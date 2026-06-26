@@ -68,6 +68,11 @@ struct StreamControl {
     std::atomic<int> playback_ratio_ppm{1000000};
 };
 
+enum class InputChannels {
+    Mono = 1,
+    Stereo = 2,
+};
+
 class DeviceStream {
 public:
     virtual ~DeviceStream() = default;
@@ -94,6 +99,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     int id,
     double requested_sample_rate,
     long buffer_size,
+    InputChannels input_channels,
     MonoRingBuffer& capture_ring,
     MonoRingBuffer& playback_ring,
     std::size_t playback_prefill_frames,

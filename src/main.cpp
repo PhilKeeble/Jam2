@@ -27,7 +27,7 @@ Usage:
   jam2 probe-device <id> [--sample-rate n]
   jam2 meter-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n]
   jam2 ring-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n] [--ring-frames n]
-  jam2 listen [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats-interval-ms n] [--metronome on|off] [--bpm n] [--metronome-level n] [--socket-send-buffer n] [--socket-recv-buffer n] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-max-correction-ppm n]
+  jam2 listen [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats-interval-ms n] [--metronome on|off] [--bpm n] [--metronome-level n] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels mono|stereo] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-max-correction-ppm n]
   jam2 connect <jam2-url> [options]
 
 Stage status:
@@ -58,6 +58,7 @@ struct Options {
     double metronome_level = 0.20;
     std::optional<int> audio_device_id;
     long audio_buffer_size = 0;
+    jam2::audio::InputChannels input_channels = jam2::audio::InputChannels::Mono;
     std::size_t capture_ring_frames = 4096;
     std::size_t playback_ring_frames = 4096;
     std::size_t playback_prefill_frames = 0;
@@ -185,6 +186,15 @@ Options parse_options(int argc, char** argv, int start)
             if (options.audio_buffer_size <= 0) {
                 throw std::runtime_error("--audio-buffer-size must be positive");
             }
+        } else if (arg == "--input-channels") {
+            const std::string value{require_value(argc, argv, i, arg)};
+            if (value == "mono" || value == "1") {
+                options.input_channels = jam2::audio::InputChannels::Mono;
+            } else if (value == "stereo" || value == "2") {
+                options.input_channels = jam2::audio::InputChannels::Stereo;
+            } else {
+                throw std::runtime_error("--input-channels must be mono or stereo");
+            }
         } else if (arg == "--capture-ring-frames") {
             const auto parsed = std::stoull(std::string(require_value(argc, argv, i, arg)));
             if (parsed == 0) {
@@ -246,6 +256,90 @@ std::vector<std::uint8_t> make_control_packet(
     return jam2::protocol::encode_packet(header, {}, session.key);
 }
 
+struct StreamConfig {
+    std::uint32_t sample_rate = 0;
+    std::uint32_t frame_size = 0;
+};
+
+void put_u32(std::vector<std::uint8_t>& out, std::size_t offset, std::uint32_t value)
+{
+    for (int i = 0; i < 4; ++i) {
+        out[offset + i] = static_cast<std::uint8_t>((value >> (i * 8)) & 0xffU);
+    }
+}
+
+std::uint32_t read_u32(std::span<const std::uint8_t> in, std::size_t offset)
+{
+    std::uint32_t value = 0;
+    for (int i = 3; i >= 0; --i) {
+        value = (value << 8) | in[offset + i];
+    }
+    return value;
+}
+
+std::array<std::uint8_t, 8> encode_stream_config(const Options& options)
+{
+    std::array<std::uint8_t, 8> payload{};
+    std::vector<std::uint8_t> out(payload.size());
+    put_u32(out, 0, static_cast<std::uint32_t>(options.sample_rate));
+    put_u32(out, 4, static_cast<std::uint32_t>(options.frame_size));
+    std::copy(out.begin(), out.end(), payload.begin());
+    return payload;
+}
+
+StreamConfig decode_stream_config(std::span<const std::uint8_t> payload)
+{
+    if (payload.size() != 8) {
+        throw std::runtime_error("handshake stream config payload size mismatch");
+    }
+    return StreamConfig{
+        read_u32(payload, 0),
+        read_u32(payload, 4),
+    };
+}
+
+std::vector<std::uint8_t> make_handshake_packet(
+    jam2::protocol::PacketType type,
+    const jam2::SessionInfo& session,
+    std::uint32_t sequence,
+    const Options& options)
+{
+    const auto payload = encode_stream_config(options);
+    const jam2::protocol::Header header{
+        type,
+        0,
+        session.session_id,
+        sequence,
+        0,
+        jam2::monotonic_us(),
+        0,
+        0,
+    };
+    return jam2::protocol::encode_packet(header, payload, session.key);
+}
+
+StreamConfig decode_handshake_config(
+    std::span<const std::uint8_t> bytes,
+    const jam2::protocol::Header& header)
+{
+    return decode_stream_config(std::span<const std::uint8_t>(
+        bytes.data() + jam2::protocol::kHeaderSize,
+        header.payload_length));
+}
+
+void require_matching_stream_config(const StreamConfig& remote, const Options& options)
+{
+    if (remote.sample_rate != static_cast<std::uint32_t>(options.sample_rate) ||
+        remote.frame_size != static_cast<std::uint32_t>(options.frame_size)) {
+        std::ostringstream message;
+        message << "peer stream config mismatch: local sample_rate=" << options.sample_rate
+                << " frame_size=" << options.frame_size
+                << ", remote sample_rate=" << remote.sample_rate
+                << " frame_size=" << remote.frame_size;
+        throw std::runtime_error(message.str());
+    }
+}
+
 struct AudioPacketStats {
     std::uint64_t sent_packets = 0;
     std::uint64_t sent_bytes = 0;
@@ -280,6 +374,7 @@ struct AudioPacketStats {
     std::uint64_t metronome_sent = 0;
     std::uint64_t metronome_received = 0;
     std::uint64_t last_remote_beat = 0;
+    std::uint64_t elapsed_ms = 0;
     bool final_metronome_enabled = false;
     int final_bpm = 120;
 };
@@ -439,9 +534,7 @@ AudioPacketStats run_audio_packet_exchange(
     jam2::audio::MonoRingBuffer* playback_ring)
 {
     AudioPacketStats stats;
-    if (options.stream_ms <= 0) {
-        return stats;
-    }
+    const bool bounded_stream = options.stream_ms > 0;
 
     std::vector<std::int32_t> asio_frames(static_cast<std::size_t>(options.frame_size), 0);
     std::vector<std::int32_t> network_frames(static_cast<std::size_t>(options.frame_size), 0);
@@ -468,8 +561,12 @@ AudioPacketStats run_audio_packet_exchange(
     std::uint64_t next_stats = options.stats_interval_ms > 0 ?
         start_time + static_cast<std::uint64_t>(options.stats_interval_ms) * 1000ULL :
         0;
-    const std::uint64_t send_deadline = next_send + static_cast<std::uint64_t>(options.stream_ms) * 1000ULL;
-    const std::uint64_t receive_deadline = send_deadline + static_cast<std::uint64_t>(options.stream_linger_ms) * 1000ULL;
+    const std::uint64_t send_deadline = bounded_stream ?
+        next_send + static_cast<std::uint64_t>(options.stream_ms) * 1000ULL :
+        UINT64_MAX;
+    const std::uint64_t receive_deadline = bounded_stream ?
+        send_deadline + static_cast<std::uint64_t>(options.stream_linger_ms) * 1000ULL :
+        UINT64_MAX;
 
     while (jam2::monotonic_us() < receive_deadline && !stats.received_bye && !runtime.quit.load(std::memory_order_relaxed)) {
         const std::uint64_t now = jam2::monotonic_us();
@@ -730,6 +827,7 @@ AudioPacketStats run_audio_packet_exchange(
     }
 
     stats.sequence = tracker.stats();
+    stats.elapsed_ms = (jam2::monotonic_us() - start_time) / 1000ULL;
     stats.final_metronome_enabled = runtime.metronome.load(std::memory_order_relaxed);
     stats.final_bpm = runtime.bpm.load(std::memory_order_relaxed);
     return stats;
@@ -742,10 +840,7 @@ double frames_to_ms(std::size_t frames, int sample_rate)
 
 void print_audio_packet_stats(const AudioPacketStats& stats, const Options& options)
 {
-    const int stream_ms = options.stream_ms;
-    if (stream_ms <= 0) {
-        return;
-    }
+    const std::uint64_t stream_ms = stats.elapsed_ms > 0 ? stats.elapsed_ms : static_cast<std::uint64_t>(options.stream_ms);
     const double seconds = static_cast<double>(stream_ms) / 1000.0;
     const double send_bitrate = seconds > 0.0 ? (static_cast<double>(stats.sent_bytes) * 8.0 / seconds) : 0.0;
     const double recv_bitrate = seconds > 0.0 ? (static_cast<double>(stats.recv_bytes) * 8.0 / seconds) : 0.0;
@@ -754,7 +849,7 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     const double frame_interval_ms =
         options.sample_rate > 0 ? (static_cast<double>(options.frame_size) * 1000.0 / static_cast<double>(options.sample_rate)) : 0.0;
     const std::uint64_t expected_packets =
-        options.frame_size > 0 ?
+        options.stream_ms > 0 && options.frame_size > 0 ?
             ((static_cast<std::uint64_t>(stream_ms) * static_cast<std::uint64_t>(options.sample_rate)) +
              (static_cast<std::uint64_t>(options.frame_size) * 1000ULL) - 1ULL) /
                 (static_cast<std::uint64_t>(options.frame_size) * 1000ULL) :
@@ -774,7 +869,9 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "BPM: " << options.bpm << "\n";
     std::cout << "Final metronome: " << (stats.final_metronome_enabled ? "on" : "off") << "\n";
     std::cout << "Final BPM: " << stats.final_bpm << "\n";
-    std::cout << "Expected audio packets: " << expected_packets << "\n";
+    if (options.stream_ms > 0) {
+        std::cout << "Expected audio packets: " << expected_packets << "\n";
+    }
     std::cout << "Audio packets sent: " << stats.sent_packets << "\n";
     std::cout << "Audio packets received: " << stats.recv_packets << "\n";
     std::cout << "Audio send packet rate pps: " << sent_rate << "\n";
@@ -860,6 +957,7 @@ OptionalAudioStream start_optional_audio(const Options& options)
         *options.audio_device_id,
         static_cast<double>(options.sample_rate),
         options.audio_buffer_size,
+        options.input_channels,
         *audio.capture_ring,
         *audio.playback_ring,
         options.playback_prefill_frames,
@@ -897,6 +995,9 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
     const std::size_t capture_readable = audio.capture_ring->available_read();
     const std::size_t playback_readable = audio.playback_ring->available_read();
     std::cout << "ASIO callbacks: " << audio.stream->callbacks() << "\n";
+    std::cout << "Input channels: "
+              << (options.input_channels == jam2::audio::InputChannels::Stereo ? "stereo" : "mono") << "\n";
+    std::cout << "Output channels: duplicated mono to channels 1/2 when available\n";
     std::cout << "Playback prefilled: " << (audio.stream->playback_prefilled() ? "yes" : "no") << "\n";
     std::cout << "Playback prefill frames: " << options.playback_prefill_frames << "\n";
     std::cout << "Playback prefill ms: " << frames_to_ms(options.playback_prefill_frames, options.sample_rate) << "\n";

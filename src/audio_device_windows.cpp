@@ -193,12 +193,17 @@ struct RingContext {
 RingContext* g_ring_context = nullptr;
 
 struct DuplexContext {
-    ASIOBufferInfo* input = nullptr;
-    ASIOBufferInfo* output = nullptr;
+    ASIOBufferInfo* input_left = nullptr;
+    ASIOBufferInfo* input_right = nullptr;
+    ASIOBufferInfo* output_left = nullptr;
+    ASIOBufferInfo* output_right = nullptr;
     long buffer_size = 0;
+    InputChannels input_channels = InputChannels::Mono;
     MonoRingBuffer* capture = nullptr;
     MonoRingBuffer* playback = nullptr;
     StreamControl* control = nullptr;
+    std::vector<std::int32_t> capture_scratch;
+    std::vector<std::int32_t> playback_scratch;
     std::size_t playback_prefill_frames = 0;
     double sample_rate = 48000.0;
     std::uint64_t metronome_sample_counter = 0;
@@ -473,24 +478,50 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
         return;
     }
 
-    if (context->input != nullptr && context->input->buffers[double_buffer_index] != nullptr) {
-        const auto* input = static_cast<const std::int32_t*>(context->input->buffers[double_buffer_index]);
-        context->capture->push(std::span<const std::int32_t>(input, static_cast<std::size_t>(context->buffer_size)));
+    if (context->input_left != nullptr && context->input_left->buffers[double_buffer_index] != nullptr) {
+        const auto* left = static_cast<const std::int32_t*>(context->input_left->buffers[double_buffer_index]);
+        if (context->input_channels == InputChannels::Stereo &&
+            context->input_right != nullptr &&
+            context->input_right->buffers[double_buffer_index] != nullptr &&
+            context->capture_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
+            const auto* right = static_cast<const std::int32_t*>(context->input_right->buffers[double_buffer_index]);
+            for (long i = 0; i < context->buffer_size; ++i) {
+                context->capture_scratch[static_cast<std::size_t>(i)] =
+                    static_cast<std::int32_t>((static_cast<std::int64_t>(left[i]) + static_cast<std::int64_t>(right[i])) / 2);
+            }
+            context->capture->push(std::span<const std::int32_t>(
+                context->capture_scratch.data(),
+                static_cast<std::size_t>(context->buffer_size)));
+        } else {
+            context->capture->push(std::span<const std::int32_t>(left, static_cast<std::size_t>(context->buffer_size)));
+        }
     }
 
-    if (context->output != nullptr && context->output->buffers[double_buffer_index] != nullptr) {
-        auto* output = static_cast<std::int32_t*>(context->output->buffers[double_buffer_index]);
+    if (context->output_left != nullptr &&
+        context->output_left->buffers[double_buffer_index] != nullptr &&
+        context->playback_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
+        auto* left = static_cast<std::int32_t*>(context->output_left->buffers[double_buffer_index]);
+        auto* right = context->output_right != nullptr && context->output_right->buffers[double_buffer_index] != nullptr ?
+            static_cast<std::int32_t*>(context->output_right->buffers[double_buffer_index]) :
+            nullptr;
+        auto* mono = context->playback_scratch.data();
         if (!context->playback_prefilled.load(std::memory_order_relaxed)) {
             if (context->playback->available_read() >= context->playback_prefill_frames) {
                 context->playback_prefilled.store(true, std::memory_order_relaxed);
             } else {
-                std::fill(output, output + context->buffer_size, 0);
+                std::fill(mono, mono + context->buffer_size, 0);
             }
         }
         if (context->playback_prefilled.load(std::memory_order_relaxed)) {
-            pop_resampled_playback(*context, std::span<std::int32_t>(output, static_cast<std::size_t>(context->buffer_size)));
+            pop_resampled_playback(*context, std::span<std::int32_t>(mono, static_cast<std::size_t>(context->buffer_size)));
         }
-        mix_metronome_click(*context, output);
+        mix_metronome_click(*context, mono);
+        for (long i = 0; i < context->buffer_size; ++i) {
+            left[i] = mono[i];
+            if (right != nullptr) {
+                right[i] = mono[i];
+            }
+        }
     }
 
     context->callbacks.fetch_add(1, std::memory_order_relaxed);
@@ -535,8 +566,10 @@ public:
     WindowsDeviceStream(
         ComRuntime com,
         AsioDriver driver,
-        std::array<ASIOBufferInfo, 2> buffers,
+        std::vector<ASIOBufferInfo> buffers,
         long buffer_size,
+        InputChannels input_channels,
+        int output_channels,
         MonoRingBuffer& capture_ring,
         MonoRingBuffer& playback_ring,
         std::size_t playback_prefill_frames,
@@ -544,16 +577,22 @@ public:
         double sample_rate)
         : com_(std::move(com)),
           driver_(std::move(driver)),
-          buffers_(buffers),
+          buffers_(std::move(buffers)),
           sample_rate_(sample_rate),
           buffer_size_(buffer_size)
     {
-        context_.input = &buffers_[0];
-        context_.output = &buffers_[1];
+        const int input_count = input_channels == InputChannels::Stereo ? 2 : 1;
+        context_.input_left = &buffers_[0];
+        context_.input_right = input_count > 1 ? &buffers_[1] : nullptr;
+        context_.output_left = &buffers_[input_count];
+        context_.output_right = output_channels > 1 ? &buffers_[input_count + 1] : nullptr;
         context_.buffer_size = buffer_size;
+        context_.input_channels = input_channels;
         context_.capture = &capture_ring;
         context_.playback = &playback_ring;
         context_.control = &control;
+        context_.capture_scratch.resize(static_cast<std::size_t>(buffer_size));
+        context_.playback_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.playback_prefill_frames = playback_prefill_frames;
         context_.sample_rate = sample_rate;
     }
@@ -576,15 +615,14 @@ public:
 
     void start()
     {
-        ASIOCallbacks callbacks{};
-        callbacks.bufferSwitch = duplex_buffer_switch;
-        callbacks.sampleRateDidChange = meter_sample_rate_changed;
-        callbacks.asioMessage = ring_asio_message;
-        callbacks.bufferSwitchTimeInfo = duplex_buffer_switch_time_info;
+        callbacks_.bufferSwitch = duplex_buffer_switch;
+        callbacks_.sampleRateDidChange = meter_sample_rate_changed;
+        callbacks_.asioMessage = ring_asio_message;
+        callbacks_.bufferSwitchTimeInfo = duplex_buffer_switch_time_info;
 
         g_duplex_context = &context_;
         require_asio_ok(
-            driver_.get()->createBuffers(buffers_.data(), static_cast<long>(buffers_.size()), buffer_size_, &callbacks),
+            driver_.get()->createBuffers(buffers_.data(), static_cast<long>(buffers_.size()), buffer_size_, &callbacks_),
             "ASIO createBuffers");
         created_ = true;
         require_asio_ok(driver_.get()->start(), "ASIO start");
@@ -606,7 +644,8 @@ public:
 private:
     ComRuntime com_;
     AsioDriver driver_;
-    std::array<ASIOBufferInfo, 2> buffers_{};
+    std::vector<ASIOBufferInfo> buffers_;
+    ASIOCallbacks callbacks_{};
     DuplexContext context_{};
     double sample_rate_ = 0.0;
     long buffer_size_ = 0;
@@ -1059,6 +1098,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     int id,
     double requested_sample_rate,
     long buffer_size,
+    InputChannels requested_input_channels,
     MonoRingBuffer& capture_ring,
     MonoRingBuffer& playback_ring,
     std::size_t playback_prefill_frames,
@@ -1112,6 +1152,11 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     if (input_channels <= 0 || output_channels <= 0) {
         throw std::runtime_error("ASIO duplex stream requires at least one input and one output channel");
     }
+    const int selected_input_channels = requested_input_channels == InputChannels::Stereo ? 2 : 1;
+    if (input_channels < selected_input_channels) {
+        throw std::runtime_error("selected ASIO device does not have enough input channels for requested input mode");
+    }
+    const int selected_output_channels = output_channels >= 2 ? 2 : 1;
 
     long min_buffer = 0;
     long max_buffer = 0;
@@ -1139,30 +1184,43 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
         (void)driver.get()->getSampleRate(&current_rate);
     }
 
-    ASIOChannelInfo input_info{};
-    input_info.channel = 0;
-    input_info.isInput = ASIOTrue;
-    require_asio_ok(driver.get()->getChannelInfo(&input_info), "ASIO getChannelInfo input");
-
-    ASIOChannelInfo output_info{};
-    output_info.channel = 0;
-    output_info.isInput = ASIOFalse;
-    require_asio_ok(driver.get()->getChannelInfo(&output_info), "ASIO getChannelInfo output");
-    if (input_info.type != ASIOSTInt32LSB || output_info.type != ASIOSTInt32LSB) {
-        throw std::runtime_error("ASIO duplex stream currently supports Int32LSB input/output only");
+    for (int channel = 0; channel < selected_input_channels; ++channel) {
+        ASIOChannelInfo input_info{};
+        input_info.channel = channel;
+        input_info.isInput = ASIOTrue;
+        require_asio_ok(driver.get()->getChannelInfo(&input_info), "ASIO getChannelInfo input");
+        if (input_info.type != ASIOSTInt32LSB) {
+            throw std::runtime_error("ASIO duplex stream currently supports Int32LSB input only");
+        }
+    }
+    for (int channel = 0; channel < selected_output_channels; ++channel) {
+        ASIOChannelInfo output_info{};
+        output_info.channel = channel;
+        output_info.isInput = ASIOFalse;
+        require_asio_ok(driver.get()->getChannelInfo(&output_info), "ASIO getChannelInfo output");
+        if (output_info.type != ASIOSTInt32LSB) {
+            throw std::runtime_error("ASIO duplex stream currently supports Int32LSB output only");
+        }
     }
 
-    std::array<ASIOBufferInfo, 2> buffers{};
-    buffers[0].isInput = ASIOTrue;
-    buffers[0].channelNum = 0;
-    buffers[1].isInput = ASIOFalse;
-    buffers[1].channelNum = 0;
+    std::vector<ASIOBufferInfo> buffers(static_cast<std::size_t>(selected_input_channels + selected_output_channels));
+    for (int channel = 0; channel < selected_input_channels; ++channel) {
+        buffers[static_cast<std::size_t>(channel)].isInput = ASIOTrue;
+        buffers[static_cast<std::size_t>(channel)].channelNum = channel;
+    }
+    for (int channel = 0; channel < selected_output_channels; ++channel) {
+        const std::size_t index = static_cast<std::size_t>(selected_input_channels + channel);
+        buffers[index].isInput = ASIOFalse;
+        buffers[index].channelNum = channel;
+    }
 
     auto stream = std::make_unique<WindowsDeviceStream>(
         std::move(com),
         std::move(driver),
-        buffers,
+        std::move(buffers),
         buffer_size,
+        requested_input_channels,
+        selected_output_channels,
         capture_ring,
         playback_ring,
         playback_prefill_frames,
