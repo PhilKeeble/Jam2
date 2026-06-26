@@ -1,0 +1,11 @@
+Mode: listen
+Local UDP bind: 127.0.0.1:52044
+Endpoint mode: manual/no-stun local fallback
+Connection string:
+jam2://v1?endpoint=127.0.0.1:52044&session=4574c09ba3dff0f0&key=f914537048ddc93345e91b7c48a1c8a3
+
+Waiting for peer...
+Peer locked: 127.0.0.1:52045
+Handshake complete
+Ignored malformed/auth/session packets: 0
+Ignored wrong-endpoint packets: 0

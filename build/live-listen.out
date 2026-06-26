@@ -1,0 +1,36 @@
+Mode: listen
+Local UDP bind: 127.0.0.1:57015
+Endpoint mode: manual/no-stun local fallback
+Connection string:
+jam2://v1?endpoint=127.0.0.1:57015&session=e757834406fef1a3&key=3811de57e6cfdc76abef45a6f8c9fa81
+
+Waiting for peer...
+Peer locked: 127.0.0.1:57016
+Handshake complete
+Ignored malformed/auth/session packets: 0
+Ignored wrong-endpoint packets: 0
+Audio packets sent: 375
+Audio packets received: 375
+Send bitrate bps: 1.296e+06
+Receive bitrate bps: 1.296e+06
+Ignored audio packets: 0
+Audio receive delay ms min: 0.027
+Audio receive delay ms avg: 0.813957
+Audio receive delay ms max: 14.923
+PING sent: 10
+PONG sent: 10
+PONG received: 10
+RTT ms min: 0.175
+RTT ms avg: 5.8179
+RTT ms max: 17.557
+Sequence lost: 0
+Sequence duplicate: 0
+Sequence out_of_order: 0
+Sequence late: 0
+ASIO callbacks: 95
+Capture ring overruns frames: 0
+Capture ring underruns frames: 512
+Capture ring readable frames: 1152
+Playback ring overruns frames: 0
+Playback ring underruns frames: 896
+Playback ring readable frames: 256

@@ -1,0 +1,1062 @@
+#include "audio_device.hpp"
+#include "audio_ring.hpp"
+
+#include <array>
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <iomanip>
+#include <sstream>
+#include <stdexcept>
+#include <vector>
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <objbase.h>
+
+#include "iasiodrv.h"
+
+namespace jam2::audio {
+namespace {
+
+class RegistryKey {
+public:
+    RegistryKey() = default;
+    ~RegistryKey()
+    {
+        if (key_ != nullptr) {
+            RegCloseKey(key_);
+        }
+    }
+
+    RegistryKey(const RegistryKey&) = delete;
+    RegistryKey& operator=(const RegistryKey&) = delete;
+
+    HKEY* out()
+    {
+        if (key_ != nullptr) {
+            RegCloseKey(key_);
+            key_ = nullptr;
+        }
+        return &key_;
+    }
+
+    HKEY get() const { return key_; }
+    explicit operator bool() const { return key_ != nullptr; }
+
+private:
+    HKEY key_ = nullptr;
+};
+
+std::string hresult_text(HRESULT hr)
+{
+    std::ostringstream out;
+    out << "0x" << std::hex << std::setw(8) << std::setfill('0') << static_cast<unsigned long>(hr);
+    return out.str();
+}
+
+class ComRuntime {
+public:
+    ComRuntime()
+    {
+        const HRESULT hr = CoInitialize(nullptr);
+        if (FAILED(hr)) {
+            throw std::runtime_error("CoInitialize failed: " + hresult_text(hr));
+        }
+        initialized_ = true;
+    }
+
+    ~ComRuntime()
+    {
+        if (initialized_) {
+            CoUninitialize();
+        }
+    }
+
+    ComRuntime(const ComRuntime&) = delete;
+    ComRuntime& operator=(const ComRuntime&) = delete;
+    ComRuntime(ComRuntime&& other) noexcept : initialized_(other.initialized_)
+    {
+        other.initialized_ = false;
+    }
+    ComRuntime& operator=(ComRuntime&& other) noexcept
+    {
+        if (this != &other) {
+            if (initialized_) {
+                CoUninitialize();
+            }
+            initialized_ = other.initialized_;
+            other.initialized_ = false;
+        }
+        return *this;
+    }
+
+private:
+    bool initialized_ = false;
+};
+
+class AsioDriver {
+public:
+    explicit AsioDriver(IASIO* driver) : driver_(driver) {}
+    ~AsioDriver()
+    {
+        if (driver_ != nullptr) {
+            driver_->Release();
+        }
+    }
+
+    AsioDriver(const AsioDriver&) = delete;
+    AsioDriver& operator=(const AsioDriver&) = delete;
+    AsioDriver(AsioDriver&& other) noexcept : driver_(other.driver_)
+    {
+        other.driver_ = nullptr;
+    }
+    AsioDriver& operator=(AsioDriver&& other) noexcept
+    {
+        if (this != &other) {
+            if (driver_ != nullptr) {
+                driver_->Release();
+            }
+            driver_ = other.driver_;
+            other.driver_ = nullptr;
+        }
+        return *this;
+    }
+
+    IASIO* get() const { return driver_; }
+
+private:
+    IASIO* driver_ = nullptr;
+};
+
+void require_asio_ok(ASIOError error, const char* operation)
+{
+    if (error != ASE_OK && error != ASE_SUCCESS) {
+        throw std::runtime_error(std::string(operation) + " failed with ASIO error " + std::to_string(error));
+    }
+}
+
+int sample_bytes(ASIOSampleType type)
+{
+    switch (type) {
+    case ASIOSTInt16LSB:
+    case ASIOSTInt16MSB:
+        return 2;
+    case ASIOSTInt24LSB:
+    case ASIOSTInt24MSB:
+        return 3;
+    case ASIOSTInt32LSB:
+    case ASIOSTInt32MSB:
+    case ASIOSTInt32LSB16:
+    case ASIOSTInt32LSB18:
+    case ASIOSTInt32LSB20:
+    case ASIOSTInt32LSB24:
+    case ASIOSTInt32MSB16:
+    case ASIOSTInt32MSB18:
+    case ASIOSTInt32MSB20:
+    case ASIOSTInt32MSB24:
+    case ASIOSTFloat32LSB:
+    case ASIOSTFloat32MSB:
+        return 4;
+    case ASIOSTFloat64LSB:
+    case ASIOSTFloat64MSB:
+        return 8;
+    default:
+        return 0;
+    }
+}
+
+struct MeterContext {
+    ASIOBufferInfo* input = nullptr;
+    ASIOBufferInfo* output = nullptr;
+    long buffer_size = 0;
+    ASIOSampleType input_type = ASIOSTInt32LSB;
+    ASIOSampleType output_type = ASIOSTInt32LSB;
+    std::atomic<long> callbacks{0};
+    std::atomic<int> peak_ppm{0};
+};
+
+MeterContext* g_meter_context = nullptr;
+
+struct RingContext {
+    ASIOBufferInfo* input = nullptr;
+    ASIOBufferInfo* output = nullptr;
+    long buffer_size = 0;
+    ASIOSampleType input_type = ASIOSTInt32LSB;
+    ASIOSampleType output_type = ASIOSTInt32LSB;
+    MonoRingBuffer* ring = nullptr;
+    std::atomic<long> callbacks{0};
+};
+
+RingContext* g_ring_context = nullptr;
+
+struct DuplexContext {
+    ASIOBufferInfo* input = nullptr;
+    ASIOBufferInfo* output = nullptr;
+    long buffer_size = 0;
+    MonoRingBuffer* capture = nullptr;
+    MonoRingBuffer* playback = nullptr;
+    std::size_t playback_prefill_frames = 0;
+    std::atomic<long> callbacks{0};
+    std::atomic<bool> playback_prefilled{false};
+};
+
+DuplexContext* g_duplex_context = nullptr;
+
+int read_signed24_lsb(const std::uint8_t* bytes)
+{
+    int value = static_cast<int>(bytes[0]) |
+        (static_cast<int>(bytes[1]) << 8) |
+        (static_cast<int>(bytes[2]) << 16);
+    if ((value & 0x00800000) != 0) {
+        value |= static_cast<int>(0xff000000);
+    }
+    return value;
+}
+
+int read_signed24_msb(const std::uint8_t* bytes)
+{
+    int value = (static_cast<int>(bytes[0]) << 16) |
+        (static_cast<int>(bytes[1]) << 8) |
+        static_cast<int>(bytes[2]);
+    if ((value & 0x00800000) != 0) {
+        value |= static_cast<int>(0xff000000);
+    }
+    return value;
+}
+
+double sample_abs(const void* data, long index, ASIOSampleType type)
+{
+    const auto* bytes = static_cast<const std::uint8_t*>(data);
+    switch (type) {
+    case ASIOSTInt16LSB: {
+        std::int16_t value = 0;
+        std::memcpy(&value, bytes + index * 2, sizeof(value));
+        return std::abs(static_cast<double>(value)) / 32768.0;
+    }
+    case ASIOSTInt24LSB:
+        return std::abs(static_cast<double>(read_signed24_lsb(bytes + index * 3))) / 8388608.0;
+    case ASIOSTInt24MSB:
+        return std::abs(static_cast<double>(read_signed24_msb(bytes + index * 3))) / 8388608.0;
+    case ASIOSTInt32LSB:
+    case ASIOSTInt32LSB16:
+    case ASIOSTInt32LSB18:
+    case ASIOSTInt32LSB20:
+    case ASIOSTInt32LSB24: {
+        std::int32_t value = 0;
+        std::memcpy(&value, bytes + index * 4, sizeof(value));
+        return std::abs(static_cast<double>(value)) / 2147483648.0;
+    }
+    case ASIOSTFloat32LSB: {
+        float value = 0.0F;
+        std::memcpy(&value, bytes + index * 4, sizeof(value));
+        return std::abs(static_cast<double>(value));
+    }
+    case ASIOSTFloat64LSB: {
+        double value = 0.0;
+        std::memcpy(&value, bytes + index * 8, sizeof(value));
+        return std::abs(value);
+    }
+    default:
+        return 0.0;
+    }
+}
+
+void update_peak(std::atomic<int>& peak, int candidate)
+{
+    int current = peak.load(std::memory_order_relaxed);
+    while (candidate > current &&
+           !peak.compare_exchange_weak(current, candidate, std::memory_order_relaxed, std::memory_order_relaxed)) {
+    }
+}
+
+void meter_buffer_switch(long double_buffer_index, ASIOBool)
+{
+    MeterContext* context = g_meter_context;
+    if (context == nullptr) {
+        return;
+    }
+
+    if (context->output != nullptr && context->output->buffers[double_buffer_index] != nullptr) {
+        const int bytes_per_sample = sample_bytes(context->output_type);
+        if (bytes_per_sample > 0) {
+            std::memset(
+                context->output->buffers[double_buffer_index],
+                0,
+                static_cast<std::size_t>(bytes_per_sample) * static_cast<std::size_t>(context->buffer_size));
+        }
+    }
+
+    double peak = 0.0;
+    if (context->input != nullptr && context->input->buffers[double_buffer_index] != nullptr) {
+        for (long i = 0; i < context->buffer_size; ++i) {
+            const double value = sample_abs(context->input->buffers[double_buffer_index], i, context->input_type);
+            if (value > peak) {
+                peak = value;
+            }
+        }
+    }
+    const int peak_ppm = static_cast<int>((peak > 1.0 ? 1.0 : peak) * 1000000.0);
+    update_peak(context->peak_ppm, peak_ppm);
+    context->callbacks.fetch_add(1, std::memory_order_relaxed);
+}
+
+void meter_sample_rate_changed(ASIOSampleRate)
+{
+}
+
+long meter_asio_message(long selector, long, void*, double*)
+{
+    if (selector == kAsioSelectorSupported || selector == kAsioEngineVersion) {
+        return 2;
+    }
+    return 0;
+}
+
+ASIOTime* meter_buffer_switch_time_info(ASIOTime* params, long double_buffer_index, ASIOBool direct_process)
+{
+    meter_buffer_switch(double_buffer_index, direct_process);
+    return params;
+}
+
+void ring_buffer_switch(long double_buffer_index, ASIOBool)
+{
+    RingContext* context = g_ring_context;
+    if (context == nullptr || context->ring == nullptr) {
+        return;
+    }
+
+    if (context->input != nullptr &&
+        context->input->buffers[double_buffer_index] != nullptr &&
+        context->input_type == ASIOSTInt32LSB) {
+        const auto* input = static_cast<const std::int32_t*>(context->input->buffers[double_buffer_index]);
+        context->ring->push(std::span<const std::int32_t>(input, static_cast<std::size_t>(context->buffer_size)));
+    }
+
+    if (context->output != nullptr &&
+        context->output->buffers[double_buffer_index] != nullptr &&
+        context->output_type == ASIOSTInt32LSB) {
+        auto* output = static_cast<std::int32_t*>(context->output->buffers[double_buffer_index]);
+        context->ring->pop(std::span<std::int32_t>(output, static_cast<std::size_t>(context->buffer_size)));
+    }
+
+    context->callbacks.fetch_add(1, std::memory_order_relaxed);
+}
+
+long ring_asio_message(long selector, long, void*, double*)
+{
+    if (selector == kAsioSelectorSupported || selector == kAsioEngineVersion) {
+        return 2;
+    }
+    return 0;
+}
+
+ASIOTime* ring_buffer_switch_time_info(ASIOTime* params, long double_buffer_index, ASIOBool direct_process)
+{
+    ring_buffer_switch(double_buffer_index, direct_process);
+    return params;
+}
+
+void duplex_buffer_switch(long double_buffer_index, ASIOBool)
+{
+    DuplexContext* context = g_duplex_context;
+    if (context == nullptr || context->capture == nullptr || context->playback == nullptr) {
+        return;
+    }
+
+    if (context->input != nullptr && context->input->buffers[double_buffer_index] != nullptr) {
+        const auto* input = static_cast<const std::int32_t*>(context->input->buffers[double_buffer_index]);
+        context->capture->push(std::span<const std::int32_t>(input, static_cast<std::size_t>(context->buffer_size)));
+    }
+
+    if (context->output != nullptr && context->output->buffers[double_buffer_index] != nullptr) {
+        auto* output = static_cast<std::int32_t*>(context->output->buffers[double_buffer_index]);
+        if (!context->playback_prefilled.load(std::memory_order_relaxed)) {
+            if (context->playback->available_read() >= context->playback_prefill_frames) {
+                context->playback_prefilled.store(true, std::memory_order_relaxed);
+            } else {
+                std::fill(output, output + context->buffer_size, 0);
+            }
+        }
+        if (context->playback_prefilled.load(std::memory_order_relaxed)) {
+            context->playback->pop(std::span<std::int32_t>(output, static_cast<std::size_t>(context->buffer_size)));
+        }
+    }
+
+    context->callbacks.fetch_add(1, std::memory_order_relaxed);
+}
+
+ASIOTime* duplex_buffer_switch_time_info(ASIOTime* params, long double_buffer_index, ASIOBool direct_process)
+{
+    duplex_buffer_switch(double_buffer_index, direct_process);
+    return params;
+}
+
+class AsioBuffers {
+public:
+    explicit AsioBuffers(IASIO* driver) : driver_(driver) {}
+    ~AsioBuffers()
+    {
+        if (started_) {
+            (void)driver_->stop();
+        }
+        if (created_) {
+            (void)driver_->disposeBuffers();
+        }
+        g_meter_context = nullptr;
+        g_ring_context = nullptr;
+        g_duplex_context = nullptr;
+    }
+
+    AsioBuffers(const AsioBuffers&) = delete;
+    AsioBuffers& operator=(const AsioBuffers&) = delete;
+
+    void mark_created() { created_ = true; }
+    void mark_started() { started_ = true; }
+
+private:
+    IASIO* driver_ = nullptr;
+    bool created_ = false;
+    bool started_ = false;
+};
+
+class WindowsDeviceStream final : public DeviceStream {
+public:
+    WindowsDeviceStream(
+        ComRuntime com,
+        AsioDriver driver,
+        std::array<ASIOBufferInfo, 2> buffers,
+        long buffer_size,
+        MonoRingBuffer& capture_ring,
+        MonoRingBuffer& playback_ring,
+        std::size_t playback_prefill_frames,
+        double sample_rate)
+        : com_(std::move(com)),
+          driver_(std::move(driver)),
+          buffers_(buffers),
+          sample_rate_(sample_rate),
+          buffer_size_(buffer_size)
+    {
+        context_.input = &buffers_[0];
+        context_.output = &buffers_[1];
+        context_.buffer_size = buffer_size;
+        context_.capture = &capture_ring;
+        context_.playback = &playback_ring;
+        context_.playback_prefill_frames = playback_prefill_frames;
+    }
+
+    ~WindowsDeviceStream() override
+    {
+        if (started_) {
+            (void)driver_.get()->stop();
+        }
+        if (created_) {
+            (void)driver_.get()->disposeBuffers();
+        }
+        if (g_duplex_context == &context_) {
+            g_duplex_context = nullptr;
+        }
+    }
+
+    WindowsDeviceStream(const WindowsDeviceStream&) = delete;
+    WindowsDeviceStream& operator=(const WindowsDeviceStream&) = delete;
+
+    void start()
+    {
+        ASIOCallbacks callbacks{};
+        callbacks.bufferSwitch = duplex_buffer_switch;
+        callbacks.sampleRateDidChange = meter_sample_rate_changed;
+        callbacks.asioMessage = ring_asio_message;
+        callbacks.bufferSwitchTimeInfo = duplex_buffer_switch_time_info;
+
+        g_duplex_context = &context_;
+        require_asio_ok(
+            driver_.get()->createBuffers(buffers_.data(), static_cast<long>(buffers_.size()), buffer_size_, &callbacks),
+            "ASIO createBuffers");
+        created_ = true;
+        require_asio_ok(driver_.get()->start(), "ASIO start");
+        started_ = true;
+    }
+
+    long callbacks() const override
+    {
+        return context_.callbacks.load(std::memory_order_relaxed);
+    }
+
+    bool playback_prefilled() const override
+    {
+        return context_.playback_prefilled.load(std::memory_order_relaxed);
+    }
+
+    double sample_rate() const { return sample_rate_; }
+
+private:
+    ComRuntime com_;
+    AsioDriver driver_;
+    std::array<ASIOBufferInfo, 2> buffers_{};
+    DuplexContext context_{};
+    double sample_rate_ = 0.0;
+    long buffer_size_ = 0;
+    bool created_ = false;
+    bool started_ = false;
+};
+
+std::string read_string_value(HKEY key, const char* value_name)
+{
+    DWORD type = 0;
+    DWORD size = 0;
+    if (RegQueryValueExA(key, value_name, nullptr, &type, nullptr, &size) != ERROR_SUCCESS ||
+        (type != REG_SZ && type != REG_EXPAND_SZ) || size == 0) {
+        return {};
+    }
+
+    std::string value(size, '\0');
+    if (RegQueryValueExA(
+            key,
+            value_name,
+            nullptr,
+            &type,
+            reinterpret_cast<LPBYTE>(value.data()),
+            &size) != ERROR_SUCCESS) {
+        return {};
+    }
+    while (!value.empty() && value.back() == '\0') {
+        value.pop_back();
+    }
+    return value;
+}
+
+std::string clsid_to_driver_path(const std::string& clsid)
+{
+    if (clsid.empty()) {
+        return {};
+    }
+    const std::string subkey = "CLSID\\" + clsid + "\\InprocServer32";
+    RegistryKey key;
+    if (RegOpenKeyExA(HKEY_CLASSES_ROOT, subkey.c_str(), 0, KEY_READ, key.out()) != ERROR_SUCCESS) {
+        return {};
+    }
+    return read_string_value(key.get(), nullptr);
+}
+
+void enumerate_asio_key(const char* registry_path, std::vector<DeviceInfo>& devices)
+{
+    RegistryKey root;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, registry_path, 0, KEY_READ, root.out()) != ERROR_SUCCESS) {
+        return;
+    }
+
+    DWORD index = 0;
+    for (;;) {
+        std::array<char, 256> name{};
+        DWORD name_size = static_cast<DWORD>(name.size());
+        const LSTATUS status = RegEnumKeyExA(
+            root.get(),
+            index,
+            name.data(),
+            &name_size,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr);
+        if (status == ERROR_NO_MORE_ITEMS) {
+            break;
+        }
+        if (status != ERROR_SUCCESS) {
+            throw std::runtime_error("failed to enumerate ASIO registry key");
+        }
+        ++index;
+
+        RegistryKey driver;
+        const std::string driver_key_path = std::string(registry_path) + "\\" + name.data();
+        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, driver_key_path.c_str(), 0, KEY_READ, driver.out()) != ERROR_SUCCESS) {
+            continue;
+        }
+
+        DeviceInfo info;
+        info.backend = "ASIO";
+        info.name = name.data();
+        info.clsid = read_string_value(driver.get(), "CLSID");
+        info.driver_path = clsid_to_driver_path(info.clsid);
+        const auto duplicate = std::find_if(devices.begin(), devices.end(), [&](const DeviceInfo& existing) {
+            if (!info.clsid.empty() && !existing.clsid.empty()) {
+                return existing.clsid == info.clsid;
+            }
+            return existing.name == info.name;
+        });
+        if (duplicate != devices.end()) {
+            continue;
+        }
+        info.id = static_cast<int>(devices.size());
+        devices.push_back(std::move(info));
+    }
+}
+
+} // namespace
+
+std::vector<DeviceInfo> list_devices()
+{
+    std::vector<DeviceInfo> devices;
+    enumerate_asio_key("SOFTWARE\\ASIO", devices);
+    enumerate_asio_key("SOFTWARE\\WOW6432Node\\ASIO", devices);
+    return devices;
+}
+
+DeviceProbe probe_device(int id, double requested_sample_rate)
+{
+    const auto devices = list_devices();
+    if (id < 0 || static_cast<std::size_t>(id) >= devices.size()) {
+        throw std::runtime_error("audio device id is out of range");
+    }
+    const DeviceInfo& device = devices[static_cast<std::size_t>(id)];
+    if (device.clsid.empty()) {
+        throw std::runtime_error("selected ASIO device has no CLSID");
+    }
+
+    ComRuntime com;
+    wchar_t wide_clsid[64]{};
+    const int converted = MultiByteToWideChar(
+        CP_UTF8,
+        0,
+        device.clsid.c_str(),
+        -1,
+        wide_clsid,
+        static_cast<int>(std::size(wide_clsid)));
+    if (converted <= 0) {
+        throw std::runtime_error("failed to convert ASIO CLSID");
+    }
+
+    CLSID clsid{};
+    HRESULT hr = CLSIDFromString(wide_clsid, &clsid);
+    if (FAILED(hr)) {
+        throw std::runtime_error("CLSIDFromString failed: " + hresult_text(hr));
+    }
+
+    IASIO* raw_driver = nullptr;
+    hr = CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, clsid, reinterpret_cast<void**>(&raw_driver));
+    if (FAILED(hr) || raw_driver == nullptr) {
+        throw std::runtime_error("CoCreateInstance failed for ASIO driver: " + hresult_text(hr));
+    }
+    AsioDriver driver(raw_driver);
+
+    if (driver.get()->init(GetConsoleWindow()) != ASIOTrue) {
+        std::array<char, 256> message{};
+        driver.get()->getErrorMessage(message.data());
+        const std::string text = message.data();
+        throw std::runtime_error(text.empty() ? "ASIO init failed" : "ASIO init failed: " + text);
+    }
+
+    DeviceProbe probe;
+    probe.device = device;
+    std::array<char, 128> driver_name{};
+    driver.get()->getDriverName(driver_name.data());
+    probe.driver_name = driver_name.data();
+    probe.driver_version = driver.get()->getDriverVersion();
+    require_asio_ok(driver.get()->getChannels(&probe.input_channels, &probe.output_channels), "ASIO getChannels");
+    require_asio_ok(driver.get()->getLatencies(&probe.input_latency_samples, &probe.output_latency_samples), "ASIO getLatencies");
+    require_asio_ok(
+        driver.get()->getBufferSize(
+            &probe.min_buffer_size,
+            &probe.max_buffer_size,
+            &probe.preferred_buffer_size,
+            &probe.buffer_granularity),
+        "ASIO getBufferSize");
+
+    ASIOSampleRate current_rate = 0.0;
+    const ASIOError rate_error = driver.get()->getSampleRate(&current_rate);
+    if (rate_error == ASE_OK || rate_error == ASE_SUCCESS) {
+        probe.current_sample_rate = current_rate;
+    }
+    const ASIOError can_rate = driver.get()->canSampleRate(requested_sample_rate);
+    probe.requested_sample_rate_supported = can_rate == ASE_OK || can_rate == ASE_SUCCESS;
+    return probe;
+}
+
+DeviceMeterResult meter_device(int id, double requested_sample_rate, long buffer_size, int duration_ms)
+{
+    if (duration_ms <= 0) {
+        throw std::runtime_error("meter duration must be positive");
+    }
+    const auto devices = list_devices();
+    if (id < 0 || static_cast<std::size_t>(id) >= devices.size()) {
+        throw std::runtime_error("audio device id is out of range");
+    }
+    const DeviceInfo& device = devices[static_cast<std::size_t>(id)];
+    if (device.clsid.empty()) {
+        throw std::runtime_error("selected ASIO device has no CLSID");
+    }
+
+    ComRuntime com;
+    wchar_t wide_clsid[64]{};
+    const int converted = MultiByteToWideChar(
+        CP_UTF8,
+        0,
+        device.clsid.c_str(),
+        -1,
+        wide_clsid,
+        static_cast<int>(std::size(wide_clsid)));
+    if (converted <= 0) {
+        throw std::runtime_error("failed to convert ASIO CLSID");
+    }
+
+    CLSID clsid{};
+    HRESULT hr = CLSIDFromString(wide_clsid, &clsid);
+    if (FAILED(hr)) {
+        throw std::runtime_error("CLSIDFromString failed: " + hresult_text(hr));
+    }
+
+    IASIO* raw_driver = nullptr;
+    hr = CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, clsid, reinterpret_cast<void**>(&raw_driver));
+    if (FAILED(hr) || raw_driver == nullptr) {
+        throw std::runtime_error("CoCreateInstance failed for ASIO driver: " + hresult_text(hr));
+    }
+    AsioDriver driver(raw_driver);
+
+    if (driver.get()->init(GetConsoleWindow()) != ASIOTrue) {
+        std::array<char, 256> message{};
+        driver.get()->getErrorMessage(message.data());
+        const std::string text = message.data();
+        throw std::runtime_error(text.empty() ? "ASIO init failed" : "ASIO init failed: " + text);
+    }
+
+    long input_channels = 0;
+    long output_channels = 0;
+    require_asio_ok(driver.get()->getChannels(&input_channels, &output_channels), "ASIO getChannels");
+    if (input_channels <= 0 || output_channels <= 0) {
+        throw std::runtime_error("ASIO meter requires at least one input and one output channel");
+    }
+
+    long min_buffer = 0;
+    long max_buffer = 0;
+    long preferred_buffer = 0;
+    long granularity = 0;
+    require_asio_ok(driver.get()->getBufferSize(&min_buffer, &max_buffer, &preferred_buffer, &granularity), "ASIO getBufferSize");
+    if (buffer_size <= 0) {
+        buffer_size = preferred_buffer;
+    }
+    if (buffer_size < min_buffer || buffer_size > max_buffer) {
+        throw std::runtime_error("requested ASIO buffer size is outside the device min/max range");
+    }
+
+    ASIOSampleRate current_rate = 0.0;
+    (void)driver.get()->getSampleRate(&current_rate);
+    if (requested_sample_rate > 0.0 && current_rate != requested_sample_rate) {
+        const ASIOError can_rate = driver.get()->canSampleRate(requested_sample_rate);
+        if (can_rate != ASE_OK && can_rate != ASE_SUCCESS) {
+            throw std::runtime_error("requested ASIO sample rate is not supported");
+        }
+        require_asio_ok(driver.get()->setSampleRate(requested_sample_rate), "ASIO setSampleRate");
+        (void)driver.get()->getSampleRate(&current_rate);
+    }
+
+    ASIOChannelInfo input_info{};
+    input_info.channel = 0;
+    input_info.isInput = ASIOTrue;
+    require_asio_ok(driver.get()->getChannelInfo(&input_info), "ASIO getChannelInfo input");
+
+    ASIOChannelInfo output_info{};
+    output_info.channel = 0;
+    output_info.isInput = ASIOFalse;
+    require_asio_ok(driver.get()->getChannelInfo(&output_info), "ASIO getChannelInfo output");
+    if (sample_bytes(input_info.type) == 0 || sample_bytes(output_info.type) == 0) {
+        throw std::runtime_error("ASIO sample type is not supported by the meter probe");
+    }
+
+    std::array<ASIOBufferInfo, 2> buffers{};
+    buffers[0].isInput = ASIOTrue;
+    buffers[0].channelNum = 0;
+    buffers[1].isInput = ASIOFalse;
+    buffers[1].channelNum = 0;
+
+    MeterContext context;
+    context.input = &buffers[0];
+    context.output = &buffers[1];
+    context.buffer_size = buffer_size;
+    context.input_type = input_info.type;
+    context.output_type = output_info.type;
+
+    ASIOCallbacks callbacks{};
+    callbacks.bufferSwitch = meter_buffer_switch;
+    callbacks.sampleRateDidChange = meter_sample_rate_changed;
+    callbacks.asioMessage = meter_asio_message;
+    callbacks.bufferSwitchTimeInfo = meter_buffer_switch_time_info;
+
+    AsioBuffers session(driver.get());
+    g_meter_context = &context;
+    require_asio_ok(driver.get()->createBuffers(buffers.data(), static_cast<long>(buffers.size()), buffer_size, &callbacks), "ASIO createBuffers");
+    session.mark_created();
+    require_asio_ok(driver.get()->start(), "ASIO start");
+    session.mark_started();
+    Sleep(static_cast<DWORD>(duration_ms));
+
+    DeviceMeterResult result;
+    result.device = device;
+    result.sample_rate = current_rate;
+    result.buffer_size = buffer_size;
+    result.callbacks = context.callbacks.load(std::memory_order_relaxed);
+    result.input_sample_type = input_info.type;
+    result.output_sample_type = output_info.type;
+    result.input_peak = static_cast<double>(context.peak_ppm.load(std::memory_order_relaxed)) / 1000000.0;
+    return result;
+}
+
+DeviceRingResult ring_device(
+    int id,
+    double requested_sample_rate,
+    long buffer_size,
+    int duration_ms,
+    std::size_t ring_capacity_frames)
+{
+    if (duration_ms <= 0) {
+        throw std::runtime_error("ring duration must be positive");
+    }
+    if (ring_capacity_frames == 0) {
+        throw std::runtime_error("ring capacity must be positive");
+    }
+    const auto devices = list_devices();
+    if (id < 0 || static_cast<std::size_t>(id) >= devices.size()) {
+        throw std::runtime_error("audio device id is out of range");
+    }
+    const DeviceInfo& device = devices[static_cast<std::size_t>(id)];
+    if (device.clsid.empty()) {
+        throw std::runtime_error("selected ASIO device has no CLSID");
+    }
+
+    ComRuntime com;
+    wchar_t wide_clsid[64]{};
+    const int converted = MultiByteToWideChar(
+        CP_UTF8,
+        0,
+        device.clsid.c_str(),
+        -1,
+        wide_clsid,
+        static_cast<int>(std::size(wide_clsid)));
+    if (converted <= 0) {
+        throw std::runtime_error("failed to convert ASIO CLSID");
+    }
+
+    CLSID clsid{};
+    HRESULT hr = CLSIDFromString(wide_clsid, &clsid);
+    if (FAILED(hr)) {
+        throw std::runtime_error("CLSIDFromString failed: " + hresult_text(hr));
+    }
+
+    IASIO* raw_driver = nullptr;
+    hr = CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, clsid, reinterpret_cast<void**>(&raw_driver));
+    if (FAILED(hr) || raw_driver == nullptr) {
+        throw std::runtime_error("CoCreateInstance failed for ASIO driver: " + hresult_text(hr));
+    }
+    AsioDriver driver(raw_driver);
+
+    if (driver.get()->init(GetConsoleWindow()) != ASIOTrue) {
+        std::array<char, 256> message{};
+        driver.get()->getErrorMessage(message.data());
+        const std::string text = message.data();
+        throw std::runtime_error(text.empty() ? "ASIO init failed" : "ASIO init failed: " + text);
+    }
+
+    long input_channels = 0;
+    long output_channels = 0;
+    require_asio_ok(driver.get()->getChannels(&input_channels, &output_channels), "ASIO getChannels");
+    if (input_channels <= 0 || output_channels <= 0) {
+        throw std::runtime_error("ASIO ring validation requires at least one input and one output channel");
+    }
+
+    long min_buffer = 0;
+    long max_buffer = 0;
+    long preferred_buffer = 0;
+    long granularity = 0;
+    require_asio_ok(driver.get()->getBufferSize(&min_buffer, &max_buffer, &preferred_buffer, &granularity), "ASIO getBufferSize");
+    if (buffer_size <= 0) {
+        buffer_size = preferred_buffer;
+    }
+    if (buffer_size < min_buffer || buffer_size > max_buffer) {
+        throw std::runtime_error("requested ASIO buffer size is outside the device min/max range");
+    }
+    if (ring_capacity_frames < static_cast<std::size_t>(buffer_size)) {
+        throw std::runtime_error("ring capacity must be at least one ASIO buffer");
+    }
+
+    ASIOSampleRate current_rate = 0.0;
+    (void)driver.get()->getSampleRate(&current_rate);
+    if (requested_sample_rate > 0.0 && current_rate != requested_sample_rate) {
+        const ASIOError can_rate = driver.get()->canSampleRate(requested_sample_rate);
+        if (can_rate != ASE_OK && can_rate != ASE_SUCCESS) {
+            throw std::runtime_error("requested ASIO sample rate is not supported");
+        }
+        require_asio_ok(driver.get()->setSampleRate(requested_sample_rate), "ASIO setSampleRate");
+        (void)driver.get()->getSampleRate(&current_rate);
+    }
+
+    ASIOChannelInfo input_info{};
+    input_info.channel = 0;
+    input_info.isInput = ASIOTrue;
+    require_asio_ok(driver.get()->getChannelInfo(&input_info), "ASIO getChannelInfo input");
+
+    ASIOChannelInfo output_info{};
+    output_info.channel = 0;
+    output_info.isInput = ASIOFalse;
+    require_asio_ok(driver.get()->getChannelInfo(&output_info), "ASIO getChannelInfo output");
+    if (input_info.type != ASIOSTInt32LSB || output_info.type != ASIOSTInt32LSB) {
+        throw std::runtime_error("ASIO ring validation currently supports Int32LSB input/output only");
+    }
+
+    std::array<ASIOBufferInfo, 2> buffers{};
+    buffers[0].isInput = ASIOTrue;
+    buffers[0].channelNum = 0;
+    buffers[1].isInput = ASIOFalse;
+    buffers[1].channelNum = 0;
+
+    MonoRingBuffer ring(ring_capacity_frames);
+    RingContext context;
+    context.input = &buffers[0];
+    context.output = &buffers[1];
+    context.buffer_size = buffer_size;
+    context.input_type = input_info.type;
+    context.output_type = output_info.type;
+    context.ring = &ring;
+
+    ASIOCallbacks callbacks{};
+    callbacks.bufferSwitch = ring_buffer_switch;
+    callbacks.sampleRateDidChange = meter_sample_rate_changed;
+    callbacks.asioMessage = ring_asio_message;
+    callbacks.bufferSwitchTimeInfo = ring_buffer_switch_time_info;
+
+    AsioBuffers session(driver.get());
+    g_ring_context = &context;
+    require_asio_ok(driver.get()->createBuffers(buffers.data(), static_cast<long>(buffers.size()), buffer_size, &callbacks), "ASIO createBuffers");
+    session.mark_created();
+    require_asio_ok(driver.get()->start(), "ASIO start");
+    session.mark_started();
+    Sleep(static_cast<DWORD>(duration_ms));
+
+    const auto ring_stats = ring.stats();
+    DeviceRingResult result;
+    result.device = device;
+    result.sample_rate = current_rate;
+    result.buffer_size = buffer_size;
+    result.callbacks = context.callbacks.load(std::memory_order_relaxed);
+    result.ring_overruns = ring_stats.overruns;
+    result.ring_underruns = ring_stats.underruns;
+    result.ring_readable = ring.available_read();
+    return result;
+}
+
+std::unique_ptr<DeviceStream> start_duplex_stream(
+    int id,
+    double requested_sample_rate,
+    long buffer_size,
+    MonoRingBuffer& capture_ring,
+    MonoRingBuffer& playback_ring,
+    std::size_t playback_prefill_frames)
+{
+    const auto devices = list_devices();
+    if (id < 0 || static_cast<std::size_t>(id) >= devices.size()) {
+        throw std::runtime_error("audio device id is out of range");
+    }
+    const DeviceInfo& device = devices[static_cast<std::size_t>(id)];
+    if (device.clsid.empty()) {
+        throw std::runtime_error("selected ASIO device has no CLSID");
+    }
+
+    ComRuntime com;
+    wchar_t wide_clsid[64]{};
+    const int converted = MultiByteToWideChar(
+        CP_UTF8,
+        0,
+        device.clsid.c_str(),
+        -1,
+        wide_clsid,
+        static_cast<int>(std::size(wide_clsid)));
+    if (converted <= 0) {
+        throw std::runtime_error("failed to convert ASIO CLSID");
+    }
+
+    CLSID clsid{};
+    HRESULT hr = CLSIDFromString(wide_clsid, &clsid);
+    if (FAILED(hr)) {
+        throw std::runtime_error("CLSIDFromString failed: " + hresult_text(hr));
+    }
+
+    IASIO* raw_driver = nullptr;
+    hr = CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, clsid, reinterpret_cast<void**>(&raw_driver));
+    if (FAILED(hr) || raw_driver == nullptr) {
+        throw std::runtime_error("CoCreateInstance failed for ASIO driver: " + hresult_text(hr));
+    }
+    AsioDriver driver(raw_driver);
+
+    if (driver.get()->init(GetConsoleWindow()) != ASIOTrue) {
+        std::array<char, 256> message{};
+        driver.get()->getErrorMessage(message.data());
+        const std::string text = message.data();
+        throw std::runtime_error(text.empty() ? "ASIO init failed" : "ASIO init failed: " + text);
+    }
+
+    long input_channels = 0;
+    long output_channels = 0;
+    require_asio_ok(driver.get()->getChannels(&input_channels, &output_channels), "ASIO getChannels");
+    if (input_channels <= 0 || output_channels <= 0) {
+        throw std::runtime_error("ASIO duplex stream requires at least one input and one output channel");
+    }
+
+    long min_buffer = 0;
+    long max_buffer = 0;
+    long preferred_buffer = 0;
+    long granularity = 0;
+    require_asio_ok(driver.get()->getBufferSize(&min_buffer, &max_buffer, &preferred_buffer, &granularity), "ASIO getBufferSize");
+    if (buffer_size <= 0) {
+        buffer_size = preferred_buffer;
+    }
+    if (buffer_size < min_buffer || buffer_size > max_buffer) {
+        throw std::runtime_error("requested ASIO buffer size is outside the device min/max range");
+    }
+    if (playback_prefill_frames > playback_ring.capacity()) {
+        throw std::runtime_error("playback prefill must fit within playback ring capacity");
+    }
+
+    ASIOSampleRate current_rate = 0.0;
+    (void)driver.get()->getSampleRate(&current_rate);
+    if (requested_sample_rate > 0.0 && current_rate != requested_sample_rate) {
+        const ASIOError can_rate = driver.get()->canSampleRate(requested_sample_rate);
+        if (can_rate != ASE_OK && can_rate != ASE_SUCCESS) {
+            throw std::runtime_error("requested ASIO sample rate is not supported");
+        }
+        require_asio_ok(driver.get()->setSampleRate(requested_sample_rate), "ASIO setSampleRate");
+        (void)driver.get()->getSampleRate(&current_rate);
+    }
+
+    ASIOChannelInfo input_info{};
+    input_info.channel = 0;
+    input_info.isInput = ASIOTrue;
+    require_asio_ok(driver.get()->getChannelInfo(&input_info), "ASIO getChannelInfo input");
+
+    ASIOChannelInfo output_info{};
+    output_info.channel = 0;
+    output_info.isInput = ASIOFalse;
+    require_asio_ok(driver.get()->getChannelInfo(&output_info), "ASIO getChannelInfo output");
+    if (input_info.type != ASIOSTInt32LSB || output_info.type != ASIOSTInt32LSB) {
+        throw std::runtime_error("ASIO duplex stream currently supports Int32LSB input/output only");
+    }
+
+    std::array<ASIOBufferInfo, 2> buffers{};
+    buffers[0].isInput = ASIOTrue;
+    buffers[0].channelNum = 0;
+    buffers[1].isInput = ASIOFalse;
+    buffers[1].channelNum = 0;
+
+    auto stream = std::make_unique<WindowsDeviceStream>(
+        std::move(com),
+        std::move(driver),
+        buffers,
+        buffer_size,
+        capture_ring,
+        playback_ring,
+        playback_prefill_frames,
+        current_rate);
+    stream->start();
+    return stream;
+}
+
+} // namespace jam2::audio

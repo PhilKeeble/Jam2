@@ -1,0 +1,20 @@
+Mode: listen
+Local UDP bind: 127.0.0.1:50436
+Endpoint mode: manual/no-stun local fallback
+Connection string:
+jam2://v1?endpoint=127.0.0.1:50436&session=79a7e3985c2277ef&key=ff6bb4583065d86c1aa5bb5880507d9b
+
+Waiting for peer...
+Peer locked: 127.0.0.1:50437
+Handshake complete
+Ignored malformed/auth/session packets: 0
+Ignored wrong-endpoint packets: 0
+Audio packets sent: 367
+Audio packets received: 367
+Send bitrate bps: 1.26835e+06
+Receive bitrate bps: 1.26835e+06
+Ignored audio packets: 0
+Sequence lost: 0
+Sequence duplicate: 0
+Sequence out_of_order: 0
+Sequence late: 0

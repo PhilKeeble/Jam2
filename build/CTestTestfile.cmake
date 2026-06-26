@@ -1,0 +1,10 @@
+# CMake generated Testfile for 
+# Source directory: C:/Tools/JamLite2
+# Build directory: C:/Tools/JamLite2/build
+# 
+# This file includes the relevant testing commands required for 
+# testing this directory and lists subdirectories to be tested as well.
+add_test([=[jam2_help]=] "C:/Tools/JamLite2/build/jam2.exe" "--help")
+set_tests_properties([=[jam2_help]=] PROPERTIES  _BACKTRACE_TRIPLES "C:/Tools/JamLite2/CMakeLists.txt;82;add_test;C:/Tools/JamLite2/CMakeLists.txt;0;")
+add_test([=[jam2_core_tests]=] "C:/Tools/JamLite2/build/jam2_tests.exe")
+set_tests_properties([=[jam2_core_tests]=] PROPERTIES  _BACKTRACE_TRIPLES "C:/Tools/JamLite2/CMakeLists.txt;83;add_test;C:/Tools/JamLite2/CMakeLists.txt;0;")
