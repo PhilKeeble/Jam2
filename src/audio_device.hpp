@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -54,6 +55,19 @@ struct DeviceRingResult {
     std::size_t ring_readable = 0;
 };
 
+struct MetronomeConfig {
+    bool enabled = false;
+    int bpm = 120;
+    double level = 0.20;
+};
+
+struct StreamControl {
+    std::atomic<bool> metronome_enabled{false};
+    std::atomic<int> metronome_bpm{120};
+    std::atomic<int> metronome_level_ppm{200000};
+    std::atomic<int> playback_ratio_ppm{1000000};
+};
+
 class DeviceStream {
 public:
     virtual ~DeviceStream() = default;
@@ -82,6 +96,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     long buffer_size,
     MonoRingBuffer& capture_ring,
     MonoRingBuffer& playback_ring,
-    std::size_t playback_prefill_frames);
+    std::size_t playback_prefill_frames,
+    StreamControl& control);
 
 } // namespace jam2::audio

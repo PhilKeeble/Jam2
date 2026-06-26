@@ -146,6 +146,46 @@ Endpoint UdpSocket::local_endpoint() const
     return from_sockaddr(addr);
 }
 
+void UdpSocket::set_send_buffer_size(int bytes)
+{
+    if (bytes <= 0) {
+        throw std::runtime_error("UDP send buffer size must be positive");
+    }
+    if (setsockopt(handle_, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&bytes), sizeof(bytes)) != 0) {
+        throw std::runtime_error("failed to set UDP send buffer size: " + socket_error_text());
+    }
+}
+
+void UdpSocket::set_recv_buffer_size(int bytes)
+{
+    if (bytes <= 0) {
+        throw std::runtime_error("UDP receive buffer size must be positive");
+    }
+    if (setsockopt(handle_, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&bytes), sizeof(bytes)) != 0) {
+        throw std::runtime_error("failed to set UDP receive buffer size: " + socket_error_text());
+    }
+}
+
+int UdpSocket::send_buffer_size() const
+{
+    int bytes = 0;
+    socklen_t len = sizeof(bytes);
+    if (getsockopt(handle_, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<char*>(&bytes), &len) != 0) {
+        throw std::runtime_error("failed to read UDP send buffer size: " + socket_error_text());
+    }
+    return bytes;
+}
+
+int UdpSocket::recv_buffer_size() const
+{
+    int bytes = 0;
+    socklen_t len = sizeof(bytes);
+    if (getsockopt(handle_, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<char*>(&bytes), &len) != 0) {
+        throw std::runtime_error("failed to read UDP receive buffer size: " + socket_error_text());
+    }
+    return bytes;
+}
+
 void UdpSocket::send_to(const Endpoint& endpoint, std::span<const std::uint8_t> bytes) const
 {
     const sockaddr_in addr = to_sockaddr(endpoint);

@@ -166,6 +166,8 @@ Tuning options:
 --socket-send-buffer <bytes>
 --socket-recv-buffer <bytes>
 --drift-correction on|off
+--drift-smoothing <0..1>
+--drift-max-correction-ppm <ppm>
 --delay-correction off|symmetric
 --delay-correction-target-us <microseconds>
 --debug-input-meter
@@ -200,7 +202,9 @@ Current implementation checkpoint:
 - Stage 2 is complete for the MVP slice: UDP socket wrapper, `jam2://v1` URL generation/parsing, authenticated `HELLO`/`HELLO_ACK`, peer lock, and local two-process handshake validation.
 - Stage 3 is complete for the MVP slice: minimal STUN Binding Request/Response parsing, XOR-MAPPED-ADDRESS extraction, retry/timeout behavior, `--stun`, `--no-stun`, and `--public-endpoint`.
 - Stage 4 Windows ASIO slice is partially complete: ASIO registry enumeration, driver probe, input meter, buffer/callback validation, and duplex ASIO stream with callback-safe ring handoff. macOS/CoreAudio is not implemented yet.
-- Stage 5 is partially complete: fixed AUDIO packets, packed 24-bit mono PCM helpers, timed UDP packet exchange, RTT and receive-delay stats in milliseconds, coarse AUDIO interarrival variance stats, sequence/loss tracking, preallocated capture/playback rings, one-sided ASIO-to-UDP integration on localhost, explicit playback prefill gating, and ring depth/prefill reporting in frames and milliseconds. Remaining Stage 5 work is real two-peer live audio validation, adaptive jitter buffering, tighter packet pacing, and longer stability testing.
+- Stage 5 is mostly complete for the current MVP slice: fixed AUDIO packets, packed 24-bit mono PCM helpers, timed UDP packet exchange, BYE stream-end signaling, catch-up packet pacing, explicit stream linger/drain timing, periodic stats snapshots via `--stats-interval-ms`, configurable UDP socket buffers with actual-size reporting, packet rate/bitrate/loss-percent/frame-interval stats, RTT and receive-delay stats in milliseconds, coarse AUDIO interarrival variance stats, sequence/loss tracking, preallocated capture/playback rings, one-sided ASIO-to-UDP integration on localhost, explicit playback prefill gating, playback ring depth capping/drop stats, and ring depth/prefill reporting in frames and milliseconds. Remaining Stage 5 work is real two-peer live audio validation, adaptive jitter buffering beyond a fixed depth cap, tighter OS-level packet scheduling, and longer stability testing.
+- Stage 6 is mostly complete for the current MVP slice: drift correction option parsing, raw and smoothed drift ppm estimates, configurable smoothing/max correction, clamped resampler ratio reporting, and a simple callback-side linear playback resampler are implemented. Remaining Stage 6 work is longer-session validation, tuning the correction loop against real hardware clocks, and replacing the simple resampler later if quality requires it.
+- Stage 8 is mostly complete for the current MVP slice: metronome control packets are exchanged with BPM and beat index stats, generated local ASIO clicks are mixed into output, runtime stdin commands exist for `quit`, `stats`, `metro on/off`, and `bpm`, runtime commands update the ASIO callback state, `metro off` is sent to the peer, and the first beat of each four-beat group is accented. Remaining Stage 8 work is tighter shared-timeline alignment and real two-peer validation.
 
 ### Stage 1: Project Skeleton and CLI
 
@@ -284,23 +288,26 @@ Acceptance:
 - Two peers can stream mono audio over LAN.
 - Stats show packet rate, bitrate, loss, jitter, buffer depth, underruns, and overruns.
 - Audio path remains stable for at least 10 minutes on a clean LAN.
-- Completed so far: localhost authenticated AUDIO packet exchange, RTT/receive-delay stats in ms, coarse AUDIO interarrival variance stats in ms, one-sided ASIO-to-UDP ring integration, visible ring underrun/overrun counters, `--playback-prefill-frames` startup gating, and ring depth/prefill stats in both frames and ms.
+- Completed so far: localhost authenticated AUDIO packet exchange, catch-up packet pacing, `--stream-linger-ms` receive drain, `--stats-interval-ms` periodic snapshots, `--socket-send-buffer`/`--socket-recv-buffer` with actual-size reporting, packet rate/bitrate/loss-percent/frame-interval stats, RTT/receive-delay stats in ms, coarse AUDIO interarrival variance stats in ms, one-sided ASIO-to-UDP ring integration, visible ring underrun/overrun counters, `--playback-prefill-frames` startup gating, `--playback-max-frames` depth cap/drop stats, and ring depth/prefill stats in both frames and ms.
 
 ### Stage 6: Drift Correction
 
 Implement:
 
-- Remote sample timestamp tracking.
-- Local playout position tracking.
-- Drift estimate in ppm.
-- Adaptive resampler ratio.
-- `--drift-correction on|off`.
+- ~~Remote sample timestamp tracking.~~
+- ~~Local playout position tracking.~~
+- ~~Drift estimate in ppm.~~
+- ~~Adaptive resampler ratio.~~
+- ~~`--drift-correction on|off`.~~
+- ~~Configurable drift smoothing and max correction.~~
+- ~~Apply simple linear resampling to playback.~~
 
 Acceptance:
 
 - Long sessions do not slowly underrun/overrun due to clock mismatch.
-- CLI reports drift ppm and current resampler ratio.
+- ~~CLI reports drift ppm and current resampler ratio.~~
 - Disabling drift correction is possible for comparison testing.
+- Remaining: long-session validation with real hardware clocks and resampler/correction-loop tuning.
 
 ### Stage 7: Stats and CSV Logging
 
@@ -335,16 +342,20 @@ Acceptance:
 
 Implement local metronome generation:
 
-- Control packets send metronome state.
-- Peers generate click locally.
-- Runtime BPM edits without restarting.
-- `metro on`, `metro off`, and `bpm <number>` commands.
+- ~~Control packets send metronome state.~~
+- ~~Peers generate click locally.~~
+- ~~Runtime BPM edits without restarting.~~
+- ~~`metro on`, `metro off`, and `bpm <number>` commands.~~
+- ~~Runtime metronome controls update the local audio callback.~~
+- ~~First beat accent pattern.~~
 
 Acceptance:
 
 - Both peers hear locally generated metronome aligned to the shared session timeline.
-- BPM can change while connected.
-- Metronome audio is not streamed as normal audio payload.
+- ~~BPM can change while connected.~~
+- ~~Metronome audio is not streamed as normal audio payload.~~
+- Completed so far: `--metronome on|off`, `--bpm`, `--metronome-level`, METRONOME_STATE send/receive, beat index stats, generated local click mixed into ASIO output, runtime stdin commands `quit`, `stats`, `metro on/off`, `bpm <number>`, peer-visible off state, final runtime metronome/BPM stats, and first-beat accenting.
+- Remaining: tighter shared-timeline alignment and real two-peer validation.
 
 ### Stage 9: Experimental Delay Correction
 

@@ -34,6 +34,10 @@ public:
 
     void bind(const Endpoint& endpoint);
     Endpoint local_endpoint() const;
+    void set_send_buffer_size(int bytes);
+    void set_recv_buffer_size(int bytes);
+    int send_buffer_size() const;
+    int recv_buffer_size() const;
     void send_to(const Endpoint& endpoint, std::span<const std::uint8_t> bytes) const;
     std::optional<std::pair<Endpoint, std::vector<std::uint8_t>>> recv_from(int timeout_ms) const;
 

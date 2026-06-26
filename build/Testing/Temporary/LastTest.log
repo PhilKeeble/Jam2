@@ -1,10 +1,10 @@
-Start testing: Jun 26 11:56 Coordinated Universal Time
+Start testing: Jun 26 14:42 Coordinated Universal Time
 ----------------------------------------------------------
 1/2 Testing: jam2_help
 1/2 Test: jam2_help
 Command: "C:/Tools/JamLite2/build/jam2.exe" "--help"
 Directory: C:/Tools/JamLite2/build
-"jam2_help" start time: Jun 26 11:56 Coordinated Universal Time
+"jam2_help" start time: Jun 26 14:42 Coordinated Universal Time
 Output:
 ----------------------------------------------------------
 jam2 - two-person low-latency music streaming tool
@@ -15,17 +15,17 @@ Usage:
   jam2 probe-device <id> [--sample-rate n]
   jam2 meter-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n]
   jam2 ring-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n] [--ring-frames n]
-  jam2 listen [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--playback-prefill-frames n]
+  jam2 listen [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats-interval-ms n] [--metronome on|off] [--bpm n] [--metronome-level n] [--socket-send-buffer n] [--socket-recv-buffer n] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-max-correction-ppm n]
   jam2 connect <jam2-url> [options]
 
 Stage status:
   UDP HELLO/HELLO_ACK session setup, jam2 URL parsing, and STUN endpoint discovery are implemented.
-  Audio streaming, device backends, stats, and metronome are still planned.
+  UDP audio streaming, Windows ASIO, drift stats/correction, and metronome controls are implemented for the MVP slice.
 <end of output>
-Test time =   0.02 sec
+Test time =   0.11 sec
 ----------------------------------------------------------
 Test Passed.
-"jam2_help" end time: Jun 26 11:56 Coordinated Universal Time
+"jam2_help" end time: Jun 26 14:42 Coordinated Universal Time
 "jam2_help" time elapsed: 00:00:00
 ----------------------------------------------------------
 
@@ -33,7 +33,7 @@ Test Passed.
 2/2 Test: jam2_core_tests
 Command: "C:/Tools/JamLite2/build/jam2_tests.exe"
 Directory: C:/Tools/JamLite2/build
-"jam2_core_tests" start time: Jun 26 11:56 Coordinated Universal Time
+"jam2_core_tests" start time: Jun 26 14:42 Coordinated Universal Time
 Output:
 ----------------------------------------------------------
 jam2 core tests passed
@@ -41,8 +41,8 @@ jam2 core tests passed
 Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"jam2_core_tests" end time: Jun 26 11:56 Coordinated Universal Time
+"jam2_core_tests" end time: Jun 26 14:42 Coordinated Universal Time
 "jam2_core_tests" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-End testing: Jun 26 11:56 Coordinated Universal Time
+End testing: Jun 26 14:42 Coordinated Universal Time

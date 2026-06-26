@@ -22,7 +22,7 @@ DeviceRingResult ring_device(int, double, long, int, std::size_t)
     return {};
 }
 
-std::unique_ptr<DeviceStream> start_duplex_stream(int, double, long, MonoRingBuffer&, MonoRingBuffer&, std::size_t)
+std::unique_ptr<DeviceStream> start_duplex_stream(int, double, long, MonoRingBuffer&, MonoRingBuffer&, std::size_t, StreamControl&)
 {
     return {};
 }

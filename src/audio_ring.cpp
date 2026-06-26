@@ -59,6 +59,16 @@ std::size_t MonoRingBuffer::pop(std::span<std::int32_t> frames)
     return count;
 }
 
+std::size_t MonoRingBuffer::drop_oldest(std::size_t frames)
+{
+    const std::uint64_t read = read_.load(std::memory_order_relaxed);
+    const std::uint64_t write = write_.load(std::memory_order_acquire);
+    const std::size_t readable = static_cast<std::size_t>(write - read);
+    const std::size_t count = std::min(readable, frames);
+    read_.store(read + count, std::memory_order_release);
+    return count;
+}
+
 RingStats MonoRingBuffer::stats() const
 {
     return RingStats{

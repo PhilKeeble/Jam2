@@ -252,6 +252,13 @@ void test_audio_ring()
     ring.reset();
     require(ring.available_read() == 0, "ring reset readable mismatch");
     require(ring.stats().overruns == 0 && ring.stats().underruns == 0, "ring reset stats mismatch");
+
+    const std::array<std::int32_t, 4> drop_source{10, 11, 12, 13};
+    require(ring.push(drop_source) == 4, "ring drop setup push mismatch");
+    require(ring.drop_oldest(2) == 2, "ring drop count mismatch");
+    std::array<std::int32_t, 2> remaining{};
+    require(ring.pop(remaining) == 2, "ring drop remaining pop mismatch");
+    require(remaining[0] == 12 && remaining[1] == 13, "ring drop remaining content mismatch");
 }
 
 } // namespace

@@ -26,6 +26,7 @@ public:
 
     std::size_t push(std::span<const std::int32_t> frames);
     std::size_t pop(std::span<std::int32_t> frames);
+    std::size_t drop_oldest(std::size_t frames);
     RingStats stats() const;
     void reset();
 

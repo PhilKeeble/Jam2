@@ -198,7 +198,20 @@ struct DuplexContext {
     long buffer_size = 0;
     MonoRingBuffer* capture = nullptr;
     MonoRingBuffer* playback = nullptr;
+    StreamControl* control = nullptr;
     std::size_t playback_prefill_frames = 0;
+    double sample_rate = 48000.0;
+    std::uint64_t metronome_sample_counter = 0;
+    std::uint64_t metronome_beat_index = 0;
+    int click_remaining = 0;
+    int click_total = 0;
+    double click_phase = 0.0;
+    double click_phase_step = 0.0;
+    std::int32_t resample_current = 0;
+    std::int32_t resample_next = 0;
+    bool resample_has_current = false;
+    bool resample_has_next = false;
+    double resample_phase = 0.0;
     std::atomic<long> callbacks{0};
     std::atomic<bool> playback_prefilled{false};
 };
@@ -359,6 +372,100 @@ ASIOTime* ring_buffer_switch_time_info(ASIOTime* params, long double_buffer_inde
     return params;
 }
 
+void mix_metronome_click(DuplexContext& context, std::int32_t* output)
+{
+    if (context.control == nullptr ||
+        !context.control->metronome_enabled.load(std::memory_order_relaxed) ||
+        context.sample_rate <= 0.0) {
+        context.click_remaining = 0;
+        context.click_total = 0;
+        return;
+    }
+
+    const int bpm = context.control->metronome_bpm.load(std::memory_order_relaxed);
+    if (bpm <= 0) {
+        return;
+    }
+    const int level_ppm = context.control->metronome_level_ppm.load(std::memory_order_relaxed);
+    const double level = static_cast<double>(std::clamp(level_ppm, 0, 1000000)) / 1000000.0;
+    const std::uint64_t beat_interval =
+        static_cast<std::uint64_t>((60.0 * context.sample_rate) / static_cast<double>(bpm));
+
+    for (long i = 0; i < context.buffer_size; ++i) {
+        if (beat_interval > 0 && (context.metronome_sample_counter % beat_interval) == 0) {
+            const bool accent = (context.metronome_beat_index % 4ULL) == 0ULL;
+            const double frequency = accent ? 1800.0 : 1200.0;
+            context.click_total = static_cast<int>(context.sample_rate * (accent ? 0.012 : 0.008));
+            context.click_remaining = context.click_total;
+            context.click_phase = 0.0;
+            context.click_phase_step = 2.0 * 3.14159265358979323846 * frequency / context.sample_rate;
+            ++context.metronome_beat_index;
+        }
+
+        if (context.click_remaining > 0 && context.click_total > 0) {
+            const double envelope = static_cast<double>(context.click_remaining) / static_cast<double>(context.click_total);
+            const bool accent = context.click_total > static_cast<int>(context.sample_rate * 0.010);
+            const double click_level = std::clamp(level * (accent ? 1.6 : 1.0), 0.0, 1.0);
+            const double click = std::sin(context.click_phase) * envelope * click_level;
+            const double mixed = static_cast<double>(output[i]) + (click * 2147483647.0);
+            const double clipped = std::clamp(mixed, -2147483648.0, 2147483647.0);
+            output[i] = static_cast<std::int32_t>(clipped);
+            context.click_phase += context.click_phase_step;
+            --context.click_remaining;
+        }
+        ++context.metronome_sample_counter;
+    }
+}
+
+std::int32_t pop_one_frame(MonoRingBuffer& ring)
+{
+    std::array<std::int32_t, 1> frame{};
+    (void)ring.pop(frame);
+    return frame[0];
+}
+
+void pop_resampled_playback(DuplexContext& context, std::span<std::int32_t> output)
+{
+    if (context.playback == nullptr || context.control == nullptr) {
+        std::fill(output.begin(), output.end(), 0);
+        return;
+    }
+
+    const int ratio_ppm = context.control->playback_ratio_ppm.load(std::memory_order_relaxed);
+    const double ratio = static_cast<double>(std::clamp(ratio_ppm, 995000, 1005000)) / 1000000.0;
+
+    if (ratio_ppm == 1000000) {
+        context.resample_has_current = false;
+        context.resample_has_next = false;
+        context.resample_phase = 0.0;
+        context.playback->pop(output);
+        return;
+    }
+
+    if (!context.resample_has_current) {
+        context.resample_current = pop_one_frame(*context.playback);
+        context.resample_has_current = true;
+    }
+    if (!context.resample_has_next) {
+        context.resample_next = pop_one_frame(*context.playback);
+        context.resample_has_next = true;
+    }
+
+    for (std::int32_t& sample : output) {
+        const double mixed =
+            static_cast<double>(context.resample_current) +
+            (static_cast<double>(context.resample_next - context.resample_current) * context.resample_phase);
+        sample = static_cast<std::int32_t>(std::clamp(mixed, -2147483648.0, 2147483647.0));
+
+        context.resample_phase += ratio;
+        while (context.resample_phase >= 1.0) {
+            context.resample_phase -= 1.0;
+            context.resample_current = context.resample_next;
+            context.resample_next = pop_one_frame(*context.playback);
+        }
+    }
+}
+
 void duplex_buffer_switch(long double_buffer_index, ASIOBool)
 {
     DuplexContext* context = g_duplex_context;
@@ -381,8 +488,9 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
             }
         }
         if (context->playback_prefilled.load(std::memory_order_relaxed)) {
-            context->playback->pop(std::span<std::int32_t>(output, static_cast<std::size_t>(context->buffer_size)));
+            pop_resampled_playback(*context, std::span<std::int32_t>(output, static_cast<std::size_t>(context->buffer_size)));
         }
+        mix_metronome_click(*context, output);
     }
 
     context->callbacks.fetch_add(1, std::memory_order_relaxed);
@@ -432,6 +540,7 @@ public:
         MonoRingBuffer& capture_ring,
         MonoRingBuffer& playback_ring,
         std::size_t playback_prefill_frames,
+        StreamControl& control,
         double sample_rate)
         : com_(std::move(com)),
           driver_(std::move(driver)),
@@ -444,7 +553,9 @@ public:
         context_.buffer_size = buffer_size;
         context_.capture = &capture_ring;
         context_.playback = &playback_ring;
+        context_.control = &control;
         context_.playback_prefill_frames = playback_prefill_frames;
+        context_.sample_rate = sample_rate;
     }
 
     ~WindowsDeviceStream() override
@@ -950,7 +1061,8 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     long buffer_size,
     MonoRingBuffer& capture_ring,
     MonoRingBuffer& playback_ring,
-    std::size_t playback_prefill_frames)
+    std::size_t playback_prefill_frames,
+    StreamControl& control)
 {
     const auto devices = list_devices();
     if (id < 0 || static_cast<std::size_t>(id) >= devices.size()) {
@@ -1054,6 +1166,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
         capture_ring,
         playback_ring,
         playback_prefill_frames,
+        control,
         current_rate);
     stream->start();
     return stream;

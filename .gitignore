@@ -1,0 +1,34 @@
+# CMake/build outputs
+/build/
+/cmake-build-*/
+/out/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+*.ninja
+.ninja_*
+
+# Binaries and libraries
+*.exe
+*.dll
+*.lib
+*.obj
+*.pdb
+*.ilk
+
+# Local validation logs
+*.out
+*.err
+*.log
+*.csv
+
+# Editor/OS noise
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+Desktop.ini
