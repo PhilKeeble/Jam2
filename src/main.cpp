@@ -993,6 +993,19 @@ OptionalAudioStream start_optional_audio(const Options& options)
     return audio;
 }
 
+int drain_pending_udp(jam2::UdpSocket& socket)
+{
+    int drained = 0;
+    for (;;) {
+        const auto received = socket.recv_from(0);
+        if (!received) {
+            break;
+        }
+        ++drained;
+    }
+    return drained;
+}
+
 struct CommandThread {
     RuntimeState state;
     std::thread thread;
@@ -1256,6 +1269,10 @@ int run_listen(int argc, char** argv)
         std::cout << "Ignored malformed/auth/session packets: " << ignored_malformed << "\n";
         std::cout << "Ignored wrong-endpoint packets: " << ignored_wrong_endpoint << "\n";
         auto audio = start_optional_audio(options);
+        const int drained_startup_packets = drain_pending_udp(socket);
+        if (drained_startup_packets > 0) {
+            std::cout << "Drained startup UDP packets: " << drained_startup_packets << "\n";
+        }
         CommandThread commands(options);
         const auto audio_stats = run_audio_packet_exchange(
             socket,
@@ -1319,6 +1336,10 @@ int run_connect(int argc, char** argv)
                 std::cout << "Attempts: " << attempts << "\n";
                 std::cout << "Ignored packets: " << ignored << "\n";
                 auto audio = start_optional_audio(options);
+                const int drained_startup_packets = drain_pending_udp(socket);
+                if (drained_startup_packets > 0) {
+                    std::cout << "Drained startup UDP packets: " << drained_startup_packets << "\n";
+                }
                 CommandThread commands(options);
                 const auto audio_stats = run_audio_packet_exchange(
                     socket,
