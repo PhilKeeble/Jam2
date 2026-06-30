@@ -24,6 +24,9 @@ Testing/
 *.err
 *.log
 *.csv
+/tools/logs/
+__pycache__/
+*.pyc
 
 # Editor/OS noise
 .vs/

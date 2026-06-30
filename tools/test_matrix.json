@@ -1,0 +1,66 @@
+{
+  "defaults": {
+    "stream_ms": 120000,
+    "stream_linger_ms": 500,
+    "common_args": [
+      "--sample-rate", "44100",
+      "--stats-warmup-ms", "3000",
+      "--stats-interval-ms", "5000"
+    ],
+    "server_args": [],
+    "client_args": []
+  },
+  "tests": [
+    {
+      "id": "audio64_frame256_prefill1536",
+      "server_args": [
+        "--audio-buffer-size", "64",
+        "--frame-size", "256",
+        "--playback-prefill-frames", "1536",
+        "--playback-ring-frames", "8192",
+        "--playback-max-frames", "4096"
+      ],
+      "client_args": [
+        "--audio-buffer-size", "64",
+        "--frame-size", "256",
+        "--playback-prefill-frames", "1536",
+        "--playback-ring-frames", "8192",
+        "--playback-max-frames", "4096"
+      ]
+    },
+    {
+      "id": "audio128_frame128_prefill1536",
+      "server_args": [
+        "--audio-buffer-size", "128",
+        "--frame-size", "128",
+        "--playback-prefill-frames", "1536",
+        "--playback-ring-frames", "8192",
+        "--playback-max-frames", "4096"
+      ],
+      "client_args": [
+        "--audio-buffer-size", "128",
+        "--frame-size", "128",
+        "--playback-prefill-frames", "1536",
+        "--playback-ring-frames", "8192",
+        "--playback-max-frames", "4096"
+      ]
+    },
+    {
+      "id": "audio128_frame128_prefill2048",
+      "server_args": [
+        "--audio-buffer-size", "128",
+        "--frame-size", "128",
+        "--playback-prefill-frames", "2048",
+        "--playback-ring-frames", "8192",
+        "--playback-max-frames", "4096"
+      ],
+      "client_args": [
+        "--audio-buffer-size", "128",
+        "--frame-size", "128",
+        "--playback-prefill-frames", "2048",
+        "--playback-ring-frames", "8192",
+        "--playback-max-frames", "4096"
+      ]
+    }
+  ]
+}
