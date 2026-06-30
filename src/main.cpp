@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <span>
@@ -572,7 +573,6 @@ AudioPacketStats run_audio_packet_exchange(
     std::vector<std::int32_t> network_frames(static_cast<std::size_t>(options.frame_size), 0);
     const auto silence_payload = jam2::protocol::pack_pcm24(network_frames);
     const std::uint16_t audio_payload_size = static_cast<std::uint16_t>(silence_payload.size());
-    jam2::protocol::SequenceTracker tracker;
     std::uint32_t audio_sequence = 1;
     std::uint32_t control_sequence = 1;
     std::uint64_t sample_time = 0;
@@ -599,6 +599,88 @@ AudioPacketStats run_audio_packet_exchange(
     const std::uint64_t receive_deadline = bounded_stream ?
         send_deadline + static_cast<std::uint64_t>(options.stream_linger_ms) * 1000ULL :
         UINT64_MAX;
+    constexpr std::uint32_t kReorderWindowPackets = 4;
+    struct PendingAudioPacket {
+        std::uint32_t sequence = 0;
+        std::uint64_t sample_time = 0;
+        std::uint64_t receive_time = 0;
+        std::vector<std::int32_t> samples;
+    };
+    std::map<std::uint32_t, PendingAudioPacket> pending_audio;
+    bool expected_sequence_set = false;
+    std::uint32_t expected_sequence = 0;
+    std::uint32_t highest_sequence = 0;
+
+    auto process_audio_packet = [&](const PendingAudioPacket& packet) {
+        if (playback_ring != nullptr) {
+            (void)playback_ring->push(packet.samples);
+            if (options.playback_max_frames > 0) {
+                const std::size_t depth = playback_ring->available_read();
+                if (depth > options.playback_max_frames) {
+                    stats.playback_dropped_frames +=
+                        playback_ring->drop_oldest(depth - options.playback_max_frames);
+                }
+            }
+            const std::uint64_t depth_after = playback_ring->available_read();
+            observe_timing(
+                depth_after,
+                stats.playback_depth_min_frames,
+                stats.playback_depth_sum_frames,
+                stats.playback_depth_max_frames);
+            ++stats.playback_depth_samples;
+        }
+        if (!drift_started) {
+            drift_started = true;
+            first_remote_sample_time = packet.sample_time;
+            first_receive_time_us = packet.receive_time;
+        } else if (packet.receive_time > first_receive_time_us && packet.sample_time > first_remote_sample_time) {
+            const double remote_elapsed_samples = static_cast<double>(packet.sample_time - first_remote_sample_time);
+            const double remote_elapsed_us = remote_elapsed_samples * 1000000.0 / static_cast<double>(options.sample_rate);
+            const double local_elapsed_us = static_cast<double>(packet.receive_time - first_receive_time_us);
+            stats.raw_drift_ppm = ((remote_elapsed_us / local_elapsed_us) - 1.0) * 1000000.0;
+            if (!drift_smoothed || options.drift_smoothing >= 1.0) {
+                smoothed_drift_ppm = stats.raw_drift_ppm;
+                drift_smoothed = true;
+            } else if (options.drift_smoothing > 0.0) {
+                smoothed_drift_ppm += (stats.raw_drift_ppm - smoothed_drift_ppm) * options.drift_smoothing;
+            }
+            stats.drift_ppm = smoothed_drift_ppm;
+            const double max_ratio_delta = static_cast<double>(options.drift_max_correction_ppm) / 1000000.0;
+            const double raw_ratio = 1.0 + stats.drift_ppm / 1000000.0;
+            stats.resampler_ratio = options.drift_correction ?
+                std::clamp(raw_ratio, 1.0 - max_ratio_delta, 1.0 + max_ratio_delta) :
+                1.0;
+            sync_audio_control(runtime, audio_control, options.metronome_level, stats.resampler_ratio);
+            stats.drift_valid = true;
+        }
+        if (last_audio_receive_us != 0) {
+            const std::uint64_t interval =
+                packet.receive_time >= last_audio_receive_us ? packet.receive_time - last_audio_receive_us : 0;
+            const std::uint64_t jitter =
+                interval > interval_us ? interval - interval_us : interval_us - interval;
+            observe_timing(jitter, stats.jitter_min_us, stats.jitter_sum_us, stats.jitter_max_us);
+            ++stats.jitter_samples;
+        }
+        last_audio_receive_us = packet.receive_time;
+    };
+
+    auto drain_reorder_buffer = [&]() {
+        for (;;) {
+            const auto next = pending_audio.find(expected_sequence);
+            if (next != pending_audio.end()) {
+                process_audio_packet(next->second);
+                pending_audio.erase(next);
+                ++expected_sequence;
+                continue;
+            }
+            if (expected_sequence_set && highest_sequence > expected_sequence + kReorderWindowPackets) {
+                ++stats.sequence.lost;
+                ++expected_sequence;
+                continue;
+            }
+            break;
+        }
+    };
 
     while (jam2::monotonic_us() < receive_deadline && !stats.received_bye && !runtime.quit.load(std::memory_order_relaxed)) {
         const std::uint64_t now = jam2::monotonic_us();
@@ -718,72 +800,41 @@ AudioPacketStats run_audio_packet_exchange(
                         ++stats.ignored_packets;
                         continue;
                     }
-                    const auto sequence_result = tracker.observe(header.sequence);
-                    stats.sequence = tracker.stats();
                     ++stats.recv_packets;
                     stats.recv_bytes += bytes.size();
-                    if (sequence_result != jam2::protocol::SequenceResult::InOrder) {
+                    const std::uint64_t receive_time = jam2::monotonic_us();
+                    if (!expected_sequence_set) {
+                        expected_sequence_set = true;
+                        expected_sequence = header.sequence;
+                        highest_sequence = header.sequence;
+                    }
+                    if (header.sequence < expected_sequence) {
+                        ++stats.sequence.late;
                         ++stats.ignored_packets;
                         continue;
                     }
-                    if (playback_ring != nullptr) {
-                        const auto received_payload = std::span<const std::uint8_t>(
-                            bytes.data() + jam2::protocol::kHeaderSize,
-                            header.payload_length);
-                        auto decoded = jam2::protocol::unpack_pcm24(received_payload);
-                        for (auto& sample : decoded) {
-                            sample *= 256;
-                        }
-                        (void)playback_ring->push(decoded);
-                        if (options.playback_max_frames > 0) {
-                            const std::size_t depth = playback_ring->available_read();
-                            if (depth > options.playback_max_frames) {
-                                stats.playback_dropped_frames +=
-                                    playback_ring->drop_oldest(depth - options.playback_max_frames);
-                            }
-                        }
-                        const std::uint64_t depth_after = playback_ring->available_read();
-                        observe_timing(
-                            depth_after,
-                            stats.playback_depth_min_frames,
-                            stats.playback_depth_sum_frames,
-                            stats.playback_depth_max_frames);
-                        ++stats.playback_depth_samples;
+                    if (pending_audio.find(header.sequence) != pending_audio.end()) {
+                        ++stats.sequence.duplicate;
+                        ++stats.ignored_packets;
+                        continue;
                     }
-                    const std::uint64_t receive_time = jam2::monotonic_us();
-                    if (!drift_started) {
-                        drift_started = true;
-                        first_remote_sample_time = header.sample_time;
-                        first_receive_time_us = receive_time;
-                    } else if (receive_time > first_receive_time_us && header.sample_time > first_remote_sample_time) {
-                        const double remote_elapsed_samples = static_cast<double>(header.sample_time - first_remote_sample_time);
-                        const double remote_elapsed_us = remote_elapsed_samples * 1000000.0 / static_cast<double>(options.sample_rate);
-                        const double local_elapsed_us = static_cast<double>(receive_time - first_receive_time_us);
-                        stats.raw_drift_ppm = ((remote_elapsed_us / local_elapsed_us) - 1.0) * 1000000.0;
-                        if (!drift_smoothed || options.drift_smoothing >= 1.0) {
-                            smoothed_drift_ppm = stats.raw_drift_ppm;
-                            drift_smoothed = true;
-                        } else if (options.drift_smoothing > 0.0) {
-                            smoothed_drift_ppm += (stats.raw_drift_ppm - smoothed_drift_ppm) * options.drift_smoothing;
-                        }
-                        stats.drift_ppm = smoothed_drift_ppm;
-                        const double max_ratio_delta = static_cast<double>(options.drift_max_correction_ppm) / 1000000.0;
-                        const double raw_ratio = 1.0 + stats.drift_ppm / 1000000.0;
-                        stats.resampler_ratio = options.drift_correction ?
-                            std::clamp(raw_ratio, 1.0 - max_ratio_delta, 1.0 + max_ratio_delta) :
-                            1.0;
-                        sync_audio_control(runtime, audio_control, options.metronome_level, stats.resampler_ratio);
-                        stats.drift_valid = true;
+                    if (header.sequence > expected_sequence) {
+                        ++stats.sequence.out_of_order;
                     }
-                    if (last_audio_receive_us != 0) {
-                        const std::uint64_t interval =
-                            receive_time >= last_audio_receive_us ? receive_time - last_audio_receive_us : 0;
-                        const std::uint64_t jitter =
-                            interval > interval_us ? interval - interval_us : interval_us - interval;
-                        observe_timing(jitter, stats.jitter_min_us, stats.jitter_sum_us, stats.jitter_max_us);
-                        ++stats.jitter_samples;
+                    if (header.sequence > highest_sequence) {
+                        highest_sequence = header.sequence;
                     }
-                    last_audio_receive_us = receive_time;
+                    const auto received_payload = std::span<const std::uint8_t>(
+                        bytes.data() + jam2::protocol::kHeaderSize,
+                        header.payload_length);
+                    auto decoded = jam2::protocol::unpack_pcm24(received_payload);
+                    for (auto& sample : decoded) {
+                        sample *= 256;
+                    }
+                    pending_audio.emplace(
+                        header.sequence,
+                        PendingAudioPacket{header.sequence, header.sample_time, receive_time, std::move(decoded)});
+                    drain_reorder_buffer();
                 } else if (header.type == jam2::protocol::PacketType::Ping) {
                     const jam2::protocol::Header pong{
                         jam2::protocol::PacketType::Pong,
@@ -856,7 +907,6 @@ AudioPacketStats run_audio_packet_exchange(
         stats.sent_bye = true;
     }
 
-    stats.sequence = tracker.stats();
     stats.elapsed_ms = (jam2::monotonic_us() - start_time) / 1000ULL;
     stats.final_metronome_enabled = runtime.metronome.load(std::memory_order_relaxed);
     stats.final_bpm = runtime.bpm.load(std::memory_order_relaxed);
