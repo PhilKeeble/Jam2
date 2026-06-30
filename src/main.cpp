@@ -539,14 +539,17 @@ void print_periodic_stream_stats(const AudioPacketStats& stats, std::uint64_t el
     const double rtt_avg_ms = stats.recv_pongs > 0 ?
         (static_cast<double>(stats.rtt_sum_us) / static_cast<double>(stats.recv_pongs) / 1000.0) :
         0.0;
-    const std::uint64_t estimated_missing = stats.sent_packets > stats.recv_packets ? stats.sent_packets - stats.recv_packets : 0;
-    const double loss_percent = stats.sent_packets > 0 ?
-        (static_cast<double>(estimated_missing) * 100.0 / static_cast<double>(stats.sent_packets)) :
+    const std::uint64_t loss_denominator = stats.recv_packets + stats.sequence.lost;
+    const double loss_percent = loss_denominator > 0 ?
+        (static_cast<double>(stats.sequence.lost) * 100.0 / static_cast<double>(loss_denominator)) :
         0.0;
     std::cout << "stats elapsed_ms=" << elapsed_ms
               << " sent=" << stats.sent_packets
               << " recv=" << stats.recv_packets
-              << " missing_now_percent=" << loss_percent
+              << " sequence_lost=" << stats.sequence.lost
+              << " sequence_loss_percent=" << loss_percent
+              << " out_of_order=" << stats.sequence.out_of_order
+              << " late=" << stats.sequence.late
               << " delay_avg_ms=" << delay_avg_ms
               << " rtt_avg_ms=" << rtt_avg_ms
               << "\n";
