@@ -1207,14 +1207,6 @@ AudioPacketStats run_audio_packet_exchange(
         if (runtime.print_stats.exchange(false, std::memory_order_relaxed)) {
             const std::uint64_t elapsed_ms = (now - start_time) / 1000ULL;
             print_periodic_stream_stats(stats, options, elapsed_ms);
-            if (csv_log != nullptr) {
-                csv_log->write(
-                    "periodic",
-                    elapsed_ms,
-                    stats,
-                    options,
-                    make_audio_snapshot(audio_stream, capture_ring, playback_ring));
-            }
         }
         if (!stats.sent_bye && now >= send_deadline) {
             const jam2::protocol::Header bye{
@@ -1234,14 +1226,6 @@ AudioPacketStats run_audio_packet_exchange(
         if (next_stats != 0 && now >= next_stats) {
             const std::uint64_t elapsed_ms = (now - start_time) / 1000ULL;
             print_periodic_stream_stats(stats, options, elapsed_ms);
-            if (csv_log != nullptr) {
-                csv_log->write(
-                    "periodic",
-                    elapsed_ms,
-                    stats,
-                    options,
-                    make_audio_snapshot(audio_stream, capture_ring, playback_ring));
-            }
             next_stats += static_cast<std::uint64_t>(options.stats_interval_ms) * 1000ULL;
         }
 
