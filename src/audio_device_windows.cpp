@@ -569,7 +569,7 @@ public:
         std::vector<ASIOBufferInfo> buffers,
         long buffer_size,
         InputChannels input_channels,
-        int output_channels,
+        int output_channel_count,
         MonoRingBuffer& capture_ring,
         MonoRingBuffer& playback_ring,
         std::size_t playback_prefill_frames,
@@ -585,7 +585,7 @@ public:
         context_.input_left = &buffers_[0];
         context_.input_right = input_count > 1 ? &buffers_[1] : nullptr;
         context_.output_left = &buffers_[input_count];
-        context_.output_right = output_channels > 1 ? &buffers_[input_count + 1] : nullptr;
+        context_.output_right = output_channel_count > 1 ? &buffers_[input_count + 1] : nullptr;
         context_.buffer_size = buffer_size;
         context_.input_channels = input_channels;
         context_.capture = &capture_ring;
@@ -1099,6 +1099,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     double requested_sample_rate,
     long buffer_size,
     InputChannels requested_input_channels,
+    ChannelSelection channels,
     MonoRingBuffer& capture_ring,
     MonoRingBuffer& playback_ring,
     std::size_t playback_prefill_frames,
@@ -1153,10 +1154,15 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
         throw std::runtime_error("ASIO duplex stream requires at least one input and one output channel");
     }
     const int selected_input_channels = requested_input_channels == InputChannels::Stereo ? 2 : 1;
-    if (input_channels < selected_input_channels) {
-        throw std::runtime_error("selected ASIO device does not have enough input channels for requested input mode");
+    const int selected_output_channels = channels.output_right >= 0 ? 2 : 1;
+    if (channels.input_left < 0 || channels.input_left >= input_channels ||
+        (selected_input_channels > 1 && (channels.input_right < 0 || channels.input_right >= input_channels))) {
+        throw std::runtime_error("selected ASIO input channel is out of range");
     }
-    const int selected_output_channels = output_channels >= 2 ? 2 : 1;
+    if (channels.output_left < 0 || channels.output_left >= output_channels ||
+        (selected_output_channels > 1 && (channels.output_right < 0 || channels.output_right >= output_channels))) {
+        throw std::runtime_error("selected ASIO output channel is out of range");
+    }
 
     long min_buffer = 0;
     long max_buffer = 0;
@@ -1184,18 +1190,18 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
         (void)driver.get()->getSampleRate(&current_rate);
     }
 
-    for (int channel = 0; channel < selected_input_channels; ++channel) {
+    for (int index = 0; index < selected_input_channels; ++index) {
         ASIOChannelInfo input_info{};
-        input_info.channel = channel;
+        input_info.channel = index == 0 ? channels.input_left : channels.input_right;
         input_info.isInput = ASIOTrue;
         require_asio_ok(driver.get()->getChannelInfo(&input_info), "ASIO getChannelInfo input");
         if (input_info.type != ASIOSTInt32LSB) {
             throw std::runtime_error("ASIO duplex stream currently supports Int32LSB input only");
         }
     }
-    for (int channel = 0; channel < selected_output_channels; ++channel) {
+    for (int index = 0; index < selected_output_channels; ++index) {
         ASIOChannelInfo output_info{};
-        output_info.channel = channel;
+        output_info.channel = index == 0 ? channels.output_left : channels.output_right;
         output_info.isInput = ASIOFalse;
         require_asio_ok(driver.get()->getChannelInfo(&output_info), "ASIO getChannelInfo output");
         if (output_info.type != ASIOSTInt32LSB) {
@@ -1204,14 +1210,14 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     }
 
     std::vector<ASIOBufferInfo> buffers(static_cast<std::size_t>(selected_input_channels + selected_output_channels));
-    for (int channel = 0; channel < selected_input_channels; ++channel) {
-        buffers[static_cast<std::size_t>(channel)].isInput = ASIOTrue;
-        buffers[static_cast<std::size_t>(channel)].channelNum = channel;
+    for (int index = 0; index < selected_input_channels; ++index) {
+        buffers[static_cast<std::size_t>(index)].isInput = ASIOTrue;
+        buffers[static_cast<std::size_t>(index)].channelNum = index == 0 ? channels.input_left : channels.input_right;
     }
-    for (int channel = 0; channel < selected_output_channels; ++channel) {
-        const std::size_t index = static_cast<std::size_t>(selected_input_channels + channel);
-        buffers[index].isInput = ASIOFalse;
-        buffers[index].channelNum = channel;
+    for (int index = 0; index < selected_output_channels; ++index) {
+        const std::size_t buffer_index = static_cast<std::size_t>(selected_input_channels + index);
+        buffers[buffer_index].isInput = ASIOFalse;
+        buffers[buffer_index].channelNum = index == 0 ? channels.output_left : channels.output_right;
     }
 
     auto stream = std::make_unique<WindowsDeviceStream>(

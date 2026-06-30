@@ -628,6 +628,7 @@ float i32_to_float(std::int32_t sample)
 
 struct CoreAudioDuplexContext {
     InputChannels input_channels = InputChannels::Mono;
+    ChannelSelection channels;
     MonoRingBuffer* capture = nullptr;
     MonoRingBuffer* playback = nullptr;
     StreamControl* control = nullptr;
@@ -760,9 +761,9 @@ OSStatus duplex_io_proc(
     const std::size_t input_frames = std::min(buffer_frames(input), context->capture_scratch.size());
     if (input_frames > 0) {
         for (std::size_t frame = 0; frame < input_frames; ++frame) {
-            const float left = read_float_channel(input, frame, 0);
+            const float left = read_float_channel(input, frame, static_cast<UInt32>(context->channels.input_left));
             if (context->input_channels == InputChannels::Stereo) {
-                const float right = read_float_channel(input, frame, 1);
+                const float right = read_float_channel(input, frame, static_cast<UInt32>(context->channels.input_right));
                 context->capture_scratch[frame] = float_to_i32((left + right) * 0.5F);
             } else {
                 context->capture_scratch[frame] = float_to_i32(left);
@@ -787,8 +788,10 @@ OSStatus duplex_io_proc(
         mix_metronome_click(*context, playback);
         for (std::size_t frame = 0; frame < output_frames; ++frame) {
             const float sample = i32_to_float(context->playback_scratch[frame]);
-            write_float_channel(output, frame, 0, sample);
-            write_float_channel(output, frame, 1, sample);
+            write_float_channel(output, frame, static_cast<UInt32>(context->channels.output_left), sample);
+            if (context->channels.output_right >= 0) {
+                write_float_channel(output, frame, static_cast<UInt32>(context->channels.output_right), sample);
+            }
         }
     }
 
@@ -802,6 +805,7 @@ public:
         AudioObjectID device,
         long buffer_size,
         InputChannels input_channels,
+        ChannelSelection channels,
         MonoRingBuffer& capture_ring,
         MonoRingBuffer& playback_ring,
         std::size_t playback_prefill_frames,
@@ -810,6 +814,7 @@ public:
         : device_(device)
     {
         context_.input_channels = input_channels;
+        context_.channels = channels;
         context_.capture = &capture_ring;
         context_.playback = &playback_ring;
         context_.control = &control;
@@ -985,6 +990,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     double requested_sample_rate,
     long requested_buffer_size,
     InputChannels requested_input_channels,
+    ChannelSelection channels,
     MonoRingBuffer& capture_ring,
     MonoRingBuffer& playback_ring,
     std::size_t playback_prefill_frames,
@@ -994,11 +1000,14 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     const UInt32 input_channels = device_channels(selected.object, kAudioDevicePropertyScopeInput);
     const UInt32 output_channels = device_channels(selected.object, kAudioDevicePropertyScopeOutput);
     const UInt32 requested_channels = requested_input_channels == InputChannels::Stereo ? 2U : 1U;
-    if (input_channels < requested_channels) {
-        throw std::runtime_error("selected CoreAudio device does not have enough input channels for requested input mode");
+    if (channels.input_left < 0 || static_cast<UInt32>(channels.input_left) >= input_channels ||
+        (requested_channels > 1 && (channels.input_right < 0 || static_cast<UInt32>(channels.input_right) >= input_channels))) {
+        throw std::runtime_error("selected CoreAudio input channel is out of range");
     }
-    if (output_channels <= 0) {
-        throw std::runtime_error("selected CoreAudio device has no output channels");
+    const UInt32 requested_output_channels = channels.output_right >= 0 ? 2U : 1U;
+    if (channels.output_left < 0 || static_cast<UInt32>(channels.output_left) >= output_channels ||
+        (requested_output_channels > 1 && (channels.output_right < 0 || static_cast<UInt32>(channels.output_right) >= output_channels))) {
+        throw std::runtime_error("selected CoreAudio output channel is out of range");
     }
     if (!is_supported_float32_format(selected.object, kAudioDevicePropertyScopeInput) ||
         !is_supported_float32_format(selected.object, kAudioDevicePropertyScopeOutput)) {
@@ -1020,6 +1029,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
         selected.object,
         buffer_size,
         requested_input_channels,
+        channels,
         capture_ring,
         playback_ring,
         playback_prefill_frames,

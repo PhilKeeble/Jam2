@@ -424,6 +424,45 @@ Conservative first approach:
 - Reject mismatched channel count initially with a clear error.
 - Add automatic mono/stereo conversion only later if real testing shows it is worth the complexity.
 
+### Future: Tuning Profiles
+
+Add named profiles only after enough real two-machine test data exists to choose useful numeric values.
+
+Possible CLI shape:
+
+```text
+--profile stable
+--profile low-latency
+--profile aggressive
+```
+
+Rules:
+
+- Profiles should expand to explicit numeric values for frame size, audio buffer size, playback prefill, ring size, and drift correction limits.
+- The app must print the actual numeric values after applying a profile.
+- Explicit user-provided numeric flags should override profile defaults.
+- Do not hide tuning behavior behind subjective labels without exposing the hard data.
+
+### Future: Full Jitter Buffer
+
+The current receive path has a small reorder buffer that can recover packets arriving slightly out of order. A full jitter buffer is different: it would intentionally maintain a target playout depth and schedule packets by sequence/sample time.
+
+Keep this as optional future work. It may help 64-frame packet mode, but it adds latency and may erase much of the benefit of the smaller frame size on typical Wi-Fi/network conditions.
+
+Possible CLI shape:
+
+```text
+--jitter-buffer-frames 0
+--jitter-buffer-frames 256
+--jitter-buffer-max-frames 1024
+```
+
+Rules:
+
+- Default should remain explicit and conservative.
+- Stats must show target depth, actual depth, reordered recovered, reordered lost, dropped frames, underruns, and added latency.
+- Do not add hidden adaptive behavior until fixed numeric behavior is well understood.
+
 ### Future: Aggregate Device Helpers
 
 Aggregation may help users who do not have one full-duplex hardware device, but it should remain outside the MVP path for now.

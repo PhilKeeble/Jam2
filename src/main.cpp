@@ -3,14 +3,20 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <span>
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "audio_device.hpp"
 #include "common.hpp"
@@ -26,9 +32,10 @@ Usage:
   jam2 --help
   jam2 --list-devices
   jam2 probe-device <id> [--sample-rate n]
+  jam2 test-device <id> [--sample-rate n]
   jam2 meter-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n]
   jam2 ring-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n] [--ring-frames n]
-  jam2 listen [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats-interval-ms n] [--metronome on|off] [--bpm n] [--metronome-level n] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels mono|stereo] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-max-correction-ppm n]
+  jam2 listen [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats-interval-ms n] [--log-stats folder] [--metronome on|off] [--bpm n] [--metronome-level n] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels mono|stereo|n|n,m] [--output-channels n|n,m] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-max-correction-ppm n]
   jam2 connect <jam2-url> [options]
 
 Stage status:
@@ -47,6 +54,7 @@ struct Options {
     int stream_ms = 0;
     int stream_linger_ms = 100;
     int stats_interval_ms = 0;
+    std::optional<std::filesystem::path> log_stats_dir;
     std::optional<int> socket_send_buffer;
     std::optional<int> socket_recv_buffer;
     int sample_rate = 48000;
@@ -60,6 +68,7 @@ struct Options {
     std::optional<int> audio_device_id;
     long audio_buffer_size = 0;
     jam2::audio::InputChannels input_channels = jam2::audio::InputChannels::Mono;
+    jam2::audio::ChannelSelection channel_selection;
     std::size_t capture_ring_frames = 4096;
     std::size_t playback_ring_frames = 4096;
     std::size_t playback_prefill_frames = 0;
@@ -73,6 +82,50 @@ std::string_view require_value(int argc, char** argv, int& i, std::string_view n
     }
     ++i;
     return argv[i];
+}
+
+std::vector<int> parse_channel_list(std::string_view value, std::size_t min_count, std::size_t max_count, std::string_view option)
+{
+    std::vector<int> channels;
+    std::size_t pos = 0;
+    while (pos <= value.size()) {
+        const std::size_t comma = value.find(',', pos);
+        const std::string_view part = value.substr(pos, comma == std::string_view::npos ? value.size() - pos : comma - pos);
+        if (part.empty()) {
+            throw std::runtime_error(std::string(option) + " contains an empty channel");
+        }
+        std::size_t consumed = 0;
+        const int channel = std::stoi(std::string(part), &consumed);
+        if (consumed != part.size() || channel <= 0) {
+            throw std::runtime_error(std::string(option) + " channels must be positive 1-based numbers");
+        }
+        channels.push_back(channel - 1);
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        pos = comma + 1;
+    }
+    if (channels.size() < min_count || channels.size() > max_count) {
+        std::ostringstream message;
+        message << option << " expects " << min_count;
+        if (min_count != max_count) {
+            message << ".." << max_count;
+        }
+        message << " channel value(s)";
+        throw std::runtime_error(message.str());
+    }
+    return channels;
+}
+
+std::string channel_selection_text(const jam2::audio::ChannelSelection& channels)
+{
+    auto one_based = [](int channel) {
+        return channel >= 0 ? std::to_string(channel + 1) : std::string("off");
+    };
+    return "input=" + one_based(channels.input_left) +
+        (channels.input_right >= 0 ? "," + one_based(channels.input_right) : "") +
+        " output=" + one_based(channels.output_left) +
+        (channels.output_right >= 0 ? "," + one_based(channels.output_right) : "");
 }
 
 Options parse_options(int argc, char** argv, int start)
@@ -119,6 +172,8 @@ Options parse_options(int argc, char** argv, int start)
             if (options.stats_interval_ms < 0) {
                 throw std::runtime_error("--stats-interval-ms must be non-negative");
             }
+        } else if (arg == "--log-stats") {
+            options.log_stats_dir = std::filesystem::path(std::string(require_value(argc, argv, i, arg)));
         } else if (arg == "--sample-rate") {
             options.sample_rate = std::stoi(std::string(require_value(argc, argv, i, arg)));
             if (options.sample_rate <= 0) {
@@ -189,13 +244,25 @@ Options parse_options(int argc, char** argv, int start)
             }
         } else if (arg == "--input-channels") {
             const std::string value{require_value(argc, argv, i, arg)};
-            if (value == "mono" || value == "1") {
+            if (value == "mono") {
                 options.input_channels = jam2::audio::InputChannels::Mono;
-            } else if (value == "stereo" || value == "2") {
+                options.channel_selection.input_left = 0;
+                options.channel_selection.input_right = -1;
+            } else if (value == "stereo") {
                 options.input_channels = jam2::audio::InputChannels::Stereo;
+                options.channel_selection.input_left = 0;
+                options.channel_selection.input_right = 1;
             } else {
-                throw std::runtime_error("--input-channels must be mono or stereo");
+                const auto channels = parse_channel_list(value, 1, 2, arg);
+                options.input_channels = channels.size() == 2 ? jam2::audio::InputChannels::Stereo : jam2::audio::InputChannels::Mono;
+                options.channel_selection.input_left = channels[0];
+                options.channel_selection.input_right = channels.size() == 2 ? channels[1] : -1;
             }
+        } else if (arg == "--output-channels") {
+            const std::string value{require_value(argc, argv, i, arg)};
+            const auto channels = parse_channel_list(value, 1, 2, arg);
+            options.channel_selection.output_left = channels[0];
+            options.channel_selection.output_right = channels.size() == 2 ? channels[1] : -1;
         } else if (arg == "--capture-ring-frames") {
             const auto parsed = std::stoull(std::string(require_value(argc, argv, i, arg)));
             if (parsed == 0) {
@@ -352,6 +419,7 @@ struct AudioPacketStats {
     std::uint64_t sent_pongs = 0;
     bool received_bye = false;
     bool sent_bye = false;
+    std::uint64_t startup_drained_packets = 0;
     std::uint64_t playback_dropped_frames = 0;
     std::uint64_t playback_depth_min_frames = 0;
     std::uint64_t playback_depth_sum_frames = 0;
@@ -362,6 +430,8 @@ struct AudioPacketStats {
     std::uint64_t audio_delay_sum_us = 0;
     std::uint64_t audio_delay_max_us = 0;
     std::uint64_t audio_delay_samples = 0;
+    std::uint64_t reordered_recovered = 0;
+    std::uint64_t reordered_lost = 0;
     std::uint64_t jitter_min_us = 0;
     std::uint64_t jitter_sum_us = 0;
     std::uint64_t jitter_max_us = 0;
@@ -532,27 +602,145 @@ void observe_timing(
     sum_value += value;
 }
 
-void print_periodic_stream_stats(const AudioPacketStats& stats, std::uint64_t elapsed_ms)
+double frames_to_ms(std::size_t frames, int sample_rate)
 {
-    const double delay_avg_ms = stats.audio_delay_samples > 0 ?
-        (static_cast<double>(stats.audio_delay_sum_us) / static_cast<double>(stats.audio_delay_samples) / 1000.0) :
+    return sample_rate > 0 ? (static_cast<double>(frames) * 1000.0 / static_cast<double>(sample_rate)) : 0.0;
+}
+
+double playback_depth_avg_frames(const AudioPacketStats& stats)
+{
+    return stats.playback_depth_samples > 0 ?
+        static_cast<double>(stats.playback_depth_sum_frames) / static_cast<double>(stats.playback_depth_samples) :
         0.0;
-    const double rtt_avg_ms = stats.recv_pongs > 0 ?
-        (static_cast<double>(stats.rtt_sum_us) / static_cast<double>(stats.recv_pongs) / 1000.0) :
+}
+
+double playback_depth_avg_ms(const AudioPacketStats& stats, const Options& options)
+{
+    return options.sample_rate > 0 ?
+        playback_depth_avg_frames(stats) * 1000.0 / static_cast<double>(options.sample_rate) :
         0.0;
-    const std::uint64_t loss_denominator = stats.recv_packets + stats.sequence.lost;
-    const double loss_percent = loss_denominator > 0 ?
-        (static_cast<double>(stats.sequence.lost) * 100.0 / static_cast<double>(loss_denominator)) :
+}
+
+double rtt_avg_ms(const AudioPacketStats& stats)
+{
+    return stats.recv_pongs > 0 ?
+        static_cast<double>(stats.rtt_sum_us) / static_cast<double>(stats.recv_pongs) / 1000.0 :
         0.0;
+}
+
+double sequence_loss_percent(const AudioPacketStats& stats)
+{
+    const std::uint64_t denominator = stats.recv_packets + stats.sequence.lost;
+    return denominator > 0 ? static_cast<double>(stats.sequence.lost) * 100.0 / static_cast<double>(denominator) : 0.0;
+}
+
+double estimated_one_way_ms(const AudioPacketStats& stats, const Options& options)
+{
+    const double network_ms = stats.recv_pongs > 0 ? rtt_avg_ms(stats) * 0.5 : 0.0;
+    const double audio_buffer_ms = options.audio_buffer_size > 0 ?
+        frames_to_ms(static_cast<std::size_t>(options.audio_buffer_size), options.sample_rate) :
+        frames_to_ms(static_cast<std::size_t>(options.frame_size), options.sample_rate);
+    return network_ms + playback_depth_avg_ms(stats, options) + audio_buffer_ms;
+}
+
+std::tm local_time_from(std::time_t value)
+{
+    std::tm out{};
+#if defined(_WIN32)
+    localtime_s(&out, &value);
+#else
+    localtime_r(&value, &out);
+#endif
+    return out;
+}
+
+std::filesystem::path make_stats_csv_path(const std::filesystem::path& folder)
+{
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+    const std::tm local = local_time_from(now_time);
+    std::ostringstream name;
+    name << "jam2_stats_"
+         << std::put_time(&local, "%Y%m%d_%H%M%S")
+         << ".csv";
+    return folder / name.str();
+}
+
+class CsvStatsLog {
+public:
+    CsvStatsLog() = default;
+
+    explicit CsvStatsLog(const std::filesystem::path& folder)
+    {
+        std::filesystem::create_directories(folder);
+        path_ = make_stats_csv_path(folder);
+        out_.open(path_);
+        if (!out_) {
+            throw std::runtime_error("failed to open stats CSV: " + path_.string());
+        }
+        out_ << "elapsed_ms,sent_packets,recv_packets,sequence_lost,sequence_loss_percent,"
+                "sequence_duplicate,sequence_out_of_order,sequence_late,reordered_recovered,reordered_lost,startup_drained_packets,"
+                "ignored_packets,playback_dropped_frames,playback_depth_min_frames,playback_depth_avg_frames,"
+                "playback_depth_max_frames,playback_depth_avg_ms,jitter_avg_ms,rtt_avg_ms,"
+                "estimated_one_way_ms,raw_drift_ppm,drift_ppm,resampler_ratio\n";
+    }
+
+    explicit operator bool() const { return out_.is_open(); }
+    const std::filesystem::path& path() const { return path_; }
+
+    void write(std::uint64_t elapsed_ms, const AudioPacketStats& stats, const Options& options)
+    {
+        if (!out_) {
+            return;
+        }
+        const double jitter_avg_ms = stats.jitter_samples > 0 ?
+            static_cast<double>(stats.jitter_sum_us) / static_cast<double>(stats.jitter_samples) / 1000.0 :
+            0.0;
+        out_ << elapsed_ms << ','
+             << stats.sent_packets << ','
+             << stats.recv_packets << ','
+             << stats.sequence.lost << ','
+             << sequence_loss_percent(stats) << ','
+             << stats.sequence.duplicate << ','
+             << stats.sequence.out_of_order << ','
+             << stats.sequence.late << ','
+             << stats.reordered_recovered << ','
+             << stats.reordered_lost << ','
+             << stats.startup_drained_packets << ','
+             << stats.ignored_packets << ','
+             << stats.playback_dropped_frames << ','
+             << stats.playback_depth_min_frames << ','
+             << playback_depth_avg_frames(stats) << ','
+             << stats.playback_depth_max_frames << ','
+             << playback_depth_avg_ms(stats, options) << ','
+             << jitter_avg_ms << ','
+             << rtt_avg_ms(stats) << ','
+             << estimated_one_way_ms(stats, options) << ','
+             << stats.raw_drift_ppm << ','
+             << stats.drift_ppm << ','
+             << stats.resampler_ratio << '\n';
+        out_.flush();
+    }
+
+private:
+    std::filesystem::path path_;
+    std::ofstream out_;
+};
+
+void print_periodic_stream_stats(const AudioPacketStats& stats, const Options& options, std::uint64_t elapsed_ms)
+{
     std::cout << "stats elapsed_ms=" << elapsed_ms
               << " sent=" << stats.sent_packets
               << " recv=" << stats.recv_packets
               << " sequence_lost=" << stats.sequence.lost
-              << " sequence_loss_percent=" << loss_percent
+              << " sequence_loss_percent=" << sequence_loss_percent(stats)
               << " out_of_order=" << stats.sequence.out_of_order
+              << " reordered_recovered=" << stats.reordered_recovered
+              << " reordered_lost=" << stats.reordered_lost
               << " late=" << stats.sequence.late
-              << " delay_avg_ms=" << delay_avg_ms
-              << " rtt_avg_ms=" << rtt_avg_ms
+              << " playback_depth_avg_ms=" << playback_depth_avg_ms(stats, options)
+              << " estimated_one_way_ms=" << estimated_one_way_ms(stats, options)
+              << " rtt_avg_ms=" << rtt_avg_ms(stats)
               << "\n";
 }
 
@@ -564,9 +752,12 @@ AudioPacketStats run_audio_packet_exchange(
     RuntimeState& runtime,
     jam2::audio::StreamControl* audio_control,
     jam2::audio::MonoRingBuffer* capture_ring,
-    jam2::audio::MonoRingBuffer* playback_ring)
+    jam2::audio::MonoRingBuffer* playback_ring,
+    std::uint64_t startup_drained_packets,
+    CsvStatsLog* csv_log)
 {
     AudioPacketStats stats;
+    stats.startup_drained_packets = startup_drained_packets;
     const bool bounded_stream = options.stream_ms > 0;
 
     std::vector<std::int32_t> asio_frames(static_cast<std::size_t>(options.frame_size), 0);
@@ -604,6 +795,7 @@ AudioPacketStats run_audio_packet_exchange(
         std::uint32_t sequence = 0;
         std::uint64_t sample_time = 0;
         std::uint64_t receive_time = 0;
+        bool reordered = false;
         std::vector<std::int32_t> samples;
     };
     std::map<std::uint32_t, PendingAudioPacket> pending_audio;
@@ -668,6 +860,9 @@ AudioPacketStats run_audio_packet_exchange(
         for (;;) {
             const auto next = pending_audio.find(expected_sequence);
             if (next != pending_audio.end()) {
+                if (next->second.reordered) {
+                    ++stats.reordered_recovered;
+                }
                 process_audio_packet(next->second);
                 pending_audio.erase(next);
                 ++expected_sequence;
@@ -675,6 +870,7 @@ AudioPacketStats run_audio_packet_exchange(
             }
             if (expected_sequence_set && highest_sequence > expected_sequence + kReorderWindowPackets) {
                 ++stats.sequence.lost;
+                ++stats.reordered_lost;
                 ++expected_sequence;
                 continue;
             }
@@ -759,7 +955,11 @@ AudioPacketStats run_audio_packet_exchange(
             }
         }
         if (runtime.print_stats.exchange(false, std::memory_order_relaxed)) {
-            print_periodic_stream_stats(stats, (now - start_time) / 1000ULL);
+            const std::uint64_t elapsed_ms = (now - start_time) / 1000ULL;
+            print_periodic_stream_stats(stats, options, elapsed_ms);
+            if (csv_log != nullptr) {
+                csv_log->write(elapsed_ms, stats, options);
+            }
         }
         if (!stats.sent_bye && now >= send_deadline) {
             const jam2::protocol::Header bye{
@@ -777,7 +977,11 @@ AudioPacketStats run_audio_packet_exchange(
             stats.sent_bye = true;
         }
         if (next_stats != 0 && now >= next_stats) {
-            print_periodic_stream_stats(stats, (now - start_time) / 1000ULL);
+            const std::uint64_t elapsed_ms = (now - start_time) / 1000ULL;
+            print_periodic_stream_stats(stats, options, elapsed_ms);
+            if (csv_log != nullptr) {
+                csv_log->write(elapsed_ms, stats, options);
+            }
             next_stats += static_cast<std::uint64_t>(options.stats_interval_ms) * 1000ULL;
         }
 
@@ -818,7 +1022,8 @@ AudioPacketStats run_audio_packet_exchange(
                         ++stats.ignored_packets;
                         continue;
                     }
-                    if (header.sequence > expected_sequence) {
+                    const bool reordered = header.sequence > expected_sequence;
+                    if (reordered) {
                         ++stats.sequence.out_of_order;
                     }
                     if (header.sequence > highest_sequence) {
@@ -833,7 +1038,7 @@ AudioPacketStats run_audio_packet_exchange(
                     }
                     pending_audio.emplace(
                         header.sequence,
-                        PendingAudioPacket{header.sequence, header.sample_time, receive_time, std::move(decoded)});
+                        PendingAudioPacket{header.sequence, header.sample_time, receive_time, reordered, std::move(decoded)});
                     drain_reorder_buffer();
                 } else if (header.type == jam2::protocol::PacketType::Ping) {
                     const jam2::protocol::Header pong{
@@ -910,12 +1115,10 @@ AudioPacketStats run_audio_packet_exchange(
     stats.elapsed_ms = (jam2::monotonic_us() - start_time) / 1000ULL;
     stats.final_metronome_enabled = runtime.metronome.load(std::memory_order_relaxed);
     stats.final_bpm = runtime.bpm.load(std::memory_order_relaxed);
+    if (csv_log != nullptr) {
+        csv_log->write(stats.elapsed_ms, stats, options);
+    }
     return stats;
-}
-
-double frames_to_ms(std::size_t frames, int sample_rate)
-{
-    return sample_rate > 0 ? (static_cast<double>(frames) * 1000.0 / static_cast<double>(sample_rate)) : 0.0;
 }
 
 void print_audio_packet_stats(const AudioPacketStats& stats, const Options& options)
@@ -934,14 +1137,14 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
              (static_cast<std::uint64_t>(options.frame_size) * 1000ULL) - 1ULL) /
                 (static_cast<std::uint64_t>(options.frame_size) * 1000ULL) :
             0;
-    const std::uint64_t loss_denominator = stats.recv_packets + stats.sequence.lost;
-    const double loss_percent = loss_denominator > 0 ?
-        (static_cast<double>(stats.sequence.lost) * 100.0 / static_cast<double>(loss_denominator)) :
-        0.0;
     std::cout << "Stream duration ms: " << stream_ms << "\n";
     std::cout << "Sample rate: " << options.sample_rate << "\n";
     std::cout << "Frame size samples: " << options.frame_size << "\n";
     std::cout << "Frame interval ms: " << frame_interval_ms << "\n";
+    std::cout << "Audio buffer size frames: " << options.audio_buffer_size << "\n";
+    std::cout << "Audio buffer size ms: "
+              << frames_to_ms(static_cast<std::size_t>(options.audio_buffer_size > 0 ? options.audio_buffer_size : 0), options.sample_rate)
+              << "\n";
     std::cout << "Drift correction: " << (options.drift_correction ? "on" : "off") << "\n";
     std::cout << "Drift smoothing alpha: " << options.drift_smoothing << "\n";
     std::cout << "Drift max correction ppm: " << options.drift_max_correction_ppm << "\n";
@@ -954,6 +1157,7 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     }
     std::cout << "Audio packets sent: " << stats.sent_packets << "\n";
     std::cout << "Audio packets received: " << stats.recv_packets << "\n";
+    std::cout << "Startup UDP packets drained: " << stats.startup_drained_packets << "\n";
     std::cout << "Audio send packet rate pps: " << sent_rate << "\n";
     std::cout << "Audio receive packet rate pps: " << recv_rate << "\n";
     std::cout << "Send bitrate bps: " << send_bitrate << "\n";
@@ -1004,10 +1208,16 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
         std::cout << "RTT ms max: " << (static_cast<double>(stats.rtt_max_us) / 1000.0) << "\n";
     }
     std::cout << "Sequence lost: " << stats.sequence.lost << "\n";
-    std::cout << "Sequence loss percent: " << loss_percent << "\n";
+    std::cout << "Sequence loss percent: " << sequence_loss_percent(stats) << "\n";
     std::cout << "Sequence duplicate: " << stats.sequence.duplicate << "\n";
     std::cout << "Sequence out_of_order: " << stats.sequence.out_of_order << "\n";
     std::cout << "Sequence late: " << stats.sequence.late << "\n";
+    std::cout << "Reordered packets recovered: " << stats.reordered_recovered << "\n";
+    std::cout << "Reordered packets lost: " << stats.reordered_lost << "\n";
+    if (stats.recv_pongs > 0 && stats.playback_depth_samples > 0) {
+        std::cout << "Estimated one-way latency ms: " << estimated_one_way_ms(stats, options) << "\n";
+        std::cout << "Estimated one-way latency note: RTT/2 + playback depth avg + audio buffer\n";
+    }
     if (stats.drift_valid) {
         std::cout << "Raw drift ppm estimate: " << stats.raw_drift_ppm << "\n";
         std::cout << "Smoothed drift ppm estimate: " << stats.drift_ppm << "\n";
@@ -1040,6 +1250,7 @@ OptionalAudioStream start_optional_audio(const Options& options)
         static_cast<double>(options.sample_rate),
         options.audio_buffer_size,
         options.input_channels,
+        options.channel_selection,
         *audio.capture_ring,
         *audio.playback_ring,
         options.playback_prefill_frames,
@@ -1090,9 +1301,19 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
     const std::size_t capture_readable = audio.capture_ring->available_read();
     const std::size_t playback_readable = audio.playback_ring->available_read();
     std::cout << "Audio callbacks: " << audio.stream->callbacks() << "\n";
+    if (options.audio_device_id) {
+        std::cout << "Audio device id: " << *options.audio_device_id << "\n";
+    }
+    std::cout << "Requested audio buffer size frames: " << options.audio_buffer_size << "\n";
+    std::cout << "Requested audio buffer size ms: "
+              << frames_to_ms(static_cast<std::size_t>(options.audio_buffer_size > 0 ? options.audio_buffer_size : 0), options.sample_rate)
+              << "\n";
     std::cout << "Input channels: "
               << (options.input_channels == jam2::audio::InputChannels::Stereo ? "stereo" : "mono") << "\n";
-    std::cout << "Output channels: duplicated mono to channels 1/2 when available\n";
+    std::cout << "Selected audio channels: " << channel_selection_text(options.channel_selection) << "\n";
+    std::cout << "Output channels: duplicated mono to selected output channels\n";
+    std::cout << "Capture ring capacity frames: " << audio.capture_ring->capacity() << "\n";
+    std::cout << "Playback ring capacity frames: " << audio.playback_ring->capacity() << "\n";
     std::cout << "Playback prefilled: " << (audio.stream->playback_prefilled() ? "yes" : "no") << "\n";
     std::cout << "Playback prefill frames: " << options.playback_prefill_frames << "\n";
     std::cout << "Playback prefill ms: " << frames_to_ms(options.playback_prefill_frames, options.sample_rate) << "\n";
@@ -1113,10 +1334,10 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
     }
 }
 
-int run_probe_device(int argc, char** argv)
+int run_probe_device_impl(int argc, char** argv, bool detailed)
 {
     if (argc < 3) {
-        throw std::runtime_error("probe-device requires a device id");
+        throw std::runtime_error(detailed ? "test-device requires a device id" : "probe-device requires a device id");
     }
     const int id = std::stoi(argv[2]);
     double sample_rate = 48000.0;
@@ -1148,7 +1369,49 @@ int run_probe_device(int argc, char** argv)
     std::cout << "Current sample rate: " << probe.current_sample_rate << "\n";
     std::cout << "Requested sample rate " << sample_rate << ": "
               << (probe.requested_sample_rate_supported ? "supported" : "not supported") << "\n";
+    if (detailed) {
+        std::cout << "Input channel ids: ";
+        if (probe.input_channels <= 0) {
+            std::cout << "none";
+        } else {
+            for (long channel = 1; channel <= probe.input_channels; ++channel) {
+                std::cout << (channel == 1 ? "" : ",") << channel;
+            }
+        }
+        std::cout << "\n";
+        std::cout << "Output channel ids: ";
+        if (probe.output_channels <= 0) {
+            std::cout << "none";
+        } else {
+            for (long channel = 1; channel <= probe.output_channels; ++channel) {
+                std::cout << (channel == 1 ? "" : ",") << channel;
+            }
+        }
+        std::cout << "\n";
+        if (probe.input_channels > 0) {
+            std::cout << "Example mono input: --input-channels 1\n";
+        }
+        if (probe.input_channels > 1) {
+            std::cout << "Example stereo input mixed to mono stream: --input-channels 1,2\n";
+        }
+        if (probe.output_channels > 0) {
+            std::cout << "Example mono output: --output-channels 1\n";
+        }
+        if (probe.output_channels > 1) {
+            std::cout << "Example duplicated output: --output-channels 1,2\n";
+        }
+    }
     return 0;
+}
+
+int run_probe_device(int argc, char** argv)
+{
+    return run_probe_device_impl(argc, argv, false);
+}
+
+int run_test_device(int argc, char** argv)
+{
+    return run_probe_device_impl(argc, argv, true);
 }
 
 int run_meter_device(int argc, char** argv)
@@ -1327,8 +1590,13 @@ int run_listen(int argc, char** argv)
         if (drained_startup_packets > 0) {
             std::cout << "Drained startup UDP packets: " << drained_startup_packets << "\n";
         }
+        std::optional<CsvStatsLog> csv_log;
+        if (options.log_stats_dir) {
+            csv_log.emplace(*options.log_stats_dir);
+            std::cout << "Stats CSV: " << csv_log->path().string() << "\n";
+        }
         CommandThread commands(options);
-        const auto audio_stats = run_audio_packet_exchange(
+        auto audio_stats = run_audio_packet_exchange(
             socket,
             session,
             from,
@@ -1336,7 +1604,10 @@ int run_listen(int argc, char** argv)
             commands.state,
             audio.control.get(),
             audio.capture_ring.get(),
-            audio.playback_ring.get());
+            audio.playback_ring.get(),
+            static_cast<std::uint64_t>(drained_startup_packets),
+            csv_log ? &*csv_log : nullptr);
+            audio_stats.startup_drained_packets = static_cast<std::uint64_t>(drained_startup_packets);
             print_audio_packet_stats(audio_stats, options);
             print_optional_audio_stats(audio, options);
             std::cout.flush();
@@ -1394,8 +1665,13 @@ int run_connect(int argc, char** argv)
                 if (drained_startup_packets > 0) {
                     std::cout << "Drained startup UDP packets: " << drained_startup_packets << "\n";
                 }
+                std::optional<CsvStatsLog> csv_log;
+                if (options.log_stats_dir) {
+                    csv_log.emplace(*options.log_stats_dir);
+                    std::cout << "Stats CSV: " << csv_log->path().string() << "\n";
+                }
                 CommandThread commands(options);
-                const auto audio_stats = run_audio_packet_exchange(
+                auto audio_stats = run_audio_packet_exchange(
                     socket,
                     session,
                     session.endpoint,
@@ -1403,7 +1679,10 @@ int run_connect(int argc, char** argv)
                     commands.state,
                     audio.control.get(),
                     audio.capture_ring.get(),
-                    audio.playback_ring.get());
+                    audio.playback_ring.get(),
+                    static_cast<std::uint64_t>(drained_startup_packets),
+                    csv_log ? &*csv_log : nullptr);
+                audio_stats.startup_drained_packets = static_cast<std::uint64_t>(drained_startup_packets);
                 print_audio_packet_stats(audio_stats, options);
                 print_optional_audio_stats(audio, options);
                 std::cout.flush();
@@ -1453,6 +1732,10 @@ int run(int argc, char** argv)
 
     if (command == "probe-device") {
         return run_probe_device(argc, argv);
+    }
+
+    if (command == "test-device") {
+        return run_test_device(argc, argv);
     }
 
     if (command == "meter-device") {

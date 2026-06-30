@@ -73,6 +73,13 @@ enum class InputChannels {
     Stereo = 2,
 };
 
+struct ChannelSelection {
+    int input_left = 0;
+    int input_right = -1;
+    int output_left = 0;
+    int output_right = 1;
+};
+
 class DeviceStream {
 public:
     virtual ~DeviceStream() = default;
@@ -100,6 +107,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     double requested_sample_rate,
     long buffer_size,
     InputChannels input_channels,
+    ChannelSelection channels,
     MonoRingBuffer& capture_ring,
     MonoRingBuffer& playback_ring,
     std::size_t playback_prefill_frames,
