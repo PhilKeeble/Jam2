@@ -759,7 +759,7 @@ AudioPacketStats run_audio_packet_exchange(
                         }
                         stats.drift_ppm = smoothed_drift_ppm;
                         const double max_ratio_delta = static_cast<double>(options.drift_max_correction_ppm) / 1000000.0;
-                        const double raw_ratio = 1.0 - stats.drift_ppm / 1000000.0;
+                        const double raw_ratio = 1.0 + stats.drift_ppm / 1000000.0;
                         stats.resampler_ratio = options.drift_correction ?
                             std::clamp(raw_ratio, 1.0 - max_ratio_delta, 1.0 + max_ratio_delta) :
                             1.0;

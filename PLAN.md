@@ -379,6 +379,72 @@ Acceptance:
 - Applied delay is visible in stats.
 - No automatic playability scoring or subjective recommendations are added.
 
+### Future: Explicit Channel Routing
+
+Add startup options for selecting input and output channels within the chosen audio device. This is useful for interfaces where the usable dry input or monitor output is not on channels 1/2.
+
+Possible CLI shape:
+
+```text
+--input-channels 1
+--input-channels 3,4
+--output-channels 1
+--output-channels 5,6
+```
+
+Rules:
+
+- User-facing channel numbers should be 1-based.
+- Internally convert to 0-based indexes for ASIO/CoreAudio.
+- Mono input uses one selected channel.
+- Stereo input uses two selected channels.
+- Current mono network mode should mix selected stereo input to mono before packetization.
+- Mono playback should duplicate to one or two selected output channels.
+- Validate selected channel numbers against the probed device channel counts before opening the stream.
+- Print selected input/output channels in startup output and final stats.
+
+This should be implemented for both ASIO and CoreAudio using the same CLI semantics.
+
+### Future: Stereo Stream Mode
+
+Consider supporting both mono and stereo network audio payloads. This should be treated as a protocol/handshake feature, not only a local audio-device option.
+
+Open design questions:
+
+- Add an explicit `--stream-channels mono|stereo` option, or infer from `--input-channels`.
+- Decide whether peers must match stream channel count exactly.
+- Decide whether mono/stereo mismatch should be rejected at handshake or allowed with deterministic downmix/upmix.
+- Keep payload format fixed-size and efficient for each mode.
+- Expose bitrate and packet payload size clearly in stats.
+
+Conservative first approach:
+
+- Default remains mono.
+- Handshake includes stream channel count.
+- Reject mismatched channel count initially with a clear error.
+- Add automatic mono/stereo conversion only later if real testing shows it is worth the complexity.
+
+### Future: Aggregate Device Helpers
+
+Aggregation may help users who do not have one full-duplex hardware device, but it should remain outside the MVP path for now.
+
+Notes:
+
+- Windows users can often aggregate WDM devices through ASIO4ALL, but Jam2 should not try to script ASIO4ALL's control panel.
+- macOS aggregate devices can be created through CoreAudio APIs, but doing it correctly requires sub-device UIDs, clock source selection, drift compensation choices, input/output enablement, naming, and cleanup.
+- Aggregates can hide resampling and clock-drift behavior, which may make latency/stability stats harder to interpret.
+- The recommended path remains one full-duplex ASIO/CoreAudio device where possible.
+
+Possible future commands:
+
+```text
+jam2 list-aggregate-candidates
+jam2 create-aggregate --name Jam2Aggregate --input-device <id> --output-device <id>
+jam2 delete-aggregate --name Jam2Aggregate
+```
+
+Only add these after the direct full-duplex path is stable on real two-machine tests.
+
 ## Testing Plan
 
 Connection tests:
