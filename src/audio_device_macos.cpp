@@ -319,6 +319,20 @@ struct ProbeContext {
     std::atomic<int> input_peak_ppm{0};
 };
 
+struct RingContext {
+    MonoRingBuffer* ring = nullptr;
+    std::vector<std::int32_t> capture_scratch;
+    std::vector<std::int32_t> playback_scratch;
+    InputChannels input_channels = InputChannels::Mono;
+    std::atomic<long> callbacks{0};
+};
+
+std::size_t buffer_frames(const AudioBufferList* buffers);
+float read_float_channel(const AudioBufferList* buffers, std::size_t frame, UInt32 channel);
+void write_float_channel(AudioBufferList* buffers, std::size_t frame, UInt32 channel, float value);
+std::int32_t float_to_i32(float sample);
+float i32_to_float(std::int32_t sample);
+
 void clear_output(AudioBufferList* output)
 {
     if (output == nullptr) {
@@ -372,6 +386,50 @@ OSStatus exploratory_io_proc(
         context->callbacks.fetch_add(1, std::memory_order_relaxed);
     }
     clear_output(output);
+    return noErr;
+}
+
+OSStatus ring_io_proc(
+    AudioObjectID,
+    const AudioTimeStamp*,
+    const AudioBufferList* input,
+    const AudioTimeStamp*,
+    AudioBufferList* output,
+    const AudioTimeStamp*,
+    void* client_data)
+{
+    auto* context = static_cast<RingContext*>(client_data);
+    if (context == nullptr || context->ring == nullptr) {
+        clear_output(output);
+        return noErr;
+    }
+
+    const std::size_t input_frames = std::min(buffer_frames(input), context->capture_scratch.size());
+    if (input_frames > 0) {
+        for (std::size_t frame = 0; frame < input_frames; ++frame) {
+            const float left = read_float_channel(input, frame, 0);
+            if (context->input_channels == InputChannels::Stereo) {
+                const float right = read_float_channel(input, frame, 1);
+                context->capture_scratch[frame] = float_to_i32((left + right) * 0.5F);
+            } else {
+                context->capture_scratch[frame] = float_to_i32(left);
+            }
+        }
+        context->ring->push(std::span<const std::int32_t>(context->capture_scratch.data(), input_frames));
+    }
+
+    const std::size_t output_frames = std::min(buffer_frames(output), context->playback_scratch.size());
+    if (output_frames > 0) {
+        auto playback = std::span<std::int32_t>(context->playback_scratch.data(), output_frames);
+        context->ring->pop(playback);
+        for (std::size_t frame = 0; frame < output_frames; ++frame) {
+            const float sample = i32_to_float(context->playback_scratch[frame]);
+            write_float_channel(output, frame, 0, sample);
+            write_float_channel(output, frame, 1, sample);
+        }
+    }
+
+    context->callbacks.fetch_add(1, std::memory_order_relaxed);
     return noErr;
 }
 
@@ -851,15 +909,74 @@ DeviceRingResult ring_device(
     int duration_ms,
     std::size_t ring_capacity_frames)
 {
-    const auto meter = run_exploratory_io(id, requested_sample_rate, buffer_size, duration_ms, ring_capacity_frames);
+    if (duration_ms <= 0) {
+        throw std::runtime_error("ring duration must be positive");
+    }
+    if (ring_capacity_frames == 0) {
+        throw std::runtime_error("ring capacity must be positive");
+    }
+
+    const auto selected = select_device(id);
+    const UInt32 input_channels = device_channels(selected.object, kAudioDevicePropertyScopeInput);
+    const UInt32 output_channels = device_channels(selected.object, kAudioDevicePropertyScopeOutput);
+    if (input_channels <= 0 || output_channels <= 0) {
+        throw std::runtime_error("CoreAudio ring validation requires at least one input and one output channel");
+    }
+    if (!is_supported_float32_format(selected.object, kAudioDevicePropertyScopeInput) ||
+        !is_supported_float32_format(selected.object, kAudioDevicePropertyScopeOutput)) {
+        throw std::runtime_error("CoreAudio ring validation currently supports float32 linear PCM input/output only");
+    }
+
+    configure_device(selected.object, requested_sample_rate, buffer_size);
+    const long active_buffer_size =
+        static_cast<long>(get_u32_property_or_zero(selected.object, kAudioDevicePropertyBufferFrameSize));
+    if (active_buffer_size <= 0) {
+        throw std::runtime_error("CoreAudio reported an invalid buffer frame size");
+    }
+    if (ring_capacity_frames < static_cast<std::size_t>(active_buffer_size)) {
+        throw std::runtime_error("ring capacity must be at least one CoreAudio buffer");
+    }
+
+    MonoRingBuffer ring(ring_capacity_frames);
+    RingContext context;
+    context.ring = &ring;
+    context.capture_scratch.resize(static_cast<std::size_t>(active_buffer_size));
+    context.playback_scratch.resize(static_cast<std::size_t>(active_buffer_size));
+    context.input_channels = InputChannels::Mono;
+
+    AudioDeviceIOProcID proc_id = nullptr;
+    require_ok(
+        AudioDeviceCreateIOProcID(selected.object, ring_io_proc, &context, &proc_id),
+        "AudioDeviceCreateIOProcID");
+
+    struct ProcGuard {
+        AudioObjectID device = kAudioObjectUnknown;
+        AudioDeviceIOProcID proc = nullptr;
+        bool started = false;
+        ~ProcGuard()
+        {
+            if (proc != nullptr) {
+                if (started) {
+                    (void)AudioDeviceStop(device, proc);
+                }
+                (void)AudioDeviceDestroyIOProcID(device, proc);
+            }
+        }
+    } guard{selected.object, proc_id, false};
+
+    require_ok(AudioDeviceStart(selected.object, proc_id), "AudioDeviceStart");
+    guard.started = true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(duration_ms));
+
+    const auto ring_stats = ring.stats();
     DeviceRingResult result;
-    result.device = meter.device;
-    result.sample_rate = meter.sample_rate;
-    result.buffer_size = meter.buffer_size;
-    result.callbacks = meter.callbacks;
-    result.ring_overruns = 0;
-    result.ring_underruns = 0;
-    result.ring_readable = 0;
+    result.device = selected.info;
+    result.sample_rate = get_double_property_or_zero(selected.object, kAudioDevicePropertyNominalSampleRate);
+    result.buffer_size = active_buffer_size;
+    result.callbacks = context.callbacks.load(std::memory_order_relaxed);
+    result.ring_overruns = ring_stats.overruns;
+    result.ring_underruns = ring_stats.underruns;
+    result.ring_readable = ring.available_read();
     return result;
 }
 
