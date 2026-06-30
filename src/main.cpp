@@ -52,7 +52,7 @@ struct Options {
     int frame_size = 128;
     bool drift_correction = true;
     double drift_smoothing = 0.02;
-    int drift_max_correction_ppm = 5000;
+    int drift_max_correction_ppm = 500;
     bool metronome = false;
     int bpm = 120;
     double metronome_level = 0.20;
@@ -360,6 +360,7 @@ struct AudioPacketStats {
     std::uint64_t audio_delay_min_us = 0;
     std::uint64_t audio_delay_sum_us = 0;
     std::uint64_t audio_delay_max_us = 0;
+    std::uint64_t audio_delay_samples = 0;
     std::uint64_t jitter_min_us = 0;
     std::uint64_t jitter_sum_us = 0;
     std::uint64_t jitter_max_us = 0;
@@ -532,8 +533,8 @@ void observe_timing(
 
 void print_periodic_stream_stats(const AudioPacketStats& stats, std::uint64_t elapsed_ms)
 {
-    const double delay_avg_ms = stats.recv_packets > 0 ?
-        (static_cast<double>(stats.audio_delay_sum_us) / static_cast<double>(stats.recv_packets) / 1000.0) :
+    const double delay_avg_ms = stats.audio_delay_samples > 0 ?
+        (static_cast<double>(stats.audio_delay_sum_us) / static_cast<double>(stats.audio_delay_samples) / 1000.0) :
         0.0;
     const double rtt_avg_ms = stats.recv_pongs > 0 ?
         (static_cast<double>(stats.rtt_sum_us) / static_cast<double>(stats.recv_pongs) / 1000.0) :
@@ -779,13 +780,6 @@ AudioPacketStats run_audio_packet_exchange(
                         ++stats.jitter_samples;
                     }
                     last_audio_receive_us = receive_time;
-                    if (receive_time >= header.send_time_us) {
-                        observe_timing(
-                            receive_time - header.send_time_us,
-                            stats.audio_delay_min_us,
-                            stats.audio_delay_sum_us,
-                            stats.audio_delay_max_us);
-                    }
                 } else if (header.type == jam2::protocol::PacketType::Ping) {
                     const jam2::protocol::Header pong{
                         jam2::protocol::PacketType::Pong,
@@ -925,11 +919,13 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
                       static_cast<double>(stats.playback_depth_samples) / static_cast<double>(options.sample_rate)) << "\n";
         std::cout << "Playback depth ms max: " << frames_to_ms(static_cast<std::size_t>(stats.playback_depth_max_frames), options.sample_rate) << "\n";
     }
-    if (stats.recv_packets > 0) {
+    if (stats.audio_delay_samples > 0) {
         std::cout << "Audio receive delay ms min: " << (static_cast<double>(stats.audio_delay_min_us) / 1000.0) << "\n";
         std::cout << "Audio receive delay ms avg: "
-                  << (static_cast<double>(stats.audio_delay_sum_us) / static_cast<double>(stats.recv_packets) / 1000.0) << "\n";
+                  << (static_cast<double>(stats.audio_delay_sum_us) / static_cast<double>(stats.audio_delay_samples) / 1000.0) << "\n";
         std::cout << "Audio receive delay ms max: " << (static_cast<double>(stats.audio_delay_max_us) / 1000.0) << "\n";
+    } else {
+        std::cout << "Audio receive delay ms: unavailable across peer clocks\n";
     }
     if (stats.jitter_samples > 0) {
         std::cout << "Audio interarrival jitter ms min: " << (static_cast<double>(stats.jitter_min_us) / 1000.0) << "\n";
