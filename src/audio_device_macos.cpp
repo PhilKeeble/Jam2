@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace jam2::audio {
@@ -34,6 +35,36 @@ void require_ok(OSStatus status, const char* operation)
     if (status != noErr) {
         throw std::runtime_error(std::string(operation) + " failed with OSStatus " + osstatus_text(status));
     }
+}
+
+std::string one_based_channel_text(int channel)
+{
+    return channel >= 0 ? std::to_string(channel + 1) : std::string("off");
+}
+
+std::string selected_channel_range_text(const ChannelSelection& channels, bool input)
+{
+    if (input) {
+        return one_based_channel_text(channels.input_left) +
+            (channels.input_right >= 0 ? "," + one_based_channel_text(channels.input_right) : "");
+    }
+    return one_based_channel_text(channels.output_left) +
+        (channels.output_right >= 0 ? "," + one_based_channel_text(channels.output_right) : "");
+}
+
+std::string channel_range_error(
+    const char* backend,
+    const char* direction,
+    const ChannelSelection& channels,
+    UInt32 available,
+    bool input)
+{
+    std::ostringstream out;
+    out << "selected " << backend << " " << direction << " channel(s) "
+        << selected_channel_range_text(channels, input)
+        << " out of range; device has " << available << " " << direction
+        << " channel(s)";
+    return out.str();
 }
 
 AudioObjectPropertyAddress address(
@@ -803,6 +834,7 @@ class CoreAudioDeviceStream final : public DeviceStream {
 public:
     CoreAudioDeviceStream(
         AudioObjectID device,
+        DeviceInfo info,
         long buffer_size,
         InputChannels input_channels,
         ChannelSelection channels,
@@ -811,7 +843,12 @@ public:
         std::size_t playback_prefill_frames,
         StreamControl& control,
         double sample_rate)
-        : device_(device)
+        : device_(device),
+          info_(std::move(info)),
+          buffer_size_(buffer_size),
+          input_channels_(input_channels),
+          channels_(channels),
+          sample_rate_(sample_rate)
     {
         context_.input_channels = input_channels;
         context_.channels = channels;
@@ -857,10 +894,27 @@ public:
         return context_.playback_prefilled.load(std::memory_order_relaxed);
     }
 
+    StreamInfo info() const override
+    {
+        StreamInfo result;
+        result.device = info_;
+        result.sample_rate = sample_rate_;
+        result.buffer_size = buffer_size_;
+        result.input_channels = input_channels_;
+        result.channels = channels_;
+        result.sample_format = "CoreAudio Float32 packed";
+        return result;
+    }
+
 private:
     AudioObjectID device_ = kAudioObjectUnknown;
+    DeviceInfo info_;
     AudioDeviceIOProcID proc_id_ = nullptr;
     bool started_ = false;
+    long buffer_size_ = 0;
+    InputChannels input_channels_ = InputChannels::Mono;
+    ChannelSelection channels_;
+    double sample_rate_ = 0.0;
     CoreAudioDuplexContext context_;
 };
 
@@ -1002,12 +1056,12 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     const UInt32 requested_channels = requested_input_channels == InputChannels::Stereo ? 2U : 1U;
     if (channels.input_left < 0 || static_cast<UInt32>(channels.input_left) >= input_channels ||
         (requested_channels > 1 && (channels.input_right < 0 || static_cast<UInt32>(channels.input_right) >= input_channels))) {
-        throw std::runtime_error("selected CoreAudio input channel is out of range");
+        throw std::runtime_error(channel_range_error("CoreAudio", "input", channels, input_channels, true));
     }
     const UInt32 requested_output_channels = channels.output_right >= 0 ? 2U : 1U;
     if (channels.output_left < 0 || static_cast<UInt32>(channels.output_left) >= output_channels ||
         (requested_output_channels > 1 && (channels.output_right < 0 || static_cast<UInt32>(channels.output_right) >= output_channels))) {
-        throw std::runtime_error("selected CoreAudio output channel is out of range");
+        throw std::runtime_error(channel_range_error("CoreAudio", "output", channels, output_channels, false));
     }
     if (!is_supported_float32_format(selected.object, kAudioDevicePropertyScopeInput) ||
         !is_supported_float32_format(selected.object, kAudioDevicePropertyScopeOutput)) {
@@ -1027,6 +1081,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     const double sample_rate = get_double_property_or_zero(selected.object, kAudioDevicePropertyNominalSampleRate);
     auto stream = std::make_unique<CoreAudioDeviceStream>(
         selected.object,
+        selected.info,
         buffer_size,
         requested_input_channels,
         channels,

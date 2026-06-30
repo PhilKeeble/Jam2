@@ -148,7 +148,7 @@ Required or commonly used:
 listen
 connect <jam2-url>
 --device <name-or-id>
---list-devices
+list-devices
 --stun <host:port>
 --no-stun
 --public-endpoint <ip:port>
@@ -215,7 +215,7 @@ Deliverables:
 - ~~`jam2 listen`~~
 - ~~`jam2 connect`~~
 - ~~`--help`~~
-- ~~`--list-devices`~~
+- ~~`list-devices`~~
 - common config model
 - structured terminal output
 

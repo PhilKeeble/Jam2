@@ -80,6 +80,15 @@ struct ChannelSelection {
     int output_right = 1;
 };
 
+struct StreamInfo {
+    DeviceInfo device;
+    double sample_rate = 0.0;
+    long buffer_size = 0;
+    InputChannels input_channels = InputChannels::Mono;
+    ChannelSelection channels;
+    std::string sample_format;
+};
+
 class DeviceStream {
 public:
     virtual ~DeviceStream() = default;
@@ -88,6 +97,7 @@ public:
 
     virtual long callbacks() const = 0;
     virtual bool playback_prefilled() const = 0;
+    virtual StreamInfo info() const = 0;
 
 protected:
     DeviceStream() = default;

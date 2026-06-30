@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #define WIN32_LEAN_AND_MEAN
@@ -166,6 +167,64 @@ int sample_bytes(ASIOSampleType type)
     default:
         return 0;
     }
+}
+
+std::string asio_sample_type_name(ASIOSampleType type)
+{
+    switch (type) {
+    case ASIOSTInt16LSB: return "ASIO Int16 LSB";
+    case ASIOSTInt24LSB: return "ASIO Int24 LSB";
+    case ASIOSTInt32LSB: return "ASIO Int32 LSB";
+    case ASIOSTFloat32LSB: return "ASIO Float32 LSB";
+    case ASIOSTFloat64LSB: return "ASIO Float64 LSB";
+    case ASIOSTInt16MSB: return "ASIO Int16 MSB";
+    case ASIOSTInt24MSB: return "ASIO Int24 MSB";
+    case ASIOSTInt32MSB: return "ASIO Int32 MSB";
+    case ASIOSTFloat32MSB: return "ASIO Float32 MSB";
+    case ASIOSTFloat64MSB: return "ASIO Float64 MSB";
+    case ASIOSTInt32LSB16: return "ASIO Int32 LSB 16-bit";
+    case ASIOSTInt32LSB18: return "ASIO Int32 LSB 18-bit";
+    case ASIOSTInt32LSB20: return "ASIO Int32 LSB 20-bit";
+    case ASIOSTInt32LSB24: return "ASIO Int32 LSB 24-bit";
+    case ASIOSTInt32MSB16: return "ASIO Int32 MSB 16-bit";
+    case ASIOSTInt32MSB18: return "ASIO Int32 MSB 18-bit";
+    case ASIOSTInt32MSB20: return "ASIO Int32 MSB 20-bit";
+    case ASIOSTInt32MSB24: return "ASIO Int32 MSB 24-bit";
+    default: break;
+    }
+    std::ostringstream out;
+    out << "ASIO sample type " << static_cast<long>(type);
+    return out.str();
+}
+
+std::string one_based_channel_text(int channel)
+{
+    return channel >= 0 ? std::to_string(channel + 1) : std::string("off");
+}
+
+std::string selected_channel_range_text(const ChannelSelection& channels, bool input)
+{
+    if (input) {
+        return one_based_channel_text(channels.input_left) +
+            (channels.input_right >= 0 ? "," + one_based_channel_text(channels.input_right) : "");
+    }
+    return one_based_channel_text(channels.output_left) +
+        (channels.output_right >= 0 ? "," + one_based_channel_text(channels.output_right) : "");
+}
+
+std::string channel_range_error(
+    const char* backend,
+    const char* direction,
+    const ChannelSelection& channels,
+    long available,
+    bool input)
+{
+    std::ostringstream out;
+    out << "selected " << backend << " " << direction << " channel(s) "
+        << selected_channel_range_text(channels, input)
+        << " out of range; device has " << available << " " << direction
+        << " channel(s)";
+    return out.str();
 }
 
 struct MeterContext {
@@ -566,9 +625,11 @@ public:
     WindowsDeviceStream(
         ComRuntime com,
         AsioDriver driver,
+        DeviceInfo device,
         std::vector<ASIOBufferInfo> buffers,
         long buffer_size,
         InputChannels input_channels,
+        ChannelSelection channels,
         int output_channel_count,
         MonoRingBuffer& capture_ring,
         MonoRingBuffer& playback_ring,
@@ -577,9 +638,12 @@ public:
         double sample_rate)
         : com_(std::move(com)),
           driver_(std::move(driver)),
+          device_(std::move(device)),
           buffers_(std::move(buffers)),
           sample_rate_(sample_rate),
-          buffer_size_(buffer_size)
+          buffer_size_(buffer_size),
+          input_channels_(input_channels),
+          channels_(channels)
     {
         const int input_count = input_channels == InputChannels::Stereo ? 2 : 1;
         context_.input_left = &buffers_[0];
@@ -639,16 +703,29 @@ public:
         return context_.playback_prefilled.load(std::memory_order_relaxed);
     }
 
-    double sample_rate() const { return sample_rate_; }
+    StreamInfo info() const override
+    {
+        StreamInfo result;
+        result.device = device_;
+        result.sample_rate = sample_rate_;
+        result.buffer_size = buffer_size_;
+        result.input_channels = input_channels_;
+        result.channels = channels_;
+        result.sample_format = asio_sample_type_name(ASIOSTInt32LSB);
+        return result;
+    }
 
 private:
     ComRuntime com_;
     AsioDriver driver_;
+    DeviceInfo device_;
     std::vector<ASIOBufferInfo> buffers_;
     ASIOCallbacks callbacks_{};
     DuplexContext context_{};
     double sample_rate_ = 0.0;
     long buffer_size_ = 0;
+    InputChannels input_channels_ = InputChannels::Mono;
+    ChannelSelection channels_;
     bool created_ = false;
     bool started_ = false;
 };
@@ -1157,11 +1234,11 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     const int selected_output_channels = channels.output_right >= 0 ? 2 : 1;
     if (channels.input_left < 0 || channels.input_left >= input_channels ||
         (selected_input_channels > 1 && (channels.input_right < 0 || channels.input_right >= input_channels))) {
-        throw std::runtime_error("selected ASIO input channel is out of range");
+        throw std::runtime_error(channel_range_error("ASIO", "input", channels, input_channels, true));
     }
     if (channels.output_left < 0 || channels.output_left >= output_channels ||
         (selected_output_channels > 1 && (channels.output_right < 0 || channels.output_right >= output_channels))) {
-        throw std::runtime_error("selected ASIO output channel is out of range");
+        throw std::runtime_error(channel_range_error("ASIO", "output", channels, output_channels, false));
     }
 
     long min_buffer = 0;
@@ -1223,9 +1300,11 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     auto stream = std::make_unique<WindowsDeviceStream>(
         std::move(com),
         std::move(driver),
+        device,
         std::move(buffers),
         buffer_size,
         requested_input_channels,
+        channels,
         selected_output_channels,
         capture_ring,
         playback_ring,

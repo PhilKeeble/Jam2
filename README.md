@@ -11,8 +11,8 @@ ctest --test-dir build --output-on-failure
 Check devices on each host:
 
 ```powershell
-.\build\jam2.exe --list-devices
-.\build\jam2.exe probe-device 0 --sample-rate 48000
+.\build\jam2.exe list-devices
+.\build\jam2.exe test-device 0 --sample-rate 48000
 .\build\jam2.exe meter-device 0 --sample-rate 48000 --buffer-size 512 --duration-ms 3000
 ```
 
