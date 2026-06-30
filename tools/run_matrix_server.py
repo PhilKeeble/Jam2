@@ -3,6 +3,7 @@
 import argparse
 import http.server
 import json
+import shutil
 import subprocess
 import threading
 from pathlib import Path
@@ -33,6 +34,7 @@ def parse_args():
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--logs", default=str(Path(__file__).with_name("logs")))
     parser.add_argument("--no-stun", action="store_true")
+    parser.add_argument("--clean", action="store_true", help="delete the logs directory before running")
     return parser.parse_args()
 
 
@@ -172,7 +174,10 @@ def main():
     jam2 = Path(args_ns.jam2)
     if not jam2.exists():
         return fail(f"jam2 executable not found: {jam2}")
-    base_logs = ensure_dir(Path(args_ns.logs))
+    base_logs_path = Path(args_ns.logs)
+    if args_ns.clean and base_logs_path.exists():
+        shutil.rmtree(base_logs_path)
+    base_logs = ensure_dir(base_logs_path)
     public_dir = ensure_dir(base_logs / "public")
     server = start_http_server(public_dir, base_logs, args_ns.host, args_ns.port)
     print_flush(f"[server] publishing {public_dir} on http://{args_ns.host}:{args_ns.port}/")

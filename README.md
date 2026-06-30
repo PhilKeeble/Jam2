@@ -40,6 +40,18 @@ Current stable profile:
 --stats-warmup-ms 3000
 ```
 
+Network-efficient profile:
+
+```text
+--sample-rate 44100
+--audio-buffer-size 64
+--frame-size 256
+--playback-prefill-frames 1536
+--playback-ring-frames 8192
+--playback-max-frames 4096
+--stats-warmup-ms 3000
+```
+
 Latency and stability tuning:
 
 - If audio pops, clicks, or drops out, increase `--playback-prefill-frames` first. Try `2048`.
@@ -49,6 +61,27 @@ Latency and stability tuning:
 - If `resampler_ratio` is pinned at the drift limit for long runs, inspect `drift_ppm` before changing `--drift-max-correction-ppm`. The current default `500` ppm is enough for the tested Windows/Mac devices.
 - If `sequence_lost` or `reordered_lost` increases, the network is dropping or delaying packets beyond the small reorder window. Increase prefill before lowering frame size.
 - Lower `--frame-size` and `--audio-buffer-size` only after the current profile is stable. Smaller values reduce latency but are more sensitive to jitter.
+
+Key arguments:
+
+| Argument | What it does | When to tweak |
+| --- | --- | --- |
+| `--audio-device` | Selects the host audio device by ID from `list-devices`. | Change when switching interface/driver. |
+| `--sample-rate` | Sets stream and device sample rate. | Keep both hosts matching; `44100` is the current tested value. |
+| `--audio-buffer-size` | Sets hardware callback size in frames. | Lower for less device latency; raise if the driver/callback path is unstable. |
+| `--frame-size` | Sets audio frames per UDP packet. | Lower for lower packet interval; raise to reduce packet rate/reorder pressure. |
+| `--playback-prefill-frames` | Initial playback cushion before output starts. | Raise for pops/dropouts; lower only when underruns are zero and latency is too high. |
+| `--playback-ring-frames` | Playback ring capacity/headroom. | Raise if bursts cause overruns; capacity alone does not add latency unless depth grows. |
+| `--playback-max-frames` | Maximum retained playback depth before old frames are dropped. | Keep set to prevent latency creep over time. |
+| `--stats-warmup-ms` | Excludes startup from drift/jitter/depth tuning stats. | Raise if startup transients are still skewing CSV results. |
+| `--stats-interval-ms` | Prints periodic stdout stats while streaming. | Use during manual tuning; CSV records final results only. |
+| `--log-stats` | Writes final CSV stats to a folder. | Enable for comparing runs or matrix tests. |
+| `--drift-max-correction-ppm` | Caps playback resampler correction. | Change only if `resampler_ratio` is pinned and `drift_ppm` is believable. |
+| `--input-channels` | Selects mono input or stereo pair mixed to mono. | Use when instrument input is not channel 1. |
+| `--output-channels` | Selects output channel or duplicated pair. | Use when headphones/monitor outputs are not 1/2. |
+| `--socket-send-buffer` / `--socket-recv-buffer` | Requests OS UDP socket buffer sizes. | Use when diagnosing packet drops or OS buffering differences. |
+| `--stream-ms` | Ends the stream after a fixed duration. | Use for repeatable tests and matrix runs. |
+| `--wait-ms` | Limits how long handshake waits. | Leave unset for manual sessions; set for automation. |
 
 Runtime commands:
 
@@ -73,7 +106,7 @@ The default matrix covers aggressive through safe profiles from `64/64` up to `5
 Start the listen/server side first:
 
 ```powershell
-python tools/run_matrix_server.py --server-audio-device 16 --host 0.0.0.0 --port 8000 --runs 3
+python tools/run_matrix_server.py --server-audio-device 16 --host 0.0.0.0 --port 8000 --runs 3 --clean
 ```
 
 Then start the connect/client side on the other host:
