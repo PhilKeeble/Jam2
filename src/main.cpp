@@ -412,19 +412,44 @@ void sync_audio_control(
     control->playback_ratio_ppm.store(ratio_to_ppm(playback_ratio), std::memory_order_relaxed);
 }
 
+void print_interactive_help()
+{
+    std::cout << "Commands:\n"
+              << "  help          show this command list\n"
+              << "  stats         print current stream stats\n"
+              << "  metro on      enable local metronome\n"
+              << "  metro off     disable local metronome\n"
+              << "  bpm <1..400>  set metronome tempo\n"
+              << "  quit          stop the stream and exit\n"
+              << "  exit          stop the stream and exit\n";
+}
+
+void print_prompt()
+{
+    std::cout << "> ";
+    std::cout.flush();
+}
+
 void stdin_command_loop(RuntimeState& state)
 {
     std::string line;
+    print_prompt();
     while (!state.quit.load(std::memory_order_relaxed) && std::getline(std::cin, line)) {
         std::istringstream in(line);
         std::string command;
         in >> command;
-        if (command == "quit") {
+        if (command == "quit" || command == "exit") {
             state.quit.store(true, std::memory_order_relaxed);
             break;
         }
+        if (command == "help") {
+            print_interactive_help();
+            print_prompt();
+            continue;
+        }
         if (command == "stats") {
             state.print_stats.store(true, std::memory_order_relaxed);
+            print_prompt();
             continue;
         }
         if (command == "metro") {
@@ -439,6 +464,7 @@ void stdin_command_loop(RuntimeState& state)
             } else {
                 std::cerr << "unknown metro command; use: metro on|off\n";
             }
+            print_prompt();
             continue;
         }
         if (command == "bpm") {
@@ -450,11 +476,13 @@ void stdin_command_loop(RuntimeState& state)
             } else {
                 std::cerr << "bpm must be 1..400\n";
             }
+            print_prompt();
             continue;
         }
         if (!command.empty()) {
-            std::cerr << "unknown command: " << command << "\n";
+            std::cerr << "unknown command: " << command << " (use: help)\n";
         }
+        print_prompt();
     }
 }
 
@@ -994,7 +1022,7 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
     const auto playback_stats = audio.playback_ring->stats();
     const std::size_t capture_readable = audio.capture_ring->available_read();
     const std::size_t playback_readable = audio.playback_ring->available_read();
-    std::cout << "ASIO callbacks: " << audio.stream->callbacks() << "\n";
+    std::cout << "Audio callbacks: " << audio.stream->callbacks() << "\n";
     std::cout << "Input channels: "
               << (options.input_channels == jam2::audio::InputChannels::Stereo ? "stereo" : "mono") << "\n";
     std::cout << "Output channels: duplicated mono to channels 1/2 when available\n";
