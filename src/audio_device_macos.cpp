@@ -15,10 +15,6 @@
 #include <thread>
 #include <vector>
 
-#ifndef kAudioObjectPropertyElementMain
-#define kAudioObjectPropertyElementMain kAudioObjectPropertyElementMaster
-#endif
-
 namespace jam2::audio {
 namespace {
 
