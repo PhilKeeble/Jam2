@@ -112,7 +112,7 @@ python tools/run_matrix_server.py --server-audio-device 16 --host 0.0.0.0 --port
 Then start the connect/client side on the other host:
 
 ```bash
-python tools/run_matrix_client.py --server http://WINDOWS_IP:8000 --client-audio-device 0
+python tools/run_matrix_client.py --server http://WINDOWS_IP:8000 --client-audio-device 0 --clean
 ```
 
 After each test, the client uploads its `stats.csv` back to the server. When the server finishes the matrix it writes combined results and analysis automatically:

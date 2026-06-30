@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import shutil
 import subprocess
 import time
 import urllib.error
@@ -27,6 +28,7 @@ def parse_args():
     parser.add_argument("--logs", default=str(Path(__file__).with_name("logs")))
     parser.add_argument("--poll-ms", type=int, default=500)
     parser.add_argument("--timeout-s", type=int, default=0, help="0 waits forever")
+    parser.add_argument("--clean", action="store_true", help="delete local logs before running and remove uploaded run logs")
     return parser.parse_args()
 
 
@@ -64,7 +66,7 @@ def upload_csv(base_url, test_id, run_index, csv_path):
     return False
 
 
-def run_connect(jam2, current, audio_device, base_logs, server_url):
+def run_connect(jam2, current, audio_device, base_logs, server_url, clean_after_upload):
     test_id = current["test_id"]
     run_index = int(current["run_index"])
     output_dir = run_dir(base_logs, test_id, "client", run_index)
@@ -97,7 +99,10 @@ def run_connect(jam2, current, audio_device, base_logs, server_url):
         return_code = process.wait()
 
     copied_csv = copy_final_csv(csv_dir, output_dir)
-    upload_csv(server_url, test_id, run_index, copied_csv)
+    uploaded = upload_csv(server_url, test_id, run_index, copied_csv)
+    if clean_after_upload and uploaded:
+        shutil.rmtree(output_dir)
+        print_flush(f"[client] removed uploaded local logs for {test_id} run {run_index}")
     print_flush(f"[client] finished {test_id} run {run_index} rc={return_code} csv={copied_csv or 'none'}")
     return return_code
 
@@ -107,7 +112,10 @@ def main():
     jam2 = Path(args_ns.jam2)
     if not jam2.exists():
         return fail(f"jam2 executable not found: {jam2}")
-    base_logs = ensure_dir(Path(args_ns.logs))
+    base_logs_path = Path(args_ns.logs)
+    if args_ns.clean and base_logs_path.exists():
+        shutil.rmtree(base_logs_path)
+    base_logs = ensure_dir(base_logs_path)
     seen = set()
     deadline = time.monotonic() + args_ns.timeout_s if args_ns.timeout_s > 0 else None
 
@@ -134,7 +142,7 @@ def main():
             time.sleep(args_ns.poll_ms / 1000.0)
             continue
         seen.add(key)
-        rc = run_connect(jam2, current, args_ns.client_audio_device, base_logs, args_ns.server)
+        rc = run_connect(jam2, current, args_ns.client_audio_device, base_logs, args_ns.server, args_ns.clean)
         if rc != 0:
             return rc
 
