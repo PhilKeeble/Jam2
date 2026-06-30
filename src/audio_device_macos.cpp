@@ -15,10 +15,14 @@
 #include <thread>
 #include <vector>
 
+#ifndef kAudioObjectPropertyElementMain
+#define kAudioObjectPropertyElementMain kAudioObjectPropertyElementMaster
+#endif
+
 namespace jam2::audio {
 namespace {
 
-constexpr AudioObjectPropertyElement kMaster = kAudioObjectPropertyElementMaster;
+constexpr AudioObjectPropertyElement kMainElement = kAudioObjectPropertyElementMain;
 
 std::string osstatus_text(OSStatus status)
 {
@@ -37,7 +41,7 @@ void require_ok(OSStatus status, const char* operation)
 AudioObjectPropertyAddress address(
     AudioObjectPropertySelector selector,
     AudioObjectPropertyScope scope = kAudioObjectPropertyScopeGlobal,
-    AudioObjectPropertyElement element = kMaster)
+    AudioObjectPropertyElement element = kMainElement)
 {
     return AudioObjectPropertyAddress{selector, scope, element};
 }
