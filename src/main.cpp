@@ -719,6 +719,7 @@ AudioPacketStats run_audio_packet_exchange(
                         continue;
                     }
                     const auto sequence_result = tracker.observe(header.sequence);
+                    stats.sequence = tracker.stats();
                     ++stats.recv_packets;
                     stats.recv_bytes += bytes.size();
                     if (sequence_result != jam2::protocol::SequenceResult::InOrder) {
