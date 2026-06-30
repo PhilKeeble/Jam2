@@ -42,7 +42,7 @@ struct Options {
     bool no_stun = false;
     int stun_timeout_ms = 1000;
     int stun_retries = 3;
-    int wait_ms = 30000;
+    int wait_ms = 0;
     int stream_ms = 0;
     int stream_linger_ms = 100;
     int stats_interval_ms = 0;
@@ -100,8 +100,8 @@ Options parse_options(int argc, char** argv, int start)
             }
         } else if (arg == "--wait-ms") {
             options.wait_ms = std::stoi(std::string(require_value(argc, argv, i, arg)));
-            if (options.wait_ms <= 0) {
-                throw std::runtime_error("--wait-ms must be positive");
+            if (options.wait_ms < 0) {
+                throw std::runtime_error("--wait-ms must be non-negative");
             }
         } else if (arg == "--stream-ms") {
             options.stream_ms = std::stoi(std::string(require_value(argc, argv, i, arg)));
@@ -1197,7 +1197,9 @@ int run_listen(int argc, char** argv)
     std::optional<jam2::Endpoint> locked_peer;
     int ignored_malformed = 0;
     int ignored_wrong_endpoint = 0;
-    const auto deadline = jam2::monotonic_us() + static_cast<std::uint64_t>(options.wait_ms) * 1000ULL;
+    const std::uint64_t deadline = options.wait_ms > 0 ?
+        jam2::monotonic_us() + static_cast<std::uint64_t>(options.wait_ms) * 1000ULL :
+        UINT64_MAX;
     while (jam2::monotonic_us() < deadline) {
         const auto received = socket.recv_from(250);
         if (!received) {
@@ -1265,7 +1267,9 @@ int run_connect(int argc, char** argv)
     print_socket_options(socket);
 
     const auto hello = make_control_packet(jam2::protocol::PacketType::Hello, session, 1);
-    const auto deadline = jam2::monotonic_us() + static_cast<std::uint64_t>(options.wait_ms) * 1000ULL;
+    const std::uint64_t deadline = options.wait_ms > 0 ?
+        jam2::monotonic_us() + static_cast<std::uint64_t>(options.wait_ms) * 1000ULL :
+        UINT64_MAX;
     int attempts = 0;
     int ignored = 0;
     while (jam2::monotonic_us() < deadline) {
