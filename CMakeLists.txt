@@ -61,6 +61,11 @@ if(WIN32)
 elseif(APPLE)
     target_sources(jam2_core PRIVATE src/audio_device_macos.cpp)
     target_compile_definitions(jam2_core PUBLIC JAM2_PLATFORM_MACOS=1)
+    target_link_libraries(jam2_core PUBLIC
+        "-framework CoreAudio"
+        "-framework CoreFoundation"
+        "-framework AudioToolbox"
+    )
 else()
     message(FATAL_ERROR "Jam2 MVP supports only Windows and macOS host-native builds.")
 endif()
