@@ -714,9 +714,13 @@ AudioPacketStats run_audio_packet_exchange(
                         ++stats.ignored_packets;
                         continue;
                     }
-                    (void)tracker.observe(header.sequence);
+                    const auto sequence_result = tracker.observe(header.sequence);
                     ++stats.recv_packets;
                     stats.recv_bytes += bytes.size();
+                    if (sequence_result != jam2::protocol::SequenceResult::InOrder) {
+                        ++stats.ignored_packets;
+                        continue;
+                    }
                     if (playback_ring != nullptr) {
                         const auto received_payload = std::span<const std::uint8_t>(
                             bytes.data() + jam2::protocol::kHeaderSize,
