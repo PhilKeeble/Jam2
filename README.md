@@ -94,3 +94,18 @@ tools/logs/<test-id>/client/run_NN/
 ```
 
 Each run directory contains `stdout.txt`, `stderr.txt`, and `stats.csv` when the app generated a CSV.
+
+Combine all matrix CSVs into one file:
+
+```powershell
+python tools/collect_matrix_csv.py --side all
+```
+
+Or collect one side only:
+
+```powershell
+python tools/collect_matrix_csv.py --side server
+python tools/collect_matrix_csv.py --side client
+```
+
+The combined CSV is written to `tools/logs/combined_stats.csv`, or `combined_stats_server.csv` / `combined_stats_client.csv` for one side.
