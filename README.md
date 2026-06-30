@@ -68,6 +68,8 @@ Edit test cases in:
 tools/test_matrix.json
 ```
 
+The default matrix covers aggressive through safe profiles from `64/64` up to `512/512`. Each test runs for `120000ms` by default; increase `--runs` to measure variance across repeated runs.
+
 Start the listen/server side first:
 
 ```powershell
@@ -78,6 +80,13 @@ Then start the connect/client side on the other host:
 
 ```bash
 python tools/run_matrix_client.py --server http://WINDOWS_IP:8000 --client-audio-device 0
+```
+
+After each test, the client uploads its `stats.csv` back to the server. When the server finishes the matrix it writes combined results and analysis automatically:
+
+```text
+tools/logs/combined_stats.csv
+tools/logs/analysis.csv
 ```
 
 The server publishes the current `jam2://` URL as raw JSON at:
@@ -95,7 +104,7 @@ tools/logs/<test-id>/client/run_NN/
 
 Each run directory contains `stdout.txt`, `stderr.txt`, and `stats.csv` when the app generated a CSV.
 
-Combine all matrix CSVs into one file:
+If needed, combine matrix CSVs manually:
 
 ```powershell
 python tools/collect_matrix_csv.py --side all
@@ -109,3 +118,21 @@ python tools/collect_matrix_csv.py --side client
 ```
 
 The combined CSV is written to `tools/logs/combined_stats.csv`, or `combined_stats_server.csv` / `combined_stats_client.csv` for one side.
+
+Rank the matrix profiles:
+
+```powershell
+python tools/analyze_matrix_csv.py --input tools/logs/combined_stats.csv
+```
+
+This writes:
+
+```text
+tools/logs/analysis.csv
+```
+
+The analyzer ranks profiles by stability first, then latency. By default, any sequence loss, reordered loss, playback underrun, playback overrun, or dropped playback frame marks a profile unstable. To tolerate small glitches during experiments:
+
+```powershell
+python tools/analyze_matrix_csv.py --max-loss 2 --max-playback-underruns 256
+```

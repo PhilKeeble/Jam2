@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 
 import argparse
-import functools
 import http.server
+import json
 import subprocess
 import threading
 from pathlib import Path
 
+from analyze_matrix_csv import analyze_matrix_csv
+from collect_matrix_csv import collect_matrix_csv
 from matrix_common import (
     copy_final_csv,
     default_jam2_path,
@@ -34,8 +36,60 @@ def parse_args():
     return parser.parse_args()
 
 
-def start_http_server(public_dir, host, port):
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(public_dir))
+class MatrixHttpHandler(http.server.SimpleHTTPRequestHandler):
+    public_dir = None
+    logs_dir = None
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(self.public_dir), **kwargs)
+
+    def log_message(self, format, *args):
+        print_flush("[http] " + (format % args))
+
+    def do_POST(self):
+        if self.path != "/upload":
+            self.send_error(404, "unknown upload endpoint")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.send_error(400, "invalid content length")
+            return
+        if length <= 0:
+            self.send_error(400, "empty upload")
+            return
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        test_id = payload["test_id"]
+        run_index = int(payload["run_index"])
+        side = payload.get("side", "client")
+        if side != "client":
+            self.send_error(400, "only client uploads are accepted")
+            return
+        csv_text = payload["csv"]
+        output_dir = run_dir(self.logs_dir, test_id, side, run_index)
+        ensure_dir(output_dir)
+        target = output_dir / "stats.csv"
+        with open(target, "w", encoding="utf-8", newline="") as handle:
+            handle.write(csv_text)
+        write_json(output_dir / "upload.json", {
+            "test_id": test_id,
+            "run_index": run_index,
+            "side": side,
+            "bytes": len(csv_text.encode("utf-8")),
+        })
+        print_flush(f"[server] received client CSV for {test_id} run {run_index}")
+        response = b'{"ok":true}\n'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response)))
+        self.end_headers()
+        self.wfile.write(response)
+
+
+def start_http_server(public_dir, logs_dir, host, port):
+    MatrixHttpHandler.public_dir = public_dir
+    MatrixHttpHandler.logs_dir = logs_dir
+    handler = MatrixHttpHandler
     server = http.server.ThreadingHTTPServer((host, port), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -120,7 +174,7 @@ def main():
         return fail(f"jam2 executable not found: {jam2}")
     base_logs = ensure_dir(Path(args_ns.logs))
     public_dir = ensure_dir(base_logs / "public")
-    server = start_http_server(public_dir, args_ns.host, args_ns.port)
+    server = start_http_server(public_dir, base_logs, args_ns.host, args_ns.port)
     print_flush(f"[server] publishing {public_dir} on http://{args_ns.host}:{args_ns.port}/")
     try:
         for run_index in range(1, args_ns.runs + 1):
@@ -137,6 +191,13 @@ def main():
                 if rc != 0:
                     return rc
         write_json(public_dir / "current.json", {"status": "all_done", "url": "", "client_args": []})
+        try:
+            combined, written, file_count = collect_matrix_csv(base_logs, side="all")
+            print_flush(f"[server] combined {written} row(s) from {file_count} CSV file(s): {combined}")
+            analysis, rows = analyze_matrix_csv(combined, print_top=True)
+            print_flush(f"[server] wrote analysis for {len(rows)} profile(s): {analysis}")
+        except SystemExit as error:
+            print_flush(f"[server] analysis skipped: {error}")
         return 0
     finally:
         server.shutdown()

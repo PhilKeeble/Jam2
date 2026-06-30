@@ -36,7 +36,35 @@ def fetch_current(base_url):
         return json.loads(response.read().decode("utf-8"))
 
 
-def run_connect(jam2, current, audio_device, base_logs):
+def upload_csv(base_url, test_id, run_index, csv_path):
+    if csv_path is None or not csv_path.exists():
+        print_flush(f"[client] no CSV to upload for {test_id} run {run_index}")
+        return False
+    payload = json.dumps({
+        "test_id": test_id,
+        "run_index": run_index,
+        "side": "client",
+        "csv": csv_path.read_text(encoding="utf-8"),
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        base_url.rstrip("/") + "/upload",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST")
+    for attempt in range(1, 6):
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                ok = 200 <= response.status < 300
+                if ok:
+                    print_flush(f"[client] uploaded CSV for {test_id} run {run_index}")
+                    return True
+        except urllib.error.URLError as error:
+            print_flush(f"[client] upload attempt {attempt} failed: {error}")
+        time.sleep(1.0)
+    return False
+
+
+def run_connect(jam2, current, audio_device, base_logs, server_url):
     test_id = current["test_id"]
     run_index = int(current["run_index"])
     output_dir = run_dir(base_logs, test_id, "client", run_index)
@@ -69,6 +97,7 @@ def run_connect(jam2, current, audio_device, base_logs):
         return_code = process.wait()
 
     copied_csv = copy_final_csv(csv_dir, output_dir)
+    upload_csv(server_url, test_id, run_index, copied_csv)
     print_flush(f"[client] finished {test_id} run {run_index} rc={return_code} csv={copied_csv or 'none'}")
     return return_code
 
@@ -105,7 +134,7 @@ def main():
             time.sleep(args_ns.poll_ms / 1000.0)
             continue
         seen.add(key)
-        rc = run_connect(jam2, current, args_ns.client_audio_device, base_logs)
+        rc = run_connect(jam2, current, args_ns.client_audio_device, base_logs, args_ns.server)
         if rc != 0:
             return rc
 

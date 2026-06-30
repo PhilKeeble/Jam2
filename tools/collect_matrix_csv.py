@@ -44,13 +44,12 @@ def default_output_path(logs_dir, side):
     return logs_dir / name
 
 
-def main():
-    args = parse_args()
-    logs_dir = Path(args.logs)
+def collect_matrix_csv(logs_dir, output=None, side="all"):
+    logs_dir = Path(logs_dir)
     if not logs_dir.exists():
         raise SystemExit(f"logs directory not found: {logs_dir}")
-    output = Path(args.output) if args.output else default_output_path(logs_dir, args.side)
-    rows = discover_stats(logs_dir, args.side)
+    output = Path(output) if output else default_output_path(logs_dir, side)
+    rows = discover_stats(logs_dir, side)
     if not rows:
         raise SystemExit(f"no stats.csv files found under {logs_dir}")
 
@@ -83,7 +82,13 @@ def main():
                     writer.writerow(out_row)
                     written += 1
 
-    print(f"wrote {written} row(s) from {len(rows)} file(s) to {output}")
+    return output, written, len(rows)
+
+
+def main():
+    args = parse_args()
+    output, written, file_count = collect_matrix_csv(args.logs, args.output or None, args.side)
+    print(f"wrote {written} row(s) from {file_count} file(s) to {output}")
     return 0
 
 

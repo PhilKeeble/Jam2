@@ -196,8 +196,9 @@ Options parse_options(int argc, char** argv, int start)
             }
         } else if (arg == "--frame-size") {
             options.frame_size = std::stoi(std::string(require_value(argc, argv, i, arg)));
-            if (options.frame_size != 32 && options.frame_size != 64 && options.frame_size != 128 && options.frame_size != 256) {
-                throw std::runtime_error("--frame-size must be 32, 64, 128, or 256");
+            if (options.frame_size != 32 && options.frame_size != 64 && options.frame_size != 128 &&
+                options.frame_size != 256 && options.frame_size != 512) {
+                throw std::runtime_error("--frame-size must be 32, 64, 128, 256, or 512");
             }
         } else if (arg == "--drift-correction") {
             const std::string value{require_value(argc, argv, i, arg)};
