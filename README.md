@@ -107,18 +107,18 @@ The adaptive search is staged to avoid spending repeated runs on clearly bad set
 - Confirmation: the best short-run result gets three 60 second runs. A rare non-catastrophic burst does not invalidate the profile if the aggregate rates remain inside the mostly-stable limits.
 - Aggressive recommendation: the tuner also prints a lowest-latency mostly-clean profile. This allows more playback underruns, tiny packet loss, dropped-frame rates, and depth dips that may be inaudible. It still rejects incomplete runs, playback overruns, severe jitter, and severe depth collapse.
 
-The server and client add best-effort `wired` / `wifi` / `unknown` network metadata to uploaded artifacts and `combined_stats.csv`. You can override detection with `--network-profile wired`, `--network-profile wifi`, or `--network-profile unknown` on either side.
+Always pass `--network-profile` on both scripts so the logs and acceptance thresholds match the actual connection. Use `wired` for Ethernet, `wifi` for Wi-Fi, and `unknown` if you cannot tell. If either side is on Wi-Fi, the combined run is treated as Wi-Fi. The scripts can still auto-detect with `--network-profile auto`, but explicit values are preferred for repeatable test data.
 
 Start the listen/server side first:
 
 ```powershell
-python tools/run_matrix_server.py --server-audio-device 16 --sample-rate 44100 --host 0.0.0.0 --port 8000 --clean
+python tools/run_matrix_server.py --server-audio-device 16 --sample-rate 44100 --host 0.0.0.0 --port 8000 --network-profile wired --clean
 ```
 
 Then start the connect/client side on the other host:
 
 ```bash
-python tools/run_matrix_client.py --server http://WINDOWS_IP:8000 --client-audio-device 0 --sample-rate 44100 --clean
+python tools/run_matrix_client.py --server http://WINDOWS_IP:8000 --client-audio-device 0 --sample-rate 44100 --network-profile wifi --clean
 ```
 
 After each test, the client uploads `stats.csv`, `stdout.txt`, and `stderr.txt` back to the server. When the tuner finishes it writes combined results, analysis, a stable recommendation, and an aggressive low-latency recommendation:

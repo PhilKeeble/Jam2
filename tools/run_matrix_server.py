@@ -5,6 +5,7 @@ import csv
 import http.server
 import json
 import math
+import shlex
 import shutil
 import subprocess
 import sys
@@ -862,6 +863,40 @@ def command_line(args):
     return " ".join(powershell_quote(arg) for arg in args)
 
 
+def posix_command_line(args):
+    return " ".join(shlex.quote(str(arg)) for arg in args)
+
+
+def first_command_token(command_line):
+    if not command_line:
+        return ""
+    try:
+        return shlex.split(command_line)[0]
+    except ValueError:
+        return command_line.split()[0] if command_line.split() else ""
+
+
+def client_jam2_command(server_jam2, client_platform, client_row):
+    uploaded_command = first_command_token(client_row.get("command_line", ""))
+    if uploaded_command:
+        return uploaded_command
+    platform = (client_platform or "").lower()
+    if platform == "macos" or platform.startswith("darwin"):
+        return "<repo>/build/jam2"
+    if platform.startswith("linux"):
+        return "<repo>/build/jam2"
+    if platform.startswith("win"):
+        return server_jam2
+    return "<path-to-jam2>"
+
+
+def command_line_for_platform(args, platform):
+    platform = (platform or "").lower()
+    if platform == "macos" or platform.startswith("darwin") or platform.startswith("linux"):
+        return posix_command_line(args)
+    return command_line(args)
+
+
 def first_final_row_for_side(base_logs, candidate_id, side):
     side_dir = base_logs / candidate_id / side
     if not side_dir.exists():
@@ -886,6 +921,7 @@ def command_block(base_logs, summary, context):
     client_audio_device = client_row.get("audio_device_id") or "<client-audio-device>"
     client_platform = client_row.get("platform") or "unknown"
     client_device_name = client_row.get("device_name") or "unknown"
+    client_jam2 = client_jam2_command(jam2, client_platform, client_row)
     common_args = candidate.runtime_args()
     listen_args = [
         jam2,
@@ -894,7 +930,7 @@ def command_block(base_logs, summary, context):
         "--sample-rate", str(sample_rate),
     ]
     connect_args = [
-        jam2,
+        client_jam2,
         "connect",
         "<paste jam2://...>",
         "--audio-device", str(client_audio_device),
@@ -911,7 +947,7 @@ def command_block(base_logs, summary, context):
         "  server_listen_command:",
         f"    {command_line(listen_args)}",
         "  client_connect_command:",
-        f"    {command_line(connect_args)}",
+        f"    {command_line_for_platform(connect_args, client_platform)}",
     ]
 
 
