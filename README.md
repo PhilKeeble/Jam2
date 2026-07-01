@@ -96,7 +96,18 @@ quit
 
 Automated adaptive tuning:
 
-The Python tuner starts with aggressive settings and backs off until it finds a mostly stable profile for the exact two-host setup. Each candidate runs three short tests, then the first stable candidate is confirmed with longer tests. The largest packetization mode remains 256 frames to keep audio UDP packets below typical MTU.
+The Python tuner starts with aggressive settings and backs off until it finds a mostly stable profile for the exact two-host setup. It raises frame size before audio buffer size, skips adaptive candidates where `frame_size < audio_buffer_size`, and does not test 32-frame packetization or 512-frame audio buffers. The largest packetization mode remains 256 frames to keep audio UDP packets below typical MTU.
+
+The adaptive search is staged to avoid spending repeated runs on clearly bad settings:
+
+- Probe: one 30 second run per candidate. Obvious failures such as excessive packet loss rate, excessive playback underrun rate, missing client upload, missing final stats, or playback depth below 2.5 ms are rejected immediately. Tiny playback underrun, packet-loss, and dropped-frame rates are kept as warnings so audibly clean low-latency paths can continue.
+- Prefill jump: if a probe, edge check, or confirmation run fails only because playback depth is too low, the tuner estimates the missing frames from the CSV depth minimum and sample rate, then queues the next matching prefill value instead of waiting for the normal ladder to reach it.
+- Edge check: promising candidates get two more 30 second runs. A candidate can pass with 2/3 good runs if aggregate packet-loss, underrun, dropped-frame, overrun, and depth metrics are within the mostly-stable limits.
+- Drift check: default adaptive runs keep `--drift-correction on --drift-deadband-ppm 25` and report measured drift. Add `--drift-probes` to spend extra time testing one measured wider deadband after a physical profile is already stable.
+- Confirmation: the best short-run result gets three 60 second runs. A rare non-catastrophic burst does not invalidate the profile if the aggregate rates remain inside the mostly-stable limits.
+- Aggressive recommendation: the tuner also prints a lowest-latency mostly-clean profile. This allows more playback underruns, tiny packet loss, dropped-frame rates, and depth dips that may be inaudible. It still rejects incomplete runs, playback overruns, severe jitter, and severe depth collapse.
+
+The server and client add best-effort `wired` / `wifi` / `unknown` network metadata to uploaded artifacts and `combined_stats.csv`. You can override detection with `--network-profile wired`, `--network-profile wifi`, or `--network-profile unknown` on either side.
 
 Start the listen/server side first:
 
@@ -110,7 +121,7 @@ Then start the connect/client side on the other host:
 python tools/run_matrix_client.py --server http://WINDOWS_IP:8000 --client-audio-device 0 --sample-rate 44100 --clean
 ```
 
-After each test, the client uploads `stats.csv`, `stdout.txt`, and `stderr.txt` back to the server. When the tuner finishes it writes combined results, analysis, and a short recommendation:
+After each test, the client uploads `stats.csv`, `stdout.txt`, and `stderr.txt` back to the server. When the tuner finishes it writes combined results, analysis, a stable recommendation, and an aggressive low-latency recommendation:
 
 ```text
 tools/logs/combined_stats.csv
@@ -167,7 +178,15 @@ This writes:
 tools/logs/analysis.csv
 ```
 
-The analyzer ranks profiles by stability first, then latency. By default, any sequence loss, reordered loss, playback underrun, playback overrun, or dropped playback frame marks a profile unstable. To tolerate small glitches during experiments:
+The analyzer ranks profiles by stability first, then latency. By default, any sequence loss, reordered loss, playback underrun, playback overrun, or dropped playback frame marks a profile unstable. The adaptive server invokes it with confirmation rules requiring at least three runs, at least 2.5 ms playback depth, and only tiny playback underrun rates. Depth below 5 ms is still reported as a warning in the adaptive output because it means the ring came close to empty. To apply the adaptive stable rules manually:
+
+The analyzer's stdout label is `CSV-ranked profile`. The adaptive tuner prints separate `stable recommendation` and `aggressive low-latency recommendation` lines and writes both to `tools/logs/recommendation.txt`; use those as the automation result. Each recommendation includes a full server `listen` command and a client `connect "<paste jam2://...>"` command using the detected client audio device from uploaded logs.
+
+```powershell
+python tools/analyze_matrix_csv.py --input tools/logs/combined_stats.csv --min-runs 3 --min-playback-depth-ms 2.5 --max-loss-percent 0.05 --max-loss-per-second 0.10 --max-playback-underruns-per-second 3 --max-playback-underrun-events-per-second 0.10 --max-playback-dropped-frames-per-second 8
+```
+
+To tolerate small glitches during experiments:
 
 ```powershell
 python tools/analyze_matrix_csv.py --max-loss 2 --max-playback-underruns 256

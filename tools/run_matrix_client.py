@@ -4,6 +4,7 @@ import argparse
 import json
 import shutil
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -29,7 +30,17 @@ def parse_args():
     parser.add_argument("--logs", default=str(Path(__file__).with_name("logs")))
     parser.add_argument("--poll-ms", type=int, default=500)
     parser.add_argument("--timeout-s", type=int, default=0, help="0 waits forever")
+    parser.add_argument(
+        "--server-gone-grace-s",
+        type=int,
+        default=10,
+        help="exit cleanly if the server is unreachable for this long after at least one completed run")
     parser.add_argument("--clean", action="store_true", help="delete local logs before running and remove uploaded run logs")
+    parser.add_argument(
+        "--network-profile",
+        choices=("auto", "wired", "wifi", "unknown"),
+        default="auto",
+        help="client network type metadata; auto uses best-effort local detection")
     return parser.parse_args()
 
 
@@ -45,7 +56,41 @@ def read_text_if_exists(path):
     return path.read_text(encoding="utf-8", errors="replace")
 
 
-def upload_artifacts(base_url, test_id, run_index, csv_path, stdout_path, stderr_path):
+def detect_network_type():
+    try:
+        if sys.platform == "win32":
+            command = [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1 | "
+                "Get-NetAdapter).NdisPhysicalMedium"
+            ]
+            text = subprocess.check_output(command, text=True, timeout=3, stderr=subprocess.DEVNULL).strip().lower()
+            if "wireless" in text or "802.11" in text or "wifi" in text:
+                return "wifi"
+            if text:
+                return "wired"
+        elif sys.platform == "darwin":
+            route = subprocess.check_output(["route", "get", "default"], text=True, timeout=3, stderr=subprocess.DEVNULL)
+            iface = ""
+            for line in route.splitlines():
+                if "interface:" in line:
+                    iface = line.split(":", 1)[1].strip()
+                    break
+            ports = subprocess.check_output(["networksetup", "-listallhardwareports"], text=True, timeout=3, stderr=subprocess.DEVNULL)
+            for block in ports.split("\n\n"):
+                if f"Device: {iface}" in block:
+                    lower = block.lower()
+                    if "wi-fi" in lower or "airport" in lower:
+                        return "wifi"
+                    return "wired"
+    except Exception:
+        pass
+    return "unknown"
+
+
+def upload_artifacts(base_url, test_id, run_index, csv_path, stdout_path, stderr_path, network_type):
     if csv_path is None or not csv_path.exists():
         print_flush(f"[client] no CSV to upload for {test_id} run {run_index}")
         return False
@@ -56,6 +101,7 @@ def upload_artifacts(base_url, test_id, run_index, csv_path, stdout_path, stderr
         "csv": read_text_if_exists(csv_path),
         "stdout": read_text_if_exists(stdout_path),
         "stderr": read_text_if_exists(stderr_path),
+        "network_type": network_type,
     }).encode("utf-8")
     request = urllib.request.Request(
         base_url.rstrip("/") + "/upload",
@@ -75,7 +121,7 @@ def upload_artifacts(base_url, test_id, run_index, csv_path, stdout_path, stderr
     return False
 
 
-def run_connect(jam2, current, audio_device, sample_rate, base_logs, server_url, clean_after_upload):
+def run_connect(jam2, current, audio_device, sample_rate, base_logs, server_url, clean_after_upload, network_type):
     test_id = current["test_id"]
     run_index = int(current["run_index"])
     output_dir = run_dir(base_logs, test_id, "client", run_index)
@@ -110,7 +156,7 @@ def run_connect(jam2, current, audio_device, sample_rate, base_logs, server_url,
         return_code = process.wait()
 
     copied_csv = copy_final_csv(csv_dir, output_dir)
-    uploaded = upload_artifacts(server_url, test_id, run_index, copied_csv, stdout_path, stderr_path)
+    uploaded = upload_artifacts(server_url, test_id, run_index, copied_csv, stdout_path, stderr_path, network_type)
     if clean_after_upload and uploaded:
         shutil.rmtree(output_dir)
         print_flush(f"[client] removed uploaded local logs for {test_id} run {run_index}")
@@ -127,15 +173,26 @@ def main():
     if args_ns.clean and base_logs_path.exists():
         shutil.rmtree(base_logs_path)
     base_logs = ensure_dir(base_logs_path)
+    detected_network = detect_network_type()
+    network_type = detected_network if args_ns.network_profile == "auto" else args_ns.network_profile
+    print_flush(f"[client] network type: {network_type} detected={detected_network}")
     seen = set()
     deadline = time.monotonic() + args_ns.timeout_s if args_ns.timeout_s > 0 else None
+    server_gone_since = None
 
     while True:
         if deadline is not None and time.monotonic() >= deadline:
             return fail("timed out waiting for matrix server")
         try:
             current = fetch_current(args_ns.server)
+            server_gone_since = None
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+            if seen:
+                if server_gone_since is None:
+                    server_gone_since = time.monotonic()
+                elif time.monotonic() - server_gone_since >= args_ns.server_gone_grace_s:
+                    print_flush("[client] server stopped after completed runs")
+                    return 0
             print_flush(f"[client] waiting for server: {error}")
             time.sleep(args_ns.poll_ms / 1000.0)
             continue
@@ -160,7 +217,8 @@ def main():
             args_ns.sample_rate,
             base_logs,
             args_ns.server,
-            args_ns.clean)
+            args_ns.clean,
+            network_type)
         if rc != 0:
             return rc
 

@@ -446,6 +446,7 @@ struct AudioPacketStats {
     std::uint64_t audio_delay_samples = 0;
     std::uint64_t reordered_recovered = 0;
     std::uint64_t reordered_lost = 0;
+    std::uint64_t reordered_lost_events = 0;
     std::uint64_t jitter_min_us = 0;
     std::uint64_t jitter_sum_us = 0;
     std::uint64_t jitter_max_us = 0;
@@ -782,9 +783,11 @@ public:
         bool playback_prefilled = false;
         std::uint64_t capture_ring_overruns = 0;
         std::uint64_t capture_ring_underruns = 0;
+        std::uint64_t capture_ring_underrun_events = 0;
         std::size_t capture_ring_readable = 0;
         std::uint64_t playback_ring_overruns = 0;
         std::uint64_t playback_ring_underruns = 0;
+        std::uint64_t playback_ring_underrun_events = 0;
         std::size_t playback_ring_readable = 0;
     };
 
@@ -805,15 +808,15 @@ public:
                 "requested_input_mode,active_input_mode,requested_channels,active_channels,"
                 "drift_correction,drift_smoothing,drift_deadband_ppm,drift_max_correction_ppm,metronome,bpm,metronome_level,"
                 "sent_packets,recv_packets,sent_bytes,recv_bytes,send_bitrate_bps,recv_bitrate_bps,"
-                "sequence_lost,sequence_loss_percent,sequence_duplicate,sequence_out_of_order,sequence_late,"
-                "reordered_recovered,reordered_lost,startup_drained_packets,recv_packets_plus_startup_drained,"
+                "sequence_lost,sequence_loss_events,sequence_loss_max_gap,sequence_loss_percent,sequence_duplicate,sequence_out_of_order,sequence_late,"
+                "reordered_recovered,reordered_lost,reordered_lost_events,startup_drained_packets,recv_packets_plus_startup_drained,"
                 "stats_warmup_skipped_packets,ignored_packets,"
                 "playback_dropped_frames,playback_depth_min_frames,playback_depth_avg_frames,playback_depth_max_frames,"
                 "playback_depth_min_ms,playback_depth_avg_ms,playback_depth_max_ms,"
                 "jitter_min_ms,jitter_avg_ms,jitter_max_ms,rtt_min_ms,rtt_avg_ms,rtt_max_ms,"
                 "estimated_one_way_ms,raw_drift_ppm,drift_ppm,resampler_ratio,"
-                "audio_callbacks,playback_prefilled,capture_ring_overruns,capture_ring_underruns,capture_ring_readable_frames,"
-                "capture_ring_readable_ms,playback_ring_overruns,playback_ring_underruns,playback_ring_readable_frames,"
+                "audio_callbacks,playback_prefilled,capture_ring_overruns,capture_ring_underruns,capture_ring_underrun_events,capture_ring_readable_frames,"
+                "capture_ring_readable_ms,playback_ring_overruns,playback_ring_underruns,playback_ring_underrun_events,playback_ring_readable_frames,"
                 "playback_ring_readable_ms,"
                 "pings_sent,pongs_sent,pongs_received,bye_sent,bye_received,metronome_states_sent,metronome_states_received,"
                 "final_metronome,final_bpm\n";
@@ -891,12 +894,15 @@ public:
              << send_bitrate << ','
              << recv_bitrate << ','
              << stats.sequence.lost << ','
+             << stats.sequence.loss_events << ','
+             << stats.sequence.loss_max_gap << ','
              << sequence_loss_percent(stats) << ','
              << stats.sequence.duplicate << ','
              << stats.sequence.out_of_order << ','
              << stats.sequence.late << ','
              << stats.reordered_recovered << ','
              << stats.reordered_lost << ','
+             << stats.reordered_lost_events << ','
              << stats.startup_drained_packets << ','
              << (stats.recv_packets + stats.startup_drained_packets) << ','
              << stats.stats_warmup_skipped_packets << ','
@@ -922,10 +928,12 @@ public:
              << (audio.playback_prefilled ? "yes" : "no") << ','
              << audio.capture_ring_overruns << ','
              << audio.capture_ring_underruns << ','
+             << audio.capture_ring_underrun_events << ','
              << audio.capture_ring_readable << ','
              << frames_to_ms(audio.capture_ring_readable, active_sample_rate) << ','
              << audio.playback_ring_overruns << ','
              << audio.playback_ring_underruns << ','
+             << audio.playback_ring_underrun_events << ','
              << audio.playback_ring_readable << ','
              << frames_to_ms(audio.playback_ring_readable, active_sample_rate) << ','
              << stats.sent_pings << ','
@@ -951,7 +959,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(92);
+        std::vector<std::string> fields(97);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -962,39 +970,44 @@ public:
         set(39, stats.sent_packets);
         set(40, stats.recv_packets);
         set(45, stats.sequence.lost);
-        set(46, sequence_loss_percent(stats));
-        set(47, stats.sequence.duplicate);
-        set(48, stats.sequence.out_of_order);
-        set(49, stats.sequence.late);
-        set(50, stats.reordered_recovered);
-        set(51, stats.reordered_lost);
-        set(55, stats.ignored_packets);
-        set(56, stats.playback_dropped_frames);
-        set(57, stats.playback_depth_min_frames);
-        set(58, playback_depth_avg_frames(stats));
-        set(59, stats.playback_depth_max_frames);
-        set(60, frames_to_ms(static_cast<std::size_t>(stats.playback_depth_min_frames), options.sample_rate));
-        set(61, playback_depth_avg_ms(stats, options));
-        set(62, frames_to_ms(static_cast<std::size_t>(stats.playback_depth_max_frames), options.sample_rate));
-        set(63, stats.jitter_samples > 0 ? static_cast<double>(stats.jitter_min_us) / 1000.0 : 0.0);
-        set(64, stats.jitter_samples > 0 ?
+        set(46, stats.sequence.loss_events);
+        set(47, stats.sequence.loss_max_gap);
+        set(48, sequence_loss_percent(stats));
+        set(49, stats.sequence.duplicate);
+        set(50, stats.sequence.out_of_order);
+        set(51, stats.sequence.late);
+        set(52, stats.reordered_recovered);
+        set(53, stats.reordered_lost);
+        set(54, stats.reordered_lost_events);
+        set(58, stats.ignored_packets);
+        set(59, stats.playback_dropped_frames);
+        set(60, stats.playback_depth_min_frames);
+        set(61, playback_depth_avg_frames(stats));
+        set(62, stats.playback_depth_max_frames);
+        set(63, frames_to_ms(static_cast<std::size_t>(stats.playback_depth_min_frames), options.sample_rate));
+        set(64, playback_depth_avg_ms(stats, options));
+        set(65, frames_to_ms(static_cast<std::size_t>(stats.playback_depth_max_frames), options.sample_rate));
+        set(66, stats.jitter_samples > 0 ? static_cast<double>(stats.jitter_min_us) / 1000.0 : 0.0);
+        set(67, stats.jitter_samples > 0 ?
             static_cast<double>(stats.jitter_sum_us) / static_cast<double>(stats.jitter_samples) / 1000.0 :
             0.0);
-        set(65, stats.jitter_samples > 0 ? static_cast<double>(stats.jitter_max_us) / 1000.0 : 0.0);
-        set(66, stats.recv_pongs > 0 ? static_cast<double>(stats.rtt_min_us) / 1000.0 : 0.0);
-        set(67, rtt_avg_ms(stats));
-        set(68, stats.recv_pongs > 0 ? static_cast<double>(stats.rtt_max_us) / 1000.0 : 0.0);
-        set(69, estimated_one_way_ms(stats, options));
-        set(70, stats.raw_drift_ppm);
-        set(71, stats.drift_ppm);
-        set(72, stats.resampler_ratio);
-        set(73, audio.callbacks);
-        set(76, audio.capture_ring_underruns);
-        set(77, audio.capture_ring_readable);
-        set(78, frames_to_ms(audio.capture_ring_readable, options.sample_rate));
-        set(80, audio.playback_ring_underruns);
-        set(81, audio.playback_ring_readable);
-        set(82, frames_to_ms(audio.playback_ring_readable, options.sample_rate));
+        set(68, stats.jitter_samples > 0 ? static_cast<double>(stats.jitter_max_us) / 1000.0 : 0.0);
+        set(69, stats.recv_pongs > 0 ? static_cast<double>(stats.rtt_min_us) / 1000.0 : 0.0);
+        set(70, rtt_avg_ms(stats));
+        set(71, stats.recv_pongs > 0 ? static_cast<double>(stats.rtt_max_us) / 1000.0 : 0.0);
+        set(72, estimated_one_way_ms(stats, options));
+        set(73, stats.raw_drift_ppm);
+        set(74, stats.drift_ppm);
+        set(75, stats.resampler_ratio);
+        set(76, audio.callbacks);
+        set(79, audio.capture_ring_underruns);
+        set(80, audio.capture_ring_underrun_events);
+        set(81, audio.capture_ring_readable);
+        set(82, frames_to_ms(audio.capture_ring_readable, options.sample_rate));
+        set(84, audio.playback_ring_underruns);
+        set(85, audio.playback_ring_underrun_events);
+        set(86, audio.playback_ring_readable);
+        set(87, frames_to_ms(audio.playback_ring_readable, options.sample_rate));
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {
@@ -1028,12 +1041,14 @@ CsvStatsLog::AudioSnapshot make_audio_snapshot(
         const auto stats = capture_ring->stats();
         snapshot.capture_ring_overruns = stats.overruns;
         snapshot.capture_ring_underruns = stats.underruns;
+        snapshot.capture_ring_underrun_events = stats.underrun_events;
         snapshot.capture_ring_readable = capture_ring->available_read();
     }
     if (playback_ring != nullptr) {
         const auto stats = playback_ring->stats();
         snapshot.playback_ring_overruns = stats.overruns;
         snapshot.playback_ring_underruns = stats.underruns;
+        snapshot.playback_ring_underrun_events = stats.underrun_events;
         snapshot.playback_ring_readable = playback_ring->available_read();
     }
     return snapshot;
@@ -1254,6 +1269,7 @@ AudioPacketStats run_audio_packet_exchange(
             if (expected_sequence_set && highest_sequence > expected_sequence + kReorderWindowPackets) {
                 ++stats.sequence.lost;
                 ++stats.reordered_lost;
+                ++stats.reordered_lost_events;
                 ++expected_sequence;
                 continue;
             }
@@ -1610,12 +1626,15 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
         std::cout << "RTT ms max: " << (static_cast<double>(stats.rtt_max_us) / 1000.0) << "\n";
     }
     std::cout << "Sequence lost: " << stats.sequence.lost << "\n";
+    std::cout << "Sequence loss events: " << stats.sequence.loss_events << "\n";
+    std::cout << "Sequence loss max gap: " << stats.sequence.loss_max_gap << "\n";
     std::cout << "Sequence loss percent: " << sequence_loss_percent(stats) << "\n";
     std::cout << "Sequence duplicate: " << stats.sequence.duplicate << "\n";
     std::cout << "Sequence out_of_order: " << stats.sequence.out_of_order << "\n";
     std::cout << "Sequence late: " << stats.sequence.late << "\n";
     std::cout << "Reordered packets recovered: " << stats.reordered_recovered << "\n";
     std::cout << "Reordered packets lost: " << stats.reordered_lost << "\n";
+    std::cout << "Reordered packet loss events: " << stats.reordered_lost_events << "\n";
     if (stats.recv_pongs > 0 && stats.playback_depth_samples > 0) {
         std::cout << "Estimated one-way latency ms: " << estimated_one_way_ms(stats, options) << "\n";
         std::cout << "Estimated one-way latency note: RTT/2 + playback depth avg + audio buffer\n";
@@ -1732,10 +1751,12 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
     std::cout << "Playback prefill ms: " << frames_to_ms(options.playback_prefill_frames, options.sample_rate) << "\n";
     std::cout << "Capture ring overruns frames: " << capture_stats.overruns << "\n";
     std::cout << "Capture ring underruns frames: " << capture_stats.underruns << "\n";
+    std::cout << "Capture ring underrun events: " << capture_stats.underrun_events << "\n";
     std::cout << "Capture ring readable frames: " << capture_readable << "\n";
     std::cout << "Capture ring readable ms: " << frames_to_ms(capture_readable, options.sample_rate) << "\n";
     std::cout << "Playback ring overruns frames: " << playback_stats.overruns << "\n";
     std::cout << "Playback ring underruns frames: " << playback_stats.underruns << "\n";
+    std::cout << "Playback ring underrun events: " << playback_stats.underrun_events << "\n";
     std::cout << "Playback ring readable frames: " << playback_readable << "\n";
     std::cout << "Playback ring readable ms: " << frames_to_ms(playback_readable, options.sample_rate) << "\n";
     if (audio.control) {
@@ -1902,6 +1923,7 @@ int run_ring_device(int argc, char** argv)
     std::cout << "Callbacks: " << result.callbacks << "\n";
     std::cout << "Ring overruns frames: " << result.ring_overruns << "\n";
     std::cout << "Ring underruns frames: " << result.ring_underruns << "\n";
+    std::cout << "Ring underrun events: " << result.ring_underrun_events << "\n";
     std::cout << "Ring readable frames: " << result.ring_readable << "\n";
     return 0;
 }

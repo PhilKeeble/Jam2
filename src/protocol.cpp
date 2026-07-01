@@ -220,7 +220,12 @@ SequenceResult SequenceTracker::observe(std::uint32_t sequence)
     if (sequence > highest_) {
         const std::uint32_t gap = sequence - highest_;
         if (gap > 1) {
-            stats_.lost += gap - 1;
+            const std::uint64_t missing = gap - 1;
+            stats_.lost += missing;
+            ++stats_.loss_events;
+            if (missing > stats_.loss_max_gap) {
+                stats_.loss_max_gap = missing;
+            }
         }
         recent_window_ = gap >= 64 ? 1 : ((recent_window_ << gap) | 1U);
         highest_ = sequence;

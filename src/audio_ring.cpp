@@ -54,6 +54,7 @@ std::size_t MonoRingBuffer::pop(std::span<std::int32_t> frames)
     if (count < frames.size()) {
         std::fill(frames.begin() + static_cast<std::ptrdiff_t>(count), frames.end(), 0);
         underruns_.fetch_add(frames.size() - count, std::memory_order_relaxed);
+        underrun_events_.fetch_add(1, std::memory_order_relaxed);
     }
     read_.store(read + count, std::memory_order_release);
     return count;
@@ -74,6 +75,7 @@ RingStats MonoRingBuffer::stats() const
     return RingStats{
         overruns_.load(std::memory_order_relaxed),
         underruns_.load(std::memory_order_relaxed),
+        underrun_events_.load(std::memory_order_relaxed),
     };
 }
 
@@ -83,6 +85,7 @@ void MonoRingBuffer::reset()
     write_.store(0, std::memory_order_release);
     overruns_.store(0, std::memory_order_relaxed);
     underruns_.store(0, std::memory_order_relaxed);
+    underrun_events_.store(0, std::memory_order_relaxed);
 }
 
 } // namespace jam2::audio

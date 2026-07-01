@@ -698,7 +698,7 @@ void pop_resampled_playback(CoreAudioDuplexContext& context, std::span<std::int3
 
     const int ratio_ppm = context.control->playback_ratio_ppm.load(std::memory_order_relaxed);
     const double ratio = static_cast<double>(std::clamp(ratio_ppm, 995000, 1005000)) / 1000000.0;
-    if (ratio_ppm == 1000000) {
+    if (ratio_ppm == 1000000 && !context.resample_has_current && !context.resample_has_next) {
         context.resample_has_current = false;
         context.resample_has_next = false;
         context.resample_phase = 0.0;
@@ -1035,6 +1035,7 @@ DeviceRingResult ring_device(
     result.callbacks = context.callbacks.load(std::memory_order_relaxed);
     result.ring_overruns = ring_stats.overruns;
     result.ring_underruns = ring_stats.underruns;
+    result.ring_underrun_events = ring_stats.underrun_events;
     result.ring_readable = ring.available_read();
     return result;
 }

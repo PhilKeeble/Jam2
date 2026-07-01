@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import json
 from pathlib import Path
 
 
@@ -39,6 +40,35 @@ def run_number(run_name):
     return 0
 
 
+def read_json(path):
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def run_metadata(logs_dir, test_id, run_name):
+    server_meta = read_json(logs_dir / test_id / "server" / run_name / "metadata.json")
+    client_meta = read_json(logs_dir / test_id / "client" / run_name / "upload.json")
+    server_network = server_meta.get("network_type", "unknown")
+    client_network = client_meta.get("network_type", "unknown")
+    network_profile = server_meta.get("network_profile", "unknown")
+    if server_network == "wifi" or client_network == "wifi":
+        combined = "wifi"
+    elif server_network == "wired" and client_network == "wired":
+        combined = "wired"
+    else:
+        combined = "unknown"
+    return {
+        "matrix_network_type": combined,
+        "matrix_server_network_type": server_network,
+        "matrix_client_network_type": client_network,
+        "matrix_network_profile": network_profile,
+    }
+
+
 def default_output_path(logs_dir, side):
     name = "combined_stats.csv" if side == "all" else f"combined_stats_{side}.csv"
     return logs_dir / name
@@ -54,7 +84,16 @@ def collect_matrix_csv(logs_dir, output=None, side="all"):
         raise SystemExit(f"no stats.csv files found under {logs_dir}")
 
     loaded_rows = []
-    header = ["matrix_test_id", "matrix_side", "matrix_run", "matrix_stats_path"]
+    header = [
+        "matrix_test_id",
+        "matrix_side",
+        "matrix_run",
+        "matrix_stats_path",
+        "matrix_network_type",
+        "matrix_server_network_type",
+        "matrix_client_network_type",
+        "matrix_network_profile",
+    ]
     seen_fields = set(header)
     for test_id, side_name, run_name, stats_path in rows:
         with open(stats_path, "r", encoding="utf-8", newline="") as in_file:
@@ -72,6 +111,7 @@ def collect_matrix_csv(logs_dir, output=None, side="all"):
                     "matrix_run": run_number(run_name),
                     "matrix_stats_path": str(stats_path),
                 }
+                out_row.update(run_metadata(logs_dir, test_id, run_name))
                 out_row.update(row)
                 loaded_rows.append(out_row)
 

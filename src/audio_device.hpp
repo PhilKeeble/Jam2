@@ -52,6 +52,7 @@ struct DeviceRingResult {
     long callbacks = 0;
     std::uint64_t ring_overruns = 0;
     std::uint64_t ring_underruns = 0;
+    std::uint64_t ring_underrun_events = 0;
     std::size_t ring_readable = 0;
 };
 

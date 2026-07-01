@@ -40,6 +40,8 @@ enum class SequenceResult {
 
 struct SequenceStats {
     std::uint64_t lost = 0;
+    std::uint64_t loss_events = 0;
+    std::uint64_t loss_max_gap = 0;
     std::uint64_t duplicate = 0;
     std::uint64_t out_of_order = 0;
     std::uint64_t late = 0;

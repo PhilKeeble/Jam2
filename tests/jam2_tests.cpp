@@ -248,10 +248,15 @@ void test_audio_ring()
     const std::array<std::int32_t, 5> expected{3, 4, 5, 6, 0};
     require(wrapped == expected, "ring wrapped content or underrun fill mismatch");
     require(ring.stats().underruns == 1, "ring underrun count mismatch");
+    require(ring.stats().underrun_events == 1, "ring underrun event count mismatch");
 
     ring.reset();
     require(ring.available_read() == 0, "ring reset readable mismatch");
-    require(ring.stats().overruns == 0 && ring.stats().underruns == 0, "ring reset stats mismatch");
+    require(
+        ring.stats().overruns == 0 &&
+        ring.stats().underruns == 0 &&
+        ring.stats().underrun_events == 0,
+        "ring reset stats mismatch");
 
     const std::array<std::int32_t, 4> drop_source{10, 11, 12, 13};
     require(ring.push(drop_source) == 4, "ring drop setup push mismatch");

@@ -11,6 +11,7 @@ namespace jam2::audio {
 struct RingStats {
     std::uint64_t overruns = 0;
     std::uint64_t underruns = 0;
+    std::uint64_t underrun_events = 0;
 };
 
 class MonoRingBuffer {
@@ -37,6 +38,7 @@ private:
     std::atomic<std::uint64_t> write_{0};
     std::atomic<std::uint64_t> overruns_{0};
     std::atomic<std::uint64_t> underruns_{0};
+    std::atomic<std::uint64_t> underrun_events_{0};
 };
 
 } // namespace jam2::audio
