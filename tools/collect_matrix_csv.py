@@ -53,34 +53,36 @@ def collect_matrix_csv(logs_dir, output=None, side="all"):
     if not rows:
         raise SystemExit(f"no stats.csv files found under {logs_dir}")
 
-    header = None
+    loaded_rows = []
+    header = ["matrix_test_id", "matrix_side", "matrix_run", "matrix_stats_path"]
+    seen_fields = set(header)
+    for test_id, side_name, run_name, stats_path in rows:
+        with open(stats_path, "r", encoding="utf-8", newline="") as in_file:
+            reader = csv.DictReader(in_file)
+            if reader.fieldnames is None:
+                continue
+            for field in reader.fieldnames:
+                if field not in seen_fields:
+                    header.append(field)
+                    seen_fields.add(field)
+            for row in reader:
+                out_row = {
+                    "matrix_test_id": test_id,
+                    "matrix_side": side_name,
+                    "matrix_run": run_number(run_name),
+                    "matrix_stats_path": str(stats_path),
+                }
+                out_row.update(row)
+                loaded_rows.append(out_row)
+
     written = 0
     output.parent.mkdir(parents=True, exist_ok=True)
     with open(output, "w", encoding="utf-8", newline="") as out_file:
-        writer = None
-        for test_id, side_name, run_name, stats_path in rows:
-            with open(stats_path, "r", encoding="utf-8", newline="") as in_file:
-                reader = csv.DictReader(in_file)
-                if reader.fieldnames is None:
-                    continue
-                if header is None:
-                    header = ["matrix_test_id", "matrix_side", "matrix_run", "matrix_stats_path"]
-                    header.extend(reader.fieldnames)
-                    writer = csv.DictWriter(out_file, fieldnames=header)
-                    writer.writeheader()
-                elif reader.fieldnames != header[4:]:
-                    raise SystemExit(f"CSV header mismatch in {stats_path}")
-                assert writer is not None
-                for row in reader:
-                    out_row = {
-                        "matrix_test_id": test_id,
-                        "matrix_side": side_name,
-                        "matrix_run": run_number(run_name),
-                        "matrix_stats_path": str(stats_path),
-                    }
-                    out_row.update(row)
-                    writer.writerow(out_row)
-                    written += 1
+        writer = csv.DictWriter(out_file, fieldnames=header, extrasaction="ignore")
+        writer.writeheader()
+        for row in loaded_rows:
+            writer.writerow(row)
+            written += 1
 
     return output, written, len(rows)
 

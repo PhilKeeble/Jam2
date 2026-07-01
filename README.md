@@ -74,13 +74,14 @@ Key arguments:
 | `--playback-ring-frames` | Playback ring capacity/headroom. | Raise if bursts cause overruns; capacity alone does not add latency unless depth grows. |
 | `--playback-max-frames` | Maximum retained playback depth before old frames are dropped. | Keep set to prevent latency creep over time. |
 | `--stats-warmup-ms` | Excludes startup from drift/jitter/depth tuning stats. | Raise if startup transients are still skewing CSV results. |
-| `--stats-interval-ms` | Prints periodic stdout stats while streaming. | Use during manual tuning; CSV records final results only. |
-| `--log-stats` | Writes final CSV stats to a folder. | Enable for comparing runs or matrix tests. |
+| `--stats-interval-ms` | Prints periodic stats and writes sparse periodic CSV rows when logging. | Use during manual tuning and adaptive analysis. |
+| `--log-stats` | Writes CSV stats to a folder. | Enable for comparing adaptive or manual runs. |
+| `--drift-deadband-ppm` | Keeps playback at exact 1.0 ratio while smoothed drift is within this ppm. | Raise if tiny corrections sound rough; lower if long-run drift needs earlier correction. |
 | `--drift-max-correction-ppm` | Caps playback resampler correction. | Change only if `resampler_ratio` is pinned and `drift_ppm` is believable. |
 | `--input-channels` | Selects mono input or stereo pair mixed to mono. | Use when instrument input is not channel 1. |
 | `--output-channels` | Selects output channel or duplicated pair. | Use when headphones/monitor outputs are not 1/2. |
 | `--socket-send-buffer` / `--socket-recv-buffer` | Requests OS UDP socket buffer sizes. | Use when diagnosing packet drops or OS buffering differences. |
-| `--stream-ms` | Ends the stream after a fixed duration. | Use for repeatable tests and matrix runs. |
+| `--stream-ms` | Ends the stream after a fixed duration. | Use for repeatable adaptive or manual tests. |
 | `--wait-ms` | Limits how long handshake waits. | Leave unset for manual sessions; set for automation. |
 
 Runtime commands:
@@ -93,33 +94,29 @@ metro on
 quit
 ```
 
-Automated matrix testing:
+Automated adaptive tuning:
 
-Edit test cases in:
-
-```text
-tools/test_matrix.json
-```
-
-The default matrix covers aggressive through safe profiles from `64/64` up to `512/256`. The largest packetization mode is 256 frames to keep audio UDP packets below typical MTU. Each test runs for `120000ms` by default; increase `--runs` to measure variance across repeated runs.
+The Python tuner starts with aggressive settings and backs off until it finds a mostly stable profile for the exact two-host setup. Each candidate runs three short tests, then the first stable candidate is confirmed with longer tests. The largest packetization mode remains 256 frames to keep audio UDP packets below typical MTU.
 
 Start the listen/server side first:
 
 ```powershell
-python tools/run_matrix_server.py --server-audio-device 16 --host 0.0.0.0 --port 8000 --runs 3 --clean
+python tools/run_matrix_server.py --server-audio-device 16 --sample-rate 44100 --host 0.0.0.0 --port 8000 --clean
 ```
 
 Then start the connect/client side on the other host:
 
 ```bash
-python tools/run_matrix_client.py --server http://WINDOWS_IP:8000 --client-audio-device 0 --clean
+python tools/run_matrix_client.py --server http://WINDOWS_IP:8000 --client-audio-device 0 --sample-rate 44100 --clean
 ```
 
-After each test, the client uploads its `stats.csv` back to the server. When the server finishes the matrix it writes combined results and analysis automatically:
+After each test, the client uploads `stats.csv`, `stdout.txt`, and `stderr.txt` back to the server. When the tuner finishes it writes combined results, analysis, and a short recommendation:
 
 ```text
 tools/logs/combined_stats.csv
 tools/logs/analysis.csv
+tools/logs/analysis.json
+tools/logs/recommendation.txt
 ```
 
 The server publishes the current `jam2://` URL as raw JSON at:
@@ -131,13 +128,13 @@ http://WINDOWS_IP:8000/current.json
 Logs are written under:
 
 ```text
-tools/logs/<test-id>/server/run_NN/
-tools/logs/<test-id>/client/run_NN/
+tools/logs/<candidate-id>/server/run_NN/
+tools/logs/<candidate-id>/client/run_NN/
 ```
 
 Each run directory contains `stdout.txt`, `stderr.txt`, and `stats.csv` when the app generated a CSV.
 
-If needed, combine matrix CSVs manually:
+If needed, combine CSVs manually:
 
 ```powershell
 python tools/collect_matrix_csv.py --side all
@@ -152,10 +149,16 @@ python tools/collect_matrix_csv.py --side client
 
 The combined CSV is written to `tools/logs/combined_stats.csv`, or `combined_stats_server.csv` / `combined_stats_client.csv` for one side.
 
-Rank the matrix profiles:
+Analyze adaptive or manual logs:
 
 ```powershell
 python tools/analyze_matrix_csv.py --input tools/logs/combined_stats.csv
+```
+
+Or point the analyzer at a log directory directly:
+
+```powershell
+python tools/analyze_matrix_csv.py --logs tools/logs
 ```
 
 This writes:

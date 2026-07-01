@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -34,7 +35,7 @@ Usage:
   jam2 test-device <id> [--sample-rate n]
   jam2 meter-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n]
   jam2 ring-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n] [--ring-frames n]
-  jam2 listen [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--metronome on|off] [--bpm n] [--metronome-level n] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels mono|stereo|n|n,m] [--output-channels n|n,m] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-max-correction-ppm n]
+  jam2 listen [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--metronome on|off] [--bpm n] [--metronome-level n] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels mono|stereo|n|n,m] [--output-channels n|n,m] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-deadband-ppm n] [--drift-max-correction-ppm n]
   jam2 connect <jam2-url> [options]
 
 Stage status:
@@ -61,6 +62,7 @@ struct Options {
     int frame_size = 128;
     bool drift_correction = true;
     double drift_smoothing = 0.02;
+    int drift_deadband_ppm = 25;
     int drift_max_correction_ppm = 500;
     bool metronome = false;
     int bpm = 120;
@@ -213,6 +215,11 @@ Options parse_options(int argc, char** argv, int start)
             options.drift_smoothing = std::stod(std::string(require_value(argc, argv, i, arg)));
             if (options.drift_smoothing < 0.0 || options.drift_smoothing > 1.0) {
                 throw std::runtime_error("--drift-smoothing must be 0..1");
+            }
+        } else if (arg == "--drift-deadband-ppm") {
+            options.drift_deadband_ppm = std::stoi(std::string(require_value(argc, argv, i, arg)));
+            if (options.drift_deadband_ppm < 0 || options.drift_deadband_ppm > 50000) {
+                throw std::runtime_error("--drift-deadband-ppm must be 0..50000");
             }
         } else if (arg == "--drift-max-correction-ppm") {
             options.drift_max_correction_ppm = std::stoi(std::string(require_value(argc, argv, i, arg)));
@@ -758,6 +765,7 @@ public:
         int stats_warmup_ms = 0;
         bool drift_correction = false;
         double drift_smoothing = 0.0;
+        int drift_deadband_ppm = 0;
         int drift_max_correction_ppm = 0;
         bool metronome = false;
         int bpm = 0;
@@ -795,7 +803,7 @@ public:
                 "requested_sample_rate,active_sample_rate,frame_size,requested_audio_buffer_frames,active_audio_buffer_frames,"
                 "capture_ring_frames,playback_ring_frames,playback_prefill_frames,playback_max_frames,stats_warmup_ms,"
                 "requested_input_mode,active_input_mode,requested_channels,active_channels,"
-                "drift_correction,drift_smoothing,drift_max_correction_ppm,metronome,bpm,metronome_level,"
+                "drift_correction,drift_smoothing,drift_deadband_ppm,drift_max_correction_ppm,metronome,bpm,metronome_level,"
                 "sent_packets,recv_packets,sent_bytes,recv_bytes,send_bitrate_bps,recv_bitrate_bps,"
                 "sequence_lost,sequence_loss_percent,sequence_duplicate,sequence_out_of_order,sequence_late,"
                 "reordered_recovered,reordered_lost,startup_drained_packets,recv_packets_plus_startup_drained,"
@@ -871,6 +879,7 @@ public:
              << csv_escape(channel_selection_text(audio.stream.channels)) << ','
              << (context_.drift_correction ? "on" : "off") << ','
              << context_.drift_smoothing << ','
+             << context_.drift_deadband_ppm << ','
              << context_.drift_max_correction_ppm << ','
              << (context_.metronome ? "on" : "off") << ','
              << context_.bpm << ','
@@ -931,6 +940,69 @@ public:
         if (row_type == "final") {
             out_.flush();
         }
+    }
+
+    void write_periodic(
+        std::uint64_t elapsed_ms,
+        const AudioPacketStats& stats,
+        const Options& options,
+        const AudioSnapshot& audio)
+    {
+        if (!out_) {
+            return;
+        }
+        std::vector<std::string> fields(92);
+        auto set = [&](std::size_t index, auto value) {
+            std::ostringstream text;
+            text << value;
+            fields[index] = text.str();
+        };
+        fields[0] = "periodic";
+        set(1, elapsed_ms);
+        set(39, stats.sent_packets);
+        set(40, stats.recv_packets);
+        set(45, stats.sequence.lost);
+        set(46, sequence_loss_percent(stats));
+        set(47, stats.sequence.duplicate);
+        set(48, stats.sequence.out_of_order);
+        set(49, stats.sequence.late);
+        set(50, stats.reordered_recovered);
+        set(51, stats.reordered_lost);
+        set(55, stats.ignored_packets);
+        set(56, stats.playback_dropped_frames);
+        set(57, stats.playback_depth_min_frames);
+        set(58, playback_depth_avg_frames(stats));
+        set(59, stats.playback_depth_max_frames);
+        set(60, frames_to_ms(static_cast<std::size_t>(stats.playback_depth_min_frames), options.sample_rate));
+        set(61, playback_depth_avg_ms(stats, options));
+        set(62, frames_to_ms(static_cast<std::size_t>(stats.playback_depth_max_frames), options.sample_rate));
+        set(63, stats.jitter_samples > 0 ? static_cast<double>(stats.jitter_min_us) / 1000.0 : 0.0);
+        set(64, stats.jitter_samples > 0 ?
+            static_cast<double>(stats.jitter_sum_us) / static_cast<double>(stats.jitter_samples) / 1000.0 :
+            0.0);
+        set(65, stats.jitter_samples > 0 ? static_cast<double>(stats.jitter_max_us) / 1000.0 : 0.0);
+        set(66, stats.recv_pongs > 0 ? static_cast<double>(stats.rtt_min_us) / 1000.0 : 0.0);
+        set(67, rtt_avg_ms(stats));
+        set(68, stats.recv_pongs > 0 ? static_cast<double>(stats.rtt_max_us) / 1000.0 : 0.0);
+        set(69, estimated_one_way_ms(stats, options));
+        set(70, stats.raw_drift_ppm);
+        set(71, stats.drift_ppm);
+        set(72, stats.resampler_ratio);
+        set(73, audio.callbacks);
+        set(76, audio.capture_ring_underruns);
+        set(77, audio.capture_ring_readable);
+        set(78, frames_to_ms(audio.capture_ring_readable, options.sample_rate));
+        set(80, audio.playback_ring_underruns);
+        set(81, audio.playback_ring_readable);
+        set(82, frames_to_ms(audio.playback_ring_readable, options.sample_rate));
+
+        for (std::size_t i = 0; i < fields.size(); ++i) {
+            if (i != 0) {
+                out_ << ',';
+            }
+            out_ << csv_escape(fields[i]);
+        }
+        out_ << '\n';
     }
 
 private:
@@ -998,6 +1070,7 @@ CsvStatsLog::Context make_csv_context(
     context.stats_warmup_ms = options.stats_warmup_ms;
     context.drift_correction = options.drift_correction;
     context.drift_smoothing = options.drift_smoothing;
+    context.drift_deadband_ppm = options.drift_deadband_ppm;
     context.drift_max_correction_ppm = options.drift_max_correction_ppm;
     context.metronome = options.metronome;
     context.bpm = options.bpm;
@@ -1021,8 +1094,16 @@ void print_periodic_stream_stats(const AudioPacketStats& stats, const Options& o
               << " reordered_lost=" << stats.reordered_lost
               << " late=" << stats.sequence.late
               << " playback_depth_avg_ms=" << playback_depth_avg_ms(stats, options)
+              << " jitter_avg_ms="
+              << (stats.jitter_samples > 0 ?
+                  static_cast<double>(stats.jitter_sum_us) / static_cast<double>(stats.jitter_samples) / 1000.0 :
+                  0.0)
+              << " jitter_max_ms=" << (stats.jitter_samples > 0 ? static_cast<double>(stats.jitter_max_us) / 1000.0 : 0.0)
               << " estimated_one_way_ms=" << estimated_one_way_ms(stats, options)
               << " rtt_avg_ms=" << rtt_avg_ms(stats)
+              << " drift_ppm=" << stats.drift_ppm
+              << " resampler_ratio=" << stats.resampler_ratio
+              << " playback_dropped_frames=" << stats.playback_dropped_frames
               << "\n";
 }
 
@@ -1050,8 +1131,11 @@ AudioPacketStats run_audio_packet_exchange(
     std::uint32_t audio_sequence = 1;
     std::uint32_t control_sequence = 1;
     std::uint64_t sample_time = 0;
-    const std::uint64_t interval_us =
-        (static_cast<std::uint64_t>(options.frame_size) * 1000000ULL) / static_cast<std::uint64_t>(options.sample_rate);
+    const std::uint64_t interval_numerator_us = static_cast<std::uint64_t>(options.frame_size) * 1000000ULL;
+    const std::uint64_t interval_denominator = static_cast<std::uint64_t>(options.sample_rate);
+    const std::uint64_t interval_us = interval_numerator_us / interval_denominator;
+    const std::uint64_t interval_remainder_us = interval_numerator_us % interval_denominator;
+    std::uint64_t interval_remainder_accumulator = 0;
     std::uint64_t next_send = jam2::monotonic_us();
     std::uint64_t next_ping = next_send;
     std::uint64_t next_metronome = next_send;
@@ -1131,7 +1215,9 @@ AudioPacketStats run_audio_packet_exchange(
                 stats.drift_ppm = smoothed_drift_ppm;
                 const double max_ratio_delta = static_cast<double>(options.drift_max_correction_ppm) / 1000000.0;
                 const double raw_ratio = 1.0 + stats.drift_ppm / 1000000.0;
-                stats.resampler_ratio = options.drift_correction ?
+                const bool inside_deadband =
+                    std::abs(stats.drift_ppm) <= static_cast<double>(options.drift_deadband_ppm);
+                stats.resampler_ratio = options.drift_correction && !inside_deadband ?
                     std::clamp(raw_ratio, 1.0 - max_ratio_delta, 1.0 + max_ratio_delta) :
                     1.0;
                 sync_audio_control(runtime, audio_control, options.metronome_level, stats.resampler_ratio);
@@ -1205,7 +1291,13 @@ AudioPacketStats run_audio_packet_exchange(
             ++stats.sent_packets;
             stats.sent_bytes += packet.size();
             sample_time += static_cast<std::uint64_t>(options.frame_size);
-            next_send += interval_us == 0 ? 1 : interval_us;
+            std::uint64_t next_send_step = interval_us == 0 ? 1 : interval_us;
+            interval_remainder_accumulator += interval_remainder_us;
+            if (interval_remainder_accumulator >= interval_denominator) {
+                ++next_send_step;
+                interval_remainder_accumulator -= interval_denominator;
+            }
+            next_send += next_send_step;
             ++sends_this_loop;
         }
         if (now >= next_ping && now < send_deadline) {
@@ -1273,6 +1365,13 @@ AudioPacketStats run_audio_packet_exchange(
         if (next_stats != 0 && now >= next_stats) {
             const std::uint64_t elapsed_ms = (now - start_time) / 1000ULL;
             print_periodic_stream_stats(stats, options, elapsed_ms);
+            if (csv_log != nullptr) {
+                csv_log->write_periodic(
+                    elapsed_ms,
+                    stats,
+                    options,
+                    make_audio_snapshot(audio_stream, capture_ring, playback_ring));
+            }
             next_stats += static_cast<std::uint64_t>(options.stats_interval_ms) * 1000ULL;
         }
 
@@ -1445,6 +1544,7 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
               << "\n";
     std::cout << "Drift correction: " << (options.drift_correction ? "on" : "off") << "\n";
     std::cout << "Drift smoothing alpha: " << options.drift_smoothing << "\n";
+    std::cout << "Drift deadband ppm: " << options.drift_deadband_ppm << "\n";
     std::cout << "Drift max correction ppm: " << options.drift_max_correction_ppm << "\n";
     std::cout << "Metronome: " << (options.metronome ? "on" : "off") << "\n";
     std::cout << "BPM: " << options.bpm << "\n";

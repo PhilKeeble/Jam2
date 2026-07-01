@@ -18,44 +18,6 @@ def default_jam2_path():
     return root / "build" / name
 
 
-def load_matrix(path):
-    with open(path, "r", encoding="utf-8") as handle:
-        data = json.load(handle)
-    tests = data.get("tests")
-    if not isinstance(tests, list) or not tests:
-        raise ValueError("matrix file must contain a non-empty tests array")
-    seen = set()
-    for test in tests:
-        test_id = test.get("id")
-        if not isinstance(test_id, str) or not test_id:
-            raise ValueError("each test requires a non-empty string id")
-        if test_id in seen:
-            raise ValueError(f"duplicate test id: {test_id}")
-        seen.add(test_id)
-    return data
-
-
-def list_arg(value, name):
-    if value is None:
-        return []
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise ValueError(f"{name} must be an array of strings")
-    return value
-
-
-def test_args(matrix, test, side):
-    defaults = matrix.get("defaults", {})
-    stream_ms = int(defaults.get("stream_ms", 120000))
-    stream_linger_ms = int(defaults.get("stream_linger_ms", 500))
-    args = []
-    args.extend(list_arg(defaults.get("common_args", []), "defaults.common_args"))
-    args.extend(list_arg(defaults.get(f"{side}_args", []), f"defaults.{side}_args"))
-    args.extend(list_arg(test.get("common_args", []), f"{test['id']}.common_args"))
-    args.extend(list_arg(test.get(f"{side}_args", []), f"{test['id']}.{side}_args"))
-    args.extend(["--stream-ms", str(stream_ms), "--stream-linger-ms", str(stream_linger_ms)])
-    return args
-
-
 def ensure_dir(path):
     path.mkdir(parents=True, exist_ok=True)
     return path

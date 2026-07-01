@@ -25,6 +25,7 @@ def parse_args():
     parser.add_argument("--server", required=True, help="Base URL, for example http://192.168.1.50:8000")
     parser.add_argument("--jam2", default=str(default_jam2_path()))
     parser.add_argument("--client-audio-device", required=True)
+    parser.add_argument("--sample-rate", required=True, type=int)
     parser.add_argument("--logs", default=str(Path(__file__).with_name("logs")))
     parser.add_argument("--poll-ms", type=int, default=500)
     parser.add_argument("--timeout-s", type=int, default=0, help="0 waits forever")
@@ -38,7 +39,13 @@ def fetch_current(base_url):
         return json.loads(response.read().decode("utf-8"))
 
 
-def upload_csv(base_url, test_id, run_index, csv_path):
+def read_text_if_exists(path):
+    if path is None or not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def upload_artifacts(base_url, test_id, run_index, csv_path, stdout_path, stderr_path):
     if csv_path is None or not csv_path.exists():
         print_flush(f"[client] no CSV to upload for {test_id} run {run_index}")
         return False
@@ -46,7 +53,9 @@ def upload_csv(base_url, test_id, run_index, csv_path):
         "test_id": test_id,
         "run_index": run_index,
         "side": "client",
-        "csv": csv_path.read_text(encoding="utf-8"),
+        "csv": read_text_if_exists(csv_path),
+        "stdout": read_text_if_exists(stdout_path),
+        "stderr": read_text_if_exists(stderr_path),
     }).encode("utf-8")
     request = urllib.request.Request(
         base_url.rstrip("/") + "/upload",
@@ -58,7 +67,7 @@ def upload_csv(base_url, test_id, run_index, csv_path):
             with urllib.request.urlopen(request, timeout=10) as response:
                 ok = 200 <= response.status < 300
                 if ok:
-                    print_flush(f"[client] uploaded CSV for {test_id} run {run_index}")
+                    print_flush(f"[client] uploaded artifacts for {test_id} run {run_index}")
                     return True
         except urllib.error.URLError as error:
             print_flush(f"[client] upload attempt {attempt} failed: {error}")
@@ -66,7 +75,7 @@ def upload_csv(base_url, test_id, run_index, csv_path):
     return False
 
 
-def run_connect(jam2, current, audio_device, base_logs, server_url, clean_after_upload):
+def run_connect(jam2, current, audio_device, sample_rate, base_logs, server_url, clean_after_upload):
     test_id = current["test_id"]
     run_index = int(current["run_index"])
     output_dir = run_dir(base_logs, test_id, "client", run_index)
@@ -80,6 +89,8 @@ def run_connect(jam2, current, audio_device, base_logs, server_url, clean_after_
         current["url"],
         "--audio-device",
         str(audio_device),
+        "--sample-rate",
+        str(sample_rate),
         "--log-stats",
         str(csv_dir),
     ]
@@ -99,7 +110,7 @@ def run_connect(jam2, current, audio_device, base_logs, server_url, clean_after_
         return_code = process.wait()
 
     copied_csv = copy_final_csv(csv_dir, output_dir)
-    uploaded = upload_csv(server_url, test_id, run_index, copied_csv)
+    uploaded = upload_artifacts(server_url, test_id, run_index, copied_csv, stdout_path, stderr_path)
     if clean_after_upload and uploaded:
         shutil.rmtree(output_dir)
         print_flush(f"[client] removed uploaded local logs for {test_id} run {run_index}")
@@ -142,7 +153,14 @@ def main():
             time.sleep(args_ns.poll_ms / 1000.0)
             continue
         seen.add(key)
-        rc = run_connect(jam2, current, args_ns.client_audio_device, base_logs, args_ns.server, args_ns.clean)
+        rc = run_connect(
+            jam2,
+            current,
+            args_ns.client_audio_device,
+            args_ns.sample_rate,
+            base_logs,
+            args_ns.server,
+            args_ns.clean)
         if rc != 0:
             return rc
 

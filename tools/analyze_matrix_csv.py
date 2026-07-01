@@ -5,6 +5,8 @@ import csv
 from collections import defaultdict
 from pathlib import Path
 
+from collect_matrix_csv import collect_matrix_csv
+
 
 NUMERIC_FIELDS = [
     "elapsed_ms",
@@ -24,13 +26,15 @@ NUMERIC_FIELDS = [
     "rtt_max_ms",
     "estimated_one_way_ms",
     "drift_ppm",
+    "resampler_ratio",
     "capture_ring_underruns",
 ]
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Rank Jam2 matrix profiles from a combined CSV.")
-    parser.add_argument("--input", default=str(Path(__file__).with_name("logs") / "combined_stats.csv"))
+    parser = argparse.ArgumentParser(description="Analyze Jam2 adaptive or manual tuning logs.")
+    parser.add_argument("--logs", default="", help="Log directory to collect before analysis")
+    parser.add_argument("--input", default="")
     parser.add_argument("--output", default="")
     parser.add_argument("--max-loss", type=float, default=0.0)
     parser.add_argument("--max-playback-underruns", type=float, default=0.0)
@@ -74,13 +78,16 @@ def profile_args(rows):
         "ring_frames": row.get("playback_ring_frames", ""),
         "max_frames": row.get("playback_max_frames", ""),
         "drift_max_ppm": row.get("drift_max_correction_ppm", ""),
+        "drift_deadband_ppm": row.get("drift_deadband_ppm", ""),
+        "drift_correction": row.get("drift_correction", ""),
     }
 
 
-def aggregate_profile(test_id, rows, thresholds):
-    values = {field: [to_float(row, field) for row in rows] for field in NUMERIC_FIELDS}
-    sides = sorted(set(row.get("matrix_side", "") for row in rows))
-    runs = sorted(set(row.get("matrix_run", "") for row in rows))
+def aggregate_profile(test_id, final_rows, periodic_rows, thresholds):
+    values = {field: [to_float(row, field) for row in final_rows] for field in NUMERIC_FIELDS}
+    periodic_values = {field: [to_float(row, field) for row in periodic_rows] for field in NUMERIC_FIELDS}
+    sides = sorted(set(row.get("matrix_side", "") for row in final_rows))
+    runs = sorted(set(row.get("matrix_run", "") for row in final_rows))
     stability_failures = (
         sum(values["sequence_lost"]) +
         sum(values["reordered_lost"]) +
@@ -109,7 +116,8 @@ def aggregate_profile(test_id, rows, thresholds):
         "matrix_test_id": test_id,
         "rank_score": score,
         "stable": "yes" if stable else "no",
-        "row_count": len(rows),
+        "final_row_count": len(final_rows),
+        "periodic_row_count": len(periodic_rows),
         "sides": "+".join(sides),
         "runs": len(runs),
         "stability_failure_total": stability_failures,
@@ -128,9 +136,16 @@ def aggregate_profile(test_id, rows, thresholds):
         "rtt_avg_ms_avg": mean(values["rtt_avg_ms"]),
         "rtt_max_ms_worst": max(values["rtt_max_ms"]) if values["rtt_max_ms"] else 0.0,
         "drift_ppm_abs_avg": mean([abs(value) for value in values["drift_ppm"]]),
+        "periodic_drift_ppm_abs_max": max([abs(value) for value in periodic_values["drift_ppm"]], default=0.0),
+        "periodic_resampler_ratio_max_delta": max(
+            [abs(value - 1.0) for value in periodic_values["resampler_ratio"]],
+            default=0.0),
+        "periodic_playback_depth_min_ms": min(periodic_values["playback_depth_avg_ms"], default=0.0),
+        "periodic_jitter_max_ms": max(periodic_values["jitter_max_ms"], default=0.0),
         "capture_underruns_total": sum(values["capture_ring_underruns"]),
+        "periodic_capture_underruns_max": max(periodic_values["capture_ring_underruns"], default=0.0),
     }
-    result.update(profile_args(rows))
+    result.update(profile_args(final_rows))
     return result
 
 
@@ -226,17 +241,22 @@ def analyze_matrix_csv(
         raise SystemExit(f"combined CSV not found: {input_path}")
     output_path = Path(output_path) if output_path else input_path.with_name("analysis.csv")
     rows = read_rows(input_path)
-    grouped = defaultdict(list)
+    grouped_final = defaultdict(list)
+    grouped_periodic = defaultdict(list)
     for row in rows:
-        if row.get("row_type") != "final":
-            continue
-        grouped[row.get("matrix_test_id", "")].append(row)
+        if row.get("row_type") == "final":
+            grouped_final[row.get("matrix_test_id", "")].append(row)
+        elif row.get("row_type") == "periodic":
+            grouped_periodic[row.get("matrix_test_id", "")].append(row)
     thresholds = {
         "max_loss": max_loss,
         "max_playback_underruns": max_playback_underruns,
         "max_playback_overruns": max_playback_overruns,
     }
-    analysis = [aggregate_profile(test_id, profile_rows, thresholds) for test_id, profile_rows in grouped.items()]
+    analysis = [
+        aggregate_profile(test_id, profile_rows, grouped_periodic.get(test_id, []), thresholds)
+        for test_id, profile_rows in grouped_final.items()
+    ]
     analysis.sort(key=lambda row: (row["stable"] != "yes", row["rank_score"], row["estimated_one_way_ms_avg"]))
     write_analysis(output_path, analysis)
     if print_top:
@@ -247,8 +267,11 @@ def analyze_matrix_csv(
 
 def main():
     args = parse_args()
+    input_path = args.input or str(Path(__file__).with_name("logs") / "combined_stats.csv")
+    if args.logs:
+        input_path, _, _ = collect_matrix_csv(Path(args.logs), args.input if args.input else None, side="all")
     analyze_matrix_csv(
-        args.input,
+        input_path,
         args.output or None,
         args.max_loss,
         args.max_playback_underruns,
