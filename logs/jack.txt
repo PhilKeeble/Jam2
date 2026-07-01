@@ -1,0 +1,236 @@
+PS C:\Users\Phil\Documents\GitHub\Jam2> C:\Users\Phil\Documents\GitHub\Jam2\build\jam2.exe listen --audio-device 5 --sample-rate 48000 --audio-buffer-size 32 --frame-size 128 --playback-prefill-frames 768 --playback-ring-frames 4096 --playback-max-frames 2048 --drift-correction on --drift-deadband-ppm 25 --input-channels 1,2
+Mode: listen
+Local UDP bind: 0.0.0.0:49000
+STUN: stun.l.google.com:19302
+UDP send buffer bytes: 65536
+UDP receive buffer bytes: 65536
+Public endpoint: 81.86.171.138:49000
+Endpoint mode: STUN discovered
+Connection string:
+jam2://v1?endpoint=81.86.171.138:49000&session=c8d75f6429305368&key=38fdf3b5d223b0da57267f3652bc3bd4
+
+Waiting for peer...
+Peer locked: 86.4.223.143:64118
+Handshake complete
+Ignored malformed/auth/session packets: 0
+Ignored wrong-endpoint packets: 0
+Drained startup UDP packets: 85
+> metro on
+> metro off
+> metro on
+> metro off
+> exit
+Stream duration ms: 1646171
+Sample rate: 48000
+Frame size samples: 128
+Frame interval ms: 2.66667
+Audio UDP payload bytes: 384
+Audio UDP packet bytes: 432
+Audio buffer size frames: 32
+Audio buffer size ms: 0.666667
+Drift correction: on
+Drift smoothing alpha: 0.02
+Drift deadband ppm: 25
+Drift max correction ppm: 500
+Metronome: off
+BPM: 120
+Final metronome: off
+Final BPM: 120
+Audio packets sent: 617313
+Audio packets received: 617314
+Startup UDP packets drained: 85
+Audio packets received plus startup drained: 617399
+Stats warmup ms: 3000
+Stats warmup skipped audio packets: 1124
+Audio send packet rate pps: 374.999
+Audio receive packet rate pps: 375
+Send bitrate bps: 1.296e+06
+Send bitrate kbps: 1296
+Receive bitrate bps: 1.296e+06
+Receive bitrate kbps: 1296
+Ignored audio packets: 0
+Playback dropped frames: 19835
+Playback depth frames min: 128
+Playback depth frames avg: 1566.5
+Playback depth frames max: 2048
+Playback depth ms min: 2.66667
+Playback depth ms avg: 32.6353
+Playback depth ms max: 42.6667
+Audio receive delay ms: unavailable across peer clocks
+Audio interarrival jitter ms min: 0.001
+Audio interarrival jitter ms avg: 1.89283
+Audio interarrival jitter ms max: 109.332
+PING sent: 16462
+PONG sent: 16461
+PONG received: 16462
+BYE sent: yes
+BYE received: no
+Metronome states sent: 3131
+Metronome states received: 3072
+Metronome last remote beat: 3071
+RTT ms min: 17.578
+RTT ms avg: 21.8143
+RTT ms max: 120.449
+Sequence lost: 0
+Sequence loss events: 0
+Sequence loss max gap: 0
+Sequence loss percent: 0
+Sequence duplicate: 0
+Sequence out_of_order: 0
+Sequence late: 0
+Reordered packets recovered: 0
+Reordered packets lost: 0
+Reordered packet loss events: 0
+Estimated one-way latency ms: 44.2091
+Estimated one-way latency note: RTT/2 + playback depth avg + audio buffer
+Raw drift ppm estimate: 3.574
+Smoothed drift ppm estimate: 2.67476
+Resampler ratio: 1
+Audio callbacks: 2469248
+Audio device id: 5
+Requested sample rate: 48000
+Active sample rate: 48000
+Requested audio buffer size frames: 32
+Requested audio buffer size ms: 0.666667
+Active audio buffer size frames: 32
+Active audio buffer size ms: 0.666667
+Requested input mode: stereo
+Active input mode: stereo
+Requested audio channels: input=1,2 output=1,2
+Active audio channels: input=1,2 output=1,2
+Backend sample format: ASIO Int32 LSB
+Output channels: duplicated mono to selected output channels
+Capture ring capacity frames: 4096
+Playback ring capacity frames: 4096
+Playback prefilled: yes
+Playback prefill frames: 768
+Playback prefill ms: 16
+Capture ring overruns frames: 0
+Capture ring underruns frames: 768
+Capture ring underrun events: 9
+Capture ring readable frames: 640
+Capture ring readable ms: 13.3333
+Playback ring overruns frames: 0
+Playback ring underruns frames: 20728
+Playback ring underrun events: 20728
+Playback ring readable frames: 1408
+Playback ring readable ms: 29.3333
+Audio control metronome: off
+Audio control BPM: 120
+Audio control resampler ratio: 1
+PS C:\Users\Phil\Documents\GitHub\Jam2> C:\Users\Phil\Documents\GitHub\Jam2\build\jam2.exe listen --audio-device 5 --sample-rate 48000 --audio-buffer-size 32 --frame-size 128 --playback-prefill-frames 768 --playback-ring-frames 4096 --playback-max-frames 2048 --drift-correction on --drift-deadband-ppm 25 --input-channels 1,2
+Mode: listen
+Local UDP bind: 0.0.0.0:49000
+STUN: stun.l.google.com:19302
+UDP send buffer bytes: 65536
+UDP receive buffer bytes: 65536
+Public endpoint: 81.86.171.138:49000
+Endpoint mode: STUN discovered
+Connection string:
+jam2://v1?endpoint=81.86.171.138:49000&session=d08fabf08b87aee5&key=5026dbd9dc21cb74479d186d29ae0159
+
+Waiting for peer...
+Peer locked: 86.4.223.143:63387
+Handshake complete
+Ignored malformed/auth/session packets: 9
+Ignored wrong-endpoint packets: 0
+Drained startup UDP packets: 18
+> exit
+Stream duration ms: 2991842
+Sample rate: 48000
+Frame size samples: 128
+Frame interval ms: 2.66667
+Audio UDP payload bytes: 384
+Audio UDP packet bytes: 432
+Audio buffer size frames: 32
+Audio buffer size ms: 0.666667
+Drift correction: on
+Drift smoothing alpha: 0.02
+Drift deadband ppm: 25
+Drift max correction ppm: 500
+Metronome: off
+BPM: 120
+Final metronome: off
+Final BPM: 60
+Audio packets sent: 1121940
+Audio packets received: 1121942
+Startup UDP packets drained: 18
+Audio packets received plus startup drained: 1121960
+Stats warmup ms: 3000
+Stats warmup skipped audio packets: 1125
+Audio send packet rate pps: 375
+Audio receive packet rate pps: 375
+Send bitrate bps: 1.296e+06
+Send bitrate kbps: 1296
+Receive bitrate bps: 1.296e+06
+Receive bitrate kbps: 1296
+Ignored audio packets: 0
+Playback dropped frames: 37767
+Playback depth frames min: 128
+Playback depth frames avg: 1748.99
+Playback depth frames max: 2048
+Playback depth ms min: 2.66667
+Playback depth ms avg: 36.4373
+Playback depth ms max: 42.6667
+Audio receive delay ms: unavailable across peer clocks
+Audio interarrival jitter ms min: 0.007
+Audio interarrival jitter ms avg: 1.96136
+Audio interarrival jitter ms max: 120.515
+PING sent: 29919
+PONG sent: 29918
+PONG received: 29919
+BYE sent: yes
+BYE received: no
+Metronome states sent: 3962
+Metronome states received: 4021
+Metronome last remote beat: 4020
+RTT ms min: 17.503
+RTT ms avg: 21.9963
+RTT ms max: 127.803
+Sequence lost: 0
+Sequence loss events: 0
+Sequence loss max gap: 0
+Sequence loss percent: 0
+Sequence duplicate: 0
+Sequence out_of_order: 0
+Sequence late: 0
+Reordered packets recovered: 0
+Reordered packets lost: 0
+Reordered packet loss events: 0
+Estimated one-way latency ms: 48.1021
+Estimated one-way latency note: RTT/2 + playback depth avg + audio buffer
+Raw drift ppm estimate: 3.01612
+Smoothed drift ppm estimate: 2.11622
+Resampler ratio: 1
+Audio callbacks: 4487754
+Audio device id: 5
+Requested sample rate: 48000
+Active sample rate: 48000
+Requested audio buffer size frames: 32
+Requested audio buffer size ms: 0.666667
+Active audio buffer size frames: 32
+Active audio buffer size ms: 0.666667
+Requested input mode: stereo
+Active input mode: stereo
+Requested audio channels: input=1,2 output=1,2
+Active audio channels: input=1,2 output=1,2
+Backend sample format: ASIO Int32 LSB
+Output channels: duplicated mono to selected output channels
+Capture ring capacity frames: 4096
+Playback ring capacity frames: 4096
+Playback prefilled: yes
+Playback prefill frames: 768
+Playback prefill ms: 16
+Capture ring overruns frames: 0
+Capture ring underruns frames: 864
+Capture ring underrun events: 8
+Capture ring readable frames: 672
+Capture ring readable ms: 14
+Playback ring overruns frames: 0
+Playback ring underruns frames: 38514
+Playback ring underrun events: 38514
+Playback ring readable frames: 1376
+Playback ring readable ms: 28.6667
+Audio control metronome: off
+Audio control BPM: 60
+Audio control resampler ratio: 1
