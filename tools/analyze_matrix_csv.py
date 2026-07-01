@@ -90,6 +90,14 @@ def playback_underrun_event_rate(final_rows, underruns_total, underrun_events_to
     return estimated_events / total_seconds
 
 
+def sample_rate_for_row(row):
+    return (
+        to_float(row, "active_sample_rate")
+        or to_float(row, "requested_sample_rate")
+        or to_float(row, "sample_rate")
+        or 44100.0)
+
+
 def percentile(values, fraction):
     if not values:
         return 0.0
@@ -146,6 +154,10 @@ def aggregate_profile(test_id, final_rows, periodic_rows, thresholds):
         )
     dropped_frames_total = sum(values["playback_dropped_frames"])
     dropped_frames_per_second = dropped_frames_total / total_seconds if total_seconds > 0 else 0.0
+    audio_frame_seconds = sum(
+        sample_rate_for_row(row) * to_float(row, "elapsed_ms") / 1000.0
+        for row in final_rows)
+    dropped_frame_percent = dropped_frames_total * 100.0 / max(1.0, audio_frame_seconds)
     loss_ok = sum(values["sequence_lost"]) <= thresholds["max_loss"] and sum(values["reordered_lost"]) <= thresholds["max_loss"]
     if not loss_ok and thresholds["max_loss_percent"] > 0.0:
         loss_ok = (
@@ -197,6 +209,7 @@ def aggregate_profile(test_id, final_rows, periodic_rows, thresholds):
         "playback_overruns_total": sum(values["playback_ring_overruns"]),
         "playback_dropped_frames_total": dropped_frames_total,
         "playback_dropped_frames_per_second": dropped_frames_per_second,
+        "playback_dropped_frame_percent": dropped_frame_percent,
         "estimated_one_way_ms_avg": latency_avg,
         "estimated_one_way_ms_worst": latency_worst,
         "playback_depth_avg_ms_avg": mean(values["playback_depth_avg_ms"]),
@@ -250,6 +263,7 @@ def print_summary(rows):
                 f"reordered_lost={float(row['reordered_lost_total']):.0f} "
                 f"underruns={float(row['playback_underruns_total']):.0f} "
                 f"underrun_events_per_s={float(row['playback_underrun_events_per_second']):.3f} "
+                f"dropped_percent={float(row['playback_dropped_frame_percent']):.4f} "
                 f"overruns={float(row['playback_overruns_total']):.0f}"
             )
 
@@ -299,6 +313,7 @@ def print_legacy_summary(rows):
             f"loss={float(row['sequence_lost_total']):.0f} "
             f"reordered_lost={float(row['reordered_lost_total']):.0f} "
             f"underruns={float(row['playback_underruns_total']):.0f} "
+            f"dropped_percent={float(row['playback_dropped_frame_percent']):.4f} "
             f"overruns={float(row['playback_overruns_total']):.0f}"
         )
 

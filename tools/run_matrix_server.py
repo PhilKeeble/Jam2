@@ -64,15 +64,18 @@ PLAYABLE_MAX_JITTER_MS = 120.0
 PLAYABLE_MAX_PACKET_LOSS_PERCENT = 0.20
 PLAYABLE_MAX_PACKET_LOSS_PER_SECOND = 0.35
 PLAYABLE_MAX_DROPPED_FRAMES_PER_SECOND = 4.0
+PLAYABLE_MAX_DROPPED_FRAME_PERCENT = 0.02
 PRESSURED_MAX_PLAYBACK_UNDERRUNS_PER_SECOND = 80.0
 PRESSURED_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND = 80.0
 PRESSURED_MAX_PACKET_LOSS_PERCENT = 0.25
 PRESSURED_MAX_PACKET_LOSS_PER_SECOND = 0.70
 PRESSURED_MAX_DROPPED_FRAMES_PER_SECOND = 0.25
+PRESSURED_MAX_DROPPED_FRAME_PERCENT = 0.10
 PRESSURED_MAX_JITTER_MS = 80.0
 EXPERIMENTAL_MAX_PACKET_LOSS_PERCENT = 0.40
 EXPERIMENTAL_MAX_PACKET_LOSS_PER_SECOND = 1.00
 EXPERIMENTAL_MAX_DROPPED_FRAMES_PER_SECOND = 50.0
+EXPERIMENTAL_MAX_DROPPED_FRAME_PERCENT = 0.25
 EXPERIMENTAL_MAX_JITTER_MS = 180.0
 DRIFT_OFF_FINAL_PPM_LIMIT = 15.0
 DRIFT_OFF_PERIODIC_PPM_LIMIT = 50.0
@@ -800,10 +803,21 @@ def ratio_delta_ppm(row):
     return abs(numeric(row, "resampler_ratio") - 1.0) * 1_000_000.0
 
 
+def sample_rate_for_row(row):
+    return (
+        numeric(row, "active_sample_rate")
+        or numeric(row, "requested_sample_rate")
+        or numeric(row, "sample_rate")
+        or 44100.0)
+
+
 def run_metrics(server, client):
     final_rows = [side["final"] for side in (server, client) if side["final"]]
     periodic_rows_all = server["periodic"] + client["periodic"]
     elapsed_seconds = sum((numeric(row, "elapsed_ms") for row in final_rows), 0.0) / 1000.0
+    audio_frame_seconds = sum(
+        (numeric(row, "elapsed_ms") / 1000.0) * max(1.0, sample_rate_for_row(row))
+        for row in final_rows)
     playback_underruns = sum((numeric(row, "playback_ring_underruns") for row in final_rows), 0.0)
     playback_underrun_events = sum((numeric(row, "playback_ring_underrun_events") for row in final_rows), 0.0)
     underrun_events_for_rate = playback_underrun_events
@@ -830,6 +844,9 @@ def run_metrics(server, client):
         "max_playback_ring_underruns": max((numeric(row, "playback_ring_underruns") for row in final_rows), default=0.0),
         "playback_ring_overruns": sum((numeric(row, "playback_ring_overruns") for row in final_rows), 0.0),
         "playback_dropped_frames": sum((numeric(row, "playback_dropped_frames") for row in final_rows), 0.0),
+        "audio_frame_seconds": audio_frame_seconds,
+        "playback_dropped_frame_percent": (
+            sum((numeric(row, "playback_dropped_frames") for row in final_rows), 0.0) * 100.0 / max(1.0, audio_frame_seconds)),
         "jitter_max_ms": max((numeric(row, "jitter_max_ms") for row in final_rows), default=0.0),
         "max_abs_final_drift_ppm": max((abs(numeric(row, "drift_ppm")) for row in final_rows), default=0.0),
         "max_abs_periodic_drift_ppm": max((abs(numeric(row, "drift_ppm")) for row in periodic_rows_all), default=0.0),
@@ -855,6 +872,7 @@ def aggregate_metrics(run_results):
     packet_loss = sum((metric.get("packet_loss", 0.0) for metric in metrics), 0.0)
     recv_packets = sum((metric.get("recv_packets", 0.0) for metric in metrics), 0.0)
     dropped_frames = sum((metric.get("playback_dropped_frames", 0.0) for metric in metrics), 0.0)
+    audio_frame_seconds = sum((metric.get("audio_frame_seconds", 0.0) for metric in metrics), 0.0)
     return {
         "sequence_lost": sequence_lost,
         "reordered_lost": reordered_lost,
@@ -871,6 +889,8 @@ def aggregate_metrics(run_results):
         "playback_ring_overruns": sum((metric.get("playback_ring_overruns", 0.0) for metric in metrics), 0.0),
         "playback_dropped_frames": dropped_frames,
         "playback_dropped_frames_per_second": dropped_frames / elapsed_seconds if elapsed_seconds > 0.0 else dropped_frames,
+        "audio_frame_seconds": audio_frame_seconds,
+        "playback_dropped_frame_percent": dropped_frames * 100.0 / max(1.0, audio_frame_seconds),
         "jitter_max_ms": max((metric.get("jitter_max_ms", 0.0) for metric in metrics), default=0.0),
         "max_abs_final_drift_ppm": max((metric.get("max_abs_final_drift_ppm", 0.0) for metric in metrics), default=0.0),
         "max_abs_periodic_drift_ppm": max((metric.get("max_abs_periodic_drift_ppm", 0.0) for metric in metrics), default=0.0),
@@ -886,7 +906,7 @@ def burst_badness(metrics):
         metrics.get("packet_loss_per_second", 0.0) / max(PLAYABLE_MAX_PACKET_LOSS_PER_SECOND, 0.001) +
         metrics.get("playback_ring_underrun_events_per_second", 0.0) / max(PLAYABLE_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND, 0.001) +
         metrics.get("playback_ring_underruns_per_second", 0.0) / max(PLAYABLE_MAX_PLAYBACK_UNDERRUNS_PER_SECOND, 0.001) +
-        metrics.get("playback_dropped_frames", 0.0) / max(1.0, PLAYABLE_MAX_DROPPED_FRAMES_PER_SECOND * max(metrics.get("elapsed_seconds", 0.0), 1.0)) +
+        metrics.get("playback_dropped_frame_percent", 0.0) / max(PLAYABLE_MAX_DROPPED_FRAME_PERCENT, 0.001) +
         metrics.get("playback_ring_overruns", 0.0) * 10.0
     )
 
@@ -1018,7 +1038,7 @@ def playable_accepts(metrics, network_profile):
         and metrics.get("playback_ring_underruns_per_second", 0.0) <= PLAYABLE_MAX_PLAYBACK_UNDERRUNS_PER_SECOND
         and metrics.get("playback_ring_underrun_events_per_second", 0.0) <= PLAYABLE_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND
         and metrics.get("max_playback_ring_underruns", 0.0) <= PLAYABLE_MAX_PLAYBACK_UNDERRUNS_PER_RUN
-        and metrics.get("playback_dropped_frames_per_second", 0.0) <= PLAYABLE_MAX_DROPPED_FRAMES_PER_SECOND
+        and metrics.get("playback_dropped_frame_percent", 0.0) <= PLAYABLE_MAX_DROPPED_FRAME_PERCENT
         and metrics.get("jitter_max_ms", 0.0) <= PLAYABLE_MAX_JITTER_MS
     )
 
@@ -1035,7 +1055,7 @@ def pressured_accepts(metrics, network_profile):
         and metrics.get("packet_loss_per_second", 0.0) <= PRESSURED_MAX_PACKET_LOSS_PER_SECOND
         and metrics.get("playback_ring_underruns_per_second", 0.0) <= PRESSURED_MAX_PLAYBACK_UNDERRUNS_PER_SECOND
         and metrics.get("playback_ring_underrun_events_per_second", 0.0) <= PRESSURED_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND
-        and metrics.get("playback_dropped_frames_per_second", 0.0) <= PRESSURED_MAX_DROPPED_FRAMES_PER_SECOND
+        and metrics.get("playback_dropped_frame_percent", 0.0) <= PRESSURED_MAX_DROPPED_FRAME_PERCENT
         and metrics.get("jitter_max_ms", 0.0) <= PRESSURED_MAX_JITTER_MS
     )
 
@@ -1050,7 +1070,7 @@ def experimental_accepts(metrics, network_profile):
     return (
         metrics.get("packet_loss_percent", 0.0) <= EXPERIMENTAL_MAX_PACKET_LOSS_PERCENT
         and metrics.get("packet_loss_per_second", 0.0) <= EXPERIMENTAL_MAX_PACKET_LOSS_PER_SECOND
-        and metrics.get("playback_dropped_frames_per_second", 0.0) <= EXPERIMENTAL_MAX_DROPPED_FRAMES_PER_SECOND
+        and metrics.get("playback_dropped_frame_percent", 0.0) <= EXPERIMENTAL_MAX_DROPPED_FRAME_PERCENT
         and metrics.get("jitter_max_ms", 0.0) <= EXPERIMENTAL_MAX_JITTER_MS
     )
 
@@ -1074,7 +1094,7 @@ def metric_score(metrics):
 
 def practical_score(summary):
     metrics = summary.get("metrics", {})
-    dropped_penalty = metrics.get("playback_dropped_frames_per_second", 0.0) * 25.0
+    dropped_penalty = metrics.get("playback_dropped_frame_percent", 0.0) * 120.0
     underrun_penalty = min(metrics.get("playback_ring_underrun_events_per_second", 0.0), 80.0) * 0.03
     loss_penalty = metrics.get("packet_loss_per_second", 0.0) * 8.0
     return (
@@ -1411,6 +1431,48 @@ def command_block(base_logs, summary, context):
     ]
 
 
+def recommendation_lines(title, summary, base_logs, command_context):
+    separator = "=" * 72
+    lines = ["", separator, title, separator]
+    if summary is None:
+        lines.append("  none confirmed")
+        return lines
+    metrics = summary.get("metrics", {})
+    lines.extend([
+        f"  profile: {summary['candidate']}",
+        f"  latency_avg_ms: {summary['latency_avg_ms']:.2f}",
+        f"  stable: {str(summary.get('stable', False)).lower()}",
+        f"  playable: {str(summary.get('playable', False)).lower()}",
+        f"  pressured_playable: {str(summary.get('pressured_playable', False)).lower()}",
+        f"  experimental: {str(summary.get('experimental', False)).lower()}",
+        f"  stable_runs: {summary['stable_runs']}/{summary['run_count']}",
+        f"  warnings: {','.join(summary.get('warnings', [])) or 'none'}",
+        "",
+        "  metrics:",
+        f"    packet_loss: {metrics.get('packet_loss', 0.0):.0f}",
+        f"    packet_loss_percent: {metrics.get('packet_loss_percent', 0.0):.4f}",
+        f"    packet_loss_per_second: {metrics.get('packet_loss_per_second', 0.0):.3f}",
+        f"    playback_dropped_frames: {metrics.get('playback_dropped_frames', 0.0):.0f}",
+        f"    playback_dropped_frames_per_second: {metrics.get('playback_dropped_frames_per_second', 0.0):.3f}",
+        f"    playback_dropped_frame_percent: {metrics.get('playback_dropped_frame_percent', 0.0):.4f}",
+        f"    playback_underruns: {metrics.get('playback_ring_underruns', 0.0):.0f}",
+        f"    playback_underruns_per_second: {metrics.get('playback_ring_underruns_per_second', 0.0):.3f}",
+        f"    playback_underrun_events: {metrics.get('playback_ring_underrun_events', 0.0):.0f}",
+        f"    playback_underrun_events_per_second: {metrics.get('playback_ring_underrun_events_per_second', 0.0):.3f}",
+        f"    min_playback_depth_ms: {metrics.get('min_playback_depth_ms', 0.0):.2f}",
+        f"    jitter_max_ms: {metrics.get('jitter_max_ms', 0.0):.2f}",
+    ])
+    if command_context is not None:
+        lines.extend(["", "  commands:"])
+        lines.extend(command_block(base_logs, summary, command_context))
+    return lines
+
+
+def print_recommendation_block(prefix, title, summary, base_logs, command_context):
+    for line in recommendation_lines(title, summary, base_logs, command_context):
+        print_flush(f"{prefix} {line}" if line else prefix)
+
+
 def is_aggressive_candidate(summary):
     metrics = summary.get("metrics", {})
     allowed_reasons = {
@@ -1434,7 +1496,7 @@ def is_aggressive_candidate(summary):
         and metrics.get("playback_ring_overruns", 0.0) == 0.0
         and metrics.get("packet_loss_percent", 0.0) <= EXPERIMENTAL_MAX_PACKET_LOSS_PERCENT
         and metrics.get("packet_loss_per_second", 0.0) <= EXPERIMENTAL_MAX_PACKET_LOSS_PER_SECOND
-        and metrics.get("playback_dropped_frames_per_second", 0.0) <= EXPERIMENTAL_MAX_DROPPED_FRAMES_PER_SECOND
+        and metrics.get("playback_dropped_frame_percent", 0.0) <= EXPERIMENTAL_MAX_DROPPED_FRAME_PERCENT
         and metrics.get("min_playback_depth_ms", 0.0) >= AGGRESSIVE_MIN_PLAYBACK_DEPTH_MS
         and metrics.get("jitter_max_ms", 0.0) <= EXPERIMENTAL_MAX_JITTER_MS
     )
@@ -1478,80 +1540,9 @@ def write_summary(base_logs, rows, recommendation, run_csv_analysis, command_con
     })
     text_path = base_logs / "recommendation.txt"
     lines = []
-    if practical_recommendation is None:
-        lines.append("Recommended practical starting profile: none confirmed")
-    else:
-        metrics = practical_recommendation.get("metrics", {})
-        lines.extend([
-            "Recommended practical starting profile:",
-            f"  {practical_recommendation['candidate']}",
-            f"  latency_avg_ms={practical_recommendation['latency_avg_ms']:.2f}",
-            f"  playable=yes",
-            f"  stable={str(practical_recommendation.get('stable', False)).lower()}",
-            f"  stable_runs={practical_recommendation['stable_runs']}/{practical_recommendation['run_count']}",
-            f"  warnings={','.join(practical_recommendation.get('warnings', [])) or 'none'}",
-            f"  packet_loss={metrics.get('packet_loss', 0.0):.0f}",
-            f"  packet_loss_percent={metrics.get('packet_loss_percent', 0.0):.4f}",
-            f"  packet_loss_per_second={metrics.get('packet_loss_per_second', 0.0):.3f}",
-            f"  playback_dropped_frames={metrics.get('playback_dropped_frames', 0.0):.0f}",
-            f"  playback_dropped_frames_per_second={metrics.get('playback_dropped_frames_per_second', 0.0):.3f}",
-            f"  tolerated_playback_underruns={metrics.get('playback_ring_underruns', 0.0):.0f}",
-            f"  playback_underruns_per_second={metrics.get('playback_ring_underruns_per_second', 0.0):.3f}",
-            f"  playback_underrun_events={metrics.get('playback_ring_underrun_events', 0.0):.0f}",
-            f"  playback_underrun_events_per_second={metrics.get('playback_ring_underrun_events_per_second', 0.0):.3f}",
-            f"  min_playback_depth_ms={metrics.get('min_playback_depth_ms', 0.0):.2f}",
-            f"  jitter_max_ms={metrics.get('jitter_max_ms', 0.0):.2f}",
-        ])
-        if command_context is not None:
-            lines.extend(command_block(base_logs, practical_recommendation, command_context))
-    if recommendation is None:
-        lines.append("Stable recommendation: none confirmed")
-    else:
-        metrics = recommendation.get("metrics", {})
-        lines.extend([
-            "Stable recommendation:",
-            f"  {recommendation['candidate']}",
-            f"  latency_avg_ms={recommendation['latency_avg_ms']:.2f}",
-            f"  stable_runs={recommendation['stable_runs']}/{recommendation['run_count']}",
-            f"  warnings={','.join(recommendation.get('warnings', [])) or 'none'}",
-            f"  packet_loss={metrics.get('packet_loss', 0.0):.0f}",
-            f"  packet_loss_percent={metrics.get('packet_loss_percent', 0.0):.4f}",
-            f"  packet_loss_per_second={metrics.get('packet_loss_per_second', 0.0):.3f}",
-            f"  playback_dropped_frames={metrics.get('playback_dropped_frames', 0.0):.0f}",
-            f"  playback_dropped_frames_per_second={metrics.get('playback_dropped_frames_per_second', 0.0):.3f}",
-            f"  tolerated_playback_underruns={metrics.get('playback_ring_underruns', 0.0):.0f}",
-            f"  playback_underruns_per_second={metrics.get('playback_ring_underruns_per_second', 0.0):.3f}",
-            f"  playback_underrun_events={metrics.get('playback_ring_underrun_events', 0.0):.0f}",
-            f"  playback_underrun_events_per_second={metrics.get('playback_ring_underrun_events_per_second', 0.0):.3f}",
-            f"  min_playback_depth_ms={metrics.get('min_playback_depth_ms', 0.0):.2f}",
-            f"  jitter_max_ms={metrics.get('jitter_max_ms', 0.0):.2f}",
-        ])
-        if command_context is not None:
-            lines.extend(command_block(base_logs, recommendation, command_context))
-    if aggressive_recommendation is None:
-        lines.append("Aggressive low-latency recommendation: none")
-    else:
-        metrics = aggressive_recommendation.get("metrics", {})
-        lines.extend([
-            "Aggressive low-latency recommendation:",
-            f"  {aggressive_recommendation['candidate']}",
-            f"  latency_avg_ms={aggressive_recommendation['latency_avg_ms']:.2f}",
-            f"  stable_runs={aggressive_recommendation['stable_runs']}/{aggressive_recommendation['run_count']}",
-            f"  warnings={','.join(aggressive_recommendation.get('warnings', [])) or 'none'}",
-            f"  packet_loss={metrics.get('packet_loss', 0.0):.0f}",
-            f"  packet_loss_percent={metrics.get('packet_loss_percent', 0.0):.4f}",
-            f"  packet_loss_per_second={metrics.get('packet_loss_per_second', 0.0):.3f}",
-            f"  playback_dropped_frames={metrics.get('playback_dropped_frames', 0.0):.0f}",
-            f"  playback_dropped_frames_per_second={metrics.get('playback_dropped_frames_per_second', 0.0):.3f}",
-            f"  tolerated_playback_underruns={metrics.get('playback_ring_underruns', 0.0):.0f}",
-            f"  playback_underruns_per_second={metrics.get('playback_ring_underruns_per_second', 0.0):.3f}",
-            f"  playback_underrun_events={metrics.get('playback_ring_underrun_events', 0.0):.0f}",
-            f"  playback_underrun_events_per_second={metrics.get('playback_ring_underrun_events_per_second', 0.0):.3f}",
-            f"  min_playback_depth_ms={metrics.get('min_playback_depth_ms', 0.0):.2f}",
-            f"  jitter_max_ms={metrics.get('jitter_max_ms', 0.0):.2f}",
-        ])
-        if command_context is not None:
-            lines.extend(command_block(base_logs, aggressive_recommendation, command_context))
+    lines.extend(recommendation_lines("Recommended practical starting profile", practical_recommendation, base_logs, command_context))
+    lines.extend(recommendation_lines("Stable recommendation", recommendation, base_logs, command_context))
+    lines.extend(recommendation_lines("Aggressive low-latency recommendation", aggressive_recommendation, base_logs, command_context))
     text_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     if run_csv_analysis:
         try:
@@ -1570,66 +1561,17 @@ def write_summary(base_logs, rows, recommendation, run_csv_analysis, command_con
             print_flush(f"[server] wrote CSV analysis for {len(analysis_rows)} profile(s): {analysis_csv}")
         except SystemExit as error:
             print_flush(f"[server] CSV analysis skipped: {error}")
-    if run_csv_analysis or recommendation is not None or practical_recommendation is not None:
+    if run_csv_analysis:
         if practical_recommendation is not None:
-            metrics = practical_recommendation.get("metrics", {})
-            print_flush(
-                "[server] recommended practical starting profile: "
-                f"{practical_recommendation['candidate']} "
-                f"latency_avg_ms={practical_recommendation['latency_avg_ms']:.2f} "
-                f"stable={str(practical_recommendation.get('stable', False)).lower()} "
-                f"stable_runs={practical_recommendation['stable_runs']}/{practical_recommendation['run_count']} "
-                f"packet_loss={metrics.get('packet_loss', 0.0):.0f} "
-                f"packet_loss_percent={metrics.get('packet_loss_percent', 0.0):.4f} "
-                f"dropped_fps={metrics.get('playback_dropped_frames_per_second', 0.0):.3f} "
-                f"tolerated_playback_underruns={metrics.get('playback_ring_underruns', 0.0):.0f} "
-                f"underruns_per_second={metrics.get('playback_ring_underruns_per_second', 0.0):.3f} "
-                f"underrun_events_per_second={metrics.get('playback_ring_underrun_events_per_second', 0.0):.3f} "
-                f"min_playback_depth_ms={metrics.get('min_playback_depth_ms', 0.0):.2f} "
-                f"warnings={','.join(practical_recommendation.get('warnings', [])) or 'none'}")
-            if command_context is not None:
-                for line in command_block(base_logs, practical_recommendation, command_context):
-                    print_flush("[server] practical " + line.strip())
+            print_recommendation_block("[server]", "Recommended practical starting profile", practical_recommendation, base_logs, command_context)
         else:
             print_flush("[server] recommended practical starting profile: none confirmed")
         if recommendation is not None:
-            metrics = recommendation.get("metrics", {})
-            print_flush(
-                "[server] stable recommendation: "
-                f"{recommendation['candidate']} "
-                f"latency_avg_ms={recommendation['latency_avg_ms']:.2f} "
-                f"stable_runs={recommendation['stable_runs']}/{recommendation['run_count']} "
-                f"packet_loss={metrics.get('packet_loss', 0.0):.0f} "
-                f"packet_loss_percent={metrics.get('packet_loss_percent', 0.0):.4f} "
-                f"dropped_fps={metrics.get('playback_dropped_frames_per_second', 0.0):.3f} "
-                f"tolerated_playback_underruns={metrics.get('playback_ring_underruns', 0.0):.0f} "
-                f"underruns_per_second={metrics.get('playback_ring_underruns_per_second', 0.0):.3f} "
-                f"underrun_events_per_second={metrics.get('playback_ring_underrun_events_per_second', 0.0):.3f} "
-                f"min_playback_depth_ms={metrics.get('min_playback_depth_ms', 0.0):.2f} "
-                f"warnings={','.join(recommendation.get('warnings', [])) or 'none'}")
-            if command_context is not None:
-                for line in command_block(base_logs, recommendation, command_context):
-                    print_flush("[server] stable " + line.strip())
+            print_recommendation_block("[server]", "Stable recommendation", recommendation, base_logs, command_context)
         else:
             print_flush("[server] stable recommendation: none confirmed")
         if aggressive_recommendation is not None:
-            metrics = aggressive_recommendation.get("metrics", {})
-            print_flush(
-                "[server] aggressive low-latency recommendation: "
-                f"{aggressive_recommendation['candidate']} "
-                f"latency_avg_ms={aggressive_recommendation['latency_avg_ms']:.2f} "
-                f"stable_runs={aggressive_recommendation['stable_runs']}/{aggressive_recommendation['run_count']} "
-                f"packet_loss={metrics.get('packet_loss', 0.0):.0f} "
-                f"packet_loss_percent={metrics.get('packet_loss_percent', 0.0):.4f} "
-                f"dropped_fps={metrics.get('playback_dropped_frames_per_second', 0.0):.3f} "
-                f"tolerated_playback_underruns={metrics.get('playback_ring_underruns', 0.0):.0f} "
-                f"underruns_per_second={metrics.get('playback_ring_underruns_per_second', 0.0):.3f} "
-                f"underrun_events_per_second={metrics.get('playback_ring_underrun_events_per_second', 0.0):.3f} "
-                f"min_playback_depth_ms={metrics.get('min_playback_depth_ms', 0.0):.2f} "
-                f"warnings={','.join(aggressive_recommendation.get('warnings', [])) or 'none'}")
-            if command_context is not None:
-                for line in command_block(base_logs, aggressive_recommendation, command_context):
-                    print_flush("[server] aggressive " + line.strip())
+            print_recommendation_block("[server]", "Aggressive low-latency recommendation", aggressive_recommendation, base_logs, command_context)
         else:
             print_flush("[server] aggressive low-latency recommendation: none")
     print_flush(f"[server] wrote adaptive analysis: {analysis_path}")
@@ -1720,6 +1662,72 @@ def mark_confirm_failed(summaries, candidate_id):
             summary["confirm_failed"] = True
 
 
+def confirm_practical_candidate(
+    jam2,
+    candidate,
+    summary,
+    base_logs,
+    public_dir,
+    audio_device,
+    sample_rate,
+    no_stun,
+    network_profile,
+    server_network_type,
+    summaries):
+    confirm_results = run_candidate(
+        jam2,
+        candidate,
+        CONFIRM_STREAM_MS,
+        base_logs,
+        public_dir,
+        audio_device,
+        sample_rate,
+        no_stun,
+        CONFIRM_RUNS,
+        "confirm",
+        network_profile,
+        server_network_type,
+        101)
+    confirm_summary = evaluate_candidate(base_logs, candidate, confirm_results, network_profile)
+    confirm_summary["confirmation"] = True
+    confirm_summary["phase"] = "confirm"
+    burst_result = isolated_burst_result(summary, confirm_results, confirm_summary)
+    if burst_result is not None:
+        print_flush(
+            f"[server] retrying confirm for {candidate.id}: "
+            f"discarding burst run {burst_result['run_index']} from recommendation averages")
+        retry_confirm_results = run_candidate(
+            jam2,
+            candidate,
+            CONFIRM_STREAM_MS,
+            base_logs,
+            public_dir,
+            audio_device,
+            sample_rate,
+            no_stun,
+            CONFIRM_BURST_RETRIES,
+            "confirm-retry",
+            network_profile,
+            server_network_type,
+            201)
+        filtered_confirm_results = [
+            result for result in confirm_results
+            if result is not burst_result
+        ] + retry_confirm_results
+        retry_confirm_summary = evaluate_candidate(
+            base_logs,
+            candidate,
+            filtered_confirm_results,
+            network_profile)
+        retry_confirm_summary["confirmation"] = True
+        retry_confirm_summary["phase"] = "confirm_retry"
+        retry_confirm_summary["warnings"].append(
+            f"confirm_retried_after_isolated_wifi_burst(run_{burst_result['run_index']})")
+        summaries.append(confirm_summary)
+        confirm_summary = retry_confirm_summary
+    return confirm_summary
+
+
 def main():
     args_ns = parse_args()
     jam2 = Path(args_ns.jam2)
@@ -1763,12 +1771,45 @@ def main():
             if local_tuning and not pending_candidates:
                 practical_recommendation = choose_practical_summary(summaries)
                 if practical_recommendation is not None:
+                    confirm_candidate = candidate_from_profile(practical_recommendation["profile"])
                     print_flush(
-                        "[server] stopping after local tuning: "
-                        "nearby profiles did not improve the practical recommendation enough")
-                    write_json(public_dir / "current.json", {"status": "all_done", "url": "", "client_args": []})
-                    write_summary(base_logs, summaries, recommendation, True, command_context)
-                    return 0
+                        f"[server] local tuning found practical candidate {confirm_candidate.id}; "
+                        "running confirm before final recommendation")
+                    confirm_summary = confirm_practical_candidate(
+                        jam2,
+                        confirm_candidate,
+                        practical_recommendation,
+                        base_logs,
+                        public_dir,
+                        args_ns.server_audio_device,
+                        args_ns.sample_rate,
+                        args_ns.no_stun,
+                        network_profile,
+                        server_network_type,
+                        summaries)
+                    confirm_summary["confirmation"] = True
+                    summaries.append(confirm_summary)
+                    candidate_stages[confirm_candidate.id] = "confirm"
+                    if confirm_summary.get("stable") or confirm_summary.get("playable", False):
+                        if confirm_summary["stable"]:
+                            recommendation = confirm_summary
+                        print_flush(
+                            f"[server] practical confirmation accepted for {confirm_candidate.id}; "
+                            "stopping after local tuning")
+                        write_json(public_dir / "current.json", {"status": "all_done", "url": "", "client_args": []})
+                        write_summary(base_logs, summaries, recommendation, True, command_context)
+                        return 0
+                    mark_confirm_failed(summaries, confirm_candidate.id)
+                    print_flush(
+                        f"[server] practical confirm failed for {confirm_candidate.id}; "
+                        "continuing local search")
+                    queue_confirm_neighbors(
+                        confirm_candidate,
+                        pending_candidates,
+                        queued_candidate_ids,
+                        candidate_stages)
+                    if pending_candidates:
+                        continue
                 local_tuning = False
 
             if pending_candidates:
@@ -1987,58 +2028,18 @@ def main():
                     best_candidate = candidate
                     if best_summary is not None and best_summary["candidate"] in tested_candidates:
                         best_candidate = tested_candidates[best_summary["candidate"]]
-                    confirm_results = run_candidate(
+                    confirm_summary = confirm_practical_candidate(
                         jam2,
                         best_candidate,
-                        CONFIRM_STREAM_MS,
+                        summary,
                         base_logs,
                         public_dir,
                         args_ns.server_audio_device,
                         args_ns.sample_rate,
                         args_ns.no_stun,
-                        CONFIRM_RUNS,
-                        "confirm",
                         network_profile,
                         server_network_type,
-                        101)
-                    confirm_summary = evaluate_candidate(base_logs, best_candidate, confirm_results, network_profile)
-                    confirm_summary["confirmation"] = True
-                    confirm_summary["phase"] = "confirm"
-                    burst_result = isolated_burst_result(summary, confirm_results, confirm_summary)
-                    if burst_result is not None:
-                        print_flush(
-                            f"[server] retrying confirm for {best_candidate.id}: "
-                            f"discarding burst run {burst_result['run_index']} from recommendation averages")
-                        retry_confirm_results = run_candidate(
-                            jam2,
-                            best_candidate,
-                            CONFIRM_STREAM_MS,
-                            base_logs,
-                            public_dir,
-                            args_ns.server_audio_device,
-                            args_ns.sample_rate,
-                            args_ns.no_stun,
-                            CONFIRM_BURST_RETRIES,
-                            "confirm-retry",
-                            network_profile,
-                            server_network_type,
-                            201)
-                        filtered_confirm_results = [
-                            result for result in confirm_results
-                            if result is not burst_result
-                        ] + retry_confirm_results
-                        retry_confirm_summary = evaluate_candidate(
-                            base_logs,
-                            best_candidate,
-                            filtered_confirm_results,
-                            network_profile)
-                        retry_confirm_summary["confirmation"] = True
-                        retry_confirm_summary["phase"] = "confirm_retry"
-                        retry_confirm_summary["warnings"].append(
-                            f"confirm_retried_after_isolated_wifi_burst(run_{burst_result['run_index']})")
-                        summaries.append(confirm_summary)
-                        confirm_results = filtered_confirm_results
-                        confirm_summary = retry_confirm_summary
+                        summaries)
                     summaries.append(confirm_summary)
                     candidate_stages[best_candidate.id] = "confirm"
                     if confirm_summary["stable"]:
@@ -2060,14 +2061,8 @@ def main():
                         pending_candidates,
                         queued_candidate_ids,
                         candidate_stages):
-                        queue_prefill_jump(
-                            best_candidate,
-                            confirm_results,
-                            args_ns.sample_rate,
-                            pending_candidates,
-                            queued_candidate_ids,
-                            candidate_stages,
-                            "confirm")
+                        print_flush(
+                            f"[server] no untested confirm neighbors remain for {best_candidate.id}")
                     last_summary = confirm_summary
                     print_flush(f"[server] confirmation failed for {best_candidate.id}; continuing backoff")
                     break
