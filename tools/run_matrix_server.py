@@ -32,7 +32,12 @@ PREFILL_VALUES = [768, 1024, 1536, 2048]
 FRAME_VALUES = [128, 256]
 AUDIO_BUFFER_VALUES = [32, 64, 128, 256]
 NORMAL_AUDIO_BUFFER_VALUES = [32, 64]
-START_PROFILE = (32, 128, 768)
+LOW_LATENCY_BASELINE_PROFILES = [
+    (32, 128, 768),
+    (64, 128, 768),
+    (32, 128, 1024),
+    (32, 128, 1536),
+]
 PROBE_RUNS = 1
 EDGE_RUNS = 3
 CONFIRM_RUNS = 3
@@ -233,9 +238,12 @@ def start_http_server(public_dir, logs_dir, host, port):
 
 def candidate_ladder():
     seen = set()
-    candidate = Candidate(*START_PROFILE)
-    seen.add(candidate.id)
-    yield candidate
+    for profile in LOW_LATENCY_BASELINE_PROFILES:
+        candidate = Candidate(*profile)
+        if candidate.id in seen:
+            continue
+        seen.add(candidate.id)
+        yield candidate
     for audio_buffer in NORMAL_AUDIO_BUFFER_VALUES:
         for prefill in PREFILL_VALUES:
             for frame_size in FRAME_VALUES:
@@ -246,6 +254,22 @@ def candidate_ladder():
                     continue
                 seen.add(candidate.id)
                 yield candidate
+
+
+def profile_key(candidate):
+    return (candidate.audio_buffer_size, candidate.frame_size, candidate.playback_prefill_frames)
+
+
+def is_low_latency_baseline(candidate):
+    return profile_key(candidate) in LOW_LATENCY_BASELINE_PROFILES
+
+
+def low_latency_baseline_complete(candidate_stages):
+    for audio_buffer, frame_size, prefill in LOW_LATENCY_BASELINE_PROFILES:
+        candidate = Candidate(audio_buffer, frame_size, prefill)
+        if candidate_stage_rank(candidate_stages.get(candidate.id, "")) < candidate_stage_rank("edge"):
+            return False
+    return True
 
 
 def detect_network_type():
@@ -1831,6 +1855,8 @@ def main():
             for candidate in candidates:
                 existing_results = candidate_results.get(candidate.id, [])
                 promote_probe_retry = bool(existing_results and candidate_stages.get(candidate.id) == "probe")
+                baseline_candidate = is_low_latency_baseline(candidate)
+                initial_run_count = EDGE_RUNS if baseline_candidate else PROBE_RUNS
                 if existing_results:
                     probe_results = existing_results[:1]
                 else:
@@ -1843,14 +1869,18 @@ def main():
                         args_ns.server_audio_device,
                         args_ns.sample_rate,
                         args_ns.no_stun,
-                        PROBE_RUNS,
+                        initial_run_count,
                         "probe",
                         network_profile,
                         server_network_type,
                         wait_for_initial_client=not summaries)
                     candidate_results[candidate.id] = probe_results
 
-                if not promote_probe_retry and not is_promising_probe(probe_results[0]):
+                if (
+                    not baseline_candidate
+                    and not promote_probe_retry
+                    and not is_promising_probe(probe_results[0])
+                ):
                     summary = evaluate_candidate(base_logs, candidate, probe_results, network_profile)
                     summary["phase"] = "probe"
                     summaries.append(summary)
@@ -1859,7 +1889,7 @@ def main():
                         f"[server] probe rejected {candidate.id}: "
                         f"reasons={','.join(summary['reasons']) or 'none'} "
                         f"warnings={','.join(summary['warnings']) or 'none'}")
-                    if not queue_smart_candidates(
+                    if low_latency_baseline_complete(candidate_stages) and not queue_smart_candidates(
                         candidate,
                         summary,
                         last_summary,
@@ -1913,12 +1943,19 @@ def main():
                     if summary.get("playable", False):
                         if practical_better(summary, local_best_summary):
                             local_best_summary = summary
+                        if not low_latency_baseline_complete(candidate_stages):
+                            print_flush(
+                                f"[server] found practical profile {candidate.id}; "
+                                "continuing low-latency baseline before local tuning")
+                        else:
+                            tuning_summary = local_best_summary or summary
+                            tuning_candidate = candidate_from_profile(tuning_summary["profile"])
                             pending_candidates.clear()
                             queued_candidate_ids.clear()
-                            if candidate.id not in local_expanded_candidate_ids:
-                                local_expanded_candidate_ids.add(candidate.id)
+                            if tuning_candidate.id not in local_expanded_candidate_ids:
+                                local_expanded_candidate_ids.add(tuning_candidate.id)
                                 queued = queue_local_neighbors(
-                                    candidate,
+                                    tuning_candidate,
                                     pending_candidates,
                                     queued_candidate_ids,
                                     candidate_stages)
@@ -1926,19 +1963,44 @@ def main():
                                 queued = 0
                             if not local_tuning:
                                 print_flush(
-                                    f"[server] found practical profile {candidate.id}; "
-                                    "switching from broad search to local tuning")
+                                    f"[server] low-latency baseline complete; "
+                                    f"switching local tuning around {tuning_candidate.id}")
                             else:
                                 print_flush(
-                                    f"[server] improved practical profile {candidate.id}; "
+                                    f"[server] improved practical profile {tuning_candidate.id}; "
                                     "refocusing local tuning around it")
                             local_tuning = True
                             if queued == 0:
                                 print_flush(
-                                    f"[server] no untested one-step neighbors remain for {candidate.id}")
+                                    f"[server] no untested one-step neighbors remain for {tuning_candidate.id}")
                         last_summary = summary
                         continue
                     if local_tuning:
+                        last_summary = summary
+                        continue
+                    if not low_latency_baseline_complete(candidate_stages):
+                        last_summary = summary
+                        continue
+                    if local_best_summary is not None:
+                        tuning_candidate = candidate_from_profile(local_best_summary["profile"])
+                        pending_candidates.clear()
+                        queued_candidate_ids.clear()
+                        if tuning_candidate.id not in local_expanded_candidate_ids:
+                            local_expanded_candidate_ids.add(tuning_candidate.id)
+                            queued = queue_local_neighbors(
+                                tuning_candidate,
+                                pending_candidates,
+                                queued_candidate_ids,
+                                candidate_stages)
+                        else:
+                            queued = 0
+                        print_flush(
+                            f"[server] low-latency baseline complete; "
+                            f"switching local tuning around {tuning_candidate.id}")
+                        if queued == 0:
+                            print_flush(
+                                f"[server] no untested one-step neighbors remain for {tuning_candidate.id}")
+                        local_tuning = True
                         last_summary = summary
                         continue
                     if not queue_smart_candidates(
@@ -1959,6 +2021,36 @@ def main():
                             "edge")
                     last_summary = summary
                 if summary["stable"]:
+                    if practical_better(summary, local_best_summary):
+                        local_best_summary = summary
+                    if not low_latency_baseline_complete(candidate_stages):
+                        print_flush(
+                            f"[server] stable profile {candidate.id}; "
+                            "continuing low-latency baseline before confirmation")
+                        last_summary = summary
+                        continue
+                    if baseline_candidate and local_best_summary is not None and not local_tuning:
+                        tuning_candidate = candidate_from_profile(local_best_summary["profile"])
+                        pending_candidates.clear()
+                        queued_candidate_ids.clear()
+                        if tuning_candidate.id not in local_expanded_candidate_ids:
+                            local_expanded_candidate_ids.add(tuning_candidate.id)
+                            queued = queue_local_neighbors(
+                                tuning_candidate,
+                                pending_candidates,
+                                queued_candidate_ids,
+                                candidate_stages)
+                        else:
+                            queued = 0
+                        print_flush(
+                            f"[server] low-latency baseline complete; "
+                            f"switching local tuning around {tuning_candidate.id}")
+                        if queued == 0:
+                            print_flush(
+                                f"[server] no untested one-step neighbors remain for {tuning_candidate.id}")
+                        local_tuning = True
+                        last_summary = summary
+                        continue
                     stable_summaries = [summary]
                     tested_candidates = {candidate.id: candidate}
                     drift_candidates = []
