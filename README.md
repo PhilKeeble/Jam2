@@ -101,7 +101,7 @@ Edit test cases in:
 tools/test_matrix.json
 ```
 
-The default matrix covers aggressive through safe profiles from `64/64` up to `512/512`. Each test runs for `120000ms` by default; increase `--runs` to measure variance across repeated runs.
+The default matrix covers aggressive through safe profiles from `64/64` up to `512/256`. The largest packetization mode is 256 frames to keep audio UDP packets below typical MTU. Each test runs for `120000ms` by default; increase `--runs` to measure variance across repeated runs.
 
 Start the listen/server side first:
 

@@ -197,8 +197,8 @@ Options parse_options(int argc, char** argv, int start)
         } else if (arg == "--frame-size") {
             options.frame_size = std::stoi(std::string(require_value(argc, argv, i, arg)));
             if (options.frame_size != 32 && options.frame_size != 64 && options.frame_size != 128 &&
-                options.frame_size != 256 && options.frame_size != 512) {
-                throw std::runtime_error("--frame-size must be 32, 64, 128, 256, or 512");
+                options.frame_size != 256) {
+                throw std::runtime_error("--frame-size must be 32, 64, 128, or 256");
             }
         } else if (arg == "--drift-correction") {
             const std::string value{require_value(argc, argv, i, arg)};
@@ -612,6 +612,16 @@ void observe_timing(
 double frames_to_ms(std::size_t frames, double sample_rate)
 {
     return sample_rate > 0.0 ? (static_cast<double>(frames) * 1000.0 / sample_rate) : 0.0;
+}
+
+std::size_t audio_payload_bytes(int frame_size)
+{
+    return static_cast<std::size_t>(frame_size > 0 ? frame_size : 0) * 3U;
+}
+
+std::size_t audio_packet_bytes(int frame_size)
+{
+    return jam2::protocol::kHeaderSize + audio_payload_bytes(frame_size);
 }
 
 std::string platform_name()
@@ -1427,6 +1437,8 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "Sample rate: " << options.sample_rate << "\n";
     std::cout << "Frame size samples: " << options.frame_size << "\n";
     std::cout << "Frame interval ms: " << frame_interval_ms << "\n";
+    std::cout << "Audio UDP payload bytes: " << audio_payload_bytes(options.frame_size) << "\n";
+    std::cout << "Audio UDP packet bytes: " << audio_packet_bytes(options.frame_size) << "\n";
     std::cout << "Audio buffer size frames: " << options.audio_buffer_size << "\n";
     std::cout << "Audio buffer size ms: "
               << frames_to_ms(static_cast<std::size_t>(options.audio_buffer_size > 0 ? options.audio_buffer_size : 0), options.sample_rate)

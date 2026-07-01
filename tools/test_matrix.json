@@ -80,16 +80,12 @@
       "common_args": ["--audio-buffer-size", "256", "--frame-size", "256", "--playback-prefill-frames", "1536", "--playback-ring-frames", "8192", "--playback-max-frames", "4096"]
     },
     {
-      "id": "safe_audio256_frame512_prefill2048",
-      "common_args": ["--audio-buffer-size", "256", "--frame-size", "512", "--playback-prefill-frames", "2048", "--playback-ring-frames", "16384", "--playback-max-frames", "8192"]
-    },
-    {
       "id": "safe_audio512_frame256_prefill2048",
       "common_args": ["--audio-buffer-size", "512", "--frame-size", "256", "--playback-prefill-frames", "2048", "--playback-ring-frames", "16384", "--playback-max-frames", "8192"]
     },
     {
-      "id": "very_safe_audio512_frame512_prefill4096",
-      "common_args": ["--audio-buffer-size", "512", "--frame-size", "512", "--playback-prefill-frames", "4096", "--playback-ring-frames", "16384", "--playback-max-frames", "8192"]
+      "id": "very_safe_audio512_frame256_prefill4096",
+      "common_args": ["--audio-buffer-size", "512", "--frame-size", "256", "--playback-prefill-frames", "4096", "--playback-ring-frames", "16384", "--playback-max-frames", "8192"]
     }
   ]
 }

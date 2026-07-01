@@ -18,6 +18,11 @@
 namespace jam2 {
 namespace {
 
+constexpr std::size_t kJam2HeaderBytes = 48;
+constexpr std::size_t kMaxAudioFramesPerPacket = 256;
+constexpr std::size_t kPcm24BytesPerFrame = 3;
+constexpr std::size_t kMaxExpectedDatagramBytes = kJam2HeaderBytes + (kMaxAudioFramesPerPacket * kPcm24BytesPerFrame);
+
 std::string socket_error_text()
 {
 #if defined(_WIN32)
@@ -217,7 +222,7 @@ std::optional<std::pair<Endpoint, std::vector<std::uint8_t>>> UdpSocket::recv_fr
         return std::nullopt;
     }
 
-    std::vector<std::uint8_t> buffer(1500);
+    std::vector<std::uint8_t> buffer(kMaxExpectedDatagramBytes);
     sockaddr_in from{};
     socklen_t from_len = sizeof(from);
     const int received = ::recvfrom(
@@ -230,6 +235,13 @@ std::optional<std::pair<Endpoint, std::vector<std::uint8_t>>> UdpSocket::recv_fr
     if (received < 0) {
 #if defined(_WIN32)
         if (WSAGetLastError() == WSAECONNRESET) {
+            return std::nullopt;
+        }
+        if (WSAGetLastError() == WSAEMSGSIZE) {
+            return std::nullopt;
+        }
+#else
+        if (errno == EMSGSIZE) {
             return std::nullopt;
         }
 #endif
