@@ -31,6 +31,7 @@ from matrix_common import (
 PREFILL_VALUES = [768, 1024, 1536, 2048]
 FRAME_VALUES = [128, 256]
 AUDIO_BUFFER_VALUES = [32, 64, 128, 256]
+NORMAL_AUDIO_BUFFER_VALUES = [32, 64]
 START_PROFILE = (32, 128, 768)
 PROBE_RUNS = 1
 EDGE_RUNS = 3
@@ -63,6 +64,16 @@ PLAYABLE_MAX_JITTER_MS = 120.0
 PLAYABLE_MAX_PACKET_LOSS_PERCENT = 0.20
 PLAYABLE_MAX_PACKET_LOSS_PER_SECOND = 0.35
 PLAYABLE_MAX_DROPPED_FRAMES_PER_SECOND = 4.0
+PRESSURED_MAX_PLAYBACK_UNDERRUNS_PER_SECOND = 80.0
+PRESSURED_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND = 80.0
+PRESSURED_MAX_PACKET_LOSS_PERCENT = 0.25
+PRESSURED_MAX_PACKET_LOSS_PER_SECOND = 0.70
+PRESSURED_MAX_DROPPED_FRAMES_PER_SECOND = 0.25
+PRESSURED_MAX_JITTER_MS = 80.0
+EXPERIMENTAL_MAX_PACKET_LOSS_PERCENT = 0.40
+EXPERIMENTAL_MAX_PACKET_LOSS_PER_SECOND = 1.00
+EXPERIMENTAL_MAX_DROPPED_FRAMES_PER_SECOND = 50.0
+EXPERIMENTAL_MAX_JITTER_MS = 180.0
 DRIFT_OFF_FINAL_PPM_LIMIT = 15.0
 DRIFT_OFF_PERIODIC_PPM_LIMIT = 50.0
 DRIFT_OFF_DEPTH_DELTA_MS_LIMIT = 2.0
@@ -222,7 +233,7 @@ def candidate_ladder():
     candidate = Candidate(*START_PROFILE)
     seen.add(candidate.id)
     yield candidate
-    for audio_buffer in AUDIO_BUFFER_VALUES:
+    for audio_buffer in NORMAL_AUDIO_BUFFER_VALUES:
         for prefill in PREFILL_VALUES:
             for frame_size in FRAME_VALUES:
                 if frame_size < audio_buffer:
@@ -669,7 +680,7 @@ def is_practical_probe(result):
     return (
         result.get("network_profile") == "wifi"
         and not is_infrastructure_failure(result)
-        and playable_accepts(result.get("metrics", {}), "wifi")
+        and practical_accepts(result.get("metrics", {}), "wifi")
     )
 
 
@@ -1012,6 +1023,42 @@ def playable_accepts(metrics, network_profile):
     )
 
 
+def pressured_accepts(metrics, network_profile):
+    if metrics.get("elapsed_seconds", 0.0) <= 0.0:
+        return False
+    if metrics.get("playback_ring_overruns", 0.0) > 0.0:
+        return False
+    if metrics.get("min_playback_depth_ms", 0.0) < PLAYABLE_MIN_PLAYBACK_DEPTH_MS:
+        return False
+    return (
+        metrics.get("packet_loss_percent", 0.0) <= PRESSURED_MAX_PACKET_LOSS_PERCENT
+        and metrics.get("packet_loss_per_second", 0.0) <= PRESSURED_MAX_PACKET_LOSS_PER_SECOND
+        and metrics.get("playback_ring_underruns_per_second", 0.0) <= PRESSURED_MAX_PLAYBACK_UNDERRUNS_PER_SECOND
+        and metrics.get("playback_ring_underrun_events_per_second", 0.0) <= PRESSURED_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND
+        and metrics.get("playback_dropped_frames_per_second", 0.0) <= PRESSURED_MAX_DROPPED_FRAMES_PER_SECOND
+        and metrics.get("jitter_max_ms", 0.0) <= PRESSURED_MAX_JITTER_MS
+    )
+
+
+def experimental_accepts(metrics, network_profile):
+    if metrics.get("elapsed_seconds", 0.0) <= 0.0:
+        return False
+    if metrics.get("playback_ring_overruns", 0.0) > 0.0:
+        return False
+    if metrics.get("min_playback_depth_ms", 0.0) < PLAYABLE_MIN_PLAYBACK_DEPTH_MS:
+        return False
+    return (
+        metrics.get("packet_loss_percent", 0.0) <= EXPERIMENTAL_MAX_PACKET_LOSS_PERCENT
+        and metrics.get("packet_loss_per_second", 0.0) <= EXPERIMENTAL_MAX_PACKET_LOSS_PER_SECOND
+        and metrics.get("playback_dropped_frames_per_second", 0.0) <= EXPERIMENTAL_MAX_DROPPED_FRAMES_PER_SECOND
+        and metrics.get("jitter_max_ms", 0.0) <= EXPERIMENTAL_MAX_JITTER_MS
+    )
+
+
+def practical_accepts(metrics, network_profile):
+    return playable_accepts(metrics, network_profile) or pressured_accepts(metrics, network_profile)
+
+
 def metric_score(metrics):
     return (
         metrics.get("packet_loss_per_second", 0.0) * 500.0 +
@@ -1027,12 +1074,14 @@ def metric_score(metrics):
 
 def practical_score(summary):
     metrics = summary.get("metrics", {})
+    dropped_penalty = metrics.get("playback_dropped_frames_per_second", 0.0) * 25.0
+    underrun_penalty = min(metrics.get("playback_ring_underrun_events_per_second", 0.0), 80.0) * 0.03
+    loss_penalty = metrics.get("packet_loss_per_second", 0.0) * 8.0
     return (
         summary.get("latency_avg_ms", 0.0) +
-        metrics.get("packet_loss_per_second", 0.0) * 20.0 +
-        metrics.get("playback_ring_underrun_events_per_second", 0.0) * 2.0 +
-        metrics.get("playback_ring_underruns_per_second", 0.0) * 0.5 +
-        metrics.get("playback_dropped_frames_per_second", 0.0) * 5.0 +
+        loss_penalty +
+        underrun_penalty +
+        dropped_penalty +
         metrics.get("playback_ring_overruns", 0.0) * 1000.0 +
         max(0.0, STABLE_TARGET_PLAYBACK_DEPTH_MIN_MS - metrics.get("min_playback_depth_ms", 0.0)) * 0.5 +
         max(0.0, metrics.get("jitter_max_ms", 0.0) - 60.0) * 0.05
@@ -1091,6 +1140,11 @@ def dominant_failures(summary):
 def add_candidate(target, output):
     if target is not None and valid_candidate(target):
         output.append(target)
+
+
+def add_normal_audio_candidate(target, output):
+    if target is not None and target.audio_buffer_size in NORMAL_AUDIO_BUFFER_VALUES:
+        add_candidate(target, output)
 
 
 def smart_next_candidates(candidate, summary, previous_summary=None):
@@ -1153,10 +1207,25 @@ def local_neighbor_candidates(candidate):
     next_frame = next_value(FRAME_VALUES, candidate.frame_size)
     add_candidate(with_prefill(candidate, previous_prefill), candidates)
     add_candidate(with_prefill(candidate, next_prefill), candidates)
-    add_candidate(with_audio_buffer(candidate, previous_audio), candidates)
-    add_candidate(with_audio_buffer(candidate, next_audio), candidates)
+    add_normal_audio_candidate(with_audio_buffer(candidate, previous_audio), candidates)
+    add_normal_audio_candidate(with_audio_buffer(candidate, next_audio), candidates)
     add_candidate(with_frame_size(candidate, previous_frame), candidates)
     add_candidate(with_frame_size(candidate, next_frame), candidates)
+    return candidates
+
+
+def confirm_neighbor_candidates(candidate):
+    candidates = []
+    previous_prefill = previous_value(PREFILL_VALUES, candidate.playback_prefill_frames)
+    next_prefill = next_value(PREFILL_VALUES, candidate.playback_prefill_frames)
+    previous_audio = previous_value(AUDIO_BUFFER_VALUES, candidate.audio_buffer_size)
+    next_audio = next_value(AUDIO_BUFFER_VALUES, candidate.audio_buffer_size)
+    previous_frame = previous_value(FRAME_VALUES, candidate.frame_size)
+    add_candidate(with_prefill(candidate, previous_prefill), candidates)
+    add_candidate(with_prefill(candidate, next_prefill), candidates)
+    add_normal_audio_candidate(with_audio_buffer(candidate, previous_audio), candidates)
+    add_normal_audio_candidate(with_audio_buffer(candidate, next_audio), candidates)
+    add_candidate(with_frame_size(candidate, previous_frame), candidates)
     return candidates
 
 
@@ -1174,6 +1243,20 @@ def queue_local_neighbors(candidate, pending_candidates, queued_candidate_ids, c
     return queued
 
 
+def queue_confirm_neighbors(candidate, pending_candidates, queued_candidate_ids, candidate_stages):
+    queued = 0
+    for next_candidate in confirm_neighbor_candidates(candidate):
+        if not can_queue_candidate(next_candidate, candidate_stages, queued_candidate_ids, allow_probe_retry=True):
+            continue
+        pending_candidates.append(next_candidate)
+        queued_candidate_ids.add(next_candidate.id)
+        queued += 1
+        print_flush(
+            f"[server] queued confirm-neighbor candidate: "
+            f"{next_candidate.id} from {candidate.id}")
+    return queued
+
+
 def evaluate_candidate(base_logs, candidate, run_results, network_profile="unknown"):
     stable_runs = [result for result in run_results if result["evaluation"]["stable"]]
     infra_failures = [result for result in run_results if is_infrastructure_failure(result)]
@@ -1187,20 +1270,37 @@ def evaluate_candidate(base_logs, candidate, run_results, network_profile="unkno
         and good_ratio >= STABLE_MIN_GOOD_RUN_RATIO
         and aggregate_accepts(metrics, network_profile, aggressive=False)
     )
-    playable = (
+    clean_playable = (
         len(infra_failures) == 0
         and len(run_results) >= PLAYABLE_MIN_RUNS
         and playable_accepts(metrics, network_profile)
     )
+    pressured_playable = (
+        len(infra_failures) == 0
+        and len(run_results) >= PLAYABLE_MIN_RUNS
+        and not clean_playable
+        and pressured_accepts(metrics, network_profile)
+    )
+    experimental = (
+        len(infra_failures) == 0
+        and len(run_results) >= PLAYABLE_MIN_RUNS
+        and experimental_accepts(metrics, network_profile)
+    )
     if accepted and len(stable_runs) != len(run_results):
         all_warnings.append(f"mostly_stable_runs({len(stable_runs)}/{len(run_results)})")
-    if playable and not accepted:
+    if clean_playable and not accepted:
         all_warnings.append("practical_playable_not_strict_stable")
+    if pressured_playable:
+        all_warnings.append("pressured_playable_underruns_without_dropouts")
+    if experimental and not (accepted or clean_playable or pressured_playable):
+        all_warnings.append("experimental_audio_issues_expected")
     return {
         "candidate": candidate.id,
         "profile": candidate.profile(),
         "stable": accepted,
-        "playable": accepted or playable,
+        "playable": accepted or clean_playable or pressured_playable,
+        "pressured_playable": pressured_playable,
+        "experimental": experimental,
         "stable_runs": len(stable_runs),
         "run_count": len(run_results),
         "reasons": all_reasons,
@@ -1332,14 +1432,11 @@ def is_aggressive_candidate(summary):
         and summary["run_count"] >= AGGRESSIVE_MIN_RUNS
         and all(reason in allowed_reasons for reason in summary.get("reasons", []))
         and metrics.get("playback_ring_overruns", 0.0) == 0.0
-        and metrics.get("packet_loss_percent", 0.0) <= AGGRESSIVE_MAX_PACKET_LOSS_PERCENT
-        and metrics.get("packet_loss_per_second", 0.0) <= AGGRESSIVE_MAX_PACKET_LOSS_PER_SECOND
-        and metrics.get("playback_dropped_frames_per_second", 0.0) <= AGGRESSIVE_MAX_DROPPED_FRAMES_PER_SECOND
-        and metrics.get("playback_ring_underruns_per_second", 0.0) <= AGGRESSIVE_MAX_PLAYBACK_UNDERRUNS_PER_SECOND
-        and event_rate <= AGGRESSIVE_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND
-        and metrics.get("max_playback_ring_underruns", 0.0) <= AGGRESSIVE_MAX_PLAYBACK_UNDERRUNS_PER_RUN
+        and metrics.get("packet_loss_percent", 0.0) <= EXPERIMENTAL_MAX_PACKET_LOSS_PERCENT
+        and metrics.get("packet_loss_per_second", 0.0) <= EXPERIMENTAL_MAX_PACKET_LOSS_PER_SECOND
+        and metrics.get("playback_dropped_frames_per_second", 0.0) <= EXPERIMENTAL_MAX_DROPPED_FRAMES_PER_SECOND
         and metrics.get("min_playback_depth_ms", 0.0) >= AGGRESSIVE_MIN_PLAYBACK_DEPTH_MS
-        and metrics.get("jitter_max_ms", 0.0) <= AGGRESSIVE_MAX_JITTER_MS
+        and metrics.get("jitter_max_ms", 0.0) <= EXPERIMENTAL_MAX_JITTER_MS
     )
 
 
@@ -1358,6 +1455,7 @@ def choose_practical_summary(summaries):
     candidates = [
         summary for summary in summaries
         if summary.get("playable") and summary.get("run_count", 0) >= PLAYABLE_MIN_RUNS
+        and not summary.get("confirm_failed", False)
     ]
     if not candidates:
         return None
@@ -1614,6 +1712,12 @@ def choose_best_stable_summary(summaries):
     if not stable:
         return None
     return min(stable, key=lambda summary: summary["latency_avg_ms"])
+
+
+def mark_confirm_failed(summaries, candidate_id):
+    for summary in summaries:
+        if summary.get("candidate") == candidate_id:
+            summary["confirm_failed"] = True
 
 
 def main():
@@ -1949,14 +2053,13 @@ def main():
                         write_summary(base_logs, summaries, recommendation, True, command_context)
                         write_json(public_dir / "current.json", {"status": "all_done", "url": "", "client_args": []})
                         return 0
-                    if not queue_smart_candidates(
+                    mark_confirm_failed(summaries, best_candidate.id)
+                    local_tuning = True
+                    if not queue_confirm_neighbors(
                         best_candidate,
-                        confirm_summary,
-                        summary,
                         pending_candidates,
                         queued_candidate_ids,
-                        candidate_stages,
-                        "confirm"):
+                        candidate_stages):
                         queue_prefill_jump(
                             best_candidate,
                             confirm_results,
