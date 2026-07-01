@@ -36,6 +36,7 @@ PROBE_RUNS = 1
 EDGE_RUNS = 3
 CONFIRM_RUNS = 3
 INFRA_RETRIES = 1
+CONFIRM_BURST_RETRIES = 1
 SHORT_STREAM_MS = 30000
 CONFIRM_STREAM_MS = 60000
 STATS_INTERVAL_MS = 5000
@@ -269,13 +270,21 @@ def detect_network_type():
 
 
 def effective_network_profile(requested, detected_server, detected_client):
-    if requested in ("wired", "wifi"):
-        return requested
     if detected_server == "wifi" or detected_client == "wifi":
         return "wifi"
+    if requested in ("wired", "wifi"):
+        return requested
     if detected_server == "wired" and detected_client == "wired":
         return "wired"
     return "unknown"
+
+
+def network_profile_note(requested, effective, detected_server, detected_client):
+    if requested != effective and effective == "wifi":
+        return (
+            " wifi_overrides_requested_profile"
+            f"({requested}) because server={detected_server} client={detected_client}")
+    return ""
 
 
 def same_physical_candidate(candidate, drift_correction, drift_deadband_ppm):
@@ -656,9 +665,20 @@ def has_probe_depth_failure(server, client):
     return not depths or min(depths) < PROBE_PLAYBACK_DEPTH_MIN_MS
 
 
+def is_practical_probe(result):
+    return (
+        result.get("network_profile") == "wifi"
+        and not is_infrastructure_failure(result)
+        and playable_accepts(result.get("metrics", {}), "wifi")
+    )
+
+
 def is_promising_probe(result):
     return (
-        not has_probe_hard_failure(result["evaluation"])
+        (
+            not has_probe_hard_failure(result["evaluation"])
+            or is_practical_probe(result)
+        )
         and not result.get("probe_depth_failure", False)
     )
 
@@ -848,6 +868,51 @@ def aggregate_metrics(run_results):
         "min_playback_depth_ms": min((metric.get("min_playback_depth_ms", 0.0) for metric in metrics), default=0.0),
         "max_abs_depth_delta_ms": max((metric.get("max_abs_depth_delta_ms", 0.0) for metric in metrics), default=0.0),
     }
+
+
+def burst_badness(metrics):
+    return (
+        metrics.get("packet_loss_per_second", 0.0) / max(PLAYABLE_MAX_PACKET_LOSS_PER_SECOND, 0.001) +
+        metrics.get("playback_ring_underrun_events_per_second", 0.0) / max(PLAYABLE_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND, 0.001) +
+        metrics.get("playback_ring_underruns_per_second", 0.0) / max(PLAYABLE_MAX_PLAYBACK_UNDERRUNS_PER_SECOND, 0.001) +
+        metrics.get("playback_dropped_frames", 0.0) / max(1.0, PLAYABLE_MAX_DROPPED_FRAMES_PER_SECOND * max(metrics.get("elapsed_seconds", 0.0), 1.0)) +
+        metrics.get("playback_ring_overruns", 0.0) * 10.0
+    )
+
+
+def isolated_burst_result(edge_summary, confirm_results, confirm_summary):
+    if not edge_summary.get("playable", False):
+        return None
+    if confirm_summary.get("playable", False):
+        return None
+    if not confirm_results or any(is_infrastructure_failure(result) for result in confirm_results):
+        return None
+    if any(result.get("network_profile") == "wifi" for result in confirm_results):
+        pass
+    else:
+        return None
+    acceptable = [
+        result for result in confirm_results
+        if result["evaluation"].get("stable") or playable_accepts(result.get("metrics", {}), "wifi")
+    ]
+    if len(acceptable) < len(confirm_results) - 1:
+        return None
+    bad_results = [
+        result for result in confirm_results
+        if not (result["evaluation"].get("stable") or playable_accepts(result.get("metrics", {}), "wifi"))
+    ]
+    if len(bad_results) != 1:
+        return None
+    bad_score = burst_badness(bad_results[0].get("metrics", {}))
+    other_scores = [burst_badness(result.get("metrics", {})) for result in acceptable]
+    baseline = max(other_scores) if other_scores else 0.0
+    if bad_score >= max(2.0, baseline * 3.0):
+        return bad_results[0]
+    return None
+
+
+def should_retry_burst_confirm(edge_summary, confirm_results, confirm_summary):
+    return isolated_burst_result(edge_summary, confirm_results, confirm_summary) is not None
 
 
 def should_probe_wider_deadband(candidate, run_results):
@@ -1505,10 +1570,16 @@ def run_candidate(
             network_profile,
             server_network_type)
         client_uploaded = wait_for_client_upload(base_logs, candidate.id, run_index)
+        run_client_network_type = client_network_type_for_run(base_logs, candidate.id, run_index)
         run_network_profile = effective_network_profile(
             network_profile,
             server_network_type,
-            client_network_type_for_run(base_logs, candidate.id, run_index))
+            run_client_network_type)
+        run_profile_note = network_profile_note(
+            network_profile,
+            run_network_profile,
+            server_network_type,
+            run_client_network_type)
         server = side_result(base_logs, candidate.id, "server", run_index)
         client = side_result(base_logs, candidate.id, "client", run_index)
         evaluation = evaluate_run(server, client, server_rc, client_uploaded, run_network_profile)
@@ -1516,12 +1587,14 @@ def run_candidate(
         metrics = run_metrics(server, client)
         print_flush(
             f"[server] {phase} evaluated {candidate.id} run {run_index}: "
+            f"network_profile={run_network_profile}{run_profile_note} "
             f"stable={evaluation['stable']} reasons={','.join(evaluation['reasons']) or 'none'} "
             f"warnings={','.join(evaluation['warnings']) or 'none'}")
         results.append({
             "run_index": run_index,
             "server_rc": server_rc,
             "client_uploaded": client_uploaded,
+            "network_profile": run_network_profile,
             "evaluation": evaluation,
             "probe_depth_failure": probe_depth_failure,
             "metrics": metrics,
@@ -1566,7 +1639,10 @@ def main():
         "no_stun": args_ns.no_stun,
     }
     print_flush(f"[server] publishing {public_dir} on http://{args_ns.host}:{args_ns.port}/")
-    print_flush(f"[server] network profile: {network_profile} server={server_network_type} client={client_network_type}")
+    print_flush(
+        f"[server] network profile: {network_profile} "
+        f"requested={args_ns.network_profile} server={server_network_type} client={client_network_type}"
+        f"{network_profile_note(args_ns.network_profile, network_profile, server_network_type, client_network_type)}")
     try:
         ladder_candidates = list(candidate_ladder())
         ladder_index = 0
@@ -1824,10 +1900,52 @@ def main():
                     confirm_summary = evaluate_candidate(base_logs, best_candidate, confirm_results, network_profile)
                     confirm_summary["confirmation"] = True
                     confirm_summary["phase"] = "confirm"
+                    burst_result = isolated_burst_result(summary, confirm_results, confirm_summary)
+                    if burst_result is not None:
+                        print_flush(
+                            f"[server] retrying confirm for {best_candidate.id}: "
+                            f"discarding burst run {burst_result['run_index']} from recommendation averages")
+                        retry_confirm_results = run_candidate(
+                            jam2,
+                            best_candidate,
+                            CONFIRM_STREAM_MS,
+                            base_logs,
+                            public_dir,
+                            args_ns.server_audio_device,
+                            args_ns.sample_rate,
+                            args_ns.no_stun,
+                            CONFIRM_BURST_RETRIES,
+                            "confirm-retry",
+                            network_profile,
+                            server_network_type,
+                            201)
+                        filtered_confirm_results = [
+                            result for result in confirm_results
+                            if result is not burst_result
+                        ] + retry_confirm_results
+                        retry_confirm_summary = evaluate_candidate(
+                            base_logs,
+                            best_candidate,
+                            filtered_confirm_results,
+                            network_profile)
+                        retry_confirm_summary["confirmation"] = True
+                        retry_confirm_summary["phase"] = "confirm_retry"
+                        retry_confirm_summary["warnings"].append(
+                            f"confirm_retried_after_isolated_wifi_burst(run_{burst_result['run_index']})")
+                        summaries.append(confirm_summary)
+                        confirm_results = filtered_confirm_results
+                        confirm_summary = retry_confirm_summary
                     summaries.append(confirm_summary)
                     candidate_stages[best_candidate.id] = "confirm"
                     if confirm_summary["stable"]:
                         recommendation = confirm_summary
+                        write_summary(base_logs, summaries, recommendation, True, command_context)
+                        write_json(public_dir / "current.json", {"status": "all_done", "url": "", "client_args": []})
+                        return 0
+                    if confirm_summary.get("playable", False):
+                        print_flush(
+                            f"[server] practical confirmation accepted for {best_candidate.id}; "
+                            "stopping without strict stable confirmation")
                         write_summary(base_logs, summaries, recommendation, True, command_context)
                         write_json(public_dir / "current.json", {"status": "all_done", "url": "", "client_args": []})
                         return 0
