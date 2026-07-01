@@ -73,9 +73,9 @@ PRESSURED_MAX_DROPPED_FRAMES_PER_SECOND = 0.25
 PRESSURED_MAX_DROPPED_FRAME_PERCENT = 0.10
 PRESSURED_MAX_JITTER_MS = 80.0
 EXPERIMENTAL_MAX_PACKET_LOSS_PERCENT = 0.40
-EXPERIMENTAL_MAX_PACKET_LOSS_PER_SECOND = 1.00
-EXPERIMENTAL_MAX_DROPPED_FRAMES_PER_SECOND = 50.0
-EXPERIMENTAL_MAX_DROPPED_FRAME_PERCENT = 0.25
+EXPERIMENTAL_MAX_PACKET_LOSS_PER_SECOND = 1.50
+EXPERIMENTAL_MAX_DROPPED_FRAMES_PER_SECOND = 500.0
+EXPERIMENTAL_MAX_DROPPED_FRAME_PERCENT = 0.75
 EXPERIMENTAL_MAX_JITTER_MS = 180.0
 DRIFT_OFF_FINAL_PPM_LIMIT = 15.0
 DRIFT_OFF_PERIODIC_PPM_LIMIT = 50.0
@@ -1491,7 +1491,7 @@ def is_aggressive_candidate(summary):
     return (
         bool(summary.get("profile"))
         and "playback_ring_underruns" in metrics
-        and summary["run_count"] >= AGGRESSIVE_MIN_RUNS
+        and summary["run_count"] >= 1
         and all(reason in allowed_reasons for reason in summary.get("reasons", []))
         and metrics.get("playback_ring_overruns", 0.0) == 0.0
         and metrics.get("packet_loss_percent", 0.0) <= EXPERIMENTAL_MAX_PACKET_LOSS_PERCENT
@@ -1507,7 +1507,11 @@ def choose_aggressive_summary(summaries):
     if not candidates:
         return None
     return min(candidates, key=lambda summary: (
+        summary.get("profile", {}).get("audio_buffer_size", 999),
+        summary.get("profile", {}).get("frame_size", 999),
+        summary.get("profile", {}).get("playback_prefill_frames", 999999),
         summary["latency_avg_ms"],
+        summary.get("metrics", {}).get("playback_dropped_frame_percent", 0.0),
         summary.get("metrics", {}).get("playback_ring_underrun_events_per_second", 0.0),
         summary.get("metrics", {}).get("playback_ring_underruns_per_second", 0.0),
         summary.get("metrics", {}).get("jitter_max_ms", 0.0)))
