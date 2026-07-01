@@ -31,12 +31,7 @@ from matrix_common import (
 PREFILL_VALUES = [768, 1024, 1536, 2048]
 FRAME_VALUES = [128, 256]
 AUDIO_BUFFER_VALUES = [32, 64, 128, 256]
-ANCHOR_PROFILES = [
-    (32, 128, 768),
-    (64, 128, 1024),
-    (128, 256, 1536),
-    (256, 256, 2048),
-]
+START_PROFILE = (32, 128, 768)
 PROBE_RUNS = 1
 EDGE_RUNS = 3
 CONFIRM_RUNS = 3
@@ -58,6 +53,15 @@ STABLE_MAX_PACKET_LOSS_PER_SECOND = 0.10
 STABLE_MAX_PACKET_LOSS_PER_RUN = 16
 STABLE_MAX_DROPPED_FRAMES_PER_SECOND = 8.0
 STABLE_MAX_DROPPED_FRAMES_PER_RUN = 2048
+PLAYABLE_MIN_RUNS = EDGE_RUNS
+PLAYABLE_MAX_PLAYBACK_UNDERRUNS_PER_SECOND = 10.0
+PLAYABLE_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND = 2.0
+PLAYABLE_MAX_PLAYBACK_UNDERRUNS_PER_RUN = 32768
+PLAYABLE_MIN_PLAYBACK_DEPTH_MS = STABLE_HARD_PLAYBACK_DEPTH_MIN_MS
+PLAYABLE_MAX_JITTER_MS = 120.0
+PLAYABLE_MAX_PACKET_LOSS_PERCENT = 0.20
+PLAYABLE_MAX_PACKET_LOSS_PER_SECOND = 0.35
+PLAYABLE_MAX_DROPPED_FRAMES_PER_SECOND = 4.0
 DRIFT_OFF_FINAL_PPM_LIMIT = 15.0
 DRIFT_OFF_PERIODIC_PPM_LIMIT = 50.0
 DRIFT_OFF_DEPTH_DELTA_MS_LIMIT = 2.0
@@ -214,10 +218,9 @@ def start_http_server(public_dir, logs_dir, host, port):
 
 def candidate_ladder():
     seen = set()
-    for audio_buffer, frame_size, prefill in ANCHOR_PROFILES:
-        candidate = Candidate(audio_buffer, frame_size, prefill)
-        seen.add(candidate.id)
-        yield candidate
+    candidate = Candidate(*START_PROFILE)
+    seen.add(candidate.id)
+    yield candidate
     for audio_buffer in AUDIO_BUFFER_VALUES:
         for prefill in PREFILL_VALUES:
             for frame_size in FRAME_VALUES:
@@ -297,11 +300,75 @@ def candidate_from_profile(profile):
         int(profile["drift_deadband_ppm"]))
 
 
+def next_value(values, current):
+    for value in values:
+        if value > current:
+            return value
+    return None
+
+
+def previous_value(values, current):
+    previous = None
+    for value in values:
+        if value >= current:
+            return previous
+        previous = value
+    return previous
+
+
+def valid_candidate(candidate):
+    return (
+        candidate.audio_buffer_size in AUDIO_BUFFER_VALUES
+        and candidate.frame_size in FRAME_VALUES
+        and candidate.playback_prefill_frames in PREFILL_VALUES
+        and candidate.frame_size >= candidate.audio_buffer_size
+    )
+
+
+def with_audio_buffer(candidate, audio_buffer):
+    return Candidate(
+        audio_buffer,
+        candidate.frame_size,
+        candidate.playback_prefill_frames,
+        candidate.playback_ring_frames,
+        candidate.playback_max_frames,
+        candidate.drift_correction,
+        candidate.drift_deadband_ppm)
+
+
+def with_frame_size(candidate, frame_size):
+    return Candidate(
+        candidate.audio_buffer_size,
+        frame_size,
+        candidate.playback_prefill_frames,
+        candidate.playback_ring_frames,
+        candidate.playback_max_frames,
+        candidate.drift_correction,
+        candidate.drift_deadband_ppm)
+
+
+def with_prefill(candidate, prefill):
+    return Candidate(
+        candidate.audio_buffer_size,
+        candidate.frame_size,
+        prefill,
+        candidate.playback_ring_frames,
+        candidate.playback_max_frames,
+        candidate.drift_correction,
+        candidate.drift_deadband_ppm)
+
+
 def numeric(row, field):
     try:
         return float(row.get(field, "") or 0)
     except ValueError:
         return 0.0
+
+
+def packet_loss_count(row_or_metrics):
+    return max(
+        float(row_or_metrics.get("sequence_lost", 0.0) or 0.0),
+        float(row_or_metrics.get("reordered_lost", 0.0) or 0.0))
 
 
 def playback_underrun_rates(row):
@@ -461,7 +528,7 @@ def repeating_capture_underruns(rows):
 
 
 def packet_loss_ok(row, profile):
-    lost = numeric(row, "sequence_lost") + numeric(row, "reordered_lost")
+    lost = packet_loss_count(row)
     elapsed_seconds = numeric(row, "elapsed_ms") / 1000.0
     recv_packets = max(1.0, numeric(row, "recv_packets") + numeric(row, "sequence_lost"))
     loss_percent = lost * 100.0 / recv_packets
@@ -639,13 +706,13 @@ def queue_prefill_jump(
     sample_rate,
     pending_candidates,
     queued_candidate_ids,
-    tested_candidate_ids,
+    candidate_stages,
     phase):
     for result in run_results:
         jump_candidate = prefill_jump_candidate(candidate, result, sample_rate)
         if jump_candidate is None:
             continue
-        if jump_candidate.id in tested_candidate_ids or jump_candidate.id in queued_candidate_ids:
+        if not can_queue_candidate(jump_candidate, candidate_stages, queued_candidate_ids, allow_probe_retry=True):
             return False
         pending_candidates.insert(0, jump_candidate)
         queued_candidate_ids.add(jump_candidate.id)
@@ -656,6 +723,46 @@ def queue_prefill_jump(
             f"target_depth_ms={STABLE_TARGET_PLAYBACK_DEPTH_MIN_MS:.2f}")
         return True
     return False
+
+
+def queue_smart_candidates(
+    candidate,
+    summary,
+    previous_summary,
+    pending_candidates,
+    queued_candidate_ids,
+    candidate_stages,
+    phase):
+    queued = False
+    for next_candidate in reversed(smart_next_candidates(candidate, summary, previous_summary)):
+        if not can_queue_candidate(next_candidate, candidate_stages, queued_candidate_ids, allow_probe_retry=True):
+            continue
+        pending_candidates.insert(0, next_candidate)
+        queued_candidate_ids.add(next_candidate.id)
+        print_flush(
+            f"[server] queued data-driven next candidate after {phase}: "
+            f"{next_candidate.id} from {candidate.id}")
+        queued = True
+    return queued
+
+
+def candidate_stage_rank(stage):
+    return {
+        "": 0,
+        "queued": 0,
+        "probe": 1,
+        "edge": 2,
+        "confirm": 3,
+    }.get(stage or "", 0)
+
+
+def can_queue_candidate(candidate, candidate_stages, queued_candidate_ids, allow_probe_retry=False):
+    stage = candidate_stages.get(candidate.id, "")
+    if candidate.id in queued_candidate_ids:
+        return False
+    if not stage:
+        return True
+    return allow_probe_retry and stage == "probe"
 
 
 def ratio_delta_ppm(row):
@@ -681,6 +788,7 @@ def run_metrics(server, client):
     return {
         "sequence_lost": sum((numeric(row, "sequence_lost") for row in final_rows), 0.0),
         "reordered_lost": sum((numeric(row, "reordered_lost") for row in final_rows), 0.0),
+        "packet_loss": sum((packet_loss_count(row) for row in final_rows), 0.0),
         "recv_packets": sum((numeric(row, "recv_packets") for row in final_rows), 0.0),
         "elapsed_seconds": elapsed_seconds,
         "playback_ring_underruns": playback_underruns,
@@ -713,7 +821,7 @@ def aggregate_metrics(run_results):
         for metric in metrics)
     sequence_lost = sum((metric.get("sequence_lost", 0.0) for metric in metrics), 0.0)
     reordered_lost = sum((metric.get("reordered_lost", 0.0) for metric in metrics), 0.0)
-    packet_loss = sequence_lost + reordered_lost
+    packet_loss = sum((metric.get("packet_loss", 0.0) for metric in metrics), 0.0)
     recv_packets = sum((metric.get("recv_packets", 0.0) for metric in metrics), 0.0)
     dropped_frames = sum((metric.get("playback_dropped_frames", 0.0) for metric in metrics), 0.0)
     return {
@@ -822,6 +930,185 @@ def aggregate_accepts(metrics, network_profile, aggressive=False):
     )
 
 
+def playable_accepts(metrics, network_profile):
+    if metrics.get("elapsed_seconds", 0.0) <= 0.0:
+        return False
+    if metrics.get("playback_ring_overruns", 0.0) > 0.0:
+        return False
+    return (
+        metrics.get("min_playback_depth_ms", 0.0) >= PLAYABLE_MIN_PLAYBACK_DEPTH_MS
+        and metrics.get("packet_loss_percent", 0.0) <= PLAYABLE_MAX_PACKET_LOSS_PERCENT
+        and metrics.get("packet_loss_per_second", 0.0) <= PLAYABLE_MAX_PACKET_LOSS_PER_SECOND
+        and metrics.get("playback_ring_underruns_per_second", 0.0) <= PLAYABLE_MAX_PLAYBACK_UNDERRUNS_PER_SECOND
+        and metrics.get("playback_ring_underrun_events_per_second", 0.0) <= PLAYABLE_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND
+        and metrics.get("max_playback_ring_underruns", 0.0) <= PLAYABLE_MAX_PLAYBACK_UNDERRUNS_PER_RUN
+        and metrics.get("playback_dropped_frames_per_second", 0.0) <= PLAYABLE_MAX_DROPPED_FRAMES_PER_SECOND
+        and metrics.get("jitter_max_ms", 0.0) <= PLAYABLE_MAX_JITTER_MS
+    )
+
+
+def metric_score(metrics):
+    return (
+        metrics.get("packet_loss_per_second", 0.0) * 500.0 +
+        metrics.get("playback_ring_underrun_events_per_second", 0.0) * 200.0 +
+        metrics.get("playback_ring_underruns_per_second", 0.0) * 20.0 +
+        metrics.get("playback_dropped_frames_per_second", 0.0) * 50.0 +
+        metrics.get("playback_ring_overruns", 0.0) * 1000.0 +
+        max(0.0, STABLE_TARGET_PLAYBACK_DEPTH_MIN_MS - metrics.get("min_playback_depth_ms", 0.0)) * 50.0 +
+        metrics.get("jitter_max_ms", 0.0) * 0.5 +
+        metrics.get("elapsed_seconds", 0.0) * 0.0
+    )
+
+
+def practical_score(summary):
+    metrics = summary.get("metrics", {})
+    return (
+        summary.get("latency_avg_ms", 0.0) +
+        metrics.get("packet_loss_per_second", 0.0) * 20.0 +
+        metrics.get("playback_ring_underrun_events_per_second", 0.0) * 2.0 +
+        metrics.get("playback_ring_underruns_per_second", 0.0) * 0.5 +
+        metrics.get("playback_dropped_frames_per_second", 0.0) * 5.0 +
+        metrics.get("playback_ring_overruns", 0.0) * 1000.0 +
+        max(0.0, STABLE_TARGET_PLAYBACK_DEPTH_MIN_MS - metrics.get("min_playback_depth_ms", 0.0)) * 0.5 +
+        max(0.0, metrics.get("jitter_max_ms", 0.0) - 60.0) * 0.05
+    )
+
+
+def practical_better(candidate_summary, previous_summary):
+    if previous_summary is None:
+        return True
+    if candidate_summary.get("stable") and not previous_summary.get("stable"):
+        return True
+    if not candidate_summary.get("playable", False):
+        return False
+    current_latency = candidate_summary.get("latency_avg_ms", 0.0)
+    previous_latency = previous_summary.get("latency_avg_ms", 0.0)
+    current_score = practical_score(candidate_summary)
+    previous_score = practical_score(previous_summary)
+    if current_latency + 2.0 < previous_latency and current_score <= previous_score + 3.0:
+        return True
+    if current_score + 4.0 < previous_score and current_latency <= previous_latency + 5.0:
+        return True
+    return False
+
+
+def better_than(candidate_summary, previous_summary):
+    if previous_summary is None:
+        return True
+    current = candidate_summary.get("metrics", {})
+    previous = previous_summary.get("metrics", {})
+    if candidate_summary.get("stable") and not previous_summary.get("stable"):
+        return True
+    return metric_score(current) + 1.0 < metric_score(previous)
+
+
+def dominant_failures(summary):
+    metrics = summary.get("metrics", {})
+    reasons = set(summary.get("reasons", []))
+    failures = []
+    if metrics.get("playback_ring_overruns", 0.0) > 0.0:
+        failures.append("overrun")
+    if metrics.get("playback_dropped_frames_per_second", 0.0) > 0.0 or any("playback_dropped" in reason for reason in reasons):
+        failures.append("dropped")
+    if metrics.get("packet_loss_per_second", 0.0) > STABLE_MAX_PACKET_LOSS_PER_SECOND or any("packet_loss" in reason for reason in reasons):
+        failures.append("packet_loss")
+    if (
+        metrics.get("playback_ring_underrun_events_per_second", 0.0) > STABLE_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND
+        or metrics.get("playback_ring_underruns_per_second", 0.0) > STABLE_MAX_PLAYBACK_UNDERRUNS_PER_SECOND
+        or any("playback_underrun" in reason for reason in reasons)
+    ):
+        failures.append("underrun")
+    if metrics.get("min_playback_depth_ms", 0.0) < STABLE_TARGET_PLAYBACK_DEPTH_MIN_MS:
+        failures.append("depth")
+    return failures
+
+
+def add_candidate(target, output):
+    if target is not None and valid_candidate(target):
+        output.append(target)
+
+
+def smart_next_candidates(candidate, summary, previous_summary=None):
+    failures = dominant_failures(summary)
+    next_prefill = next_value(PREFILL_VALUES, candidate.playback_prefill_frames)
+    previous_prefill = previous_value(PREFILL_VALUES, candidate.playback_prefill_frames)
+    next_frame = next_value(FRAME_VALUES, candidate.frame_size)
+    previous_frame = previous_value(FRAME_VALUES, candidate.frame_size)
+    next_audio = next_value(AUDIO_BUFFER_VALUES, candidate.audio_buffer_size)
+    previous_audio = previous_value(AUDIO_BUFFER_VALUES, candidate.audio_buffer_size)
+    candidates = []
+    previous_candidate = None
+    if previous_summary and previous_summary.get("profile"):
+        previous_candidate = candidate_from_profile(previous_summary["profile"])
+
+    if summary.get("stable"):
+        add_candidate(with_prefill(candidate, previous_prefill), candidates)
+        add_candidate(with_audio_buffer(candidate, previous_audio), candidates)
+        add_candidate(with_frame_size(candidate, previous_frame), candidates)
+        return candidates
+
+    improved = better_than(summary, previous_summary)
+    if "packet_loss" in failures and "underrun" not in failures and "dropped" not in failures:
+        add_candidate(with_frame_size(candidate, next_frame), candidates)
+        add_candidate(with_prefill(candidate, next_prefill), candidates)
+        return candidates
+
+    if "underrun" in failures or "depth" in failures:
+        if not improved:
+            if previous_candidate and previous_candidate.frame_size < candidate.frame_size:
+                add_candidate(with_prefill(previous_candidate, next_prefill), candidates)
+            elif previous_candidate and previous_candidate.audio_buffer_size < candidate.audio_buffer_size:
+                add_candidate(with_prefill(previous_candidate, next_prefill), candidates)
+            add_candidate(with_prefill(candidate, next_prefill), candidates)
+            add_candidate(with_frame_size(candidate, next_frame), candidates)
+        else:
+            add_candidate(with_prefill(candidate, next_prefill), candidates)
+        return candidates
+
+    if "dropped" in failures or "overrun" in failures:
+        if not improved and previous_candidate and previous_candidate.frame_size < candidate.frame_size:
+            add_candidate(with_prefill(previous_candidate, next_prefill), candidates)
+        else:
+            add_candidate(with_prefill(candidate, next_prefill), candidates)
+            add_candidate(with_audio_buffer(candidate, next_audio), candidates)
+        return candidates
+
+    add_candidate(with_prefill(candidate, next_prefill), candidates)
+    add_candidate(with_frame_size(candidate, next_frame), candidates)
+    return candidates
+
+
+def local_neighbor_candidates(candidate):
+    candidates = []
+    previous_prefill = previous_value(PREFILL_VALUES, candidate.playback_prefill_frames)
+    next_prefill = next_value(PREFILL_VALUES, candidate.playback_prefill_frames)
+    previous_audio = previous_value(AUDIO_BUFFER_VALUES, candidate.audio_buffer_size)
+    next_audio = next_value(AUDIO_BUFFER_VALUES, candidate.audio_buffer_size)
+    previous_frame = previous_value(FRAME_VALUES, candidate.frame_size)
+    next_frame = next_value(FRAME_VALUES, candidate.frame_size)
+    add_candidate(with_prefill(candidate, previous_prefill), candidates)
+    add_candidate(with_prefill(candidate, next_prefill), candidates)
+    add_candidate(with_audio_buffer(candidate, previous_audio), candidates)
+    add_candidate(with_audio_buffer(candidate, next_audio), candidates)
+    add_candidate(with_frame_size(candidate, previous_frame), candidates)
+    add_candidate(with_frame_size(candidate, next_frame), candidates)
+    return candidates
+
+
+def queue_local_neighbors(candidate, pending_candidates, queued_candidate_ids, candidate_stages):
+    queued = 0
+    for next_candidate in local_neighbor_candidates(candidate):
+        if not can_queue_candidate(next_candidate, candidate_stages, queued_candidate_ids, allow_probe_retry=True):
+            continue
+        pending_candidates.append(next_candidate)
+        queued_candidate_ids.add(next_candidate.id)
+        queued += 1
+        print_flush(
+            f"[server] queued local tuning candidate: "
+            f"{next_candidate.id} from {candidate.id}")
+    return queued
+
+
 def evaluate_candidate(base_logs, candidate, run_results, network_profile="unknown"):
     stable_runs = [result for result in run_results if result["evaluation"]["stable"]]
     infra_failures = [result for result in run_results if is_infrastructure_failure(result)]
@@ -835,12 +1122,20 @@ def evaluate_candidate(base_logs, candidate, run_results, network_profile="unkno
         and good_ratio >= STABLE_MIN_GOOD_RUN_RATIO
         and aggregate_accepts(metrics, network_profile, aggressive=False)
     )
+    playable = (
+        len(infra_failures) == 0
+        and len(run_results) >= PLAYABLE_MIN_RUNS
+        and playable_accepts(metrics, network_profile)
+    )
     if accepted and len(stable_runs) != len(run_results):
         all_warnings.append(f"mostly_stable_runs({len(stable_runs)}/{len(run_results)})")
+    if playable and not accepted:
+        all_warnings.append("practical_playable_not_strict_stable")
     return {
         "candidate": candidate.id,
         "profile": candidate.profile(),
         "stable": accepted,
+        "playable": accepted or playable,
         "stable_runs": len(stable_runs),
         "run_count": len(run_results),
         "reasons": all_reasons,
@@ -994,16 +1289,58 @@ def choose_aggressive_summary(summaries):
         summary.get("metrics", {}).get("jitter_max_ms", 0.0)))
 
 
+def choose_practical_summary(summaries):
+    candidates = [
+        summary for summary in summaries
+        if summary.get("playable") and summary.get("run_count", 0) >= PLAYABLE_MIN_RUNS
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda summary: (
+        practical_score(summary),
+        summary["latency_avg_ms"],
+        summary.get("metrics", {}).get("playback_ring_underrun_events_per_second", 0.0),
+        summary.get("metrics", {}).get("playback_ring_underruns_per_second", 0.0)))
+
+
 def write_summary(base_logs, rows, recommendation, run_csv_analysis, command_context=None):
+    practical_recommendation = choose_practical_summary(rows)
     aggressive_recommendation = choose_aggressive_summary(rows)
     analysis_path = base_logs / "analysis.json"
     write_json(analysis_path, {
         "recommendation": recommendation,
+        "practical_recommendation": practical_recommendation,
         "aggressive_recommendation": aggressive_recommendation,
         "candidates": rows,
     })
     text_path = base_logs / "recommendation.txt"
     lines = []
+    if practical_recommendation is None:
+        lines.append("Recommended practical starting profile: none confirmed")
+    else:
+        metrics = practical_recommendation.get("metrics", {})
+        lines.extend([
+            "Recommended practical starting profile:",
+            f"  {practical_recommendation['candidate']}",
+            f"  latency_avg_ms={practical_recommendation['latency_avg_ms']:.2f}",
+            f"  playable=yes",
+            f"  stable={str(practical_recommendation.get('stable', False)).lower()}",
+            f"  stable_runs={practical_recommendation['stable_runs']}/{practical_recommendation['run_count']}",
+            f"  warnings={','.join(practical_recommendation.get('warnings', [])) or 'none'}",
+            f"  packet_loss={metrics.get('packet_loss', 0.0):.0f}",
+            f"  packet_loss_percent={metrics.get('packet_loss_percent', 0.0):.4f}",
+            f"  packet_loss_per_second={metrics.get('packet_loss_per_second', 0.0):.3f}",
+            f"  playback_dropped_frames={metrics.get('playback_dropped_frames', 0.0):.0f}",
+            f"  playback_dropped_frames_per_second={metrics.get('playback_dropped_frames_per_second', 0.0):.3f}",
+            f"  tolerated_playback_underruns={metrics.get('playback_ring_underruns', 0.0):.0f}",
+            f"  playback_underruns_per_second={metrics.get('playback_ring_underruns_per_second', 0.0):.3f}",
+            f"  playback_underrun_events={metrics.get('playback_ring_underrun_events', 0.0):.0f}",
+            f"  playback_underrun_events_per_second={metrics.get('playback_ring_underrun_events_per_second', 0.0):.3f}",
+            f"  min_playback_depth_ms={metrics.get('min_playback_depth_ms', 0.0):.2f}",
+            f"  jitter_max_ms={metrics.get('jitter_max_ms', 0.0):.2f}",
+        ])
+        if command_context is not None:
+            lines.extend(command_block(base_logs, practical_recommendation, command_context))
     if recommendation is None:
         lines.append("Stable recommendation: none confirmed")
     else:
@@ -1070,7 +1407,28 @@ def write_summary(base_logs, rows, recommendation, run_csv_analysis, command_con
             print_flush(f"[server] wrote CSV analysis for {len(analysis_rows)} profile(s): {analysis_csv}")
         except SystemExit as error:
             print_flush(f"[server] CSV analysis skipped: {error}")
-    if run_csv_analysis or recommendation is not None:
+    if run_csv_analysis or recommendation is not None or practical_recommendation is not None:
+        if practical_recommendation is not None:
+            metrics = practical_recommendation.get("metrics", {})
+            print_flush(
+                "[server] recommended practical starting profile: "
+                f"{practical_recommendation['candidate']} "
+                f"latency_avg_ms={practical_recommendation['latency_avg_ms']:.2f} "
+                f"stable={str(practical_recommendation.get('stable', False)).lower()} "
+                f"stable_runs={practical_recommendation['stable_runs']}/{practical_recommendation['run_count']} "
+                f"packet_loss={metrics.get('packet_loss', 0.0):.0f} "
+                f"packet_loss_percent={metrics.get('packet_loss_percent', 0.0):.4f} "
+                f"dropped_fps={metrics.get('playback_dropped_frames_per_second', 0.0):.3f} "
+                f"tolerated_playback_underruns={metrics.get('playback_ring_underruns', 0.0):.0f} "
+                f"underruns_per_second={metrics.get('playback_ring_underruns_per_second', 0.0):.3f} "
+                f"underrun_events_per_second={metrics.get('playback_ring_underrun_events_per_second', 0.0):.3f} "
+                f"min_playback_depth_ms={metrics.get('min_playback_depth_ms', 0.0):.2f} "
+                f"warnings={','.join(practical_recommendation.get('warnings', [])) or 'none'}")
+            if command_context is not None:
+                for line in command_block(base_logs, practical_recommendation, command_context):
+                    print_flush("[server] practical " + line.strip())
+        else:
+            print_flush("[server] recommended practical starting profile: none confirmed")
         if recommendation is not None:
             metrics = recommendation.get("metrics", {})
             print_flush(
@@ -1213,87 +1571,168 @@ def main():
         ladder_candidates = list(candidate_ladder())
         ladder_index = 0
         pending_candidates = []
-        tested_candidate_ids = set()
+        candidate_stages = {}
+        candidate_results = {}
         queued_candidate_ids = set()
+        last_summary = None
+        local_tuning = False
+        local_best_summary = None
+        local_expanded_candidate_ids = set()
 
         while pending_candidates or ladder_index < len(ladder_candidates):
+            if local_tuning and not pending_candidates:
+                practical_recommendation = choose_practical_summary(summaries)
+                if practical_recommendation is not None:
+                    print_flush(
+                        "[server] stopping after local tuning: "
+                        "nearby profiles did not improve the practical recommendation enough")
+                    write_json(public_dir / "current.json", {"status": "all_done", "url": "", "client_args": []})
+                    write_summary(base_logs, summaries, recommendation, True, command_context)
+                    return 0
+                local_tuning = False
+
             if pending_candidates:
                 base_candidate = pending_candidates.pop(0)
                 queued_candidate_ids.discard(base_candidate.id)
             else:
+                if local_tuning:
+                    continue
                 base_candidate = ladder_candidates[ladder_index]
                 ladder_index += 1
-            if base_candidate.id in tested_candidate_ids:
+            if candidate_stage_rank(candidate_stages.get(base_candidate.id, "")) >= candidate_stage_rank("edge"):
                 continue
-            tested_candidate_ids.add(base_candidate.id)
 
             candidates = [base_candidate]
             for candidate in candidates:
-                probe_results = run_candidate(
-                    jam2,
-                    candidate,
-                    SHORT_STREAM_MS,
-                    base_logs,
-                    public_dir,
-                    args_ns.server_audio_device,
-                    args_ns.sample_rate,
-                    args_ns.no_stun,
-                    PROBE_RUNS,
-                    "probe",
-                    network_profile,
-                    server_network_type,
-                    wait_for_initial_client=not summaries)
+                existing_results = candidate_results.get(candidate.id, [])
+                promote_probe_retry = bool(existing_results and candidate_stages.get(candidate.id) == "probe")
+                if existing_results:
+                    probe_results = existing_results[:1]
+                else:
+                    probe_results = run_candidate(
+                        jam2,
+                        candidate,
+                        SHORT_STREAM_MS,
+                        base_logs,
+                        public_dir,
+                        args_ns.server_audio_device,
+                        args_ns.sample_rate,
+                        args_ns.no_stun,
+                        PROBE_RUNS,
+                        "probe",
+                        network_profile,
+                        server_network_type,
+                        wait_for_initial_client=not summaries)
+                    candidate_results[candidate.id] = probe_results
 
-                if not is_promising_probe(probe_results[0]):
+                if not promote_probe_retry and not is_promising_probe(probe_results[0]):
                     summary = evaluate_candidate(base_logs, candidate, probe_results, network_profile)
                     summary["phase"] = "probe"
                     summaries.append(summary)
+                    candidate_stages[candidate.id] = "probe"
                     print_flush(
                         f"[server] probe rejected {candidate.id}: "
                         f"reasons={','.join(summary['reasons']) or 'none'} "
                         f"warnings={','.join(summary['warnings']) or 'none'}")
-                    queue_prefill_jump(
+                    if not queue_smart_candidates(
                         candidate,
-                        probe_results,
-                        args_ns.sample_rate,
+                        summary,
+                        last_summary,
                         pending_candidates,
                         queued_candidate_ids,
-                        tested_candidate_ids,
-                        "probe")
+                        candidate_stages,
+                        "probe"):
+                        queue_prefill_jump(
+                            candidate,
+                            probe_results,
+                            args_ns.sample_rate,
+                            pending_candidates,
+                            queued_candidate_ids,
+                            candidate_stages,
+                            "probe")
+                    last_summary = summary
                     continue
 
-                extra_runs = run_candidate(
-                    jam2,
-                    candidate,
-                    SHORT_STREAM_MS,
-                    base_logs,
-                    public_dir,
-                    args_ns.server_audio_device,
-                    args_ns.sample_rate,
-                    args_ns.no_stun,
-                    EDGE_RUNS - PROBE_RUNS,
-                    "edge",
-                    network_profile,
-                    server_network_type,
-                    start_run_index=PROBE_RUNS + 1)
-                results = probe_results + extra_runs
+                existing_results = candidate_results.get(candidate.id, [])
+                existing_count = len(existing_results)
+                if existing_count < EDGE_RUNS:
+                    extra_runs = run_candidate(
+                        jam2,
+                        candidate,
+                        SHORT_STREAM_MS,
+                        base_logs,
+                        public_dir,
+                        args_ns.server_audio_device,
+                        args_ns.sample_rate,
+                        args_ns.no_stun,
+                        EDGE_RUNS - existing_count,
+                        "edge",
+                        network_profile,
+                        server_network_type,
+                        start_run_index=existing_count + 1)
+                    results = existing_results + extra_runs
+                    candidate_results[candidate.id] = results
+                else:
+                    results = existing_results
                 summary = evaluate_candidate(base_logs, candidate, results, network_profile)
                 summary["phase"] = "edge"
                 summaries.append(summary)
+                candidate_stages[candidate.id] = "edge"
                 print_flush(
                     f"[server] edge candidate {candidate.id}: stable={summary['stable']} "
+                    f"playable={summary.get('playable', False)} "
                     f"runs={summary['stable_runs']}/{summary['run_count']} "
                     f"reasons={','.join(summary['reasons']) or 'none'} "
                     f"warnings={','.join(summary['warnings']) or 'none'}")
                 if not summary["stable"]:
-                    queue_prefill_jump(
+                    if summary.get("playable", False):
+                        if practical_better(summary, local_best_summary):
+                            local_best_summary = summary
+                            pending_candidates.clear()
+                            queued_candidate_ids.clear()
+                            if candidate.id not in local_expanded_candidate_ids:
+                                local_expanded_candidate_ids.add(candidate.id)
+                                queued = queue_local_neighbors(
+                                    candidate,
+                                    pending_candidates,
+                                    queued_candidate_ids,
+                                    candidate_stages)
+                            else:
+                                queued = 0
+                            if not local_tuning:
+                                print_flush(
+                                    f"[server] found practical profile {candidate.id}; "
+                                    "switching from broad search to local tuning")
+                            else:
+                                print_flush(
+                                    f"[server] improved practical profile {candidate.id}; "
+                                    "refocusing local tuning around it")
+                            local_tuning = True
+                            if queued == 0:
+                                print_flush(
+                                    f"[server] no untested one-step neighbors remain for {candidate.id}")
+                        last_summary = summary
+                        continue
+                    if local_tuning:
+                        last_summary = summary
+                        continue
+                    if not queue_smart_candidates(
                         candidate,
-                        results,
-                        args_ns.sample_rate,
+                        summary,
+                        last_summary,
                         pending_candidates,
                         queued_candidate_ids,
-                        tested_candidate_ids,
-                        "edge")
+                        candidate_stages,
+                        "edge"):
+                        queue_prefill_jump(
+                            candidate,
+                            results,
+                            args_ns.sample_rate,
+                            pending_candidates,
+                            queued_candidate_ids,
+                            candidate_stages,
+                            "edge")
+                    last_summary = summary
                 if summary["stable"]:
                     stable_summaries = [summary]
                     tested_candidates = {candidate.id: candidate}
@@ -1386,19 +1825,29 @@ def main():
                     confirm_summary["confirmation"] = True
                     confirm_summary["phase"] = "confirm"
                     summaries.append(confirm_summary)
+                    candidate_stages[best_candidate.id] = "confirm"
                     if confirm_summary["stable"]:
                         recommendation = confirm_summary
                         write_summary(base_logs, summaries, recommendation, True, command_context)
                         write_json(public_dir / "current.json", {"status": "all_done", "url": "", "client_args": []})
                         return 0
-                    queue_prefill_jump(
+                    if not queue_smart_candidates(
                         best_candidate,
-                        confirm_results,
-                        args_ns.sample_rate,
+                        confirm_summary,
+                        summary,
                         pending_candidates,
                         queued_candidate_ids,
-                        tested_candidate_ids,
-                        "confirm")
+                        candidate_stages,
+                        "confirm"):
+                        queue_prefill_jump(
+                            best_candidate,
+                            confirm_results,
+                            args_ns.sample_rate,
+                            pending_candidates,
+                            queued_candidate_ids,
+                            candidate_stages,
+                            "confirm")
+                    last_summary = confirm_summary
                     print_flush(f"[server] confirmation failed for {best_candidate.id}; continuing backoff")
                     break
             write_summary(base_logs, summaries, recommendation, False, command_context)

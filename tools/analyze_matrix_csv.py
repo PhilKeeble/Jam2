@@ -117,15 +117,14 @@ def aggregate_profile(test_id, final_rows, periodic_rows, thresholds):
     periodic_values = {field: [to_float(row, field) for row in periodic_rows] for field in NUMERIC_FIELDS}
     sides = sorted(set(row.get("matrix_side", "") for row in final_rows))
     runs = sorted(set(row.get("matrix_run", "") for row in final_rows))
+    total_seconds = sum(values["elapsed_ms"]) / 1000.0
+    loss_total = max(sum(values["sequence_lost"]), sum(values["reordered_lost"]))
     stability_failures = (
-        sum(values["sequence_lost"]) +
-        sum(values["reordered_lost"]) +
+        loss_total +
         sum(values["playback_ring_overruns"]) +
         sum(values["playback_ring_underruns"]) +
         sum(values["playback_dropped_frames"])
     )
-    total_seconds = sum(values["elapsed_ms"]) / 1000.0
-    loss_total = sum(values["sequence_lost"]) + sum(values["reordered_lost"])
     recv_total = sum(values["recv_packets"])
     loss_percent = loss_total * 100.0 / max(1.0, recv_total + sum(values["sequence_lost"]))
     loss_per_second = loss_total / total_seconds if total_seconds > 0 else 0.0
