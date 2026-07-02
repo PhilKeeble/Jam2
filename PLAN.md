@@ -443,6 +443,31 @@ Rules:
 - Explicit user-provided numeric flags should override profile defaults.
 - Do not hide tuning behavior behind subjective labels without exposing the hard data.
 
+### Future: Adaptive Playback Cushion
+
+Consider an explicit experimental mode for Wi-Fi burst handling before committing to a full jitter buffer. The goal is to keep a low normal playback target, such as 768 or 1024 frames, while temporarily allowing playback depth to grow when diagnostics show burst pressure or near-empty playback depth.
+
+This should be opt-in only while more wired, one-Wi-Fi, and both-Wi-Fi benchmark data is collected.
+
+Possible CLI shape:
+
+```text
+--adaptive-playback-cushion on|off
+--adaptive-playback-target-frames 768
+--adaptive-playback-min-frames 768
+--adaptive-playback-max-frames 2048
+--adaptive-playback-release-ppm 1000
+```
+
+Rules:
+
+- Default behavior remains fixed numeric prefill/max depth.
+- Raise cushion quickly only after clear burst or low-depth evidence.
+- Release extra latency slowly so players do not hear sudden timing jumps.
+- Avoid sudden frame drops except when playback depth is far beyond the configured ceiling.
+- Stats must expose current adaptive target, target raise/release events, burst-mode events, time above target, and estimated added latency.
+- Keep thresholds numeric and inspectable; do not add subjective playability scoring.
+
 ### Future: Full Jitter Buffer
 
 The current receive path has a small reorder buffer that can recover packets arriving slightly out of order. A full jitter buffer is different: it would intentionally maintain a target playout depth and schedule packets by sequence/sample time.
