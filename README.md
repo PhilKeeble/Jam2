@@ -121,6 +121,37 @@ Then start the connect/client side on the other host:
 python tools/run_matrix_client.py --server http://WINDOWS_IP:8000 --client-audio-device 0 --sample-rate 44100 --network-profile wifi --clean
 ```
 
+Targeted benchmark mode:
+
+Add `--benchmark` on the server side to run a bounded connection benchmark instead of stopping at the first confirmed adaptive recommendation:
+
+```powershell
+python tools/run_matrix_server.py --benchmark --server-audio-device 16 --sample-rate 44100 --host 0.0.0.0 --port 8000 --network-profile wired --clean
+```
+
+Use the same client command as the adaptive tuner. Benchmark mode runs each profile for `3 x 30s`, starts with this baseline spine, then queues a small number of targeted neighbor profiles based on the measured failure mode:
+
+```text
+32/64/768
+64/64/768
+32/128/1024
+64/128/1024
+128/128/1024
+128/128/1536
+128/256/2048
+128/256/4096
+```
+
+The fields are `audio_buffer_size/frame_size/playback_prefill_frames`. Capture underruns push the benchmark toward larger audio buffers, packet loss or jitter pushes toward larger frame sizes, and playback underruns, drops, overruns, or low depth push toward larger prefill. Clean profiles queue lower-latency boundary checks. The benchmark writes:
+
+If one run is an isolated large burst compared with the other runs for that profile, benchmark mode excludes that run from the aggregate and runs a replacement sample. The original run logs remain on disk, and the benchmark CSV records `benchmark_attempt_count`, `benchmark_clean_runs`, and `benchmark_discarded_burst_runs`. The benchmark exits with failure if any baseline spine profile cannot collect three non-burst runs within the retry limit.
+
+```text
+tools/logs/benchmark.csv
+tools/logs/benchmark.json
+tools/logs/benchmark_summary.txt
+```
+
 After each test, the client uploads `stats.csv`, `stdout.txt`, and `stderr.txt` back to the server. When the tuner finishes it writes combined results, analysis, a stable recommendation, and an aggressive low-latency recommendation:
 
 ```text

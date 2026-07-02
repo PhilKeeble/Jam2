@@ -98,6 +98,13 @@ AGGRESSIVE_MAX_JITTER_MS = 60.0
 AGGRESSIVE_MAX_PACKET_LOSS_PERCENT = 0.10
 AGGRESSIVE_MAX_PACKET_LOSS_PER_SECOND = 0.25
 AGGRESSIVE_MAX_DROPPED_FRAMES_PER_SECOND = 12.0
+BENCHMARK_RUNS = 3
+BENCHMARK_STREAM_MS = 30000
+BENCHMARK_AUDIO_BUFFER_VALUES = [32, 64, 128, 256]
+BENCHMARK_FRAME_VALUES = [64, 128, 256]
+BENCHMARK_PREFILL_VALUES = [768, 1024, 1536, 2048, 4096]
+BENCHMARK_MAX_PROFILES = 16
+BENCHMARK_BURST_RETRIES = 3
 
 
 @dataclass(frozen=True)
@@ -224,6 +231,7 @@ def parse_args():
         default="auto",
         help="network type for tuner tolerances; auto uses best-effort local detection")
     parser.add_argument("--drift-probes", action="store_true", help="test one measured drift-deadband variant after a physical profile is stable")
+    parser.add_argument("--benchmark", action="store_true", help="run a targeted connection benchmark instead of adaptive early-stop tuning")
     return parser.parse_args()
 
 
@@ -254,6 +262,25 @@ def candidate_ladder():
                     continue
                 seen.add(candidate.id)
                 yield candidate
+
+
+def benchmark_candidate(audio_buffer, frame_size, prefill):
+    playback_max = max(2048, prefill * 2)
+    playback_ring = max(4096, playback_max * 2)
+    return Candidate(audio_buffer, frame_size, prefill, playback_ring, playback_max)
+
+
+def benchmark_baseline_candidates():
+    return [
+        benchmark_candidate(32, 64, 768),
+        benchmark_candidate(64, 64, 768),
+        benchmark_candidate(32, 128, 1024),
+        benchmark_candidate(64, 128, 1024),
+        benchmark_candidate(128, 128, 1024),
+        benchmark_candidate(128, 128, 1536),
+        benchmark_candidate(128, 256, 2048),
+        benchmark_candidate(128, 256, 4096),
+    ]
 
 
 def profile_key(candidate):
@@ -361,6 +388,41 @@ def previous_value(values, current):
             return previous
         previous = value
     return previous
+
+
+def benchmark_next_value(values, current):
+    return next_value(values, current)
+
+
+def benchmark_previous_value(values, current):
+    return previous_value(values, current)
+
+
+def benchmark_valid_candidate(candidate):
+    return (
+        candidate.audio_buffer_size in BENCHMARK_AUDIO_BUFFER_VALUES
+        and candidate.frame_size in BENCHMARK_FRAME_VALUES
+        and candidate.playback_prefill_frames in BENCHMARK_PREFILL_VALUES
+        and candidate.frame_size >= candidate.audio_buffer_size
+    )
+
+
+def benchmark_with_audio_buffer(candidate, audio_buffer):
+    if audio_buffer is None:
+        return None
+    return benchmark_candidate(audio_buffer, candidate.frame_size, candidate.playback_prefill_frames)
+
+
+def benchmark_with_frame_size(candidate, frame_size):
+    if frame_size is None:
+        return None
+    return benchmark_candidate(candidate.audio_buffer_size, frame_size, candidate.playback_prefill_frames)
+
+
+def benchmark_with_prefill(candidate, prefill):
+    if prefill is None:
+        return None
+    return benchmark_candidate(candidate.audio_buffer_size, candidate.frame_size, prefill)
 
 
 def valid_candidate(candidate):
@@ -970,6 +1032,39 @@ def should_retry_burst_confirm(edge_summary, confirm_results, confirm_summary):
     return isolated_burst_result(edge_summary, confirm_results, confirm_summary) is not None
 
 
+def result_acceptable_for_burst_baseline(result):
+    profile = result.get("network_profile", "unknown")
+    metrics = result.get("metrics", {})
+    return (
+        result["evaluation"].get("stable")
+        or playable_accepts(metrics, profile)
+        or pressured_accepts(metrics, profile)
+    )
+
+
+def isolated_benchmark_burst_result(run_results):
+    if len(run_results) < BENCHMARK_RUNS:
+        return None
+    if any(is_infrastructure_failure(result) for result in run_results):
+        return None
+    acceptable = [
+        result for result in run_results
+        if result_acceptable_for_burst_baseline(result)
+    ]
+    bad_results = [
+        result for result in run_results
+        if not result_acceptable_for_burst_baseline(result)
+    ]
+    if len(bad_results) != 1 or len(acceptable) < BENCHMARK_RUNS - 1:
+        return None
+    bad_score = burst_badness(bad_results[0].get("metrics", {}))
+    other_scores = [burst_badness(result.get("metrics", {})) for result in acceptable]
+    baseline = max(other_scores) if other_scores else 0.0
+    if bad_score >= max(2.0, baseline * 3.0):
+        return bad_results[0]
+    return None
+
+
 def should_probe_wider_deadband(candidate, run_results):
     metrics = aggregate_metrics(run_results)
     return (
@@ -1239,6 +1334,56 @@ def smart_next_candidates(candidate, summary, previous_summary=None):
     add_candidate(with_prefill(candidate, next_prefill), candidates)
     add_candidate(with_frame_size(candidate, next_frame), candidates)
     return candidates
+
+
+def benchmark_targeted_candidates(candidate, summary):
+    metrics = summary.get("metrics", {})
+    reasons = set(summary.get("reasons", []))
+    failures = dominant_failures(summary)
+    next_audio = benchmark_next_value(BENCHMARK_AUDIO_BUFFER_VALUES, candidate.audio_buffer_size)
+    previous_audio = benchmark_previous_value(BENCHMARK_AUDIO_BUFFER_VALUES, candidate.audio_buffer_size)
+    next_frame = benchmark_next_value(BENCHMARK_FRAME_VALUES, candidate.frame_size)
+    previous_frame = benchmark_previous_value(BENCHMARK_FRAME_VALUES, candidate.frame_size)
+    next_prefill = benchmark_next_value(BENCHMARK_PREFILL_VALUES, candidate.playback_prefill_frames)
+    previous_prefill = benchmark_previous_value(BENCHMARK_PREFILL_VALUES, candidate.playback_prefill_frames)
+    candidates = []
+
+    def add(reason, target):
+        if target is None or not benchmark_valid_candidate(target):
+            return
+        candidates.append((target, reason))
+
+    capture_pressure = any("capture_underruns" in reason for reason in reasons)
+    jitter_pressure = metrics.get("jitter_max_ms", 0.0) > PRESSURED_MAX_JITTER_MS
+    if capture_pressure:
+        add("capture underruns increased; test a larger audio callback buffer", benchmark_with_audio_buffer(candidate, next_audio))
+    if "packet_loss" in failures or jitter_pressure:
+        add("packet loss or jitter pressure; test a larger packet frame size", benchmark_with_frame_size(candidate, next_frame))
+    if "underrun" in failures or "depth" in failures or "dropped" in failures or "overrun" in failures:
+        add("playback cushion pressure; test a larger prefill", benchmark_with_prefill(candidate, next_prefill))
+    if summary.get("stable"):
+        if metrics.get("min_playback_depth_ms", 0.0) >= STABLE_TARGET_PLAYBACK_DEPTH_MIN_MS:
+            add("stable with depth margin; test lower prefill boundary", benchmark_with_prefill(candidate, previous_prefill))
+        add("stable; test smaller audio callback boundary", benchmark_with_audio_buffer(candidate, previous_audio))
+        add("stable; test smaller packet frame boundary", benchmark_with_frame_size(candidate, previous_frame))
+    if not candidates:
+        add("general backoff; test more playback cushion", benchmark_with_prefill(candidate, next_prefill))
+        add("general backoff; test lower packet rate", benchmark_with_frame_size(candidate, next_frame))
+    return candidates
+
+
+def queue_benchmark_candidates(candidate, summary, pending, queued_ids, completed_ids):
+    queued = 0
+    for next_candidate, reason in benchmark_targeted_candidates(candidate, summary):
+        if next_candidate.id in queued_ids or next_candidate.id in completed_ids:
+            continue
+        pending.append((next_candidate, reason))
+        queued_ids.add(next_candidate.id)
+        queued += 1
+        print_flush(
+            f"[server] benchmark queued {next_candidate.id}: "
+            f"{reason} from {candidate.id}")
+    return queued
 
 
 def local_neighbor_candidates(candidate):
@@ -1605,6 +1750,120 @@ def write_summary(base_logs, rows, recommendation, run_csv_analysis, command_con
     print_flush(f"[server] wrote adaptive analysis: {analysis_path}")
 
 
+def benchmark_row(summary):
+    profile = summary.get("profile", {})
+    metrics = summary.get("metrics", {})
+    return {
+        "candidate": summary.get("candidate", ""),
+        "phase": summary.get("phase", ""),
+        "reason": summary.get("benchmark_reason", ""),
+        "audio_buffer_size": profile.get("audio_buffer_size", ""),
+        "frame_size": profile.get("frame_size", ""),
+        "playback_prefill_frames": profile.get("playback_prefill_frames", ""),
+        "playback_ring_frames": profile.get("playback_ring_frames", ""),
+        "playback_max_frames": profile.get("playback_max_frames", ""),
+        "stable": str(summary.get("stable", False)).lower(),
+        "playable": str(summary.get("playable", False)).lower(),
+        "pressured_playable": str(summary.get("pressured_playable", False)).lower(),
+        "experimental": str(summary.get("experimental", False)).lower(),
+        "stable_runs": summary.get("stable_runs", 0),
+        "run_count": summary.get("run_count", 0),
+        "benchmark_core_profile": str(summary.get("benchmark_core_profile", False)).lower(),
+        "benchmark_attempt_count": summary.get("benchmark_attempt_count", summary.get("run_count", 0)),
+        "benchmark_clean_runs": summary.get("benchmark_clean_runs", summary.get("run_count", 0)),
+        "benchmark_discarded_burst_runs": ",".join(str(run) for run in summary.get("benchmark_discarded_burst_runs", [])) or "none",
+        "benchmark_burst_retry_exhausted": str(summary.get("benchmark_burst_retry_exhausted", False)).lower(),
+        "latency_avg_ms": f"{summary.get('latency_avg_ms', 0.0):.3f}",
+        "packet_loss": f"{metrics.get('packet_loss', 0.0):.0f}",
+        "packet_loss_percent": f"{metrics.get('packet_loss_percent', 0.0):.5f}",
+        "packet_loss_per_second": f"{metrics.get('packet_loss_per_second', 0.0):.5f}",
+        "playback_underruns": f"{metrics.get('playback_ring_underruns', 0.0):.0f}",
+        "playback_underruns_per_second": f"{metrics.get('playback_ring_underruns_per_second', 0.0):.5f}",
+        "playback_underrun_events": f"{metrics.get('playback_ring_underrun_events', 0.0):.0f}",
+        "playback_underrun_events_per_second": f"{metrics.get('playback_ring_underrun_events_per_second', 0.0):.5f}",
+        "playback_overruns": f"{metrics.get('playback_ring_overruns', 0.0):.0f}",
+        "playback_dropped_frames": f"{metrics.get('playback_dropped_frames', 0.0):.0f}",
+        "playback_dropped_frames_per_second": f"{metrics.get('playback_dropped_frames_per_second', 0.0):.5f}",
+        "playback_dropped_frame_percent": f"{metrics.get('playback_dropped_frame_percent', 0.0):.5f}",
+        "min_playback_depth_ms": f"{metrics.get('min_playback_depth_ms', 0.0):.3f}",
+        "jitter_max_ms": f"{metrics.get('jitter_max_ms', 0.0):.3f}",
+        "max_abs_final_drift_ppm": f"{metrics.get('max_abs_final_drift_ppm', 0.0):.3f}",
+        "max_abs_periodic_drift_ppm": f"{metrics.get('max_abs_periodic_drift_ppm', 0.0):.3f}",
+        "max_abs_ratio_delta_ppm": f"{metrics.get('max_abs_ratio_delta_ppm', 0.0):.3f}",
+        "max_abs_depth_delta_ms": f"{metrics.get('max_abs_depth_delta_ms', 0.0):.3f}",
+        "reasons": ",".join(summary.get("reasons", [])) or "none",
+        "warnings": ",".join(summary.get("warnings", [])) or "none",
+    }
+
+
+def write_benchmark_outputs(base_logs, summaries, command_context, run_csv_analysis=True):
+    benchmark_json = base_logs / "benchmark.json"
+    practical = choose_practical_summary(summaries)
+    stable = choose_best_stable_summary(summaries)
+    aggressive = choose_aggressive_summary(summaries)
+    write_json(benchmark_json, {
+        "lowest_measured_clean_profile": practical,
+        "lowest_strictly_stable_profile": stable,
+        "aggressive_low_latency_profile": aggressive,
+        "candidates": summaries,
+    })
+
+    rows = [benchmark_row(summary) for summary in summaries]
+    benchmark_csv = base_logs / "benchmark.csv"
+    if rows:
+        with open(benchmark_csv, "w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+
+    lines = []
+    lines.extend(recommendation_lines("Lowest measured clean profile", practical, base_logs, command_context))
+    lines.extend(recommendation_lines("Lowest strictly stable profile", stable, base_logs, command_context))
+    lines.extend(recommendation_lines("Aggressive low-latency measured profile", aggressive, base_logs, command_context))
+    lines.append("")
+    lines.append("=" * 72)
+    lines.append("Measured Profiles")
+    lines.append("=" * 72)
+    for row in rows:
+        lines.append(
+            f"  {row['candidate']}: stable={row['stable']} playable={row['playable']} "
+            f"runs={row['stable_runs']}/{row['run_count']} "
+            f"attempts={row['benchmark_attempt_count']} clean_runs={row['benchmark_clean_runs']} "
+            f"discarded_bursts={row['benchmark_discarded_burst_runs']} "
+            f"lat_avg_ms={row['latency_avg_ms']} depth_min_ms={row['min_playback_depth_ms']} "
+            f"loss_pct={row['packet_loss_percent']} underrun_eps={row['playback_underrun_events_per_second']} "
+            f"dropped_pct={row['playback_dropped_frame_percent']} jitter_max_ms={row['jitter_max_ms']}"
+        )
+        lines.append(f"    reason: {row['reason'] or 'baseline'}")
+        lines.append(f"    failures: {row['reasons']}")
+    text_path = base_logs / "benchmark_summary.txt"
+    text_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    if run_csv_analysis:
+        try:
+            combined, written, file_count = collect_matrix_csv(base_logs, side="all")
+            print_flush(f"[server] combined {written} row(s) from {file_count} CSV file(s): {combined}")
+            analysis_csv, analysis_rows = analyze_matrix_csv(
+                combined,
+                min_playback_depth_ms=STABLE_HARD_PLAYBACK_DEPTH_MIN_MS,
+                min_runs=BENCHMARK_RUNS,
+                max_loss_percent=STABLE_MAX_PACKET_LOSS_PERCENT,
+                max_loss_per_second=STABLE_MAX_PACKET_LOSS_PER_SECOND,
+                max_playback_underruns_per_second=STABLE_MAX_PLAYBACK_UNDERRUNS_PER_SECOND,
+                max_playback_underrun_events_per_second=STABLE_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND,
+                max_playback_dropped_frames_per_second=STABLE_MAX_DROPPED_FRAMES_PER_SECOND,
+                print_top=True)
+            print_flush(f"[server] wrote CSV analysis for {len(analysis_rows)} profile(s): {analysis_csv}")
+        except SystemExit as error:
+            print_flush(f"[server] CSV analysis skipped: {error}")
+
+        if practical is not None:
+            print_recommendation_block("[server]", "Lowest measured clean profile", practical, base_logs, command_context)
+        else:
+            print_flush("[server] lowest measured clean profile: none")
+    print_flush(f"[server] wrote benchmark outputs: {benchmark_json}, {benchmark_csv}, {text_path}")
+
+
 def run_candidate(
     jam2,
     candidate,
@@ -1756,6 +2015,133 @@ def confirm_practical_candidate(
     return confirm_summary
 
 
+def run_benchmark_candidate(
+    args_ns,
+    jam2,
+    candidate,
+    base_logs,
+    public_dir,
+    network_profile,
+    server_network_type,
+    wait_for_initial_client):
+    clean_results = []
+    discarded_burst_runs = []
+    raw_results = []
+    next_run_index = 1
+    max_attempts = BENCHMARK_RUNS + BENCHMARK_BURST_RETRIES
+    while len(clean_results) < BENCHMARK_RUNS and next_run_index <= max_attempts:
+        result = run_candidate(
+            jam2,
+            candidate,
+            BENCHMARK_STREAM_MS,
+            base_logs,
+            public_dir,
+            args_ns.server_audio_device,
+            args_ns.sample_rate,
+            args_ns.no_stun,
+            1,
+            "benchmark",
+            network_profile,
+            server_network_type,
+            start_run_index=next_run_index,
+            wait_for_initial_client=wait_for_initial_client and next_run_index == 1)[0]
+        raw_results.append(result)
+        clean_results.append(result)
+        burst_result = isolated_benchmark_burst_result(clean_results)
+        if burst_result is not None:
+            clean_results = [
+                clean_result for clean_result in clean_results
+                if clean_result is not burst_result
+            ]
+            discarded_burst_runs.append(burst_result["run_index"])
+            if next_run_index < max_attempts:
+                print_flush(
+                    f"[server] benchmark retrying {candidate.id}: "
+                    f"discarding isolated burst run {burst_result['run_index']} from aggregate")
+            else:
+                print_flush(
+                    f"[server] benchmark exhausted burst retries for {candidate.id}: "
+                    f"discarding isolated burst run {burst_result['run_index']} from aggregate")
+        next_run_index = int(result["run_index"]) + 1
+
+    summary = evaluate_candidate(base_logs, candidate, clean_results, network_profile)
+    summary["benchmark_attempt_count"] = len(raw_results)
+    summary["benchmark_clean_runs"] = len(clean_results)
+    summary["benchmark_discarded_burst_runs"] = discarded_burst_runs
+    summary["benchmark_burst_retry_exhausted"] = len(clean_results) < BENCHMARK_RUNS
+    if discarded_burst_runs:
+        summary["warnings"].append(
+            "benchmark_retried_after_isolated_burst"
+            f"(runs_{'-'.join(str(run) for run in discarded_burst_runs)})")
+    if summary["benchmark_burst_retry_exhausted"]:
+        summary["reasons"].append("benchmark_clean_run_count_low")
+    return summary
+
+
+def run_benchmark_mode(
+    args_ns,
+    jam2,
+    base_logs,
+    public_dir,
+    network_profile,
+    server_network_type,
+    command_context):
+    baseline_ids = {candidate.id for candidate in benchmark_baseline_candidates()}
+    pending = [(candidate, "baseline spine") for candidate in benchmark_baseline_candidates()]
+    queued_ids = {candidate.id for candidate, _ in pending}
+    completed_ids = set()
+    summaries = []
+    baseline_failures = []
+
+    while pending and len(completed_ids) < BENCHMARK_MAX_PROFILES:
+        candidate, reason = pending.pop(0)
+        queued_ids.discard(candidate.id)
+        if candidate.id in completed_ids:
+            continue
+        print_flush(
+            f"[server] benchmark testing {candidate.id} "
+            f"({len(completed_ids) + 1}/{BENCHMARK_MAX_PROFILES}): {reason}")
+        summary = run_benchmark_candidate(
+            args_ns,
+            jam2,
+            candidate,
+            base_logs,
+            public_dir,
+            network_profile,
+            server_network_type,
+            wait_for_initial_client=not summaries)
+        summary["phase"] = "benchmark"
+        summary["benchmark_reason"] = reason
+        summary["benchmark_core_profile"] = candidate.id in baseline_ids
+        summaries.append(summary)
+        completed_ids.add(candidate.id)
+        if candidate.id in baseline_ids and summary.get("benchmark_clean_runs", 0) < BENCHMARK_RUNS:
+            baseline_failures.append(candidate.id)
+        print_flush(
+            f"[server] benchmark candidate {candidate.id}: stable={summary['stable']} "
+            f"playable={summary.get('playable', False)} "
+            f"runs={summary['stable_runs']}/{summary['run_count']} "
+            f"attempts={summary.get('benchmark_attempt_count', summary['run_count'])} "
+            f"discarded_bursts={','.join(str(run) for run in summary.get('benchmark_discarded_burst_runs', [])) or 'none'} "
+            f"reasons={','.join(summary['reasons']) or 'none'} "
+            f"warnings={','.join(summary['warnings']) or 'none'}")
+        if len(completed_ids) + len(pending) < BENCHMARK_MAX_PROFILES:
+            queue_benchmark_candidates(candidate, summary, pending, queued_ids, completed_ids)
+        write_benchmark_outputs(base_logs, summaries, command_context, run_csv_analysis=False)
+
+    write_json(public_dir / "current.json", {"status": "all_done", "url": "", "client_args": []})
+    write_benchmark_outputs(base_logs, summaries, command_context)
+    if baseline_failures:
+        print_flush(
+            "[server] benchmark failed: core profile(s) did not collect "
+            f"{BENCHMARK_RUNS} non-burst runs: {','.join(baseline_failures)}")
+        return 1
+    if choose_practical_summary(summaries) is None:
+        print_flush("[server] benchmark found no clean measured profile under current limits")
+        return 1
+    return 0
+
+
 def main():
     args_ns = parse_args()
     jam2 = Path(args_ns.jam2)
@@ -1784,6 +2170,16 @@ def main():
         f"requested={args_ns.network_profile} server={server_network_type} client={client_network_type}"
         f"{network_profile_note(args_ns.network_profile, network_profile, server_network_type, client_network_type)}")
     try:
+        if args_ns.benchmark:
+            return run_benchmark_mode(
+                args_ns,
+                jam2,
+                base_logs,
+                public_dir,
+                network_profile,
+                server_network_type,
+                command_context)
+
         ladder_candidates = list(candidate_ladder())
         ladder_index = 0
         pending_candidates = []
