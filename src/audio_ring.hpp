@@ -10,6 +10,8 @@ namespace jam2::audio {
 
 struct RingStats {
     std::uint64_t overruns = 0;
+    std::uint64_t overrun_events = 0;
+    std::uint64_t overrun_event_max_frames = 0;
     std::uint64_t underruns = 0;
     std::uint64_t underrun_events = 0;
     std::uint64_t underrun_event_max_frames = 0;
@@ -38,6 +40,7 @@ public:
     std::size_t pop(std::span<std::int32_t> frames, bool observe_depth = true);
     std::size_t drop_oldest(std::size_t frames);
     void set_depth_bucket_thresholds(double sample_rate);
+    void set_diagnostics_enabled(bool enabled);
     RingStats stats() const;
     void reset();
 
@@ -51,7 +54,10 @@ private:
     std::size_t depth_under_10ms_threshold_frames_ = 480;
     std::atomic<std::uint64_t> read_{0};
     std::atomic<std::uint64_t> write_{0};
+    std::atomic<bool> diagnostics_enabled_{false};
     std::atomic<std::uint64_t> overruns_{0};
+    std::atomic<std::uint64_t> overrun_events_{0};
+    std::atomic<std::uint64_t> overrun_event_max_frames_{0};
     std::atomic<std::uint64_t> underruns_{0};
     std::atomic<std::uint64_t> underrun_events_{0};
     std::atomic<std::uint64_t> underrun_event_max_frames_{0};

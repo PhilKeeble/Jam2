@@ -135,6 +135,7 @@ class Candidate:
             "--playback-max-frames", str(playback_max_frames),
             "--drift-correction", self.drift_correction,
             "--drift-deadband-ppm", str(self.drift_deadband_ppm),
+            "--stats", "enabled",
             "--stats-warmup-ms", str(STATS_WARMUP_MS),
             "--stats-interval-ms", str(STATS_INTERVAL_MS),
             "--stream-ms", str(stream_ms),
@@ -950,6 +951,19 @@ def run_metrics(server, client):
         "playback_ring_underrun_burst_max_ms": max(
             (numeric(row, "playback_ring_underrun_burst_max_ms") for row in final_rows),
             default=0.0),
+        "audio_packet_gap_max_ms": max((numeric(row, "audio_packet_gap_max_ms") for row in final_rows), default=0.0),
+        "audio_packet_gap_over_2x_count": sum((numeric(row, "audio_packet_gap_over_2x_count") for row in final_rows), 0.0),
+        "audio_packet_gap_over_4x_count": sum((numeric(row, "audio_packet_gap_over_4x_count") for row in final_rows), 0.0),
+        "playback_depth_under_10ms_max_duration_ms": max(
+            (numeric(row, "playback_depth_under_10ms_max_duration_ms") for row in final_rows),
+            default=0.0),
+        "recv_loop_batch_max": max((numeric(row, "recv_loop_batch_max") for row in final_rows), default=0.0),
+        "reordered_max_distance_packets": max((numeric(row, "reordered_max_distance_packets") for row in final_rows), default=0.0),
+        "drift_correction_active_percent": max((numeric(row, "drift_correction_active_percent") for row in final_rows), default=0.0),
+        "drift_correction_clamped_percent": max((numeric(row, "drift_correction_clamped_percent") for row in final_rows), default=0.0),
+        "resampler_ratio_change_max_ppm_per_second": max(
+            (numeric(row, "resampler_ratio_change_max_ppm_per_second") for row in final_rows),
+            default=0.0),
         "playback_depth_observed_frames": playback_depth_observed_frames,
         "has_playback_severity_stats": any(has_field(row, "playback_depth_observed_frames") for row in final_rows),
         "playback_ring_underruns_per_second": playback_underruns / elapsed_seconds if elapsed_seconds > 0.0 else 0.0,
@@ -1012,6 +1026,19 @@ def aggregate_metrics(run_results):
             default=0.0),
         "playback_ring_underrun_burst_max_ms": max(
             (metric.get("playback_ring_underrun_burst_max_ms", 0.0) for metric in metrics),
+            default=0.0),
+        "audio_packet_gap_max_ms": max((metric.get("audio_packet_gap_max_ms", 0.0) for metric in metrics), default=0.0),
+        "audio_packet_gap_over_2x_count": sum((metric.get("audio_packet_gap_over_2x_count", 0.0) for metric in metrics), 0.0),
+        "audio_packet_gap_over_4x_count": sum((metric.get("audio_packet_gap_over_4x_count", 0.0) for metric in metrics), 0.0),
+        "playback_depth_under_10ms_max_duration_ms": max(
+            (metric.get("playback_depth_under_10ms_max_duration_ms", 0.0) for metric in metrics),
+            default=0.0),
+        "recv_loop_batch_max": max((metric.get("recv_loop_batch_max", 0.0) for metric in metrics), default=0.0),
+        "reordered_max_distance_packets": max((metric.get("reordered_max_distance_packets", 0.0) for metric in metrics), default=0.0),
+        "drift_correction_active_percent": max((metric.get("drift_correction_active_percent", 0.0) for metric in metrics), default=0.0),
+        "drift_correction_clamped_percent": max((metric.get("drift_correction_clamped_percent", 0.0) for metric in metrics), default=0.0),
+        "resampler_ratio_change_max_ppm_per_second": max(
+            (metric.get("resampler_ratio_change_max_ppm_per_second", 0.0) for metric in metrics),
             default=0.0),
         "playback_depth_observed_frames": playback_depth_observed_frames,
         "has_playback_severity_stats": any(metric.get("has_playback_severity_stats", False) for metric in metrics),
@@ -1880,6 +1907,15 @@ def benchmark_row(summary):
         "playback_underrun_time_percent": f"{metrics.get('playback_ring_underrun_time_percent', 0.0):.5f}",
         "playback_underrun_burst_max_ms": f"{metrics.get('playback_ring_underrun_burst_max_ms', 0.0):.3f}",
         "playback_underrun_event_max_ms": f"{metrics.get('playback_ring_underrun_event_max_ms', 0.0):.3f}",
+        "audio_packet_gap_max_ms": f"{metrics.get('audio_packet_gap_max_ms', 0.0):.3f}",
+        "audio_packet_gap_over_2x_count": f"{metrics.get('audio_packet_gap_over_2x_count', 0.0):.0f}",
+        "audio_packet_gap_over_4x_count": f"{metrics.get('audio_packet_gap_over_4x_count', 0.0):.0f}",
+        "playback_depth_under_10ms_max_duration_ms": f"{metrics.get('playback_depth_under_10ms_max_duration_ms', 0.0):.3f}",
+        "recv_loop_batch_max": f"{metrics.get('recv_loop_batch_max', 0.0):.0f}",
+        "reordered_max_distance_packets": f"{metrics.get('reordered_max_distance_packets', 0.0):.0f}",
+        "drift_correction_active_percent": f"{metrics.get('drift_correction_active_percent', 0.0):.3f}",
+        "drift_correction_clamped_percent": f"{metrics.get('drift_correction_clamped_percent', 0.0):.3f}",
+        "resampler_ratio_change_max_ppm_per_second": f"{metrics.get('resampler_ratio_change_max_ppm_per_second', 0.0):.3f}",
         "playback_overruns": f"{metrics.get('playback_ring_overruns', 0.0):.0f}",
         "playback_dropped_frames": f"{metrics.get('playback_dropped_frames', 0.0):.0f}",
         "playback_dropped_frames_per_second": f"{metrics.get('playback_dropped_frames_per_second', 0.0):.5f}",
@@ -1934,6 +1970,8 @@ def write_benchmark_outputs(base_logs, summaries, command_context, run_csv_analy
             f"loss_pct={row['packet_loss_percent']} underrun_eps={row['playback_underrun_events_per_second']} "
             f"underrun_time_pct={row['playback_underrun_time_percent']} "
             f"underrun_burst_max_ms={row['playback_underrun_burst_max_ms']} "
+            f"gap_max_ms={row['audio_packet_gap_max_ms']} "
+            f"low_depth10_max_ms={row['playback_depth_under_10ms_max_duration_ms']} "
             f"dropped_pct={row['playback_dropped_frame_percent']} jitter_max_ms={row['jitter_max_ms']}"
         )
         lines.append(f"    reason: {row['reason'] or 'baseline'}")

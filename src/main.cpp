@@ -35,7 +35,7 @@ Usage:
   jam2 test-device <id> [--sample-rate n]
   jam2 meter-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n]
   jam2 ring-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n] [--ring-frames n]
-  jam2 listen [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--metronome on|off] [--bpm n] [--metronome-level n] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels mono|stereo|n|n,m] [--output-channels n|n,m] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-deadband-ppm n] [--drift-max-correction-ppm n]
+  jam2 listen [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats enabled|disabled] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--metronome on|off] [--bpm n] [--metronome-level n] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels mono|stereo|n|n,m] [--output-channels n|n,m] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-deadband-ppm n] [--drift-max-correction-ppm n]
   jam2 connect <jam2-url> [options]
 
 Stage status:
@@ -53,6 +53,7 @@ struct Options {
     int wait_ms = 0;
     int stream_ms = 0;
     int stream_linger_ms = 100;
+    bool stats_enabled = false;
     int stats_interval_ms = 0;
     int stats_warmup_ms = 3000;
     std::optional<std::filesystem::path> log_stats_dir;
@@ -168,6 +169,15 @@ Options parse_options(int argc, char** argv, int start)
             options.stream_linger_ms = std::stoi(std::string(require_value(argc, argv, i, arg)));
             if (options.stream_linger_ms < 0) {
                 throw std::runtime_error("--stream-linger-ms must be non-negative");
+            }
+        } else if (arg == "--stats") {
+            const auto value = require_value(argc, argv, i, arg);
+            if (value == "enabled" || value == "on" || value == "true" || value == "1") {
+                options.stats_enabled = true;
+            } else if (value == "disabled" || value == "off" || value == "false" || value == "0") {
+                options.stats_enabled = false;
+            } else {
+                throw std::runtime_error("--stats must be enabled or disabled");
             }
         } else if (arg == "--stats-interval-ms") {
             options.stats_interval_ms = std::stoi(std::string(require_value(argc, argv, i, arg)));
@@ -299,6 +309,12 @@ Options parse_options(int argc, char** argv, int start)
         } else {
             throw std::runtime_error("unknown option: " + std::string(arg));
         }
+    }
+    if (!options.stats_enabled && options.stats_interval_ms > 0) {
+        throw std::runtime_error("--stats-interval-ms requires --stats enabled");
+    }
+    if (!options.stats_enabled && options.log_stats_dir) {
+        throw std::runtime_error("--log-stats requires --stats enabled");
     }
     return options;
 }
@@ -449,10 +465,31 @@ struct AudioPacketStats {
     std::uint64_t reordered_recovered = 0;
     std::uint64_t reordered_lost = 0;
     std::uint64_t reordered_lost_events = 0;
+    std::uint64_t reordered_max_distance_packets = 0;
     std::uint64_t jitter_min_us = 0;
     std::uint64_t jitter_sum_us = 0;
     std::uint64_t jitter_max_us = 0;
     std::uint64_t jitter_samples = 0;
+    std::uint64_t audio_packet_gap_min_us = 0;
+    std::uint64_t audio_packet_gap_sum_us = 0;
+    std::uint64_t audio_packet_gap_max_us = 0;
+    std::uint64_t audio_packet_gap_samples = 0;
+    std::uint64_t audio_packet_gap_over_2x_count = 0;
+    std::uint64_t audio_packet_gap_over_4x_count = 0;
+    std::uint64_t playback_push_min_frames = 0;
+    std::uint64_t playback_push_sum_frames = 0;
+    std::uint64_t playback_push_max_frames = 0;
+    std::uint64_t playback_push_batches = 0;
+    std::uint64_t playback_depth_under_2ms_events = 0;
+    std::uint64_t playback_depth_under_2ms_max_duration_us = 0;
+    std::uint64_t playback_depth_under_5ms_events = 0;
+    std::uint64_t playback_depth_under_5ms_max_duration_us = 0;
+    std::uint64_t playback_depth_under_10ms_events = 0;
+    std::uint64_t playback_depth_under_10ms_max_duration_us = 0;
+    std::uint64_t recv_loop_iterations = 0;
+    std::uint64_t recv_loop_idle_count = 0;
+    std::uint64_t recv_loop_batch_sum = 0;
+    std::uint64_t recv_loop_batch_max = 0;
     std::uint64_t rtt_min_us = 0;
     std::uint64_t rtt_sum_us = 0;
     std::uint64_t rtt_max_us = 0;
@@ -460,6 +497,13 @@ struct AudioPacketStats {
     double raw_drift_ppm = 0.0;
     double drift_ppm = 0.0;
     double resampler_ratio = 1.0;
+    double resampler_ratio_min = 0.0;
+    double resampler_ratio_sum = 0.0;
+    double resampler_ratio_max = 0.0;
+    std::uint64_t resampler_ratio_samples = 0;
+    std::uint64_t drift_correction_active_samples = 0;
+    std::uint64_t drift_correction_clamped_samples = 0;
+    double resampler_ratio_change_max_ppm_per_second = 0.0;
     std::uint64_t metronome_sent = 0;
     std::uint64_t metronome_received = 0;
     std::uint64_t last_remote_beat = 0;
@@ -470,6 +514,7 @@ struct AudioPacketStats {
 
 struct RuntimeState {
     std::atomic<bool> quit{false};
+    std::atomic<bool> stats_enabled{false};
     std::atomic<bool> print_stats{false};
     std::atomic<bool> metronome{false};
     std::atomic<int> bpm{120};
@@ -504,9 +549,17 @@ void sync_audio_control(
 void print_interactive_help()
 {
     std::cout << "Commands:\n"
-              << "  help          show this command list\n"
-              << "  stats         print current stream stats\n"
-              << "  metro on      enable local metronome\n"
+              << "  help          show this command list\n";
+}
+
+void print_interactive_help(bool stats_enabled)
+{
+    std::cout << "Commands:\n"
+              << "  help          show this command list\n";
+    if (stats_enabled) {
+        std::cout << "  stats         print current stream stats\n";
+    }
+    std::cout << "  metro on      enable local metronome\n"
               << "  metro off     disable local metronome\n"
               << "  bpm <1..400>  set metronome tempo\n"
               << "  quit          stop the stream and exit\n"
@@ -532,12 +585,16 @@ void stdin_command_loop(RuntimeState& state)
             break;
         }
         if (command == "help") {
-            print_interactive_help();
+            print_interactive_help(state.stats_enabled.load(std::memory_order_relaxed));
             print_prompt();
             continue;
         }
         if (command == "stats") {
-            state.print_stats.store(true, std::memory_order_relaxed);
+            if (state.stats_enabled.load(std::memory_order_relaxed)) {
+                state.print_stats.store(true, std::memory_order_relaxed);
+            } else {
+                std::cout << "Stats are disabled. Restart with --stats enabled to use this command.\n";
+            }
             print_prompt();
             continue;
         }
@@ -712,6 +769,25 @@ double packet_path_frame_percent(std::uint64_t frames, std::uint64_t audio_frame
         0.0;
 }
 
+double avg_us_to_ms(std::uint64_t sum_us, std::uint64_t samples)
+{
+    return samples > 0 ?
+        static_cast<double>(sum_us) / static_cast<double>(samples) / 1000.0 :
+        0.0;
+}
+
+double avg_u64(std::uint64_t sum, std::uint64_t samples)
+{
+    return samples > 0 ?
+        static_cast<double>(sum) / static_cast<double>(samples) :
+        0.0;
+}
+
+double avg_double(double sum, std::uint64_t samples)
+{
+    return samples > 0 ? sum / static_cast<double>(samples) : 0.0;
+}
+
 double rtt_avg_ms(const AudioPacketStats& stats)
 {
     return stats.recv_pongs > 0 ?
@@ -798,6 +874,8 @@ public:
         long callbacks = 0;
         bool playback_prefilled = false;
         std::uint64_t capture_ring_overruns = 0;
+        std::uint64_t capture_ring_overrun_events = 0;
+        std::uint64_t capture_ring_overrun_event_max_frames = 0;
         std::uint64_t capture_ring_underruns = 0;
         std::uint64_t capture_ring_underrun_events = 0;
         std::size_t capture_ring_readable = 0;
@@ -852,7 +930,20 @@ public:
                 "playback_depth_under_2ms_frames,playback_depth_under_2ms_percent,"
                 "playback_depth_under_5ms_frames,playback_depth_under_5ms_percent,"
                 "playback_depth_under_10ms_frames,playback_depth_under_10ms_percent,"
-                "playback_depth_10ms_plus_frames,playback_depth_10ms_plus_percent,playback_depth_observed_frames\n";
+                "playback_depth_10ms_plus_frames,playback_depth_10ms_plus_percent,playback_depth_observed_frames,"
+                "capture_ring_overrun_events,capture_ring_overrun_event_max_frames,capture_ring_overrun_event_max_ms,"
+                "audio_packet_gap_min_ms,audio_packet_gap_avg_ms,audio_packet_gap_max_ms,audio_packet_gap_samples,"
+                "audio_packet_gap_over_2x_count,audio_packet_gap_over_4x_count,"
+                "playback_push_min_frames,playback_push_avg_frames,playback_push_max_frames,playback_push_batches,"
+                "playback_depth_under_2ms_events,playback_depth_under_2ms_max_duration_ms,"
+                "playback_depth_under_5ms_events,playback_depth_under_5ms_max_duration_ms,"
+                "playback_depth_under_10ms_events,playback_depth_under_10ms_max_duration_ms,"
+                "recv_loop_iterations,recv_loop_idle_count,recv_loop_batch_avg,recv_loop_batch_max,"
+                "reordered_max_distance_packets,"
+                "resampler_ratio_min,resampler_ratio_avg,resampler_ratio_max,resampler_ratio_samples,"
+                "drift_correction_active_samples,drift_correction_active_percent,"
+                "drift_correction_clamped_samples,drift_correction_clamped_percent,"
+                "resampler_ratio_change_max_ppm_per_second\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -887,6 +978,10 @@ public:
             packet_path_frame_percent(stats.playback_dropped_frames, elapsed_audio_frames);
         const double playback_underrun_percent =
             frames_percent(audio.playback_ring_underruns, audio.playback_depth_observed_frames);
+        const double drift_active_percent =
+            frames_percent(stats.drift_correction_active_samples, stats.resampler_ratio_samples);
+        const double drift_clamped_percent =
+            frames_percent(stats.drift_correction_clamped_samples, stats.resampler_ratio_samples);
         out_ << csv_escape(row_type) << ','
              << elapsed_ms << ','
              << csv_escape(context_.command_line) << ','
@@ -1004,7 +1099,40 @@ public:
              << frames_percent(audio.playback_depth_under_10ms_frames, audio.playback_depth_observed_frames) << ','
              << audio.playback_depth_10ms_plus_frames << ','
              << frames_percent(audio.playback_depth_10ms_plus_frames, audio.playback_depth_observed_frames) << ','
-             << audio.playback_depth_observed_frames << '\n';
+             << audio.playback_depth_observed_frames << ','
+             << audio.capture_ring_overrun_events << ','
+             << audio.capture_ring_overrun_event_max_frames << ','
+             << frames_to_ms(static_cast<std::size_t>(audio.capture_ring_overrun_event_max_frames), active_sample_rate) << ','
+             << (stats.audio_packet_gap_samples > 0 ? static_cast<double>(stats.audio_packet_gap_min_us) / 1000.0 : 0.0) << ','
+             << avg_us_to_ms(stats.audio_packet_gap_sum_us, stats.audio_packet_gap_samples) << ','
+             << (stats.audio_packet_gap_samples > 0 ? static_cast<double>(stats.audio_packet_gap_max_us) / 1000.0 : 0.0) << ','
+             << stats.audio_packet_gap_samples << ','
+             << stats.audio_packet_gap_over_2x_count << ','
+             << stats.audio_packet_gap_over_4x_count << ','
+             << stats.playback_push_min_frames << ','
+             << avg_u64(stats.playback_push_sum_frames, stats.playback_push_batches) << ','
+             << stats.playback_push_max_frames << ','
+             << stats.playback_push_batches << ','
+             << stats.playback_depth_under_2ms_events << ','
+             << static_cast<double>(stats.playback_depth_under_2ms_max_duration_us) / 1000.0 << ','
+             << stats.playback_depth_under_5ms_events << ','
+             << static_cast<double>(stats.playback_depth_under_5ms_max_duration_us) / 1000.0 << ','
+             << stats.playback_depth_under_10ms_events << ','
+             << static_cast<double>(stats.playback_depth_under_10ms_max_duration_us) / 1000.0 << ','
+             << stats.recv_loop_iterations << ','
+             << stats.recv_loop_idle_count << ','
+             << avg_u64(stats.recv_loop_batch_sum, stats.recv_loop_iterations) << ','
+             << stats.recv_loop_batch_max << ','
+             << stats.reordered_max_distance_packets << ','
+             << stats.resampler_ratio_min << ','
+             << avg_double(stats.resampler_ratio_sum, stats.resampler_ratio_samples) << ','
+             << stats.resampler_ratio_max << ','
+             << stats.resampler_ratio_samples << ','
+             << stats.drift_correction_active_samples << ','
+             << drift_active_percent << ','
+             << stats.drift_correction_clamped_samples << ','
+             << drift_clamped_percent << ','
+             << stats.resampler_ratio_change_max_ppm_per_second << '\n';
         if (row_type == "final") {
             out_.flush();
         }
@@ -1019,7 +1147,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(118);
+        std::vector<std::string> fields(151);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1092,6 +1220,39 @@ public:
         set(115, audio.playback_depth_10ms_plus_frames);
         set(116, frames_percent(audio.playback_depth_10ms_plus_frames, audio.playback_depth_observed_frames));
         set(117, audio.playback_depth_observed_frames);
+        set(118, audio.capture_ring_overrun_events);
+        set(119, audio.capture_ring_overrun_event_max_frames);
+        set(120, frames_to_ms(static_cast<std::size_t>(audio.capture_ring_overrun_event_max_frames), options.sample_rate));
+        set(121, stats.audio_packet_gap_samples > 0 ? static_cast<double>(stats.audio_packet_gap_min_us) / 1000.0 : 0.0);
+        set(122, avg_us_to_ms(stats.audio_packet_gap_sum_us, stats.audio_packet_gap_samples));
+        set(123, stats.audio_packet_gap_samples > 0 ? static_cast<double>(stats.audio_packet_gap_max_us) / 1000.0 : 0.0);
+        set(124, stats.audio_packet_gap_samples);
+        set(125, stats.audio_packet_gap_over_2x_count);
+        set(126, stats.audio_packet_gap_over_4x_count);
+        set(127, stats.playback_push_min_frames);
+        set(128, avg_u64(stats.playback_push_sum_frames, stats.playback_push_batches));
+        set(129, stats.playback_push_max_frames);
+        set(130, stats.playback_push_batches);
+        set(131, stats.playback_depth_under_2ms_events);
+        set(132, static_cast<double>(stats.playback_depth_under_2ms_max_duration_us) / 1000.0);
+        set(133, stats.playback_depth_under_5ms_events);
+        set(134, static_cast<double>(stats.playback_depth_under_5ms_max_duration_us) / 1000.0);
+        set(135, stats.playback_depth_under_10ms_events);
+        set(136, static_cast<double>(stats.playback_depth_under_10ms_max_duration_us) / 1000.0);
+        set(137, stats.recv_loop_iterations);
+        set(138, stats.recv_loop_idle_count);
+        set(139, avg_u64(stats.recv_loop_batch_sum, stats.recv_loop_iterations));
+        set(140, stats.recv_loop_batch_max);
+        set(141, stats.reordered_max_distance_packets);
+        set(142, stats.resampler_ratio_min);
+        set(143, avg_double(stats.resampler_ratio_sum, stats.resampler_ratio_samples));
+        set(144, stats.resampler_ratio_max);
+        set(145, stats.resampler_ratio_samples);
+        set(146, stats.drift_correction_active_samples);
+        set(147, frames_percent(stats.drift_correction_active_samples, stats.resampler_ratio_samples));
+        set(148, stats.drift_correction_clamped_samples);
+        set(149, frames_percent(stats.drift_correction_clamped_samples, stats.resampler_ratio_samples));
+        set(150, stats.resampler_ratio_change_max_ppm_per_second);
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {
@@ -1124,6 +1285,8 @@ CsvStatsLog::AudioSnapshot make_audio_snapshot(
     if (capture_ring != nullptr) {
         const auto stats = capture_ring->stats();
         snapshot.capture_ring_overruns = stats.overruns;
+        snapshot.capture_ring_overrun_events = stats.overrun_events;
+        snapshot.capture_ring_overrun_event_max_frames = stats.overrun_event_max_frames;
         snapshot.capture_ring_underruns = stats.underruns;
         snapshot.capture_ring_underrun_events = stats.underrun_events;
         snapshot.capture_ring_readable = capture_ring->available_read();
@@ -1231,6 +1394,8 @@ AudioPacketStats run_audio_packet_exchange(
     AudioPacketStats stats;
     stats.startup_drained_packets = startup_drained_packets;
     const bool bounded_stream = options.stream_ms > 0;
+    const bool collect_stats = options.stats_enabled;
+    const bool collect_diagnostics = collect_stats && (csv_log != nullptr || options.stats_interval_ms > 0);
 
     std::vector<std::int32_t> asio_frames(static_cast<std::size_t>(options.frame_size), 0);
     std::vector<std::int32_t> network_frames(static_cast<std::size_t>(options.frame_size), 0);
@@ -1250,13 +1415,16 @@ AudioPacketStats run_audio_packet_exchange(
     std::uint64_t local_beat = 0;
     std::uint64_t last_metronome_revision = runtime.metronome_revision.load(std::memory_order_relaxed);
     std::uint64_t last_audio_receive_us = 0;
+    std::uint64_t last_audio_gap_receive_us = 0;
     bool drift_started = false;
     bool drift_smoothed = false;
     double smoothed_drift_ppm = 0.0;
+    double previous_resampler_ratio = 1.0;
+    std::uint64_t previous_resampler_ratio_time_us = 0;
     std::uint64_t first_remote_sample_time = 0;
     std::uint64_t first_receive_time_us = 0;
     const std::uint64_t start_time = next_send;
-    std::uint64_t next_stats = options.stats_interval_ms > 0 ?
+    std::uint64_t next_stats = collect_stats && options.stats_interval_ms > 0 ?
         start_time + static_cast<std::uint64_t>(options.stats_interval_ms) * 1000ULL :
         0;
     const std::uint64_t send_deadline = bounded_stream ?
@@ -1277,22 +1445,72 @@ AudioPacketStats run_audio_packet_exchange(
     bool expected_sequence_set = false;
     std::uint32_t expected_sequence = 0;
     std::uint32_t highest_sequence = 0;
+    const std::uint64_t depth_under_2ms_frames =
+        static_cast<std::uint64_t>(std::ceil(static_cast<double>(options.sample_rate) * 2.0 / 1000.0)) > 0 ?
+            static_cast<std::uint64_t>(std::ceil(static_cast<double>(options.sample_rate) * 2.0 / 1000.0)) : 1;
+    const std::uint64_t depth_under_5ms_frames =
+        static_cast<std::uint64_t>(std::ceil(static_cast<double>(options.sample_rate) * 5.0 / 1000.0)) > 0 ?
+            static_cast<std::uint64_t>(std::ceil(static_cast<double>(options.sample_rate) * 5.0 / 1000.0)) : 1;
+    const std::uint64_t depth_under_10ms_frames =
+        static_cast<std::uint64_t>(std::ceil(static_cast<double>(options.sample_rate) * 10.0 / 1000.0)) > 0 ?
+            static_cast<std::uint64_t>(std::ceil(static_cast<double>(options.sample_rate) * 10.0 / 1000.0)) : 1;
+    struct LowDepthTracker {
+        bool active = false;
+        std::uint64_t start_us = 0;
+    };
+    LowDepthTracker low_depth_2ms;
+    LowDepthTracker low_depth_5ms;
+    LowDepthTracker low_depth_10ms;
+
+    auto observe_low_depth_event = [](
+        bool below,
+        std::uint64_t now_us,
+        LowDepthTracker& tracker,
+        std::uint64_t& event_count,
+        std::uint64_t& max_duration_us) {
+        if (below) {
+            if (!tracker.active) {
+                tracker.active = true;
+                tracker.start_us = now_us;
+                ++event_count;
+            }
+            return;
+        }
+        if (!tracker.active) {
+            return;
+        }
+        const std::uint64_t duration = now_us >= tracker.start_us ? now_us - tracker.start_us : 0;
+        if (duration > max_duration_us) {
+            max_duration_us = duration;
+        }
+        tracker.active = false;
+    };
 
     auto process_audio_packet = [&](const PendingAudioPacket& packet) {
         const std::uint64_t warmup_end_time =
             start_time + static_cast<std::uint64_t>(options.stats_warmup_ms) * 1000ULL;
-        const bool collect_tuning_stats = packet.receive_time >= warmup_end_time;
-        if (!collect_tuning_stats) {
+        const bool past_stats_warmup = packet.receive_time >= warmup_end_time;
+        const bool collect_tuning_stats = collect_stats && past_stats_warmup;
+        const bool collect_deep_diagnostics = collect_diagnostics && past_stats_warmup;
+        if (collect_stats && !collect_tuning_stats) {
             ++stats.stats_warmup_skipped_packets;
         }
         if (playback_ring != nullptr) {
-            (void)playback_ring->push(packet.samples);
+            const std::size_t pushed_frames = playback_ring->push(packet.samples);
+            if (collect_deep_diagnostics) {
+                observe_timing(
+                    static_cast<std::uint64_t>(pushed_frames),
+                    stats.playback_push_min_frames,
+                    stats.playback_push_sum_frames,
+                    stats.playback_push_max_frames);
+                ++stats.playback_push_batches;
+            }
             if (options.playback_max_frames > 0) {
                 const std::size_t depth = playback_ring->available_read();
                 if (depth > options.playback_max_frames) {
                     const std::uint64_t dropped =
                         playback_ring->drop_oldest(depth - options.playback_max_frames);
-                    if (dropped > 0) {
+                    if (collect_stats && dropped > 0) {
                         stats.playback_dropped_frames += dropped;
                         ++stats.playback_drop_events;
                         if (dropped > stats.playback_drop_event_max_frames) {
@@ -1303,6 +1521,26 @@ AudioPacketStats run_audio_packet_exchange(
             }
             if (collect_tuning_stats) {
                 const std::uint64_t depth_after = playback_ring->available_read();
+                if (collect_deep_diagnostics) {
+                    observe_low_depth_event(
+                        depth_after < depth_under_2ms_frames,
+                        packet.receive_time,
+                        low_depth_2ms,
+                        stats.playback_depth_under_2ms_events,
+                        stats.playback_depth_under_2ms_max_duration_us);
+                    observe_low_depth_event(
+                        depth_after < depth_under_5ms_frames,
+                        packet.receive_time,
+                        low_depth_5ms,
+                        stats.playback_depth_under_5ms_events,
+                        stats.playback_depth_under_5ms_max_duration_us);
+                    observe_low_depth_event(
+                        depth_after < depth_under_10ms_frames,
+                        packet.receive_time,
+                        low_depth_10ms,
+                        stats.playback_depth_under_10ms_events,
+                        stats.playback_depth_under_10ms_max_duration_us);
+                }
                 observe_timing(
                     depth_after,
                     stats.playback_depth_min_frames,
@@ -1311,7 +1549,7 @@ AudioPacketStats run_audio_packet_exchange(
                 ++stats.playback_depth_samples;
             }
         }
-        if (collect_tuning_stats) {
+        if (past_stats_warmup) {
             if (!drift_started) {
                 drift_started = true;
                 first_remote_sample_time = packet.sample_time;
@@ -1335,6 +1573,39 @@ AudioPacketStats run_audio_packet_exchange(
                 stats.resampler_ratio = options.drift_correction && !inside_deadband ?
                     std::clamp(raw_ratio, 1.0 - max_ratio_delta, 1.0 + max_ratio_delta) :
                     1.0;
+                if (collect_deep_diagnostics) {
+                    if (stats.resampler_ratio_samples == 0) {
+                        stats.resampler_ratio_min = stats.resampler_ratio;
+                        stats.resampler_ratio_max = stats.resampler_ratio;
+                    } else {
+                        if (stats.resampler_ratio < stats.resampler_ratio_min) {
+                            stats.resampler_ratio_min = stats.resampler_ratio;
+                        }
+                        if (stats.resampler_ratio > stats.resampler_ratio_max) {
+                            stats.resampler_ratio_max = stats.resampler_ratio;
+                        }
+                    }
+                    stats.resampler_ratio_sum += stats.resampler_ratio;
+                    ++stats.resampler_ratio_samples;
+                    if (stats.resampler_ratio != 1.0) {
+                        ++stats.drift_correction_active_samples;
+                    }
+                    if (options.drift_correction && !inside_deadband &&
+                        (stats.resampler_ratio == 1.0 - max_ratio_delta || stats.resampler_ratio == 1.0 + max_ratio_delta)) {
+                        ++stats.drift_correction_clamped_samples;
+                    }
+                    if (previous_resampler_ratio_time_us != 0 && packet.receive_time > previous_resampler_ratio_time_us) {
+                        const double delta_ppm = std::abs(stats.resampler_ratio - previous_resampler_ratio) * 1000000.0;
+                        const double delta_seconds =
+                            static_cast<double>(packet.receive_time - previous_resampler_ratio_time_us) / 1000000.0;
+                        const double ppm_per_second = delta_seconds > 0.0 ? delta_ppm / delta_seconds : 0.0;
+                        if (ppm_per_second > stats.resampler_ratio_change_max_ppm_per_second) {
+                            stats.resampler_ratio_change_max_ppm_per_second = ppm_per_second;
+                        }
+                    }
+                    previous_resampler_ratio = stats.resampler_ratio;
+                    previous_resampler_ratio_time_us = packet.receive_time;
+                }
                 sync_audio_control(runtime, audio_control, options.metronome_level, stats.resampler_ratio);
                 stats.drift_valid = true;
             }
@@ -1347,10 +1618,30 @@ AudioPacketStats run_audio_packet_exchange(
             observe_timing(jitter, stats.jitter_min_us, stats.jitter_sum_us, stats.jitter_max_us);
             ++stats.jitter_samples;
         }
+        if (collect_deep_diagnostics && last_audio_gap_receive_us != 0) {
+            const std::uint64_t interval =
+                packet.receive_time >= last_audio_gap_receive_us ? packet.receive_time - last_audio_gap_receive_us : 0;
+            observe_timing(
+                interval,
+                stats.audio_packet_gap_min_us,
+                stats.audio_packet_gap_sum_us,
+                stats.audio_packet_gap_max_us);
+            ++stats.audio_packet_gap_samples;
+            if (interval_us > 0 && interval > interval_us * 2) {
+                ++stats.audio_packet_gap_over_2x_count;
+            }
+            if (interval_us > 0 && interval > interval_us * 4) {
+                ++stats.audio_packet_gap_over_4x_count;
+            }
+        }
         if (collect_tuning_stats) {
             last_audio_receive_us = packet.receive_time;
+            if (collect_deep_diagnostics) {
+                last_audio_gap_receive_us = packet.receive_time;
+            }
         } else {
             last_audio_receive_us = 0;
+            last_audio_gap_receive_us = 0;
         }
     };
 
@@ -1358,7 +1649,7 @@ AudioPacketStats run_audio_packet_exchange(
         for (;;) {
             const auto next = pending_audio.find(expected_sequence);
             if (next != pending_audio.end()) {
-                if (next->second.reordered) {
+                if (collect_stats && next->second.reordered) {
                     ++stats.reordered_recovered;
                 }
                 process_audio_packet(next->second);
@@ -1367,9 +1658,11 @@ AudioPacketStats run_audio_packet_exchange(
                 continue;
             }
             if (expected_sequence_set && highest_sequence > expected_sequence + kReorderWindowPackets) {
-                ++stats.sequence.lost;
-                ++stats.reordered_lost;
-                ++stats.reordered_lost_events;
+                if (collect_stats) {
+                    ++stats.sequence.lost;
+                    ++stats.reordered_lost;
+                    ++stats.reordered_lost_events;
+                }
                 ++expected_sequence;
                 continue;
             }
@@ -1404,8 +1697,10 @@ AudioPacketStats run_audio_packet_exchange(
             };
             const auto packet = jam2::protocol::encode_packet(header, payload, session.key);
             socket.send_to(peer, packet);
-            ++stats.sent_packets;
-            stats.sent_bytes += packet.size();
+            if (collect_stats) {
+                ++stats.sent_packets;
+                stats.sent_bytes += packet.size();
+            }
             sample_time += static_cast<std::uint64_t>(options.frame_size);
             std::uint64_t next_send_step = interval_us == 0 ? 1 : interval_us;
             interval_remainder_accumulator += interval_remainder_us;
@@ -1429,7 +1724,9 @@ AudioPacketStats run_audio_packet_exchange(
             };
             const auto packet = jam2::protocol::encode_packet(ping, {}, session.key);
             socket.send_to(peer, packet);
-            ++stats.sent_pings;
+            if (collect_stats) {
+                ++stats.sent_pings;
+            }
             next_ping += 100000ULL;
         }
         const bool metronome_enabled = runtime.metronome.load(std::memory_order_relaxed);
@@ -1450,7 +1747,9 @@ AudioPacketStats run_audio_packet_exchange(
             };
             const auto packet = jam2::protocol::encode_packet(metro, metro_payload, session.key);
             socket.send_to(peer, packet);
-            ++stats.metronome_sent;
+            if (collect_stats) {
+                ++stats.metronome_sent;
+            }
             last_metronome_revision = metronome_revision;
             if (metronome_enabled) {
                 const std::uint64_t beat_interval_us = 60000000ULL / static_cast<std::uint64_t>(current_bpm);
@@ -1459,7 +1758,7 @@ AudioPacketStats run_audio_packet_exchange(
                 next_metronome = now + 1000000ULL;
             }
         }
-        if (runtime.print_stats.exchange(false, std::memory_order_relaxed)) {
+        if (collect_stats && runtime.print_stats.exchange(false, std::memory_order_relaxed)) {
             const std::uint64_t elapsed_ms = (now - start_time) / 1000ULL;
             print_periodic_stream_stats(stats, options, elapsed_ms);
         }
@@ -1492,26 +1791,36 @@ AudioPacketStats run_audio_packet_exchange(
         }
 
         bool received_any = false;
+        std::uint64_t received_this_loop = 0;
         for (;;) {
             const auto received = socket.recv_from(received_any ? 0 : 1);
             if (!received) {
                 break;
             }
             received_any = true;
+            if (collect_diagnostics) {
+                ++received_this_loop;
+            }
             const auto& [from, bytes] = *received;
             if (from.host != peer.host || from.port != peer.port) {
-                ++stats.ignored_packets;
+                if (collect_stats) {
+                    ++stats.ignored_packets;
+                }
                 continue;
             }
             try {
                 const auto header = jam2::protocol::decode_packet(bytes, session.key, session.session_id);
                 if (header.type == jam2::protocol::PacketType::Audio) {
                     if (header.payload_length != audio_payload_size) {
-                        ++stats.ignored_packets;
+                        if (collect_stats) {
+                            ++stats.ignored_packets;
+                        }
                         continue;
                     }
-                    ++stats.recv_packets;
-                    stats.recv_bytes += bytes.size();
+                    if (collect_stats) {
+                        ++stats.recv_packets;
+                        stats.recv_bytes += bytes.size();
+                    }
                     const std::uint64_t receive_time = jam2::monotonic_us();
                     if (!expected_sequence_set) {
                         expected_sequence_set = true;
@@ -1519,18 +1828,29 @@ AudioPacketStats run_audio_packet_exchange(
                         highest_sequence = header.sequence;
                     }
                     if (header.sequence < expected_sequence) {
-                        ++stats.sequence.late;
-                        ++stats.ignored_packets;
+                        if (collect_stats) {
+                            ++stats.sequence.late;
+                            ++stats.ignored_packets;
+                        }
                         continue;
                     }
                     if (pending_audio.find(header.sequence) != pending_audio.end()) {
-                        ++stats.sequence.duplicate;
-                        ++stats.ignored_packets;
+                        if (collect_stats) {
+                            ++stats.sequence.duplicate;
+                            ++stats.ignored_packets;
+                        }
                         continue;
                     }
                     const bool reordered = header.sequence > expected_sequence;
-                    if (reordered) {
+                    if (reordered && collect_stats) {
                         ++stats.sequence.out_of_order;
+                        if (collect_diagnostics) {
+                            const std::uint64_t distance =
+                                static_cast<std::uint64_t>(header.sequence - expected_sequence);
+                            if (distance > stats.reordered_max_distance_packets) {
+                                stats.reordered_max_distance_packets = distance;
+                            }
+                        }
                     }
                     if (header.sequence > highest_sequence) {
                         highest_sequence = header.sequence;
@@ -1559,17 +1879,21 @@ AudioPacketStats run_audio_packet_exchange(
                     };
                     const auto packet = jam2::protocol::encode_packet(pong, {}, session.key);
                     socket.send_to(peer, packet);
-                    ++stats.sent_pongs;
+                    if (collect_stats) {
+                        ++stats.sent_pongs;
+                    }
                 } else if (header.type == jam2::protocol::PacketType::Pong) {
                     const std::uint64_t receive_time = jam2::monotonic_us();
-                    if (receive_time >= header.send_time_us) {
+                    if (collect_stats && receive_time >= header.send_time_us) {
                         observe_timing(
                             receive_time - header.send_time_us,
                             stats.rtt_min_us,
                             stats.rtt_sum_us,
                             stats.rtt_max_us);
                     }
-                    ++stats.recv_pongs;
+                    if (collect_stats) {
+                        ++stats.recv_pongs;
+                    }
                 } else if (header.type == jam2::protocol::PacketType::Bye) {
                     stats.received_bye = true;
                     break;
@@ -1588,12 +1912,28 @@ AudioPacketStats run_audio_packet_exchange(
                         }
                     }
                     stats.last_remote_beat = remote_beat;
-                    ++stats.metronome_received;
+                    if (collect_stats) {
+                        ++stats.metronome_received;
+                    }
                 } else {
-                    ++stats.ignored_packets;
+                    if (collect_stats) {
+                        ++stats.ignored_packets;
+                    }
                 }
             } catch (const std::exception&) {
-                ++stats.ignored_packets;
+                if (collect_stats) {
+                    ++stats.ignored_packets;
+                }
+            }
+        }
+        if (collect_diagnostics) {
+            ++stats.recv_loop_iterations;
+            stats.recv_loop_batch_sum += received_this_loop;
+            if (received_this_loop > stats.recv_loop_batch_max) {
+                stats.recv_loop_batch_max = received_this_loop;
+            }
+            if (received_this_loop == 0) {
+                ++stats.recv_loop_idle_count;
             }
         }
         if (!received_any) {
@@ -1618,7 +1958,29 @@ AudioPacketStats run_audio_packet_exchange(
         stats.sent_bye = true;
     }
 
-    stats.elapsed_ms = (jam2::monotonic_us() - start_time) / 1000ULL;
+    const std::uint64_t finish_time = jam2::monotonic_us();
+    if (collect_diagnostics) {
+        observe_low_depth_event(
+            false,
+            finish_time,
+            low_depth_2ms,
+            stats.playback_depth_under_2ms_events,
+            stats.playback_depth_under_2ms_max_duration_us);
+        observe_low_depth_event(
+            false,
+            finish_time,
+            low_depth_5ms,
+            stats.playback_depth_under_5ms_events,
+            stats.playback_depth_under_5ms_max_duration_us);
+        observe_low_depth_event(
+            false,
+            finish_time,
+            low_depth_10ms,
+            stats.playback_depth_under_10ms_events,
+            stats.playback_depth_under_10ms_max_duration_us);
+    }
+
+    stats.elapsed_ms = (finish_time - start_time) / 1000ULL;
     stats.final_metronome_enabled = runtime.metronome.load(std::memory_order_relaxed);
     stats.final_bpm = runtime.bpm.load(std::memory_order_relaxed);
     if (csv_log != nullptr) {
@@ -1772,6 +2134,10 @@ OptionalAudioStream start_optional_audio(const Options& options)
     audio.control->playback_ratio_ppm.store(1000000, std::memory_order_relaxed);
     audio.capture_ring = std::make_unique<jam2::audio::MonoRingBuffer>(options.capture_ring_frames);
     audio.playback_ring = std::make_unique<jam2::audio::MonoRingBuffer>(options.playback_ring_frames);
+    const bool diagnostics_enabled =
+        options.stats_enabled && (options.log_stats_dir.has_value() || options.stats_interval_ms > 0);
+    audio.capture_ring->set_diagnostics_enabled(diagnostics_enabled);
+    audio.playback_ring->set_diagnostics_enabled(diagnostics_enabled);
     audio.playback_ring->set_depth_bucket_thresholds(static_cast<double>(options.sample_rate));
     audio.stream = jam2::audio::start_duplex_stream(
         *options.audio_device_id,
@@ -1807,6 +2173,7 @@ struct CommandThread {
     {
         state.metronome.store(options.metronome, std::memory_order_relaxed);
         state.bpm.store(options.bpm, std::memory_order_relaxed);
+        state.stats_enabled.store(options.stats_enabled, std::memory_order_relaxed);
         thread = std::thread([this] { stdin_command_loop(state); });
     }
 
@@ -2160,8 +2527,10 @@ int run_listen(int argc, char** argv)
             static_cast<std::uint64_t>(drained_startup_packets),
             csv_log ? &*csv_log : nullptr);
             audio_stats.startup_drained_packets = static_cast<std::uint64_t>(drained_startup_packets);
+        if (options.stats_enabled) {
             print_audio_packet_stats(audio_stats, options);
             print_optional_audio_stats(audio, options);
+        }
             std::cout.flush();
             return 0;
     }
@@ -2246,8 +2615,10 @@ int run_connect(int argc, char** argv)
                     static_cast<std::uint64_t>(drained_startup_packets),
                     csv_log ? &*csv_log : nullptr);
                 audio_stats.startup_drained_packets = static_cast<std::uint64_t>(drained_startup_packets);
+                if (options.stats_enabled) {
                 print_audio_packet_stats(audio_stats, options);
                 print_optional_audio_stats(audio, options);
+                }
                 std::cout.flush();
                 return 0;
             }
