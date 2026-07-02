@@ -1,0 +1,73 @@
+
+========================================================================
+Recommended practical starting profile
+========================================================================
+  profile: adaptive_audio64_frame128_prefill768_drift_db25
+  latency_avg_ms: 27.51
+  stable: false
+  playable: true
+  pressured_playable: true
+  experimental: true
+  stable_runs: 0/3
+  warnings: client_jitter_spike,client_playback_depth_near_empty(2.67ms),server_playback_depth_near_empty(2.67ms),pressured_playable_underruns_without_dropouts
+
+  metrics:
+    packet_loss: 0
+    packet_loss_percent: 0.0000
+    packet_loss_per_second: 0.000
+    playback_dropped_frames: 0
+    playback_dropped_frames_per_second: 0.000
+    playback_dropped_frame_percent: 0.0000
+    playback_underruns: 1172
+    playback_underruns_per_second: 6.509
+    playback_underrun_events: 1172
+    playback_underrun_events_per_second: 6.509
+    min_playback_depth_ms: 2.67
+    jitter_max_ms: 17.96
+
+  commands:
+  client_detected_platform=windows
+  client_detected_device=2 (Focusrite USB ASIO)
+  server_listen_command:
+    C:\Users\Phil\Documents\GitHub\Jam2\build\jam2.exe listen --audio-device 5 --sample-rate 48000 --audio-buffer-size 64 --frame-size 128 --playback-prefill-frames 768 --playback-ring-frames 4096 --playback-max-frames 2048 --drift-correction on --drift-deadband-ppm 25
+  client_connect_command:
+    C:UsersjackrDocumentsToolsJam2buildjam2.exe connect "<paste jam2://...>" --audio-device 2 --sample-rate 48000 --audio-buffer-size 64 --frame-size 128 --playback-prefill-frames 768 --playback-ring-frames 4096 --playback-max-frames 2048 --drift-correction on --drift-deadband-ppm 25
+
+========================================================================
+Stable recommendation
+========================================================================
+  none confirmed
+
+========================================================================
+Aggressive low-latency recommendation
+========================================================================
+  profile: adaptive_audio32_frame128_prefill768_drift_db25
+  latency_avg_ms: 28.17
+  stable: false
+  playable: true
+  pressured_playable: true
+  experimental: true
+  stable_runs: 0/3
+  warnings: client_jitter_spike,client_playback_depth_near_empty(2.67ms),client_playback_depth_near_empty(3.96ms),server_playback_depth_near_empty(2.67ms),pressured_playable_underruns_without_dropouts
+
+  metrics:
+    packet_loss: 0
+    packet_loss_percent: 0.0000
+    packet_loss_per_second: 0.000
+    playback_dropped_frames: 0
+    playback_dropped_frames_per_second: 0.000
+    playback_dropped_frame_percent: 0.0000
+    playback_underruns: 706
+    playback_underruns_per_second: 3.921
+    playback_underrun_events: 458
+    playback_underrun_events_per_second: 2.544
+    min_playback_depth_ms: 2.67
+    jitter_max_ms: 16.31
+
+  commands:
+  client_detected_platform=windows
+  client_detected_device=2 (Focusrite USB ASIO)
+  server_listen_command:
+    C:\Users\Phil\Documents\GitHub\Jam2\build\jam2.exe listen --audio-device 5 --sample-rate 48000 --audio-buffer-size 32 --frame-size 128 --playback-prefill-frames 768 --playback-ring-frames 4096 --playback-max-frames 2048 --drift-correction on --drift-deadband-ppm 25
+  client_connect_command:
+    C:UsersjackrDocumentsToolsJam2buildjam2.exe connect "<paste jam2://...>" --audio-device 2 --sample-rate 48000 --audio-buffer-size 32 --frame-size 128 --playback-prefill-frames 768 --playback-ring-frames 4096 --playback-max-frames 2048 --drift-correction on --drift-deadband-ppm 25

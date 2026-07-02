@@ -1232,6 +1232,8 @@ def practical_better(candidate_summary, previous_summary):
         return True
     if candidate_summary.get("stable") and not previous_summary.get("stable"):
         return True
+    if previous_summary.get("stable") and not candidate_summary.get("stable"):
+        return False
     if not candidate_summary.get("playable", False):
         return False
     current_latency = candidate_summary.get("latency_avg_ms", 0.0)
@@ -1516,9 +1518,18 @@ def posix_command_line(args):
     return " ".join(shlex.quote(str(arg)) for arg in args)
 
 
-def first_command_token(command_line):
+def first_command_token(command_line, platform):
     if not command_line:
         return ""
+    platform = (platform or "").lower()
+    if platform.startswith("win"):
+        text = command_line.strip()
+        if not text:
+            return ""
+        if text[0] == '"':
+            end = text.find('"', 1)
+            return text[1:end] if end > 0 else text[1:]
+        return text.split()[0] if text.split() else ""
     try:
         return shlex.split(command_line)[0]
     except ValueError:
@@ -1526,7 +1537,7 @@ def first_command_token(command_line):
 
 
 def client_jam2_command(server_jam2, client_platform, client_row):
-    uploaded_command = first_command_token(client_row.get("command_line", ""))
+    uploaded_command = first_command_token(client_row.get("command_line", ""), client_platform)
     if uploaded_command:
         return uploaded_command
     platform = (client_platform or "").lower()
@@ -1695,6 +1706,7 @@ def choose_practical_summary(summaries):
     if not candidates:
         return None
     return min(candidates, key=lambda summary: (
+        not summary.get("stable", False),
         practical_score(summary),
         summary["latency_avg_ms"],
         summary.get("metrics", {}).get("playback_ring_underrun_events_per_second", 0.0),
