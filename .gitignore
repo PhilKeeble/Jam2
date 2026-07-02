@@ -24,6 +24,7 @@ Testing/
 *.err
 *.log
 *.csv
+/logs/
 /tools/logs/
 __pycache__/
 *.pyc
