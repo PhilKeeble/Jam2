@@ -493,6 +493,11 @@ def playback_underrun_rates(row):
 
 
 def stable_underrun_failure(row):
+    if has_field(row, "playback_depth_observed_frames"):
+        return (
+            numeric(row, "playback_ring_underrun_time_percent") > 0.05
+            or numeric(row, "playback_ring_underrun_burst_max_ms") > 10.0
+        )
     frames, frames_per_second, events_per_second = playback_underrun_rates(row)
     return (
         frames > STABLE_MAX_PLAYBACK_UNDERRUNS_PER_RUN
@@ -897,6 +902,10 @@ def sample_rate_for_row(row):
         or 44100.0)
 
 
+def has_field(row, field):
+    return row.get(field, "") not in ("", None)
+
+
 def run_metrics(server, client):
     final_rows = [side["final"] for side in (server, client) if side["final"]]
     periodic_rows_all = server["periodic"] + client["periodic"]
@@ -906,6 +915,15 @@ def run_metrics(server, client):
         for row in final_rows)
     playback_underruns = sum((numeric(row, "playback_ring_underruns") for row in final_rows), 0.0)
     playback_underrun_events = sum((numeric(row, "playback_ring_underrun_events") for row in final_rows), 0.0)
+    playback_depth_observed_frames = sum((numeric(row, "playback_depth_observed_frames") for row in final_rows), 0.0)
+    playback_underrun_time_percent = (
+        playback_underruns * 100.0 / playback_depth_observed_frames
+        if playback_depth_observed_frames > 0.0 else 0.0)
+    playback_underrun_time_ms = sum((numeric(row, "playback_ring_underrun_time_ms") for row in final_rows), 0.0)
+    if playback_underrun_time_ms <= 0.0:
+        playback_underrun_time_ms = sum(
+            numeric(row, "playback_ring_underruns") * 1000.0 / sample_rate_for_row(row)
+            for row in final_rows)
     underrun_events_for_rate = playback_underrun_events
     if playback_underruns > 0.0 and playback_underrun_events <= 0.0:
         underrun_events_for_rate = sum(
@@ -924,12 +942,25 @@ def run_metrics(server, client):
         "elapsed_seconds": elapsed_seconds,
         "playback_ring_underruns": playback_underruns,
         "playback_ring_underrun_events": playback_underrun_events,
+        "playback_ring_underrun_time_ms": playback_underrun_time_ms,
+        "playback_ring_underrun_time_percent": playback_underrun_time_percent,
+        "playback_ring_underrun_event_max_ms": max(
+            (numeric(row, "playback_ring_underrun_event_max_ms") for row in final_rows),
+            default=0.0),
+        "playback_ring_underrun_burst_max_ms": max(
+            (numeric(row, "playback_ring_underrun_burst_max_ms") for row in final_rows),
+            default=0.0),
+        "playback_depth_observed_frames": playback_depth_observed_frames,
+        "has_playback_severity_stats": any(has_field(row, "playback_depth_observed_frames") for row in final_rows),
         "playback_ring_underruns_per_second": playback_underruns / elapsed_seconds if elapsed_seconds > 0.0 else 0.0,
         "playback_ring_underrun_events_per_second": (
             underrun_events_for_rate / elapsed_seconds if elapsed_seconds > 0.0 else 0.0),
         "max_playback_ring_underruns": max((numeric(row, "playback_ring_underruns") for row in final_rows), default=0.0),
         "playback_ring_overruns": sum((numeric(row, "playback_ring_overruns") for row in final_rows), 0.0),
         "playback_dropped_frames": sum((numeric(row, "playback_dropped_frames") for row in final_rows), 0.0),
+        "playback_drop_events": sum((numeric(row, "playback_drop_events") for row in final_rows), 0.0),
+        "playback_drop_event_max_ms": max((numeric(row, "playback_drop_event_max_ms") for row in final_rows), default=0.0),
+        "playback_dropped_time_ms": sum((numeric(row, "playback_dropped_time_ms") for row in final_rows), 0.0),
         "audio_frame_seconds": audio_frame_seconds,
         "playback_dropped_frame_percent": (
             sum((numeric(row, "playback_dropped_frames") for row in final_rows), 0.0) * 100.0 / max(1.0, audio_frame_seconds)),
@@ -950,6 +981,11 @@ def aggregate_metrics(run_results):
     elapsed_seconds = sum((metric.get("elapsed_seconds", 0.0) for metric in metrics), 0.0)
     playback_underruns = sum((metric.get("playback_ring_underruns", 0.0) for metric in metrics), 0.0)
     playback_underrun_events = sum((metric.get("playback_ring_underrun_events", 0.0) for metric in metrics), 0.0)
+    playback_depth_observed_frames = sum((metric.get("playback_depth_observed_frames", 0.0) for metric in metrics), 0.0)
+    playback_underrun_time_ms = sum((metric.get("playback_ring_underrun_time_ms", 0.0) for metric in metrics), 0.0)
+    playback_underrun_time_percent = (
+        playback_underruns * 100.0 / playback_depth_observed_frames
+        if playback_depth_observed_frames > 0.0 else 0.0)
     weighted_underrun_event_rate = sum(
         metric.get("playback_ring_underrun_events_per_second", 0.0) * metric.get("elapsed_seconds", 0.0)
         for metric in metrics)
@@ -958,6 +994,7 @@ def aggregate_metrics(run_results):
     packet_loss = sum((metric.get("packet_loss", 0.0) for metric in metrics), 0.0)
     recv_packets = sum((metric.get("recv_packets", 0.0) for metric in metrics), 0.0)
     dropped_frames = sum((metric.get("playback_dropped_frames", 0.0) for metric in metrics), 0.0)
+    dropped_time_ms = sum((metric.get("playback_dropped_time_ms", 0.0) for metric in metrics), 0.0)
     audio_frame_seconds = sum((metric.get("audio_frame_seconds", 0.0) for metric in metrics), 0.0)
     return {
         "sequence_lost": sequence_lost,
@@ -968,12 +1005,25 @@ def aggregate_metrics(run_results):
         "elapsed_seconds": elapsed_seconds,
         "playback_ring_underruns": playback_underruns,
         "playback_ring_underrun_events": playback_underrun_events,
+        "playback_ring_underrun_time_ms": playback_underrun_time_ms,
+        "playback_ring_underrun_time_percent": playback_underrun_time_percent,
+        "playback_ring_underrun_event_max_ms": max(
+            (metric.get("playback_ring_underrun_event_max_ms", 0.0) for metric in metrics),
+            default=0.0),
+        "playback_ring_underrun_burst_max_ms": max(
+            (metric.get("playback_ring_underrun_burst_max_ms", 0.0) for metric in metrics),
+            default=0.0),
+        "playback_depth_observed_frames": playback_depth_observed_frames,
+        "has_playback_severity_stats": any(metric.get("has_playback_severity_stats", False) for metric in metrics),
         "playback_ring_underruns_per_second": playback_underruns / elapsed_seconds if elapsed_seconds > 0.0 else 0.0,
         "playback_ring_underrun_events_per_second": (
             weighted_underrun_event_rate / elapsed_seconds if elapsed_seconds > 0.0 else 0.0),
         "max_playback_ring_underruns": max((metric.get("max_playback_ring_underruns", 0.0) for metric in metrics), default=0.0),
         "playback_ring_overruns": sum((metric.get("playback_ring_overruns", 0.0) for metric in metrics), 0.0),
         "playback_dropped_frames": dropped_frames,
+        "playback_drop_events": sum((metric.get("playback_drop_events", 0.0) for metric in metrics), 0.0),
+        "playback_drop_event_max_ms": max((metric.get("playback_drop_event_max_ms", 0.0) for metric in metrics), default=0.0),
+        "playback_dropped_time_ms": dropped_time_ms,
         "playback_dropped_frames_per_second": dropped_frames / elapsed_seconds if elapsed_seconds > 0.0 else dropped_frames,
         "audio_frame_seconds": audio_frame_seconds,
         "playback_dropped_frame_percent": dropped_frames * 100.0 / max(1.0, audio_frame_seconds),
@@ -1125,12 +1175,28 @@ def aggregate_accepts(metrics, network_profile, aggressive=False):
     if metrics.get("min_playback_depth_ms", 0.0) < STABLE_HARD_PLAYBACK_DEPTH_MIN_MS:
         return False
 
+    severity_stats = metrics.get("has_playback_severity_stats", False)
+    if severity_stats:
+        underruns_ok = (
+            metrics.get("playback_ring_underrun_time_percent", 0.0) <= (0.05 if not aggressive else 0.15)
+            and metrics.get("playback_ring_underrun_burst_max_ms", 0.0) <= (10.0 if not aggressive else 20.0)
+        )
+    else:
+        underruns_ok = (
+            metrics.get("playback_ring_underruns_per_second", 0.0) <= (
+                AGGRESSIVE_MAX_PLAYBACK_UNDERRUNS_PER_SECOND if aggressive else STABLE_MAX_PLAYBACK_UNDERRUNS_PER_SECOND)
+            and metrics.get("playback_ring_underrun_events_per_second", 0.0) <= (
+                AGGRESSIVE_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND if aggressive else STABLE_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND)
+            and (
+                aggressive
+                or metrics.get("max_playback_ring_underruns", 0.0) <= STABLE_MAX_PLAYBACK_UNDERRUNS_PER_RUN)
+        )
+
     if aggressive:
         return (
             metrics.get("packet_loss_percent", 0.0) <= AGGRESSIVE_MAX_PACKET_LOSS_PERCENT
             and metrics.get("packet_loss_per_second", 0.0) <= AGGRESSIVE_MAX_PACKET_LOSS_PER_SECOND
-            and metrics.get("playback_ring_underruns_per_second", 0.0) <= AGGRESSIVE_MAX_PLAYBACK_UNDERRUNS_PER_SECOND
-            and metrics.get("playback_ring_underrun_events_per_second", 0.0) <= AGGRESSIVE_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND
+            and underruns_ok
             and metrics.get("playback_dropped_frames_per_second", 0.0) <= AGGRESSIVE_MAX_DROPPED_FRAMES_PER_SECOND
             and metrics.get("jitter_max_ms", 0.0) <= AGGRESSIVE_MAX_JITTER_MS
         )
@@ -1138,9 +1204,7 @@ def aggregate_accepts(metrics, network_profile, aggressive=False):
     return (
         metrics.get("packet_loss_percent", 0.0) <= STABLE_MAX_PACKET_LOSS_PERCENT
         and metrics.get("packet_loss_per_second", 0.0) <= STABLE_MAX_PACKET_LOSS_PER_SECOND
-        and metrics.get("playback_ring_underruns_per_second", 0.0) <= STABLE_MAX_PLAYBACK_UNDERRUNS_PER_SECOND
-        and metrics.get("playback_ring_underrun_events_per_second", 0.0) <= STABLE_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND
-        and metrics.get("max_playback_ring_underruns", 0.0) <= STABLE_MAX_PLAYBACK_UNDERRUNS_PER_RUN
+        and underruns_ok
         and metrics.get("playback_dropped_frames_per_second", 0.0) <= STABLE_MAX_DROPPED_FRAMES_PER_SECOND
     )
 
@@ -1150,13 +1214,22 @@ def playable_accepts(metrics, network_profile):
         return False
     if metrics.get("playback_ring_overruns", 0.0) > 0.0:
         return False
+    if metrics.get("has_playback_severity_stats", False):
+        underruns_ok = (
+            metrics.get("playback_ring_underrun_time_percent", 0.0) <= 0.20
+            and metrics.get("playback_ring_underrun_burst_max_ms", 0.0) <= 25.0
+        )
+    else:
+        underruns_ok = (
+            metrics.get("playback_ring_underruns_per_second", 0.0) <= PLAYABLE_MAX_PLAYBACK_UNDERRUNS_PER_SECOND
+            and metrics.get("playback_ring_underrun_events_per_second", 0.0) <= PLAYABLE_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND
+            and metrics.get("max_playback_ring_underruns", 0.0) <= PLAYABLE_MAX_PLAYBACK_UNDERRUNS_PER_RUN
+        )
     return (
         metrics.get("min_playback_depth_ms", 0.0) >= PLAYABLE_MIN_PLAYBACK_DEPTH_MS
         and metrics.get("packet_loss_percent", 0.0) <= PLAYABLE_MAX_PACKET_LOSS_PERCENT
         and metrics.get("packet_loss_per_second", 0.0) <= PLAYABLE_MAX_PACKET_LOSS_PER_SECOND
-        and metrics.get("playback_ring_underruns_per_second", 0.0) <= PLAYABLE_MAX_PLAYBACK_UNDERRUNS_PER_SECOND
-        and metrics.get("playback_ring_underrun_events_per_second", 0.0) <= PLAYABLE_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND
-        and metrics.get("max_playback_ring_underruns", 0.0) <= PLAYABLE_MAX_PLAYBACK_UNDERRUNS_PER_RUN
+        and underruns_ok
         and metrics.get("playback_dropped_frame_percent", 0.0) <= PLAYABLE_MAX_DROPPED_FRAME_PERCENT
         and metrics.get("jitter_max_ms", 0.0) <= PLAYABLE_MAX_JITTER_MS
     )
@@ -1169,11 +1242,20 @@ def pressured_accepts(metrics, network_profile):
         return False
     if metrics.get("min_playback_depth_ms", 0.0) < PLAYABLE_MIN_PLAYBACK_DEPTH_MS:
         return False
+    if metrics.get("has_playback_severity_stats", False):
+        underruns_ok = (
+            metrics.get("playback_ring_underrun_time_percent", 0.0) <= 0.50
+            and metrics.get("playback_ring_underrun_burst_max_ms", 0.0) <= 50.0
+        )
+    else:
+        underruns_ok = (
+            metrics.get("playback_ring_underruns_per_second", 0.0) <= PRESSURED_MAX_PLAYBACK_UNDERRUNS_PER_SECOND
+            and metrics.get("playback_ring_underrun_events_per_second", 0.0) <= PRESSURED_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND
+        )
     return (
         metrics.get("packet_loss_percent", 0.0) <= PRESSURED_MAX_PACKET_LOSS_PERCENT
         and metrics.get("packet_loss_per_second", 0.0) <= PRESSURED_MAX_PACKET_LOSS_PER_SECOND
-        and metrics.get("playback_ring_underruns_per_second", 0.0) <= PRESSURED_MAX_PLAYBACK_UNDERRUNS_PER_SECOND
-        and metrics.get("playback_ring_underrun_events_per_second", 0.0) <= PRESSURED_MAX_PLAYBACK_UNDERRUN_EVENTS_PER_SECOND
+        and underruns_ok
         and metrics.get("playback_dropped_frame_percent", 0.0) <= PRESSURED_MAX_DROPPED_FRAME_PERCENT
         and metrics.get("jitter_max_ms", 0.0) <= PRESSURED_MAX_JITTER_MS
     )
@@ -1639,6 +1721,8 @@ def recommendation_lines(title, summary, base_logs, command_context):
         f"    playback_underruns_per_second: {metrics.get('playback_ring_underruns_per_second', 0.0):.3f}",
         f"    playback_underrun_events: {metrics.get('playback_ring_underrun_events', 0.0):.0f}",
         f"    playback_underrun_events_per_second: {metrics.get('playback_ring_underrun_events_per_second', 0.0):.3f}",
+        f"    playback_underrun_time_percent: {metrics.get('playback_ring_underrun_time_percent', 0.0):.4f}",
+        f"    playback_underrun_burst_max_ms: {metrics.get('playback_ring_underrun_burst_max_ms', 0.0):.2f}",
         f"    min_playback_depth_ms: {metrics.get('min_playback_depth_ms', 0.0):.2f}",
         f"    jitter_max_ms: {metrics.get('jitter_max_ms', 0.0):.2f}",
     ])
@@ -1793,10 +1877,14 @@ def benchmark_row(summary):
         "playback_underruns_per_second": f"{metrics.get('playback_ring_underruns_per_second', 0.0):.5f}",
         "playback_underrun_events": f"{metrics.get('playback_ring_underrun_events', 0.0):.0f}",
         "playback_underrun_events_per_second": f"{metrics.get('playback_ring_underrun_events_per_second', 0.0):.5f}",
+        "playback_underrun_time_percent": f"{metrics.get('playback_ring_underrun_time_percent', 0.0):.5f}",
+        "playback_underrun_burst_max_ms": f"{metrics.get('playback_ring_underrun_burst_max_ms', 0.0):.3f}",
+        "playback_underrun_event_max_ms": f"{metrics.get('playback_ring_underrun_event_max_ms', 0.0):.3f}",
         "playback_overruns": f"{metrics.get('playback_ring_overruns', 0.0):.0f}",
         "playback_dropped_frames": f"{metrics.get('playback_dropped_frames', 0.0):.0f}",
         "playback_dropped_frames_per_second": f"{metrics.get('playback_dropped_frames_per_second', 0.0):.5f}",
         "playback_dropped_frame_percent": f"{metrics.get('playback_dropped_frame_percent', 0.0):.5f}",
+        "playback_drop_event_max_ms": f"{metrics.get('playback_drop_event_max_ms', 0.0):.3f}",
         "min_playback_depth_ms": f"{metrics.get('min_playback_depth_ms', 0.0):.3f}",
         "jitter_max_ms": f"{metrics.get('jitter_max_ms', 0.0):.3f}",
         "max_abs_final_drift_ppm": f"{metrics.get('max_abs_final_drift_ppm', 0.0):.3f}",
@@ -1844,6 +1932,8 @@ def write_benchmark_outputs(base_logs, summaries, command_context, run_csv_analy
             f"discarded_bursts={row['benchmark_discarded_burst_runs']} "
             f"lat_avg_ms={row['latency_avg_ms']} depth_min_ms={row['min_playback_depth_ms']} "
             f"loss_pct={row['packet_loss_percent']} underrun_eps={row['playback_underrun_events_per_second']} "
+            f"underrun_time_pct={row['playback_underrun_time_percent']} "
+            f"underrun_burst_max_ms={row['playback_underrun_burst_max_ms']} "
             f"dropped_pct={row['playback_dropped_frame_percent']} jitter_max_ms={row['jitter_max_ms']}"
         )
         lines.append(f"    reason: {row['reason'] or 'baseline'}")
@@ -1855,8 +1945,9 @@ def write_benchmark_outputs(base_logs, summaries, command_context, run_csv_analy
         try:
             combined, written, file_count = collect_matrix_csv(base_logs, side="all")
             print_flush(f"[server] combined {written} row(s) from {file_count} CSV file(s): {combined}")
+            analysis_input = write_benchmark_clean_combined_csv(base_logs, combined, summaries)
             analysis_csv, analysis_rows = analyze_matrix_csv(
-                combined,
+                analysis_input,
                 min_playback_depth_ms=STABLE_HARD_PLAYBACK_DEPTH_MIN_MS,
                 min_runs=BENCHMARK_RUNS,
                 max_loss_percent=STABLE_MAX_PACKET_LOSS_PERCENT,
@@ -1874,6 +1965,33 @@ def write_benchmark_outputs(base_logs, summaries, command_context, run_csv_analy
         else:
             print_flush("[server] lowest measured clean profile: none")
     print_flush(f"[server] wrote benchmark outputs: {benchmark_json}, {benchmark_csv}, {text_path}")
+
+
+def write_benchmark_clean_combined_csv(base_logs, combined_path, summaries):
+    discarded = set()
+    for summary in summaries:
+        candidate = summary.get("candidate", "")
+        for run in summary.get("benchmark_discarded_burst_runs", []):
+            discarded.add((candidate, str(run)))
+    if not discarded:
+        return combined_path
+    clean_path = base_logs / "benchmark_clean_combined_stats.csv"
+    with open(combined_path, "r", encoding="utf-8", newline="") as in_file:
+        reader = csv.DictReader(in_file)
+        if reader.fieldnames is None:
+            return combined_path
+        with open(clean_path, "w", encoding="utf-8", newline="") as out_file:
+            writer = csv.DictWriter(out_file, fieldnames=reader.fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for row in reader:
+                key = (row.get("matrix_test_id", ""), str(row.get("matrix_run", "")))
+                if key in discarded:
+                    continue
+                writer.writerow(row)
+    print_flush(
+        f"[server] wrote benchmark clean combined CSV excluding "
+        f"{len(discarded)} discarded burst run(s): {clean_path}")
+    return clean_path
 
 
 def run_candidate(

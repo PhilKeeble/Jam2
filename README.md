@@ -152,6 +152,8 @@ tools/logs/benchmark.json
 tools/logs/benchmark_summary.txt
 ```
 
+When burst runs are discarded, `combined_stats.csv` remains the raw record and benchmark mode also writes `benchmark_clean_combined_stats.csv` for analysis without the discarded burst rows.
+
 After each test, the client uploads `stats.csv`, `stdout.txt`, and `stderr.txt` back to the server. When the tuner finishes it writes combined results, analysis, a stable recommendation, and an aggressive low-latency recommendation:
 
 ```text
@@ -210,6 +212,8 @@ tools/logs/analysis.csv
 ```
 
 The analyzer ranks profiles by stability first, then latency. By default, any sequence loss, reordered loss, playback underrun, playback overrun, or dropped playback frame marks a profile unstable. The adaptive server invokes it with confirmation rules requiring at least three runs, at least 2.5 ms playback depth, and only tiny playback underrun rates. Depth below 5 ms is still reported as a warning in the adaptive output because it means the ring came close to empty. To apply the adaptive stable rules manually:
+
+Newer CSVs include underrun severity fields in addition to raw underrun counts: `playback_ring_underrun_time_percent`, `playback_ring_underrun_burst_max_ms`, `playback_ring_underrun_event_max_ms`, `playback_dropped_time_ms`, and playback-depth bucket percentages under 2 ms, 5 ms, and 10 ms. The analyzer uses these severity fields when present so tiny, scattered underruns are not treated the same as long audible gaps.
 
 The analyzer's stdout label is `CSV-ranked profile`. The adaptive tuner prints separate `stable recommendation` and `aggressive low-latency recommendation` lines and writes both to `tools/logs/recommendation.txt`; use those as the automation result. Each recommendation includes a full server `listen` command and a client `connect "<paste jam2://...>"` command using the detected client audio device from uploaded logs.
 

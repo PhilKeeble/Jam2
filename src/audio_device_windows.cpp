@@ -484,7 +484,7 @@ void mix_metronome_click(DuplexContext& context, std::int32_t* output)
 std::int32_t pop_one_frame(MonoRingBuffer& ring)
 {
     std::array<std::int32_t, 1> frame{};
-    (void)ring.pop(frame);
+    (void)ring.pop(frame, false);
     return frame[0];
 }
 

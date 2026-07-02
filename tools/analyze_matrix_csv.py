@@ -20,12 +20,33 @@ NUMERIC_FIELDS = [
     "reordered_lost",
     "reordered_lost_events",
     "playback_dropped_frames",
+    "playback_drop_events",
+    "playback_drop_event_max_frames",
+    "playback_drop_event_max_ms",
+    "playback_dropped_time_ms",
+    "playback_dropped_frame_percent",
     "playback_depth_min_ms",
     "playback_depth_avg_ms",
     "playback_depth_max_ms",
     "playback_ring_overruns",
     "playback_ring_underruns",
     "playback_ring_underrun_events",
+    "playback_ring_underrun_event_max_frames",
+    "playback_ring_underrun_event_max_ms",
+    "playback_ring_underrun_burst_events",
+    "playback_ring_underrun_burst_max_frames",
+    "playback_ring_underrun_burst_max_ms",
+    "playback_ring_underrun_time_ms",
+    "playback_ring_underrun_time_percent",
+    "playback_depth_under_2ms_frames",
+    "playback_depth_under_2ms_percent",
+    "playback_depth_under_5ms_frames",
+    "playback_depth_under_5ms_percent",
+    "playback_depth_under_10ms_frames",
+    "playback_depth_under_10ms_percent",
+    "playback_depth_10ms_plus_frames",
+    "playback_depth_10ms_plus_percent",
+    "playback_depth_observed_frames",
     "jitter_avg_ms",
     "jitter_max_ms",
     "rtt_avg_ms",
@@ -144,6 +165,17 @@ def aggregate_profile(test_id, final_rows, periodic_rows, thresholds):
         underruns_total,
         underrun_events_total,
         total_seconds)
+    underrun_observed_frames = sum(values["playback_depth_observed_frames"])
+    underrun_time_percent = (
+        underruns_total * 100.0 / underrun_observed_frames
+        if underrun_observed_frames > 0.0 else 0.0)
+    underrun_time_ms = sum(values["playback_ring_underrun_time_ms"])
+    if underrun_time_ms <= 0.0:
+        underrun_time_ms = sum(
+            to_float(row, "playback_ring_underruns") * 1000.0 / sample_rate_for_row(row)
+            for row in final_rows)
+    underrun_burst_max_ms = max(values["playback_ring_underrun_burst_max_ms"], default=0.0)
+    underrun_event_max_ms = max(values["playback_ring_underrun_event_max_ms"], default=0.0)
     underruns_ok = underruns_total <= thresholds["max_playback_underruns"]
     if thresholds["max_playback_underruns"] <= 0.0:
         underruns_ok = underruns_total == 0.0
@@ -152,12 +184,23 @@ def aggregate_profile(test_id, final_rows, periodic_rows, thresholds):
             underruns_per_second <= thresholds["max_playback_underruns_per_second"] and
             underrun_events_per_second <= thresholds["max_playback_underrun_events_per_second"]
         )
+    if not underruns_ok and underrun_observed_frames > 0.0:
+        underruns_ok = (
+            underrun_time_percent <= 0.05
+            and underrun_burst_max_ms <= 10.0
+        )
     dropped_frames_total = sum(values["playback_dropped_frames"])
     dropped_frames_per_second = dropped_frames_total / total_seconds if total_seconds > 0 else 0.0
     audio_frame_seconds = sum(
         sample_rate_for_row(row) * to_float(row, "elapsed_ms") / 1000.0
         for row in final_rows)
     dropped_frame_percent = dropped_frames_total * 100.0 / max(1.0, audio_frame_seconds)
+    dropped_time_ms = sum(values["playback_dropped_time_ms"])
+    if dropped_time_ms <= 0.0:
+        dropped_time_ms = sum(
+            to_float(row, "playback_dropped_frames") * 1000.0 / sample_rate_for_row(row)
+            for row in final_rows)
+    dropped_event_max_ms = max(values["playback_drop_event_max_ms"], default=0.0)
     loss_ok = sum(values["sequence_lost"]) <= thresholds["max_loss"] and sum(values["reordered_lost"]) <= thresholds["max_loss"]
     if not loss_ok and thresholds["max_loss_percent"] > 0.0:
         loss_ok = (
@@ -206,10 +249,16 @@ def aggregate_profile(test_id, final_rows, periodic_rows, thresholds):
         "playback_underrun_events_total": underrun_events_total,
         "playback_underruns_per_second": underruns_per_second,
         "playback_underrun_events_per_second": underrun_events_per_second,
+        "playback_underrun_time_ms": underrun_time_ms,
+        "playback_underrun_time_percent": underrun_time_percent,
+        "playback_underrun_burst_max_ms": underrun_burst_max_ms,
+        "playback_underrun_event_max_ms": underrun_event_max_ms,
         "playback_overruns_total": sum(values["playback_ring_overruns"]),
         "playback_dropped_frames_total": dropped_frames_total,
         "playback_dropped_frames_per_second": dropped_frames_per_second,
         "playback_dropped_frame_percent": dropped_frame_percent,
+        "playback_dropped_time_ms": dropped_time_ms,
+        "playback_drop_event_max_ms": dropped_event_max_ms,
         "estimated_one_way_ms_avg": latency_avg,
         "estimated_one_way_ms_worst": latency_worst,
         "playback_depth_avg_ms_avg": mean(values["playback_depth_avg_ms"]),
@@ -263,7 +312,10 @@ def print_summary(rows):
                 f"reordered_lost={float(row['reordered_lost_total']):.0f} "
                 f"underruns={float(row['playback_underruns_total']):.0f} "
                 f"underrun_events_per_s={float(row['playback_underrun_events_per_second']):.3f} "
+                f"underrun_time_pct={float(row['playback_underrun_time_percent']):.4f} "
+                f"underrun_burst_max={float(row['playback_underrun_burst_max_ms']):.2f}ms "
                 f"dropped_percent={float(row['playback_dropped_frame_percent']):.4f} "
+                f"drop_event_max={float(row['playback_drop_event_max_ms']):.2f}ms "
                 f"overruns={float(row['playback_overruns_total']):.0f}"
             )
 

@@ -434,6 +434,8 @@ struct AudioPacketStats {
     bool sent_bye = false;
     std::uint64_t startup_drained_packets = 0;
     std::uint64_t playback_dropped_frames = 0;
+    std::uint64_t playback_drop_events = 0;
+    std::uint64_t playback_drop_event_max_frames = 0;
     std::uint64_t playback_depth_min_frames = 0;
     std::uint64_t playback_depth_sum_frames = 0;
     std::uint64_t playback_depth_max_frames = 0;
@@ -696,6 +698,20 @@ double playback_depth_avg_ms(const AudioPacketStats& stats, const Options& optio
         0.0;
 }
 
+double frames_percent(std::uint64_t frames, std::uint64_t total_frames)
+{
+    return total_frames > 0 ?
+        static_cast<double>(frames) * 100.0 / static_cast<double>(total_frames) :
+        0.0;
+}
+
+double packet_path_frame_percent(std::uint64_t frames, std::uint64_t audio_frame_seconds)
+{
+    return audio_frame_seconds > 0 ?
+        static_cast<double>(frames) * 100.0 / static_cast<double>(audio_frame_seconds) :
+        0.0;
+}
+
 double rtt_avg_ms(const AudioPacketStats& stats)
 {
     return stats.recv_pongs > 0 ?
@@ -788,6 +804,15 @@ public:
         std::uint64_t playback_ring_overruns = 0;
         std::uint64_t playback_ring_underruns = 0;
         std::uint64_t playback_ring_underrun_events = 0;
+        std::uint64_t playback_ring_underrun_event_max_frames = 0;
+        std::uint64_t playback_ring_underrun_burst_events = 0;
+        std::uint64_t playback_ring_underrun_burst_max_frames = 0;
+        std::uint64_t playback_ring_underrun_burst_current_frames = 0;
+        std::uint64_t playback_depth_under_2ms_frames = 0;
+        std::uint64_t playback_depth_under_5ms_frames = 0;
+        std::uint64_t playback_depth_under_10ms_frames = 0;
+        std::uint64_t playback_depth_10ms_plus_frames = 0;
+        std::uint64_t playback_depth_observed_frames = 0;
         std::size_t playback_ring_readable = 0;
     };
 
@@ -819,7 +844,15 @@ public:
                 "capture_ring_readable_ms,playback_ring_overruns,playback_ring_underruns,playback_ring_underrun_events,playback_ring_readable_frames,"
                 "playback_ring_readable_ms,"
                 "pings_sent,pongs_sent,pongs_received,bye_sent,bye_received,metronome_states_sent,metronome_states_received,"
-                "final_metronome,final_bpm\n";
+                "final_metronome,final_bpm,"
+                "playback_drop_events,playback_drop_event_max_frames,playback_drop_event_max_ms,playback_dropped_time_ms,playback_dropped_frame_percent,"
+                "playback_ring_underrun_event_max_frames,playback_ring_underrun_event_max_ms,"
+                "playback_ring_underrun_burst_events,playback_ring_underrun_burst_max_frames,playback_ring_underrun_burst_max_ms,"
+                "playback_ring_underrun_time_ms,playback_ring_underrun_time_percent,"
+                "playback_depth_under_2ms_frames,playback_depth_under_2ms_percent,"
+                "playback_depth_under_5ms_frames,playback_depth_under_5ms_percent,"
+                "playback_depth_under_10ms_frames,playback_depth_under_10ms_percent,"
+                "playback_depth_10ms_plus_frames,playback_depth_10ms_plus_percent,playback_depth_observed_frames\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -848,6 +881,12 @@ public:
         const double active_sample_rate = audio.stream.sample_rate > 0.0 ?
             audio.stream.sample_rate :
             static_cast<double>(options.sample_rate);
+        const std::uint64_t elapsed_audio_frames = static_cast<std::uint64_t>(
+            active_sample_rate * seconds);
+        const double playback_dropped_percent =
+            packet_path_frame_percent(stats.playback_dropped_frames, elapsed_audio_frames);
+        const double playback_underrun_percent =
+            frames_percent(audio.playback_ring_underruns, audio.playback_depth_observed_frames);
         out_ << csv_escape(row_type) << ','
              << elapsed_ms << ','
              << csv_escape(context_.command_line) << ','
@@ -944,7 +983,28 @@ public:
              << stats.metronome_sent << ','
              << stats.metronome_received << ','
              << (stats.final_metronome_enabled ? "on" : "off") << ','
-             << stats.final_bpm << '\n';
+             << stats.final_bpm << ','
+             << stats.playback_drop_events << ','
+             << stats.playback_drop_event_max_frames << ','
+             << frames_to_ms(static_cast<std::size_t>(stats.playback_drop_event_max_frames), active_sample_rate) << ','
+             << frames_to_ms(static_cast<std::size_t>(stats.playback_dropped_frames), active_sample_rate) << ','
+             << playback_dropped_percent << ','
+             << audio.playback_ring_underrun_event_max_frames << ','
+             << frames_to_ms(static_cast<std::size_t>(audio.playback_ring_underrun_event_max_frames), active_sample_rate) << ','
+             << audio.playback_ring_underrun_burst_events << ','
+             << audio.playback_ring_underrun_burst_max_frames << ','
+             << frames_to_ms(static_cast<std::size_t>(audio.playback_ring_underrun_burst_max_frames), active_sample_rate) << ','
+             << frames_to_ms(static_cast<std::size_t>(audio.playback_ring_underruns), active_sample_rate) << ','
+             << playback_underrun_percent << ','
+             << audio.playback_depth_under_2ms_frames << ','
+             << frames_percent(audio.playback_depth_under_2ms_frames, audio.playback_depth_observed_frames) << ','
+             << audio.playback_depth_under_5ms_frames << ','
+             << frames_percent(audio.playback_depth_under_5ms_frames, audio.playback_depth_observed_frames) << ','
+             << audio.playback_depth_under_10ms_frames << ','
+             << frames_percent(audio.playback_depth_under_10ms_frames, audio.playback_depth_observed_frames) << ','
+             << audio.playback_depth_10ms_plus_frames << ','
+             << frames_percent(audio.playback_depth_10ms_plus_frames, audio.playback_depth_observed_frames) << ','
+             << audio.playback_depth_observed_frames << '\n';
         if (row_type == "final") {
             out_.flush();
         }
@@ -959,7 +1019,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(97);
+        std::vector<std::string> fields(118);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1008,6 +1068,30 @@ public:
         set(85, audio.playback_ring_underrun_events);
         set(86, audio.playback_ring_readable);
         set(87, frames_to_ms(audio.playback_ring_readable, options.sample_rate));
+        const double seconds = elapsed_ms > 0 ? static_cast<double>(elapsed_ms) / 1000.0 : 0.0;
+        const std::uint64_t elapsed_audio_frames = static_cast<std::uint64_t>(
+            static_cast<double>(options.sample_rate) * seconds);
+        set(97, stats.playback_drop_events);
+        set(98, stats.playback_drop_event_max_frames);
+        set(99, frames_to_ms(static_cast<std::size_t>(stats.playback_drop_event_max_frames), options.sample_rate));
+        set(100, frames_to_ms(static_cast<std::size_t>(stats.playback_dropped_frames), options.sample_rate));
+        set(101, packet_path_frame_percent(stats.playback_dropped_frames, elapsed_audio_frames));
+        set(102, audio.playback_ring_underrun_event_max_frames);
+        set(103, frames_to_ms(static_cast<std::size_t>(audio.playback_ring_underrun_event_max_frames), options.sample_rate));
+        set(104, audio.playback_ring_underrun_burst_events);
+        set(105, audio.playback_ring_underrun_burst_max_frames);
+        set(106, frames_to_ms(static_cast<std::size_t>(audio.playback_ring_underrun_burst_max_frames), options.sample_rate));
+        set(107, frames_to_ms(static_cast<std::size_t>(audio.playback_ring_underruns), options.sample_rate));
+        set(108, frames_percent(audio.playback_ring_underruns, audio.playback_depth_observed_frames));
+        set(109, audio.playback_depth_under_2ms_frames);
+        set(110, frames_percent(audio.playback_depth_under_2ms_frames, audio.playback_depth_observed_frames));
+        set(111, audio.playback_depth_under_5ms_frames);
+        set(112, frames_percent(audio.playback_depth_under_5ms_frames, audio.playback_depth_observed_frames));
+        set(113, audio.playback_depth_under_10ms_frames);
+        set(114, frames_percent(audio.playback_depth_under_10ms_frames, audio.playback_depth_observed_frames));
+        set(115, audio.playback_depth_10ms_plus_frames);
+        set(116, frames_percent(audio.playback_depth_10ms_plus_frames, audio.playback_depth_observed_frames));
+        set(117, audio.playback_depth_observed_frames);
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {
@@ -1049,6 +1133,15 @@ CsvStatsLog::AudioSnapshot make_audio_snapshot(
         snapshot.playback_ring_overruns = stats.overruns;
         snapshot.playback_ring_underruns = stats.underruns;
         snapshot.playback_ring_underrun_events = stats.underrun_events;
+        snapshot.playback_ring_underrun_event_max_frames = stats.underrun_event_max_frames;
+        snapshot.playback_ring_underrun_burst_events = stats.underrun_burst_events;
+        snapshot.playback_ring_underrun_burst_max_frames = stats.underrun_burst_max_frames;
+        snapshot.playback_ring_underrun_burst_current_frames = stats.underrun_burst_current_frames;
+        snapshot.playback_depth_under_2ms_frames = stats.depth_under_2ms_frames;
+        snapshot.playback_depth_under_5ms_frames = stats.depth_under_5ms_frames;
+        snapshot.playback_depth_under_10ms_frames = stats.depth_under_10ms_frames;
+        snapshot.playback_depth_10ms_plus_frames = stats.depth_10ms_plus_frames;
+        snapshot.playback_depth_observed_frames = stats.depth_observed_frames;
         snapshot.playback_ring_readable = playback_ring->available_read();
     }
     return snapshot;
@@ -1197,8 +1290,15 @@ AudioPacketStats run_audio_packet_exchange(
             if (options.playback_max_frames > 0) {
                 const std::size_t depth = playback_ring->available_read();
                 if (depth > options.playback_max_frames) {
-                    stats.playback_dropped_frames +=
+                    const std::uint64_t dropped =
                         playback_ring->drop_oldest(depth - options.playback_max_frames);
+                    if (dropped > 0) {
+                        stats.playback_dropped_frames += dropped;
+                        ++stats.playback_drop_events;
+                        if (dropped > stats.playback_drop_event_max_frames) {
+                            stats.playback_drop_event_max_frames = dropped;
+                        }
+                    }
                 }
             }
             if (collect_tuning_stats) {
@@ -1585,6 +1685,12 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "Ignored audio packets: " << stats.ignored_packets << "\n";
     if (stats.playback_depth_samples > 0) {
         std::cout << "Playback dropped frames: " << stats.playback_dropped_frames << "\n";
+        std::cout << "Playback drop events: " << stats.playback_drop_events << "\n";
+        std::cout << "Playback drop event max frames: " << stats.playback_drop_event_max_frames << "\n";
+        std::cout << "Playback drop event max ms: "
+                  << frames_to_ms(static_cast<std::size_t>(stats.playback_drop_event_max_frames), options.sample_rate) << "\n";
+        std::cout << "Playback dropped time ms: "
+                  << frames_to_ms(static_cast<std::size_t>(stats.playback_dropped_frames), options.sample_rate) << "\n";
         std::cout << "Playback depth frames min: " << stats.playback_depth_min_frames << "\n";
         std::cout << "Playback depth frames avg: "
                   << (static_cast<double>(stats.playback_depth_sum_frames) / static_cast<double>(stats.playback_depth_samples)) << "\n";
@@ -1666,6 +1772,7 @@ OptionalAudioStream start_optional_audio(const Options& options)
     audio.control->playback_ratio_ppm.store(1000000, std::memory_order_relaxed);
     audio.capture_ring = std::make_unique<jam2::audio::MonoRingBuffer>(options.capture_ring_frames);
     audio.playback_ring = std::make_unique<jam2::audio::MonoRingBuffer>(options.playback_ring_frames);
+    audio.playback_ring->set_depth_bucket_thresholds(static_cast<double>(options.sample_rate));
     audio.stream = jam2::audio::start_duplex_stream(
         *options.audio_device_id,
         static_cast<double>(options.sample_rate),
@@ -1757,6 +1864,25 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
     std::cout << "Playback ring overruns frames: " << playback_stats.overruns << "\n";
     std::cout << "Playback ring underruns frames: " << playback_stats.underruns << "\n";
     std::cout << "Playback ring underrun events: " << playback_stats.underrun_events << "\n";
+    std::cout << "Playback ring underrun event max frames: " << playback_stats.underrun_event_max_frames << "\n";
+    std::cout << "Playback ring underrun event max ms: "
+              << frames_to_ms(static_cast<std::size_t>(playback_stats.underrun_event_max_frames), stream_info.sample_rate) << "\n";
+    std::cout << "Playback ring underrun burst events: " << playback_stats.underrun_burst_events << "\n";
+    std::cout << "Playback ring underrun burst max frames: " << playback_stats.underrun_burst_max_frames << "\n";
+    std::cout << "Playback ring underrun burst max ms: "
+              << frames_to_ms(static_cast<std::size_t>(playback_stats.underrun_burst_max_frames), stream_info.sample_rate) << "\n";
+    std::cout << "Playback ring underrun time ms: "
+              << frames_to_ms(static_cast<std::size_t>(playback_stats.underruns), stream_info.sample_rate) << "\n";
+    std::cout << "Playback depth observed frames: " << playback_stats.depth_observed_frames << "\n";
+    std::cout << "Playback depth under 2ms frames: " << playback_stats.depth_under_2ms_frames << "\n";
+    std::cout << "Playback depth under 2ms percent: "
+              << frames_percent(playback_stats.depth_under_2ms_frames, playback_stats.depth_observed_frames) << "\n";
+    std::cout << "Playback depth under 5ms frames: " << playback_stats.depth_under_5ms_frames << "\n";
+    std::cout << "Playback depth under 5ms percent: "
+              << frames_percent(playback_stats.depth_under_5ms_frames, playback_stats.depth_observed_frames) << "\n";
+    std::cout << "Playback depth under 10ms frames: " << playback_stats.depth_under_10ms_frames << "\n";
+    std::cout << "Playback depth under 10ms percent: "
+              << frames_percent(playback_stats.depth_under_10ms_frames, playback_stats.depth_observed_frames) << "\n";
     std::cout << "Playback ring readable frames: " << playback_readable << "\n";
     std::cout << "Playback ring readable ms: " << frames_to_ms(playback_readable, options.sample_rate) << "\n";
     if (audio.control) {
