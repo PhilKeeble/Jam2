@@ -98,7 +98,7 @@ struct CallbackTimingStats {
     std::uint64_t interval_sum_us = 0;
     std::uint64_t interval_max_us = 0;
     std::uint64_t interval_samples = 0;
-    std::uint64_t gap_over_expected_count = 0;
+    std::uint64_t gap_over_1_1x_count = 0;
     std::uint64_t gap_over_1_5x_count = 0;
     std::uint64_t gap_over_2x_count = 0;
 };

@@ -248,7 +248,7 @@ Stats to add for comparison:
 - UDP send schedule lateness min/avg/max.
 - Receive loop gap min/avg/max.
 - Audio callback interval min/avg/max.
-- Audio callback gaps over expected callback interval, `1.5x`, and `2x`.
+- Audio callback gaps over `1.1x`, `1.5x`, and `2x` expected callback interval.
 - Largest observed local scheduling stall in milliseconds.
 
 Benchmark goals:

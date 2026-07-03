@@ -1486,7 +1486,7 @@ public:
                 "receive_loop_gap_min_ms,receive_loop_gap_avg_ms,receive_loop_gap_max_ms,receive_loop_gap_samples,"
                 "receive_burst_packets_max,receive_packets_per_loop_max,"
                 "audio_callback_interval_min_ms,audio_callback_interval_avg_ms,audio_callback_interval_max_ms,audio_callback_interval_samples,"
-                "audio_callback_gap_over_expected_count,audio_callback_gap_over_1_5x_count,audio_callback_gap_over_2x_count,"
+                "audio_callback_gap_over_1_1x_count,audio_callback_gap_over_1_5x_count,audio_callback_gap_over_2x_count,"
                 "adaptive_playback_cushion,adaptive_playback_target_frames,adaptive_playback_target_ms,"
                 "adaptive_playback_min_frames,adaptive_playback_max_frames,adaptive_playback_raise_events,adaptive_playback_release_events,"
                 "adaptive_playback_burst_events,adaptive_playback_padding_frames,adaptive_playback_padding_ms,"
@@ -1725,7 +1725,7 @@ public:
              << avg_us_to_ms(audio.callback_timing.interval_sum_us, audio.callback_timing.interval_samples) << ','
              << (audio.callback_timing.interval_samples > 0 ? static_cast<double>(audio.callback_timing.interval_max_us) / 1000.0 : 0.0) << ','
              << audio.callback_timing.interval_samples << ','
-             << audio.callback_timing.gap_over_expected_count << ','
+             << audio.callback_timing.gap_over_1_1x_count << ','
              << audio.callback_timing.gap_over_1_5x_count << ','
              << audio.callback_timing.gap_over_2x_count << ','
              << (stats.adaptive_playback_cushion_enabled ? "on" : "off") << ','
@@ -1906,7 +1906,7 @@ public:
         set(189, avg_us_to_ms(audio.callback_timing.interval_sum_us, audio.callback_timing.interval_samples));
         set(190, audio.callback_timing.interval_samples > 0 ? static_cast<double>(audio.callback_timing.interval_max_us) / 1000.0 : 0.0);
         set(191, audio.callback_timing.interval_samples);
-        set(192, audio.callback_timing.gap_over_expected_count);
+        set(192, audio.callback_timing.gap_over_1_1x_count);
         set(193, audio.callback_timing.gap_over_1_5x_count);
         set(194, audio.callback_timing.gap_over_2x_count);
         fields[195] = stats.adaptive_playback_cushion_enabled ? "on" : "off";
@@ -3370,7 +3370,7 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
         std::cout << "Audio callback interval ms max: "
                   << static_cast<double>(callback_stats.interval_max_us) / 1000.0 << "\n";
     }
-    std::cout << "Audio callback gaps over expected: " << callback_stats.gap_over_expected_count << "\n";
+    std::cout << "Audio callback gaps over 1.1x: " << callback_stats.gap_over_1_1x_count << "\n";
     std::cout << "Audio callback gaps over 1.5x: " << callback_stats.gap_over_1_5x_count << "\n";
     std::cout << "Audio callback gaps over 2x: " << callback_stats.gap_over_2x_count << "\n";
     if (options.audio_device_id) {

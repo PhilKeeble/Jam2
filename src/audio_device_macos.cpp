@@ -691,7 +691,7 @@ struct CoreAudioDuplexContext {
     std::atomic<std::uint64_t> callback_interval_sum_us{0};
     std::atomic<std::uint64_t> callback_interval_max_us{0};
     std::atomic<std::uint64_t> callback_interval_samples{0};
-    std::atomic<std::uint64_t> callback_gap_over_expected_count{0};
+    std::atomic<std::uint64_t> callback_gap_over_1_1x_count{0};
     std::atomic<std::uint64_t> callback_gap_over_1_5x_count{0};
     std::atomic<std::uint64_t> callback_gap_over_2x_count{0};
 };
@@ -730,8 +730,8 @@ void observe_callback_interval(CoreAudioDuplexContext& context)
     atomic_update_max(context.callback_interval_max_us, interval);
     context.callback_interval_samples.fetch_add(1, std::memory_order_relaxed);
     const double expected = static_cast<double>(context.playback_scratch.size()) * 1000000.0 / context.sample_rate;
-    if (interval > static_cast<std::uint64_t>(expected)) {
-        context.callback_gap_over_expected_count.fetch_add(1, std::memory_order_relaxed);
+    if (interval > static_cast<std::uint64_t>(expected * 1.1)) {
+        context.callback_gap_over_1_1x_count.fetch_add(1, std::memory_order_relaxed);
     }
     if (interval > static_cast<std::uint64_t>(expected * 1.5)) {
         context.callback_gap_over_1_5x_count.fetch_add(1, std::memory_order_relaxed);
@@ -1000,7 +1000,7 @@ public:
             context_.callback_interval_sum_us.load(std::memory_order_relaxed),
             context_.callback_interval_max_us.load(std::memory_order_relaxed),
             context_.callback_interval_samples.load(std::memory_order_relaxed),
-            context_.callback_gap_over_expected_count.load(std::memory_order_relaxed),
+            context_.callback_gap_over_1_1x_count.load(std::memory_order_relaxed),
             context_.callback_gap_over_1_5x_count.load(std::memory_order_relaxed),
             context_.callback_gap_over_2x_count.load(std::memory_order_relaxed),
         };
