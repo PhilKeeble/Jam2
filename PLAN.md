@@ -2,14 +2,6 @@
 
 ## Things To Test
 
-- Validate real two-peer live audio on separate machines over LAN, one-Wi-Fi, and both-Wi-Fi setups.
-- Run longer sessions with real audio hardware to confirm drift correction does not slowly underrun, overrun, or sound unstable.
-- Compare drift correction on/off and different `--drift-deadband-ppm` values using CSV stats.
-- Validate the current ASIO path with a real vendor ASIO driver, not only ASIO4ALL.
-- Validate CoreAudio behavior on macOS with real full-duplex hardware.
-- Test stable streaming at practical frame sizes, especially `64`, `128`, and `256`.
-- Test runtime controls in real sessions: `stats`, `status`, `metro on`, `metro off`, `metro mode <mode>`, `metro level <number>`, `remote level <number>`, `bpm <number>`, `quit`, and Ctrl+C.
-- Confirm manual port-forward mode and STUN-assisted mode both work across real networks.
 - Confirm wrong session/key packets and packets from unexpected endpoints are ignored and counted.
 - Use benchmark/adaptive logs to compare profiles by packet loss, jitter, playback depth, underruns, overruns, drift ppm, resampler ratio, and estimated one-way latency.
 - Validate metronome behavior in real sessions after shared-timeline refinement: startup alignment, BPM changes, on/off propagation, and first-beat accenting.
@@ -26,6 +18,10 @@
 - Preserve the current product scope: two peers, direct UDP, no rooms, no relay/TURN audio path, no accounts, and no GUI layer unless explicitly chosen later.
 
 ## Potential Future Plans
+
+### Python tests
+
+Add some functionality onto the benchmark testing that also tests the different command line args and validates things are working as expected in an automated fashion 
 
 ### Local Shared Track Mix Source
 
