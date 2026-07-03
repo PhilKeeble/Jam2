@@ -424,6 +424,46 @@ Conservative first approach:
 - Reject mismatched channel count initially with a clear error.
 - Add automatic mono/stereo conversion only later if real testing shows it is worth the complexity.
 
+### Future: Small Full-Mesh Group Mode
+
+Consider an experimental mode for 3 people first, with 4 people only after the 3-peer path is stable. The goal is to preserve the current lowest-latency direct UDP design by using a small full mesh instead of a relay, TURN audio path, room server, or central mixer.
+
+Topology:
+
+- Each participant sends captured mono audio directly to every other participant.
+- Each participant receives one independent remote stream per peer.
+- Each client mixes remote streams locally into the mono playback output.
+- The listener may coordinate the initial peer list, but it must not become an audio relay or hosted mixer.
+
+Latency rules:
+
+- Do not wait for all peers' packets to align before playback.
+- Keep each remote peer on independent reorder buffering, playback depth, drift correction, underrun handling, and stats.
+- If one peer is late or unstable, that peer should contribute silence, drops, or drift correction independently while stable peers continue at their lowest usable latency.
+- Mixing remote mono streams should happen in the audio callback from already-prefilled per-peer playback rings, using preallocated scratch buffers and no allocation, logging, locks, throws, or blocking operations.
+
+Expected tradeoffs:
+
+- Upload and receive bandwidth scale with `N - 1`.
+- CPU cost for summing 2 or 3 remote mono streams should be negligible compared with network jitter, audio device latency, packet scheduling, and drift correction.
+- Four-peer mode increases packet rate and uplink pressure enough that Wi-Fi or weak uplinks may require larger playback prefill values.
+- The worst individual peer link can affect what that peer hears and contributes, but should not force additional delay onto other stable peer streams.
+
+Possible CLI shape:
+
+```text
+jam2 listen --max-peers 3
+jam2 connect "<jam2-url>"
+```
+
+Rules:
+
+- Keep mono PCM as the first network format.
+- Require all peers to match sample rate and frame size.
+- Prefer 3-peer LAN validation before internet testing or 4-peer experiments.
+- Expose per-peer hard stats: endpoint, packet loss, jitter, RTT, bitrate, playback depth, underruns, overruns, drift ppm, and resampler ratio.
+- Do not add rooms, accounts, GUI, subjective playability scores, or hidden recommendations.
+
 ### Future: Tuning Profiles
 
 Add named profiles only after enough real two-machine test data exists to choose useful numeric values.
@@ -508,6 +548,34 @@ jam2 delete-aggregate --name Jam2Aggregate
 ```
 
 Only add these after the direct full-duplex path is stable on real two-machine tests.
+
+### Future: Linux Audio Backend
+
+Consider Linux support after the Windows ASIO and macOS CoreAudio paths are stable. Linux should be treated as another host-native low-latency backend, not as a Docker or container target.
+
+Backend approach:
+
+- Start with ALSA direct hardware access for the smallest dependency footprint and most inspectable timing behavior.
+- Use ALSA `snd_pcm` capture/playback devices in full-duplex mode where possible, configured for the requested sample rate, period size, buffer size, and signed 32-bit PCM if the device supports it.
+- Run a dedicated non-real-time audio service thread around `poll`/`snd_pcm_wait` or mmap-style ALSA access, then hand audio to the existing capture/playback rings.
+- Keep the real-time-sensitive ALSA loop free of allocation, logging, exceptions, locks on the hot path, and blocking work unrelated to device I/O.
+- Add JACK or PipeWire support only if direct ALSA testing shows a concrete need. JACK can be useful on pro-audio Linux setups because it provides a graph callback model and central device clocking, but it adds runtime setup expectations. PipeWire is common on modern desktops, but its native API and session behavior are broader than Jam2 needs for a first Linux slice.
+
+Possible CLI shape:
+
+```text
+jam2 list-devices
+jam2 test-device <id> --sample-rate 48000 --audio-backend alsa
+jam2 listen --audio-backend alsa --audio-device hw:2,0 --sample-rate 48000 --audio-buffer-size 128
+```
+
+Rules:
+
+- Keep Linux builds host-native through CMake.
+- Do not make PulseAudio the low-latency backend.
+- Expose actual ALSA period size, buffer size, sample format, channel count, input/output latency frames, underruns, overruns, and xrun recoveries in stats.
+- Prefer one full-duplex hardware device. If separate input/output devices are used later, expose the clocking and drift consequences clearly.
+- Real validation must happen on Linux with the actual audio driver stack and hardware; build success alone is not meaningful latency validation.
 
 ## Testing Plan
 
