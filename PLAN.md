@@ -17,6 +17,10 @@
 ## Things To Refine
 
 - Tighten metronome shared-timeline alignment. Current behavior exchanges metronome state and generates local clicks, but does not yet provide a true shared epoch/phase model.
+- Add runtime controls for metronome level so users can adjust click volume during a jam, not only through startup `--metronome-level`.
+- Add runtime remote playback level so users can raise or lower what they hear from the other peer during a jam without changing the outgoing audio stream.
+- Add engine support for GUI orchestration: allow `jam2 listen` to accept an explicit session id/key while preserving current headless behavior where omitted session args generate a new session.
+- Add machine-readable startup/status output suitable for a controller process, so `jam2-gui` does not need to scrape human CLI text.
 - Tune the drift correction loop against real hardware clocks, including smoothing, deadband, max correction, and audible behavior during long runs.
 - Improve receive/playout behavior beyond the current small reorder buffer and FIFO playback ring. Future playout should become sample-time aware so packet drops or long bursts do not permanently shift remote audio timing.
 - Keep OS-level packet scheduling and send pacing under review if real-session stats show avoidable burstiness.
@@ -25,6 +29,108 @@
 - Preserve the current product scope: two peers, direct UDP, no rooms, no relay/TURN audio path, no accounts, and no GUI layer unless explicitly chosen later.
 
 ## Potential Future Plans
+
+### Runtime Mix Controls
+
+Add runtime commands and audio-control state for levels that need to change during a live jam.
+
+Possible CLI/runtime shape:
+
+```text
+--metronome-level <0..1>
+--remote-level <0..1>
+
+metro level <0..1>
+metro level +0.05
+metro level -0.05
+remote level <0..1>
+remote level +0.05
+remote level -0.05
+```
+
+Rules:
+
+- Metronome level should remain atomic and callback-safe, matching the existing metronome on/off/BPM control style.
+- Remote playback level should affect only local monitoring of the peer's audio, not the outgoing audio sent to the peer.
+- Apply remote playback gain in the audio callback after remote playback is popped/resampled and before metronome mixing.
+- Report requested and final metronome/remote levels in startup output, final output, and CSV stats.
+- Keep local remote-playback level independent per user; do not synchronize it over the network by default.
+
+### Local Shared Track Mix Source
+
+Add an engine-side local playback source that `jam2-gui` can control for shared backing tracks.
+
+Possible runtime command shape:
+
+```text
+track load <path-or-cache-id>
+track play <start-frame>
+track stop
+track level <0..1>
+track level +0.05
+track level -0.05
+```
+
+Rules:
+
+- The track source is local-only by default and should not be sent over the live UDP audio stream.
+- Mix the track into local output through the same ASIO/CoreAudio device as remote peer audio and metronome.
+- Keep track level independent from remote peer playback level and metronome level.
+- Decode/file I/O must stay outside the real-time callback; prebuffer decoded audio or use a callback-safe handoff.
+- Report track loaded/playing state, track level, underruns, decode errors, and current playback frame in machine-readable status and CSV where useful.
+- Let `jam2-gui` handle TCP file transfer, file readiness, shared countdowns, and synchronized playback commands.
+
+### Jam Output Recording
+
+Add optional recording inside `jam2` for the local jam output mix. This is separate from `jam2-capture`, which records external/local sources for import.
+
+Possible runtime command shape:
+
+```text
+record output start <path.wav>
+record output stop
+record output status
+record stems start <folder>
+record stems stop
+record stems status
+```
+
+Rules:
+
+- Record the local output mix before it reaches ASIO/CoreAudio output.
+- Include remote peer audio, metronome, and local shared track playback when those sources are active.
+- Do not rely on OS loopback capture for jam output, especially on Windows ASIO where system loopback may not see the signal.
+- Keep file I/O out of the real-time callback by using a callback-safe handoff to a writer thread.
+- WAV should be the first supported output format.
+- Support optional stem recording so users can import the jam into a DAW and remove or rebalance parts later.
+- First useful stem set: `mix.wav`, `my-input.wav`, `their-input.wav`, `inputs-mix.wav`, `metronome.wav`, and `shared-track.wav` when active.
+- `my-input.wav` should record the local captured input before it is sent to the peer.
+- `their-input.wav` should record the decoded remote peer audio as heard locally after receive/playout processing.
+- `inputs-mix.wav` should record local input plus remote peer audio without metronome or shared backing track.
+- `mix.wav` should record the full local monitoring mix, including inputs, metronome, and shared track when active.
+- Stems must stay sample-aligned so they line up correctly in a DAW.
+- Missing/inactive stems should be omitted or written as silence according to an explicit option.
+- Report recording state, output path, written frames, dropped writer frames, and file errors in machine-readable status/final stats.
+
+### GUI-Oriented Engine Hooks
+
+Add small engine hooks that let a separate GUI process control `jam2` without merging GUI/control-plane behavior into the audio engine.
+
+Possible CLI shape:
+
+```text
+--session-id <hex-or-u64>
+--session-key <hex-16-byte-key>
+--machine-readable-startup on|off
+```
+
+Rules:
+
+- If `--session-id` and `--session-key` are provided to `jam2 listen`, use them for the printed/generated `jam2://` URL and UDP authentication.
+- If either session argument is omitted, preserve current headless behavior and generate a fresh session id/key inside `jam2 listen`.
+- Machine-readable startup output should expose connection URL, local/public endpoint, selected device, active sample rate, active buffer size, selected channels, and any startup error in a stable parseable shape.
+- Runtime stdin commands remain the first control interface for `jam2-gui`: metronome on/off/BPM/level, remote playback level, stats, and quit.
+- Do not add TCP, shared beat documents, GUI state, or lead-cue handling to the `jam2` audio engine.
 
 ### Metronome Modes
 
@@ -48,6 +154,33 @@ Design constraints for metronome modes:
 
 - Do not drive metronome phase from packet arrival timing. Click generation should stay local and stable unless a selected mode explicitly changes the playout timeline.
 - Stats should expose metronome mode, grid source, epoch sample time, local/remote beat index, playout delay frames/ms, adaptive added latency, metronome phase error frames/ms, missing audio frames inserted, late audio frames dropped, and alignment-valid state.
+
+### Custom Metronome And Rhythm Training
+
+Add future metronome controls that go beyond a fixed quarter-note click.
+
+Possible CLI/runtime shape:
+
+```text
+--time-signature 4/4
+--metronome-pattern <pattern>
+--metronome-subdivision quarter|eighth|sixteenth|triplet
+
+metro time 7/8
+metro pattern <pattern>
+metro subdivision sixteenth
+```
+
+Rules:
+
+- Support time signatures such as `4/4`, `3/4`, `6/8`, `7/8`, and other explicit numerator/denominator values.
+- Support configurable accent patterns, including first-beat accent, offbeat accents, clave-like patterns, and user-defined beat/subdivision accents.
+- Support different click sounds or levels for strong accent, weak accent, and subdivision clicks.
+- Keep patterns explicit and numeric/textual rather than inferred.
+- Expose active time signature, pattern, subdivision, beat index, bar index, and accent index in stats.
+- Keep click generation callback-safe: no allocation, logging, file I/O, locks, or blocking in the audio callback.
+- Maybe explore whether `jam2-gui` Beat View/drum-grid patterns should be reusable as metronome accent/rhythm-training patterns. Do not assume this is required until real use shows it is useful.
+- Preserve simple default behavior: 4/4 quarter-note click with first-beat accent.
 
 ### Sample-Time-Aware Playout
 
