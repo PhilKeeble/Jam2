@@ -50,7 +50,6 @@ These rules apply to all implementation work in this repository.
 - Do not use Docker as the normal build/test path for this project.
 - Real audio backend testing must happen on the relevant host OS with real audio drivers and hardware.
 - For this workspace, the local ASIO SDK fallback path is `C:\Tools\ASIO-SDK_2.3.4\ASIOSDK`; prefer `ASIO_SDK_DIR` if it is set, otherwise use this path when wiring CMake.
-- ASIO4ALL is installed on this Windows host and may be used for early ASIO enumeration and rough streaming tests. Prefer a device vendor's ASIO driver for meaningful latency/stability validation.
 
 ## Debugging and Tuning Rules
 
