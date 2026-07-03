@@ -4,6 +4,7 @@
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -204,12 +205,18 @@ std::string one_based_channel_text(int channel)
 
 std::string selected_channel_range_text(const ChannelSelection& channels, bool input)
 {
-    if (input) {
-        return one_based_channel_text(channels.input_left) +
-            (channels.input_right >= 0 ? "," + one_based_channel_text(channels.input_right) : "");
+    const auto& selected = input ? channels.input : channels.output;
+    if (selected.empty()) {
+        return "off";
     }
-    return one_based_channel_text(channels.output_left) +
-        (channels.output_right >= 0 ? "," + one_based_channel_text(channels.output_right) : "");
+    std::ostringstream out;
+    for (std::size_t i = 0; i < selected.size(); ++i) {
+        if (i > 0) {
+            out << ",";
+        }
+        out << one_based_channel_text(selected[i]);
+    }
+    return out.str();
 }
 
 std::string channel_range_error(
@@ -252,10 +259,8 @@ struct RingContext {
 RingContext* g_ring_context = nullptr;
 
 struct DuplexContext {
-    ASIOBufferInfo* input_left = nullptr;
-    ASIOBufferInfo* input_right = nullptr;
-    ASIOBufferInfo* output_left = nullptr;
-    ASIOBufferInfo* output_right = nullptr;
+    std::vector<ASIOBufferInfo*> inputs;
+    std::vector<ASIOBufferInfo*> outputs;
     long buffer_size = 0;
     InputChannels input_channels = InputChannels::Mono;
     MonoRingBuffer* capture = nullptr;
@@ -278,9 +283,62 @@ struct DuplexContext {
     double resample_phase = 0.0;
     std::atomic<long> callbacks{0};
     std::atomic<bool> playback_prefilled{false};
+    std::atomic<std::uint64_t> last_callback_us{0};
+    std::atomic<std::uint64_t> callback_interval_min_us{0};
+    std::atomic<std::uint64_t> callback_interval_sum_us{0};
+    std::atomic<std::uint64_t> callback_interval_max_us{0};
+    std::atomic<std::uint64_t> callback_interval_samples{0};
+    std::atomic<std::uint64_t> callback_gap_over_expected_count{0};
+    std::atomic<std::uint64_t> callback_gap_over_1_5x_count{0};
+    std::atomic<std::uint64_t> callback_gap_over_2x_count{0};
 };
 
 DuplexContext* g_duplex_context = nullptr;
+
+std::uint64_t callback_now_us()
+{
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
+}
+
+void atomic_update_max(std::atomic<std::uint64_t>& target, std::uint64_t value)
+{
+    std::uint64_t current = target.load(std::memory_order_relaxed);
+    while (value > current && !target.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
+    }
+}
+
+void atomic_update_min(std::atomic<std::uint64_t>& target, std::uint64_t value)
+{
+    std::uint64_t current = target.load(std::memory_order_relaxed);
+    while ((current == 0 || value < current) &&
+           !target.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
+    }
+}
+
+void observe_callback_interval(DuplexContext& context)
+{
+    const std::uint64_t now = callback_now_us();
+    const std::uint64_t previous = context.last_callback_us.exchange(now, std::memory_order_relaxed);
+    if (previous == 0 || now <= previous || context.sample_rate <= 0.0 || context.buffer_size <= 0) {
+        return;
+    }
+    const std::uint64_t interval = now - previous;
+    atomic_update_min(context.callback_interval_min_us, interval);
+    context.callback_interval_sum_us.fetch_add(interval, std::memory_order_relaxed);
+    atomic_update_max(context.callback_interval_max_us, interval);
+    context.callback_interval_samples.fetch_add(1, std::memory_order_relaxed);
+    const double expected = static_cast<double>(context.buffer_size) * 1000000.0 / context.sample_rate;
+    if (interval > static_cast<std::uint64_t>(expected)) {
+        context.callback_gap_over_expected_count.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (interval > static_cast<std::uint64_t>(expected * 1.5)) {
+        context.callback_gap_over_1_5x_count.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (interval > static_cast<std::uint64_t>(expected * 2.0)) {
+        context.callback_gap_over_2x_count.fetch_add(1, std::memory_order_relaxed);
+    }
+}
 
 int read_signed24_lsb(const std::uint8_t* bytes)
 {
@@ -445,6 +503,10 @@ void mix_metronome_click(DuplexContext& context, std::int32_t* output)
         context.click_total = 0;
         return;
     }
+    if (context.control->metronome_mode.load(std::memory_order_relaxed) == 1 &&
+        !context.control->leader_audio_local_click.load(std::memory_order_relaxed)) {
+        return;
+    }
 
     const int bpm = context.control->metronome_bpm.load(std::memory_order_relaxed);
     if (bpm <= 0) {
@@ -454,16 +516,22 @@ void mix_metronome_click(DuplexContext& context, std::int32_t* output)
     const double level = static_cast<double>(std::clamp(level_ppm, 0, 1000000)) / 1000000.0;
     const std::uint64_t beat_interval =
         static_cast<std::uint64_t>((60.0 * context.sample_rate) / static_cast<double>(bpm));
+    const bool epoch_valid = context.control->metronome_epoch_valid.load(std::memory_order_relaxed);
+    const std::uint64_t epoch = context.control->metronome_epoch_sample_time.load(std::memory_order_relaxed);
 
     for (long i = 0; i < context.buffer_size; ++i) {
-        if (beat_interval > 0 && (context.metronome_sample_counter % beat_interval) == 0) {
-            const bool accent = (context.metronome_beat_index % 4ULL) == 0ULL;
+        const bool before_epoch = epoch_valid && context.metronome_sample_counter < epoch;
+        const std::uint64_t position =
+            before_epoch ? 0ULL : (epoch_valid ? context.metronome_sample_counter - epoch : context.metronome_sample_counter);
+        if (!before_epoch && beat_interval > 0 && (position % beat_interval) == 0) {
+            const std::uint64_t beat_index = position / beat_interval;
+            const bool accent = (beat_index % 4ULL) == 0ULL;
             const double frequency = accent ? 1800.0 : 1200.0;
             context.click_total = static_cast<int>(context.sample_rate * (accent ? 0.012 : 0.008));
             context.click_remaining = context.click_total;
             context.click_phase = 0.0;
             context.click_phase_step = 2.0 * 3.14159265358979323846 * frequency / context.sample_rate;
-            ++context.metronome_beat_index;
+            context.metronome_beat_index = beat_index + 1;
         }
 
         if (context.click_remaining > 0 && context.click_total > 0) {
@@ -530,39 +598,62 @@ void pop_resampled_playback(DuplexContext& context, std::span<std::int32_t> outp
     }
 }
 
+void apply_remote_level(DuplexContext& context, std::span<std::int32_t> output)
+{
+    if (context.control == nullptr) {
+        return;
+    }
+    const int level_ppm = context.control->remote_level_ppm.load(std::memory_order_relaxed);
+    if (level_ppm == 1000000) {
+        return;
+    }
+    const double level = static_cast<double>(std::clamp(level_ppm, 0, 1000000)) / 1000000.0;
+    for (std::int32_t& sample : output) {
+        const double scaled = static_cast<double>(sample) * level;
+        sample = static_cast<std::int32_t>(std::clamp(scaled, -2147483648.0, 2147483647.0));
+    }
+}
+
 void duplex_buffer_switch(long double_buffer_index, ASIOBool)
 {
     DuplexContext* context = g_duplex_context;
     if (context == nullptr || context->capture == nullptr || context->playback == nullptr) {
         return;
     }
+    observe_callback_interval(*context);
 
-    if (context->input_left != nullptr && context->input_left->buffers[double_buffer_index] != nullptr) {
-        const auto* left = static_cast<const std::int32_t*>(context->input_left->buffers[double_buffer_index]);
-        if (context->input_channels == InputChannels::Stereo &&
-            context->input_right != nullptr &&
-            context->input_right->buffers[double_buffer_index] != nullptr &&
-            context->capture_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
-            const auto* right = static_cast<const std::int32_t*>(context->input_right->buffers[double_buffer_index]);
+    if (!context->inputs.empty() &&
+        context->inputs[0] != nullptr &&
+        context->inputs[0]->buffers[double_buffer_index] != nullptr &&
+        context->capture_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
+        if (context->inputs.size() == 1) {
+            const auto* input = static_cast<const std::int32_t*>(context->inputs[0]->buffers[double_buffer_index]);
+            context->capture->push(std::span<const std::int32_t>(input, static_cast<std::size_t>(context->buffer_size)));
+        } else {
             for (long i = 0; i < context->buffer_size; ++i) {
+                std::int64_t sum = 0;
+                int mixed_channels = 0;
+                for (ASIOBufferInfo* input_info : context->inputs) {
+                    if (input_info == nullptr || input_info->buffers[double_buffer_index] == nullptr) {
+                        continue;
+                    }
+                    const auto* input = static_cast<const std::int32_t*>(input_info->buffers[double_buffer_index]);
+                    sum += input[i];
+                    ++mixed_channels;
+                }
                 context->capture_scratch[static_cast<std::size_t>(i)] =
-                    static_cast<std::int32_t>((static_cast<std::int64_t>(left[i]) + static_cast<std::int64_t>(right[i])) / 2);
+                    mixed_channels > 0 ? static_cast<std::int32_t>(sum / mixed_channels) : 0;
             }
             context->capture->push(std::span<const std::int32_t>(
                 context->capture_scratch.data(),
                 static_cast<std::size_t>(context->buffer_size)));
-        } else {
-            context->capture->push(std::span<const std::int32_t>(left, static_cast<std::size_t>(context->buffer_size)));
         }
     }
 
-    if (context->output_left != nullptr &&
-        context->output_left->buffers[double_buffer_index] != nullptr &&
+    if (!context->outputs.empty() &&
+        context->outputs[0] != nullptr &&
+        context->outputs[0]->buffers[double_buffer_index] != nullptr &&
         context->playback_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
-        auto* left = static_cast<std::int32_t*>(context->output_left->buffers[double_buffer_index]);
-        auto* right = context->output_right != nullptr && context->output_right->buffers[double_buffer_index] != nullptr ?
-            static_cast<std::int32_t*>(context->output_right->buffers[double_buffer_index]) :
-            nullptr;
         auto* mono = context->playback_scratch.data();
         if (!context->playback_prefilled.load(std::memory_order_relaxed)) {
             if (context->playback->available_read() >= context->playback_prefill_frames) {
@@ -572,13 +663,18 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
             }
         }
         if (context->playback_prefilled.load(std::memory_order_relaxed)) {
-            pop_resampled_playback(*context, std::span<std::int32_t>(mono, static_cast<std::size_t>(context->buffer_size)));
+            auto playback = std::span<std::int32_t>(mono, static_cast<std::size_t>(context->buffer_size));
+            pop_resampled_playback(*context, playback);
+            apply_remote_level(*context, playback);
         }
         mix_metronome_click(*context, mono);
         for (long i = 0; i < context->buffer_size; ++i) {
-            left[i] = mono[i];
-            if (right != nullptr) {
-                right[i] = mono[i];
+            for (ASIOBufferInfo* output_info : context->outputs) {
+                if (output_info == nullptr || output_info->buffers[double_buffer_index] == nullptr) {
+                    continue;
+                }
+                auto* output = static_cast<std::int32_t*>(output_info->buffers[double_buffer_index]);
+                output[i] = mono[i];
             }
         }
     }
@@ -645,11 +741,15 @@ public:
           input_channels_(input_channels),
           channels_(channels)
     {
-        const int input_count = input_channels == InputChannels::Stereo ? 2 : 1;
-        context_.input_left = &buffers_[0];
-        context_.input_right = input_count > 1 ? &buffers_[1] : nullptr;
-        context_.output_left = &buffers_[input_count];
-        context_.output_right = output_channel_count > 1 ? &buffers_[input_count + 1] : nullptr;
+        const std::size_t input_count = channels_.input.size();
+        context_.inputs.reserve(input_count);
+        for (std::size_t index = 0; index < input_count; ++index) {
+            context_.inputs.push_back(&buffers_[index]);
+        }
+        context_.outputs.reserve(static_cast<std::size_t>(output_channel_count));
+        for (std::size_t index = 0; index < static_cast<std::size_t>(output_channel_count); ++index) {
+            context_.outputs.push_back(&buffers_[input_count + index]);
+        }
         context_.buffer_size = buffer_size;
         context_.input_channels = input_channels;
         context_.capture = &capture_ring;
@@ -713,6 +813,19 @@ public:
         result.channels = channels_;
         result.sample_format = asio_sample_type_name(ASIOSTInt32LSB);
         return result;
+    }
+
+    CallbackTimingStats callback_timing_stats() const override
+    {
+        return CallbackTimingStats{
+            context_.callback_interval_min_us.load(std::memory_order_relaxed),
+            context_.callback_interval_sum_us.load(std::memory_order_relaxed),
+            context_.callback_interval_max_us.load(std::memory_order_relaxed),
+            context_.callback_interval_samples.load(std::memory_order_relaxed),
+            context_.callback_gap_over_expected_count.load(std::memory_order_relaxed),
+            context_.callback_gap_over_1_5x_count.load(std::memory_order_relaxed),
+            context_.callback_gap_over_2x_count.load(std::memory_order_relaxed),
+        };
     }
 
 private:
@@ -1231,15 +1344,20 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     if (input_channels <= 0 || output_channels <= 0) {
         throw std::runtime_error("ASIO duplex stream requires at least one input and one output channel");
     }
-    const int selected_input_channels = requested_input_channels == InputChannels::Stereo ? 2 : 1;
-    const int selected_output_channels = channels.output_right >= 0 ? 2 : 1;
-    if (channels.input_left < 0 || channels.input_left >= input_channels ||
-        (selected_input_channels > 1 && (channels.input_right < 0 || channels.input_right >= input_channels))) {
-        throw std::runtime_error(channel_range_error("ASIO", "input", channels, input_channels, true));
+    const int selected_input_channels = static_cast<int>(channels.input.size());
+    const int selected_output_channels = static_cast<int>(channels.output.size());
+    if (selected_input_channels <= 0 || selected_output_channels <= 0) {
+        throw std::runtime_error("ASIO duplex stream requires at least one selected input and output channel");
     }
-    if (channels.output_left < 0 || channels.output_left >= output_channels ||
-        (selected_output_channels > 1 && (channels.output_right < 0 || channels.output_right >= output_channels))) {
-        throw std::runtime_error(channel_range_error("ASIO", "output", channels, output_channels, false));
+    for (int channel : channels.input) {
+        if (channel < 0 || channel >= input_channels) {
+            throw std::runtime_error(channel_range_error("ASIO", "input", channels, input_channels, true));
+        }
+    }
+    for (int channel : channels.output) {
+        if (channel < 0 || channel >= output_channels) {
+            throw std::runtime_error(channel_range_error("ASIO", "output", channels, output_channels, false));
+        }
     }
 
     long min_buffer = 0;
@@ -1270,7 +1388,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
 
     for (int index = 0; index < selected_input_channels; ++index) {
         ASIOChannelInfo input_info{};
-        input_info.channel = index == 0 ? channels.input_left : channels.input_right;
+        input_info.channel = channels.input[static_cast<std::size_t>(index)];
         input_info.isInput = ASIOTrue;
         require_asio_ok(driver.get()->getChannelInfo(&input_info), "ASIO getChannelInfo input");
         if (input_info.type != ASIOSTInt32LSB) {
@@ -1279,7 +1397,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     }
     for (int index = 0; index < selected_output_channels; ++index) {
         ASIOChannelInfo output_info{};
-        output_info.channel = index == 0 ? channels.output_left : channels.output_right;
+        output_info.channel = channels.output[static_cast<std::size_t>(index)];
         output_info.isInput = ASIOFalse;
         require_asio_ok(driver.get()->getChannelInfo(&output_info), "ASIO getChannelInfo output");
         if (output_info.type != ASIOSTInt32LSB) {
@@ -1290,12 +1408,12 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     std::vector<ASIOBufferInfo> buffers(static_cast<std::size_t>(selected_input_channels + selected_output_channels));
     for (int index = 0; index < selected_input_channels; ++index) {
         buffers[static_cast<std::size_t>(index)].isInput = ASIOTrue;
-        buffers[static_cast<std::size_t>(index)].channelNum = index == 0 ? channels.input_left : channels.input_right;
+        buffers[static_cast<std::size_t>(index)].channelNum = channels.input[static_cast<std::size_t>(index)];
     }
     for (int index = 0; index < selected_output_channels; ++index) {
         const std::size_t buffer_index = static_cast<std::size_t>(selected_input_channels + index);
         buffers[buffer_index].isInput = ASIOFalse;
-        buffers[buffer_index].channelNum = index == 0 ? channels.output_left : channels.output_right;
+        buffers[buffer_index].channelNum = channels.output[static_cast<std::size_t>(index)];
     }
 
     auto stream = std::make_unique<WindowsDeviceStream>(

@@ -66,7 +66,12 @@ struct StreamControl {
     std::atomic<bool> metronome_enabled{false};
     std::atomic<int> metronome_bpm{120};
     std::atomic<int> metronome_level_ppm{200000};
+    std::atomic<int> remote_level_ppm{1000000};
     std::atomic<int> playback_ratio_ppm{1000000};
+    std::atomic<int> metronome_mode{0};
+    std::atomic<bool> leader_audio_local_click{false};
+    std::atomic<std::uint64_t> metronome_epoch_sample_time{0};
+    std::atomic<bool> metronome_epoch_valid{false};
 };
 
 enum class InputChannels {
@@ -75,10 +80,8 @@ enum class InputChannels {
 };
 
 struct ChannelSelection {
-    int input_left = 0;
-    int input_right = -1;
-    int output_left = 0;
-    int output_right = 1;
+    std::vector<int> input{0};
+    std::vector<int> output{0, 1};
 };
 
 struct StreamInfo {
@@ -90,6 +93,16 @@ struct StreamInfo {
     std::string sample_format;
 };
 
+struct CallbackTimingStats {
+    std::uint64_t interval_min_us = 0;
+    std::uint64_t interval_sum_us = 0;
+    std::uint64_t interval_max_us = 0;
+    std::uint64_t interval_samples = 0;
+    std::uint64_t gap_over_expected_count = 0;
+    std::uint64_t gap_over_1_5x_count = 0;
+    std::uint64_t gap_over_2x_count = 0;
+};
+
 class DeviceStream {
 public:
     virtual ~DeviceStream() = default;
@@ -99,6 +112,7 @@ public:
     virtual long callbacks() const = 0;
     virtual bool playback_prefilled() const = 0;
     virtual StreamInfo info() const = 0;
+    virtual CallbackTimingStats callback_timing_stats() const = 0;
 
 protected:
     DeviceStream() = default;

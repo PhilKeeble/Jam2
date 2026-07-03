@@ -44,12 +44,18 @@ std::string one_based_channel_text(int channel)
 
 std::string selected_channel_range_text(const ChannelSelection& channels, bool input)
 {
-    if (input) {
-        return one_based_channel_text(channels.input_left) +
-            (channels.input_right >= 0 ? "," + one_based_channel_text(channels.input_right) : "");
+    const auto& selected = input ? channels.input : channels.output;
+    if (selected.empty()) {
+        return "off";
     }
-    return one_based_channel_text(channels.output_left) +
-        (channels.output_right >= 0 ? "," + one_based_channel_text(channels.output_right) : "");
+    std::ostringstream out;
+    for (std::size_t i = 0; i < selected.size(); ++i) {
+        if (i > 0) {
+            out << ",";
+        }
+        out << one_based_channel_text(selected[i]);
+    }
+    return out.str();
 }
 
 std::string channel_range_error(
@@ -680,7 +686,60 @@ struct CoreAudioDuplexContext {
     double resample_phase = 0.0;
     std::atomic<long> callbacks{0};
     std::atomic<bool> playback_prefilled{false};
+    std::atomic<std::uint64_t> last_callback_us{0};
+    std::atomic<std::uint64_t> callback_interval_min_us{0};
+    std::atomic<std::uint64_t> callback_interval_sum_us{0};
+    std::atomic<std::uint64_t> callback_interval_max_us{0};
+    std::atomic<std::uint64_t> callback_interval_samples{0};
+    std::atomic<std::uint64_t> callback_gap_over_expected_count{0};
+    std::atomic<std::uint64_t> callback_gap_over_1_5x_count{0};
+    std::atomic<std::uint64_t> callback_gap_over_2x_count{0};
 };
+
+std::uint64_t callback_now_us()
+{
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
+}
+
+void atomic_update_max(std::atomic<std::uint64_t>& target, std::uint64_t value)
+{
+    std::uint64_t current = target.load(std::memory_order_relaxed);
+    while (value > current && !target.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
+    }
+}
+
+void atomic_update_min(std::atomic<std::uint64_t>& target, std::uint64_t value)
+{
+    std::uint64_t current = target.load(std::memory_order_relaxed);
+    while ((current == 0 || value < current) &&
+           !target.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
+    }
+}
+
+void observe_callback_interval(CoreAudioDuplexContext& context)
+{
+    const std::uint64_t now = callback_now_us();
+    const std::uint64_t previous = context.last_callback_us.exchange(now, std::memory_order_relaxed);
+    if (previous == 0 || now <= previous || context.sample_rate <= 0.0 || context.playback_scratch.empty()) {
+        return;
+    }
+    const std::uint64_t interval = now - previous;
+    atomic_update_min(context.callback_interval_min_us, interval);
+    context.callback_interval_sum_us.fetch_add(interval, std::memory_order_relaxed);
+    atomic_update_max(context.callback_interval_max_us, interval);
+    context.callback_interval_samples.fetch_add(1, std::memory_order_relaxed);
+    const double expected = static_cast<double>(context.playback_scratch.size()) * 1000000.0 / context.sample_rate;
+    if (interval > static_cast<std::uint64_t>(expected)) {
+        context.callback_gap_over_expected_count.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (interval > static_cast<std::uint64_t>(expected * 1.5)) {
+        context.callback_gap_over_1_5x_count.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (interval > static_cast<std::uint64_t>(expected * 2.0)) {
+        context.callback_gap_over_2x_count.fetch_add(1, std::memory_order_relaxed);
+    }
+}
 
 std::int32_t pop_one_frame(MonoRingBuffer& ring)
 {
@@ -730,6 +789,22 @@ void pop_resampled_playback(CoreAudioDuplexContext& context, std::span<std::int3
     }
 }
 
+void apply_remote_level(CoreAudioDuplexContext& context, std::span<std::int32_t> output)
+{
+    if (context.control == nullptr) {
+        return;
+    }
+    const int level_ppm = context.control->remote_level_ppm.load(std::memory_order_relaxed);
+    if (level_ppm == 1000000) {
+        return;
+    }
+    const double level = static_cast<double>(std::clamp(level_ppm, 0, 1000000)) / 1000000.0;
+    for (std::int32_t& sample : output) {
+        const double scaled = static_cast<double>(sample) * level;
+        sample = static_cast<std::int32_t>(std::clamp(scaled, -2147483648.0, 2147483647.0));
+    }
+}
+
 void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t> output)
 {
     if (context.control == nullptr ||
@@ -737,6 +812,10 @@ void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t
         context.sample_rate <= 0.0) {
         context.click_remaining = 0;
         context.click_total = 0;
+        return;
+    }
+    if (context.control->metronome_mode.load(std::memory_order_relaxed) == 1 &&
+        !context.control->leader_audio_local_click.load(std::memory_order_relaxed)) {
         return;
     }
 
@@ -748,16 +827,22 @@ void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t
     const double level = static_cast<double>(std::clamp(level_ppm, 0, 1000000)) / 1000000.0;
     const std::uint64_t beat_interval =
         static_cast<std::uint64_t>((60.0 * context.sample_rate) / static_cast<double>(bpm));
+    const bool epoch_valid = context.control->metronome_epoch_valid.load(std::memory_order_relaxed);
+    const std::uint64_t epoch = context.control->metronome_epoch_sample_time.load(std::memory_order_relaxed);
 
     for (std::int32_t& sample : output) {
-        if (beat_interval > 0 && (context.metronome_sample_counter % beat_interval) == 0) {
-            const bool accent = (context.metronome_beat_index % 4ULL) == 0ULL;
+        const bool before_epoch = epoch_valid && context.metronome_sample_counter < epoch;
+        const std::uint64_t position =
+            before_epoch ? 0ULL : (epoch_valid ? context.metronome_sample_counter - epoch : context.metronome_sample_counter);
+        if (!before_epoch && beat_interval > 0 && (position % beat_interval) == 0) {
+            const std::uint64_t beat_index = position / beat_interval;
+            const bool accent = (beat_index % 4ULL) == 0ULL;
             const double frequency = accent ? 1800.0 : 1200.0;
             context.click_total = static_cast<int>(context.sample_rate * (accent ? 0.012 : 0.008));
             context.click_remaining = context.click_total;
             context.click_phase = 0.0;
             context.click_phase_step = 2.0 * 3.14159265358979323846 * frequency / context.sample_rate;
-            ++context.metronome_beat_index;
+            context.metronome_beat_index = beat_index + 1;
         }
 
         if (context.click_remaining > 0 && context.click_total > 0) {
@@ -788,17 +873,19 @@ OSStatus duplex_io_proc(
         clear_output(output);
         return noErr;
     }
+    observe_callback_interval(*context);
 
     const std::size_t input_frames = std::min(buffer_frames(input), context->capture_scratch.size());
     if (input_frames > 0) {
         for (std::size_t frame = 0; frame < input_frames; ++frame) {
-            const float left = read_float_channel(input, frame, static_cast<UInt32>(context->channels.input_left));
-            if (context->input_channels == InputChannels::Stereo) {
-                const float right = read_float_channel(input, frame, static_cast<UInt32>(context->channels.input_right));
-                context->capture_scratch[frame] = float_to_i32((left + right) * 0.5F);
-            } else {
-                context->capture_scratch[frame] = float_to_i32(left);
+            float sum = 0.0F;
+            for (int channel : context->channels.input) {
+                sum += read_float_channel(input, frame, static_cast<UInt32>(channel));
             }
+            const float mixed = context->channels.input.empty() ?
+                0.0F :
+                sum / static_cast<float>(context->channels.input.size());
+            context->capture_scratch[frame] = float_to_i32(mixed);
         }
         context->capture->push(std::span<const std::int32_t>(context->capture_scratch.data(), input_frames));
     }
@@ -815,13 +902,13 @@ OSStatus duplex_io_proc(
         }
         if (context->playback_prefilled.load(std::memory_order_relaxed)) {
             pop_resampled_playback(*context, playback);
+            apply_remote_level(*context, playback);
         }
         mix_metronome_click(*context, playback);
         for (std::size_t frame = 0; frame < output_frames; ++frame) {
             const float sample = i32_to_float(context->playback_scratch[frame]);
-            write_float_channel(output, frame, static_cast<UInt32>(context->channels.output_left), sample);
-            if (context->channels.output_right >= 0) {
-                write_float_channel(output, frame, static_cast<UInt32>(context->channels.output_right), sample);
+            for (int channel : context->channels.output) {
+                write_float_channel(output, frame, static_cast<UInt32>(channel), sample);
             }
         }
     }
@@ -904,6 +991,19 @@ public:
         result.channels = channels_;
         result.sample_format = "CoreAudio Float32 packed";
         return result;
+    }
+
+    CallbackTimingStats callback_timing_stats() const override
+    {
+        return CallbackTimingStats{
+            context_.callback_interval_min_us.load(std::memory_order_relaxed),
+            context_.callback_interval_sum_us.load(std::memory_order_relaxed),
+            context_.callback_interval_max_us.load(std::memory_order_relaxed),
+            context_.callback_interval_samples.load(std::memory_order_relaxed),
+            context_.callback_gap_over_expected_count.load(std::memory_order_relaxed),
+            context_.callback_gap_over_1_5x_count.load(std::memory_order_relaxed),
+            context_.callback_gap_over_2x_count.load(std::memory_order_relaxed),
+        };
     }
 
 private:
@@ -1054,15 +1154,18 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     const auto selected = select_device(id);
     const UInt32 input_channels = device_channels(selected.object, kAudioDevicePropertyScopeInput);
     const UInt32 output_channels = device_channels(selected.object, kAudioDevicePropertyScopeOutput);
-    const UInt32 requested_channels = requested_input_channels == InputChannels::Stereo ? 2U : 1U;
-    if (channels.input_left < 0 || static_cast<UInt32>(channels.input_left) >= input_channels ||
-        (requested_channels > 1 && (channels.input_right < 0 || static_cast<UInt32>(channels.input_right) >= input_channels))) {
-        throw std::runtime_error(channel_range_error("CoreAudio", "input", channels, input_channels, true));
+    if (channels.input.empty() || channels.output.empty()) {
+        throw std::runtime_error("CoreAudio duplex stream requires at least one selected input and output channel");
     }
-    const UInt32 requested_output_channels = channels.output_right >= 0 ? 2U : 1U;
-    if (channels.output_left < 0 || static_cast<UInt32>(channels.output_left) >= output_channels ||
-        (requested_output_channels > 1 && (channels.output_right < 0 || static_cast<UInt32>(channels.output_right) >= output_channels))) {
-        throw std::runtime_error(channel_range_error("CoreAudio", "output", channels, output_channels, false));
+    for (int channel : channels.input) {
+        if (channel < 0 || static_cast<UInt32>(channel) >= input_channels) {
+            throw std::runtime_error(channel_range_error("CoreAudio", "input", channels, input_channels, true));
+        }
+    }
+    for (int channel : channels.output) {
+        if (channel < 0 || static_cast<UInt32>(channel) >= output_channels) {
+            throw std::runtime_error(channel_range_error("CoreAudio", "output", channels, output_channels, false));
+        }
     }
     if (!is_supported_float32_format(selected.object, kAudioDevicePropertyScopeInput) ||
         !is_supported_float32_format(selected.object, kAudioDevicePropertyScopeOutput)) {

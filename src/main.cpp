@@ -35,13 +35,20 @@ Usage:
   jam2 test-device <id> [--sample-rate n]
   jam2 meter-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n]
   jam2 ring-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n] [--ring-frames n]
-  jam2 listen [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats enabled|disabled] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--metronome on|off] [--bpm n] [--metronome-level n] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels mono|stereo|n|n,m] [--output-channels n|n,m] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-deadband-ppm n] [--drift-max-correction-ppm n]
+  jam2 listen [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats enabled|disabled] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--metronome on|off] [--bpm n] [--metronome-level n] [--remote-level n] [--metronome-mode shared-grid|leader-audio|symmetric-delay|listener-compensated] [--sample-time-playout on|off] [--playout-delay-frames n] [--adaptive-playback-cushion on|off] [--adaptive-playback-target-frames n] [--adaptive-playback-min-frames n] [--adaptive-playback-max-frames n] [--adaptive-playback-release-ppm n] [--session-id hex] [--session-key hex32] [--machine-readable-startup on|off] [--status-format text|jsonl] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels n[,n...]] [--output-channels n[,n...]] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-deadband-ppm n] [--drift-max-correction-ppm n]
   jam2 connect <jam2-url> [options]
 
 Stage status:
   UDP HELLO/HELLO_ACK session setup, jam2 URL parsing, and STUN endpoint discovery are implemented.
   UDP audio streaming, Windows ASIO, drift stats/correction, and metronome controls are implemented for the MVP slice.
 )";
+
+enum class MetronomeMode {
+    SharedGrid,
+    LeaderAudio,
+    SymmetricDelay,
+    ListenerCompensated,
+};
 
 struct Options {
     jam2::Endpoint bind{"0.0.0.0", 49000};
@@ -68,6 +75,19 @@ struct Options {
     bool metronome = false;
     int bpm = 120;
     double metronome_level = 0.20;
+    MetronomeMode metronome_mode = MetronomeMode::SharedGrid;
+    double remote_level = 1.0;
+    bool sample_time_playout = true;
+    std::size_t playout_delay_frames = 0;
+    bool adaptive_playback_cushion = false;
+    std::size_t adaptive_playback_target_frames = 0;
+    std::size_t adaptive_playback_min_frames = 0;
+    std::size_t adaptive_playback_max_frames = 0;
+    int adaptive_playback_release_ppm = 1000;
+    std::optional<std::uint64_t> session_id;
+    std::optional<std::array<std::uint8_t, 16>> session_key;
+    bool machine_readable_startup = false;
+    bool status_jsonl = false;
     std::optional<int> audio_device_id;
     long audio_buffer_size = 0;
     jam2::audio::InputChannels input_channels = jam2::audio::InputChannels::Mono;
@@ -87,6 +107,69 @@ std::string_view require_value(int argc, char** argv, int& i, std::string_view n
     return argv[i];
 }
 
+MetronomeMode parse_metronome_mode(std::string_view value)
+{
+    if (value == "shared-grid") {
+        return MetronomeMode::SharedGrid;
+    }
+    if (value == "leader-audio") {
+        return MetronomeMode::LeaderAudio;
+    }
+    if (value == "symmetric-delay") {
+        return MetronomeMode::SymmetricDelay;
+    }
+    if (value == "listener-compensated") {
+        return MetronomeMode::ListenerCompensated;
+    }
+    throw std::runtime_error("--metronome-mode must be shared-grid, leader-audio, symmetric-delay, or listener-compensated");
+}
+
+std::string_view metronome_mode_text(MetronomeMode mode)
+{
+    switch (mode) {
+    case MetronomeMode::SharedGrid:
+        return "shared-grid";
+    case MetronomeMode::LeaderAudio:
+        return "leader-audio";
+    case MetronomeMode::SymmetricDelay:
+        return "symmetric-delay";
+    case MetronomeMode::ListenerCompensated:
+        return "listener-compensated";
+    }
+    return "shared-grid";
+}
+
+std::string_view metronome_mode_text(int mode)
+{
+    switch (mode) {
+    case 0:
+        return "shared-grid";
+    case 1:
+        return "leader-audio";
+    case 2:
+        return "symmetric-delay";
+    case 3:
+        return "listener-compensated";
+    default:
+        return "shared-grid";
+    }
+}
+
+int metronome_mode_id(MetronomeMode mode)
+{
+    switch (mode) {
+    case MetronomeMode::SharedGrid:
+        return 0;
+    case MetronomeMode::LeaderAudio:
+        return 1;
+    case MetronomeMode::SymmetricDelay:
+        return 2;
+    case MetronomeMode::ListenerCompensated:
+        return 3;
+    }
+    return 0;
+}
+
 std::vector<int> parse_channel_list(std::string_view value, std::size_t min_count, std::size_t max_count, std::string_view option)
 {
     std::vector<int> channels;
@@ -98,9 +181,17 @@ std::vector<int> parse_channel_list(std::string_view value, std::size_t min_coun
             throw std::runtime_error(std::string(option) + " contains an empty channel");
         }
         std::size_t consumed = 0;
-        const int channel = std::stoi(std::string(part), &consumed);
+        int channel = 0;
+        try {
+            channel = std::stoi(std::string(part), &consumed);
+        } catch (const std::exception&) {
+            throw std::runtime_error(std::string(option) + " channels must be positive 1-based numbers");
+        }
         if (consumed != part.size() || channel <= 0) {
             throw std::runtime_error(std::string(option) + " channels must be positive 1-based numbers");
+        }
+        if (std::find(channels.begin(), channels.end(), channel - 1) != channels.end()) {
+            throw std::runtime_error(std::string(option) + " contains a duplicate channel");
         }
         channels.push_back(channel - 1);
         if (comma == std::string_view::npos) {
@@ -108,10 +199,12 @@ std::vector<int> parse_channel_list(std::string_view value, std::size_t min_coun
         }
         pos = comma + 1;
     }
-    if (channels.size() < min_count || channels.size() > max_count) {
+    if (channels.size() < min_count || (max_count > 0 && channels.size() > max_count)) {
         std::ostringstream message;
         message << option << " expects " << min_count;
-        if (min_count != max_count) {
+        if (max_count == 0) {
+            message << "+";
+        } else if (min_count != max_count) {
             message << ".." << max_count;
         }
         message << " channel value(s)";
@@ -122,13 +215,25 @@ std::vector<int> parse_channel_list(std::string_view value, std::size_t min_coun
 
 std::string channel_selection_text(const jam2::audio::ChannelSelection& channels)
 {
-    auto one_based = [](int channel) {
-        return channel >= 0 ? std::to_string(channel + 1) : std::string("off");
+    auto channel_list = [](const std::vector<int>& selected) {
+        if (selected.empty()) {
+            return std::string("off");
+        }
+        std::ostringstream out;
+        for (std::size_t i = 0; i < selected.size(); ++i) {
+            if (i > 0) {
+                out << ",";
+            }
+            out << (selected[i] + 1);
+        }
+        return out.str();
     };
-    return "input=" + one_based(channels.input_left) +
-        (channels.input_right >= 0 ? "," + one_based(channels.input_right) : "") +
-        " output=" + one_based(channels.output_left) +
-        (channels.output_right >= 0 ? "," + one_based(channels.output_right) : "");
+    return "input=" + channel_list(channels.input) + " output=" + channel_list(channels.output);
+}
+
+std::string mono_mix_mode_text(std::size_t channel_count)
+{
+    return std::to_string(channel_count) + "-to-mono";
 }
 
 Options parse_options(int argc, char** argv, int start)
@@ -255,6 +360,76 @@ Options parse_options(int argc, char** argv, int start)
             if (options.metronome_level < 0.0 || options.metronome_level > 1.0) {
                 throw std::runtime_error("--metronome-level must be 0..1");
             }
+        } else if (arg == "--metronome-mode") {
+            options.metronome_mode = parse_metronome_mode(require_value(argc, argv, i, arg));
+        } else if (arg == "--remote-level") {
+            options.remote_level = std::stod(std::string(require_value(argc, argv, i, arg)));
+            if (options.remote_level < 0.0 || options.remote_level > 1.0) {
+                throw std::runtime_error("--remote-level must be 0..1");
+            }
+        } else if (arg == "--sample-time-playout") {
+            const std::string value{require_value(argc, argv, i, arg)};
+            if (value == "on" || value == "true" || value == "1") {
+                options.sample_time_playout = true;
+            } else if (value == "off" || value == "false" || value == "0") {
+                options.sample_time_playout = false;
+            } else {
+                throw std::runtime_error("--sample-time-playout must be on or off");
+            }
+        } else if (arg == "--playout-delay-frames") {
+            const auto parsed = std::stoull(std::string(require_value(argc, argv, i, arg)));
+            options.playout_delay_frames = static_cast<std::size_t>(parsed);
+        } else if (arg == "--adaptive-playback-cushion") {
+            const std::string value{require_value(argc, argv, i, arg)};
+            if (value == "on" || value == "true" || value == "1") {
+                options.adaptive_playback_cushion = true;
+            } else if (value == "off" || value == "false" || value == "0") {
+                options.adaptive_playback_cushion = false;
+            } else {
+                throw std::runtime_error("--adaptive-playback-cushion must be on or off");
+            }
+        } else if (arg == "--adaptive-playback-target-frames") {
+            const auto parsed = std::stoull(std::string(require_value(argc, argv, i, arg)));
+            options.adaptive_playback_target_frames = static_cast<std::size_t>(parsed);
+        } else if (arg == "--adaptive-playback-min-frames") {
+            const auto parsed = std::stoull(std::string(require_value(argc, argv, i, arg)));
+            options.adaptive_playback_min_frames = static_cast<std::size_t>(parsed);
+        } else if (arg == "--adaptive-playback-max-frames") {
+            const auto parsed = std::stoull(std::string(require_value(argc, argv, i, arg)));
+            options.adaptive_playback_max_frames = static_cast<std::size_t>(parsed);
+        } else if (arg == "--adaptive-playback-release-ppm") {
+            options.adaptive_playback_release_ppm = std::stoi(std::string(require_value(argc, argv, i, arg)));
+            if (options.adaptive_playback_release_ppm < 0 || options.adaptive_playback_release_ppm > 1000000) {
+                throw std::runtime_error("--adaptive-playback-release-ppm must be 0..1000000");
+            }
+        } else if (arg == "--session-id") {
+            options.session_id = jam2::parse_hex_u64(require_value(argc, argv, i, arg));
+        } else if (arg == "--session-key") {
+            const auto key = jam2::hex_decode(require_value(argc, argv, i, arg));
+            if (key.size() != 16) {
+                throw std::runtime_error("--session-key must be 16 bytes encoded as 32 hex characters");
+            }
+            std::array<std::uint8_t, 16> parsed{};
+            std::copy(key.begin(), key.end(), parsed.begin());
+            options.session_key = parsed;
+        } else if (arg == "--machine-readable-startup") {
+            const std::string value{require_value(argc, argv, i, arg)};
+            if (value == "on" || value == "true" || value == "1") {
+                options.machine_readable_startup = true;
+            } else if (value == "off" || value == "false" || value == "0") {
+                options.machine_readable_startup = false;
+            } else {
+                throw std::runtime_error("--machine-readable-startup must be on or off");
+            }
+        } else if (arg == "--status-format") {
+            const std::string value{require_value(argc, argv, i, arg)};
+            if (value == "text") {
+                options.status_jsonl = false;
+            } else if (value == "jsonl") {
+                options.status_jsonl = true;
+            } else {
+                throw std::runtime_error("--status-format must be text or jsonl");
+            }
         } else if (arg == "--audio-device") {
             options.audio_device_id = std::stoi(std::string(require_value(argc, argv, i, arg)));
             if (*options.audio_device_id < 0) {
@@ -267,25 +442,13 @@ Options parse_options(int argc, char** argv, int start)
             }
         } else if (arg == "--input-channels") {
             const std::string value{require_value(argc, argv, i, arg)};
-            if (value == "mono") {
-                options.input_channels = jam2::audio::InputChannels::Mono;
-                options.channel_selection.input_left = 0;
-                options.channel_selection.input_right = -1;
-            } else if (value == "stereo") {
-                options.input_channels = jam2::audio::InputChannels::Stereo;
-                options.channel_selection.input_left = 0;
-                options.channel_selection.input_right = 1;
-            } else {
-                const auto channels = parse_channel_list(value, 1, 2, arg);
-                options.input_channels = channels.size() == 2 ? jam2::audio::InputChannels::Stereo : jam2::audio::InputChannels::Mono;
-                options.channel_selection.input_left = channels[0];
-                options.channel_selection.input_right = channels.size() == 2 ? channels[1] : -1;
-            }
+            const auto channels = parse_channel_list(value, 1, 0, arg);
+            options.input_channels = jam2::audio::InputChannels::Mono;
+            options.channel_selection.input = channels;
         } else if (arg == "--output-channels") {
             const std::string value{require_value(argc, argv, i, arg)};
-            const auto channels = parse_channel_list(value, 1, 2, arg);
-            options.channel_selection.output_left = channels[0];
-            options.channel_selection.output_right = channels.size() == 2 ? channels[1] : -1;
+            const auto channels = parse_channel_list(value, 1, 0, arg);
+            options.channel_selection.output = channels;
         } else if (arg == "--capture-ring-frames") {
             const auto parsed = std::stoull(std::string(require_value(argc, argv, i, arg)));
             if (parsed == 0) {
@@ -315,6 +478,32 @@ Options parse_options(int argc, char** argv, int start)
     }
     if (!options.stats_enabled && options.log_stats_dir) {
         throw std::runtime_error("--log-stats requires --stats enabled");
+    }
+    if (options.session_id.has_value() != options.session_key.has_value()) {
+        throw std::runtime_error("--session-id and --session-key must be provided together");
+    }
+    if (options.playout_delay_frames == 0) {
+        options.playout_delay_frames = options.playback_prefill_frames;
+    }
+    if (options.adaptive_playback_target_frames == 0) {
+        options.adaptive_playback_target_frames = options.playout_delay_frames;
+    }
+    if (options.adaptive_playback_min_frames == 0) {
+        options.adaptive_playback_min_frames = options.playout_delay_frames;
+    }
+    if (options.adaptive_playback_max_frames == 0) {
+        options.adaptive_playback_max_frames =
+            options.playback_max_frames > 0 ? options.playback_max_frames : options.playback_ring_frames;
+    }
+    if (options.adaptive_playback_min_frames > options.adaptive_playback_target_frames ||
+        options.adaptive_playback_target_frames > options.adaptive_playback_max_frames) {
+        throw std::runtime_error("adaptive playback frames must satisfy min <= target <= max");
+    }
+    if (options.playout_delay_frames > options.playback_ring_frames) {
+        throw std::runtime_error("--playout-delay-frames must fit within playback ring capacity");
+    }
+    if (options.adaptive_playback_max_frames > options.playback_ring_frames) {
+        throw std::runtime_error("--adaptive-playback-max-frames must fit within playback ring capacity");
     }
     return options;
 }
@@ -476,6 +665,22 @@ struct AudioPacketStats {
     std::uint64_t audio_packet_gap_samples = 0;
     std::uint64_t audio_packet_gap_over_2x_count = 0;
     std::uint64_t audio_packet_gap_over_4x_count = 0;
+    std::uint64_t send_interval_min_us = 0;
+    std::uint64_t send_interval_sum_us = 0;
+    std::uint64_t send_interval_max_us = 0;
+    std::uint64_t send_interval_samples = 0;
+    std::uint64_t send_schedule_error_min_us = 0;
+    std::uint64_t send_schedule_error_sum_us = 0;
+    std::uint64_t send_schedule_error_max_us = 0;
+    std::uint64_t send_schedule_error_samples = 0;
+    std::uint64_t send_catchup_events = 0;
+    std::uint64_t send_catchup_max_packets = 0;
+    std::uint64_t receive_loop_gap_min_us = 0;
+    std::uint64_t receive_loop_gap_sum_us = 0;
+    std::uint64_t receive_loop_gap_max_us = 0;
+    std::uint64_t receive_loop_gap_samples = 0;
+    std::uint64_t receive_burst_packets_max = 0;
+    std::uint64_t receive_packets_per_loop_max = 0;
     std::uint64_t playback_push_min_frames = 0;
     std::uint64_t playback_push_sum_frames = 0;
     std::uint64_t playback_push_max_frames = 0;
@@ -507,17 +712,51 @@ struct AudioPacketStats {
     std::uint64_t metronome_sent = 0;
     std::uint64_t metronome_received = 0;
     std::uint64_t last_remote_beat = 0;
+    bool sample_time_playout_enabled = false;
+    std::uint64_t expected_remote_sample_time = 0;
+    std::uint64_t last_received_sample_time = 0;
+    std::uint64_t last_played_remote_sample_time = 0;
+    std::uint64_t remote_sample_lag_frames = 0;
+    std::uint64_t missing_sample_ranges = 0;
+    std::uint64_t missing_audio_frames_inserted = 0;
+    std::uint64_t late_audio_frames_dropped = 0;
+    std::uint64_t playout_delay_frames = 0;
+    std::int64_t playout_delay_error_frames = 0;
+    bool adaptive_playback_cushion_enabled = false;
+    std::uint64_t adaptive_playback_target_frames = 0;
+    std::uint64_t adaptive_playback_min_frames = 0;
+    std::uint64_t adaptive_playback_max_frames = 0;
+    std::uint64_t adaptive_playback_raise_events = 0;
+    std::uint64_t adaptive_playback_release_events = 0;
+    std::uint64_t adaptive_playback_burst_events = 0;
+    std::uint64_t adaptive_playback_padding_frames = 0;
+    std::uint64_t adaptive_playback_time_above_target_us = 0;
+    std::uint64_t adaptive_playback_time_under_target_us = 0;
+    std::uint64_t adaptive_playback_longest_above_target_us = 0;
+    std::uint64_t adaptive_playback_longest_under_target_us = 0;
+    std::uint64_t metronome_epoch_sample_time = 0;
+    std::uint64_t local_metronome_beat = 0;
+    std::uint64_t remote_metronome_beat = 0;
+    bool metronome_alignment_valid = false;
     std::uint64_t elapsed_ms = 0;
     bool final_metronome_enabled = false;
     int final_bpm = 120;
+    double final_metronome_level = 0.20;
+    double final_remote_level = 1.0;
 };
 
 struct RuntimeState {
     std::atomic<bool> quit{false};
     std::atomic<bool> stats_enabled{false};
     std::atomic<bool> print_stats{false};
+    std::atomic<bool> print_status{false};
     std::atomic<bool> metronome{false};
     std::atomic<int> bpm{120};
+    std::atomic<int> metronome_level_ppm{200000};
+    std::atomic<int> remote_level_ppm{1000000};
+    std::atomic<int> metronome_mode{0};
+    std::atomic<std::uint64_t> metronome_epoch_sample_time{0};
+    std::atomic<bool> metronome_epoch_valid{false};
     std::atomic<std::uint64_t> metronome_revision{0};
 };
 
@@ -531,10 +770,14 @@ int ratio_to_ppm(double ratio)
     return static_cast<int>(std::clamp(ratio, 0.5, 2.0) * 1000000.0);
 }
 
+double unit_from_ppm(int value)
+{
+    return static_cast<double>(std::clamp(value, 0, 1000000)) / 1000000.0;
+}
+
 void sync_audio_control(
     const RuntimeState& runtime,
     jam2::audio::StreamControl* control,
-    double metronome_level,
     double playback_ratio)
 {
     if (control == nullptr) {
@@ -542,8 +785,12 @@ void sync_audio_control(
     }
     control->metronome_enabled.store(runtime.metronome.load(std::memory_order_relaxed), std::memory_order_relaxed);
     control->metronome_bpm.store(runtime.bpm.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    control->metronome_level_ppm.store(ppm_from_unit(metronome_level), std::memory_order_relaxed);
+    control->metronome_level_ppm.store(runtime.metronome_level_ppm.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    control->remote_level_ppm.store(runtime.remote_level_ppm.load(std::memory_order_relaxed), std::memory_order_relaxed);
     control->playback_ratio_ppm.store(ratio_to_ppm(playback_ratio), std::memory_order_relaxed);
+    control->metronome_mode.store(runtime.metronome_mode.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    control->metronome_epoch_sample_time.store(runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    control->metronome_epoch_valid.store(runtime.metronome_epoch_valid.load(std::memory_order_relaxed), std::memory_order_relaxed);
 }
 
 void print_interactive_help()
@@ -559,17 +806,57 @@ void print_interactive_help(bool stats_enabled)
     if (stats_enabled) {
         std::cout << "  stats         print current stream stats\n";
     }
-    std::cout << "  metro on      enable local metronome\n"
-              << "  metro off     disable local metronome\n"
-              << "  bpm <1..400>  set metronome tempo\n"
-              << "  quit          stop the stream and exit\n"
-              << "  exit          stop the stream and exit\n";
+    std::cout << "  stats on|off        enable or disable interactive stats output\n"
+              << "  status              print compact stream status\n"
+              << "  metro on            enable local metronome\n"
+              << "  metro off           disable local metronome\n"
+              << "  metro mode <mode>   set shared-grid|leader-audio|symmetric-delay|listener-compensated\n"
+              << "  metro level <0..1>  set local metronome level\n"
+              << "  metro level +/-n    adjust local metronome level\n"
+              << "  metro mute          set local metronome level to 0\n"
+              << "  metro unmute        restore local metronome level to 0.20\n"
+              << "  remote level <0..1> set peer playback level\n"
+              << "  remote level +/-n   adjust peer playback level\n"
+              << "  remote mute         set peer playback level to 0\n"
+              << "  remote unmute       restore peer playback level to 1\n"
+              << "  bpm <1..400>        set metronome tempo\n"
+              << "  quit                stop the stream and exit\n"
+              << "  exit                stop the stream and exit\n";
 }
 
 void print_prompt()
 {
     std::cout << "> ";
     std::cout.flush();
+}
+
+bool apply_level_token(std::string_view token, std::atomic<int>& target_ppm)
+{
+    if (token.empty()) {
+        return false;
+    }
+    std::size_t consumed = 0;
+    const std::string text{token};
+    double value = 0.0;
+    try {
+        value = std::stod(text, &consumed);
+    } catch (const std::exception&) {
+        return false;
+    }
+    if (consumed != text.size()) {
+        return false;
+    }
+    int ppm = 0;
+    if (text[0] == '+' || text[0] == '-') {
+        ppm = target_ppm.load(std::memory_order_relaxed) + static_cast<int>(value * 1000000.0);
+    } else {
+        if (value < 0.0 || value > 1.0) {
+            return false;
+        }
+        ppm = ppm_from_unit(value);
+    }
+    target_ppm.store(std::clamp(ppm, 0, 1000000), std::memory_order_relaxed);
+    return true;
 }
 
 void stdin_command_loop(RuntimeState& state)
@@ -590,11 +877,22 @@ void stdin_command_loop(RuntimeState& state)
             continue;
         }
         if (command == "stats") {
-            if (state.stats_enabled.load(std::memory_order_relaxed)) {
+            std::string value;
+            in >> value;
+            if (value == "on") {
+                state.stats_enabled.store(true, std::memory_order_relaxed);
+            } else if (value == "off") {
+                state.stats_enabled.store(false, std::memory_order_relaxed);
+            } else if (value.empty() && state.stats_enabled.load(std::memory_order_relaxed)) {
                 state.print_stats.store(true, std::memory_order_relaxed);
             } else {
-                std::cout << "Stats are disabled. Restart with --stats enabled to use this command.\n";
+                std::cout << "Stats are disabled. Use `stats on` to enable interactive stats output.\n";
             }
+            print_prompt();
+            continue;
+        }
+        if (command == "status") {
+            state.print_status.store(true, std::memory_order_relaxed);
             print_prompt();
             continue;
         }
@@ -607,8 +905,46 @@ void stdin_command_loop(RuntimeState& state)
             } else if (value == "off") {
                 state.metronome.store(false, std::memory_order_relaxed);
                 state.metronome_revision.fetch_add(1, std::memory_order_relaxed);
+            } else if (value == "mode") {
+                std::string mode;
+                in >> mode;
+                try {
+                    state.metronome_mode.store(metronome_mode_id(parse_metronome_mode(mode)), std::memory_order_relaxed);
+                    state.metronome_revision.fetch_add(1, std::memory_order_relaxed);
+                } catch (const std::exception& error) {
+                    std::cerr << error.what() << "\n";
+                }
+            } else if (value == "level") {
+                std::string level;
+                in >> level;
+                if (!apply_level_token(level, state.metronome_level_ppm)) {
+                    std::cerr << "metro level must be 0..1 or a relative +/- adjustment\n";
+                }
+            } else if (value == "mute") {
+                state.metronome_level_ppm.store(0, std::memory_order_relaxed);
+            } else if (value == "unmute") {
+                state.metronome_level_ppm.store(200000, std::memory_order_relaxed);
             } else {
-                std::cerr << "unknown metro command; use: metro on|off\n";
+                std::cerr << "unknown metro command; use: metro on|off|mode|level|mute|unmute\n";
+            }
+            print_prompt();
+            continue;
+        }
+        if (command == "remote") {
+            std::string value;
+            in >> value;
+            if (value == "level") {
+                std::string level;
+                in >> level;
+                if (!apply_level_token(level, state.remote_level_ppm)) {
+                    std::cerr << "remote level must be 0..1 or a relative +/- adjustment\n";
+                }
+            } else if (value == "mute") {
+                state.remote_level_ppm.store(0, std::memory_order_relaxed);
+            } else if (value == "unmute") {
+                state.remote_level_ppm.store(1000000, std::memory_order_relaxed);
+            } else {
+                std::cerr << "unknown remote command; use: remote level|mute|unmute\n";
             }
             print_prompt();
             continue;
@@ -632,22 +968,29 @@ void stdin_command_loop(RuntimeState& state)
     }
 }
 
-std::array<std::uint8_t, 12> encode_metronome_payload(int bpm, std::uint64_t beat)
+std::array<std::uint8_t, 20> encode_metronome_payload(int bpm, std::uint64_t beat, std::uint64_t epoch_sample_time)
 {
-    std::array<std::uint8_t, 12> payload{};
+    std::array<std::uint8_t, 20> payload{};
     payload[0] = static_cast<std::uint8_t>(bpm & 0xff);
     payload[1] = static_cast<std::uint8_t>((bpm >> 8) & 0xff);
     payload[2] = static_cast<std::uint8_t>((bpm >> 16) & 0xff);
     payload[3] = static_cast<std::uint8_t>((bpm >> 24) & 0xff);
     for (int i = 0; i < 8; ++i) {
         payload[4 + i] = static_cast<std::uint8_t>((beat >> (i * 8)) & 0xffU);
+        payload[12 + i] = static_cast<std::uint8_t>((epoch_sample_time >> (i * 8)) & 0xffU);
     }
     return payload;
 }
 
-std::pair<int, std::uint64_t> decode_metronome_payload(std::span<const std::uint8_t> payload)
+struct MetronomePayload {
+    int bpm = 120;
+    std::uint64_t beat = 0;
+    std::uint64_t epoch_sample_time = 0;
+};
+
+MetronomePayload decode_metronome_payload(std::span<const std::uint8_t> payload)
 {
-    if (payload.size() != 12) {
+    if (payload.size() != 12 && payload.size() != 20) {
         throw std::runtime_error("metronome payload size mismatch");
     }
     const int bpm = static_cast<int>(payload[0]) |
@@ -658,7 +1001,13 @@ std::pair<int, std::uint64_t> decode_metronome_payload(std::span<const std::uint
     for (int i = 7; i >= 0; --i) {
         beat = (beat << 8) | payload[4 + i];
     }
-    return {bpm, beat};
+    std::uint64_t epoch = 0;
+    if (payload.size() == 20) {
+        for (int i = 7; i >= 0; --i) {
+            epoch = (epoch << 8) | payload[12 + i];
+        }
+    }
+    return MetronomePayload{bpm, beat, epoch};
 }
 
 void observe_timing(
@@ -741,6 +1090,105 @@ std::string command_line_text(int argc, char** argv)
     return out.str();
 }
 
+std::string shell_quote(std::string_view value)
+{
+    std::string out = "\"";
+    for (const char c : value) {
+        if (c == '"') {
+            out += "\\\"";
+        } else {
+            out.push_back(c);
+        }
+    }
+    out += "\"";
+    return out;
+}
+
+std::string bool_on_off(bool value)
+{
+    return value ? "on" : "off";
+}
+
+std::string channel_option_text(const std::vector<int>& channels)
+{
+    std::ostringstream out;
+    for (std::size_t i = 0; i < channels.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        out << (channels[i] + 1);
+    }
+    return out.str();
+}
+
+std::string input_channels_option_text(const Options& options)
+{
+    return channel_option_text(options.channel_selection.input);
+}
+
+std::string output_channels_option_text(const Options& options)
+{
+    return channel_option_text(options.channel_selection.output);
+}
+
+std::string make_headless_client_command(std::string_view executable, const std::string& connection_url, const Options& options)
+{
+    std::ostringstream out;
+    out << executable << " connect " << shell_quote(connection_url)
+        << " --audio-device <replace-client-device-id>"
+        << " --sample-rate " << options.sample_rate
+        << " --audio-buffer-size " << options.audio_buffer_size
+        << " --frame-size " << options.frame_size
+        << " --playback-prefill-frames " << options.playback_prefill_frames
+        << " --playback-ring-frames " << options.playback_ring_frames
+        << " --playback-max-frames " << options.playback_max_frames
+        << " --capture-ring-frames " << options.capture_ring_frames
+        << " --input-channels " << input_channels_option_text(options)
+        << " --output-channels " << output_channels_option_text(options)
+        << " --stats " << (options.stats_enabled ? "enabled" : "disabled")
+        << " --stats-warmup-ms " << options.stats_warmup_ms
+        << " --stats-interval-ms " << options.stats_interval_ms
+        << " --metronome " << bool_on_off(options.metronome)
+        << " --bpm " << options.bpm
+        << " --metronome-level " << options.metronome_level
+        << " --remote-level " << options.remote_level
+        << " --metronome-mode " << metronome_mode_text(options.metronome_mode)
+        << " --sample-time-playout " << bool_on_off(options.sample_time_playout)
+        << " --playout-delay-frames " << options.playout_delay_frames
+        << " --adaptive-playback-cushion " << bool_on_off(options.adaptive_playback_cushion)
+        << " --adaptive-playback-target-frames " << options.adaptive_playback_target_frames
+        << " --adaptive-playback-min-frames " << options.adaptive_playback_min_frames
+        << " --adaptive-playback-max-frames " << options.adaptive_playback_max_frames
+        << " --adaptive-playback-release-ppm " << options.adaptive_playback_release_ppm
+        << " --drift-correction " << bool_on_off(options.drift_correction)
+        << " --drift-smoothing " << options.drift_smoothing
+        << " --drift-deadband-ppm " << options.drift_deadband_ppm
+        << " --drift-max-correction-ppm " << options.drift_max_correction_ppm
+        << " --stream-linger-ms " << options.stream_linger_ms;
+    if (options.wait_ms > 0) {
+        out << " --wait-ms " << options.wait_ms;
+    }
+    if (options.stream_ms > 0) {
+        out << " --stream-ms " << options.stream_ms;
+    }
+    if (options.log_stats_dir) {
+        out << " --log-stats " << shell_quote(options.log_stats_dir->string());
+    }
+    if (options.socket_send_buffer) {
+        out << " --socket-send-buffer " << *options.socket_send_buffer;
+    }
+    if (options.socket_recv_buffer) {
+        out << " --socket-recv-buffer " << *options.socket_recv_buffer;
+    }
+    if (options.status_jsonl) {
+        out << " --status-format jsonl";
+    }
+    if (options.machine_readable_startup) {
+        out << " --machine-readable-startup on";
+    }
+    return out.str();
+}
+
 double playback_depth_avg_frames(const AudioPacketStats& stats)
 {
     return stats.playback_depth_samples > 0 ?
@@ -810,6 +1258,85 @@ double estimated_one_way_ms(const AudioPacketStats& stats, const Options& option
     return network_ms + playback_depth_avg_ms(stats, options) + audio_buffer_ms;
 }
 
+std::string json_escape(std::string_view value)
+{
+    std::string out;
+    out.reserve(value.size() + 2);
+    for (const char c : value) {
+        switch (c) {
+        case '\\':
+            out += "\\\\";
+            break;
+        case '"':
+            out += "\\\"";
+            break;
+        case '\n':
+            out += "\\n";
+            break;
+        case '\r':
+            out += "\\r";
+            break;
+        case '\t':
+            out += "\\t";
+            break;
+        default:
+            out.push_back(c);
+            break;
+        }
+    }
+    return out;
+}
+
+void print_startup_json(
+    std::string_view mode,
+    std::string_view stage,
+    const Options& options,
+    const jam2::Endpoint& local,
+    const std::optional<jam2::Endpoint>& peer,
+    std::string_view endpoint_mode,
+    std::string_view connection_url,
+    std::string_view error = {})
+{
+    if (!options.machine_readable_startup) {
+        return;
+    }
+    std::cout << "{\"event\":\"startup\""
+              << ",\"mode\":\"" << json_escape(mode) << "\""
+              << ",\"stage\":\"" << json_escape(stage) << "\""
+              << ",\"local_endpoint\":\"" << json_escape(jam2::endpoint_to_string(local)) << "\"";
+    if (peer) {
+        std::cout << ",\"peer_endpoint\":\"" << json_escape(jam2::endpoint_to_string(*peer)) << "\"";
+    }
+    if (!endpoint_mode.empty()) {
+        std::cout << ",\"endpoint_mode\":\"" << json_escape(endpoint_mode) << "\"";
+    }
+    if (!connection_url.empty()) {
+        std::cout << ",\"connection_url\":\"" << json_escape(connection_url) << "\"";
+    }
+    std::cout << ",\"sample_rate\":" << options.sample_rate
+              << ",\"frame_size\":" << options.frame_size
+              << ",\"audio_device_id\":" << options.audio_device_id.value_or(-1)
+              << ",\"audio_buffer_size\":" << options.audio_buffer_size
+              << ",\"input_channels\":\"" << mono_mix_mode_text(options.channel_selection.input.size()) << "\""
+              << ",\"channel_selection\":\"" << json_escape(channel_selection_text(options.channel_selection)) << "\""
+              << ",\"metronome\":\"" << (options.metronome ? "on" : "off") << "\""
+              << ",\"bpm\":" << options.bpm
+              << ",\"metronome_level\":" << options.metronome_level
+              << ",\"metronome_mode\":\"" << metronome_mode_text(options.metronome_mode) << "\""
+              << ",\"remote_level\":" << options.remote_level
+              << ",\"sample_time_playout\":" << (options.sample_time_playout ? "true" : "false")
+              << ",\"playout_delay_frames\":" << options.playout_delay_frames
+              << ",\"adaptive_playback_cushion\":" << (options.adaptive_playback_cushion ? "true" : "false")
+              << ",\"adaptive_playback_target_frames\":" << options.adaptive_playback_target_frames
+              << ",\"adaptive_playback_min_frames\":" << options.adaptive_playback_min_frames
+              << ",\"adaptive_playback_max_frames\":" << options.adaptive_playback_max_frames
+              << ",\"adaptive_playback_release_ppm\":" << options.adaptive_playback_release_ppm;
+    if (!error.empty()) {
+        std::cout << ",\"error\":\"" << json_escape(error) << "\"";
+    }
+    std::cout << "}\n";
+}
+
 std::tm local_time_from(std::time_t value)
 {
     std::tm out{};
@@ -863,6 +1390,10 @@ public:
         bool metronome = false;
         int bpm = 0;
         double metronome_level = 0.0;
+        std::string metronome_mode;
+        bool sample_time_playout = false;
+        std::size_t playout_delay_frames = 0;
+        double remote_level = 1.0;
         int audio_device_id = -1;
         std::string requested_input_mode;
         std::string requested_channels;
@@ -892,6 +1423,7 @@ public:
         std::uint64_t playback_depth_10ms_plus_frames = 0;
         std::uint64_t playback_depth_observed_frames = 0;
         std::size_t playback_ring_readable = 0;
+        jam2::audio::CallbackTimingStats callback_timing;
     };
 
     CsvStatsLog(const std::filesystem::path& folder, Context context)
@@ -943,7 +1475,23 @@ public:
                 "resampler_ratio_min,resampler_ratio_avg,resampler_ratio_max,resampler_ratio_samples,"
                 "drift_correction_active_samples,drift_correction_active_percent,"
                 "drift_correction_clamped_samples,drift_correction_clamped_percent,"
-                "resampler_ratio_change_max_ppm_per_second\n";
+                "resampler_ratio_change_max_ppm_per_second,remote_level,final_metronome_level,final_remote_level,"
+                "metronome_mode,sample_time_playout,playout_delay_frames,playout_delay_ms,"
+                "expected_remote_sample_time,last_received_sample_time,last_played_remote_sample_time,remote_sample_lag_frames,remote_sample_lag_ms,"
+                "missing_sample_ranges,missing_audio_frames_inserted,late_audio_frames_dropped,playout_delay_error_frames,playout_delay_error_ms,"
+                "metronome_epoch_sample_time,local_metronome_beat,remote_metronome_beat,metronome_alignment_valid,"
+                "send_interval_min_ms,send_interval_avg_ms,send_interval_max_ms,send_interval_samples,"
+                "send_schedule_error_min_ms,send_schedule_error_avg_ms,send_schedule_error_max_ms,send_schedule_error_samples,"
+                "send_catchup_events,send_catchup_max_packets,"
+                "receive_loop_gap_min_ms,receive_loop_gap_avg_ms,receive_loop_gap_max_ms,receive_loop_gap_samples,"
+                "receive_burst_packets_max,receive_packets_per_loop_max,"
+                "audio_callback_interval_min_ms,audio_callback_interval_avg_ms,audio_callback_interval_max_ms,audio_callback_interval_samples,"
+                "audio_callback_gap_over_expected_count,audio_callback_gap_over_1_5x_count,audio_callback_gap_over_2x_count,"
+                "adaptive_playback_cushion,adaptive_playback_target_frames,adaptive_playback_target_ms,"
+                "adaptive_playback_min_frames,adaptive_playback_max_frames,adaptive_playback_raise_events,adaptive_playback_release_events,"
+                "adaptive_playback_burst_events,adaptive_playback_padding_frames,adaptive_playback_padding_ms,"
+                "adaptive_playback_time_above_target_ms,adaptive_playback_time_under_target_ms,"
+                "adaptive_playback_longest_above_target_ms,adaptive_playback_longest_under_target_ms\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -1011,7 +1559,7 @@ public:
              << context_.playback_max_frames << ','
              << context_.stats_warmup_ms << ','
              << csv_escape(context_.requested_input_mode) << ','
-             << csv_escape(audio.stream.input_channels == jam2::audio::InputChannels::Stereo ? "stereo" : "mono") << ','
+             << csv_escape(mono_mix_mode_text(audio.stream.channels.input.size())) << ','
              << csv_escape(context_.requested_channels) << ','
              << csv_escape(channel_selection_text(audio.stream.channels)) << ','
              << (context_.drift_correction ? "on" : "off") << ','
@@ -1132,7 +1680,68 @@ public:
              << drift_active_percent << ','
              << stats.drift_correction_clamped_samples << ','
              << drift_clamped_percent << ','
-             << stats.resampler_ratio_change_max_ppm_per_second << '\n';
+             << stats.resampler_ratio_change_max_ppm_per_second << ','
+             << context_.remote_level << ','
+             << stats.final_metronome_level << ','
+             << stats.final_remote_level << ','
+             << csv_escape(context_.metronome_mode) << ','
+             << (context_.sample_time_playout ? "on" : "off") << ','
+             << context_.playout_delay_frames << ','
+             << frames_to_ms(context_.playout_delay_frames, active_sample_rate) << ','
+             << stats.expected_remote_sample_time << ','
+             << stats.last_received_sample_time << ','
+             << stats.last_played_remote_sample_time << ','
+             << stats.remote_sample_lag_frames << ','
+             << frames_to_ms(static_cast<std::size_t>(stats.remote_sample_lag_frames), active_sample_rate) << ','
+             << stats.missing_sample_ranges << ','
+             << stats.missing_audio_frames_inserted << ','
+             << stats.late_audio_frames_dropped << ','
+             << stats.playout_delay_error_frames << ','
+             << frames_to_ms(
+                    static_cast<std::size_t>(
+                        stats.playout_delay_error_frames < 0 ? -stats.playout_delay_error_frames : stats.playout_delay_error_frames),
+                    active_sample_rate) << ','
+             << stats.metronome_epoch_sample_time << ','
+             << stats.local_metronome_beat << ','
+             << stats.remote_metronome_beat << ','
+             << (stats.metronome_alignment_valid ? "yes" : "no") << ','
+             << (stats.send_interval_samples > 0 ? static_cast<double>(stats.send_interval_min_us) / 1000.0 : 0.0) << ','
+             << avg_us_to_ms(stats.send_interval_sum_us, stats.send_interval_samples) << ','
+             << (stats.send_interval_samples > 0 ? static_cast<double>(stats.send_interval_max_us) / 1000.0 : 0.0) << ','
+             << stats.send_interval_samples << ','
+             << (stats.send_schedule_error_samples > 0 ? static_cast<double>(stats.send_schedule_error_min_us) / 1000.0 : 0.0) << ','
+             << avg_us_to_ms(stats.send_schedule_error_sum_us, stats.send_schedule_error_samples) << ','
+             << (stats.send_schedule_error_samples > 0 ? static_cast<double>(stats.send_schedule_error_max_us) / 1000.0 : 0.0) << ','
+             << stats.send_schedule_error_samples << ','
+             << stats.send_catchup_events << ','
+             << stats.send_catchup_max_packets << ','
+             << (stats.receive_loop_gap_samples > 0 ? static_cast<double>(stats.receive_loop_gap_min_us) / 1000.0 : 0.0) << ','
+             << avg_us_to_ms(stats.receive_loop_gap_sum_us, stats.receive_loop_gap_samples) << ','
+             << (stats.receive_loop_gap_samples > 0 ? static_cast<double>(stats.receive_loop_gap_max_us) / 1000.0 : 0.0) << ','
+             << stats.receive_loop_gap_samples << ','
+             << stats.receive_burst_packets_max << ','
+             << stats.receive_packets_per_loop_max << ','
+             << (audio.callback_timing.interval_samples > 0 ? static_cast<double>(audio.callback_timing.interval_min_us) / 1000.0 : 0.0) << ','
+             << avg_us_to_ms(audio.callback_timing.interval_sum_us, audio.callback_timing.interval_samples) << ','
+             << (audio.callback_timing.interval_samples > 0 ? static_cast<double>(audio.callback_timing.interval_max_us) / 1000.0 : 0.0) << ','
+             << audio.callback_timing.interval_samples << ','
+             << audio.callback_timing.gap_over_expected_count << ','
+             << audio.callback_timing.gap_over_1_5x_count << ','
+             << audio.callback_timing.gap_over_2x_count << ','
+             << (stats.adaptive_playback_cushion_enabled ? "on" : "off") << ','
+             << stats.adaptive_playback_target_frames << ','
+             << frames_to_ms(static_cast<std::size_t>(stats.adaptive_playback_target_frames), active_sample_rate) << ','
+             << stats.adaptive_playback_min_frames << ','
+             << stats.adaptive_playback_max_frames << ','
+             << stats.adaptive_playback_raise_events << ','
+             << stats.adaptive_playback_release_events << ','
+             << stats.adaptive_playback_burst_events << ','
+             << stats.adaptive_playback_padding_frames << ','
+             << frames_to_ms(static_cast<std::size_t>(stats.adaptive_playback_padding_frames), active_sample_rate) << ','
+             << static_cast<double>(stats.adaptive_playback_time_above_target_us) / 1000.0 << ','
+             << static_cast<double>(stats.adaptive_playback_time_under_target_us) / 1000.0 << ','
+             << static_cast<double>(stats.adaptive_playback_longest_above_target_us) / 1000.0 << ','
+             << static_cast<double>(stats.adaptive_playback_longest_under_target_us) / 1000.0 << '\n';
         if (row_type == "final") {
             out_.flush();
         }
@@ -1147,7 +1756,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(151);
+        std::vector<std::string> fields(209);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1253,6 +1862,67 @@ public:
         set(148, stats.drift_correction_clamped_samples);
         set(149, frames_percent(stats.drift_correction_clamped_samples, stats.resampler_ratio_samples));
         set(150, stats.resampler_ratio_change_max_ppm_per_second);
+        set(151, context_.remote_level);
+        set(152, stats.final_metronome_level);
+        set(153, stats.final_remote_level);
+        fields[154] = context_.metronome_mode;
+        fields[155] = context_.sample_time_playout ? "on" : "off";
+        set(156, context_.playout_delay_frames);
+        set(157, frames_to_ms(context_.playout_delay_frames, options.sample_rate));
+        set(158, stats.expected_remote_sample_time);
+        set(159, stats.last_received_sample_time);
+        set(160, stats.last_played_remote_sample_time);
+        set(161, stats.remote_sample_lag_frames);
+        set(162, frames_to_ms(static_cast<std::size_t>(stats.remote_sample_lag_frames), options.sample_rate));
+        set(163, stats.missing_sample_ranges);
+        set(164, stats.missing_audio_frames_inserted);
+        set(165, stats.late_audio_frames_dropped);
+        set(166, stats.playout_delay_error_frames);
+        set(167, frames_to_ms(
+            static_cast<std::size_t>(
+                stats.playout_delay_error_frames < 0 ? -stats.playout_delay_error_frames : stats.playout_delay_error_frames),
+            options.sample_rate));
+        set(168, stats.metronome_epoch_sample_time);
+        set(169, stats.local_metronome_beat);
+        set(170, stats.remote_metronome_beat);
+        fields[171] = stats.metronome_alignment_valid ? "yes" : "no";
+        set(172, stats.send_interval_samples > 0 ? static_cast<double>(stats.send_interval_min_us) / 1000.0 : 0.0);
+        set(173, avg_us_to_ms(stats.send_interval_sum_us, stats.send_interval_samples));
+        set(174, stats.send_interval_samples > 0 ? static_cast<double>(stats.send_interval_max_us) / 1000.0 : 0.0);
+        set(175, stats.send_interval_samples);
+        set(176, stats.send_schedule_error_samples > 0 ? static_cast<double>(stats.send_schedule_error_min_us) / 1000.0 : 0.0);
+        set(177, avg_us_to_ms(stats.send_schedule_error_sum_us, stats.send_schedule_error_samples));
+        set(178, stats.send_schedule_error_samples > 0 ? static_cast<double>(stats.send_schedule_error_max_us) / 1000.0 : 0.0);
+        set(179, stats.send_schedule_error_samples);
+        set(180, stats.send_catchup_events);
+        set(181, stats.send_catchup_max_packets);
+        set(182, stats.receive_loop_gap_samples > 0 ? static_cast<double>(stats.receive_loop_gap_min_us) / 1000.0 : 0.0);
+        set(183, avg_us_to_ms(stats.receive_loop_gap_sum_us, stats.receive_loop_gap_samples));
+        set(184, stats.receive_loop_gap_samples > 0 ? static_cast<double>(stats.receive_loop_gap_max_us) / 1000.0 : 0.0);
+        set(185, stats.receive_loop_gap_samples);
+        set(186, stats.receive_burst_packets_max);
+        set(187, stats.receive_packets_per_loop_max);
+        set(188, audio.callback_timing.interval_samples > 0 ? static_cast<double>(audio.callback_timing.interval_min_us) / 1000.0 : 0.0);
+        set(189, avg_us_to_ms(audio.callback_timing.interval_sum_us, audio.callback_timing.interval_samples));
+        set(190, audio.callback_timing.interval_samples > 0 ? static_cast<double>(audio.callback_timing.interval_max_us) / 1000.0 : 0.0);
+        set(191, audio.callback_timing.interval_samples);
+        set(192, audio.callback_timing.gap_over_expected_count);
+        set(193, audio.callback_timing.gap_over_1_5x_count);
+        set(194, audio.callback_timing.gap_over_2x_count);
+        fields[195] = stats.adaptive_playback_cushion_enabled ? "on" : "off";
+        set(196, stats.adaptive_playback_target_frames);
+        set(197, frames_to_ms(static_cast<std::size_t>(stats.adaptive_playback_target_frames), options.sample_rate));
+        set(198, stats.adaptive_playback_min_frames);
+        set(199, stats.adaptive_playback_max_frames);
+        set(200, stats.adaptive_playback_raise_events);
+        set(201, stats.adaptive_playback_release_events);
+        set(202, stats.adaptive_playback_burst_events);
+        set(203, stats.adaptive_playback_padding_frames);
+        set(204, frames_to_ms(static_cast<std::size_t>(stats.adaptive_playback_padding_frames), options.sample_rate));
+        set(205, static_cast<double>(stats.adaptive_playback_time_above_target_us) / 1000.0);
+        set(206, static_cast<double>(stats.adaptive_playback_time_under_target_us) / 1000.0);
+        set(207, static_cast<double>(stats.adaptive_playback_longest_above_target_us) / 1000.0);
+        set(208, static_cast<double>(stats.adaptive_playback_longest_under_target_us) / 1000.0);
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {
@@ -1281,6 +1951,7 @@ CsvStatsLog::AudioSnapshot make_audio_snapshot(
     snapshot.has_audio = true;
     snapshot.stream = stream->info();
     snapshot.callbacks = stream->callbacks();
+    snapshot.callback_timing = stream->callback_timing_stats();
     snapshot.playback_prefilled = stream->playback_prefilled();
     if (capture_ring != nullptr) {
         const auto stats = capture_ring->stats();
@@ -1346,9 +2017,12 @@ CsvStatsLog::Context make_csv_context(
     context.metronome = options.metronome;
     context.bpm = options.bpm;
     context.metronome_level = options.metronome_level;
+    context.metronome_mode = std::string(metronome_mode_text(options.metronome_mode));
+    context.sample_time_playout = options.sample_time_playout;
+    context.playout_delay_frames = options.playout_delay_frames;
+    context.remote_level = options.remote_level;
     context.audio_device_id = options.audio_device_id.value_or(-1);
-    context.requested_input_mode =
-        options.input_channels == jam2::audio::InputChannels::Stereo ? "stereo" : "mono";
+    context.requested_input_mode = mono_mix_mode_text(options.channel_selection.input.size());
     context.requested_channels = channel_selection_text(options.channel_selection);
     return context;
 }
@@ -1378,6 +2052,133 @@ void print_periodic_stream_stats(const AudioPacketStats& stats, const Options& o
               << "\n";
 }
 
+void print_compact_status(
+    const AudioPacketStats& stats,
+    const Options& options,
+    const RuntimeState& runtime,
+    const jam2::audio::DeviceStream* audio_stream,
+    const jam2::audio::MonoRingBuffer* playback_ring,
+    std::uint64_t elapsed_ms)
+{
+    const std::size_t playback_depth = playback_ring != nullptr ? playback_ring->available_read() : 0;
+    const double playback_depth_ms = frames_to_ms(playback_depth, options.sample_rate);
+    const double metro_level = unit_from_ppm(runtime.metronome_level_ppm.load(std::memory_order_relaxed));
+    const double remote_level = unit_from_ppm(runtime.remote_level_ppm.load(std::memory_order_relaxed));
+    const int live_metronome_mode = runtime.metronome_mode.load(std::memory_order_relaxed);
+    const bool playback_prefilled = audio_stream != nullptr && audio_stream->playback_prefilled();
+    if (options.status_jsonl) {
+        std::cout << "{\"event\":\"status\""
+                  << ",\"elapsed_ms\":" << elapsed_ms
+                  << ",\"metronome\":\"" << (runtime.metronome.load(std::memory_order_relaxed) ? "on" : "off") << "\""
+                  << ",\"bpm\":" << runtime.bpm.load(std::memory_order_relaxed)
+                  << ",\"metronome_level\":" << metro_level
+                  << ",\"remote_level\":" << remote_level
+                  << ",\"metronome_mode\":\"" << metronome_mode_text(live_metronome_mode) << "\""
+                  << ",\"sample_time_playout\":" << (options.sample_time_playout ? "true" : "false")
+                  << ",\"playout_delay_frames\":" << options.playout_delay_frames
+                  << ",\"playback_prefilled\":" << (playback_prefilled ? "true" : "false")
+                  << ",\"playback_depth_frames\":" << playback_depth
+                  << ",\"playback_depth_ms\":" << playback_depth_ms
+                  << ",\"expected_remote_sample_time\":" << stats.expected_remote_sample_time
+                  << ",\"last_received_sample_time\":" << stats.last_received_sample_time
+                  << ",\"last_played_remote_sample_time\":" << stats.last_played_remote_sample_time
+                  << ",\"missing_audio_frames_inserted\":" << stats.missing_audio_frames_inserted
+                  << ",\"late_audio_frames_dropped\":" << stats.late_audio_frames_dropped
+                  << ",\"send_interval_avg_ms\":" << avg_us_to_ms(stats.send_interval_sum_us, stats.send_interval_samples)
+                  << ",\"send_schedule_error_max_ms\":"
+                  << (stats.send_schedule_error_samples > 0 ? static_cast<double>(stats.send_schedule_error_max_us) / 1000.0 : 0.0)
+                  << ",\"receive_loop_gap_max_ms\":"
+                  << (stats.receive_loop_gap_samples > 0 ? static_cast<double>(stats.receive_loop_gap_max_us) / 1000.0 : 0.0)
+                  << ",\"send_catchup_events\":" << stats.send_catchup_events
+                  << ",\"adaptive_playback_cushion\":" << (stats.adaptive_playback_cushion_enabled ? "true" : "false")
+                  << ",\"adaptive_playback_target_frames\":" << stats.adaptive_playback_target_frames
+                  << ",\"adaptive_playback_raise_events\":" << stats.adaptive_playback_raise_events
+                  << ",\"adaptive_playback_release_events\":" << stats.adaptive_playback_release_events
+                  << ",\"rtt_avg_ms\":" << rtt_avg_ms(stats)
+                  << ",\"jitter_avg_ms\":" << avg_us_to_ms(stats.jitter_sum_us, stats.jitter_samples)
+                  << ",\"sequence_lost\":" << stats.sequence.lost
+                  << ",\"sequence_loss_percent\":" << sequence_loss_percent(stats)
+                  << ",\"drift_ppm\":" << stats.drift_ppm
+                  << ",\"resampler_ratio\":" << stats.resampler_ratio
+                  << "}\n";
+        return;
+    }
+    std::cout << "status elapsed_ms=" << elapsed_ms
+              << " metro=" << (runtime.metronome.load(std::memory_order_relaxed) ? "on" : "off")
+              << " bpm=" << runtime.bpm.load(std::memory_order_relaxed)
+              << " metro_level=" << metro_level
+              << " remote_level=" << remote_level
+              << " metronome_mode=" << metronome_mode_text(live_metronome_mode)
+              << " sample_time_playout=" << (options.sample_time_playout ? "on" : "off")
+              << " playout_delay_frames=" << options.playout_delay_frames
+              << " playback_prefilled=" << (playback_prefilled ? "yes" : "no")
+              << " playback_depth_ms=" << playback_depth_ms
+              << " expected_remote_sample_time=" << stats.expected_remote_sample_time
+              << " last_received_sample_time=" << stats.last_received_sample_time
+              << " last_played_remote_sample_time=" << stats.last_played_remote_sample_time
+              << " missing_audio_frames_inserted=" << stats.missing_audio_frames_inserted
+              << " late_audio_frames_dropped=" << stats.late_audio_frames_dropped
+              << " send_interval_avg_ms=" << avg_us_to_ms(stats.send_interval_sum_us, stats.send_interval_samples)
+              << " send_schedule_error_max_ms="
+              << (stats.send_schedule_error_samples > 0 ? static_cast<double>(stats.send_schedule_error_max_us) / 1000.0 : 0.0)
+              << " receive_loop_gap_max_ms="
+              << (stats.receive_loop_gap_samples > 0 ? static_cast<double>(stats.receive_loop_gap_max_us) / 1000.0 : 0.0)
+              << " send_catchup_events=" << stats.send_catchup_events
+              << " adaptive_playback_cushion=" << (stats.adaptive_playback_cushion_enabled ? "on" : "off")
+              << " adaptive_playback_target_frames=" << stats.adaptive_playback_target_frames
+              << " adaptive_playback_raise_events=" << stats.adaptive_playback_raise_events
+              << " adaptive_playback_release_events=" << stats.adaptive_playback_release_events
+              << " rtt_avg_ms=" << rtt_avg_ms(stats)
+              << " jitter_avg_ms=" << avg_us_to_ms(stats.jitter_sum_us, stats.jitter_samples)
+              << " sequence_lost=" << stats.sequence.lost
+              << " sequence_loss_percent=" << sequence_loss_percent(stats)
+              << " drift_ppm=" << stats.drift_ppm
+              << " resampler_ratio=" << stats.resampler_ratio
+              << "\n";
+}
+
+void mix_leader_click_into_packet(
+    std::span<std::int32_t> samples,
+    std::uint64_t packet_sample_time,
+    int sample_rate,
+    int bpm,
+    double level,
+    std::uint64_t epoch_sample_time)
+{
+    if (sample_rate <= 0 || bpm <= 0 || samples.empty()) {
+        return;
+    }
+    const std::uint64_t beat_interval =
+        static_cast<std::uint64_t>((60.0 * static_cast<double>(sample_rate)) / static_cast<double>(bpm));
+    if (beat_interval == 0) {
+        return;
+    }
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+        const std::uint64_t absolute_sample = packet_sample_time + static_cast<std::uint64_t>(i);
+        if (absolute_sample < epoch_sample_time) {
+            continue;
+        }
+        const std::uint64_t grid_sample = absolute_sample - epoch_sample_time;
+        const std::uint64_t beat_phase = grid_sample % beat_interval;
+        const double click_frame_count = static_cast<double>(sample_rate) * 0.010;
+        const std::uint64_t click_frames =
+            static_cast<std::uint64_t>(click_frame_count < 1.0 ? 1.0 : click_frame_count);
+        if (beat_phase >= click_frames) {
+            continue;
+        }
+        const std::uint64_t beat_index = grid_sample / beat_interval;
+        const bool accent = (beat_index % 4ULL) == 0ULL;
+        const double frequency = accent ? 1800.0 : 1200.0;
+        const double phase = 2.0 * 3.14159265358979323846 * frequency *
+            static_cast<double>(beat_phase) / static_cast<double>(sample_rate);
+        const double envelope = 1.0 - (static_cast<double>(beat_phase) / static_cast<double>(click_frames));
+        const double click_level = std::clamp(level * (accent ? 1.6 : 1.0), 0.0, 1.0);
+        const double click = std::sin(phase) * envelope * click_level * 8388607.0;
+        const double mixed = static_cast<double>(samples[i]) + click;
+        samples[i] = static_cast<std::int32_t>(std::clamp(mixed, -8388608.0, 8388607.0));
+    }
+}
+
 AudioPacketStats run_audio_packet_exchange(
     jam2::UdpSocket& socket,
     const jam2::SessionInfo& session,
@@ -1389,16 +2190,24 @@ AudioPacketStats run_audio_packet_exchange(
     jam2::audio::MonoRingBuffer* playback_ring,
     jam2::audio::DeviceStream* audio_stream,
     std::uint64_t startup_drained_packets,
-    CsvStatsLog* csv_log)
+    CsvStatsLog* csv_log,
+    bool listener_side)
 {
     AudioPacketStats stats;
     stats.startup_drained_packets = startup_drained_packets;
+    stats.sample_time_playout_enabled = options.sample_time_playout;
+    stats.playout_delay_frames = static_cast<std::uint64_t>(options.playout_delay_frames);
+    stats.adaptive_playback_cushion_enabled = options.adaptive_playback_cushion;
+    stats.adaptive_playback_target_frames = static_cast<std::uint64_t>(options.adaptive_playback_target_frames);
+    stats.adaptive_playback_min_frames = static_cast<std::uint64_t>(options.adaptive_playback_min_frames);
+    stats.adaptive_playback_max_frames = static_cast<std::uint64_t>(options.adaptive_playback_max_frames);
     const bool bounded_stream = options.stream_ms > 0;
-    const bool collect_stats = options.stats_enabled;
+    const bool collect_stats = true;
     const bool collect_diagnostics = collect_stats && (csv_log != nullptr || options.stats_interval_ms > 0);
 
     std::vector<std::int32_t> asio_frames(static_cast<std::size_t>(options.frame_size), 0);
     std::vector<std::int32_t> network_frames(static_cast<std::size_t>(options.frame_size), 0);
+    std::vector<std::int32_t> silence_frames(static_cast<std::size_t>(options.frame_size), 0);
     const auto silence_payload = jam2::protocol::pack_pcm24(network_frames);
     const std::uint16_t audio_payload_size = static_cast<std::uint16_t>(silence_payload.size());
     std::uint32_t audio_sequence = 1;
@@ -1423,6 +2232,16 @@ AudioPacketStats run_audio_packet_exchange(
     std::uint64_t previous_resampler_ratio_time_us = 0;
     std::uint64_t first_remote_sample_time = 0;
     std::uint64_t first_receive_time_us = 0;
+    bool playout_sample_time_initialized = false;
+    std::uint64_t next_playout_remote_sample_time = 0;
+    std::uint64_t adaptive_target_frames = static_cast<std::uint64_t>(options.adaptive_playback_target_frames);
+    std::uint64_t adaptive_last_update_us = 0;
+    std::uint64_t adaptive_under_start_us = 0;
+    std::uint64_t adaptive_above_start_us = 0;
+    bool adaptive_under_active = false;
+    bool adaptive_above_active = false;
+    std::uint64_t last_send_time_us = 0;
+    std::uint64_t last_stream_loop_us = 0;
     const std::uint64_t start_time = next_send;
     std::uint64_t next_stats = collect_stats && options.stats_interval_ms > 0 ?
         start_time + static_cast<std::uint64_t>(options.stats_interval_ms) * 1000ULL :
@@ -1486,6 +2305,37 @@ AudioPacketStats run_audio_packet_exchange(
         tracker.active = false;
     };
 
+    auto observe_target_duration = [](
+        bool active,
+        std::uint64_t now_us,
+        bool& tracker_active,
+        std::uint64_t& tracker_start_us,
+        std::uint64_t& total_us,
+        std::uint64_t& longest_us) {
+        if (active) {
+            if (!tracker_active) {
+                tracker_active = true;
+                tracker_start_us = now_us;
+            }
+            return;
+        }
+        if (!tracker_active) {
+            return;
+        }
+        const std::uint64_t duration = now_us >= tracker_start_us ? now_us - tracker_start_us : 0;
+        total_us += duration;
+        if (duration > longest_us) {
+            longest_us = duration;
+        }
+        tracker_active = false;
+    };
+
+    auto current_playout_delay_frames = [&]() -> std::uint64_t {
+        return options.adaptive_playback_cushion ?
+            adaptive_target_frames :
+            static_cast<std::uint64_t>(options.playout_delay_frames);
+    };
+
     auto process_audio_packet = [&](const PendingAudioPacket& packet) {
         const std::uint64_t warmup_end_time =
             start_time + static_cast<std::uint64_t>(options.stats_warmup_ms) * 1000ULL;
@@ -1496,7 +2346,61 @@ AudioPacketStats run_audio_packet_exchange(
             ++stats.stats_warmup_skipped_packets;
         }
         if (playback_ring != nullptr) {
-            const std::size_t pushed_frames = playback_ring->push(packet.samples);
+            stats.sample_time_playout_enabled = options.sample_time_playout;
+            stats.last_received_sample_time = packet.sample_time;
+            std::size_t pushed_frames = 0;
+            bool inserted_missing_samples_for_packet = false;
+            if (options.sample_time_playout) {
+                if (!playout_sample_time_initialized) {
+                    playout_sample_time_initialized = true;
+                    next_playout_remote_sample_time = packet.sample_time;
+                    stats.expected_remote_sample_time = next_playout_remote_sample_time;
+                }
+                if (packet.sample_time > next_playout_remote_sample_time) {
+                    std::uint64_t missing = packet.sample_time - next_playout_remote_sample_time;
+                    inserted_missing_samples_for_packet = true;
+                    ++stats.missing_sample_ranges;
+                    stats.missing_audio_frames_inserted += missing;
+                    while (missing > 0) {
+                        const std::size_t chunk = static_cast<std::size_t>(std::min<std::uint64_t>(
+                            missing,
+                            static_cast<std::uint64_t>(silence_frames.size())));
+                        pushed_frames += playback_ring->push(std::span<const std::int32_t>(silence_frames.data(), chunk));
+                        missing -= chunk;
+                    }
+                    next_playout_remote_sample_time = packet.sample_time;
+                }
+                const std::uint64_t packet_end =
+                    packet.sample_time + static_cast<std::uint64_t>(packet.samples.size());
+                if (packet_end <= next_playout_remote_sample_time) {
+                    stats.late_audio_frames_dropped += static_cast<std::uint64_t>(packet.samples.size());
+                    return;
+                }
+                std::span<const std::int32_t> packet_samples(packet.samples.data(), packet.samples.size());
+                if (packet.sample_time < next_playout_remote_sample_time) {
+                    const std::uint64_t late = next_playout_remote_sample_time - packet.sample_time;
+                    const std::size_t skip = static_cast<std::size_t>(std::min<std::uint64_t>(
+                        late,
+                        static_cast<std::uint64_t>(packet.samples.size())));
+                    stats.late_audio_frames_dropped += static_cast<std::uint64_t>(skip);
+                    packet_samples = packet_samples.subspan(skip);
+                }
+                pushed_frames += playback_ring->push(packet_samples);
+                next_playout_remote_sample_time += static_cast<std::uint64_t>(packet_samples.size());
+                stats.expected_remote_sample_time = next_playout_remote_sample_time;
+                stats.last_played_remote_sample_time = next_playout_remote_sample_time;
+                stats.remote_sample_lag_frames =
+                    next_playout_remote_sample_time >= packet.sample_time ?
+                        next_playout_remote_sample_time - packet.sample_time :
+                        0;
+            } else {
+                pushed_frames = playback_ring->push(packet.samples);
+                stats.expected_remote_sample_time = packet.sample_time + static_cast<std::uint64_t>(packet.samples.size());
+                stats.last_played_remote_sample_time = stats.expected_remote_sample_time;
+            }
+            stats.playout_delay_frames = current_playout_delay_frames();
+            const std::int64_t depth_after_push = static_cast<std::int64_t>(playback_ring->available_read());
+            stats.playout_delay_error_frames = depth_after_push - static_cast<std::int64_t>(stats.playout_delay_frames);
             if (collect_deep_diagnostics) {
                 observe_timing(
                     static_cast<std::uint64_t>(pushed_frames),
@@ -1518,6 +2422,78 @@ AudioPacketStats run_audio_packet_exchange(
                         }
                     }
                 }
+            }
+            if (options.adaptive_playback_cushion && collect_tuning_stats) {
+                const std::uint64_t now_us = packet.receive_time;
+                std::uint64_t depth = static_cast<std::uint64_t>(playback_ring->available_read());
+                const bool burst_evidence =
+                    depth < static_cast<std::uint64_t>(options.adaptive_playback_min_frames) ||
+                    inserted_missing_samples_for_packet;
+                if (burst_evidence && adaptive_target_frames < static_cast<std::uint64_t>(options.adaptive_playback_max_frames)) {
+                    const std::uint64_t previous_target = adaptive_target_frames;
+                    adaptive_target_frames = std::min<std::uint64_t>(
+                        static_cast<std::uint64_t>(options.adaptive_playback_max_frames),
+                        std::max<std::uint64_t>(
+                            adaptive_target_frames + static_cast<std::uint64_t>(options.frame_size),
+                            static_cast<std::uint64_t>(options.adaptive_playback_min_frames)));
+                    if (adaptive_target_frames > previous_target) {
+                        ++stats.adaptive_playback_raise_events;
+                        ++stats.adaptive_playback_burst_events;
+                    }
+                } else if (!burst_evidence &&
+                    adaptive_target_frames > static_cast<std::uint64_t>(options.adaptive_playback_min_frames) &&
+                    options.adaptive_playback_release_ppm > 0) {
+                    const std::uint64_t elapsed_us =
+                        adaptive_last_update_us != 0 && now_us > adaptive_last_update_us ? now_us - adaptive_last_update_us : 0;
+                    const double release_frames =
+                        static_cast<double>(adaptive_target_frames) *
+                        static_cast<double>(options.adaptive_playback_release_ppm) *
+                        (static_cast<double>(elapsed_us) / 1000000.0) / 1000000.0;
+                    const std::uint64_t release = static_cast<std::uint64_t>(release_frames);
+                    if (release > 0) {
+                        const std::uint64_t previous_target = adaptive_target_frames;
+                        adaptive_target_frames = previous_target > release ?
+                            std::max<std::uint64_t>(
+                                static_cast<std::uint64_t>(options.adaptive_playback_min_frames),
+                                previous_target - release) :
+                            static_cast<std::uint64_t>(options.adaptive_playback_min_frames);
+                        if (adaptive_target_frames < previous_target) {
+                            ++stats.adaptive_playback_release_events;
+                        }
+                    }
+                }
+                adaptive_last_update_us = now_us;
+                depth = static_cast<std::uint64_t>(playback_ring->available_read());
+                if (depth < adaptive_target_frames) {
+                    std::uint64_t padding = adaptive_target_frames - depth;
+                    stats.adaptive_playback_padding_frames += padding;
+                    while (padding > 0) {
+                        const std::size_t chunk = static_cast<std::size_t>(std::min<std::uint64_t>(
+                            padding,
+                            static_cast<std::uint64_t>(silence_frames.size())));
+                        (void)playback_ring->push(std::span<const std::int32_t>(silence_frames.data(), chunk));
+                        padding -= chunk;
+                    }
+                }
+                depth = static_cast<std::uint64_t>(playback_ring->available_read());
+                observe_target_duration(
+                    depth < adaptive_target_frames,
+                    now_us,
+                    adaptive_under_active,
+                    adaptive_under_start_us,
+                    stats.adaptive_playback_time_under_target_us,
+                    stats.adaptive_playback_longest_under_target_us);
+                observe_target_duration(
+                    depth > adaptive_target_frames,
+                    now_us,
+                    adaptive_above_active,
+                    adaptive_above_start_us,
+                    stats.adaptive_playback_time_above_target_us,
+                    stats.adaptive_playback_longest_above_target_us);
+                stats.adaptive_playback_target_frames = adaptive_target_frames;
+                stats.playout_delay_frames = adaptive_target_frames;
+                stats.playout_delay_error_frames =
+                    static_cast<std::int64_t>(depth) - static_cast<std::int64_t>(adaptive_target_frames);
             }
             if (collect_tuning_stats) {
                 const std::uint64_t depth_after = playback_ring->available_read();
@@ -1606,7 +2582,7 @@ AudioPacketStats run_audio_packet_exchange(
                     previous_resampler_ratio = stats.resampler_ratio;
                     previous_resampler_ratio_time_us = packet.receive_time;
                 }
-                sync_audio_control(runtime, audio_control, options.metronome_level, stats.resampler_ratio);
+                sync_audio_control(runtime, audio_control, stats.resampler_ratio);
                 stats.drift_valid = true;
             }
         }
@@ -1672,7 +2648,21 @@ AudioPacketStats run_audio_packet_exchange(
 
     while (jam2::monotonic_us() < receive_deadline && !stats.received_bye && !runtime.quit.load(std::memory_order_relaxed)) {
         const std::uint64_t now = jam2::monotonic_us();
-        sync_audio_control(runtime, audio_control, options.metronome_level, stats.resampler_ratio);
+        if (collect_diagnostics && last_stream_loop_us != 0 && now >= last_stream_loop_us) {
+            observe_timing(now - last_stream_loop_us, stats.receive_loop_gap_min_us, stats.receive_loop_gap_sum_us, stats.receive_loop_gap_max_us);
+            ++stats.receive_loop_gap_samples;
+        }
+        last_stream_loop_us = now;
+        const bool metronome_enabled = runtime.metronome.load(std::memory_order_relaxed);
+        const std::uint64_t metronome_revision = runtime.metronome_revision.load(std::memory_order_relaxed);
+        if (metronome_enabled && (!runtime.metronome_epoch_valid.load(std::memory_order_relaxed) ||
+            metronome_revision != last_metronome_revision)) {
+            runtime.metronome_epoch_sample_time.store(
+                sample_time + current_playout_delay_frames(),
+                std::memory_order_relaxed);
+            runtime.metronome_epoch_valid.store(true, std::memory_order_relaxed);
+        }
+        sync_audio_control(runtime, audio_control, stats.resampler_ratio);
         int sends_this_loop = 0;
         while (now >= next_send && next_send < send_deadline && sends_this_loop < 8) {
             std::vector<std::uint8_t> payload;
@@ -1681,9 +2671,32 @@ AudioPacketStats run_audio_packet_exchange(
                 for (std::size_t i = 0; i < asio_frames.size(); ++i) {
                     network_frames[i] = asio_frames[i] / 256;
                 }
+                const int live_metronome_mode = runtime.metronome_mode.load(std::memory_order_relaxed);
+                if (live_metronome_mode == metronome_mode_id(MetronomeMode::LeaderAudio) && listener_side && metronome_enabled) {
+                    mix_leader_click_into_packet(
+                        network_frames,
+                        sample_time,
+                        options.sample_rate,
+                        runtime.bpm.load(std::memory_order_relaxed),
+                        unit_from_ppm(runtime.metronome_level_ppm.load(std::memory_order_relaxed)),
+                        runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed));
+                }
                 payload = jam2::protocol::pack_pcm24(network_frames);
             } else {
-                payload = silence_payload;
+                const int live_metronome_mode = runtime.metronome_mode.load(std::memory_order_relaxed);
+                if (live_metronome_mode == metronome_mode_id(MetronomeMode::LeaderAudio) && listener_side && metronome_enabled) {
+                    std::fill(network_frames.begin(), network_frames.end(), 0);
+                    mix_leader_click_into_packet(
+                        network_frames,
+                        sample_time,
+                        options.sample_rate,
+                        runtime.bpm.load(std::memory_order_relaxed),
+                        unit_from_ppm(runtime.metronome_level_ppm.load(std::memory_order_relaxed)),
+                        runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed));
+                    payload = jam2::protocol::pack_pcm24(network_frames);
+                } else {
+                    payload = silence_payload;
+                }
             }
             const jam2::protocol::Header header{
                 jam2::protocol::PacketType::Audio,
@@ -1696,10 +2709,30 @@ AudioPacketStats run_audio_packet_exchange(
                 0,
             };
             const auto packet = jam2::protocol::encode_packet(header, payload, session.key);
+            const std::uint64_t actual_send_time = jam2::monotonic_us();
             socket.send_to(peer, packet);
             if (collect_stats) {
                 ++stats.sent_packets;
                 stats.sent_bytes += packet.size();
+            }
+            if (collect_diagnostics) {
+                if (last_send_time_us != 0 && actual_send_time >= last_send_time_us) {
+                    observe_timing(
+                        actual_send_time - last_send_time_us,
+                        stats.send_interval_min_us,
+                        stats.send_interval_sum_us,
+                        stats.send_interval_max_us);
+                    ++stats.send_interval_samples;
+                }
+                const std::uint64_t schedule_error =
+                    actual_send_time >= next_send ? actual_send_time - next_send : next_send - actual_send_time;
+                observe_timing(
+                    schedule_error,
+                    stats.send_schedule_error_min_us,
+                    stats.send_schedule_error_sum_us,
+                    stats.send_schedule_error_max_us);
+                ++stats.send_schedule_error_samples;
+                last_send_time_us = actual_send_time;
             }
             sample_time += static_cast<std::uint64_t>(options.frame_size);
             std::uint64_t next_send_step = interval_us == 0 ? 1 : interval_us;
@@ -1710,6 +2743,12 @@ AudioPacketStats run_audio_packet_exchange(
             }
             next_send += next_send_step;
             ++sends_this_loop;
+        }
+        if (collect_diagnostics && sends_this_loop > 1) {
+            ++stats.send_catchup_events;
+            if (static_cast<std::uint64_t>(sends_this_loop) > stats.send_catchup_max_packets) {
+                stats.send_catchup_max_packets = static_cast<std::uint64_t>(sends_this_loop);
+            }
         }
         if (now >= next_ping && now < send_deadline) {
             const jam2::protocol::Header ping{
@@ -1729,12 +2768,11 @@ AudioPacketStats run_audio_packet_exchange(
             }
             next_ping += 100000ULL;
         }
-        const bool metronome_enabled = runtime.metronome.load(std::memory_order_relaxed);
-        const std::uint64_t metronome_revision = runtime.metronome_revision.load(std::memory_order_relaxed);
         if (((metronome_enabled && now >= next_metronome) || metronome_revision != last_metronome_revision) &&
             now < send_deadline) {
             const int current_bpm = runtime.bpm.load(std::memory_order_relaxed);
-            const auto metro_payload = encode_metronome_payload(metronome_enabled ? current_bpm : -current_bpm, local_beat++);
+            const std::uint64_t epoch = runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed);
+            const auto metro_payload = encode_metronome_payload(metronome_enabled ? current_bpm : -current_bpm, local_beat++, epoch);
             const jam2::protocol::Header metro{
                 jam2::protocol::PacketType::MetronomeState,
                 0,
@@ -1750,6 +2788,9 @@ AudioPacketStats run_audio_packet_exchange(
             if (collect_stats) {
                 ++stats.metronome_sent;
             }
+            stats.local_metronome_beat = local_beat;
+            stats.metronome_epoch_sample_time = epoch;
+            stats.metronome_alignment_valid = runtime.metronome_epoch_valid.load(std::memory_order_relaxed);
             last_metronome_revision = metronome_revision;
             if (metronome_enabled) {
                 const std::uint64_t beat_interval_us = 60000000ULL / static_cast<std::uint64_t>(current_bpm);
@@ -1761,6 +2802,10 @@ AudioPacketStats run_audio_packet_exchange(
         if (collect_stats && runtime.print_stats.exchange(false, std::memory_order_relaxed)) {
             const std::uint64_t elapsed_ms = (now - start_time) / 1000ULL;
             print_periodic_stream_stats(stats, options, elapsed_ms);
+        }
+        if (runtime.print_status.exchange(false, std::memory_order_relaxed)) {
+            const std::uint64_t elapsed_ms = (now - start_time) / 1000ULL;
+            print_compact_status(stats, options, runtime, audio_stream, playback_ring, elapsed_ms);
         }
         if (!stats.sent_bye && now >= send_deadline) {
             const jam2::protocol::Header bye{
@@ -1779,7 +2824,9 @@ AudioPacketStats run_audio_packet_exchange(
         }
         if (next_stats != 0 && now >= next_stats) {
             const std::uint64_t elapsed_ms = (now - start_time) / 1000ULL;
-            print_periodic_stream_stats(stats, options, elapsed_ms);
+            if (runtime.stats_enabled.load(std::memory_order_relaxed)) {
+                print_periodic_stream_stats(stats, options, elapsed_ms);
+            }
             if (csv_log != nullptr) {
                 csv_log->write_periodic(
                     elapsed_ms,
@@ -1901,17 +2948,26 @@ AudioPacketStats run_audio_packet_exchange(
                     const auto payload = std::span<const std::uint8_t>(
                         bytes.data() + jam2::protocol::kHeaderSize,
                         header.payload_length);
-                    const auto [remote_bpm, remote_beat] = decode_metronome_payload(payload);
+                    const auto metronome_payload = decode_metronome_payload(payload);
+                    const int remote_bpm = metronome_payload.bpm;
                     if (runtime.metronome_revision.load(std::memory_order_relaxed) == 0) {
                         if (remote_bpm < 0 && remote_bpm >= -400) {
                             runtime.metronome.store(false, std::memory_order_relaxed);
                             runtime.bpm.store(-remote_bpm, std::memory_order_relaxed);
+                            runtime.metronome_epoch_valid.store(false, std::memory_order_relaxed);
                         } else if (remote_bpm > 0 && remote_bpm <= 400) {
                             runtime.metronome.store(true, std::memory_order_relaxed);
                             runtime.bpm.store(remote_bpm, std::memory_order_relaxed);
+                            runtime.metronome_epoch_sample_time.store(
+                                metronome_payload.epoch_sample_time + current_playout_delay_frames(),
+                                std::memory_order_relaxed);
+                            runtime.metronome_epoch_valid.store(true, std::memory_order_relaxed);
                         }
                     }
-                    stats.last_remote_beat = remote_beat;
+                    stats.last_remote_beat = metronome_payload.beat;
+                    stats.remote_metronome_beat = metronome_payload.beat;
+                    stats.metronome_epoch_sample_time = runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed);
+                    stats.metronome_alignment_valid = runtime.metronome_epoch_valid.load(std::memory_order_relaxed);
                     if (collect_stats) {
                         ++stats.metronome_received;
                     }
@@ -1931,6 +2987,12 @@ AudioPacketStats run_audio_packet_exchange(
             stats.recv_loop_batch_sum += received_this_loop;
             if (received_this_loop > stats.recv_loop_batch_max) {
                 stats.recv_loop_batch_max = received_this_loop;
+            }
+            if (received_this_loop > stats.receive_packets_per_loop_max) {
+                stats.receive_packets_per_loop_max = received_this_loop;
+            }
+            if (received_this_loop > 1 && received_this_loop > stats.receive_burst_packets_max) {
+                stats.receive_burst_packets_max = received_this_loop;
             }
             if (received_this_loop == 0) {
                 ++stats.recv_loop_idle_count;
@@ -1979,10 +3041,34 @@ AudioPacketStats run_audio_packet_exchange(
             stats.playback_depth_under_10ms_events,
             stats.playback_depth_under_10ms_max_duration_us);
     }
+    if (options.adaptive_playback_cushion) {
+        observe_target_duration(
+            false,
+            finish_time,
+            adaptive_under_active,
+            adaptive_under_start_us,
+            stats.adaptive_playback_time_under_target_us,
+            stats.adaptive_playback_longest_under_target_us);
+        observe_target_duration(
+            false,
+            finish_time,
+            adaptive_above_active,
+            adaptive_above_start_us,
+            stats.adaptive_playback_time_above_target_us,
+            stats.adaptive_playback_longest_above_target_us);
+    }
 
     stats.elapsed_ms = (finish_time - start_time) / 1000ULL;
     stats.final_metronome_enabled = runtime.metronome.load(std::memory_order_relaxed);
     stats.final_bpm = runtime.bpm.load(std::memory_order_relaxed);
+    stats.final_metronome_level = unit_from_ppm(runtime.metronome_level_ppm.load(std::memory_order_relaxed));
+    stats.final_remote_level = unit_from_ppm(runtime.remote_level_ppm.load(std::memory_order_relaxed));
+    stats.metronome_epoch_sample_time = runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed);
+    stats.metronome_alignment_valid = runtime.metronome_epoch_valid.load(std::memory_order_relaxed);
+    stats.adaptive_playback_cushion_enabled = options.adaptive_playback_cushion;
+    stats.adaptive_playback_target_frames = adaptive_target_frames;
+    stats.adaptive_playback_min_frames = static_cast<std::uint64_t>(options.adaptive_playback_min_frames);
+    stats.adaptive_playback_max_frames = static_cast<std::uint64_t>(options.adaptive_playback_max_frames);
     if (csv_log != nullptr) {
         csv_log->write(
             "final",
@@ -2026,8 +3112,21 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "Drift max correction ppm: " << options.drift_max_correction_ppm << "\n";
     std::cout << "Metronome: " << (options.metronome ? "on" : "off") << "\n";
     std::cout << "BPM: " << options.bpm << "\n";
+    std::cout << "Metronome level: " << options.metronome_level << "\n";
+    std::cout << "Metronome mode: " << metronome_mode_text(options.metronome_mode) << "\n";
+    std::cout << "Remote playback level: " << options.remote_level << "\n";
+    std::cout << "Sample-time playout: " << (options.sample_time_playout ? "on" : "off") << "\n";
+    std::cout << "Playout delay frames: " << options.playout_delay_frames << "\n";
+    std::cout << "Playout delay ms: " << frames_to_ms(options.playout_delay_frames, options.sample_rate) << "\n";
+    std::cout << "Adaptive playback cushion requested: " << (options.adaptive_playback_cushion ? "on" : "off") << "\n";
+    std::cout << "Adaptive playback target frames requested: " << options.adaptive_playback_target_frames << "\n";
+    std::cout << "Adaptive playback min frames requested: " << options.adaptive_playback_min_frames << "\n";
+    std::cout << "Adaptive playback max frames requested: " << options.adaptive_playback_max_frames << "\n";
+    std::cout << "Adaptive playback release ppm: " << options.adaptive_playback_release_ppm << "\n";
     std::cout << "Final metronome: " << (stats.final_metronome_enabled ? "on" : "off") << "\n";
     std::cout << "Final BPM: " << stats.final_bpm << "\n";
+    std::cout << "Final metronome level: " << stats.final_metronome_level << "\n";
+    std::cout << "Final remote playback level: " << stats.final_remote_level << "\n";
     if (options.stream_ms > 0) {
         std::cout << "Expected audio packets: " << expected_packets << "\n";
     }
@@ -2084,9 +3183,64 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "BYE received: " << (stats.received_bye ? "yes" : "no") << "\n";
     std::cout << "Metronome states sent: " << stats.metronome_sent << "\n";
     std::cout << "Metronome states received: " << stats.metronome_received << "\n";
+    std::cout << "Metronome epoch sample time: " << stats.metronome_epoch_sample_time << "\n";
+    std::cout << "Metronome local beat: " << stats.local_metronome_beat << "\n";
+    std::cout << "Metronome remote beat: " << stats.remote_metronome_beat << "\n";
+    std::cout << "Metronome alignment valid: " << (stats.metronome_alignment_valid ? "yes" : "no") << "\n";
     if (stats.metronome_received > 0) {
         std::cout << "Metronome last remote beat: " << stats.last_remote_beat << "\n";
     }
+    std::cout << "Expected remote sample time: " << stats.expected_remote_sample_time << "\n";
+    std::cout << "Last received sample time: " << stats.last_received_sample_time << "\n";
+    std::cout << "Last played remote sample time: " << stats.last_played_remote_sample_time << "\n";
+    std::cout << "Remote sample lag frames: " << stats.remote_sample_lag_frames << "\n";
+    std::cout << "Remote sample lag ms: " << frames_to_ms(static_cast<std::size_t>(stats.remote_sample_lag_frames), options.sample_rate) << "\n";
+    std::cout << "Missing sample ranges: " << stats.missing_sample_ranges << "\n";
+    std::cout << "Missing audio frames inserted: " << stats.missing_audio_frames_inserted << "\n";
+    std::cout << "Late audio frames dropped: " << stats.late_audio_frames_dropped << "\n";
+    std::cout << "Playout delay error frames: " << stats.playout_delay_error_frames << "\n";
+    std::cout << "Playout delay error ms: "
+              << frames_to_ms(
+                     static_cast<std::size_t>(
+                         stats.playout_delay_error_frames < 0 ? -stats.playout_delay_error_frames : stats.playout_delay_error_frames),
+                     options.sample_rate)
+              << "\n";
+    if (stats.send_interval_samples > 0) {
+        std::cout << "Send interval ms min: " << static_cast<double>(stats.send_interval_min_us) / 1000.0 << "\n";
+        std::cout << "Send interval ms avg: " << avg_us_to_ms(stats.send_interval_sum_us, stats.send_interval_samples) << "\n";
+        std::cout << "Send interval ms max: " << static_cast<double>(stats.send_interval_max_us) / 1000.0 << "\n";
+    }
+    if (stats.send_schedule_error_samples > 0) {
+        std::cout << "Send schedule error ms min: " << static_cast<double>(stats.send_schedule_error_min_us) / 1000.0 << "\n";
+        std::cout << "Send schedule error ms avg: "
+                  << avg_us_to_ms(stats.send_schedule_error_sum_us, stats.send_schedule_error_samples) << "\n";
+        std::cout << "Send schedule error ms max: " << static_cast<double>(stats.send_schedule_error_max_us) / 1000.0 << "\n";
+    }
+    std::cout << "Send catchup events: " << stats.send_catchup_events << "\n";
+    std::cout << "Send catchup max packets: " << stats.send_catchup_max_packets << "\n";
+    if (stats.receive_loop_gap_samples > 0) {
+        std::cout << "Receive loop gap ms min: " << static_cast<double>(stats.receive_loop_gap_min_us) / 1000.0 << "\n";
+        std::cout << "Receive loop gap ms avg: " << avg_us_to_ms(stats.receive_loop_gap_sum_us, stats.receive_loop_gap_samples) << "\n";
+        std::cout << "Receive loop gap ms max: " << static_cast<double>(stats.receive_loop_gap_max_us) / 1000.0 << "\n";
+    }
+    std::cout << "Receive burst packets max: " << stats.receive_burst_packets_max << "\n";
+    std::cout << "Receive packets per loop max: " << stats.receive_packets_per_loop_max << "\n";
+    std::cout << "Adaptive playback cushion: " << (stats.adaptive_playback_cushion_enabled ? "on" : "off") << "\n";
+    std::cout << "Adaptive playback target frames: " << stats.adaptive_playback_target_frames << "\n";
+    std::cout << "Adaptive playback target ms: "
+              << frames_to_ms(static_cast<std::size_t>(stats.adaptive_playback_target_frames), options.sample_rate) << "\n";
+    std::cout << "Adaptive playback min frames: " << stats.adaptive_playback_min_frames << "\n";
+    std::cout << "Adaptive playback max frames: " << stats.adaptive_playback_max_frames << "\n";
+    std::cout << "Adaptive playback raise events: " << stats.adaptive_playback_raise_events << "\n";
+    std::cout << "Adaptive playback release events: " << stats.adaptive_playback_release_events << "\n";
+    std::cout << "Adaptive playback burst events: " << stats.adaptive_playback_burst_events << "\n";
+    std::cout << "Adaptive playback padding frames: " << stats.adaptive_playback_padding_frames << "\n";
+    std::cout << "Adaptive playback padding ms: "
+              << frames_to_ms(static_cast<std::size_t>(stats.adaptive_playback_padding_frames), options.sample_rate) << "\n";
+    std::cout << "Adaptive playback time above target ms: "
+              << static_cast<double>(stats.adaptive_playback_time_above_target_us) / 1000.0 << "\n";
+    std::cout << "Adaptive playback time under target ms: "
+              << static_cast<double>(stats.adaptive_playback_time_under_target_us) / 1000.0 << "\n";
     if (stats.recv_pongs > 0) {
         std::cout << "RTT ms min: " << (static_cast<double>(stats.rtt_min_us) / 1000.0) << "\n";
         std::cout << "RTT ms avg: "
@@ -2121,7 +3275,7 @@ struct OptionalAudioStream {
     std::unique_ptr<jam2::audio::DeviceStream> stream;
 };
 
-OptionalAudioStream start_optional_audio(const Options& options)
+OptionalAudioStream start_optional_audio(const Options& options, bool leader_audio_local_click)
 {
     OptionalAudioStream audio;
     if (!options.audio_device_id) {
@@ -2131,7 +3285,12 @@ OptionalAudioStream start_optional_audio(const Options& options)
     audio.control->metronome_enabled.store(options.metronome, std::memory_order_relaxed);
     audio.control->metronome_bpm.store(options.bpm, std::memory_order_relaxed);
     audio.control->metronome_level_ppm.store(ppm_from_unit(options.metronome_level), std::memory_order_relaxed);
+    audio.control->remote_level_ppm.store(ppm_from_unit(options.remote_level), std::memory_order_relaxed);
     audio.control->playback_ratio_ppm.store(1000000, std::memory_order_relaxed);
+    audio.control->metronome_mode.store(metronome_mode_id(options.metronome_mode), std::memory_order_relaxed);
+    audio.control->leader_audio_local_click.store(leader_audio_local_click, std::memory_order_relaxed);
+    audio.control->metronome_epoch_sample_time.store(0, std::memory_order_relaxed);
+    audio.control->metronome_epoch_valid.store(options.metronome, std::memory_order_relaxed);
     audio.capture_ring = std::make_unique<jam2::audio::MonoRingBuffer>(options.capture_ring_frames);
     audio.playback_ring = std::make_unique<jam2::audio::MonoRingBuffer>(options.playback_ring_frames);
     const bool diagnostics_enabled =
@@ -2173,6 +3332,11 @@ struct CommandThread {
     {
         state.metronome.store(options.metronome, std::memory_order_relaxed);
         state.bpm.store(options.bpm, std::memory_order_relaxed);
+        state.metronome_level_ppm.store(ppm_from_unit(options.metronome_level), std::memory_order_relaxed);
+        state.remote_level_ppm.store(ppm_from_unit(options.remote_level), std::memory_order_relaxed);
+        state.metronome_mode.store(metronome_mode_id(options.metronome_mode), std::memory_order_relaxed);
+        state.metronome_epoch_sample_time.store(0, std::memory_order_relaxed);
+        state.metronome_epoch_valid.store(options.metronome, std::memory_order_relaxed);
         state.stats_enabled.store(options.stats_enabled, std::memory_order_relaxed);
         thread = std::thread([this] { stdin_command_loop(state); });
     }
@@ -2193,10 +3357,22 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
     }
     const auto capture_stats = audio.capture_ring->stats();
     const auto playback_stats = audio.playback_ring->stats();
+    const auto callback_stats = audio.stream->callback_timing_stats();
     const std::size_t capture_readable = audio.capture_ring->available_read();
     const std::size_t playback_readable = audio.playback_ring->available_read();
     const auto stream_info = audio.stream->info();
     std::cout << "Audio callbacks: " << audio.stream->callbacks() << "\n";
+    if (callback_stats.interval_samples > 0) {
+        std::cout << "Audio callback interval ms min: "
+                  << static_cast<double>(callback_stats.interval_min_us) / 1000.0 << "\n";
+        std::cout << "Audio callback interval ms avg: "
+                  << avg_us_to_ms(callback_stats.interval_sum_us, callback_stats.interval_samples) << "\n";
+        std::cout << "Audio callback interval ms max: "
+                  << static_cast<double>(callback_stats.interval_max_us) / 1000.0 << "\n";
+    }
+    std::cout << "Audio callback gaps over expected: " << callback_stats.gap_over_expected_count << "\n";
+    std::cout << "Audio callback gaps over 1.5x: " << callback_stats.gap_over_1_5x_count << "\n";
+    std::cout << "Audio callback gaps over 2x: " << callback_stats.gap_over_2x_count << "\n";
     if (options.audio_device_id) {
         std::cout << "Audio device id: " << *options.audio_device_id << "\n";
     }
@@ -2210,10 +3386,8 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
     std::cout << "Active audio buffer size ms: "
               << frames_to_ms(static_cast<std::size_t>(stream_info.buffer_size > 0 ? stream_info.buffer_size : 0), stream_info.sample_rate)
               << "\n";
-    std::cout << "Requested input mode: "
-              << (options.input_channels == jam2::audio::InputChannels::Stereo ? "stereo" : "mono") << "\n";
-    std::cout << "Active input mode: "
-              << (stream_info.input_channels == jam2::audio::InputChannels::Stereo ? "stereo" : "mono") << "\n";
+    std::cout << "Requested input mix: " << mono_mix_mode_text(options.channel_selection.input.size()) << "\n";
+    std::cout << "Active input mix: " << mono_mix_mode_text(stream_info.channels.input.size()) << "\n";
     std::cout << "Requested audio channels: " << channel_selection_text(options.channel_selection) << "\n";
     std::cout << "Active audio channels: " << channel_selection_text(stream_info.channels) << "\n";
     std::cout << "Backend sample format: " << stream_info.sample_format << "\n";
@@ -2256,6 +3430,16 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
         std::cout << "Audio control metronome: "
                   << (audio.control->metronome_enabled.load(std::memory_order_relaxed) ? "on" : "off") << "\n";
         std::cout << "Audio control BPM: " << audio.control->metronome_bpm.load(std::memory_order_relaxed) << "\n";
+        std::cout << "Audio control metronome level: "
+                  << unit_from_ppm(audio.control->metronome_level_ppm.load(std::memory_order_relaxed)) << "\n";
+        std::cout << "Audio control remote playback level: "
+                  << unit_from_ppm(audio.control->remote_level_ppm.load(std::memory_order_relaxed)) << "\n";
+        std::cout << "Audio control metronome mode: "
+                  << metronome_mode_text(audio.control->metronome_mode.load(std::memory_order_relaxed)) << "\n";
+        std::cout << "Audio control metronome epoch sample time: "
+                  << audio.control->metronome_epoch_sample_time.load(std::memory_order_relaxed) << "\n";
+        std::cout << "Audio control metronome epoch valid: "
+                  << (audio.control->metronome_epoch_valid.load(std::memory_order_relaxed) ? "yes" : "no") << "\n";
         std::cout << "Audio control resampler ratio: "
                   << (static_cast<double>(audio.control->playback_ratio_ppm.load(std::memory_order_relaxed)) / 1000000.0) << "\n";
     }
@@ -2315,16 +3499,22 @@ int run_test_device(int argc, char** argv)
     }
     std::cout << "\n";
     if (probe.input_channels > 0) {
-        std::cout << "Example mono input: --input-channels 1\n";
+        std::cout << "Example one-channel input mixed to mono stream: --input-channels 1\n";
     }
     if (probe.input_channels > 1) {
-        std::cout << "Example stereo input mixed to mono stream: --input-channels 1,2\n";
+        std::cout << "Example two-channel input mixed to mono stream: --input-channels 1,2\n";
+    }
+    if (probe.input_channels > 2) {
+        std::cout << "Example multi-input mix to mono stream: --input-channels 1,2,3,4\n";
     }
     if (probe.output_channels > 0) {
-        std::cout << "Example mono output: --output-channels 1\n";
+        std::cout << "Example one-channel output: --output-channels 1\n";
     }
     if (probe.output_channels > 1) {
-        std::cout << "Example duplicated output: --output-channels 1,2\n";
+        std::cout << "Example duplicated two-output mono: --output-channels 1,2\n";
+    }
+    if (probe.output_channels > 2) {
+        std::cout << "Example duplicated multi-output: --output-channels 1,2,3,4\n";
     }
     return 0;
 }
@@ -2452,7 +3642,11 @@ int run_listen(int argc, char** argv)
         endpoint_mode = "STUN discovered";
     }
 
-    jam2::SessionInfo session{advertised, jam2::random_u64(), jam2::random_key()};
+    jam2::SessionInfo session{
+        advertised,
+        options.session_id.value_or(jam2::random_u64()),
+        options.session_key.value_or(jam2::random_key())};
+    const std::string connection_url = jam2::make_jam_url(session);
     if (options.public_endpoint || options.no_stun) {
         std::cout << "Mode: listen\n";
         std::cout << "Local UDP bind: " << jam2::endpoint_to_string(local) << "\n";
@@ -2464,7 +3658,12 @@ int run_listen(int argc, char** argv)
         std::cout << "Public endpoint: " << jam2::endpoint_to_string(advertised) << "\n";
     }
     std::cout << "Endpoint mode: " << endpoint_mode << "\n";
-    std::cout << "Connection string:\n" << jam2::make_jam_url(session) << "\n\n";
+    std::cout << "Connection string:\n" << connection_url << "\n\n";
+    if (!options.session_id && !options.session_key) {
+        std::cout << "Client command:\n"
+                  << make_headless_client_command(argv[0], connection_url, options) << "\n\n";
+    }
+    print_startup_json("listen", "waiting", options, local, std::nullopt, endpoint_mode, connection_url);
     std::cout << "Waiting for peer...\n";
     std::cout.flush();
 
@@ -2501,7 +3700,8 @@ int run_listen(int argc, char** argv)
         std::cout << "Handshake complete\n";
         std::cout << "Ignored malformed/auth/session packets: " << ignored_malformed << "\n";
         std::cout << "Ignored wrong-endpoint packets: " << ignored_wrong_endpoint << "\n";
-        auto audio = start_optional_audio(options);
+        print_startup_json("listen", "connected", options, local, from, endpoint_mode, connection_url);
+        auto audio = start_optional_audio(options, true);
         const int drained_startup_packets = drain_pending_udp(socket);
         if (drained_startup_packets > 0) {
             std::cout << "Drained startup UDP packets: " << drained_startup_packets << "\n";
@@ -2525,18 +3725,20 @@ int run_listen(int argc, char** argv)
             audio.playback_ring.get(),
             audio.stream.get(),
             static_cast<std::uint64_t>(drained_startup_packets),
-            csv_log ? &*csv_log : nullptr);
-            audio_stats.startup_drained_packets = static_cast<std::uint64_t>(drained_startup_packets);
-        if (options.stats_enabled) {
+            csv_log ? &*csv_log : nullptr,
+            true);
+        audio_stats.startup_drained_packets = static_cast<std::uint64_t>(drained_startup_packets);
+        if (commands.state.stats_enabled.load(std::memory_order_relaxed)) {
             print_audio_packet_stats(audio_stats, options);
             print_optional_audio_stats(audio, options);
         }
-            std::cout.flush();
-            return 0;
+        std::cout.flush();
+        return 0;
     }
     std::cerr << "Timed out waiting for authenticated peer\n";
     std::cerr << "Ignored malformed/auth/session packets: " << ignored_malformed << "\n";
     std::cerr << "Ignored wrong-endpoint packets: " << ignored_wrong_endpoint << "\n";
+    print_startup_json("listen", "error", options, local, std::nullopt, endpoint_mode, connection_url, "timed out waiting for authenticated peer");
     return 3;
 }
 
@@ -2556,6 +3758,7 @@ int run_connect(int argc, char** argv)
     std::cout << "Local UDP bind: " << jam2::endpoint_to_string(socket.local_endpoint()) << "\n";
     std::cout << "Peer endpoint: " << jam2::endpoint_to_string(session.endpoint) << "\n";
     print_socket_options(socket);
+    print_startup_json("connect", "connecting", options, socket.local_endpoint(), session.endpoint, "jam2-url", "");
 
     const auto hello = make_control_packet(jam2::protocol::PacketType::Hello, session, 1);
     const std::uint64_t deadline = options.wait_ms > 0 ?
@@ -2581,7 +3784,8 @@ int run_connect(int argc, char** argv)
                 std::cout << "Handshake complete\n";
                 std::cout << "Attempts: " << attempts << "\n";
                 std::cout << "Ignored packets: " << ignored << "\n";
-                auto audio = start_optional_audio(options);
+                print_startup_json("connect", "connected", options, socket.local_endpoint(), session.endpoint, "jam2-url", "");
+                auto audio = start_optional_audio(options, false);
                 const int drained_startup_packets = drain_pending_udp(socket);
                 if (drained_startup_packets > 0) {
                     std::cout << "Drained startup UDP packets: " << drained_startup_packets << "\n";
@@ -2613,11 +3817,12 @@ int run_connect(int argc, char** argv)
                     audio.playback_ring.get(),
                     audio.stream.get(),
                     static_cast<std::uint64_t>(drained_startup_packets),
-                    csv_log ? &*csv_log : nullptr);
+                    csv_log ? &*csv_log : nullptr,
+                    false);
                 audio_stats.startup_drained_packets = static_cast<std::uint64_t>(drained_startup_packets);
-                if (options.stats_enabled) {
-                print_audio_packet_stats(audio_stats, options);
-                print_optional_audio_stats(audio, options);
+                if (commands.state.stats_enabled.load(std::memory_order_relaxed)) {
+                    print_audio_packet_stats(audio_stats, options);
+                    print_optional_audio_stats(audio, options);
                 }
                 std::cout.flush();
                 return 0;
@@ -2630,6 +3835,7 @@ int run_connect(int argc, char** argv)
     std::cerr << "Timed out waiting for HELLO_ACK\n";
     std::cerr << "Attempts: " << attempts << "\n";
     std::cerr << "Ignored packets: " << ignored << "\n";
+    print_startup_json("connect", "error", options, socket.local_endpoint(), session.endpoint, "jam2-url", "", "timed out waiting for HELLO_ACK");
     return 3;
 }
 

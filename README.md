@@ -28,6 +28,8 @@ Host B, paste the `jam2://...` URL from Host A:
 .\build\jam2.exe connect "jam2://v1?endpoint=127.0.0.1:49000&session=55f9e711a1c6b358&key=10eee9ddd63f5f43014378bdfd0ccc8f" --audio-device 5 --sample-rate 44100 --audio-buffer-size 128 --frame-size 128 --playback-prefill-frames 1536 --playback-ring-frames 8192 --playback-max-frames 4096 --stats enabled --stats-warmup-ms 3000 --stats-interval-ms 5000 --log-stats logs --metronome on --bpm 120
 ```
 
+When `listen` generates the session id/key itself, it also prints a full `connect` command with matching stream/tuning options; replace only the client `--audio-device` value.
+
 Current stable profile:
 
 ```text
@@ -77,10 +79,19 @@ Key arguments:
 | `--stats enabled\|disabled` | Enables live stats counters, final stats output, and the interactive `stats` command. | Leave disabled for lean live sessions; enable for debugging. |
 | `--stats-interval-ms` | Prints periodic stats and writes sparse periodic CSV rows when logging. | Use during manual tuning and adaptive analysis. |
 | `--log-stats` | Writes CSV stats to a folder. Requires `--stats enabled`. | Enable for comparing adaptive or manual runs. |
+| `--metronome-level` | Sets local click volume from `0` to `1`. | Start lower if the click masks the remote instrument. |
+| `--remote-level` | Sets local peer playback volume from `0` to `1`. | Lower the peer locally without changing what you send. |
+| `--metronome-mode` | Selects `shared-grid`, `leader-audio`, `symmetric-delay`, or `listener-compensated`. | Use `shared-grid` as the default; compare modes with stats during timing tests. |
+| `--sample-time-playout` | Enables or disables sample-time-aware receive scheduling. | Leave on for normal testing so drops and late packets do not permanently shift playback timing. |
+| `--playout-delay-frames` | Declares the target sample-time playout delay. Defaults to `--playback-prefill-frames`. | Set explicitly when comparing delay, jitter, or metronome alignment experiments. |
+| `--adaptive-playback-cushion` | Enables explicit adaptive playout target changes. | Use for Wi-Fi or burst testing; final stats show every raise/release and padding event. |
+| `--adaptive-playback-target-frames` | Sets the starting adaptive playout target. | Keep near the normal stable prefill for a run. |
+| `--adaptive-playback-min-frames` / `--adaptive-playback-max-frames` | Bounds adaptive target movement. | Use numeric bounds to keep added latency controlled. |
+| `--adaptive-playback-release-ppm` | Controls how slowly the adaptive target releases extra cushion. | Lower values hold added latency longer; higher values release faster. |
 | `--drift-deadband-ppm` | Keeps playback at exact 1.0 ratio while smoothed drift is within this ppm. | Raise if tiny corrections sound rough; lower if long-run drift needs earlier correction. |
 | `--drift-max-correction-ppm` | Caps playback resampler correction. | Change only if `resampler_ratio` is pinned and `drift_ppm` is believable. |
-| `--input-channels` | Selects mono input or stereo pair mixed to mono. | Use when instrument input is not channel 1. |
-| `--output-channels` | Selects output channel or duplicated pair. | Use when headphones/monitor outputs are not 1/2. |
+| `--input-channels` | Selects one or more input channels mixed to mono. | Use `1,2,3,4` for multi-input devices; invalid device channels error out. |
+| `--output-channels` | Selects one or more output channels receiving duplicated mono. | Use when headphones/monitor outputs are not 1/2. |
 | `--socket-send-buffer` / `--socket-recv-buffer` | Requests OS UDP socket buffer sizes. | Use when diagnosing packet drops or OS buffering differences. |
 | `--stream-ms` | Ends the stream after a fixed duration. | Use for repeatable adaptive or manual tests. |
 | `--wait-ms` | Limits how long handshake waits. | Leave unset for manual sessions; set for automation. |
@@ -89,9 +100,16 @@ Runtime commands:
 
 ```text
 stats
+status
 bpm 140
 metro off
 metro on
+metro mode shared-grid
+metro level 0.15
+metro level +0.05
+remote level 0.75
+remote mute
+remote unmute
 quit
 ```
 
