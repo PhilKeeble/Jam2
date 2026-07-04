@@ -25,9 +25,10 @@
 #ifdef _WIN32
 #define NOMINMAX
 #include <audioclient.h>
+#include <mmdeviceapi.h>
+#include <propkeydef.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <ksmedia.h>
-#include <mmdeviceapi.h>
 #include <propvarutil.h>
 #include <wrl/client.h>
 #endif

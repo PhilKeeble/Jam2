@@ -5,6 +5,11 @@ SharedTrackModel& SharedTrackController::model()
     return model_;
 }
 
+const SharedTrackModel& SharedTrackController::model() const
+{
+    return model_;
+}
+
 QJsonObject SharedTrackController::processingMessage() const
 {
     return QJsonObject{

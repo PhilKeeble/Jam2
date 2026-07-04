@@ -43,6 +43,10 @@ add_executable(jam2-gui
 
 jam2_set_app_output(jam2-gui)
 
+target_include_directories(jam2-gui PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../libs/third_party"
+)
+
 target_link_libraries(jam2-gui PRIVATE
     jam2_core
     Qt6::Multimedia

@@ -15,8 +15,8 @@ struct SharedTrackModel {
     double speed = 1.0;
     int pitchCents = 0;
     bool loopEnabled = false;
-    double loopStartSeconds = 0.0;
-    double loopEndSeconds = 0.0;
+    double loopStartSeconds = -1.0;
+    double loopEndSeconds = -1.0;
     bool syncControls = true;
     double focusFrequencyHz = 120.0;
     double focusGainDb = 0.0;

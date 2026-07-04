@@ -8,6 +8,8 @@
 #include "SharedTrackController.hpp"
 
 #include <QCheckBox>
+#include <QBuffer>
+#include <QByteArray>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QLabel>
@@ -18,6 +20,8 @@
 #include <QJsonObject>
 #include <QAudioOutput>
 #include <QProcess>
+#include <QSoundEffect>
+#include <QTimer>
 #include <QSlider>
 #include <QSpinBox>
 #include <QTabWidget>
@@ -27,12 +31,17 @@
 #include <array>
 #include <cstdint>
 
+class QEvent;
+class WaveformWidget;
+
 class MainWindow : public QWidget {
 public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
 
 private:
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
     void buildUi();
     QWidget* buildSessionPage();
     QWidget* buildSongPage();
@@ -41,6 +50,8 @@ private:
     QWidget* buildStatsPage();
 
     void startJam();
+    void showStartJamDialog();
+    void showJoinJamDialog();
     void stopJam();
     void refreshDevices();
     void appendLog(const QString& line);
@@ -58,12 +69,23 @@ private:
     void chooseCaptureFolder();
     void refreshLoopbackSources();
     void startInputCapture();
+    void showInputCaptureDialog();
     void startLoopbackCapture();
+    void showLoopbackCaptureDialog();
     void stopInputCapture();
     void importLastCapture();
     void loadTrackIntoPlayer();
     void playTrack();
     void stopTrack();
+    void setLoopStartAtCurrentPosition();
+    void setLoopEndAtCurrentPosition();
+    void clearTrackLoop();
+    void updateTrackTimeline();
+    void startTrackMetronome();
+    void stopTrackMetronome();
+    void updateTrackMetronomeInterval();
+    void playTrackMetronomeClick();
+    void prepareTrackMetronomeClick();
     void sendTrackFile();
     void receiveTrackFileStart(const QJsonObject& message);
     void receiveTrackFileChunk(const QJsonObject& message);
@@ -90,6 +112,9 @@ private:
     BeatGridModel songModel_;
     QMediaPlayer trackPlayer_;
     QAudioOutput trackAudio_;
+    QSoundEffect trackMetronomeClick_;
+    QByteArray processedTrackBytes_;
+    QBuffer processedTrackBuffer_;
 
     QComboBox* modeBox_ = nullptr;
     QLineEdit* jam2PathEdit_ = nullptr;
@@ -98,6 +123,16 @@ private:
     QLineEdit* publicHostEdit_ = nullptr;
     QLineEdit* connectUrlEdit_ = nullptr;
     QLineEdit* generatedUrlEdit_ = nullptr;
+    QLineEdit* stunServerEdit_ = nullptr;
+    QSpinBox* stunTimeoutSpin_ = nullptr;
+    QSpinBox* stunRetriesSpin_ = nullptr;
+    QSpinBox* waitMsSpin_ = nullptr;
+    QSpinBox* streamMsSpin_ = nullptr;
+    QSpinBox* streamLingerMsSpin_ = nullptr;
+    QSpinBox* statsWarmupMsSpin_ = nullptr;
+    QLineEdit* logStatsEdit_ = nullptr;
+    QSpinBox* socketSendBufferSpin_ = nullptr;
+    QSpinBox* socketRecvBufferSpin_ = nullptr;
     QComboBox* deviceBox_ = nullptr;
     QLineEdit* inputChannelsEdit_ = nullptr;
     QLineEdit* outputChannelsEdit_ = nullptr;
@@ -105,12 +140,29 @@ private:
     QSpinBox* bufferSizeSpin_ = nullptr;
     QSpinBox* frameSizeSpin_ = nullptr;
     QSpinBox* prefillSpin_ = nullptr;
+    QSpinBox* playbackMaxSpin_ = nullptr;
+    QSpinBox* captureRingSpin_ = nullptr;
+    QSpinBox* playbackRingSpin_ = nullptr;
+    QCheckBox* driftCorrectionCheck_ = nullptr;
+    QDoubleSpinBox* driftSmoothingSpin_ = nullptr;
+    QSpinBox* driftDeadbandSpin_ = nullptr;
+    QSpinBox* driftMaxCorrectionSpin_ = nullptr;
     QCheckBox* noStunCheck_ = nullptr;
     QCheckBox* metronomeCheck_ = nullptr;
     QSpinBox* bpmSpin_ = nullptr;
+    QComboBox* metronomeModeBox_ = nullptr;
     QSlider* metronomeLevelSlider_ = nullptr;
     QSlider* remoteLevelSlider_ = nullptr;
+    QCheckBox* sampleTimePlayoutCheck_ = nullptr;
+    QSpinBox* playoutDelaySpin_ = nullptr;
+    QCheckBox* adaptiveCushionCheck_ = nullptr;
+    QSpinBox* adaptiveTargetSpin_ = nullptr;
+    QSpinBox* adaptiveMinSpin_ = nullptr;
+    QSpinBox* adaptiveMaxSpin_ = nullptr;
+    QSpinBox* adaptiveReleaseSpin_ = nullptr;
+    QLineEdit* extraArgsEdit_ = nullptr;
     QPushButton* startButton_ = nullptr;
+    QPushButton* joinButton_ = nullptr;
     QPushButton* stopButton_ = nullptr;
     QLabel* connectionLabel_ = nullptr;
     QLabel* rttLabel_ = nullptr;
@@ -123,6 +175,7 @@ private:
     QLabel* leadPendingLabel_ = nullptr;
     QLabel* trackNameLabel_ = nullptr;
     QLabel* trackAnalysisLabel_ = nullptr;
+    WaveformWidget* trackWaveform_ = nullptr;
     QLabel* titleLabel_ = nullptr;
     QLineEdit* songTitleEdit_ = nullptr;
     QLineEdit* capturePathEdit_ = nullptr;
@@ -139,10 +192,19 @@ private:
     QSpinBox* tailSilenceSpin_ = nullptr;
     QLabel* captureProgressLabel_ = nullptr;
     QLabel* trackPlaybackLabel_ = nullptr;
+    QDoubleSpinBox* trackSpeedSpin_ = nullptr;
+    QSpinBox* trackPitchSpin_ = nullptr;
+    QSpinBox* trackBpmSpin_ = nullptr;
+    QPushButton* startTrackMetronomeButton_ = nullptr;
+    QPushButton* stopTrackMetronomeButton_ = nullptr;
+    QLabel* trackMetronomeLabel_ = nullptr;
     QPushButton* playTrackButton_ = nullptr;
     QPushButton* stopTrackButton_ = nullptr;
+    QPushButton* loopStartButton_ = nullptr;
+    QPushButton* loopEndButton_ = nullptr;
+    QPushButton* clearLoopButton_ = nullptr;
+    QLabel* loopStatusLabel_ = nullptr;
     QPushButton* shareTrackFileButton_ = nullptr;
-    QSlider* trackPositionSlider_ = nullptr;
     QSlider* trackLevelSlider_ = nullptr;
     QPushButton* captureButton_ = nullptr;
     QPushButton* loopbackCaptureButton_ = nullptr;
@@ -165,4 +227,8 @@ private:
     QString incomingTrackSha256_;
     qint64 incomingTrackBytesExpected_ = 0;
     int incomingTrackNextChunk_ = 0;
+    QTimer trackTimelineTimer_;
+    QTimer trackMetronomeTimer_;
+    QString trackMetronomeClickPath_;
+    int trackMetronomeBeat_ = 0;
 };
