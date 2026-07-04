@@ -1,5 +1,14 @@
 # Jam2 Quick Run
 
+Repository layout:
+
+- `libs/jam2-core`: shared low-latency audio, protocol, STUN, socket, and utility code.
+- `apps/jam2-cli`: current `jam2` command-line audio engine.
+- `apps/jam2-gui` and `apps/jam2-capture`: Qt controller app and standalone WAV capture utility.
+- `tests`: CMake/CTest tests for shared code and app behavior.
+- `artifacts`: preserved local benchmark logs and release binaries.
+- `release`: app binaries produced by CMake for easy distribution.
+
 Build:
 
 ```powershell
@@ -8,24 +17,48 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+`jam2-gui` and `jam2-capture` are enabled by default for new CMake build directories and are written to `release` beside the `jam2` binary. If an existing build directory was configured before those targets were added, reconfigure with `-DJAM2_BUILD_GUI=ON -DJAM2_BUILD_CAPTURE=ON` or use a fresh build directory.
+
+The GUI needs Qt 6 Widgets, Network, and Multimedia development packages. If CMake cannot find Qt automatically, pass its install prefix:
+
+```powershell
+cmake -S . -B build -G Ninja -DJAM2_BUILD_GUI=ON -DCMAKE_PREFIX_PATH=C:/Qt/6.7.3/msvc2019_64
+```
+
 Check devices on each host:
 
 ```powershell
-.\build\jam2.exe list-devices
-.\build\jam2.exe test-device 0 --sample-rate 48000
-.\build\jam2.exe meter-device 0 --sample-rate 48000 --buffer-size 512 --duration-ms 3000
+.\release\jam2.exe list-devices
+.\release\jam2.exe test-device 0 --sample-rate 48000
+.\release\jam2.exe meter-device 0 --sample-rate 48000 --buffer-size 512 --duration-ms 3000
 ```
+
+Capture a quick WAV from an input device:
+
+```powershell
+.\release\jam2-capture.exe list-devices
+.\release\jam2-capture.exe record-input --audio-device 0 --input-channels 1 --sample-rate 44100 --buffer-size 128 --duration-ms 30000 --output captures\riff.wav
+.\release\jam2-capture.exe list-loopback-sources
+.\release\jam2-capture.exe record-loopback --source default --duration-ms 30000 --output captures\system.wav
+.\release\jam2-capture.exe record-input --audio-device 0 --input-channels 1 --trigger on --trigger-threshold-db -45 --pre-roll-ms 250 --trim-leading-silence on --trim-trailing-silence on --summary-json on --output captures\idea.wav
+```
+
+Capture output is PCM16 mono WAV. Each capture can also write a `.wav.json` sidecar and print a `capture.summary` JSON line for the GUI.
+
+On macOS, `record-loopback` uses CoreAudio process taps on macOS 14.2 or newer. Older macOS users should route system audio through a virtual device such as BlackHole and capture it with `record-input`.
+
+The GUI Track tab can refresh loopback sources, import captured WAV metadata, play a local WAV, and share the WAV to the authenticated peer over the GUI TCP control plane. Speed is currently simple local playback-rate control; pitch-preserving stretch is left for the Signalsmith dependency pass.
 
 Host A:
 
 ```powershell
-.\build\jam2.exe listen --audio-device 16 --sample-rate 44100 --audio-buffer-size 128 --frame-size 128 --playback-prefill-frames 1536 --playback-ring-frames 8192 --playback-max-frames 4096 --stats enabled --stats-warmup-ms 3000 --stats-interval-ms 5000 --log-stats logs --metronome on --bpm 120
+.\release\jam2.exe listen --audio-device 16 --sample-rate 44100 --audio-buffer-size 128 --frame-size 128 --playback-prefill-frames 1536 --playback-ring-frames 8192 --playback-max-frames 4096 --stats enabled --stats-warmup-ms 3000 --stats-interval-ms 5000 --log-stats logs --metronome on --bpm 120
 ```
 
 Host B, paste the `jam2://...` URL from Host A:
 
 ```powershell
-.\build\jam2.exe connect "jam2://v1?endpoint=127.0.0.1:49000&session=55f9e711a1c6b358&key=10eee9ddd63f5f43014378bdfd0ccc8f" --audio-device 5 --sample-rate 44100 --audio-buffer-size 128 --frame-size 128 --playback-prefill-frames 1536 --playback-ring-frames 8192 --playback-max-frames 4096 --stats enabled --stats-warmup-ms 3000 --stats-interval-ms 5000 --log-stats logs --metronome on --bpm 120
+.\release\jam2.exe connect "jam2://v1?endpoint=127.0.0.1:49000&session=55f9e711a1c6b358&key=10eee9ddd63f5f43014378bdfd0ccc8f" --audio-device 5 --sample-rate 44100 --audio-buffer-size 128 --frame-size 128 --playback-prefill-frames 1536 --playback-ring-frames 8192 --playback-max-frames 4096 --stats enabled --stats-warmup-ms 3000 --stats-interval-ms 5000 --log-stats logs --metronome on --bpm 120
 ```
 
 When `listen` generates the session id/key itself, it also prints a full `connect` command with matching stream/tuning options; replace only the client `--audio-device` value.

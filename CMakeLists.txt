@@ -7,83 +7,47 @@ project(Jam2
 )
 
 option(JAM2_BUILD_TESTS "Build Jam2 tests" ON)
+option(JAM2_BUILD_GUI "Build jam2-gui when its CMake target is present" ON)
+option(JAM2_BUILD_CAPTURE "Build jam2-capture when its CMake target is present" ON)
 
-add_library(jam2_core STATIC
-    src/audio_ring.cpp
-    src/common.cpp
-    src/protocol.cpp
-    src/stun.cpp
-    src/udp_socket.cpp
-)
+set(JAM2_RELEASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/release" CACHE PATH "Directory for distributable app binaries")
 
-target_compile_features(jam2_core PUBLIC cxx_std_20)
-
-set_target_properties(jam2_core PROPERTIES
-    CXX_EXTENSIONS OFF
-)
-
-target_include_directories(jam2_core PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-)
-
-if(MSVC)
-    target_compile_options(jam2_core PRIVATE
-        /W4
-        /permissive-
-        /EHsc
+function(jam2_set_app_output target)
+    set_target_properties(${target} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${JAM2_RELEASE_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${JAM2_RELEASE_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${JAM2_RELEASE_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${JAM2_RELEASE_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${JAM2_RELEASE_DIR}"
     )
-else()
-    target_compile_options(jam2_core PRIVATE
-        -Wall
-        -Wextra
-        -Wpedantic
-    )
+endfunction()
+
+add_subdirectory(libs/jam2-core)
+
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${JAM2_RELEASE_DIR}")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG "${JAM2_RELEASE_DIR}")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE "${JAM2_RELEASE_DIR}")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${JAM2_RELEASE_DIR}")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${JAM2_RELEASE_DIR}")
+
+add_subdirectory(apps/jam2-cli)
+
+if(JAM2_BUILD_GUI AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/apps/jam2-gui/CMakeLists.txt")
+    add_subdirectory(apps/jam2-gui)
 endif()
 
-if(WIN32)
-    if(DEFINED ENV{ASIO_SDK_DIR})
-        set(JAM2_ASIO_SDK_DIR "$ENV{ASIO_SDK_DIR}" CACHE PATH "Path to Steinberg ASIO SDK")
-    else()
-        set(JAM2_ASIO_SDK_DIR "C:/Tools/ASIO-SDK_2.3.4/ASIOSDK" CACHE PATH "Path to Steinberg ASIO SDK")
-    endif()
-    if(EXISTS "${JAM2_ASIO_SDK_DIR}/common/asio.h")
-        target_include_directories(jam2_core PUBLIC
-            "${JAM2_ASIO_SDK_DIR}/common"
-            "${JAM2_ASIO_SDK_DIR}/host"
-            "${JAM2_ASIO_SDK_DIR}/host/pc"
-        )
-    else()
-        message(WARNING "ASIO SDK not found at ${JAM2_ASIO_SDK_DIR}; device enumeration can still read registry entries, but ASIO opening will need the SDK.")
-    endif()
-    target_sources(jam2_core PRIVATE src/audio_device_windows.cpp)
-    target_compile_definitions(jam2_core PUBLIC JAM2_PLATFORM_WINDOWS=1)
-    target_link_libraries(jam2_core PUBLIC ws2_32 advapi32 ole32)
-elseif(APPLE)
-    target_sources(jam2_core PRIVATE src/audio_device_macos.cpp)
-    target_compile_definitions(jam2_core PUBLIC JAM2_PLATFORM_MACOS=1)
-    target_link_libraries(jam2_core PUBLIC
-        "-framework CoreAudio"
-        "-framework CoreFoundation"
-        "-framework AudioToolbox"
-    )
-else()
-    message(FATAL_ERROR "Jam2 MVP supports only Windows and macOS host-native builds.")
+if(JAM2_BUILD_CAPTURE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/apps/jam2-capture/CMakeLists.txt")
+    add_subdirectory(apps/jam2-capture)
 endif()
 
-add_executable(jam2
-    src/main.cpp
-)
-
-target_link_libraries(jam2 PRIVATE jam2_core)
+unset(CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+unset(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG)
+unset(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE)
+unset(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO)
+unset(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL)
 
 include(CTest)
 
 if(JAM2_BUILD_TESTS AND BUILD_TESTING)
-    add_executable(jam2_tests
-        tests/jam2_tests.cpp
-    )
-    target_link_libraries(jam2_tests PRIVATE jam2_core)
-
-    add_test(NAME jam2_help COMMAND jam2 --help)
-    add_test(NAME jam2_core_tests COMMAND jam2_tests)
+    add_subdirectory(tests)
 endif()

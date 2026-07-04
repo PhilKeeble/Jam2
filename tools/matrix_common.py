@@ -16,7 +16,7 @@ def repo_root():
 def default_jam2_path():
     root = repo_root()
     name = "jam2.exe" if os.name == "nt" else "jam2"
-    return root / "build" / name
+    return root / "release" / name
 
 
 def ensure_dir(path):

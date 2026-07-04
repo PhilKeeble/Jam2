@@ -15,7 +15,7 @@
 - Keep OS-level packet scheduling and send pacing under review if real-session stats show avoidable burstiness.
 - Continue refining stats and CSV output only where it exposes hard tuning data. Avoid subjective playability scores or hidden recommendations.
 - Keep CLI/runtime controls numeric and inspectable. Defaults can be conservative, but aggressive tuning should remain explicit.
-- Preserve the current product scope: two peers, direct UDP, no rooms, no relay/TURN audio path, no accounts, and no GUI layer unless explicitly chosen later.
+- Preserve the current product scope: two peers, direct UDP, no rooms, no relay/TURN audio path, no accounts, and only the explicitly chosen local GUI/control apps.
 
 ## Potential Future Plans
 
@@ -26,6 +26,8 @@ Add some functionality onto the benchmark testing that also tests the different 
 ### Local Shared Track Mix Source
 
 Add an engine-side local playback source that `jam2-gui` can control for shared backing tracks.
+
+Current state: `jam2-gui` can load/play/share WAV files locally through Qt Multimedia and TCP file transfer. This section is specifically for a later engine-side mix path through the same ASIO/CoreAudio device as the live jam output.
 
 Possible runtime command shape:
 

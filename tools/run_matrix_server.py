@@ -1651,9 +1651,9 @@ def client_jam2_command(server_jam2, client_platform, client_row):
         return uploaded_command
     platform = (client_platform or "").lower()
     if platform == "macos" or platform.startswith("darwin"):
-        return "<repo>/build/jam2"
+        return "<repo>/release/jam2"
     if platform.startswith("linux"):
-        return "<repo>/build/jam2"
+        return "<repo>/release/jam2"
     if platform.startswith("win"):
         return server_jam2
     return "<path-to-jam2>"

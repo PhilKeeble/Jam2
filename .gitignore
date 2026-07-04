@@ -12,6 +12,7 @@ Testing/
 .ninja_*
 
 # Binaries and libraries
+/release/
 *.exe
 *.dll
 *.lib
@@ -26,6 +27,8 @@ Testing/
 *.csv
 /logs/
 /tools/logs/
+/artifacts/logs/
+/artifacts/release/
 __pycache__/
 *.pyc
 

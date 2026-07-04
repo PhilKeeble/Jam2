@@ -9,6 +9,7 @@ Required tools:
 - Visual Studio Build Tools with the C++ workload.
 - CMake.
 - Ninja.
+- Qt 6 with Widgets and Network modules when building `jam2-gui`.
 - ASIO SDK available locally when the ASIO backend is implemented.
 
 Local SDK path for this workspace:
@@ -41,6 +42,7 @@ Required tools:
 - Xcode Command Line Tools.
 - CMake.
 - Ninja.
+- Qt 6 with Widgets and Network modules when building `jam2-gui`.
 
 Build commands:
 
@@ -55,6 +57,8 @@ Real CoreAudio validation must happen on a macOS host with the target audio devi
 ## Notes
 
 - CMake is the single source of truth for builds on Windows and macOS.
+- The repository is split into `libs/jam2-core`, `apps/jam2-cli`, `apps/jam2-gui`, `apps/jam2-capture`, and `tests` so additional app targets can share the same core library.
+- Distributable app executables are written to the repo-root `release` directory. Tests and intermediate build products stay in the selected CMake build directory.
 - Shared protocol, STUN, stats, and timing code should remain platform-neutral.
 - ASIO and CoreAudio code should stay isolated behind platform-specific source files.
 - The real-time audio callback path must not allocate, log, lock, throw exceptions, or block.
