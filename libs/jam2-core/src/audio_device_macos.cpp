@@ -810,8 +810,6 @@ void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t
     if (context.control == nullptr ||
         !context.control->metronome_enabled.load(std::memory_order_relaxed) ||
         context.sample_rate <= 0.0) {
-        context.click_remaining = 0;
-        context.click_total = 0;
         return;
     }
     if (context.control->metronome_mode.load(std::memory_order_relaxed) == 1 &&
@@ -819,41 +817,34 @@ void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t
         return;
     }
 
-    const int bpm = context.control->metronome_bpm.load(std::memory_order_relaxed);
-    if (bpm <= 0) {
-        return;
-    }
     const int level_ppm = context.control->metronome_level_ppm.load(std::memory_order_relaxed);
     const double level = static_cast<double>(std::clamp(level_ppm, 0, 1000000)) / 1000000.0;
-    const std::uint64_t beat_interval =
-        static_cast<std::uint64_t>((60.0 * context.sample_rate) / static_cast<double>(bpm));
     const bool epoch_valid = context.control->metronome_epoch_valid.load(std::memory_order_relaxed);
     const std::uint64_t epoch = context.control->metronome_epoch_sample_time.load(std::memory_order_relaxed);
+    const jam2::metronome::PatternSnapshot pattern = jam2::metronome::sanitize({
+        context.control->metronome_bpm.load(std::memory_order_relaxed),
+        context.control->metronome_beats_per_bar.load(std::memory_order_relaxed),
+        context.control->metronome_division.load(std::memory_order_relaxed),
+        context.control->metronome_step_count.load(std::memory_order_relaxed),
+        context.control->metronome_play_mask_low.load(std::memory_order_relaxed),
+        context.control->metronome_play_mask_high.load(std::memory_order_relaxed),
+        context.control->metronome_accent_mask_low.load(std::memory_order_relaxed),
+        context.control->metronome_accent_mask_high.load(std::memory_order_relaxed),
+    });
+    const std::uint64_t step_interval =
+        jam2::metronome::step_interval_samples(context.sample_rate, pattern.bpm, pattern.division);
 
     for (std::int32_t& sample : output) {
         const bool before_epoch = epoch_valid && context.metronome_sample_counter < epoch;
         const std::uint64_t position =
             before_epoch ? 0ULL : (epoch_valid ? context.metronome_sample_counter - epoch : context.metronome_sample_counter);
-        if (!before_epoch && beat_interval > 0 && (position % beat_interval) == 0) {
-            const std::uint64_t beat_index = position / beat_interval;
-            const bool accent = (beat_index % 4ULL) == 0ULL;
-            const double frequency = accent ? 1800.0 : 1200.0;
-            context.click_total = static_cast<int>(context.sample_rate * (accent ? 0.012 : 0.008));
-            context.click_remaining = context.click_total;
-            context.click_phase = 0.0;
-            context.click_phase_step = 2.0 * 3.14159265358979323846 * frequency / context.sample_rate;
-            context.metronome_beat_index = beat_index + 1;
-        }
-
-        if (context.click_remaining > 0 && context.click_total > 0) {
-            const double envelope = static_cast<double>(context.click_remaining) / static_cast<double>(context.click_total);
-            const bool accent = context.click_total > static_cast<int>(context.sample_rate * 0.010);
-            const double click_level = std::clamp(level * (accent ? 1.6 : 1.0), 0.0, 1.0);
-            const double click = std::sin(context.click_phase) * envelope * click_level;
-            const double mixed = static_cast<double>(sample) + (click * 2147483647.0);
-            sample = static_cast<std::int32_t>(std::clamp(mixed, -2147483648.0, 2147483647.0));
-            context.click_phase += context.click_phase_step;
-            --context.click_remaining;
+        if (!before_epoch) {
+            sample = jam2::metronome::mix_i32(
+                sample,
+                jam2::metronome::render_sample(pattern, position, step_interval, context.sample_rate, level));
+            if (step_interval > 0) {
+                context.metronome_beat_index = (position / step_interval) + 1;
+            }
         }
         ++context.metronome_sample_counter;
     }

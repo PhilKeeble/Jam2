@@ -7,32 +7,36 @@
 #include "LeadCueModel.hpp"
 #include "SharedTrackController.hpp"
 
+#include "metronome.hpp"
+
 #include <QCheckBox>
-#include <QBuffer>
 #include <QByteArray>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QLabel>
 #include <QLineEdit>
-#include <QMediaPlayer>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QJsonObject>
-#include <QAudioOutput>
 #include <QProcess>
-#include <QSoundEffect>
-#include <QTimer>
 #include <QSlider>
 #include <QSpinBox>
 #include <QTabWidget>
-#include <QTextEdit>
+#include <QTimer>
+#include <QVector>
 #include <QWidget>
 
 #include <array>
 #include <cstdint>
+#include <memory>
 
 class QEvent;
+class QGroupBox;
+class QTableWidget;
 class WaveformWidget;
+class QAudioSink;
+class LocalMetronomeDevice;
+class TrackPlaybackDevice;
 
 class MainWindow : public QWidget {
 public:
@@ -45,8 +49,8 @@ private:
     void buildUi();
     QWidget* buildSessionPage();
     QWidget* buildSongPage();
-    QWidget* buildArrangementPage();
     QWidget* buildTrackPage();
+    QWidget* buildMetronomePage();
     QWidget* buildStatsPage();
 
     void startJam();
@@ -75,6 +79,7 @@ private:
     void stopInputCapture();
     void importLastCapture();
     void loadTrackIntoPlayer();
+    void applyTrackPlaybackSettings();
     void playTrack();
     void stopTrack();
     void setLoopStartAtCurrentPosition();
@@ -84,8 +89,10 @@ private:
     void startTrackMetronome();
     void stopTrackMetronome();
     void updateTrackMetronomeInterval();
-    void playTrackMetronomeClick();
-    void prepareTrackMetronomeClick();
+    void rebuildMetronomePattern();
+    jam2::metronome::PatternSnapshot currentMetronomePattern() const;
+    void applyMetronomePatternToLocalDevice();
+    void sendMetronomePatternToJam();
     void sendTrackFile();
     void receiveTrackFileStart(const QJsonObject& message);
     void receiveTrackFileChunk(const QJsonObject& message);
@@ -93,10 +100,14 @@ private:
     QJsonObject trackMetadataMessage(const QString& type) const;
     QJsonObject trackToJson() const;
     void loadTrackJson(const QJsonObject& object);
+    QJsonObject songToJson() const;
+    bool loadSongJson(const QJsonObject& object);
     void newSong();
     void openSong();
     void saveSong();
     void refreshSongViews();
+    void refreshSongView(const QString& lane);
+    void sendSongSnapshot();
 
     QStringList commonJamArgs() const;
     QString sessionHex() const;
@@ -109,12 +120,13 @@ private:
     ControlClient controlClient_;
     SharedTrackController trackController_;
     LeadCueModel leadCue_;
-    BeatGridModel songModel_;
-    QMediaPlayer trackPlayer_;
-    QAudioOutput trackAudio_;
-    QSoundEffect trackMetronomeClick_;
-    QByteArray processedTrackBytes_;
-    QBuffer processedTrackBuffer_;
+    BeatGridModel chordModel_;
+    BeatGridModel beatModel_;
+    BeatGridModel lyricModel_;
+    std::unique_ptr<QAudioSink> localMetronomeSink_;
+    std::unique_ptr<LocalMetronomeDevice> localMetronomeDevice_;
+    std::unique_ptr<QAudioSink> trackSink_;
+    std::unique_ptr<TrackPlaybackDevice> trackDevice_;
 
     QComboBox* modeBox_ = nullptr;
     QLineEdit* jam2PathEdit_ = nullptr;
@@ -164,6 +176,7 @@ private:
     QPushButton* startButton_ = nullptr;
     QPushButton* joinButton_ = nullptr;
     QPushButton* stopButton_ = nullptr;
+    QGroupBox* runtimeMixBox_ = nullptr;
     QLabel* connectionLabel_ = nullptr;
     QLabel* rttLabel_ = nullptr;
     QLabel* jitterLabel_ = nullptr;
@@ -173,14 +186,15 @@ private:
     QLabel* driftLabel_ = nullptr;
     QLabel* leadLabel_ = nullptr;
     QLabel* leadPendingLabel_ = nullptr;
+    QPushButton* leadSwapButton_ = nullptr;
     QLabel* trackNameLabel_ = nullptr;
-    QLabel* trackAnalysisLabel_ = nullptr;
     WaveformWidget* trackWaveform_ = nullptr;
     QLabel* titleLabel_ = nullptr;
     QLineEdit* songTitleEdit_ = nullptr;
     QLineEdit* capturePathEdit_ = nullptr;
     QLineEdit* captureOutputEdit_ = nullptr;
     QComboBox* loopbackSourceBox_ = nullptr;
+    QCheckBox* captureManualStopCheck_ = nullptr;
     QSpinBox* captureDurationSpin_ = nullptr;
     QCheckBox* captureTriggerCheck_ = nullptr;
     QCheckBox* trimLeadingCheck_ = nullptr;
@@ -190,22 +204,32 @@ private:
     QSpinBox* preRollSpin_ = nullptr;
     QSpinBox* triggerHoldSpin_ = nullptr;
     QSpinBox* tailSilenceSpin_ = nullptr;
-    QLabel* captureProgressLabel_ = nullptr;
-    QLabel* trackPlaybackLabel_ = nullptr;
     QDoubleSpinBox* trackSpeedSpin_ = nullptr;
     QSpinBox* trackPitchSpin_ = nullptr;
-    QSpinBox* trackBpmSpin_ = nullptr;
+    QSlider* trackSpeedSlider_ = nullptr;
+    QSlider* trackPitchSlider_ = nullptr;
+    QSpinBox* metronomeBpmSpin_ = nullptr;
+    QSpinBox* metronomeBeatsSpin_ = nullptr;
+    QComboBox* metronomeDivisionBox_ = nullptr;
+    QSlider* localMetronomeLevelSlider_ = nullptr;
     QPushButton* startTrackMetronomeButton_ = nullptr;
     QPushButton* stopTrackMetronomeButton_ = nullptr;
     QLabel* trackMetronomeLabel_ = nullptr;
+    QTableWidget* metronomePatternTable_ = nullptr;
     QPushButton* playTrackButton_ = nullptr;
     QPushButton* stopTrackButton_ = nullptr;
     QPushButton* loopStartButton_ = nullptr;
     QPushButton* loopEndButton_ = nullptr;
     QPushButton* clearLoopButton_ = nullptr;
-    QLabel* loopStatusLabel_ = nullptr;
+    QCheckBox* loopEnabledCheck_ = nullptr;
+    QCheckBox* waveformGridCheck_ = nullptr;
     QPushButton* shareTrackFileButton_ = nullptr;
     QSlider* trackLevelSlider_ = nullptr;
+    QLabel* trackLevelDbLabel_ = nullptr;
+    QCheckBox* focusFrequencyCheck_ = nullptr;
+    QComboBox* focusPresetBox_ = nullptr;
+    QSlider* focusFrequencySlider_ = nullptr;
+    QSpinBox* focusFrequencySpin_ = nullptr;
     QPushButton* captureButton_ = nullptr;
     QPushButton* loopbackCaptureButton_ = nullptr;
     QPushButton* stopCaptureButton_ = nullptr;
@@ -214,8 +238,6 @@ private:
     BeatGridWidget* chordGrid_ = nullptr;
     BeatGridWidget* beatGrid_ = nullptr;
     BeatGridWidget* lyricGrid_ = nullptr;
-    QComboBox* arrangementSectionBox_ = nullptr;
-    QTextEdit* arrangementEdit_ = nullptr;
     QTabWidget* tabs_ = nullptr;
 
     std::uint64_t sessionId_ = 0;
@@ -228,7 +250,7 @@ private:
     qint64 incomingTrackBytesExpected_ = 0;
     int incomingTrackNextChunk_ = 0;
     QTimer trackTimelineTimer_;
-    QTimer trackMetronomeTimer_;
-    QString trackMetronomeClickPath_;
-    int trackMetronomeBeat_ = 0;
+    bool localMetronomeRunning_ = false;
+    QVector<bool> metronomeEnabledSteps_;
+    QVector<bool> metronomeAccents_;
 };

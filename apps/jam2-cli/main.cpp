@@ -21,6 +21,7 @@
 
 #include "audio_device.hpp"
 #include "common.hpp"
+#include "metronome.hpp"
 #include "protocol.hpp"
 #include "stun.hpp"
 #include "udp_socket.hpp"
@@ -752,6 +753,13 @@ struct RuntimeState {
     std::atomic<bool> print_status{false};
     std::atomic<bool> metronome{false};
     std::atomic<int> bpm{120};
+    std::atomic<int> metronome_beats_per_bar{4};
+    std::atomic<int> metronome_division{1};
+    std::atomic<int> metronome_step_count{4};
+    std::atomic<std::uint64_t> metronome_play_mask_low{0x0fULL};
+    std::atomic<std::uint64_t> metronome_play_mask_high{0};
+    std::atomic<std::uint64_t> metronome_accent_mask_low{0x01ULL};
+    std::atomic<std::uint64_t> metronome_accent_mask_high{0};
     std::atomic<int> metronome_level_ppm{200000};
     std::atomic<int> remote_level_ppm{1000000};
     std::atomic<int> metronome_mode{0};
@@ -775,6 +783,47 @@ double unit_from_ppm(int value)
     return static_cast<double>(std::clamp(value, 0, 1000000)) / 1000000.0;
 }
 
+jam2::metronome::PatternSnapshot metronome_pattern_from_runtime(const RuntimeState& runtime)
+{
+    return jam2::metronome::sanitize({
+        runtime.bpm.load(std::memory_order_relaxed),
+        runtime.metronome_beats_per_bar.load(std::memory_order_relaxed),
+        runtime.metronome_division.load(std::memory_order_relaxed),
+        runtime.metronome_step_count.load(std::memory_order_relaxed),
+        runtime.metronome_play_mask_low.load(std::memory_order_relaxed),
+        runtime.metronome_play_mask_high.load(std::memory_order_relaxed),
+        runtime.metronome_accent_mask_low.load(std::memory_order_relaxed),
+        runtime.metronome_accent_mask_high.load(std::memory_order_relaxed),
+    });
+}
+
+void store_metronome_pattern(RuntimeState& runtime, const jam2::metronome::PatternSnapshot& pattern)
+{
+    const jam2::metronome::PatternSnapshot sanitized = jam2::metronome::sanitize(pattern);
+    runtime.bpm.store(sanitized.bpm, std::memory_order_relaxed);
+    runtime.metronome_beats_per_bar.store(sanitized.beats_per_bar, std::memory_order_relaxed);
+    runtime.metronome_division.store(sanitized.division, std::memory_order_relaxed);
+    runtime.metronome_step_count.store(sanitized.step_count, std::memory_order_relaxed);
+    runtime.metronome_play_mask_low.store(sanitized.play_mask_low, std::memory_order_relaxed);
+    runtime.metronome_play_mask_high.store(sanitized.play_mask_high, std::memory_order_relaxed);
+    runtime.metronome_accent_mask_low.store(sanitized.accent_mask_low, std::memory_order_relaxed);
+    runtime.metronome_accent_mask_high.store(sanitized.accent_mask_high, std::memory_order_relaxed);
+}
+
+bool parse_u64(std::string_view token, std::uint64_t& value)
+{
+    if (token.empty()) {
+        return false;
+    }
+    std::size_t consumed = 0;
+    try {
+        value = std::stoull(std::string(token), &consumed, 0);
+    } catch (const std::exception&) {
+        return false;
+    }
+    return consumed == token.size();
+}
+
 void sync_audio_control(
     const RuntimeState& runtime,
     jam2::audio::StreamControl* control,
@@ -785,6 +834,13 @@ void sync_audio_control(
     }
     control->metronome_enabled.store(runtime.metronome.load(std::memory_order_relaxed), std::memory_order_relaxed);
     control->metronome_bpm.store(runtime.bpm.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    control->metronome_beats_per_bar.store(runtime.metronome_beats_per_bar.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    control->metronome_division.store(runtime.metronome_division.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    control->metronome_step_count.store(runtime.metronome_step_count.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    control->metronome_play_mask_low.store(runtime.metronome_play_mask_low.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    control->metronome_play_mask_high.store(runtime.metronome_play_mask_high.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    control->metronome_accent_mask_low.store(runtime.metronome_accent_mask_low.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    control->metronome_accent_mask_high.store(runtime.metronome_accent_mask_high.load(std::memory_order_relaxed), std::memory_order_relaxed);
     control->metronome_level_ppm.store(runtime.metronome_level_ppm.load(std::memory_order_relaxed), std::memory_order_relaxed);
     control->remote_level_ppm.store(runtime.remote_level_ppm.load(std::memory_order_relaxed), std::memory_order_relaxed);
     control->playback_ratio_ppm.store(ratio_to_ppm(playback_ratio), std::memory_order_relaxed);
@@ -813,6 +869,7 @@ void print_interactive_help(bool stats_enabled)
               << "  metro mode <mode>   set shared-grid|leader-audio|symmetric-delay|listener-compensated\n"
               << "  metro level <0..1>  set local metronome level\n"
               << "  metro level +/-n    adjust local metronome level\n"
+              << "  metro pattern <bpm> <beats> <division> <play_lo> <play_hi> <accent_lo> <accent_hi>\n"
               << "  metro mute          set local metronome level to 0\n"
               << "  metro unmute        restore local metronome level to 0.20\n"
               << "  remote level <0..1> set peer playback level\n"
@@ -920,12 +977,47 @@ void stdin_command_loop(RuntimeState& state)
                 if (!apply_level_token(level, state.metronome_level_ppm)) {
                     std::cerr << "metro level must be 0..1 or a relative +/- adjustment\n";
                 }
+            } else if (value == "pattern") {
+                int bpm = 0;
+                int beats = 0;
+                int division = 0;
+                std::string play_low_text;
+                std::string play_high_text;
+                std::string accent_low_text;
+                std::string accent_high_text;
+                in >> bpm >> beats >> division >> play_low_text >> play_high_text >> accent_low_text >> accent_high_text;
+                std::uint64_t play_low = 0;
+                std::uint64_t play_high = 0;
+                std::uint64_t accent_low = 0;
+                std::uint64_t accent_high = 0;
+                if (bpm <= 0 ||
+                    bpm > 400 ||
+                    beats <= 0 ||
+                    division <= 0 ||
+                    !parse_u64(play_low_text, play_low) ||
+                    !parse_u64(play_high_text, play_high) ||
+                    !parse_u64(accent_low_text, accent_low) ||
+                    !parse_u64(accent_high_text, accent_high)) {
+                    std::cerr << "metro pattern must be: bpm beats division play_low play_high accent_low accent_high\n";
+                } else {
+                    auto pattern = metronome_pattern_from_runtime(state);
+                    pattern.bpm = bpm;
+                    pattern.beats_per_bar = beats;
+                    pattern.division = division;
+                    pattern.step_count = jam2::metronome::pattern_step_count(beats, division);
+                    pattern.play_mask_low = play_low;
+                    pattern.play_mask_high = play_high;
+                    pattern.accent_mask_low = accent_low;
+                    pattern.accent_mask_high = accent_high;
+                    store_metronome_pattern(state, pattern);
+                    state.metronome_revision.fetch_add(1, std::memory_order_relaxed);
+                }
             } else if (value == "mute") {
                 state.metronome_level_ppm.store(0, std::memory_order_relaxed);
             } else if (value == "unmute") {
                 state.metronome_level_ppm.store(200000, std::memory_order_relaxed);
             } else {
-                std::cerr << "unknown metro command; use: metro on|off|mode|level|mute|unmute\n";
+                std::cerr << "unknown metro command; use: metro on|off|mode|level|pattern|mute|unmute\n";
             }
             print_prompt();
             continue;
@@ -968,17 +1060,44 @@ void stdin_command_loop(RuntimeState& state)
     }
 }
 
-std::array<std::uint8_t, 20> encode_metronome_payload(int bpm, std::uint64_t beat, std::uint64_t epoch_sample_time)
+void write_u64_le(std::span<std::uint8_t> payload, std::size_t offset, std::uint64_t value)
 {
-    std::array<std::uint8_t, 20> payload{};
+    for (int i = 0; i < 8; ++i) {
+        payload[offset + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>((value >> (i * 8)) & 0xffU);
+    }
+}
+
+std::uint64_t read_u64_le(std::span<const std::uint8_t> payload, std::size_t offset)
+{
+    std::uint64_t value = 0;
+    for (int i = 7; i >= 0; --i) {
+        value = (value << 8) | payload[offset + static_cast<std::size_t>(i)];
+    }
+    return value;
+}
+
+std::array<std::uint8_t, 56> encode_metronome_payload(
+    int bpm,
+    std::uint64_t beat,
+    std::uint64_t epoch_sample_time,
+    jam2::metronome::PatternSnapshot pattern)
+{
+    pattern = jam2::metronome::sanitize(pattern);
+    std::array<std::uint8_t, 56> payload{};
     payload[0] = static_cast<std::uint8_t>(bpm & 0xff);
     payload[1] = static_cast<std::uint8_t>((bpm >> 8) & 0xff);
     payload[2] = static_cast<std::uint8_t>((bpm >> 16) & 0xff);
     payload[3] = static_cast<std::uint8_t>((bpm >> 24) & 0xff);
-    for (int i = 0; i < 8; ++i) {
-        payload[4 + i] = static_cast<std::uint8_t>((beat >> (i * 8)) & 0xffU);
-        payload[12 + i] = static_cast<std::uint8_t>((epoch_sample_time >> (i * 8)) & 0xffU);
-    }
+    write_u64_le(std::span<std::uint8_t>(payload), 4, beat);
+    write_u64_le(std::span<std::uint8_t>(payload), 12, epoch_sample_time);
+    payload[20] = 1;
+    payload[21] = static_cast<std::uint8_t>(pattern.beats_per_bar);
+    payload[22] = static_cast<std::uint8_t>(pattern.division);
+    payload[23] = static_cast<std::uint8_t>(pattern.step_count);
+    write_u64_le(std::span<std::uint8_t>(payload), 24, pattern.play_mask_low);
+    write_u64_le(std::span<std::uint8_t>(payload), 32, pattern.play_mask_high);
+    write_u64_le(std::span<std::uint8_t>(payload), 40, pattern.accent_mask_low);
+    write_u64_le(std::span<std::uint8_t>(payload), 48, pattern.accent_mask_high);
     return payload;
 }
 
@@ -986,28 +1105,43 @@ struct MetronomePayload {
     int bpm = 120;
     std::uint64_t beat = 0;
     std::uint64_t epoch_sample_time = 0;
+    jam2::metronome::PatternSnapshot pattern;
+    bool has_pattern = false;
 };
 
 MetronomePayload decode_metronome_payload(std::span<const std::uint8_t> payload)
 {
-    if (payload.size() != 12 && payload.size() != 20) {
+    if (payload.size() != 12 && payload.size() != 20 && payload.size() != 56) {
         throw std::runtime_error("metronome payload size mismatch");
     }
     const int bpm = static_cast<int>(payload[0]) |
         (static_cast<int>(payload[1]) << 8) |
         (static_cast<int>(payload[2]) << 16) |
         (static_cast<int>(payload[3]) << 24);
-    std::uint64_t beat = 0;
-    for (int i = 7; i >= 0; --i) {
-        beat = (beat << 8) | payload[4 + i];
-    }
+    const std::uint64_t beat = read_u64_le(payload, 4);
     std::uint64_t epoch = 0;
     if (payload.size() == 20) {
-        for (int i = 7; i >= 0; --i) {
-            epoch = (epoch << 8) | payload[12 + i];
-        }
+        epoch = read_u64_le(payload, 12);
     }
-    return MetronomePayload{bpm, beat, epoch};
+    MetronomePayload decoded;
+    decoded.bpm = bpm;
+    decoded.beat = beat;
+    decoded.epoch_sample_time = epoch;
+    if (payload.size() == 56) {
+        decoded.epoch_sample_time = read_u64_le(payload, 12);
+        decoded.pattern = jam2::metronome::sanitize({
+            std::abs(bpm),
+            static_cast<int>(payload[21]),
+            static_cast<int>(payload[22]),
+            static_cast<int>(payload[23]),
+            read_u64_le(payload, 24),
+            read_u64_le(payload, 32),
+            read_u64_le(payload, 40),
+            read_u64_le(payload, 48),
+        });
+        decoded.has_pattern = payload[20] == 1;
+    }
+    return decoded;
 }
 
 void observe_timing(
@@ -2141,41 +2275,25 @@ void mix_leader_click_into_packet(
     std::span<std::int32_t> samples,
     std::uint64_t packet_sample_time,
     int sample_rate,
-    int bpm,
     double level,
-    std::uint64_t epoch_sample_time)
+    std::uint64_t epoch_sample_time,
+    jam2::metronome::PatternSnapshot pattern)
 {
-    if (sample_rate <= 0 || bpm <= 0 || samples.empty()) {
+    if (sample_rate <= 0 || samples.empty()) {
         return;
     }
-    const std::uint64_t beat_interval =
-        static_cast<std::uint64_t>((60.0 * static_cast<double>(sample_rate)) / static_cast<double>(bpm));
-    if (beat_interval == 0) {
-        return;
-    }
+    pattern = jam2::metronome::sanitize(pattern);
+    const std::uint64_t step_interval =
+        jam2::metronome::step_interval_samples(static_cast<double>(sample_rate), pattern.bpm, pattern.division);
     for (std::size_t i = 0; i < samples.size(); ++i) {
         const std::uint64_t absolute_sample = packet_sample_time + static_cast<std::uint64_t>(i);
         if (absolute_sample < epoch_sample_time) {
             continue;
         }
         const std::uint64_t grid_sample = absolute_sample - epoch_sample_time;
-        const std::uint64_t beat_phase = grid_sample % beat_interval;
-        const double click_frame_count = static_cast<double>(sample_rate) * 0.010;
-        const std::uint64_t click_frames =
-            static_cast<std::uint64_t>(click_frame_count < 1.0 ? 1.0 : click_frame_count);
-        if (beat_phase >= click_frames) {
-            continue;
-        }
-        const std::uint64_t beat_index = grid_sample / beat_interval;
-        const bool accent = (beat_index % 4ULL) == 0ULL;
-        const double frequency = accent ? 1800.0 : 1200.0;
-        const double phase = 2.0 * 3.14159265358979323846 * frequency *
-            static_cast<double>(beat_phase) / static_cast<double>(sample_rate);
-        const double envelope = 1.0 - (static_cast<double>(beat_phase) / static_cast<double>(click_frames));
-        const double click_level = std::clamp(level * (accent ? 1.6 : 1.0), 0.0, 1.0);
-        const double click = std::sin(phase) * envelope * click_level * 8388607.0;
-        const double mixed = static_cast<double>(samples[i]) + click;
-        samples[i] = static_cast<std::int32_t>(std::clamp(mixed, -8388608.0, 8388607.0));
+        samples[i] = jam2::metronome::mix_pcm24(
+            samples[i],
+            jam2::metronome::render_sample(pattern, grid_sample, step_interval, static_cast<double>(sample_rate), level));
     }
 }
 
@@ -2677,9 +2795,9 @@ AudioPacketStats run_audio_packet_exchange(
                         network_frames,
                         sample_time,
                         options.sample_rate,
-                        runtime.bpm.load(std::memory_order_relaxed),
                         unit_from_ppm(runtime.metronome_level_ppm.load(std::memory_order_relaxed)),
-                        runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed));
+                        runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed),
+                        metronome_pattern_from_runtime(runtime));
                 }
                 payload = jam2::protocol::pack_pcm24(network_frames);
             } else {
@@ -2690,9 +2808,9 @@ AudioPacketStats run_audio_packet_exchange(
                         network_frames,
                         sample_time,
                         options.sample_rate,
-                        runtime.bpm.load(std::memory_order_relaxed),
                         unit_from_ppm(runtime.metronome_level_ppm.load(std::memory_order_relaxed)),
-                        runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed));
+                        runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed),
+                        metronome_pattern_from_runtime(runtime));
                     payload = jam2::protocol::pack_pcm24(network_frames);
                 } else {
                     payload = silence_payload;
@@ -2772,7 +2890,11 @@ AudioPacketStats run_audio_packet_exchange(
             now < send_deadline) {
             const int current_bpm = runtime.bpm.load(std::memory_order_relaxed);
             const std::uint64_t epoch = runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed);
-            const auto metro_payload = encode_metronome_payload(metronome_enabled ? current_bpm : -current_bpm, local_beat++, epoch);
+            const auto metro_payload = encode_metronome_payload(
+                metronome_enabled ? current_bpm : -current_bpm,
+                local_beat++,
+                epoch,
+                metronome_pattern_from_runtime(runtime));
             const jam2::protocol::Header metro{
                 jam2::protocol::PacketType::MetronomeState,
                 0,
@@ -2951,6 +3073,9 @@ AudioPacketStats run_audio_packet_exchange(
                     const auto metronome_payload = decode_metronome_payload(payload);
                     const int remote_bpm = metronome_payload.bpm;
                     if (runtime.metronome_revision.load(std::memory_order_relaxed) == 0) {
+                        if (metronome_payload.has_pattern) {
+                            store_metronome_pattern(runtime, metronome_payload.pattern);
+                        }
                         if (remote_bpm < 0 && remote_bpm >= -400) {
                             runtime.metronome.store(false, std::memory_order_relaxed);
                             runtime.bpm.store(-remote_bpm, std::memory_order_relaxed);
@@ -3284,6 +3409,13 @@ OptionalAudioStream start_optional_audio(const Options& options, bool leader_aud
     audio.control = std::make_unique<jam2::audio::StreamControl>();
     audio.control->metronome_enabled.store(options.metronome, std::memory_order_relaxed);
     audio.control->metronome_bpm.store(options.bpm, std::memory_order_relaxed);
+    audio.control->metronome_beats_per_bar.store(4, std::memory_order_relaxed);
+    audio.control->metronome_division.store(1, std::memory_order_relaxed);
+    audio.control->metronome_step_count.store(4, std::memory_order_relaxed);
+    audio.control->metronome_play_mask_low.store(0x0fULL, std::memory_order_relaxed);
+    audio.control->metronome_play_mask_high.store(0, std::memory_order_relaxed);
+    audio.control->metronome_accent_mask_low.store(0x01ULL, std::memory_order_relaxed);
+    audio.control->metronome_accent_mask_high.store(0, std::memory_order_relaxed);
     audio.control->metronome_level_ppm.store(ppm_from_unit(options.metronome_level), std::memory_order_relaxed);
     audio.control->remote_level_ppm.store(ppm_from_unit(options.remote_level), std::memory_order_relaxed);
     audio.control->playback_ratio_ppm.store(1000000, std::memory_order_relaxed);
@@ -3332,6 +3464,13 @@ struct CommandThread {
     {
         state.metronome.store(options.metronome, std::memory_order_relaxed);
         state.bpm.store(options.bpm, std::memory_order_relaxed);
+        state.metronome_beats_per_bar.store(4, std::memory_order_relaxed);
+        state.metronome_division.store(1, std::memory_order_relaxed);
+        state.metronome_step_count.store(4, std::memory_order_relaxed);
+        state.metronome_play_mask_low.store(0x0fULL, std::memory_order_relaxed);
+        state.metronome_play_mask_high.store(0, std::memory_order_relaxed);
+        state.metronome_accent_mask_low.store(0x01ULL, std::memory_order_relaxed);
+        state.metronome_accent_mask_high.store(0, std::memory_order_relaxed);
         state.metronome_level_ppm.store(ppm_from_unit(options.metronome_level), std::memory_order_relaxed);
         state.remote_level_ppm.store(ppm_from_unit(options.remote_level), std::memory_order_relaxed);
         state.metronome_mode.store(metronome_mode_id(options.metronome_mode), std::memory_order_relaxed);

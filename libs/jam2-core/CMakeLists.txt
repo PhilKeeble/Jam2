@@ -1,6 +1,7 @@
 add_library(jam2_core STATIC
     src/audio_ring.cpp
     src/common.cpp
+    src/metronome.cpp
     src/protocol.cpp
     src/stun.cpp
     src/udp_socket.cpp

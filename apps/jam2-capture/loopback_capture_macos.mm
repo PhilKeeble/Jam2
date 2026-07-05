@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
@@ -117,6 +118,7 @@ struct CaptureResult {
     std::uint64_t trimmed_trailing_frames = 0;
     bool trigger_enabled = false;
     bool trigger_fired = false;
+    bool stopped_by_request = false;
     double peak = 0.0;
 };
 
@@ -158,8 +160,9 @@ public:
         result_.samples.push_back(sample);
     }
 
-    CaptureResult finish()
+    CaptureResult finish(bool stopped_by_request)
     {
+        result_.stopped_by_request = stopped_by_request;
         trim();
         return result_;
     }
@@ -273,7 +276,7 @@ void write_summary(const MacLoopbackOptions& options, int sample_rate, const Cap
          << "\"peak\":" << result.peak << ","
          << "\"trigger_enabled\":" << (result.trigger_enabled ? "true" : "false") << ","
          << "\"trigger_fired\":" << (result.trigger_fired ? "true" : "false") << ","
-         << "\"stopped_by_request\":false,"
+         << "\"stopped_by_request\":" << (result.stopped_by_request ? "true" : "false") << ","
          << "\"pre_roll_used_frames\":" << result.pre_roll_used_frames << ","
          << "\"trimmed_leading_frames\":" << result.trimmed_leading_frames << ","
          << "\"trimmed_trailing_frames\":" << result.trimmed_trailing_frames
@@ -314,7 +317,7 @@ struct CaptureBuffer {
     std::mutex mutex;
     std::condition_variable cv;
     std::vector<std::int16_t> samples;
-    std::uint32_t target_frames = 0;
+    std::uint64_t target_frames = 0;
     bool done = false;
     double peak = 0.0;
 };
@@ -413,12 +416,15 @@ int record_loopback_macos(const MacLoopbackOptions& options)
                 throw std::runtime_error("CoreAudio process tap produced an unsupported non-float stream format");
             }
             const int sampleRate = static_cast<int>(std::llround(format.mSampleRate));
-            const std::uint32_t targetFrames =
-                static_cast<std::uint32_t>((static_cast<std::int64_t>(sampleRate) * options.duration_ms) / 1000);
+            const std::uint64_t targetFrames = options.duration_ms > 0
+                ? static_cast<std::uint64_t>((static_cast<std::int64_t>(sampleRate) * options.duration_ms) / 1000)
+                : std::numeric_limits<std::uint64_t>::max();
 
             CaptureBuffer capture;
             capture.target_frames = targetFrames;
-            capture.samples.reserve(targetFrames);
+            if (options.duration_ms > 0) {
+                capture.samples.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(targetFrames, std::numeric_limits<std::size_t>::max())));
+            }
 
             AudioDeviceIOProcID ioProcId = nullptr;
             check_osstatus(AudioDeviceCreateIOProcIDWithBlock(
@@ -458,7 +464,14 @@ int record_loopback_macos(const MacLoopbackOptions& options)
             check_osstatus(AudioDeviceStart(aggregateId, ioProcId), "failed to start CoreAudio process tap capture");
             {
                 std::unique_lock<std::mutex> lock(capture.mutex);
-                capture.cv.wait_for(lock, std::chrono::milliseconds(options.duration_ms + 3000), [&capture] { return capture.done; });
+                if (options.duration_ms > 0) {
+                    capture.cv.wait_for(lock, std::chrono::milliseconds(options.duration_ms + 3000), [&capture] { return capture.done; });
+                } else {
+                    while (!capture.done &&
+                           !(options.stop_requested != nullptr && options.stop_requested->load(std::memory_order_relaxed))) {
+                        capture.cv.wait_for(lock, std::chrono::milliseconds(50));
+                    }
+                }
                 capture.done = true;
             }
             check_osstatus(AudioDeviceStop(aggregateId, ioProcId), "failed to stop CoreAudio process tap capture");
@@ -468,7 +481,7 @@ int record_loopback_macos(const MacLoopbackOptions& options)
             for (const std::int16_t sample : capture.samples) {
                 accumulator.push(sample);
             }
-            CaptureResult result = accumulator.finish();
+            CaptureResult result = accumulator.finish(options.stop_requested != nullptr && options.stop_requested->load(std::memory_order_relaxed));
             write_wav_file(options.output, sampleRate, result.samples);
             write_summary(options, sampleRate, result);
 
@@ -476,7 +489,7 @@ int record_loopback_macos(const MacLoopbackOptions& options)
             std::cout << "Source: default CoreAudio process-tap system mix\n";
             std::cout << "Mix sample rate: " << sampleRate << "\n";
             std::cout << "Mix channels: " << format.mChannelsPerFrame << "\n";
-            std::cout << "Duration ms: " << options.duration_ms << "\n";
+            std::cout << "Duration ms: " << (options.duration_ms > 0 ? std::to_string(options.duration_ms) : std::string("manual")) << "\n";
             std::cout << "Frames written: " << result.samples.size() << "\n";
             std::cout << "Raw frames: " << result.raw_frames << "\n";
             std::cout << "Captured frames: " << capture.samples.size() << "\n";

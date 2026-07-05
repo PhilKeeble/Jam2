@@ -1,11 +1,13 @@
 #pragma once
 
+#include <atomic>
 #include <filesystem>
 #include <string>
 
 struct MacLoopbackOptions {
     std::string source = "default";
-    int duration_ms = 10000;
+    int duration_ms = 0;
+    std::atomic<bool>* stop_requested = nullptr;
     std::filesystem::path output;
     bool trigger = false;
     double trigger_threshold_db = -45.0;

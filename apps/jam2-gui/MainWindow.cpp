@@ -10,6 +10,9 @@
 #include <QAbstractSpinBox>
 #include <QApplication>
 #include <QAbstractItemView>
+#include <QAudioDevice>
+#include <QAudioFormat>
+#include <QAudioSink>
 #include <QClipboard>
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -21,6 +24,7 @@
 #include <QFileInfo>
 #include <QFile>
 #include <QFormLayout>
+#include <QFrame>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -28,6 +32,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QList>
+#include <QMediaDevices>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QIODevice>
@@ -36,7 +41,6 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QScrollBar>
-#include <QStandardPaths>
 #include <QUrl>
 #include <QSlider>
 #include <QSignalBlocker>
@@ -48,13 +52,17 @@
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
+#include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <iomanip>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <functional>
+#include <utility>
 #include <vector>
 
 quint16 waveformReadLe16(const QByteArray& data, qsizetype offset)
@@ -71,40 +79,104 @@ quint32 waveformReadLe32(const QByteArray& data, qsizetype offset)
         (static_cast<quint32>(static_cast<unsigned char>(data[offset + 3])) << 24);
 }
 
-class ResetDoubleSpinBox : public QDoubleSpinBox {
+class LocalMetronomeDevice : public QIODevice {
 public:
-    explicit ResetDoubleSpinBox(double resetValue, QWidget* parent = nullptr)
-        : QDoubleSpinBox(parent), resetValue_(resetValue)
+    LocalMetronomeDevice(int sampleRate, int channels, QObject* parent = nullptr)
+        : QIODevice(parent),
+          sampleRate_(qMax(1, sampleRate)),
+          channels_(qMax(1, channels))
     {
+    }
+
+    void configure(jam2::metronome::PatternSnapshot pattern, double level)
+    {
+        pattern = jam2::metronome::sanitize(pattern);
+        bpm_.store(pattern.bpm, std::memory_order_relaxed);
+        beatsPerBar_.store(pattern.beats_per_bar, std::memory_order_relaxed);
+        division_.store(pattern.division, std::memory_order_relaxed);
+        stepCount_.store(pattern.step_count, std::memory_order_relaxed);
+        playMaskLow_.store(pattern.play_mask_low, std::memory_order_relaxed);
+        playMaskHigh_.store(pattern.play_mask_high, std::memory_order_relaxed);
+        accentMaskLow_.store(pattern.accent_mask_low, std::memory_order_relaxed);
+        accentMaskHigh_.store(pattern.accent_mask_high, std::memory_order_relaxed);
+        levelPpm_.store(static_cast<int>(qBound(0.0, level, 1.0) * 1000000.0), std::memory_order_relaxed);
+    }
+
+    void resetGrid()
+    {
+        sampleCounter_ = 0;
+    }
+
+    qint64 bytesAvailable() const override
+    {
+        return 8192 + QIODevice::bytesAvailable();
+    }
+
+    bool isSequential() const override
+    {
+        return true;
     }
 
 protected:
-    void mouseDoubleClickEvent(QMouseEvent* event) override
+    qint64 readData(char* data, qint64 maxSize) override
     {
-        setValue(resetValue_);
-        QDoubleSpinBox::mouseDoubleClickEvent(event);
+        if (maxSize <= 0) {
+            return 0;
+        }
+        constexpr int kBytesPerSample = 2;
+        const int bytesPerFrame = channels_ * kBytesPerSample;
+        const qint64 frames = maxSize / bytesPerFrame;
+        if (frames <= 0) {
+            return 0;
+        }
+
+        const jam2::metronome::PatternSnapshot pattern = jam2::metronome::sanitize({
+            bpm_.load(std::memory_order_relaxed),
+            beatsPerBar_.load(std::memory_order_relaxed),
+            division_.load(std::memory_order_relaxed),
+            stepCount_.load(std::memory_order_relaxed),
+            playMaskLow_.load(std::memory_order_relaxed),
+            playMaskHigh_.load(std::memory_order_relaxed),
+            accentMaskLow_.load(std::memory_order_relaxed),
+            accentMaskHigh_.load(std::memory_order_relaxed),
+        });
+        const double level = static_cast<double>(levelPpm_.load(std::memory_order_relaxed)) / 1000000.0;
+        const std::uint64_t stepInterval =
+            jam2::metronome::step_interval_samples(static_cast<double>(sampleRate_), pattern.bpm, pattern.division);
+        auto* output = reinterpret_cast<qint16*>(data);
+        for (qint64 frame = 0; frame < frames; ++frame) {
+            const double click = jam2::metronome::render_sample(
+                pattern,
+                sampleCounter_++,
+                stepInterval,
+                static_cast<double>(sampleRate_),
+                level);
+            const qint16 pcm = static_cast<qint16>(std::lrint(qBound(-1.0, click, 1.0) * 32767.0));
+            for (int channel = 0; channel < channels_; ++channel) {
+                *output++ = pcm;
+            }
+        }
+        return frames * bytesPerFrame;
+    }
+
+    qint64 writeData(const char*, qint64) override
+    {
+        return -1;
     }
 
 private:
-    double resetValue_ = 0.0;
-};
-
-class ResetSpinBox : public QSpinBox {
-public:
-    explicit ResetSpinBox(int resetValue, QWidget* parent = nullptr)
-        : QSpinBox(parent), resetValue_(resetValue)
-    {
-    }
-
-protected:
-    void mouseDoubleClickEvent(QMouseEvent* event) override
-    {
-        setValue(resetValue_);
-        QSpinBox::mouseDoubleClickEvent(event);
-    }
-
-private:
-    int resetValue_ = 0;
+    int sampleRate_ = 48000;
+    int channels_ = 2;
+    std::uint64_t sampleCounter_ = 0;
+    std::atomic<int> bpm_{120};
+    std::atomic<int> beatsPerBar_{4};
+    std::atomic<int> division_{1};
+    std::atomic<int> stepCount_{4};
+    std::atomic<std::uint64_t> playMaskLow_{0x0fULL};
+    std::atomic<std::uint64_t> playMaskHigh_{0};
+    std::atomic<std::uint64_t> accentMaskLow_{0x01ULL};
+    std::atomic<std::uint64_t> accentMaskHigh_{0};
+    std::atomic<int> levelPpm_{350000};
 };
 
 class WaveformWidget : public QWidget {
@@ -139,6 +211,12 @@ public:
     void setBpm(double bpm)
     {
         bpm_ = qBound(1.0, bpm, 400.0);
+        update();
+    }
+
+    void setGridVisible(bool visible)
+    {
+        gridVisible_ = visible;
         update();
     }
 
@@ -231,7 +309,7 @@ protected:
         painter.fillRect(rect(), QColor(18, 20, 22));
         painter.setRenderHint(QPainter::Antialiasing, false);
 
-        if (durationMs_ > 0 && bpm_ > 0.0) {
+        if (gridVisible_ && durationMs_ > 0 && bpm_ > 0.0) {
             const double beatMs = 60000.0 / bpm_;
             const int beats = static_cast<int>(std::floor(static_cast<double>(durationMs_) / beatMs));
             for (int beat = 0; beat <= beats + 1; ++beat) {
@@ -344,6 +422,347 @@ private:
     qint64 loopStartMs_ = -1;
     qint64 loopEndMs_ = -1;
     double bpm_ = 120.0;
+    bool gridVisible_ = true;
+};
+
+struct Pcm16Wav {
+    int sampleRate = 0;
+    int channels = 0;
+    std::vector<std::vector<float>> samples;
+};
+
+class TrackPlaybackDevice : public QIODevice {
+    struct FocusState {
+        double x1 = 0.0;
+        double x2 = 0.0;
+        double y1 = 0.0;
+        double y2 = 0.0;
+    };
+
+public:
+    explicit TrackPlaybackDevice(QObject* parent = nullptr)
+        : QIODevice(parent)
+    {
+    }
+
+    void setTrack(Pcm16Wav wav)
+    {
+        wav_ = std::move(wav);
+        const int channels = qMax(1, wav_.channels);
+        stretch_.presetDefault(channels, static_cast<float>(qMax(1, wav_.sampleRate)), true);
+        inputBlock_.assign(channels, std::vector<float>(kMaxInputFrames, 0.0f));
+        outputBlock_.assign(channels, std::vector<float>(kMaxOutputFrames, 0.0f));
+        focusState_.assign(channels, FocusState{});
+        sourceFrame_ = 0.0;
+        positionFrame_.store(0, std::memory_order_relaxed);
+        pendingSeekFrame_.store(0, std::memory_order_relaxed);
+        lastPitchCents_ = std::numeric_limits<int>::min();
+        lastFocusEnabled_ = false;
+        lastFocusFrequencyHz_ = -1.0;
+        lastFocusGainDb_ = 0.0;
+        lastFocusQ_ = 0.0;
+        stretch_.reset();
+    }
+
+    bool hasTrack() const
+    {
+        return wav_.sampleRate > 0 && wav_.channels > 0 && !wav_.samples.empty() && !wav_.samples.front().empty();
+    }
+
+    int sampleRate() const
+    {
+        return qMax(1, wav_.sampleRate);
+    }
+
+    int channels() const
+    {
+        return qMax(1, wav_.channels);
+    }
+
+    qint64 durationMs() const
+    {
+        if (!hasTrack()) {
+            return 0;
+        }
+        return static_cast<qint64>(std::llround(static_cast<double>(frameCount()) * 1000.0 / sampleRate()));
+    }
+
+    qint64 positionMs() const
+    {
+        return static_cast<qint64>(positionFrame_.load(std::memory_order_relaxed) * 1000 / sampleRate());
+    }
+
+    void setPositionMs(qint64 ms)
+    {
+        const qint64 frame = qBound<qint64>(0, ms * sampleRate() / 1000, frameCount());
+        pendingSeekFrame_.store(frame, std::memory_order_relaxed);
+    }
+
+    void setSpeed(double speed)
+    {
+        speedPpm_.store(static_cast<int>(qBound(0.10, speed, 2.0) * 1000000.0), std::memory_order_relaxed);
+    }
+
+    void setPitchCents(int cents)
+    {
+        pitchCents_.store(qBound(-1200, cents, 1200), std::memory_order_relaxed);
+    }
+
+    void setGainDb(double gainDb)
+    {
+        gainPpm_.store(static_cast<int>(std::pow(10.0, qBound(-60.0, gainDb, 12.0) / 20.0) * 1000000.0), std::memory_order_relaxed);
+    }
+
+    void setFocus(bool enabled, double frequencyHz, double gainDb, double q)
+    {
+        focusEnabled_.store(enabled, std::memory_order_relaxed);
+        focusFrequencyHz_.store(qBound(20.0, frequencyHz, static_cast<double>(sampleRate()) * 0.45), std::memory_order_relaxed);
+        focusGainDb_.store(qBound(-24.0, gainDb, 24.0), std::memory_order_relaxed);
+        focusQ_.store(qBound(0.1, q, 20.0), std::memory_order_relaxed);
+    }
+
+    void setLoop(bool enabled, qint64 startMs, qint64 endMs)
+    {
+        loopEnabled_.store(enabled, std::memory_order_relaxed);
+        loopStartFrame_.store(qBound<qint64>(0, startMs * sampleRate() / 1000, frameCount()), std::memory_order_relaxed);
+        loopEndFrame_.store(qBound<qint64>(0, endMs * sampleRate() / 1000, frameCount()), std::memory_order_relaxed);
+    }
+
+    qint64 bytesAvailable() const override
+    {
+        return kMaxOutputFrames * channels() * 2 + QIODevice::bytesAvailable();
+    }
+
+    bool isSequential() const override
+    {
+        return true;
+    }
+
+protected:
+    qint64 readData(char* data, qint64 maxSize) override
+    {
+        if (!hasTrack() || maxSize <= 0) {
+            return 0;
+        }
+        applyPendingSeek();
+        const int channelCount = channels();
+        const int requestedFrames = static_cast<int>(maxSize / (channelCount * 2));
+        const int outputFrames = qBound(0, requestedFrames, kMaxOutputFrames);
+        if (outputFrames <= 0) {
+            return 0;
+        }
+
+        const double speed = static_cast<double>(speedPpm_.load(std::memory_order_relaxed)) / 1000000.0;
+        const int pitchCents = pitchCents_.load(std::memory_order_relaxed);
+        const double gain = static_cast<double>(gainPpm_.load(std::memory_order_relaxed)) / 1000000.0;
+
+        if (pitchCents != lastPitchCents_) {
+            stretch_.setTransposeSemitones(static_cast<float>(pitchCents) / 100.0f);
+            lastPitchCents_ = pitchCents;
+        }
+        updateFocusCoefficients();
+
+        if (std::abs(speed - 1.0) <= 0.0001 && pitchCents == 0) {
+            renderDirect(outputFrames, gain, data);
+        } else {
+            renderStretched(outputFrames, speed, gain, data);
+        }
+        positionFrame_.store(qBound<qint64>(0, static_cast<qint64>(std::llround(sourceFrame_)), frameCount()), std::memory_order_relaxed);
+        return static_cast<qint64>(outputFrames) * channelCount * 2;
+    }
+
+    qint64 writeData(const char*, qint64) override
+    {
+        return -1;
+    }
+
+private:
+    static constexpr int kMaxOutputFrames = 4096;
+    static constexpr int kMaxInputFrames = kMaxOutputFrames * 2 + 16;
+
+    qint64 frameCount() const
+    {
+        return hasTrack() ? static_cast<qint64>(wav_.samples.front().size()) : 0;
+    }
+
+    void applyPendingSeek()
+    {
+        const qint64 pending = pendingSeekFrame_.exchange(-1, std::memory_order_relaxed);
+        if (pending >= 0) {
+            sourceFrame_ = static_cast<double>(qBound<qint64>(0, pending, frameCount()));
+            positionFrame_.store(static_cast<qint64>(sourceFrame_), std::memory_order_relaxed);
+            stretch_.reset();
+            resetFocusState();
+        }
+    }
+
+    void advanceFrame()
+    {
+        const bool looping = loopEnabled_.load(std::memory_order_relaxed);
+        const qint64 loopStart = loopStartFrame_.load(std::memory_order_relaxed);
+        const qint64 loopEnd = loopEndFrame_.load(std::memory_order_relaxed);
+        if (looping && loopEnd > loopStart && sourceFrame_ >= static_cast<double>(loopEnd)) {
+            sourceFrame_ = static_cast<double>(loopStart);
+            stretch_.reset();
+            resetFocusState();
+        }
+    }
+
+    void resetFocusState()
+    {
+        for (FocusState& state : focusState_) {
+            state = {};
+        }
+    }
+
+    void updateFocusCoefficients()
+    {
+        const bool enabled = focusEnabled_.load(std::memory_order_relaxed);
+        const double frequencyHz = focusFrequencyHz_.load(std::memory_order_relaxed);
+        const double gainDb = focusGainDb_.load(std::memory_order_relaxed);
+        const double q = focusQ_.load(std::memory_order_relaxed);
+        if (enabled == lastFocusEnabled_ &&
+            std::abs(frequencyHz - lastFocusFrequencyHz_) < 0.001 &&
+            std::abs(gainDb - lastFocusGainDb_) < 0.001 &&
+            std::abs(q - lastFocusQ_) < 0.001) {
+            return;
+        }
+
+        lastFocusEnabled_ = enabled;
+        lastFocusFrequencyHz_ = frequencyHz;
+        lastFocusGainDb_ = gainDb;
+        lastFocusQ_ = q;
+        if (!enabled || std::abs(gainDb) < 0.001) {
+            focusA0_ = 1.0;
+            focusA1_ = 0.0;
+            focusA2_ = 0.0;
+            focusB1_ = 0.0;
+            focusB2_ = 0.0;
+            resetFocusState();
+            return;
+        }
+
+        const double clampedFrequency = qBound(20.0, frequencyHz, static_cast<double>(sampleRate()) * 0.45);
+        const double omega = 2.0 * 3.14159265358979323846 * clampedFrequency / static_cast<double>(sampleRate());
+        const double sinOmega = std::sin(omega);
+        const double cosOmega = std::cos(omega);
+        const double alpha = sinOmega / (2.0 * qBound(0.1, q, 20.0));
+        const double makeup = std::pow(10.0, gainDb / 20.0);
+
+        const double b0 = alpha;
+        const double b1 = 0.0;
+        const double b2 = -alpha;
+        const double a0 = 1.0 + alpha;
+        const double a1 = -2.0 * cosOmega;
+        const double a2 = 1.0 - alpha;
+
+        focusA0_ = makeup * b0 / a0;
+        focusA1_ = makeup * b1 / a0;
+        focusA2_ = makeup * b2 / a0;
+        focusB1_ = a1 / a0;
+        focusB2_ = a2 / a0;
+        resetFocusState();
+    }
+
+    double processFocusSample(int channel, double sample)
+    {
+        if (!lastFocusEnabled_ || channel < 0 || channel >= static_cast<int>(focusState_.size())) {
+            return sample;
+        }
+        FocusState& state = focusState_[channel];
+        const double output = focusA0_ * sample + focusA1_ * state.x1 + focusA2_ * state.x2 - focusB1_ * state.y1 - focusB2_ * state.y2;
+        state.x2 = state.x1;
+        state.x1 = sample;
+        state.y2 = state.y1;
+        state.y1 = output;
+        return output;
+    }
+
+    float sampleAt(int channel, qint64 frame) const
+    {
+        if (frame < 0 || frame >= frameCount() || channel < 0 || channel >= wav_.channels) {
+            return 0.0f;
+        }
+        return wav_.samples[channel][static_cast<std::size_t>(frame)];
+    }
+
+    void fillInput(int inputFrames)
+    {
+        const int channelCount = channels();
+        for (int frame = 0; frame < inputFrames; ++frame) {
+            advanceFrame();
+            const qint64 source = static_cast<qint64>(sourceFrame_);
+            for (int channel = 0; channel < channelCount; ++channel) {
+                inputBlock_[channel][frame] = sampleAt(channel, source);
+            }
+            sourceFrame_ += 1.0;
+        }
+    }
+
+    void renderDirect(int outputFrames, double gain, char* data)
+    {
+        auto* output = reinterpret_cast<qint16*>(data);
+        const int channelCount = channels();
+        for (int frame = 0; frame < outputFrames; ++frame) {
+            advanceFrame();
+            const qint64 source = static_cast<qint64>(sourceFrame_);
+            for (int channel = 0; channel < channelCount; ++channel) {
+                const double focused = processFocusSample(channel, static_cast<double>(sampleAt(channel, source)));
+                const double sample = qBound(-1.0, focused * gain, 1.0);
+                *output++ = static_cast<qint16>(std::lrint(sample * 32767.0));
+            }
+            sourceFrame_ += 1.0;
+        }
+    }
+
+    void renderStretched(int outputFrames, double speed, double gain, char* data)
+    {
+        const int channelCount = channels();
+        const int inputFrames = qBound(1, static_cast<int>(std::ceil(outputFrames * speed)), kMaxInputFrames);
+        fillInput(inputFrames);
+        for (int channel = 0; channel < channelCount; ++channel) {
+            std::fill(outputBlock_[channel].begin(), outputBlock_[channel].begin() + outputFrames, 0.0f);
+        }
+        stretch_.process(inputBlock_, inputFrames, outputBlock_, outputFrames);
+
+        auto* output = reinterpret_cast<qint16*>(data);
+        for (int frame = 0; frame < outputFrames; ++frame) {
+            for (int channel = 0; channel < channelCount; ++channel) {
+                const double focused = processFocusSample(channel, static_cast<double>(outputBlock_[channel][frame]));
+                const double sample = qBound(-1.0, focused * gain, 1.0);
+                *output++ = static_cast<qint16>(std::lrint(sample * 32767.0));
+            }
+        }
+    }
+
+    Pcm16Wav wav_;
+    signalsmith::stretch::SignalsmithStretch<float> stretch_;
+    std::vector<std::vector<float>> inputBlock_;
+    std::vector<std::vector<float>> outputBlock_;
+    std::vector<FocusState> focusState_;
+    double sourceFrame_ = 0.0;
+    int lastPitchCents_ = std::numeric_limits<int>::min();
+    std::atomic<int> speedPpm_{1000000};
+    std::atomic<int> pitchCents_{0};
+    std::atomic<int> gainPpm_{1000000};
+    std::atomic<bool> focusEnabled_{false};
+    std::atomic<double> focusFrequencyHz_{120.0};
+    std::atomic<double> focusGainDb_{12.0};
+    std::atomic<double> focusQ_{6.0};
+    std::atomic<qint64> pendingSeekFrame_{-1};
+    std::atomic<qint64> positionFrame_{0};
+    std::atomic<bool> loopEnabled_{false};
+    std::atomic<qint64> loopStartFrame_{0};
+    std::atomic<qint64> loopEndFrame_{0};
+    bool lastFocusEnabled_ = false;
+    double lastFocusFrequencyHz_ = -1.0;
+    double lastFocusGainDb_ = 0.0;
+    double lastFocusQ_ = 0.0;
+    double focusA0_ = 1.0;
+    double focusA1_ = 0.0;
+    double focusA2_ = 0.0;
+    double focusB1_ = 0.0;
+    double focusB2_ = 0.0;
 };
 
 namespace {
@@ -376,6 +795,42 @@ QSlider* makeUnitSlider(double value, QWidget* parent)
     return slider;
 }
 
+struct FocusPreset {
+    double frequencyHz = 120.0;
+    double gainDb = 12.0;
+    double q = 6.0;
+};
+
+FocusPreset focusPresetForKey(const QString& key)
+{
+    if (key == QStringLiteral("bass")) {
+        return {95.0, 14.0, 7.0};
+    }
+    if (key == QStringLiteral("guitar")) {
+        return {850.0, 12.0, 5.0};
+    }
+    if (key == QStringLiteral("vocals")) {
+        return {1800.0, 12.0, 4.5};
+    }
+    if (key == QStringLiteral("drums")) {
+        return {3200.0, 10.0, 3.5};
+    }
+    return {120.0, 12.0, 6.0};
+}
+
+bool isCustomFocusPreset(const QString& key)
+{
+    return key.isEmpty() || key == QStringLiteral("custom");
+}
+
+QString trackCheckBoxStyle()
+{
+    return QStringLiteral(
+        "QCheckBox::indicator { width: 16px; height: 16px; border: 2px solid #d7dde2; background: #101214; }"
+        "QCheckBox::indicator:hover { border-color: #ffffff; }"
+        "QCheckBox::indicator:checked { border: 2px solid #66c6a6; background: #66c6a6; }");
+}
+
 QString deviceId(const QString& text)
 {
     const QRegularExpression re(QStringLiteral("^\\s*\\[?(\\d+)\\]?"));
@@ -390,12 +845,6 @@ struct WavMetadata {
     qint64 dataBytes = 0;
     int durationMs = 0;
     QString sha256;
-};
-
-struct Pcm16Wav {
-    int sampleRate = 0;
-    int channels = 0;
-    std::vector<std::vector<float>> samples;
 };
 
 quint16 readLe16(const QByteArray& data, qsizetype offset)
@@ -491,7 +940,7 @@ Pcm16Wav readPcm16Wav(const QString& path)
             sampleRate = static_cast<int>(readLe32(bytes, payload + 4));
             bitsPerSample = readLe16(bytes, payload + 14);
             if (format != 1) {
-                throw std::runtime_error("only PCM WAV input is supported for stretching");
+                throw std::runtime_error("only PCM WAV input is supported for track playback");
             }
         } else if (id == "data") {
             dataOffset = payload;
@@ -501,7 +950,7 @@ Pcm16Wav readPcm16Wav(const QString& path)
     }
 
     if (channels <= 0 || sampleRate <= 0 || bitsPerSample != 16 || dataOffset < 0 || dataBytes <= 0) {
-        throw std::runtime_error("stretching currently supports PCM16 WAV input");
+        throw std::runtime_error("track playback currently supports PCM16 WAV input");
     }
     const qsizetype frameBytes = channels * 2;
     const qsizetype frames = dataBytes / frameBytes;
@@ -519,99 +968,16 @@ Pcm16Wav readPcm16Wav(const QString& path)
     return wav;
 }
 
-QByteArray encodePcm16Wav(const Pcm16Wav& wav)
-{
-    if (wav.channels <= 0 || wav.sampleRate <= 0 || wav.samples.empty()) {
-        throw std::runtime_error("invalid WAV render data");
-    }
-    const qsizetype frames = static_cast<qsizetype>(wav.samples.front().size());
-    const quint32 dataBytes = static_cast<quint32>(frames * wav.channels * 2);
-    const quint32 riffBytes = 36 + dataBytes;
-
-    QByteArray bytes;
-    bytes.reserve(static_cast<int>(44 + dataBytes));
-    auto writeAscii = [&bytes](const char* text) {
-        bytes.append(text, 4);
-    };
-    auto writeU16 = [&bytes](quint16 value) {
-        char out[2]{
-            static_cast<char>(value & 0xffU),
-            static_cast<char>((value >> 8) & 0xffU),
-        };
-        bytes.append(out, 2);
-    };
-    auto writeU32 = [&bytes](quint32 value) {
-        char out[4]{
-            static_cast<char>(value & 0xffU),
-            static_cast<char>((value >> 8) & 0xffU),
-            static_cast<char>((value >> 16) & 0xffU),
-            static_cast<char>((value >> 24) & 0xffU),
-        };
-        bytes.append(out, 4);
-    };
-
-    writeAscii("RIFF");
-    writeU32(riffBytes);
-    writeAscii("WAVE");
-    writeAscii("fmt ");
-    writeU32(16);
-    writeU16(1);
-    writeU16(static_cast<quint16>(wav.channels));
-    writeU32(static_cast<quint32>(wav.sampleRate));
-    writeU32(static_cast<quint32>(wav.sampleRate * wav.channels * 2));
-    writeU16(static_cast<quint16>(wav.channels * 2));
-    writeU16(16);
-    writeAscii("data");
-    writeU32(dataBytes);
-
-    for (qsizetype frame = 0; frame < frames; ++frame) {
-        for (int channel = 0; channel < wav.channels; ++channel) {
-            const float sample = qBound(-1.0f, wav.samples[channel][static_cast<std::size_t>(frame)], 1.0f);
-            const qint16 pcm = static_cast<qint16>(std::lrint(sample * 32767.0f));
-            writeU16(static_cast<quint16>(pcm));
-        }
-    }
-    return bytes;
-}
-
-QByteArray renderStretchedWav(const QString& inputPath, double speed, int pitchSemitones)
-{
-    const Pcm16Wav input = readPcm16Wav(inputPath);
-    const double clampedSpeed = qBound(0.10, speed, 2.0);
-    const int outputFrames = qMax(1, static_cast<int>(std::ceil(input.samples.front().size() / clampedSpeed)));
-    Pcm16Wav output;
-    output.sampleRate = input.sampleRate;
-    output.channels = input.channels;
-    output.samples.assign(output.channels, std::vector<float>(static_cast<std::size_t>(outputFrames), 0.0f));
-
-    signalsmith::stretch::SignalsmithStretch<float> stretch;
-    stretch.presetDefault(output.channels, static_cast<float>(output.sampleRate));
-    stretch.setTransposeSemitones(static_cast<float>(pitchSemitones));
-    if (!stretch.exact(input.samples, static_cast<int>(input.samples.front().size()), output.samples, outputFrames)) {
-        stretch.process(input.samples, static_cast<int>(input.samples.front().size()), output.samples, outputFrames);
-    }
-
-    return encodePcm16Wav(output);
-}
-
-QByteArray renderClickWav(int sampleRate, double frequency, double seconds)
-{
-    const int frames = qMax(1, static_cast<int>(std::llround(sampleRate * seconds)));
-    Pcm16Wav wav;
-    wav.sampleRate = sampleRate;
-    wav.channels = 1;
-    wav.samples.assign(1, std::vector<float>(static_cast<std::size_t>(frames), 0.0f));
-    for (int i = 0; i < frames; ++i) {
-        const double phase = 2.0 * 3.14159265358979323846 * frequency * static_cast<double>(i) / sampleRate;
-        const double envelope = 1.0 - (static_cast<double>(i) / static_cast<double>(frames));
-        wav.samples[0][static_cast<std::size_t>(i)] = static_cast<float>(std::sin(phase) * envelope * 0.8);
-    }
-    return encodePcm16Wav(wav);
-}
-
 QString onOff(bool value)
 {
     return value ? QStringLiteral("on") : QStringLiteral("off");
+}
+
+QString dbText(double db)
+{
+    return QStringLiteral("%1%2 dB")
+        .arg(db >= 0.0 ? QStringLiteral("+") : QString())
+        .arg(db, 0, 'f', 1);
 }
 
 bool isWheelValueEditor(QObject* object)
@@ -662,8 +1028,6 @@ MainWindow::MainWindow(QWidget* parent)
     : QWidget(parent)
 {
     generateSession();
-    trackPlayer_.setAudioOutput(&trackAudio_);
-    trackAudio_.setVolume(0.75);
     buildUi();
     QApplication::instance()->installEventFilter(this);
 
@@ -676,6 +1040,12 @@ MainWindow::MainWindow(QWidget* parent)
         startButton_->setEnabled(true);
         joinButton_->setEnabled(true);
         stopButton_->setEnabled(false);
+        if (runtimeMixBox_) {
+            runtimeMixBox_->setVisible(false);
+        }
+        if (leadSwapButton_) {
+            leadSwapButton_->setEnabled(false);
+        }
     };
     controlServer_.onState = [this](const QString& state) {
         connectionLabel_->setText(state);
@@ -717,38 +1087,10 @@ MainWindow::MainWindow(QWidget* parent)
         if (importCaptureButton_) {
             importCaptureButton_->setEnabled(exitCode == 0 && QFileInfo::exists(lastCapturePath_));
         }
-        if (captureProgressLabel_) {
-            captureProgressLabel_->setText(exitCode == 0 ? QStringLiteral("Capture ready") : QStringLiteral("Capture failed"));
-        }
-    });
-    QObject::connect(&trackPlayer_, &QMediaPlayer::positionChanged, this, [this](qint64) { updateTrackTimeline(); });
-    QObject::connect(&trackPlayer_, &QMediaPlayer::durationChanged, this, [this](qint64 duration) {
-        if (trackWaveform_) {
-            trackWaveform_->setDurationMs(duration);
-        }
-        updateTrackTimeline();
-    });
-    QObject::connect(&trackPlayer_, &QMediaPlayer::playbackStateChanged, this, [this](QMediaPlayer::PlaybackState state) {
-        if (!trackPlaybackLabel_) {
-            return;
-        }
-        if (state == QMediaPlayer::PlayingState) {
-            trackPlaybackLabel_->setText(QStringLiteral("Playing local track"));
-        } else if (state == QMediaPlayer::PausedState) {
-            trackPlaybackLabel_->setText(QStringLiteral("Track paused"));
-        } else {
-            trackPlaybackLabel_->setText(QStringLiteral("Track stopped"));
-        }
-    });
-    QObject::connect(&trackPlayer_, &QMediaPlayer::errorOccurred, this, [this](QMediaPlayer::Error, const QString& error) {
-        if (!error.isEmpty()) {
-            appendLog(QStringLiteral("track playback error: ") + error);
-        }
     });
     trackTimelineTimer_.setInterval(33);
     QObject::connect(&trackTimelineTimer_, &QTimer::timeout, this, [this] { updateTrackTimeline(); });
     trackTimelineTimer_.start();
-    QObject::connect(&trackMetronomeTimer_, &QTimer::timeout, this, [this] { playTrackMetronomeClick(); });
 }
 
 MainWindow::~MainWindow()
@@ -762,8 +1104,9 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
     if (event->type() == QEvent::Wheel && isWheelValueEditor(watched)) {
         if (auto* scrollArea = parentScrollArea(watched)) {
             scrollAreaByWheel(*scrollArea, *static_cast<QWheelEvent*>(event));
+            return true;
         }
-        return true;
+        return false;
     }
     return QWidget::eventFilter(watched, event);
 }
@@ -792,7 +1135,7 @@ void MainWindow::buildUi()
     header->addWidget(jitterLabel_);
     header->addWidget(lossLabel_);
 
-    songTitleEdit_ = new QLineEdit(songModel_.title(), this);
+    songTitleEdit_ = new QLineEdit(chordModel_.title(), this);
     songTitleEdit_->setMinimumWidth(300);
     auto* newSongButton = new QPushButton(QStringLiteral("New Song"), this);
     auto* openSongButton = new QPushButton(QStringLiteral("Open"), this);
@@ -805,7 +1148,10 @@ void MainWindow::buildUi()
     library->addWidget(saveSongButton);
 
     QObject::connect(songTitleEdit_, &QLineEdit::editingFinished, this, [this] {
-        songModel_.setTitle(songTitleEdit_->text());
+        chordModel_.setTitle(songTitleEdit_->text());
+        beatModel_.setTitle(songTitleEdit_->text());
+        lyricModel_.setTitle(songTitleEdit_->text());
+        sendSongSnapshot();
     });
     QObject::connect(newSongButton, &QPushButton::clicked, this, [this] { newSong(); });
     QObject::connect(openSongButton, &QPushButton::clicked, this, [this] { openSong(); });
@@ -813,12 +1159,12 @@ void MainWindow::buildUi()
 
     tabs_ = new QTabWidget(this);
     tabs_->addTab(buildSongPage(), QStringLiteral("Chord View"));
-    beatGrid_ = new BeatGridWidget(&songModel_, QStringLiteral("beat"), this);
+    beatGrid_ = new BeatGridWidget(&beatModel_, QStringLiteral("beat"), this);
     tabs_->addTab(beatGrid_, QStringLiteral("Beat View"));
-    lyricGrid_ = new BeatGridWidget(&songModel_, QStringLiteral("lyric"), this);
+    lyricGrid_ = new BeatGridWidget(&lyricModel_, QStringLiteral("lyric"), this);
     tabs_->addTab(lyricGrid_, QStringLiteral("Lyrics"));
-    tabs_->addTab(buildArrangementPage(), QStringLiteral("Arrangement"));
     tabs_->addTab(buildTrackPage(), QStringLiteral("Track"));
+    tabs_->addTab(buildMetronomePage(), QStringLiteral("Metronome"));
     tabs_->addTab(buildStatsPage(), QStringLiteral("Stats"));
 
     auto sendCellEdit = [this](int section, const QString& lane, int beat, const QString& text, int revision) {
@@ -830,20 +1176,49 @@ void MainWindow::buildUi()
             {QStringLiteral("beat"), beat},
             {QStringLiteral("text"), text},
         });
-        refreshSongViews();
     };
     beatGrid_->onCellEdited = sendCellEdit;
     lyricGrid_->onCellEdited = sendCellEdit;
-    beatGrid_->onStructureChanged = [this] { refreshSongViews(); };
-    lyricGrid_->onStructureChanged = [this] { refreshSongViews(); };
+    beatGrid_->onBeatHitEdited = [this](int section, int beat, int lane, const QString& text, int revision) {
+        sendControl(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("beat.hit")},
+            {QStringLiteral("revision"), revision},
+            {QStringLiteral("section"), section},
+            {QStringLiteral("beat"), beat},
+            {QStringLiteral("lane"), lane},
+            {QStringLiteral("text"), text},
+        });
+    };
+    beatGrid_->onBeatDivisionChanged = [this](int section, int beat, int division, int revision) {
+        sendControl(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("beat.division")},
+            {QStringLiteral("revision"), revision},
+            {QStringLiteral("section"), section},
+            {QStringLiteral("beat"), beat},
+            {QStringLiteral("division"), division},
+        });
+    };
+    lyricGrid_->onLyricsEdited = [this](const QString& text, int revision) {
+        sendControl(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("lyrics.set")},
+            {QStringLiteral("revision"), revision},
+            {QStringLiteral("text"), text},
+        });
+    };
+    beatGrid_->onStructureChanged = [this] {
+        sendSongSnapshot();
+    };
+    lyricGrid_->onStructureChanged = [this] {
+        sendSongSnapshot();
+    };
     beatGrid_->onGridResized = [this](int section, int beats, int revision) {
         sendControl(QJsonObject{
             {QStringLiteral("type"), QStringLiteral("grid.resize")},
             {QStringLiteral("revision"), revision},
             {QStringLiteral("section"), section},
+            {QStringLiteral("lane"), QStringLiteral("beat")},
             {QStringLiteral("beats"), beats},
         });
-        refreshSongViews();
     };
     lyricGrid_->onGridResized = beatGrid_->onGridResized;
 
@@ -966,6 +1341,7 @@ QWidget* MainWindow::buildSessionPage()
     bpmSpin_ = new QSpinBox(page);
     bpmSpin_->setRange(1, 400);
     bpmSpin_->setValue(120);
+    bpmSpin_->hide();
     metronomeModeBox_ = new QComboBox(page);
     metronomeModeBox_->addItems({
         QStringLiteral("shared-grid"),
@@ -1018,17 +1394,16 @@ QWidget* MainWindow::buildSessionPage()
 
     auto* runtimeLayout = new QGridLayout();
     runtimeLayout->addWidget(metronomeCheck_, 0, 0);
-    runtimeLayout->addWidget(new QLabel(QStringLiteral("BPM"), page), 0, 1);
-    runtimeLayout->addWidget(bpmSpin_, 0, 2);
-    runtimeLayout->addWidget(new QLabel(QStringLiteral("Mode"), page), 0, 3);
-    runtimeLayout->addWidget(metronomeModeBox_, 0, 4);
-    runtimeLayout->addWidget(new QLabel(QStringLiteral("Metronome"), page), 0, 5);
-    runtimeLayout->addWidget(metronomeLevelSlider_, 0, 6);
-    runtimeLayout->addWidget(new QLabel(QStringLiteral("Remote"), page), 0, 7);
-    runtimeLayout->addWidget(remoteLevelSlider_, 0, 8);
+    runtimeLayout->addWidget(new QLabel(QStringLiteral("Mode"), page), 0, 1);
+    runtimeLayout->addWidget(metronomeModeBox_, 0, 2);
+    runtimeLayout->addWidget(new QLabel(QStringLiteral("Metronome"), page), 0, 3);
+    runtimeLayout->addWidget(metronomeLevelSlider_, 0, 4);
+    runtimeLayout->addWidget(new QLabel(QStringLiteral("Remote"), page), 0, 5);
+    runtimeLayout->addWidget(remoteLevelSlider_, 0, 6);
 
-    auto* runtimeBox = new QGroupBox(QStringLiteral("Runtime Mix"), page);
-    runtimeBox->setLayout(runtimeLayout);
+    runtimeMixBox_ = new QGroupBox(QStringLiteral("Runtime Mix"), page);
+    runtimeMixBox_->setLayout(runtimeLayout);
+    runtimeMixBox_->setVisible(jam2_.isRunning());
 
     auto* buttons = new QHBoxLayout();
     buttons->addWidget(startButton_);
@@ -1038,14 +1413,13 @@ QWidget* MainWindow::buildSessionPage()
 
     auto* layout = new QVBoxLayout(page);
     layout->setContentsMargins(0, 0, 0, 0);
-    layout->addWidget(runtimeBox);
+    layout->addWidget(runtimeMixBox_);
     layout->addLayout(buttons);
 
     QObject::connect(startButton_, &QPushButton::clicked, this, [this] { showStartJamDialog(); });
     QObject::connect(joinButton_, &QPushButton::clicked, this, [this] { showJoinJamDialog(); });
     QObject::connect(stopButton_, &QPushButton::clicked, this, [this] { stopJam(); });
     QObject::connect(metronomeCheck_, &QCheckBox::toggled, this, [this] { updateRuntimeControls(); });
-    QObject::connect(bpmSpin_, &QSpinBox::valueChanged, this, [this] { updateRuntimeControls(); });
     QObject::connect(metronomeModeBox_, &QComboBox::currentTextChanged, this, [this] { updateRuntimeControls(); });
     QObject::connect(metronomeLevelSlider_, &QSlider::valueChanged, this, [this] { updateRuntimeControls(); });
     QObject::connect(remoteLevelSlider_, &QSlider::valueChanged, this, [this] { updateRuntimeControls(); });
@@ -1056,19 +1430,20 @@ QWidget* MainWindow::buildSessionPage()
 QWidget* MainWindow::buildSongPage()
 {
     auto* page = new QWidget(this);
-    chordGrid_ = new BeatGridWidget(&songModel_, QStringLiteral("chord"), page);
+    chordGrid_ = new BeatGridWidget(&chordModel_, QStringLiteral("chord"), page);
     leadLabel_ = new QLabel(page);
     leadPendingLabel_ = new QLabel(page);
     updateLeadLabels();
 
-    auto* leadButton = new QPushButton(QStringLiteral("Request Lead Swap"), page);
-    QObject::connect(leadButton, &QPushButton::clicked, this, [this] { requestLeadSwap(); });
+    leadSwapButton_ = new QPushButton(QStringLiteral("Request Lead Swap"), page);
+    leadSwapButton_->setEnabled(jam2_.isRunning());
+    QObject::connect(leadSwapButton_, &QPushButton::clicked, this, [this] { requestLeadSwap(); });
 
     auto* top = new QHBoxLayout();
     top->addWidget(leadLabel_);
     top->addWidget(leadPendingLabel_);
     top->addStretch(1);
-    top->addWidget(leadButton);
+    top->addWidget(leadSwapButton_);
 
     auto* layout = new QVBoxLayout(page);
     layout->addLayout(top);
@@ -1083,56 +1458,20 @@ QWidget* MainWindow::buildSongPage()
             {QStringLiteral("beat"), beat},
             {QStringLiteral("text"), text},
         });
-        refreshSongViews();
     };
     chordGrid_->onGridResized = [this](int section, int beats, int revision) {
         sendControl(QJsonObject{
             {QStringLiteral("type"), QStringLiteral("grid.resize")},
             {QStringLiteral("revision"), revision},
             {QStringLiteral("section"), section},
+            {QStringLiteral("lane"), QStringLiteral("chord")},
             {QStringLiteral("beats"), beats},
         });
-        refreshSongViews();
     };
-    chordGrid_->onStructureChanged = [this] { refreshSongViews(); };
+    chordGrid_->onStructureChanged = [this] {
+        sendSongSnapshot();
+    };
 
-    return page;
-}
-
-QWidget* MainWindow::buildArrangementPage()
-{
-    auto* page = new QWidget(this);
-    arrangementSectionBox_ = new QComboBox(page);
-    arrangementEdit_ = new QTextEdit(page);
-    arrangementEdit_->setReadOnly(true);
-    auto* upButton = new QPushButton(QStringLiteral("Move Section Up"), page);
-    auto* downButton = new QPushButton(QStringLiteral("Move Section Down"), page);
-    auto* refreshButton = new QPushButton(QStringLiteral("Refresh Arrangement"), page);
-
-    auto* buttons = new QHBoxLayout();
-    buttons->addWidget(new QLabel(QStringLiteral("Section"), page));
-    buttons->addWidget(arrangementSectionBox_);
-    buttons->addWidget(upButton);
-    buttons->addWidget(downButton);
-    buttons->addWidget(refreshButton);
-    buttons->addStretch(1);
-
-    auto* layout = new QVBoxLayout(page);
-    layout->addLayout(buttons);
-    layout->addWidget(arrangementEdit_, 1);
-
-    QObject::connect(upButton, &QPushButton::clicked, this, [this] {
-        const int current = arrangementSectionBox_->currentIndex();
-        songModel_.moveSection(current, qMax(0, current - 1));
-        refreshSongViews();
-    });
-    QObject::connect(downButton, &QPushButton::clicked, this, [this] {
-        const int current = arrangementSectionBox_->currentIndex();
-        songModel_.moveSection(current, qMin(songModel_.sections().size() - 1, current + 1));
-        refreshSongViews();
-    });
-    QObject::connect(refreshButton, &QPushButton::clicked, this, [this] { refreshSongViews(); });
-    refreshSongViews();
     return page;
 }
 
@@ -1140,46 +1479,52 @@ QWidget* MainWindow::buildTrackPage()
 {
     auto* page = new QWidget(this);
     trackNameLabel_ = new QLabel(QStringLiteral("Track: No track loaded"), page);
-    trackAnalysisLabel_ = new QLabel(QStringLiteral("Analysis: Essentia not linked | Stretch: Signalsmith enabled"), page);
 
     auto* loadButton = new QPushButton(QStringLiteral("Load WAV"), page);
-    auto* shareButton = new QPushButton(QStringLiteral("Share Metadata"), page);
     shareTrackFileButton_ = new QPushButton(QStringLiteral("Share WAV"), page);
-    auto* analyzeButton = new QPushButton(QStringLiteral("Analyze"), page);
-    analyzeButton->setEnabled(false);
-    analyzeButton->setToolTip(QStringLiteral("Reserved for Essentia integration."));
 
     trackWaveform_ = new WaveformWidget(page);
-    trackSpeedSpin_ = new ResetDoubleSpinBox(1.0, page);
+    trackSpeedSlider_ = new QSlider(Qt::Horizontal, page);
+    trackSpeedSlider_->setRange(10, 200);
+    trackSpeedSlider_->setValue(100);
+    trackSpeedSpin_ = new QDoubleSpinBox(page);
     trackSpeedSpin_->setRange(0.10, 2.00);
     trackSpeedSpin_->setSingleStep(0.01);
     trackSpeedSpin_->setDecimals(2);
     trackSpeedSpin_->setValue(1.0);
-    trackPitchSpin_ = new ResetSpinBox(0, page);
+    trackSpeedSpin_->setFixedWidth(92);
+    trackPitchSlider_ = new QSlider(Qt::Horizontal, page);
+    trackPitchSlider_->setRange(-12, 12);
+    trackPitchSlider_->setValue(0);
+    trackPitchSpin_ = new QSpinBox(page);
     trackPitchSpin_->setRange(-12, 12);
     trackPitchSpin_->setSingleStep(1);
     trackPitchSpin_->setSuffix(QStringLiteral(" semitones"));
-    trackBpmSpin_ = new QSpinBox(page);
-    trackBpmSpin_->setRange(1, 400);
-    trackBpmSpin_->setValue(120);
-    trackBpmSpin_->setSuffix(QStringLiteral(" BPM"));
-    startTrackMetronomeButton_ = new QPushButton(QStringLiteral("Start Metronome"), page);
-    stopTrackMetronomeButton_ = new QPushButton(QStringLiteral("Stop Metronome"), page);
-    trackMetronomeLabel_ = new QLabel(QStringLiteral("Metronome stopped"), page);
-    auto* focusSlider = new QSlider(Qt::Horizontal, page);
-    focusSlider->setRange(40, 8000);
-    focusSlider->setValue(120);
+    trackPitchSpin_->setFixedWidth(128);
+    focusFrequencySlider_ = new QSlider(Qt::Horizontal, page);
+    focusFrequencySlider_->setRange(40, 8000);
+    focusFrequencySlider_->setValue(120);
+    focusFrequencySpin_ = new QSpinBox(page);
+    focusFrequencySpin_->setRange(40, 8000);
+    focusFrequencySpin_->setValue(120);
+    focusFrequencySpin_->setSuffix(QStringLiteral(" Hz"));
+    focusFrequencySpin_->setFixedWidth(108);
     auto* syncBox = new QCheckBox(QStringLiteral("Sync track controls"), page);
     syncBox->setChecked(true);
+    syncBox->setStyleSheet(trackCheckBoxStyle());
     capturePathEdit_ = new QLineEdit(SessionController::defaultCapturePath(), page);
     captureOutputEdit_ = new QLineEdit(page);
     loopbackSourceBox_ = new QComboBox(page);
     loopbackSourceBox_->setEditable(true);
     loopbackSourceBox_->addItem(QStringLiteral("[default] System mix"), QStringLiteral("default"));
+    captureManualStopCheck_ = new QCheckBox(QStringLiteral("Record until stopped"), page);
+    captureManualStopCheck_->setChecked(true);
+    captureManualStopCheck_->setStyleSheet(trackCheckBoxStyle());
     captureDurationSpin_ = new QSpinBox(page);
     captureDurationSpin_->setRange(1000, 600000);
     captureDurationSpin_->setValue(30000);
     captureDurationSpin_->setSuffix(QStringLiteral(" ms"));
+    captureDurationSpin_->setEnabled(false);
     captureTriggerCheck_ = new QCheckBox(QStringLiteral("Trigger on signal"), page);
     trimLeadingCheck_ = new QCheckBox(QStringLiteral("Trim leading silence"), page);
     trimTrailingCheck_ = new QCheckBox(QStringLiteral("Trim trailing silence"), page);
@@ -1207,15 +1552,26 @@ QWidget* MainWindow::buildTrackPage()
     tailSilenceSpin_->setRange(0, 30000);
     tailSilenceSpin_->setValue(1000);
     tailSilenceSpin_->setSuffix(QStringLiteral(" ms"));
-    captureProgressLabel_ = new QLabel(QStringLiteral("Capture idle"), page);
-    trackPlaybackLabel_ = new QLabel(QStringLiteral("Track player idle"), page);
     playTrackButton_ = new QPushButton(QStringLiteral("Play Track"), page);
     stopTrackButton_ = new QPushButton(QStringLiteral("Stop Track"), page);
     loopStartButton_ = new QPushButton(QStringLiteral("Loop Start"), page);
     loopEndButton_ = new QPushButton(QStringLiteral("Loop End"), page);
     clearLoopButton_ = new QPushButton(QStringLiteral("Clear Loop"), page);
-    loopStatusLabel_ = new QLabel(QStringLiteral("Loop off"), page);
-    trackLevelSlider_ = makeUnitSlider(0.75, page);
+    loopEnabledCheck_ = new QCheckBox(QStringLiteral("Loop whole track"), page);
+    loopEnabledCheck_->setChecked(false);
+    loopEnabledCheck_->setStyleSheet(trackCheckBoxStyle());
+    waveformGridCheck_ = new QCheckBox(QStringLiteral("Show waveform grid"), page);
+    waveformGridCheck_->setChecked(trackController_.model().waveformGridVisible);
+    waveformGridCheck_->setStyleSheet(trackCheckBoxStyle());
+    trackLevelSlider_ = new QSlider(Qt::Horizontal, page);
+    trackLevelSlider_->setRange(-60, 12);
+    trackLevelSlider_->setValue(0);
+    trackLevelSlider_->setMinimumWidth(160);
+    trackController_.model().trackGainDb = 0.0;
+    trackLevelDbLabel_ = new QLabel(dbText(trackController_.model().trackGainDb), page);
+    trackLevelDbLabel_->setFrameShape(QFrame::StyledPanel);
+    trackLevelDbLabel_->setAlignment(Qt::AlignCenter);
+    trackLevelDbLabel_->setMinimumWidth(82);
     captureButton_ = new QPushButton(QStringLiteral("Record Input"), page);
     loopbackCaptureButton_ = new QPushButton(QStringLiteral("Record Loopback"), page);
     stopCaptureButton_ = new QPushButton(QStringLiteral("Stop Capture"), page);
@@ -1228,33 +1584,63 @@ QWidget* MainWindow::buildTrackPage()
     captureOutputEdit_->setText(captureDir.absoluteFilePath(QStringLiteral("captures/capture.wav")));
     const QList<QWidget*> captureDialogWidgets{
         capturePathEdit_, captureOutputEdit_, loopbackSourceBox_, captureDurationSpin_,
+        captureManualStopCheck_,
         captureTriggerCheck_, trimLeadingCheck_, trimTrailingCheck_, triggerThresholdSpin_,
         tailThresholdSpin_, preRollSpin_, triggerHoldSpin_, tailSilenceSpin_,
     };
     for (QWidget* widget : captureDialogWidgets) {
         widget->hide();
     }
+    auto* speedControl = new QWidget(page);
+    auto* speedLayout = new QHBoxLayout(speedControl);
+    speedLayout->setContentsMargins(0, 0, 0, 0);
+    speedLayout->addWidget(trackSpeedSlider_, 1);
+    speedLayout->addWidget(trackSpeedSpin_);
+    auto* pitchControl = new QWidget(page);
+    auto* pitchLayout = new QHBoxLayout(pitchControl);
+    pitchLayout->setContentsMargins(0, 0, 0, 0);
+    pitchLayout->addWidget(trackPitchSlider_, 1);
+    pitchLayout->addWidget(trackPitchSpin_);
+    auto* trackLevelControl = new QWidget(page);
+    auto* trackLevelLayout = new QHBoxLayout(trackLevelControl);
+    trackLevelLayout->setContentsMargins(0, 0, 0, 0);
+    trackLevelLayout->addWidget(trackLevelSlider_, 1);
+    trackLevelLayout->addWidget(trackLevelDbLabel_);
+    auto* focusControl = new QWidget(page);
+    auto* focusLayout = new QHBoxLayout(focusControl);
+    focusLayout->setContentsMargins(0, 0, 0, 0);
+    focusFrequencyCheck_ = new QCheckBox(page);
+    focusFrequencyCheck_->setStyleSheet(trackCheckBoxStyle());
+    focusPresetBox_ = new QComboBox(page);
+    focusPresetBox_->addItem(QStringLiteral("Custom"), QStringLiteral("custom"));
+    focusPresetBox_->addItem(QStringLiteral("Bass"), QStringLiteral("bass"));
+    focusPresetBox_->addItem(QStringLiteral("Guitar"), QStringLiteral("guitar"));
+    focusPresetBox_->addItem(QStringLiteral("Vocals"), QStringLiteral("vocals"));
+    focusPresetBox_->addItem(QStringLiteral("Drums"), QStringLiteral("drums"));
+    focusPresetBox_->setFixedWidth(108);
+    focusLayout->addWidget(focusFrequencyCheck_);
+    focusLayout->addWidget(focusPresetBox_);
+    focusLayout->addWidget(focusFrequencySlider_, 1);
+    focusLayout->addWidget(focusFrequencySpin_);
+    auto* loopOptionsControl = new QWidget(page);
+    auto* loopOptionsLayout = new QHBoxLayout(loopOptionsControl);
+    loopOptionsLayout->setContentsMargins(0, 0, 0, 0);
+    loopOptionsLayout->addWidget(loopEnabledCheck_);
+    loopOptionsLayout->addWidget(waveformGridCheck_);
+    loopOptionsLayout->addStretch(1);
+
     auto* form = new QFormLayout();
     form->addRow(trackNameLabel_);
-    form->addRow(QStringLiteral("Metronome BPM"), trackBpmSpin_);
-    form->addRow(trackMetronomeLabel_);
-    form->addRow(QStringLiteral("Speed"), trackSpeedSpin_);
-    form->addRow(QStringLiteral("Pitch"), trackPitchSpin_);
-    form->addRow(QStringLiteral("Track level"), trackLevelSlider_);
-    form->addRow(QStringLiteral("Focus frequency"), focusSlider);
-    form->addRow(loopStatusLabel_);
+    form->addRow(QStringLiteral("Speed"), speedControl);
+    form->addRow(QStringLiteral("Pitch"), pitchControl);
+    form->addRow(QStringLiteral("Track level"), trackLevelControl);
+    form->addRow(QStringLiteral("Focus frequency"), focusControl);
+    form->addRow(loopOptionsControl);
     form->addRow(syncBox);
-    form->addRow(trackAnalysisLabel_);
-    form->addRow(QStringLiteral("Capture status"), captureProgressLabel_);
-    form->addRow(QStringLiteral("Playback status"), trackPlaybackLabel_);
 
     auto* buttons = new QHBoxLayout();
     buttons->addWidget(loadButton);
-    buttons->addWidget(shareButton);
     buttons->addWidget(shareTrackFileButton_);
-    buttons->addWidget(analyzeButton);
-    buttons->addWidget(startTrackMetronomeButton_);
-    buttons->addWidget(stopTrackMetronomeButton_);
     buttons->addWidget(playTrackButton_);
     buttons->addWidget(stopTrackButton_);
     buttons->addWidget(loopStartButton_);
@@ -1272,30 +1658,44 @@ QWidget* MainWindow::buildTrackPage()
     layout->addLayout(form);
 
     QObject::connect(loadButton, &QPushButton::clicked, this, [this] { loadTrackMetadata(); });
-    QObject::connect(shareButton, &QPushButton::clicked, this, [this] {
-        sendControl(trackMetadataMessage(QStringLiteral("track.offer")));
-    });
     QObject::connect(shareTrackFileButton_, &QPushButton::clicked, this, [this] { sendTrackFile(); });
-    QObject::connect(trackBpmSpin_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int value) {
-        trackController_.model().acceptedBpm = value;
-        if (trackWaveform_) {
-            trackWaveform_->setBpm(value);
+    QObject::connect(trackSpeedSlider_, &QSlider::valueChanged, this, [this](int value) {
+        const double speed = static_cast<double>(value) / 100.0;
+        trackController_.model().speed = speed;
+        if (trackSpeedSpin_) {
+            const QSignalBlocker blocker(trackSpeedSpin_);
+            trackSpeedSpin_->setValue(speed);
         }
-        updateTrackControls();
-        updateTrackMetronomeInterval();
+        applyTrackPlaybackSettings();
     });
-    QObject::connect(startTrackMetronomeButton_, &QPushButton::clicked, this, [this] { startTrackMetronome(); });
-    QObject::connect(stopTrackMetronomeButton_, &QPushButton::clicked, this, [this] { stopTrackMetronome(); });
     QObject::connect(trackSpeedSpin_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) {
         trackController_.model().speed = value;
-        loadTrackIntoPlayer();
+        if (trackSpeedSlider_) {
+            const QSignalBlocker blocker(trackSpeedSlider_);
+            trackSpeedSlider_->setValue(qBound(10, qRound(value * 100.0), 200));
+        }
+        applyTrackPlaybackSettings();
+    });
+    QObject::connect(trackPitchSlider_, &QSlider::valueChanged, this, [this](int value) {
+        trackController_.model().pitchCents = value * 100;
+        if (trackPitchSpin_) {
+            const QSignalBlocker blocker(trackPitchSpin_);
+            trackPitchSpin_->setValue(value);
+        }
+        applyTrackPlaybackSettings();
     });
     QObject::connect(trackPitchSpin_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int value) {
         trackController_.model().pitchCents = value * 100;
-        loadTrackIntoPlayer();
+        if (trackPitchSlider_) {
+            const QSignalBlocker blocker(trackPitchSlider_);
+            trackPitchSlider_->setValue(value);
+        }
+        applyTrackPlaybackSettings();
     });
     trackWaveform_->onSeekMs = [this](qint64 positionMs) {
-        trackPlayer_.setPosition(positionMs);
+        if (trackDevice_) {
+            trackDevice_->setPositionMs(positionMs);
+        }
         updateTrackTimeline();
     };
     QObject::connect(playTrackButton_, &QPushButton::clicked, this, [this] { playTrack(); });
@@ -1303,20 +1703,189 @@ QWidget* MainWindow::buildTrackPage()
     QObject::connect(loopStartButton_, &QPushButton::clicked, this, [this] { setLoopStartAtCurrentPosition(); });
     QObject::connect(loopEndButton_, &QPushButton::clicked, this, [this] { setLoopEndAtCurrentPosition(); });
     QObject::connect(clearLoopButton_, &QPushButton::clicked, this, [this] { clearTrackLoop(); });
-    QObject::connect(trackLevelSlider_, &QSlider::valueChanged, this, [this](int value) {
-        trackAudio_.setVolume(static_cast<double>(value) / 100.0);
+    QObject::connect(loopEnabledCheck_, &QCheckBox::toggled, this, [this](bool checked) {
+        trackController_.model().loopEnabled = checked;
+        applyTrackPlaybackSettings();
+        updateTrackControls();
+        if (trackController_.model().syncControls) {
+            sendControl(trackMetadataMessage(QStringLiteral("track.offer")));
+        }
     });
-    QObject::connect(focusSlider, &QSlider::valueChanged, this, [this](int value) {
-        trackController_.model().focusFrequencyHz = value;
+    QObject::connect(waveformGridCheck_, &QCheckBox::toggled, this, [this](bool checked) {
+        trackController_.model().waveformGridVisible = checked;
+        if (trackWaveform_) {
+            trackWaveform_->setGridVisible(checked);
+        }
+    });
+    QObject::connect(trackLevelSlider_, &QSlider::valueChanged, this, [this](int value) {
+        trackController_.model().trackGainDb = static_cast<double>(value);
+        if (trackLevelDbLabel_) {
+            trackLevelDbLabel_->setText(dbText(trackController_.model().trackGainDb));
+        }
+        applyTrackPlaybackSettings();
+    });
+    QObject::connect(focusFrequencyCheck_, &QCheckBox::toggled, this, [this](bool checked) {
+        trackController_.model().focusEnabled = checked;
+        applyTrackPlaybackSettings();
+        if (trackController_.model().syncControls) {
+            sendControl(trackMetadataMessage(QStringLiteral("track.offer")));
+        }
+    });
+    QObject::connect(focusPresetBox_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
+        QString key = focusPresetBox_->currentData().toString();
+        if (key.isEmpty()) {
+            key = QStringLiteral("custom");
+        }
+        auto& model = trackController_.model();
+        model.focusPreset = key;
+        if (!isCustomFocusPreset(key)) {
+            const FocusPreset preset = focusPresetForKey(key);
+            model.focusEnabled = true;
+            model.focusFrequencyHz = preset.frequencyHz;
+            model.focusGainDb = preset.gainDb;
+            model.focusQ = preset.q;
+        }
+        updateTrackControls();
+        applyTrackPlaybackSettings();
+        if (model.syncControls) {
+            sendControl(trackMetadataMessage(QStringLiteral("track.offer")));
+        }
+    });
+    QObject::connect(focusFrequencySlider_, &QSlider::valueChanged, this, [this](int value) {
+        auto& model = trackController_.model();
+        model.focusPreset = QStringLiteral("custom");
+        model.focusFrequencyHz = value;
+        if (focusPresetBox_) {
+            const QSignalBlocker blocker(focusPresetBox_);
+            focusPresetBox_->setCurrentIndex(qMax(0, focusPresetBox_->findData(QStringLiteral("custom"))));
+        }
+        if (focusFrequencySlider_) {
+            focusFrequencySlider_->setEnabled(true);
+        }
+        if (focusFrequencySpin_) {
+            focusFrequencySpin_->setEnabled(true);
+        }
+        if (focusFrequencySpin_) {
+            const QSignalBlocker blocker(focusFrequencySpin_);
+            focusFrequencySpin_->setValue(value);
+        }
+        applyTrackPlaybackSettings();
+    });
+    QObject::connect(focusFrequencySpin_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int value) {
+        auto& model = trackController_.model();
+        model.focusPreset = QStringLiteral("custom");
+        model.focusFrequencyHz = value;
+        if (focusPresetBox_) {
+            const QSignalBlocker blocker(focusPresetBox_);
+            focusPresetBox_->setCurrentIndex(qMax(0, focusPresetBox_->findData(QStringLiteral("custom"))));
+        }
+        if (focusFrequencySlider_) {
+            focusFrequencySlider_->setEnabled(true);
+        }
+        if (focusFrequencySpin_) {
+            focusFrequencySpin_->setEnabled(true);
+        }
+        if (focusFrequencySlider_) {
+            const QSignalBlocker blocker(focusFrequencySlider_);
+            focusFrequencySlider_->setValue(value);
+        }
+        applyTrackPlaybackSettings();
     });
     QObject::connect(syncBox, &QCheckBox::toggled, this, [this](bool checked) {
         trackController_.model().syncControls = checked;
+    });
+    QObject::connect(captureManualStopCheck_, &QCheckBox::toggled, this, [this](bool checked) {
+        if (captureDurationSpin_) {
+            captureDurationSpin_->setEnabled(!checked);
+        }
     });
     QObject::connect(captureButton_, &QPushButton::clicked, this, [this] { showInputCaptureDialog(); });
     QObject::connect(loopbackCaptureButton_, &QPushButton::clicked, this, [this] { showLoopbackCaptureDialog(); });
     QObject::connect(stopCaptureButton_, &QPushButton::clicked, this, [this] { stopInputCapture(); });
     QObject::connect(importCaptureButton_, &QPushButton::clicked, this, [this] { importLastCapture(); });
 
+    return page;
+}
+
+QWidget* MainWindow::buildMetronomePage()
+{
+    auto* page = new QWidget(this);
+
+    metronomeBpmSpin_ = new QSpinBox(page);
+    metronomeBpmSpin_->setRange(1, 400);
+    metronomeBpmSpin_->setValue(qBound(1, static_cast<int>(std::lround(trackController_.model().acceptedBpm)), 400));
+    metronomeBpmSpin_->setSuffix(QStringLiteral(" BPM"));
+
+    metronomeBeatsSpin_ = new QSpinBox(page);
+    metronomeBeatsSpin_->setRange(1, 16);
+    metronomeBeatsSpin_->setValue(4);
+
+    metronomeDivisionBox_ = new QComboBox(page);
+    metronomeDivisionBox_->addItem(QStringLiteral("Quarter"), 1);
+    metronomeDivisionBox_->addItem(QStringLiteral("Eighth"), 2);
+    metronomeDivisionBox_->addItem(QStringLiteral("Triplet"), 3);
+    metronomeDivisionBox_->addItem(QStringLiteral("16th"), 4);
+    metronomeDivisionBox_->addItem(QStringLiteral("6th"), 6);
+    metronomeDivisionBox_->addItem(QStringLiteral("32nd"), 8);
+    metronomeDivisionBox_->setCurrentIndex(metronomeDivisionBox_->findData(1));
+
+    localMetronomeLevelSlider_ = makeUnitSlider(0.35, page);
+    trackMetronomeLabel_ = new QLabel(QStringLiteral("Local metronome stopped"), page);
+    startTrackMetronomeButton_ = new QPushButton(QStringLiteral("Start"), page);
+    stopTrackMetronomeButton_ = new QPushButton(QStringLiteral("Stop"), page);
+    stopTrackMetronomeButton_->setEnabled(false);
+
+    metronomePatternTable_ = new QTableWidget(page);
+    metronomePatternTable_->setRowCount(2);
+    metronomePatternTable_->verticalHeader()->setVisible(true);
+    metronomePatternTable_->setVerticalHeaderLabels(QStringList{QStringLiteral("Play"), QStringLiteral("Accent")});
+    metronomePatternTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    metronomePatternTable_->setSelectionMode(QAbstractItemView::NoSelection);
+    metronomePatternTable_->setMinimumHeight(110);
+    metronomePatternTable_->setStyleSheet(QStringLiteral(
+        "QTableWidget::item { padding: 3px 6px; }"
+        "QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid #52616c; background: #1f2428; }"
+        "QCheckBox::indicator:checked { border: 1px solid #66c6a6; background: #66c6a6; }"));
+
+    auto* controls = new QGridLayout();
+    controls->addWidget(new QLabel(QStringLiteral("BPM"), page), 0, 0);
+    controls->addWidget(metronomeBpmSpin_, 0, 1);
+    controls->addWidget(new QLabel(QStringLiteral("Beats"), page), 0, 2);
+    controls->addWidget(metronomeBeatsSpin_, 0, 3);
+    controls->addWidget(new QLabel(QStringLiteral("Division"), page), 0, 4);
+    controls->addWidget(metronomeDivisionBox_, 0, 5);
+    controls->addWidget(new QLabel(QStringLiteral("Level"), page), 0, 6);
+    controls->addWidget(localMetronomeLevelSlider_, 0, 7);
+
+    auto* buttons = new QHBoxLayout();
+    buttons->addWidget(startTrackMetronomeButton_);
+    buttons->addWidget(stopTrackMetronomeButton_);
+    buttons->addWidget(trackMetronomeLabel_);
+    buttons->addStretch(1);
+
+    auto* layout = new QVBoxLayout(page);
+    layout->addLayout(controls);
+    layout->addLayout(buttons);
+    layout->addWidget(metronomePatternTable_, 1);
+
+    QObject::connect(startTrackMetronomeButton_, &QPushButton::clicked, this, [this] { startTrackMetronome(); });
+    QObject::connect(stopTrackMetronomeButton_, &QPushButton::clicked, this, [this] { stopTrackMetronome(); });
+    QObject::connect(metronomeBpmSpin_, qOverload<int>(&QSpinBox::valueChanged), this, [this] {
+        updateTrackMetronomeInterval();
+    });
+    QObject::connect(localMetronomeLevelSlider_, &QSlider::valueChanged, this, [this] {
+        applyMetronomePatternToLocalDevice();
+    });
+    QObject::connect(metronomeBeatsSpin_, qOverload<int>(&QSpinBox::valueChanged), this, [this] {
+        rebuildMetronomePattern();
+        updateTrackMetronomeInterval();
+    });
+    QObject::connect(metronomeDivisionBox_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
+        rebuildMetronomePattern();
+        updateTrackMetronomeInterval();
+    });
+
+    rebuildMetronomePattern();
     return page;
 }
 
@@ -1392,7 +1961,16 @@ void MainWindow::startJam()
     startButton_->setEnabled(false);
     joinButton_->setEnabled(false);
     stopButton_->setEnabled(true);
+    if (runtimeMixBox_) {
+        runtimeMixBox_->setVisible(true);
+    }
+    if (leadSwapButton_) {
+        leadSwapButton_->setEnabled(true);
+    }
     connectionLabel_->setText(QStringLiteral("Starting"));
+    QTimer::singleShot(250, this, [this] {
+        updateRuntimeControls();
+    });
 }
 
 void MainWindow::showStartJamDialog()
@@ -1619,6 +2197,12 @@ void MainWindow::stopJam()
     startButton_->setEnabled(true);
     joinButton_->setEnabled(true);
     stopButton_->setEnabled(false);
+    if (runtimeMixBox_) {
+        runtimeMixBox_->setVisible(false);
+    }
+    if (leadSwapButton_) {
+        leadSwapButton_->setEnabled(false);
+    }
 }
 
 void MainWindow::refreshDevices()
@@ -1678,17 +2262,46 @@ void MainWindow::handleControlMessage(const QJsonObject& message)
 {
     const QString type = message.value(QStringLiteral("type")).toString();
     if (type == QStringLiteral("beat.set")) {
-        songModel_.setCell(
+        const QString lane = message.value(QStringLiteral("lane")).toString();
+        BeatGridModel* model = &beatModel_;
+        if (lane == QStringLiteral("chord")) {
+            model = &chordModel_;
+        } else if (lane == QStringLiteral("lyric")) {
+            model = &lyricModel_;
+        }
+        model->setCell(
             message.value(QStringLiteral("section")).toInt(),
-            message.value(QStringLiteral("lane")).toString(),
+            lane,
             message.value(QStringLiteral("beat")).toInt(),
             message.value(QStringLiteral("text")).toString());
-        refreshSongViews();
+        refreshSongView(lane);
     } else if (type == QStringLiteral("grid.resize")) {
-        songModel_.resizeSection(
+        const QString lane = message.value(QStringLiteral("lane")).toString(QStringLiteral("beat"));
+        BeatGridModel* model = lane == QStringLiteral("chord") ? &chordModel_ : &beatModel_;
+        model->resizeSection(
             message.value(QStringLiteral("section")).toInt(),
             message.value(QStringLiteral("beats")).toInt(8));
-        refreshSongViews();
+        refreshSongView(lane);
+    } else if (type == QStringLiteral("beat.hit")) {
+        beatModel_.setBeatHit(
+            message.value(QStringLiteral("section")).toInt(),
+            message.value(QStringLiteral("beat")).toInt(),
+            message.value(QStringLiteral("lane")).toInt(),
+            message.value(QStringLiteral("text")).toString());
+        refreshSongView(QStringLiteral("beat"));
+    } else if (type == QStringLiteral("beat.division")) {
+        beatModel_.setBeatDivision(
+            message.value(QStringLiteral("section")).toInt(),
+            message.value(QStringLiteral("beat")).toInt(),
+            message.value(QStringLiteral("division")).toInt(4));
+        refreshSongView(QStringLiteral("beat"));
+    } else if (type == QStringLiteral("lyrics.set")) {
+        lyricModel_.setLyricsText(message.value(QStringLiteral("text")).toString());
+        refreshSongView(QStringLiteral("lyric"));
+    } else if (type == QStringLiteral("song.set")) {
+        if (loadSongJson(message.value(QStringLiteral("song")).toObject())) {
+            refreshSongViews();
+        }
     } else if (type == QStringLiteral("lead.change_pending")) {
         leadCue_.pendingLead = message.value(QStringLiteral("target")).toString();
         leadCue_.pendingBars = message.value(QStringLiteral("bars")).toInt(4);
@@ -1702,20 +2315,33 @@ void MainWindow::handleControlMessage(const QJsonObject& message)
         trackController_.model().sha256 = message.value(QStringLiteral("sha256")).toString(trackController_.model().sha256);
         trackController_.model().acceptedBpm = message.value(QStringLiteral("accepted_bpm")).toDouble(120.0);
         trackController_.model().key = message.value(QStringLiteral("key")).toString(QStringLiteral("Unknown"));
+        trackController_.model().trackGainDb = message.value(QStringLiteral("track_gain_db")).toDouble(trackController_.model().trackGainDb);
         trackController_.model().loopEnabled = message.value(QStringLiteral("loop_enabled")).toBool(trackController_.model().loopEnabled);
         trackController_.model().loopStartSeconds = message.value(QStringLiteral("loop_start_seconds")).toDouble(trackController_.model().loopStartSeconds);
         trackController_.model().loopEndSeconds = message.value(QStringLiteral("loop_end_seconds")).toDouble(trackController_.model().loopEndSeconds);
+        trackController_.model().focusEnabled = message.value(QStringLiteral("focus_enabled")).toBool(trackController_.model().focusEnabled);
+        trackController_.model().focusPreset = message.value(QStringLiteral("focus_preset")).toString(trackController_.model().focusPreset);
+        trackController_.model().focusFrequencyHz = message.value(QStringLiteral("focus_frequency_hz")).toDouble(trackController_.model().focusFrequencyHz);
+        trackController_.model().focusGainDb = message.value(QStringLiteral("focus_gain_db")).toDouble(trackController_.model().focusGainDb);
+        trackController_.model().focusQ = message.value(QStringLiteral("focus_q")).toDouble(trackController_.model().focusQ);
         updateTrackControls();
         loadTrackIntoPlayer();
     } else if (type == QStringLiteral("track.processing")) {
         appendLog(QStringLiteral("ignored remote track processing controls"));
     } else if (type == QStringLiteral("track.play")) {
         loadTrackIntoPlayer();
-        trackPlayer_.setPlaybackRate(1.0);
-        trackPlayer_.setPosition(message.value(QStringLiteral("position_ms")).toInteger(0));
-        trackPlayer_.play();
+        if (trackDevice_) {
+            trackDevice_->setPositionMs(message.value(QStringLiteral("position_ms")).toInteger(0));
+        }
+        const bool syncControls = trackController_.model().syncControls;
+        trackController_.model().syncControls = false;
+        playTrack();
+        trackController_.model().syncControls = syncControls;
     } else if (type == QStringLiteral("track.stop")) {
-        trackPlayer_.stop();
+        const bool syncControls = trackController_.model().syncControls;
+        trackController_.model().syncControls = false;
+        stopTrack();
+        trackController_.model().syncControls = syncControls;
     } else if (type == QStringLiteral("track.file.start")) {
         receiveTrackFileStart(message);
     } else if (type == QStringLiteral("track.file.chunk")) {
@@ -1737,7 +2363,7 @@ void MainWindow::updateRuntimeControls()
         return;
     }
     jam2_.sendLine(metronomeCheck_->isChecked() ? QStringLiteral("metro on") : QStringLiteral("metro off"));
-    jam2_.sendLine(QStringLiteral("bpm %1").arg(bpmSpin_->value()));
+    sendMetronomePatternToJam();
     jam2_.sendLine(QStringLiteral("metro level %1").arg(static_cast<double>(metronomeLevelSlider_->value()) / 100.0, 0, 'f', 2));
     jam2_.sendLine(QStringLiteral("metro mode %1").arg(metronomeModeBox_->currentText()));
     jam2_.sendLine(QStringLiteral("remote level %1").arg(static_cast<double>(remoteLevelSlider_->value()) / 100.0, 0, 'f', 2));
@@ -1793,37 +2419,78 @@ void MainWindow::updateTrackControls()
         const QSignalBlocker blocker(trackSpeedSpin_);
         trackSpeedSpin_->setValue(model.speed);
     }
+    if (trackSpeedSlider_) {
+        const QSignalBlocker blocker(trackSpeedSlider_);
+        trackSpeedSlider_->setValue(qBound(10, qRound(model.speed * 100.0), 200));
+    }
     if (trackPitchSpin_) {
         const QSignalBlocker blocker(trackPitchSpin_);
         trackPitchSpin_->setValue(qBound(-12, model.pitchCents / 100, 12));
     }
-    if (trackBpmSpin_) {
-        const QSignalBlocker blocker(trackBpmSpin_);
-        trackBpmSpin_->setValue(qBound(1, static_cast<int>(std::lround(model.acceptedBpm)), 400));
+    if (trackPitchSlider_) {
+        const QSignalBlocker blocker(trackPitchSlider_);
+        trackPitchSlider_->setValue(qBound(-12, model.pitchCents / 100, 12));
+    }
+    if (trackLevelDbLabel_ && trackLevelSlider_) {
+        trackLevelDbLabel_->setText(dbText(trackController_.model().trackGainDb));
+        const QSignalBlocker blocker(trackLevelSlider_);
+        trackLevelSlider_->setValue(qBound(-60, qRound(trackController_.model().trackGainDb), 12));
+    }
+    if (focusFrequencySlider_) {
+        const QSignalBlocker blocker(focusFrequencySlider_);
+        focusFrequencySlider_->setValue(qBound(40, qRound(model.focusFrequencyHz), 8000));
+    }
+    if (focusFrequencySpin_) {
+        const QSignalBlocker blocker(focusFrequencySpin_);
+        focusFrequencySpin_->setValue(qBound(40, qRound(model.focusFrequencyHz), 8000));
+    }
+    if (focusFrequencyCheck_) {
+        const QSignalBlocker blocker(focusFrequencyCheck_);
+        focusFrequencyCheck_->setChecked(model.focusEnabled);
+    }
+    if (waveformGridCheck_) {
+        const QSignalBlocker blocker(waveformGridCheck_);
+        waveformGridCheck_->setChecked(model.waveformGridVisible);
+    }
+    const bool knownFocusPreset = !focusPresetBox_ || focusPresetBox_->findData(model.focusPreset) >= 0;
+    const bool customFocus = isCustomFocusPreset(model.focusPreset) || !knownFocusPreset;
+    if (focusPresetBox_) {
+        const QSignalBlocker blocker(focusPresetBox_);
+        const int index = focusPresetBox_->findData(customFocus ? QStringLiteral("custom") : model.focusPreset);
+        focusPresetBox_->setCurrentIndex(index >= 0 ? index : 0);
+    }
+    if (focusFrequencySlider_) {
+        focusFrequencySlider_->setEnabled(customFocus);
+    }
+    if (focusFrequencySpin_) {
+        focusFrequencySpin_->setEnabled(customFocus);
     }
     if (trackWaveform_) {
+        trackWaveform_->setGridVisible(model.waveformGridVisible);
         trackWaveform_->setBpm(model.acceptedBpm);
         trackWaveform_->setLoop(
             model.loopStartSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopStartSeconds * 1000.0)) : -1,
             model.loopEndSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopEndSeconds * 1000.0)) : -1);
     }
-    if (loopStatusLabel_) {
-        if (model.loopEnabled && model.loopStartSeconds >= 0.0 && model.loopEndSeconds > model.loopStartSeconds) {
-            loopStatusLabel_->setText(QStringLiteral("Loop: %1.%2 s to %3.%4 s")
+    if (loopEnabledCheck_) {
+        const QSignalBlocker blocker(loopEnabledCheck_);
+        loopEnabledCheck_->setChecked(model.loopEnabled);
+        if (model.loopStartSeconds >= 0.0 && model.loopEndSeconds > model.loopStartSeconds) {
+            loopEnabledCheck_->setText(QStringLiteral("Loop: %1.%2 s to %3.%4 s")
                 .arg(static_cast<int>(model.loopStartSeconds))
                 .arg(static_cast<int>(std::llround(model.loopStartSeconds * 10.0)) % 10)
                 .arg(static_cast<int>(model.loopEndSeconds))
                 .arg(static_cast<int>(std::llround(model.loopEndSeconds * 10.0)) % 10));
         } else if (model.loopStartSeconds >= 0.0) {
-            loopStatusLabel_->setText(QStringLiteral("Loop start: %1.%2 s")
+            loopEnabledCheck_->setText(QStringLiteral("Loop from %1.%2 s")
                 .arg(static_cast<int>(model.loopStartSeconds))
                 .arg(static_cast<int>(std::llround(model.loopStartSeconds * 10.0)) % 10));
         } else if (model.loopEndSeconds >= 0.0) {
-            loopStatusLabel_->setText(QStringLiteral("Loop end: %1.%2 s")
+            loopEnabledCheck_->setText(QStringLiteral("Loop to %1.%2 s")
                 .arg(static_cast<int>(model.loopEndSeconds))
                 .arg(static_cast<int>(std::llround(model.loopEndSeconds * 10.0)) % 10));
         } else {
-            loopStatusLabel_->setText(QStringLiteral("Loop off"));
+            loopEnabledCheck_->setText(QStringLiteral("Loop whole track"));
         }
     }
 }
@@ -1845,7 +2512,7 @@ void MainWindow::loadTrackMetadata()
         trackController_.model().durationMs = sidecar.value(QStringLiteral("duration_ms")).toInt(metadata.durationMs);
         trackController_.model().sha256 = metadata.sha256;
         trackController_.model().guessedBpm = 0.0;
-        trackController_.model().acceptedBpm = trackBpmSpin_ ? trackBpmSpin_->value() : 120.0;
+        trackController_.model().acceptedBpm = sidecar.value(QStringLiteral("accepted_bpm")).toDouble(120.0);
         trackController_.model().key = QStringLiteral("Unknown");
         trackController_.model().loopEnabled = false;
         trackController_.model().loopStartSeconds = -1.0;
@@ -1890,13 +2557,6 @@ void MainWindow::handleCaptureOutputLine(const QString& line)
     if (!output.isEmpty()) {
         lastCapturePath_ = output;
         captureOutputEdit_->setText(output);
-    }
-    if (captureProgressLabel_) {
-        captureProgressLabel_->setText(QStringLiteral("%1 frames | peak %2 | trimmed %3/%4")
-            .arg(object.value(QStringLiteral("frames_written")).toInteger())
-            .arg(object.value(QStringLiteral("peak")).toDouble(), 0, 'f', 4)
-            .arg(object.value(QStringLiteral("trimmed_leading_frames")).toInteger())
-            .arg(object.value(QStringLiteral("trimmed_trailing_frames")).toInteger()));
     }
     if (importCaptureButton_) {
         importCaptureButton_->setEnabled(QFileInfo::exists(lastCapturePath_));
@@ -1973,7 +2633,7 @@ void MainWindow::showInputCaptureDialog()
     auto* form = new QFormLayout(content);
     const QList<QWidget*> visibleWidgets{
         capturePathEdit_, captureOutputEdit_, deviceBox_, inputChannelsEdit_, sampleRateSpin_,
-        bufferSizeSpin_, captureDurationSpin_, captureTriggerCheck_, triggerThresholdSpin_,
+        bufferSizeSpin_, captureManualStopCheck_, captureDurationSpin_, captureTriggerCheck_, triggerThresholdSpin_,
         triggerHoldSpin_, preRollSpin_, tailThresholdSpin_, tailSilenceSpin_, trimLeadingCheck_,
         trimTrailingCheck_,
     };
@@ -1990,7 +2650,8 @@ void MainWindow::showInputCaptureDialog()
     form->addRow(QStringLiteral("Input channels"), inputChannelsEdit_);
     form->addRow(QStringLiteral("Sample rate"), sampleRateSpin_);
     form->addRow(QStringLiteral("Buffer size"), bufferSizeSpin_);
-    form->addRow(QStringLiteral("Duration"), captureDurationSpin_);
+    form->addRow(captureManualStopCheck_);
+    form->addRow(QStringLiteral("Duration limit"), captureDurationSpin_);
     form->addRow(captureTriggerCheck_);
     form->addRow(QStringLiteral("Trigger threshold"), triggerThresholdSpin_);
     form->addRow(QStringLiteral("Trigger hold"), triggerHoldSpin_);
@@ -2020,7 +2681,7 @@ void MainWindow::showInputCaptureDialog()
     const int result = dialog.exec();
     const QList<QWidget*> widgets{
         capturePathEdit_, captureOutputEdit_, deviceBox_, inputChannelsEdit_, sampleRateSpin_,
-        bufferSizeSpin_, captureDurationSpin_, captureTriggerCheck_, triggerThresholdSpin_,
+        bufferSizeSpin_, captureManualStopCheck_, captureDurationSpin_, captureTriggerCheck_, triggerThresholdSpin_,
         triggerHoldSpin_, preRollSpin_, tailThresholdSpin_, tailSilenceSpin_, trimLeadingCheck_,
         trimTrailingCheck_,
     };
@@ -2058,9 +2719,11 @@ void MainWindow::startInputCapture()
         QStringLiteral("--input-channels"), inputChannelsEdit_->text(),
         QStringLiteral("--sample-rate"), QString::number(sampleRateSpin_->value()),
         QStringLiteral("--buffer-size"), QString::number(bufferSizeSpin_->value()),
-        QStringLiteral("--duration-ms"), QString::number(captureDurationSpin_->value()),
         QStringLiteral("--output"), output,
     };
+    if (!captureManualStopCheck_ || !captureManualStopCheck_->isChecked()) {
+        args << QStringLiteral("--duration-ms") << QString::number(captureDurationSpin_->value());
+    }
     args << captureOptionArgs();
     const QFileInfo binary(capturePathEdit_->text());
     if (binary.exists()) {
@@ -2076,7 +2739,6 @@ void MainWindow::startInputCapture()
     loopbackCaptureButton_->setEnabled(false);
     stopCaptureButton_->setEnabled(true);
     importCaptureButton_->setEnabled(false);
-    captureProgressLabel_->setText(QStringLiteral("Capturing input"));
 }
 
 void MainWindow::showLoopbackCaptureDialog()
@@ -2092,7 +2754,7 @@ void MainWindow::showLoopbackCaptureDialog()
     auto* content = new QWidget(&dialog);
     auto* form = new QFormLayout(content);
     const QList<QWidget*> visibleWidgets{
-        capturePathEdit_, captureOutputEdit_, loopbackSourceBox_, captureDurationSpin_,
+        capturePathEdit_, captureOutputEdit_, loopbackSourceBox_, captureManualStopCheck_, captureDurationSpin_,
         captureTriggerCheck_, triggerThresholdSpin_, triggerHoldSpin_, preRollSpin_,
         tailThresholdSpin_, tailSilenceSpin_, trimLeadingCheck_, trimTrailingCheck_,
     };
@@ -2110,7 +2772,8 @@ void MainWindow::showLoopbackCaptureDialog()
     auto* refreshSources = new QPushButton(QStringLiteral("Refresh Sources"), content);
     sourceLayout->addWidget(refreshSources);
     form->addRow(QStringLiteral("Loopback source"), sourceLayout);
-    form->addRow(QStringLiteral("Duration"), captureDurationSpin_);
+    form->addRow(captureManualStopCheck_);
+    form->addRow(QStringLiteral("Duration limit"), captureDurationSpin_);
     form->addRow(captureTriggerCheck_);
     form->addRow(QStringLiteral("Trigger threshold"), triggerThresholdSpin_);
     form->addRow(QStringLiteral("Trigger hold"), triggerHoldSpin_);
@@ -2138,7 +2801,7 @@ void MainWindow::showLoopbackCaptureDialog()
 
     const int result = dialog.exec();
     const QList<QWidget*> widgets{
-        capturePathEdit_, captureOutputEdit_, loopbackSourceBox_, captureDurationSpin_,
+        capturePathEdit_, captureOutputEdit_, loopbackSourceBox_, captureManualStopCheck_, captureDurationSpin_,
         captureTriggerCheck_, triggerThresholdSpin_, triggerHoldSpin_, preRollSpin_,
         tailThresholdSpin_, tailSilenceSpin_, trimLeadingCheck_, trimTrailingCheck_,
     };
@@ -2176,9 +2839,11 @@ void MainWindow::startLoopbackCapture()
     QStringList args{
         QStringLiteral("record-loopback"),
         QStringLiteral("--source"), source,
-        QStringLiteral("--duration-ms"), QString::number(captureDurationSpin_->value()),
         QStringLiteral("--output"), output,
     };
+    if (!captureManualStopCheck_ || !captureManualStopCheck_->isChecked()) {
+        args << QStringLiteral("--duration-ms") << QString::number(captureDurationSpin_->value());
+    }
     args << captureOptionArgs();
     const QFileInfo binary(capturePathEdit_->text());
     if (binary.exists()) {
@@ -2194,7 +2859,6 @@ void MainWindow::startLoopbackCapture()
     loopbackCaptureButton_->setEnabled(false);
     stopCaptureButton_->setEnabled(true);
     importCaptureButton_->setEnabled(false);
-    captureProgressLabel_->setText(QStringLiteral("Capturing loopback"));
 }
 
 void MainWindow::stopInputCapture()
@@ -2229,7 +2893,7 @@ void MainWindow::importLastCapture()
         trackController_.model().durationMs = lastCaptureSummary_.value(QStringLiteral("duration_ms")).toInt(
             sidecar.value(QStringLiteral("duration_ms")).toInt(metadata.durationMs));
         trackController_.model().sha256 = metadata.sha256;
-        trackController_.model().acceptedBpm = trackBpmSpin_ ? trackBpmSpin_->value() : 120.0;
+        trackController_.model().acceptedBpm = sidecar.value(QStringLiteral("accepted_bpm")).toDouble(120.0);
         trackController_.model().key = QStringLiteral("Unknown");
         trackController_.model().loopEnabled = false;
         trackController_.model().loopStartSeconds = -1.0;
@@ -2249,9 +2913,15 @@ void MainWindow::importLastCapture()
         {QStringLiteral("sha256"), trackController_.model().sha256},
         {QStringLiteral("accepted_bpm"), trackController_.model().acceptedBpm},
         {QStringLiteral("key"), trackController_.model().key},
+        {QStringLiteral("track_gain_db"), trackController_.model().trackGainDb},
         {QStringLiteral("loop_enabled"), trackController_.model().loopEnabled},
         {QStringLiteral("loop_start_seconds"), trackController_.model().loopStartSeconds},
         {QStringLiteral("loop_end_seconds"), trackController_.model().loopEndSeconds},
+        {QStringLiteral("focus_enabled"), trackController_.model().focusEnabled},
+        {QStringLiteral("focus_preset"), trackController_.model().focusPreset},
+        {QStringLiteral("focus_frequency_hz"), trackController_.model().focusFrequencyHz},
+        {QStringLiteral("focus_gain_db"), trackController_.model().focusGainDb},
+        {QStringLiteral("focus_q"), trackController_.model().focusQ},
     });
     loadTrackIntoPlayer();
 }
@@ -2260,79 +2930,116 @@ void MainWindow::loadTrackIntoPlayer()
 {
     const QString path = trackController_.model().filePath;
     if (path.isEmpty() || !QFileInfo::exists(path)) {
-        if (trackPlaybackLabel_) {
-            trackPlaybackLabel_->setText(QStringLiteral("No local track file"));
-        }
-        processedTrackBuffer_.close();
-        processedTrackBytes_.clear();
+        trackSink_.reset();
+        trackDevice_.reset();
         if (trackWaveform_) {
             trackWaveform_->clear();
         }
         return;
     }
+    trackSink_.reset();
     if (trackWaveform_) {
         trackWaveform_->loadWav(path);
         trackWaveform_->setDurationMs(trackController_.model().durationMs);
         trackWaveform_->setBpm(trackController_.model().acceptedBpm);
+        trackWaveform_->setGridVisible(trackController_.model().waveformGridVisible);
     }
-    const double speed = qBound(0.10, trackController_.model().speed, 2.0);
-    const int pitchSemitones = qBound(-12, trackController_.model().pitchCents / 100, 12);
-    if (std::abs(speed - 1.0) > 0.0001 || pitchSemitones != 0) {
-        try {
-            processedTrackBytes_ = renderStretchedWav(path, speed, pitchSemitones);
-            processedTrackBuffer_.close();
-            processedTrackBuffer_.setData(processedTrackBytes_);
-            processedTrackBuffer_.open(QIODevice::ReadOnly);
-            trackPlayer_.setSourceDevice(&processedTrackBuffer_, QUrl::fromLocalFile(path));
-            appendLog(QStringLiteral("prepared local track processing: speed=%1 pitch=%2 semitones")
-                .arg(speed, 0, 'f', 2)
-                .arg(pitchSemitones));
-        } catch (const std::exception& error) {
-            appendLog(QStringLiteral("track stretch failed: ") + QString::fromUtf8(error.what()));
-            processedTrackBuffer_.close();
-            processedTrackBytes_.clear();
-            trackPlayer_.setSource(QUrl::fromLocalFile(path));
+
+    try {
+        Pcm16Wav wav = readPcm16Wav(path);
+        trackDevice_ = std::make_unique<TrackPlaybackDevice>();
+        trackDevice_->setTrack(std::move(wav));
+        if (!trackDevice_->open(QIODevice::ReadOnly)) {
+            trackDevice_.reset();
+            appendLog(QStringLiteral("track stream failed to open"));
+            return;
         }
-    } else {
-        processedTrackBuffer_.close();
-        processedTrackBytes_.clear();
-        trackPlayer_.setSource(QUrl::fromLocalFile(path));
+        applyTrackPlaybackSettings();
+    } catch (const std::exception& error) {
+        trackDevice_.reset();
+        appendLog(QStringLiteral("track load failed: ") + QString::fromUtf8(error.what()));
     }
-    trackPlayer_.setPlaybackRate(1.0);
-    if (trackPlaybackLabel_) {
-        trackPlaybackLabel_->setText(QStringLiteral("Track loaded locally"));
+}
+
+void MainWindow::applyTrackPlaybackSettings()
+{
+    if (!trackDevice_) {
+        return;
     }
+    const auto& model = trackController_.model();
+    const qint64 durationMs = trackDevice_->durationMs();
+    qint64 loopStartMs = model.loopStartSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopStartSeconds * 1000.0)) : 0;
+    qint64 loopEndMs = model.loopEndSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopEndSeconds * 1000.0)) : durationMs;
+    loopStartMs = qBound<qint64>(0, loopStartMs, durationMs);
+    loopEndMs = qBound<qint64>(0, loopEndMs, durationMs);
+    if (loopEndMs <= loopStartMs) {
+        loopStartMs = 0;
+        loopEndMs = durationMs;
+    }
+    trackDevice_->setSpeed(model.speed);
+    trackDevice_->setPitchCents(model.pitchCents);
+    trackDevice_->setGainDb(model.trackGainDb);
+    trackDevice_->setFocus(model.focusEnabled, model.focusFrequencyHz, model.focusGainDb, model.focusQ);
+    trackDevice_->setLoop(model.loopEnabled, loopStartMs, loopEndMs);
 }
 
 void MainWindow::playTrack()
 {
-    if (trackPlayer_.source().isEmpty()) {
+    if (!trackDevice_) {
         loadTrackIntoPlayer();
     }
-    if (trackPlayer_.source().isEmpty()) {
+    if (!trackDevice_ || !trackDevice_->hasTrack()) {
         QMessageBox::warning(this, QStringLiteral("Jam2 Track"), QStringLiteral("No local WAV is loaded."));
         return;
     }
     const auto& model = trackController_.model();
-    if (model.loopEnabled && model.loopStartSeconds >= 0.0 && model.loopEndSeconds > model.loopStartSeconds) {
-        const qint64 startMs = static_cast<qint64>(std::llround(model.loopStartSeconds * 1000.0));
-        const qint64 endMs = static_cast<qint64>(std::llround(model.loopEndSeconds * 1000.0));
-        if (trackPlayer_.position() < startMs || trackPlayer_.position() >= endMs) {
-            trackPlayer_.setPosition(startMs);
+    if (model.loopEnabled) {
+        const qint64 durationMs = trackDevice_->durationMs();
+        qint64 startMs = model.loopStartSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopStartSeconds * 1000.0)) : 0;
+        qint64 endMs = model.loopEndSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopEndSeconds * 1000.0)) : durationMs;
+        startMs = qBound<qint64>(0, startMs, durationMs);
+        endMs = qBound<qint64>(0, endMs, durationMs);
+        if (endMs <= startMs) {
+            startMs = 0;
+            endMs = durationMs;
         }
+        const qint64 position = trackDevice_->positionMs();
+        if (position < startMs || position >= endMs) {
+            trackDevice_->setPositionMs(startMs);
+        }
+    } else if (trackDevice_->positionMs() >= trackDevice_->durationMs()) {
+        trackDevice_->setPositionMs(0);
     }
-    trackPlayer_.play();
+
+    QAudioDevice outputDevice = QMediaDevices::defaultAudioOutput();
+    if (outputDevice.isNull()) {
+        QMessageBox::warning(this, QStringLiteral("Jam2 Track"), QStringLiteral("No default audio output is available."));
+        return;
+    }
+    QAudioFormat format;
+    format.setSampleRate(trackDevice_->sampleRate());
+    format.setChannelCount(trackDevice_->channels());
+    format.setSampleFormat(QAudioFormat::Int16);
+    if (!outputDevice.isFormatSupported(format)) {
+        QMessageBox::warning(this, QStringLiteral("Jam2 Track"), QStringLiteral("Track sample format is not supported by the default audio output."));
+        return;
+    }
+    trackSink_ = std::make_unique<QAudioSink>(outputDevice, format);
+    trackSink_->start(trackDevice_.get());
     if (trackController_.model().syncControls) {
         sendControl(QJsonObject{
             {QStringLiteral("type"), QStringLiteral("track.play")},
-            {QStringLiteral("position_ms"), trackPlayer_.position()},
+            {QStringLiteral("position_ms"), trackDevice_->positionMs()},
         });
     }
 }
 
 void MainWindow::stopTrack()
 {
-    trackPlayer_.stop();
+    if (trackSink_) {
+        trackSink_->stop();
+        trackSink_.reset();
+    }
     updateTrackTimeline();
     if (trackController_.model().syncControls) {
         sendControl(QJsonObject{{QStringLiteral("type"), QStringLiteral("track.stop")}});
@@ -2341,10 +3048,12 @@ void MainWindow::stopTrack()
 
 void MainWindow::setLoopStartAtCurrentPosition()
 {
-    const qint64 position = qBound<qint64>(0, trackPlayer_.position(), trackPlayer_.duration());
+    const qint64 duration = trackDevice_ ? trackDevice_->durationMs() : trackController_.model().durationMs;
+    const qint64 position = qBound<qint64>(0, trackDevice_ ? trackDevice_->positionMs() : 0, duration);
     auto& model = trackController_.model();
     model.loopStartSeconds = static_cast<double>(position) / 1000.0;
-    model.loopEnabled = model.loopEndSeconds > model.loopStartSeconds;
+    model.loopEnabled = true;
+    applyTrackPlaybackSettings();
     updateTrackControls();
     updateTrackTimeline();
     if (model.syncControls) {
@@ -2354,10 +3063,12 @@ void MainWindow::setLoopStartAtCurrentPosition()
 
 void MainWindow::setLoopEndAtCurrentPosition()
 {
-    const qint64 position = qBound<qint64>(0, trackPlayer_.position(), trackPlayer_.duration());
+    const qint64 duration = trackDevice_ ? trackDevice_->durationMs() : trackController_.model().durationMs;
+    const qint64 position = qBound<qint64>(0, trackDevice_ ? trackDevice_->positionMs() : 0, duration);
     auto& model = trackController_.model();
     model.loopEndSeconds = static_cast<double>(position) / 1000.0;
-    model.loopEnabled = model.loopStartSeconds >= 0.0 && model.loopEndSeconds > model.loopStartSeconds;
+    model.loopEnabled = true;
+    applyTrackPlaybackSettings();
     updateTrackControls();
     updateTrackTimeline();
     if (model.syncControls) {
@@ -2371,6 +3082,7 @@ void MainWindow::clearTrackLoop()
     model.loopEnabled = false;
     model.loopStartSeconds = -1.0;
     model.loopEndSeconds = -1.0;
+    applyTrackPlaybackSettings();
     updateTrackControls();
     updateTrackTimeline();
     if (model.syncControls) {
@@ -2381,19 +3093,13 @@ void MainWindow::clearTrackLoop()
 void MainWindow::updateTrackTimeline()
 {
     auto& model = trackController_.model();
-    if (model.loopEnabled && model.loopStartSeconds >= 0.0 && model.loopEndSeconds > model.loopStartSeconds &&
-        trackPlayer_.playbackState() == QMediaPlayer::PlayingState) {
-        const qint64 startMs = static_cast<qint64>(std::llround(model.loopStartSeconds * 1000.0));
-        const qint64 endMs = static_cast<qint64>(std::llround(model.loopEndSeconds * 1000.0));
-        if (trackPlayer_.position() >= endMs) {
-            trackPlayer_.setPosition(startMs);
-        }
-    }
     if (trackWaveform_) {
-        const qint64 duration = trackPlayer_.duration() > 0 ? trackPlayer_.duration() : model.durationMs;
+        const qint64 duration = trackDevice_ ? trackDevice_->durationMs() : model.durationMs;
+        const qint64 position = trackDevice_ ? trackDevice_->positionMs() : 0;
         trackWaveform_->setDurationMs(duration);
-        trackWaveform_->setPlayheadMs(trackPlayer_.position());
+        trackWaveform_->setPlayheadMs(position);
         trackWaveform_->setBpm(model.acceptedBpm);
+        trackWaveform_->setGridVisible(model.waveformGridVisible);
         trackWaveform_->setLoop(
             model.loopStartSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopStartSeconds * 1000.0)) : -1,
             model.loopEndSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopEndSeconds * 1000.0)) : -1);
@@ -2402,80 +3108,196 @@ void MainWindow::updateTrackTimeline()
 
 void MainWindow::startTrackMetronome()
 {
-    prepareTrackMetronomeClick();
-    if (trackMetronomeClick_.source().isEmpty()) {
+    stopTrackMetronome();
+
+    QAudioDevice outputDevice = QMediaDevices::defaultAudioOutput();
+    if (outputDevice.isNull()) {
         if (trackMetronomeLabel_) {
-            trackMetronomeLabel_->setText(QStringLiteral("Track metronome unavailable"));
+            trackMetronomeLabel_->setText(QStringLiteral("Local metronome unavailable"));
         }
         return;
     }
-    trackMetronomeBeat_ = 0;
-    const int bpm = trackBpmSpin_ ? trackBpmSpin_->value() : static_cast<int>(std::lround(trackController_.model().acceptedBpm));
-    trackMetronomeTimer_.start(qMax(1, static_cast<int>(std::llround(60000.0 / qMax(1, bpm)))));
-    playTrackMetronomeClick();
+
+    QAudioFormat preferred = outputDevice.preferredFormat();
+    QAudioFormat format;
+    format.setSampleRate(preferred.sampleRate() > 0 ? preferred.sampleRate() : 48000);
+    format.setChannelCount(qMax(1, preferred.channelCount() > 0 ? preferred.channelCount() : 2));
+    format.setSampleFormat(QAudioFormat::Int16);
+    if (!outputDevice.isFormatSupported(format)) {
+        format.setSampleRate(48000);
+        format.setChannelCount(2);
+    }
+    if (!outputDevice.isFormatSupported(format)) {
+        if (trackMetronomeLabel_) {
+            trackMetronomeLabel_->setText(QStringLiteral("Local metronome format unavailable"));
+        }
+        return;
+    }
+
+    localMetronomeDevice_ = std::make_unique<LocalMetronomeDevice>(format.sampleRate(), format.channelCount());
+    localMetronomeDevice_->configure(
+        currentMetronomePattern(),
+        localMetronomeLevelSlider_ ? static_cast<double>(localMetronomeLevelSlider_->value()) / 100.0 : 0.35);
+    localMetronomeDevice_->resetGrid();
+    if (!localMetronomeDevice_->open(QIODevice::ReadOnly)) {
+        localMetronomeDevice_.reset();
+        if (trackMetronomeLabel_) {
+            trackMetronomeLabel_->setText(QStringLiteral("Local metronome unavailable"));
+        }
+        return;
+    }
+
+    localMetronomeSink_ = std::make_unique<QAudioSink>(outputDevice, format);
+    localMetronomeSink_->start(localMetronomeDevice_.get());
+    localMetronomeRunning_ = true;
     if (trackMetronomeLabel_) {
-        trackMetronomeLabel_->setText(QStringLiteral("Track metronome running"));
+        trackMetronomeLabel_->setText(QStringLiteral("Local metronome running"));
+    }
+    if (startTrackMetronomeButton_) {
+        startTrackMetronomeButton_->setEnabled(false);
+    }
+    if (stopTrackMetronomeButton_) {
+        stopTrackMetronomeButton_->setEnabled(true);
     }
 }
 
 void MainWindow::stopTrackMetronome()
 {
-    trackMetronomeTimer_.stop();
-    trackMetronomeClick_.stop();
-    trackMetronomeBeat_ = 0;
+    if (localMetronomeSink_) {
+        localMetronomeSink_->stop();
+        localMetronomeSink_.reset();
+    }
+    if (localMetronomeDevice_) {
+        localMetronomeDevice_->close();
+        localMetronomeDevice_.reset();
+    }
+    localMetronomeRunning_ = false;
     if (trackMetronomeLabel_) {
-        trackMetronomeLabel_->setText(QStringLiteral("Track metronome stopped"));
+        trackMetronomeLabel_->setText(QStringLiteral("Local metronome stopped"));
+    }
+    if (startTrackMetronomeButton_) {
+        startTrackMetronomeButton_->setEnabled(true);
+    }
+    if (stopTrackMetronomeButton_) {
+        stopTrackMetronomeButton_->setEnabled(false);
     }
 }
 
 void MainWindow::updateTrackMetronomeInterval()
 {
-    const int bpm = trackBpmSpin_ ? trackBpmSpin_->value() : static_cast<int>(std::lround(trackController_.model().acceptedBpm));
-    const int intervalMs = qMax(1, static_cast<int>(std::llround(60000.0 / qMax(1, bpm))));
-    if (trackMetronomeTimer_.isActive()) {
-        trackMetronomeTimer_.start(intervalMs);
-        if (trackMetronomeLabel_) {
-            trackMetronomeLabel_->setText(QStringLiteral("Track metronome running"));
-        }
+    if (bpmSpin_ && metronomeBpmSpin_) {
+        bpmSpin_->setValue(metronomeBpmSpin_->value());
     }
+    applyMetronomePatternToLocalDevice();
+    sendMetronomePatternToJam();
 }
 
-void MainWindow::playTrackMetronomeClick()
+void MainWindow::rebuildMetronomePattern()
 {
-    prepareTrackMetronomeClick();
-    if (trackMetronomeClick_.source().isEmpty()) {
+    if (!metronomePatternTable_) {
         return;
     }
-    trackMetronomeClick_.setVolume(0.35f);
-    trackMetronomeClick_.play();
-    ++trackMetronomeBeat_;
+    const int beats = metronomeBeatsSpin_ ? metronomeBeatsSpin_->value() : 4;
+    const int division = metronomeDivisionBox_ ? metronomeDivisionBox_->currentData().toInt() : 1;
+    const int steps = qMax(1, beats * qMax(1, division));
+    QVector<bool> previousEnabled = metronomeEnabledSteps_;
+    QVector<bool> previous = metronomeAccents_;
+    metronomeEnabledSteps_.resize(steps);
+    metronomeAccents_.resize(steps);
+    for (int i = 0; i < steps; ++i) {
+        metronomeEnabledSteps_[i] = i < previousEnabled.size() ? previousEnabled[i] : true;
+        metronomeAccents_[i] = i < previous.size() ? previous[i] : (i == 0);
+    }
+
+    metronomePatternTable_->clear();
+    metronomePatternTable_->setRowCount(2);
+    metronomePatternTable_->setColumnCount(steps);
+    QStringList headers;
+    headers.reserve(steps);
+    for (int step = 0; step < steps; ++step) {
+        headers << QStringLiteral("%1").arg(step + 1);
+        auto* playCell = new QWidget(metronomePatternTable_);
+        auto* playLayout = new QHBoxLayout(playCell);
+        playLayout->setContentsMargins(0, 0, 0, 0);
+        playLayout->setAlignment(Qt::AlignCenter);
+        auto* playCheck = new QCheckBox(playCell);
+        playCheck->setChecked(metronomeEnabledSteps_[step]);
+        QObject::connect(playCheck, &QCheckBox::toggled, this, [this, step](bool checked) {
+            if (step >= 0 && step < metronomeEnabledSteps_.size()) {
+                metronomeEnabledSteps_[step] = checked;
+                applyMetronomePatternToLocalDevice();
+                sendMetronomePatternToJam();
+            }
+        });
+        playLayout->addWidget(playCheck);
+        metronomePatternTable_->setCellWidget(0, step, playCell);
+
+        auto* accentCell = new QWidget(metronomePatternTable_);
+        auto* accentLayout = new QHBoxLayout(accentCell);
+        accentLayout->setContentsMargins(0, 0, 0, 0);
+        accentLayout->setAlignment(Qt::AlignCenter);
+        auto* accentCheck = new QCheckBox(accentCell);
+        accentCheck->setChecked(metronomeAccents_[step]);
+        QObject::connect(accentCheck, &QCheckBox::toggled, this, [this, step](bool checked) {
+            if (step >= 0 && step < metronomeAccents_.size()) {
+                metronomeAccents_[step] = checked;
+                applyMetronomePatternToLocalDevice();
+                sendMetronomePatternToJam();
+            }
+        });
+        accentLayout->addWidget(accentCheck);
+        metronomePatternTable_->setCellWidget(1, step, accentCell);
+    }
+    metronomePatternTable_->setHorizontalHeaderLabels(headers);
+    metronomePatternTable_->setVerticalHeaderLabels(QStringList{QStringLiteral("Play"), QStringLiteral("Accent")});
+    applyMetronomePatternToLocalDevice();
+    sendMetronomePatternToJam();
 }
 
-void MainWindow::prepareTrackMetronomeClick()
+jam2::metronome::PatternSnapshot MainWindow::currentMetronomePattern() const
 {
-    if (!trackMetronomeClick_.source().isEmpty()) {
+    jam2::metronome::PatternSnapshot pattern;
+    pattern.bpm = metronomeBpmSpin_ ? metronomeBpmSpin_->value() : 120;
+    pattern.beats_per_bar = metronomeBeatsSpin_ ? metronomeBeatsSpin_->value() : 4;
+    pattern.division = metronomeDivisionBox_ ? metronomeDivisionBox_->currentData().toInt() : 1;
+    pattern.step_count = jam2::metronome::pattern_step_count(pattern.beats_per_bar, pattern.division);
+    pattern.play_mask_low = 0;
+    pattern.play_mask_high = 0;
+    pattern.accent_mask_low = 0;
+    pattern.accent_mask_high = 0;
+    for (int step = 0; step < pattern.step_count; ++step) {
+        const bool play = step < metronomeEnabledSteps_.size() ? metronomeEnabledSteps_[step] : true;
+        const bool accent = step < metronomeAccents_.size() ? metronomeAccents_[step] : (step == 0);
+        jam2::metronome::set_mask_enabled(pattern.play_mask_low, pattern.play_mask_high, step, play);
+        jam2::metronome::set_mask_enabled(pattern.accent_mask_low, pattern.accent_mask_high, step, accent);
+    }
+    return jam2::metronome::sanitize(pattern);
+}
+
+void MainWindow::applyMetronomePatternToLocalDevice()
+{
+    if (!localMetronomeDevice_) {
         return;
     }
-    QString cachePath = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-    if (cachePath.isEmpty()) {
-        cachePath = QDir::tempPath();
+    localMetronomeDevice_->configure(
+        currentMetronomePattern(),
+        localMetronomeLevelSlider_ ? static_cast<double>(localMetronomeLevelSlider_->value()) / 100.0 : 0.35);
+}
+
+void MainWindow::sendMetronomePatternToJam()
+{
+    if (!jam2_.isRunning()) {
+        return;
     }
-    QDir dir(cachePath);
-    if (!dir.exists()) {
-        dir.mkpath(QStringLiteral("."));
-    }
-    trackMetronomeClickPath_ = dir.absoluteFilePath(QStringLiteral("jam2-track-click.wav"));
-    if (!QFileInfo::exists(trackMetronomeClickPath_)) {
-        QFile file(trackMetronomeClickPath_);
-        if (!file.open(QIODevice::WriteOnly)) {
-            appendLog(QStringLiteral("track metronome click write failed: ") + file.errorString());
-            return;
-        }
-        file.write(renderClickWav(44100, 1800.0, 0.055));
-    }
-    trackMetronomeClick_.setSource(QUrl::fromLocalFile(trackMetronomeClickPath_));
-    trackMetronomeClick_.setLoopCount(1);
-    trackMetronomeClick_.setVolume(0.35f);
+    const jam2::metronome::PatternSnapshot pattern = currentMetronomePattern();
+    jam2_.sendLine(QStringLiteral("metro pattern %1 %2 %3 0x%4 0x%5 0x%6 0x%7")
+        .arg(pattern.bpm)
+        .arg(pattern.beats_per_bar)
+        .arg(pattern.division)
+        .arg(QString::number(static_cast<qulonglong>(pattern.play_mask_low), 16))
+        .arg(QString::number(static_cast<qulonglong>(pattern.play_mask_high), 16))
+        .arg(QString::number(static_cast<qulonglong>(pattern.accent_mask_low), 16))
+        .arg(QString::number(static_cast<qulonglong>(pattern.accent_mask_high), 16)));
 }
 
 QJsonObject MainWindow::trackMetadataMessage(const QString& type) const
@@ -2490,9 +3312,15 @@ QJsonObject MainWindow::trackMetadataMessage(const QString& type) const
         {QStringLiteral("sha256"), trackController_.model().sha256},
         {QStringLiteral("accepted_bpm"), trackController_.model().acceptedBpm},
         {QStringLiteral("key"), trackController_.model().key},
+        {QStringLiteral("track_gain_db"), trackController_.model().trackGainDb},
         {QStringLiteral("loop_enabled"), trackController_.model().loopEnabled},
         {QStringLiteral("loop_start_seconds"), trackController_.model().loopStartSeconds},
         {QStringLiteral("loop_end_seconds"), trackController_.model().loopEndSeconds},
+        {QStringLiteral("focus_enabled"), trackController_.model().focusEnabled},
+        {QStringLiteral("focus_preset"), trackController_.model().focusPreset},
+        {QStringLiteral("focus_frequency_hz"), trackController_.model().focusFrequencyHz},
+        {QStringLiteral("focus_gain_db"), trackController_.model().focusGainDb},
+        {QStringLiteral("focus_q"), trackController_.model().focusQ},
     };
 }
 
@@ -2614,7 +3442,7 @@ QStringList MainWindow::commonJamArgs() const
          << QStringLiteral("--machine-readable-startup") << QStringLiteral("on")
          << QStringLiteral("--status-format") << QStringLiteral("jsonl")
          << QStringLiteral("--metronome") << (metronomeCheck_->isChecked() ? QStringLiteral("on") : QStringLiteral("off"))
-         << QStringLiteral("--bpm") << QString::number(bpmSpin_->value())
+         << QStringLiteral("--bpm") << QString::number(metronomeBpmSpin_ ? metronomeBpmSpin_->value() : bpmSpin_->value())
          << QStringLiteral("--metronome-level") << QString::number(static_cast<double>(metronomeLevelSlider_->value()) / 100.0, 'f', 2)
          << QStringLiteral("--remote-level") << QString::number(static_cast<double>(remoteLevelSlider_->value()) / 100.0, 'f', 2)
          << QStringLiteral("--metronome-mode") << metronomeModeBox_->currentText()
@@ -2686,10 +3514,14 @@ QJsonObject MainWindow::trackToJson() const
         {QStringLiteral("key"), model.key},
         {QStringLiteral("speed"), model.speed},
         {QStringLiteral("pitch_cents"), model.pitchCents},
+        {QStringLiteral("track_gain_db"), model.trackGainDb},
         {QStringLiteral("loop_enabled"), model.loopEnabled},
         {QStringLiteral("loop_start_seconds"), model.loopStartSeconds},
         {QStringLiteral("loop_end_seconds"), model.loopEndSeconds},
+        {QStringLiteral("waveform_grid_visible"), model.waveformGridVisible},
         {QStringLiteral("sync_controls"), model.syncControls},
+        {QStringLiteral("focus_enabled"), model.focusEnabled},
+        {QStringLiteral("focus_preset"), model.focusPreset},
         {QStringLiteral("focus_frequency_hz"), model.focusFrequencyHz},
         {QStringLiteral("focus_gain_db"), model.focusGainDb},
         {QStringLiteral("focus_q"), model.focusQ},
@@ -2715,10 +3547,14 @@ void MainWindow::loadTrackJson(const QJsonObject& object)
     model.key = object.value(QStringLiteral("key")).toString(model.key);
     model.speed = object.value(QStringLiteral("speed")).toDouble(model.speed);
     model.pitchCents = object.value(QStringLiteral("pitch_cents")).toInt(model.pitchCents);
+    model.trackGainDb = object.value(QStringLiteral("track_gain_db")).toDouble(model.trackGainDb);
     model.loopEnabled = object.value(QStringLiteral("loop_enabled")).toBool(model.loopEnabled);
     model.loopStartSeconds = object.value(QStringLiteral("loop_start_seconds")).toDouble(model.loopStartSeconds);
     model.loopEndSeconds = object.value(QStringLiteral("loop_end_seconds")).toDouble(model.loopEndSeconds);
+    model.waveformGridVisible = object.value(QStringLiteral("waveform_grid_visible")).toBool(model.waveformGridVisible);
     model.syncControls = object.value(QStringLiteral("sync_controls")).toBool(model.syncControls);
+    model.focusEnabled = object.value(QStringLiteral("focus_enabled")).toBool(model.focusEnabled);
+    model.focusPreset = object.value(QStringLiteral("focus_preset")).toString(model.focusPreset);
     model.focusFrequencyHz = object.value(QStringLiteral("focus_frequency_hz")).toDouble(model.focusFrequencyHz);
     model.focusGainDb = object.value(QStringLiteral("focus_gain_db")).toDouble(model.focusGainDb);
     model.focusQ = object.value(QStringLiteral("focus_q")).toDouble(model.focusQ);
@@ -2728,14 +3564,60 @@ void MainWindow::loadTrackJson(const QJsonObject& object)
     loadTrackIntoPlayer();
 }
 
+QJsonObject MainWindow::songToJson() const
+{
+    QJsonObject root = chordModel_.toJson();
+    root.insert(QStringLiteral("independent_views"), true);
+    root.insert(QStringLiteral("beat_view"), beatModel_.toJson());
+    root.insert(QStringLiteral("lyric_view"), lyricModel_.toJson());
+    return root;
+}
+
+bool MainWindow::loadSongJson(const QJsonObject& object)
+{
+    BeatGridModel loadedChord;
+    BeatGridModel loadedBeat;
+    BeatGridModel loadedLyric;
+    if (!loadedChord.loadJson(object)) {
+        return false;
+    }
+    const QJsonObject beatObject = object.value(QStringLiteral("beat_view")).toObject();
+    if (!beatObject.isEmpty()) {
+        if (!loadedBeat.loadJson(beatObject)) {
+            return false;
+        }
+    } else if (!loadedBeat.loadJson(object)) {
+        return false;
+    }
+    const QJsonObject lyricObject = object.value(QStringLiteral("lyric_view")).toObject();
+    if (!lyricObject.isEmpty()) {
+        if (!loadedLyric.loadJson(lyricObject)) {
+            return false;
+        }
+    } else if (!loadedLyric.loadJson(object)) {
+        return false;
+    }
+
+    const QString title = loadedChord.title();
+    loadedBeat.setTitle(title);
+    loadedLyric.setTitle(title);
+    chordModel_ = loadedChord;
+    beatModel_ = loadedBeat;
+    lyricModel_ = loadedLyric;
+    return true;
+}
+
 void MainWindow::newSong()
 {
-    songModel_.reset();
-    trackPlayer_.stop();
+    chordModel_.reset();
+    beatModel_.reset();
+    lyricModel_.reset();
+    if (trackSink_) {
+        trackSink_->stop();
+        trackSink_.reset();
+    }
     stopTrackMetronome();
-    trackPlayer_.setSource(QUrl());
-    processedTrackBuffer_.close();
-    processedTrackBytes_.clear();
+    trackDevice_.reset();
     trackController_ = SharedTrackController{};
     lastCaptureSummary_ = QJsonObject{};
     lastCapturePath_.clear();
@@ -2763,7 +3645,7 @@ void MainWindow::openSong()
     }
     const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
     const QJsonObject root = document.object();
-    if (!document.isObject() || !songModel_.loadJson(root)) {
+    if (!document.isObject() || !loadSongJson(root)) {
         QMessageBox::warning(this, QStringLiteral("Jam2"), QStringLiteral("Invalid Jam2 song file."));
         return;
     }
@@ -2773,11 +3655,13 @@ void MainWindow::openSong()
 
 void MainWindow::saveSong()
 {
-    songModel_.setTitle(songTitleEdit_->text());
+    chordModel_.setTitle(songTitleEdit_->text());
+    beatModel_.setTitle(songTitleEdit_->text());
+    lyricModel_.setTitle(songTitleEdit_->text());
     const QString path = QFileDialog::getSaveFileName(
         this,
         QStringLiteral("Save Jam2 Song"),
-        songModel_.title() + QStringLiteral(".jam2song"),
+        chordModel_.title() + QStringLiteral(".jam2song"),
         QStringLiteral("Jam2 song (*.jam2song);;JSON files (*.json);;All files (*)"));
     if (path.isEmpty()) {
         return;
@@ -2787,15 +3671,24 @@ void MainWindow::saveSong()
         QMessageBox::warning(this, QStringLiteral("Jam2"), QStringLiteral("Could not save song file."));
         return;
     }
-    QJsonObject root = songModel_.toJson();
+    QJsonObject root = songToJson();
     root.insert(QStringLiteral("track"), trackToJson());
     file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+}
+
+void MainWindow::sendSongSnapshot()
+{
+    sendControl(QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("song.set")},
+        {QStringLiteral("revision"), chordModel_.revision() + beatModel_.revision() + lyricModel_.revision()},
+        {QStringLiteral("song"), songToJson()},
+    });
 }
 
 void MainWindow::refreshSongViews()
 {
     if (songTitleEdit_) {
-        songTitleEdit_->setText(songModel_.title());
+        songTitleEdit_->setText(chordModel_.title());
     }
     if (chordGrid_) {
         chordGrid_->refresh();
@@ -2806,25 +3699,22 @@ void MainWindow::refreshSongViews()
     if (lyricGrid_) {
         lyricGrid_->refresh();
     }
-    if (arrangementEdit_) {
-        QStringList parts;
-        const int selected = arrangementSectionBox_ ? qMax(0, arrangementSectionBox_->currentIndex()) : 0;
-        if (arrangementSectionBox_) {
-            arrangementSectionBox_->clear();
+}
+
+void MainWindow::refreshSongView(const QString& lane)
+{
+    if (lane == QStringLiteral("chord")) {
+        if (chordGrid_) {
+            chordGrid_->refresh();
         }
-        for (const SongSection& section : songModel_.sections()) {
-            if (arrangementSectionBox_) {
-                arrangementSectionBox_->addItem(section.name + QStringLiteral(" ") + section.label);
-            }
-            parts << QStringLiteral("[%1 %2: %3 beats]")
-                .arg(section.name)
-                .arg(section.label)
-                .arg(section.beats);
+    } else if (lane == QStringLiteral("lyric")) {
+        if (lyricGrid_) {
+            lyricGrid_->refresh();
         }
-        if (arrangementSectionBox_ && arrangementSectionBox_->count() > 0) {
-            arrangementSectionBox_->setCurrentIndex(qMin(selected, arrangementSectionBox_->count() - 1));
+    } else {
+        if (beatGrid_) {
+            beatGrid_->refresh();
         }
-        arrangementEdit_->setPlainText(parts.join(QStringLiteral(" -> ")));
     }
 }
 

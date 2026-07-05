@@ -11,11 +11,11 @@ void applyDarkTheme(QApplication& app)
         QWidget {
             background: #101418;
             color: #d7dde4;
-            font-size: 13px;
+            font-size: 10pt;
         }
         QLabel#AppTitle {
             color: #f1f5f9;
-            font-size: 22px;
+            font-size: 17pt;
             font-weight: 700;
         }
         QLabel#StatusPill {

@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <span>
 #include <sstream>
@@ -40,7 +41,7 @@ struct Options {
     std::vector<int> input_channels{0};
     int sample_rate = 44100;
     long buffer_size = 128;
-    int duration_ms = 10000;
+    int duration_ms = 0;
     std::filesystem::path output;
     std::string source = "default";
     bool trigger = false;
@@ -179,8 +180,8 @@ Options parse_record_input(int argc, char** argv)
     if (options.output.empty()) {
         throw std::runtime_error("record-input requires --output");
     }
-    if (options.sample_rate <= 0 || options.buffer_size <= 0 || options.duration_ms <= 0) {
-        throw std::runtime_error("sample rate, buffer size, and duration must be positive");
+    if (options.sample_rate <= 0 || options.buffer_size <= 0 || options.duration_ms < 0) {
+        throw std::runtime_error("sample rate and buffer size must be positive, and duration must be non-negative");
     }
     return options;
 }
@@ -188,7 +189,6 @@ Options parse_record_input(int argc, char** argv)
 Options parse_record_loopback(int argc, char** argv)
 {
     Options options;
-    options.duration_ms = 10000;
     for (int i = 2; i < argc; ++i) {
         const std::string_view arg = argv[i];
         if (arg == "--source") {
@@ -204,8 +204,8 @@ Options parse_record_loopback(int argc, char** argv)
     if (options.output.empty()) {
         throw std::runtime_error("record-loopback requires --output");
     }
-    if (options.duration_ms <= 0) {
-        throw std::runtime_error("--duration-ms must be positive");
+    if (options.duration_ms < 0) {
+        throw std::runtime_error("--duration-ms must be non-negative");
     }
     return options;
 }
@@ -495,8 +495,9 @@ int list_devices()
 
 int record_input(const Options& options)
 {
-    const std::uint32_t target_frames =
-        static_cast<std::uint32_t>((static_cast<std::int64_t>(options.sample_rate) * options.duration_ms) / 1000);
+    const std::uint64_t target_frames = options.duration_ms > 0
+        ? static_cast<std::uint64_t>((static_cast<std::int64_t>(options.sample_rate) * options.duration_ms) / 1000)
+        : std::numeric_limits<std::uint64_t>::max();
     g_stop_requested.store(false, std::memory_order_relaxed);
     start_stdin_stop_thread();
 
@@ -519,7 +520,7 @@ int record_input(const Options& options)
         control);
 
     std::vector<std::int32_t> frames(static_cast<std::size_t>(std::max<long>(options.buffer_size, 256)));
-    std::uint32_t raw_read = 0;
+    std::uint64_t raw_read = 0;
     CaptureAccumulator capture(options, options.sample_rate);
     while (raw_read < target_frames && !g_stop_requested.load(std::memory_order_relaxed)) {
         const std::size_t want = std::min<std::size_t>(frames.size(), target_frames - raw_read);
@@ -527,7 +528,7 @@ int record_input(const Options& options)
         for (std::size_t i = 0; i < got; ++i) {
             capture.push(to_i16(frames[i]));
         }
-        raw_read += static_cast<std::uint32_t>(got);
+        raw_read += static_cast<std::uint64_t>(got);
         if (got == 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
@@ -542,7 +543,7 @@ int record_input(const Options& options)
     std::cout << "Device: [" << info.device.id << "] " << info.device.backend << " " << info.device.name << "\n";
     std::cout << "Sample rate: " << options.sample_rate << "\n";
     std::cout << "Buffer size: " << options.buffer_size << "\n";
-    std::cout << "Duration ms: " << options.duration_ms << "\n";
+    std::cout << "Duration ms: " << (options.duration_ms > 0 ? std::to_string(options.duration_ms) : std::string("manual")) << "\n";
     std::cout << "Frames written: " << result.samples.size() << "\n";
     std::cout << "Raw frames: " << result.raw_frames << "\n";
     std::cout << "Peak: " << result.peak << "\n";
@@ -745,8 +746,9 @@ int record_loopback(const Options& options)
     const int sample_rate = static_cast<int>(mix_format->nSamplesPerSec);
     const WORD channels = mix_format->nChannels;
     const WORD bits_per_sample = mix_format->wBitsPerSample;
-    const std::uint32_t target_frames =
-        static_cast<std::uint32_t>((static_cast<std::int64_t>(sample_rate) * options.duration_ms) / 1000);
+    const std::uint64_t target_frames = options.duration_ms > 0
+        ? static_cast<std::uint64_t>((static_cast<std::int64_t>(sample_rate) * options.duration_ms) / 1000)
+        : std::numeric_limits<std::uint64_t>::max();
     g_stop_requested.store(false, std::memory_order_relaxed);
     start_stdin_stop_thread();
 
@@ -765,7 +767,7 @@ int record_loopback(const Options& options)
         "failed to get WASAPI capture client");
 
     check_hr(audio_client->Start(), "failed to start WASAPI loopback capture");
-    std::uint32_t written = 0;
+    std::uint64_t written = 0;
     std::uint64_t silent_frames = 0;
     CaptureAccumulator capture(options, sample_rate);
     while (written < target_frames && !g_stop_requested.load(std::memory_order_relaxed)) {
@@ -779,7 +781,7 @@ int record_loopback(const Options& options)
         UINT32 frames_available = 0;
         DWORD flags = 0;
         check_hr(capture_client->GetBuffer(&data, &frames_available, &flags, nullptr, nullptr), "failed to get WASAPI capture buffer");
-        const UINT32 frames_to_write = std::min<UINT32>(frames_available, target_frames - written);
+        const UINT32 frames_to_write = static_cast<UINT32>(std::min<std::uint64_t>(frames_available, target_frames - written));
         for (UINT32 frame = 0; frame < frames_to_write; ++frame) {
             double mono = 0.0;
             if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) == 0) {
@@ -806,7 +808,7 @@ int record_loopback(const Options& options)
     std::cout << "Mix sample rate: " << sample_rate << "\n";
     std::cout << "Mix channels: " << channels << "\n";
     std::cout << "Mix bits per sample: " << bits_per_sample << "\n";
-    std::cout << "Duration ms: " << options.duration_ms << "\n";
+    std::cout << "Duration ms: " << (options.duration_ms > 0 ? std::to_string(options.duration_ms) : std::string("manual")) << "\n";
     std::cout << "Frames written: " << result.samples.size() << "\n";
     std::cout << "Raw frames: " << result.raw_frames << "\n";
     std::cout << "Silent frames: " << silent_frames << "\n";
@@ -826,9 +828,12 @@ int list_loopback_sources()
 
 int record_loopback(const Options& options)
 {
+    g_stop_requested.store(false, std::memory_order_relaxed);
+    start_stdin_stop_thread();
     MacLoopbackOptions mac_options;
     mac_options.source = options.source;
     mac_options.duration_ms = options.duration_ms;
+    mac_options.stop_requested = &g_stop_requested;
     mac_options.output = options.output;
     mac_options.trigger = options.trigger;
     mac_options.trigger_threshold_db = options.trigger_threshold_db;

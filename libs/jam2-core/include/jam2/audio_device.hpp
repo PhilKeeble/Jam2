@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "audio_ring.hpp"
+#include "metronome.hpp"
 
 namespace jam2::audio {
 
@@ -65,6 +66,13 @@ struct MetronomeConfig {
 struct StreamControl {
     std::atomic<bool> metronome_enabled{false};
     std::atomic<int> metronome_bpm{120};
+    std::atomic<int> metronome_beats_per_bar{4};
+    std::atomic<int> metronome_division{1};
+    std::atomic<int> metronome_step_count{4};
+    std::atomic<std::uint64_t> metronome_play_mask_low{0x0fULL};
+    std::atomic<std::uint64_t> metronome_play_mask_high{0};
+    std::atomic<std::uint64_t> metronome_accent_mask_low{0x01ULL};
+    std::atomic<std::uint64_t> metronome_accent_mask_high{0};
     std::atomic<int> metronome_level_ppm{200000};
     std::atomic<int> remote_level_ppm{1000000};
     std::atomic<int> playback_ratio_ppm{1000000};
