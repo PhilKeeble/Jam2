@@ -43,13 +43,10 @@ These rules apply to all implementation work in this repository.
 
 ## Build and Test Rules
 
-- Use host-native CMake builds unless explicitly requested otherwise.
-- Run CMake configure, build, and CTest steps sequentially for a given build directory. Do not launch configure and build in parallel against the same Ninja/MSVC build tree; Windows file locking can leave Ninja/CMake files wedged with `Access is denied`.
+- dont compile unless I tell you too directly, I will compile for you and share results
 - Windows builds should target MSVC for ASIO development and validation.
 - macOS builds should use Apple tooling for CoreAudio development and validation.
-- Do not use Docker as the normal build/test path for this project.
-- Real audio backend testing must happen on the relevant host OS with real audio drivers and hardware.
-- For this workspace, the local ASIO SDK fallback path is `C:\Tools\ASIO-SDK_2.3.4\ASIOSDK`; prefer `ASIO_SDK_DIR` if it is set, otherwise use this path when wiring CMake.
+
 
 ## Debugging and Tuning Rules
 

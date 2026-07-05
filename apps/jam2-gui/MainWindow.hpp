@@ -9,6 +9,7 @@
 
 #include "metronome.hpp"
 
+#include <QAudioDevice>
 #include <QCheckBox>
 #include <QByteArray>
 #include <QComboBox>
@@ -51,7 +52,6 @@ private:
     QWidget* buildSongPage();
     QWidget* buildTrackPage();
     QWidget* buildMetronomePage();
-    QWidget* buildStatsPage();
 
     void startJam();
     void showStartJamDialog();
@@ -59,18 +59,32 @@ private:
     void stopJam();
     void refreshDevices();
     void appendLog(const QString& line);
+    void handleOutputLine(const QString& line);
     void handleStatus(const QJsonObject& status);
+    void handleStatsLine(const QString& line);
+    void updateStatsDisplay(const QJsonObject& stats);
     void handleControlMessage(const QJsonObject& message);
     void sendControl(const QJsonObject& message);
+    void handleControlState(const QString& state, bool serverSide);
+    void refreshControlConnection();
+    void scheduleControlReconnect();
+    void sendLeaderSettings();
+    QJsonObject leaderSettingsMessage() const;
+    void applyLeaderSettings(const QJsonObject& settings);
+    bool selectedDeviceSupportsSampleRate(int sampleRate);
+    void launchJamProcess(const QStringList& args);
+    void launchPendingJoin();
     void updateRuntimeControls();
     void requestLeadSwap();
     void updateLeadLabels();
     void updateTrackControls();
     void loadTrackMetadata();
     QString selectedDeviceId() const;
+    QAudioDevice selectedLocalOutputDevice() const;
     QStringList captureOptionArgs() const;
     void handleCaptureOutputLine(const QString& line);
     void chooseCaptureFolder();
+    void refreshLocalOutputs();
     void refreshLoopbackSources();
     void startInputCapture();
     void showInputCaptureDialog();
@@ -109,7 +123,7 @@ private:
     void refreshSongView(const QString& lane);
     void sendSongSnapshot();
 
-    QStringList commonJamArgs() const;
+    QStringList commonJamArgs(bool includeExtraArgs = true) const;
     QString sessionHex() const;
     QString keyHex() const;
     void generateSession();
@@ -146,6 +160,7 @@ private:
     QSpinBox* socketSendBufferSpin_ = nullptr;
     QSpinBox* socketRecvBufferSpin_ = nullptr;
     QComboBox* deviceBox_ = nullptr;
+    QComboBox* localOutputBox_ = nullptr;
     QLineEdit* inputChannelsEdit_ = nullptr;
     QLineEdit* outputChannelsEdit_ = nullptr;
     QSpinBox* sampleRateSpin_ = nullptr;
@@ -176,14 +191,17 @@ private:
     QPushButton* startButton_ = nullptr;
     QPushButton* joinButton_ = nullptr;
     QPushButton* stopButton_ = nullptr;
+    QPushButton* refreshControlButton_ = nullptr;
     QGroupBox* runtimeMixBox_ = nullptr;
     QLabel* connectionLabel_ = nullptr;
-    QLabel* rttLabel_ = nullptr;
     QLabel* jitterLabel_ = nullptr;
     QLabel* lossLabel_ = nullptr;
     QLabel* depthLabel_ = nullptr;
     QLabel* underrunLabel_ = nullptr;
     QLabel* driftLabel_ = nullptr;
+    QLabel* latencyLabel_ = nullptr;
+    QLabel* ringDepthLabel_ = nullptr;
+    QLabel* missingFramesLabel_ = nullptr;
     QLabel* leadLabel_ = nullptr;
     QLabel* leadPendingLabel_ = nullptr;
     QPushButton* leadSwapButton_ = nullptr;
@@ -250,6 +268,16 @@ private:
     qint64 incomingTrackBytesExpected_ = 0;
     int incomingTrackNextChunk_ = 0;
     QTimer trackTimelineTimer_;
+    QTimer controlReconnectTimer_;
+    QString controlHost_;
+    quint16 controlPort_ = 0;
+    QString controlSessionHex_;
+    QString controlKeyHex_;
+    bool controlServerMode_ = false;
+    bool controlReconnectEnabled_ = false;
+    int controlReconnectAttempts_ = 0;
+    QStringList pendingJoinBaseArgs_;
+    bool pendingJoinLaunch_ = false;
     bool localMetronomeRunning_ = false;
     QVector<bool> metronomeEnabledSteps_;
     QVector<bool> metronomeAccents_;

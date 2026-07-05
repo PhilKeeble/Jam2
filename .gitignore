@@ -27,6 +27,7 @@ Testing/
 *.csv
 /logs/
 /tools/logs/
+/tools/stress_logs/
 /artifacts/logs/
 /artifacts/release/
 __pycache__/

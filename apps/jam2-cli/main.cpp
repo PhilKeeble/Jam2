@@ -2161,11 +2161,15 @@ CsvStatsLog::Context make_csv_context(
     return context;
 }
 
-void print_periodic_stream_stats(const AudioPacketStats& stats, const Options& options, std::uint64_t elapsed_ms)
+void print_periodic_stream_stats(
+    const AudioPacketStats& stats,
+    const Options& options,
+    const CsvStatsLog::AudioSnapshot& audio,
+    std::uint64_t elapsed_ms)
 {
     std::cout << "stats elapsed_ms=" << elapsed_ms
-              << " sent=" << stats.sent_packets
-              << " recv=" << stats.recv_packets
+              << " sent_packets=" << stats.sent_packets
+              << " recv_packets=" << stats.recv_packets
               << " sequence_lost=" << stats.sequence.lost
               << " sequence_loss_percent=" << sequence_loss_percent(stats)
               << " out_of_order=" << stats.sequence.out_of_order
@@ -2173,6 +2177,14 @@ void print_periodic_stream_stats(const AudioPacketStats& stats, const Options& o
               << " reordered_lost=" << stats.reordered_lost
               << " late=" << stats.sequence.late
               << " playback_depth_avg_ms=" << playback_depth_avg_ms(stats, options)
+              << " playback_ring_readable_ms=" << frames_to_ms(audio.playback_ring_readable, options.sample_rate)
+              << " playback_ring_underruns=" << audio.playback_ring_underruns
+              << " playback_ring_underrun_events=" << audio.playback_ring_underrun_events
+              << " playback_ring_underrun_time_ms="
+              << frames_to_ms(static_cast<std::size_t>(audio.playback_ring_underruns), options.sample_rate)
+              << " playback_ring_underrun_time_percent="
+              << frames_percent(audio.playback_ring_underruns, audio.playback_depth_observed_frames)
+              << " playback_depth_observed_frames=" << audio.playback_depth_observed_frames
               << " jitter_avg_ms="
               << (stats.jitter_samples > 0 ?
                   static_cast<double>(stats.jitter_sum_us) / static_cast<double>(stats.jitter_samples) / 1000.0 :
@@ -2183,6 +2195,8 @@ void print_periodic_stream_stats(const AudioPacketStats& stats, const Options& o
               << " drift_ppm=" << stats.drift_ppm
               << " resampler_ratio=" << stats.resampler_ratio
               << " playback_dropped_frames=" << stats.playback_dropped_frames
+              << " missing_audio_frames_inserted=" << stats.missing_audio_frames_inserted
+              << " late_audio_frames_dropped=" << stats.late_audio_frames_dropped
               << "\n";
 }
 
@@ -2923,7 +2937,11 @@ AudioPacketStats run_audio_packet_exchange(
         }
         if (collect_stats && runtime.print_stats.exchange(false, std::memory_order_relaxed)) {
             const std::uint64_t elapsed_ms = (now - start_time) / 1000ULL;
-            print_periodic_stream_stats(stats, options, elapsed_ms);
+            print_periodic_stream_stats(
+                stats,
+                options,
+                make_audio_snapshot(audio_stream, capture_ring, playback_ring),
+                elapsed_ms);
         }
         if (runtime.print_status.exchange(false, std::memory_order_relaxed)) {
             const std::uint64_t elapsed_ms = (now - start_time) / 1000ULL;
@@ -2947,7 +2965,11 @@ AudioPacketStats run_audio_packet_exchange(
         if (next_stats != 0 && now >= next_stats) {
             const std::uint64_t elapsed_ms = (now - start_time) / 1000ULL;
             if (runtime.stats_enabled.load(std::memory_order_relaxed)) {
-                print_periodic_stream_stats(stats, options, elapsed_ms);
+                print_periodic_stream_stats(
+                    stats,
+                    options,
+                    make_audio_snapshot(audio_stream, capture_ring, playback_ring),
+                    elapsed_ms);
             }
             if (csv_log != nullptr) {
                 csv_log->write_periodic(

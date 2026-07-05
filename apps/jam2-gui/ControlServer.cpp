@@ -63,13 +63,15 @@ void ControlServer::acceptPeer()
         onState(QStringLiteral("TCP peer connected; waiting for session auth"));
     }
     QObject::connect(peer_, &QTcpSocket::readyRead, this, [this] { readPeer(); });
-    QObject::connect(peer_, &QTcpSocket::disconnected, this, [this] {
+    QObject::connect(peer_, &QTcpSocket::disconnected, this, [this, socket] {
         authenticated_ = false;
         if (onState) {
             onState(QStringLiteral("TCP peer disconnected"));
         }
-        peer_->deleteLater();
-        peer_ = nullptr;
+        socket->deleteLater();
+        if (peer_ == socket) {
+            peer_ = nullptr;
+        }
     });
 }
 

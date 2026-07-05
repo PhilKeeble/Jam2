@@ -23,6 +23,24 @@
 
 Add some functionality onto the benchmark testing that also tests the different command line args and validates things are working as expected in an automated fashion 
 
+### Stress Test Outcomes
+
+Latest local UDP proxy stress testing shows the current controls mostly work:
+
+- Adaptive playback cushion materially reduces underrun time under burst/jitter pressure.
+- Drift max correction clamps as expected.
+- Packet loss up to about 1% is visible in stats and is handled without major underruns in the current aggressive localhost profile.
+- Larger playout delay and socket buffer options are applied and visible in CSV metadata.
+- Metronome modes validate shared grid state, epoch setup, beat advancement, and alignment from current stats.
+
+Controls worth considering:
+
+- Add a clear burst-protection preset that raises prefill, playback max, adaptive max, and possibly playout delay for unstable Wi-Fi or OS scheduling stalls.
+- Expose adaptive cushion aggressiveness more explicitly, especially raise/release behavior, because burst recovery is where it matters most.
+- Consider a tunable reorder/late-packet grace window for unstable networks, trading latency for fewer late drops.
+- Improve GUI/periodic stats so actual packet loss, reordered/late packets, burst/stall behavior, and underrun duration are clearly distinguished.
+- Fail fast on incompatible peer settings. The validation suite showed mismatched frame sizes can connect but silently discard audio, which should become a clear config/connection failure.
+
 ### Local Shared Track Mix Source
 
 Add an engine-side local playback source that `jam2-gui` can control for shared backing tracks.

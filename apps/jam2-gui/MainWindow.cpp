@@ -786,6 +786,53 @@ QString doubleText(const QJsonObject& object, const QString& key, const QString&
     return QString::number(object.value(key).toDouble(), 'f', precision) + suffix;
 }
 
+bool hasNumber(const QJsonObject& object, const QString& key)
+{
+    return object.contains(key) && object.value(key).isDouble();
+}
+
+QString numberText(const QJsonObject& object, const QString& key, const QString& suffix = QString(), int precision = 1)
+{
+    if (!hasNumber(object, key)) {
+        return QStringLiteral("-");
+    }
+    return QString::number(object.value(key).toDouble(), 'f', precision) + suffix;
+}
+
+QString integerText(const QJsonObject& object, const QString& key, const QString& fallbackKey = QString())
+{
+    QString actualKey = key;
+    if (!hasNumber(object, actualKey) && !fallbackKey.isEmpty()) {
+        actualKey = fallbackKey;
+    }
+    if (!hasNumber(object, actualKey)) {
+        return QStringLiteral("-");
+    }
+    return QString::number(static_cast<qlonglong>(object.value(actualKey).toDouble()));
+}
+
+QString durationText(double ms)
+{
+    if (ms >= 1000.0) {
+        return QString::number(ms / 1000.0, 'f', 2) + QStringLiteral(" s");
+    }
+    return QString::number(ms, 'f', 1) + QStringLiteral(" ms");
+}
+
+QString metricText(
+    const QJsonObject& object,
+    const QString& key,
+    const QString& suffix = QString(),
+    int precision = 1,
+    const QString& fallbackKey = QString())
+{
+    QString actualKey = key;
+    if (!hasNumber(object, actualKey) && !fallbackKey.isEmpty()) {
+        actualKey = fallbackKey;
+    }
+    return numberText(object, actualKey, suffix, precision);
+}
+
 QSlider* makeUnitSlider(double value, QWidget* parent)
 {
     auto* slider = new QSlider(Qt::Horizontal, parent);
@@ -836,6 +883,11 @@ QString deviceId(const QString& text)
     const QRegularExpression re(QStringLiteral("^\\s*\\[?(\\d+)\\]?"));
     const QRegularExpressionMatch match = re.match(text);
     return match.hasMatch() ? match.captured(1) : text.trimmed();
+}
+
+QString audioDeviceIdText(const QAudioDevice& device)
+{
+    return QString::fromLatin1(device.id().toHex());
 }
 
 struct WavMetadata {
@@ -1031,7 +1083,7 @@ MainWindow::MainWindow(QWidget* parent)
     buildUi();
     QApplication::instance()->installEventFilter(this);
 
-    jam2_.onOutputLine = [this](const QString& line) { appendLog(line); };
+    jam2_.onOutputLine = [this](const QString& line) { handleOutputLine(line); };
     jam2_.onErrorLine = [this](const QString& line) { appendLog(QStringLiteral("stderr: ") + line); };
     jam2_.onStatus = [this](const QJsonObject& status) { handleStatus(status); };
     jam2_.onFinished = [this](int code) {
@@ -1040,6 +1092,11 @@ MainWindow::MainWindow(QWidget* parent)
         startButton_->setEnabled(true);
         joinButton_->setEnabled(true);
         stopButton_->setEnabled(false);
+        if (refreshControlButton_) {
+            refreshControlButton_->setEnabled(false);
+        }
+        controlReconnectEnabled_ = false;
+        controlReconnectTimer_.stop();
         if (runtimeMixBox_) {
             runtimeMixBox_->setVisible(false);
         }
@@ -1047,16 +1104,12 @@ MainWindow::MainWindow(QWidget* parent)
             leadSwapButton_->setEnabled(false);
         }
     };
-    controlServer_.onState = [this](const QString& state) {
-        connectionLabel_->setText(state);
-        appendLog(QStringLiteral("control: ") + state);
-    };
+    controlServer_.onState = [this](const QString& state) { handleControlState(state, true); };
     controlServer_.onMessage = [this](const QJsonObject& message) { handleControlMessage(message); };
-    controlClient_.onState = [this](const QString& state) {
-        connectionLabel_->setText(state);
-        appendLog(QStringLiteral("control: ") + state);
-    };
+    controlClient_.onState = [this](const QString& state) { handleControlState(state, false); };
     controlClient_.onMessage = [this](const QJsonObject& message) { handleControlMessage(message); };
+    controlReconnectTimer_.setInterval(2000);
+    QObject::connect(&controlReconnectTimer_, &QTimer::timeout, this, [this] { refreshControlConnection(); });
     QObject::connect(&captureProcess_, &QProcess::readyReadStandardOutput, this, [this] {
         const QString text = QString::fromUtf8(captureProcess_.readAllStandardOutput());
         for (const QString& line : text.split(QLatin1Char('\n'))) {
@@ -1120,8 +1173,6 @@ void MainWindow::buildUi()
     titleLabel_->setObjectName(QStringLiteral("AppTitle"));
     connectionLabel_ = new QLabel(QStringLiteral("Idle"), this);
     connectionLabel_->setObjectName(QStringLiteral("StatusPill"));
-    rttLabel_ = new QLabel(QStringLiteral("RTT -"), this);
-    rttLabel_->setObjectName(QStringLiteral("StatusPill"));
     jitterLabel_ = new QLabel(QStringLiteral("Jitter -"), this);
     jitterLabel_->setObjectName(QStringLiteral("StatusPill"));
     lossLabel_ = new QLabel(QStringLiteral("Loss -"), this);
@@ -1131,9 +1182,6 @@ void MainWindow::buildUi()
     header->addWidget(titleLabel_);
     header->addStretch(1);
     header->addWidget(connectionLabel_);
-    header->addWidget(rttLabel_);
-    header->addWidget(jitterLabel_);
-    header->addWidget(lossLabel_);
 
     songTitleEdit_ = new QLineEdit(chordModel_.title(), this);
     songTitleEdit_->setMinimumWidth(300);
@@ -1165,7 +1213,6 @@ void MainWindow::buildUi()
     tabs_->addTab(lyricGrid_, QStringLiteral("Lyrics"));
     tabs_->addTab(buildTrackPage(), QStringLiteral("Track"));
     tabs_->addTab(buildMetronomePage(), QStringLiteral("Metronome"));
-    tabs_->addTab(buildStatsPage(), QStringLiteral("Stats"));
 
     auto sendCellEdit = [this](int section, const QString& lane, int beat, const QString& text, int revision) {
         sendControl(QJsonObject{
@@ -1222,15 +1269,26 @@ void MainWindow::buildUi()
     };
     lyricGrid_->onGridResized = beatGrid_->onGridResized;
 
+    latencyLabel_ = new QLabel(QStringLiteral("Latency -"), this);
+    latencyLabel_->setObjectName(QStringLiteral("StatusPill"));
     depthLabel_ = new QLabel(QStringLiteral("Depth -"), this);
     depthLabel_->setObjectName(QStringLiteral("StatusPill"));
-    underrunLabel_ = new QLabel(QStringLiteral("Underruns -"), this);
+    ringDepthLabel_ = new QLabel(QStringLiteral("Ring -"), this);
+    ringDepthLabel_->setObjectName(QStringLiteral("StatusPill"));
+    underrunLabel_ = new QLabel(QStringLiteral("Underrun -"), this);
     underrunLabel_->setObjectName(QStringLiteral("StatusPill"));
+    missingFramesLabel_ = new QLabel(QStringLiteral("Missing -"), this);
+    missingFramesLabel_->setObjectName(QStringLiteral("StatusPill"));
     driftLabel_ = new QLabel(QStringLiteral("Drift -"), this);
     driftLabel_->setObjectName(QStringLiteral("StatusPill"));
     auto* footer = new QHBoxLayout();
+    footer->addWidget(latencyLabel_);
+    footer->addWidget(jitterLabel_);
+    footer->addWidget(lossLabel_);
     footer->addWidget(depthLabel_);
+    footer->addWidget(ringDepthLabel_);
     footer->addWidget(underrunLabel_);
+    footer->addWidget(missingFramesLabel_);
     footer->addWidget(driftLabel_);
     footer->addStretch(1);
 
@@ -1251,6 +1309,7 @@ void MainWindow::buildUi()
 
     QTimer::singleShot(0, this, [this] {
         refreshDevices();
+        refreshLocalOutputs();
         refreshLoopbackSources();
     });
 }
@@ -1299,6 +1358,7 @@ QWidget* MainWindow::buildSessionPage()
 
     deviceBox_ = new QComboBox(page);
     deviceBox_->setEditable(true);
+    localOutputBox_ = new QComboBox(page);
     inputChannelsEdit_ = new QLineEdit(QStringLiteral("1"), page);
     outputChannelsEdit_ = new QLineEdit(QStringLiteral("1,2"), page);
     sampleRateSpin_ = new QSpinBox(page);
@@ -1370,18 +1430,21 @@ QWidget* MainWindow::buildSessionPage()
     startButton_ = new QPushButton(QStringLiteral("Start Jam"), page);
     joinButton_ = new QPushButton(QStringLiteral("Join Jam"), page);
     stopButton_ = new QPushButton(QStringLiteral("Stop"), page);
+    refreshControlButton_ = new QPushButton(QStringLiteral("Refresh Control"), page);
     stopButton_->setEnabled(false);
+    refreshControlButton_->setEnabled(false);
 
     jam2PathEdit_->setMinimumWidth(360);
     connectUrlEdit_->setMinimumWidth(420);
     generatedUrlEdit_->setMinimumWidth(420);
     deviceBox_->setEditable(false);
     deviceBox_->setMinimumWidth(280);
+    localOutputBox_->setMinimumWidth(280);
     const QList<QWidget*> sessionDialogWidgets{
         modeBox_, jam2PathEdit_, bindHostEdit_, portSpin_, publicHostEdit_, connectUrlEdit_,
         generatedUrlEdit_, stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, waitMsSpin_,
         streamMsSpin_, streamLingerMsSpin_, statsWarmupMsSpin_, logStatsEdit_,
-        socketSendBufferSpin_, socketRecvBufferSpin_, deviceBox_, inputChannelsEdit_,
+        socketSendBufferSpin_, socketRecvBufferSpin_, deviceBox_, localOutputBox_, inputChannelsEdit_,
         outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_, prefillSpin_,
         playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, driftCorrectionCheck_,
         driftSmoothingSpin_, driftDeadbandSpin_, driftMaxCorrectionSpin_, noStunCheck_,
@@ -1409,6 +1472,7 @@ QWidget* MainWindow::buildSessionPage()
     buttons->addWidget(startButton_);
     buttons->addWidget(joinButton_);
     buttons->addWidget(stopButton_);
+    buttons->addWidget(refreshControlButton_);
     buttons->addStretch(1);
 
     auto* layout = new QVBoxLayout(page);
@@ -1419,6 +1483,7 @@ QWidget* MainWindow::buildSessionPage()
     QObject::connect(startButton_, &QPushButton::clicked, this, [this] { showStartJamDialog(); });
     QObject::connect(joinButton_, &QPushButton::clicked, this, [this] { showJoinJamDialog(); });
     QObject::connect(stopButton_, &QPushButton::clicked, this, [this] { stopJam(); });
+    QObject::connect(refreshControlButton_, &QPushButton::clicked, this, [this] { refreshControlConnection(); });
     QObject::connect(metronomeCheck_, &QCheckBox::toggled, this, [this] { updateRuntimeControls(); });
     QObject::connect(metronomeModeBox_, &QComboBox::currentTextChanged, this, [this] { updateRuntimeControls(); });
     QObject::connect(metronomeLevelSlider_, &QSlider::valueChanged, this, [this] { updateRuntimeControls(); });
@@ -1889,32 +1954,6 @@ QWidget* MainWindow::buildMetronomePage()
     return page;
 }
 
-QWidget* MainWindow::buildStatsPage()
-{
-    auto* page = new QWidget(this);
-    auto* statsTable = new QTableWidget(6, 2, page);
-    statsTable->setHorizontalHeaderLabels({QStringLiteral("Metric"), QStringLiteral("Current")});
-    statsTable->verticalHeader()->setVisible(false);
-    statsTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    statsTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    const QStringList metrics{
-        QStringLiteral("RTT"),
-        QStringLiteral("Jitter"),
-        QStringLiteral("Packet loss"),
-        QStringLiteral("Playback depth"),
-        QStringLiteral("Missing frames"),
-        QStringLiteral("Drift"),
-    };
-    for (int row = 0; row < metrics.size(); ++row) {
-        statsTable->setItem(row, 0, new QTableWidgetItem(metrics[row]));
-        statsTable->setItem(row, 1, new QTableWidgetItem(QStringLiteral("-")));
-    }
-
-    auto* layout = new QVBoxLayout(page);
-    layout->addWidget(statsTable, 1);
-    return page;
-}
-
 void MainWindow::startJam()
 {
     if (jam2_.isRunning()) {
@@ -1922,6 +1961,8 @@ void MainWindow::startJam()
     }
     QStringList args;
     const bool listenMode = modeBox_->currentText() == QStringLiteral("Listen");
+    pendingJoinLaunch_ = false;
+    pendingJoinBaseArgs_.clear();
     try {
         if (listenMode) {
             jam2::SessionInfo info;
@@ -1942,12 +1983,24 @@ void MainWindow::startJam()
             if (!controlServer_.listen(static_cast<quint16>(portSpin_->value()), sessionHex(), keyHex())) {
                 appendLog(QStringLiteral("control server failed: ") + controlServer_.errorString());
             }
+            controlServerMode_ = true;
+            controlHost_ = bindHostEdit_->text();
+            controlPort_ = static_cast<quint16>(portSpin_->value());
+            controlSessionHex_ = sessionHex();
+            controlKeyHex_ = keyHex();
         } else {
             const std::string url = connectUrlEdit_->text().toStdString();
             const jam2::SessionInfo info = jam2::parse_jam_url(url);
             sessionId_ = info.session_id;
             sessionKey_ = info.key;
             args << QStringLiteral("connect") << connectUrlEdit_->text();
+            pendingJoinBaseArgs_ = args;
+            pendingJoinLaunch_ = true;
+            controlServerMode_ = false;
+            controlHost_ = QString::fromStdString(info.endpoint.host);
+            controlPort_ = info.endpoint.port;
+            controlSessionHex_ = sessionHex();
+            controlKeyHex_ = keyHex();
             controlClient_.connectToHost(QString::fromStdString(info.endpoint.host), info.endpoint.port, sessionHex(), keyHex());
         }
     } catch (const std::exception& error) {
@@ -1955,12 +2008,32 @@ void MainWindow::startJam()
         return;
     }
 
+    controlReconnectEnabled_ = true;
+    controlReconnectAttempts_ = 0;
+    if (!listenMode) {
+        appendLog(QStringLiteral("waiting for leader settings before launching Jam2"));
+        startButton_->setEnabled(false);
+        joinButton_->setEnabled(false);
+        stopButton_->setEnabled(true);
+        if (refreshControlButton_) {
+            refreshControlButton_->setEnabled(true);
+        }
+        return;
+    }
     args << commonJamArgs();
+    launchJamProcess(args);
+}
+
+void MainWindow::launchJamProcess(const QStringList& args)
+{
     jam2_.start(jam2PathEdit_->text(), args);
     appendLog(QStringLiteral("starting: %1 %2").arg(jam2PathEdit_->text(), args.join(QLatin1Char(' '))));
     startButton_->setEnabled(false);
     joinButton_->setEnabled(false);
     stopButton_->setEnabled(true);
+    if (refreshControlButton_) {
+        refreshControlButton_->setEnabled(true);
+    }
     if (runtimeMixBox_) {
         runtimeMixBox_->setVisible(true);
     }
@@ -2000,7 +2073,7 @@ void MainWindow::showStartJamDialog()
     const QList<QWidget*> visibleWidgets{
         jam2PathEdit_, bindHostEdit_, portSpin_, publicHostEdit_, generatedUrlEdit_,
         stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, noStunCheck_, deviceBox_,
-        inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_,
+        localOutputBox_, inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_,
         prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_,
         streamMsSpin_, streamLingerMsSpin_, statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
         socketRecvBufferSpin_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
@@ -2027,6 +2100,7 @@ void MainWindow::showStartJamDialog()
 
     auto* audioForm = new QFormLayout();
     audioForm->addRow(QStringLiteral("Audio device"), deviceBox_);
+    audioForm->addRow(QStringLiteral("Local track/metronome output"), localOutputBox_);
     audioForm->addRow(QStringLiteral("Input channels"), inputChannelsEdit_);
     audioForm->addRow(QStringLiteral("Output channels"), outputChannelsEdit_);
     audioForm->addRow(QStringLiteral("Sample rate"), sampleRateSpin_);
@@ -2073,7 +2147,10 @@ void MainWindow::showStartJamDialog()
     auto* refresh = buttons->addButton(QStringLiteral("Refresh Devices"), QDialogButtonBox::ActionRole);
     auto* regen = buttons->addButton(QStringLiteral("New Session"), QDialogButtonBox::ActionRole);
     auto* copy = buttons->addButton(QStringLiteral("Copy URL"), QDialogButtonBox::ActionRole);
-    QObject::connect(refresh, &QPushButton::clicked, this, [this] { refreshDevices(); });
+    QObject::connect(refresh, &QPushButton::clicked, this, [this] {
+        refreshDevices();
+        refreshLocalOutputs();
+    });
     QObject::connect(regen, &QPushButton::clicked, this, [this] {
         generateSession();
         jam2::SessionInfo info;
@@ -2099,7 +2176,7 @@ void MainWindow::showStartJamDialog()
     const QList<QWidget*> startWidgets{
         jam2PathEdit_, bindHostEdit_, portSpin_, publicHostEdit_, generatedUrlEdit_,
         stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, noStunCheck_, deviceBox_,
-        inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_,
+        localOutputBox_, inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_,
         prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_,
         streamMsSpin_, streamLingerMsSpin_, statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
         socketRecvBufferSpin_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
@@ -2130,8 +2207,7 @@ void MainWindow::showJoinJamDialog()
     auto* content = new QWidget(&dialog);
     auto* layout = new QVBoxLayout(content);
     const QList<QWidget*> visibleWidgets{
-        connectUrlEdit_, jam2PathEdit_, deviceBox_, inputChannelsEdit_, outputChannelsEdit_,
-        sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_, prefillSpin_, extraArgsEdit_,
+        connectUrlEdit_, jam2PathEdit_, deviceBox_, localOutputBox_, inputChannelsEdit_, outputChannelsEdit_,
     };
     for (QWidget* widget : visibleWidgets) {
         widget->show();
@@ -2146,13 +2222,9 @@ void MainWindow::showJoinJamDialog()
 
     auto* audioForm = new QFormLayout();
     audioForm->addRow(QStringLiteral("Audio device"), deviceBox_);
+    audioForm->addRow(QStringLiteral("Local track/metronome output"), localOutputBox_);
     audioForm->addRow(QStringLiteral("Input channels"), inputChannelsEdit_);
     audioForm->addRow(QStringLiteral("Output channels"), outputChannelsEdit_);
-    audioForm->addRow(QStringLiteral("Sample rate"), sampleRateSpin_);
-    audioForm->addRow(QStringLiteral("Audio buffer size"), bufferSizeSpin_);
-    audioForm->addRow(QStringLiteral("Frame size"), frameSizeSpin_);
-    audioForm->addRow(QStringLiteral("Playback prefill frames"), prefillSpin_);
-    audioForm->addRow(QStringLiteral("Extra jam2 args"), extraArgsEdit_);
     auto* audioBox = new QGroupBox(QStringLiteral("Local Audio"), content);
     audioBox->setLayout(audioForm);
     layout->addWidget(audioBox);
@@ -2164,7 +2236,10 @@ void MainWindow::showJoinJamDialog()
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, &dialog);
     auto* join = buttons->addButton(QStringLiteral("Join"), QDialogButtonBox::AcceptRole);
     auto* refresh = buttons->addButton(QStringLiteral("Refresh Devices"), QDialogButtonBox::ActionRole);
-    QObject::connect(refresh, &QPushButton::clicked, this, [this] { refreshDevices(); });
+    QObject::connect(refresh, &QPushButton::clicked, this, [this] {
+        refreshDevices();
+        refreshLocalOutputs();
+    });
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 
@@ -2175,8 +2250,7 @@ void MainWindow::showJoinJamDialog()
 
     const int result = dialog.exec();
     const QList<QWidget*> joinWidgets{
-        connectUrlEdit_, jam2PathEdit_, deviceBox_, inputChannelsEdit_, outputChannelsEdit_,
-        sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_, prefillSpin_, extraArgsEdit_,
+        connectUrlEdit_, jam2PathEdit_, deviceBox_, localOutputBox_, inputChannelsEdit_, outputChannelsEdit_,
     };
     for (QWidget* widget : joinWidgets) {
         widget->setParent(this);
@@ -2191,12 +2265,19 @@ void MainWindow::showJoinJamDialog()
 
 void MainWindow::stopJam()
 {
+    controlReconnectEnabled_ = false;
+    controlReconnectTimer_.stop();
     controlServer_.close();
     controlClient_.close();
+    pendingJoinLaunch_ = false;
+    pendingJoinBaseArgs_.clear();
     jam2_.stop();
     startButton_->setEnabled(true);
     joinButton_->setEnabled(true);
     stopButton_->setEnabled(false);
+    if (refreshControlButton_) {
+        refreshControlButton_->setEnabled(false);
+    }
     if (runtimeMixBox_) {
         runtimeMixBox_->setVisible(false);
     }
@@ -2238,6 +2319,26 @@ void MainWindow::refreshDevices()
     }
 }
 
+void MainWindow::refreshLocalOutputs()
+{
+    if (!localOutputBox_) {
+        return;
+    }
+    const QString previous = localOutputBox_->currentData().toString();
+    localOutputBox_->clear();
+    const QList<QAudioDevice> outputs = QMediaDevices::audioOutputs();
+    for (const QAudioDevice& device : outputs) {
+        localOutputBox_->addItem(device.description(), audioDeviceIdText(device));
+    }
+    if (localOutputBox_->count() == 0) {
+        localOutputBox_->addItem(QStringLiteral("Default audio output"), QString{});
+    }
+    const int restore = localOutputBox_->findData(previous);
+    if (restore >= 0) {
+        localOutputBox_->setCurrentIndex(restore);
+    }
+}
+
 void MainWindow::appendLog(const QString& line)
 {
     if (logEdit_) {
@@ -2245,23 +2346,107 @@ void MainWindow::appendLog(const QString& line)
     }
 }
 
+void MainWindow::handleOutputLine(const QString& line)
+{
+    appendLog(line);
+    handleStatsLine(line);
+}
+
 void MainWindow::handleStatus(const QJsonObject& status)
 {
     if (status.value(QStringLiteral("event")).toString() != QStringLiteral("status")) {
         return;
     }
-    rttLabel_->setText(QStringLiteral("RTT ") + doubleText(status, QStringLiteral("rtt_avg_ms"), QStringLiteral(" ms")));
-    jitterLabel_->setText(QStringLiteral("Jitter ") + doubleText(status, QStringLiteral("jitter_avg_ms"), QStringLiteral(" ms")));
-    lossLabel_->setText(QStringLiteral("Loss ") + doubleText(status, QStringLiteral("sequence_loss_percent"), QStringLiteral("%"), 2));
-    depthLabel_->setText(QStringLiteral("Depth ") + doubleText(status, QStringLiteral("playback_depth_ms"), QStringLiteral(" ms")));
-    underrunLabel_->setText(QStringLiteral("Missing frames %1").arg(status.value(QStringLiteral("missing_audio_frames_inserted")).toInteger()));
-    driftLabel_->setText(QStringLiteral("Drift ") + doubleText(status, QStringLiteral("drift_ppm"), QStringLiteral(" ppm")));
+    updateStatsDisplay(status);
+}
+
+void MainWindow::handleStatsLine(const QString& line)
+{
+    if (!line.startsWith(QStringLiteral("stats "))) {
+        return;
+    }
+    QJsonObject stats;
+    stats.insert(QStringLiteral("event"), QStringLiteral("stats"));
+    const QRegularExpression fieldRe(QStringLiteral("(\\S+)=([^\\s]+)"));
+    auto it = fieldRe.globalMatch(line.mid(6));
+    while (it.hasNext()) {
+        const QRegularExpressionMatch match = it.next();
+        const QString key = match.captured(1);
+        const QString value = match.captured(2);
+        bool ok = false;
+        const double number = value.toDouble(&ok);
+        if (ok) {
+            stats.insert(key, number);
+        } else {
+            stats.insert(key, value);
+        }
+    }
+    if (stats.contains(QStringLiteral("sent")) && !stats.contains(QStringLiteral("sent_packets"))) {
+        stats.insert(QStringLiteral("sent_packets"), stats.value(QStringLiteral("sent")).toDouble());
+    }
+    if (stats.contains(QStringLiteral("recv")) && !stats.contains(QStringLiteral("recv_packets"))) {
+        stats.insert(QStringLiteral("recv_packets"), stats.value(QStringLiteral("recv")).toDouble());
+    }
+    updateStatsDisplay(stats);
+}
+
+void MainWindow::updateStatsDisplay(const QJsonObject& stats)
+{
+    QString latency = metricText(stats, QStringLiteral("estimated_one_way_ms"), QStringLiteral(" ms"));
+    if (latency == QStringLiteral("-")) {
+        latency = metricText(stats, QStringLiteral("rtt_avg_ms"), QStringLiteral(" ms"));
+    }
+    latencyLabel_->setText(QStringLiteral("Latency ") + latency);
+    const QString jitterAvg = metricText(stats, QStringLiteral("jitter_avg_ms"), QStringLiteral(" ms"));
+    const QString jitterMax = metricText(stats, QStringLiteral("jitter_max_ms"), QStringLiteral(" ms"));
+    jitterLabel_->setText(QStringLiteral("Jitter %1 / %2").arg(jitterAvg, jitterMax));
+    lossLabel_->setText(QStringLiteral("Loss ") + metricText(stats, QStringLiteral("sequence_loss_percent"), QStringLiteral("%"), 2));
+    depthLabel_->setText(QStringLiteral("Depth ") + metricText(
+        stats,
+        QStringLiteral("playback_depth_avg_ms"),
+        QStringLiteral(" ms"),
+        1,
+        QStringLiteral("playback_depth_ms")));
+    ringDepthLabel_->setText(QStringLiteral("Ring ") + metricText(stats, QStringLiteral("playback_ring_readable_ms"), QStringLiteral(" ms")));
+    QString underrunText = QStringLiteral("-");
+    if (hasNumber(stats, QStringLiteral("playback_ring_underrun_time_ms"))) {
+        const double underrunMs = stats.value(QStringLiteral("playback_ring_underrun_time_ms")).toDouble();
+        underrunText = durationText(underrunMs);
+        if (hasNumber(stats, QStringLiteral("elapsed_ms")) && stats.value(QStringLiteral("elapsed_ms")).toDouble() > 0.0) {
+            const double perMinute = underrunMs * 60000.0 / stats.value(QStringLiteral("elapsed_ms")).toDouble();
+            underrunText += QStringLiteral(" (%1/min)").arg(durationText(perMinute));
+        }
+    } else if (hasNumber(stats, QStringLiteral("playback_ring_underruns"))) {
+        underrunText = integerText(stats, QStringLiteral("playback_ring_underruns")) + QStringLiteral(" fr");
+    }
+    underrunLabel_->setText(QStringLiteral("Underrun ") + underrunText);
+    missingFramesLabel_->setText(QStringLiteral("Missing %1 fr").arg(integerText(stats, QStringLiteral("missing_audio_frames_inserted"))));
+    driftLabel_->setText(QStringLiteral("Drift ") + metricText(stats, QStringLiteral("drift_ppm"), QStringLiteral(" ppm")));
 }
 
 void MainWindow::handleControlMessage(const QJsonObject& message)
 {
     const QString type = message.value(QStringLiteral("type")).toString();
-    if (type == QStringLiteral("beat.set")) {
+    const bool trackMessage =
+        type == QStringLiteral("track.offer") ||
+        type == QStringLiteral("track.processing") ||
+        type == QStringLiteral("track.play") ||
+        type == QStringLiteral("track.stop") ||
+        type == QStringLiteral("track.file.start") ||
+        type == QStringLiteral("track.file.chunk") ||
+        type == QStringLiteral("track.file.done");
+    if (trackMessage && !trackController_.model().syncControls) {
+        appendLog(QStringLiteral("ignored remote track sync while local sync is disabled"));
+        return;
+    }
+    if (type == QStringLiteral("session.settings")) {
+        applyLeaderSettings(message.value(QStringLiteral("settings")).toObject());
+        launchPendingJoin();
+    } else if (type == QStringLiteral("session.error")) {
+        const QString text = message.value(QStringLiteral("message")).toString(QStringLiteral("Session error"));
+        appendLog(QStringLiteral("peer session error: ") + text);
+        QMessageBox::warning(this, QStringLiteral("Jam2"), text);
+    } else if (type == QStringLiteral("beat.set")) {
         const QString lane = message.value(QStringLiteral("lane")).toString();
         BeatGridModel* model = &beatModel_;
         if (lane == QStringLiteral("chord")) {
@@ -2308,7 +2493,11 @@ void MainWindow::handleControlMessage(const QJsonObject& message)
         updateLeadLabels();
     } else if (type == QStringLiteral("track.offer")) {
         trackController_.model().fileName = message.value(QStringLiteral("name")).toString();
-        trackController_.model().filePath = message.value(QStringLiteral("path")).toString(trackController_.model().filePath);
+        const QString offeredPath = message.value(QStringLiteral("path")).toString(trackController_.model().filePath);
+        const bool offeredPathExists = QFileInfo::exists(offeredPath);
+        if (offeredPathExists) {
+            trackController_.model().filePath = offeredPath;
+        }
         trackController_.model().fileBytes = static_cast<qint64>(message.value(QStringLiteral("file_bytes")).toDouble(trackController_.model().fileBytes));
         trackController_.model().sampleRate = message.value(QStringLiteral("sample_rate")).toInt(trackController_.model().sampleRate);
         trackController_.model().durationMs = message.value(QStringLiteral("duration_ms")).toInt(trackController_.model().durationMs);
@@ -2325,7 +2514,9 @@ void MainWindow::handleControlMessage(const QJsonObject& message)
         trackController_.model().focusGainDb = message.value(QStringLiteral("focus_gain_db")).toDouble(trackController_.model().focusGainDb);
         trackController_.model().focusQ = message.value(QStringLiteral("focus_q")).toDouble(trackController_.model().focusQ);
         updateTrackControls();
-        loadTrackIntoPlayer();
+        if (offeredPathExists) {
+            loadTrackIntoPlayer();
+        }
     } else if (type == QStringLiteral("track.processing")) {
         appendLog(QStringLiteral("ignored remote track processing controls"));
     } else if (type == QStringLiteral("track.play")) {
@@ -2351,6 +2542,190 @@ void MainWindow::handleControlMessage(const QJsonObject& message)
     }
 }
 
+void MainWindow::handleControlState(const QString& state, bool serverSide)
+{
+    connectionLabel_->setText(state);
+    appendLog(QStringLiteral("control: ") + state);
+    if (serverSide && state == QStringLiteral("TCP peer authenticated")) {
+        controlReconnectAttempts_ = 0;
+        controlReconnectTimer_.stop();
+        sendLeaderSettings();
+    } else if (!serverSide && state == QStringLiteral("TCP control authenticated")) {
+        controlReconnectAttempts_ = 0;
+        controlReconnectTimer_.stop();
+    } else if ((jam2_.isRunning() || pendingJoinLaunch_) && controlReconnectEnabled_ &&
+        (state == QStringLiteral("TCP control disconnected") || state == QStringLiteral("TCP peer disconnected"))) {
+        scheduleControlReconnect();
+    }
+}
+
+void MainWindow::refreshControlConnection()
+{
+    if (!controlReconnectEnabled_ || controlHost_.isEmpty() || controlPort_ == 0) {
+        return;
+    }
+    if (controlServerMode_ && controlServer_.hasPeer()) {
+        sendLeaderSettings();
+        appendLog(QStringLiteral("TCP control already connected; resent leader settings"));
+        return;
+    }
+    if (!controlServerMode_ && controlClient_.isConnected()) {
+        appendLog(QStringLiteral("TCP control already connected"));
+        return;
+    }
+    ++controlReconnectAttempts_;
+    appendLog(QStringLiteral("refreshing TCP control attempt %1").arg(controlReconnectAttempts_));
+    if (controlServerMode_) {
+        if (!controlServer_.listen(controlPort_, controlSessionHex_, controlKeyHex_)) {
+            appendLog(QStringLiteral("control server refresh failed: ") + controlServer_.errorString());
+        }
+    } else {
+        controlClient_.connectToHost(controlHost_, controlPort_, controlSessionHex_, controlKeyHex_);
+    }
+    if (controlReconnectAttempts_ >= 15) {
+        controlReconnectTimer_.stop();
+        appendLog(QStringLiteral("TCP control auto reconnect paused; use Refresh Control to retry"));
+    }
+}
+
+void MainWindow::scheduleControlReconnect()
+{
+    if (!controlReconnectEnabled_ || controlReconnectTimer_.isActive()) {
+        return;
+    }
+    controlReconnectAttempts_ = 0;
+    controlReconnectTimer_.start();
+}
+
+void MainWindow::sendLeaderSettings()
+{
+    if (!controlServer_.hasPeer()) {
+        return;
+    }
+    controlServer_.send(QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("session.settings")},
+        {QStringLiteral("settings"), leaderSettingsMessage()},
+    });
+}
+
+QJsonObject MainWindow::leaderSettingsMessage() const
+{
+    return QJsonObject{
+        {QStringLiteral("sample_rate"), sampleRateSpin_->value()},
+        {QStringLiteral("audio_buffer_size"), bufferSizeSpin_->value()},
+        {QStringLiteral("frame_size"), frameSizeSpin_->value()},
+        {QStringLiteral("playback_prefill_frames"), prefillSpin_->value()},
+        {QStringLiteral("playback_max_frames"), playbackMaxSpin_->value()},
+        {QStringLiteral("capture_ring_frames"), captureRingSpin_->value()},
+        {QStringLiteral("playback_ring_frames"), playbackRingSpin_->value()},
+        {QStringLiteral("stats_warmup_ms"), statsWarmupMsSpin_->value()},
+        {QStringLiteral("socket_send_buffer"), socketSendBufferSpin_->value()},
+        {QStringLiteral("socket_recv_buffer"), socketRecvBufferSpin_->value()},
+        {QStringLiteral("drift_correction"), driftCorrectionCheck_->isChecked()},
+        {QStringLiteral("drift_smoothing"), driftSmoothingSpin_->value()},
+        {QStringLiteral("drift_deadband_ppm"), driftDeadbandSpin_->value()},
+        {QStringLiteral("drift_max_correction_ppm"), driftMaxCorrectionSpin_->value()},
+        {QStringLiteral("metronome"), metronomeCheck_->isChecked()},
+        {QStringLiteral("bpm"), metronomeBpmSpin_ ? metronomeBpmSpin_->value() : bpmSpin_->value()},
+        {QStringLiteral("metronome_level"), static_cast<double>(metronomeLevelSlider_->value()) / 100.0},
+        {QStringLiteral("remote_level"), static_cast<double>(remoteLevelSlider_->value()) / 100.0},
+        {QStringLiteral("metronome_mode"), metronomeModeBox_->currentText()},
+        {QStringLiteral("sample_time_playout"), sampleTimePlayoutCheck_->isChecked()},
+        {QStringLiteral("playout_delay_frames"), playoutDelaySpin_->value()},
+        {QStringLiteral("adaptive_playback_cushion"), adaptiveCushionCheck_->isChecked()},
+        {QStringLiteral("adaptive_target_frames"), adaptiveTargetSpin_->value()},
+        {QStringLiteral("adaptive_min_frames"), adaptiveMinSpin_->value()},
+        {QStringLiteral("adaptive_max_frames"), adaptiveMaxSpin_->value()},
+        {QStringLiteral("adaptive_release_ppm"), adaptiveReleaseSpin_->value()},
+    };
+}
+
+void MainWindow::applyLeaderSettings(const QJsonObject& settings)
+{
+    sampleRateSpin_->setValue(settings.value(QStringLiteral("sample_rate")).toInt(sampleRateSpin_->value()));
+    bufferSizeSpin_->setValue(settings.value(QStringLiteral("audio_buffer_size")).toInt(bufferSizeSpin_->value()));
+    frameSizeSpin_->setValue(settings.value(QStringLiteral("frame_size")).toInt(frameSizeSpin_->value()));
+    prefillSpin_->setValue(settings.value(QStringLiteral("playback_prefill_frames")).toInt(prefillSpin_->value()));
+    playbackMaxSpin_->setValue(settings.value(QStringLiteral("playback_max_frames")).toInt(playbackMaxSpin_->value()));
+    captureRingSpin_->setValue(settings.value(QStringLiteral("capture_ring_frames")).toInt(captureRingSpin_->value()));
+    playbackRingSpin_->setValue(settings.value(QStringLiteral("playback_ring_frames")).toInt(playbackRingSpin_->value()));
+    statsWarmupMsSpin_->setValue(settings.value(QStringLiteral("stats_warmup_ms")).toInt(statsWarmupMsSpin_->value()));
+    socketSendBufferSpin_->setValue(settings.value(QStringLiteral("socket_send_buffer")).toInt(socketSendBufferSpin_->value()));
+    socketRecvBufferSpin_->setValue(settings.value(QStringLiteral("socket_recv_buffer")).toInt(socketRecvBufferSpin_->value()));
+    driftCorrectionCheck_->setChecked(settings.value(QStringLiteral("drift_correction")).toBool(driftCorrectionCheck_->isChecked()));
+    driftSmoothingSpin_->setValue(settings.value(QStringLiteral("drift_smoothing")).toDouble(driftSmoothingSpin_->value()));
+    driftDeadbandSpin_->setValue(settings.value(QStringLiteral("drift_deadband_ppm")).toInt(driftDeadbandSpin_->value()));
+    driftMaxCorrectionSpin_->setValue(settings.value(QStringLiteral("drift_max_correction_ppm")).toInt(driftMaxCorrectionSpin_->value()));
+    metronomeCheck_->setChecked(settings.value(QStringLiteral("metronome")).toBool(metronomeCheck_->isChecked()));
+    if (metronomeBpmSpin_) {
+        metronomeBpmSpin_->setValue(settings.value(QStringLiteral("bpm")).toInt(metronomeBpmSpin_->value()));
+    }
+    metronomeLevelSlider_->setValue(qBound(0, qRound(settings.value(QStringLiteral("metronome_level")).toDouble(
+        static_cast<double>(metronomeLevelSlider_->value()) / 100.0) * 100.0), 100));
+    remoteLevelSlider_->setValue(qBound(0, qRound(settings.value(QStringLiteral("remote_level")).toDouble(
+        static_cast<double>(remoteLevelSlider_->value()) / 100.0) * 100.0), 100));
+    const QString mode = settings.value(QStringLiteral("metronome_mode")).toString(metronomeModeBox_->currentText());
+    const int modeIndex = metronomeModeBox_->findText(mode);
+    if (modeIndex >= 0) {
+        metronomeModeBox_->setCurrentIndex(modeIndex);
+    }
+    sampleTimePlayoutCheck_->setChecked(settings.value(QStringLiteral("sample_time_playout")).toBool(sampleTimePlayoutCheck_->isChecked()));
+    playoutDelaySpin_->setValue(settings.value(QStringLiteral("playout_delay_frames")).toInt(playoutDelaySpin_->value()));
+    adaptiveCushionCheck_->setChecked(settings.value(QStringLiteral("adaptive_playback_cushion")).toBool(adaptiveCushionCheck_->isChecked()));
+    adaptiveTargetSpin_->setValue(settings.value(QStringLiteral("adaptive_target_frames")).toInt(adaptiveTargetSpin_->value()));
+    adaptiveMinSpin_->setValue(settings.value(QStringLiteral("adaptive_min_frames")).toInt(adaptiveMinSpin_->value()));
+    adaptiveMaxSpin_->setValue(settings.value(QStringLiteral("adaptive_max_frames")).toInt(adaptiveMaxSpin_->value()));
+    adaptiveReleaseSpin_->setValue(settings.value(QStringLiteral("adaptive_release_ppm")).toInt(adaptiveReleaseSpin_->value()));
+}
+
+bool MainWindow::selectedDeviceSupportsSampleRate(int sampleRate)
+{
+    if (selectedDeviceId().isEmpty()) {
+        return false;
+    }
+    QProcess process;
+    const QFileInfo binary(jam2PathEdit_->text());
+    if (binary.exists()) {
+        process.setWorkingDirectory(binary.absolutePath());
+    }
+    process.start(jam2PathEdit_->text(), QStringList{
+        QStringLiteral("test-device"),
+        selectedDeviceId(),
+        QStringLiteral("--sample-rate"),
+        QString::number(sampleRate),
+    });
+    if (!process.waitForStarted(3000) || !process.waitForFinished(5000)) {
+        process.kill();
+        return false;
+    }
+    const QString output = QString::fromUtf8(process.readAllStandardOutput());
+    if (!output.contains(QStringLiteral("Requested sample rate %1: supported").arg(sampleRate))) {
+        appendLog(QStringLiteral("device sample-rate preflight failed: ") + output.trimmed());
+        return false;
+    }
+    return true;
+}
+
+void MainWindow::launchPendingJoin()
+{
+    if (!pendingJoinLaunch_ || jam2_.isRunning()) {
+        return;
+    }
+    if (!selectedDeviceSupportsSampleRate(sampleRateSpin_->value())) {
+        const QString message = QStringLiteral("Selected joiner audio device does not support leader sample rate %1").arg(sampleRateSpin_->value());
+        appendLog(message);
+        sendControl(QJsonObject{{QStringLiteral("type"), QStringLiteral("session.error")}, {QStringLiteral("message"), message}});
+        QMessageBox::warning(this, QStringLiteral("Jam2"), message);
+        pendingJoinLaunch_ = false;
+        return;
+    }
+    QStringList args = pendingJoinBaseArgs_;
+    args << commonJamArgs(false);
+    pendingJoinLaunch_ = false;
+    pendingJoinBaseArgs_.clear();
+    launchJamProcess(args);
+}
+
 void MainWindow::sendControl(const QJsonObject& message)
 {
     controlServer_.send(message);
@@ -2362,10 +2737,14 @@ void MainWindow::updateRuntimeControls()
     if (!jam2_.isRunning()) {
         return;
     }
-    jam2_.sendLine(metronomeCheck_->isChecked() ? QStringLiteral("metro on") : QStringLiteral("metro off"));
-    sendMetronomePatternToJam();
     jam2_.sendLine(QStringLiteral("metro level %1").arg(static_cast<double>(metronomeLevelSlider_->value()) / 100.0, 0, 'f', 2));
     jam2_.sendLine(QStringLiteral("metro mode %1").arg(metronomeModeBox_->currentText()));
+    if (metronomeCheck_->isChecked()) {
+        sendMetronomePatternToJam();
+        jam2_.sendLine(QStringLiteral("metro on"));
+    } else {
+        jam2_.sendLine(QStringLiteral("metro off"));
+    }
     jam2_.sendLine(QStringLiteral("remote level %1").arg(static_cast<double>(remoteLevelSlider_->value()) / 100.0, 0, 'f', 2));
 }
 
@@ -3011,7 +3390,7 @@ void MainWindow::playTrack()
         trackDevice_->setPositionMs(0);
     }
 
-    QAudioDevice outputDevice = QMediaDevices::defaultAudioOutput();
+    QAudioDevice outputDevice = selectedLocalOutputDevice();
     if (outputDevice.isNull()) {
         QMessageBox::warning(this, QStringLiteral("Jam2 Track"), QStringLiteral("No default audio output is available."));
         return;
@@ -3110,7 +3489,7 @@ void MainWindow::startTrackMetronome()
 {
     stopTrackMetronome();
 
-    QAudioDevice outputDevice = QMediaDevices::defaultAudioOutput();
+    QAudioDevice outputDevice = selectedLocalOutputDevice();
     if (outputDevice.isNull()) {
         if (trackMetronomeLabel_) {
             trackMetronomeLabel_->setText(QStringLiteral("Local metronome unavailable"));
@@ -3424,7 +3803,7 @@ void MainWindow::receiveTrackFileDone(const QJsonObject& message)
     incomingTrackBytes_.clear();
 }
 
-QStringList MainWindow::commonJamArgs() const
+QStringList MainWindow::commonJamArgs(bool includeExtraArgs) const
 {
     QStringList args;
     args << QStringLiteral("--audio-device") << selectedDeviceId()
@@ -3487,7 +3866,7 @@ QStringList MainWindow::commonJamArgs() const
     if (noStunCheck_->isChecked()) {
         args << QStringLiteral("--no-stun");
     }
-    if (!extraArgsEdit_->text().trimmed().isEmpty()) {
+    if (includeExtraArgs && !extraArgsEdit_->text().trimmed().isEmpty()) {
         args << QProcess::splitCommand(extraArgsEdit_->text().trimmed());
     }
     return args;
@@ -3497,6 +3876,20 @@ QString MainWindow::selectedDeviceId() const
 {
     const QString data = deviceBox_->currentData().toString();
     return data.isEmpty() ? deviceId(deviceBox_->currentText()) : data;
+}
+
+QAudioDevice MainWindow::selectedLocalOutputDevice() const
+{
+    const QString selected = localOutputBox_ ? localOutputBox_->currentData().toString() : QString{};
+    if (!selected.isEmpty()) {
+        const QList<QAudioDevice> outputs = QMediaDevices::audioOutputs();
+        for (const QAudioDevice& device : outputs) {
+            if (audioDeviceIdText(device) == selected) {
+                return device;
+            }
+        }
+    }
+    return QMediaDevices::defaultAudioOutput();
 }
 
 QJsonObject MainWindow::trackToJson() const
