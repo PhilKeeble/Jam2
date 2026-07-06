@@ -37,7 +37,7 @@ Usage:
   jam2 test-device <id> [--sample-rate n]
   jam2 meter-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n]
   jam2 ring-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n] [--ring-frames n]
-  jam2 listen [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats enabled|disabled] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--metronome on|off] [--bpm n] [--metronome-level n] [--remote-level n] [--metronome-mode shared-grid|leader-audio|symmetric-delay|listener-compensated] [--sample-time-playout on|off] [--playout-delay-frames n] [--adaptive-playback-cushion on|off] [--adaptive-playback-target-frames n] [--adaptive-playback-min-frames n] [--adaptive-playback-max-frames n] [--adaptive-playback-release-ppm n] [--session-id hex] [--session-key hex32] [--machine-readable-startup on|off] [--status-format text|jsonl] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels n[,n...]] [--output-channels n[,n...]] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-deadband-ppm n] [--drift-max-correction-ppm n]
+  jam2 listen [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats enabled|disabled] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--record-jam-folder folder] [--test-input off|silence|tone-440|pulse-1s] [--metronome on|off] [--bpm n] [--metronome-level n] [--remote-level n] [--metronome-mode shared-grid|leader-audio|symmetric-delay|listener-compensated] [--sample-time-playout on|off] [--playout-delay-frames n] [--adaptive-playback-cushion on|off] [--adaptive-playback-target-frames n] [--adaptive-playback-min-frames n] [--adaptive-playback-max-frames n] [--adaptive-playback-release-ppm n] [--session-id hex] [--session-key hex32] [--machine-readable-startup on|off] [--status-format text|jsonl] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels n[,n...]] [--output-channels n[,n...]] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-deadband-ppm n] [--drift-max-correction-ppm n]
   jam2 connect <jam2-url> [options]
 
 Stage status:
@@ -50,6 +50,13 @@ enum class MetronomeMode {
     LeaderAudio,
     SymmetricDelay,
     ListenerCompensated,
+};
+
+enum class TestInputMode {
+    Off,
+    Silence,
+    Tone440,
+    Pulse1s,
 };
 
 struct Options {
@@ -66,6 +73,7 @@ struct Options {
     int stats_interval_ms = 0;
     int stats_warmup_ms = 3000;
     std::optional<std::filesystem::path> log_stats_dir;
+    std::optional<std::filesystem::path> record_jam_folder;
     std::optional<int> socket_send_buffer;
     std::optional<int> socket_recv_buffer;
     int sample_rate = 48000;
@@ -98,6 +106,7 @@ struct Options {
     std::size_t playback_ring_frames = 4096;
     std::size_t playback_prefill_frames = 0;
     std::size_t playback_max_frames = 0;
+    TestInputMode test_input = TestInputMode::Off;
 };
 
 std::string_view require_value(int argc, char** argv, int& i, std::string_view name)
@@ -167,6 +176,53 @@ int metronome_mode_id(MetronomeMode mode)
     case MetronomeMode::SymmetricDelay:
         return 2;
     case MetronomeMode::ListenerCompensated:
+        return 3;
+    }
+    return 0;
+}
+
+TestInputMode parse_test_input_mode(std::string_view value)
+{
+    if (value == "off") {
+        return TestInputMode::Off;
+    }
+    if (value == "silence") {
+        return TestInputMode::Silence;
+    }
+    if (value == "tone-440") {
+        return TestInputMode::Tone440;
+    }
+    if (value == "pulse-1s") {
+        return TestInputMode::Pulse1s;
+    }
+    throw std::runtime_error("--test-input must be off, silence, tone-440, or pulse-1s");
+}
+
+std::string_view test_input_mode_text(TestInputMode mode)
+{
+    switch (mode) {
+    case TestInputMode::Off:
+        return "off";
+    case TestInputMode::Silence:
+        return "silence";
+    case TestInputMode::Tone440:
+        return "tone-440";
+    case TestInputMode::Pulse1s:
+        return "pulse-1s";
+    }
+    return "off";
+}
+
+int test_input_mode_id(TestInputMode mode)
+{
+    switch (mode) {
+    case TestInputMode::Off:
+        return 0;
+    case TestInputMode::Silence:
+        return 1;
+    case TestInputMode::Tone440:
+        return 2;
+    case TestInputMode::Pulse1s:
         return 3;
     }
     return 0;
@@ -298,6 +354,10 @@ Options parse_options(int argc, char** argv, int start)
             }
         } else if (arg == "--log-stats") {
             options.log_stats_dir = std::filesystem::path(std::string(require_value(argc, argv, i, arg)));
+        } else if (arg == "--record-jam-folder") {
+            options.record_jam_folder = std::filesystem::path(std::string(require_value(argc, argv, i, arg)));
+        } else if (arg == "--test-input") {
+            options.test_input = parse_test_input_mode(require_value(argc, argv, i, arg));
         } else if (arg == "--sample-rate") {
             options.sample_rate = std::stoi(std::string(require_value(argc, argv, i, arg)));
             if (options.sample_rate <= 0) {
@@ -1526,6 +1586,7 @@ void write_recording_sidecar(
         << "  \"metronome_level\": " << unit_from_ppm(state.metronome_level_ppm.load(std::memory_order_relaxed)) << ",\n"
         << "  \"remote_level\": " << unit_from_ppm(state.remote_level_ppm.load(std::memory_order_relaxed)) << ",\n"
         << "  \"metronome_mode\": \"" << metronome_mode_text(state.metronome_mode.load(std::memory_order_relaxed)) << "\",\n"
+        << "  \"test_input\": \"" << test_input_mode_text(options.test_input) << "\",\n"
         << "  \"metronome_epoch_sample_time\": "
         << state.metronome_epoch_sample_time.load(std::memory_order_relaxed) << ",\n"
         << "  \"metronome_epoch_valid\": "
@@ -3707,6 +3768,8 @@ OptionalAudioStream start_optional_audio(const Options& options, bool leader_aud
     audio.control->leader_audio_local_click.store(leader_audio_local_click, std::memory_order_relaxed);
     audio.control->metronome_epoch_sample_time.store(0, std::memory_order_relaxed);
     audio.control->metronome_epoch_valid.store(true, std::memory_order_relaxed);
+    audio.control->test_input_mode.store(test_input_mode_id(options.test_input), std::memory_order_relaxed);
+    audio.control->test_input_level_ppm.store(125000, std::memory_order_relaxed);
     audio.capture_ring = std::make_unique<jam2::audio::MonoRingBuffer>(options.capture_ring_frames);
     audio.playback_ring = std::make_unique<jam2::audio::MonoRingBuffer>(options.playback_ring_frames);
     const bool diagnostics_enabled =
@@ -3794,6 +3857,22 @@ void finalize_active_recording(OptionalAudioStream& audio, const Options& option
     }
     if (!ok) {
         std::cerr << "record jam finalization failed: " << error << "\n";
+    }
+}
+
+void start_startup_recording(
+    OptionalAudioStream& audio,
+    const Options& options,
+    RuntimeState& state,
+    int recording_sample_rate)
+{
+    if (!options.record_jam_folder || !audio.recorder) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(state.recording_mutex);
+    std::string error;
+    if (!audio.recorder->start(*options.record_jam_folder, recording_sample_rate, error)) {
+        std::cerr << "record jam start failed: " << error << "\n";
     }
 }
 
@@ -4186,6 +4265,7 @@ int run_listen(int argc, char** argv)
             ? static_cast<int>(std::lround(audio.stream->info().sample_rate))
             : options.sample_rate;
         CommandThread commands(options, audio.recorder.get(), recording_sample_rate);
+        start_startup_recording(audio, options, commands.state, recording_sample_rate);
         auto audio_stats = run_audio_packet_exchange(
             socket,
             session,
@@ -4292,6 +4372,7 @@ int run_connect(int argc, char** argv)
                     ? static_cast<int>(std::lround(audio.stream->info().sample_rate))
                     : options.sample_rate;
                 CommandThread commands(options, audio.recorder.get(), recording_sample_rate);
+                start_startup_recording(audio, options, commands.state, recording_sample_rate);
                 auto audio_stats = run_audio_packet_exchange(
                     socket,
                     session,

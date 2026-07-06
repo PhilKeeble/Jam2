@@ -81,6 +81,8 @@ struct StreamControl {
     std::atomic<bool> leader_audio_local_click{false};
     std::atomic<std::uint64_t> metronome_epoch_sample_time{0};
     std::atomic<bool> metronome_epoch_valid{false};
+    std::atomic<int> test_input_mode{0};
+    std::atomic<int> test_input_level_ppm{125000};
 };
 
 enum class InputChannels {

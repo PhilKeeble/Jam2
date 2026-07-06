@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 
-from matrix_common import copy_final_csv, ensure_dir, repo_root
+from jam2_tooling import copy_final_csv, ensure_dir, repo_root
 
 
 def parse_endpoint(value):

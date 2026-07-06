@@ -19,7 +19,7 @@ from jam2_harness import (
 )
 from jam2_metrics import combined_summary, write_results_csv
 from jam2_profiles import AGGRESSIVE_LOCAL_PROFILE, SAFE_LOCAL_PROFILE, adaptive_off_profile, variant
-from matrix_common import default_jam2_path, ensure_dir, fail, print_flush, safe_test_id, write_json
+from jam2_tooling import default_jam2_path, ensure_dir, fail, print_flush, safe_test_id, write_json
 from udp_stress_proxy import DirectionImpairment, ProxyImpairment, UdpStressProxy
 
 

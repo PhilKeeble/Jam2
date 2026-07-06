@@ -10,7 +10,7 @@ The default Jam2 binary path is `release\jam2.exe`. Override it with `--jam2` if
 
 ## Local Stress Testing
 
-`tools\run_stress_local.py` runs two local Jam2 processes through a localhost UDP impairment proxy. Use this when you want fast, repeatable tests with two real local audio interfaces and no real network involved.
+`tools\run_stress_local.py` runs two local Jam2 processes through a localhost UDP impairment proxy. Use this for fast repeatable tests with two local audio interfaces and no real network involved.
 
 Default profile is aggressive: `32/64/768`.
 
@@ -18,7 +18,7 @@ Default profile is aggressive: `32/64/768`.
 python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --clean
 ```
 
-Run the old safe profile:
+Run the safe profile:
 
 ```powershell
 python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --profile safe --clean
@@ -40,6 +40,12 @@ Run short stress passes:
 
 ```powershell
 python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --stream-ms 10000 --clean
+```
+
+Run the metronome timing scenarios with WAV recording/analysis:
+
+```powershell
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --scenario metronome-shared-grid --scenario metronome-leader-audio --scenario metronome-symmetric-delay --scenario metronome-listener-compensated --clean
 ```
 
 Include CLI/session/error validation checks:
@@ -67,145 +73,102 @@ Main outputs:
 - `tools\stress_logs\stress_summary.txt`
 - `tools\stress_logs\stress_results.csv`
 - `tools\stress_logs\stress_results.json`
+- per-scenario `recording\*.wav` folders for metronome scenarios
 - `tools\stress_logs\validation_results.json` when `--include-validation` is used
 
-## Two-Host Matrix Tuning
+## Two-Host Static Benchmarks
 
-`tools\run_matrix_server.py` coordinates two-host profile testing. Run this on the listen/server machine.
+`tools\run_benchmark_server.py` runs the listen/server side of the static benchmark suite. It publishes each fixed benchmark case over HTTP, runs the listener, records server stems, waits for client artifacts, then writes the final summary/CSV/JSON.
 
-Adaptive profile search:
-
-```powershell
-python tools\run_matrix_server.py --server-audio-device 5 --sample-rate 44100 --host 0.0.0.0 --port 8000 --clean
-```
-
-Benchmark mode:
+Run this on the listen/server machine:
 
 ```powershell
-python tools\run_matrix_server.py --server-audio-device 5 --sample-rate 44100 --host 0.0.0.0 --port 8000 --benchmark --clean
+python tools\run_benchmark_server.py --server-audio-device 5 --sample-rate 44100 --bind-http 0.0.0.0:8000 --clean
 ```
 
-No STUN:
+List the benchmark cases without launching Jam2:
 
 ```powershell
-python tools\run_matrix_server.py --server-audio-device 5 --sample-rate 44100 --no-stun --clean
+python tools\run_benchmark_server.py --server-audio-device 5 --sample-rate 44100 --list-cases
 ```
 
-Useful args:
+Run a short tone-only benchmark pass:
+
+```powershell
+python tools\run_benchmark_server.py --server-audio-device 5 --sample-rate 44100 --signals tone-440 --no-metronome-cases --stream-ms 10000 --clean
+```
+
+Useful server args:
 
 - `--server-audio-device`: server/listen-side audio device id.
 - `--sample-rate`: audio sample rate.
-- `--host`: HTTP control server bind address. Default: `0.0.0.0`.
-- `--port`: HTTP control server port. Default: `8000`.
-- `--logs PATH`: output folder. Default: `tools\logs`.
+- `--bind-http HOST:PORT`: HTTP control/artifact server bind. Default: `0.0.0.0:8000`.
+- `--logs PATH`: output folder. Default: `tools\benchmark_logs`.
+- `--stream-ms N`: stream duration per case. Default: `30000`.
+- `--repeats N`: repeat count per case. Default: `1`.
+- `--signals silence,tone-440,pulse-1s`: injected input signals for non-metronome cases.
+- `--no-metronome-cases`: skip metronome-only benchmark cases.
+- `--list-cases`: print the static case list and exit.
 - `--clean`: delete the output folder before running.
-- `--no-stun`: use local/manual endpoint behavior.
-- `--network-profile auto|wired|wifi|unknown`: tolerance metadata.
-- `--drift-probes`: add drift deadband probe runs after stable profile detection.
-- `--benchmark`: run benchmark mode instead of adaptive search.
 
-## Two-Host Matrix Client
+## Two-Host Benchmark Client
 
-`tools\run_matrix_client.py` polls the matrix server and runs the connect-side tests. Run this on the client/connect machine.
+`tools\run_benchmark_client.py` polls the benchmark server, runs the connect-side Jam2 process for each published case, records client stems, analyzes local WAVs, and uploads the artifacts back to the server.
+
+Run this on the client/connect machine:
 
 ```powershell
-python tools\run_matrix_client.py --server http://192.168.1.50:8000 --client-audio-device 16 --sample-rate 44100
+python tools\run_benchmark_client.py --server http://192.168.1.50:8000 --client-audio-device 16 --sample-rate 44100
 ```
 
-Clean local logs after upload:
+Clean local client artifacts after successful upload:
 
 ```powershell
-python tools\run_matrix_client.py --server http://192.168.1.50:8000 --client-audio-device 16 --sample-rate 44100 --clean
+python tools\run_benchmark_client.py --server http://192.168.1.50:8000 --client-audio-device 16 --sample-rate 44100 --clean
 ```
 
-Useful args:
+Useful client args:
 
-- `--server`: matrix server URL, for example `http://192.168.1.50:8000`.
+- `--server`: benchmark server URL, for example `http://192.168.1.50:8000`.
 - `--client-audio-device`: client/connect-side audio device id.
 - `--sample-rate`: audio sample rate.
-- `--logs PATH`: local output folder. Default: `tools\logs`.
+- `--logs PATH`: local output folder. Default: `tools\benchmark_logs`.
 - `--poll-ms N`: polling interval. Default: `500`.
 - `--timeout-s N`: stop waiting after N seconds. `0` waits forever.
-- `--server-gone-grace-s N`: exit after server disappears following completed runs. Default: `10`.
-- `--clean`: remove uploaded local run logs.
+- `--clean`: remove local artifacts after upload.
 - `--network-profile auto|wired|wifi|unknown`: client network metadata.
 
-## Collect Matrix CSV
+Benchmark outputs on the server:
 
-`tools\collect_matrix_csv.py` combines per-run `stats.csv` files into one CSV.
+- `tools\benchmark_logs\benchmark_summary.txt`
+- `tools\benchmark_logs\benchmark_results.csv`
+- `tools\benchmark_logs\benchmark_results.json`
+- per-case server/client `recording\*.wav`
+- per-case server/client `analysis.json`
+- per-case server/client stdout/stderr/stats artifacts
 
-```powershell
-python tools\collect_matrix_csv.py --logs tools\logs
-```
+## Analyze Benchmark Results
 
-Server side only:
-
-```powershell
-python tools\collect_matrix_csv.py --logs tools\logs --side server
-```
-
-Custom output:
+The benchmark server writes the main CSV/text/JSON outputs automatically. `tools\analyze_benchmark_results.py` is only a lightweight helper for re-printing or exporting a compact table from an existing `benchmark_results.json`.
 
 ```powershell
-python tools\collect_matrix_csv.py --logs tools\logs --output artifacts\matrix_combined.csv
+python tools\analyze_benchmark_results.py tools\benchmark_logs\benchmark_results.json
 ```
 
-Useful args:
-
-- `--logs PATH`: matrix log folder. Default: `tools\logs`.
-- `--output PATH`: output CSV path. Default is inside the log folder.
-- `--side server|client|all`: side filter. Default: `all`.
-
-## Analyze Matrix CSV
-
-`tools\analyze_matrix_csv.py` summarizes collected matrix CSVs and applies threshold filters.
-
-Analyze from logs:
+Write a regenerated summary and flattened CSV:
 
 ```powershell
-python tools\analyze_matrix_csv.py --logs tools\logs
+python tools\analyze_benchmark_results.py tools\benchmark_logs\benchmark_results.json --text artifacts\benchmark_summary.txt --csv artifacts\benchmark_results.csv
 ```
-
-Analyze an existing combined CSV:
-
-```powershell
-python tools\analyze_matrix_csv.py --input tools\logs\combined_stats.csv
-```
-
-Write analysis output:
-
-```powershell
-python tools\analyze_matrix_csv.py --input tools\logs\combined_stats.csv --output artifacts\matrix_analysis.csv
-```
-
-Example threshold run:
-
-```powershell
-python tools\analyze_matrix_csv.py --logs tools\logs --max-loss-percent 0.05 --max-playback-underrun-events-per-second 0.10 --min-playback-depth-ms 2.5
-```
-
-Useful args:
-
-- `--logs PATH`: collect logs before analysis.
-- `--input PATH`: existing combined CSV.
-- `--output PATH`: output analysis CSV.
-- `--max-loss N`: maximum total packet loss.
-- `--max-loss-percent N`: maximum packet loss percent.
-- `--max-loss-per-second N`: maximum loss rate.
-- `--max-playback-underruns N`: maximum underrun frames.
-- `--max-playback-underruns-per-second N`: maximum underrun frame rate.
-- `--max-playback-underrun-events-per-second N`: maximum underrun event rate.
-- `--max-playback-overruns N`: maximum playback overruns.
-- `--max-playback-dropped-frames-per-second N`: maximum dropped playback frame rate.
-- `--min-playback-depth-ms N`: minimum acceptable playback depth.
-- `--min-runs N`: minimum runs required for a profile.
 
 ## Support Modules
 
 These files are imported by the runnable tools and are not normally run directly:
 
-- `tools\matrix_common.py`: shared paths, JSON writing, log helpers.
-- `tools\jam2_profiles.py`: shared stress profile definitions.
+- `tools\jam2_tooling.py`: shared paths, JSON writing, CSV copy, and log helpers.
+- `tools\jam2_profiles.py`: shared profile definitions.
+- `tools\jam2_benchmark_suite.py`: static benchmark case definitions.
+- `tools\jam2_audio_analysis.py`: WAV/stem analysis helpers.
 - `tools\jam2_harness.py`: Jam2 process and CSV collection helpers.
 - `tools\jam2_metrics.py`: stress CSV summarizing and result CSV writing.
 - `tools\udp_stress_proxy.py`: localhost UDP impairment proxy.

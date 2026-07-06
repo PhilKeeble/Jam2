@@ -21,6 +21,7 @@
 namespace jam2::audio {
 namespace {
 
+constexpr double kPi = 3.14159265358979323846;
 constexpr AudioObjectPropertyElement kMainElement = kAudioObjectPropertyElementMain;
 
 std::string osstatus_text(OSStatus status)
@@ -678,6 +679,7 @@ struct CoreAudioDuplexContext {
     std::vector<std::int32_t> recorder_metronome_scratch;
     std::size_t playback_prefill_frames = 0;
     double sample_rate = 48000.0;
+    std::uint64_t test_input_sample_counter = 0;
     std::uint64_t metronome_sample_counter = 0;
     std::uint64_t metronome_beat_index = 0;
     int click_remaining = 0;
@@ -816,6 +818,40 @@ std::int32_t mix_i32_samples(std::int32_t a, std::int32_t b)
     return static_cast<std::int32_t>(std::clamp<std::int64_t>(mixed, -2147483648LL, 2147483647LL));
 }
 
+std::int32_t render_test_input_sample(int mode, std::uint64_t sample_time, double sample_rate, double level)
+{
+    if (mode == 1 || sample_rate <= 0.0) {
+        return 0;
+    }
+    if (mode == 2) {
+        const double phase = std::fmod(static_cast<double>(sample_time) * 440.0 / sample_rate, 1.0);
+        return static_cast<std::int32_t>(std::sin(phase * 2.0 * kPi) * level * 2147483647.0);
+    }
+    if (mode == 3) {
+        const std::uint64_t period = static_cast<std::uint64_t>(sample_rate > 1.0 ? sample_rate : 1.0);
+        const std::uint64_t width = std::max<std::uint64_t>(1, period / 100);
+        return (sample_time % period) < width ?
+            static_cast<std::int32_t>(level * 2147483647.0) :
+            0;
+    }
+    return 0;
+}
+
+void fill_test_input(CoreAudioDuplexContext& context, std::span<std::int32_t> output)
+{
+    if (context.control == nullptr) {
+        std::fill(output.begin(), output.end(), 0);
+        return;
+    }
+    const int mode = context.control->test_input_mode.load(std::memory_order_relaxed);
+    const double level = static_cast<double>(
+        std::clamp(context.control->test_input_level_ppm.load(std::memory_order_relaxed), 0, 1000000)) / 1000000.0;
+    for (std::int32_t& sample : output) {
+        sample = render_test_input_sample(mode, context.test_input_sample_counter, context.sample_rate, level);
+        ++context.test_input_sample_counter;
+    }
+}
+
 void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t> output, std::span<std::int32_t> metronome_stem)
 {
     if (context.control == nullptr ||
@@ -893,8 +929,19 @@ OSStatus duplex_io_proc(
             0);
     }
 
+    const int test_input_mode = context->control != nullptr ?
+        context->control->test_input_mode.load(std::memory_order_relaxed) :
+        0;
     const std::size_t input_frames = std::min(buffer_frames(input), context->capture_scratch.size());
-    if (input_frames > 0) {
+    if (test_input_mode != 0 && !context->capture_scratch.empty()) {
+        const std::size_t generated_frames = std::min(buffer_frames(output), context->capture_scratch.size());
+        auto generated = std::span<std::int32_t>(context->capture_scratch.data(), generated_frames);
+        fill_test_input(*context, generated);
+        context->capture->push(std::span<const std::int32_t>(generated.data(), generated.size()));
+        if (context->recorder_my_input_scratch.size() >= generated_frames) {
+            std::copy(generated.begin(), generated.end(), context->recorder_my_input_scratch.begin());
+        }
+    } else if (input_frames > 0) {
         for (std::size_t frame = 0; frame < input_frames; ++frame) {
             float sum = 0.0F;
             for (int channel : context->channels.input) {
