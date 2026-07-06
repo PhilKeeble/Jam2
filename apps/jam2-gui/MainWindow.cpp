@@ -14,6 +14,7 @@
 #include <QAudioFormat>
 #include <QAudioSink>
 #include <QClipboard>
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
@@ -82,6 +83,73 @@ quint32 waveformReadLe32(const QByteArray& data, qsizetype offset)
         (static_cast<quint32>(static_cast<unsigned char>(data[offset + 1])) << 8) |
         (static_cast<quint32>(static_cast<unsigned char>(data[offset + 2])) << 16) |
         (static_cast<quint32>(static_cast<unsigned char>(data[offset + 3])) << 24);
+}
+
+namespace {
+
+QDir appReleaseDir()
+{
+    QDir appDir(QCoreApplication::applicationDirPath());
+
+    QDir bundleDir(appDir);
+    if (bundleDir.dirName() == QStringLiteral("MacOS") &&
+        bundleDir.cdUp() &&
+        bundleDir.dirName() == QStringLiteral("Contents") &&
+        bundleDir.cdUp() &&
+        bundleDir.dirName().endsWith(QStringLiteral(".app")) &&
+        bundleDir.cdUp()) {
+        return bundleDir;
+    }
+
+    if (appDir.dirName() == QStringLiteral("release")) {
+        return appDir;
+    }
+
+    QDir probe(appDir);
+    while (true) {
+        if (probe.exists(QStringLiteral("release"))) {
+            return QDir(probe.absoluteFilePath(QStringLiteral("release")));
+        }
+        if (!probe.cdUp()) {
+            break;
+        }
+    }
+
+    return QFileInfo(SessionController::defaultCapturePath()).absoluteDir();
+}
+
+QString appReleaseFilePath(const QString& folder, const QString& fileName)
+{
+    QDir dir = appReleaseDir();
+    dir.mkpath(folder);
+    return dir.absoluteFilePath(folder + QLatin1Char('/') + fileName);
+}
+
+QString appReleaseFolderPath(const QString& folder)
+{
+    QDir dir = appReleaseDir();
+    dir.mkpath(folder);
+    return dir.absoluteFilePath(folder);
+}
+
+QString timestampedCapturePath(const QString& prefix)
+{
+    return appReleaseFilePath(
+        QStringLiteral("captures"),
+        QStringLiteral("%1-%2.wav").arg(prefix, QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss"))));
+}
+
+bool isAutoCapturePath(const QString& path)
+{
+    const QFileInfo info(path);
+    const QString name = info.fileName();
+    return path.isEmpty() ||
+        name == QStringLiteral("capture.wav") ||
+        name.startsWith(QStringLiteral("capture-")) ||
+        name.startsWith(QStringLiteral("loopback-")) ||
+        info.absolutePath() == QStringLiteral("/captures");
+}
+
 }
 
 class LocalMetronomeDevice : public QIODevice {
@@ -1544,6 +1612,7 @@ QWidget* MainWindow::buildSessionPage()
     statsWarmupMsSpin_->setRange(0, 600000);
     statsWarmupMsSpin_->setValue(3000);
     logStatsEdit_ = new QLineEdit(page);
+    logStatsEdit_->setText(appReleaseFolderPath(QStringLiteral("logs")));
     socketSendBufferSpin_ = new QSpinBox(page);
     socketSendBufferSpin_->setRange(0, std::numeric_limits<int>::max());
     socketSendBufferSpin_->setValue(0);
@@ -1834,9 +1903,7 @@ QWidget* MainWindow::buildTrackPage()
     importCaptureButton_ = new QPushButton(QStringLiteral("Import Capture"), page);
     importCaptureButton_->setEnabled(false);
 
-    QDir captureDir(QDir::current());
-    captureDir.mkpath(QStringLiteral("captures"));
-    captureOutputEdit_->setText(captureDir.absoluteFilePath(QStringLiteral("captures/capture.wav")));
+    captureOutputEdit_->setText(appReleaseFilePath(QStringLiteral("captures"), QStringLiteral("capture.wav")));
     const QList<QWidget*> captureDialogWidgets{
         capturePathEdit_, captureOutputEdit_, loopbackSourceBox_, captureDurationSpin_,
         captureManualStopCheck_,
@@ -2389,6 +2456,7 @@ void MainWindow::startJam()
         if (refreshControlButton_) {
             refreshControlButton_->setEnabled(true);
         }
+        scheduleControlReconnect();
         return;
     }
     args << commonJamArgs();
@@ -3362,10 +3430,11 @@ void MainWindow::handleCaptureOutputLine(const QString& line)
 
 void MainWindow::chooseCaptureFolder()
 {
+    const QString current = captureOutputEdit_->text().trimmed();
     const QString path = QFileDialog::getSaveFileName(
         this,
         QStringLiteral("Capture Output"),
-        captureOutputEdit_->text(),
+        isAutoCapturePath(current) ? timestampedCapturePath(QStringLiteral("capture")) : current,
         QStringLiteral("WAV files (*.wav);;All files (*)"));
     if (!path.isEmpty()) {
         captureOutputEdit_->setText(path);
@@ -3511,12 +3580,9 @@ void MainWindow::startInputCapture()
         QMessageBox::warning(this, QStringLiteral("Jam2 Capture"), QStringLiteral("Select an audio device first."));
         return;
     }
-    QDir captureDir(QDir::current());
-    captureDir.mkpath(QStringLiteral("captures"));
     QString output = captureOutputEdit_->text().trimmed();
-    if (output.isEmpty() || output.endsWith(QStringLiteral("capture.wav"))) {
-        output = captureDir.absoluteFilePath(
-            QStringLiteral("captures/capture-%1.wav").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss"))));
+    if (isAutoCapturePath(output)) {
+        output = timestampedCapturePath(QStringLiteral("capture"));
         captureOutputEdit_->setText(output);
     }
     lastCapturePath_ = output;
@@ -3635,12 +3701,9 @@ void MainWindow::startLoopbackCapture()
     if (captureProcess_.state() != QProcess::NotRunning) {
         return;
     }
-    QDir captureDir(QDir::current());
-    captureDir.mkpath(QStringLiteral("captures"));
     QString output = captureOutputEdit_->text().trimmed();
-    if (output.isEmpty() || output.endsWith(QStringLiteral("capture.wav"))) {
-        output = captureDir.absoluteFilePath(
-            QStringLiteral("captures/loopback-%1.wav").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss"))));
+    if (isAutoCapturePath(output)) {
+        output = timestampedCapturePath(QStringLiteral("loopback"));
         captureOutputEdit_->setText(output);
     }
     lastCapturePath_ = output;
@@ -4355,9 +4418,9 @@ void MainWindow::receiveTrackFileDone(const QJsonObject& message)
         incomingTrackBytes_.clear();
         return;
     }
-    QDir dir(QDir::current());
-    dir.mkpath(QStringLiteral("received_tracks"));
-    const QString output = dir.absoluteFilePath(QStringLiteral("received_tracks/%1").arg(incomingTrackName_.isEmpty() ? QStringLiteral("track.wav") : incomingTrackName_));
+    const QString output = appReleaseFilePath(
+        QStringLiteral("received_tracks"),
+        incomingTrackName_.isEmpty() ? QStringLiteral("track.wav") : incomingTrackName_);
     QFile file(output);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         appendLog(QStringLiteral("failed to write received track WAV: ") + output);
@@ -4609,7 +4672,7 @@ void MainWindow::openSong()
     const QString path = QFileDialog::getOpenFileName(
         this,
         QStringLiteral("Open Jam2 Song"),
-        QString(),
+        appReleaseFolderPath(QStringLiteral("songs")),
         QStringLiteral("Jam2 song (*.jam2song *.json);;JSON files (*.json);;All files (*)"));
     if (path.isEmpty()) {
         return;
@@ -4637,7 +4700,7 @@ void MainWindow::saveSong()
     const QString path = QFileDialog::getSaveFileName(
         this,
         QStringLiteral("Save Jam2 Song"),
-        chordModel_.title() + QStringLiteral(".jam2song"),
+        appReleaseFilePath(QStringLiteral("songs"), chordModel_.title() + QStringLiteral(".jam2song")),
         QStringLiteral("Jam2 song (*.jam2song);;JSON files (*.json);;All files (*)"));
     if (path.isEmpty()) {
         return;

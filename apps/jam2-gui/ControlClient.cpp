@@ -11,6 +11,7 @@ ControlClient::ControlClient(QObject* parent)
             {QStringLiteral("session"), sessionHex_},
             {QStringLiteral("key"), keyHex_},
         }).toJson(QJsonDocument::Compact) + "\n");
+        socket_.flush();
         if (onState) {
             onState(QStringLiteral("TCP connected; sent session auth"));
         }

@@ -55,9 +55,17 @@ void ControlServer::acceptPeer()
         return;
     }
     if (peer_) {
-        socket->disconnectFromHost();
-        socket->deleteLater();
-        return;
+        if (authenticated_) {
+            socket->disconnectFromHost();
+            socket->deleteLater();
+            return;
+        }
+        QTcpSocket* stale = peer_;
+        peer_ = nullptr;
+        stale->disconnect(this);
+        stale->abort();
+        stale->deleteLater();
+        buffer_.clear();
     }
     peer_ = socket;
     authenticated_ = false;
