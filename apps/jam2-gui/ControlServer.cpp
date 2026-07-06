@@ -112,6 +112,14 @@ void ControlServer::handleMessage(const QJsonObject& message)
                 onState(QStringLiteral("TCP peer authenticated"));
             }
         } else {
+            peer_->write(QJsonDocument(QJsonObject{
+                {QStringLiteral("type"), QStringLiteral("hello.error")},
+                {QStringLiteral("reason"), QStringLiteral("incorrect session or key")},
+            }).toJson(QJsonDocument::Compact) + "\n");
+            peer_->flush();
+            if (onState) {
+                onState(QStringLiteral("TCP auth rejected: incorrect session or key"));
+            }
             peer_->disconnectFromHost();
         }
         return;

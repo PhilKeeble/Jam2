@@ -6,20 +6,20 @@ if(WIN32)
     list(APPEND CMAKE_PREFIX_PATH ${JAM2_QT_PREFIX_HINTS})
 endif()
 
-find_package(Qt6 QUIET COMPONENTS Widgets Network Multimedia)
+find_package(Qt6 QUIET COMPONENTS Core Gui Widgets Network Multimedia)
 
 if(NOT Qt6_FOUND)
     message(FATAL_ERROR
         "jam2-gui requires Qt 6 Widgets, Network, and Multimedia development packages.\n"
         "Install Qt 6, then reconfigure with a Qt prefix, for example:\n"
-        "  cmake -S . -B build -G Ninja -DJAM2_BUILD_GUI=ON -DCMAKE_PREFIX_PATH=C:/Qt/6.7.3/msvc2019_64\n"
+        "  cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DJAM2_BUILD_GUI=ON -DCMAKE_PREFIX_PATH=C:/Qt/6.7.3/msvc2019_64\n"
         "If your Qt version/toolchain folder differs, point CMAKE_PREFIX_PATH at that folder."
     )
 endif()
 
 set(CMAKE_AUTOMOC ON)
 
-add_executable(jam2-gui
+add_executable(jam2-gui WIN32 MACOSX_BUNDLE
     BeatGridModel.cpp
     BeatGridModel.hpp
     BeatGridWidget.cpp
@@ -30,7 +30,6 @@ add_executable(jam2-gui
     ControlServer.hpp
     Jam2Process.cpp
     Jam2Process.hpp
-    LeadCueModel.hpp
     MainWindow.cpp
     MainWindow.hpp
     SessionController.cpp
@@ -56,19 +55,63 @@ target_link_libraries(jam2-gui PRIVATE
 
 if(WIN32)
     get_target_property(QT_QMAKE_EXECUTABLE Qt6::qmake IMPORTED_LOCATION)
-    get_filename_component(QT_BIN_DIR "${QT_QMAKE_EXECUTABLE}" DIRECTORY)
-    find_program(WINDEPLOYQT_EXECUTABLE windeployqt HINTS "${QT_BIN_DIR}")
-    if(WINDEPLOYQT_EXECUTABLE)
+    execute_process(
+        COMMAND "${QT_QMAKE_EXECUTABLE}" -query QT_INSTALL_PLUGINS
+        OUTPUT_VARIABLE QT_PLUGINS_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    add_custom_command(TARGET jam2-gui POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory
+            "${JAM2_RELEASE_DIR}/generic"
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory
+            "${JAM2_RELEASE_DIR}/iconengines"
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory
+            "${JAM2_RELEASE_DIR}/imageformats"
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory
+            "${JAM2_RELEASE_DIR}/networkinformation"
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory
+            "${JAM2_RELEASE_DIR}/platforms"
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory
+            "${JAM2_RELEASE_DIR}/styles"
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory
+            "${JAM2_RELEASE_DIR}/tls"
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory
+            "${JAM2_RELEASE_DIR}/translations"
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory
+            "${JAM2_RELEASE_DIR}/multimedia"
+        COMMAND "${CMAKE_COMMAND}" -E rm -f
+            "${JAM2_RELEASE_DIR}/D3Dcompiler_47.dll"
+            "${JAM2_RELEASE_DIR}/dxcompiler.dll"
+            "${JAM2_RELEASE_DIR}/dxil.dll"
+            "${JAM2_RELEASE_DIR}/libEGL.dll"
+            "${JAM2_RELEASE_DIR}/libGLESv2.dll"
+            "${JAM2_RELEASE_DIR}/opengl32sw.dll"
+            "${JAM2_RELEASE_DIR}/vc_redist.x64.exe"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:Qt6::Core>"
+            "$<TARGET_FILE:Qt6::Gui>"
+            "$<TARGET_FILE:Qt6::Widgets>"
+            "$<TARGET_FILE:Qt6::Network>"
+            "$<TARGET_FILE:Qt6::Multimedia>"
+            "${JAM2_RELEASE_DIR}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory
+            "${JAM2_RELEASE_DIR}/platforms"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${QT_PLUGINS_DIR}/platforms/qwindows.dll"
+            "${JAM2_RELEASE_DIR}/platforms"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/qt.conf"
+            "${JAM2_RELEASE_DIR}/qt.conf"
+        COMMENT "Staging minimal Qt runtime files for jam2-gui"
+        VERBATIM
+    )
+    if(EXISTS "${QT_PLUGINS_DIR}/multimedia")
         add_custom_command(TARGET jam2-gui POST_BUILD
-            COMMAND "${WINDEPLOYQT_EXECUTABLE}"
-                --no-translations
-                --no-system-d3d-compiler
-                --no-opengl-sw
-                "$<TARGET_FILE:jam2-gui>"
-            COMMENT "Deploying Qt runtime files for jam2-gui"
+            COMMAND "${CMAKE_COMMAND}" -E copy_directory
+                "${QT_PLUGINS_DIR}/multimedia"
+                "${JAM2_RELEASE_DIR}/multimedia"
+            COMMENT "Staging Qt multimedia plugins for jam2-gui"
             VERBATIM
         )
-    else()
-        message(WARNING "windeployqt was not found; jam2-gui may need Qt DLLs copied beside the executable.")
     endif()
 endif()

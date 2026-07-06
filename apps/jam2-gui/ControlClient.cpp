@@ -71,6 +71,14 @@ void ControlClient::readSocket()
             }
             continue;
         }
+        if (!authenticated_ && message.value(QStringLiteral("type")).toString() == QStringLiteral("hello.error")) {
+            const QString reason = message.value(QStringLiteral("reason")).toString(QStringLiteral("auth failed"));
+            if (onState) {
+                onState(QStringLiteral("TCP auth failed: ") + reason);
+            }
+            socket_.disconnectFromHost();
+            continue;
+        }
         if (onMessage) {
             onMessage(message);
         }

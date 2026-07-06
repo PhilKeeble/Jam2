@@ -19,6 +19,10 @@
 
 ## Potential Future Plans
 
+### thoughts
+
+Might need more locking in across the app to the gui and grid, like having songs start on the grid at the same real time for everyone in the jam, maybe a small indicator on beat and chord view that moves along the grid so that people know which beat they are on at any given time? Needs fleshing out though so dont implement without discussion. Could have another ticbox on track to lock to metronome or not potentially.
+
 ### Docs
 
 Docs needs to be fleshed out at some point

@@ -303,7 +303,7 @@ public:
             }
             peaks_[i] = static_cast<float>(peak) / 32768.0f;
         }
-        label_ = QFileInfo(path).fileName();
+        label_.clear();
         update();
     }
 
@@ -1007,7 +1007,8 @@ bool isCustomFocusPreset(const QString& key)
 QString trackValueEditorStyle()
 {
     return QStringLiteral(
-        "QAbstractSpinBox, QComboBox, QLineEdit { border: 1px solid #52616c; background: #101214; color: #f2f5f7; padding: 2px 6px; }"
+        "QAbstractSpinBox { border: 1px solid #52616c; background: #101214; color: #f2f5f7; padding: 2px 28px 2px 6px; }"
+        "QComboBox, QLineEdit { border: 1px solid #52616c; background: #101214; color: #f2f5f7; padding: 2px 6px; }"
         "QAbstractSpinBox:focus, QComboBox:focus, QLineEdit:focus { border: 1px solid #66c6a6; }"
         "QAbstractSpinBox:disabled, QComboBox:disabled, QLineEdit:disabled { border: 1px solid #343c42; background: #171a1d; color: #6f7a82; }");
 }
@@ -1253,6 +1254,20 @@ MainWindow::MainWindow(QWidget* parent)
     jam2_.onFinished = [this](int code) {
         appendLog(QStringLiteral("jam2 exited rc=%1").arg(code));
         connectionLabel_->setText(QStringLiteral("Stopped"));
+        controlReconnectEnabled_ = false;
+        controlReconnectTimer_.stop();
+        controlServer_.close();
+        controlClient_.close();
+        pendingJoinLaunch_ = false;
+        pendingJoinBaseArgs_.clear();
+        if (localMetronomeSink_) {
+            localMetronomeSink_->stop();
+            localMetronomeSink_.reset();
+        }
+        if (localMetronomeDevice_) {
+            localMetronomeDevice_->close();
+            localMetronomeDevice_.reset();
+        }
         localMetronomeRunning_ = false;
         if (trackMetronomeLabel_) {
             trackMetronomeLabel_->setText(QStringLiteral("Local metronome stopped"));
@@ -1269,14 +1284,10 @@ MainWindow::MainWindow(QWidget* parent)
         if (refreshControlButton_) {
             refreshControlButton_->setEnabled(false);
         }
-        controlReconnectEnabled_ = false;
-        controlReconnectTimer_.stop();
-        if (runtimeMixBox_) {
-            runtimeMixBox_->setVisible(false);
+        if (localOutputBox_) {
+            localOutputBox_->setEnabled(true);
         }
-        if (leadSwapButton_) {
-            leadSwapButton_->setEnabled(false);
-        }
+        setMixRemotePeerVisible(false);
     };
     controlServer_.onState = [this](const QString& state) { handleControlState(state, true); };
     controlServer_.onMessage = [this](const QJsonObject& message) { handleControlMessage(message); };
@@ -1379,6 +1390,8 @@ void MainWindow::buildUi()
     QObject::connect(openSongButton, &QPushButton::clicked, this, [this] { openSong(); });
     QObject::connect(saveSongButton, &QPushButton::clicked, this, [this] { saveSong(); });
 
+    QWidget* sessionPage = buildSessionPage();
+
     tabs_ = new QTabWidget(this);
     tabs_->addTab(buildSongPage(), QStringLiteral("Chord View"));
     beatGrid_ = new BeatGridWidget(&beatModel_, QStringLiteral("beat"), this);
@@ -1387,6 +1400,7 @@ void MainWindow::buildUi()
     tabs_->addTab(lyricGrid_, QStringLiteral("Lyrics"));
     tabs_->addTab(buildTrackPage(), QStringLiteral("Track"));
     tabs_->addTab(buildMetronomePage(), QStringLiteral("Metronome"));
+    tabs_->addTab(buildMixPage(), QStringLiteral("Mix"));
 
     auto sendCellEdit = [this](int section, const QString& lane, int beat, const QString& text, int revision) {
         sendControl(QJsonObject{
@@ -1476,7 +1490,7 @@ void MainWindow::buildUi()
     layout->setSpacing(8);
     layout->addLayout(header);
     layout->addLayout(library);
-    layout->addWidget(buildSessionPage());
+    layout->addWidget(sessionPage);
     layout->addWidget(tabs_, 1);
 
     logEdit_ = new QPlainTextEdit(this);
@@ -1581,7 +1595,6 @@ QWidget* MainWindow::buildSessionPage()
     bpmSpin_->setRange(1, 400);
     bpmSpin_->setValue(120);
     bpmSpin_->hide();
-    remoteLevelSlider_ = makeUnitSlider(1.0, page);
     sampleTimePlayoutCheck_ = new QCheckBox(QStringLiteral("Sample-time playout"), page);
     sampleTimePlayoutCheck_->setChecked(true);
     playoutDelaySpin_ = new QSpinBox(page);
@@ -1611,11 +1624,12 @@ QWidget* MainWindow::buildSessionPage()
     deviceBox_->setEditable(false);
     deviceBox_->setMinimumWidth(280);
     localOutputBox_->setMinimumWidth(280);
+    applyMutedEditorStyle(localOutputBox_);
     const QList<QWidget*> sessionEditors{
         modeBox_, jam2PathEdit_, bindHostEdit_, portSpin_, publicHostEdit_, connectUrlEdit_,
         generatedUrlEdit_, stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, waitMsSpin_,
         streamMsSpin_, streamLingerMsSpin_, statsWarmupMsSpin_, logStatsEdit_,
-        socketSendBufferSpin_, socketRecvBufferSpin_, deviceBox_, localOutputBox_, inputChannelsEdit_,
+        socketSendBufferSpin_, socketRecvBufferSpin_, deviceBox_, inputChannelsEdit_,
         outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_, prefillSpin_,
         playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, driftSmoothingSpin_,
         driftDeadbandSpin_, driftMaxCorrectionSpin_, playoutDelaySpin_, adaptiveTargetSpin_,
@@ -1628,7 +1642,7 @@ QWidget* MainWindow::buildSessionPage()
         modeBox_, jam2PathEdit_, bindHostEdit_, portSpin_, publicHostEdit_, connectUrlEdit_,
         generatedUrlEdit_, stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, waitMsSpin_,
         streamMsSpin_, streamLingerMsSpin_, statsCheck_, statsWarmupMsSpin_, logStatsEdit_,
-        socketSendBufferSpin_, socketRecvBufferSpin_, deviceBox_, localOutputBox_, inputChannelsEdit_,
+        socketSendBufferSpin_, socketRecvBufferSpin_, deviceBox_, inputChannelsEdit_,
         outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_, prefillSpin_,
         playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, driftCorrectionCheck_,
         driftSmoothingSpin_, driftDeadbandSpin_, driftMaxCorrectionSpin_, noStunCheck_,
@@ -1639,14 +1653,6 @@ QWidget* MainWindow::buildSessionPage()
         widget->hide();
     }
 
-    auto* runtimeLayout = new QGridLayout();
-    runtimeLayout->addWidget(new QLabel(QStringLiteral("Remote"), page), 0, 0);
-    runtimeLayout->addWidget(remoteLevelSlider_, 0, 1);
-
-    runtimeMixBox_ = new QGroupBox(QStringLiteral("Runtime Mix"), page);
-    runtimeMixBox_->setLayout(runtimeLayout);
-    runtimeMixBox_->setVisible(jam2_.isRunning());
-
     auto* buttons = new QHBoxLayout();
     buttons->addWidget(startButton_);
     buttons->addWidget(joinButton_);
@@ -1656,14 +1662,17 @@ QWidget* MainWindow::buildSessionPage()
 
     auto* layout = new QVBoxLayout(page);
     layout->setContentsMargins(0, 0, 0, 0);
-    layout->addWidget(runtimeMixBox_);
     layout->addLayout(buttons);
 
     QObject::connect(startButton_, &QPushButton::clicked, this, [this] { showStartJamDialog(); });
     QObject::connect(joinButton_, &QPushButton::clicked, this, [this] { showJoinJamDialog(); });
     QObject::connect(stopButton_, &QPushButton::clicked, this, [this] { stopJam(); });
     QObject::connect(refreshControlButton_, &QPushButton::clicked, this, [this] { refreshControlConnection(); });
-    QObject::connect(remoteLevelSlider_, &QSlider::valueChanged, this, [this] { updateRuntimeControls(); });
+    QObject::connect(noStunCheck_, &QCheckBox::toggled, this, [this] {
+        updateConnectionControlState();
+        refreshGeneratedUrl();
+    });
+    updateConnectionControlState();
 
     return page;
 }
@@ -1672,19 +1681,9 @@ QWidget* MainWindow::buildSongPage()
 {
     auto* page = new QWidget(this);
     chordGrid_ = new BeatGridWidget(&chordModel_, QStringLiteral("chord"), page);
-    leadLabel_ = new QLabel(page);
-    leadPendingLabel_ = new QLabel(page);
-    updateLeadLabels();
-
-    leadSwapButton_ = new QPushButton(QStringLiteral("Request Lead Swap"), page);
-    leadSwapButton_->setEnabled(jam2_.isRunning());
-    QObject::connect(leadSwapButton_, &QPushButton::clicked, this, [this] { requestLeadSwap(); });
 
     auto* top = new QHBoxLayout();
-    top->addWidget(leadLabel_);
-    top->addWidget(leadPendingLabel_);
     top->addStretch(1);
-    top->addWidget(leadSwapButton_);
 
     auto* layout = new QVBoxLayout(page);
     layout->addLayout(top);
@@ -1827,16 +1826,7 @@ QWidget* MainWindow::buildTrackPage()
     loopEnabledCheck_->setChecked(false);
     waveformGridCheck_ = new QCheckBox(QStringLiteral("Show waveform grid"), page);
     waveformGridCheck_->setChecked(trackController_.model().waveformGridVisible);
-    trackLevelSlider_ = new QSlider(Qt::Horizontal, page);
-    trackLevelSlider_->setRange(-60, 12);
-    trackLevelSlider_->setValue(0);
-    trackLevelSlider_->setMinimumWidth(160);
-    trackLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     trackController_.model().trackGainDb = 0.0;
-    trackLevelDbLabel_ = new QLabel(dbText(trackController_.model().trackGainDb), page);
-    trackLevelDbLabel_->setFrameShape(QFrame::StyledPanel);
-    trackLevelDbLabel_->setAlignment(Qt::AlignCenter);
-    trackLevelDbLabel_->setMinimumWidth(82);
     captureButton_ = new QPushButton(QStringLiteral("Record Input"), page);
     loopbackCaptureButton_ = new QPushButton(QStringLiteral("Record Loopback"), page);
     stopCaptureButton_ = new QPushButton(QStringLiteral("Stop Capture"), page);
@@ -1868,12 +1858,6 @@ QWidget* MainWindow::buildTrackPage()
     pitchLayout->setContentsMargins(0, 0, 0, 0);
     pitchLayout->addWidget(trackPitchSlider_, 1);
     pitchLayout->addWidget(trackPitchSpin_);
-    auto* trackLevelControl = new QWidget(page);
-    trackLevelControl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    auto* trackLevelLayout = new QHBoxLayout(trackLevelControl);
-    trackLevelLayout->setContentsMargins(0, 0, 0, 0);
-    trackLevelLayout->addWidget(trackLevelSlider_, 1);
-    trackLevelLayout->addWidget(trackLevelDbLabel_);
     auto* focusControl = new QWidget(page);
     focusControl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     auto* focusLayout = new QHBoxLayout(focusControl);
@@ -1903,7 +1887,6 @@ QWidget* MainWindow::buildTrackPage()
     form->addRow(trackNameLabel_);
     form->addRow(QStringLiteral("Speed"), speedControl);
     form->addRow(QStringLiteral("Pitch"), pitchControl);
-    form->addRow(QStringLiteral("Track level"), trackLevelControl);
     form->addRow(QStringLiteral("Focus frequency"), focusControl);
     form->addRow(loopOptionsControl);
     form->addRow(syncBox);
@@ -1986,13 +1969,6 @@ QWidget* MainWindow::buildTrackPage()
         if (trackWaveform_) {
             trackWaveform_->setGridVisible(checked);
         }
-    });
-    QObject::connect(trackLevelSlider_, &QSlider::valueChanged, this, [this](int value) {
-        trackController_.model().trackGainDb = static_cast<double>(value);
-        if (trackLevelDbLabel_) {
-            trackLevelDbLabel_->setText(dbText(trackController_.model().trackGainDb));
-        }
-        applyTrackPlaybackSettings();
     });
     QObject::connect(focusFrequencyCheck_, &QCheckBox::toggled, this, [this](bool checked) {
         trackController_.model().focusEnabled = checked;
@@ -2099,6 +2075,7 @@ QWidget* MainWindow::buildMetronomePage()
     metronomeDivisionBox_->addItem(QStringLiteral("6th"), 6);
     metronomeDivisionBox_->addItem(QStringLiteral("32nd"), 8);
     metronomeDivisionBox_->setCurrentIndex(metronomeDivisionBox_->findData(1));
+    metronomeDivisionBox_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
     applyMutedEditorStyle(metronomeDivisionBox_);
 
     metronomeModeBox_ = new QComboBox(page);
@@ -2108,10 +2085,9 @@ QWidget* MainWindow::buildMetronomePage()
         QStringLiteral("symmetric-delay"),
         QStringLiteral("listener-compensated"),
     });
+    metronomeModeBox_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
     applyMutedEditorStyle(metronomeModeBox_);
 
-    metronomeLevelSlider_ = makeUnitSlider(0.2, page);
-    localMetronomeLevelSlider_ = makeUnitSlider(0.35, page);
     trackMetronomeLabel_ = new QLabel(QStringLiteral("Local metronome stopped"), page);
     startTrackMetronomeButton_ = new QPushButton(QStringLiteral("Start"), page);
     stopTrackMetronomeButton_ = new QPushButton(QStringLiteral("Stop"), page);
@@ -2129,24 +2105,31 @@ QWidget* MainWindow::buildMetronomePage()
         "QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid #52616c; background: #1f2428; }"
         "QCheckBox::indicator:checked { border: 1px solid #66c6a6; background: #66c6a6; }"));
 
+    auto makeControlPair = [page](const QString& label, QWidget* editor) {
+        auto* pair = new QWidget(page);
+        auto* pairLayout = new QHBoxLayout(pair);
+        pairLayout->setContentsMargins(0, 0, 0, 0);
+        pairLayout->setSpacing(6);
+        pairLayout->addWidget(new QLabel(label, pair));
+        pairLayout->addWidget(editor, 0, Qt::AlignLeft);
+        pairLayout->addStretch(1);
+        return pair;
+    };
     auto* controls = new QGridLayout();
-    controls->addWidget(new QLabel(QStringLiteral("BPM"), page), 0, 0);
-    controls->addWidget(metronomeBpmSpin_, 0, 1);
-    controls->addWidget(new QLabel(QStringLiteral("Beats"), page), 0, 2);
-    controls->addWidget(metronomeBeatsSpin_, 0, 3);
-    controls->addWidget(new QLabel(QStringLiteral("Division"), page), 0, 4);
-    controls->addWidget(metronomeDivisionBox_, 0, 5);
-    controls->addWidget(new QLabel(QStringLiteral("Mode"), page), 0, 6);
-    controls->addWidget(metronomeModeBox_, 0, 7);
-    controls->addWidget(new QLabel(QStringLiteral("Jam level"), page), 1, 0);
-    controls->addWidget(metronomeLevelSlider_, 1, 1, 1, 3);
-    controls->addWidget(new QLabel(QStringLiteral("Standalone level"), page), 1, 4);
-    controls->addWidget(localMetronomeLevelSlider_, 1, 5, 1, 3);
+    controls->setHorizontalSpacing(24);
+    controls->setVerticalSpacing(10);
+    controls->addWidget(makeControlPair(QStringLiteral("BPM"), metronomeBpmSpin_), 0, 0);
+    controls->addWidget(makeControlPair(QStringLiteral("Beats"), metronomeBeatsSpin_), 0, 1);
+    controls->addWidget(makeControlPair(QStringLiteral("Division"), metronomeDivisionBox_), 0, 2);
+    controls->addWidget(makeControlPair(QStringLiteral("Mode"), metronomeModeBox_), 0, 3);
+    controls->addWidget(new QLabel(QStringLiteral("Pattern"), page), 1, 0);
+    controls->addWidget(trackMetronomeLabel_, 1, 1, 1, 3);
+    controls->setColumnStretch(1, 1);
+    controls->setColumnStretch(3, 1);
 
     auto* buttons = new QHBoxLayout();
     buttons->addWidget(startTrackMetronomeButton_);
     buttons->addWidget(stopTrackMetronomeButton_);
-    buttons->addWidget(trackMetronomeLabel_);
     buttons->addStretch(1);
 
     auto* layout = new QVBoxLayout(page);
@@ -2163,12 +2146,6 @@ QWidget* MainWindow::buildMetronomePage()
         updateRuntimeControls();
         sendMetronomeSettingsToPeer();
     });
-    QObject::connect(metronomeLevelSlider_, &QSlider::valueChanged, this, [this] {
-        updateRuntimeControls();
-    });
-    QObject::connect(localMetronomeLevelSlider_, &QSlider::valueChanged, this, [this] {
-        applyMetronomePatternToLocalDevice();
-    });
     QObject::connect(metronomeBeatsSpin_, qOverload<int>(&QSpinBox::valueChanged), this, [this] {
         rebuildMetronomePattern();
         updateTrackMetronomeInterval();
@@ -2182,6 +2159,172 @@ QWidget* MainWindow::buildMetronomePage()
     return page;
 }
 
+QWidget* MainWindow::buildMixPage()
+{
+    auto* page = new QWidget(this);
+    auto* content = new QWidget(page);
+    auto* layout = new QVBoxLayout(content);
+    layout->setContentsMargins(18, 16, 18, 16);
+    layout->setSpacing(12);
+
+    auto makeValueLabel = [page](const QString& text) {
+        auto* label = new QLabel(text, page);
+        label->setFrameShape(QFrame::StyledPanel);
+        label->setAlignment(Qt::AlignCenter);
+        label->setMinimumWidth(82);
+        return label;
+    };
+    auto makeRow = [page](const QString& name, QSlider* slider, QLabel* valueLabel) {
+        auto* row = new QWidget(page);
+        auto* rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(0, 0, 0, 0);
+        rowLayout->setSpacing(10);
+        auto* nameLabel = new QLabel(name, row);
+        nameLabel->setMinimumWidth(120);
+        rowLayout->addWidget(nameLabel);
+        rowLayout->addWidget(slider, 1);
+        rowLayout->addWidget(valueLabel);
+        return row;
+    };
+    auto makeDeviceRow = [content](const QString& name, QComboBox* combo) {
+        auto* row = new QWidget(content);
+        auto* rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(0, 0, 0, 0);
+        rowLayout->setSpacing(10);
+        auto* nameLabel = new QLabel(name, row);
+        nameLabel->setMinimumWidth(120);
+        rowLayout->addWidget(nameLabel);
+        rowLayout->addWidget(combo, 1);
+        return row;
+    };
+
+    localOutputBox_->setParent(content);
+    localOutputBox_->show();
+    layout->addWidget(makeDeviceRow(QStringLiteral("Standalone output"), localOutputBox_));
+
+    trackLevelSlider_ = new QSlider(Qt::Horizontal, page);
+    trackLevelSlider_->setRange(-60, 12);
+    trackLevelSlider_->setValue(0);
+    trackLevelSlider_->setMinimumWidth(220);
+    trackLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    trackLevelDbLabel_ = makeValueLabel(dbText(trackController_.model().trackGainDb));
+
+    metronomeLevelSlider_ = makeUnitSlider(0.2, page);
+    metronomeLevelSlider_->setMinimumWidth(220);
+    metronomeLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    localMetronomeLevelSlider_ = metronomeLevelSlider_;
+    mixMetronomeLevelSlider_ = metronomeLevelSlider_;
+    mixMetronomeLevelLabel_ = makeValueLabel(QStringLiteral("20%"));
+
+    remoteLevelSlider_ = makeUnitSlider(1.0, page);
+    remoteLevelSlider_->setMinimumWidth(220);
+    remoteLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    mixRemotePeerSlider_ = remoteLevelSlider_;
+    mixRemotePeerLevelLabel_ = makeValueLabel(QStringLiteral("100%"));
+
+    mixTrackLevelSlider_ = trackLevelSlider_;
+    mixTrackLevelLabel_ = trackLevelDbLabel_;
+
+    layout->addWidget(makeRow(QStringLiteral("Track"), trackLevelSlider_, trackLevelDbLabel_));
+    layout->addWidget(makeRow(QStringLiteral("Metronome"), metronomeLevelSlider_, mixMetronomeLevelLabel_));
+
+    mixRemotePeerRow_ = makeRow(QStringLiteral("User 1"), remoteLevelSlider_, mixRemotePeerLevelLabel_);
+    mixRemotePeerRow_->setVisible(false);
+    layout->addWidget(mixRemotePeerRow_);
+    layout->addStretch(1);
+
+    auto* scroll = new QScrollArea(page);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setWidget(content);
+
+    auto* pageLayout = new QVBoxLayout(page);
+    pageLayout->setContentsMargins(0, 0, 0, 0);
+    pageLayout->addWidget(scroll, 1);
+
+    QObject::connect(trackLevelSlider_, &QSlider::valueChanged, this, [this](int value) {
+        trackController_.model().trackGainDb = static_cast<double>(value);
+        if (trackLevelDbLabel_) {
+            trackLevelDbLabel_->setText(dbText(trackController_.model().trackGainDb));
+        }
+        applyTrackPlaybackSettings();
+    });
+    QObject::connect(metronomeLevelSlider_, &QSlider::valueChanged, this, [this](int value) {
+        if (mixMetronomeLevelLabel_) {
+            mixMetronomeLevelLabel_->setText(QStringLiteral("%1%").arg(value));
+        }
+        applyMetronomePatternToLocalDevice();
+        updateRuntimeControls();
+    });
+    QObject::connect(remoteLevelSlider_, &QSlider::valueChanged, this, [this](int value) {
+        if (mixRemotePeerLevelLabel_) {
+            mixRemotePeerLevelLabel_->setText(QStringLiteral("%1%").arg(value));
+        }
+        updateRuntimeControls();
+    });
+    updateMixControls();
+    return page;
+}
+
+void MainWindow::updateMixControls()
+{
+    if (trackLevelSlider_ && trackLevelDbLabel_) {
+        const QSignalBlocker blocker(trackLevelSlider_);
+        trackLevelSlider_->setValue(qBound(-60, qRound(trackController_.model().trackGainDb), 12));
+        trackLevelDbLabel_->setText(dbText(trackController_.model().trackGainDb));
+    }
+    if (metronomeLevelSlider_ && mixMetronomeLevelLabel_) {
+        mixMetronomeLevelLabel_->setText(QStringLiteral("%1%").arg(metronomeLevelSlider_->value()));
+    }
+    if (remoteLevelSlider_ && mixRemotePeerLevelLabel_) {
+        mixRemotePeerLevelLabel_->setText(QStringLiteral("%1%").arg(remoteLevelSlider_->value()));
+    }
+}
+
+void MainWindow::setMixRemotePeerVisible(bool visible)
+{
+    if (mixRemotePeerRow_) {
+        mixRemotePeerRow_->setVisible(visible);
+    }
+}
+
+void MainWindow::refreshGeneratedUrl()
+{
+    if (!generatedUrlEdit_) {
+        return;
+    }
+    if (!noStunCheck_ || !noStunCheck_->isChecked()) {
+        generatedUrlEdit_->setText(QStringLiteral("Generated after STUN discovery starts"));
+        return;
+    }
+    try {
+        jam2::SessionInfo info;
+        info.endpoint = {publicHostEdit_->text().toStdString(), static_cast<std::uint16_t>(portSpin_->value())};
+        info.session_id = sessionId_;
+        info.key = sessionKey_;
+        generatedUrlEdit_->setText(QString::fromStdString(jam2::make_jam_url(info)));
+    } catch (const std::exception&) {
+        generatedUrlEdit_->clear();
+    }
+}
+
+void MainWindow::updateConnectionControlState()
+{
+    const bool manualEndpoint = noStunCheck_ && noStunCheck_->isChecked();
+    if (publicHostEdit_) {
+        publicHostEdit_->setEnabled(manualEndpoint);
+    }
+    if (stunServerEdit_) {
+        stunServerEdit_->setEnabled(!manualEndpoint);
+    }
+    if (stunTimeoutSpin_) {
+        stunTimeoutSpin_->setEnabled(!manualEndpoint);
+    }
+    if (stunRetriesSpin_) {
+        stunRetriesSpin_->setEnabled(!manualEndpoint);
+    }
+}
+
 void MainWindow::startJam()
 {
     if (jam2_.isRunning()) {
@@ -2193,17 +2336,17 @@ void MainWindow::startJam()
     pendingJoinBaseArgs_.clear();
     try {
         if (listenMode) {
-            jam2::SessionInfo info;
-            info.endpoint = {publicHostEdit_->text().toStdString(), static_cast<std::uint16_t>(portSpin_->value())};
-            info.session_id = sessionId_;
-            info.key = sessionKey_;
-            generatedUrlEdit_->setText(QString::fromStdString(jam2::make_jam_url(info)));
             args << QStringLiteral("listen")
                  << QStringLiteral("--bind") << QStringLiteral("%1:%2").arg(bindHostEdit_->text()).arg(portSpin_->value())
-                 << QStringLiteral("--public-endpoint") << QStringLiteral("%1:%2").arg(publicHostEdit_->text()).arg(portSpin_->value())
                  << QStringLiteral("--session-id") << sessionHex()
                  << QStringLiteral("--session-key") << keyHex();
-            if (!noStunCheck_->isChecked()) {
+            if (noStunCheck_->isChecked()) {
+                refreshGeneratedUrl();
+                args << QStringLiteral("--public-endpoint") << QStringLiteral("%1:%2").arg(publicHostEdit_->text()).arg(portSpin_->value());
+            } else {
+                if (generatedUrlEdit_) {
+                    generatedUrlEdit_->setText(QStringLiteral("Waiting for STUN discovery..."));
+                }
                 args << QStringLiteral("--stun") << stunServerEdit_->text()
                      << QStringLiteral("--stun-timeout-ms") << QString::number(stunTimeoutSpin_->value())
                      << QStringLiteral("--stun-retries") << QString::number(stunRetriesSpin_->value());
@@ -2280,11 +2423,8 @@ void MainWindow::launchJamProcess(const QStringList& args)
     if (refreshControlButton_) {
         refreshControlButton_->setEnabled(true);
     }
-    if (runtimeMixBox_) {
-        runtimeMixBox_->setVisible(true);
-    }
-    if (leadSwapButton_) {
-        leadSwapButton_->setEnabled(true);
+    if (localOutputBox_) {
+        localOutputBox_->setEnabled(false);
     }
     connectionLabel_->setText(QStringLiteral("Starting"));
     QTimer::singleShot(250, this, [this] {
@@ -2304,25 +2444,15 @@ void MainWindow::showStartJamDialog()
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Start Jam"));
     dialog.resize(760, 620);
-    auto updateGeneratedUrl = [this] {
-        jam2::SessionInfo info;
-        info.endpoint = {publicHostEdit_->text().toStdString(), static_cast<std::uint16_t>(portSpin_->value())};
-        info.session_id = sessionId_;
-        info.key = sessionKey_;
-        generatedUrlEdit_->setText(QString::fromStdString(jam2::make_jam_url(info)));
-    };
-    try {
-        updateGeneratedUrl();
-    } catch (const std::exception&) {
-        generatedUrlEdit_->clear();
-    }
+    refreshGeneratedUrl();
+    updateConnectionControlState();
 
     auto* content = new QWidget(&dialog);
     auto* layout = new QVBoxLayout(content);
     const QList<QWidget*> visibleWidgets{
         jam2PathEdit_, bindHostEdit_, portSpin_, publicHostEdit_, generatedUrlEdit_,
         stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, noStunCheck_, deviceBox_,
-        localOutputBox_, inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_,
+        inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_,
         prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_,
         streamMsSpin_, streamLingerMsSpin_, statsCheck_, statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
         socketRecvBufferSpin_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
@@ -2334,6 +2464,7 @@ void MainWindow::showStartJamDialog()
     }
 
     auto* sessionForm = new QFormLayout();
+    sessionForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     sessionForm->addRow(QStringLiteral("jam2 binary"), jam2PathEdit_);
     sessionForm->addRow(QStringLiteral("Bind"), bindHostEdit_);
     sessionForm->addRow(QStringLiteral("Port"), portSpin_);
@@ -2348,8 +2479,8 @@ void MainWindow::showStartJamDialog()
     layout->addWidget(sessionBox);
 
     auto* audioForm = new QFormLayout();
+    audioForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     audioForm->addRow(QStringLiteral("Audio device"), deviceBox_);
-    audioForm->addRow(QStringLiteral("Local track/metronome output"), localOutputBox_);
     audioForm->addRow(QStringLiteral("Input channels"), inputChannelsEdit_);
     audioForm->addRow(QStringLiteral("Output channels"), outputChannelsEdit_);
     audioForm->addRow(QStringLiteral("Sample rate"), sampleRateSpin_);
@@ -2364,6 +2495,7 @@ void MainWindow::showStartJamDialog()
     layout->addWidget(audioBox);
 
     auto* advancedForm = new QFormLayout();
+    advancedForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     advancedForm->addRow(QStringLiteral("Wait ms"), waitMsSpin_);
     advancedForm->addRow(QStringLiteral("Stream ms"), streamMsSpin_);
     advancedForm->addRow(QStringLiteral("Stream linger ms"), streamLingerMsSpin_);
@@ -2403,19 +2535,19 @@ void MainWindow::showStartJamDialog()
     });
     QObject::connect(regen, &QPushButton::clicked, this, [this] {
         generateSession();
-        jam2::SessionInfo info;
-        info.endpoint = {publicHostEdit_->text().toStdString(), static_cast<std::uint16_t>(portSpin_->value())};
-        info.session_id = sessionId_;
-        info.key = sessionKey_;
-        generatedUrlEdit_->setText(QString::fromStdString(jam2::make_jam_url(info)));
+        refreshGeneratedUrl();
     });
     QObject::connect(copy, &QPushButton::clicked, this, [this] {
         QApplication::clipboard()->setText(generatedUrlEdit_->text());
     });
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    QObject::connect(publicHostEdit_, &QLineEdit::textChanged, &dialog, updateGeneratedUrl);
-    QObject::connect(portSpin_, &QSpinBox::valueChanged, &dialog, updateGeneratedUrl);
+    QObject::connect(publicHostEdit_, &QLineEdit::textChanged, &dialog, [this] { refreshGeneratedUrl(); });
+    QObject::connect(portSpin_, &QSpinBox::valueChanged, &dialog, [this] { refreshGeneratedUrl(); });
+    QObject::connect(noStunCheck_, &QCheckBox::toggled, &dialog, [this] {
+        updateConnectionControlState();
+        refreshGeneratedUrl();
+    });
 
     auto* outer = new QVBoxLayout(&dialog);
     outer->addWidget(scroll, 1);
@@ -2426,7 +2558,7 @@ void MainWindow::showStartJamDialog()
     const QList<QWidget*> startWidgets{
         jam2PathEdit_, bindHostEdit_, portSpin_, publicHostEdit_, generatedUrlEdit_,
         stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, noStunCheck_, deviceBox_,
-        localOutputBox_, inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_,
+        inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_,
         prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_,
         streamMsSpin_, streamLingerMsSpin_, statsCheck_, statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
         socketRecvBufferSpin_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
@@ -2457,7 +2589,7 @@ void MainWindow::showJoinJamDialog()
     auto* content = new QWidget(&dialog);
     auto* layout = new QVBoxLayout(content);
     const QList<QWidget*> visibleWidgets{
-        connectUrlEdit_, jam2PathEdit_, deviceBox_, localOutputBox_, inputChannelsEdit_, outputChannelsEdit_,
+        connectUrlEdit_, jam2PathEdit_, deviceBox_, inputChannelsEdit_, outputChannelsEdit_,
         statsCheck_, statsWarmupMsSpin_, logStatsEdit_,
     };
     for (QWidget* widget : visibleWidgets) {
@@ -2465,6 +2597,7 @@ void MainWindow::showJoinJamDialog()
     }
 
     auto* sessionForm = new QFormLayout();
+    sessionForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     sessionForm->addRow(QStringLiteral("jam2 URL"), connectUrlEdit_);
     sessionForm->addRow(QStringLiteral("jam2 binary"), jam2PathEdit_);
     auto* sessionBox = new QGroupBox(QStringLiteral("Connection"), content);
@@ -2472,8 +2605,8 @@ void MainWindow::showJoinJamDialog()
     layout->addWidget(sessionBox);
 
     auto* audioForm = new QFormLayout();
+    audioForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     audioForm->addRow(QStringLiteral("Audio device"), deviceBox_);
-    audioForm->addRow(QStringLiteral("Local track/metronome output"), localOutputBox_);
     audioForm->addRow(QStringLiteral("Input channels"), inputChannelsEdit_);
     audioForm->addRow(QStringLiteral("Output channels"), outputChannelsEdit_);
     auto* audioBox = new QGroupBox(QStringLiteral("Local Audio"), content);
@@ -2481,6 +2614,7 @@ void MainWindow::showJoinJamDialog()
     layout->addWidget(audioBox);
 
     auto* statsForm = new QFormLayout();
+    statsForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     statsForm->addRow(QString(), statsCheck_);
     statsForm->addRow(QStringLiteral("Stats warmup ms"), statsWarmupMsSpin_);
     statsForm->addRow(QStringLiteral("Log stats folder"), logStatsEdit_);
@@ -2509,7 +2643,7 @@ void MainWindow::showJoinJamDialog()
 
     const int result = dialog.exec();
     const QList<QWidget*> joinWidgets{
-        connectUrlEdit_, jam2PathEdit_, deviceBox_, localOutputBox_, inputChannelsEdit_, outputChannelsEdit_,
+        connectUrlEdit_, jam2PathEdit_, deviceBox_, inputChannelsEdit_, outputChannelsEdit_,
         statsCheck_, statsWarmupMsSpin_, logStatsEdit_,
     };
     for (QWidget* widget : joinWidgets) {
@@ -2548,12 +2682,10 @@ void MainWindow::stopJam()
     if (refreshControlButton_) {
         refreshControlButton_->setEnabled(false);
     }
-    if (runtimeMixBox_) {
-        runtimeMixBox_->setVisible(false);
+    if (localOutputBox_) {
+        localOutputBox_->setEnabled(true);
     }
-    if (leadSwapButton_) {
-        leadSwapButton_->setEnabled(false);
-    }
+    setMixRemotePeerVisible(false);
 }
 
 void MainWindow::refreshDevices()
@@ -2624,6 +2756,18 @@ void MainWindow::handleOutputLine(const QString& line)
 
 void MainWindow::handleStatus(const QJsonObject& status)
 {
+    if (status.value(QStringLiteral("event")).toString() == QStringLiteral("startup")) {
+        const QString connectionUrl = status.value(QStringLiteral("connection_url")).toString();
+        if (!connectionUrl.isEmpty() && generatedUrlEdit_) {
+            generatedUrlEdit_->setText(connectionUrl);
+        }
+        const QString stage = status.value(QStringLiteral("stage")).toString();
+        if (stage == QStringLiteral("error")) {
+            const QString error = status.value(QStringLiteral("error")).toString(QStringLiteral("startup error"));
+            appendLog(QStringLiteral("startup error: ") + error);
+        }
+        return;
+    }
     if (status.value(QStringLiteral("event")).toString() != QStringLiteral("status")) {
         return;
     }
@@ -2797,10 +2941,6 @@ void MainWindow::handleControlMessage(const QJsonObject& message)
         if (loadSongJson(message.value(QStringLiteral("song")).toObject())) {
             refreshSongViews();
         }
-    } else if (type == QStringLiteral("lead.change_pending")) {
-        leadCue_.pendingLead = message.value(QStringLiteral("target")).toString();
-        leadCue_.pendingBars = message.value(QStringLiteral("bars")).toInt(4);
-        updateLeadLabels();
     } else if (type == QStringLiteral("track.offer")) {
         trackController_.model().fileName = message.value(QStringLiteral("name")).toString();
         const QString offeredPath = message.value(QStringLiteral("path")).toString(trackController_.model().filePath);
@@ -2859,13 +2999,32 @@ void MainWindow::handleControlState(const QString& state, bool serverSide)
     if (serverSide && state == QStringLiteral("TCP peer authenticated")) {
         controlReconnectAttempts_ = 0;
         controlReconnectTimer_.stop();
+        setMixRemotePeerVisible(true);
         sendLeaderSettings();
         sendMetronomeSettingsToPeer();
     } else if (!serverSide && state == QStringLiteral("TCP control authenticated")) {
         controlReconnectAttempts_ = 0;
         controlReconnectTimer_.stop();
+        setMixRemotePeerVisible(true);
+    } else if (state.startsWith(QStringLiteral("TCP auth failed:"))) {
+        controlReconnectEnabled_ = false;
+        controlReconnectTimer_.stop();
+        pendingJoinLaunch_ = false;
+        pendingJoinBaseArgs_.clear();
+        if (startButton_) {
+            startButton_->setEnabled(true);
+        }
+        if (joinButton_) {
+            joinButton_->setEnabled(true);
+        }
+        if (stopButton_) {
+            stopButton_->setEnabled(false);
+        }
+        setMixRemotePeerVisible(false);
+        QMessageBox::warning(this, QStringLiteral("Jam2"), state);
     } else if ((jam2_.isRunning() || pendingJoinLaunch_) && controlReconnectEnabled_ &&
         (state == QStringLiteral("TCP control disconnected") || state == QStringLiteral("TCP peer disconnected"))) {
+        setMixRemotePeerVisible(false);
         scheduleControlReconnect();
     }
 }
@@ -3049,52 +3208,10 @@ void MainWindow::updateRuntimeControls()
     jam2_.sendLine(QStringLiteral("remote level %1").arg(static_cast<double>(remoteLevelSlider_->value()) / 100.0, 0, 'f', 2));
 }
 
-void MainWindow::requestLeadSwap()
-{
-    const QString target = leadCue_.currentLead == QStringLiteral("Teacher") ? QStringLiteral("Student") : QStringLiteral("Teacher");
-    leadCue_.pendingLead = target;
-    leadCue_.pendingBars = 4;
-    updateLeadLabels();
-    sendControl(QJsonObject{
-        {QStringLiteral("type"), QStringLiteral("lead.change_pending")},
-        {QStringLiteral("target"), target},
-        {QStringLiteral("bars"), leadCue_.pendingBars},
-    });
-    QTimer::singleShot(4000, this, [this, target] {
-        leadCue_.currentLead = target;
-        leadCue_.pendingLead.clear();
-        leadCue_.pendingBars = 0;
-        updateLeadLabels();
-    });
-}
-
-void MainWindow::updateLeadLabels()
-{
-    if (!leadLabel_) {
-        return;
-    }
-    leadLabel_->setText(QStringLiteral("Lead: %1").arg(leadCue_.currentLead));
-    leadPendingLabel_->setText(
-        leadCue_.pendingLead.isEmpty()
-            ? QStringLiteral("No pending lead change")
-            : QStringLiteral("%1 leads in %2 bars").arg(leadCue_.pendingLead).arg(leadCue_.pendingBars));
-}
-
 void MainWindow::updateTrackControls()
 {
     const auto& model = trackController_.model();
-    const QString duration = model.durationMs > 0
-        ? QStringLiteral(" | %1.%2 s").arg(model.durationMs / 1000).arg((model.durationMs % 1000) / 100)
-        : QString();
-    const QString rate = model.sampleRate > 0 ? QStringLiteral(" | %1 Hz").arg(model.sampleRate) : QString();
-    const QString bytes = model.fileBytes > 0 ? QStringLiteral(" | %1 bytes").arg(model.fileBytes) : QString();
-    trackNameLabel_->setText(QStringLiteral("Track: %1 | BPM %2 | Key %3%4%5%6")
-        .arg(model.fileName)
-        .arg(model.acceptedBpm, 0, 'f', 1)
-        .arg(model.key)
-        .arg(duration)
-        .arg(rate)
-        .arg(bytes));
+    trackNameLabel_->setText(QStringLiteral("Track: %1").arg(model.fileName));
     if (trackSpeedSpin_) {
         const QSignalBlocker blocker(trackSpeedSpin_);
         trackSpeedSpin_->setValue(model.speed);

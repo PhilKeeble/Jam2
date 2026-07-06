@@ -40,6 +40,10 @@ void Jam2Process::stop()
     sendLine(QStringLiteral("quit"));
     if (!process_.waitForFinished(1500)) {
         process_.terminate();
+        if (!process_.waitForFinished(1500)) {
+            process_.kill();
+            process_.waitForFinished(1500);
+        }
     }
 }
 

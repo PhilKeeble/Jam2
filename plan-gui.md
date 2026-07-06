@@ -105,29 +105,6 @@ Fallback before this pass:
 
 - Track UI keeps speed/pitch visible as synced metadata; speed is also mapped to Qt playback rate as a temporary local playback behavior.
 
-## Essentia Analysis Pass
-
-Add this as a separate targeted dependency/investigation pass.
-
-Scope:
-
-- Analyze imported WAV files offline for tempo/BPM, key, chroma, and chord suggestions.
-- Present all analysis as editable suggestions, not authoritative truth.
-- Let users accept or correct detected BPM/key/chords.
-- Store corrected user values in the song/project document as the source of truth.
-- Populate Chord View from accepted chord suggestions where practical.
-- Run analysis in a background task so the GUI stays responsive.
-- Do not analyze live UDP peer audio.
-- Credit Essentia and any other analysis libraries in an about/license view.
-
-Investigation:
-
-- Inspect Essentia source and build options before linking it into the GUI.
-- Identify the smallest practical subset for WAV tempo/BPM, key, chroma, and chord suggestions.
-- Avoid Python bindings, TensorFlow models, fingerprinting, broad metadata loading, and unrelated MIR algorithms unless a future use case requires them.
-- Consider a separate analyzer helper executable if direct Qt GUI linking is too heavy or awkward.
-- Support consuming analysis metadata generated outside `jam2-gui`.
-
 ## Track EQ And Frequency Focus
 
 Add local practice EQ for backing tracks only.

@@ -23,7 +23,7 @@ When the ASIO backend is added, CMake should default to this path if `ASIO_SDK_D
 Recommended build commands from a Developer PowerShell or Developer Command Prompt:
 
 ```powershell
-cmake -S . -B build -G Ninja
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build
 ```
@@ -47,7 +47,7 @@ Required tools:
 Build commands:
 
 ```bash
-cmake -S . -B build -G Ninja
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build
 ```
@@ -57,6 +57,7 @@ Real CoreAudio validation must happen on a macOS host with the target audio devi
 ## Notes
 
 - CMake is the single source of truth for builds on Windows and macOS.
+- Jam2 only supports Release builds. Configure fresh build directories with `-DCMAKE_BUILD_TYPE=Release`; multi-config generators are restricted to the Release configuration.
 - The repository is split into `libs/jam2-core`, `apps/jam2-cli`, `apps/jam2-gui`, `apps/jam2-capture`, and `tests` so additional app targets can share the same core library.
 - Distributable app executables are written to the repo-root `release` directory. Tests and intermediate build products stay in the selected CMake build directory.
 - Shared protocol, STUN, stats, and timing code should remain platform-neutral.

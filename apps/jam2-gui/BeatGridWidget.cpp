@@ -606,6 +606,11 @@ void BeatGridWidget::rebuildChordTable()
 void BeatGridWidget::rebuildBeatTable()
 {
     const QStringList lanes = BeatGridModel::beatLaneNames();
+    QVector<int> visualLaneIndices;
+    visualLaneIndices.reserve(lanes.size());
+    for (int lane = lanes.size() - 1; lane >= 0; --lane) {
+        visualLaneIndices.push_back(lane);
+    }
     updating_ = true;
     QSignalBlocker tableBlocker(table_);
     table_->setUpdatesEnabled(false);
@@ -639,7 +644,9 @@ void BeatGridWidget::rebuildBeatTable()
     for (int sectionIndex = 0; sectionIndex < model_->sections().size(); ++sectionIndex) {
         rowLabels << QString();
         rowLabels << QStringLiteral("Division");
-        rowLabels << lanes;
+        for (int lane : visualLaneIndices) {
+            rowLabels << lanes[lane];
+        }
     }
     table_->setVerticalHeaderLabels(rowLabels);
 
@@ -686,7 +693,7 @@ void BeatGridWidget::rebuildBeatTable()
         }
         ++row;
 
-        for (int lane = 0; lane < lanes.size(); ++lane) {
+        for (int lane : visualLaneIndices) {
             const int laneRow = row;
             rowToSection_[laneRow] = sectionIndex;
             rowToLane_[laneRow] = lane;

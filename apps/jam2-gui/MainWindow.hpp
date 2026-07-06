@@ -4,7 +4,6 @@
 #include "ControlClient.hpp"
 #include "ControlServer.hpp"
 #include "Jam2Process.hpp"
-#include "LeadCueModel.hpp"
 #include "SharedTrackController.hpp"
 
 #include "metronome.hpp"
@@ -52,6 +51,7 @@ private:
     QWidget* buildSongPage();
     QWidget* buildTrackPage();
     QWidget* buildMetronomePage();
+    QWidget* buildMixPage();
 
     void startJam();
     void showStartJamDialog();
@@ -75,8 +75,10 @@ private:
     void launchJamProcess(const QStringList& args);
     void launchPendingJoin();
     void updateRuntimeControls();
-    void requestLeadSwap();
-    void updateLeadLabels();
+    void updateMixControls();
+    void setMixRemotePeerVisible(bool visible);
+    void refreshGeneratedUrl();
+    void updateConnectionControlState();
     void updateTrackControls();
     void loadTrackMetadata();
     QString selectedDeviceId() const;
@@ -135,7 +137,6 @@ private:
     ControlServer controlServer_;
     ControlClient controlClient_;
     SharedTrackController trackController_;
-    LeadCueModel leadCue_;
     BeatGridModel chordModel_;
     BeatGridModel beatModel_;
     BeatGridModel lyricModel_;
@@ -194,7 +195,6 @@ private:
     QPushButton* joinButton_ = nullptr;
     QPushButton* stopButton_ = nullptr;
     QPushButton* refreshControlButton_ = nullptr;
-    QGroupBox* runtimeMixBox_ = nullptr;
     QLabel* connectionLabel_ = nullptr;
     QLabel* jitterLabel_ = nullptr;
     QLabel* lossLabel_ = nullptr;
@@ -205,9 +205,6 @@ private:
     QLabel* ringDepthLabel_ = nullptr;
     QLabel* missingFramesLabel_ = nullptr;
     QLabel* diagnosisLabel_ = nullptr;
-    QLabel* leadLabel_ = nullptr;
-    QLabel* leadPendingLabel_ = nullptr;
-    QPushButton* leadSwapButton_ = nullptr;
     QLabel* trackNameLabel_ = nullptr;
     WaveformWidget* trackWaveform_ = nullptr;
     QLabel* titleLabel_ = nullptr;
@@ -247,6 +244,13 @@ private:
     QPushButton* shareTrackFileButton_ = nullptr;
     QSlider* trackLevelSlider_ = nullptr;
     QLabel* trackLevelDbLabel_ = nullptr;
+    QSlider* mixTrackLevelSlider_ = nullptr;
+    QLabel* mixTrackLevelLabel_ = nullptr;
+    QSlider* mixMetronomeLevelSlider_ = nullptr;
+    QLabel* mixMetronomeLevelLabel_ = nullptr;
+    QWidget* mixRemotePeerRow_ = nullptr;
+    QSlider* mixRemotePeerSlider_ = nullptr;
+    QLabel* mixRemotePeerLevelLabel_ = nullptr;
     QCheckBox* focusFrequencyCheck_ = nullptr;
     QComboBox* focusPresetBox_ = nullptr;
     QSlider* focusFrequencySlider_ = nullptr;

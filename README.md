@@ -12,7 +12,7 @@ Repository layout:
 Build:
 
 ```powershell
-cmake -S . -B build -G Ninja
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
@@ -22,7 +22,7 @@ ctest --test-dir build --output-on-failure
 The GUI needs Qt 6 Widgets, Network, and Multimedia development packages. If CMake cannot find Qt automatically, pass its install prefix:
 
 ```powershell
-cmake -S . -B build -G Ninja -DJAM2_BUILD_GUI=ON -DCMAKE_PREFIX_PATH=C:/Qt/6.7.3/msvc2019_64
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DJAM2_BUILD_GUI=ON -DCMAKE_PREFIX_PATH=C:/Qt/6.7.3/msvc2019_64
 ```
 
 Check devices on each host:
