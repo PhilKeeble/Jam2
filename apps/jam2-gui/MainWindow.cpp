@@ -1123,6 +1123,7 @@ QString audioDeviceIdText(const QAudioDevice& device)
 }
 
 struct WavMetadata {
+    int audioFormat = 0;
     int sampleRate = 0;
     int channels = 0;
     int bitsPerSample = 0;
@@ -1167,6 +1168,7 @@ WavMetadata readWavMetadata(const QString& path)
             break;
         }
         if (id == "fmt " && size >= 16) {
+            meta.audioFormat = readLe16(bytes, payload);
             meta.channels = readLe16(bytes, payload + 2);
             meta.sampleRate = static_cast<int>(readLe32(bytes, payload + 4));
             meta.bitsPerSample = readLe16(bytes, payload + 14);
@@ -1182,6 +1184,37 @@ WavMetadata readWavMetadata(const QString& path)
         }
     }
     return meta;
+}
+
+bool isImportablePcm16Wav(const QString& path, QString* reason = nullptr)
+{
+    try {
+        const WavMetadata metadata = readWavMetadata(path);
+        if (metadata.audioFormat != 1) {
+            if (reason) {
+                *reason = QStringLiteral("capture WAV is not PCM format");
+            }
+            return false;
+        }
+        if (metadata.channels <= 0 || metadata.sampleRate <= 0 || metadata.bitsPerSample != 16) {
+            if (reason) {
+                *reason = QStringLiteral("capture WAV must be PCM16 with a valid sample rate and channel count");
+            }
+            return false;
+        }
+        if (metadata.dataBytes <= 0) {
+            if (reason) {
+                *reason = QStringLiteral("capture WAV contains no audio frames; the recording was silent or trimming removed all audio");
+            }
+            return false;
+        }
+        return true;
+    } catch (const std::exception& error) {
+        if (reason) {
+            *reason = QString::fromUtf8(error.what());
+        }
+        return false;
+    }
 }
 
 QJsonObject readSidecarJson(const QString& wavPath)
@@ -1233,7 +1266,10 @@ Pcm16Wav readPcm16Wav(const QString& path)
         offset = payload + size + (size % 2);
     }
 
-    if (channels <= 0 || sampleRate <= 0 || bitsPerSample != 16 || dataOffset < 0 || dataBytes <= 0) {
+    if (dataOffset >= 0 && dataBytes <= 0) {
+        throw std::runtime_error("WAV contains no audio frames");
+    }
+    if (channels <= 0 || sampleRate <= 0 || bitsPerSample != 16 || dataOffset < 0) {
         throw std::runtime_error("track playback currently supports PCM16 WAV input");
     }
     const qsizetype frameBytes = channels * 2;
@@ -1391,7 +1427,15 @@ MainWindow::MainWindow(QWidget* parent)
             stopCaptureButton_->setEnabled(false);
         }
         if (importCaptureButton_) {
-            importCaptureButton_->setEnabled(exitCode == 0 && QFileInfo::exists(lastCapturePath_));
+            bool importable = false;
+            if (exitCode == 0 && QFileInfo::exists(lastCapturePath_)) {
+                QString reason;
+                importable = isImportablePcm16Wav(lastCapturePath_, &reason);
+                if (!importable && !reason.isEmpty()) {
+                    appendLog(QStringLiteral("capture not importable: ") + reason);
+                }
+            }
+            importCaptureButton_->setEnabled(importable);
         }
     });
     trackTimelineTimer_.setInterval(33);
@@ -3362,7 +3406,13 @@ void MainWindow::updateTrackControls()
 
 void MainWindow::loadTrackMetadata()
 {
-    const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("Load WAV"), QString(), QStringLiteral("WAV files (*.wav);;All files (*)"));
+    const QString path = QFileDialog::getOpenFileName(
+        this,
+        QStringLiteral("Load WAV"),
+        appReleaseFolderPath(QStringLiteral("captures")),
+        QStringLiteral("WAV files (*.wav);;All files (*)"),
+        nullptr,
+        QFileDialog::DontUseNativeDialog);
     if (path.isEmpty()) {
         return;
     }
@@ -3424,7 +3474,7 @@ void MainWindow::handleCaptureOutputLine(const QString& line)
         captureOutputEdit_->setText(output);
     }
     if (importCaptureButton_) {
-        importCaptureButton_->setEnabled(QFileInfo::exists(lastCapturePath_));
+        importCaptureButton_->setEnabled(QFileInfo::exists(lastCapturePath_) && isImportablePcm16Wav(lastCapturePath_));
     }
 }
 
@@ -3435,7 +3485,9 @@ void MainWindow::chooseCaptureFolder()
         this,
         QStringLiteral("Capture Output"),
         isAutoCapturePath(current) ? timestampedCapturePath(QStringLiteral("capture")) : current,
-        QStringLiteral("WAV files (*.wav);;All files (*)"));
+        QStringLiteral("WAV files (*.wav);;All files (*)"),
+        nullptr,
+        QFileDialog::DontUseNativeDialog);
     if (!path.isEmpty()) {
         captureOutputEdit_->setText(path);
     }
@@ -3759,6 +3811,11 @@ void MainWindow::importLastCapture()
 {
     if (!QFileInfo::exists(lastCapturePath_)) {
         QMessageBox::warning(this, QStringLiteral("Jam2 Capture"), QStringLiteral("No captured WAV is available to import."));
+        return;
+    }
+    QString importReason;
+    if (!isImportablePcm16Wav(lastCapturePath_, &importReason)) {
+        QMessageBox::warning(this, QStringLiteral("Jam2 Capture"), importReason);
         return;
     }
     QFileInfo info(lastCapturePath_);
@@ -4673,7 +4730,9 @@ void MainWindow::openSong()
         this,
         QStringLiteral("Open Jam2 Song"),
         appReleaseFolderPath(QStringLiteral("songs")),
-        QStringLiteral("Jam2 song (*.jam2song *.json);;JSON files (*.json);;All files (*)"));
+        QStringLiteral("Jam2 song (*.jam2song *.json);;JSON files (*.json);;All files (*)"),
+        nullptr,
+        QFileDialog::DontUseNativeDialog);
     if (path.isEmpty()) {
         return;
     }
@@ -4701,7 +4760,9 @@ void MainWindow::saveSong()
         this,
         QStringLiteral("Save Jam2 Song"),
         appReleaseFilePath(QStringLiteral("songs"), chordModel_.title() + QStringLiteral(".jam2song")),
-        QStringLiteral("Jam2 song (*.jam2song);;JSON files (*.json);;All files (*)"));
+        QStringLiteral("Jam2 song (*.jam2song);;JSON files (*.json);;All files (*)"),
+        nullptr,
+        QFileDialog::DontUseNativeDialog);
     if (path.isEmpty()) {
         return;
     }
