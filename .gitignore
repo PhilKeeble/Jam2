@@ -28,6 +28,7 @@ Testing/
 /logs/
 /tools/logs/
 /tools/stress_logs/
+/incoming_uploads/
 /artifacts/logs/
 /artifacts/release/
 __pycache__/

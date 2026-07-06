@@ -37,8 +37,10 @@
 #include <QMouseEvent>
 #include <QIODevice>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPolygon>
 #include <QProcess>
+#include <QProxyStyle>
 #include <QRegularExpression>
 #include <QScrollBar>
 #include <QUrl>
@@ -47,6 +49,7 @@
 #include <QSplitter>
 #include <QScrollArea>
 #include <QStringList>
+#include <QStyleOption>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
@@ -768,6 +771,56 @@ private:
 
 namespace {
 
+class Jam2Style final : public QProxyStyle {
+public:
+    using QProxyStyle::QProxyStyle;
+
+    void drawPrimitive(PrimitiveElement element, const QStyleOption* option, QPainter* painter, const QWidget* widget = nullptr) const override
+    {
+        if (element != PE_IndicatorCheckBox) {
+            QProxyStyle::drawPrimitive(element, option, painter, widget);
+            return;
+        }
+
+        const QRect box = option->rect.adjusted(1, 1, -1, -1);
+        const bool enabled = (option->state & State_Enabled) != 0;
+        const bool checked = (option->state & State_On) != 0;
+        const bool hovered = (option->state & State_MouseOver) != 0;
+        const bool focused = (option->state & State_HasFocus) != 0;
+        const QColor border = enabled
+            ? (hovered || focused ? QColor(QStringLiteral("#66c6a6")) : QColor(QStringLiteral("#8a97a1")))
+            : QColor(QStringLiteral("#4d565d"));
+        const QColor fill = checked ? QColor(QStringLiteral("#1b3b33")) : QColor(QStringLiteral("#101214"));
+        const QColor tick = enabled ? QColor(QStringLiteral("#f2f5f7")) : QColor(QStringLiteral("#7a858c"));
+
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, true);
+        painter->setPen(QPen(border, 1.25));
+        painter->setBrush(fill);
+        painter->drawRect(box);
+
+        if (checked) {
+            painter->setPen(QPen(tick, 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            QPainterPath path;
+            path.moveTo(box.left() + box.width() * 0.24, box.top() + box.height() * 0.54);
+            path.lineTo(box.left() + box.width() * 0.43, box.top() + box.height() * 0.72);
+            path.lineTo(box.left() + box.width() * 0.77, box.top() + box.height() * 0.30);
+            painter->drawPath(path);
+        }
+        painter->restore();
+    }
+};
+
+void installJam2Style()
+{
+    static bool installed = false;
+    if (installed) {
+        return;
+    }
+    QApplication::setStyle(new Jam2Style(QApplication::style()));
+    installed = true;
+}
+
 QString keyToHex(const std::array<std::uint8_t, 16>& key)
 {
     return QString::fromStdString(jam2::hex_encode(key.data(), key.size()));
@@ -950,19 +1003,41 @@ bool isCustomFocusPreset(const QString& key)
     return key.isEmpty() || key == QStringLiteral("custom");
 }
 
-QString trackCheckBoxStyle()
-{
-    return QStringLiteral(
-        "QCheckBox::indicator { width: 16px; height: 16px; border: 2px solid #d7dde2; background: #101214; }"
-        "QCheckBox::indicator:hover { border-color: #ffffff; }"
-        "QCheckBox::indicator:checked { border: 2px solid #66c6a6; background: #66c6a6; }");
-}
-
 QString trackValueEditorStyle()
 {
     return QStringLiteral(
         "QAbstractSpinBox, QComboBox, QLineEdit { border: 1px solid #52616c; background: #101214; color: #f2f5f7; padding: 2px 6px; }"
-        "QAbstractSpinBox:focus, QComboBox:focus, QLineEdit:focus { border: 1px solid #66c6a6; }");
+        "QAbstractSpinBox:focus, QComboBox:focus, QLineEdit:focus { border: 1px solid #66c6a6; }"
+        "QAbstractSpinBox:disabled, QComboBox:disabled, QLineEdit:disabled { border: 1px solid #343c42; background: #171a1d; color: #6f7a82; }");
+}
+
+void applyMutedEditorStyle(QWidget* widget)
+{
+    if (widget == nullptr) {
+        return;
+    }
+    widget->setAttribute(Qt::WA_MacShowFocusRect, false);
+    widget->setStyleSheet(trackValueEditorStyle());
+    if (auto* combo = qobject_cast<QComboBox*>(widget); combo != nullptr && combo->lineEdit() != nullptr) {
+        combo->lineEdit()->setAttribute(Qt::WA_MacShowFocusRect, false);
+        combo->lineEdit()->setStyleSheet(trackValueEditorStyle());
+    }
+}
+
+void updateCaptureDurationControl(QCheckBox* manualStopCheck, QSpinBox* durationSpin)
+{
+    if (manualStopCheck == nullptr || durationSpin == nullptr) {
+        return;
+    }
+    durationSpin->setEnabled(!manualStopCheck->isChecked());
+}
+
+void updateCaptureDurationControl(QCheckBox* manualStopCheck, QSpinBox* durationSpin, QLabel* durationLabel)
+{
+    updateCaptureDurationControl(manualStopCheck, durationSpin);
+    if (durationLabel != nullptr && manualStopCheck != nullptr) {
+        durationLabel->setEnabled(!manualStopCheck->isChecked());
+    }
 }
 
 QString deviceId(const QString& text)
@@ -1166,6 +1241,7 @@ void scrollAreaByWheel(QScrollArea& scrollArea, QWheelEvent& wheel)
 MainWindow::MainWindow(QWidget* parent)
     : QWidget(parent)
 {
+    installJam2Style();
     generateSession();
     buildUi();
     QApplication::instance()->installEventFilter(this);
@@ -1521,7 +1597,7 @@ QWidget* MainWindow::buildSessionPage()
     extraArgsEdit_ = new QLineEdit(page);
     startButton_ = new QPushButton(QStringLiteral("Start Jam"), page);
     joinButton_ = new QPushButton(QStringLiteral("Join Jam"), page);
-    stopButton_ = new QPushButton(QStringLiteral("Stop"), page);
+    stopButton_ = new QPushButton(QStringLiteral("End Jam"), page);
     refreshControlButton_ = new QPushButton(QStringLiteral("Refresh Control"), page);
     stopButton_->setEnabled(false);
     refreshControlButton_->setEnabled(false);
@@ -1532,6 +1608,19 @@ QWidget* MainWindow::buildSessionPage()
     deviceBox_->setEditable(false);
     deviceBox_->setMinimumWidth(280);
     localOutputBox_->setMinimumWidth(280);
+    const QList<QWidget*> sessionEditors{
+        modeBox_, jam2PathEdit_, bindHostEdit_, portSpin_, publicHostEdit_, connectUrlEdit_,
+        generatedUrlEdit_, stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, waitMsSpin_,
+        streamMsSpin_, streamLingerMsSpin_, statsWarmupMsSpin_, logStatsEdit_,
+        socketSendBufferSpin_, socketRecvBufferSpin_, deviceBox_, localOutputBox_, inputChannelsEdit_,
+        outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_, prefillSpin_,
+        playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, driftSmoothingSpin_,
+        driftDeadbandSpin_, driftMaxCorrectionSpin_, playoutDelaySpin_, adaptiveTargetSpin_,
+        adaptiveMinSpin_, adaptiveMaxSpin_, adaptiveReleaseSpin_, extraArgsEdit_,
+    };
+    for (QWidget* widget : sessionEditors) {
+        applyMutedEditorStyle(widget);
+    }
     const QList<QWidget*> sessionDialogWidgets{
         modeBox_, jam2PathEdit_, bindHostEdit_, portSpin_, publicHostEdit_, connectUrlEdit_,
         generatedUrlEdit_, stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, waitMsSpin_,
@@ -1651,8 +1740,7 @@ QWidget* MainWindow::buildTrackPage()
     trackSpeedSpin_->setDecimals(2);
     trackSpeedSpin_->setValue(1.0);
     trackSpeedSpin_->setFixedWidth(92);
-    trackSpeedSpin_->setAttribute(Qt::WA_MacShowFocusRect, false);
-    trackSpeedSpin_->setStyleSheet(trackValueEditorStyle());
+    applyMutedEditorStyle(trackSpeedSpin_);
     trackPitchSlider_ = new QSlider(Qt::Horizontal, page);
     trackPitchSlider_->setRange(-12, 12);
     trackPitchSlider_->setValue(0);
@@ -1662,8 +1750,7 @@ QWidget* MainWindow::buildTrackPage()
     trackPitchSpin_->setSingleStep(1);
     trackPitchSpin_->setSuffix(QStringLiteral(" semitones"));
     trackPitchSpin_->setFixedWidth(128);
-    trackPitchSpin_->setAttribute(Qt::WA_MacShowFocusRect, false);
-    trackPitchSpin_->setStyleSheet(trackValueEditorStyle());
+    applyMutedEditorStyle(trackPitchSpin_);
     focusFrequencySlider_ = new QSlider(Qt::Horizontal, page);
     focusFrequencySlider_->setRange(40, 8000);
     focusFrequencySlider_->setValue(120);
@@ -1673,38 +1760,29 @@ QWidget* MainWindow::buildTrackPage()
     focusFrequencySpin_->setValue(120);
     focusFrequencySpin_->setSuffix(QStringLiteral(" Hz"));
     focusFrequencySpin_->setFixedWidth(108);
-    focusFrequencySpin_->setAttribute(Qt::WA_MacShowFocusRect, false);
-    focusFrequencySpin_->setStyleSheet(trackValueEditorStyle());
+    applyMutedEditorStyle(focusFrequencySpin_);
     auto* syncBox = new QCheckBox(QStringLiteral("Sync track controls"), page);
     syncBox->setChecked(true);
-    syncBox->setStyleSheet(trackCheckBoxStyle());
     capturePathEdit_ = new QLineEdit(SessionController::defaultCapturePath(), page);
     capturePathEdit_->setMinimumWidth(420);
-    capturePathEdit_->setAttribute(Qt::WA_MacShowFocusRect, false);
-    capturePathEdit_->setStyleSheet(trackValueEditorStyle());
+    applyMutedEditorStyle(capturePathEdit_);
     captureOutputEdit_ = new QLineEdit(page);
     captureOutputEdit_->setMinimumWidth(420);
-    captureOutputEdit_->setAttribute(Qt::WA_MacShowFocusRect, false);
-    captureOutputEdit_->setStyleSheet(trackValueEditorStyle());
+    applyMutedEditorStyle(captureOutputEdit_);
     loopbackSourceBox_ = new QComboBox(page);
     loopbackSourceBox_->setEditable(true);
     loopbackSourceBox_->addItem(QStringLiteral("[default] System mix"), QStringLiteral("default"));
     loopbackSourceBox_->setMinimumWidth(360);
-    loopbackSourceBox_->setAttribute(Qt::WA_MacShowFocusRect, false);
-    loopbackSourceBox_->setStyleSheet(trackValueEditorStyle());
-    if (loopbackSourceBox_->lineEdit() != nullptr) {
-        loopbackSourceBox_->lineEdit()->setAttribute(Qt::WA_MacShowFocusRect, false);
-        loopbackSourceBox_->lineEdit()->setStyleSheet(trackValueEditorStyle());
-    }
+    applyMutedEditorStyle(loopbackSourceBox_);
     captureManualStopCheck_ = new QCheckBox(QStringLiteral("Record until stopped"), page);
     captureManualStopCheck_->setChecked(true);
-    captureManualStopCheck_->setStyleSheet(trackCheckBoxStyle());
     captureDurationSpin_ = new QSpinBox(page);
-    captureDurationSpin_->setRange(1000, 600000);
-    captureDurationSpin_->setValue(30000);
-    captureDurationSpin_->setSuffix(QStringLiteral(" ms"));
+    captureDurationSpin_->setRange(1, 600);
+    captureDurationSpin_->setValue(30);
+    captureDurationSpin_->setSuffix(QStringLiteral(" s"));
     captureDurationSpin_->setEnabled(false);
     captureDurationSpin_->setMinimumWidth(120);
+    applyMutedEditorStyle(captureDurationSpin_);
     captureTriggerCheck_ = new QCheckBox(QStringLiteral("Trigger on signal"), page);
     trimLeadingCheck_ = new QCheckBox(QStringLiteral("Trim leading silence"), page);
     trimTrailingCheck_ = new QCheckBox(QStringLiteral("Trim trailing silence"), page);
@@ -1716,27 +1794,32 @@ QWidget* MainWindow::buildTrackPage()
     triggerThresholdSpin_->setValue(-45.0);
     triggerThresholdSpin_->setSuffix(QStringLiteral(" dB"));
     triggerThresholdSpin_->setMinimumWidth(120);
+    applyMutedEditorStyle(triggerThresholdSpin_);
     tailThresholdSpin_ = new QDoubleSpinBox(page);
     tailThresholdSpin_->setRange(-120.0, 0.0);
     tailThresholdSpin_->setDecimals(1);
     tailThresholdSpin_->setValue(-50.0);
     tailThresholdSpin_->setSuffix(QStringLiteral(" dB"));
     tailThresholdSpin_->setMinimumWidth(120);
+    applyMutedEditorStyle(tailThresholdSpin_);
     preRollSpin_ = new QSpinBox(page);
     preRollSpin_->setRange(0, 10000);
     preRollSpin_->setValue(250);
     preRollSpin_->setSuffix(QStringLiteral(" ms"));
     preRollSpin_->setMinimumWidth(120);
+    applyMutedEditorStyle(preRollSpin_);
     triggerHoldSpin_ = new QSpinBox(page);
     triggerHoldSpin_->setRange(1, 5000);
     triggerHoldSpin_->setValue(50);
     triggerHoldSpin_->setSuffix(QStringLiteral(" ms"));
     triggerHoldSpin_->setMinimumWidth(120);
+    applyMutedEditorStyle(triggerHoldSpin_);
     tailSilenceSpin_ = new QSpinBox(page);
     tailSilenceSpin_->setRange(0, 30000);
     tailSilenceSpin_->setValue(1000);
     tailSilenceSpin_->setSuffix(QStringLiteral(" ms"));
     tailSilenceSpin_->setMinimumWidth(120);
+    applyMutedEditorStyle(tailSilenceSpin_);
     playTrackButton_ = new QPushButton(QStringLiteral("Play Track"), page);
     stopTrackButton_ = new QPushButton(QStringLiteral("Stop Track"), page);
     loopStartButton_ = new QPushButton(QStringLiteral("Loop Start"), page);
@@ -1744,10 +1827,8 @@ QWidget* MainWindow::buildTrackPage()
     clearLoopButton_ = new QPushButton(QStringLiteral("Clear Loop"), page);
     loopEnabledCheck_ = new QCheckBox(QStringLiteral("Loop whole track"), page);
     loopEnabledCheck_->setChecked(false);
-    loopEnabledCheck_->setStyleSheet(trackCheckBoxStyle());
     waveformGridCheck_ = new QCheckBox(QStringLiteral("Show waveform grid"), page);
     waveformGridCheck_->setChecked(trackController_.model().waveformGridVisible);
-    waveformGridCheck_->setStyleSheet(trackCheckBoxStyle());
     trackLevelSlider_ = new QSlider(Qt::Horizontal, page);
     trackLevelSlider_->setRange(-60, 12);
     trackLevelSlider_->setValue(0);
@@ -1795,7 +1876,6 @@ QWidget* MainWindow::buildTrackPage()
     auto* focusLayout = new QHBoxLayout(focusControl);
     focusLayout->setContentsMargins(0, 0, 0, 0);
     focusFrequencyCheck_ = new QCheckBox(page);
-    focusFrequencyCheck_->setStyleSheet(trackCheckBoxStyle());
     focusPresetBox_ = new QComboBox(page);
     focusPresetBox_->addItem(QStringLiteral("Custom"), QStringLiteral("custom"));
     focusPresetBox_->addItem(QStringLiteral("Bass"), QStringLiteral("bass"));
@@ -1803,8 +1883,7 @@ QWidget* MainWindow::buildTrackPage()
     focusPresetBox_->addItem(QStringLiteral("Vocals"), QStringLiteral("vocals"));
     focusPresetBox_->addItem(QStringLiteral("Drums"), QStringLiteral("drums"));
     focusPresetBox_->setFixedWidth(108);
-    focusPresetBox_->setAttribute(Qt::WA_MacShowFocusRect, false);
-    focusPresetBox_->setStyleSheet(trackValueEditorStyle());
+    applyMutedEditorStyle(focusPresetBox_);
     focusLayout->addWidget(focusFrequencyCheck_);
     focusLayout->addWidget(focusPresetBox_);
     focusLayout->addWidget(focusFrequencySlider_, 1);
@@ -1982,9 +2061,8 @@ QWidget* MainWindow::buildTrackPage()
         trackController_.model().syncControls = checked;
     });
     QObject::connect(captureManualStopCheck_, &QCheckBox::toggled, this, [this](bool checked) {
-        if (captureDurationSpin_) {
-            captureDurationSpin_->setEnabled(!checked);
-        }
+        (void)checked;
+        updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_);
     });
     QObject::connect(captureButton_, &QPushButton::clicked, this, [this] { showInputCaptureDialog(); });
     QObject::connect(loopbackCaptureButton_, &QPushButton::clicked, this, [this] { showLoopbackCaptureDialog(); });
@@ -2002,10 +2080,12 @@ QWidget* MainWindow::buildMetronomePage()
     metronomeBpmSpin_->setRange(1, 400);
     metronomeBpmSpin_->setValue(qBound(1, static_cast<int>(std::lround(trackController_.model().acceptedBpm)), 400));
     metronomeBpmSpin_->setSuffix(QStringLiteral(" BPM"));
+    applyMutedEditorStyle(metronomeBpmSpin_);
 
     metronomeBeatsSpin_ = new QSpinBox(page);
     metronomeBeatsSpin_->setRange(1, 16);
     metronomeBeatsSpin_->setValue(4);
+    applyMutedEditorStyle(metronomeBeatsSpin_);
 
     metronomeDivisionBox_ = new QComboBox(page);
     metronomeDivisionBox_->addItem(QStringLiteral("Quarter"), 1);
@@ -2015,6 +2095,7 @@ QWidget* MainWindow::buildMetronomePage()
     metronomeDivisionBox_->addItem(QStringLiteral("6th"), 6);
     metronomeDivisionBox_->addItem(QStringLiteral("32nd"), 8);
     metronomeDivisionBox_->setCurrentIndex(metronomeDivisionBox_->findData(1));
+    applyMutedEditorStyle(metronomeDivisionBox_);
 
     localMetronomeLevelSlider_ = makeUnitSlider(0.35, page);
     trackMetronomeLabel_ = new QLabel(QStringLiteral("Local metronome stopped"), page);
@@ -3180,6 +3261,7 @@ void MainWindow::showInputCaptureDialog()
     for (QWidget* widget : visibleWidgets) {
         widget->show();
     }
+    updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_);
     deviceBox_->setMinimumWidth(420);
     inputChannelsEdit_->setMinimumWidth(220);
     sampleRateSpin_->setMinimumWidth(120);
@@ -3195,7 +3277,12 @@ void MainWindow::showInputCaptureDialog()
     form->addRow(QStringLiteral("Sample rate"), sampleRateSpin_);
     form->addRow(QStringLiteral("Buffer size"), bufferSizeSpin_);
     form->addRow(captureManualStopCheck_);
-    form->addRow(QStringLiteral("Duration limit"), captureDurationSpin_);
+    auto* durationLabel = new QLabel(QStringLiteral("Duration limit"), content);
+    form->addRow(durationLabel, captureDurationSpin_);
+    QObject::connect(captureManualStopCheck_, &QCheckBox::toggled, &dialog, [this, durationLabel] {
+        updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_, durationLabel);
+    });
+    updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_, durationLabel);
     form->addRow(captureTriggerCheck_);
     form->addRow(QStringLiteral("Trigger threshold"), triggerThresholdSpin_);
     form->addRow(QStringLiteral("Trigger hold"), triggerHoldSpin_);
@@ -3266,7 +3353,7 @@ void MainWindow::startInputCapture()
         QStringLiteral("--output"), output,
     };
     if (!captureManualStopCheck_ || !captureManualStopCheck_->isChecked()) {
-        args << QStringLiteral("--duration-ms") << QString::number(captureDurationSpin_->value());
+        args << QStringLiteral("--duration-ms") << QString::number(captureDurationSpin_->value() * 1000);
     }
     args << captureOptionArgs();
     const QFileInfo binary(capturePathEdit_->text());
@@ -3306,6 +3393,7 @@ void MainWindow::showLoopbackCaptureDialog()
     for (QWidget* widget : visibleWidgets) {
         widget->show();
     }
+    updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_);
     loopbackSourceBox_->setMinimumWidth(420);
     form->addRow(QStringLiteral("jam2-capture"), capturePathEdit_);
     auto* outputLayout = new QHBoxLayout();
@@ -3319,7 +3407,12 @@ void MainWindow::showLoopbackCaptureDialog()
     sourceLayout->addWidget(refreshSources);
     form->addRow(QStringLiteral("Loopback source"), sourceLayout);
     form->addRow(captureManualStopCheck_);
-    form->addRow(QStringLiteral("Duration limit"), captureDurationSpin_);
+    auto* durationLabel = new QLabel(QStringLiteral("Duration limit"), content);
+    form->addRow(durationLabel, captureDurationSpin_);
+    QObject::connect(captureManualStopCheck_, &QCheckBox::toggled, &dialog, [this, durationLabel] {
+        updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_, durationLabel);
+    });
+    updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_, durationLabel);
     form->addRow(captureTriggerCheck_);
     form->addRow(QStringLiteral("Trigger threshold"), triggerThresholdSpin_);
     form->addRow(QStringLiteral("Trigger hold"), triggerHoldSpin_);
@@ -3388,7 +3481,7 @@ void MainWindow::startLoopbackCapture()
         QStringLiteral("--output"), output,
     };
     if (!captureManualStopCheck_ || !captureManualStopCheck_->isChecked()) {
-        args << QStringLiteral("--duration-ms") << QString::number(captureDurationSpin_->value());
+        args << QStringLiteral("--duration-ms") << QString::number(captureDurationSpin_->value() * 1000);
     }
     args << captureOptionArgs();
     const QFileInfo binary(capturePathEdit_->text());
