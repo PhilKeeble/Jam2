@@ -202,6 +202,7 @@ private:
     QLabel* latencyLabel_ = nullptr;
     QLabel* ringDepthLabel_ = nullptr;
     QLabel* missingFramesLabel_ = nullptr;
+    QLabel* diagnosisLabel_ = nullptr;
     QLabel* leadLabel_ = nullptr;
     QLabel* leadPendingLabel_ = nullptr;
     QPushButton* leadSwapButton_ = nullptr;

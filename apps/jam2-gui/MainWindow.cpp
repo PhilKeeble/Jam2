@@ -46,6 +46,7 @@
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QScrollArea>
+#include <QStringList>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
@@ -833,6 +834,85 @@ QString metricText(
     return numberText(object, actualKey, suffix, precision);
 }
 
+double metricValue(const QJsonObject& object, const QString& key, double fallback = 0.0)
+{
+    return hasNumber(object, key) ? object.value(key).toDouble() : fallback;
+}
+
+double percentOf(double part, double whole)
+{
+    return whole > 0.0 ? part * 100.0 / whole : 0.0;
+}
+
+double perMinute(double count, double elapsedMs)
+{
+    return elapsedMs > 0.0 ? count * 60000.0 / elapsedMs : 0.0;
+}
+
+QString percentText(double value, int precision = 2)
+{
+    return QString::number(value, 'f', precision) + QStringLiteral("%");
+}
+
+QString diagnoseStats(const QJsonObject& stats)
+{
+    if (!hasNumber(stats, QStringLiteral("elapsed_ms"))) {
+        return QStringLiteral("Diagnosis -");
+    }
+
+    QStringList findings;
+    const double elapsedMs = metricValue(stats, QStringLiteral("elapsed_ms"));
+    const double recvPackets = metricValue(stats, QStringLiteral("recv_packets"));
+    const double frameSize = metricValue(stats, QStringLiteral("frame_size"));
+    const double receivedFrames = recvPackets * frameSize;
+    const double packetGapSamples = metricValue(stats, QStringLiteral("audio_packet_gap_samples"));
+    const double lossPercent = metricValue(stats, QStringLiteral("sequence_loss_percent"));
+    const double underrunMs = metricValue(stats, QStringLiteral("playback_ring_underrun_time_ms"));
+    const double underrunEvents = metricValue(stats, QStringLiteral("playback_ring_underrun_events"));
+    const double underrunBurstMaxMs = metricValue(stats, QStringLiteral("playback_ring_underrun_burst_max_ms"));
+    const double gapOver4x = metricValue(stats, QStringLiteral("audio_packet_gap_over_4x_count"));
+    const double reorderedLost = metricValue(stats, QStringLiteral("reordered_lost"));
+    const double sequenceLate = metricValue(stats, QStringLiteral("sequence_late"));
+    const double lateFrames = metricValue(stats, QStringLiteral("late_audio_frames_dropped"));
+    const double missingFrames = metricValue(stats, QStringLiteral("missing_audio_frames_inserted"));
+    const double driftPpm = std::abs(metricValue(stats, QStringLiteral("drift_ppm")));
+
+    const double underrunPercent = percentOf(underrunMs, elapsedMs);
+    const double underrunEventsPerMinute = perMinute(underrunEvents, elapsedMs);
+    const double gapOver4xPercent = percentOf(gapOver4x, packetGapSamples);
+    const double gapOver4xPerMinute = perMinute(gapOver4x, elapsedMs);
+    const double reorderLatePercent = percentOf(reorderedLost + sequenceLate, recvPackets);
+    const double lateFramePercent = percentOf(lateFrames, lateFrames + missingFrames + receivedFrames);
+    const double missingPressurePercent = percentOf(missingFrames, missingFrames + lateFrames + receivedFrames);
+
+    if (underrunPercent >= 0.10 || underrunEventsPerMinute >= 2.0 || underrunBurstMaxMs >= 10.0) {
+        findings << QStringLiteral("Underrun %1: +prefill/+max").arg(percentText(underrunPercent));
+    }
+    if (gapOver4xPercent >= 0.50 || gapOver4xPerMinute >= 2.0) {
+        findings << QStringLiteral("Bursts %1: +prefill/+adaptive max").arg(percentText(gapOver4xPercent));
+    }
+    if (lossPercent >= 0.50) {
+        findings << QStringLiteral("Loss %1: +frame/wired").arg(metricText(stats, QStringLiteral("sequence_loss_percent"), QStringLiteral("%"), 2));
+    }
+    if (reorderLatePercent >= 0.25 || lateFramePercent >= 0.25) {
+        findings << QStringLiteral("Late/reorder %1: +playout").arg(percentText(qMax(reorderLatePercent, lateFramePercent)));
+    }
+    if (missingPressurePercent >= 0.25 && findings.size() < 2) {
+        findings << QStringLiteral("Missing %1: +playout/prefill").arg(percentText(missingPressurePercent));
+    }
+    if (driftPpm >= 200.0 && findings.size() < 2) {
+        findings << QStringLiteral("Drift %1ppm: +correction").arg(metricText(stats, QStringLiteral("drift_ppm"), QString{}, 0));
+    }
+
+    if (findings.isEmpty()) {
+        return QStringLiteral("Diagnosis OK");
+    }
+    while (findings.size() > 2) {
+        findings.removeLast();
+    }
+    return QStringLiteral("Diagnosis ") + findings.join(QStringLiteral(" | "));
+}
+
 QSlider* makeUnitSlider(double value, QWidget* parent)
 {
     auto* slider = new QSlider(Qt::Horizontal, parent);
@@ -1281,6 +1361,10 @@ void MainWindow::buildUi()
     missingFramesLabel_->setObjectName(QStringLiteral("StatusPill"));
     driftLabel_ = new QLabel(QStringLiteral("Drift -"), this);
     driftLabel_->setObjectName(QStringLiteral("StatusPill"));
+    diagnosisLabel_ = new QLabel(QStringLiteral("Diagnosis -"), this);
+    diagnosisLabel_->setObjectName(QStringLiteral("StatusPill"));
+    diagnosisLabel_->setMinimumWidth(260);
+    diagnosisLabel_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     auto* footer = new QHBoxLayout();
     footer->addWidget(latencyLabel_);
     footer->addWidget(jitterLabel_);
@@ -1291,6 +1375,7 @@ void MainWindow::buildUi()
     footer->addWidget(missingFramesLabel_);
     footer->addWidget(driftLabel_);
     footer->addStretch(1);
+    footer->addWidget(diagnosisLabel_);
 
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(12, 10, 12, 10);
@@ -2399,29 +2484,67 @@ void MainWindow::updateStatsDisplay(const QJsonObject& stats)
     latencyLabel_->setText(QStringLiteral("Latency ") + latency);
     const QString jitterAvg = metricText(stats, QStringLiteral("jitter_avg_ms"), QStringLiteral(" ms"));
     const QString jitterMax = metricText(stats, QStringLiteral("jitter_max_ms"), QStringLiteral(" ms"));
-    jitterLabel_->setText(QStringLiteral("Jitter %1 / %2").arg(jitterAvg, jitterMax));
-    lossLabel_->setText(QStringLiteral("Loss ") + metricText(stats, QStringLiteral("sequence_loss_percent"), QStringLiteral("%"), 2));
+    const QString packetGapMax = metricText(stats, QStringLiteral("audio_packet_gap_max_ms"), QStringLiteral(" ms"));
+    jitterLabel_->setText(QStringLiteral("Jitter %1/%2 gap %3").arg(jitterAvg, jitterMax, packetGapMax));
+    const QString lostPackets = integerText(stats, QStringLiteral("sequence_lost"));
+    const QString lossEvents = integerText(stats, QStringLiteral("sequence_loss_events"));
+    const QString lossMaxGap = integerText(stats, QStringLiteral("sequence_loss_max_gap"));
+    lossLabel_->setText(QStringLiteral("Loss %1 lost %2 ev %3 max %4p")
+        .arg(metricText(stats, QStringLiteral("sequence_loss_percent"), QStringLiteral("%"), 2))
+        .arg(lostPackets)
+        .arg(lossEvents)
+        .arg(lossMaxGap));
     depthLabel_->setText(QStringLiteral("Depth ") + metricText(
         stats,
         QStringLiteral("playback_depth_avg_ms"),
         QStringLiteral(" ms"),
         1,
         QStringLiteral("playback_depth_ms")));
-    ringDepthLabel_->setText(QStringLiteral("Ring ") + metricText(stats, QStringLiteral("playback_ring_readable_ms"), QStringLiteral(" ms")));
+    QString outOfOrder = integerText(stats, QStringLiteral("sequence_out_of_order"));
+    if (outOfOrder == QStringLiteral("-")) {
+        outOfOrder = integerText(stats, QStringLiteral("out_of_order"));
+    }
+    QString latePackets = integerText(stats, QStringLiteral("sequence_late"));
+    if (latePackets == QStringLiteral("-")) {
+        latePackets = integerText(stats, QStringLiteral("late"));
+    }
+    ringDepthLabel_->setText(QStringLiteral("Reorder oo %1 rec %2 lost %3 late %4 max %5p")
+        .arg(outOfOrder)
+        .arg(integerText(stats, QStringLiteral("reordered_recovered")))
+        .arg(integerText(stats, QStringLiteral("reordered_lost")))
+        .arg(latePackets)
+        .arg(integerText(stats, QStringLiteral("reordered_max_distance_packets"))));
     QString underrunText = QStringLiteral("-");
     if (hasNumber(stats, QStringLiteral("playback_ring_underrun_time_ms"))) {
         const double underrunMs = stats.value(QStringLiteral("playback_ring_underrun_time_ms")).toDouble();
         underrunText = durationText(underrunMs);
-        if (hasNumber(stats, QStringLiteral("elapsed_ms")) && stats.value(QStringLiteral("elapsed_ms")).toDouble() > 0.0) {
-            const double perMinute = underrunMs * 60000.0 / stats.value(QStringLiteral("elapsed_ms")).toDouble();
-            underrunText += QStringLiteral(" (%1/min)").arg(durationText(perMinute));
+        if (hasNumber(stats, QStringLiteral("playback_ring_underrun_events"))) {
+            underrunText += QStringLiteral(" ev %1").arg(integerText(stats, QStringLiteral("playback_ring_underrun_events")));
+        }
+        if (hasNumber(stats, QStringLiteral("playback_ring_underrun_event_max_ms"))) {
+            underrunText += QStringLiteral(" max %1").arg(metricText(
+                stats,
+                QStringLiteral("playback_ring_underrun_event_max_ms"),
+                QStringLiteral(" ms")));
+        }
+        if (hasNumber(stats, QStringLiteral("playback_ring_underrun_burst_max_ms"))) {
+            underrunText += QStringLiteral(" burst %1").arg(metricText(
+                stats,
+                QStringLiteral("playback_ring_underrun_burst_max_ms"),
+                QStringLiteral(" ms")));
         }
     } else if (hasNumber(stats, QStringLiteral("playback_ring_underruns"))) {
         underrunText = integerText(stats, QStringLiteral("playback_ring_underruns")) + QStringLiteral(" fr");
     }
     underrunLabel_->setText(QStringLiteral("Underrun ") + underrunText);
-    missingFramesLabel_->setText(QStringLiteral("Missing %1 fr").arg(integerText(stats, QStringLiteral("missing_audio_frames_inserted"))));
+    missingFramesLabel_->setText(QStringLiteral("Stall loop %1 burst %2p gap>2x %3 missing %4 latefr %5")
+        .arg(metricText(stats, QStringLiteral("receive_loop_gap_max_ms"), QStringLiteral(" ms")))
+        .arg(integerText(stats, QStringLiteral("receive_burst_packets_max")))
+        .arg(integerText(stats, QStringLiteral("audio_packet_gap_over_2x_count")))
+        .arg(integerText(stats, QStringLiteral("missing_audio_frames_inserted")))
+        .arg(integerText(stats, QStringLiteral("late_audio_frames_dropped"))));
     driftLabel_->setText(QStringLiteral("Drift ") + metricText(stats, QStringLiteral("drift_ppm"), QStringLiteral(" ppm")));
+    diagnosisLabel_->setText(diagnoseStats(stats));
 }
 
 void MainWindow::handleControlMessage(const QJsonObject& message)

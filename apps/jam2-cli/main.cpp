@@ -2167,19 +2167,32 @@ void print_periodic_stream_stats(
     const CsvStatsLog::AudioSnapshot& audio,
     std::uint64_t elapsed_ms)
 {
+    const double underrun_event_max_ms =
+        frames_to_ms(static_cast<std::size_t>(audio.playback_ring_underrun_event_max_frames), options.sample_rate);
+    const double underrun_burst_max_ms =
+        frames_to_ms(static_cast<std::size_t>(audio.playback_ring_underrun_burst_max_frames), options.sample_rate);
     std::cout << "stats elapsed_ms=" << elapsed_ms
+              << " frame_size=" << options.frame_size
               << " sent_packets=" << stats.sent_packets
               << " recv_packets=" << stats.recv_packets
               << " sequence_lost=" << stats.sequence.lost
+              << " sequence_loss_events=" << stats.sequence.loss_events
+              << " sequence_loss_max_gap=" << stats.sequence.loss_max_gap
               << " sequence_loss_percent=" << sequence_loss_percent(stats)
-              << " out_of_order=" << stats.sequence.out_of_order
+              << " sequence_duplicate=" << stats.sequence.duplicate
+              << " sequence_out_of_order=" << stats.sequence.out_of_order
               << " reordered_recovered=" << stats.reordered_recovered
               << " reordered_lost=" << stats.reordered_lost
-              << " late=" << stats.sequence.late
+              << " reordered_lost_events=" << stats.reordered_lost_events
+              << " reordered_max_distance_packets=" << stats.reordered_max_distance_packets
+              << " sequence_late=" << stats.sequence.late
               << " playback_depth_avg_ms=" << playback_depth_avg_ms(stats, options)
               << " playback_ring_readable_ms=" << frames_to_ms(audio.playback_ring_readable, options.sample_rate)
               << " playback_ring_underruns=" << audio.playback_ring_underruns
               << " playback_ring_underrun_events=" << audio.playback_ring_underrun_events
+              << " playback_ring_underrun_event_max_ms=" << underrun_event_max_ms
+              << " playback_ring_underrun_burst_events=" << audio.playback_ring_underrun_burst_events
+              << " playback_ring_underrun_burst_max_ms=" << underrun_burst_max_ms
               << " playback_ring_underrun_time_ms="
               << frames_to_ms(static_cast<std::size_t>(audio.playback_ring_underruns), options.sample_rate)
               << " playback_ring_underrun_time_percent="
@@ -2190,6 +2203,14 @@ void print_periodic_stream_stats(
                   static_cast<double>(stats.jitter_sum_us) / static_cast<double>(stats.jitter_samples) / 1000.0 :
                   0.0)
               << " jitter_max_ms=" << (stats.jitter_samples > 0 ? static_cast<double>(stats.jitter_max_us) / 1000.0 : 0.0)
+              << " audio_packet_gap_max_ms="
+              << (stats.audio_packet_gap_samples > 0 ? static_cast<double>(stats.audio_packet_gap_max_us) / 1000.0 : 0.0)
+              << " audio_packet_gap_over_2x_count=" << stats.audio_packet_gap_over_2x_count
+              << " audio_packet_gap_over_4x_count=" << stats.audio_packet_gap_over_4x_count
+              << " audio_packet_gap_samples=" << stats.audio_packet_gap_samples
+              << " receive_loop_gap_max_ms="
+              << (stats.receive_loop_gap_samples > 0 ? static_cast<double>(stats.receive_loop_gap_max_us) / 1000.0 : 0.0)
+              << " receive_burst_packets_max=" << stats.receive_burst_packets_max
               << " estimated_one_way_ms=" << estimated_one_way_ms(stats, options)
               << " rtt_avg_ms=" << rtt_avg_ms(stats)
               << " drift_ppm=" << stats.drift_ppm
@@ -2214,9 +2235,18 @@ void print_compact_status(
     const double remote_level = unit_from_ppm(runtime.remote_level_ppm.load(std::memory_order_relaxed));
     const int live_metronome_mode = runtime.metronome_mode.load(std::memory_order_relaxed);
     const bool playback_prefilled = audio_stream != nullptr && audio_stream->playback_prefilled();
+    const auto audio_snapshot = make_audio_snapshot(audio_stream, nullptr, playback_ring);
+    const double playback_underrun_time_ms =
+        frames_to_ms(static_cast<std::size_t>(audio_snapshot.playback_ring_underruns), options.sample_rate);
+    const double playback_underrun_event_max_ms =
+        frames_to_ms(static_cast<std::size_t>(audio_snapshot.playback_ring_underrun_event_max_frames), options.sample_rate);
+    const double playback_underrun_burst_max_ms =
+        frames_to_ms(static_cast<std::size_t>(audio_snapshot.playback_ring_underrun_burst_max_frames), options.sample_rate);
     if (options.status_jsonl) {
         std::cout << "{\"event\":\"status\""
                   << ",\"elapsed_ms\":" << elapsed_ms
+                  << ",\"recv_packets\":" << stats.recv_packets
+                  << ",\"frame_size\":" << options.frame_size
                   << ",\"metronome\":\"" << (runtime.metronome.load(std::memory_order_relaxed) ? "on" : "off") << "\""
                   << ",\"bpm\":" << runtime.bpm.load(std::memory_order_relaxed)
                   << ",\"metronome_level\":" << metro_level
@@ -2244,14 +2274,41 @@ void print_compact_status(
                   << ",\"adaptive_playback_release_events\":" << stats.adaptive_playback_release_events
                   << ",\"rtt_avg_ms\":" << rtt_avg_ms(stats)
                   << ",\"jitter_avg_ms\":" << avg_us_to_ms(stats.jitter_sum_us, stats.jitter_samples)
+                  << ",\"jitter_max_ms\":"
+                  << (stats.jitter_samples > 0 ? static_cast<double>(stats.jitter_max_us) / 1000.0 : 0.0)
                   << ",\"sequence_lost\":" << stats.sequence.lost
+                  << ",\"sequence_loss_events\":" << stats.sequence.loss_events
+                  << ",\"sequence_loss_max_gap\":" << stats.sequence.loss_max_gap
                   << ",\"sequence_loss_percent\":" << sequence_loss_percent(stats)
+                  << ",\"sequence_duplicate\":" << stats.sequence.duplicate
+                  << ",\"sequence_out_of_order\":" << stats.sequence.out_of_order
+                  << ",\"sequence_late\":" << stats.sequence.late
+                  << ",\"reordered_recovered\":" << stats.reordered_recovered
+                  << ",\"reordered_lost\":" << stats.reordered_lost
+                  << ",\"reordered_lost_events\":" << stats.reordered_lost_events
+                  << ",\"reordered_max_distance_packets\":" << stats.reordered_max_distance_packets
+                  << ",\"audio_packet_gap_max_ms\":"
+                  << (stats.audio_packet_gap_samples > 0 ? static_cast<double>(stats.audio_packet_gap_max_us) / 1000.0 : 0.0)
+                  << ",\"audio_packet_gap_over_2x_count\":" << stats.audio_packet_gap_over_2x_count
+                  << ",\"audio_packet_gap_over_4x_count\":" << stats.audio_packet_gap_over_4x_count
+                  << ",\"audio_packet_gap_samples\":" << stats.audio_packet_gap_samples
+                  << ",\"receive_burst_packets_max\":" << stats.receive_burst_packets_max
+                  << ",\"playback_ring_readable_ms\":"
+                  << frames_to_ms(audio_snapshot.playback_ring_readable, options.sample_rate)
+                  << ",\"playback_ring_underruns\":" << audio_snapshot.playback_ring_underruns
+                  << ",\"playback_ring_underrun_events\":" << audio_snapshot.playback_ring_underrun_events
+                  << ",\"playback_ring_underrun_time_ms\":" << playback_underrun_time_ms
+                  << ",\"playback_ring_underrun_event_max_ms\":" << playback_underrun_event_max_ms
+                  << ",\"playback_ring_underrun_burst_events\":" << audio_snapshot.playback_ring_underrun_burst_events
+                  << ",\"playback_ring_underrun_burst_max_ms\":" << playback_underrun_burst_max_ms
                   << ",\"drift_ppm\":" << stats.drift_ppm
                   << ",\"resampler_ratio\":" << stats.resampler_ratio
                   << "}\n";
         return;
     }
     std::cout << "status elapsed_ms=" << elapsed_ms
+              << " recv_packets=" << stats.recv_packets
+              << " frame_size=" << options.frame_size
               << " metro=" << (runtime.metronome.load(std::memory_order_relaxed) ? "on" : "off")
               << " bpm=" << runtime.bpm.load(std::memory_order_relaxed)
               << " metro_level=" << metro_level
@@ -2278,8 +2335,32 @@ void print_compact_status(
               << " adaptive_playback_release_events=" << stats.adaptive_playback_release_events
               << " rtt_avg_ms=" << rtt_avg_ms(stats)
               << " jitter_avg_ms=" << avg_us_to_ms(stats.jitter_sum_us, stats.jitter_samples)
+              << " jitter_max_ms="
+              << (stats.jitter_samples > 0 ? static_cast<double>(stats.jitter_max_us) / 1000.0 : 0.0)
               << " sequence_lost=" << stats.sequence.lost
+              << " sequence_loss_events=" << stats.sequence.loss_events
+              << " sequence_loss_max_gap=" << stats.sequence.loss_max_gap
               << " sequence_loss_percent=" << sequence_loss_percent(stats)
+              << " sequence_duplicate=" << stats.sequence.duplicate
+              << " sequence_out_of_order=" << stats.sequence.out_of_order
+              << " sequence_late=" << stats.sequence.late
+              << " reordered_recovered=" << stats.reordered_recovered
+              << " reordered_lost=" << stats.reordered_lost
+              << " reordered_lost_events=" << stats.reordered_lost_events
+              << " reordered_max_distance_packets=" << stats.reordered_max_distance_packets
+              << " audio_packet_gap_max_ms="
+              << (stats.audio_packet_gap_samples > 0 ? static_cast<double>(stats.audio_packet_gap_max_us) / 1000.0 : 0.0)
+              << " audio_packet_gap_over_2x_count=" << stats.audio_packet_gap_over_2x_count
+              << " audio_packet_gap_over_4x_count=" << stats.audio_packet_gap_over_4x_count
+              << " audio_packet_gap_samples=" << stats.audio_packet_gap_samples
+              << " receive_burst_packets_max=" << stats.receive_burst_packets_max
+              << " playback_ring_readable_ms=" << frames_to_ms(audio_snapshot.playback_ring_readable, options.sample_rate)
+              << " playback_ring_underruns=" << audio_snapshot.playback_ring_underruns
+              << " playback_ring_underrun_events=" << audio_snapshot.playback_ring_underrun_events
+              << " playback_ring_underrun_time_ms=" << playback_underrun_time_ms
+              << " playback_ring_underrun_event_max_ms=" << playback_underrun_event_max_ms
+              << " playback_ring_underrun_burst_events=" << audio_snapshot.playback_ring_underrun_burst_events
+              << " playback_ring_underrun_burst_max_ms=" << playback_underrun_burst_max_ms
               << " drift_ppm=" << stats.drift_ppm
               << " resampler_ratio=" << stats.resampler_ratio
               << "\n";
@@ -3855,8 +3936,18 @@ int run_listen(int argc, char** argv)
             ++ignored_malformed;
             continue;
         }
+        try {
+            const auto remote_config = decode_handshake_config(bytes, header);
+            require_matching_stream_config(remote_config, options);
+        } catch (const std::exception& error) {
+            const std::string message = error.what();
+            socket.send_to(from, make_handshake_packet(jam2::protocol::PacketType::HelloAck, session, header.sequence, options));
+            std::cerr << message << "\n";
+            print_startup_json("listen", "error", options, local, from, endpoint_mode, connection_url, message);
+            return 4;
+        }
         locked_peer = from;
-        socket.send_to(from, make_control_packet(jam2::protocol::PacketType::HelloAck, session, header.sequence));
+        socket.send_to(from, make_handshake_packet(jam2::protocol::PacketType::HelloAck, session, header.sequence, options));
         std::cout << "Peer locked: " << jam2::endpoint_to_string(from) << "\n";
         std::cout << "Handshake complete\n";
         std::cout << "Ignored malformed/auth/session packets: " << ignored_malformed << "\n";
@@ -3921,7 +4012,7 @@ int run_connect(int argc, char** argv)
     print_socket_options(socket);
     print_startup_json("connect", "connecting", options, socket.local_endpoint(), session.endpoint, "jam2-url", "");
 
-    const auto hello = make_control_packet(jam2::protocol::PacketType::Hello, session, 1);
+    const auto hello = make_handshake_packet(jam2::protocol::PacketType::Hello, session, 1, options);
     const std::uint64_t deadline = options.wait_ms > 0 ?
         jam2::monotonic_us() + static_cast<std::uint64_t>(options.wait_ms) * 1000ULL :
         UINT64_MAX;
@@ -3942,6 +4033,15 @@ int run_connect(int argc, char** argv)
         try {
             const auto header = jam2::protocol::decode_packet(bytes, session.key, session.session_id);
             if (header.type == jam2::protocol::PacketType::HelloAck) {
+                try {
+                    const auto remote_config = decode_handshake_config(bytes, header);
+                    require_matching_stream_config(remote_config, options);
+                } catch (const std::exception& error) {
+                    const std::string message = error.what();
+                    std::cerr << message << "\n";
+                    print_startup_json("connect", "error", options, socket.local_endpoint(), session.endpoint, "jam2-url", "", message);
+                    return 4;
+                }
                 std::cout << "Handshake complete\n";
                 std::cout << "Attempts: " << attempts << "\n";
                 std::cout << "Ignored packets: " << ignored << "\n";
