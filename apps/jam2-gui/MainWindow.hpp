@@ -155,6 +155,7 @@ private:
     QSpinBox* waitMsSpin_ = nullptr;
     QSpinBox* streamMsSpin_ = nullptr;
     QSpinBox* streamLingerMsSpin_ = nullptr;
+    QCheckBox* statsCheck_ = nullptr;
     QSpinBox* statsWarmupMsSpin_ = nullptr;
     QLineEdit* logStatsEdit_ = nullptr;
     QSpinBox* socketSendBufferSpin_ = nullptr;
@@ -175,7 +176,6 @@ private:
     QSpinBox* driftDeadbandSpin_ = nullptr;
     QSpinBox* driftMaxCorrectionSpin_ = nullptr;
     QCheckBox* noStunCheck_ = nullptr;
-    QCheckBox* metronomeCheck_ = nullptr;
     QSpinBox* bpmSpin_ = nullptr;
     QComboBox* metronomeModeBox_ = nullptr;
     QSlider* metronomeLevelSlider_ = nullptr;

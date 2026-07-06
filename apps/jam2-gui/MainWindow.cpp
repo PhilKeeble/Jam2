@@ -1253,6 +1253,16 @@ MainWindow::MainWindow(QWidget* parent)
     jam2_.onFinished = [this](int code) {
         appendLog(QStringLiteral("jam2 exited rc=%1").arg(code));
         connectionLabel_->setText(QStringLiteral("Stopped"));
+        localMetronomeRunning_ = false;
+        if (trackMetronomeLabel_) {
+            trackMetronomeLabel_->setText(QStringLiteral("Local metronome stopped"));
+        }
+        if (startTrackMetronomeButton_) {
+            startTrackMetronomeButton_->setEnabled(true);
+        }
+        if (stopTrackMetronomeButton_) {
+            stopTrackMetronomeButton_->setEnabled(false);
+        }
         startButton_->setEnabled(true);
         joinButton_->setEnabled(true);
         stopButton_->setEnabled(false);
@@ -1514,6 +1524,8 @@ QWidget* MainWindow::buildSessionPage()
     streamLingerMsSpin_ = new QSpinBox(page);
     streamLingerMsSpin_->setRange(0, 60000);
     streamLingerMsSpin_->setValue(100);
+    statsCheck_ = new QCheckBox(QStringLiteral("Periodic stats"), page);
+    statsCheck_->setChecked(true);
     statsWarmupMsSpin_ = new QSpinBox(page);
     statsWarmupMsSpin_->setRange(0, 600000);
     statsWarmupMsSpin_->setValue(3000);
@@ -1565,8 +1577,6 @@ QWidget* MainWindow::buildSessionPage()
     driftMaxCorrectionSpin_->setRange(0, 50000);
     driftMaxCorrectionSpin_->setValue(500);
     noStunCheck_ = new QCheckBox(QStringLiteral("No STUN"), page);
-    metronomeCheck_ = new QCheckBox(QStringLiteral("Metronome"), page);
-    metronomeCheck_->setChecked(true);
     bpmSpin_ = new QSpinBox(page);
     bpmSpin_->setRange(1, 400);
     bpmSpin_->setValue(120);
@@ -1625,7 +1635,7 @@ QWidget* MainWindow::buildSessionPage()
     const QList<QWidget*> sessionDialogWidgets{
         modeBox_, jam2PathEdit_, bindHostEdit_, portSpin_, publicHostEdit_, connectUrlEdit_,
         generatedUrlEdit_, stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, waitMsSpin_,
-        streamMsSpin_, streamLingerMsSpin_, statsWarmupMsSpin_, logStatsEdit_,
+        streamMsSpin_, streamLingerMsSpin_, statsCheck_, statsWarmupMsSpin_, logStatsEdit_,
         socketSendBufferSpin_, socketRecvBufferSpin_, deviceBox_, localOutputBox_, inputChannelsEdit_,
         outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_, prefillSpin_,
         playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, driftCorrectionCheck_,
@@ -1638,13 +1648,12 @@ QWidget* MainWindow::buildSessionPage()
     }
 
     auto* runtimeLayout = new QGridLayout();
-    runtimeLayout->addWidget(metronomeCheck_, 0, 0);
-    runtimeLayout->addWidget(new QLabel(QStringLiteral("Mode"), page), 0, 1);
-    runtimeLayout->addWidget(metronomeModeBox_, 0, 2);
-    runtimeLayout->addWidget(new QLabel(QStringLiteral("Metronome"), page), 0, 3);
-    runtimeLayout->addWidget(metronomeLevelSlider_, 0, 4);
-    runtimeLayout->addWidget(new QLabel(QStringLiteral("Remote"), page), 0, 5);
-    runtimeLayout->addWidget(remoteLevelSlider_, 0, 6);
+    runtimeLayout->addWidget(new QLabel(QStringLiteral("Mode"), page), 0, 0);
+    runtimeLayout->addWidget(metronomeModeBox_, 0, 1);
+    runtimeLayout->addWidget(new QLabel(QStringLiteral("Metronome"), page), 0, 2);
+    runtimeLayout->addWidget(metronomeLevelSlider_, 0, 3);
+    runtimeLayout->addWidget(new QLabel(QStringLiteral("Remote"), page), 0, 4);
+    runtimeLayout->addWidget(remoteLevelSlider_, 0, 5);
 
     runtimeMixBox_ = new QGroupBox(QStringLiteral("Runtime Mix"), page);
     runtimeMixBox_->setLayout(runtimeLayout);
@@ -1666,7 +1675,6 @@ QWidget* MainWindow::buildSessionPage()
     QObject::connect(joinButton_, &QPushButton::clicked, this, [this] { showJoinJamDialog(); });
     QObject::connect(stopButton_, &QPushButton::clicked, this, [this] { stopJam(); });
     QObject::connect(refreshControlButton_, &QPushButton::clicked, this, [this] { refreshControlConnection(); });
-    QObject::connect(metronomeCheck_, &QCheckBox::toggled, this, [this] { updateRuntimeControls(); });
     QObject::connect(metronomeModeBox_, &QComboBox::currentTextChanged, this, [this] { updateRuntimeControls(); });
     QObject::connect(metronomeLevelSlider_, &QSlider::valueChanged, this, [this] { updateRuntimeControls(); });
     QObject::connect(remoteLevelSlider_, &QSlider::valueChanged, this, [this] { updateRuntimeControls(); });
@@ -2239,6 +2247,24 @@ void MainWindow::startJam()
 
 void MainWindow::launchJamProcess(const QStringList& args)
 {
+    if (localMetronomeSink_) {
+        localMetronomeSink_->stop();
+        localMetronomeSink_.reset();
+    }
+    if (localMetronomeDevice_) {
+        localMetronomeDevice_->close();
+        localMetronomeDevice_.reset();
+    }
+    localMetronomeRunning_ = false;
+    if (trackMetronomeLabel_) {
+        trackMetronomeLabel_->setText(QStringLiteral("Jam metronome stopped"));
+    }
+    if (startTrackMetronomeButton_) {
+        startTrackMetronomeButton_->setEnabled(true);
+    }
+    if (stopTrackMetronomeButton_) {
+        stopTrackMetronomeButton_->setEnabled(false);
+    }
     jam2_.start(jam2PathEdit_->text(), args);
     appendLog(QStringLiteral("starting: %1 %2").arg(jam2PathEdit_->text(), args.join(QLatin1Char(' '))));
     startButton_->setEnabled(false);
@@ -2288,7 +2314,7 @@ void MainWindow::showStartJamDialog()
         stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, noStunCheck_, deviceBox_,
         localOutputBox_, inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_,
         prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_,
-        streamMsSpin_, streamLingerMsSpin_, statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
+        streamMsSpin_, streamLingerMsSpin_, statsCheck_, statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
         socketRecvBufferSpin_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
         driftMaxCorrectionSpin_, sampleTimePlayoutCheck_, playoutDelaySpin_, adaptiveCushionCheck_,
         adaptiveTargetSpin_, adaptiveMinSpin_, adaptiveMaxSpin_, adaptiveReleaseSpin_, extraArgsEdit_,
@@ -2331,6 +2357,7 @@ void MainWindow::showStartJamDialog()
     advancedForm->addRow(QStringLiteral("Wait ms"), waitMsSpin_);
     advancedForm->addRow(QStringLiteral("Stream ms"), streamMsSpin_);
     advancedForm->addRow(QStringLiteral("Stream linger ms"), streamLingerMsSpin_);
+    advancedForm->addRow(QString(), statsCheck_);
     advancedForm->addRow(QStringLiteral("Stats warmup ms"), statsWarmupMsSpin_);
     advancedForm->addRow(QStringLiteral("Log stats folder"), logStatsEdit_);
     advancedForm->addRow(QStringLiteral("Socket send buffer"), socketSendBufferSpin_);
@@ -2391,7 +2418,7 @@ void MainWindow::showStartJamDialog()
         stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, noStunCheck_, deviceBox_,
         localOutputBox_, inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_,
         prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_,
-        streamMsSpin_, streamLingerMsSpin_, statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
+        streamMsSpin_, streamLingerMsSpin_, statsCheck_, statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
         socketRecvBufferSpin_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
         driftMaxCorrectionSpin_, sampleTimePlayoutCheck_, playoutDelaySpin_, adaptiveCushionCheck_,
         adaptiveTargetSpin_, adaptiveMinSpin_, adaptiveMaxSpin_, adaptiveReleaseSpin_, extraArgsEdit_,
@@ -2421,6 +2448,7 @@ void MainWindow::showJoinJamDialog()
     auto* layout = new QVBoxLayout(content);
     const QList<QWidget*> visibleWidgets{
         connectUrlEdit_, jam2PathEdit_, deviceBox_, localOutputBox_, inputChannelsEdit_, outputChannelsEdit_,
+        statsCheck_, statsWarmupMsSpin_, logStatsEdit_,
     };
     for (QWidget* widget : visibleWidgets) {
         widget->show();
@@ -2441,6 +2469,14 @@ void MainWindow::showJoinJamDialog()
     auto* audioBox = new QGroupBox(QStringLiteral("Local Audio"), content);
     audioBox->setLayout(audioForm);
     layout->addWidget(audioBox);
+
+    auto* statsForm = new QFormLayout();
+    statsForm->addRow(QString(), statsCheck_);
+    statsForm->addRow(QStringLiteral("Stats warmup ms"), statsWarmupMsSpin_);
+    statsForm->addRow(QStringLiteral("Log stats folder"), logStatsEdit_);
+    auto* statsBox = new QGroupBox(QStringLiteral("Local Stats"), content);
+    statsBox->setLayout(statsForm);
+    layout->addWidget(statsBox);
 
     auto* scroll = new QScrollArea(&dialog);
     scroll->setWidgetResizable(true);
@@ -2464,6 +2500,7 @@ void MainWindow::showJoinJamDialog()
     const int result = dialog.exec();
     const QList<QWidget*> joinWidgets{
         connectUrlEdit_, jam2PathEdit_, deviceBox_, localOutputBox_, inputChannelsEdit_, outputChannelsEdit_,
+        statsCheck_, statsWarmupMsSpin_, logStatsEdit_,
     };
     for (QWidget* widget : joinWidgets) {
         widget->setParent(this);
@@ -2485,6 +2522,16 @@ void MainWindow::stopJam()
     pendingJoinLaunch_ = false;
     pendingJoinBaseArgs_.clear();
     jam2_.stop();
+    localMetronomeRunning_ = false;
+    if (trackMetronomeLabel_) {
+        trackMetronomeLabel_->setText(QStringLiteral("Local metronome stopped"));
+    }
+    if (startTrackMetronomeButton_) {
+        startTrackMetronomeButton_->setEnabled(true);
+    }
+    if (stopTrackMetronomeButton_) {
+        stopTrackMetronomeButton_->setEnabled(false);
+    }
     startButton_->setEnabled(true);
     joinButton_->setEnabled(true);
     stopButton_->setEnabled(false);
@@ -2876,7 +2923,6 @@ QJsonObject MainWindow::leaderSettingsMessage() const
         {QStringLiteral("drift_smoothing"), driftSmoothingSpin_->value()},
         {QStringLiteral("drift_deadband_ppm"), driftDeadbandSpin_->value()},
         {QStringLiteral("drift_max_correction_ppm"), driftMaxCorrectionSpin_->value()},
-        {QStringLiteral("metronome"), metronomeCheck_->isChecked()},
         {QStringLiteral("bpm"), metronomeBpmSpin_ ? metronomeBpmSpin_->value() : bpmSpin_->value()},
         {QStringLiteral("metronome_level"), static_cast<double>(metronomeLevelSlider_->value()) / 100.0},
         {QStringLiteral("remote_level"), static_cast<double>(remoteLevelSlider_->value()) / 100.0},
@@ -2907,7 +2953,6 @@ void MainWindow::applyLeaderSettings(const QJsonObject& settings)
     driftSmoothingSpin_->setValue(settings.value(QStringLiteral("drift_smoothing")).toDouble(driftSmoothingSpin_->value()));
     driftDeadbandSpin_->setValue(settings.value(QStringLiteral("drift_deadband_ppm")).toInt(driftDeadbandSpin_->value()));
     driftMaxCorrectionSpin_->setValue(settings.value(QStringLiteral("drift_max_correction_ppm")).toInt(driftMaxCorrectionSpin_->value()));
-    metronomeCheck_->setChecked(settings.value(QStringLiteral("metronome")).toBool(metronomeCheck_->isChecked()));
     if (metronomeBpmSpin_) {
         metronomeBpmSpin_->setValue(settings.value(QStringLiteral("bpm")).toInt(metronomeBpmSpin_->value()));
     }
@@ -2990,11 +3035,8 @@ void MainWindow::updateRuntimeControls()
     }
     jam2_.sendLine(QStringLiteral("metro level %1").arg(static_cast<double>(metronomeLevelSlider_->value()) / 100.0, 0, 'f', 2));
     jam2_.sendLine(QStringLiteral("metro mode %1").arg(metronomeModeBox_->currentText()));
-    if (metronomeCheck_->isChecked()) {
+    if (localMetronomeRunning_) {
         sendMetronomePatternToJam();
-        jam2_.sendLine(QStringLiteral("metro on"));
-    } else {
-        jam2_.sendLine(QStringLiteral("metro off"));
     }
     jam2_.sendLine(QStringLiteral("remote level %1").arg(static_cast<double>(remoteLevelSlider_->value()) / 100.0, 0, 'f', 2));
 }
@@ -3757,6 +3799,30 @@ void MainWindow::updateTrackTimeline()
 
 void MainWindow::startTrackMetronome()
 {
+    if (jam2_.isRunning()) {
+        if (localMetronomeSink_) {
+            localMetronomeSink_->stop();
+            localMetronomeSink_.reset();
+        }
+        if (localMetronomeDevice_) {
+            localMetronomeDevice_->close();
+            localMetronomeDevice_.reset();
+        }
+        localMetronomeRunning_ = true;
+        updateRuntimeControls();
+        jam2_.sendLine(QStringLiteral("metro on"));
+        if (trackMetronomeLabel_) {
+            trackMetronomeLabel_->setText(QStringLiteral("Jam metronome running"));
+        }
+        if (startTrackMetronomeButton_) {
+            startTrackMetronomeButton_->setEnabled(false);
+        }
+        if (stopTrackMetronomeButton_) {
+            stopTrackMetronomeButton_->setEnabled(true);
+        }
+        return;
+    }
+
     stopTrackMetronome();
 
     QAudioDevice outputDevice = selectedLocalOutputDevice();
@@ -3812,6 +3878,7 @@ void MainWindow::startTrackMetronome()
 
 void MainWindow::stopTrackMetronome()
 {
+    const bool jamMetronomeWasRunning = jam2_.isRunning() && localMetronomeRunning_;
     if (localMetronomeSink_) {
         localMetronomeSink_->stop();
         localMetronomeSink_.reset();
@@ -3821,8 +3888,13 @@ void MainWindow::stopTrackMetronome()
         localMetronomeDevice_.reset();
     }
     localMetronomeRunning_ = false;
+    if (jamMetronomeWasRunning) {
+        jam2_.sendLine(QStringLiteral("metro off"));
+    }
     if (trackMetronomeLabel_) {
-        trackMetronomeLabel_->setText(QStringLiteral("Local metronome stopped"));
+        trackMetronomeLabel_->setText(jam2_.isRunning()
+            ? QStringLiteral("Jam metronome stopped")
+            : QStringLiteral("Local metronome stopped"));
     }
     if (startTrackMetronomeButton_) {
         startTrackMetronomeButton_->setEnabled(true);
@@ -4085,12 +4157,10 @@ QStringList MainWindow::commonJamArgs(bool includeExtraArgs) const
          << QStringLiteral("--playback-ring-frames") << QString::number(playbackRingSpin_->value())
          << QStringLiteral("--input-channels") << inputChannelsEdit_->text()
          << QStringLiteral("--output-channels") << outputChannelsEdit_->text()
-         << QStringLiteral("--stats") << QStringLiteral("enabled")
-         << QStringLiteral("--stats-interval-ms") << QStringLiteral("1000")
-         << QStringLiteral("--stats-warmup-ms") << QString::number(statsWarmupMsSpin_->value())
+         << QStringLiteral("--stats") << (statsCheck_->isChecked() ? QStringLiteral("enabled") : QStringLiteral("disabled"))
          << QStringLiteral("--machine-readable-startup") << QStringLiteral("on")
          << QStringLiteral("--status-format") << QStringLiteral("jsonl")
-         << QStringLiteral("--metronome") << (metronomeCheck_->isChecked() ? QStringLiteral("on") : QStringLiteral("off"))
+         << QStringLiteral("--metronome") << QStringLiteral("off")
          << QStringLiteral("--bpm") << QString::number(metronomeBpmSpin_ ? metronomeBpmSpin_->value() : bpmSpin_->value())
          << QStringLiteral("--metronome-level") << QString::number(static_cast<double>(metronomeLevelSlider_->value()) / 100.0, 'f', 2)
          << QStringLiteral("--remote-level") << QString::number(static_cast<double>(remoteLevelSlider_->value()) / 100.0, 'f', 2)
@@ -4103,6 +4173,10 @@ QStringList MainWindow::commonJamArgs(bool includeExtraArgs) const
          << QStringLiteral("--drift-deadband-ppm") << QString::number(driftDeadbandSpin_->value())
          << QStringLiteral("--drift-max-correction-ppm") << QString::number(driftMaxCorrectionSpin_->value())
          << QStringLiteral("--stream-linger-ms") << QString::number(streamLingerMsSpin_->value());
+    if (statsCheck_->isChecked()) {
+        args << QStringLiteral("--stats-interval-ms") << QStringLiteral("1000")
+             << QStringLiteral("--stats-warmup-ms") << QString::number(statsWarmupMsSpin_->value());
+    }
     if (playbackMaxSpin_->value() > 0) {
         args << QStringLiteral("--playback-max-frames") << QString::number(playbackMaxSpin_->value());
     }
@@ -4112,7 +4186,7 @@ QStringList MainWindow::commonJamArgs(bool includeExtraArgs) const
     if (streamMsSpin_->value() > 0) {
         args << QStringLiteral("--stream-ms") << QString::number(streamMsSpin_->value());
     }
-    if (!logStatsEdit_->text().trimmed().isEmpty()) {
+    if (statsCheck_->isChecked() && !logStatsEdit_->text().trimmed().isEmpty()) {
         args << QStringLiteral("--log-stats") << logStatsEdit_->text().trimmed();
     }
     if (socketSendBufferSpin_->value() > 0) {
