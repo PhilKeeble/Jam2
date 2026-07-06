@@ -54,6 +54,12 @@ Include CLI/session/error validation checks:
 python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --include-validation --clean
 ```
 
+Include targeted recorded tone/pulse probes for audible artifact analysis under stress:
+
+```powershell
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --include-audio-probes --clean
+```
+
 Useful args:
 
 - `--server-audio-device`: local listen-side audio device id.
@@ -63,6 +69,7 @@ Useful args:
 - `--scenario NAME`: run only one scenario. Repeat for multiple scenarios.
 - `--stream-ms N`: stream duration per scenario. Default: `30000`.
 - `--include-validation`: run short non-audio/error-path validation checks.
+- `--include-audio-probes`: add targeted recorded tone/pulse probes for audible analysis.
 - `--validation-stream-ms N`: stream duration for validation pair tests. Default: `5000`.
 - `--logs PATH`: output folder. Default: `tools\stress_logs`.
 - `--clean`: delete the output folder before running.
@@ -74,7 +81,17 @@ Main outputs:
 - `tools\stress_logs\stress_results.csv`
 - `tools\stress_logs\stress_results.json`
 - per-scenario `recording\*.wav` folders for metronome scenarios
+- per-probe `recording\*.wav` and `audio_probe_analysis` data when `--include-audio-probes` is used
 - `tools\stress_logs\validation_results.json` when `--include-validation` is used
+
+Audio probe coverage:
+
+- `audio-probe-clean-tone`: symmetric tone without injected impairment.
+- `audio-probe-jitter-tone`: symmetric tone under high ordered jitter.
+- `audio-probe-loss-server-to-client`: server tone, client silence, high loss.
+- `audio-probe-loss-client-to-server`: client tone, server silence, high loss.
+- `audio-probe-adaptive-on-pulse`: symmetric pulse under jitter/burst pressure.
+- `audio-probe-adaptive-off-pulse`: same pulse pressure with adaptive cushion disabled.
 
 ## Two-Host Static Benchmarks
 

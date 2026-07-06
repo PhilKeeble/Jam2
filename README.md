@@ -186,6 +186,14 @@ Each case folder contains server/client `stats.csv`, `stdout.txt`, `stderr.txt`,
 
 Tone coverage includes symmetric `tone-440`, `tone-server-to-client`, and `tone-client-to-server` cases without applying every direction to every profile.
 
+Local stress tests can also add targeted recorded tone/pulse probes:
+
+```powershell
+python tools/run_stress_local.py --server-audio-device 16 --client-audio-device 0 --sample-rate 44100 --include-audio-probes --clean
+```
+
+Those probes write WAV stems and `audio_probe_analysis` data under `tools/stress_logs` for clean, jitter, directional-loss, and adaptive on/off pressure cases.
+
 The server publishes the current `jam2://` URL as raw JSON at:
 
 ```text

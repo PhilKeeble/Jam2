@@ -9,6 +9,7 @@ import threading
 import time
 from pathlib import Path
 
+from jam2_audio_analysis import analyze_recording_dir
 from jam2_harness import (
     collect_side_csv,
     ManagedProcess,
@@ -25,6 +26,25 @@ from udp_stress_proxy import DirectionImpairment, ProxyImpairment, UdpStressProx
 
 DEFAULT_STREAM_MS = 30000
 METRONOME_WAV_TOLERANCE_FRAMES = 96
+INFRA_AUDIO_PROBE_TAGS = {
+    "recording_sidecar_missing",
+    "recording_sidecar_invalid",
+    "recording_dropped_frames",
+    "recording_writer_errors",
+    "stem_length_mismatch",
+    "my-input_missing",
+    "their-input_missing",
+    "mix_missing",
+    "inputs-mix_missing",
+    "metronome_missing",
+    "my-input_invalid",
+    "their-input_invalid",
+    "mix_invalid",
+    "inputs-mix_invalid",
+    "metronome_invalid",
+    "my-input_tone_missing",
+    "their-input_tone_missing",
+}
 
 
 def parse_args():
@@ -45,6 +65,10 @@ def parse_args():
         default="aggressive",
         help="profile family for stress scenarios; both duplicates selected scenarios for comparison")
     parser.add_argument("--include-validation", action="store_true", help="also run short CLI/session/error validation checks")
+    parser.add_argument(
+        "--include-audio-probes",
+        action="store_true",
+        help="also run targeted recorded tone/pulse probes for audible artifact analysis")
     parser.add_argument("--validation-stream-ms", type=int, default=5000)
     parser.add_argument(
         "--scenario",
@@ -60,6 +84,11 @@ def selected_profile(profile_name):
     if profile_name == "aggressive":
         return AGGRESSIVE_LOCAL_PROFILE
     raise ValueError(f"unknown profile: {profile_name}")
+
+
+def audio_probe_health_ok(analysis):
+    tags = set(analysis.get("tags", []))
+    return not (tags & INFRA_AUDIO_PROBE_TAGS)
 
 
 def scenario_catalog(base_profile=AGGRESSIVE_LOCAL_PROFILE):
@@ -247,6 +276,59 @@ def standard_suite():
     ]
 
 
+def audio_probe_suite(base_profile=AGGRESSIVE_LOCAL_PROFILE):
+    return {
+        "audio-probe-clean-tone": {
+            "profile": base_profile,
+            "impairment": ProxyImpairment.both(DirectionImpairment()),
+            "signal": "tone-440",
+            "server_signal": "tone-440",
+            "client_signal": "tone-440",
+            "expect": "symmetric tone should record cleanly without injected impairment",
+        },
+        "audio-probe-jitter-tone": {
+            "profile": base_profile,
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0)),
+            "signal": "tone-440",
+            "server_signal": "tone-440",
+            "client_signal": "tone-440",
+            "expect": "symmetric tone should expose audible artifacts under high ordered jitter",
+        },
+        "audio-probe-loss-server-to-client": {
+            "profile": base_profile,
+            "impairment": ProxyImpairment.both(DirectionImpairment(loss_percent=1.0)),
+            "signal": "tone-server-to-client",
+            "server_signal": "tone-440",
+            "client_signal": "silence",
+            "expect": "server-to-client tone should expose directional loss artifacts",
+        },
+        "audio-probe-loss-client-to-server": {
+            "profile": base_profile,
+            "impairment": ProxyImpairment.both(DirectionImpairment(loss_percent=1.0)),
+            "signal": "tone-client-to-server",
+            "server_signal": "silence",
+            "client_signal": "tone-440",
+            "expect": "client-to-server tone should expose directional loss artifacts",
+        },
+        "audio-probe-adaptive-on-pulse": {
+            "profile": base_profile,
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0, burst_pause_ms=250.0, burst_every_ms=8000.0)),
+            "signal": "pulse-1s",
+            "server_signal": "pulse-1s",
+            "client_signal": "pulse-1s",
+            "expect": "pulse recording should show whether adaptive cushion masks burst pressure",
+        },
+        "audio-probe-adaptive-off-pulse": {
+            "profile": adaptive_off_profile(base_profile),
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0, burst_pause_ms=250.0, burst_every_ms=8000.0)),
+            "signal": "pulse-1s",
+            "server_signal": "pulse-1s",
+            "client_signal": "pulse-1s",
+            "expect": "pulse recording should expose the same burst pressure with adaptive cushion disabled",
+        },
+    }
+
+
 def expand_scenarios(scenario_ids):
     expanded = []
     for scenario_id in scenario_ids:
@@ -257,16 +339,28 @@ def expand_scenarios(scenario_ids):
     return expanded
 
 
-def scenario_plan(profile_mode, requested_scenarios):
+def scenario_plan(profile_mode, requested_scenarios, include_audio_probes=False):
     base_ids = expand_scenarios(requested_scenarios) if requested_scenarios else standard_suite()
     if profile_mode != "both":
-        return scenario_catalog(selected_profile(profile_mode)), base_ids
+        base_profile = selected_profile(profile_mode)
+        catalog = scenario_catalog(base_profile)
+        if include_audio_probes:
+            probes = audio_probe_suite(base_profile)
+            catalog.update(probes)
+            base_ids = base_ids + list(probes.keys())
+        return catalog, base_ids
 
     planned_catalog = {}
     planned_ids = []
     for profile_name in ("aggressive", "safe"):
-        catalog = scenario_catalog(selected_profile(profile_name))
-        for scenario_id in base_ids:
+        base_profile = selected_profile(profile_name)
+        catalog = scenario_catalog(base_profile)
+        profile_ids = list(base_ids)
+        if include_audio_probes:
+            probes = audio_probe_suite(base_profile)
+            catalog.update(probes)
+            profile_ids.extend(probes.keys())
+        for scenario_id in profile_ids:
             planned_id = f"{profile_name}__{scenario_id}"
             scenario = dict(catalog[scenario_id])
             scenario["source_scenario"] = scenario_id
@@ -369,6 +463,13 @@ def verdict_for(result):
             return "runtime_remote_level_not_applied"
         if not observations.get("server_audio_control_metronome_mode_symmetric_delay", False):
             return "runtime_metronome_mode_not_applied"
+        return "pass"
+    if scenario.startswith("audio-probe-"):
+        audio = result.get("audio_probe_analysis", {})
+        if not audio:
+            return "audio_probe_missing"
+        if not audio.get("ok", False):
+            return audio.get("verdict", "audio_probe_failed")
         return "pass"
     return "pass"
 
@@ -578,7 +679,23 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
     profile = scenario["profile"]
     source_scenario = scenario.get("source_scenario", scenario_id)
     record_metronome = source_scenario == "metronome-shared-grid" or source_scenario.startswith("metronome-")
+    audio_probe = source_scenario.startswith("audio-probe-")
     commands = list(scenario.get("commands", []))
+    server_extra_args = []
+    client_extra_args = []
+    if audio_probe:
+        server_recording = Path(output_dir) / "server" / "recording"
+        client_recording = Path(output_dir) / "client" / "recording"
+        server_signal = scenario.get("server_signal", scenario.get("signal", "silence"))
+        client_signal = scenario.get("client_signal", scenario.get("signal", "silence"))
+        server_extra_args = [
+            "--record-jam-folder", str(server_recording),
+            "--test-input", server_signal,
+        ]
+        client_extra_args = [
+            "--record-jam-folder", str(client_recording),
+            "--test-input", client_signal,
+        ]
     if record_metronome:
         commands.extend([
             {"at_s": 1.0, "side": "server", "line": f"record jam start {Path(output_dir) / 'server' / 'recording'}"},
@@ -594,6 +711,7 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
         profile,
         args_ns.stream_ms,
         output_dir,
+        extra_args=server_extra_args,
         stdin_pipe=bool(commands))
     startup = listener.wait_for_startup("waiting", args_ns.startup_timeout_s)
     if startup is None:
@@ -621,6 +739,7 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
         profile,
         args_ns.stream_ms,
         output_dir,
+        extra_args=client_extra_args,
         stdin_pipe=bool(commands))
 
     command_thread = None
@@ -672,6 +791,29 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
     wav_analysis = analyze_metronome_recordings(result, server_paths, client_paths)
     if wav_analysis:
         result["metronome_wav_analysis"] = wav_analysis
+    if audio_probe:
+        server_analysis = analyze_recording_dir(
+            Path(server_paths["dir"]) / "recording",
+            scenario.get("signal", "silence"),
+            local_signal=scenario.get("server_signal", "silence"),
+            remote_signal=scenario.get("client_signal", "silence"))
+        client_analysis = analyze_recording_dir(
+            Path(client_paths["dir"]) / "recording",
+            scenario.get("signal", "silence"),
+            local_signal=scenario.get("client_signal", "silence"),
+            remote_signal=scenario.get("server_signal", "silence"))
+        server_ok = audio_probe_health_ok(server_analysis)
+        client_ok = audio_probe_health_ok(client_analysis)
+        result["audio_probe_analysis"] = {
+            "ok": server_ok and client_ok,
+            "verdict": "pass" if server_ok and client_ok else "audio_probe_analysis_failed",
+            "signal": scenario.get("signal", ""),
+            "server_signal": scenario.get("server_signal", ""),
+            "client_signal": scenario.get("client_signal", ""),
+            "server": server_analysis,
+            "client": client_analysis,
+            "tags": sorted(set(server_analysis.get("tags", []) + client_analysis.get("tags", []))),
+        }
     result["verdict"] = verdict_for(result)
     print_flush(
         f"[stress] finished {scenario_id} verdict={result['verdict']} "
@@ -685,6 +827,12 @@ def write_summary(path, results):
     lines = []
     for result in results:
         metrics = result.get("metrics", {}).get("combined", {})
+        audio_probe = result.get("audio_probe_analysis", {})
+        audio_suffix = ""
+        if audio_probe:
+            audio_suffix = (
+                f" audio_probe_ok={'yes' if audio_probe.get('ok', False) else 'no'}"
+                f" audio_tags={','.join(audio_probe.get('tags', [])) or '-'}")
         lines.append(
             f"{result.get('scenario')} verdict={result.get('verdict')} "
             f"loss_max={metrics.get('loss_percent_max', 0.0):.3f}% "
@@ -692,6 +840,7 @@ def write_summary(path, results):
             f"rtt_max={metrics.get('rtt_max_ms', 0.0):.1f}ms "
             f"underrun_ms={metrics.get('playback_underrun_time_ms_total', 0.0):.1f} "
             f"drift_abs_ppm={metrics.get('drift_abs_ppm_max', 0.0):.1f}"
+            f"{audio_suffix}"
         )
     Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -865,7 +1014,7 @@ def main():
         shutil.rmtree(logs)
     ensure_dir(logs)
 
-    catalog, scenario_ids = scenario_plan(args_ns.profile, args_ns.scenario)
+    catalog, scenario_ids = scenario_plan(args_ns.profile, args_ns.scenario, args_ns.include_audio_probes)
     unknown = [scenario for scenario in scenario_ids if scenario not in catalog]
     if unknown:
         return fail("unknown scenario(s): " + ", ".join(unknown))
@@ -883,6 +1032,9 @@ def main():
             "client_audio_device": args_ns.client_audio_device,
             "profile": catalog[scenario_id]["profile"].metadata(),
             "expect": catalog[scenario_id]["expect"],
+            "signal": catalog[scenario_id].get("signal", ""),
+            "server_signal": catalog[scenario_id].get("server_signal", ""),
+            "client_signal": catalog[scenario_id].get("client_signal", ""),
         })
         result = run_scenario(jam2, scenario_id, catalog[scenario_id], args_ns, scenario_dir, args_ns.seed + index)
         write_json(scenario_dir / "result.json", result)

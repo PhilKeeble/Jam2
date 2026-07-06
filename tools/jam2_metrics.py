@@ -224,6 +224,12 @@ def write_results_csv(path, results):
         "playout_delay_error_ms_abs_max",
         "metronome_wav_ok",
         "metronome_wav_verdict",
+        "audio_probe_ok",
+        "audio_probe_verdict",
+        "audio_probe_signal",
+        "audio_probe_server_signal",
+        "audio_probe_client_signal",
+        "audio_probe_tags",
         "server_metronome_wav_max_error_frames",
         "client_metronome_wav_max_error_frames",
         "server_metronome_wav_missing_clicks",
@@ -240,6 +246,7 @@ def write_results_csv(path, results):
             combined = result.get("metrics", {}).get("combined", {})
             proxy = result.get("proxy_stats", {})
             wav = result.get("metronome_wav_analysis", {})
+            audio_probe = result.get("audio_probe_analysis", {})
             wav_server = wav.get("server", {})
             wav_client = wav.get("client", {})
             row = {
@@ -261,6 +268,12 @@ def write_results_csv(path, results):
                 "proxy_server_to_client_send_errors": proxy.get("server_to_client_send_errors", 0),
                 "metronome_wav_ok": "yes" if wav.get("ok", False) else ("no" if wav else ""),
                 "metronome_wav_verdict": wav.get("verdict", ""),
+                "audio_probe_ok": "yes" if audio_probe.get("ok", False) else ("no" if audio_probe else ""),
+                "audio_probe_verdict": audio_probe.get("verdict", ""),
+                "audio_probe_signal": audio_probe.get("signal", ""),
+                "audio_probe_server_signal": audio_probe.get("server_signal", ""),
+                "audio_probe_client_signal": audio_probe.get("client_signal", ""),
+                "audio_probe_tags": ";".join(audio_probe.get("tags", [])),
                 "server_metronome_wav_max_error_frames": wav_server.get("max_abs_error_frames", ""),
                 "client_metronome_wav_max_error_frames": wav_client.get("max_abs_error_frames", ""),
                 "server_metronome_wav_missing_clicks": wav_server.get("missing_clicks", ""),
