@@ -46,6 +46,7 @@
 #include <QUrl>
 #include <QSlider>
 #include <QSignalBlocker>
+#include <QSizePolicy>
 #include <QSplitter>
 #include <QScrollArea>
 #include <QStringList>
@@ -1734,6 +1735,7 @@ QWidget* MainWindow::buildTrackPage()
     trackSpeedSlider_->setRange(10, 200);
     trackSpeedSlider_->setValue(100);
     trackSpeedSlider_->setMinimumWidth(220);
+    trackSpeedSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     trackSpeedSpin_ = new QDoubleSpinBox(page);
     trackSpeedSpin_->setRange(0.10, 2.00);
     trackSpeedSpin_->setSingleStep(0.01);
@@ -1745,6 +1747,7 @@ QWidget* MainWindow::buildTrackPage()
     trackPitchSlider_->setRange(-12, 12);
     trackPitchSlider_->setValue(0);
     trackPitchSlider_->setMinimumWidth(220);
+    trackPitchSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     trackPitchSpin_ = new QSpinBox(page);
     trackPitchSpin_->setRange(-12, 12);
     trackPitchSpin_->setSingleStep(1);
@@ -1755,6 +1758,7 @@ QWidget* MainWindow::buildTrackPage()
     focusFrequencySlider_->setRange(40, 8000);
     focusFrequencySlider_->setValue(120);
     focusFrequencySlider_->setMinimumWidth(220);
+    focusFrequencySlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     focusFrequencySpin_ = new QSpinBox(page);
     focusFrequencySpin_->setRange(40, 8000);
     focusFrequencySpin_->setValue(120);
@@ -1833,6 +1837,7 @@ QWidget* MainWindow::buildTrackPage()
     trackLevelSlider_->setRange(-60, 12);
     trackLevelSlider_->setValue(0);
     trackLevelSlider_->setMinimumWidth(160);
+    trackLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     trackController_.model().trackGainDb = 0.0;
     trackLevelDbLabel_ = new QLabel(dbText(trackController_.model().trackGainDb), page);
     trackLevelDbLabel_->setFrameShape(QFrame::StyledPanel);
@@ -1858,21 +1863,25 @@ QWidget* MainWindow::buildTrackPage()
         widget->hide();
     }
     auto* speedControl = new QWidget(page);
+    speedControl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     auto* speedLayout = new QHBoxLayout(speedControl);
     speedLayout->setContentsMargins(0, 0, 0, 0);
     speedLayout->addWidget(trackSpeedSlider_, 1);
     speedLayout->addWidget(trackSpeedSpin_);
     auto* pitchControl = new QWidget(page);
+    pitchControl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     auto* pitchLayout = new QHBoxLayout(pitchControl);
     pitchLayout->setContentsMargins(0, 0, 0, 0);
     pitchLayout->addWidget(trackPitchSlider_, 1);
     pitchLayout->addWidget(trackPitchSpin_);
     auto* trackLevelControl = new QWidget(page);
+    trackLevelControl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     auto* trackLevelLayout = new QHBoxLayout(trackLevelControl);
     trackLevelLayout->setContentsMargins(0, 0, 0, 0);
     trackLevelLayout->addWidget(trackLevelSlider_, 1);
     trackLevelLayout->addWidget(trackLevelDbLabel_);
     auto* focusControl = new QWidget(page);
+    focusControl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     auto* focusLayout = new QHBoxLayout(focusControl);
     focusLayout->setContentsMargins(0, 0, 0, 0);
     focusFrequencyCheck_ = new QCheckBox(page);
@@ -1896,6 +1905,7 @@ QWidget* MainWindow::buildTrackPage()
     loopOptionsLayout->addStretch(1);
 
     auto* form = new QFormLayout();
+    form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     form->addRow(trackNameLabel_);
     form->addRow(QStringLiteral("Speed"), speedControl);
     form->addRow(QStringLiteral("Pitch"), pitchControl);
