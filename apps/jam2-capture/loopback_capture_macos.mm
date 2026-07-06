@@ -293,7 +293,7 @@ std::string ns_to_utf8(NSString* value)
     return value ? std::string([value UTF8String]) : std::string();
 }
 
-using AudioHardwareCreateProcessTapFn = OSStatus (*)(CATapDescription*, AudioObjectID*);
+using AudioHardwareCreateProcessTapFn = OSStatus (*)(id, AudioObjectID*);
 using AudioHardwareDestroyProcessTapFn = OSStatus (*)(AudioObjectID);
 
 AudioHardwareCreateProcessTapFn create_process_tap()
@@ -311,6 +311,34 @@ void require_process_tap_api()
     if (create_process_tap() == nullptr || destroy_process_tap() == nullptr || NSClassFromString(@"CATapDescription") == nil) {
         throw std::runtime_error("macOS direct loopback requires macOS 14.2+ CoreAudio process taps. On older macOS, use BlackHole/Loopback as an input device with record-input.");
     }
+}
+
+id make_process_tap_description(NSUUID* tapUuid)
+{
+    Class tapClass = NSClassFromString(@"CATapDescription");
+    if (tapClass == nil) {
+        throw std::runtime_error("CATapDescription is not available on this macOS runtime");
+    }
+
+    SEL initSelector = NSSelectorFromString(@"initStereoGlobalTapButExcludeProcesses:");
+    id tapDescription = [tapClass alloc];
+    if (![tapDescription respondsToSelector:initSelector]) {
+        throw std::runtime_error("CATapDescription does not support stereo global process taps");
+    }
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    tapDescription = [tapDescription performSelector:initSelector withObject:@[]];
+#pragma clang diagnostic pop
+
+    if (tapDescription == nil) {
+        throw std::runtime_error("failed to allocate CATapDescription");
+    }
+
+    [tapDescription setValue:tapUuid forKey:@"UUID"];
+    [tapDescription setValue:@YES forKey:@"private"];
+    [tapDescription setValue:@0 forKey:@"muteBehavior"];
+    return tapDescription;
 }
 
 struct CaptureBuffer {
@@ -383,10 +411,7 @@ int record_loopback_macos(const MacLoopbackOptions& options)
         }
 
         NSUUID* tapUuid = [NSUUID UUID];
-        CATapDescription* tapDescription = [[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:@[]];
-        tapDescription.UUID = tapUuid;
-        tapDescription.private = YES;
-        tapDescription.muteBehavior = CATapUnmuted;
+        id tapDescription = make_process_tap_description(tapUuid);
 
         AudioObjectID tapId = kAudioObjectUnknown;
         check_osstatus(createTap(tapDescription, &tapId), "failed to create CoreAudio process tap");
@@ -427,6 +452,7 @@ int record_loopback_macos(const MacLoopbackOptions& options)
             }
 
             AudioDeviceIOProcID ioProcId = nullptr;
+            CaptureBuffer* capturePtr = &capture;
             check_osstatus(AudioDeviceCreateIOProcIDWithBlock(
                                &ioProcId,
                                aggregateId,
@@ -436,6 +462,7 @@ int record_loopback_macos(const MacLoopbackOptions& options)
                                    const AudioTimeStamp*,
                                    AudioBufferList*,
                                    const AudioTimeStamp*) {
+                                   CaptureBuffer& capture = *capturePtr;
                                    std::lock_guard<std::mutex> lock(capture.mutex);
                                    if (capture.done) {
                                        return;
