@@ -27,7 +27,7 @@ Might need more locking in across the app to the gui and grid, like having songs
 
 Docs needs to be fleshed out at some point
 Building.md for compilation instructions including pre-reqs needed for Mac and windows and how to do so.
-Quickstart.md for a very quick doc on how to download from the github release and get a jam going and pointing them to the other docs for specific issues.
+readme.md in repo root for a very quick doc on how to download from the github release and get a jam going and pointing them to the other docs for specific issues.
 Gui.md for docs on how the gui works, whats available, what different options do and how they interact so it behaves like a user manual for the GUI.
 Engine.md for docs on how the core engine can be used and what different options do and how they interact so it behaves like a user manual for the CLI.
 Metronome.md for docs specific to the metronome implementation, the different modes and how the interact with time and jams and standalone as that is one of the most complex parts of the tool

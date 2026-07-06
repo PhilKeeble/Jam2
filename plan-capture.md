@@ -63,11 +63,6 @@ Current rules:
 - Leading/trailing trim uses measured level.
 - Capture summary reports pre-roll used, trimmed leading/trailing frames, final duration, peak, and output path.
 
-Future:
-
-- Optional auto-stop after tail silence if fixed duration is too awkward for quick idea capture.
-- Add explicit trigger/tail timestamps if needed for debugging capture behavior.
-
 ## Loopback Capture Follow-Up
 
 Windows WASAPI loopback and macOS 14.2+ CoreAudio process-tap loopback exist in the first pass.
@@ -85,37 +80,11 @@ Rules:
 - Report duration, peak level, underruns/drops where available, and output path.
 - Keep loopback capture separate from ASIO/CoreAudio input capture.
 
-## Optional Capture Analysis
-
-Add after the Essentia investigation pass.
-
-Planned CLI:
-
-```text
-jam2-capture record-input --audio-device 5 --input-channels 1 --output riff.wav --analyze on
-jam2-capture record-loopback --source default --output backing.wav --analyze on
-```
-
-Behavior:
-
-- Analyze final WAV offline after recording and trim.
-- Detect approximate BPM, key, and chord suggestions where practical.
-- Write analysis sidecar metadata next to the WAV.
-- Treat analysis values as suggestions that the GUI can display and users can correct.
-- Corrected GUI values become project metadata and should not overwrite raw analysis unless explicitly exported.
-
 ## File Formats
 
 Current:
 
 - WAV PCM16 mono.
-
-Future:
-
-- Stereo or selected-channel-count WAV if needed.
-- 24-bit or float WAV if useful for higher-quality capture.
-- MP3 export only through an optional encoder if useful.
-- FLAC export if smaller lossless files become useful.
 
 Keep file-format support separate from the live UDP audio protocol.
 

@@ -40,6 +40,21 @@ add_executable(jam2-gui WIN32 MACOSX_BUNDLE
     main.cpp
 )
 
+if(APPLE)
+    enable_language(OBJCXX)
+    target_sources(jam2-gui PRIVATE
+        Jam2MacPermissions.hpp
+        Jam2MacPermissions.mm
+    )
+    set_target_properties(jam2-gui PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in"
+        MACOSX_BUNDLE_BUNDLE_NAME "Jam2"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.jam2.app"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+    )
+endif()
+
 jam2_set_app_output(jam2-gui)
 
 target_include_directories(jam2-gui PRIVATE
@@ -52,6 +67,13 @@ target_link_libraries(jam2-gui PRIVATE
     Qt6::Network
     Qt6::Widgets
 )
+
+if(APPLE)
+    target_link_libraries(jam2-gui PRIVATE
+        "-framework AVFoundation"
+        "-framework Foundation"
+    )
+endif()
 
 if(WIN32)
     get_target_property(QT_QMAKE_EXECUTABLE Qt6::qmake IMPORTED_LOCATION)

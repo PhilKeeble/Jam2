@@ -1,5 +1,6 @@
 #include "MainWindow.hpp"
 
+#include "Jam2MacPermissions.hpp"
 #include "SessionController.hpp"
 
 #include "common.hpp"
@@ -2441,6 +2442,12 @@ void MainWindow::startJam()
     if (jam2_.isRunning()) {
         return;
     }
+    QString permissionError;
+    if (!jam2EnsureMicrophonePermission(&permissionError)) {
+        QMessageBox::warning(this, QStringLiteral("Jam2 Microphone Access"), permissionError);
+        appendLog(permissionError);
+        return;
+    }
     QStringList args;
     const bool listenMode = modeBox_->currentText() == QStringLiteral("Listen");
     pendingJoinLaunch_ = false;
@@ -2509,6 +2516,13 @@ void MainWindow::startJam()
 
 void MainWindow::launchJamProcess(const QStringList& args)
 {
+    QString permissionError;
+    if (!jam2EnsureMicrophonePermission(&permissionError)) {
+        QMessageBox::warning(this, QStringLiteral("Jam2 Microphone Access"), permissionError);
+        appendLog(permissionError);
+        return;
+    }
+
     if (localMetronomeSink_) {
         localMetronomeSink_->stop();
         localMetronomeSink_.reset();
@@ -3626,6 +3640,12 @@ void MainWindow::showInputCaptureDialog()
 void MainWindow::startInputCapture()
 {
     if (captureProcess_.state() != QProcess::NotRunning) {
+        return;
+    }
+    QString permissionError;
+    if (!jam2EnsureMicrophonePermission(&permissionError)) {
+        QMessageBox::warning(this, QStringLiteral("Jam2 Capture Microphone Access"), permissionError);
+        appendLog(permissionError);
         return;
     }
     if (selectedDeviceId().isEmpty()) {
