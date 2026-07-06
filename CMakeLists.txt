@@ -77,12 +77,12 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${JAM2_BUILD_BIN_DIR}")
 
 add_subdirectory(apps/jam2-cli)
 
-if(JAM2_BUILD_GUI AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/apps/jam2-gui/CMakeLists.txt")
-    add_subdirectory(apps/jam2-gui)
-endif()
-
 if(JAM2_BUILD_CAPTURE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/apps/jam2-capture/CMakeLists.txt")
     add_subdirectory(apps/jam2-capture)
+endif()
+
+if(JAM2_BUILD_GUI AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/apps/jam2-gui/CMakeLists.txt")
+    add_subdirectory(apps/jam2-gui)
 endif()
 
 unset(CMAKE_RUNTIME_OUTPUT_DIRECTORY)

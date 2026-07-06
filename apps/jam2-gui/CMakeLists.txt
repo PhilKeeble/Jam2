@@ -53,6 +53,22 @@ if(APPLE)
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
     )
+    add_dependencies(jam2-gui jam2)
+    add_custom_command(TARGET jam2-gui POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:jam2>"
+            "$<TARGET_BUNDLE_DIR:jam2-gui>/Contents/MacOS/$<TARGET_FILE_NAME:jam2>"
+        VERBATIM
+    )
+    if(TARGET jam2-capture)
+        add_dependencies(jam2-gui jam2-capture)
+        add_custom_command(TARGET jam2-gui POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "$<TARGET_FILE:jam2-capture>"
+                "$<TARGET_BUNDLE_DIR:jam2-gui>/Contents/MacOS/$<TARGET_FILE_NAME:jam2-capture>"
+            VERBATIM
+        )
+    endif()
 endif()
 
 jam2_set_app_output(jam2-gui)
