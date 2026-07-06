@@ -3045,9 +3045,7 @@ void MainWindow::updateRuntimeControls()
     }
     jam2_.sendLine(QStringLiteral("metro level %1").arg(static_cast<double>(metronomeLevelSlider_->value()) / 100.0, 0, 'f', 2));
     jam2_.sendLine(QStringLiteral("metro mode %1").arg(metronomeModeBox_->currentText()));
-    if (localMetronomeRunning_) {
-        sendMetronomePatternToJam();
-    }
+    sendMetronomePatternToJam();
     jam2_.sendLine(QStringLiteral("remote level %1").arg(static_cast<double>(remoteLevelSlider_->value()) / 100.0, 0, 'f', 2));
 }
 

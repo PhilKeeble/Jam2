@@ -808,12 +808,15 @@ void apply_remote_level(CoreAudioDuplexContext& context, std::span<std::int32_t>
 void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t> output)
 {
     if (context.control == nullptr ||
-        !context.control->metronome_enabled.load(std::memory_order_relaxed) ||
         context.sample_rate <= 0.0) {
         return;
     }
-    if (context.control->metronome_mode.load(std::memory_order_relaxed) == 1 &&
-        !context.control->leader_audio_local_click.load(std::memory_order_relaxed)) {
+    const bool enabled = context.control->metronome_enabled.load(std::memory_order_relaxed);
+    const bool local_click_suppressed =
+        context.control->metronome_mode.load(std::memory_order_relaxed) == 1 &&
+        !context.control->leader_audio_local_click.load(std::memory_order_relaxed);
+    if (!enabled || local_click_suppressed) {
+        context.metronome_sample_counter += static_cast<std::uint64_t>(output.size());
         return;
     }
 

@@ -19,9 +19,22 @@
 
 ## Potential Future Plans
 
+### Docs
+
+Docs needs to be fleshed out at some point
+Building.md for compilation instructions including pre-reqs needed for Mac and windows and how to do so.
+Quickstart.md for a very quick doc on how to download from the github release and get a jam going and pointing them to the other docs for specific issues.
+Gui.md for docs on how the gui works, whats available, what different options do and how they interact so it behaves like a user manual for the GUI.
+Engine.md for docs on how the core engine can be used and what different options do and how they interact so it behaves like a user manual for the CLI.
+Metronome.md for docs specific to the metronome implementation, the different modes and how the interact with time and jams and standalone as that is one of the most complex parts of the tool
+Capture.md for similar usage docs 
+Diagnosing.md for instructions and tips on how to diagnose audio issues on any given connection, including how to read the various stats, how to use the python tools to help you identify and resolve issues 
+Licensing documentation so that we can properly credit SignalSmith for there part 
+Our own license to be sorted
+
 ### Python tests
 
-Add some functionality onto the benchmark testing that also tests the different command line args and validates things are working as expected in an automated fashion 
+Consider adding audio analysis onto the stress tests in some ways so that audible differences are heard and things like metronome timing can be measured on both sides and analysed to make sure the timing models are responding properly under load
 
 ### Stress Test Outcomes
 

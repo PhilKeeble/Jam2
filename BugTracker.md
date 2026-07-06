@@ -1,17 +1,24 @@
-## GUI
+Metromone is not playing properly on either side of the session it seems. Works fine when enabled at start but not during session. maybe stdin error?
+This might relate to ### Local Shared Track Mix Source section in plan
 
-### General 
+end jam might not be closing the session properly, if i start a jam then end it, i cant start a new one again
 
-TCP connection died mid jam and we couldnt reconnect to eachother without dropping the jam, UDP was fine 
-Rapid clicks on one wav side seemed to unload the wav from my side and potentially cause issues 
-refresh connection might be useful when TCP peers drop out for whatever that caused 
-During the jam the metronome wouldnt play audio in modes other than leader audio where it was mixed in
-when i play the local metronome it was coming out of my wasapi default speakers and not the headphones i was using for the jam 
-if one person has sync track controls on and one has them off then the other person can interrupt the person with it disabled, if its disabled then the local person should also not listen to incoming sync requests 
-metronome was on at the start then when we both turned it off it just seemed to not turn back on, i wonder if there is an issue with how the gui is talking to the cli 
+STUN endpoint is getting overwritten by public endpoint for shared links 
 
-### Joining 
+captured WAVs probably dont need metadata anymore, since Key and chord analysis no longer going to be in place and users can just adjust the BPM of a song manually to fit. if useful for debugging then we can leave but not have it pulled into the GUI, so the gui only shows the WAV name when its loaded in
 
-when joining the room we had an issue of mismatching sample rate, the joiner should just choose the device and the channels only for input / output, the other settigns should come from the TCP leader and if they are invalid then the session should error on both sides and tell them that their device doesnt support those settings (and identify which ones)
+Metronome view is laid out in a nice way but the text alignment is off, all the fields have name and then a large space and then value. like Division               Quarter mode                              shared-grid, i want the name and value together then the gaps between to be between the different name/value pairs so its more like Division Quarter             Mode shared-grid
 
+Chord view functionaliy for Request Lead swap, the text relating to it and any code around that feature can be removed as I dont want that feature anymore and dont need to account for rollback or compatability backwards
+
+On beat view i want the order flipped so that kick is at the bottom and bass is at the top, keeping the current ordering between them over than just flipping it 
+
+Might need more locking in across the app to the gui and grid, like having songs start on the grid at the same real time for everyone in the jam, maybe a small indicator on beat and chord view that moves along the grid so that people know which beat they are on at any given time? Needs fleshing out though so dont implement without discussion. Could have another ticbox on track to lock to metronome or not potentially.
+
+Could add new view for Jam Mix, with the views where you can control the level for differnt people in the jam for when we have multi-P2p mesh setup
+
+### Deploy
+console window spawns with application, should make it hidden
+windows dlls consider linking to make them all standalone binaries same as mac 
+Sort release folder so that the release folder only has the standalone binaries and a folder for logs and a folder for captures and a folder for songs and a folder for recieved tracks. folders should exist on the mac release folder as well.
 
