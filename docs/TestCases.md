@@ -92,7 +92,7 @@ List the benchmark cases without launching Jam2:
 python tools\run_benchmark_server.py --server-audio-device 5 --sample-rate 44100 --list-cases
 ```
 
-Run a short tone-only benchmark pass:
+Run a short tone benchmark pass. This includes symmetric tone cases plus targeted server-to-client and client-to-server tone cases for the baseline profiles:
 
 ```powershell
 python tools\run_benchmark_server.py --server-audio-device 5 --sample-rate 44100 --signals tone-440 --no-metronome-cases --stream-ms 10000 --clean
@@ -106,7 +106,7 @@ Useful server args:
 - `--logs PATH`: output folder. Default: `tools\benchmark_logs`.
 - `--stream-ms N`: stream duration per case. Default: `30000`.
 - `--repeats N`: repeat count per case. Default: `1`.
-- `--signals silence,tone-440,pulse-1s`: injected input signals for non-metronome cases.
+- `--signals silence,tone-440,pulse-1s`: symmetric injected input signals for non-metronome cases. When `tone-440` is included, the suite also adds a small number of directional tone cases.
 - `--no-metronome-cases`: skip metronome-only benchmark cases.
 - `--list-cases`: print the static case list and exit.
 - `--clean`: delete the output folder before running.
@@ -146,6 +146,12 @@ Benchmark outputs on the server:
 - per-case server/client `recording\*.wav`
 - per-case server/client `analysis.json`
 - per-case server/client stdout/stderr/stats artifacts
+
+Tone coverage:
+
+- `tone-440`: both peers inject tone.
+- `tone-server-to-client`: server injects tone, client injects silence.
+- `tone-client-to-server`: client injects tone, server injects silence.
 
 ## Analyze Benchmark Results
 

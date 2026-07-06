@@ -168,7 +168,7 @@ List benchmark cases without launching Jam2:
 python tools/run_benchmark_server.py --server-audio-device 16 --sample-rate 44100 --list-cases
 ```
 
-Run a short tone-only benchmark pass:
+Run a short tone benchmark pass. This includes symmetric tone cases plus targeted server-to-client and client-to-server tone cases for the baseline profiles:
 
 ```powershell
 python tools/run_benchmark_server.py --server-audio-device 16 --sample-rate 44100 --signals tone-440 --no-metronome-cases --stream-ms 10000 --clean
@@ -183,6 +183,8 @@ tools/benchmark_logs/benchmark_results.json
 ```
 
 Each case folder contains server/client `stats.csv`, `stdout.txt`, `stderr.txt`, `recording/*.wav`, `recording/recording.json`, and `analysis.json`.
+
+Tone coverage includes symmetric `tone-440`, `tone-server-to-client`, and `tone-client-to-server` cases without applying every direction to every profile.
 
 The server publishes the current `jam2://` URL as raw JSON at:
 

@@ -179,8 +179,19 @@ def analyze_metronome_wav(recording_dir, tolerance_frames=96, allow_silent=False
     }
 
 
-def analyze_recording_dir(recording_dir, signal="silence"):
+def _signal_for_stem(stem, local_signal, remote_signal, mix_signal):
+    if stem == "my-input":
+        return local_signal
+    if stem == "their-input":
+        return remote_signal
+    return mix_signal
+
+
+def analyze_recording_dir(recording_dir, signal="silence", local_signal=None, remote_signal=None):
     recording_dir = Path(recording_dir)
+    local_signal = local_signal or signal
+    remote_signal = remote_signal or signal
+    mix_signal = "tone-440" if "tone-440" in (local_signal, remote_signal) else signal
     result = {"recording_dir": str(recording_dir), "ok": True, "tags": [], "stems": {}}
     sidecar_path = recording_dir / "recording.json"
     if sidecar_path.exists():
@@ -205,9 +216,10 @@ def analyze_recording_dir(recording_dir, signal="silence"):
             continue
         stats = basic_stats(wav["samples"])
         stats.update({"exists": True, "sample_rate": wav["sample_rate"], "path": wav["path"]})
-        if signal == "tone-440" and stem in ("my-input", "their-input", "mix", "inputs-mix"):
+        expected_signal = _signal_for_stem(stem, local_signal, remote_signal, mix_signal)
+        if expected_signal == "tone-440" and stem in ("my-input", "their-input", "mix", "inputs-mix"):
             stats["tone"] = estimate_tone(wav["samples"], wav["sample_rate"], 440.0)
-        if signal == "pulse-1s" and stem in ("my-input", "their-input", "mix", "inputs-mix"):
+        if expected_signal == "pulse-1s" and stem in ("my-input", "their-input", "mix", "inputs-mix"):
             stats["pulse_frames"] = detect_transients(wav["samples"], threshold=0.08, refractory_frames=max(512, wav["sample_rate"] // 2))
         result["stems"][stem] = stats
         lengths.append(stats["frames"])
@@ -222,13 +234,16 @@ def analyze_recording_dir(recording_dir, signal="silence"):
         result["tags"].append("recording_dropped_frames")
     if sidecar.get("writer_errors", 0):
         result["tags"].append("recording_writer_errors")
-    if signal == "silence":
-        for stem in ("my-input", "their-input"):
-            stats = result["stems"].get(stem, {})
-            if stats.get("rms", 0.0) > 0.002 or stats.get("peak", 0.0) > 0.05:
-                result["tags"].append(f"{stem}_unexpected_signal")
-    if signal == "tone-440":
-        for stem in ("my-input", "their-input"):
+    if local_signal == "silence":
+        stats = result["stems"].get("my-input", {})
+        if stats.get("rms", 0.0) > 0.002 or stats.get("peak", 0.0) > 0.05:
+            result["tags"].append("my-input_unexpected_signal")
+    if remote_signal == "silence":
+        stats = result["stems"].get("their-input", {})
+        if stats.get("rms", 0.0) > 0.002 or stats.get("peak", 0.0) > 0.05:
+            result["tags"].append("their-input_unexpected_signal")
+    for stem, expected_signal in (("my-input", local_signal), ("their-input", remote_signal)):
+        if expected_signal == "tone-440":
             tone = result["stems"].get(stem, {}).get("tone", {})
             if not tone.get("tone_present", False):
                 result["tags"].append(f"{stem}_tone_missing")

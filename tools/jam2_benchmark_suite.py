@@ -14,14 +14,24 @@ class BenchmarkCase:
     case_id: str
     profile: Jam2Profile
     signal: str
+    server_signal: str = ""
+    client_signal: str = ""
     repeats: int = 1
     stream_ms: int = 30000
     expect_metronome: bool = False
+
+    def __post_init__(self):
+        if not self.server_signal:
+            object.__setattr__(self, "server_signal", self.signal)
+        if not self.client_signal:
+            object.__setattr__(self, "client_signal", self.signal)
 
     def metadata(self):
         return {
             "case_id": self.case_id,
             "signal": self.signal,
+            "server_signal": self.server_signal,
+            "client_signal": self.client_signal,
             "repeats": self.repeats,
             "stream_ms": self.stream_ms,
             "expect_metronome": self.expect_metronome,
@@ -63,12 +73,32 @@ def metronome_profiles():
 def benchmark_cases(signals=None, include_metronome=True, stream_ms=30000, repeats=1):
     selected_signals = tuple(signals) if signals else DEFAULT_SIGNALS
     cases = []
-    for profile in static_profiles():
+    profiles = static_profiles()
+    for profile in profiles:
         for signal in selected_signals:
             cases.append(BenchmarkCase(
                 case_id=f"{profile.name}_{signal}",
                 profile=profile,
                 signal=signal,
+                repeats=repeats,
+                stream_ms=stream_ms))
+    directional_profiles = profiles[:2]
+    if "tone-440" in selected_signals:
+        for profile in directional_profiles:
+            cases.append(BenchmarkCase(
+                case_id=f"{profile.name}_tone-server-to-client",
+                profile=profile,
+                signal="tone-server-to-client",
+                server_signal="tone-440",
+                client_signal="silence",
+                repeats=repeats,
+                stream_ms=stream_ms))
+            cases.append(BenchmarkCase(
+                case_id=f"{profile.name}_tone-client-to-server",
+                profile=profile,
+                signal="tone-client-to-server",
+                server_signal="silence",
+                client_signal="tone-440",
                 repeats=repeats,
                 stream_ms=stream_ms))
     if include_metronome:

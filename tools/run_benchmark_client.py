@@ -83,6 +83,8 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
     case_id = current["case_id"]
     run_index = int(current["run_index"])
     signal = current["signal"]
+    server_signal = current.get("server_signal", signal)
+    client_signal = current.get("client_signal", signal)
     output_dir = ensure_dir(Path(logs) / case_id / "client" / f"run_{run_index:02d}")
     csv_dir = ensure_dir(output_dir / "csv_raw")
     recording_dir = ensure_dir(output_dir / "recording")
@@ -93,6 +95,8 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
         "run_index": run_index,
         "side": "client",
         "signal": signal,
+        "server_signal": server_signal,
+        "client_signal": client_signal,
         "network_type": network_type,
         "profile": current.get("profile", {}),
     }
@@ -105,7 +109,7 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
         "--sample-rate", str(sample_rate),
         "--log-stats", str(csv_dir),
         "--record-jam-folder", str(recording_dir),
-        "--test-input", signal if signal != "metronome-only" else "silence",
+        "--test-input", client_signal if client_signal != "metronome-only" else "silence",
     ]
     args.extend(current.get("client_args", []))
     print_flush(f"[client] starting {case_id} run {run_index} signal={signal}")
@@ -120,7 +124,11 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
             errors="replace")
         return_code = process.wait()
     copied_csv = copy_final_csv(csv_dir, output_dir)
-    analysis = analyze_recording_dir(recording_dir, signal)
+    analysis = analyze_recording_dir(
+        recording_dir,
+        signal,
+        local_signal=client_signal,
+        remote_signal=server_signal)
     write_json(output_dir / "analysis.json", analysis)
     write_json(output_dir / "result.json", {
         **metadata,

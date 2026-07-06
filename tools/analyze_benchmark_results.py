@@ -26,6 +26,8 @@ def flatten(result):
         "run_index": result.get("run_index", ""),
         "profile": result.get("profile", ""),
         "signal": result.get("signal", ""),
+        "server_signal": result.get("server_signal", ""),
+        "client_signal": result.get("client_signal", ""),
         "verdict": result.get("verdict", ""),
         "tags": ";".join(result.get("tags", [])),
         "loss_percent_max": combined.get("loss_percent_max", ""),
@@ -49,13 +51,15 @@ def write_csv(path, rows):
 
 def text_summary(rows):
     lines = []
-    lines.append(f"{'case':44} {'profile':28} {'signal':14} {'run':>3} {'verdict':8} tags")
-    lines.append("-" * 118)
+    lines.append(f"{'case':44} {'profile':28} {'signal':22} {'S':9} {'C':9} {'run':>3} {'verdict':8} tags")
+    lines.append("-" * 138)
     for row in rows:
         lines.append(
             f"{row.get('case_id','')[:44]:44} "
             f"{row.get('profile','')[:28]:28} "
-            f"{row.get('signal','')[:14]:14} "
+            f"{row.get('signal','')[:22]:22} "
+            f"{row.get('server_signal','')[:9]:9} "
+            f"{row.get('client_signal','')[:9]:9} "
             f"{row.get('run_index', 0):>3} "
             f"{row.get('verdict',''):8} "
             f"{','.join(row.get('tags', [])) or '-'}")

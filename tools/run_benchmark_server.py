@@ -148,6 +148,7 @@ def write_outputs(logs_dir, results):
     write_json(logs_dir / "benchmark_results.json", {"results": results})
     fields = [
         "case_id", "run_index", "profile", "signal", "verdict", "tags",
+        "server_signal", "client_signal",
         "server_return_code", "client_return_code", "loss_percent_max",
         "jitter_max_ms", "rtt_max_ms", "playback_underrun_time_ms_total",
         "playback_dropped_frames_total", "metronome_beat_delta_abs_max",
@@ -163,6 +164,8 @@ def write_outputs(logs_dir, results):
                 "run_index": result.get("run_index", ""),
                 "profile": result.get("profile", ""),
                 "signal": result.get("signal", ""),
+                "server_signal": result.get("server_signal", ""),
+                "client_signal": result.get("client_signal", ""),
                 "verdict": result.get("verdict", ""),
                 "tags": ";".join(result.get("tags", [])),
                 "server_return_code": result.get("server_return_code", ""),
@@ -174,13 +177,15 @@ def write_outputs(logs_dir, results):
     lines = []
     lines.append("Jam2 benchmark summary")
     lines.append("")
-    lines.append(f"{'case':44} {'profile':28} {'signal':14} {'run':>3} {'verdict':8} tags")
-    lines.append("-" * 118)
+    lines.append(f"{'case':44} {'profile':28} {'signal':22} {'S':9} {'C':9} {'run':>3} {'verdict':8} tags")
+    lines.append("-" * 138)
     for result in results:
         lines.append(
             f"{result.get('case_id','')[:44]:44} "
             f"{result.get('profile','')[:28]:28} "
-            f"{result.get('signal','')[:14]:14} "
+            f"{result.get('signal','')[:22]:22} "
+            f"{result.get('server_signal','')[:9]:9} "
+            f"{result.get('client_signal','')[:9]:9} "
             f"{result.get('run_index', 0):>3} "
             f"{result.get('verdict',''):8} "
             f"{','.join(result.get('tags', [])) or '-'}")
@@ -199,7 +204,7 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
         output_dir,
         extra_args=[
             "--record-jam-folder", str(recording_dir),
-            "--test-input", case.signal if case.signal != "metronome-only" else "silence",
+            "--test-input", case.server_signal if case.server_signal != "metronome-only" else "silence",
         ])
     startup = listener.wait_for_startup("listen", 10.0)
     if not startup or not startup.get("url"):
@@ -219,6 +224,8 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
         "run_index": run_index,
         "url": startup["url"],
         "signal": case.signal,
+        "server_signal": case.server_signal,
+        "client_signal": case.client_signal,
         "profile": case.profile.metadata(),
         "client_args": case.profile.args(case.stream_ms),
     }
@@ -230,7 +237,11 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
         listener.terminate()
         server_rc = listener.poll()
     server_csv = copy_final_csv(paths["csv_raw"], paths["dir"])
-    server_analysis = analyze_recording_dir(recording_dir, case.signal)
+    server_analysis = analyze_recording_dir(
+        recording_dir,
+        case.signal,
+        local_signal=case.server_signal,
+        remote_signal=case.client_signal)
     write_json(output_dir / "analysis.json", server_analysis)
     client_result = {}
     client_csv = None
@@ -248,6 +259,8 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
         "profile": case.profile.name,
         "profile_values": case.profile.metadata(),
         "signal": case.signal,
+        "server_signal": case.server_signal,
+        "client_signal": case.client_signal,
         "server_return_code": server_rc,
         "client_return_code": client_rc,
         "server_csv_path": str(server_csv) if server_csv else "",
@@ -278,7 +291,9 @@ def main():
         repeats=args.repeats)
     if args.list_cases:
         for case in cases:
-            print(f"{case.case_id} profile={case.profile.name} signal={case.signal} repeats={case.repeats}")
+            print(
+                f"{case.case_id} profile={case.profile.name} signal={case.signal} "
+                f"server_signal={case.server_signal} client_signal={case.client_signal} repeats={case.repeats}")
         return 0
     logs_dir = Path(args.logs)
     if args.clean and logs_dir.exists():
