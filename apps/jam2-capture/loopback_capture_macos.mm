@@ -346,21 +346,57 @@ struct CaptureBuffer {
     std::condition_variable cv;
     std::vector<std::int16_t> samples;
     std::uint64_t target_frames = 0;
+    UInt32 channels = 0;
     bool done = false;
     double peak = 0.0;
 };
 
-AudioStreamBasicDescription device_stream_format(AudioObjectID device)
+double device_nominal_sample_rate(AudioObjectID device)
 {
-    AudioStreamBasicDescription format{};
-    UInt32 size = sizeof(format);
+    Float64 sampleRate = 0.0;
+    UInt32 size = sizeof(sampleRate);
     AudioObjectPropertyAddress address{
-        kAudioDevicePropertyStreamFormat,
-        kAudioObjectPropertyScopeOutput,
+        kAudioDevicePropertyNominalSampleRate,
+        kAudioObjectPropertyScopeGlobal,
         kAudioObjectPropertyElementMain,
     };
-    check_osstatus(AudioObjectGetPropertyData(device, &address, 0, nullptr, &size, &format), "failed to read process tap stream format");
-    return format;
+    check_osstatus(AudioObjectGetPropertyData(device, &address, 0, nullptr, &size, &sampleRate), "failed to read process tap sample rate");
+    if (sampleRate <= 0.0) {
+        throw std::runtime_error("CoreAudio process tap reported an invalid sample rate");
+    }
+    return sampleRate;
+}
+
+UInt32 input_channel_count(const AudioBufferList* input)
+{
+    if (input == nullptr || input->mNumberBuffers == 0) {
+        return 1;
+    }
+    UInt32 channels = 0;
+    for (UInt32 bufferIndex = 0; bufferIndex < input->mNumberBuffers; ++bufferIndex) {
+        channels += std::max<UInt32>(input->mBuffers[bufferIndex].mNumberChannels, 1);
+    }
+    return std::max<UInt32>(channels, 1);
+}
+
+UInt32 input_frame_count(const AudioBufferList* input)
+{
+    if (input == nullptr || input->mNumberBuffers == 0 || input->mBuffers[0].mData == nullptr) {
+        return 0;
+    }
+    const AudioBuffer& buffer = input->mBuffers[0];
+    const UInt32 channels = std::max<UInt32>(buffer.mNumberChannels, 1);
+    return buffer.mDataByteSize / (sizeof(float) * channels);
+}
+
+double read_interleaved_float_sample(const AudioBuffer& buffer, UInt32 frame, UInt32 channel)
+{
+    if (buffer.mData == nullptr || buffer.mNumberChannels == 0) {
+        return 0.0;
+    }
+    const UInt32 clampedChannel = std::min<UInt32>(channel, buffer.mNumberChannels - 1);
+    const float* samples = static_cast<const float*>(buffer.mData);
+    return samples[static_cast<std::size_t>(frame) * buffer.mNumberChannels + clampedChannel];
 }
 
 double read_float_sample(const AudioBufferList* input, UInt32 frame, UInt32 channel)
@@ -369,14 +405,18 @@ double read_float_sample(const AudioBufferList* input, UInt32 frame, UInt32 chan
         return 0.0;
     }
     if (input->mNumberBuffers == 1) {
-        const AudioBuffer& buffer = input->mBuffers[0];
-        if (buffer.mData == nullptr || buffer.mNumberChannels == 0) {
-            return 0.0;
-        }
-        const float* samples = static_cast<const float*>(buffer.mData);
-        return samples[static_cast<std::size_t>(frame) * buffer.mNumberChannels + std::min<UInt32>(channel, buffer.mNumberChannels - 1)];
+        return read_interleaved_float_sample(input->mBuffers[0], frame, channel);
     }
-    const AudioBuffer& buffer = input->mBuffers[std::min<UInt32>(channel, input->mNumberBuffers - 1)];
+    UInt32 remaining = channel;
+    for (UInt32 bufferIndex = 0; bufferIndex < input->mNumberBuffers; ++bufferIndex) {
+        const AudioBuffer& buffer = input->mBuffers[bufferIndex];
+        const UInt32 bufferChannels = std::max<UInt32>(buffer.mNumberChannels, 1);
+        if (remaining < bufferChannels) {
+            return read_interleaved_float_sample(buffer, frame, remaining);
+        }
+        remaining -= bufferChannels;
+    }
+    const AudioBuffer& buffer = input->mBuffers[input->mNumberBuffers - 1];
     if (buffer.mData == nullptr) {
         return 0.0;
     }
@@ -434,13 +474,7 @@ int record_loopback_macos(const MacLoopbackOptions& options)
             check_osstatus(AudioHardwareCreateAggregateDevice((__bridge CFDictionaryRef)aggregateDescription, &aggregateId),
                 "failed to create CoreAudio aggregate tap device");
 
-            const AudioStreamBasicDescription format = device_stream_format(aggregateId);
-            if (format.mFormatID != kAudioFormatLinearPCM ||
-                (format.mFormatFlags & kAudioFormatFlagIsFloat) == 0 ||
-                format.mBitsPerChannel != 32) {
-                throw std::runtime_error("CoreAudio process tap produced an unsupported non-float stream format");
-            }
-            const int sampleRate = static_cast<int>(std::llround(format.mSampleRate));
+            const int sampleRate = static_cast<int>(std::llround(device_nominal_sample_rate(aggregateId)));
             const std::uint64_t targetFrames = options.duration_ms > 0
                 ? static_cast<std::uint64_t>((static_cast<std::int64_t>(sampleRate) * options.duration_ms) / 1000)
                 : std::numeric_limits<std::uint64_t>::max();
@@ -467,13 +501,11 @@ int record_loopback_macos(const MacLoopbackOptions& options)
                                    if (capture.done) {
                                        return;
                                    }
-                                   const UInt32 frames =
-                                       inputData != nullptr && inputData->mNumberBuffers > 0
-                                           ? inputData->mBuffers[0].mDataByteSize / (sizeof(float) * std::max<UInt32>(inputData->mBuffers[0].mNumberChannels, 1))
-                                           : 0;
+                                   const UInt32 frames = input_frame_count(inputData);
+                                   const UInt32 channels = input_channel_count(inputData);
+                                   capture.channels = std::max(capture.channels, channels);
                                    for (UInt32 frame = 0; frame < frames && capture.samples.size() < capture.target_frames; ++frame) {
                                        double mono = 0.0;
-                                       const UInt32 channels = std::max<UInt32>(format.mChannelsPerFrame, 1);
                                        for (UInt32 channel = 0; channel < channels; ++channel) {
                                            mono += read_float_sample(inputData, frame, channel);
                                        }
@@ -515,7 +547,7 @@ int record_loopback_macos(const MacLoopbackOptions& options)
             std::cout << "Mode: record-loopback\n";
             std::cout << "Source: default CoreAudio process-tap system mix\n";
             std::cout << "Mix sample rate: " << sampleRate << "\n";
-            std::cout << "Mix channels: " << format.mChannelsPerFrame << "\n";
+            std::cout << "Mix channels: " << capture.channels << "\n";
             std::cout << "Duration ms: " << (options.duration_ms > 0 ? std::to_string(options.duration_ms) : std::string("manual")) << "\n";
             std::cout << "Frames written: " << result.samples.size() << "\n";
             std::cout << "Raw frames: " << result.raw_frames << "\n";
