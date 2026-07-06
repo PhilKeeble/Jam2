@@ -669,8 +669,13 @@ struct CoreAudioDuplexContext {
     MonoRingBuffer* capture = nullptr;
     MonoRingBuffer* playback = nullptr;
     StreamControl* control = nullptr;
+    OutputRecorder* recorder = nullptr;
     std::vector<std::int32_t> capture_scratch;
     std::vector<std::int32_t> playback_scratch;
+    std::vector<std::int32_t> recorder_my_input_scratch;
+    std::vector<std::int32_t> recorder_their_input_scratch;
+    std::vector<std::int32_t> recorder_inputs_mix_scratch;
+    std::vector<std::int32_t> recorder_metronome_scratch;
     std::size_t playback_prefill_frames = 0;
     double sample_rate = 48000.0;
     std::uint64_t metronome_sample_counter = 0;
@@ -805,11 +810,20 @@ void apply_remote_level(CoreAudioDuplexContext& context, std::span<std::int32_t>
     }
 }
 
-void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t> output)
+std::int32_t mix_i32_samples(std::int32_t a, std::int32_t b)
+{
+    const std::int64_t mixed = static_cast<std::int64_t>(a) + static_cast<std::int64_t>(b);
+    return static_cast<std::int32_t>(std::clamp<std::int64_t>(mixed, -2147483648LL, 2147483647LL));
+}
+
+void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t> output, std::span<std::int32_t> metronome_stem)
 {
     if (context.control == nullptr ||
         context.sample_rate <= 0.0) {
         return;
+    }
+    if (metronome_stem.size() == output.size()) {
+        std::fill(metronome_stem.begin(), metronome_stem.end(), 0);
     }
     const bool enabled = context.control->metronome_enabled.load(std::memory_order_relaxed);
     const bool local_click_suppressed =
@@ -837,14 +851,17 @@ void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t
     const std::uint64_t step_interval =
         jam2::metronome::step_interval_samples(context.sample_rate, pattern.bpm, pattern.division);
 
-    for (std::int32_t& sample : output) {
+    for (std::size_t i = 0; i < output.size(); ++i) {
         const bool before_epoch = epoch_valid && context.metronome_sample_counter < epoch;
         const std::uint64_t position =
             before_epoch ? 0ULL : (epoch_valid ? context.metronome_sample_counter - epoch : context.metronome_sample_counter);
         if (!before_epoch) {
-            sample = jam2::metronome::mix_i32(
-                sample,
-                jam2::metronome::render_sample(pattern, position, step_interval, context.sample_rate, level));
+            const double rendered =
+                jam2::metronome::render_sample(pattern, position, step_interval, context.sample_rate, level);
+            if (metronome_stem.size() == output.size()) {
+                metronome_stem[i] = jam2::metronome::mix_i32(0, rendered);
+            }
+            output[i] = jam2::metronome::mix_i32(output[i], rendered);
             if (step_interval > 0) {
                 context.metronome_beat_index = (position / step_interval) + 1;
             }
@@ -868,6 +885,13 @@ OSStatus duplex_io_proc(
         return noErr;
     }
     observe_callback_interval(*context);
+    const std::size_t output_frames_for_input = std::min(buffer_frames(output), context->recorder_my_input_scratch.size());
+    if (output_frames_for_input > 0) {
+        std::fill(
+            context->recorder_my_input_scratch.begin(),
+            context->recorder_my_input_scratch.begin() + output_frames_for_input,
+            0);
+    }
 
     const std::size_t input_frames = std::min(buffer_frames(input), context->capture_scratch.size());
     if (input_frames > 0) {
@@ -882,6 +906,12 @@ OSStatus duplex_io_proc(
             context->capture_scratch[frame] = float_to_i32(mixed);
         }
         context->capture->push(std::span<const std::int32_t>(context->capture_scratch.data(), input_frames));
+        if (context->recorder_my_input_scratch.size() >= input_frames) {
+            std::copy(
+                context->capture_scratch.begin(),
+                context->capture_scratch.begin() + input_frames,
+                context->recorder_my_input_scratch.begin());
+        }
     }
 
     const std::size_t output_frames = std::min(buffer_frames(output), context->playback_scratch.size());
@@ -898,7 +928,35 @@ OSStatus duplex_io_proc(
             pop_resampled_playback(*context, playback);
             apply_remote_level(*context, playback);
         }
-        mix_metronome_click(*context, playback);
+        if (context->recorder_their_input_scratch.size() >= output_frames) {
+            std::copy(playback.begin(), playback.end(), context->recorder_their_input_scratch.begin());
+        }
+        const std::uint64_t audio_frame_start = context->metronome_sample_counter;
+        mix_metronome_click(
+            *context,
+            playback,
+            std::span<std::int32_t>(
+                context->recorder_metronome_scratch.data(),
+                std::min<std::size_t>(context->recorder_metronome_scratch.size(), playback.size())));
+        if (context->recorder != nullptr &&
+            context->recorder_inputs_mix_scratch.size() >= playback.size() &&
+            context->recorder_my_input_scratch.size() >= playback.size() &&
+            context->recorder_their_input_scratch.size() >= playback.size() &&
+            context->recorder_metronome_scratch.size() >= playback.size()) {
+            for (std::size_t frame = 0; frame < playback.size(); ++frame) {
+                context->recorder_inputs_mix_scratch[frame] = mix_i32_samples(
+                    context->recorder_my_input_scratch[frame],
+                    context->recorder_their_input_scratch[frame]);
+            }
+            context->recorder->record(RecordBlock{
+                audio_frame_start,
+                playback,
+                std::span<const std::int32_t>(context->recorder_my_input_scratch.data(), playback.size()),
+                std::span<const std::int32_t>(context->recorder_their_input_scratch.data(), playback.size()),
+                std::span<const std::int32_t>(context->recorder_inputs_mix_scratch.data(), playback.size()),
+                std::span<const std::int32_t>(context->recorder_metronome_scratch.data(), playback.size()),
+            });
+        }
         for (std::size_t frame = 0; frame < output_frames; ++frame) {
             const float sample = i32_to_float(context->playback_scratch[frame]);
             for (int channel : context->channels.output) {
@@ -923,6 +981,7 @@ public:
         MonoRingBuffer& playback_ring,
         std::size_t playback_prefill_frames,
         StreamControl& control,
+        OutputRecorder* recorder,
         double sample_rate)
         : device_(device),
           info_(std::move(info)),
@@ -936,8 +995,13 @@ public:
         context_.capture = &capture_ring;
         context_.playback = &playback_ring;
         context_.control = &control;
+        context_.recorder = recorder;
         context_.capture_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.playback_scratch.resize(static_cast<std::size_t>(buffer_size));
+        context_.recorder_my_input_scratch.resize(static_cast<std::size_t>(buffer_size));
+        context_.recorder_their_input_scratch.resize(static_cast<std::size_t>(buffer_size));
+        context_.recorder_inputs_mix_scratch.resize(static_cast<std::size_t>(buffer_size));
+        context_.recorder_metronome_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.playback_prefill_frames = playback_prefill_frames;
         context_.sample_rate = sample_rate;
 
@@ -1143,7 +1207,8 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     MonoRingBuffer& capture_ring,
     MonoRingBuffer& playback_ring,
     std::size_t playback_prefill_frames,
-    StreamControl& control)
+    StreamControl& control,
+    OutputRecorder* recorder)
 {
     const auto selected = select_device(id);
     const UInt32 input_channels = device_channels(selected.object, kAudioDevicePropertyScopeInput);
@@ -1189,6 +1254,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
         playback_ring,
         playback_prefill_frames,
         control,
+        recorder,
         sample_rate > 0.0 ? sample_rate : requested_sample_rate);
     stream->start();
     return stream;

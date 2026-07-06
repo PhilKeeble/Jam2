@@ -517,7 +517,8 @@ int record_input(const Options& options)
         capture_ring,
         playback_ring,
         0,
-        control);
+        control,
+        nullptr);
 
     std::vector<std::int32_t> frames(static_cast<std::size_t>(std::max<long>(options.buffer_size, 256)));
     std::uint64_t raw_read = 0;

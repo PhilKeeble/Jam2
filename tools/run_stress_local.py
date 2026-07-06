@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
+import math
 import shutil
+import wave
 import threading
 import time
 from pathlib import Path
@@ -21,6 +24,7 @@ from udp_stress_proxy import DirectionImpairment, ProxyImpairment, UdpStressProx
 
 
 DEFAULT_STREAM_MS = 30000
+METRONOME_WAV_TOLERANCE_FRAMES = 96
 
 
 def parse_args():
@@ -386,7 +390,155 @@ def metronome_verdict(result, expected_mode):
         return "metronome_grid_beat_delta_high"
     if server.get("metronome_mode", "") != expected_mode or client.get("metronome_mode", "") != expected_mode:
         return "metronome_mode_not_applied"
+    wav = result.get("metronome_wav_analysis", {})
+    if wav:
+        if not wav.get("ok", False):
+            return wav.get("verdict", "metronome_wav_failed")
     return "pass"
+
+
+def is_metronome_scenario(scenario):
+    source = scenario.get("source_scenario") or scenario.get("scenario") or ""
+    return source == "metronome-shared-grid" or source.startswith("metronome-")
+
+
+def read_wav_i16(path):
+    with wave.open(str(path), "rb") as handle:
+        if handle.getnchannels() != 1 or handle.getsampwidth() != 2:
+            raise ValueError("expected mono PCM16 WAV")
+        sample_rate = handle.getframerate()
+        frames = handle.getnframes()
+        raw = handle.readframes(frames)
+    samples = [
+        int.from_bytes(raw[i:i + 2], "little", signed=True)
+        for i in range(0, len(raw), 2)
+    ]
+    return sample_rate, samples
+
+
+def detect_click_frames(samples):
+    threshold = 1800
+    holdoff = 900
+    clicks = []
+    hold = 0
+    for index, sample in enumerate(samples):
+        if hold > 0:
+            hold -= 1
+            continue
+        if abs(sample) >= threshold:
+            clicks.append(index)
+            hold = holdoff
+    return clicks
+
+
+def expected_metronome_frames(meta, sample_count):
+    sample_rate = int(meta.get("sample_rate", 48000))
+    bpm = int(meta.get("bpm", 120))
+    division = int(meta.get("metronome_division", 1))
+    step_count = max(1, int(meta.get("metronome_step_count", 4)))
+    play_low = int(meta.get("metronome_play_mask_low", 0x0f))
+    play_high = int(meta.get("metronome_play_mask_high", 0))
+    start_audio_frame = int(meta.get("start_audio_frame", 0))
+    epoch = int(meta.get("metronome_epoch_sample_time", 0))
+    epoch_valid = bool(meta.get("metronome_epoch_valid", False))
+    if not epoch_valid or bpm <= 0 or division <= 0:
+        return []
+    step_interval = max(1, round((60.0 * sample_rate) / (bpm * division)))
+    first_absolute = max(start_audio_frame, epoch)
+    first_step = max(0, math.floor((first_absolute - epoch) / step_interval) - 1)
+    expected = []
+    step = first_step
+    stop_audio_frame = start_audio_frame + sample_count
+    while True:
+        absolute = epoch + step * step_interval
+        if absolute >= stop_audio_frame:
+            break
+        if absolute >= start_audio_frame:
+            pattern_step = step % step_count
+            mask = play_low if pattern_step < 64 else play_high
+            bit = pattern_step if pattern_step < 64 else pattern_step - 64
+            if ((mask >> bit) & 1) != 0:
+                expected.append(absolute - start_audio_frame)
+        step += 1
+    return expected
+
+
+def match_clicks(expected, detected):
+    errors = []
+    missing = 0
+    extras = 0
+    used = set()
+    for frame in expected:
+        best_index = None
+        best_error = None
+        for index, click in enumerate(detected):
+            if index in used:
+                continue
+            error = abs(click - frame)
+            if best_error is None or error < best_error:
+                best_error = error
+                best_index = index
+        if best_index is None or best_error is None or best_error > METRONOME_WAV_TOLERANCE_FRAMES:
+            missing += 1
+        else:
+            used.add(best_index)
+            errors.append(best_error)
+    extras = len(detected) - len(used)
+    return {
+        "expected_clicks": len(expected),
+        "detected_clicks": len(detected),
+        "missing_clicks": missing,
+        "extra_clicks": extras,
+        "max_abs_error_frames": max(errors, default=0),
+        "avg_abs_error_frames": sum(errors) / len(errors) if errors else 0.0,
+    }
+
+
+def analyze_side_recording(recording_dir, allow_silent=False):
+    meta_path = Path(recording_dir) / "recording.json"
+    wav_path = Path(recording_dir) / "metronome.wav"
+    if not meta_path.exists() or not wav_path.exists():
+        return {"ok": False, "verdict": "metronome_wav_missing", "recording_dir": str(recording_dir)}
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    sample_rate, samples = read_wav_i16(wav_path)
+    detected = detect_click_frames(samples)
+    expected = expected_metronome_frames(meta, len(samples))
+    if allow_silent and not detected:
+        return {
+            "ok": True,
+            "recording_dir": str(recording_dir),
+            "sample_rate": sample_rate,
+            "expected_clicks": len(expected),
+            "detected_clicks": 0,
+            "silent_allowed": True,
+        }
+    analysis = match_clicks(expected, detected)
+    analysis.update({
+        "ok": analysis["missing_clicks"] == 0 and analysis["max_abs_error_frames"] <= METRONOME_WAV_TOLERANCE_FRAMES,
+        "recording_dir": str(recording_dir),
+        "sample_rate": sample_rate,
+    })
+    if not analysis["ok"]:
+        analysis["verdict"] = (
+            "metronome_click_count_mismatch"
+            if analysis["missing_clicks"] > 0
+            else "metronome_click_timing_high"
+        )
+    return analysis
+
+
+def analyze_metronome_recordings(result, server_paths, client_paths):
+    scenario = result.get("source_scenario") or result.get("scenario", "")
+    if not (scenario == "metronome-shared-grid" or scenario.startswith("metronome-")):
+        return {}
+    allow_client_silent = scenario == "metronome-leader-audio"
+    server = analyze_side_recording(Path(server_paths["dir"]) / "recording")
+    client = analyze_side_recording(Path(client_paths["dir"]) / "recording", allow_silent=allow_client_silent)
+    ok = server.get("ok", False) and client.get("ok", False)
+    verdict = ""
+    if not ok:
+        verdict = server.get("verdict") if not server.get("ok", False) else client.get("verdict", "metronome_wav_failed")
+    return {"ok": ok, "verdict": verdict, "server": server, "client": client}
 
 
 def run_runtime_commands(commands, server_process, client_process):
@@ -424,7 +576,16 @@ def scenario_observations(scenario_id, scenario, server_paths, client_paths):
 
 def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
     profile = scenario["profile"]
-    commands = scenario.get("commands", [])
+    source_scenario = scenario.get("source_scenario", scenario_id)
+    record_metronome = source_scenario == "metronome-shared-grid" or source_scenario.startswith("metronome-")
+    commands = list(scenario.get("commands", []))
+    if record_metronome:
+        commands.extend([
+            {"at_s": 1.0, "side": "server", "line": f"record jam start {Path(output_dir) / 'server' / 'recording'}"},
+            {"at_s": 1.0, "side": "client", "line": f"record jam start {Path(output_dir) / 'client' / 'recording'}"},
+            {"at_s": max(2.0, args_ns.stream_ms / 1000.0 - 1.0), "side": "server", "line": "record jam stop"},
+            {"at_s": max(2.0, args_ns.stream_ms / 1000.0 - 1.0), "side": "client", "line": "record jam stop"},
+        ])
     print_flush(f"[stress] starting {scenario_id} profile={profile.name}")
     listener, server_paths = start_listener(
         jam2,
@@ -508,6 +669,9 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
         "observations": observations,
         "metrics": metrics,
     }
+    wav_analysis = analyze_metronome_recordings(result, server_paths, client_paths)
+    if wav_analysis:
+        result["metronome_wav_analysis"] = wav_analysis
     result["verdict"] = verdict_for(result)
     print_flush(
         f"[stress] finished {scenario_id} verdict={result['verdict']} "

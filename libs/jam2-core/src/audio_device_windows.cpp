@@ -266,8 +266,13 @@ struct DuplexContext {
     MonoRingBuffer* capture = nullptr;
     MonoRingBuffer* playback = nullptr;
     StreamControl* control = nullptr;
+    OutputRecorder* recorder = nullptr;
     std::vector<std::int32_t> capture_scratch;
     std::vector<std::int32_t> playback_scratch;
+    std::vector<std::int32_t> recorder_my_input_scratch;
+    std::vector<std::int32_t> recorder_their_input_scratch;
+    std::vector<std::int32_t> recorder_inputs_mix_scratch;
+    std::vector<std::int32_t> recorder_metronome_scratch;
     std::size_t playback_prefill_frames = 0;
     double sample_rate = 48000.0;
     std::uint64_t metronome_sample_counter = 0;
@@ -494,18 +499,21 @@ ASIOTime* ring_buffer_switch_time_info(ASIOTime* params, long double_buffer_inde
     return params;
 }
 
-void mix_metronome_click(DuplexContext& context, std::int32_t* output)
+void mix_metronome_click(DuplexContext& context, std::span<std::int32_t> output, std::span<std::int32_t> metronome_stem)
 {
     if (context.control == nullptr ||
         context.sample_rate <= 0.0) {
         return;
+    }
+    if (metronome_stem.size() == output.size()) {
+        std::fill(metronome_stem.begin(), metronome_stem.end(), 0);
     }
     const bool enabled = context.control->metronome_enabled.load(std::memory_order_relaxed);
     const bool local_click_suppressed =
         context.control->metronome_mode.load(std::memory_order_relaxed) == 1 &&
         !context.control->leader_audio_local_click.load(std::memory_order_relaxed);
     if (!enabled || local_click_suppressed) {
-        context.metronome_sample_counter += static_cast<std::uint64_t>(context.buffer_size);
+        context.metronome_sample_counter += static_cast<std::uint64_t>(output.size());
         return;
     }
 
@@ -526,14 +534,17 @@ void mix_metronome_click(DuplexContext& context, std::int32_t* output)
     const std::uint64_t step_interval =
         jam2::metronome::step_interval_samples(context.sample_rate, pattern.bpm, pattern.division);
 
-    for (long i = 0; i < context.buffer_size; ++i) {
+    for (std::size_t i = 0; i < output.size(); ++i) {
         const bool before_epoch = epoch_valid && context.metronome_sample_counter < epoch;
         const std::uint64_t position =
             before_epoch ? 0ULL : (epoch_valid ? context.metronome_sample_counter - epoch : context.metronome_sample_counter);
         if (!before_epoch) {
-            output[i] = jam2::metronome::mix_i32(
-                output[i],
-                jam2::metronome::render_sample(pattern, position, step_interval, context.sample_rate, level));
+            const double rendered =
+                jam2::metronome::render_sample(pattern, position, step_interval, context.sample_rate, level);
+            if (metronome_stem.size() == output.size()) {
+                metronome_stem[i] = jam2::metronome::mix_i32(0, rendered);
+            }
+            output[i] = jam2::metronome::mix_i32(output[i], rendered);
             if (step_interval > 0) {
                 context.metronome_beat_index = (position / step_interval) + 1;
             }
@@ -607,6 +618,12 @@ void apply_remote_level(DuplexContext& context, std::span<std::int32_t> output)
     }
 }
 
+std::int32_t mix_i32_samples(std::int32_t a, std::int32_t b)
+{
+    const std::int64_t mixed = static_cast<std::int64_t>(a) + static_cast<std::int64_t>(b);
+    return static_cast<std::int32_t>(std::clamp<std::int64_t>(mixed, -2147483648LL, 2147483647LL));
+}
+
 void duplex_buffer_switch(long double_buffer_index, ASIOBool)
 {
     DuplexContext* context = g_duplex_context;
@@ -614,14 +631,22 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
         return;
     }
     observe_callback_interval(*context);
+    if (context->recorder_my_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
+        std::fill(
+            context->recorder_my_input_scratch.begin(),
+            context->recorder_my_input_scratch.begin() + context->buffer_size,
+            0);
+    }
 
     if (!context->inputs.empty() &&
         context->inputs[0] != nullptr &&
         context->inputs[0]->buffers[double_buffer_index] != nullptr &&
         context->capture_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
+        std::span<const std::int32_t> captured_input;
         if (context->inputs.size() == 1) {
             const auto* input = static_cast<const std::int32_t*>(context->inputs[0]->buffers[double_buffer_index]);
-            context->capture->push(std::span<const std::int32_t>(input, static_cast<std::size_t>(context->buffer_size)));
+            captured_input = std::span<const std::int32_t>(input, static_cast<std::size_t>(context->buffer_size));
+            context->capture->push(captured_input);
         } else {
             for (long i = 0; i < context->buffer_size; ++i) {
                 std::int64_t sum = 0;
@@ -637,9 +662,13 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
                 context->capture_scratch[static_cast<std::size_t>(i)] =
                     mixed_channels > 0 ? static_cast<std::int32_t>(sum / mixed_channels) : 0;
             }
-            context->capture->push(std::span<const std::int32_t>(
+            captured_input = std::span<const std::int32_t>(
                 context->capture_scratch.data(),
-                static_cast<std::size_t>(context->buffer_size)));
+                static_cast<std::size_t>(context->buffer_size));
+            context->capture->push(captured_input);
+        }
+        if (context->recorder_my_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
+            std::copy(captured_input.begin(), captured_input.end(), context->recorder_my_input_scratch.begin());
         }
     }
 
@@ -660,7 +689,36 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
             pop_resampled_playback(*context, playback);
             apply_remote_level(*context, playback);
         }
-        mix_metronome_click(*context, mono);
+        auto playback = std::span<std::int32_t>(mono, static_cast<std::size_t>(context->buffer_size));
+        if (context->recorder_their_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
+            std::copy(playback.begin(), playback.end(), context->recorder_their_input_scratch.begin());
+        }
+        const std::uint64_t audio_frame_start = context->metronome_sample_counter;
+        mix_metronome_click(
+            *context,
+            playback,
+            std::span<std::int32_t>(
+                context->recorder_metronome_scratch.data(),
+                std::min<std::size_t>(context->recorder_metronome_scratch.size(), playback.size())));
+        if (context->recorder != nullptr &&
+            context->recorder_inputs_mix_scratch.size() >= playback.size() &&
+            context->recorder_my_input_scratch.size() >= playback.size() &&
+            context->recorder_their_input_scratch.size() >= playback.size() &&
+            context->recorder_metronome_scratch.size() >= playback.size()) {
+            for (std::size_t i = 0; i < playback.size(); ++i) {
+                context->recorder_inputs_mix_scratch[i] = mix_i32_samples(
+                    context->recorder_my_input_scratch[i],
+                    context->recorder_their_input_scratch[i]);
+            }
+            context->recorder->record(RecordBlock{
+                audio_frame_start,
+                playback,
+                std::span<const std::int32_t>(context->recorder_my_input_scratch.data(), playback.size()),
+                std::span<const std::int32_t>(context->recorder_their_input_scratch.data(), playback.size()),
+                std::span<const std::int32_t>(context->recorder_inputs_mix_scratch.data(), playback.size()),
+                std::span<const std::int32_t>(context->recorder_metronome_scratch.data(), playback.size()),
+            });
+        }
         for (long i = 0; i < context->buffer_size; ++i) {
             for (ASIOBufferInfo* output_info : context->outputs) {
                 if (output_info == nullptr || output_info->buffers[double_buffer_index] == nullptr) {
@@ -724,6 +782,7 @@ public:
         MonoRingBuffer& playback_ring,
         std::size_t playback_prefill_frames,
         StreamControl& control,
+        OutputRecorder* recorder,
         double sample_rate)
         : com_(std::move(com)),
           driver_(std::move(driver)),
@@ -748,8 +807,13 @@ public:
         context_.capture = &capture_ring;
         context_.playback = &playback_ring;
         context_.control = &control;
+        context_.recorder = recorder;
         context_.capture_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.playback_scratch.resize(static_cast<std::size_t>(buffer_size));
+        context_.recorder_my_input_scratch.resize(static_cast<std::size_t>(buffer_size));
+        context_.recorder_their_input_scratch.resize(static_cast<std::size_t>(buffer_size));
+        context_.recorder_inputs_mix_scratch.resize(static_cast<std::size_t>(buffer_size));
+        context_.recorder_metronome_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.playback_prefill_frames = playback_prefill_frames;
         context_.sample_rate = sample_rate;
     }
@@ -1287,7 +1351,8 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     MonoRingBuffer& capture_ring,
     MonoRingBuffer& playback_ring,
     std::size_t playback_prefill_frames,
-    StreamControl& control)
+    StreamControl& control,
+    OutputRecorder* recorder)
 {
     const auto devices = list_devices();
     if (id < 0 || static_cast<std::size_t>(id) >= devices.size()) {
@@ -1425,6 +1490,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
         playback_ring,
         playback_prefill_frames,
         control,
+        recorder,
         current_rate);
     stream->start();
     return stream;

@@ -9,6 +9,7 @@
 
 #include "audio_ring.hpp"
 #include "metronome.hpp"
+#include "output_recorder.hpp"
 
 namespace jam2::audio {
 
@@ -144,6 +145,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     MonoRingBuffer& capture_ring,
     MonoRingBuffer& playback_ring,
     std::size_t playback_prefill_frames,
-    StreamControl& control);
+    StreamControl& control,
+    OutputRecorder* recorder);
 
 } // namespace jam2::audio

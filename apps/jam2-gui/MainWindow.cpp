@@ -140,6 +140,12 @@ QString timestampedCapturePath(const QString& prefix)
         QStringLiteral("%1-%2.wav").arg(prefix, QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss"))));
 }
 
+QString timestampedJamRecordingFolder()
+{
+    const QString stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss"));
+    return appReleaseFolderPath(QStringLiteral("jam_recordings/%1").arg(stamp));
+}
+
 bool isAutoCapturePath(const QString& path)
 {
     const QFileInfo info(path);
@@ -1392,6 +1398,8 @@ MainWindow::MainWindow(QWidget* parent)
         if (localOutputBox_) {
             localOutputBox_->setEnabled(true);
         }
+        jamRecordingActive_ = false;
+        updateJamRecordingControls();
         setMixRemotePeerVisible(false);
     };
     controlServer_.onState = [this](const QString& state) { handleControlState(state, true); };
@@ -2314,6 +2322,21 @@ QWidget* MainWindow::buildMixPage()
     localOutputBox_->show();
     layout->addWidget(makeDeviceRow(QStringLiteral("Standalone output"), localOutputBox_));
 
+    auto* recordingRow = new QWidget(content);
+    auto* recordingLayout = new QHBoxLayout(recordingRow);
+    recordingLayout->setContentsMargins(0, 0, 0, 0);
+    recordingLayout->setSpacing(10);
+    auto* recordingName = new QLabel(QStringLiteral("Jam recording"), recordingRow);
+    recordingName->setMinimumWidth(120);
+    jamRecordingButton_ = new QPushButton(QStringLiteral("Start Recording Jam"), recordingRow);
+    jamRecordingLabel_ = new QLabel(QStringLiteral("Stopped"), recordingRow);
+    jamRecordingLabel_->setFrameShape(QFrame::StyledPanel);
+    jamRecordingLabel_->setMinimumWidth(180);
+    recordingLayout->addWidget(recordingName);
+    recordingLayout->addWidget(jamRecordingButton_);
+    recordingLayout->addWidget(jamRecordingLabel_, 1);
+    layout->addWidget(recordingRow);
+
     trackLevelSlider_ = new QSlider(Qt::Horizontal, page);
     trackLevelSlider_->setRange(-60, 12);
     trackLevelSlider_->setValue(0);
@@ -2374,7 +2397,15 @@ QWidget* MainWindow::buildMixPage()
         }
         updateRuntimeControls();
     });
+    QObject::connect(jamRecordingButton_, &QPushButton::clicked, this, [this] {
+        if (jamRecordingActive_) {
+            stopJamRecording();
+        } else {
+            startJamRecording();
+        }
+    });
     updateMixControls();
+    updateJamRecordingControls();
     return page;
 }
 
@@ -2397,6 +2428,57 @@ void MainWindow::setMixRemotePeerVisible(bool visible)
 {
     if (mixRemotePeerRow_) {
         mixRemotePeerRow_->setVisible(visible);
+    }
+}
+
+void MainWindow::startJamRecording()
+{
+    if (!jam2_.isRunning()) {
+        return;
+    }
+    jamRecordingFolder_ = timestampedJamRecordingFolder();
+    QDir().mkpath(jamRecordingFolder_);
+    jam2_.sendLine(QStringLiteral("record jam start %1").arg(jamRecordingFolder_));
+    appendLog(QStringLiteral("record jam start: ") + jamRecordingFolder_);
+    QTimer::singleShot(250, this, [this] {
+        if (jam2_.isRunning()) {
+            jam2_.sendLine(QStringLiteral("status"));
+        }
+    });
+    jamRecordingActive_ = true;
+    updateJamRecordingControls();
+}
+
+void MainWindow::stopJamRecording()
+{
+    if (!jam2_.isRunning()) {
+        return;
+    }
+    jam2_.sendLine(QStringLiteral("record jam stop"));
+    appendLog(QStringLiteral("record jam stop"));
+    QTimer::singleShot(250, this, [this] {
+        if (jam2_.isRunning()) {
+            jam2_.sendLine(QStringLiteral("status"));
+        }
+    });
+    jamRecordingActive_ = false;
+    updateJamRecordingControls();
+}
+
+void MainWindow::updateJamRecordingControls()
+{
+    if (jamRecordingButton_) {
+        jamRecordingButton_->setEnabled(jam2_.isRunning());
+        jamRecordingButton_->setText(jamRecordingActive_
+            ? QStringLiteral("Stop Recording Jam")
+            : QStringLiteral("Start Recording Jam"));
+    }
+    if (jamRecordingLabel_) {
+        if (jamRecordingActive_ || !jamRecordingFolder_.isEmpty()) {
+            jamRecordingLabel_->setText(QFileInfo(jamRecordingFolder_).fileName());
+        } else {
+            jamRecordingLabel_->setText(QStringLiteral("Stopped"));
+        }
     }
 }
 
@@ -2552,6 +2634,8 @@ void MainWindow::launchJamProcess(const QStringList& args)
     if (localOutputBox_) {
         localOutputBox_->setEnabled(false);
     }
+    jamRecordingActive_ = false;
+    updateJamRecordingControls();
     connectionLabel_->setText(QStringLiteral("Starting"));
     QTimer::singleShot(250, this, [this] {
         updateRuntimeControls();
@@ -2811,6 +2895,8 @@ void MainWindow::stopJam()
     if (localOutputBox_) {
         localOutputBox_->setEnabled(true);
     }
+    jamRecordingActive_ = false;
+    updateJamRecordingControls();
     setMixRemotePeerVisible(false);
 }
 
@@ -2896,6 +2982,14 @@ void MainWindow::handleStatus(const QJsonObject& status)
     }
     if (status.value(QStringLiteral("event")).toString() != QStringLiteral("status")) {
         return;
+    }
+    if (status.contains(QStringLiteral("recording_active"))) {
+        jamRecordingActive_ = status.value(QStringLiteral("recording_active")).toBool(false);
+        const QString folder = status.value(QStringLiteral("recording_folder")).toString();
+        if (!folder.isEmpty()) {
+            jamRecordingFolder_ = folder;
+        }
+        updateJamRecordingControls();
     }
     updateStatsDisplay(status);
 }

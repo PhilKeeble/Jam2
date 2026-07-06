@@ -222,6 +222,12 @@ def write_results_csv(path, results):
         "resampler_ratio_min",
         "resampler_ratio_max",
         "playout_delay_error_ms_abs_max",
+        "metronome_wav_ok",
+        "metronome_wav_verdict",
+        "server_metronome_wav_max_error_frames",
+        "client_metronome_wav_max_error_frames",
+        "server_metronome_wav_missing_clicks",
+        "client_metronome_wav_missing_clicks",
         "server_csv_path",
         "client_csv_path",
     ]
@@ -233,6 +239,9 @@ def write_results_csv(path, results):
         for result in results:
             combined = result.get("metrics", {}).get("combined", {})
             proxy = result.get("proxy_stats", {})
+            wav = result.get("metronome_wav_analysis", {})
+            wav_server = wav.get("server", {})
+            wav_client = wav.get("client", {})
             row = {
                 "scenario": result.get("scenario", ""),
                 "source_scenario": result.get("source_scenario", result.get("scenario", "")),
@@ -250,6 +259,12 @@ def write_results_csv(path, results):
                 "proxy_server_to_client_recv_errors": proxy.get("server_to_client_recv_errors", 0),
                 "proxy_client_to_server_send_errors": proxy.get("client_to_server_send_errors", 0),
                 "proxy_server_to_client_send_errors": proxy.get("server_to_client_send_errors", 0),
+                "metronome_wav_ok": "yes" if wav.get("ok", False) else ("no" if wav else ""),
+                "metronome_wav_verdict": wav.get("verdict", ""),
+                "server_metronome_wav_max_error_frames": wav_server.get("max_abs_error_frames", ""),
+                "client_metronome_wav_max_error_frames": wav_client.get("max_abs_error_frames", ""),
+                "server_metronome_wav_missing_clicks": wav_server.get("missing_clicks", ""),
+                "client_metronome_wav_missing_clicks": wav_client.get("missing_clicks", ""),
                 "server_csv_path": result.get("server_csv_path", ""),
                 "client_csv_path": result.get("client_csv_path", ""),
             }

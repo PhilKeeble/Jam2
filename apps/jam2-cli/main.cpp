@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -747,6 +748,7 @@ struct AudioPacketStats {
 };
 
 struct RuntimeState {
+    mutable std::mutex recording_mutex;
     std::atomic<bool> quit{false};
     std::atomic<bool> stats_enabled{false};
     std::atomic<bool> print_stats{false};
@@ -876,6 +878,9 @@ void print_interactive_help(bool stats_enabled)
               << "  remote level +/-n   adjust peer playback level\n"
               << "  remote mute         set peer playback level to 0\n"
               << "  remote unmute       restore peer playback level to 1\n"
+              << "  record jam start <folder>  start dry jam stem recording\n"
+              << "  record jam stop            stop dry jam stem recording\n"
+              << "  record jam status          print dry jam recording status\n"
               << "  bpm <1..400>        set metronome tempo\n"
               << "  quit                stop the stream and exit\n"
               << "  exit                stop the stream and exit\n";
@@ -916,7 +921,18 @@ bool apply_level_token(std::string_view token, std::atomic<int>& target_ppm)
     return true;
 }
 
-void stdin_command_loop(RuntimeState& state)
+void write_recording_sidecar(
+    const std::filesystem::path& folder,
+    const jam2::audio::OutputRecorderStats& stats,
+    const Options& options,
+    const RuntimeState& state);
+void print_recording_status(const jam2::audio::OutputRecorder* recorder);
+
+void stdin_command_loop(
+    RuntimeState& state,
+    jam2::audio::OutputRecorder* recorder,
+    int recording_sample_rate,
+    const Options& options)
 {
     std::string line;
     print_prompt();
@@ -1037,6 +1053,54 @@ void stdin_command_loop(RuntimeState& state)
                 state.remote_level_ppm.store(1000000, std::memory_order_relaxed);
             } else {
                 std::cerr << "unknown remote command; use: remote level|mute|unmute\n";
+            }
+            print_prompt();
+            continue;
+        }
+        if (command == "record") {
+            std::string target;
+            std::string action;
+            in >> target >> action;
+            if (target != "jam" || (action != "start" && action != "stop" && action != "status")) {
+                std::cerr << "unknown record command; use: record jam start|stop|status\n";
+                print_prompt();
+                continue;
+            }
+            if (recorder == nullptr) {
+                std::cerr << "record jam requires an active audio device\n";
+                print_prompt();
+                continue;
+            }
+            if (action == "start") {
+                std::string folder;
+                std::getline(in >> std::ws, folder);
+                if (folder.empty()) {
+                    std::cerr << "record jam start requires a folder\n";
+                } else {
+                    std::lock_guard<std::mutex> lock(state.recording_mutex);
+                    std::string error;
+                    if (recorder->start(std::filesystem::path(folder), recording_sample_rate, error)) {
+                        std::cout << "Recording jam: " << folder << "\n";
+                    } else {
+                        std::cerr << "record jam start failed: " << error << "\n";
+                    }
+                }
+            } else if (action == "stop") {
+                std::lock_guard<std::mutex> lock(state.recording_mutex);
+                const auto before = recorder->stats();
+                std::string error;
+                const bool ok = recorder->stop(error);
+                const auto after = recorder->stats();
+                if (!before.folder.empty()) {
+                    write_recording_sidecar(std::filesystem::path(before.folder), after, options, state);
+                }
+                if (ok) {
+                    std::cout << "Recording jam stopped: " << after.folder << "\n";
+                } else {
+                    std::cerr << "record jam stop failed: " << error << "\n";
+                }
+            } else {
+                print_recording_status(recorder);
             }
             print_prompt();
             continue;
@@ -1419,6 +1483,75 @@ std::string json_escape(std::string_view value)
         }
     }
     return out;
+}
+
+void write_recording_sidecar(
+    const std::filesystem::path& folder,
+    const jam2::audio::OutputRecorderStats& stats,
+    const Options& options,
+    const RuntimeState& state)
+{
+    if (folder.empty()) {
+        return;
+    }
+    std::filesystem::create_directories(folder);
+    std::ofstream out(folder / "recording.json", std::ios::binary | std::ios::trunc);
+    if (!out) {
+        std::cerr << "record jam sidecar failed: " << (folder / "recording.json").string() << "\n";
+        return;
+    }
+    const auto pattern = metronome_pattern_from_runtime(state);
+    out << "{\n"
+        << "  \"format\": \"pcm16_mono_wav\",\n"
+        << "  \"sample_rate\": " << stats.sample_rate << ",\n"
+        << "  \"stems\": [\"mix.wav\", \"my-input.wav\", \"their-input.wav\", \"inputs-mix.wav\", \"metronome.wav\"],\n"
+        << "  \"recording_folder\": \"" << json_escape(folder.string()) << "\",\n"
+        << "  \"start_audio_frame\": " << stats.start_audio_frame << ",\n"
+        << "  \"stop_audio_frame\": " << stats.stop_audio_frame << ",\n"
+        << "  \"frames_queued\": " << stats.frames_queued << ",\n"
+        << "  \"frames_written\": " << stats.frames_written << ",\n"
+        << "  \"dropped_frames\": " << stats.dropped_frames << ",\n"
+        << "  \"drop_events\": " << stats.drop_events << ",\n"
+        << "  \"writer_errors\": " << stats.writer_errors << ",\n"
+        << "  \"queue_capacity_frames\": " << stats.queue_capacity_frames << ",\n"
+        << "  \"metronome\": \"" << (state.metronome.load(std::memory_order_relaxed) ? "on" : "off") << "\",\n"
+        << "  \"bpm\": " << state.bpm.load(std::memory_order_relaxed) << ",\n"
+        << "  \"metronome_level\": " << unit_from_ppm(state.metronome_level_ppm.load(std::memory_order_relaxed)) << ",\n"
+        << "  \"remote_level\": " << unit_from_ppm(state.remote_level_ppm.load(std::memory_order_relaxed)) << ",\n"
+        << "  \"metronome_mode\": \"" << metronome_mode_text(state.metronome_mode.load(std::memory_order_relaxed)) << "\",\n"
+        << "  \"metronome_epoch_sample_time\": "
+        << state.metronome_epoch_sample_time.load(std::memory_order_relaxed) << ",\n"
+        << "  \"metronome_epoch_valid\": "
+        << (state.metronome_epoch_valid.load(std::memory_order_relaxed) ? "true" : "false") << ",\n"
+        << "  \"metronome_beats_per_bar\": " << pattern.beats_per_bar << ",\n"
+        << "  \"metronome_division\": " << pattern.division << ",\n"
+        << "  \"metronome_step_count\": " << pattern.step_count << ",\n"
+        << "  \"metronome_play_mask_low\": " << pattern.play_mask_low << ",\n"
+        << "  \"metronome_play_mask_high\": " << pattern.play_mask_high << ",\n"
+        << "  \"metronome_accent_mask_low\": " << pattern.accent_mask_low << ",\n"
+        << "  \"metronome_accent_mask_high\": " << pattern.accent_mask_high << ",\n"
+        << "  \"sample_time_playout\": " << (options.sample_time_playout ? "true" : "false") << ",\n"
+        << "  \"playout_delay_frames\": " << options.playout_delay_frames << "\n"
+        << "}\n";
+}
+
+void print_recording_status(const jam2::audio::OutputRecorder* recorder)
+{
+    if (recorder == nullptr) {
+        std::cout << "recording_active=0 recording_available=0\n";
+        return;
+    }
+    const auto stats = recorder->stats();
+    std::cout << "recording_active=" << (stats.active ? 1 : 0)
+              << " recording_folder=" << stats.folder
+              << " recording_sample_rate=" << stats.sample_rate
+              << " recording_frames_written=" << stats.frames_written
+              << " recording_dropped_frames=" << stats.dropped_frames
+              << " recording_drop_events=" << stats.drop_events
+              << " recording_queue_depth_frames=" << stats.queue_depth_frames
+              << " recording_queue_capacity_frames=" << stats.queue_capacity_frames
+              << " recording_writer_errors=" << stats.writer_errors
+              << "\n";
 }
 
 void print_startup_json(
@@ -2227,6 +2360,7 @@ void print_compact_status(
     const RuntimeState& runtime,
     const jam2::audio::DeviceStream* audio_stream,
     const jam2::audio::MonoRingBuffer* playback_ring,
+    const jam2::audio::OutputRecorder* recorder,
     std::uint64_t elapsed_ms)
 {
     const std::size_t playback_depth = playback_ring != nullptr ? playback_ring->available_read() : 0;
@@ -2235,6 +2369,7 @@ void print_compact_status(
     const double remote_level = unit_from_ppm(runtime.remote_level_ppm.load(std::memory_order_relaxed));
     const int live_metronome_mode = runtime.metronome_mode.load(std::memory_order_relaxed);
     const bool playback_prefilled = audio_stream != nullptr && audio_stream->playback_prefilled();
+    const auto recording_stats = recorder != nullptr ? recorder->stats() : jam2::audio::OutputRecorderStats{};
     const auto audio_snapshot = make_audio_snapshot(audio_stream, nullptr, playback_ring);
     const double playback_underrun_time_ms =
         frames_to_ms(static_cast<std::size_t>(audio_snapshot.playback_ring_underruns), options.sample_rate);
@@ -2254,6 +2389,13 @@ void print_compact_status(
                   << ",\"metronome_mode\":\"" << metronome_mode_text(live_metronome_mode) << "\""
                   << ",\"sample_time_playout\":" << (options.sample_time_playout ? "true" : "false")
                   << ",\"playout_delay_frames\":" << options.playout_delay_frames
+                  << ",\"recording_active\":" << (recording_stats.active ? "true" : "false")
+                  << ",\"recording_folder\":\"" << json_escape(recording_stats.folder) << "\""
+                  << ",\"recording_frames_written\":" << recording_stats.frames_written
+                  << ",\"recording_dropped_frames\":" << recording_stats.dropped_frames
+                  << ",\"recording_queue_depth_frames\":" << recording_stats.queue_depth_frames
+                  << ",\"recording_queue_capacity_frames\":" << recording_stats.queue_capacity_frames
+                  << ",\"recording_writer_errors\":" << recording_stats.writer_errors
                   << ",\"playback_prefilled\":" << (playback_prefilled ? "true" : "false")
                   << ",\"playback_depth_frames\":" << playback_depth
                   << ",\"playback_depth_ms\":" << playback_depth_ms
@@ -2316,6 +2458,12 @@ void print_compact_status(
               << " metronome_mode=" << metronome_mode_text(live_metronome_mode)
               << " sample_time_playout=" << (options.sample_time_playout ? "on" : "off")
               << " playout_delay_frames=" << options.playout_delay_frames
+              << " recording_active=" << (recording_stats.active ? "yes" : "no")
+              << " recording_folder=" << recording_stats.folder
+              << " recording_frames_written=" << recording_stats.frames_written
+              << " recording_dropped_frames=" << recording_stats.dropped_frames
+              << " recording_queue_depth_frames=" << recording_stats.queue_depth_frames
+              << " recording_writer_errors=" << recording_stats.writer_errors
               << " playback_prefilled=" << (playback_prefilled ? "yes" : "no")
               << " playback_depth_ms=" << playback_depth_ms
               << " expected_remote_sample_time=" << stats.expected_remote_sample_time
@@ -2402,6 +2550,7 @@ AudioPacketStats run_audio_packet_exchange(
     jam2::audio::MonoRingBuffer* capture_ring,
     jam2::audio::MonoRingBuffer* playback_ring,
     jam2::audio::DeviceStream* audio_stream,
+    jam2::audio::OutputRecorder* recorder,
     std::uint64_t startup_drained_packets,
     CsvStatsLog* csv_log,
     bool listener_side)
@@ -3026,7 +3175,7 @@ AudioPacketStats run_audio_packet_exchange(
         }
         if (runtime.print_status.exchange(false, std::memory_order_relaxed)) {
             const std::uint64_t elapsed_ms = (now - start_time) / 1000ULL;
-            print_compact_status(stats, options, runtime, audio_stream, playback_ring, elapsed_ms);
+            print_compact_status(stats, options, runtime, audio_stream, playback_ring, recorder, elapsed_ms);
         }
         if (!stats.sent_bye && now >= send_deadline) {
             const jam2::protocol::Header bye{
@@ -3498,6 +3647,7 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
 
 struct OptionalAudioStream {
     std::unique_ptr<jam2::audio::StreamControl> control;
+    std::unique_ptr<jam2::audio::OutputRecorder> recorder;
     std::unique_ptr<jam2::audio::MonoRingBuffer> capture_ring;
     std::unique_ptr<jam2::audio::MonoRingBuffer> playback_ring;
     std::unique_ptr<jam2::audio::DeviceStream> stream;
@@ -3510,6 +3660,7 @@ OptionalAudioStream start_optional_audio(const Options& options, bool leader_aud
         return audio;
     }
     audio.control = std::make_unique<jam2::audio::StreamControl>();
+    audio.recorder = std::make_unique<jam2::audio::OutputRecorder>();
     audio.control->metronome_enabled.store(options.metronome, std::memory_order_relaxed);
     audio.control->metronome_bpm.store(options.bpm, std::memory_order_relaxed);
     audio.control->metronome_beats_per_bar.store(4, std::memory_order_relaxed);
@@ -3542,7 +3693,8 @@ OptionalAudioStream start_optional_audio(const Options& options, bool leader_aud
         *audio.capture_ring,
         *audio.playback_ring,
         options.playback_prefill_frames,
-        *audio.control);
+        *audio.control,
+        audio.recorder.get());
     return audio;
 }
 
@@ -3563,7 +3715,7 @@ struct CommandThread {
     RuntimeState state;
     std::thread thread;
 
-    explicit CommandThread(const Options& options)
+    CommandThread(const Options& options, jam2::audio::OutputRecorder* recorder, int recording_sample_rate)
     {
         state.metronome.store(options.metronome, std::memory_order_relaxed);
         state.bpm.store(options.bpm, std::memory_order_relaxed);
@@ -3580,7 +3732,9 @@ struct CommandThread {
         state.metronome_epoch_sample_time.store(0, std::memory_order_relaxed);
         state.metronome_epoch_valid.store(options.metronome, std::memory_order_relaxed);
         state.stats_enabled.store(options.stats_enabled, std::memory_order_relaxed);
-        thread = std::thread([this] { stdin_command_loop(state); });
+        thread = std::thread([this, recorder, recording_sample_rate, options] {
+            stdin_command_loop(state, recorder, recording_sample_rate, options);
+        });
     }
 
     ~CommandThread()
@@ -3591,6 +3745,27 @@ struct CommandThread {
         }
     }
 };
+
+void finalize_active_recording(OptionalAudioStream& audio, const Options& options, RuntimeState& state)
+{
+    if (!audio.recorder) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(state.recording_mutex);
+    const auto before = audio.recorder->stats();
+    if (!before.active) {
+        return;
+    }
+    std::string error;
+    const bool ok = audio.recorder->stop(error);
+    const auto after = audio.recorder->stats();
+    if (!before.folder.empty()) {
+        write_recording_sidecar(std::filesystem::path(before.folder), after, options, state);
+    }
+    if (!ok) {
+        std::cerr << "record jam finalization failed: " << error << "\n";
+    }
+}
 
 void print_optional_audio_stats(const OptionalAudioStream& audio, const Options& options)
 {
@@ -3636,6 +3811,18 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
     std::cout << "Output channels: duplicated mono to selected output channels\n";
     std::cout << "Capture ring capacity frames: " << audio.capture_ring->capacity() << "\n";
     std::cout << "Playback ring capacity frames: " << audio.playback_ring->capacity() << "\n";
+    if (audio.recorder) {
+        const auto recording = audio.recorder->stats();
+        std::cout << "Recording active: " << (recording.active ? "yes" : "no") << "\n";
+        std::cout << "Recording folder: " << recording.folder << "\n";
+        std::cout << "Recording sample rate: " << recording.sample_rate << "\n";
+        std::cout << "Recording frames written: " << recording.frames_written << "\n";
+        std::cout << "Recording dropped frames: " << recording.dropped_frames << "\n";
+        std::cout << "Recording drop events: " << recording.drop_events << "\n";
+        std::cout << "Recording queue depth frames: " << recording.queue_depth_frames << "\n";
+        std::cout << "Recording queue capacity frames: " << recording.queue_capacity_frames << "\n";
+        std::cout << "Recording writer errors: " << recording.writer_errors << "\n";
+    }
     std::cout << "Playback prefilled: " << (audio.stream->playback_prefilled() ? "yes" : "no") << "\n";
     std::cout << "Playback prefill frames: " << options.playback_prefill_frames << "\n";
     std::cout << "Playback prefill ms: " << frames_to_ms(options.playback_prefill_frames, options.sample_rate) << "\n";
@@ -3965,7 +4152,10 @@ int run_listen(int argc, char** argv)
                 make_csv_context(argc, argv, "listen", options, socket, local, from, endpoint_mode));
             std::cout << "Stats CSV: " << csv_log->path().string() << "\n";
         }
-        CommandThread commands(options);
+        const int recording_sample_rate = audio.stream
+            ? static_cast<int>(std::lround(audio.stream->info().sample_rate))
+            : options.sample_rate;
+        CommandThread commands(options, audio.recorder.get(), recording_sample_rate);
         auto audio_stats = run_audio_packet_exchange(
             socket,
             session,
@@ -3976,6 +4166,7 @@ int run_listen(int argc, char** argv)
             audio.capture_ring.get(),
             audio.playback_ring.get(),
             audio.stream.get(),
+            audio.recorder.get(),
             static_cast<std::uint64_t>(drained_startup_packets),
             csv_log ? &*csv_log : nullptr,
             true);
@@ -3984,6 +4175,7 @@ int run_listen(int argc, char** argv)
             print_audio_packet_stats(audio_stats, options);
             print_optional_audio_stats(audio, options);
         }
+        finalize_active_recording(audio, options, commands.state);
         std::cout.flush();
         return 0;
     }
@@ -4066,7 +4258,10 @@ int run_connect(int argc, char** argv)
                             "jam2-url"));
                     std::cout << "Stats CSV: " << csv_log->path().string() << "\n";
                 }
-                CommandThread commands(options);
+                const int recording_sample_rate = audio.stream
+                    ? static_cast<int>(std::lround(audio.stream->info().sample_rate))
+                    : options.sample_rate;
+                CommandThread commands(options, audio.recorder.get(), recording_sample_rate);
                 auto audio_stats = run_audio_packet_exchange(
                     socket,
                     session,
@@ -4077,6 +4272,7 @@ int run_connect(int argc, char** argv)
                     audio.capture_ring.get(),
                     audio.playback_ring.get(),
                     audio.stream.get(),
+                    audio.recorder.get(),
                     static_cast<std::uint64_t>(drained_startup_packets),
                     csv_log ? &*csv_log : nullptr,
                     false);
@@ -4085,6 +4281,7 @@ int run_connect(int argc, char** argv)
                     print_audio_packet_stats(audio_stats, options);
                     print_optional_audio_stats(audio, options);
                 }
+                finalize_active_recording(audio, options, commands.state);
                 std::cout.flush();
                 return 0;
             }

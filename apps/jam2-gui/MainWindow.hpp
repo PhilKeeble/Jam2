@@ -77,6 +77,9 @@ private:
     void updateRuntimeControls();
     void updateMixControls();
     void setMixRemotePeerVisible(bool visible);
+    void startJamRecording();
+    void stopJamRecording();
+    void updateJamRecordingControls();
     void refreshGeneratedUrl();
     void updateConnectionControlState();
     void updateTrackControls();
@@ -251,6 +254,8 @@ private:
     QWidget* mixRemotePeerRow_ = nullptr;
     QSlider* mixRemotePeerSlider_ = nullptr;
     QLabel* mixRemotePeerLevelLabel_ = nullptr;
+    QPushButton* jamRecordingButton_ = nullptr;
+    QLabel* jamRecordingLabel_ = nullptr;
     QCheckBox* focusFrequencyCheck_ = nullptr;
     QComboBox* focusPresetBox_ = nullptr;
     QSlider* focusFrequencySlider_ = nullptr;
@@ -268,6 +273,8 @@ private:
     std::uint64_t sessionId_ = 0;
     std::array<std::uint8_t, 16> sessionKey_{};
     QString lastCapturePath_;
+    QString jamRecordingFolder_;
+    bool jamRecordingActive_ = false;
     QJsonObject lastCaptureSummary_;
     QByteArray incomingTrackBytes_;
     QString incomingTrackName_;

@@ -29,6 +29,7 @@ function(jam2_create_release_dirs target)
             "${JAM2_RELEASE_DIR}"
             "${JAM2_RELEASE_DIR}/logs"
             "${JAM2_RELEASE_DIR}/captures"
+            "${JAM2_RELEASE_DIR}/jam_recordings"
             "${JAM2_RELEASE_DIR}/songs"
             "${JAM2_RELEASE_DIR}/received_tracks"
         VERBATIM
