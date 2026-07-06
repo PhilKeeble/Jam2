@@ -4,6 +4,38 @@
 #include <QDir>
 #include <QFileInfo>
 
+namespace {
+
+QString siblingToolPath(const char* binary)
+{
+    const QDir appDir(QCoreApplication::applicationDirPath());
+    const QString sibling = appDir.absoluteFilePath(QString::fromLatin1(binary));
+    if (QFileInfo::exists(sibling)) {
+        return sibling;
+    }
+
+    QDir releaseDir(appDir);
+    if (releaseDir.dirName() == QStringLiteral("MacOS") &&
+        releaseDir.cdUp() &&
+        releaseDir.dirName() == QStringLiteral("Contents") &&
+        releaseDir.cdUp() &&
+        releaseDir.dirName().endsWith(QStringLiteral(".app")) &&
+        releaseDir.cdUp()) {
+        const QString besideBundle = releaseDir.absoluteFilePath(QString::fromLatin1(binary));
+        if (QFileInfo::exists(besideBundle)) {
+            return besideBundle;
+        }
+    }
+
+    QDir root(appDir);
+    if (root.dirName() == QStringLiteral("release")) {
+        root.cdUp();
+    }
+    return root.absoluteFilePath(QStringLiteral("release/%1").arg(QString::fromLatin1(binary)));
+}
+
+}
+
 QString SessionController::defaultJam2Path()
 {
 #if defined(Q_OS_WIN)
@@ -11,16 +43,7 @@ QString SessionController::defaultJam2Path()
 #else
     constexpr const char* binary = "jam2";
 #endif
-    const QDir appDir(QCoreApplication::applicationDirPath());
-    const QString sibling = appDir.absoluteFilePath(binary);
-    if (QFileInfo::exists(sibling)) {
-        return sibling;
-    }
-    QDir root(appDir);
-    if (root.dirName() == "release") {
-        root.cdUp();
-    }
-    return root.absoluteFilePath(QStringLiteral("release/%1").arg(binary));
+    return siblingToolPath(binary);
 }
 
 QString SessionController::defaultCapturePath()
@@ -30,16 +53,7 @@ QString SessionController::defaultCapturePath()
 #else
     constexpr const char* binary = "jam2-capture";
 #endif
-    const QDir appDir(QCoreApplication::applicationDirPath());
-    const QString sibling = appDir.absoluteFilePath(binary);
-    if (QFileInfo::exists(sibling)) {
-        return sibling;
-    }
-    QDir root(appDir);
-    if (root.dirName() == "release") {
-        root.cdUp();
-    }
-    return root.absoluteFilePath(QStringLiteral("release/%1").arg(binary));
+    return siblingToolPath(binary);
 }
 
 QString SessionController::defaultBindHost()
