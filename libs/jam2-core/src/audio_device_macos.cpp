@@ -1145,8 +1145,8 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     const auto selected = select_device(id);
     const UInt32 input_channels = device_channels(selected.object, kAudioDevicePropertyScopeInput);
     const UInt32 output_channels = device_channels(selected.object, kAudioDevicePropertyScopeOutput);
-    if (channels.input.empty() || channels.output.empty()) {
-        throw std::runtime_error("CoreAudio duplex stream requires at least one selected input and output channel");
+    if (channels.input.empty()) {
+        throw std::runtime_error("CoreAudio stream requires at least one selected input channel");
     }
     for (int channel : channels.input) {
         if (channel < 0 || static_cast<UInt32>(channel) >= input_channels) {
@@ -1158,9 +1158,11 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
             throw std::runtime_error(channel_range_error("CoreAudio", "output", channels, output_channels, false));
         }
     }
-    if (!is_supported_float32_format(selected.object, kAudioDevicePropertyScopeInput) ||
-        !is_supported_float32_format(selected.object, kAudioDevicePropertyScopeOutput)) {
-        throw std::runtime_error("CoreAudio duplex stream currently supports float32 linear PCM input/output only");
+    if (!is_supported_float32_format(selected.object, kAudioDevicePropertyScopeInput)) {
+        throw std::runtime_error("CoreAudio stream currently supports float32 linear PCM input only");
+    }
+    if (!channels.output.empty() && !is_supported_float32_format(selected.object, kAudioDevicePropertyScopeOutput)) {
+        throw std::runtime_error("CoreAudio stream currently supports float32 linear PCM output only");
     }
 
     configure_device(selected.object, requested_sample_rate, requested_buffer_size);

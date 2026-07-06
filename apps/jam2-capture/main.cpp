@@ -506,7 +506,7 @@ int record_input(const Options& options)
     jam2::audio::StreamControl control;
     jam2::audio::ChannelSelection channels;
     channels.input = options.input_channels;
-    channels.output = {0, 1};
+    channels.output.clear();
 
     auto stream = jam2::audio::start_duplex_stream(
         options.audio_device,

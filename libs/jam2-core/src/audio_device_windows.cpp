@@ -1331,13 +1331,16 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     long input_channels = 0;
     long output_channels = 0;
     require_asio_ok(driver.get()->getChannels(&input_channels, &output_channels), "ASIO getChannels");
-    if (input_channels <= 0 || output_channels <= 0) {
-        throw std::runtime_error("ASIO duplex stream requires at least one input and one output channel");
+    if (input_channels <= 0) {
+        throw std::runtime_error("ASIO stream requires at least one input channel");
     }
     const int selected_input_channels = static_cast<int>(channels.input.size());
     const int selected_output_channels = static_cast<int>(channels.output.size());
-    if (selected_input_channels <= 0 || selected_output_channels <= 0) {
-        throw std::runtime_error("ASIO duplex stream requires at least one selected input and output channel");
+    if (selected_input_channels <= 0) {
+        throw std::runtime_error("ASIO stream requires at least one selected input channel");
+    }
+    if (selected_output_channels > 0 && output_channels <= 0) {
+        throw std::runtime_error("ASIO stream selected output channels but device has no output channels");
     }
     for (int channel : channels.input) {
         if (channel < 0 || channel >= input_channels) {
