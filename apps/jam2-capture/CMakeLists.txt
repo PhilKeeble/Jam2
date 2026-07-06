@@ -8,6 +8,9 @@ if(APPLE)
         loopback_capture_macos.hpp
         loopback_capture_macos.mm
     )
+    target_link_options(jam2-capture PRIVATE
+        "LINKER:-sectcreate,__TEXT,__info_plist,${CMAKE_CURRENT_SOURCE_DIR}/Info.plist"
+    )
 endif()
 
 jam2_set_app_output(jam2-capture)

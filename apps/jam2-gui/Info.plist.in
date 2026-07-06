@@ -20,5 +20,7 @@
     <string>@MACOSX_BUNDLE_BUNDLE_VERSION@</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Jam2 uses the microphone or selected audio input so you can send and record instrument audio.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Jam2 records system audio when you use loopback capture.</string>
 </dict>
 </plist>
