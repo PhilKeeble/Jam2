@@ -21,9 +21,11 @@ void ControlServer::close()
     authenticated_ = false;
     buffer_.clear();
     if (peer_) {
-        peer_->disconnectFromHost();
-        peer_->deleteLater();
+        QTcpSocket* socket = peer_;
         peer_ = nullptr;
+        socket->disconnect(this);
+        socket->abort();
+        socket->deleteLater();
     }
     server_.close();
 }
@@ -77,6 +79,9 @@ void ControlServer::acceptPeer()
 
 void ControlServer::readPeer()
 {
+    if (!peer_) {
+        return;
+    }
     buffer_ += peer_->readAll();
     int newline = -1;
     while ((newline = buffer_.indexOf('\n')) >= 0) {
@@ -91,6 +96,9 @@ void ControlServer::readPeer()
 
 void ControlServer::handleMessage(const QJsonObject& message)
 {
+    if (!peer_) {
+        return;
+    }
     if (!authenticated_) {
         if (message.value(QStringLiteral("type")).toString() == QStringLiteral("hello") &&
             message.value(QStringLiteral("session")).toString() == sessionHex_ &&

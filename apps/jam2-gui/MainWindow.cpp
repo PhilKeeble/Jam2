@@ -1581,14 +1581,6 @@ QWidget* MainWindow::buildSessionPage()
     bpmSpin_->setRange(1, 400);
     bpmSpin_->setValue(120);
     bpmSpin_->hide();
-    metronomeModeBox_ = new QComboBox(page);
-    metronomeModeBox_->addItems({
-        QStringLiteral("shared-grid"),
-        QStringLiteral("leader-audio"),
-        QStringLiteral("symmetric-delay"),
-        QStringLiteral("listener-compensated"),
-    });
-    metronomeLevelSlider_ = makeUnitSlider(0.2, page);
     remoteLevelSlider_ = makeUnitSlider(1.0, page);
     sampleTimePlayoutCheck_ = new QCheckBox(QStringLiteral("Sample-time playout"), page);
     sampleTimePlayoutCheck_->setChecked(true);
@@ -1648,12 +1640,8 @@ QWidget* MainWindow::buildSessionPage()
     }
 
     auto* runtimeLayout = new QGridLayout();
-    runtimeLayout->addWidget(new QLabel(QStringLiteral("Mode"), page), 0, 0);
-    runtimeLayout->addWidget(metronomeModeBox_, 0, 1);
-    runtimeLayout->addWidget(new QLabel(QStringLiteral("Metronome"), page), 0, 2);
-    runtimeLayout->addWidget(metronomeLevelSlider_, 0, 3);
-    runtimeLayout->addWidget(new QLabel(QStringLiteral("Remote"), page), 0, 4);
-    runtimeLayout->addWidget(remoteLevelSlider_, 0, 5);
+    runtimeLayout->addWidget(new QLabel(QStringLiteral("Remote"), page), 0, 0);
+    runtimeLayout->addWidget(remoteLevelSlider_, 0, 1);
 
     runtimeMixBox_ = new QGroupBox(QStringLiteral("Runtime Mix"), page);
     runtimeMixBox_->setLayout(runtimeLayout);
@@ -1675,8 +1663,6 @@ QWidget* MainWindow::buildSessionPage()
     QObject::connect(joinButton_, &QPushButton::clicked, this, [this] { showJoinJamDialog(); });
     QObject::connect(stopButton_, &QPushButton::clicked, this, [this] { stopJam(); });
     QObject::connect(refreshControlButton_, &QPushButton::clicked, this, [this] { refreshControlConnection(); });
-    QObject::connect(metronomeModeBox_, &QComboBox::currentTextChanged, this, [this] { updateRuntimeControls(); });
-    QObject::connect(metronomeLevelSlider_, &QSlider::valueChanged, this, [this] { updateRuntimeControls(); });
     QObject::connect(remoteLevelSlider_, &QSlider::valueChanged, this, [this] { updateRuntimeControls(); });
 
     return page;
@@ -2115,6 +2101,16 @@ QWidget* MainWindow::buildMetronomePage()
     metronomeDivisionBox_->setCurrentIndex(metronomeDivisionBox_->findData(1));
     applyMutedEditorStyle(metronomeDivisionBox_);
 
+    metronomeModeBox_ = new QComboBox(page);
+    metronomeModeBox_->addItems({
+        QStringLiteral("shared-grid"),
+        QStringLiteral("leader-audio"),
+        QStringLiteral("symmetric-delay"),
+        QStringLiteral("listener-compensated"),
+    });
+    applyMutedEditorStyle(metronomeModeBox_);
+
+    metronomeLevelSlider_ = makeUnitSlider(0.2, page);
     localMetronomeLevelSlider_ = makeUnitSlider(0.35, page);
     trackMetronomeLabel_ = new QLabel(QStringLiteral("Local metronome stopped"), page);
     startTrackMetronomeButton_ = new QPushButton(QStringLiteral("Start"), page);
@@ -2140,8 +2136,12 @@ QWidget* MainWindow::buildMetronomePage()
     controls->addWidget(metronomeBeatsSpin_, 0, 3);
     controls->addWidget(new QLabel(QStringLiteral("Division"), page), 0, 4);
     controls->addWidget(metronomeDivisionBox_, 0, 5);
-    controls->addWidget(new QLabel(QStringLiteral("Level"), page), 0, 6);
-    controls->addWidget(localMetronomeLevelSlider_, 0, 7);
+    controls->addWidget(new QLabel(QStringLiteral("Mode"), page), 0, 6);
+    controls->addWidget(metronomeModeBox_, 0, 7);
+    controls->addWidget(new QLabel(QStringLiteral("Jam level"), page), 1, 0);
+    controls->addWidget(metronomeLevelSlider_, 1, 1, 1, 3);
+    controls->addWidget(new QLabel(QStringLiteral("Standalone level"), page), 1, 4);
+    controls->addWidget(localMetronomeLevelSlider_, 1, 5, 1, 3);
 
     auto* buttons = new QHBoxLayout();
     buttons->addWidget(startTrackMetronomeButton_);
@@ -2158,6 +2158,13 @@ QWidget* MainWindow::buildMetronomePage()
     QObject::connect(stopTrackMetronomeButton_, &QPushButton::clicked, this, [this] { stopTrackMetronome(); });
     QObject::connect(metronomeBpmSpin_, qOverload<int>(&QSpinBox::valueChanged), this, [this] {
         updateTrackMetronomeInterval();
+    });
+    QObject::connect(metronomeModeBox_, &QComboBox::currentTextChanged, this, [this] {
+        updateRuntimeControls();
+        sendMetronomeSettingsToPeer();
+    });
+    QObject::connect(metronomeLevelSlider_, &QSlider::valueChanged, this, [this] {
+        updateRuntimeControls();
     });
     QObject::connect(localMetronomeLevelSlider_, &QSlider::valueChanged, this, [this] {
         applyMetronomePatternToLocalDevice();
@@ -2282,6 +2289,9 @@ void MainWindow::launchJamProcess(const QStringList& args)
     connectionLabel_->setText(QStringLiteral("Starting"));
     QTimer::singleShot(250, this, [this] {
         updateRuntimeControls();
+    });
+    QTimer::singleShot(500, this, [this] {
+        sendMetronomeSettingsToPeer();
     });
 }
 
@@ -2744,6 +2754,8 @@ void MainWindow::handleControlMessage(const QJsonObject& message)
         const QString text = message.value(QStringLiteral("message")).toString(QStringLiteral("Session error"));
         appendLog(QStringLiteral("peer session error: ") + text);
         QMessageBox::warning(this, QStringLiteral("Jam2"), text);
+    } else if (type == QStringLiteral("metronome.settings")) {
+        applyRemoteMetronomeSettings(message);
     } else if (type == QStringLiteral("beat.set")) {
         const QString lane = message.value(QStringLiteral("lane")).toString();
         BeatGridModel* model = &beatModel_;
@@ -2848,6 +2860,7 @@ void MainWindow::handleControlState(const QString& state, bool serverSide)
         controlReconnectAttempts_ = 0;
         controlReconnectTimer_.stop();
         sendLeaderSettings();
+        sendMetronomeSettingsToPeer();
     } else if (!serverSide && state == QStringLiteral("TCP control authenticated")) {
         controlReconnectAttempts_ = 0;
         controlReconnectTimer_.stop();
@@ -2924,7 +2937,6 @@ QJsonObject MainWindow::leaderSettingsMessage() const
         {QStringLiteral("drift_deadband_ppm"), driftDeadbandSpin_->value()},
         {QStringLiteral("drift_max_correction_ppm"), driftMaxCorrectionSpin_->value()},
         {QStringLiteral("bpm"), metronomeBpmSpin_ ? metronomeBpmSpin_->value() : bpmSpin_->value()},
-        {QStringLiteral("metronome_level"), static_cast<double>(metronomeLevelSlider_->value()) / 100.0},
         {QStringLiteral("remote_level"), static_cast<double>(remoteLevelSlider_->value()) / 100.0},
         {QStringLiteral("metronome_mode"), metronomeModeBox_->currentText()},
         {QStringLiteral("sample_time_playout"), sampleTimePlayoutCheck_->isChecked()},
@@ -2956,8 +2968,6 @@ void MainWindow::applyLeaderSettings(const QJsonObject& settings)
     if (metronomeBpmSpin_) {
         metronomeBpmSpin_->setValue(settings.value(QStringLiteral("bpm")).toInt(metronomeBpmSpin_->value()));
     }
-    metronomeLevelSlider_->setValue(qBound(0, qRound(settings.value(QStringLiteral("metronome_level")).toDouble(
-        static_cast<double>(metronomeLevelSlider_->value()) / 100.0) * 100.0), 100));
     remoteLevelSlider_->setValue(qBound(0, qRound(settings.value(QStringLiteral("remote_level")).toDouble(
         static_cast<double>(remoteLevelSlider_->value()) / 100.0) * 100.0), 100));
     const QString mode = settings.value(QStringLiteral("metronome_mode")).toString(metronomeModeBox_->currentText());
@@ -3811,6 +3821,7 @@ void MainWindow::startTrackMetronome()
         localMetronomeRunning_ = true;
         updateRuntimeControls();
         jam2_.sendLine(QStringLiteral("metro on"));
+        sendMetronomeSettingsToPeer();
         if (trackMetronomeLabel_) {
             trackMetronomeLabel_->setText(QStringLiteral("Jam metronome running"));
         }
@@ -3890,6 +3901,7 @@ void MainWindow::stopTrackMetronome()
     localMetronomeRunning_ = false;
     if (jamMetronomeWasRunning) {
         jam2_.sendLine(QStringLiteral("metro off"));
+        sendMetronomeSettingsToPeer();
     }
     if (trackMetronomeLabel_) {
         trackMetronomeLabel_->setText(jam2_.isRunning()
@@ -3911,6 +3923,7 @@ void MainWindow::updateTrackMetronomeInterval()
     }
     applyMetronomePatternToLocalDevice();
     sendMetronomePatternToJam();
+    sendMetronomeSettingsToPeer();
 }
 
 void MainWindow::rebuildMetronomePattern()
@@ -3948,6 +3961,7 @@ void MainWindow::rebuildMetronomePattern()
                 metronomeEnabledSteps_[step] = checked;
                 applyMetronomePatternToLocalDevice();
                 sendMetronomePatternToJam();
+                sendMetronomeSettingsToPeer();
             }
         });
         playLayout->addWidget(playCheck);
@@ -3964,6 +3978,7 @@ void MainWindow::rebuildMetronomePattern()
                 metronomeAccents_[step] = checked;
                 applyMetronomePatternToLocalDevice();
                 sendMetronomePatternToJam();
+                sendMetronomeSettingsToPeer();
             }
         });
         accentLayout->addWidget(accentCheck);
@@ -3973,6 +3988,7 @@ void MainWindow::rebuildMetronomePattern()
     metronomePatternTable_->setVerticalHeaderLabels(QStringList{QStringLiteral("Play"), QStringLiteral("Accent")});
     applyMetronomePatternToLocalDevice();
     sendMetronomePatternToJam();
+    sendMetronomeSettingsToPeer();
 }
 
 jam2::metronome::PatternSnapshot MainWindow::currentMetronomePattern() const
@@ -4019,6 +4035,114 @@ void MainWindow::sendMetronomePatternToJam()
         .arg(QString::number(static_cast<qulonglong>(pattern.play_mask_high), 16))
         .arg(QString::number(static_cast<qulonglong>(pattern.accent_mask_low), 16))
         .arg(QString::number(static_cast<qulonglong>(pattern.accent_mask_high), 16)));
+}
+
+void MainWindow::sendMetronomeSettingsToPeer()
+{
+    if (applyingRemoteMetronomeSettings_ || !jam2_.isRunning()) {
+        return;
+    }
+    const jam2::metronome::PatternSnapshot pattern = currentMetronomePattern();
+    sendControl(QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("metronome.settings")},
+        {QStringLiteral("running"), localMetronomeRunning_},
+        {QStringLiteral("mode"), metronomeModeBox_ ? metronomeModeBox_->currentText() : QStringLiteral("shared-grid")},
+        {QStringLiteral("bpm"), pattern.bpm},
+        {QStringLiteral("beats"), pattern.beats_per_bar},
+        {QStringLiteral("division"), pattern.division},
+        {QStringLiteral("play_mask_low"), QString::number(static_cast<qulonglong>(pattern.play_mask_low), 16)},
+        {QStringLiteral("play_mask_high"), QString::number(static_cast<qulonglong>(pattern.play_mask_high), 16)},
+        {QStringLiteral("accent_mask_low"), QString::number(static_cast<qulonglong>(pattern.accent_mask_low), 16)},
+        {QStringLiteral("accent_mask_high"), QString::number(static_cast<qulonglong>(pattern.accent_mask_high), 16)},
+    });
+}
+
+void MainWindow::applyRemoteMetronomeSettings(const QJsonObject& message)
+{
+    auto parseMask = [](const QJsonObject& object, const QString& key) {
+        bool ok = false;
+        const QString text = object.value(key).toString();
+        const qulonglong value = text.toULongLong(&ok, 16);
+        return ok ? static_cast<std::uint64_t>(value) : 0ULL;
+    };
+
+    const bool running = message.value(QStringLiteral("running")).toBool(localMetronomeRunning_);
+    const QString mode = message.value(QStringLiteral("mode")).toString(metronomeModeBox_
+        ? metronomeModeBox_->currentText()
+        : QStringLiteral("shared-grid"));
+    const int bpm = qBound(1, message.value(QStringLiteral("bpm")).toInt(metronomeBpmSpin_ ? metronomeBpmSpin_->value() : 120), 400);
+    const int beats = qBound(1, message.value(QStringLiteral("beats")).toInt(metronomeBeatsSpin_ ? metronomeBeatsSpin_->value() : 4), 16);
+    const int division = qMax(1, message.value(QStringLiteral("division")).toInt(metronomeDivisionBox_ ? metronomeDivisionBox_->currentData().toInt() : 1));
+    const std::uint64_t playLow = parseMask(message, QStringLiteral("play_mask_low"));
+    const std::uint64_t playHigh = parseMask(message, QStringLiteral("play_mask_high"));
+    const std::uint64_t accentLow = parseMask(message, QStringLiteral("accent_mask_low"));
+    const std::uint64_t accentHigh = parseMask(message, QStringLiteral("accent_mask_high"));
+
+    applyingRemoteMetronomeSettings_ = true;
+    if (metronomeBpmSpin_) {
+        const QSignalBlocker blocker(metronomeBpmSpin_);
+        metronomeBpmSpin_->setValue(bpm);
+    }
+    if (bpmSpin_) {
+        const QSignalBlocker blocker(bpmSpin_);
+        bpmSpin_->setValue(bpm);
+    }
+    if (metronomeBeatsSpin_) {
+        const QSignalBlocker blocker(metronomeBeatsSpin_);
+        metronomeBeatsSpin_->setValue(beats);
+    }
+    if (metronomeDivisionBox_) {
+        const QSignalBlocker blocker(metronomeDivisionBox_);
+        const int index = metronomeDivisionBox_->findData(division);
+        if (index >= 0) {
+            metronomeDivisionBox_->setCurrentIndex(index);
+        }
+    }
+    if (metronomeModeBox_) {
+        const QSignalBlocker blocker(metronomeModeBox_);
+        const int index = metronomeModeBox_->findText(mode);
+        if (index >= 0) {
+            metronomeModeBox_->setCurrentIndex(index);
+        }
+    }
+
+    jam2::metronome::PatternSnapshot pattern;
+    pattern.bpm = bpm;
+    pattern.beats_per_bar = beats;
+    pattern.division = division;
+    pattern.step_count = jam2::metronome::pattern_step_count(beats, division);
+    pattern.play_mask_low = playLow;
+    pattern.play_mask_high = playHigh;
+    pattern.accent_mask_low = accentLow;
+    pattern.accent_mask_high = accentHigh;
+    pattern = jam2::metronome::sanitize(pattern);
+
+    metronomeEnabledSteps_.resize(pattern.step_count);
+    metronomeAccents_.resize(pattern.step_count);
+    for (int step = 0; step < pattern.step_count; ++step) {
+        metronomeEnabledSteps_[step] = jam2::metronome::mask_enabled(pattern.play_mask_low, pattern.play_mask_high, step);
+        metronomeAccents_[step] = jam2::metronome::mask_enabled(pattern.accent_mask_low, pattern.accent_mask_high, step);
+    }
+    rebuildMetronomePattern();
+    localMetronomeRunning_ = running;
+    applyingRemoteMetronomeSettings_ = false;
+
+    applyMetronomePatternToLocalDevice();
+    updateRuntimeControls();
+    if (jam2_.isRunning()) {
+        jam2_.sendLine(running ? QStringLiteral("metro on") : QStringLiteral("metro off"));
+    }
+    if (trackMetronomeLabel_) {
+        trackMetronomeLabel_->setText(running
+            ? QStringLiteral("Jam metronome running")
+            : QStringLiteral("Jam metronome stopped"));
+    }
+    if (startTrackMetronomeButton_) {
+        startTrackMetronomeButton_->setEnabled(!running);
+    }
+    if (stopTrackMetronomeButton_) {
+        stopTrackMetronomeButton_->setEnabled(running);
+    }
 }
 
 QJsonObject MainWindow::trackMetadataMessage(const QString& type) const

@@ -107,6 +107,8 @@ private:
     jam2::metronome::PatternSnapshot currentMetronomePattern() const;
     void applyMetronomePatternToLocalDevice();
     void sendMetronomePatternToJam();
+    void sendMetronomeSettingsToPeer();
+    void applyRemoteMetronomeSettings(const QJsonObject& message);
     void sendTrackFile();
     void receiveTrackFileStart(const QJsonObject& message);
     void receiveTrackFileChunk(const QJsonObject& message);
@@ -280,6 +282,7 @@ private:
     QStringList pendingJoinBaseArgs_;
     bool pendingJoinLaunch_ = false;
     bool localMetronomeRunning_ = false;
+    bool applyingRemoteMetronomeSettings_ = false;
     QVector<bool> metronomeEnabledSteps_;
     QVector<bool> metronomeAccents_;
 };
