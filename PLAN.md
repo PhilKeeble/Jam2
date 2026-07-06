@@ -58,7 +58,7 @@ Controls worth considering:
 - Improve GUI/periodic stats so actual packet loss, reordered/late packets, burst/stall behavior, and underrun duration are clearly distinguished.
 - Fail fast on incompatible peer settings. The validation suite showed mismatched frame sizes can connect but silently discard audio, which should become a clear config/connection failure.
 
-### Local Shared Track Mix Source
+### Local Shared Track Mix Source (only if need sync with metronome)
 
 Add an engine-side local playback source that `jam2-gui` can control for shared backing tracks.
 
@@ -84,64 +84,6 @@ Rules:
 - Report track loaded/playing state, track level, underruns, decode errors, and current playback frame in machine-readable status and CSV where useful.
 - Let `jam2-gui` handle TCP file transfer, file readiness, shared countdowns, and synchronized playback commands.
 
-### Jam Output Recording
-
-Add optional recording inside `jam2` for the local jam output mix. This is separate from `jam2-capture`, which records external/local sources for import.
-
-Possible runtime command shape:
-
-```text
-record output start <path.wav>
-record output stop
-record output status
-record stems start <folder>
-record stems stop
-record stems status
-```
-
-Rules:
-
-- Record the local output mix before it reaches ASIO/CoreAudio output.
-- Include remote peer audio, metronome, and local shared track playback when those sources are active.
-- Do not rely on OS loopback capture for jam output, especially on Windows ASIO where system loopback may not see the signal.
-- Keep file I/O out of the real-time callback by using a callback-safe handoff to a writer thread.
-- WAV should be the first supported output format.
-- Support optional stem recording so users can import the jam into a DAW and remove or rebalance parts later.
-- First useful stem set: `mix.wav`, `my-input.wav`, `their-input.wav`, `inputs-mix.wav`, `metronome.wav`, and `shared-track.wav` when active.
-- `my-input.wav` should record the local captured input before it is sent to the peer.
-- `their-input.wav` should record the decoded remote peer audio as heard locally after receive/playout processing.
-- `inputs-mix.wav` should record local input plus remote peer audio without metronome or shared backing track.
-- `mix.wav` should record the full local monitoring mix, including inputs, metronome, and shared track when active.
-- Stems must stay sample-aligned so they line up correctly in a DAW.
-- Missing/inactive stems should be omitted or written as silence according to an explicit option.
-- Report recording state, output path, written frames, dropped writer frames, and file errors in machine-readable status/final stats.
-
-### Custom Metronome And Rhythm Training
-
-Add future metronome controls that go beyond a fixed quarter-note click.
-
-Possible CLI/runtime shape:
-
-```text
---time-signature 4/4
---metronome-pattern <pattern>
---metronome-subdivision quarter|eighth|sixteenth|triplet
-
-metro time 7/8
-metro pattern <pattern>
-metro subdivision sixteenth
-```
-
-Rules:
-
-- Support time signatures such as `4/4`, `3/4`, `6/8`, `7/8`, and other explicit numerator/denominator values.
-- Support configurable accent patterns, including first-beat accent, offbeat accents, clave-like patterns, and user-defined beat/subdivision accents.
-- Support different click sounds or levels for strong accent, weak accent, and subdivision clicks.
-- Keep patterns explicit and numeric/textual rather than inferred.
-- Expose active time signature, pattern, subdivision, beat index, bar index, and accent index in stats.
-- Keep click generation callback-safe: no allocation, logging, file I/O, locks, or blocking in the audio callback.
-- Maybe explore whether `jam2-gui` Beat View/drum-grid patterns should be reusable as metronome accent/rhythm-training patterns. Do not assume this is required until real use shows it is useful.
-- Preserve simple default behavior: 4/4 quarter-note click with first-beat accent.
 
 ### Experimental Delay Correction
 

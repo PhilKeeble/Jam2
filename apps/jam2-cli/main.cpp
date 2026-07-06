@@ -768,6 +768,7 @@ struct RuntimeState {
     std::atomic<std::uint64_t> metronome_epoch_sample_time{0};
     std::atomic<bool> metronome_epoch_valid{false};
     std::atomic<std::uint64_t> metronome_revision{0};
+    std::atomic<std::uint64_t> metronome_epoch_revision{0};
 };
 
 int ppm_from_unit(double value)
@@ -984,6 +985,7 @@ void stdin_command_loop(
                 try {
                     state.metronome_mode.store(metronome_mode_id(parse_metronome_mode(mode)), std::memory_order_relaxed);
                     state.metronome_revision.fetch_add(1, std::memory_order_relaxed);
+                    state.metronome_epoch_revision.fetch_add(1, std::memory_order_relaxed);
                 } catch (const std::exception& error) {
                     std::cerr << error.what() << "\n";
                 }
@@ -1016,6 +1018,7 @@ void stdin_command_loop(
                     !parse_u64(accent_high_text, accent_high)) {
                     std::cerr << "metro pattern must be: bpm beats division play_low play_high accent_low accent_high\n";
                 } else {
+                    const int previous_bpm = state.bpm.load(std::memory_order_relaxed);
                     auto pattern = metronome_pattern_from_runtime(state);
                     pattern.bpm = bpm;
                     pattern.beats_per_bar = beats;
@@ -1027,6 +1030,9 @@ void stdin_command_loop(
                     pattern.accent_mask_high = accent_high;
                     store_metronome_pattern(state, pattern);
                     state.metronome_revision.fetch_add(1, std::memory_order_relaxed);
+                    if (previous_bpm != pattern.bpm) {
+                        state.metronome_epoch_revision.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
             } else if (value == "mute") {
                 state.metronome_level_ppm.store(0, std::memory_order_relaxed);
@@ -1111,6 +1117,7 @@ void stdin_command_loop(
             if (value > 0 && value <= 400) {
                 state.bpm.store(value, std::memory_order_relaxed);
                 state.metronome_revision.fetch_add(1, std::memory_order_relaxed);
+                state.metronome_epoch_revision.fetch_add(1, std::memory_order_relaxed);
             } else {
                 std::cerr << "bpm must be 1..400\n";
             }
@@ -2585,6 +2592,7 @@ AudioPacketStats run_audio_packet_exchange(
     std::uint64_t next_metronome = next_send;
     std::uint64_t local_beat = 0;
     std::uint64_t last_metronome_revision = runtime.metronome_revision.load(std::memory_order_relaxed);
+    std::uint64_t last_metronome_epoch_revision = runtime.metronome_epoch_revision.load(std::memory_order_relaxed);
     std::uint64_t last_audio_receive_us = 0;
     std::uint64_t last_audio_gap_receive_us = 0;
     bool drift_started = false;
@@ -2596,6 +2604,7 @@ AudioPacketStats run_audio_packet_exchange(
     std::uint64_t first_receive_time_us = 0;
     bool playout_sample_time_initialized = false;
     std::uint64_t next_playout_remote_sample_time = 0;
+    bool remote_metronome_epoch_accepted = false;
     std::uint64_t adaptive_target_frames = static_cast<std::uint64_t>(options.adaptive_playback_target_frames);
     std::uint64_t adaptive_last_update_us = 0;
     std::uint64_t adaptive_under_start_us = 0;
@@ -2697,6 +2706,9 @@ AudioPacketStats run_audio_packet_exchange(
             adaptive_target_frames :
             static_cast<std::uint64_t>(options.playout_delay_frames);
     };
+
+    runtime.metronome_epoch_sample_time.store(current_playout_delay_frames(), std::memory_order_relaxed);
+    runtime.metronome_epoch_valid.store(true, std::memory_order_relaxed);
 
     auto process_audio_packet = [&](const PendingAudioPacket& packet) {
         const std::uint64_t warmup_end_time =
@@ -3017,12 +3029,14 @@ AudioPacketStats run_audio_packet_exchange(
         last_stream_loop_us = now;
         const bool metronome_enabled = runtime.metronome.load(std::memory_order_relaxed);
         const std::uint64_t metronome_revision = runtime.metronome_revision.load(std::memory_order_relaxed);
-        if (metronome_enabled && (!runtime.metronome_epoch_valid.load(std::memory_order_relaxed) ||
-            metronome_revision != last_metronome_revision)) {
+        const std::uint64_t metronome_epoch_revision = runtime.metronome_epoch_revision.load(std::memory_order_relaxed);
+        if (!runtime.metronome_epoch_valid.load(std::memory_order_relaxed) ||
+            metronome_epoch_revision != last_metronome_epoch_revision) {
             runtime.metronome_epoch_sample_time.store(
                 sample_time + current_playout_delay_frames(),
                 std::memory_order_relaxed);
             runtime.metronome_epoch_valid.store(true, std::memory_order_relaxed);
+            last_metronome_epoch_revision = metronome_epoch_revision;
         }
         sync_audio_control(runtime, audio_control, stats.resampler_ratio);
         int sends_this_loop = 0;
@@ -3130,7 +3144,7 @@ AudioPacketStats run_audio_packet_exchange(
             }
             next_ping += 100000ULL;
         }
-        if (((metronome_enabled && now >= next_metronome) || metronome_revision != last_metronome_revision) &&
+        if ((now >= next_metronome || metronome_revision != last_metronome_revision) &&
             now < send_deadline) {
             const int current_bpm = runtime.bpm.load(std::memory_order_relaxed);
             const std::uint64_t epoch = runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed);
@@ -3328,17 +3342,33 @@ AudioPacketStats run_audio_packet_exchange(
                         if (metronome_payload.has_pattern) {
                             store_metronome_pattern(runtime, metronome_payload.pattern);
                         }
+                        const int current_bpm = runtime.bpm.load(std::memory_order_relaxed);
+                        const int remote_abs_bpm = remote_bpm < 0 ? -remote_bpm : remote_bpm;
+                        const bool bpm_changed = remote_abs_bpm > 0 && remote_abs_bpm <= 400 && remote_abs_bpm != current_bpm;
+                        const bool needs_epoch =
+                            !remote_metronome_epoch_accepted ||
+                            bpm_changed ||
+                            !runtime.metronome_epoch_valid.load(std::memory_order_relaxed);
                         if (remote_bpm < 0 && remote_bpm >= -400) {
                             runtime.metronome.store(false, std::memory_order_relaxed);
                             runtime.bpm.store(-remote_bpm, std::memory_order_relaxed);
-                            runtime.metronome_epoch_valid.store(false, std::memory_order_relaxed);
+                            if (needs_epoch) {
+                                runtime.metronome_epoch_sample_time.store(
+                                    metronome_payload.epoch_sample_time + current_playout_delay_frames(),
+                                    std::memory_order_relaxed);
+                                runtime.metronome_epoch_valid.store(true, std::memory_order_relaxed);
+                                remote_metronome_epoch_accepted = true;
+                            }
                         } else if (remote_bpm > 0 && remote_bpm <= 400) {
                             runtime.metronome.store(true, std::memory_order_relaxed);
                             runtime.bpm.store(remote_bpm, std::memory_order_relaxed);
-                            runtime.metronome_epoch_sample_time.store(
-                                metronome_payload.epoch_sample_time + current_playout_delay_frames(),
-                                std::memory_order_relaxed);
-                            runtime.metronome_epoch_valid.store(true, std::memory_order_relaxed);
+                            if (needs_epoch) {
+                                runtime.metronome_epoch_sample_time.store(
+                                    metronome_payload.epoch_sample_time + current_playout_delay_frames(),
+                                    std::memory_order_relaxed);
+                                runtime.metronome_epoch_valid.store(true, std::memory_order_relaxed);
+                                remote_metronome_epoch_accepted = true;
+                            }
                         }
                     }
                     stats.last_remote_beat = metronome_payload.beat;
@@ -3676,7 +3706,7 @@ OptionalAudioStream start_optional_audio(const Options& options, bool leader_aud
     audio.control->metronome_mode.store(metronome_mode_id(options.metronome_mode), std::memory_order_relaxed);
     audio.control->leader_audio_local_click.store(leader_audio_local_click, std::memory_order_relaxed);
     audio.control->metronome_epoch_sample_time.store(0, std::memory_order_relaxed);
-    audio.control->metronome_epoch_valid.store(options.metronome, std::memory_order_relaxed);
+    audio.control->metronome_epoch_valid.store(true, std::memory_order_relaxed);
     audio.capture_ring = std::make_unique<jam2::audio::MonoRingBuffer>(options.capture_ring_frames);
     audio.playback_ring = std::make_unique<jam2::audio::MonoRingBuffer>(options.playback_ring_frames);
     const bool diagnostics_enabled =
@@ -3730,7 +3760,7 @@ struct CommandThread {
         state.remote_level_ppm.store(ppm_from_unit(options.remote_level), std::memory_order_relaxed);
         state.metronome_mode.store(metronome_mode_id(options.metronome_mode), std::memory_order_relaxed);
         state.metronome_epoch_sample_time.store(0, std::memory_order_relaxed);
-        state.metronome_epoch_valid.store(options.metronome, std::memory_order_relaxed);
+        state.metronome_epoch_valid.store(true, std::memory_order_relaxed);
         state.stats_enabled.store(options.stats_enabled, std::memory_order_relaxed);
         thread = std::thread([this, recorder, recording_sample_rate, options] {
             stdin_command_loop(state, recorder, recording_sample_rate, options);
