@@ -1641,7 +1641,9 @@ private:
         status_.realtime_active = "off";
         qos_class_t active_qos = QOS_CLASS_UNSPECIFIED;
         int relative_priority = 0;
-        active_qos = pthread_get_qos_class_np(pthread_self(), &relative_priority);
+        if (pthread_get_qos_class_np(pthread_self(), &active_qos, &relative_priority) != 0) {
+            active_qos = QOS_CLASS_UNSPECIFIED;
+        }
         status_.thread_priority = mac_qos_text(active_qos);
         if (options.os_priority == OsPriorityMode::Off) {
             return;
@@ -1652,7 +1654,9 @@ private:
             if (result != 0) {
                 status_.qos_error = "error " + std::to_string(result);
             }
-            active_qos = pthread_get_qos_class_np(pthread_self(), &relative_priority);
+            if (pthread_get_qos_class_np(pthread_self(), &active_qos, &relative_priority) != 0) {
+                active_qos = QOS_CLASS_UNSPECIFIED;
+            }
             status_.qos_active = mac_qos_text(active_qos);
             status_.thread_priority = status_.qos_active;
             return;
