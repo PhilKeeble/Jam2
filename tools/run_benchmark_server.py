@@ -5,6 +5,7 @@ import csv
 import http.server
 import json
 import shutil
+import socket
 import socketserver
 import threading
 import time
@@ -13,12 +14,12 @@ from pathlib import Path
 
 from jam2_audio_analysis import analyze_recording_dir
 from jam2_benchmark_suite import benchmark_cases
-from jam2_harness import start_listener
+from jam2_harness import rewrite_jam_url_endpoint, start_listener
 from jam2_metrics import combined_summary
 from jam2_tooling import copy_final_csv, default_jam2_path, ensure_dir, fail, print_flush, repo_root, write_json
 
 
-CLIENT_UPLOAD_TIMEOUT_S = 60
+CLIENT_UPLOAD_TIMEOUT_S = 0
 
 
 def parse_args():
@@ -28,6 +29,9 @@ def parse_args():
     parser.add_argument("--sample-rate", required=True, type=int)
     parser.add_argument("--logs", default=str(Path(__file__).with_name("benchmark_logs")))
     parser.add_argument("--bind-http", default="0.0.0.0:8000")
+    parser.add_argument("--audio-bind", default="0.0.0.0:0", help="Jam2 UDP listen bind endpoint for benchmark sessions")
+    parser.add_argument("--public-audio-host", default="", help="LAN host/IP clients should use for the Jam2 UDP endpoint")
+    parser.add_argument("--client-upload-timeout-s", type=float, default=0.0, help="wait for client upload; 0 waits indefinitely")
     parser.add_argument("--stream-ms", type=int, default=30000)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--signals", default="silence,tone-440,pulse-1s")
@@ -103,14 +107,27 @@ def serve_http(bind_http, public_dir, logs_dir):
     return server
 
 
-def wait_for_client_result(logs_dir, case_id, run_index):
+def default_public_audio_host():
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("8.8.8.8", 80))
+            return probe.getsockname()[0]
+    except OSError:
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except OSError:
+            return ""
+
+
+def wait_for_client_result(logs_dir, case_id, run_index, timeout_s=CLIENT_UPLOAD_TIMEOUT_S):
     target = Path(logs_dir) / case_id / "client" / f"run_{run_index:02d}" / "result.json"
-    deadline = time.monotonic() + CLIENT_UPLOAD_TIMEOUT_S
-    while time.monotonic() < deadline:
+    deadline = time.monotonic() + timeout_s if timeout_s and timeout_s > 0 else None
+    while True:
         if target.exists():
             return target
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
         time.sleep(0.25)
-    return None
 
 
 def verdict_from_tags(tags):
@@ -210,7 +227,7 @@ def write_outputs(logs_dir, results):
     (logs_dir / "benchmark_summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, run_index):
+def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, run_index, audio_bind, public_audio_host, client_upload_timeout_s):
     output_dir = ensure_dir(Path(logs_dir) / case.case_id / "server" / f"run_{run_index:02d}")
     recording_dir = ensure_dir(output_dir / "recording")
     listener, paths = start_listener(
@@ -223,7 +240,9 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
         extra_args=[
             "--record-jam-folder", str(recording_dir),
             "--test-input", case.server_signal if case.server_signal != "metronome-only" else "silence",
-        ])
+        ],
+        bind=audio_bind,
+        wait_ms=0)
     startup = listener.wait_for_startup("waiting", 10.0)
     connection_url = startup.get("connection_url") if startup else ""
     if not connection_url and startup:
@@ -239,6 +258,10 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
             "client_return_code": -1,
             "tags": ["listener_startup_failed"],
         })
+    startup_endpoint = startup.get("local_endpoint", "")
+    if public_audio_host:
+        _, _, port_text = startup_endpoint.rpartition(":")
+        connection_url = rewrite_jam_url_endpoint(connection_url, (public_audio_host, int(port_text)))
     current = {
         "status": "running",
         "case_id": case.case_id,
@@ -247,12 +270,17 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
         "signal": case.signal,
         "server_signal": case.server_signal,
         "client_signal": case.client_signal,
+        "stream_ms": case.stream_ms,
         "profile": case.profile.metadata(),
         "client_args": case.profile.args(case.stream_ms),
     }
     write_json(Path(public_dir) / "current.json", current)
-    print_flush(f"[server] published {case.case_id} run {run_index}")
-    client_result_path = wait_for_client_result(logs_dir, case.case_id, run_index)
+    print_flush(f"[server] published {case.case_id} run {run_index} url={connection_url}")
+    if client_upload_timeout_s and client_upload_timeout_s > 0:
+        print_flush(f"[server] waiting up to {client_upload_timeout_s:g}s for client upload")
+    else:
+        print_flush("[server] waiting indefinitely for client upload")
+    client_result_path = wait_for_client_result(logs_dir, case.case_id, run_index, client_upload_timeout_s)
     server_rc = listener.wait(timeout=max(1.0, case.stream_ms / 1000.0 + 10.0))
     if server_rc is None:
         listener.terminate()
@@ -323,6 +351,12 @@ def main():
     jam2 = Path(args.jam2)
     if not jam2.exists():
         return fail(f"jam2 executable not found: {jam2}")
+    public_audio_host = args.public_audio_host.strip()
+    if not public_audio_host:
+        public_audio_host = default_public_audio_host()
+    if not public_audio_host or public_audio_host.startswith("127."):
+        return fail("could not infer a LAN audio host; pass --public-audio-host WINDOWS_LAN_IP")
+    print_flush(f"[server] audio bind={args.audio_bind} public_audio_host={public_audio_host}")
     logs_dir = Path(args.logs)
     if args.clean and logs_dir.exists():
         shutil.rmtree(logs_dir)
@@ -339,7 +373,8 @@ def main():
             for run_index in range(1, case.repeats + 1):
                 results.append(run_one_case(
                     jam2, args.server_audio_device, args.sample_rate,
-                    logs_dir, public_dir, case, run_index))
+                    logs_dir, public_dir, case, run_index,
+                    args.audio_bind, public_audio_host, args.client_upload_timeout_s))
                 write_outputs(logs_dir, results)
         write_json(public_dir / "current.json", {"status": "all_done"})
         write_outputs(logs_dir, results)

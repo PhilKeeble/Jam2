@@ -5,6 +5,7 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -26,6 +27,7 @@ def parse_args():
     parser.add_argument("--timeout-s", type=int, default=0)
     parser.add_argument("--finish-idle-s", type=float, default=5.0, help="exit cleanly if the server disappears after completed work")
     parser.add_argument("--post-upload-pause-s", type=float, default=5.0, help="wait after each upload before polling for the next case")
+    parser.add_argument("--case-timeout-s", type=float, default=0.0, help="kill a Jam2 case after this many seconds; 0 derives from stream/wait time")
     parser.add_argument("--clean", action="store_true", help="delete local artifacts after successful upload")
     parser.add_argument("--network-profile", choices=("auto", "wired", "wifi", "unknown"), default="auto")
     return parser.parse_args()
@@ -81,7 +83,17 @@ def upload_zip(base_url, zip_path):
     return False
 
 
-def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, network_type):
+def _copy_stream(pipe, handle, prefix):
+    try:
+        for line in pipe:
+            handle.write(line)
+            handle.flush()
+            print_flush(f"{prefix}{line.rstrip()}")
+    finally:
+        pipe.close()
+
+
+def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, network_type, case_timeout_s=0.0):
     case_id = current["case_id"]
     run_index = int(current["run_index"])
     signal = current["signal"]
@@ -107,6 +119,7 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
         str(jam2),
         "connect",
         current["url"],
+        "--wait-ms", str(max(15000, int(current.get("stream_ms", 30000)) + 15000)),
         "--audio-device", str(audio_device),
         "--sample-rate", str(sample_rate),
         "--log-stats", str(csv_dir),
@@ -114,17 +127,34 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
         "--test-input", client_signal if client_signal != "metronome-only" else "silence",
     ]
     args.extend(current.get("client_args", []))
-    print_flush(f"[client] starting {case_id} run {run_index} signal={signal}")
+    timeout_s = case_timeout_s if case_timeout_s and case_timeout_s > 0 else max(30.0, int(current.get("stream_ms", 30000)) / 1000.0 + 30.0)
+    print_flush(f"[client] starting {case_id} run {run_index} signal={signal} url={current['url']}")
     with open(stdout_path, "w", encoding="utf-8", newline="") as stdout, open(stderr_path, "w", encoding="utf-8", newline="") as stderr:
         process = subprocess.Popen(
             args,
             cwd=str(repo_root()),
-            stdout=stdout,
-            stderr=stderr,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
-            errors="replace")
-        return_code = process.wait()
+            errors="replace",
+            bufsize=1)
+        stdout_thread = threading.Thread(target=_copy_stream, args=(process.stdout, stdout, "[jam2 stdout] "), daemon=True)
+        stderr_thread = threading.Thread(target=_copy_stream, args=(process.stderr, stderr, "[jam2 stderr] "), daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+        try:
+            return_code = process.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            print_flush(f"[client] case timeout after {timeout_s:g}s; terminating Jam2")
+            process.terminate()
+            try:
+                return_code = process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                return_code = process.wait(timeout=5.0)
+        stdout_thread.join(timeout=1.0)
+        stderr_thread.join(timeout=1.0)
     copied_csv = copy_final_csv(csv_dir, output_dir)
     analysis = analyze_recording_dir(
         recording_dir,
@@ -189,7 +219,7 @@ def main():
         seen.add(key)
         rc = run_case(
             jam2, current, args.client_audio_device, args.sample_rate,
-            logs, args.server, args.clean, network_type)
+            logs, args.server, args.clean, network_type, args.case_timeout_s)
         if rc != 0:
             return rc
         completed.add(key)

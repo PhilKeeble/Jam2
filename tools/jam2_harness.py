@@ -171,18 +171,21 @@ def side_paths(base_dir, side):
     }
 
 
-def start_listener(jam2, audio_device, sample_rate, profile, stream_ms, output_dir, extra_args=None, stdin_pipe=False):
+def start_listener(jam2, audio_device, sample_rate, profile, stream_ms, output_dir, extra_args=None, stdin_pipe=False, bind="127.0.0.1:0", wait_ms=None):
     paths = side_paths(output_dir, "server")
     args = [
         jam2,
         "listen",
-        "--bind", "127.0.0.1:0",
+        "--bind", bind,
         "--no-stun",
-        "--wait-ms", str(max(15000, stream_ms + 15000)),
         "--audio-device", str(audio_device),
         "--sample-rate", str(sample_rate),
         "--log-stats", str(paths["csv_raw"]),
     ]
+    if wait_ms is None:
+        wait_ms = max(15000, stream_ms + 15000)
+    if wait_ms > 0:
+        args.extend(["--wait-ms", str(wait_ms)])
     args.extend(profile.args(stream_ms))
     if extra_args:
         args.extend(extra_args)
