@@ -5,10 +5,10 @@ import csv
 import http.server
 import json
 import shutil
-import socket
 import socketserver
 import threading
 import time
+import urllib.parse
 import zipfile
 from pathlib import Path
 
@@ -29,8 +29,8 @@ def parse_args():
     parser.add_argument("--sample-rate", required=True, type=int)
     parser.add_argument("--logs", default=str(Path(__file__).with_name("benchmark_logs")))
     parser.add_argument("--bind-http", default="0.0.0.0:8000")
-    parser.add_argument("--audio-bind", default="0.0.0.0:0", help="Jam2 UDP listen bind endpoint for benchmark sessions")
-    parser.add_argument("--public-audio-host", default="", help="LAN host/IP clients should use for the Jam2 UDP endpoint")
+    parser.add_argument("--audio-bind", default="0.0.0.0:49000", help="Jam2 UDP listen bind endpoint for benchmark sessions")
+    parser.add_argument("--public-audio-host", default="", help="optional legacy override for the host in the published Jam2 URL")
     parser.add_argument("--client-upload-timeout-s", type=float, default=0.0, help="wait for client upload; 0 waits indefinitely")
     parser.add_argument("--stream-ms", type=int, default=30000)
     parser.add_argument("--repeats", type=int, default=1)
@@ -47,6 +47,7 @@ def parse_args():
 class UploadHandler(http.server.SimpleHTTPRequestHandler):
     public_dir = None
     logs_dir = None
+    done_acked = False
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(self.public_dir), **kwargs)
@@ -57,6 +58,22 @@ class UploadHandler(http.server.SimpleHTTPRequestHandler):
         print_flush("[http] " + (fmt % args))
 
     def do_POST(self):
+        if self.path == "/done-ack":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = 0
+            if length > 0:
+                self.rfile.read(length)
+            type(self).done_acked = True
+            response = b'{"ok":true}\n'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+            print_flush("[server] received all_done ack from client")
+            return
         if self.path != "/upload":
             self.send_error(404, "unknown upload endpoint")
             return
@@ -97,6 +114,7 @@ def serve_http(bind_http, public_dir, logs_dir):
     host, port_text = bind_http.rsplit(":", 1)
     UploadHandler.public_dir = public_dir
     UploadHandler.logs_dir = logs_dir
+    UploadHandler.done_acked = False
 
     class ReusableThreadingTcpServer(socketserver.ThreadingTCPServer):
         allow_reuse_address = True
@@ -107,16 +125,27 @@ def serve_http(bind_http, public_dir, logs_dir):
     return server
 
 
-def default_public_audio_host():
+def endpoint_port(endpoint):
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-            probe.connect(("8.8.8.8", 80))
-            return probe.getsockname()[0]
-    except OSError:
-        try:
-            return socket.gethostbyname(socket.gethostname())
-        except OSError:
-            return ""
+        _, port_text = endpoint.rsplit(":", 1)
+        return int(port_text)
+    except ValueError:
+        return None
+
+
+def jam_url_fields(jam_url):
+    parsed = urllib.parse.urlparse(jam_url)
+    query = urllib.parse.parse_qs(parsed.query)
+    endpoint = query.get("endpoint", [""])[0]
+    session_id = query.get("session", [""])[0]
+    session_key = query.get("key", [""])[0]
+    audio_port = endpoint_port(endpoint)
+    return {
+        "endpoint": endpoint,
+        "audio_port": audio_port,
+        "session_id": session_id,
+        "session_key": session_key,
+    }
 
 
 def wait_for_client_result(logs_dir, case_id, run_index, timeout_s=CLIENT_UPLOAD_TIMEOUT_S):
@@ -128,6 +157,46 @@ def wait_for_client_result(logs_dir, case_id, run_index, timeout_s=CLIENT_UPLOAD
         if deadline is not None and time.monotonic() >= deadline:
             return None
         time.sleep(0.25)
+
+
+def read_client_return_code(client_result_path):
+    if not client_result_path:
+        return None
+    try:
+        result = json.loads(Path(client_result_path).read_text(encoding="utf-8"))
+        return int(result.get("return_code", -1))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return -1
+
+
+def wait_for_case_progress(logs_dir, case_id, run_index, listener, public_dir, current, timeout_s=CLIENT_UPLOAD_TIMEOUT_S):
+    target = Path(logs_dir) / case_id / "client" / f"run_{run_index:02d}" / "result.json"
+    deadline = time.monotonic() + timeout_s if timeout_s and timeout_s > 0 else None
+    connected = False
+    while True:
+        if target.exists():
+            return target, connected, "client_upload"
+        if not connected and listener.startup_payloads("connected"):
+            connected = True
+            current = dict(current)
+            current["server_stage"] = "connected"
+            write_json(Path(public_dir) / "current.json", current)
+            print_flush(f"[server] client connected for {case_id} run {run_index}")
+        if listener.poll() is not None:
+            return None, connected, "listener_exit"
+        if deadline is not None and time.monotonic() >= deadline:
+            return None, connected, "timeout"
+        time.sleep(0.25)
+
+
+def wait_for_done_ack(timeout_s):
+    deadline = time.monotonic() + timeout_s if timeout_s and timeout_s > 0 else None
+    while True:
+        if UploadHandler.done_acked:
+            return True
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
 
 
 def verdict_from_tags(tags):
@@ -157,6 +226,12 @@ def evaluate_result(result):
         tags.append("underrun_high")
     if metrics.get("playback_dropped_frames_total", 0.0) > 0:
         tags.append("playback_dropped_frames")
+    if metrics.get("missing_audio_frames_total", 0.0) > 0:
+        tags.append("missing_audio_frames")
+    if metrics.get("jitter_buffer_dropped_packets_total", 0.0) > 0:
+        tags.append("jitter_buffer_dropped_packets")
+    if metrics.get("jitter_buffer_dropped_frames_total", 0.0) > 0:
+        tags.append("jitter_buffer_dropped_frames")
     for side in ("server", "client"):
         analysis = result.get(f"{side}_recording_analysis", {})
         tags.extend(analysis.get("tags", []))
@@ -262,11 +337,15 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
     if public_audio_host:
         _, _, port_text = startup_endpoint.rpartition(":")
         connection_url = rewrite_jam_url_endpoint(connection_url, (public_audio_host, int(port_text)))
+    url_fields = jam_url_fields(connection_url)
     current = {
         "status": "running",
         "case_id": case.case_id,
         "run_index": run_index,
         "url": connection_url,
+        "audio_port": url_fields["audio_port"],
+        "session_id": url_fields["session_id"],
+        "session_key": url_fields["session_key"],
         "signal": case.signal,
         "server_signal": case.server_signal,
         "client_signal": case.client_signal,
@@ -280,11 +359,36 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
         print_flush(f"[server] waiting up to {client_upload_timeout_s:g}s for client upload")
     else:
         print_flush("[server] waiting indefinitely for client upload")
-    client_result_path = wait_for_client_result(logs_dir, case.case_id, run_index, client_upload_timeout_s)
-    server_rc = listener.wait(timeout=max(1.0, case.stream_ms / 1000.0 + 10.0))
-    if server_rc is None:
+    client_result_path, connected, progress_reason = wait_for_case_progress(
+        logs_dir,
+        case.case_id,
+        run_index,
+        listener,
+        public_dir,
+        current,
+        client_upload_timeout_s)
+    client_rc = read_client_return_code(client_result_path)
+    if client_result_path and client_rc != 0 and listener.poll() is None:
+        print_flush(
+            f"[server] client uploaded failure before stream completion "
+            f"for {case.case_id} run {run_index}; stopping listener")
         listener.terminate()
         server_rc = listener.poll()
+    elif client_result_path:
+        server_rc = listener.wait(timeout=max(1.0, case.stream_ms / 1000.0 + 10.0))
+        if server_rc is None:
+            listener.terminate()
+            server_rc = listener.poll()
+    else:
+        if progress_reason == "listener_exit":
+            print_flush(f"[server] listener exited before client upload for {case.case_id} run {run_index}")
+        elif progress_reason == "timeout":
+            print_flush(f"[server] timed out waiting for client upload for {case.case_id} run {run_index}")
+        if listener.poll() is None:
+            listener.terminate()
+        server_rc = listener.poll()
+        if progress_reason == "listener_exit":
+            client_result_path = wait_for_client_result(logs_dir, case.case_id, run_index, 5.0)
     server_csv = copy_final_csv(paths["csv_raw"], paths["dir"])
     server_analysis = analyze_recording_dir(
         recording_dir,
@@ -318,6 +422,7 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
         "server_recording_analysis": server_analysis,
         "client_recording_analysis": client_analysis,
         "client_artifacts_received": client_result_path is not None,
+        "client_connected": connected,
     }
     if not client_result_path:
         result["tags"] = ["client_upload_missing"]
@@ -352,10 +457,11 @@ def main():
     if not jam2.exists():
         return fail(f"jam2 executable not found: {jam2}")
     public_audio_host = args.public_audio_host.strip()
-    if not public_audio_host:
-        public_audio_host = default_public_audio_host()
-    if not public_audio_host or public_audio_host.startswith("127."):
-        return fail("could not infer a LAN audio host; pass --public-audio-host WINDOWS_LAN_IP")
+    audio_bind_port = endpoint_port(args.audio_bind)
+    if args.public_audio_host.strip() and audio_bind_port == 0:
+        print_flush(
+            "[server] warning: --public-audio-host with --audio-bind port 0 publishes a random UDP port; "
+            "public-IP runs usually need a fixed forwarded UDP port such as --audio-bind 0.0.0.0:49000")
     print_flush(f"[server] audio bind={args.audio_bind} public_audio_host={public_audio_host}")
     logs_dir = Path(args.logs)
     if args.clean and logs_dir.exists():
@@ -379,8 +485,9 @@ def main():
         write_json(public_dir / "current.json", {"status": "all_done"})
         write_outputs(logs_dir, results)
         if args.finish_grace_s > 0:
-            print_flush(f"[server] published all_done; keeping HTTP alive for {args.finish_grace_s:g}s")
-            time.sleep(args.finish_grace_s)
+            print_flush(f"[server] published all_done; waiting up to {args.finish_grace_s:g}s for client ack")
+            if not wait_for_done_ack(args.finish_grace_s):
+                print_flush("[server] all_done ack not received before finish grace expired")
     finally:
         server.shutdown()
         server.server_close()

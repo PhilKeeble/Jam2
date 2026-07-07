@@ -49,44 +49,56 @@ On macOS, `record-loopback` uses CoreAudio process taps on macOS 14.2 or newer. 
 
 The GUI Track tab can refresh loopback sources, import captured WAV metadata, play a local WAV, and share the WAV to the authenticated peer over the GUI TCP control plane. Speed is currently simple local playback-rate control; pitch-preserving stretch is left for the Signalsmith dependency pass.
 
-Host A, recommended aggressive profile (`aggressive_32_64_768_jitter_512_tail_256_on`):
+Recommended aggressive GUI profile: `aggressive_32_64_768_jitter_512_tail_256_on`.
 
-```powershell
-.\release\jam2.exe listen --audio-device 16 --sample-rate 44100 --audio-buffer-size 32 --frame-size 64 --playback-prefill-frames 256 --playback-ring-frames 4096 --playback-max-frames 1536 --stats enabled --stats-warmup-ms 3000 --stats-interval-ms 5000 --log-stats logs --metronome on --bpm 120 --metronome-level 0.2 --metronome-mode shared-grid --remote-level 1.0 --sample-time-playout on --playout-delay-frames 256 --jitter-buffer-frames 512 --jitter-buffer-max-frames 1024 --adaptive-playback-cushion on --adaptive-playback-target-frames 256 --adaptive-playback-min-frames 256 --adaptive-playback-max-frames 1536 --adaptive-playback-release-ppm 1000 --drift-correction on --drift-smoothing 0.02 --drift-deadband-ppm 25 --drift-max-correction-ppm 500
-```
+In the GUI, open **Start Jam** on the host that will listen, then use these values. On the joining host, paste the generated `jam2://...` URL and use the same audio/tuning values with that host's own device and channel selections.
 
-Host B, paste the `jam2://...` URL from Host A:
+| Start Jam field | Value |
+| --- | --- |
+| Bind | `0.0.0.0` or the local interface IP |
+| Port | `49000` or any open UDP port |
+| Public endpoint host | Your reachable LAN/WAN host if needed |
+| STUN server | `stun.l.google.com:19302` unless using manual/LAN |
+| No STUN | On for manual/LAN testing; off for STUN endpoint discovery |
+| Wait ms | `0` |
+| Stream ms | `0` |
+| Stream linger ms | `500` |
 
-```powershell
-.\release\jam2.exe connect "jam2://v1?endpoint=127.0.0.1:49000&session=55f9e711a1c6b358&key=10eee9ddd63f5f43014378bdfd0ccc8f" --audio-device 5 --sample-rate 44100 --audio-buffer-size 32 --frame-size 64 --playback-prefill-frames 256 --playback-ring-frames 4096 --playback-max-frames 1536 --stats enabled --stats-warmup-ms 3000 --stats-interval-ms 5000 --log-stats logs --metronome on --bpm 120 --metronome-level 0.2 --metronome-mode shared-grid --remote-level 1.0 --sample-time-playout on --playout-delay-frames 256 --jitter-buffer-frames 512 --jitter-buffer-max-frames 1024 --adaptive-playback-cushion on --adaptive-playback-target-frames 256 --adaptive-playback-min-frames 256 --adaptive-playback-max-frames 1536 --adaptive-playback-release-ppm 1000 --drift-correction on --drift-smoothing 0.02 --drift-deadband-ppm 25 --drift-max-correction-ppm 500
-```
+| Audio field | Value |
+| --- | --- |
+| Audio device | Select the local interface/device |
+| Input channels | `1`; use `2` or `1,2` if the instrument is on another input |
+| Output channels | `1,2` |
+| Sample rate | `44100` |
+| Audio buffer size | `32` |
+| Frame size | `64` |
+| Playback prefill frames | `256` |
+| Playback max frames | `1536` |
+| Capture ring frames | `4096` |
+| Playback ring frames | `4096` |
 
-When `listen` generates the session id/key itself, it also prints a full `connect` command with matching stream/tuning options; replace only the client `--audio-device` value.
+| Advanced field | Value |
+| --- | --- |
+| Periodic stats | On while testing; optional for normal playing |
+| Stats warmup ms | `3000` |
+| Log stats folder | `logs` if collecting CSV data |
+| Socket send buffer | `0` |
+| Socket recv buffer | `0` |
+| Drift correction | On |
+| Drift smoothing | `0.02` |
+| Drift deadband ppm | `25` |
+| Drift max correction ppm | `500` |
+| Sample-time playout | On |
+| Playout delay frames | `256` |
+| Jitter buffer frames | `512` |
+| Jitter buffer max frames | `1024` |
+| Adaptive cushion | On |
+| Adaptive target frames | `256` |
+| Adaptive min frames | `256` |
+| Adaptive max frames | `1536` |
+| Adaptive release ppm | `1000` |
 
-Recommended aggressive profile:
-
-```text
---sample-rate 44100
---audio-buffer-size 32
---frame-size 64
---playback-prefill-frames 256
---playback-ring-frames 4096
---playback-max-frames 1536
---sample-time-playout on
---playout-delay-frames 256
---jitter-buffer-frames 512
---jitter-buffer-max-frames 1024
---adaptive-playback-cushion on
---adaptive-playback-target-frames 256
---adaptive-playback-min-frames 256
---adaptive-playback-max-frames 1536
---adaptive-playback-release-ppm 1000
---drift-correction on
---drift-smoothing 0.02
---drift-deadband-ppm 25
---drift-max-correction-ppm 500
---stats-warmup-ms 3000
-```
+This profile spends about `512 + 256 = 768` receive-side frames on jitter/playback cushion, which is about `17.4ms` at `44100` Hz before device, driver, and network latency. If this profile underruns or drops jitter-buffer packets on Wi-Fi, increase `Jitter buffer frames` first to `1024` and set `Jitter buffer max frames` to `3072`.
 
 Network-efficient profile:
 

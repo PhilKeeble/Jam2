@@ -122,6 +122,14 @@ class ManagedProcess:
             time.sleep(0.05)
         return None
 
+    def startup_payloads(self, stage=None):
+        payloads = []
+        for line in self.lines():
+            payload = self._startup_json(line)
+            if payload and (stage is None or payload.get("stage") == stage):
+                payloads.append(payload)
+        return payloads
+
     def _read_stdout(self):
         try:
             for line in self.process.stdout:

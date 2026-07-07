@@ -8,11 +8,13 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
 
 from jam2_audio_analysis import analyze_recording_dir
+from jam2_harness import rewrite_jam_url_endpoint
 from jam2_tooling import copy_final_csv, default_jam2_path, ensure_dir, fail, print_flush, repo_root, write_json
 
 
@@ -25,9 +27,10 @@ def parse_args():
     parser.add_argument("--logs", default=str(Path(__file__).with_name("benchmark_logs")))
     parser.add_argument("--poll-ms", type=int, default=500)
     parser.add_argument("--timeout-s", type=int, default=0)
-    parser.add_argument("--finish-idle-s", type=float, default=5.0, help="exit cleanly if the server disappears after completed work")
+    parser.add_argument("--finish-idle-s", type=float, default=0.0, help="optional fallback exit if the server disappears after completed work; 0 waits for all_done")
     parser.add_argument("--post-upload-pause-s", type=float, default=5.0, help="wait after each upload before polling for the next case")
     parser.add_argument("--case-timeout-s", type=float, default=0.0, help="kill a Jam2 case after this many seconds; 0 derives from stream/wait time")
+    parser.add_argument("--use-published-audio-host", action="store_true", help="use the Jam2 URL host exactly as published by the server")
     parser.add_argument("--clean", action="store_true", help="delete local artifacts after successful upload")
     parser.add_argument("--network-profile", choices=("auto", "wired", "wifi", "unknown"), default="auto")
     return parser.parse_args()
@@ -54,6 +57,38 @@ def detect_network_type():
 def fetch_current(base_url):
     with urllib.request.urlopen(base_url.rstrip("/") + "/current.json", timeout=5) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def server_host_from_url(base_url):
+    parsed = urllib.parse.urlparse(base_url)
+    return parsed.hostname or ""
+
+
+def jam_url_endpoint_port(jam_url):
+    parsed = urllib.parse.urlparse(jam_url)
+    values = urllib.parse.parse_qs(parsed.query).get("endpoint", [])
+    if not values:
+        raise ValueError("Jam2 URL does not contain endpoint")
+    _, port_text = values[0].rsplit(":", 1)
+    return int(port_text)
+
+
+def jam_url_query_value(jam_url, key):
+    parsed = urllib.parse.urlparse(jam_url)
+    values = urllib.parse.parse_qs(parsed.query).get(key, [])
+    return values[0] if values else ""
+
+
+def build_jam_url_from_server(current, server_url):
+    host = server_host_from_url(server_url)
+    if not host:
+        return current["url"]
+    session_id = current.get("session_id") or jam_url_query_value(current["url"], "session")
+    session_key = current.get("session_key") or jam_url_query_value(current["url"], "key")
+    audio_port = int(current.get("audio_port") or jam_url_endpoint_port(current["url"]))
+    if not session_id or not session_key:
+        return rewrite_jam_url_endpoint(current["url"], (host, audio_port))
+    return f"jam2://v1?endpoint={host}:{audio_port}&session={session_id}&key={session_key}"
 
 
 def zip_dir(source_dir, zip_path):
@@ -83,6 +118,20 @@ def upload_zip(base_url, zip_path):
     return False
 
 
+def post_done_ack(base_url):
+    request = urllib.request.Request(
+        base_url.rstrip("/") + "/done-ack",
+        data=b'{"ok":true}\n',
+        headers={"Content-Type": "application/json"},
+        method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return 200 <= response.status < 300
+    except urllib.error.URLError as error:
+        print_flush(f"[client] all_done ack failed: {error}")
+        return False
+
+
 def _copy_stream(pipe, handle, prefix):
     try:
         for line in pipe:
@@ -93,7 +142,7 @@ def _copy_stream(pipe, handle, prefix):
         pipe.close()
 
 
-def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, network_type, case_timeout_s=0.0):
+def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, network_type, case_timeout_s=0.0, use_published_audio_host=False):
     case_id = current["case_id"]
     run_index = int(current["run_index"])
     signal = current["signal"]
@@ -115,10 +164,19 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
         "profile": current.get("profile", {}),
     }
     write_json(output_dir / "metadata.json", metadata)
+    jam_url = current["url"]
+    if not use_published_audio_host:
+        try:
+            rewritten_url = build_jam_url_from_server(current, server_url)
+            if rewritten_url != jam_url:
+                print_flush(f"[client] built Jam2 URL from server host/session: {rewritten_url}")
+                jam_url = rewritten_url
+        except ValueError as error:
+            print_flush(f"[client] could not rewrite Jam2 URL host: {error}; using published URL")
     args = [
         str(jam2),
         "connect",
-        current["url"],
+        jam_url,
         "--wait-ms", str(max(15000, int(current.get("stream_ms", 30000)) + 15000)),
         "--audio-device", str(audio_device),
         "--sample-rate", str(sample_rate),
@@ -128,7 +186,7 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
     ]
     args.extend(current.get("client_args", []))
     timeout_s = case_timeout_s if case_timeout_s and case_timeout_s > 0 else max(30.0, int(current.get("stream_ms", 30000)) / 1000.0 + 30.0)
-    print_flush(f"[client] starting {case_id} run {run_index} signal={signal} url={current['url']}")
+    print_flush(f"[client] starting {case_id} run {run_index} signal={signal} url={jam_url}")
     with open(stdout_path, "w", encoding="utf-8", newline="") as stdout, open(stderr_path, "w", encoding="utf-8", newline="") as stderr:
         process = subprocess.Popen(
             args,
@@ -178,7 +236,7 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
         except OSError:
             pass
     print_flush(f"[client] finished {case_id} run {run_index} rc={return_code} uploaded={uploaded}")
-    return return_code if uploaded else 1
+    return 0 if uploaded else 1
 
 
 def main():
@@ -200,14 +258,15 @@ def main():
         try:
             current = fetch_current(args.server)
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
-            if completed and last_completed_at and time.monotonic() - last_completed_at >= args.finish_idle_s:
+            if args.finish_idle_s > 0 and completed and last_completed_at and time.monotonic() - last_completed_at >= args.finish_idle_s:
                 print_flush("[client] server stopped after completed work")
                 return 0
             print_flush(f"[client] waiting for server: {error}")
             time.sleep(args.poll_ms / 1000.0)
             continue
         if current.get("status") == "all_done":
-            print_flush("[client] server reports all_done")
+            acked = post_done_ack(args.server)
+            print_flush(f"[client] server reports all_done acked={acked}")
             return 0
         if current.get("status") != "running":
             time.sleep(args.poll_ms / 1000.0)
@@ -219,7 +278,8 @@ def main():
         seen.add(key)
         rc = run_case(
             jam2, current, args.client_audio_device, args.sample_rate,
-            logs, args.server, args.clean, network_type, args.case_timeout_s)
+            logs, args.server, args.clean, network_type, args.case_timeout_s,
+            args.use_published_audio_host)
         if rc != 0:
             return rc
         completed.add(key)
