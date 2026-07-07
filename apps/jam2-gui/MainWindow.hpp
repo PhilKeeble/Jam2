@@ -131,6 +131,7 @@ private:
     void sendSongSnapshot();
 
     QStringList commonJamArgs(bool includeExtraArgs = true) const;
+    void applyTuningProfileName(const QString& name);
     QString sessionHex() const;
     QString keyHex() const;
     void generateSession();
@@ -166,6 +167,8 @@ private:
     QLineEdit* logStatsEdit_ = nullptr;
     QSpinBox* socketSendBufferSpin_ = nullptr;
     QSpinBox* socketRecvBufferSpin_ = nullptr;
+    QComboBox* profileBox_ = nullptr;
+    QComboBox* osPriorityBox_ = nullptr;
     QComboBox* deviceBox_ = nullptr;
     QComboBox* localOutputBox_ = nullptr;
     QLineEdit* inputChannelsEdit_ = nullptr;

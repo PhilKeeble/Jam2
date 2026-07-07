@@ -161,6 +161,8 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
         "client_signal": client_signal,
         "network_type": network_type,
         "profile": current.get("profile", {}),
+        "server_args": current.get("server_args", []),
+        "client_args": current.get("case_client_args", []),
     }
     write_json(output_dir / "metadata.json", metadata)
     jam_url = current["url"]

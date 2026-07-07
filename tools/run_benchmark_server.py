@@ -316,7 +316,7 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
         extra_args=[
             "--record-jam-folder", str(recording_dir),
             "--test-input", case.server_signal if case.server_signal != "metronome-only" else "silence",
-        ],
+        ] + list(case.server_args),
         bind=audio_bind,
         wait_ms=0)
     startup = listener.wait_for_startup("waiting", 10.0)
@@ -352,7 +352,9 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
         "client_signal": case.client_signal,
         "stream_ms": case.stream_ms,
         "profile": case.profile.metadata(),
-        "client_args": case.profile.args(case.stream_ms),
+        "server_args": list(case.server_args),
+        "case_client_args": list(case.client_args),
+        "client_args": case.profile.args(case.stream_ms) + list(case.client_args),
     }
     write_json(Path(public_dir) / "current.json", current)
     print_flush(f"[server] published {case.case_id} run {run_index} url={connection_url}")
@@ -418,6 +420,8 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
         "run_index": run_index,
         "profile": case.profile.name,
         "profile_values": case.profile.metadata(),
+        "server_args": list(case.server_args),
+        "client_args": list(case.client_args),
         "signal": case.signal,
         "server_signal": case.server_signal,
         "client_signal": case.client_signal,

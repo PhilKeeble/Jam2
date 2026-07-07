@@ -5,6 +5,7 @@ add_library(jam2_core STATIC
     src/output_recorder.cpp
     src/protocol.cpp
     src/stun.cpp
+    src/tuning_profile.cpp
     src/udp_socket.cpp
 )
 

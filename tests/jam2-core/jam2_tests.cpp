@@ -2,6 +2,7 @@
 #include "common.hpp"
 #include "protocol.hpp"
 #include "stun.hpp"
+#include "tuning_profile.hpp"
 
 #include <array>
 #include <cstdlib>
@@ -266,6 +267,38 @@ void test_audio_ring()
     require(remaining[0] == 12 && remaining[1] == 13, "ring drop remaining content mismatch");
 }
 
+void test_tuning_profiles()
+{
+    const auto profiles = jam2::tuning_profiles();
+    require(profiles.size() == 3, "expected three tuning profiles");
+    require(jam2::find_tuning_profile("fast") != nullptr, "fast profile missing");
+    require(jam2::find_tuning_profile("moderate") != nullptr, "moderate profile missing");
+    require(jam2::find_tuning_profile("safe") != nullptr, "safe profile missing");
+    require(jam2::find_tuning_profile("invalid") == nullptr, "invalid profile should not resolve");
+
+    const auto& fast = *jam2::find_tuning_profile("fast");
+    require(fast.sample_rate == 48000, "fast sample rate mismatch");
+    require(fast.audio_buffer_size == 32, "fast audio buffer mismatch");
+    require(fast.frame_size == 64, "fast frame size mismatch");
+    require(fast.playback_prefill_frames == 256, "fast prefill mismatch");
+    require(fast.jitter_buffer_frames == 512, "fast jitter buffer mismatch");
+
+    const auto& moderate = *jam2::find_tuning_profile("moderate");
+    require(moderate.sample_rate == 48000, "moderate sample rate mismatch");
+    require(moderate.audio_buffer_size == 64, "moderate audio buffer mismatch");
+    require(moderate.frame_size == 128, "moderate frame size mismatch");
+    require(moderate.playback_prefill_frames == 512, "moderate prefill mismatch");
+    require(moderate.jitter_buffer_frames == 2048, "moderate jitter buffer mismatch");
+
+    const auto& safe = *jam2::find_tuning_profile("safe");
+    require(safe.sample_rate == 48000, "safe sample rate mismatch");
+    require(safe.audio_buffer_size == 64, "safe audio buffer mismatch");
+    require(safe.frame_size == 256, "safe frame size mismatch");
+    require(safe.playback_prefill_frames == 1024, "safe prefill mismatch");
+    require(safe.jitter_buffer_max_frames == 6144, "safe jitter max mismatch");
+    require(&jam2::default_tuning_profile() == &fast, "default profile should be fast");
+}
+
 } // namespace
 
 int main()
@@ -279,6 +312,7 @@ int main()
         test_stun_parse();
         test_sequence_tracker();
         test_audio_ring();
+        test_tuning_profiles();
         std::cout << "jam2 core tests passed\n";
         return 0;
     } catch (const std::exception& error) {

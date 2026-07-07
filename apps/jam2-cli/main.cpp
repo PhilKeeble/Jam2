@@ -20,11 +20,30 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <avrt.h>
+#include <mmsystem.h>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/thread_policy.h>
+#include <pthread.h>
+#include <pthread/qos.h>
+#endif
+
 #include "audio_device.hpp"
 #include "common.hpp"
 #include "metronome.hpp"
 #include "protocol.hpp"
 #include "stun.hpp"
+#include "tuning_profile.hpp"
 #include "udp_socket.hpp"
 
 namespace {
@@ -37,8 +56,8 @@ Usage:
   jam2 test-device <id> [--sample-rate n]
   jam2 meter-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n]
   jam2 ring-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n] [--ring-frames n]
-  jam2 listen [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats enabled|disabled] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--record-jam-folder folder] [--test-input off|silence|tone-440|pulse-1s] [--metronome on|off] [--bpm n] [--metronome-level n] [--remote-level n] [--metronome-mode shared-grid|leader-audio|symmetric-delay|listener-compensated] [--sample-time-playout on|off] [--playout-delay-frames n] [--jitter-buffer-frames n] [--jitter-buffer-max-frames n] [--adaptive-playback-cushion on|off] [--adaptive-playback-target-frames n] [--adaptive-playback-min-frames n] [--adaptive-playback-max-frames n] [--adaptive-playback-release-ppm n] [--session-id hex] [--session-key hex32] [--machine-readable-startup on|off] [--status-format text|jsonl] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels n[,n...]] [--output-channels n[,n...]] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-deadband-ppm n] [--drift-max-correction-ppm n]
-  jam2 connect <jam2-url> [options]
+  jam2 listen [--profile fast|moderate|safe] [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats enabled|disabled] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--record-jam-folder folder] [--test-input off|silence|tone-440|pulse-1s] [--os-priority off|high|realtime] [--metronome on|off] [--bpm n] [--metronome-level n] [--remote-level n] [--metronome-mode shared-grid|leader-audio|symmetric-delay|listener-compensated] [--sample-time-playout on|off] [--playout-delay-frames n] [--jitter-buffer-frames n] [--jitter-buffer-max-frames n] [--adaptive-playback-cushion on|off] [--adaptive-playback-target-frames n] [--adaptive-playback-min-frames n] [--adaptive-playback-max-frames n] [--adaptive-playback-release-ppm n] [--session-id hex] [--session-key hex32] [--machine-readable-startup on|off] [--status-format text|jsonl] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels n[,n...]] [--output-channels n[,n...]] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-deadband-ppm n] [--drift-max-correction-ppm n]
+  jam2 connect <jam2-url> [--profile fast|moderate|safe] [options]
 
 Stage status:
   UDP HELLO/HELLO_ACK session setup, jam2 URL parsing, and STUN endpoint discovery are implemented.
@@ -57,6 +76,33 @@ enum class TestInputMode {
     Silence,
     Tone440,
     Pulse1s,
+};
+
+enum class OsPriorityMode {
+    Off,
+    High,
+    Realtime,
+};
+
+struct OsSchedulingStatus {
+    OsPriorityMode requested = OsPriorityMode::High;
+    std::string platform;
+    unsigned int cpu_count = 0;
+    std::string process_priority;
+    std::string thread_priority;
+    std::string mmcss_requested;
+    std::string mmcss_active;
+    std::string mmcss_profile;
+    std::string mmcss_error;
+    std::string timer_resolution_requested;
+    std::string timer_resolution_active;
+    std::string timer_resolution_error;
+    std::string qos_requested;
+    std::string qos_active;
+    std::string qos_error;
+    std::string realtime_requested;
+    std::string realtime_active;
+    std::string realtime_error;
 };
 
 struct Options {
@@ -101,6 +147,7 @@ struct Options {
     bool machine_readable_startup = false;
     bool status_jsonl = false;
     std::optional<int> audio_device_id;
+    std::string profile_name;
     long audio_buffer_size = 0;
     jam2::audio::InputChannels input_channels = jam2::audio::InputChannels::Mono;
     jam2::audio::ChannelSelection channel_selection;
@@ -109,7 +156,33 @@ struct Options {
     std::size_t playback_prefill_frames = 0;
     std::size_t playback_max_frames = 0;
     TestInputMode test_input = TestInputMode::Off;
+    OsPriorityMode os_priority = OsPriorityMode::High;
 };
+
+void apply_tuning_profile(Options& options, const jam2::TuningProfile& profile)
+{
+    options.profile_name.assign(profile.name.data(), profile.name.size());
+    options.sample_rate = profile.sample_rate;
+    options.audio_buffer_size = profile.audio_buffer_size;
+    options.frame_size = profile.frame_size;
+    options.playback_prefill_frames = profile.playback_prefill_frames;
+    options.playback_ring_frames = profile.playback_ring_frames;
+    options.playback_max_frames = profile.playback_max_frames;
+    options.capture_ring_frames = profile.capture_ring_frames;
+    options.drift_correction = profile.drift_correction;
+    options.drift_smoothing = profile.drift_smoothing;
+    options.drift_deadband_ppm = profile.drift_deadband_ppm;
+    options.drift_max_correction_ppm = profile.drift_max_correction_ppm;
+    options.sample_time_playout = profile.sample_time_playout;
+    options.playout_delay_frames = profile.playout_delay_frames;
+    options.jitter_buffer_frames = profile.jitter_buffer_frames;
+    options.jitter_buffer_max_frames = profile.jitter_buffer_max_frames;
+    options.adaptive_playback_cushion = profile.adaptive_playback_cushion;
+    options.adaptive_playback_target_frames = profile.adaptive_playback_target_frames;
+    options.adaptive_playback_min_frames = profile.adaptive_playback_min_frames;
+    options.adaptive_playback_max_frames = profile.adaptive_playback_max_frames;
+    options.adaptive_playback_release_ppm = profile.adaptive_playback_release_ppm;
+}
 
 std::string_view require_value(int argc, char** argv, int& i, std::string_view name)
 {
@@ -296,12 +369,53 @@ std::string mono_mix_mode_text(std::size_t channel_count)
     return std::to_string(channel_count) + "-to-mono";
 }
 
+std::string_view os_priority_text(OsPriorityMode mode)
+{
+    switch (mode) {
+    case OsPriorityMode::Off:
+        return "off";
+    case OsPriorityMode::High:
+        return "high";
+    case OsPriorityMode::Realtime:
+        return "realtime";
+    }
+    return "unknown";
+}
+
+OsPriorityMode parse_os_priority(std::string_view value)
+{
+    if (value == "off") {
+        return OsPriorityMode::Off;
+    }
+    if (value == "high") {
+        return OsPriorityMode::High;
+    }
+    if (value == "realtime") {
+        return OsPriorityMode::Realtime;
+    }
+    throw std::runtime_error("--os-priority must be off, high, or realtime");
+}
+
 Options parse_options(int argc, char** argv, int start)
 {
     Options options;
+    const jam2::TuningProfile* selected_profile = &jam2::default_tuning_profile();
     for (int i = start; i < argc; ++i) {
         const std::string_view arg{argv[i]};
-        if (arg == "--bind") {
+        if (arg == "--profile") {
+            const auto value = require_value(argc, argv, i, arg);
+            selected_profile = jam2::find_tuning_profile(value);
+            if (selected_profile == nullptr) {
+                throw std::runtime_error("--profile must be one of: " + jam2::tuning_profile_names());
+            }
+        }
+    }
+    apply_tuning_profile(options, *selected_profile);
+    for (int i = start; i < argc; ++i) {
+        const std::string_view arg{argv[i]};
+        if (arg == "--profile") {
+            (void)require_value(argc, argv, i, arg);
+        } else if (arg == "--bind") {
             options.bind = jam2::parse_bind_endpoint(require_value(argc, argv, i, arg));
         } else if (arg == "--stun") {
             options.stun_server = jam2::parse_endpoint(require_value(argc, argv, i, arg));
@@ -360,6 +474,8 @@ Options parse_options(int argc, char** argv, int start)
             options.record_jam_folder = std::filesystem::path(std::string(require_value(argc, argv, i, arg)));
         } else if (arg == "--test-input") {
             options.test_input = parse_test_input_mode(require_value(argc, argv, i, arg));
+        } else if (arg == "--os-priority") {
+            options.os_priority = parse_os_priority(require_value(argc, argv, i, arg));
         } else if (arg == "--sample-rate") {
             options.sample_rate = std::stoi(std::string(require_value(argc, argv, i, arg)));
             if (options.sample_rate <= 0) {
@@ -834,6 +950,7 @@ struct AudioPacketStats {
     int final_bpm = 120;
     double final_metronome_level = 0.20;
     double final_remote_level = 1.0;
+    OsSchedulingStatus os_scheduling;
 };
 
 struct RuntimeState {
@@ -1347,6 +1464,234 @@ std::string platform_name()
 #endif
 }
 
+std::string os_error_text(unsigned long code)
+{
+    if (code == 0) {
+        return {};
+    }
+    return "error " + std::to_string(code);
+}
+
+#if defined(_WIN32)
+std::string win_priority_class_text(DWORD value)
+{
+    switch (value) {
+    case IDLE_PRIORITY_CLASS: return "idle";
+    case BELOW_NORMAL_PRIORITY_CLASS: return "below-normal";
+    case NORMAL_PRIORITY_CLASS: return "normal";
+    case ABOVE_NORMAL_PRIORITY_CLASS: return "above-normal";
+    case HIGH_PRIORITY_CLASS: return "high";
+    case REALTIME_PRIORITY_CLASS: return "realtime";
+    default: return "unknown-" + std::to_string(value);
+    }
+}
+
+std::string win_thread_priority_text(int value)
+{
+    switch (value) {
+    case THREAD_PRIORITY_IDLE: return "idle";
+    case THREAD_PRIORITY_LOWEST: return "lowest";
+    case THREAD_PRIORITY_BELOW_NORMAL: return "below-normal";
+    case THREAD_PRIORITY_NORMAL: return "normal";
+    case THREAD_PRIORITY_ABOVE_NORMAL: return "above-normal";
+    case THREAD_PRIORITY_HIGHEST: return "highest";
+    case THREAD_PRIORITY_TIME_CRITICAL: return "time-critical";
+    case THREAD_PRIORITY_ERROR_RETURN: return "error";
+    default: return std::to_string(value);
+    }
+}
+#endif
+
+#if defined(__APPLE__)
+std::string mac_qos_text(qos_class_t value)
+{
+    switch (value) {
+    case QOS_CLASS_USER_INTERACTIVE: return "user-interactive";
+    case QOS_CLASS_USER_INITIATED: return "user-initiated";
+    case QOS_CLASS_DEFAULT: return "default";
+    case QOS_CLASS_UTILITY: return "utility";
+    case QOS_CLASS_BACKGROUND: return "background";
+    case QOS_CLASS_UNSPECIFIED: return "unspecified";
+    default: return std::to_string(static_cast<int>(value));
+    }
+}
+
+std::uint64_t ns_to_mach_absolute(std::uint64_t ns)
+{
+    mach_timebase_info_data_t info{};
+    if (mach_timebase_info(&info) != KERN_SUCCESS || info.numer == 0) {
+        return ns;
+    }
+    return (ns * static_cast<std::uint64_t>(info.denom)) / static_cast<std::uint64_t>(info.numer);
+}
+#endif
+
+class OsPriorityScope {
+public:
+    explicit OsPriorityScope(const Options& options)
+    {
+        status_.requested = options.os_priority;
+        status_.platform = platform_name();
+        status_.cpu_count = std::thread::hardware_concurrency();
+        apply(options);
+    }
+
+    ~OsPriorityScope()
+    {
+#if defined(_WIN32)
+        if (mmcss_handle_ != nullptr) {
+            (void)AvRevertMmThreadCharacteristics(mmcss_handle_);
+        }
+        if (timer_resolution_active_) {
+            (void)timeEndPeriod(1);
+        }
+#endif
+    }
+
+    OsPriorityScope(const OsPriorityScope&) = delete;
+    OsPriorityScope& operator=(const OsPriorityScope&) = delete;
+
+    const OsSchedulingStatus& status() const { return status_; }
+
+private:
+    void apply(const Options& options)
+    {
+#if defined(_WIN32)
+        apply_windows(options);
+#elif defined(__APPLE__)
+        apply_macos(options);
+#else
+        (void)options;
+        status_.process_priority = "unsupported";
+        status_.thread_priority = "unsupported";
+#endif
+    }
+
+#if defined(_WIN32)
+    void apply_windows(const Options& options)
+    {
+        status_.process_priority = win_priority_class_text(GetPriorityClass(GetCurrentProcess()));
+        status_.thread_priority = win_thread_priority_text(GetThreadPriority(GetCurrentThread()));
+        status_.mmcss_requested = "off";
+        status_.mmcss_active = "off";
+        status_.timer_resolution_requested = "off";
+        status_.timer_resolution_active = "off";
+        if (options.os_priority == OsPriorityMode::Off) {
+            return;
+        }
+
+        const DWORD priority_class = options.os_priority == OsPriorityMode::Realtime ?
+            REALTIME_PRIORITY_CLASS :
+            HIGH_PRIORITY_CLASS;
+        if (!SetPriorityClass(GetCurrentProcess(), priority_class)) {
+            status_.process_priority = "request-failed:" + os_error_text(GetLastError());
+        } else {
+            status_.process_priority = win_priority_class_text(GetPriorityClass(GetCurrentProcess()));
+        }
+
+        const int thread_priority = options.os_priority == OsPriorityMode::Realtime ?
+            THREAD_PRIORITY_TIME_CRITICAL :
+            THREAD_PRIORITY_HIGHEST;
+        if (!SetThreadPriority(GetCurrentThread(), thread_priority)) {
+            status_.thread_priority = "request-failed:" + os_error_text(GetLastError());
+        } else {
+            status_.thread_priority = win_thread_priority_text(GetThreadPriority(GetCurrentThread()));
+        }
+
+        status_.timer_resolution_requested = "1ms";
+        const MMRESULT timer_result = timeBeginPeriod(1);
+        if (timer_result == TIMERR_NOERROR) {
+            timer_resolution_active_ = true;
+            status_.timer_resolution_active = "1ms";
+        } else {
+            status_.timer_resolution_active = "off";
+            status_.timer_resolution_error = os_error_text(timer_result);
+        }
+
+        status_.mmcss_requested = "Pro Audio";
+        DWORD task_index = 0;
+        mmcss_handle_ = AvSetMmThreadCharacteristicsA("Pro Audio", &task_index);
+        if (mmcss_handle_ == nullptr) {
+            const DWORD pro_audio_error = GetLastError();
+            task_index = 0;
+            mmcss_handle_ = AvSetMmThreadCharacteristicsA("Audio", &task_index);
+            if (mmcss_handle_ != nullptr) {
+                status_.mmcss_active = "on";
+                status_.mmcss_profile = "Audio";
+                status_.mmcss_error = "Pro Audio failed: " + os_error_text(pro_audio_error);
+            } else {
+                status_.mmcss_active = "off";
+                status_.mmcss_error = "Pro Audio failed: " + os_error_text(pro_audio_error) +
+                    "; Audio failed: " + os_error_text(GetLastError());
+            }
+        } else {
+            status_.mmcss_active = "on";
+            status_.mmcss_profile = "Pro Audio";
+        }
+    }
+#endif
+
+#if defined(__APPLE__)
+    void apply_macos(const Options& options)
+    {
+        status_.process_priority = "unchanged";
+        status_.qos_requested = "off";
+        status_.qos_active = "off";
+        status_.realtime_requested = "off";
+        status_.realtime_active = "off";
+        qos_class_t active_qos = QOS_CLASS_UNSPECIFIED;
+        int relative_priority = 0;
+        active_qos = pthread_get_qos_class_np(pthread_self(), &relative_priority);
+        status_.thread_priority = mac_qos_text(active_qos);
+        if (options.os_priority == OsPriorityMode::Off) {
+            return;
+        }
+        if (options.os_priority == OsPriorityMode::High) {
+            status_.qos_requested = "user-interactive";
+            const int result = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+            if (result != 0) {
+                status_.qos_error = "error " + std::to_string(result);
+            }
+            active_qos = pthread_get_qos_class_np(pthread_self(), &relative_priority);
+            status_.qos_active = mac_qos_text(active_qos);
+            status_.thread_priority = status_.qos_active;
+            return;
+        }
+
+        status_.realtime_requested = "thread-time-constraint";
+        const std::uint64_t packet_period_ns =
+            options.sample_rate > 0 && options.frame_size > 0 ?
+                (static_cast<std::uint64_t>(options.frame_size) * 1000000000ULL) /
+                    static_cast<std::uint64_t>(options.sample_rate) :
+                1000000ULL;
+        const std::uint64_t period = ns_to_mach_absolute(packet_period_ns);
+        thread_time_constraint_policy_data_t policy{};
+        policy.period = static_cast<std::uint32_t>(std::max<std::uint64_t>(period, 1));
+        policy.computation = static_cast<std::uint32_t>(std::max<std::uint64_t>(period / 4, 1));
+        policy.constraint = static_cast<std::uint32_t>(std::max<std::uint64_t>(period / 2, policy.computation + 1));
+        policy.preemptible = TRUE;
+        const kern_return_t result = thread_policy_set(
+            pthread_mach_thread_np(pthread_self()),
+            THREAD_TIME_CONSTRAINT_POLICY,
+            reinterpret_cast<thread_policy_t>(&policy),
+            THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+        if (result == KERN_SUCCESS) {
+            status_.realtime_active = "on";
+            status_.thread_priority = "thread-time-constraint";
+        } else {
+            status_.realtime_active = "off";
+            status_.realtime_error = mach_error_string(result);
+        }
+    }
+#endif
+
+    OsSchedulingStatus status_;
+#if defined(_WIN32)
+    HANDLE mmcss_handle_ = nullptr;
+    bool timer_resolution_active_ = false;
+#endif
+};
+
 std::string csv_escape(std::string_view value)
 {
     bool quote = false;
@@ -1370,6 +1715,28 @@ std::string csv_escape(std::string_view value)
     }
     out.push_back('"');
     return out;
+}
+
+void append_os_scheduling_csv(std::ostream& out, const OsSchedulingStatus& status)
+{
+    out << ',' << csv_escape(os_priority_text(status.requested))
+        << ',' << csv_escape(status.platform)
+        << ',' << status.cpu_count
+        << ',' << csv_escape(status.process_priority)
+        << ',' << csv_escape(status.thread_priority)
+        << ',' << csv_escape(status.mmcss_requested)
+        << ',' << csv_escape(status.mmcss_active)
+        << ',' << csv_escape(status.mmcss_profile)
+        << ',' << csv_escape(status.mmcss_error)
+        << ',' << csv_escape(status.timer_resolution_requested)
+        << ',' << csv_escape(status.timer_resolution_active)
+        << ',' << csv_escape(status.timer_resolution_error)
+        << ',' << csv_escape(status.qos_requested)
+        << ',' << csv_escape(status.qos_active)
+        << ',' << csv_escape(status.qos_error)
+        << ',' << csv_escape(status.realtime_requested)
+        << ',' << csv_escape(status.realtime_active)
+        << ',' << csv_escape(status.realtime_error);
 }
 
 std::string command_line_text(int argc, char** argv)
@@ -1430,6 +1797,7 @@ std::string make_headless_client_command(std::string_view executable, const std:
     std::ostringstream out;
     out << executable << " connect " << shell_quote(connection_url)
         << " --audio-device <replace-client-device-id>"
+        << " --profile " << options.profile_name
         << " --sample-rate " << options.sample_rate
         << " --audio-buffer-size " << options.audio_buffer_size
         << " --frame-size " << options.frame_size
@@ -1442,6 +1810,7 @@ std::string make_headless_client_command(std::string_view executable, const std:
         << " --stats " << (options.stats_enabled ? "enabled" : "disabled")
         << " --stats-warmup-ms " << options.stats_warmup_ms
         << " --stats-interval-ms " << options.stats_interval_ms
+        << " --os-priority " << os_priority_text(options.os_priority)
         << " --metronome " << bool_on_off(options.metronome)
         << " --bpm " << options.bpm
         << " --metronome-level " << options.metronome_level
@@ -1672,6 +2041,7 @@ void print_startup_json(
     std::cout << "{\"event\":\"startup\""
               << ",\"mode\":\"" << json_escape(mode) << "\""
               << ",\"stage\":\"" << json_escape(stage) << "\""
+              << ",\"profile\":\"" << json_escape(options.profile_name) << "\""
               << ",\"local_endpoint\":\"" << json_escape(jam2::endpoint_to_string(local)) << "\"";
     if (peer) {
         std::cout << ",\"peer_endpoint\":\"" << json_escape(jam2::endpoint_to_string(*peer)) << "\"";
@@ -1686,6 +2056,11 @@ void print_startup_json(
               << ",\"frame_size\":" << options.frame_size
               << ",\"audio_device_id\":" << options.audio_device_id.value_or(-1)
               << ",\"audio_buffer_size\":" << options.audio_buffer_size
+              << ",\"os_priority\":\"" << os_priority_text(options.os_priority) << "\""
+              << ",\"capture_ring_frames\":" << options.capture_ring_frames
+              << ",\"playback_ring_frames\":" << options.playback_ring_frames
+              << ",\"playback_prefill_frames\":" << options.playback_prefill_frames
+              << ",\"playback_max_frames\":" << options.playback_max_frames
               << ",\"input_channels\":\"" << mono_mix_mode_text(options.channel_selection.input.size()) << "\""
               << ",\"channel_selection\":\"" << json_escape(channel_selection_text(options.channel_selection)) << "\""
               << ",\"metronome\":\"" << (options.metronome ? "on" : "off") << "\""
@@ -1693,6 +2068,10 @@ void print_startup_json(
               << ",\"metronome_level\":" << options.metronome_level
               << ",\"metronome_mode\":\"" << metronome_mode_text(options.metronome_mode) << "\""
               << ",\"remote_level\":" << options.remote_level
+              << ",\"drift_correction\":" << (options.drift_correction ? "true" : "false")
+              << ",\"drift_smoothing\":" << options.drift_smoothing
+              << ",\"drift_deadband_ppm\":" << options.drift_deadband_ppm
+              << ",\"drift_max_correction_ppm\":" << options.drift_max_correction_ppm
               << ",\"sample_time_playout\":" << (options.sample_time_playout ? "true" : "false")
               << ",\"playout_delay_frames\":" << options.playout_delay_frames
               << ",\"jitter_buffer_frames\":" << options.jitter_buffer_frames
@@ -1868,7 +2247,12 @@ public:
                 "jitter_buffer,jitter_buffer_target_frames,jitter_buffer_target_ms,jitter_buffer_max_frames,jitter_buffer_max_ms,"
                 "jitter_buffer_depth_frames,jitter_buffer_depth_ms,jitter_buffer_depth_max_frames,jitter_buffer_depth_max_ms,"
                 "jitter_buffer_queued_packets,jitter_buffer_released_packets,jitter_buffer_late_packets,"
-                "jitter_buffer_dropped_packets,jitter_buffer_dropped_frames,jitter_buffer_dropped_ms\n";
+                "jitter_buffer_dropped_packets,jitter_buffer_dropped_frames,jitter_buffer_dropped_ms,"
+                "os_priority_requested,os_platform,os_cpu_count,os_process_priority_active,os_thread_priority_active,"
+                "os_mmcss_requested,os_mmcss_active,os_mmcss_profile,os_mmcss_error,"
+                "os_timer_resolution_requested,os_timer_resolution_active,os_timer_resolution_error,"
+                "os_qos_requested,os_qos_active,os_qos_error,"
+                "os_realtime_requested,os_realtime_active,os_realtime_error\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -2133,7 +2517,9 @@ public:
              << stats.jitter_buffer_late_packets << ','
              << stats.jitter_buffer_dropped_packets << ','
              << stats.jitter_buffer_dropped_frames << ','
-             << frames_to_ms(static_cast<std::size_t>(stats.jitter_buffer_dropped_frames), active_sample_rate) << '\n';
+             << frames_to_ms(static_cast<std::size_t>(stats.jitter_buffer_dropped_frames), active_sample_rate);
+        append_os_scheduling_csv(out_, stats.os_scheduling);
+        out_ << '\n';
         if (row_type == "final") {
             out_.flush();
         }
@@ -2148,7 +2534,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(224);
+        std::vector<std::string> fields(242);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -2330,6 +2716,24 @@ public:
         set(221, stats.jitter_buffer_dropped_packets);
         set(222, stats.jitter_buffer_dropped_frames);
         set(223, frames_to_ms(static_cast<std::size_t>(stats.jitter_buffer_dropped_frames), options.sample_rate));
+        fields[224] = std::string(os_priority_text(stats.os_scheduling.requested));
+        fields[225] = stats.os_scheduling.platform;
+        set(226, stats.os_scheduling.cpu_count);
+        fields[227] = stats.os_scheduling.process_priority;
+        fields[228] = stats.os_scheduling.thread_priority;
+        fields[229] = stats.os_scheduling.mmcss_requested;
+        fields[230] = stats.os_scheduling.mmcss_active;
+        fields[231] = stats.os_scheduling.mmcss_profile;
+        fields[232] = stats.os_scheduling.mmcss_error;
+        fields[233] = stats.os_scheduling.timer_resolution_requested;
+        fields[234] = stats.os_scheduling.timer_resolution_active;
+        fields[235] = stats.os_scheduling.timer_resolution_error;
+        fields[236] = stats.os_scheduling.qos_requested;
+        fields[237] = stats.os_scheduling.qos_active;
+        fields[238] = stats.os_scheduling.qos_error;
+        fields[239] = stats.os_scheduling.realtime_requested;
+        fields[240] = stats.os_scheduling.realtime_active;
+        fields[241] = stats.os_scheduling.realtime_error;
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {
@@ -2499,6 +2903,15 @@ void print_periodic_stream_stats(
               << " jitter_buffer_released_packets=" << stats.jitter_buffer_released_packets
               << " jitter_buffer_late_packets=" << stats.jitter_buffer_late_packets
               << " jitter_buffer_dropped_packets=" << stats.jitter_buffer_dropped_packets
+              << " os_priority_requested=" << os_priority_text(stats.os_scheduling.requested)
+              << " os_cpu_count=" << stats.os_scheduling.cpu_count
+              << " os_process_priority_active=" << stats.os_scheduling.process_priority
+              << " os_thread_priority_active=" << stats.os_scheduling.thread_priority
+              << " os_mmcss_active=" << stats.os_scheduling.mmcss_active
+              << " os_mmcss_profile=" << stats.os_scheduling.mmcss_profile
+              << " os_timer_resolution_active=" << stats.os_scheduling.timer_resolution_active
+              << " os_qos_active=" << stats.os_scheduling.qos_active
+              << " os_realtime_active=" << stats.os_scheduling.realtime_active
               << "\n";
 }
 
@@ -2600,6 +3013,15 @@ void print_compact_status(
                   << ",\"playback_ring_underrun_burst_max_ms\":" << playback_underrun_burst_max_ms
                   << ",\"drift_ppm\":" << stats.drift_ppm
                   << ",\"resampler_ratio\":" << stats.resampler_ratio
+                  << ",\"os_priority_requested\":\"" << os_priority_text(stats.os_scheduling.requested) << "\""
+                  << ",\"os_cpu_count\":" << stats.os_scheduling.cpu_count
+                  << ",\"os_process_priority_active\":\"" << json_escape(stats.os_scheduling.process_priority) << "\""
+                  << ",\"os_thread_priority_active\":\"" << json_escape(stats.os_scheduling.thread_priority) << "\""
+                  << ",\"os_mmcss_active\":\"" << json_escape(stats.os_scheduling.mmcss_active) << "\""
+                  << ",\"os_mmcss_profile\":\"" << json_escape(stats.os_scheduling.mmcss_profile) << "\""
+                  << ",\"os_timer_resolution_active\":\"" << json_escape(stats.os_scheduling.timer_resolution_active) << "\""
+                  << ",\"os_qos_active\":\"" << json_escape(stats.os_scheduling.qos_active) << "\""
+                  << ",\"os_realtime_active\":\"" << json_escape(stats.os_scheduling.realtime_active) << "\""
                   << "}\n";
         return;
     }
@@ -2672,6 +3094,15 @@ void print_compact_status(
               << " playback_ring_underrun_burst_max_ms=" << playback_underrun_burst_max_ms
               << " drift_ppm=" << stats.drift_ppm
               << " resampler_ratio=" << stats.resampler_ratio
+              << " os_priority_requested=" << os_priority_text(stats.os_scheduling.requested)
+              << " os_cpu_count=" << stats.os_scheduling.cpu_count
+              << " os_process_priority_active=" << stats.os_scheduling.process_priority
+              << " os_thread_priority_active=" << stats.os_scheduling.thread_priority
+              << " os_mmcss_active=" << stats.os_scheduling.mmcss_active
+              << " os_mmcss_profile=" << stats.os_scheduling.mmcss_profile
+              << " os_timer_resolution_active=" << stats.os_scheduling.timer_resolution_active
+              << " os_qos_active=" << stats.os_scheduling.qos_active
+              << " os_realtime_active=" << stats.os_scheduling.realtime_active
               << "\n";
 }
 
@@ -2717,6 +3148,8 @@ AudioPacketStats run_audio_packet_exchange(
     bool listener_side)
 {
     AudioPacketStats stats;
+    OsPriorityScope os_priority_scope(options);
+    stats.os_scheduling = os_priority_scope.status();
     stats.startup_drained_packets = startup_drained_packets;
     stats.sample_time_playout_enabled = options.sample_time_playout;
     stats.playout_delay_frames = static_cast<std::uint64_t>(options.playout_delay_frames);
@@ -3764,6 +4197,25 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "Sample rate: " << options.sample_rate << "\n";
     std::cout << "Frame size samples: " << options.frame_size << "\n";
     std::cout << "Frame interval ms: " << frame_interval_ms << "\n";
+    std::cout << "OS priority requested: " << os_priority_text(options.os_priority) << "\n";
+    std::cout << "OS priority active request: " << os_priority_text(stats.os_scheduling.requested) << "\n";
+    std::cout << "OS platform: " << stats.os_scheduling.platform << "\n";
+    std::cout << "OS CPU count: " << stats.os_scheduling.cpu_count << "\n";
+    std::cout << "OS process priority active: " << stats.os_scheduling.process_priority << "\n";
+    std::cout << "OS thread priority active: " << stats.os_scheduling.thread_priority << "\n";
+    std::cout << "OS MMCSS requested: " << stats.os_scheduling.mmcss_requested << "\n";
+    std::cout << "OS MMCSS active: " << stats.os_scheduling.mmcss_active << "\n";
+    std::cout << "OS MMCSS profile: " << stats.os_scheduling.mmcss_profile << "\n";
+    std::cout << "OS MMCSS error: " << stats.os_scheduling.mmcss_error << "\n";
+    std::cout << "OS timer resolution requested: " << stats.os_scheduling.timer_resolution_requested << "\n";
+    std::cout << "OS timer resolution active: " << stats.os_scheduling.timer_resolution_active << "\n";
+    std::cout << "OS timer resolution error: " << stats.os_scheduling.timer_resolution_error << "\n";
+    std::cout << "OS QoS requested: " << stats.os_scheduling.qos_requested << "\n";
+    std::cout << "OS QoS active: " << stats.os_scheduling.qos_active << "\n";
+    std::cout << "OS QoS error: " << stats.os_scheduling.qos_error << "\n";
+    std::cout << "OS realtime requested: " << stats.os_scheduling.realtime_requested << "\n";
+    std::cout << "OS realtime active: " << stats.os_scheduling.realtime_active << "\n";
+    std::cout << "OS realtime error: " << stats.os_scheduling.realtime_error << "\n";
     std::cout << "Audio UDP payload bytes: " << audio_payload_bytes(options.frame_size) << "\n";
     std::cout << "Audio UDP packet bytes: " << audio_packet_bytes(options.frame_size) << "\n";
     std::cout << "Audio buffer size frames: " << options.audio_buffer_size << "\n";

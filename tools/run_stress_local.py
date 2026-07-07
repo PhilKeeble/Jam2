@@ -20,8 +20,9 @@ from jam2_harness import (
 )
 from jam2_metrics import combined_summary, write_results_csv
 from jam2_profiles import (
-    AGGRESSIVE_LOCAL_PROFILE,
-    SAFE_LOCAL_PROFILE,
+    FAST_PROFILE,
+    MODERATE_PROFILE,
+    SAFE_PROFILE,
     adaptive_off_profile,
     jitter_buffer_profile,
     latency_matched_prefill_profile,
@@ -49,9 +50,9 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument(
         "--profile",
-        choices=("aggressive", "safe", "both"),
-        default="aggressive",
-        help="profile family for stress scenarios; both duplicates selected scenarios for comparison")
+        choices=("fast", "moderate", "safe", "all"),
+        default="fast",
+        help="profile family for stress scenarios; all duplicates selected scenarios across fast, moderate, and safe")
     parser.add_argument("--include-validation", action="store_true", help="also run short CLI/session/error validation checks")
     parser.add_argument(
         "--include-audio-probes",
@@ -63,37 +64,62 @@ def parse_args():
         action="append",
         default=[],
         help="scenario id to run; repeat for multiple. Default runs the standard suite.")
+    parser.add_argument(
+        "--os-priority",
+        action="append",
+        choices=("off", "high", "realtime", "all"),
+        default=None,
+        help="OS priority mode to run; repeat for multiple or use all. Default: high.")
     return parser.parse_args()
 
 
 def selected_profile(profile_name):
+    if profile_name == "fast":
+        return FAST_PROFILE
+    if profile_name == "moderate":
+        return MODERATE_PROFILE
     if profile_name == "safe":
-        return SAFE_LOCAL_PROFILE
-    if profile_name == "aggressive":
-        return AGGRESSIVE_LOCAL_PROFILE
+        return SAFE_PROFILE
     raise ValueError(f"unknown profile: {profile_name}")
+
+
+def selected_os_priorities(values):
+    if not values:
+        return ["high"]
+    if "all" in values:
+        return ["off", "high", "realtime"]
+    priorities = []
+    for value in values:
+        if value not in priorities:
+            priorities.append(value)
+    return priorities
 
 
 def audio_probe_health_ok(analysis):
     return analysis.get("ok", False) and not analysis.get("tags", [])
 
 
-def scenario_catalog(base_profile=AGGRESSIVE_LOCAL_PROFILE):
+def scenario_catalog(base_profile=FAST_PROFILE):
     return {
         "clean-control": {
             "profile": base_profile,
             "impairment": ProxyImpairment.both(DirectionImpairment()),
             "expect": "no injected impairment",
         },
+        "clean-fast-control": {
+            "profile": FAST_PROFILE,
+            "impairment": ProxyImpairment.both(DirectionImpairment()),
+            "expect": "fast localhost baseline with no injected impairment",
+        },
+        "clean-moderate-control": {
+            "profile": MODERATE_PROFILE,
+            "impairment": ProxyImpairment.both(DirectionImpairment()),
+            "expect": "moderate localhost baseline with no injected impairment",
+        },
         "clean-safe-control": {
-            "profile": SAFE_LOCAL_PROFILE,
+            "profile": SAFE_PROFILE,
             "impairment": ProxyImpairment.both(DirectionImpairment()),
             "expect": "safe localhost baseline with no injected impairment",
-        },
-        "clean-aggressive-control": {
-            "profile": AGGRESSIVE_LOCAL_PROFILE,
-            "impairment": ProxyImpairment.both(DirectionImpairment()),
-            "expect": "aggressive localhost baseline with no injected impairment",
         },
         "jitter-20": {
             "profile": base_profile,
@@ -335,7 +361,7 @@ def standard_suite():
     ]
 
 
-def audio_probe_suite(base_profile=AGGRESSIVE_LOCAL_PROFILE):
+def audio_probe_suite(base_profile=FAST_PROFILE):
     return {
         "audio-probe-clean-tone": {
             "profile": base_profile,
@@ -425,6 +451,8 @@ def expand_scenarios(scenario_ids):
     for scenario_id in scenario_ids:
         if scenario_id == "adaptive-off-vs-on":
             expanded.extend(["adaptive-on-pressure", "adaptive-off-pressure"])
+        elif scenario_id == "burst-loss":
+            expanded.extend(["burst-pause-500", "loss-1.0"])
         elif scenario_id == "jitter-buffer-adaptive-pressure-matrix":
             expanded.extend([
                 "jitter-buffer-512-pressure",
@@ -449,7 +477,7 @@ def expand_scenarios(scenario_ids):
 
 def scenario_plan(profile_mode, requested_scenarios, include_audio_probes=False):
     base_ids = expand_scenarios(requested_scenarios) if requested_scenarios else standard_suite()
-    if profile_mode != "both":
+    if profile_mode != "all":
         base_profile = selected_profile(profile_mode)
         catalog = scenario_catalog(base_profile)
         needs_audio_probes = include_audio_probes or any(scenario_id.startswith("audio-probe-") for scenario_id in base_ids)
@@ -462,7 +490,7 @@ def scenario_plan(profile_mode, requested_scenarios, include_audio_probes=False)
 
     planned_catalog = {}
     planned_ids = []
-    for profile_name in ("aggressive", "safe"):
+    for profile_name in ("fast", "moderate", "safe"):
         base_profile = selected_profile(profile_name)
         catalog = scenario_catalog(base_profile)
         profile_ids = list(base_ids)
@@ -827,25 +855,26 @@ def scenario_observations(scenario_id, scenario, server_paths, client_paths):
 
 def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
     profile = scenario["profile"]
+    os_priority = scenario.get("os_priority", "high")
     source_scenario = scenario.get("source_scenario", scenario_id)
     record_metronome = source_scenario == "metronome-shared-grid" or source_scenario.startswith("metronome-")
     audio_probe = source_scenario.startswith("audio-probe-")
     commands = list(scenario.get("commands", []))
-    server_extra_args = []
-    client_extra_args = []
+    server_extra_args = ["--os-priority", os_priority]
+    client_extra_args = ["--os-priority", os_priority]
     if audio_probe:
         server_recording = Path(output_dir) / "server" / "recording"
         client_recording = Path(output_dir) / "client" / "recording"
         server_signal = scenario.get("server_signal", scenario.get("signal", "silence"))
         client_signal = scenario.get("client_signal", scenario.get("signal", "silence"))
-        server_extra_args = [
+        server_extra_args.extend([
             "--record-jam-folder", str(server_recording),
             "--test-input", server_signal,
-        ]
-        client_extra_args = [
+        ])
+        client_extra_args.extend([
             "--record-jam-folder", str(client_recording),
             "--test-input", client_signal,
-        ]
+        ])
     if record_metronome:
         commands.extend([
             {"at_s": 1.0, "side": "server", "line": f"record jam start {Path(output_dir) / 'server' / 'recording'}"},
@@ -853,7 +882,7 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
             {"at_s": max(2.0, args_ns.stream_ms / 1000.0 - 1.0), "side": "server", "line": "record jam stop"},
             {"at_s": max(2.0, args_ns.stream_ms / 1000.0 - 1.0), "side": "client", "line": "record jam stop"},
         ])
-    print_flush(f"[stress] starting {scenario_id} profile={profile.name}")
+    print_flush(f"[stress] starting {scenario_id} profile={profile.name} os_priority={os_priority}")
     listener, server_paths = start_listener(
         jam2,
         args_ns.server_audio_device,
@@ -926,6 +955,7 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
         "source_scenario": scenario.get("source_scenario", scenario_id),
         "profile_family": scenario.get("profile_family", args_ns.profile),
         "profile": profile.name,
+        "os_priority": os_priority,
         "expect": scenario["expect"],
         "profile_metadata": profile.metadata(),
         "server_return_code": server_rc,
@@ -1015,6 +1045,124 @@ def validation_command(jam2, args, output_dir, expect_rc, name):
     }
 
 
+def profile_explicit_args(profile, stream_ms):
+    args = profile.args(stream_ms)
+    cleaned = []
+    index = 0
+    while index < len(args):
+        if args[index] == "--profile":
+            index += 2
+            continue
+        cleaned.append(args[index])
+        index += 1
+    return cleaned
+
+
+def read_startup_json(stdout_path):
+    for line in Path(stdout_path).read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("{"):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("event") == "startup":
+                return payload
+    return None
+
+
+def run_startup_validation_command(jam2, args, output_dir):
+    output_dir = ensure_dir(output_dir)
+    process = ManagedProcess(
+        [jam2] + args,
+        Path.cwd(),
+        output_dir / "stdout.txt",
+        output_dir / "stderr.txt").start()
+    rc = process.wait(timeout=20.0)
+    if rc is None:
+        process.terminate()
+        rc = process.poll()
+    return rc, read_startup_json(output_dir / "stdout.txt")
+
+
+def validation_profile_equivalence(jam2, profile_name, profile, output_dir, stream_ms):
+    output_dir = ensure_dir(output_dir)
+    common = [
+        "listen",
+        "--bind", "127.0.0.1:0",
+        "--no-stun",
+        "--wait-ms", "250",
+        "--machine-readable-startup", "on",
+    ]
+    profile_args = common + ["--profile", profile_name]
+    explicit_args = common + [
+        "--sample-rate", str(profile.sample_rate),
+    ] + profile_explicit_args(profile, stream_ms)
+    profile_rc, profile_startup = run_startup_validation_command(
+        jam2,
+        profile_args,
+        output_dir / "profile")
+    explicit_rc, explicit_startup = run_startup_validation_command(
+        jam2,
+        explicit_args,
+        output_dir / "explicit")
+    fields = [
+        "sample_rate",
+        "frame_size",
+        "audio_buffer_size",
+        "capture_ring_frames",
+        "playback_ring_frames",
+        "playback_prefill_frames",
+        "playback_max_frames",
+        "drift_correction",
+        "drift_smoothing",
+        "drift_deadband_ppm",
+        "drift_max_correction_ppm",
+        "sample_time_playout",
+        "playout_delay_frames",
+        "jitter_buffer_frames",
+        "jitter_buffer_max_frames",
+        "adaptive_playback_cushion",
+        "adaptive_playback_target_frames",
+        "adaptive_playback_min_frames",
+        "adaptive_playback_max_frames",
+        "adaptive_playback_release_ppm",
+    ]
+    mismatches = []
+    if profile_startup is None or explicit_startup is None:
+        mismatches.append("missing startup JSON")
+    else:
+        for field in fields:
+            if profile_startup.get(field) != explicit_startup.get(field):
+                mismatches.append(
+                    f"{field}: profile={profile_startup.get(field)!r} explicit={explicit_startup.get(field)!r}")
+    ok = profile_rc == 3 and explicit_rc == 3 and not mismatches
+    return {
+        "validation": f"profile-equivalence-{profile_name}",
+        "verdict": "pass" if ok else "profile_mismatch",
+        "profile_return_code": profile_rc,
+        "explicit_return_code": explicit_rc,
+        "expected_return_code": 3,
+        "mismatches": mismatches,
+        "profile_args": [str(item) for item in profile_args],
+        "explicit_args": [str(item) for item in explicit_args],
+        "profile_startup": profile_startup or {},
+        "explicit_startup": explicit_startup or {},
+    }
+
+
+def validation_profile_mismatch(jam2, name, args_ns, output_dir, server_profile, client_profile, client_extra_args=None):
+    return run_pair_validation(
+        jam2,
+        name,
+        args_ns,
+        output_dir,
+        server_profile,
+        client_profile,
+        False,
+        None,
+        client_extra_args=client_extra_args)
+
+
 def replace_url_key(url, key_hex):
     parts = []
     for item in url.split("&"):
@@ -1092,6 +1240,8 @@ def run_pair_validation(
         "verdict": "pass" if ok else "unexpected_success" if not expect_success else "unexpected_failure",
         "server_return_code": server_rc,
         "client_return_code": client_rc,
+        "server_args": listener.args,
+        "client_args": connector.args,
         "server_csv_path": str(server_csv) if server_csv else "",
         "client_csv_path": str(client_csv) if client_csv else "",
     }
@@ -1102,23 +1252,48 @@ def run_validations(jam2, args_ns, logs):
     results = []
     results.append(validation_command(
         jam2,
-        ["listen", "--definitely-bad-option"],
+        ["listen", "--profile", "fast", "--definitely-bad-option"],
         validations_dir / "bad-option",
         1,
         "bad-option"))
     results.append(validation_command(
         jam2,
-        ["connect", "not-a-jam-url", "--wait-ms", "100"],
+        ["connect", "not-a-jam-url", "--profile", "fast", "--wait-ms", "100"],
         validations_dir / "bad-url",
         1,
         "bad-url"))
     results.append(validation_command(
         jam2,
-        ["listen", "--bind", "127.0.0.1:0", "--no-stun", "--wait-ms", "250", "--machine-readable-startup", "on"],
+        ["listen", "--profile", "fast", "--bind", "127.0.0.1:0", "--no-stun", "--wait-ms", "250", "--machine-readable-startup", "on"],
         validations_dir / "listen-timeout",
         3,
         "listen-timeout"))
-    fixed_session_profile = SAFE_LOCAL_PROFILE
+    for profile_name, profile in (
+            ("fast", FAST_PROFILE),
+            ("moderate", MODERATE_PROFILE),
+            ("safe", SAFE_PROFILE)):
+        results.append(validation_profile_equivalence(
+            jam2,
+            profile_name,
+            profile,
+            validations_dir / f"profile-equivalence-{profile_name}",
+            args_ns.validation_stream_ms))
+    results.append(validation_profile_mismatch(
+        jam2,
+        "profile-mismatch-fast-safe",
+        args_ns,
+        validations_dir / "profile-mismatch-fast-safe",
+        FAST_PROFILE,
+        SAFE_PROFILE))
+    results.append(validation_profile_mismatch(
+        jam2,
+        "profile-override-frame-size-mismatch",
+        args_ns,
+        validations_dir / "profile-override-frame-size-mismatch",
+        FAST_PROFILE,
+        FAST_PROFILE,
+        client_extra_args=["--frame-size", "128"]))
+    fixed_session_profile = MODERATE_PROFILE
     session_args = ["--session-id", "1", "--session-key", "00000000000000000000000000000001"]
     results.append(run_pair_validation(
         jam2,
@@ -1135,8 +1310,8 @@ def run_validations(jam2, args_ns, logs):
         "wrong-key-timeout",
         args_ns,
         validations_dir / "wrong-key-timeout",
-        SAFE_LOCAL_PROFILE,
-        SAFE_LOCAL_PROFILE,
+        MODERATE_PROFILE,
+        MODERATE_PROFILE,
         False,
         lambda url: replace_url_key(url, "ffffffffffffffffffffffffffffffff")))
     results.append(run_pair_validation(
@@ -1144,8 +1319,8 @@ def run_validations(jam2, args_ns, logs):
         "mismatched-frame-size",
         args_ns,
         validations_dir / "mismatched-frame-size",
-        SAFE_LOCAL_PROFILE,
-        variant(SAFE_LOCAL_PROFILE, "frame_256", frame_size=256),
+        MODERATE_PROFILE,
+        variant(MODERATE_PROFILE, "frame_256", frame_size=256),
         False,
         None))
     return results
@@ -1165,28 +1340,39 @@ def main():
     ensure_dir(logs)
 
     catalog, scenario_ids = scenario_plan(args_ns.profile, args_ns.scenario, args_ns.include_audio_probes)
+    os_priorities = selected_os_priorities(args_ns.os_priority)
     unknown = [scenario for scenario in scenario_ids if scenario not in catalog]
     if unknown:
         return fail("unknown scenario(s): " + ", ".join(unknown))
 
     results = []
-    for index, scenario_id in enumerate(scenario_ids):
-        scenario_dir = ensure_dir(logs / f"{index + 1:02d}_{safe_test_id(scenario_id)}")
+    run_plan = []
+    for scenario_id in scenario_ids:
+        for os_priority in os_priorities:
+            planned_id = scenario_id if len(os_priorities) == 1 else f"{scenario_id}__os_{os_priority}"
+            run_plan.append((planned_id, scenario_id, os_priority))
+
+    for index, (planned_id, scenario_id, os_priority) in enumerate(run_plan):
+        scenario_dir = ensure_dir(logs / f"{index + 1:02d}_{safe_test_id(planned_id)}")
+        scenario = dict(catalog[scenario_id])
+        scenario.setdefault("source_scenario", scenario_id)
+        scenario["os_priority"] = os_priority
         write_json(scenario_dir / "scenario.json", {
-            "scenario": scenario_id,
-            "source_scenario": catalog[scenario_id].get("source_scenario", scenario_id),
-            "profile_family": catalog[scenario_id].get("profile_family", args_ns.profile),
+            "scenario": planned_id,
+            "source_scenario": scenario.get("source_scenario", scenario_id),
+            "profile_family": scenario.get("profile_family", args_ns.profile),
             "stream_ms": args_ns.stream_ms,
             "sample_rate": args_ns.sample_rate,
             "server_audio_device": args_ns.server_audio_device,
             "client_audio_device": args_ns.client_audio_device,
-            "profile": catalog[scenario_id]["profile"].metadata(),
-            "expect": catalog[scenario_id]["expect"],
-            "signal": catalog[scenario_id].get("signal", ""),
-            "server_signal": catalog[scenario_id].get("server_signal", ""),
-            "client_signal": catalog[scenario_id].get("client_signal", ""),
+            "profile": scenario["profile"].metadata(),
+            "os_priority": os_priority,
+            "expect": scenario["expect"],
+            "signal": scenario.get("signal", ""),
+            "server_signal": scenario.get("server_signal", ""),
+            "client_signal": scenario.get("client_signal", ""),
         })
-        result = run_scenario(jam2, scenario_id, catalog[scenario_id], args_ns, scenario_dir, args_ns.seed + index)
+        result = run_scenario(jam2, planned_id, scenario, args_ns, scenario_dir, args_ns.seed + index)
         write_json(scenario_dir / "result.json", result)
         results.append(result)
         time.sleep(0.5)

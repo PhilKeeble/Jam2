@@ -4,6 +4,7 @@
 #include "SessionController.hpp"
 
 #include "common.hpp"
+#include "tuning_profile.hpp"
 
 #include "signalsmith-stretch/signalsmith-stretch.h"
 
@@ -1673,6 +1674,15 @@ QWidget* MainWindow::buildSessionPage()
     socketRecvBufferSpin_->setRange(0, std::numeric_limits<int>::max());
     socketRecvBufferSpin_->setValue(0);
 
+    profileBox_ = new QComboBox(page);
+    for (const jam2::TuningProfile& profile : jam2::tuning_profiles()) {
+        profileBox_->addItem(QString::fromUtf8(profile.label.data(), static_cast<qsizetype>(profile.label.size())),
+                             QString::fromUtf8(profile.name.data(), static_cast<qsizetype>(profile.name.size())));
+    }
+    osPriorityBox_ = new QComboBox(page);
+    osPriorityBox_->addItem(QStringLiteral("High"), QStringLiteral("high"));
+    osPriorityBox_->addItem(QStringLiteral("Realtime"), QStringLiteral("realtime"));
+    osPriorityBox_->addItem(QStringLiteral("Off"), QStringLiteral("off"));
     deviceBox_ = new QComboBox(page);
     deviceBox_->setEditable(true);
     localOutputBox_ = new QComboBox(page);
@@ -1757,7 +1767,7 @@ QWidget* MainWindow::buildSessionPage()
         modeBox_, jam2PathEdit_, bindHostEdit_, portSpin_, publicHostEdit_, connectUrlEdit_,
         generatedUrlEdit_, stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, waitMsSpin_,
         streamMsSpin_, streamLingerMsSpin_, statsWarmupMsSpin_, logStatsEdit_,
-        socketSendBufferSpin_, socketRecvBufferSpin_, deviceBox_, inputChannelsEdit_,
+        socketSendBufferSpin_, socketRecvBufferSpin_, profileBox_, osPriorityBox_, deviceBox_, inputChannelsEdit_,
         outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_, prefillSpin_,
         playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, driftSmoothingSpin_,
         driftDeadbandSpin_, driftMaxCorrectionSpin_, playoutDelaySpin_, jitterBufferSpin_,
@@ -1771,7 +1781,7 @@ QWidget* MainWindow::buildSessionPage()
         modeBox_, jam2PathEdit_, bindHostEdit_, portSpin_, publicHostEdit_, connectUrlEdit_,
         generatedUrlEdit_, stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, waitMsSpin_,
         streamMsSpin_, streamLingerMsSpin_, statsCheck_, statsWarmupMsSpin_, logStatsEdit_,
-        socketSendBufferSpin_, socketRecvBufferSpin_, deviceBox_, inputChannelsEdit_,
+        socketSendBufferSpin_, socketRecvBufferSpin_, profileBox_, osPriorityBox_, deviceBox_, inputChannelsEdit_,
         outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_, prefillSpin_,
         playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, driftCorrectionCheck_,
         driftSmoothingSpin_, driftDeadbandSpin_, driftMaxCorrectionSpin_, noStunCheck_,
@@ -1798,6 +1808,10 @@ QWidget* MainWindow::buildSessionPage()
     QObject::connect(joinButton_, &QPushButton::clicked, this, [this] { showJoinJamDialog(); });
     QObject::connect(stopButton_, &QPushButton::clicked, this, [this] { stopJam(); });
     QObject::connect(refreshControlButton_, &QPushButton::clicked, this, [this] { refreshControlConnection(); });
+    QObject::connect(profileBox_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
+        applyTuningProfileName(profileBox_->currentData().toString());
+    });
+    applyTuningProfileName(QStringLiteral("fast"));
     QObject::connect(noStunCheck_, &QCheckBox::toggled, this, [this] {
         updateConnectionControlState();
         refreshGeneratedUrl();
@@ -2669,11 +2683,11 @@ void MainWindow::showStartJamDialog()
     auto* layout = new QVBoxLayout(content);
     const QList<QWidget*> visibleWidgets{
         jam2PathEdit_, bindHostEdit_, portSpin_, publicHostEdit_, generatedUrlEdit_,
-        stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, noStunCheck_, deviceBox_,
+        stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, noStunCheck_, profileBox_, deviceBox_,
         inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_,
         prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_,
         streamMsSpin_, streamLingerMsSpin_, statsCheck_, statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
-        socketRecvBufferSpin_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
+        socketRecvBufferSpin_, osPriorityBox_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
         driftMaxCorrectionSpin_, sampleTimePlayoutCheck_, playoutDelaySpin_, jitterBufferSpin_,
         jitterBufferMaxSpin_, adaptiveCushionCheck_, adaptiveTargetSpin_, adaptiveMinSpin_,
         adaptiveMaxSpin_, adaptiveReleaseSpin_, extraArgsEdit_,
@@ -2699,6 +2713,7 @@ void MainWindow::showStartJamDialog()
 
     auto* audioForm = new QFormLayout();
     audioForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    audioForm->addRow(QStringLiteral("Profile"), profileBox_);
     audioForm->addRow(QStringLiteral("Audio device"), deviceBox_);
     audioForm->addRow(QStringLiteral("Input channels"), inputChannelsEdit_);
     audioForm->addRow(QStringLiteral("Output channels"), outputChannelsEdit_);
@@ -2723,6 +2738,7 @@ void MainWindow::showStartJamDialog()
     advancedForm->addRow(QStringLiteral("Log stats folder"), logStatsEdit_);
     advancedForm->addRow(QStringLiteral("Socket send buffer"), socketSendBufferSpin_);
     advancedForm->addRow(QStringLiteral("Socket recv buffer"), socketRecvBufferSpin_);
+    advancedForm->addRow(QStringLiteral("OS priority"), osPriorityBox_);
     advancedForm->addRow(QString(), driftCorrectionCheck_);
     advancedForm->addRow(QStringLiteral("Drift smoothing"), driftSmoothingSpin_);
     advancedForm->addRow(QStringLiteral("Drift deadband ppm"), driftDeadbandSpin_);
@@ -2778,11 +2794,11 @@ void MainWindow::showStartJamDialog()
     const int result = dialog.exec();
     const QList<QWidget*> startWidgets{
         jam2PathEdit_, bindHostEdit_, portSpin_, publicHostEdit_, generatedUrlEdit_,
-        stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, noStunCheck_, deviceBox_,
+        stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, noStunCheck_, profileBox_, deviceBox_,
         inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_,
         prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_,
         streamMsSpin_, streamLingerMsSpin_, statsCheck_, statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
-        socketRecvBufferSpin_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
+        socketRecvBufferSpin_, osPriorityBox_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
         driftMaxCorrectionSpin_, sampleTimePlayoutCheck_, playoutDelaySpin_, jitterBufferSpin_,
         jitterBufferMaxSpin_, adaptiveCushionCheck_, adaptiveTargetSpin_, adaptiveMinSpin_,
         adaptiveMaxSpin_, adaptiveReleaseSpin_, extraArgsEdit_,
@@ -2812,7 +2828,7 @@ void MainWindow::showJoinJamDialog()
     auto* layout = new QVBoxLayout(content);
     const QList<QWidget*> visibleWidgets{
         connectUrlEdit_, jam2PathEdit_, deviceBox_, inputChannelsEdit_, outputChannelsEdit_,
-        statsCheck_, statsWarmupMsSpin_, logStatsEdit_,
+        statsCheck_, statsWarmupMsSpin_, logStatsEdit_, osPriorityBox_,
     };
     for (QWidget* widget : visibleWidgets) {
         widget->show();
@@ -2840,6 +2856,7 @@ void MainWindow::showJoinJamDialog()
     statsForm->addRow(QString(), statsCheck_);
     statsForm->addRow(QStringLiteral("Stats warmup ms"), statsWarmupMsSpin_);
     statsForm->addRow(QStringLiteral("Log stats folder"), logStatsEdit_);
+    statsForm->addRow(QStringLiteral("OS priority"), osPriorityBox_);
     auto* statsBox = new QGroupBox(QStringLiteral("Local Stats"), content);
     statsBox->setLayout(statsForm);
     layout->addWidget(statsBox);
@@ -2866,7 +2883,7 @@ void MainWindow::showJoinJamDialog()
     const int result = dialog.exec();
     const QList<QWidget*> joinWidgets{
         connectUrlEdit_, jam2PathEdit_, deviceBox_, inputChannelsEdit_, outputChannelsEdit_,
-        statsCheck_, statsWarmupMsSpin_, logStatsEdit_,
+        statsCheck_, statsWarmupMsSpin_, logStatsEdit_, osPriorityBox_,
     };
     for (QWidget* widget : joinWidgets) {
         widget->setParent(this);
@@ -3313,6 +3330,7 @@ void MainWindow::sendLeaderSettings()
 QJsonObject MainWindow::leaderSettingsMessage() const
 {
     return QJsonObject{
+        {QStringLiteral("profile"), profileBox_ ? profileBox_->currentData().toString() : QStringLiteral("fast")},
         {QStringLiteral("sample_rate"), sampleRateSpin_->value()},
         {QStringLiteral("audio_buffer_size"), bufferSizeSpin_->value()},
         {QStringLiteral("frame_size"), frameSizeSpin_->value()},
@@ -3344,6 +3362,8 @@ QJsonObject MainWindow::leaderSettingsMessage() const
 
 void MainWindow::applyLeaderSettings(const QJsonObject& settings)
 {
+    applyTuningProfileName(settings.value(QStringLiteral("profile")).toString(
+        profileBox_ ? profileBox_->currentData().toString() : QStringLiteral("fast")));
     sampleRateSpin_->setValue(settings.value(QStringLiteral("sample_rate")).toInt(sampleRateSpin_->value()));
     bufferSizeSpin_->setValue(settings.value(QStringLiteral("audio_buffer_size")).toInt(bufferSizeSpin_->value()));
     frameSizeSpin_->setValue(settings.value(QStringLiteral("frame_size")).toInt(frameSizeSpin_->value()));
@@ -3377,6 +3397,45 @@ void MainWindow::applyLeaderSettings(const QJsonObject& settings)
     adaptiveMinSpin_->setValue(settings.value(QStringLiteral("adaptive_min_frames")).toInt(adaptiveMinSpin_->value()));
     adaptiveMaxSpin_->setValue(settings.value(QStringLiteral("adaptive_max_frames")).toInt(adaptiveMaxSpin_->value()));
     adaptiveReleaseSpin_->setValue(settings.value(QStringLiteral("adaptive_release_ppm")).toInt(adaptiveReleaseSpin_->value()));
+}
+
+void MainWindow::applyTuningProfileName(const QString& name)
+{
+    if (profileBox_) {
+        const int index = profileBox_->findData(name);
+        if (index >= 0 && profileBox_->currentIndex() != index) {
+            const QSignalBlocker blocker(profileBox_);
+            profileBox_->setCurrentIndex(index);
+        }
+    }
+
+    const QByteArray utf8 = name.toUtf8();
+    const jam2::TuningProfile* profile = jam2::find_tuning_profile(
+        std::string_view(utf8.constData(), static_cast<std::size_t>(utf8.size())));
+    if (profile == nullptr) {
+        profile = &jam2::default_tuning_profile();
+    }
+
+    sampleRateSpin_->setValue(profile->sample_rate);
+    bufferSizeSpin_->setValue(static_cast<int>(profile->audio_buffer_size));
+    frameSizeSpin_->setValue(profile->frame_size);
+    prefillSpin_->setValue(static_cast<int>(profile->playback_prefill_frames));
+    playbackMaxSpin_->setValue(static_cast<int>(profile->playback_max_frames));
+    captureRingSpin_->setValue(static_cast<int>(profile->capture_ring_frames));
+    playbackRingSpin_->setValue(static_cast<int>(profile->playback_ring_frames));
+    driftCorrectionCheck_->setChecked(profile->drift_correction);
+    driftSmoothingSpin_->setValue(profile->drift_smoothing);
+    driftDeadbandSpin_->setValue(profile->drift_deadband_ppm);
+    driftMaxCorrectionSpin_->setValue(profile->drift_max_correction_ppm);
+    sampleTimePlayoutCheck_->setChecked(profile->sample_time_playout);
+    playoutDelaySpin_->setValue(static_cast<int>(profile->playout_delay_frames));
+    jitterBufferSpin_->setValue(static_cast<int>(profile->jitter_buffer_frames));
+    jitterBufferMaxSpin_->setValue(static_cast<int>(profile->jitter_buffer_max_frames));
+    adaptiveCushionCheck_->setChecked(profile->adaptive_playback_cushion);
+    adaptiveTargetSpin_->setValue(static_cast<int>(profile->adaptive_playback_target_frames));
+    adaptiveMinSpin_->setValue(static_cast<int>(profile->adaptive_playback_min_frames));
+    adaptiveMaxSpin_->setValue(static_cast<int>(profile->adaptive_playback_max_frames));
+    adaptiveReleaseSpin_->setValue(profile->adaptive_playback_release_ppm);
 }
 
 bool MainWindow::selectedDeviceSupportsSampleRate(int sampleRate)
@@ -4638,9 +4697,11 @@ QStringList MainWindow::commonJamArgs(bool includeExtraArgs) const
 {
     QStringList args;
     args << QStringLiteral("--audio-device") << selectedDeviceId()
+         << QStringLiteral("--profile") << (profileBox_ ? profileBox_->currentData().toString() : QStringLiteral("fast"))
          << QStringLiteral("--sample-rate") << QString::number(sampleRateSpin_->value())
          << QStringLiteral("--audio-buffer-size") << QString::number(bufferSizeSpin_->value())
          << QStringLiteral("--frame-size") << QString::number(frameSizeSpin_->value())
+         << QStringLiteral("--os-priority") << (osPriorityBox_ ? osPriorityBox_->currentData().toString() : QStringLiteral("high"))
          << QStringLiteral("--playback-prefill-frames") << QString::number(prefillSpin_->value())
          << QStringLiteral("--capture-ring-frames") << QString::number(captureRingSpin_->value())
          << QStringLiteral("--playback-ring-frames") << QString::number(playbackRingSpin_->value())

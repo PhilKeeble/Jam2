@@ -12,52 +12,52 @@ The default Jam2 binary path is `release\jam2.exe`. Override it with `--jam2` if
 
 `tools\run_stress_local.py` runs two local Jam2 processes through a localhost UDP impairment proxy. Use this for fast repeatable tests with two local audio interfaces and no real network involved.
 
-Default profile is aggressive: `32/64/768`.
+Default profile is `fast`. Use `--profile all` to run each selected stress case against `fast`, `moderate`, and `safe`.
 
 ```powershell
-python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --clean
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 48000 --clean
 ```
 
 Run the safe profile:
 
 ```powershell
-python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --profile safe --clean
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 48000 --profile safe --clean
 ```
 
-Compare aggressive and safe for one scenario:
+Compare all three profiles for one scenario:
 
 ```powershell
-python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --profile both --scenario jitter-50 --clean
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 48000 --profile all --scenario jitter-50 --clean
 ```
 
 Run one scenario quickly:
 
 ```powershell
-python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --scenario clean-control
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 48000 --scenario clean-control
 ```
 
 Run short stress passes:
 
 ```powershell
-python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --stream-ms 10000 --clean
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 48000 --stream-ms 10000 --clean
 ```
 
 Run the metronome timing scenarios with WAV recording/analysis:
 
 ```powershell
-python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --scenario metronome-shared-grid --scenario metronome-leader-audio --scenario metronome-symmetric-delay --scenario metronome-listener-compensated --clean
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 48000 --scenario metronome-shared-grid --scenario metronome-leader-audio --scenario metronome-symmetric-delay --scenario metronome-listener-compensated --clean
 ```
 
 Include CLI/session/error validation checks:
 
 ```powershell
-python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --include-validation --clean
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 48000 --include-validation --clean
 ```
 
 Include targeted recorded tone/pulse probes for audible artifact analysis under stress:
 
 ```powershell
-python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --include-audio-probes --clean
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 48000 --include-audio-probes --clean
 ```
 
 Useful args:
@@ -65,7 +65,7 @@ Useful args:
 - `--server-audio-device`: local listen-side audio device id.
 - `--client-audio-device`: local connect-side audio device id.
 - `--sample-rate`: sample rate for both local interfaces.
-- `--profile aggressive|safe|both`: choose profile family. Default: `aggressive`.
+- `--profile fast|moderate|safe|all`: choose one profile or run each selected scenario against all three. Default: `fast`.
 - `--scenario NAME`: run only one scenario. Repeat for multiple scenarios.
 - `--stream-ms N`: stream duration per scenario. Default: `30000`.
 - `--include-validation`: run short non-audio/error-path validation checks.
