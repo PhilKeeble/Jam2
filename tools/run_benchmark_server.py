@@ -32,6 +32,7 @@ def parse_args():
     parser.add_argument("--audio-bind", default="0.0.0.0:49000", help="Jam2 UDP listen bind endpoint for benchmark sessions")
     parser.add_argument("--public-audio-host", default="", help="optional legacy override for the host in the published Jam2 URL")
     parser.add_argument("--client-upload-timeout-s", type=float, default=0.0, help="wait for client upload; 0 waits indefinitely")
+    parser.add_argument("--post-listener-upload-grace-s", type=float, default=60.0, help="wait this long for client results after the server-side Jam2 process exits")
     parser.add_argument("--stream-ms", type=int, default=30000)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--signals", default="silence,tone-440,pulse-1s")
@@ -302,7 +303,7 @@ def write_outputs(logs_dir, results):
     (logs_dir / "benchmark_summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, run_index, audio_bind, public_audio_host, client_upload_timeout_s):
+def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, run_index, audio_bind, public_audio_host, client_upload_timeout_s, post_listener_upload_grace_s):
     output_dir = ensure_dir(Path(logs_dir) / case.case_id / "server" / f"run_{run_index:02d}")
     recording_dir = ensure_dir(output_dir / "recording")
     listener, paths = start_listener(
@@ -381,14 +382,20 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
             server_rc = listener.poll()
     else:
         if progress_reason == "listener_exit":
-            print_flush(f"[server] server-side case completed; waiting briefly for client results for {case.case_id} run {run_index}")
+            print_flush(
+                f"[server] server-side case completed; waiting up to "
+                f"{post_listener_upload_grace_s:g}s for client results for {case.case_id} run {run_index}")
         elif progress_reason == "timeout":
             print_flush(f"[server] timed out waiting for client upload for {case.case_id} run {run_index}")
         if listener.poll() is None:
             listener.terminate()
         server_rc = listener.poll()
         if progress_reason == "listener_exit":
-            client_result_path = wait_for_client_result(logs_dir, case.case_id, run_index, 5.0)
+            client_result_path = wait_for_client_result(
+                logs_dir,
+                case.case_id,
+                run_index,
+                post_listener_upload_grace_s)
     server_csv = copy_final_csv(paths["csv_raw"], paths["dir"])
     server_analysis = analyze_recording_dir(
         recording_dir,
@@ -480,7 +487,8 @@ def main():
                 results.append(run_one_case(
                     jam2, args.server_audio_device, args.sample_rate,
                     logs_dir, public_dir, case, run_index,
-                    args.audio_bind, public_audio_host, args.client_upload_timeout_s))
+                    args.audio_bind, public_audio_host, args.client_upload_timeout_s,
+                    args.post_listener_upload_grace_s))
                 write_outputs(logs_dir, results)
         write_json(public_dir / "current.json", {"status": "all_done"})
         write_outputs(logs_dir, results)
