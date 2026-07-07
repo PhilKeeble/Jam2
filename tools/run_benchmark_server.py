@@ -356,9 +356,9 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
     write_json(Path(public_dir) / "current.json", current)
     print_flush(f"[server] published {case.case_id} run {run_index} url={connection_url}")
     if client_upload_timeout_s and client_upload_timeout_s > 0:
-        print_flush(f"[server] waiting up to {client_upload_timeout_s:g}s for client upload")
+        print_flush(f"[server] waiting up to {client_upload_timeout_s:g}s for client connection/result upload")
     else:
-        print_flush("[server] waiting indefinitely for client upload")
+        print_flush("[server] waiting for client connection")
     client_result_path, connected, progress_reason = wait_for_case_progress(
         logs_dir,
         case.case_id,
@@ -381,7 +381,7 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
             server_rc = listener.poll()
     else:
         if progress_reason == "listener_exit":
-            print_flush(f"[server] listener exited before client upload for {case.case_id} run {run_index}")
+            print_flush(f"[server] server-side case completed; waiting briefly for client results for {case.case_id} run {run_index}")
         elif progress_reason == "timeout":
             print_flush(f"[server] timed out waiting for client upload for {case.case_id} run {run_index}")
         if listener.poll() is None:
@@ -462,7 +462,7 @@ def main():
         print_flush(
             "[server] warning: --public-audio-host with --audio-bind port 0 publishes a random UDP port; "
             "public-IP runs usually need a fixed forwarded UDP port such as --audio-bind 0.0.0.0:49000")
-    print_flush(f"[server] audio bind={args.audio_bind} public_audio_host={public_audio_host}")
+    print_flush(f"[server] audio bind={args.audio_bind}")
     logs_dir = Path(args.logs)
     if args.clean and logs_dir.exists():
         shutil.rmtree(logs_dir)

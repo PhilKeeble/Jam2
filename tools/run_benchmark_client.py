@@ -132,12 +132,11 @@ def post_done_ack(base_url):
         return False
 
 
-def _copy_stream(pipe, handle, prefix):
+def _copy_stream(pipe, handle):
     try:
         for line in pipe:
             handle.write(line)
             handle.flush()
-            print_flush(f"{prefix}{line.rstrip()}")
     finally:
         pipe.close()
 
@@ -169,7 +168,6 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
         try:
             rewritten_url = build_jam_url_from_server(current, server_url)
             if rewritten_url != jam_url:
-                print_flush(f"[client] built Jam2 URL from server host/session: {rewritten_url}")
                 jam_url = rewritten_url
         except ValueError as error:
             print_flush(f"[client] could not rewrite Jam2 URL host: {error}; using published URL")
@@ -186,7 +184,7 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
     ]
     args.extend(current.get("client_args", []))
     timeout_s = case_timeout_s if case_timeout_s and case_timeout_s > 0 else max(30.0, int(current.get("stream_ms", 30000)) / 1000.0 + 30.0)
-    print_flush(f"[client] starting {case_id} run {run_index} signal={signal} url={jam_url}")
+    print_flush(f"[client] Starting {case_id} run {run_index}")
     with open(stdout_path, "w", encoding="utf-8", newline="") as stdout, open(stderr_path, "w", encoding="utf-8", newline="") as stderr:
         process = subprocess.Popen(
             args,
@@ -197,8 +195,8 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
             encoding="utf-8",
             errors="replace",
             bufsize=1)
-        stdout_thread = threading.Thread(target=_copy_stream, args=(process.stdout, stdout, "[jam2 stdout] "), daemon=True)
-        stderr_thread = threading.Thread(target=_copy_stream, args=(process.stderr, stderr, "[jam2 stderr] "), daemon=True)
+        stdout_thread = threading.Thread(target=_copy_stream, args=(process.stdout, stdout), daemon=True)
+        stderr_thread = threading.Thread(target=_copy_stream, args=(process.stderr, stderr), daemon=True)
         stdout_thread.start()
         stderr_thread.start()
         try:
@@ -226,8 +224,10 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
         "stats_csv": str(copied_csv) if copied_csv else "",
         "analysis": analysis,
     })
+    print_flush(f"[client] Finished {case_id} run {run_index} rc={return_code}")
     zip_path = output_dir.with_suffix(".zip")
     zip_dir(output_dir, zip_path)
+    print_flush(f"[client] Uploading results for {case_id} run {run_index}")
     uploaded = upload_zip(server_url, zip_path)
     if clean and uploaded:
         shutil.rmtree(output_dir, ignore_errors=True)
@@ -235,7 +235,7 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
             zip_path.unlink()
         except OSError:
             pass
-    print_flush(f"[client] finished {case_id} run {run_index} rc={return_code} uploaded={uploaded}")
+    print_flush(f"[client] Upload complete for {case_id} run {run_index} uploaded={uploaded}")
     return 0 if uploaded else 1
 
 
@@ -248,9 +248,11 @@ def main():
     detected = detect_network_type()
     network_type = detected if args.network_profile == "auto" else args.network_profile
     print_flush(f"[client] network type: {network_type} detected={detected}")
+    print_flush(f"[client] connecting to server {args.server}")
     seen = set()
     completed = set()
     last_completed_at = None
+    connected_to_server = False
     deadline = time.monotonic() + args.timeout_s if args.timeout_s > 0 else None
     while True:
         if deadline and time.monotonic() >= deadline:
@@ -264,6 +266,9 @@ def main():
             print_flush(f"[client] waiting for server: {error}")
             time.sleep(args.poll_ms / 1000.0)
             continue
+        if not connected_to_server:
+            print_flush("[client] connection successful")
+            connected_to_server = True
         if current.get("status") == "all_done":
             acked = post_done_ack(args.server)
             print_flush(f"[client] server reports all_done acked={acked}")
@@ -285,6 +290,7 @@ def main():
         completed.add(key)
         last_completed_at = time.monotonic()
         if args.post_upload_pause_s > 0:
+            print_flush("[client] Waiting for new case")
             time.sleep(args.post_upload_pause_s)
 
 
