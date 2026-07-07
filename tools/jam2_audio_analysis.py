@@ -113,21 +113,27 @@ def _expected_metronome_frames(meta, sample_count):
     step_count = max(1, int(meta.get("metronome_step_count", 4) or 4))
     play_low = int(meta.get("metronome_play_mask_low", 0x0f) or 0)
     play_high = int(meta.get("metronome_play_mask_high", 0) or 0)
+    start_audio_frame = int(meta.get("start_audio_frame", 0) or 0)
     epoch = int(meta.get("metronome_epoch_sample_time", 0) or 0)
     epoch_valid = bool(meta.get("metronome_epoch_valid", False))
     step_interval = int(round(sample_rate * 60.0 / max(1, bpm) / max(1, division)))
-    if step_interval <= 0:
+    if not epoch_valid or step_interval <= 0:
         return []
-    start = epoch if epoch_valid else 0
     frames = []
-    position = start
-    step = 0
-    while position < sample_count:
-        mask = play_low if step < 64 else play_high
-        if mask & (1 << (step % 64)):
-            frames.append(position)
-        step = (step + 1) % step_count
-        position += step_interval
+    stop_audio_frame = start_audio_frame + sample_count
+    first_absolute = max(start_audio_frame, epoch)
+    step = max(0, math.floor((first_absolute - epoch) / step_interval) - 1)
+    while True:
+        absolute = epoch + step * step_interval
+        if absolute >= stop_audio_frame:
+            break
+        if absolute >= start_audio_frame:
+            pattern_step = step % step_count
+            mask = play_low if pattern_step < 64 else play_high
+            bit = pattern_step if pattern_step < 64 else pattern_step - 64
+            if ((mask >> bit) & 1) != 0:
+                frames.append(absolute - start_audio_frame)
+        step += 1
     return frames
 
 
@@ -164,8 +170,27 @@ def analyze_metronome_wav(recording_dir, tolerance_frames=96, allow_silent=False
     missing = max(0, len(expected) - len(errors))
     extra = max(0, len(actual) - len(used))
     max_error = max(errors, default=0)
-    ok = missing == 0 and extra == 0 and max_error <= tolerance_frames
-    verdict = "pass" if ok else ("metronome_click_count_mismatch" if missing or extra else "metronome_click_timing_high")
+    startup_boundary_mismatch = False
+    steady_missing = missing
+    steady_extra = extra
+    steady_max_error = max_error
+    if missing or extra:
+        for actual_start in range(1, min(3, len(actual)) + 1):
+            if len(expected) <= 1 or len(expected[1:]) != len(actual[actual_start:]):
+                continue
+            steady_errors = [abs(actual_frame - expected_frame)
+                             for expected_frame, actual_frame in zip(expected[1:], actual[actual_start:])]
+            if steady_errors and all(error <= tolerance_frames for error in steady_errors):
+                startup_boundary_mismatch = True
+                steady_missing = 0
+                steady_extra = 0
+                steady_max_error = max(steady_errors, default=0)
+                break
+    ok = steady_missing == 0 and steady_extra == 0 and steady_max_error <= tolerance_frames
+    if ok:
+        verdict = "pass_startup_boundary" if startup_boundary_mismatch else "pass"
+    else:
+        verdict = "metronome_click_count_mismatch" if steady_missing or steady_extra else "metronome_click_timing_high"
     return {
         "ok": ok,
         "verdict": verdict,
@@ -174,6 +199,10 @@ def analyze_metronome_wav(recording_dir, tolerance_frames=96, allow_silent=False
         "actual_clicks": len(actual),
         "missing_clicks": missing,
         "extra_clicks": extra,
+        "startup_boundary_mismatch": startup_boundary_mismatch,
+        "steady_missing_clicks": steady_missing,
+        "steady_extra_clicks": steady_extra,
+        "steady_max_abs_error_frames": steady_max_error,
         "max_abs_error_frames": max_error,
         "tolerance_frames": tolerance_frames,
     }

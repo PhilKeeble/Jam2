@@ -49,29 +49,42 @@ On macOS, `record-loopback` uses CoreAudio process taps on macOS 14.2 or newer. 
 
 The GUI Track tab can refresh loopback sources, import captured WAV metadata, play a local WAV, and share the WAV to the authenticated peer over the GUI TCP control plane. Speed is currently simple local playback-rate control; pitch-preserving stretch is left for the Signalsmith dependency pass.
 
-Host A:
+Host A, recommended aggressive profile (`aggressive_32_64_768_jitter_512_tail_256_on`):
 
 ```powershell
-.\release\jam2.exe listen --audio-device 16 --sample-rate 44100 --audio-buffer-size 128 --frame-size 128 --playback-prefill-frames 1536 --playback-ring-frames 8192 --playback-max-frames 4096 --stats enabled --stats-warmup-ms 3000 --stats-interval-ms 5000 --log-stats logs --metronome on --bpm 120
+.\release\jam2.exe listen --audio-device 16 --sample-rate 44100 --audio-buffer-size 32 --frame-size 64 --playback-prefill-frames 256 --playback-ring-frames 4096 --playback-max-frames 1536 --stats enabled --stats-warmup-ms 3000 --stats-interval-ms 5000 --log-stats logs --metronome on --bpm 120 --metronome-level 0.2 --metronome-mode shared-grid --remote-level 1.0 --sample-time-playout on --playout-delay-frames 256 --jitter-buffer-frames 512 --jitter-buffer-max-frames 1024 --adaptive-playback-cushion on --adaptive-playback-target-frames 256 --adaptive-playback-min-frames 256 --adaptive-playback-max-frames 1536 --adaptive-playback-release-ppm 1000 --drift-correction on --drift-smoothing 0.02 --drift-deadband-ppm 25 --drift-max-correction-ppm 500
 ```
 
 Host B, paste the `jam2://...` URL from Host A:
 
 ```powershell
-.\release\jam2.exe connect "jam2://v1?endpoint=127.0.0.1:49000&session=55f9e711a1c6b358&key=10eee9ddd63f5f43014378bdfd0ccc8f" --audio-device 5 --sample-rate 44100 --audio-buffer-size 128 --frame-size 128 --playback-prefill-frames 1536 --playback-ring-frames 8192 --playback-max-frames 4096 --stats enabled --stats-warmup-ms 3000 --stats-interval-ms 5000 --log-stats logs --metronome on --bpm 120
+.\release\jam2.exe connect "jam2://v1?endpoint=127.0.0.1:49000&session=55f9e711a1c6b358&key=10eee9ddd63f5f43014378bdfd0ccc8f" --audio-device 5 --sample-rate 44100 --audio-buffer-size 32 --frame-size 64 --playback-prefill-frames 256 --playback-ring-frames 4096 --playback-max-frames 1536 --stats enabled --stats-warmup-ms 3000 --stats-interval-ms 5000 --log-stats logs --metronome on --bpm 120 --metronome-level 0.2 --metronome-mode shared-grid --remote-level 1.0 --sample-time-playout on --playout-delay-frames 256 --jitter-buffer-frames 512 --jitter-buffer-max-frames 1024 --adaptive-playback-cushion on --adaptive-playback-target-frames 256 --adaptive-playback-min-frames 256 --adaptive-playback-max-frames 1536 --adaptive-playback-release-ppm 1000 --drift-correction on --drift-smoothing 0.02 --drift-deadband-ppm 25 --drift-max-correction-ppm 500
 ```
 
 When `listen` generates the session id/key itself, it also prints a full `connect` command with matching stream/tuning options; replace only the client `--audio-device` value.
 
-Current stable profile:
+Recommended aggressive profile:
 
 ```text
 --sample-rate 44100
---audio-buffer-size 128
---frame-size 128
---playback-prefill-frames 1536
---playback-ring-frames 8192
---playback-max-frames 4096
+--audio-buffer-size 32
+--frame-size 64
+--playback-prefill-frames 256
+--playback-ring-frames 4096
+--playback-max-frames 1536
+--sample-time-playout on
+--playout-delay-frames 256
+--jitter-buffer-frames 512
+--jitter-buffer-max-frames 1024
+--adaptive-playback-cushion on
+--adaptive-playback-target-frames 256
+--adaptive-playback-min-frames 256
+--adaptive-playback-max-frames 1536
+--adaptive-playback-release-ppm 1000
+--drift-correction on
+--drift-smoothing 0.02
+--drift-deadband-ppm 25
+--drift-max-correction-ppm 500
 --stats-warmup-ms 3000
 ```
 
@@ -117,6 +130,8 @@ Key arguments:
 | `--metronome-mode` | Selects `shared-grid`, `leader-audio`, `symmetric-delay`, or `listener-compensated`. | Use `shared-grid` as the default; compare modes with stats during timing tests. |
 | `--sample-time-playout` | Enables or disables sample-time-aware receive scheduling. | Leave on for normal testing so drops and late packets do not permanently shift playback timing. |
 | `--playout-delay-frames` | Declares the target sample-time playout delay. Defaults to `--playback-prefill-frames`. | Set explicitly when comparing delay, jitter, or metronome alignment experiments. |
+| `--jitter-buffer-frames` | Holds reordered audio packets until their sample-time playout deadline. `0` disables it. | Use to spend part of the latency budget on network jitter absorption instead of blind playback prefill. |
+| `--jitter-buffer-max-frames` | Caps queued jitter-buffer span and expands the reorder window. Defaults from `--jitter-buffer-frames` when omitted. | Raise for jitter/reorder experiments; keep numeric so added latency and drops are visible in stats. |
 | `--adaptive-playback-cushion` | Enables explicit adaptive playout target changes. | Use for Wi-Fi or burst testing; final stats show every raise/release and padding event. |
 | `--adaptive-playback-target-frames` | Sets the starting adaptive playout target. | Keep near the normal stable prefill for a run. |
 | `--adaptive-playback-min-frames` / `--adaptive-playback-max-frames` | Bounds adaptive target movement. | Use numeric bounds to keep added latency controlled. |

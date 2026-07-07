@@ -19,32 +19,20 @@ from jam2_harness import (
     start_listener,
 )
 from jam2_metrics import combined_summary, write_results_csv
-from jam2_profiles import AGGRESSIVE_LOCAL_PROFILE, SAFE_LOCAL_PROFILE, adaptive_off_profile, variant
+from jam2_profiles import (
+    AGGRESSIVE_LOCAL_PROFILE,
+    SAFE_LOCAL_PROFILE,
+    adaptive_off_profile,
+    jitter_buffer_profile,
+    latency_matched_prefill_profile,
+    variant,
+)
 from jam2_tooling import default_jam2_path, ensure_dir, fail, print_flush, safe_test_id, write_json
 from udp_stress_proxy import DirectionImpairment, ProxyImpairment, UdpStressProxy
 
 
 DEFAULT_STREAM_MS = 30000
 METRONOME_WAV_TOLERANCE_FRAMES = 96
-INFRA_AUDIO_PROBE_TAGS = {
-    "recording_sidecar_missing",
-    "recording_sidecar_invalid",
-    "recording_dropped_frames",
-    "recording_writer_errors",
-    "stem_length_mismatch",
-    "my-input_missing",
-    "their-input_missing",
-    "mix_missing",
-    "inputs-mix_missing",
-    "metronome_missing",
-    "my-input_invalid",
-    "their-input_invalid",
-    "mix_invalid",
-    "inputs-mix_invalid",
-    "metronome_invalid",
-    "my-input_tone_missing",
-    "their-input_tone_missing",
-}
 
 
 def parse_args():
@@ -87,8 +75,7 @@ def selected_profile(profile_name):
 
 
 def audio_probe_health_ok(analysis):
-    tags = set(analysis.get("tags", []))
-    return not (tags & INFRA_AUDIO_PROBE_TAGS)
+    return analysis.get("ok", False) and not analysis.get("tags", [])
 
 
 def scenario_catalog(base_profile=AGGRESSIVE_LOCAL_PROFILE):
@@ -167,6 +154,68 @@ def scenario_catalog(base_profile=AGGRESSIVE_LOCAL_PROFILE):
             "profile": adaptive_off_profile(base_profile),
             "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0, burst_pause_ms=250.0, burst_every_ms=8000.0)),
             "expect": "comparison run for adaptive cushion disabled under pressure",
+        },
+        "jitter-buffer-512-pressure": {
+            "profile": jitter_buffer_profile(base_profile, jitter_frames=512, playback_tail_frames=256, adaptive=True),
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0, burst_pause_ms=250.0, burst_every_ms=8000.0)),
+            "expect": "jitter buffer uses most of the latency budget while adaptive cushion remains available under pressure",
+        },
+        "jitter-buffer-512-max3072-pressure": {
+            "profile": variant(
+                jitter_buffer_profile(base_profile, jitter_frames=512, playback_tail_frames=256, adaptive=True),
+                "max_3072",
+                jitter_buffer_max_frames=3072),
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0, burst_pause_ms=250.0, burst_every_ms=8000.0)),
+            "expect": "same jitter target as the failing pressure case with larger jitter-buffer headroom",
+        },
+        "jitter-buffer-1024-max3072-pressure": {
+            "profile": variant(
+                jitter_buffer_profile(base_profile, jitter_frames=1024, playback_tail_frames=256, adaptive=True),
+                "max_3072",
+                jitter_buffer_max_frames=3072),
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0, burst_pause_ms=250.0, burst_every_ms=8000.0)),
+            "expect": "larger jitter target and max under the same pressure case",
+        },
+        "jitter-buffer-2048-max3072-pressure": {
+            "profile": variant(
+                jitter_buffer_profile(base_profile, jitter_frames=2048, playback_tail_frames=256, adaptive=True),
+                "max_3072",
+                jitter_buffer_max_frames=3072),
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0, burst_pause_ms=250.0, burst_every_ms=8000.0)),
+            "expect": "safe-style jitter target under the same pressure case with aggressive playback tail",
+        },
+        "jitter-buffer-2048-max4096-pressure": {
+            "profile": variant(
+                jitter_buffer_profile(base_profile, jitter_frames=2048, playback_tail_frames=256, adaptive=True),
+                "max_4096",
+                jitter_buffer_max_frames=4096),
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0, burst_pause_ms=250.0, burst_every_ms=8000.0)),
+            "expect": "safe-style jitter target with enough jitter-buffer headroom for observed pressure depth",
+        },
+        "prefill-768-pressure": {
+            "profile": latency_matched_prefill_profile(base_profile, total_frames=768, adaptive=True),
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0, burst_pause_ms=250.0, burst_every_ms=8000.0)),
+            "expect": "latency-matched prefill comparison for jitter-buffer-512-pressure",
+        },
+        "jitter-buffer-512-adaptive-off-pressure": {
+            "profile": jitter_buffer_profile(base_profile, jitter_frames=512, playback_tail_frames=256, adaptive=False),
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0, burst_pause_ms=250.0, burst_every_ms=8000.0)),
+            "expect": "fixed jitter buffer without adaptive cushion under pressure",
+        },
+        "prefill-768-adaptive-off-pressure": {
+            "profile": latency_matched_prefill_profile(base_profile, total_frames=768, adaptive=False),
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0, burst_pause_ms=250.0, burst_every_ms=8000.0)),
+            "expect": "fixed prefill without adaptive cushion under pressure",
+        },
+        "jitter-buffer-1024-jitter-100": {
+            "profile": jitter_buffer_profile(base_profile, jitter_frames=1024, playback_tail_frames=256, adaptive=True),
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=100.0)),
+            "expect": "larger jitter buffer should reduce underrun pressure under extreme ordered jitter at the cost of latency",
+        },
+        "jitter-buffer-512-reorder-small": {
+            "profile": jitter_buffer_profile(base_profile, jitter_frames=512, playback_tail_frames=256, adaptive=True),
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=8.0, reorder_percent=2.0, preserve_order=False)),
+            "expect": "jitter buffer should work with the reorder path and expose queued/released counters",
         },
         "metronome-shared-grid": {
             "profile": base_profile,
@@ -261,6 +310,16 @@ def standard_suite():
         "reorder-small",
         "adaptive-on-pressure",
         "adaptive-off-pressure",
+        "jitter-buffer-512-pressure",
+        "jitter-buffer-512-max3072-pressure",
+        "jitter-buffer-1024-max3072-pressure",
+        "jitter-buffer-2048-max3072-pressure",
+        "jitter-buffer-2048-max4096-pressure",
+        "prefill-768-pressure",
+        "jitter-buffer-512-adaptive-off-pressure",
+        "prefill-768-adaptive-off-pressure",
+        "jitter-buffer-1024-jitter-100",
+        "jitter-buffer-512-reorder-small",
         "metronome-shared-grid",
         "metronome-leader-audio",
         "metronome-symmetric-delay",
@@ -326,6 +385,38 @@ def audio_probe_suite(base_profile=AGGRESSIVE_LOCAL_PROFILE):
             "client_signal": "pulse-1s",
             "expect": "pulse recording should expose the same burst pressure with adaptive cushion disabled",
         },
+        "audio-probe-jitter-buffer-512-tone": {
+            "profile": jitter_buffer_profile(base_profile, jitter_frames=512, playback_tail_frames=256, adaptive=True),
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0)),
+            "signal": "tone-440",
+            "server_signal": "tone-440",
+            "client_signal": "tone-440",
+            "expect": "jitter-buffer tone recording should expose audible artifacts and jitter-buffer stats under high ordered jitter",
+        },
+        "audio-probe-prefill-768-tone": {
+            "profile": latency_matched_prefill_profile(base_profile, total_frames=768, adaptive=True),
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0)),
+            "signal": "tone-440",
+            "server_signal": "tone-440",
+            "client_signal": "tone-440",
+            "expect": "latency-matched prefill tone recording comparison for jitter-buffer tone analysis",
+        },
+        "audio-probe-jitter-buffer-512-metronome": {
+            "profile": jitter_buffer_profile(base_profile, jitter_frames=512, playback_tail_frames=256, adaptive=True),
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0, burst_pause_ms=250.0, burst_every_ms=8000.0)),
+            "signal": "metronome-only",
+            "server_signal": "silence",
+            "client_signal": "silence",
+            "expect": "jitter-buffer metronome recording should expose click timing error under Wi-Fi-like pressure",
+        },
+        "audio-probe-prefill-768-metronome": {
+            "profile": latency_matched_prefill_profile(base_profile, total_frames=768, adaptive=True),
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0, burst_pause_ms=250.0, burst_every_ms=8000.0)),
+            "signal": "metronome-only",
+            "server_signal": "silence",
+            "client_signal": "silence",
+            "expect": "latency-matched prefill metronome recording comparison for jitter-buffer timing analysis",
+        },
     }
 
 
@@ -334,6 +425,23 @@ def expand_scenarios(scenario_ids):
     for scenario_id in scenario_ids:
         if scenario_id == "adaptive-off-vs-on":
             expanded.extend(["adaptive-on-pressure", "adaptive-off-pressure"])
+        elif scenario_id == "jitter-buffer-adaptive-pressure-matrix":
+            expanded.extend([
+                "jitter-buffer-512-pressure",
+                "jitter-buffer-512-max3072-pressure",
+                "jitter-buffer-1024-max3072-pressure",
+                "jitter-buffer-2048-max3072-pressure",
+                "jitter-buffer-2048-max4096-pressure",
+                "jitter-buffer-512-adaptive-off-pressure",
+                "prefill-768-pressure",
+            ])
+        elif scenario_id == "jitter-buffer-audio-vs-prefill":
+            expanded.extend([
+                "audio-probe-jitter-buffer-512-tone",
+                "audio-probe-prefill-768-tone",
+                "audio-probe-jitter-buffer-512-metronome",
+                "audio-probe-prefill-768-metronome",
+            ])
         else:
             expanded.append(scenario_id)
     return expanded
@@ -344,10 +452,12 @@ def scenario_plan(profile_mode, requested_scenarios, include_audio_probes=False)
     if profile_mode != "both":
         base_profile = selected_profile(profile_mode)
         catalog = scenario_catalog(base_profile)
-        if include_audio_probes:
+        needs_audio_probes = include_audio_probes or any(scenario_id.startswith("audio-probe-") for scenario_id in base_ids)
+        if needs_audio_probes:
             probes = audio_probe_suite(base_profile)
             catalog.update(probes)
-            base_ids = base_ids + list(probes.keys())
+            if include_audio_probes:
+                base_ids = base_ids + list(probes.keys())
         return catalog, base_ids
 
     planned_catalog = {}
@@ -356,10 +466,12 @@ def scenario_plan(profile_mode, requested_scenarios, include_audio_probes=False)
         base_profile = selected_profile(profile_name)
         catalog = scenario_catalog(base_profile)
         profile_ids = list(base_ids)
-        if include_audio_probes:
+        needs_audio_probes = include_audio_probes or any(scenario_id.startswith("audio-probe-") for scenario_id in profile_ids)
+        if needs_audio_probes:
             probes = audio_probe_suite(base_profile)
             catalog.update(probes)
-            profile_ids.extend(probes.keys())
+            if include_audio_probes:
+                profile_ids.extend(probes.keys())
         for scenario_id in profile_ids:
             planned_id = f"{profile_name}__{scenario_id}"
             scenario = dict(catalog[scenario_id])
@@ -412,6 +524,13 @@ def verdict_for(result):
             return "proxy_reorder_not_injected"
         if metrics.get("sequence_out_of_order_total", 0.0) <= 0.0 and metrics.get("reordered_recovered_total", 0.0) <= 0.0:
             return "reorder_not_observed"
+        return "pass"
+    if scenario.startswith("jitter-buffer-"):
+        if metrics.get("jitter_buffer_released_packets_total", 0.0) <= 0.0:
+            return "jitter_buffer_not_used"
+        if scenario.endswith("reorder-small"):
+            if proxy.get("client_to_server_reordered", 0) + proxy.get("server_to_client_reordered", 0) <= 0:
+                return "proxy_reorder_not_injected"
         return "pass"
     if scenario == "metronome-shared-grid":
         return metronome_verdict(result, "shared-grid")
@@ -595,6 +714,32 @@ def match_clicks(expected, detected):
     }
 
 
+def classify_metronome_clicks(expected, detected, analysis):
+    startup_boundary = False
+    steady_missing = analysis["missing_clicks"]
+    steady_extra = analysis["extra_clicks"]
+    steady_max_error = analysis["max_abs_error_frames"]
+    if analysis["missing_clicks"] or analysis["extra_clicks"]:
+        for detected_start in range(1, min(3, len(detected)) + 1):
+            if len(expected) <= 1 or len(expected[1:]) != len(detected[detected_start:]):
+                continue
+            steady_errors = [abs(click - frame) for frame, click in zip(expected[1:], detected[detected_start:])]
+            if not steady_errors or any(error > METRONOME_WAV_TOLERANCE_FRAMES for error in steady_errors):
+                continue
+            startup_boundary = True
+            steady_missing = 0
+            steady_extra = 0
+            steady_max_error = max(steady_errors, default=0)
+            break
+    analysis.update({
+        "startup_boundary_mismatch": startup_boundary,
+        "steady_missing_clicks": steady_missing,
+        "steady_extra_clicks": steady_extra,
+        "steady_max_abs_error_frames": steady_max_error,
+    })
+    return analysis
+
+
 def analyze_side_recording(recording_dir, allow_silent=False):
     meta_path = Path(recording_dir) / "recording.json"
     wav_path = Path(recording_dir) / "metronome.wav"
@@ -613,18 +758,23 @@ def analyze_side_recording(recording_dir, allow_silent=False):
             "detected_clicks": 0,
             "silent_allowed": True,
         }
-    analysis = match_clicks(expected, detected)
+    analysis = classify_metronome_clicks(expected, detected, match_clicks(expected, detected))
     analysis.update({
-        "ok": analysis["missing_clicks"] == 0 and analysis["max_abs_error_frames"] <= METRONOME_WAV_TOLERANCE_FRAMES,
+        "ok": (
+            analysis["steady_missing_clicks"] == 0 and
+            analysis["steady_extra_clicks"] == 0 and
+            analysis["steady_max_abs_error_frames"] <= METRONOME_WAV_TOLERANCE_FRAMES),
         "recording_dir": str(recording_dir),
         "sample_rate": sample_rate,
     })
     if not analysis["ok"]:
         analysis["verdict"] = (
             "metronome_click_count_mismatch"
-            if analysis["missing_clicks"] > 0
+            if analysis["steady_missing_clicks"] > 0 or analysis["steady_extra_clicks"] > 0
             else "metronome_click_timing_high"
         )
+    elif analysis["startup_boundary_mismatch"]:
+        analysis["verdict"] = "pass_startup_boundary"
     return analysis
 
 

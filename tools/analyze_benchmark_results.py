@@ -21,6 +21,7 @@ def load_results(path):
 
 def flatten(result):
     combined = result.get("metrics", {}).get("combined", {})
+    profile = result.get("profile_values", {})
     return {
         "case_id": result.get("case_id", ""),
         "run_index": result.get("run_index", ""),
@@ -30,11 +31,34 @@ def flatten(result):
         "client_signal": result.get("client_signal", ""),
         "verdict": result.get("verdict", ""),
         "tags": ";".join(result.get("tags", [])),
+        "audio_buffer_size": profile.get("audio_buffer_size", ""),
+        "frame_size": profile.get("frame_size", ""),
+        "playback_prefill_frames": profile.get("playback_prefill_frames", ""),
+        "playback_ring_frames": profile.get("playback_ring_frames", ""),
+        "playback_max_frames": profile.get("playback_max_frames", ""),
+        "playout_delay_frames": profile.get("playout_delay_frames", ""),
+        "adaptive_playback_cushion": profile.get("adaptive_playback_cushion", ""),
+        "adaptive_playback_target_frames": profile.get("adaptive_playback_target_frames", ""),
+        "adaptive_playback_min_frames": profile.get("adaptive_playback_min_frames", ""),
+        "adaptive_playback_max_frames": profile.get("adaptive_playback_max_frames", ""),
+        "jitter_buffer_frames": profile.get("jitter_buffer_frames", ""),
+        "jitter_buffer_max_frames": profile.get("jitter_buffer_max_frames", ""),
         "loss_percent_max": combined.get("loss_percent_max", ""),
         "jitter_max_ms": combined.get("jitter_max_ms", ""),
         "rtt_max_ms": combined.get("rtt_max_ms", ""),
         "playback_underrun_time_ms_total": combined.get("playback_underrun_time_ms_total", ""),
+        "playback_underrun_burst_max_ms": combined.get("playback_underrun_burst_max_ms", ""),
         "playback_dropped_frames_total": combined.get("playback_dropped_frames_total", ""),
+        "missing_audio_frames_total": combined.get("missing_audio_frames_total", ""),
+        "late_audio_frames_total": combined.get("late_audio_frames_total", ""),
+        "drift_abs_ppm_max": combined.get("drift_abs_ppm_max", ""),
+        "adaptive_raise_events_total": combined.get("adaptive_raise_events_total", ""),
+        "adaptive_burst_events_total": combined.get("adaptive_burst_events_total", ""),
+        "jitter_buffer_released_packets_total": combined.get("jitter_buffer_released_packets_total", ""),
+        "jitter_buffer_dropped_packets_total": combined.get("jitter_buffer_dropped_packets_total", ""),
+        "jitter_buffer_dropped_frames_total": combined.get("jitter_buffer_dropped_frames_total", ""),
+        "jitter_buffer_depth_max_frames": combined.get("jitter_buffer_depth_max_frames", ""),
+        "metronome_beat_delta_abs_max": combined.get("metronome_beat_delta_abs_max", ""),
         "server_csv_path": result.get("server_csv_path", ""),
         "client_csv_path": result.get("client_csv_path", ""),
     }

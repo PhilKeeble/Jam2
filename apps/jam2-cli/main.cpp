@@ -37,7 +37,7 @@ Usage:
   jam2 test-device <id> [--sample-rate n]
   jam2 meter-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n]
   jam2 ring-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n] [--ring-frames n]
-  jam2 listen [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats enabled|disabled] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--record-jam-folder folder] [--test-input off|silence|tone-440|pulse-1s] [--metronome on|off] [--bpm n] [--metronome-level n] [--remote-level n] [--metronome-mode shared-grid|leader-audio|symmetric-delay|listener-compensated] [--sample-time-playout on|off] [--playout-delay-frames n] [--adaptive-playback-cushion on|off] [--adaptive-playback-target-frames n] [--adaptive-playback-min-frames n] [--adaptive-playback-max-frames n] [--adaptive-playback-release-ppm n] [--session-id hex] [--session-key hex32] [--machine-readable-startup on|off] [--status-format text|jsonl] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels n[,n...]] [--output-channels n[,n...]] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-deadband-ppm n] [--drift-max-correction-ppm n]
+  jam2 listen [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats enabled|disabled] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--record-jam-folder folder] [--test-input off|silence|tone-440|pulse-1s] [--metronome on|off] [--bpm n] [--metronome-level n] [--remote-level n] [--metronome-mode shared-grid|leader-audio|symmetric-delay|listener-compensated] [--sample-time-playout on|off] [--playout-delay-frames n] [--jitter-buffer-frames n] [--jitter-buffer-max-frames n] [--adaptive-playback-cushion on|off] [--adaptive-playback-target-frames n] [--adaptive-playback-min-frames n] [--adaptive-playback-max-frames n] [--adaptive-playback-release-ppm n] [--session-id hex] [--session-key hex32] [--machine-readable-startup on|off] [--status-format text|jsonl] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels n[,n...]] [--output-channels n[,n...]] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-deadband-ppm n] [--drift-max-correction-ppm n]
   jam2 connect <jam2-url> [options]
 
 Stage status:
@@ -89,6 +89,8 @@ struct Options {
     double remote_level = 1.0;
     bool sample_time_playout = true;
     std::size_t playout_delay_frames = 0;
+    std::size_t jitter_buffer_frames = 0;
+    std::size_t jitter_buffer_max_frames = 0;
     bool adaptive_playback_cushion = false;
     std::size_t adaptive_playback_target_frames = 0;
     std::size_t adaptive_playback_min_frames = 0;
@@ -441,6 +443,12 @@ Options parse_options(int argc, char** argv, int start)
         } else if (arg == "--playout-delay-frames") {
             const auto parsed = std::stoull(std::string(require_value(argc, argv, i, arg)));
             options.playout_delay_frames = static_cast<std::size_t>(parsed);
+        } else if (arg == "--jitter-buffer-frames") {
+            const auto parsed = std::stoull(std::string(require_value(argc, argv, i, arg)));
+            options.jitter_buffer_frames = static_cast<std::size_t>(parsed);
+        } else if (arg == "--jitter-buffer-max-frames") {
+            const auto parsed = std::stoull(std::string(require_value(argc, argv, i, arg)));
+            options.jitter_buffer_max_frames = static_cast<std::size_t>(parsed);
         } else if (arg == "--adaptive-playback-cushion") {
             const std::string value{require_value(argc, argv, i, arg)};
             if (value == "on" || value == "true" || value == "1") {
@@ -547,6 +555,11 @@ Options parse_options(int argc, char** argv, int start)
     if (options.playout_delay_frames == 0) {
         options.playout_delay_frames = options.playback_prefill_frames;
     }
+    if (options.jitter_buffer_frames > 0 && options.jitter_buffer_max_frames == 0) {
+        options.jitter_buffer_max_frames = std::max<std::size_t>(
+            options.jitter_buffer_frames,
+            static_cast<std::size_t>(options.frame_size));
+    }
     if (options.adaptive_playback_target_frames == 0) {
         options.adaptive_playback_target_frames = options.playout_delay_frames;
     }
@@ -563,6 +576,12 @@ Options parse_options(int argc, char** argv, int start)
     }
     if (options.playout_delay_frames > options.playback_ring_frames) {
         throw std::runtime_error("--playout-delay-frames must fit within playback ring capacity");
+    }
+    if (options.jitter_buffer_frames == 0 && options.jitter_buffer_max_frames > 0) {
+        throw std::runtime_error("--jitter-buffer-max-frames requires --jitter-buffer-frames");
+    }
+    if (options.jitter_buffer_max_frames > 0 && options.jitter_buffer_max_frames < options.jitter_buffer_frames) {
+        throw std::runtime_error("--jitter-buffer-max-frames must be >= --jitter-buffer-frames");
     }
     if (options.adaptive_playback_max_frames > options.playback_ring_frames) {
         throw std::runtime_error("--adaptive-playback-max-frames must fit within playback ring capacity");
@@ -784,6 +803,16 @@ struct AudioPacketStats {
     std::uint64_t late_audio_frames_dropped = 0;
     std::uint64_t playout_delay_frames = 0;
     std::int64_t playout_delay_error_frames = 0;
+    bool jitter_buffer_enabled = false;
+    std::uint64_t jitter_buffer_target_frames = 0;
+    std::uint64_t jitter_buffer_max_frames = 0;
+    std::uint64_t jitter_buffer_depth_frames = 0;
+    std::uint64_t jitter_buffer_depth_max_frames = 0;
+    std::uint64_t jitter_buffer_queued_packets = 0;
+    std::uint64_t jitter_buffer_released_packets = 0;
+    std::uint64_t jitter_buffer_late_packets = 0;
+    std::uint64_t jitter_buffer_dropped_packets = 0;
+    std::uint64_t jitter_buffer_dropped_frames = 0;
     bool adaptive_playback_cushion_enabled = false;
     std::uint64_t adaptive_playback_target_frames = 0;
     std::uint64_t adaptive_playback_min_frames = 0;
@@ -1420,6 +1449,8 @@ std::string make_headless_client_command(std::string_view executable, const std:
         << " --metronome-mode " << metronome_mode_text(options.metronome_mode)
         << " --sample-time-playout " << bool_on_off(options.sample_time_playout)
         << " --playout-delay-frames " << options.playout_delay_frames
+        << " --jitter-buffer-frames " << options.jitter_buffer_frames
+        << " --jitter-buffer-max-frames " << options.jitter_buffer_max_frames
         << " --adaptive-playback-cushion " << bool_on_off(options.adaptive_playback_cushion)
         << " --adaptive-playback-target-frames " << options.adaptive_playback_target_frames
         << " --adaptive-playback-min-frames " << options.adaptive_playback_min_frames
@@ -1520,7 +1551,10 @@ double estimated_one_way_ms(const AudioPacketStats& stats, const Options& option
     const double audio_buffer_ms = options.audio_buffer_size > 0 ?
         frames_to_ms(static_cast<std::size_t>(options.audio_buffer_size), options.sample_rate) :
         frames_to_ms(static_cast<std::size_t>(options.frame_size), options.sample_rate);
-    return network_ms + playback_depth_avg_ms(stats, options) + audio_buffer_ms;
+    const double jitter_buffer_ms = options.jitter_buffer_frames > 0 ?
+        frames_to_ms(options.jitter_buffer_frames, options.sample_rate) :
+        0.0;
+    return network_ms + jitter_buffer_ms + playback_depth_avg_ms(stats, options) + audio_buffer_ms;
 }
 
 std::string json_escape(std::string_view value)
@@ -1661,6 +1695,8 @@ void print_startup_json(
               << ",\"remote_level\":" << options.remote_level
               << ",\"sample_time_playout\":" << (options.sample_time_playout ? "true" : "false")
               << ",\"playout_delay_frames\":" << options.playout_delay_frames
+              << ",\"jitter_buffer_frames\":" << options.jitter_buffer_frames
+              << ",\"jitter_buffer_max_frames\":" << options.jitter_buffer_max_frames
               << ",\"adaptive_playback_cushion\":" << (options.adaptive_playback_cushion ? "true" : "false")
               << ",\"adaptive_playback_target_frames\":" << options.adaptive_playback_target_frames
               << ",\"adaptive_playback_min_frames\":" << options.adaptive_playback_min_frames
@@ -1728,6 +1764,8 @@ public:
         std::string metronome_mode;
         bool sample_time_playout = false;
         std::size_t playout_delay_frames = 0;
+        std::size_t jitter_buffer_frames = 0;
+        std::size_t jitter_buffer_max_frames = 0;
         double remote_level = 1.0;
         int audio_device_id = -1;
         std::string requested_input_mode;
@@ -1826,7 +1864,11 @@ public:
                 "adaptive_playback_min_frames,adaptive_playback_max_frames,adaptive_playback_raise_events,adaptive_playback_release_events,"
                 "adaptive_playback_burst_events,adaptive_playback_padding_frames,adaptive_playback_padding_ms,"
                 "adaptive_playback_time_above_target_ms,adaptive_playback_time_under_target_ms,"
-                "adaptive_playback_longest_above_target_ms,adaptive_playback_longest_under_target_ms\n";
+                "adaptive_playback_longest_above_target_ms,adaptive_playback_longest_under_target_ms,"
+                "jitter_buffer,jitter_buffer_target_frames,jitter_buffer_target_ms,jitter_buffer_max_frames,jitter_buffer_max_ms,"
+                "jitter_buffer_depth_frames,jitter_buffer_depth_ms,jitter_buffer_depth_max_frames,jitter_buffer_depth_max_ms,"
+                "jitter_buffer_queued_packets,jitter_buffer_released_packets,jitter_buffer_late_packets,"
+                "jitter_buffer_dropped_packets,jitter_buffer_dropped_frames,jitter_buffer_dropped_ms\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -2076,7 +2118,22 @@ public:
              << static_cast<double>(stats.adaptive_playback_time_above_target_us) / 1000.0 << ','
              << static_cast<double>(stats.adaptive_playback_time_under_target_us) / 1000.0 << ','
              << static_cast<double>(stats.adaptive_playback_longest_above_target_us) / 1000.0 << ','
-             << static_cast<double>(stats.adaptive_playback_longest_under_target_us) / 1000.0 << '\n';
+             << static_cast<double>(stats.adaptive_playback_longest_under_target_us) / 1000.0 << ','
+             << (stats.jitter_buffer_enabled ? "on" : "off") << ','
+             << stats.jitter_buffer_target_frames << ','
+             << frames_to_ms(static_cast<std::size_t>(stats.jitter_buffer_target_frames), active_sample_rate) << ','
+             << stats.jitter_buffer_max_frames << ','
+             << frames_to_ms(static_cast<std::size_t>(stats.jitter_buffer_max_frames), active_sample_rate) << ','
+             << stats.jitter_buffer_depth_frames << ','
+             << frames_to_ms(static_cast<std::size_t>(stats.jitter_buffer_depth_frames), active_sample_rate) << ','
+             << stats.jitter_buffer_depth_max_frames << ','
+             << frames_to_ms(static_cast<std::size_t>(stats.jitter_buffer_depth_max_frames), active_sample_rate) << ','
+             << stats.jitter_buffer_queued_packets << ','
+             << stats.jitter_buffer_released_packets << ','
+             << stats.jitter_buffer_late_packets << ','
+             << stats.jitter_buffer_dropped_packets << ','
+             << stats.jitter_buffer_dropped_frames << ','
+             << frames_to_ms(static_cast<std::size_t>(stats.jitter_buffer_dropped_frames), active_sample_rate) << '\n';
         if (row_type == "final") {
             out_.flush();
         }
@@ -2091,7 +2148,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(209);
+        std::vector<std::string> fields(224);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -2258,6 +2315,21 @@ public:
         set(206, static_cast<double>(stats.adaptive_playback_time_under_target_us) / 1000.0);
         set(207, static_cast<double>(stats.adaptive_playback_longest_above_target_us) / 1000.0);
         set(208, static_cast<double>(stats.adaptive_playback_longest_under_target_us) / 1000.0);
+        fields[209] = stats.jitter_buffer_enabled ? "on" : "off";
+        set(210, stats.jitter_buffer_target_frames);
+        set(211, frames_to_ms(static_cast<std::size_t>(stats.jitter_buffer_target_frames), options.sample_rate));
+        set(212, stats.jitter_buffer_max_frames);
+        set(213, frames_to_ms(static_cast<std::size_t>(stats.jitter_buffer_max_frames), options.sample_rate));
+        set(214, stats.jitter_buffer_depth_frames);
+        set(215, frames_to_ms(static_cast<std::size_t>(stats.jitter_buffer_depth_frames), options.sample_rate));
+        set(216, stats.jitter_buffer_depth_max_frames);
+        set(217, frames_to_ms(static_cast<std::size_t>(stats.jitter_buffer_depth_max_frames), options.sample_rate));
+        set(218, stats.jitter_buffer_queued_packets);
+        set(219, stats.jitter_buffer_released_packets);
+        set(220, stats.jitter_buffer_late_packets);
+        set(221, stats.jitter_buffer_dropped_packets);
+        set(222, stats.jitter_buffer_dropped_frames);
+        set(223, frames_to_ms(static_cast<std::size_t>(stats.jitter_buffer_dropped_frames), options.sample_rate));
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {
@@ -2355,6 +2427,8 @@ CsvStatsLog::Context make_csv_context(
     context.metronome_mode = std::string(metronome_mode_text(options.metronome_mode));
     context.sample_time_playout = options.sample_time_playout;
     context.playout_delay_frames = options.playout_delay_frames;
+    context.jitter_buffer_frames = options.jitter_buffer_frames;
+    context.jitter_buffer_max_frames = options.jitter_buffer_max_frames;
     context.remote_level = options.remote_level;
     context.audio_device_id = options.audio_device_id.value_or(-1);
     context.requested_input_mode = mono_mix_mode_text(options.channel_selection.input.size());
@@ -2419,6 +2493,12 @@ void print_periodic_stream_stats(
               << " playback_dropped_frames=" << stats.playback_dropped_frames
               << " missing_audio_frames_inserted=" << stats.missing_audio_frames_inserted
               << " late_audio_frames_dropped=" << stats.late_audio_frames_dropped
+              << " jitter_buffer=" << (stats.jitter_buffer_enabled ? "on" : "off")
+              << " jitter_buffer_target_frames=" << stats.jitter_buffer_target_frames
+              << " jitter_buffer_depth_frames=" << stats.jitter_buffer_depth_frames
+              << " jitter_buffer_released_packets=" << stats.jitter_buffer_released_packets
+              << " jitter_buffer_late_packets=" << stats.jitter_buffer_late_packets
+              << " jitter_buffer_dropped_packets=" << stats.jitter_buffer_dropped_packets
               << "\n";
 }
 
@@ -2457,6 +2537,13 @@ void print_compact_status(
                   << ",\"metronome_mode\":\"" << metronome_mode_text(live_metronome_mode) << "\""
                   << ",\"sample_time_playout\":" << (options.sample_time_playout ? "true" : "false")
                   << ",\"playout_delay_frames\":" << options.playout_delay_frames
+                  << ",\"jitter_buffer\":" << (stats.jitter_buffer_enabled ? "true" : "false")
+                  << ",\"jitter_buffer_target_frames\":" << stats.jitter_buffer_target_frames
+                  << ",\"jitter_buffer_max_frames\":" << stats.jitter_buffer_max_frames
+                  << ",\"jitter_buffer_depth_frames\":" << stats.jitter_buffer_depth_frames
+                  << ",\"jitter_buffer_released_packets\":" << stats.jitter_buffer_released_packets
+                  << ",\"jitter_buffer_late_packets\":" << stats.jitter_buffer_late_packets
+                  << ",\"jitter_buffer_dropped_packets\":" << stats.jitter_buffer_dropped_packets
                   << ",\"recording_active\":" << (recording_stats.active ? "true" : "false")
                   << ",\"recording_folder\":\"" << json_escape(recording_stats.folder) << "\""
                   << ",\"recording_frames_written\":" << recording_stats.frames_written
@@ -2526,6 +2613,12 @@ void print_compact_status(
               << " metronome_mode=" << metronome_mode_text(live_metronome_mode)
               << " sample_time_playout=" << (options.sample_time_playout ? "on" : "off")
               << " playout_delay_frames=" << options.playout_delay_frames
+              << " jitter_buffer=" << (stats.jitter_buffer_enabled ? "on" : "off")
+              << " jitter_buffer_target_frames=" << stats.jitter_buffer_target_frames
+              << " jitter_buffer_depth_frames=" << stats.jitter_buffer_depth_frames
+              << " jitter_buffer_released_packets=" << stats.jitter_buffer_released_packets
+              << " jitter_buffer_late_packets=" << stats.jitter_buffer_late_packets
+              << " jitter_buffer_dropped_packets=" << stats.jitter_buffer_dropped_packets
               << " recording_active=" << (recording_stats.active ? "yes" : "no")
               << " recording_folder=" << recording_stats.folder
               << " recording_frames_written=" << recording_stats.frames_written
@@ -2627,6 +2720,9 @@ AudioPacketStats run_audio_packet_exchange(
     stats.startup_drained_packets = startup_drained_packets;
     stats.sample_time_playout_enabled = options.sample_time_playout;
     stats.playout_delay_frames = static_cast<std::uint64_t>(options.playout_delay_frames);
+    stats.jitter_buffer_enabled = options.jitter_buffer_frames > 0;
+    stats.jitter_buffer_target_frames = static_cast<std::uint64_t>(options.jitter_buffer_frames);
+    stats.jitter_buffer_max_frames = static_cast<std::uint64_t>(options.jitter_buffer_max_frames);
     stats.adaptive_playback_cushion_enabled = options.adaptive_playback_cushion;
     stats.adaptive_playback_target_frames = static_cast<std::uint64_t>(options.adaptive_playback_target_frames);
     stats.adaptive_playback_min_frames = static_cast<std::uint64_t>(options.adaptive_playback_min_frames);
@@ -2684,7 +2780,13 @@ AudioPacketStats run_audio_packet_exchange(
     const std::uint64_t receive_deadline = bounded_stream ?
         send_deadline + static_cast<std::uint64_t>(options.stream_linger_ms) * 1000ULL :
         UINT64_MAX;
-    constexpr std::uint32_t kReorderWindowPackets = 4;
+    const std::uint32_t reorder_window_packets = options.jitter_buffer_max_frames > 0 && options.frame_size > 0 ?
+        std::max<std::uint32_t>(
+            4,
+            static_cast<std::uint32_t>(
+                (options.jitter_buffer_max_frames + static_cast<std::size_t>(options.frame_size) - 1) /
+                static_cast<std::size_t>(options.frame_size)) + 1U) :
+        4U;
     struct PendingAudioPacket {
         std::uint32_t sequence = 0;
         std::uint64_t sample_time = 0;
@@ -2693,9 +2795,13 @@ AudioPacketStats run_audio_packet_exchange(
         std::vector<std::int32_t> samples;
     };
     std::map<std::uint32_t, PendingAudioPacket> pending_audio;
+    std::map<std::uint64_t, PendingAudioPacket> jitter_audio;
     bool expected_sequence_set = false;
     std::uint32_t expected_sequence = 0;
     std::uint32_t highest_sequence = 0;
+    bool jitter_buffer_time_initialized = false;
+    std::uint64_t jitter_buffer_base_sample_time = 0;
+    std::uint64_t jitter_buffer_base_receive_time_us = 0;
     const std::uint64_t depth_under_2ms_frames =
         static_cast<std::uint64_t>(std::ceil(static_cast<double>(options.sample_rate) * 2.0 / 1000.0)) > 0 ?
             static_cast<std::uint64_t>(std::ceil(static_cast<double>(options.sample_rate) * 2.0 / 1000.0)) : 1;
@@ -2768,7 +2874,11 @@ AudioPacketStats run_audio_packet_exchange(
             static_cast<std::uint64_t>(options.playout_delay_frames);
     };
 
-    runtime.metronome_epoch_sample_time.store(current_playout_delay_frames(), std::memory_order_relaxed);
+    auto current_effective_playout_delay_frames = [&]() -> std::uint64_t {
+        return current_playout_delay_frames() + static_cast<std::uint64_t>(options.jitter_buffer_frames);
+    };
+
+    runtime.metronome_epoch_sample_time.store(current_effective_playout_delay_frames(), std::memory_order_relaxed);
     runtime.metronome_epoch_valid.store(true, std::memory_order_relaxed);
 
     auto process_audio_packet = [&](const PendingAudioPacket& packet) {
@@ -3056,6 +3166,91 @@ AudioPacketStats run_audio_packet_exchange(
         }
     };
 
+    auto jitter_buffer_depth_frames = [&]() -> std::uint64_t {
+        if (jitter_audio.empty()) {
+            return 0;
+        }
+        const auto& first = jitter_audio.begin()->second;
+        const auto& last = jitter_audio.rbegin()->second;
+        const std::uint64_t last_end =
+            last.sample_time + static_cast<std::uint64_t>(last.samples.size());
+        return last_end > first.sample_time ? last_end - first.sample_time : 0;
+    };
+
+    auto jitter_packet_due_time_us = [&](const PendingAudioPacket& packet) -> std::uint64_t {
+        const std::uint64_t sample_delta =
+            packet.sample_time >= jitter_buffer_base_sample_time ?
+                packet.sample_time - jitter_buffer_base_sample_time :
+                0;
+        const std::uint64_t playout_delta_us =
+            sample_delta * 1000000ULL / static_cast<std::uint64_t>(options.sample_rate);
+        const std::uint64_t target_delay_us =
+            static_cast<std::uint64_t>(options.jitter_buffer_frames) * 1000000ULL /
+            static_cast<std::uint64_t>(options.sample_rate);
+        return jitter_buffer_base_receive_time_us + target_delay_us + playout_delta_us;
+    };
+
+    auto update_jitter_buffer_depth_stats = [&]() {
+        stats.jitter_buffer_depth_frames = jitter_buffer_depth_frames();
+        if (stats.jitter_buffer_depth_frames > stats.jitter_buffer_depth_max_frames) {
+            stats.jitter_buffer_depth_max_frames = stats.jitter_buffer_depth_frames;
+        }
+    };
+
+    auto drop_jitter_buffer_packet = [&](std::map<std::uint64_t, PendingAudioPacket>::iterator packet) {
+        stats.jitter_buffer_dropped_frames += static_cast<std::uint64_t>(packet->second.samples.size());
+        ++stats.jitter_buffer_dropped_packets;
+        jitter_audio.erase(packet);
+        update_jitter_buffer_depth_stats();
+    };
+
+    auto drain_jitter_buffer = [&](std::uint64_t now_us) {
+        if (options.jitter_buffer_frames == 0) {
+            return;
+        }
+        for (;;) {
+            update_jitter_buffer_depth_stats();
+            if (options.jitter_buffer_max_frames > 0 &&
+                stats.jitter_buffer_depth_frames > static_cast<std::uint64_t>(options.jitter_buffer_max_frames) &&
+                !jitter_audio.empty()) {
+                drop_jitter_buffer_packet(jitter_audio.begin());
+                continue;
+            }
+            const auto next = jitter_audio.begin();
+            if (next == jitter_audio.end()) {
+                return;
+            }
+            const std::uint64_t due_us = jitter_packet_due_time_us(next->second);
+            if (due_us > now_us) {
+                return;
+            }
+            if (now_us > due_us) {
+                ++stats.jitter_buffer_late_packets;
+            }
+            PendingAudioPacket packet = std::move(next->second);
+            jitter_audio.erase(next);
+            ++stats.jitter_buffer_released_packets;
+            process_audio_packet(packet);
+            update_jitter_buffer_depth_stats();
+        }
+    };
+
+    auto queue_or_process_audio_packet = [&](PendingAudioPacket packet) {
+        if (options.jitter_buffer_frames == 0) {
+            process_audio_packet(packet);
+            return;
+        }
+        if (!jitter_buffer_time_initialized) {
+            jitter_buffer_time_initialized = true;
+            jitter_buffer_base_sample_time = packet.sample_time;
+            jitter_buffer_base_receive_time_us = packet.receive_time;
+        }
+        jitter_audio.emplace(packet.sample_time, std::move(packet));
+        ++stats.jitter_buffer_queued_packets;
+        update_jitter_buffer_depth_stats();
+        drain_jitter_buffer(jam2::monotonic_us());
+    };
+
     auto drain_reorder_buffer = [&]() {
         for (;;) {
             const auto next = pending_audio.find(expected_sequence);
@@ -3063,12 +3258,12 @@ AudioPacketStats run_audio_packet_exchange(
                 if (collect_stats && next->second.reordered) {
                     ++stats.reordered_recovered;
                 }
-                process_audio_packet(next->second);
+                queue_or_process_audio_packet(std::move(next->second));
                 pending_audio.erase(next);
                 ++expected_sequence;
                 continue;
             }
-            if (expected_sequence_set && highest_sequence > expected_sequence + kReorderWindowPackets) {
+            if (expected_sequence_set && highest_sequence > expected_sequence + reorder_window_packets) {
                 if (collect_stats) {
                     ++stats.sequence.lost;
                     ++stats.reordered_lost;
@@ -3083,6 +3278,7 @@ AudioPacketStats run_audio_packet_exchange(
 
     while (jam2::monotonic_us() < receive_deadline && !stats.received_bye && !runtime.quit.load(std::memory_order_relaxed)) {
         const std::uint64_t now = jam2::monotonic_us();
+        drain_jitter_buffer(now);
         if (collect_diagnostics && last_stream_loop_us != 0 && now >= last_stream_loop_us) {
             observe_timing(now - last_stream_loop_us, stats.receive_loop_gap_min_us, stats.receive_loop_gap_sum_us, stats.receive_loop_gap_max_us);
             ++stats.receive_loop_gap_samples;
@@ -3094,7 +3290,7 @@ AudioPacketStats run_audio_packet_exchange(
         if (!runtime.metronome_epoch_valid.load(std::memory_order_relaxed) ||
             metronome_epoch_revision != last_metronome_epoch_revision) {
             runtime.metronome_epoch_sample_time.store(
-                sample_time + current_playout_delay_frames(),
+                sample_time + current_effective_playout_delay_frames(),
                 std::memory_order_relaxed);
             runtime.metronome_epoch_valid.store(true, std::memory_order_relaxed);
             last_metronome_epoch_revision = metronome_epoch_revision;
@@ -3415,7 +3611,7 @@ AudioPacketStats run_audio_packet_exchange(
                             runtime.bpm.store(-remote_bpm, std::memory_order_relaxed);
                             if (needs_epoch) {
                                 runtime.metronome_epoch_sample_time.store(
-                                    metronome_payload.epoch_sample_time + current_playout_delay_frames(),
+                                    metronome_payload.epoch_sample_time + current_effective_playout_delay_frames(),
                                     std::memory_order_relaxed);
                                 runtime.metronome_epoch_valid.store(true, std::memory_order_relaxed);
                                 remote_metronome_epoch_accepted = true;
@@ -3425,7 +3621,7 @@ AudioPacketStats run_audio_packet_exchange(
                             runtime.bpm.store(remote_bpm, std::memory_order_relaxed);
                             if (needs_epoch) {
                                 runtime.metronome_epoch_sample_time.store(
-                                    metronome_payload.epoch_sample_time + current_playout_delay_frames(),
+                                    metronome_payload.epoch_sample_time + current_effective_playout_delay_frames(),
                                     std::memory_order_relaxed);
                                 runtime.metronome_epoch_valid.store(true, std::memory_order_relaxed);
                                 remote_metronome_epoch_accepted = true;
@@ -3586,6 +3782,11 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "Sample-time playout: " << (options.sample_time_playout ? "on" : "off") << "\n";
     std::cout << "Playout delay frames: " << options.playout_delay_frames << "\n";
     std::cout << "Playout delay ms: " << frames_to_ms(options.playout_delay_frames, options.sample_rate) << "\n";
+    std::cout << "Jitter buffer requested: " << (options.jitter_buffer_frames > 0 ? "on" : "off") << "\n";
+    std::cout << "Jitter buffer target frames requested: " << options.jitter_buffer_frames << "\n";
+    std::cout << "Jitter buffer target ms requested: " << frames_to_ms(options.jitter_buffer_frames, options.sample_rate) << "\n";
+    std::cout << "Jitter buffer max frames requested: " << options.jitter_buffer_max_frames << "\n";
+    std::cout << "Jitter buffer max ms requested: " << frames_to_ms(options.jitter_buffer_max_frames, options.sample_rate) << "\n";
     std::cout << "Adaptive playback cushion requested: " << (options.adaptive_playback_cushion ? "on" : "off") << "\n";
     std::cout << "Adaptive playback target frames requested: " << options.adaptive_playback_target_frames << "\n";
     std::cout << "Adaptive playback min frames requested: " << options.adaptive_playback_min_frames << "\n";
@@ -3673,6 +3874,20 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
                          stats.playout_delay_error_frames < 0 ? -stats.playout_delay_error_frames : stats.playout_delay_error_frames),
                      options.sample_rate)
               << "\n";
+    std::cout << "Jitter buffer: " << (stats.jitter_buffer_enabled ? "on" : "off") << "\n";
+    std::cout << "Jitter buffer target frames: " << stats.jitter_buffer_target_frames << "\n";
+    std::cout << "Jitter buffer target ms: "
+              << frames_to_ms(static_cast<std::size_t>(stats.jitter_buffer_target_frames), options.sample_rate) << "\n";
+    std::cout << "Jitter buffer max frames: " << stats.jitter_buffer_max_frames << "\n";
+    std::cout << "Jitter buffer max ms: "
+              << frames_to_ms(static_cast<std::size_t>(stats.jitter_buffer_max_frames), options.sample_rate) << "\n";
+    std::cout << "Jitter buffer final depth frames: " << stats.jitter_buffer_depth_frames << "\n";
+    std::cout << "Jitter buffer max depth frames: " << stats.jitter_buffer_depth_max_frames << "\n";
+    std::cout << "Jitter buffer queued packets: " << stats.jitter_buffer_queued_packets << "\n";
+    std::cout << "Jitter buffer released packets: " << stats.jitter_buffer_released_packets << "\n";
+    std::cout << "Jitter buffer late packets: " << stats.jitter_buffer_late_packets << "\n";
+    std::cout << "Jitter buffer dropped packets: " << stats.jitter_buffer_dropped_packets << "\n";
+    std::cout << "Jitter buffer dropped frames: " << stats.jitter_buffer_dropped_frames << "\n";
     if (stats.send_interval_samples > 0) {
         std::cout << "Send interval ms min: " << static_cast<double>(stats.send_interval_min_us) / 1000.0 << "\n";
         std::cout << "Send interval ms avg: " << avg_us_to_ms(stats.send_interval_sum_us, stats.send_interval_samples) << "\n";
@@ -3727,7 +3942,7 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "Reordered packet loss events: " << stats.reordered_lost_events << "\n";
     if (stats.recv_pongs > 0 && stats.playback_depth_samples > 0) {
         std::cout << "Estimated one-way latency ms: " << estimated_one_way_ms(stats, options) << "\n";
-        std::cout << "Estimated one-way latency note: RTT/2 + playback depth avg + audio buffer\n";
+        std::cout << "Estimated one-way latency note: RTT/2 + jitter buffer target + playback depth avg + audio buffer\n";
     }
     if (stats.drift_valid) {
         std::cout << "Raw drift ppm estimate: " << stats.raw_drift_ppm << "\n";

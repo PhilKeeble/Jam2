@@ -31,6 +31,8 @@ class Jam2Profile:
     remote_level: float = 1.0
     sample_time_playout: str = "on"
     playout_delay_frames: int = 2048
+    jitter_buffer_frames: int = 0
+    jitter_buffer_max_frames: int = 0
     socket_send_buffer: int = 0
     socket_recv_buffer: int = 0
     input_channels: str = ""
@@ -61,6 +63,8 @@ class Jam2Profile:
             "--remote-level", str(self.remote_level),
             "--sample-time-playout", self.sample_time_playout,
             "--playout-delay-frames", str(self.playout_delay_frames),
+            "--jitter-buffer-frames", str(self.jitter_buffer_frames),
+            "--jitter-buffer-max-frames", str(self.jitter_buffer_max_frames),
             "--stats", "enabled",
             "--stats-warmup-ms", str(STATS_WARMUP_MS),
             "--stats-interval-ms", str(STATS_INTERVAL_MS),
@@ -102,6 +106,8 @@ class Jam2Profile:
             "remote_level": self.remote_level,
             "sample_time_playout": self.sample_time_playout,
             "playout_delay_frames": self.playout_delay_frames,
+            "jitter_buffer_frames": self.jitter_buffer_frames,
+            "jitter_buffer_max_frames": self.jitter_buffer_max_frames,
             "socket_send_buffer": self.socket_send_buffer,
             "socket_recv_buffer": self.socket_recv_buffer,
             "input_channels": self.input_channels,
@@ -109,7 +115,20 @@ class Jam2Profile:
         }
 
 
-SAFE_LOCAL_PROFILE = Jam2Profile(name="safe_64_128_2048")
+SAFE_LOCAL_PROFILE = Jam2Profile(
+    name="safe_64_128_jitter_2048_tail_512",
+    audio_buffer_size=64,
+    frame_size=128,
+    playback_prefill_frames=512,
+    playback_ring_frames=8192,
+    playback_max_frames=4096,
+    adaptive_playback_target_frames=512,
+    adaptive_playback_min_frames=512,
+    adaptive_playback_max_frames=4096,
+    playout_delay_frames=512,
+    jitter_buffer_frames=2048,
+    jitter_buffer_max_frames=3072,
+)
 AGGRESSIVE_LOCAL_PROFILE = Jam2Profile(
     name="aggressive_32_64_768",
     audio_buffer_size=32,
@@ -126,6 +145,47 @@ AGGRESSIVE_LOCAL_PROFILE = Jam2Profile(
 
 def adaptive_off_profile(base=AGGRESSIVE_LOCAL_PROFILE):
     return variant(base, "adaptive_off", adaptive_playback_cushion="off")
+
+
+def jitter_buffer_profile(base=AGGRESSIVE_LOCAL_PROFILE, jitter_frames=512, playback_tail_frames=256, adaptive=True):
+    total_frames = jitter_frames + playback_tail_frames
+    adaptive_state = "on" if adaptive else "off"
+    playback_max_frames = max(total_frames * 2, base.playback_max_frames)
+    adaptive_max_frames = max(total_frames * 2, base.adaptive_playback_max_frames)
+    ring_frames = max(base.playback_ring_frames, playback_max_frames, adaptive_max_frames)
+    return variant(
+        base,
+        f"jitter_{jitter_frames}_tail_{playback_tail_frames}_{adaptive_state}",
+        jitter_buffer_frames=jitter_frames,
+        jitter_buffer_max_frames=max(jitter_frames * 2, jitter_frames + base.frame_size),
+        playback_prefill_frames=playback_tail_frames,
+        playout_delay_frames=playback_tail_frames,
+        playback_ring_frames=ring_frames,
+        playback_max_frames=playback_max_frames,
+        adaptive_playback_cushion=adaptive_state,
+        adaptive_playback_target_frames=playback_tail_frames,
+        adaptive_playback_min_frames=playback_tail_frames,
+        adaptive_playback_max_frames=adaptive_max_frames)
+
+
+def latency_matched_prefill_profile(base=AGGRESSIVE_LOCAL_PROFILE, total_frames=768, adaptive=True):
+    adaptive_state = "on" if adaptive else "off"
+    playback_max_frames = max(total_frames * 2, base.playback_max_frames)
+    adaptive_max_frames = max(total_frames * 2, base.adaptive_playback_max_frames)
+    ring_frames = max(base.playback_ring_frames, playback_max_frames, adaptive_max_frames)
+    return variant(
+        base,
+        f"prefill_{total_frames}_{adaptive_state}",
+        jitter_buffer_frames=0,
+        jitter_buffer_max_frames=0,
+        playback_prefill_frames=total_frames,
+        playout_delay_frames=total_frames,
+        playback_ring_frames=ring_frames,
+        playback_max_frames=playback_max_frames,
+        adaptive_playback_cushion=adaptive_state,
+        adaptive_playback_target_frames=total_frames,
+        adaptive_playback_min_frames=total_frames,
+        adaptive_playback_max_frames=adaptive_max_frames)
 
 
 def variant(base, suffix, **changes):

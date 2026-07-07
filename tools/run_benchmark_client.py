@@ -24,6 +24,8 @@ def parse_args():
     parser.add_argument("--logs", default=str(Path(__file__).with_name("benchmark_logs")))
     parser.add_argument("--poll-ms", type=int, default=500)
     parser.add_argument("--timeout-s", type=int, default=0)
+    parser.add_argument("--finish-idle-s", type=float, default=5.0, help="exit cleanly if the server disappears after completed work")
+    parser.add_argument("--post-upload-pause-s", type=float, default=5.0, help="wait after each upload before polling for the next case")
     parser.add_argument("--clean", action="store_true", help="delete local artifacts after successful upload")
     parser.add_argument("--network-profile", choices=("auto", "wired", "wifi", "unknown"), default="auto")
     return parser.parse_args()
@@ -159,6 +161,8 @@ def main():
     network_type = detected if args.network_profile == "auto" else args.network_profile
     print_flush(f"[client] network type: {network_type} detected={detected}")
     seen = set()
+    completed = set()
+    last_completed_at = None
     deadline = time.monotonic() + args.timeout_s if args.timeout_s > 0 else None
     while True:
         if deadline and time.monotonic() >= deadline:
@@ -166,6 +170,9 @@ def main():
         try:
             current = fetch_current(args.server)
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+            if completed and last_completed_at and time.monotonic() - last_completed_at >= args.finish_idle_s:
+                print_flush("[client] server stopped after completed work")
+                return 0
             print_flush(f"[client] waiting for server: {error}")
             time.sleep(args.poll_ms / 1000.0)
             continue
@@ -185,6 +192,10 @@ def main():
             logs, args.server, args.clean, network_type)
         if rc != 0:
             return rc
+        completed.add(key)
+        last_completed_at = time.monotonic()
+        if args.post_upload_pause_s > 0:
+            time.sleep(args.post_upload_pause_s)
 
 
 if __name__ == "__main__":

@@ -188,6 +188,8 @@ private:
     QSlider* remoteLevelSlider_ = nullptr;
     QCheckBox* sampleTimePlayoutCheck_ = nullptr;
     QSpinBox* playoutDelaySpin_ = nullptr;
+    QSpinBox* jitterBufferSpin_ = nullptr;
+    QSpinBox* jitterBufferMaxSpin_ = nullptr;
     QCheckBox* adaptiveCushionCheck_ = nullptr;
     QSpinBox* adaptiveTargetSpin_ = nullptr;
     QSpinBox* adaptiveMinSpin_ = nullptr;

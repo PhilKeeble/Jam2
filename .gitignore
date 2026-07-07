@@ -27,6 +27,7 @@ Testing/
 *.csv
 /logs/
 /tools/logs/
+/tools/benchmark_logs/
 /tools/stress_logs/
 /incoming_uploads/
 /artifacts/logs/

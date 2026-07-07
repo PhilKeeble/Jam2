@@ -31,8 +31,11 @@ def parse_args():
     parser.add_argument("--stream-ms", type=int, default=30000)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--signals", default="silence,tone-440,pulse-1s")
+    parser.add_argument("--case", action="append", default=[], help="exact case id to run; repeat for multiple")
     parser.add_argument("--no-metronome-cases", action="store_true")
     parser.add_argument("--list-cases", action="store_true")
+    parser.add_argument("--startup-grace-s", type=float, default=5.0, help="wait after HTTP startup before publishing the first case")
+    parser.add_argument("--finish-grace-s", type=float, default=10.0, help="keep HTTP server alive after publishing all_done")
     parser.add_argument("--clean", action="store_true")
     return parser.parse_args()
 
@@ -45,6 +48,8 @@ class UploadHandler(http.server.SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(self.public_dir), **kwargs)
 
     def log_message(self, fmt, *args):
+        if self.command == "GET" and self.path == "/current.json":
+            return
         print_flush("[http] " + (fmt % args))
 
     def do_POST(self):
@@ -149,9 +154,20 @@ def write_outputs(logs_dir, results):
     fields = [
         "case_id", "run_index", "profile", "signal", "verdict", "tags",
         "server_signal", "client_signal",
-        "server_return_code", "client_return_code", "loss_percent_max",
-        "jitter_max_ms", "rtt_max_ms", "playback_underrun_time_ms_total",
-        "playback_dropped_frames_total", "metronome_beat_delta_abs_max",
+        "server_return_code", "client_return_code",
+        "audio_buffer_size", "frame_size", "playback_prefill_frames",
+        "playback_ring_frames", "playback_max_frames", "playout_delay_frames",
+        "adaptive_playback_cushion", "adaptive_playback_target_frames",
+        "adaptive_playback_min_frames", "adaptive_playback_max_frames",
+        "jitter_buffer_frames", "jitter_buffer_max_frames",
+        "loss_percent_max", "jitter_max_ms", "rtt_max_ms",
+        "playback_underrun_time_ms_total", "playback_underrun_burst_max_ms",
+        "playback_dropped_frames_total", "missing_audio_frames_total",
+        "late_audio_frames_total", "drift_abs_ppm_max",
+        "adaptive_raise_events_total", "adaptive_burst_events_total",
+        "jitter_buffer_released_packets_total", "jitter_buffer_dropped_packets_total",
+        "jitter_buffer_dropped_frames_total", "jitter_buffer_depth_max_frames",
+        "metronome_beat_delta_abs_max",
         "server_csv_path", "client_csv_path",
     ]
     with open(logs_dir / "benchmark_results.csv", "w", encoding="utf-8", newline="") as handle:
@@ -159,6 +175,7 @@ def write_outputs(logs_dir, results):
         writer.writeheader()
         for result in results:
             combined = result.get("metrics", {}).get("combined", {})
+            profile_values = result.get("profile_values", {})
             writer.writerow({
                 "case_id": result.get("case_id", ""),
                 "run_index": result.get("run_index", ""),
@@ -172,6 +189,7 @@ def write_outputs(logs_dir, results):
                 "client_return_code": result.get("client_return_code", ""),
                 "server_csv_path": result.get("server_csv_path", ""),
                 "client_csv_path": result.get("client_csv_path", ""),
+                **profile_values,
                 **combined,
             })
     lines = []
@@ -206,8 +224,11 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
             "--record-jam-folder", str(recording_dir),
             "--test-input", case.server_signal if case.server_signal != "metronome-only" else "silence",
         ])
-    startup = listener.wait_for_startup("listen", 10.0)
-    if not startup or not startup.get("url"):
+    startup = listener.wait_for_startup("waiting", 10.0)
+    connection_url = startup.get("connection_url") if startup else ""
+    if not connection_url and startup:
+        connection_url = startup.get("url", "")
+    if not connection_url:
         listener.terminate()
         return evaluate_result({
             "case_id": case.case_id,
@@ -222,7 +243,7 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
         "status": "running",
         "case_id": case.case_id,
         "run_index": run_index,
-        "url": startup["url"],
+        "url": connection_url,
         "signal": case.signal,
         "server_signal": case.server_signal,
         "client_signal": case.client_signal,
@@ -280,29 +301,40 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
 
 def main():
     args = parse_args()
-    jam2 = Path(args.jam2)
-    if not jam2.exists():
-        return fail(f"jam2 executable not found: {jam2}")
     signals = tuple(item.strip() for item in args.signals.split(",") if item.strip())
     cases = benchmark_cases(
         signals=signals,
         include_metronome=not args.no_metronome_cases,
         stream_ms=args.stream_ms,
         repeats=args.repeats)
+    if args.case:
+        requested = set(args.case)
+        cases = [case for case in cases if case.case_id in requested]
+        found = {case.case_id for case in cases}
+        missing = sorted(requested - found)
+        if missing:
+            return fail("unknown benchmark case id(s): " + ", ".join(missing))
     if args.list_cases:
         for case in cases:
             print(
                 f"{case.case_id} profile={case.profile.name} signal={case.signal} "
                 f"server_signal={case.server_signal} client_signal={case.client_signal} repeats={case.repeats}")
         return 0
+    jam2 = Path(args.jam2)
+    if not jam2.exists():
+        return fail(f"jam2 executable not found: {jam2}")
     logs_dir = Path(args.logs)
     if args.clean and logs_dir.exists():
         shutil.rmtree(logs_dir)
     logs_dir = ensure_dir(logs_dir)
     public_dir = ensure_dir(logs_dir / "public")
+    write_json(public_dir / "current.json", {"status": "starting"})
     server = serve_http(args.bind_http, public_dir, logs_dir)
     results = []
     try:
+        if args.startup_grace_s > 0:
+            print_flush(f"[server] waiting {args.startup_grace_s:g}s for benchmark client polling")
+            time.sleep(args.startup_grace_s)
         for case in cases:
             for run_index in range(1, case.repeats + 1):
                 results.append(run_one_case(
@@ -311,6 +343,9 @@ def main():
                 write_outputs(logs_dir, results)
         write_json(public_dir / "current.json", {"status": "all_done"})
         write_outputs(logs_dir, results)
+        if args.finish_grace_s > 0:
+            print_flush(f"[server] published all_done; keeping HTTP alive for {args.finish_grace_s:g}s")
+            time.sleep(args.finish_grace_s)
     finally:
         server.shutdown()
         server.server_close()

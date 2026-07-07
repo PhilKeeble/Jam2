@@ -2,7 +2,15 @@
 
 from dataclasses import dataclass
 
-from jam2_profiles import AGGRESSIVE_LOCAL_PROFILE, SAFE_LOCAL_PROFILE, Jam2Profile, adaptive_off_profile, variant
+from jam2_profiles import (
+    AGGRESSIVE_LOCAL_PROFILE,
+    SAFE_LOCAL_PROFILE,
+    Jam2Profile,
+    adaptive_off_profile,
+    jitter_buffer_profile,
+    latency_matched_prefill_profile,
+    variant,
+)
 
 
 DEFAULT_SIGNALS = ("silence", "tone-440", "pulse-1s")
@@ -54,6 +62,28 @@ def static_profiles():
                 playback_max_frames=6144, adaptive_playback_target_frames=3072,
                 adaptive_playback_min_frames=3072, adaptive_playback_max_frames=6144,
                 playout_delay_frames=3072),
+        latency_matched_prefill_profile(aggressive, total_frames=768, adaptive=True),
+        jitter_buffer_profile(aggressive, jitter_frames=512, playback_tail_frames=256, adaptive=True),
+        latency_matched_prefill_profile(aggressive, total_frames=768, adaptive=False),
+        jitter_buffer_profile(aggressive, jitter_frames=512, playback_tail_frames=256, adaptive=False),
+        variant(
+            jitter_buffer_profile(aggressive, jitter_frames=1024, playback_tail_frames=256, adaptive=True),
+            "max_3072",
+            jitter_buffer_max_frames=3072),
+        variant(
+            jitter_buffer_profile(aggressive, jitter_frames=2048, playback_tail_frames=256, adaptive=True),
+            "max_3072",
+            jitter_buffer_max_frames=3072),
+        variant(
+            jitter_buffer_profile(aggressive, jitter_frames=2048, playback_tail_frames=256, adaptive=True),
+            "max_4096",
+            jitter_buffer_max_frames=4096),
+        variant(
+            jitter_buffer_profile(aggressive, jitter_frames=2048, playback_tail_frames=256, adaptive=False),
+            "max_4096",
+            jitter_buffer_max_frames=4096),
+        latency_matched_prefill_profile(aggressive, total_frames=2304, adaptive=True),
+        latency_matched_prefill_profile(aggressive, total_frames=2304, adaptive=False),
         variant(safe, "drift_off", drift_correction="off"),
         variant(safe, "drift_tight", drift_deadband_ppm=5, drift_smoothing=0.05),
         variant(safe, "socket_large", socket_send_buffer=1048576, socket_recv_buffer=1048576),

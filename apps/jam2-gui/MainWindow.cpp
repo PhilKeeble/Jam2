@@ -1722,6 +1722,12 @@ QWidget* MainWindow::buildSessionPage()
     playoutDelaySpin_ = new QSpinBox(page);
     playoutDelaySpin_->setRange(0, 1048576);
     playoutDelaySpin_->setValue(0);
+    jitterBufferSpin_ = new QSpinBox(page);
+    jitterBufferSpin_->setRange(0, 1048576);
+    jitterBufferSpin_->setValue(0);
+    jitterBufferMaxSpin_ = new QSpinBox(page);
+    jitterBufferMaxSpin_->setRange(0, 1048576);
+    jitterBufferMaxSpin_->setValue(0);
     adaptiveCushionCheck_ = new QCheckBox(QStringLiteral("Adaptive cushion"), page);
     adaptiveTargetSpin_ = new QSpinBox(page);
     adaptiveTargetSpin_->setRange(0, 1048576);
@@ -1754,8 +1760,9 @@ QWidget* MainWindow::buildSessionPage()
         socketSendBufferSpin_, socketRecvBufferSpin_, deviceBox_, inputChannelsEdit_,
         outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_, prefillSpin_,
         playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, driftSmoothingSpin_,
-        driftDeadbandSpin_, driftMaxCorrectionSpin_, playoutDelaySpin_, adaptiveTargetSpin_,
-        adaptiveMinSpin_, adaptiveMaxSpin_, adaptiveReleaseSpin_, extraArgsEdit_,
+        driftDeadbandSpin_, driftMaxCorrectionSpin_, playoutDelaySpin_, jitterBufferSpin_,
+        jitterBufferMaxSpin_, adaptiveTargetSpin_, adaptiveMinSpin_, adaptiveMaxSpin_,
+        adaptiveReleaseSpin_, extraArgsEdit_,
     };
     for (QWidget* widget : sessionEditors) {
         applyMutedEditorStyle(widget);
@@ -1768,8 +1775,9 @@ QWidget* MainWindow::buildSessionPage()
         outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_, prefillSpin_,
         playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, driftCorrectionCheck_,
         driftSmoothingSpin_, driftDeadbandSpin_, driftMaxCorrectionSpin_, noStunCheck_,
-        sampleTimePlayoutCheck_, playoutDelaySpin_, adaptiveCushionCheck_, adaptiveTargetSpin_,
-        adaptiveMinSpin_, adaptiveMaxSpin_, adaptiveReleaseSpin_, extraArgsEdit_,
+        sampleTimePlayoutCheck_, playoutDelaySpin_, jitterBufferSpin_, jitterBufferMaxSpin_,
+        adaptiveCushionCheck_, adaptiveTargetSpin_, adaptiveMinSpin_, adaptiveMaxSpin_,
+        adaptiveReleaseSpin_, extraArgsEdit_,
     };
     for (QWidget* widget : sessionDialogWidgets) {
         widget->hide();
@@ -2666,8 +2674,9 @@ void MainWindow::showStartJamDialog()
         prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_,
         streamMsSpin_, streamLingerMsSpin_, statsCheck_, statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
         socketRecvBufferSpin_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
-        driftMaxCorrectionSpin_, sampleTimePlayoutCheck_, playoutDelaySpin_, adaptiveCushionCheck_,
-        adaptiveTargetSpin_, adaptiveMinSpin_, adaptiveMaxSpin_, adaptiveReleaseSpin_, extraArgsEdit_,
+        driftMaxCorrectionSpin_, sampleTimePlayoutCheck_, playoutDelaySpin_, jitterBufferSpin_,
+        jitterBufferMaxSpin_, adaptiveCushionCheck_, adaptiveTargetSpin_, adaptiveMinSpin_,
+        adaptiveMaxSpin_, adaptiveReleaseSpin_, extraArgsEdit_,
     };
     for (QWidget* widget : visibleWidgets) {
         widget->show();
@@ -2720,6 +2729,8 @@ void MainWindow::showStartJamDialog()
     advancedForm->addRow(QStringLiteral("Drift max correction ppm"), driftMaxCorrectionSpin_);
     advancedForm->addRow(QString(), sampleTimePlayoutCheck_);
     advancedForm->addRow(QStringLiteral("Playout delay frames"), playoutDelaySpin_);
+    advancedForm->addRow(QStringLiteral("Jitter buffer frames"), jitterBufferSpin_);
+    advancedForm->addRow(QStringLiteral("Jitter buffer max frames"), jitterBufferMaxSpin_);
     advancedForm->addRow(QString(), adaptiveCushionCheck_);
     advancedForm->addRow(QStringLiteral("Adaptive target frames"), adaptiveTargetSpin_);
     advancedForm->addRow(QStringLiteral("Adaptive min frames"), adaptiveMinSpin_);
@@ -2772,8 +2783,9 @@ void MainWindow::showStartJamDialog()
         prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_,
         streamMsSpin_, streamLingerMsSpin_, statsCheck_, statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
         socketRecvBufferSpin_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
-        driftMaxCorrectionSpin_, sampleTimePlayoutCheck_, playoutDelaySpin_, adaptiveCushionCheck_,
-        adaptiveTargetSpin_, adaptiveMinSpin_, adaptiveMaxSpin_, adaptiveReleaseSpin_, extraArgsEdit_,
+        driftMaxCorrectionSpin_, sampleTimePlayoutCheck_, playoutDelaySpin_, jitterBufferSpin_,
+        jitterBufferMaxSpin_, adaptiveCushionCheck_, adaptiveTargetSpin_, adaptiveMinSpin_,
+        adaptiveMaxSpin_, adaptiveReleaseSpin_, extraArgsEdit_,
     };
     for (QWidget* widget : startWidgets) {
         widget->setParent(this);
@@ -3320,6 +3332,8 @@ QJsonObject MainWindow::leaderSettingsMessage() const
         {QStringLiteral("metronome_mode"), metronomeModeBox_->currentText()},
         {QStringLiteral("sample_time_playout"), sampleTimePlayoutCheck_->isChecked()},
         {QStringLiteral("playout_delay_frames"), playoutDelaySpin_->value()},
+        {QStringLiteral("jitter_buffer_frames"), jitterBufferSpin_->value()},
+        {QStringLiteral("jitter_buffer_max_frames"), jitterBufferMaxSpin_->value()},
         {QStringLiteral("adaptive_playback_cushion"), adaptiveCushionCheck_->isChecked()},
         {QStringLiteral("adaptive_target_frames"), adaptiveTargetSpin_->value()},
         {QStringLiteral("adaptive_min_frames"), adaptiveMinSpin_->value()},
@@ -3356,6 +3370,8 @@ void MainWindow::applyLeaderSettings(const QJsonObject& settings)
     }
     sampleTimePlayoutCheck_->setChecked(settings.value(QStringLiteral("sample_time_playout")).toBool(sampleTimePlayoutCheck_->isChecked()));
     playoutDelaySpin_->setValue(settings.value(QStringLiteral("playout_delay_frames")).toInt(playoutDelaySpin_->value()));
+    jitterBufferSpin_->setValue(settings.value(QStringLiteral("jitter_buffer_frames")).toInt(jitterBufferSpin_->value()));
+    jitterBufferMaxSpin_->setValue(settings.value(QStringLiteral("jitter_buffer_max_frames")).toInt(jitterBufferMaxSpin_->value()));
     adaptiveCushionCheck_->setChecked(settings.value(QStringLiteral("adaptive_playback_cushion")).toBool(adaptiveCushionCheck_->isChecked()));
     adaptiveTargetSpin_->setValue(settings.value(QStringLiteral("adaptive_target_frames")).toInt(adaptiveTargetSpin_->value()));
     adaptiveMinSpin_->setValue(settings.value(QStringLiteral("adaptive_min_frames")).toInt(adaptiveMinSpin_->value()));
@@ -4670,6 +4686,12 @@ QStringList MainWindow::commonJamArgs(bool includeExtraArgs) const
     }
     if (playoutDelaySpin_->value() > 0) {
         args << QStringLiteral("--playout-delay-frames") << QString::number(playoutDelaySpin_->value());
+    }
+    if (jitterBufferSpin_->value() > 0) {
+        args << QStringLiteral("--jitter-buffer-frames") << QString::number(jitterBufferSpin_->value());
+    }
+    if (jitterBufferSpin_->value() > 0 && jitterBufferMaxSpin_->value() > 0) {
+        args << QStringLiteral("--jitter-buffer-max-frames") << QString::number(jitterBufferMaxSpin_->value());
     }
     if (adaptiveTargetSpin_->value() > 0) {
         args << QStringLiteral("--adaptive-playback-target-frames") << QString::number(adaptiveTargetSpin_->value());
