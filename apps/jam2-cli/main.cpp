@@ -4459,6 +4459,15 @@ OptionalAudioStream start_optional_audio(const Options& options, bool leader_aud
         options.playback_prefill_frames,
         *audio.control,
         audio.recorder.get());
+    const double active_sample_rate = audio.stream ? audio.stream->info().sample_rate : 0.0;
+    if (options.sample_rate > 0 && active_sample_rate > 0.0 &&
+        std::abs(active_sample_rate - static_cast<double>(options.sample_rate)) > 1.0) {
+        std::ostringstream message;
+        message << "active audio sample rate mismatch: requested " << options.sample_rate
+                << " Hz but device started at " << active_sample_rate
+                << " Hz; select a device/rate that actually activates at the requested sample rate";
+        throw std::runtime_error(message.str());
+    }
     return audio;
 }
 

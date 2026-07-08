@@ -67,6 +67,8 @@ def summarize_csv(path):
     return {
         "csv_path": str(path),
         "has_csv": True,
+        "requested_sample_rate": to_float(row, "requested_sample_rate") or to_float(row, "sample_rate"),
+        "active_sample_rate": to_float(row, "active_sample_rate") or sample_rate_for_row(row),
         "elapsed_s": elapsed_s,
         "sent_packets": to_float(row, "sent_packets"),
         "recv_packets": recv_packets,
@@ -156,6 +158,10 @@ def combined_summary(server_csv, client_csv):
         }
     combined = {
         "has_csv": True,
+        "server_active_sample_rate": server.get("active_sample_rate", 0.0),
+        "client_active_sample_rate": client.get("active_sample_rate", 0.0),
+        "server_requested_sample_rate": server.get("requested_sample_rate", 0.0),
+        "client_requested_sample_rate": client.get("requested_sample_rate", 0.0),
         "elapsed_s": max((side.get("elapsed_s", 0.0) for side in sides), default=0.0),
         "loss_percent_max": max((side.get("sequence_loss_percent", 0.0) for side in sides), default=0.0),
         "jitter_max_ms": max((side.get("jitter_max_ms", 0.0) for side in sides), default=0.0),

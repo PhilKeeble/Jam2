@@ -485,9 +485,11 @@ class BenchmarkControlClient:
                         break
                     self.inbox.put(message)
             except OSError as error:
-                self.log(f"[client] waiting for TCP control: {error}")
+                if not self.stop_event.is_set():
+                    self.log(f"[client] waiting for TCP control: {error}")
             except (json.JSONDecodeError, UnicodeDecodeError) as error:
-                self.log(f"[client] TCP control parse error: {error}")
+                if not self.stop_event.is_set():
+                    self.log(f"[client] TCP control parse error: {error}")
             finally:
                 if self.peer is not None:
                     self.peer.close()

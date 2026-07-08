@@ -305,6 +305,15 @@ def evaluate_result(result):
     metrics = result.get("metrics", {}).get("combined", {})
     if not metrics.get("has_csv", False):
         tags.append("stats_missing")
+    server_active_rate = metrics.get("server_active_sample_rate", 0.0)
+    client_active_rate = metrics.get("client_active_sample_rate", 0.0)
+    if server_active_rate and client_active_rate and abs(server_active_rate - client_active_rate) > 1.0:
+        tags.append("active_sample_rate_mismatch")
+    for side in ("server", "client"):
+        requested = metrics.get(f"{side}_requested_sample_rate", 0.0)
+        active = metrics.get(f"{side}_active_sample_rate", 0.0)
+        if requested and active and abs(requested - active) > 1.0:
+            tags.append(f"{side}_active_sample_rate_differs")
     if metrics.get("loss_percent_max", 0.0) > 0.05:
         tags.append("packet_loss_high")
     if metrics.get("playback_underrun_time_ms_total", 0.0) > 100.0:
@@ -332,6 +341,8 @@ def write_outputs(logs_dir, results):
         "case_id", "run_index", "profile", "signal", "verdict", "tags",
         "server_signal", "client_signal",
         "server_return_code", "client_return_code",
+        "server_requested_sample_rate", "server_active_sample_rate",
+        "client_requested_sample_rate", "client_active_sample_rate",
         "audio_buffer_size", "frame_size", "playback_prefill_frames",
         "playback_ring_frames", "playback_max_frames", "playout_delay_frames",
         "adaptive_playback_cushion", "adaptive_playback_target_frames",
