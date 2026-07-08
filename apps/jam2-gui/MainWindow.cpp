@@ -3070,7 +3070,7 @@ void MainWindow::handleGuiControlLine(const QString& line)
             stats.insert(key, value);
         }
     }
-    updateStatsDisplay(stats);
+    updateMixMeters(stats);
 }
 
 void MainWindow::showStartJamDialog()
@@ -3401,7 +3401,8 @@ void MainWindow::appendLog(const QString& line)
 
 void MainWindow::handleOutputLine(const QString& line)
 {
-    if (!line.startsWith(QStringLiteral("{\"event\":\"status\""))) {
+    if (!line.startsWith(QStringLiteral("{\"event\":\"status\"")) &&
+        !line.startsWith(QStringLiteral("stats "))) {
         appendLog(line);
     }
     handleStatsLine(line);
@@ -3534,29 +3535,39 @@ void MainWindow::updateStatsDisplay(const QJsonObject& stats)
         .arg(integerText(stats, QStringLiteral("missing_audio_frames_inserted")))
         .arg(integerText(stats, QStringLiteral("late_audio_frames_dropped"))));
     driftLabel_->setText(QStringLiteral("Drift ") + metricText(stats, QStringLiteral("drift_ppm"), QStringLiteral(" ppm")));
-    if (mixInputMeter_) {
+    const bool guiMeterFeedActive =
+        guiControlSocket_ != nullptr &&
+        guiControlSocket_->state() == QAbstractSocket::ConnectedState;
+    if (!guiMeterFeedActive) {
+        updateMixMeters(stats);
+    }
+    diagnosisLabel_->setText(diagnoseStats(stats));
+}
+
+void MainWindow::updateMixMeters(const QJsonObject& stats)
+{
+    if (mixInputMeter_ && stats.contains(QStringLiteral("input_peak"))) {
         mixInputMeter_->setLevel(stats.value(QStringLiteral("input_peak")).toDouble(0.0));
     }
-    if (mixSendMeter_) {
+    if (mixSendMeter_ && stats.contains(QStringLiteral("send_peak"))) {
         mixSendMeter_->setLevel(stats.value(QStringLiteral("send_peak")).toDouble(0.0));
     }
-    if (mixMonitorMeter_) {
+    if (mixMonitorMeter_ && stats.contains(QStringLiteral("monitor_peak"))) {
         mixMonitorMeter_->setLevel(stats.value(QStringLiteral("monitor_peak")).toDouble(0.0));
     }
-    if (mixRemotePeerMeter_) {
+    if (mixRemotePeerMeter_ && stats.contains(QStringLiteral("remote_peak"))) {
         mixRemotePeerMeter_->setLevel(stats.value(QStringLiteral("remote_peak")).toDouble(0.0));
     }
-    if (mixMetronomeMeter_) {
+    if (mixMetronomeMeter_ && stats.contains(QStringLiteral("metronome_peak"))) {
         mixMetronomeMeter_->setLevel(stats.value(QStringLiteral("metronome_peak")).toDouble(0.0));
     }
-    if (mixOutputMeter_) {
+    if (mixOutputMeter_ && stats.contains(QStringLiteral("output_peak"))) {
         mixOutputMeter_->setLevel(stats.value(QStringLiteral("output_peak")).toDouble(0.0));
     }
-    if (mixOutputClipLabel_) {
+    if (mixOutputClipLabel_ && stats.contains(QStringLiteral("output_clipped_samples"))) {
         mixOutputClipLabel_->setText(QStringLiteral("clip %1").arg(static_cast<qulonglong>(
             stats.value(QStringLiteral("output_clipped_samples")).toDouble(0.0))));
     }
-    diagnosisLabel_->setText(diagnoseStats(stats));
 }
 
 void MainWindow::handleControlMessage(const QJsonObject& message)

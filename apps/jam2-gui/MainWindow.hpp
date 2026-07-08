@@ -66,6 +66,7 @@ private:
     void handleStatus(const QJsonObject& status);
     void handleStatsLine(const QString& line);
     void updateStatsDisplay(const QJsonObject& stats);
+    void updateMixMeters(const QJsonObject& stats);
     void handleControlMessage(const QJsonObject& message);
     void sendControl(const QJsonObject& message);
     void handleControlState(const QString& state, bool serverSide);
