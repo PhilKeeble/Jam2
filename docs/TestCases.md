@@ -98,6 +98,8 @@ Audio probe coverage:
 
 `tools\run_benchmark_server.py` runs the listen/server side of the static benchmark suite. It coordinates lifecycle state and client artifact upload over a direct TCP control connection, records server stems, waits for client artifacts, then writes the final summary/CSV/JSON. An HTTP `current.json` diagnostic endpoint is available only when explicitly enabled.
 
+The server waits indefinitely for the first TCP benchmark client before publishing any case by default, so the listener machine can be started first and the client can join when ready.
+
 Run this on the listen/server machine:
 
 ```powershell
@@ -122,6 +124,8 @@ Useful server args:
 - `--sample-rate`: audio sample rate.
 - `--bind-control HOST:PORT`: TCP lifecycle control bind. Default: `0.0.0.0:49000`. This intentionally matches the default Jam2 UDP audio port number; TCP control and UDP audio are separate sockets.
 - `--bind-http HOST:PORT`: optional HTTP diagnostic bind for `current.json`. Disabled by default and not used for uploads.
+- `--initial-client-timeout-s N`: optional timeout for the initial TCP client wait. Default `0` waits indefinitely.
+- `--post-listener-upload-grace-s N`: optional timeout for client artifact upload after the server-side Jam2 process exits. Default `0` waits indefinitely.
 - `--logs PATH`: output folder. Default: `tools\benchmark_logs`.
 - `--stream-ms N`: stream duration per case. Default: `30000`.
 - `--repeats N`: repeat count per case. Default: `1`.

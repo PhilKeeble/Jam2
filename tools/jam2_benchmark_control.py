@@ -233,6 +233,9 @@ class BenchmarkControlState:
                 else:
                     self.condition.wait(0.25)
 
+    def wait_for_peer(self, timeout_s=0.0):
+        return self.wait_for(lambda: self.peer is not None, timeout_s=timeout_s)
+
     def has_message(self, msg_type, identity=None):
         with self.condition:
             for message in self.messages:
@@ -247,6 +250,7 @@ class BenchmarkControlState:
             return {
                 "connected_once": self.connected_once,
                 "peer_connected": self.peer is not None,
+                "peer_id": self.peer_id,
                 "disconnect_count": self.disconnect_count,
                 "reconnect_count": self.reconnect_count,
                 "active_phase": self.active_phase,
@@ -390,23 +394,40 @@ class BenchmarkControlClient:
             self.connected_event.clear()
             return False
 
-    def upload_artifact(self, identity, zip_path, timeout_s=120.0):
+    def upload_artifact(self, identity, zip_path, timeout_s=0.0):
         data = zip_path.read_bytes()
-        message = {
-            "type": "artifact.upload",
-            **run_identity(identity),
-            "size": len(data),
-            "client_time_ms": now_ms(),
-        }
-        if not self.send_with_payload(message, data):
-            return False
-        deadline = time.monotonic() + timeout_s
+        deadline = time.monotonic() + timeout_s if timeout_s and timeout_s > 0 else None
+        while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                self.log("[client] artifact upload timed out waiting for TCP control reconnect")
+                return False
+            if not self.wait_connected(timeout_s=1.0):
+                self.log("[client] waiting for TCP control reconnect before artifact upload")
+                continue
+            message = {
+                "type": "artifact.upload",
+                **run_identity(identity),
+                "size": len(data),
+                "client_time_ms": now_ms(),
+            }
+            if not self.send_with_payload(message, data):
+                self.log("[client] artifact upload send failed; waiting for reconnect")
+                continue
+            result = self._wait_for_upload_ack(identity, deadline)
+            if result is None:
+                continue
+            return result
+
+    def _wait_for_upload_ack(self, identity, deadline):
         deferred = []
-        matched = False
-        ok = False
-        while time.monotonic() < deadline:
-            remaining = max(0.1, deadline - time.monotonic())
-            response = self.wait_message(timeout_s=min(1.0, remaining))
+        while deadline is None or time.monotonic() < deadline:
+            if not self.wait_connected(timeout_s=0.0):
+                for message in deferred:
+                    self.inbox.put(message)
+                self.log("[client] TCP control disconnected before upload ack; retrying after reconnect")
+                return None
+            wait_s = 1.0 if deadline is None else min(1.0, max(0.1, deadline - time.monotonic()))
+            response = self.wait_message(timeout_s=wait_s)
             if response is None:
                 continue
             response_type = response.get("type", "")
@@ -414,17 +435,17 @@ class BenchmarkControlClient:
                 deferred.append(response)
                 continue
             if same_run(response, identity):
-                matched = True
                 if response_type == "artifact.upload.ok":
-                    ok = True
-                    break
+                    for message in deferred:
+                        self.inbox.put(message)
+                    return True
                 self.log(f"[client] artifact upload rejected: {response.get('reason', 'unknown error')}")
-                break
+                for message in deferred:
+                    self.inbox.put(message)
+                return False
             deferred.append(response)
         for message in deferred:
             self.inbox.put(message)
-        if matched:
-            return ok
         self.log("[client] artifact upload timed out waiting for control ack")
         return False
 

@@ -36,14 +36,14 @@ def parse_args():
     parser.add_argument("--audio-bind", default="0.0.0.0:49000", help="Jam2 UDP listen bind endpoint for benchmark sessions")
     parser.add_argument("--public-audio-host", default="", help="optional legacy override for the host in the published Jam2 URL")
     parser.add_argument("--client-upload-timeout-s", type=float, default=0.0, help="wait for client upload; 0 waits indefinitely")
-    parser.add_argument("--post-listener-upload-grace-s", type=float, default=60.0, help="wait this long for client results after the server-side Jam2 process exits")
+    parser.add_argument("--post-listener-upload-grace-s", type=float, default=0.0, help="wait this long for client results after the server-side Jam2 process exits; 0 waits indefinitely")
     parser.add_argument("--stream-ms", type=int, default=30000)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--signals", default="silence,tone-440,pulse-1s")
     parser.add_argument("--case", action="append", default=[], help="exact case id to run; repeat for multiple")
     parser.add_argument("--no-metronome-cases", action="store_true")
     parser.add_argument("--list-cases", action="store_true")
-    parser.add_argument("--startup-grace-s", type=float, default=5.0, help="wait after control startup before publishing the first case")
+    parser.add_argument("--initial-client-timeout-s", type=float, default=0.0, help="wait for the first TCP benchmark client before publishing cases; 0 waits indefinitely")
     parser.add_argument("--finish-grace-s", type=float, default=10.0, help="keep control server alive after publishing all_done")
     parser.add_argument("--clean", action="store_true")
     return parser.parse_args()
@@ -107,11 +107,17 @@ def extract_client_upload(logs_dir, control_state, payload):
             "run_index": run_index,
             "attempt_id": result.get("attempt_id", ""),
         }
+        target = ensure_dir(Path(logs_dir) / case_id / "client" / f"run_{run_index:02d}")
         if control_state is not None and (control_state.active_case is None or not same_run(identity, control_state.active_case)):
+            existing_result = target / "result.json"
+            if existing_result.exists():
+                existing = json.loads(existing_result.read_text(encoding="utf-8"))
+                if same_run(identity, existing):
+                    print_flush(f"[server] duplicate client artifacts already present for {case_id} run {run_index}")
+                    return
             raise ValueError(
                 "stale upload identity "
                 f"{identity.get('suite_id','')}/{case_id}/{run_index}/{identity.get('attempt_id','')}")
-        target = ensure_dir(Path(logs_dir) / case_id / "client" / f"run_{run_index:02d}")
         if target.exists():
             shutil.rmtree(target)
         ensure_dir(target)
@@ -205,32 +211,65 @@ def wait_for_case_progress_control(logs_dir, case_id, run_index, listener, publi
     connected = False
     accepted = False
     client_started = False
+    client_finished = False
+    printed_accept_wait = False
+    printed_audio_wait = False
+    printed_upload_wait = False
+    last_peer_connected = control_state.snapshot().get("peer_connected", False)
     while True:
         if target.exists():
             return target, connected, "client_upload", {
                 "accepted": accepted,
                 "client_started": client_started,
+                "client_finished": client_finished,
             }
+        snapshot = control_state.snapshot()
+        peer_connected = snapshot.get("peer_connected", False)
+        if peer_connected != last_peer_connected:
+            if peer_connected:
+                print_flush(f"[server] TCP benchmark client reconnected peer={snapshot.get('peer_id') or '-'}")
+            else:
+                print_flush("[server] TCP benchmark client disconnected during active case; waiting for reconnect")
+            last_peer_connected = peer_connected
         if control_state.has_message("case.accept", current):
+            if not accepted:
+                print_flush(f"[server] client accepted {case_id} run {run_index}")
             accepted = True
         if control_state.has_message("case.started", current):
+            if not client_started:
+                print_flush(f"[server] client started Jam2 for {case_id} run {run_index}")
             client_started = True
+        if control_state.has_message("case.finished", current):
+            if not client_finished:
+                print_flush(f"[server] client finished Jam2 for {case_id} run {run_index}; waiting for artifact upload")
+            client_finished = True
+        if not accepted and not printed_accept_wait:
+            print_flush(f"[server] waiting for client to accept {case_id} run {run_index}")
+            printed_accept_wait = True
+        if accepted and not connected and not printed_audio_wait:
+            print_flush(f"[server] waiting for Jam2 UDP audio connection for {case_id} run {run_index}")
+            printed_audio_wait = True
         if not connected and listener.startup_payloads("connected"):
             connected = True
             current = dict(current)
             current["server_stage"] = "connected"
             current["control_phase"] = control_state.snapshot().get("active_phase", "")
             write_json(Path(public_dir) / "current.json", current)
-            print_flush(f"[server] client connected for {case_id} run {run_index}")
+            print_flush(f"[server] Jam2 UDP audio connected for {case_id} run {run_index}")
+        if connected and not printed_upload_wait:
+            print_flush(f"[server] waiting for TCP artifact upload for {case_id} run {run_index}")
+            printed_upload_wait = True
         if listener.poll() is not None:
             return None, connected, "listener_exit", {
                 "accepted": accepted,
                 "client_started": client_started,
+                "client_finished": client_finished,
             }
         if deadline is not None and time.monotonic() >= deadline:
             return None, connected, "timeout", {
                 "accepted": accepted,
                 "client_started": client_started,
+                "client_finished": client_finished,
             }
         time.sleep(0.25)
 
@@ -408,11 +447,11 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
     control_start = control_state.snapshot() if control_state is not None else {}
     if control_state is not None:
         control_state.publish_case(current)
-    print_flush(f"[server] published {case.case_id} run {run_index} url={connection_url}")
+    print_flush(f"[server] offered {case.case_id} run {run_index} url={connection_url}")
     if client_upload_timeout_s and client_upload_timeout_s > 0:
-        print_flush(f"[server] waiting up to {client_upload_timeout_s:g}s for client connection/result upload")
+        print_flush(f"[server] active-case timeout is {client_upload_timeout_s:g}s")
     else:
-        print_flush("[server] waiting for client connection")
+        print_flush("[server] active-case timeout disabled")
     if control_state is not None:
         client_result_path, connected, progress_reason, control_progress = wait_for_case_progress_control(
             logs_dir,
@@ -447,11 +486,23 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
             server_rc = listener.poll()
     else:
         if progress_reason == "listener_exit":
-            print_flush(
-                f"[server] server-side case completed; waiting up to "
-                f"{post_listener_upload_grace_s:g}s for client results for {case.case_id} run {run_index}")
+            if post_listener_upload_grace_s and post_listener_upload_grace_s > 0:
+                print_flush(
+                    f"[server] server-side case completed; waiting up to "
+                    f"{post_listener_upload_grace_s:g}s for TCP artifact upload for {case.case_id} run {run_index}")
+            else:
+                print_flush(
+                    f"[server] server-side case completed; waiting indefinitely for TCP artifact upload "
+                    f"for {case.case_id} run {run_index}")
         elif progress_reason == "timeout":
-            print_flush(f"[server] timed out waiting for client upload for {case.case_id} run {run_index}")
+            if not control_progress.get("accepted", False):
+                print_flush(f"[server] timed out waiting for client accept for {case.case_id} run {run_index}")
+            elif not control_progress.get("client_started", False):
+                print_flush(f"[server] timed out waiting for client Jam2 start for {case.case_id} run {run_index}")
+            elif not connected:
+                print_flush(f"[server] timed out waiting for Jam2 UDP audio connection for {case.case_id} run {run_index}")
+            else:
+                print_flush(f"[server] timed out waiting for TCP artifact upload for {case.case_id} run {run_index}")
         if listener.poll() is None:
             listener.terminate()
         server_rc = listener.poll()
@@ -502,6 +553,7 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
         "control": control_state.snapshot() if control_state is not None else {},
         "client_accepted": control_progress.get("accepted", False),
         "client_started": control_progress.get("client_started", False),
+        "client_finished": control_progress.get("client_finished", False),
     }
     tags = []
     if control_state is not None:
@@ -582,11 +634,21 @@ def main():
         print_flush(f"[server] HTTP diagnostics bind={args.bind_http}")
     results = []
     try:
-        if args.startup_grace_s > 0:
-            print_flush(f"[server] waiting {args.startup_grace_s:g}s for benchmark client polling")
-            time.sleep(args.startup_grace_s)
+        if args.initial_client_timeout_s and args.initial_client_timeout_s > 0:
+            print_flush(
+                f"[server] waiting up to {args.initial_client_timeout_s:g}s for TCP benchmark client "
+                f"before publishing cases")
+        else:
+            print_flush("[server] waiting for TCP benchmark client before publishing cases")
+        if not control_state.wait_for_peer(args.initial_client_timeout_s):
+            return fail("timed out waiting for TCP benchmark client before publishing cases")
+        print_flush(f"[server] TCP benchmark client ready peer={control_state.snapshot().get('peer_id') or '-'}")
         for case in cases:
             for run_index in range(1, case.repeats + 1):
+                if not control_state.snapshot().get("peer_connected", False):
+                    print_flush("[server] waiting for TCP benchmark client to reconnect before next case")
+                    control_state.wait_for_peer(0.0)
+                    print_flush(f"[server] TCP benchmark client ready peer={control_state.snapshot().get('peer_id') or '-'}")
                 results.append(run_one_case(
                     jam2, args.server_audio_device, args.sample_rate,
                     logs_dir, public_dir, case, run_index,
