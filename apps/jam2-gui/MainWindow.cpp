@@ -32,6 +32,7 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QList>
@@ -188,6 +189,11 @@ public:
         sampleCounter_ = 0;
     }
 
+    double takePeak()
+    {
+        return static_cast<double>(peakPpm_.exchange(0, std::memory_order_relaxed)) / 1000000.0;
+    }
+
     qint64 bytesAvailable() const override
     {
         return 8192 + QIODevice::bytesAvailable();
@@ -225,6 +231,7 @@ protected:
         const std::uint64_t stepInterval =
             jam2::metronome::step_interval_samples(static_cast<double>(sampleRate_), pattern.bpm, pattern.division);
         auto* output = reinterpret_cast<qint16*>(data);
+        double peak = 0.0;
         for (qint64 frame = 0; frame < frames; ++frame) {
             const double click = jam2::metronome::render_sample(
                 pattern,
@@ -232,11 +239,13 @@ protected:
                 stepInterval,
                 static_cast<double>(sampleRate_),
                 level);
+            peak = std::max(peak, std::abs(click));
             const qint16 pcm = static_cast<qint16>(std::lrint(qBound(-1.0, click, 1.0) * 32767.0));
             for (int channel = 0; channel < channels_; ++channel) {
                 *output++ = pcm;
             }
         }
+        updatePeak(peak);
         return frames * bytesPerFrame;
     }
 
@@ -246,6 +255,15 @@ protected:
     }
 
 private:
+    void updatePeak(double peak)
+    {
+        const int candidate = static_cast<int>(qBound(0.0, peak, 1.0) * 1000000.0);
+        int current = peakPpm_.load(std::memory_order_relaxed);
+        while (candidate > current &&
+               !peakPpm_.compare_exchange_weak(current, candidate, std::memory_order_relaxed, std::memory_order_relaxed)) {
+        }
+    }
+
     int sampleRate_ = 48000;
     int channels_ = 2;
     std::uint64_t sampleCounter_ = 0;
@@ -258,6 +276,7 @@ private:
     std::atomic<std::uint64_t> accentMaskLow_{0x01ULL};
     std::atomic<std::uint64_t> accentMaskHigh_{0};
     std::atomic<int> levelPpm_{350000};
+    std::atomic<int> peakPpm_{0};
 };
 
 class WaveformWidget : public QWidget {
@@ -528,21 +547,24 @@ protected:
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, false);
         const QRect bar = rect().adjusted(0, 2, 0, -2);
-        painter.fillRect(bar, QColor(28, 32, 36));
+        const bool active = isEnabled();
+        painter.fillRect(bar, active ? QColor(28, 32, 36) : QColor(34, 36, 38));
         const int safeEnd = bar.left() + static_cast<int>(bar.width() * 0.50);
         const int warnEnd = bar.left() + static_cast<int>(bar.width() * 0.89);
-        painter.fillRect(QRect(QPoint(safeEnd, bar.top()), QPoint(warnEnd, bar.bottom())), QColor(72, 56, 24));
-        painter.fillRect(QRect(QPoint(warnEnd, bar.top()), QPoint(bar.right(), bar.bottom())), QColor(76, 30, 30));
+        painter.fillRect(QRect(QPoint(safeEnd, bar.top()), QPoint(warnEnd, bar.bottom())),
+            active ? QColor(72, 56, 24) : QColor(45, 42, 38));
+        painter.fillRect(QRect(QPoint(warnEnd, bar.top()), QPoint(bar.right(), bar.bottom())),
+            active ? QColor(76, 30, 30) : QColor(46, 38, 38));
 
         const int fillWidth = qBound(0, static_cast<int>(std::llround(level_ * static_cast<double>(bar.width()))), bar.width());
-        QColor fill = QColor(94, 188, 132);
-        if (level_ >= 0.891) {
+        QColor fill = active ? QColor(94, 188, 132) : QColor(82, 88, 92);
+        if (active && level_ >= 0.891) {
             fill = QColor(224, 74, 74);
-        } else if (level_ >= 0.501) {
+        } else if (active && level_ >= 0.501) {
             fill = QColor(230, 151, 55);
         }
         painter.fillRect(QRect(bar.left(), bar.top(), fillWidth, bar.height()), fill);
-        painter.setPen(QColor(86, 94, 102));
+        painter.setPen(active ? QColor(86, 94, 102) : QColor(58, 62, 66));
         painter.drawRect(bar.adjusted(0, 0, -1, -1));
     }
 
@@ -1108,12 +1130,16 @@ QString diagnoseStats(const QJsonObject& stats)
     return QStringLiteral("Diagnosis ") + findings.join(QStringLiteral(" | "));
 }
 
+QString jamSliderStyle();
+void applyJamSliderStyle(QSlider* slider);
+
 QSlider* makeUnitSlider(double value, QWidget* parent)
 {
     auto* slider = new QSlider(Qt::Horizontal, parent);
     slider->setRange(0, 100);
     slider->setValue(qRound(value * 100.0));
     slider->setMinimumWidth(160);
+    applyJamSliderStyle(slider);
     return slider;
 }
 
@@ -1290,6 +1316,26 @@ bool isImportablePcm16Wav(const QString& path, QString* reason = nullptr)
     }
 }
 
+QString jamSliderStyle()
+{
+    return QStringLiteral(
+        "QSlider::groove:horizontal { height: 6px; background: #2a3035; border: 1px solid #3d464d; }"
+        "QSlider::sub-page:horizontal { background: #66c6a6; border: 1px solid #66c6a6; }"
+        "QSlider::add-page:horizontal { background: #1b1f23; border: 1px solid #3d464d; }"
+        "QSlider::handle:horizontal { width: 16px; height: 16px; margin: -6px 0; background: #f2f5f7; border: 1px solid #66c6a6; }"
+        "QSlider::groove:horizontal:disabled { background: #2e3235; border: 1px solid #454b50; }"
+        "QSlider::sub-page:horizontal:disabled { background: #5e666c; border: 1px solid #5e666c; }"
+        "QSlider::add-page:horizontal:disabled { background: #25282b; border: 1px solid #454b50; }"
+        "QSlider::handle:horizontal:disabled { background: #8a9298; border: 1px solid #6b7379; }");
+}
+
+void applyJamSliderStyle(QSlider* slider)
+{
+    if (slider != nullptr) {
+        slider->setStyleSheet(jamSliderStyle());
+    }
+}
+
 QJsonObject readSidecarJson(const QString& wavPath)
 {
     QFile file(wavPath + QStringLiteral(".json"));
@@ -1446,7 +1492,7 @@ MainWindow::MainWindow(QWidget* parent)
         connectionLabel_->setText(QStringLiteral("Stopped"));
         controlReconnectEnabled_ = false;
         controlReconnectTimer_.stop();
-        statusPollTimer_.stop();
+        stopGuiControlServer();
         controlServer_.close();
         controlClient_.close();
         pendingJoinLaunch_ = false;
@@ -1480,6 +1526,7 @@ MainWindow::MainWindow(QWidget* parent)
         }
         jamRecordingActive_ = false;
         updateJamRecordingControls();
+        updateMixControls();
         setMixRemotePeerVisible(false);
     };
     controlServer_.onState = [this](const QString& state) { handleControlState(state, true); };
@@ -1488,10 +1535,26 @@ MainWindow::MainWindow(QWidget* parent)
     controlClient_.onMessage = [this](const QJsonObject& message) { handleControlMessage(message); };
     controlReconnectTimer_.setInterval(2000);
     QObject::connect(&controlReconnectTimer_, &QTimer::timeout, this, [this] { refreshControlConnection(); });
-    statusPollTimer_.setInterval(100);
-    QObject::connect(&statusPollTimer_, &QTimer::timeout, this, [this] {
-        if (jam2_.isRunning()) {
-            jam2_.sendLine(QStringLiteral("status"));
+    QObject::connect(&guiControlServer_, &QTcpServer::newConnection, this, [this] {
+        while (guiControlServer_.hasPendingConnections()) {
+            QTcpSocket* next = guiControlServer_.nextPendingConnection();
+            if (guiControlSocket_ != nullptr) {
+                guiControlSocket_->disconnect(this);
+                guiControlSocket_->close();
+                guiControlSocket_->deleteLater();
+            }
+            guiControlSocket_ = next;
+            guiControlBuffer_.clear();
+            QObject::connect(guiControlSocket_, &QTcpSocket::readyRead, this, &MainWindow::readGuiControlSocket);
+            QObject::connect(guiControlSocket_, &QTcpSocket::disconnected, this, [this] {
+                if (guiControlSocket_ != nullptr) {
+                    guiControlSocket_->deleteLater();
+                    guiControlSocket_ = nullptr;
+                    guiControlBuffer_.clear();
+                }
+            });
+            appendLog(QStringLiteral("local mixer control connected"));
+            updateRuntimeControls();
         }
     });
     QObject::connect(&captureProcess_, &QProcess::readyReadStandardOutput, this, [this] {
@@ -1956,6 +2019,7 @@ QWidget* MainWindow::buildTrackPage()
     trackSpeedSlider_ = new QSlider(Qt::Horizontal, page);
     trackSpeedSlider_->setRange(10, 200);
     trackSpeedSlider_->setValue(100);
+    applyJamSliderStyle(trackSpeedSlider_);
     trackSpeedSlider_->setMinimumWidth(220);
     trackSpeedSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     trackSpeedSpin_ = new QDoubleSpinBox(page);
@@ -1968,6 +2032,7 @@ QWidget* MainWindow::buildTrackPage()
     trackPitchSlider_ = new QSlider(Qt::Horizontal, page);
     trackPitchSlider_->setRange(-12, 12);
     trackPitchSlider_->setValue(0);
+    applyJamSliderStyle(trackPitchSlider_);
     trackPitchSlider_->setMinimumWidth(220);
     trackPitchSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     trackPitchSpin_ = new QSpinBox(page);
@@ -1979,6 +2044,7 @@ QWidget* MainWindow::buildTrackPage()
     focusFrequencySlider_ = new QSlider(Qt::Horizontal, page);
     focusFrequencySlider_->setRange(40, 8000);
     focusFrequencySlider_->setValue(120);
+    applyJamSliderStyle(focusFrequencySlider_);
     focusFrequencySlider_->setMinimumWidth(220);
     focusFrequencySlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     focusFrequencySpin_ = new QSpinBox(page);
@@ -2446,22 +2512,23 @@ QWidget* MainWindow::buildMixPage()
 
     localOutputBox_->setParent(content);
     localOutputBox_->show();
-    layout->addWidget(makeDeviceRow(QStringLiteral("Standalone output"), localOutputBox_));
+    mixStandaloneOutputRow_ = makeDeviceRow(QStringLiteral("Standalone output"), localOutputBox_);
+    layout->addWidget(mixStandaloneOutputRow_);
 
-    auto* recordingRow = new QWidget(content);
-    auto* recordingLayout = new QHBoxLayout(recordingRow);
+    mixJamRecordingRow_ = new QWidget(content);
+    auto* recordingLayout = new QHBoxLayout(mixJamRecordingRow_);
     recordingLayout->setContentsMargins(0, 0, 0, 0);
     recordingLayout->setSpacing(10);
-    auto* recordingName = new QLabel(QStringLiteral("Jam recording"), recordingRow);
+    auto* recordingName = new QLabel(QStringLiteral("Jam recording"), mixJamRecordingRow_);
     recordingName->setMinimumWidth(120);
-    jamRecordingButton_ = new QPushButton(QStringLiteral("Start Recording Jam"), recordingRow);
-    jamRecordingLabel_ = new QLabel(QStringLiteral("Stopped"), recordingRow);
+    jamRecordingButton_ = new QPushButton(QStringLiteral("Start Recording Jam"), mixJamRecordingRow_);
+    jamRecordingLabel_ = new QLabel(QStringLiteral("Stopped"), mixJamRecordingRow_);
     jamRecordingLabel_->setFrameShape(QFrame::StyledPanel);
     jamRecordingLabel_->setMinimumWidth(180);
     recordingLayout->addWidget(recordingName);
     recordingLayout->addWidget(jamRecordingButton_);
     recordingLayout->addWidget(jamRecordingLabel_, 1);
-    layout->addWidget(recordingRow);
+    layout->addWidget(mixJamRecordingRow_);
 
     mixInputMeter_ = new LevelMeterWidget(page);
     mixSendMeter_ = new LevelMeterWidget(page);
@@ -2475,6 +2542,7 @@ QWidget* MainWindow::buildMixPage()
     mixSendLevelSlider_ = new QSlider(Qt::Horizontal, page);
     mixSendLevelSlider_->setRange(-60, 12);
     mixSendLevelSlider_->setValue(0);
+    applyJamSliderStyle(mixSendLevelSlider_);
     mixSendLevelSlider_->setMinimumWidth(220);
     mixSendLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     mixSendLevelLabel_ = makeValueLabel(QStringLiteral("+0.0 dB"));
@@ -2484,6 +2552,7 @@ QWidget* MainWindow::buildMixPage()
     mixMonitorLevelSlider_ = new QSlider(Qt::Horizontal, page);
     mixMonitorLevelSlider_->setRange(-60, 0);
     mixMonitorLevelSlider_->setValue(-18);
+    applyJamSliderStyle(mixMonitorLevelSlider_);
     mixMonitorLevelSlider_->setMinimumWidth(220);
     mixMonitorLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     mixMonitorLevelLabel_ = makeValueLabel(QStringLiteral("-18.0 dB"));
@@ -2491,6 +2560,7 @@ QWidget* MainWindow::buildMixPage()
     trackLevelSlider_ = new QSlider(Qt::Horizontal, page);
     trackLevelSlider_->setRange(-60, 12);
     trackLevelSlider_->setValue(0);
+    applyJamSliderStyle(trackLevelSlider_);
     trackLevelSlider_->setMinimumWidth(220);
     trackLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     trackLevelDbLabel_ = makeValueLabel(dbText(trackController_.model().trackGainDb));
@@ -2511,35 +2581,50 @@ QWidget* MainWindow::buildMixPage()
     mixTrackLevelSlider_ = trackLevelSlider_;
     mixTrackLevelLabel_ = trackLevelDbLabel_;
 
-    layout->addWidget(makeSectionLabel(QStringLiteral("Local input")));
-    layout->addWidget(makeMeterRow(QStringLiteral("Input"), mixInputMeter_));
-    layout->addWidget(makeRow(QStringLiteral("Send"), mixSendLevelSlider_, mixSendLevelLabel_));
-    layout->addWidget(makeMeterRow(QStringLiteral("Post-send"), mixSendMeter_));
+    mixLocalInputSection_ = makeSectionLabel(QStringLiteral("Local input"));
+    mixInputMeterRow_ = makeMeterRow(QStringLiteral("Input"), mixInputMeter_);
+    mixSendRow_ = makeRow(QStringLiteral("Send"), mixSendLevelSlider_, mixSendLevelLabel_);
+    mixSendMeterRow_ = makeMeterRow(QStringLiteral("Post-send"), mixSendMeter_);
+    layout->addWidget(mixLocalInputSection_);
+    layout->addWidget(mixInputMeterRow_);
+    layout->addWidget(mixSendRow_);
+    layout->addWidget(mixSendMeterRow_);
 
-    auto* monitorEnableRow = new QWidget(page);
-    auto* monitorEnableLayout = new QHBoxLayout(monitorEnableRow);
+    mixMonitorEnableRow_ = new QWidget(page);
+    auto* monitorEnableLayout = new QHBoxLayout(mixMonitorEnableRow_);
     monitorEnableLayout->setContentsMargins(0, 0, 0, 0);
     monitorEnableLayout->setSpacing(10);
-    auto* monitorName = new QLabel(QStringLiteral("Monitoring"), monitorEnableRow);
+    auto* monitorName = new QLabel(QStringLiteral("Monitoring"), mixMonitorEnableRow_);
     monitorName->setMinimumWidth(120);
     monitorEnableLayout->addWidget(monitorName);
     monitorEnableLayout->addWidget(mixMonitorCheck_, 1);
-    layout->addWidget(monitorEnableRow);
-    layout->addWidget(makeRow(QStringLiteral("Monitor"), mixMonitorLevelSlider_, mixMonitorLevelLabel_));
-    layout->addWidget(makeMeterRow(QStringLiteral("Monitor meter"), mixMonitorMeter_));
+    mixMonitorRow_ = makeRow(QStringLiteral("Monitor"), mixMonitorLevelSlider_, mixMonitorLevelLabel_);
+    mixMonitorMeterRow_ = makeMeterRow(QStringLiteral("Monitor meter"), mixMonitorMeter_);
+    layout->addWidget(mixMonitorEnableRow_);
+    layout->addWidget(mixMonitorRow_);
+    layout->addWidget(mixMonitorMeterRow_);
 
-    layout->addWidget(makeSectionLabel(QStringLiteral("Track")));
-    layout->addWidget(makeRow(QStringLiteral("Track"), trackLevelSlider_, trackLevelDbLabel_));
-    layout->addWidget(makeMeterRow(QStringLiteral("Track meter"), mixTrackMeter_));
+    mixTrackSection_ = makeSectionLabel(QStringLiteral("Track"));
+    mixTrackRow_ = makeRow(QStringLiteral("Track"), trackLevelSlider_, trackLevelDbLabel_);
+    mixTrackMeterRow_ = makeMeterRow(QStringLiteral("Track meter"), mixTrackMeter_);
+    layout->addWidget(mixTrackSection_);
+    layout->addWidget(mixTrackRow_);
+    layout->addWidget(mixTrackMeterRow_);
 
-    layout->addWidget(makeSectionLabel(QStringLiteral("Metronome")));
-    layout->addWidget(makeRow(QStringLiteral("Metronome"), metronomeLevelSlider_, mixMetronomeLevelLabel_));
-    layout->addWidget(makeMeterRow(QStringLiteral("Click meter"), mixMetronomeMeter_));
+    mixMetronomeSection_ = makeSectionLabel(QStringLiteral("Metronome"));
+    mixMetronomeRow_ = makeRow(QStringLiteral("Metronome"), metronomeLevelSlider_, mixMetronomeLevelLabel_);
+    mixMetronomeMeterRow_ = makeMeterRow(QStringLiteral("Click meter"), mixMetronomeMeter_);
+    layout->addWidget(mixMetronomeSection_);
+    layout->addWidget(mixMetronomeRow_);
+    layout->addWidget(mixMetronomeMeterRow_);
 
-    layout->addWidget(makeSectionLabel(QStringLiteral("Output")));
-    layout->addWidget(makeMeterRow(QStringLiteral("Main output"), mixOutputMeter_, mixOutputClipLabel_));
+    mixOutputSection_ = makeSectionLabel(QStringLiteral("Output"));
+    mixOutputMeterRow_ = makeMeterRow(QStringLiteral("Main output"), mixOutputMeter_, mixOutputClipLabel_);
+    layout->addWidget(mixOutputSection_);
+    layout->addWidget(mixOutputMeterRow_);
 
-    layout->addWidget(makeSectionLabel(QStringLiteral("Remote peers")));
+    mixRemotePeersSection_ = makeSectionLabel(QStringLiteral("Remote peers"));
+    layout->addWidget(mixRemotePeersSection_);
     mixRemotePeerRow_ = new QWidget(page);
     auto* remoteLayout = new QVBoxLayout(mixRemotePeerRow_);
     remoteLayout->setContentsMargins(0, 0, 0, 0);
@@ -2608,6 +2693,53 @@ QWidget* MainWindow::buildMixPage()
 
 void MainWindow::updateMixControls()
 {
+    const bool jamActive = jam2_.isRunning();
+    auto setModeEnabled = [](QWidget* widget, bool enabled) {
+        if (widget != nullptr) {
+            widget->setEnabled(enabled);
+        }
+    };
+
+    setModeEnabled(mixStandaloneOutputRow_, !jamActive);
+    setModeEnabled(mixJamRecordingRow_, jamActive);
+    setModeEnabled(mixLocalInputSection_, jamActive);
+    setModeEnabled(mixInputMeterRow_, jamActive);
+    setModeEnabled(mixSendRow_, jamActive);
+    setModeEnabled(mixSendMeterRow_, jamActive);
+    setModeEnabled(mixMonitorEnableRow_, jamActive);
+    setModeEnabled(mixMonitorRow_, jamActive && mixMonitorCheck_ && mixMonitorCheck_->isChecked());
+    setModeEnabled(mixMonitorMeterRow_, jamActive);
+    setModeEnabled(mixTrackSection_, true);
+    setModeEnabled(mixTrackRow_, true);
+    setModeEnabled(mixTrackMeterRow_, true);
+    setModeEnabled(mixMetronomeSection_, true);
+    setModeEnabled(mixMetronomeRow_, true);
+    setModeEnabled(mixMetronomeMeterRow_, true);
+    setModeEnabled(mixOutputSection_, jamActive);
+    setModeEnabled(mixOutputMeterRow_, jamActive);
+    setModeEnabled(mixRemotePeersSection_, jamActive);
+    setModeEnabled(mixRemotePeerRow_, jamActive);
+    if (!jamActive) {
+        if (mixInputMeter_) {
+            mixInputMeter_->setLevel(0.0);
+        }
+        if (mixSendMeter_) {
+            mixSendMeter_->setLevel(0.0);
+        }
+        if (mixMonitorMeter_) {
+            mixMonitorMeter_->setLevel(0.0);
+        }
+        if (mixRemotePeerMeter_) {
+            mixRemotePeerMeter_->setLevel(0.0);
+        }
+        if (mixOutputMeter_) {
+            mixOutputMeter_->setLevel(0.0);
+        }
+        if (mixOutputClipLabel_) {
+            mixOutputClipLabel_->setText(QStringLiteral("clip 0"));
+        }
+    }
+
     if (trackLevelSlider_ && trackLevelDbLabel_) {
         const QSignalBlocker blocker(trackLevelSlider_);
         trackLevelSlider_->setValue(qBound(-60, qRound(trackController_.model().trackGainDb), 12));
@@ -2626,15 +2758,19 @@ void MainWindow::updateMixControls()
         mixMonitorLevelLabel_->setText(dbText(static_cast<double>(mixMonitorLevelSlider_->value())));
     }
     if (mixMonitorLevelSlider_ && mixMonitorCheck_) {
-        mixMonitorLevelSlider_->setEnabled(mixMonitorCheck_->isChecked());
+        mixMonitorLevelSlider_->setEnabled(jamActive && mixMonitorCheck_->isChecked());
     }
 }
 
 void MainWindow::setMixRemotePeerVisible(bool visible)
 {
-    Q_UNUSED(visible);
     if (mixRemotePeerRow_) {
         mixRemotePeerRow_->setVisible(true);
+        mixRemotePeerRow_->setEnabled(visible && jam2_.isRunning());
+    }
+    if (mixRemotePeersSection_) {
+        mixRemotePeersSection_->setVisible(true);
+        mixRemotePeersSection_->setEnabled(jam2_.isRunning());
     }
 }
 
@@ -2645,13 +2781,8 @@ void MainWindow::startJamRecording()
     }
     jamRecordingFolder_ = timestampedJamRecordingFolder();
     QDir().mkpath(jamRecordingFolder_);
-    jam2_.sendLine(QStringLiteral("record jam start %1").arg(jamRecordingFolder_));
+    sendJamCommand(QStringLiteral("record jam start %1").arg(jamRecordingFolder_));
     appendLog(QStringLiteral("record jam start: ") + jamRecordingFolder_);
-    QTimer::singleShot(250, this, [this] {
-        if (jam2_.isRunning()) {
-            jam2_.sendLine(QStringLiteral("status"));
-        }
-    });
     jamRecordingActive_ = true;
     updateJamRecordingControls();
 }
@@ -2661,13 +2792,8 @@ void MainWindow::stopJamRecording()
     if (!jam2_.isRunning()) {
         return;
     }
-    jam2_.sendLine(QStringLiteral("record jam stop"));
+    sendJamCommand(QStringLiteral("record jam stop"));
     appendLog(QStringLiteral("record jam stop"));
-    QTimer::singleShot(250, this, [this] {
-        if (jam2_.isRunning()) {
-            jam2_.sendLine(QStringLiteral("status"));
-        }
-    });
     jamRecordingActive_ = false;
     updateJamRecordingControls();
 }
@@ -2803,7 +2929,7 @@ void MainWindow::startJam()
     launchJamProcess(args);
 }
 
-void MainWindow::launchJamProcess(const QStringList& args)
+void MainWindow::launchJamProcess(QStringList args)
 {
     QString permissionError;
     if (!jam2EnsureMicrophonePermission(&permissionError)) {
@@ -2830,6 +2956,9 @@ void MainWindow::launchJamProcess(const QStringList& args)
     if (stopTrackMetronomeButton_) {
         stopTrackMetronomeButton_->setEnabled(false);
     }
+    if (!startGuiControlServer(args)) {
+        appendLog(QStringLiteral("local mixer control unavailable; falling back to stdin commands"));
+    }
     jam2_.start(jam2PathEdit_->text(), args);
     appendLog(QStringLiteral("starting: %1 %2").arg(jam2PathEdit_->text(), args.join(QLatin1Char(' '))));
     startButton_->setEnabled(false);
@@ -2843,14 +2972,98 @@ void MainWindow::launchJamProcess(const QStringList& args)
     }
     jamRecordingActive_ = false;
     updateJamRecordingControls();
+    updateMixControls();
     connectionLabel_->setText(QStringLiteral("Starting"));
-    statusPollTimer_.start();
     QTimer::singleShot(250, this, [this] {
         updateRuntimeControls();
     });
     QTimer::singleShot(500, this, [this] {
         sendMetronomeSettingsToPeer();
     });
+}
+
+bool MainWindow::startGuiControlServer(QStringList& args)
+{
+    stopGuiControlServer();
+    if (!guiControlServer_.listen(QHostAddress::LocalHost, 0)) {
+        return false;
+    }
+    args << QStringLiteral("--gui-control")
+         << QStringLiteral("127.0.0.1:%1").arg(guiControlServer_.serverPort());
+    return true;
+}
+
+void MainWindow::stopGuiControlServer()
+{
+    if (guiControlSocket_ != nullptr) {
+        guiControlSocket_->disconnect(this);
+        guiControlSocket_->close();
+        guiControlSocket_->deleteLater();
+        guiControlSocket_ = nullptr;
+    }
+    guiControlBuffer_.clear();
+    guiControlServer_.close();
+}
+
+void MainWindow::sendJamCommand(const QString& line)
+{
+    if (guiControlSocket_ != nullptr && guiControlSocket_->state() == QAbstractSocket::ConnectedState) {
+        guiControlSocket_->write(line.toUtf8());
+        guiControlSocket_->write("\n");
+        return;
+    }
+    jam2_.sendLine(line);
+}
+
+void MainWindow::readGuiControlSocket()
+{
+    if (guiControlSocket_ == nullptr) {
+        return;
+    }
+    guiControlBuffer_.append(guiControlSocket_->readAll());
+    for (;;) {
+        const qsizetype newline = guiControlBuffer_.indexOf('\n');
+        if (newline < 0) {
+            break;
+        }
+        QByteArray line = guiControlBuffer_.left(newline);
+        guiControlBuffer_.remove(0, newline + 1);
+        if (!line.isEmpty() && line.endsWith('\r')) {
+            line.chop(1);
+        }
+        handleGuiControlLine(QString::fromUtf8(line).trimmed());
+    }
+}
+
+void MainWindow::handleGuiControlLine(const QString& line)
+{
+    if (line.isEmpty()) {
+        return;
+    }
+    if (line.startsWith(QStringLiteral("hello "))) {
+        return;
+    }
+    if (!line.startsWith(QStringLiteral("meters "))) {
+        appendLog(QStringLiteral("gui-control: ") + line);
+        return;
+    }
+    QJsonObject stats;
+    stats.insert(QStringLiteral("event"), QStringLiteral("meters"));
+    const QRegularExpression fieldRe(QStringLiteral("(\\S+)=([^\\s]+)"));
+    auto it = fieldRe.globalMatch(line.mid(7));
+    while (it.hasNext()) {
+        const QRegularExpressionMatch match = it.next();
+        const QString key = match.captured(1);
+        const QString value = match.captured(2);
+        bool ok = false;
+        const double number = value.toDouble(&ok);
+        if (ok) {
+            stats.insert(key, number);
+        } else {
+            stats.insert(key, value);
+        }
+    }
+    updateStatsDisplay(stats);
 }
 
 void MainWindow::showStartJamDialog()
@@ -3086,7 +3299,7 @@ void MainWindow::stopJam()
 {
     controlReconnectEnabled_ = false;
     controlReconnectTimer_.stop();
-    statusPollTimer_.stop();
+    stopGuiControlServer();
     controlServer_.close();
     controlClient_.close();
     pendingJoinLaunch_ = false;
@@ -3113,6 +3326,7 @@ void MainWindow::stopJam()
     }
     jamRecordingActive_ = false;
     updateJamRecordingControls();
+    updateMixControls();
     setMixRemotePeerVisible(false);
 }
 
@@ -3708,15 +3922,15 @@ void MainWindow::updateRuntimeControls()
     if (!jam2_.isRunning()) {
         return;
     }
-    jam2_.sendLine(QStringLiteral("metro level %1").arg(static_cast<double>(metronomeLevelSlider_->value()) / 100.0, 0, 'f', 2));
-    jam2_.sendLine(QStringLiteral("metro mode %1").arg(metronomeModeBox_->currentText()));
+    sendJamCommand(QStringLiteral("metro level %1").arg(static_cast<double>(metronomeLevelSlider_->value()) / 100.0, 0, 'f', 2));
+    sendJamCommand(QStringLiteral("metro mode %1").arg(metronomeModeBox_->currentText()));
     sendMetronomePatternToJam();
-    jam2_.sendLine(QStringLiteral("remote level %1").arg(static_cast<double>(remoteLevelSlider_->value()) / 100.0, 0, 'f', 2));
+    sendJamCommand(QStringLiteral("remote level %1").arg(static_cast<double>(remoteLevelSlider_->value()) / 100.0, 0, 'f', 2));
     const double sendLevel = gainFromDb(static_cast<double>(mixSendLevelSlider_ ? mixSendLevelSlider_->value() : 0));
     const double monitorLevel = gainFromDb(static_cast<double>(mixMonitorLevelSlider_ ? mixMonitorLevelSlider_->value() : -18));
-    jam2_.sendLine(QStringLiteral("send level %1").arg(sendLevel, 0, 'f', 3));
-    jam2_.sendLine(QStringLiteral("monitor %1").arg(mixMonitorCheck_ && mixMonitorCheck_->isChecked() ? QStringLiteral("on") : QStringLiteral("off")));
-    jam2_.sendLine(QStringLiteral("monitor level %1").arg(monitorLevel, 0, 'f', 3));
+    sendJamCommand(QStringLiteral("send level %1").arg(sendLevel, 0, 'f', 3));
+    sendJamCommand(QStringLiteral("monitor %1").arg(mixMonitorCheck_ && mixMonitorCheck_->isChecked() ? QStringLiteral("on") : QStringLiteral("off")));
+    sendJamCommand(QStringLiteral("monitor level %1").arg(monitorLevel, 0, 'f', 3));
 }
 
 void MainWindow::updateTrackControls()
@@ -3800,9 +4014,6 @@ void MainWindow::updateTrackControls()
         } else {
             loopEnabledCheck_->setText(QStringLiteral("Loop whole track"));
         }
-    }
-    if (mixTrackMeter_) {
-        mixTrackMeter_->setLevel(trackDevice_ ? trackDevice_->takePeak() : 0.0);
     }
 }
 
@@ -4448,6 +4659,12 @@ void MainWindow::updateTrackTimeline()
             model.loopStartSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopStartSeconds * 1000.0)) : -1,
             model.loopEndSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopEndSeconds * 1000.0)) : -1);
     }
+    if (mixTrackMeter_) {
+        mixTrackMeter_->setLevel(trackDevice_ ? trackDevice_->takePeak() : 0.0);
+    }
+    if (!jam2_.isRunning() && mixMetronomeMeter_) {
+        mixMetronomeMeter_->setLevel(localMetronomeDevice_ ? localMetronomeDevice_->takePeak() : 0.0);
+    }
 }
 
 void MainWindow::startTrackMetronome()
@@ -4463,7 +4680,7 @@ void MainWindow::startTrackMetronome()
         }
         localMetronomeRunning_ = true;
         updateRuntimeControls();
-        jam2_.sendLine(QStringLiteral("metro on"));
+        sendJamCommand(QStringLiteral("metro on"));
         sendMetronomeSettingsToPeer();
         if (trackMetronomeLabel_) {
             trackMetronomeLabel_->setText(QStringLiteral("Jam metronome running"));
@@ -4543,7 +4760,7 @@ void MainWindow::stopTrackMetronome()
     }
     localMetronomeRunning_ = false;
     if (jamMetronomeWasRunning) {
-        jam2_.sendLine(QStringLiteral("metro off"));
+        sendJamCommand(QStringLiteral("metro off"));
         sendMetronomeSettingsToPeer();
     }
     if (trackMetronomeLabel_) {
@@ -4670,7 +4887,7 @@ void MainWindow::sendMetronomePatternToJam()
         return;
     }
     const jam2::metronome::PatternSnapshot pattern = currentMetronomePattern();
-    jam2_.sendLine(QStringLiteral("metro pattern %1 %2 %3 0x%4 0x%5 0x%6 0x%7")
+    sendJamCommand(QStringLiteral("metro pattern %1 %2 %3 0x%4 0x%5 0x%6 0x%7")
         .arg(pattern.bpm)
         .arg(pattern.beats_per_bar)
         .arg(pattern.division)
@@ -4773,7 +4990,7 @@ void MainWindow::applyRemoteMetronomeSettings(const QJsonObject& message)
     applyMetronomePatternToLocalDevice();
     updateRuntimeControls();
     if (jam2_.isRunning()) {
-        jam2_.sendLine(running ? QStringLiteral("metro on") : QStringLiteral("metro off"));
+        sendJamCommand(running ? QStringLiteral("metro on") : QStringLiteral("metro off"));
     }
     if (trackMetronomeLabel_) {
         trackMetronomeLabel_->setText(running

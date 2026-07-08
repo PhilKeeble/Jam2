@@ -654,12 +654,14 @@ void mix_local_monitor(DuplexContext& context, std::span<std::int32_t> output, s
         input.empty()) {
         if (context.control != nullptr) {
             context.control->monitor_peak_ppm.store(0, std::memory_order_relaxed);
+            context.control->gui_monitor_peak_ppm.store(0, std::memory_order_relaxed);
         }
         return;
     }
     const int level_ppm = context.control->local_monitor_level_ppm.load(std::memory_order_relaxed);
     if (level_ppm <= 0) {
         context.control->monitor_peak_ppm.store(0, std::memory_order_relaxed);
+        context.control->gui_monitor_peak_ppm.store(0, std::memory_order_relaxed);
         return;
     }
     const double level = static_cast<double>(std::clamp(level_ppm, 0, 1000000)) / 1000000.0;
@@ -674,9 +676,9 @@ void mix_local_monitor(DuplexContext& context, std::span<std::int32_t> output, s
         output[i] = mix_i32_samples(output[i], monitored);
     }
     const double normalized = static_cast<double>(monitor_peak) / 2147483647.0;
-    context.control->monitor_peak_ppm.store(
-        static_cast<int>(std::clamp(normalized, 0.0, 1.0) * 1000000.0),
-        std::memory_order_relaxed);
+    const int peak_ppm = static_cast<int>(std::clamp(normalized, 0.0, 1.0) * 1000000.0);
+    context.control->monitor_peak_ppm.store(peak_ppm, std::memory_order_relaxed);
+    context.control->gui_monitor_peak_ppm.store(peak_ppm, std::memory_order_relaxed);
 }
 
 void observe_output_peak(DuplexContext& context, std::span<const std::int32_t> output)
@@ -685,6 +687,7 @@ void observe_output_peak(DuplexContext& context, std::span<const std::int32_t> o
         return;
     }
     observe_peak(context.control->output_peak_ppm, output);
+    observe_peak(context.control->gui_output_peak_ppm, output);
     for (std::int32_t sample : output) {
         if (sample == (std::numeric_limits<std::int32_t>::min)() ||
             sample == (std::numeric_limits<std::int32_t>::max)()) {
@@ -756,6 +759,7 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
         fill_test_input(*context, generated);
         if (context->control != nullptr) {
             observe_peak(context->control->input_peak_ppm, generated);
+            observe_peak(context->control->gui_input_peak_ppm, generated);
         }
         context->capture->push(std::span<const std::int32_t>(generated.data(), generated.size()));
         if (context->recorder_my_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
@@ -793,6 +797,7 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
         }
         if (context->control != nullptr) {
             observe_peak(context->control->input_peak_ppm, captured_input);
+            observe_peak(context->control->gui_input_peak_ppm, captured_input);
         }
         if (context->recorder_my_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
             std::copy(captured_input.begin(), captured_input.end(), context->recorder_my_input_scratch.begin());
@@ -818,6 +823,7 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
         }
         if (context->control != nullptr) {
             observe_peak(context->control->remote_peak_ppm, playback);
+            observe_peak(context->control->gui_remote_peak_ppm, playback);
         }
         if (context->recorder_their_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
             std::copy(playback.begin(), playback.end(), context->recorder_their_input_scratch.begin());
@@ -838,6 +844,11 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
         if (context->control != nullptr) {
             observe_peak(
                 context->control->metronome_peak_ppm,
+                std::span<const std::int32_t>(
+                    context->recorder_metronome_scratch.data(),
+                    std::min<std::size_t>(context->recorder_metronome_scratch.size(), playback.size())));
+            observe_peak(
+                context->control->gui_metronome_peak_ppm,
                 std::span<const std::int32_t>(
                     context->recorder_metronome_scratch.data(),
                     std::min<std::size_t>(context->recorder_metronome_scratch.size(), playback.size())));

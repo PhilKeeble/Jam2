@@ -27,15 +27,28 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <avrt.h>
 #include <mmsystem.h>
 #elif defined(__APPLE__)
+#include <arpa/inet.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <mach/thread_policy.h>
+#include <netdb.h>
 #include <pthread.h>
 #include <pthread/qos.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#else
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #endif
 
 #include "audio_device.hpp"
@@ -56,7 +69,7 @@ Usage:
   jam2 test-device <id> [--sample-rate n]
   jam2 meter-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n]
   jam2 ring-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n] [--ring-frames n]
-  jam2 listen [--profile fast|moderate|safe] [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats enabled|disabled] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--record-jam-folder folder] [--test-input off|silence|tone-440|pulse-1s] [--os-priority off|high|realtime] [--metronome on|off] [--bpm n] [--metronome-level n] [--remote-level n] [--send-level n] [--local-monitor on|off] [--local-monitor-level n] [--metronome-mode shared-grid|leader-audio|symmetric-delay|listener-compensated] [--sample-time-playout on|off] [--playout-delay-frames n] [--jitter-buffer-frames n] [--jitter-buffer-max-frames n] [--adaptive-playback-cushion on|off] [--adaptive-playback-target-frames n] [--adaptive-playback-min-frames n] [--adaptive-playback-max-frames n] [--adaptive-playback-release-ppm n] [--session-id hex] [--session-key hex32] [--machine-readable-startup on|off] [--status-format text|jsonl] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels n[,n...]] [--output-channels n[,n...]] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-deadband-ppm n] [--drift-max-correction-ppm n]
+  jam2 listen [--profile fast|moderate|safe] [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats enabled|disabled] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--record-jam-folder folder] [--test-input off|silence|tone-440|pulse-1s] [--os-priority off|high|realtime] [--metronome on|off] [--bpm n] [--metronome-level n] [--remote-level n] [--send-level n] [--local-monitor on|off] [--local-monitor-level n] [--gui-control ip:port] [--metronome-mode shared-grid|leader-audio|symmetric-delay|listener-compensated] [--sample-time-playout on|off] [--playout-delay-frames n] [--jitter-buffer-frames n] [--jitter-buffer-max-frames n] [--adaptive-playback-cushion on|off] [--adaptive-playback-target-frames n] [--adaptive-playback-min-frames n] [--adaptive-playback-max-frames n] [--adaptive-playback-release-ppm n] [--session-id hex] [--session-key hex32] [--machine-readable-startup on|off] [--status-format text|jsonl] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels n[,n...]] [--output-channels n[,n...]] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-deadband-ppm n] [--drift-max-correction-ppm n]
   jam2 connect <jam2-url> [--profile fast|moderate|safe] [options]
 
 Stage status:
@@ -147,6 +160,7 @@ struct Options {
     int adaptive_playback_release_ppm = 1000;
     std::optional<std::uint64_t> session_id;
     std::optional<std::array<std::uint8_t, 16>> session_key;
+    std::optional<jam2::Endpoint> gui_control;
     bool machine_readable_startup = false;
     bool status_jsonl = false;
     std::optional<int> audio_device_id;
@@ -569,6 +583,8 @@ Options parse_options(int argc, char** argv, int start)
             if (options.local_monitor_level < 0.0 || options.local_monitor_level > 1.0) {
                 throw std::runtime_error("--local-monitor-level must be 0..1");
             }
+        } else if (arg == "--gui-control") {
+            options.gui_control = jam2::parse_endpoint(require_value(argc, argv, i, arg));
         } else if (arg == "--sample-time-playout") {
             const std::string value{require_value(argc, argv, i, arg)};
             if (value == "on" || value == "true" || value == "1") {
@@ -1239,6 +1255,163 @@ void write_recording_sidecar(
     const Options& options,
     const RuntimeState& state);
 void print_recording_status(const jam2::audio::OutputRecorder* recorder);
+
+void apply_gui_control_line(
+    RuntimeState& state,
+    jam2::audio::OutputRecorder* recorder,
+    int recording_sample_rate,
+    const Options& options,
+    std::string_view line)
+{
+    std::istringstream in{std::string(line)};
+    std::string command;
+    in >> command;
+    if (command == "quit" || command == "exit") {
+        state.quit.store(true, std::memory_order_relaxed);
+        return;
+    }
+    if (command == "status") {
+        state.print_status.store(true, std::memory_order_relaxed);
+        return;
+    }
+    if (command == "metro") {
+        std::string value;
+        in >> value;
+        if (value == "on") {
+            state.metronome.store(true, std::memory_order_relaxed);
+            state.metronome_revision.fetch_add(1, std::memory_order_relaxed);
+        } else if (value == "off") {
+            state.metronome.store(false, std::memory_order_relaxed);
+            state.metronome_revision.fetch_add(1, std::memory_order_relaxed);
+        } else if (value == "mode") {
+            std::string mode;
+            in >> mode;
+            state.metronome_mode.store(metronome_mode_id(parse_metronome_mode(mode)), std::memory_order_relaxed);
+            state.metronome_revision.fetch_add(1, std::memory_order_relaxed);
+            state.metronome_epoch_revision.fetch_add(1, std::memory_order_relaxed);
+        } else if (value == "level") {
+            std::string level;
+            in >> level;
+            (void)apply_level_token(level, state.metronome_level_ppm);
+        } else if (value == "pattern") {
+            int bpm = 0;
+            int beats = 0;
+            int division = 0;
+            std::string play_low_text;
+            std::string play_high_text;
+            std::string accent_low_text;
+            std::string accent_high_text;
+            in >> bpm >> beats >> division >> play_low_text >> play_high_text >> accent_low_text >> accent_high_text;
+            std::uint64_t play_low = 0;
+            std::uint64_t play_high = 0;
+            std::uint64_t accent_low = 0;
+            std::uint64_t accent_high = 0;
+            if (bpm > 0 &&
+                bpm <= 400 &&
+                beats > 0 &&
+                division > 0 &&
+                parse_u64(play_low_text, play_low) &&
+                parse_u64(play_high_text, play_high) &&
+                parse_u64(accent_low_text, accent_low) &&
+                parse_u64(accent_high_text, accent_high)) {
+                const int previous_bpm = state.bpm.load(std::memory_order_relaxed);
+                auto pattern = metronome_pattern_from_runtime(state);
+                pattern.bpm = bpm;
+                pattern.beats_per_bar = beats;
+                pattern.division = division;
+                pattern.step_count = jam2::metronome::pattern_step_count(beats, division);
+                pattern.play_mask_low = play_low;
+                pattern.play_mask_high = play_high;
+                pattern.accent_mask_low = accent_low;
+                pattern.accent_mask_high = accent_high;
+                store_metronome_pattern(state, pattern);
+                state.metronome_revision.fetch_add(1, std::memory_order_relaxed);
+                if (previous_bpm != pattern.bpm) {
+                    state.metronome_epoch_revision.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        }
+        return;
+    }
+    if (command == "remote") {
+        std::string value;
+        in >> value;
+        if (value == "level") {
+            std::string level;
+            in >> level;
+            (void)apply_level_token(level, state.remote_level_ppm);
+        } else if (value == "mute") {
+            state.remote_level_ppm.store(0, std::memory_order_relaxed);
+        } else if (value == "unmute") {
+            state.remote_level_ppm.store(1000000, std::memory_order_relaxed);
+        }
+        return;
+    }
+    if (command == "send") {
+        std::string value;
+        in >> value;
+        if (value == "level") {
+            std::string level;
+            in >> level;
+            (void)apply_gain_token(level, state.send_level_ppm, 4.0);
+        } else if (value == "unity") {
+            state.send_level_ppm.store(1000000, std::memory_order_relaxed);
+        }
+        return;
+    }
+    if (command == "monitor") {
+        std::string value;
+        in >> value;
+        if (value == "on") {
+            state.local_monitor.store(true, std::memory_order_relaxed);
+        } else if (value == "off") {
+            state.local_monitor.store(false, std::memory_order_relaxed);
+        } else if (value == "level") {
+            std::string level;
+            in >> level;
+            (void)apply_level_token(level, state.local_monitor_level_ppm);
+        }
+        return;
+    }
+    if (command == "bpm") {
+        int value = 0;
+        in >> value;
+        if (value > 0 && value <= 400) {
+            state.bpm.store(value, std::memory_order_relaxed);
+            state.metronome_revision.fetch_add(1, std::memory_order_relaxed);
+            state.metronome_epoch_revision.fetch_add(1, std::memory_order_relaxed);
+        }
+        return;
+    }
+    if (command == "record") {
+        std::string target;
+        std::string action;
+        in >> target >> action;
+        if (target != "jam" || recorder == nullptr) {
+            return;
+        }
+        if (action == "start") {
+            std::string folder;
+            std::getline(in >> std::ws, folder);
+            if (!folder.empty()) {
+                std::lock_guard<std::mutex> lock(state.recording_mutex);
+                std::string error;
+                (void)recorder->start(std::filesystem::path(folder), recording_sample_rate, error);
+            }
+        } else if (action == "stop") {
+            std::lock_guard<std::mutex> lock(state.recording_mutex);
+            const auto before = recorder->stats();
+            std::string error;
+            (void)recorder->stop(error);
+            const auto after = recorder->stats();
+            if (!before.folder.empty()) {
+                write_recording_sidecar(std::filesystem::path(before.folder), after, options, state);
+            }
+        } else if (action == "status") {
+            state.print_status.store(true, std::memory_order_relaxed);
+        }
+    }
+}
 
 void stdin_command_loop(
     RuntimeState& state,
@@ -3942,7 +4115,9 @@ AudioPacketStats run_audio_packet_exchange(
                 const int live_send_level_ppm = runtime.send_level_ppm.load(std::memory_order_relaxed);
                 apply_send_level(network_frames, live_send_level_ppm);
                 if (audio_control != nullptr) {
-                    update_peak(audio_control->send_peak_ppm, pcm24_peak_ppm(network_frames));
+                    const int send_peak_ppm = pcm24_peak_ppm(network_frames);
+                    update_peak(audio_control->send_peak_ppm, send_peak_ppm);
+                    update_peak(audio_control->gui_send_peak_ppm, send_peak_ppm);
                 }
                 const int live_metronome_mode = runtime.metronome_mode.load(std::memory_order_relaxed);
                 if (live_metronome_mode == metronome_mode_id(MetronomeMode::LeaderAudio) && listener_side && metronome_enabled) {
@@ -3958,6 +4133,7 @@ AudioPacketStats run_audio_packet_exchange(
             } else {
                 if (audio_control != nullptr) {
                     audio_control->send_peak_ppm.store(0, std::memory_order_relaxed);
+                    audio_control->gui_send_peak_ppm.store(0, std::memory_order_relaxed);
                 }
                 const int live_metronome_mode = runtime.metronome_mode.load(std::memory_order_relaxed);
                 if (live_metronome_mode == metronome_mode_id(MetronomeMode::LeaderAudio) && listener_side && metronome_enabled) {
@@ -4740,6 +4916,230 @@ struct CommandThread {
     }
 };
 
+#if defined(_WIN32)
+using GuiSocketHandle = SOCKET;
+constexpr GuiSocketHandle kInvalidGuiSocket = INVALID_SOCKET;
+#else
+using GuiSocketHandle = int;
+constexpr GuiSocketHandle kInvalidGuiSocket = -1;
+#endif
+
+void close_gui_socket(GuiSocketHandle socket)
+{
+    if (socket == kInvalidGuiSocket) {
+        return;
+    }
+#if defined(_WIN32)
+    closesocket(socket);
+#else
+    close(socket);
+#endif
+}
+
+GuiSocketHandle connect_gui_socket(const jam2::Endpoint& endpoint)
+{
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    addrinfo* results = nullptr;
+    const std::string port = std::to_string(endpoint.port);
+    if (getaddrinfo(endpoint.host.c_str(), port.c_str(), &hints, &results) != 0 || results == nullptr) {
+        return kInvalidGuiSocket;
+    }
+
+    GuiSocketHandle connected = kInvalidGuiSocket;
+    for (addrinfo* address = results; address != nullptr; address = address->ai_next) {
+        GuiSocketHandle socket = ::socket(address->ai_family, address->ai_socktype, address->ai_protocol);
+        if (socket == kInvalidGuiSocket) {
+            continue;
+        }
+        if (::connect(socket, address->ai_addr, static_cast<int>(address->ai_addrlen)) == 0) {
+            connected = socket;
+            break;
+        }
+        close_gui_socket(socket);
+    }
+    freeaddrinfo(results);
+    return connected;
+}
+
+bool gui_send_all(GuiSocketHandle socket, std::string_view text)
+{
+    const char* cursor = text.data();
+    std::size_t remaining = text.size();
+    while (remaining > 0) {
+        const int chunk = static_cast<int>(std::min<std::size_t>(remaining, 16 * 1024));
+        const int sent = send(socket, cursor, chunk, 0);
+        if (sent <= 0) {
+            return false;
+        }
+        cursor += sent;
+        remaining -= static_cast<std::size_t>(sent);
+    }
+    return true;
+}
+
+int gui_select_width(GuiSocketHandle socket)
+{
+#if defined(_WIN32)
+    (void)socket;
+    return 0;
+#else
+    return socket + 1;
+#endif
+}
+
+struct GuiControlThread {
+    const Options& options;
+    RuntimeState& state;
+    jam2::audio::OutputRecorder* recorder = nullptr;
+    int recording_sample_rate = 0;
+    const jam2::audio::DeviceStream* audio_stream = nullptr;
+    const jam2::audio::MonoRingBuffer* capture_ring = nullptr;
+    const jam2::audio::MonoRingBuffer* playback_ring = nullptr;
+    jam2::audio::StreamControl* audio_control = nullptr;
+    std::atomic<bool> stop{false};
+    std::thread thread;
+    std::mutex socket_mutex;
+    GuiSocketHandle socket = kInvalidGuiSocket;
+
+    GuiControlThread(
+        const Options& options_in,
+        RuntimeState& state_in,
+        jam2::audio::OutputRecorder* recorder_in,
+        int recording_sample_rate_in,
+        const jam2::audio::DeviceStream* audio_stream_in,
+        const jam2::audio::MonoRingBuffer* capture_ring_in,
+        const jam2::audio::MonoRingBuffer* playback_ring_in,
+        jam2::audio::StreamControl* audio_control_in)
+        : options(options_in)
+        , state(state_in)
+        , recorder(recorder_in)
+        , recording_sample_rate(recording_sample_rate_in)
+        , audio_stream(audio_stream_in)
+        , capture_ring(capture_ring_in)
+        , playback_ring(playback_ring_in)
+        , audio_control(audio_control_in)
+    {
+        if (!options.gui_control) {
+            return;
+        }
+        thread = std::thread([this] { run(); });
+    }
+
+    ~GuiControlThread()
+    {
+        stop.store(true, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lock(socket_mutex);
+            close_gui_socket(socket);
+            socket = kInvalidGuiSocket;
+        }
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+
+    void run() noexcept
+    {
+        try {
+            const GuiSocketHandle connected = connect_gui_socket(*options.gui_control);
+            if (connected == kInvalidGuiSocket) {
+                return;
+            }
+            {
+                std::lock_guard<std::mutex> lock(socket_mutex);
+                socket = connected;
+            }
+            (void)gui_send_all(connected, "hello jam2-gui-control 1\n");
+            std::string input_buffer;
+            std::uint64_t next_meter_us = 0;
+            while (!stop.load(std::memory_order_relaxed) && !state.quit.load(std::memory_order_relaxed)) {
+                fd_set read_set;
+                FD_ZERO(&read_set);
+                FD_SET(connected, &read_set);
+                timeval timeout{};
+                timeout.tv_sec = 0;
+                timeout.tv_usec = 20000;
+                const int ready = select(gui_select_width(connected), &read_set, nullptr, nullptr, &timeout);
+                if (ready > 0 && FD_ISSET(connected, &read_set)) {
+                    char buffer[1024];
+                    const int received = recv(connected, buffer, static_cast<int>(sizeof(buffer)), 0);
+                    if (received <= 0) {
+                        break;
+                    }
+                    input_buffer.append(buffer, static_cast<std::size_t>(received));
+                    for (;;) {
+                        const std::size_t newline = input_buffer.find('\n');
+                        if (newline == std::string::npos) {
+                            break;
+                        }
+                        std::string line = input_buffer.substr(0, newline);
+                        input_buffer.erase(0, newline + 1);
+                        if (!line.empty() && line.back() == '\r') {
+                            line.pop_back();
+                        }
+                        try {
+                            apply_gui_control_line(state, recorder, recording_sample_rate, options, line);
+                        } catch (const std::exception&) {
+                        }
+                    }
+                } else if (ready < 0) {
+                    break;
+                }
+
+                const std::uint64_t now_us = jam2::monotonic_us();
+                if (now_us >= next_meter_us) {
+                    if (!send_meters(connected)) {
+                        break;
+                    }
+                    next_meter_us = now_us + 50000;
+                }
+            }
+        } catch (const std::exception&) {
+        }
+
+        std::lock_guard<std::mutex> lock(socket_mutex);
+        close_gui_socket(socket);
+        socket = kInvalidGuiSocket;
+    }
+
+    bool send_meters(GuiSocketHandle connected)
+    {
+        (void)audio_stream;
+        (void)capture_ring;
+        (void)playback_ring;
+        double input_peak = 0.0;
+        double send_peak = 0.0;
+        double monitor_peak = 0.0;
+        double remote_peak = 0.0;
+        double metronome_peak = 0.0;
+        double output_peak = 0.0;
+        std::uint64_t output_clipped_samples = 0;
+        if (audio_control != nullptr) {
+            input_peak = unit_from_ppm(audio_control->gui_input_peak_ppm.exchange(0, std::memory_order_relaxed));
+            send_peak = unit_from_ppm(audio_control->gui_send_peak_ppm.exchange(0, std::memory_order_relaxed));
+            monitor_peak = unit_from_ppm(audio_control->gui_monitor_peak_ppm.exchange(0, std::memory_order_relaxed));
+            remote_peak = unit_from_ppm(audio_control->gui_remote_peak_ppm.exchange(0, std::memory_order_relaxed));
+            metronome_peak = unit_from_ppm(audio_control->gui_metronome_peak_ppm.exchange(0, std::memory_order_relaxed));
+            output_peak = unit_from_ppm(audio_control->gui_output_peak_ppm.exchange(0, std::memory_order_relaxed));
+            output_clipped_samples = audio_control->output_clipped_samples.load(std::memory_order_relaxed);
+        }
+        std::ostringstream out;
+        out << std::fixed << std::setprecision(4)
+            << "meters input_peak=" << input_peak
+            << " send_peak=" << send_peak
+            << " monitor_peak=" << monitor_peak
+            << " remote_peak=" << remote_peak
+            << " metronome_peak=" << metronome_peak
+            << " output_peak=" << output_peak
+            << " output_clipped_samples=" << output_clipped_samples
+            << "\n";
+        return gui_send_all(connected, out.str());
+    }
+};
+
 void finalize_active_recording(OptionalAudioStream& audio, const Options& options, RuntimeState& state)
 {
     if (!audio.recorder) {
@@ -5166,6 +5566,15 @@ int run_listen(int argc, char** argv)
             ? static_cast<int>(std::lround(audio.stream->info().sample_rate))
             : options.sample_rate;
         CommandThread commands(options, audio.recorder.get(), recording_sample_rate);
+        GuiControlThread gui_control(
+            options,
+            commands.state,
+            audio.recorder.get(),
+            recording_sample_rate,
+            audio.stream.get(),
+            audio.capture_ring.get(),
+            audio.playback_ring.get(),
+            audio.control.get());
         start_startup_recording(audio, options, commands.state, recording_sample_rate);
         auto audio_stats = run_audio_packet_exchange(
             socket,
@@ -5273,6 +5682,15 @@ int run_connect(int argc, char** argv)
                     ? static_cast<int>(std::lround(audio.stream->info().sample_rate))
                     : options.sample_rate;
                 CommandThread commands(options, audio.recorder.get(), recording_sample_rate);
+                GuiControlThread gui_control(
+                    options,
+                    commands.state,
+                    audio.recorder.get(),
+                    recording_sample_rate,
+                    audio.stream.get(),
+                    audio.capture_ring.get(),
+                    audio.playback_ring.get(),
+                    audio.control.get());
                 start_startup_recording(audio, options, commands.state, recording_sample_rate);
                 auto audio_stats = run_audio_packet_exchange(
                     socket,

@@ -92,6 +92,12 @@ struct StreamControl {
     std::atomic<int> remote_peak_ppm{0};
     std::atomic<int> metronome_peak_ppm{0};
     std::atomic<int> output_peak_ppm{0};
+    std::atomic<int> gui_input_peak_ppm{0};
+    std::atomic<int> gui_send_peak_ppm{0};
+    std::atomic<int> gui_monitor_peak_ppm{0};
+    std::atomic<int> gui_remote_peak_ppm{0};
+    std::atomic<int> gui_metronome_peak_ppm{0};
+    std::atomic<int> gui_output_peak_ppm{0};
     std::atomic<std::uint64_t> output_clipped_samples{0};
 };
 

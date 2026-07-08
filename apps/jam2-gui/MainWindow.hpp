@@ -22,6 +22,8 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QTabWidget>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTimer>
 #include <QVector>
 #include <QWidget>
@@ -73,8 +75,13 @@ private:
     QJsonObject leaderSettingsMessage() const;
     void applyLeaderSettings(const QJsonObject& settings);
     bool selectedDeviceSupportsSampleRate(int sampleRate);
-    void launchJamProcess(const QStringList& args);
+    void launchJamProcess(QStringList args);
     void launchPendingJoin();
+    bool startGuiControlServer(QStringList& args);
+    void stopGuiControlServer();
+    void sendJamCommand(const QString& line);
+    void readGuiControlSocket();
+    void handleGuiControlLine(const QString& line);
     void updateRuntimeControls();
     void updateMixControls();
     void setMixRemotePeerVisible(bool visible);
@@ -256,6 +263,24 @@ private:
     QSlider* mixTrackLevelSlider_ = nullptr;
     QLabel* mixTrackLevelLabel_ = nullptr;
     LevelMeterWidget* mixTrackMeter_ = nullptr;
+    QWidget* mixStandaloneOutputRow_ = nullptr;
+    QWidget* mixJamRecordingRow_ = nullptr;
+    QWidget* mixLocalInputSection_ = nullptr;
+    QWidget* mixInputMeterRow_ = nullptr;
+    QWidget* mixSendRow_ = nullptr;
+    QWidget* mixSendMeterRow_ = nullptr;
+    QWidget* mixMonitorEnableRow_ = nullptr;
+    QWidget* mixMonitorRow_ = nullptr;
+    QWidget* mixMonitorMeterRow_ = nullptr;
+    QWidget* mixTrackSection_ = nullptr;
+    QWidget* mixTrackRow_ = nullptr;
+    QWidget* mixTrackMeterRow_ = nullptr;
+    QWidget* mixMetronomeSection_ = nullptr;
+    QWidget* mixMetronomeRow_ = nullptr;
+    QWidget* mixMetronomeMeterRow_ = nullptr;
+    QWidget* mixOutputSection_ = nullptr;
+    QWidget* mixOutputMeterRow_ = nullptr;
+    QWidget* mixRemotePeersSection_ = nullptr;
     QSlider* mixSendLevelSlider_ = nullptr;
     QLabel* mixSendLevelLabel_ = nullptr;
     LevelMeterWidget* mixInputMeter_ = nullptr;
@@ -302,7 +327,9 @@ private:
     int incomingTrackNextChunk_ = 0;
     QTimer trackTimelineTimer_;
     QTimer controlReconnectTimer_;
-    QTimer statusPollTimer_;
+    QTcpServer guiControlServer_;
+    QTcpSocket* guiControlSocket_ = nullptr;
+    QByteArray guiControlBuffer_;
     QString controlHost_;
     quint16 controlPort_ = 0;
     QString controlSessionHex_;

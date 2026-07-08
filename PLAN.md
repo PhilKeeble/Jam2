@@ -2,12 +2,6 @@
 
 This file tracks future work that is not already implemented. User-facing documentation lives in `docs/`, with only `README.md` and this plan kept at the repository root.
 
-## Direct Monitor
-
-Add optionl direct monitoring of your own input in the Mix view with a slider to control your own monitor volume. keep low latency on your own input as long as we can mix it in without impacting the latency of output. Tick box to enable or disable next to slider so it can be off. In CLI can be controlled with monitor on/off and monitor-level +/-.
-
-
-
 ## Shared Song Timing Ideas
 
 The GUI already has shared song grids and local track playback. A possible future pass is tighter timing between the song grid, metronome, and any shared backing track.
