@@ -151,6 +151,8 @@ class BenchmarkControlState:
                 "phase": self.active_phase,
                 "case": self.active_case,
             })
+        elif self.active_phase == "all_done":
+            self.send({"type": "all_done", "suite_id": self.suite_id})
 
     def detach_peer(self, peer):
         with self.condition:

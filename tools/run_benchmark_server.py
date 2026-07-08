@@ -49,7 +49,7 @@ def parse_args():
     parser.add_argument("--no-metronome-cases", action="store_true")
     parser.add_argument("--list-cases", action="store_true")
     parser.add_argument("--initial-client-timeout-s", type=float, default=0.0, help="wait for the first TCP benchmark client before publishing cases; 0 waits indefinitely")
-    parser.add_argument("--finish-grace-s", type=float, default=10.0, help="keep control server alive after publishing all_done")
+    parser.add_argument("--finish-grace-s", type=float, default=300.0, help="keep control server alive after publishing all_done")
     parser.add_argument("--clean", action="store_true")
     return parser.parse_args()
 

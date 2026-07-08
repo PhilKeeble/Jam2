@@ -126,6 +126,7 @@ Useful server args:
 - `--bind-http HOST:PORT`: optional HTTP diagnostic bind for `current.json`. Disabled by default and not used for uploads.
 - `--initial-client-timeout-s N`: optional timeout for the initial TCP client wait. Default `0` waits indefinitely.
 - `--post-listener-upload-grace-s N`: optional timeout for client artifact upload after the server-side Jam2 process exits. Default `0` waits indefinitely.
+- `--finish-grace-s N`: wait for the client to acknowledge `all_done` after the last case. Default `300`.
 - `--logs PATH`: output folder. Default: `tools\benchmark_logs`.
 - `--stream-ms N`: stream duration per case. Default: `30000`.
 - `--repeats N`: repeat count per case. Default: `1`.
