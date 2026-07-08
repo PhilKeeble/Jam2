@@ -1930,7 +1930,7 @@ QWidget* MainWindow::buildSessionPage()
     const QList<QWidget*> sessionDialogWidgets{
         modeBox_, jam2PathEdit_, bindHostEdit_, portSpin_, publicHostEdit_, connectUrlEdit_,
         generatedUrlEdit_, stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, waitMsSpin_,
-        streamMsSpin_, streamLingerMsSpin_, statsCheck_, statsWarmupMsSpin_, logStatsEdit_,
+        streamMsSpin_, streamLingerMsSpin_, statsCheck_, guiControlCheck_, statsWarmupMsSpin_, logStatsEdit_,
         socketSendBufferSpin_, socketRecvBufferSpin_, profileBox_, osPriorityBox_, deviceBox_, inputChannelsEdit_,
         outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_, prefillSpin_,
         playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, driftCorrectionCheck_,
