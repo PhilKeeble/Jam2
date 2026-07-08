@@ -96,9 +96,13 @@ Audio probe coverage:
 
 ## Two-Host Static Benchmarks
 
-`tools\run_benchmark_server.py` runs the listen/server side of the static benchmark suite. It coordinates lifecycle state and client artifact upload over a direct TCP control connection, records server stems, waits for client artifacts, then writes the final summary/CSV/JSON. An HTTP `current.json` diagnostic endpoint is available only when explicitly enabled.
+`tools\run_benchmark_server.py` runs the listen/server side of the static benchmark suite. It coordinates lifecycle state and client artifact upload over one direct TCP control connection, records server stems, waits for client artifacts, then writes the final summary/CSV/JSON. Jam2 UDP audio still travels directly between the two Jam2 child processes and is never relayed by the benchmark control connection.
 
 The server waits indefinitely for the first TCP benchmark client before publishing any case by default, so the listener machine can be started first and the client can join when ready.
+
+Each offered run carries a `suite_id`, `case_id`, `run_index`, and `attempt_id`. If the client TCP connection drops before the client reports that its Jam2 child finished, the server abandons that attempt and retries the same logical run with a new `attempt_id`. The server and client clean that run's local artifact folder before retrying, so stale files do not collide with the new attempt. If TCP drops after the client finished Jam2, the server waits for the client to reconnect and upload the already completed artifacts.
+
+Jam2 itself rejects a run if the active audio device sample rate differs from the requested `--sample-rate`, so a device that silently starts at another rate becomes a clear child-process failure instead of misleading benchmark warnings.
 
 Run this on the listen/server machine:
 
@@ -118,6 +122,12 @@ Run a short tone benchmark pass. This includes symmetric tone cases plus targete
 python tools\run_benchmark_server.py --server-audio-device 5 --sample-rate 44100 --signals tone-440 --no-metronome-cases --stream-ms 10000 --clean
 ```
 
+Run one short end-to-end case for control/upload testing:
+
+```powershell
+python tools\run_benchmark_server.py --server-audio-device 5 --sample-rate 44100 --signals tone-440 --no-metronome-cases --stream-ms 5000 --case fast_os_priority_off_tone-440 --clean
+```
+
 Useful server args:
 
 - `--server-audio-device`: server/listen-side audio device id.
@@ -125,7 +135,9 @@ Useful server args:
 - `--bind-control HOST:PORT`: TCP lifecycle control bind. Default: `0.0.0.0:49000`. This intentionally matches the default Jam2 UDP audio port number; TCP control and UDP audio are separate sockets.
 - `--bind-http HOST:PORT`: optional HTTP diagnostic bind for `current.json`. Disabled by default and not used for uploads.
 - `--initial-client-timeout-s N`: optional timeout for the initial TCP client wait. Default `0` waits indefinitely.
+- `--client-upload-timeout-s N`: active-case timeout while waiting for accept/connect/finish/upload. Default `0` waits indefinitely.
 - `--post-listener-upload-grace-s N`: optional timeout for client artifact upload after the server-side Jam2 process exits. Default `0` waits indefinitely.
+- `--case-retry-limit N`: retry count after client TCP disconnects before the Jam2 child has finished. Default `3`; `0` retries indefinitely.
 - `--finish-grace-s N`: wait for the client to acknowledge `all_done` after the last case. Default `300`.
 - `--logs PATH`: output folder. Default: `tools\benchmark_logs`.
 - `--stream-ms N`: stream duration per case. Default: `30000`.
@@ -137,7 +149,7 @@ Useful server args:
 
 ## Two-Host Benchmark Client
 
-`tools\run_benchmark_client.py` connects to the benchmark TCP control plane, runs the connect-side Jam2 process for each offered case, records client stems, analyzes local WAVs, and uploads the artifacts back on the same TCP connection. The client reconnects the control channel if it drops; every run and upload carries a suite/case/run/attempt identity so stale results are rejected instead of being matched to a later case.
+`tools\run_benchmark_client.py` connects to the benchmark TCP control plane, runs the connect-side Jam2 process for each offered case, records client stems, analyzes local WAVs, and uploads the artifacts back on the same TCP connection. The client reconnects the control channel if it drops; every run and upload carries a suite/case/run/attempt identity so stale results are rejected instead of being matched to a later case. If the server retries a run with a new attempt while the client still has an old Jam2 child running, the client terminates the stale child and follows the new offer.
 
 Run this on the client/connect machine:
 
@@ -158,8 +170,12 @@ Useful client args:
 - `--client-audio-device`: client/connect-side audio device id.
 - `--sample-rate`: audio sample rate.
 - `--logs PATH`: local output folder. Default: `tools\benchmark_logs`.
-- `--poll-ms N`: polling interval. Default: `500`.
+- `--poll-ms N`: control-loop wait interval while idle. Default: `500`.
 - `--timeout-s N`: stop waiting after N seconds. `0` waits forever.
+- `--finish-idle-s N`: optional fallback exit if the server disappears after completed work. Default `0` waits for `all_done`.
+- `--post-upload-pause-s N`: wait after each upload before accepting the next offered case. Default `5`.
+- `--case-timeout-s N`: kill a Jam2 child after this many seconds. Default `0` derives from stream/wait time.
+- `--use-published-audio-host`: use the Jam2 URL host exactly as published by the server instead of rewriting it to the `--server` host.
 - `--clean`: remove local artifacts after upload.
 - `--network-profile auto|wired|wifi|unknown`: client network metadata.
 
@@ -171,6 +187,13 @@ Benchmark outputs on the server:
 - per-case server/client `recording\*.wav`
 - per-case server/client `analysis.json`
 - per-case server/client stdout/stderr/stats artifacts
+
+Useful result tags:
+
+- `control_disconnect`: TCP control disconnected during the active case. If this appears with valid artifacts, the upload still completed.
+- `active_sample_rate_mismatch` or `*_active_sample_rate_differs`: a device did not run at the requested sample rate. Current Jam2 builds should fail hard before streaming in this case.
+- `jitter_buffer_dropped_packets`, `jitter_buffer_dropped_frames`, `missing_audio_frames`, `playback_dropped_frames`, `underrun_high`: raw audio-path instability measurements from the Jam2 child stats.
+- `their-input_tone_frequency_mismatch`: the remote received recording did not contain the expected 440 Hz tone. Check sample-rate tags first, then network/dropout stats.
 
 Tone coverage:
 

@@ -17,7 +17,7 @@ from jam2_tooling import copy_final_csv, default_jam2_path, ensure_dir, fail, pr
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run Jam2 static benchmark cases by polling a benchmark server.")
+    parser = argparse.ArgumentParser(description="Run Jam2 static benchmark cases from a benchmark TCP control server.")
     parser.add_argument("--server", required=True, help="Server host or diagnostic HTTP URL, for example 192.168.1.50")
     parser.add_argument("--control", default="", help="TCP control endpoint; defaults to SERVER host with port 49000")
     parser.add_argument("--jam2", default=str(default_jam2_path()))
@@ -27,7 +27,7 @@ def parse_args():
     parser.add_argument("--poll-ms", type=int, default=500)
     parser.add_argument("--timeout-s", type=int, default=0)
     parser.add_argument("--finish-idle-s", type=float, default=0.0, help="optional fallback exit if the server disappears after completed work; 0 waits for all_done")
-    parser.add_argument("--post-upload-pause-s", type=float, default=5.0, help="wait after each upload before polling for the next case")
+    parser.add_argument("--post-upload-pause-s", type=float, default=5.0, help="wait after each upload before accepting the next offered case")
     parser.add_argument("--case-timeout-s", type=float, default=0.0, help="kill a Jam2 case after this many seconds; 0 derives from stream/wait time")
     parser.add_argument("--use-published-audio-host", action="store_true", help="use the Jam2 URL host exactly as published by the server")
     parser.add_argument("--clean", action="store_true", help="delete local artifacts after successful upload")
