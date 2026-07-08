@@ -11,7 +11,7 @@ import zipfile
 from pathlib import Path
 
 from jam2_audio_analysis import analyze_recording_dir
-from jam2_benchmark_control import BenchmarkControlClient, control_endpoint_from_server_url
+from jam2_benchmark_control import BenchmarkControlClient, control_endpoint_from_server_url, same_run
 from jam2_harness import rewrite_jam_url_endpoint
 from jam2_tooling import copy_final_csv, default_jam2_path, ensure_dir, fail, print_flush, repo_root, write_json
 
@@ -105,6 +105,15 @@ def _copy_stream(pipe, handle):
         pipe.close()
 
 
+def terminate_process(process):
+    process.terminate()
+    try:
+        return process.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        return process.wait(timeout=5.0)
+
+
 def send_control(control, message):
     if control is None:
         return False
@@ -119,7 +128,15 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
     signal = current["signal"]
     server_signal = current.get("server_signal", signal)
     client_signal = current.get("client_signal", signal)
-    output_dir = ensure_dir(Path(logs) / case_id / "client" / f"run_{run_index:02d}")
+    output_dir = Path(logs) / case_id / "client" / f"run_{run_index:02d}"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    zip_path = output_dir.with_suffix(".zip")
+    try:
+        zip_path.unlink()
+    except OSError:
+        pass
+    output_dir = ensure_dir(output_dir)
     csv_dir = ensure_dir(output_dir / "csv_raw")
     recording_dir = ensure_dir(output_dir / "recording")
     stdout_path = output_dir / "stdout.txt"
@@ -183,20 +200,36 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
         stderr_thread = threading.Thread(target=_copy_stream, args=(process.stderr, stderr), daemon=True)
         stdout_thread.start()
         stderr_thread.start()
-        try:
-            return_code = process.wait(timeout=timeout_s)
-            timed_out = False
-        except subprocess.TimeoutExpired:
-            print_flush(f"[client] case timeout after {timeout_s:g}s; terminating Jam2")
-            timed_out = True
-            process.terminate()
-            try:
-                return_code = process.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                return_code = process.wait(timeout=5.0)
+        timed_out = False
+        stale_retry = False
+        deadline = time.monotonic() + timeout_s
+        while True:
+            return_code = process.poll()
+            if return_code is not None:
+                break
+            if time.monotonic() >= deadline:
+                print_flush(f"[client] case timeout after {timeout_s:g}s; terminating Jam2")
+                timed_out = True
+                return_code = terminate_process(process)
+                break
+            if control is not None:
+                message = control.wait_message(timeout_s=0.25)
+                if message is not None:
+                    if message.get("type") == "case.offer" and not same_run(message.get("case", {}), metadata):
+                        control.inbox.put(message)
+                        print_flush(
+                            f"[client] received new server attempt while {case_id} run {run_index} was active; "
+                            "terminating stale Jam2 child")
+                        stale_retry = True
+                        return_code = terminate_process(process)
+                        break
+                    control.inbox.put(message)
+            else:
+                time.sleep(0.25)
         stdout_thread.join(timeout=1.0)
         stderr_thread.join(timeout=1.0)
+    if stale_retry:
+        return "retry_offer"
     copied_csv = copy_final_csv(csv_dir, output_dir)
     analysis = analyze_recording_dir(
         recording_dir,
@@ -222,7 +255,6 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
         "timed_out": timed_out,
         "client_time_ms": int(time.time() * 1000),
     })
-    zip_path = output_dir.with_suffix(".zip")
     zip_dir(output_dir, zip_path)
     print_flush(f"[client] Uploading results for {case_id} run {run_index} over TCP control")
     uploaded = control.upload_artifact(metadata, zip_path) if control is not None else False
@@ -321,6 +353,8 @@ def main():
                 jam2, current, args.client_audio_device, args.sample_rate,
                 logs, args.server, args.clean, network_type, args.case_timeout_s,
                 args.use_published_audio_host, control)
+            if rc == "retry_offer":
+                continue
             if rc != 0:
                 return rc
             completed.add(identity_key)

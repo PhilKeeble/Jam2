@@ -25,6 +25,10 @@ from jam2_tooling import copy_final_csv, default_jam2_path, ensure_dir, fail, pr
 CLIENT_UPLOAD_TIMEOUT_S = 0
 
 
+class RetryCaseRun(Exception):
+    pass
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Run a static recorded Jam2 benchmark suite.")
     parser.add_argument("--jam2", default=str(default_jam2_path()))
@@ -37,6 +41,7 @@ def parse_args():
     parser.add_argument("--public-audio-host", default="", help="optional legacy override for the host in the published Jam2 URL")
     parser.add_argument("--client-upload-timeout-s", type=float, default=0.0, help="wait for client upload; 0 waits indefinitely")
     parser.add_argument("--post-listener-upload-grace-s", type=float, default=0.0, help="wait this long for client results after the server-side Jam2 process exits; 0 waits indefinitely")
+    parser.add_argument("--case-retry-limit", type=int, default=3, help="retry a case this many times after client TCP disconnect before UDP completion; 0 retries indefinitely")
     parser.add_argument("--stream-ms", type=int, default=30000)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--signals", default="silence,tone-440,pulse-1s")
@@ -214,6 +219,7 @@ def wait_for_case_progress_control(logs_dir, case_id, run_index, listener, publi
     client_finished = False
     printed_accept_wait = False
     printed_audio_wait = False
+    upload_expected = False
     printed_upload_wait = False
     last_peer_connected = control_state.snapshot().get("peer_connected", False)
     while True:
@@ -229,7 +235,15 @@ def wait_for_case_progress_control(logs_dir, case_id, run_index, listener, publi
             if peer_connected:
                 print_flush(f"[server] TCP benchmark client reconnected peer={snapshot.get('peer_id') or '-'}")
             else:
-                print_flush("[server] TCP benchmark client disconnected during active case; waiting for reconnect")
+                if client_finished or upload_expected:
+                    print_flush("[server] TCP benchmark client disconnected after Jam2 finished; waiting for reconnect and artifact upload")
+                else:
+                    print_flush("[server] TCP benchmark client disconnected before Jam2 finished; retrying this run after reconnect")
+                    return None, connected, "control_disconnect_before_finish", {
+                        "accepted": accepted,
+                        "client_started": client_started,
+                        "client_finished": client_finished,
+                    }
             last_peer_connected = peer_connected
         if control_state.has_message("case.accept", current):
             if not accepted:
@@ -243,6 +257,7 @@ def wait_for_case_progress_control(logs_dir, case_id, run_index, listener, publi
             if not client_finished:
                 print_flush(f"[server] client finished Jam2 for {case_id} run {run_index}; waiting for artifact upload")
             client_finished = True
+            upload_expected = True
         if not accepted and not printed_accept_wait:
             print_flush(f"[server] waiting for client to accept {case_id} run {run_index}")
             printed_accept_wait = True
@@ -256,10 +271,16 @@ def wait_for_case_progress_control(logs_dir, case_id, run_index, listener, publi
             current["control_phase"] = control_state.snapshot().get("active_phase", "")
             write_json(Path(public_dir) / "current.json", current)
             print_flush(f"[server] Jam2 UDP audio connected for {case_id} run {run_index}")
-        if connected and not printed_upload_wait:
+        if upload_expected and not printed_upload_wait:
             print_flush(f"[server] waiting for TCP artifact upload for {case_id} run {run_index}")
             printed_upload_wait = True
         if listener.poll() is not None:
+            if not upload_expected:
+                print_flush(f"[server] server-side Jam2 finished for {case_id} run {run_index}; waiting for client finish/upload state")
+            upload_expected = True
+            if not printed_upload_wait:
+                print_flush(f"[server] waiting for TCP artifact upload for {case_id} run {run_index}")
+                printed_upload_wait = True
             return None, connected, "listener_exit", {
                 "accepted": accepted,
                 "client_started": client_started,
@@ -399,7 +420,10 @@ def write_outputs(logs_dir, results):
 
 
 def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, run_index, audio_bind, public_audio_host, client_upload_timeout_s, post_listener_upload_grace_s, suite_id, control_state=None):
-    output_dir = ensure_dir(Path(logs_dir) / case.case_id / "server" / f"run_{run_index:02d}")
+    output_dir = Path(logs_dir) / case.case_id / "server" / f"run_{run_index:02d}"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir = ensure_dir(output_dir)
     recording_dir = ensure_dir(output_dir / "recording")
     listener, paths = start_listener(
         jam2,
@@ -496,6 +520,12 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
             listener.terminate()
             server_rc = listener.poll()
     else:
+        if progress_reason == "control_disconnect_before_finish":
+            if listener.poll() is None:
+                listener.terminate()
+            if control_state is not None:
+                control_state.clear_case()
+            raise RetryCaseRun()
         if progress_reason == "listener_exit":
             if post_listener_upload_grace_s and post_listener_upload_grace_s > 0:
                 print_flush(
@@ -589,6 +619,24 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
     return result
 
 
+def retry_exhausted_result(case, run_index, suite_id):
+    return evaluate_result({
+        "case_id": case.case_id,
+        "run_index": run_index,
+        "profile": case.profile.name,
+        "profile_values": case.profile.metadata(),
+        "server_args": list(case.server_args),
+        "client_args": list(case.client_args),
+        "signal": case.signal,
+        "server_signal": case.server_signal,
+        "client_signal": case.client_signal,
+        "server_return_code": -1,
+        "client_return_code": -1,
+        "suite_id": suite_id,
+        "tags": ["client_disconnected_before_finish", "case_retry_exhausted"],
+    })
+
+
 def main():
     args = parse_args()
     signals = tuple(item.strip() for item in args.signals.split(",") if item.strip())
@@ -656,15 +704,30 @@ def main():
         print_flush(f"[server] TCP benchmark client ready peer={control_state.snapshot().get('peer_id') or '-'}")
         for case in cases:
             for run_index in range(1, case.repeats + 1):
-                if not control_state.snapshot().get("peer_connected", False):
-                    print_flush("[server] waiting for TCP benchmark client to reconnect before next case")
-                    control_state.wait_for_peer(0.0)
-                    print_flush(f"[server] TCP benchmark client ready peer={control_state.snapshot().get('peer_id') or '-'}")
-                results.append(run_one_case(
-                    jam2, args.server_audio_device, args.sample_rate,
-                    logs_dir, public_dir, case, run_index,
-                    args.audio_bind, public_audio_host, args.client_upload_timeout_s,
-                    args.post_listener_upload_grace_s, suite_id, control_state))
+                retry_count = 0
+                while True:
+                    if not control_state.snapshot().get("peer_connected", False):
+                        print_flush("[server] waiting for TCP benchmark client to reconnect before next case")
+                        control_state.wait_for_peer(0.0)
+                        print_flush(f"[server] TCP benchmark client ready peer={control_state.snapshot().get('peer_id') or '-'}")
+                    try:
+                        results.append(run_one_case(
+                            jam2, args.server_audio_device, args.sample_rate,
+                            logs_dir, public_dir, case, run_index,
+                            args.audio_bind, public_audio_host, args.client_upload_timeout_s,
+                            args.post_listener_upload_grace_s, suite_id, control_state))
+                        break
+                    except RetryCaseRun:
+                        retry_count += 1
+                        if args.case_retry_limit > 0 and retry_count > args.case_retry_limit:
+                            print_flush(
+                                f"[server] retry limit exceeded for {case.case_id} run {run_index} "
+                                "after client disconnected before Jam2 finished")
+                            results.append(retry_exhausted_result(case, run_index, suite_id))
+                            break
+                        print_flush(
+                            f"[server] will retry {case.case_id} run {run_index} after TCP client reconnect "
+                            f"(retry {retry_count})")
                 write_outputs(logs_dir, results)
         write_json(public_dir / "current.json", {"status": "all_done", "suite_id": suite_id})
         control_state.mark_all_done()
