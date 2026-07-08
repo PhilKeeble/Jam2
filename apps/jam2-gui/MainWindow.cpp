@@ -1810,6 +1810,8 @@ QWidget* MainWindow::buildSessionPage()
     streamLingerMsSpin_->setValue(100);
     statsCheck_ = new QCheckBox(QStringLiteral("Periodic stats"), page);
     statsCheck_->setChecked(true);
+    guiControlCheck_ = new QCheckBox(QStringLiteral("GUI control socket"), page);
+    guiControlCheck_->setChecked(true);
     statsWarmupMsSpin_ = new QSpinBox(page);
     statsWarmupMsSpin_->setRange(0, 600000);
     statsWarmupMsSpin_->setValue(3000);
@@ -2956,8 +2958,13 @@ void MainWindow::launchJamProcess(QStringList args)
     if (stopTrackMetronomeButton_) {
         stopTrackMetronomeButton_->setEnabled(false);
     }
-    if (!startGuiControlServer(args)) {
-        appendLog(QStringLiteral("local mixer control unavailable; falling back to stdin commands"));
+    if (guiControlCheck_ == nullptr || guiControlCheck_->isChecked()) {
+        if (!startGuiControlServer(args)) {
+            appendLog(QStringLiteral("local mixer control unavailable; falling back to stdin commands"));
+        }
+    } else {
+        stopGuiControlServer();
+        appendLog(QStringLiteral("local mixer control disabled; using stdin commands only"));
     }
     jam2_.start(jam2PathEdit_->text(), args);
     appendLog(QStringLiteral("starting: %1 %2").arg(jam2PathEdit_->text(), args.join(QLatin1Char(' '))));
@@ -3085,7 +3092,7 @@ void MainWindow::showStartJamDialog()
         stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, noStunCheck_, profileBox_, deviceBox_,
         inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_,
         prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_,
-        streamMsSpin_, streamLingerMsSpin_, statsCheck_, statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
+        streamMsSpin_, streamLingerMsSpin_, statsCheck_, guiControlCheck_, statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
         socketRecvBufferSpin_, osPriorityBox_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
         driftMaxCorrectionSpin_, sampleTimePlayoutCheck_, playoutDelaySpin_, jitterBufferSpin_,
         jitterBufferMaxSpin_, adaptiveCushionCheck_, adaptiveTargetSpin_, adaptiveMinSpin_,
@@ -3133,6 +3140,7 @@ void MainWindow::showStartJamDialog()
     advancedForm->addRow(QStringLiteral("Stream ms"), streamMsSpin_);
     advancedForm->addRow(QStringLiteral("Stream linger ms"), streamLingerMsSpin_);
     advancedForm->addRow(QString(), statsCheck_);
+    advancedForm->addRow(QString(), guiControlCheck_);
     advancedForm->addRow(QStringLiteral("Stats warmup ms"), statsWarmupMsSpin_);
     advancedForm->addRow(QStringLiteral("Log stats folder"), logStatsEdit_);
     advancedForm->addRow(QStringLiteral("Socket send buffer"), socketSendBufferSpin_);
@@ -3196,7 +3204,7 @@ void MainWindow::showStartJamDialog()
         stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, noStunCheck_, profileBox_, deviceBox_,
         inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_,
         prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_,
-        streamMsSpin_, streamLingerMsSpin_, statsCheck_, statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
+        streamMsSpin_, streamLingerMsSpin_, statsCheck_, guiControlCheck_, statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
         socketRecvBufferSpin_, osPriorityBox_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
         driftMaxCorrectionSpin_, sampleTimePlayoutCheck_, playoutDelaySpin_, jitterBufferSpin_,
         jitterBufferMaxSpin_, adaptiveCushionCheck_, adaptiveTargetSpin_, adaptiveMinSpin_,
@@ -3227,7 +3235,7 @@ void MainWindow::showJoinJamDialog()
     auto* layout = new QVBoxLayout(content);
     const QList<QWidget*> visibleWidgets{
         connectUrlEdit_, jam2PathEdit_, deviceBox_, inputChannelsEdit_, outputChannelsEdit_,
-        statsCheck_, statsWarmupMsSpin_, logStatsEdit_, osPriorityBox_,
+        statsCheck_, guiControlCheck_, statsWarmupMsSpin_, logStatsEdit_, osPriorityBox_,
     };
     for (QWidget* widget : visibleWidgets) {
         widget->show();
@@ -3253,6 +3261,7 @@ void MainWindow::showJoinJamDialog()
     auto* statsForm = new QFormLayout();
     statsForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     statsForm->addRow(QString(), statsCheck_);
+    statsForm->addRow(QString(), guiControlCheck_);
     statsForm->addRow(QStringLiteral("Stats warmup ms"), statsWarmupMsSpin_);
     statsForm->addRow(QStringLiteral("Log stats folder"), logStatsEdit_);
     statsForm->addRow(QStringLiteral("OS priority"), osPriorityBox_);
@@ -3282,7 +3291,7 @@ void MainWindow::showJoinJamDialog()
     const int result = dialog.exec();
     const QList<QWidget*> joinWidgets{
         connectUrlEdit_, jam2PathEdit_, deviceBox_, inputChannelsEdit_, outputChannelsEdit_,
-        statsCheck_, statsWarmupMsSpin_, logStatsEdit_, osPriorityBox_,
+        statsCheck_, guiControlCheck_, statsWarmupMsSpin_, logStatsEdit_, osPriorityBox_,
     };
     for (QWidget* widget : joinWidgets) {
         widget->setParent(this);

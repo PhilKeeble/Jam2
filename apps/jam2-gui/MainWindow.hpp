@@ -171,6 +171,7 @@ private:
     QSpinBox* streamMsSpin_ = nullptr;
     QSpinBox* streamLingerMsSpin_ = nullptr;
     QCheckBox* statsCheck_ = nullptr;
+    QCheckBox* guiControlCheck_ = nullptr;
     QSpinBox* statsWarmupMsSpin_ = nullptr;
     QLineEdit* logStatsEdit_ = nullptr;
     QSpinBox* socketSendBufferSpin_ = nullptr;
