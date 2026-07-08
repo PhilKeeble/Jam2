@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -415,6 +416,30 @@ void update_peak(std::atomic<int>& peak, int candidate)
     }
 }
 
+int i32_peak_ppm(std::span<const std::int32_t> samples)
+{
+    std::uint32_t peak = 0;
+    for (std::int32_t sample : samples) {
+        const std::uint32_t abs_sample = sample == (std::numeric_limits<std::int32_t>::min)() ?
+            static_cast<std::uint32_t>((std::numeric_limits<std::int32_t>::max)()) :
+            static_cast<std::uint32_t>(std::abs(sample));
+        peak = (std::max)(peak, abs_sample);
+    }
+    const double normalized = static_cast<double>(peak) / 2147483647.0;
+    return static_cast<int>(std::clamp(normalized, 0.0, 1.0) * 1000000.0);
+}
+
+std::int32_t scale_i32_sample(std::int32_t sample, double level)
+{
+    const double scaled = static_cast<double>(sample) * level;
+    return static_cast<std::int32_t>(std::clamp(scaled, -2147483648.0, 2147483647.0));
+}
+
+void observe_peak(std::atomic<int>& peak, std::span<const std::int32_t> samples)
+{
+    update_peak(peak, i32_peak_ppm(samples));
+}
+
 void meter_buffer_switch(long double_buffer_index, ASIOBool)
 {
     MeterContext* context = g_meter_context;
@@ -616,8 +641,55 @@ void apply_remote_level(DuplexContext& context, std::span<std::int32_t> output)
     }
     const double level = static_cast<double>(std::clamp(level_ppm, 0, 1000000)) / 1000000.0;
     for (std::int32_t& sample : output) {
-        const double scaled = static_cast<double>(sample) * level;
-        sample = static_cast<std::int32_t>(std::clamp(scaled, -2147483648.0, 2147483647.0));
+        sample = scale_i32_sample(sample, level);
+    }
+}
+
+std::int32_t mix_i32_samples(std::int32_t a, std::int32_t b);
+
+void mix_local_monitor(DuplexContext& context, std::span<std::int32_t> output, std::span<const std::int32_t> input)
+{
+    if (context.control == nullptr ||
+        !context.control->local_monitor_enabled.load(std::memory_order_relaxed) ||
+        input.empty()) {
+        if (context.control != nullptr) {
+            context.control->monitor_peak_ppm.store(0, std::memory_order_relaxed);
+        }
+        return;
+    }
+    const int level_ppm = context.control->local_monitor_level_ppm.load(std::memory_order_relaxed);
+    if (level_ppm <= 0) {
+        context.control->monitor_peak_ppm.store(0, std::memory_order_relaxed);
+        return;
+    }
+    const double level = static_cast<double>(std::clamp(level_ppm, 0, 1000000)) / 1000000.0;
+    std::uint32_t monitor_peak = 0;
+    const std::size_t frames = (std::min)(output.size(), input.size());
+    for (std::size_t i = 0; i < frames; ++i) {
+        const std::int32_t monitored = scale_i32_sample(input[i], level);
+        const std::uint32_t abs_sample = monitored == (std::numeric_limits<std::int32_t>::min)() ?
+            static_cast<std::uint32_t>((std::numeric_limits<std::int32_t>::max)()) :
+            static_cast<std::uint32_t>(std::abs(monitored));
+        monitor_peak = (std::max)(monitor_peak, abs_sample);
+        output[i] = mix_i32_samples(output[i], monitored);
+    }
+    const double normalized = static_cast<double>(monitor_peak) / 2147483647.0;
+    context.control->monitor_peak_ppm.store(
+        static_cast<int>(std::clamp(normalized, 0.0, 1.0) * 1000000.0),
+        std::memory_order_relaxed);
+}
+
+void observe_output_peak(DuplexContext& context, std::span<const std::int32_t> output)
+{
+    if (context.control == nullptr) {
+        return;
+    }
+    observe_peak(context.control->output_peak_ppm, output);
+    for (std::int32_t sample : output) {
+        if (sample == (std::numeric_limits<std::int32_t>::min)() ||
+            sample == (std::numeric_limits<std::int32_t>::max)()) {
+            context.control->output_clipped_samples.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 }
 
@@ -682,6 +754,9 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
         context->capture_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
         auto generated = std::span<std::int32_t>(context->capture_scratch.data(), static_cast<std::size_t>(context->buffer_size));
         fill_test_input(*context, generated);
+        if (context->control != nullptr) {
+            observe_peak(context->control->input_peak_ppm, generated);
+        }
         context->capture->push(std::span<const std::int32_t>(generated.data(), generated.size()));
         if (context->recorder_my_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
             std::copy(generated.begin(), generated.end(), context->recorder_my_input_scratch.begin());
@@ -694,6 +769,7 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
         if (context->inputs.size() == 1) {
             const auto* input = static_cast<const std::int32_t*>(context->inputs[0]->buffers[double_buffer_index]);
             captured_input = std::span<const std::int32_t>(input, static_cast<std::size_t>(context->buffer_size));
+            std::copy(captured_input.begin(), captured_input.end(), context->capture_scratch.begin());
             context->capture->push(captured_input);
         } else {
             for (long i = 0; i < context->buffer_size; ++i) {
@@ -715,6 +791,9 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
                 static_cast<std::size_t>(context->buffer_size));
             context->capture->push(captured_input);
         }
+        if (context->control != nullptr) {
+            observe_peak(context->control->input_peak_ppm, captured_input);
+        }
         if (context->recorder_my_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
             std::copy(captured_input.begin(), captured_input.end(), context->recorder_my_input_scratch.begin());
         }
@@ -732,15 +811,23 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
                 std::fill(mono, mono + context->buffer_size, 0);
             }
         }
+        auto playback = std::span<std::int32_t>(mono, static_cast<std::size_t>(context->buffer_size));
         if (context->playback_prefilled.load(std::memory_order_relaxed)) {
-            auto playback = std::span<std::int32_t>(mono, static_cast<std::size_t>(context->buffer_size));
             pop_resampled_playback(*context, playback);
             apply_remote_level(*context, playback);
         }
-        auto playback = std::span<std::int32_t>(mono, static_cast<std::size_t>(context->buffer_size));
+        if (context->control != nullptr) {
+            observe_peak(context->control->remote_peak_ppm, playback);
+        }
         if (context->recorder_their_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
             std::copy(playback.begin(), playback.end(), context->recorder_their_input_scratch.begin());
         }
+        mix_local_monitor(
+            *context,
+            playback,
+            std::span<const std::int32_t>(
+                context->capture_scratch.data(),
+                std::min<std::size_t>(context->capture_scratch.size(), playback.size())));
         const std::uint64_t audio_frame_start = context->metronome_sample_counter;
         mix_metronome_click(
             *context,
@@ -748,6 +835,14 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
             std::span<std::int32_t>(
                 context->recorder_metronome_scratch.data(),
                 std::min<std::size_t>(context->recorder_metronome_scratch.size(), playback.size())));
+        if (context->control != nullptr) {
+            observe_peak(
+                context->control->metronome_peak_ppm,
+                std::span<const std::int32_t>(
+                    context->recorder_metronome_scratch.data(),
+                    std::min<std::size_t>(context->recorder_metronome_scratch.size(), playback.size())));
+            observe_output_peak(*context, playback);
+        }
         if (context->recorder != nullptr &&
             context->recorder_inputs_mix_scratch.size() >= playback.size() &&
             context->recorder_my_input_scratch.size() >= playback.size() &&

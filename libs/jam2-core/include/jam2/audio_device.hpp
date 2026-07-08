@@ -76,6 +76,9 @@ struct StreamControl {
     std::atomic<std::uint64_t> metronome_accent_mask_high{0};
     std::atomic<int> metronome_level_ppm{200000};
     std::atomic<int> remote_level_ppm{1000000};
+    std::atomic<bool> local_monitor_enabled{false};
+    std::atomic<int> local_monitor_level_ppm{250000};
+    std::atomic<int> send_level_ppm{1000000};
     std::atomic<int> playback_ratio_ppm{1000000};
     std::atomic<int> metronome_mode{0};
     std::atomic<bool> leader_audio_local_click{false};
@@ -83,6 +86,13 @@ struct StreamControl {
     std::atomic<bool> metronome_epoch_valid{false};
     std::atomic<int> test_input_mode{0};
     std::atomic<int> test_input_level_ppm{125000};
+    std::atomic<int> input_peak_ppm{0};
+    std::atomic<int> send_peak_ppm{0};
+    std::atomic<int> monitor_peak_ppm{0};
+    std::atomic<int> remote_peak_ppm{0};
+    std::atomic<int> metronome_peak_ppm{0};
+    std::atomic<int> output_peak_ppm{0};
+    std::atomic<std::uint64_t> output_clipped_samples{0};
 };
 
 enum class InputChannels {

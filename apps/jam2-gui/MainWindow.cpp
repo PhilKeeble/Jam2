@@ -506,6 +506,50 @@ private:
     bool gridVisible_ = true;
 };
 
+class LevelMeterWidget : public QWidget {
+public:
+    explicit LevelMeterWidget(QWidget* parent = nullptr)
+        : QWidget(parent)
+    {
+        setMinimumWidth(180);
+        setFixedHeight(18);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    }
+
+    void setLevel(double level)
+    {
+        level_ = qBound(0.0, level, 1.0);
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, false);
+        const QRect bar = rect().adjusted(0, 2, 0, -2);
+        painter.fillRect(bar, QColor(28, 32, 36));
+        const int safeEnd = bar.left() + static_cast<int>(bar.width() * 0.50);
+        const int warnEnd = bar.left() + static_cast<int>(bar.width() * 0.89);
+        painter.fillRect(QRect(QPoint(safeEnd, bar.top()), QPoint(warnEnd, bar.bottom())), QColor(72, 56, 24));
+        painter.fillRect(QRect(QPoint(warnEnd, bar.top()), QPoint(bar.right(), bar.bottom())), QColor(76, 30, 30));
+
+        const int fillWidth = qBound(0, static_cast<int>(std::llround(level_ * static_cast<double>(bar.width()))), bar.width());
+        QColor fill = QColor(94, 188, 132);
+        if (level_ >= 0.891) {
+            fill = QColor(224, 74, 74);
+        } else if (level_ >= 0.501) {
+            fill = QColor(230, 151, 55);
+        }
+        painter.fillRect(QRect(bar.left(), bar.top(), fillWidth, bar.height()), fill);
+        painter.setPen(QColor(86, 94, 102));
+        painter.drawRect(bar.adjusted(0, 0, -1, -1));
+    }
+
+private:
+    double level_ = 0.0;
+};
+
 struct Pcm16Wav {
     int sampleRate = 0;
     int channels = 0;
@@ -592,6 +636,11 @@ public:
     void setGainDb(double gainDb)
     {
         gainPpm_.store(static_cast<int>(std::pow(10.0, qBound(-60.0, gainDb, 12.0) / 20.0) * 1000000.0), std::memory_order_relaxed);
+    }
+
+    double takePeak()
+    {
+        return static_cast<double>(peakPpm_.exchange(0, std::memory_order_relaxed)) / 1000000.0;
     }
 
     void setFocus(bool enabled, double frequencyHz, double gainDb, double q)
@@ -784,16 +833,19 @@ private:
     {
         auto* output = reinterpret_cast<qint16*>(data);
         const int channelCount = channels();
+        double peak = 0.0;
         for (int frame = 0; frame < outputFrames; ++frame) {
             advanceFrame();
             const qint64 source = static_cast<qint64>(sourceFrame_);
             for (int channel = 0; channel < channelCount; ++channel) {
                 const double focused = processFocusSample(channel, static_cast<double>(sampleAt(channel, source)));
                 const double sample = qBound(-1.0, focused * gain, 1.0);
+                peak = std::max(peak, std::abs(sample));
                 *output++ = static_cast<qint16>(std::lrint(sample * 32767.0));
             }
             sourceFrame_ += 1.0;
         }
+        updatePeak(peak);
     }
 
     void renderStretched(int outputFrames, double speed, double gain, char* data)
@@ -807,12 +859,24 @@ private:
         stretch_.process(inputBlock_, inputFrames, outputBlock_, outputFrames);
 
         auto* output = reinterpret_cast<qint16*>(data);
+        double peak = 0.0;
         for (int frame = 0; frame < outputFrames; ++frame) {
             for (int channel = 0; channel < channelCount; ++channel) {
                 const double focused = processFocusSample(channel, static_cast<double>(outputBlock_[channel][frame]));
                 const double sample = qBound(-1.0, focused * gain, 1.0);
+                peak = std::max(peak, std::abs(sample));
                 *output++ = static_cast<qint16>(std::lrint(sample * 32767.0));
             }
+        }
+        updatePeak(peak);
+    }
+
+    void updatePeak(double peak)
+    {
+        const int candidate = static_cast<int>(qBound(0.0, peak, 1.0) * 1000000.0);
+        int current = peakPpm_.load(std::memory_order_relaxed);
+        while (candidate > current &&
+               !peakPpm_.compare_exchange_weak(current, candidate, std::memory_order_relaxed, std::memory_order_relaxed)) {
         }
     }
 
@@ -835,6 +899,7 @@ private:
     std::atomic<bool> loopEnabled_{false};
     std::atomic<qint64> loopStartFrame_{0};
     std::atomic<qint64> loopEndFrame_{0};
+    std::atomic<int> peakPpm_{0};
     bool lastFocusEnabled_ = false;
     double lastFocusFrequencyHz_ = -1.0;
     double lastFocusGainDb_ = 0.0;
@@ -1306,6 +1371,19 @@ QString dbText(double db)
     return QStringLiteral("%1%2 dB")
         .arg(db >= 0.0 ? QStringLiteral("+") : QString())
         .arg(db, 0, 'f', 1);
+}
+
+double gainFromDb(double db)
+{
+    if (db <= -60.0) {
+        return 0.0;
+    }
+    return std::pow(10.0, db / 20.0);
+}
+
+QString percentTextFromGain(double gain)
+{
+    return QStringLiteral("%1%").arg(qRound(gain * 100.0));
 }
 
 bool isWheelValueEditor(QObject* object)
@@ -2328,6 +2406,25 @@ QWidget* MainWindow::buildMixPage()
         rowLayout->addWidget(valueLabel);
         return row;
     };
+    auto makeMeterRow = [page](const QString& name, LevelMeterWidget* meter, QLabel* valueLabel = nullptr) {
+        auto* row = new QWidget(page);
+        auto* rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(0, 0, 0, 0);
+        rowLayout->setSpacing(10);
+        auto* nameLabel = new QLabel(name, row);
+        nameLabel->setMinimumWidth(120);
+        rowLayout->addWidget(nameLabel);
+        rowLayout->addWidget(meter, 1);
+        if (valueLabel != nullptr) {
+            rowLayout->addWidget(valueLabel);
+        }
+        return row;
+    };
+    auto makeSectionLabel = [content](const QString& text) {
+        auto* label = new QLabel(text, content);
+        label->setStyleSheet(QStringLiteral("font-weight: 600; margin-top: 8px;"));
+        return label;
+    };
     auto makeDeviceRow = [content](const QString& name, QComboBox* combo) {
         auto* row = new QWidget(content);
         auto* rowLayout = new QHBoxLayout(row);
@@ -2359,6 +2456,31 @@ QWidget* MainWindow::buildMixPage()
     recordingLayout->addWidget(jamRecordingLabel_, 1);
     layout->addWidget(recordingRow);
 
+    mixInputMeter_ = new LevelMeterWidget(page);
+    mixSendMeter_ = new LevelMeterWidget(page);
+    mixMonitorMeter_ = new LevelMeterWidget(page);
+    mixTrackMeter_ = new LevelMeterWidget(page);
+    mixMetronomeMeter_ = new LevelMeterWidget(page);
+    mixOutputMeter_ = new LevelMeterWidget(page);
+    mixRemotePeerMeter_ = new LevelMeterWidget(page);
+    mixOutputClipLabel_ = makeValueLabel(QStringLiteral("clip 0"));
+
+    mixSendLevelSlider_ = new QSlider(Qt::Horizontal, page);
+    mixSendLevelSlider_->setRange(-60, 12);
+    mixSendLevelSlider_->setValue(0);
+    mixSendLevelSlider_->setMinimumWidth(220);
+    mixSendLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    mixSendLevelLabel_ = makeValueLabel(QStringLiteral("+0.0 dB"));
+
+    mixMonitorCheck_ = new QCheckBox(QStringLiteral("Monitor input"), page);
+    mixMonitorCheck_->setChecked(false);
+    mixMonitorLevelSlider_ = new QSlider(Qt::Horizontal, page);
+    mixMonitorLevelSlider_->setRange(-60, 0);
+    mixMonitorLevelSlider_->setValue(-18);
+    mixMonitorLevelSlider_->setMinimumWidth(220);
+    mixMonitorLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    mixMonitorLevelLabel_ = makeValueLabel(QStringLiteral("-18.0 dB"));
+
     trackLevelSlider_ = new QSlider(Qt::Horizontal, page);
     trackLevelSlider_->setRange(-60, 12);
     trackLevelSlider_->setValue(0);
@@ -2382,10 +2504,41 @@ QWidget* MainWindow::buildMixPage()
     mixTrackLevelSlider_ = trackLevelSlider_;
     mixTrackLevelLabel_ = trackLevelDbLabel_;
 
-    layout->addWidget(makeRow(QStringLiteral("Track"), trackLevelSlider_, trackLevelDbLabel_));
-    layout->addWidget(makeRow(QStringLiteral("Metronome"), metronomeLevelSlider_, mixMetronomeLevelLabel_));
+    layout->addWidget(makeSectionLabel(QStringLiteral("Local input")));
+    layout->addWidget(makeMeterRow(QStringLiteral("Input"), mixInputMeter_));
+    layout->addWidget(makeRow(QStringLiteral("Send"), mixSendLevelSlider_, mixSendLevelLabel_));
+    layout->addWidget(makeMeterRow(QStringLiteral("Post-send"), mixSendMeter_));
 
-    mixRemotePeerRow_ = makeRow(QStringLiteral("User 1"), remoteLevelSlider_, mixRemotePeerLevelLabel_);
+    auto* monitorEnableRow = new QWidget(page);
+    auto* monitorEnableLayout = new QHBoxLayout(monitorEnableRow);
+    monitorEnableLayout->setContentsMargins(0, 0, 0, 0);
+    monitorEnableLayout->setSpacing(10);
+    auto* monitorName = new QLabel(QStringLiteral("Monitoring"), monitorEnableRow);
+    monitorName->setMinimumWidth(120);
+    monitorEnableLayout->addWidget(monitorName);
+    monitorEnableLayout->addWidget(mixMonitorCheck_, 1);
+    layout->addWidget(monitorEnableRow);
+    layout->addWidget(makeRow(QStringLiteral("Monitor"), mixMonitorLevelSlider_, mixMonitorLevelLabel_));
+    layout->addWidget(makeMeterRow(QStringLiteral("Monitor meter"), mixMonitorMeter_));
+
+    layout->addWidget(makeSectionLabel(QStringLiteral("Track")));
+    layout->addWidget(makeRow(QStringLiteral("Track"), trackLevelSlider_, trackLevelDbLabel_));
+    layout->addWidget(makeMeterRow(QStringLiteral("Track meter"), mixTrackMeter_));
+
+    layout->addWidget(makeSectionLabel(QStringLiteral("Metronome")));
+    layout->addWidget(makeRow(QStringLiteral("Metronome"), metronomeLevelSlider_, mixMetronomeLevelLabel_));
+    layout->addWidget(makeMeterRow(QStringLiteral("Click meter"), mixMetronomeMeter_));
+
+    layout->addWidget(makeSectionLabel(QStringLiteral("Output")));
+    layout->addWidget(makeMeterRow(QStringLiteral("Main output"), mixOutputMeter_, mixOutputClipLabel_));
+
+    layout->addWidget(makeSectionLabel(QStringLiteral("Remote peers")));
+    mixRemotePeerRow_ = new QWidget(page);
+    auto* remoteLayout = new QVBoxLayout(mixRemotePeerRow_);
+    remoteLayout->setContentsMargins(0, 0, 0, 0);
+    remoteLayout->setSpacing(6);
+    remoteLayout->addWidget(makeRow(QStringLiteral("User 1"), remoteLevelSlider_, mixRemotePeerLevelLabel_));
+    remoteLayout->addWidget(makeMeterRow(QStringLiteral("User 1 meter"), mixRemotePeerMeter_));
     mixRemotePeerRow_->setVisible(false);
     layout->addWidget(mixRemotePeerRow_);
     layout->addStretch(1);
@@ -2405,6 +2558,22 @@ QWidget* MainWindow::buildMixPage()
             trackLevelDbLabel_->setText(dbText(trackController_.model().trackGainDb));
         }
         applyTrackPlaybackSettings();
+    });
+    QObject::connect(mixSendLevelSlider_, &QSlider::valueChanged, this, [this](int value) {
+        if (mixSendLevelLabel_) {
+            mixSendLevelLabel_->setText(dbText(static_cast<double>(value)));
+        }
+        updateRuntimeControls();
+    });
+    QObject::connect(mixMonitorCheck_, &QCheckBox::toggled, this, [this] {
+        updateMixControls();
+        updateRuntimeControls();
+    });
+    QObject::connect(mixMonitorLevelSlider_, &QSlider::valueChanged, this, [this](int value) {
+        if (mixMonitorLevelLabel_) {
+            mixMonitorLevelLabel_->setText(dbText(static_cast<double>(value)));
+        }
+        updateRuntimeControls();
     });
     QObject::connect(metronomeLevelSlider_, &QSlider::valueChanged, this, [this](int value) {
         if (mixMetronomeLevelLabel_) {
@@ -2443,6 +2612,15 @@ void MainWindow::updateMixControls()
     }
     if (remoteLevelSlider_ && mixRemotePeerLevelLabel_) {
         mixRemotePeerLevelLabel_->setText(QStringLiteral("%1%").arg(remoteLevelSlider_->value()));
+    }
+    if (mixSendLevelSlider_ && mixSendLevelLabel_) {
+        mixSendLevelLabel_->setText(dbText(static_cast<double>(mixSendLevelSlider_->value())));
+    }
+    if (mixMonitorLevelSlider_ && mixMonitorLevelLabel_) {
+        mixMonitorLevelLabel_->setText(dbText(static_cast<double>(mixMonitorLevelSlider_->value())));
+    }
+    if (mixMonitorLevelSlider_ && mixMonitorCheck_) {
+        mixMonitorLevelSlider_->setEnabled(mixMonitorCheck_->isChecked());
     }
 }
 
@@ -3122,6 +3300,28 @@ void MainWindow::updateStatsDisplay(const QJsonObject& stats)
         .arg(integerText(stats, QStringLiteral("missing_audio_frames_inserted")))
         .arg(integerText(stats, QStringLiteral("late_audio_frames_dropped"))));
     driftLabel_->setText(QStringLiteral("Drift ") + metricText(stats, QStringLiteral("drift_ppm"), QStringLiteral(" ppm")));
+    if (mixInputMeter_) {
+        mixInputMeter_->setLevel(stats.value(QStringLiteral("input_peak")).toDouble(0.0));
+    }
+    if (mixSendMeter_) {
+        mixSendMeter_->setLevel(stats.value(QStringLiteral("send_peak")).toDouble(0.0));
+    }
+    if (mixMonitorMeter_) {
+        mixMonitorMeter_->setLevel(stats.value(QStringLiteral("monitor_peak")).toDouble(0.0));
+    }
+    if (mixRemotePeerMeter_) {
+        mixRemotePeerMeter_->setLevel(stats.value(QStringLiteral("remote_peak")).toDouble(0.0));
+    }
+    if (mixMetronomeMeter_) {
+        mixMetronomeMeter_->setLevel(stats.value(QStringLiteral("metronome_peak")).toDouble(0.0));
+    }
+    if (mixOutputMeter_) {
+        mixOutputMeter_->setLevel(stats.value(QStringLiteral("output_peak")).toDouble(0.0));
+    }
+    if (mixOutputClipLabel_) {
+        mixOutputClipLabel_->setText(QStringLiteral("clip %1").arg(static_cast<qulonglong>(
+            stats.value(QStringLiteral("output_clipped_samples")).toDouble(0.0))));
+    }
     diagnosisLabel_->setText(diagnoseStats(stats));
 }
 
@@ -3501,6 +3701,11 @@ void MainWindow::updateRuntimeControls()
     jam2_.sendLine(QStringLiteral("metro mode %1").arg(metronomeModeBox_->currentText()));
     sendMetronomePatternToJam();
     jam2_.sendLine(QStringLiteral("remote level %1").arg(static_cast<double>(remoteLevelSlider_->value()) / 100.0, 0, 'f', 2));
+    const double sendLevel = gainFromDb(static_cast<double>(mixSendLevelSlider_ ? mixSendLevelSlider_->value() : 0));
+    const double monitorLevel = gainFromDb(static_cast<double>(mixMonitorLevelSlider_ ? mixMonitorLevelSlider_->value() : -18));
+    jam2_.sendLine(QStringLiteral("send level %1").arg(sendLevel, 0, 'f', 3));
+    jam2_.sendLine(QStringLiteral("monitor %1").arg(mixMonitorCheck_ && mixMonitorCheck_->isChecked() ? QStringLiteral("on") : QStringLiteral("off")));
+    jam2_.sendLine(QStringLiteral("monitor level %1").arg(monitorLevel, 0, 'f', 3));
 }
 
 void MainWindow::updateTrackControls()
@@ -3584,6 +3789,9 @@ void MainWindow::updateTrackControls()
         } else {
             loopEnabledCheck_->setText(QStringLiteral("Loop whole track"));
         }
+    }
+    if (mixTrackMeter_) {
+        mixTrackMeter_->setLevel(trackDevice_ ? trackDevice_->takePeak() : 0.0);
     }
 }
 
@@ -4714,6 +4922,9 @@ QStringList MainWindow::commonJamArgs(bool includeExtraArgs) const
          << QStringLiteral("--bpm") << QString::number(metronomeBpmSpin_ ? metronomeBpmSpin_->value() : bpmSpin_->value())
          << QStringLiteral("--metronome-level") << QString::number(static_cast<double>(metronomeLevelSlider_->value()) / 100.0, 'f', 2)
          << QStringLiteral("--remote-level") << QString::number(static_cast<double>(remoteLevelSlider_->value()) / 100.0, 'f', 2)
+         << QStringLiteral("--send-level") << QString::number(gainFromDb(static_cast<double>(mixSendLevelSlider_ ? mixSendLevelSlider_->value() : 0)), 'f', 3)
+         << QStringLiteral("--local-monitor") << onOff(mixMonitorCheck_ && mixMonitorCheck_->isChecked())
+         << QStringLiteral("--local-monitor-level") << QString::number(gainFromDb(static_cast<double>(mixMonitorLevelSlider_ ? mixMonitorLevelSlider_->value() : -18)), 'f', 3)
          << QStringLiteral("--metronome-mode") << metronomeModeBox_->currentText()
          << QStringLiteral("--sample-time-playout") << onOff(sampleTimePlayoutCheck_->isChecked())
          << QStringLiteral("--adaptive-playback-cushion") << onOff(adaptiveCushionCheck_->isChecked())
