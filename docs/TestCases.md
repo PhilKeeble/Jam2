@@ -67,6 +67,7 @@ Useful args:
 - `--sample-rate`: sample rate for both local interfaces.
 - `--profile fast|moderate|safe|all`: choose one profile or run each selected scenario against all three. Default: `fast`.
 - `--scenario NAME`: run only one scenario. Repeat for multiple scenarios.
+- `--os-priority off|high|realtime|all`: pass the selected OS scheduling mode to both local Jam2 processes. Use `all` to run every selected scenario once with no explicit priority request, once with high priority, and once with realtime priority for direct comparison.
 - `--stream-ms N`: stream duration per scenario. Default: `30000`.
 - `--include-validation`: run short non-audio/error-path validation checks.
 - `--include-audio-probes`: add targeted recorded tone/pulse probes for audible analysis.
@@ -95,12 +96,12 @@ Audio probe coverage:
 
 ## Two-Host Static Benchmarks
 
-`tools\run_benchmark_server.py` runs the listen/server side of the static benchmark suite. It publishes each fixed benchmark case over HTTP, runs the listener, records server stems, waits for client artifacts, then writes the final summary/CSV/JSON.
+`tools\run_benchmark_server.py` runs the listen/server side of the static benchmark suite. It coordinates lifecycle state and client artifact upload over a direct TCP control connection, records server stems, waits for client artifacts, then writes the final summary/CSV/JSON. An HTTP `current.json` diagnostic endpoint is available only when explicitly enabled.
 
 Run this on the listen/server machine:
 
 ```powershell
-python tools\run_benchmark_server.py --server-audio-device 5 --sample-rate 44100 --bind-http 0.0.0.0:8000 --clean
+python tools\run_benchmark_server.py --server-audio-device 5 --sample-rate 44100 --clean
 ```
 
 List the benchmark cases without launching Jam2:
@@ -119,7 +120,8 @@ Useful server args:
 
 - `--server-audio-device`: server/listen-side audio device id.
 - `--sample-rate`: audio sample rate.
-- `--bind-http HOST:PORT`: HTTP control/artifact server bind. Default: `0.0.0.0:8000`.
+- `--bind-control HOST:PORT`: TCP lifecycle control bind. Default: `0.0.0.0:49000`. This intentionally matches the default Jam2 UDP audio port number; TCP control and UDP audio are separate sockets.
+- `--bind-http HOST:PORT`: optional HTTP diagnostic bind for `current.json`. Disabled by default and not used for uploads.
 - `--logs PATH`: output folder. Default: `tools\benchmark_logs`.
 - `--stream-ms N`: stream duration per case. Default: `30000`.
 - `--repeats N`: repeat count per case. Default: `1`.
@@ -130,23 +132,24 @@ Useful server args:
 
 ## Two-Host Benchmark Client
 
-`tools\run_benchmark_client.py` polls the benchmark server, runs the connect-side Jam2 process for each published case, records client stems, analyzes local WAVs, and uploads the artifacts back to the server.
+`tools\run_benchmark_client.py` connects to the benchmark TCP control plane, runs the connect-side Jam2 process for each offered case, records client stems, analyzes local WAVs, and uploads the artifacts back on the same TCP connection. The client reconnects the control channel if it drops; every run and upload carries a suite/case/run/attempt identity so stale results are rejected instead of being matched to a later case.
 
 Run this on the client/connect machine:
 
 ```powershell
-python tools\run_benchmark_client.py --server http://192.168.1.50:8000 --client-audio-device 16 --sample-rate 44100
+python tools\run_benchmark_client.py --server 192.168.1.50 --client-audio-device 16 --sample-rate 44100
 ```
 
 Clean local client artifacts after successful upload:
 
 ```powershell
-python tools\run_benchmark_client.py --server http://192.168.1.50:8000 --client-audio-device 16 --sample-rate 44100 --clean
+python tools\run_benchmark_client.py --server 192.168.1.50 --client-audio-device 16 --sample-rate 44100 --clean
 ```
 
 Useful client args:
 
-- `--server`: benchmark server URL, for example `http://192.168.1.50:8000`.
+- `--server`: benchmark server host, for example `192.168.1.50`. The old diagnostic HTTP URL form also works.
+- `--control`: optional TCP control endpoint. By default this uses the server host with TCP port `49000`, for example `192.168.1.50:49000`.
 - `--client-audio-device`: client/connect-side audio device id.
 - `--sample-rate`: audio sample rate.
 - `--logs PATH`: local output folder. Default: `tools\benchmark_logs`.

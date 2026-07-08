@@ -3,17 +3,20 @@
 import argparse
 import csv
 import http.server
+import io
 import json
 import shutil
 import socketserver
 import threading
 import time
 import urllib.parse
+import uuid
 import zipfile
 from pathlib import Path
 
 from jam2_audio_analysis import analyze_recording_dir
 from jam2_benchmark_suite import benchmark_cases
+from jam2_benchmark_control import new_suite_id, same_run, start_control_server
 from jam2_harness import rewrite_jam_url_endpoint, start_listener
 from jam2_metrics import combined_summary
 from jam2_tooling import copy_final_csv, default_jam2_path, ensure_dir, fail, print_flush, repo_root, write_json
@@ -28,7 +31,8 @@ def parse_args():
     parser.add_argument("--server-audio-device", required=True)
     parser.add_argument("--sample-rate", required=True, type=int)
     parser.add_argument("--logs", default=str(Path(__file__).with_name("benchmark_logs")))
-    parser.add_argument("--bind-http", default="0.0.0.0:8000")
+    parser.add_argument("--bind-http", default="", help="optional HTTP diagnostic bind for current.json; disabled by default")
+    parser.add_argument("--bind-control", default="0.0.0.0:49000", help="TCP benchmark control bind endpoint")
     parser.add_argument("--audio-bind", default="0.0.0.0:49000", help="Jam2 UDP listen bind endpoint for benchmark sessions")
     parser.add_argument("--public-audio-host", default="", help="optional legacy override for the host in the published Jam2 URL")
     parser.add_argument("--client-upload-timeout-s", type=float, default=0.0, help="wait for client upload; 0 waits indefinitely")
@@ -39,8 +43,8 @@ def parse_args():
     parser.add_argument("--case", action="append", default=[], help="exact case id to run; repeat for multiple")
     parser.add_argument("--no-metronome-cases", action="store_true")
     parser.add_argument("--list-cases", action="store_true")
-    parser.add_argument("--startup-grace-s", type=float, default=5.0, help="wait after HTTP startup before publishing the first case")
-    parser.add_argument("--finish-grace-s", type=float, default=10.0, help="keep HTTP server alive after publishing all_done")
+    parser.add_argument("--startup-grace-s", type=float, default=5.0, help="wait after control startup before publishing the first case")
+    parser.add_argument("--finish-grace-s", type=float, default=10.0, help="keep control server alive after publishing all_done")
     parser.add_argument("--clean", action="store_true")
     return parser.parse_args()
 
@@ -49,6 +53,7 @@ class UploadHandler(http.server.SimpleHTTPRequestHandler):
     public_dir = None
     logs_dir = None
     done_acked = False
+    control_state = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(self.public_dir), **kwargs)
@@ -78,44 +83,48 @@ class UploadHandler(http.server.SimpleHTTPRequestHandler):
         if self.path != "/upload":
             self.send_error(404, "unknown upload endpoint")
             return
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            self.send_error(400, "invalid content length")
-            return
-        if length <= 0:
-            self.send_error(400, "empty upload")
-            return
-        upload_dir = ensure_dir(Path(self.logs_dir) / "_uploads")
-        zip_path = upload_dir / f"client_{int(time.time() * 1000)}.zip"
-        zip_path.write_bytes(self.rfile.read(length))
-        try:
-            with zipfile.ZipFile(zip_path, "r") as archive:
-                result = json.loads(archive.read("result.json").decode("utf-8"))
-                case_id = result["case_id"]
-                run_index = int(result["run_index"])
-                target = ensure_dir(Path(self.logs_dir) / case_id / "client" / f"run_{run_index:02d}")
-                if target.exists():
-                    shutil.rmtree(target)
-                ensure_dir(target)
-                archive.extractall(target)
-        except Exception as error:
-            self.send_error(400, f"invalid upload: {error}")
-            return
-        response = b'{"ok":true}\n'
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(response)))
-        self.end_headers()
-        self.wfile.write(response)
-        print_flush(f"[server] received client artifacts for {case_id} run {run_index}")
+        self.send_error(410, "artifact uploads use the TCP control connection")
 
 
-def serve_http(bind_http, public_dir, logs_dir):
+def extract_client_upload(logs_dir, control_state, payload):
+    upload_dir = ensure_dir(Path(logs_dir) / "_uploads")
+    zip_path = upload_dir / f"client_{int(time.time() * 1000)}.zip"
+    zip_path.write_bytes(payload)
+    with zipfile.ZipFile(io.BytesIO(payload), "r") as archive:
+        names = archive.namelist()
+        if "result.json" not in names:
+            raise ValueError("missing result.json")
+        for name in names:
+            path = Path(name)
+            if path.is_absolute() or ".." in path.parts:
+                raise ValueError(f"unsafe zip member: {name}")
+        result = json.loads(archive.read("result.json").decode("utf-8"))
+        case_id = result["case_id"]
+        run_index = int(result["run_index"])
+        identity = {
+            "suite_id": result.get("suite_id", ""),
+            "case_id": case_id,
+            "run_index": run_index,
+            "attempt_id": result.get("attempt_id", ""),
+        }
+        if control_state is not None and (control_state.active_case is None or not same_run(identity, control_state.active_case)):
+            raise ValueError(
+                "stale upload identity "
+                f"{identity.get('suite_id','')}/{case_id}/{run_index}/{identity.get('attempt_id','')}")
+        target = ensure_dir(Path(logs_dir) / case_id / "client" / f"run_{run_index:02d}")
+        if target.exists():
+            shutil.rmtree(target)
+        ensure_dir(target)
+        archive.extractall(target)
+    print_flush(f"[server] received client artifacts for {case_id} run {run_index} over TCP control")
+
+
+def serve_http(bind_http, public_dir, logs_dir, control_state=None):
     host, port_text = bind_http.rsplit(":", 1)
     UploadHandler.public_dir = public_dir
     UploadHandler.logs_dir = logs_dir
     UploadHandler.done_acked = False
+    UploadHandler.control_state = control_state
 
     class ReusableThreadingTcpServer(socketserver.ThreadingTCPServer):
         allow_reuse_address = True
@@ -190,10 +199,46 @@ def wait_for_case_progress(logs_dir, case_id, run_index, listener, public_dir, c
         time.sleep(0.25)
 
 
-def wait_for_done_ack(timeout_s):
+def wait_for_case_progress_control(logs_dir, case_id, run_index, listener, public_dir, current, control_state, timeout_s=CLIENT_UPLOAD_TIMEOUT_S):
+    target = Path(logs_dir) / case_id / "client" / f"run_{run_index:02d}" / "result.json"
+    deadline = time.monotonic() + timeout_s if timeout_s and timeout_s > 0 else None
+    connected = False
+    accepted = False
+    client_started = False
+    while True:
+        if target.exists():
+            return target, connected, "client_upload", {
+                "accepted": accepted,
+                "client_started": client_started,
+            }
+        if control_state.has_message("case.accept", current):
+            accepted = True
+        if control_state.has_message("case.started", current):
+            client_started = True
+        if not connected and listener.startup_payloads("connected"):
+            connected = True
+            current = dict(current)
+            current["server_stage"] = "connected"
+            current["control_phase"] = control_state.snapshot().get("active_phase", "")
+            write_json(Path(public_dir) / "current.json", current)
+            print_flush(f"[server] client connected for {case_id} run {run_index}")
+        if listener.poll() is not None:
+            return None, connected, "listener_exit", {
+                "accepted": accepted,
+                "client_started": client_started,
+            }
+        if deadline is not None and time.monotonic() >= deadline:
+            return None, connected, "timeout", {
+                "accepted": accepted,
+                "client_started": client_started,
+            }
+        time.sleep(0.25)
+
+
+def wait_for_done_ack(timeout_s, control_state=None):
     deadline = time.monotonic() + timeout_s if timeout_s and timeout_s > 0 else None
     while True:
-        if UploadHandler.done_acked:
+        if UploadHandler.done_acked or (control_state is not None and control_state.done_acked):
             return True
         if deadline is not None and time.monotonic() >= deadline:
             return False
@@ -303,7 +348,7 @@ def write_outputs(logs_dir, results):
     (logs_dir / "benchmark_summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, run_index, audio_bind, public_audio_host, client_upload_timeout_s, post_listener_upload_grace_s):
+def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, run_index, audio_bind, public_audio_host, client_upload_timeout_s, post_listener_upload_grace_s, suite_id, control_state=None):
     output_dir = ensure_dir(Path(logs_dir) / case.case_id / "server" / f"run_{run_index:02d}")
     recording_dir = ensure_dir(output_dir / "recording")
     listener, paths = start_listener(
@@ -341,6 +386,9 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
     url_fields = jam_url_fields(connection_url)
     current = {
         "status": "running",
+        "suite_id": suite_id,
+        "attempt_id": uuid.uuid4().hex,
+        "published_at_ms": int(time.time() * 1000),
         "case_id": case.case_id,
         "run_index": run_index,
         "url": connection_url,
@@ -357,19 +405,34 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
         "client_args": case.profile.args(case.stream_ms) + list(case.client_args),
     }
     write_json(Path(public_dir) / "current.json", current)
+    control_start = control_state.snapshot() if control_state is not None else {}
+    if control_state is not None:
+        control_state.publish_case(current)
     print_flush(f"[server] published {case.case_id} run {run_index} url={connection_url}")
     if client_upload_timeout_s and client_upload_timeout_s > 0:
         print_flush(f"[server] waiting up to {client_upload_timeout_s:g}s for client connection/result upload")
     else:
         print_flush("[server] waiting for client connection")
-    client_result_path, connected, progress_reason = wait_for_case_progress(
-        logs_dir,
-        case.case_id,
-        run_index,
-        listener,
-        public_dir,
-        current,
-        client_upload_timeout_s)
+    if control_state is not None:
+        client_result_path, connected, progress_reason, control_progress = wait_for_case_progress_control(
+            logs_dir,
+            case.case_id,
+            run_index,
+            listener,
+            public_dir,
+            current,
+            control_state,
+            client_upload_timeout_s)
+    else:
+        client_result_path, connected, progress_reason = wait_for_case_progress(
+            logs_dir,
+            case.case_id,
+            run_index,
+            listener,
+            public_dir,
+            current,
+            client_upload_timeout_s)
+        control_progress = {}
     client_rc = read_client_return_code(client_result_path)
     if client_result_path and client_rc != 0 and listener.poll() is None:
         print_flush(
@@ -434,11 +497,31 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
         "client_recording_analysis": client_analysis,
         "client_artifacts_received": client_result_path is not None,
         "client_connected": connected,
+        "suite_id": suite_id,
+        "attempt_id": current["attempt_id"],
+        "control": control_state.snapshot() if control_state is not None else {},
+        "client_accepted": control_progress.get("accepted", False),
+        "client_started": control_progress.get("client_started", False),
     }
+    tags = []
+    if control_state is not None:
+        snapshot = control_state.snapshot()
+        if snapshot.get("disconnect_count", 0) > control_start.get("disconnect_count", 0):
+            tags.append("control_disconnect")
+        if snapshot.get("reconnect_count", 0) > control_start.get("reconnect_count", 0):
+            tags.append("client_reconnected")
+        if not control_progress.get("accepted", False):
+            tags.append("client_accept_missing")
+        if not control_progress.get("client_started", False):
+            tags.append("client_start_missing")
     if not client_result_path:
-        result["tags"] = ["client_upload_missing"]
+        tags.append("client_upload_missing")
+    if tags:
+        result["tags"] = tags
     result = evaluate_result(result)
     write_json(output_dir / "result.json", result)
+    if control_state is not None:
+        control_state.clear_case()
     print_flush(f"[server] {case.case_id} run {run_index}: {result['verdict']} {','.join(result['tags']) or '-'}")
     return result
 
@@ -474,13 +557,29 @@ def main():
             "[server] warning: --public-audio-host with --audio-bind port 0 publishes a random UDP port; "
             "public-IP runs usually need a fixed forwarded UDP port such as --audio-bind 0.0.0.0:49000")
     print_flush(f"[server] audio bind={args.audio_bind}")
+    suite_id = new_suite_id()
+    print_flush(f"[server] benchmark suite id={suite_id}")
     logs_dir = Path(args.logs)
     if args.clean and logs_dir.exists():
         shutil.rmtree(logs_dir)
     logs_dir = ensure_dir(logs_dir)
     public_dir = ensure_dir(logs_dir / "public")
-    write_json(public_dir / "current.json", {"status": "starting"})
-    server = serve_http(args.bind_http, public_dir, logs_dir)
+    write_json(public_dir / "current.json", {"status": "starting", "suite_id": suite_id})
+    control_state_holder = {}
+
+    def handle_control_upload(message, payload):
+        extract_client_upload(logs_dir, control_state_holder["state"], payload)
+
+    control_server, control_state = start_control_server(
+        args.bind_control,
+        suite_id,
+        print_flush,
+        upload_callback=handle_control_upload)
+    control_state_holder["state"] = control_state
+    print_flush(f"[server] TCP control bind={args.bind_control}")
+    server = serve_http(args.bind_http, public_dir, logs_dir, control_state) if args.bind_http else None
+    if args.bind_http:
+        print_flush(f"[server] HTTP diagnostics bind={args.bind_http}")
     results = []
     try:
         if args.startup_grace_s > 0:
@@ -492,17 +591,21 @@ def main():
                     jam2, args.server_audio_device, args.sample_rate,
                     logs_dir, public_dir, case, run_index,
                     args.audio_bind, public_audio_host, args.client_upload_timeout_s,
-                    args.post_listener_upload_grace_s))
+                    args.post_listener_upload_grace_s, suite_id, control_state))
                 write_outputs(logs_dir, results)
-        write_json(public_dir / "current.json", {"status": "all_done"})
+        write_json(public_dir / "current.json", {"status": "all_done", "suite_id": suite_id})
+        control_state.mark_all_done()
         write_outputs(logs_dir, results)
         if args.finish_grace_s > 0:
             print_flush(f"[server] published all_done; waiting up to {args.finish_grace_s:g}s for client ack")
-            if not wait_for_done_ack(args.finish_grace_s):
+            if not wait_for_done_ack(args.finish_grace_s, control_state):
                 print_flush("[server] all_done ack not received before finish grace expired")
     finally:
-        server.shutdown()
-        server.server_close()
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        control_server.shutdown()
+        control_server.server_close()
     print_flush(f"[server] wrote {logs_dir / 'benchmark_summary.txt'}")
     return 0
 
