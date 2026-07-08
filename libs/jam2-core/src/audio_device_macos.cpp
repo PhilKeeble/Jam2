@@ -830,7 +830,7 @@ void apply_remote_level(CoreAudioDuplexContext& context, std::span<std::int32_t>
     if (level_ppm == 1000000) {
         return;
     }
-    const double level = static_cast<double>(std::clamp(level_ppm, 0, 1000000)) / 1000000.0;
+    const double level = static_cast<double>(std::clamp(level_ppm, 0, 4000000)) / 1000000.0;
     for (std::int32_t& sample : output) {
         sample = scale_i32_sample(sample, level);
     }
@@ -859,7 +859,7 @@ void mix_local_monitor(CoreAudioDuplexContext& context, std::span<std::int32_t> 
         context.control->gui_monitor_peak_ppm.store(0, std::memory_order_relaxed);
         return;
     }
-    const double level = static_cast<double>(std::clamp(level_ppm, 0, 1000000)) / 1000000.0;
+    const double level = static_cast<double>(std::clamp(level_ppm, 0, 4000000)) / 1000000.0;
     std::uint32_t monitor_peak = 0;
     const std::size_t frames = std::min(output.size(), input.size());
     for (std::size_t frame = 0; frame < frames; ++frame) {
@@ -944,7 +944,7 @@ void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t
     }
 
     const int level_ppm = context.control->metronome_level_ppm.load(std::memory_order_relaxed);
-    const double level = static_cast<double>(std::clamp(level_ppm, 0, 1000000)) / 1000000.0;
+    const double level = static_cast<double>(std::clamp(level_ppm, 0, 4000000)) / 1000000.0;
     const bool epoch_valid = context.control->metronome_epoch_valid.load(std::memory_order_relaxed);
     const std::uint64_t epoch = context.control->metronome_epoch_sample_time.load(std::memory_order_relaxed);
     const jam2::metronome::PatternSnapshot pattern = jam2::metronome::sanitize({

@@ -143,7 +143,7 @@ struct Options {
     int drift_max_correction_ppm = 500;
     bool metronome = false;
     int bpm = 120;
-    double metronome_level = 0.20;
+    double metronome_level = 1.0;
     MetronomeMode metronome_mode = MetronomeMode::SharedGrid;
     double remote_level = 1.0;
     double send_level = 1.0;
@@ -554,15 +554,15 @@ Options parse_options(int argc, char** argv, int start)
             }
         } else if (arg == "--metronome-level") {
             options.metronome_level = std::stod(std::string(require_value(argc, argv, i, arg)));
-            if (options.metronome_level < 0.0 || options.metronome_level > 1.0) {
-                throw std::runtime_error("--metronome-level must be 0..1");
+            if (options.metronome_level < 0.0 || options.metronome_level > 4.0) {
+                throw std::runtime_error("--metronome-level must be 0..4");
             }
         } else if (arg == "--metronome-mode") {
             options.metronome_mode = parse_metronome_mode(require_value(argc, argv, i, arg));
         } else if (arg == "--remote-level") {
             options.remote_level = std::stod(std::string(require_value(argc, argv, i, arg)));
-            if (options.remote_level < 0.0 || options.remote_level > 1.0) {
-                throw std::runtime_error("--remote-level must be 0..1");
+            if (options.remote_level < 0.0 || options.remote_level > 4.0) {
+                throw std::runtime_error("--remote-level must be 0..4");
             }
         } else if (arg == "--send-level") {
             options.send_level = std::stod(std::string(require_value(argc, argv, i, arg)));
@@ -580,8 +580,8 @@ Options parse_options(int argc, char** argv, int start)
             }
         } else if (arg == "--local-monitor-level") {
             options.local_monitor_level = std::stod(std::string(require_value(argc, argv, i, arg)));
-            if (options.local_monitor_level < 0.0 || options.local_monitor_level > 1.0) {
-                throw std::runtime_error("--local-monitor-level must be 0..1");
+            if (options.local_monitor_level < 0.0 || options.local_monitor_level > 4.0) {
+                throw std::runtime_error("--local-monitor-level must be 0..4");
             }
         } else if (arg == "--gui-control") {
             options.gui_control = jam2::parse_endpoint(require_value(argc, argv, i, arg));
@@ -986,7 +986,7 @@ struct AudioPacketStats {
     std::uint64_t elapsed_ms = 0;
     bool final_metronome_enabled = false;
     int final_bpm = 120;
-    double final_metronome_level = 0.20;
+    double final_metronome_level = 1.0;
     double final_remote_level = 1.0;
     double final_send_level = 1.0;
     bool final_local_monitor_enabled = false;
@@ -1009,7 +1009,7 @@ struct RuntimeState {
     std::atomic<std::uint64_t> metronome_play_mask_high{0};
     std::atomic<std::uint64_t> metronome_accent_mask_low{0x01ULL};
     std::atomic<std::uint64_t> metronome_accent_mask_high{0};
-    std::atomic<int> metronome_level_ppm{200000};
+    std::atomic<int> metronome_level_ppm{1000000};
     std::atomic<int> remote_level_ppm{1000000};
     std::atomic<int> send_level_ppm{1000000};
     std::atomic<bool> local_monitor{false};
@@ -1020,11 +1020,6 @@ struct RuntimeState {
     std::atomic<std::uint64_t> metronome_revision{0};
     std::atomic<std::uint64_t> metronome_epoch_revision{0};
 };
-
-int ppm_from_unit(double value)
-{
-    return static_cast<int>(std::clamp(value, 0.0, 1.0) * 1000000.0);
-}
 
 int ppm_from_gain(double value)
 {
@@ -1163,19 +1158,19 @@ void print_interactive_help(bool stats_enabled)
               << "  metro on            enable local metronome\n"
               << "  metro off           disable local metronome\n"
               << "  metro mode <mode>   set shared-grid|leader-audio|symmetric-delay|listener-compensated\n"
-              << "  metro level <0..1>  set local metronome level\n"
+              << "  metro level <0..4>  set local metronome gain\n"
               << "  metro level +/-n    adjust local metronome level\n"
               << "  metro pattern <bpm> <beats> <division> <play_lo> <play_hi> <accent_lo> <accent_hi>\n"
               << "  metro mute          set local metronome level to 0\n"
-              << "  metro unmute        restore local metronome level to 0.20\n"
-              << "  remote level <0..1> set peer playback level\n"
+              << "  metro unmute        restore local metronome level to 1\n"
+              << "  remote level <0..4> set peer playback gain\n"
               << "  remote level +/-n   adjust peer playback level\n"
               << "  remote mute         set peer playback level to 0\n"
               << "  remote unmute       restore peer playback level to 1\n"
               << "  send level <0..4>   set local send level, 1 is unity\n"
               << "  send level +/-n     adjust local send level\n"
               << "  monitor on|off      enable or disable local input monitoring\n"
-              << "  monitor level <0..1> set local monitor level\n"
+              << "  monitor level <0..4> set local monitor gain\n"
               << "  monitor level +/-n  adjust local monitor level\n"
               << "  record jam start <folder>  start dry jam stem recording\n"
               << "  record jam stop            stop dry jam stem recording\n"
@@ -1189,35 +1184,6 @@ void print_prompt()
 {
     std::cout << "> ";
     std::cout.flush();
-}
-
-bool apply_level_token(std::string_view token, std::atomic<int>& target_ppm)
-{
-    if (token.empty()) {
-        return false;
-    }
-    std::size_t consumed = 0;
-    const std::string text{token};
-    double value = 0.0;
-    try {
-        value = std::stod(text, &consumed);
-    } catch (const std::exception&) {
-        return false;
-    }
-    if (consumed != text.size()) {
-        return false;
-    }
-    int ppm = 0;
-    if (text[0] == '+' || text[0] == '-') {
-        ppm = target_ppm.load(std::memory_order_relaxed) + static_cast<int>(value * 1000000.0);
-    } else {
-        if (value < 0.0 || value > 1.0) {
-            return false;
-        }
-        ppm = ppm_from_unit(value);
-    }
-    target_ppm.store(std::clamp(ppm, 0, 1000000), std::memory_order_relaxed);
-    return true;
 }
 
 bool apply_gain_token(std::string_view token, std::atomic<int>& target_ppm, double max_value)
@@ -1292,7 +1258,7 @@ void apply_gui_control_line(
         } else if (value == "level") {
             std::string level;
             in >> level;
-            (void)apply_level_token(level, state.metronome_level_ppm);
+            (void)apply_gain_token(level, state.metronome_level_ppm, 4.0);
         } else if (value == "pattern") {
             int bpm = 0;
             int beats = 0;
@@ -1339,7 +1305,7 @@ void apply_gui_control_line(
         if (value == "level") {
             std::string level;
             in >> level;
-            (void)apply_level_token(level, state.remote_level_ppm);
+            (void)apply_gain_token(level, state.remote_level_ppm, 4.0);
         } else if (value == "mute") {
             state.remote_level_ppm.store(0, std::memory_order_relaxed);
         } else if (value == "unmute") {
@@ -1369,7 +1335,7 @@ void apply_gui_control_line(
         } else if (value == "level") {
             std::string level;
             in >> level;
-            (void)apply_level_token(level, state.local_monitor_level_ppm);
+            (void)apply_gain_token(level, state.local_monitor_level_ppm, 4.0);
         }
         return;
     }
@@ -1476,8 +1442,8 @@ void stdin_command_loop(
             } else if (value == "level") {
                 std::string level;
                 in >> level;
-                if (!apply_level_token(level, state.metronome_level_ppm)) {
-                    std::cerr << "metro level must be 0..1 or a relative +/- adjustment\n";
+                if (!apply_gain_token(level, state.metronome_level_ppm, 4.0)) {
+                    std::cerr << "metro level must be 0..4 or a relative +/- adjustment\n";
                 }
             } else if (value == "pattern") {
                 int bpm = 0;
@@ -1521,7 +1487,7 @@ void stdin_command_loop(
             } else if (value == "mute") {
                 state.metronome_level_ppm.store(0, std::memory_order_relaxed);
             } else if (value == "unmute") {
-                state.metronome_level_ppm.store(200000, std::memory_order_relaxed);
+                state.metronome_level_ppm.store(1000000, std::memory_order_relaxed);
             } else {
                 std::cerr << "unknown metro command; use: metro on|off|mode|level|pattern|mute|unmute\n";
             }
@@ -1534,8 +1500,8 @@ void stdin_command_loop(
             if (value == "level") {
                 std::string level;
                 in >> level;
-                if (!apply_level_token(level, state.remote_level_ppm)) {
-                    std::cerr << "remote level must be 0..1 or a relative +/- adjustment\n";
+                if (!apply_gain_token(level, state.remote_level_ppm, 4.0)) {
+                    std::cerr << "remote level must be 0..4 or a relative +/- adjustment\n";
                 }
             } else if (value == "mute") {
                 state.remote_level_ppm.store(0, std::memory_order_relaxed);
@@ -1574,8 +1540,8 @@ void stdin_command_loop(
             } else if (value == "level") {
                 std::string level;
                 in >> level;
-                if (!apply_level_token(level, state.local_monitor_level_ppm)) {
-                    std::cerr << "monitor level must be 0..1 or a relative +/- adjustment\n";
+                if (!apply_gain_token(level, state.local_monitor_level_ppm, 4.0)) {
+                    std::cerr << "monitor level must be 0..4 or a relative +/- adjustment\n";
                 }
             } else {
                 std::cerr << "unknown monitor command; use: monitor on|off|level\n";
@@ -2307,11 +2273,11 @@ void write_recording_sidecar(
         << "  \"queue_capacity_frames\": " << stats.queue_capacity_frames << ",\n"
         << "  \"metronome\": \"" << (state.metronome.load(std::memory_order_relaxed) ? "on" : "off") << "\",\n"
         << "  \"bpm\": " << state.bpm.load(std::memory_order_relaxed) << ",\n"
-        << "  \"metronome_level\": " << unit_from_ppm(state.metronome_level_ppm.load(std::memory_order_relaxed)) << ",\n"
-        << "  \"remote_level\": " << unit_from_ppm(state.remote_level_ppm.load(std::memory_order_relaxed)) << ",\n"
+        << "  \"metronome_level\": " << gain_from_ppm(state.metronome_level_ppm.load(std::memory_order_relaxed)) << ",\n"
+        << "  \"remote_level\": " << gain_from_ppm(state.remote_level_ppm.load(std::memory_order_relaxed)) << ",\n"
         << "  \"send_level\": " << gain_from_ppm(state.send_level_ppm.load(std::memory_order_relaxed)) << ",\n"
         << "  \"local_monitor\": \"" << (state.local_monitor.load(std::memory_order_relaxed) ? "on" : "off") << "\",\n"
-        << "  \"local_monitor_level\": " << unit_from_ppm(state.local_monitor_level_ppm.load(std::memory_order_relaxed)) << ",\n"
+        << "  \"local_monitor_level\": " << gain_from_ppm(state.local_monitor_level_ppm.load(std::memory_order_relaxed)) << ",\n"
         << "  \"metronome_mode\": \"" << metronome_mode_text(state.metronome_mode.load(std::memory_order_relaxed)) << "\",\n"
         << "  \"test_input\": \"" << test_input_mode_text(options.test_input) << "\",\n"
         << "  \"metronome_epoch_sample_time\": "
@@ -3278,11 +3244,11 @@ void print_compact_status(
 {
     const std::size_t playback_depth = playback_ring != nullptr ? playback_ring->available_read() : 0;
     const double playback_depth_ms = frames_to_ms(playback_depth, options.sample_rate);
-    const double metro_level = unit_from_ppm(runtime.metronome_level_ppm.load(std::memory_order_relaxed));
-    const double remote_level = unit_from_ppm(runtime.remote_level_ppm.load(std::memory_order_relaxed));
+    const double metro_level = gain_from_ppm(runtime.metronome_level_ppm.load(std::memory_order_relaxed));
+    const double remote_level = gain_from_ppm(runtime.remote_level_ppm.load(std::memory_order_relaxed));
     const double send_level = gain_from_ppm(runtime.send_level_ppm.load(std::memory_order_relaxed));
     const bool local_monitor = runtime.local_monitor.load(std::memory_order_relaxed);
-    const double local_monitor_level = unit_from_ppm(runtime.local_monitor_level_ppm.load(std::memory_order_relaxed));
+    const double local_monitor_level = gain_from_ppm(runtime.local_monitor_level_ppm.load(std::memory_order_relaxed));
     const int live_metronome_mode = runtime.metronome_mode.load(std::memory_order_relaxed);
     const bool playback_prefilled = audio_stream != nullptr && audio_stream->playback_prefilled();
     const auto recording_stats = recorder != nullptr ? recorder->stats() : jam2::audio::OutputRecorderStats{};
@@ -4125,7 +4091,7 @@ AudioPacketStats run_audio_packet_exchange(
                         network_frames,
                         sample_time,
                         options.sample_rate,
-                        unit_from_ppm(runtime.metronome_level_ppm.load(std::memory_order_relaxed)),
+                        gain_from_ppm(runtime.metronome_level_ppm.load(std::memory_order_relaxed)),
                         runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed),
                         metronome_pattern_from_runtime(runtime));
                 }
@@ -4142,7 +4108,7 @@ AudioPacketStats run_audio_packet_exchange(
                         network_frames,
                         sample_time,
                         options.sample_rate,
-                        unit_from_ppm(runtime.metronome_level_ppm.load(std::memory_order_relaxed)),
+                        gain_from_ppm(runtime.metronome_level_ppm.load(std::memory_order_relaxed)),
                         runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed),
                         metronome_pattern_from_runtime(runtime));
                     payload = jam2::protocol::pack_pcm24(network_frames);
@@ -4544,11 +4510,11 @@ AudioPacketStats run_audio_packet_exchange(
     stats.elapsed_ms = (finish_time - start_time) / 1000ULL;
     stats.final_metronome_enabled = runtime.metronome.load(std::memory_order_relaxed);
     stats.final_bpm = runtime.bpm.load(std::memory_order_relaxed);
-    stats.final_metronome_level = unit_from_ppm(runtime.metronome_level_ppm.load(std::memory_order_relaxed));
-    stats.final_remote_level = unit_from_ppm(runtime.remote_level_ppm.load(std::memory_order_relaxed));
+    stats.final_metronome_level = gain_from_ppm(runtime.metronome_level_ppm.load(std::memory_order_relaxed));
+    stats.final_remote_level = gain_from_ppm(runtime.remote_level_ppm.load(std::memory_order_relaxed));
     stats.final_send_level = gain_from_ppm(runtime.send_level_ppm.load(std::memory_order_relaxed));
     stats.final_local_monitor_enabled = runtime.local_monitor.load(std::memory_order_relaxed);
-    stats.final_local_monitor_level = unit_from_ppm(runtime.local_monitor_level_ppm.load(std::memory_order_relaxed));
+    stats.final_local_monitor_level = gain_from_ppm(runtime.local_monitor_level_ppm.load(std::memory_order_relaxed));
     stats.metronome_epoch_sample_time = runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed);
     stats.metronome_alignment_valid = runtime.metronome_epoch_valid.load(std::memory_order_relaxed);
     stats.adaptive_playback_cushion_enabled = options.adaptive_playback_cushion;
@@ -4823,11 +4789,11 @@ OptionalAudioStream start_optional_audio(const Options& options, bool leader_aud
     audio.control->metronome_play_mask_high.store(0, std::memory_order_relaxed);
     audio.control->metronome_accent_mask_low.store(0x01ULL, std::memory_order_relaxed);
     audio.control->metronome_accent_mask_high.store(0, std::memory_order_relaxed);
-    audio.control->metronome_level_ppm.store(ppm_from_unit(options.metronome_level), std::memory_order_relaxed);
-    audio.control->remote_level_ppm.store(ppm_from_unit(options.remote_level), std::memory_order_relaxed);
+    audio.control->metronome_level_ppm.store(ppm_from_gain(options.metronome_level), std::memory_order_relaxed);
+    audio.control->remote_level_ppm.store(ppm_from_gain(options.remote_level), std::memory_order_relaxed);
     audio.control->send_level_ppm.store(ppm_from_gain(options.send_level), std::memory_order_relaxed);
     audio.control->local_monitor_enabled.store(options.local_monitor, std::memory_order_relaxed);
-    audio.control->local_monitor_level_ppm.store(ppm_from_unit(options.local_monitor_level), std::memory_order_relaxed);
+    audio.control->local_monitor_level_ppm.store(ppm_from_gain(options.local_monitor_level), std::memory_order_relaxed);
     audio.control->playback_ratio_ppm.store(1000000, std::memory_order_relaxed);
     audio.control->metronome_mode.store(metronome_mode_id(options.metronome_mode), std::memory_order_relaxed);
     audio.control->leader_audio_local_click.store(leader_audio_local_click, std::memory_order_relaxed);
@@ -4893,11 +4859,11 @@ struct CommandThread {
         state.metronome_play_mask_high.store(0, std::memory_order_relaxed);
         state.metronome_accent_mask_low.store(0x01ULL, std::memory_order_relaxed);
         state.metronome_accent_mask_high.store(0, std::memory_order_relaxed);
-        state.metronome_level_ppm.store(ppm_from_unit(options.metronome_level), std::memory_order_relaxed);
-        state.remote_level_ppm.store(ppm_from_unit(options.remote_level), std::memory_order_relaxed);
+        state.metronome_level_ppm.store(ppm_from_gain(options.metronome_level), std::memory_order_relaxed);
+        state.remote_level_ppm.store(ppm_from_gain(options.remote_level), std::memory_order_relaxed);
         state.send_level_ppm.store(ppm_from_gain(options.send_level), std::memory_order_relaxed);
         state.local_monitor.store(options.local_monitor, std::memory_order_relaxed);
-        state.local_monitor_level_ppm.store(ppm_from_unit(options.local_monitor_level), std::memory_order_relaxed);
+        state.local_monitor_level_ppm.store(ppm_from_gain(options.local_monitor_level), std::memory_order_relaxed);
         state.metronome_mode.store(metronome_mode_id(options.metronome_mode), std::memory_order_relaxed);
         state.metronome_epoch_sample_time.store(0, std::memory_order_relaxed);
         state.metronome_epoch_valid.store(true, std::memory_order_relaxed);
@@ -5270,9 +5236,9 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
                   << (audio.control->metronome_enabled.load(std::memory_order_relaxed) ? "on" : "off") << "\n";
         std::cout << "Audio control BPM: " << audio.control->metronome_bpm.load(std::memory_order_relaxed) << "\n";
         std::cout << "Audio control metronome level: "
-                  << unit_from_ppm(audio.control->metronome_level_ppm.load(std::memory_order_relaxed)) << "\n";
+                  << gain_from_ppm(audio.control->metronome_level_ppm.load(std::memory_order_relaxed)) << "\n";
         std::cout << "Audio control remote playback level: "
-                  << unit_from_ppm(audio.control->remote_level_ppm.load(std::memory_order_relaxed)) << "\n";
+                  << gain_from_ppm(audio.control->remote_level_ppm.load(std::memory_order_relaxed)) << "\n";
         std::cout << "Audio control metronome mode: "
                   << metronome_mode_text(audio.control->metronome_mode.load(std::memory_order_relaxed)) << "\n";
         std::cout << "Audio control metronome epoch sample time: "

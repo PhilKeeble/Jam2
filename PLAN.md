@@ -2,6 +2,10 @@
 
 This file tracks future work that is not already implemented. User-facing documentation lives in `docs/`, with only `README.md` and this plan kept at the repository root.
 
+## stress test
+
+stress test should be split out possibly from cli validation, cli validation should just validate each command options and stdin options and just make sure everything is working correctly and as intended so that adding new features doesnt break stuff. Maybe better in ctests? 
+
 ## Shared Song Timing Ideas
 
 The GUI already has shared song grids and local track playback. A possible future pass is tighter timing between the song grid, metronome, and any shared backing track.

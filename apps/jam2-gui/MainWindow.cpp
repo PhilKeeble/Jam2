@@ -181,7 +181,7 @@ public:
         playMaskHigh_.store(pattern.play_mask_high, std::memory_order_relaxed);
         accentMaskLow_.store(pattern.accent_mask_low, std::memory_order_relaxed);
         accentMaskHigh_.store(pattern.accent_mask_high, std::memory_order_relaxed);
-        levelPpm_.store(static_cast<int>(qBound(0.0, level, 1.0) * 1000000.0), std::memory_order_relaxed);
+        levelPpm_.store(static_cast<int>(qBound(0.0, level, 4.0) * 1000000.0), std::memory_order_relaxed);
     }
 
     void resetGrid()
@@ -275,7 +275,7 @@ private:
     std::atomic<std::uint64_t> playMaskHigh_{0};
     std::atomic<std::uint64_t> accentMaskLow_{0x01ULL};
     std::atomic<std::uint64_t> accentMaskHigh_{0};
-    std::atomic<int> levelPpm_{350000};
+    std::atomic<int> levelPpm_{1000000};
     std::atomic<int> peakPpm_{0};
 };
 
@@ -537,7 +537,21 @@ public:
 
     void setLevel(double level)
     {
-        level_ = qBound(0.0, level, 1.0);
+        const double next = qBound(0.0, level, 1.0);
+        if (!isEnabled()) {
+            level_ = next;
+            update();
+            return;
+        }
+        const double delta = next - level_;
+        if (std::abs(delta) < 0.008) {
+            return;
+        }
+        const double smoothing = delta > 0.0 ? 0.45 : 0.10;
+        level_ += delta * smoothing;
+        if (level_ < 0.001 && next <= 0.001) {
+            level_ = 0.0;
+        }
         update();
     }
 
@@ -1133,16 +1147,6 @@ QString diagnoseStats(const QJsonObject& stats)
 QString jamSliderStyle();
 void applyJamSliderStyle(QSlider* slider);
 
-QSlider* makeUnitSlider(double value, QWidget* parent)
-{
-    auto* slider = new QSlider(Qt::Horizontal, parent);
-    slider->setRange(0, 100);
-    slider->setValue(qRound(value * 100.0));
-    slider->setMinimumWidth(160);
-    applyJamSliderStyle(slider);
-    return slider;
-}
-
 struct FocusPreset {
     double frequencyHz = 120.0;
     double gainDb = 12.0;
@@ -1427,9 +1431,12 @@ double gainFromDb(double db)
     return std::pow(10.0, db / 20.0);
 }
 
-QString percentTextFromGain(double gain)
+double dbFromGain(double gain)
 {
-    return QStringLiteral("%1%").arg(qRound(gain * 100.0));
+    if (gain <= 0.0) {
+        return -60.0;
+    }
+    return qBound(-60.0, 20.0 * std::log10(gain), 12.0);
 }
 
 bool isWheelValueEditor(QObject* object)
@@ -2552,7 +2559,7 @@ QWidget* MainWindow::buildMixPage()
     mixMonitorCheck_ = new QCheckBox(QStringLiteral("Monitor input"), page);
     mixMonitorCheck_->setChecked(false);
     mixMonitorLevelSlider_ = new QSlider(Qt::Horizontal, page);
-    mixMonitorLevelSlider_->setRange(-60, 0);
+    mixMonitorLevelSlider_->setRange(-60, 12);
     mixMonitorLevelSlider_->setValue(-18);
     applyJamSliderStyle(mixMonitorLevelSlider_);
     mixMonitorLevelSlider_->setMinimumWidth(220);
@@ -2567,18 +2574,24 @@ QWidget* MainWindow::buildMixPage()
     trackLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     trackLevelDbLabel_ = makeValueLabel(dbText(trackController_.model().trackGainDb));
 
-    metronomeLevelSlider_ = makeUnitSlider(0.2, page);
+    metronomeLevelSlider_ = new QSlider(Qt::Horizontal, page);
+    metronomeLevelSlider_->setRange(-60, 12);
+    metronomeLevelSlider_->setValue(0);
+    applyJamSliderStyle(metronomeLevelSlider_);
     metronomeLevelSlider_->setMinimumWidth(220);
     metronomeLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     localMetronomeLevelSlider_ = metronomeLevelSlider_;
     mixMetronomeLevelSlider_ = metronomeLevelSlider_;
-    mixMetronomeLevelLabel_ = makeValueLabel(QStringLiteral("20%"));
+    mixMetronomeLevelLabel_ = makeValueLabel(QStringLiteral("+0.0 dB"));
 
-    remoteLevelSlider_ = makeUnitSlider(1.0, page);
+    remoteLevelSlider_ = new QSlider(Qt::Horizontal, page);
+    remoteLevelSlider_->setRange(-60, 12);
+    remoteLevelSlider_->setValue(0);
+    applyJamSliderStyle(remoteLevelSlider_);
     remoteLevelSlider_->setMinimumWidth(220);
     remoteLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     mixRemotePeerSlider_ = remoteLevelSlider_;
-    mixRemotePeerLevelLabel_ = makeValueLabel(QStringLiteral("100%"));
+    mixRemotePeerLevelLabel_ = makeValueLabel(QStringLiteral("+0.0 dB"));
 
     mixTrackLevelSlider_ = trackLevelSlider_;
     mixTrackLevelLabel_ = trackLevelDbLabel_;
@@ -2670,14 +2683,14 @@ QWidget* MainWindow::buildMixPage()
     });
     QObject::connect(metronomeLevelSlider_, &QSlider::valueChanged, this, [this](int value) {
         if (mixMetronomeLevelLabel_) {
-            mixMetronomeLevelLabel_->setText(QStringLiteral("%1%").arg(value));
+            mixMetronomeLevelLabel_->setText(dbText(static_cast<double>(value)));
         }
         applyMetronomePatternToLocalDevice();
         updateRuntimeControls();
     });
     QObject::connect(remoteLevelSlider_, &QSlider::valueChanged, this, [this](int value) {
         if (mixRemotePeerLevelLabel_) {
-            mixRemotePeerLevelLabel_->setText(QStringLiteral("%1%").arg(value));
+            mixRemotePeerLevelLabel_->setText(dbText(static_cast<double>(value)));
         }
         updateRuntimeControls();
     });
@@ -2748,10 +2761,10 @@ void MainWindow::updateMixControls()
         trackLevelDbLabel_->setText(dbText(trackController_.model().trackGainDb));
     }
     if (metronomeLevelSlider_ && mixMetronomeLevelLabel_) {
-        mixMetronomeLevelLabel_->setText(QStringLiteral("%1%").arg(metronomeLevelSlider_->value()));
+        mixMetronomeLevelLabel_->setText(dbText(static_cast<double>(metronomeLevelSlider_->value())));
     }
     if (remoteLevelSlider_ && mixRemotePeerLevelLabel_) {
-        mixRemotePeerLevelLabel_->setText(QStringLiteral("%1%").arg(remoteLevelSlider_->value()));
+        mixRemotePeerLevelLabel_->setText(dbText(static_cast<double>(remoteLevelSlider_->value())));
     }
     if (mixSendLevelSlider_ && mixSendLevelLabel_) {
         mixSendLevelLabel_->setText(dbText(static_cast<double>(mixSendLevelSlider_->value())));
@@ -3791,7 +3804,7 @@ QJsonObject MainWindow::leaderSettingsMessage() const
         {QStringLiteral("drift_deadband_ppm"), driftDeadbandSpin_->value()},
         {QStringLiteral("drift_max_correction_ppm"), driftMaxCorrectionSpin_->value()},
         {QStringLiteral("bpm"), metronomeBpmSpin_ ? metronomeBpmSpin_->value() : bpmSpin_->value()},
-        {QStringLiteral("remote_level"), static_cast<double>(remoteLevelSlider_->value()) / 100.0},
+        {QStringLiteral("remote_level"), gainFromDb(static_cast<double>(remoteLevelSlider_->value()))},
         {QStringLiteral("metronome_mode"), metronomeModeBox_->currentText()},
         {QStringLiteral("sample_time_playout"), sampleTimePlayoutCheck_->isChecked()},
         {QStringLiteral("playout_delay_frames"), playoutDelaySpin_->value()},
@@ -3826,8 +3839,8 @@ void MainWindow::applyLeaderSettings(const QJsonObject& settings)
     if (metronomeBpmSpin_) {
         metronomeBpmSpin_->setValue(settings.value(QStringLiteral("bpm")).toInt(metronomeBpmSpin_->value()));
     }
-    remoteLevelSlider_->setValue(qBound(0, qRound(settings.value(QStringLiteral("remote_level")).toDouble(
-        static_cast<double>(remoteLevelSlider_->value()) / 100.0) * 100.0), 100));
+    remoteLevelSlider_->setValue(qBound(-60, qRound(dbFromGain(settings.value(QStringLiteral("remote_level")).toDouble(
+        gainFromDb(static_cast<double>(remoteLevelSlider_->value()))))), 12));
     const QString mode = settings.value(QStringLiteral("metronome_mode")).toString(metronomeModeBox_->currentText());
     const int modeIndex = metronomeModeBox_->findText(mode);
     if (modeIndex >= 0) {
@@ -3942,10 +3955,12 @@ void MainWindow::updateRuntimeControls()
     if (!jam2_.isRunning()) {
         return;
     }
-    sendJamCommand(QStringLiteral("metro level %1").arg(static_cast<double>(metronomeLevelSlider_->value()) / 100.0, 0, 'f', 2));
+    const double metronomeLevel = gainFromDb(static_cast<double>(metronomeLevelSlider_ ? metronomeLevelSlider_->value() : 0));
+    const double remoteLevel = gainFromDb(static_cast<double>(remoteLevelSlider_ ? remoteLevelSlider_->value() : 0));
+    sendJamCommand(QStringLiteral("metro level %1").arg(metronomeLevel, 0, 'f', 3));
     sendJamCommand(QStringLiteral("metro mode %1").arg(metronomeModeBox_->currentText()));
     sendMetronomePatternToJam();
-    sendJamCommand(QStringLiteral("remote level %1").arg(static_cast<double>(remoteLevelSlider_->value()) / 100.0, 0, 'f', 2));
+    sendJamCommand(QStringLiteral("remote level %1").arg(remoteLevel, 0, 'f', 3));
     const double sendLevel = gainFromDb(static_cast<double>(mixSendLevelSlider_ ? mixSendLevelSlider_->value() : 0));
     const double monitorLevel = gainFromDb(static_cast<double>(mixMonitorLevelSlider_ ? mixMonitorLevelSlider_->value() : -18));
     sendJamCommand(QStringLiteral("send level %1").arg(sendLevel, 0, 'f', 3));
@@ -4743,7 +4758,7 @@ void MainWindow::startTrackMetronome()
     localMetronomeDevice_ = std::make_unique<LocalMetronomeDevice>(format.sampleRate(), format.channelCount());
     localMetronomeDevice_->configure(
         currentMetronomePattern(),
-        localMetronomeLevelSlider_ ? static_cast<double>(localMetronomeLevelSlider_->value()) / 100.0 : 0.35);
+        gainFromDb(static_cast<double>(localMetronomeLevelSlider_ ? localMetronomeLevelSlider_->value() : 0)));
     localMetronomeDevice_->resetGrid();
     if (!localMetronomeDevice_->open(QIODevice::ReadOnly)) {
         localMetronomeDevice_.reset();
@@ -4898,7 +4913,7 @@ void MainWindow::applyMetronomePatternToLocalDevice()
     }
     localMetronomeDevice_->configure(
         currentMetronomePattern(),
-        localMetronomeLevelSlider_ ? static_cast<double>(localMetronomeLevelSlider_->value()) / 100.0 : 0.35);
+        gainFromDb(static_cast<double>(localMetronomeLevelSlider_ ? localMetronomeLevelSlider_->value() : 0)));
 }
 
 void MainWindow::sendMetronomePatternToJam()
@@ -5168,8 +5183,8 @@ QStringList MainWindow::commonJamArgs(bool includeExtraArgs) const
          << QStringLiteral("--status-format") << QStringLiteral("jsonl")
          << QStringLiteral("--metronome") << QStringLiteral("off")
          << QStringLiteral("--bpm") << QString::number(metronomeBpmSpin_ ? metronomeBpmSpin_->value() : bpmSpin_->value())
-         << QStringLiteral("--metronome-level") << QString::number(static_cast<double>(metronomeLevelSlider_->value()) / 100.0, 'f', 2)
-         << QStringLiteral("--remote-level") << QString::number(static_cast<double>(remoteLevelSlider_->value()) / 100.0, 'f', 2)
+         << QStringLiteral("--metronome-level") << QString::number(gainFromDb(static_cast<double>(metronomeLevelSlider_ ? metronomeLevelSlider_->value() : 0)), 'f', 3)
+         << QStringLiteral("--remote-level") << QString::number(gainFromDb(static_cast<double>(remoteLevelSlider_ ? remoteLevelSlider_->value() : 0)), 'f', 3)
          << QStringLiteral("--send-level") << QString::number(gainFromDb(static_cast<double>(mixSendLevelSlider_ ? mixSendLevelSlider_->value() : 0)), 'f', 3)
          << QStringLiteral("--local-monitor") << onOff(mixMonitorCheck_ && mixMonitorCheck_->isChecked())
          << QStringLiteral("--local-monitor-level") << QString::number(gainFromDb(static_cast<double>(mixMonitorLevelSlider_ ? mixMonitorLevelSlider_->value() : -18)), 'f', 3)
