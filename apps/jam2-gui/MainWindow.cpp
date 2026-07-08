@@ -1446,6 +1446,7 @@ MainWindow::MainWindow(QWidget* parent)
         connectionLabel_->setText(QStringLiteral("Stopped"));
         controlReconnectEnabled_ = false;
         controlReconnectTimer_.stop();
+        statusPollTimer_.stop();
         controlServer_.close();
         controlClient_.close();
         pendingJoinLaunch_ = false;
@@ -1487,6 +1488,12 @@ MainWindow::MainWindow(QWidget* parent)
     controlClient_.onMessage = [this](const QJsonObject& message) { handleControlMessage(message); };
     controlReconnectTimer_.setInterval(2000);
     QObject::connect(&controlReconnectTimer_, &QTimer::timeout, this, [this] { refreshControlConnection(); });
+    statusPollTimer_.setInterval(100);
+    QObject::connect(&statusPollTimer_, &QTimer::timeout, this, [this] {
+        if (jam2_.isRunning()) {
+            jam2_.sendLine(QStringLiteral("status"));
+        }
+    });
     QObject::connect(&captureProcess_, &QProcess::readyReadStandardOutput, this, [this] {
         const QString text = QString::fromUtf8(captureProcess_.readAllStandardOutput());
         for (const QString& line : text.split(QLatin1Char('\n'))) {
@@ -2539,7 +2546,6 @@ QWidget* MainWindow::buildMixPage()
     remoteLayout->setSpacing(6);
     remoteLayout->addWidget(makeRow(QStringLiteral("User 1"), remoteLevelSlider_, mixRemotePeerLevelLabel_));
     remoteLayout->addWidget(makeMeterRow(QStringLiteral("User 1 meter"), mixRemotePeerMeter_));
-    mixRemotePeerRow_->setVisible(false);
     layout->addWidget(mixRemotePeerRow_);
     layout->addStretch(1);
 
@@ -2626,8 +2632,9 @@ void MainWindow::updateMixControls()
 
 void MainWindow::setMixRemotePeerVisible(bool visible)
 {
+    Q_UNUSED(visible);
     if (mixRemotePeerRow_) {
-        mixRemotePeerRow_->setVisible(visible);
+        mixRemotePeerRow_->setVisible(true);
     }
 }
 
@@ -2837,6 +2844,7 @@ void MainWindow::launchJamProcess(const QStringList& args)
     jamRecordingActive_ = false;
     updateJamRecordingControls();
     connectionLabel_->setText(QStringLiteral("Starting"));
+    statusPollTimer_.start();
     QTimer::singleShot(250, this, [this] {
         updateRuntimeControls();
     });
@@ -3078,6 +3086,7 @@ void MainWindow::stopJam()
 {
     controlReconnectEnabled_ = false;
     controlReconnectTimer_.stop();
+    statusPollTimer_.stop();
     controlServer_.close();
     controlClient_.close();
     pendingJoinLaunch_ = false;
@@ -3169,7 +3178,9 @@ void MainWindow::appendLog(const QString& line)
 
 void MainWindow::handleOutputLine(const QString& line)
 {
-    appendLog(line);
+    if (!line.startsWith(QStringLiteral("{\"event\":\"status\""))) {
+        appendLog(line);
+    }
     handleStatsLine(line);
 }
 

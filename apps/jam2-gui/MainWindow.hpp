@@ -302,6 +302,7 @@ private:
     int incomingTrackNextChunk_ = 0;
     QTimer trackTimelineTimer_;
     QTimer controlReconnectTimer_;
+    QTimer statusPollTimer_;
     QString controlHost_;
     quint16 controlPort_ = 0;
     QString controlSessionHex_;
