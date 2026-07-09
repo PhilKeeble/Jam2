@@ -124,6 +124,7 @@ private:
     void setLoopStartAtCurrentPosition();
     void setLoopEndAtCurrentPosition();
     void clearTrackLoop();
+    qint64 currentAudibleTrackPositionMs() const;
     void updateTrackTimeline();
     void startTrackMetronome();
     void stopTrackMetronome();

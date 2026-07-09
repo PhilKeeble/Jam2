@@ -654,9 +654,32 @@ public:
         return static_cast<qint64>(positionFrame_.load(std::memory_order_relaxed) * 1000 / sampleRate());
     }
 
+    qint64 audiblePositionMs(qint64 queuedOutputFrames, double sourceFramesPerOutputFrame) const
+    {
+        qint64 frame = positionFrame_.load(std::memory_order_relaxed);
+        qint64 queuedSourceFrames = static_cast<qint64>(std::llround(
+            static_cast<double>(qMax<qint64>(0, queuedOutputFrames)) *
+            qBound(0.10, sourceFramesPerOutputFrame, 2.0)));
+        const bool looping = loopEnabled_.load(std::memory_order_relaxed);
+        const qint64 loopStart = loopStartFrame_.load(std::memory_order_relaxed);
+        const qint64 loopEnd = loopEndFrame_.load(std::memory_order_relaxed);
+        if (looping && loopEnd > loopStart && frame >= loopStart && frame < loopEnd) {
+            const qint64 loopLength = loopEnd - loopStart;
+            queuedSourceFrames %= loopLength;
+            const qint64 offset = frame - loopStart;
+            frame = queuedSourceFrames <= offset
+                ? frame - queuedSourceFrames
+                : loopEnd - (queuedSourceFrames - offset);
+        } else {
+            frame = qMax<qint64>(0, frame - queuedSourceFrames);
+        }
+        return qBound<qint64>(0, static_cast<qint64>(frame * 1000 / sampleRate()), durationMs());
+    }
+
     void setPositionMs(qint64 ms)
     {
         const qint64 frame = qBound<qint64>(0, ms * sampleRate() / 1000, frameCount());
+        positionFrame_.store(frame, std::memory_order_relaxed);
         pendingSeekFrame_.store(frame, std::memory_order_relaxed);
     }
 
@@ -4880,6 +4903,7 @@ void MainWindow::playTrack()
     } else if (trackDevice_->positionMs() >= trackDevice_->durationMs()) {
         trackDevice_->setPositionMs(0);
     }
+    const qint64 sharedStartPositionMs = currentAudibleTrackPositionMs();
 
     QAudioDevice outputDevice = selectedLocalOutputDevice();
     if (outputDevice.isNull()) {
@@ -4899,16 +4923,20 @@ void MainWindow::playTrack()
     if (trackController_.model().syncControls) {
         sendControl(QJsonObject{
             {QStringLiteral("type"), QStringLiteral("track.play")},
-            {QStringLiteral("position_ms"), trackDevice_->positionMs()},
+            {QStringLiteral("position_ms"), sharedStartPositionMs},
         });
     }
 }
 
 void MainWindow::stopTrack()
 {
+    const qint64 stopPositionMs = currentAudibleTrackPositionMs();
     if (trackSink_) {
         trackSink_->stop();
         trackSink_.reset();
+    }
+    if (trackDevice_) {
+        trackDevice_->setPositionMs(stopPositionMs);
     }
     updateTrackTimeline();
     if (trackController_.model().syncControls) {
@@ -4919,7 +4947,7 @@ void MainWindow::stopTrack()
 void MainWindow::setLoopStartAtCurrentPosition()
 {
     const qint64 duration = trackDevice_ ? trackDevice_->durationMs() : trackController_.model().durationMs;
-    const qint64 position = qBound<qint64>(0, trackDevice_ ? trackDevice_->positionMs() : 0, duration);
+    const qint64 position = qBound<qint64>(0, currentAudibleTrackPositionMs(), duration);
     auto& model = trackController_.model();
     model.loopStartSeconds = static_cast<double>(position) / 1000.0;
     model.loopEnabled = true;
@@ -4934,7 +4962,7 @@ void MainWindow::setLoopStartAtCurrentPosition()
 void MainWindow::setLoopEndAtCurrentPosition()
 {
     const qint64 duration = trackDevice_ ? trackDevice_->durationMs() : trackController_.model().durationMs;
-    const qint64 position = qBound<qint64>(0, trackDevice_ ? trackDevice_->positionMs() : 0, duration);
+    const qint64 position = qBound<qint64>(0, currentAudibleTrackPositionMs(), duration);
     auto& model = trackController_.model();
     model.loopEndSeconds = static_cast<double>(position) / 1000.0;
     model.loopEnabled = true;
@@ -4960,12 +4988,31 @@ void MainWindow::clearTrackLoop()
     }
 }
 
+qint64 MainWindow::currentAudibleTrackPositionMs() const
+{
+    if (!trackDevice_) {
+        return 0;
+    }
+
+    const qint64 durationMs = trackDevice_->durationMs();
+    qint64 queuedOutputFrames = 0;
+    if (trackSink_) {
+        const qint64 bytesPerFrame = qMax<qint64>(1, static_cast<qint64>(trackDevice_->channels()) * 2);
+        const qint64 queuedBytes = qMax<qint64>(
+            0,
+            static_cast<qint64>(trackSink_->bufferSize()) - static_cast<qint64>(trackSink_->bytesFree()));
+        queuedOutputFrames = queuedBytes / bytesPerFrame;
+    }
+    const qint64 positionMs = trackDevice_->audiblePositionMs(queuedOutputFrames, trackController_.model().speed);
+    return qBound<qint64>(0, positionMs, durationMs);
+}
+
 void MainWindow::updateTrackTimeline()
 {
     auto& model = trackController_.model();
     if (trackWaveform_) {
         const qint64 duration = trackDevice_ ? trackDevice_->durationMs() : model.durationMs;
-        const qint64 position = trackDevice_ ? trackDevice_->positionMs() : 0;
+        const qint64 position = currentAudibleTrackPositionMs();
         trackWaveform_->setDurationMs(duration);
         trackWaveform_->setPlayheadMs(position);
         trackWaveform_->setBpm(model.acceptedBpm);
