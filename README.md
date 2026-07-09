@@ -1,3 +1,5 @@
+![Jam2](logo.png)
+
 # Jam2
 
 Jam2 is a small direct peer-to-peer music jamming tool for two people. It pairs low-latency mono UDP audio with a shared metronome, hard technical stats, and a Qt GUI for starting or joining a jam without adding accounts, rooms, relays, or hosted audio paths.

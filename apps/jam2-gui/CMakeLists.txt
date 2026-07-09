@@ -19,6 +19,18 @@ endif()
 
 set(CMAKE_AUTOMOC ON)
 
+set(JAM2_GUI_WINDOWS_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/jam2.ico")
+set(JAM2_GUI_MACOS_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/jam2.icns")
+
+if(WIN32)
+    enable_language(RC)
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Jam2.rc.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/Jam2.rc"
+        @ONLY
+    )
+endif()
+
 add_executable(jam2-gui WIN32 MACOSX_BUNDLE
     BeatGridModel.cpp
     BeatGridModel.hpp
@@ -40,16 +52,25 @@ add_executable(jam2-gui WIN32 MACOSX_BUNDLE
     main.cpp
 )
 
+if(WIN32)
+    target_sources(jam2-gui PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/Jam2.rc")
+endif()
+
 if(APPLE)
     enable_language(OBJCXX)
+    set_source_files_properties("${JAM2_GUI_MACOS_ICON}" PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources"
+    )
     target_sources(jam2-gui PRIVATE
         Jam2MacPermissions.hpp
         Jam2MacPermissions.mm
+        "${JAM2_GUI_MACOS_ICON}"
     )
     set_target_properties(jam2-gui PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in"
         MACOSX_BUNDLE_BUNDLE_NAME "Jam2"
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.jam2.app"
+        MACOSX_BUNDLE_ICON_FILE "jam2.icns"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
     )
