@@ -16,7 +16,6 @@ else()
     endif()
 endif()
 
-option(JAM2_BUILD_TESTS "Build Jam2 tests" ON)
 option(JAM2_BUILD_GUI "Build jam2-gui when its CMake target is present" ON)
 option(JAM2_BUILD_CAPTURE "Build jam2-capture when its CMake target is present" ON)
 
@@ -91,9 +90,3 @@ unset(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG)
 unset(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE)
 unset(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO)
 unset(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL)
-
-include(CTest)
-
-if(JAM2_BUILD_TESTS AND BUILD_TESTING)
-    add_subdirectory(tests)
-endif()

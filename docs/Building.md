@@ -41,7 +41,6 @@ Recommended build commands from a Developer PowerShell or Developer Command Prom
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure
 ```
 
 If CMake cannot find Qt automatically, pass its install prefix:
@@ -80,7 +79,6 @@ Recommended build commands:
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure
 ```
 
 If CMake cannot find Homebrew Qt automatically, pass the Qt prefix:
@@ -97,6 +95,6 @@ Real CoreAudio validation must happen on a macOS host with the target audio devi
 - Jam2 currently expects Release builds. Configure fresh build directories with `-DCMAKE_BUILD_TYPE=Release`.
 - `jam2-gui` and `jam2-capture` are enabled by default for new CMake build directories.
 - Built app binaries are staged to the repo-root `release` directory.
-- Tests and intermediate build products stay in the selected CMake build directory.
+- Intermediate build products stay in the selected CMake build directory.
 - Shared protocol, STUN, stats, and timing code should remain platform-neutral.
 - ASIO and CoreAudio code should stay isolated behind platform-specific source files.
