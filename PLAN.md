@@ -2,10 +2,6 @@
 
 This file tracks future work that is not already implemented. User-facing documentation lives in `docs/`, with only `README.md` and this plan kept at the repository root.
 
-## stress test
-
-stress test should be split out possibly from cli validation, cli validation should just validate each command options and stdin options and just make sure everything is working correctly and as intended so that adding new features doesnt break stuff. Maybe better in ctests? 
-
 ## Shared Song Timing Ideas
 
 The GUI already has shared song grids and local track playback. A possible future pass is tighter timing between the song grid, metronome, and any shared backing track.
@@ -45,7 +41,7 @@ Rules:
 
 ## Small Full-Mesh Group Mode
 
-Consider an experimental mode for three people first, with four people only after the three-peer path is stable. The goal is to preserve the current direct UDP design by using a small full mesh instead of a relay, TURN audio path, room server, or central mixer.
+Consider an experimental mode for multiple people. The goal is to preserve the current direct UDP design by using a small full mesh instead of a relay, TURN audio path, room server, or central mixer.
 
 Topology:
 
@@ -82,6 +78,10 @@ Rules:
 - Prefer three-peer LAN validation before internet testing or four-peer experiments.
 - Expose per-peer hard stats: endpoint, packet loss, jitter, RTT, bitrate, playback depth, underruns, overruns, drift ppm, and resampler ratio.
 - Do not add rooms, accounts, GUI room layers, subjective playability scores, or hidden recommendations.
+
+GUI 
+
+Gui should be done in a star topology rather than full mesh like UDP. All peers connect to the one listener in TCP and follow that session, where peer B could make a change and push it to peer A (the leader) and then the other peers would replicate off of peeer A for the change. No need to track and order, just whoever last made the change wins if people make changes in a view at once. The star topology llows the UDP to follow the more complex mesh model whilst the TCP star can be more simple and relieve some networking pressure whilst alowing all peers to have a 2 way TCP link.
 
 ## Linux Audio Backend
 

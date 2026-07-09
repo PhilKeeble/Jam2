@@ -18,6 +18,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QJsonObject>
+#include <QMap>
 #include <QProcess>
 #include <QSlider>
 #include <QSpinBox>
@@ -75,6 +76,14 @@ private:
     void sendLeaderSettings();
     QJsonObject leaderSettingsMessage() const;
     void applyLeaderSettings(const QJsonObject& settings);
+    void handleMeshPeerAuthenticated(const QString& token, const QJsonObject& message);
+    void broadcastMeshPeerList();
+    void applyMeshPeerList(const QJsonObject& message);
+    void restartMeshEngineFromPeerList();
+    QStringList meshPeerEndpointsExcludingSelf() const;
+    QString meshBindEndpoint() const;
+    QString localMeshEndpoint() const;
+    QString meshPeerToken();
     bool selectedDeviceSupportsSampleRate(int sampleRate);
     void launchJamProcess(QStringList args);
     void launchPendingJoin();
@@ -90,6 +99,8 @@ private:
     void stopJamRecording();
     void updateJamRecordingControls();
     void refreshGeneratedUrl();
+    QString meshInviteUrl() const;
+    void showPendingMeshInviteUrl();
     void updateConnectionControlState();
     void updateTrackControls();
     void loadTrackMetadata();
@@ -173,6 +184,8 @@ private:
     QSpinBox* streamLingerMsSpin_ = nullptr;
     QCheckBox* statsCheck_ = nullptr;
     QCheckBox* guiControlCheck_ = nullptr;
+    QCheckBox* meshModeCheck_ = nullptr;
+    QSpinBox* meshMaxPeersSpin_ = nullptr;
     QSpinBox* statsWarmupMsSpin_ = nullptr;
     QLineEdit* logStatsEdit_ = nullptr;
     QSpinBox* socketSendBufferSpin_ = nullptr;
@@ -341,6 +354,12 @@ private:
     int controlReconnectAttempts_ = 0;
     QStringList pendingJoinBaseArgs_;
     bool pendingJoinLaunch_ = false;
+    bool meshActive_ = false;
+    bool meshRestarting_ = false;
+    bool pendingMeshInvitePopup_ = false;
+    QString meshPeerToken_;
+    QMap<QString, QString> meshPeerEndpoints_;
+    QStringList currentMeshPeers_;
     bool localMetronomeRunning_ = false;
     bool applyingRemoteMetronomeSettings_ = false;
     QVector<bool> metronomeEnabledSteps_;

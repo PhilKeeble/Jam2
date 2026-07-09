@@ -35,6 +35,7 @@
 #include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QJsonValue>
 #include <QList>
 #include <QMediaDevices>
 #include <QMessageBox>
@@ -1496,6 +1497,9 @@ MainWindow::MainWindow(QWidget* parent)
     jam2_.onStatus = [this](const QJsonObject& status) { handleStatus(status); };
     jam2_.onFinished = [this](int code) {
         appendLog(QStringLiteral("jam2 exited rc=%1").arg(code));
+        if (meshRestarting_) {
+            return;
+        }
         connectionLabel_->setText(QStringLiteral("Stopped"));
         controlReconnectEnabled_ = false;
         controlReconnectTimer_.stop();
@@ -1504,6 +1508,10 @@ MainWindow::MainWindow(QWidget* parent)
         controlClient_.close();
         pendingJoinLaunch_ = false;
         pendingJoinBaseArgs_.clear();
+        meshActive_ = false;
+        meshPeerEndpoints_.clear();
+        currentMeshPeers_.clear();
+        pendingMeshInvitePopup_ = false;
         if (localMetronomeSink_) {
             localMetronomeSink_->stop();
             localMetronomeSink_.reset();
@@ -1538,6 +1546,9 @@ MainWindow::MainWindow(QWidget* parent)
     };
     controlServer_.onState = [this](const QString& state) { handleControlState(state, true); };
     controlServer_.onMessage = [this](const QJsonObject& message) { handleControlMessage(message); };
+    controlServer_.onAuthenticated = [this](const QString& token, const QJsonObject& message) {
+        handleMeshPeerAuthenticated(token, message);
+    };
     controlClient_.onState = [this](const QString& state) { handleControlState(state, false); };
     controlClient_.onMessage = [this](const QJsonObject& message) { handleControlMessage(message); };
     controlReconnectTimer_.setInterval(2000);
@@ -1819,6 +1830,10 @@ QWidget* MainWindow::buildSessionPage()
     statsCheck_->setChecked(true);
     guiControlCheck_ = new QCheckBox(QStringLiteral("GUI control socket"), page);
     guiControlCheck_->setChecked(true);
+    meshModeCheck_ = new QCheckBox(QStringLiteral("Mesh mode"), page);
+    meshMaxPeersSpin_ = new QSpinBox(page);
+    meshMaxPeersSpin_->setRange(0, 64);
+    meshMaxPeersSpin_->setValue(0);
     statsWarmupMsSpin_ = new QSpinBox(page);
     statsWarmupMsSpin_->setRange(0, 600000);
     statsWarmupMsSpin_->setValue(3000);
@@ -1924,6 +1939,7 @@ QWidget* MainWindow::buildSessionPage()
         modeBox_, jam2PathEdit_, bindHostEdit_, portSpin_, publicHostEdit_, connectUrlEdit_,
         generatedUrlEdit_, stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, waitMsSpin_,
         streamMsSpin_, streamLingerMsSpin_, statsWarmupMsSpin_, logStatsEdit_,
+        meshMaxPeersSpin_,
         socketSendBufferSpin_, socketRecvBufferSpin_, profileBox_, osPriorityBox_, deviceBox_, inputChannelsEdit_,
         outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_, prefillSpin_,
         playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, driftSmoothingSpin_,
@@ -1938,6 +1954,7 @@ QWidget* MainWindow::buildSessionPage()
         modeBox_, jam2PathEdit_, bindHostEdit_, portSpin_, publicHostEdit_, connectUrlEdit_,
         generatedUrlEdit_, stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, waitMsSpin_,
         streamMsSpin_, streamLingerMsSpin_, statsCheck_, guiControlCheck_, statsWarmupMsSpin_, logStatsEdit_,
+        meshModeCheck_, meshMaxPeersSpin_,
         socketSendBufferSpin_, socketRecvBufferSpin_, profileBox_, osPriorityBox_, deviceBox_, inputChannelsEdit_,
         outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_, prefillSpin_,
         playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, driftCorrectionCheck_,
@@ -1970,6 +1987,10 @@ QWidget* MainWindow::buildSessionPage()
     });
     applyTuningProfileName(QStringLiteral("fast"));
     QObject::connect(noStunCheck_, &QCheckBox::toggled, this, [this] {
+        updateConnectionControlState();
+        refreshGeneratedUrl();
+    });
+    QObject::connect(meshModeCheck_, &QCheckBox::toggled, this, [this] {
         updateConnectionControlState();
         refreshGeneratedUrl();
     });
@@ -2835,35 +2856,68 @@ void MainWindow::refreshGeneratedUrl()
     if (!generatedUrlEdit_) {
         return;
     }
-    if (!noStunCheck_ || !noStunCheck_->isChecked()) {
+    const bool meshMode = meshModeCheck_ && meshModeCheck_->isChecked();
+    if (!meshMode && (!noStunCheck_ || !noStunCheck_->isChecked())) {
         generatedUrlEdit_->setText(QStringLiteral("Generated after STUN discovery starts"));
         return;
     }
     try {
-        jam2::SessionInfo info;
-        info.endpoint = {publicHostEdit_->text().toStdString(), static_cast<std::uint16_t>(portSpin_->value())};
-        info.session_id = sessionId_;
-        info.key = sessionKey_;
-        generatedUrlEdit_->setText(QString::fromStdString(jam2::make_jam_url(info)));
+        generatedUrlEdit_->setText(meshMode ? meshInviteUrl() : QString::fromStdString(jam2::make_jam_url({
+            {publicHostEdit_->text().toStdString(), static_cast<std::uint16_t>(portSpin_->value())},
+            sessionId_,
+            sessionKey_,
+        })));
     } catch (const std::exception&) {
         generatedUrlEdit_->clear();
     }
 }
 
+QString MainWindow::meshInviteUrl() const
+{
+    const QString host = publicHostEdit_ && !publicHostEdit_->text().trimmed().isEmpty()
+        ? publicHostEdit_->text().trimmed()
+        : (bindHostEdit_ && !bindHostEdit_->text().trimmed().isEmpty()
+            ? bindHostEdit_->text().trimmed()
+            : QStringLiteral("127.0.0.1"));
+    jam2::SessionInfo info;
+    info.endpoint = {host.toStdString(), static_cast<std::uint16_t>(portSpin_ ? portSpin_->value() : 49000)};
+    info.session_id = sessionId_;
+    info.key = sessionKey_;
+    return QString::fromStdString(jam2::make_jam_url(info));
+}
+
+void MainWindow::showPendingMeshInviteUrl()
+{
+    if (!pendingMeshInvitePopup_ || !meshActive_ || !controlServerMode_) {
+        return;
+    }
+    pendingMeshInvitePopup_ = false;
+    const QString inviteUrl = meshInviteUrl();
+    if (generatedUrlEdit_) {
+        generatedUrlEdit_->setText(inviteUrl);
+    }
+    QApplication::clipboard()->setText(inviteUrl);
+    QMessageBox::information(
+        this,
+        QStringLiteral("Mesh Invite URL"),
+        QStringLiteral("Paste this into Join Jam:\n\n%1").arg(inviteUrl));
+}
+
 void MainWindow::updateConnectionControlState()
 {
+    const bool meshMode = meshModeCheck_ && meshModeCheck_->isChecked();
     const bool manualEndpoint = noStunCheck_ && noStunCheck_->isChecked();
     if (publicHostEdit_) {
-        publicHostEdit_->setEnabled(manualEndpoint);
+        publicHostEdit_->setEnabled(manualEndpoint || meshMode);
     }
     if (stunServerEdit_) {
-        stunServerEdit_->setEnabled(!manualEndpoint);
+        stunServerEdit_->setEnabled(!manualEndpoint && !meshMode);
     }
     if (stunTimeoutSpin_) {
-        stunTimeoutSpin_->setEnabled(!manualEndpoint);
+        stunTimeoutSpin_->setEnabled(!manualEndpoint && !meshMode);
     }
     if (stunRetriesSpin_) {
-        stunRetriesSpin_->setEnabled(!manualEndpoint);
+        stunRetriesSpin_->setEnabled(!manualEndpoint && !meshMode);
     }
 }
 
@@ -2880,10 +2934,31 @@ void MainWindow::startJam()
     }
     QStringList args;
     const bool listenMode = modeBox_->currentText() == QStringLiteral("Listen");
+    const bool meshMode = meshModeCheck_ && meshModeCheck_->isChecked();
+    meshActive_ = meshMode;
     pendingJoinLaunch_ = false;
     pendingJoinBaseArgs_.clear();
+    currentMeshPeers_.clear();
     try {
-        if (listenMode) {
+        if (listenMode && meshMode) {
+            refreshGeneratedUrl();
+            pendingMeshInvitePopup_ = true;
+            meshPeerEndpoints_.clear();
+            meshPeerEndpoints_[meshPeerToken()] = localMeshEndpoint();
+            args << QStringLiteral("mesh")
+                 << QStringLiteral("--bind") << meshBindEndpoint()
+                 << QStringLiteral("--session-id") << sessionHex()
+                 << QStringLiteral("--session-key") << keyHex()
+                 << QStringLiteral("--peers") << QString();
+            if (!controlServer_.listen(static_cast<quint16>(portSpin_->value()), sessionHex(), keyHex())) {
+                appendLog(QStringLiteral("control server failed: ") + controlServer_.errorString());
+            }
+            controlServerMode_ = true;
+            controlHost_ = bindHostEdit_->text();
+            controlPort_ = static_cast<quint16>(portSpin_->value());
+            controlSessionHex_ = sessionHex();
+            controlKeyHex_ = keyHex();
+        } else if (listenMode) {
             args << QStringLiteral("listen")
                  << QStringLiteral("--bind") << QStringLiteral("%1:%2").arg(bindHostEdit_->text()).arg(portSpin_->value())
                  << QStringLiteral("--session-id") << sessionHex()
@@ -2907,6 +2982,26 @@ void MainWindow::startJam()
             controlPort_ = static_cast<quint16>(portSpin_->value());
             controlSessionHex_ = sessionHex();
             controlKeyHex_ = keyHex();
+        } else if (meshMode) {
+            const std::string url = connectUrlEdit_->text().toStdString();
+            const jam2::SessionInfo info = jam2::parse_jam_url(url);
+            sessionId_ = info.session_id;
+            sessionKey_ = info.key;
+            meshPeerEndpoints_.clear();
+            meshPeerEndpoints_[meshPeerToken()] = localMeshEndpoint();
+            pendingJoinLaunch_ = true;
+            controlServerMode_ = false;
+            controlHost_ = QString::fromStdString(info.endpoint.host);
+            controlPort_ = info.endpoint.port;
+            controlSessionHex_ = sessionHex();
+            controlKeyHex_ = keyHex();
+            controlClient_.connectToHost(
+                QString::fromStdString(info.endpoint.host),
+                info.endpoint.port,
+                sessionHex(),
+                keyHex(),
+                meshPeerToken(),
+                localMeshEndpoint());
         } else {
             const std::string url = connectUrlEdit_->text().toStdString();
             const jam2::SessionInfo info = jam2::parse_jam_url(url);
@@ -2941,6 +3036,9 @@ void MainWindow::startJam()
         return;
     }
     args << commonJamArgs();
+    if (meshMode) {
+        currentMeshPeers_ = meshPeerEndpointsExcludingSelf();
+    }
     launchJamProcess(args);
 }
 
@@ -3105,7 +3203,8 @@ void MainWindow::showStartJamDialog()
         stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, noStunCheck_, profileBox_, deviceBox_,
         inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_,
         prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_,
-        streamMsSpin_, streamLingerMsSpin_, statsCheck_, guiControlCheck_, statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
+        streamMsSpin_, streamLingerMsSpin_, statsCheck_, guiControlCheck_, meshModeCheck_, meshMaxPeersSpin_,
+        statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
         socketRecvBufferSpin_, osPriorityBox_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
         driftMaxCorrectionSpin_, sampleTimePlayoutCheck_, playoutDelaySpin_, jitterBufferSpin_,
         jitterBufferMaxSpin_, adaptiveCushionCheck_, adaptiveTargetSpin_, adaptiveMinSpin_,
@@ -3126,6 +3225,8 @@ void MainWindow::showStartJamDialog()
     sessionForm->addRow(QStringLiteral("STUN timeout ms"), stunTimeoutSpin_);
     sessionForm->addRow(QStringLiteral("STUN retries"), stunRetriesSpin_);
     sessionForm->addRow(QString(), noStunCheck_);
+    sessionForm->addRow(QString(), meshModeCheck_);
+    sessionForm->addRow(QStringLiteral("Max mesh peers"), meshMaxPeersSpin_);
     auto* sessionBox = new QGroupBox(QStringLiteral("Connection"), content);
     sessionBox->setLayout(sessionForm);
     layout->addWidget(sessionBox);
@@ -3217,7 +3318,8 @@ void MainWindow::showStartJamDialog()
         stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, noStunCheck_, profileBox_, deviceBox_,
         inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_,
         prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_,
-        streamMsSpin_, streamLingerMsSpin_, statsCheck_, guiControlCheck_, statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
+        streamMsSpin_, streamLingerMsSpin_, statsCheck_, guiControlCheck_, meshModeCheck_, meshMaxPeersSpin_,
+        statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
         socketRecvBufferSpin_, osPriorityBox_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
         driftMaxCorrectionSpin_, sampleTimePlayoutCheck_, playoutDelaySpin_, jitterBufferSpin_,
         jitterBufferMaxSpin_, adaptiveCushionCheck_, adaptiveTargetSpin_, adaptiveMinSpin_,
@@ -3247,8 +3349,8 @@ void MainWindow::showJoinJamDialog()
     auto* content = new QWidget(&dialog);
     auto* layout = new QVBoxLayout(content);
     const QList<QWidget*> visibleWidgets{
-        connectUrlEdit_, jam2PathEdit_, deviceBox_, inputChannelsEdit_, outputChannelsEdit_,
-        statsCheck_, guiControlCheck_, statsWarmupMsSpin_, logStatsEdit_, osPriorityBox_,
+        connectUrlEdit_, jam2PathEdit_, bindHostEdit_, portSpin_, deviceBox_, inputChannelsEdit_, outputChannelsEdit_,
+        statsCheck_, guiControlCheck_, meshModeCheck_, statsWarmupMsSpin_, logStatsEdit_, osPriorityBox_,
     };
     for (QWidget* widget : visibleWidgets) {
         widget->show();
@@ -3258,6 +3360,9 @@ void MainWindow::showJoinJamDialog()
     sessionForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     sessionForm->addRow(QStringLiteral("jam2 URL"), connectUrlEdit_);
     sessionForm->addRow(QStringLiteral("jam2 binary"), jam2PathEdit_);
+    sessionForm->addRow(QStringLiteral("Local UDP bind host"), bindHostEdit_);
+    sessionForm->addRow(QStringLiteral("Local UDP bind port"), portSpin_);
+    sessionForm->addRow(QString(), meshModeCheck_);
     auto* sessionBox = new QGroupBox(QStringLiteral("Connection"), content);
     sessionBox->setLayout(sessionForm);
     layout->addWidget(sessionBox);
@@ -3303,8 +3408,8 @@ void MainWindow::showJoinJamDialog()
 
     const int result = dialog.exec();
     const QList<QWidget*> joinWidgets{
-        connectUrlEdit_, jam2PathEdit_, deviceBox_, inputChannelsEdit_, outputChannelsEdit_,
-        statsCheck_, guiControlCheck_, statsWarmupMsSpin_, logStatsEdit_, osPriorityBox_,
+        connectUrlEdit_, jam2PathEdit_, bindHostEdit_, portSpin_, deviceBox_, inputChannelsEdit_, outputChannelsEdit_,
+        statsCheck_, guiControlCheck_, meshModeCheck_, statsWarmupMsSpin_, logStatsEdit_, osPriorityBox_,
     };
     for (QWidget* widget : joinWidgets) {
         widget->setParent(this);
@@ -3326,6 +3431,10 @@ void MainWindow::stopJam()
     controlClient_.close();
     pendingJoinLaunch_ = false;
     pendingJoinBaseArgs_.clear();
+    meshActive_ = false;
+    meshPeerEndpoints_.clear();
+    currentMeshPeers_.clear();
+    pendingMeshInvitePopup_ = false;
     jam2_.stop();
     localMetronomeRunning_ = false;
     if (trackMetronomeLabel_) {
@@ -3432,7 +3541,15 @@ void MainWindow::handleStatus(const QJsonObject& status)
         if (stage == QStringLiteral("error")) {
             const QString error = status.value(QStringLiteral("error")).toString(QStringLiteral("startup error"));
             appendLog(QStringLiteral("startup error: ") + error);
+            pendingMeshInvitePopup_ = false;
+        } else if (meshActive_ && controlServerMode_ && status.value(QStringLiteral("mode")).toString() == QStringLiteral("mesh")) {
+            showPendingMeshInviteUrl();
         }
+        return;
+    }
+    if (status.value(QStringLiteral("event")).toString() == QStringLiteral("mesh_stats")) {
+        updateStatsDisplay(status);
+        updateMixMeters(status);
         return;
     }
     if (status.value(QStringLiteral("event")).toString() != QStringLiteral("status")) {
@@ -3601,6 +3718,8 @@ void MainWindow::handleControlMessage(const QJsonObject& message)
     if (type == QStringLiteral("session.settings")) {
         applyLeaderSettings(message.value(QStringLiteral("settings")).toObject());
         launchPendingJoin();
+    } else if (type == QStringLiteral("mesh.peer_list")) {
+        applyMeshPeerList(message);
     } else if (type == QStringLiteral("session.error")) {
         const QString text = message.value(QStringLiteral("message")).toString(QStringLiteral("Session error"));
         appendLog(QStringLiteral("peer session error: ") + text);
@@ -3757,7 +3876,13 @@ void MainWindow::refreshControlConnection()
             appendLog(QStringLiteral("control server refresh failed: ") + controlServer_.errorString());
         }
     } else {
-        controlClient_.connectToHost(controlHost_, controlPort_, controlSessionHex_, controlKeyHex_);
+        controlClient_.connectToHost(
+            controlHost_,
+            controlPort_,
+            controlSessionHex_,
+            controlKeyHex_,
+            meshActive_ ? meshPeerToken() : QString(),
+            meshActive_ ? localMeshEndpoint() : QString());
     }
     if (controlReconnectAttempts_ >= 15) {
         controlReconnectTimer_.stop();
@@ -3924,6 +4049,153 @@ bool MainWindow::selectedDeviceSupportsSampleRate(int sampleRate)
     return true;
 }
 
+QString MainWindow::meshPeerToken()
+{
+    if (meshPeerToken_.isEmpty()) {
+        const auto key = jam2::random_key();
+        meshPeerToken_ = keyToHex(key);
+    }
+    return meshPeerToken_;
+}
+
+QString MainWindow::localMeshEndpoint() const
+{
+    const bool listenMode = modeBox_ && modeBox_->currentText() == QStringLiteral("Listen");
+    QString host = listenMode && publicHostEdit_ && !publicHostEdit_->text().trimmed().isEmpty()
+        ? publicHostEdit_->text().trimmed()
+        : (bindHostEdit_ && !bindHostEdit_->text().trimmed().isEmpty()
+            ? bindHostEdit_->text().trimmed()
+            : QStringLiteral("0.0.0.0"));
+    if (!listenMode && (host == QStringLiteral("0.0.0.0") || host == QStringLiteral("::") || host == QStringLiteral("[::]"))) {
+        host = QStringLiteral("127.0.0.1");
+    }
+    return QStringLiteral("%1:%2").arg(host).arg(portSpin_ ? portSpin_->value() : 49000);
+}
+
+QString MainWindow::meshBindEndpoint() const
+{
+    const QString host = bindHostEdit_ && !bindHostEdit_->text().trimmed().isEmpty()
+        ? bindHostEdit_->text().trimmed()
+        : QStringLiteral("0.0.0.0");
+    return QStringLiteral("%1:%2").arg(host).arg(portSpin_ ? portSpin_->value() : 49000);
+}
+
+QStringList MainWindow::meshPeerEndpointsExcludingSelf() const
+{
+    QStringList peers;
+    const QString self = meshPeerToken_;
+    for (auto it = meshPeerEndpoints_.cbegin(); it != meshPeerEndpoints_.cend(); ++it) {
+        if (it.key() == self || it.value().isEmpty()) {
+            continue;
+        }
+        if (!peers.contains(it.value())) {
+            peers << it.value();
+        }
+    }
+    return peers;
+}
+
+void MainWindow::handleMeshPeerAuthenticated(const QString& token, const QJsonObject& message)
+{
+    if (!meshActive_ || token.isEmpty()) {
+        return;
+    }
+    QString endpoint = message.value(QStringLiteral("udp_endpoint")).toString();
+    if (endpoint.isEmpty()) {
+        appendLog(QStringLiteral("mesh peer authenticated without UDP endpoint token=") + token.left(8));
+        return;
+    }
+    const int separator = endpoint.lastIndexOf(QLatin1Char(':'));
+    const QString host = separator > 0 ? endpoint.left(separator) : endpoint;
+    if (host == QStringLiteral("0.0.0.0") || host == QStringLiteral("::") || host == QStringLiteral("[::]")) {
+        const QString tcpPeerHost = message.value(QStringLiteral("tcp_peer_host")).toString();
+        if (tcpPeerHost.isEmpty()) {
+            appendLog(QStringLiteral("mesh peer advertised wildcard UDP endpoint without TCP peer host token=") + token.left(8));
+            return;
+        }
+        endpoint = tcpPeerHost + endpoint.mid(separator);
+        appendLog(QStringLiteral("mesh peer wildcard endpoint resolved via TCP host: %1").arg(endpoint));
+    }
+    if (meshMaxPeersSpin_ && meshMaxPeersSpin_->value() > 0 &&
+        !meshPeerEndpoints_.contains(token) &&
+        meshPeerEndpoints_.size() >= meshMaxPeersSpin_->value() + 1) {
+        controlServer_.send(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("session.error")},
+            {QStringLiteral("message"), QStringLiteral("Mesh peer cap reached")},
+        });
+        appendLog(QStringLiteral("mesh peer rejected by max peer cap"));
+        return;
+    }
+    const bool changed = meshPeerEndpoints_.value(token) != endpoint;
+    meshPeerEndpoints_[token] = endpoint;
+    if (changed) {
+        appendLog(QStringLiteral("mesh peer endpoint %1 -> %2").arg(token.left(8), endpoint));
+        broadcastMeshPeerList();
+        restartMeshEngineFromPeerList();
+    }
+}
+
+void MainWindow::broadcastMeshPeerList()
+{
+    QJsonArray peers;
+    int index = 1;
+    for (auto it = meshPeerEndpoints_.cbegin(); it != meshPeerEndpoints_.cend(); ++it, ++index) {
+        peers.append(QJsonObject{
+            {QStringLiteral("id"), QStringLiteral("peer%1").arg(index)},
+            {QStringLiteral("token"), it.key()},
+            {QStringLiteral("endpoint"), it.value()},
+        });
+    }
+    controlServer_.send(QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("mesh.peer_list")},
+        {QStringLiteral("session"), sessionHex()},
+        {QStringLiteral("key"), keyHex()},
+        {QStringLiteral("peers"), peers},
+    });
+}
+
+void MainWindow::applyMeshPeerList(const QJsonObject& message)
+{
+    meshPeerEndpoints_.clear();
+    const QJsonArray peers = message.value(QStringLiteral("peers")).toArray();
+    for (const QJsonValue& value : peers) {
+        const QJsonObject peer = value.toObject();
+        const QString token = peer.value(QStringLiteral("token")).toString();
+        const QString endpoint = peer.value(QStringLiteral("endpoint")).toString();
+        if (!token.isEmpty() && !endpoint.isEmpty()) {
+            meshPeerEndpoints_[token] = endpoint;
+        }
+    }
+    restartMeshEngineFromPeerList();
+}
+
+void MainWindow::restartMeshEngineFromPeerList()
+{
+    if (!meshActive_) {
+        return;
+    }
+    const QStringList peers = meshPeerEndpointsExcludingSelf();
+    if (jam2_.isRunning() && peers == currentMeshPeers_) {
+        return;
+    }
+    currentMeshPeers_ = peers;
+    QStringList args;
+    args << QStringLiteral("mesh")
+         << QStringLiteral("--bind") << meshBindEndpoint()
+         << QStringLiteral("--session-id") << sessionHex()
+         << QStringLiteral("--session-key") << keyHex()
+         << QStringLiteral("--peers") << peers.join(QLatin1Char(','));
+    args << commonJamArgs(false);
+    if (jam2_.isRunning()) {
+        meshRestarting_ = true;
+        jam2_.stop();
+        meshRestarting_ = false;
+    }
+    pendingJoinLaunch_ = false;
+    pendingJoinBaseArgs_.clear();
+    launchJamProcess(args);
+}
+
 void MainWindow::launchPendingJoin()
 {
     if (!pendingJoinLaunch_ || jam2_.isRunning()) {
@@ -3935,6 +4207,10 @@ void MainWindow::launchPendingJoin()
         sendControl(QJsonObject{{QStringLiteral("type"), QStringLiteral("session.error")}, {QStringLiteral("message"), message}});
         QMessageBox::warning(this, QStringLiteral("Jam2"), message);
         pendingJoinLaunch_ = false;
+        return;
+    }
+    if (meshActive_) {
+        restartMeshEngineFromPeerList();
         return;
     }
     QStringList args = pendingJoinBaseArgs_;

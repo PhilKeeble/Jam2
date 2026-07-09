@@ -71,10 +71,11 @@ Usage:
   jam2 ring-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n] [--ring-frames n]
   jam2 listen [--profile fast|moderate|safe] [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats enabled|disabled] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--record-jam-folder folder] [--test-input off|silence|tone-440|pulse-1s] [--os-priority off|high|realtime] [--metronome on|off] [--bpm n] [--metronome-level n] [--remote-level n] [--send-level n] [--local-monitor on|off] [--local-monitor-level n] [--gui-control ip:port] [--metronome-mode shared-grid|leader-audio|symmetric-delay|listener-compensated] [--sample-time-playout on|off] [--playout-delay-frames n] [--jitter-buffer-frames n] [--jitter-buffer-max-frames n] [--adaptive-playback-cushion on|off] [--adaptive-playback-target-frames n] [--adaptive-playback-min-frames n] [--adaptive-playback-max-frames n] [--adaptive-playback-release-ppm n] [--session-id hex] [--session-key hex32] [--machine-readable-startup on|off] [--status-format text|jsonl] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels n[,n...]] [--output-channels n[,n...]] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-deadband-ppm n] [--drift-max-correction-ppm n]
   jam2 connect <jam2-url> [--profile fast|moderate|safe] [options]
+  jam2 mesh --session-id <hex> --session-key <hex32> --bind ip:port --peers ip:port[,ip:port...] [options]
 
 Stage status:
   UDP HELLO/HELLO_ACK session setup, jam2 URL parsing, and STUN endpoint discovery are implemented.
-  UDP audio streaming, Windows ASIO, drift stats/correction, and metronome controls are implemented for the MVP slice.
+  UDP audio streaming, Windows ASIO, drift stats/correction, metronome controls, and fixed-peer experimental mesh mode are implemented for the MVP slice.
 )";
 
 enum class MetronomeMode {
@@ -160,6 +161,8 @@ struct Options {
     int adaptive_playback_release_ppm = 1000;
     std::optional<std::uint64_t> session_id;
     std::optional<std::array<std::uint8_t, 16>> session_key;
+    std::vector<jam2::Endpoint> mesh_peers;
+    bool mesh_peers_configured = false;
     std::optional<jam2::Endpoint> gui_control;
     bool machine_readable_startup = false;
     bool status_jsonl = false;
@@ -363,6 +366,38 @@ std::vector<int> parse_channel_list(std::string_view value, std::size_t min_coun
     return channels;
 }
 
+std::vector<jam2::Endpoint> parse_peer_list(std::string_view value, const jam2::Endpoint& self)
+{
+    std::vector<jam2::Endpoint> peers;
+    if (value.empty()) {
+        return peers;
+    }
+    std::size_t pos = 0;
+    while (pos <= value.size()) {
+        const std::size_t comma = value.find(',', pos);
+        const std::string_view part = value.substr(pos, comma == std::string_view::npos ? value.size() - pos : comma - pos);
+        if (part.empty()) {
+            throw std::runtime_error("--peers contains an empty endpoint");
+        }
+        const jam2::Endpoint endpoint = jam2::parse_endpoint(part);
+        if (endpoint.host == self.host && endpoint.port == self.port) {
+            throw std::runtime_error("--peers must not include the local --bind endpoint");
+        }
+        const auto duplicate = std::find_if(peers.begin(), peers.end(), [&](const jam2::Endpoint& existing) {
+            return existing.host == endpoint.host && existing.port == endpoint.port;
+        });
+        if (duplicate != peers.end()) {
+            throw std::runtime_error("--peers contains a duplicate endpoint: " + jam2::endpoint_to_string(endpoint));
+        }
+        peers.push_back(endpoint);
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        pos = comma + 1;
+    }
+    return peers;
+}
+
 std::string channel_selection_text(const jam2::audio::ChannelSelection& channels)
 {
     auto channel_list = [](const std::vector<int>& selected) {
@@ -434,6 +469,9 @@ Options parse_options(int argc, char** argv, int start)
             (void)require_value(argc, argv, i, arg);
         } else if (arg == "--bind") {
             options.bind = jam2::parse_bind_endpoint(require_value(argc, argv, i, arg));
+        } else if (arg == "--peers") {
+            options.mesh_peers_configured = true;
+            options.mesh_peers = parse_peer_list(require_value(argc, argv, i, arg), options.bind);
         } else if (arg == "--stun") {
             options.stun_server = jam2::parse_endpoint(require_value(argc, argv, i, arg));
             options.no_stun = false;
@@ -739,6 +777,11 @@ Options parse_options(int argc, char** argv, int start)
     }
     if (options.adaptive_playback_max_frames > options.playback_ring_frames) {
         throw std::runtime_error("--adaptive-playback-max-frames must fit within playback ring capacity");
+    }
+    for (const auto& peer : options.mesh_peers) {
+        if (peer.host == options.bind.host && peer.port == options.bind.port) {
+            throw std::runtime_error("--peers must not include the local --bind endpoint");
+        }
     }
     return options;
 }
@@ -5693,6 +5736,460 @@ int run_connect(int argc, char** argv)
     return 3;
 }
 
+int run_mesh(int argc, char** argv)
+{
+    const Options options = parse_options(argc, argv, 2);
+    if (!options.session_id || !options.session_key) {
+        throw std::runtime_error("mesh requires --session-id and --session-key");
+    }
+    if (!options.mesh_peers_configured) {
+        throw std::runtime_error("mesh requires --peers, use --peers \"\" for an empty initial peer list");
+    }
+
+    jam2::NetworkRuntime network;
+    jam2::UdpSocket socket;
+    apply_socket_options(socket, options);
+    socket.bind(options.bind);
+    const jam2::Endpoint local = socket.local_endpoint();
+    const jam2::SessionInfo session{local, *options.session_id, *options.session_key};
+
+    std::cout << "Mode: mesh\n";
+    std::cout << "Local UDP bind: " << jam2::endpoint_to_string(local) << "\n";
+    std::cout << "Mesh peers: " << options.mesh_peers.size() << "\n";
+    for (std::size_t i = 0; i < options.mesh_peers.size(); ++i) {
+        std::cout << "  peer" << (i + 1) << ": " << jam2::endpoint_to_string(options.mesh_peers[i]) << "\n";
+    }
+    print_socket_options(socket);
+    print_startup_json("mesh", "running", options, local, std::nullopt, "gui-peer-list", "");
+
+    auto audio = start_optional_audio(options, false);
+    const int drained_startup_packets = drain_pending_udp(socket);
+    if (drained_startup_packets > 0) {
+        std::cout << "Drained startup UDP packets: " << drained_startup_packets << "\n";
+    }
+    const int recording_sample_rate = audio.stream
+        ? static_cast<int>(std::lround(audio.stream->info().sample_rate))
+        : options.sample_rate;
+    CommandThread commands(options, audio.recorder.get(), recording_sample_rate);
+    GuiControlThread gui_control(
+        options,
+        commands.state,
+        audio.recorder.get(),
+        recording_sample_rate,
+        audio.stream.get(),
+        audio.capture_ring.get(),
+        audio.playback_ring.get(),
+        audio.control.get());
+    start_startup_recording(audio, options, commands.state, recording_sample_rate);
+
+    struct MeshPeerState {
+        jam2::Endpoint endpoint;
+        jam2::protocol::SequenceTracker sequence;
+        std::uint64_t sent_packets = 0;
+        std::uint64_t sent_bytes = 0;
+        std::uint64_t recv_packets = 0;
+        std::uint64_t recv_bytes = 0;
+        std::uint64_t ignored_packets = 0;
+        std::uint64_t sent_pings = 0;
+        std::uint64_t sent_pongs = 0;
+        std::uint64_t recv_pongs = 0;
+        std::uint64_t rtt_min_us = 0;
+        std::uint64_t rtt_sum_us = 0;
+        std::uint64_t rtt_max_us = 0;
+        std::uint64_t jitter_min_us = 0;
+        std::uint64_t jitter_sum_us = 0;
+        std::uint64_t jitter_max_us = 0;
+        std::uint64_t jitter_samples = 0;
+        std::uint64_t last_audio_receive_us = 0;
+    };
+
+    auto endpoint_key = [](const jam2::Endpoint& endpoint) {
+        return endpoint.host + ":" + std::to_string(endpoint.port);
+    };
+
+    std::map<std::string, MeshPeerState> peers;
+    for (const auto& peer : options.mesh_peers) {
+        peers.emplace(endpoint_key(peer), MeshPeerState{peer});
+    }
+
+    std::vector<std::int32_t> asio_frames(static_cast<std::size_t>(options.frame_size), 0);
+    std::vector<std::int32_t> network_frames(static_cast<std::size_t>(options.frame_size), 0);
+    std::vector<std::int32_t> silence_frames(static_cast<std::size_t>(options.frame_size), 0);
+    const auto silence_payload = jam2::protocol::pack_pcm24(network_frames);
+    const std::uint16_t audio_payload_size = static_cast<std::uint16_t>(silence_payload.size());
+    std::map<std::uint64_t, std::vector<std::int32_t>> pending_mix;
+    bool mix_time_initialized = false;
+    std::uint64_t mix_base_sample_time = 0;
+    std::uint64_t mix_base_receive_time_us = 0;
+    std::uint64_t next_mix_sample_time = 0;
+    bool next_mix_initialized = false;
+
+    std::uint32_t audio_sequence = 1;
+    std::uint32_t control_sequence = 1;
+    std::uint64_t sample_time = 0;
+    const std::uint64_t interval_numerator_us = static_cast<std::uint64_t>(options.frame_size) * 1000000ULL;
+    const std::uint64_t interval_denominator = static_cast<std::uint64_t>(options.sample_rate);
+    const std::uint64_t interval_us = interval_numerator_us / interval_denominator;
+    const std::uint64_t interval_remainder_us = interval_numerator_us % interval_denominator;
+    std::uint64_t interval_remainder_accumulator = 0;
+    std::uint64_t next_send = jam2::monotonic_us();
+    std::uint64_t next_ping = next_send;
+    const std::uint64_t start_time = next_send;
+    std::uint64_t next_stats = options.stats_enabled && options.stats_interval_ms > 0
+        ? start_time + static_cast<std::uint64_t>(options.stats_interval_ms) * 1000ULL
+        : 0;
+    const std::uint64_t send_deadline = options.stream_ms > 0
+        ? next_send + static_cast<std::uint64_t>(options.stream_ms) * 1000ULL
+        : UINT64_MAX;
+    const std::uint64_t receive_deadline = options.stream_ms > 0
+        ? send_deadline + static_cast<std::uint64_t>(options.stream_linger_ms) * 1000ULL
+        : UINT64_MAX;
+    const std::uint64_t playout_delay_frames = options.jitter_buffer_frames > 0
+        ? static_cast<std::uint64_t>(options.jitter_buffer_frames)
+        : static_cast<std::uint64_t>(options.playout_delay_frames);
+    const std::uint64_t playout_delay_us =
+        playout_delay_frames * 1000000ULL / static_cast<std::uint64_t>(options.sample_rate);
+
+    auto aggregate_stats = [&]() {
+        AudioPacketStats stats;
+        stats.startup_drained_packets = static_cast<std::uint64_t>(drained_startup_packets);
+        stats.sample_time_playout_enabled = true;
+        stats.playout_delay_frames = playout_delay_frames;
+        stats.jitter_buffer_enabled = playout_delay_frames > 0;
+        stats.jitter_buffer_target_frames = playout_delay_frames;
+        for (const auto& entry : peers) {
+            const auto& peer = entry.second;
+            stats.sent_packets += peer.sent_packets;
+            stats.sent_bytes += peer.sent_bytes;
+            stats.recv_packets += peer.recv_packets;
+            stats.recv_bytes += peer.recv_bytes;
+            stats.ignored_packets += peer.ignored_packets;
+            stats.sent_pings += peer.sent_pings;
+            stats.sent_pongs += peer.sent_pongs;
+            stats.recv_pongs += peer.recv_pongs;
+            stats.sequence.lost += peer.sequence.stats().lost;
+            stats.sequence.loss_events += peer.sequence.stats().loss_events;
+            stats.sequence.loss_max_gap = std::max(stats.sequence.loss_max_gap, peer.sequence.stats().loss_max_gap);
+            stats.sequence.duplicate += peer.sequence.stats().duplicate;
+            stats.sequence.out_of_order += peer.sequence.stats().out_of_order;
+            stats.sequence.late += peer.sequence.stats().late;
+            if (peer.recv_pongs > 0) {
+                if (stats.rtt_min_us == 0 || peer.rtt_min_us < stats.rtt_min_us) {
+                    stats.rtt_min_us = peer.rtt_min_us;
+                }
+                stats.rtt_sum_us += peer.rtt_sum_us;
+                stats.rtt_max_us = std::max(stats.rtt_max_us, peer.rtt_max_us);
+            }
+            if (peer.jitter_samples > 0) {
+                if (stats.jitter_min_us == 0 || peer.jitter_min_us < stats.jitter_min_us) {
+                    stats.jitter_min_us = peer.jitter_min_us;
+                }
+                stats.jitter_sum_us += peer.jitter_sum_us;
+                stats.jitter_max_us = std::max(stats.jitter_max_us, peer.jitter_max_us);
+                stats.jitter_samples += peer.jitter_samples;
+            }
+        }
+        return stats;
+    };
+
+    auto print_mesh_stats = [&](std::uint64_t now_us) {
+        const std::uint64_t elapsed_ms = (now_us - start_time) / 1000ULL;
+        const auto audio_snapshot = make_audio_snapshot(
+            audio.stream.get(),
+            audio.capture_ring.get(),
+            audio.playback_ring.get(),
+            audio.control.get());
+        if (options.status_jsonl) {
+            std::cout << "{\"event\":\"mesh_stats\",\"elapsed_ms\":" << elapsed_ms
+                      << ",\"peer_count\":" << peers.size()
+                      << ",\"playout_delay_frames\":" << playout_delay_frames
+                      << ",\"playback_ring_readable_ms\":" << frames_to_ms(audio_snapshot.playback_ring_readable, options.sample_rate)
+                      << ",\"remote_peak\":" << audio_snapshot.remote_peak
+                      << ",\"output_peak\":" << audio_snapshot.output_peak
+                      << ",\"peers\":[";
+            bool first = true;
+            for (const auto& entry : peers) {
+                const auto& peer = entry.second;
+                if (!first) {
+                    std::cout << ",";
+                }
+                first = false;
+                std::cout << "{\"endpoint\":\"" << json_escape(jam2::endpoint_to_string(peer.endpoint)) << "\""
+                          << ",\"sent_packets\":" << peer.sent_packets
+                          << ",\"recv_packets\":" << peer.recv_packets
+                          << ",\"ignored_packets\":" << peer.ignored_packets
+                          << ",\"sequence_lost\":" << peer.sequence.stats().lost
+                          << ",\"sequence_duplicate\":" << peer.sequence.stats().duplicate
+                          << ",\"sequence_out_of_order\":" << peer.sequence.stats().out_of_order
+                          << ",\"sequence_late\":" << peer.sequence.stats().late
+                          << ",\"rtt_avg_ms\":"
+                          << (peer.recv_pongs > 0 ? static_cast<double>(peer.rtt_sum_us) / static_cast<double>(peer.recv_pongs) / 1000.0 : 0.0)
+                          << ",\"jitter_avg_ms\":"
+                          << (peer.jitter_samples > 0 ? static_cast<double>(peer.jitter_sum_us) / static_cast<double>(peer.jitter_samples) / 1000.0 : 0.0)
+                          << "}";
+            }
+            std::cout << "]}\n";
+        } else {
+            std::cout << "mesh_stats elapsed_ms=" << elapsed_ms
+                      << " peer_count=" << peers.size()
+                      << " playback_ring_readable_ms=" << frames_to_ms(audio_snapshot.playback_ring_readable, options.sample_rate)
+                      << " remote_peak=" << audio_snapshot.remote_peak
+                      << " output_peak=" << audio_snapshot.output_peak << "\n";
+            for (const auto& entry : peers) {
+                const auto& peer = entry.second;
+                std::cout << "mesh_peer endpoint=" << jam2::endpoint_to_string(peer.endpoint)
+                          << " sent_packets=" << peer.sent_packets
+                          << " recv_packets=" << peer.recv_packets
+                          << " ignored_packets=" << peer.ignored_packets
+                          << " sequence_lost=" << peer.sequence.stats().lost
+                          << " sequence_duplicate=" << peer.sequence.stats().duplicate
+                          << " sequence_out_of_order=" << peer.sequence.stats().out_of_order
+                          << " sequence_late=" << peer.sequence.stats().late << "\n";
+            }
+        }
+    };
+
+    auto mix_due_packets = [&](std::uint64_t now_us) {
+        if (!mix_time_initialized || audio.playback_ring == nullptr) {
+            return;
+        }
+        for (;;) {
+            auto next = pending_mix.begin();
+            if (next == pending_mix.end()) {
+                return;
+            }
+            const std::uint64_t sample_delta = next->first >= mix_base_sample_time ? next->first - mix_base_sample_time : 0;
+            const std::uint64_t due_us =
+                mix_base_receive_time_us + playout_delay_us +
+                sample_delta * 1000000ULL / static_cast<std::uint64_t>(options.sample_rate);
+            if (due_us > now_us) {
+                return;
+            }
+            if (!next_mix_initialized) {
+                next_mix_initialized = true;
+                next_mix_sample_time = next->first;
+            }
+            while (next_mix_sample_time < next->first) {
+                const std::size_t missing = static_cast<std::size_t>(
+                    std::min<std::uint64_t>(
+                        static_cast<std::uint64_t>(options.frame_size),
+                        next->first - next_mix_sample_time));
+                audio.playback_ring->push(std::span<const std::int32_t>(silence_frames.data(), missing));
+                next_mix_sample_time += missing;
+            }
+            audio.playback_ring->push(next->second);
+            next_mix_sample_time = next->first + static_cast<std::uint64_t>(next->second.size());
+            pending_mix.erase(next);
+        }
+    };
+
+    while (jam2::monotonic_us() < receive_deadline && !commands.state.quit.load(std::memory_order_relaxed)) {
+        const std::uint64_t now = jam2::monotonic_us();
+        sync_audio_control(commands.state, audio.control.get(), 1.0);
+        mix_due_packets(now);
+
+        int sends_this_loop = 0;
+        while (now >= next_send && next_send < send_deadline && sends_this_loop < 8) {
+            std::vector<std::uint8_t> payload;
+            if (audio.capture_ring != nullptr) {
+                (void)audio.capture_ring->pop(asio_frames);
+                for (std::size_t i = 0; i < asio_frames.size(); ++i) {
+                    network_frames[i] = asio_frames[i] / 256;
+                }
+                apply_send_level(network_frames, commands.state.send_level_ppm.load(std::memory_order_relaxed));
+                if (audio.control != nullptr) {
+                    const int send_peak_ppm = pcm24_peak_ppm(network_frames);
+                    update_peak(audio.control->send_peak_ppm, send_peak_ppm);
+                    update_peak(audio.control->gui_send_peak_ppm, send_peak_ppm);
+                }
+                payload = jam2::protocol::pack_pcm24(network_frames);
+            } else {
+                payload = silence_payload;
+            }
+            const jam2::protocol::Header header{
+                jam2::protocol::PacketType::Audio,
+                0,
+                session.session_id,
+                audio_sequence++,
+                sample_time,
+                now,
+                0,
+                0,
+            };
+            const auto packet = jam2::protocol::encode_packet(header, payload, session.key);
+            for (auto& entry : peers) {
+                auto& peer = entry.second;
+                socket.send_to(peer.endpoint, packet);
+                ++peer.sent_packets;
+                peer.sent_bytes += packet.size();
+            }
+            sample_time += static_cast<std::uint64_t>(options.frame_size);
+            std::uint64_t next_send_step = interval_us == 0 ? 1 : interval_us;
+            interval_remainder_accumulator += interval_remainder_us;
+            if (interval_remainder_accumulator >= interval_denominator) {
+                ++next_send_step;
+                interval_remainder_accumulator -= interval_denominator;
+            }
+            next_send += next_send_step;
+            ++sends_this_loop;
+        }
+
+        if (now >= next_ping && now < send_deadline) {
+            const jam2::protocol::Header ping{
+                jam2::protocol::PacketType::Ping,
+                0,
+                session.session_id,
+                control_sequence++,
+                0,
+                now,
+                0,
+                0,
+            };
+            const auto packet = jam2::protocol::encode_packet(ping, {}, session.key);
+            for (auto& entry : peers) {
+                auto& peer = entry.second;
+                socket.send_to(peer.endpoint, packet);
+                ++peer.sent_pings;
+            }
+            next_ping += 100000ULL;
+        }
+
+        if (commands.state.print_stats.exchange(false, std::memory_order_relaxed) ||
+            commands.state.print_status.exchange(false, std::memory_order_relaxed)) {
+            print_mesh_stats(now);
+        }
+        if (next_stats != 0 && now >= next_stats) {
+            if (commands.state.stats_enabled.load(std::memory_order_relaxed)) {
+                print_mesh_stats(now);
+            }
+            next_stats += static_cast<std::uint64_t>(options.stats_interval_ms) * 1000ULL;
+        }
+
+        bool received_any = false;
+        for (;;) {
+            const auto received = socket.recv_from(received_any ? 0 : 1);
+            if (!received) {
+                break;
+            }
+            received_any = true;
+            const auto& [from, bytes] = *received;
+            auto peer_it = peers.find(endpoint_key(from));
+            if (peer_it == peers.end()) {
+                continue;
+            }
+            auto& peer = peer_it->second;
+            try {
+                const auto header = jam2::protocol::decode_packet(bytes, session.key, session.session_id);
+                if (header.type == jam2::protocol::PacketType::Audio) {
+                    if (header.payload_length != audio_payload_size) {
+                        ++peer.ignored_packets;
+                        continue;
+                    }
+                    const std::uint64_t receive_time = jam2::monotonic_us();
+                    const auto sequence_result = peer.sequence.observe(header.sequence);
+                    if (sequence_result == jam2::protocol::SequenceResult::Duplicate ||
+                        sequence_result == jam2::protocol::SequenceResult::Late) {
+                        ++peer.ignored_packets;
+                        continue;
+                    }
+                    ++peer.recv_packets;
+                    peer.recv_bytes += bytes.size();
+                    if (peer.last_audio_receive_us != 0) {
+                        const std::uint64_t interval = receive_time >= peer.last_audio_receive_us
+                            ? receive_time - peer.last_audio_receive_us
+                            : 0;
+                        const std::uint64_t jitter = interval > interval_us ? interval - interval_us : interval_us - interval;
+                        observe_timing(jitter, peer.jitter_min_us, peer.jitter_sum_us, peer.jitter_max_us);
+                        ++peer.jitter_samples;
+                    }
+                    peer.last_audio_receive_us = receive_time;
+                    const auto received_payload = std::span<const std::uint8_t>(
+                        bytes.data() + jam2::protocol::kHeaderSize,
+                        header.payload_length);
+                    auto decoded = jam2::protocol::unpack_pcm24(received_payload);
+                    for (auto& sample : decoded) {
+                        sample *= 256;
+                    }
+                    if (!mix_time_initialized) {
+                        mix_time_initialized = true;
+                        mix_base_sample_time = header.sample_time;
+                        mix_base_receive_time_us = receive_time;
+                    }
+                    auto& mixed = pending_mix[header.sample_time];
+                    if (mixed.empty()) {
+                        mixed.resize(decoded.size(), 0);
+                    }
+                    if (mixed.size() == decoded.size()) {
+                        for (std::size_t i = 0; i < mixed.size(); ++i) {
+                            const std::int64_t summed =
+                                static_cast<std::int64_t>(mixed[i]) + static_cast<std::int64_t>(decoded[i]);
+                            mixed[i] = static_cast<std::int32_t>(
+                                std::clamp<std::int64_t>(summed, std::numeric_limits<std::int32_t>::min(), std::numeric_limits<std::int32_t>::max()));
+                        }
+                    } else {
+                        ++peer.ignored_packets;
+                    }
+                } else if (header.type == jam2::protocol::PacketType::Ping) {
+                    const jam2::protocol::Header pong{
+                        jam2::protocol::PacketType::Pong,
+                        0,
+                        session.session_id,
+                        header.sequence,
+                        0,
+                        header.send_time_us,
+                        0,
+                        0,
+                    };
+                    const auto packet = jam2::protocol::encode_packet(pong, {}, session.key);
+                    socket.send_to(peer.endpoint, packet);
+                    ++peer.sent_pongs;
+                } else if (header.type == jam2::protocol::PacketType::Pong) {
+                    const std::uint64_t receive_time = jam2::monotonic_us();
+                    if (receive_time >= header.send_time_us) {
+                        observe_timing(receive_time - header.send_time_us, peer.rtt_min_us, peer.rtt_sum_us, peer.rtt_max_us);
+                    }
+                    ++peer.recv_pongs;
+                } else if (header.type == jam2::protocol::PacketType::Bye) {
+                    ++peer.ignored_packets;
+                } else {
+                    ++peer.ignored_packets;
+                }
+            } catch (const std::exception&) {
+                ++peer.ignored_packets;
+            }
+        }
+        if (!received_any) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    const std::uint64_t now = jam2::monotonic_us();
+    const jam2::protocol::Header bye{
+        jam2::protocol::PacketType::Bye,
+        0,
+        session.session_id,
+        control_sequence++,
+        0,
+        now,
+        0,
+        0,
+    };
+    const auto bye_packet = jam2::protocol::encode_packet(bye, {}, session.key);
+    for (const auto& entry : peers) {
+        socket.send_to(entry.second.endpoint, bye_packet);
+    }
+    print_mesh_stats(now);
+    auto final_stats = aggregate_stats();
+    final_stats.elapsed_ms = (now - start_time) / 1000ULL;
+    if (commands.state.stats_enabled.load(std::memory_order_relaxed)) {
+        print_audio_packet_stats(final_stats, options);
+        print_optional_audio_stats(audio, options);
+    }
+    finalize_active_recording(audio, options, commands.state);
+    std::cout.flush();
+    return 0;
+}
+
 int run(int argc, char** argv)
 {
     if (argc <= 1) {
@@ -5736,6 +6233,10 @@ int run(int argc, char** argv)
 
     if (command == "connect") {
         return run_connect(argc, argv);
+    }
+
+    if (command == "mesh") {
+        return run_mesh(argc, argv);
     }
 
     std::cerr << "Unknown command: " << command << "\n\n" << kUsage;

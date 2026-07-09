@@ -1,6 +1,7 @@
 #include "ControlServer.hpp"
 
 #include <QJsonDocument>
+#include <QHostAddress>
 
 ControlServer::ControlServer(QObject* parent)
     : QObject(parent)
@@ -18,29 +19,36 @@ bool ControlServer::listen(quint16 port, const QString& sessionHex, const QStrin
 
 void ControlServer::close()
 {
-    authenticated_ = false;
-    buffer_.clear();
-    if (peer_) {
-        QTcpSocket* socket = peer_;
-        peer_ = nullptr;
-        socket->disconnect(this);
-        socket->abort();
-        socket->deleteLater();
+    for (Peer* peer : peers_) {
+        if (peer->socket) {
+            peer->socket->disconnect(this);
+            peer->socket->abort();
+            peer->socket->deleteLater();
+        }
+        delete peer;
     }
+    peers_.clear();
     server_.close();
 }
 
 void ControlServer::send(const QJsonObject& message)
 {
-    if (!peer_ || !authenticated_) {
-        return;
+    const QByteArray line = QJsonDocument(message).toJson(QJsonDocument::Compact) + "\n";
+    for (Peer* peer : peers_) {
+        if (peer->socket && peer->authenticated) {
+            peer->socket->write(line);
+        }
     }
-    peer_->write(QJsonDocument(message).toJson(QJsonDocument::Compact) + "\n");
 }
 
 bool ControlServer::hasPeer() const
 {
-    return peer_ && authenticated_;
+    for (const Peer* peer : peers_) {
+        if (peer->socket && peer->authenticated) {
+            return true;
+        }
+    }
+    return false;
 }
 
 QString ControlServer::errorString() const
@@ -48,87 +56,106 @@ QString ControlServer::errorString() const
     return server_.errorString();
 }
 
+ControlServer::Peer* ControlServer::findPeer(QTcpSocket* socket)
+{
+    for (Peer* peer : peers_) {
+        if (peer->socket == socket) {
+            return peer;
+        }
+    }
+    return nullptr;
+}
+
 void ControlServer::acceptPeer()
 {
-    QTcpSocket* socket = server_.nextPendingConnection();
-    if (!socket) {
-        return;
-    }
-    if (peer_) {
-        if (authenticated_) {
-            socket->disconnectFromHost();
-            socket->deleteLater();
+    while (server_.hasPendingConnections()) {
+        QTcpSocket* socket = server_.nextPendingConnection();
+        if (!socket) {
             return;
         }
-        QTcpSocket* stale = peer_;
-        peer_ = nullptr;
-        stale->disconnect(this);
-        stale->abort();
-        stale->deleteLater();
-        buffer_.clear();
-    }
-    peer_ = socket;
-    authenticated_ = false;
-    if (onState) {
-        onState(QStringLiteral("TCP peer connected; waiting for session auth"));
-    }
-    QObject::connect(peer_, &QTcpSocket::readyRead, this, [this] { readPeer(); });
-    QObject::connect(peer_, &QTcpSocket::disconnected, this, [this, socket] {
-        authenticated_ = false;
+        auto* peer = new Peer;
+        peer->socket = socket;
+        peers_.push_back(peer);
         if (onState) {
-            onState(QStringLiteral("TCP peer disconnected"));
+            onState(QStringLiteral("TCP peer connected; waiting for session auth"));
         }
-        socket->deleteLater();
-        if (peer_ == socket) {
-            peer_ = nullptr;
-        }
-    });
+        QObject::connect(socket, &QTcpSocket::readyRead, this, [this, socket] {
+            if (Peer* peer = findPeer(socket)) {
+                readPeer(peer);
+            }
+        });
+        QObject::connect(socket, &QTcpSocket::disconnected, this, [this, socket] {
+            for (qsizetype i = 0; i < peers_.size(); ++i) {
+                Peer* peer = peers_[i];
+                if (peer->socket != socket) {
+                    continue;
+                }
+                const QString token = peer->token;
+                peers_.removeAt(i);
+                if (onDisconnected && !token.isEmpty()) {
+                    onDisconnected(token);
+                }
+                if (onState) {
+                    onState(QStringLiteral("TCP peer disconnected"));
+                }
+                socket->deleteLater();
+                delete peer;
+                return;
+            }
+        });
+    }
 }
 
-void ControlServer::readPeer()
+void ControlServer::readPeer(Peer* peer)
 {
-    if (!peer_) {
+    if (!peer || !peer->socket) {
         return;
     }
-    buffer_ += peer_->readAll();
+    peer->buffer += peer->socket->readAll();
     int newline = -1;
-    while ((newline = buffer_.indexOf('\n')) >= 0) {
-        const QByteArray line = buffer_.left(newline).trimmed();
-        buffer_.remove(0, newline + 1);
+    while ((newline = peer->buffer.indexOf('\n')) >= 0) {
+        const QByteArray line = peer->buffer.left(newline).trimmed();
+        peer->buffer.remove(0, newline + 1);
         const QJsonDocument doc = QJsonDocument::fromJson(line);
         if (doc.isObject()) {
-            handleMessage(doc.object());
+            handleMessage(peer, doc.object());
         }
     }
 }
 
-void ControlServer::handleMessage(const QJsonObject& message)
+void ControlServer::handleMessage(Peer* peer, const QJsonObject& message)
 {
-    if (!peer_) {
+    if (!peer || !peer->socket) {
         return;
     }
-    if (!authenticated_) {
+    if (!peer->authenticated) {
         if (message.value(QStringLiteral("type")).toString() == QStringLiteral("hello") &&
             message.value(QStringLiteral("session")).toString() == sessionHex_ &&
             message.value(QStringLiteral("key")).toString() == keyHex_) {
-            authenticated_ = true;
-            send(QJsonObject{
+            peer->authenticated = true;
+            peer->token = message.value(QStringLiteral("mesh_peer_token")).toString();
+            peer->socket->write(QJsonDocument(QJsonObject{
                 {QStringLiteral("type"), QStringLiteral("hello.ok")},
                 {QStringLiteral("role"), QStringLiteral("listener")},
-            });
+            }).toJson(QJsonDocument::Compact) + "\n");
             if (onState) {
                 onState(QStringLiteral("TCP peer authenticated"));
             }
+            if (onAuthenticated) {
+                QJsonObject authenticatedMessage = message;
+                authenticatedMessage.insert(QStringLiteral("tcp_peer_host"), peer->socket->peerAddress().toString());
+                onAuthenticated(peer->token, authenticatedMessage);
+            }
         } else {
-            peer_->write(QJsonDocument(QJsonObject{
+            peer->socket->write(QJsonDocument(QJsonObject{
                 {QStringLiteral("type"), QStringLiteral("hello.error")},
                 {QStringLiteral("reason"), QStringLiteral("incorrect session or key")},
             }).toJson(QJsonDocument::Compact) + "\n");
-            peer_->flush();
+            peer->socket->flush();
             if (onState) {
                 onState(QStringLiteral("TCP auth rejected: incorrect session or key"));
             }
-            peer_->disconnectFromHost();
+            peer->socket->disconnectFromHost();
         }
         return;
     }

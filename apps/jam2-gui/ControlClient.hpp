@@ -9,7 +9,13 @@ class ControlClient : public QObject {
 public:
     explicit ControlClient(QObject* parent = nullptr);
 
-    void connectToHost(const QString& host, quint16 port, const QString& sessionHex, const QString& keyHex);
+    void connectToHost(
+        const QString& host,
+        quint16 port,
+        const QString& sessionHex,
+        const QString& keyHex,
+        const QString& meshPeerToken = QString(),
+        const QString& meshUdpEndpoint = QString());
     void close();
     void send(const QJsonObject& message);
     bool isConnected() const;
@@ -24,5 +30,7 @@ private:
     QByteArray buffer_;
     QString sessionHex_;
     QString keyHex_;
+    QString meshPeerToken_;
+    QString meshUdpEndpoint_;
     bool authenticated_ = false;
 };

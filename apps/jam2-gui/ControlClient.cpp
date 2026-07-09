@@ -6,11 +6,18 @@ ControlClient::ControlClient(QObject* parent)
     : QObject(parent)
 {
     QObject::connect(&socket_, &QTcpSocket::connected, this, [this] {
-        socket_.write(QJsonDocument(QJsonObject{
+        QJsonObject hello{
             {QStringLiteral("type"), QStringLiteral("hello")},
             {QStringLiteral("session"), sessionHex_},
             {QStringLiteral("key"), keyHex_},
-        }).toJson(QJsonDocument::Compact) + "\n");
+        };
+        if (!meshPeerToken_.isEmpty()) {
+            hello.insert(QStringLiteral("mesh_peer_token"), meshPeerToken_);
+        }
+        if (!meshUdpEndpoint_.isEmpty()) {
+            hello.insert(QStringLiteral("udp_endpoint"), meshUdpEndpoint_);
+        }
+        socket_.write(QJsonDocument(hello).toJson(QJsonDocument::Compact) + "\n");
         socket_.flush();
         if (onState) {
             onState(QStringLiteral("TCP connected; sent session auth"));
@@ -25,11 +32,19 @@ ControlClient::ControlClient(QObject* parent)
     });
 }
 
-void ControlClient::connectToHost(const QString& host, quint16 port, const QString& sessionHex, const QString& keyHex)
+void ControlClient::connectToHost(
+    const QString& host,
+    quint16 port,
+    const QString& sessionHex,
+    const QString& keyHex,
+    const QString& meshPeerToken,
+    const QString& meshUdpEndpoint)
 {
     close();
     sessionHex_ = sessionHex;
     keyHex_ = keyHex;
+    meshPeerToken_ = meshPeerToken;
+    meshUdpEndpoint_ = meshUdpEndpoint;
     socket_.connectToHost(host, port);
 }
 
