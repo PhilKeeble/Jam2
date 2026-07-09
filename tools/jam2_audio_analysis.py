@@ -216,7 +216,14 @@ def _signal_for_stem(stem, local_signal, remote_signal, mix_signal):
     return mix_signal
 
 
-def analyze_recording_dir(recording_dir, signal="silence", local_signal=None, remote_signal=None):
+def analyze_recording_dir(
+        recording_dir,
+        signal="silence",
+        local_signal=None,
+        remote_signal=None,
+        ignore_pop_events=False,
+        ignore_tone_frequency=False,
+        ignore_inputs_mix_clipping=False):
     recording_dir = Path(recording_dir)
     local_signal = local_signal or signal
     remote_signal = remote_signal or signal
@@ -252,9 +259,9 @@ def analyze_recording_dir(recording_dir, signal="silence", local_signal=None, re
             stats["pulse_frames"] = detect_transients(wav["samples"], threshold=0.08, refractory_frames=max(512, wav["sample_rate"] // 2))
         result["stems"][stem] = stats
         lengths.append(stats["frames"])
-        if stats["clipped_frames"] > 0:
+        if stats["clipped_frames"] > 0 and not (ignore_inputs_mix_clipping and stem == "inputs-mix"):
             result["tags"].append(f"{stem}_clipping_detected")
-        if stats["pop_events"] > 0:
+        if stats["pop_events"] > 0 and not ignore_pop_events:
             result["tags"].append(f"{stem}_pop_detected")
     if lengths and max(lengths) - min(lengths) > 1:
         result["tags"].append("stem_length_mismatch")
@@ -276,7 +283,7 @@ def analyze_recording_dir(recording_dir, signal="silence", local_signal=None, re
             tone = result["stems"].get(stem, {}).get("tone", {})
             if not tone.get("tone_present", False):
                 result["tags"].append(f"{stem}_tone_missing")
-            elif abs(tone.get("error_hz", 0.0)) > 5.0:
+            elif not ignore_tone_frequency and abs(tone.get("error_hz", 0.0)) > 5.0:
                 result["tags"].append(f"{stem}_tone_frequency_mismatch")
     if signal == "metronome-only":
         metro = analyze_metronome_wav(recording_dir)

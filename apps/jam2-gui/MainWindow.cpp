@@ -3524,6 +3524,8 @@ void MainWindow::appendLog(const QString& line)
 void MainWindow::handleOutputLine(const QString& line)
 {
     if (!line.startsWith(QStringLiteral("{\"event\":\"status\"")) &&
+        !line.startsWith(QStringLiteral("{\"event\":\"mesh_stats\"")) &&
+        !line.startsWith(QStringLiteral("mesh_stats ")) &&
         !line.startsWith(QStringLiteral("stats "))) {
         appendLog(line);
     }
@@ -3568,13 +3570,15 @@ void MainWindow::handleStatus(const QJsonObject& status)
 
 void MainWindow::handleStatsLine(const QString& line)
 {
-    if (!line.startsWith(QStringLiteral("stats "))) {
+    const bool statsLine = line.startsWith(QStringLiteral("stats "));
+    const bool meshStatsLine = line.startsWith(QStringLiteral("mesh_stats "));
+    if (!statsLine && !meshStatsLine) {
         return;
     }
     QJsonObject stats;
-    stats.insert(QStringLiteral("event"), QStringLiteral("stats"));
+    stats.insert(QStringLiteral("event"), statsLine ? QStringLiteral("stats") : QStringLiteral("mesh_stats"));
     const QRegularExpression fieldRe(QStringLiteral("(\\S+)=([^\\s]+)"));
-    auto it = fieldRe.globalMatch(line.mid(6));
+    auto it = fieldRe.globalMatch(line.mid(statsLine ? 6 : 11));
     while (it.hasNext()) {
         const QRegularExpressionMatch match = it.next();
         const QString key = match.captured(1);

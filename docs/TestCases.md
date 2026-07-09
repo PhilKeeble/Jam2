@@ -42,6 +42,18 @@ Run short stress passes:
 python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 48000 --stream-ms 10000 --clean
 ```
 
+Run headless mesh stress without ASIO/CoreAudio devices:
+
+```powershell
+python tools\run_stress_local.py --mode mesh --sample-rate 48000 --profile all --clean
+```
+
+Run one mesh size/profile quickly:
+
+```powershell
+python tools\run_stress_local.py --mode mesh --sample-rate 48000 --profile fast --mesh-peers 4 --stream-ms 10000 --clean
+```
+
 Run the metronome timing scenarios with WAV recording/analysis:
 
 ```powershell
@@ -62,6 +74,7 @@ python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 1
 
 Useful args:
 
+- `--mode normal|mesh`: normal runs the two-process listen/connect stress path with real audio devices; mesh runs headless full-mesh processes with synthetic audio.
 - `--server-audio-device`: local listen-side audio device id.
 - `--client-audio-device`: local connect-side audio device id.
 - `--sample-rate`: sample rate for both local interfaces.
@@ -75,12 +88,15 @@ Useful args:
 - `--logs PATH`: output folder. Default: `tools\stress_logs`.
 - `--clean`: delete the output folder before running.
 - `--seed N`: deterministic proxy impairment seed.
+- `--mesh-peers N`: mesh peer count for `--mode mesh`; repeat for multiple. Default mesh counts are 2, 3, 4, and 8.
+- `--mesh-base-port PORT`: first localhost UDP port used by mesh stress. Default: `50000`.
 
 Main outputs:
 
 - `tools\stress_logs\stress_summary.txt`
 - `tools\stress_logs\stress_results.csv`
 - `tools\stress_logs\stress_results.json`
+- per-peer mesh stdout/stderr/stats/recording folders when `--mode mesh` is used
 - per-scenario `recording\*.wav` folders for metronome scenarios
 - per-probe `recording\*.wav` and `audio_probe_analysis` data when `--include-audio-probes` is used
 - `tools\stress_logs\validation_results.json` when `--include-validation` is used

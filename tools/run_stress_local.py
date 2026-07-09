@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import secrets
 import shutil
 import wave
 import threading
@@ -15,10 +16,11 @@ from jam2_harness import (
     ManagedProcess,
     parse_endpoint,
     rewrite_jam_url_endpoint,
+    side_paths,
     start_connector,
     start_listener,
 )
-from jam2_metrics import combined_summary, write_results_csv
+from jam2_metrics import combined_summary, summarize_csv, write_results_csv
 from jam2_profiles import (
     FAST_PROFILE,
     MODERATE_PROFILE,
@@ -28,7 +30,7 @@ from jam2_profiles import (
     latency_matched_prefill_profile,
     variant,
 )
-from jam2_tooling import default_jam2_path, ensure_dir, fail, print_flush, safe_test_id, write_json
+from jam2_tooling import default_jam2_path, ensure_dir, fail, print_flush, repo_root, safe_test_id, write_json
 from udp_stress_proxy import DirectionImpairment, ProxyImpairment, UdpStressProxy
 
 
@@ -38,10 +40,11 @@ METRONOME_WAV_TOLERANCE_FRAMES = 96
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run localhost Jam2 stress scenarios through a UDP impairment proxy using two local audio devices.")
+        description="Run localhost Jam2 stress scenarios through a UDP impairment proxy or headless mesh peers.")
     parser.add_argument("--jam2", default=str(default_jam2_path()))
-    parser.add_argument("--server-audio-device", required=True)
-    parser.add_argument("--client-audio-device", required=True)
+    parser.add_argument("--mode", choices=("normal", "mesh"), default="normal")
+    parser.add_argument("--server-audio-device")
+    parser.add_argument("--client-audio-device")
     parser.add_argument("--sample-rate", required=True, type=int)
     parser.add_argument("--logs", default=str(Path(__file__).with_name("stress_logs")))
     parser.add_argument("--stream-ms", type=int, default=DEFAULT_STREAM_MS)
@@ -70,6 +73,17 @@ def parse_args():
         choices=("off", "high", "realtime", "all"),
         default=None,
         help="OS priority mode to run; repeat for multiple or use all. Default: high.")
+    parser.add_argument(
+        "--mesh-peers",
+        action="append",
+        type=int,
+        default=None,
+        help="mesh peer count to run in --mode mesh; repeat for multiple. Default: 2, 3, 4, 8.")
+    parser.add_argument(
+        "--mesh-base-port",
+        type=int,
+        default=50000,
+        help="first localhost UDP port used by headless mesh stress cases")
     return parser.parse_args()
 
 
@@ -508,6 +522,187 @@ def scenario_plan(profile_mode, requested_scenarios, include_audio_probes=False)
             planned_catalog[planned_id] = scenario
             planned_ids.append(planned_id)
     return planned_catalog, planned_ids
+
+
+def mesh_peer_counts(args_ns):
+    counts = args_ns.mesh_peers or [2, 3, 4, 8]
+    out = []
+    for count in counts:
+        if count < 2:
+            raise ValueError("--mesh-peers must be at least 2")
+        if count not in out:
+            out.append(count)
+    return out
+
+
+def mesh_scenario_catalog(base_profile, counts):
+    return {
+        f"mesh-{count}-clean": {
+            "profile": base_profile,
+            "mesh_peers": count,
+            "signal": "tone-440",
+            "expect": f"headless full mesh with {count} peers and no injected network impairment",
+        }
+        for count in counts
+    }
+
+
+def mesh_scenario_plan(profile_mode, requested_scenarios, counts):
+    base_ids = requested_scenarios if requested_scenarios else [f"mesh-{count}-clean" for count in counts]
+    if profile_mode != "all":
+        catalog = mesh_scenario_catalog(selected_profile(profile_mode), counts)
+        return catalog, base_ids
+
+    planned_catalog = {}
+    planned_ids = []
+    for profile_name in ("fast", "moderate", "safe"):
+        catalog = mesh_scenario_catalog(selected_profile(profile_name), counts)
+        for scenario_id in base_ids:
+            if scenario_id not in catalog:
+                planned_ids.append(f"{profile_name}__{scenario_id}")
+                continue
+            planned_id = f"{profile_name}__{scenario_id}"
+            scenario = dict(catalog[scenario_id])
+            scenario["source_scenario"] = scenario_id
+            scenario["profile_family"] = profile_name
+            planned_catalog[planned_id] = scenario
+            planned_ids.append(planned_id)
+    return planned_catalog, planned_ids
+
+
+def mesh_collect_metrics(peer_results):
+    peers_with_csv = [peer for peer in peer_results if peer.get("csv_summary", {}).get("has_csv")]
+    audio_tags = []
+    for peer in peer_results:
+        audio = peer.get("audio_analysis", {})
+        audio_tags.extend(audio.get("tags", []))
+    summaries = [peer["csv_summary"] for peer in peers_with_csv]
+    return {
+        "has_csv": bool(summaries),
+        "peer_count": len(peer_results),
+        "peers_with_csv": len(peers_with_csv),
+        "return_code_failures": sum(1 for peer in peer_results if peer.get("return_code") != 0),
+        "sent_packets_min": min((row.get("sent_packets", 0.0) for row in summaries), default=0.0),
+        "recv_packets_min": min((row.get("recv_packets", 0.0) for row in summaries), default=0.0),
+        "sent_packets_total": sum((row.get("sent_packets", 0.0) for row in summaries), 0.0),
+        "recv_packets_total": sum((row.get("recv_packets", 0.0) for row in summaries), 0.0),
+        "sequence_lost_total": sum((row.get("sequence_lost", 0.0) for row in summaries), 0.0),
+        "sequence_loss_percent_max": max((row.get("sequence_loss_percent", 0.0) for row in summaries), default=0.0),
+        "sequence_out_of_order_total": sum((row.get("sequence_out_of_order", 0.0) for row in summaries), 0.0),
+        "sequence_duplicate_total": sum((row.get("sequence_duplicate", 0.0) for row in summaries), 0.0),
+        "jitter_max_ms": max((row.get("jitter_max_ms", 0.0) for row in summaries), default=0.0),
+        "rtt_max_ms": max((row.get("rtt_max_ms", 0.0) for row in summaries), default=0.0),
+        "playback_underrun_time_ms_total": sum((row.get("playback_ring_underrun_time_ms", 0.0) for row in summaries), 0.0),
+        "audio_ok_peers": sum(1 for peer in peer_results if peer.get("audio_analysis", {}).get("ok", False)),
+        "audio_tags": sorted(set(audio_tags)),
+    }
+
+
+def mesh_verdict(result):
+    metrics = result.get("mesh_metrics", {})
+    peer_count = metrics.get("peer_count", 0)
+    if metrics.get("return_code_failures", 0) > 0:
+        return "process_failed"
+    if metrics.get("peers_with_csv", 0) != peer_count:
+        return "missing_csv"
+    if metrics.get("sent_packets_min", 0.0) <= 0.0 or metrics.get("recv_packets_min", 0.0) <= 0.0:
+        return "mesh_packets_missing"
+    if metrics.get("sequence_lost_total", 0.0) > 0.0:
+        return "unexpected_loss"
+    if metrics.get("sequence_out_of_order_total", 0.0) > 0.0:
+        return "unexpected_reorder"
+    if metrics.get("audio_ok_peers", 0) != peer_count:
+        return "mesh_audio_probe_failed"
+    return "pass"
+
+
+def run_mesh_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
+    del seed
+    profile = scenario["profile"]
+    peer_count = scenario["mesh_peers"]
+    os_priority = scenario.get("os_priority", "high")
+    base_port = args_ns.mesh_base_port
+    session_id = secrets.token_hex(8)
+    session_key = secrets.token_hex(16)
+    endpoints = [f"127.0.0.1:{base_port + index}" for index in range(peer_count)]
+    processes = []
+    peer_results = []
+    print_flush(f"[stress] starting {scenario_id} profile={profile.name} peers={peer_count} os_priority={os_priority}")
+    for index, endpoint in enumerate(endpoints):
+        peer_name = f"peer{index + 1}"
+        paths = side_paths(output_dir, peer_name)
+        recording = ensure_dir(Path(paths["dir"]) / "recording")
+        peers = ",".join(peer for peer in endpoints if peer != endpoint)
+        args = [
+            jam2,
+            "mesh",
+            "--bind", endpoint,
+            "--session-id", session_id,
+            "--session-key", session_key,
+            "--peers", peers,
+            "--sample-rate", str(args_ns.sample_rate),
+            "--log-stats", str(paths["csv_raw"]),
+            "--headless-audio", "on",
+            "--test-input", scenario.get("signal", "tone-440"),
+            "--record-jam-folder", str(recording),
+            "--os-priority", os_priority,
+            "--status-format", "jsonl",
+        ]
+        args.extend(profile.args(args_ns.stream_ms))
+        process = ManagedProcess(
+            args,
+            repo_root(),
+            paths["stdout"],
+            paths["stderr"]).start()
+        processes.append((process, paths, peer_name))
+
+    timeout = max(30.0, args_ns.stream_ms / 1000.0 + 30.0)
+    for process, paths, peer_name in processes:
+        rc = process.wait(timeout=timeout)
+        if rc is None:
+            process.terminate()
+            rc = process.poll()
+        csv_path = collect_side_csv(paths)
+        csv_summary = summarize_csv(csv_path) if csv_path else {"has_csv": False}
+        audio_analysis = analyze_recording_dir(
+            Path(paths["dir"]) / "recording",
+            scenario.get("signal", "tone-440"),
+            local_signal=scenario.get("signal", "tone-440"),
+            remote_signal=scenario.get("signal", "tone-440"),
+            ignore_pop_events=True,
+            ignore_tone_frequency=True,
+            ignore_inputs_mix_clipping=True)
+        peer_results.append({
+            "peer": peer_name,
+            "return_code": rc,
+            "csv_path": str(csv_path) if csv_path else "",
+            "csv_summary": csv_summary,
+            "audio_analysis": audio_analysis,
+            "stdout": str(paths["stdout"]),
+            "stderr": str(paths["stderr"]),
+        })
+
+    mesh_metrics = mesh_collect_metrics(peer_results)
+    result = {
+        "scenario": scenario_id,
+        "source_scenario": scenario.get("source_scenario", scenario_id),
+        "profile_family": scenario.get("profile_family", args_ns.profile),
+        "profile": profile.name,
+        "os_priority": os_priority,
+        "expect": scenario["expect"],
+        "profile_metadata": profile.metadata(),
+        "mesh_peers": peer_count,
+        "mesh_endpoints": endpoints,
+        "peer_results": peer_results,
+        "mesh_metrics": mesh_metrics,
+    }
+    result["verdict"] = mesh_verdict(result)
+    print_flush(
+        f"[stress] finished {scenario_id} verdict={result['verdict']} "
+        f"peers={peer_count} recv_min={mesh_metrics.get('recv_packets_min', 0.0):.0f} "
+        f"loss={mesh_metrics.get('sequence_lost_total', 0.0):.0f} "
+        f"audio_ok={mesh_metrics.get('audio_ok_peers', 0)}/{peer_count}")
+    return result
 
 
 def verdict_for(result):
@@ -1006,6 +1201,20 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
 def write_summary(path, results):
     lines = []
     for result in results:
+        if "mesh_metrics" in result:
+            metrics = result.get("mesh_metrics", {})
+            lines.append(
+                f"{result.get('scenario')} verdict={result.get('verdict')} "
+                f"mesh_peers={metrics.get('peer_count', 0)} "
+                f"recv_min={metrics.get('recv_packets_min', 0.0):.0f} "
+                f"sent_min={metrics.get('sent_packets_min', 0.0):.0f} "
+                f"loss_total={metrics.get('sequence_lost_total', 0.0):.0f} "
+                f"jitter_max={metrics.get('jitter_max_ms', 0.0):.1f}ms "
+                f"rtt_max={metrics.get('rtt_max_ms', 0.0):.1f}ms "
+                f"underrun_ms={metrics.get('playback_underrun_time_ms_total', 0.0):.1f} "
+                f"audio_ok={metrics.get('audio_ok_peers', 0)}/{metrics.get('peer_count', 0)} "
+                f"audio_tags={','.join(metrics.get('audio_tags', [])) or '-'}")
+            continue
         metrics = result.get("metrics", {}).get("combined", {})
         audio_probe = result.get("audio_probe_analysis", {})
         audio_suffix = ""
@@ -1333,13 +1542,22 @@ def main():
         return fail(f"jam2 executable not found: {jam2}")
     if args_ns.stream_ms <= 0:
         return fail("--stream-ms must be positive")
+    if args_ns.mode == "normal" and (not args_ns.server_audio_device or not args_ns.client_audio_device):
+        return fail("--server-audio-device and --client-audio-device are required in --mode normal")
 
     logs = Path(args_ns.logs)
     if args_ns.clean and logs.exists():
         shutil.rmtree(logs)
     ensure_dir(logs)
 
-    catalog, scenario_ids = scenario_plan(args_ns.profile, args_ns.scenario, args_ns.include_audio_probes)
+    if args_ns.mode == "mesh":
+        try:
+            counts = mesh_peer_counts(args_ns)
+            catalog, scenario_ids = mesh_scenario_plan(args_ns.profile, args_ns.scenario, counts)
+        except ValueError as error:
+            return fail(str(error))
+    else:
+        catalog, scenario_ids = scenario_plan(args_ns.profile, args_ns.scenario, args_ns.include_audio_probes)
     os_priorities = selected_os_priorities(args_ns.os_priority)
     unknown = [scenario for scenario in scenario_ids if scenario not in catalog]
     if unknown:
@@ -1361,10 +1579,12 @@ def main():
             "scenario": planned_id,
             "source_scenario": scenario.get("source_scenario", scenario_id),
             "profile_family": scenario.get("profile_family", args_ns.profile),
+            "mode": args_ns.mode,
             "stream_ms": args_ns.stream_ms,
             "sample_rate": args_ns.sample_rate,
             "server_audio_device": args_ns.server_audio_device,
             "client_audio_device": args_ns.client_audio_device,
+            "mesh_peers": scenario.get("mesh_peers", 0),
             "profile": scenario["profile"].metadata(),
             "os_priority": os_priority,
             "expect": scenario["expect"],
@@ -1372,7 +1592,10 @@ def main():
             "server_signal": scenario.get("server_signal", ""),
             "client_signal": scenario.get("client_signal", ""),
         })
-        result = run_scenario(jam2, planned_id, scenario, args_ns, scenario_dir, args_ns.seed + index)
+        if args_ns.mode == "mesh":
+            result = run_mesh_scenario(jam2, planned_id, scenario, args_ns, scenario_dir, args_ns.seed + index)
+        else:
+            result = run_scenario(jam2, planned_id, scenario, args_ns, scenario_dir, args_ns.seed + index)
         write_json(scenario_dir / "result.json", result)
         results.append(result)
         time.sleep(0.5)

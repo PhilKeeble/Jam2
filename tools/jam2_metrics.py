@@ -257,6 +257,13 @@ def write_results_csv(path, results):
         "audio_probe_server_signal",
         "audio_probe_client_signal",
         "audio_probe_tags",
+        "mesh_peers",
+        "mesh_peers_with_csv",
+        "mesh_audio_ok_peers",
+        "mesh_recv_packets_min",
+        "mesh_sent_packets_min",
+        "mesh_sequence_lost_total",
+        "mesh_audio_tags",
         "server_metronome_wav_max_error_frames",
         "client_metronome_wav_max_error_frames",
         "server_metronome_wav_missing_clicks",
@@ -274,6 +281,7 @@ def write_results_csv(path, results):
             proxy = result.get("proxy_stats", {})
             wav = result.get("metronome_wav_analysis", {})
             audio_probe = result.get("audio_probe_analysis", {})
+            mesh = result.get("mesh_metrics", {})
             wav_server = wav.get("server", {})
             wav_client = wav.get("client", {})
             row = {
@@ -302,6 +310,13 @@ def write_results_csv(path, results):
                 "audio_probe_server_signal": audio_probe.get("server_signal", ""),
                 "audio_probe_client_signal": audio_probe.get("client_signal", ""),
                 "audio_probe_tags": ";".join(audio_probe.get("tags", [])),
+                "mesh_peers": mesh.get("peer_count", ""),
+                "mesh_peers_with_csv": mesh.get("peers_with_csv", ""),
+                "mesh_audio_ok_peers": mesh.get("audio_ok_peers", ""),
+                "mesh_recv_packets_min": mesh.get("recv_packets_min", ""),
+                "mesh_sent_packets_min": mesh.get("sent_packets_min", ""),
+                "mesh_sequence_lost_total": mesh.get("sequence_lost_total", ""),
+                "mesh_audio_tags": ";".join(mesh.get("audio_tags", [])),
                 "server_metronome_wav_max_error_frames": wav_server.get("max_abs_error_frames", ""),
                 "client_metronome_wav_max_error_frames": wav_client.get("max_abs_error_frames", ""),
                 "server_metronome_wav_missing_clicks": wav_server.get("missing_clicks", ""),

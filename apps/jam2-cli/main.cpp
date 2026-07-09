@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <memory>
@@ -71,7 +72,7 @@ Usage:
   jam2 ring-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n] [--ring-frames n]
   jam2 listen [--profile fast|moderate|safe] [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats enabled|disabled] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--record-jam-folder folder] [--test-input off|silence|tone-440|pulse-1s] [--os-priority off|high|realtime] [--metronome on|off] [--bpm n] [--metronome-level n] [--remote-level n] [--send-level n] [--local-monitor on|off] [--local-monitor-level n] [--gui-control ip:port] [--metronome-mode shared-grid|leader-audio|symmetric-delay|listener-compensated] [--sample-time-playout on|off] [--playout-delay-frames n] [--jitter-buffer-frames n] [--jitter-buffer-max-frames n] [--adaptive-playback-cushion on|off] [--adaptive-playback-target-frames n] [--adaptive-playback-min-frames n] [--adaptive-playback-max-frames n] [--adaptive-playback-release-ppm n] [--session-id hex] [--session-key hex32] [--machine-readable-startup on|off] [--status-format text|jsonl] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels n[,n...]] [--output-channels n[,n...]] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-deadband-ppm n] [--drift-max-correction-ppm n]
   jam2 connect <jam2-url> [--profile fast|moderate|safe] [options]
-  jam2 mesh --session-id <hex> --session-key <hex32> --bind ip:port --peers ip:port[,ip:port...] [options]
+  jam2 mesh --session-id <hex> --session-key <hex32> --bind ip:port --peers ip:port[,ip:port...] [options] [--headless-audio on|off]
 
 Stage status:
   UDP HELLO/HELLO_ACK session setup, jam2 URL parsing, and STUN endpoint discovery are implemented.
@@ -167,6 +168,7 @@ struct Options {
     bool machine_readable_startup = false;
     bool status_jsonl = false;
     std::optional<int> audio_device_id;
+    bool headless_audio = false;
     std::string profile_name;
     long audio_buffer_size = 0;
     jam2::audio::InputChannels input_channels = jam2::audio::InputChannels::Mono;
@@ -697,6 +699,15 @@ Options parse_options(int argc, char** argv, int start)
             if (*options.audio_device_id < 0) {
                 throw std::runtime_error("--audio-device must be non-negative");
             }
+        } else if (arg == "--headless-audio") {
+            const std::string value{require_value(argc, argv, i, arg)};
+            if (value == "on" || value == "true" || value == "1") {
+                options.headless_audio = true;
+            } else if (value == "off" || value == "false" || value == "0") {
+                options.headless_audio = false;
+            } else {
+                throw std::runtime_error("--headless-audio must be on or off");
+            }
         } else if (arg == "--audio-buffer-size") {
             options.audio_buffer_size = std::stol(std::string(require_value(argc, argv, i, arg)));
             if (options.audio_buffer_size <= 0) {
@@ -740,6 +751,9 @@ Options parse_options(int argc, char** argv, int start)
     }
     if (!options.stats_enabled && options.log_stats_dir) {
         throw std::runtime_error("--log-stats requires --stats enabled");
+    }
+    if (options.headless_audio && options.audio_device_id) {
+        throw std::runtime_error("--headless-audio cannot be used with --audio-device");
     }
     if (options.session_id.has_value() != options.session_key.has_value()) {
         throw std::runtime_error("--session-id and --session-key must be provided together");
@@ -2434,14 +2448,28 @@ std::tm local_time_from(std::time_t value)
     return out;
 }
 
+unsigned long current_process_id()
+{
+#if defined(_WIN32)
+    return static_cast<unsigned long>(GetCurrentProcessId());
+#else
+    return static_cast<unsigned long>(getpid());
+#endif
+}
+
 std::filesystem::path make_stats_csv_path(const std::filesystem::path& folder)
 {
     const auto now = std::chrono::system_clock::now();
     const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
     const std::tm local = local_time_from(now_time);
+    const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()).count() % 1000;
     std::ostringstream name;
     name << "jam2_stats_"
          << std::put_time(&local, "%Y%m%d_%H%M%S")
+         << '_'
+         << std::setw(3) << std::setfill('0') << millis
+         << "_pid" << current_process_id()
          << ".csv";
     return folder / name.str();
 }
@@ -4807,6 +4835,270 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     }
 }
 
+constexpr double kHeadlessPi = 3.141592653589793238462643383279502884;
+
+int i32_peak_ppm(std::span<const std::int32_t> samples)
+{
+    std::int64_t peak = 0;
+    for (std::int32_t sample : samples) {
+        const std::int64_t value = sample < 0
+            ? -static_cast<std::int64_t>(sample)
+            : static_cast<std::int64_t>(sample);
+        peak = std::max(peak, value);
+    }
+    const double normalized = static_cast<double>(peak) / 2147483647.0;
+    return static_cast<int>(std::clamp(normalized, 0.0, 1.0) * 1000000.0);
+}
+
+std::int32_t clamp_i32_sample(double sample)
+{
+    return static_cast<std::int32_t>(std::clamp(sample, -2147483648.0, 2147483647.0));
+}
+
+std::int32_t mix_i32_samples(std::int32_t a, std::int32_t b)
+{
+    const std::int64_t mixed = static_cast<std::int64_t>(a) + static_cast<std::int64_t>(b);
+    return static_cast<std::int32_t>(std::clamp<std::int64_t>(mixed, -2147483648LL, 2147483647LL));
+}
+
+std::int32_t render_headless_test_input_sample(int mode, std::uint64_t sample_time, double sample_rate, double level)
+{
+    if (mode == 1 || sample_rate <= 0.0) {
+        return 0;
+    }
+    if (mode == 2) {
+        const double phase = std::fmod(static_cast<double>(sample_time) * 440.0 / sample_rate, 1.0);
+        return clamp_i32_sample(std::sin(phase * 2.0 * kHeadlessPi) * level * 2147483647.0);
+    }
+    if (mode == 3) {
+        const std::uint64_t period = static_cast<std::uint64_t>(sample_rate > 1.0 ? sample_rate : 1.0);
+        const std::uint64_t width = std::max<std::uint64_t>(1, period / 100);
+        return (sample_time % period) < width ? clamp_i32_sample(level * 2147483647.0) : 0;
+    }
+    return 0;
+}
+
+class HeadlessDeviceStream final : public jam2::audio::DeviceStream {
+public:
+    HeadlessDeviceStream(
+        double sample_rate,
+        long buffer_size,
+        jam2::audio::InputChannels input_channels,
+        jam2::audio::ChannelSelection channels,
+        jam2::audio::MonoRingBuffer& capture_ring,
+        jam2::audio::MonoRingBuffer& playback_ring,
+        std::size_t playback_prefill_frames,
+        jam2::audio::StreamControl& control,
+        jam2::audio::OutputRecorder* recorder)
+        : sample_rate_(sample_rate)
+        , buffer_size_(buffer_size > 0 ? buffer_size : 128)
+        , capture_ring_(capture_ring)
+        , playback_ring_(playback_ring)
+        , playback_prefill_frames_(playback_prefill_frames)
+        , control_(control)
+        , recorder_(recorder)
+    {
+        info_.device.id = -1;
+        info_.device.backend = "headless";
+        info_.device.name = "Headless synthetic audio";
+        info_.sample_rate = sample_rate_;
+        info_.buffer_size = buffer_size_;
+        info_.input_channels = input_channels;
+        info_.channels = std::move(channels);
+        info_.sample_format = "s32";
+        capture_scratch_.resize(static_cast<std::size_t>(buffer_size_), 0);
+        playback_scratch_.resize(static_cast<std::size_t>(buffer_size_), 0);
+        output_scratch_.resize(static_cast<std::size_t>(buffer_size_), 0);
+        inputs_mix_scratch_.resize(static_cast<std::size_t>(buffer_size_), 0);
+        metronome_scratch_.resize(static_cast<std::size_t>(buffer_size_), 0);
+        thread_ = std::thread([this] { run(); });
+    }
+
+    ~HeadlessDeviceStream() override
+    {
+        stop_.store(true, std::memory_order_relaxed);
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    long callbacks() const override
+    {
+        return callbacks_.load(std::memory_order_relaxed);
+    }
+
+    bool playback_prefilled() const override
+    {
+        return playback_prefilled_.load(std::memory_order_relaxed);
+    }
+
+    jam2::audio::StreamInfo info() const override
+    {
+        return info_;
+    }
+
+    jam2::audio::CallbackTimingStats callback_timing_stats() const override
+    {
+        jam2::audio::CallbackTimingStats stats;
+        stats.interval_min_us = interval_min_us_.load(std::memory_order_relaxed);
+        stats.interval_sum_us = interval_sum_us_.load(std::memory_order_relaxed);
+        stats.interval_max_us = interval_max_us_.load(std::memory_order_relaxed);
+        stats.interval_samples = interval_samples_.load(std::memory_order_relaxed);
+        stats.gap_over_1_1x_count = gap_over_1_1x_count_.load(std::memory_order_relaxed);
+        stats.gap_over_1_5x_count = gap_over_1_5x_count_.load(std::memory_order_relaxed);
+        stats.gap_over_2x_count = gap_over_2x_count_.load(std::memory_order_relaxed);
+        return stats;
+    }
+
+private:
+    void observe_callback_interval(std::uint64_t now_us)
+    {
+        if (last_callback_us_ == 0) {
+            last_callback_us_ = now_us;
+            return;
+        }
+        const std::uint64_t interval = now_us >= last_callback_us_ ? now_us - last_callback_us_ : 0;
+        last_callback_us_ = now_us;
+        const std::uint64_t expected_us =
+            static_cast<std::uint64_t>(static_cast<double>(buffer_size_) * 1000000.0 / sample_rate_);
+        if (interval_min_us_.load(std::memory_order_relaxed) == 0 ||
+            interval < interval_min_us_.load(std::memory_order_relaxed)) {
+            interval_min_us_.store(interval, std::memory_order_relaxed);
+        }
+        interval_sum_us_.fetch_add(interval, std::memory_order_relaxed);
+        std::uint64_t current_max = interval_max_us_.load(std::memory_order_relaxed);
+        while (interval > current_max &&
+               !interval_max_us_.compare_exchange_weak(current_max, interval, std::memory_order_relaxed, std::memory_order_relaxed)) {
+        }
+        interval_samples_.fetch_add(1, std::memory_order_relaxed);
+        if (expected_us > 0) {
+            if (interval > expected_us * 11 / 10) {
+                gap_over_1_1x_count_.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (interval > expected_us * 3 / 2) {
+                gap_over_1_5x_count_.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (interval > expected_us * 2) {
+                gap_over_2x_count_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    }
+
+    void fill_capture()
+    {
+        const int mode = control_.test_input_mode.load(std::memory_order_relaxed);
+        const double level = static_cast<double>(
+            std::clamp(control_.test_input_level_ppm.load(std::memory_order_relaxed), 0, 1000000)) / 1000000.0;
+        for (std::int32_t& sample : capture_scratch_) {
+            sample = render_headless_test_input_sample(mode, test_input_sample_time_, sample_rate_, level);
+            ++test_input_sample_time_;
+        }
+        capture_ring_.push(std::span<const std::int32_t>(capture_scratch_.data(), capture_scratch_.size()));
+        const int peak = i32_peak_ppm(capture_scratch_);
+        update_peak(control_.input_peak_ppm, peak);
+        update_peak(control_.gui_input_peak_ppm, peak);
+    }
+
+    void drain_playback()
+    {
+        if (!playback_prefilled_.load(std::memory_order_relaxed)) {
+            if (playback_ring_.available_read() >= playback_prefill_frames_) {
+                playback_prefilled_.store(true, std::memory_order_relaxed);
+            } else {
+                std::fill(playback_scratch_.begin(), playback_scratch_.end(), 0);
+            }
+        }
+        if (playback_prefilled_.load(std::memory_order_relaxed)) {
+            playback_ring_.pop(std::span<std::int32_t>(playback_scratch_.data(), playback_scratch_.size()));
+        }
+        const int remote_peak = i32_peak_ppm(playback_scratch_);
+        update_peak(control_.remote_peak_ppm, remote_peak);
+        update_peak(control_.gui_remote_peak_ppm, remote_peak);
+
+        const double remote_level = gain_from_ppm(control_.remote_level_ppm.load(std::memory_order_relaxed));
+        const bool monitor_enabled = control_.local_monitor_enabled.load(std::memory_order_relaxed);
+        const double monitor_level = gain_from_ppm(control_.local_monitor_level_ppm.load(std::memory_order_relaxed));
+        for (std::size_t i = 0; i < output_scratch_.size(); ++i) {
+            std::int32_t sample = clamp_i32_sample(static_cast<double>(playback_scratch_[i]) * remote_level);
+            if (monitor_enabled) {
+                const auto monitor = clamp_i32_sample(static_cast<double>(capture_scratch_[i]) * monitor_level);
+                sample = mix_i32_samples(sample, monitor);
+            }
+            output_scratch_[i] = sample;
+            if (sample == (std::numeric_limits<std::int32_t>::min)() ||
+                sample == (std::numeric_limits<std::int32_t>::max)()) {
+                control_.output_clipped_samples.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        const int output_peak = i32_peak_ppm(output_scratch_);
+        update_peak(control_.output_peak_ppm, output_peak);
+        update_peak(control_.gui_output_peak_ppm, output_peak);
+        if (recorder_ != nullptr) {
+            for (std::size_t i = 0; i < inputs_mix_scratch_.size(); ++i) {
+                inputs_mix_scratch_[i] = mix_i32_samples(capture_scratch_[i], playback_scratch_[i]);
+            }
+            std::fill(metronome_scratch_.begin(), metronome_scratch_.end(), 0);
+            recorder_->record(jam2::audio::RecordBlock{
+                audio_frame_start_,
+                std::span<const std::int32_t>(output_scratch_.data(), output_scratch_.size()),
+                std::span<const std::int32_t>(capture_scratch_.data(), capture_scratch_.size()),
+                std::span<const std::int32_t>(playback_scratch_.data(), playback_scratch_.size()),
+                std::span<const std::int32_t>(inputs_mix_scratch_.data(), inputs_mix_scratch_.size()),
+                std::span<const std::int32_t>(metronome_scratch_.data(), metronome_scratch_.size()),
+            });
+        }
+        audio_frame_start_ += static_cast<std::uint64_t>(buffer_size_);
+    }
+
+    void run()
+    {
+        using clock = std::chrono::steady_clock;
+        auto next = clock::now();
+        const auto period = std::chrono::duration_cast<clock::duration>(
+            std::chrono::duration<double>(static_cast<double>(buffer_size_) / sample_rate_));
+        while (!stop_.load(std::memory_order_relaxed)) {
+            observe_callback_interval(jam2::monotonic_us());
+            fill_capture();
+            drain_playback();
+            callbacks_.fetch_add(1, std::memory_order_relaxed);
+            next += period;
+            std::this_thread::sleep_until(next);
+            const auto now = clock::now();
+            if (next + period < now) {
+                next = now;
+            }
+        }
+    }
+
+    double sample_rate_ = 48000.0;
+    long buffer_size_ = 128;
+    jam2::audio::MonoRingBuffer& capture_ring_;
+    jam2::audio::MonoRingBuffer& playback_ring_;
+    std::size_t playback_prefill_frames_ = 0;
+    jam2::audio::StreamControl& control_;
+    jam2::audio::OutputRecorder* recorder_ = nullptr;
+    jam2::audio::StreamInfo info_;
+    std::vector<std::int32_t> capture_scratch_;
+    std::vector<std::int32_t> playback_scratch_;
+    std::vector<std::int32_t> output_scratch_;
+    std::vector<std::int32_t> inputs_mix_scratch_;
+    std::vector<std::int32_t> metronome_scratch_;
+    std::thread thread_;
+    std::atomic<bool> stop_{false};
+    std::atomic<long> callbacks_{0};
+    std::atomic<bool> playback_prefilled_{false};
+    std::atomic<std::uint64_t> interval_min_us_{0};
+    std::atomic<std::uint64_t> interval_sum_us_{0};
+    std::atomic<std::uint64_t> interval_max_us_{0};
+    std::atomic<std::uint64_t> interval_samples_{0};
+    std::atomic<std::uint64_t> gap_over_1_1x_count_{0};
+    std::atomic<std::uint64_t> gap_over_1_5x_count_{0};
+    std::atomic<std::uint64_t> gap_over_2x_count_{0};
+    std::uint64_t last_callback_us_ = 0;
+    std::uint64_t test_input_sample_time_ = 0;
+    std::uint64_t audio_frame_start_ = 0;
+};
+
 struct OptionalAudioStream {
     std::unique_ptr<jam2::audio::StreamControl> control;
     std::unique_ptr<jam2::audio::OutputRecorder> recorder;
@@ -4818,7 +5110,7 @@ struct OptionalAudioStream {
 OptionalAudioStream start_optional_audio(const Options& options, bool leader_audio_local_click)
 {
     OptionalAudioStream audio;
-    if (!options.audio_device_id) {
+    if (!options.audio_device_id && !options.headless_audio) {
         return audio;
     }
     audio.control = std::make_unique<jam2::audio::StreamControl>();
@@ -4851,17 +5143,33 @@ OptionalAudioStream start_optional_audio(const Options& options, bool leader_aud
     audio.capture_ring->set_diagnostics_enabled(diagnostics_enabled);
     audio.playback_ring->set_diagnostics_enabled(diagnostics_enabled);
     audio.playback_ring->set_depth_bucket_thresholds(static_cast<double>(options.sample_rate));
-    audio.stream = jam2::audio::start_duplex_stream(
-        *options.audio_device_id,
-        static_cast<double>(options.sample_rate),
-        options.audio_buffer_size,
-        options.input_channels,
-        options.channel_selection,
-        *audio.capture_ring,
-        *audio.playback_ring,
-        options.playback_prefill_frames,
-        *audio.control,
-        audio.recorder.get());
+    const long active_buffer_size = options.audio_buffer_size > 0
+        ? options.audio_buffer_size
+        : static_cast<long>(options.frame_size);
+    if (options.headless_audio) {
+        audio.stream = std::make_unique<HeadlessDeviceStream>(
+            static_cast<double>(options.sample_rate),
+            active_buffer_size,
+            options.input_channels,
+            options.channel_selection,
+            *audio.capture_ring,
+            *audio.playback_ring,
+            options.playback_prefill_frames,
+            *audio.control,
+            audio.recorder.get());
+    } else {
+        audio.stream = jam2::audio::start_duplex_stream(
+            *options.audio_device_id,
+            static_cast<double>(options.sample_rate),
+            options.audio_buffer_size,
+            options.input_channels,
+            options.channel_selection,
+            *audio.capture_ring,
+            *audio.playback_ring,
+            options.playback_prefill_frames,
+            *audio.control,
+            audio.recorder.get());
+    }
     const double active_sample_rate = audio.stream ? audio.stream->info().sample_rate : 0.0;
     if (options.sample_rate > 0 && active_sample_rate > 0.0 &&
         std::abs(active_sample_rate - static_cast<double>(options.sample_rate)) > 1.0) {
@@ -5767,6 +6075,16 @@ int run_mesh(int argc, char** argv)
     if (drained_startup_packets > 0) {
         std::cout << "Drained startup UDP packets: " << drained_startup_packets << "\n";
     }
+    std::optional<CsvStatsLog> csv_log;
+    if (options.log_stats_dir) {
+        const jam2::Endpoint peer_context{
+            options.mesh_peers.empty() ? std::string("mesh:none") : std::string("mesh:") + std::to_string(options.mesh_peers.size()),
+            0};
+        csv_log.emplace(
+            *options.log_stats_dir,
+            make_csv_context(argc, argv, "mesh", options, socket, local, peer_context, "gui-peer-list"));
+        std::cout << "Stats CSV: " << csv_log->path().string() << "\n";
+    }
     const int recording_sample_rate = audio.stream
         ? static_cast<int>(std::lround(audio.stream->info().sample_rate))
         : options.sample_rate;
@@ -5857,6 +6175,7 @@ int run_mesh(int argc, char** argv)
         stats.playout_delay_frames = playout_delay_frames;
         stats.jitter_buffer_enabled = playout_delay_frames > 0;
         stats.jitter_buffer_target_frames = playout_delay_frames;
+        stats.jitter_buffer_max_frames = static_cast<std::uint64_t>(options.jitter_buffer_max_frames);
         for (const auto& entry : peers) {
             const auto& peer = entry.second;
             stats.sent_packets += peer.sent_packets;
@@ -5892,20 +6211,56 @@ int run_mesh(int argc, char** argv)
         return stats;
     };
 
-    auto print_mesh_stats = [&](std::uint64_t now_us) {
+    auto print_mesh_stats = [&](std::uint64_t now_us, const CsvStatsLog::AudioSnapshot* provided_audio_snapshot = nullptr) {
         const std::uint64_t elapsed_ms = (now_us - start_time) / 1000ULL;
-        const auto audio_snapshot = make_audio_snapshot(
-            audio.stream.get(),
-            audio.capture_ring.get(),
-            audio.playback_ring.get(),
-            audio.control.get());
+        const AudioPacketStats stats = aggregate_stats();
+        CsvStatsLog::AudioSnapshot current_audio_snapshot;
+        if (provided_audio_snapshot == nullptr) {
+            current_audio_snapshot = make_audio_snapshot(
+                audio.stream.get(),
+                audio.capture_ring.get(),
+                audio.playback_ring.get(),
+                audio.control.get());
+            provided_audio_snapshot = &current_audio_snapshot;
+        }
+        const auto& audio_snapshot = *provided_audio_snapshot;
         if (options.status_jsonl) {
             std::cout << "{\"event\":\"mesh_stats\",\"elapsed_ms\":" << elapsed_ms
                       << ",\"peer_count\":" << peers.size()
+                      << ",\"sent_packets\":" << stats.sent_packets
+                      << ",\"recv_packets\":" << stats.recv_packets
+                      << ",\"sent_bytes\":" << stats.sent_bytes
+                      << ",\"recv_bytes\":" << stats.recv_bytes
+                      << ",\"ignored_packets\":" << stats.ignored_packets
+                      << ",\"sent_pings\":" << stats.sent_pings
+                      << ",\"sent_pongs\":" << stats.sent_pongs
+                      << ",\"recv_pongs\":" << stats.recv_pongs
+                      << ",\"rtt_avg_ms\":" << rtt_avg_ms(stats)
+                      << ",\"jitter_avg_ms\":" << avg_us_to_ms(stats.jitter_sum_us, stats.jitter_samples)
+                      << ",\"jitter_max_ms\":"
+                      << (stats.jitter_samples > 0 ? static_cast<double>(stats.jitter_max_us) / 1000.0 : 0.0)
+                      << ",\"sequence_lost\":" << stats.sequence.lost
+                      << ",\"sequence_loss_events\":" << stats.sequence.loss_events
+                      << ",\"sequence_loss_max_gap\":" << stats.sequence.loss_max_gap
+                      << ",\"sequence_loss_percent\":" << sequence_loss_percent(stats)
+                      << ",\"sequence_duplicate\":" << stats.sequence.duplicate
+                      << ",\"sequence_out_of_order\":" << stats.sequence.out_of_order
+                      << ",\"sequence_late\":" << stats.sequence.late
                       << ",\"playout_delay_frames\":" << playout_delay_frames
+                      << ",\"jitter_buffer\":\"" << (stats.jitter_buffer_enabled ? "on" : "off") << "\""
+                      << ",\"jitter_buffer_target_frames\":" << stats.jitter_buffer_target_frames
+                      << ",\"jitter_buffer_target_ms\":"
+                      << frames_to_ms(static_cast<std::size_t>(stats.jitter_buffer_target_frames), options.sample_rate)
+                      << ",\"capture_ring_readable_ms\":"
+                      << frames_to_ms(audio_snapshot.capture_ring_readable, options.sample_rate)
                       << ",\"playback_ring_readable_ms\":" << frames_to_ms(audio_snapshot.playback_ring_readable, options.sample_rate)
+                      << ",\"playback_ring_underruns\":" << audio_snapshot.playback_ring_underruns
+                      << ",\"playback_ring_underrun_events\":" << audio_snapshot.playback_ring_underrun_events
+                      << ",\"input_peak\":" << audio_snapshot.input_peak
+                      << ",\"send_peak\":" << audio_snapshot.send_peak
                       << ",\"remote_peak\":" << audio_snapshot.remote_peak
                       << ",\"output_peak\":" << audio_snapshot.output_peak
+                      << ",\"output_clipped_samples\":" << audio_snapshot.output_clipped_samples
                       << ",\"peers\":[";
             bool first = true;
             for (const auto& entry : peers) {
@@ -5932,6 +6287,12 @@ int run_mesh(int argc, char** argv)
         } else {
             std::cout << "mesh_stats elapsed_ms=" << elapsed_ms
                       << " peer_count=" << peers.size()
+                      << " sent_packets=" << stats.sent_packets
+                      << " recv_packets=" << stats.recv_packets
+                      << " sequence_lost=" << stats.sequence.lost
+                      << " sequence_loss_percent=" << sequence_loss_percent(stats)
+                      << " jitter_avg_ms=" << avg_us_to_ms(stats.jitter_sum_us, stats.jitter_samples)
+                      << " rtt_avg_ms=" << rtt_avg_ms(stats)
                       << " playback_ring_readable_ms=" << frames_to_ms(audio_snapshot.playback_ring_readable, options.sample_rate)
                       << " remote_peak=" << audio_snapshot.remote_peak
                       << " output_peak=" << audio_snapshot.output_peak << "\n";
@@ -5992,6 +6353,9 @@ int run_mesh(int argc, char** argv)
         while (now >= next_send && next_send < send_deadline && sends_this_loop < 8) {
             std::vector<std::uint8_t> payload;
             if (audio.capture_ring != nullptr) {
+                if (audio.capture_ring->available_read() < static_cast<std::size_t>(options.frame_size)) {
+                    break;
+                }
                 (void)audio.capture_ring->pop(asio_frames);
                 for (std::size_t i = 0; i < asio_frames.size(); ++i) {
                     network_frames[i] = asio_frames[i] / 256;
@@ -6061,6 +6425,13 @@ int run_mesh(int argc, char** argv)
         if (next_stats != 0 && now >= next_stats) {
             if (commands.state.stats_enabled.load(std::memory_order_relaxed)) {
                 print_mesh_stats(now);
+            }
+            if (csv_log) {
+                csv_log->write_periodic(
+                    (now - start_time) / 1000ULL,
+                    aggregate_stats(),
+                    options,
+                    make_audio_snapshot(audio.stream.get(), audio.capture_ring.get(), audio.playback_ring.get(), audio.control.get()));
             }
             next_stats += static_cast<std::uint64_t>(options.stats_interval_ms) * 1000ULL;
         }
@@ -6178,9 +6549,22 @@ int run_mesh(int argc, char** argv)
     for (const auto& entry : peers) {
         socket.send_to(entry.second.endpoint, bye_packet);
     }
-    print_mesh_stats(now);
+    const auto final_audio_snapshot = make_audio_snapshot(
+        audio.stream.get(),
+        audio.capture_ring.get(),
+        audio.playback_ring.get(),
+        audio.control.get());
+    print_mesh_stats(now, &final_audio_snapshot);
     auto final_stats = aggregate_stats();
     final_stats.elapsed_ms = (now - start_time) / 1000ULL;
+    if (csv_log) {
+        csv_log->write(
+            "final",
+            final_stats.elapsed_ms,
+            final_stats,
+            options,
+            final_audio_snapshot);
+    }
     if (commands.state.stats_enabled.load(std::memory_order_relaxed)) {
         print_audio_packet_stats(final_stats, options);
         print_optional_audio_stats(audio, options);
