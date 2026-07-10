@@ -123,6 +123,13 @@ def summarize_csv(path):
         "final_metronome_level": to_float(row, "final_metronome_level"),
         "final_remote_level": to_float(row, "final_remote_level"),
         "metronome_mode": row.get("metronome_mode", ""),
+        "metronome_compensation_active": row.get("metronome_compensation_active", ""),
+        "metronome_compensation_offset_frames": to_float(row, "metronome_compensation_offset_frames"),
+        "metronome_compensation_offset_ms": to_float(row, "metronome_compensation_offset_ms"),
+        "metronome_compensation_target_frames": to_float(row, "metronome_compensation_target_frames"),
+        "metronome_compensation_target_ms": to_float(row, "metronome_compensation_target_ms"),
+        "metronome_compensation_clamp_events": to_float(row, "metronome_compensation_clamp_events"),
+        "metronome_compensation_stale_events": to_float(row, "metronome_compensation_stale_events"),
         "sample_time_playout": row.get("sample_time_playout", ""),
         "playout_delay_frames": to_float(row, "playout_delay_frames"),
         "playout_delay_ms": to_float(row, "playout_delay_ms"),
@@ -182,6 +189,16 @@ def combined_summary(server_csv, client_csv):
         "metronome_beat_delta_abs_max": max((side.get("metronome_beat_delta_abs", 0.0) for side in sides), default=0.0),
         "metronome_alignment_valid_sides": sum(
             (1 for side in sides if side.get("metronome_alignment_valid", "") == "yes"), 0),
+        "metronome_compensation_active_sides": sum(
+            (1 for side in sides if side.get("metronome_compensation_active", "") == "yes"), 0),
+        "metronome_compensation_offset_ms_abs_max": max(
+            (abs(side.get("metronome_compensation_offset_ms", 0.0)) for side in sides), default=0.0),
+        "metronome_compensation_target_ms_abs_max": max(
+            (abs(side.get("metronome_compensation_target_ms", 0.0)) for side in sides), default=0.0),
+        "metronome_compensation_clamp_events_total": sum(
+            (side.get("metronome_compensation_clamp_events", 0.0) for side in sides), 0.0),
+        "metronome_compensation_stale_events_total": sum(
+            (side.get("metronome_compensation_stale_events", 0.0) for side in sides), 0.0),
         "sequence_lost_total": sum((side.get("sequence_lost", 0.0) for side in sides), 0.0),
         "sequence_out_of_order_total": sum((side.get("sequence_out_of_order", 0.0) for side in sides), 0.0),
         "reordered_recovered_total": sum((side.get("reordered_recovered", 0.0) for side in sides), 0.0),
@@ -236,6 +253,11 @@ def write_results_csv(path, results):
         "remote_metronome_beat_max",
         "metronome_beat_delta_abs_max",
         "metronome_alignment_valid_sides",
+        "metronome_compensation_active_sides",
+        "metronome_compensation_offset_ms_abs_max",
+        "metronome_compensation_target_ms_abs_max",
+        "metronome_compensation_clamp_events_total",
+        "metronome_compensation_stale_events_total",
         "sequence_lost_total",
         "sequence_out_of_order_total",
         "reordered_recovered_total",

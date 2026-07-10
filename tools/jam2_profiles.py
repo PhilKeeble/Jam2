@@ -29,6 +29,10 @@ class Jam2Profile:
     bpm: int = 120
     metronome_level: float = 0.20
     metronome_mode: str = "shared-grid"
+    metronome_compensation_max_ms: float = 80.0
+    metronome_compensation_smoothing_ms: float = 750.0
+    metronome_compensation_deadband_ms: float = 1.0
+    metronome_compensation_slew_ms_per_sec: float = 40.0
     remote_level: float = 1.0
     sample_time_playout: str = "on"
     playout_delay_frames: int = 2048
@@ -65,6 +69,10 @@ class Jam2Profile:
             "--bpm", str(self.bpm),
             "--metronome-level", str(self.metronome_level),
             "--metronome-mode", self.metronome_mode,
+            "--metronome-compensation-max-ms", str(self.metronome_compensation_max_ms),
+            "--metronome-compensation-smoothing-ms", str(self.metronome_compensation_smoothing_ms),
+            "--metronome-compensation-deadband-ms", str(self.metronome_compensation_deadband_ms),
+            "--metronome-compensation-slew-ms-per-sec", str(self.metronome_compensation_slew_ms_per_sec),
             "--remote-level", str(self.remote_level),
             "--sample-time-playout", self.sample_time_playout,
             "--playout-delay-frames", str(self.playout_delay_frames),
@@ -109,6 +117,10 @@ class Jam2Profile:
             "bpm": self.bpm,
             "metronome_level": self.metronome_level,
             "metronome_mode": self.metronome_mode,
+            "metronome_compensation_max_ms": self.metronome_compensation_max_ms,
+            "metronome_compensation_smoothing_ms": self.metronome_compensation_smoothing_ms,
+            "metronome_compensation_deadband_ms": self.metronome_compensation_deadband_ms,
+            "metronome_compensation_slew_ms_per_sec": self.metronome_compensation_slew_ms_per_sec,
             "remote_level": self.remote_level,
             "sample_time_playout": self.sample_time_playout,
             "playout_delay_frames": self.playout_delay_frames,

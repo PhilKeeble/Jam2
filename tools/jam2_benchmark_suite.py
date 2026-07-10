@@ -225,7 +225,6 @@ def metronome_profiles():
     return [
         variant(base, "shared_grid", metronome_mode="shared-grid"),
         variant(base, "leader_audio", metronome_mode="leader-audio"),
-        variant(base, "symmetric_delay", metronome_mode="symmetric-delay"),
         variant(base, "listener_compensated", metronome_mode="listener-compensated"),
     ]
 

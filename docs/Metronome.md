@@ -10,7 +10,7 @@ CLI startup options:
 --metronome on|off
 --bpm n
 --metronome-level n
---metronome-mode shared-grid|leader-audio|symmetric-delay|listener-compensated
+--metronome-mode shared-grid|leader-audio|listener-compensated
 ```
 
 Runtime commands:
@@ -32,7 +32,6 @@ The GUI exposes the same controls in its runtime/metronome area.
 | --- | --- |
 | `shared-grid` | Default mode. Both peers generate the click from the shared timing grid. |
 | `leader-audio` | Useful for comparing click timing against the listener's audio path. |
-| `symmetric-delay` | Experimental timing comparison mode that assumes symmetric network delay. |
 | `listener-compensated` | Experimental mode for comparing listener-side compensation behavior. |
 
 Use `shared-grid` first. Compare the other modes only when collecting timing data or validating metronome behavior.

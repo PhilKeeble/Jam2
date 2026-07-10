@@ -84,6 +84,8 @@ struct StreamControl {
     std::atomic<bool> leader_audio_local_click{false};
     std::atomic<std::uint64_t> metronome_epoch_sample_time{0};
     std::atomic<bool> metronome_epoch_valid{false};
+    std::atomic<std::int64_t> metronome_render_offset_frames{0};
+    std::atomic<std::uint64_t> metronome_render_sample_counter{0};
     std::atomic<int> test_input_mode{0};
     std::atomic<int> test_input_level_ppm{125000};
     std::atomic<int> input_peak_ppm{0};

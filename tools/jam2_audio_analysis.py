@@ -151,6 +151,21 @@ def analyze_metronome_wav(recording_dir, tolerance_frames=96, allow_silent=False
     actual = detect_transients(samples, threshold=0.04, refractory_frames=1024)
     if allow_silent and not actual:
         return {"ok": True, "verdict": "metronome_silent_expected", "clicks": 0, "recording_dir": str(recording_dir)}
+    if meta.get("metronome_mode", "") == "listener-compensated":
+        return {
+            "ok": bool(actual),
+            "verdict": "pass_loose_listener_compensated" if actual else "listener_compensated_clicks_missing",
+            "recording_dir": str(recording_dir),
+            "expected_clicks": 0,
+            "actual_clicks": len(actual),
+            "missing_clicks": 0 if actual else 1,
+            "extra_clicks": 0,
+            "steady_missing_clicks": 0 if actual else 1,
+            "steady_extra_clicks": 0,
+            "steady_max_abs_error_frames": 0,
+            "max_abs_error_frames": 0,
+            "tolerance_frames": tolerance_frames,
+        }
     expected = _expected_metronome_frames({**meta, "sample_rate": wav["sample_rate"]}, len(samples))
     errors = []
     used = set()

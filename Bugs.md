@@ -14,4 +14,6 @@ in mesh when dialogue comes up you cant re get it on clipboard as you cant highl
 do STUN testing with other netwroks to see what works and whether port forwarding needed 
 
 
+when severe wifi burst happens ring cant catch back up, might need tuning or testing with alternate profile - analysis is next to jam log files to keep track of
+
 

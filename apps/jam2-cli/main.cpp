@@ -70,7 +70,7 @@ Usage:
   jam2 test-device <id> [--sample-rate n]
   jam2 meter-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n]
   jam2 ring-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n] [--ring-frames n]
-  jam2 listen [--profile fast|moderate|safe] [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats enabled|disabled] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--record-jam-folder folder] [--test-input off|silence|tone-440|pulse-1s] [--os-priority off|high|realtime] [--metronome on|off] [--bpm n] [--metronome-level n] [--remote-level n] [--send-level n] [--local-monitor on|off] [--local-monitor-level n] [--gui-control ip:port] [--metronome-mode shared-grid|leader-audio|symmetric-delay|listener-compensated] [--sample-time-playout on|off] [--playout-delay-frames n] [--jitter-buffer-frames n] [--jitter-buffer-max-frames n] [--adaptive-playback-cushion on|off] [--adaptive-playback-target-frames n] [--adaptive-playback-min-frames n] [--adaptive-playback-max-frames n] [--adaptive-playback-release-ppm n] [--session-id hex] [--session-key hex32] [--machine-readable-startup on|off] [--status-format text|jsonl] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels n[,n...]] [--output-channels n[,n...]] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-deadband-ppm n] [--drift-max-correction-ppm n]
+  jam2 listen [--profile fast|moderate|safe] [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats enabled|disabled] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--record-jam-folder folder] [--test-input off|silence|tone-440|pulse-1s] [--os-priority off|high|realtime] [--metronome on|off] [--bpm n] [--metronome-level n] [--remote-level n] [--send-level n] [--local-monitor on|off] [--local-monitor-level n] [--gui-control ip:port] [--metronome-mode shared-grid|leader-audio|listener-compensated] [--metronome-compensation-max-ms n] [--metronome-compensation-smoothing-ms n] [--metronome-compensation-deadband-ms n] [--metronome-compensation-slew-ms-per-sec n] [--sample-time-playout on|off] [--playout-delay-frames n] [--jitter-buffer-frames n] [--jitter-buffer-max-frames n] [--adaptive-playback-cushion on|off] [--adaptive-playback-target-frames n] [--adaptive-playback-min-frames n] [--adaptive-playback-max-frames n] [--adaptive-playback-release-ppm n] [--session-id hex] [--session-key hex32] [--machine-readable-startup on|off] [--status-format text|jsonl] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels n[,n...]] [--output-channels n[,n...]] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-deadband-ppm n] [--drift-max-correction-ppm n]
   jam2 connect <jam2-url> [--profile fast|moderate|safe] [options]
   jam2 mesh --session-id <hex> --session-key <hex32> --bind ip:port --peers ip:port[,ip:port...] [options] [--headless-audio on|off]
 
@@ -82,7 +82,6 @@ Stage status:
 enum class MetronomeMode {
     SharedGrid,
     LeaderAudio,
-    SymmetricDelay,
     ListenerCompensated,
 };
 
@@ -147,6 +146,10 @@ struct Options {
     int bpm = 120;
     double metronome_level = 1.0;
     MetronomeMode metronome_mode = MetronomeMode::SharedGrid;
+    double metronome_compensation_max_ms = 80.0;
+    double metronome_compensation_smoothing_ms = 750.0;
+    double metronome_compensation_deadband_ms = 1.0;
+    double metronome_compensation_slew_ms_per_sec = 40.0;
     double remote_level = 1.0;
     double send_level = 1.0;
     bool local_monitor = false;
@@ -223,13 +226,10 @@ MetronomeMode parse_metronome_mode(std::string_view value)
     if (value == "leader-audio") {
         return MetronomeMode::LeaderAudio;
     }
-    if (value == "symmetric-delay") {
-        return MetronomeMode::SymmetricDelay;
-    }
     if (value == "listener-compensated") {
         return MetronomeMode::ListenerCompensated;
     }
-    throw std::runtime_error("--metronome-mode must be shared-grid, leader-audio, symmetric-delay, or listener-compensated");
+    throw std::runtime_error("--metronome-mode must be shared-grid, leader-audio, or listener-compensated");
 }
 
 std::string_view metronome_mode_text(MetronomeMode mode)
@@ -239,8 +239,6 @@ std::string_view metronome_mode_text(MetronomeMode mode)
         return "shared-grid";
     case MetronomeMode::LeaderAudio:
         return "leader-audio";
-    case MetronomeMode::SymmetricDelay:
-        return "symmetric-delay";
     case MetronomeMode::ListenerCompensated:
         return "listener-compensated";
     }
@@ -255,8 +253,6 @@ std::string_view metronome_mode_text(int mode)
     case 1:
         return "leader-audio";
     case 2:
-        return "symmetric-delay";
-    case 3:
         return "listener-compensated";
     default:
         return "shared-grid";
@@ -270,10 +266,8 @@ int metronome_mode_id(MetronomeMode mode)
         return 0;
     case MetronomeMode::LeaderAudio:
         return 1;
-    case MetronomeMode::SymmetricDelay:
-        return 2;
     case MetronomeMode::ListenerCompensated:
-        return 3;
+        return 2;
     }
     return 0;
 }
@@ -599,6 +593,26 @@ Options parse_options(int argc, char** argv, int start)
             }
         } else if (arg == "--metronome-mode") {
             options.metronome_mode = parse_metronome_mode(require_value(argc, argv, i, arg));
+        } else if (arg == "--metronome-compensation-max-ms") {
+            options.metronome_compensation_max_ms = std::stod(std::string(require_value(argc, argv, i, arg)));
+            if (options.metronome_compensation_max_ms < 0.0 || options.metronome_compensation_max_ms > 1000.0) {
+                throw std::runtime_error("--metronome-compensation-max-ms must be 0..1000");
+            }
+        } else if (arg == "--metronome-compensation-smoothing-ms") {
+            options.metronome_compensation_smoothing_ms = std::stod(std::string(require_value(argc, argv, i, arg)));
+            if (options.metronome_compensation_smoothing_ms < 0.0 || options.metronome_compensation_smoothing_ms > 10000.0) {
+                throw std::runtime_error("--metronome-compensation-smoothing-ms must be 0..10000");
+            }
+        } else if (arg == "--metronome-compensation-deadband-ms") {
+            options.metronome_compensation_deadband_ms = std::stod(std::string(require_value(argc, argv, i, arg)));
+            if (options.metronome_compensation_deadband_ms < 0.0 || options.metronome_compensation_deadband_ms > 1000.0) {
+                throw std::runtime_error("--metronome-compensation-deadband-ms must be 0..1000");
+            }
+        } else if (arg == "--metronome-compensation-slew-ms-per-sec") {
+            options.metronome_compensation_slew_ms_per_sec = std::stod(std::string(require_value(argc, argv, i, arg)));
+            if (options.metronome_compensation_slew_ms_per_sec < 0.0 || options.metronome_compensation_slew_ms_per_sec > 10000.0) {
+                throw std::runtime_error("--metronome-compensation-slew-ms-per-sec must be 0..10000");
+            }
         } else if (arg == "--remote-level") {
             options.remote_level = std::stod(std::string(require_value(argc, argv, i, arg)));
             if (options.remote_level < 0.0 || options.remote_level > 4.0) {
@@ -1040,6 +1054,11 @@ struct AudioPacketStats {
     std::uint64_t local_metronome_beat = 0;
     std::uint64_t remote_metronome_beat = 0;
     bool metronome_alignment_valid = false;
+    bool metronome_compensation_active = false;
+    std::int64_t metronome_compensation_offset_frames = 0;
+    std::int64_t metronome_compensation_target_frames = 0;
+    std::uint64_t metronome_compensation_clamp_events = 0;
+    std::uint64_t metronome_compensation_stale_events = 0;
     std::uint64_t elapsed_ms = 0;
     bool final_metronome_enabled = false;
     int final_bpm = 120;
@@ -1072,8 +1091,10 @@ struct RuntimeState {
     std::atomic<bool> local_monitor{false};
     std::atomic<int> local_monitor_level_ppm{250000};
     std::atomic<int> metronome_mode{0};
+    std::atomic<bool> leader_audio_local_click{false};
     std::atomic<std::uint64_t> metronome_epoch_sample_time{0};
     std::atomic<bool> metronome_epoch_valid{false};
+    std::atomic<std::int64_t> metronome_render_offset_frames{0};
     std::atomic<std::uint64_t> metronome_revision{0};
     std::atomic<std::uint64_t> metronome_epoch_revision{0};
 };
@@ -1193,8 +1214,10 @@ void sync_audio_control(
     control->local_monitor_level_ppm.store(runtime.local_monitor_level_ppm.load(std::memory_order_relaxed), std::memory_order_relaxed);
     control->playback_ratio_ppm.store(ratio_to_ppm(playback_ratio), std::memory_order_relaxed);
     control->metronome_mode.store(runtime.metronome_mode.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    control->leader_audio_local_click.store(runtime.leader_audio_local_click.load(std::memory_order_relaxed), std::memory_order_relaxed);
     control->metronome_epoch_sample_time.store(runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed), std::memory_order_relaxed);
     control->metronome_epoch_valid.store(runtime.metronome_epoch_valid.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    control->metronome_render_offset_frames.store(runtime.metronome_render_offset_frames.load(std::memory_order_relaxed), std::memory_order_relaxed);
 }
 
 void print_interactive_help()
@@ -1214,7 +1237,8 @@ void print_interactive_help(bool stats_enabled)
               << "  status              print compact stream status\n"
               << "  metro on            enable local metronome\n"
               << "  metro off           disable local metronome\n"
-              << "  metro mode <mode>   set shared-grid|leader-audio|symmetric-delay|listener-compensated\n"
+              << "  metro mode <mode>   set shared-grid|leader-audio|listener-compensated\n"
+              << "  metro leader on|off set whether this side supplies leader-audio click\n"
               << "  metro level <0..4>  set local metronome gain\n"
               << "  metro level +/-n    adjust local metronome level\n"
               << "  metro pattern <bpm> <beats> <division> <play_lo> <play_hi> <accent_lo> <accent_hi>\n"
@@ -1309,13 +1333,25 @@ void apply_gui_control_line(
         } else if (value == "mode") {
             std::string mode;
             in >> mode;
-            state.metronome_mode.store(metronome_mode_id(parse_metronome_mode(mode)), std::memory_order_relaxed);
-            state.metronome_revision.fetch_add(1, std::memory_order_relaxed);
-            state.metronome_epoch_revision.fetch_add(1, std::memory_order_relaxed);
+            const int next_mode = metronome_mode_id(parse_metronome_mode(mode));
+            const int previous_mode = state.metronome_mode.exchange(next_mode, std::memory_order_relaxed);
+            if (previous_mode != next_mode) {
+                state.metronome_render_offset_frames.store(0, std::memory_order_relaxed);
+                state.metronome_revision.fetch_add(1, std::memory_order_relaxed);
+                state.metronome_epoch_revision.fetch_add(1, std::memory_order_relaxed);
+            }
         } else if (value == "level") {
             std::string level;
             in >> level;
             (void)apply_gain_token(level, state.metronome_level_ppm, 4.0);
+        } else if (value == "leader") {
+            std::string leader;
+            in >> leader;
+            if (leader == "on") {
+                state.leader_audio_local_click.store(true, std::memory_order_relaxed);
+            } else if (leader == "off") {
+                state.leader_audio_local_click.store(false, std::memory_order_relaxed);
+            }
         } else if (value == "pattern") {
             int bpm = 0;
             int beats = 0;
@@ -1490,9 +1526,13 @@ void stdin_command_loop(
                 std::string mode;
                 in >> mode;
                 try {
-                    state.metronome_mode.store(metronome_mode_id(parse_metronome_mode(mode)), std::memory_order_relaxed);
-                    state.metronome_revision.fetch_add(1, std::memory_order_relaxed);
-                    state.metronome_epoch_revision.fetch_add(1, std::memory_order_relaxed);
+                    const int next_mode = metronome_mode_id(parse_metronome_mode(mode));
+                    const int previous_mode = state.metronome_mode.exchange(next_mode, std::memory_order_relaxed);
+                    if (previous_mode != next_mode) {
+                        state.metronome_render_offset_frames.store(0, std::memory_order_relaxed);
+                        state.metronome_revision.fetch_add(1, std::memory_order_relaxed);
+                        state.metronome_epoch_revision.fetch_add(1, std::memory_order_relaxed);
+                    }
                 } catch (const std::exception& error) {
                     std::cerr << error.what() << "\n";
                 }
@@ -1501,6 +1541,16 @@ void stdin_command_loop(
                 in >> level;
                 if (!apply_gain_token(level, state.metronome_level_ppm, 4.0)) {
                     std::cerr << "metro level must be 0..4 or a relative +/- adjustment\n";
+                }
+            } else if (value == "leader") {
+                std::string leader;
+                in >> leader;
+                if (leader == "on") {
+                    state.leader_audio_local_click.store(true, std::memory_order_relaxed);
+                } else if (leader == "off") {
+                    state.leader_audio_local_click.store(false, std::memory_order_relaxed);
+                } else {
+                    std::cerr << "metro leader must be on or off\n";
                 }
             } else if (value == "pattern") {
                 int bpm = 0;
@@ -1774,6 +1824,16 @@ void observe_timing(
 }
 
 double frames_to_ms(std::size_t frames, double sample_rate)
+{
+    return sample_rate > 0.0 ? (static_cast<double>(frames) * 1000.0 / sample_rate) : 0.0;
+}
+
+std::int64_t ms_to_signed_frames(double ms, double sample_rate)
+{
+    return sample_rate > 0.0 ? static_cast<std::int64_t>(std::llround(ms * sample_rate / 1000.0)) : 0;
+}
+
+double signed_frames_to_ms(std::int64_t frames, double sample_rate)
 {
     return sample_rate > 0.0 ? (static_cast<double>(frames) * 1000.0 / sample_rate) : 0.0;
 }
@@ -2160,6 +2220,10 @@ std::string make_headless_client_command(std::string_view executable, const std:
         << " --local-monitor " << bool_on_off(options.local_monitor)
         << " --local-monitor-level " << options.local_monitor_level
         << " --metronome-mode " << metronome_mode_text(options.metronome_mode)
+        << " --metronome-compensation-max-ms " << options.metronome_compensation_max_ms
+        << " --metronome-compensation-smoothing-ms " << options.metronome_compensation_smoothing_ms
+        << " --metronome-compensation-deadband-ms " << options.metronome_compensation_deadband_ms
+        << " --metronome-compensation-slew-ms-per-sec " << options.metronome_compensation_slew_ms_per_sec
         << " --sample-time-playout " << bool_on_off(options.sample_time_playout)
         << " --playout-delay-frames " << options.playout_delay_frames
         << " --jitter-buffer-frames " << options.jitter_buffer_frames
@@ -2623,7 +2687,10 @@ public:
                 "os_mmcss_requested,os_mmcss_active,os_mmcss_profile,os_mmcss_error,"
                 "os_timer_resolution_requested,os_timer_resolution_active,os_timer_resolution_error,"
                 "os_qos_requested,os_qos_active,os_qos_error,"
-                "os_realtime_requested,os_realtime_active,os_realtime_error\n";
+                "os_realtime_requested,os_realtime_active,os_realtime_error,"
+                "metronome_compensation_active,metronome_compensation_offset_frames,metronome_compensation_offset_ms,"
+                "metronome_compensation_target_frames,metronome_compensation_target_ms,"
+                "metronome_compensation_clamp_events,metronome_compensation_stale_events\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -2890,6 +2957,14 @@ public:
              << stats.jitter_buffer_dropped_frames << ','
              << frames_to_ms(static_cast<std::size_t>(stats.jitter_buffer_dropped_frames), active_sample_rate);
         append_os_scheduling_csv(out_, stats.os_scheduling);
+        out_ << ','
+             << (stats.metronome_compensation_active ? "yes" : "no") << ','
+             << stats.metronome_compensation_offset_frames << ','
+             << signed_frames_to_ms(stats.metronome_compensation_offset_frames, active_sample_rate) << ','
+             << stats.metronome_compensation_target_frames << ','
+             << signed_frames_to_ms(stats.metronome_compensation_target_frames, active_sample_rate) << ','
+             << stats.metronome_compensation_clamp_events << ','
+             << stats.metronome_compensation_stale_events;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -2905,7 +2980,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(242);
+        std::vector<std::string> fields(249);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -3105,6 +3180,13 @@ public:
         fields[239] = stats.os_scheduling.realtime_requested;
         fields[240] = stats.os_scheduling.realtime_active;
         fields[241] = stats.os_scheduling.realtime_error;
+        fields[242] = stats.metronome_compensation_active ? "yes" : "no";
+        set(243, stats.metronome_compensation_offset_frames);
+        set(244, signed_frames_to_ms(stats.metronome_compensation_offset_frames, options.sample_rate));
+        set(245, stats.metronome_compensation_target_frames);
+        set(246, signed_frames_to_ms(stats.metronome_compensation_target_frames, options.sample_rate));
+        set(247, stats.metronome_compensation_clamp_events);
+        set(248, stats.metronome_compensation_stale_events);
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {
@@ -3284,6 +3366,11 @@ void print_periodic_stream_stats(
               << " jitter_buffer_released_packets=" << stats.jitter_buffer_released_packets
               << " jitter_buffer_late_packets=" << stats.jitter_buffer_late_packets
               << " jitter_buffer_dropped_packets=" << stats.jitter_buffer_dropped_packets
+              << " metronome_compensation_active=" << (stats.metronome_compensation_active ? "yes" : "no")
+              << " metronome_compensation_offset_ms="
+              << signed_frames_to_ms(stats.metronome_compensation_offset_frames, options.sample_rate)
+              << " metronome_compensation_target_ms="
+              << signed_frames_to_ms(stats.metronome_compensation_target_frames, options.sample_rate)
               << " input_peak=" << audio.input_peak
               << " send_peak=" << audio.send_peak
               << " monitor_peak=" << audio.monitor_peak
@@ -3352,6 +3439,13 @@ void print_compact_status(
                   << ",\"jitter_buffer_released_packets\":" << stats.jitter_buffer_released_packets
                   << ",\"jitter_buffer_late_packets\":" << stats.jitter_buffer_late_packets
                   << ",\"jitter_buffer_dropped_packets\":" << stats.jitter_buffer_dropped_packets
+                  << ",\"metronome_compensation_active\":" << (stats.metronome_compensation_active ? "true" : "false")
+                  << ",\"metronome_compensation_offset_frames\":" << stats.metronome_compensation_offset_frames
+                  << ",\"metronome_compensation_offset_ms\":"
+                  << signed_frames_to_ms(stats.metronome_compensation_offset_frames, options.sample_rate)
+                  << ",\"metronome_compensation_target_frames\":" << stats.metronome_compensation_target_frames
+                  << ",\"metronome_compensation_target_ms\":"
+                  << signed_frames_to_ms(stats.metronome_compensation_target_frames, options.sample_rate)
                   << ",\"recording_active\":" << (recording_stats.active ? "true" : "false")
                   << ",\"recording_folder\":\"" << json_escape(recording_stats.folder) << "\""
                   << ",\"recording_frames_written\":" << recording_stats.frames_written
@@ -3446,6 +3540,11 @@ void print_compact_status(
               << " jitter_buffer_released_packets=" << stats.jitter_buffer_released_packets
               << " jitter_buffer_late_packets=" << stats.jitter_buffer_late_packets
               << " jitter_buffer_dropped_packets=" << stats.jitter_buffer_dropped_packets
+              << " metronome_compensation_active=" << (stats.metronome_compensation_active ? "yes" : "no")
+              << " metronome_compensation_offset_ms="
+              << signed_frames_to_ms(stats.metronome_compensation_offset_frames, options.sample_rate)
+              << " metronome_compensation_target_ms="
+              << signed_frames_to_ms(stats.metronome_compensation_target_frames, options.sample_rate)
               << " recording_active=" << (recording_stats.active ? "yes" : "no")
               << " recording_folder=" << recording_stats.folder
               << " recording_frames_written=" << recording_stats.frames_written
@@ -3607,6 +3706,11 @@ AudioPacketStats run_audio_packet_exchange(
     bool playout_sample_time_initialized = false;
     std::uint64_t next_playout_remote_sample_time = 0;
     bool remote_metronome_epoch_accepted = false;
+    bool remote_metronome_epoch_valid = false;
+    std::uint64_t remote_metronome_epoch_sample_time = 0;
+    double metronome_compensation_offset_frames = 0.0;
+    std::uint64_t metronome_compensation_last_update_us = 0;
+    bool metronome_compensation_was_stale = false;
     std::uint64_t adaptive_target_frames = static_cast<std::uint64_t>(options.adaptive_playback_target_frames);
     std::uint64_t adaptive_last_update_us = 0;
     std::uint64_t adaptive_under_start_us = 0;
@@ -3725,6 +3829,98 @@ AudioPacketStats run_audio_packet_exchange(
 
     runtime.metronome_epoch_sample_time.store(current_effective_playout_delay_frames(), std::memory_order_relaxed);
     runtime.metronome_epoch_valid.store(true, std::memory_order_relaxed);
+    runtime.metronome_render_offset_frames.store(0, std::memory_order_relaxed);
+
+    auto update_metronome_compensation = [&](std::uint64_t now_us) {
+        const bool listener_compensated =
+            runtime.metronome_mode.load(std::memory_order_relaxed) ==
+            metronome_mode_id(MetronomeMode::ListenerCompensated);
+        const bool can_compensate =
+            listener_compensated &&
+            options.sample_time_playout &&
+            playback_ring != nullptr &&
+            audio_control != nullptr &&
+            playout_sample_time_initialized &&
+            remote_metronome_epoch_valid &&
+            runtime.metronome_epoch_valid.load(std::memory_order_relaxed);
+        if (!can_compensate) {
+            if (!listener_compensated) {
+                metronome_compensation_offset_frames = 0.0;
+                runtime.metronome_render_offset_frames.store(0, std::memory_order_relaxed);
+            }
+            stats.metronome_compensation_active = false;
+            stats.metronome_compensation_offset_frames =
+                runtime.metronome_render_offset_frames.load(std::memory_order_relaxed);
+            stats.metronome_compensation_target_frames = 0;
+            metronome_compensation_last_update_us = now_us;
+            if (listener_compensated && !metronome_compensation_was_stale) {
+                ++stats.metronome_compensation_stale_events;
+            }
+            metronome_compensation_was_stale = listener_compensated;
+            return;
+        }
+
+        metronome_compensation_was_stale = false;
+        const std::uint64_t playback_depth = playback_ring->available_read();
+        const std::uint64_t remote_playback_head =
+            next_playout_remote_sample_time > playback_depth ?
+                next_playout_remote_sample_time - playback_depth :
+                0ULL;
+        const std::int64_t remote_position =
+            remote_playback_head >= remote_metronome_epoch_sample_time ?
+                static_cast<std::int64_t>(remote_playback_head - remote_metronome_epoch_sample_time) :
+                -static_cast<std::int64_t>(remote_metronome_epoch_sample_time - remote_playback_head);
+        const std::uint64_t local_epoch =
+            runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed);
+        const std::uint64_t local_counter =
+            audio_control->metronome_render_sample_counter.load(std::memory_order_relaxed);
+        const std::int64_t local_position =
+            local_counter >= local_epoch ?
+                static_cast<std::int64_t>(local_counter - local_epoch) :
+                -static_cast<std::int64_t>(local_epoch - local_counter);
+        std::int64_t target_frames = remote_position - local_position;
+        const std::int64_t max_frames = ms_to_signed_frames(options.metronome_compensation_max_ms, options.sample_rate);
+        if (max_frames >= 0 && target_frames > max_frames) {
+            target_frames = max_frames;
+            ++stats.metronome_compensation_clamp_events;
+        } else if (max_frames >= 0 && target_frames < -max_frames) {
+            target_frames = -max_frames;
+            ++stats.metronome_compensation_clamp_events;
+        }
+
+        const double elapsed_ms =
+            metronome_compensation_last_update_us != 0 && now_us > metronome_compensation_last_update_us ?
+                static_cast<double>(now_us - metronome_compensation_last_update_us) / 1000.0 :
+                0.0;
+        metronome_compensation_last_update_us = now_us;
+        const double deadband_frames =
+            std::abs(static_cast<double>(ms_to_signed_frames(options.metronome_compensation_deadband_ms, options.sample_rate)));
+        double next_offset = metronome_compensation_offset_frames;
+        const double diff = static_cast<double>(target_frames) - next_offset;
+        if (std::abs(diff) >= deadband_frames) {
+            const double smoothing_alpha =
+                options.metronome_compensation_smoothing_ms > 0.0 ?
+                    std::clamp(elapsed_ms / options.metronome_compensation_smoothing_ms, 0.0, 1.0) :
+                    1.0;
+            double step = diff * smoothing_alpha;
+            const double max_step =
+                options.metronome_compensation_slew_ms_per_sec > 0.0 ?
+                    static_cast<double>(ms_to_signed_frames(
+                        options.metronome_compensation_slew_ms_per_sec * elapsed_ms / 1000.0,
+                        options.sample_rate)) :
+                    std::abs(diff);
+            if (max_step > 0.0 && std::abs(step) > max_step) {
+                step = step > 0.0 ? max_step : -max_step;
+            }
+            next_offset += step;
+        }
+        metronome_compensation_offset_frames = next_offset;
+        const std::int64_t applied_frames = static_cast<std::int64_t>(std::llround(next_offset));
+        runtime.metronome_render_offset_frames.store(applied_frames, std::memory_order_relaxed);
+        stats.metronome_compensation_active = true;
+        stats.metronome_compensation_offset_frames = applied_frames;
+        stats.metronome_compensation_target_frames = target_frames;
+    };
 
     auto process_audio_packet = [&](const PendingAudioPacket& packet) {
         const std::uint64_t warmup_end_time =
@@ -4139,7 +4335,11 @@ AudioPacketStats run_audio_packet_exchange(
                 std::memory_order_relaxed);
             runtime.metronome_epoch_valid.store(true, std::memory_order_relaxed);
             last_metronome_epoch_revision = metronome_epoch_revision;
+            if (!listener_side) {
+                remote_metronome_epoch_accepted = false;
+            }
         }
+        update_metronome_compensation(now);
         sync_audio_control(runtime, audio_control, stats.resampler_ratio);
         int sends_this_loop = 0;
         while (now >= next_send && next_send < send_deadline && sends_this_loop < 8) {
@@ -4157,7 +4357,8 @@ AudioPacketStats run_audio_packet_exchange(
                     update_peak(audio_control->gui_send_peak_ppm, send_peak_ppm);
                 }
                 const int live_metronome_mode = runtime.metronome_mode.load(std::memory_order_relaxed);
-                if (live_metronome_mode == metronome_mode_id(MetronomeMode::LeaderAudio) && listener_side && metronome_enabled) {
+                const bool leader_audio_local_click = runtime.leader_audio_local_click.load(std::memory_order_relaxed);
+                if (live_metronome_mode == metronome_mode_id(MetronomeMode::LeaderAudio) && leader_audio_local_click && metronome_enabled) {
                     mix_leader_click_into_packet(
                         network_frames,
                         sample_time,
@@ -4173,7 +4374,8 @@ AudioPacketStats run_audio_packet_exchange(
                     audio_control->gui_send_peak_ppm.store(0, std::memory_order_relaxed);
                 }
                 const int live_metronome_mode = runtime.metronome_mode.load(std::memory_order_relaxed);
-                if (live_metronome_mode == metronome_mode_id(MetronomeMode::LeaderAudio) && listener_side && metronome_enabled) {
+                const bool leader_audio_local_click = runtime.leader_audio_local_click.load(std::memory_order_relaxed);
+                if (live_metronome_mode == metronome_mode_id(MetronomeMode::LeaderAudio) && leader_audio_local_click && metronome_enabled) {
                     std::fill(network_frames.begin(), network_frames.end(), 0);
                     mix_leader_click_into_packet(
                         network_frames,
@@ -4451,37 +4653,51 @@ AudioPacketStats run_audio_packet_exchange(
                         header.payload_length);
                     const auto metronome_payload = decode_metronome_payload(payload);
                     const int remote_bpm = metronome_payload.bpm;
-                    if (runtime.metronome_revision.load(std::memory_order_relaxed) == 0) {
+                    remote_metronome_epoch_sample_time = metronome_payload.epoch_sample_time;
+                    remote_metronome_epoch_valid = true;
+                    const int current_bpm = runtime.bpm.load(std::memory_order_relaxed);
+                    const int remote_abs_bpm = remote_bpm < 0 ? -remote_bpm : remote_bpm;
+                    const bool bpm_changed = remote_abs_bpm > 0 && remote_abs_bpm <= 400 && remote_abs_bpm != current_bpm;
+                    const bool needs_epoch =
+                        !listener_side &&
+                        (!remote_metronome_epoch_accepted ||
+                            bpm_changed ||
+                            !runtime.metronome_epoch_valid.load(std::memory_order_relaxed));
+                    if (remote_bpm < 0 && remote_bpm >= -400) {
                         if (metronome_payload.has_pattern) {
                             store_metronome_pattern(runtime, metronome_payload.pattern);
                         }
-                        const int current_bpm = runtime.bpm.load(std::memory_order_relaxed);
-                        const int remote_abs_bpm = remote_bpm < 0 ? -remote_bpm : remote_bpm;
-                        const bool bpm_changed = remote_abs_bpm > 0 && remote_abs_bpm <= 400 && remote_abs_bpm != current_bpm;
-                        const bool needs_epoch =
-                            !remote_metronome_epoch_accepted ||
-                            bpm_changed ||
-                            !runtime.metronome_epoch_valid.load(std::memory_order_relaxed);
-                        if (remote_bpm < 0 && remote_bpm >= -400) {
-                            runtime.metronome.store(false, std::memory_order_relaxed);
-                            runtime.bpm.store(-remote_bpm, std::memory_order_relaxed);
-                            if (needs_epoch) {
-                                runtime.metronome_epoch_sample_time.store(
-                                    metronome_payload.epoch_sample_time + current_effective_playout_delay_frames(),
-                                    std::memory_order_relaxed);
-                                runtime.metronome_epoch_valid.store(true, std::memory_order_relaxed);
-                                remote_metronome_epoch_accepted = true;
-                            }
-                        } else if (remote_bpm > 0 && remote_bpm <= 400) {
-                            runtime.metronome.store(true, std::memory_order_relaxed);
-                            runtime.bpm.store(remote_bpm, std::memory_order_relaxed);
-                            if (needs_epoch) {
-                                runtime.metronome_epoch_sample_time.store(
-                                    metronome_payload.epoch_sample_time + current_effective_playout_delay_frames(),
-                                    std::memory_order_relaxed);
-                                runtime.metronome_epoch_valid.store(true, std::memory_order_relaxed);
-                                remote_metronome_epoch_accepted = true;
-                            }
+                        runtime.metronome.store(false, std::memory_order_relaxed);
+                        runtime.bpm.store(-remote_bpm, std::memory_order_relaxed);
+                        if (needs_epoch) {
+                            runtime.metronome_epoch_sample_time.store(
+                                metronome_payload.epoch_sample_time + current_effective_playout_delay_frames(),
+                                std::memory_order_relaxed);
+                            runtime.metronome_epoch_valid.store(true, std::memory_order_relaxed);
+                            remote_metronome_epoch_accepted = true;
+                        } else if (listener_side && bpm_changed) {
+                            runtime.metronome_epoch_sample_time.store(
+                                sample_time + current_effective_playout_delay_frames(),
+                                std::memory_order_relaxed);
+                            runtime.metronome_epoch_valid.store(true, std::memory_order_relaxed);
+                        }
+                    } else if (remote_bpm > 0 && remote_bpm <= 400) {
+                        if (metronome_payload.has_pattern) {
+                            store_metronome_pattern(runtime, metronome_payload.pattern);
+                        }
+                        runtime.metronome.store(true, std::memory_order_relaxed);
+                        runtime.bpm.store(remote_bpm, std::memory_order_relaxed);
+                        if (needs_epoch) {
+                            runtime.metronome_epoch_sample_time.store(
+                                metronome_payload.epoch_sample_time + current_effective_playout_delay_frames(),
+                                std::memory_order_relaxed);
+                            runtime.metronome_epoch_valid.store(true, std::memory_order_relaxed);
+                            remote_metronome_epoch_accepted = true;
+                        } else if (listener_side && bpm_changed) {
+                            runtime.metronome_epoch_sample_time.store(
+                                sample_time + current_effective_playout_delay_frames(),
+                                std::memory_order_relaxed);
+                            runtime.metronome_epoch_valid.store(true, std::memory_order_relaxed);
                         }
                     }
                     stats.last_remote_beat = metronome_payload.beat;
@@ -4588,6 +4804,7 @@ AudioPacketStats run_audio_packet_exchange(
     stats.final_local_monitor_level = gain_from_ppm(runtime.local_monitor_level_ppm.load(std::memory_order_relaxed));
     stats.metronome_epoch_sample_time = runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed);
     stats.metronome_alignment_valid = runtime.metronome_epoch_valid.load(std::memory_order_relaxed);
+    stats.metronome_compensation_offset_frames = runtime.metronome_render_offset_frames.load(std::memory_order_relaxed);
     stats.adaptive_playback_cushion_enabled = options.adaptive_playback_cushion;
     stats.adaptive_playback_target_frames = adaptive_target_frames;
     stats.adaptive_playback_min_frames = static_cast<std::uint64_t>(options.adaptive_playback_min_frames);
@@ -4656,6 +4873,10 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "BPM: " << options.bpm << "\n";
     std::cout << "Metronome level: " << options.metronome_level << "\n";
     std::cout << "Metronome mode: " << metronome_mode_text(options.metronome_mode) << "\n";
+    std::cout << "Metronome compensation max ms: " << options.metronome_compensation_max_ms << "\n";
+    std::cout << "Metronome compensation smoothing ms: " << options.metronome_compensation_smoothing_ms << "\n";
+    std::cout << "Metronome compensation deadband ms: " << options.metronome_compensation_deadband_ms << "\n";
+    std::cout << "Metronome compensation slew ms per sec: " << options.metronome_compensation_slew_ms_per_sec << "\n";
     std::cout << "Remote playback level: " << options.remote_level << "\n";
     std::cout << "Send level: " << options.send_level << "\n";
     std::cout << "Local monitor: " << (options.local_monitor ? "on" : "off") << "\n";
@@ -4740,6 +4961,15 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "Metronome local beat: " << stats.local_metronome_beat << "\n";
     std::cout << "Metronome remote beat: " << stats.remote_metronome_beat << "\n";
     std::cout << "Metronome alignment valid: " << (stats.metronome_alignment_valid ? "yes" : "no") << "\n";
+    std::cout << "Metronome compensation active: " << (stats.metronome_compensation_active ? "yes" : "no") << "\n";
+    std::cout << "Metronome compensation offset frames: " << stats.metronome_compensation_offset_frames << "\n";
+    std::cout << "Metronome compensation offset ms: "
+              << signed_frames_to_ms(stats.metronome_compensation_offset_frames, options.sample_rate) << "\n";
+    std::cout << "Metronome compensation target frames: " << stats.metronome_compensation_target_frames << "\n";
+    std::cout << "Metronome compensation target ms: "
+              << signed_frames_to_ms(stats.metronome_compensation_target_frames, options.sample_rate) << "\n";
+    std::cout << "Metronome compensation clamp events: " << stats.metronome_compensation_clamp_events << "\n";
+    std::cout << "Metronome compensation stale events: " << stats.metronome_compensation_stale_events << "\n";
     if (stats.metronome_received > 0) {
         std::cout << "Metronome last remote beat: " << stats.last_remote_beat << "\n";
     }
@@ -5134,6 +5364,8 @@ OptionalAudioStream start_optional_audio(const Options& options, bool leader_aud
     audio.control->leader_audio_local_click.store(leader_audio_local_click, std::memory_order_relaxed);
     audio.control->metronome_epoch_sample_time.store(0, std::memory_order_relaxed);
     audio.control->metronome_epoch_valid.store(true, std::memory_order_relaxed);
+    audio.control->metronome_render_offset_frames.store(0, std::memory_order_relaxed);
+    audio.control->metronome_render_sample_counter.store(0, std::memory_order_relaxed);
     audio.control->test_input_mode.store(test_input_mode_id(options.test_input), std::memory_order_relaxed);
     audio.control->test_input_level_ppm.store(125000, std::memory_order_relaxed);
     audio.capture_ring = std::make_unique<jam2::audio::MonoRingBuffer>(options.capture_ring_frames);
@@ -5199,7 +5431,11 @@ struct CommandThread {
     RuntimeState state;
     std::thread thread;
 
-    CommandThread(const Options& options, jam2::audio::OutputRecorder* recorder, int recording_sample_rate)
+    CommandThread(
+        const Options& options,
+        jam2::audio::OutputRecorder* recorder,
+        int recording_sample_rate,
+        bool leader_audio_local_click)
     {
         state.metronome.store(options.metronome, std::memory_order_relaxed);
         state.bpm.store(options.bpm, std::memory_order_relaxed);
@@ -5216,8 +5452,10 @@ struct CommandThread {
         state.local_monitor.store(options.local_monitor, std::memory_order_relaxed);
         state.local_monitor_level_ppm.store(ppm_from_gain(options.local_monitor_level), std::memory_order_relaxed);
         state.metronome_mode.store(metronome_mode_id(options.metronome_mode), std::memory_order_relaxed);
+        state.leader_audio_local_click.store(leader_audio_local_click, std::memory_order_relaxed);
         state.metronome_epoch_sample_time.store(0, std::memory_order_relaxed);
         state.metronome_epoch_valid.store(true, std::memory_order_relaxed);
+        state.metronome_render_offset_frames.store(0, std::memory_order_relaxed);
         state.stats_enabled.store(options.stats_enabled, std::memory_order_relaxed);
         thread = std::thread([this, recorder, recording_sample_rate, options] {
             stdin_command_loop(state, recorder, recording_sample_rate, options);
@@ -5882,7 +6120,7 @@ int run_listen(int argc, char** argv)
         const int recording_sample_rate = audio.stream
             ? static_cast<int>(std::lround(audio.stream->info().sample_rate))
             : options.sample_rate;
-        CommandThread commands(options, audio.recorder.get(), recording_sample_rate);
+        CommandThread commands(options, audio.recorder.get(), recording_sample_rate, true);
         GuiControlThread gui_control(
             options,
             commands.state,
@@ -5998,7 +6236,7 @@ int run_connect(int argc, char** argv)
                 const int recording_sample_rate = audio.stream
                     ? static_cast<int>(std::lround(audio.stream->info().sample_rate))
                     : options.sample_rate;
-                CommandThread commands(options, audio.recorder.get(), recording_sample_rate);
+                CommandThread commands(options, audio.recorder.get(), recording_sample_rate, false);
                 GuiControlThread gui_control(
                     options,
                     commands.state,
@@ -6088,7 +6326,7 @@ int run_mesh(int argc, char** argv)
     const int recording_sample_rate = audio.stream
         ? static_cast<int>(std::lround(audio.stream->info().sample_rate))
         : options.sample_rate;
-    CommandThread commands(options, audio.recorder.get(), recording_sample_rate);
+    CommandThread commands(options, audio.recorder.get(), recording_sample_rate, false);
     GuiControlThread gui_control(
         options,
         commands.state,

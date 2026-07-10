@@ -132,9 +132,12 @@ private:
     void rebuildMetronomePattern();
     jam2::metronome::PatternSnapshot currentMetronomePattern() const;
     void applyMetronomePatternToLocalDevice();
+    void sendMetronomeModeToJam();
     void sendMetronomePatternToJam();
     void sendMetronomeSettingsToPeer();
     void applyRemoteMetronomeSettings(const QJsonObject& message);
+    void showMetronomeCompensationDialog();
+    void updateMetronomeCompensationVisibility();
     void sendTrackFile();
     void receiveTrackFileStart(const QJsonObject& message);
     void receiveTrackFileChunk(const QJsonObject& message);
@@ -217,6 +220,11 @@ private:
     QSpinBox* playoutDelaySpin_ = nullptr;
     QSpinBox* jitterBufferSpin_ = nullptr;
     QSpinBox* jitterBufferMaxSpin_ = nullptr;
+    QPushButton* metronomeCompensationButton_ = nullptr;
+    QDoubleSpinBox* metronomeCompensationMaxSpin_ = nullptr;
+    QDoubleSpinBox* metronomeCompensationSmoothingSpin_ = nullptr;
+    QDoubleSpinBox* metronomeCompensationDeadbandSpin_ = nullptr;
+    QDoubleSpinBox* metronomeCompensationSlewSpin_ = nullptr;
     QCheckBox* adaptiveCushionCheck_ = nullptr;
     QSpinBox* adaptiveTargetSpin_ = nullptr;
     QSpinBox* adaptiveMinSpin_ = nullptr;
@@ -362,6 +370,7 @@ private:
     QMap<QString, QString> meshPeerEndpoints_;
     QStringList currentMeshPeers_;
     bool localMetronomeRunning_ = false;
+    bool localMetronomeLeader_ = false;
     bool applyingRemoteMetronomeSettings_ = false;
     QVector<bool> metronomeEnabledSteps_;
     QVector<bool> metronomeAccents_;

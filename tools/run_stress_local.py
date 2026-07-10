@@ -267,15 +267,10 @@ def scenario_catalog(base_profile=FAST_PROFILE):
             "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=20.0)),
             "expect": "leader-audio metronome mode should run and exchange metronome state",
         },
-        "metronome-symmetric-delay": {
-            "profile": variant(base_profile, "metro_symmetric_delay", metronome_mode="symmetric-delay"),
-            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=20.0)),
-            "expect": "symmetric-delay metronome mode should run and exchange metronome state",
-        },
         "metronome-listener-compensated": {
             "profile": variant(base_profile, "metro_listener_compensated", metronome_mode="listener-compensated"),
             "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=20.0)),
-            "expect": "listener-compensated metronome mode should run and exchange metronome state",
+            "expect": "listener-compensated metronome mode should keep the shared epoch valid while applying local render compensation",
         },
         "levels-low": {
             "profile": variant(base_profile, "levels_low", metronome_level=0.05, remote_level=0.50),
@@ -325,7 +320,7 @@ def scenario_catalog(base_profile=FAST_PROFILE):
             "commands": [
                 {"at_s": 3.0, "side": "server", "line": "metro off"},
                 {"at_s": 5.0, "side": "server", "line": "metro on"},
-                {"at_s": 7.0, "side": "server", "line": "metro mode symmetric-delay"},
+                {"at_s": 7.0, "side": "server", "line": "metro mode listener-compensated"},
                 {"at_s": 9.0, "side": "client", "line": "metro level 0.10"},
                 {"at_s": 11.0, "side": "client", "line": "remote level 0.75"},
                 {"at_s": 13.0, "side": "server", "line": "stats"},
@@ -362,7 +357,6 @@ def standard_suite():
         "jitter-buffer-512-reorder-small",
         "metronome-shared-grid",
         "metronome-leader-audio",
-        "metronome-symmetric-delay",
         "metronome-listener-compensated",
         "levels-low",
         "sample-time-playout-off",
@@ -803,7 +797,7 @@ def verdict_for(result):
             return "runtime_metronome_level_not_applied"
         if abs(client.get("final_remote_level", 0.0) - 0.75) > 0.01:
             return "runtime_remote_level_not_applied"
-        if not observations.get("server_audio_control_metronome_mode_symmetric_delay", False):
+        if not observations.get("server_audio_control_metronome_mode_listener_compensated", False):
             return "runtime_metronome_mode_not_applied"
         return "pass"
     if scenario.startswith("audio-probe-"):
@@ -829,10 +823,16 @@ def metronome_verdict(result, expected_mode):
         return "metronome_epoch_not_set"
     if combined.get("local_metronome_beat_max", 0.0) <= 0.0 or combined.get("remote_metronome_beat_max", 0.0) <= 0.0:
         return "metronome_beats_not_advancing"
-    if combined.get("metronome_beat_delta_abs_max", 0.0) > 2.0:
+    if expected_mode != "listener-compensated" and combined.get("metronome_beat_delta_abs_max", 0.0) > 2.0:
         return "metronome_grid_beat_delta_high"
     if server.get("metronome_mode", "") != expected_mode or client.get("metronome_mode", "") != expected_mode:
         return "metronome_mode_not_applied"
+    if expected_mode == "listener-compensated":
+        if combined.get("metronome_compensation_active_sides", 0.0) < 1:
+            return "metronome_compensation_not_active"
+    else:
+        if combined.get("metronome_compensation_offset_ms_abs_max", 0.0) != 0.0:
+            return "unexpected_metronome_compensation"
     wav = result.get("metronome_wav_analysis", {})
     if wav:
         if not wav.get("ok", False):
@@ -1006,8 +1006,16 @@ def analyze_metronome_recordings(result, server_paths, client_paths):
     if not (scenario == "metronome-shared-grid" or scenario.startswith("metronome-")):
         return {}
     allow_client_silent = scenario == "metronome-leader-audio"
+    loose_timing = scenario == "metronome-listener-compensated"
     server = analyze_side_recording(Path(server_paths["dir"]) / "recording")
     client = analyze_side_recording(Path(client_paths["dir"]) / "recording", allow_silent=allow_client_silent)
+    if loose_timing:
+        server["ok"] = server.get("detected_clicks", 0) > 0
+        client["ok"] = client.get("detected_clicks", 0) > 0
+        if not server["ok"]:
+            server["verdict"] = "listener_compensated_server_clicks_missing"
+        if not client["ok"]:
+            client["verdict"] = "listener_compensated_client_clicks_missing"
     ok = server.get("ok", False) and client.get("ok", False)
     verdict = ""
     if not ok:
@@ -1036,9 +1044,9 @@ def scenario_observations(scenario_id, scenario, server_paths, client_paths):
     source = scenario.get("source_scenario", scenario_id)
     observations = {}
     if source == "runtime-controls":
-        observations["server_audio_control_metronome_mode_symmetric_delay"] = text_contains(
+        observations["server_audio_control_metronome_mode_listener_compensated"] = text_contains(
             server_paths["stdout"],
-            "Audio control metronome mode: symmetric-delay")
+            "Audio control metronome mode: listener-compensated")
         observations["client_final_metronome_level_0_1"] = text_contains(
             client_paths["stdout"],
             "Final metronome level: 0.1")

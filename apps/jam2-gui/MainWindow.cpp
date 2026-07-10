@@ -1544,6 +1544,7 @@ MainWindow::MainWindow(QWidget* parent)
             localMetronomeDevice_.reset();
         }
         localMetronomeRunning_ = false;
+        localMetronomeLeader_ = false;
         if (trackMetronomeLabel_) {
             trackMetronomeLabel_->setText(QStringLiteral("Local metronome stopped"));
         }
@@ -2428,11 +2429,42 @@ QWidget* MainWindow::buildMetronomePage()
     metronomeModeBox_->addItems({
         QStringLiteral("shared-grid"),
         QStringLiteral("leader-audio"),
-        QStringLiteral("symmetric-delay"),
         QStringLiteral("listener-compensated"),
     });
     metronomeModeBox_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
     applyMutedEditorStyle(metronomeModeBox_);
+
+    metronomeCompensationButton_ = new QPushButton(QStringLiteral("Advanced"), page);
+    metronomeCompensationButton_->setVisible(false);
+
+    metronomeCompensationMaxSpin_ = new QDoubleSpinBox(page);
+    metronomeCompensationMaxSpin_->setRange(0.0, 1000.0);
+    metronomeCompensationMaxSpin_->setDecimals(1);
+    metronomeCompensationMaxSpin_->setSuffix(QStringLiteral(" ms"));
+    metronomeCompensationMaxSpin_->setValue(80.0);
+    metronomeCompensationSmoothingSpin_ = new QDoubleSpinBox(page);
+    metronomeCompensationSmoothingSpin_->setRange(0.0, 10000.0);
+    metronomeCompensationSmoothingSpin_->setDecimals(1);
+    metronomeCompensationSmoothingSpin_->setSuffix(QStringLiteral(" ms"));
+    metronomeCompensationSmoothingSpin_->setValue(750.0);
+    metronomeCompensationDeadbandSpin_ = new QDoubleSpinBox(page);
+    metronomeCompensationDeadbandSpin_->setRange(0.0, 1000.0);
+    metronomeCompensationDeadbandSpin_->setDecimals(1);
+    metronomeCompensationDeadbandSpin_->setSuffix(QStringLiteral(" ms"));
+    metronomeCompensationDeadbandSpin_->setValue(1.0);
+    metronomeCompensationSlewSpin_ = new QDoubleSpinBox(page);
+    metronomeCompensationSlewSpin_->setRange(0.0, 10000.0);
+    metronomeCompensationSlewSpin_->setDecimals(1);
+    metronomeCompensationSlewSpin_->setSuffix(QStringLiteral(" ms/s"));
+    metronomeCompensationSlewSpin_->setValue(40.0);
+    applyMutedEditorStyle(metronomeCompensationMaxSpin_);
+    applyMutedEditorStyle(metronomeCompensationSmoothingSpin_);
+    applyMutedEditorStyle(metronomeCompensationDeadbandSpin_);
+    applyMutedEditorStyle(metronomeCompensationSlewSpin_);
+    metronomeCompensationMaxSpin_->hide();
+    metronomeCompensationSmoothingSpin_->hide();
+    metronomeCompensationDeadbandSpin_->hide();
+    metronomeCompensationSlewSpin_->hide();
 
     trackMetronomeLabel_ = new QLabel(QStringLiteral("Local metronome stopped"), page);
     startTrackMetronomeButton_ = new QPushButton(QStringLiteral("Start"), page);
@@ -2467,7 +2499,15 @@ QWidget* MainWindow::buildMetronomePage()
     controls->addWidget(makeControlPair(QStringLiteral("BPM"), metronomeBpmSpin_), 0, 0);
     controls->addWidget(makeControlPair(QStringLiteral("Beats"), metronomeBeatsSpin_), 0, 1);
     controls->addWidget(makeControlPair(QStringLiteral("Division"), metronomeDivisionBox_), 0, 2);
-    controls->addWidget(makeControlPair(QStringLiteral("Mode"), metronomeModeBox_), 0, 3);
+    auto* modeRow = new QWidget(page);
+    auto* modeLayout = new QHBoxLayout(modeRow);
+    modeLayout->setContentsMargins(0, 0, 0, 0);
+    modeLayout->setSpacing(6);
+    modeLayout->addWidget(new QLabel(QStringLiteral("Mode"), modeRow));
+    modeLayout->addWidget(metronomeModeBox_, 0, Qt::AlignLeft);
+    modeLayout->addWidget(metronomeCompensationButton_, 0, Qt::AlignLeft);
+    modeLayout->addStretch(1);
+    controls->addWidget(modeRow, 0, 3);
     controls->addWidget(new QLabel(QStringLiteral("Pattern"), page), 1, 0);
     controls->addWidget(trackMetronomeLabel_, 1, 1, 1, 3);
     controls->setColumnStretch(1, 1);
@@ -2489,8 +2529,12 @@ QWidget* MainWindow::buildMetronomePage()
         updateTrackMetronomeInterval();
     });
     QObject::connect(metronomeModeBox_, &QComboBox::currentTextChanged, this, [this] {
-        updateRuntimeControls();
+        updateMetronomeCompensationVisibility();
+        sendMetronomeModeToJam();
         sendMetronomeSettingsToPeer();
+    });
+    QObject::connect(metronomeCompensationButton_, &QPushButton::clicked, this, [this] {
+        showMetronomeCompensationDialog();
     });
     QObject::connect(metronomeBeatsSpin_, qOverload<int>(&QSpinBox::valueChanged), this, [this] {
         rebuildMetronomePattern();
@@ -2502,6 +2546,7 @@ QWidget* MainWindow::buildMetronomePage()
     });
 
     rebuildMetronomePattern();
+    updateMetronomeCompensationVisibility();
     return page;
 }
 
@@ -2730,7 +2775,10 @@ QWidget* MainWindow::buildMixPage()
             mixMetronomeLevelLabel_->setText(dbText(static_cast<double>(value)));
         }
         applyMetronomePatternToLocalDevice();
-        updateRuntimeControls();
+        if (jam2_.isRunning()) {
+            const double metronomeLevel = gainFromDb(static_cast<double>(value));
+            sendJamCommand(QStringLiteral("metro level %1").arg(metronomeLevel, 0, 'f', 3));
+        }
     });
     QObject::connect(remoteLevelSlider_, &QSlider::valueChanged, this, [this](int value) {
         if (mixRemotePeerLevelLabel_) {
@@ -3083,6 +3131,7 @@ void MainWindow::launchJamProcess(QStringList args)
         localMetronomeDevice_.reset();
     }
     localMetronomeRunning_ = false;
+    localMetronomeLeader_ = false;
     if (trackMetronomeLabel_) {
         trackMetronomeLabel_->setText(QStringLiteral("Jam metronome stopped"));
     }
@@ -3117,6 +3166,8 @@ void MainWindow::launchJamProcess(QStringList args)
     connectionLabel_->setText(QStringLiteral("Starting"));
     QTimer::singleShot(250, this, [this] {
         updateRuntimeControls();
+        sendMetronomeModeToJam();
+        sendMetronomePatternToJam();
     });
     QTimer::singleShot(500, this, [this] {
         sendMetronomeSettingsToPeer();
@@ -3460,6 +3511,7 @@ void MainWindow::stopJam()
     pendingMeshInvitePopup_ = false;
     jam2_.stop();
     localMetronomeRunning_ = false;
+    localMetronomeLeader_ = false;
     if (trackMetronomeLabel_) {
         trackMetronomeLabel_->setText(QStringLiteral("Local metronome stopped"));
     }
@@ -3958,6 +4010,10 @@ QJsonObject MainWindow::leaderSettingsMessage() const
         {QStringLiteral("bpm"), metronomeBpmSpin_ ? metronomeBpmSpin_->value() : bpmSpin_->value()},
         {QStringLiteral("remote_level"), gainFromDb(static_cast<double>(remoteLevelSlider_->value()))},
         {QStringLiteral("metronome_mode"), metronomeModeBox_->currentText()},
+        {QStringLiteral("metronome_compensation_max_ms"), metronomeCompensationMaxSpin_ ? metronomeCompensationMaxSpin_->value() : 80.0},
+        {QStringLiteral("metronome_compensation_smoothing_ms"), metronomeCompensationSmoothingSpin_ ? metronomeCompensationSmoothingSpin_->value() : 750.0},
+        {QStringLiteral("metronome_compensation_deadband_ms"), metronomeCompensationDeadbandSpin_ ? metronomeCompensationDeadbandSpin_->value() : 1.0},
+        {QStringLiteral("metronome_compensation_slew_ms_per_sec"), metronomeCompensationSlewSpin_ ? metronomeCompensationSlewSpin_->value() : 40.0},
         {QStringLiteral("sample_time_playout"), sampleTimePlayoutCheck_->isChecked()},
         {QStringLiteral("playout_delay_frames"), playoutDelaySpin_->value()},
         {QStringLiteral("jitter_buffer_frames"), jitterBufferSpin_->value()},
@@ -3998,6 +4054,19 @@ void MainWindow::applyLeaderSettings(const QJsonObject& settings)
     if (modeIndex >= 0) {
         metronomeModeBox_->setCurrentIndex(modeIndex);
     }
+    if (metronomeCompensationMaxSpin_) {
+        metronomeCompensationMaxSpin_->setValue(settings.value(QStringLiteral("metronome_compensation_max_ms")).toDouble(metronomeCompensationMaxSpin_->value()));
+    }
+    if (metronomeCompensationSmoothingSpin_) {
+        metronomeCompensationSmoothingSpin_->setValue(settings.value(QStringLiteral("metronome_compensation_smoothing_ms")).toDouble(metronomeCompensationSmoothingSpin_->value()));
+    }
+    if (metronomeCompensationDeadbandSpin_) {
+        metronomeCompensationDeadbandSpin_->setValue(settings.value(QStringLiteral("metronome_compensation_deadband_ms")).toDouble(metronomeCompensationDeadbandSpin_->value()));
+    }
+    if (metronomeCompensationSlewSpin_) {
+        metronomeCompensationSlewSpin_->setValue(settings.value(QStringLiteral("metronome_compensation_slew_ms_per_sec")).toDouble(metronomeCompensationSlewSpin_->value()));
+    }
+    updateMetronomeCompensationVisibility();
     sampleTimePlayoutCheck_->setChecked(settings.value(QStringLiteral("sample_time_playout")).toBool(sampleTimePlayoutCheck_->isChecked()));
     playoutDelaySpin_->setValue(settings.value(QStringLiteral("playout_delay_frames")).toInt(playoutDelaySpin_->value()));
     jitterBufferSpin_->setValue(settings.value(QStringLiteral("jitter_buffer_frames")).toInt(jitterBufferSpin_->value()));
@@ -4261,8 +4330,6 @@ void MainWindow::updateRuntimeControls()
     const double metronomeLevel = gainFromDb(static_cast<double>(metronomeLevelSlider_ ? metronomeLevelSlider_->value() : 0));
     const double remoteLevel = gainFromDb(static_cast<double>(remoteLevelSlider_ ? remoteLevelSlider_->value() : 0));
     sendJamCommand(QStringLiteral("metro level %1").arg(metronomeLevel, 0, 'f', 3));
-    sendJamCommand(QStringLiteral("metro mode %1").arg(metronomeModeBox_->currentText()));
-    sendMetronomePatternToJam();
     sendJamCommand(QStringLiteral("remote level %1").arg(remoteLevel, 0, 'f', 3));
     const double sendLevel = gainFromDb(static_cast<double>(mixSendLevelSlider_ ? mixSendLevelSlider_->value() : 0));
     const double monitorLevel = gainFromDb(static_cast<double>(mixMonitorLevelSlider_ ? mixMonitorLevelSlider_->value() : -18));
@@ -5041,7 +5108,9 @@ void MainWindow::startTrackMetronome()
             localMetronomeDevice_.reset();
         }
         localMetronomeRunning_ = true;
+        localMetronomeLeader_ = true;
         updateRuntimeControls();
+        sendJamCommand(QStringLiteral("metro leader on"));
         sendJamCommand(QStringLiteral("metro on"));
         sendMetronomeSettingsToPeer();
         if (trackMetronomeLabel_) {
@@ -5121,7 +5190,9 @@ void MainWindow::stopTrackMetronome()
         localMetronomeDevice_.reset();
     }
     localMetronomeRunning_ = false;
+    localMetronomeLeader_ = false;
     if (jamMetronomeWasRunning) {
+        sendJamCommand(QStringLiteral("metro leader off"));
         sendJamCommand(QStringLiteral("metro off"));
         sendMetronomeSettingsToPeer();
     }
@@ -5243,6 +5314,74 @@ void MainWindow::applyMetronomePatternToLocalDevice()
         gainFromDb(static_cast<double>(localMetronomeLevelSlider_ ? localMetronomeLevelSlider_->value() : 0)));
 }
 
+void MainWindow::sendMetronomeModeToJam()
+{
+    if (!jam2_.isRunning() || !metronomeModeBox_) {
+        return;
+    }
+    sendJamCommand(QStringLiteral("metro mode %1").arg(metronomeModeBox_->currentText()));
+}
+
+void MainWindow::showMetronomeCompensationDialog()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Listener Compensation"));
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* form = new QFormLayout();
+    form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+
+    auto makeSpin = [&dialog](double value, double max, const QString& suffix) {
+        auto* spin = new QDoubleSpinBox(&dialog);
+        spin->setRange(0.0, max);
+        spin->setDecimals(1);
+        spin->setSuffix(suffix);
+        spin->setValue(value);
+        applyMutedEditorStyle(spin);
+        return spin;
+    };
+
+    auto* maxSpin = makeSpin(metronomeCompensationMaxSpin_ ? metronomeCompensationMaxSpin_->value() : 80.0, 1000.0, QStringLiteral(" ms"));
+    auto* smoothingSpin = makeSpin(metronomeCompensationSmoothingSpin_ ? metronomeCompensationSmoothingSpin_->value() : 750.0, 10000.0, QStringLiteral(" ms"));
+    auto* deadbandSpin = makeSpin(metronomeCompensationDeadbandSpin_ ? metronomeCompensationDeadbandSpin_->value() : 1.0, 1000.0, QStringLiteral(" ms"));
+    auto* slewSpin = makeSpin(metronomeCompensationSlewSpin_ ? metronomeCompensationSlewSpin_->value() : 40.0, 10000.0, QStringLiteral(" ms/s"));
+
+    form->addRow(QStringLiteral("Max offset"), maxSpin);
+    form->addRow(QStringLiteral("Smoothing"), smoothingSpin);
+    form->addRow(QStringLiteral("Deadband"), deadbandSpin);
+    form->addRow(QStringLiteral("Slew limit"), slewSpin);
+    layout->addLayout(form);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    if (metronomeCompensationMaxSpin_) {
+        metronomeCompensationMaxSpin_->setValue(maxSpin->value());
+    }
+    if (metronomeCompensationSmoothingSpin_) {
+        metronomeCompensationSmoothingSpin_->setValue(smoothingSpin->value());
+    }
+    if (metronomeCompensationDeadbandSpin_) {
+        metronomeCompensationDeadbandSpin_->setValue(deadbandSpin->value());
+    }
+    if (metronomeCompensationSlewSpin_) {
+        metronomeCompensationSlewSpin_->setValue(slewSpin->value());
+    }
+}
+
+void MainWindow::updateMetronomeCompensationVisibility()
+{
+    if (!metronomeCompensationButton_ || !metronomeModeBox_) {
+        return;
+    }
+    metronomeCompensationButton_->setVisible(
+        metronomeModeBox_->currentText() == QStringLiteral("listener-compensated"));
+}
+
 void MainWindow::sendMetronomePatternToJam()
 {
     if (!jam2_.isRunning()) {
@@ -5268,6 +5407,7 @@ void MainWindow::sendMetronomeSettingsToPeer()
     sendControl(QJsonObject{
         {QStringLiteral("type"), QStringLiteral("metronome.settings")},
         {QStringLiteral("running"), localMetronomeRunning_},
+        {QStringLiteral("leader"), localMetronomeLeader_},
         {QStringLiteral("mode"), metronomeModeBox_ ? metronomeModeBox_->currentText() : QStringLiteral("shared-grid")},
         {QStringLiteral("bpm"), pattern.bpm},
         {QStringLiteral("beats"), pattern.beats_per_bar},
@@ -5289,6 +5429,7 @@ void MainWindow::applyRemoteMetronomeSettings(const QJsonObject& message)
     };
 
     const bool running = message.value(QStringLiteral("running")).toBool(localMetronomeRunning_);
+    const bool remoteLeader = message.value(QStringLiteral("leader")).toBool(running);
     const QString mode = message.value(QStringLiteral("mode")).toString(metronomeModeBox_
         ? metronomeModeBox_->currentText()
         : QStringLiteral("shared-grid"));
@@ -5347,11 +5488,16 @@ void MainWindow::applyRemoteMetronomeSettings(const QJsonObject& message)
     }
     rebuildMetronomePattern();
     localMetronomeRunning_ = running;
+    if (!running || remoteLeader) {
+        localMetronomeLeader_ = false;
+    }
     applyingRemoteMetronomeSettings_ = false;
 
     applyMetronomePatternToLocalDevice();
-    updateRuntimeControls();
     if (jam2_.isRunning()) {
+        sendJamCommand(localMetronomeLeader_ ? QStringLiteral("metro leader on") : QStringLiteral("metro leader off"));
+        sendMetronomeModeToJam();
+        sendMetronomePatternToJam();
         sendJamCommand(running ? QStringLiteral("metro on") : QStringLiteral("metro off"));
     }
     if (trackMetronomeLabel_) {
@@ -5516,6 +5662,10 @@ QStringList MainWindow::commonJamArgs(bool includeExtraArgs) const
          << QStringLiteral("--local-monitor") << onOff(mixMonitorCheck_ && mixMonitorCheck_->isChecked())
          << QStringLiteral("--local-monitor-level") << QString::number(gainFromDb(static_cast<double>(mixMonitorLevelSlider_ ? mixMonitorLevelSlider_->value() : -18)), 'f', 3)
          << QStringLiteral("--metronome-mode") << metronomeModeBox_->currentText()
+         << QStringLiteral("--metronome-compensation-max-ms") << QString::number(metronomeCompensationMaxSpin_ ? metronomeCompensationMaxSpin_->value() : 80.0, 'f', 1)
+         << QStringLiteral("--metronome-compensation-smoothing-ms") << QString::number(metronomeCompensationSmoothingSpin_ ? metronomeCompensationSmoothingSpin_->value() : 750.0, 'f', 1)
+         << QStringLiteral("--metronome-compensation-deadband-ms") << QString::number(metronomeCompensationDeadbandSpin_ ? metronomeCompensationDeadbandSpin_->value() : 1.0, 'f', 1)
+         << QStringLiteral("--metronome-compensation-slew-ms-per-sec") << QString::number(metronomeCompensationSlewSpin_ ? metronomeCompensationSlewSpin_->value() : 40.0, 'f', 1)
          << QStringLiteral("--sample-time-playout") << onOff(sampleTimePlayoutCheck_->isChecked())
          << QStringLiteral("--adaptive-playback-cushion") << onOff(adaptiveCushionCheck_->isChecked())
          << QStringLiteral("--adaptive-playback-release-ppm") << QString::number(adaptiveReleaseSpin_->value())

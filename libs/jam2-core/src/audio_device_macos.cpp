@@ -947,6 +947,8 @@ void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t
     const double level = static_cast<double>(std::clamp(level_ppm, 0, 4000000)) / 1000000.0;
     const bool epoch_valid = context.control->metronome_epoch_valid.load(std::memory_order_relaxed);
     const std::uint64_t epoch = context.control->metronome_epoch_sample_time.load(std::memory_order_relaxed);
+    const std::int64_t render_offset_frames =
+        context.control->metronome_render_offset_frames.load(std::memory_order_relaxed);
     const jam2::metronome::PatternSnapshot pattern = jam2::metronome::sanitize({
         context.control->metronome_bpm.load(std::memory_order_relaxed),
         context.control->metronome_beats_per_bar.load(std::memory_order_relaxed),
@@ -961,9 +963,17 @@ void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t
         jam2::metronome::step_interval_samples(context.sample_rate, pattern.bpm, pattern.division);
 
     for (std::size_t i = 0; i < output.size(); ++i) {
-        const bool before_epoch = epoch_valid && context.metronome_sample_counter < epoch;
+        context.control->metronome_render_sample_counter.store(context.metronome_sample_counter, std::memory_order_relaxed);
+        std::uint64_t render_sample_counter = context.metronome_sample_counter;
+        if (render_offset_frames < 0) {
+            const std::uint64_t offset = static_cast<std::uint64_t>(-render_offset_frames);
+            render_sample_counter = render_sample_counter > offset ? render_sample_counter - offset : 0ULL;
+        } else {
+            render_sample_counter += static_cast<std::uint64_t>(render_offset_frames);
+        }
+        const bool before_epoch = epoch_valid && render_sample_counter < epoch;
         const std::uint64_t position =
-            before_epoch ? 0ULL : (epoch_valid ? context.metronome_sample_counter - epoch : context.metronome_sample_counter);
+            before_epoch ? 0ULL : (epoch_valid ? render_sample_counter - epoch : render_sample_counter);
         if (!before_epoch) {
             const double rendered =
                 jam2::metronome::render_sample(pattern, position, step_interval, context.sample_rate, level);
