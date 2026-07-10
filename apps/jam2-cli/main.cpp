@@ -70,7 +70,7 @@ Usage:
   jam2 test-device <id> [--sample-rate n]
   jam2 meter-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n]
   jam2 ring-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n] [--ring-frames n]
-  jam2 listen [--profile fast|moderate|safe] [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats enabled|disabled] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--record-jam-folder folder] [--test-input off|silence|tone-440|pulse-1s] [--os-priority off|high|realtime] [--metronome on|off] [--bpm n] [--metronome-level n] [--remote-level n] [--send-level n] [--local-monitor on|off] [--local-monitor-level n] [--gui-control ip:port] [--metronome-mode shared-grid|leader-audio|listener-compensated] [--metronome-compensation-max-ms n] [--metronome-compensation-smoothing-ms n] [--metronome-compensation-deadband-ms n] [--metronome-compensation-slew-ms-per-sec n] [--sample-time-playout on|off] [--playout-delay-frames n] [--jitter-buffer-frames n] [--jitter-buffer-max-frames n] [--adaptive-playback-cushion on|off] [--adaptive-playback-target-frames n] [--adaptive-playback-min-frames n] [--adaptive-playback-max-frames n] [--adaptive-playback-release-ppm n] [--session-id hex] [--session-key hex32] [--machine-readable-startup on|off] [--status-format text|jsonl] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels n[,n...]] [--output-channels n[,n...]] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-deadband-ppm n] [--drift-max-correction-ppm n]
+  jam2 listen [--profile fast|moderate|safe] [--bind ip:port] [--stun host:port] [--no-stun] [--public-endpoint ip:port] [--wait-ms n] [--stream-ms n] [--stream-linger-ms n] [--stats enabled|disabled] [--stats-interval-ms n] [--stats-warmup-ms n] [--log-stats folder] [--record-jam-folder folder] [--test-input off|silence|tone-440|pulse-1s|metro-pulse] [--os-priority off|high|realtime] [--metronome on|off] [--bpm n] [--metronome-level n] [--remote-level n] [--send-level n] [--local-monitor on|off] [--local-monitor-level n] [--gui-control ip:port] [--metronome-mode shared-grid|leader-audio|listener-compensated] [--metronome-compensation-max-ms n] [--metronome-compensation-smoothing-ms n] [--metronome-compensation-deadband-ms n] [--metronome-compensation-slew-ms-per-sec n] [--sample-time-playout on|off] [--playout-delay-frames n] [--jitter-buffer-frames n] [--jitter-buffer-max-frames n] [--adaptive-playback-cushion on|off] [--adaptive-playback-target-frames n] [--adaptive-playback-min-frames n] [--adaptive-playback-max-frames n] [--adaptive-playback-release-ppm n] [--session-id hex] [--session-key hex32] [--machine-readable-startup on|off] [--status-format text|jsonl] [--socket-send-buffer n] [--socket-recv-buffer n] [--input-channels n[,n...]] [--output-channels n[,n...]] [--playback-prefill-frames n] [--playback-max-frames n] [--drift-smoothing n] [--drift-deadband-ppm n] [--drift-max-correction-ppm n]
   jam2 connect <jam2-url> [--profile fast|moderate|safe] [options]
   jam2 mesh --session-id <hex> --session-key <hex32> --bind ip:port --peers ip:port[,ip:port...] [options] [--headless-audio on|off]
 
@@ -90,6 +90,7 @@ enum class TestInputMode {
     Silence,
     Tone440,
     Pulse1s,
+    MetroPulse,
 };
 
 enum class OsPriorityMode {
@@ -286,7 +287,10 @@ TestInputMode parse_test_input_mode(std::string_view value)
     if (value == "pulse-1s") {
         return TestInputMode::Pulse1s;
     }
-    throw std::runtime_error("--test-input must be off, silence, tone-440, or pulse-1s");
+    if (value == "metro-pulse") {
+        return TestInputMode::MetroPulse;
+    }
+    throw std::runtime_error("--test-input must be off, silence, tone-440, pulse-1s, or metro-pulse");
 }
 
 std::string_view test_input_mode_text(TestInputMode mode)
@@ -300,6 +304,8 @@ std::string_view test_input_mode_text(TestInputMode mode)
         return "tone-440";
     case TestInputMode::Pulse1s:
         return "pulse-1s";
+    case TestInputMode::MetroPulse:
+        return "metro-pulse";
     }
     return "off";
 }
@@ -315,6 +321,8 @@ int test_input_mode_id(TestInputMode mode)
         return 2;
     case TestInputMode::Pulse1s:
         return 3;
+    case TestInputMode::MetroPulse:
+        return 4;
     }
     return 0;
 }
@@ -5108,6 +5116,41 @@ std::int32_t render_headless_test_input_sample(int mode, std::uint64_t sample_ti
     return 0;
 }
 
+std::int32_t render_headless_metronome_test_input_sample(
+    const jam2::audio::StreamControl& control,
+    std::uint64_t sample_time,
+    double sample_rate,
+    double level)
+{
+    if (sample_rate <= 0.0 ||
+        !control.metronome_enabled.load(std::memory_order_relaxed) ||
+        !control.metronome_epoch_valid.load(std::memory_order_relaxed)) {
+        return 0;
+    }
+    const std::uint64_t epoch = control.metronome_epoch_sample_time.load(std::memory_order_relaxed);
+    if (sample_time < epoch) {
+        return 0;
+    }
+    const jam2::metronome::PatternSnapshot pattern = jam2::metronome::sanitize({
+        control.metronome_bpm.load(std::memory_order_relaxed),
+        control.metronome_beats_per_bar.load(std::memory_order_relaxed),
+        control.metronome_division.load(std::memory_order_relaxed),
+        control.metronome_step_count.load(std::memory_order_relaxed),
+        control.metronome_play_mask_low.load(std::memory_order_relaxed),
+        control.metronome_play_mask_high.load(std::memory_order_relaxed),
+        control.metronome_accent_mask_low.load(std::memory_order_relaxed),
+        control.metronome_accent_mask_high.load(std::memory_order_relaxed),
+    });
+    const std::uint64_t step_interval =
+        jam2::metronome::step_interval_samples(sample_rate, pattern.bpm, pattern.division);
+    return clamp_i32_sample(jam2::metronome::render_sample(
+        pattern,
+        sample_time - epoch,
+        step_interval,
+        sample_rate,
+        level));
+}
+
 class HeadlessDeviceStream final : public jam2::audio::DeviceStream {
 public:
     HeadlessDeviceStream(
@@ -5220,7 +5263,9 @@ private:
         const double level = static_cast<double>(
             std::clamp(control_.test_input_level_ppm.load(std::memory_order_relaxed), 0, 1000000)) / 1000000.0;
         for (std::int32_t& sample : capture_scratch_) {
-            sample = render_headless_test_input_sample(mode, test_input_sample_time_, sample_rate_, level);
+            sample = mode == 4 ?
+                render_headless_metronome_test_input_sample(control_, test_input_sample_time_, sample_rate_, level) :
+                render_headless_test_input_sample(mode, test_input_sample_time_, sample_rate_, level);
             ++test_input_sample_time_;
         }
         capture_ring_.push(std::span<const std::int32_t>(capture_scratch_.data(), capture_scratch_.size()));

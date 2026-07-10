@@ -219,6 +219,7 @@ def combined_summary(server_csv, client_csv):
 def write_results_csv(path, results):
     fields = [
         "scenario",
+        "verdict",
         "source_scenario",
         "profile_family",
         "profile",
@@ -279,6 +280,17 @@ def write_results_csv(path, results):
         "audio_probe_server_signal",
         "audio_probe_client_signal",
         "audio_probe_tags",
+        "listener_pulse_ok",
+        "listener_pulse_verdict",
+        "listener_pulse_matched_min",
+        "listener_pulse_avg_abs_error_ms_max",
+        "listener_pulse_max_abs_error_ms_max",
+        "listener_pulse_missing_matches_total",
+        "metro_pulse_epoch_ok",
+        "metro_pulse_epoch_verdict",
+        "metro_pulse_epoch_max_error_frames",
+        "metro_pulse_epoch_missing_total",
+        "metro_pulse_epoch_extra_total",
         "mesh_peers",
         "mesh_peers_with_csv",
         "mesh_audio_ok_peers",
@@ -303,11 +315,16 @@ def write_results_csv(path, results):
             proxy = result.get("proxy_stats", {})
             wav = result.get("metronome_wav_analysis", {})
             audio_probe = result.get("audio_probe_analysis", {})
+            listener_pulse = result.get("listener_compensated_pulse_analysis", {})
+            listener_pulse_combined = listener_pulse.get("combined", {})
+            metro_pulse = result.get("metro_pulse_epoch_analysis", {})
+            metro_pulse_combined = metro_pulse.get("combined", {})
             mesh = result.get("mesh_metrics", {})
             wav_server = wav.get("server", {})
             wav_client = wav.get("client", {})
             row = {
                 "scenario": result.get("scenario", ""),
+                "verdict": result.get("verdict", ""),
                 "source_scenario": result.get("source_scenario", result.get("scenario", "")),
                 "profile_family": result.get("profile_family", ""),
                 "profile": result.get("profile", ""),
@@ -332,6 +349,17 @@ def write_results_csv(path, results):
                 "audio_probe_server_signal": audio_probe.get("server_signal", ""),
                 "audio_probe_client_signal": audio_probe.get("client_signal", ""),
                 "audio_probe_tags": ";".join(audio_probe.get("tags", [])),
+                "listener_pulse_ok": "yes" if listener_pulse.get("ok", False) else ("no" if listener_pulse else ""),
+                "listener_pulse_verdict": listener_pulse.get("verdict", ""),
+                "listener_pulse_matched_min": listener_pulse_combined.get("matched_pulses_min", ""),
+                "listener_pulse_avg_abs_error_ms_max": listener_pulse_combined.get("avg_abs_error_ms_max", ""),
+                "listener_pulse_max_abs_error_ms_max": listener_pulse_combined.get("max_abs_error_ms_max", ""),
+                "listener_pulse_missing_matches_total": listener_pulse_combined.get("missing_pulse_matches_total", ""),
+                "metro_pulse_epoch_ok": "yes" if metro_pulse.get("ok", False) else ("no" if metro_pulse else ""),
+                "metro_pulse_epoch_verdict": metro_pulse.get("verdict", ""),
+                "metro_pulse_epoch_max_error_frames": metro_pulse_combined.get("max_abs_error_frames_max", ""),
+                "metro_pulse_epoch_missing_total": metro_pulse_combined.get("missing_clicks_total", ""),
+                "metro_pulse_epoch_extra_total": metro_pulse_combined.get("extra_clicks_total", ""),
                 "mesh_peers": mesh.get("peer_count", ""),
                 "mesh_peers_with_csv": mesh.get("peers_with_csv", ""),
                 "mesh_audio_ok_peers": mesh.get("audio_ok_peers", ""),

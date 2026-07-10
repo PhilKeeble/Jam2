@@ -272,6 +272,38 @@ def scenario_catalog(base_profile=FAST_PROFILE):
             "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=20.0)),
             "expect": "listener-compensated metronome mode should keep the shared epoch valid while applying local render compensation",
         },
+        "metronome-listener-compensated-metro-pulse": {
+            "profile": variant(base_profile, "metro_listener_compensated_metro_pulse", metronome_mode="listener-compensated"),
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0)),
+            "signal": "metro-pulse",
+            "server_signal": "metro-pulse",
+            "client_signal": "metro-pulse",
+            "expect": "listener-compensated metronome should align local compensated clicks to incoming peer pulses generated from the peer metronome epoch",
+        },
+        "metronome-listener-compensated-pulse-jitter": {
+            "profile": variant(base_profile, "metro_listener_compensated_pulse", metronome_mode="listener-compensated"),
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0)),
+            "signal": "listener-compensated-pulse",
+            "server_signal": "pulse-1s",
+            "client_signal": "pulse-1s",
+            "expect": "listener-compensated metronome should track incoming peer pulse timing under ordered jitter",
+        },
+        "metronome-listener-compensated-pulse-burst": {
+            "profile": variant(base_profile, "metro_listener_compensated_pulse_burst", metronome_mode="listener-compensated"),
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0, burst_pause_ms=250.0, burst_every_ms=8000.0)),
+            "signal": "listener-compensated-pulse",
+            "server_signal": "pulse-1s",
+            "client_signal": "pulse-1s",
+            "expect": "listener-compensated metronome should expose pulse/click tracking under burst pressure",
+        },
+        "metronome-listener-compensated-pulse-loss": {
+            "profile": variant(base_profile, "metro_listener_compensated_pulse_loss", metronome_mode="listener-compensated"),
+            "impairment": ProxyImpairment.both(DirectionImpairment(loss_percent=1.0, jitter_ms=20.0)),
+            "signal": "listener-compensated-pulse",
+            "server_signal": "pulse-1s",
+            "client_signal": "pulse-1s",
+            "expect": "listener-compensated metronome should report pulse/click tracking when packet loss creates missing remote pulses",
+        },
         "levels-low": {
             "profile": variant(base_profile, "levels_low", metronome_level=0.05, remote_level=0.50),
             "impairment": ProxyImpairment.both(DirectionImpairment()),
@@ -358,6 +390,10 @@ def standard_suite():
         "metronome-shared-grid",
         "metronome-leader-audio",
         "metronome-listener-compensated",
+        "metronome-listener-compensated-metro-pulse",
+        "metronome-listener-compensated-pulse-jitter",
+        "metronome-listener-compensated-pulse-burst",
+        "metronome-listener-compensated-pulse-loss",
         "levels-low",
         "sample-time-playout-off",
         "playout-delay-3072",
@@ -751,6 +787,24 @@ def verdict_for(result):
         return "pass"
     if scenario == "metronome-shared-grid":
         return metronome_verdict(result, "shared-grid")
+    if is_listener_compensated_pulse_tracking_scenario(scenario):
+        base = metronome_verdict(result, "listener-compensated")
+        if base != "pass":
+            return base
+        if scenario == "metronome-listener-compensated-metro-pulse":
+            metro_pulse = result.get("metro_pulse_epoch_analysis", {})
+            if not metro_pulse:
+                return "metro_pulse_epoch_analysis_missing"
+            if not metro_pulse.get("ok", False):
+                return metro_pulse.get("verdict", "metro_pulse_epoch_failed")
+        pulse = result.get("listener_compensated_pulse_analysis", {})
+        if not pulse:
+            return "listener_compensated_pulse_analysis_missing"
+        if not pulse.get("ok", False):
+            return pulse.get("verdict", "listener_compensated_pulse_failed")
+        if pulse.get("combined", {}).get("matched_pulses_min", 0) <= 0:
+            return "listener_compensated_pulse_not_matched"
+        return "pass"
     if scenario.startswith("metronome-"):
         expected = scenario.removeprefix("metronome-")
         return metronome_verdict(result, expected)
@@ -1006,21 +1060,217 @@ def analyze_metronome_recordings(result, server_paths, client_paths):
     if not (scenario == "metronome-shared-grid" or scenario.startswith("metronome-")):
         return {}
     allow_client_silent = scenario == "metronome-leader-audio"
-    loose_timing = scenario == "metronome-listener-compensated"
+    loose_timing = scenario.startswith("metronome-listener-compensated")
     server = analyze_side_recording(Path(server_paths["dir"]) / "recording")
     client = analyze_side_recording(Path(client_paths["dir"]) / "recording", allow_silent=allow_client_silent)
     if loose_timing:
-        server["ok"] = server.get("detected_clicks", 0) > 0
-        client["ok"] = client.get("detected_clicks", 0) > 0
-        if not server["ok"]:
-            server["verdict"] = "listener_compensated_server_clicks_missing"
-        if not client["ok"]:
-            client["verdict"] = "listener_compensated_client_clicks_missing"
+        def clean_loose(side, missing_verdict):
+            detected = side.get("detected_clicks", 0)
+            return {
+                "ok": detected > 0,
+                "verdict": "pass_loose_listener_compensated" if detected > 0 else missing_verdict,
+                "recording_dir": side.get("recording_dir", ""),
+                "sample_rate": side.get("sample_rate", 0),
+                "detected_clicks": detected,
+                "strict_grid_expected_clicks": side.get("expected_clicks", 0),
+                "strict_grid_check": "skipped_listener_compensated",
+            }
+        server = clean_loose(server, "listener_compensated_server_clicks_missing")
+        client = clean_loose(client, "listener_compensated_client_clicks_missing")
     ok = server.get("ok", False) and client.get("ok", False)
     verdict = ""
     if not ok:
         verdict = server.get("verdict") if not server.get("ok", False) else client.get("verdict", "metronome_wav_failed")
     return {"ok": ok, "verdict": verdict, "server": server, "client": client}
+
+
+def is_listener_compensated_pulse_tracking_scenario(scenario):
+    return (
+        scenario == "metronome-listener-compensated-metro-pulse" or
+        scenario.startswith("metronome-listener-compensated-pulse"))
+
+
+def nearest_errors(reference_frames, measured_frames):
+    errors = []
+    used = set()
+    missing = 0
+    for reference in reference_frames:
+        best_index = None
+        best_abs = None
+        best_signed = None
+        for index, measured in enumerate(measured_frames):
+            if index in used:
+                continue
+            signed = measured - reference
+            absolute = abs(signed)
+            if best_abs is None or absolute < best_abs:
+                best_index = index
+                best_abs = absolute
+                best_signed = signed
+        if best_index is None:
+            missing += 1
+            continue
+        used.add(best_index)
+        errors.append(best_signed)
+    return errors, missing, max(0, len(measured_frames) - len(used))
+
+
+def summarize_signed_errors(errors, sample_rate):
+    if not errors:
+        return {
+            "samples": 0,
+            "avg_error_frames": 0.0,
+            "avg_error_ms": 0.0,
+            "avg_abs_error_ms": 0.0,
+            "max_abs_error_ms": 0.0,
+            "min_error_ms": 0.0,
+            "max_error_ms": 0.0,
+        }
+    ms = [error * 1000.0 / sample_rate for error in errors]
+    abs_ms = [abs(value) for value in ms]
+    return {
+        "samples": len(errors),
+        "avg_error_frames": sum(errors) / len(errors),
+        "avg_error_ms": sum(ms) / len(ms),
+        "avg_abs_error_ms": sum(abs_ms) / len(abs_ms),
+        "max_abs_error_ms": max(abs_ms),
+        "min_error_ms": min(ms),
+        "max_error_ms": max(ms),
+    }
+
+
+def read_stem_frames(recording_dir, stem, threshold, refractory_frames):
+    wav_path = Path(recording_dir) / f"{stem}.wav"
+    if not wav_path.exists():
+        return 0, []
+    sample_rate, samples = read_wav_i16(wav_path)
+    return sample_rate, detect_click_frames_with_threshold(samples, threshold, refractory_frames)
+
+
+def detect_click_frames_with_threshold(samples, threshold, refractory_frames):
+    frames = []
+    holdoff = 0
+    for index, sample in enumerate(samples):
+        if holdoff > 0:
+            holdoff -= 1
+            continue
+        if abs(sample) >= threshold:
+            frames.append(index)
+            holdoff = refractory_frames
+    return frames
+
+
+def analyze_listener_compensated_pulse_side(recording_dir):
+    recording_dir = Path(recording_dir)
+    sample_rate, pulses = read_stem_frames(recording_dir, "their-input", 2500, 18000)
+    metro_rate, clicks = read_stem_frames(recording_dir, "metronome", 1800, 900)
+    if sample_rate == 0:
+        sample_rate = metro_rate
+    if sample_rate == 0:
+        return {
+            "ok": False,
+            "verdict": "listener_compensated_pulse_recording_missing",
+            "recording_dir": str(recording_dir),
+            "sample_rate": 0,
+            "remote_pulses_detected": len(pulses),
+            "metronome_clicks_detected": len(clicks),
+            "matched_pulses": 0,
+            "missing_pulse_matches": 0,
+            "extra_clicks": 0,
+        }
+    errors, missing_pulses, extra_clicks = nearest_errors(pulses, clicks)
+    summary = summarize_signed_errors(errors, sample_rate)
+    summary.update({
+        "ok": bool(pulses) and bool(clicks),
+        "recording_dir": str(recording_dir),
+        "sample_rate": sample_rate,
+        "remote_pulses_detected": len(pulses),
+        "metronome_clicks_detected": len(clicks),
+        "matched_pulses": len(errors),
+        "missing_pulse_matches": missing_pulses,
+        "extra_clicks": extra_clicks,
+        "verdict": "pass" if pulses and clicks else "pulse_or_click_missing",
+    })
+    return summary
+
+
+def analyze_metro_pulse_epoch_side(recording_dir):
+    recording_dir = Path(recording_dir)
+    meta_path = recording_dir / "recording.json"
+    wav_path = recording_dir / "my-input.wav"
+    if not meta_path.exists() or not wav_path.exists():
+        return {
+            "ok": False,
+            "verdict": "metro_pulse_epoch_recording_missing",
+            "recording_dir": str(recording_dir),
+        }
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    sample_rate, samples = read_wav_i16(wav_path)
+    expected = expected_metronome_frames(meta, len(samples))
+    detected = detect_click_frames_with_threshold(samples, 2500, 900)
+    analysis = classify_metronome_clicks(expected, detected, match_clicks(expected, detected))
+    analysis.update({
+        "ok": (
+            analysis["steady_missing_clicks"] == 0 and
+            analysis["steady_extra_clicks"] == 0 and
+            analysis["steady_max_abs_error_frames"] <= METRONOME_WAV_TOLERANCE_FRAMES),
+        "recording_dir": str(recording_dir),
+        "sample_rate": sample_rate,
+    })
+    if not analysis["ok"]:
+        analysis["verdict"] = (
+            "metro_pulse_epoch_count_mismatch"
+            if analysis["steady_missing_clicks"] > 0 or analysis["steady_extra_clicks"] > 0
+            else "metro_pulse_epoch_timing_high"
+        )
+    elif analysis["startup_boundary_mismatch"]:
+        analysis["verdict"] = "pass_startup_boundary"
+    else:
+        analysis["verdict"] = "pass"
+    return analysis
+
+
+def analyze_metro_pulse_epoch(result, server_paths, client_paths):
+    scenario = result.get("source_scenario") or result.get("scenario", "")
+    if scenario != "metronome-listener-compensated-metro-pulse":
+        return {}
+    server = analyze_metro_pulse_epoch_side(Path(server_paths["dir"]) / "recording")
+    client = analyze_metro_pulse_epoch_side(Path(client_paths["dir"]) / "recording")
+    ok = server.get("ok", False) and client.get("ok", False)
+    return {
+        "ok": ok,
+        "verdict": "pass" if ok else "metro_pulse_epoch_analysis_failed",
+        "server": server,
+        "client": client,
+        "combined": {
+            "max_abs_error_frames_max": max(
+                server.get("steady_max_abs_error_frames", 0),
+                client.get("steady_max_abs_error_frames", 0)),
+            "missing_clicks_total": server.get("steady_missing_clicks", 0) + client.get("steady_missing_clicks", 0),
+            "extra_clicks_total": server.get("steady_extra_clicks", 0) + client.get("steady_extra_clicks", 0),
+        },
+    }
+
+
+def analyze_listener_compensated_pulse(result, server_paths, client_paths):
+    scenario = result.get("source_scenario") or result.get("scenario", "")
+    if not is_listener_compensated_pulse_tracking_scenario(scenario):
+        return {}
+    server = analyze_listener_compensated_pulse_side(Path(server_paths["dir"]) / "recording")
+    client = analyze_listener_compensated_pulse_side(Path(client_paths["dir"]) / "recording")
+    ok = server.get("ok", False) and client.get("ok", False)
+    return {
+        "ok": ok,
+        "verdict": "pass" if ok else "listener_compensated_pulse_analysis_failed",
+        "server": server,
+        "client": client,
+        "combined": {
+            "matched_pulses_min": min(server.get("matched_pulses", 0), client.get("matched_pulses", 0)),
+            "avg_abs_error_ms_max": max(server.get("avg_abs_error_ms", 0.0), client.get("avg_abs_error_ms", 0.0)),
+            "max_abs_error_ms_max": max(server.get("max_abs_error_ms", 0.0), client.get("max_abs_error_ms", 0.0)),
+            "missing_pulse_matches_total": server.get("missing_pulse_matches", 0) + client.get("missing_pulse_matches", 0),
+        },
+    }
 
 
 def run_runtime_commands(commands, server_process, client_process):
@@ -1065,11 +1315,11 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
     commands = list(scenario.get("commands", []))
     server_extra_args = ["--os-priority", os_priority]
     client_extra_args = ["--os-priority", os_priority]
+    server_signal = scenario.get("server_signal", scenario.get("signal", "silence"))
+    client_signal = scenario.get("client_signal", scenario.get("signal", "silence"))
     if audio_probe:
         server_recording = Path(output_dir) / "server" / "recording"
         client_recording = Path(output_dir) / "client" / "recording"
-        server_signal = scenario.get("server_signal", scenario.get("signal", "silence"))
-        client_signal = scenario.get("client_signal", scenario.get("signal", "silence"))
         server_extra_args.extend([
             "--record-jam-folder", str(server_recording),
             "--test-input", server_signal,
@@ -1078,6 +1328,9 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
             "--record-jam-folder", str(client_recording),
             "--test-input", client_signal,
         ])
+    elif scenario.get("server_signal") or scenario.get("client_signal"):
+        server_extra_args.extend(["--test-input", server_signal])
+        client_extra_args.extend(["--test-input", client_signal])
     if record_metronome:
         commands.extend([
             {"at_s": 1.0, "side": "server", "line": f"record jam start {Path(output_dir) / 'server' / 'recording'}"},
@@ -1174,6 +1427,12 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
     wav_analysis = analyze_metronome_recordings(result, server_paths, client_paths)
     if wav_analysis:
         result["metronome_wav_analysis"] = wav_analysis
+    metro_pulse_epoch = analyze_metro_pulse_epoch(result, server_paths, client_paths)
+    if metro_pulse_epoch:
+        result["metro_pulse_epoch_analysis"] = metro_pulse_epoch
+    pulse_analysis = analyze_listener_compensated_pulse(result, server_paths, client_paths)
+    if pulse_analysis:
+        result["listener_compensated_pulse_analysis"] = pulse_analysis
     if audio_probe:
         server_analysis = analyze_recording_dir(
             Path(server_paths["dir"]) / "recording",
@@ -1230,6 +1489,21 @@ def write_summary(path, results):
             audio_suffix = (
                 f" audio_probe_ok={'yes' if audio_probe.get('ok', False) else 'no'}"
                 f" audio_tags={','.join(audio_probe.get('tags', [])) or '-'}")
+        pulse = result.get("listener_compensated_pulse_analysis", {})
+        pulse_suffix = ""
+        if pulse:
+            combined = pulse.get("combined", {})
+            pulse_suffix = (
+                f" listener_pulse_ok={'yes' if pulse.get('ok', False) else 'no'}"
+                f" listener_pulse_matched_min={combined.get('matched_pulses_min', 0)}"
+                f" listener_pulse_avg_abs_ms={combined.get('avg_abs_error_ms_max', 0.0):.2f}"
+                f" listener_pulse_max_abs_ms={combined.get('max_abs_error_ms_max', 0.0):.2f}")
+        metro_pulse = result.get("metro_pulse_epoch_analysis", {})
+        if metro_pulse:
+            combined = metro_pulse.get("combined", {})
+            pulse_suffix += (
+                f" metro_pulse_epoch_ok={'yes' if metro_pulse.get('ok', False) else 'no'}"
+                f" metro_pulse_epoch_max_error_frames={combined.get('max_abs_error_frames_max', 0)}")
         lines.append(
             f"{result.get('scenario')} verdict={result.get('verdict')} "
             f"loss_max={metrics.get('loss_percent_max', 0.0):.3f}% "
@@ -1238,6 +1512,7 @@ def write_summary(path, results):
             f"underrun_ms={metrics.get('playback_underrun_time_ms_total', 0.0):.1f} "
             f"drift_abs_ppm={metrics.get('drift_abs_ppm_max', 0.0):.1f}"
             f"{audio_suffix}"
+            f"{pulse_suffix}"
         )
     Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 

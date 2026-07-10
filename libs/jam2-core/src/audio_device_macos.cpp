@@ -910,6 +910,42 @@ std::int32_t render_test_input_sample(int mode, std::uint64_t sample_time, doubl
     return 0;
 }
 
+std::int32_t render_metronome_test_input_sample(
+    const StreamControl& control,
+    std::uint64_t sample_time,
+    double sample_rate,
+    double level)
+{
+    if (sample_rate <= 0.0 ||
+        !control.metronome_enabled.load(std::memory_order_relaxed) ||
+        !control.metronome_epoch_valid.load(std::memory_order_relaxed)) {
+        return 0;
+    }
+    const std::uint64_t epoch = control.metronome_epoch_sample_time.load(std::memory_order_relaxed);
+    if (sample_time < epoch) {
+        return 0;
+    }
+    const jam2::metronome::PatternSnapshot pattern = jam2::metronome::sanitize({
+        control.metronome_bpm.load(std::memory_order_relaxed),
+        control.metronome_beats_per_bar.load(std::memory_order_relaxed),
+        control.metronome_division.load(std::memory_order_relaxed),
+        control.metronome_step_count.load(std::memory_order_relaxed),
+        control.metronome_play_mask_low.load(std::memory_order_relaxed),
+        control.metronome_play_mask_high.load(std::memory_order_relaxed),
+        control.metronome_accent_mask_low.load(std::memory_order_relaxed),
+        control.metronome_accent_mask_high.load(std::memory_order_relaxed),
+    });
+    const std::uint64_t step_interval =
+        jam2::metronome::step_interval_samples(sample_rate, pattern.bpm, pattern.division);
+    const double rendered = jam2::metronome::render_sample(
+        pattern,
+        sample_time - epoch,
+        step_interval,
+        sample_rate,
+        level);
+    return static_cast<std::int32_t>(std::clamp(rendered, -2147483648.0, 2147483647.0));
+}
+
 void fill_test_input(CoreAudioDuplexContext& context, std::span<std::int32_t> output)
 {
     if (context.control == nullptr) {
@@ -920,7 +956,13 @@ void fill_test_input(CoreAudioDuplexContext& context, std::span<std::int32_t> ou
     const double level = static_cast<double>(
         std::clamp(context.control->test_input_level_ppm.load(std::memory_order_relaxed), 0, 1000000)) / 1000000.0;
     for (std::int32_t& sample : output) {
-        sample = render_test_input_sample(mode, context.test_input_sample_counter, context.sample_rate, level);
+        sample = mode == 4 ?
+            render_metronome_test_input_sample(
+                *context.control,
+                context.test_input_sample_counter,
+                context.sample_rate,
+                level) :
+            render_test_input_sample(mode, context.test_input_sample_counter, context.sample_rate, level);
         ++context.test_input_sample_counter;
     }
 }
