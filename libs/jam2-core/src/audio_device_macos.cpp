@@ -943,7 +943,7 @@ std::int32_t render_metronome_test_input_sample(
         step_interval,
         sample_rate,
         level);
-    return static_cast<std::int32_t>(std::clamp(rendered, -2147483648.0, 2147483647.0));
+    return jam2::metronome::mix_i32(0, rendered);
 }
 
 void fill_test_input(CoreAudioDuplexContext& context, std::span<std::int32_t> output)

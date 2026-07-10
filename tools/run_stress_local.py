@@ -36,6 +36,7 @@ from udp_stress_proxy import DirectionImpairment, ProxyImpairment, UdpStressProx
 
 DEFAULT_STREAM_MS = 30000
 METRONOME_WAV_TOLERANCE_FRAMES = 96
+LISTENER_PULSE_STEADY_SKIP = 8
 
 
 def parse_args():
@@ -804,6 +805,12 @@ def verdict_for(result):
             return pulse.get("verdict", "listener_compensated_pulse_failed")
         if pulse.get("combined", {}).get("matched_pulses_min", 0) <= 0:
             return "listener_compensated_pulse_not_matched"
+        if scenario == "metronome-listener-compensated-metro-pulse":
+            if pulse.get("combined", {}).get("steady_samples_min", 0) <= 0:
+                return "listener_compensated_pulse_steady_missing"
+            max_abs_error = pulse.get("combined", {}).get("steady_max_abs_error_ms_max", 0.0)
+            if max_abs_error > 80.0:
+                return "listener_compensated_pulse_timing_high"
         return "pass"
     if scenario.startswith("metronome-"):
         expected = scenario.removeprefix("metronome-")
@@ -1139,6 +1146,10 @@ def summarize_signed_errors(errors, sample_rate):
     }
 
 
+def prefixed_summary(prefix, summary):
+    return {f"{prefix}_{key}": value for key, value in summary.items()}
+
+
 def read_stem_frames(recording_dir, stem, threshold, refractory_frames):
     wav_path = Path(recording_dir) / f"{stem}.wav"
     if not wav_path.exists():
@@ -1180,10 +1191,13 @@ def analyze_listener_compensated_pulse_side(recording_dir):
         }
     errors, missing_pulses, extra_clicks = nearest_errors(pulses, clicks)
     summary = summarize_signed_errors(errors, sample_rate)
+    steady_errors = errors[LISTENER_PULSE_STEADY_SKIP:] if len(errors) > LISTENER_PULSE_STEADY_SKIP else []
+    steady_summary = summarize_signed_errors(steady_errors, sample_rate)
     summary.update({
         "ok": bool(pulses) and bool(clicks),
         "recording_dir": str(recording_dir),
         "sample_rate": sample_rate,
+        "steady_skip_pulses": LISTENER_PULSE_STEADY_SKIP,
         "remote_pulses_detected": len(pulses),
         "metronome_clicks_detected": len(clicks),
         "matched_pulses": len(errors),
@@ -1191,6 +1205,7 @@ def analyze_listener_compensated_pulse_side(recording_dir):
         "extra_clicks": extra_clicks,
         "verdict": "pass" if pulses and clicks else "pulse_or_click_missing",
     })
+    summary.update(prefixed_summary("steady", steady_summary))
     return summary
 
 
@@ -1268,6 +1283,13 @@ def analyze_listener_compensated_pulse(result, server_paths, client_paths):
             "matched_pulses_min": min(server.get("matched_pulses", 0), client.get("matched_pulses", 0)),
             "avg_abs_error_ms_max": max(server.get("avg_abs_error_ms", 0.0), client.get("avg_abs_error_ms", 0.0)),
             "max_abs_error_ms_max": max(server.get("max_abs_error_ms", 0.0), client.get("max_abs_error_ms", 0.0)),
+            "steady_samples_min": min(server.get("steady_samples", 0), client.get("steady_samples", 0)),
+            "steady_avg_abs_error_ms_max": max(
+                server.get("steady_avg_abs_error_ms", 0.0),
+                client.get("steady_avg_abs_error_ms", 0.0)),
+            "steady_max_abs_error_ms_max": max(
+                server.get("steady_max_abs_error_ms", 0.0),
+                client.get("steady_max_abs_error_ms", 0.0)),
             "missing_pulse_matches_total": server.get("missing_pulse_matches", 0) + client.get("missing_pulse_matches", 0),
         },
     }
@@ -1497,7 +1519,9 @@ def write_summary(path, results):
                 f" listener_pulse_ok={'yes' if pulse.get('ok', False) else 'no'}"
                 f" listener_pulse_matched_min={combined.get('matched_pulses_min', 0)}"
                 f" listener_pulse_avg_abs_ms={combined.get('avg_abs_error_ms_max', 0.0):.2f}"
-                f" listener_pulse_max_abs_ms={combined.get('max_abs_error_ms_max', 0.0):.2f}")
+                f" listener_pulse_max_abs_ms={combined.get('max_abs_error_ms_max', 0.0):.2f}"
+                f" listener_pulse_steady_avg_abs_ms={combined.get('steady_avg_abs_error_ms_max', 0.0):.2f}"
+                f" listener_pulse_steady_max_abs_ms={combined.get('steady_max_abs_error_ms_max', 0.0):.2f}")
         metro_pulse = result.get("metro_pulse_epoch_analysis", {})
         if metro_pulse:
             combined = metro_pulse.get("combined", {})

@@ -147,7 +147,7 @@ struct Options {
     int bpm = 120;
     double metronome_level = 1.0;
     MetronomeMode metronome_mode = MetronomeMode::SharedGrid;
-    double metronome_compensation_max_ms = 80.0;
+    double metronome_compensation_max_ms = 250.0;
     double metronome_compensation_smoothing_ms = 750.0;
     double metronome_compensation_deadband_ms = 1.0;
     double metronome_compensation_slew_ms_per_sec = 40.0;
@@ -3886,7 +3886,43 @@ AudioPacketStats run_audio_packet_exchange(
             local_counter >= local_epoch ?
                 static_cast<std::int64_t>(local_counter - local_epoch) :
                 -static_cast<std::int64_t>(local_epoch - local_counter);
-        std::int64_t target_frames = remote_position - local_position;
+        const auto pattern = metronome_pattern_from_runtime(runtime);
+        const std::uint64_t step_interval =
+            jam2::metronome::step_interval_samples(
+                static_cast<double>(options.sample_rate),
+                pattern.bpm,
+                pattern.division);
+        auto phase_frames = [](std::int64_t position, std::int64_t interval) -> std::int64_t {
+            if (interval <= 0) {
+                return 0;
+            }
+            std::int64_t phase = position % interval;
+            if (phase < 0) {
+                phase += interval;
+            }
+            return phase;
+        };
+        auto nearest_phase_error = [](std::int64_t target_phase, std::int64_t local_phase, std::int64_t interval) -> std::int64_t {
+            if (interval <= 0) {
+                return 0;
+            }
+            std::int64_t error = target_phase - local_phase;
+            const std::int64_t half_interval = interval / 2;
+            if (error > half_interval) {
+                error -= interval;
+            } else if (error < -half_interval) {
+                error += interval;
+            }
+            return error;
+        };
+        std::int64_t target_frames = 0;
+        if (step_interval > 0) {
+            const std::int64_t interval = static_cast<std::int64_t>(step_interval);
+            target_frames = nearest_phase_error(
+                phase_frames(remote_position, interval),
+                phase_frames(local_position, interval),
+                interval);
+        }
         const std::int64_t max_frames = ms_to_signed_frames(options.metronome_compensation_max_ms, options.sample_rate);
         if (max_frames >= 0 && target_frames > max_frames) {
             target_frames = max_frames;
@@ -5143,12 +5179,13 @@ std::int32_t render_headless_metronome_test_input_sample(
     });
     const std::uint64_t step_interval =
         jam2::metronome::step_interval_samples(sample_rate, pattern.bpm, pattern.division);
-    return clamp_i32_sample(jam2::metronome::render_sample(
+    const double rendered = jam2::metronome::render_sample(
         pattern,
         sample_time - epoch,
         step_interval,
         sample_rate,
-        level));
+        level);
+    return jam2::metronome::mix_i32(0, rendered);
 }
 
 class HeadlessDeviceStream final : public jam2::audio::DeviceStream {

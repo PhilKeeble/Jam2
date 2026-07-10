@@ -29,7 +29,7 @@ class Jam2Profile:
     bpm: int = 120
     metronome_level: float = 0.20
     metronome_mode: str = "shared-grid"
-    metronome_compensation_max_ms: float = 80.0
+    metronome_compensation_max_ms: float = 250.0
     metronome_compensation_smoothing_ms: float = 750.0
     metronome_compensation_deadband_ms: float = 1.0
     metronome_compensation_slew_ms_per_sec: float = 40.0

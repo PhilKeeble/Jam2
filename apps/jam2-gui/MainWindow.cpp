@@ -2441,7 +2441,7 @@ QWidget* MainWindow::buildMetronomePage()
     metronomeCompensationMaxSpin_->setRange(0.0, 1000.0);
     metronomeCompensationMaxSpin_->setDecimals(1);
     metronomeCompensationMaxSpin_->setSuffix(QStringLiteral(" ms"));
-    metronomeCompensationMaxSpin_->setValue(80.0);
+    metronomeCompensationMaxSpin_->setValue(250.0);
     metronomeCompensationSmoothingSpin_ = new QDoubleSpinBox(page);
     metronomeCompensationSmoothingSpin_->setRange(0.0, 10000.0);
     metronomeCompensationSmoothingSpin_->setDecimals(1);
@@ -4010,7 +4010,7 @@ QJsonObject MainWindow::leaderSettingsMessage() const
         {QStringLiteral("bpm"), metronomeBpmSpin_ ? metronomeBpmSpin_->value() : bpmSpin_->value()},
         {QStringLiteral("remote_level"), gainFromDb(static_cast<double>(remoteLevelSlider_->value()))},
         {QStringLiteral("metronome_mode"), metronomeModeBox_->currentText()},
-        {QStringLiteral("metronome_compensation_max_ms"), metronomeCompensationMaxSpin_ ? metronomeCompensationMaxSpin_->value() : 80.0},
+        {QStringLiteral("metronome_compensation_max_ms"), metronomeCompensationMaxSpin_ ? metronomeCompensationMaxSpin_->value() : 250.0},
         {QStringLiteral("metronome_compensation_smoothing_ms"), metronomeCompensationSmoothingSpin_ ? metronomeCompensationSmoothingSpin_->value() : 750.0},
         {QStringLiteral("metronome_compensation_deadband_ms"), metronomeCompensationDeadbandSpin_ ? metronomeCompensationDeadbandSpin_->value() : 1.0},
         {QStringLiteral("metronome_compensation_slew_ms_per_sec"), metronomeCompensationSlewSpin_ ? metronomeCompensationSlewSpin_->value() : 40.0},
@@ -5340,7 +5340,7 @@ void MainWindow::showMetronomeCompensationDialog()
         return spin;
     };
 
-    auto* maxSpin = makeSpin(metronomeCompensationMaxSpin_ ? metronomeCompensationMaxSpin_->value() : 80.0, 1000.0, QStringLiteral(" ms"));
+    auto* maxSpin = makeSpin(metronomeCompensationMaxSpin_ ? metronomeCompensationMaxSpin_->value() : 250.0, 1000.0, QStringLiteral(" ms"));
     auto* smoothingSpin = makeSpin(metronomeCompensationSmoothingSpin_ ? metronomeCompensationSmoothingSpin_->value() : 750.0, 10000.0, QStringLiteral(" ms"));
     auto* deadbandSpin = makeSpin(metronomeCompensationDeadbandSpin_ ? metronomeCompensationDeadbandSpin_->value() : 1.0, 1000.0, QStringLiteral(" ms"));
     auto* slewSpin = makeSpin(metronomeCompensationSlewSpin_ ? metronomeCompensationSlewSpin_->value() : 40.0, 10000.0, QStringLiteral(" ms/s"));
@@ -5662,7 +5662,7 @@ QStringList MainWindow::commonJamArgs(bool includeExtraArgs) const
          << QStringLiteral("--local-monitor") << onOff(mixMonitorCheck_ && mixMonitorCheck_->isChecked())
          << QStringLiteral("--local-monitor-level") << QString::number(gainFromDb(static_cast<double>(mixMonitorLevelSlider_ ? mixMonitorLevelSlider_->value() : -18)), 'f', 3)
          << QStringLiteral("--metronome-mode") << metronomeModeBox_->currentText()
-         << QStringLiteral("--metronome-compensation-max-ms") << QString::number(metronomeCompensationMaxSpin_ ? metronomeCompensationMaxSpin_->value() : 80.0, 'f', 1)
+         << QStringLiteral("--metronome-compensation-max-ms") << QString::number(metronomeCompensationMaxSpin_ ? metronomeCompensationMaxSpin_->value() : 250.0, 'f', 1)
          << QStringLiteral("--metronome-compensation-smoothing-ms") << QString::number(metronomeCompensationSmoothingSpin_ ? metronomeCompensationSmoothingSpin_->value() : 750.0, 'f', 1)
          << QStringLiteral("--metronome-compensation-deadband-ms") << QString::number(metronomeCompensationDeadbandSpin_ ? metronomeCompensationDeadbandSpin_->value() : 1.0, 'f', 1)
          << QStringLiteral("--metronome-compensation-slew-ms-per-sec") << QString::number(metronomeCompensationSlewSpin_ ? metronomeCompensationSlewSpin_->value() : 40.0, 'f', 1)
