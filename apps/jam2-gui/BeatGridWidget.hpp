@@ -11,6 +11,7 @@
 #include <functional>
 
 class QPushButton;
+class QHeaderView;
 
 class BeatGridWidget : public QWidget {
 public:
@@ -19,6 +20,7 @@ public:
 
     BeatGridModel& model();
     void refresh();
+    void setGridPosition(quint64 absoluteBeat, int subdivision, bool running);
     void applyRemoteCell(int section, const QString& lane, int beat, const QString& text);
 
     std::function<void(int, const QString&, int, const QString&, int)> onCellEdited;
@@ -63,6 +65,7 @@ private:
     QLineEdit* labelEdit_ = nullptr;
     QLineEdit* nameEdit_ = nullptr;
     QTableWidget* table_ = nullptr;
+    QHeaderView* beatHeader_ = nullptr;
     QPlainTextEdit* lyricsEdit_ = nullptr;
     QPushButton* duplicateButton_ = nullptr;
     QPushButton* deleteButton_ = nullptr;
@@ -71,5 +74,8 @@ private:
     QVector<int> rowToSection_;
     QVector<int> rowToLane_;
     int selectedSection_ = -1;
+    quint64 gridBeat_ = 0;
+    int gridSubdivision_ = 0;
+    bool gridRunning_ = false;
     bool updating_ = false;
 };

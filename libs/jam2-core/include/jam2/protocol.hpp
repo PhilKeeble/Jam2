@@ -16,6 +16,7 @@ enum class PacketType : std::uint8_t {
     Pong = 5,
     MetronomeState = 6,
     Bye = 7,
+    TransportState = 8,
 };
 
 struct Header {

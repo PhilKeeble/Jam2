@@ -1,6 +1,6 @@
 # Jam2 GUI
 
-`jam2-gui` is the normal way to run Jam2. It controls a local `jam2` audio engine process, shows live stats, and opens a TCP control connection to the other GUI for shared settings, song grid edits, and track sharing. Audio still travels directly between the two `jam2` engine processes over UDP.
+`jam2-gui` is the normal way to run Jam2. It controls a local `jam2` audio engine process, shows live stats, and opens a TCP control connection to the other GUI for shared settings, song grid edits, and looper arrangement sync. Audio still travels directly between the two `jam2` engine processes over UDP.
 
 ## Start A Jam
 
@@ -58,20 +58,22 @@ The song grid lets both players share simple song structure:
 
 The current GUI control plane is a direct single-peer TCP connection authenticated with the session id and key. It is not a room server and does not relay audio.
 
-## Shared Tracks
+## Track And Looper
 
 The Track tab can:
 
-- Load a local PCM16 WAV.
-- Display the waveform.
-- Play, stop, loop, and seek locally.
-- Adjust track gain.
-- Change speed and pitch with Signalsmith processing.
-- Share a WAV to the authenticated peer over the GUI TCP connection.
-- Sync basic play/stop controls when track sync is enabled.
+- Manage four looper banks.
+- Add PCM16 WAV lanes to the active bank.
+- Add empty lanes and arm a lane for recording. Perform input takes are recorded by the running engine over the local GUI-control socket; loopback takes are recorded by the GUI.
+- Use a stacked lane editor with inline mute, solo, record-arm, gain, rename, remove, drag, and edge-crop controls.
+- Render the active bank to a prepared mono PCM16 cache.
+- In Perform mode, load that prepared cache into the engine and control play/stop/level there.
+- Sync host-authoritative arrangement snapshots and missing managed WAV assets by content hash when Track Sync is enabled.
 
-Track playback is currently GUI-local through Qt audio output. It is separate from the engine's ASIO/CoreAudio output path and is not sent over the live UDP audio stream.
+Perform prepared-cache playback uses the engine's ASIO/CoreAudio output path. Prepared caches must match the active engine sample rate; offline resampling is deferred.
 
-## Capture From The GUI
+Lane recording is local. The first version records one clip per lane, stages the recorded WAV, inserts it at timeline frame 0, and lets the user adjust the lane region afterward. The selected lane region can be moved by dragging the clip body and cropped by dragging either edge; numeric frame controls remain available for exact edits.
 
-The GUI can launch `jam2-capture` for input or loopback recording and import the resulting WAV metadata into the Track tab. Capture behavior is documented in [Capture](Capture.md).
+## Track Recording From The GUI
+
+The GUI records Perform input takes through the running engine and records loopback takes internally, then imports the resulting WAV into the armed Track lane.

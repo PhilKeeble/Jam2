@@ -10,6 +10,8 @@
 #include "audio_ring.hpp"
 #include "metronome.hpp"
 #include "output_recorder.hpp"
+#include "prepared_track_source.hpp"
+#include "track_take_recorder.hpp"
 
 namespace jam2::audio {
 
@@ -85,7 +87,11 @@ struct StreamControl {
     std::atomic<std::uint64_t> metronome_epoch_sample_time{0};
     std::atomic<bool> metronome_epoch_valid{false};
     std::atomic<std::int64_t> metronome_render_offset_frames{0};
-    std::atomic<std::uint64_t> metronome_render_sample_counter{0};
+    std::atomic<std::uint64_t> engine_frame_counter{0};
+    std::atomic<std::uint32_t> input_latency_frames{0};
+    std::atomic<std::uint32_t> output_latency_frames{0};
+    std::atomic<std::int64_t> recording_latency_adjustment_frames{0};
+    std::atomic<std::uint64_t> recording_latency_compensation_frames{0};
     std::atomic<int> test_input_mode{0};
     std::atomic<int> test_input_level_ppm{125000};
     std::atomic<int> input_peak_ppm{0};
@@ -101,6 +107,12 @@ struct StreamControl {
     std::atomic<int> gui_metronome_peak_ppm{0};
     std::atomic<int> gui_output_peak_ppm{0};
     std::atomic<std::uint64_t> output_clipped_samples{0};
+    PreparedTrackSource* prepared_source = nullptr;
+    std::atomic<std::uint64_t> prepared_source_frame{0};
+    std::atomic<std::uint64_t> prepared_source_scheduled_start_frame{0};
+    std::atomic<std::uint64_t> prepared_source_actual_start_frame{0};
+    std::atomic<std::uint64_t> prepared_source_underruns{0};
+    std::atomic<std::uint64_t> prepared_source_busy_events{0};
 };
 
 enum class InputChannels {
@@ -117,6 +129,8 @@ struct StreamInfo {
     DeviceInfo device;
     double sample_rate = 0.0;
     long buffer_size = 0;
+    long input_latency_frames = 0;
+    long output_latency_frames = 0;
     InputChannels input_channels = InputChannels::Mono;
     ChannelSelection channels;
     std::string sample_format;
@@ -166,6 +180,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     MonoRingBuffer& playback_ring,
     std::size_t playback_prefill_frames,
     StreamControl& control,
-    OutputRecorder* recorder);
+    OutputRecorder* recorder,
+    TrackTakeRecorder* track_take_recorder = nullptr);
 
 } // namespace jam2::audio

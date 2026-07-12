@@ -46,16 +46,6 @@ QString SessionController::defaultJam2Path()
     return siblingToolPath(binary);
 }
 
-QString SessionController::defaultCapturePath()
-{
-#if defined(Q_OS_WIN)
-    constexpr const char* binary = "jam2-capture.exe";
-#else
-    constexpr const char* binary = "jam2-capture";
-#endif
-    return siblingToolPath(binary);
-}
-
 QString SessionController::defaultBindHost()
 {
     return QStringLiteral("0.0.0.0");

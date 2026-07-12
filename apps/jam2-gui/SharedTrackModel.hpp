@@ -15,10 +15,9 @@ struct SharedTrackModel {
     double speed = 1.0;
     int pitchCents = 0;
     double trackGainDb = 0.0;
-    bool loopEnabled = false;
+    bool loopEnabled = true;
     double loopStartSeconds = -1.0;
     double loopEndSeconds = -1.0;
-    bool waveformGridVisible = true;
     bool syncControls = true;
     bool focusEnabled = false;
     QString focusPreset = QStringLiteral("custom");

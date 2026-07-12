@@ -696,6 +696,7 @@ struct CoreAudioDuplexContext {
     MonoRingBuffer* playback = nullptr;
     StreamControl* control = nullptr;
     OutputRecorder* recorder = nullptr;
+    TrackTakeRecorder* track_take_recorder = nullptr;
     std::vector<std::int32_t> capture_scratch;
     std::vector<std::int32_t> playback_scratch;
     std::vector<std::int32_t> recorder_my_input_scratch;
@@ -705,7 +706,7 @@ struct CoreAudioDuplexContext {
     std::size_t playback_prefill_frames = 0;
     double sample_rate = 48000.0;
     std::uint64_t test_input_sample_counter = 0;
-    std::uint64_t metronome_sample_counter = 0;
+    std::uint64_t engine_frame_counter = 0;
     std::uint64_t metronome_beat_index = 0;
     int click_remaining = 0;
     int click_total = 0;
@@ -876,6 +877,26 @@ void mix_local_monitor(CoreAudioDuplexContext& context, std::span<std::int32_t> 
     context.control->gui_monitor_peak_ppm.store(peak_ppm, std::memory_order_relaxed);
 }
 
+void mix_prepared_source(CoreAudioDuplexContext& context, std::span<std::int32_t> output, std::uint64_t frame)
+{
+    if (context.control == nullptr || context.control->prepared_source == nullptr || output.empty()) {
+        return;
+    }
+    context.control->prepared_source->mix(output.data(), output.size(), frame);
+    context.control->prepared_source_frame.store(
+        context.control->prepared_source->sourceFrame(),
+        std::memory_order_relaxed);
+    context.control->prepared_source_scheduled_start_frame.store(
+        context.control->prepared_source->scheduledStartFrame(),
+        std::memory_order_relaxed);
+    context.control->prepared_source_actual_start_frame.store(
+        context.control->prepared_source->actualStartFrame(),
+        std::memory_order_relaxed);
+    context.control->prepared_source_underruns.store(
+        context.control->prepared_source->underruns(),
+        std::memory_order_relaxed);
+}
+
 void observe_output_peak(CoreAudioDuplexContext& context, std::span<const std::int32_t> output)
 {
     if (context.control == nullptr) {
@@ -981,7 +1002,10 @@ void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t
         context.control->metronome_mode.load(std::memory_order_relaxed) == 1 &&
         !context.control->leader_audio_local_click.load(std::memory_order_relaxed);
     if (!enabled || local_click_suppressed) {
-        context.metronome_sample_counter += static_cast<std::uint64_t>(output.size());
+        context.engine_frame_counter += static_cast<std::uint64_t>(output.size());
+        context.control->engine_frame_counter.store(
+            context.engine_frame_counter,
+            std::memory_order_relaxed);
         return;
     }
 
@@ -1005,8 +1029,8 @@ void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t
         jam2::metronome::step_interval_samples(context.sample_rate, pattern.bpm, pattern.division);
 
     for (std::size_t i = 0; i < output.size(); ++i) {
-        context.control->metronome_render_sample_counter.store(context.metronome_sample_counter, std::memory_order_relaxed);
-        std::uint64_t render_sample_counter = context.metronome_sample_counter;
+        context.control->engine_frame_counter.store(context.engine_frame_counter, std::memory_order_relaxed);
+        std::uint64_t render_sample_counter = context.engine_frame_counter;
         if (render_offset_frames < 0) {
             const std::uint64_t offset = static_cast<std::uint64_t>(-render_offset_frames);
             render_sample_counter = render_sample_counter > offset ? render_sample_counter - offset : 0ULL;
@@ -1027,8 +1051,11 @@ void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t
                 context.metronome_beat_index = (position / step_interval) + 1;
             }
         }
-        ++context.metronome_sample_counter;
+        ++context.engine_frame_counter;
     }
+    context.control->engine_frame_counter.store(
+        context.engine_frame_counter,
+        std::memory_order_relaxed);
 }
 
 OSStatus duplex_io_proc(
@@ -1125,7 +1152,20 @@ OSStatus duplex_io_proc(
             std::span<const std::int32_t>(
                 context->capture_scratch.data(),
                 std::min<std::size_t>(context->capture_scratch.size(), playback.size())));
-        const std::uint64_t audio_frame_start = context->metronome_sample_counter;
+        const std::uint64_t audio_frame_start = context->engine_frame_counter;
+        if (context->track_take_recorder != nullptr &&
+            context->recorder_my_input_scratch.size() >= playback.size()) {
+            const std::uint64_t compensation = context->control != nullptr
+                ? context->control->recording_latency_compensation_frames.load(std::memory_order_relaxed)
+                : 0ULL;
+            const std::uint64_t capture_frame_start = audio_frame_start > compensation
+                ? audio_frame_start - compensation
+                : 0ULL;
+            context->track_take_recorder->record(
+                capture_frame_start,
+                std::span<const std::int32_t>(context->recorder_my_input_scratch.data(), playback.size()));
+        }
+        mix_prepared_source(*context, playback, audio_frame_start);
         mix_metronome_click(
             *context,
             playback,
@@ -1189,6 +1229,7 @@ public:
         std::size_t playback_prefill_frames,
         StreamControl& control,
         OutputRecorder* recorder,
+        TrackTakeRecorder* track_take_recorder,
         double sample_rate)
         : device_(device),
           info_(std::move(info)),
@@ -1203,6 +1244,7 @@ public:
         context_.playback = &playback_ring;
         context_.control = &control;
         context_.recorder = recorder;
+        context_.track_take_recorder = track_take_recorder;
         context_.capture_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.playback_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.recorder_my_input_scratch.resize(static_cast<std::size_t>(buffer_size));
@@ -1211,6 +1253,22 @@ public:
         context_.recorder_metronome_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.playback_prefill_frames = playback_prefill_frames;
         context_.sample_rate = sample_rate;
+        input_latency_frames_ = static_cast<long>(
+            get_u32_property_or_zero(device_, kAudioDevicePropertyLatency, kAudioDevicePropertyScopeInput) +
+            get_u32_property_or_zero(device_, kAudioDevicePropertySafetyOffset, kAudioDevicePropertyScopeInput));
+        output_latency_frames_ = channels_.output.empty() ? 0L : static_cast<long>(
+            get_u32_property_or_zero(device_, kAudioDevicePropertyLatency, kAudioDevicePropertyScopeOutput) +
+            get_u32_property_or_zero(device_, kAudioDevicePropertySafetyOffset, kAudioDevicePropertyScopeOutput));
+        control.input_latency_frames.store(
+            static_cast<std::uint32_t>(std::max(0L, input_latency_frames_)),
+            std::memory_order_relaxed);
+        control.output_latency_frames.store(
+            static_cast<std::uint32_t>(std::max(0L, output_latency_frames_)),
+            std::memory_order_relaxed);
+        control.recording_latency_compensation_frames.store(
+            static_cast<std::uint64_t>(std::max(0L, input_latency_frames_)) +
+                static_cast<std::uint64_t>(std::max(0L, output_latency_frames_)),
+            std::memory_order_relaxed);
 
         require_ok(
             AudioDeviceCreateIOProcID(device_, duplex_io_proc, &context_, &proc_id_),
@@ -1252,6 +1310,8 @@ public:
         result.device = info_;
         result.sample_rate = sample_rate_;
         result.buffer_size = buffer_size_;
+        result.input_latency_frames = input_latency_frames_;
+        result.output_latency_frames = output_latency_frames_;
         result.input_channels = input_channels_;
         result.channels = channels_;
         result.sample_format = "CoreAudio Float32 packed";
@@ -1277,6 +1337,8 @@ private:
     AudioDeviceIOProcID proc_id_ = nullptr;
     bool started_ = false;
     long buffer_size_ = 0;
+    long input_latency_frames_ = 0;
+    long output_latency_frames_ = 0;
     InputChannels input_channels_ = InputChannels::Mono;
     ChannelSelection channels_;
     double sample_rate_ = 0.0;
@@ -1415,7 +1477,8 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     MonoRingBuffer& playback_ring,
     std::size_t playback_prefill_frames,
     StreamControl& control,
-    OutputRecorder* recorder)
+    OutputRecorder* recorder,
+    TrackTakeRecorder* track_take_recorder)
 {
     const auto selected = select_device(id);
     const UInt32 input_channels = device_channels(selected.object, kAudioDevicePropertyScopeInput);
@@ -1462,6 +1525,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
         playback_prefill_frames,
         control,
         recorder,
+        track_take_recorder,
         sample_rate > 0.0 ? sample_rate : requested_sample_rate);
     stream->start();
     return stream;

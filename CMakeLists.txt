@@ -17,7 +17,6 @@ else()
 endif()
 
 option(JAM2_BUILD_GUI "Build jam2-gui when its CMake target is present" ON)
-option(JAM2_BUILD_CAPTURE "Build jam2-capture when its CMake target is present" ON)
 
 set(JAM2_RELEASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/release" CACHE PATH "Directory for distributable app binaries")
 set(JAM2_BUILD_BIN_DIR "${CMAKE_BINARY_DIR}/bin" CACHE PATH "Directory for built app binaries before release staging")
@@ -76,10 +75,6 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${JAM2_BUILD_BIN_DIR}")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${JAM2_BUILD_BIN_DIR}")
 
 add_subdirectory(apps/jam2-cli)
-
-if(JAM2_BUILD_CAPTURE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/apps/jam2-capture/CMakeLists.txt")
-    add_subdirectory(apps/jam2-capture)
-endif()
 
 if(JAM2_BUILD_GUI AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/apps/jam2-gui/CMakeLists.txt")
     add_subdirectory(apps/jam2-gui)

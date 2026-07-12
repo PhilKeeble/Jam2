@@ -93,7 +93,7 @@ Real CoreAudio validation must happen on a macOS host with the target audio devi
 
 - CMake is the single source of truth for Windows and macOS builds.
 - Jam2 currently expects Release builds. Configure fresh build directories with `-DCMAKE_BUILD_TYPE=Release`.
-- `jam2-gui` and `jam2-capture` are enabled by default for new CMake build directories.
+- `jam2-gui` is enabled by default for new CMake build directories.
 - Built app binaries are staged to the repo-root `release` directory.
 - Intermediate build products stay in the selected CMake build directory.
 - Shared protocol, STUN, stats, and timing code should remain platform-neutral.

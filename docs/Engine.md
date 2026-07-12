@@ -8,6 +8,7 @@
 jam2 list-devices
 jam2 test-device <id> [--sample-rate n]
 jam2 meter-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n]
+jam2 local [audio options]
 jam2 listen [--profile fast|moderate|safe] [options]
 jam2 connect <jam2-url> [--profile fast|moderate|safe] [options]
 ```
@@ -75,12 +76,19 @@ metro level +0.05
 remote level 0.75
 remote mute
 remote unmute
+track load C:\path\prepared.wav
+track play
+track stop
+track level 0.75
+track loop on
 quit
 ```
 
+`track load` accepts the GUI-rendered active-bank prepared mix. The file must be mono PCM16 at the active engine sample rate and no longer than five minutes. Resampling is not done in the engine.
+
 ## Stats Output
 
-Use stats while testing and tuning. The engine reports raw measurements such as packet loss, jitter, RTT, bitrate, playback depth, underruns, overruns, drift ppm, resampler ratio, jitter-buffer drops, adaptive cushion movement, receive loop gaps, and audio callback gaps.
+Use stats while testing and tuning. The engine reports raw measurements such as packet loss, jitter, RTT, bitrate, playback depth, underruns, overruns, drift ppm, resampler ratio, jitter-buffer drops, adaptive cushion movement, receive loop gaps, audio callback gaps, and prepared-source frame/underrun/busy counters.
 
 Use CSV logs for comparisons between runs:
 

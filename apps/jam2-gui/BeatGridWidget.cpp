@@ -16,6 +16,8 @@
 #include <QTableWidgetItem>
 #include <QVBoxLayout>
 
+#include <limits>
+
 namespace {
 
 constexpr int kBeatCellKindRole = Qt::UserRole + 1;
@@ -26,6 +28,41 @@ enum class BeatCellKind {
     None = 0,
     Division = 1,
     Hit = 2,
+};
+
+class GridHeaderView final : public QHeaderView {
+public:
+    explicit GridHeaderView(Qt::Orientation orientation, QWidget* parent = nullptr)
+        : QHeaderView(orientation, parent)
+    {
+        setMinimumHeight(28);
+    }
+
+    void setCurrentBeatColumn(int column)
+    {
+        if (currentBeatColumn_ == column) {
+            return;
+        }
+        currentBeatColumn_ = column;
+        viewport()->update();
+    }
+
+protected:
+    void paintSection(QPainter* painter, const QRect& rect, int logicalIndex) const override
+    {
+        QHeaderView::paintSection(painter, rect, logicalIndex);
+        if (logicalIndex != currentBeatColumn_) {
+            return;
+        }
+        painter->save();
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(QColor(102, 198, 166));
+        painter->drawEllipse(QPoint(rect.center().x(), rect.top() + 6), 4, 4);
+        painter->restore();
+    }
+
+private:
+    int currentBeatColumn_ = -1;
 };
 
 QString sectionTitle(const SongSection& section)
@@ -184,10 +221,12 @@ BeatGridWidget::BeatGridWidget(BeatGridModel* model, const QString& lane, QWidge
     table_ = new QTableWidget(this);
     lyricsEdit_ = new QPlainTextEdit(this);
 
-    table_->setAlternatingRowColors(true);
+    table_->setAlternatingRowColors(false);
     table_->setSelectionMode(QAbstractItemView::SingleSelection);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
-    table_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    beatHeader_ = new GridHeaderView(Qt::Horizontal, table_);
+    table_->setHorizontalHeader(beatHeader_);
+    beatHeader_->setSectionResizeMode(QHeaderView::Stretch);
     table_->verticalHeader()->setVisible(true);
     table_->setStyleSheet(QStringLiteral(
         "QTableWidget::item { padding: 3px 6px; }"
@@ -458,6 +497,39 @@ void BeatGridWidget::refresh()
     rebuildSectionList();
     rebuildTable();
     updateActionButtons();
+    const quint64 beat = gridBeat_;
+    const int subdivision = gridSubdivision_;
+    const bool running = gridRunning_;
+    gridBeat_ = (std::numeric_limits<quint64>::max)();
+    setGridPosition(beat, subdivision, running);
+}
+
+void BeatGridWidget::setGridPosition(quint64 absoluteBeat, int subdivision, bool running)
+{
+    gridBeat_ = absoluteBeat;
+    gridSubdivision_ = subdivision;
+    gridRunning_ = running;
+    if (table_ == nullptr) {
+        return;
+    }
+    auto* header = static_cast<GridHeaderView*>(beatHeader_);
+    if (header == nullptr || !running) {
+        if (header != nullptr) {
+            header->setCurrentBeatColumn(-1);
+        }
+        return;
+    }
+    const int activeSection = selectedSection_ >= 0 && selectedSection_ < model_->sections().size()
+        ? selectedSection_ : 0;
+    const int beatsInSection = activeSection < model_->sections().size()
+        ? model_->section(activeSection).beats : 0;
+    if (beatsInSection <= 0) {
+        header->setCurrentBeatColumn(-1);
+        return;
+    }
+    const int sectionBeat = static_cast<int>(absoluteBeat % static_cast<quint64>(beatsInSection));
+    const int beatColumn = mode() == Mode::Chord ? sectionBeat + 1 : sectionBeat;
+    header->setCurrentBeatColumn(beatColumn >= 0 && beatColumn < table_->columnCount() ? beatColumn : -1);
 }
 
 void BeatGridWidget::applyRemoteCell(int section, const QString& lane, int beat, const QString& text)

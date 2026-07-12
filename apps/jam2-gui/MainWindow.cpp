@@ -4,18 +4,15 @@
 #include "SessionController.hpp"
 
 #include "common.hpp"
+#include "gui_control_protocol.hpp"
 #include "tuning_profile.hpp"
-
-#include "signalsmith-stretch/signalsmith-stretch.h"
 
 #include <QAbstractSlider>
 #include <QAbstractSpinBox>
 #include <QApplication>
 #include <QAbstractItemView>
-#include <QAudioDevice>
-#include <QAudioFormat>
-#include <QAudioSink>
 #include <QClipboard>
+#include <QCloseEvent>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -32,13 +29,14 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QInputDialog>
 #include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonValue>
 #include <QList>
-#include <QMediaDevices>
 #include <QMessageBox>
+#include <QMetaObject>
 #include <QMouseEvent>
 #include <QIODevice>
 #include <QPainter>
@@ -61,11 +59,12 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWheelEvent>
+#include <QUuid>
 
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <cstdlib>
 #include <iomanip>
 #include <limits>
@@ -119,7 +118,7 @@ QDir appReleaseDir()
         }
     }
 
-    return QFileInfo(SessionController::defaultCapturePath()).absoluteDir();
+    return appDir;
 }
 
 QString appReleaseFilePath(const QString& folder, const QString& fileName)
@@ -140,7 +139,40 @@ QString timestampedCapturePath(const QString& prefix)
 {
     return appReleaseFilePath(
         QStringLiteral("captures"),
-        QStringLiteral("%1-%2.wav").arg(prefix, QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss"))));
+        QStringLiteral("%1-%2-%3.wav")
+            .arg(
+                prefix,
+                QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss-zzz")),
+                QUuid::createUuid().toString(QUuid::WithoutBraces).left(8)));
+}
+
+QString safeFileName(QString name)
+{
+    name = name.trimmed();
+    name.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9._-]+")), QStringLiteral("-"));
+    name = name.trimmed();
+    while (name.startsWith(QLatin1Char('-')) || name.startsWith(QLatin1Char('.'))) {
+        name.remove(0, 1);
+    }
+    while (name.endsWith(QLatin1Char('-')) || name.endsWith(QLatin1Char('.'))) {
+        name.chop(1);
+    }
+    return name;
+}
+
+bool isDefaultEmptyTrackName(const QString& name)
+{
+    const QString trimmed = name.trimmed();
+    if (trimmed == QStringLiteral("Empty Track") || trimmed == QStringLiteral("Empty Lane")) {
+        return true;
+    }
+    const QString prefix = QStringLiteral("Empty Track ");
+    if (!trimmed.startsWith(prefix)) {
+        return false;
+    }
+    bool ok = false;
+    const int number = trimmed.mid(prefix.size()).toInt(&ok);
+    return ok && number > 0;
 }
 
 QString timestampedJamRecordingFolder()
@@ -155,130 +187,348 @@ bool isAutoCapturePath(const QString& path)
     const QString name = info.fileName();
     return path.isEmpty() ||
         name == QStringLiteral("capture.wav") ||
+        name == QStringLiteral("take.wav") ||
         name.startsWith(QStringLiteral("capture-")) ||
+        name.startsWith(QStringLiteral("take-")) ||
         name.startsWith(QStringLiteral("loopback-")) ||
         info.absolutePath() == QStringLiteral("/captures");
 }
 
+QString sha256FileHex(const QString& path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return {};
+    }
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    while (!file.atEnd()) {
+        hash.addData(file.read(1024 * 1024));
+    }
+    return QString::fromLatin1(hash.result().toHex());
 }
 
-class LocalMetronomeDevice : public QIODevice {
-public:
-    LocalMetronomeDevice(int sampleRate, int channels, QObject* parent = nullptr)
-        : QIODevice(parent),
-          sampleRate_(qMax(1, sampleRate)),
-          channels_(qMax(1, channels))
-    {
-    }
+bool sameOrChildPath(const QString& parent, const QString& candidate)
+{
+    const QString root = QDir::cleanPath(QFileInfo(parent).absoluteFilePath());
+    const QString path = QDir::cleanPath(QFileInfo(candidate).absoluteFilePath());
+    return path == root || path.startsWith(root + QLatin1Char('/')) || path.startsWith(root + QLatin1Char('\\'));
+}
 
-    void configure(jam2::metronome::PatternSnapshot pattern, double level)
-    {
-        pattern = jam2::metronome::sanitize(pattern);
-        bpm_.store(pattern.bpm, std::memory_order_relaxed);
-        beatsPerBar_.store(pattern.beats_per_bar, std::memory_order_relaxed);
-        division_.store(pattern.division, std::memory_order_relaxed);
-        stepCount_.store(pattern.step_count, std::memory_order_relaxed);
-        playMaskLow_.store(pattern.play_mask_low, std::memory_order_relaxed);
-        playMaskHigh_.store(pattern.play_mask_high, std::memory_order_relaxed);
-        accentMaskLow_.store(pattern.accent_mask_low, std::memory_order_relaxed);
-        accentMaskHigh_.store(pattern.accent_mask_high, std::memory_order_relaxed);
-        levelPpm_.store(static_cast<int>(qBound(0.0, level, 4.0) * 1000000.0), std::memory_order_relaxed);
-    }
+QString frameText(qint64 frame)
+{
+    return frame >= 0 ? QString::number(frame) : QStringLiteral("-");
+}
 
-    void resetGrid()
-    {
-        sampleCounter_ = 0;
-    }
+void appendGuiU16(QByteArray& out, quint16 value)
+{
+    out.append(char(value & 0xffU));
+    out.append(char((value >> 8) & 0xffU));
+}
 
-    double takePeak()
-    {
-        return static_cast<double>(peakPpm_.exchange(0, std::memory_order_relaxed)) / 1000000.0;
+void appendGuiU32(QByteArray& out, quint32 value)
+{
+    for (int shift = 0; shift < 32; shift += 8) {
+        out.append(char((value >> shift) & 0xffU));
     }
+}
 
-    qint64 bytesAvailable() const override
-    {
-        return 8192 + QIODevice::bytesAvailable();
+void appendGuiU64(QByteArray& out, quint64 value)
+{
+    for (int shift = 0; shift < 64; shift += 8) {
+        out.append(char((value >> shift) & 0xffU));
     }
+}
 
-    bool isSequential() const override
-    {
+void appendGuiI64(QByteArray& out, qint64 value)
+{
+    appendGuiU64(out, static_cast<quint64>(value));
+}
+
+void appendGuiF64(QByteArray& out, double value)
+{
+    quint64 bits = 0;
+    static_assert(sizeof(bits) == sizeof(value));
+    std::memcpy(&bits, &value, sizeof(bits));
+    appendGuiU64(out, bits);
+}
+
+quint16 guiU16(const QByteArray& data, qsizetype offset)
+{
+    return quint16(uchar(data[offset])) | quint16(uchar(data[offset + 1]) << 8);
+}
+
+quint32 guiU32(const QByteArray& data, qsizetype offset)
+{
+    quint32 value = 0;
+    for (int shift = 0; shift < 32; shift += 8) {
+        value |= quint32(uchar(data[offset + shift / 8])) << shift;
+    }
+    return value;
+}
+
+quint64 guiU64(const QByteArray& data, qsizetype offset)
+{
+    quint64 value = 0;
+    for (int shift = 0; shift < 64; shift += 8) {
+        value |= quint64(uchar(data[offset + shift / 8])) << shift;
+    }
+    return value;
+}
+
+qint64 guiI64(const QByteArray& data, qsizetype offset)
+{
+    return static_cast<qint64>(guiU64(data, offset));
+}
+
+double guiF64(const QByteArray& data, qsizetype offset)
+{
+    const quint64 bits = guiU64(data, offset);
+    double value = 0.0;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+struct GuiBinaryCommand {
+    jam2::gui_control::CommandOpcode opcode = jam2::gui_control::CommandOpcode::None;
+    quint16 flags = 0;
+    std::array<qint64, 8> i{};
+    std::array<double, 4> d{};
+    QByteArray text;
+};
+
+QByteArray encodeGuiCommandPayload(const GuiBinaryCommand& command)
+{
+    QByteArray payload;
+    appendGuiU16(payload, static_cast<quint16>(command.opcode));
+    appendGuiU16(payload, command.flags);
+    appendGuiU32(payload, static_cast<quint32>(command.text.size()));
+    for (const qint64 value : command.i) {
+        appendGuiI64(payload, value);
+    }
+    for (const double value : command.d) {
+        appendGuiF64(payload, value);
+    }
+    payload.append(command.text);
+    return payload;
+}
+
+QByteArray guiFrame(jam2::gui_control::MessageType type, quint32 sequence, const QByteArray& payload)
+{
+    QByteArray out;
+    out.reserve(16 + payload.size());
+    appendGuiU32(out, jam2::gui_control::kMagic);
+    appendGuiU16(out, jam2::gui_control::kVersion);
+    appendGuiU16(out, static_cast<quint16>(type));
+    appendGuiU32(out, static_cast<quint32>(payload.size()));
+    appendGuiU32(out, sequence);
+    out.append(payload);
+    return out;
+}
+
+bool parseDoubleToken(const QString& value, double& out)
+{
+    bool ok = false;
+    out = value.toDouble(&ok);
+    return ok;
+}
+
+bool parseI64Token(const QString& value, qint64& out)
+{
+    bool ok = false;
+    out = value.toLongLong(&ok, 0);
+    return ok;
+}
+
+bool parseU64Token(const QString& value, qint64& out)
+{
+    bool ok = false;
+    out = static_cast<qint64>(value.toULongLong(&ok, 0));
+    return ok;
+}
+
+bool encodeJamTextCommand(const QString& line, GuiBinaryCommand& command)
+{
+    const QString trimmed = line.trimmed();
+    const QStringList parts = trimmed.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    if (parts.isEmpty()) {
+        return false;
+    }
+    if (parts[0] == QStringLiteral("metro") && parts.size() >= 2) {
+        if (parts[1] == QStringLiteral("on") || parts[1] == QStringLiteral("off")) {
+            command.opcode = jam2::gui_control::CommandOpcode::MetronomeEnabled;
+            command.flags = parts[1] == QStringLiteral("on") ? 1 : 0;
+            return true;
+        }
+        if (parts[1] == QStringLiteral("leader") && parts.size() >= 3) {
+            command.opcode = jam2::gui_control::CommandOpcode::MetronomeLeader;
+            command.flags = parts[2] == QStringLiteral("on") ? 1 : 0;
+            return true;
+        }
+        if (parts[1] == QStringLiteral("mode") && parts.size() >= 3) {
+            command.opcode = jam2::gui_control::CommandOpcode::MetronomeMode;
+            command.text = parts[2].toUtf8();
+            return true;
+        }
+        if (parts[1] == QStringLiteral("level") && parts.size() >= 3) {
+            command.opcode = jam2::gui_control::CommandOpcode::MetronomeLevel;
+            return parseDoubleToken(parts[2], command.d[0]);
+        }
+        if (parts[1] == QStringLiteral("pattern") && parts.size() >= 9) {
+            command.opcode = jam2::gui_control::CommandOpcode::MetronomePattern;
+            for (int i = 0; i < 3; ++i) {
+                if (!parseI64Token(parts[2 + i], command.i[static_cast<std::size_t>(i)])) return false;
+            }
+            for (int i = 0; i < 4; ++i) {
+                if (!parseU64Token(parts[5 + i], command.i[static_cast<std::size_t>(3 + i)])) return false;
+            }
+            return true;
+        }
+    }
+    if ((parts[0] == QStringLiteral("remote") || parts[0] == QStringLiteral("send")) &&
+        parts.size() >= 3 &&
+        parts[1] == QStringLiteral("level")) {
+        command.opcode = parts[0] == QStringLiteral("remote")
+            ? jam2::gui_control::CommandOpcode::RemoteLevel
+            : jam2::gui_control::CommandOpcode::SendLevel;
+        return parseDoubleToken(parts[2], command.d[0]);
+    }
+    if (parts[0] == QStringLiteral("monitor") && parts.size() >= 2) {
+        if (parts[1] == QStringLiteral("on") || parts[1] == QStringLiteral("off")) {
+            command.opcode = jam2::gui_control::CommandOpcode::MonitorEnabled;
+            command.flags = parts[1] == QStringLiteral("on") ? 1 : 0;
+            return true;
+        }
+        if (parts[1] == QStringLiteral("level") && parts.size() >= 3) {
+            command.opcode = jam2::gui_control::CommandOpcode::MonitorLevel;
+            return parseDoubleToken(parts[2], command.d[0]);
+        }
+    }
+    if (parts[0] == QStringLiteral("bpm") && parts.size() >= 2) {
+        command.opcode = jam2::gui_control::CommandOpcode::Bpm;
+        return parseI64Token(parts[1], command.i[0]);
+    }
+    if (trimmed.startsWith(QStringLiteral("record jam start "))) {
+        command.opcode = jam2::gui_control::CommandOpcode::RecordJamStart;
+        command.text = trimmed.mid(QStringLiteral("record jam start ").size()).toUtf8();
+        return !command.text.isEmpty();
+    }
+    if (trimmed == QStringLiteral("record jam stop")) {
+        command.opcode = jam2::gui_control::CommandOpcode::RecordJamStop;
         return true;
     }
-
-protected:
-    qint64 readData(char* data, qint64 maxSize) override
-    {
-        if (maxSize <= 0) {
-            return 0;
+    if (parts[0] == QStringLiteral("record") &&
+        parts.size() >= 3 &&
+        parts[1] == QStringLiteral("latency_adjust")) {
+        command.opcode = jam2::gui_control::CommandOpcode::RecordingLatencyAdjustment;
+        return parseI64Token(parts[2], command.i[0]);
+    }
+    if (parts[0] == QStringLiteral("track") && parts.size() >= 2) {
+        if (trimmed.startsWith(QStringLiteral("track load "))) {
+            command.opcode = jam2::gui_control::CommandOpcode::TrackLoad;
+            command.text = trimmed.mid(QStringLiteral("track load ").size()).toUtf8();
+            return !command.text.isEmpty();
         }
-        constexpr int kBytesPerSample = 2;
-        const int bytesPerFrame = channels_ * kBytesPerSample;
-        const qint64 frames = maxSize / bytesPerFrame;
-        if (frames <= 0) {
-            return 0;
+        if (parts[1] == QStringLiteral("restart")) {
+            command.opcode = jam2::gui_control::CommandOpcode::TrackRestartQuantized;
+            return true;
         }
-
-        const jam2::metronome::PatternSnapshot pattern = jam2::metronome::sanitize({
-            bpm_.load(std::memory_order_relaxed),
-            beatsPerBar_.load(std::memory_order_relaxed),
-            division_.load(std::memory_order_relaxed),
-            stepCount_.load(std::memory_order_relaxed),
-            playMaskLow_.load(std::memory_order_relaxed),
-            playMaskHigh_.load(std::memory_order_relaxed),
-            accentMaskLow_.load(std::memory_order_relaxed),
-            accentMaskHigh_.load(std::memory_order_relaxed),
-        });
-        const double level = static_cast<double>(levelPpm_.load(std::memory_order_relaxed)) / 1000000.0;
-        const std::uint64_t stepInterval =
-            jam2::metronome::step_interval_samples(static_cast<double>(sampleRate_), pattern.bpm, pattern.division);
-        auto* output = reinterpret_cast<qint16*>(data);
-        double peak = 0.0;
-        for (qint64 frame = 0; frame < frames; ++frame) {
-            const double click = jam2::metronome::render_sample(
-                pattern,
-                sampleCounter_++,
-                stepInterval,
-                static_cast<double>(sampleRate_),
-                level);
-            peak = std::max(peak, std::abs(click));
-            const qint16 pcm = static_cast<qint16>(std::lrint(qBound(-1.0, click, 1.0) * 32767.0));
-            for (int channel = 0; channel < channels_; ++channel) {
-                *output++ = pcm;
+        if (parts[1] == QStringLiteral("play") && parts.size() >= 3) {
+            command.opcode = jam2::gui_control::CommandOpcode::TrackPlay;
+            return parseI64Token(parts[2], command.i[0]);
+        }
+        if (parts[1] == QStringLiteral("stop") && parts.size() >= 3) {
+            command.opcode = jam2::gui_control::CommandOpcode::TrackStop;
+            return parseI64Token(parts[2], command.i[0]);
+        }
+        if (parts[1] == QStringLiteral("seek") && parts.size() >= 4) {
+            command.opcode = jam2::gui_control::CommandOpcode::TrackSeek;
+            return parseI64Token(parts[2], command.i[0]) && parseI64Token(parts[3], command.i[1]);
+        }
+        if (parts[1] == QStringLiteral("level") && parts.size() >= 3) {
+            command.opcode = jam2::gui_control::CommandOpcode::TrackLevel;
+            return parseDoubleToken(parts[2], command.d[0]);
+        }
+        if (parts[1] == QStringLiteral("loop") && parts.size() >= 3) {
+            command.opcode = jam2::gui_control::CommandOpcode::TrackLoop;
+            command.flags = parts[2] == QStringLiteral("on") ? 1 : 0;
+            if (parts.size() >= 5) {
+                return parseI64Token(parts[3], command.i[0]) && parseI64Token(parts[4], command.i[1]);
             }
-        }
-        updatePeak(peak);
-        return frames * bytesPerFrame;
-    }
-
-    qint64 writeData(const char*, qint64) override
-    {
-        return -1;
-    }
-
-private:
-    void updatePeak(double peak)
-    {
-        const int candidate = static_cast<int>(qBound(0.0, peak, 1.0) * 1000000.0);
-        int current = peakPpm_.load(std::memory_order_relaxed);
-        while (candidate > current &&
-               !peakPpm_.compare_exchange_weak(current, candidate, std::memory_order_relaxed, std::memory_order_relaxed)) {
+            return true;
         }
     }
+    if (trimmed.startsWith(QStringLiteral("track_take arm input "))) {
+        const QString rest = trimmed.mid(QStringLiteral("track_take arm input ").size());
+        const int split = rest.indexOf(QLatin1Char(' '));
+        if (split <= 0) return false;
+        command.opcode = jam2::gui_control::CommandOpcode::TrackTakeArmInput;
+        command.text = rest.left(split).toUtf8();
+        command.text.append('\n');
+        command.text.append(rest.mid(split + 1).toUtf8());
+        return true;
+    }
+    if (parts[0] == QStringLiteral("track_take") && parts.size() >= 3) {
+        if (parts[1] == QStringLiteral("start_quantized") && parts.size() >= 4) {
+            command.opcode = jam2::gui_control::CommandOpcode::TrackTakeStartQuantized;
+            command.text = parts[2].toUtf8();
+            return parseI64Token(parts[3], command.i[0]);
+        }
+        if (parts[1] == QStringLiteral("start") && parts.size() >= 4) {
+            command.opcode = jam2::gui_control::CommandOpcode::TrackTakeStart;
+            command.text = parts[2].toUtf8();
+            return parseI64Token(parts[3], command.i[0]);
+        }
+        if (parts[1] == QStringLiteral("stop") && parts.size() >= 4) {
+            command.opcode = jam2::gui_control::CommandOpcode::TrackTakeStop;
+            command.text = parts[2].toUtf8();
+            return parseI64Token(parts[3], command.i[0]);
+        }
+        if (parts[1] == QStringLiteral("cancel")) {
+            command.opcode = jam2::gui_control::CommandOpcode::TrackTakeCancel;
+            return true;
+        }
+    }
+    return false;
+}
 
-    int sampleRate_ = 48000;
-    int channels_ = 2;
-    std::uint64_t sampleCounter_ = 0;
-    std::atomic<int> bpm_{120};
-    std::atomic<int> beatsPerBar_{4};
-    std::atomic<int> division_{1};
-    std::atomic<int> stepCount_{4};
-    std::atomic<std::uint64_t> playMaskLow_{0x0fULL};
-    std::atomic<std::uint64_t> playMaskHigh_{0};
-    std::atomic<std::uint64_t> accentMaskLow_{0x01ULL};
-    std::atomic<std::uint64_t> accentMaskHigh_{0};
-    std::atomic<int> levelPpm_{1000000};
-    std::atomic<int> peakPpm_{0};
-};
+std::uint64_t rawFrameFromMusicalFrame(std::uint64_t musicalFrame, std::int64_t renderOffsetFrames)
+{
+    if (renderOffsetFrames >= 0) {
+        const std::uint64_t offset = static_cast<std::uint64_t>(renderOffsetFrames);
+        return musicalFrame > offset ? musicalFrame - offset : 0ULL;
+    }
+    return musicalFrame + static_cast<std::uint64_t>(-renderOffsetFrames);
+}
+
+bool promptFrame(QWidget* parent, const QString& title, const QString& label, qint64 current, qint64& out)
+{
+    bool accepted = false;
+    const QString text = QInputDialog::getText(
+        parent,
+        title,
+        label,
+        QLineEdit::Normal,
+        current >= 0 ? QString::number(current) : QString(),
+        &accepted);
+    if (!accepted) {
+        return false;
+    }
+    const QString trimmed = text.trimmed();
+    if (trimmed.isEmpty()) {
+        out = -1;
+        return true;
+    }
+    bool ok = false;
+    const qint64 parsed = trimmed.toLongLong(&ok);
+    if (!ok || parsed < 0) {
+        QMessageBox::warning(parent, title, QStringLiteral("Frame values must be empty or non-negative integers."));
+        return false;
+    }
+    out = parsed;
+    return true;
+}
+
+}
 
 class WaveformWidget : public QWidget {
 public:
@@ -315,9 +565,10 @@ public:
         update();
     }
 
-    void setGridVisible(bool visible)
+    void setGridPosition(std::uint64_t absoluteBeat, bool running)
     {
-        gridVisible_ = visible;
+        gridAbsoluteBeat_ = absoluteBeat;
+        gridRunning_ = running;
         update();
     }
 
@@ -399,6 +650,13 @@ public:
             }
             peaks_[i] = static_cast<float>(peak) / 32768.0f;
         }
+        const auto maxPeak = std::max_element(peaks_.begin(), peaks_.end());
+        if (maxPeak != peaks_.end() && *maxPeak > 0.0f && *maxPeak < 0.85f) {
+            const float scale = 0.85f / *maxPeak;
+            for (float& peak : peaks_) {
+                peak = qMin(1.0f, peak * scale);
+            }
+        }
         label_.clear();
         update();
     }
@@ -410,7 +668,7 @@ protected:
         painter.fillRect(rect(), QColor(18, 20, 22));
         painter.setRenderHint(QPainter::Antialiasing, false);
 
-        if (gridVisible_ && durationMs_ > 0 && bpm_ > 0.0) {
+        if (durationMs_ > 0 && bpm_ > 0.0) {
             const double beatMs = 60000.0 / bpm_;
             const int beats = static_cast<int>(std::floor(static_cast<double>(durationMs_) / beatMs));
             for (int beat = 0; beat <= beats + 1; ++beat) {
@@ -424,6 +682,14 @@ protected:
                     painter.drawText(x + 4, 18, QString::number(beat + 1));
                 }
             }
+            const int totalBeats = qMax(1, static_cast<int>(std::ceil(static_cast<double>(durationMs_) / beatMs)));
+            if (gridRunning_) {
+                const int currentBeat = static_cast<int>(gridAbsoluteBeat_ % static_cast<std::uint64_t>(totalBeats));
+                const qint64 beatPosition = static_cast<qint64>(std::llround(currentBeat * beatMs));
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(102, 198, 166));
+                painter.drawEllipse(QPoint(xForMs(beatPosition), 7), 4, 4);
+            }
         }
 
         painter.setPen(QColor(58, 64, 70));
@@ -432,7 +698,7 @@ protected:
         if (!peaks_.empty()) {
             for (int x = 0; x < width(); ++x) {
                 const int index = qBound(0, x * static_cast<int>(peaks_.size()) / qMax(1, width()), static_cast<int>(peaks_.size()) - 1);
-                const int half = qMax(1, static_cast<int>(peaks_[index] * (height() / 2 - 14)));
+                const int half = qMax(2, static_cast<int>(peaks_[index] * (height() / 2 - 14)));
                 painter.drawLine(x, height() / 2 - half, x, height() / 2 + half);
             }
         }
@@ -523,7 +789,594 @@ private:
     qint64 loopStartMs_ = -1;
     qint64 loopEndMs_ = -1;
     double bpm_ = 120.0;
-    bool gridVisible_ = true;
+    std::uint64_t gridAbsoluteBeat_ = 0;
+    bool gridRunning_ = false;
+};
+
+class LooperLaneStackWidget : public QWidget {
+public:
+    struct LaneView {
+        LooperLane lane;
+        QString assetPath;
+        qint64 sourceFrames = 0;
+        std::vector<float> peaks;
+    };
+
+    explicit LooperLaneStackWidget(QWidget* parent = nullptr)
+        : QWidget(parent)
+    {
+        setMinimumHeight(260);
+        setMouseTracking(true);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    }
+
+    std::function<void(int)> onSelected;
+    std::function<void()> onAddLane;
+    std::function<void()> onAddWav;
+    std::function<void(int)> onMute;
+    std::function<void(int)> onSolo;
+    std::function<void(int)> onArm;
+    std::function<void(int)> onRename;
+    std::function<void(int)> onRemove;
+    std::function<void(int, double)> onGainChanged;
+    std::function<void(int, qint64, qint64, qint64)> onRegionCommitted;
+    std::function<void(int)> onBankSelected;
+    std::function<void(qint64)> onSeekFrame;
+
+    void setLanes(
+        QVector<LaneView> lanes,
+        int selected,
+        int activeBank,
+        int armedLane,
+        int sampleRate,
+        double bpm,
+        bool gridLockEnabled)
+    {
+        lanes_ = std::move(lanes);
+        selectedLane_ = selected;
+        activeBank_ = qBound(0, activeBank, 3);
+        armedLane_ = armedLane;
+        markerSampleRate_ = sampleRate > 0 ? sampleRate : 48000;
+        bpm_ = qBound(1.0, bpm, 400.0);
+        gridLockEnabled_ = gridLockEnabled;
+        dragMode_ = DragMode::None;
+        updateMinimumHeight();
+        update();
+    }
+
+    void setGridPosition(std::uint64_t absoluteBeat, bool running, double bpm)
+    {
+        gridAbsoluteBeat_ = absoluteBeat;
+        gridRunning_ = running;
+        bpm_ = qBound(1.0, bpm, 400.0);
+        update();
+    }
+
+    void setPlaybackMarkers(qint64 positionMs, qint64 loopStartMs, qint64 loopEndMs)
+    {
+        playheadMs_ = positionMs >= 0 ? positionMs : -1;
+        loopStartMs_ = loopStartMs >= 0 ? loopStartMs : -1;
+        loopEndMs_ = loopEndMs >= 0 ? loopEndMs : -1;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.fillRect(rect(), QColor(15, 17, 19));
+        painter.setRenderHint(QPainter::Antialiasing, false);
+
+        drawToolbar(painter);
+
+        const int laneCount = visualLaneCount();
+        for (int row = 0; row < laneCount; ++row) {
+            drawLane(painter, row);
+        }
+
+        drawOverlays(painter);
+
+        const QRect plus = plusRect();
+        painter.fillRect(plus, QColor(28, 32, 36));
+        painter.setPen(QColor(86, 94, 102));
+        painter.drawRect(plus.adjusted(0, 0, -1, -1));
+        painter.setPen(QColor(220, 224, 226));
+        painter.drawText(plus.adjusted(0, 0, 0, 0), Qt::AlignCenter, QStringLiteral("+"));
+    }
+
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        if (event->button() != Qt::LeftButton) {
+            QWidget::mousePressEvent(event);
+            return;
+        }
+        const QPoint pos = event->position().toPoint();
+        if (plusRect().contains(pos)) {
+            if (onAddLane) onAddLane();
+            event->accept();
+            return;
+        }
+
+        const int laneIndex = laneAt(pos);
+        if (laneIndex < 0) {
+            QWidget::mousePressEvent(event);
+            return;
+        }
+        const QString control = controlAt(laneIndex, pos);
+        selectLane(laneIndex);
+        if (laneIndex >= lanes_.size()) {
+            if (onAddLane) onAddLane();
+            if (control == QStringLiteral("arm") && onArm) {
+                onArm(laneIndex);
+            }
+            event->accept();
+            return;
+        }
+
+        if (control == QStringLiteral("mute")) {
+            if (onMute) onMute(laneIndex);
+            event->accept();
+            return;
+        }
+        if (control == QStringLiteral("solo")) {
+            if (onSolo) onSolo(laneIndex);
+            event->accept();
+            return;
+        }
+        if (control == QStringLiteral("arm")) {
+            if (onArm) onArm(laneIndex);
+            event->accept();
+            return;
+        }
+        if (control == QStringLiteral("rename")) {
+            if (onRename) onRename(laneIndex);
+            event->accept();
+            return;
+        }
+        if (control == QStringLiteral("remove")) {
+            if (onRemove) onRemove(laneIndex);
+            event->accept();
+            return;
+        }
+        if (control == QStringLiteral("gain")) {
+            beginGainDrag(laneIndex, pos.y());
+            event->accept();
+            return;
+        }
+
+        if (laneTimelineRect(laneIndex).contains(pos) && onSeekFrame) {
+            onSeekFrame(frameForX(pos.x()));
+        }
+        if (laneIndex >= lanes_.size() || lanes_[laneIndex].sourceFrames <= 0) {
+            event->accept();
+            return;
+        }
+        const QRect clip = clipRect(laneIndex);
+        if (!clip.adjusted(-4, -6, 4, 6).contains(pos)) {
+            event->accept();
+            return;
+        }
+        constexpr int kEdgePx = 10;
+        if (std::abs(pos.x() - clip.left()) <= kEdgePx) {
+            dragMode_ = DragMode::LeftEdge;
+        } else if (std::abs(pos.x() - clip.right()) <= kEdgePx) {
+            dragMode_ = DragMode::RightEdge;
+        } else {
+            dragMode_ = DragMode::Move;
+        }
+        dragLane_ = laneIndex;
+        dragStartX_ = pos.x();
+        const LooperLane& lane = lanes_[laneIndex].lane;
+        dragStartFrame_ = lane.startFrame;
+        dragSourceStartFrame_ = sourceStart(laneIndex);
+        dragSourceEndFrame_ = sourceEnd(laneIndex);
+        event->accept();
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override
+    {
+        const QPoint pos = event->position().toPoint();
+        if (dragMode_ == DragMode::Gain && dragLane_ >= 0 && dragLane_ < lanes_.size()) {
+            const QRect slider = gainRect(dragLane_);
+            const double t = 1.0 - qBound(0.0, static_cast<double>(pos.y() - slider.top()) / qMax(1, slider.height()), 1.0);
+            pendingGainDb_ = -60.0 + t * 72.0;
+            lanes_[dragLane_].lane.gainDb = pendingGainDb_;
+            update();
+            event->accept();
+            return;
+        }
+        if (dragMode_ != DragMode::None && dragLane_ >= 0 && dragLane_ < lanes_.size()) {
+            applyDragPreview(pos.x());
+            update();
+            event->accept();
+            return;
+        }
+        QWidget::mouseMoveEvent(event);
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override
+    {
+        if (event->button() != Qt::LeftButton || dragMode_ == DragMode::None) {
+            QWidget::mouseReleaseEvent(event);
+            return;
+        }
+        const int lane = dragLane_;
+        const DragMode mode = dragMode_;
+        dragMode_ = DragMode::None;
+        dragLane_ = -1;
+        if (lane >= 0 && lane < lanes_.size()) {
+            if (mode == DragMode::Gain) {
+                if (onGainChanged) onGainChanged(lane, pendingGainDb_);
+            } else if (onRegionCommitted) {
+                onRegionCommitted(lane, lanes_[lane].lane.startFrame, sourceStart(lane), sourceEnd(lane));
+            }
+        }
+        event->accept();
+    }
+
+private:
+    enum class DragMode { None, Move, LeftEdge, RightEdge, Gain };
+
+    static constexpr int kToolbarHeight = 34;
+    static constexpr int kLaneHeight = 112;
+    static constexpr int kHeaderWidth = 176;
+    static constexpr int kPlusHeight = 34;
+
+    int visualLaneCount() const
+    {
+        return qMax(1, lanes_.size());
+    }
+
+    void updateMinimumHeight()
+    {
+        setMinimumHeight(kToolbarHeight + visualLaneCount() * kLaneHeight + kPlusHeight + 12);
+    }
+
+    QRect timelineRect() const
+    {
+        return rect().adjusted(kHeaderWidth, kToolbarHeight, -1, -kPlusHeight - 8);
+    }
+
+    QRect laneRect(int row) const
+    {
+        return QRect(0, kToolbarHeight + row * kLaneHeight, width(), kLaneHeight);
+    }
+
+    QRect laneTimelineRect(int row) const
+    {
+        return laneRect(row).adjusted(kHeaderWidth, 0, -1, 0);
+    }
+
+    QRect plusRect() const
+    {
+        return QRect(0, kToolbarHeight + visualLaneCount() * kLaneHeight, width(), kPlusHeight);
+    }
+
+    qint64 sourceStart(int laneIndex) const
+    {
+        if (laneIndex < 0 || laneIndex >= lanes_.size()) return 0;
+        const LooperLane& lane = lanes_[laneIndex].lane;
+        return lane.loopStartFrame >= 0 ? qBound<qint64>(0, lane.loopStartFrame, qMax<qint64>(0, lanes_[laneIndex].sourceFrames - 1)) : 0;
+    }
+
+    qint64 sourceEnd(int laneIndex) const
+    {
+        if (laneIndex < 0 || laneIndex >= lanes_.size()) return 0;
+        const qint64 start = sourceStart(laneIndex);
+        const qint64 frames = lanes_[laneIndex].sourceFrames;
+        return laneIndex < lanes_.size() && lanes_[laneIndex].lane.loopEndFrame > start
+            ? qBound<qint64>(start + 1, lanes_[laneIndex].lane.loopEndFrame, frames)
+            : frames;
+    }
+
+    qint64 visibleFrames(int laneIndex) const
+    {
+        return qMax<qint64>(1, sourceEnd(laneIndex) - sourceStart(laneIndex));
+    }
+
+    qint64 viewFrames() const
+    {
+        const int markerRate = markerSampleRate();
+        qint64 frames = static_cast<qint64>(markerRate) * 8;
+        if (playheadMs_ >= 0) frames = qMax(frames, playheadMs_ * markerRate / 1000);
+        if (loopStartMs_ >= 0) frames = qMax(frames, loopStartMs_ * markerRate / 1000);
+        if (loopEndMs_ >= 0) frames = qMax(frames, loopEndMs_ * markerRate / 1000);
+        for (int i = 0; i < lanes_.size(); ++i) {
+            frames = qMax(frames, lanes_[i].lane.startFrame + visibleFrames(i));
+        }
+        return qMax<qint64>(1, frames);
+    }
+
+    int markerSampleRate() const
+    {
+        return markerSampleRate_ > 0 ? markerSampleRate_ : 48000;
+    }
+
+    int xForFrame(qint64 frame) const
+    {
+        const QRect area = timelineRect();
+        return area.left() + qBound(0, static_cast<int>(std::llround((static_cast<double>(frame) / viewFrames()) * area.width())), qMax(0, area.width()));
+    }
+
+    qint64 frameDeltaForX(double dx) const
+    {
+        const QRect area = timelineRect();
+        return area.width() > 1 ? static_cast<qint64>(std::llround((dx / area.width()) * viewFrames())) : 0;
+    }
+
+    qint64 snapTimelineFrame(qint64 frame) const
+    {
+        frame = qMax<qint64>(0, frame);
+        if (!gridLockEnabled_) {
+            return frame;
+        }
+        const double beatFrames = static_cast<double>(markerSampleRate()) * 60.0 / bpm_;
+        const qint64 beat = static_cast<qint64>(std::llround(static_cast<double>(frame) / beatFrames));
+        return qMax<qint64>(0, static_cast<qint64>(std::llround(static_cast<double>(beat) * beatFrames)));
+    }
+
+    qint64 frameForX(double x) const
+    {
+        const QRect area = timelineRect();
+        if (area.width() <= 1) {
+            return 0;
+        }
+        const double clamped = qBound(static_cast<double>(area.left()), x, static_cast<double>(area.right()));
+        return qBound<qint64>(0, static_cast<qint64>(std::llround(((clamped - area.left()) / area.width()) * viewFrames())), viewFrames());
+    }
+
+    QRect clipRect(int laneIndex) const
+    {
+        const QRect area = laneTimelineRect(laneIndex).adjusted(0, 12, 0, -12);
+        const int left = xForFrame(lanes_[laneIndex].lane.startFrame);
+        const int right = qMax(left + 1, xForFrame(lanes_[laneIndex].lane.startFrame + visibleFrames(laneIndex)));
+        return QRect(QPoint(left, area.top()), QPoint(right, area.bottom())).normalized();
+    }
+
+    void drawToolbar(QPainter& painter)
+    {
+        painter.fillRect(QRect(0, 0, width(), kToolbarHeight), QColor(25, 29, 33));
+        painter.setPen(QColor(72, 80, 88));
+        painter.drawLine(0, kToolbarHeight - 1, width(), kToolbarHeight - 1);
+        if (bpm_ > 0.0) {
+            const QRect area = QRect(kHeaderWidth, 0, width() - kHeaderWidth, kToolbarHeight);
+            const double beatFrames = static_cast<double>(markerSampleRate()) * 60.0 / bpm_;
+            for (int beat = 0; beat < 128; ++beat) {
+                const int x = xForFrame(static_cast<qint64>(std::llround(beat * beatFrames)));
+                if (x >= area.right()) break;
+                painter.setPen(beat % 4 == 0 ? QColor(90, 100, 110) : QColor(56, 62, 68));
+                const int gridBottom = kToolbarHeight + visualLaneCount() * kLaneHeight - 1;
+                painter.drawLine(x, 0, x, gridBottom);
+                if (beat % 4 == 0) {
+                    painter.setPen(QColor(168, 176, 184));
+                    painter.drawText(x + 4, 20, QString::number(beat / 4 + 1));
+                }
+            }
+        }
+    }
+
+    void drawOverlays(QPainter& painter)
+    {
+        const int top = kToolbarHeight;
+        const int bottom = kToolbarHeight + visualLaneCount() * kLaneHeight - 1;
+        if (bottom <= top) {
+            return;
+        }
+        const int rate = markerSampleRate();
+        auto drawMarker = [&](qint64 ms, const QColor& color, int width) {
+            if (ms < 0) {
+                return;
+            }
+            const int x = xForFrame(ms * rate / 1000);
+            painter.setPen(QPen(color, width));
+            painter.drawLine(x, top, x, bottom);
+        };
+        if (loopStartMs_ >= 0) {
+            drawMarker(loopStartMs_, QColor(86, 210, 124), 2);
+        }
+        if (loopEndMs_ >= 0) {
+            drawMarker(loopEndMs_, QColor(86, 210, 124), 2);
+        }
+        if (gridRunning_) {
+            const double beatFrames = static_cast<double>(rate) * 60.0 / qMax(1.0, bpm_);
+            const std::uint64_t totalBeats = qMax<std::uint64_t>(1ULL, static_cast<std::uint64_t>(std::ceil(static_cast<double>(viewFrames()) / beatFrames)));
+            const qint64 currentBeatFrame = static_cast<qint64>(std::llround(static_cast<double>(gridAbsoluteBeat_ % totalBeats) * beatFrames));
+            const int x = xForFrame(currentBeatFrame);
+            painter.setPen(QPen(QColor(102, 198, 166, 150), 1));
+            painter.drawLine(x, top, x, bottom);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(102, 198, 166));
+            painter.drawEllipse(QPoint(x, kToolbarHeight - 8), 4, 4);
+        }
+        drawMarker(playheadMs_, QColor(232, 64, 64), 2);
+    }
+
+    void drawLane(QPainter& painter, int row)
+    {
+        const bool realLane = row < lanes_.size();
+        const LooperLane lane = realLane ? lanes_[row].lane : LooperLane{QString(), QString(), QString(), QStringLiteral("Empty Track 1")};
+        const QRect rowRect = laneRect(row);
+        const bool selected = row == selectedLane_;
+        painter.fillRect(rowRect.adjusted(0, 0, 0, -1), selected ? QColor(38, 45, 52) : QColor(31, 36, 41));
+        painter.fillRect(rowRect.adjusted(kHeaderWidth, 0, 0, -1), QColor(18, 20, 22));
+        painter.setPen(QColor(52, 60, 68));
+        painter.drawLine(0, rowRect.bottom(), width(), rowRect.bottom());
+        painter.drawLine(kHeaderWidth, rowRect.top(), kHeaderWidth, rowRect.bottom());
+
+        drawLaneHeader(painter, row, lane, realLane);
+        drawLaneWaveform(painter, row, realLane);
+    }
+
+    QRect controlRect(int row, const QString& control) const
+    {
+        const QRect lane = laneRect(row);
+        if (control == QStringLiteral("mute")) return QRect(30, lane.top() + 36, 70, 20);
+        if (control == QStringLiteral("solo")) return QRect(30, lane.top() + 59, 70, 20);
+        if (control == QStringLiteral("arm")) return QRect(30, lane.top() + 82, 70, 20);
+        if (control == QStringLiteral("rename")) return QRect(kHeaderWidth - 58, lane.top() + 9, 20, 20);
+        if (control == QStringLiteral("remove")) return QRect(kHeaderWidth - 30, lane.top() + 9, 20, 20);
+        return {};
+    }
+
+    QRect gainRect(int row) const
+    {
+        const QRect lane = laneRect(row);
+        return QRect(8, lane.top() + 42, 12, lane.height() - 54);
+    }
+
+    QString controlAt(int row, const QPoint& pos) const
+    {
+        for (const QString& control : {QStringLiteral("mute"), QStringLiteral("solo"), QStringLiteral("arm"), QStringLiteral("rename"), QStringLiteral("remove")}) {
+            if (controlRect(row, control).contains(pos)) return control;
+        }
+        if (gainRect(row).adjusted(-6, -2, 6, 2).contains(pos)) return QStringLiteral("gain");
+        return {};
+    }
+
+    void drawLaneHeader(QPainter& painter, int row, const LooperLane& lane, bool realLane)
+    {
+        const QRect r = laneRect(row);
+        painter.setPen(QColor(210, 216, 222));
+        painter.drawText(
+            QRect(28, r.top() + 8, kHeaderWidth - 92, 22),
+            Qt::AlignLeft | Qt::AlignVCenter,
+            lane.name.isEmpty() ? QStringLiteral("Empty Track %1").arg(row + 1) : lane.name);
+
+        drawButton(painter, controlRect(row, QStringLiteral("mute")), QStringLiteral("Mute"), realLane && lane.muted ? QColor(188, 150, 72) : QColor(50, 56, 62));
+        drawButton(painter, controlRect(row, QStringLiteral("solo")), QStringLiteral("Solo"), realLane && lane.solo ? QColor(84, 148, 112) : QColor(50, 56, 62));
+        drawButton(painter, controlRect(row, QStringLiteral("arm")), QStringLiteral("Record"), row == armedLane_ ? QColor(190, 70, 70) : QColor(50, 56, 62));
+        drawIconButton(painter, controlRect(row, QStringLiteral("rename")), QStringLiteral("pencil"), QColor(42, 48, 54));
+        drawButton(painter, controlRect(row, QStringLiteral("remove")), QStringLiteral("X"), QColor(78, 38, 38));
+
+        const QRect slider = gainRect(row);
+        painter.fillRect(slider, QColor(18, 20, 22));
+        painter.setPen(QColor(76, 86, 96));
+        painter.drawRect(slider.adjusted(0, 0, -1, -1));
+        const double t = qBound(0.0, (lane.gainDb + 60.0) / 72.0, 1.0);
+        const int y = slider.bottom() - static_cast<int>(std::llround(t * slider.height()));
+        painter.fillRect(QRect(slider.left(), y, slider.width(), slider.bottom() - y + 1), QColor(102, 198, 166));
+    }
+
+    void drawButton(QPainter& painter, const QRect& rect, const QString& text, const QColor& fill)
+    {
+        painter.fillRect(rect, fill);
+        painter.setPen(QColor(94, 104, 114));
+        painter.drawRect(rect.adjusted(0, 0, -1, -1));
+        painter.setPen(QColor(230, 234, 236));
+        painter.drawText(rect, Qt::AlignCenter, text);
+    }
+
+    void drawIconButton(QPainter& painter, const QRect& rect, const QString& icon, const QColor& fill)
+    {
+        painter.fillRect(rect, fill);
+        painter.setPen(QColor(94, 104, 114));
+        painter.drawRect(rect.adjusted(0, 0, -1, -1));
+        painter.setPen(QPen(QColor(230, 234, 236), 2));
+        if (icon == QStringLiteral("pencil")) {
+            painter.drawLine(rect.left() + 5, rect.bottom() - 5, rect.right() - 5, rect.top() + 5);
+            painter.drawLine(rect.left() + 4, rect.bottom() - 4, rect.left() + 7, rect.bottom() - 3);
+        }
+    }
+
+    void drawLaneWaveform(QPainter& painter, int row, bool realLane)
+    {
+        const QRect area = laneTimelineRect(row).adjusted(0, 12, -1, -12);
+        painter.setPen(QColor(44, 50, 56));
+        painter.drawLine(area.left(), area.center().y(), area.right(), area.center().y());
+        if (!realLane || row >= lanes_.size() || lanes_[row].sourceFrames <= 0 || lanes_[row].peaks.empty()) {
+            painter.setPen(QColor(90, 98, 106));
+            painter.drawLine(area.left(), area.center().y(), area.right(), area.center().y());
+            return;
+        }
+        const QRect clip = clipRect(row);
+        painter.fillRect(clip, QColor(36, 62, 92));
+        painter.setPen(QColor(132, 205, 180));
+        const auto& peaks = lanes_[row].peaks;
+        const qint64 firstSourceFrame = sourceStart(row);
+        const qint64 croppedFrames = visibleFrames(row);
+        const qint64 sourceFrames = lanes_[row].sourceFrames;
+        for (int x = clip.left(); x <= clip.right(); ++x) {
+            const qint64 frameOffset = static_cast<qint64>(x - clip.left()) * croppedFrames /
+                qMax(1, clip.width());
+            const qint64 sourceFrame = qMin(sourceFrames - 1, firstSourceFrame + frameOffset);
+            const int index = static_cast<int>(qBound<qint64>(
+                0,
+                sourceFrame * static_cast<qint64>(peaks.size()) / sourceFrames,
+                static_cast<qint64>(peaks.size()) - 1));
+            const int half = qMax(2, static_cast<int>(peaks[index] * (clip.height() / 2 - 4)));
+            painter.drawLine(x, clip.center().y() - half, x, clip.center().y() + half);
+        }
+        painter.fillRect(QRect(clip.left(), clip.top(), 6, clip.height()), QColor(115, 190, 255, 150));
+        painter.fillRect(QRect(clip.right() - 5, clip.top(), 6, clip.height()), QColor(115, 190, 255, 150));
+        painter.setPen(QColor(190, 218, 255));
+        painter.drawText(clip.adjusted(6, 2, -6, -2), Qt::AlignLeft | Qt::AlignTop, lanes_[row].lane.name);
+    }
+
+    int laneAt(const QPoint& pos) const
+    {
+        if (pos.y() < kToolbarHeight || pos.y() >= kToolbarHeight + visualLaneCount() * kLaneHeight) return -1;
+        return qBound(0, (pos.y() - kToolbarHeight) / kLaneHeight, visualLaneCount() - 1);
+    }
+
+    void selectLane(int lane)
+    {
+        selectedLane_ = lane;
+        if (onSelected) onSelected(lane);
+        update();
+    }
+
+    void beginGainDrag(int lane, int)
+    {
+        dragMode_ = DragMode::Gain;
+        dragLane_ = lane;
+        pendingGainDb_ = lanes_.value(lane).lane.gainDb;
+    }
+
+    void applyDragPreview(double x)
+    {
+        if (dragLane_ < 0 || dragLane_ >= lanes_.size()) return;
+        const qint64 delta = frameDeltaForX(x - dragStartX_);
+        LooperLane& lane = lanes_[dragLane_].lane;
+        if (dragMode_ == DragMode::Move) {
+            lane.startFrame = snapTimelineFrame(dragStartFrame_ + delta);
+        } else if (dragMode_ == DragMode::LeftEdge) {
+            const qint64 minSourceStart = qMax<qint64>(0, dragSourceStartFrame_ - dragStartFrame_);
+            const qint64 snappedTimelineStart = snapTimelineFrame(dragStartFrame_ + delta);
+            const qint64 snappedSourceStart = dragSourceStartFrame_ + snappedTimelineStart - dragStartFrame_;
+            const qint64 next = qBound<qint64>(minSourceStart, snappedSourceStart, dragSourceEndFrame_ - 1);
+            lane.loopStartFrame = next == 0 && dragSourceEndFrame_ == lanes_[dragLane_].sourceFrames ? -1 : next;
+            lane.loopEndFrame = next == 0 && dragSourceEndFrame_ == lanes_[dragLane_].sourceFrames ? -1 : dragSourceEndFrame_;
+            lane.startFrame = dragStartFrame_ + (next - dragSourceStartFrame_);
+        } else if (dragMode_ == DragMode::RightEdge) {
+            const qint64 originalTimelineEnd = dragStartFrame_ + (dragSourceEndFrame_ - dragSourceStartFrame_);
+            const qint64 snappedTimelineEnd = snapTimelineFrame(originalTimelineEnd + delta);
+            const qint64 snappedSourceEnd = dragSourceStartFrame_ + snappedTimelineEnd - dragStartFrame_;
+            const qint64 next = qBound<qint64>(dragSourceStartFrame_ + 1, snappedSourceEnd, lanes_[dragLane_].sourceFrames);
+            lane.loopStartFrame = dragSourceStartFrame_ == 0 && next == lanes_[dragLane_].sourceFrames ? -1 : dragSourceStartFrame_;
+            lane.loopEndFrame = dragSourceStartFrame_ == 0 && next == lanes_[dragLane_].sourceFrames ? -1 : next;
+        }
+        lane.stopFrame = lane.startFrame + visibleFrames(dragLane_);
+    }
+
+    QVector<LaneView> lanes_;
+    int selectedLane_ = -1;
+    int activeBank_ = 0;
+    int armedLane_ = -1;
+    double bpm_ = 120.0;
+    bool gridLockEnabled_ = true;
+    std::uint64_t gridAbsoluteBeat_ = 0;
+    bool gridRunning_ = false;
+    qint64 playheadMs_ = -1;
+    qint64 loopStartMs_ = -1;
+    qint64 loopEndMs_ = -1;
+    int markerSampleRate_ = 48000;
+    DragMode dragMode_ = DragMode::None;
+    int dragLane_ = -1;
+    double dragStartX_ = 0.0;
+    qint64 dragStartFrame_ = 0;
+    qint64 dragSourceStartFrame_ = 0;
+    qint64 dragSourceEndFrame_ = 0;
+    double pendingGainDb_ = 0.0;
 };
 
 class LevelMeterWidget : public QWidget {
@@ -585,390 +1438,6 @@ protected:
 
 private:
     double level_ = 0.0;
-};
-
-struct Pcm16Wav {
-    int sampleRate = 0;
-    int channels = 0;
-    std::vector<std::vector<float>> samples;
-};
-
-class TrackPlaybackDevice : public QIODevice {
-    struct FocusState {
-        double x1 = 0.0;
-        double x2 = 0.0;
-        double y1 = 0.0;
-        double y2 = 0.0;
-    };
-
-public:
-    explicit TrackPlaybackDevice(QObject* parent = nullptr)
-        : QIODevice(parent)
-    {
-    }
-
-    void setTrack(Pcm16Wav wav)
-    {
-        wav_ = std::move(wav);
-        const int channels = qMax(1, wav_.channels);
-        stretch_.presetDefault(channels, static_cast<float>(qMax(1, wav_.sampleRate)), true);
-        inputBlock_.assign(channels, std::vector<float>(kMaxInputFrames, 0.0f));
-        outputBlock_.assign(channels, std::vector<float>(kMaxOutputFrames, 0.0f));
-        focusState_.assign(channels, FocusState{});
-        sourceFrame_ = 0.0;
-        positionFrame_.store(0, std::memory_order_relaxed);
-        pendingSeekFrame_.store(0, std::memory_order_relaxed);
-        lastPitchCents_ = std::numeric_limits<int>::min();
-        lastFocusEnabled_ = false;
-        lastFocusFrequencyHz_ = -1.0;
-        lastFocusGainDb_ = 0.0;
-        lastFocusQ_ = 0.0;
-        stretch_.reset();
-    }
-
-    bool hasTrack() const
-    {
-        return wav_.sampleRate > 0 && wav_.channels > 0 && !wav_.samples.empty() && !wav_.samples.front().empty();
-    }
-
-    int sampleRate() const
-    {
-        return qMax(1, wav_.sampleRate);
-    }
-
-    int channels() const
-    {
-        return qMax(1, wav_.channels);
-    }
-
-    qint64 durationMs() const
-    {
-        if (!hasTrack()) {
-            return 0;
-        }
-        return static_cast<qint64>(std::llround(static_cast<double>(frameCount()) * 1000.0 / sampleRate()));
-    }
-
-    qint64 positionMs() const
-    {
-        return static_cast<qint64>(positionFrame_.load(std::memory_order_relaxed) * 1000 / sampleRate());
-    }
-
-    qint64 audiblePositionMs(qint64 queuedOutputFrames, double sourceFramesPerOutputFrame) const
-    {
-        qint64 frame = positionFrame_.load(std::memory_order_relaxed);
-        qint64 queuedSourceFrames = static_cast<qint64>(std::llround(
-            static_cast<double>(qMax<qint64>(0, queuedOutputFrames)) *
-            qBound(0.10, sourceFramesPerOutputFrame, 2.0)));
-        const bool looping = loopEnabled_.load(std::memory_order_relaxed);
-        const qint64 loopStart = loopStartFrame_.load(std::memory_order_relaxed);
-        const qint64 loopEnd = loopEndFrame_.load(std::memory_order_relaxed);
-        if (looping && loopEnd > loopStart && frame >= loopStart && frame < loopEnd) {
-            const qint64 loopLength = loopEnd - loopStart;
-            queuedSourceFrames %= loopLength;
-            const qint64 offset = frame - loopStart;
-            frame = queuedSourceFrames <= offset
-                ? frame - queuedSourceFrames
-                : loopEnd - (queuedSourceFrames - offset);
-        } else {
-            frame = qMax<qint64>(0, frame - queuedSourceFrames);
-        }
-        return qBound<qint64>(0, static_cast<qint64>(frame * 1000 / sampleRate()), durationMs());
-    }
-
-    void setPositionMs(qint64 ms)
-    {
-        const qint64 frame = qBound<qint64>(0, ms * sampleRate() / 1000, frameCount());
-        positionFrame_.store(frame, std::memory_order_relaxed);
-        pendingSeekFrame_.store(frame, std::memory_order_relaxed);
-    }
-
-    void setSpeed(double speed)
-    {
-        speedPpm_.store(static_cast<int>(qBound(0.10, speed, 2.0) * 1000000.0), std::memory_order_relaxed);
-    }
-
-    void setPitchCents(int cents)
-    {
-        pitchCents_.store(qBound(-1200, cents, 1200), std::memory_order_relaxed);
-    }
-
-    void setGainDb(double gainDb)
-    {
-        gainPpm_.store(static_cast<int>(std::pow(10.0, qBound(-60.0, gainDb, 12.0) / 20.0) * 1000000.0), std::memory_order_relaxed);
-    }
-
-    double takePeak()
-    {
-        return static_cast<double>(peakPpm_.exchange(0, std::memory_order_relaxed)) / 1000000.0;
-    }
-
-    void setFocus(bool enabled, double frequencyHz, double gainDb, double q)
-    {
-        focusEnabled_.store(enabled, std::memory_order_relaxed);
-        focusFrequencyHz_.store(qBound(20.0, frequencyHz, static_cast<double>(sampleRate()) * 0.45), std::memory_order_relaxed);
-        focusGainDb_.store(qBound(-24.0, gainDb, 24.0), std::memory_order_relaxed);
-        focusQ_.store(qBound(0.1, q, 20.0), std::memory_order_relaxed);
-    }
-
-    void setLoop(bool enabled, qint64 startMs, qint64 endMs)
-    {
-        loopEnabled_.store(enabled, std::memory_order_relaxed);
-        loopStartFrame_.store(qBound<qint64>(0, startMs * sampleRate() / 1000, frameCount()), std::memory_order_relaxed);
-        loopEndFrame_.store(qBound<qint64>(0, endMs * sampleRate() / 1000, frameCount()), std::memory_order_relaxed);
-    }
-
-    qint64 bytesAvailable() const override
-    {
-        return kMaxOutputFrames * channels() * 2 + QIODevice::bytesAvailable();
-    }
-
-    bool isSequential() const override
-    {
-        return true;
-    }
-
-protected:
-    qint64 readData(char* data, qint64 maxSize) override
-    {
-        if (!hasTrack() || maxSize <= 0) {
-            return 0;
-        }
-        applyPendingSeek();
-        const int channelCount = channels();
-        const int requestedFrames = static_cast<int>(maxSize / (channelCount * 2));
-        const int outputFrames = qBound(0, requestedFrames, kMaxOutputFrames);
-        if (outputFrames <= 0) {
-            return 0;
-        }
-
-        const double speed = static_cast<double>(speedPpm_.load(std::memory_order_relaxed)) / 1000000.0;
-        const int pitchCents = pitchCents_.load(std::memory_order_relaxed);
-        const double gain = static_cast<double>(gainPpm_.load(std::memory_order_relaxed)) / 1000000.0;
-
-        if (pitchCents != lastPitchCents_) {
-            stretch_.setTransposeSemitones(static_cast<float>(pitchCents) / 100.0f);
-            lastPitchCents_ = pitchCents;
-        }
-        updateFocusCoefficients();
-
-        if (std::abs(speed - 1.0) <= 0.0001 && pitchCents == 0) {
-            renderDirect(outputFrames, gain, data);
-        } else {
-            renderStretched(outputFrames, speed, gain, data);
-        }
-        positionFrame_.store(qBound<qint64>(0, static_cast<qint64>(std::llround(sourceFrame_)), frameCount()), std::memory_order_relaxed);
-        return static_cast<qint64>(outputFrames) * channelCount * 2;
-    }
-
-    qint64 writeData(const char*, qint64) override
-    {
-        return -1;
-    }
-
-private:
-    static constexpr int kMaxOutputFrames = 4096;
-    static constexpr int kMaxInputFrames = kMaxOutputFrames * 2 + 16;
-
-    qint64 frameCount() const
-    {
-        return hasTrack() ? static_cast<qint64>(wav_.samples.front().size()) : 0;
-    }
-
-    void applyPendingSeek()
-    {
-        const qint64 pending = pendingSeekFrame_.exchange(-1, std::memory_order_relaxed);
-        if (pending >= 0) {
-            sourceFrame_ = static_cast<double>(qBound<qint64>(0, pending, frameCount()));
-            positionFrame_.store(static_cast<qint64>(sourceFrame_), std::memory_order_relaxed);
-            stretch_.reset();
-            resetFocusState();
-        }
-    }
-
-    void advanceFrame()
-    {
-        const bool looping = loopEnabled_.load(std::memory_order_relaxed);
-        const qint64 loopStart = loopStartFrame_.load(std::memory_order_relaxed);
-        const qint64 loopEnd = loopEndFrame_.load(std::memory_order_relaxed);
-        if (looping && loopEnd > loopStart && sourceFrame_ >= static_cast<double>(loopEnd)) {
-            sourceFrame_ = static_cast<double>(loopStart);
-            stretch_.reset();
-            resetFocusState();
-        }
-    }
-
-    void resetFocusState()
-    {
-        for (FocusState& state : focusState_) {
-            state = {};
-        }
-    }
-
-    void updateFocusCoefficients()
-    {
-        const bool enabled = focusEnabled_.load(std::memory_order_relaxed);
-        const double frequencyHz = focusFrequencyHz_.load(std::memory_order_relaxed);
-        const double gainDb = focusGainDb_.load(std::memory_order_relaxed);
-        const double q = focusQ_.load(std::memory_order_relaxed);
-        if (enabled == lastFocusEnabled_ &&
-            std::abs(frequencyHz - lastFocusFrequencyHz_) < 0.001 &&
-            std::abs(gainDb - lastFocusGainDb_) < 0.001 &&
-            std::abs(q - lastFocusQ_) < 0.001) {
-            return;
-        }
-
-        lastFocusEnabled_ = enabled;
-        lastFocusFrequencyHz_ = frequencyHz;
-        lastFocusGainDb_ = gainDb;
-        lastFocusQ_ = q;
-        if (!enabled || std::abs(gainDb) < 0.001) {
-            focusA0_ = 1.0;
-            focusA1_ = 0.0;
-            focusA2_ = 0.0;
-            focusB1_ = 0.0;
-            focusB2_ = 0.0;
-            resetFocusState();
-            return;
-        }
-
-        const double clampedFrequency = qBound(20.0, frequencyHz, static_cast<double>(sampleRate()) * 0.45);
-        const double omega = 2.0 * 3.14159265358979323846 * clampedFrequency / static_cast<double>(sampleRate());
-        const double sinOmega = std::sin(omega);
-        const double cosOmega = std::cos(omega);
-        const double alpha = sinOmega / (2.0 * qBound(0.1, q, 20.0));
-        const double makeup = std::pow(10.0, gainDb / 20.0);
-
-        const double b0 = alpha;
-        const double b1 = 0.0;
-        const double b2 = -alpha;
-        const double a0 = 1.0 + alpha;
-        const double a1 = -2.0 * cosOmega;
-        const double a2 = 1.0 - alpha;
-
-        focusA0_ = makeup * b0 / a0;
-        focusA1_ = makeup * b1 / a0;
-        focusA2_ = makeup * b2 / a0;
-        focusB1_ = a1 / a0;
-        focusB2_ = a2 / a0;
-        resetFocusState();
-    }
-
-    double processFocusSample(int channel, double sample)
-    {
-        if (!lastFocusEnabled_ || channel < 0 || channel >= static_cast<int>(focusState_.size())) {
-            return sample;
-        }
-        FocusState& state = focusState_[channel];
-        const double output = focusA0_ * sample + focusA1_ * state.x1 + focusA2_ * state.x2 - focusB1_ * state.y1 - focusB2_ * state.y2;
-        state.x2 = state.x1;
-        state.x1 = sample;
-        state.y2 = state.y1;
-        state.y1 = output;
-        return output;
-    }
-
-    float sampleAt(int channel, qint64 frame) const
-    {
-        if (frame < 0 || frame >= frameCount() || channel < 0 || channel >= wav_.channels) {
-            return 0.0f;
-        }
-        return wav_.samples[channel][static_cast<std::size_t>(frame)];
-    }
-
-    void fillInput(int inputFrames)
-    {
-        const int channelCount = channels();
-        for (int frame = 0; frame < inputFrames; ++frame) {
-            advanceFrame();
-            const qint64 source = static_cast<qint64>(sourceFrame_);
-            for (int channel = 0; channel < channelCount; ++channel) {
-                inputBlock_[channel][frame] = sampleAt(channel, source);
-            }
-            sourceFrame_ += 1.0;
-        }
-    }
-
-    void renderDirect(int outputFrames, double gain, char* data)
-    {
-        auto* output = reinterpret_cast<qint16*>(data);
-        const int channelCount = channels();
-        double peak = 0.0;
-        for (int frame = 0; frame < outputFrames; ++frame) {
-            advanceFrame();
-            const qint64 source = static_cast<qint64>(sourceFrame_);
-            for (int channel = 0; channel < channelCount; ++channel) {
-                const double focused = processFocusSample(channel, static_cast<double>(sampleAt(channel, source)));
-                const double sample = qBound(-1.0, focused * gain, 1.0);
-                peak = std::max(peak, std::abs(sample));
-                *output++ = static_cast<qint16>(std::lrint(sample * 32767.0));
-            }
-            sourceFrame_ += 1.0;
-        }
-        updatePeak(peak);
-    }
-
-    void renderStretched(int outputFrames, double speed, double gain, char* data)
-    {
-        const int channelCount = channels();
-        const int inputFrames = qBound(1, static_cast<int>(std::ceil(outputFrames * speed)), kMaxInputFrames);
-        fillInput(inputFrames);
-        for (int channel = 0; channel < channelCount; ++channel) {
-            std::fill(outputBlock_[channel].begin(), outputBlock_[channel].begin() + outputFrames, 0.0f);
-        }
-        stretch_.process(inputBlock_, inputFrames, outputBlock_, outputFrames);
-
-        auto* output = reinterpret_cast<qint16*>(data);
-        double peak = 0.0;
-        for (int frame = 0; frame < outputFrames; ++frame) {
-            for (int channel = 0; channel < channelCount; ++channel) {
-                const double focused = processFocusSample(channel, static_cast<double>(outputBlock_[channel][frame]));
-                const double sample = qBound(-1.0, focused * gain, 1.0);
-                peak = std::max(peak, std::abs(sample));
-                *output++ = static_cast<qint16>(std::lrint(sample * 32767.0));
-            }
-        }
-        updatePeak(peak);
-    }
-
-    void updatePeak(double peak)
-    {
-        const int candidate = static_cast<int>(qBound(0.0, peak, 1.0) * 1000000.0);
-        int current = peakPpm_.load(std::memory_order_relaxed);
-        while (candidate > current &&
-               !peakPpm_.compare_exchange_weak(current, candidate, std::memory_order_relaxed, std::memory_order_relaxed)) {
-        }
-    }
-
-    Pcm16Wav wav_;
-    signalsmith::stretch::SignalsmithStretch<float> stretch_;
-    std::vector<std::vector<float>> inputBlock_;
-    std::vector<std::vector<float>> outputBlock_;
-    std::vector<FocusState> focusState_;
-    double sourceFrame_ = 0.0;
-    int lastPitchCents_ = std::numeric_limits<int>::min();
-    std::atomic<int> speedPpm_{1000000};
-    std::atomic<int> pitchCents_{0};
-    std::atomic<int> gainPpm_{1000000};
-    std::atomic<bool> focusEnabled_{false};
-    std::atomic<double> focusFrequencyHz_{120.0};
-    std::atomic<double> focusGainDb_{12.0};
-    std::atomic<double> focusQ_{6.0};
-    std::atomic<qint64> pendingSeekFrame_{-1};
-    std::atomic<qint64> positionFrame_{0};
-    std::atomic<bool> loopEnabled_{false};
-    std::atomic<qint64> loopStartFrame_{0};
-    std::atomic<qint64> loopEndFrame_{0};
-    std::atomic<int> peakPpm_{0};
-    bool lastFocusEnabled_ = false;
-    double lastFocusFrequencyHz_ = -1.0;
-    double lastFocusGainDb_ = 0.0;
-    double lastFocusQ_ = 0.0;
-    double focusA0_ = 1.0;
-    double focusA1_ = 0.0;
-    double focusA2_ = 0.0;
-    double focusB1_ = 0.0;
-    double focusB2_ = 0.0;
 };
 
 namespace {
@@ -1244,11 +1713,6 @@ QString deviceId(const QString& text)
     return match.hasMatch() ? match.captured(1) : text.trimmed();
 }
 
-QString audioDeviceIdText(const QAudioDevice& device)
-{
-    return QString::fromLatin1(device.id().toHex());
-}
-
 struct WavMetadata {
     int audioFormat = 0;
     int sampleRate = 0;
@@ -1319,19 +1783,19 @@ bool isImportablePcm16Wav(const QString& path, QString* reason = nullptr)
         const WavMetadata metadata = readWavMetadata(path);
         if (metadata.audioFormat != 1) {
             if (reason) {
-                *reason = QStringLiteral("capture WAV is not PCM format");
+                *reason = QStringLiteral("recorded WAV is not PCM format");
             }
             return false;
         }
         if (metadata.channels <= 0 || metadata.sampleRate <= 0 || metadata.bitsPerSample != 16) {
             if (reason) {
-                *reason = QStringLiteral("capture WAV must be PCM16 with a valid sample rate and channel count");
+                *reason = QStringLiteral("recorded WAV must be PCM16 with a valid sample rate and channel count");
             }
             return false;
         }
         if (metadata.dataBytes <= 0) {
             if (reason) {
-                *reason = QStringLiteral("capture WAV contains no audio frames; the recording was silent or trimming removed all audio");
+                *reason = QStringLiteral("recorded WAV contains no audio frames; the recording was silent or trimming removed all audio");
             }
             return false;
         }
@@ -1372,67 +1836,6 @@ QJsonObject readSidecarJson(const QString& wavPath)
     }
     const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
     return document.isObject() ? document.object() : QJsonObject{};
-}
-
-Pcm16Wav readPcm16Wav(const QString& path)
-{
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        throw std::runtime_error(QStringLiteral("failed to open WAV: %1").arg(path).toStdString());
-    }
-    const QByteArray bytes = file.readAll();
-    if (bytes.size() < 12 || bytes.mid(0, 4) != "RIFF" || bytes.mid(8, 4) != "WAVE") {
-        throw std::runtime_error("not a RIFF/WAVE file");
-    }
-
-    int channels = 0;
-    int sampleRate = 0;
-    int bitsPerSample = 0;
-    qsizetype dataOffset = -1;
-    qsizetype dataBytes = 0;
-    qsizetype offset = 12;
-    while (offset + 8 <= bytes.size()) {
-        const QByteArray id = bytes.mid(offset, 4);
-        const quint32 size = readLe32(bytes, offset + 4);
-        const qsizetype payload = offset + 8;
-        if (payload + size > bytes.size()) {
-            break;
-        }
-        if (id == "fmt " && size >= 16) {
-            const quint16 format = readLe16(bytes, payload);
-            channels = readLe16(bytes, payload + 2);
-            sampleRate = static_cast<int>(readLe32(bytes, payload + 4));
-            bitsPerSample = readLe16(bytes, payload + 14);
-            if (format != 1) {
-                throw std::runtime_error("only PCM WAV input is supported for track playback");
-            }
-        } else if (id == "data") {
-            dataOffset = payload;
-            dataBytes = size;
-        }
-        offset = payload + size + (size % 2);
-    }
-
-    if (dataOffset >= 0 && dataBytes <= 0) {
-        throw std::runtime_error("WAV contains no audio frames");
-    }
-    if (channels <= 0 || sampleRate <= 0 || bitsPerSample != 16 || dataOffset < 0) {
-        throw std::runtime_error("track playback currently supports PCM16 WAV input");
-    }
-    const qsizetype frameBytes = channels * 2;
-    const qsizetype frames = dataBytes / frameBytes;
-    Pcm16Wav wav;
-    wav.sampleRate = sampleRate;
-    wav.channels = channels;
-    wav.samples.assign(channels, std::vector<float>(static_cast<std::size_t>(frames), 0.0f));
-    for (qsizetype frame = 0; frame < frames; ++frame) {
-        for (int channel = 0; channel < channels; ++channel) {
-            const qsizetype sampleOffset = dataOffset + frame * frameBytes + channel * 2;
-            const qint16 sample = static_cast<qint16>(readLe16(bytes, sampleOffset));
-            wav.samples[channel][static_cast<std::size_t>(frame)] = static_cast<float>(sample) / 32768.0f;
-        }
-    }
-    return wav;
 }
 
 QString onOff(bool value)
@@ -1512,14 +1915,24 @@ MainWindow::MainWindow(QWidget* parent)
 {
     installJam2Style();
     generateSession();
+    transientProjectFolder_ = appReleaseFolderPath(
+        QStringLiteral("song_staging/") + QUuid::createUuid().toString(QUuid::WithoutBraces));
+    QDir().mkpath(QDir(transientProjectFolder_).absoluteFilePath(QStringLiteral("wavs")));
     buildUi();
+    savedProjectSnapshot_ = currentProjectSnapshot();
     QApplication::instance()->installEventFilter(this);
 
     jam2_.onOutputLine = [this](const QString& line) { handleOutputLine(line); };
     jam2_.onErrorLine = [this](const QString& line) { appendLog(QStringLiteral("stderr: ") + line); };
     jam2_.onStatus = [this](const QJsonObject& status) { handleStatus(status); };
     jam2_.onFinished = [this](int code) {
+        const bool endedJam = !localEngineActive_;
         appendLog(QStringLiteral("jam2 exited rc=%1").arg(code));
+        localEngineActive_ = false;
+        if (replacingLocalEngine_) {
+            replacingLocalEngine_ = false;
+            return;
+        }
         if (meshRestarting_) {
             return;
         }
@@ -1535,16 +1948,10 @@ MainWindow::MainWindow(QWidget* parent)
         meshPeerEndpoints_.clear();
         currentMeshPeers_.clear();
         pendingMeshInvitePopup_ = false;
-        if (localMetronomeSink_) {
-            localMetronomeSink_->stop();
-            localMetronomeSink_.reset();
-        }
-        if (localMetronomeDevice_) {
-            localMetronomeDevice_->close();
-            localMetronomeDevice_.reset();
-        }
+        remotePeerConnected_ = false;
         localMetronomeRunning_ = false;
         localMetronomeLeader_ = false;
+        playbackGrid_.clearEngine();
         if (trackMetronomeLabel_) {
             trackMetronomeLabel_->setText(QStringLiteral("Local metronome stopped"));
         }
@@ -1560,23 +1967,39 @@ MainWindow::MainWindow(QWidget* parent)
         if (refreshControlButton_) {
             refreshControlButton_->setEnabled(false);
         }
-        if (localOutputBox_) {
-            localOutputBox_->setEnabled(true);
-        }
         jamRecordingActive_ = false;
         updateJamRecordingControls();
         updateMixControls();
         setMixRemotePeerVisible(false);
+        const bool restoreLocal = !shuttingDown_ && (returnToLocalAfterStop_ || endedJam);
+        returnToLocalAfterStop_ = false;
+        if (restoreLocal) {
+            QTimer::singleShot(0, this, [this] {
+                if (!shuttingDown_ && !jam2_.isRunning()) {
+                    startLocalPerform();
+                }
+            });
+        }
     };
     controlServer_.onState = [this](const QString& state) { handleControlState(state, true); };
     controlServer_.onMessage = [this](const QJsonObject& message) { handleControlMessage(message); };
     controlServer_.onAuthenticated = [this](const QString& token, const QJsonObject& message) {
         handleMeshPeerAuthenticated(token, message);
     };
+    controlServer_.onDisconnected = [this](const QString& token) {
+        if (meshActive_ && meshPeerEndpoints_.remove(token) > 0) {
+            broadcastMeshPeerList();
+            updateMixRemotePeers();
+            restartMeshEngineFromPeerList();
+        }
+    };
     controlClient_.onState = [this](const QString& state) { handleControlState(state, false); };
     controlClient_.onMessage = [this](const QJsonObject& message) { handleControlMessage(message); };
     controlReconnectTimer_.setInterval(2000);
     QObject::connect(&controlReconnectTimer_, &QTimer::timeout, this, [this] { refreshControlConnection(); });
+    playbackGridTimer_.setInterval(16);
+    QObject::connect(&playbackGridTimer_, &QTimer::timeout, this, [this] { updatePlaybackGrid(); });
+    playbackGridTimer_.start();
     QObject::connect(&guiControlServer_, &QTcpServer::newConnection, this, [this] {
         while (guiControlServer_.hasPendingConnections()) {
             QTcpSocket* next = guiControlServer_.nextPendingConnection();
@@ -1599,45 +2022,6 @@ MainWindow::MainWindow(QWidget* parent)
             updateRuntimeControls();
         }
     });
-    QObject::connect(&captureProcess_, &QProcess::readyReadStandardOutput, this, [this] {
-        const QString text = QString::fromUtf8(captureProcess_.readAllStandardOutput());
-        for (const QString& line : text.split(QLatin1Char('\n'))) {
-            if (!line.trimmed().isEmpty()) {
-                handleCaptureOutputLine(line.trimmed());
-            }
-        }
-    });
-    QObject::connect(&captureProcess_, &QProcess::readyReadStandardError, this, [this] {
-        const QString text = QString::fromUtf8(captureProcess_.readAllStandardError());
-        for (const QString& line : text.split(QLatin1Char('\n'))) {
-            if (!line.trimmed().isEmpty()) {
-                appendLog(QStringLiteral("capture stderr: ") + line.trimmed());
-            }
-        }
-    });
-    QObject::connect(&captureProcess_, &QProcess::finished, this, [this](int exitCode, QProcess::ExitStatus) {
-        appendLog(QStringLiteral("capture exited rc=%1").arg(exitCode));
-        if (captureButton_) {
-            captureButton_->setEnabled(true);
-        }
-        if (loopbackCaptureButton_) {
-            loopbackCaptureButton_->setEnabled(true);
-        }
-        if (stopCaptureButton_) {
-            stopCaptureButton_->setEnabled(false);
-        }
-        if (importCaptureButton_) {
-            bool importable = false;
-            if (exitCode == 0 && QFileInfo::exists(lastCapturePath_)) {
-                QString reason;
-                importable = isImportablePcm16Wav(lastCapturePath_, &reason);
-                if (!importable && !reason.isEmpty()) {
-                    appendLog(QStringLiteral("capture not importable: ") + reason);
-                }
-            }
-            importCaptureButton_->setEnabled(importable);
-        }
-    });
     trackTimelineTimer_.setInterval(33);
     QObject::connect(&trackTimelineTimer_, &QTimer::timeout, this, [this] { updateTrackTimeline(); });
     trackTimelineTimer_.start();
@@ -1645,8 +2029,54 @@ MainWindow::MainWindow(QWidget* parent)
 
 MainWindow::~MainWindow()
 {
+    shuttingDown_ = true;
     QApplication::instance()->removeEventFilter(this);
-    stopJam();
+    stopJam(false);
+}
+
+void MainWindow::closeEvent(QCloseEvent* event)
+{
+    bool hasTransientWavs = false;
+    for (const QString& path : std::as_const(transientTrackWavs_)) {
+        if (QFileInfo::exists(path)) {
+            hasTransientWavs = true;
+            break;
+        }
+    }
+    hasTransientWavs = hasTransientWavs || !pendingTransientCapturePath_.isEmpty();
+    if (hasUnsavedProjectChanges() || hasTransientWavs) {
+        QMessageBox dialog(
+            QMessageBox::Question,
+            QStringLiteral("Close Jam2"),
+            QStringLiteral("Save this project before closing?"),
+            QMessageBox::NoButton,
+            this);
+        QPushButton* save = dialog.addButton(QStringLiteral("Save Project"), QMessageBox::AcceptRole);
+        QPushButton* discard = dialog.addButton(QStringLiteral("Discard"), QMessageBox::DestructiveRole);
+        QPushButton* cancel = dialog.addButton(QMessageBox::Cancel);
+        dialog.setInformativeText(QStringLiteral(
+            "Discarding removes temporary Track-view WAVs created or staged in this session."));
+        dialog.exec();
+        if (dialog.clickedButton() == cancel || dialog.clickedButton() == nullptr) {
+            event->ignore();
+            return;
+        }
+        if (dialog.clickedButton() == save && !saveSong()) {
+            event->ignore();
+            return;
+        }
+    }
+    shuttingDown_ = true;
+    stopJam(false);
+    if (loopbackRecorder_.isRunning()) {
+        loopbackRecorder_.stop();
+    }
+    if (!pendingTransientCapturePath_.isEmpty()) {
+        registerTransientTrackWav(pendingTransientCapturePath_);
+        pendingTransientCapturePath_.clear();
+    }
+    cleanupTransientTrackWavs();
+    event->accept();
 }
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event)
@@ -1678,6 +2108,11 @@ void MainWindow::buildUi()
     auto* header = new QHBoxLayout();
     header->addWidget(titleLabel_);
     header->addStretch(1);
+    engineModeLabel_ = new QLabel(QStringLiteral("Local"), this);
+    engineModeLabel_->setObjectName(QStringLiteral("StatusPill"));
+    engineModeLabel_->setAlignment(Qt::AlignCenter);
+    engineModeLabel_->setMinimumWidth(72);
+    header->addWidget(engineModeLabel_);
     header->addWidget(connectionLabel_);
 
     songTitleEdit_ = new QLineEdit(chordModel_.title(), this);
@@ -1814,8 +2249,10 @@ void MainWindow::buildUi()
 
     QTimer::singleShot(0, this, [this] {
         refreshDevices();
-        refreshLocalOutputs();
         refreshLoopbackSources();
+        if (!jam2_.isRunning()) {
+            showLocalPerformSetup();
+        }
     });
 }
 
@@ -1881,7 +2318,6 @@ QWidget* MainWindow::buildSessionPage()
     osPriorityBox_->addItem(QStringLiteral("Off"), QStringLiteral("off"));
     deviceBox_ = new QComboBox(page);
     deviceBox_->setEditable(true);
-    localOutputBox_ = new QComboBox(page);
     inputChannelsEdit_ = new QLineEdit(QStringLiteral("1"), page);
     outputChannelsEdit_ = new QLineEdit(QStringLiteral("1,2"), page);
     sampleRateSpin_ = new QSpinBox(page);
@@ -1957,8 +2393,6 @@ QWidget* MainWindow::buildSessionPage()
     generatedUrlEdit_->setMinimumWidth(420);
     deviceBox_->setEditable(false);
     deviceBox_->setMinimumWidth(280);
-    localOutputBox_->setMinimumWidth(280);
-    applyMutedEditorStyle(localOutputBox_);
     const QList<QWidget*> sessionEditors{
         modeBox_, jam2PathEdit_, bindHostEdit_, portSpin_, publicHostEdit_, connectUrlEdit_,
         generatedUrlEdit_, stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, waitMsSpin_,
@@ -2065,11 +2499,17 @@ QWidget* MainWindow::buildTrackPage()
 {
     auto* page = new QWidget(this);
     trackNameLabel_ = new QLabel(QStringLiteral("Track: No track loaded"), page);
+    gridPositionLabel_ = new QLabel(QStringLiteral("Grid: stopped"), page);
+    gridScheduleLabel_ = new QLabel(QStringLiteral("Grid lock: idle"), page);
+    recordingCountdownLabel_ = new QLabel(page);
+    recordingCountdownLabel_->setAlignment(Qt::AlignCenter);
+    recordingCountdownLabel_->setMinimumHeight(72);
+    recordingCountdownLabel_->setStyleSheet(QStringLiteral(
+        "QLabel { background: #171b1e; border: 1px solid #66c6a6; color: #f2f5f4; font-size: 34px; font-weight: 700; }"));
+    recordingCountdownLabel_->hide();
 
-    auto* loadButton = new QPushButton(QStringLiteral("Load WAV"), page);
-    shareTrackFileButton_ = new QPushButton(QStringLiteral("Share WAV"), page);
-
-    trackWaveform_ = new WaveformWidget(page);
+    trackWaveform_ = nullptr;
+    looperStack_ = new LooperLaneStackWidget(page);
     trackSpeedSlider_ = new QSlider(Qt::Horizontal, page);
     trackSpeedSlider_->setRange(10, 200);
     trackSpeedSlider_->setValue(100);
@@ -2107,11 +2547,10 @@ QWidget* MainWindow::buildTrackPage()
     focusFrequencySpin_->setSuffix(QStringLiteral(" Hz"));
     focusFrequencySpin_->setFixedWidth(108);
     applyMutedEditorStyle(focusFrequencySpin_);
-    auto* syncBox = new QCheckBox(QStringLiteral("Sync track controls"), page);
-    syncBox->setChecked(true);
-    capturePathEdit_ = new QLineEdit(SessionController::defaultCapturePath(), page);
-    capturePathEdit_->setMinimumWidth(420);
-    applyMutedEditorStyle(capturePathEdit_);
+    trackSyncCheck_ = new QCheckBox(QStringLiteral("Sync track controls"), page);
+    trackSyncCheck_->setChecked(looperProject_.trackSyncEnabled());
+    auto* gridLockBox = new QCheckBox(QStringLiteral("Lock to grid"), page);
+    gridLockBox->setChecked(looperProject_.gridLockEnabled());
     captureOutputEdit_ = new QLineEdit(page);
     captureOutputEdit_->setMinimumWidth(420);
     applyMutedEditorStyle(captureOutputEdit_);
@@ -2122,6 +2561,26 @@ QWidget* MainWindow::buildTrackPage()
     applyMutedEditorStyle(loopbackSourceBox_);
     captureManualStopCheck_ = new QCheckBox(QStringLiteral("Record until stopped"), page);
     captureManualStopCheck_->setChecked(true);
+    captureCountInCheck_ = new QCheckBox(QStringLiteral("Count-in"), page);
+    captureCountInCheck_->setChecked(true);
+    captureCountInMetronomeCheck_ = new QCheckBox(QStringLiteral("Metronome during count-in"), page);
+    captureCountInMetronomeCheck_->setChecked(true);
+    captureKeepMetronomeCheck_ = new QCheckBox(QStringLiteral("Keep metronome on while recording"), page);
+    captureKeepMetronomeCheck_->setChecked(false);
+    captureCountInBarsSpin_ = new QSpinBox(page);
+    captureCountInBarsSpin_->setRange(1, 8);
+    captureCountInBarsSpin_->setValue(1);
+    captureCountInBarsSpin_->setSuffix(QStringLiteral(" bars"));
+    captureCountInBarsSpin_->setMinimumWidth(120);
+    applyMutedEditorStyle(captureCountInBarsSpin_);
+    recordingLatencyLabel_ = new QLabel(QStringLiteral("Waiting for engine latency data"), page);
+    recordingLatencyLabel_->setWordWrap(true);
+    recordingLatencyAdjustmentSpin_ = new QSpinBox(page);
+    recordingLatencyAdjustmentSpin_->setRange(-8192, 8192);
+    recordingLatencyAdjustmentSpin_->setValue(0);
+    recordingLatencyAdjustmentSpin_->setSuffix(QStringLiteral(" frames"));
+    recordingLatencyAdjustmentSpin_->setMinimumWidth(132);
+    applyMutedEditorStyle(recordingLatencyAdjustmentSpin_);
     captureDurationSpin_ = new QSpinBox(page);
     captureDurationSpin_->setRange(1, 600);
     captureDurationSpin_->setValue(30);
@@ -2172,21 +2631,18 @@ QWidget* MainWindow::buildTrackPage()
     loopEndButton_ = new QPushButton(QStringLiteral("Loop End"), page);
     clearLoopButton_ = new QPushButton(QStringLiteral("Clear Loop"), page);
     loopEnabledCheck_ = new QCheckBox(QStringLiteral("Loop whole track"), page);
-    loopEnabledCheck_->setChecked(false);
-    waveformGridCheck_ = new QCheckBox(QStringLiteral("Show waveform grid"), page);
-    waveformGridCheck_->setChecked(trackController_.model().waveformGridVisible);
+    loopEnabledCheck_->setChecked(trackController_.model().loopEnabled);
     trackController_.model().trackGainDb = 0.0;
-    captureButton_ = new QPushButton(QStringLiteral("Record Input"), page);
-    loopbackCaptureButton_ = new QPushButton(QStringLiteral("Record Loopback"), page);
-    stopCaptureButton_ = new QPushButton(QStringLiteral("Stop Capture"), page);
+    stopCaptureButton_ = new QPushButton(QStringLiteral("Stop Recording"), page);
     stopCaptureButton_->setEnabled(false);
-    importCaptureButton_ = new QPushButton(QStringLiteral("Import Capture"), page);
-    importCaptureButton_->setEnabled(false);
+    loadWavButton_ = new QPushButton(QStringLiteral("Load WAV"), page);
+    startArmedLaneRecordingButton_ = new QPushButton(QStringLiteral("Start Recording"), page);
 
-    captureOutputEdit_->setText(appReleaseFilePath(QStringLiteral("captures"), QStringLiteral("capture.wav")));
+    captureOutputEdit_->setText(appReleaseFilePath(QStringLiteral("captures"), QStringLiteral("take.wav")));
     const QList<QWidget*> captureDialogWidgets{
-        capturePathEdit_, captureOutputEdit_, loopbackSourceBox_, captureDurationSpin_,
-        captureManualStopCheck_,
+        captureOutputEdit_, loopbackSourceBox_, captureDurationSpin_,
+        captureManualStopCheck_, captureCountInCheck_, captureCountInMetronomeCheck_, captureKeepMetronomeCheck_, captureCountInBarsSpin_,
+        recordingLatencyLabel_, recordingLatencyAdjustmentSpin_,
         captureTriggerCheck_, trimLeadingCheck_, trimTrailingCheck_, triggerThresholdSpin_,
         tailThresholdSpin_, preRollSpin_, triggerHoldSpin_, tailSilenceSpin_,
     };
@@ -2223,42 +2679,64 @@ QWidget* MainWindow::buildTrackPage()
     focusLayout->addWidget(focusFrequencySlider_, 1);
     focusLayout->addWidget(focusFrequencySpin_);
     auto* loopOptionsControl = new QWidget(page);
-    auto* loopOptionsLayout = new QHBoxLayout(loopOptionsControl);
+    auto* loopOptionsLayout = new QGridLayout(loopOptionsControl);
     loopOptionsLayout->setContentsMargins(0, 0, 0, 0);
-    loopOptionsLayout->addWidget(loopEnabledCheck_);
-    loopOptionsLayout->addWidget(waveformGridCheck_);
-    loopOptionsLayout->addStretch(1);
+    loopOptionsLayout->setHorizontalSpacing(24);
+    loopOptionsLayout->addWidget(gridLockBox, 0, 0);
+    loopOptionsLayout->addWidget(trackSyncCheck_, 0, 1);
+    loopOptionsLayout->addWidget(loopEnabledCheck_, 1, 0);
+    loopOptionsLayout->setColumnStretch(0, 1);
+    loopOptionsLayout->setColumnStretch(1, 1);
 
     auto* form = new QFormLayout();
     form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     form->addRow(trackNameLabel_);
+    form->addRow(gridPositionLabel_);
+    form->addRow(gridScheduleLabel_);
     form->addRow(QStringLiteral("Speed"), speedControl);
     form->addRow(QStringLiteral("Pitch"), pitchControl);
     form->addRow(QStringLiteral("Focus frequency"), focusControl);
     form->addRow(loopOptionsControl);
-    form->addRow(syncBox);
 
     auto* buttons = new QHBoxLayout();
-    buttons->addWidget(loadButton);
-    buttons->addWidget(shareTrackFileButton_);
     buttons->addWidget(playTrackButton_);
     buttons->addWidget(stopTrackButton_);
     buttons->addWidget(loopStartButton_);
     buttons->addWidget(loopEndButton_);
     buttons->addWidget(clearLoopButton_);
-    buttons->addWidget(captureButton_);
-    buttons->addWidget(loopbackCaptureButton_);
+    buttons->addWidget(startArmedLaneRecordingButton_);
     buttons->addWidget(stopCaptureButton_);
-    buttons->addWidget(importCaptureButton_);
+    buttons->addWidget(loadWavButton_);
+    for (int i = 0; i < 4; ++i) {
+        auto* bankButton = new QPushButton(QString(QChar(QLatin1Char(static_cast<char>('A' + i)))), page);
+        bankButton->setFixedWidth(34);
+        bankButton->setCheckable(true);
+        looperBankButtons_[i] = bankButton;
+        buttons->addWidget(bankButton);
+        QObject::connect(bankButton, &QPushButton::clicked, this, [this, i] {
+            looperProject_.setActiveBankIndex(i);
+            selectedLooperLane_ = -1;
+            refreshLooperLanes();
+            regeneratePreparedMix();
+            syncLooperArrangement();
+        });
+    }
     buttons->addStretch(1);
+
+    auto* laneScroll = new QScrollArea(page);
+    laneScroll->setWidgetResizable(true);
+    laneScroll->setFrameShape(QFrame::NoFrame);
+    laneScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    laneScroll->setMinimumHeight(280);
+    laneScroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    laneScroll->setWidget(looperStack_);
 
     auto* layout = new QVBoxLayout(page);
     layout->addLayout(buttons);
-    layout->addWidget(trackWaveform_, 1);
+    layout->addWidget(recordingCountdownLabel_);
+    layout->addWidget(laneScroll, 1);
     layout->addLayout(form);
 
-    QObject::connect(loadButton, &QPushButton::clicked, this, [this] { loadTrackMetadata(); });
-    QObject::connect(shareTrackFileButton_, &QPushButton::clicked, this, [this] { sendTrackFile(); });
     QObject::connect(trackSpeedSlider_, &QSlider::valueChanged, this, [this](int value) {
         const double speed = static_cast<double>(value) / 100.0;
         trackController_.model().speed = speed;
@@ -2266,7 +2744,9 @@ QWidget* MainWindow::buildTrackPage()
             const QSignalBlocker blocker(trackSpeedSpin_);
             trackSpeedSpin_->setValue(speed);
         }
-        applyTrackPlaybackSettings();
+    });
+    QObject::connect(trackSpeedSlider_, &QSlider::sliderReleased, this, [this] {
+        regeneratePreparedMix();
     });
     QObject::connect(trackSpeedSpin_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double value) {
         trackController_.model().speed = value;
@@ -2274,7 +2754,7 @@ QWidget* MainWindow::buildTrackPage()
             const QSignalBlocker blocker(trackSpeedSlider_);
             trackSpeedSlider_->setValue(qBound(10, qRound(value * 100.0), 200));
         }
-        applyTrackPlaybackSettings();
+        regeneratePreparedMix();
     });
     QObject::connect(trackPitchSlider_, &QSlider::valueChanged, this, [this](int value) {
         trackController_.model().pitchCents = value * 100;
@@ -2282,7 +2762,9 @@ QWidget* MainWindow::buildTrackPage()
             const QSignalBlocker blocker(trackPitchSpin_);
             trackPitchSpin_->setValue(value);
         }
-        applyTrackPlaybackSettings();
+    });
+    QObject::connect(trackPitchSlider_, &QSlider::sliderReleased, this, [this] {
+        regeneratePreparedMix();
     });
     QObject::connect(trackPitchSpin_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int value) {
         trackController_.model().pitchCents = value * 100;
@@ -2290,39 +2772,40 @@ QWidget* MainWindow::buildTrackPage()
             const QSignalBlocker blocker(trackPitchSlider_);
             trackPitchSlider_->setValue(value);
         }
-        applyTrackPlaybackSettings();
+        regeneratePreparedMix();
     });
-    trackWaveform_->onSeekMs = [this](qint64 positionMs) {
-        if (trackDevice_) {
-            trackDevice_->setPositionMs(positionMs);
-        }
-        updateTrackTimeline();
-    };
-    QObject::connect(playTrackButton_, &QPushButton::clicked, this, [this] { playTrack(); });
-    QObject::connect(stopTrackButton_, &QPushButton::clicked, this, [this] { stopTrack(); });
-    QObject::connect(loopStartButton_, &QPushButton::clicked, this, [this] { setLoopStartAtCurrentPosition(); });
-    QObject::connect(loopEndButton_, &QPushButton::clicked, this, [this] { setLoopEndAtCurrentPosition(); });
+    if (trackWaveform_) {
+        trackWaveform_->onSeekMs = [this](qint64 positionMs) {
+            const qint64 frame = positionMs * qMax(1, preparedSourceSampleRate_) / 1000;
+            runGridLockedEngineAction(QStringLiteral("track.seek"), [this, frame](std::uint64_t targetFrame) {
+                sendJamCommand(QStringLiteral("track seek %1 %2").arg(frame).arg(targetFrame));
+                preparedSourceFrame_ = frame;
+                preparedSourceEngineFrame_ = static_cast<qint64>(playbackGrid_.position().rawCurrentFrame);
+                updateTrackTimeline();
+            });
+        };
+    }
+    QObject::connect(playTrackButton_, &QPushButton::clicked, this, [this] {
+        playTrack();
+    });
+    QObject::connect(stopTrackButton_, &QPushButton::clicked, this, [this] {
+        runGridLockedEngineAction(QStringLiteral("track.stop"), [this](std::uint64_t targetFrame) { stopTrack(targetFrame); });
+    });
+    QObject::connect(loopStartButton_, &QPushButton::clicked, this, [this] {
+        setLoopStartAtCurrentPosition();
+    });
+    QObject::connect(loopEndButton_, &QPushButton::clicked, this, [this] {
+        setLoopEndAtCurrentPosition();
+    });
     QObject::connect(clearLoopButton_, &QPushButton::clicked, this, [this] { clearTrackLoop(); });
     QObject::connect(loopEnabledCheck_, &QCheckBox::toggled, this, [this](bool checked) {
         trackController_.model().loopEnabled = checked;
-        applyTrackPlaybackSettings();
         updateTrackControls();
-        if (trackController_.model().syncControls) {
-            sendControl(trackMetadataMessage(QStringLiteral("track.offer")));
-        }
-    });
-    QObject::connect(waveformGridCheck_, &QCheckBox::toggled, this, [this](bool checked) {
-        trackController_.model().waveformGridVisible = checked;
-        if (trackWaveform_) {
-            trackWaveform_->setGridVisible(checked);
-        }
+        loadPreparedMixIntoEngine();
     });
     QObject::connect(focusFrequencyCheck_, &QCheckBox::toggled, this, [this](bool checked) {
         trackController_.model().focusEnabled = checked;
-        applyTrackPlaybackSettings();
-        if (trackController_.model().syncControls) {
-            sendControl(trackMetadataMessage(QStringLiteral("track.offer")));
-        }
+        regeneratePreparedMix();
     });
     QObject::connect(focusPresetBox_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
         QString key = focusPresetBox_->currentData().toString();
@@ -2339,10 +2822,7 @@ QWidget* MainWindow::buildTrackPage()
             model.focusQ = preset.q;
         }
         updateTrackControls();
-        applyTrackPlaybackSettings();
-        if (model.syncControls) {
-            sendControl(trackMetadataMessage(QStringLiteral("track.offer")));
-        }
+        regeneratePreparedMix();
     });
     QObject::connect(focusFrequencySlider_, &QSlider::valueChanged, this, [this](int value) {
         auto& model = trackController_.model();
@@ -2362,7 +2842,9 @@ QWidget* MainWindow::buildTrackPage()
             const QSignalBlocker blocker(focusFrequencySpin_);
             focusFrequencySpin_->setValue(value);
         }
-        applyTrackPlaybackSettings();
+    });
+    QObject::connect(focusFrequencySlider_, &QSlider::sliderReleased, this, [this] {
+        regeneratePreparedMix();
     });
     QObject::connect(focusFrequencySpin_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int value) {
         auto& model = trackController_.model();
@@ -2382,19 +2864,77 @@ QWidget* MainWindow::buildTrackPage()
             const QSignalBlocker blocker(focusFrequencySlider_);
             focusFrequencySlider_->setValue(value);
         }
-        applyTrackPlaybackSettings();
+        regeneratePreparedMix();
     });
-    QObject::connect(syncBox, &QCheckBox::toggled, this, [this](bool checked) {
+    QObject::connect(trackSyncCheck_, &QCheckBox::toggled, this, [this](bool checked) {
+        looperProject_.setTrackSyncEnabled(checked);
         trackController_.model().syncControls = checked;
+    });
+    QObject::connect(gridLockBox, &QCheckBox::toggled, this, [this](bool checked) {
+        looperProject_.setGridLockEnabled(checked);
+        refreshLooperLanes();
+    });
+    QObject::connect(recordingLatencyAdjustmentSpin_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int frames) {
+        updateRecordingLatencyDisplay();
+        if (jam2_.isRunning()) {
+            sendJamCommand(QStringLiteral("record latency_adjust %1").arg(frames));
+        }
     });
     QObject::connect(captureManualStopCheck_, &QCheckBox::toggled, this, [this](bool checked) {
         (void)checked;
         updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_);
     });
-    QObject::connect(captureButton_, &QPushButton::clicked, this, [this] { showInputCaptureDialog(); });
-    QObject::connect(loopbackCaptureButton_, &QPushButton::clicked, this, [this] { showLoopbackCaptureDialog(); });
-    QObject::connect(stopCaptureButton_, &QPushButton::clicked, this, [this] { stopInputCapture(); });
-    QObject::connect(importCaptureButton_, &QPushButton::clicked, this, [this] { importLastCapture(); });
+    QObject::connect(stopCaptureButton_, &QPushButton::clicked, this, [this] {
+        if (loopbackRecorder_.isRunning()) {
+            loopbackRecorder_.stop();
+        } else {
+            runGridLockedEngineAction(QStringLiteral("record.stop"), [this](std::uint64_t targetFrame) { stopInputCapture(targetFrame); });
+        }
+    });
+    QObject::connect(loadWavButton_, &QPushButton::clicked, this, [this] { loadWavIntoLooperLane(); });
+    QObject::connect(startArmedLaneRecordingButton_, &QPushButton::clicked, this, [this] { startArmedLooperLaneRecording(); });
+    looperStack_->onSelected = [this](int lane) { selectedLooperLane_ = lane; };
+    looperStack_->onAddLane = [this] { addEmptyLooperLane(); };
+    looperStack_->onAddWav = [this] { addLooperWavs(); };
+    looperStack_->onMute = [this](int lane) { selectedLooperLane_ = lane; toggleSelectedLooperLaneMute(); };
+    looperStack_->onSolo = [this](int lane) { selectedLooperLane_ = lane; toggleSelectedLooperLaneSolo(); };
+    looperStack_->onArm = [this](int lane) {
+        selectedLooperLane_ = lane;
+        if (armedRecordBank_ == looperProject_.activeBankIndex() && armedRecordLane_ == lane) {
+            armedRecordBank_ = -1;
+            armedRecordLane_ = -1;
+            armedRecordMode_.clear();
+            refreshLooperLanes();
+            appendLog(QStringLiteral("disarmed lane recording"));
+            return;
+        }
+        (void)armSelectedLooperLaneRecording();
+    };
+    looperStack_->onRename = [this](int lane) { selectedLooperLane_ = lane; renameSelectedLooperLane(); };
+    looperStack_->onRemove = [this](int lane) { selectedLooperLane_ = lane; removeSelectedLooperLane(); };
+    looperStack_->onGainChanged = [this](int lane, double gainDb) { applyLooperLaneGain(lane, gainDb); };
+    looperStack_->onRegionCommitted = [this](int lane, qint64 startFrame, qint64 sourceStartFrame, qint64 sourceEndFrame) {
+        selectedLooperLane_ = lane;
+        applySelectedLooperLaneRegion(startFrame, sourceStartFrame, sourceEndFrame);
+    };
+    looperStack_->onSeekFrame = [this](qint64 frame) {
+        runGridLockedEngineAction(QStringLiteral("track.seek"), [this, frame](std::uint64_t targetFrame) {
+            sendJamCommand(QStringLiteral("track seek %1 %2").arg(frame).arg(targetFrame));
+            preparedSourceFrame_ = frame;
+            preparedSourceEngineFrame_ = static_cast<qint64>(playbackGrid_.position().rawCurrentFrame);
+            updateTrackTimeline();
+        });
+    };
+    looperStack_->onBankSelected = [this](int index) {
+        looperProject_.setActiveBankIndex(index);
+        selectedLooperLane_ = -1;
+        refreshLooperLanes();
+        regeneratePreparedMix();
+        syncLooperArrangement();
+    };
+    refreshLooperLanes();
+    regeneratePreparedMix();
+    syncLooperArrangement();
 
     return page;
 }
@@ -2406,7 +2946,6 @@ QWidget* MainWindow::buildMetronomePage()
     metronomeBpmSpin_ = new QSpinBox(page);
     metronomeBpmSpin_->setRange(1, 400);
     metronomeBpmSpin_->setValue(qBound(1, static_cast<int>(std::lround(trackController_.model().acceptedBpm)), 400));
-    metronomeBpmSpin_->setSuffix(QStringLiteral(" BPM"));
     applyMutedEditorStyle(metronomeBpmSpin_);
 
     metronomeBeatsSpin_ = new QSpinBox(page);
@@ -2470,6 +3009,8 @@ QWidget* MainWindow::buildMetronomePage()
     startTrackMetronomeButton_ = new QPushButton(QStringLiteral("Start"), page);
     stopTrackMetronomeButton_ = new QPushButton(QStringLiteral("Stop"), page);
     stopTrackMetronomeButton_->setEnabled(false);
+    metronomeMarkerReferenceCheck_ = new QCheckBox(QStringLiteral("Show marker reference"), page);
+    metronomeMarkerReferenceCheck_->setChecked(true);
 
     metronomePatternTable_ = new QTableWidget(page);
     metronomePatternTable_->setRowCount(2);
@@ -2509,7 +3050,8 @@ QWidget* MainWindow::buildMetronomePage()
     modeLayout->addStretch(1);
     controls->addWidget(modeRow, 0, 3);
     controls->addWidget(new QLabel(QStringLiteral("Pattern"), page), 1, 0);
-    controls->addWidget(trackMetronomeLabel_, 1, 1, 1, 3);
+    controls->addWidget(trackMetronomeLabel_, 1, 1);
+    controls->addWidget(metronomeMarkerReferenceCheck_, 1, 2, 1, 2);
     controls->setColumnStretch(1, 1);
     controls->setColumnStretch(3, 1);
 
@@ -2525,6 +3067,9 @@ QWidget* MainWindow::buildMetronomePage()
 
     QObject::connect(startTrackMetronomeButton_, &QPushButton::clicked, this, [this] { startTrackMetronome(); });
     QObject::connect(stopTrackMetronomeButton_, &QPushButton::clicked, this, [this] { stopTrackMetronome(); });
+    QObject::connect(metronomeMarkerReferenceCheck_, &QCheckBox::toggled, this, [this] {
+        updatePlaybackGrid();
+    });
     QObject::connect(metronomeBpmSpin_, qOverload<int>(&QSpinBox::valueChanged), this, [this] {
         updateTrackMetronomeInterval();
     });
@@ -2541,7 +3086,7 @@ QWidget* MainWindow::buildMetronomePage()
         updateTrackMetronomeInterval();
     });
     QObject::connect(metronomeDivisionBox_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
-        rebuildMetronomePattern();
+        rebuildMetronomePattern(true);
         updateTrackMetronomeInterval();
     });
 
@@ -2596,23 +3141,6 @@ QWidget* MainWindow::buildMixPage()
         label->setStyleSheet(QStringLiteral("font-weight: 600; margin-top: 8px;"));
         return label;
     };
-    auto makeDeviceRow = [content](const QString& name, QComboBox* combo) {
-        auto* row = new QWidget(content);
-        auto* rowLayout = new QHBoxLayout(row);
-        rowLayout->setContentsMargins(0, 0, 0, 0);
-        rowLayout->setSpacing(10);
-        auto* nameLabel = new QLabel(name, row);
-        nameLabel->setMinimumWidth(120);
-        rowLayout->addWidget(nameLabel);
-        rowLayout->addWidget(combo, 1);
-        return row;
-    };
-
-    localOutputBox_->setParent(content);
-    localOutputBox_->show();
-    mixStandaloneOutputRow_ = makeDeviceRow(QStringLiteral("Standalone output"), localOutputBox_);
-    layout->addWidget(mixStandaloneOutputRow_);
-
     mixJamRecordingRow_ = new QWidget(content);
     auto* recordingLayout = new QHBoxLayout(mixJamRecordingRow_);
     recordingLayout->setContentsMargins(0, 0, 0, 0);
@@ -2665,13 +3193,13 @@ QWidget* MainWindow::buildMixPage()
 
     metronomeLevelSlider_ = new QSlider(Qt::Horizontal, page);
     metronomeLevelSlider_->setRange(-60, 12);
-    metronomeLevelSlider_->setValue(0);
+    metronomeLevelSlider_->setValue(-10);
     applyJamSliderStyle(metronomeLevelSlider_);
     metronomeLevelSlider_->setMinimumWidth(220);
     metronomeLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     localMetronomeLevelSlider_ = metronomeLevelSlider_;
     mixMetronomeLevelSlider_ = metronomeLevelSlider_;
-    mixMetronomeLevelLabel_ = makeValueLabel(QStringLiteral("+0.0 dB"));
+    mixMetronomeLevelLabel_ = makeValueLabel(QStringLiteral("-10.0 dB"));
 
     remoteLevelSlider_ = new QSlider(Qt::Horizontal, page);
     remoteLevelSlider_->setRange(-60, 12);
@@ -2733,8 +3261,13 @@ QWidget* MainWindow::buildMixPage()
     auto* remoteLayout = new QVBoxLayout(mixRemotePeerRow_);
     remoteLayout->setContentsMargins(0, 0, 0, 0);
     remoteLayout->setSpacing(6);
-    remoteLayout->addWidget(makeRow(QStringLiteral("User 1"), remoteLevelSlider_, mixRemotePeerLevelLabel_));
-    remoteLayout->addWidget(makeMeterRow(QStringLiteral("User 1 meter"), mixRemotePeerMeter_));
+    remoteLayout->addWidget(makeRow(QStringLiteral("Remote mix"), remoteLevelSlider_, mixRemotePeerLevelLabel_));
+    remoteLayout->addWidget(makeMeterRow(QStringLiteral("Remote meter"), mixRemotePeerMeter_));
+    auto* peerList = new QWidget(mixRemotePeerRow_);
+    mixRemotePeerListLayout_ = new QVBoxLayout(peerList);
+    mixRemotePeerListLayout_->setContentsMargins(120, 0, 0, 0);
+    mixRemotePeerListLayout_->setSpacing(4);
+    remoteLayout->addWidget(peerList);
     layout->addWidget(mixRemotePeerRow_);
     layout->addStretch(1);
 
@@ -2752,7 +3285,9 @@ QWidget* MainWindow::buildMixPage()
         if (trackLevelDbLabel_) {
             trackLevelDbLabel_->setText(dbText(trackController_.model().trackGainDb));
         }
-        applyTrackPlaybackSettings();
+        if (jam2_.isRunning()) {
+            sendPreparedTrackLevel();
+        }
     });
     QObject::connect(mixSendLevelSlider_, &QSlider::valueChanged, this, [this](int value) {
         if (mixSendLevelLabel_) {
@@ -2774,7 +3309,6 @@ QWidget* MainWindow::buildMixPage()
         if (mixMetronomeLevelLabel_) {
             mixMetronomeLevelLabel_->setText(dbText(static_cast<double>(value)));
         }
-        applyMetronomePatternToLocalDevice();
         if (jam2_.isRunning()) {
             const double metronomeLevel = gainFromDb(static_cast<double>(value));
             sendJamCommand(QStringLiteral("metro level %1").arg(metronomeLevel, 0, 'f', 3));
@@ -2794,6 +3328,7 @@ QWidget* MainWindow::buildMixPage()
         }
     });
     updateMixControls();
+    updateMixRemotePeers();
     updateJamRecordingControls();
     return page;
 }
@@ -2807,14 +3342,13 @@ void MainWindow::updateMixControls()
         }
     };
 
-    setModeEnabled(mixStandaloneOutputRow_, !jamActive);
     setModeEnabled(mixJamRecordingRow_, jamActive);
-    setModeEnabled(mixLocalInputSection_, jamActive);
+    setModeEnabled(mixLocalInputSection_, true);
     setModeEnabled(mixInputMeterRow_, jamActive);
-    setModeEnabled(mixSendRow_, jamActive);
+    setModeEnabled(mixSendRow_, true);
     setModeEnabled(mixSendMeterRow_, jamActive);
-    setModeEnabled(mixMonitorEnableRow_, jamActive);
-    setModeEnabled(mixMonitorRow_, jamActive && mixMonitorCheck_ && mixMonitorCheck_->isChecked());
+    setModeEnabled(mixMonitorEnableRow_, true);
+    setModeEnabled(mixMonitorRow_, true);
     setModeEnabled(mixMonitorMeterRow_, jamActive);
     setModeEnabled(mixTrackSection_, true);
     setModeEnabled(mixTrackRow_, true);
@@ -2824,8 +3358,8 @@ void MainWindow::updateMixControls()
     setModeEnabled(mixMetronomeMeterRow_, true);
     setModeEnabled(mixOutputSection_, jamActive);
     setModeEnabled(mixOutputMeterRow_, jamActive);
-    setModeEnabled(mixRemotePeersSection_, jamActive);
-    setModeEnabled(mixRemotePeerRow_, jamActive);
+    setModeEnabled(mixRemotePeersSection_, true);
+    setModeEnabled(mixRemotePeerRow_, true);
     if (!jamActive) {
         if (mixInputMeter_) {
             mixInputMeter_->setLevel(0.0);
@@ -2864,20 +3398,49 @@ void MainWindow::updateMixControls()
     if (mixMonitorLevelSlider_ && mixMonitorLevelLabel_) {
         mixMonitorLevelLabel_->setText(dbText(static_cast<double>(mixMonitorLevelSlider_->value())));
     }
-    if (mixMonitorLevelSlider_ && mixMonitorCheck_) {
-        mixMonitorLevelSlider_->setEnabled(jamActive && mixMonitorCheck_->isChecked());
-    }
 }
 
 void MainWindow::setMixRemotePeerVisible(bool visible)
 {
+    if (!meshActive_) {
+        remotePeerConnected_ = visible;
+    }
+    updateMixRemotePeers();
+}
+
+void MainWindow::updateMixRemotePeers()
+{
+    QStringList peers;
+    if (meshActive_) {
+        peers = meshPeerEndpointsExcludingSelf();
+    } else if (remotePeerConnected_) {
+        peers << QStringLiteral("Connected peer");
+    }
+
+    if (mixRemotePeerListLayout_) {
+        while (QLayoutItem* item = mixRemotePeerListLayout_->takeAt(0)) {
+            delete item->widget();
+            delete item;
+        }
+        for (int index = 0; index < peers.size(); ++index) {
+            auto* label = new QLabel(
+                meshActive_
+                    ? QStringLiteral("Peer %1 - %2").arg(index + 1).arg(peers.at(index))
+                    : peers.at(index),
+                mixRemotePeerRow_);
+            label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            mixRemotePeerListLayout_->addWidget(label);
+        }
+    }
+
+    const bool visible = !peers.isEmpty();
     if (mixRemotePeerRow_) {
-        mixRemotePeerRow_->setVisible(true);
-        mixRemotePeerRow_->setEnabled(visible && jam2_.isRunning());
+        mixRemotePeerRow_->setVisible(visible);
+        mixRemotePeerRow_->setEnabled(true);
     }
     if (mixRemotePeersSection_) {
-        mixRemotePeersSection_->setVisible(true);
-        mixRemotePeersSection_->setEnabled(jam2_.isRunning());
+        mixRemotePeersSection_->setVisible(visible);
+        mixRemotePeersSection_->setEnabled(true);
     }
 }
 
@@ -2992,9 +3555,71 @@ void MainWindow::updateConnectionControlState()
     }
 }
 
-void MainWindow::startJam()
+void MainWindow::showLocalPerformSetup()
 {
     if (jam2_.isRunning()) {
+        return;
+    }
+    refreshDevices();
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Start Local Engine"));
+    auto* form = new QFormLayout(&dialog);
+    auto* device = new QComboBox(&dialog);
+    for (int index = 0; deviceBox_ && index < deviceBox_->count(); ++index) {
+        device->addItem(deviceBox_->itemText(index), deviceBox_->itemData(index));
+    }
+    if (deviceBox_) {
+        device->setCurrentIndex(qMax(0, device->findData(deviceBox_->currentData())));
+    }
+    auto* sampleRate = new QSpinBox(&dialog);
+    sampleRate->setRange(8000, 384000);
+    sampleRate->setValue(sampleRateSpin_ ? sampleRateSpin_->value() : 48000);
+    auto* inputChannels = new QLineEdit(inputChannelsEdit_ ? inputChannelsEdit_->text() : QStringLiteral("0"), &dialog);
+    auto* outputChannels = new QLineEdit(outputChannelsEdit_ ? outputChannelsEdit_->text() : QStringLiteral("0,1"), &dialog);
+    form->addRow(QStringLiteral("Low-latency device"), device);
+    form->addRow(QStringLiteral("Sample rate"), sampleRate);
+    form->addRow(QStringLiteral("Input channels"), inputChannels);
+    form->addRow(QStringLiteral("Output channels"), outputChannels);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Start Engine"));
+    form->addRow(buttons);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    if (device->currentData().toString().isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Perform"), QStringLiteral("Select a low-latency audio device first."));
+        return;
+    }
+    deviceBox_->setCurrentIndex(qMax(0, deviceBox_->findData(device->currentData())));
+    sampleRateSpin_->setValue(sampleRate->value());
+    inputChannelsEdit_->setText(inputChannels->text().trimmed());
+    outputChannelsEdit_->setText(outputChannels->text().trimmed());
+    startLocalPerform();
+}
+
+void MainWindow::startLocalPerform()
+{
+    if (jam2_.isRunning()) {
+        return;
+    }
+    QString permissionError;
+    if (!jam2EnsureMicrophonePermission(&permissionError)) {
+        QMessageBox::warning(this, QStringLiteral("Jam2 Microphone Access"), permissionError);
+        return;
+    }
+    QStringList args{QStringLiteral("local")};
+    args << commonJamArgs();
+    if (engineModeLabel_) {
+        engineModeLabel_->setText(QStringLiteral("Local"));
+    }
+    launchLocalPerformProcess(args);
+}
+
+void MainWindow::startJam()
+{
+    if (jam2_.isRunning() && !localEngineActive_) {
         return;
     }
     QString permissionError;
@@ -3003,9 +3628,20 @@ void MainWindow::startJam()
         appendLog(permissionError);
         return;
     }
+    if (localEngineActive_) {
+        replacingLocalEngine_ = true;
+        stopGuiControlServer();
+        jam2_.stop();
+        localEngineActive_ = false;
+    }
     QStringList args;
     const bool listenMode = modeBox_->currentText() == QStringLiteral("Listen");
     const bool meshMode = meshModeCheck_ && meshModeCheck_->isChecked();
+    if (engineModeLabel_) {
+        engineModeLabel_->setText(meshMode
+            ? QStringLiteral("Mesh")
+            : (listenMode ? QStringLiteral("Listen") : QStringLiteral("Connect")));
+    }
     meshActive_ = meshMode;
     pendingJoinLaunch_ = false;
     pendingJoinBaseArgs_.clear();
@@ -3113,6 +3749,33 @@ void MainWindow::startJam()
     launchJamProcess(args);
 }
 
+void MainWindow::launchLocalPerformProcess(QStringList args)
+{
+    stopGuiControlServer();
+    controlServer_.close();
+    controlClient_.close();
+    controlReconnectEnabled_ = false;
+    meshActive_ = false;
+    if (!startGuiControlServer(args)) {
+        appendLog(QStringLiteral("local Perform GUI control unavailable; input track recording will be disabled"));
+    }
+    localEngineActive_ = true;
+    jam2_.start(jam2PathEdit_->text(), args);
+    appendLog(QStringLiteral("starting local Perform: %1 %2").arg(jam2PathEdit_->text(), args.join(QLatin1Char(' '))));
+    startButton_->setEnabled(true);
+    joinButton_->setEnabled(true);
+    stopButton_->setEnabled(false);
+    if (refreshControlButton_) {
+        refreshControlButton_->setEnabled(false);
+    }
+    connectionLabel_->setText(QStringLiteral("Starting Perform"));
+    QTimer::singleShot(250, this, [this] {
+        updateRuntimeControls();
+        sendMetronomeModeToJam();
+        sendMetronomePatternToJam();
+    });
+}
+
 void MainWindow::launchJamProcess(QStringList args)
 {
     QString permissionError;
@@ -3122,16 +3785,9 @@ void MainWindow::launchJamProcess(QStringList args)
         return;
     }
 
-    if (localMetronomeSink_) {
-        localMetronomeSink_->stop();
-        localMetronomeSink_.reset();
-    }
-    if (localMetronomeDevice_) {
-        localMetronomeDevice_->close();
-        localMetronomeDevice_.reset();
-    }
     localMetronomeRunning_ = false;
     localMetronomeLeader_ = false;
+    playbackGrid_.clearEngine();
     if (trackMetronomeLabel_) {
         trackMetronomeLabel_->setText(QStringLiteral("Jam metronome stopped"));
     }
@@ -3149,6 +3805,7 @@ void MainWindow::launchJamProcess(QStringList args)
         stopGuiControlServer();
         appendLog(QStringLiteral("local mixer control disabled; using stdin commands only"));
     }
+    localEngineActive_ = false;
     jam2_.start(jam2PathEdit_->text(), args);
     appendLog(QStringLiteral("starting: %1 %2").arg(jam2PathEdit_->text(), args.join(QLatin1Char(' '))));
     startButton_->setEnabled(false);
@@ -3157,13 +3814,14 @@ void MainWindow::launchJamProcess(QStringList args)
     if (refreshControlButton_) {
         refreshControlButton_->setEnabled(true);
     }
-    if (localOutputBox_) {
-        localOutputBox_->setEnabled(false);
-    }
     jamRecordingActive_ = false;
     updateJamRecordingControls();
     updateMixControls();
-    connectionLabel_->setText(QStringLiteral("Starting"));
+    connectionLabel_->setText(
+        (!controlServerMode_ && controlClient_.isConnected()) ||
+                (controlServerMode_ && controlServer_.hasPeer())
+            ? QStringLiteral("TCP peer authenticated")
+            : QStringLiteral("Starting"));
     QTimer::singleShot(250, this, [this] {
         updateRuntimeControls();
         sendMetronomeModeToJam();
@@ -3200,8 +3858,13 @@ void MainWindow::stopGuiControlServer()
 void MainWindow::sendJamCommand(const QString& line)
 {
     if (guiControlSocket_ != nullptr && guiControlSocket_->state() == QAbstractSocket::ConnectedState) {
-        guiControlSocket_->write(line.toUtf8());
-        guiControlSocket_->write("\n");
+        GuiBinaryCommand command;
+        if (encodeJamTextCommand(line, command)) {
+            const QByteArray payload = encodeGuiCommandPayload(command);
+            guiControlSocket_->write(guiFrame(jam2::gui_control::MessageType::Command, guiControlSequence_++, payload));
+            return;
+        }
+        appendLog(QStringLiteral("gui-control unsupported command: ") + line);
         return;
     }
     jam2_.sendLine(line);
@@ -3214,53 +3877,216 @@ void MainWindow::readGuiControlSocket()
     }
     guiControlBuffer_.append(guiControlSocket_->readAll());
     for (;;) {
-        const qsizetype newline = guiControlBuffer_.indexOf('\n');
-        if (newline < 0) {
+        constexpr qsizetype headerSize = 16;
+        if (guiControlBuffer_.size() < headerSize) {
             break;
         }
-        QByteArray line = guiControlBuffer_.left(newline);
-        guiControlBuffer_.remove(0, newline + 1);
-        if (!line.isEmpty() && line.endsWith('\r')) {
-            line.chop(1);
+        const quint32 magic = guiU32(guiControlBuffer_, 0);
+        const quint16 version = guiU16(guiControlBuffer_, 4);
+        const quint16 type = guiU16(guiControlBuffer_, 6);
+        const quint32 payloadSize = guiU32(guiControlBuffer_, 8);
+        if (magic != jam2::gui_control::kMagic ||
+            version != jam2::gui_control::kVersion ||
+            payloadSize > jam2::gui_control::kMaxPayloadBytes) {
+            appendLog(QStringLiteral("gui-control binary protocol mismatch"));
+            guiControlSocket_->close();
+            return;
         }
-        handleGuiControlLine(QString::fromUtf8(line).trimmed());
+        if (guiControlBuffer_.size() < headerSize + static_cast<qsizetype>(payloadSize)) {
+            break;
+        }
+        const QByteArray payload = guiControlBuffer_.mid(headerSize, static_cast<qsizetype>(payloadSize));
+        guiControlBuffer_.remove(0, headerSize + static_cast<qsizetype>(payloadSize));
+        handleGuiControlFrame(type, payload);
     }
 }
 
-void MainWindow::handleGuiControlLine(const QString& line)
+void MainWindow::handleGuiControlFrame(quint16 type, const QByteArray& payload)
 {
-    if (line.isEmpty()) {
+    const auto messageType = static_cast<jam2::gui_control::MessageType>(type);
+    if (messageType == jam2::gui_control::MessageType::Hello) {
         return;
     }
-    if (line.startsWith(QStringLiteral("hello "))) {
-        return;
-    }
-    if (!line.startsWith(QStringLiteral("meters "))) {
-        appendLog(QStringLiteral("gui-control: ") + line);
-        return;
-    }
-    QJsonObject stats;
-    stats.insert(QStringLiteral("event"), QStringLiteral("meters"));
-    const QRegularExpression fieldRe(QStringLiteral("(\\S+)=([^\\s]+)"));
-    auto it = fieldRe.globalMatch(line.mid(7));
-    while (it.hasNext()) {
-        const QRegularExpressionMatch match = it.next();
-        const QString key = match.captured(1);
-        const QString value = match.captured(2);
-        bool ok = false;
-        const double number = value.toDouble(&ok);
-        if (ok) {
-            stats.insert(key, number);
-        } else {
-            stats.insert(key, value);
+    if (messageType == jam2::gui_control::MessageType::ClockState) {
+        if (payload.size() < 60) {
+            return;
         }
+        const quint64 rawFrame = guiU64(payload, 0);
+        const quint64 musicalFrame = guiU64(payload, 8);
+        const quint64 epochFrame = guiU64(payload, 16);
+        const qint64 offsetFrames = guiI64(payload, 24);
+        const int sampleRate = static_cast<int>(guiU32(payload, 32));
+        const int bpm = static_cast<int>(guiU32(payload, 36));
+        const int beats = static_cast<int>(guiU32(payload, 40));
+        const int division = static_cast<int>(guiU32(payload, 44));
+        const bool running = guiU16(payload, 56) != 0;
+        playbackGrid_.setPattern(bpm, beats, division);
+        playbackGrid_.updateEngine(rawFrame, musicalFrame, epochFrame, offsetFrames, sampleRate, running);
+        if (payload.size() >= 84) {
+            recordingInputLatencyFrames_ = guiU32(payload, 60);
+            recordingOutputLatencyFrames_ = guiU32(payload, 64);
+            const qint64 adjustmentFrames = guiI64(payload, 68);
+            recordingAppliedLatencyFrames_ = guiU64(payload, 76);
+            recordingLatencySampleRate_ = qMax(1, sampleRate);
+            if (recordingLatencyAdjustmentSpin_) {
+                const QSignalBlocker blocker(recordingLatencyAdjustmentSpin_);
+                recordingLatencyAdjustmentSpin_->setValue(static_cast<int>(qBound<qint64>(
+                    static_cast<qint64>(recordingLatencyAdjustmentSpin_->minimum()),
+                    adjustmentFrames,
+                    static_cast<qint64>(recordingLatencyAdjustmentSpin_->maximum()))));
+            }
+            updateRecordingLatencyDisplay();
+        }
+        updatePlaybackGrid();
+        return;
     }
-    updateMixMeters(stats);
+    if (messageType == jam2::gui_control::MessageType::Meters) {
+        if (payload.size() < 56) {
+            return;
+        }
+        QJsonObject stats;
+        stats.insert(QStringLiteral("event"), QStringLiteral("meters"));
+        stats.insert(QStringLiteral("input_peak"), guiF64(payload, 0));
+        stats.insert(QStringLiteral("send_peak"), guiF64(payload, 8));
+        stats.insert(QStringLiteral("monitor_peak"), guiF64(payload, 16));
+        stats.insert(QStringLiteral("remote_peak"), guiF64(payload, 24));
+        stats.insert(QStringLiteral("metronome_peak"), guiF64(payload, 32));
+        stats.insert(QStringLiteral("output_peak"), guiF64(payload, 40));
+        stats.insert(QStringLiteral("output_clipped_samples"), static_cast<double>(guiU64(payload, 48)));
+        updateMixMeters(stats);
+        return;
+    }
+    if (messageType == jam2::gui_control::MessageType::TransportState) {
+        if (payload.size() < 40) {
+            return;
+        }
+        const quint64 revision = guiU64(payload, 0);
+        const quint64 targetRawFrame = guiU64(payload, 8);
+        const quint64 targetMusicalFrame = guiU64(payload, 16);
+        const quint64 countdownStartFrame = guiU64(payload, 24);
+        const auto action = static_cast<jam2::gui_control::TransportAction>(guiU16(payload, 32));
+        if (action == jam2::gui_control::TransportAction::TrackRestart && revision > 0) {
+            playbackGrid_.scheduleEpoch(targetRawFrame, targetMusicalFrame, revision);
+            if (gridScheduleLabel_) {
+                gridScheduleLabel_->setText(QStringLiteral("Track restart: engine target_frame=%1 revision=%2")
+                    .arg(targetRawFrame)
+                    .arg(revision));
+            }
+        } else if (action == jam2::gui_control::TransportAction::RecordStart &&
+                   revision > recordingScheduleRevision_) {
+            playbackGrid_.scheduleEpoch(targetRawFrame, targetMusicalFrame, revision);
+            recordingScheduleRevision_ = revision;
+            recordingCountdownStartFrame_ = countdownStartFrame;
+            recordingStartFrame_ = targetRawFrame;
+            if ((!captureManualStopCheck_ || !captureManualStopCheck_->isChecked()) &&
+                captureDurationSpin_) {
+                const PlaybackGrid::Position position = playbackGrid_.position();
+                const quint64 framesUntilStart = targetRawFrame > position.rawCurrentFrame
+                    ? targetRawFrame - position.rawCurrentFrame
+                    : 0ULL;
+                const int delayMs = position.sampleRate > 0
+                    ? static_cast<int>(framesUntilStart * 1000ULL / static_cast<quint64>(position.sampleRate))
+                    : 0;
+                const QString takeId = activeTrackTakeId_;
+                QTimer::singleShot(delayMs + captureDurationSpin_->value() * 1000, this, [this, takeId] {
+                    if (trackTakeRecordingActive_ && activeTrackTakeId_ == takeId) {
+                        runGridLockedEngineAction(QStringLiteral("record.stop"), [this](std::uint64_t stopFrame) {
+                            stopInputCapture(stopFrame);
+                        });
+                    }
+                });
+            }
+            if (recordingCountdownLabel_) {
+                recordingCountdownLabel_->setText(QStringLiteral("WAITING FOR NEXT BAR"));
+                recordingCountdownLabel_->show();
+            }
+            if (gridScheduleLabel_) {
+                gridScheduleLabel_->setText(QStringLiteral("Recording: engine countdown_start_frame=%1 start_frame=%2 revision=%3")
+                    .arg(countdownStartFrame)
+                    .arg(targetRawFrame)
+                    .arg(revision));
+            }
+        }
+        return;
+    }
+    if (messageType == jam2::gui_control::MessageType::TrackState) {
+        if (payload.size() < 56) {
+            return;
+        }
+        preparedSourceEngineFrame_ = static_cast<qint64>(guiU64(payload, 0));
+        preparedSourceFrame_ = static_cast<qint64>(guiU64(payload, 8));
+        const int sampleRate = static_cast<int>(guiU32(payload, 48));
+        preparedSourcePlaying_ = guiU16(payload, 52) != 0;
+        if (sampleRate > 0) {
+            preparedSourceSampleRate_ = sampleRate;
+        }
+        return;
+    }
+    if (messageType == jam2::gui_control::MessageType::TrackTakeEvent) {
+        if (payload.size() < 60) {
+            return;
+        }
+        const quint16 eventType = guiU16(payload, 0);
+        const quint32 takeSize = guiU32(payload, 4);
+        const quint32 pathSize = guiU32(payload, 8);
+        const quint32 errorSize = guiU32(payload, 12);
+        const quint64 startFrame = guiU64(payload, 20);
+        const quint64 stopFrame = guiU64(payload, 28);
+        const quint64 framesWritten = guiU64(payload, 36);
+        const quint64 droppedFrames = guiU64(payload, 44);
+        const quint64 writerErrors = guiU64(payload, 52);
+        const qsizetype total = 60 + static_cast<qsizetype>(takeSize + pathSize + errorSize);
+        if (payload.size() < total) {
+            return;
+        }
+        qsizetype offset = 60;
+        const QString takeId = QString::fromUtf8(payload.mid(offset, static_cast<qsizetype>(takeSize)));
+        offset += static_cast<qsizetype>(takeSize);
+        const QString wav = QString::fromUtf8(payload.mid(offset, static_cast<qsizetype>(pathSize)));
+        offset += static_cast<qsizetype>(pathSize);
+        const QString error = QString::fromUtf8(payload.mid(offset, static_cast<qsizetype>(errorSize)));
+        if (takeId == activeTrackTakeId_) {
+            trackTakeRecordingActive_ = false;
+            activeTrackTakeId_.clear();
+            if (stopCaptureButton_) stopCaptureButton_->setEnabled(false);
+            recordingStartFrame_ = 0;
+            recordingCountdownStartFrame_ = 0;
+            stopMetronomeAtRecordingStart_ = false;
+            if (recordingCountdownLabel_) recordingCountdownLabel_->hide();
+            if (eventType == static_cast<quint16>(jam2::gui_control::TrackTakeEventType::Stopped) && !wav.isEmpty()) {
+                lastCapturePath_ = QDir::fromNativeSeparators(wav);
+                if (!pendingTransientCapturePath_.isEmpty()) {
+                    registerTransientTrackWav(pendingTransientCapturePath_);
+                }
+                pendingTransientCapturePath_.clear();
+                importLastCaptureToArmedLane();
+            } else {
+                if (!pendingTransientCapturePath_.isEmpty() && QFileInfo::exists(pendingTransientCapturePath_)) {
+                    registerTransientTrackWav(pendingTransientCapturePath_);
+                }
+                pendingTransientCapturePath_.clear();
+            }
+            if (loadWavButton_) loadWavButton_->setEnabled(true);
+        }
+        if (eventType == static_cast<quint16>(jam2::gui_control::TrackTakeEventType::Stopped)) {
+            appendLog(QStringLiteral("track take stopped: take_id=%1 wav=%2 start_frame=%3 stop_frame=%4 frames=%5 dropped_frames=%6 writer_errors=%7")
+                .arg(takeId)
+                .arg(wav)
+                .arg(startFrame)
+                .arg(stopFrame)
+                .arg(framesWritten)
+                .arg(droppedFrames)
+                .arg(writerErrors));
+        } else {
+            appendLog(QStringLiteral("track take error: take_id=%1 reason=%2").arg(takeId, error));
+        }
+        return;
+    }
 }
 
 void MainWindow::showStartJamDialog()
 {
-    if (jam2_.isRunning()) {
+    if (jam2_.isRunning() && !localEngineActive_) {
         return;
     }
 
@@ -3363,7 +4189,6 @@ void MainWindow::showStartJamDialog()
     auto* copy = buttons->addButton(QStringLiteral("Copy URL"), QDialogButtonBox::ActionRole);
     QObject::connect(refresh, &QPushButton::clicked, this, [this] {
         refreshDevices();
-        refreshLocalOutputs();
     });
     QObject::connect(regen, &QPushButton::clicked, this, [this] {
         generateSession();
@@ -3412,7 +4237,7 @@ void MainWindow::showStartJamDialog()
 
 void MainWindow::showJoinJamDialog()
 {
-    if (jam2_.isRunning()) {
+    if (jam2_.isRunning() && !localEngineActive_) {
         return;
     }
 
@@ -3470,7 +4295,6 @@ void MainWindow::showJoinJamDialog()
     auto* refresh = buttons->addButton(QStringLiteral("Refresh Devices"), QDialogButtonBox::ActionRole);
     QObject::connect(refresh, &QPushButton::clicked, this, [this] {
         refreshDevices();
-        refreshLocalOutputs();
     });
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
@@ -3496,8 +4320,10 @@ void MainWindow::showJoinJamDialog()
     }
 }
 
-void MainWindow::stopJam()
+void MainWindow::stopJam(bool returnToLocal)
 {
+    returnToLocalAfterStop_ = returnToLocal && !shuttingDown_;
+    const bool processWasRunning = jam2_.isRunning();
     controlReconnectEnabled_ = false;
     controlReconnectTimer_.stop();
     stopGuiControlServer();
@@ -3509,6 +4335,7 @@ void MainWindow::stopJam()
     meshPeerEndpoints_.clear();
     currentMeshPeers_.clear();
     pendingMeshInvitePopup_ = false;
+    remotePeerConnected_ = false;
     jam2_.stop();
     localMetronomeRunning_ = false;
     localMetronomeLeader_ = false;
@@ -3527,13 +4354,18 @@ void MainWindow::stopJam()
     if (refreshControlButton_) {
         refreshControlButton_->setEnabled(false);
     }
-    if (localOutputBox_) {
-        localOutputBox_->setEnabled(true);
-    }
     jamRecordingActive_ = false;
     updateJamRecordingControls();
     updateMixControls();
     setMixRemotePeerVisible(false);
+    if (returnToLocalAfterStop_ && !processWasRunning) {
+        returnToLocalAfterStop_ = false;
+        QTimer::singleShot(0, this, [this] {
+            if (!shuttingDown_ && !jam2_.isRunning()) {
+                startLocalPerform();
+            }
+        });
+    }
 }
 
 void MainWindow::refreshDevices()
@@ -3566,26 +4398,6 @@ void MainWindow::refreshDevices()
         appendLog(error.isEmpty() ? QStringLiteral("no devices returned by jam2 list-devices") : error);
     } else {
         appendLog(QStringLiteral("loaded %1 audio devices").arg(deviceBox_->count()));
-    }
-}
-
-void MainWindow::refreshLocalOutputs()
-{
-    if (!localOutputBox_) {
-        return;
-    }
-    const QString previous = localOutputBox_->currentData().toString();
-    localOutputBox_->clear();
-    const QList<QAudioDevice> outputs = QMediaDevices::audioOutputs();
-    for (const QAudioDevice& device : outputs) {
-        localOutputBox_->addItem(device.description(), audioDeviceIdText(device));
-    }
-    if (localOutputBox_->count() == 0) {
-        localOutputBox_->addItem(QStringLiteral("Default audio output"), QString{});
-    }
-    const int restore = localOutputBox_->findData(previous);
-    if (restore >= 0) {
-        localOutputBox_->setCurrentIndex(restore);
     }
 }
 
@@ -3671,6 +4483,9 @@ void MainWindow::handleStatsLine(const QString& line)
     }
     if (stats.contains(QStringLiteral("recv")) && !stats.contains(QStringLiteral("recv_packets"))) {
         stats.insert(QStringLiteral("recv_packets"), stats.value(QStringLiteral("recv")).toDouble());
+    }
+    if (meshStatsLine) {
+        updateMixMeters(stats);
     }
     updateStatsDisplay(stats);
 }
@@ -3783,13 +4598,10 @@ void MainWindow::handleControlMessage(const QJsonObject& message)
 {
     const QString type = message.value(QStringLiteral("type")).toString();
     const bool trackMessage =
-        type == QStringLiteral("track.offer") ||
-        type == QStringLiteral("track.processing") ||
-        type == QStringLiteral("track.play") ||
-        type == QStringLiteral("track.stop") ||
-        type == QStringLiteral("track.file.start") ||
-        type == QStringLiteral("track.file.chunk") ||
-        type == QStringLiteral("track.file.done");
+        type == QStringLiteral("looper.asset.request") ||
+        type == QStringLiteral("looper.asset.start") ||
+        type == QStringLiteral("looper.asset.chunk") ||
+        type == QStringLiteral("looper.asset.done");
     if (trackMessage && !trackController_.model().syncControls) {
         appendLog(QStringLiteral("ignored remote track sync while local sync is disabled"));
         return;
@@ -3843,75 +4655,42 @@ void MainWindow::handleControlMessage(const QJsonObject& message)
         lyricModel_.setLyricsText(message.value(QStringLiteral("text")).toString());
         refreshSongView(QStringLiteral("lyric"));
     } else if (type == QStringLiteral("song.set")) {
-        if (loadSongJson(message.value(QStringLiteral("song")).toObject())) {
-            refreshSongViews();
-        }
-    } else if (type == QStringLiteral("track.offer")) {
-        trackController_.model().fileName = message.value(QStringLiteral("name")).toString();
-        const QString offeredPath = message.value(QStringLiteral("path")).toString(trackController_.model().filePath);
-        const bool offeredPathExists = QFileInfo::exists(offeredPath);
-        if (offeredPathExists) {
-            trackController_.model().filePath = offeredPath;
-        }
-        trackController_.model().fileBytes = static_cast<qint64>(message.value(QStringLiteral("file_bytes")).toDouble(trackController_.model().fileBytes));
-        trackController_.model().sampleRate = message.value(QStringLiteral("sample_rate")).toInt(trackController_.model().sampleRate);
-        trackController_.model().durationMs = message.value(QStringLiteral("duration_ms")).toInt(trackController_.model().durationMs);
-        trackController_.model().sha256 = message.value(QStringLiteral("sha256")).toString(trackController_.model().sha256);
-        trackController_.model().acceptedBpm = message.value(QStringLiteral("accepted_bpm")).toDouble(120.0);
-        trackController_.model().key = message.value(QStringLiteral("key")).toString(QStringLiteral("Unknown"));
-        trackController_.model().trackGainDb = message.value(QStringLiteral("track_gain_db")).toDouble(trackController_.model().trackGainDb);
-        trackController_.model().loopEnabled = message.value(QStringLiteral("loop_enabled")).toBool(trackController_.model().loopEnabled);
-        trackController_.model().loopStartSeconds = message.value(QStringLiteral("loop_start_seconds")).toDouble(trackController_.model().loopStartSeconds);
-        trackController_.model().loopEndSeconds = message.value(QStringLiteral("loop_end_seconds")).toDouble(trackController_.model().loopEndSeconds);
-        trackController_.model().focusEnabled = message.value(QStringLiteral("focus_enabled")).toBool(trackController_.model().focusEnabled);
-        trackController_.model().focusPreset = message.value(QStringLiteral("focus_preset")).toString(trackController_.model().focusPreset);
-        trackController_.model().focusFrequencyHz = message.value(QStringLiteral("focus_frequency_hz")).toDouble(trackController_.model().focusFrequencyHz);
-        trackController_.model().focusGainDb = message.value(QStringLiteral("focus_gain_db")).toDouble(trackController_.model().focusGainDb);
-        trackController_.model().focusQ = message.value(QStringLiteral("focus_q")).toDouble(trackController_.model().focusQ);
-        updateTrackControls();
-        if (offeredPathExists) {
-            loadTrackIntoPlayer();
-        }
-    } else if (type == QStringLiteral("track.processing")) {
-        appendLog(QStringLiteral("ignored remote track processing controls"));
-    } else if (type == QStringLiteral("track.play")) {
-        loadTrackIntoPlayer();
-        if (trackDevice_) {
-            trackDevice_->setPositionMs(message.value(QStringLiteral("position_ms")).toInteger(0));
-        }
-        const bool syncControls = trackController_.model().syncControls;
-        trackController_.model().syncControls = false;
-        playTrack();
-        trackController_.model().syncControls = syncControls;
-    } else if (type == QStringLiteral("track.stop")) {
-        const bool syncControls = trackController_.model().syncControls;
-        trackController_.model().syncControls = false;
-        stopTrack();
-        trackController_.model().syncControls = syncControls;
-    } else if (type == QStringLiteral("track.file.start")) {
-        receiveTrackFileStart(message);
-    } else if (type == QStringLiteral("track.file.chunk")) {
-        receiveTrackFileChunk(message);
-    } else if (type == QStringLiteral("track.file.done")) {
-        receiveTrackFileDone(message);
+        handleSongSet(message);
+    } else if (type == QStringLiteral("looper.asset.request")) {
+        handleLooperAssetRequest(message);
+    } else if (type == QStringLiteral("looper.asset.start")) {
+        receiveLooperAssetStart(message);
+    } else if (type == QStringLiteral("looper.asset.chunk")) {
+        receiveLooperAssetChunk(message);
+    } else if (type == QStringLiteral("looper.asset.done")) {
+        receiveLooperAssetDone(message);
     }
 }
 
 void MainWindow::handleControlState(const QString& state, bool serverSide)
 {
-    connectionLabel_->setText(state);
+    const QString displayState = !serverSide && state == QStringLiteral("TCP control authenticated")
+        ? QStringLiteral("TCP peer authenticated")
+        : state;
+    connectionLabel_->setText(displayState);
     appendLog(QStringLiteral("control: ") + state);
     if (serverSide && state == QStringLiteral("TCP peer authenticated")) {
+        remotePeerConnected_ = true;
         controlReconnectAttempts_ = 0;
         controlReconnectTimer_.stop();
         setMixRemotePeerVisible(true);
         sendLeaderSettings();
         sendMetronomeSettingsToPeer();
+        if (looperProject_.trackSyncEnabled()) {
+            sendSongSnapshot();
+        }
     } else if (!serverSide && state == QStringLiteral("TCP control authenticated")) {
+        remotePeerConnected_ = true;
         controlReconnectAttempts_ = 0;
         controlReconnectTimer_.stop();
         setMixRemotePeerVisible(true);
     } else if (state.startsWith(QStringLiteral("TCP auth failed:"))) {
+        remotePeerConnected_ = false;
         controlReconnectEnabled_ = false;
         controlReconnectTimer_.stop();
         pendingJoinLaunch_ = false;
@@ -3929,6 +4708,11 @@ void MainWindow::handleControlState(const QString& state, bool serverSide)
         QMessageBox::warning(this, QStringLiteral("Jam2"), state);
     } else if ((jam2_.isRunning() || pendingJoinLaunch_) && controlReconnectEnabled_ &&
         (state == QStringLiteral("TCP control disconnected") || state == QStringLiteral("TCP peer disconnected"))) {
+        remotePeerConnected_ = false;
+        if (!serverSide && meshActive_) {
+            meshPeerEndpoints_.clear();
+            meshPeerEndpoints_[meshPeerToken()] = localMeshEndpoint();
+        }
         setMixRemotePeerVisible(false);
         scheduleControlReconnect();
     }
@@ -3949,6 +4733,9 @@ void MainWindow::refreshControlConnection()
         return;
     }
     ++controlReconnectAttempts_;
+    if (connectionLabel_) {
+        connectionLabel_->setText(QStringLiteral("Refreshing TCP control (%1)").arg(controlReconnectAttempts_));
+    }
     appendLog(QStringLiteral("refreshing TCP control attempt %1").arg(controlReconnectAttempts_));
     if (controlServerMode_) {
         if (!controlServer_.listen(controlPort_, controlSessionHex_, controlKeyHex_)) {
@@ -3965,6 +4752,9 @@ void MainWindow::refreshControlConnection()
     }
     if (controlReconnectAttempts_ >= 15) {
         controlReconnectTimer_.stop();
+        if (connectionLabel_) {
+            connectionLabel_->setText(QStringLiteral("TCP refresh required"));
+        }
         appendLog(QStringLiteral("TCP control auto reconnect paused; use Refresh Control to retry"));
     }
 }
@@ -4224,6 +5014,7 @@ void MainWindow::handleMeshPeerAuthenticated(const QString& token, const QJsonOb
     }
     const bool changed = meshPeerEndpoints_.value(token) != endpoint;
     meshPeerEndpoints_[token] = endpoint;
+    updateMixRemotePeers();
     if (changed) {
         appendLog(QStringLiteral("mesh peer endpoint %1 -> %2").arg(token.left(8), endpoint));
         broadcastMeshPeerList();
@@ -4262,6 +5053,7 @@ void MainWindow::applyMeshPeerList(const QJsonObject& message)
             meshPeerEndpoints_[token] = endpoint;
         }
     }
+    updateMixRemotePeers();
     restartMeshEngineFromPeerList();
 }
 
@@ -4271,6 +5063,7 @@ void MainWindow::restartMeshEngineFromPeerList()
         return;
     }
     const QStringList peers = meshPeerEndpointsExcludingSelf();
+    updateMixRemotePeers();
     if (jam2_.isRunning() && peers == currentMeshPeers_) {
         return;
     }
@@ -4282,6 +5075,9 @@ void MainWindow::restartMeshEngineFromPeerList()
          << QStringLiteral("--session-key") << keyHex()
          << QStringLiteral("--peers") << peers.join(QLatin1Char(','));
     args << commonJamArgs(false);
+    if (controlServerMode_) {
+        args << QStringLiteral("--grid-coordinator") << QStringLiteral("on");
+    }
     if (jam2_.isRunning()) {
         meshRestarting_ = true;
         jam2_.stop();
@@ -4327,7 +5123,7 @@ void MainWindow::updateRuntimeControls()
     if (!jam2_.isRunning()) {
         return;
     }
-    const double metronomeLevel = gainFromDb(static_cast<double>(metronomeLevelSlider_ ? metronomeLevelSlider_->value() : 0));
+    const double metronomeLevel = gainFromDb(static_cast<double>(metronomeLevelSlider_ ? metronomeLevelSlider_->value() : -10));
     const double remoteLevel = gainFromDb(static_cast<double>(remoteLevelSlider_ ? remoteLevelSlider_->value() : 0));
     sendJamCommand(QStringLiteral("metro level %1").arg(metronomeLevel, 0, 'f', 3));
     sendJamCommand(QStringLiteral("remote level %1").arg(remoteLevel, 0, 'f', 3));
@@ -4336,6 +5132,844 @@ void MainWindow::updateRuntimeControls()
     sendJamCommand(QStringLiteral("send level %1").arg(sendLevel, 0, 'f', 3));
     sendJamCommand(QStringLiteral("monitor %1").arg(mixMonitorCheck_ && mixMonitorCheck_->isChecked() ? QStringLiteral("on") : QStringLiteral("off")));
     sendJamCommand(QStringLiteral("monitor level %1").arg(monitorLevel, 0, 'f', 3));
+}
+
+void MainWindow::refreshLooperLanes()
+{
+    for (int i = 0; i < static_cast<int>(looperBankButtons_.size()); ++i) {
+        if (looperBankButtons_[i]) {
+            looperBankButtons_[i]->setChecked(i == looperProject_.activeBankIndex());
+            looperBankButtons_[i]->setStyleSheet(i == looperProject_.activeBankIndex()
+                ? QStringLiteral("QPushButton { background: #4a7496; color: #e6eef4; border: 1px solid #6e8fa8; padding: 4px; }")
+                : QStringLiteral("QPushButton { background: #272d33; color: #aab2ba; border: 1px solid #4a525a; padding: 4px; }"));
+        }
+    }
+    if (looperStack_ == nullptr) {
+        return;
+    }
+    const LooperBank& bank = looperProject_.banks().at(looperProject_.activeBankIndex());
+    if (bank.lanes.isEmpty()) {
+        selectedLooperLane_ = -1;
+    } else {
+        selectedLooperLane_ = qBound(0, selectedLooperLane_, bank.lanes.size() - 1);
+    }
+
+    QVector<LooperLaneStackWidget::LaneView> views;
+    views.reserve(bank.lanes.size());
+    for (const LooperLane& lane : bank.lanes) {
+        LooperLaneStackWidget::LaneView view;
+        view.lane = lane;
+        view.assetPath = looperAssetAbsolutePath(lane);
+        if (!lane.assetPath.trimmed().isEmpty()) {
+            QFile file(view.assetPath);
+            if (file.open(QIODevice::ReadOnly)) {
+                const QByteArray data = file.readAll();
+                int channels = 0;
+                int bitsPerSample = 0;
+                qsizetype dataOffset = -1;
+                qsizetype dataBytes = 0;
+                qsizetype offset = 12;
+                if (data.size() >= 44 && data.mid(0, 4) == "RIFF" && data.mid(8, 4) == "WAVE") {
+                    while (offset + 8 <= data.size()) {
+                        const QByteArray id = data.mid(offset, 4);
+                        const quint32 size = waveformReadLe32(data, offset + 4);
+                        const qsizetype payload = offset + 8;
+                        if (payload + size > data.size()) {
+                            break;
+                        }
+                        if (id == "fmt " && size >= 16) {
+                            channels = waveformReadLe16(data, payload + 2);
+                            bitsPerSample = waveformReadLe16(data, payload + 14);
+                        } else if (id == "data") {
+                            dataOffset = payload;
+                            dataBytes = size;
+                        }
+                        offset = payload + size + (size % 2);
+                    }
+                }
+                if (channels > 0 && bitsPerSample == 16 && dataOffset >= 0 && dataBytes > 0) {
+                    constexpr int kPeakCount = 512;
+                    const qsizetype frameBytes = channels * 2;
+                    const qsizetype frames = dataBytes / frameBytes;
+                    view.sourceFrames = frames;
+                    view.peaks.assign(kPeakCount, 0.0f);
+                    for (int i = 0; i < kPeakCount && frames > 0; ++i) {
+                        const qsizetype begin = frames * i / kPeakCount;
+                        const qsizetype end = qMax<qsizetype>(begin + 1, frames * (i + 1) / kPeakCount);
+                        int peak = 0;
+                        for (qsizetype frame = begin; frame < end; ++frame) {
+                            int mixed = 0;
+                            for (int channel = 0; channel < channels; ++channel) {
+                                const qsizetype sampleOffset = dataOffset + frame * frameBytes + channel * 2;
+                                mixed += std::abs(static_cast<int>(static_cast<qint16>(waveformReadLe16(data, sampleOffset))));
+                            }
+                            peak = qMax(peak, mixed / channels);
+                        }
+                        view.peaks[i] = static_cast<float>(peak) / 32768.0f;
+                    }
+                    const auto maxPeak = std::max_element(view.peaks.begin(), view.peaks.end());
+                    if (maxPeak != view.peaks.end() && *maxPeak > 0.0f && *maxPeak < 0.85f) {
+                        const float scale = 0.85f / *maxPeak;
+                        for (float& peak : view.peaks) {
+                            peak = qMin(1.0f, peak * scale);
+                        }
+                    }
+                }
+            }
+        }
+        views.push_back(std::move(view));
+    }
+    const int armedLane = armedRecordBank_ == looperProject_.activeBankIndex() ? armedRecordLane_ : -1;
+    int markerRate = preparedSourceSampleRate_;
+    if (markerRate <= 0) {
+        markerRate = 48000;
+    }
+    looperStack_->setLanes(
+        std::move(views),
+        selectedLooperLane_,
+        looperProject_.activeBankIndex(),
+        armedLane,
+        markerRate,
+        playbackGrid_.bpm(),
+        looperProject_.gridLockEnabled());
+}
+
+void MainWindow::applySelectedLooperLaneRegion(qint64 startFrame, qint64 sourceStartFrame, qint64 sourceEndFrame)
+{
+    if (selectedLooperLane_ < 0) {
+        return;
+    }
+    const int row = selectedLooperLane_;
+    LooperBank& bank = looperProject_.banks()[looperProject_.activeBankIndex()];
+    if (row < 0 || row >= bank.lanes.size()) {
+        return;
+    }
+    LooperLane& lane = bank.lanes[row];
+    qint64 sourceFrames = 0;
+    try {
+        const WavMetadata metadata = readWavMetadata(looperAssetAbsolutePath(lane));
+        const qint64 frameBytes = static_cast<qint64>(metadata.channels) * metadata.bitsPerSample / 8;
+        sourceFrames = frameBytes > 0 ? metadata.dataBytes / frameBytes : 0;
+    } catch (const std::exception& error) {
+        appendLog(QStringLiteral("lane region edit failed: ") + QString::fromUtf8(error.what()));
+        refreshLooperLanes();
+        return;
+    }
+    if (sourceFrames <= 0) {
+        refreshLooperLanes();
+        return;
+    }
+
+    sourceStartFrame = qBound<qint64>(0, sourceStartFrame, sourceFrames - 1);
+    sourceEndFrame = qBound<qint64>(sourceStartFrame + 1, sourceEndFrame, sourceFrames);
+    lane.startFrame = qMax<qint64>(0, startFrame);
+    lane.stopFrame = lane.startFrame + (sourceEndFrame - sourceStartFrame);
+    if (sourceStartFrame == 0 && sourceEndFrame == sourceFrames) {
+        lane.loopStartFrame = -1;
+        lane.loopEndFrame = -1;
+    } else {
+        lane.loopStartFrame = sourceStartFrame;
+        lane.loopEndFrame = sourceEndFrame;
+    }
+
+    refreshLooperLanes();
+    selectedLooperLane_ = row;
+    regeneratePreparedMix();
+    syncLooperArrangement();
+}
+
+void MainWindow::applyLooperLaneGain(int laneIndex, double gainDb)
+{
+    LooperBank& bank = looperProject_.banks()[looperProject_.activeBankIndex()];
+    if (laneIndex < 0 || laneIndex >= bank.lanes.size()) {
+        return;
+    }
+    selectedLooperLane_ = laneIndex;
+    bank.lanes[laneIndex].gainDb = qBound(-60.0, gainDb, 12.0);
+    refreshLooperLanes();
+    regeneratePreparedMix();
+    syncLooperArrangement();
+}
+
+void MainWindow::addLooperWavs()
+{
+    const QStringList paths = QFileDialog::getOpenFileNames(
+        this, QStringLiteral("Add WAV lanes"), QString(), QStringLiteral("WAV files (*.wav *.WAV)"));
+    for (const QString& path : paths) {
+        if (!QFileInfo::exists(path)) {
+            appendLog(QStringLiteral("could not import WAV: ") + path);
+            continue;
+        }
+        const QFileInfo info(path);
+        const QString assetHash = sha256FileHex(info.absoluteFilePath());
+        if (assetHash.isEmpty()) {
+            appendLog(QStringLiteral("could not hash WAV: ") + path);
+            continue;
+        }
+        const QString stagedPath = QDir(transientProjectFolder_).absoluteFilePath(
+            QStringLiteral("wavs/") + assetHash + QStringLiteral(".wav"));
+        QDir().mkpath(QFileInfo(stagedPath).absolutePath());
+        if (!QFileInfo::exists(stagedPath) && !QFile::copy(info.absoluteFilePath(), stagedPath)) {
+            appendLog(QStringLiteral("could not stage WAV: ") + path);
+            continue;
+        }
+        registerTransientTrackWav(stagedPath);
+        LooperLane lane;
+        lane.assetPath = stagedPath;
+        lane.assetHash = assetHash;
+        lane.name = info.completeBaseName();
+        if (!looperProject_.appendLane(looperProject_.activeBankIndex(), std::move(lane))) {
+            appendLog(QStringLiteral("could not add WAV lane: ") + path);
+        }
+    }
+    refreshLooperLanes();
+    regeneratePreparedMix();
+}
+
+void MainWindow::loadWavIntoLooperLane()
+{
+    const int bankIndex = looperProject_.activeBankIndex();
+    const LooperBank& bank = looperProject_.banks().at(bankIndex);
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Load WAV"));
+    auto* form = new QFormLayout(&dialog);
+    auto* laneBox = new QComboBox(&dialog);
+    for (int laneIndex = 0; laneIndex < bank.lanes.size(); ++laneIndex) {
+        laneBox->addItem(bank.lanes.at(laneIndex).name, laneIndex);
+    }
+    if (bank.lanes.isEmpty()) {
+        laneBox->addItem(QStringLiteral("Empty Track 1"), -1);
+    } else if (selectedLooperLane_ >= 0 && selectedLooperLane_ < laneBox->count()) {
+        laneBox->setCurrentIndex(selectedLooperLane_);
+    }
+
+    auto* pathEdit = new QLineEdit(&dialog);
+    pathEdit->setReadOnly(true);
+    auto* browse = new QPushButton(QStringLiteral("Browse"), &dialog);
+    auto* pathRow = new QHBoxLayout();
+    pathRow->addWidget(pathEdit, 1);
+    pathRow->addWidget(browse);
+    form->addRow(QStringLiteral("Track lane"), laneBox);
+    form->addRow(QStringLiteral("WAV"), pathRow);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Load WAV"));
+    buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+    form->addRow(buttons);
+    QObject::connect(browse, &QPushButton::clicked, &dialog, [this, pathEdit, buttons] {
+        const QString path = QFileDialog::getOpenFileName(
+            this,
+            QStringLiteral("Load WAV"),
+            QString(),
+            QStringLiteral("WAV files (*.wav *.WAV)"));
+        if (!path.isEmpty()) {
+            pathEdit->setText(QDir::toNativeSeparators(path));
+            buttons->button(QDialogButtonBox::Ok)->setEnabled(true);
+        }
+    });
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    const QString sourcePath = QDir::fromNativeSeparators(pathEdit->text());
+    QString reason;
+    if (!isImportablePcm16Wav(sourcePath, &reason)) {
+        QMessageBox::warning(this, QStringLiteral("Load WAV"), reason);
+        return;
+    }
+    const QFileInfo info(sourcePath);
+    const QString assetHash = sha256FileHex(info.absoluteFilePath());
+    if (assetHash.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Load WAV"), QStringLiteral("Could not hash the selected WAV."));
+        return;
+    }
+    const QString stagedPath = QDir(transientProjectFolder_).absoluteFilePath(
+        QStringLiteral("wavs/") + assetHash + QStringLiteral(".wav"));
+    QDir().mkpath(QFileInfo(stagedPath).absolutePath());
+    if (!QFileInfo::exists(stagedPath) && !QFile::copy(info.absoluteFilePath(), stagedPath)) {
+        QMessageBox::warning(this, QStringLiteral("Load WAV"), QStringLiteral("Could not stage the selected WAV."));
+        return;
+    }
+    registerTransientTrackWav(stagedPath);
+
+    int laneIndex = laneBox->currentData().toInt();
+    if (laneIndex < 0) {
+        if (!looperProject_.appendLane(bankIndex, LooperLane{})) {
+            QMessageBox::warning(this, QStringLiteral("Load WAV"), QStringLiteral("Could not create a track lane."));
+            return;
+        }
+        laneIndex = looperProject_.banks().at(bankIndex).lanes.size() - 1;
+    }
+    if (laneIndex < 0 || laneIndex >= looperProject_.banks().at(bankIndex).lanes.size()) {
+        QMessageBox::warning(this, QStringLiteral("Load WAV"), QStringLiteral("The selected track lane is no longer available."));
+        return;
+    }
+    LooperLane& lane = looperProject_.banks()[bankIndex].lanes[laneIndex];
+    lane.assetPath = stagedPath;
+    lane.assetHash = assetHash;
+    if (isDefaultEmptyTrackName(lane.name) || lane.name.trimmed().isEmpty()) {
+        lane.name = info.completeBaseName();
+    }
+    lane.startFrame = 0;
+    lane.stopFrame = -1;
+    lane.loopStartFrame = -1;
+    lane.loopEndFrame = -1;
+    lane.loopEnabled = false;
+    selectedLooperLane_ = laneIndex;
+    refreshLooperLanes();
+    regeneratePreparedMix();
+    syncLooperArrangement();
+}
+
+void MainWindow::addEmptyLooperLane()
+{
+    LooperLane lane;
+    if (!looperProject_.appendLane(looperProject_.activeBankIndex(), std::move(lane))) {
+        appendLog(QStringLiteral("could not add empty lane"));
+        return;
+    }
+    refreshLooperLanes();
+    const int row = looperProject_.banks().at(looperProject_.activeBankIndex()).lanes.size() - 1;
+    selectedLooperLane_ = row;
+    refreshLooperLanes();
+    syncLooperArrangement();
+}
+
+bool MainWindow::armSelectedLooperLaneRecording()
+{
+    if (selectedLooperLane_ < 0) {
+        if (looperProject_.banks().at(looperProject_.activeBankIndex()).lanes.isEmpty()) {
+            addEmptyLooperLane();
+        } else {
+            selectedLooperLane_ = 0;
+        }
+    }
+    if (selectedLooperLane_ < 0) {
+        return false;
+    }
+
+    const int bankIndex = looperProject_.activeBankIndex();
+    const int laneIndex = selectedLooperLane_;
+    const LooperLane& lane = looperProject_.banks().at(bankIndex).lanes.at(laneIndex);
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Arm Lane Recording"));
+    dialog.resize(760, 560);
+    auto* content = new QWidget(&dialog);
+    content->setMinimumWidth(700);
+    auto* form = new QFormLayout(content);
+
+    auto* modeBox = new QComboBox(content);
+    modeBox->addItem(QStringLiteral("Input"), QStringLiteral("input"));
+    modeBox->addItem(QStringLiteral("Loopback"), QStringLiteral("loopback"));
+    applyMutedEditorStyle(modeBox);
+
+    const QList<QWidget*> widgets{
+        captureOutputEdit_, deviceBox_, inputChannelsEdit_, loopbackSourceBox_,
+        sampleRateSpin_, bufferSizeSpin_, captureManualStopCheck_, captureDurationSpin_,
+        captureCountInCheck_, captureCountInMetronomeCheck_, captureKeepMetronomeCheck_, captureCountInBarsSpin_, captureTriggerCheck_, triggerThresholdSpin_,
+        triggerHoldSpin_, preRollSpin_, tailThresholdSpin_, tailSilenceSpin_, trimLeadingCheck_,
+        trimTrailingCheck_, recordingLatencyLabel_, recordingLatencyAdjustmentSpin_,
+    };
+    for (QWidget* widget : widgets) {
+        widget->show();
+    }
+    const QString laneFileName = safeFileName(lane.name);
+    captureOutputEdit_->setText(timestampedCapturePath(laneFileName.isEmpty() ? QStringLiteral("lane") : laneFileName));
+
+    auto* outputLayout = new QHBoxLayout();
+    outputLayout->addWidget(captureOutputEdit_, 1);
+    auto* browse = new QPushButton(QStringLiteral("Browse"), content);
+    outputLayout->addWidget(browse);
+    auto* sourceLayout = new QHBoxLayout();
+    sourceLayout->addWidget(loopbackSourceBox_, 1);
+    auto* refreshSources = new QPushButton(QStringLiteral("Refresh Sources"), content);
+    sourceLayout->addWidget(refreshSources);
+    auto* countInLayout = new QHBoxLayout();
+    countInLayout->addWidget(captureCountInCheck_);
+    countInLayout->addWidget(captureCountInBarsSpin_);
+    countInLayout->addStretch(1);
+    auto* metronomeLayout = new QHBoxLayout();
+    metronomeLayout->addWidget(captureCountInMetronomeCheck_);
+    metronomeLayout->addWidget(captureKeepMetronomeCheck_);
+    metronomeLayout->addStretch(1);
+    auto* latencyLayout = new QHBoxLayout();
+    latencyLayout->addWidget(recordingLatencyLabel_, 1);
+    latencyLayout->addWidget(recordingLatencyAdjustmentSpin_);
+
+    auto refreshMode = [this, modeBox] {
+        const bool inputMode = modeBox->currentData().toString() == QStringLiteral("input");
+        deviceBox_->setVisible(inputMode);
+        inputChannelsEdit_->setVisible(inputMode);
+        sampleRateSpin_->setVisible(inputMode);
+        bufferSizeSpin_->setVisible(inputMode);
+        recordingLatencyLabel_->setVisible(inputMode);
+        recordingLatencyAdjustmentSpin_->setVisible(inputMode);
+        loopbackSourceBox_->setVisible(!inputMode);
+    };
+
+    form->addRow(QStringLiteral("Lane"), new QLabel(lane.name, content));
+    form->addRow(QStringLiteral("Source"), modeBox);
+    form->addRow(QStringLiteral("Take WAV"), outputLayout);
+    form->addRow(QStringLiteral("Audio device"), deviceBox_);
+    form->addRow(QStringLiteral("Input channels"), inputChannelsEdit_);
+    form->addRow(QStringLiteral("Loopback source"), sourceLayout);
+    form->addRow(QStringLiteral("Sample rate"), sampleRateSpin_);
+    form->addRow(QStringLiteral("Buffer size"), bufferSizeSpin_);
+    form->addRow(QStringLiteral("Recording alignment"), latencyLayout);
+    form->addRow(captureManualStopCheck_);
+    auto* durationLabel = new QLabel(QStringLiteral("Duration limit"), content);
+    form->addRow(durationLabel, captureDurationSpin_);
+    form->addRow(QStringLiteral("Count-in"), countInLayout);
+    form->addRow(QStringLiteral("Metronome"), metronomeLayout);
+    form->addRow(captureTriggerCheck_);
+    form->addRow(QStringLiteral("Trigger threshold"), triggerThresholdSpin_);
+    form->addRow(QStringLiteral("Trigger hold"), triggerHoldSpin_);
+    form->addRow(QStringLiteral("Pre-roll"), preRollSpin_);
+    form->addRow(QStringLiteral("Tail threshold"), tailThresholdSpin_);
+    form->addRow(QStringLiteral("Tail silence"), tailSilenceSpin_);
+    form->addRow(trimLeadingCheck_);
+    form->addRow(trimTrailingCheck_);
+
+    QObject::connect(modeBox, qOverload<int>(&QComboBox::currentIndexChanged), &dialog, refreshMode);
+    QObject::connect(browse, &QPushButton::clicked, this, [this] { chooseCaptureFolder(); });
+    QObject::connect(refreshSources, &QPushButton::clicked, this, [this] { refreshLoopbackSources(); });
+    QObject::connect(captureManualStopCheck_, &QCheckBox::toggled, &dialog, [this, durationLabel] {
+        updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_, durationLabel);
+    });
+    updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_, durationLabel);
+    refreshMode();
+
+    auto* scroll = new QScrollArea(&dialog);
+    scroll->setWidgetResizable(true);
+    scroll->setWidget(content);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, &dialog);
+    auto* arm = buttons->addButton(QStringLiteral("Arm"), QDialogButtonBox::AcceptRole);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->addWidget(scroll, 1);
+    layout->addWidget(buttons);
+    arm->setDefault(true);
+
+    const int result = dialog.exec();
+    for (QWidget* widget : widgets) {
+        widget->setParent(this);
+        widget->hide();
+    }
+    if (result != QDialog::Accepted) {
+        return false;
+    }
+    armedRecordBank_ = bankIndex;
+    armedRecordLane_ = laneIndex;
+    armedRecordMode_ = modeBox->currentData().toString();
+    refreshLooperLanes();
+    appendLog(QStringLiteral("armed lane recording: bank=%1 lane=%2 mode=%3")
+        .arg(looperProject_.banks().at(bankIndex).id)
+        .arg(lane.name)
+        .arg(armedRecordMode_));
+    return true;
+}
+
+void MainWindow::startArmedLooperLaneRecording()
+{
+    if (trackTakeRecordingActive_ || loopbackRecorder_.isRunning()) {
+        return;
+    }
+    if (armedRecordBank_ < 0 || armedRecordLane_ < 0) {
+        if (!armSelectedLooperLaneRecording()) {
+            return;
+        }
+    }
+    const bool engineInput = armedRecordMode_ != QStringLiteral("loopback");
+    if (captureCountInCheck_ && captureCountInCheck_->isChecked()) {
+        const bool countInMetronome = captureCountInMetronomeCheck_ && captureCountInMetronomeCheck_->isChecked();
+        const bool keepMetronome = captureKeepMetronomeCheck_ && captureKeepMetronomeCheck_->isChecked();
+        if (engineInput && countInMetronome) {
+            startTrackMetronome();
+        }
+        const int bars = qMax(1, captureCountInBarsSpin_ ? captureCountInBarsSpin_->value() : 1);
+        const QString countInText = QStringLiteral("Recording: waiting for engine count-in schedule (%1 bar%2)")
+            .arg(bars)
+            .arg(bars == 1 ? QString{} : QStringLiteral("s"));
+        if (gridScheduleLabel_) {
+            gridScheduleLabel_->setText(countInText);
+        }
+        appendLog(countInText);
+        if (engineInput) {
+            stopMetronomeAtRecordingStart_ = countInMetronome && !keepMetronome;
+            startInputCapture(0, bars);
+        } else {
+            startLoopbackCapture();
+        }
+    } else {
+        if (engineInput) {
+            startInputCapture(0, 0);
+        } else {
+            startArmedLooperLaneRecordingNow(0);
+        }
+    }
+}
+
+void MainWindow::startArmedLooperLaneRecordingNow(std::uint64_t targetFrame)
+{
+    if (armedRecordMode_ == QStringLiteral("loopback")) {
+        startLoopbackCapture();
+    } else {
+        startInputCapture(targetFrame);
+    }
+}
+
+void MainWindow::importLastCaptureToArmedLane()
+{
+    if (armedRecordBank_ < 0 || armedRecordLane_ < 0 ||
+        armedRecordBank_ >= looperProject_.banks().size() ||
+        armedRecordLane_ >= looperProject_.banks().at(armedRecordBank_).lanes.size()) {
+        return;
+    }
+    QString reason;
+    if (!isImportablePcm16Wav(lastCapturePath_, &reason)) {
+        appendLog(QStringLiteral("recorded lane WAV not importable: ") + reason);
+        return;
+    }
+    const QFileInfo info(lastCapturePath_);
+    const QString assetHash = sha256FileHex(info.absoluteFilePath());
+    if (assetHash.isEmpty()) {
+        appendLog(QStringLiteral("recorded lane WAV hash failed"));
+        return;
+    }
+    const QString stagedPath = QDir(transientProjectFolder_).absoluteFilePath(
+        QStringLiteral("wavs/") + assetHash + QStringLiteral(".wav"));
+    QDir().mkpath(QFileInfo(stagedPath).absolutePath());
+    if (!QFileInfo::exists(stagedPath) && !QFile::copy(info.absoluteFilePath(), stagedPath)) {
+        appendLog(QStringLiteral("could not stage recorded lane WAV: ") + info.absoluteFilePath());
+        return;
+    }
+    registerTransientTrackWav(stagedPath);
+    LooperLane& lane = looperProject_.banks()[armedRecordBank_].lanes[armedRecordLane_];
+    lane.assetPath = stagedPath;
+    lane.assetHash = assetHash;
+    if (isDefaultEmptyTrackName(lane.name) || lane.name.trimmed().isEmpty()) {
+        lane.name = info.completeBaseName();
+    }
+    lane.startFrame = 0;
+    lane.stopFrame = -1;
+    lane.loopStartFrame = -1;
+    lane.loopEndFrame = -1;
+    lane.loopEnabled = false;
+    appendLog(QStringLiteral("recorded lane imported: %1").arg(lane.name));
+    armedRecordBank_ = -1;
+    armedRecordLane_ = -1;
+    armedRecordMode_.clear();
+    refreshLooperLanes();
+    regeneratePreparedMix();
+    syncLooperArrangement();
+}
+
+void MainWindow::renameSelectedLooperLane()
+{
+    if (selectedLooperLane_ < 0) {
+        return;
+    }
+    const int row = selectedLooperLane_;
+    const LooperLane& lane = looperProject_.banks().at(looperProject_.activeBankIndex()).lanes.at(row);
+    bool accepted = false;
+    const QString name = QInputDialog::getText(this, QStringLiteral("Rename lane"), QStringLiteral("Lane name"),
+        QLineEdit::Normal, lane.name, &accepted);
+    if (accepted && looperProject_.renameLane(looperProject_.activeBankIndex(), row, name)) {
+        refreshLooperLanes();
+        regeneratePreparedMix();
+        syncLooperArrangement();
+    }
+}
+
+void MainWindow::removeSelectedLooperLane()
+{
+    if (selectedLooperLane_ < 0) {
+        return;
+    }
+    const int bankIndex = looperProject_.activeBankIndex();
+    const int row = selectedLooperLane_;
+    const LooperLane lane = looperProject_.banks().at(bankIndex).lanes.at(row);
+    const QString assetPath = looperAssetAbsolutePath(lane);
+    const QFileInfo assetInfo(assetPath);
+    int references = 0;
+    for (const LooperBank& bank : looperProject_.banks()) {
+        for (const LooperLane& candidate : bank.lanes) {
+            if ((!lane.assetHash.isEmpty() && candidate.assetHash == lane.assetHash) ||
+                (!assetPath.isEmpty() && QDir::cleanPath(looperAssetAbsolutePath(candidate)) == QDir::cleanPath(assetPath))) {
+                ++references;
+            }
+        }
+    }
+    QMessageBox dialog(QMessageBox::Question, QStringLiteral("Remove lane"),
+        QStringLiteral("Remove '%1' from this bank?").arg(lane.name), QMessageBox::Cancel, this);
+    QPushButton* removeOnly = dialog.addButton(QStringLiteral("Remove lane only"), QMessageBox::AcceptRole);
+    QPushButton* deleteAsset = dialog.addButton(QStringLiteral("Delete WAV from disk"), QMessageBox::DestructiveRole);
+    const bool hasWav = assetInfo.exists() && assetInfo.isFile() &&
+        assetInfo.suffix().compare(QStringLiteral("wav"), Qt::CaseInsensitive) == 0;
+    if (!hasWav) {
+        deleteAsset->setEnabled(false);
+        dialog.setInformativeText(QStringLiteral("The lane does not reference an existing WAV file."));
+    } else if (references > 1) {
+        dialog.setInformativeText(QStringLiteral(
+            "This WAV is referenced by %1 lanes. Deleting it from disk will leave the other references without audio.")
+            .arg(references));
+    }
+    dialog.exec();
+    if (dialog.clickedButton() != removeOnly && dialog.clickedButton() != deleteAsset) {
+        return;
+    }
+    if (dialog.clickedButton() == deleteAsset && (!hasWav || !QFile::remove(assetPath))) {
+        QMessageBox::warning(this, QStringLiteral("Remove lane"), QStringLiteral("Could not delete the WAV file."));
+        return;
+    }
+    looperProject_.removeLane(bankIndex, row);
+    selectedLooperLane_ = qMin(row, looperProject_.banks().at(bankIndex).lanes.size() - 1);
+    refreshLooperLanes();
+    regeneratePreparedMix();
+    syncLooperArrangement();
+}
+
+void MainWindow::moveSelectedLooperLane(int delta)
+{
+    if (selectedLooperLane_ < 0) {
+        return;
+    }
+    const int from = selectedLooperLane_;
+    const int to = from + delta;
+    if (looperProject_.moveLane(looperProject_.activeBankIndex(), from, to)) {
+        selectedLooperLane_ = to;
+        refreshLooperLanes();
+        regeneratePreparedMix();
+        syncLooperArrangement();
+    }
+}
+
+void MainWindow::toggleSelectedLooperLaneMute()
+{
+    if (selectedLooperLane_ < 0) return;
+    LooperLane& lane = looperProject_.banks()[looperProject_.activeBankIndex()].lanes[selectedLooperLane_];
+    lane.muted = !lane.muted;
+    refreshLooperLanes();
+    regeneratePreparedMix();
+    syncLooperArrangement();
+}
+
+void MainWindow::toggleSelectedLooperLaneSolo()
+{
+    if (selectedLooperLane_ < 0) return;
+    LooperLane& lane = looperProject_.banks()[looperProject_.activeBankIndex()].lanes[selectedLooperLane_];
+    lane.solo = !lane.solo;
+    refreshLooperLanes();
+    regeneratePreparedMix();
+    syncLooperArrangement();
+}
+
+void MainWindow::setSelectedLooperLaneGain()
+{
+    if (selectedLooperLane_ < 0) return;
+    LooperLane& lane = looperProject_.banks()[looperProject_.activeBankIndex()].lanes[selectedLooperLane_];
+    bool accepted = false;
+    const double gain = QInputDialog::getDouble(this, QStringLiteral("Lane gain"), QStringLiteral("Gain (dB)"), lane.gainDb, -60.0, 12.0, 1, &accepted);
+    if (!accepted) return;
+    lane.gainDb = gain;
+    refreshLooperLanes();
+    regeneratePreparedMix();
+    syncLooperArrangement();
+}
+
+void MainWindow::editSelectedLooperLaneRegion()
+{
+    if (selectedLooperLane_ < 0) {
+        return;
+    }
+    LooperLane& lane = looperProject_.banks()[looperProject_.activeBankIndex()].lanes[selectedLooperLane_];
+    qint64 startFrame = lane.startFrame;
+    qint64 stopFrame = lane.stopFrame;
+    qint64 loopStartFrame = lane.loopStartFrame;
+    qint64 loopEndFrame = lane.loopEndFrame;
+
+    if (!promptFrame(this, QStringLiteral("Lane region"), QStringLiteral("Timeline start frame"), startFrame, startFrame)) {
+        return;
+    }
+    if (startFrame < 0) {
+        QMessageBox::warning(this, QStringLiteral("Lane region"), QStringLiteral("Timeline start frame is required."));
+        return;
+    }
+    if (!promptFrame(this, QStringLiteral("Lane region"), QStringLiteral("Timeline stop frame (empty for source end)"), stopFrame, stopFrame)) {
+        return;
+    }
+    if (stopFrame >= 0 && stopFrame < startFrame) {
+        QMessageBox::warning(this, QStringLiteral("Lane region"), QStringLiteral("Timeline stop frame must be after start frame."));
+        return;
+    }
+    if (!promptFrame(this, QStringLiteral("Lane region"), QStringLiteral("Source crop start frame (empty for source start)"), loopStartFrame, loopStartFrame)) {
+        return;
+    }
+    if (!promptFrame(this, QStringLiteral("Lane region"), QStringLiteral("Source crop end frame (empty for source end)"), loopEndFrame, loopEndFrame)) {
+        return;
+    }
+    if ((loopStartFrame < 0) != (loopEndFrame < 0)) {
+        QMessageBox::warning(this, QStringLiteral("Lane region"), QStringLiteral("Source crop start and end must both be set, or both left empty."));
+        return;
+    }
+    if (loopStartFrame >= 0 && loopEndFrame <= loopStartFrame) {
+        QMessageBox::warning(this, QStringLiteral("Lane region"), QStringLiteral("Source crop end frame must be after the source crop start frame."));
+        return;
+    }
+    const bool loopEnabled = QMessageBox::question(
+        this,
+        QStringLiteral("Lane region"),
+        QStringLiteral("Loop the source crop range for this lane?"),
+        QMessageBox::Yes | QMessageBox::No,
+        lane.loopEnabled ? QMessageBox::Yes : QMessageBox::No) == QMessageBox::Yes;
+    if (loopStartFrame < 0) {
+        loopStartFrame = -1;
+        loopEndFrame = -1;
+    }
+
+    lane.startFrame = startFrame;
+    lane.stopFrame = stopFrame;
+    lane.loopEnabled = loopEnabled;
+    lane.loopStartFrame = loopStartFrame;
+    lane.loopEndFrame = loopEndFrame;
+    refreshLooperLanes();
+    regeneratePreparedMix();
+    syncLooperArrangement();
+}
+
+void MainWindow::syncLooperArrangement()
+{
+    if (looperProject_.trackSyncEnabled() && jam2_.isRunning() && controlServerMode_) {
+        sendSongSnapshot();
+    } else if (looperProject_.trackSyncEnabled() && jam2_.isRunning() && !controlServerMode_) {
+        appendLog(QStringLiteral("local arrangement edit kept local; host owns Track Sync revisions"));
+    }
+}
+
+QString MainWindow::looperAssetAbsolutePath(const LooperLane& lane) const
+{
+    if (QFileInfo(lane.assetPath).isAbsolute() || projectFolder_.isEmpty()) {
+        return lane.assetPath;
+    }
+    return QDir(projectFolder_).absoluteFilePath(lane.assetPath);
+}
+
+bool MainWindow::materializeLooperAssets(const QString& projectFolder)
+{
+    QDir folder(projectFolder);
+    if (!folder.mkpath(QStringLiteral("wavs"))) {
+        QMessageBox::warning(this, QStringLiteral("Save Jam2 Song"), QStringLiteral("Could not create the project's wavs folder."));
+        return false;
+    }
+    QStringList stagedFilesToRemove;
+    const QString stagingFolder = transientProjectFolder_;
+    for (LooperBank& bank : looperProject_.banks()) {
+        for (LooperLane& lane : bank.lanes) {
+            if (lane.assetPath.trimmed().isEmpty()) {
+                continue;
+            }
+            const QString source = looperAssetAbsolutePath(lane);
+            if (lane.assetHash.isEmpty() || !QFileInfo::exists(source)) {
+                QMessageBox::warning(this, QStringLiteral("Save Jam2 Song"), QStringLiteral("A lane WAV is missing: %1").arg(lane.name));
+                return false;
+            }
+            if (sha256FileHex(source) != lane.assetHash) {
+                QMessageBox::warning(this, QStringLiteral("Save Jam2 Song"), QStringLiteral("A lane WAV does not match its content hash: %1").arg(lane.name));
+                return false;
+            }
+            const QString fileName = lane.assetHash + QStringLiteral(".wav");
+            const QString relativePath = QStringLiteral("wavs/") + fileName;
+            const QString destination = folder.absoluteFilePath(relativePath);
+            if (QFileInfo::exists(destination)) {
+                if (sha256FileHex(destination) != lane.assetHash) {
+                    QMessageBox::warning(this, QStringLiteral("Save Jam2 Song"), QStringLiteral("Project WAV hash mismatch: %1").arg(fileName));
+                    return false;
+                }
+            } else {
+                if (!QFile::copy(source, destination)) {
+                    QMessageBox::warning(this, QStringLiteral("Save Jam2 Song"), QStringLiteral("Could not copy WAV into project: %1").arg(lane.name));
+                    return false;
+                }
+                if (sha256FileHex(destination) != lane.assetHash) {
+                    QFile::remove(destination);
+                    QMessageBox::warning(this, QStringLiteral("Save Jam2 Song"), QStringLiteral("Copied WAV failed hash verification: %1").arg(lane.name));
+                    return false;
+                }
+                registerTransientTrackWav(destination);
+            }
+            if (sameOrChildPath(stagingFolder, source) && QDir::cleanPath(source) != QDir::cleanPath(destination)) {
+                stagedFilesToRemove.append(source);
+            }
+            lane.assetPath = relativePath;
+        }
+    }
+    projectFolder_ = folder.absolutePath();
+    for (const QString& stagedFile : stagedFilesToRemove) {
+        QFile::remove(stagedFile);
+    }
+    return true;
+}
+
+void MainWindow::regeneratePreparedMix()
+{
+    const int sampleRate = sampleRateSpin_ != nullptr ? sampleRateSpin_->value() : 48000;
+    const QString cachePath = appReleaseFilePath(
+        QStringLiteral("prepared_mixes"),
+        QStringLiteral("active-bank-%1.wav").arg(looperProject_.activeBankIndex()));
+    preparedMix_ = PreparedMixRenderer::render(looperProject_, projectFolder_, sampleRate, cachePath, trackController_.model());
+    if (!preparedMix_.error.isEmpty()) {
+        appendLog(QStringLiteral("prepared mix failed: ") + preparedMix_.error);
+        return;
+    }
+    try {
+        const WavMetadata metadata = readWavMetadata(preparedMix_.path);
+        auto& track = trackController_.model();
+        track.fileName = QStringLiteral("Prepared Bank %1").arg(looperProject_.banks().at(looperProject_.activeBankIndex()).id);
+        track.filePath = preparedMix_.path;
+        track.fileBytes = QFileInfo(preparedMix_.path).size();
+        track.sampleRate = metadata.sampleRate;
+        track.durationMs = metadata.durationMs;
+        track.sha256 = metadata.sha256;
+        updateTrackControls();
+        loadTrackWaveform();
+        loadPreparedMixIntoEngine();
+        appendLog(QStringLiteral("prepared mix: %1 frames in %2 ms").arg(preparedMix_.frames).arg(preparedMix_.renderMs));
+    } catch (const std::exception& error) {
+        preparedMix_.error = QString::fromUtf8(error.what());
+        appendLog(QStringLiteral("prepared mix metadata failed: ") + preparedMix_.error);
+    }
+}
+
+void MainWindow::loadPreparedMixIntoEngine()
+{
+    if (!jam2_.isRunning() || preparedMix_.path.isEmpty() || !preparedMix_.error.isEmpty()) {
+        return;
+    }
+    sendJamCommand(QStringLiteral("track load %1").arg(QDir::toNativeSeparators(preparedMix_.path)));
+    const auto& model = trackController_.model();
+    if (model.loopEnabled) {
+        const qint64 loopStartFrame = model.loopStartSeconds >= 0.0
+            ? qMax<qint64>(0, static_cast<qint64>(std::llround(model.loopStartSeconds * preparedSourceSampleRate_)))
+            : 0;
+        const qint64 loopEndFrame = model.loopEndSeconds > model.loopStartSeconds
+            ? qMax<qint64>(loopStartFrame + 1, static_cast<qint64>(std::llround(model.loopEndSeconds * preparedSourceSampleRate_)))
+            : qMax<qint64>(loopStartFrame + 1, preparedMix_.frames);
+        sendJamCommand(QStringLiteral("track loop on %1 %2").arg(loopStartFrame).arg(loopEndFrame));
+    } else {
+        sendJamCommand(QStringLiteral("track loop off"));
+    }
+    sendPreparedTrackLevel();
+}
+
+void MainWindow::sendPreparedTrackLevel()
+{
+    const double gain = gainFromDb(trackController_.model().trackGainDb);
+    sendJamCommand(QStringLiteral("track level %1").arg(gain, 0, 'f', 6));
 }
 
 void MainWindow::updateTrackControls()
@@ -4375,10 +6009,6 @@ void MainWindow::updateTrackControls()
         const QSignalBlocker blocker(focusFrequencyCheck_);
         focusFrequencyCheck_->setChecked(model.focusEnabled);
     }
-    if (waveformGridCheck_) {
-        const QSignalBlocker blocker(waveformGridCheck_);
-        waveformGridCheck_->setChecked(model.waveformGridVisible);
-    }
     const bool knownFocusPreset = !focusPresetBox_ || focusPresetBox_->findData(model.focusPreset) >= 0;
     const bool customFocus = isCustomFocusPreset(model.focusPreset) || !knownFocusPreset;
     if (focusPresetBox_) {
@@ -4393,12 +6023,12 @@ void MainWindow::updateTrackControls()
         focusFrequencySpin_->setEnabled(customFocus);
     }
     if (trackWaveform_) {
-        trackWaveform_->setGridVisible(model.waveformGridVisible);
         trackWaveform_->setBpm(model.acceptedBpm);
         trackWaveform_->setLoop(
             model.loopStartSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopStartSeconds * 1000.0)) : -1,
             model.loopEndSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopEndSeconds * 1000.0)) : -1);
     }
+    refreshLooperLanes();
     if (loopEnabledCheck_) {
         const QSignalBlocker blocker(loopEnabledCheck_);
         loopEnabledCheck_->setChecked(model.loopEnabled);
@@ -4419,6 +6049,10 @@ void MainWindow::updateTrackControls()
         } else {
             loopEnabledCheck_->setText(QStringLiteral("Loop whole track"));
         }
+    }
+    if (trackSyncCheck_) {
+        const QSignalBlocker blocker(trackSyncCheck_);
+        trackSyncCheck_->setChecked(looperProject_.trackSyncEnabled());
     }
 }
 
@@ -4447,7 +6081,7 @@ void MainWindow::loadTrackMetadata()
         trackController_.model().guessedBpm = 0.0;
         trackController_.model().acceptedBpm = sidecar.value(QStringLiteral("accepted_bpm")).toDouble(120.0);
         trackController_.model().key = QStringLiteral("Unknown");
-        trackController_.model().loopEnabled = false;
+        trackController_.model().loopEnabled = true;
         trackController_.model().loopStartSeconds = -1.0;
         trackController_.model().loopEndSeconds = -1.0;
     } catch (const std::exception& error) {
@@ -4455,45 +6089,7 @@ void MainWindow::loadTrackMetadata()
         return;
     }
     updateTrackControls();
-    loadTrackIntoPlayer();
-}
-
-QStringList MainWindow::captureOptionArgs() const
-{
-    return QStringList{
-        QStringLiteral("--trigger"), onOff(captureTriggerCheck_ && captureTriggerCheck_->isChecked()),
-        QStringLiteral("--trigger-threshold-db"), QString::number(triggerThresholdSpin_ ? triggerThresholdSpin_->value() : -45.0, 'f', 1),
-        QStringLiteral("--trigger-hold-ms"), QString::number(triggerHoldSpin_ ? triggerHoldSpin_->value() : 50),
-        QStringLiteral("--pre-roll-ms"), QString::number(preRollSpin_ ? preRollSpin_->value() : 250),
-        QStringLiteral("--tail-silence-db"), QString::number(tailThresholdSpin_ ? tailThresholdSpin_->value() : -50.0, 'f', 1),
-        QStringLiteral("--tail-silence-ms"), QString::number(tailSilenceSpin_ ? tailSilenceSpin_->value() : 1000),
-        QStringLiteral("--trim-leading-silence"), onOff(trimLeadingCheck_ && trimLeadingCheck_->isChecked()),
-        QStringLiteral("--trim-trailing-silence"), onOff(trimTrailingCheck_ && trimTrailingCheck_->isChecked()),
-        QStringLiteral("--summary-json"), QStringLiteral("on"),
-    };
-}
-
-void MainWindow::handleCaptureOutputLine(const QString& line)
-{
-    appendLog(QStringLiteral("capture: ") + line);
-    QJsonParseError parseError{};
-    const QJsonDocument doc = QJsonDocument::fromJson(line.toUtf8(), &parseError);
-    if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
-        return;
-    }
-    const QJsonObject object = doc.object();
-    if (object.value(QStringLiteral("event")).toString() != QStringLiteral("capture.summary")) {
-        return;
-    }
-    lastCaptureSummary_ = object;
-    const QString output = object.value(QStringLiteral("output")).toString();
-    if (!output.isEmpty()) {
-        lastCapturePath_ = output;
-        captureOutputEdit_->setText(output);
-    }
-    if (importCaptureButton_) {
-        importCaptureButton_->setEnabled(QFileInfo::exists(lastCapturePath_) && isImportablePcm16Wav(lastCapturePath_));
-    }
+    loadTrackWaveform();
 }
 
 void MainWindow::chooseCaptureFolder()
@@ -4501,8 +6097,8 @@ void MainWindow::chooseCaptureFolder()
     const QString current = captureOutputEdit_->text().trimmed();
     const QString path = QFileDialog::getSaveFileName(
         this,
-        QStringLiteral("Capture Output"),
-        isAutoCapturePath(current) ? timestampedCapturePath(QStringLiteral("capture")) : current,
+        QStringLiteral("Take WAV"),
+        isAutoCapturePath(current) ? timestampedCapturePath(QStringLiteral("take")) : current,
         QStringLiteral("WAV files (*.wav);;All files (*)"),
         nullptr,
         QFileDialog::DontUseNativeDialog);
@@ -4513,29 +6109,14 @@ void MainWindow::chooseCaptureFolder()
 
 void MainWindow::refreshLoopbackSources()
 {
-    QProcess process;
-    const QFileInfo binary(capturePathEdit_->text());
-    if (binary.exists()) {
-        process.setWorkingDirectory(binary.absolutePath());
-    }
-    process.start(capturePathEdit_->text(), QStringList{QStringLiteral("list-loopback-sources")});
-    if (!process.waitForStarted(3000)) {
-        appendLog(QStringLiteral("loopback source refresh failed to start: %1").arg(process.errorString()));
-        return;
-    }
-    if (!process.waitForFinished(5000)) {
-        appendLog(QStringLiteral("loopback source refresh timed out"));
-        process.kill();
-        return;
-    }
-
     const QString previous = loopbackSourceBox_->currentData().toString().isEmpty()
         ? loopbackSourceBox_->currentText()
         : loopbackSourceBox_->currentData().toString();
     loopbackSourceBox_->clear();
-    const QString output = QString::fromUtf8(process.readAllStandardOutput());
+    QString error;
+    const QStringList sources = GuiLoopbackRecorder::listSources(&error);
     const QRegularExpression re(QStringLiteral("^\\s*\\[([^\\]]+)\\]\\s*(.*)$"));
-    for (const QString& line : output.split(QLatin1Char('\n'))) {
+    for (const QString& line : sources) {
         const QString trimmed = line.trimmed();
         const QRegularExpressionMatch match = re.match(trimmed);
         if (match.hasMatch()) {
@@ -4544,7 +6125,6 @@ void MainWindow::refreshLoopbackSources()
     }
     if (loopbackSourceBox_->count() == 0) {
         loopbackSourceBox_->addItem(QStringLiteral("[default] System mix"), QStringLiteral("default"));
-        const QString error = QString::fromUtf8(process.readAllStandardError()).trimmed();
         appendLog(error.isEmpty() ? QStringLiteral("no loopback sources returned") : error);
     } else {
         appendLog(QStringLiteral("loaded %1 loopback sources").arg(loopbackSourceBox_->count()));
@@ -4555,226 +6135,68 @@ void MainWindow::refreshLoopbackSources()
     }
 }
 
-void MainWindow::showInputCaptureDialog()
+void MainWindow::startInputCapture(std::uint64_t targetFrame, int countInBars)
 {
-    if (captureProcess_.state() != QProcess::NotRunning) {
-        return;
-    }
-
-    QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("Record Input"));
-    dialog.resize(780, 560);
-
-    auto* content = new QWidget(&dialog);
-    content->setMinimumWidth(720);
-    auto* form = new QFormLayout(content);
-    const QList<QWidget*> visibleWidgets{
-        capturePathEdit_, captureOutputEdit_, deviceBox_, inputChannelsEdit_, sampleRateSpin_,
-        bufferSizeSpin_, captureManualStopCheck_, captureDurationSpin_, captureTriggerCheck_, triggerThresholdSpin_,
-        triggerHoldSpin_, preRollSpin_, tailThresholdSpin_, tailSilenceSpin_, trimLeadingCheck_,
-        trimTrailingCheck_,
-    };
-    for (QWidget* widget : visibleWidgets) {
-        widget->show();
-    }
-    updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_);
-    deviceBox_->setMinimumWidth(420);
-    inputChannelsEdit_->setMinimumWidth(220);
-    sampleRateSpin_->setMinimumWidth(120);
-    bufferSizeSpin_->setMinimumWidth(120);
-    form->addRow(QStringLiteral("jam2-capture"), capturePathEdit_);
-    auto* outputLayout = new QHBoxLayout();
-    outputLayout->addWidget(captureOutputEdit_, 1);
-    auto* browse = new QPushButton(QStringLiteral("Browse"), content);
-    outputLayout->addWidget(browse);
-    form->addRow(QStringLiteral("Capture output"), outputLayout);
-    form->addRow(QStringLiteral("Audio device"), deviceBox_);
-    form->addRow(QStringLiteral("Input channels"), inputChannelsEdit_);
-    form->addRow(QStringLiteral("Sample rate"), sampleRateSpin_);
-    form->addRow(QStringLiteral("Buffer size"), bufferSizeSpin_);
-    form->addRow(captureManualStopCheck_);
-    auto* durationLabel = new QLabel(QStringLiteral("Duration limit"), content);
-    form->addRow(durationLabel, captureDurationSpin_);
-    QObject::connect(captureManualStopCheck_, &QCheckBox::toggled, &dialog, [this, durationLabel] {
-        updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_, durationLabel);
-    });
-    updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_, durationLabel);
-    form->addRow(captureTriggerCheck_);
-    form->addRow(QStringLiteral("Trigger threshold"), triggerThresholdSpin_);
-    form->addRow(QStringLiteral("Trigger hold"), triggerHoldSpin_);
-    form->addRow(QStringLiteral("Pre-roll"), preRollSpin_);
-    form->addRow(QStringLiteral("Tail threshold"), tailThresholdSpin_);
-    form->addRow(QStringLiteral("Tail silence"), tailSilenceSpin_);
-    form->addRow(trimLeadingCheck_);
-    form->addRow(trimTrailingCheck_);
-
-    auto* scroll = new QScrollArea(&dialog);
-    scroll->setWidgetResizable(true);
-    scroll->setWidget(content);
-
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, &dialog);
-    auto* record = buttons->addButton(QStringLiteral("Record"), QDialogButtonBox::AcceptRole);
-    auto* refresh = buttons->addButton(QStringLiteral("Refresh Devices"), QDialogButtonBox::ActionRole);
-    QObject::connect(browse, &QPushButton::clicked, this, [this] { chooseCaptureFolder(); });
-    QObject::connect(refresh, &QPushButton::clicked, this, [this] { refreshDevices(); });
-    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-
-    auto* layout = new QVBoxLayout(&dialog);
-    layout->addWidget(scroll, 1);
-    layout->addWidget(buttons);
-    record->setDefault(true);
-
-    const int result = dialog.exec();
-    const QList<QWidget*> widgets{
-        capturePathEdit_, captureOutputEdit_, deviceBox_, inputChannelsEdit_, sampleRateSpin_,
-        bufferSizeSpin_, captureManualStopCheck_, captureDurationSpin_, captureTriggerCheck_, triggerThresholdSpin_,
-        triggerHoldSpin_, preRollSpin_, tailThresholdSpin_, tailSilenceSpin_, trimLeadingCheck_,
-        trimTrailingCheck_,
-    };
-    for (QWidget* widget : widgets) {
-        widget->setParent(this);
-        widget->hide();
-    }
-    if (result == QDialog::Accepted) {
-        startInputCapture();
-    }
-}
-
-void MainWindow::startInputCapture()
-{
-    if (captureProcess_.state() != QProcess::NotRunning) {
+    if (trackTakeRecordingActive_) {
         return;
     }
     QString permissionError;
     if (!jam2EnsureMicrophonePermission(&permissionError)) {
-        QMessageBox::warning(this, QStringLiteral("Jam2 Capture Microphone Access"), permissionError);
+        QMessageBox::warning(this, QStringLiteral("Jam2 Track Recording Microphone Access"), permissionError);
         appendLog(permissionError);
         return;
     }
-    if (selectedDeviceId().isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("Jam2 Capture"), QStringLiteral("Select an audio device first."));
+    if (!jam2_.isRunning()) {
+        QMessageBox::warning(this, QStringLiteral("Jam2 Track Recording"), QStringLiteral("Input lane recording requires Perform mode so the engine can record the active ASIO input."));
+        return;
+    }
+    if (guiControlSocket_ == nullptr || guiControlSocket_->state() != QAbstractSocket::ConnectedState) {
+        QMessageBox::warning(this, QStringLiteral("Jam2 Track Recording"), QStringLiteral("The local engine control socket is not connected yet."));
         return;
     }
     QString output = captureOutputEdit_->text().trimmed();
     if (isAutoCapturePath(output)) {
-        output = timestampedCapturePath(QStringLiteral("capture"));
+        output = timestampedCapturePath(QStringLiteral("track-input"));
         captureOutputEdit_->setText(output);
     }
+    pendingTransientCapturePath_ = QFileInfo::exists(output) ? QString{} : output;
     lastCapturePath_ = output;
     lastCaptureSummary_ = QJsonObject{};
-    QStringList args{
-        QStringLiteral("record-input"),
-        QStringLiteral("--audio-device"), selectedDeviceId(),
-        QStringLiteral("--input-channels"), inputChannelsEdit_->text(),
-        QStringLiteral("--sample-rate"), QString::number(sampleRateSpin_->value()),
-        QStringLiteral("--buffer-size"), QString::number(bufferSizeSpin_->value()),
-        QStringLiteral("--output"), output,
-    };
-    if (!captureManualStopCheck_ || !captureManualStopCheck_->isChecked()) {
-        args << QStringLiteral("--duration-ms") << QString::number(captureDurationSpin_->value() * 1000);
+    activeTrackTakeId_ = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    sendJamCommand(QStringLiteral("track_take arm input %1 %2").arg(activeTrackTakeId_, QDir::toNativeSeparators(output)));
+    if (countInBars >= 0) {
+        sendJamCommand(QStringLiteral("track_take start_quantized %1 %2").arg(activeTrackTakeId_).arg(countInBars));
+    } else {
+        sendJamCommand(QStringLiteral("track_take start %1 %2").arg(activeTrackTakeId_).arg(targetFrame));
     }
-    args << captureOptionArgs();
-    const QFileInfo binary(capturePathEdit_->text());
-    if (binary.exists()) {
-        captureProcess_.setWorkingDirectory(binary.absolutePath());
+    trackTakeRecordingActive_ = true;
+    const QString startText = countInBars >= 0
+        ? QStringLiteral("Recording: armed input take, engine_quantized_count_in_bars=%1 latency_compensation_frames=%2 output=%3")
+            .arg(countInBars)
+            .arg(recordingAppliedLatencyFrames_)
+            .arg(output)
+        : QStringLiteral("Recording: armed input take, start_frame=%1 latency_compensation_frames=%2 output=%3")
+            .arg(targetFrame)
+            .arg(recordingAppliedLatencyFrames_)
+            .arg(output);
+    if (gridScheduleLabel_) {
+        gridScheduleLabel_->setText(startText);
     }
-    appendLog(QStringLiteral("starting capture: %1 %2").arg(capturePathEdit_->text(), args.join(QLatin1Char(' '))));
-    captureProcess_.start(capturePathEdit_->text(), args);
-    if (!captureProcess_.waitForStarted(3000)) {
-        appendLog(QStringLiteral("capture failed to start: %1").arg(captureProcess_.errorString()));
-        return;
-    }
-    captureButton_->setEnabled(false);
-    loopbackCaptureButton_->setEnabled(false);
-    stopCaptureButton_->setEnabled(true);
-    importCaptureButton_->setEnabled(false);
-}
-
-void MainWindow::showLoopbackCaptureDialog()
-{
-    if (captureProcess_.state() != QProcess::NotRunning) {
-        return;
-    }
-
-    QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("Record Loopback"));
-    dialog.resize(780, 560);
-
-    auto* content = new QWidget(&dialog);
-    content->setMinimumWidth(720);
-    auto* form = new QFormLayout(content);
-    const QList<QWidget*> visibleWidgets{
-        capturePathEdit_, captureOutputEdit_, loopbackSourceBox_, captureManualStopCheck_, captureDurationSpin_,
-        captureTriggerCheck_, triggerThresholdSpin_, triggerHoldSpin_, preRollSpin_,
-        tailThresholdSpin_, tailSilenceSpin_, trimLeadingCheck_, trimTrailingCheck_,
-    };
-    for (QWidget* widget : visibleWidgets) {
-        widget->show();
-    }
-    updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_);
-    loopbackSourceBox_->setMinimumWidth(420);
-    form->addRow(QStringLiteral("jam2-capture"), capturePathEdit_);
-    auto* outputLayout = new QHBoxLayout();
-    outputLayout->addWidget(captureOutputEdit_, 1);
-    auto* browse = new QPushButton(QStringLiteral("Browse"), content);
-    outputLayout->addWidget(browse);
-    form->addRow(QStringLiteral("Capture output"), outputLayout);
-    auto* sourceLayout = new QHBoxLayout();
-    sourceLayout->addWidget(loopbackSourceBox_, 1);
-    auto* refreshSources = new QPushButton(QStringLiteral("Refresh Sources"), content);
-    sourceLayout->addWidget(refreshSources);
-    form->addRow(QStringLiteral("Loopback source"), sourceLayout);
-    form->addRow(captureManualStopCheck_);
-    auto* durationLabel = new QLabel(QStringLiteral("Duration limit"), content);
-    form->addRow(durationLabel, captureDurationSpin_);
-    QObject::connect(captureManualStopCheck_, &QCheckBox::toggled, &dialog, [this, durationLabel] {
-        updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_, durationLabel);
-    });
-    updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_, durationLabel);
-    form->addRow(captureTriggerCheck_);
-    form->addRow(QStringLiteral("Trigger threshold"), triggerThresholdSpin_);
-    form->addRow(QStringLiteral("Trigger hold"), triggerHoldSpin_);
-    form->addRow(QStringLiteral("Pre-roll"), preRollSpin_);
-    form->addRow(QStringLiteral("Tail threshold"), tailThresholdSpin_);
-    form->addRow(QStringLiteral("Tail silence"), tailSilenceSpin_);
-    form->addRow(trimLeadingCheck_);
-    form->addRow(trimTrailingCheck_);
-
-    auto* scroll = new QScrollArea(&dialog);
-    scroll->setWidgetResizable(true);
-    scroll->setWidget(content);
-
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, &dialog);
-    auto* record = buttons->addButton(QStringLiteral("Record"), QDialogButtonBox::AcceptRole);
-    QObject::connect(browse, &QPushButton::clicked, this, [this] { chooseCaptureFolder(); });
-    QObject::connect(refreshSources, &QPushButton::clicked, this, [this] { refreshLoopbackSources(); });
-    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-
-    auto* layout = new QVBoxLayout(&dialog);
-    layout->addWidget(scroll, 1);
-    layout->addWidget(buttons);
-    record->setDefault(true);
-
-    const int result = dialog.exec();
-    const QList<QWidget*> widgets{
-        capturePathEdit_, captureOutputEdit_, loopbackSourceBox_, captureManualStopCheck_, captureDurationSpin_,
-        captureTriggerCheck_, triggerThresholdSpin_, triggerHoldSpin_, preRollSpin_,
-        tailThresholdSpin_, tailSilenceSpin_, trimLeadingCheck_, trimTrailingCheck_,
-    };
-    for (QWidget* widget : widgets) {
-        widget->setParent(this);
-        widget->hide();
-    }
-    if (result == QDialog::Accepted) {
-        startLoopbackCapture();
+    appendLog(startText);
+    if (stopCaptureButton_) stopCaptureButton_->setEnabled(true);
+    if (loadWavButton_) loadWavButton_->setEnabled(false);
+    if (countInBars < 0 && (!captureManualStopCheck_ || !captureManualStopCheck_->isChecked())) {
+        QTimer::singleShot(captureDurationSpin_->value() * 1000, this, [this] {
+            if (trackTakeRecordingActive_) {
+                runGridLockedEngineAction(QStringLiteral("record.stop"), [this](std::uint64_t stopFrame) { stopInputCapture(stopFrame); });
+            }
+        });
     }
 }
 
 void MainWindow::startLoopbackCapture()
 {
-    if (captureProcess_.state() != QProcess::NotRunning) {
+    if (loopbackRecorder_.isRunning()) {
         return;
     }
     QString output = captureOutputEdit_->text().trimmed();
@@ -4782,6 +6204,7 @@ void MainWindow::startLoopbackCapture()
         output = timestampedCapturePath(QStringLiteral("loopback"));
         captureOutputEdit_->setText(output);
     }
+    pendingTransientCapturePath_ = QFileInfo::exists(output) ? QString{} : output;
     lastCapturePath_ = output;
     lastCaptureSummary_ = QJsonObject{};
     QString source = loopbackSourceBox_->currentData().toString();
@@ -4791,254 +6214,139 @@ void MainWindow::startLoopbackCapture()
     if (source.isEmpty()) {
         source = QStringLiteral("default");
     }
-    QStringList args{
-        QStringLiteral("record-loopback"),
-        QStringLiteral("--source"), source,
-        QStringLiteral("--output"), output,
-    };
-    if (!captureManualStopCheck_ || !captureManualStopCheck_->isChecked()) {
-        args << QStringLiteral("--duration-ms") << QString::number(captureDurationSpin_->value() * 1000);
-    }
-    args << captureOptionArgs();
-    const QFileInfo binary(capturePathEdit_->text());
-    if (binary.exists()) {
-        captureProcess_.setWorkingDirectory(binary.absolutePath());
-    }
-    appendLog(QStringLiteral("starting loopback capture: %1 %2").arg(capturePathEdit_->text(), args.join(QLatin1Char(' '))));
-    captureProcess_.start(capturePathEdit_->text(), args);
-    if (!captureProcess_.waitForStarted(3000)) {
-        appendLog(QStringLiteral("loopback capture failed to start: %1").arg(captureProcess_.errorString()));
+
+    GuiLoopbackOptions options;
+    options.source = source;
+    options.outputPath = output;
+    options.durationMs = (!captureManualStopCheck_ || !captureManualStopCheck_->isChecked()) ? captureDurationSpin_->value() * 1000 : 0;
+    options.trigger = captureTriggerCheck_ && captureTriggerCheck_->isChecked();
+    options.triggerThresholdDb = triggerThresholdSpin_ ? triggerThresholdSpin_->value() : -45.0;
+    options.triggerHoldMs = triggerHoldSpin_ ? triggerHoldSpin_->value() : 50;
+    options.preRollMs = preRollSpin_ ? preRollSpin_->value() : 250;
+    options.tailSilenceDb = tailThresholdSpin_ ? tailThresholdSpin_->value() : -50.0;
+    options.tailSilenceMs = tailSilenceSpin_ ? tailSilenceSpin_->value() : 1000;
+    options.trimLeadingSilence = trimLeadingCheck_ && trimLeadingCheck_->isChecked();
+    options.trimTrailingSilence = trimTrailingCheck_ && trimTrailingCheck_->isChecked();
+
+    QString error;
+    appendLog(QStringLiteral("starting internal loopback recording: %1").arg(output));
+    if (!loopbackRecorder_.start(options, [this](bool ok, const QString& outputPath, const QString& errorText) {
+            QMetaObject::invokeMethod(this, [this, ok, outputPath, errorText] {
+                if (stopCaptureButton_) stopCaptureButton_->setEnabled(false);
+                lastCapturePath_ = outputPath;
+                if (!ok) {
+                    if (!pendingTransientCapturePath_.isEmpty() && QFileInfo::exists(pendingTransientCapturePath_)) {
+                        registerTransientTrackWav(pendingTransientCapturePath_);
+                    }
+                    pendingTransientCapturePath_.clear();
+                    if (loadWavButton_) loadWavButton_->setEnabled(true);
+                    appendLog(QStringLiteral("loopback recording failed: ") + errorText);
+                    return;
+                }
+                if (!pendingTransientCapturePath_.isEmpty()) {
+                    registerTransientTrackWav(pendingTransientCapturePath_);
+                }
+                pendingTransientCapturePath_.clear();
+                if (loadWavButton_) {
+                    loadWavButton_->setEnabled(true);
+                }
+                if (armedRecordBank_ >= 0 && armedRecordLane_ >= 0) {
+                    importLastCaptureToArmedLane();
+                }
+            }, Qt::QueuedConnection);
+        }, &error)) {
+        if (!pendingTransientCapturePath_.isEmpty() && QFileInfo::exists(pendingTransientCapturePath_)) {
+            registerTransientTrackWav(pendingTransientCapturePath_);
+        }
+        pendingTransientCapturePath_.clear();
+        if (loadWavButton_) loadWavButton_->setEnabled(true);
+        appendLog(QStringLiteral("loopback recording failed to start: ") + error);
         return;
     }
-    captureButton_->setEnabled(false);
-    loopbackCaptureButton_->setEnabled(false);
-    stopCaptureButton_->setEnabled(true);
-    importCaptureButton_->setEnabled(false);
+    if (stopCaptureButton_) stopCaptureButton_->setEnabled(true);
+    if (loadWavButton_) loadWavButton_->setEnabled(false);
 }
 
-void MainWindow::stopInputCapture()
+void MainWindow::stopInputCapture(std::uint64_t targetFrame)
 {
-    if (captureProcess_.state() == QProcess::NotRunning) {
+    if (trackTakeRecordingActive_ && !activeTrackTakeId_.isEmpty()) {
+        sendJamCommand(QStringLiteral("track_take stop %1 %2").arg(activeTrackTakeId_).arg(targetFrame));
+        const QString stopText = QStringLiteral("Recording: stop requested target_frame=%1").arg(targetFrame);
+        if (gridScheduleLabel_) {
+            gridScheduleLabel_->setText(stopText);
+        }
+        appendLog(stopText);
         return;
     }
-    captureProcess_.write("stop\n");
-    captureProcess_.closeWriteChannel();
-    if (!captureProcess_.waitForFinished(3000)) {
-        captureProcess_.terminate();
-    }
-    if (captureProcess_.state() != QProcess::NotRunning && !captureProcess_.waitForFinished(1500)) {
-        captureProcess_.kill();
+    if (loopbackRecorder_.isRunning()) {
+        loopbackRecorder_.stop();
     }
 }
 
-void MainWindow::importLastCapture()
-{
-    if (!QFileInfo::exists(lastCapturePath_)) {
-        QMessageBox::warning(this, QStringLiteral("Jam2 Capture"), QStringLiteral("No captured WAV is available to import."));
-        return;
-    }
-    QString importReason;
-    if (!isImportablePcm16Wav(lastCapturePath_, &importReason)) {
-        QMessageBox::warning(this, QStringLiteral("Jam2 Capture"), importReason);
-        return;
-    }
-    QFileInfo info(lastCapturePath_);
-    try {
-        const WavMetadata metadata = readWavMetadata(lastCapturePath_);
-        const QJsonObject sidecar = readSidecarJson(lastCapturePath_);
-        trackController_.model().fileName = info.fileName();
-        trackController_.model().filePath = info.absoluteFilePath();
-        trackController_.model().fileBytes = info.size();
-        trackController_.model().sampleRate = sidecar.value(QStringLiteral("sample_rate")).toInt(metadata.sampleRate);
-        trackController_.model().durationMs = lastCaptureSummary_.value(QStringLiteral("duration_ms")).toInt(
-            sidecar.value(QStringLiteral("duration_ms")).toInt(metadata.durationMs));
-        trackController_.model().sha256 = metadata.sha256;
-        trackController_.model().acceptedBpm = sidecar.value(QStringLiteral("accepted_bpm")).toDouble(120.0);
-        trackController_.model().key = QStringLiteral("Unknown");
-        trackController_.model().loopEnabled = false;
-        trackController_.model().loopStartSeconds = -1.0;
-        trackController_.model().loopEndSeconds = -1.0;
-    } catch (const std::exception& error) {
-        QMessageBox::warning(this, QStringLiteral("Jam2 Capture"), QString::fromUtf8(error.what()));
-        return;
-    }
-    updateTrackControls();
-    sendControl(QJsonObject{
-        {QStringLiteral("type"), QStringLiteral("track.offer")},
-        {QStringLiteral("name"), trackController_.model().fileName},
-        {QStringLiteral("path"), trackController_.model().filePath},
-        {QStringLiteral("file_bytes"), trackController_.model().fileBytes},
-        {QStringLiteral("sample_rate"), trackController_.model().sampleRate},
-        {QStringLiteral("duration_ms"), trackController_.model().durationMs},
-        {QStringLiteral("sha256"), trackController_.model().sha256},
-        {QStringLiteral("accepted_bpm"), trackController_.model().acceptedBpm},
-        {QStringLiteral("key"), trackController_.model().key},
-        {QStringLiteral("track_gain_db"), trackController_.model().trackGainDb},
-        {QStringLiteral("loop_enabled"), trackController_.model().loopEnabled},
-        {QStringLiteral("loop_start_seconds"), trackController_.model().loopStartSeconds},
-        {QStringLiteral("loop_end_seconds"), trackController_.model().loopEndSeconds},
-        {QStringLiteral("focus_enabled"), trackController_.model().focusEnabled},
-        {QStringLiteral("focus_preset"), trackController_.model().focusPreset},
-        {QStringLiteral("focus_frequency_hz"), trackController_.model().focusFrequencyHz},
-        {QStringLiteral("focus_gain_db"), trackController_.model().focusGainDb},
-        {QStringLiteral("focus_q"), trackController_.model().focusQ},
-    });
-    loadTrackIntoPlayer();
-}
-
-void MainWindow::loadTrackIntoPlayer()
+void MainWindow::loadTrackWaveform()
 {
     const QString path = trackController_.model().filePath;
     if (path.isEmpty() || !QFileInfo::exists(path)) {
-        trackSink_.reset();
-        trackDevice_.reset();
         if (trackWaveform_) {
             trackWaveform_->clear();
         }
         return;
     }
-    trackSink_.reset();
     if (trackWaveform_) {
         trackWaveform_->loadWav(path);
         trackWaveform_->setDurationMs(trackController_.model().durationMs);
         trackWaveform_->setBpm(trackController_.model().acceptedBpm);
-        trackWaveform_->setGridVisible(trackController_.model().waveformGridVisible);
     }
-
-    try {
-        Pcm16Wav wav = readPcm16Wav(path);
-        trackDevice_ = std::make_unique<TrackPlaybackDevice>();
-        trackDevice_->setTrack(std::move(wav));
-        if (!trackDevice_->open(QIODevice::ReadOnly)) {
-            trackDevice_.reset();
-            appendLog(QStringLiteral("track stream failed to open"));
-            return;
-        }
-        applyTrackPlaybackSettings();
-    } catch (const std::exception& error) {
-        trackDevice_.reset();
-        appendLog(QStringLiteral("track load failed: ") + QString::fromUtf8(error.what()));
-    }
-}
-
-void MainWindow::applyTrackPlaybackSettings()
-{
-    if (!trackDevice_) {
-        return;
-    }
-    const auto& model = trackController_.model();
-    const qint64 durationMs = trackDevice_->durationMs();
-    qint64 loopStartMs = model.loopStartSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopStartSeconds * 1000.0)) : 0;
-    qint64 loopEndMs = model.loopEndSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopEndSeconds * 1000.0)) : durationMs;
-    loopStartMs = qBound<qint64>(0, loopStartMs, durationMs);
-    loopEndMs = qBound<qint64>(0, loopEndMs, durationMs);
-    if (loopEndMs <= loopStartMs) {
-        loopStartMs = 0;
-        loopEndMs = durationMs;
-    }
-    trackDevice_->setSpeed(model.speed);
-    trackDevice_->setPitchCents(model.pitchCents);
-    trackDevice_->setGainDb(model.trackGainDb);
-    trackDevice_->setFocus(model.focusEnabled, model.focusFrequencyHz, model.focusGainDb, model.focusQ);
-    trackDevice_->setLoop(model.loopEnabled, loopStartMs, loopEndMs);
 }
 
 void MainWindow::playTrack()
 {
-    if (!trackDevice_) {
-        loadTrackIntoPlayer();
-    }
-    if (!trackDevice_ || !trackDevice_->hasTrack()) {
-        QMessageBox::warning(this, QStringLiteral("Jam2 Track"), QStringLiteral("No local WAV is loaded."));
+    if (!jam2_.isRunning()) {
+        QMessageBox::warning(this, QStringLiteral("Jam2 Track"), QStringLiteral("Start the local engine before playing the prepared mix."));
         return;
     }
-    const auto& model = trackController_.model();
-    if (model.loopEnabled) {
-        const qint64 durationMs = trackDevice_->durationMs();
-        qint64 startMs = model.loopStartSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopStartSeconds * 1000.0)) : 0;
-        qint64 endMs = model.loopEndSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopEndSeconds * 1000.0)) : durationMs;
-        startMs = qBound<qint64>(0, startMs, durationMs);
-        endMs = qBound<qint64>(0, endMs, durationMs);
-        if (endMs <= startMs) {
-            startMs = 0;
-            endMs = durationMs;
-        }
-        const qint64 position = trackDevice_->positionMs();
-        if (position < startMs || position >= endMs) {
-            trackDevice_->setPositionMs(startMs);
-        }
-    } else if (trackDevice_->positionMs() >= trackDevice_->durationMs()) {
-        trackDevice_->setPositionMs(0);
+    if (preparedMix_.path.isEmpty() || !preparedMix_.error.isEmpty()) {
+        regeneratePreparedMix();
     }
-    const qint64 sharedStartPositionMs = currentAudibleTrackPositionMs();
-
-    QAudioDevice outputDevice = selectedLocalOutputDevice();
-    if (outputDevice.isNull()) {
-        QMessageBox::warning(this, QStringLiteral("Jam2 Track"), QStringLiteral("No default audio output is available."));
-        return;
-    }
-    QAudioFormat format;
-    format.setSampleRate(trackDevice_->sampleRate());
-    format.setChannelCount(trackDevice_->channels());
-    format.setSampleFormat(QAudioFormat::Int16);
-    if (!outputDevice.isFormatSupported(format)) {
-        QMessageBox::warning(this, QStringLiteral("Jam2 Track"), QStringLiteral("Track sample format is not supported by the default audio output."));
-        return;
-    }
-    trackSink_ = std::make_unique<QAudioSink>(outputDevice, format);
-    trackSink_->start(trackDevice_.get());
-    if (trackController_.model().syncControls) {
-        sendControl(QJsonObject{
-            {QStringLiteral("type"), QStringLiteral("track.play")},
-            {QStringLiteral("position_ms"), sharedStartPositionMs},
-        });
+    loadPreparedMixIntoEngine();
+    sendJamCommand(QStringLiteral("track restart"));
+    if (gridScheduleLabel_) {
+        gridScheduleLabel_->setText(QStringLiteral("Track restart: waiting for engine bar schedule"));
     }
 }
 
-void MainWindow::stopTrack()
+void MainWindow::stopTrack(std::uint64_t targetFrame)
 {
-    const qint64 stopPositionMs = currentAudibleTrackPositionMs();
-    if (trackSink_) {
-        trackSink_->stop();
-        trackSink_.reset();
+    if (!jam2_.isRunning()) {
+        QMessageBox::warning(this, QStringLiteral("Jam2 Track"), QStringLiteral("Start the local engine before stopping the prepared mix."));
+        return;
     }
-    if (trackDevice_) {
-        trackDevice_->setPositionMs(stopPositionMs);
-    }
+    sendJamCommand(QStringLiteral("track stop %1").arg(targetFrame));
     updateTrackTimeline();
-    if (trackController_.model().syncControls) {
-        sendControl(QJsonObject{{QStringLiteral("type"), QStringLiteral("track.stop")}});
-    }
 }
 
 void MainWindow::setLoopStartAtCurrentPosition()
 {
-    const qint64 duration = trackDevice_ ? trackDevice_->durationMs() : trackController_.model().durationMs;
+    const qint64 duration = trackController_.model().durationMs;
     const qint64 position = qBound<qint64>(0, currentAudibleTrackPositionMs(), duration);
     auto& model = trackController_.model();
     model.loopStartSeconds = static_cast<double>(position) / 1000.0;
     model.loopEnabled = true;
-    applyTrackPlaybackSettings();
     updateTrackControls();
     updateTrackTimeline();
-    if (model.syncControls) {
-        sendControl(trackMetadataMessage(QStringLiteral("track.offer")));
-    }
+    loadPreparedMixIntoEngine();
 }
 
 void MainWindow::setLoopEndAtCurrentPosition()
 {
-    const qint64 duration = trackDevice_ ? trackDevice_->durationMs() : trackController_.model().durationMs;
+    const qint64 duration = trackController_.model().durationMs;
     const qint64 position = qBound<qint64>(0, currentAudibleTrackPositionMs(), duration);
     auto& model = trackController_.model();
     model.loopEndSeconds = static_cast<double>(position) / 1000.0;
     model.loopEnabled = true;
-    applyTrackPlaybackSettings();
     updateTrackControls();
     updateTrackTimeline();
-    if (model.syncControls) {
-        sendControl(trackMetadataMessage(QStringLiteral("track.offer")));
-    }
+    loadPreparedMixIntoEngine();
 }
 
 void MainWindow::clearTrackLoop()
@@ -5047,66 +6355,59 @@ void MainWindow::clearTrackLoop()
     model.loopEnabled = false;
     model.loopStartSeconds = -1.0;
     model.loopEndSeconds = -1.0;
-    applyTrackPlaybackSettings();
     updateTrackControls();
     updateTrackTimeline();
-    if (model.syncControls) {
-        sendControl(trackMetadataMessage(QStringLiteral("track.offer")));
-    }
+    loadPreparedMixIntoEngine();
 }
 
 qint64 MainWindow::currentAudibleTrackPositionMs() const
 {
-    if (!trackDevice_) {
+    if (preparedSourceSampleRate_ <= 0) {
         return 0;
     }
-
-    const qint64 durationMs = trackDevice_->durationMs();
-    qint64 queuedOutputFrames = 0;
-    if (trackSink_) {
-        const qint64 bytesPerFrame = qMax<qint64>(1, static_cast<qint64>(trackDevice_->channels()) * 2);
-        const qint64 queuedBytes = qMax<qint64>(
-            0,
-            static_cast<qint64>(trackSink_->bufferSize()) - static_cast<qint64>(trackSink_->bytesFree()));
-        queuedOutputFrames = queuedBytes / bytesPerFrame;
+    qint64 sourceFrame = preparedSourceFrame_;
+    if (preparedSourcePlaying_) {
+        const PlaybackGrid::Position enginePosition = playbackGrid_.position();
+        if (enginePosition.engineAnchored &&
+            static_cast<qint64>(enginePosition.rawCurrentFrame) >= preparedSourceEngineFrame_) {
+            sourceFrame += static_cast<qint64>(enginePosition.rawCurrentFrame) - preparedSourceEngineFrame_;
+        }
     }
-    const qint64 positionMs = trackDevice_->audiblePositionMs(queuedOutputFrames, trackController_.model().speed);
+    const qint64 positionMs = sourceFrame * 1000 / preparedSourceSampleRate_;
+    const qint64 durationMs = trackController_.model().durationMs;
     return qBound<qint64>(0, positionMs, durationMs);
 }
 
 void MainWindow::updateTrackTimeline()
 {
     auto& model = trackController_.model();
+    qint64 position = currentAudibleTrackPositionMs();
     if (trackWaveform_) {
-        const qint64 duration = trackDevice_ ? trackDevice_->durationMs() : model.durationMs;
-        const qint64 position = currentAudibleTrackPositionMs();
+        const qint64 duration = model.durationMs;
         trackWaveform_->setDurationMs(duration);
         trackWaveform_->setPlayheadMs(position);
         trackWaveform_->setBpm(model.acceptedBpm);
-        trackWaveform_->setGridVisible(model.waveformGridVisible);
         trackWaveform_->setLoop(
             model.loopStartSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopStartSeconds * 1000.0)) : -1,
             model.loopEndSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopEndSeconds * 1000.0)) : -1);
     }
+    if (looperStack_) {
+        looperStack_->setPlaybackMarkers(
+            position,
+            model.loopStartSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopStartSeconds * 1000.0)) : -1,
+            model.loopEndSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopEndSeconds * 1000.0)) : -1);
+    }
     if (mixTrackMeter_) {
-        mixTrackMeter_->setLevel(trackDevice_ ? trackDevice_->takePeak() : 0.0);
+        mixTrackMeter_->setLevel(0.0);
     }
     if (!jam2_.isRunning() && mixMetronomeMeter_) {
-        mixMetronomeMeter_->setLevel(localMetronomeDevice_ ? localMetronomeDevice_->takePeak() : 0.0);
+        mixMetronomeMeter_->setLevel(0.0);
     }
 }
 
 void MainWindow::startTrackMetronome()
 {
     if (jam2_.isRunning()) {
-        if (localMetronomeSink_) {
-            localMetronomeSink_->stop();
-            localMetronomeSink_.reset();
-        }
-        if (localMetronomeDevice_) {
-            localMetronomeDevice_->close();
-            localMetronomeDevice_.reset();
-        }
         localMetronomeRunning_ = true;
         localMetronomeLeader_ = true;
         updateRuntimeControls();
@@ -5125,70 +6426,15 @@ void MainWindow::startTrackMetronome()
         return;
     }
 
-    stopTrackMetronome();
-
-    QAudioDevice outputDevice = selectedLocalOutputDevice();
-    if (outputDevice.isNull()) {
-        if (trackMetronomeLabel_) {
-            trackMetronomeLabel_->setText(QStringLiteral("Local metronome unavailable"));
-        }
-        return;
-    }
-
-    QAudioFormat preferred = outputDevice.preferredFormat();
-    QAudioFormat format;
-    format.setSampleRate(preferred.sampleRate() > 0 ? preferred.sampleRate() : 48000);
-    format.setChannelCount(qMax(1, preferred.channelCount() > 0 ? preferred.channelCount() : 2));
-    format.setSampleFormat(QAudioFormat::Int16);
-    if (!outputDevice.isFormatSupported(format)) {
-        format.setSampleRate(48000);
-        format.setChannelCount(2);
-    }
-    if (!outputDevice.isFormatSupported(format)) {
-        if (trackMetronomeLabel_) {
-            trackMetronomeLabel_->setText(QStringLiteral("Local metronome format unavailable"));
-        }
-        return;
-    }
-
-    localMetronomeDevice_ = std::make_unique<LocalMetronomeDevice>(format.sampleRate(), format.channelCount());
-    localMetronomeDevice_->configure(
-        currentMetronomePattern(),
-        gainFromDb(static_cast<double>(localMetronomeLevelSlider_ ? localMetronomeLevelSlider_->value() : 0)));
-    localMetronomeDevice_->resetGrid();
-    if (!localMetronomeDevice_->open(QIODevice::ReadOnly)) {
-        localMetronomeDevice_.reset();
-        if (trackMetronomeLabel_) {
-            trackMetronomeLabel_->setText(QStringLiteral("Local metronome unavailable"));
-        }
-        return;
-    }
-
-    localMetronomeSink_ = std::make_unique<QAudioSink>(outputDevice, format);
-    localMetronomeSink_->start(localMetronomeDevice_.get());
-    localMetronomeRunning_ = true;
     if (trackMetronomeLabel_) {
-        trackMetronomeLabel_->setText(QStringLiteral("Local metronome running"));
+        trackMetronomeLabel_->setText(QStringLiteral("Start local engine for metronome"));
     }
-    if (startTrackMetronomeButton_) {
-        startTrackMetronomeButton_->setEnabled(false);
-    }
-    if (stopTrackMetronomeButton_) {
-        stopTrackMetronomeButton_->setEnabled(true);
-    }
+    QMessageBox::warning(this, QStringLiteral("Jam2 Metronome"), QStringLiteral("Start the local engine before using the track metronome."));
 }
 
 void MainWindow::stopTrackMetronome()
 {
     const bool jamMetronomeWasRunning = jam2_.isRunning() && localMetronomeRunning_;
-    if (localMetronomeSink_) {
-        localMetronomeSink_->stop();
-        localMetronomeSink_.reset();
-    }
-    if (localMetronomeDevice_) {
-        localMetronomeDevice_->close();
-        localMetronomeDevice_.reset();
-    }
     localMetronomeRunning_ = false;
     localMetronomeLeader_ = false;
     if (jamMetronomeWasRunning) {
@@ -5214,12 +6460,11 @@ void MainWindow::updateTrackMetronomeInterval()
     if (bpmSpin_ && metronomeBpmSpin_) {
         bpmSpin_->setValue(metronomeBpmSpin_->value());
     }
-    applyMetronomePatternToLocalDevice();
     sendMetronomePatternToJam();
     sendMetronomeSettingsToPeer();
 }
 
-void MainWindow::rebuildMetronomePattern()
+void MainWindow::rebuildMetronomePattern(bool resetToDivisionDefault)
 {
     if (!metronomePatternTable_) {
         return;
@@ -5232,8 +6477,12 @@ void MainWindow::rebuildMetronomePattern()
     metronomeEnabledSteps_.resize(steps);
     metronomeAccents_.resize(steps);
     for (int i = 0; i < steps; ++i) {
-        metronomeEnabledSteps_[i] = i < previousEnabled.size() ? previousEnabled[i] : true;
-        metronomeAccents_[i] = i < previous.size() ? previous[i] : (i == 0);
+        metronomeEnabledSteps_[i] = !resetToDivisionDefault && i < previousEnabled.size()
+            ? previousEnabled[i]
+            : true;
+        metronomeAccents_[i] = !resetToDivisionDefault && i < previous.size()
+            ? previous[i]
+            : (division <= 1 ? i == 0 : i % division == 0);
     }
 
     metronomePatternTable_->clear();
@@ -5252,7 +6501,6 @@ void MainWindow::rebuildMetronomePattern()
         QObject::connect(playCheck, &QCheckBox::toggled, this, [this, step](bool checked) {
             if (step >= 0 && step < metronomeEnabledSteps_.size()) {
                 metronomeEnabledSteps_[step] = checked;
-                applyMetronomePatternToLocalDevice();
                 sendMetronomePatternToJam();
                 sendMetronomeSettingsToPeer();
             }
@@ -5269,7 +6517,6 @@ void MainWindow::rebuildMetronomePattern()
         QObject::connect(accentCheck, &QCheckBox::toggled, this, [this, step](bool checked) {
             if (step >= 0 && step < metronomeAccents_.size()) {
                 metronomeAccents_[step] = checked;
-                applyMetronomePatternToLocalDevice();
                 sendMetronomePatternToJam();
                 sendMetronomeSettingsToPeer();
             }
@@ -5279,7 +6526,6 @@ void MainWindow::rebuildMetronomePattern()
     }
     metronomePatternTable_->setHorizontalHeaderLabels(headers);
     metronomePatternTable_->setVerticalHeaderLabels(QStringList{QStringLiteral("Play"), QStringLiteral("Accent")});
-    applyMetronomePatternToLocalDevice();
     sendMetronomePatternToJam();
     sendMetronomeSettingsToPeer();
 }
@@ -5297,21 +6543,13 @@ jam2::metronome::PatternSnapshot MainWindow::currentMetronomePattern() const
     pattern.accent_mask_high = 0;
     for (int step = 0; step < pattern.step_count; ++step) {
         const bool play = step < metronomeEnabledSteps_.size() ? metronomeEnabledSteps_[step] : true;
-        const bool accent = step < metronomeAccents_.size() ? metronomeAccents_[step] : (step == 0);
+        const bool accent = step < metronomeAccents_.size()
+            ? metronomeAccents_[step]
+            : (pattern.division <= 1 ? step == 0 : step % pattern.division == 0);
         jam2::metronome::set_mask_enabled(pattern.play_mask_low, pattern.play_mask_high, step, play);
         jam2::metronome::set_mask_enabled(pattern.accent_mask_low, pattern.accent_mask_high, step, accent);
     }
     return jam2::metronome::sanitize(pattern);
-}
-
-void MainWindow::applyMetronomePatternToLocalDevice()
-{
-    if (!localMetronomeDevice_) {
-        return;
-    }
-    localMetronomeDevice_->configure(
-        currentMetronomePattern(),
-        gainFromDb(static_cast<double>(localMetronomeLevelSlider_ ? localMetronomeLevelSlider_->value() : 0)));
 }
 
 void MainWindow::sendMetronomeModeToJam()
@@ -5493,7 +6731,6 @@ void MainWindow::applyRemoteMetronomeSettings(const QJsonObject& message)
     }
     applyingRemoteMetronomeSettings_ = false;
 
-    applyMetronomePatternToLocalDevice();
     if (jam2_.isRunning()) {
         sendJamCommand(localMetronomeLeader_ ? QStringLiteral("metro leader on") : QStringLiteral("metro leader off"));
         sendMetronomeModeToJam();
@@ -5513,128 +6750,266 @@ void MainWindow::applyRemoteMetronomeSettings(const QJsonObject& message)
     }
 }
 
-QJsonObject MainWindow::trackMetadataMessage(const QString& type) const
+void MainWindow::handleLooperAssetRequest(const QJsonObject& message)
 {
-    return QJsonObject{
-        {QStringLiteral("type"), type},
-        {QStringLiteral("name"), trackController_.model().fileName},
-        {QStringLiteral("path"), trackController_.model().filePath},
-        {QStringLiteral("file_bytes"), trackController_.model().fileBytes},
-        {QStringLiteral("sample_rate"), trackController_.model().sampleRate},
-        {QStringLiteral("duration_ms"), trackController_.model().durationMs},
-        {QStringLiteral("sha256"), trackController_.model().sha256},
-        {QStringLiteral("accepted_bpm"), trackController_.model().acceptedBpm},
-        {QStringLiteral("key"), trackController_.model().key},
-        {QStringLiteral("track_gain_db"), trackController_.model().trackGainDb},
-        {QStringLiteral("loop_enabled"), trackController_.model().loopEnabled},
-        {QStringLiteral("loop_start_seconds"), trackController_.model().loopStartSeconds},
-        {QStringLiteral("loop_end_seconds"), trackController_.model().loopEndSeconds},
-        {QStringLiteral("focus_enabled"), trackController_.model().focusEnabled},
-        {QStringLiteral("focus_preset"), trackController_.model().focusPreset},
-        {QStringLiteral("focus_frequency_hz"), trackController_.model().focusFrequencyHz},
-        {QStringLiteral("focus_gain_db"), trackController_.model().focusGainDb},
-        {QStringLiteral("focus_q"), trackController_.model().focusQ},
-    };
+    if (!looperProject_.trackSyncEnabled()) {
+        return;
+    }
+    const QJsonArray hashes = message.value(QStringLiteral("hashes")).toArray();
+    for (const QJsonValue& value : hashes) {
+        const QString hash = value.toString();
+        if (!hash.isEmpty()) {
+            sendLooperAsset(hash);
+        }
+    }
 }
 
-void MainWindow::sendTrackFile()
+void MainWindow::sendLooperAsset(const QString& hash)
 {
-    const QString path = trackController_.model().filePath;
-    if (path.isEmpty() || !QFileInfo::exists(path)) {
-        QMessageBox::warning(this, QStringLiteral("Jam2 Track"), QStringLiteral("No local WAV is available to share."));
+    QString path;
+    for (const LooperBank& bank : looperProject_.banks()) {
+        for (const LooperLane& lane : bank.lanes) {
+            if (lane.assetHash == hash) {
+                path = looperAssetAbsolutePath(lane);
+                break;
+            }
+        }
+        if (!path.isEmpty()) {
+            break;
+        }
+    }
+    if (path.isEmpty() || !QFileInfo::exists(path) || sha256FileHex(path) != hash) {
+        appendLog(QStringLiteral("looper asset unavailable for sync: ") + hash);
         return;
     }
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
-        QMessageBox::warning(this, QStringLiteral("Jam2 Track"), QStringLiteral("Could not open track WAV for sharing."));
+        appendLog(QStringLiteral("could not open looper asset for sync: ") + path);
         return;
     }
     const QByteArray bytes = file.readAll();
-    const QString sha = QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
     constexpr int chunkSize = 48 * 1024;
-    sendControl(trackMetadataMessage(QStringLiteral("track.offer")));
     sendControl(QJsonObject{
-        {QStringLiteral("type"), QStringLiteral("track.file.start")},
-        {QStringLiteral("name"), QFileInfo(path).fileName()},
+        {QStringLiteral("type"), QStringLiteral("looper.asset.start")},
+        {QStringLiteral("sha256"), hash},
         {QStringLiteral("file_bytes"), bytes.size()},
-        {QStringLiteral("sha256"), sha},
         {QStringLiteral("chunk_size"), chunkSize},
     });
     for (int offset = 0, index = 0; offset < bytes.size(); offset += chunkSize, ++index) {
         sendControl(QJsonObject{
-            {QStringLiteral("type"), QStringLiteral("track.file.chunk")},
+            {QStringLiteral("type"), QStringLiteral("looper.asset.chunk")},
+            {QStringLiteral("sha256"), hash},
             {QStringLiteral("index"), index},
             {QStringLiteral("data"), QString::fromLatin1(bytes.mid(offset, chunkSize).toBase64())},
         });
     }
     sendControl(QJsonObject{
-        {QStringLiteral("type"), QStringLiteral("track.file.done")},
+        {QStringLiteral("type"), QStringLiteral("looper.asset.done")},
+        {QStringLiteral("sha256"), hash},
         {QStringLiteral("chunks"), (bytes.size() + chunkSize - 1) / chunkSize},
-        {QStringLiteral("sha256"), sha},
     });
-    appendLog(QStringLiteral("shared track WAV: %1 bytes").arg(bytes.size()));
+    appendLog(QStringLiteral("sent looper asset: %1 bytes hash=%2").arg(bytes.size()).arg(hash));
 }
 
-void MainWindow::receiveTrackFileStart(const QJsonObject& message)
+void MainWindow::receiveLooperAssetStart(const QJsonObject& message)
 {
-    incomingTrackBytes_.clear();
-    incomingTrackName_ = QFileInfo(message.value(QStringLiteral("name")).toString(QStringLiteral("track.wav"))).fileName();
-    incomingTrackSha256_ = message.value(QStringLiteral("sha256")).toString();
-    incomingTrackBytesExpected_ = static_cast<qint64>(message.value(QStringLiteral("file_bytes")).toDouble());
-    incomingTrackNextChunk_ = 0;
-    incomingTrackBytes_.reserve(static_cast<int>(qMin<qint64>(incomingTrackBytesExpected_, std::numeric_limits<int>::max())));
-    appendLog(QStringLiteral("receiving track WAV: %1 bytes").arg(incomingTrackBytesExpected_));
+    incomingLooperAssetBytes_.clear();
+    incomingLooperAssetHash_ = message.value(QStringLiteral("sha256")).toString();
+    incomingLooperAssetBytesExpected_ = static_cast<qint64>(message.value(QStringLiteral("file_bytes")).toDouble());
+    incomingLooperAssetNextChunk_ = 0;
+    incomingLooperAssetBytes_.reserve(static_cast<int>(qMin<qint64>(incomingLooperAssetBytesExpected_, std::numeric_limits<int>::max())));
+    appendLog(QStringLiteral("receiving looper asset: %1 bytes hash=%2")
+        .arg(incomingLooperAssetBytesExpected_)
+        .arg(incomingLooperAssetHash_));
 }
 
-void MainWindow::receiveTrackFileChunk(const QJsonObject& message)
+void MainWindow::receiveLooperAssetChunk(const QJsonObject& message)
 {
+    const QString hash = message.value(QStringLiteral("sha256")).toString();
     const int index = message.value(QStringLiteral("index")).toInt(-1);
-    if (index != incomingTrackNextChunk_) {
-        appendLog(QStringLiteral("track WAV chunk out of order: got %1 expected %2").arg(index).arg(incomingTrackNextChunk_));
-        incomingTrackBytes_.clear();
-        incomingTrackNextChunk_ = 0;
+    if (hash != incomingLooperAssetHash_ || index != incomingLooperAssetNextChunk_) {
+        appendLog(QStringLiteral("looper asset chunk out of order"));
+        incomingLooperAssetBytes_.clear();
+        incomingLooperAssetHash_.clear();
+        incomingLooperAssetNextChunk_ = 0;
         return;
     }
-    incomingTrackBytes_.append(QByteArray::fromBase64(message.value(QStringLiteral("data")).toString().toLatin1()));
-    ++incomingTrackNextChunk_;
+    incomingLooperAssetBytes_.append(QByteArray::fromBase64(message.value(QStringLiteral("data")).toString().toLatin1()));
+    ++incomingLooperAssetNextChunk_;
 }
 
-void MainWindow::receiveTrackFileDone(const QJsonObject& message)
+void MainWindow::receiveLooperAssetDone(const QJsonObject& message)
 {
-    const QString expectedSha = message.value(QStringLiteral("sha256")).toString(incomingTrackSha256_);
-    const QString actualSha = QString::fromLatin1(QCryptographicHash::hash(incomingTrackBytes_, QCryptographicHash::Sha256).toHex());
-    if (incomingTrackBytesExpected_ != incomingTrackBytes_.size() || (!expectedSha.isEmpty() && expectedSha != actualSha)) {
-        appendLog(QStringLiteral("received track WAV failed verification"));
-        incomingTrackBytes_.clear();
+    const QString expectedHash = message.value(QStringLiteral("sha256")).toString(incomingLooperAssetHash_);
+    const QString actualHash = QString::fromLatin1(QCryptographicHash::hash(incomingLooperAssetBytes_, QCryptographicHash::Sha256).toHex());
+    if (incomingLooperAssetBytesExpected_ != incomingLooperAssetBytes_.size() || expectedHash.isEmpty() || expectedHash != actualHash) {
+        appendLog(QStringLiteral("received looper asset failed verification"));
+        incomingLooperAssetBytes_.clear();
+        incomingLooperAssetHash_.clear();
         return;
     }
-    const QString output = appReleaseFilePath(
-        QStringLiteral("received_tracks"),
-        incomingTrackName_.isEmpty() ? QStringLiteral("track.wav") : incomingTrackName_);
+    const QString output = looperAssetPathForHash(expectedHash);
+    QFileInfo outputInfo(output);
+    QDir().mkpath(outputInfo.absolutePath());
     QFile file(output);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        appendLog(QStringLiteral("failed to write received track WAV: ") + output);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+        file.write(incomingLooperAssetBytes_) != incomingLooperAssetBytes_.size()) {
+        appendLog(QStringLiteral("failed to write looper asset: ") + output);
+        incomingLooperAssetBytes_.clear();
+        incomingLooperAssetHash_.clear();
         return;
     }
-    file.write(incomingTrackBytes_);
     file.close();
+    registerTransientTrackWav(output);
+    appendLog(QStringLiteral("received looper asset: ") + output);
+    pendingLooperAssetHashes_.removeAll(expectedHash);
+    incomingLooperAssetBytes_.clear();
+    incomingLooperAssetHash_.clear();
+    applyPendingSongIfAssetsReady();
+}
 
-    try {
-        const WavMetadata metadata = readWavMetadata(output);
-        QFileInfo info(output);
-        trackController_.model().fileName = info.fileName();
-        trackController_.model().filePath = info.absoluteFilePath();
-        trackController_.model().fileBytes = info.size();
-        trackController_.model().sampleRate = metadata.sampleRate;
-        trackController_.model().durationMs = metadata.durationMs;
-        trackController_.model().sha256 = metadata.sha256;
-        updateTrackControls();
-        loadTrackIntoPlayer();
-        appendLog(QStringLiteral("received track WAV: ") + output);
-    } catch (const std::exception& error) {
-        appendLog(QStringLiteral("received track WAV metadata failed: ") + QString::fromUtf8(error.what()));
+void MainWindow::handleSongSet(const QJsonObject& message)
+{
+    if (message.value(QStringLiteral("host_authoritative")).toBool(false) &&
+        !looperProject_.trackSyncEnabled()) {
+        appendLog(QStringLiteral("ignored host arrangement while Track Sync is disabled"));
+        return;
     }
-    incomingTrackBytes_.clear();
+    if (controlServerMode_ && message.value(QStringLiteral("host_authoritative")).toBool(false)) {
+        appendLog(QStringLiteral("ignored host-authoritative song snapshot while hosting"));
+        return;
+    }
+    const int revision = message.value(QStringLiteral("arrangement_revision")).toInt(
+        message.value(QStringLiteral("revision")).toInt(0));
+    const bool restartTrack = message.value(QStringLiteral("track_playing")).toBool(false);
+    if (message.value(QStringLiteral("host_authoritative")).toBool(false) &&
+        revision <= lastAppliedHostArrangementRevision_) {
+        appendLog(QStringLiteral("ignored stale host arrangement revision %1").arg(revision));
+        return;
+    }
+    QJsonObject song = normalizeLooperAssetPaths(message.value(QStringLiteral("song")).toObject());
+    const QStringList missing = missingLooperAssetHashes(song);
+    if (!missing.isEmpty()) {
+        pendingSongSet_ = song;
+        pendingSongRevision_ = revision;
+        pendingSongTrackRestart_ = restartTrack;
+        pendingLooperAssetHashes_ = missing;
+        appendLog(QStringLiteral("requesting %1 looper asset(s) for arrangement revision %2")
+            .arg(missing.size())
+            .arg(revision));
+        QJsonArray hashes;
+        for (const QString& hash : missing) {
+            hashes.append(hash);
+        }
+        sendControl(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("looper.asset.request")},
+            {QStringLiteral("arrangement_revision"), revision},
+            {QStringLiteral("hashes"), hashes},
+        });
+        return;
+    }
+    if (projectFolder_.isEmpty()) {
+        projectFolder_ = transientProjectFolder_;
+    }
+    pendingSongSet_ = QJsonObject{};
+    pendingSongRevision_ = 0;
+    pendingSongTrackRestart_ = false;
+    pendingLooperAssetHashes_.clear();
+    if (loadSongJson(song)) {
+        if (message.value(QStringLiteral("host_authoritative")).toBool(false)) {
+            lastAppliedHostArrangementRevision_ = revision;
+        }
+        refreshSongViews();
+        refreshLooperLanes();
+        regeneratePreparedMix();
+        if (restartTrack && jam2_.isRunning()) {
+            sendJamCommand(QStringLiteral("track restart"));
+            appendLog(QStringLiteral("scheduled synchronized track restart for arrangement revision %1").arg(revision));
+        }
+    }
+}
+
+void MainWindow::applyPendingSongIfAssetsReady()
+{
+    if (pendingSongSet_.isEmpty()) {
+        return;
+    }
+    pendingLooperAssetHashes_ = missingLooperAssetHashes(pendingSongSet_);
+    if (!pendingLooperAssetHashes_.isEmpty()) {
+        return;
+    }
+    const QJsonObject song = pendingSongSet_;
+    const int revision = pendingSongRevision_;
+    const bool restartTrack = pendingSongTrackRestart_;
+    pendingSongSet_ = QJsonObject{};
+    pendingSongRevision_ = 0;
+    pendingSongTrackRestart_ = false;
+    if (projectFolder_.isEmpty()) {
+        projectFolder_ = transientProjectFolder_;
+    }
+    if (loadSongJson(song)) {
+        lastAppliedHostArrangementRevision_ = qMax(lastAppliedHostArrangementRevision_, revision);
+        refreshSongViews();
+        refreshLooperLanes();
+        regeneratePreparedMix();
+        if (restartTrack && jam2_.isRunning()) {
+            sendJamCommand(QStringLiteral("track restart"));
+            appendLog(QStringLiteral("scheduled synchronized track restart for received arrangement revision %1").arg(revision));
+        }
+        appendLog(QStringLiteral("applied pending looper arrangement after asset sync"));
+    }
+}
+
+QStringList MainWindow::missingLooperAssetHashes(const QJsonObject& song) const
+{
+    QStringList missing;
+    const QJsonArray banks = song.value(QStringLiteral("looper")).toObject().value(QStringLiteral("banks")).toArray();
+    for (const QJsonValue& bankValue : banks) {
+        const QJsonArray lanes = bankValue.toObject().value(QStringLiteral("lanes")).toArray();
+        for (const QJsonValue& laneValue : lanes) {
+            const QString hash = laneValue.toObject().value(QStringLiteral("asset_hash")).toString();
+            if (hash.isEmpty() || missing.contains(hash)) {
+                continue;
+            }
+            const QString path = looperAssetPathForHash(hash);
+            if (!QFileInfo::exists(path) || sha256FileHex(path) != hash) {
+                missing.append(hash);
+            }
+        }
+    }
+    return missing;
+}
+
+QJsonObject MainWindow::normalizeLooperAssetPaths(QJsonObject song) const
+{
+    QJsonObject looper = song.value(QStringLiteral("looper")).toObject();
+    QJsonArray banks = looper.value(QStringLiteral("banks")).toArray();
+    for (int bankIndex = 0; bankIndex < banks.size(); ++bankIndex) {
+        QJsonObject bank = banks.at(bankIndex).toObject();
+        QJsonArray lanes = bank.value(QStringLiteral("lanes")).toArray();
+        for (int laneIndex = 0; laneIndex < lanes.size(); ++laneIndex) {
+            QJsonObject lane = lanes.at(laneIndex).toObject();
+            const QString hash = lane.value(QStringLiteral("asset_hash")).toString();
+            if (!hash.isEmpty()) {
+                lane.insert(
+                    QStringLiteral("asset_path"),
+                    QDir(transientProjectFolder_).absoluteFilePath(
+                        QStringLiteral("wavs/") + hash + QStringLiteral(".wav")));
+                lanes.replace(laneIndex, lane);
+            }
+        }
+        bank.insert(QStringLiteral("lanes"), lanes);
+        banks.replace(bankIndex, bank);
+    }
+    looper.insert(QStringLiteral("banks"), banks);
+    song.insert(QStringLiteral("looper"), looper);
+    return song;
+}
+
+QString MainWindow::looperAssetPathForHash(const QString& hash) const
+{
+    return QDir(transientProjectFolder_).absoluteFilePath(
+        QStringLiteral("wavs/") + hash + QStringLiteral(".wav"));
 }
 
 QStringList MainWindow::commonJamArgs(bool includeExtraArgs) const
@@ -5656,7 +7031,7 @@ QStringList MainWindow::commonJamArgs(bool includeExtraArgs) const
          << QStringLiteral("--status-format") << QStringLiteral("jsonl")
          << QStringLiteral("--metronome") << QStringLiteral("off")
          << QStringLiteral("--bpm") << QString::number(metronomeBpmSpin_ ? metronomeBpmSpin_->value() : bpmSpin_->value())
-         << QStringLiteral("--metronome-level") << QString::number(gainFromDb(static_cast<double>(metronomeLevelSlider_ ? metronomeLevelSlider_->value() : 0)), 'f', 3)
+         << QStringLiteral("--metronome-level") << QString::number(gainFromDb(static_cast<double>(metronomeLevelSlider_ ? metronomeLevelSlider_->value() : -10)), 'f', 3)
          << QStringLiteral("--remote-level") << QString::number(gainFromDb(static_cast<double>(remoteLevelSlider_ ? remoteLevelSlider_->value() : 0)), 'f', 3)
          << QStringLiteral("--send-level") << QString::number(gainFromDb(static_cast<double>(mixSendLevelSlider_ ? mixSendLevelSlider_->value() : 0)), 'f', 3)
          << QStringLiteral("--local-monitor") << onOff(mixMonitorCheck_ && mixMonitorCheck_->isChecked())
@@ -5729,20 +7104,6 @@ QString MainWindow::selectedDeviceId() const
     return data.isEmpty() ? deviceId(deviceBox_->currentText()) : data;
 }
 
-QAudioDevice MainWindow::selectedLocalOutputDevice() const
-{
-    const QString selected = localOutputBox_ ? localOutputBox_->currentData().toString() : QString{};
-    if (!selected.isEmpty()) {
-        const QList<QAudioDevice> outputs = QMediaDevices::audioOutputs();
-        for (const QAudioDevice& device : outputs) {
-            if (audioDeviceIdText(device) == selected) {
-                return device;
-            }
-        }
-    }
-    return QMediaDevices::defaultAudioOutput();
-}
-
 QJsonObject MainWindow::trackToJson() const
 {
     const auto& model = trackController_.model();
@@ -5762,7 +7123,6 @@ QJsonObject MainWindow::trackToJson() const
         {QStringLiteral("loop_enabled"), model.loopEnabled},
         {QStringLiteral("loop_start_seconds"), model.loopStartSeconds},
         {QStringLiteral("loop_end_seconds"), model.loopEndSeconds},
-        {QStringLiteral("waveform_grid_visible"), model.waveformGridVisible},
         {QStringLiteral("sync_controls"), model.syncControls},
         {QStringLiteral("focus_enabled"), model.focusEnabled},
         {QStringLiteral("focus_preset"), model.focusPreset},
@@ -5795,7 +7155,6 @@ void MainWindow::loadTrackJson(const QJsonObject& object)
     model.loopEnabled = object.value(QStringLiteral("loop_enabled")).toBool(model.loopEnabled);
     model.loopStartSeconds = object.value(QStringLiteral("loop_start_seconds")).toDouble(model.loopStartSeconds);
     model.loopEndSeconds = object.value(QStringLiteral("loop_end_seconds")).toDouble(model.loopEndSeconds);
-    model.waveformGridVisible = object.value(QStringLiteral("waveform_grid_visible")).toBool(model.waveformGridVisible);
     model.syncControls = object.value(QStringLiteral("sync_controls")).toBool(model.syncControls);
     model.focusEnabled = object.value(QStringLiteral("focus_enabled")).toBool(model.focusEnabled);
     model.focusPreset = object.value(QStringLiteral("focus_preset")).toString(model.focusPreset);
@@ -5805,7 +7164,7 @@ void MainWindow::loadTrackJson(const QJsonObject& object)
     model.highpassHz = object.value(QStringLiteral("highpass_hz")).toDouble(model.highpassHz);
     model.lowpassHz = object.value(QStringLiteral("lowpass_hz")).toDouble(model.lowpassHz);
     updateTrackControls();
-    loadTrackIntoPlayer();
+    loadTrackWaveform();
 }
 
 QJsonObject MainWindow::songToJson() const
@@ -5814,6 +7173,7 @@ QJsonObject MainWindow::songToJson() const
     root.insert(QStringLiteral("independent_views"), true);
     root.insert(QStringLiteral("beat_view"), beatModel_.toJson());
     root.insert(QStringLiteral("lyric_view"), lyricModel_.toJson());
+    root.insert(QStringLiteral("looper"), looperProject_.toJson());
     return root;
 }
 
@@ -5848,7 +7208,164 @@ bool MainWindow::loadSongJson(const QJsonObject& object)
     chordModel_ = loadedChord;
     beatModel_ = loadedBeat;
     lyricModel_ = loadedLyric;
+    const QJsonObject looperObject = object.value(QStringLiteral("looper")).toObject();
+    if (!looperObject.isEmpty() && !looperProject_.loadJson(looperObject)) {
+        return false;
+    }
+    refreshLooperLanes();
     return true;
+}
+
+void MainWindow::updatePlaybackGrid()
+{
+    const bool jamGrid = jam2_.isRunning();
+    if (!jamGrid) {
+        const auto pattern = currentMetronomePattern();
+        playbackGrid_.setPattern(pattern.bpm, pattern.beats_per_bar, pattern.division);
+        playbackGrid_.clearEngine();
+    }
+    const PlaybackGrid::Position position = playbackGrid_.position();
+    const bool showMarkerReference = metronomeMarkerReferenceCheck_ == nullptr ||
+        metronomeMarkerReferenceCheck_->isChecked();
+    const bool markerRunning = position.engineAnchored && showMarkerReference;
+    updateRecordingCountdown(position);
+    if (chordGrid_) {
+        chordGrid_->setGridPosition(position.absoluteBeat, position.subdivision, markerRunning);
+    }
+    if (beatGrid_) {
+        beatGrid_->setGridPosition(position.absoluteBeat, position.subdivision, markerRunning);
+    }
+    if (lyricGrid_) {
+        lyricGrid_->setGridPosition(position.absoluteBeat, position.subdivision, markerRunning);
+    }
+    if (gridPositionLabel_) {
+        if (position.running) {
+            QString text = QStringLiteral(
+                "Grid: beat %1.%2 abs_beat=%3 abs_step=%4 epoch_s=%5 beat_s=%6 step_s=%7 source=%8")
+                .arg(position.beat + 1)
+                .arg(position.subdivision + 1)
+                .arg(position.absoluteBeat)
+                .arg(position.absoluteStep)
+                .arg(position.secondsFromEpoch, 0, 'f', 3)
+                .arg(position.secondsPerBeat, 0, 'f', 6)
+                .arg(position.secondsPerStep, 0, 'f', 6)
+                .arg(position.engineAnchored ? QStringLiteral("engine") : QStringLiteral("none"));
+        if (position.engineAnchored) {
+                text += QStringLiteral(" musical_frame=%1 raw_frame=%2 epoch_frame=%3 offset_frames=%4 rate=%5")
+                    .arg(position.currentFrame)
+                    .arg(position.rawCurrentFrame)
+                    .arg(position.epochFrame)
+                    .arg(position.renderOffsetFrames)
+                    .arg(position.sampleRate);
+            }
+            gridPositionLabel_->setText(text);
+        } else if (position.engineAnchored) {
+            gridPositionLabel_->setText(QStringLiteral("Grid: waiting at beat 1.1 for shared epoch"));
+        } else {
+            gridPositionLabel_->setText(QStringLiteral("Grid: stopped"));
+        }
+    }
+    if (trackWaveform_) {
+        trackWaveform_->setBpm(playbackGrid_.bpm());
+        trackWaveform_->setGridPosition(position.absoluteBeat, markerRunning);
+    }
+    if (looperStack_) {
+        looperStack_->setGridPosition(position.absoluteBeat, markerRunning, playbackGrid_.bpm());
+    }
+}
+
+void MainWindow::updateRecordingCountdown(const PlaybackGrid::Position& position)
+{
+    if (!recordingCountdownLabel_ || recordingStartFrame_ == 0 || !trackTakeRecordingActive_) {
+        return;
+    }
+    if (position.rawCurrentFrame < recordingCountdownStartFrame_) {
+        recordingCountdownLabel_->setText(QStringLiteral("WAITING FOR NEXT BAR"));
+        recordingCountdownLabel_->show();
+        return;
+    }
+    if (position.rawCurrentFrame < recordingStartFrame_) {
+        const double beatFrames = position.secondsPerBeat > 0.0 && position.sampleRate > 0
+            ? position.secondsPerBeat * static_cast<double>(position.sampleRate)
+            : static_cast<double>(qMax(1, position.sampleRate)) * 0.5;
+        const quint64 remainingFrames = recordingStartFrame_ - position.rawCurrentFrame;
+        const int remainingBeats = qMax(1, static_cast<int>(std::ceil(static_cast<double>(remainingFrames) / beatFrames)));
+        recordingCountdownLabel_->setText(QString::number(remainingBeats));
+        recordingCountdownLabel_->show();
+        return;
+    }
+    recordingCountdownLabel_->setText(QStringLiteral("RECORDING"));
+    recordingCountdownLabel_->show();
+    if (stopMetronomeAtRecordingStart_) {
+        stopMetronomeAtRecordingStart_ = false;
+        stopTrackMetronome();
+    }
+}
+
+void MainWindow::updateRecordingLatencyDisplay()
+{
+    if (!recordingLatencyLabel_) {
+        return;
+    }
+    const int sampleRate = qMax(1, recordingLatencySampleRate_);
+    const qint64 adjustment = recordingLatencyAdjustmentSpin_
+        ? recordingLatencyAdjustmentSpin_->value()
+        : 0;
+    const auto milliseconds = [sampleRate](quint64 frames) {
+        return static_cast<double>(frames) * 1000.0 / static_cast<double>(sampleRate);
+    };
+    recordingLatencyLabel_->setText(QStringLiteral(
+        "Input %1 (%2 ms) | Output %3 (%4 ms) | Manual %5 | Applied %6 (%7 ms)")
+        .arg(recordingInputLatencyFrames_)
+        .arg(milliseconds(recordingInputLatencyFrames_), 0, 'f', 2)
+        .arg(recordingOutputLatencyFrames_)
+        .arg(milliseconds(recordingOutputLatencyFrames_), 0, 'f', 2)
+        .arg(adjustment >= 0 ? QStringLiteral("+%1").arg(adjustment) : QString::number(adjustment))
+        .arg(recordingAppliedLatencyFrames_)
+        .arg(milliseconds(recordingAppliedLatencyFrames_), 0, 'f', 2));
+}
+
+void MainWindow::runGridLockedEngineAction(const QString& actionName, const std::function<void(std::uint64_t)>& action)
+{
+    const PlaybackGrid::Position position = playbackGrid_.position();
+    if (!position.engineAnchored || position.sampleRate <= 0) {
+        if (gridScheduleLabel_) {
+            gridScheduleLabel_->setText(QStringLiteral("Grid lock: %1 waiting for engine").arg(actionName));
+        }
+        QMessageBox::warning(this, QStringLiteral("Jam2 Track"), QStringLiteral("Start the local engine before using track transport."));
+        return;
+    }
+
+    std::uint64_t targetFrame = position.rawCurrentFrame;
+    QString targetText;
+    if (looperProject_.gridLockEnabled() && position.running && position.secondsPerBeat > 0.0) {
+        const std::uint64_t targetBeat = position.absoluteBeat + 1ULL;
+        const std::uint64_t targetStep = targetBeat * static_cast<std::uint64_t>(qMax(1, currentMetronomePattern().division));
+        const std::uint64_t targetMusicalFrame = position.epochFrame +
+            static_cast<std::uint64_t>(std::llround(static_cast<double>(targetBeat) * position.secondsPerBeat * static_cast<double>(position.sampleRate)));
+        targetFrame = rawFrameFromMusicalFrame(targetMusicalFrame, position.renderOffsetFrames);
+        const double delayMs = targetFrame > position.rawCurrentFrame
+            ? (static_cast<double>(targetFrame - position.rawCurrentFrame) * 1000.0 / static_cast<double>(position.sampleRate))
+            : 0.0;
+        targetText = QStringLiteral(
+            "Grid lock: %1 engine target_beat=%2 target_step=%3 target_musical_frame=%4 target_raw_frame=%5 current_musical_frame=%6 current_raw_frame=%7 offset_frames=%8 delay_ms=%9")
+            .arg(actionName)
+            .arg(targetBeat)
+            .arg(targetStep)
+            .arg(targetMusicalFrame)
+            .arg(targetFrame)
+            .arg(position.currentFrame)
+            .arg(position.rawCurrentFrame)
+            .arg(position.renderOffsetFrames)
+            .arg(delayMs, 0, 'f', 3);
+    } else {
+        targetText = QStringLiteral("Grid lock: %1 engine immediate target_frame=%2").arg(actionName).arg(targetFrame);
+    }
+    if (gridScheduleLabel_) {
+        gridScheduleLabel_->setText(targetText);
+    }
+    appendLog(targetText);
+    action(targetFrame);
 }
 
 void MainWindow::newSong()
@@ -5856,20 +7373,20 @@ void MainWindow::newSong()
     chordModel_.reset();
     beatModel_.reset();
     lyricModel_.reset();
-    if (trackSink_) {
-        trackSink_->stop();
-        trackSink_.reset();
-    }
     stopTrackMetronome();
-    trackDevice_.reset();
     trackController_ = SharedTrackController{};
+    looperProject_ = LooperProject{};
     lastCaptureSummary_ = QJsonObject{};
     lastCapturePath_.clear();
     if (trackWaveform_) {
         trackWaveform_->clear();
     }
     updateTrackControls();
+    refreshLooperLanes();
     refreshSongViews();
+    projectFilePath_.clear();
+    projectFolder_.clear();
+    savedProjectSnapshot_ = currentProjectSnapshot();
 }
 
 void MainWindow::openSong()
@@ -5895,40 +7412,113 @@ void MainWindow::openSong()
         QMessageBox::warning(this, QStringLiteral("Jam2"), QStringLiteral("Invalid Jam2 song file."));
         return;
     }
+    projectFolder_ = QFileInfo(path).absolutePath();
+    projectFilePath_ = QFileInfo(path).absoluteFilePath();
     loadTrackJson(root.value(QStringLiteral("track")).toObject());
     refreshSongViews();
+    savedProjectSnapshot_ = currentProjectSnapshot();
 }
 
-void MainWindow::saveSong()
+bool MainWindow::saveSong()
 {
     chordModel_.setTitle(songTitleEdit_->text());
     beatModel_.setTitle(songTitleEdit_->text());
     lyricModel_.setTitle(songTitleEdit_->text());
-    const QString path = QFileDialog::getSaveFileName(
-        this,
-        QStringLiteral("Save Jam2 Song"),
-        appReleaseFilePath(QStringLiteral("songs"), chordModel_.title() + QStringLiteral(".jam2song")),
-        QStringLiteral("Jam2 song (*.jam2song);;JSON files (*.json);;All files (*)"),
-        nullptr,
-        QFileDialog::DontUseNativeDialog);
+    QString path = projectFilePath_;
     if (path.isEmpty()) {
-        return;
+        path = QFileDialog::getSaveFileName(
+            this,
+            QStringLiteral("Save Jam2 Song"),
+            appReleaseFilePath(QStringLiteral("songs"), chordModel_.title() + QStringLiteral(".jam2song")),
+            QStringLiteral("Jam2 song (*.jam2song);;JSON files (*.json);;All files (*)"),
+            nullptr,
+            QFileDialog::DontUseNativeDialog);
+    }
+    if (path.isEmpty()) {
+        return false;
+    }
+    const QFileInfo songInfo(path);
+    if (!materializeLooperAssets(songInfo.absolutePath())) {
+        return false;
     }
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         QMessageBox::warning(this, QStringLiteral("Jam2"), QStringLiteral("Could not save song file."));
-        return;
+        return false;
     }
     QJsonObject root = songToJson();
     root.insert(QStringLiteral("track"), trackToJson());
-    file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    const QByteArray json = QJsonDocument(root).toJson(QJsonDocument::Indented);
+    if (file.write(json) != json.size()) {
+        QMessageBox::warning(this, QStringLiteral("Jam2"), QStringLiteral("Could not finish writing the song file."));
+        return false;
+    }
+    file.close();
+    projectFilePath_ = songInfo.absoluteFilePath();
+    projectFolder_ = songInfo.absolutePath();
+    for (const LooperBank& bank : std::as_const(looperProject_.banks())) {
+        for (const LooperLane& lane : bank.lanes) {
+            if (!lane.assetPath.trimmed().isEmpty()) {
+                const QString savedAsset = QFileInfo(lane.assetPath).isAbsolute()
+                    ? lane.assetPath
+                    : QDir(projectFolder_).absoluteFilePath(lane.assetPath);
+                transientTrackWavs_.remove(QDir::cleanPath(QFileInfo(savedAsset).absoluteFilePath()));
+            }
+        }
+    }
+    savedProjectSnapshot_ = currentProjectSnapshot();
+    cleanupTransientTrackWavs();
+    return true;
+}
+
+QByteArray MainWindow::currentProjectSnapshot() const
+{
+    QJsonObject root = songToJson();
+    root.insert(QStringLiteral("track"), trackToJson());
+    return QJsonDocument(root).toJson(QJsonDocument::Compact);
+}
+
+bool MainWindow::hasUnsavedProjectChanges() const
+{
+    return currentProjectSnapshot() != savedProjectSnapshot_;
+}
+
+void MainWindow::registerTransientTrackWav(const QString& path)
+{
+    if (!path.trimmed().isEmpty()) {
+        transientTrackWavs_.insert(QDir::cleanPath(QFileInfo(path).absoluteFilePath()));
+    }
+}
+
+void MainWindow::cleanupTransientTrackWavs()
+{
+    for (const QString& path : std::as_const(transientTrackWavs_)) {
+        const QFileInfo info(path);
+        if (info.suffix().compare(QStringLiteral("wav"), Qt::CaseInsensitive) == 0 && info.exists()) {
+            QFile::remove(info.absoluteFilePath());
+        }
+    }
+    transientTrackWavs_.clear();
+    if (!lastCapturePath_.isEmpty() && !QFileInfo::exists(lastCapturePath_)) {
+        lastCapturePath_.clear();
+    }
+    QDir workspace(transientProjectFolder_);
+    workspace.rmdir(QStringLiteral("wavs"));
+    QDir parent = workspace;
+    if (parent.cdUp()) {
+        parent.rmdir(workspace.dirName());
+    }
 }
 
 void MainWindow::sendSongSnapshot()
 {
+    const int revision = ++looperArrangementRevision_;
     sendControl(QJsonObject{
         {QStringLiteral("type"), QStringLiteral("song.set")},
-        {QStringLiteral("revision"), chordModel_.revision() + beatModel_.revision() + lyricModel_.revision()},
+        {QStringLiteral("revision"), revision},
+        {QStringLiteral("arrangement_revision"), revision},
+        {QStringLiteral("host_authoritative"), true},
+        {QStringLiteral("track_playing"), preparedSourcePlaying_},
         {QStringLiteral("song"), songToJson()},
     });
 }

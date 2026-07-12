@@ -3,7 +3,9 @@ add_library(jam2_core STATIC
     src/common.cpp
     src/metronome.cpp
     src/output_recorder.cpp
+    src/prepared_track_source.cpp
     src/protocol.cpp
+    src/track_take_recorder.cpp
     src/stun.cpp
     src/tuning_profile.cpp
     src/udp_socket.cpp

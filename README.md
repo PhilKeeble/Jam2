@@ -24,7 +24,6 @@ For LAN testing, use **No STUN** and a reachable LAN host/IP. For internet testi
 | [Engine](docs/Engine.md) | `jam2` CLI commands, runtime commands, audio/network tuning flags, and stats logging. |
 | [Mesh](docs/Mesh.md) | Experimental direct full-mesh audio usage, GUI launch flow, peer-list behavior, and scaling considerations. |
 | [Metronome](docs/Metronome.md) | Metronome modes, timing behavior, levels, and when to compare modes. |
-| [Capture](docs/Capture.md) | `jam2-capture` input and loopback recording commands. |
 | [Profiles](docs/Profiles.md) | Current tested tuning profiles and what each numeric field does. |
 | [Diagnosing](docs/Diagnosing.md) | How to read Jam2 stats and troubleshoot network/audio issues. |
 | [Connection Test](docs/ConnectionTest.md) | Pre-flight UDP connectivity checks before running Jam2. |
