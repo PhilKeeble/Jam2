@@ -36,19 +36,26 @@ else()
 endif()
 
 if(WIN32)
-    if(DEFINED ENV{ASIO_SDK_DIR})
-        set(JAM2_ASIO_SDK_DIR "$ENV{ASIO_SDK_DIR}" CACHE PATH "Path to Steinberg ASIO SDK")
+    if(DEFINED ASIO_SDK_DIR)
+        set(_jam2_asio_sdk_dir "${ASIO_SDK_DIR}")
+    elseif(DEFINED JAM2_ASIO_SDK_DIR)
+        set(_jam2_asio_sdk_dir "${JAM2_ASIO_SDK_DIR}")
+    elseif(DEFINED ENV{ASIO_SDK_DIR})
+        set(_jam2_asio_sdk_dir "$ENV{ASIO_SDK_DIR}")
     else()
-        set(JAM2_ASIO_SDK_DIR "C:/Tools/ASIO-SDK_2.3.4/ASIOSDK" CACHE PATH "Path to Steinberg ASIO SDK")
+        set(_jam2_asio_sdk_dir "C:/Tools/ASIO-SDK_2.3.4/ASIOSDK")
     endif()
-    if(EXISTS "${JAM2_ASIO_SDK_DIR}/common/asio.h")
+    set(ASIO_SDK_DIR "${_jam2_asio_sdk_dir}" CACHE PATH "Path to Steinberg ASIO SDK" FORCE)
+    set(JAM2_ASIO_SDK_DIR "${ASIO_SDK_DIR}" CACHE PATH "Compatibility alias for ASIO_SDK_DIR" FORCE)
+    unset(_jam2_asio_sdk_dir)
+    if(EXISTS "${ASIO_SDK_DIR}/common/asio.h")
         target_include_directories(jam2_core PUBLIC
-            "${JAM2_ASIO_SDK_DIR}/common"
-            "${JAM2_ASIO_SDK_DIR}/host"
-            "${JAM2_ASIO_SDK_DIR}/host/pc"
+            "${ASIO_SDK_DIR}/common"
+            "${ASIO_SDK_DIR}/host"
+            "${ASIO_SDK_DIR}/host/pc"
         )
     else()
-        message(WARNING "ASIO SDK not found at ${JAM2_ASIO_SDK_DIR}; device enumeration can still read registry entries, but ASIO opening will need the SDK.")
+        message(WARNING "ASIO SDK not found at ${ASIO_SDK_DIR}; device enumeration can still read registry entries, but ASIO opening will need the SDK.")
     endif()
     target_sources(jam2_core PRIVATE src/audio_device_windows.cpp)
     target_compile_definitions(jam2_core PUBLIC JAM2_PLATFORM_WINDOWS=1)

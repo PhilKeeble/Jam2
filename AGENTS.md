@@ -5,7 +5,8 @@ These rules apply to all implementation work in this repository.
 ## Product Constraints
 
 - Simplicity and efficiency are the priority. This is not a broad production-ready platform.
-- The app is only for two people to connect directly and play instruments together with a metronome and the most real-time feel possible within physical network limits.
+- The primary and simplest workflow is two people connecting directly to play instruments together with a metronome and the most real-time feel possible within physical network limits.
+- Keep direct full-mesh support for multiple people. Three or four peers are expected small-group use cases, while larger meshes may be exposed with clear raw CPU, bandwidth, packet-rate, and timing measurements.
 - Do not add rooms, relays, account systems, GUI layers, broad device abstractions, or production platform features unless explicitly requested.
 - The app must expose hard data for debugging and fine tuning.
 - Do not add subjective playability scores or inferred recommendations when raw measurements are sufficient.
