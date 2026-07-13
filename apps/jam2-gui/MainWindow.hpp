@@ -16,12 +16,15 @@
 #include <QByteArray>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QElapsedTimer>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QJsonObject>
+#include <QList>
 #include <QMap>
+#include <QPair>
 #include <QProcess>
 #include <QSet>
 #include <QSlider>
@@ -30,12 +33,19 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
+#include <QThreadPool>
 #include <QVector>
 #include <QWidget>
 
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <vector>
+
+class QFile;
+class QCryptographicHash;
+class QTemporaryFile;
 
 class QEvent;
 class QCloseEvent;
@@ -75,7 +85,7 @@ private:
     void handleStatsLine(const QString& line);
     void updateStatsDisplay(const QJsonObject& stats);
     void updateMixMeters(const QJsonObject& stats);
-    void handleControlMessage(const QJsonObject& message);
+    void handleControlMessage(const QJsonObject& message, const QString& sourcePeerToken = QString());
     void sendControl(const QJsonObject& message);
     void handleControlState(const QString& state, bool serverSide);
     void refreshControlConnection();
@@ -130,6 +140,11 @@ private:
     void applySelectedLooperLaneRegion(qint64 startFrame, qint64 sourceStartFrame, qint64 sourceEndFrame);
     void applyLooperLaneGain(int laneIndex, double gainDb);
     void regeneratePreparedMix();
+    void applyPreparedMixResult(PreparedMixResult result);
+    bool startFileWorkerTask(
+        std::function<void()> work,
+        std::function<void()> complete,
+        std::function<void(const QString&)> failed = {});
     void loadPreparedMixIntoEngine();
     void sendPreparedTrackLevel();
     void syncLooperArrangement();
@@ -161,14 +176,20 @@ private:
     void applyRemoteMetronomeSettings(const QJsonObject& message);
     void showMetronomeCompensationDialog();
     void updateMetronomeCompensationVisibility();
-    void handleLooperAssetRequest(const QJsonObject& message);
-    void sendLooperAsset(const QString& hash);
-    void receiveLooperAssetStart(const QJsonObject& message);
-    void receiveLooperAssetChunk(const QJsonObject& message);
-    void receiveLooperAssetDone(const QJsonObject& message);
+    void publishLocalRecordingOffer(int bankIndex, const QString& targetLaneId, const LooperLane& lane);
+    void handleRecordingOffer(const QJsonObject& message, const QString& sourcePeerToken);
+    void applyPendingRecordingContributions();
+    void handleLooperAssetRequest(const QJsonObject& message, const QString& sourcePeerToken);
+    void sendLooperAsset(const QString& hash, const QString& targetPeerToken);
+    void continueLooperAssetSend();
+    void resetIncomingLooperAsset();
+    bool sendControlTo(const QString& targetPeerToken, const QJsonObject& message);
+    bool canQueueControlTo(const QString& targetPeerToken, qint64 estimatedBytes) const;
+    void receiveLooperAssetStart(const QJsonObject& message, const QString& sourcePeerToken);
+    void receiveLooperAssetChunk(const QJsonObject& message, const QString& sourcePeerToken);
+    void receiveLooperAssetDone(const QJsonObject& message, const QString& sourcePeerToken);
     void handleSongSet(const QJsonObject& message);
     void applyPendingSongIfAssetsReady();
-    QStringList missingLooperAssetHashes(const QJsonObject& song) const;
     QJsonObject normalizeLooperAssetPaths(QJsonObject song) const;
     QString looperAssetPathForHash(const QString& hash) const;
     QJsonObject trackToJson() const;
@@ -400,18 +421,72 @@ private:
     QString transientProjectFolder_;
     QByteArray savedProjectSnapshot_;
     QSet<QString> transientTrackWavs_;
+    QSet<QString> deferredTransientCleanupWavs_;
     PreparedMixResult preparedMix_;
+    QThreadPool fileWorkerPool_;
+    bool preparedMixWorkerRunning_ = false;
+    bool preparedMixRerunPending_ = false;
+    bool playPreparedMixWhenReady_ = false;
+    bool restartPreparedMixWhenReady_ = false;
+    std::uint64_t preparedMixRequests_ = 0;
+    std::uint64_t preparedMixCoalesced_ = 0;
+    std::uint64_t preparedMixFailures_ = 0;
+    int fileWorkerTasksActive_ = 0;
+    int fileWorkerTasksHighWater_ = 0;
+    std::uint64_t fileWorkerTasksCompleted_ = 0;
+    std::uint64_t fileWorkerTasksRejected_ = 0;
+    bool trackWaveformWorkerRunning_ = false;
+    std::uint64_t trackWaveformRevision_ = 0;
+    struct LooperWaveformPreview {
+        std::vector<float> peaks;
+        qint64 sourceFrames = 0;
+        bool valid = false;
+    };
+    QMap<QString, LooperWaveformPreview> looperWaveformCache_;
+    bool looperWaveformWorkerRunning_ = false;
     QString jamRecordingFolder_;
     bool jamRecordingActive_ = false;
     QJsonObject lastCaptureSummary_;
-    QByteArray incomingLooperAssetBytes_;
+    struct PendingRecordingContribution {
+        QString sourcePeerToken;
+        int bankIndex = 0;
+        QString targetLaneId;
+        QString assetHash;
+        QString name;
+    };
+    QMap<QString, PendingRecordingContribution> pendingRecordingContributions_;
+    QSet<QString> appliedRecordingContributionIds_;
+    QMap<QString, QJsonObject> localRecordingOffers_;
+    QMap<QString, QString> recordingOfferAssetPaths_;
+    QMap<QString, QString> pendingRecordingAssetSources_;
+    QSet<QString> validatedRecordingAssetHashes_;
+    std::unique_ptr<QTemporaryFile> incomingLooperAssetFile_;
+    std::unique_ptr<QCryptographicHash> incomingLooperAssetHasher_;
     QString incomingLooperAssetHash_;
+    QString incomingLooperAssetSourceToken_;
     qint64 incomingLooperAssetBytesExpected_ = 0;
+    qint64 incomingLooperAssetBytesReceived_ = 0;
+    int incomingLooperAssetChunkSize_ = 0;
     int incomingLooperAssetNextChunk_ = 0;
+    QTimer incomingLooperAssetTimer_;
+    QList<QPair<QString, QString>> outgoingLooperAssetQueue_;
+    std::unique_ptr<QFile> outgoingLooperAssetFile_;
+    QString outgoingLooperAssetHash_;
+    QString outgoingLooperAssetTargetToken_;
+    QString outgoingLooperAssetPendingHash_;
+    QString outgoingLooperAssetPendingTargetToken_;
+    bool outgoingLooperAssetValidationPending_ = false;
+    qint64 outgoingLooperAssetBytes_ = 0;
+    int outgoingLooperAssetNextChunk_ = 0;
+    QElapsedTimer outgoingLooperAssetProgress_;
+    QTimer outgoingLooperAssetTimer_;
     QJsonObject pendingSongSet_;
     QStringList pendingLooperAssetHashes_;
     int pendingSongRevision_ = 0;
     bool pendingSongTrackRestart_ = false;
+    std::uint64_t songAssetCheckRevision_ = 0;
+    QJsonObject deferredSongSetMessage_;
+    QTimer songAssetCheckRetryTimer_;
     int looperArrangementRevision_ = 0;
     int lastAppliedHostArrangementRevision_ = 0;
     QTimer trackTimelineTimer_;

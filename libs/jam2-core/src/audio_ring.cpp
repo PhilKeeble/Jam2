@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 
 namespace jam2::audio {
@@ -50,8 +51,14 @@ std::size_t MonoRingBuffer::push(std::span<const std::int32_t> frames)
     const std::size_t used = static_cast<std::size_t>(write - read);
     const std::size_t writable = capacity_ - used;
     const std::size_t count = std::min(writable, frames.size());
-    for (std::size_t i = 0; i < count; ++i) {
-        buffer_[static_cast<std::size_t>((write + i) % capacity_)] = frames[i];
+    const std::size_t write_offset = static_cast<std::size_t>(write % capacity_);
+    const std::size_t first_count = std::min(count, capacity_ - write_offset);
+    if (first_count > 0) {
+        std::memcpy(buffer_.data() + write_offset, frames.data(), first_count * sizeof(std::int32_t));
+    }
+    const std::size_t second_count = count - first_count;
+    if (second_count > 0) {
+        std::memcpy(buffer_.data(), frames.data() + first_count, second_count * sizeof(std::int32_t));
     }
     if (count < frames.size()) {
         const std::uint64_t dropped = static_cast<std::uint64_t>(frames.size() - count);
@@ -67,16 +74,23 @@ std::size_t MonoRingBuffer::push(std::span<const std::int32_t> frames)
 
 std::size_t MonoRingBuffer::pop(std::span<std::int32_t> frames, bool observe_depth)
 {
-    const std::uint64_t read = read_.load(std::memory_order_relaxed);
+    std::uint64_t read = read_.load(std::memory_order_relaxed);
     const std::uint64_t write = write_.load(std::memory_order_acquire);
+    read += apply_requested_drop(read, write);
     const std::size_t readable = static_cast<std::size_t>(write - read);
     const std::size_t count = std::min(readable, frames.size());
     const bool diagnostics_enabled = diagnostics_enabled_.load(std::memory_order_relaxed);
     if (observe_depth && diagnostics_enabled) {
         observe_depth_for_pop(readable, frames.size());
     }
-    for (std::size_t i = 0; i < count; ++i) {
-        frames[i] = buffer_[static_cast<std::size_t>((read + i) % capacity_)];
+    const std::size_t read_offset = static_cast<std::size_t>(read % capacity_);
+    const std::size_t first_count = std::min(count, capacity_ - read_offset);
+    if (first_count > 0) {
+        std::memcpy(frames.data(), buffer_.data() + read_offset, first_count * sizeof(std::int32_t));
+    }
+    const std::size_t second_count = count - first_count;
+    if (second_count > 0) {
+        std::memcpy(frames.data() + first_count, buffer_.data(), second_count * sizeof(std::int32_t));
     }
     if (count < frames.size()) {
         const std::uint64_t missing = static_cast<std::uint64_t>(frames.size() - count);
@@ -99,14 +113,43 @@ std::size_t MonoRingBuffer::pop(std::span<std::int32_t> frames, bool observe_dep
     return count;
 }
 
-std::size_t MonoRingBuffer::drop_oldest(std::size_t frames)
+void MonoRingBuffer::request_drop_oldest(std::size_t frames)
 {
-    const std::uint64_t read = read_.load(std::memory_order_relaxed);
-    const std::uint64_t write = write_.load(std::memory_order_acquire);
-    const std::size_t readable = static_cast<std::size_t>(write - read);
-    const std::size_t count = std::min(readable, frames);
-    read_.store(read + count, std::memory_order_release);
-    return count;
+    if (frames == 0) {
+        return;
+    }
+    const std::uint64_t read = read_.load(std::memory_order_acquire);
+    const std::uint64_t write = write_.load(std::memory_order_relaxed);
+    const std::uint64_t readable = write - read;
+    const std::uint64_t requested = std::min<std::uint64_t>(frames, readable);
+    if (requested == 0) {
+        return;
+    }
+    drop_requested_frames_.fetch_add(requested, std::memory_order_relaxed);
+    const std::uint64_t target = read + requested;
+    std::uint64_t pending_target = drop_target_read_.load(std::memory_order_relaxed);
+    if (pending_target > read) {
+        drop_coalesced_requests_.fetch_add(1, std::memory_order_relaxed);
+    }
+    while (target > pending_target &&
+           !drop_target_read_.compare_exchange_weak(
+               pending_target,
+               target,
+               std::memory_order_release,
+               std::memory_order_relaxed)) {
+    }
+}
+
+std::size_t MonoRingBuffer::apply_requested_drop(std::uint64_t read, std::uint64_t write)
+{
+    const std::uint64_t target = drop_target_read_.load(std::memory_order_acquire);
+    const std::uint64_t desired = std::min(target, write);
+    const std::size_t applied = desired > read ? static_cast<std::size_t>(desired - read) : 0;
+    if (applied > 0) {
+        drop_applied_frames_.fetch_add(applied, std::memory_order_relaxed);
+        atomic_update_max(drop_max_batch_frames_, applied);
+    }
+    return applied;
 }
 
 void MonoRingBuffer::set_depth_bucket_thresholds(double sample_rate)
@@ -126,6 +169,8 @@ void MonoRingBuffer::set_diagnostics_enabled(bool enabled)
 
 RingStats MonoRingBuffer::stats() const
 {
+    const std::uint64_t read = read_.load(std::memory_order_acquire);
+    const std::uint64_t target = drop_target_read_.load(std::memory_order_acquire);
     return RingStats{
         overruns_.load(std::memory_order_relaxed),
         overrun_events_.load(std::memory_order_relaxed),
@@ -141,6 +186,11 @@ RingStats MonoRingBuffer::stats() const
         depth_under_10ms_frames_.load(std::memory_order_relaxed),
         depth_10ms_plus_frames_.load(std::memory_order_relaxed),
         depth_observed_frames_.load(std::memory_order_relaxed),
+        drop_requested_frames_.load(std::memory_order_relaxed),
+        drop_applied_frames_.load(std::memory_order_relaxed),
+        drop_coalesced_requests_.load(std::memory_order_relaxed),
+        target > read ? target - read : 0,
+        drop_max_batch_frames_.load(std::memory_order_relaxed),
     };
 }
 
@@ -162,6 +212,11 @@ void MonoRingBuffer::reset()
     depth_under_10ms_frames_.store(0, std::memory_order_relaxed);
     depth_10ms_plus_frames_.store(0, std::memory_order_relaxed);
     depth_observed_frames_.store(0, std::memory_order_relaxed);
+    drop_requested_frames_.store(0, std::memory_order_relaxed);
+    drop_applied_frames_.store(0, std::memory_order_relaxed);
+    drop_coalesced_requests_.store(0, std::memory_order_relaxed);
+    drop_target_read_.store(0, std::memory_order_relaxed);
+    drop_max_batch_frames_.store(0, std::memory_order_relaxed);
 }
 
 void MonoRingBuffer::observe_depth_for_pop(std::size_t readable, std::size_t output_frames)

@@ -35,12 +35,12 @@ The principal weaknesses are concentrated outside the core callback implementati
 6. Remote TCP control and asset synchronization need explicit input and memory bounds.
 7. Engine and GUI behavior are concentrated in two very large source files.
 8. Process, stdin, loopback TCP, JSONL, and GUI state form several overlapping local-control paths.
-9. There are extensive Python integration and benchmark tools, but no registered native C++ unit-test layer for protocol and concurrency primitives.
+9. The Python integration and benchmark tools need stronger independent protocol generators and adversarial real-process coverage.
 
 The recommended release strategy is:
 
 1. Correct concurrency, boundedness, sequence, and control-input risks.
-2. Add focused native tests and capture two-peer and mesh baselines.
+2. Expand focused Python real-process validation and retain comparable two-peer and mesh evidence.
 3. Optimize the existing UDP implementation without changing the wire format.
 4. Extract a Qt-free engine behind typed interfaces.
 5. Ship one public executable named `jam2`: no arguments launch the GUI, while supported subcommands retain benchmarking and optional headless use.
@@ -613,9 +613,13 @@ Qt objects, JSON objects, dialogs, filesystem work, and callbacks into widgets s
 
 The earlier binary-specific review is preserved in [refactor-binaries.md](refactor-binaries.md). Where it proposes a development-only CLI executable, this report records the later decision to keep CLI/headless operation publicly available in the unified `jam2` executable.
 
-## Recommended Work Sequence
+## Audit Work Groups
 
-### Phase 1: v1 correctness and bounds
+These groups preserve the audit's technical reasoning. Their old local phase
+numbers have been removed; [refactor-plan.md](refactor-plan.md) is authoritative
+for dependency order, and validation is not a hard gate between groups.
+
+### Current-model correctness and bounds
 
 1. Correct playback-ring ownership.
 2. Make sequence handling wrap-safe.
@@ -626,14 +630,14 @@ The earlier binary-specific review is preserved in [refactor-binaries.md](refact
 
 Do not mix these fixes with a packet-header change.
 
-### Phase 2: native tests and baselines
+### Python validation and comparable evidence
 
-1. Add CMake-registered tests for protocol, ring, sequence, jitter/reorder, prepared source, and bounded queues.
+1. Add independent Python protocol, malformed-input, impairment, and artifact checks against real Jam2 processes; do not add CMake/CTest scaffolding.
 2. Capture fast/moderate/safe two-peer baselines.
 3. Capture two-, three-, and four-peer headless mesh baselines.
 4. Record allocations/packet, network-loop CPU, packet-loop gaps, send intervals, callback gaps, jitter, loss, underruns, drift, and bitrate.
 
-### Phase 3: wire-compatible fast-path optimization
+### Wire-compatible fast-path optimization
 
 1. Resolve endpoints once and use numeric keys.
 2. Introduce caller-owned receive/transmit buffers.
@@ -644,7 +648,7 @@ Do not mix these fixes with a packet-header change.
 7. Bulk-copy ring spans after the ownership correction.
 8. Compare every change against the captured baselines.
 
-### Phase 4: engine extraction
+### Engine and peer-path extraction
 
 1. Move shared configuration and validation behind typed structures.
 2. Extract normal and mesh network behavior into reusable engine components.
@@ -652,7 +656,7 @@ Do not mix these fixes with a packet-header change.
 4. Keep existing CLI modes operating over the extracted engine.
 5. Add dynamic mesh membership without restarting the audio device.
 
-### Phase 5: unified application
+### Unified application
 
 1. Make no-argument `jam2` launch the GUI.
 2. Replace GUI child-process launch with the engine API.
@@ -661,7 +665,7 @@ Do not mix these fixes with a packet-header change.
 5. Remove second-binary staging and obsolete compatibility code.
 6. Update packaging, documentation, benchmark paths, and shutdown tests.
 
-### Phase 6: measured wire experiments
+### Measured wire experiments
 
 1. Add explicit PCM16 versus PCM24 comparison if Wi-Fi/mesh data justifies it.
 2. Consider a smaller type-specific v2 header only if header cost remains material.

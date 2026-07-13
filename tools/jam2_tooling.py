@@ -2,11 +2,67 @@
 
 import json
 import os
+import platform
+import re
 import shutil
 import sys
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
+
+
+_JAM_URL_KEY = re.compile(r"(?i)([?&]key=)[0-9a-f]+")
+_SESSION_KEY_ASSIGNMENT = re.compile(r"(?i)(--session-key=)[0-9a-f]+")
+_SESSION_KEY_ARGUMENT = re.compile(r"(?i)(--session-key\s+)[0-9a-f]+")
+
+
+def redact_text(value):
+    text = str(value)
+    text = _JAM_URL_KEY.sub(r"\1<redacted>", text)
+    text = _SESSION_KEY_ASSIGNMENT.sub(r"\1<redacted>", text)
+    return _SESSION_KEY_ARGUMENT.sub(r"\1<redacted>", text)
+
+
+def redact_cli_args(args):
+    redacted = []
+    hide_next = False
+    for item in args:
+        text = str(item)
+        if hide_next:
+            redacted.append("<redacted>")
+            hide_next = False
+            continue
+        redacted.append(redact_text(text))
+        hide_next = text == "--session-key"
+    return redacted
+
+
+def redact_structure(value):
+    if isinstance(value, dict):
+        return {str(key): redact_structure(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_structure(item) for item in value]
+    if isinstance(value, tuple):
+        return [redact_structure(item) for item in value]
+    if isinstance(value, str):
+        return redact_text(value)
+    return value
+
+
+def new_run_manifest(tool, argv, **settings):
+    return {
+        "schema_version": 1,
+        "run_id": uuid.uuid4().hex,
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "tool": str(tool),
+        "argv": redact_cli_args(argv),
+        "host": {
+            "platform": platform.platform(),
+            "python": platform.python_version(),
+        },
+        "settings": settings,
+    }
 
 
 def repo_root():

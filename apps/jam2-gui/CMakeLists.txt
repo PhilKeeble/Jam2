@@ -38,6 +38,8 @@ add_executable(jam2-gui WIN32 MACOSX_BUNDLE
     BeatGridWidget.hpp
     ControlClient.cpp
     ControlClient.hpp
+    ControlProtocol.cpp
+    ControlProtocol.hpp
     ControlServer.cpp
     ControlServer.hpp
     GuiLoopbackRecorder.cpp

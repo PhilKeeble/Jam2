@@ -3,9 +3,22 @@
 #include <algorithm>
 #include <chrono>
 #include <iomanip>
-#include <random>
+#include <span>
 #include <sstream>
 #include <stdexcept>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <bcrypt.h>
+#elif defined(__APPLE__)
+#include <cstdlib>
+#endif
 
 namespace jam2 {
 namespace {
@@ -40,6 +53,24 @@ std::string query_value(std::string_view query, std::string_view name)
         pos = next + 1;
     }
     throw std::runtime_error("missing jam2 URL field: " + std::string(name));
+}
+
+void fill_os_random(std::span<std::uint8_t> bytes)
+{
+#if defined(_WIN32)
+    const NTSTATUS status = BCryptGenRandom(
+        nullptr,
+        reinterpret_cast<PUCHAR>(bytes.data()),
+        static_cast<ULONG>(bytes.size()),
+        BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    if (status < 0) {
+        throw std::runtime_error("BCryptGenRandom failed");
+    }
+#elif defined(__APPLE__)
+    arc4random_buf(bytes.data(), bytes.size());
+#else
+#error Jam2 requires an OS-backed random implementation for this platform.
+#endif
 }
 
 } // namespace
@@ -121,19 +152,17 @@ std::uint64_t parse_hex_u64(std::string_view text)
 std::array<std::uint8_t, 16> random_key()
 {
     std::array<std::uint8_t, 16> key{};
-    std::random_device rd;
-    for (auto& byte : key) {
-        byte = static_cast<std::uint8_t>(rd());
-    }
+    fill_os_random(std::span<std::uint8_t>(key));
     return key;
 }
 
 std::uint64_t random_u64()
 {
-    std::random_device rd;
+    std::array<std::uint8_t, 8> bytes{};
+    fill_os_random(std::span<std::uint8_t>(bytes));
     std::uint64_t value = 0;
-    for (int i = 0; i < 8; ++i) {
-        value = (value << 8) | static_cast<std::uint64_t>(rd() & 0xffU);
+    for (const std::uint8_t byte : bytes) {
+        value = (value << 8) | static_cast<std::uint64_t>(byte);
     }
     return value == 0 ? 1 : value;
 }

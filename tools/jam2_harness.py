@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 
-from jam2_tooling import copy_final_csv, ensure_dir, repo_root
+from jam2_tooling import copy_final_csv, ensure_dir, redact_cli_args, redact_text, repo_root
 
 
 def parse_endpoint(value):
@@ -45,6 +45,7 @@ class ManagedProcess:
         self._lines = []
         self._lock = threading.Lock()
         self._thread = None
+        self._stderr_thread = None
         self._stdin_pipe = stdin_pipe
 
     def start(self):
@@ -56,7 +57,7 @@ class ManagedProcess:
             self.args,
             cwd=self.cwd,
             stdout=subprocess.PIPE,
-            stderr=self._stderr_handle,
+            stderr=subprocess.PIPE,
             stdin=subprocess.PIPE if self._stdin_pipe else subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
@@ -64,8 +65,13 @@ class ManagedProcess:
             bufsize=1,
         )
         self._thread = threading.Thread(target=self._read_stdout, daemon=True)
+        self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
         self._thread.start()
+        self._stderr_thread.start()
         return self
+
+    def artifact_args(self):
+        return redact_cli_args(self.args)
 
     def wait(self, timeout=None):
         if self.process is None:
@@ -133,7 +139,7 @@ class ManagedProcess:
     def _read_stdout(self):
         try:
             for line in self.process.stdout:
-                self._stdout_handle.write(line)
+                self._stdout_handle.write(redact_text(line))
                 self._stdout_handle.flush()
                 with self._lock:
                     self._lines.append(line.rstrip("\r\n"))
@@ -153,9 +159,20 @@ class ManagedProcess:
             return None
         return payload
 
+    def _read_stderr(self):
+        try:
+            for line in self.process.stderr:
+                self._stderr_handle.write(redact_text(line))
+                self._stderr_handle.flush()
+        finally:
+            if self.process.stderr:
+                self.process.stderr.close()
+
     def _close_handles(self):
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
+        if self._stderr_thread and self._stderr_thread.is_alive():
+            self._stderr_thread.join(timeout=1.0)
         if self._stdout_handle:
             self._stdout_handle.close()
             self._stdout_handle = None

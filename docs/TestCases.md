@@ -82,6 +82,7 @@ Useful args:
 - `--scenario NAME`: run only one scenario. Repeat for multiple scenarios.
 - `--os-priority off|high|realtime|all`: pass the selected OS scheduling mode to both local Jam2 processes. Use `all` to run every selected scenario once with no explicit priority request, once with high priority, and once with realtime priority for direct comparison.
 - `--stream-ms N`: stream duration per scenario. Default: `30000`.
+- `--scenario-cooldown-s N`: recovery time between scenario processes. Default: `2.0`; set it to `0` only when deliberately measuring immediate reopen behavior.
 - `--include-validation`: run short non-audio/error-path validation checks.
 - `--include-audio-probes`: add targeted recorded tone/pulse probes for audible analysis.
 - `--validation-stream-ms N`: stream duration for validation pair tests. Default: `5000`.
@@ -89,7 +90,8 @@ Useful args:
 - `--clean`: delete the output folder before running.
 - `--seed N`: deterministic proxy impairment seed.
 - `--mesh-peers N`: mesh peer count for `--mode mesh`; repeat for multiple. Default mesh counts are 2, 3, 4, and 8.
-- `--mesh-base-port PORT`: first localhost UDP port used by mesh stress. Default: `50000`.
+- `--mesh-base-port PORT`: first localhost UDP port used by mesh stress. Default: `0`, which reserves available ports automatically; a nonzero value requests consecutive explicit ports and fails clearly if any cannot be bound.
+- `--headless-audio-buffer-frames N`: synthetic callback size used by headless cases. Default: `1024`, large enough for reliable wall-clock pacing with ordinary Windows timer scheduling while the network frame size remains controlled by the selected profile.
 
 Main outputs:
 
@@ -100,6 +102,25 @@ Main outputs:
 - per-scenario `recording\*.wav` folders for metronome scenarios
 - per-probe `recording\*.wav` and `audio_probe_analysis` data when `--include-audio-probes` is used
 - `tools\stress_logs\validation_results.json` when `--include-validation` is used
+
+Stress results separate three decisions:
+
+- `protocol_verdict` checks the behavior the scenario intended to exercise, such as duplicate, replay, malformed-packet, or sample-time rejection.
+- `duration_verdict` requires every participating process—and every recording made by a headless case—to cover at least 90% of the requested stream duration.
+- `audio_health_verdict` checks clean transport-validation cases for capacity drops, playback overruns, dropped or late frames, unexpected missing frames, jitter-buffer drops, and underruns. Forward-gap and extreme-sample-time cases allow only the two deliberately rejected audio packets' worth of missing frames.
+- `audio_health_observations` records callback gaps beyond twice the expected period and bounded forced jitter releases. These remain prominent measurements but do not by themselves claim an audible discontinuity when playback counters are otherwise clean.
+
+The overall `verdict` fails if any applicable decision fails. Scenarios that intentionally inject ordinary loss, jitter, or blackouts retain `audio_health_verdict=not_evaluated`, because discontinuities are part of those cases and need scenario-specific interpretation. The raw counters remain in CSV and JSON for comparison.
+
+The headless duration and callback checks are intentionally independent of the current mesh startup topology. They are meant to carry forward when listen/connect uses the same two-peer mesh engine; the Python suite does not attempt to validate the current all-peers-tone routing as a lasting design contract.
+
+Run the dependency-free verdict checks directly with Python:
+
+```powershell
+python -m unittest discover -s tools -p "test_*.py"
+```
+
+The zero-delay proxy path forwards packets immediately after observation or transformation. Its timed heap is used only when a scenario actually requests delay, jitter, reordering, or burst pauses, preventing the validation harness itself from manufacturing a startup packet burst.
 
 Audio probe coverage:
 

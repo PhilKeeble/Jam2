@@ -58,6 +58,7 @@
 #include "common.hpp"
 #include "gui_control_protocol.hpp"
 #include "metronome.hpp"
+#include "pcm16_wav.hpp"
 #include "protocol.hpp"
 #include "stun.hpp"
 #include "tuning_profile.hpp"
@@ -852,24 +853,6 @@ void print_socket_options(const jam2::UdpSocket& socket)
     std::cout << "UDP receive buffer bytes: " << socket.recv_buffer_size() << "\n";
 }
 
-std::vector<std::uint8_t> make_control_packet(
-    jam2::protocol::PacketType type,
-    const jam2::SessionInfo& session,
-    std::uint32_t sequence)
-{
-    const jam2::protocol::Header header{
-        type,
-        0,
-        session.session_id,
-        sequence,
-        0,
-        jam2::monotonic_us(),
-        0,
-        0,
-    };
-    return jam2::protocol::encode_packet(header, {}, session.key);
-}
-
 struct StreamConfig {
     std::uint32_t sample_rate = 0;
     std::uint32_t frame_size = 0;
@@ -954,12 +937,87 @@ void require_matching_stream_config(const StreamConfig& remote, const Options& o
     }
 }
 
+struct UdpParseStats {
+    std::uint64_t short_packet = 0;
+    std::uint64_t wrong_magic = 0;
+    std::uint64_t wrong_version = 0;
+    std::uint64_t unknown_type = 0;
+    std::uint64_t invalid_flags = 0;
+    std::uint64_t invalid_reserved = 0;
+    std::uint64_t wrong_session = 0;
+    std::uint64_t invalid_payload_size = 0;
+    std::uint64_t authentication_failed = 0;
+
+    void observe(jam2::protocol::ParseError error)
+    {
+        switch (error) {
+        case jam2::protocol::ParseError::None: break;
+        case jam2::protocol::ParseError::ShortPacket: ++short_packet; break;
+        case jam2::protocol::ParseError::WrongMagic: ++wrong_magic; break;
+        case jam2::protocol::ParseError::WrongVersion: ++wrong_version; break;
+        case jam2::protocol::ParseError::UnknownType: ++unknown_type; break;
+        case jam2::protocol::ParseError::InvalidFlags: ++invalid_flags; break;
+        case jam2::protocol::ParseError::InvalidReserved: ++invalid_reserved; break;
+        case jam2::protocol::ParseError::WrongSession: ++wrong_session; break;
+        case jam2::protocol::ParseError::InvalidPayloadSize: ++invalid_payload_size; break;
+        case jam2::protocol::ParseError::AuthenticationFailed: ++authentication_failed; break;
+        }
+    }
+
+    void add(const UdpParseStats& other)
+    {
+        short_packet += other.short_packet;
+        wrong_magic += other.wrong_magic;
+        wrong_version += other.wrong_version;
+        unknown_type += other.unknown_type;
+        invalid_flags += other.invalid_flags;
+        invalid_reserved += other.invalid_reserved;
+        wrong_session += other.wrong_session;
+        invalid_payload_size += other.invalid_payload_size;
+        authentication_failed += other.authentication_failed;
+    }
+
+    std::uint64_t total() const
+    {
+        return short_packet + wrong_magic + wrong_version + unknown_type + invalid_flags +
+            invalid_reserved + wrong_session + invalid_payload_size + authentication_failed;
+    }
+};
+
+void print_udp_parse_stats(const UdpParseStats& stats, std::ostream& out = std::cout)
+{
+    out << "UDP parse rejects: total=" << stats.total()
+        << " short=" << stats.short_packet
+        << " magic=" << stats.wrong_magic
+        << " version=" << stats.wrong_version
+        << " type=" << stats.unknown_type
+        << " flags=" << stats.invalid_flags
+        << " reserved=" << stats.invalid_reserved
+        << " session=" << stats.wrong_session
+        << " size=" << stats.invalid_payload_size
+        << " auth=" << stats.authentication_failed << "\n";
+}
+
 struct AudioPacketStats {
     std::uint64_t sent_packets = 0;
     std::uint64_t sent_bytes = 0;
     std::uint64_t recv_packets = 0;
     std::uint64_t recv_bytes = 0;
     std::uint64_t ignored_packets = 0;
+    UdpParseStats udp_parse;
+    std::uint64_t udp_replay_rejects = 0;
+    std::uint64_t udp_forward_gap_rejects = 0;
+    std::uint64_t udp_forward_gap_resyncs = 0;
+    std::uint64_t udp_sequence_ambiguous_rejects = 0;
+    std::uint64_t udp_sample_time_stale_rejects = 0;
+    std::uint64_t udp_sample_time_future_rejects = 0;
+    std::uint64_t udp_unmatched_pongs = 0;
+    std::uint64_t udp_ping_slot_overwrites = 0;
+    std::uint64_t udp_work_budget_yields = 0;
+    std::uint64_t reorder_pending_high_water = 0;
+    std::uint64_t reorder_capacity_drops = 0;
+    std::uint64_t jitter_pending_high_water = 0;
+    std::uint64_t jitter_capacity_drops = 0;
     std::uint64_t sent_pings = 0;
     std::uint64_t recv_pongs = 0;
     std::uint64_t sent_pongs = 0;
@@ -1060,6 +1118,7 @@ struct AudioPacketStats {
     std::uint64_t jitter_buffer_late_packets = 0;
     std::uint64_t jitter_buffer_dropped_packets = 0;
     std::uint64_t jitter_buffer_dropped_frames = 0;
+    std::uint64_t jitter_buffer_forced_releases = 0;
     bool adaptive_playback_cushion_enabled = false;
     std::uint64_t adaptive_playback_target_frames = 0;
     std::uint64_t adaptive_playback_min_frames = 0;
@@ -1092,6 +1151,26 @@ struct AudioPacketStats {
     OsSchedulingStatus os_scheduling;
 };
 
+struct OutstandingPing {
+    std::uint32_t sequence = 0;
+    std::uint64_t send_time_us = 0;
+    bool active = false;
+};
+
+bool observe_replay_window(
+    jam2::protocol::ReplayWindow& window,
+    std::uint32_t sequence,
+    AudioPacketStats& stats)
+{
+    const auto result = window.observe(sequence);
+    if (result == jam2::protocol::ReplayResult::New) {
+        return true;
+    }
+    ++stats.udp_replay_rejects;
+    ++stats.ignored_packets;
+    return false;
+}
+
 struct RuntimeState {
     mutable std::mutex recording_mutex;
     mutable std::mutex track_take_mutex;
@@ -1116,6 +1195,7 @@ struct RuntimeState {
     std::atomic<int> local_monitor_level_ppm{250000};
     std::atomic<int> metronome_mode{0};
     std::atomic<bool> leader_audio_local_click{false};
+    std::atomic<bool> metronome_local_authority{false};
     std::atomic<std::uint64_t> metronome_epoch_sample_time{0};
     std::atomic<bool> metronome_epoch_valid{false};
     std::atomic<std::int64_t> metronome_render_offset_frames{0};
@@ -1351,20 +1431,6 @@ bool apply_gain_token(std::string_view token, std::atomic<int>& target_ppm, doub
     return true;
 }
 
-std::uint16_t read_le16(const std::vector<char>& data, std::size_t offset)
-{
-    return static_cast<std::uint16_t>(static_cast<unsigned char>(data[offset])) |
-        static_cast<std::uint16_t>(static_cast<unsigned char>(data[offset + 1]) << 8);
-}
-
-std::uint32_t read_le32(const std::vector<char>& data, std::size_t offset)
-{
-    return static_cast<std::uint32_t>(static_cast<unsigned char>(data[offset])) |
-        (static_cast<std::uint32_t>(static_cast<unsigned char>(data[offset + 1])) << 8) |
-        (static_cast<std::uint32_t>(static_cast<unsigned char>(data[offset + 2])) << 16) |
-        (static_cast<std::uint32_t>(static_cast<unsigned char>(data[offset + 3])) << 24);
-}
-
 struct PreparedLoadResult {
     bool ok = false;
     std::uint64_t frames = 0;
@@ -1376,51 +1442,20 @@ PreparedLoadResult load_prepared_pcm16_wav(
     const std::filesystem::path& path,
     int expected_sample_rate)
 {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        return {false, 0, "prepared track load failed: cannot open WAV"};
+    const jam2::wav::InspectResult inspected = jam2::wav::inspect_pcm16_file(path);
+    if (!inspected) {
+        return {false, 0, "prepared track load failed: " + inspected.error};
     }
-    std::vector<char> data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    if (data.size() < 44 || std::string_view(data.data(), 4) != "RIFF" || std::string_view(data.data() + 8, 4) != "WAVE") {
-        return {false, 0, "prepared track load failed: not a RIFF/WAVE file"};
-    }
-
-    int channels = 0;
-    int sample_rate = 0;
-    int bits = 0;
-    std::size_t data_offset = 0;
-    std::size_t data_bytes = 0;
-    for (std::size_t offset = 12; offset + 8 <= data.size();) {
-        const std::string_view id(data.data() + offset, 4);
-        const std::uint32_t size = read_le32(data, offset + 4);
-        const std::size_t payload = offset + 8;
-        if (payload + size > data.size()) {
-            break;
-        }
-        if (id == "fmt " && size >= 16) {
-            const int format = read_le16(data, payload);
-            channels = read_le16(data, payload + 2);
-            sample_rate = static_cast<int>(read_le32(data, payload + 4));
-            bits = read_le16(data, payload + 14);
-            if (format != 1) {
-                return {false, 0, "prepared track load failed: WAV must be PCM"};
-            }
-        } else if (id == "data") {
-            data_offset = payload;
-            data_bytes = size;
-        }
-        offset = payload + size + (size & 1U);
-    }
-    if (channels != 1 || bits != 16 || sample_rate <= 0 || data_offset == 0 || data_bytes == 0) {
+    if (inspected.info.channels != 1U) {
         return {false, 0, "prepared track load failed: WAV must be mono PCM16"};
     }
-    if (sample_rate != expected_sample_rate) {
+    if (inspected.info.sample_rate != static_cast<std::uint32_t>(expected_sample_rate)) {
         std::ostringstream message;
-        message << "prepared track load failed: WAV sample rate " << sample_rate
+        message << "prepared track load failed: WAV sample rate " << inspected.info.sample_rate
                 << " does not match active engine rate " << expected_sample_rate;
         return {false, 0, message.str()};
     }
-    const std::uint64_t frames = data_bytes / 2U;
+    const std::uint64_t frames = inspected.info.frames;
     const std::uint64_t max_frames = static_cast<std::uint64_t>(std::max(1, expected_sample_rate)) * 60ULL * 5ULL;
     if (frames > max_frames) {
         return {false, 0, "prepared track load failed: WAV exceeds five-minute source limit"};
@@ -1433,10 +1468,29 @@ PreparedLoadResult load_prepared_pcm16_wav(
     if (destination == nullptr) {
         return {false, 0, "prepared track load failed: source slot unavailable"};
     }
-    for (std::uint64_t frame = 0; frame < frames; ++frame) {
-        destination[frame] = static_cast<std::int16_t>(read_le16(data, data_offset + static_cast<std::size_t>(frame * 2U)));
+    std::ifstream file(path, std::ios::binary);
+    if (!file || inspected.info.data_offset > static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max())) {
+        return {false, 0, "prepared track load failed: cannot reopen WAV data"};
     }
-    if (!source.publishReady(slot, frames, sample_rate)) {
+    file.seekg(static_cast<std::streamoff>(inspected.info.data_offset), std::ios::beg);
+    std::array<unsigned char, 8192> input{};
+    std::uint64_t frame = 0;
+    while (frame < frames) {
+        const std::uint64_t frames_to_read = std::min<std::uint64_t>(frames - frame, input.size() / 2U);
+        const std::streamsize bytes_to_read = static_cast<std::streamsize>(frames_to_read * 2U);
+        file.read(reinterpret_cast<char*>(input.data()), bytes_to_read);
+        if (file.gcount() != bytes_to_read) {
+            return {false, 0, "prepared track load failed: truncated WAV data"};
+        }
+        for (std::uint64_t index = 0; index < frames_to_read; ++index) {
+            const std::size_t byte = static_cast<std::size_t>(index * 2U);
+            const std::uint16_t sample = static_cast<std::uint16_t>(input[byte]) |
+                static_cast<std::uint16_t>(static_cast<std::uint16_t>(input[byte + 1]) << 8U);
+            destination[frame + index] = static_cast<std::int16_t>(sample);
+        }
+        frame += frames_to_read;
+    }
+    if (!source.publishReady(slot, frames, expected_sample_rate)) {
         return {false, 0, "prepared track load failed: source slot publish failed"};
     }
     const std::uint64_t replacement_frame = source.playing()
@@ -1691,8 +1745,10 @@ void apply_gui_control_line(
             in >> leader;
             if (leader == "on") {
                 state.leader_audio_local_click.store(true, std::memory_order_relaxed);
+                state.metronome_local_authority.store(true, std::memory_order_relaxed);
             } else if (leader == "off") {
                 state.leader_audio_local_click.store(false, std::memory_order_relaxed);
+                state.metronome_local_authority.store(false, std::memory_order_relaxed);
             }
         } else if (value == "pattern") {
             int bpm = 0;
@@ -2038,8 +2094,10 @@ void stdin_command_loop(
                 in >> leader;
                 if (leader == "on") {
                     state.leader_audio_local_click.store(true, std::memory_order_relaxed);
+                    state.metronome_local_authority.store(true, std::memory_order_relaxed);
                 } else if (leader == "off") {
                     state.leader_audio_local_click.store(false, std::memory_order_relaxed);
+                    state.metronome_local_authority.store(false, std::memory_order_relaxed);
                 } else {
                     std::cerr << "metro leader must be on or off\n";
                 }
@@ -2669,11 +2727,34 @@ void append_os_scheduling_csv(std::ostream& out, const OsSchedulingStatus& statu
 std::string command_line_text(int argc, char** argv)
 {
     std::ostringstream out;
+    bool redact_next = false;
     for (int i = 0; i < argc; ++i) {
         if (i > 0) {
             out << ' ';
         }
-        out << argv[i];
+        std::string value = argv[i];
+        if (redact_next) {
+            value = "<redacted>";
+            redact_next = false;
+        } else if (value == "--session-key") {
+            redact_next = true;
+        } else if (value.rfind("--session-key=", 0) == 0) {
+            value = "--session-key=<redacted>";
+        } else if (value.rfind("jam2://v1?", 0) == 0) {
+            std::size_t key = value.find("?key=");
+            if (key == std::string::npos) {
+                key = value.find("&key=");
+            }
+            if (key != std::string::npos) {
+                const std::size_t key_value = key + 5;
+                const std::size_t key_end = value.find('&', key_value);
+                value.replace(
+                    key_value,
+                    key_end == std::string::npos ? value.size() - key_value : key_end - key_value,
+                    "<redacted>");
+            }
+        }
+        out << value;
     }
     return out.str();
 }
@@ -3128,6 +3209,11 @@ public:
         std::uint64_t playback_depth_under_10ms_frames = 0;
         std::uint64_t playback_depth_10ms_plus_frames = 0;
         std::uint64_t playback_depth_observed_frames = 0;
+        std::uint64_t playback_drop_requested_frames = 0;
+        std::uint64_t playback_drop_applied_frames = 0;
+        std::uint64_t playback_drop_coalesced_requests = 0;
+        std::uint64_t playback_drop_pending_frames = 0;
+        std::uint64_t playback_drop_max_batch_frames = 0;
         std::size_t playback_ring_readable = 0;
         jam2::audio::CallbackTimingStats callback_timing;
         double input_peak = 0.0;
@@ -3223,7 +3309,15 @@ public:
                 "metronome_compensation_target_frames,metronome_compensation_target_ms,"
                 "metronome_compensation_clamp_events,metronome_compensation_stale_events,"
                 "prepared_source_frame,prepared_source_scheduled_start_frame,prepared_source_actual_start_frame,"
-                "prepared_source_underruns,prepared_source_busy_events\n";
+                "prepared_source_underruns,prepared_source_busy_events,"
+                "playback_drop_requested_frames,playback_drop_applied_frames,playback_drop_coalesced_requests,"
+                "playback_drop_pending_frames,playback_drop_max_batch_frames,"
+                "udp_short_packets,udp_wrong_magic,udp_wrong_version,udp_unknown_type,udp_invalid_flags,"
+                "udp_invalid_reserved,udp_wrong_session,udp_invalid_payload_size,udp_authentication_failed,"
+                "udp_replay_rejects,udp_forward_gap_rejects,udp_forward_gap_resyncs,udp_sequence_ambiguous_rejects,"
+                "udp_sample_time_stale_rejects,udp_sample_time_future_rejects,udp_unmatched_pongs,"
+                "udp_ping_slot_overwrites,udp_work_budget_yields,reorder_pending_high_water,reorder_capacity_drops,"
+                "jitter_pending_high_water,jitter_capacity_drops,jitter_buffer_forced_releases\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -3502,7 +3596,35 @@ public:
              << audio.prepared_source_scheduled_start_frame << ','
              << audio.prepared_source_actual_start_frame << ','
              << audio.prepared_source_underruns << ','
-             << audio.prepared_source_busy_events;
+             << audio.prepared_source_busy_events << ','
+             << audio.playback_drop_requested_frames << ','
+             << audio.playback_drop_applied_frames << ','
+             << audio.playback_drop_coalesced_requests << ','
+             << audio.playback_drop_pending_frames << ','
+             << audio.playback_drop_max_batch_frames << ','
+             << stats.udp_parse.short_packet << ','
+             << stats.udp_parse.wrong_magic << ','
+             << stats.udp_parse.wrong_version << ','
+             << stats.udp_parse.unknown_type << ','
+             << stats.udp_parse.invalid_flags << ','
+             << stats.udp_parse.invalid_reserved << ','
+             << stats.udp_parse.wrong_session << ','
+             << stats.udp_parse.invalid_payload_size << ','
+             << stats.udp_parse.authentication_failed << ','
+             << stats.udp_replay_rejects << ','
+             << stats.udp_forward_gap_rejects << ','
+             << stats.udp_forward_gap_resyncs << ','
+             << stats.udp_sequence_ambiguous_rejects << ','
+             << stats.udp_sample_time_stale_rejects << ','
+             << stats.udp_sample_time_future_rejects << ','
+             << stats.udp_unmatched_pongs << ','
+             << stats.udp_ping_slot_overwrites << ','
+             << stats.udp_work_budget_yields << ','
+             << stats.reorder_pending_high_water << ','
+             << stats.reorder_capacity_drops << ','
+             << stats.jitter_pending_high_water << ','
+             << stats.jitter_capacity_drops << ','
+             << stats.jitter_buffer_forced_releases;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -3518,7 +3640,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(254);
+        std::vector<std::string> fields(282);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -3730,6 +3852,34 @@ public:
         set(251, audio.prepared_source_actual_start_frame);
         set(252, audio.prepared_source_underruns);
         set(253, audio.prepared_source_busy_events);
+        set(254, audio.playback_drop_requested_frames);
+        set(255, audio.playback_drop_applied_frames);
+        set(256, audio.playback_drop_coalesced_requests);
+        set(257, audio.playback_drop_pending_frames);
+        set(258, audio.playback_drop_max_batch_frames);
+        set(259, stats.udp_parse.short_packet);
+        set(260, stats.udp_parse.wrong_magic);
+        set(261, stats.udp_parse.wrong_version);
+        set(262, stats.udp_parse.unknown_type);
+        set(263, stats.udp_parse.invalid_flags);
+        set(264, stats.udp_parse.invalid_reserved);
+        set(265, stats.udp_parse.wrong_session);
+        set(266, stats.udp_parse.invalid_payload_size);
+        set(267, stats.udp_parse.authentication_failed);
+        set(268, stats.udp_replay_rejects);
+        set(269, stats.udp_forward_gap_rejects);
+        set(270, stats.udp_forward_gap_resyncs);
+        set(271, stats.udp_sequence_ambiguous_rejects);
+        set(272, stats.udp_sample_time_stale_rejects);
+        set(273, stats.udp_sample_time_future_rejects);
+        set(274, stats.udp_unmatched_pongs);
+        set(275, stats.udp_ping_slot_overwrites);
+        set(276, stats.udp_work_budget_yields);
+        set(277, stats.reorder_pending_high_water);
+        set(278, stats.reorder_capacity_drops);
+        set(279, stats.jitter_pending_high_water);
+        set(280, stats.jitter_capacity_drops);
+        set(281, stats.jitter_buffer_forced_releases);
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {
@@ -3784,6 +3934,11 @@ CsvStatsLog::AudioSnapshot make_audio_snapshot(
         snapshot.playback_depth_under_10ms_frames = stats.depth_under_10ms_frames;
         snapshot.playback_depth_10ms_plus_frames = stats.depth_10ms_plus_frames;
         snapshot.playback_depth_observed_frames = stats.depth_observed_frames;
+        snapshot.playback_drop_requested_frames = stats.drop_requested_frames;
+        snapshot.playback_drop_applied_frames = stats.drop_applied_frames;
+        snapshot.playback_drop_coalesced_requests = stats.drop_coalesced_requests;
+        snapshot.playback_drop_pending_frames = stats.drop_pending_frames;
+        snapshot.playback_drop_max_batch_frames = stats.drop_max_batch_frames;
         snapshot.playback_ring_readable = playback_ring->available_read();
     }
     if (control != nullptr) {
@@ -3916,6 +4071,7 @@ void print_periodic_stream_stats(
               << " jitter_buffer_released_packets=" << stats.jitter_buffer_released_packets
               << " jitter_buffer_late_packets=" << stats.jitter_buffer_late_packets
               << " jitter_buffer_dropped_packets=" << stats.jitter_buffer_dropped_packets
+              << " jitter_buffer_forced_releases=" << stats.jitter_buffer_forced_releases
               << " metronome_compensation_active=" << (stats.metronome_compensation_active ? "yes" : "no")
               << " metronome_compensation_offset_ms="
               << signed_frames_to_ms(stats.metronome_compensation_offset_frames, options.sample_rate)
@@ -4032,6 +4188,7 @@ void print_compact_status(
                   << ",\"last_played_remote_sample_time\":" << stats.last_played_remote_sample_time
                   << ",\"missing_audio_frames_inserted\":" << stats.missing_audio_frames_inserted
                   << ",\"late_audio_frames_dropped\":" << stats.late_audio_frames_dropped
+                  << ",\"jitter_buffer_forced_releases\":" << stats.jitter_buffer_forced_releases
                   << ",\"send_interval_avg_ms\":" << avg_us_to_ms(stats.send_interval_sum_us, stats.send_interval_samples)
                   << ",\"send_schedule_error_max_ms\":"
                   << (stats.send_schedule_error_samples > 0 ? static_cast<double>(stats.send_schedule_error_max_us) / 1000.0 : 0.0)
@@ -4111,6 +4268,7 @@ void print_compact_status(
               << " jitter_buffer_released_packets=" << stats.jitter_buffer_released_packets
               << " jitter_buffer_late_packets=" << stats.jitter_buffer_late_packets
               << " jitter_buffer_dropped_packets=" << stats.jitter_buffer_dropped_packets
+              << " jitter_buffer_forced_releases=" << stats.jitter_buffer_forced_releases
               << " metronome_compensation_active=" << (stats.metronome_compensation_active ? "yes" : "no")
               << " metronome_compensation_offset_ms="
               << signed_frames_to_ms(stats.metronome_compensation_offset_frames, options.sample_rate)
@@ -4252,8 +4410,30 @@ AudioPacketStats run_audio_packet_exchange(
     std::vector<std::int32_t> silence_frames(static_cast<std::size_t>(options.frame_size), 0);
     const auto silence_payload = jam2::protocol::pack_pcm24(network_frames);
     const std::uint16_t audio_payload_size = static_cast<std::uint16_t>(silence_payload.size());
+    std::vector<std::uint8_t> packed_audio_payload(audio_payload_size);
+    std::array<std::uint8_t, jam2::protocol::kMaxDatagramSize> transmit_packet{};
+    std::array<std::uint8_t, jam2::protocol::kMaxDatagramSize> receive_packet{};
+    auto send_packet = [&](const jam2::protocol::Header& header, std::span<const std::uint8_t> payload) {
+        const std::size_t packet_size = jam2::protocol::encode_packet_into(
+            header,
+            payload,
+            session.key,
+            transmit_packet);
+        if (packet_size == 0) {
+            throw std::runtime_error("failed to encode bounded UDP v1 packet");
+        }
+        socket.send_to(peer, std::span<const std::uint8_t>(transmit_packet.data(), packet_size));
+        return packet_size;
+    };
     std::uint32_t audio_sequence = 1;
     std::uint32_t control_sequence = 1;
+    constexpr std::size_t kMaxDatagramsPerWake = 64;
+    constexpr std::size_t kOutstandingPingSlots = 8;
+    std::array<OutstandingPing, kOutstandingPingSlots> outstanding_pings{};
+    jam2::protocol::ReplayWindow ping_replay;
+    jam2::protocol::ReplayWindow metronome_replay;
+    jam2::protocol::ReplayWindow transport_replay;
+    jam2::protocol::ReplayWindow bye_replay;
     std::uint64_t sample_time = 0;
     const std::uint64_t interval_numerator_us = static_cast<std::uint64_t>(options.frame_size) * 1000000ULL;
     const std::uint64_t interval_denominator = static_cast<std::uint64_t>(options.sample_rate);
@@ -4323,13 +4503,48 @@ AudioPacketStats run_audio_packet_exchange(
         std::uint64_t sample_time = 0;
         std::uint64_t receive_time = 0;
         bool reordered = false;
-        std::vector<std::int32_t> samples;
+        std::size_t sample_count = 0;
+        std::array<std::int32_t, jam2::protocol::kMaxAudioFramesPerPacket> samples{};
+
+        std::span<const std::int32_t> sample_span() const noexcept
+        {
+            return {samples.data(), sample_count};
+        }
     };
-    std::map<std::uint32_t, PendingAudioPacket> pending_audio;
-    std::map<std::uint64_t, PendingAudioPacket> jitter_audio;
     bool expected_sequence_set = false;
     std::uint32_t expected_sequence = 0;
     std::uint32_t highest_sequence = 0;
+    bool forward_resync_candidate_set = false;
+    std::uint32_t forward_resync_candidate_last = 0;
+    std::uint32_t forward_resync_candidate_count = 0;
+    bool forward_gap_recovery_pending = false;
+    std::uint32_t forward_gap_recovery_expected = 0;
+    bool highest_remote_sample_time_set = false;
+    std::uint64_t highest_remote_sample_time = 0;
+    const std::uint64_t sample_time_horizon_frames =
+        static_cast<std::uint64_t>(options.sample_rate) * 10ULL;
+    const std::size_t reorder_capacity = std::min<std::size_t>(
+        4096,
+        std::max<std::size_t>(8, static_cast<std::size_t>(reorder_window_packets) + 2));
+    const std::size_t jitter_capacity = std::min<std::size_t>(
+        4096,
+        std::max<std::size_t>(
+            8,
+            options.jitter_buffer_max_frames > 0
+                ? static_cast<std::size_t>(options.jitter_buffer_max_frames) /
+                        static_cast<std::size_t>(std::max(1, options.frame_size)) + 4U
+                : reorder_capacity));
+    struct PacketSlot {
+        bool occupied = false;
+        PendingAudioPacket packet;
+    };
+    std::vector<PacketSlot> pending_audio(reorder_capacity);
+    std::vector<PacketSlot> jitter_audio(jitter_capacity);
+    std::size_t pending_audio_count = 0;
+    std::size_t jitter_audio_count = 0;
+    const std::uint32_t max_forward_sequence_gap = std::min<std::uint32_t>(
+        4096,
+        std::max<std::uint32_t>(128, reorder_window_packets * 2));
     bool jitter_buffer_time_initialized = false;
     std::uint64_t jitter_buffer_base_sample_time = 0;
     std::uint64_t jitter_buffer_base_receive_time_us = 0;
@@ -4728,17 +4943,17 @@ AudioPacketStats run_audio_packet_exchange(
                     next_playout_remote_sample_time = packet.sample_time;
                 }
                 const std::uint64_t packet_end =
-                    packet.sample_time + static_cast<std::uint64_t>(packet.samples.size());
+                    packet.sample_time + static_cast<std::uint64_t>(packet.sample_count);
                 if (packet_end <= next_playout_remote_sample_time) {
-                    stats.late_audio_frames_dropped += static_cast<std::uint64_t>(packet.samples.size());
+                    stats.late_audio_frames_dropped += static_cast<std::uint64_t>(packet.sample_count);
                     return;
                 }
-                std::span<const std::int32_t> packet_samples(packet.samples.data(), packet.samples.size());
+                std::span<const std::int32_t> packet_samples = packet.sample_span();
                 if (packet.sample_time < next_playout_remote_sample_time) {
                     const std::uint64_t late = next_playout_remote_sample_time - packet.sample_time;
                     const std::size_t skip = static_cast<std::size_t>(std::min<std::uint64_t>(
                         late,
-                        static_cast<std::uint64_t>(packet.samples.size())));
+                        static_cast<std::uint64_t>(packet.sample_count)));
                     stats.late_audio_frames_dropped += static_cast<std::uint64_t>(skip);
                     packet_samples = packet_samples.subspan(skip);
                 }
@@ -4751,8 +4966,8 @@ AudioPacketStats run_audio_packet_exchange(
                         next_playout_remote_sample_time - packet.sample_time :
                         0;
             } else {
-                pushed_frames = playback_ring->push(packet.samples);
-                stats.expected_remote_sample_time = packet.sample_time + static_cast<std::uint64_t>(packet.samples.size());
+                pushed_frames = playback_ring->push(packet.sample_span());
+                stats.expected_remote_sample_time = packet.sample_time + static_cast<std::uint64_t>(packet.sample_count);
                 stats.last_played_remote_sample_time = stats.expected_remote_sample_time;
             }
             stats.playout_delay_frames = current_playout_delay_frames();
@@ -4769,13 +4984,15 @@ AudioPacketStats run_audio_packet_exchange(
             if (options.playback_max_frames > 0) {
                 const std::size_t depth = playback_ring->available_read();
                 if (depth > options.playback_max_frames) {
-                    const std::uint64_t dropped =
-                        playback_ring->drop_oldest(depth - options.playback_max_frames);
-                    if (collect_stats && dropped > 0) {
-                        stats.playback_dropped_frames += dropped;
+                    const std::uint64_t requested = depth - options.playback_max_frames;
+                    playback_ring->request_drop_oldest(static_cast<std::size_t>(requested));
+                    if (collect_stats) {
+                        // Legacy packet-path fields record requests. Ring stats expose
+                        // the exact number applied by the sole read-index owner.
+                        stats.playback_dropped_frames += requested;
                         ++stats.playback_drop_events;
-                        if (dropped > stats.playback_drop_event_max_frames) {
-                            stats.playback_drop_event_max_frames = dropped;
+                        if (requested > stats.playback_drop_event_max_frames) {
+                            stats.playback_drop_event_max_frames = requested;
                         }
                     }
                 }
@@ -4979,14 +5196,21 @@ AudioPacketStats run_audio_packet_exchange(
     };
 
     auto jitter_buffer_depth_frames = [&]() -> std::uint64_t {
-        if (jitter_audio.empty()) {
+        if (jitter_audio_count == 0) {
             return 0;
         }
-        const auto& first = jitter_audio.begin()->second;
-        const auto& last = jitter_audio.rbegin()->second;
-        const std::uint64_t last_end =
-            last.sample_time + static_cast<std::uint64_t>(last.samples.size());
-        return last_end > first.sample_time ? last_end - first.sample_time : 0;
+        std::uint64_t first_sample_time = UINT64_MAX;
+        std::uint64_t last_end = 0;
+        for (const PacketSlot& slot : jitter_audio) {
+            if (!slot.occupied) {
+                continue;
+            }
+            first_sample_time = std::min(first_sample_time, slot.packet.sample_time);
+            last_end = std::max(
+                last_end,
+                slot.packet.sample_time + static_cast<std::uint64_t>(slot.packet.sample_count));
+        }
+        return last_end > first_sample_time ? last_end - first_sample_time : 0;
     };
 
     auto jitter_packet_due_time_us = [&](const PendingAudioPacket& packet) -> std::uint64_t {
@@ -5009,11 +5233,14 @@ AudioPacketStats run_audio_packet_exchange(
         }
     };
 
-    auto drop_jitter_buffer_packet = [&](std::map<std::uint64_t, PendingAudioPacket>::iterator packet) {
-        stats.jitter_buffer_dropped_frames += static_cast<std::uint64_t>(packet->second.samples.size());
-        ++stats.jitter_buffer_dropped_packets;
-        jitter_audio.erase(packet);
-        update_jitter_buffer_depth_stats();
+    auto earliest_jitter_slot = [&]() -> PacketSlot* {
+        PacketSlot* earliest = nullptr;
+        for (PacketSlot& slot : jitter_audio) {
+            if (slot.occupied && (!earliest || slot.packet.sample_time < earliest->packet.sample_time)) {
+                earliest = &slot;
+            }
+        }
+        return earliest;
     };
 
     auto drain_jitter_buffer = [&](std::uint64_t now_us) {
@@ -5024,23 +5251,38 @@ AudioPacketStats run_audio_packet_exchange(
             update_jitter_buffer_depth_stats();
             if (options.jitter_buffer_max_frames > 0 &&
                 stats.jitter_buffer_depth_frames > static_cast<std::uint64_t>(options.jitter_buffer_max_frames) &&
-                !jitter_audio.empty()) {
-                drop_jitter_buffer_packet(jitter_audio.begin());
+                jitter_audio_count > 0) {
+                PacketSlot* oldest = earliest_jitter_slot();
+                if (!oldest) {
+                    return;
+                }
+                // The queue already contains valid in-order audio. Releasing its oldest
+                // packet early bounds jitter latency without creating a sample-time hole;
+                // dropping it here would make playout insert equivalent silence and can
+                // leave a burst-induced overflow repeating indefinitely.
+                PendingAudioPacket packet = std::move(oldest->packet);
+                oldest->occupied = false;
+                --jitter_audio_count;
+                ++stats.jitter_buffer_released_packets;
+                ++stats.jitter_buffer_forced_releases;
+                process_audio_packet(packet);
+                update_jitter_buffer_depth_stats();
                 continue;
             }
-            const auto next = jitter_audio.begin();
-            if (next == jitter_audio.end()) {
+            PacketSlot* next = earliest_jitter_slot();
+            if (!next) {
                 return;
             }
-            const std::uint64_t due_us = jitter_packet_due_time_us(next->second);
+            const std::uint64_t due_us = jitter_packet_due_time_us(next->packet);
             if (due_us > now_us) {
                 return;
             }
             if (now_us > due_us) {
                 ++stats.jitter_buffer_late_packets;
             }
-            PendingAudioPacket packet = std::move(next->second);
-            jitter_audio.erase(next);
+            PendingAudioPacket packet = std::move(next->packet);
+            next->occupied = false;
+            --jitter_audio_count;
             ++stats.jitter_buffer_released_packets;
             process_audio_packet(packet);
             update_jitter_buffer_depth_stats();
@@ -5057,39 +5299,79 @@ AudioPacketStats run_audio_packet_exchange(
             jitter_buffer_base_sample_time = packet.sample_time;
             jitter_buffer_base_receive_time_us = packet.receive_time;
         }
-        jitter_audio.emplace(packet.sample_time, std::move(packet));
+        const std::size_t slot_index = static_cast<std::size_t>(
+            (packet.sample_time / static_cast<std::uint64_t>(std::max(1, options.frame_size))) %
+            jitter_audio.size());
+        PacketSlot& slot = jitter_audio[slot_index];
+        if (slot.occupied) {
+            ++stats.jitter_capacity_drops;
+            stats.jitter_buffer_dropped_frames += static_cast<std::uint64_t>(packet.sample_count);
+            ++stats.jitter_buffer_dropped_packets;
+            return;
+        }
+        slot.packet = std::move(packet);
+        slot.occupied = true;
+        ++jitter_audio_count;
+        stats.jitter_pending_high_water = std::max<std::uint64_t>(
+            stats.jitter_pending_high_water,
+            jitter_audio_count);
         ++stats.jitter_buffer_queued_packets;
         update_jitter_buffer_depth_stats();
         drain_jitter_buffer(jam2::monotonic_us());
     };
 
     auto drain_reorder_buffer = [&]() {
-        for (;;) {
-            const auto next = pending_audio.find(expected_sequence);
-            if (next != pending_audio.end()) {
-                if (collect_stats && next->second.reordered) {
+        std::size_t work = 0;
+        while (work < 64) {
+            PacketSlot& next = pending_audio[expected_sequence % pending_audio.size()];
+            if (next.occupied && next.packet.sequence == expected_sequence) {
+                if (collect_stats && next.packet.reordered) {
                     ++stats.reordered_recovered;
                 }
-                queue_or_process_audio_packet(std::move(next->second));
-                pending_audio.erase(next);
+                queue_or_process_audio_packet(std::move(next.packet));
+                next.occupied = false;
+                --pending_audio_count;
                 ++expected_sequence;
+                ++work;
                 continue;
             }
-            if (expected_sequence_set && highest_sequence > expected_sequence + reorder_window_packets) {
+            if (expected_sequence_set &&
+                jam2::protocol::sequence_after(highest_sequence, expected_sequence) &&
+                jam2::protocol::sequence_forward_distance(highest_sequence, expected_sequence) > reorder_window_packets) {
                 if (collect_stats) {
                     ++stats.sequence.lost;
                     ++stats.reordered_lost;
                     ++stats.reordered_lost_events;
                 }
                 ++expected_sequence;
+                ++work;
                 continue;
             }
             break;
         }
+        if (work == 64) {
+            ++stats.udp_work_budget_yields;
+        }
+    };
+
+    auto mark_expected_audio_packet_lost = [&]() {
+        if (!expected_sequence_set) {
+            return;
+        }
+        if (collect_stats) {
+            ++stats.sequence.lost;
+            ++stats.sequence.loss_events;
+            stats.sequence.loss_max_gap = std::max<std::uint64_t>(stats.sequence.loss_max_gap, 1);
+            ++stats.reordered_lost;
+            ++stats.reordered_lost_events;
+        }
+        ++expected_sequence;
+        drain_reorder_buffer();
     };
 
     while (jam2::monotonic_us() < receive_deadline && !stats.received_bye && !runtime.quit.load(std::memory_order_relaxed)) {
         const std::uint64_t now = jam2::monotonic_us();
+        drain_reorder_buffer();
         drain_jitter_buffer(now);
         if (collect_diagnostics && last_stream_loop_us != 0 && now >= last_stream_loop_us) {
             observe_timing(now - last_stream_loop_us, stats.receive_loop_gap_min_us, stats.receive_loop_gap_sum_us, stats.receive_loop_gap_max_us);
@@ -5141,7 +5423,7 @@ AudioPacketStats run_audio_packet_exchange(
         sync_audio_control(runtime, audio_control, stats.resampler_ratio);
         int sends_this_loop = 0;
         while (now >= next_send && next_send < send_deadline && sends_this_loop < 8) {
-            std::vector<std::uint8_t> payload;
+            std::span<const std::uint8_t> payload = silence_payload;
             if (capture_ring != nullptr) {
                 (void)capture_ring->pop(asio_frames);
                 for (std::size_t i = 0; i < asio_frames.size(); ++i) {
@@ -5165,7 +5447,8 @@ AudioPacketStats run_audio_packet_exchange(
                         runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed),
                         metronome_pattern_from_runtime(runtime));
                 }
-                payload = jam2::protocol::pack_pcm24(network_frames);
+                (void)jam2::protocol::pack_pcm24_into(network_frames, packed_audio_payload);
+                payload = packed_audio_payload;
             } else {
                 if (audio_control != nullptr) {
                     audio_control->send_peak_ppm.store(0, std::memory_order_relaxed);
@@ -5182,9 +5465,8 @@ AudioPacketStats run_audio_packet_exchange(
                         gain_from_ppm(runtime.metronome_level_ppm.load(std::memory_order_relaxed)),
                         runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed),
                         metronome_pattern_from_runtime(runtime));
-                    payload = jam2::protocol::pack_pcm24(network_frames);
-                } else {
-                    payload = silence_payload;
+                    (void)jam2::protocol::pack_pcm24_into(network_frames, packed_audio_payload);
+                    payload = packed_audio_payload;
                 }
             }
             const jam2::protocol::Header header{
@@ -5197,12 +5479,11 @@ AudioPacketStats run_audio_packet_exchange(
                 0,
                 0,
             };
-            const auto packet = jam2::protocol::encode_packet(header, payload, session.key);
+            const std::size_t packet_size = send_packet(header, payload);
             const std::uint64_t actual_send_time = jam2::monotonic_us();
-            socket.send_to(peer, packet);
             if (collect_stats) {
                 ++stats.sent_packets;
-                stats.sent_bytes += packet.size();
+                stats.sent_bytes += packet_size;
             }
             if (collect_diagnostics) {
                 if (last_send_time_us != 0 && actual_send_time >= last_send_time_us) {
@@ -5240,18 +5521,23 @@ AudioPacketStats run_audio_packet_exchange(
             }
         }
         if (now >= next_ping && now < send_deadline) {
+            const std::uint32_t ping_sequence = control_sequence++;
+            OutstandingPing& outstanding = outstanding_pings[ping_sequence % outstanding_pings.size()];
+            if (outstanding.active) {
+                ++stats.udp_ping_slot_overwrites;
+            }
+            outstanding = OutstandingPing{ping_sequence, now, true};
             const jam2::protocol::Header ping{
                 jam2::protocol::PacketType::Ping,
                 0,
                 session.session_id,
-                control_sequence++,
+                ping_sequence,
                 0,
                 now,
                 0,
                 0,
             };
-            const auto packet = jam2::protocol::encode_packet(ping, {}, session.key);
-            socket.send_to(peer, packet);
+            (void)send_packet(ping, {});
             if (collect_stats) {
                 ++stats.sent_pings;
             }
@@ -5280,8 +5566,7 @@ AudioPacketStats run_audio_packet_exchange(
                 0,
                 0,
             };
-            const auto packet = jam2::protocol::encode_packet(metro, metro_payload, session.key);
-            socket.send_to(peer, packet);
+            (void)send_packet(metro, metro_payload);
             if (collect_stats) {
                 ++stats.metronome_sent;
             }
@@ -5325,7 +5610,7 @@ AudioPacketStats run_audio_packet_exchange(
                 0,
                 0,
             };
-            socket.send_to(peer, jam2::protocol::encode_packet(transport_header, transport_payload, session.key));
+            (void)send_packet(transport_header, transport_payload);
             next_transport_send = now + 20000ULL;
         }
         if (collect_stats && runtime.print_stats.exchange(false, std::memory_order_relaxed)) {
@@ -5351,8 +5636,7 @@ AudioPacketStats run_audio_packet_exchange(
                 0,
                 0,
             };
-            const auto packet = jam2::protocol::encode_packet(bye, {}, session.key);
-            socket.send_to(peer, packet);
+            (void)send_packet(bye, {});
             stats.sent_bye = true;
         }
         if (next_stats != 0 && now >= next_stats) {
@@ -5376,24 +5660,56 @@ AudioPacketStats run_audio_packet_exchange(
 
         bool received_any = false;
         std::uint64_t received_this_loop = 0;
-        for (;;) {
-            const auto received = socket.recv_from(received_any ? 0 : 1);
+        std::size_t datagrams_this_wake = 0;
+        const std::uint64_t wait_now = jam2::monotonic_us();
+        std::uint64_t next_network_deadline = std::min(receive_deadline, wait_now + 1000ULL);
+        if (next_send < send_deadline) {
+            next_network_deadline = std::min(next_network_deadline, next_send);
+        }
+        if (next_ping < send_deadline) {
+            next_network_deadline = std::min(next_network_deadline, next_ping);
+        }
+        if (next_metronome < send_deadline) {
+            next_network_deadline = std::min(next_network_deadline, next_metronome);
+        }
+        if (next_stats != 0) {
+            next_network_deadline = std::min(next_network_deadline, next_stats);
+        }
+        const std::uint64_t first_wait_us = next_network_deadline > wait_now
+            ? next_network_deadline - wait_now
+            : 0ULL;
+        while (datagrams_this_wake < kMaxDatagramsPerWake) {
+            if (received_any && next_send < send_deadline && jam2::monotonic_us() >= next_send) {
+                ++stats.udp_work_budget_yields;
+                break;
+            }
+            const auto received = socket.recv_from_for(receive_packet, received_any ? 0ULL : first_wait_us);
             if (!received) {
                 break;
             }
+            ++datagrams_this_wake;
             received_any = true;
             if (collect_diagnostics) {
                 ++received_this_loop;
             }
-            const auto& [from, bytes] = *received;
+            const auto& from = received->endpoint;
+            const std::span<const std::uint8_t> bytes(receive_packet.data(), received->size);
             if (from.host != peer.host || from.port != peer.port) {
                 if (collect_stats) {
                     ++stats.ignored_packets;
                 }
                 continue;
             }
+            const auto parsed = jam2::protocol::parse_packet(bytes, session.key, session.session_id);
+            if (!parsed) {
+                if (collect_stats) {
+                    stats.udp_parse.observe(parsed.error);
+                    ++stats.ignored_packets;
+                }
+                continue;
+            }
             try {
-                const auto header = jam2::protocol::decode_packet(bytes, session.key, session.session_id);
+                const auto& header = parsed.header;
                 if (header.type == jam2::protocol::PacketType::Audio) {
                     if (header.payload_length != audio_payload_size) {
                         if (collect_stats) {
@@ -5411,46 +5727,171 @@ AudioPacketStats run_audio_packet_exchange(
                         expected_sequence = header.sequence;
                         highest_sequence = header.sequence;
                     }
-                    if (header.sequence < expected_sequence) {
+                    if (forward_gap_recovery_pending && expected_sequence == forward_gap_recovery_expected) {
+                        if (header.sequence == expected_sequence) {
+                            forward_gap_recovery_pending = false;
+                        } else if (
+                                jam2::protocol::sequence_after(header.sequence, expected_sequence) &&
+                                jam2::protocol::sequence_forward_distance(header.sequence, expected_sequence) == 1U) {
+                            forward_gap_recovery_pending = false;
+                            mark_expected_audio_packet_lost();
+                        }
+                    }
+                    if (jam2::protocol::sequence_before(header.sequence, expected_sequence)) {
                         if (collect_stats) {
                             ++stats.sequence.late;
                             ++stats.ignored_packets;
                         }
                         continue;
                     }
-                    if (pending_audio.find(header.sequence) != pending_audio.end()) {
+                    const bool sequence_is_expected = header.sequence == expected_sequence;
+                    const bool sequence_is_forward =
+                        jam2::protocol::sequence_after(header.sequence, expected_sequence);
+                    if (!sequence_is_expected && !sequence_is_forward) {
+                        ++stats.udp_sequence_ambiguous_rejects;
+                        ++stats.ignored_packets;
+                        continue;
+                    }
+                    PacketSlot& reorder_slot = pending_audio[header.sequence % pending_audio.size()];
+                    if (reorder_slot.occupied && reorder_slot.packet.sequence == header.sequence) {
                         if (collect_stats) {
                             ++stats.sequence.duplicate;
                             ++stats.ignored_packets;
                         }
                         continue;
                     }
-                    const bool reordered = header.sequence > expected_sequence;
+                    bool reordered = sequence_is_forward;
+                    if (reordered) {
+                        const std::uint32_t distance = jam2::protocol::sequence_forward_distance(
+                            header.sequence,
+                            expected_sequence);
+                        if (distance > max_forward_sequence_gap) {
+                            if (forward_resync_candidate_set &&
+                                header.sequence == forward_resync_candidate_last + 1U) {
+                                ++forward_resync_candidate_count;
+                            } else {
+                                forward_resync_candidate_set = true;
+                                forward_resync_candidate_count = 1;
+                            }
+                            forward_resync_candidate_last = header.sequence;
+                            if (forward_resync_candidate_count < 3) {
+                                forward_gap_recovery_pending = true;
+                                forward_gap_recovery_expected = expected_sequence;
+                                ++stats.udp_forward_gap_rejects;
+                                ++stats.ignored_packets;
+                                continue;
+                            }
+                            for (PacketSlot& slot : pending_audio) {
+                                slot.occupied = false;
+                            }
+                            pending_audio_count = 0;
+                            expected_sequence = header.sequence;
+                            highest_sequence = header.sequence;
+                            forward_resync_candidate_set = false;
+                            forward_resync_candidate_count = 0;
+                            forward_gap_recovery_pending = false;
+                            reordered = false;
+                            ++stats.udp_forward_gap_resyncs;
+                        }
+                    } else {
+                        forward_resync_candidate_set = false;
+                        forward_resync_candidate_count = 0;
+                    }
                     if (reordered && collect_stats) {
                         ++stats.sequence.out_of_order;
                         if (collect_diagnostics) {
-                            const std::uint64_t distance =
-                                static_cast<std::uint64_t>(header.sequence - expected_sequence);
+                            const std::uint64_t distance = jam2::protocol::sequence_forward_distance(
+                                header.sequence,
+                                expected_sequence);
                             if (distance > stats.reordered_max_distance_packets) {
                                 stats.reordered_max_distance_packets = distance;
                             }
                         }
                     }
-                    if (header.sequence > highest_sequence) {
+                    if (jam2::protocol::sequence_after(header.sequence, highest_sequence)) {
                         highest_sequence = header.sequence;
+                    }
+                    const std::uint64_t packet_frames = header.payload_length / 3U;
+                    if (header.sample_time > std::numeric_limits<std::uint64_t>::max() - packet_frames) {
+                        if (header.sequence == expected_sequence) {
+                            mark_expected_audio_packet_lost();
+                        }
+                        ++stats.udp_sample_time_future_rejects;
+                        ++stats.ignored_packets;
+                        continue;
+                    }
+                    const std::uint64_t packet_end_sample_time = header.sample_time + packet_frames;
+                    if (!highest_remote_sample_time_set) {
+                        if (header.sample_time > sample_time_horizon_frames) {
+                            if (header.sequence == expected_sequence) {
+                                mark_expected_audio_packet_lost();
+                            }
+                            ++stats.udp_sample_time_future_rejects;
+                            ++stats.ignored_packets;
+                            continue;
+                        }
+                        highest_remote_sample_time_set = true;
+                        highest_remote_sample_time = packet_end_sample_time;
+                    } else {
+                        if (packet_end_sample_time < highest_remote_sample_time &&
+                            highest_remote_sample_time - packet_end_sample_time > sample_time_horizon_frames) {
+                            if (header.sequence == expected_sequence) {
+                                mark_expected_audio_packet_lost();
+                            }
+                            ++stats.udp_sample_time_stale_rejects;
+                            ++stats.ignored_packets;
+                            continue;
+                        }
+                        if (header.sample_time > highest_remote_sample_time &&
+                            header.sample_time - highest_remote_sample_time > sample_time_horizon_frames) {
+                            if (header.sequence == expected_sequence) {
+                                mark_expected_audio_packet_lost();
+                            }
+                            ++stats.udp_sample_time_future_rejects;
+                            ++stats.ignored_packets;
+                            continue;
+                        }
+                        highest_remote_sample_time = std::max(highest_remote_sample_time, packet_end_sample_time);
                     }
                     const auto received_payload = std::span<const std::uint8_t>(
                         bytes.data() + jam2::protocol::kHeaderSize,
                         header.payload_length);
-                    auto decoded = jam2::protocol::unpack_pcm24(received_payload);
-                    for (auto& sample : decoded) {
+                    PendingAudioPacket pending;
+                    pending.sequence = header.sequence;
+                    pending.sample_time = header.sample_time;
+                    pending.receive_time = receive_time;
+                    pending.reordered = reordered;
+                    pending.sample_count = header.payload_length / 3U;
+                    std::span<std::int32_t> decoded(pending.samples.data(), pending.sample_count);
+                    if (!jam2::protocol::unpack_pcm24_into(received_payload, decoded)) {
+                        ++stats.ignored_packets;
+                        continue;
+                    }
+                    for (std::int32_t& sample : decoded) {
                         sample *= 256;
                     }
-                    pending_audio.emplace(
-                        header.sequence,
-                        PendingAudioPacket{header.sequence, header.sample_time, receive_time, reordered, std::move(decoded)});
+                    if (header.sequence == expected_sequence) {
+                        queue_or_process_audio_packet(std::move(pending));
+                        ++expected_sequence;
+                        drain_reorder_buffer();
+                        continue;
+                    }
+                    if (reorder_slot.occupied || pending_audio_count >= reorder_capacity) {
+                        ++stats.reorder_capacity_drops;
+                        ++stats.ignored_packets;
+                        continue;
+                    }
+                    reorder_slot.packet = std::move(pending);
+                    reorder_slot.occupied = true;
+                    ++pending_audio_count;
+                    stats.reorder_pending_high_water = std::max<std::uint64_t>(
+                        stats.reorder_pending_high_water,
+                        pending_audio_count);
                     drain_reorder_buffer();
                 } else if (header.type == jam2::protocol::PacketType::Ping) {
+                    if (!observe_replay_window(ping_replay, header.sequence, stats)) {
+                        continue;
+                    }
                     const jam2::protocol::Header pong{
                         jam2::protocol::PacketType::Pong,
                         0,
@@ -5461,30 +5902,52 @@ AudioPacketStats run_audio_packet_exchange(
                         0,
                         0,
                     };
-                    const auto packet = jam2::protocol::encode_packet(pong, {}, session.key);
-                    socket.send_to(peer, packet);
+                    (void)send_packet(pong, {});
                     if (collect_stats) {
                         ++stats.sent_pongs;
                     }
                 } else if (header.type == jam2::protocol::PacketType::Pong) {
+                    OutstandingPing& outstanding = outstanding_pings[header.sequence % outstanding_pings.size()];
+                    if (!outstanding.active ||
+                        outstanding.sequence != header.sequence ||
+                        outstanding.send_time_us != header.send_time_us) {
+                        ++stats.udp_unmatched_pongs;
+                        ++stats.ignored_packets;
+                        continue;
+                    }
+                    outstanding.active = false;
                     const std::uint64_t receive_time = jam2::monotonic_us();
-                    if (receive_time >= header.send_time_us) {
+                    if (receive_time >= outstanding.send_time_us) {
                         observe_timing(
-                            receive_time - header.send_time_us,
+                            receive_time - outstanding.send_time_us,
                             stats.rtt_min_us,
                             stats.rtt_sum_us,
                             stats.rtt_max_us);
                     }
                     ++stats.recv_pongs;
                 } else if (header.type == jam2::protocol::PacketType::Bye) {
+                    if (!observe_replay_window(bye_replay, header.sequence, stats)) {
+                        continue;
+                    }
                     stats.received_bye = true;
                     break;
                 } else if (header.type == jam2::protocol::PacketType::MetronomeState) {
+                    if (!observe_replay_window(metronome_replay, header.sequence, stats)) {
+                        continue;
+                    }
                     const auto payload = std::span<const std::uint8_t>(
                         bytes.data() + jam2::protocol::kHeaderSize,
                         header.payload_length);
                     const auto metronome_payload = decode_metronome_payload(payload);
                     const int remote_bpm = metronome_payload.bpm;
+                    stats.last_remote_beat = metronome_payload.beat;
+                    stats.remote_metronome_beat = metronome_payload.beat;
+                    if (collect_stats) {
+                        ++stats.metronome_received;
+                    }
+                    if (runtime.metronome_local_authority.load(std::memory_order_relaxed)) {
+                        continue;
+                    }
                     remote_metronome_epoch_sample_time = metronome_payload.epoch_sample_time;
                     remote_metronome_epoch_valid = true;
                     const int current_bpm = runtime.bpm.load(std::memory_order_relaxed);
@@ -5559,8 +6022,6 @@ AudioPacketStats run_audio_packet_exchange(
                     if (needs_epoch && remote_metronome_epoch_accepted) {
                         remote_start_epoch_pending = false;
                     }
-                    stats.last_remote_beat = metronome_payload.beat;
-                    stats.remote_metronome_beat = metronome_payload.beat;
                     if (runtime.metronome_mode.load(std::memory_order_relaxed) ==
                         metronome_mode_id(MetronomeMode::SharedGrid)) {
                         observe_shared_grid_phase(metronome_payload, header.sample_time);
@@ -5572,10 +6033,10 @@ AudioPacketStats run_audio_packet_exchange(
                     }
                     stats.metronome_epoch_sample_time = runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed);
                     stats.metronome_alignment_valid = runtime.metronome_epoch_valid.load(std::memory_order_relaxed);
-                    if (collect_stats) {
-                        ++stats.metronome_received;
-                    }
                 } else if (header.type == jam2::protocol::PacketType::TransportState) {
+                    if (!observe_replay_window(transport_replay, header.sequence, stats)) {
+                        continue;
+                    }
                     const auto payload = std::span<const std::uint8_t>(
                         bytes.data() + jam2::protocol::kHeaderSize,
                         header.payload_length);
@@ -5632,6 +6093,9 @@ AudioPacketStats run_audio_packet_exchange(
                 }
             }
         }
+        if (datagrams_this_wake == kMaxDatagramsPerWake) {
+            ++stats.udp_work_budget_yields;
+        }
         if (collect_diagnostics) {
             ++stats.recv_loop_iterations;
             stats.recv_loop_batch_sum += received_this_loop;
@@ -5665,8 +6129,7 @@ AudioPacketStats run_audio_packet_exchange(
             0,
             0,
         };
-        const auto packet = jam2::protocol::encode_packet(bye, {}, session.key);
-        socket.send_to(peer, packet);
+        (void)send_packet(bye, {});
         stats.sent_bye = true;
     }
 
@@ -5832,6 +6295,7 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "Receive bitrate bps: " << recv_bitrate << "\n";
     std::cout << "Receive bitrate kbps: " << (recv_bitrate / 1000.0) << "\n";
     std::cout << "Ignored audio packets: " << stats.ignored_packets << "\n";
+    print_udp_parse_stats(stats.udp_parse);
     if (stats.playback_depth_samples > 0) {
         std::cout << "Playback dropped frames: " << stats.playback_dropped_frames << "\n";
         std::cout << "Playback drop events: " << stats.playback_drop_events << "\n";
@@ -5916,6 +6380,7 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "Jitter buffer late packets: " << stats.jitter_buffer_late_packets << "\n";
     std::cout << "Jitter buffer dropped packets: " << stats.jitter_buffer_dropped_packets << "\n";
     std::cout << "Jitter buffer dropped frames: " << stats.jitter_buffer_dropped_frames << "\n";
+    std::cout << "Jitter buffer forced releases: " << stats.jitter_buffer_forced_releases << "\n";
     if (stats.send_interval_samples > 0) {
         std::cout << "Send interval ms min: " << static_cast<double>(stats.send_interval_min_us) / 1000.0 << "\n";
         std::cout << "Send interval ms avg: " << avg_us_to_ms(stats.send_interval_sum_us, stats.send_interval_samples) << "\n";
@@ -5968,6 +6433,10 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "Reordered packets recovered: " << stats.reordered_recovered << "\n";
     std::cout << "Reordered packets lost: " << stats.reordered_lost << "\n";
     std::cout << "Reordered packet loss events: " << stats.reordered_lost_events << "\n";
+    std::cout << "Reorder pending high water packets: " << stats.reorder_pending_high_water << "\n";
+    std::cout << "Reorder capacity drops: " << stats.reorder_capacity_drops << "\n";
+    std::cout << "Jitter pending high water packets: " << stats.jitter_pending_high_water << "\n";
+    std::cout << "Jitter capacity drops: " << stats.jitter_capacity_drops << "\n";
     if (stats.recv_pongs > 0 && stats.playback_depth_samples > 0) {
         std::cout << "Estimated one-way latency ms: " << estimated_one_way_ms(stats, options) << "\n";
         std::cout << "Estimated one-way latency note: RTT/2 + jitter buffer target + playback depth avg + audio buffer\n";
@@ -6434,6 +6903,7 @@ struct CommandThread {
         state.local_monitor_level_ppm.store(ppm_from_gain(options.local_monitor_level), std::memory_order_relaxed);
         state.metronome_mode.store(metronome_mode_id(options.metronome_mode), std::memory_order_relaxed);
         state.leader_audio_local_click.store(leader_audio_local_click, std::memory_order_relaxed);
+        state.metronome_local_authority.store(leader_audio_local_click, std::memory_order_relaxed);
         state.metronome_epoch_sample_time.store(0, std::memory_order_relaxed);
         state.metronome_epoch_valid.store(true, std::memory_order_relaxed);
         state.metronome_render_offset_frames.store(0, std::memory_order_relaxed);
@@ -6740,9 +7210,12 @@ struct GuiControlThread {
             state.metronome_revision.fetch_add(1, std::memory_order_relaxed);
             return true;
         }
-        case jam2::gui_control::CommandOpcode::MetronomeLeader:
-            state.leader_audio_local_click.store(command.flags != 0, std::memory_order_relaxed);
+        case jam2::gui_control::CommandOpcode::MetronomeLeader: {
+            const bool local_authority = command.flags != 0;
+            state.leader_audio_local_click.store(local_authority, std::memory_order_relaxed);
+            state.metronome_local_authority.store(local_authority, std::memory_order_relaxed);
             return true;
+        }
         case jam2::gui_control::CommandOpcode::MetronomeMode: {
             const int previous_mode = state.metronome_mode.exchange(
                 metronome_mode_id(parse_metronome_mode(command.text)),
@@ -7628,26 +8101,29 @@ int run_listen(int argc, char** argv)
     std::optional<jam2::Endpoint> locked_peer;
     int ignored_malformed = 0;
     int ignored_wrong_endpoint = 0;
+    UdpParseStats handshake_parse;
+    std::array<std::uint8_t, jam2::protocol::kMaxDatagramSize> handshake_packet{};
     const std::uint64_t deadline = options.wait_ms > 0 ?
         jam2::monotonic_us() + static_cast<std::uint64_t>(options.wait_ms) * 1000ULL :
         UINT64_MAX;
     while (jam2::monotonic_us() < deadline) {
-        const auto received = socket.recv_from(250);
+        const auto received = socket.recv_from(handshake_packet, 250);
         if (!received) {
             continue;
         }
-        const auto& [from, bytes] = *received;
+        const auto& from = received->endpoint;
+        const std::span<const std::uint8_t> bytes(handshake_packet.data(), received->size);
         if (locked_peer && (from.host != locked_peer->host || from.port != locked_peer->port)) {
             ++ignored_wrong_endpoint;
             continue;
         }
-        jam2::protocol::Header header{};
-        try {
-            header = jam2::protocol::decode_packet(bytes, session.key, session.session_id);
-        } catch (const std::exception&) {
+        const auto parsed = jam2::protocol::parse_packet(bytes, session.key, session.session_id);
+        if (!parsed) {
+            handshake_parse.observe(parsed.error);
             ++ignored_malformed;
             continue;
         }
+        const auto& header = parsed.header;
         if (header.type != jam2::protocol::PacketType::Hello) {
             ++ignored_malformed;
             continue;
@@ -7668,6 +8144,7 @@ int run_listen(int argc, char** argv)
         std::cout << "Handshake complete\n";
         std::cout << "Ignored malformed/auth/session packets: " << ignored_malformed << "\n";
         std::cout << "Ignored wrong-endpoint packets: " << ignored_wrong_endpoint << "\n";
+        print_udp_parse_stats(handshake_parse);
         print_startup_json("listen", "connected", options, local, from, endpoint_mode, connection_url);
         auto audio = start_optional_audio(options, true);
         const int drained_startup_packets = drain_pending_udp(socket);
@@ -7725,6 +8202,7 @@ int run_listen(int argc, char** argv)
     std::cerr << "Timed out waiting for authenticated peer\n";
     std::cerr << "Ignored malformed/auth/session packets: " << ignored_malformed << "\n";
     std::cerr << "Ignored wrong-endpoint packets: " << ignored_wrong_endpoint << "\n";
+    print_udp_parse_stats(handshake_parse, std::cerr);
     print_startup_json("listen", "error", options, local, std::nullopt, endpoint_mode, connection_url, "timed out waiting for authenticated peer");
     return 3;
 }
@@ -7734,7 +8212,8 @@ int run_connect(int argc, char** argv)
     if (argc < 3) {
         throw std::runtime_error("connect requires a jam2 URL");
     }
-    const auto session = jam2::parse_jam_url(argv[2]);
+    auto session = jam2::parse_jam_url(argv[2]);
+    session.endpoint = jam2::resolve_udp_endpoint(session.endpoint);
     const Options options = parse_options(argc, argv, 3);
     jam2::NetworkRuntime network;
     jam2::UdpSocket socket;
@@ -7753,21 +8232,29 @@ int run_connect(int argc, char** argv)
         UINT64_MAX;
     int attempts = 0;
     int ignored = 0;
+    UdpParseStats handshake_parse;
+    std::array<std::uint8_t, jam2::protocol::kMaxDatagramSize> handshake_packet{};
     while (jam2::monotonic_us() < deadline) {
         ++attempts;
         socket.send_to(session.endpoint, hello);
-        const auto received = socket.recv_from(500);
+        const auto received = socket.recv_from(handshake_packet, 500);
         if (!received) {
             continue;
         }
-        const auto& [from, bytes] = *received;
+        const auto& from = received->endpoint;
+        const std::span<const std::uint8_t> bytes(handshake_packet.data(), received->size);
         if (from.host != session.endpoint.host || from.port != session.endpoint.port) {
             ++ignored;
             continue;
         }
-        try {
-            const auto header = jam2::protocol::decode_packet(bytes, session.key, session.session_id);
-            if (header.type == jam2::protocol::PacketType::HelloAck) {
+        const auto parsed = jam2::protocol::parse_packet(bytes, session.key, session.session_id);
+        if (!parsed) {
+            handshake_parse.observe(parsed.error);
+            ++ignored;
+            continue;
+        }
+        const auto& header = parsed.header;
+        if (header.type == jam2::protocol::PacketType::HelloAck) {
                 try {
                     const auto remote_config = decode_handshake_config(bytes, header);
                     require_matching_stream_config(remote_config, options);
@@ -7780,6 +8267,7 @@ int run_connect(int argc, char** argv)
                 std::cout << "Handshake complete\n";
                 std::cout << "Attempts: " << attempts << "\n";
                 std::cout << "Ignored packets: " << ignored << "\n";
+                print_udp_parse_stats(handshake_parse);
                 print_startup_json("connect", "connected", options, socket.local_endpoint(), session.endpoint, "jam2-url", "");
                 auto audio = start_optional_audio(options, false);
                 const int drained_startup_packets = drain_pending_udp(socket);
@@ -7841,27 +8329,33 @@ int run_connect(int argc, char** argv)
                 finalize_active_recording(audio, options, commands.state);
                 std::cout.flush();
                 return 0;
-            }
-            ++ignored;
-        } catch (const std::exception&) {
+        } else {
             ++ignored;
         }
     }
     std::cerr << "Timed out waiting for HELLO_ACK\n";
     std::cerr << "Attempts: " << attempts << "\n";
     std::cerr << "Ignored packets: " << ignored << "\n";
+    print_udp_parse_stats(handshake_parse, std::cerr);
     print_startup_json("connect", "error", options, socket.local_endpoint(), session.endpoint, "jam2-url", "", "timed out waiting for HELLO_ACK");
     return 3;
 }
 
 int run_mesh(int argc, char** argv)
 {
-    const Options options = parse_options(argc, argv, 2);
+    Options options = parse_options(argc, argv, 2);
     if (!options.session_id || !options.session_key) {
         throw std::runtime_error("mesh requires --session-id and --session-key");
     }
     if (!options.mesh_peers_configured) {
         throw std::runtime_error("mesh requires --peers, use --peers \"\" for an empty initial peer list");
+    }
+    constexpr std::size_t kMaxCompatibilityMeshPeers = 32;
+    if (options.mesh_peers.size() > kMaxCompatibilityMeshPeers) {
+        throw std::runtime_error("mesh peer count exceeds the explicit compatibility limit of 32");
+    }
+    for (auto& peer : options.mesh_peers) {
+        peer = jam2::resolve_udp_endpoint(peer);
     }
 
     jam2::NetworkRuntime network;
@@ -7913,14 +8407,38 @@ int run_mesh(int argc, char** argv)
         audio.control.get());
     start_startup_recording(audio, options, commands.state, recording_sample_rate);
 
+    enum class EndpointProofState {
+        Candidate,
+        Probing,
+        Active,
+        Failed,
+    };
+
+    struct ProbeChallenge {
+        std::uint32_t sequence = 0;
+        std::uint64_t send_time_us = 0;
+        bool used = false;
+    };
+
     struct MeshPeerState {
         jam2::Endpoint endpoint;
         jam2::protocol::SequenceTracker sequence;
+        EndpointProofState endpoint_proof = EndpointProofState::Candidate;
+        std::array<ProbeChallenge, 8> probe_challenges{};
+        std::uint32_t proof_attempts = 0;
+        std::uint64_t proof_deadline_us = 0;
+        std::uint64_t next_probe_us = 0;
+        std::uint64_t proof_successes = 0;
+        std::uint64_t proof_failures = 0;
+        std::uint64_t proof_unverified_drops = 0;
+        std::uint64_t proof_unmatched_pongs = 0;
+        std::uint64_t proof_challenge_overwrites = 0;
         std::uint64_t sent_packets = 0;
         std::uint64_t sent_bytes = 0;
         std::uint64_t recv_packets = 0;
         std::uint64_t recv_bytes = 0;
         std::uint64_t ignored_packets = 0;
+        UdpParseStats udp_parse;
         std::uint64_t sent_pings = 0;
         std::uint64_t sent_pongs = 0;
         std::uint64_t recv_pongs = 0;
@@ -7939,6 +8457,20 @@ int run_mesh(int argc, char** argv)
         return endpoint.host + ":" + std::to_string(endpoint.port);
     };
 
+    auto endpoint_proof_name = [](EndpointProofState state) -> const char* {
+        switch (state) {
+        case EndpointProofState::Candidate:
+            return "candidate";
+        case EndpointProofState::Probing:
+            return "probing";
+        case EndpointProofState::Active:
+            return "active";
+        case EndpointProofState::Failed:
+            return "failed";
+        }
+        return "unknown";
+    };
+
     std::map<std::string, MeshPeerState> peers;
     for (const auto& peer : options.mesh_peers) {
         peers.emplace(endpoint_key(peer), MeshPeerState{peer});
@@ -7949,7 +8481,36 @@ int run_mesh(int argc, char** argv)
     std::vector<std::int32_t> silence_frames(static_cast<std::size_t>(options.frame_size), 0);
     const auto silence_payload = jam2::protocol::pack_pcm24(network_frames);
     const std::uint16_t audio_payload_size = static_cast<std::uint16_t>(silence_payload.size());
+    std::vector<std::uint8_t> packed_audio_payload(audio_payload_size);
+    std::array<std::uint8_t, jam2::protocol::kMaxDatagramSize> mesh_transmit_packet{};
+    std::array<std::uint8_t, jam2::protocol::kMaxDatagramSize> mesh_receive_packet{};
     std::map<std::uint64_t, std::vector<std::int32_t>> pending_mix;
+    const std::size_t pending_mix_capacity = std::min<std::size_t>(
+        4096,
+        std::max<std::size_t>(
+            8,
+            static_cast<std::size_t>(std::max(options.jitter_buffer_max_frames, options.playout_delay_frames)) /
+                    static_cast<std::size_t>(std::max(1, options.frame_size)) + 8U));
+    const std::uint64_t mesh_sample_time_horizon_frames =
+        static_cast<std::uint64_t>(options.sample_rate) * 10ULL;
+    std::uint64_t pending_mix_high_water = 0;
+    std::uint64_t pending_mix_capacity_drops = 0;
+    std::uint64_t pending_mix_stale_rejects = 0;
+    std::uint64_t pending_mix_future_rejects = 0;
+    std::uint64_t mesh_work_budget_yields = 0;
+    bool highest_mesh_sample_time_set = false;
+    std::uint64_t highest_mesh_sample_time = 0;
+    auto encode_mesh_packet = [&](const jam2::protocol::Header& header, std::span<const std::uint8_t> payload) {
+        const std::size_t size = jam2::protocol::encode_packet_into(
+            header,
+            payload,
+            session.key,
+            mesh_transmit_packet);
+        if (size == 0) {
+            throw std::runtime_error("failed to encode bounded mesh UDP packet");
+        }
+        return std::span<const std::uint8_t>(mesh_transmit_packet.data(), size);
+    };
     bool mix_time_initialized = false;
     std::uint64_t mix_base_sample_time = 0;
     std::uint64_t mix_base_receive_time_us = 0;
@@ -7997,6 +8558,11 @@ int run_mesh(int argc, char** argv)
         stats.jitter_buffer_enabled = playout_delay_frames > 0;
         stats.jitter_buffer_target_frames = playout_delay_frames;
         stats.jitter_buffer_max_frames = static_cast<std::uint64_t>(options.jitter_buffer_max_frames);
+        stats.reorder_pending_high_water = pending_mix_high_water;
+        stats.reorder_capacity_drops = pending_mix_capacity_drops;
+        stats.udp_sample_time_stale_rejects = pending_mix_stale_rejects;
+        stats.udp_sample_time_future_rejects = pending_mix_future_rejects;
+        stats.udp_work_budget_yields = mesh_work_budget_yields;
         for (const auto& entry : peers) {
             const auto& peer = entry.second;
             stats.sent_packets += peer.sent_packets;
@@ -8004,6 +8570,7 @@ int run_mesh(int argc, char** argv)
             stats.recv_packets += peer.recv_packets;
             stats.recv_bytes += peer.recv_bytes;
             stats.ignored_packets += peer.ignored_packets;
+            stats.udp_parse.add(peer.udp_parse);
             stats.sent_pings += peer.sent_pings;
             stats.sent_pongs += peer.sent_pongs;
             stats.recv_pongs += peer.recv_pongs;
@@ -8108,6 +8675,13 @@ int run_mesh(int argc, char** argv)
                 }
                 first = false;
                 std::cout << "{\"endpoint\":\"" << json_escape(jam2::endpoint_to_string(peer.endpoint)) << "\""
+                          << ",\"endpoint_proof_state\":\"" << endpoint_proof_name(peer.endpoint_proof) << "\""
+                          << ",\"endpoint_proof_attempts\":" << peer.proof_attempts
+                          << ",\"endpoint_proof_successes\":" << peer.proof_successes
+                          << ",\"endpoint_proof_failures\":" << peer.proof_failures
+                          << ",\"endpoint_unverified_drops\":" << peer.proof_unverified_drops
+                          << ",\"endpoint_unmatched_pongs\":" << peer.proof_unmatched_pongs
+                          << ",\"endpoint_challenge_overwrites\":" << peer.proof_challenge_overwrites
                           << ",\"sent_packets\":" << peer.sent_packets
                           << ",\"recv_packets\":" << peer.recv_packets
                           << ",\"ignored_packets\":" << peer.ignored_packets
@@ -8146,6 +8720,13 @@ int run_mesh(int argc, char** argv)
             for (const auto& entry : peers) {
                 const auto& peer = entry.second;
                 std::cout << "mesh_peer endpoint=" << jam2::endpoint_to_string(peer.endpoint)
+                          << " endpoint_proof_state=" << endpoint_proof_name(peer.endpoint_proof)
+                          << " endpoint_proof_attempts=" << peer.proof_attempts
+                          << " endpoint_proof_successes=" << peer.proof_successes
+                          << " endpoint_proof_failures=" << peer.proof_failures
+                          << " endpoint_unverified_drops=" << peer.proof_unverified_drops
+                          << " endpoint_unmatched_pongs=" << peer.proof_unmatched_pongs
+                          << " endpoint_challenge_overwrites=" << peer.proof_challenge_overwrites
                           << " sent_packets=" << peer.sent_packets
                           << " recv_packets=" << peer.recv_packets
                           << " ignored_packets=" << peer.ignored_packets
@@ -8161,10 +8742,18 @@ int run_mesh(int argc, char** argv)
         if (!mix_time_initialized || audio.playback_ring == nullptr) {
             return;
         }
-        for (;;) {
+        std::size_t work = 0;
+        while (work < 64) {
             auto next = pending_mix.begin();
             if (next == pending_mix.end()) {
                 return;
+            }
+            if (next_mix_initialized &&
+                next->first + static_cast<std::uint64_t>(next->second.size()) <= next_mix_sample_time) {
+                pending_mix.erase(next);
+                ++pending_mix_stale_rejects;
+                ++work;
+                continue;
             }
             const std::uint64_t sample_delta = next->first >= mix_base_sample_time ? next->first - mix_base_sample_time : 0;
             const std::uint64_t due_us =
@@ -8184,11 +8773,18 @@ int run_mesh(int argc, char** argv)
                         next->first - next_mix_sample_time));
                 audio.playback_ring->push(std::span<const std::int32_t>(silence_frames.data(), missing));
                 next_mix_sample_time += missing;
+                ++work;
+                if (work == 64) {
+                    ++mesh_work_budget_yields;
+                    return;
+                }
             }
             audio.playback_ring->push(next->second);
             next_mix_sample_time = next->first + static_cast<std::uint64_t>(next->second.size());
             pending_mix.erase(next);
+            ++work;
         }
+        ++mesh_work_budget_yields;
     };
 
     while (jam2::monotonic_us() < receive_deadline && !commands.state.quit.load(std::memory_order_relaxed)) {
@@ -8223,7 +8819,7 @@ int run_mesh(int argc, char** argv)
 
         int sends_this_loop = 0;
         while (now >= next_send && next_send < send_deadline && sends_this_loop < 8) {
-            std::vector<std::uint8_t> payload;
+            std::span<const std::uint8_t> payload = silence_payload;
             if (audio.capture_ring != nullptr) {
                 if (audio.capture_ring->available_read() < static_cast<std::size_t>(options.frame_size)) {
                     break;
@@ -8238,9 +8834,8 @@ int run_mesh(int argc, char** argv)
                     update_peak(audio.control->send_peak_ppm, send_peak_ppm);
                     update_peak(audio.control->gui_send_peak_ppm, send_peak_ppm);
                 }
-                payload = jam2::protocol::pack_pcm24(network_frames);
-            } else {
-                payload = silence_payload;
+                (void)jam2::protocol::pack_pcm24_into(network_frames, packed_audio_payload);
+                payload = packed_audio_payload;
             }
             const jam2::protocol::Header header{
                 jam2::protocol::PacketType::Audio,
@@ -8252,9 +8847,12 @@ int run_mesh(int argc, char** argv)
                 0,
                 0,
             };
-            const auto packet = jam2::protocol::encode_packet(header, payload, session.key);
+            const auto packet = encode_mesh_packet(header, payload);
             for (auto& entry : peers) {
                 auto& peer = entry.second;
+                if (peer.endpoint_proof != EndpointProofState::Active) {
+                    continue;
+                }
                 socket.send_to(peer.endpoint, packet);
                 ++peer.sent_packets;
                 peer.sent_bytes += packet.size();
@@ -8271,19 +8869,57 @@ int run_mesh(int argc, char** argv)
         }
 
         if (now >= next_ping && now < send_deadline) {
-            const jam2::protocol::Header ping{
-                jam2::protocol::PacketType::Ping,
-                0,
-                session.session_id,
-                control_sequence++,
-                0,
-                now,
-                0,
-                0,
-            };
-            const auto packet = jam2::protocol::encode_packet(ping, {}, session.key);
             for (auto& entry : peers) {
                 auto& peer = entry.second;
+                if (peer.endpoint_proof == EndpointProofState::Probing &&
+                    peer.proof_attempts >= 8 &&
+                    now >= peer.proof_deadline_us) {
+                    peer.endpoint_proof = EndpointProofState::Failed;
+                    ++peer.proof_failures;
+                    peer.next_probe_us = now + 5000000ULL;
+                }
+                if (peer.endpoint_proof == EndpointProofState::Failed) {
+                    if (now < peer.next_probe_us) {
+                        continue;
+                    }
+                    peer.endpoint_proof = EndpointProofState::Candidate;
+                    peer.proof_attempts = 0;
+                    peer.proof_deadline_us = 0;
+                    for (ProbeChallenge& challenge : peer.probe_challenges) {
+                        challenge.used = false;
+                    }
+                }
+                if (peer.endpoint_proof != EndpointProofState::Active) {
+                    if (peer.proof_attempts >= 8 || now < peer.next_probe_us) {
+                        continue;
+                    }
+                    peer.endpoint_proof = EndpointProofState::Probing;
+                    peer.next_probe_us = now + 250000ULL;
+                }
+                const std::uint32_t ping_sequence = control_sequence++;
+                const jam2::protocol::Header ping{
+                    jam2::protocol::PacketType::Ping,
+                    0,
+                    session.session_id,
+                    ping_sequence,
+                    0,
+                    now,
+                    0,
+                    0,
+                };
+                ProbeChallenge& challenge =
+                    peer.probe_challenges[ping_sequence % peer.probe_challenges.size()];
+                if (challenge.used) {
+                    ++peer.proof_challenge_overwrites;
+                }
+                challenge = ProbeChallenge{ping_sequence, now, true};
+                if (peer.endpoint_proof == EndpointProofState::Probing) {
+                    ++peer.proof_attempts;
+                    if (peer.proof_attempts == 8) {
+                        peer.proof_deadline_us = now + 1000000ULL;
+                    }
+                }
+                const auto packet = encode_mesh_packet(ping, {});
                 socket.send_to(peer.endpoint, packet);
                 ++peer.sent_pings;
             }
@@ -8311,9 +8947,11 @@ int run_mesh(int argc, char** argv)
                 0,
                 0,
             };
-            const auto packet = jam2::protocol::encode_packet(header, payload, session.key);
+            const auto packet = encode_mesh_packet(header, payload);
             for (auto& entry : peers) {
-                socket.send_to(entry.second.endpoint, packet);
+                if (entry.second.endpoint_proof == EndpointProofState::Active) {
+                    socket.send_to(entry.second.endpoint, packet);
+                }
             }
             next_grid_state = now + 20000ULL;
         }
@@ -8352,9 +8990,11 @@ int run_mesh(int argc, char** argv)
                 0,
                 0,
             };
-            const auto packet = jam2::protocol::encode_packet(header, payload, session.key);
+            const auto packet = encode_mesh_packet(header, payload);
             for (auto& entry : peers) {
-                socket.send_to(entry.second.endpoint, packet);
+                if (entry.second.endpoint_proof == EndpointProofState::Active) {
+                    socket.send_to(entry.second.endpoint, packet);
+                }
             }
             next_transport_send = now + 20000ULL;
         }
@@ -8378,20 +9018,36 @@ int run_mesh(int argc, char** argv)
         }
 
         bool received_any = false;
-        for (;;) {
-            const auto received = socket.recv_from(received_any ? 0 : 1);
+        std::size_t mesh_datagrams_this_wake = 0;
+        while (mesh_datagrams_this_wake < 64) {
+            const auto received = socket.recv_from(mesh_receive_packet, received_any ? 0 : 1);
             if (!received) {
                 break;
             }
+            ++mesh_datagrams_this_wake;
             received_any = true;
-            const auto& [from, bytes] = *received;
+            const auto& from = received->endpoint;
+            const std::span<const std::uint8_t> bytes(mesh_receive_packet.data(), received->size);
             auto peer_it = peers.find(endpoint_key(from));
             if (peer_it == peers.end()) {
                 continue;
             }
             auto& peer = peer_it->second;
+            const auto parsed = jam2::protocol::parse_packet(bytes, session.key, session.session_id);
+            if (!parsed) {
+                peer.udp_parse.observe(parsed.error);
+                ++peer.ignored_packets;
+                continue;
+            }
             try {
-                const auto header = jam2::protocol::decode_packet(bytes, session.key, session.session_id);
+                const auto& header = parsed.header;
+                if (header.type != jam2::protocol::PacketType::Ping &&
+                    header.type != jam2::protocol::PacketType::Pong &&
+                    peer.endpoint_proof != EndpointProofState::Active) {
+                    ++peer.proof_unverified_drops;
+                    ++peer.ignored_packets;
+                    continue;
+                }
                 if (header.type == jam2::protocol::PacketType::Audio) {
                     if (header.payload_length != audio_payload_size) {
                         ++peer.ignored_packets;
@@ -8418,8 +9074,37 @@ int run_mesh(int argc, char** argv)
                     const auto received_payload = std::span<const std::uint8_t>(
                         bytes.data() + jam2::protocol::kHeaderSize,
                         header.payload_length);
-                    auto decoded = jam2::protocol::unpack_pcm24(received_payload);
-                    for (auto& sample : decoded) {
+                    const std::uint64_t packet_frames = header.payload_length / 3U;
+                    if (header.sample_time > std::numeric_limits<std::uint64_t>::max() - packet_frames) {
+                        ++pending_mix_future_rejects;
+                        ++peer.ignored_packets;
+                        continue;
+                    }
+                    const std::uint64_t packet_end = header.sample_time + packet_frames;
+                    if (highest_mesh_sample_time_set) {
+                        if (packet_end < highest_mesh_sample_time &&
+                            highest_mesh_sample_time - packet_end > mesh_sample_time_horizon_frames) {
+                            ++pending_mix_stale_rejects;
+                            ++peer.ignored_packets;
+                            continue;
+                        }
+                        if (header.sample_time > highest_mesh_sample_time &&
+                            header.sample_time - highest_mesh_sample_time > mesh_sample_time_horizon_frames) {
+                            ++pending_mix_future_rejects;
+                            ++peer.ignored_packets;
+                            continue;
+                        }
+                    }
+                    highest_mesh_sample_time_set = true;
+                    highest_mesh_sample_time = std::max(highest_mesh_sample_time, packet_end);
+
+                    std::array<std::int32_t, jam2::protocol::kMaxAudioFramesPerPacket> decoded_storage{};
+                    std::span<std::int32_t> decoded(decoded_storage.data(), static_cast<std::size_t>(packet_frames));
+                    if (!jam2::protocol::unpack_pcm24_into(received_payload, decoded)) {
+                        ++peer.ignored_packets;
+                        continue;
+                    }
+                    for (std::int32_t& sample : decoded) {
                         sample *= 256;
                     }
                     if (!mix_time_initialized) {
@@ -8427,7 +9112,21 @@ int run_mesh(int argc, char** argv)
                         mix_base_sample_time = header.sample_time;
                         mix_base_receive_time_us = receive_time;
                     }
-                    auto& mixed = pending_mix[header.sample_time];
+                    auto mixed_it = pending_mix.find(header.sample_time);
+                    if (mixed_it == pending_mix.end()) {
+                        if (pending_mix.size() >= pending_mix_capacity) {
+                            ++pending_mix_capacity_drops;
+                            ++peer.ignored_packets;
+                            continue;
+                        }
+                        mixed_it = pending_mix.emplace(
+                            header.sample_time,
+                            std::vector<std::int32_t>(decoded.size(), 0)).first;
+                        pending_mix_high_water = std::max<std::uint64_t>(
+                            pending_mix_high_water,
+                            pending_mix.size());
+                    }
+                    auto& mixed = mixed_it->second;
                     if (mixed.empty()) {
                         mixed.resize(decoded.size(), 0);
                     }
@@ -8452,13 +9151,27 @@ int run_mesh(int argc, char** argv)
                         0,
                         0,
                     };
-                    const auto packet = jam2::protocol::encode_packet(pong, {}, session.key);
+                    const auto packet = encode_mesh_packet(pong, {});
                     socket.send_to(peer.endpoint, packet);
                     ++peer.sent_pongs;
                 } else if (header.type == jam2::protocol::PacketType::Pong) {
+                    ProbeChallenge& challenge =
+                        peer.probe_challenges[header.sequence % peer.probe_challenges.size()];
+                    if (!challenge.used ||
+                        challenge.sequence != header.sequence ||
+                        challenge.send_time_us != header.send_time_us) {
+                        ++peer.proof_unmatched_pongs;
+                        ++peer.ignored_packets;
+                        continue;
+                    }
+                    challenge.used = false;
                     const std::uint64_t receive_time = jam2::monotonic_us();
-                    if (receive_time >= header.send_time_us) {
-                        observe_timing(receive_time - header.send_time_us, peer.rtt_min_us, peer.rtt_sum_us, peer.rtt_max_us);
+                    if (receive_time >= challenge.send_time_us) {
+                        observe_timing(receive_time - challenge.send_time_us, peer.rtt_min_us, peer.rtt_sum_us, peer.rtt_max_us);
+                    }
+                    if (peer.endpoint_proof != EndpointProofState::Active) {
+                        peer.endpoint_proof = EndpointProofState::Active;
+                        ++peer.proof_successes;
                     }
                     ++peer.recv_pongs;
                 } else if (header.type == jam2::protocol::PacketType::MetronomeState) {
@@ -8559,6 +9272,9 @@ int run_mesh(int argc, char** argv)
                 ++peer.ignored_packets;
             }
         }
+        if (mesh_datagrams_this_wake == 64) {
+            ++mesh_work_budget_yields;
+        }
         if (!received_any) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
@@ -8575,7 +9291,7 @@ int run_mesh(int argc, char** argv)
         0,
         0,
     };
-    const auto bye_packet = jam2::protocol::encode_packet(bye, {}, session.key);
+    const auto bye_packet = encode_mesh_packet(bye, {});
     for (const auto& entry : peers) {
         socket.send_to(entry.second.endpoint, bye_packet);
     }

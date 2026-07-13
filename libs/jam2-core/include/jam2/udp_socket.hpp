@@ -15,6 +15,8 @@
 
 namespace jam2 {
 
+Endpoint resolve_udp_endpoint(const Endpoint& endpoint);
+
 class NetworkRuntime {
 public:
     NetworkRuntime();
@@ -25,6 +27,11 @@ public:
 
 class UdpSocket {
 public:
+    struct ReceivedDatagram {
+        Endpoint endpoint;
+        std::size_t size = 0;
+    };
+
     UdpSocket();
     ~UdpSocket();
     UdpSocket(const UdpSocket&) = delete;
@@ -39,6 +46,10 @@ public:
     int send_buffer_size() const;
     int recv_buffer_size() const;
     void send_to(const Endpoint& endpoint, std::span<const std::uint8_t> bytes) const;
+    std::optional<ReceivedDatagram> recv_from(std::span<std::uint8_t> buffer, int timeout_ms) const;
+    std::optional<ReceivedDatagram> recv_from_for(
+        std::span<std::uint8_t> buffer,
+        std::uint64_t timeout_us) const;
     std::optional<std::pair<Endpoint, std::vector<std::uint8_t>>> recv_from(int timeout_ms) const;
 
 private:

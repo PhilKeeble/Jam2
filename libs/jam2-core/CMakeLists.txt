@@ -3,6 +3,7 @@ add_library(jam2_core STATIC
     src/common.cpp
     src/metronome.cpp
     src/output_recorder.cpp
+    src/pcm16_wav.cpp
     src/prepared_track_source.cpp
     src/protocol.cpp
     src/track_take_recorder.cpp
@@ -59,7 +60,7 @@ if(WIN32)
     endif()
     target_sources(jam2_core PRIVATE src/audio_device_windows.cpp)
     target_compile_definitions(jam2_core PUBLIC JAM2_PLATFORM_WINDOWS=1)
-    target_link_libraries(jam2_core PUBLIC ws2_32 advapi32 ole32)
+    target_link_libraries(jam2_core PUBLIC ws2_32 advapi32 ole32 bcrypt)
 elseif(APPLE)
     target_sources(jam2_core PRIVATE src/audio_device_macos.cpp)
     target_compile_definitions(jam2_core PUBLIC JAM2_PLATFORM_MACOS=1)

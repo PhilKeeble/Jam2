@@ -513,17 +513,14 @@ The dependency-ordered worker tasks are integrated into [refactor-plan.md](refac
 
 | Refactor phase | Security work |
 | --- | --- |
-| Phase 0 | Golden/malformed control frames and handshake tests; authorization/schema boundary tests; asset/WAV fuzz harnesses; UDP replay/horizon/ping/endpoint tests; baseline rejection and cost measurements |
-| Phase 1 | Immediate TCP caps, framing, pre-auth fix, mutual proof/frame MAC, authorization, JSON/model limits, asset streaming/paths, strict WAV validation, OS secrets, socket RAII correction |
-| Phase 2 | Allocation-free UDP authentication/parse results and fixed replay/storage primitives while preserving UDP v1 bytes |
-| Phase 3 | Preserve bounded control/worker boundaries in the extracted engine; remote data becomes typed commands only after validation |
-| Phase 4 | Per-peer replay, horizons, gap bounds, ping correlation, work budgets, stable identity, and symmetric authenticated edge state |
-| Phase 5 | Candidate-only membership endpoints, authenticated observed-source proof, active-edge gating, and session key/identity ownership |
-| Phase 6 | Authority-source authorization and monotonic grid/transport revisions |
-| Phase 7 | GUI lifecycle uses the hardened peer control path; all file/hash/WAV/prepared work stays on bounded workers |
-| Phase 8 | Single binary removes child-argument key exposure but retains worker containment and top-level exception boundaries |
-| Phase 9 | Remove legacy unauthenticated/unbounded framing and scrub documentation/tooling of key logging |
-| Phase 10 | Optional raw asset chunks, UDP version/header changes, or encryption only as independently measured protocol changes |
+| Phase 1 | TCP caps/framing/mutual proof/frame MAC, authorization, model limits, asset streaming and local paths, strict WAV handling on bounded workers, UDP parse/replay/horizon/work bounds, endpoint proof, OS secrets, and socket RAII correction |
+| Phase 2 | Preserve the corrected bounded control, file-worker, command, and top-level exception boundaries while extracting `Engine` |
+| Phase 3 | Carry replay, horizon, gap, ping-correlation, stable identity, and symmetric authenticated edge state into the mature one-peer `PeerStream` |
+| Phase 4 | Apply candidate-only membership, observed-source proof, active-edge gating, replay, and fixed per-peer storage to every direct mesh edge |
+| Phase 5 | Enforce authority-source authorization and monotonic grid/transport revisions |
+| Phase 6 | Integrate the hardened paths in one executable and remove child-argument key exposure without moving security work into the callback |
+| Phase 7 | Exercise the final paths through Python adversarial scenarios, then remove obsolete unauthenticated/unbounded compatibility behavior and stale secret logging |
+| Phase 8 | Consider raw asset chunks, UDP version/header changes, or encryption only as separate measured experiments |
 
 ## Security Validation Matrix
 

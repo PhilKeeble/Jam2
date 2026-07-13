@@ -5,6 +5,7 @@
 
 #include "common.hpp"
 #include "gui_control_protocol.hpp"
+#include "pcm16_wav.hpp"
 #include "tuning_profile.hpp"
 
 #include <QAbstractSlider>
@@ -20,6 +21,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QEvent>
+#include <QEventLoop>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFile>
@@ -43,8 +45,12 @@
 #include <QPainterPath>
 #include <QPolygon>
 #include <QProcess>
+#include <QProgressDialog>
+#include <QPointer>
+#include <QRunnable>
 #include <QProxyStyle>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QScrollBar>
 #include <QUrl>
 #include <QSlider>
@@ -56,6 +62,7 @@
 #include <QStyleOption>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTemporaryFile>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWheelEvent>
@@ -66,6 +73,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#include <filesystem>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -74,21 +82,304 @@
 #include <utility>
 #include <vector>
 
-quint16 waveformReadLe16(const QByteArray& data, qsizetype offset)
-{
-    return static_cast<quint16>(static_cast<unsigned char>(data[offset])) |
-        static_cast<quint16>(static_cast<unsigned char>(data[offset + 1]) << 8);
-}
-
-quint32 waveformReadLe32(const QByteArray& data, qsizetype offset)
-{
-    return static_cast<quint32>(static_cast<unsigned char>(data[offset])) |
-        (static_cast<quint32>(static_cast<unsigned char>(data[offset + 1])) << 8) |
-        (static_cast<quint32>(static_cast<unsigned char>(data[offset + 2])) << 16) |
-        (static_cast<quint32>(static_cast<unsigned char>(data[offset + 3])) << 24);
-}
-
 namespace {
+
+constexpr qint64 kMaxLooperAssetBytes = 512LL * 1024LL * 1024LL;
+constexpr int kLooperAssetChunkBytes = 24 * 1024;
+constexpr int kMaxLooperAssetRequests = 64;
+constexpr qint64 kLooperAssetFrameQueueEstimate = 48 * 1024;
+constexpr int kLooperAssetProgressDeadlineMs = 10000;
+
+std::filesystem::path nativeFilePath(const QString& path)
+{
+#if defined(_WIN32)
+    return std::filesystem::path(path.toStdWString());
+#else
+    return std::filesystem::path(path.toUtf8().constData());
+#endif
+}
+
+bool readPcm16WaveformPeaks(
+    const QString& path,
+    int peakCount,
+    std::vector<float>& peaks,
+    qint64* sourceFrames = nullptr)
+{
+    if (peakCount <= 0) {
+        return false;
+    }
+    const jam2::wav::InspectResult inspected = jam2::wav::inspect_pcm16_file(
+        nativeFilePath(path), static_cast<std::uint64_t>(kMaxLooperAssetBytes));
+    if (!inspected || inspected.info.frames > static_cast<std::uint64_t>(std::numeric_limits<qint64>::max())) {
+        return false;
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly) ||
+        inspected.info.data_offset > static_cast<std::uint64_t>(std::numeric_limits<qint64>::max()) ||
+        !file.seek(static_cast<qint64>(inspected.info.data_offset))) {
+        return false;
+    }
+
+    const qint64 frames = static_cast<qint64>(inspected.info.frames);
+    const qint64 blockAlign = inspected.info.block_align;
+    std::vector<int> peakValues(static_cast<std::size_t>(peakCount), 0);
+    QByteArray buffer(64 * 1024, '\0');
+    qint64 frameIndex = 0;
+    qint64 bytesRemaining = static_cast<qint64>(inspected.info.data_bytes);
+    while (bytesRemaining > 0) {
+        qint64 bytesToRead = std::min<qint64>(bytesRemaining, buffer.size());
+        bytesToRead -= bytesToRead % blockAlign;
+        if (bytesToRead <= 0 || file.read(buffer.data(), bytesToRead) != bytesToRead) {
+            return false;
+        }
+        for (qint64 offset = 0; offset < bytesToRead; offset += blockAlign, ++frameIndex) {
+            int mixed = 0;
+            for (std::uint16_t channel = 0; channel < inspected.info.channels; ++channel) {
+                const qint64 sampleOffset = offset + static_cast<qint64>(channel) * 2;
+                const std::uint16_t raw = static_cast<std::uint16_t>(
+                    static_cast<unsigned char>(buffer[sampleOffset])) |
+                    static_cast<std::uint16_t>(
+                        static_cast<std::uint16_t>(static_cast<unsigned char>(buffer[sampleOffset + 1])) << 8U);
+                mixed += std::abs(static_cast<int>(static_cast<std::int16_t>(raw)));
+            }
+            const int bucket = static_cast<int>(std::min<qint64>(
+                peakCount - 1,
+                frameIndex * peakCount / std::max<qint64>(1, frames)));
+            peakValues[bucket] = std::max(
+                peakValues[bucket],
+                mixed / static_cast<int>(inspected.info.channels));
+        }
+        bytesRemaining -= bytesToRead;
+    }
+
+    peaks.resize(peakCount);
+    for (int index = 0; index < peakCount; ++index) {
+        peaks[index] = static_cast<float>(peakValues[index]) / 32768.0f;
+    }
+    const auto maxPeak = std::max_element(peaks.begin(), peaks.end());
+    if (maxPeak != peaks.end() && *maxPeak > 0.0f && *maxPeak < 0.85f) {
+        const float scale = 0.85f / *maxPeak;
+        for (float& peak : peaks) {
+            peak = std::min(1.0f, peak * scale);
+        }
+    }
+    if (sourceFrames) {
+        *sourceFrames = frames;
+    }
+    return true;
+}
+
+bool isSha256Hex(const QString& value)
+{
+    static const QRegularExpression expression(QStringLiteral("^[0-9a-f]{64}$"));
+    return expression.match(value).hasMatch();
+}
+
+bool isBoundedInteger(const QJsonValue& value, qint64 minimum, qint64 maximum)
+{
+    if (!value.isDouble()) {
+        return false;
+    }
+    const double number = value.toDouble();
+    return std::isfinite(number) && std::floor(number) == number &&
+        number >= static_cast<double>(minimum) && number <= static_cast<double>(maximum);
+}
+
+bool isBoundedString(const QJsonValue& value, qsizetype maximum)
+{
+    return value.isString() && value.toString().size() <= maximum;
+}
+
+bool validateRemoteSongAssets(const QJsonObject& song, QString& reason)
+{
+    const QJsonValue looperValue = song.value(QStringLiteral("looper"));
+    if (looperValue.isUndefined()) {
+        return true;
+    }
+    if (!looperValue.isObject()) {
+        reason = QStringLiteral("song looper field is not an object");
+        return false;
+    }
+    const QJsonArray banks = looperValue.toObject().value(QStringLiteral("banks")).toArray();
+    if (banks.size() > 4) {
+        reason = QStringLiteral("song contains too many looper banks");
+        return false;
+    }
+    for (const QJsonValue& bankValue : banks) {
+        if (!bankValue.isObject()) {
+            reason = QStringLiteral("song looper bank is not an object");
+            return false;
+        }
+        const QJsonArray lanes = bankValue.toObject().value(QStringLiteral("lanes")).toArray();
+        if (lanes.size() > 128) {
+            reason = QStringLiteral("song looper bank contains too many lanes");
+            return false;
+        }
+        for (const QJsonValue& laneValue : lanes) {
+            if (!laneValue.isObject()) {
+                reason = QStringLiteral("song looper lane is not an object");
+                return false;
+            }
+            const QString hash = laneValue.toObject().value(QStringLiteral("asset_hash")).toString();
+            if (!hash.isEmpty() && !isSha256Hex(hash)) {
+                reason = QStringLiteral("song contains an invalid asset hash");
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool validateControlMessageShape(const QJsonObject& message, QString& reason)
+{
+    const QString type = message.value(QStringLiteral("type")).toString();
+    if (type.isEmpty() || type.size() > 64) {
+        reason = QStringLiteral("message type is missing or too long");
+        return false;
+    }
+    const QJsonValue revision = message.value(QStringLiteral("revision"));
+    if (!revision.isUndefined() && !isBoundedInteger(revision, 0, std::numeric_limits<int>::max())) {
+        reason = QStringLiteral("message revision is invalid");
+        return false;
+    }
+    if (type == QStringLiteral("session.settings")) {
+        const QJsonValue settingsValue = message.value(QStringLiteral("settings"));
+        if (!settingsValue.isObject()) {
+            reason = QStringLiteral("session settings shape is invalid");
+            return false;
+        }
+        const QJsonObject settings = settingsValue.toObject();
+        if (settings.size() > 40) {
+            reason = QStringLiteral("session settings shape is invalid");
+            return false;
+        }
+        for (auto it = settings.constBegin(); it != settings.constEnd(); ++it) {
+            if (it.key().size() > 64 ||
+                !(it.value().isBool() ||
+                  (it.value().isString() && it.value().toString().size() <= 64) ||
+                  (it.value().isDouble() && std::isfinite(it.value().toDouble()) &&
+                   std::abs(it.value().toDouble()) <= 1.0e9))) {
+                reason = QStringLiteral("session setting value is invalid");
+                return false;
+            }
+        }
+        return true;
+    }
+    if (type == QStringLiteral("mesh.peer_list")) {
+        const QJsonValue peersValue = message.value(QStringLiteral("peers"));
+        if (!peersValue.isArray() || peersValue.toArray().size() > 8) {
+            reason = QStringLiteral("mesh peer list is invalid or exceeds the peer cap");
+            return false;
+        }
+        static const QRegularExpression tokenExpression(QStringLiteral("^[0-9a-f]{32}$"));
+        for (const QJsonValue& peerValue : peersValue.toArray()) {
+            const QJsonObject peer = peerValue.toObject();
+            if (!peerValue.isObject() ||
+                !tokenExpression.match(peer.value(QStringLiteral("token")).toString()).hasMatch() ||
+                !isBoundedString(peer.value(QStringLiteral("endpoint")), 255)) {
+                reason = QStringLiteral("mesh peer entry is invalid");
+                return false;
+            }
+        }
+        return true;
+    }
+    if (type == QStringLiteral("session.error")) {
+        return isBoundedString(message.value(QStringLiteral("message")), 4096)
+            ? true : (reason = QStringLiteral("session error text is invalid"), false);
+    }
+    if (type == QStringLiteral("metronome.settings")) {
+        static const QStringList maskKeys{
+            QStringLiteral("play_mask_low"), QStringLiteral("play_mask_high"),
+            QStringLiteral("accent_mask_low"), QStringLiteral("accent_mask_high")};
+        if (!message.value(QStringLiteral("running")).isBool() || !message.value(QStringLiteral("leader")).isBool() ||
+            !isBoundedString(message.value(QStringLiteral("mode")), 32) ||
+            !isBoundedInteger(message.value(QStringLiteral("bpm")), 1, 400) ||
+            !isBoundedInteger(message.value(QStringLiteral("beats")), 1, 16) ||
+            !isBoundedInteger(message.value(QStringLiteral("division")), 1, 16)) {
+            reason = QStringLiteral("metronome settings are invalid");
+            return false;
+        }
+        static const QRegularExpression maskExpression(QStringLiteral("^[0-9a-fA-F]{1,16}$"));
+        for (const QString& key : maskKeys) {
+            if (!maskExpression.match(message.value(key).toString()).hasMatch()) {
+                reason = QStringLiteral("metronome mask is invalid");
+                return false;
+            }
+        }
+        return true;
+    }
+    if (type == QStringLiteral("beat.set")) {
+        const QString lane = message.value(QStringLiteral("lane")).toString();
+        return isBoundedInteger(message.value(QStringLiteral("section")), 0, 63) &&
+            isBoundedInteger(message.value(QStringLiteral("beat")), 0, 511) &&
+            (lane == QStringLiteral("chord") || lane == QStringLiteral("beat") || lane == QStringLiteral("lyric")) &&
+            isBoundedString(message.value(QStringLiteral("text")), 4096)
+            ? true : (reason = QStringLiteral("beat cell update is invalid"), false);
+    }
+    if (type == QStringLiteral("grid.resize")) {
+        const QString lane = message.value(QStringLiteral("lane")).toString();
+        return (lane == QStringLiteral("chord") || lane == QStringLiteral("beat")) &&
+            isBoundedInteger(message.value(QStringLiteral("section")), 0, 63) &&
+            isBoundedInteger(message.value(QStringLiteral("beats")), 4, 512)
+            ? true : (reason = QStringLiteral("grid resize is invalid"), false);
+    }
+    if (type == QStringLiteral("beat.hit")) {
+        return isBoundedInteger(message.value(QStringLiteral("section")), 0, 63) &&
+            isBoundedInteger(message.value(QStringLiteral("beat")), 0, 511) &&
+            isBoundedInteger(message.value(QStringLiteral("lane")), 0, 10) &&
+            isBoundedString(message.value(QStringLiteral("text")), 4096)
+            ? true : (reason = QStringLiteral("beat hit is invalid"), false);
+    }
+    if (type == QStringLiteral("beat.division")) {
+        const int division = message.value(QStringLiteral("division")).toInt(-1);
+        return isBoundedInteger(message.value(QStringLiteral("section")), 0, 63) &&
+            isBoundedInteger(message.value(QStringLiteral("beat")), 0, 511) &&
+            QList<int>{1, 2, 3, 4, 6, 8}.contains(division)
+            ? true : (reason = QStringLiteral("beat division is invalid"), false);
+    }
+    if (type == QStringLiteral("lyrics.set")) {
+        return isBoundedString(message.value(QStringLiteral("text")), 64 * 1024)
+            ? true : (reason = QStringLiteral("lyrics update is invalid"), false);
+    }
+    if (type == QStringLiteral("song.set")) {
+        const QJsonValue songValue = message.value(QStringLiteral("song"));
+        if (!songValue.isObject() ||
+            !isBoundedInteger(message.value(QStringLiteral("arrangement_revision")), 0, std::numeric_limits<int>::max()) ||
+            (!message.value(QStringLiteral("host_authoritative")).isUndefined() &&
+             !message.value(QStringLiteral("host_authoritative")).isBool()) ||
+            (!message.value(QStringLiteral("track_playing")).isUndefined() &&
+             !message.value(QStringLiteral("track_playing")).isBool())) {
+            reason = QStringLiteral("song snapshot or revision is invalid");
+            return false;
+        }
+        return validateRemoteSongAssets(songValue.toObject(), reason);
+    }
+    if (type == QStringLiteral("looper.recording.offer")) {
+        static const QRegularExpression recordingIdExpression(
+            QStringLiteral("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"));
+        const QString recordingId = message.value(QStringLiteral("recording_id")).toString();
+        const QString targetLaneId = message.value(QStringLiteral("target_lane_id")).toString();
+        const QString hash = message.value(QStringLiteral("sha256")).toString().toLower();
+        return recordingIdExpression.match(recordingId).hasMatch() &&
+            isBoundedInteger(message.value(QStringLiteral("bank")), 0, 3) &&
+            !targetLaneId.isEmpty() && targetLaneId.size() <= 80 &&
+            isSha256Hex(hash) &&
+            isBoundedString(message.value(QStringLiteral("name")), 512)
+            ? true : (reason = QStringLiteral("recording offer is invalid"), false);
+    }
+    if (type == QStringLiteral("looper.asset.request")) {
+        const QJsonValue arrangementRevision = message.value(QStringLiteral("arrangement_revision"));
+        return message.value(QStringLiteral("hashes")).isArray() &&
+            (arrangementRevision.isUndefined() ||
+             isBoundedInteger(arrangementRevision, 0, std::numeric_limits<int>::max()));
+    }
+    if (type == QStringLiteral("looper.asset.start") || type == QStringLiteral("looper.asset.chunk") ||
+        type == QStringLiteral("looper.asset.done")) {
+        return true; // Transfer-specific strict checks run before any file mutation.
+    }
+    reason = QStringLiteral("unknown message type");
+    return false;
+}
 
 QDir appReleaseDir()
 {
@@ -205,13 +496,6 @@ QString sha256FileHex(const QString& path)
         hash.addData(file.read(1024 * 1024));
     }
     return QString::fromLatin1(hash.result().toHex());
-}
-
-bool sameOrChildPath(const QString& parent, const QString& candidate)
-{
-    const QString root = QDir::cleanPath(QFileInfo(parent).absoluteFilePath());
-    const QString path = QDir::cleanPath(QFileInfo(candidate).absoluteFilePath());
-    return path == root || path.startsWith(root + QLatin1Char('/')) || path.startsWith(root + QLatin1Char('\\'));
 }
 
 QString frameText(qint64 frame)
@@ -585,79 +869,10 @@ public:
         update();
     }
 
-    void loadWav(const QString& path)
+    void setPeaks(std::vector<float> peaks, bool valid)
     {
-        QFile file(path);
-        if (!file.open(QIODevice::ReadOnly)) {
-            clear();
-            return;
-        }
-        const QByteArray data = file.readAll();
-        if (data.size() < 44 || data.mid(0, 4) != "RIFF" || data.mid(8, 4) != "WAVE") {
-            clear();
-            return;
-        }
-
-        int channels = 0;
-        int bitsPerSample = 0;
-        qsizetype dataOffset = -1;
-        qsizetype dataBytes = 0;
-        qsizetype offset = 12;
-        while (offset + 8 <= data.size()) {
-            const QByteArray id = data.mid(offset, 4);
-            const quint32 size = waveformReadLe32(data, offset + 4);
-            const qsizetype payload = offset + 8;
-            if (payload + size > data.size()) {
-                break;
-            }
-            if (id == "fmt " && size >= 16) {
-                channels = waveformReadLe16(data, payload + 2);
-                bitsPerSample = waveformReadLe16(data, payload + 14);
-            } else if (id == "data") {
-                dataOffset = payload;
-                dataBytes = size;
-            }
-            offset = payload + size + (size % 2);
-        }
-
-        if (channels <= 0 || bitsPerSample != 16 || dataOffset < 0 || dataBytes <= 0) {
-            peaks_.clear();
-            label_ = QStringLiteral("Waveform preview supports PCM16 WAV");
-            update();
-            return;
-        }
-
-        constexpr int kPeakCount = 2048;
-        peaks_.assign(kPeakCount, 0.0f);
-        const qsizetype frameBytes = channels * 2;
-        const qsizetype frames = dataBytes / frameBytes;
-        if (frames <= 0) {
-            clear();
-            return;
-        }
-        for (int i = 0; i < kPeakCount; ++i) {
-            const qsizetype begin = frames * i / kPeakCount;
-            const qsizetype end = qMax<qsizetype>(begin + 1, frames * (i + 1) / kPeakCount);
-            int peak = 0;
-            for (qsizetype frame = begin; frame < end; ++frame) {
-                int mixed = 0;
-                for (int channel = 0; channel < channels; ++channel) {
-                    const qsizetype sampleOffset = dataOffset + frame * frameBytes + channel * 2;
-                    const qint16 sample = static_cast<qint16>(waveformReadLe16(data, sampleOffset));
-                    mixed += std::abs(static_cast<int>(sample));
-                }
-                peak = qMax(peak, mixed / channels);
-            }
-            peaks_[i] = static_cast<float>(peak) / 32768.0f;
-        }
-        const auto maxPeak = std::max_element(peaks_.begin(), peaks_.end());
-        if (maxPeak != peaks_.end() && *maxPeak > 0.0f && *maxPeak < 0.85f) {
-            const float scale = 0.85f / *maxPeak;
-            for (float& peak : peaks_) {
-                peak = qMin(1.0f, peak * scale);
-            }
-        }
-        label_.clear();
+        peaks_ = std::move(peaks);
+        label_ = valid ? QString{} : QStringLiteral("Waveform preview supports PCM16 WAV");
         update();
     }
 
@@ -1723,89 +1938,86 @@ struct WavMetadata {
     QString sha256;
 };
 
-quint16 readLe16(const QByteArray& data, qsizetype offset)
-{
-    return static_cast<quint16>(static_cast<unsigned char>(data[offset])) |
-        static_cast<quint16>(static_cast<unsigned char>(data[offset + 1]) << 8);
-}
-
-quint32 readLe32(const QByteArray& data, qsizetype offset)
-{
-    return static_cast<quint32>(static_cast<unsigned char>(data[offset])) |
-        (static_cast<quint32>(static_cast<unsigned char>(data[offset + 1])) << 8) |
-        (static_cast<quint32>(static_cast<unsigned char>(data[offset + 2])) << 16) |
-        (static_cast<quint32>(static_cast<unsigned char>(data[offset + 3])) << 24);
-}
-
 WavMetadata readWavMetadata(const QString& path)
 {
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        throw std::runtime_error(QStringLiteral("failed to open WAV: %1").arg(path).toStdString());
+    const jam2::wav::InspectResult inspected = jam2::wav::inspect_pcm16_file(nativeFilePath(path));
+    if (!inspected) {
+        throw std::runtime_error(inspected.error);
     }
-    const QByteArray bytes = file.readAll();
-    if (bytes.size() < 12 || bytes.mid(0, 4) != "RIFF" || bytes.mid(8, 4) != "WAVE") {
-        throw std::runtime_error("not a RIFF/WAVE file");
-    }
-
     WavMetadata meta;
-    meta.sha256 = QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
-    qsizetype offset = 12;
-    while (offset + 8 <= bytes.size()) {
-        const QByteArray id = bytes.mid(offset, 4);
-        const quint32 size = readLe32(bytes, offset + 4);
-        const qsizetype payload = offset + 8;
-        if (payload + size > bytes.size()) {
-            break;
-        }
-        if (id == "fmt " && size >= 16) {
-            meta.audioFormat = readLe16(bytes, payload);
-            meta.channels = readLe16(bytes, payload + 2);
-            meta.sampleRate = static_cast<int>(readLe32(bytes, payload + 4));
-            meta.bitsPerSample = readLe16(bytes, payload + 14);
-        } else if (id == "data") {
-            meta.dataBytes = size;
-        }
-        offset = payload + size + (size % 2);
-    }
-    if (meta.sampleRate > 0 && meta.channels > 0 && meta.bitsPerSample > 0 && meta.dataBytes > 0) {
-        const qint64 frameBytes = static_cast<qint64>(meta.channels) * meta.bitsPerSample / 8;
-        if (frameBytes > 0) {
-            meta.durationMs = static_cast<int>((meta.dataBytes / frameBytes) * 1000 / meta.sampleRate);
-        }
+    meta.audioFormat = 1;
+    meta.sampleRate = static_cast<int>(inspected.info.sample_rate);
+    meta.channels = static_cast<int>(inspected.info.channels);
+    meta.bitsPerSample = 16;
+    meta.dataBytes = static_cast<qint64>(inspected.info.data_bytes);
+    const std::uint64_t duration_ms = inspected.info.frames * 1000ULL / inspected.info.sample_rate;
+    meta.durationMs = static_cast<int>(std::min<std::uint64_t>(duration_ms, std::numeric_limits<int>::max()));
+    meta.sha256 = sha256FileHex(path);
+    if (meta.sha256.isEmpty()) {
+        throw std::runtime_error("failed to hash WAV");
     }
     return meta;
 }
 
-bool isImportablePcm16Wav(const QString& path, QString* reason = nullptr)
+struct StagedPcm16Asset {
+    QString sourcePath;
+    QString stagedPath;
+    QString displayName;
+    QString sha256;
+    WavMetadata metadata;
+    QString error;
+};
+
+StagedPcm16Asset stagePcm16Asset(const QString& sourcePath, const QString& stagingFolder)
 {
+    StagedPcm16Asset result;
+    const QFileInfo sourceInfo(sourcePath);
+    result.sourcePath = sourceInfo.absoluteFilePath();
+    result.displayName = sourceInfo.completeBaseName();
     try {
-        const WavMetadata metadata = readWavMetadata(path);
-        if (metadata.audioFormat != 1) {
-            if (reason) {
-                *reason = QStringLiteral("recorded WAV is not PCM format");
-            }
-            return false;
-        }
-        if (metadata.channels <= 0 || metadata.sampleRate <= 0 || metadata.bitsPerSample != 16) {
-            if (reason) {
-                *reason = QStringLiteral("recorded WAV must be PCM16 with a valid sample rate and channel count");
-            }
-            return false;
-        }
-        if (metadata.dataBytes <= 0) {
-            if (reason) {
-                *reason = QStringLiteral("recorded WAV contains no audio frames; the recording was silent or trimming removed all audio");
-            }
-            return false;
-        }
-        return true;
+        result.metadata = readWavMetadata(result.sourcePath);
     } catch (const std::exception& error) {
-        if (reason) {
-            *reason = QString::fromUtf8(error.what());
-        }
-        return false;
+        result.error = QString::fromUtf8(error.what());
+        return result;
     }
+    if (result.metadata.dataBytes <= 0) {
+        result.error = QStringLiteral("WAV contains no audio frames");
+        return result;
+    }
+    result.sha256 = result.metadata.sha256;
+    result.stagedPath = QDir(stagingFolder).absoluteFilePath(
+        QStringLiteral("wavs/") + result.sha256 + QStringLiteral(".wav"));
+    if (!QDir().mkpath(QFileInfo(result.stagedPath).absolutePath())) {
+        result.error = QStringLiteral("could not create the WAV staging folder");
+        return result;
+    }
+    if (QFileInfo::exists(result.stagedPath) && sha256FileHex(result.stagedPath) == result.sha256) {
+        return result;
+    }
+
+    QFile source(result.sourcePath);
+    QSaveFile destination(result.stagedPath);
+    if (!source.open(QIODevice::ReadOnly) || !destination.open(QIODevice::WriteOnly)) {
+        result.error = QStringLiteral("could not open the WAV for atomic staging");
+        return result;
+    }
+    constexpr qint64 copyBlockBytes = 1024 * 1024;
+    while (!source.atEnd()) {
+        const QByteArray block = source.read(copyBlockBytes);
+        if (block.isEmpty() && source.error() != QFileDevice::NoError) {
+            result.error = QStringLiteral("failed while reading the WAV for staging");
+            return result;
+        }
+        if (destination.write(block) != block.size()) {
+            result.error = QStringLiteral("failed while writing the staged WAV");
+            return result;
+        }
+    }
+    if (!destination.commit()) {
+        result.error = QStringLiteral("could not atomically commit the staged WAV");
+        return result;
+    }
+    return result;
 }
 
 QString jamSliderStyle()
@@ -1831,7 +2043,8 @@ void applyJamSliderStyle(QSlider* slider)
 QJsonObject readSidecarJson(const QString& wavPath)
 {
     QFile file(wavPath + QStringLiteral(".json"));
-    if (!file.open(QIODevice::ReadOnly)) {
+    constexpr qint64 kMaxSidecarBytes = 1024 * 1024;
+    if (!file.open(QIODevice::ReadOnly) || file.size() < 0 || file.size() > kMaxSidecarBytes) {
         return {};
     }
     const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
@@ -1913,6 +2126,8 @@ void scrollAreaByWheel(QScrollArea& scrollArea, QWheelEvent& wheel)
 MainWindow::MainWindow(QWidget* parent)
     : QWidget(parent)
 {
+    fileWorkerPool_.setMaxThreadCount(2);
+    fileWorkerPool_.setExpiryTimeout(30000);
     installJam2Style();
     generateSession();
     transientProjectFolder_ = appReleaseFolderPath(
@@ -1982,7 +2197,9 @@ MainWindow::MainWindow(QWidget* parent)
         }
     };
     controlServer_.onState = [this](const QString& state) { handleControlState(state, true); };
-    controlServer_.onMessage = [this](const QJsonObject& message) { handleControlMessage(message); };
+    controlServer_.onMessage = [this](const QString& sourcePeerToken, const QJsonObject& message) {
+        handleControlMessage(message, sourcePeerToken);
+    };
     controlServer_.onAuthenticated = [this](const QString& token, const QJsonObject& message) {
         handleMeshPeerAuthenticated(token, message);
     };
@@ -1997,6 +2214,21 @@ MainWindow::MainWindow(QWidget* parent)
     controlClient_.onMessage = [this](const QJsonObject& message) { handleControlMessage(message); };
     controlReconnectTimer_.setInterval(2000);
     QObject::connect(&controlReconnectTimer_, &QTimer::timeout, this, [this] { refreshControlConnection(); });
+    outgoingLooperAssetTimer_.setInterval(5);
+    QObject::connect(&outgoingLooperAssetTimer_, &QTimer::timeout, this, [this] { continueLooperAssetSend(); });
+    songAssetCheckRetryTimer_.setSingleShot(true);
+    QObject::connect(&songAssetCheckRetryTimer_, &QTimer::timeout, this, [this] {
+        const QJsonObject message = deferredSongSetMessage_;
+        deferredSongSetMessage_ = QJsonObject{};
+        if (!message.isEmpty()) {
+            handleSongSet(message);
+        }
+    });
+    incomingLooperAssetTimer_.setSingleShot(true);
+    QObject::connect(&incomingLooperAssetTimer_, &QTimer::timeout, this, [this] {
+        appendLog(QStringLiteral("looper asset receive progress timeout"));
+        resetIncomingLooperAsset();
+    });
     playbackGridTimer_.setInterval(16);
     QObject::connect(&playbackGridTimer_, &QTimer::timeout, this, [this] { updatePlaybackGrid(); });
     playbackGridTimer_.start();
@@ -2009,6 +2241,7 @@ MainWindow::MainWindow(QWidget* parent)
                 guiControlSocket_->deleteLater();
             }
             guiControlSocket_ = next;
+            guiControlSocket_->setReadBufferSize(jam2::gui_control::kMaxPayloadBytes + 16);
             guiControlBuffer_.clear();
             QObject::connect(guiControlSocket_, &QTcpSocket::readyRead, this, &MainWindow::readGuiControlSocket);
             QObject::connect(guiControlSocket_, &QTcpSocket::disconnected, this, [this] {
@@ -2030,6 +2263,7 @@ MainWindow::MainWindow(QWidget* parent)
 MainWindow::~MainWindow()
 {
     shuttingDown_ = true;
+    fileWorkerPool_.waitForDone();
     QApplication::instance()->removeEventFilter(this);
     stopJam(false);
 }
@@ -3646,6 +3880,12 @@ void MainWindow::startJam()
     pendingJoinLaunch_ = false;
     pendingJoinBaseArgs_.clear();
     currentMeshPeers_.clear();
+    pendingRecordingContributions_.clear();
+    appliedRecordingContributionIds_.clear();
+    localRecordingOffers_.clear();
+    recordingOfferAssetPaths_.clear();
+    pendingRecordingAssetSources_.clear();
+    validatedRecordingAssetHashes_.clear();
     try {
         if (listenMode && meshMode) {
             refreshGeneratedUrl();
@@ -3876,6 +4116,12 @@ void MainWindow::readGuiControlSocket()
         return;
     }
     guiControlBuffer_.append(guiControlSocket_->readAll());
+    if (guiControlBuffer_.size() > static_cast<qsizetype>(jam2::gui_control::kMaxPayloadBytes) + 16) {
+        appendLog(QStringLiteral("gui-control input high-water exceeded"));
+        guiControlSocket_->close();
+        guiControlBuffer_.clear();
+        return;
+    }
     for (;;) {
         constexpr qsizetype headerSize = 16;
         if (guiControlBuffer_.size() < headerSize) {
@@ -4594,10 +4840,23 @@ void MainWindow::updateMixMeters(const QJsonObject& stats)
     }
 }
 
-void MainWindow::handleControlMessage(const QJsonObject& message)
+void MainWindow::handleControlMessage(const QJsonObject& message, const QString& sourcePeerToken)
 {
     const QString type = message.value(QStringLiteral("type")).toString();
+    QString validationError;
+    if (!validateControlMessageShape(message, validationError)) {
+        appendLog(QStringLiteral("rejected control message: ") + validationError);
+        return;
+    }
+    const bool fromJoinerConnection = !sourcePeerToken.isEmpty();
+    if (fromJoinerConnection &&
+        (type == QStringLiteral("session.settings") || type == QStringLiteral("mesh.peer_list"))) {
+        appendLog(QStringLiteral("rejected unauthorized control family from peer ") +
+            sourcePeerToken.left(8) + QStringLiteral(": ") + type);
+        return;
+    }
     const bool trackMessage =
+        type == QStringLiteral("looper.recording.offer") ||
         type == QStringLiteral("looper.asset.request") ||
         type == QStringLiteral("looper.asset.start") ||
         type == QStringLiteral("looper.asset.chunk") ||
@@ -4656,14 +4915,16 @@ void MainWindow::handleControlMessage(const QJsonObject& message)
         refreshSongView(QStringLiteral("lyric"));
     } else if (type == QStringLiteral("song.set")) {
         handleSongSet(message);
+    } else if (type == QStringLiteral("looper.recording.offer")) {
+        handleRecordingOffer(message, sourcePeerToken);
     } else if (type == QStringLiteral("looper.asset.request")) {
-        handleLooperAssetRequest(message);
+        handleLooperAssetRequest(message, sourcePeerToken);
     } else if (type == QStringLiteral("looper.asset.start")) {
-        receiveLooperAssetStart(message);
+        receiveLooperAssetStart(message, sourcePeerToken);
     } else if (type == QStringLiteral("looper.asset.chunk")) {
-        receiveLooperAssetChunk(message);
+        receiveLooperAssetChunk(message, sourcePeerToken);
     } else if (type == QStringLiteral("looper.asset.done")) {
-        receiveLooperAssetDone(message);
+        receiveLooperAssetDone(message, sourcePeerToken);
     }
 }
 
@@ -4674,6 +4935,39 @@ void MainWindow::handleControlState(const QString& state, bool serverSide)
         : state;
     connectionLabel_->setText(displayState);
     appendLog(QStringLiteral("control: ") + state);
+    if (state.contains(QStringLiteral("disconnected"), Qt::CaseInsensitive) ||
+        state.contains(QStringLiteral("rejected"), Qt::CaseInsensitive) ||
+        state.contains(QStringLiteral("timeout"), Qt::CaseInsensitive) ||
+        state.contains(QStringLiteral("high-water"), Qt::CaseInsensitive)) {
+        if (serverSide) {
+            const ControlServer::Stats stats = controlServer_.stats();
+            appendLog(QStringLiteral(
+                "control_stats side=server accepted=%1 auth_rejects=%2 auth_timeouts=%3 frame_rejects=%4 "
+                "frame_timeouts=%5 tag_or_sequence_rejects=%6 output_rejects=%7 input_high_water=%8 output_high_water=%9")
+                .arg(stats.acceptedConnections)
+                .arg(stats.authenticationRejects)
+                .arg(stats.authenticationTimeouts)
+                .arg(stats.frameRejects)
+                .arg(stats.frameTimeouts)
+                .arg(stats.sequenceOrTagRejects)
+                .arg(stats.outputHighWaterRejects)
+                .arg(stats.maxBufferedInputBytes)
+                .arg(stats.maxQueuedOutputBytes));
+        } else {
+            const ControlClient::Stats stats = controlClient_.stats();
+            appendLog(QStringLiteral(
+                "control_stats side=client auth_rejects=%1 auth_timeouts=%2 frame_rejects=%3 frame_timeouts=%4 "
+                "tag_or_sequence_rejects=%5 output_rejects=%6 input_high_water=%7 output_high_water=%8")
+                .arg(stats.authenticationRejects)
+                .arg(stats.authenticationTimeouts)
+                .arg(stats.frameRejects)
+                .arg(stats.frameTimeouts)
+                .arg(stats.sequenceOrTagRejects)
+                .arg(stats.outputHighWaterRejects)
+                .arg(stats.maxBufferedInputBytes)
+                .arg(stats.maxQueuedOutputBytes));
+        }
+    }
     if (serverSide && state == QStringLiteral("TCP peer authenticated")) {
         remotePeerConnected_ = true;
         controlReconnectAttempts_ = 0;
@@ -4689,6 +4983,9 @@ void MainWindow::handleControlState(const QString& state, bool serverSide)
         controlReconnectAttempts_ = 0;
         controlReconnectTimer_.stop();
         setMixRemotePeerVisible(true);
+        for (const QJsonObject& offer : localRecordingOffers_) {
+            sendControl(offer);
+        }
     } else if (state.startsWith(QStringLiteral("TCP auth failed:"))) {
         remotePeerConnected_ = false;
         controlReconnectEnabled_ = false;
@@ -5005,10 +5302,10 @@ void MainWindow::handleMeshPeerAuthenticated(const QString& token, const QJsonOb
     if (meshMaxPeersSpin_ && meshMaxPeersSpin_->value() > 0 &&
         !meshPeerEndpoints_.contains(token) &&
         meshPeerEndpoints_.size() >= meshMaxPeersSpin_->value() + 1) {
-        controlServer_.send(QJsonObject{
+        controlServer_.sendTo(token, QJsonObject{
             {QStringLiteral("type"), QStringLiteral("session.error")},
             {QStringLiteral("message"), QStringLiteral("Mesh peer cap reached")},
-        });
+        }, true);
         appendLog(QStringLiteral("mesh peer rejected by max peer cap"));
         return;
     }
@@ -5036,7 +5333,6 @@ void MainWindow::broadcastMeshPeerList()
     controlServer_.send(QJsonObject{
         {QStringLiteral("type"), QStringLiteral("mesh.peer_list")},
         {QStringLiteral("session"), sessionHex()},
-        {QStringLiteral("key"), keyHex()},
         {QStringLiteral("peers"), peers},
     });
 }
@@ -5155,66 +5451,19 @@ void MainWindow::refreshLooperLanes()
     }
 
     QVector<LooperLaneStackWidget::LaneView> views;
+    QStringList missingWaveforms;
     views.reserve(bank.lanes.size());
     for (const LooperLane& lane : bank.lanes) {
         LooperLaneStackWidget::LaneView view;
         view.lane = lane;
         view.assetPath = looperAssetAbsolutePath(lane);
         if (!lane.assetPath.trimmed().isEmpty()) {
-            QFile file(view.assetPath);
-            if (file.open(QIODevice::ReadOnly)) {
-                const QByteArray data = file.readAll();
-                int channels = 0;
-                int bitsPerSample = 0;
-                qsizetype dataOffset = -1;
-                qsizetype dataBytes = 0;
-                qsizetype offset = 12;
-                if (data.size() >= 44 && data.mid(0, 4) == "RIFF" && data.mid(8, 4) == "WAVE") {
-                    while (offset + 8 <= data.size()) {
-                        const QByteArray id = data.mid(offset, 4);
-                        const quint32 size = waveformReadLe32(data, offset + 4);
-                        const qsizetype payload = offset + 8;
-                        if (payload + size > data.size()) {
-                            break;
-                        }
-                        if (id == "fmt " && size >= 16) {
-                            channels = waveformReadLe16(data, payload + 2);
-                            bitsPerSample = waveformReadLe16(data, payload + 14);
-                        } else if (id == "data") {
-                            dataOffset = payload;
-                            dataBytes = size;
-                        }
-                        offset = payload + size + (size % 2);
-                    }
-                }
-                if (channels > 0 && bitsPerSample == 16 && dataOffset >= 0 && dataBytes > 0) {
-                    constexpr int kPeakCount = 512;
-                    const qsizetype frameBytes = channels * 2;
-                    const qsizetype frames = dataBytes / frameBytes;
-                    view.sourceFrames = frames;
-                    view.peaks.assign(kPeakCount, 0.0f);
-                    for (int i = 0; i < kPeakCount && frames > 0; ++i) {
-                        const qsizetype begin = frames * i / kPeakCount;
-                        const qsizetype end = qMax<qsizetype>(begin + 1, frames * (i + 1) / kPeakCount);
-                        int peak = 0;
-                        for (qsizetype frame = begin; frame < end; ++frame) {
-                            int mixed = 0;
-                            for (int channel = 0; channel < channels; ++channel) {
-                                const qsizetype sampleOffset = dataOffset + frame * frameBytes + channel * 2;
-                                mixed += std::abs(static_cast<int>(static_cast<qint16>(waveformReadLe16(data, sampleOffset))));
-                            }
-                            peak = qMax(peak, mixed / channels);
-                        }
-                        view.peaks[i] = static_cast<float>(peak) / 32768.0f;
-                    }
-                    const auto maxPeak = std::max_element(view.peaks.begin(), view.peaks.end());
-                    if (maxPeak != view.peaks.end() && *maxPeak > 0.0f && *maxPeak < 0.85f) {
-                        const float scale = 0.85f / *maxPeak;
-                        for (float& peak : view.peaks) {
-                            peak = qMin(1.0f, peak * scale);
-                        }
-                    }
-                }
+            const auto cached = looperWaveformCache_.constFind(view.assetPath);
+            if (cached != looperWaveformCache_.cend()) {
+                view.peaks = cached.value().peaks;
+                view.sourceFrames = cached.value().sourceFrames;
+            } else if (!missingWaveforms.contains(view.assetPath)) {
+                missingWaveforms.append(view.assetPath);
             }
         }
         views.push_back(std::move(view));
@@ -5232,6 +5481,46 @@ void MainWindow::refreshLooperLanes()
         markerRate,
         playbackGrid_.bpm(),
         looperProject_.gridLockEnabled());
+
+    if (missingWaveforms.isEmpty() || looperWaveformWorkerRunning_) {
+        return;
+    }
+    looperWaveformWorkerRunning_ = true;
+    auto previews = std::make_shared<std::vector<std::pair<QString, LooperWaveformPreview>>>();
+    previews->reserve(static_cast<std::size_t>(missingWaveforms.size()));
+    const bool started = startFileWorkerTask(
+        [missingWaveforms, previews] {
+            for (const QString& path : missingWaveforms) {
+                LooperWaveformPreview preview;
+                constexpr int peakCount = 512;
+                preview.valid = readPcm16WaveformPeaks(
+                    path,
+                    peakCount,
+                    preview.peaks,
+                    &preview.sourceFrames);
+                previews->emplace_back(path, std::move(preview));
+            }
+        },
+        [this, previews] {
+            looperWaveformWorkerRunning_ = false;
+            constexpr qsizetype maxCachedWaveforms = 256;
+            for (auto& [path, preview] : *previews) {
+                while (looperWaveformCache_.size() >= maxCachedWaveforms &&
+                       !looperWaveformCache_.contains(path)) {
+                    looperWaveformCache_.erase(looperWaveformCache_.begin());
+                }
+                looperWaveformCache_.insert(path, std::move(preview));
+            }
+            refreshLooperLanes();
+        },
+        [this](const QString&) {
+            looperWaveformWorkerRunning_ = false;
+            QTimer::singleShot(100, this, [this] { refreshLooperLanes(); });
+        });
+    if (!started) {
+        looperWaveformWorkerRunning_ = false;
+        QTimer::singleShot(100, this, [this] { refreshLooperLanes(); });
+    }
 }
 
 void MainWindow::applySelectedLooperLaneRegion(qint64 startFrame, qint64 sourceStartFrame, qint64 sourceEndFrame)
@@ -5245,16 +5534,14 @@ void MainWindow::applySelectedLooperLaneRegion(qint64 startFrame, qint64 sourceS
         return;
     }
     LooperLane& lane = bank.lanes[row];
-    qint64 sourceFrames = 0;
-    try {
-        const WavMetadata metadata = readWavMetadata(looperAssetAbsolutePath(lane));
-        const qint64 frameBytes = static_cast<qint64>(metadata.channels) * metadata.bitsPerSample / 8;
-        sourceFrames = frameBytes > 0 ? metadata.dataBytes / frameBytes : 0;
-    } catch (const std::exception& error) {
-        appendLog(QStringLiteral("lane region edit failed: ") + QString::fromUtf8(error.what()));
+    const QString assetPath = looperAssetAbsolutePath(lane);
+    const auto preview = looperWaveformCache_.constFind(assetPath);
+    if (preview == looperWaveformCache_.cend()) {
+        appendLog(QStringLiteral("lane region edit deferred until bounded waveform inspection completes"));
         refreshLooperLanes();
         return;
     }
+    const qint64 sourceFrames = preview.value().sourceFrames;
     if (sourceFrames <= 0) {
         refreshLooperLanes();
         return;
@@ -5293,37 +5580,65 @@ void MainWindow::applyLooperLaneGain(int laneIndex, double gainDb)
 
 void MainWindow::addLooperWavs()
 {
-    const QStringList paths = QFileDialog::getOpenFileNames(
+    QStringList paths = QFileDialog::getOpenFileNames(
         this, QStringLiteral("Add WAV lanes"), QString(), QStringLiteral("WAV files (*.wav *.WAV)"));
-    for (const QString& path : paths) {
-        if (!QFileInfo::exists(path)) {
-            appendLog(QStringLiteral("could not import WAV: ") + path);
-            continue;
-        }
-        const QFileInfo info(path);
-        const QString assetHash = sha256FileHex(info.absoluteFilePath());
-        if (assetHash.isEmpty()) {
-            appendLog(QStringLiteral("could not hash WAV: ") + path);
-            continue;
-        }
-        const QString stagedPath = QDir(transientProjectFolder_).absoluteFilePath(
-            QStringLiteral("wavs/") + assetHash + QStringLiteral(".wav"));
-        QDir().mkpath(QFileInfo(stagedPath).absolutePath());
-        if (!QFileInfo::exists(stagedPath) && !QFile::copy(info.absoluteFilePath(), stagedPath)) {
-            appendLog(QStringLiteral("could not stage WAV: ") + path);
-            continue;
-        }
-        registerTransientTrackWav(stagedPath);
-        LooperLane lane;
-        lane.assetPath = stagedPath;
-        lane.assetHash = assetHash;
-        lane.name = info.completeBaseName();
-        if (!looperProject_.appendLane(looperProject_.activeBankIndex(), std::move(lane))) {
-            appendLog(QStringLiteral("could not add WAV lane: ") + path);
-        }
+    if (paths.isEmpty()) {
+        return;
     }
-    refreshLooperLanes();
-    regeneratePreparedMix();
+    constexpr int maxLanesPerBank = 128;
+    const int bankIndex = looperProject_.activeBankIndex();
+    const int remaining = qMax(0, maxLanesPerBank - looperProject_.banks().at(bankIndex).lanes.size());
+    if (paths.size() > remaining) {
+        appendLog(QStringLiteral("WAV import limited to %1 remaining lane slots; rejected=%2")
+            .arg(remaining)
+            .arg(paths.size() - remaining));
+        paths = paths.mid(0, remaining);
+    }
+    if (paths.isEmpty()) {
+        return;
+    }
+    const QString stagingFolder = transientProjectFolder_;
+    auto results = std::make_shared<std::vector<StagedPcm16Asset>>();
+    results->reserve(static_cast<std::size_t>(paths.size()));
+    (void)startFileWorkerTask(
+        [paths, stagingFolder, results] {
+            for (const QString& path : paths) {
+                results->push_back(stagePcm16Asset(path, stagingFolder));
+            }
+        },
+        [this, bankIndex, results] {
+            if (bankIndex < 0 || bankIndex >= looperProject_.banks().size()) {
+                return;
+            }
+            int imported = 0;
+            for (const StagedPcm16Asset& asset : *results) {
+                if (!asset.error.isEmpty()) {
+                    appendLog(QStringLiteral("could not import WAV %1: %2")
+                        .arg(asset.sourcePath, asset.error));
+                    continue;
+                }
+                registerTransientTrackWav(asset.stagedPath);
+                looperWaveformCache_.remove(asset.stagedPath);
+                LooperLane lane;
+                lane.assetPath = asset.stagedPath;
+                lane.assetHash = asset.sha256;
+                lane.name = asset.displayName;
+                if (!looperProject_.appendLane(bankIndex, std::move(lane))) {
+                    appendLog(QStringLiteral("could not add WAV lane: ") + asset.sourcePath);
+                    continue;
+                }
+                ++imported;
+            }
+            appendLog(QStringLiteral("WAV import worker completed: imported=%1 requested=%2 active=%3 high_water=%4 completed=%5 rejected=%6")
+                .arg(imported)
+                .arg(static_cast<qulonglong>(results->size()))
+                .arg(fileWorkerTasksActive_)
+                .arg(fileWorkerTasksHighWater_)
+                .arg(fileWorkerTasksCompleted_)
+                .arg(fileWorkerTasksRejected_));
+            refreshLooperLanes();
+            regeneratePreparedMix();
+        });
 }
 
 void MainWindow::loadWavIntoLooperLane()
@@ -5375,53 +5690,62 @@ void MainWindow::loadWavIntoLooperLane()
     }
 
     const QString sourcePath = QDir::fromNativeSeparators(pathEdit->text());
-    QString reason;
-    if (!isImportablePcm16Wav(sourcePath, &reason)) {
-        QMessageBox::warning(this, QStringLiteral("Load WAV"), reason);
-        return;
-    }
-    const QFileInfo info(sourcePath);
-    const QString assetHash = sha256FileHex(info.absoluteFilePath());
-    if (assetHash.isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("Load WAV"), QStringLiteral("Could not hash the selected WAV."));
-        return;
-    }
-    const QString stagedPath = QDir(transientProjectFolder_).absoluteFilePath(
-        QStringLiteral("wavs/") + assetHash + QStringLiteral(".wav"));
-    QDir().mkpath(QFileInfo(stagedPath).absolutePath());
-    if (!QFileInfo::exists(stagedPath) && !QFile::copy(info.absoluteFilePath(), stagedPath)) {
-        QMessageBox::warning(this, QStringLiteral("Load WAV"), QStringLiteral("Could not stage the selected WAV."));
-        return;
-    }
-    registerTransientTrackWav(stagedPath);
-
-    int laneIndex = laneBox->currentData().toInt();
-    if (laneIndex < 0) {
-        if (!looperProject_.appendLane(bankIndex, LooperLane{})) {
-            QMessageBox::warning(this, QStringLiteral("Load WAV"), QStringLiteral("Could not create a track lane."));
-            return;
-        }
-        laneIndex = looperProject_.banks().at(bankIndex).lanes.size() - 1;
-    }
-    if (laneIndex < 0 || laneIndex >= looperProject_.banks().at(bankIndex).lanes.size()) {
-        QMessageBox::warning(this, QStringLiteral("Load WAV"), QStringLiteral("The selected track lane is no longer available."));
-        return;
-    }
-    LooperLane& lane = looperProject_.banks()[bankIndex].lanes[laneIndex];
-    lane.assetPath = stagedPath;
-    lane.assetHash = assetHash;
-    if (isDefaultEmptyTrackName(lane.name) || lane.name.trimmed().isEmpty()) {
-        lane.name = info.completeBaseName();
-    }
-    lane.startFrame = 0;
-    lane.stopFrame = -1;
-    lane.loopStartFrame = -1;
-    lane.loopEndFrame = -1;
-    lane.loopEnabled = false;
-    selectedLooperLane_ = laneIndex;
-    refreshLooperLanes();
-    regeneratePreparedMix();
-    syncLooperArrangement();
+    const int selectedLaneIndex = laneBox->currentData().toInt();
+    const QString targetLaneId = selectedLaneIndex >= 0 && selectedLaneIndex < bank.lanes.size()
+        ? bank.lanes.at(selectedLaneIndex).id
+        : QString{};
+    const QString stagingFolder = transientProjectFolder_;
+    auto result = std::make_shared<StagedPcm16Asset>();
+    (void)startFileWorkerTask(
+        [sourcePath, stagingFolder, result] {
+            *result = stagePcm16Asset(sourcePath, stagingFolder);
+        },
+        [this, bankIndex, targetLaneId, result] {
+            if (!result->error.isEmpty()) {
+                QMessageBox::warning(this, QStringLiteral("Load WAV"), result->error);
+                return;
+            }
+            if (bankIndex < 0 || bankIndex >= looperProject_.banks().size()) {
+                return;
+            }
+            int laneIndex = -1;
+            if (!targetLaneId.isEmpty()) {
+                const auto& currentLanes = looperProject_.banks().at(bankIndex).lanes;
+                for (int index = 0; index < currentLanes.size(); ++index) {
+                    if (currentLanes.at(index).id == targetLaneId) {
+                        laneIndex = index;
+                        break;
+                    }
+                }
+                if (laneIndex < 0) {
+                    QMessageBox::warning(this, QStringLiteral("Load WAV"), QStringLiteral("The selected track lane is no longer available."));
+                    return;
+                }
+            } else {
+                if (!looperProject_.appendLane(bankIndex, LooperLane{})) {
+                    QMessageBox::warning(this, QStringLiteral("Load WAV"), QStringLiteral("Could not create a track lane."));
+                    return;
+                }
+                laneIndex = looperProject_.banks().at(bankIndex).lanes.size() - 1;
+            }
+            registerTransientTrackWav(result->stagedPath);
+            looperWaveformCache_.remove(result->stagedPath);
+            LooperLane& lane = looperProject_.banks()[bankIndex].lanes[laneIndex];
+            lane.assetPath = result->stagedPath;
+            lane.assetHash = result->sha256;
+            if (isDefaultEmptyTrackName(lane.name) || lane.name.trimmed().isEmpty()) {
+                lane.name = result->displayName;
+            }
+            lane.startFrame = 0;
+            lane.stopFrame = -1;
+            lane.loopStartFrame = -1;
+            lane.loopEndFrame = -1;
+            lane.loopEnabled = false;
+            selectedLooperLane_ = laneIndex;
+            refreshLooperLanes();
+            regeneratePreparedMix();
+            syncLooperArrangement();
+        });
 }
 
 void MainWindow::addEmptyLooperLane()
@@ -5630,43 +5954,57 @@ void MainWindow::importLastCaptureToArmedLane()
         armedRecordLane_ >= looperProject_.banks().at(armedRecordBank_).lanes.size()) {
         return;
     }
-    QString reason;
-    if (!isImportablePcm16Wav(lastCapturePath_, &reason)) {
-        appendLog(QStringLiteral("recorded lane WAV not importable: ") + reason);
-        return;
-    }
-    const QFileInfo info(lastCapturePath_);
-    const QString assetHash = sha256FileHex(info.absoluteFilePath());
-    if (assetHash.isEmpty()) {
-        appendLog(QStringLiteral("recorded lane WAV hash failed"));
-        return;
-    }
-    const QString stagedPath = QDir(transientProjectFolder_).absoluteFilePath(
-        QStringLiteral("wavs/") + assetHash + QStringLiteral(".wav"));
-    QDir().mkpath(QFileInfo(stagedPath).absolutePath());
-    if (!QFileInfo::exists(stagedPath) && !QFile::copy(info.absoluteFilePath(), stagedPath)) {
-        appendLog(QStringLiteral("could not stage recorded lane WAV: ") + info.absoluteFilePath());
-        return;
-    }
-    registerTransientTrackWav(stagedPath);
-    LooperLane& lane = looperProject_.banks()[armedRecordBank_].lanes[armedRecordLane_];
-    lane.assetPath = stagedPath;
-    lane.assetHash = assetHash;
-    if (isDefaultEmptyTrackName(lane.name) || lane.name.trimmed().isEmpty()) {
-        lane.name = info.completeBaseName();
-    }
-    lane.startFrame = 0;
-    lane.stopFrame = -1;
-    lane.loopStartFrame = -1;
-    lane.loopEndFrame = -1;
-    lane.loopEnabled = false;
-    appendLog(QStringLiteral("recorded lane imported: %1").arg(lane.name));
-    armedRecordBank_ = -1;
-    armedRecordLane_ = -1;
-    armedRecordMode_.clear();
-    refreshLooperLanes();
-    regeneratePreparedMix();
-    syncLooperArrangement();
+    const int bankIndex = armedRecordBank_;
+    const QString laneId = looperProject_.banks().at(bankIndex).lanes.at(armedRecordLane_).id;
+    const QString sourcePath = lastCapturePath_;
+    const QString stagingFolder = transientProjectFolder_;
+    auto result = std::make_shared<StagedPcm16Asset>();
+    (void)startFileWorkerTask(
+        [sourcePath, stagingFolder, result] {
+            *result = stagePcm16Asset(sourcePath, stagingFolder);
+        },
+        [this, bankIndex, laneId, result] {
+            if (!result->error.isEmpty()) {
+                appendLog(QStringLiteral("recorded lane WAV not importable: ") + result->error);
+                return;
+            }
+            if (bankIndex < 0 || bankIndex >= looperProject_.banks().size()) {
+                return;
+            }
+            int laneIndex = -1;
+            const auto& lanes = looperProject_.banks().at(bankIndex).lanes;
+            for (int index = 0; index < lanes.size(); ++index) {
+                if (lanes.at(index).id == laneId) {
+                    laneIndex = index;
+                    break;
+                }
+            }
+            if (laneIndex < 0) {
+                appendLog(QStringLiteral("recorded lane target was removed before import completed"));
+                return;
+            }
+            registerTransientTrackWav(result->stagedPath);
+            looperWaveformCache_.remove(result->stagedPath);
+            LooperLane& lane = looperProject_.banks()[bankIndex].lanes[laneIndex];
+            lane.assetPath = result->stagedPath;
+            lane.assetHash = result->sha256;
+            if (isDefaultEmptyTrackName(lane.name) || lane.name.trimmed().isEmpty()) {
+                lane.name = result->displayName;
+            }
+            lane.startFrame = 0;
+            lane.stopFrame = -1;
+            lane.loopStartFrame = -1;
+            lane.loopEndFrame = -1;
+            lane.loopEnabled = false;
+            appendLog(QStringLiteral("recorded lane imported: %1").arg(lane.name));
+            armedRecordBank_ = -1;
+            armedRecordLane_ = -1;
+            armedRecordMode_.clear();
+            refreshLooperLanes();
+            regeneratePreparedMix();
+            publishLocalRecordingOffer(bankIndex, laneId, lane);
+            syncLooperArrangement();
+        });
 }
 
 void MainWindow::renameSelectedLooperLane()
@@ -5861,87 +6199,253 @@ QString MainWindow::looperAssetAbsolutePath(const LooperLane& lane) const
 
 bool MainWindow::materializeLooperAssets(const QString& projectFolder)
 {
-    QDir folder(projectFolder);
-    if (!folder.mkpath(QStringLiteral("wavs"))) {
-        QMessageBox::warning(this, QStringLiteral("Save Jam2 Song"), QStringLiteral("Could not create the project's wavs folder."));
+    struct MaterializeResult {
+        LooperProject project;
+        QString projectFolder;
+        QString error;
+    };
+    auto result = std::make_shared<MaterializeResult>();
+    result->project = looperProject_;
+    result->projectFolder = QDir(projectFolder).absolutePath();
+    const QString sourceProjectFolder = projectFolder_;
+    const QByteArray sourceSnapshot = currentProjectSnapshot();
+    QEventLoop waitLoop;
+    const bool started = startFileWorkerTask(
+        [result, sourceProjectFolder] {
+            QDir folder(result->projectFolder);
+            if (!folder.mkpath(QStringLiteral("wavs"))) {
+                result->error = QStringLiteral("Could not create the project's wavs folder.");
+                return;
+            }
+            for (LooperBank& bank : result->project.banks()) {
+                for (LooperLane& lane : bank.lanes) {
+                    if (lane.assetPath.trimmed().isEmpty()) {
+                        continue;
+                    }
+                    const QString source = QFileInfo(lane.assetPath).isAbsolute() || sourceProjectFolder.isEmpty()
+                        ? lane.assetPath
+                        : QDir(sourceProjectFolder).absoluteFilePath(lane.assetPath);
+                    if (!isSha256Hex(lane.assetHash) || !QFileInfo::exists(source)) {
+                        result->error = QStringLiteral("A lane WAV is missing or has an invalid hash: %1").arg(lane.name);
+                        return;
+                    }
+                    const StagedPcm16Asset materialized = stagePcm16Asset(source, result->projectFolder);
+                    if (!materialized.error.isEmpty()) {
+                        result->error = QStringLiteral("Could not materialize WAV %1: %2")
+                            .arg(lane.name, materialized.error);
+                        return;
+                    }
+                    if (materialized.sha256 != lane.assetHash) {
+                        result->error = QStringLiteral("A lane WAV does not match its content hash: %1").arg(lane.name);
+                        return;
+                    }
+                    lane.assetPath = QStringLiteral("wavs/") + lane.assetHash + QStringLiteral(".wav");
+                }
+            }
+        },
+        [&waitLoop] { waitLoop.quit(); },
+        [&waitLoop, result](const QString& error) {
+            result->error = error;
+            waitLoop.quit();
+        });
+    if (!started) {
+        QMessageBox::warning(this, QStringLiteral("Save Jam2 Song"), QStringLiteral("The bounded file worker is busy; try Save again."));
         return false;
     }
-    QStringList stagedFilesToRemove;
-    const QString stagingFolder = transientProjectFolder_;
-    for (LooperBank& bank : looperProject_.banks()) {
-        for (LooperLane& lane : bank.lanes) {
-            if (lane.assetPath.trimmed().isEmpty()) {
-                continue;
-            }
-            const QString source = looperAssetAbsolutePath(lane);
-            if (lane.assetHash.isEmpty() || !QFileInfo::exists(source)) {
-                QMessageBox::warning(this, QStringLiteral("Save Jam2 Song"), QStringLiteral("A lane WAV is missing: %1").arg(lane.name));
-                return false;
-            }
-            if (sha256FileHex(source) != lane.assetHash) {
-                QMessageBox::warning(this, QStringLiteral("Save Jam2 Song"), QStringLiteral("A lane WAV does not match its content hash: %1").arg(lane.name));
-                return false;
-            }
-            const QString fileName = lane.assetHash + QStringLiteral(".wav");
-            const QString relativePath = QStringLiteral("wavs/") + fileName;
-            const QString destination = folder.absoluteFilePath(relativePath);
-            if (QFileInfo::exists(destination)) {
-                if (sha256FileHex(destination) != lane.assetHash) {
-                    QMessageBox::warning(this, QStringLiteral("Save Jam2 Song"), QStringLiteral("Project WAV hash mismatch: %1").arg(fileName));
-                    return false;
-                }
-            } else {
-                if (!QFile::copy(source, destination)) {
-                    QMessageBox::warning(this, QStringLiteral("Save Jam2 Song"), QStringLiteral("Could not copy WAV into project: %1").arg(lane.name));
-                    return false;
-                }
-                if (sha256FileHex(destination) != lane.assetHash) {
-                    QFile::remove(destination);
-                    QMessageBox::warning(this, QStringLiteral("Save Jam2 Song"), QStringLiteral("Copied WAV failed hash verification: %1").arg(lane.name));
-                    return false;
-                }
-                registerTransientTrackWav(destination);
-            }
-            if (sameOrChildPath(stagingFolder, source) && QDir::cleanPath(source) != QDir::cleanPath(destination)) {
-                stagedFilesToRemove.append(source);
-            }
-            lane.assetPath = relativePath;
-        }
+    QProgressDialog progress(
+        QStringLiteral("Verifying and materializing project WAVs..."),
+        QString{},
+        0,
+        0,
+        this);
+    progress.setCancelButton(nullptr);
+    progress.setWindowModality(Qt::ApplicationModal);
+    progress.setMinimumDuration(0);
+    waitLoop.exec();
+    progress.close();
+    if (!result->error.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Save Jam2 Song"), result->error);
+        return false;
     }
-    projectFolder_ = folder.absolutePath();
-    for (const QString& stagedFile : stagedFilesToRemove) {
-        QFile::remove(stagedFile);
+    if (currentProjectSnapshot() != sourceSnapshot) {
+        QMessageBox::warning(this, QStringLiteral("Save Jam2 Song"), QStringLiteral("The project changed while its WAVs were being materialized; Save again."));
+        return false;
     }
+    looperProject_ = std::move(result->project);
+    projectFolder_ = result->projectFolder;
     return true;
 }
 
 void MainWindow::regeneratePreparedMix()
 {
+    ++preparedMixRequests_;
+    if (preparedMixWorkerRunning_) {
+        preparedMixRerunPending_ = true;
+        ++preparedMixCoalesced_;
+        return;
+    }
+
     const int sampleRate = sampleRateSpin_ != nullptr ? sampleRateSpin_->value() : 48000;
     const QString cachePath = appReleaseFilePath(
         QStringLiteral("prepared_mixes"),
         QStringLiteral("active-bank-%1.wav").arg(looperProject_.activeBankIndex()));
-    preparedMix_ = PreparedMixRenderer::render(looperProject_, projectFolder_, sampleRate, cachePath, trackController_.model());
+    const LooperProject project = looperProject_;
+    const QString projectFolder = projectFolder_;
+    const SharedTrackModel track = trackController_.model();
+    QPointer<MainWindow> self(this);
+    preparedMixWorkerRunning_ = true;
+    fileWorkerPool_.start(QRunnable::create([
+        self,
+        project,
+        projectFolder,
+        sampleRate,
+        cachePath,
+        track
+    ]() mutable {
+        PreparedMixResult result;
+        try {
+            result = PreparedMixRenderer::render(
+                project,
+                projectFolder,
+                sampleRate,
+                cachePath,
+                track);
+        } catch (const std::exception& error) {
+            result.error = QString::fromUtf8(error.what());
+        } catch (...) {
+            result.error = QStringLiteral("unknown prepared-mix worker exception");
+        }
+        if (self.isNull()) {
+            return;
+        }
+        QMetaObject::invokeMethod(self, [self, result = std::move(result)]() mutable {
+            if (self.isNull()) {
+                return;
+            }
+            self->preparedMixWorkerRunning_ = false;
+            if (self->preparedMixRerunPending_) {
+                self->preparedMixRerunPending_ = false;
+                self->regeneratePreparedMix();
+                return;
+            }
+            self->applyPreparedMixResult(std::move(result));
+        }, Qt::QueuedConnection);
+    }));
+}
+
+bool MainWindow::startFileWorkerTask(
+    std::function<void()> work,
+    std::function<void()> complete,
+    std::function<void(const QString&)> failed)
+{
+    constexpr int maxFileWorkerTasks = 2;
+    if (fileWorkerTasksActive_ >= maxFileWorkerTasks) {
+        ++fileWorkerTasksRejected_;
+        appendLog(QStringLiteral("file worker saturated: active=%1 capacity=%2 rejected=%3")
+            .arg(fileWorkerTasksActive_)
+            .arg(maxFileWorkerTasks)
+            .arg(fileWorkerTasksRejected_));
+        return false;
+    }
+    ++fileWorkerTasksActive_;
+    fileWorkerTasksHighWater_ = qMax(fileWorkerTasksHighWater_, fileWorkerTasksActive_);
+    QPointer<MainWindow> self(this);
+    auto unexpectedError = std::make_shared<QString>();
+    fileWorkerPool_.start(QRunnable::create([
+        self,
+        work = std::move(work),
+        complete = std::move(complete),
+        failed = std::move(failed),
+        unexpectedError
+    ]() mutable {
+        try {
+            work();
+        } catch (const std::exception& error) {
+            *unexpectedError = QString::fromUtf8(error.what());
+        } catch (...) {
+            *unexpectedError = QStringLiteral("unknown worker exception");
+        }
+        if (self.isNull()) {
+            return;
+        }
+        QMetaObject::invokeMethod(self, [
+            self,
+            complete = std::move(complete),
+            failed = std::move(failed),
+            unexpectedError
+        ]() mutable {
+            if (self.isNull()) {
+                return;
+            }
+            self->fileWorkerTasksActive_ = qMax(0, self->fileWorkerTasksActive_ - 1);
+            ++self->fileWorkerTasksCompleted_;
+            if (!unexpectedError->isEmpty()) {
+                self->appendLog(QStringLiteral("file worker failed: %1 active=%2 high_water=%3 completed=%4 rejected=%5")
+                    .arg(*unexpectedError)
+                    .arg(self->fileWorkerTasksActive_)
+                    .arg(self->fileWorkerTasksHighWater_)
+                    .arg(self->fileWorkerTasksCompleted_)
+                    .arg(self->fileWorkerTasksRejected_));
+                if (failed) {
+                    failed(*unexpectedError);
+                }
+                return;
+            }
+            complete();
+        }, Qt::QueuedConnection);
+    }));
+    return true;
+}
+
+void MainWindow::applyPreparedMixResult(PreparedMixResult result)
+{
+    preparedMix_ = std::move(result);
     if (!preparedMix_.error.isEmpty()) {
-        appendLog(QStringLiteral("prepared mix failed: ") + preparedMix_.error);
+        ++preparedMixFailures_;
+        appendLog(QStringLiteral("prepared mix failed: %1 worker_requests=%2 worker_coalesced=%3 worker_failures=%4")
+            .arg(preparedMix_.error)
+            .arg(preparedMixRequests_)
+            .arg(preparedMixCoalesced_)
+            .arg(preparedMixFailures_));
+        playPreparedMixWhenReady_ = false;
+        restartPreparedMixWhenReady_ = false;
         return;
     }
     try {
-        const WavMetadata metadata = readWavMetadata(preparedMix_.path);
         auto& track = trackController_.model();
         track.fileName = QStringLiteral("Prepared Bank %1").arg(looperProject_.banks().at(looperProject_.activeBankIndex()).id);
         track.filePath = preparedMix_.path;
-        track.fileBytes = QFileInfo(preparedMix_.path).size();
-        track.sampleRate = metadata.sampleRate;
-        track.durationMs = metadata.durationMs;
-        track.sha256 = metadata.sha256;
+        track.fileBytes = preparedMix_.fileBytes;
+        track.sampleRate = preparedMix_.sampleRate;
+        track.durationMs = preparedMix_.durationMs;
+        track.sha256 = preparedMix_.sha256;
         updateTrackControls();
         loadTrackWaveform();
         loadPreparedMixIntoEngine();
-        appendLog(QStringLiteral("prepared mix: %1 frames in %2 ms").arg(preparedMix_.frames).arg(preparedMix_.renderMs));
+        appendLog(QStringLiteral("prepared mix: %1 frames in %2 ms worker_requests=%3 worker_coalesced=%4 worker_failures=%5")
+            .arg(preparedMix_.frames)
+            .arg(preparedMix_.renderMs)
+            .arg(preparedMixRequests_)
+            .arg(preparedMixCoalesced_)
+            .arg(preparedMixFailures_));
+        if (playPreparedMixWhenReady_) {
+            playPreparedMixWhenReady_ = false;
+            sendJamCommand(QStringLiteral("track restart"));
+            if (gridScheduleLabel_) {
+                gridScheduleLabel_->setText(QStringLiteral("Track restart: waiting for engine bar schedule"));
+            }
+        } else if (restartPreparedMixWhenReady_) {
+            restartPreparedMixWhenReady_ = false;
+            sendJamCommand(QStringLiteral("track restart"));
+        }
     } catch (const std::exception& error) {
         preparedMix_.error = QString::fromUtf8(error.what());
-        appendLog(QStringLiteral("prepared mix metadata failed: ") + preparedMix_.error);
+        ++preparedMixFailures_;
+        appendLog(QStringLiteral("prepared mix metadata failed: %1 worker_failures=%2")
+            .arg(preparedMix_.error)
+            .arg(preparedMixFailures_));
+        playPreparedMixWhenReady_ = false;
+        restartPreparedMixWhenReady_ = false;
     }
 }
 
@@ -6068,28 +6572,39 @@ void MainWindow::loadTrackMetadata()
     if (path.isEmpty()) {
         return;
     }
-    QFileInfo info(path);
-    try {
-        const WavMetadata metadata = readWavMetadata(path);
-        const QJsonObject sidecar = readSidecarJson(path);
-        trackController_.model().fileName = info.fileName();
-        trackController_.model().filePath = info.absoluteFilePath();
-        trackController_.model().fileBytes = info.size();
-        trackController_.model().sampleRate = sidecar.value(QStringLiteral("sample_rate")).toInt(metadata.sampleRate);
-        trackController_.model().durationMs = sidecar.value(QStringLiteral("duration_ms")).toInt(metadata.durationMs);
-        trackController_.model().sha256 = metadata.sha256;
-        trackController_.model().guessedBpm = 0.0;
-        trackController_.model().acceptedBpm = sidecar.value(QStringLiteral("accepted_bpm")).toDouble(120.0);
-        trackController_.model().key = QStringLiteral("Unknown");
-        trackController_.model().loopEnabled = true;
-        trackController_.model().loopStartSeconds = -1.0;
-        trackController_.model().loopEndSeconds = -1.0;
-    } catch (const std::exception& error) {
-        QMessageBox::warning(this, QStringLiteral("Jam2 Track"), QString::fromUtf8(error.what()));
-        return;
-    }
-    updateTrackControls();
-    loadTrackWaveform();
+    const QFileInfo info(path);
+    auto metadata = std::make_shared<WavMetadata>();
+    auto sidecar = std::make_shared<QJsonObject>();
+    auto error = std::make_shared<QString>();
+    (void)startFileWorkerTask(
+        [path, metadata, sidecar, error] {
+            try {
+                *metadata = readWavMetadata(path);
+                *sidecar = readSidecarJson(path);
+            } catch (const std::exception& exception) {
+                *error = QString::fromUtf8(exception.what());
+            }
+        },
+        [this, info, metadata, sidecar, error] {
+            if (!error->isEmpty()) {
+                QMessageBox::warning(this, QStringLiteral("Jam2 Track"), *error);
+                return;
+            }
+            trackController_.model().fileName = info.fileName();
+            trackController_.model().filePath = info.absoluteFilePath();
+            trackController_.model().fileBytes = info.size();
+            trackController_.model().sampleRate = sidecar->value(QStringLiteral("sample_rate")).toInt(metadata->sampleRate);
+            trackController_.model().durationMs = sidecar->value(QStringLiteral("duration_ms")).toInt(metadata->durationMs);
+            trackController_.model().sha256 = metadata->sha256;
+            trackController_.model().guessedBpm = 0.0;
+            trackController_.model().acceptedBpm = sidecar->value(QStringLiteral("accepted_bpm")).toDouble(120.0);
+            trackController_.model().key = QStringLiteral("Unknown");
+            trackController_.model().loopEnabled = true;
+            trackController_.model().loopStartSeconds = -1.0;
+            trackController_.model().loopEndSeconds = -1.0;
+            updateTrackControls();
+            loadTrackWaveform();
+        });
 }
 
 void MainWindow::chooseCaptureFolder()
@@ -6285,6 +6800,7 @@ void MainWindow::stopInputCapture(std::uint64_t targetFrame)
 
 void MainWindow::loadTrackWaveform()
 {
+    const std::uint64_t revision = ++trackWaveformRevision_;
     const QString path = trackController_.model().filePath;
     if (path.isEmpty() || !QFileInfo::exists(path)) {
         if (trackWaveform_) {
@@ -6292,10 +6808,44 @@ void MainWindow::loadTrackWaveform()
         }
         return;
     }
-    if (trackWaveform_) {
-        trackWaveform_->loadWav(path);
-        trackWaveform_->setDurationMs(trackController_.model().durationMs);
-        trackWaveform_->setBpm(trackController_.model().acceptedBpm);
+    if (trackWaveformWorkerRunning_) {
+        return;
+    }
+    trackWaveformWorkerRunning_ = true;
+    auto peaks = std::make_shared<std::vector<float>>();
+    auto valid = std::make_shared<bool>(false);
+    const bool started = startFileWorkerTask(
+        [path, peaks, valid] {
+            constexpr int peakCount = 2048;
+            *valid = readPcm16WaveformPeaks(path, peakCount, *peaks);
+        },
+        [this, path, revision, peaks, valid] {
+            trackWaveformWorkerRunning_ = false;
+            if (revision != trackWaveformRevision_ || path != trackController_.model().filePath) {
+                loadTrackWaveform();
+                return;
+            }
+            if (trackWaveform_) {
+                trackWaveform_->setPeaks(std::move(*peaks), *valid);
+                trackWaveform_->setDurationMs(trackController_.model().durationMs);
+                trackWaveform_->setBpm(trackController_.model().acceptedBpm);
+            }
+        },
+        [this, revision](const QString&) {
+            trackWaveformWorkerRunning_ = false;
+            QTimer::singleShot(100, this, [this, revision] {
+                if (revision == trackWaveformRevision_) {
+                    loadTrackWaveform();
+                }
+            });
+        });
+    if (!started) {
+        trackWaveformWorkerRunning_ = false;
+        QTimer::singleShot(100, this, [this, revision] {
+            if (revision == trackWaveformRevision_) {
+                loadTrackWaveform();
+            }
+        });
     }
 }
 
@@ -6305,8 +6855,10 @@ void MainWindow::playTrack()
         QMessageBox::warning(this, QStringLiteral("Jam2 Track"), QStringLiteral("Start the local engine before playing the prepared mix."));
         return;
     }
-    if (preparedMix_.path.isEmpty() || !preparedMix_.error.isEmpty()) {
+    if (preparedMixWorkerRunning_ || preparedMix_.path.isEmpty() || !preparedMix_.error.isEmpty()) {
+        playPreparedMixWhenReady_ = true;
         regeneratePreparedMix();
+        return;
     }
     loadPreparedMixIntoEngine();
     sendJamCommand(QStringLiteral("track restart"));
@@ -6750,122 +7302,547 @@ void MainWindow::applyRemoteMetronomeSettings(const QJsonObject& message)
     }
 }
 
-void MainWindow::handleLooperAssetRequest(const QJsonObject& message)
+void MainWindow::publishLocalRecordingOffer(
+    int bankIndex,
+    const QString& targetLaneId,
+    const LooperLane& lane)
+{
+    if (!looperProject_.trackSyncEnabled() || !jam2_.isRunning() || controlServerMode_ ||
+        bankIndex < 0 || bankIndex >= looperProject_.banks().size() || targetLaneId.isEmpty() ||
+        !isSha256Hex(lane.assetHash) || lane.assetPath.isEmpty()) {
+        return;
+    }
+    while (localRecordingOffers_.size() >= kMaxLooperAssetRequests) {
+        localRecordingOffers_.erase(localRecordingOffers_.begin());
+    }
+    while (recordingOfferAssetPaths_.size() >= kMaxLooperAssetRequests * 2) {
+        recordingOfferAssetPaths_.erase(recordingOfferAssetPaths_.begin());
+    }
+    const QString recordingId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QJsonObject offer{
+        {QStringLiteral("type"), QStringLiteral("looper.recording.offer")},
+        {QStringLiteral("recording_id"), recordingId},
+        {QStringLiteral("bank"), bankIndex},
+        {QStringLiteral("target_lane_id"), targetLaneId},
+        {QStringLiteral("sha256"), lane.assetHash},
+        {QStringLiteral("name"), lane.name.left(512)},
+    };
+    localRecordingOffers_.insert(recordingId, offer);
+    recordingOfferAssetPaths_.insert(lane.assetHash, lane.assetPath);
+    sendControl(offer);
+    appendLog(QStringLiteral("offered recorded lane for Track Sync: %1 hash=%2")
+        .arg(lane.name, lane.assetHash));
+}
+
+void MainWindow::handleRecordingOffer(const QJsonObject& message, const QString& sourcePeerToken)
+{
+    if (!controlServerMode_ || sourcePeerToken.isEmpty()) {
+        appendLog(QStringLiteral("rejected recording offer from a non-joiner control path"));
+        return;
+    }
+    const QString recordingId = message.value(QStringLiteral("recording_id")).toString().toLower();
+    if (appliedRecordingContributionIds_.contains(recordingId)) {
+        return;
+    }
+    const QString hash = message.value(QStringLiteral("sha256")).toString().toLower();
+    if (!pendingRecordingContributions_.contains(recordingId)) {
+        if (pendingRecordingContributions_.size() >= kMaxLooperAssetRequests) {
+            appendLog(QStringLiteral("recording contribution queue is full"));
+            return;
+        }
+        pendingRecordingContributions_.insert(recordingId, PendingRecordingContribution{
+            sourcePeerToken,
+            message.value(QStringLiteral("bank")).toInt(),
+            message.value(QStringLiteral("target_lane_id")).toString(),
+            hash,
+            message.value(QStringLiteral("name")).toString(),
+        });
+    }
+    if (validatedRecordingAssetHashes_.contains(hash)) {
+        applyPendingRecordingContributions();
+        return;
+    }
+    if (!pendingLooperAssetHashes_.contains(hash)) {
+        pendingLooperAssetHashes_.append(hash);
+    }
+    if (!pendingRecordingAssetSources_.contains(hash)) {
+        pendingRecordingAssetSources_.insert(hash, sourcePeerToken);
+    }
+    QJsonArray hashes;
+    hashes.append(hash);
+    if (!sendControlTo(sourcePeerToken, QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("looper.asset.request")},
+            {QStringLiteral("hashes"), hashes},
+        })) {
+        appendLog(QStringLiteral("could not request offered recording asset from peer ") +
+            sourcePeerToken.left(8));
+    }
+}
+
+void MainWindow::applyPendingRecordingContributions()
+{
+    if (!controlServerMode_) {
+        return;
+    }
+    QStringList completedIds;
+    bool arrangementChanged = false;
+    for (auto it = pendingRecordingContributions_.constBegin();
+         it != pendingRecordingContributions_.constEnd(); ++it) {
+        const PendingRecordingContribution& contribution = it.value();
+        if (!validatedRecordingAssetHashes_.contains(contribution.assetHash) ||
+            contribution.bankIndex < 0 || contribution.bankIndex >= looperProject_.banks().size()) {
+            continue;
+        }
+        const QString assetPath = looperAssetPathForHash(contribution.assetHash);
+        auto& lanes = looperProject_.banks()[contribution.bankIndex].lanes;
+        int targetIndex = -1;
+        for (int index = 0; index < lanes.size(); ++index) {
+            if (lanes.at(index).id == contribution.targetLaneId) {
+                targetIndex = index;
+                break;
+            }
+        }
+        const bool targetReservedForLocalRecording =
+            contribution.bankIndex == armedRecordBank_ && targetIndex == armedRecordLane_;
+        bool applied = false;
+        if (targetIndex >= 0 && lanes.at(targetIndex).assetHash == contribution.assetHash) {
+            applied = true;
+        } else if (targetIndex >= 0 && !targetReservedForLocalRecording &&
+                   lanes.at(targetIndex).assetHash.isEmpty() && lanes.at(targetIndex).assetPath.isEmpty()) {
+            LooperLane& lane = lanes[targetIndex];
+            lane.assetPath = assetPath;
+            lane.assetHash = contribution.assetHash;
+            if (!contribution.name.trimmed().isEmpty() &&
+                (lane.name.trimmed().isEmpty() || isDefaultEmptyTrackName(lane.name))) {
+                lane.name = contribution.name;
+            }
+            lane.startFrame = 0;
+            lane.stopFrame = -1;
+            lane.loopStartFrame = -1;
+            lane.loopEndFrame = -1;
+            lane.loopEnabled = false;
+            arrangementChanged = true;
+            applied = true;
+        } else {
+            LooperLane lane;
+            lane.assetPath = assetPath;
+            lane.assetHash = contribution.assetHash;
+            lane.name = contribution.name.trimmed().isEmpty()
+                ? QStringLiteral("Peer recording") : contribution.name;
+            if (looperProject_.appendLane(contribution.bankIndex, std::move(lane))) {
+                arrangementChanged = true;
+                applied = true;
+            } else {
+                appendLog(QStringLiteral("could not append received recording to bank %1")
+                    .arg(contribution.bankIndex + 1));
+            }
+        }
+        if (applied) {
+            completedIds.append(it.key());
+            appendLog(QStringLiteral("added peer recording to Track Sync: %1 hash=%2")
+                .arg(contribution.name, contribution.assetHash));
+        }
+    }
+    for (const QString& recordingId : completedIds) {
+        pendingRecordingContributions_.remove(recordingId);
+        appliedRecordingContributionIds_.insert(recordingId);
+    }
+    while (appliedRecordingContributionIds_.size() > kMaxLooperAssetRequests * 2) {
+        appliedRecordingContributionIds_.erase(appliedRecordingContributionIds_.begin());
+    }
+    if (arrangementChanged) {
+        refreshLooperLanes();
+        regeneratePreparedMix();
+        if (looperProject_.trackSyncEnabled() && jam2_.isRunning()) {
+            sendSongSnapshot();
+        }
+    }
+}
+
+void MainWindow::handleLooperAssetRequest(const QJsonObject& message, const QString& sourcePeerToken)
 {
     if (!looperProject_.trackSyncEnabled()) {
         return;
     }
     const QJsonArray hashes = message.value(QStringLiteral("hashes")).toArray();
+    if (hashes.isEmpty() || hashes.size() > kMaxLooperAssetRequests) {
+        appendLog(QStringLiteral("rejected looper asset request with invalid hash count"));
+        return;
+    }
     for (const QJsonValue& value : hashes) {
-        const QString hash = value.toString();
-        if (!hash.isEmpty()) {
-            sendLooperAsset(hash);
+        const QString hash = value.toString().toLower();
+        if (!isSha256Hex(hash)) {
+            appendLog(QStringLiteral("rejected looper asset request with invalid hash"));
+            return;
         }
+        sendLooperAsset(hash, sourcePeerToken);
     }
 }
 
-void MainWindow::sendLooperAsset(const QString& hash)
+void MainWindow::sendLooperAsset(const QString& hash, const QString& targetPeerToken)
 {
-    QString path;
-    for (const LooperBank& bank : looperProject_.banks()) {
-        for (const LooperLane& lane : bank.lanes) {
-            if (lane.assetHash == hash) {
-                path = looperAssetAbsolutePath(lane);
+    const QPair<QString, QString> request{hash, targetPeerToken};
+    if ((outgoingLooperAssetHash_ == hash && outgoingLooperAssetTargetToken_ == targetPeerToken) ||
+        (outgoingLooperAssetPendingHash_ == hash && outgoingLooperAssetPendingTargetToken_ == targetPeerToken) ||
+        outgoingLooperAssetQueue_.contains(request)) {
+        return;
+    }
+    if (outgoingLooperAssetQueue_.size() >= kMaxLooperAssetRequests) {
+        appendLog(QStringLiteral("looper asset send queue is full"));
+        return;
+    }
+    outgoingLooperAssetQueue_.append(request);
+    if (!outgoingLooperAssetTimer_.isActive()) {
+        outgoingLooperAssetTimer_.start();
+    }
+    continueLooperAssetSend();
+}
+
+bool MainWindow::canQueueControlTo(const QString& targetPeerToken, qint64 estimatedBytes) const
+{
+    return targetPeerToken.isEmpty()
+        ? controlClient_.canQueue(estimatedBytes)
+        : controlServer_.canQueueTo(targetPeerToken, estimatedBytes);
+}
+
+bool MainWindow::sendControlTo(const QString& targetPeerToken, const QJsonObject& message)
+{
+    return targetPeerToken.isEmpty()
+        ? controlClient_.send(message)
+        : controlServer_.sendTo(targetPeerToken, message);
+}
+
+void MainWindow::continueLooperAssetSend()
+{
+    if (!outgoingLooperAssetFile_) {
+        if (outgoingLooperAssetValidationPending_) {
+            return;
+        }
+        if (outgoingLooperAssetQueue_.isEmpty()) {
+            outgoingLooperAssetTimer_.stop();
+            return;
+        }
+        const QPair<QString, QString> request = outgoingLooperAssetQueue_.takeFirst();
+        const QString hash = request.first;
+        const QString targetPeerToken = request.second;
+        if (!isSha256Hex(hash)) {
+            return;
+        }
+
+        QString path = recordingOfferAssetPaths_.value(hash);
+        for (const LooperBank& bank : looperProject_.banks()) {
+            if (!path.isEmpty()) {
+                break;
+            }
+            for (const LooperLane& lane : bank.lanes) {
+                if (lane.assetHash == hash) {
+                    path = looperAssetAbsolutePath(lane);
+                    break;
+                }
+            }
+            if (!path.isEmpty()) {
                 break;
             }
         }
-        if (!path.isEmpty()) {
-            break;
+        struct ValidationResult {
+            qint64 bytes = 0;
+            QString error;
+        };
+        auto validation = std::make_shared<ValidationResult>();
+        outgoingLooperAssetValidationPending_ = true;
+        outgoingLooperAssetPendingHash_ = hash;
+        outgoingLooperAssetPendingTargetToken_ = targetPeerToken;
+        const bool started = startFileWorkerTask(
+            [path, hash, validation] {
+                const QFileInfo workerInfo(path);
+                if (path.isEmpty() || !workerInfo.isFile() || workerInfo.size() <= 0 ||
+                    workerInfo.size() > kMaxLooperAssetBytes || sha256FileHex(path) != hash) {
+                    validation->error = QStringLiteral("asset unavailable, hash-mismatched, or outside transfer bounds");
+                    return;
+                }
+                const jam2::wav::InspectResult inspected = jam2::wav::inspect_pcm16_file(
+                    nativeFilePath(path), static_cast<std::uint64_t>(kMaxLooperAssetBytes));
+                if (!inspected) {
+                    validation->error = QStringLiteral("WAV validation failed: ") + QString::fromStdString(inspected.error);
+                    return;
+                }
+                validation->bytes = workerInfo.size();
+            },
+            [this, path, hash, targetPeerToken, validation] {
+                outgoingLooperAssetValidationPending_ = false;
+                outgoingLooperAssetPendingHash_.clear();
+                outgoingLooperAssetPendingTargetToken_.clear();
+                if (!validation->error.isEmpty()) {
+                    appendLog(QStringLiteral("looper asset validation failed hash=%1: %2")
+                        .arg(hash, validation->error));
+                    continueLooperAssetSend();
+                    return;
+                }
+                auto file = std::make_unique<QFile>(path);
+                if (!file->open(QIODevice::ReadOnly)) {
+                    appendLog(QStringLiteral("could not open looper asset for sync: ") + path);
+                    continueLooperAssetSend();
+                    return;
+                }
+                outgoingLooperAssetFile_ = std::move(file);
+                outgoingLooperAssetHash_ = hash;
+                outgoingLooperAssetTargetToken_ = targetPeerToken;
+                outgoingLooperAssetBytes_ = validation->bytes;
+                outgoingLooperAssetNextChunk_ = -1;
+                outgoingLooperAssetProgress_.start();
+                continueLooperAssetSend();
+            },
+            [this, request](const QString&) {
+                outgoingLooperAssetValidationPending_ = false;
+                outgoingLooperAssetPendingHash_.clear();
+                outgoingLooperAssetPendingTargetToken_.clear();
+                outgoingLooperAssetQueue_.prepend(request);
+            });
+        if (!started) {
+            outgoingLooperAssetValidationPending_ = false;
+            outgoingLooperAssetPendingHash_.clear();
+            outgoingLooperAssetPendingTargetToken_.clear();
+            outgoingLooperAssetQueue_.prepend(request);
         }
-    }
-    if (path.isEmpty() || !QFileInfo::exists(path) || sha256FileHex(path) != hash) {
-        appendLog(QStringLiteral("looper asset unavailable for sync: ") + hash);
         return;
     }
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        appendLog(QStringLiteral("could not open looper asset for sync: ") + path);
+
+    if (!canQueueControlTo(outgoingLooperAssetTargetToken_, kLooperAssetFrameQueueEstimate)) {
+        if (outgoingLooperAssetProgress_.isValid() &&
+            outgoingLooperAssetProgress_.elapsed() > kLooperAssetProgressDeadlineMs) {
+            appendLog(QStringLiteral("looper asset send progress timeout: ") + outgoingLooperAssetHash_);
+            outgoingLooperAssetFile_.reset();
+            outgoingLooperAssetHash_.clear();
+            outgoingLooperAssetTargetToken_.clear();
+        }
         return;
     }
-    const QByteArray bytes = file.readAll();
-    constexpr int chunkSize = 48 * 1024;
-    sendControl(QJsonObject{
-        {QStringLiteral("type"), QStringLiteral("looper.asset.start")},
-        {QStringLiteral("sha256"), hash},
-        {QStringLiteral("file_bytes"), bytes.size()},
-        {QStringLiteral("chunk_size"), chunkSize},
-    });
-    for (int offset = 0, index = 0; offset < bytes.size(); offset += chunkSize, ++index) {
-        sendControl(QJsonObject{
+    if (outgoingLooperAssetNextChunk_ < 0) {
+        if (!sendControlTo(outgoingLooperAssetTargetToken_, QJsonObject{
+                {QStringLiteral("type"), QStringLiteral("looper.asset.start")},
+                {QStringLiteral("sha256"), outgoingLooperAssetHash_},
+                {QStringLiteral("file_bytes"), static_cast<double>(outgoingLooperAssetBytes_)},
+                {QStringLiteral("chunk_size"), kLooperAssetChunkBytes},
+            })) {
+            outgoingLooperAssetFile_.reset();
+            outgoingLooperAssetHash_.clear();
+            return;
+        }
+        outgoingLooperAssetNextChunk_ = 0;
+        outgoingLooperAssetProgress_.restart();
+        return;
+    }
+
+    if (!outgoingLooperAssetFile_->atEnd()) {
+        const QByteArray bytes = outgoingLooperAssetFile_->read(kLooperAssetChunkBytes);
+        if (bytes.isEmpty()) {
+            appendLog(QStringLiteral("failed while reading looper asset for sync: ") + outgoingLooperAssetHash_);
+            outgoingLooperAssetFile_.reset();
+            outgoingLooperAssetHash_.clear();
+            return;
+        }
+        const QJsonObject chunk{
             {QStringLiteral("type"), QStringLiteral("looper.asset.chunk")},
-            {QStringLiteral("sha256"), hash},
-            {QStringLiteral("index"), index},
-            {QStringLiteral("data"), QString::fromLatin1(bytes.mid(offset, chunkSize).toBase64())},
-        });
+            {QStringLiteral("sha256"), outgoingLooperAssetHash_},
+            {QStringLiteral("index"), outgoingLooperAssetNextChunk_},
+            {QStringLiteral("data"), QString::fromLatin1(bytes.toBase64())},
+        };
+        if (!sendControlTo(outgoingLooperAssetTargetToken_, chunk)) {
+            outgoingLooperAssetFile_.reset();
+            outgoingLooperAssetHash_.clear();
+            return;
+        }
+        ++outgoingLooperAssetNextChunk_;
+        outgoingLooperAssetProgress_.restart();
+        return;
     }
-    sendControl(QJsonObject{
-        {QStringLiteral("type"), QStringLiteral("looper.asset.done")},
-        {QStringLiteral("sha256"), hash},
-        {QStringLiteral("chunks"), (bytes.size() + chunkSize - 1) / chunkSize},
-    });
-    appendLog(QStringLiteral("sent looper asset: %1 bytes hash=%2").arg(bytes.size()).arg(hash));
+
+    if (!sendControlTo(outgoingLooperAssetTargetToken_, QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("looper.asset.done")},
+            {QStringLiteral("sha256"), outgoingLooperAssetHash_},
+            {QStringLiteral("chunks"), outgoingLooperAssetNextChunk_},
+        })) {
+        outgoingLooperAssetFile_.reset();
+        outgoingLooperAssetHash_.clear();
+        return;
+    }
+    appendLog(QStringLiteral("sent looper asset: %1 bytes hash=%2")
+        .arg(outgoingLooperAssetBytes_)
+        .arg(outgoingLooperAssetHash_));
+    outgoingLooperAssetFile_.reset();
+    outgoingLooperAssetHash_.clear();
+    outgoingLooperAssetTargetToken_.clear();
+    outgoingLooperAssetBytes_ = 0;
+    outgoingLooperAssetNextChunk_ = 0;
+    outgoingLooperAssetProgress_.invalidate();
 }
 
-void MainWindow::receiveLooperAssetStart(const QJsonObject& message)
+void MainWindow::resetIncomingLooperAsset()
 {
-    incomingLooperAssetBytes_.clear();
-    incomingLooperAssetHash_ = message.value(QStringLiteral("sha256")).toString();
-    incomingLooperAssetBytesExpected_ = static_cast<qint64>(message.value(QStringLiteral("file_bytes")).toDouble());
+    incomingLooperAssetTimer_.stop();
+    incomingLooperAssetFile_.reset();
+    incomingLooperAssetHasher_.reset();
+    incomingLooperAssetHash_.clear();
+    incomingLooperAssetSourceToken_.clear();
+    incomingLooperAssetBytesExpected_ = 0;
+    incomingLooperAssetBytesReceived_ = 0;
+    incomingLooperAssetChunkSize_ = 0;
     incomingLooperAssetNextChunk_ = 0;
-    incomingLooperAssetBytes_.reserve(static_cast<int>(qMin<qint64>(incomingLooperAssetBytesExpected_, std::numeric_limits<int>::max())));
+}
+
+void MainWindow::receiveLooperAssetStart(const QJsonObject& message, const QString& sourcePeerToken)
+{
+    const QString hash = message.value(QStringLiteral("sha256")).toString().toLower();
+    const QString expectedSource = pendingRecordingAssetSources_.value(hash);
+    const double declaredBytes = message.value(QStringLiteral("file_bytes")).toDouble(-1.0);
+    const int chunkSize = message.value(QStringLiteral("chunk_size")).toInt(-1);
+    if (incomingLooperAssetFile_ || !isSha256Hex(hash) || !pendingLooperAssetHashes_.contains(hash) ||
+        (!expectedSource.isEmpty() && expectedSource != sourcePeerToken) ||
+        !std::isfinite(declaredBytes) || std::floor(declaredBytes) != declaredBytes ||
+        declaredBytes < 44.0 || declaredBytes > static_cast<double>(kMaxLooperAssetBytes) ||
+        chunkSize <= 0 || chunkSize > kLooperAssetChunkBytes) {
+        appendLog(QStringLiteral("rejected unsolicited or invalid looper asset start"));
+        return;
+    }
+
+    const QString output = looperAssetPathForHash(hash);
+    QFileInfo outputInfo(output);
+    if (!QDir().mkpath(outputInfo.absolutePath())) {
+        appendLog(QStringLiteral("failed to create looper asset cache folder"));
+        return;
+    }
+    auto file = std::make_unique<QTemporaryFile>(output + QStringLiteral(".partial.XXXXXX"));
+    file->setAutoRemove(true);
+    if (!file->open()) {
+        appendLog(QStringLiteral("failed to create temporary looper asset"));
+        return;
+    }
+    incomingLooperAssetFile_ = std::move(file);
+    incomingLooperAssetHasher_ = std::make_unique<QCryptographicHash>(QCryptographicHash::Sha256);
+    incomingLooperAssetHash_ = hash;
+    incomingLooperAssetSourceToken_ = sourcePeerToken;
+    incomingLooperAssetBytesExpected_ = static_cast<qint64>(declaredBytes);
+    incomingLooperAssetBytesReceived_ = 0;
+    incomingLooperAssetChunkSize_ = chunkSize;
+    incomingLooperAssetNextChunk_ = 0;
+    incomingLooperAssetTimer_.start(kLooperAssetProgressDeadlineMs);
     appendLog(QStringLiteral("receiving looper asset: %1 bytes hash=%2")
         .arg(incomingLooperAssetBytesExpected_)
         .arg(incomingLooperAssetHash_));
 }
 
-void MainWindow::receiveLooperAssetChunk(const QJsonObject& message)
+void MainWindow::receiveLooperAssetChunk(const QJsonObject& message, const QString& sourcePeerToken)
 {
-    const QString hash = message.value(QStringLiteral("sha256")).toString();
+    const QString hash = message.value(QStringLiteral("sha256")).toString().toLower();
     const int index = message.value(QStringLiteral("index")).toInt(-1);
-    if (hash != incomingLooperAssetHash_ || index != incomingLooperAssetNextChunk_) {
-        appendLog(QStringLiteral("looper asset chunk out of order"));
-        incomingLooperAssetBytes_.clear();
-        incomingLooperAssetHash_.clear();
-        incomingLooperAssetNextChunk_ = 0;
+    const QString encodedText = message.value(QStringLiteral("data")).toString();
+    const QByteArray encoded = encodedText.toLatin1();
+    static const QRegularExpression base64Expression(QStringLiteral("^[A-Za-z0-9+/]*={0,2}$"));
+    const int maxEncodedBytes = ((incomingLooperAssetChunkSize_ + 2) / 3) * 4;
+    if (incomingLooperAssetFile_ && sourcePeerToken != incomingLooperAssetSourceToken_) {
+        appendLog(QStringLiteral("looper asset chunk rejected from unexpected peer"));
         return;
     }
-    incomingLooperAssetBytes_.append(QByteArray::fromBase64(message.value(QStringLiteral("data")).toString().toLatin1()));
+    if (!incomingLooperAssetFile_ || !incomingLooperAssetHasher_ || hash != incomingLooperAssetHash_ ||
+        index != incomingLooperAssetNextChunk_ || encodedText.isEmpty() ||
+        encoded.size() > maxEncodedBytes || encoded.size() % 4 != 0 ||
+        !base64Expression.match(encodedText).hasMatch()) {
+        appendLog(QStringLiteral("looper asset chunk rejected"));
+        resetIncomingLooperAsset();
+        return;
+    }
+    const QByteArray decoded = QByteArray::fromBase64(encoded);
+    if (decoded.isEmpty() || decoded.size() > incomingLooperAssetChunkSize_ ||
+        decoded.toBase64() != encoded ||
+        incomingLooperAssetBytesReceived_ > incomingLooperAssetBytesExpected_ - decoded.size() ||
+        incomingLooperAssetFile_->write(decoded) != decoded.size()) {
+        appendLog(QStringLiteral("looper asset chunk decoding or write failed"));
+        resetIncomingLooperAsset();
+        return;
+    }
+    incomingLooperAssetHasher_->addData(decoded);
+    incomingLooperAssetBytesReceived_ += decoded.size();
     ++incomingLooperAssetNextChunk_;
+    incomingLooperAssetTimer_.start(kLooperAssetProgressDeadlineMs);
 }
 
-void MainWindow::receiveLooperAssetDone(const QJsonObject& message)
+void MainWindow::receiveLooperAssetDone(const QJsonObject& message, const QString& sourcePeerToken)
 {
-    const QString expectedHash = message.value(QStringLiteral("sha256")).toString(incomingLooperAssetHash_);
-    const QString actualHash = QString::fromLatin1(QCryptographicHash::hash(incomingLooperAssetBytes_, QCryptographicHash::Sha256).toHex());
-    if (incomingLooperAssetBytesExpected_ != incomingLooperAssetBytes_.size() || expectedHash.isEmpty() || expectedHash != actualHash) {
-        appendLog(QStringLiteral("received looper asset failed verification"));
-        incomingLooperAssetBytes_.clear();
-        incomingLooperAssetHash_.clear();
+    const QString expectedHash = message.value(QStringLiteral("sha256")).toString().toLower();
+    const int chunks = message.value(QStringLiteral("chunks")).toInt(-1);
+    if (incomingLooperAssetFile_ && sourcePeerToken != incomingLooperAssetSourceToken_) {
+        appendLog(QStringLiteral("looper asset completion rejected from unexpected peer"));
         return;
     }
+    if (!incomingLooperAssetFile_ || !incomingLooperAssetHasher_ || expectedHash != incomingLooperAssetHash_ ||
+        chunks != incomingLooperAssetNextChunk_ || incomingLooperAssetBytesExpected_ != incomingLooperAssetBytesReceived_ ||
+        QString::fromLatin1(incomingLooperAssetHasher_->result().toHex()) != expectedHash) {
+        appendLog(QStringLiteral("received looper asset failed size, sequence, or hash verification"));
+        resetIncomingLooperAsset();
+        return;
+    }
+    incomingLooperAssetFile_->flush();
+    incomingLooperAssetFile_->close();
+    incomingLooperAssetTimer_.stop();
+    const QString temporaryPath = incomingLooperAssetFile_->fileName();
     const QString output = looperAssetPathForHash(expectedHash);
-    QFileInfo outputInfo(output);
-    QDir().mkpath(outputInfo.absolutePath());
-    QFile file(output);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
-        file.write(incomingLooperAssetBytes_) != incomingLooperAssetBytes_.size()) {
-        appendLog(QStringLiteral("failed to write looper asset: ") + output);
-        incomingLooperAssetBytes_.clear();
-        incomingLooperAssetHash_.clear();
-        return;
+    auto validationError = std::make_shared<QString>();
+    const bool started = startFileWorkerTask(
+        [temporaryPath, output, expectedHash, validationError] {
+            const jam2::wav::InspectResult inspected = jam2::wav::inspect_pcm16_file(
+                nativeFilePath(temporaryPath), static_cast<std::uint64_t>(kMaxLooperAssetBytes));
+            if (!inspected) {
+                *validationError = QStringLiteral("WAV validation failed: ") +
+                    QString::fromStdString(inspected.error);
+                return;
+            }
+            if (QFileInfo::exists(output) && sha256FileHex(output) == expectedHash) {
+                return;
+            }
+            QFile source(temporaryPath);
+            QSaveFile destination(output);
+            if (!source.open(QIODevice::ReadOnly) || !destination.open(QIODevice::WriteOnly)) {
+                *validationError = QStringLiteral("could not open asset for atomic commit");
+                return;
+            }
+            constexpr qint64 copyBlockBytes = 1024 * 1024;
+            while (!source.atEnd()) {
+                const QByteArray block = source.read(copyBlockBytes);
+                if (block.isEmpty() && source.error() != QFileDevice::NoError) {
+                    *validationError = QStringLiteral("failed while reading validated asset");
+                    return;
+                }
+                if (destination.write(block) != block.size()) {
+                    *validationError = QStringLiteral("failed while writing validated asset");
+                    return;
+                }
+            }
+            if (!destination.commit()) {
+                *validationError = QStringLiteral("failed to atomically commit validated asset");
+            }
+        },
+        [this, output, expectedHash, validationError] {
+            if (!validationError->isEmpty()) {
+                appendLog(QStringLiteral("received looper asset validation failed: ") + *validationError);
+                resetIncomingLooperAsset();
+                return;
+            }
+            registerTransientTrackWav(output);
+            looperWaveformCache_.remove(output);
+            appendLog(QStringLiteral("received looper asset: ") + output);
+            pendingLooperAssetHashes_.removeAll(expectedHash);
+            if (pendingRecordingAssetSources_.remove(expectedHash) > 0) {
+                validatedRecordingAssetHashes_.insert(expectedHash);
+            }
+            resetIncomingLooperAsset();
+            applyPendingRecordingContributions();
+            applyPendingSongIfAssetsReady();
+        },
+        [this](const QString&) { resetIncomingLooperAsset(); });
+    if (!started) {
+        appendLog(QStringLiteral("received looper asset validation rejected by saturated file worker"));
+        resetIncomingLooperAsset();
     }
-    file.close();
-    registerTransientTrackWav(output);
-    appendLog(QStringLiteral("received looper asset: ") + output);
-    pendingLooperAssetHashes_.removeAll(expectedHash);
-    incomingLooperAssetBytes_.clear();
-    incomingLooperAssetHash_.clear();
-    applyPendingSongIfAssetsReady();
 }
 
 void MainWindow::handleSongSet(const QJsonObject& message)
@@ -6887,45 +7864,97 @@ void MainWindow::handleSongSet(const QJsonObject& message)
         appendLog(QStringLiteral("ignored stale host arrangement revision %1").arg(revision));
         return;
     }
-    QJsonObject song = normalizeLooperAssetPaths(message.value(QStringLiteral("song")).toObject());
-    const QStringList missing = missingLooperAssetHashes(song);
-    if (!missing.isEmpty()) {
-        pendingSongSet_ = song;
-        pendingSongRevision_ = revision;
-        pendingSongTrackRestart_ = restartTrack;
-        pendingLooperAssetHashes_ = missing;
-        appendLog(QStringLiteral("requesting %1 looper asset(s) for arrangement revision %2")
-            .arg(missing.size())
-            .arg(revision));
-        QJsonArray hashes;
-        for (const QString& hash : missing) {
-            hashes.append(hash);
+    const bool hostAuthoritative = message.value(QStringLiteral("host_authoritative")).toBool(false);
+    const QJsonObject song = normalizeLooperAssetPaths(message.value(QStringLiteral("song")).toObject());
+    QStringList referencedHashes;
+    const QJsonArray banks = song.value(QStringLiteral("looper")).toObject().value(QStringLiteral("banks")).toArray();
+    for (const QJsonValue& bankValue : banks) {
+        for (const QJsonValue& laneValue : bankValue.toObject().value(QStringLiteral("lanes")).toArray()) {
+            const QString hash = laneValue.toObject().value(QStringLiteral("asset_hash")).toString().toLower();
+            if (!hash.isEmpty() && !referencedHashes.contains(hash)) {
+                referencedHashes.append(hash);
+            }
         }
-        sendControl(QJsonObject{
-            {QStringLiteral("type"), QStringLiteral("looper.asset.request")},
-            {QStringLiteral("arrangement_revision"), revision},
-            {QStringLiteral("hashes"), hashes},
-        });
+    }
+    if (referencedHashes.size() > kMaxLooperAssetRequests) {
+        appendLog(QStringLiteral("rejected arrangement with %1 unique assets; maximum=%2")
+            .arg(referencedHashes.size())
+            .arg(kMaxLooperAssetRequests));
         return;
     }
-    if (projectFolder_.isEmpty()) {
-        projectFolder_ = transientProjectFolder_;
-    }
-    pendingSongSet_ = QJsonObject{};
-    pendingSongRevision_ = 0;
-    pendingSongTrackRestart_ = false;
-    pendingLooperAssetHashes_.clear();
-    if (loadSongJson(song)) {
-        if (message.value(QStringLiteral("host_authoritative")).toBool(false)) {
-            lastAppliedHostArrangementRevision_ = revision;
+    const QString assetFolder = QDir(transientProjectFolder_).absoluteFilePath(QStringLiteral("wavs"));
+    const std::uint64_t checkRevision = ++songAssetCheckRevision_;
+    auto missing = std::make_shared<QStringList>();
+    const bool started = startFileWorkerTask(
+        [referencedHashes, assetFolder, missing] {
+            for (const QString& hash : referencedHashes) {
+                if (!isSha256Hex(hash)) {
+                    missing->append(hash);
+                    continue;
+                }
+                const QString path = QDir(assetFolder).absoluteFilePath(hash + QStringLiteral(".wav"));
+                const jam2::wav::InspectResult inspected = jam2::wav::inspect_pcm16_file(
+                    nativeFilePath(path), static_cast<std::uint64_t>(kMaxLooperAssetBytes));
+                if (!QFileInfo::exists(path) || !inspected || sha256FileHex(path) != hash) {
+                    missing->append(hash);
+                }
+            }
+        },
+        [this, song, revision, restartTrack, hostAuthoritative, checkRevision, missing] {
+            if (checkRevision != songAssetCheckRevision_) {
+                return;
+            }
+            if (!missing->isEmpty()) {
+                pendingSongSet_ = song;
+                pendingSongRevision_ = revision;
+                pendingSongTrackRestart_ = restartTrack;
+                pendingLooperAssetHashes_ = *missing;
+                appendLog(QStringLiteral("requesting %1 looper asset(s) for arrangement revision %2")
+                    .arg(missing->size())
+                    .arg(revision));
+                QJsonArray hashes;
+                for (const QString& hash : *missing) {
+                    hashes.append(hash);
+                }
+                sendControl(QJsonObject{
+                    {QStringLiteral("type"), QStringLiteral("looper.asset.request")},
+                    {QStringLiteral("arrangement_revision"), revision},
+                    {QStringLiteral("hashes"), hashes},
+                });
+                return;
+            }
+            if (projectFolder_.isEmpty()) {
+                projectFolder_ = transientProjectFolder_;
+            }
+            pendingSongSet_ = QJsonObject{};
+            pendingSongRevision_ = 0;
+            pendingSongTrackRestart_ = false;
+            pendingLooperAssetHashes_.clear();
+            if (loadSongJson(song)) {
+                if (hostAuthoritative) {
+                    lastAppliedHostArrangementRevision_ = revision;
+                }
+                refreshSongViews();
+                refreshLooperLanes();
+                restartPreparedMixWhenReady_ = restartTrack && jam2_.isRunning();
+                regeneratePreparedMix();
+                if (restartPreparedMixWhenReady_) {
+                    appendLog(QStringLiteral("scheduled synchronized track restart for arrangement revision %1").arg(revision));
+                }
+            }
+        },
+        [this, message](const QString&) {
+            deferredSongSetMessage_ = message;
+            if (!songAssetCheckRetryTimer_.isActive()) {
+                songAssetCheckRetryTimer_.start(100);
+            }
+        });
+    if (!started) {
+        deferredSongSetMessage_ = message;
+        if (!songAssetCheckRetryTimer_.isActive()) {
+            songAssetCheckRetryTimer_.start(100);
         }
-        refreshSongViews();
-        refreshLooperLanes();
-        regeneratePreparedMix();
-        if (restartTrack && jam2_.isRunning()) {
-            sendJamCommand(QStringLiteral("track restart"));
-            appendLog(QStringLiteral("scheduled synchronized track restart for arrangement revision %1").arg(revision));
-        }
+        appendLog(QStringLiteral("arrangement asset validation deferred by saturated file worker"));
     }
 }
 
@@ -6934,7 +7963,6 @@ void MainWindow::applyPendingSongIfAssetsReady()
     if (pendingSongSet_.isEmpty()) {
         return;
     }
-    pendingLooperAssetHashes_ = missingLooperAssetHashes(pendingSongSet_);
     if (!pendingLooperAssetHashes_.isEmpty()) {
         return;
     }
@@ -6951,33 +7979,13 @@ void MainWindow::applyPendingSongIfAssetsReady()
         lastAppliedHostArrangementRevision_ = qMax(lastAppliedHostArrangementRevision_, revision);
         refreshSongViews();
         refreshLooperLanes();
+        restartPreparedMixWhenReady_ = restartTrack && jam2_.isRunning();
         regeneratePreparedMix();
-        if (restartTrack && jam2_.isRunning()) {
-            sendJamCommand(QStringLiteral("track restart"));
+        if (restartPreparedMixWhenReady_) {
             appendLog(QStringLiteral("scheduled synchronized track restart for received arrangement revision %1").arg(revision));
         }
         appendLog(QStringLiteral("applied pending looper arrangement after asset sync"));
     }
-}
-
-QStringList MainWindow::missingLooperAssetHashes(const QJsonObject& song) const
-{
-    QStringList missing;
-    const QJsonArray banks = song.value(QStringLiteral("looper")).toObject().value(QStringLiteral("banks")).toArray();
-    for (const QJsonValue& bankValue : banks) {
-        const QJsonArray lanes = bankValue.toObject().value(QStringLiteral("lanes")).toArray();
-        for (const QJsonValue& laneValue : lanes) {
-            const QString hash = laneValue.toObject().value(QStringLiteral("asset_hash")).toString();
-            if (hash.isEmpty() || missing.contains(hash)) {
-                continue;
-            }
-            const QString path = looperAssetPathForHash(hash);
-            if (!QFileInfo::exists(path) || sha256FileHex(path) != hash) {
-                missing.append(hash);
-            }
-        }
-    }
-    return missing;
 }
 
 QJsonObject MainWindow::normalizeLooperAssetPaths(QJsonObject song) const
@@ -6990,13 +7998,14 @@ QJsonObject MainWindow::normalizeLooperAssetPaths(QJsonObject song) const
         for (int laneIndex = 0; laneIndex < lanes.size(); ++laneIndex) {
             QJsonObject lane = lanes.at(laneIndex).toObject();
             const QString hash = lane.value(QStringLiteral("asset_hash")).toString();
-            if (!hash.isEmpty()) {
+            lane.remove(QStringLiteral("asset_path"));
+            if (isSha256Hex(hash)) {
                 lane.insert(
                     QStringLiteral("asset_path"),
                     QDir(transientProjectFolder_).absoluteFilePath(
                         QStringLiteral("wavs/") + hash + QStringLiteral(".wav")));
-                lanes.replace(laneIndex, lane);
             }
+            lanes.replace(laneIndex, lane);
         }
         bank.insert(QStringLiteral("lanes"), lanes);
         banks.replace(bankIndex, bank);
@@ -7008,6 +8017,9 @@ QJsonObject MainWindow::normalizeLooperAssetPaths(QJsonObject song) const
 
 QString MainWindow::looperAssetPathForHash(const QString& hash) const
 {
+    if (!isSha256Hex(hash)) {
+        return {};
+    }
     return QDir(transientProjectFolder_).absoluteFilePath(
         QStringLiteral("wavs/") + hash + QStringLiteral(".wav"));
 }
@@ -7182,6 +8194,7 @@ bool MainWindow::loadSongJson(const QJsonObject& object)
     BeatGridModel loadedChord;
     BeatGridModel loadedBeat;
     BeatGridModel loadedLyric;
+    LooperProject loadedLooper = looperProject_;
     if (!loadedChord.loadJson(object)) {
         return false;
     }
@@ -7202,16 +8215,17 @@ bool MainWindow::loadSongJson(const QJsonObject& object)
         return false;
     }
 
+    const QJsonObject looperObject = object.value(QStringLiteral("looper")).toObject();
+    if (!looperObject.isEmpty() && !loadedLooper.loadJson(looperObject)) {
+        return false;
+    }
     const QString title = loadedChord.title();
     loadedBeat.setTitle(title);
     loadedLyric.setTitle(title);
     chordModel_ = loadedChord;
     beatModel_ = loadedBeat;
     lyricModel_ = loadedLyric;
-    const QJsonObject looperObject = object.value(QStringLiteral("looper")).toObject();
-    if (!looperObject.isEmpty() && !looperProject_.loadJson(looperObject)) {
-        return false;
-    }
+    looperProject_ = std::move(loadedLooper);
     refreshLooperLanes();
     return true;
 }
@@ -7401,22 +8415,37 @@ void MainWindow::openSong()
     if (path.isEmpty()) {
         return;
     }
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        QMessageBox::warning(this, QStringLiteral("Jam2"), QStringLiteral("Could not open song file."));
-        return;
-    }
-    const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
-    const QJsonObject root = document.object();
-    if (!document.isObject() || !loadSongJson(root)) {
-        QMessageBox::warning(this, QStringLiteral("Jam2"), QStringLiteral("Invalid Jam2 song file."));
-        return;
-    }
-    projectFolder_ = QFileInfo(path).absolutePath();
-    projectFilePath_ = QFileInfo(path).absoluteFilePath();
-    loadTrackJson(root.value(QStringLiteral("track")).toObject());
-    refreshSongViews();
-    savedProjectSnapshot_ = currentProjectSnapshot();
+    auto root = std::make_shared<QJsonObject>();
+    auto error = std::make_shared<QString>();
+    (void)startFileWorkerTask(
+        [path, root, error] {
+            QFile file(path);
+            constexpr qint64 maxSongFileBytes = 4LL * 1024LL * 1024LL;
+            if (!file.open(QIODevice::ReadOnly) || file.size() < 0 || file.size() > maxSongFileBytes) {
+                *error = QStringLiteral("Could not open song file within the 4 MiB limit.");
+                return;
+            }
+            const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
+            if (!document.isObject()) {
+                *error = QStringLiteral("Invalid Jam2 song JSON.");
+                return;
+            }
+            *root = document.object();
+        },
+        [this, path, root, error] {
+            if (!error->isEmpty() || !loadSongJson(*root)) {
+                QMessageBox::warning(
+                    this,
+                    QStringLiteral("Jam2"),
+                    error->isEmpty() ? QStringLiteral("Invalid Jam2 song file.") : *error);
+                return;
+            }
+            projectFolder_ = QFileInfo(path).absolutePath();
+            projectFilePath_ = QFileInfo(path).absoluteFilePath();
+            loadTrackJson(root->value(QStringLiteral("track")).toObject());
+            refreshSongViews();
+            savedProjectSnapshot_ = currentProjectSnapshot();
+        });
 }
 
 bool MainWindow::saveSong()
@@ -7441,19 +8470,42 @@ bool MainWindow::saveSong()
     if (!materializeLooperAssets(songInfo.absolutePath())) {
         return false;
     }
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        QMessageBox::warning(this, QStringLiteral("Jam2"), QStringLiteral("Could not save song file."));
-        return false;
-    }
     QJsonObject root = songToJson();
     root.insert(QStringLiteral("track"), trackToJson());
     const QByteArray json = QJsonDocument(root).toJson(QJsonDocument::Indented);
-    if (file.write(json) != json.size()) {
-        QMessageBox::warning(this, QStringLiteral("Jam2"), QStringLiteral("Could not finish writing the song file."));
+    auto saveError = std::make_shared<QString>();
+    QEventLoop saveWaitLoop;
+    const bool saveStarted = startFileWorkerTask(
+        [path, json, saveError] {
+            QSaveFile file(path);
+            if (!file.open(QIODevice::WriteOnly) || file.write(json) != json.size() || !file.commit()) {
+                *saveError = QStringLiteral("Could not atomically write the song file.");
+            }
+        },
+        [&saveWaitLoop] { saveWaitLoop.quit(); },
+        [&saveWaitLoop, saveError](const QString& error) {
+            *saveError = error;
+            saveWaitLoop.quit();
+        });
+    if (!saveStarted) {
+        QMessageBox::warning(this, QStringLiteral("Jam2"), QStringLiteral("The bounded file worker is busy; try Save again."));
         return false;
     }
-    file.close();
+    QProgressDialog saveProgress(
+        QStringLiteral("Writing Jam2 song..."),
+        QString{},
+        0,
+        0,
+        this);
+    saveProgress.setCancelButton(nullptr);
+    saveProgress.setWindowModality(Qt::ApplicationModal);
+    saveProgress.setMinimumDuration(0);
+    saveWaitLoop.exec();
+    saveProgress.close();
+    if (!saveError->isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Jam2"), *saveError);
+        return false;
+    }
     projectFilePath_ = songInfo.absoluteFilePath();
     projectFolder_ = songInfo.absolutePath();
     for (const LooperBank& bank : std::as_const(looperProject_.banks())) {
@@ -7467,7 +8519,8 @@ bool MainWindow::saveSong()
         }
     }
     savedProjectSnapshot_ = currentProjectSnapshot();
-    cleanupTransientTrackWavs();
+    deferredTransientCleanupWavs_.unite(transientTrackWavs_);
+    transientTrackWavs_.clear();
     return true;
 }
 
@@ -7492,22 +8545,28 @@ void MainWindow::registerTransientTrackWav(const QString& path)
 
 void MainWindow::cleanupTransientTrackWavs()
 {
-    for (const QString& path : std::as_const(transientTrackWavs_)) {
-        const QFileInfo info(path);
-        if (info.suffix().compare(QStringLiteral("wav"), Qt::CaseInsensitive) == 0 && info.exists()) {
-            QFile::remove(info.absoluteFilePath());
-        }
-    }
+    QSet<QString> paths = transientTrackWavs_;
+    paths.unite(deferredTransientCleanupWavs_);
+    const QString workspacePath = transientProjectFolder_;
     transientTrackWavs_.clear();
+    deferredTransientCleanupWavs_.clear();
     if (!lastCapturePath_.isEmpty() && !QFileInfo::exists(lastCapturePath_)) {
         lastCapturePath_.clear();
     }
-    QDir workspace(transientProjectFolder_);
-    workspace.rmdir(QStringLiteral("wavs"));
-    QDir parent = workspace;
-    if (parent.cdUp()) {
-        parent.rmdir(workspace.dirName());
-    }
+    fileWorkerPool_.start(QRunnable::create([paths, workspacePath] {
+        for (const QString& path : paths) {
+            const QFileInfo info(path);
+            if (info.suffix().compare(QStringLiteral("wav"), Qt::CaseInsensitive) == 0 && info.exists()) {
+                (void)QFile::remove(info.absoluteFilePath());
+            }
+        }
+        QDir workspace(workspacePath);
+        workspace.rmdir(QStringLiteral("wavs"));
+        QDir parent = workspace;
+        if (parent.cdUp()) {
+            parent.rmdir(workspace.dirName());
+        }
+    }));
 }
 
 void MainWindow::sendSongSnapshot()

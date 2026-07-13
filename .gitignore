@@ -29,6 +29,7 @@ Testing/
 /tools/logs/
 /tools/benchmark_logs/
 /tools/stress_logs/
+/tools/stress_logs*
 /incoming_uploads/
 /artifacts/logs/
 /artifacts/release/

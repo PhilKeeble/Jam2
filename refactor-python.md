@@ -155,7 +155,7 @@ There is one engine implementation. “Debug” changes how it is configured and
 
 ## Unified Executable Surface
 
-The final spelling can be selected during Phase 8, but the public shape must preserve ordinary headless commands and add one explicit scenario-driven debug entry point:
+The final spelling can be selected during canonical Phase 6, but the public shape must preserve ordinary headless commands and add one explicit scenario-driven debug entry point:
 
 ```text
 jam2
@@ -459,9 +459,15 @@ Python should consume the published manifest rather than choose the newest file 
 
 ## Test Layers
 
-### Native unit/component tests
+### Focused protocol and component validation
 
-Use CTest/native harnesses for packet codecs, rings, framing, replay, horizons, timing maps, drift/resampler bounds, mix scheduling, authority, parsers, and fuzz seams. Python process tests should not be the only way to exercise these primitives.
+Use independent Python codecs, malformed-input generators, deterministic process
+scenarios, emitted counters, and artifact analysis for packet framing, replay,
+horizons, parsers, bounded queues, authority, and timing behavior. Exercise the
+real Jam2 executable so a passing check demonstrates externally visible native
+behavior rather than only a separately compiled test harness. Keep small
+in-process Python checks for the independent generators themselves; do not add
+CMake/CTest scaffolding.
 
 ### Headless deterministic integration
 
@@ -517,99 +523,75 @@ The GUI should not become a general upload server. Automated benchmark artifact 
 - The automation channel must not change packet cadence when idle.
 - Benchmark the same engine with and without automation events to expose supervisory overhead.
 
-## Refactor Phase Integration
+## Canonical Phase Integration
 
-### Phase 0: baseline and contract
+[refactor-plan.md](refactor-plan.md) is authoritative for phase numbering and
+order. The items below describe where Python work naturally accompanies that
+implementation; they are not validation gates and do not require an exhaustive
+run after every phase.
 
-- Preserve the current Python stress and benchmark results as legacy evidence.
-- Record exactly which cases use real devices, headless audio, a proxy, or a real network.
-- Stop storing session keys in routine benchmark state/artifacts.
-- Define scenario schema v1, structured event/artifact schema v1, effective-configuration output, and non-secret run identity.
-- Record missing deterministic seams: packet duplication, independent peer drift, reactive frame scheduling, and impaired mesh edges.
-- Add native CTest foundations without removing current process tools.
+### Phase 1: stabilize the current model
 
-Gate: existing tools produce a traceable baseline, and the successor automation contract is documented before engine interfaces are frozen.
+- Preserve historical stress and benchmark artifacts as legacy evidence.
+- Keep secrets out of persisted arguments, logs, manifests, and results.
+- Use native effective configuration as the source of truth.
+- Separate reusable scenario, protocol, impairment, orchestration, metric,
+  verdict, and artifact helpers while retaining current commands.
+- Add deterministic malformed, duplicate, corrupt, replay, wrap, gap,
+  timestamp, flood, and directional impairment cases for current UDP v1.
 
-### Phase 1: correctness and lightweight bounds
+### Phase 2: extract the persistent local engine
 
-- Apply bounded parsing, secret scrubbing, artifact size/time limits, and streamed upload behavior to retained tooling where it is exposed during the refactor.
-- Keep benchmark/automation credentials separate from Jam2 session secrets.
-- Preserve raw rejection/capacity data without per-packet logging.
-
-Gate: retained tools cannot silently persist session keys or accept unbounded frames/artifacts.
-
-### Phase 2: wire-compatible fast-path changes
-
-- Keep the scenario, signal, device, topology, seed, and artifact schemas fixed while measuring each packet/ring optimization.
-- Use the same Python runner to compare each isolated change with Phase 0 evidence.
-- Preserve native debug instrumentation for packet rate, bytes, CPU, allocations where available, copied bytes, scheduler gaps, queue depth, and rejection counts.
-- Do not change the automation protocol as a side effect of a UDP fast-path implementation change.
-
-Gate: every accepted optimization has traceable before/after artifacts from an otherwise identical scenario.
-
-### Phase 3: engine extraction
-
-- Put effective configuration, native test sources, fixed-shape snapshots, bounded commands/events, recording, and technical stats in the shared `Engine`.
-- Add the frame-clock scheduler seam required by deterministic scenarios.
+- Put effective configuration, native test sources, fixed-shape snapshots,
+  bounded commands/events, recording, and raw technical stats in the shared
+  Engine.
+- Add the frame-clock scheduler seam needed by deterministic scenarios.
 - Keep scenario JSON and Python types outside the engine.
 
-Gate: legacy CLI and a thin test adapter can drive the same extracted engine without a second audio implementation.
+### Phase 3: extract the mature one-peer path
 
-### Phase 4: one-peer parity
+- Run legacy and replacement one-peer paths through comparable Python cases.
+- Preserve directional tone/pulse, metronome, impairment, device, and profile
+  evidence.
+- Emit normalized per-peer results even with one remote peer.
 
-- Run legacy and replacement one-peer paths through identical Python scenarios.
-- Preserve directional tone/pulse, metronome, impairment, device, and profile comparisons.
-- Emit normalized per-peer evidence even when only one remote peer exists.
+### Phase 4: generalize to direct full mesh
 
-Gate: Python can compare legacy and replacement artifacts without topology-specific metric code hiding differences.
+- Generalize process identities from server/client to arbitrary peer IDs.
+- Add two-, three-, and four-peer cases plus explicit larger experimental runs.
+- Add per-edge impairment, late join/restart, and independent headless drift.
 
-### Phase 5: universal full mesh
+### Phase 5: timing and authority
 
-- Generalize orchestration from server/client to arbitrary peer IDs.
-- Add clean two/three/four-peer cases and independently impaired edges.
-- Add deterministic per-peer headless drift and late-join/restart cases.
-- Retain real-device and real-network mesh cases where machines are available.
+- Schedule grid, metronome, and transport actions through engine frame/event
+  triggers.
+- Exercise different authority peers and record requested/applied frame,
+  revision, mapping error, and recovery data.
+- Submit normal local requests rather than injecting accepted remote state.
 
-Gate: the same scenario/result model covers one or multiple remote peers and exposes every edge independently.
+### Phase 6: GUI lifecycle and one executable
 
-### Phase 6: timing and authority
+- Reuse the same Engine and NetworkSession commands/events for GUI and
+  debug/headless operation.
+- Ship ordinary headless subcommands and one bounded explicit debug scenario
+  adapter in the unified executable.
+- Remove child-engine key arguments without making Python part of ordinary GUI
+  startup or the real-time path.
 
-- Schedule metronome/grid/transport actions through frame/event triggers.
-- Exercise creator, first joiner, third peer, and fourth peer as grid initiator.
-- Ensure automation submits normal local requests rather than injecting accepted remote state.
-- Record requested/applied frames, authority peer, revision, mapping error, and recovery.
+### Phase 7: tooling migration and legacy retirement
 
-Gate: timing tests are reproducible and prove the real authority path rather than a debug bypass.
+- Migrate local stress, multi-host benchmarks, connection diagnostics,
+  profiles, metrics, and artifact collection to the unified contract.
+- Add real-process TCP framing/authentication/authorization, model boundary,
+  asset-transfer, and WAV adversarial scenarios against that same executable.
+- Remove stdout scraping, newest-file discovery, unbounded text control, and
+  legacy loop adapters only after useful comparisons have been made.
 
-### Phase 7: GUI lifecycle
+### Phase 8: optional measured protocol experiments
 
-- Reuse the same engine commands/events as debug/headless operation.
-- Optionally add explicit local diagnostic-bundle creation without making the GUI a benchmark coordinator.
-- Verify GUI activity does not change debug/headless engine behavior beyond measurable UI load.
-
-Gate: GUI and headless adapters are thin clients of the same engine contract.
-
-### Phase 8: single executable
-
-- Ship one `jam2` executable with GUI default, ordinary headless subcommands, `debug run`, and capability/schema description.
-- Implement bounded scenario ingestion and the inherited local reactive channel.
-- Remove child-engine key arguments while retaining Python process orchestration.
-- Preserve headless operation on Windows and the callable executable inside the macOS bundle.
-
-Gate: local stress and multi-host Python runners use the unified executable and the same engine as the GUI.
-
-### Phase 9: migrate and retire compatibility
-
-- Move local stress, benchmark coordinator/agents, connection diagnostics, profiles, metrics, and artifact collection to the new contract.
-- Compare migrated results with Phase 0 legacy evidence.
-- Remove stdout scraping, newest-file discovery, unbounded text stdin, legacy mode loops, and obsolete local control only after replacement acceptance.
-- Keep the versioned scenario and local automation contracts as supported technical interfaces.
-
-Gate: no supported tool depends on a retired engine loop or compatibility protocol, and robust Python automation remains available.
-
-### Phase 10: optional wire experiments
-
-Python continues to provide the comparison matrix and raw artifact correlation for optional PCM/header/control experiments. Debug automation does not justify or require a production wire-format change.
+- Use the same Python scenario/result model to compare optional PCM, header,
+  control, or asset-wire experiments.
+- Do not let debug automation require a production wire-format change.
 
 ## Acceptance Checklist
 
@@ -651,9 +633,9 @@ Do not begin by rewriting all scripts.
 2. Define the v1 scenario, event, effective-configuration, and artifact-manifest schemas.
 3. Add non-secret run/attempt/peer identity to current artifacts.
 4. Make the native executable report effective profile/configuration so Python stops treating duplicated defaults as authoritative.
-5. Add the bounded frame-scheduler/test-source seams to the extracted engine when Phase 3 begins.
-6. Implement the unified executable debug adapter in Phase 8.
-7. Migrate one clean two-peer scenario end to end and compare it with the Phase 0 baseline.
+5. Add the bounded frame-scheduler/test-source seams to the extracted engine when canonical Phase 2 begins.
+6. Implement the unified executable debug adapter in canonical Phase 6.
+7. Migrate one clean two-peer scenario end to end and compare it with the retained historical evidence.
 8. Migrate impairment and metronome scenarios.
 9. Generalize the runner/result model to three/four peers.
 10. Remove legacy scraping/control paths only after the migrated suites pass.

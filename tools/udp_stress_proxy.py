@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 @dataclass(frozen=True)
 class DirectionImpairment:
     loss_percent: float = 0.0
+    duplicate_percent: float = 0.0
+    corrupt_percent: float = 0.0
     jitter_ms: float = 0.0
     fixed_delay_ms: float = 0.0
     reorder_percent: float = 0.0
@@ -30,10 +32,22 @@ class ProxyImpairment:
 
 
 class UdpStressProxy:
-    def __init__(self, server_endpoint, bind_host="127.0.0.1", bind_port=0, impairment=None, seed=1):
+    def __init__(
+            self,
+            server_endpoint,
+            bind_host="127.0.0.1",
+            bind_port=0,
+            impairment=None,
+            seed=1,
+            packet_observer=None,
+            packet_transformer=None,
+            max_pending_packets=65536):
         self.server_endpoint = server_endpoint
         self.impairment = impairment or ProxyImpairment()
         self.random = random.Random(seed)
+        self.packet_observer = packet_observer
+        self.packet_transformer = packet_transformer
+        self.max_pending_packets = max(1, int(max_pending_packets))
         self.selector = selectors.DefaultSelector()
         self.client_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -58,6 +72,12 @@ class UdpStressProxy:
             "server_to_client_packets": 0,
             "client_to_server_dropped": 0,
             "server_to_client_dropped": 0,
+            "client_to_server_capacity_dropped": 0,
+            "server_to_client_capacity_dropped": 0,
+            "client_to_server_duplicated": 0,
+            "server_to_client_duplicated": 0,
+            "client_to_server_corrupted": 0,
+            "server_to_client_corrupted": 0,
             "client_to_server_delayed": 0,
             "server_to_client_delayed": 0,
             "client_to_server_reordered": 0,
@@ -68,6 +88,12 @@ class UdpStressProxy:
             "server_to_client_recv_errors": 0,
             "client_to_server_send_errors": 0,
             "server_to_client_send_errors": 0,
+            "client_to_server_injected": 0,
+            "server_to_client_injected": 0,
+            "packet_observer_errors": 0,
+            "packet_transform_errors": 0,
+            "pending_packets_high_water": 0,
+            "pending_packet_limit": self.max_pending_packets,
             "client_endpoint": "",
             "server_endpoint": f"{server_endpoint[0]}:{server_endpoint[1]}",
         }
@@ -83,6 +109,28 @@ class UdpStressProxy:
         finally:
             self.client_sock.close()
             self.server_sock.close()
+
+    def inject_client_to_server(self, data):
+        """Send a crafted datagram from the proxy address observed by the server."""
+        try:
+            self.server_sock.sendto(bytes(data), self.server_endpoint)
+            self.stats["client_to_server_injected"] += 1
+            return True
+        except OSError:
+            self.stats["client_to_server_send_errors"] += 1
+            return False
+
+    def inject_server_to_client(self, data):
+        """Send a crafted datagram from the proxy address observed by the client."""
+        if self.client_endpoint is None:
+            return False
+        try:
+            self.client_sock.sendto(bytes(data), self.client_endpoint)
+            self.stats["server_to_client_injected"] += 1
+            return True
+        except OSError:
+            self.stats["server_to_client_send_errors"] += 1
+            return False
 
     def run_until(self, stop_event):
         try:
@@ -144,8 +192,37 @@ class UdpStressProxy:
 
     def _schedule(self, data, out_sock, destination, impairment, prefix):
         self.stats[f"{prefix}_packets"] += 1
+        if self.packet_observer is not None:
+            try:
+                self.packet_observer(prefix, bytes(data))
+            except Exception:
+                self.stats["packet_observer_errors"] += 1
+        if self.packet_transformer is not None:
+            try:
+                data = self.packet_transformer(prefix, bytes(data))
+            except Exception:
+                self.stats["packet_transform_errors"] += 1
+            if data is None:
+                self.stats[f"{prefix}_dropped"] += 1
+                return
+        data = bytes(data)
         if impairment.loss_percent > 0.0 and self.random.random() < impairment.loss_percent / 100.0:
             self.stats[f"{prefix}_dropped"] += 1
+            return
+
+        if data and impairment.corrupt_percent > 0.0 and self.random.random() < impairment.corrupt_percent / 100.0:
+            corrupted = bytearray(data)
+            byte_index = self.random.randrange(len(corrupted))
+            corrupted[byte_index] ^= 1 << self.random.randrange(8)
+            data = bytes(corrupted)
+            self.stats[f"{prefix}_corrupted"] += 1
+
+        if not self._requires_timed_queue(impairment):
+            if not self._send_immediate(out_sock, destination, data, prefix):
+                return
+            if impairment.duplicate_percent > 0.0 and self.random.random() < impairment.duplicate_percent / 100.0:
+                if self._send_immediate(out_sock, destination, data, prefix):
+                    self.stats[f"{prefix}_duplicated"] += 1
             return
 
         now = time.monotonic()
@@ -166,8 +243,39 @@ class UdpStressProxy:
 
         if delay_s > 0.0:
             self.stats[f"{prefix}_delayed"] += 1
+        if not self._queue_packet(release_at, prefix, out_sock, destination, data):
+            return
+        if impairment.duplicate_percent > 0.0 and self.random.random() < impairment.duplicate_percent / 100.0:
+            duplicate_at = release_at + 0.000001
+            if self._queue_packet(duplicate_at, prefix, out_sock, destination, data):
+                self.stats[f"{prefix}_duplicated"] += 1
+
+    @staticmethod
+    def _requires_timed_queue(impairment):
+        return (
+            impairment.fixed_delay_ms > 0.0
+            or impairment.jitter_ms > 0.0
+            or impairment.reorder_percent > 0.0
+            or (impairment.burst_pause_ms > 0.0 and impairment.burst_every_ms > 0.0)
+        )
+
+    def _send_immediate(self, out_sock, destination, data, prefix):
+        try:
+            out_sock.sendto(data, destination)
+            return True
+        except OSError:
+            self.stats[f"{prefix}_send_errors"] += 1
+            return False
+
+    def _queue_packet(self, release_at, prefix, out_sock, destination, data):
+        if len(self.pending) >= self.max_pending_packets:
+            self.stats[f"{prefix}_capacity_dropped"] += 1
+            return False
         self.next_order += 1
         heapq.heappush(self.pending, (release_at, self.next_order, prefix, out_sock, destination, data))
+        if len(self.pending) > self.stats["pending_packets_high_water"]:
+            self.stats["pending_packets_high_water"] = len(self.pending)
+        return True
 
     def _send_due(self):
         now = time.monotonic()

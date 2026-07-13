@@ -205,6 +205,8 @@ Song arrangement, prepared-track state, quantized restart, and recording command
 
 The current host-authoritative song/asset model can remain initially, but transport packets need a source peer id and globally unambiguous event id. Local revision counters from different peers are not comparable by themselves.
 
+A completed peer recording is a contribution, not an unrestricted arrangement edit. The recording peer offers a unique contribution id plus its intended bank/lane and content hash; the arrangement authority requests and validates the asset, fills the target only when it is still empty, otherwise appends a lane, and then publishes a new authoritative arrangement revision. This preserves simultaneous takes without allowing competing full snapshots to overwrite one another.
+
 Separating these roles avoids replacing one fixed `listener_side` flag with a different fixed “host is everything” flag.
 
 ## Proposed Persistent Engine Lifecycle
@@ -737,11 +739,13 @@ Current stress and two-host benchmark tools explicitly launch `listen`, `connect
 
 ## Recommended Implementation Sequence
 
-### Phase 1: freeze current behavior with tests and baselines
+### Phase 1: stabilize the current model and preserve useful evidence
 
-1. Capture fast/moderate/safe two-peer results for `listen/connect`.
-2. Capture two-, three-, and four-peer mesh results.
-3. Add native tests for sequence, jitter/reorder, clock mapping, drift, ring ownership, and protocol handshake.
+1. Correct the identified ownership, bounds, protocol, control, asset, and
+   worker issues in the current model.
+2. Reuse existing fast/moderate/safe and mesh results, and capture new cases
+   when they are useful for a specific change.
+3. Add independent Python real-process validation for sequence, jitter/reorder, clock mapping, drift, ring ownership counters, and protocol handshake behavior.
 4. Record every existing difference in stats so parity failures are visible.
 
 ### Phase 2: extract the persistent local engine
@@ -758,7 +762,8 @@ Current stress and two-host benchmark tools explicitly launch `listen`, `connect
 3. Run the new network session with exactly one remote peer.
 4. Compare it against `listen/connect` under clean, jitter, loss, burst, drift, metronome, transport, and recording scenarios.
 
-Do not proceed to general mesh until one-peer parity is established.
+Use one-peer parity evidence before replacing the mesh path; this is guidance
+for implementation order rather than a hard validation gate.
 
 ### Phase 4: add peer fan-out and per-peer mixing
 

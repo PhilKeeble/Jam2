@@ -9,21 +9,24 @@ namespace {
 
 constexpr std::uint32_t kMagic = 0x324d414aU; // JAM2 little-endian.
 constexpr std::uint8_t kVersion = 1;
+constexpr std::size_t kAuthTagOffset = 38;
+constexpr std::size_t kAuthTagSize = 8;
+constexpr std::size_t kReservedOffset = 46;
 
-void put_u16(std::vector<std::uint8_t>& out, std::size_t offset, std::uint16_t value)
+void put_u16(std::span<std::uint8_t> out, std::size_t offset, std::uint16_t value)
 {
     out[offset] = static_cast<std::uint8_t>(value & 0xffU);
     out[offset + 1] = static_cast<std::uint8_t>((value >> 8) & 0xffU);
 }
 
-void put_u32(std::vector<std::uint8_t>& out, std::size_t offset, std::uint32_t value)
+void put_u32(std::span<std::uint8_t> out, std::size_t offset, std::uint32_t value)
 {
     for (int i = 0; i < 4; ++i) {
         out[offset + i] = static_cast<std::uint8_t>((value >> (i * 8)) & 0xffU);
     }
 }
 
-void put_u64(std::vector<std::uint8_t>& out, std::size_t offset, std::uint64_t value)
+void put_u64(std::span<std::uint8_t> out, std::size_t offset, std::uint64_t value)
 {
     for (int i = 0; i < 8; ++i) {
         out[offset + i] = static_cast<std::uint8_t>((value >> (i * 8)) & 0xffU);
@@ -53,7 +56,10 @@ std::uint64_t read_u64(std::span<const std::uint8_t> in, std::size_t offset)
     return value;
 }
 
-std::uint64_t siphash24(std::span<const std::uint8_t> data, const std::array<std::uint8_t, 16>& key)
+std::uint64_t siphash24(
+    std::span<const std::uint8_t> data,
+    const std::array<std::uint8_t, 16>& key,
+    bool zero_auth_tag = false)
 {
     auto rotl = [](std::uint64_t value, int bits) {
         return (value << bits) | (value >> (64 - bits));
@@ -65,8 +71,6 @@ std::uint64_t siphash24(std::span<const std::uint8_t> data, const std::array<std
         }
         return value;
     };
-    auto round = [&]() {};
-
     std::uint64_t v0 = 0x736f6d6570736575ULL ^ read_key(0);
     std::uint64_t v1 = 0x646f72616e646f6dULL ^ read_key(8);
     std::uint64_t v2 = 0x6c7967656e657261ULL ^ read_key(0);
@@ -88,11 +92,19 @@ std::uint64_t siphash24(std::span<const std::uint8_t> data, const std::array<std
         v1 ^= v2;
         v2 = rotl(v2, 32);
     };
-    (void)round;
+    auto data_byte = [&](std::size_t index) {
+        if (zero_auth_tag && index >= kAuthTagOffset && index < kAuthTagOffset + kAuthTagSize) {
+            return static_cast<std::uint8_t>(0);
+        }
+        return data[index];
+    };
 
     std::size_t offset = 0;
     while (offset + 8 <= data.size()) {
-        const std::uint64_t m = read_u64(data, offset);
+        std::uint64_t m = 0;
+        for (std::size_t i = 0; i < 8; ++i) {
+            m |= static_cast<std::uint64_t>(data_byte(offset + i)) << (8 * i);
+        }
         v3 ^= m;
         sip_round();
         sip_round();
@@ -102,7 +114,7 @@ std::uint64_t siphash24(std::span<const std::uint8_t> data, const std::array<std
 
     std::uint64_t b = static_cast<std::uint64_t>(data.size()) << 56;
     for (std::size_t i = 0; offset + i < data.size(); ++i) {
-        b |= static_cast<std::uint64_t>(data[offset + i]) << (8 * i);
+        b |= static_cast<std::uint64_t>(data_byte(offset + i)) << (8 * i);
     }
     v3 ^= b;
     sip_round();
@@ -116,6 +128,32 @@ std::uint64_t siphash24(std::span<const std::uint8_t> data, const std::array<std
     return v0 ^ v1 ^ v2 ^ v3;
 }
 
+bool known_packet_type(std::uint8_t value)
+{
+    return value >= static_cast<std::uint8_t>(PacketType::Hello) &&
+        value <= static_cast<std::uint8_t>(PacketType::TransportState);
+}
+
+bool valid_payload_size(PacketType type, std::size_t size)
+{
+    switch (type) {
+    case PacketType::Hello:
+    case PacketType::HelloAck:
+        return size == 8;
+    case PacketType::Audio:
+        return size > 0 && size <= 256 * 3 && (size % 3) == 0;
+    case PacketType::Ping:
+    case PacketType::Pong:
+    case PacketType::Bye:
+        return size == 0;
+    case PacketType::MetronomeState:
+        return size == 56;
+    case PacketType::TransportState:
+        return size == 20;
+    }
+    return false;
+}
+
 } // namespace
 
 std::vector<std::uint8_t> encode_packet(
@@ -127,6 +165,23 @@ std::vector<std::uint8_t> encode_packet(
         throw std::runtime_error("payload too large");
     }
     std::vector<std::uint8_t> out(kHeaderSize + payload.size());
+    if (encode_packet_into(header, payload, key, out) == 0) {
+        throw std::runtime_error("packet output buffer is too small");
+    }
+    return out;
+}
+
+std::size_t encode_packet_into(
+    const Header& header,
+    std::span<const std::uint8_t> payload,
+    const std::array<std::uint8_t, 16>& key,
+    std::span<std::uint8_t> output)
+{
+    if (payload.size() > 65535 || output.size() < kHeaderSize + payload.size()) {
+        return 0;
+    }
+    const std::size_t packet_size = kHeaderSize + payload.size();
+    std::span<std::uint8_t> out = output.first(packet_size);
     put_u32(out, 0, kMagic);
     out[4] = kVersion;
     out[5] = static_cast<std::uint8_t>(header.type);
@@ -138,21 +193,29 @@ std::vector<std::uint8_t> encode_packet(
     put_u16(out, 36, static_cast<std::uint16_t>(payload.size()));
     put_u64(out, 38, 0);
     put_u16(out, 46, 0);
-    std::memcpy(out.data() + kHeaderSize, payload.data(), payload.size());
+    if (!payload.empty()) {
+        std::memcpy(out.data() + kHeaderSize, payload.data(), payload.size());
+    }
     put_u64(out, 38, siphash24(out, key));
-    return out;
+    return packet_size;
 }
 
-Header decode_packet(
+ParseResult parse_packet(
     std::span<const std::uint8_t> packet,
     const std::array<std::uint8_t, 16>& key,
     std::uint64_t expected_session_id)
 {
     if (packet.size() < kHeaderSize) {
-        throw std::runtime_error("packet shorter than header");
+        return {{}, ParseError::ShortPacket};
     }
-    if (read_u32(packet, 0) != kMagic || packet[4] != kVersion) {
-        throw std::runtime_error("wrong packet magic/version");
+    if (read_u32(packet, 0) != kMagic) {
+        return {{}, ParseError::WrongMagic};
+    }
+    if (packet[4] != kVersion) {
+        return {{}, ParseError::WrongVersion};
+    }
+    if (!known_packet_type(packet[5])) {
+        return {{}, ParseError::UnknownType};
     }
     Header header;
     header.type = static_cast<PacketType>(packet[5]);
@@ -163,23 +226,54 @@ Header decode_packet(
     header.send_time_us = read_u64(packet, 28);
     header.payload_length = read_u16(packet, 36);
     header.auth_tag = read_u64(packet, 38);
+    if (header.flags != 0) {
+        return {header, ParseError::InvalidFlags};
+    }
+    if (read_u16(packet, kReservedOffset) != 0) {
+        return {header, ParseError::InvalidReserved};
+    }
     if (header.session_id != expected_session_id) {
-        throw std::runtime_error("wrong session id");
+        return {header, ParseError::WrongSession};
     }
-    if (packet.size() != kHeaderSize + header.payload_length) {
-        throw std::runtime_error("packet payload length mismatch");
+    if (packet.size() != kHeaderSize + header.payload_length ||
+        !valid_payload_size(header.type, header.payload_length)) {
+        return {header, ParseError::InvalidPayloadSize};
     }
-    std::vector<std::uint8_t> auth_copy(packet.begin(), packet.end());
-    put_u64(auth_copy, 38, 0);
-    if (siphash24(auth_copy, key) != header.auth_tag) {
-        throw std::runtime_error("packet authentication failed");
+    if (siphash24(packet, key, true) != header.auth_tag) {
+        return {header, ParseError::AuthenticationFailed};
     }
-    return header;
+    return {header, ParseError::None};
+}
+
+const char* parse_error_text(ParseError error)
+{
+    switch (error) {
+    case ParseError::None: return "none";
+    case ParseError::ShortPacket: return "short_packet";
+    case ParseError::WrongMagic: return "wrong_magic";
+    case ParseError::WrongVersion: return "wrong_version";
+    case ParseError::UnknownType: return "unknown_type";
+    case ParseError::InvalidFlags: return "invalid_flags";
+    case ParseError::InvalidReserved: return "invalid_reserved";
+    case ParseError::WrongSession: return "wrong_session";
+    case ParseError::InvalidPayloadSize: return "invalid_payload_size";
+    case ParseError::AuthenticationFailed: return "authentication_failed";
+    }
+    return "unknown";
 }
 
 std::vector<std::uint8_t> pack_pcm24(std::span<const std::int32_t> samples)
 {
     std::vector<std::uint8_t> out(samples.size() * 3);
+    (void)pack_pcm24_into(samples, out);
+    return out;
+}
+
+bool pack_pcm24_into(std::span<const std::int32_t> samples, std::span<std::uint8_t> out) noexcept
+{
+    if (out.size() != samples.size() * 3) {
+        return false;
+    }
     for (std::size_t i = 0; i < samples.size(); ++i) {
         const std::int32_t clamped = samples[i] < -8388608 ? -8388608 : (samples[i] > 8388607 ? 8388607 : samples[i]);
         const std::uint32_t value = static_cast<std::uint32_t>(clamped) & 0x00ffffffU;
@@ -187,7 +281,7 @@ std::vector<std::uint8_t> pack_pcm24(std::span<const std::int32_t> samples)
         out[i * 3 + 1] = static_cast<std::uint8_t>((value >> 8) & 0xffU);
         out[i * 3 + 2] = static_cast<std::uint8_t>((value >> 16) & 0xffU);
     }
-    return out;
+    return true;
 }
 
 std::vector<std::int32_t> unpack_pcm24(std::span<const std::uint8_t> bytes)
@@ -196,6 +290,15 @@ std::vector<std::int32_t> unpack_pcm24(std::span<const std::uint8_t> bytes)
         throw std::runtime_error("24-bit PCM byte count must be divisible by 3");
     }
     std::vector<std::int32_t> out(bytes.size() / 3);
+    (void)unpack_pcm24_into(bytes, out);
+    return out;
+}
+
+bool unpack_pcm24_into(std::span<const std::uint8_t> bytes, std::span<std::int32_t> out) noexcept
+{
+    if ((bytes.size() % 3) != 0 || out.size() != bytes.size() / 3) {
+        return false;
+    }
     for (std::size_t i = 0; i < out.size(); ++i) {
         std::uint32_t value = static_cast<std::uint32_t>(bytes[i * 3]) |
             (static_cast<std::uint32_t>(bytes[i * 3 + 1]) << 8) |
@@ -205,7 +308,7 @@ std::vector<std::int32_t> unpack_pcm24(std::span<const std::uint8_t> bytes)
         }
         out[i] = static_cast<std::int32_t>(value);
     }
-    return out;
+    return true;
 }
 
 SequenceResult SequenceTracker::observe(std::uint32_t sequence)
@@ -217,8 +320,13 @@ SequenceResult SequenceTracker::observe(std::uint32_t sequence)
         return SequenceResult::InOrder;
     }
 
-    if (sequence > highest_) {
-        const std::uint32_t gap = sequence - highest_;
+    if (sequence == highest_) {
+        ++stats_.duplicate;
+        return SequenceResult::Duplicate;
+    }
+
+    if (sequence_after(sequence, highest_)) {
+        const std::uint32_t gap = sequence_forward_distance(sequence, highest_);
         if (gap > 1) {
             const std::uint64_t missing = gap - 1;
             stats_.lost += missing;
@@ -232,7 +340,12 @@ SequenceResult SequenceTracker::observe(std::uint32_t sequence)
         return SequenceResult::InOrder;
     }
 
-    const std::uint32_t delta = highest_ - sequence;
+    if (!sequence_before(sequence, highest_)) {
+        ++stats_.late;
+        return SequenceResult::Late;
+    }
+
+    const std::uint32_t delta = sequence_forward_distance(highest_, sequence);
     if (delta >= 64) {
         ++stats_.late;
         return SequenceResult::Late;
@@ -247,6 +360,45 @@ SequenceResult SequenceTracker::observe(std::uint32_t sequence)
     recent_window_ |= mask;
     ++stats_.out_of_order;
     return SequenceResult::OutOfOrder;
+}
+
+ReplayResult ReplayWindow::observe(std::uint32_t sequence)
+{
+    if (!initialized_) {
+        initialized_ = true;
+        highest_ = sequence;
+        bitmap_ = 1;
+        return ReplayResult::New;
+    }
+    if (sequence == highest_) {
+        return ReplayResult::Duplicate;
+    }
+    if (sequence_after(sequence, highest_)) {
+        const std::uint32_t distance = sequence_forward_distance(sequence, highest_);
+        bitmap_ = distance >= 64 ? 1 : ((bitmap_ << distance) | 1ULL);
+        highest_ = sequence;
+        return ReplayResult::New;
+    }
+    if (!sequence_before(sequence, highest_)) {
+        return ReplayResult::Ambiguous;
+    }
+    const std::uint32_t distance = sequence_forward_distance(highest_, sequence);
+    if (distance >= 64) {
+        return ReplayResult::TooOld;
+    }
+    const std::uint64_t mask = 1ULL << distance;
+    if ((bitmap_ & mask) != 0) {
+        return ReplayResult::Duplicate;
+    }
+    bitmap_ |= mask;
+    return ReplayResult::New;
+}
+
+void ReplayWindow::reset()
+{
+    initialized_ = false;
+    highest_ = 0;
+    bitmap_ = 0;
 }
 
 } // namespace jam2::protocol

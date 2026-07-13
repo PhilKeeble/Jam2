@@ -1,5 +1,6 @@
 #include "udp_socket.hpp"
 
+#include <algorithm>
 #include <array>
 #include <stdexcept>
 
@@ -12,6 +13,7 @@
 #include <netdb.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 #endif
 
@@ -68,6 +70,13 @@ Endpoint from_sockaddr(const sockaddr_in& addr)
 
 } // namespace
 
+Endpoint resolve_udp_endpoint(const Endpoint& endpoint)
+{
+    sockaddr_in address = to_sockaddr(endpoint);
+    address.sin_port = htons(endpoint.port);
+    return from_sockaddr(address);
+}
+
 NetworkRuntime::NetworkRuntime()
 {
 #if defined(_WIN32)
@@ -122,7 +131,15 @@ UdpSocket::UdpSocket(UdpSocket&& other) noexcept : handle_(other.handle_)
 UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept
 {
     if (this != &other) {
-        this->~UdpSocket();
+#if defined(_WIN32)
+        if (handle_ != INVALID_SOCKET) {
+            closesocket(handle_);
+        }
+#else
+        if (handle_ >= 0) {
+            close(handle_);
+        }
+#endif
         handle_ = other.handle_;
 #if defined(_WIN32)
         other.handle_ = INVALID_SOCKET;
@@ -208,12 +225,37 @@ void UdpSocket::send_to(const Endpoint& endpoint, std::span<const std::uint8_t> 
 
 std::optional<std::pair<Endpoint, std::vector<std::uint8_t>>> UdpSocket::recv_from(int timeout_ms) const
 {
+    std::vector<std::uint8_t> buffer(kMaxExpectedDatagramBytes);
+    const auto received = recv_from(buffer, timeout_ms);
+    if (!received) {
+        return std::nullopt;
+    }
+    buffer.resize(received->size);
+    return std::make_pair(received->endpoint, std::move(buffer));
+}
+
+std::optional<UdpSocket::ReceivedDatagram> UdpSocket::recv_from(
+    std::span<std::uint8_t> buffer,
+    int timeout_ms) const
+{
+    const std::uint64_t timeout_us = timeout_ms > 0
+        ? static_cast<std::uint64_t>(timeout_ms) * 1000ULL
+        : 0ULL;
+    return recv_from_for(buffer, timeout_us);
+}
+
+std::optional<UdpSocket::ReceivedDatagram> UdpSocket::recv_from_for(
+    std::span<std::uint8_t> buffer,
+    std::uint64_t timeout_us) const
+{
+    constexpr std::uint64_t kMaxSelectTimeoutUs = 24ULL * 60ULL * 60ULL * 1000000ULL;
+    timeout_us = (std::min)(timeout_us, kMaxSelectTimeoutUs);
     fd_set read_set;
     FD_ZERO(&read_set);
     FD_SET(handle_, &read_set);
     timeval timeout{};
-    timeout.tv_sec = timeout_ms / 1000;
-    timeout.tv_usec = (timeout_ms % 1000) * 1000;
+    timeout.tv_sec = static_cast<long>(timeout_us / 1000000ULL);
+    timeout.tv_usec = static_cast<long>(timeout_us % 1000000ULL);
     const int ready = select(static_cast<int>(handle_ + 1), &read_set, nullptr, nullptr, &timeout);
     if (ready < 0) {
         throw std::runtime_error("UDP select failed: " + socket_error_text());
@@ -222,9 +264,9 @@ std::optional<std::pair<Endpoint, std::vector<std::uint8_t>>> UdpSocket::recv_fr
         return std::nullopt;
     }
 
-    std::vector<std::uint8_t> buffer(kMaxExpectedDatagramBytes);
     sockaddr_in from{};
     socklen_t from_len = sizeof(from);
+#if defined(_WIN32)
     const int received = ::recvfrom(
         handle_,
         reinterpret_cast<char*>(buffer.data()),
@@ -232,6 +274,18 @@ std::optional<std::pair<Endpoint, std::vector<std::uint8_t>>> UdpSocket::recv_fr
         0,
         reinterpret_cast<sockaddr*>(&from),
         &from_len);
+#else
+    iovec vector{};
+    vector.iov_base = buffer.data();
+    vector.iov_len = buffer.size();
+    msghdr message{};
+    message.msg_name = &from;
+    message.msg_namelen = from_len;
+    message.msg_iov = &vector;
+    message.msg_iovlen = 1;
+    const ssize_t received = ::recvmsg(handle_, &message, 0);
+    from_len = message.msg_namelen;
+#endif
     if (received < 0) {
 #if defined(_WIN32)
         if (WSAGetLastError() == WSAECONNRESET) {
@@ -247,8 +301,12 @@ std::optional<std::pair<Endpoint, std::vector<std::uint8_t>>> UdpSocket::recv_fr
 #endif
         throw std::runtime_error("UDP receive failed: " + socket_error_text());
     }
-    buffer.resize(static_cast<std::size_t>(received));
-    return std::make_pair(from_sockaddr(from), std::move(buffer));
+#if !defined(_WIN32)
+    if ((message.msg_flags & MSG_TRUNC) != 0) {
+        return std::nullopt;
+    }
+#endif
+    return ReceivedDatagram{from_sockaddr(from), static_cast<std::size_t>(received)};
 }
 
 } // namespace jam2

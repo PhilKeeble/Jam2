@@ -2,9 +2,19 @@
 
 #include <QJsonArray>
 #include <QJsonValue>
+#include <QRegularExpression>
 #include <QUuid>
 
+#include <cmath>
+#include <limits>
+
 namespace {
+constexpr int kBankCount = 4;
+constexpr int kMaxLanesPerBank = 128;
+constexpr int kMaxIdCharacters = 80;
+constexpr int kMaxNameCharacters = 512;
+constexpr int kMaxPathCharacters = 4096;
+
 QString laneId(const QString& value)
 {
     return value.isEmpty() ? QUuid::createUuid().toString(QUuid::WithoutBraces) : value;
@@ -19,7 +29,12 @@ qint64 jsonFrame(const QJsonObject& object, const char* key, qint64 fallback)
         return ok ? parsed : fallback;
     }
     if (value.isDouble()) {
-        return static_cast<qint64>(value.toDouble());
+        const double number = value.toDouble();
+        if (std::isfinite(number) && std::floor(number) == number &&
+            number >= static_cast<double>(std::numeric_limits<qint64>::min()) &&
+            number <= static_cast<double>(std::numeric_limits<qint64>::max())) {
+            return static_cast<qint64>(number);
+        }
     }
     return fallback;
 }
@@ -27,6 +42,31 @@ qint64 jsonFrame(const QJsonObject& object, const char* key, qint64 fallback)
 bool validBankId(const QString& id, int index)
 {
     return id == QString(QChar('A' + index));
+}
+
+bool validAssetHash(const QString& hash)
+{
+    static const QRegularExpression expression(QStringLiteral("^[0-9a-f]{64}$"));
+    return hash.isEmpty() || expression.match(hash).hasMatch();
+}
+
+bool validJsonFrameValue(const QJsonValue& value)
+{
+    if (value.isUndefined()) {
+        return true;
+    }
+    if (value.isString()) {
+        bool ok = false;
+        (void)value.toString().toLongLong(&ok);
+        return ok;
+    }
+    if (!value.isDouble()) {
+        return false;
+    }
+    const double number = value.toDouble();
+    return std::isfinite(number) && std::floor(number) == number &&
+        number >= static_cast<double>(std::numeric_limits<qint64>::min()) &&
+        number <= static_cast<double>(std::numeric_limits<qint64>::max());
 }
 }
 
@@ -47,7 +87,9 @@ bool LooperProject::trackSyncEnabled() const { return trackSyncEnabled_; }
 void LooperProject::setTrackSyncEnabled(bool enabled) { trackSyncEnabled_ = enabled; }
 bool LooperProject::appendLane(int bankIndex, LooperLane lane)
 {
-    if (bankIndex < 0 || bankIndex >= banks_.size()) {
+    if (bankIndex < 0 || bankIndex >= banks_.size() || banks_[bankIndex].lanes.size() >= kMaxLanesPerBank ||
+        lane.id.size() > kMaxIdCharacters || lane.name.size() > kMaxNameCharacters ||
+        lane.assetPath.size() > kMaxPathCharacters || !validAssetHash(lane.assetHash)) {
         return false;
     }
     lane.id = laneId(lane.id);
@@ -129,7 +171,7 @@ QJsonObject LooperProject::toJson() const
 bool LooperProject::loadJson(const QJsonObject& object)
 {
     const QJsonArray savedBanks = object.value(QStringLiteral("banks")).toArray();
-    if (savedBanks.size() != 4) return false;
+    if (savedBanks.size() != kBankCount) return false;
     QVector<LooperBank> loaded;
     for (int i = 0; i < savedBanks.size(); ++i) {
         const QJsonObject bankObject = savedBanks.at(i).toObject();
@@ -138,8 +180,41 @@ bool LooperProject::loadJson(const QJsonObject& object)
             return false;
         }
         LooperBank bank{bankId, {}};
-        for (const QJsonValue& value : bankObject.value(QStringLiteral("lanes")).toArray()) {
+        const QJsonArray savedLanes = bankObject.value(QStringLiteral("lanes")).toArray();
+        if (savedLanes.size() > kMaxLanesPerBank) {
+            return false;
+        }
+        for (const QJsonValue& value : savedLanes) {
+            if (!value.isObject()) {
+                return false;
+            }
             const QJsonObject laneObject = value.toObject();
+            for (const QString& key : {
+                    QStringLiteral("id"), QStringLiteral("asset_path"),
+                    QStringLiteral("asset_hash"), QStringLiteral("name")}) {
+                const QJsonValue text = laneObject.value(key);
+                if (!text.isUndefined() && !text.isString()) {
+                    return false;
+                }
+            }
+            for (const QString& key : {
+                    QStringLiteral("start_frame"), QStringLiteral("stop_frame"),
+                    QStringLiteral("loop_start_frame"), QStringLiteral("loop_end_frame")}) {
+                if (!validJsonFrameValue(laneObject.value(key))) {
+                    return false;
+                }
+            }
+            for (const QString& key : {
+                    QStringLiteral("muted"), QStringLiteral("solo"), QStringLiteral("loop_enabled")}) {
+                const QJsonValue flag = laneObject.value(key);
+                if (!flag.isUndefined() && !flag.isBool()) {
+                    return false;
+                }
+            }
+            const QJsonValue gain = laneObject.value(QStringLiteral("gain_db"));
+            if (!gain.isUndefined() && (!gain.isDouble() || !std::isfinite(gain.toDouble()))) {
+                return false;
+            }
             LooperLane lane;
             lane.id = laneId(laneObject.value(QStringLiteral("id")).toString());
             lane.assetPath = laneObject.value(QStringLiteral("asset_path")).toString();
@@ -153,7 +228,10 @@ bool LooperProject::loadJson(const QJsonObject& object)
             lane.muted = laneObject.value(QStringLiteral("muted")).toBool();
             lane.solo = laneObject.value(QStringLiteral("solo")).toBool();
             lane.loopEnabled = laneObject.value(QStringLiteral("loop_enabled")).toBool();
-            if (lane.startFrame < 0 ||
+            if (lane.id.size() > kMaxIdCharacters || lane.name.size() > kMaxNameCharacters ||
+                lane.assetPath.size() > kMaxPathCharacters || !validAssetHash(lane.assetHash) ||
+                !std::isfinite(lane.gainDb) || lane.gainDb < -120.0 || lane.gainDb > 24.0 ||
+                lane.startFrame < 0 ||
                 (lane.stopFrame >= 0 && lane.stopFrame < lane.startFrame) ||
                 (lane.loopStartFrame >= 0 && lane.loopEndFrame >= 0 && lane.loopEndFrame <= lane.loopStartFrame)) {
                 return false;

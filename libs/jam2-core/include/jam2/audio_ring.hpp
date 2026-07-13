@@ -23,6 +23,11 @@ struct RingStats {
     std::uint64_t depth_under_10ms_frames = 0;
     std::uint64_t depth_10ms_plus_frames = 0;
     std::uint64_t depth_observed_frames = 0;
+    std::uint64_t drop_requested_frames = 0;
+    std::uint64_t drop_applied_frames = 0;
+    std::uint64_t drop_coalesced_requests = 0;
+    std::uint64_t drop_pending_frames = 0;
+    std::uint64_t drop_max_batch_frames = 0;
 };
 
 class MonoRingBuffer {
@@ -38,13 +43,14 @@ public:
 
     std::size_t push(std::span<const std::int32_t> frames);
     std::size_t pop(std::span<std::int32_t> frames, bool observe_depth = true);
-    std::size_t drop_oldest(std::size_t frames);
+    void request_drop_oldest(std::size_t frames);
     void set_depth_bucket_thresholds(double sample_rate);
     void set_diagnostics_enabled(bool enabled);
     RingStats stats() const;
     void reset();
 
 private:
+    std::size_t apply_requested_drop(std::uint64_t read, std::uint64_t write);
     void observe_depth_for_pop(std::size_t readable, std::size_t output_frames);
 
     std::vector<std::int32_t> buffer_;
@@ -69,6 +75,11 @@ private:
     std::atomic<std::uint64_t> depth_under_10ms_frames_{0};
     std::atomic<std::uint64_t> depth_10ms_plus_frames_{0};
     std::atomic<std::uint64_t> depth_observed_frames_{0};
+    std::atomic<std::uint64_t> drop_requested_frames_{0};
+    std::atomic<std::uint64_t> drop_applied_frames_{0};
+    std::atomic<std::uint64_t> drop_coalesced_requests_{0};
+    std::atomic<std::uint64_t> drop_target_read_{0};
+    std::atomic<std::uint64_t> drop_max_batch_frames_{0};
 };
 
 } // namespace jam2::audio
