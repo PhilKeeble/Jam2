@@ -1,0 +1,605 @@
+# Jam2 v1 Lightweight Network Security Review
+
+## Purpose
+
+This report reviews Jam2's network-exposed control, UDP audio, project, asset-transfer, and WAV-processing paths as they exist near the v1 functionality target. It records the risks found, the smallest useful mitigations, their expected cost, and where they belong in the broader refactor.
+
+The goal is not to turn Jam2 into a hosted platform. The target remains a small, direct, short-lived session between controlled peers, with two people as the primary case and three/four-person direct mesh as the supported extension.
+
+No code was changed and no fuzzing, sanitizer run, build, or live penetration test was performed for this review. The findings are from static source inspection. No confirmed remote-code-execution path was found, but static inspection alone cannot prove that malformed network data or WAV input is memory-safe.
+
+## Governing Constraints
+
+The security work must preserve the repository's product rules:
+
+- No rooms, relay/TURN audio path, accounts, certificate-management UI, or broad security platform.
+- No allocation, locks, logging, exceptions, file work, or blocking operations in the real-time audio callback.
+- Keep fixed, bounded, inspectable protocol shapes.
+- Prefer a small local implementation over a dependency unless the dependency removes substantial correctness risk.
+- Expose hard counters for rejected traffic, capacity, timeouts, replay, and endpoint state.
+- Measure packet-loop and callback timing before accepting fast-path changes.
+
+Security is treated here primarily as containment:
+
+1. A malformed or hostile packet must not create unbounded memory, CPU, disk, file-descriptor, or queue work.
+2. Data must not reach application handlers until its connection and source are authenticated and authorized for that message type.
+3. Remote values must not become allocation sizes, loop bounds, local paths, or timeline positions without explicit limits.
+4. A peer-advertised endpoint must not receive continuous audio until it proves it owns the observed UDP source.
+
+## Threat Boundary
+
+### In scope
+
+- An unauthenticated host reaches a TCP or UDP port while a jam is active.
+- A scanner or buggy client opens connections or sends fragmented, oversized, malformed, duplicated, reordered, or replayed data.
+- A user connects to a malicious host or an on-path party modifies unencrypted TCP control traffic.
+- An authenticated invited peer sends messages outside its intended role.
+- An authenticated or buggy peer sends extreme sequence numbers, timestamps, grid sizes, project values, asset sizes, or WAV structures.
+- A valid peer advertises a third party's UDP endpoint.
+- A corrupt transferred WAV reaches the parser and prepared-mix worker.
+
+### Deliberately limited for v1
+
+- Peers who receive the invite are generally trusted not to extract and redistribute the shared session key.
+- The application does not attempt account-level identity, revocation, bans, or persistence across sessions.
+- The application does not attempt traffic-flow privacy or anonymity.
+- Direct connectivity remains mandatory; restrictive NAT failure is reported rather than relayed.
+
+The short socket-exposure window reduces likelihood, but it is not a reliable control by itself. Automated scans can hit a newly opened port immediately, and the same limits are valuable against accidental bugs from trusted peers.
+
+## Current Security Posture
+
+### Useful protections already present
+
+- UDP receive storage is capped at the expected maximum datagram size.
+- UDP decoding checks the header minimum, magic/version, session ID, exact total payload length, and SipHash tag before the packet reaches normal handlers.
+- Audio and control packet handlers contain several type-specific payload-size checks.
+- STUN is used for discovery and is not part of the audio data path.
+- The WAV chunk walk has basic file-size boundary checks before reading chunk payloads.
+- Asset completion checks a SHA-256 content hash before accepting the complete transfer.
+
+These are meaningful foundations. The main v1 risks are not an obviously writable network buffer; they are unbounded resource use, insufficient message authority, endpoint abuse, unchecked numeric/model expansion, and weak containment around transferred files.
+
+### Overall assessment
+
+| Area | Current assessment | Primary concern |
+| --- | --- | --- |
+| TCP control admission/framing | High priority | Unbounded unauthenticated connections and receive buffers |
+| TCP authentication | High priority | Raw key transmission, no server proof, and pre-auth client dispatch bug |
+| Control authorization | High priority | Authenticated peers are not restricted by source or message role |
+| Project/model JSON | High priority | Remote values can drive unbounded allocations and numeric conversions |
+| Asset transfer | High priority | Full-file/base64 copies and unbounded size/chunk/disk work |
+| WAV processing | Medium-high priority | Remote file reaches a custom parser/DSP worker without strict format/resource validation |
+| UDP parser | Good base, medium hardening | Fixed/authenticated format exists; replay, horizons, and work budgets are incomplete |
+| Mesh endpoint activation | Medium-high priority | Advertised endpoint is trusted without proof of UDP source ownership |
+| Secrets/privacy | Medium priority | Shared key exposure surfaces and plaintext control/audio |
+| Socket RAII | Correctness priority | Move assignment ends object lifetime and then writes the ended object |
+
+## Detailed Findings
+
+### 1. TCP admission and framing are unbounded
+
+Relevant sources:
+
+- [apps/jam2-gui/ControlServer.cpp](apps/jam2-gui/ControlServer.cpp)
+- [apps/jam2-gui/ControlClient.cpp](apps/jam2-gui/ControlClient.cpp)
+
+`ControlServer::listen` binds to `QHostAddress::Any`. That is necessary for direct remote control, but every interface can accept traffic for the duration of the session.
+
+The server currently accepts every pending TCP connection into `peers_` before authentication. There is no hard pending-connection cap, authentication deadline, incomplete-frame deadline, or aggregate connection cap. A remote host can therefore consume sockets and peer objects without knowing the session key.
+
+Both control endpoints append `readAll()` to a `QByteArray` and wait for a newline. A sender can omit the newline and grow the buffer indefinitely. A valid line and parsed JSON object also have no explicit maximum size. The server broadcast path calls `write` for every authenticated peer without a queued-output high-water policy.
+
+Likely result: memory/file-descriptor exhaustion or GUI event-loop starvation rather than code execution.
+
+Lightweight correction:
+
+- Use a four-byte network-order length prefix for handshake frames and a small fixed authenticated header after the handshake.
+- Reject a length above the declared maximum before reserving or appending payload storage.
+- Keep a fixed receive state per connection: header bytes received, declared payload length, payload bytes received, and deadline.
+- Add a small unauthenticated-connection cap, authenticated cap, authentication deadline, incomplete-frame deadline, and output high-water mark.
+- Limit frames processed per event-loop turn and resume later so one peer cannot monopolize the GUI/control thread.
+- Close the offending connection and increment a reason-specific counter when a hard limit is violated.
+
+Suggested starting limits, to be named constants and validated against real project sizes:
+
+| Limit | Starting point | Reason |
+| --- | ---: | --- |
+| Maximum control JSON payload | 64 KiB | Far above ordinary human-paced control messages; small enough for simple fixed bounds |
+| Pending unauthenticated TCP peers | 8 | Covers expected concurrent connection attempts without making admission unbounded |
+| Authentication deadline | 5 seconds | Reclaims scanners and stalled handshakes |
+| Incomplete-frame deadline | 5 seconds | Prevents slow indefinite frame accumulation |
+| Per-peer queued output high-water | 256 KiB | Four maximum frames; close a peer that cannot consume control state |
+| Frames handled per event-loop turn | 32 | Bounds monopolization while allowing normal bursts |
+
+The authenticated-peer limit must be the configured session capacity subject to a hard safety maximum; the GUI peer cap alone must not be the only enforcement point.
+
+If a measured valid song/project snapshot exceeds the ordinary control-message maximum, give that message family a separate bounded chunked transfer/state machine. Do not raise the limit for every control message merely to accommodate one large payload.
+
+### 2. The control client dispatches messages before authentication
+
+Relevant source:
+
+- [apps/jam2-gui/ControlClient.cpp](apps/jam2-gui/ControlClient.cpp)
+
+While `authenticated_` is false, the client specially handles `hello.ok` and `hello.error`, but any other valid JSON object falls through to `onMessage`. A malicious endpoint can send `session.settings`, `mesh.peer_list`, song, metronome, or asset messages before authentication succeeds.
+
+This is a concrete state-machine bug, not only a hardening preference.
+
+Lightweight correction:
+
+- Before authentication, accept only the exact next handshake message for the current handshake state.
+- Reject and close on every other type, duplicate step, malformed proof, or unexpected field shape.
+- Do not install or invoke the normal application-message callback until mutual authentication completes.
+- Add a deterministic test proving that every application message is ignored/rejected before the authenticated state.
+
+Cost: a branch per handshake frame and no steady-state audio cost.
+
+### 3. The master session key is sent directly and the client does not authenticate the server
+
+Relevant sources:
+
+- [apps/jam2-gui/ControlServer.cpp](apps/jam2-gui/ControlServer.cpp)
+- [apps/jam2-gui/ControlClient.cpp](apps/jam2-gui/ControlClient.cpp)
+
+The client currently sends the session key as a JSON string in the initial TCP hello. TCP is not encrypted. A passive observer can obtain the key, while a malicious endpoint can return `hello.ok` without proving that it knows the key.
+
+For the v1 threat boundary, full TLS and certificate identity would add more deployment and UI complexity than value. A small challenge-response protocol is a better balance.
+
+Recommended control handshake:
+
+1. Server sends the session ID, protocol version, and a fresh server nonce in a bounded challenge frame.
+2. Client sends a fresh client nonce, its claimed/bootstrap token, its UDP candidate, and a keyed proof over the session ID, version, both nonces, and the supplied fields.
+3. Server validates the proof, assigns/binds the stable peer identity for this connection, and returns its keyed proof over the same transcript and assigned identity.
+4. Both sides derive separate client-to-server and server-to-client control-frame keys from the master session key and transcript.
+5. Application frames begin at sequence one and are accepted only after the final proof is valid.
+
+Use HMAC-SHA-256 or an equivalently reviewed keyed construction and truncate authenticated frame tags to 128 bits. SHA-256 is already used in the GUI, so this need not introduce a large dependency. Domain-separate control, UDP, and any future asset keys rather than using identical key material directly for every protocol.
+
+An example authenticated control envelope is:
+
+```text
+u32 frame_bytes
+u8  version
+u8  message_class
+u16 flags_must_be_zero
+u64 connection_sequence
+u8  authentication_tag[16]
+u8  payload[frame_bytes - fixed_header]
+```
+
+The tag must cover the fixed header with a zeroed tag field, payload, session identity, direction, and bound connection/peer identities. Exact bytes require golden protocol tests; native structs must not be sent.
+
+This protects the key from direct transmission and prevents ordinary on-path modification/replay of control frames. It does not encrypt message contents, and because invited peers share the master key it does not provide cryptographic isolation from a deliberately malicious invited peer who can observe another connection. Authorization still has to be enforced in application logic.
+
+Expected cost: at most one extra handshake round trip, a few SHA-256 operations during join, approximately 28-32 bytes of framing per control message, and one MAC verification per human-paced message. It does not touch the audio callback or UDP audio bandwidth.
+
+### 4. Authentication is not authorization
+
+Relevant sources:
+
+- [apps/jam2-gui/ControlServer.cpp](apps/jam2-gui/ControlServer.cpp)
+- [apps/jam2-gui/MainWindow.cpp](apps/jam2-gui/MainWindow.cpp)
+
+After authentication, `ControlServer` invokes `onMessage` without the source peer. Creator-side and joiner-side messages both enter `MainWindow::handleControlMessage`. The receiver therefore cannot reliably enforce which connection or role may send coordinator snapshots, membership, session errors, grid actions, project state, or assets.
+
+For example, a joiner can submit a coordinator-shaped `mesh.peer_list`; the receiving path clears its current peer table, accepts the supplied endpoints, and restarts the current mesh engine. Similar concerns apply to settings, song state, and asset messages.
+
+Lightweight correction:
+
+- Carry the authenticated stable peer ID and connection direction into every control dispatch.
+- Never trust a `source_peer_id`, role, or endpoint identity supplied in the JSON payload when the connection already establishes it.
+- Define a compact authorization table by message family.
+- Separate requests/proposals from authoritative ordered snapshots. A peer may request a grid change; only the coordinator may issue the accepted grid revision.
+- Reject an otherwise valid but unauthorized message before it mutates models, starts workers, writes files, or causes network reconfiguration.
+- Send responses to the requesting peer when appropriate instead of broadcasting all responses to every peer.
+
+Minimum authorization matrix:
+
+| Message family | Accepted source | Rule |
+| --- | --- | --- |
+| Session contract/settings snapshot | Bootstrap coordinator | Joiners reject the same shape from other sources |
+| Membership/peer-list snapshot | Bootstrap coordinator | Each advertised peer is also subject to endpoint proof |
+| Grid/transport proposal | Any authenticated peer | Receiver overwrites source with connection identity; coordinator orders it |
+| Accepted grid/transport revision | Current coordinator/authority as defined by the protocol | Revision and source role must match |
+| Collaborative song edit | Explicitly allowed authenticated peer | Validate and order/rebroadcast according to the selected collaboration policy |
+| Asset request | Authenticated peer | Hash must be referenced by accepted project state and response is targeted |
+| Asset start/chunk/done | The peer from which that hash was explicitly requested | Reject unsolicited or overlapping transfer state |
+| Heartbeat/close | Bound authenticated peer | Cannot name or remove another peer |
+
+Cost: a source lookup and a few comparisons per control message. It has no packet-rate audio cost.
+
+### 5. Remote JSON can drive unbounded model growth and unsafe numeric conversion
+
+Relevant sources:
+
+- [apps/jam2-gui/MainWindow.cpp](apps/jam2-gui/MainWindow.cpp)
+- [apps/jam2-gui/BeatGridModel.cpp](apps/jam2-gui/BeatGridModel.cpp)
+- [apps/jam2-gui/LooperProject.cpp](apps/jam2-gui/LooperProject.cpp)
+- [apps/jam2-gui/SharedTrackController.cpp](apps/jam2-gui/SharedTrackController.cpp)
+
+Remote values are often converted with permissive `toInt`/`toDouble` defaults and then passed into models. `grid.resize`, for example, applies only a lower bound and resizes several vectors to the remote beat count. Song sections, lanes, lyrics, text fields, names, IDs, project arrays, frame positions, gains, and durations do not share one strict schema/limit layer.
+
+Likely result: memory/CPU exhaustion, inconsistent model state, integer overflow, or non-finite values entering later calculations.
+
+Lightweight correction:
+
+- Give every network message type an explicit validator before model mutation.
+- Check JSON type before conversion; do not rely on permissive default conversion.
+- Require integers where integers are intended and range-check before narrowing.
+- Reject NaN/infinity and bound every floating-point control.
+- Define maximum counts for sections, beats per section, lanes, events, peer-list entries, requested hashes, and concurrent transfers.
+- Define maximum UTF-8/UTF-16 lengths for IDs, names, chord cells, beat cells, lyrics, error strings, and paths.
+- Use checked addition/multiplication for frame, byte, sample, and allocation calculations.
+- Require monotonic/versioned state where stale data must not overwrite current state.
+- Increment rejection counters by message type and reason without logging each rejected packet in a flood.
+
+The limits should be product-derived and centralized in one protocol/model-limits header. They should not be scattered GUI magic numbers.
+
+### 6. Asset transfer can consume unbounded memory, CPU, and disk
+
+Relevant source:
+
+- [apps/jam2-gui/MainWindow.cpp](apps/jam2-gui/MainWindow.cpp)
+
+The sender reads the entire WAV, copies portions, base64-encodes each chunk, wraps the encoded text in JSON, and broadcasts through the generic control sender. The receiver trusts `file_bytes` enough to reserve from it, appends decoded chunks to one growing `QByteArray`, hashes only at completion, and writes the completed buffer directly to the final path.
+
+There is no common hard asset-size limit, transfer timeout, chunk-count limit, decoded-chunk limit, aggregate disk limit, concurrency limit, or requirement that the transfer was requested. Repeated asset requests can also force repeated hashing, reading, base64 work, and broadcasts.
+
+SHA-256 currently verifies that the received bytes match the sender-supplied hash. It does not make the sender trustworthy or make the WAV safe to parse.
+
+Lightweight correction:
+
+- Derive the maximum asset bytes from the maximum supported PCM16 duration, channel count, and a small bounded WAV-header allowance.
+- Accept an incoming transfer only for a validated 64-character lowercase hexadecimal hash that is pending because accepted project state referenced it.
+- Allow only a small fixed number of transfers; for v1, one active inbound transfer application-wide and one active outbound file source is a simple starting policy.
+- Validate declared bytes, chunk size, expected chunk count, index, decoded bytes per chunk, cumulative bytes, and completion count before writing.
+- Read the sender file incrementally; do not retain the complete asset merely to send it.
+- Write incoming bytes incrementally to a temporary file while updating `QCryptographicHash`.
+- Abort and remove the temporary file on timeout, disconnect, order error, excess bytes, hash mismatch, or disk failure.
+- Commit with `QSaveFile` or an equivalent same-directory atomic replace only after size/hash/WAV validation succeeds.
+- Avoid duplicate simultaneous requests for the same hash and cache a validated file's size/hash result for the session where safe.
+- Target asset responses to the requesting peer rather than broadcasting them.
+
+Base64 can remain temporarily if each encoded frame is bounded, but raw framed asset chunks are the preferred later efficiency change. Raw chunks remove the roughly 33% base64 expansion and several large text conversions. Streaming remains required regardless of encoding.
+
+Expected cost: the same O(file bytes) hashing work, small per-chunk state, and much lower peak memory. Raw chunks later reduce transferred bytes by about 25% relative to the base64-encoded representation.
+
+### 7. Remote project paths must not select local files
+
+Relevant sources:
+
+- [apps/jam2-gui/MainWindow.cpp](apps/jam2-gui/MainWindow.cpp)
+- [apps/jam2-gui/LooperProject.cpp](apps/jam2-gui/LooperProject.cpp)
+- [apps/jam2-gui/PreparedMixRenderer.cpp](apps/jam2-gui/PreparedMixRenderer.cpp)
+
+`normalizeLooperAssetPaths` replaces a lane's `asset_path` only when `asset_hash` is non-empty. A remote lane with no validated hash can therefore retain an absolute or relative path. Prepared-mix code resolves and attempts to open that path.
+
+No automatic exfiltration of arbitrary file content was confirmed in the reviewed path, but remote metadata should never be able to choose a local file for parsing or processing.
+
+Lightweight correction:
+
+- Ignore all remote `asset_path` values.
+- Require a valid content hash for every remotely referenced asset.
+- Construct the path locally as `<fixed-session-cache>/<validated-hash>.wav`.
+- Canonicalize the cache root and verify the final path remains beneath it before open/commit.
+- Keep user-selected local project paths as a separate trusted-local model field that is never populated from remote state.
+
+Cost: a hash-format check and local path construction per asset reference.
+
+### 8. WAV parsing needs strict format and resource containment
+
+Relevant source:
+
+- [apps/jam2-gui/PreparedMixRenderer.cpp](apps/jam2-gui/PreparedMixRenderer.cpp)
+
+The custom parser reads the complete file before applying the five-minute processed-output limit. It recognizes RIFF/WAVE and walks chunks with basic bounds, but it does not fully validate the RIFF declared size, PCM format tag, supported channel maximum, byte rate, block alignment, data alignment, duplicate critical chunks, chunk-count/header-work bounds, or all arithmetic before allocations and DSP work. It can also retain/copy large WAV data per lane.
+
+No clear out-of-bounds read was confirmed in the reviewed 64-bit code. The larger practical risk is resource exhaustion or unexpected numeric state reaching the stretch/mix worker. Fuzzing is still required because this parser receives network-originated bytes.
+
+Lightweight correction for a deliberately narrow v1 WAV format:
+
+- Accept only RIFF/WAVE, uncompressed PCM format tag 1, 16-bit samples, the session sample rate, and explicitly supported mono/stereo channel counts.
+- Check the filesystem size against the product-derived maximum before reading the file.
+- Validate RIFF size, chunk headers, padding, chunk count, cumulative header bytes, unique required `fmt`/`data` chunks, block alignment, byte rate, data-size alignment, and frame count using checked arithmetic.
+- Reject trailing/duplicate/unsupported structures according to one documented policy rather than partially interpreting them.
+- Do not allocate output until validated frame counts and processing-speed bounds establish the maximum.
+- Avoid duplicating the same WAV bytes for multiple lanes that reference the same hash.
+- Keep parse, hash, file I/O, stretch, and mix work on a bounded non-real-time worker.
+- Fuzz the isolated parser under AddressSanitizer and UndefinedBehaviorSanitizer where supported.
+
+If future versions accept broad codecs or complex container variants, a sandboxed decoder process would become more attractive. It is unnecessary for the narrow PCM16 v1 format if the local parser is bounded, isolated, and fuzzed.
+
+### 9. UDP has good authentication foundations but incomplete abuse bounds
+
+Relevant sources:
+
+- [libs/jam2-core/src/protocol.cpp](libs/jam2-core/src/protocol.cpp)
+- [libs/jam2-core/src/udp_socket.cpp](libs/jam2-core/src/udp_socket.cpp)
+- [apps/jam2-cli/main.cpp](apps/jam2-cli/main.cpp)
+
+The current fixed UDP header and 64-bit SipHash tag provide session integrity at low overhead. Audio remains plaintext. The receive buffer is fixed to the expected maximum datagram size, which sharply limits direct packet-size abuse.
+
+Remaining issues:
+
+- Unknown packet types and invalid flag/reserved combinations are not rejected centrally before dispatch.
+- Authentication currently copies the complete packet and throws exceptions for routine invalid traffic.
+- Replay handling is incomplete/inconsistent across message types.
+- Sequence comparisons need modular wrap handling.
+- Very large authenticated sequence gaps can cause excessive advancement/work if drain logic iterates toward the supplied value.
+- Remote sample times and timestamps need past/future acceptance horizons before entering reorder, jitter, or mix storage.
+- Ping/pong values are not consistently bound to a currently outstanding challenge, so replayed/forged authenticated responses can distort RTT/timing observations.
+- A receive burst can consume too much scheduler time unless packet work is budgeted and send deadlines are rechecked.
+- Current map-based pending/reorder/mix storage is dynamic and can be stressed by an authenticated peer's sequence/timeline choices.
+
+Lightweight correction:
+
+- Perform cheap fixed checks first: size, magic, version, known type, allowed flags/reserved zero, session, and exact type-specific payload length.
+- Verify the existing tag directly over packet spans without allocation.
+- Return an explicit parse result and counter rather than throw for ordinary invalid datagrams.
+- Maintain a fixed 64- or 128-packet replay bitmap per peer/stream, using wrap-safe sequence distance.
+- Reject stale and excessive-future sample/timeline values before they reach storage.
+- Bound sequence-gap advancement; a huge jump must cause a bounded reject/resync decision, never a loop proportional to the gap.
+- Use fixed indexed reorder/jitter/mix storage with visible capacity/high-water/drop counters.
+- Limit datagrams processed per wake/batch and re-evaluate the next audio send deadline between batches.
+- Put an unpredictable nonce in ping requests, retain a small fixed outstanding set, and accept exactly one matching pong from the bound peer/source.
+
+Expected steady cost is a few comparisons and bitmap operations per packet. At approximately 750 packets/sec per peer, even tens of simple operations per packet are negligible compared with socket, PCM conversion, map, and resampler work. Fixed storage and allocation-free authentication may reduce overall cost.
+
+### 10. Advertised mesh endpoints are activated without source proof
+
+Relevant sources:
+
+- [apps/jam2-gui/MainWindow.cpp](apps/jam2-gui/MainWindow.cpp)
+- [libs/jam2-core/src/udp_socket.cpp](libs/jam2-core/src/udp_socket.cpp)
+
+The current control flow accepts a peer-advertised `udp_endpoint`, distributes it, and restarts the mesh engine around the supplied endpoint. A malicious authenticated peer can advertise a third party's address, causing Jam2 peers to direct UDP traffic toward that address. A hostname can also cause repeated resolution in the current packet path.
+
+Lightweight correction:
+
+- Treat every control-advertised endpoint as an unverified candidate.
+- Resolve/normalize it once outside the packet loop and keep a numeric address key.
+- Send only a small, rate-limited number of authenticated challenge probes to an unverified candidate; never send audio to it.
+- Activate an edge only after the correct response arrives from the observed UDP source and is bound to the authenticated peer/session/challenge.
+- If the observed endpoint changes, return the edge to probing and repeat proof before audio resumes.
+- Expose candidate, probing, authenticated, compatible, active, stale, and failed state with a reason.
+
+Expected cost: a few small packets and at most roughly one extra round trip during edge activation. All mesh edges can probe in parallel. There is no steady-state bandwidth or audio-latency increase.
+
+### 11. Shared session keys limit insider isolation and do not provide privacy
+
+The UDP SipHash tag authenticates possession of the shared session key; it does not encrypt audio. Current TCP control and asset content are also plaintext. A peer with the group key can potentially forge another peer's UDP packets if identity is not additionally bound, and any observer on the traffic path can hear/read content.
+
+For the stated controlled-peer v1 use case:
+
+- Keep a shared session master key.
+- Derive protocol-specific keys and bind stable peer/source identities wherever possible.
+- State clearly that v1 direct traffic is authenticated for session safety but is not confidential.
+- Defer UDP AEAD, pairwise public-key exchange, and per-edge cryptographic identities unless the threat model expands to malicious invited peers or privacy on untrusted networks.
+
+Pairwise UDP keys would require at least per-destination final authentication even when audio payload encoding is shared. The raw cryptographic CPU would still be small at Jam2's bitrate, but negotiation, identity, recovery, testing, and fan-out complexity are not justified for this v1 balance.
+
+### 12. Secret generation and exposure should be narrowed
+
+Relevant sources:
+
+- [libs/jam2-core/src/common.cpp](libs/jam2-core/src/common.cpp)
+- CLI/GUI process-launch and benchmark metadata paths
+
+Session IDs and keys are currently produced through `std::random_device`, whose cryptographic quality is implementation-defined. The master key also appears in the invite URL and, in the current two-binary flow, can appear in child-process arguments, logs/tool output, clipboard history, and benchmark metadata.
+
+Lightweight correction:
+
+- Add one Qt-free `secure_random_bytes(span)` wrapper backed by the operating-system CSPRNG on Windows and macOS, with explicit failure reporting.
+- Generate session keys, nonces, peer bootstrap tokens, and challenge values only through that wrapper.
+- Keep the invite key because manual sharing requires it, but do not print it in routine logs or store it in benchmark results.
+- Redact keys from diagnostics and crash/error text. Store a non-secret session/run identifier instead.
+- Eliminate child-process argument exposure when the single-binary integration removes the process boundary.
+- Do not attempt elaborate in-memory secret wiping through copied Qt strings for v1; reduce unnecessary copies/lifetimes instead.
+
+OS random generation happens only at session/handshake time and has no measurable audio cost.
+
+### 13. UDP socket move assignment violates object-lifetime rules
+
+Relevant source:
+
+- [libs/jam2-core/src/udp_socket.cpp](libs/jam2-core/src/udp_socket.cpp)
+
+`UdpSocket::operator=(UdpSocket&&)` explicitly invokes `this->~UdpSocket()` and then writes `handle_` without reconstructing the object. That is C++ object-lifetime undefined behavior.
+
+No remote trigger was established, but socket ownership is a security and reliability boundary. Replace this with a private `close()`/RAII-handle reset followed by `std::exchange`, or use a scoped socket-handle type whose move assignment closes the old handle without ending the containing object's lifetime.
+
+Cost: none.
+
+## Recommended Lightweight Security Set
+
+The following set gives the best risk reduction without materially increasing audio/network cost.
+
+### Required before relying on the refactored v1 network path
+
+1. Fixed length-prefixed control framing with a hard payload maximum.
+2. Small hard limits for pending/authenticated connections, per-peer buffers, output queues, frames per event turn, and handshake/incomplete-frame time.
+3. Strict pre-authentication state machines on both client and server.
+4. Mutual challenge-response without transmitting the raw master key, followed by sequenced authenticated control frames.
+5. Authenticated source identity and an explicit per-message authorization matrix.
+6. Central strict schemas and product-derived bounds for all remote JSON/model values.
+7. Requested-only, size/chunk/time/concurrency-bounded streaming asset transfer to a temporary file with incremental hashing and atomic commit.
+8. Content-hash-only remote asset references and locally constructed canonical paths.
+9. A narrow, strictly validated PCM16 WAV parser running on a bounded worker, plus fuzz/sanitizer coverage.
+10. Exact UDP type/flag/payload validation, allocation-free authentication, replay windows, wrap-safe sequences, sample-time horizons, bounded gap handling, and per-wake work budgets.
+11. Authenticated UDP endpoint proof before audio activation.
+12. OS-backed secret/nonces plus domain-separated control/UDP key derivation and key redaction.
+
+### Explicitly deferred unless the threat model changes
+
+- TLS certificates, certificate pinning UI, or a private certificate authority.
+- UDP encryption/AEAD and audio confidentiality.
+- Pairwise public-key identities or per-edge secret negotiation.
+- Accounts, passwords, rooms, bans, IP reputation, or intrusion-detection features.
+- Relay/TURN audio paths.
+- A sandboxed codec service while only the bounded PCM16 WAV subset is accepted.
+
+These deferred items address privacy, malicious invited peers, persistent identity, or broad public-service operation. They are not needed merely to keep a short direct session robust against malformed traffic and common implementation bugs.
+
+## Computational and Network Cost
+
+### Expected normal two-person session impact
+
+| Control | CPU | Memory | Bandwidth/latency |
+| --- | --- | --- | --- |
+| Connection/frame/size/time caps | Effectively zero | Fixed small state; lower worst case | None |
+| Schema and authorization checks | A few comparisons per human-paced message | None beyond validators | None |
+| Challenge-response | A few hashes at join | Tens/hundreds of bytes | At most one extra RTT during join |
+| Authenticated TCP frame MAC | One SHA-256-based MAC per control message | Small sequence/key state | About 28-32 bytes per control message |
+| UDP replay/horizon/type checks | A few integer/bitmap operations per packet | Roughly 16-64 bytes per peer/stream | No packet growth and no playout delay |
+| Endpoint proof | Only during join/change | Small challenge state | A few probe packets; about one RTT before edge activation |
+| Incremental asset hash/write | Same O(n) work as whole-file hash | Much lower peak memory | Same with base64; lower after raw chunks |
+| Strict WAV checks | Negligible beside file I/O/DSP | Prevents invalid allocations | None |
+| Fuzz/sanitizer tests | Zero in release builds | Zero in release builds | None |
+| OS CSPRNG | Session/handshake only | Negligible | None |
+
+At a representative 750 UDP packets/sec per remote peer, a 20-operation validation/replay path is about 15,000 simple operations/sec per peer. Three remote peers would be about 45,000 operations/sec, which should be below measurement noise compared with socket calls, PCM packing, resampling, and the current dynamic maps. This is an order-of-magnitude illustration, not a substitute for the plan's before/after profiling.
+
+Expected user-visible result:
+
+- Audio bandwidth: unchanged.
+- Audio playout latency: unchanged.
+- Packet-loop CPU: likely unchanged or lower once copy/allocation/exception paths are removed.
+- Control bandwidth: trivially higher for small authenticated headers; asset bandwidth lower if raw chunks are adopted.
+- Peak control/asset memory: materially lower and bounded.
+- Join time: potentially one additional RTT for mutual proof and one parallel RTT for endpoint proof.
+- Implementation complexity: moderate, concentrated in reusable framing/validation/state-machine components rather than the audio callback.
+
+## Implementation Shape
+
+### Keep security work out of the real-time callback
+
+```text
+TCP/control thread
+    bounded deframer -> handshake/MAC -> source authorization -> schema validator
+        -> bounded EngineCommand
+
+UDP/network thread
+    fixed receive buffer -> cheap header checks -> SipHash -> replay/horizon checks
+        -> fixed PeerStream slot -> local-timeline output
+
+asset worker
+    authorized request -> bounded stream -> temp file + incremental SHA-256
+        -> strict WAV validation -> atomic commit -> prepared-mix worker
+
+audio callback
+    consumes only already validated, bounded, prepared audio/control state
+```
+
+### Central reusable components
+
+Prefer small components with no GUI model mutation inside them:
+
+- `ControlFrameDecoder`: fixed receive state, maximum length, sequence, MAC result, and explicit failure reason.
+- `ControlHandshake`: explicit client/server states, nonces, transcript proof, peer binding, and deadline.
+- `ControlAuthorization`: message family plus authenticated source/role to allow/reject.
+- `RemoteMessageValidator`: exact field types, counts, lengths, numeric ranges, and revision rules.
+- `AssetTransfer`: requested hash, expected/received bytes, next chunk, deadline, incremental hash, temporary file, and final status.
+- `WavPcm16Parser`: bounded header/format metadata and explicit parse result independent of rendering.
+- `ReplayWindow`: fixed wrap-safe sequence bitmap with accept/duplicate/old/ahead result.
+- `EndpointProbe`: candidate, challenge, observed source, attempts/deadline, and state.
+- `secure_random_bytes`: platform CSPRNG boundary.
+
+Each ordinary malformed-input path should return a small result enum. Exceptions remain appropriate at top-level file/socket/worker boundaries for exceptional system failures, not for normal unauthenticated traffic.
+
+## Refactor Phase Placement
+
+The dependency-ordered worker tasks are integrated into [refactor-plan.md](refactor-plan.md). The intended placement is:
+
+| Refactor phase | Security work |
+| --- | --- |
+| Phase 0 | Golden/malformed control frames and handshake tests; authorization/schema boundary tests; asset/WAV fuzz harnesses; UDP replay/horizon/ping/endpoint tests; baseline rejection and cost measurements |
+| Phase 1 | Immediate TCP caps, framing, pre-auth fix, mutual proof/frame MAC, authorization, JSON/model limits, asset streaming/paths, strict WAV validation, OS secrets, socket RAII correction |
+| Phase 2 | Allocation-free UDP authentication/parse results and fixed replay/storage primitives while preserving UDP v1 bytes |
+| Phase 3 | Preserve bounded control/worker boundaries in the extracted engine; remote data becomes typed commands only after validation |
+| Phase 4 | Per-peer replay, horizons, gap bounds, ping correlation, work budgets, stable identity, and symmetric authenticated edge state |
+| Phase 5 | Candidate-only membership endpoints, authenticated observed-source proof, active-edge gating, and session key/identity ownership |
+| Phase 6 | Authority-source authorization and monotonic grid/transport revisions |
+| Phase 7 | GUI lifecycle uses the hardened peer control path; all file/hash/WAV/prepared work stays on bounded workers |
+| Phase 8 | Single binary removes child-argument key exposure but retains worker containment and top-level exception boundaries |
+| Phase 9 | Remove legacy unauthenticated/unbounded framing and scrub documentation/tooling of key logging |
+| Phase 10 | Optional raw asset chunks, UDP version/header changes, or encryption only as independently measured protocol changes |
+
+## Security Validation Matrix
+
+### TCP framing and admission
+
+- Fragment every header/payload boundary, including one byte per read.
+- Deliver multiple frames in one read.
+- Declare zero, exact maximum, and maximum-plus-one payload lengths.
+- Omit payload completion until the deadline.
+- Open more pending/authenticated connections than allowed.
+- Fill a peer's output queue beyond the high-water mark.
+- Verify current/peak connection, buffer, queue, timeout, and rejection counters.
+- Verify memory and file-descriptor use remain bounded.
+
+### Authentication and authorization
+
+- Send every application message before authentication; none reaches `MainWindow`, models, engine commands, asset state, or files.
+- Use wrong session, wrong proof, repeated nonce, altered transcript field, wrong frame tag, duplicate sequence, old sequence, and wrong direction.
+- Connect to a fake server that cannot prove the session key; client must reject it.
+- Send each coordinator-only message from a normal peer.
+- Put a forged `source_peer_id`, role, or endpoint owner in an otherwise valid payload; connection identity wins.
+- Verify authorization failures do not rebroadcast or partially mutate state.
+
+### JSON/model limits
+
+- Boundary and boundary-plus-one tests for every count/string/range constant.
+- Negative, fractional, too-large, NaN/infinite, missing, null, and wrong-type numeric fields.
+- Huge grid beat counts, peer lists, lanes, lyrics, text cells, events, and requested-hash arrays.
+- Checked frame/byte arithmetic near integer limits.
+- Stale/duplicate/future revisions.
+
+### Assets and WAVs
+
+- Unsolicited transfer, invalid hash, negative/oversized declared bytes, invalid chunk size/count, out-of-order/duplicate chunk, excess cumulative bytes, early/late completion, timeout, disconnect, hash mismatch, and disk failure.
+- More simultaneous transfers and requests than allowed.
+- Verify temporary files are removed and existing valid assets are not truncated on failure.
+- RIFF size mismatch, truncated/oversized/padded chunks, excessive chunk count, missing/duplicate `fmt` or `data`, non-PCM tag, unsupported channels/rate/bits, invalid byte rate/block alignment, misaligned data, excessive frames, and arithmetic limits.
+- Fuzz the isolated frame decoder, JSON validators, asset state machine, and WAV parser under sanitizers.
+
+### UDP and endpoint state
+
+- Wrong magic/version/session/key/tag/type/flags/reserved/payload length.
+- Sequence wrap, duplicate, reorder, replay outside window, and huge forward gap.
+- Sample/timestamp just inside/outside past and future horizons.
+- Burst beyond the per-wake budget while verifying send/callback deadline counters remain stable.
+- Pong with no request, wrong nonce, duplicate pong, expired pong, and pong from wrong peer/source.
+- Advertise a third-party endpoint; only bounded probes may be sent and audio must remain disabled.
+- Change observed endpoint; edge returns to probing before audio resumes.
+
+### Secret handling and release overhead
+
+- Verify routine logs, benchmark metadata, CSV, child arguments, and errors do not contain the master key.
+- Verify CSPRNG failure produces a clear session-creation failure rather than a weak fallback.
+- Record packet-loop CPU, allocations, copied bytes, send gaps, callback gaps, and UDP rejection counters before/after.
+- Record normal control join time, frame overhead, asset peak memory, and transfer bytes.
+- Run fuzzers/sanitizers only in test configurations; release builds contain no sanitizer cost.
+
+## Acceptance Criteria
+
+The lightweight security refactor is acceptable when:
+
+- No unauthenticated or authenticated remote input can grow packet, control, model, asset, mix, or disk state without a declared hard bound.
+- The client cannot dispatch application data before authenticating the server/session.
+- Every control mutation has an authenticated source and explicit authorization rule.
+- The master key is not transmitted directly in the control hello or written to routine artifacts.
+- Remote project state cannot select an arbitrary local path.
+- Transferred assets are requested, streamed, incrementally verified, strictly parsed, and atomically committed.
+- Invalid UDP input uses fixed work/storage; replay, gap, timestamp, ping, and endpoint state are bounded and measured.
+- No audio is sent to an endpoint that has not proved the authenticated observed UDP source.
+- No security control enters or blocks the real-time callback.
+- Two-person packet/callback timing and audio bandwidth show no material regression in raw before/after results.
+- Three/four-person tests show fixed per-peer state and predictable linear packet-validation cost.
+- The documentation states that v1 traffic is not encrypted and that invited peers share the session trust boundary.
+
+## Final Recommendation
+
+Implement the bounds and state-machine corrections before engine extraction, then carry them into the typed control, `PeerStream`, and `NetworkSession` boundaries rather than adding a separate security subsystem later. The highest-value controls are limits, source-aware authorization, streaming file handling, replay/timeline bounds, and endpoint proof. They prevent both deliberate abuse and ordinary peer bugs while adding effectively no steady audio latency or bandwidth.
+
+Do not add TLS, accounts, relay infrastructure, or encrypted UDP as part of this v1 refactor. Revisit confidentiality and malicious-invited-peer isolation only if Jam2's deployment model expands beyond short direct sessions among controlled users.

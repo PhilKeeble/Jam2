@@ -42,7 +42,7 @@ Acceptance criteria:
 
 Consider consolidating the GUI and audio engine into one end-user application, and selectively replacing peer/song JSON control messages with fixed binary messages where measurements justify it. Preserve the primary two-person flow while retaining mesh for small groups and larger direct sessions.
 
-See [refactor.md](refactor.md) for the current architecture review, tradeoffs, risks, efficiency opportunities, and recommended implementation sequence.
+See [refactor-plan.md](refactor-plan.md) for the dependency-ordered worker plan, [refactor-binaries.md](refactor-binaries.md) for the single-application architecture review, [refactor-efficiency.md](refactor-efficiency.md) for the broader v1 code, protocol, data-flow, and efficiency audit, [refactor-modes.md](refactor-modes.md) for the local/network lifecycle and full-mesh consolidation review, and [refactor-security.md](refactor-security.md) for the lightweight network/control/asset/WAV security review and its measured v1 threat boundary.
 
 ## Loopback Recording Level Investigation
 
