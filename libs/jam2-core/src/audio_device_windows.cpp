@@ -542,10 +542,6 @@ void mix_metronome_click(DuplexContext& context, std::span<std::int32_t> output,
         context.control->metronome_mode.load(std::memory_order_relaxed) == 1 &&
         !context.control->leader_audio_local_click.load(std::memory_order_relaxed);
     if (!enabled || local_click_suppressed) {
-        context.engine_frame_counter += static_cast<std::uint64_t>(output.size());
-        context.control->engine_frame_counter.store(
-            context.engine_frame_counter,
-            std::memory_order_relaxed);
         return;
     }
 
@@ -569,8 +565,8 @@ void mix_metronome_click(DuplexContext& context, std::span<std::int32_t> output,
         jam2::metronome::step_interval_samples(context.sample_rate, pattern.bpm, pattern.division);
 
     for (std::size_t i = 0; i < output.size(); ++i) {
-        context.control->engine_frame_counter.store(context.engine_frame_counter, std::memory_order_relaxed);
-        std::uint64_t render_sample_counter = context.engine_frame_counter;
+        std::uint64_t render_sample_counter =
+            context.engine_frame_counter + static_cast<std::uint64_t>(i);
         if (render_offset_frames < 0) {
             const std::uint64_t offset = static_cast<std::uint64_t>(-render_offset_frames);
             render_sample_counter = render_sample_counter > offset ? render_sample_counter - offset : 0ULL;
@@ -591,11 +587,7 @@ void mix_metronome_click(DuplexContext& context, std::span<std::int32_t> output,
                 context.metronome_beat_index = (position / step_interval) + 1;
             }
         }
-        ++context.engine_frame_counter;
     }
-    context.control->engine_frame_counter.store(
-        context.engine_frame_counter,
-        std::memory_order_relaxed);
 }
 
 std::int32_t pop_one_frame(MonoRingBuffer& ring)
@@ -822,6 +814,11 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
         return;
     }
     observe_callback_interval(*context);
+    const bool network_capture_enabled = context->control != nullptr &&
+        prepare_network_capture_callback(
+            *context->control,
+            *context->capture,
+            context->engine_frame_counter);
     if (context->recorder_my_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
         std::fill(
             context->recorder_my_input_scratch.begin(),
@@ -840,7 +837,9 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
             observe_peak(context->control->input_peak_ppm, generated);
             observe_peak(context->control->gui_input_peak_ppm, generated);
         }
-        context->capture->push(std::span<const std::int32_t>(generated.data(), generated.size()));
+        if (network_capture_enabled) {
+            context->capture->push(std::span<const std::int32_t>(generated.data(), generated.size()));
+        }
         if (context->recorder_my_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
             std::copy(generated.begin(), generated.end(), context->recorder_my_input_scratch.begin());
         }
@@ -853,7 +852,9 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
             const auto* input = static_cast<const std::int32_t*>(context->inputs[0]->buffers[double_buffer_index]);
             captured_input = std::span<const std::int32_t>(input, static_cast<std::size_t>(context->buffer_size));
             std::copy(captured_input.begin(), captured_input.end(), context->capture_scratch.begin());
-            context->capture->push(captured_input);
+            if (network_capture_enabled) {
+                context->capture->push(captured_input);
+            }
         } else {
             for (long i = 0; i < context->buffer_size; ++i) {
                 std::int64_t sum = 0;
@@ -872,7 +873,9 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
             captured_input = std::span<const std::int32_t>(
                 context->capture_scratch.data(),
                 static_cast<std::size_t>(context->buffer_size));
-            context->capture->push(captured_input);
+            if (network_capture_enabled) {
+                context->capture->push(captured_input);
+            }
         }
         if (context->control != nullptr) {
             observe_peak(context->control->input_peak_ppm, captured_input);
@@ -888,7 +891,13 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
         context->outputs[0]->buffers[double_buffer_index] != nullptr &&
         context->playback_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
         auto* mono = context->playback_scratch.data();
-        if (!context->playback_prefilled.load(std::memory_order_relaxed)) {
+        const bool network_playback_enabled = context->control != nullptr &&
+            context->control->network_playback_enabled.load(std::memory_order_acquire);
+        if (!network_playback_enabled) {
+            context->playback_prefilled.store(false, std::memory_order_relaxed);
+            context->playback->pop(std::span<std::int32_t>{}, false);
+            std::fill(mono, mono + context->buffer_size, 0);
+        } else if (!context->playback_prefilled.load(std::memory_order_relaxed)) {
             if (context->playback->available_read() >= context->playback_prefill_frames) {
                 context->playback_prefilled.store(true, std::memory_order_relaxed);
             } else {
@@ -896,7 +905,7 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
             }
         }
         auto playback = std::span<std::int32_t>(mono, static_cast<std::size_t>(context->buffer_size));
-        if (context->playback_prefilled.load(std::memory_order_relaxed)) {
+        if (network_playback_enabled && context->playback_prefilled.load(std::memory_order_relaxed)) {
             pop_resampled_playback(*context, playback);
             apply_remote_level(*context, playback);
         }
@@ -976,6 +985,10 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
         }
     }
 
+    context->engine_frame_counter += static_cast<std::uint64_t>(context->buffer_size);
+    if (context->control != nullptr) {
+        context->control->engine_frame_counter.store(context->engine_frame_counter, std::memory_order_release);
+    }
     context->callbacks.fetch_add(1, std::memory_order_relaxed);
 }
 

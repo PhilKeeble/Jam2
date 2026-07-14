@@ -137,6 +137,65 @@ def _expected_metronome_frames(meta, sample_count):
     return frames
 
 
+def _analyze_dynamic_metronome(
+        recording_dir,
+        actual,
+        expected,
+        sample_rate,
+        meta,
+        tolerance_frames):
+    mode = meta.get("metronome_mode", "dynamic")
+    bpm = int(meta.get("bpm", 120) or 120)
+    division = int(meta.get("metronome_division", 1) or 1)
+    step_count = max(1, int(meta.get("metronome_step_count", 4) or 4))
+    play_low = int(meta.get("metronome_play_mask_low", 0x0f) or 0)
+    play_high = int(meta.get("metronome_play_mask_high", 0) or 0)
+    play_mask = play_low | (play_high << 64)
+    all_steps_play = all(((play_mask >> step) & 1) != 0 for step in range(step_count))
+    if not all_steps_play:
+        return None
+
+    expected_interval = int(round(sample_rate * 60.0 / max(1, bpm) / max(1, division)))
+    interval_tolerance = max(tolerance_frames, int(round(sample_rate * 0.010)))
+    interval_errors = [
+        abs((current - previous) - expected_interval)
+        for previous, current in zip(actual, actual[1:])
+    ]
+    missing = max(0, len(expected) - len(actual))
+    extra = max(0, len(actual) - len(expected))
+    boundary_count_delta = abs(len(actual) - len(expected))
+    intervals_ok = bool(actual) and all(error <= interval_tolerance for error in interval_errors)
+    count_ok = bool(expected) and boundary_count_delta <= 1
+    ok = intervals_ok and count_ok
+    if not actual:
+        verdict = f"{mode.replace('-', '_')}_clicks_missing"
+    elif not count_ok:
+        verdict = "metronome_click_count_mismatch"
+    elif not intervals_ok:
+        verdict = "metronome_click_interval_high"
+    else:
+        verdict = f"pass_dynamic_{mode.replace('-', '_')}"
+    return {
+        "ok": ok,
+        "verdict": verdict,
+        "recording_dir": str(recording_dir),
+        "expected_clicks": len(expected),
+        "actual_clicks": len(actual),
+        "missing_clicks": missing,
+        "extra_clicks": extra,
+        "startup_boundary_mismatch": ok and boundary_count_delta != 0,
+        "steady_missing_clicks": 0 if ok else missing,
+        "steady_extra_clicks": 0 if ok else extra,
+        "steady_max_abs_error_frames": max(interval_errors, default=0),
+        "max_abs_error_frames": max(interval_errors, default=0),
+        "expected_interval_frames": expected_interval,
+        "max_interval_error_frames": max(interval_errors, default=0),
+        "interval_tolerance_frames": interval_tolerance,
+        "phase_check": f"skipped_dynamic_{mode.replace('-', '_')}_epoch",
+        "tolerance_frames": tolerance_frames,
+    }
+
+
 def analyze_metronome_wav(recording_dir, tolerance_frames=96, allow_silent=False):
     recording_dir = Path(recording_dir)
     sidecar = recording_dir / "recording.json"
@@ -151,22 +210,17 @@ def analyze_metronome_wav(recording_dir, tolerance_frames=96, allow_silent=False
     actual = detect_transients(samples, threshold=0.04, refractory_frames=1024)
     if allow_silent and not actual:
         return {"ok": True, "verdict": "metronome_silent_expected", "clicks": 0, "recording_dir": str(recording_dir)}
-    if meta.get("metronome_mode", "") == "listener-compensated":
-        return {
-            "ok": bool(actual),
-            "verdict": "pass_loose_listener_compensated" if actual else "listener_compensated_clicks_missing",
-            "recording_dir": str(recording_dir),
-            "expected_clicks": 0,
-            "actual_clicks": len(actual),
-            "missing_clicks": 0 if actual else 1,
-            "extra_clicks": 0,
-            "steady_missing_clicks": 0 if actual else 1,
-            "steady_extra_clicks": 0,
-            "steady_max_abs_error_frames": 0,
-            "max_abs_error_frames": 0,
-            "tolerance_frames": tolerance_frames,
-        }
     expected = _expected_metronome_frames({**meta, "sample_rate": wav["sample_rate"]}, len(samples))
+    if meta.get("metronome_mode", "") in {"shared-grid", "listener-compensated"}:
+        dynamic = _analyze_dynamic_metronome(
+            recording_dir,
+            actual,
+            expected,
+            wav["sample_rate"],
+            meta,
+            tolerance_frames)
+        if dynamic is not None:
+            return dynamic
     errors = []
     used = set()
     for expected_frame in expected:

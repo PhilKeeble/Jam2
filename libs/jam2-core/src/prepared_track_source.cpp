@@ -6,16 +6,48 @@ PreparedTrackSource::PreparedTrackSource(std::size_t maxFrames) { for (auto& s :
 int PreparedTrackSource::claimLoadingSlot() { for (int i=0;i<int(kSlots);++i) { for (SlotState expected : {SlotState::Free, SlotState::Retired}) { if (slots_[i].state.compare_exchange_strong(expected,SlotState::Loading)) return i; } } return -1; }
 std::int16_t* PreparedTrackSource::loadingData(int slot) { return slot>=0&&slot<int(kSlots)&&slots_[slot].state.load()==SlotState::Loading ? slots_[slot].samples.data() : nullptr; }
 bool PreparedTrackSource::publishReady(int slot,std::uint64_t frames,int rate) { if(slot<0||slot>=int(kSlots)||frames>slots_[slot].samples.size()||rate<=0) return false; auto& s=slots_[slot]; if(s.state.load()!=SlotState::Loading) return false; s.frames=frames;s.sampleRate=rate;s.state.store(SlotState::Ready,std::memory_order_release);return true; }
+void PreparedTrackSource::abandonLoadingSlot(int slot) noexcept
+{
+    if (slot < 0 || slot >= int(kSlots)) return;
+    auto& s = slots_[slot];
+    SlotState expected = SlotState::Loading;
+    if (s.state.compare_exchange_strong(expected, SlotState::Reclaiming, std::memory_order_acq_rel)) {
+        s.frames = 0;
+        s.sampleRate = 0;
+        s.state.store(SlotState::Free, std::memory_order_release);
+    }
+}
+void PreparedTrackSource::abandonReadySlot(int slot) noexcept
+{
+    if (slot < 0 || slot >= int(kSlots)) return;
+    auto& s = slots_[slot];
+    SlotState expected = SlotState::Ready;
+    if (s.state.compare_exchange_strong(expected, SlotState::Reclaiming, std::memory_order_acq_rel)) {
+        s.frames = 0;
+        s.sampleRate = 0;
+        s.state.store(SlotState::Free, std::memory_order_release);
+    }
+}
 bool PreparedTrackSource::enqueue(const Command& command)
 {
+    return enqueueBatch(std::span<const Command>(&command, 1));
+}
+bool PreparedTrackSource::enqueueBatch(std::span<const Command> commands)
+{
     std::lock_guard<std::mutex> lock(producerMutex_);
-    const std::uint32_t write = write_.load(std::memory_order_relaxed);
-    const std::uint32_t next = (write + 1U) % static_cast<std::uint32_t>(kCommandCapacity);
-    if (next == read_.load(std::memory_order_acquire)) {
+    const std::uint32_t capacity = static_cast<std::uint32_t>(kCommandCapacity);
+    std::uint32_t write = write_.load(std::memory_order_relaxed);
+    const std::uint32_t read = read_.load(std::memory_order_acquire);
+    const std::uint32_t used = write >= read ? write - read : capacity - (read - write);
+    const std::size_t available = static_cast<std::size_t>(capacity - 1U - used);
+    if (commands.size() > available) {
         return false;
     }
-    queue_[write] = command;
-    write_.store(next, std::memory_order_release);
+    for (const Command& command : commands) {
+        queue_[write] = command;
+        write = (write + 1U) % capacity;
+    }
+    write_.store(write, std::memory_order_release);
     return true;
 }
 void PreparedTrackSource::mix(

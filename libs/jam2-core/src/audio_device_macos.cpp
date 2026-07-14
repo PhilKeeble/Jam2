@@ -1002,10 +1002,6 @@ void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t
         context.control->metronome_mode.load(std::memory_order_relaxed) == 1 &&
         !context.control->leader_audio_local_click.load(std::memory_order_relaxed);
     if (!enabled || local_click_suppressed) {
-        context.engine_frame_counter += static_cast<std::uint64_t>(output.size());
-        context.control->engine_frame_counter.store(
-            context.engine_frame_counter,
-            std::memory_order_relaxed);
         return;
     }
 
@@ -1029,8 +1025,8 @@ void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t
         jam2::metronome::step_interval_samples(context.sample_rate, pattern.bpm, pattern.division);
 
     for (std::size_t i = 0; i < output.size(); ++i) {
-        context.control->engine_frame_counter.store(context.engine_frame_counter, std::memory_order_relaxed);
-        std::uint64_t render_sample_counter = context.engine_frame_counter;
+        std::uint64_t render_sample_counter =
+            context.engine_frame_counter + static_cast<std::uint64_t>(i);
         if (render_offset_frames < 0) {
             const std::uint64_t offset = static_cast<std::uint64_t>(-render_offset_frames);
             render_sample_counter = render_sample_counter > offset ? render_sample_counter - offset : 0ULL;
@@ -1051,11 +1047,7 @@ void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t
                 context.metronome_beat_index = (position / step_interval) + 1;
             }
         }
-        ++context.engine_frame_counter;
     }
-    context.control->engine_frame_counter.store(
-        context.engine_frame_counter,
-        std::memory_order_relaxed);
 }
 
 OSStatus duplex_io_proc(
@@ -1073,6 +1065,11 @@ OSStatus duplex_io_proc(
         return noErr;
     }
     observe_callback_interval(*context);
+    const bool network_capture_enabled = context->control != nullptr &&
+        prepare_network_capture_callback(
+            *context->control,
+            *context->capture,
+            context->engine_frame_counter);
     const std::size_t output_frames_for_input = std::min(buffer_frames(output), context->recorder_my_input_scratch.size());
     if (output_frames_for_input > 0) {
         std::fill(
@@ -1093,7 +1090,9 @@ OSStatus duplex_io_proc(
             observe_peak(context->control->input_peak_ppm, generated);
             observe_peak(context->control->gui_input_peak_ppm, generated);
         }
-        context->capture->push(std::span<const std::int32_t>(generated.data(), generated.size()));
+        if (network_capture_enabled) {
+            context->capture->push(std::span<const std::int32_t>(generated.data(), generated.size()));
+        }
         if (context->recorder_my_input_scratch.size() >= generated_frames) {
             std::copy(generated.begin(), generated.end(), context->recorder_my_input_scratch.begin());
         }
@@ -1108,7 +1107,9 @@ OSStatus duplex_io_proc(
                 sum / static_cast<float>(context->channels.input.size());
             context->capture_scratch[frame] = float_to_i32(mixed);
         }
-        context->capture->push(std::span<const std::int32_t>(context->capture_scratch.data(), input_frames));
+        if (network_capture_enabled) {
+            context->capture->push(std::span<const std::int32_t>(context->capture_scratch.data(), input_frames));
+        }
         if (context->control != nullptr) {
             observe_peak(
                 context->control->input_peak_ppm,
@@ -1128,14 +1129,20 @@ OSStatus duplex_io_proc(
     const std::size_t output_frames = std::min(buffer_frames(output), context->playback_scratch.size());
     if (output_frames > 0) {
         auto playback = std::span<std::int32_t>(context->playback_scratch.data(), output_frames);
-        if (!context->playback_prefilled.load(std::memory_order_relaxed)) {
+        const bool network_playback_enabled = context->control != nullptr &&
+            context->control->network_playback_enabled.load(std::memory_order_acquire);
+        if (!network_playback_enabled) {
+            context->playback_prefilled.store(false, std::memory_order_relaxed);
+            context->playback->pop(std::span<std::int32_t>{}, false);
+            std::fill(playback.begin(), playback.end(), 0);
+        } else if (!context->playback_prefilled.load(std::memory_order_relaxed)) {
             if (context->playback->available_read() >= context->playback_prefill_frames) {
                 context->playback_prefilled.store(true, std::memory_order_relaxed);
             } else {
                 std::fill(playback.begin(), playback.end(), 0);
             }
         }
-        if (context->playback_prefilled.load(std::memory_order_relaxed)) {
+        if (network_playback_enabled && context->playback_prefilled.load(std::memory_order_relaxed)) {
             pop_resampled_playback(*context, playback);
             apply_remote_level(*context, playback);
         }
@@ -1212,6 +1219,11 @@ OSStatus duplex_io_proc(
         }
     }
 
+    const std::size_t callback_frames = std::max(buffer_frames(input), buffer_frames(output));
+    context->engine_frame_counter += static_cast<std::uint64_t>(callback_frames);
+    if (context->control != nullptr) {
+        context->control->engine_frame_counter.store(context->engine_frame_counter, std::memory_order_release);
+    }
     context->callbacks.fetch_add(1, std::memory_order_relaxed);
     return noErr;
 }

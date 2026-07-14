@@ -243,6 +243,49 @@ def scenario_catalog(base_profile=FAST_PROFILE):
             "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=20.0)),
             "expect": "listener-compensated metronome mode should keep the shared epoch valid while applying local render compensation",
         },
+        "grid-authority-client-shared-grid": {
+            "profile": base_profile,
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=20.0)),
+            "commands": [
+                {"at_s": 3.0, "side": "client", "line": "bpm 126"},
+            ],
+            "expect": "a client grid change should be coordinator-ordered and make that client authority for the new shared-grid revision",
+        },
+        "grid-authority-client-leader-audio": {
+            "profile": base_profile,
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=20.0)),
+            "commands": [
+                {"at_s": 3.0, "side": "client", "line": "metro mode leader-audio"},
+            ],
+            "expect": "a client leader-audio revision should inject click packets from exactly the assigned client authority",
+        },
+        "grid-authority-client-listener-compensated": {
+            "profile": base_profile,
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=20.0)),
+            "commands": [
+                {"at_s": 3.0, "side": "client", "line": "metro mode listener-compensated"},
+            ],
+            "expect": "listener compensation should follow the client authority stream after an ordered authority transfer",
+        },
+        "grid-authority-concurrent": {
+            "profile": base_profile,
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=20.0)),
+            "commands": [
+                {"at_s": 3.0, "side": "server", "line": "bpm 124"},
+                {"at_s": 3.0, "side": "client", "line": "bpm 126"},
+            ],
+            "expect": "near-concurrent grid proposals should resolve to one monotonic revision and one authority on both peers",
+        },
+        "transport-grid-authority": {
+            "profile": base_profile,
+            "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=20.0)),
+            "prepared_track": True,
+            "commands": [
+                {"at_s": 3.0, "side": "client", "line": "bpm 126"},
+                {"at_s": 6.0, "side": "server", "line": "track restart"},
+            ],
+            "expect": "creator arrangement authority should publish a source-identified transport event associated with the client-owned grid revision",
+        },
         "metronome-listener-compensated-metro-pulse": {
             "profile": variant(base_profile, "metro_listener_compensated_metro_pulse", metronome_mode="listener-compensated"),
             "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=50.0)),
@@ -369,6 +412,11 @@ def standard_suite():
         "metronome-shared-grid",
         "metronome-leader-audio",
         "metronome-listener-compensated",
+        "grid-authority-client-shared-grid",
+        "grid-authority-client-leader-audio",
+        "grid-authority-client-listener-compensated",
+        "grid-authority-concurrent",
+        "transport-grid-authority",
         "metronome-listener-compensated-metro-pulse",
         "metronome-listener-compensated-pulse-jitter",
         "metronome-listener-compensated-pulse-burst",
@@ -545,7 +593,7 @@ def mesh_peer_counts(args_ns):
 
 
 def mesh_scenario_catalog(base_profile, counts):
-    return {
+    scenarios = {
         f"mesh-{count}-clean": {
             "profile": base_profile,
             "mesh_peers": count,
@@ -554,6 +602,30 @@ def mesh_scenario_catalog(base_profile, counts):
         }
         for count in counts
     }
+    for count in counts:
+        scenarios[f"mesh-{count}-authority-peer2"] = {
+            "profile": base_profile,
+            "mesh_peers": count,
+            "signal": "tone-440",
+            "commands": [
+                {"at_s": 3.0, "peer": "peer2", "line": "metro mode leader-audio"},
+            ],
+            "authority_peer": "peer2",
+            "expect": f"peer2 should become the ordered leader-audio grid authority across all {count} mesh peers",
+        }
+        if count >= 3:
+            authority_peer = f"peer{count}"
+            scenarios[f"mesh-{count}-authority-last"] = {
+                "profile": base_profile,
+                "mesh_peers": count,
+                "signal": "tone-440",
+                "commands": [
+                    {"at_s": 3.0, "peer": authority_peer, "line": "metro mode leader-audio"},
+                ],
+                "authority_peer": authority_peer,
+                "expect": f"{authority_peer} should become the ordered leader-audio grid authority across all {count} mesh peers",
+            }
+    return scenarios
 
 
 def mesh_scenario_plan(profile_mode, requested_scenarios, counts):
@@ -577,6 +649,3 @@ def mesh_scenario_plan(profile_mode, requested_scenarios, counts):
             planned_catalog[planned_id] = scenario
             planned_ids.append(planned_id)
     return planned_catalog, planned_ids
-
-
-

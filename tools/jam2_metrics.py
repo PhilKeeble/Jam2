@@ -18,6 +18,19 @@ def to_float(row, field):
         return 0.0
 
 
+def to_int(row, field):
+    value = row.get(field, "")
+    if value == "":
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return 0
+
+
 def read_rows(path):
     path = Path(path)
     if not path.exists():
@@ -64,9 +77,76 @@ def summarize_csv(path):
         underrun_time_ms = to_float(row, "playback_ring_underruns") * 1000.0 / sample_rate_for_row(row)
 
     periodic_depths = [to_float(period, "playback_depth_avg_ms") for period in periods]
+    authority_rows = periods + [row]
+    authority_ids_seen = sorted({
+        to_int(item, "grid_authority_peer_id")
+        for item in authority_rows
+        if to_int(item, "grid_authority_peer_id") > 0
+    })
     return {
         "csv_path": str(path),
         "has_csv": True,
+        "local_peer_id": to_int(row, "local_peer_id"),
+        "remote_peer_id": to_int(row, "remote_peer_id"),
+        "bootstrap_role": row.get("bootstrap_role", ""),
+        "session_protocol_version": int(to_float(row, "session_protocol_version")),
+        "session_audio_format": row.get("session_audio_format", ""),
+        "session_sample_rate": int(to_float(row, "session_sample_rate")),
+        "session_frames_per_packet": int(to_float(row, "session_frames_per_packet")),
+        "network_peer_count": int(to_float(row, "network_peer_count")),
+        "network_active_peer_count": int(to_float(row, "network_active_peer_count")),
+        "mix_contributing_peers": int(to_float(row, "mix_contributing_peers")),
+        "mix_active_slots": to_float(row, "mix_active_slots"),
+        "mix_max_slots": to_float(row, "mix_max_slots"),
+        "mix_active_slots_high_water": to_float(row, "mix_active_slots_high_water"),
+        "mix_released_slots": to_float(row, "mix_released_slots"),
+        "mix_complete_slots": to_float(row, "mix_complete_slots"),
+        "mix_deadline_slots": to_float(row, "mix_deadline_slots"),
+        "mix_missing_peer_contributions": to_float(row, "mix_missing_peer_contributions"),
+        "mix_missing_peer_frames": to_float(row, "mix_missing_peer_frames"),
+        "mix_late_after_release_frames": to_float(row, "mix_late_after_release_frames"),
+        "mix_capacity_drops": to_float(row, "mix_capacity_drops"),
+        "mix_capacity_dropped_frames": to_float(row, "mix_capacity_dropped_frames"),
+        "mix_clipped_samples": to_float(row, "mix_clipped_samples"),
+        "mix_output_frames": to_float(row, "mix_output_frames"),
+        "mix_output_drop_requested_frames": to_float(row, "mix_output_drop_requested_frames"),
+        "mix_output_drop_request_events": to_float(row, "mix_output_drop_request_events"),
+        "mix_output_dropped_frames": to_float(row, "mix_output_dropped_frames"),
+        "mix_work_budget_yields": to_float(row, "mix_work_budget_yields"),
+        "bootstrap_coordinator_peer_id": to_int(row, "bootstrap_coordinator_peer_id"),
+        "arrangement_authority_peer_id": to_int(row, "arrangement_authority_peer_id"),
+        "grid_authority_peer_id": to_int(row, "grid_authority_peer_id"),
+        "grid_authority_peer_ids_seen": authority_ids_seen,
+        "grid_revision": int(to_float(row, "grid_revision")),
+        "grid_revision_max": int(max(
+            (to_float(item, "grid_revision") for item in authority_rows), default=0.0)),
+        "grid_run_state": int(to_float(row, "grid_run_state")),
+        "grid_run_state_before_shutdown": int(to_float(periods[-1], "grid_run_state")) if periods else int(to_float(row, "grid_run_state")),
+        "grid_mode": int(to_float(row, "grid_mode")),
+        "grid_authority_epoch_frame": to_float(row, "grid_authority_epoch_frame"),
+        "grid_mapped_epoch_frame": to_float(row, "grid_mapped_epoch_frame"),
+        "grid_authority_packet_frame": to_float(row, "grid_authority_packet_frame"),
+        "grid_mapping_error_frames": to_float(row, "grid_mapping_error_frames"),
+        "grid_proposals_sent": to_float(row, "grid_proposals_sent"),
+        "grid_proposals_accepted": to_float(row, "grid_proposals_accepted"),
+        "grid_proposals_rejected": to_float(row, "grid_proposals_rejected"),
+        "grid_assignments_sent": to_float(row, "grid_assignments_sent"),
+        "grid_assignments_accepted": to_float(row, "grid_assignments_accepted"),
+        "grid_assignments_rejected": to_float(row, "grid_assignments_rejected"),
+        "grid_authority_states_sent": to_float(row, "grid_authority_states_sent"),
+        "grid_authority_states_accepted": to_float(row, "grid_authority_states_accepted"),
+        "grid_authority_states_rejected": to_float(row, "grid_authority_states_rejected"),
+        "grid_authority_missing_events": to_float(row, "grid_authority_missing_events"),
+        "leader_audio_source_peer_id": to_int(row, "leader_audio_source_peer_id"),
+        "leader_audio_injected_packets": to_float(row, "leader_audio_injected_packets"),
+        "transport_source_peer_id": to_int(row, "transport_source_peer_id"),
+        "transport_event_counter": int(to_float(row, "transport_event_counter")),
+        "transport_grid_revision": int(to_float(row, "transport_grid_revision")),
+        "transport_events_accepted": to_float(row, "transport_events_accepted"),
+        "transport_events_rejected": to_float(row, "transport_events_rejected"),
+        "transport_source_frame": to_float(row, "transport_source_frame"),
+        "transport_requested_target_frame": to_float(row, "transport_requested_target_frame"),
+        "transport_applied_target_frame": to_float(row, "transport_applied_target_frame"),
         "requested_sample_rate": to_float(row, "requested_sample_rate") or to_float(row, "sample_rate"),
         "active_sample_rate": to_float(row, "active_sample_rate") or sample_rate_for_row(row),
         "frame_size": to_float(row, "frame_size"),
@@ -200,6 +280,21 @@ def combined_summary(server_csv, client_csv):
         }
     combined = {
         "has_csv": True,
+        "peer_identity_valid": (
+            server.get("local_peer_id") == 1
+            and server.get("remote_peer_id") == 2
+            and server.get("bootstrap_role") == "creator"
+            and client.get("local_peer_id") == 2
+            and client.get("remote_peer_id") == 1
+            and client.get("bootstrap_role") == "joiner"),
+        "session_contract_valid": all(
+            side.get("session_protocol_version") == 1
+            and side.get("session_audio_format") == "pcm24-mono"
+            and side.get("session_sample_rate", 0) > 0
+            and side.get("session_frames_per_packet", 0) > 0
+            and side.get("session_sample_rate") == int(side.get("requested_sample_rate", 0))
+            and side.get("session_frames_per_packet") == int(side.get("frame_size", 0))
+            for side in sides),
         "server_active_sample_rate": server.get("active_sample_rate", 0.0),
         "client_active_sample_rate": client.get("active_sample_rate", 0.0),
         "server_requested_sample_rate": server.get("requested_sample_rate", 0.0),
@@ -227,6 +322,25 @@ def combined_summary(server_csv, client_csv):
         "adaptive_raise_events_total": sum((side.get("adaptive_playback_raise_events", 0.0) for side in sides), 0.0),
         "adaptive_burst_events_total": sum((side.get("adaptive_playback_burst_events", 0.0) for side in sides), 0.0),
         "metronome_received_min": min((side.get("metronome_received", 0.0) for side in sides), default=0.0),
+        "grid_authority_consensus": (
+            len({side.get("grid_authority_peer_id", 0) for side in sides}) == 1
+            and all(side.get("grid_authority_peer_id", 0) > 0 for side in sides)),
+        "grid_authority_peer_id": server.get("grid_authority_peer_id", 0),
+        "grid_revision_consensus": (
+            len({side.get("grid_revision", 0) for side in sides}) == 1
+            and all(side.get("grid_revision", 0) > 0 for side in sides)),
+        "grid_revision": server.get("grid_revision", 0),
+        "grid_authority_epoch_min": min((side.get("grid_authority_epoch_frame", 0.0) for side in sides), default=0.0),
+        "grid_mapped_epoch_min": min((side.get("grid_mapped_epoch_frame", 0.0) for side in sides), default=0.0),
+        "grid_proposals_sent_total": sum((side.get("grid_proposals_sent", 0.0) for side in sides), 0.0),
+        "grid_proposals_accepted_total": sum((side.get("grid_proposals_accepted", 0.0) for side in sides), 0.0),
+        "grid_assignments_sent_total": sum((side.get("grid_assignments_sent", 0.0) for side in sides), 0.0),
+        "grid_assignments_accepted_total": sum((side.get("grid_assignments_accepted", 0.0) for side in sides), 0.0),
+        "grid_authority_states_sent_total": sum((side.get("grid_authority_states_sent", 0.0) for side in sides), 0.0),
+        "grid_authority_states_accepted_total": sum((side.get("grid_authority_states_accepted", 0.0) for side in sides), 0.0),
+        "grid_authority_states_rejected_total": sum((side.get("grid_authority_states_rejected", 0.0) for side in sides), 0.0),
+        "leader_audio_injected_sides": sum((1 for side in sides if side.get("leader_audio_injected_packets", 0.0) > 0.0), 0),
+        "leader_audio_injected_packets_total": sum((side.get("leader_audio_injected_packets", 0.0) for side in sides), 0.0),
         "metronome_epoch_sample_time_min": min((side.get("metronome_epoch_sample_time", 0.0) for side in sides), default=0.0),
         "local_metronome_beat_max": max((side.get("local_metronome_beat", 0.0) for side in sides), default=0.0),
         "remote_metronome_beat_max": max((side.get("remote_metronome_beat", 0.0) for side in sides), default=0.0),
@@ -318,6 +432,8 @@ def write_results_csv(path, results):
         "proxy_server_to_client_recv_errors",
         "proxy_client_to_server_send_errors",
         "proxy_server_to_client_send_errors",
+        "peer_identity_valid",
+        "session_contract_valid",
         "loss_percent_max",
         "elapsed_s_min",
         "audio_callbacks_min",
@@ -394,6 +510,19 @@ def write_results_csv(path, results):
         "metro_pulse_epoch_extra_total",
         "mesh_peers",
         "mesh_peers_with_csv",
+        "mesh_expected_remote_peers",
+        "mesh_distinct_local_peer_ids",
+        "mesh_active_peer_count_min",
+        "mesh_mix_contributing_peers_min",
+        "mesh_mix_released_slots_min",
+        "mesh_mix_complete_slots_min",
+        "mesh_mix_deadline_slots_total",
+        "mesh_mix_missing_peer_frames_total",
+        "mesh_mix_late_after_release_frames_total",
+        "mesh_mix_capacity_drops_total",
+        "mesh_mix_output_frames_min",
+        "mesh_mix_output_dropped_frames_total",
+        "mesh_mix_clipped_samples_total",
         "mesh_audio_ok_peers",
         "mesh_recv_packets_min",
         "mesh_sent_packets_min",
@@ -482,6 +611,20 @@ def write_results_csv(path, results):
                 "metro_pulse_epoch_extra_total": metro_pulse_combined.get("extra_clicks_total", ""),
                 "mesh_peers": mesh.get("peer_count", ""),
                 "mesh_peers_with_csv": mesh.get("peers_with_csv", ""),
+                "mesh_expected_remote_peers": mesh.get("expected_remote_peers", ""),
+                "mesh_distinct_local_peer_ids": mesh.get("distinct_local_peer_ids", ""),
+                "mesh_active_peer_count_min": mesh.get("network_active_peer_count_min", ""),
+                "mesh_mix_contributing_peers_min": mesh.get("mix_contributing_peers_min", ""),
+                "mesh_mix_released_slots_min": mesh.get("mix_released_slots_min", ""),
+                "mesh_mix_complete_slots_min": mesh.get("mix_complete_slots_min", ""),
+                "mesh_mix_deadline_slots_total": mesh.get("mix_deadline_slots_total", ""),
+                "mesh_mix_missing_peer_frames_total": mesh.get("mix_missing_peer_frames_total", ""),
+                "mesh_mix_late_after_release_frames_total": mesh.get(
+                    "mix_late_after_release_frames_total", ""),
+                "mesh_mix_capacity_drops_total": mesh.get("mix_capacity_drops_total", ""),
+                "mesh_mix_output_frames_min": mesh.get("mix_output_frames_min", ""),
+                "mesh_mix_output_dropped_frames_total": mesh.get("mix_output_dropped_frames_total", ""),
+                "mesh_mix_clipped_samples_total": mesh.get("mix_clipped_samples_total", ""),
                 "mesh_audio_ok_peers": mesh.get("audio_ok_peers", ""),
                 "mesh_recv_packets_min": mesh.get("recv_packets_min", ""),
                 "mesh_sent_packets_min": mesh.get("sent_packets_min", ""),

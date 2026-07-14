@@ -88,6 +88,17 @@ struct StreamControl {
     std::atomic<bool> metronome_epoch_valid{false};
     std::atomic<std::int64_t> metronome_render_offset_frames{0};
     std::atomic<std::uint64_t> engine_frame_counter{0};
+    // The callback is the capture-ring producer and the only side allowed to
+    // reset it. A network attachment publishes a generation; the callback
+    // acknowledges that generation at a frame boundary, discards stale local
+    // data, and publishes the first authoritative capture frame.
+    std::atomic<bool> network_capture_requested_enabled{false};
+    std::atomic<bool> network_capture_enabled{false};
+    std::atomic<std::uint64_t> network_capture_generation_requested{0};
+    std::atomic<std::uint64_t> network_capture_generation_applied{0};
+    std::atomic<std::uint64_t> network_capture_epoch_frame{0};
+    std::atomic<std::uint64_t> network_capture_stale_frames_discarded{0};
+    std::atomic<bool> network_playback_enabled{false};
     std::atomic<std::uint32_t> input_latency_frames{0};
     std::atomic<std::uint32_t> output_latency_frames{0};
     std::atomic<std::int64_t> recording_latency_adjustment_frames{0};
@@ -182,5 +193,12 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     StreamControl& control,
     OutputRecorder* recorder,
     TrackTakeRecorder* track_take_recorder = nullptr);
+
+// Called once per device callback before capture is pushed. This is fixed-work,
+// allocation-free, lock-free, and is shared by real and headless devices.
+bool prepare_network_capture_callback(
+    StreamControl& control,
+    MonoRingBuffer& capture_ring,
+    std::uint64_t callback_frame) noexcept;
 
 } // namespace jam2::audio

@@ -44,7 +44,7 @@ These rules apply to all implementation work in this repository.
 
 ## Build and Test Rules
 
-- dont compile unless I tell you too directly, I will compile for you and share results
+- Compile Windows changes from the repository root with `cmd.exe /d /c "call compile.cmd --in-dev-shell"`. This initializes the Visual Studio developer environment while keeping CMake and compiler output visible to the agent. Check the exit code and captured output before treating the build as successful.
 - Windows builds should target MSVC for ASIO development and validation.
 - macOS builds should use Apple tooling for CoreAudio development and validation.
 

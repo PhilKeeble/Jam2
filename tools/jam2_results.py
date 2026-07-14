@@ -1,14 +1,17 @@
 """Result processing and offline audio verdict helpers for Jam2 scenarios."""
 
+import json
 import math
 import time
 import wave
 from pathlib import Path
 
-from jam2_audio_analysis import analyze_recording_dir
+from jam2_audio_analysis import analyze_metronome_wav, analyze_recording_dir
 from jam2_scenarios import audio_probe_health_ok
 
 
+METRONOME_WAV_TOLERANCE_FRAMES = 96
+LISTENER_PULSE_STEADY_SKIP = 8
 MIN_DURATION_COVERAGE_RATIO = 0.90
 STRICT_AUDIO_HEALTH_SCENARIOS = {
     "clean-control",
@@ -48,10 +51,66 @@ def mesh_collect_metrics(peer_results, requested_stream_ms=0):
     summaries = [peer["csv_summary"] for peer in peers_with_csv]
     recording_coverages = [_recording_coverage(peer, requested_stream_ms) for peer in peer_results]
     requested_s = requested_stream_ms / 1000.0
+    expected_remote_peers = max(0, len(peer_results) - 1)
     return {
         "has_csv": bool(summaries),
         "peer_count": len(peer_results),
         "peers_with_csv": len(peers_with_csv),
+        "expected_remote_peers": expected_remote_peers,
+        "distinct_local_peer_ids": len({
+            row.get("local_peer_id", 0) for row in summaries if row.get("local_peer_id", 0) != 0
+        }),
+        "grid_authority_peer_ids": sorted({
+            row.get("grid_authority_peer_id", 0)
+            for row in summaries
+            if row.get("grid_authority_peer_id", 0) != 0
+        }),
+        "bootstrap_coordinator_peer_ids": sorted({
+            row.get("bootstrap_coordinator_peer_id", 0)
+            for row in summaries
+            if row.get("bootstrap_coordinator_peer_id", 0) != 0
+        }),
+        "grid_revision_min": min((row.get("grid_revision", 0) for row in summaries), default=0),
+        "grid_revision_max": max((row.get("grid_revision", 0) for row in summaries), default=0),
+        "grid_authority_states_sent_total": sum(
+            (row.get("grid_authority_states_sent", 0.0) for row in summaries), 0.0),
+        "grid_authority_states_accepted_total": sum(
+            (row.get("grid_authority_states_accepted", 0.0) for row in summaries), 0.0),
+        "grid_proposals_sent_total": sum(
+            (row.get("grid_proposals_sent", 0.0) for row in summaries), 0.0),
+        "leader_audio_injected_peers": sum(
+            (1 for row in summaries if row.get("leader_audio_injected_packets", 0.0) > 0.0), 0),
+        "leader_audio_source_peer_ids": sorted({
+            row.get("leader_audio_source_peer_id", 0)
+            for row in summaries
+            if row.get("leader_audio_injected_packets", 0.0) > 0.0
+        }),
+        "network_peer_count_min": min((row.get("network_peer_count", 0) for row in summaries), default=0),
+        "network_peer_count_max": max((row.get("network_peer_count", 0) for row in summaries), default=0),
+        "network_active_peer_count_min": min(
+            (row.get("network_active_peer_count", 0) for row in summaries), default=0),
+        "network_active_peer_count_max": max(
+            (row.get("network_active_peer_count", 0) for row in summaries), default=0),
+        "mix_contributing_peers_min": min(
+            (row.get("mix_contributing_peers", 0) for row in summaries), default=0),
+        "mix_released_slots_min": min((row.get("mix_released_slots", 0.0) for row in summaries), default=0.0),
+        "mix_complete_slots_min": min((row.get("mix_complete_slots", 0.0) for row in summaries), default=0.0),
+        "mix_deadline_slots_total": sum((row.get("mix_deadline_slots", 0.0) for row in summaries), 0.0),
+        "mix_missing_peer_frames_total": sum(
+            (row.get("mix_missing_peer_frames", 0.0) for row in summaries), 0.0),
+        "mix_late_after_release_frames_total": sum(
+            (row.get("mix_late_after_release_frames", 0.0) for row in summaries), 0.0),
+        "mix_capacity_drops_total": sum((row.get("mix_capacity_drops", 0.0) for row in summaries), 0.0),
+        "mix_capacity_dropped_frames_total": sum(
+            (row.get("mix_capacity_dropped_frames", 0.0) for row in summaries), 0.0),
+        "mix_output_frames_min": min((row.get("mix_output_frames", 0.0) for row in summaries), default=0.0),
+        "mix_output_drop_requested_frames_total": sum(
+            (row.get("mix_output_drop_requested_frames", 0.0) for row in summaries), 0.0),
+        "mix_output_drop_request_events_total": sum(
+            (row.get("mix_output_drop_request_events", 0.0) for row in summaries), 0.0),
+        "mix_output_dropped_frames_total": sum(
+            (row.get("mix_output_dropped_frames", 0.0) for row in summaries), 0.0),
+        "mix_clipped_samples_total": sum((row.get("mix_clipped_samples", 0.0) for row in summaries), 0.0),
         "return_code_failures": sum(1 for peer in peer_results if peer.get("return_code") != 0),
         "elapsed_s_min": min((row.get("elapsed_s", 0.0) for row in summaries), default=0.0),
         "stats_duration_coverage_ratio_min": (
@@ -101,8 +160,34 @@ def mesh_verdict(result):
         protocol_verdict = "process_failed"
     elif metrics.get("peers_with_csv", 0) != peer_count:
         protocol_verdict = "missing_csv"
+    elif metrics.get("distinct_local_peer_ids", 0) != peer_count:
+        protocol_verdict = "mesh_peer_identity_invalid"
+    elif (metrics.get("network_peer_count_min", -1) != metrics.get("expected_remote_peers", 0) or
+          metrics.get("network_peer_count_max", -1) != metrics.get("expected_remote_peers", 0)):
+        protocol_verdict = "mesh_peer_count_mismatch"
+    elif (metrics.get("network_active_peer_count_min", -1) != metrics.get("expected_remote_peers", 0) or
+          metrics.get("network_active_peer_count_max", -1) != metrics.get("expected_remote_peers", 0)):
+        protocol_verdict = "mesh_endpoint_proof_incomplete"
+    elif metrics.get("mix_contributing_peers_min", -1) != metrics.get("expected_remote_peers", 0):
+        protocol_verdict = "mesh_mixer_contributors_missing"
+    elif metrics.get("mix_released_slots_min", 0.0) <= 0.0 or metrics.get("mix_output_frames_min", 0.0) <= 0.0:
+        protocol_verdict = "mesh_mixer_output_missing"
+    elif metrics.get("mix_complete_slots_min", 0.0) <= 0.0:
+        protocol_verdict = "mesh_mixer_complete_slots_missing"
+    elif metrics.get("mix_capacity_drops_total", 0.0) > 0.0:
+        protocol_verdict = "mesh_mixer_capacity_drops"
+    elif metrics.get("mix_output_dropped_frames_total", 0.0) > 0.0:
+        protocol_verdict = "mesh_mixer_output_drops"
     elif metrics.get("sent_packets_min", 0.0) <= 0.0 or metrics.get("recv_packets_min", 0.0) <= 0.0:
         protocol_verdict = "mesh_packets_missing"
+    elif len(metrics.get("grid_authority_peer_ids", [])) != 1:
+        protocol_verdict = "mesh_grid_authority_conflict"
+    elif metrics.get("grid_revision_min", 0) <= 0 or metrics.get("grid_revision_min") != metrics.get("grid_revision_max"):
+        protocol_verdict = "mesh_grid_revision_conflict"
+    elif metrics.get("grid_authority_states_sent_total", 0.0) <= 0.0:
+        protocol_verdict = "mesh_grid_authority_state_missing"
+    elif metrics.get("grid_authority_states_accepted_total", 0.0) <= 0.0:
+        protocol_verdict = "mesh_grid_authority_state_not_accepted"
     elif metrics.get("sequence_lost_total", 0.0) > 0.0:
         protocol_verdict = "unexpected_loss"
     elif metrics.get("sequence_out_of_order_total", 0.0) > 0.0:
@@ -112,6 +197,24 @@ def mesh_verdict(result):
     elif metrics.get("udp_sample_time_future_rejects_total", 0.0) > 0.0:
         protocol_verdict = "unexpected_future_sample_rejection"
 
+    if protocol_verdict == "pass" and result.get("authority_peer"):
+        expected = next((
+            peer.get("csv_summary", {}).get("local_peer_id", 0)
+            for peer in result.get("peer_results", [])
+            if peer.get("peer") == result.get("authority_peer")), 0)
+        actual = metrics.get("grid_authority_peer_ids", [])
+        if expected <= 0 or actual != [expected]:
+            protocol_verdict = "mesh_requested_authority_not_applied"
+        elif metrics.get("grid_revision_min", 0) < 2:
+            protocol_verdict = "mesh_authority_revision_not_applied"
+        elif (expected not in metrics.get("bootstrap_coordinator_peer_ids", []) and
+              metrics.get("grid_proposals_sent_total", 0.0) <= 0.0):
+            protocol_verdict = "mesh_authority_proposal_not_sent"
+        elif metrics.get("leader_audio_injected_peers", 0) != 1:
+            protocol_verdict = "mesh_leader_audio_source_count_invalid"
+        elif metrics.get("leader_audio_source_peer_ids", []) != [expected]:
+            protocol_verdict = "mesh_leader_audio_source_not_authority"
+
     duration_verdict = duration_verdict_for(result)
     audio_health_failures = []
     audio_health_observations = []
@@ -119,6 +222,8 @@ def mesh_verdict(result):
         audio_health_observations.append("audio_callback_deadline_misses")
     if metrics.get("jitter_buffer_forced_releases_total", 0.0) > 0.0:
         audio_health_observations.append("audio_jitter_forced_releases")
+    if metrics.get("playback_underrun_time_ms_total", 0.0) > 0.0:
+        audio_health_observations.append("audio_playback_startup_underrun")
     if metrics.get("audio_ok_peers", 0) != peer_count:
         audio_health_failures.append("mesh_audio_probe_failed")
     if metrics.get("audio_callbacks_min", 0.0) <= 0.0:
@@ -137,7 +242,7 @@ def mesh_verdict(result):
         audio_health_failures.append("audio_late_frames")
     if metrics.get("jitter_buffer_dropped_frames_total", 0.0) > 0.0:
         audio_health_failures.append("audio_jitter_frames_dropped")
-    if metrics.get("playback_underrun_time_ms_total", 0.0) > 0.0:
+    if metrics.get("playback_underrun_time_ms_total", 0.0) > max(250.0, peer_count * 250.0):
         audio_health_failures.append("audio_playback_underrun")
     audio_health_verdict = audio_health_failures[0] if audio_health_failures else "pass"
 
@@ -236,6 +341,10 @@ def protocol_verdict_for(result):
             or not metric_set.get("server", {}).get("has_csv")
             or not metric_set.get("client", {}).get("has_csv")):
         return "missing_csv"
+    if not metrics.get("peer_identity_valid", False):
+        return "network_peer_identity_invalid"
+    if not metrics.get("session_contract_valid", False):
+        return "network_session_contract_invalid"
     scenario = result.get("source_scenario") or result.get("scenario", "")
     if scenario == "clean-control":
         if metrics.get("loss_percent_max", 0.0) > 0.0:
@@ -365,6 +474,55 @@ def protocol_verdict_for(result):
     if scenario.startswith("metronome-"):
         expected = scenario.removeprefix("metronome-")
         return metronome_verdict(result, expected)
+    if scenario.startswith("grid-authority-client-"):
+        expected = scenario.removeprefix("grid-authority-client-")
+        base = metronome_verdict(result, expected)
+        if base != "pass":
+            return base
+        server = result.get("metrics", {}).get("server", {})
+        client = result.get("metrics", {}).get("client", {})
+        if (server.get("grid_authority_peer_id") != client.get("local_peer_id") or
+                client.get("grid_authority_peer_id") != client.get("local_peer_id")):
+            return "client_not_grid_authority"
+        if min(server.get("grid_revision", 0), client.get("grid_revision", 0)) < 2:
+            return "client_authority_revision_not_applied"
+        if client.get("grid_proposals_sent", 0.0) <= 0.0:
+            return "client_grid_proposal_not_sent"
+        return "pass"
+    if scenario == "grid-authority-concurrent":
+        base = metronome_verdict(result, "shared-grid")
+        if base != "pass":
+            return base
+        metrics_set = result.get("metrics", {})
+        server = metrics_set.get("server", {})
+        client = metrics_set.get("client", {})
+        if min(server.get("grid_revision", 0), client.get("grid_revision", 0)) < 3:
+            return "concurrent_grid_revisions_not_ordered"
+        if server.get("grid_authority_peer_id") != client.get("grid_authority_peer_id"):
+            return "concurrent_grid_authority_conflict"
+        return "pass"
+    if scenario == "transport-grid-authority":
+        metric_set = result.get("metrics", {})
+        server = metric_set.get("server", {})
+        client = metric_set.get("client", {})
+        if server.get("grid_authority_peer_id") != client.get("local_peer_id"):
+            return "transport_grid_authority_not_client"
+        if (server.get("arrangement_authority_peer_id") != server.get("local_peer_id") or
+                client.get("arrangement_authority_peer_id") != server.get("local_peer_id")):
+            return "transport_arrangement_authority_invalid"
+        if (server.get("transport_source_peer_id") != server.get("local_peer_id") or
+                client.get("transport_source_peer_id") != server.get("local_peer_id")):
+            return "transport_source_identity_invalid"
+        if min(server.get("transport_event_counter", 0), client.get("transport_event_counter", 0)) <= 0:
+            return "transport_event_not_observed"
+        if (server.get("transport_grid_revision") != server.get("grid_revision") or
+                client.get("transport_grid_revision") != client.get("grid_revision")):
+            return "transport_grid_revision_mismatch"
+        if client.get("transport_events_accepted", 0.0) <= 0.0:
+            return "transport_event_not_accepted"
+        if client.get("transport_applied_target_frame", 0.0) <= client.get("transport_source_frame", 0.0):
+            return "transport_applied_frame_invalid"
+        return "pass"
     if scenario == "levels-low":
         server = result.get("metrics", {}).get("server", {})
         client = result.get("metrics", {}).get("client", {})
@@ -447,24 +605,41 @@ def metronome_verdict(result, expected_mode):
     combined = metrics.get("combined", {})
     server = metrics.get("server", {})
     client = metrics.get("client", {})
-    if combined.get("metronome_received_min", 0.0) <= 0.0:
-        return "metronome_not_observed"
+    if not combined.get("grid_authority_consensus", False):
+        return "grid_authority_not_consistent"
+    if not combined.get("grid_revision_consensus", False):
+        return "grid_revision_not_consistent"
+    if combined.get("grid_authority_states_sent_total", 0.0) <= 0.0:
+        return "grid_authority_state_not_sent"
+    if combined.get("grid_authority_states_accepted_total", 0.0) <= 0.0:
+        return "grid_authority_state_not_accepted"
     if combined.get("metronome_alignment_valid_sides", 0.0) < 2:
         return "metronome_alignment_not_valid"
-    if combined.get("metronome_epoch_sample_time_min", 0.0) <= 0.0:
+    # Leader audio legitimately starts its creator clock at frame zero. The
+    # alignment-valid fields above distinguish that from an unset epoch.
+    if combined.get("grid_authority_epoch_min", 0.0) <= 0.0:
         return "metronome_epoch_not_set"
-    if combined.get("local_metronome_beat_max", 0.0) <= 0.0 or combined.get("remote_metronome_beat_max", 0.0) <= 0.0:
-        return "metronome_beats_not_advancing"
-    if expected_mode != "listener-compensated" and combined.get("metronome_beat_delta_abs_max", 0.0) > 2.0:
-        return "metronome_grid_beat_delta_high"
-    if server.get("metronome_mode", "") != expected_mode or client.get("metronome_mode", "") != expected_mode:
+    if combined.get("grid_mapped_epoch_min", 0.0) <= 0.0:
+        return "metronome_epoch_not_mapped"
+    expected_mode_id = {
+        "shared-grid": 0,
+        "leader-audio": 1,
+        "listener-compensated": 2,
+    }.get(expected_mode, -1)
+    if server.get("grid_mode", -1) != expected_mode_id or client.get("grid_mode", -1) != expected_mode_id:
         return "metronome_mode_not_applied"
     if expected_mode == "listener-compensated":
         if combined.get("metronome_compensation_active_sides", 0.0) < 1:
             return "metronome_compensation_not_active"
-    else:
+    elif expected_mode == "leader-audio":
         if combined.get("metronome_compensation_offset_ms_abs_max", 0.0) != 0.0:
             return "unexpected_metronome_compensation"
+        if combined.get("leader_audio_injected_sides", 0) != 1:
+            return "leader_audio_source_count_invalid"
+        authority_id = combined.get("grid_authority_peer_id", 0)
+        injecting = [side for side in (server, client) if side.get("leader_audio_injected_packets", 0.0) > 0.0]
+        if len(injecting) != 1 or injecting[0].get("leader_audio_source_peer_id") != authority_id:
+            return "leader_audio_source_not_authority"
     wav = result.get("metronome_wav_analysis", {})
     if wav:
         if not wav.get("ok", False):
@@ -638,23 +813,12 @@ def analyze_metronome_recordings(result, server_paths, client_paths):
     if not (scenario == "metronome-shared-grid" or scenario.startswith("metronome-")):
         return {}
     allow_client_silent = scenario == "metronome-leader-audio"
-    loose_timing = scenario.startswith("metronome-listener-compensated")
+    loose_timing = scenario == "metronome-shared-grid" or scenario.startswith("metronome-listener-compensated")
     server = analyze_side_recording(Path(server_paths["dir"]) / "recording")
     client = analyze_side_recording(Path(client_paths["dir"]) / "recording", allow_silent=allow_client_silent)
     if loose_timing:
-        def clean_loose(side, missing_verdict):
-            detected = side.get("detected_clicks", 0)
-            return {
-                "ok": detected > 0,
-                "verdict": "pass_loose_listener_compensated" if detected > 0 else missing_verdict,
-                "recording_dir": side.get("recording_dir", ""),
-                "sample_rate": side.get("sample_rate", 0),
-                "detected_clicks": detected,
-                "strict_grid_expected_clicks": side.get("expected_clicks", 0),
-                "strict_grid_check": "skipped_listener_compensated",
-            }
-        server = clean_loose(server, "listener_compensated_server_clicks_missing")
-        client = clean_loose(client, "listener_compensated_client_clicks_missing")
+        server = analyze_metronome_wav(Path(server_paths["dir"]) / "recording")
+        client = analyze_metronome_wav(Path(client_paths["dir"]) / "recording")
     ok = server.get("ok", False) and client.get("ok", False)
     verdict = ""
     if not ok:

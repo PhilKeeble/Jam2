@@ -18,10 +18,20 @@ The detailed findings, rationale, and validation matrices remain in:
 
 ## Work Rules
 
-- The phases describe implementation order. They are not hard validation gates.
-- The user decides when a phase is suitably complete and will compile and run
-  validation as needed.
-- Do not compile or run build/test commands unless the user explicitly asks.
+- Validate every phase with Python stress tests where practical and use focused
+  manual checks only where Python is not useful.
+- Keep the exact validation commands under each phase after they are run so the
+  scenarios and saved artifacts remain available for regression comparisons.
+  Device stress uses IDs `5` and `16` at 44100 Hz. Refactor artifacts use
+  top-level folders such as `tools\stress_logs_phase2_udp` or
+  `tools\stress_logs_phase2_mesh`, never subfolders of the normal
+  `tools\stress_logs` directory.
+- At the end of every phase, compile from the repository root with
+  `cmd.exe /d /c "call compile.cmd --in-dev-shell"`, then run the relevant
+  Python stress scenarios and inspect their saved metrics. Fix failures or
+  regressions and repeat compilation and affected scenarios until validation
+  passes. Then mark the phase complete and report what changed, the validation
+  outcome, and whether any focused manual testing is still needed from the user.
 - Preserve existing benchmark artifacts as historical protocol and behavior
   evidence. Re-run representative cases when they are useful; do not require a
   new exhaustive baseline before correcting known defects.
@@ -37,26 +47,25 @@ Status markers:
 
 - `[ ]` not started.
 - `[~]` in progress.
-- `[x]` implemented.
-- `[v]` implementation complete; user validation remains pending.
+- `[x]` implementation item complete; at phase level, compilation and required
+  automated validation have also passed.
+- `[v]` phase implementation complete; compilation or validation remains pending.
 - `[!]` blocked, with the reason recorded in the work log.
 
 ## Current Status
 
-Last plan rewrite: 2026-07-13.
+Last plan update: 2026-07-14.
 
 - `[x]` Phase 1: stabilize and improve the current model.
-- `[ ]` Phase 2: extract the persistent local engine.
-- `[ ]` Phase 3: extract the mature one-peer network path.
-- `[ ]` Phase 4: generalize to universal direct full mesh.
-- `[ ]` Phase 5: timing, metronome, and transport authority.
+- `[x]` Phase 2: extract the persistent local engine.
+- `[x]` Phase 3: extract the mature one-peer network path.
+- `[x]` Phase 4: generalize to universal direct full mesh.
+- `[x]` Phase 5: timing, metronome, and transport authority.
 - `[ ]` Phase 6: GUI lifecycle and single-application integration.
 - `[ ]` Phase 7: tooling migration and legacy retirement.
 - `[ ]` Phase 8: optional measured protocol experiments.
 
-Current implementation focus: Phase 1 is complete and its focused user-run
-runtime validation is clean. Phase 2 is deliberately deferred to a future
-session.
+Current implementation focus: Phase 6 GUI lifecycle and single-application integration.
 
 ## Product and Architecture Invariants
 
@@ -168,65 +177,95 @@ implementation before extracting it.
 
 ## Phase 2: Extract the Persistent Local Engine
 
-- `[ ]` Create one Qt-free `Engine` owning audio-device lifecycle, callback frame
-  clock, local capture/playback handoffs, monitoring, metronome, prepared
-  tracks, recording, and technical statistics.
-- `[ ]` Define typed immutable configuration, bounded commands, fixed-shape
+- `[x]` Create one Qt-free `Engine` owning audio-device lifecycle, callback frame
+  clock, local capture/playback handoffs, monitoring, metronome, transport,
+  prepared tracks, recording, and technical statistics.
+- `[x]` Define typed immutable configuration, bounded commands, fixed-shape
   snapshots, bounded events, stop, and join interfaces.
-- `[ ]` Make local operation the base engine state and networking an optional
+- `[x]` Make local operation the base engine state and networking an optional
   attachment.
-- `[ ]` Tag or epoch capture data against the authoritative callback frame
+- `[x]` Tag or epoch capture data against the authoritative callback frame
   clock; discard stale capture when networking attaches.
-- `[ ]` Keep current CLI/headless modes working as adapters over the extracted
+- `[x]` Keep current CLI/headless modes working as adapters over the extracted
   engine.
-- `[ ]` Preserve real-device and headless operation.
+- `[x]` Preserve real-device and headless operation.
+
+### Validation commands
+
+```powershell
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --profile fast --scenario clean-control --stream-ms 10000 --logs tools\stress_logs_phase2_udp --clean
+python tools\run_stress_local.py --mode mesh --sample-rate 48000 --profile fast --mesh-peers 2 --stream-ms 10000 --logs tools\stress_logs_phase2_mesh --clean
+python tools\run_stress_local.py --headless-audio --headless-audio-buffer-frames 256 --sample-rate 48000 --profile moderate --scenario clean-control --scenario metronome-shared-grid --stream-ms 10000 --logs tools\stress_logs_phase2_udp_headless --clean
+```
 
 ## Phase 3: Extract the Mature One-Peer Network Path
 
-- `[ ]` Create `PeerStream` from the corrected `listen/connect` reorder, jitter,
+- `[x]` Create `PeerStream` from the corrected `listen/connect` reorder, jitter,
   playout, missing-frame, drift, resampling, RTT, and statistics behavior.
-- `[ ]` Create `NetworkSession` for the UDP socket, packet scheduling,
+- `[x]` Create `NetworkSession` for the UDP socket, packet scheduling,
   control/bootstrap state, peer identity, and immutable session contract.
-- `[ ]` Attach one `PeerStream` for the normal two-person case.
-- `[ ]` Separate creator/joiner bootstrap concepts from steady-state audio-peer
+- `[x]` Attach one `PeerStream` for the normal two-person case.
+- `[x]` Separate creator/joiner bootstrap concepts from steady-state audio-peer
   behavior.
-- `[ ]` Keep `listen` and `connect` as compatibility adapters.
-- `[ ]` Carry hardened framing, authentication, authorization, replay,
+- `[x]` Keep `listen` and `connect` as compatibility adapters.
+- `[x]` Carry hardened framing, authentication, authorization, replay,
   endpoint, and bounded-storage components forward rather than reimplementing
   them.
 
+Validation commands:
+
+```powershell
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --profile fast --scenario clean-control --scenario jitter-50 --scenario loss-0.5 --scenario reorder-small --scenario duplicate-2.0 --scenario near-wrap-sequence --scenario delayed-replay --scenario forward-sequence-gap --scenario extreme-sample-time --scenario metronome-shared-grid --scenario runtime-controls --stream-ms 18000 --logs tools\stress_logs_phase3_udp --clean
+python tools\run_stress_local.py --headless-audio --headless-audio-buffer-frames 256 --sample-rate 48000 --profile moderate --scenario clean-control --scenario metronome-shared-grid --scenario metronome-leader-audio --stream-ms 16000 --include-audio-probes --logs tools\stress_logs_phase3_udp_headless --clean
+python tools\run_stress_local.py --headless-audio --headless-audio-buffer-frames 256 --sample-rate 48000 --profile moderate --scenario metronome-leader-audio --scenario audio-probe-jitter-buffer-512-metronome --scenario audio-probe-prefill-768-metronome --stream-ms 16000 --logs tools\stress_logs_phase3_udp_headless_recheck --clean
+```
+
 ## Phase 4: Generalize to Universal Direct Full Mesh
 
-- `[ ]` Use the same `NetworkSession` and `PeerStream` implementation for one or
+- `[x]` Use the same `NetworkSession` and `PeerStream` implementation for one or
   many remote peers.
-- `[ ]` Encode local audio once and fan out the packet to each active direct
+- `[x]` Encode local audio once and fan out the packet to each active direct
   peer.
-- `[ ]` Give each peer independent reorder, jitter, clock mapping, drift,
+- `[x]` Give each peer independent reorder, jitter, clock mapping, drift,
   resampling, and raw statistics.
-- `[ ]` Map each peer onto the local frame timeline before mixing.
-- `[ ]` Add bounded fixed-slot mixing with peer-contribution tracking,
+- `[x]` Map each peer onto the local frame timeline before mixing.
+- `[x]` Add bounded fixed-slot mixing with peer-contribution tracking,
   missing-peer silence, deadline release, wide accumulation, and one saturation
   step.
-- `[ ]` Support peer add/remove/endpoint changes without restarting the audio
+- `[x]` Support peer add/remove/endpoint changes without restarting the audio
   device or unaffected streams.
-- `[ ]` Retire the old mesh audio loop after the universal path replaces its
+- `[x]` Retire the old mesh audio loop after the universal path replaces its
   useful topology behavior.
+
+Validation commands:
+
+```powershell
+python tools\run_stress_local.py --headless-audio --headless-audio-buffer-frames 256 --sample-rate 48000 --profile fast --scenario clean-control --scenario jitter-50 --scenario loss-0.5 --scenario reorder-small --scenario runtime-controls --stream-ms 12000 --logs tools\stress_logs_phase4_udp_headless --clean
+python tools\run_stress_local.py --mode mesh --sample-rate 48000 --profile fast --mesh-peers 2 --mesh-peers 3 --mesh-peers 4 --stream-ms 16000 --logs tools\stress_logs_phase4_mesh --clean
+```
 
 ## Phase 5: Timing, Metronome, and Transport Authority
 
-- `[ ]` Separate bootstrap coordinator, audio peer, grid authority, and
+- `[x]` Separate bootstrap coordinator, audio peer, grid authority, and
   arrangement authority.
-- `[ ]` Give each grid an authority peer, revision, mapped epoch, and explicit
+- `[x]` Give each grid an authority peer, revision, mapped epoch, and explicit
   state.
-- `[ ]` Let the peer initiating a grid revision become its authority.
-- `[ ]` Ensure `leader-audio` click injection comes from exactly that authority
+- `[x]` Let the peer initiating a grid revision become its authority.
+- `[x]` Ensure `leader-audio` click injection comes from exactly that authority
   peer.
-- `[ ]` Map shared-grid and listener-compensated behavior relative to the
+- `[x]` Map shared-grid and listener-compensated behavior relative to the
   authority stream.
-- `[ ]` Resolve concurrent proposals through ordered revisions and support
+- `[x]` Resolve concurrent proposals through ordered revisions and support
   joining a running grid at a safe musical boundary.
-- `[ ]` Make transport actions source-identified, revisioned, and scheduled
+- `[x]` Make transport actions source-identified, revisioned, and scheduled
   against the engine frame clock.
+
+Validation commands:
+
+```powershell
+python tools\run_stress_local.py --headless-audio --headless-audio-buffer-frames 256 --sample-rate 48000 --profile fast --scenario metronome-shared-grid --scenario metronome-leader-audio --scenario metronome-listener-compensated --scenario grid-authority-client-shared-grid --scenario grid-authority-client-leader-audio --scenario grid-authority-client-listener-compensated --scenario grid-authority-concurrent --scenario transport-grid-authority --scenario runtime-controls --stream-ms 12000 --logs tools\stress_logs_phase5_udp_headless --clean
+python tools\run_stress_local.py --mode mesh --sample-rate 48000 --profile fast --mesh-peers 2 --mesh-peers 3 --mesh-peers 4 --scenario mesh-2-clean --scenario mesh-3-authority-last --scenario mesh-4-authority-last --stream-ms 12000 --logs tools\stress_logs_phase5_mesh --clean
+```
 
 ## Phase 6: GUI Lifecycle and Single-Application Integration
 
@@ -274,22 +313,85 @@ implementation before extracting it.
 - `[ ]` Do not introduce relays, TURN audio, rooms, accounts, or production
   platform infrastructure.
 
-## Validation and Progress Handling
-
-- Validation occurs throughout at the user's discretion rather than as a hard
-  phase-exit requirement.
-- Existing benchmark data may be compared whenever a change affects relevant
-  packet, audio, timing, or resource behavior.
-- Python scenarios can be expanded alongside the implementation they exercise.
-- Phase markers describe implementation progress, not formal certification.
-- Record useful raw result paths and outstanding user-run checks in the work
-  log; do not block unrelated implementation solely because a build has not
-  been requested.
-
 ## Work Log
 
 Add concise entries as implementation proceeds:
 
+### 2026-07-14 - Phase 5 timing, metronome, and transport authority
+
+- Added coordinator-ordered grid revisions with endpoint-derived authority,
+  explicit running/stopped/authority-missing state, safe-bar epoch mapping, and
+  no automatic authority election.
+- Made shared-grid and listener compensation follow only the assigned stream;
+  leader-audio now renders and injects from exactly one assigned peer across
+  one-peer and mesh sessions.
+- Source-identified transport now carries its event counter and grid revision,
+  maps requested targets onto the receiving engine clock, and remains controlled
+  by the separate arrangement authority.
+- Added authority, mapping, leader-injection, and transport frame statistics plus
+  client/concurrent/third-peer/fourth-peer Python scenarios. MSVC built
+  successfully; all nine UDP scenarios and all 2/3/4-peer mesh scenarios passed
+  in the Phase 5 artifact folders above.
+
+### 2026-07-14 - Phase 4 universal direct full mesh
+
+- Generalized `NetworkSession` to stable multi-peer ownership, endpoint-gated
+  lifecycle changes, one-time packet encoding, and direct fan-out with no peer
+  count cap.
+- Added bounded `PeerMixer` local-timeline queues, per-peer resampling and
+  gain/mute controls, contribution/deadline tracking, missing-peer silence,
+  wide accumulation, single saturation, shared adaptive/output control, and
+  detailed per-peer/aggregate CSV statistics.
+- Replaced the legacy mesh decode and `pending_mix` path with the same mature
+  `PeerStream` used by one-peer sessions. Python now verifies distinct peer
+  identities, all expected active edges, mixer contributors/output, and zero
+  capacity/output drops for 2/3/4-peer sessions.
+- MSVC/Ninja built successfully; the final build reported no work to do. The
+  five-scenario headless UDP regression suite and all 2/3/4-peer mesh scenarios
+  passed with artifacts in the Phase 4 folders above.
+
+### 2026-07-14 - Phase 3 mature one-peer network path
+
+- Added `PeerStream` with fixed-capacity reorder/jitter, sample-time playout,
+  missing-frame handling, adaptive cushion, drift ratio, RTT, replay, horizons,
+  and per-peer technical statistics.
+- Added `NetworkSession` ownership for the UDP socket, immutable PCM24
+  contract, stable compatibility peer IDs, endpoint gate, bootstrap metadata,
+  and rational packet schedule.
+- `listen` and `connect` now bootstrap as compatibility adapters and attach the
+  same role-free one-peer stream to Engine capture/playback APIs. UDP v1 bytes,
+  PCM24, packet cadence, and timing policy remain unchanged.
+- Appended peer/session identity and contract fields to CSV. The MSVC/Ninja
+  build succeeded, the 11-scenario UDP suite passed, and the targeted headless
+  recheck passed 3/3 with valid identity/contracts and zero reorder/jitter
+  capacity drops.
+
+### 2026-07-14 — Phase 2 persistent local engine
+
+- Added a Qt-free `jam2::Engine` in `jam2-core`. It owns real/headless audio
+  stream lifetime, the callback frame clock, capture/playback rings, local
+  monitoring, metronome and transport controls, prepared tracks, jam recording,
+  track takes, and fixed-shape technical snapshots.
+- Added validated retained startup configuration, bounded command/scheduled
+  command/event storage with capacity and rejection/drop statistics, explicit
+  stop/join lifecycle, and a non-real-time supervisor boundary that reports
+  command and worker failures without adding work to audio callbacks.
+- Made local audio the base state. Network capture/playback is an explicit
+  generation-tagged attachment acknowledged at a callback boundary; stale
+  capture is discarded there, its authoritative local frame epoch is exposed,
+  and detached local operation neither fills the capture ring nor records
+  artificial playback underruns.
+- Moved the synthetic headless device into the core engine and made both real
+  backends advance the authoritative frame clock once per callback, including
+  input-only operation. The callback attachment check remains fixed-work,
+  allocation-free, lock-free, and logging-free.
+- Converted `local`, `listen`, `connect`, and compatibility `mesh` paths to
+  legacy adapters over Engine-owned resources. The mature network algorithms,
+  UDP v1 bytes, PCM24 payloads, packet cadence, and zero-based session packet
+  sample-time behavior were left unchanged for Phase 3 extraction.
+- Added capture attachment state, generation, epoch, stale-discard, and
+  playback-attachment data to CLI diagnostics and structured status output;
+  bounded Engine queue data is exposed in snapshots and final text statistics.
 ### 2026-07-13 — Phase 1 implementation pass
 
 - Corrected playback-ring ownership, UDP parsing/sequence/replay/horizon/work

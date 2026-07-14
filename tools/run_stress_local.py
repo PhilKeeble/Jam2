@@ -8,6 +8,7 @@ import socket
 import threading
 import time
 import sys
+import wave
 from dataclasses import asdict
 from pathlib import Path
 
@@ -72,10 +73,6 @@ from udp_stress_proxy import DirectionImpairment, ProxyImpairment, UdpStressProx
 DEFAULT_STREAM_MS = 30000
 DEFAULT_HEADLESS_AUDIO_BUFFER_FRAMES = 1024
 DEFAULT_SCENARIO_COOLDOWN_S = 2.0
-METRONOME_WAV_TOLERANCE_FRAMES = 96
-LISTENER_PULSE_STEADY_SKIP = 8
-
-
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Run localhost Jam2 stress scenarios through a UDP impairment proxy or headless mesh peers.")
@@ -83,6 +80,10 @@ def parse_args():
     parser.add_argument("--mode", choices=("normal", "mesh"), default="normal")
     parser.add_argument("--server-audio-device")
     parser.add_argument("--client-audio-device")
+    parser.add_argument(
+        "--headless-audio",
+        action="store_true",
+        help="use synthetic audio for normal listen/connect scenarios instead of physical devices")
     parser.add_argument("--sample-rate", required=True, type=int)
     parser.add_argument("--logs", default=str(Path(__file__).with_name("stress_logs")))
     parser.add_argument("--stream-ms", type=int, default=DEFAULT_STREAM_MS)
@@ -164,6 +165,7 @@ def run_mesh_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
     endpoints = select_mesh_endpoints(peer_count, args_ns.mesh_base_port)
     processes = []
     peer_results = []
+    commands = list(scenario.get("commands", []))
     print_flush(f"[stress] starting {scenario_id} profile={profile.name} peers={peer_count} os_priority={os_priority}")
     for index, endpoint in enumerate(endpoints):
         peer_name = f"peer{index + 1}"
@@ -191,8 +193,24 @@ def run_mesh_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
             args,
             repo_root(),
             paths["stdout"],
-            paths["stderr"]).start()
+            paths["stderr"],
+            stdin_pipe=bool(commands)).start()
         processes.append((process, paths, peer_name))
+
+    command_thread = None
+    if commands:
+        def run_mesh_commands():
+            start = time.monotonic()
+            targets = {peer_name: process for process, _, peer_name in processes}
+            for command in sorted(commands, key=lambda item: item.get("at_s", 0.0)):
+                delay = start + float(command.get("at_s", 0.0)) - time.monotonic()
+                if delay > 0.0:
+                    time.sleep(delay)
+                target = targets.get(command.get("peer", ""))
+                if target is not None:
+                    target.send_line(command.get("line", ""))
+        command_thread = threading.Thread(target=run_mesh_commands, daemon=True)
+        command_thread.start()
 
     timeout = max(30.0, args_ns.stream_ms / 1000.0 + 30.0)
     for process, paths, peer_name in processes:
@@ -219,6 +237,8 @@ def run_mesh_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
             "stdout": str(paths["stdout"]),
             "stderr": str(paths["stderr"]),
         })
+    if command_thread is not None:
+        command_thread.join(timeout=1.0)
 
     mesh_metrics = mesh_collect_metrics(peer_results, args_ns.stream_ms)
     result = {
@@ -235,6 +255,7 @@ def run_mesh_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
         "mesh_endpoints": endpoints,
         "peer_results": peer_results,
         "mesh_metrics": mesh_metrics,
+        "authority_peer": scenario.get("authority_peer", ""),
     }
     result["verdict"] = mesh_verdict(result)
     print_flush(
@@ -244,6 +265,10 @@ def run_mesh_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
         f"observations={','.join(result.get('audio_health_observations', [])) or '-'} "
         f"peers={peer_count} recv_min={mesh_metrics.get('recv_packets_min', 0.0):.0f} "
         f"loss={mesh_metrics.get('sequence_lost_total', 0.0):.0f} "
+        f"active_edges_min={mesh_metrics.get('network_active_peer_count_min', 0)}/"
+        f"{mesh_metrics.get('expected_remote_peers', 0)} "
+        f"mix_slots_min={mesh_metrics.get('mix_released_slots_min', 0.0):.0f} "
+        f"mix_capacity_drops={mesh_metrics.get('mix_capacity_drops_total', 0.0):.0f} "
         f"duration_coverage={result.get('duration_coverage_ratio_min', 0.0):.3f} "
         f"audio_ok={mesh_metrics.get('audio_ok_peers', 0)}/{peer_count}")
     return result
@@ -256,8 +281,31 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
     record_metronome = source_scenario == "metronome-shared-grid" or source_scenario.startswith("metronome-")
     audio_probe = source_scenario.startswith("audio-probe-")
     commands = list(scenario.get("commands", []))
+    if scenario.get("prepared_track"):
+        track_path = Path(output_dir) / "prepared-track.wav"
+        track_path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(track_path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(args_ns.sample_rate)
+            handle.writeframes(bytes(args_ns.sample_rate * 2))
+        commands.extend([
+            {"at_s": 1.0, "side": "server", "line": f"track load {track_path}"},
+            {"at_s": 1.0, "side": "client", "line": f"track load {track_path}"},
+        ])
     server_extra_args = ["--os-priority", os_priority]
     client_extra_args = ["--os-priority", os_priority]
+    server_audio_device = args_ns.server_audio_device
+    client_audio_device = args_ns.client_audio_device
+    if args_ns.headless_audio:
+        headless_args = [
+            "--headless-audio", "on",
+            "--audio-buffer-size", str(args_ns.headless_audio_buffer_frames),
+        ]
+        server_extra_args.extend(headless_args)
+        client_extra_args.extend(headless_args)
+        server_audio_device = None
+        client_audio_device = None
     server_signal = scenario.get("server_signal", scenario.get("signal", "silence"))
     client_signal = scenario.get("client_signal", scenario.get("signal", "silence"))
     if audio_probe:
@@ -284,7 +332,7 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
     print_flush(f"[stress] starting {scenario_id} profile={profile.name} os_priority={os_priority}")
     listener, server_paths = start_listener(
         jam2,
-        args_ns.server_audio_device,
+        server_audio_device,
         args_ns.sample_rate,
         profile,
         args_ns.stream_ms,
@@ -326,7 +374,7 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
     connector, client_paths = start_connector(
         jam2,
         proxy_url,
-        args_ns.client_audio_device,
+        client_audio_device,
         args_ns.sample_rate,
         profile,
         args_ns.stream_ms,
@@ -830,7 +878,8 @@ def main():
         return fail("--scenario-cooldown-s cannot be negative")
     if args_ns.headless_audio_buffer_frames <= 0:
         return fail("--headless-audio-buffer-frames must be positive")
-    if args_ns.mode == "normal" and (not args_ns.server_audio_device or not args_ns.client_audio_device):
+    if (args_ns.mode == "normal" and not args_ns.headless_audio and
+            (not args_ns.server_audio_device or not args_ns.client_audio_device)):
         return fail("--server-audio-device and --client-audio-device are required in --mode normal")
 
     logs = Path(args_ns.logs)
@@ -866,6 +915,7 @@ def main():
         sample_rate=args_ns.sample_rate,
         stream_ms=args_ns.stream_ms,
         scenario_cooldown_s=args_ns.scenario_cooldown_s,
+        headless_audio=args_ns.headless_audio,
         headless_audio_buffer_frames=args_ns.headless_audio_buffer_frames,
         seed=args_ns.seed,
         profile=args_ns.profile,
@@ -886,8 +936,10 @@ def main():
             "mode": args_ns.mode,
             "stream_ms": args_ns.stream_ms,
             "sample_rate": args_ns.sample_rate,
+            "headless_audio": args_ns.headless_audio,
             "headless_audio_buffer_frames": (
-                args_ns.headless_audio_buffer_frames if args_ns.mode == "mesh" else 0),
+                args_ns.headless_audio_buffer_frames
+                if args_ns.mode == "mesh" or args_ns.headless_audio else 0),
             "server_audio_device": args_ns.server_audio_device,
             "client_audio_device": args_ns.client_audio_device,
             "seed": args_ns.seed + index,

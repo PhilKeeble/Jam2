@@ -47,6 +47,9 @@ public:
     void set_depth_bucket_thresholds(double sample_rate);
     void set_diagnostics_enabled(bool enabled);
     RingStats stats() const;
+    // Used only at a producer/consumer attachment boundary where the consumer
+    // is known to be inactive. Preserves cumulative diagnostics.
+    std::size_t discard_all() noexcept;
     void reset();
 
 private:

@@ -2,10 +2,16 @@ add_library(jam2_core STATIC
     src/audio_ring.cpp
     src/common.cpp
     src/metronome.cpp
+    src/engine.cpp
+    src/network_capture.cpp
+    src/network_session.cpp
     src/output_recorder.cpp
+    src/peer_mixer.cpp
+    src/peer_stream.cpp
     src/pcm16_wav.cpp
     src/prepared_track_source.cpp
     src/protocol.cpp
+    src/session_authority.cpp
     src/track_take_recorder.cpp
     src/stun.cpp
     src/tuning_profile.cpp

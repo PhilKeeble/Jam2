@@ -194,6 +194,15 @@ RingStats MonoRingBuffer::stats() const
     };
 }
 
+std::size_t MonoRingBuffer::discard_all() noexcept
+{
+    const std::uint64_t read = read_.load(std::memory_order_relaxed);
+    const std::uint64_t write = write_.load(std::memory_order_acquire);
+    read_.store(write, std::memory_order_release);
+    drop_target_read_.store(write, std::memory_order_release);
+    return static_cast<std::size_t>(write - read);
+}
+
 void MonoRingBuffer::reset()
 {
     read_.store(0, std::memory_order_release);

@@ -203,10 +203,11 @@ def start_listener(jam2, audio_device, sample_rate, profile, stream_ms, output_d
         "listen",
         "--bind", bind,
         "--no-stun",
-        "--audio-device", str(audio_device),
         "--sample-rate", str(sample_rate),
         "--log-stats", str(paths["csv_raw"]),
     ]
+    if audio_device is not None:
+        args.extend(["--audio-device", str(audio_device)])
     if wait_ms is None:
         wait_ms = max(15000, stream_ms + 15000)
     if wait_ms > 0:
@@ -224,10 +225,11 @@ def start_connector(jam2, url, audio_device, sample_rate, profile, stream_ms, ou
         "connect",
         url,
         "--wait-ms", str(max(15000, stream_ms + 15000)),
-        "--audio-device", str(audio_device),
         "--sample-rate", str(sample_rate),
         "--log-stats", str(paths["csv_raw"]),
     ]
+    if audio_device is not None:
+        args.extend(["--audio-device", str(audio_device)])
     args.extend(profile.args(stream_ms))
     if extra_args:
         args.extend(extra_args)
