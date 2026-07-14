@@ -12,18 +12,21 @@ namespace jam2 {
 NetworkPacketSchedule::NetworkPacketSchedule(
     int sample_rate,
     int frames_per_packet,
-    std::uint64_t start_time_us)
+    std::uint64_t start_time_us,
+    int clock_drift_ppm)
     : start_time_us_(start_time_us),
       next_audio_send_us_(start_time_us),
       next_ping_us_(start_time_us),
       next_grid_state_us_(start_time_us),
-      interval_denominator_(static_cast<std::uint64_t>(sample_rate)),
       frames_per_packet_(static_cast<std::uint64_t>(frames_per_packet))
 {
-    if (sample_rate <= 0 || frames_per_packet <= 0) {
+    if (sample_rate <= 0 || frames_per_packet <= 0 ||
+        clock_drift_ppm < -5000 || clock_drift_ppm > 5000) {
         throw std::runtime_error("invalid NetworkSession packet schedule");
     }
-    const std::uint64_t numerator = frames_per_packet_ * 1000000ULL;
+    const std::uint64_t clock_scale = static_cast<std::uint64_t>(1000000 + clock_drift_ppm);
+    interval_denominator_ = static_cast<std::uint64_t>(sample_rate) * clock_scale;
+    const std::uint64_t numerator = frames_per_packet_ * 1000000ULL * 1000000ULL;
     interval_us_ = numerator / interval_denominator_;
     interval_remainder_us_ = numerator % interval_denominator_;
 }
@@ -93,13 +96,18 @@ struct NetworkSession::Impl {
         PeerId local_id,
         std::span<const NetworkPeerDescriptor> initial_peers,
         const PeerStreamConfig& peer_config,
-        PeerStreamPlayback* output)
+        PeerStreamPlayback* output,
+        int packet_clock_drift_ppm)
         : socket(std::move(owned_socket)),
           session(session_info),
           contract(session_contract),
           bootstrap_role(role),
           local_peer_id(local_id),
-          schedule(contract.sample_rate, contract.frames_per_packet, monotonic_us()),
+          schedule(
+              contract.sample_rate,
+              contract.frames_per_packet,
+              monotonic_us(),
+              packet_clock_drift_ppm),
           mixer({
               contract.sample_rate,
               contract.frames_per_packet,
@@ -286,7 +294,8 @@ NetworkSession::NetworkSession(
     PeerId local_peer_id,
     const NetworkPeerDescriptor& remote_peer,
     const PeerStreamConfig& peer_config,
-    PeerStreamPlayback* playback)
+    PeerStreamPlayback* playback,
+    int packet_clock_drift_ppm)
     : NetworkSession(
           std::move(socket),
           session,
@@ -295,7 +304,8 @@ NetworkSession::NetworkSession(
           local_peer_id,
           std::span<const NetworkPeerDescriptor>(&remote_peer, 1),
           peer_config,
-          playback)
+          playback,
+          packet_clock_drift_ppm)
 {
 }
 
@@ -307,7 +317,8 @@ NetworkSession::NetworkSession(
     PeerId local_peer_id,
     std::span<const NetworkPeerDescriptor> remote_peers,
     const PeerStreamConfig& peer_config,
-    PeerStreamPlayback* playback)
+    PeerStreamPlayback* playback,
+    int packet_clock_drift_ppm)
     : impl_(std::make_unique<Impl>(
           std::move(socket),
           session,
@@ -316,7 +327,8 @@ NetworkSession::NetworkSession(
           local_peer_id,
           remote_peers,
           peer_config,
-          playback))
+          playback,
+          packet_clock_drift_ppm))
 {
 }
 

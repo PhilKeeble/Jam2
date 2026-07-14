@@ -15,31 +15,39 @@ The default Jam2 binary path is `release\jam2.exe`. Override it with `--jam2` if
 Default profile is `fast`. Use `--profile all` to run each selected stress case against `fast`, `moderate`, and `safe`.
 
 ```powershell
-python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 48000 --clean
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --clean
 ```
 
 Run the safe profile:
 
 ```powershell
-python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 48000 --profile safe --clean
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --profile safe --clean
 ```
 
 Compare all three profiles for one scenario:
 
 ```powershell
-python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 48000 --profile all --scenario jitter-50 --clean
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --profile all --scenario jitter-50 --clean
 ```
 
 Run one scenario quickly:
 
 ```powershell
-python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 48000 --scenario clean-control
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --scenario clean-control
+```
+
+Validate recovery from one 120 ms bidirectional delivery stall. This case
+requires packet flow, mixer occupancy, adaptive padding, and the adaptive
+target to be recovering during the final five seconds:
+
+```powershell
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --profile fast --os-priority realtime --scenario transient-stall-recovery --stream-ms 22000 --logs tools\stress_logs_phase7_udp_recovery --clean
 ```
 
 Run short stress passes:
 
 ```powershell
-python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 48000 --stream-ms 10000 --clean
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --stream-ms 10000 --clean
 ```
 
 Run headless mesh stress without ASIO/CoreAudio devices:
@@ -57,26 +65,26 @@ python tools\run_stress_local.py --mode mesh --sample-rate 48000 --profile fast 
 Run the metronome timing scenarios with WAV recording/analysis:
 
 ```powershell
-python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 48000 --scenario metronome-shared-grid --scenario metronome-leader-audio --scenario metronome-symmetric-delay --scenario metronome-listener-compensated --clean
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --scenario metronome-shared-grid --scenario metronome-leader-audio --scenario metronome-symmetric-delay --scenario metronome-listener-compensated --clean
 ```
 
 Include CLI/session/error validation checks:
 
 ```powershell
-python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 48000 --include-validation --clean
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --include-validation --clean
 ```
 
 Include targeted recorded tone/pulse probes for audible artifact analysis under stress:
 
 ```powershell
-python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 48000 --include-audio-probes --clean
+python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --include-audio-probes --clean
 ```
 
 Useful args:
 
-- `--mode normal|mesh`: normal runs the two-process listen/connect stress path with real audio devices; mesh runs headless full-mesh processes with synthetic audio.
-- `--server-audio-device`: local listen-side audio device id.
-- `--client-audio-device`: local connect-side audio device id.
+- `--mode normal|mesh`: normal runs one `network create` plus one `network join` with real or headless audio; mesh runs the same public create/join bootstrap with multiple headless peers and direct UDP edges.
+- `--server-audio-device`: local creator-side audio device id.
+- `--client-audio-device`: local joiner-side audio device id.
 - `--sample-rate`: sample rate for both local interfaces.
 - `--profile fast|moderate|safe|all`: choose one profile or run each selected scenario against all three. Default: `fast`.
 - `--scenario NAME`: run only one scenario. Repeat for multiple scenarios.
@@ -92,6 +100,8 @@ Useful args:
 - `--mesh-peers N`: mesh peer count for `--mode mesh`; repeat for multiple. Default mesh counts are 2, 3, 4, and 8.
 - `--mesh-base-port PORT`: first localhost UDP port used by mesh stress. Default: `0`, which reserves available ports automatically; a nonzero value requests consecutive explicit ports and fails clearly if any cannot be bound.
 - `--headless-audio-buffer-frames N`: synthetic callback size used by headless cases. Default: `1024`, large enough for reliable wall-clock pacing with ordinary Windows timer scheduling while the network frame size remains controlled by the selected profile.
+
+Mesh scenarios include clean/authority cases plus `mesh-N-independent-drift` for per-peer synthetic clocks and `mesh-N-edge-jitter` for one impaired edge with all other edges direct.
 
 Main outputs:
 
@@ -112,7 +122,7 @@ Stress results separate three decisions:
 
 The overall `verdict` fails if any applicable decision fails. Scenarios that intentionally inject ordinary loss, jitter, or blackouts retain `audio_health_verdict=not_evaluated`, because discontinuities are part of those cases and need scenario-specific interpretation. The raw counters remain in CSV and JSON for comparison.
 
-The headless duration and callback checks are intentionally independent of the current mesh startup topology. They are meant to carry forward when listen/connect uses the same two-peer mesh engine; the Python suite does not attempt to validate the current all-peers-tone routing as a lasting design contract.
+The headless duration and callback checks are independent of peer count. Two-person and multi-peer cases use the same public TCP bootstrap and the same `NetworkSession`, `PeerStream`, and mixer implementation.
 
 Run the dependency-free verdict checks directly with Python:
 
@@ -131,17 +141,17 @@ Audio probe coverage:
 - `audio-probe-adaptive-on-pulse`: symmetric pulse under jitter/burst pressure.
 - `audio-probe-adaptive-off-pulse`: same pulse pressure with adaptive cushion disabled.
 
-## Two-Host Static Benchmarks
+## Two-Host Benchmarks
 
-`tools\run_benchmark_server.py` runs the listen/server side of the static benchmark suite. It coordinates lifecycle state and client artifact upload over one direct TCP control connection, records server stems, waits for client artifacts, then writes the final summary/CSV/JSON. Jam2 UDP audio still travels directly between the two Jam2 child processes and is never relayed by the benchmark control connection.
+`tools\run_benchmark_server.py` runs the creator side of the benchmark suite. It coordinates lifecycle state and client artifact upload over one direct TCP control connection, records server stems, waits for client artifacts, then writes the final summary/CSV/JSON. Jam2 UDP audio still travels directly between the two unified Jam2 processes and is never relayed by the benchmark control connection.
 
-The server waits indefinitely for the first TCP benchmark client before publishing any case by default, so the listener machine can be started first and the client can join when ready.
+The server waits indefinitely for the first TCP benchmark client before publishing any case by default, so the creator machine can be started first and the client can join when ready.
 
 Each offered run carries a `suite_id`, `case_id`, `run_index`, and `attempt_id`. If the client TCP connection drops before the client reports that its Jam2 child finished, the server abandons that attempt and retries the same logical run with a new `attempt_id`. The server and client clean that run's local artifact folder before retrying, so stale files do not collide with the new attempt. If TCP drops after the client finished Jam2, the server waits for the client to reconnect and upload the already completed artifacts.
 
 Jam2 itself rejects a run if the active audio device sample rate differs from the requested `--sample-rate`, so a device that silently starts at another rate becomes a clear child-process failure instead of misleading benchmark warnings.
 
-Run this on the listen/server machine:
+Run this on the creator/server machine:
 
 ```powershell
 python tools\run_benchmark_server.py --server-audio-device 5 --sample-rate 44100 --clean
@@ -167,13 +177,13 @@ python tools\run_benchmark_server.py --server-audio-device 5 --sample-rate 44100
 
 Useful server args:
 
-- `--server-audio-device`: server/listen-side audio device id.
+- `--server-audio-device`: creator-side audio device id.
 - `--sample-rate`: audio sample rate.
 - `--bind-control HOST:PORT`: TCP lifecycle control bind. Default: `0.0.0.0:49000`. This intentionally matches the default Jam2 UDP audio port number; TCP control and UDP audio are separate sockets.
 - `--bind-http HOST:PORT`: optional HTTP diagnostic bind for `current.json`. Disabled by default and not used for uploads.
 - `--initial-client-timeout-s N`: optional timeout for the initial TCP client wait. Default `0` waits indefinitely.
 - `--client-upload-timeout-s N`: active-case timeout while waiting for accept/connect/finish/upload. Default `0` waits indefinitely.
-- `--post-listener-upload-grace-s N`: optional timeout for client artifact upload after the server-side Jam2 process exits. Default `0` waits indefinitely.
+- `--post-listener-upload-grace-s N`: optional timeout for client artifact upload after the creator-side Jam2 process exits. Default `0` waits indefinitely. The flag name is retained for script compatibility.
 - `--case-retry-limit N`: retry count after client TCP disconnects before the Jam2 child has finished. Default `3`; `0` retries indefinitely.
 - `--finish-grace-s N`: wait for the client to acknowledge `all_done` after the last case. Default `300`.
 - `--logs PATH`: output folder. Default: `tools\benchmark_logs`.
@@ -181,14 +191,14 @@ Useful server args:
 - `--repeats N`: repeat count per case. Default: `1`.
 - `--signals silence,tone-440,pulse-1s`: symmetric injected input signals for non-metronome cases. When `tone-440` is included, the suite also adds a small number of directional tone cases.
 - `--no-metronome-cases`: skip metronome-only benchmark cases.
-- `--list-cases`: print the static case list and exit.
+- `--list-cases`: print the fixed benchmark case list and exit.
 - `--clean`: delete the output folder before running.
 
 ## Two-Host Benchmark Client
 
-`tools\run_benchmark_client.py` connects to the benchmark TCP control plane, runs the connect-side Jam2 process for each offered case, records client stems, analyzes local WAVs, and uploads the artifacts back on the same TCP connection. The client reconnects the control channel if it drops; every run and upload carries a suite/case/run/attempt identity so stale results are rejected instead of being matched to a later case. If the server retries a run with a new attempt while the client still has an old Jam2 child running, the client terminates the stale child and follows the new offer.
+`tools\run_benchmark_client.py` connects to the benchmark TCP control plane, runs the joiner-side Jam2 process for each offered case, records client stems, analyzes local WAVs, and uploads the artifacts back on the same TCP connection. The client reconnects the control channel if it drops; every run and upload carries a suite/case/run/attempt identity so stale results are rejected instead of being matched to a later case. If the server retries a run with a new attempt while the client still has an old Jam2 child running, the client terminates the stale child and follows the new offer.
 
-Run this on the client/connect machine:
+Run this on the joiner/client machine:
 
 ```powershell
 python tools\run_benchmark_client.py --server 192.168.1.50 --client-audio-device 16 --sample-rate 44100
@@ -204,7 +214,7 @@ Useful client args:
 
 - `--server`: benchmark server host, for example `192.168.1.50`. The old diagnostic HTTP URL form also works.
 - `--control`: optional TCP control endpoint. By default this uses the server host with TCP port `49000`, for example `192.168.1.50:49000`.
-- `--client-audio-device`: client/connect-side audio device id.
+- `--client-audio-device`: joiner-side audio device id.
 - `--sample-rate`: audio sample rate.
 - `--logs PATH`: local output folder. Default: `tools\benchmark_logs`.
 - `--poll-ms N`: control-loop wait interval while idle. Default: `500`.
@@ -258,7 +268,7 @@ These files are imported by the runnable tools and are not normally run directly
 
 - `tools\jam2_tooling.py`: shared paths, JSON writing, CSV copy, and log helpers.
 - `tools\jam2_profiles.py`: shared profile definitions.
-- `tools\jam2_benchmark_suite.py`: static benchmark case definitions.
+- `tools\jam2_benchmark_suite.py`: fixed benchmark case definitions.
 - `tools\jam2_audio_analysis.py`: WAV/stem analysis helpers.
 - `tools\jam2_harness.py`: Jam2 process and CSV collection helpers.
 - `tools\jam2_metrics.py`: stress CSV summarizing and result CSV writing.

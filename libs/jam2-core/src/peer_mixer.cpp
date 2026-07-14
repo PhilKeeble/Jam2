@@ -31,6 +31,8 @@ struct PeerMixer::Impl {
         std::size_t read_index = 0;
         std::size_t write_index = 0;
         std::size_t queued = 0;
+        std::size_t late_frames_to_discard = 0;
+        bool timeline_recovery_pending = false;
         bool has_previous_sample = false;
         std::int32_t previous_sample = 0;
         double next_output_phase = 0.0;
@@ -48,6 +50,8 @@ struct PeerMixer::Impl {
             read_index = 0;
             write_index = 0;
             queued = 0;
+            late_frames_to_discard = 0;
+            timeline_recovery_pending = false;
             has_previous_sample = false;
             previous_sample = 0;
             next_output_phase = 0.0;
@@ -57,12 +61,25 @@ struct PeerMixer::Impl {
 
         bool enqueue(std::int32_t sample) noexcept
         {
+            if (owner->output != nullptr && !owner->output->acceptsFrames()) {
+                return false;
+            }
+            if (late_frames_to_discard > 0) {
+                --late_frames_to_discard;
+                ++stats.late_after_release_frames;
+                ++owner->stats.late_after_release_frames;
+                return false;
+            }
             if (queued == queue.size()) {
+                // Keep the stream current after a burst. Retaining a full queue
+                // of stale audio while rejecting every new sample can leave the
+                // peer permanently behind real time.
+                read_index = (read_index + 1U) % queue.size();
+                --queued;
                 ++stats.queue_capacity_drops;
                 ++stats.queue_capacity_dropped_frames;
                 ++owner->stats.capacity_drops;
                 ++owner->stats.capacity_dropped_frames;
-                return false;
             }
             queue[write_index] = sample;
             write_index = (write_index + 1U) % queue.size();
@@ -73,6 +90,28 @@ struct PeerMixer::Impl {
                 stats.queue_high_water_frames,
                 queued);
             return true;
+        }
+
+        void noteMissingFrames(std::size_t frames) noexcept
+        {
+            const std::size_t available = (std::numeric_limits<std::size_t>::max)() -
+                late_frames_to_discard;
+            late_frames_to_discard += std::min(frames, available);
+            timeline_recovery_pending = true;
+        }
+
+        void recoverTimeline(std::size_t retain_frames) noexcept
+        {
+            if (!timeline_recovery_pending || late_frames_to_discard > 0 || queued == 0) {
+                return;
+            }
+            const std::size_t dropped = queued > retain_frames ? queued - retain_frames : 0;
+            read_index = (read_index + dropped) % queue.size();
+            queued -= dropped;
+            stats.late_after_release_frames += dropped;
+            owner->stats.late_after_release_frames += dropped;
+            stats.queue_depth_frames = queued;
+            timeline_recovery_pending = false;
         }
 
         std::int32_t pop() noexcept
@@ -160,6 +199,7 @@ struct PeerMixer::Impl {
     std::size_t deadline_blocks = 2;
     std::uint64_t adaptive_target_frames = 0;
     std::uint64_t adaptive_last_update_us = 0;
+    double adaptive_release_accumulator_frames = 0.0;
     std::uint64_t consecutive_deadline_slots = 0;
 
     Impl(const PeerMixerConfig& requested, PeerStreamPlayback* sink)
@@ -316,27 +356,45 @@ struct PeerMixer::Impl {
         if (!config.adaptive_playback_cushion) {
             return;
         }
-        if (missing && adaptive_target_frames < config.adaptive_max_frames) {
-            adaptive_target_frames = std::min<std::uint64_t>(
-                config.adaptive_max_frames,
-                std::max<std::uint64_t>(
-                    config.adaptive_min_frames,
-                    adaptive_target_frames + static_cast<std::uint64_t>(config.frames_per_block)));
-            ++stats.adaptive_raise_events;
+        if (missing) {
+            adaptive_release_accumulator_frames = 0.0;
+            if (adaptive_target_frames < config.adaptive_max_frames) {
+                adaptive_target_frames = std::min<std::uint64_t>(
+                    config.adaptive_max_frames,
+                    std::max<std::uint64_t>(
+                        config.adaptive_min_frames,
+                        adaptive_target_frames + static_cast<std::uint64_t>(config.frames_per_block)));
+                ++stats.adaptive_raise_events;
+            }
         } else if (!missing && adaptive_target_frames > config.adaptive_min_frames &&
                    config.adaptive_release_ppm > 0 && adaptive_last_update_us != 0 &&
                    now_us > adaptive_last_update_us) {
-            const double release_frames =
-                static_cast<double>(adaptive_target_frames) *
-                static_cast<double>(config.adaptive_release_ppm) *
-                (static_cast<double>(now_us - adaptive_last_update_us) / 1000000.0) / 1000000.0;
-            const std::uint64_t release = static_cast<std::uint64_t>(release_frames);
+            // Release ppm describes a temporary playback-rate offset. Accumulate
+            // fractions across the frequent network-thread updates instead of
+            // truncating every sub-frame update to zero.
+            const int effective_release_ppm = std::min(config.adaptive_release_ppm, 5000);
+            adaptive_release_accumulator_frames +=
+                static_cast<double>(config.sample_rate) *
+                static_cast<double>(effective_release_ppm) *
+                static_cast<double>(now_us - adaptive_last_update_us) /
+                1000000000000.0;
+            const std::uint64_t available_release =
+                static_cast<std::uint64_t>(adaptive_release_accumulator_frames);
+            const std::uint64_t release = std::min<std::uint64_t>(
+                available_release,
+                adaptive_target_frames - config.adaptive_min_frames);
             if (release > 0) {
-                adaptive_target_frames = adaptive_target_frames > release
-                    ? std::max<std::uint64_t>(config.adaptive_min_frames, adaptive_target_frames - release)
-                    : config.adaptive_min_frames;
+                adaptive_target_frames -= release;
+                adaptive_release_accumulator_frames -= static_cast<double>(release);
                 ++stats.adaptive_release_events;
             }
+        }
+        if (output != nullptr) {
+            const int effective_release_ppm = std::min(config.adaptive_release_ppm, 5000);
+            const bool releasing = !missing && adaptive_target_frames > config.adaptive_min_frames &&
+                effective_release_ppm > 0;
+            output->setResamplerRatio(
+                releasing ? 1.0 + static_cast<double>(effective_release_ppm) / 1000000.0 : 1.0);
         }
         adaptive_last_update_us = now_us;
         stats.adaptive_target_frames = adaptive_target_frames;
@@ -355,6 +413,17 @@ struct PeerMixer::Impl {
             }
         }
         return any;
+    }
+
+    bool anyContributorReady() const noexcept
+    {
+        for (const auto& peer : peers) {
+            if (peer->stats.active && peer->stats.contributing &&
+                peer->queued >= static_cast<std::size_t>(config.frames_per_block)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     bool outputAtLimit() const noexcept
@@ -377,6 +446,7 @@ struct PeerMixer::Impl {
             if (missing > 0) {
                 ++stats.missing_peer_contributions;
                 stats.missing_peer_frames += missing;
+                peer->noteMissingFrames(missing);
             }
             const int gain = peer->stats.muted ? 0 : peer->stats.gain_ppm;
             for (std::size_t frame = 0; frame < available; ++frame) {
@@ -402,16 +472,28 @@ struct PeerMixer::Impl {
 
     void advance(std::uint64_t now_us) noexcept
     {
+        if (output != nullptr && !output->acceptsFrames()) {
+            return;
+        }
+        const std::size_t recovery_tail = static_cast<std::size_t>(config.frames_per_block) * 2U;
+        for (auto& peer : peers) {
+            peer->recoverTimeline(recovery_tail);
+        }
         updateOccupancy();
         if (stats.contributing_peers == 0) {
+            if (output != nullptr) {
+                output->setResamplerRatio(1.0);
+            }
             return;
         }
         if (!started) {
             started = true;
             next_deadline_us = now_us + deadlineDelay();
             adaptive_last_update_us = now_us;
+            // Initial prefill establishes the configured latency before the
+            // first real block. Later padding must never outrank queued audio.
+            ensureAdaptiveCushion();
         }
-        ensureAdaptiveCushion();
         std::size_t work = 0;
         while (work < config.max_blocks_per_advance) {
             if (outputAtLimit()) {
@@ -437,6 +519,11 @@ struct PeerMixer::Impl {
                 next_deadline_us += deadlineStep();
             }
             updateOccupancy();
+        }
+        // During an actual gap, padding may protect the device from underrun.
+        // Once real peer audio is queued it always gets playback capacity first.
+        if (!anyContributorReady()) {
+            ensureAdaptiveCushion();
         }
         if (work == config.max_blocks_per_advance &&
             (allContributorsReady() || now_us >= next_deadline_us)) {

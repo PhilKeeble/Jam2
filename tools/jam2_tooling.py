@@ -5,6 +5,7 @@ import os
 import platform
 import re
 import shutil
+import subprocess
 import sys
 import time
 import uuid
@@ -75,6 +76,22 @@ def default_jam2_path():
     return root / "release" / name
 
 
+def debug_description(jam2):
+    completed = subprocess.run(
+        [str(jam2), "debug", "describe", "--json"],
+        cwd=repo_root(),
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        timeout=5.0)
+    payload = json.loads(completed.stdout.strip())
+    if payload.get("schema") != "jam2-debug-description-v1":
+        raise ValueError("jam2 returned an unsupported debug description")
+    return payload
+
+
 def ensure_dir(path):
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -117,14 +134,9 @@ def run_dir(base, test_id, side, run_index):
     return ensure_dir(base / safe_test_id(test_id) / side / f"run_{run_index:02d}")
 
 
-def newest_csv(log_dir):
-    files = sorted(log_dir.glob("jam2_stats_*.csv"), key=lambda path: path.stat().st_mtime)
-    return files[-1] if files else None
-
-
-def copy_final_csv(log_dir, destination):
-    csv = newest_csv(log_dir)
-    if csv is None:
+def copy_emitted_csv(source, destination):
+    csv = Path(source) if source else None
+    if csv is None or not csv.is_file():
         return None
     target = destination / "stats.csv"
     shutil.copy2(csv, target)

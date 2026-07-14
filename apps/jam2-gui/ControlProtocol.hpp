@@ -13,7 +13,6 @@ constexpr int kAuthenticationDeadlineMs = 5000;
 constexpr int kIncompleteFrameDeadlineMs = 5000;
 constexpr int kFramesPerTurn = 32;
 constexpr int kMaxPendingPeers = 8;
-constexpr int kMaxAuthenticatedPeers = 8;
 
 enum class TakeFrameResult {
     NeedMore,

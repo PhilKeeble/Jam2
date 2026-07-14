@@ -115,6 +115,7 @@ struct PeerStream::Impl {
     std::uint64_t last_audio_gap_receive_us = 0;
     std::uint64_t adaptive_target_frames = 0;
     std::uint64_t adaptive_last_update_us = 0;
+    double adaptive_release_accumulator_frames = 0.0;
     DurationTracker adaptive_under;
     DurationTracker adaptive_above;
     DurationTracker low_depth_2ms;
@@ -295,35 +296,42 @@ struct PeerStream::Impl {
 
             if (config.adaptive_playback_cushion && past_warmup) {
                 const bool burst_evidence = depth < config.adaptive_playback_min_frames || inserted_missing;
-                if (burst_evidence && adaptive_target_frames < config.adaptive_playback_max_frames) {
-                    const std::uint64_t previous = adaptive_target_frames;
-                    adaptive_target_frames = std::min<std::uint64_t>(
-                        config.adaptive_playback_max_frames,
-                        std::max<std::uint64_t>(
-                            adaptive_target_frames + static_cast<std::uint64_t>(config.frames_per_packet),
-                            config.adaptive_playback_min_frames));
-                    if (adaptive_target_frames > previous) {
-                        ++stats.adaptive_playback_raise_events;
-                        ++stats.adaptive_playback_burst_events;
+                if (burst_evidence) {
+                    adaptive_release_accumulator_frames = 0.0;
+                    if (adaptive_target_frames < config.adaptive_playback_max_frames) {
+                        const std::uint64_t previous = adaptive_target_frames;
+                        adaptive_target_frames = std::min<std::uint64_t>(
+                            config.adaptive_playback_max_frames,
+                            std::max<std::uint64_t>(
+                                adaptive_target_frames + static_cast<std::uint64_t>(config.frames_per_packet),
+                                config.adaptive_playback_min_frames));
+                        if (adaptive_target_frames > previous) {
+                            ++stats.adaptive_playback_raise_events;
+                            ++stats.adaptive_playback_burst_events;
+                        }
                     }
                 } else if (!burst_evidence && adaptive_target_frames > config.adaptive_playback_min_frames &&
                            config.adaptive_playback_release_ppm > 0) {
                     const std::uint64_t elapsed_us = adaptive_last_update_us != 0 && packet.receive_time > adaptive_last_update_us
                         ? packet.receive_time - adaptive_last_update_us
                         : 0;
-                    const double release_frames =
-                        static_cast<double>(adaptive_target_frames) *
-                        static_cast<double>(config.adaptive_playback_release_ppm) *
-                        (static_cast<double>(elapsed_us) / 1000000.0) / 1000000.0;
-                    const std::uint64_t release = static_cast<std::uint64_t>(release_frames);
+                    const int effective_release_ppm = std::min(
+                        config.adaptive_playback_release_ppm,
+                        5000);
+                    adaptive_release_accumulator_frames +=
+                        static_cast<double>(config.sample_rate) *
+                        static_cast<double>(effective_release_ppm) *
+                        static_cast<double>(elapsed_us) /
+                        1000000000000.0;
+                    const std::uint64_t available_release =
+                        static_cast<std::uint64_t>(adaptive_release_accumulator_frames);
+                    const std::uint64_t release = std::min<std::uint64_t>(
+                        available_release,
+                        adaptive_target_frames - config.adaptive_playback_min_frames);
                     if (release > 0) {
-                        const std::uint64_t previous = adaptive_target_frames;
-                        adaptive_target_frames = previous > release
-                            ? std::max<std::uint64_t>(config.adaptive_playback_min_frames, previous - release)
-                            : config.adaptive_playback_min_frames;
-                        if (adaptive_target_frames < previous) {
-                            ++stats.adaptive_playback_release_events;
-                        }
+                        adaptive_target_frames -= release;
+                        adaptive_release_accumulator_frames -= static_cast<double>(release);
+                        ++stats.adaptive_playback_release_events;
                     }
                 }
                 adaptive_last_update_us = packet.receive_time;

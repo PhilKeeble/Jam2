@@ -8,7 +8,7 @@ Jam2 supports three named tuning profiles:
 | `moderate` | More forgiving general-purpose profile with a larger jitter buffer and lower packet rate. |
 | `safe` | Safest Wi-Fi profile measured so far; higher latency, but best current dropout resistance. |
 
-The CLI accepts `--profile fast`, `--profile moderate`, or `--profile safe` on `listen` and `connect`. The GUI exposes the profiles on **Start Jam** and sends the selected settings to the joining GUI before its engine starts. Explicit numeric CLI flags still override the selected profile.
+The CLI accepts `--profile fast`, `--profile moderate`, or `--profile safe` on `network create` and `network join`. The GUI exposes the profiles on **Start Jam** and sends the selected settings to joining peers before their network sessions start. Explicit numeric CLI flags still override the selected profile.
 
 ## Fast Profile
 

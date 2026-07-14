@@ -39,6 +39,7 @@ struct PeerStreamConfig {
 class PeerStreamPlayback {
 public:
     virtual ~PeerStreamPlayback() = default;
+    virtual bool acceptsFrames() const noexcept { return true; }
     virtual std::size_t depthFrames() const noexcept = 0;
     virtual std::size_t pushFrames(std::span<const std::int32_t> frames) noexcept = 0;
     virtual void requestDropFrames(std::size_t frames) noexcept = 0;

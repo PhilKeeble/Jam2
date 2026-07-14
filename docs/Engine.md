@@ -1,6 +1,6 @@
 # Jam2 Engine
 
-`jam2` is the command-line audio engine used by both the GUI and headless testing. It handles device access, UDP audio, STUN endpoint discovery, metronome timing, drift correction, stats, and CSV logging.
+`jam2` is one unified GUI and command-line application. With no arguments it opens the GUI; its subcommands use the same engine and network implementation for headless operation, diagnostics, and automated testing.
 
 ## Commands
 
@@ -9,27 +9,44 @@ jam2 list-devices
 jam2 test-device <id> [--sample-rate n]
 jam2 meter-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n]
 jam2 local [audio options]
-jam2 listen [--profile fast|moderate|safe] [options]
-jam2 connect <jam2-url> [--profile fast|moderate|safe] [options]
+jam2 network create [--profile fast|moderate|safe] [options]
+jam2 network join <jam2-url> [--profile fast|moderate|safe] [options]
+jam2 debug describe --json
+jam2 debug run <scenario.json>
 ```
 
 Use `list-devices` first on each host, then use the local device id in the GUI or CLI.
 
-## Basic Listen And Connect
+## CLI Help
+
+Use `-h` or `--help` for the command menu, then apply it to a command or network/debug subcommand for its accepted options and ranges:
+
+```powershell
+.\release\jam2.exe -h
+.\release\jam2.exe local -h
+.\release\jam2.exe network -h
+.\release\jam2.exe network create -h
+.\release\jam2.exe network join -h
+.\release\jam2.exe debug run -h
+```
+
+`jam2 help` is also accepted for the root menu. Help exits without opening an audio device, socket, STUN request, or scenario file.
+
+## Basic Create And Join
 
 Host:
 
 ```powershell
-.\release\jam2.exe listen --bind 0.0.0.0:49000 --profile fast --audio-device 0 --input-channels 1 --output-channels 1,2
+.\release\jam2.exe network create --bind 0.0.0.0:49000 --profile fast --audio-device 0 --input-channels 1 --output-channels 1,2
 ```
 
 Client:
 
 ```powershell
-.\release\jam2.exe connect "jam2://..." --profile fast --audio-device 0 --input-channels 1 --output-channels 1,2
+.\release\jam2.exe network join "jam2://..." --profile fast --audio-device 0 --input-channels 1 --output-channels 1,2
 ```
 
-Both peers must match sample rate and frame size. Device ids and channel selections are local to each machine.
+The creator's TCP coordinator authenticates the joiner, checks the immutable sample-rate/frame-size contract, and distributes direct UDP candidates and current membership. Device ids and channel selections remain local to each machine.
 
 ## Important Options
 
@@ -39,6 +56,7 @@ Both peers must match sample rate and frame size. Device ids and channel selecti
 | `--audio-device` | Selects the host audio device id. |
 | `--sample-rate` | Sets device and stream sample rate. Keep both peers matching. |
 | `--audio-buffer-size` | Sets the host audio callback size in frames. |
+| `--headless-clock-drift-ppm` | Test-only synthetic device clock offset (`-5000..5000` ppm); requires headless audio. |
 | `--frame-size` | Sets audio frames per UDP packet. |
 | `--input-channels` | Selects one or more input channels mixed to mono. |
 | `--output-channels` | Selects one or more output channels for duplicated mono playback. |
@@ -62,7 +80,7 @@ Both peers must match sample rate and frame size. Device ids and channel selecti
 
 ## Runtime Commands
 
-While `jam2 listen` or `jam2 connect` is running, stdin accepts:
+While a direct headless command is running, stdin accepts:
 
 ```text
 stats
@@ -93,7 +111,7 @@ Use stats while testing and tuning. The engine reports raw measurements such as 
 Use CSV logs for comparisons between runs:
 
 ```powershell
-.\release\jam2.exe listen --stats enabled --stats-interval-ms 1000 --log-stats logs
+.\release\jam2.exe network create --stats enabled --stats-interval-ms 1000 --log-stats logs
 ```
 
 See [Diagnosing](Diagnosing.md) and [Profiles](Profiles.md) for practical tuning guidance.

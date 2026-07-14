@@ -1147,6 +1147,9 @@ OSStatus duplex_io_proc(
             apply_remote_level(*context, playback);
         }
         if (context->control != nullptr) {
+            context->control->network_playback_enabled_applied.store(
+                network_playback_enabled,
+                std::memory_order_release);
             observe_peak(context->control->remote_peak_ppm, playback);
             observe_peak(context->control->gui_remote_peak_ppm, playback);
         }

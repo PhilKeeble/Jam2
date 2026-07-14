@@ -156,7 +156,10 @@ def _analyze_dynamic_metronome(
         return None
 
     expected_interval = int(round(sample_rate * 60.0 / max(1, bpm) / max(1, division)))
-    interval_tolerance = max(tolerance_frames, int(round(sample_rate * 0.010)))
+    # A mapped shared grid may slew by up to the configured 40 ms/s while it
+    # converges. Over a 500 ms beat that can legitimately move one interval by
+    # 20 ms, so retain a small margin while still rejecting gross timing drift.
+    interval_tolerance = max(tolerance_frames, int(round(sample_rate * 0.025)))
     interval_errors = [
         abs((current - previous) - expected_interval)
         for previous, current in zip(actual, actual[1:])

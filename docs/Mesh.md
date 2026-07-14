@@ -1,130 +1,85 @@
-# Mesh Network
+# Direct Full-Mesh Network
 
-Jam2 mesh mode lets more than two known peers exchange live audio in a direct UDP full mesh. It is intended for controlled technical testing with a small number of players, not for rooms, relays, accounts, or hosted audio.
+Every Jam2 network session uses one bootstrap model and one direct UDP full-mesh audio engine. Two players are the primary and best-tested workflow. Three or four players use the same `NetworkSession` and per-peer `PeerStream` implementation; larger groups are experimental and limited by each machine and network rather than an application-wide peer cap. A jam creator may optionally configure a limit for that session.
 
-The normal two-person mode is still the lowest-risk path for playing. Use mesh mode when you need every participant to hear every other participant directly and you can manage the extra endpoint, bandwidth, CPU, and tuning cost.
+## Create And Join Model
 
-## When To Use It
+One participant creates the jam and remains its TCP coordinator. Other participants join the `jam2://...` URL published by that creator.
 
-Use mesh mode for:
+The TCP coordinator only handles session setup and control:
 
-- Testing how Jam2 behaves with more than one remote audio source.
-- LAN or port-forwarded sessions where each participant has a reachable UDP endpoint.
-- Comparing packet loss, jitter, RTT, underruns, overruns, and bitrate as peer count increases.
-- Small experiments where a direct peer list is acceptable.
+- authenticating the session id and key;
+- checking the immutable protocol, sample-rate, and frame-size contract;
+- assigning stable peer identities;
+- distributing the current peer membership and each peer's UDP candidate;
+- carrying shared settings and GUI control messages.
 
-Do not use mesh mode when you need automatic room discovery, relay traversal, TURN fallback, moderation, account identity, or a server-mixed session. Jam2 does not add any relay audio path in mesh mode. Each peer still sends audio directly to the other peers.
+The creator binds TCP and UDP to the same local numeric port. A joiner first authenticates to that TCP port, receives the contract and membership, then starts its UDP session. TCP never carries or relays audio.
 
-## Network Model
+Every proven UDP edge is direct peer to peer. Each engine sends its local mono PCM packet to every other active peer, receives one independent stream from each peer, and mixes those streams locally. For `N` peers, each peer sends to `N - 1` peers and the session has `N * (N - 1)` directed UDP paths.
 
-Mesh mode uses a fixed-shape full mesh:
-
-- Each peer runs one local `jam2 mesh` engine.
-- Each engine has one UDP bind endpoint.
-- Each engine receives a list of all other peer UDP endpoints.
-- Each engine sends its local mono PCM audio packet to every listed peer.
-- Received peer packets are mixed locally for playback.
-
-For `N` peers, each peer sends to `N - 1` peers. Across the whole session, the live UDP audio paths grow as `N * (N - 1)`. There is no central audio mixer and no relay. This keeps the audio path direct, but it means scaling cost is paid by every participant and by every participant's network.
-
-STUN is not part of the mesh audio path. The GUI mesh flow uses the GUI TCP control connection to exchange endpoint data and distribute the peer list. The UDP audio path remains direct between engines.
-
-## GUI Launch Flow
-
-The GUI is the normal way to start mesh mode.
-
-### Host
-
-1. Open `jam2-gui`.
-2. Open **Start Jam**.
-3. Set **Bind** and **Port** for the local UDP socket.
-4. Set **Public endpoint host** to the host address other peers should use. On a LAN this is usually the host's LAN IP. Across the internet this must be a reachable public or forwarded address.
-5. Enable **Mesh mode**.
-6. Optionally set **Max mesh peers**. `0` means no GUI-enforced cap.
-7. Choose the local audio device, channels, profile, sample rate, frame size, and other numeric tuning options.
-8. Start the jam.
-9. Send the generated `jam2://...` URL to each joining peer.
-
-When mesh mode is enabled for **Start Jam**, the GUI launches:
-
-```text
-jam2 mesh --bind <host:port> --session-id <hex> --session-key <hex32> --peers ""
-```
-
-The empty peer list is valid for the initial host. The GUI then starts its TCP control server on the same session id and key. As peers authenticate, the GUI records their advertised UDP endpoints, broadcasts the full peer list, and restarts the local engine with the current `--peers` list when needed.
-
-### Joiner
-
-1. Open `jam2-gui`.
-2. Open **Join Jam**.
-3. Paste the host's `jam2://...` URL.
-4. Set **Local UDP bind host** and **Local UDP bind port** for this peer.
-5. Enable **Mesh mode**.
-6. Choose the local audio device and channels.
-7. Join.
-
-The joiner connects to the host GUI over the authenticated TCP control connection, advertises its UDP endpoint, receives the current mesh peer list, then launches:
-
-```text
-jam2 mesh --bind <local-host:port> --session-id <hex> --session-key <hex32> --peers <comma-separated-peer-endpoints>
-```
-
-If a peer list changes, the GUI restarts the mesh engine with the updated list. This is expected behavior in the current implementation.
+There is no public static topology command, separate two-person transport, central audio mixer, relay, or TURN fallback.
 
 ## CLI Usage
 
-The CLI form is useful for headless tests and repeatable local stress runs:
+Creator:
 
 ```powershell
-.\release\jam2.exe mesh --bind 0.0.0.0:49000 --session-id <hex> --session-key <hex32> --peers 192.168.1.20:49000,192.168.1.30:49000
+.\release\jam2.exe network create --bind 0.0.0.0:49000 --public-endpoint 203.0.113.10:49000 --profile fast --audio-device 5 --sample-rate 44100
 ```
 
-Every peer must use the same session id, session key, sample rate, frame size, and compatible tuning values. Each peer's `--peers` value should include every other peer and must not include its own bind endpoint.
-
-Use an explicitly empty list only when intentionally starting with no known peers:
+The creator prints a `jam2://...` URL. A joiner uses that URL:
 
 ```powershell
-.\release\jam2.exe mesh --bind 0.0.0.0:49000 --session-id <hex> --session-key <hex32> --peers ""
+.\release\jam2.exe network join "jam2://..." --bind 0.0.0.0:49001 --profile fast --audio-device 16 --sample-rate 44100
 ```
 
-## What To Watch While It Scales
+Use `network create -h` and `network join -h` for the full option list. Device ids and channel selections are local. The coordinator rejects incompatible protocol, sample-rate, or frame-size contracts before UDP starts.
 
-Mesh mode exposes aggregate and per-peer stats. With periodic stats enabled, the engine prints `mesh_stats` plus one `mesh_peer` line per remote peer in text mode, or a JSON `mesh_stats` object with a `peers` array in JSONL mode.
+## GUI Flow
 
-Watch these values first:
+The GUI exposes the same create/join model as **Start Jam** and **Join Jam**:
 
-- `peer_count`: confirms the local engine's current peer list size.
-- `sent_packets` and `recv_packets`: should increase for each active peer.
-- `sequence_lost`, `sequence_duplicate`, `sequence_out_of_order`, and `sequence_late`: show packet health.
-- `rtt_avg_ms` and `jitter_avg_ms`: show network timing pressure.
-- `playout_delay_frames` and jitter-buffer fields: show configured receive delay.
-- `playback_ring_readable_ms`, underruns, and underrun events: show whether playback is starving.
-- `input_peak`, `send_peak`, `remote_peak`, `output_peak`, and `output_clipped_samples`: show audio level and clipping behavior.
-- CSV logs from **Log stats folder**: use these for comparing peer counts and profiles across runs.
+1. The creator selects the device, channels, profile, bind port, and reachable public endpoint, then starts the jam.
+2. Jam2 copies or displays the generated invite URL.
+3. Each joiner pastes that URL, selects local device and channel settings, and joins.
+4. The creator authenticates the joiner and distributes updated membership.
+5. The existing audio engine adds or updates only the affected peer stream; unchanged audio devices and peer streams keep running.
 
-As peer count grows, expect:
+The creator may optionally impose a GUI peer limit. `0` means no user-selected cap.
 
-- Higher outbound bitrate on every peer because each local audio packet is copied to every remote peer.
-- Higher inbound bitrate because every remote peer sends a separate stream.
-- More local mixing work before playback.
-- More sensitivity to one weak peer's route, because that peer still needs a direct path to every other peer.
-- More engine restarts when people join while the GUI distributes updated peer lists.
+## Address Discovery And Reachability
 
-Keep tests small and measurable. Increase peer count gradually, compare CSV logs, and tune with explicit numeric controls such as frame size, buffer sizes, playout delay, jitter buffer frames, and socket buffer sizes.
+STUN is used only to discover a candidate public UDP endpoint. It is never in the audio path and does not make an unreachable TCP or UDP port reachable by itself.
 
-## Connection Considerations
+On a LAN, publish a stable LAN address. Across the internet, every participant needs a public or forwarded UDP endpoint reachable by every other participant. The creator also needs its TCP coordinator port reachable. Because the creator uses the same numeric TCP and UDP port, forward both protocols for that port when manual forwarding is required. Other peers need their selected UDP ports forwarded when NAT does not establish a usable direct mapping.
 
-Every peer needs a UDP endpoint that every other peer can reach. On a LAN, this usually means stable LAN IPs and local firewall rules allowing the chosen UDP ports. Across the internet, this usually means manual port forwarding or a known reachable public endpoint for each peer.
+A peer behind CGNAT or restrictive/symmetric NAT can fail to form one or more direct edges. Jam2 deliberately provides no relay audio fallback. Use [Connection Test](ConnectionTest.md) when routes are uncertain, and never publish `0.0.0.0` as a peer candidate.
 
-Because mesh mode does not add relay audio, a single peer behind CGNAT or restrictive NAT can fail to receive or send direct UDP with one or more participants. Use [Connection Test](ConnectionTest.md) before the session when routes are uncertain.
+## Coordinator Loss
 
-Avoid using `0.0.0.0` as the public endpoint host. It is valid as a local bind address, but other peers need a real address they can route to. In the GUI host flow, set **Public endpoint host** to the address peers should dial.
+If the creator's TCP coordinator disappears, already proven UDP audio edges continue. Membership and shared coordinator state freeze because nobody else is promoted to coordinator. Joiners attempt to reconnect to the original creator; new participants cannot join and membership cannot change until it returns.
 
-## Current Limits
+This keeps the failure behavior simple and avoids adding leader election or a room-service protocol.
 
-- Mesh mode is experimental.
-- Peer membership is distributed by the GUI control connection and engine restarts, not by a dynamic in-engine membership protocol.
-- The host GUI is the control-plane coordinator for the peer list.
-- There is no relay, TURN fallback, or server-side audio mixer.
-- There is no subjective playability score. Use the raw stats and CSV logs.
-- Large peer counts can exceed practical upload bandwidth, CPU, or route stability quickly.
+## Measurements
+
+Periodic stats include aggregate `mesh_stats` and one `mesh_peer` record per remote peer. Watch:
+
+- `peer_count` and `active_peers` for membership and proven edge state;
+- sent/received packets, loss, duplicate, reorder, late, and replay counters;
+- per-peer RTT, jitter, playout depth, drift ppm, and resampler ratio;
+- mixer released/deadline slots, missing frames, and capacity drops;
+- playback ring depth, underruns, and overruns;
+- input, send, remote, and output peak levels;
+- outbound and inbound bitrate as peer count grows.
+
+CSV logs keep the same raw fields for regression comparisons. Increase peer count gradually and compare the per-peer routes: one weak route should be diagnosable without hiding it behind a subjective score.
+
+## Practical Limits
+
+- Two peers remain the main low-latency use case.
+- Three and four peers are expected small-group experiments.
+- Larger direct meshes have no artificial cap, but upload bandwidth, CPU, and route stability become practical limits quickly.
+- Membership is coordinated over creator TCP; audio remains direct UDP.
+- There are no rooms, accounts, relays, moderation services, or server-side audio mixing.

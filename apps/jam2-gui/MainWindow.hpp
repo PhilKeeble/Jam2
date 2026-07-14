@@ -25,13 +25,10 @@
 #include <QList>
 #include <QMap>
 #include <QPair>
-#include <QProcess>
 #include <QSet>
 #include <QSlider>
 #include <QSpinBox>
 #include <QTabWidget>
-#include <QTcpServer>
-#include <QTcpSocket>
 #include <QTimer>
 #include <QThreadPool>
 #include <QVector>
@@ -55,6 +52,8 @@ class QVBoxLayout;
 class WaveformWidget;
 class LooperLaneStackWidget;
 class LevelMeterWidget;
+
+QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs);
 
 class MainWindow : public QWidget {
 public:
@@ -81,7 +80,6 @@ private:
     void refreshDevices();
     void appendLog(const QString& line);
     void handleOutputLine(const QString& line);
-    void handleStatus(const QJsonObject& status);
     void handleStatsLine(const QString& line);
     void updateStatsDisplay(const QJsonObject& stats);
     void updateMixMeters(const QJsonObject& stats);
@@ -98,6 +96,8 @@ private:
     void applyMeshPeerList(const QJsonObject& message);
     void restartMeshEngineFromPeerList();
     QStringList meshPeerEndpointsExcludingSelf() const;
+    QStringList meshPeerSpecsExcludingSelf() const;
+    quint64 meshPeerIdForToken(const QString& token) const;
     QString meshBindEndpoint() const;
     QString localMeshEndpoint() const;
     QString meshPeerToken();
@@ -105,10 +105,7 @@ private:
     void launchJamProcess(QStringList args);
     void launchLocalPerformProcess(QStringList args);
     void launchPendingJoin();
-    bool startGuiControlServer(QStringList& args);
-    void stopGuiControlServer();
     void sendJamCommand(const QString& line);
-    void readGuiControlSocket();
     void handleGuiControlFrame(quint16 type, const QByteArray& payload);
     void updateRuntimeControls();
     void updateMixControls();
@@ -117,7 +114,6 @@ private:
     void startJamRecording();
     void stopJamRecording();
     void updateJamRecordingControls();
-    void refreshGeneratedUrl();
     QString meshInviteUrl() const;
     void showPendingMeshInviteUrl();
     void updateConnectionControlState();
@@ -228,13 +224,10 @@ private:
     BeatGridModel beatModel_;
     BeatGridModel lyricModel_;
 
-    QComboBox* modeBox_ = nullptr;
-    QLineEdit* jam2PathEdit_ = nullptr;
     QLineEdit* bindHostEdit_ = nullptr;
     QSpinBox* portSpin_ = nullptr;
     QLineEdit* publicHostEdit_ = nullptr;
     QLineEdit* connectUrlEdit_ = nullptr;
-    QLineEdit* generatedUrlEdit_ = nullptr;
     QLineEdit* stunServerEdit_ = nullptr;
     QSpinBox* stunTimeoutSpin_ = nullptr;
     QSpinBox* stunRetriesSpin_ = nullptr;
@@ -242,8 +235,6 @@ private:
     QSpinBox* streamMsSpin_ = nullptr;
     QSpinBox* streamLingerMsSpin_ = nullptr;
     QCheckBox* statsCheck_ = nullptr;
-    QCheckBox* guiControlCheck_ = nullptr;
-    QCheckBox* meshModeCheck_ = nullptr;
     QSpinBox* meshMaxPeersSpin_ = nullptr;
     QSpinBox* statsWarmupMsSpin_ = nullptr;
     QLineEdit* logStatsEdit_ = nullptr;
@@ -492,10 +483,6 @@ private:
     QTimer trackTimelineTimer_;
     QTimer playbackGridTimer_;
     QTimer controlReconnectTimer_;
-    QTcpServer guiControlServer_;
-    QTcpSocket* guiControlSocket_ = nullptr;
-    QByteArray guiControlBuffer_;
-    quint32 guiControlSequence_ = 1;
     quint64 recordingScheduleRevision_ = 0;
     quint64 recordingCountdownStartFrame_ = 0;
     quint64 recordingStartFrame_ = 0;
@@ -513,15 +500,21 @@ private:
     int controlReconnectAttempts_ = 0;
     QStringList pendingJoinBaseArgs_;
     bool pendingJoinLaunch_ = false;
+    bool pendingJoinSettingsReady_ = false;
+    bool pendingJoinMembershipReady_ = false;
     bool meshActive_ = false;
     bool localEngineActive_ = false;
+    bool sessionCreator_ = true;
     bool replacingLocalEngine_ = false;
     bool returnToLocalAfterStop_ = false;
     bool shuttingDown_ = false;
     bool remotePeerConnected_ = false;
     bool meshRestarting_ = false;
     bool pendingMeshInvitePopup_ = false;
+    QString activePublicEndpoint_;
     QString meshPeerToken_;
+    QString meshCoordinatorToken_;
+    QSet<QString> localMeshPeerTokens_;
     QMap<QString, QString> meshPeerEndpoints_;
     QStringList currentMeshPeers_;
     bool localMetronomeRunning_ = false;

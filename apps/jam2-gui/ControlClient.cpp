@@ -206,7 +206,7 @@ void ControlClient::handleHandshake(const QJsonObject& message)
             {QStringLiteral("version"), 1},
             {QStringLiteral("session"), sessionHex_},
             {QStringLiteral("client_nonce"), encodeHex(clientNonce_)},
-            {QStringLiteral("mesh_peer_token"), meshPeerToken_},
+            {QStringLiteral("peer_token"), meshPeerToken_},
             {QStringLiteral("udp_endpoint"), meshUdpEndpoint_},
             {QStringLiteral("proof"), encodeHex(proof)},
         });

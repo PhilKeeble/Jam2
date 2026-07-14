@@ -12,20 +12,30 @@ It is a focused companion to:
 - [refactor-efficiency.md](refactor-efficiency.md), the code and fast-path audit.
 - [refactor-security.md](refactor-security.md), the lightweight security contract.
 
-This is a design and migration plan. No tooling or application implementation is marked complete by this document.
+This is supporting design context. Implementation order and completion status
+are defined only by [refactor-plan.md](refactor-plan.md).
+
+Sections describing current or legacy tooling record the migration baseline.
+They do not require preservation of legacy command aliases or text-control
+interfaces.
 
 ## Decision Summary
 
 Keep Python as the external test orchestrator and offline analysis layer.
 
-The unified `jam2` executable must retain an explicit headless/debug automation surface over the same `Engine` and `NetworkSession` used by the GUI. Static and scheduled cases should be expressible through a strictly validated scenario file ingested at startup. Tests that must react to runtime state should use a bounded, versioned, inherited local automation channel rather than an always-listening network service.
+The unified `jam2` executable must retain an explicit headless/debug automation
+surface over the same shared session controller, `Engine`, and `NetworkSession`
+used by the GUI. Startup-static and scheduled cases should be expressible
+through a strictly validated scenario file ingested at startup. Tests that must
+react to runtime state use a bounded, versioned, inherited local pipe rather
+than stdin or an always-listening network service.
 
 The resulting ownership split is:
 
 | Owner | Responsibilities |
 | --- | --- |
-| C++ `Engine` and `NetworkSession` | Real/headless audio execution, deterministic test input, frame-accurate scheduling, local/create/join/static lifecycle, recording, raw per-peer statistics, effective configuration, bounded events and snapshots |
-| Unified executable debug/headless adapter | Scenario parsing, secret-free startup configuration, conversion to typed engine commands, structured event/artifact output, bounded local automation transport |
+| Shared session controller, `Engine`, and `NetworkSession` | Shared GUI/headless create/join lifecycle, TCP bootstrap and membership, real/headless audio execution, deterministic test input, frame-accurate scheduling, recording, raw per-peer statistics, effective configuration, bounded events and snapshots |
+| Unified executable debug/headless adapter | Scenario parsing, conversion to typed application requests, structured event/artifact output, and bounded inherited-pipe automation transport |
 | Python tooling | Process and machine orchestration, peer topology, impairment, retries, experiment matrices, artifact collection, repeated comparisons, offline WAV/CSV analysis |
 | GUI | Normal user workflow and an optional thin diagnostic-bundle action; not a benchmark coordinator |
 
@@ -33,13 +43,15 @@ The resulting ownership split is:
 
 - Preserve robust local stress, two-host benchmark, and future three/four-peer benchmark workflows after binary consolidation.
 - Exercise exactly the same engine and network implementations used by ordinary GUI sessions.
-- Support local-only, create-jam, join-jam, and explicit static full-mesh automation.
+- Support local-only, create-jam, join-jam, and multi-peer full-mesh automation through the same public bootstrap.
 - Preserve both real-device ASIO/CoreAudio tests and headless synthetic tests.
 - Make scenarios reproducible through versioned declarative inputs and explicit numeric settings.
 - Schedule timing-sensitive actions against the engine frame clock rather than Python wall-clock sleeps.
 - Produce raw artifacts that can be correlated across every peer in a mesh.
 - Keep Python and debug-control work outside the real-time callback and packet fast path.
-- Keep session secrets out of command lines, persisted scenario files, logs, CSV, benchmark metadata, and uploaded artifacts.
+- Keep local automation simple and inspectable. Session keys and invite URLs may
+  appear in local command lines, scenarios, logs, CSV, benchmark metadata, and
+  artifacts because those surfaces are outside the application threat boundary.
 - Retain raw measurements and explicit deltas rather than generating subjective playability scores or hidden recommendations.
 
 ## Non-Goals
@@ -79,7 +91,9 @@ The current two-host benchmark control connection carries lifecycle messages and
 
 The harness launches `listen`, `connect`, or `mesh`, rewrites the current invite URL, scrapes startup JSONL/stdout, sends text commands over stdin, and finds the newest CSV in an output directory.
 
-These are compatibility mechanisms, not the desired final automation contract. They must remain available until the replacement produces accepted side-by-side results.
+These are historical compatibility mechanisms, not the desired final
+automation contract. They are removed rather than retained as aliases once the
+unified debug/session interfaces cover their useful workflows.
 
 ### Mesh stress is not equivalent to normal stress
 
@@ -113,11 +127,16 @@ The current primary metric reducer combines `server` and `client`. Mesh support 
 
 The current Python proxy does not duplicate packets, and the current headless flow does not inject independent positive/negative device-clock drift per peer. Those baseline cases must be added through explicit test facilities or recorded as unavailable in the legacy baseline.
 
-### Current artifact handling can expose secrets or unbounded cold-path work
+### Current artifact handling can perform unbounded cold-path work
 
-The current benchmark can persist the invite URL/session key in case state and metadata. The current benchmark upload reads complete archives into memory, and the standalone upload server has no authentication or hard request-size limit.
+The current benchmark upload reads complete archives into memory, and the
+standalone upload server has no authentication or hard request-size limit.
+Persisting invite URLs or session keys locally is permitted and is not treated
+as an application vulnerability.
 
-These are not acceptable properties of the retained automation contract. The fixes are cold-path bounds and secret separation and do not require audio-path cost.
+The retained automation contract still needs cold-path size, time,
+concurrency, and cleanup bounds. Those protections do not require audio-path
+cost.
 
 ## Target Architecture
 
@@ -134,43 +153,48 @@ Python controller
             +-- debug/headless adapter (explicit command only)
             |       |
             |       +-- bounded scenario parser
-            |       +-- inherited secret/control channel
+            |       +-- inherited framed automation pipe
             |       +-- structured events and artifact manifest
-            |       +-- typed EngineCommand conversion
+            |       +-- typed session request conversion
             |
-            +-- shared persistent Engine
-                    |
-                    +-- real ASIO/CoreAudio or headless device
-                    +-- deterministic native test source
-                    +-- frame-clock command scheduler
-                    +-- recording and raw snapshots
+            +-- shared non-UI session controller
+                    +-- TCP create/join bootstrap, membership, authorities
+                    +-- persistent Engine
+                    |       +-- real ASIO/CoreAudio or headless device
+                    |       +-- deterministic native test source
+                    |       +-- frame-clock command scheduler
+                    |       +-- recording and raw snapshots
                     +-- optional universal NetworkSession
-                            |
-                            +-- create/join/static lifecycle
                             +-- one independent PeerStream per peer
                             +-- direct full-mesh UDP
 ```
 
-There is one engine implementation. “Debug” changes how it is configured and controlled, not how audio, timing, authorization, or network state is processed.
+There is one application-session, engine, and network implementation. “Debug”
+changes how it is configured and controlled, not how audio, timing,
+authorization, or network state is processed.
 
 ## Unified Executable Surface
 
-The final spelling can be selected during canonical Phase 6, but the public shape must preserve ordinary headless commands and add one explicit scenario-driven debug entry point:
+The public shape preserves ordinary headless commands and one explicit
+scenario-driven debug entry point:
 
 ```text
 jam2
 jam2 local [options]
 jam2 network create [options]
 jam2 network join <invite> [options]
-jam2 network static [options]
 jam2 debug run <scenario.json>
 jam2 debug describe --json
 ```
 
 - No arguments launch the GUI.
-- `local`, `network create`, `network join`, and `network static` remain usable directly by technical users.
+- `local`, `network create`, and `network join` remain usable directly by technical users.
+- Ordinary headless commands focus on core audio/network startup and shutdown;
+  scheduled metronome, grid, transport, recording, and recovery controls belong
+  to `debug run` and its inherited pipe rather than interactive stdin.
 - `debug run` is opt-in and is never activated by a received peer message.
-- `debug describe` reports supported scenario schema versions, commands, test inputs, profiles, limits, protocol versions, and output schema without exposing secrets.
+- `debug describe` reports supported scenario schema versions, commands, test
+  inputs, profiles, limits, protocol versions, and output schema.
 - All commands instantiate the same `Engine` and, when requested, the same `NetworkSession`.
 
 The Python tools may call the direct headless commands for simple cases or generate a scenario file for deterministic scheduled cases.
@@ -179,7 +203,10 @@ The Python tools may call the direct headless commands for simple cases or gener
 
 ### Purpose
 
-A scenario file describes non-secret, reproducible startup configuration and scheduled actions. It replaces long fragile command lines and output scraping without becoming a second application configuration system.
+A scenario file describes reproducible startup configuration and scheduled
+actions. It may contain local invite or session-key material. It replaces long
+fragile command lines and output scraping without becoming a second application
+configuration system.
 
 JSON is suitable because this is bounded startup/debug input outside the fast path and Python already produces it. A fixed schema and hard size/count/string/numeric limits matter more here than a binary encoding.
 
@@ -190,8 +217,8 @@ The exact names are provisional, but the responsibilities should remain recogniz
 ```json
 {
   "schema": "jam2-debug-scenario-v1",
-  "run_id": "non-secret-run-id",
-  "operation": "network.static",
+  "run_id": "run-id",
+  "operation": "network.create",
   "audio": {
     "backend": "headless",
     "device_id": null,
@@ -203,7 +230,7 @@ The exact names are provisional, but the responsibilities should remain recogniz
   "network": {
     "bind": "127.0.0.1:50000",
     "peer_ids": ["peer-b", "peer-c"],
-    "secret_source": "inherited-control"
+    "session_key": "optional-local-test-key"
   },
   "tuning": {
     "profile": "fast",
@@ -239,16 +266,15 @@ The exact names are provisional, but the responsibilities should remain recogniz
 - `local`: persistent engine with no UDP socket.
 - `network.create`: create a real network session and emit an invite through the protected automation channel.
 - `network.join`: receive an invite through the protected automation channel and join through the normal authenticated bootstrap path.
-- `network.static`: use explicit test membership for deterministic local/multi-process stress while retaining the normal universal per-peer audio engine.
 
-Static membership is a test/bootstrap convenience. It must not create a simplified receive, timing, mixing, or authority implementation.
+Deterministic local and multi-process stress still uses the public create/join bootstrap. A narrowly scoped inherited debug seam may override the candidate seen by each observer so impairment proxies can sit on individual UDP edges; it must not create a different receive, timing, mixing, authority, or membership implementation.
 
 ### Required functional coverage
 
 The scenario and reactive command contracts must be able to exercise supported functionality without adding test-only engine mutations:
 
 - Real-device and headless engine start, stop, cancellation, and failure paths.
-- Create, join, static membership, leave, reconnect, late join, peer restart, and endpoint change.
+- Create, join, membership update, leave, coordinator reconnect, late join, peer restart, and endpoint change.
 - Every metronome mode, BPM/pattern change, grid start/stop, authority change, and missing-authority behavior.
 - Prepared-track load, play, quantized restart, seek, loop, level, stop, and invalid-fixture handling.
 - Jam recording and track-take arm/start/stop/cancel lifecycle.
@@ -270,7 +296,9 @@ Local fixtures are selected by the local scenario adapter and validated before u
 - Resolve local output paths once, outside the callback, beneath the caller-selected output root.
 - Reject contradictory settings before opening the audio device or UDP socket.
 - Emit the effective validated configuration; never treat the requested file as proof of what ran.
-- Do not include session keys, invite secrets, peer proof material, or upload credentials in the persisted scenario.
+- Treat scenario files and their local session material as ordinary caller-owned
+  test artifacts. Network proof nonces remain generated by the application and
+  are not scenario inputs.
 
 ## Reactive Local Automation Channel
 
@@ -280,7 +308,8 @@ The unified executable should therefore offer a small local automation channel o
 
 ### Transport requirements
 
-- Prefer inherited stdin/stdout handles or an inherited local pipe so no listening socket is opened.
+- Use a dedicated inherited local pipe so no listening socket is opened and the
+  removed CLI stdin command loop is not recreated.
 - If platform constraints require a local endpoint, bind only an OS-local IPC mechanism with caller ownership and an unpredictable per-run name; do not expose it on the LAN.
 - Use bounded, versioned, length-prefixed frames rather than unbounded newline accumulation.
 - Cap input/output frame size, queued frames, frames processed per turn, and incomplete-frame time.
@@ -292,7 +321,7 @@ JSON payloads remain acceptable for this cold, local, human-rate control layer. 
 ### Minimum message families
 
 - Hello/capability and schema negotiation.
-- One-time secret delivery for create/join/static coordination.
+- Create/join session configuration and invite delivery.
 - Start, stop, cancel, and orderly shutdown.
 - Typed local user actions such as metronome, grid, transport, recording, peer gain/mute, and tuning changes.
 - Lifecycle and peer-state events.
@@ -301,19 +330,15 @@ JSON payloads remain acceptable for this cold, local, human-rate control layer. 
 
 Automation commands that are intended to simulate GUI user actions must enter the same local command/request path as the GUI. They must not directly mutate remote-authority state or bypass normal peer control.
 
-## Secret Handling
+## Local Session Material
 
-The scenario file and artifacts use only a non-secret `run_id` and stable test peer IDs.
-
-For automated create/join/static cases:
-
-1. Python creates or receives secret material in memory.
-2. It delivers the secret through an inherited automation handle after the child starts, or asks one child to create the session and forwards the returned invite in memory to the joining children.
-3. The executable copies the secret into bounded session-owned memory and acknowledges only a non-secret identifier.
-4. Neither side writes the secret to the scenario file, command line, routine stdout/stderr, CSV, metadata, result JSON, archive, or error text.
-5. The artifact collector scans outputs for known secret values before accepting a run.
-
-The exact in-memory handoff may change by platform, but persisting the secret as a convenience is not an accepted fallback.
+Local process arguments, scenarios, logs, clipboard contents, benchmark state,
+and artifacts are outside Jam2's application threat boundary. Automation may
+store and pass session keys or complete invite URLs through those surfaces when
+that keeps create/join orchestration simple and inspectable. Network
+challenge-response, authenticated framing, source authorization, and endpoint
+proof remain mandatory; local visibility of a key does not weaken those remote
+protocol requirements.
 
 ## Native Test Facilities Required by Python
 
@@ -366,16 +391,17 @@ The existing scripts can migrate incrementally; a broad framework rewrite is unn
 - Defines case names, one-variable tuning variants, signals, durations, repeats, and expected hard invariants.
 - Produces versioned scenario JSON.
 - Stores explicit impairment parameters and seeds.
-- Does not contain session secrets.
+- May contain local session keys or invite URLs where convenient.
 - Does not copy native profile defaults; it requests a profile name and explicit overrides.
 
 ### Local controller
 
 - Launches two or more unified `jam2 debug run` processes.
 - Selects real devices or headless audio independently per peer.
-- Creates static/create/join topology inputs.
+- Creates local/create/join topology inputs over the universal mesh engine.
 - Starts per-edge impairment where requested.
-- Delivers secrets over inherited handles.
+- Passes create/join session material through scenarios, arguments, or the
+  inherited automation pipe as appropriate.
 - Waits on structured lifecycle events instead of scraping human text.
 - Applies reactive commands and bounded timeouts.
 - Collects one artifact manifest per peer.
@@ -433,25 +459,24 @@ Independent positive/negative clock drift is better implemented through a determ
 
 Every peer run should publish a final manifest containing at least:
 
-- Non-secret suite, run, attempt, machine, local-peer, and role identifiers.
+- Suite, run, attempt, machine, local-peer, and role identifiers.
 - Source revision or exact working-tree identity.
 - Executable/build identity and platform.
 - Audio backend, device identity, requested and active rate/buffer/channels.
 - Effective profile and every numeric override.
 - Debug scenario, automation, control, and UDP protocol versions.
-- Topology and peer count without session secrets.
+- Topology, peer count, and effective local session configuration.
 - Test input parameters.
 - Impairment parameters and random seed for every affected edge.
 - Start/end reason and process return state.
 - Paths and hashes for raw CSV, stdout/stderr diagnostics, recordings, analysis, and result files.
-- Secret-scan result.
 
 CSV/stat output must support:
 
 - One local-engine row stream.
 - One aggregate `NetworkSession` view.
 - One normalized view per remote peer/edge.
-- Stable non-secret peer identity independent of endpoint.
+- Stable peer identity independent of endpoint.
 - Queue capacities, high-water marks, and drop/rejection counters.
 - Callback, packet scheduler, per-peer clock/drift/playout, mix, metronome, transport, and lifecycle measurements required by [refactor-plan.md](refactor-plan.md).
 
@@ -490,9 +515,10 @@ An optional GUI action may package raw diagnostics from an ordinary jam. This su
 The application may later expose a small explicit diagnostic-bundle action:
 
 - Stop the real-time audio/network work before transferring a bundle.
-- Include the effective configuration, raw CSV, errors, and non-secret manifest by default.
+- Include the effective configuration, raw CSV, errors, and manifest by default.
 - Make recordings an explicit opt-in because of size and audio privacy.
-- Scrub secrets and verify the bundle before transfer.
+- Make the bundle contents explicit before transfer; local session keys and
+  invite URLs do not require redaction.
 - Use bounded streaming, incremental hashing, size/time/concurrency limits, cancellation, and temporary-file cleanup.
 - Never block leaving a jam indefinitely.
 
@@ -508,7 +534,9 @@ The GUI should not become a general upload server. Automated benchmark artifact 
 - Keep automation parsing, file access, formatting, and artifact hashing off the callback and packet scheduler.
 - Do not expose a direct “set remote state” command; exercise normal coordinator/authority messages.
 - Treat scenario files as untrusted local input and report errors at the adapter boundary.
-- Never persist or echo session keys, invite secrets, proof nonces, or upload tokens.
+- Do not expose a remote network mutation that bypasses normal authentication,
+  authorization, or endpoint proof. Local session keys in automation data are
+  permitted.
 - Stream large artifacts instead of reading complete archives into memory.
 - Cap artifact bytes, files, duration, concurrency, and retained disk use.
 - Make debug-protocol version and all capacity limits visible in the effective run manifest.
@@ -523,96 +551,34 @@ The GUI should not become a general upload server. Automated benchmark artifact 
 - The automation channel must not change packet cadence when idle.
 - Benchmark the same engine with and without automation events to expose supervisory overhead.
 
-## Canonical Phase Integration
+## Relationship to the Authoritative Plan
 
-[refactor-plan.md](refactor-plan.md) is authoritative for phase numbering and
-order. The items below describe where Python work naturally accompanies that
-implementation; they are not validation gates and do not require an exhaustive
-run after every phase.
+This document defines the target automation behavior and explains why it is
+needed. It does not assign phases, gates, or completion state. The remaining
+implementation order, completed work, useful validation commands, and optional
+wire experiments are maintained only in
+[refactor-plan.md](refactor-plan.md).
 
-### Phase 1: stabilize the current model
+## Target Capability Summary
 
-- Preserve historical stress and benchmark artifacts as legacy evidence.
-- Keep secrets out of persisted arguments, logs, manifests, and results.
-- Use native effective configuration as the source of truth.
-- Separate reusable scenario, protocol, impairment, orchestration, metric,
-  verdict, and artifact helpers while retaining current commands.
-- Add deterministic malformed, duplicate, corrupt, replay, wrap, gap,
-  timestamp, flood, and directional impairment cases for current UDP v1.
-
-### Phase 2: extract the persistent local engine
-
-- Put effective configuration, native test sources, fixed-shape snapshots,
-  bounded commands/events, recording, and raw technical stats in the shared
-  Engine.
-- Add the frame-clock scheduler seam needed by deterministic scenarios.
-- Keep scenario JSON and Python types outside the engine.
-
-### Phase 3: extract the mature one-peer path
-
-- Run legacy and replacement one-peer paths through comparable Python cases.
-- Preserve directional tone/pulse, metronome, impairment, device, and profile
-  evidence.
-- Emit normalized per-peer results even with one remote peer.
-
-### Phase 4: generalize to direct full mesh
-
-- Generalize process identities from server/client to arbitrary peer IDs.
-- Add two-, three-, and four-peer cases plus explicit larger experimental runs.
-- Add per-edge impairment, late join/restart, and independent headless drift.
-
-### Phase 5: timing and authority
-
-- Schedule grid, metronome, and transport actions through engine frame/event
-  triggers.
-- Exercise different authority peers and record requested/applied frame,
-  revision, mapping error, and recovery data.
-- Submit normal local requests rather than injecting accepted remote state.
-
-### Phase 6: GUI lifecycle and one executable
-
-- Reuse the same Engine and NetworkSession commands/events for GUI and
-  debug/headless operation.
-- Ship ordinary headless subcommands and one bounded explicit debug scenario
-  adapter in the unified executable.
-- Remove child-engine key arguments without making Python part of ordinary GUI
-  startup or the real-time path.
-
-### Phase 7: tooling migration and legacy retirement
-
-- Migrate local stress, multi-host benchmarks, connection diagnostics,
-  profiles, metrics, and artifact collection to the unified contract.
-- Add real-process TCP framing/authentication/authorization, model boundary,
-  asset-transfer, and WAV adversarial scenarios against that same executable.
-- Remove stdout scraping, newest-file discovery, unbounded text control, and
-  legacy loop adapters only after useful comparisons have been made.
-
-### Phase 8: optional measured protocol experiments
-
-- Use the same Python scenario/result model to compare optional PCM, header,
-  control, or asset-wire experiments.
-- Do not let debug automation require a production wire-format change.
-
-## Acceptance Checklist
-
-- `[ ]` Python stress and benchmark tooling remains supported after binary consolidation.
-- `[ ]` GUI and debug/headless runs instantiate the same `Engine` and `NetworkSession` implementations.
-- `[ ]` Local, create, join, and static full-mesh scenarios are automatable.
-- `[ ]` Supported lifecycle, metronome/grid, prepared-track, recording, track-take, gain/mute, tuning, asset, stats, error, and recovery paths are reachable through normal typed application actions.
-- `[ ]` Declarative scenarios are versioned, bounded, and contain no session secrets.
-- `[ ]` Reactive automation is local-only, opt-in, bounded, and inactive during ordinary GUI startup.
-- `[ ]` Debug commands cannot bypass authentication, source authorization, endpoint proof, grid authority, or transport revision rules.
-- `[ ]` Real-device test input remains inside the ASIO/CoreAudio callback path.
-- `[ ]` Headless tests are labeled and do not claim hardware coverage.
-- `[ ]` Frame-sensitive actions use engine/grid scheduling rather than Python sleep timing.
-- `[ ]` Native profiles/effective configuration are the source of truth.
-- `[ ]` Two-, three-, and four-peer runs use one normalized peer/result model.
-- `[ ]` Per-edge impairment and independent drift cases are explicit and reproducible.
-- `[ ]` Raw CSV, recordings, manifests, and repeat-level results remain available.
-- `[ ]` Results report hard measurements and deltas without subjective scores or hidden recommendations.
-- `[ ]` Session secrets are absent from arguments, scenarios, logs, CSV, metadata, archives, uploads, and errors.
-- `[ ]` Artifact transfer is bounded and streamed outside real-time work.
-- `[ ]` Legacy automation paths are removed only after accepted replacement comparisons.
+- Python stress and benchmark tooling remains supported after binary consolidation.
+- GUI and debug/headless runs instantiate the same shared session controller,
+  `Engine`, and `NetworkSession` implementations.
+- Local, create, join, and multi-peer full-mesh scenarios are automatable through the same public bootstrap.
+- Supported lifecycle, metronome/grid, prepared-track, recording, track-take, gain/mute, tuning, asset, stats, error, and recovery paths are reachable through normal typed application actions.
+- Declarative scenarios are versioned and bounded; local session material is permitted.
+- Reactive automation is local-only, opt-in, bounded, and inactive during ordinary GUI startup.
+- Debug commands cannot bypass authentication, source authorization, endpoint proof, grid authority, or transport revision rules.
+- Real-device test input remains inside the ASIO/CoreAudio callback path.
+- Headless tests are labeled and do not claim hardware coverage.
+- Frame-sensitive actions use engine/grid scheduling rather than Python sleep timing.
+- Native profiles/effective configuration are the source of truth.
+- Two-, three-, and four-peer runs use one normalized peer/result model.
+- Per-edge impairment and independent drift cases are explicit and reproducible.
+- Raw CSV, recordings, manifests, and repeat-level results remain available.
+- Results report hard measurements and deltas without subjective scores or hidden recommendations.
+- Artifact transfer is bounded and streamed outside real-time work.
+- Legacy scraping, text-control, and mode adapters are removed rather than retained as aliases.
 
 ## Decision Log
 
@@ -620,22 +586,21 @@ run after every phase.
 | --- | --- | --- | --- |
 | 2026-07-13 | Retain Python tooling after single-binary consolidation | It provides flexible process/machine orchestration, impairment, repeated experiment matrices, artifact movement, and offline analysis without entering the audio callback | Python migrates to a stable debug/headless adapter instead of being removed |
 | 2026-07-13 | Use the same native engine for GUI, direct headless commands, and debug scenarios | A separate benchmark engine could pass while production behavior regresses | Debug mode changes configuration/control only, never audio/network implementation |
-| 2026-07-13 | Use declarative scenario files plus an optional inherited reactive channel | Startup files are reproducible, while recovery tests need event-driven control | Static cases need no control service; reactive cases remain local, bounded, and opt-in |
-| 2026-07-13 | Keep secrets out of persisted scenarios and process arguments | Benchmark artifacts and process inspection must not disclose the Jam2 session key | Secrets use an inherited in-memory handoff and artifacts use non-secret run IDs |
+| 2026-07-13 | Use declarative scenario files plus an optional inherited reactive channel | Startup files are reproducible, while recovery tests need event-driven control | Deterministic cases use the real create/join coordinator; reactive cases remain local, bounded, and opt-in |
+| 2026-07-14 | Treat local session-key exposure as outside the application boundary | A compromised host can already observe the process and audio; local automation should remain simple and inspectable | Keys and invites may appear in arguments, scenarios, logs, clipboard contents, benchmark state, and artifacts while network authentication remains mandatory |
 | 2026-07-13 | Keep impairment and offline analysis in Python | They are test/cold-path responsibilities and benefit from rapid iteration | Production audio stays direct and small; proxy overhead remains measurable |
 | 2026-07-13 | Schedule timing-sensitive actions using engine frames/events | Python wall-clock sleeps add supervisory jitter and cannot prove exact application time | Engine reports requested/applied timing while Python handles failure timeouts only |
 
-## Recommended First Tooling Work
+## Remaining Tooling Context
 
-Do not begin by rewriting all scripts.
-
-1. Capture the current `listen/connect` and mesh artifact shapes and identify secret exposure.
-2. Define the v1 scenario, event, effective-configuration, and artifact-manifest schemas.
-3. Add non-secret run/attempt/peer identity to current artifacts.
-4. Make the native executable report effective profile/configuration so Python stops treating duplicated defaults as authoritative.
-5. Add the bounded frame-scheduler/test-source seams to the extracted engine when canonical Phase 2 begins.
-6. Implement the unified executable debug adapter in canonical Phase 6.
-7. Migrate one clean two-peer scenario end to end and compare it with the retained historical evidence.
-8. Migrate impairment and metronome scenarios.
-9. Generalize the runner/result model to three/four peers.
-10. Remove legacy scraping/control paths only after the migrated suites pass.
+- The debug scenario, event, effective-configuration, and artifact-manifest
+  schemas should cover the complete typed application surface rather than wrap
+  arbitrary argv.
+- Native profile/configuration reporting replaces duplicated Python defaults.
+- A native frame scheduler and deterministic test sources support timing cases
+  without Python sleep timing.
+- Local, impairment, metronome, lifecycle, two-/three-/four-peer, and
+  multi-machine workflows share one normalized result model.
+- Human-output scraping, newest-file discovery, legacy mode adapters, and the
+  runtime stdin command loop disappear once structured events and manifests
+  cover their useful information.

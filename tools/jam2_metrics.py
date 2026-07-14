@@ -59,6 +59,23 @@ def periodic_rows(rows):
     return [row for row in rows if row.get("row_type") == PERIODIC_ROW]
 
 
+def periodic_tail(periods, window_ms=5000.0):
+    if not periods:
+        return []
+    end_ms = to_float(periods[-1], "elapsed_ms")
+    start_ms = max(0.0, end_ms - window_ms)
+    tail = [row for row in periods if to_float(row, "elapsed_ms") >= start_ms]
+    if len(tail) < 2 and len(periods) >= 2:
+        return periods[-2:]
+    return tail
+
+
+def counter_growth(rows, field):
+    if len(rows) < 2:
+        return 0.0
+    return max(0.0, to_float(rows[-1], field) - to_float(rows[0], field))
+
+
 def summarize_csv(path):
     rows = read_rows(path)
     row = final_row(rows)
@@ -77,7 +94,15 @@ def summarize_csv(path):
         underrun_time_ms = to_float(row, "playback_ring_underruns") * 1000.0 / sample_rate_for_row(row)
 
     periodic_depths = [to_float(period, "playback_depth_avg_ms") for period in periods]
+    recovery_rows = periodic_tail(periods)
+    recovery_slots = [to_float(period, "mix_active_slots") for period in recovery_rows]
+    recovery_slot_ratios = [
+        to_float(period, "mix_active_slots") / max(1.0, to_float(period, "mix_max_slots"))
+        for period in recovery_rows
+    ]
+    adaptive_targets = [to_float(period, "adaptive_playback_target_frames") for period in periods]
     authority_rows = periods + [row]
+    observed_rows = periods + [row]
     authority_ids_seen = sorted({
         to_int(item, "grid_authority_peer_id")
         for item in authority_rows
@@ -96,6 +121,12 @@ def summarize_csv(path):
         "network_peer_count": int(to_float(row, "network_peer_count")),
         "network_active_peer_count": int(to_float(row, "network_active_peer_count")),
         "mix_contributing_peers": int(to_float(row, "mix_contributing_peers")),
+        "network_peer_count_observed_max": int(max(
+            (to_float(item, "network_peer_count") for item in observed_rows), default=0.0)),
+        "network_active_peer_count_observed_max": int(max(
+            (to_float(item, "network_active_peer_count") for item in observed_rows), default=0.0)),
+        "mix_contributing_peers_observed_max": int(max(
+            (to_float(item, "mix_contributing_peers") for item in observed_rows), default=0.0)),
         "mix_active_slots": to_float(row, "mix_active_slots"),
         "mix_max_slots": to_float(row, "mix_max_slots"),
         "mix_active_slots_high_water": to_float(row, "mix_active_slots_high_water"),
@@ -113,6 +144,15 @@ def summarize_csv(path):
         "mix_output_drop_request_events": to_float(row, "mix_output_drop_request_events"),
         "mix_output_dropped_frames": to_float(row, "mix_output_dropped_frames"),
         "mix_work_budget_yields": to_float(row, "mix_work_budget_yields"),
+        "recovery_window_ms": (
+            to_float(recovery_rows[-1], "elapsed_ms") - to_float(recovery_rows[0], "elapsed_ms")
+            if len(recovery_rows) >= 2 else 0.0),
+        "recovery_recv_packets_delta": counter_growth(recovery_rows, "recv_packets"),
+        "recovery_mix_capacity_drops_delta": counter_growth(recovery_rows, "mix_capacity_drops"),
+        "recovery_adaptive_padding_frames_delta": counter_growth(
+            recovery_rows, "adaptive_playback_padding_frames"),
+        "recovery_mix_active_slots_max": max(recovery_slots, default=0.0),
+        "recovery_mix_active_slots_ratio_max": max(recovery_slot_ratios, default=0.0),
         "bootstrap_coordinator_peer_id": to_int(row, "bootstrap_coordinator_peer_id"),
         "arrangement_authority_peer_id": to_int(row, "arrangement_authority_peer_id"),
         "grid_authority_peer_id": to_int(row, "grid_authority_peer_id"),
@@ -193,6 +233,15 @@ def summarize_csv(path):
         "adaptive_playback_raise_events": to_float(row, "adaptive_playback_raise_events"),
         "adaptive_playback_release_events": to_float(row, "adaptive_playback_release_events"),
         "adaptive_playback_burst_events": to_float(row, "adaptive_playback_burst_events"),
+        "adaptive_playback_padding_frames": to_float(row, "adaptive_playback_padding_frames"),
+        "adaptive_playback_target_frames": to_float(row, "adaptive_playback_target_frames"),
+        "adaptive_playback_min_frames": to_float(row, "adaptive_playback_min_frames"),
+        "adaptive_playback_max_frames": to_float(row, "adaptive_playback_max_frames"),
+        "adaptive_playback_target_observed_max": max(adaptive_targets, default=0.0),
+        "adaptive_playback_target_recovered_frames": max(
+            0.0,
+            max(adaptive_targets, default=0.0) -
+                (to_float(recovery_rows[-1], "adaptive_playback_target_frames") if recovery_rows else 0.0)),
         "audio_callbacks": to_float(row, "audio_callbacks"),
         "audio_callback_interval_min_ms": to_float(row, "audio_callback_interval_min_ms"),
         "audio_callback_interval_avg_ms": to_float(row, "audio_callback_interval_avg_ms"),
@@ -281,11 +330,12 @@ def combined_summary(server_csv, client_csv):
     combined = {
         "has_csv": True,
         "peer_identity_valid": (
-            server.get("local_peer_id") == 1
-            and server.get("remote_peer_id") == 2
+            server.get("local_peer_id", 0) > 0
+            and client.get("local_peer_id", 0) > 0
+            and server.get("local_peer_id") != client.get("local_peer_id")
+            and server.get("remote_peer_id") == client.get("local_peer_id")
             and server.get("bootstrap_role") == "creator"
-            and client.get("local_peer_id") == 2
-            and client.get("remote_peer_id") == 1
+            and client.get("remote_peer_id") == server.get("local_peer_id")
             and client.get("bootstrap_role") == "joiner"),
         "session_contract_valid": all(
             side.get("session_protocol_version") == 1
@@ -320,7 +370,24 @@ def combined_summary(server_csv, client_csv):
         "late_audio_frames_total": sum((side.get("late_audio_frames_dropped", 0.0) for side in sides), 0.0),
         "drift_abs_ppm_max": max((abs(side.get("drift_ppm", 0.0)) for side in sides), default=0.0),
         "adaptive_raise_events_total": sum((side.get("adaptive_playback_raise_events", 0.0) for side in sides), 0.0),
+        "adaptive_release_events_total": sum((side.get("adaptive_playback_release_events", 0.0) for side in sides), 0.0),
         "adaptive_burst_events_total": sum((side.get("adaptive_playback_burst_events", 0.0) for side in sides), 0.0),
+        "adaptive_target_observed_max": max(
+            (side.get("adaptive_playback_target_observed_max", 0.0) for side in sides), default=0.0),
+        "adaptive_target_recovered_frames_min": min(
+            (side.get("adaptive_playback_target_recovered_frames", 0.0) for side in sides), default=0.0),
+        "mix_capacity_drops_total": sum((side.get("mix_capacity_drops", 0.0) for side in sides), 0.0),
+        "recovery_window_ms_min": min((side.get("recovery_window_ms", 0.0) for side in sides), default=0.0),
+        "recovery_recv_packets_delta_min": min(
+            (side.get("recovery_recv_packets_delta", 0.0) for side in sides), default=0.0),
+        "recovery_mix_capacity_drops_delta_total": sum(
+            (side.get("recovery_mix_capacity_drops_delta", 0.0) for side in sides), 0.0),
+        "recovery_adaptive_padding_frames_delta_total": sum(
+            (side.get("recovery_adaptive_padding_frames_delta", 0.0) for side in sides), 0.0),
+        "recovery_mix_active_slots_max": max(
+            (side.get("recovery_mix_active_slots_max", 0.0) for side in sides), default=0.0),
+        "recovery_mix_active_slots_ratio_max": max(
+            (side.get("recovery_mix_active_slots_ratio_max", 0.0) for side in sides), default=0.0),
         "metronome_received_min": min((side.get("metronome_received", 0.0) for side in sides), default=0.0),
         "grid_authority_consensus": (
             len({side.get("grid_authority_peer_id", 0) for side in sides}) == 1
@@ -450,7 +517,17 @@ def write_results_csv(path, results):
         "late_audio_frames_total",
         "drift_abs_ppm_max",
         "adaptive_raise_events_total",
+        "adaptive_release_events_total",
         "adaptive_burst_events_total",
+        "adaptive_target_observed_max",
+        "adaptive_target_recovered_frames_min",
+        "mix_capacity_drops_total",
+        "recovery_window_ms_min",
+        "recovery_recv_packets_delta_min",
+        "recovery_mix_capacity_drops_delta_total",
+        "recovery_adaptive_padding_frames_delta_total",
+        "recovery_mix_active_slots_max",
+        "recovery_mix_active_slots_ratio_max",
         "metronome_received_min",
         "metronome_epoch_sample_time_min",
         "local_metronome_beat_max",

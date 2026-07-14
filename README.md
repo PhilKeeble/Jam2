@@ -8,7 +8,7 @@ Jam2 is a small direct peer-to-peer music jamming tool for two people. It pairs 
 
 1. Download the latest Jam2 release from the GitHub Releases page for this repository.
 2. Extract the release zip.
-3. Run `jam2-gui` from the extracted folder.
+3. Run `jam2.exe` on Windows (or `Jam2.app` on macOS). Running `jam2` with no arguments opens the GUI.
 4. On the host machine, open **Start Jam**, choose the local audio device and tuning profile, then start listening.
 5. Send the generated `jam2://...` connection string to the other player.
 6. On the joining machine, open **Join Jam**, paste the connection string, choose the local audio device and the channels you want to use for input and output, then connect.
@@ -20,7 +20,7 @@ For LAN testing, use **No STUN** and a reachable LAN host/IP. For internet testi
 | Document | Contents |
 | --- | --- |
 | [Building](docs/Building.md) | Host-native CMake build instructions for Windows and macOS. |
-| [GUI](docs/Gui.md) | How to use `jam2-gui` to start, join, tune, share songs, and share tracks. |
+| [GUI](docs/Gui.md) | How to use the unified `jam2` application to start, join, tune, share songs, and share tracks. |
 | [Engine](docs/Engine.md) | `jam2` CLI commands, runtime commands, audio/network tuning flags, and stats logging. |
 | [Mesh](docs/Mesh.md) | Experimental direct full-mesh audio usage, GUI launch flow, peer-list behavior, and scaling considerations. |
 | [Metronome](docs/Metronome.md) | Metronome modes, timing behavior, levels, and when to compare modes. |

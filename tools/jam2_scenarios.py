@@ -90,6 +90,14 @@ def scenario_catalog(base_profile=FAST_PROFILE):
             "impairment": ProxyImpairment.both(DirectionImpairment(burst_pause_ms=1500.0, burst_every_ms=10000.0)),
             "expect": "long stalls should cause obvious underruns but recover afterwards",
         },
+        "transient-stall-recovery": {
+            "profile": base_profile,
+            "impairment": ProxyImpairment.both(DirectionImpairment(
+                burst_pause_ms=120.0,
+                burst_every_ms=8000.0,
+                burst_limit=1)),
+            "expect": "one bidirectional 120 ms stall should raise the cushion, then drain queued audio and resume steady mixing",
+        },
         "loss-0.1": {
             "profile": base_profile,
             "impairment": ProxyImpairment.both(DirectionImpairment(loss_percent=0.1)),
@@ -385,6 +393,7 @@ def standard_suite():
         "burst-pause-250",
         "burst-pause-500",
         "burst-pause-1500",
+        "transient-stall-recovery",
         "loss-0.1",
         "loss-0.5",
         "loss-1.0",
@@ -603,6 +612,20 @@ def mesh_scenario_catalog(base_profile, counts):
         for count in counts
     }
     for count in counts:
+        clock_drifts = [
+            round(-200 + (400 * index / (count - 1)))
+            for index in range(count)
+        ]
+        scenarios[f"mesh-{count}-independent-drift"] = {
+            "profile": base_profile,
+            "mesh_peers": count,
+            "signal": "tone-440",
+            "headless_clock_drift_ppm": clock_drifts,
+            "expect": (
+                f"all {count} peers should remain active while independent synthetic device "
+                f"clocks exercise per-peer drift measurement and resampling"
+            ),
+        }
         scenarios[f"mesh-{count}-authority-peer2"] = {
             "profile": base_profile,
             "mesh_peers": count,
@@ -614,6 +637,20 @@ def mesh_scenario_catalog(base_profile, counts):
             "expect": f"peer2 should become the ordered leader-audio grid authority across all {count} mesh peers",
         }
         if count >= 3:
+            scenarios[f"mesh-{count}-edge-jitter"] = {
+                "profile": base_profile,
+                "mesh_peers": count,
+                "signal": "tone-440",
+                "edge_impairments": [{
+                    "peer_a": 1,
+                    "peer_b": 2,
+                    "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=20.0)),
+                }],
+                "expect": (
+                    f"only the peer1/peer2 edge should traverse a jitter proxy while all {count} "
+                    f"stable peer identities and direct mesh edges remain active"
+                ),
+            }
             authority_peer = f"peer{count}"
             scenarios[f"mesh-{count}-authority-last"] = {
                 "profile": base_profile,

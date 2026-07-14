@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jam2-debug-scenario-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "run_id", "operation", "arguments"],
+  "properties": {
+    "schema": {"const": "jam2-debug-scenario-v1"},
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "operation": {
+      "enum": ["local", "lifecycle.local-network-local", "validate.boundaries", "network.create", "network.join"]
+    },
+    "arguments": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {"type": "string", "minLength": 1, "maxLength": 4096}
+    }
+  }
+}

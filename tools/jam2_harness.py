@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 
 import json
+import os
+import shutil
 import subprocess
 import threading
 import time
 from pathlib import Path
 
-from jam2_tooling import copy_final_csv, ensure_dir, redact_cli_args, redact_text, repo_root
+from jam2_tooling import ensure_dir, redact_cli_args, redact_text, repo_root
 
 
 def parse_endpoint(value):
@@ -34,7 +36,7 @@ def rewrite_jam_url_endpoint(url, endpoint):
 
 
 class ManagedProcess:
-    def __init__(self, args, cwd, stdout_path, stderr_path, stdin_pipe=False):
+    def __init__(self, args, cwd, stdout_path, stderr_path, stdin_pipe=False, env=None):
         self.args = [str(arg) for arg in args]
         self.cwd = str(cwd)
         self.stdout_path = Path(stdout_path)
@@ -47,6 +49,8 @@ class ManagedProcess:
         self._thread = None
         self._stderr_thread = None
         self._stdin_pipe = stdin_pipe
+        self._env = dict(env or {})
+        self._stats_csv = None
 
     def start(self):
         self.stdout_path.parent.mkdir(parents=True, exist_ok=True)
@@ -63,6 +67,7 @@ class ManagedProcess:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            env={**os.environ, **self._env},
         )
         self._thread = threading.Thread(target=self._read_stdout, daemon=True)
         self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
@@ -72,6 +77,10 @@ class ManagedProcess:
 
     def artifact_args(self):
         return redact_cli_args(self.args)
+
+    def stats_csv_path(self):
+        with self._lock:
+            return Path(self._stats_csv) if self._stats_csv else None
 
     def wait(self, timeout=None):
         if self.process is None:
@@ -141,8 +150,11 @@ class ManagedProcess:
             for line in self.process.stdout:
                 self._stdout_handle.write(redact_text(line))
                 self._stdout_handle.flush()
+                raw = line.rstrip("\r\n")
                 with self._lock:
-                    self._lines.append(line.rstrip("\r\n"))
+                    self._lines.append(raw)
+                    if raw.startswith("Stats CSV: "):
+                        self._stats_csv = raw[len("Stats CSV: "):].strip()
         finally:
             if self.process.stdout:
                 self.process.stdout.close()
@@ -196,11 +208,11 @@ def side_paths(base_dir, side):
     }
 
 
-def start_listener(jam2, audio_device, sample_rate, profile, stream_ms, output_dir, extra_args=None, stdin_pipe=False, bind="127.0.0.1:0", wait_ms=None):
+def start_listener(jam2, audio_device, sample_rate, profile, stream_ms, output_dir, extra_args=None, stdin_pipe=False, bind="127.0.0.1:0", wait_ms=None, env=None):
     paths = side_paths(output_dir, "server")
     args = [
         jam2,
-        "listen",
+        "network", "create",
         "--bind", bind,
         "--no-stun",
         "--sample-rate", str(sample_rate),
@@ -215,26 +227,33 @@ def start_listener(jam2, audio_device, sample_rate, profile, stream_ms, output_d
     args.extend(profile.args(stream_ms))
     if extra_args:
         args.extend(extra_args)
-    return ManagedProcess(args, repo_root(), paths["stdout"], paths["stderr"], stdin_pipe=stdin_pipe).start(), paths
+    return ManagedProcess(args, repo_root(), paths["stdout"], paths["stderr"], stdin_pipe=stdin_pipe, env=env).start(), paths
 
 
-def start_connector(jam2, url, audio_device, sample_rate, profile, stream_ms, output_dir, extra_args=None, stdin_pipe=False):
+def start_connector(jam2, url, audio_device, sample_rate, profile, stream_ms, output_dir, extra_args=None, stdin_pipe=False, bind=None, env=None):
     paths = side_paths(output_dir, "client")
     args = [
         jam2,
-        "connect",
+        "network", "join",
         url,
         "--wait-ms", str(max(15000, stream_ms + 15000)),
         "--sample-rate", str(sample_rate),
         "--log-stats", str(paths["csv_raw"]),
     ]
+    if bind is not None:
+        args.extend(["--bind", bind])
     if audio_device is not None:
         args.extend(["--audio-device", str(audio_device)])
     args.extend(profile.args(stream_ms))
     if extra_args:
         args.extend(extra_args)
-    return ManagedProcess(args, repo_root(), paths["stdout"], paths["stderr"], stdin_pipe=stdin_pipe).start(), paths
+    return ManagedProcess(args, repo_root(), paths["stdout"], paths["stderr"], stdin_pipe=stdin_pipe, env=env).start(), paths
 
 
-def collect_side_csv(paths):
-    return copy_final_csv(paths["csv_raw"], paths["dir"])
+def collect_side_csv(paths, process):
+    source = process.stats_csv_path()
+    if source is None or not source.is_file():
+        return None
+    target = Path(paths["dir"]) / "stats.csv"
+    shutil.copy2(source, target)
+    return target

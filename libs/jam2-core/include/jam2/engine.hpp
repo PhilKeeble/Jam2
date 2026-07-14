@@ -57,6 +57,7 @@ struct EngineConfig {
     int audio_device_id = -1;
     int sample_rate = 48000;
     long audio_buffer_frames = 0;
+    int headless_clock_drift_ppm = 0;
     audio::InputChannels input_channels = audio::InputChannels::Mono;
     audio::ChannelSelection channels;
     std::size_t capture_ring_frames = 4096;

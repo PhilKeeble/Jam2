@@ -4,9 +4,18 @@
 
 This report reviews Jam2's network-exposed control, UDP audio, project, asset-transfer, and WAV-processing paths as they exist near the v1 functionality target. It records the risks found, the smallest useful mitigations, their expected cost, and where they belong in the broader refactor.
 
-The goal is not to turn Jam2 into a hosted platform. The target remains a small, direct, short-lived session between controlled peers, with two people as the primary case and three/four-person direct mesh as the supported extension.
+The goal is not to turn Jam2 into a hosted platform. The target remains a
+small, direct, short-lived session between controlled peers, with two people as
+the primary case and three/four-person direct mesh as the expected extension.
+Larger meshes remain experimental and have no application-wide peer cap; a jam
+creator may optionally configure a limit for that session.
 
 No code was changed and no fuzzing, sanitizer run, build, or live penetration test was performed for this review. The findings are from static source inspection. No confirmed remote-code-execution path was found, but static inspection alone cannot prove that malformed network data or WAV input is memory-safe.
+
+The detailed findings describe the original review baseline. They remain as
+threat and design context, not as current implementation status or a separate
+phase/gate system. Current status and remaining work live only in
+[refactor-plan.md](refactor-plan.md).
 
 ## Governing Constraints
 
@@ -17,7 +26,8 @@ The security work must preserve the repository's product rules:
 - Keep fixed, bounded, inspectable protocol shapes.
 - Prefer a small local implementation over a dependency unless the dependency removes substantial correctness risk.
 - Expose hard counters for rejected traffic, capacity, timeouts, replay, and endpoint state.
-- Measure packet-loop and callback timing before accepting fast-path changes.
+- Inspect packet-loop and callback timing when a fast-path change could affect
+  them; measurements are engineering evidence rather than hard acceptance gates.
 
 Security is treated here primarily as containment:
 
@@ -44,6 +54,9 @@ Security is treated here primarily as containment:
 - The application does not attempt account-level identity, revocation, bans, or persistence across sessions.
 - The application does not attempt traffic-flow privacy or anonymity.
 - Direct connectivity remains mandatory; restrictive NAT failure is reported rather than relayed.
+- Local command lines, logs, clipboard contents, scenarios, benchmark state,
+  and artifacts are outside the application threat boundary and may contain
+  session keys or invite URLs.
 
 The short socket-exposure window reduces likelihood, but it is not a reliable control by itself. Automated scans can hit a newly opened port immediately, and the same limits are valuable against accidental bugs from trusted peers.
 
@@ -97,7 +110,10 @@ Lightweight correction:
 - Use a four-byte network-order length prefix for handshake frames and a small fixed authenticated header after the handshake.
 - Reject a length above the declared maximum before reserving or appending payload storage.
 - Keep a fixed receive state per connection: header bytes received, declared payload length, payload bytes received, and deadline.
-- Add a small unauthenticated-connection cap, authenticated cap, authentication deadline, incomplete-frame deadline, and output high-water mark.
+- Add a small pending-unauthenticated cap, bounded failed-key work,
+  authentication deadline, incomplete-frame deadline, and output high-water
+  mark. An optional creator-selected session peer limit is enforced after valid
+  authentication; there is no application-wide authenticated-peer cap.
 - Limit frames processed per event-loop turn and resume later so one peer cannot monopolize the GUI/control thread.
 - Close the offending connection and increment a reason-specific counter when a hard limit is violated.
 
@@ -112,7 +128,10 @@ Suggested starting limits, to be named constants and validated against real proj
 | Per-peer queued output high-water | 256 KiB | Four maximum frames; close a peer that cannot consume control state |
 | Frames handled per event-loop turn | 32 | Bounds monopolization while allowing normal bursts |
 
-The authenticated-peer limit must be the configured session capacity subject to a hard safety maximum; the GUI peer cap alone must not be the only enforcement point.
+When the creator configures a session peer limit, enforce it in the shared
+session controller rather than only in GUI presentation. Without that setting,
+authenticated membership is limited by actual machine resources while every
+connection and per-peer state remains independently bounded.
 
 If a measured valid song/project snapshot exceeds the ordinary control-message maximum, give that message family a separate bounded chunked transfer/state machine. Do not raise the limit for every control message merely to accommodate one large payload.
 
@@ -228,7 +247,10 @@ Lightweight correction:
 - Check JSON type before conversion; do not rely on permissive default conversion.
 - Require integers where integers are intended and range-check before narrowing.
 - Reject NaN/infinity and bound every floating-point control.
-- Define maximum counts for sections, beats per section, lanes, events, peer-list entries, requested hashes, and concurrent transfers.
+- Define maximum counts for sections, beats per section, lanes, events,
+  requested hashes, and concurrent transfers. Bound peer-list entries per
+  control frame/page and validate each entry, but page membership rather than
+  imposing an application-wide total peer limit.
 - Define maximum UTF-8/UTF-16 lengths for IDs, names, chord cells, beat cells, lyrics, error strings, and paths.
 - Use checked addition/multiplication for frame, byte, sample, and allocation calculations.
 - Require monotonic/versioned state where stale data must not overwrite current state.
@@ -379,22 +401,27 @@ For the stated controlled-peer v1 use case:
 
 Pairwise UDP keys would require at least per-destination final authentication even when audio payload encoding is shared. The raw cryptographic CPU would still be small at Jam2's bitrate, but negotiation, identity, recovery, testing, and fan-out complexity are not justified for this v1 balance.
 
-### 12. Secret generation and exposure should be narrowed
+### 12. Session secrets require strong generation, not local redaction
 
 Relevant sources:
 
 - [libs/jam2-core/src/common.cpp](libs/jam2-core/src/common.cpp)
 - CLI/GUI process-launch and benchmark metadata paths
 
-Session IDs and keys are currently produced through `std::random_device`, whose cryptographic quality is implementation-defined. The master key also appears in the invite URL and, in the current two-binary flow, can appear in child-process arguments, logs/tool output, clipboard history, and benchmark metadata.
+Session IDs and keys must come from a cryptographically strong operating-system
+source. The master key necessarily appears in the invite URL and may also appear
+in local process arguments, logs/tool output, clipboard history, scenarios, and
+benchmark metadata. Those local surfaces are explicitly outside the
+application threat boundary.
 
 Lightweight correction:
 
 - Add one Qt-free `secure_random_bytes(span)` wrapper backed by the operating-system CSPRNG on Windows and macOS, with explicit failure reporting.
 - Generate session keys, nonces, peer bootstrap tokens, and challenge values only through that wrapper.
-- Keep the invite key because manual sharing requires it, but do not print it in routine logs or store it in benchmark results.
-- Redact keys from diagnostics and crash/error text. Store a non-secret session/run identifier instead.
-- Eliminate child-process argument exposure when the single-binary integration removes the process boundary.
+- Keep invite creation, joining, diagnostics, and automation simple and
+  inspectable; local keys do not require redaction.
+- Continue to avoid transmitting the raw master key in the network control
+  handshake; use challenge-response and derived protocol keys.
 - Do not attempt elaborate in-memory secret wiping through copied Qt strings for v1; reduce unnecessary copies/lifetimes instead.
 
 OS random generation happens only at session/handshake time and has no measurable audio cost.
@@ -415,10 +442,13 @@ Cost: none.
 
 The following set gives the best risk reduction without materially increasing audio/network cost.
 
-### Required before relying on the refactored v1 network path
+### Target controls for the refactored v1 network path
 
 1. Fixed length-prefixed control framing with a hard payload maximum.
-2. Small hard limits for pending/authenticated connections, per-peer buffers, output queues, frames per event turn, and handshake/incomplete-frame time.
+2. Small hard limits for pending unauthenticated connections, failed-key work,
+   per-peer buffers, output queues, frames per event turn, and
+   handshake/incomplete-frame time; enforce an optional creator-selected
+   session peer limit without an application-wide authenticated-peer cap.
 3. Strict pre-authentication state machines on both client and server.
 4. Mutual challenge-response without transmitting the raw master key, followed by sequenced authenticated control frames.
 5. Authenticated source identity and an explicit per-message authorization matrix.
@@ -428,7 +458,7 @@ The following set gives the best risk reduction without materially increasing au
 9. A narrow, strictly validated PCM16 WAV parser running on a bounded worker, plus fuzz/sanitizer coverage.
 10. Exact UDP type/flag/payload validation, allocation-free authentication, replay windows, wrap-safe sequences, sample-time horizons, bounded gap handling, and per-wake work budgets.
 11. Authenticated UDP endpoint proof before audio activation.
-12. OS-backed secret/nonces plus domain-separated control/UDP key derivation and key redaction.
+12. OS-backed secrets/nonces plus domain-separated control/UDP key derivation.
 
 ### Explicitly deferred unless the threat model changes
 
@@ -507,22 +537,13 @@ Prefer small components with no GUI model mutation inside them:
 
 Each ordinary malformed-input path should return a small result enum. Exceptions remain appropriate at top-level file/socket/worker boundaries for exceptional system failures, not for normal unauthenticated traffic.
 
-## Refactor Phase Placement
+## Relationship to the Authoritative Plan
 
-The dependency-ordered worker tasks are integrated into [refactor-plan.md](refactor-plan.md). The intended placement is:
+This review supplies threat context, target properties, and useful adversarial
+scenarios. It does not assign phases, gates, or completion state. Those are
+maintained only in [refactor-plan.md](refactor-plan.md).
 
-| Refactor phase | Security work |
-| --- | --- |
-| Phase 1 | TCP caps/framing/mutual proof/frame MAC, authorization, model limits, asset streaming and local paths, strict WAV handling on bounded workers, UDP parse/replay/horizon/work bounds, endpoint proof, OS secrets, and socket RAII correction |
-| Phase 2 | Preserve the corrected bounded control, file-worker, command, and top-level exception boundaries while extracting `Engine` |
-| Phase 3 | Carry replay, horizon, gap, ping-correlation, stable identity, and symmetric authenticated edge state into the mature one-peer `PeerStream` |
-| Phase 4 | Apply candidate-only membership, observed-source proof, active-edge gating, replay, and fixed per-peer storage to every direct mesh edge |
-| Phase 5 | Enforce authority-source authorization and monotonic grid/transport revisions |
-| Phase 6 | Integrate the hardened paths in one executable and remove child-argument key exposure without moving security work into the callback |
-| Phase 7 | Exercise the final paths through Python adversarial scenarios, then remove obsolete unauthenticated/unbounded compatibility behavior and stale secret logging |
-| Phase 8 | Consider raw asset chunks, UDP version/header changes, or encryption only as separate measured experiments |
-
-## Security Validation Matrix
+## Useful Security Scenarios
 
 ### TCP framing and admission
 
@@ -530,7 +551,8 @@ The dependency-ordered worker tasks are integrated into [refactor-plan.md](refac
 - Deliver multiple frames in one read.
 - Declare zero, exact maximum, and maximum-plus-one payload lengths.
 - Omit payload completion until the deadline.
-- Open more pending/authenticated connections than allowed.
+- Open more pending unauthenticated connections than allowed, repeat invalid
+  keys, and exceed a configured optional session peer limit.
 - Fill a peer's output queue beyond the high-water mark.
 - Verify current/peak connection, buffer, queue, timeout, and rejection counters.
 - Verify memory and file-descriptor use remain bounded.
@@ -570,33 +592,39 @@ The dependency-ordered worker tasks are integrated into [refactor-plan.md](refac
 - Advertise a third-party endpoint; only bounded probes may be sent and audio must remain disabled.
 - Change observed endpoint; edge returns to probing before audio resumes.
 
-### Secret handling and release overhead
+### Random generation and release overhead
 
-- Verify routine logs, benchmark metadata, CSV, child arguments, and errors do not contain the master key.
 - Verify CSPRNG failure produces a clear session-creation failure rather than a weak fallback.
 - Record packet-loop CPU, allocations, copied bytes, send gaps, callback gaps, and UDP rejection counters before/after.
 - Record normal control join time, frame overhead, asset peak memory, and transfer bytes.
 - Run fuzzers/sanitizers only in test configurations; release builds contain no sanitizer cost.
 
-## Acceptance Criteria
+## Target Security Properties
 
-The lightweight security refactor is acceptable when:
-
-- No unauthenticated or authenticated remote input can grow packet, control, model, asset, mix, or disk state without a declared hard bound.
+- Unauthenticated traffic has aggregate admission/work limits, and each
+  authenticated peer cannot grow packet, control, model, asset, mix, or disk
+  state without declared per-peer bounds.
 - The client cannot dispatch application data before authenticating the server/session.
 - Every control mutation has an authenticated source and explicit authorization rule.
-- The master key is not transmitted directly in the control hello or written to routine artifacts.
+- The master key is not transmitted directly in the network control hello;
+  local arguments, logs, clipboard contents, scenarios, and artifacts may
+  contain it.
 - Remote project state cannot select an arbitrary local path.
 - Transferred assets are requested, streamed, incrementally verified, strictly parsed, and atomically committed.
 - Invalid UDP input uses fixed work/storage; replay, gap, timestamp, ping, and endpoint state are bounded and measured.
 - No audio is sent to an endpoint that has not proved the authenticated observed UDP source.
 - No security control enters or blocks the real-time callback.
-- Two-person packet/callback timing and audio bandwidth show no material regression in raw before/after results.
-- Three/four-person tests show fixed per-peer state and predictable linear packet-validation cost.
+- Raw two-person and three/four-person packet/callback measurements remain
+  useful evidence when investigating security-related timing changes.
 - The documentation states that v1 traffic is not encrypted and that invited peers share the session trust boundary.
 
 ## Final Recommendation
 
-Implement the bounds and state-machine corrections before engine extraction, then carry them into the typed control, `PeerStream`, and `NetworkSession` boundaries rather than adding a separate security subsystem later. The highest-value controls are limits, source-aware authorization, streaming file handling, replay/timeline bounds, and endpoint proof. They prevent both deliberate abuse and ordinary peer bugs while adding effectively no steady audio latency or bandwidth.
+Keep the bounds and state-machine corrections in shared typed control,
+`PeerStream`, `NetworkSession`, and session-controller boundaries rather than
+adding a separate security subsystem. The highest-value controls are limits,
+source-aware authorization, streaming file handling, replay/timeline bounds,
+and endpoint proof. They prevent both deliberate abuse and ordinary peer bugs
+while adding effectively no steady audio latency or bandwidth.
 
 Do not add TLS, accounts, relay infrastructure, or encrypted UDP as part of this v1 refactor. Revisit confidentiality and malicious-invited-peer isolation only if Jam2's deployment model expands beyond short direct sessions among controlled users.

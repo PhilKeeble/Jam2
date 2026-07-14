@@ -1,12 +1,12 @@
 # Jam2 GUI
 
-`jam2-gui` is the normal way to run Jam2. It controls a local `jam2` audio engine process, shows live stats, and opens a TCP control connection to the other GUI for shared settings, song grid edits, and looper arrangement sync. Audio still travels directly between the two `jam2` engine processes over UDP.
+Running `jam2` with no arguments is the normal way to use Jam2. The GUI and persistent local audio engine live in one application process; starting, joining, leaving, and changing peer membership attach or detach the direct UDP session without reopening an unchanged audio device. The authenticated TCP control connection between GUIs carries shared settings, song grid edits, and looper arrangement sync. Audio travels directly between peers over UDP.
 
 ## Start A Jam
 
 On the host machine:
 
-1. Open `jam2-gui`.
+1. Open `jam2`.
 2. In **Start Jam**, choose the bind host and UDP port. `0.0.0.0:49000` is the usual starting point.
 3. Leave STUN enabled for internet testing, or enable **No STUN** for manual/LAN testing.
 4. Choose the local audio device and input/output channels.
@@ -19,7 +19,7 @@ Use the same profile, sample rate, and frame size on both machines. Each player 
 
 On the joining machine:
 
-1. Open `jam2-gui`.
+1. Open `jam2`.
 2. Paste the `jam2://...` URL into **Join Jam**.
 3. Choose the local audio device and channels.
 4. The sample rate, tuning profile, and detailed engine settings are received from the host before the local engine starts.
@@ -38,7 +38,7 @@ The GUI exposes the useful live controls from the engine:
 - Adjust local remote playback level or mute the remote peer.
 - Enable stats and CSV logging while testing.
 
-These controls affect the local engine through stdin runtime commands.
+These controls use the in-process typed binary engine bridge; they do not use a child process, stdin, loopback control socket, or JSONL state reconstruction.
 
 ## Stats
 
@@ -64,7 +64,7 @@ The Track tab can:
 
 - Manage four looper banks.
 - Add PCM16 WAV lanes to the active bank.
-- Add empty lanes and arm a lane for recording. Perform input takes are recorded by the running engine over the local GUI-control socket; loopback takes are recorded by the GUI.
+- Add empty lanes and arm a lane for recording. Perform input takes are recorded by the persistent engine through the in-process control bridge; loopback takes are recorded by the GUI.
 - Use a stacked lane editor with inline mute, solo, record-arm, gain, rename, remove, drag, and edge-crop controls.
 - Render the active bank to a prepared mono PCM16 cache.
 - In Perform mode, load that prepared cache into the engine and control play/stop/level there.

@@ -99,6 +99,7 @@ struct StreamControl {
     std::atomic<std::uint64_t> network_capture_epoch_frame{0};
     std::atomic<std::uint64_t> network_capture_stale_frames_discarded{0};
     std::atomic<bool> network_playback_enabled{false};
+    std::atomic<bool> network_playback_enabled_applied{false};
     std::atomic<std::uint32_t> input_latency_frames{0};
     std::atomic<std::uint32_t> output_latency_frames{0};
     std::atomic<std::int64_t> recording_latency_adjustment_frames{0};

@@ -12,7 +12,13 @@ This report reviews Jam2 as it approaches a v1-style release. It covers:
 - Stale or duplicated flows left by earlier development stages.
 - The relationship between stabilization, efficiency work, and consolidating the two shipped applications.
 
-This was a static source review. No compilation, runtime profiling, or audio-device testing was performed. Quantified gains below are arithmetic estimates from the current packet shapes and tuning profiles, not benchmark results. They should be verified with Jam2's raw statistics and benchmark tooling before accepting an optimization.
+This was a static source review. No compilation, runtime profiling, or
+audio-device testing was performed. Quantified gains below are arithmetic
+estimates from the original packet shapes and tuning profiles, not benchmark
+results. Compare them with Jam2's raw statistics and retained benchmark tooling
+when useful; they are not hard completion gates. Sections describing current
+code paths record that original audit baseline, while implementation status and
+order live only in [refactor-plan.md](refactor-plan.md).
 
 ## Executive Assessment
 
@@ -137,7 +143,9 @@ Mesh mixing currently uses an ordered map keyed only by sample time, with a dyna
 Recommended correction:
 
 - Use a fixed number of mix slots indexed by normalized playout time or a coordinator-defined stream epoch.
-- Store a peer-contribution bitset/generation with each slot.
+- Store membership-generation contribution metadata with each slot. Size or
+  replace that metadata only when membership changes outside packet processing;
+  do not impose a compile-time peer-count ceiling.
 - Reject packets behind the released cursor.
 - Reject or clamp packets beyond a configured future horizon.
 - Release at a deadline even when peers are missing, recording the missing contributor count.
@@ -162,7 +170,9 @@ The remote control client/server append incoming TCP data until a newline is obs
 Recommended v1 bounds:
 
 - Maximum JSON line length and total undecoded receive buffer.
-- Maximum authenticated peers and pending connections.
+- Maximum pending unauthenticated connections and failed-authentication work.
+- Optional creator-selected session peer limit, with no application-wide
+  authenticated-peer maximum.
 - Maximum project message size.
 - Maximum asset bytes, chunk bytes, and chunk count.
 - Exactly 64 hexadecimal characters for SHA-256 identifiers.
@@ -172,16 +182,21 @@ Recommended v1 bounds:
 - Stream asset chunks to a temporary file while updating SHA-256 incrementally; atomically publish the file only after length and hash validation.
 - Apply TCP backpressure instead of queueing an entire large asset through repeated socket writes at once.
 
-### 5. Mesh peer-cap enforcement
+### 5. Session admission limits
 
-When the configured mesh cap is exceeded, the current host reports an error but can leave the rejected connection authenticated. A rejected peer should not continue receiving peer lists, songs, or assets.
+When a creator configures a session peer limit, a valid join above that limit
+must be rejected cleanly and must not continue receiving peer lists, songs, or
+assets. Without that option, the application does not impose an authenticated
+mesh size cap. Pending unauthenticated connections and repeated invalid-key work
+remain independently bounded to avoid resource exhaustion.
 
 Recommended correction:
 
 - Address the error to the offending connection rather than broadcasting it.
 - Close that connection after the error frame is flushed.
 - Do not add it to authenticated membership or include it in broadcasts.
-- Count cap rejections and current authenticated/control peers.
+- Count configured-session-limit rejections, pending-authentication rejections,
+  authentication failures, and current authenticated/control peers.
 
 ### 6. UDP validation and observability
 
@@ -579,8 +594,12 @@ Device listing, probing, metering, local/headless audio, and benchmark modes sho
 The selected target is one public executable named `jam2`:
 
 - `jam2` with no subcommand launches the GUI.
-- `jam2 list-devices`, device probes/meters, `local`, `listen`, `connect`, and `mesh` remain supported CLI/headless entry points.
-- Benchmark and stress tooling continues to invoke those subcommands.
+- `jam2 list-devices`, device probes/meters, `local`, `network create`,
+  `network join`, and explicit debug/diagnostic commands remain supported
+  CLI/headless entry points.
+- `listen`, `connect`, `mesh`, and public static-membership commands are removed
+  without compatibility aliases; every network session uses universal mesh.
+- Benchmark and stress tooling uses the unified public/debug surface.
 - The GUI calls the engine API directly rather than launching its own executable.
 - On Windows, CLI mode attaches to the invoking terminal while normal GUI launch remains console-free.
 - On macOS, document the callable executable inside the application bundle for headless use.
@@ -603,7 +622,11 @@ EngineCommand
     fixed/bounded runtime operations, including peer add/remove/update
 
 EngineSnapshot
-    fixed-shape lifecycle, audio, timing, queue, recording, and peer data
+    fixed-shape lifecycle, audio, timing, queue, and recording data
+
+PeerSnapshot page/event stream
+    bounded per-call peer data published outside real-time work; no global
+    peer-count ceiling
 
 EngineEvent
     bounded errors, lifecycle changes, peer changes, transport, and recording completion
@@ -611,20 +634,24 @@ EngineEvent
 
 Qt objects, JSON objects, dialogs, filesystem work, and callbacks into widgets should not enter the engine or real-time layer.
 
-The earlier binary-specific review is preserved in [refactor-binaries.md](refactor-binaries.md). Where it proposes a development-only CLI executable, this report records the later decision to keep CLI/headless operation publicly available in the unified `jam2` executable.
+The binary-specific review is preserved in
+[refactor-binaries.md](refactor-binaries.md). Both documents use the selected
+one-public-executable design: the GUI is primary and CLI/headless/debug
+operation remains available in `jam2`.
 
-## Audit Work Groups
+## Technical Design Areas
 
-These groups preserve the audit's technical reasoning. Their old local phase
-numbers have been removed; [refactor-plan.md](refactor-plan.md) is authoritative
-for dependency order, and validation is not a hard gate between groups.
+These groups preserve the audit's technical reasoning. They do not define
+implementation order, status, or completion gates; those live only in
+[refactor-plan.md](refactor-plan.md).
 
 ### Current-model correctness and bounds
 
 1. Correct playback-ring ownership.
 2. Make sequence handling wrap-safe.
 3. Bound and validate remote control and asset traffic.
-4. Enforce mesh peer rejection at the connection level.
+4. Bound pending authentication and enforce an optional creator-selected
+   session limit at admission.
 5. Make mesh mixing bounded, peer-aware, and deterministic.
 6. Add precise rejection/drop counters.
 
@@ -646,14 +673,15 @@ Do not mix these fixes with a packet-header change.
 5. Replace ordered packet maps with bounded indexed storage.
 6. Replace double waiting with deadline-aware polling.
 7. Bulk-copy ring spans after the ownership correction.
-8. Compare every change against the captured baselines.
+8. Compare material changes with retained historical evidence when useful.
 
 ### Engine and peer-path extraction
 
 1. Move shared configuration and validation behind typed structures.
 2. Extract normal and mesh network behavior into reusable engine components.
 3. Preserve audio, scheduling, metronome, transport, recording, priority, and stats semantics.
-4. Keep existing CLI modes operating over the extracted engine.
+4. Keep the unified public headless and debug commands operating over the
+   extracted engine.
 5. Add dynamic mesh membership without restarting the audio device.
 
 ### Unified application
@@ -672,7 +700,7 @@ Do not mix these fixes with a packet-header change.
 3. Consider binary peer-control messages selectively, especially raw asset chunks.
 4. Do not combine these experiments with engine extraction or consolidation.
 
-## Test and Acceptance Matrix
+## Useful Validation Scenarios
 
 ### Protocol
 
@@ -705,7 +733,8 @@ Do not mix these fixes with a packet-header change.
 
 - TCP fragmentation and multiple frames in one read.
 - Missing newline and oversized line.
-- Authentication failure and peer-cap rejection.
+- Authentication failure, pending-authentication rejection, and configured
+  session-limit rejection.
 - Excessive declared asset size.
 - Invalid hash, wrong chunk order, duplicate chunk, excess decoded bytes, timeout, disconnect, and disk-write failure.
 - Successful streaming transfer without retaining the complete base64 and decoded asset in memory.
@@ -719,9 +748,10 @@ Do not mix these fixes with a packet-header change.
 - Metronome and transport remain engine-sample-time authoritative.
 - Existing Python stress and two-host benchmark workflows remain usable.
 
-## Measurement and Acceptance Criteria
+## Measurements Worth Retaining
 
-Every fast-path optimization should report before/after results for:
+When useful for diagnosing a material fast-path change, retain before/after
+results for:
 
 - Allocations per audio packet and allocations/sec.
 - Bytes copied per packet.
@@ -736,47 +766,27 @@ Every fast-path optimization should report before/after results for:
 - Fixed storage occupancy, high-water marks, and capacity drops.
 - Startup and shutdown time.
 
-Acceptance rules:
+Stable design properties:
 
 - No regression in audio correctness, authentication, session rejection, metronome/transport timing, recording alignment, or raw diagnostics.
 - No unbounded packet, mix, control, or asset storage.
 - No allocation, locks, logging, exceptions, blocking, or file work in the audio callback.
 - Two-person behavior remains the simplest and best-tested path.
 - Three/four-peer mesh remains direct, measurable, and supported without hidden relays or automatic recommendations.
-- Changes that only improve microbenchmarks but worsen callback or packet-loop tail timing should not be accepted.
+- A microbenchmark improvement does not by itself outweigh worse callback or
+  packet-loop tail timing; investigate the full technical evidence and audible
+  behavior.
 
-## Priority Summary
+## Design Context Summary
 
-### Before v1 stabilization
-
-1. Playback-ring ownership.
-2. Bounded peer-aware mesh mixing.
-3. Wrap-safe sequencing.
-4. TCP/control/asset limits.
-5. Correct peer-cap rejection.
-6. Native protocol and concurrency tests.
-
-### First efficiency pass
-
-1. Resolve endpoints once.
-2. Correct network wait scheduling.
-3. Caller-owned packet buffers.
-4. Authentication without copying.
-5. Fixed reorder/jitter storage and direct PCM decode.
-6. Bulk ring copies.
-
-### Refactor after stabilization
-
-1. Extract the Qt-free engine.
-2. Preserve supported CLI/headless modes.
-3. Integrate the GUI into the same `jam2` executable.
-4. Remove process-boundary compatibility paths.
-5. Split engine and GUI monoliths along ownership boundaries.
-
-### Optional measured experiments
-
-1. PCM16 network audio.
-2. Smaller type-specific UDP v2 header.
-3. Binary framing for asset chunks and selected frequent peer controls.
+- Preserve playback-ring ownership, bounded peer-aware mixing, wrap-safe
+  sequencing, remote-control/asset limits, and precise technical counters.
+- Keep endpoint resolution, packet buffers, authentication, PCM conversion,
+  reorder/jitter storage, network waiting, and ring copies predictable and
+  allocation-light.
+- Complete the typed shared application boundary, remove process-compatibility
+  paths, and split the engine and GUI monoliths along ownership boundaries.
+- Treat PCM16 network audio, a smaller UDP header, and selected binary peer
+  controls as optional measured experiments rather than core refactor work.
 
 The largest predictable bandwidth gain is PCM16. The largest predictable packet-processing gain is eliminating packet-rate allocation and endpoint conversion. The change most likely to improve visible timing measurements immediately is replacing the double wait with deadline-aware network scheduling. The single-binary refactor offers the largest maintainability and workflow gain, but should follow stabilization rather than being used as a substitute for it.

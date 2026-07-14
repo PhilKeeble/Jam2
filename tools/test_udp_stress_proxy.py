@@ -71,6 +71,24 @@ class ProxySchedulingTests(unittest.TestCase):
         finally:
             proxy.close()
 
+    def test_one_shot_burst_disarms_after_first_blackout(self):
+        proxy = self.make_proxy()
+        impairment = DirectionImpairment(
+            burst_pause_ms=120.0,
+            burst_every_ms=8000.0,
+            burst_limit=1)
+        try:
+            proxy.next_client_to_server_burst = 10.0
+            first_delay = proxy._burst_delay(10.0, impairment, "client_to_server")
+            second_delay = proxy._burst_delay(20.0, impairment, "client_to_server")
+
+            self.assertAlmostEqual(first_delay, 0.12)
+            self.assertEqual(second_delay, 0.0)
+            self.assertIsNone(proxy.next_client_to_server_burst)
+            self.assertEqual(proxy.stats["client_to_server_blackout_events"], 1)
+        finally:
+            proxy.close()
+
 
 if __name__ == "__main__":
     unittest.main()

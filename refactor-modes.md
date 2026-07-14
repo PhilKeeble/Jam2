@@ -16,6 +16,11 @@ The intended product model is:
 
 This is a static source review. Nothing was compiled or run. It should be considered alongside [refactor-binaries.md](refactor-binaries.md) and [refactor-efficiency.md](refactor-efficiency.md).
 
+The current-mode descriptions below record the pre-consolidation baseline.
+They explain which mature behavior had to be preserved and are not the current
+public command set or implementation status. Status and phase order live only
+in [refactor-plan.md](refactor-plan.md).
+
 ## Executive Assessment
 
 The proposed consolidation is a strong target and fits Jam2 better than the current four-mode history. It would simplify lifecycle, testing, state ownership, peer scaling, and the single-executable refactor.
@@ -44,7 +49,9 @@ The safest design is therefore:
 4. Drift-correct and release each remote stream independently onto the local engine timeline.
 5. Mix the released peer blocks into one playback stream.
 6. Keep session creation/joining, membership coordination, and musical authority outside the audio peer implementation.
-7. Retire the legacy `listen`, `connect`, and experimental `mesh` implementations after compatibility and benchmark parity are proven.
+7. Retire the legacy `listen`, `connect`, and experimental `mesh`
+   implementations after their useful behavior is carried into the universal
+   path; do not retain public compatibility aliases.
 
 This yields one local engine and one network engine without treating the original experimental mesh loop as the architectural foundation.
 
@@ -142,7 +149,7 @@ peer A -> peer B
 peer B -> peer A
 ```
 
-That is the same audio topology as the current `listen/connect` session. A general peer table adds negligible inherent cost when it contains one remote peer. Encoding can still happen once per local packet, followed by one send.
+That is the same audio topology as the former `listen/connect` session. A general peer table adds negligible inherent cost when it contains one remote peer. Encoding can still happen once per local packet, followed by one send.
 
 Using the same path provides real maintenance benefits:
 
@@ -533,6 +540,15 @@ Peers must agree on values that affect wire interpretation or shared time:
 
 Reject mismatches clearly during every peer handshake.
 
+### Session admission policy
+
+- The creator may set an optional peer limit when starting the jam.
+- If omitted, authenticated membership has no application-wide count limit.
+- The shared session controller rejects otherwise valid joins after the
+  configured limit is reached.
+- Pending unauthenticated connections, deadlines, and failed-key work are local
+  safety limits and do not define the jam's authenticated peer capacity.
+
 ### Musical session state
 
 These belong to versioned grid/arrangement state rather than process startup:
@@ -603,7 +619,13 @@ The GUI no longer needs an engine-mode selector or experimental mesh checkbox.
 - Creates the coordinator and invite.
 - Leaves the local engine running.
 - Shows zero or more peer-edge states and raw measurements.
-- Optional peer cap remains an explicit session setting.
+- An optional creator-selected peer limit remains an explicit session setting.
+  There is no application-wide authenticated-peer cap; pending and failed
+  authentication work is bounded independently.
+- Membership and diagnostic collections may grow during non-real-time peer
+  admission/removal, while every `PeerStream`, packet queue, and mix timeslot
+  remains independently bounded. Fixed hot-path storage must not create a
+  hidden compile-time peer-count ceiling.
 
 ### Join Jam
 
@@ -639,23 +661,20 @@ jam2                         launch GUI
 jam2 local [options]         headless/local engine, network disabled
 jam2 network create [options]
 jam2 network join <jam2-url> [options]
-jam2 network static --session-id ... --session-key ... --peers ...
 ```
 
 The exact command names can be finalized during implementation, but the internal distinction should be:
 
 - `local`: network attachment absent.
-- `network create`: local engine plus coordinator/bootstrap setup.
-- `network join`: local engine plus join/bootstrap setup.
-- `network static`: explicit peer list for deterministic headless stress tests.
+- `network create`: local engine plus the permanent TCP membership/settings coordinator; TCP and UDP bind the same local numeric port.
+- `network join`: authenticate to the creator URL, receive the immutable contract and current membership, then attach the same direct UDP session.
 
-For migration:
+The completed migration retired the temporary mode adapters:
 
-- `listen` can temporarily alias `network create`.
-- `connect` can temporarily alias `network join`.
-- `mesh` can temporarily alias the static/network peer-list form.
+- `listen`, `connect`, `mesh`, and public static membership commands are no longer exposed.
+- Deterministic stress uses create/join plus a debug-only inherited candidate-override seam for per-edge UDP proxies.
 - Startup JSON should report lifecycle/session state rather than different audio-engine implementations.
-- Existing Python harnesses should migrate after parity testing, not be removed.
+- Existing Python harnesses migrated after parity testing rather than being removed.
 
 ## Benefits
 
@@ -671,7 +690,7 @@ For migration:
 
 - The common two-person case exercises the same per-peer implementation as mesh.
 - Drift, jitter, authentication, and timing fixes are tested at every peer count.
-- Static headless mesh remains available without a separate runtime engine.
+- Headless multi-peer stress uses the public create/join bootstrap without a separate runtime engine.
 - State-transition tests can cover local -> network -> local without process replacement.
 
 ### Better scaling discipline
@@ -692,9 +711,12 @@ For migration:
 
 ### Replacing the proven two-peer path
 
-The largest risk is accidentally discarding behavior from `run_audio_packet_exchange` while adopting the smaller mesh loop. This would regress normal sessions even if basic audio still passes.
+The largest extraction risk was accidentally discarding behavior from the former
+`run_audio_packet_exchange` path while replacing the smaller mesh loop. The
+retained parity and fault scenarios cover that regression boundary.
 
-Mitigation: derive `PeerStream` from the mature two-peer behavior and prove one-peer parity before enabling multi-peer mixing.
+Mitigation: derive `PeerStream` from the mature two-peer behavior and use
+one-peer parity evidence when investigating multi-peer behavior.
 
 ### Per-peer resampling complexity
 
@@ -735,70 +757,22 @@ If any peer can become grid authority, the coordinator must explicitly validate 
 
 ### Compatibility and benchmark migration
 
-Current stress and two-host benchmark tools explicitly launch `listen`, `connect`, or `mesh`. Compatibility aliases and side-by-side result comparison are required until the new network path is proven.
+The final public interface does not retain compatibility aliases. Stress and
+benchmark tools use `network create`, `network join`, and the explicit debug
+surface over the universal mesh engine. Historical results remain useful for
+comparison, but they are not completion gates.
 
-## Recommended Implementation Sequence
+## Shared Application Ownership Context
 
-### Phase 1: stabilize the current model and preserve useful evidence
+One non-UI session controller is shared by the GUI, ordinary headless commands,
+and debug automation. `Engine` owns audio, callback time, local media, and
+technical state. `NetworkSession` owns the UDP socket, peer streams, packet
+scheduling, and mixing. The shared controller owns TCP bootstrap,
+authentication, membership, the immutable session contract, and authority
+coordination. UI code displays state and submits typed requests; it does not own
+or duplicate session policy.
 
-1. Correct the identified ownership, bounds, protocol, control, asset, and
-   worker issues in the current model.
-2. Reuse existing fast/moderate/safe and mesh results, and capture new cases
-   when they are useful for a specific change.
-3. Add independent Python real-process validation for sequence, jitter/reorder, clock mapping, drift, ring ownership counters, and protocol handshake behavior.
-4. Record every existing difference in stats so parity failures are visible.
-
-### Phase 2: extract the persistent local engine
-
-1. Move device, metronome, transport, prepared-track, recording, and stats ownership into `Engine`.
-2. Keep the callback sample-frame clock authoritative.
-3. Make the network capture tap explicitly enabled/disabled.
-4. Run legacy modes through the same local engine while their packet loops remain unchanged.
-
-### Phase 3: extract one mature `PeerStream`
-
-1. Move the normal receive reorder, jitter, playout, drift, and stats behavior into a reusable per-peer object.
-2. Introduce stable peer identity and symmetric stream handshake.
-3. Run the new network session with exactly one remote peer.
-4. Compare it against `listen/connect` under clean, jitter, loss, burst, drift, metronome, transport, and recording scenarios.
-
-Use one-peer parity evidence before replacing the mesh path; this is guidance
-for implementation order rather than a hard validation gate.
-
-### Phase 4: add peer fan-out and per-peer mixing
-
-1. Encode local audio once and send to every active peer.
-2. Run independent `PeerStream` timing/resampling for every remote.
-3. Mix mapped local-timeline blocks with bounded deterministic storage.
-4. Add dynamic peer add/remove/update without device restart.
-5. Preserve detailed per-peer and aggregate stats.
-
-### Phase 5: replace fixed timing roles
-
-1. Remove `listener_side` from the packet engine.
-2. Remove fixed `grid_coordinator` from the audio process.
-3. Add coordinator-assigned grid revision and authority peer id.
-4. Implement shared-grid authority mapping and correction.
-5. Implement leader-audio injection by the peer that started the grid.
-6. Reframe listener compensation relative to grid authority.
-7. Make transport events source-identified and grid-revision-aware.
-
-### Phase 6: integrate GUI and one executable
-
-1. Start one local engine in the application.
-2. Implement Start Jam, Join Jam, and Leave Jam as network-session transitions.
-3. Remove engine mode selector and mesh checkbox.
-4. Show coordinator, grid authority, and per-edge state explicitly.
-5. Preserve CLI/headless subcommands in the same `jam2` executable.
-
-### Phase 7: retire compatibility paths
-
-1. Move Python tools to the new network commands.
-2. Keep aliases for one transition period if useful.
-3. Remove duplicate two-peer and experimental mesh loops only after parity data is accepted.
-4. Update docs and structured status schemas.
-
-## Test Matrix
+## Useful Validation Scenarios
 
 ### Lifecycle
 
@@ -862,13 +836,14 @@ for implementation order rather than a hard validation gate.
 - Endpoint update and authenticated reprobe.
 - No relay/TURN path.
 
-### Compatibility
+### Unified interfaces
 
-- Legacy `listen`, `connect`, and `mesh` aliases during migration.
-- Existing stress, validation, and two-host benchmark scenarios.
-- Structured startup/status and CSV consumers.
+- `network create` and `network join` through the universal mesh engine.
+- Existing stress, validation, and two-host benchmark workflows through the
+  unified/debug surface.
+- Typed startup/session events, manifests, and CSV consumers.
 
-## Required Raw Measurements
+## Raw Measurements to Preserve
 
 The unified mode should expose:
 
@@ -907,7 +882,8 @@ The following defaults best match the current product constraints:
 - Preserve join-initiated UDP probing and add symmetric per-edge handshakes.
 - Require per-peer drift correction before claiming mesh parity.
 - Generalize the mature two-peer engine; do not promote the present mesh loop unchanged.
-- Preserve legacy CLI forms until benchmarks and tools have migrated.
+- Expose only `network create` and `network join` for public network startup;
+  no legacy mode aliases are retained after migration.
 
 ## Final Assessment
 
@@ -918,6 +894,10 @@ Local Engine: always present when a device is active
 Network Session: optionally attached, containing 0..N remote peers
 ```
 
-`listen` and `connect` should survive only as create/join bootstrap actions. `mesh` should become the ordinary network topology rather than a user-selected experimental engine. A two-person jam then becomes the smallest full mesh naturally.
+The old `listen` and `connect` command names do not survive; their distinct
+creator/joiner bootstrap responsibilities become `network create` and `network
+join`. Mesh is the ordinary network topology rather than a user-selected
+experimental engine. A two-person jam then becomes the smallest full mesh
+naturally.
 
 The major engineering work is not fan-out. It is preserving the mature two-peer buffering and timing behavior per remote clock, mapping every stream onto the local engine timeline, and replacing fixed listener/coordinator assumptions with explicit versioned musical authority. If those parts are handled first, the result should be simpler to operate and maintain while being technically stronger for both two-person and small-group use.

@@ -5,6 +5,7 @@ import json
 import secrets
 import shutil
 import socket
+import subprocess
 import threading
 import time
 import sys
@@ -17,7 +18,6 @@ from jam2_harness import (
     collect_side_csv,
     ManagedProcess,
     parse_endpoint,
-    rewrite_jam_url_endpoint,
     side_paths,
     start_connector,
     start_listener,
@@ -57,6 +57,7 @@ from jam2_profiles import (
 )
 from jam2_tooling import (
     default_jam2_path,
+    debug_description,
     ensure_dir,
     fail,
     new_run_manifest,
@@ -83,7 +84,7 @@ def parse_args():
     parser.add_argument(
         "--headless-audio",
         action="store_true",
-        help="use synthetic audio for normal listen/connect scenarios instead of physical devices")
+        help="use synthetic audio for normal create/join scenarios instead of physical devices")
     parser.add_argument("--sample-rate", required=True, type=int)
     parser.add_argument("--logs", default=str(Path(__file__).with_name("stress_logs")))
     parser.add_argument("--stream-ms", type=int, default=DEFAULT_STREAM_MS)
@@ -155,30 +156,95 @@ def select_mesh_endpoints(peer_count, base_port):
             reservation.close()
 
 
+_NETWORK_TEST_PORT_MIN = 20000
+_NETWORK_TEST_PORT_MAX = 47999
+_network_test_port_cursor = _NETWORK_TEST_PORT_MIN + secrets.randbelow(
+    _NETWORK_TEST_PORT_MAX - _NETWORK_TEST_PORT_MIN + 1)
+
+
+def select_network_endpoint(requested_port=0):
+    """Choose one localhost number that is free for both coordinator TCP and audio UDP."""
+    global _network_test_port_cursor
+    candidate_count = 1 if requested_port else (_NETWORK_TEST_PORT_MAX - _NETWORK_TEST_PORT_MIN + 1)
+    for _ in range(candidate_count):
+        port = requested_port
+        if not port:
+            port = _network_test_port_cursor
+            _network_test_port_cursor += 1
+            if _network_test_port_cursor > _NETWORK_TEST_PORT_MAX:
+                _network_test_port_cursor = _NETWORK_TEST_PORT_MIN
+        tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            tcp.bind(("0.0.0.0", port))
+            udp.bind(("127.0.0.1", port))
+            return f"127.0.0.1:{port}"
+        except OSError:
+            continue
+        finally:
+            tcp.close()
+            udp.close()
+    requested = f" {requested_port}" if requested_port else ""
+    raise RuntimeError(f"stress test could not reserve shared localhost TCP/UDP port{requested}")
+
+
 def run_mesh_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
-    del seed
     profile = scenario["profile"]
     peer_count = scenario["mesh_peers"]
     os_priority = scenario.get("os_priority", "high")
     session_id = secrets.token_hex(8)
     session_key = secrets.token_hex(16)
-    endpoints = select_mesh_endpoints(peer_count, args_ns.mesh_base_port)
+    if args_ns.mesh_base_port:
+        endpoints = [select_network_endpoint(args_ns.mesh_base_port)]
+        endpoints.extend(select_mesh_endpoints(peer_count - 1, args_ns.mesh_base_port + 1))
+    else:
+        endpoints = [select_network_endpoint()]
+        endpoints.extend(select_mesh_endpoints(peer_count - 1, 0))
+    tokens = [secrets.token_hex(16) for _ in range(peer_count)]
+    peer_endpoints = [
+        {remote: endpoints[remote] for remote in range(peer_count) if remote != local}
+        for local in range(peer_count)
+    ]
+    edge_proxies = []
+    proxy_stop = threading.Event()
+    for edge_index, edge in enumerate(scenario.get("edge_impairments", [])):
+        peer_a = int(edge["peer_a"]) - 1
+        peer_b = int(edge["peer_b"]) - 1
+        if peer_a < 0 or peer_b < 0 or peer_a >= peer_count or peer_b >= peer_count or peer_a == peer_b:
+            raise RuntimeError("mesh edge impairment peer indexes are invalid")
+        proxy = UdpStressProxy(
+            parse_endpoint(endpoints[peer_b]),
+            impairment=edge["impairment"],
+            seed=seed + edge_index)
+        client_host, client_port = proxy.public_endpoint
+        server_host, server_port = proxy.server_public_endpoint
+        peer_endpoints[peer_a][peer_b] = f"{client_host}:{client_port}"
+        peer_endpoints[peer_b][peer_a] = f"{server_host}:{server_port}"
+        thread = threading.Thread(target=proxy.run_until, args=(proxy_stop,), daemon=True)
+        thread.start()
+        edge_proxies.append((proxy, thread, peer_a, peer_b))
     processes = []
     peer_results = []
     commands = list(scenario.get("commands", []))
+    clock_drifts = list(scenario.get("headless_clock_drift_ppm", [0] * peer_count))
+    if len(clock_drifts) != peer_count:
+        raise RuntimeError("mesh scenario headless clock drift list must match its peer count")
     print_flush(f"[stress] starting {scenario_id} profile={profile.name} peers={peer_count} os_priority={os_priority}")
+
+    topology = {
+        tokens[local]: {
+            tokens[remote]: peer_endpoints[local][remote]
+            for remote in range(peer_count)
+            if remote != local
+        }
+        for local in range(peer_count)
+    }
+
     for index, endpoint in enumerate(endpoints):
         peer_name = f"peer{index + 1}"
         paths = side_paths(output_dir, peer_name)
         recording = ensure_dir(Path(paths["dir"]) / "recording")
-        peers = ",".join(peer for peer in endpoints if peer != endpoint)
-        args = [
-            jam2,
-            "mesh",
-            "--bind", endpoint,
-            "--session-id", session_id,
-            "--session-key", session_key,
-            "--peers", peers,
+        common_args = [
             "--sample-rate", str(args_ns.sample_rate),
             "--log-stats", str(paths["csv_raw"]),
             "--headless-audio", "on",
@@ -187,14 +253,52 @@ def run_mesh_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
             "--os-priority", os_priority,
             "--status-format", "jsonl",
         ]
-        args.extend(profile.args(args_ns.stream_ms))
-        args.extend(["--audio-buffer-size", str(args_ns.headless_audio_buffer_frames)])
+        common_args.extend(profile.args(args_ns.stream_ms))
+        common_args.extend(["--audio-buffer-size", str(args_ns.headless_audio_buffer_frames)])
+        common_args.extend(["--headless-clock-drift-ppm", str(clock_drifts[index])])
+        env = {
+            "JAM2_DEBUG_SCENARIO": "1",
+            "JAM2_DEBUG_PEER_TOKEN": tokens[index],
+        }
+        if index == 0:
+            env["JAM2_DEBUG_TOPOLOGY"] = json.dumps(topology, separators=(",", ":"))
+            args = [
+                jam2,
+                "network", "create",
+                "--bind", endpoint,
+                "--no-stun",
+                "--session-id", session_id,
+                "--session-key", session_key,
+                "--wait-ms", str(max(15000, args_ns.stream_ms + 15000)),
+            ] + common_args
+        else:
+            creator_startup = processes[0][0].wait_for_startup("waiting", args_ns.startup_timeout_s)
+            if creator_startup is None:
+                for process, _, _ in processes:
+                    process.terminate()
+                proxy_stop.set()
+                for proxy, thread, _, _ in edge_proxies:
+                    thread.join(timeout=2.0)
+                    proxy.close()
+                return {
+                    "scenario": scenario_id,
+                    "profile": profile.name,
+                    "error": "mesh creator did not emit waiting startup JSON",
+                    "peer_results": [],
+                }
+            args = [
+                jam2,
+                "network", "join", creator_startup["connection_url"],
+                "--bind", endpoint,
+                "--wait-ms", str(max(15000, args_ns.stream_ms + 15000)),
+            ] + common_args
         process = ManagedProcess(
             args,
             repo_root(),
             paths["stdout"],
             paths["stderr"],
-            stdin_pipe=bool(commands)).start()
+            stdin_pipe=bool(commands),
+            env=env).start()
         processes.append((process, paths, peer_name))
 
     command_thread = None
@@ -218,7 +322,7 @@ def run_mesh_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
         if rc is None:
             process.terminate()
             rc = process.poll()
-        csv_path = collect_side_csv(paths)
+        csv_path = collect_side_csv(paths, process)
         csv_summary = summarize_csv(csv_path) if csv_path else {"has_csv": False}
         audio_analysis = analyze_recording_dir(
             Path(paths["dir"]) / "recording",
@@ -240,6 +344,19 @@ def run_mesh_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
     if command_thread is not None:
         command_thread.join(timeout=1.0)
 
+    proxy_stop.set()
+    for proxy, thread, _, _ in edge_proxies:
+        thread.join(timeout=2.0)
+        proxy.close()
+    edge_proxy_stats = [
+        {
+            "peer_a": peer_a + 1,
+            "peer_b": peer_b + 1,
+            "stats": dict(proxy.stats),
+        }
+        for proxy, _, peer_a, peer_b in edge_proxies
+    ]
+
     mesh_metrics = mesh_collect_metrics(peer_results, args_ns.stream_ms)
     result = {
         "scenario": scenario_id,
@@ -253,6 +370,17 @@ def run_mesh_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
         "headless_audio_buffer_frames": args_ns.headless_audio_buffer_frames,
         "mesh_peers": peer_count,
         "mesh_endpoints": endpoints,
+        "mesh_peer_endpoints": peer_endpoints,
+        "headless_clock_drift_ppm": clock_drifts,
+        "edge_impairments": [
+            {
+                "peer_a": edge["peer_a"],
+                "peer_b": edge["peer_b"],
+                "impairment": asdict(edge["impairment"]),
+            }
+            for edge in scenario.get("edge_impairments", [])
+        ],
+        "edge_proxy_stats": edge_proxy_stats,
         "peer_results": peer_results,
         "mesh_metrics": mesh_metrics,
         "authority_peer": scenario.get("authority_peer", ""),
@@ -265,10 +393,11 @@ def run_mesh_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
         f"observations={','.join(result.get('audio_health_observations', [])) or '-'} "
         f"peers={peer_count} recv_min={mesh_metrics.get('recv_packets_min', 0.0):.0f} "
         f"loss={mesh_metrics.get('sequence_lost_total', 0.0):.0f} "
-        f"active_edges_min={mesh_metrics.get('network_active_peer_count_min', 0)}/"
+        f"active_edges_min={mesh_metrics.get('network_active_peer_count_established_min', mesh_metrics.get('network_active_peer_count_min', 0))}/"
         f"{mesh_metrics.get('expected_remote_peers', 0)} "
         f"mix_slots_min={mesh_metrics.get('mix_released_slots_min', 0.0):.0f} "
         f"mix_capacity_drops={mesh_metrics.get('mix_capacity_drops_total', 0.0):.0f} "
+        f"drift_abs_max={mesh_metrics.get('drift_abs_ppm_max', 0.0):.1f}ppm "
         f"duration_coverage={result.get('duration_coverage_ratio_min', 0.0):.3f} "
         f"audio_ok={mesh_metrics.get('audio_ok_peers', 0)}/{peer_count}")
     return result
@@ -330,6 +459,40 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
             {"at_s": max(2.0, args_ns.stream_ms / 1000.0 - 1.0), "side": "client", "line": "record jam stop"},
         ])
     print_flush(f"[stress] starting {scenario_id} profile={profile.name} os_priority={os_priority}")
+
+    # Public create/join now keep the invitation endpoint on the TCP
+    # coordinator. Route only the direct UDP edge through the impairment proxy
+    # by using the inherited, bounded debug topology seam.
+    server_bind = select_network_endpoint()
+    real_endpoint = parse_endpoint(server_bind)
+    server_token = secrets.token_hex(16)
+    client_token = secrets.token_hex(16)
+    udp_validation_kind = scenario.get("udp_validation", "")
+    packet_capture = PacketCapture() if udp_validation_kind in ("malformed", "delayed-replay", "short-flood") else None
+    proxy = UdpStressProxy(
+        real_endpoint,
+        impairment=scenario["impairment"],
+        seed=seed,
+        packet_observer=packet_capture.observe if packet_capture is not None else None)
+    proxy_client = f"{proxy.public_endpoint[0]}:{proxy.public_endpoint[1]}"
+    proxy_server = f"{proxy.server_public_endpoint[0]}:{proxy.server_public_endpoint[1]}"
+    topology = {
+        server_token: {client_token: proxy_server},
+        client_token: {server_token: proxy_client},
+    }
+    server_env = {
+        "JAM2_DEBUG_SCENARIO": "1",
+        "JAM2_DEBUG_PEER_TOKEN": server_token,
+        "JAM2_DEBUG_TOPOLOGY": json.dumps(topology, separators=(",", ":")),
+    }
+    client_env = {
+        "JAM2_DEBUG_SCENARIO": "1",
+        "JAM2_DEBUG_PEER_TOKEN": client_token,
+    }
+    stop_proxy = threading.Event()
+    proxy_thread = threading.Thread(target=proxy.run_until, args=(stop_proxy,), daemon=True)
+    proxy_thread.start()
+
     listener, server_paths = start_listener(
         jam2,
         server_audio_device,
@@ -338,10 +501,15 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
         args_ns.stream_ms,
         output_dir,
         extra_args=server_extra_args,
-        stdin_pipe=bool(commands))
+        stdin_pipe=bool(commands),
+        bind=server_bind,
+        env=server_env)
     startup = listener.wait_for_startup("waiting", args_ns.startup_timeout_s)
     if startup is None:
         listener.terminate()
+        stop_proxy.set()
+        proxy_thread.join(timeout=2.0)
+        proxy.close()
         return {
             "scenario": scenario_id,
             "profile": profile.name,
@@ -350,9 +518,6 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
             "client_return_code": None,
         }
 
-    real_endpoint = parse_endpoint(startup["local_endpoint"])
-    udp_validation_kind = scenario.get("udp_validation", "")
-    packet_capture = PacketCapture() if udp_validation_kind in ("malformed", "delayed-replay", "short-flood") else None
     sequence_transformer = None
     if udp_validation_kind == "near-wrap-sequence":
         sequence_transformer = NearWrapSequenceTransformer(parse_jam_url(startup["connection_url"]).key)
@@ -360,27 +525,19 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
         sequence_transformer = OneShotAudioHeaderTransformer(
             parse_jam_url(startup["connection_url"]).key,
             udp_validation_kind)
-    proxy = UdpStressProxy(
-        real_endpoint,
-        impairment=scenario["impairment"],
-        seed=seed,
-        packet_observer=packet_capture.observe if packet_capture is not None else None,
-        packet_transformer=sequence_transformer)
-    stop_proxy = threading.Event()
-    proxy_thread = threading.Thread(target=proxy.run_until, args=(stop_proxy,), daemon=True)
-    proxy_thread.start()
+    proxy.packet_transformer = sequence_transformer
 
-    proxy_url = rewrite_jam_url_endpoint(startup["connection_url"], proxy.public_endpoint)
     connector, client_paths = start_connector(
         jam2,
-        proxy_url,
+        startup["connection_url"],
         client_audio_device,
         args_ns.sample_rate,
         profile,
         args_ns.stream_ms,
         output_dir,
         extra_args=client_extra_args,
-        stdin_pipe=bool(commands))
+        stdin_pipe=bool(commands),
+        env=client_env)
 
     udp_validation = {}
     if udp_validation_kind == "malformed":
@@ -415,8 +572,8 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
     proxy_stats = dict(proxy.stats)
     proxy.close()
 
-    server_csv = collect_side_csv(server_paths)
-    client_csv = collect_side_csv(client_paths)
+    server_csv = collect_side_csv(server_paths, listener)
+    client_csv = collect_side_csv(client_paths, connector)
     client_startups = connector.startup_payloads("connected")
     native_effective_config = {
         "server": redact_structure(startup),
@@ -586,6 +743,16 @@ def validation_command(jam2, args, output_dir, expect_rc, name):
     }
 
 
+def validation_help_command(jam2, args, output_dir, name, expected_text):
+    result = validation_command(jam2, args, output_dir, 0, name)
+    output = (Path(output_dir) / "stdout.txt").read_text(encoding="utf-8", errors="replace")
+    missing = [text for text in expected_text if text not in output]
+    result["missing_help_text"] = missing
+    if result["verdict"] == "pass" and missing:
+        result["verdict"] = "help_output_missing"
+    return result
+
+
 def profile_explicit_args(profile, stream_ms):
     args = profile.args(stream_ms)
     cleaned = []
@@ -628,7 +795,7 @@ def run_startup_validation_command(jam2, args, output_dir):
 def validation_profile_equivalence(jam2, profile_name, profile, output_dir, stream_ms):
     output_dir = ensure_dir(output_dir)
     common = [
-        "listen",
+        "network", "create",
         "--bind", "127.0.0.1:0",
         "--no-stun",
         "--wait-ms", "250",
@@ -725,6 +892,27 @@ def run_pair_validation(
         url_mutator=None,
         server_extra_args=None,
         client_extra_args=None):
+    server_bind = select_network_endpoint()
+    real_endpoint = parse_endpoint(server_bind)
+    server_token = secrets.token_hex(16)
+    client_token = secrets.token_hex(16)
+    proxy = UdpStressProxy(real_endpoint, impairment=ProxyImpairment.both(DirectionImpairment()), seed=args_ns.seed)
+    topology = {
+        server_token: {client_token: f"{proxy.server_public_endpoint[0]}:{proxy.server_public_endpoint[1]}"},
+        client_token: {server_token: f"{proxy.public_endpoint[0]}:{proxy.public_endpoint[1]}"},
+    }
+    server_env = {
+        "JAM2_DEBUG_SCENARIO": "1",
+        "JAM2_DEBUG_PEER_TOKEN": server_token,
+        "JAM2_DEBUG_TOPOLOGY": json.dumps(topology, separators=(",", ":")),
+    }
+    client_env = {
+        "JAM2_DEBUG_SCENARIO": "1",
+        "JAM2_DEBUG_PEER_TOKEN": client_token,
+    }
+    stop_proxy = threading.Event()
+    proxy_thread = threading.Thread(target=proxy.run_until, args=(stop_proxy,), daemon=True)
+    proxy_thread.start()
     listener, server_paths = start_listener(
         jam2,
         args_ns.server_audio_device,
@@ -732,10 +920,15 @@ def run_pair_validation(
         server_profile,
         args_ns.validation_stream_ms,
         output_dir,
-        extra_args=server_extra_args)
+        extra_args=server_extra_args,
+        bind=server_bind,
+        env=server_env)
     startup = listener.wait_for_startup("waiting", args_ns.startup_timeout_s)
     if startup is None:
         listener.terminate()
+        stop_proxy.set()
+        proxy_thread.join(timeout=2.0)
+        proxy.close()
         return {
             "validation": name,
             "verdict": "listener_startup_failed",
@@ -743,12 +936,7 @@ def run_pair_validation(
             "client_return_code": None,
         }
 
-    real_endpoint = parse_endpoint(startup["local_endpoint"])
-    proxy = UdpStressProxy(real_endpoint, impairment=ProxyImpairment.both(DirectionImpairment()), seed=args_ns.seed)
-    stop_proxy = threading.Event()
-    proxy_thread = threading.Thread(target=proxy.run_until, args=(stop_proxy,), daemon=True)
-    proxy_thread.start()
-    url = rewrite_jam_url_endpoint(startup["connection_url"], proxy.public_endpoint)
+    url = startup["connection_url"]
     if url_mutator is not None:
         url = url_mutator(url)
 
@@ -760,7 +948,8 @@ def run_pair_validation(
         client_profile,
         args_ns.validation_stream_ms,
         output_dir,
-        extra_args=client_extra_args)
+        extra_args=client_extra_args,
+        env=client_env)
     client_rc = connector.wait(timeout=max(25.0, args_ns.validation_stream_ms / 1000.0 + 20.0))
     if client_rc is None:
         connector.terminate()
@@ -773,8 +962,8 @@ def run_pair_validation(
     stop_proxy.set()
     proxy_thread.join(timeout=2.0)
     proxy.close()
-    server_csv = collect_side_csv(server_paths)
-    client_csv = collect_side_csv(client_paths)
+    server_csv = collect_side_csv(server_paths, listener)
+    client_csv = collect_side_csv(client_paths, connector)
     ok = (server_rc == 0 and client_rc == 0) if expect_success else (server_rc != 0 or client_rc != 0)
     return {
         "validation": name,
@@ -791,21 +980,140 @@ def run_pair_validation(
 def run_validations(jam2, args_ns, logs):
     validations_dir = ensure_dir(logs / "validation")
     results = []
+    help_dir = ensure_dir(validations_dir / "cli-help")
+    for name, command, expected in (
+            ("root", ["-h"], ["Commands:", "network create", "debug run"]),
+            ("list-devices", ["list-devices", "-h"], ["Usage:", "jam2 list-devices"]),
+            ("test-device", ["test-device", "-h"], ["--sample-rate", "<id>"]),
+            ("meter-device", ["meter-device", "-h"], ["--buffer-size", "--duration-ms"]),
+            ("ring-device", ["ring-device", "-h"], ["--ring-frames", "--duration-ms"]),
+            ("local", ["local", "-h"], ["--audio-device", "--headless-audio", "--profile"]),
+            ("network", ["network", "-h"], ["create", "join"]),
+            ("network-create", ["network", "create", "-h"], ["--stun", "--no-stun", "--bind"]),
+            ("network-join", ["network", "join", "-h"], ["<jam2-url>", "--wait-ms", "--bind"]),
+            ("debug", ["debug", "-h"], ["describe", "run"]),
+            ("debug-describe", ["debug", "describe", "-h"], ["--json", "automation schema"]),
+            ("debug-run", ["debug", "run", "-h"], ["scenario.json", "262144", "Secrets"]),
+    ):
+        results.append(validation_help_command(
+            jam2, command, help_dir / name, f"cli-help-{name}", expected))
+    debug_dir = ensure_dir(validations_dir / "debug-adapter")
     results.append(validation_command(
         jam2,
-        ["listen", "--profile", "fast", "--definitely-bad-option"],
+        ["debug", "run", str(repo_root() / "tools" / "scenarios" / "local-headless-smoke.json")],
+        debug_dir / "valid-local-smoke",
+        0,
+        "debug-valid-local-smoke"))
+    results.append(validation_command(
+        jam2,
+        ["debug", "run", str(repo_root() / "tools" / "scenarios" / "lifecycle-headless-smoke.json")],
+        debug_dir / "valid-lifecycle-smoke",
+        0,
+        "debug-valid-lifecycle-smoke"))
+
+    boundary_fixtures = ensure_dir(debug_dir / "boundary-fixtures")
+    valid_wav = boundary_fixtures / "valid.wav"
+    with wave.open(str(valid_wav), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(48000)
+        handle.writeframes(bytes(960))
+    truncated_wav = boundary_fixtures / "truncated.wav"
+    truncated_wav.write_bytes(b"RIFF\x20\x00\x00\x00WAVEfmt ")
+    bad_align_wav = boundary_fixtures / "bad-block-align.wav"
+    bad_align = bytearray(valid_wav.read_bytes())
+    bad_align[32:34] = (3).to_bytes(2, "little")
+    bad_align_wav.write_bytes(bad_align)
+    trailing_wav = boundary_fixtures / "trailing-data.wav"
+    trailing_wav.write_bytes(valid_wav.read_bytes() + b"unexpected")
+    boundary_scenario = debug_dir / "boundary-validation.json"
+    write_json(boundary_scenario, {
+        "schema": "jam2-debug-scenario-v1",
+        "run_id": "boundary-validation",
+        "operation": "validate.boundaries",
+        "arguments": [
+            "valid:" + str(valid_wav.resolve()),
+            "invalid:" + str(truncated_wav.resolve()),
+            "invalid:" + str(bad_align_wav.resolve()),
+            "invalid:" + str(trailing_wav.resolve()),
+        ],
+    })
+    results.append(validation_command(
+        jam2, ["debug", "run", str(boundary_scenario)],
+        debug_dir / "valid-boundary-suite", 0, "debug-valid-boundary-suite"))
+
+    malformed_scenario = debug_dir / "malformed.json"
+    malformed_scenario.write_text("{", encoding="utf-8")
+    results.append(validation_command(
+        jam2, ["debug", "run", str(malformed_scenario)],
+        debug_dir / "reject-malformed", 2, "debug-reject-malformed"))
+
+    unknown_field_scenario = debug_dir / "unknown-field.json"
+    write_json(unknown_field_scenario, {
+        "schema": "jam2-debug-scenario-v1",
+        "run_id": "unknown-field",
+        "operation": "local",
+        "arguments": ["--headless-audio", "on"],
+        "unexpected": True,
+    })
+    results.append(validation_command(
+        jam2, ["debug", "run", str(unknown_field_scenario)],
+        debug_dir / "reject-unknown-field", 2, "debug-reject-unknown-field"))
+
+    secret_scenario = debug_dir / "secret-argument.json"
+    write_json(secret_scenario, {
+        "schema": "jam2-debug-scenario-v1",
+        "run_id": "secret-argument",
+        "operation": "local",
+        "arguments": ["--headless-audio", "on", "--session-key"],
+    })
+    results.append(validation_command(
+        jam2, ["debug", "run", str(secret_scenario)],
+        debug_dir / "reject-secret-argument", 2, "debug-reject-secret-argument"))
+
+    secret_assignment_scenario = debug_dir / "secret-assignment.json"
+    write_json(secret_assignment_scenario, {
+        "schema": "jam2-debug-scenario-v1",
+        "run_id": "secret-assignment",
+        "operation": "local",
+        "arguments": ["--headless-audio", "on", "--session-key=not-persistable"],
+    })
+    results.append(validation_command(
+        jam2, ["debug", "run", str(secret_assignment_scenario)],
+        debug_dir / "reject-secret-assignment", 2, "debug-reject-secret-assignment"))
+
+    excessive_arguments_scenario = debug_dir / "excessive-arguments.json"
+    write_json(excessive_arguments_scenario, {
+        "schema": "jam2-debug-scenario-v1",
+        "run_id": "excessive-arguments",
+        "operation": "local",
+        "arguments": ["x"] * 129,
+    })
+    results.append(validation_command(
+        jam2, ["debug", "run", str(excessive_arguments_scenario)],
+        debug_dir / "reject-excessive-arguments", 2, "debug-reject-excessive-arguments"))
+
+    oversized_scenario = debug_dir / "oversized.json"
+    oversized_scenario.write_text("{" + (" " * (256 * 1024)) + "}", encoding="utf-8")
+    results.append(validation_command(
+        jam2, ["debug", "run", str(oversized_scenario)],
+        debug_dir / "reject-oversized", 2, "debug-reject-oversized"))
+
+    results.append(validation_command(
+        jam2,
+        ["network", "create", "--profile", "fast", "--definitely-bad-option"],
         validations_dir / "bad-option",
         1,
         "bad-option"))
     results.append(validation_command(
         jam2,
-        ["connect", "not-a-jam-url", "--profile", "fast", "--wait-ms", "100"],
+        ["network", "join", "not-a-jam-url", "--profile", "fast", "--wait-ms", "100"],
         validations_dir / "bad-url",
-        1,
+        2,
         "bad-url"))
     results.append(validation_command(
         jam2,
-        ["listen", "--profile", "fast", "--bind", "127.0.0.1:0", "--no-stun", "--wait-ms", "250", "--machine-readable-startup", "on"],
+        ["network", "create", "--profile", "fast", "--bind", "127.0.0.1:0", "--no-stun", "--wait-ms", "250", "--machine-readable-startup", "on"],
         validations_dir / "listen-timeout",
         3,
         "listen-timeout"))
@@ -887,6 +1195,11 @@ def main():
         shutil.rmtree(logs)
     ensure_dir(logs)
 
+    try:
+        capabilities = debug_description(jam2)
+    except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+        return fail(f"jam2 debug capability query failed: {error}")
+
     if args_ns.mode == "mesh":
         try:
             counts = mesh_peer_counts(args_ns)
@@ -921,7 +1234,8 @@ def main():
         profile=args_ns.profile,
         scenarios=[planned_id for planned_id, _, _ in run_plan],
         server_audio_device=args_ns.server_audio_device,
-        client_audio_device=args_ns.client_audio_device))
+        client_audio_device=args_ns.client_audio_device,
+        native_debug_description=capabilities))
 
     for index, (planned_id, scenario_id, os_priority) in enumerate(run_plan):
         scenario_dir = ensure_dir(logs / f"{index + 1:02d}_{safe_test_id(planned_id)}")
@@ -944,6 +1258,15 @@ def main():
             "client_audio_device": args_ns.client_audio_device,
             "seed": args_ns.seed + index,
             "mesh_peers": scenario.get("mesh_peers", 0),
+            "headless_clock_drift_ppm": scenario.get("headless_clock_drift_ppm", []),
+            "edge_impairments": [
+                {
+                    "peer_a": edge["peer_a"],
+                    "peer_b": edge["peer_b"],
+                    "impairment": asdict(edge["impairment"]),
+                }
+                for edge in scenario.get("edge_impairments", [])
+            ],
             "profile": scenario["profile"].metadata(),
             "impairment": asdict(scenario["impairment"]) if "impairment" in scenario else {},
             "os_priority": os_priority,

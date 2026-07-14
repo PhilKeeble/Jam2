@@ -11,6 +11,20 @@ when severe wifi burst happens ring cant catch back up, might need tuning or tes
 
 add user preferences so that users cna set devices for loopback / asio once and then not have to set it again unless they need to change it, maybe a seperate settings button that loads a file off disk for user preferences? 
 
+saw in output somewhere about MVP sections, make a note to look through code and finalise for release and remove stuff like that 
+
+check max peer limits and defaults 
+
+look into making python more of a framework with neater code
+
+look into why jam2-cli code still exists in repo and whether its beter just all in the same src folder 
+
+when start jam dialogue comes up with url it makes the windows error noise which sucks, also cant re add it to clipboard
+
+on latest run there was audio and then latency increase but never seemed to come back down? 
+
+on latest run server was left in 0 person mesh channel and metronome was taking a while to start like it was waiting for the next bar 
+
 ## bugs
 
 

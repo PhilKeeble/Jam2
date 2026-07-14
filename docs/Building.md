@@ -9,7 +9,7 @@ Required tools:
 - Visual Studio Build Tools with the C++ workload.
 - CMake.
 - Ninja.
-- Qt 6 with Widgets, Network, and Multimedia modules for `jam2-gui`.
+- Qt 6 with Widgets and Network modules for the unified `jam2` application.
 - ASIO SDK for Windows ASIO builds.
 
 Install the common build dependencies from an Administrator PowerShell with:
@@ -64,7 +64,7 @@ Required tools:
 - Xcode Command Line Tools.
 - CMake.
 - Ninja.
-- Qt 6 with Widgets, Network, and Multimedia modules for `jam2-gui`.
+- Qt 6 with Widgets and Network modules for the unified `jam2` application.
 
 Install the common build dependencies with:
 
@@ -93,7 +93,7 @@ Real CoreAudio validation must happen on a macOS host with the target audio devi
 
 - CMake is the single source of truth for Windows and macOS builds.
 - Jam2 currently expects Release builds. Configure fresh build directories with `-DCMAKE_BUILD_TYPE=Release`.
-- `jam2-gui` is enabled by default for new CMake build directories.
+- The unified GUI/CLI `jam2` target is enabled by default for new CMake build directories.
 - Built app binaries are staged to the repo-root `release` directory.
 - Intermediate build products stay in the selected CMake build directory.
 - Shared protocol, STUN, stats, and timing code should remain platform-neutral.

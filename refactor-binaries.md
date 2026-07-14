@@ -10,11 +10,16 @@ The safest direction would be to:
 - Extract the current engine from the CLI entry point behind a small Qt-free C++ API before integrating it into the GUI.
 - Run audio and network work on dedicated threads rather than the Qt event thread.
 - Replace local process, stdin, TCP, and JSONL communication with typed commands and fixed-shape snapshots.
-- Retain headless testability through the shared engine library or a development-only executable, even if releases contain only one `jam2` application.
+- Retain public headless, automation, and diagnostic commands in the same
+  `jam2` executable, with the no-argument GUI remaining the primary use case.
 - Keep mesh support. Optimize the normal experience for two peers, while making small sessions of three or four peers straightforward and retaining the ability to connect more peers where hardware and network capacity allow.
 - Treat peer-control protocol changes and UDP fast-path optimization as separate, measurable work.
 
 The largest risk is not having two components in one process. It is safely extracting the audio, network, timing, recording, and statistics code from the 8,000-plus-line CLI entry point without changing its real-time behavior.
+
+Sections describing the "current" two-process architecture record the original
+review baseline. They explain what the refactor is removing and are not current
+status; [refactor-plan.md](refactor-plan.md) is the status authority.
 
 ## Current Architecture
 
@@ -139,9 +144,22 @@ Some state and statistics behavior must remain behind typed interfaces, so not e
 
 ### Duplicate Controls and CLI Compatibility
 
-The engine supports both stdin text commands and binary GUI-control commands that ultimately update the same runtime state. If the public CLI is retired, interactive prompts, help, text parsing, and GUI compatibility output can be removed while retaining the underlying behavior as typed commands. This may remove another 500–800 lines.
+The engine supports both stdin text commands and binary GUI-control commands
+that ultimately update the same runtime state. The public CLI remains, but the
+legacy runtime stdin loop, GUI compatibility output, and duplicate mode parsers
+can be removed while retaining the underlying behavior as typed commands.
+Public network startup is limited to `network create` and `network join`;
+`listen`, `connect`, `mesh`, and static-membership aliases do not need backward
+compatibility.
 
-Device listing, device tests, metering, benchmark support, and headless audio are useful diagnostics rather than obvious dead code. They should be preserved through internal engine APIs, GUI diagnostics, or a development-only target.
+Ordinary headless commands stay focused on core audio/network startup and
+shutdown. Metronome, grid, transport, recording, and other scheduled automation
+actions belong to the explicit typed debug scenario/pipe contract rather than a
+runtime stdin loop or broad interactive option surface.
+
+Device listing, device tests, metering, benchmark support, and headless audio
+are useful diagnostics rather than obvious dead code. They remain supported by
+the one public executable through the shared application interfaces.
 
 ### Mesh Is Retained Scope
 
@@ -151,7 +169,10 @@ The current project rules describing Jam2 as strictly two-person are out of date
 
 - Two people remain the primary and simplest workflow.
 - Three or four peers are an expected small-group use case.
-- Larger direct full-mesh sessions remain available, subject to explicit CPU, bandwidth, packet-rate, and device limits.
+- Larger direct full-mesh sessions remain available without an
+  application-wide peer cap, subject to the machine's actual CPU, bandwidth,
+  packet-rate, and device limits. A creator may optionally configure a limit
+  for that jam.
 - Audio remains direct UDP with no relay/TURN audio path.
 - Per-peer and aggregate raw measurements should expose how mesh cost scales.
 
@@ -203,7 +224,11 @@ Moving the CLI code directly into `MainWindow` would increase complexity. The en
 
 ### Test Harness Compatibility
 
-The Python stress and benchmark tools currently launch `jam2` with CLI arguments. Removing that interface without a replacement would discard valuable regression coverage. A development-only headless executable built from the same engine library is the cleanest replacement while still shipping a single end-user application.
+The Python stress and benchmark tools launch `jam2` through its public
+headless/debug surface. Removing that interface would discard valuable
+regression coverage. GUI, ordinary headless commands, and debug automation must
+therefore remain adapters over the same application session, `Engine`, and
+`NetworkSession` implementations in the one shipped executable.
 
 ## Recommended Target Architecture
 
@@ -212,11 +237,14 @@ Qt GUI thread
     |
     | typed commands, events, immutable snapshots
     v
-Engine supervisor
-    |-- ASIO/CoreAudio device and real-time callback
-    |-- UDP session and mesh worker
-    |-- recording/file worker
-    `-- statistics snapshot publisher
+Shared application session controller
+    |-- TCP bootstrap, authentication, membership, and authorities
+    |-- Engine
+    |     |-- ASIO/CoreAudio device and real-time callback
+    |     |-- recording/file worker
+    |     `-- statistics snapshot publisher
+    `-- NetworkSession
+          `-- UDP peers, scheduling, timing, and mixing
 ```
 
 The engine boundary should remain small:
@@ -226,23 +254,31 @@ The engine boundary should remain small:
 - `Engine::requestStop()` and `Engine::join()`.
 - `Engine::submit(Command)` using bounded storage.
 - Atomic runtime controls for appropriate simple values.
-- `EngineSnapshot Engine::snapshot()` with fixed-shape technical data.
+- `EngineSnapshot Engine::snapshot()` with fixed-shape local technical data,
+  plus bounded per-call/paged peer snapshots published outside real-time work
+  so diagnostics do not impose a global peer-count ceiling.
 - A bounded event queue for lifecycle, network, recording, and error events.
 - Explicit peer add/remove/update operations suitable for mesh membership changes.
 
 Qt types, widgets, JSON objects, dialogs, and GUI callbacks should not enter the engine or core library.
 
-## Recommended Sequence
+## Remaining Architecture Context
 
-1. Establish baseline two-peer and three/four-peer benchmark captures for latency, jitter, packet processing, callback timing, mesh CPU, and shutdown behavior.
-2. Extract a typed, Qt-free engine without changing audio, metronome, UDP, buffering, scheduling, or mesh behavior.
-3. Preserve a development-only headless harness using the extracted engine.
-4. Integrate the engine into the GUI through dedicated threads and typed snapshots.
-5. Allow mesh peer membership changes without restarting the engine process/session machinery.
-6. Remove `QProcess`, local TCP control, stdin commands, JSONL compatibility, and second-binary staging.
-7. Compare the unified application against the captured baselines before changing packet behavior.
-8. Independently benchmark and optimize UDP buffer ownership, copying, allocation, and parse errors.
-9. Convert remote GUI JSON selectively only where measurements or fixed high-frequency message shapes justify it.
+The final application uses one shared non-UI session controller for GUI,
+ordinary headless commands, and explicit debug automation. `Engine` owns audio,
+callback time, local media, and technical state. `NetworkSession` owns UDP peer
+streams and mixing. The shared controller owns TCP bootstrap, authentication,
+membership, the immutable session contract, and musical authority coordination.
+
+Typed commands, events, and snapshots replace `Jam2Process`, in-process CLI
+invocation, local loopback control, the runtime stdin command loop, and JSONL
+state reconstruction. A dedicated bounded inherited pipe may be used by debug
+automation; it is not the former CLI stdin protocol.
+
+Useful historical stress artifacts can be compared when a change needs them,
+but they are engineering evidence rather than mandatory numeric gates. The
+authoritative implementation order and completion status live only in
+[refactor-plan.md](refactor-plan.md).
 
 ## Decision Summary
 

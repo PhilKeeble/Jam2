@@ -17,9 +17,9 @@ from pathlib import Path
 from jam2_audio_analysis import analyze_recording_dir
 from jam2_benchmark_suite import benchmark_cases
 from jam2_benchmark_control import new_suite_id, same_run, start_control_server
-from jam2_harness import rewrite_jam_url_endpoint, start_listener
+from jam2_harness import collect_side_csv, rewrite_jam_url_endpoint, start_listener
 from jam2_metrics import combined_summary
-from jam2_tooling import copy_final_csv, default_jam2_path, ensure_dir, fail, print_flush, repo_root, write_json
+from jam2_tooling import default_jam2_path, ensure_dir, fail, print_flush, repo_root, write_json
 
 
 CLIENT_UPLOAD_TIMEOUT_S = 0
@@ -553,7 +553,7 @@ def run_one_case(jam2, audio_device, sample_rate, logs_dir, public_dir, case, ru
                 case.case_id,
                 run_index,
                 post_listener_upload_grace_s)
-    server_csv = copy_final_csv(paths["csv_raw"], paths["dir"])
+    server_csv = collect_side_csv(paths, listener)
     server_analysis = analyze_recording_dir(
         recording_dir,
         case.signal,

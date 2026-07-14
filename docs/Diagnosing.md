@@ -39,7 +39,7 @@ Jam2 exposes raw technical data so tuning can be based on measured behavior inst
 Enable CSV logging during repeatable tests:
 
 ```powershell
-.\release\jam2.exe listen --stats enabled --stats-interval-ms 1000 --log-stats logs
+.\release\jam2.exe network create --stats enabled --stats-interval-ms 1000 --log-stats logs
 ```
 
 CSV rows are useful for comparing one change at a time: frame size, audio buffer size, playback prefill, jitter-buffer frames, adaptive cushion, network path, or audio device.

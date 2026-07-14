@@ -16,7 +16,7 @@ else()
     endif()
 endif()
 
-option(JAM2_BUILD_GUI "Build jam2-gui when its CMake target is present" ON)
+option(JAM2_BUILD_GUI "Build the unified Jam2 GUI/CLI application" ON)
 
 set(JAM2_RELEASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/release" CACHE PATH "Directory for distributable app binaries")
 set(JAM2_BUILD_BIN_DIR "${CMAKE_BINARY_DIR}/bin" CACHE PATH "Directory for built app binaries before release staging")
@@ -36,13 +36,13 @@ endfunction()
 
 function(jam2_stage_release_binary target)
     jam2_create_release_dirs(${target})
-    if(APPLE AND target STREQUAL "jam2-gui")
+    if(APPLE AND target STREQUAL "jam2")
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND "${CMAKE_COMMAND}" -E remove_directory
-                "${JAM2_RELEASE_DIR}/jam2-gui.app"
+                "${JAM2_RELEASE_DIR}/Jam2.app"
             COMMAND "${CMAKE_COMMAND}" -E copy_directory
                 "$<TARGET_BUNDLE_DIR:${target}>"
-                "${JAM2_RELEASE_DIR}/jam2-gui.app"
+                "${JAM2_RELEASE_DIR}/Jam2.app"
             VERBATIM
         )
     else()
@@ -73,8 +73,6 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG "${JAM2_BUILD_BIN_DIR}")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE "${JAM2_BUILD_BIN_DIR}")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${JAM2_BUILD_BIN_DIR}")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${JAM2_BUILD_BIN_DIR}")
-
-add_subdirectory(apps/jam2-cli)
 
 if(JAM2_BUILD_GUI AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/apps/jam2-gui/CMakeLists.txt")
     add_subdirectory(apps/jam2-gui)

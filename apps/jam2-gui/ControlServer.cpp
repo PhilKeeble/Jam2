@@ -156,8 +156,7 @@ void ControlServer::acceptPeer()
         if (!socket) {
             return;
         }
-        if (pendingPeerCount() >= kMaxPendingPeers ||
-            peers_.size() >= kMaxPendingPeers + kMaxAuthenticatedPeers) {
+        if (pendingPeerCount() >= kMaxPendingPeers) {
             ++stats_.pendingCapRejects;
             socket->abort();
             socket->deleteLater();
@@ -301,7 +300,7 @@ void ControlServer::handleHandshake(Peer* peer, const QJsonObject& message)
     const QString session = message.value(QStringLiteral("session")).toString().toLower();
     const QByteArray clientNonce = decodeHex(message.value(QStringLiteral("client_nonce")).toString(), 16);
     const QByteArray clientProof = decodeHex(message.value(QStringLiteral("proof")).toString(), 16);
-    QString token = message.value(QStringLiteral("mesh_peer_token")).toString();
+    QString token = message.value(QStringLiteral("peer_token")).toString();
     const QString udpEndpoint = message.value(QStringLiteral("udp_endpoint")).toString();
     const bool tokenValid = token.isEmpty() || decodeHex(token, 16).size() == 16;
     if (type != QStringLiteral("hello.proof") ||
@@ -312,12 +311,6 @@ void ControlServer::handleHandshake(Peer* peer, const QJsonObject& message)
         rejectPeer(peer, QStringLiteral("TCP control authentication fields are invalid"));
         return;
     }
-    if (authenticatedPeerCount() >= kMaxAuthenticatedPeers) {
-        ++stats_.authenticatedCapRejects;
-        rejectPeer(peer, QStringLiteral("TCP control authenticated peer cap reached"));
-        return;
-    }
-
     if (token.isEmpty()) {
         token = encodeHex(randomNonce());
     }
@@ -364,7 +357,7 @@ void ControlServer::handleHandshake(Peer* peer, const QJsonObject& message)
     }
     if (onAuthenticated) {
         QJsonObject authenticatedMessage{
-            {QStringLiteral("mesh_peer_token"), token},
+            {QStringLiteral("peer_token"), token},
             {QStringLiteral("udp_endpoint"), udpEndpoint},
             {QStringLiteral("tcp_peer_host"), peer->socket->peerAddress().toString()},
         };

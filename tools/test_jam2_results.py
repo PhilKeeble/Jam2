@@ -17,6 +17,8 @@ def normal_result(scenario="clean-control", **metric_overrides):
         "loss_percent_max": 0.0,
         "frame_size_max": 64.0,
         "audio_callbacks_min": 100.0,
+        "peer_identity_valid": True,
+        "session_contract_valid": True,
     }
     metrics.update(metric_overrides)
     return {
@@ -99,8 +101,100 @@ class NormalVerdictTests(unittest.TestCase):
         self.assertEqual(verdict_for(result), "pass")
         self.assertEqual(result["audio_health_verdict"], "not_evaluated")
 
+    def test_transient_stall_requires_bounded_recovery(self):
+        result = normal_result(
+            "transient-stall-recovery",
+            jitter_max_ms=120.0,
+            frame_size_max=64.0,
+            recovery_window_ms_min=5000.0,
+            recovery_recv_packets_delta_min=3000.0,
+            mix_capacity_drops_total=0.0,
+            recovery_mix_capacity_drops_delta_total=0.0,
+            recovery_mix_active_slots_ratio_max=0.02,
+            recovery_adaptive_padding_frames_delta_total=0.0,
+            adaptive_raise_events_total=40.0,
+            adaptive_release_events_total=100.0,
+            adaptive_target_recovered_frames_min=400.0)
+        result["requested_stream_ms"] = 18000
+        result["metrics"]["combined"]["elapsed_s_min"] = 18.0
+        result["proxy_stats"] = {
+            "client_to_server_blackout_events": 1,
+            "server_to_client_blackout_events": 1,
+        }
+
+        self.assertEqual(verdict_for(result), "pass")
+
+        result["metrics"]["combined"]["recovery_mix_active_slots_ratio_max"] = 0.99
+        self.assertEqual(verdict_for(result), "transient_stall_mixer_queue_not_recovered")
+
+    def test_transient_stall_rejects_continuing_padding(self):
+        result = normal_result(
+            "transient-stall-recovery",
+            jitter_max_ms=120.0,
+            frame_size_max=64.0,
+            recovery_window_ms_min=5000.0,
+            recovery_recv_packets_delta_min=3000.0,
+            recovery_mix_active_slots_ratio_max=0.02,
+            recovery_adaptive_padding_frames_delta_total=9000.0,
+            adaptive_raise_events_total=40.0,
+            adaptive_release_events_total=100.0,
+            adaptive_target_recovered_frames_min=400.0)
+        result["requested_stream_ms"] = 18000
+        result["metrics"]["combined"]["elapsed_s_min"] = 18.0
+        result["proxy_stats"] = {
+            "client_to_server_blackout_events": 1,
+            "server_to_client_blackout_events": 1,
+        }
+
+        self.assertEqual(verdict_for(result), "transient_stall_adaptive_padding_not_recovered")
+
 
 class HeadlessVerdictTests(unittest.TestCase):
+    def test_mesh_teardown_uses_established_membership_high_water(self):
+        peers = []
+        for index in range(3):
+            peers.append({
+                "peer": f"peer{index + 1}",
+                "return_code": 0,
+                "csv_summary": {
+                    "has_csv": True,
+                    "active_sample_rate": 1000.0,
+                    "elapsed_s": 1.0,
+                    "sent_packets": 100.0,
+                    "recv_packets": 100.0,
+                    "audio_callbacks": 10.0,
+                    "local_peer_id": index + 1,
+                    "network_peer_count": 1 if index == 0 else 2,
+                    "network_active_peer_count": 1 if index == 0 else 2,
+                    "mix_contributing_peers": 1 if index == 0 else 2,
+                    "network_peer_count_observed_max": 2,
+                    "network_active_peer_count_observed_max": 2,
+                    "mix_contributing_peers_observed_max": 2,
+                    "mix_released_slots": 10,
+                    "mix_complete_slots": 10,
+                    "mix_output_frames": 100,
+                    "grid_authority_peer_id": 1,
+                    "bootstrap_coordinator_peer_id": 1,
+                    "grid_revision": 1,
+                    "grid_authority_states_sent": 1,
+                    "grid_authority_states_accepted": 1,
+                },
+                "audio_analysis": {
+                    "ok": True,
+                    "tags": [],
+                    "sidecar": {"sample_rate": 1000, "frames_written": 1000},
+                },
+            })
+        result = {
+            "requested_stream_ms": 1000,
+            "peer_results": peers,
+            "mesh_metrics": mesh_collect_metrics(peers, requested_stream_ms=1000),
+        }
+
+        self.assertEqual(result["mesh_metrics"]["network_peer_count_min"], 1)
+        self.assertEqual(result["mesh_metrics"]["network_peer_count_established_min"], 2)
+        self.assertEqual(mesh_verdict(result), "pass")
+
     def test_recording_coverage_uses_requested_wall_clock_duration(self):
         peers = []
         for index in range(2):
@@ -114,6 +208,21 @@ class HeadlessVerdictTests(unittest.TestCase):
                     "sent_packets": 1.0,
                     "recv_packets": 1.0,
                     "audio_callbacks": 10.0,
+                    "local_peer_id": index + 1,
+                    "network_peer_count": 1,
+                    "network_active_peer_count": 1,
+                    "mix_contributing_peers": 1,
+                    "mix_released_slots": 1,
+                    "mix_complete_slots": 1,
+                    "mix_output_frames": 1,
+                    "grid_authority_peer_id": 1,
+                    "bootstrap_coordinator_peer_id": 1,
+                    "grid_revision": 1,
+                    "grid_authority_states_sent": 1,
+                    "grid_authority_states_accepted": 1,
+                    "drift_ppm": 180.0 if index == 0 else -160.0,
+                    "resampler_ratio": 1.00018 if index == 0 else 0.99984,
+                    "drift_correction_active_percent": 0.0,
                 },
                 "audio_analysis": {
                     "ok": True,
@@ -131,6 +240,8 @@ class HeadlessVerdictTests(unittest.TestCase):
         }
 
         self.assertEqual(metrics["recording_duration_coverage_ratio_min"], 0.899)
+        self.assertEqual(metrics["drift_correction_active_peers"], 2)
+        self.assertAlmostEqual(metrics["resampler_ratio_delta_max"], 0.00018)
         self.assertEqual(mesh_verdict(result), "effective_duration_too_short")
 
     def test_stale_sample_rejection_is_not_a_clean_protocol_pass(self):
@@ -140,6 +251,21 @@ class HeadlessVerdictTests(unittest.TestCase):
                 "peer_count": 2,
                 "return_code_failures": 0,
                 "peers_with_csv": 2,
+                "expected_remote_peers": 1,
+                "distinct_local_peer_ids": 2,
+                "network_peer_count_min": 1,
+                "network_peer_count_max": 1,
+                "network_active_peer_count_min": 1,
+                "network_active_peer_count_max": 1,
+                "mix_contributing_peers_min": 1,
+                "mix_released_slots_min": 1.0,
+                "mix_complete_slots_min": 1.0,
+                "mix_output_frames_min": 1.0,
+                "grid_authority_peer_ids": [1],
+                "grid_revision_min": 1,
+                "grid_revision_max": 1,
+                "grid_authority_states_sent_total": 1.0,
+                "grid_authority_states_accepted_total": 1.0,
                 "sent_packets_min": 1.0,
                 "recv_packets_min": 1.0,
                 "stats_duration_coverage_ratio_min": 1.0,

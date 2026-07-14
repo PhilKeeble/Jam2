@@ -91,8 +91,23 @@ def mesh_collect_metrics(peer_results, requested_stream_ms=0):
             (row.get("network_active_peer_count", 0) for row in summaries), default=0),
         "network_active_peer_count_max": max(
             (row.get("network_active_peer_count", 0) for row in summaries), default=0),
+        "network_peer_count_established_min": min(
+            (row.get("network_peer_count_observed_max", row.get("network_peer_count", 0))
+             for row in summaries), default=0),
+        "network_peer_count_established_max": max(
+            (row.get("network_peer_count_observed_max", row.get("network_peer_count", 0))
+             for row in summaries), default=0),
+        "network_active_peer_count_established_min": min(
+            (row.get("network_active_peer_count_observed_max", row.get("network_active_peer_count", 0))
+             for row in summaries), default=0),
+        "network_active_peer_count_established_max": max(
+            (row.get("network_active_peer_count_observed_max", row.get("network_active_peer_count", 0))
+             for row in summaries), default=0),
         "mix_contributing_peers_min": min(
             (row.get("mix_contributing_peers", 0) for row in summaries), default=0),
+        "mix_contributing_peers_established_min": min(
+            (row.get("mix_contributing_peers_observed_max", row.get("mix_contributing_peers", 0))
+             for row in summaries), default=0),
         "mix_released_slots_min": min((row.get("mix_released_slots", 0.0) for row in summaries), default=0.0),
         "mix_complete_slots_min": min((row.get("mix_complete_slots", 0.0) for row in summaries), default=0.0),
         "mix_deadline_slots_total": sum((row.get("mix_deadline_slots", 0.0) for row in summaries), 0.0),
@@ -127,6 +142,20 @@ def mesh_collect_metrics(peer_results, requested_stream_ms=0):
         "sequence_duplicate_total": sum((row.get("sequence_duplicate", 0.0) for row in summaries), 0.0),
         "jitter_max_ms": max((row.get("jitter_max_ms", 0.0) for row in summaries), default=0.0),
         "rtt_max_ms": max((row.get("rtt_max_ms", 0.0) for row in summaries), default=0.0),
+        "drift_abs_ppm_max": max((abs(row.get("drift_ppm", 0.0)) for row in summaries), default=0.0),
+        "drift_correction_active_peers": sum(
+            1 for row in summaries
+            if (row.get("drift_correction_active_percent", 0.0) > 0.0 or
+                abs(row.get("resampler_ratio", 1.0) - 1.0) > 0.000001)),
+        "resampler_ratio_delta_max": max((
+            max(
+                abs(row.get("resampler_ratio", 1.0) - 1.0),
+                abs(row.get("resampler_ratio_min", 1.0) - 1.0)
+                if row.get("resampler_ratio_min", 0.0) > 0.0 else 0.0,
+                abs(row.get("resampler_ratio_max", 1.0) - 1.0)
+                if row.get("resampler_ratio_max", 0.0) > 0.0 else 0.0)
+            for row in summaries
+        ), default=0.0),
         "playback_underrun_time_ms_total": sum((row.get("playback_ring_underrun_time_ms", 0.0) for row in summaries), 0.0),
         "playback_overruns_total": sum((row.get("playback_ring_overruns", 0.0) for row in summaries), 0.0),
         "playback_dropped_frames_total": sum((row.get("playback_dropped_frames", 0.0) for row in summaries), 0.0),
@@ -162,13 +191,18 @@ def mesh_verdict(result):
         protocol_verdict = "missing_csv"
     elif metrics.get("distinct_local_peer_ids", 0) != peer_count:
         protocol_verdict = "mesh_peer_identity_invalid"
-    elif (metrics.get("network_peer_count_min", -1) != metrics.get("expected_remote_peers", 0) or
-          metrics.get("network_peer_count_max", -1) != metrics.get("expected_remote_peers", 0)):
+    elif (metrics.get("network_peer_count_established_min", metrics.get("network_peer_count_min", -1)) !=
+          metrics.get("expected_remote_peers", 0) or
+          metrics.get("network_peer_count_established_max", metrics.get("network_peer_count_max", -1)) !=
+          metrics.get("expected_remote_peers", 0)):
         protocol_verdict = "mesh_peer_count_mismatch"
-    elif (metrics.get("network_active_peer_count_min", -1) != metrics.get("expected_remote_peers", 0) or
-          metrics.get("network_active_peer_count_max", -1) != metrics.get("expected_remote_peers", 0)):
+    elif (metrics.get("network_active_peer_count_established_min", metrics.get("network_active_peer_count_min", -1)) !=
+          metrics.get("expected_remote_peers", 0) or
+          metrics.get("network_active_peer_count_established_max", metrics.get("network_active_peer_count_max", -1)) !=
+          metrics.get("expected_remote_peers", 0)):
         protocol_verdict = "mesh_endpoint_proof_incomplete"
-    elif metrics.get("mix_contributing_peers_min", -1) != metrics.get("expected_remote_peers", 0):
+    elif metrics.get("mix_contributing_peers_established_min", metrics.get("mix_contributing_peers_min", -1)) != \
+            metrics.get("expected_remote_peers", 0):
         protocol_verdict = "mesh_mixer_contributors_missing"
     elif metrics.get("mix_released_slots_min", 0.0) <= 0.0 or metrics.get("mix_output_frames_min", 0.0) <= 0.0:
         protocol_verdict = "mesh_mixer_output_missing"
@@ -178,6 +212,22 @@ def mesh_verdict(result):
         protocol_verdict = "mesh_mixer_capacity_drops"
     elif metrics.get("mix_output_dropped_frames_total", 0.0) > 0.0:
         protocol_verdict = "mesh_mixer_output_drops"
+    elif (len(set(result.get("headless_clock_drift_ppm", []))) > 1 and
+          metrics.get("drift_abs_ppm_max", 0.0) < 50.0):
+        protocol_verdict = "headless_clock_drift_not_observed"
+    elif (len(set(result.get("headless_clock_drift_ppm", []))) > 1 and
+          metrics.get("drift_correction_active_peers", 0) <= 0):
+        protocol_verdict = "headless_clock_drift_not_corrected"
+    elif (result.get("edge_impairments") and
+          len(result.get("edge_proxy_stats", [])) != len(result.get("edge_impairments", []))):
+        protocol_verdict = "mesh_edge_proxy_missing"
+    elif (result.get("edge_impairments") and any(
+            edge.get("stats", {}).get("client_to_server_packets", 0) <= 0 or
+            edge.get("stats", {}).get("server_to_client_packets", 0) <= 0 or
+            (edge.get("stats", {}).get("client_to_server_delayed", 0) +
+             edge.get("stats", {}).get("server_to_client_delayed", 0)) <= 0
+            for edge in result.get("edge_proxy_stats", []))):
+        protocol_verdict = "mesh_edge_impairment_not_exercised"
     elif metrics.get("sent_packets_min", 0.0) <= 0.0 or metrics.get("recv_packets_min", 0.0) <= 0.0:
         protocol_verdict = "mesh_packets_missing"
     elif len(metrics.get("grid_authority_peer_ids", [])) != 1:
@@ -372,6 +422,31 @@ def protocol_verdict_for(result):
                 and metrics.get("missing_audio_frames_total", 0.0) <= 0.0
                 and metrics.get("sequence_lost_total", 0.0) <= 0.0):
             return "burst_not_observed"
+        return "pass"
+    if scenario == "transient-stall-recovery":
+        blackouts = proxy.get("client_to_server_blackout_events", 0) + proxy.get("server_to_client_blackout_events", 0)
+        if blackouts != 2:
+            return "transient_stall_not_injected_once_per_direction"
+        if metrics.get("jitter_max_ms", 0.0) < 50.0:
+            return "transient_stall_not_observed"
+        if metrics.get("recovery_window_ms_min", 0.0) < 4000.0:
+            return "transient_stall_recovery_window_too_short"
+        if metrics.get("recovery_recv_packets_delta_min", 0.0) <= 0.0:
+            return "transient_stall_packet_flow_not_recovered"
+        if metrics.get("mix_capacity_drops_total", 0.0) > 0.0:
+            return "transient_stall_mixer_capacity_drops"
+        if metrics.get("recovery_mix_capacity_drops_delta_total", 0.0) > 0.0:
+            return "transient_stall_mixer_still_dropping"
+        if metrics.get("recovery_mix_active_slots_ratio_max", 0.0) > 0.25:
+            return "transient_stall_mixer_queue_not_recovered"
+        padding_limit = max(128.0, metrics.get("frame_size_max", 0.0) * 4.0)
+        if metrics.get("recovery_adaptive_padding_frames_delta_total", 0.0) > padding_limit:
+            return "transient_stall_adaptive_padding_not_recovered"
+        if metrics.get("adaptive_raise_events_total", 0.0) <= 0.0:
+            return "transient_stall_adaptive_raise_not_observed"
+        if metrics.get("adaptive_release_events_total", 0.0) <= 0.0 or \
+                metrics.get("adaptive_target_recovered_frames_min", 0.0) <= 0.0:
+            return "transient_stall_adaptive_target_not_recovering"
         return "pass"
     if scenario == "reorder-small":
         if proxy.get("client_to_server_reordered", 0) + proxy.get("server_to_client_reordered", 0) <= 0:
@@ -605,6 +680,7 @@ def metronome_verdict(result, expected_mode):
     combined = metrics.get("combined", {})
     server = metrics.get("server", {})
     client = metrics.get("client", {})
+    wav = result.get("metronome_wav_analysis", {})
     if not combined.get("grid_authority_consensus", False):
         return "grid_authority_not_consistent"
     if not combined.get("grid_revision_consensus", False):
@@ -613,7 +689,7 @@ def metronome_verdict(result, expected_mode):
         return "grid_authority_state_not_sent"
     if combined.get("grid_authority_states_accepted_total", 0.0) <= 0.0:
         return "grid_authority_state_not_accepted"
-    if combined.get("metronome_alignment_valid_sides", 0.0) < 2:
+    if combined.get("metronome_alignment_valid_sides", 0.0) < 2 and not wav:
         return "metronome_alignment_not_valid"
     # Leader audio legitimately starts its creator clock at frame zero. The
     # alignment-valid fields above distinguish that from an unset epoch.
@@ -640,7 +716,6 @@ def metronome_verdict(result, expected_mode):
         injecting = [side for side in (server, client) if side.get("leader_audio_injected_packets", 0.0) > 0.0]
         if len(injecting) != 1 or injecting[0].get("leader_audio_source_peer_id") != authority_id:
             return "leader_audio_source_not_authority"
-    wav = result.get("metronome_wav_analysis", {})
     if wav:
         if not wav.get("ok", False):
             return wav.get("verdict", "metronome_wav_failed")

@@ -10,7 +10,7 @@ find_package(Qt6 QUIET COMPONENTS Core Gui Widgets Network)
 
 if(NOT Qt6_FOUND)
     message(FATAL_ERROR
-        "jam2-gui requires Qt 6 Widgets and Network development packages.\n"
+        "The Jam2 GUI requires Qt 6 Widgets and Network development packages.\n"
         "Install Qt 6, then reconfigure with a Qt prefix, for example:\n"
         "  cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DJAM2_BUILD_GUI=ON -DCMAKE_PREFIX_PATH=C:/Qt/6.7.3/msvc2019_64\n"
         "If your Qt version/toolchain folder differs, point CMAKE_PREFIX_PATH at that folder."
@@ -31,7 +31,9 @@ if(WIN32)
     )
 endif()
 
-add_executable(jam2-gui WIN32 MACOSX_BUNDLE
+# The unified Windows binary uses the console subsystem so shells wait for
+# command-line invocations. The no-argument GUI path detaches immediately.
+add_executable(jam2 MACOSX_BUNDLE
     BeatGridModel.cpp
     BeatGridModel.hpp
     BeatGridWidget.cpp
@@ -60,10 +62,13 @@ add_executable(jam2-gui WIN32 MACOSX_BUNDLE
     SharedTrackController.hpp
     SharedTrackModel.hpp
     main.cpp
+    ../jam2-cli/main.cpp
+    ../jam2-cli/cli_entry.hpp
 )
 
 if(WIN32)
-    target_sources(jam2-gui PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/Jam2.rc")
+    set_target_properties(jam2 PROPERTIES WIN32_EXECUTABLE FALSE)
+    target_sources(jam2 PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/Jam2.rc")
 endif()
 
 if(APPLE)
@@ -71,12 +76,12 @@ if(APPLE)
     set_source_files_properties("${JAM2_GUI_MACOS_ICON}" PROPERTIES
         MACOSX_PACKAGE_LOCATION "Resources"
     )
-    target_sources(jam2-gui PRIVATE
+    target_sources(jam2 PRIVATE
         Jam2MacPermissions.hpp
         Jam2MacPermissions.mm
         "${JAM2_GUI_MACOS_ICON}"
     )
-    set_target_properties(jam2-gui PROPERTIES
+    set_target_properties(jam2 PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in"
         MACOSX_BUNDLE_BUNDLE_NAME "Jam2"
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.jam2.app"
@@ -84,43 +89,39 @@ if(APPLE)
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
     )
-    add_dependencies(jam2-gui jam2)
-    add_custom_command(TARGET jam2-gui POST_BUILD
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "$<TARGET_FILE:jam2>"
-            "$<TARGET_BUNDLE_DIR:jam2-gui>/Contents/MacOS/$<TARGET_FILE_NAME:jam2>"
-        VERBATIM
-    )
 endif()
 
-jam2_set_app_output(jam2-gui)
+jam2_set_app_output(jam2)
 
-target_include_directories(jam2-gui PRIVATE
+target_include_directories(jam2 PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../../libs/third_party"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../jam2-cli"
 )
 
-target_link_libraries(jam2-gui PRIVATE
+target_link_libraries(jam2 PRIVATE
     jam2_core
     Qt6::Network
     Qt6::Widgets
 )
 
 if(APPLE)
-    target_link_libraries(jam2-gui PRIVATE
+    target_link_libraries(jam2 PRIVATE
         "-framework AVFoundation"
         "-framework Foundation"
     )
 endif()
 
 if(WIN32)
-    target_link_libraries(jam2-gui PRIVATE ole32 propsys)
+    target_link_libraries(jam2 PRIVATE ole32 propsys Avrt Winmm)
     get_target_property(QT_QMAKE_EXECUTABLE Qt6::qmake IMPORTED_LOCATION)
     execute_process(
         COMMAND "${QT_QMAKE_EXECUTABLE}" -query QT_INSTALL_PLUGINS
         OUTPUT_VARIABLE QT_PLUGINS_DIR
         OUTPUT_STRIP_TRAILING_WHITESPACE
     )
-    add_custom_command(TARGET jam2-gui POST_BUILD
+    add_custom_command(TARGET jam2 POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E rm -f
+            "${JAM2_RELEASE_DIR}/jam2-gui.exe"
         COMMAND "${CMAKE_COMMAND}" -E remove_directory
             "${JAM2_RELEASE_DIR}/generic"
         COMMAND "${CMAKE_COMMAND}" -E remove_directory
@@ -161,7 +162,7 @@ if(WIN32)
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/qt.conf"
             "${JAM2_RELEASE_DIR}/qt.conf"
-        COMMENT "Staging minimal Qt runtime files for jam2-gui"
+        COMMENT "Staging minimal Qt runtime files for unified jam2"
         VERBATIM
     )
 endif()

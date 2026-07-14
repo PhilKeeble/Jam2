@@ -35,7 +35,6 @@ struct PeerId {
 enum class SessionBootstrapRole : std::uint8_t {
     Creator,
     Joiner,
-    Static,
 };
 
 enum class SessionBootstrapState : std::uint8_t {
@@ -59,7 +58,11 @@ struct NetworkPeerDescriptor {
 
 class NetworkPacketSchedule {
 public:
-    NetworkPacketSchedule(int sample_rate, int frames_per_packet, std::uint64_t start_time_us);
+    NetworkPacketSchedule(
+        int sample_rate,
+        int frames_per_packet,
+        std::uint64_t start_time_us,
+        int clock_drift_ppm = 0);
 
     std::uint64_t startTimeUs() const noexcept;
     std::uint64_t nextAudioSendUs() const noexcept;
@@ -112,7 +115,8 @@ public:
         PeerId local_peer_id,
         const NetworkPeerDescriptor& remote_peer,
         const PeerStreamConfig& peer_config,
-        PeerStreamPlayback* playback);
+        PeerStreamPlayback* playback,
+        int packet_clock_drift_ppm = 0);
     NetworkSession(
         UdpSocket&& socket,
         const SessionInfo& session,
@@ -121,7 +125,8 @@ public:
         PeerId local_peer_id,
         std::span<const NetworkPeerDescriptor> remote_peers,
         const PeerStreamConfig& peer_config,
-        PeerStreamPlayback* playback);
+        PeerStreamPlayback* playback,
+        int packet_clock_drift_ppm = 0);
     ~NetworkSession();
 
     NetworkSession(const NetworkSession&) = delete;

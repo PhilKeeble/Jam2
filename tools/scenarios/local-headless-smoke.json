@@ -1,0 +1,14 @@
+{
+  "schema": "jam2-debug-scenario-v1",
+  "run_id": "local-headless-smoke",
+  "operation": "local",
+  "arguments": [
+    "--headless-audio", "on",
+    "--audio-buffer-size", "256",
+    "--sample-rate", "48000",
+    "--stream-ms", "1000",
+    "--stats", "enabled",
+    "--status-format", "jsonl",
+    "--stats-interval-ms", "250"
+  ]
+}

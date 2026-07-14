@@ -13,11 +13,11 @@ from pathlib import Path
 from jam2_audio_analysis import analyze_recording_dir
 from jam2_benchmark_control import BenchmarkControlClient, control_endpoint_from_server_url, same_run
 from jam2_harness import rewrite_jam_url_endpoint
-from jam2_tooling import copy_final_csv, default_jam2_path, ensure_dir, fail, print_flush, repo_root, write_json
+from jam2_tooling import copy_emitted_csv, default_jam2_path, ensure_dir, fail, print_flush, repo_root, write_json
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run Jam2 static benchmark cases from a benchmark TCP control server.")
+    parser = argparse.ArgumentParser(description="Run fixed Jam2 benchmark cases from a benchmark TCP control server.")
     parser.add_argument("--server", required=True, help="Server host or diagnostic HTTP URL, for example 192.168.1.50")
     parser.add_argument("--control", default="", help="TCP control endpoint; defaults to SERVER host with port 49000")
     parser.add_argument("--jam2", default=str(default_jam2_path()))
@@ -96,11 +96,14 @@ def zip_dir(source_dir, zip_path):
             archive.write(path, path.relative_to(source_dir))
 
 
-def _copy_stream(pipe, handle):
+def _copy_stream(pipe, handle, emitted_stats=None):
     try:
         for line in pipe:
             handle.write(line)
             handle.flush()
+            raw = line.rstrip("\r\n")
+            if emitted_stats is not None and raw.startswith("Stats CSV: "):
+                emitted_stats.append(raw[len("Stats CSV: "):].strip())
     finally:
         pipe.close()
 
@@ -166,7 +169,7 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
             print_flush(f"[client] could not rewrite Jam2 URL host: {error}; using published URL")
     args = [
         str(jam2),
-        "connect",
+        "network", "join",
         jam_url,
         "--wait-ms", str(max(15000, int(current.get("stream_ms", 30000)) + 15000)),
         "--audio-device", str(audio_device),
@@ -196,7 +199,11 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
             encoding="utf-8",
             errors="replace",
             bufsize=1)
-        stdout_thread = threading.Thread(target=_copy_stream, args=(process.stdout, stdout), daemon=True)
+        emitted_stats = []
+        stdout_thread = threading.Thread(
+            target=_copy_stream,
+            args=(process.stdout, stdout, emitted_stats),
+            daemon=True)
         stderr_thread = threading.Thread(target=_copy_stream, args=(process.stderr, stderr), daemon=True)
         stdout_thread.start()
         stderr_thread.start()
@@ -230,7 +237,7 @@ def run_case(jam2, current, audio_device, sample_rate, logs, server_url, clean, 
         stderr_thread.join(timeout=1.0)
     if stale_retry:
         return "retry_offer"
-    copied_csv = copy_final_csv(csv_dir, output_dir)
+    copied_csv = copy_emitted_csv(emitted_stats[-1] if emitted_stats else None, output_dir)
     analysis = analyze_recording_dir(
         recording_dir,
         signal,

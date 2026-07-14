@@ -278,6 +278,7 @@ public:
     HeadlessDeviceStream(
         double sample_rate,
         long buffer_size,
+        int clock_drift_ppm,
         audio::InputChannels input_channels,
         audio::ChannelSelection channels,
         audio::MonoRingBuffer& capture_ring,
@@ -288,6 +289,7 @@ public:
         audio::TrackTakeRecorder* track_take_recorder)
         : sample_rate_(sample_rate)
         , buffer_size_(buffer_size > 0 ? buffer_size : 128)
+        , clock_rate_(sample_rate * (1.0 + static_cast<double>(clock_drift_ppm) / 1000000.0))
         , capture_ring_(capture_ring)
         , playback_ring_(playback_ring)
         , playback_prefill_frames_(playback_prefill_frames)
@@ -347,7 +349,7 @@ private:
         const std::uint64_t interval = now_us >= last_callback_us_ ? now_us - last_callback_us_ : 0;
         last_callback_us_ = now_us;
         const std::uint64_t expected = static_cast<std::uint64_t>(
-            static_cast<double>(buffer_size_) * 1000000.0 / sample_rate_);
+            static_cast<double>(buffer_size_) * 1000000.0 / clock_rate_);
         std::uint64_t minimum = interval_min_us_.load(std::memory_order_relaxed);
         while ((minimum == 0 || interval < minimum) &&
                !interval_min_us_.compare_exchange_weak(minimum, interval, std::memory_order_relaxed)) {
@@ -408,6 +410,7 @@ private:
         if (network_playback && playback_prefilled_.load(std::memory_order_relaxed)) {
             playback_ring_.pop(playback_scratch_);
         }
+        control_.network_playback_enabled_applied.store(network_playback, std::memory_order_release);
         const int remote_peak = peak_ppm(playback_scratch_);
         update_peak(control_.remote_peak_ppm, remote_peak);
         update_peak(control_.gui_remote_peak_ppm, remote_peak);
@@ -476,7 +479,7 @@ private:
         using clock = std::chrono::steady_clock;
         auto next = clock::now();
         const auto period = std::chrono::duration_cast<clock::duration>(
-            std::chrono::duration<double>(static_cast<double>(buffer_size_) / sample_rate_));
+            std::chrono::duration<double>(static_cast<double>(buffer_size_) / clock_rate_));
         while (!stop_.load(std::memory_order_acquire)) {
             const std::uint64_t callback_frame = engine_frame_;
             observe_callback_interval(monotonic_us());
@@ -495,6 +498,7 @@ private:
 
     double sample_rate_ = 48000.0;
     long buffer_size_ = 128;
+    double clock_rate_ = 48000.0;
     audio::MonoRingBuffer& capture_ring_;
     audio::MonoRingBuffer& playback_ring_;
     std::size_t playback_prefill_frames_ = 0;
@@ -1076,6 +1080,12 @@ void Engine::start(const EngineConfig& requested)
     if (requested.audio_buffer_frames < 0) {
         throw std::runtime_error("engine audio buffer size cannot be negative");
     }
+    if (requested.headless_clock_drift_ppm < -5000 || requested.headless_clock_drift_ppm > 5000) {
+        throw std::runtime_error("engine headless clock drift must be -5000..5000 ppm");
+    }
+    if (requested.backend != EngineAudioBackend::Headless && requested.headless_clock_drift_ppm != 0) {
+        throw std::runtime_error("engine headless clock drift requires the headless backend");
+    }
     if (requested.backend == EngineAudioBackend::Device && requested.audio_device_id < 0) {
         throw std::runtime_error("device engine requires a non-negative audio device id");
     }
@@ -1149,6 +1159,7 @@ void Engine::start(const EngineConfig& requested)
         control.network_capture_generation_applied.store(0, std::memory_order_relaxed);
         control.network_capture_epoch_frame.store(0, std::memory_order_relaxed);
         control.network_playback_enabled.store(false, std::memory_order_relaxed);
+        control.network_playback_enabled_applied.store(false, std::memory_order_relaxed);
 
         const long buffer_frames = impl_->config.audio_buffer_frames > 0
             ? impl_->config.audio_buffer_frames
@@ -1157,6 +1168,7 @@ void Engine::start(const EngineConfig& requested)
             impl_->stream = std::make_unique<HeadlessDeviceStream>(
                 static_cast<double>(impl_->config.sample_rate),
                 buffer_frames,
+                impl_->config.headless_clock_drift_ppm,
                 impl_->config.input_channels,
                 impl_->config.channels,
                 *impl_->capture_ring,
@@ -1421,9 +1433,6 @@ void Engine::detachNetworkCapture(NetworkCaptureAttachment attachment) noexcept
     }
     impl_->control->network_capture_requested_enabled.store(false, std::memory_order_release);
     impl_->control->network_playback_enabled.store(false, std::memory_order_release);
-    if (impl_->playback_ring != nullptr) {
-        impl_->playback_ring->request_drop_oldest(impl_->playback_ring->available_read());
-    }
     (void)impl_->control->network_capture_generation_requested.fetch_add(1, std::memory_order_acq_rel);
     impl_->attachment_active.store(false, std::memory_order_release);
     impl_->capture_detach_count.fetch_add(1, std::memory_order_relaxed);

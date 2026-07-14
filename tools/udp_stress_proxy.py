@@ -18,6 +18,7 @@ class DirectionImpairment:
     reorder_percent: float = 0.0
     burst_pause_ms: float = 0.0
     burst_every_ms: float = 0.0
+    burst_limit: int = 0
     preserve_order: bool = True
 
 
@@ -101,6 +102,11 @@ class UdpStressProxy:
     @property
     def public_endpoint(self):
         host, port = self.client_sock.getsockname()
+        return host, port
+
+    @property
+    def server_public_endpoint(self):
+        host, port = self.server_sock.getsockname()
         return host, port
 
     def close(self):
@@ -322,7 +328,10 @@ class UdpStressProxy:
         blackout_until = next_burst + pause_s
         setattr(self, blackout_attr, blackout_until)
         self.stats[f"{prefix}_blackout_events"] += 1
-        while next_burst <= now:
-            next_burst += every_s
+        if impairment.burst_limit > 0 and self.stats[f"{prefix}_blackout_events"] >= impairment.burst_limit:
+            next_burst = None
+        else:
+            while next_burst <= now:
+                next_burst += every_s
         setattr(self, attr, next_burst)
         return max(0.0, blackout_until - now)

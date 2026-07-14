@@ -6,10 +6,11 @@ These rules apply to all implementation work in this repository.
 
 - Simplicity and efficiency are the priority. This is not a broad production-ready platform.
 - The primary and simplest workflow is two people connecting directly to play instruments together with a metronome and the most real-time feel possible within physical network limits.
-- Keep direct full-mesh support for multiple people. Three or four peers are expected small-group use cases, while larger meshes are supported with no cap other than the limitations of there machine and it being experimental rather than explicitly suporting a certain number of people.
+- Keep direct full-mesh support for multiple people. Three or four peers are expected small-group use cases, while larger meshes have no application-wide cap and remain experimental. A jam creator may optionally set a session peer limit. Bound pending unauthenticated connections and failed-key work so invalid authentication traffic cannot consume unbounded resources.
 - Do not add rooms, relays, account systems, GUI layers, broad device abstractions, or production platform features unless explicitly requested.
 - The app must expose hard data for debugging and fine tuning.
 - Do not add subjective playability scores or inferred recommendations when raw measurements are sufficient.
+- Ship one public `jam2` executable. No arguments launch the primary GUI; public network startup uses only `network create` and `network join`, both over the universal direct-mesh engine. Retain useful headless, automation, and diagnostic commands in that executable.
 
 ## Protocol Rules
 
@@ -20,6 +21,7 @@ These rules apply to all implementation work in this repository.
 - Every protocol field should justify its presence in latency, correctness, debugging, or session safety terms.
 - STUN is used only for endpoint discovery and is never part of the audio path.
 - No relay/TURN audio path should be added.
+- Local command lines, logs, clipboard contents, and artifacts are outside the application security boundary and may contain session keys or invite URLs. Do not weaken network authentication or authorization on that basis.
 
 ## C++ Rules
 
