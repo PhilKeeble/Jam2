@@ -573,6 +573,7 @@ CsvStatsLog::AudioSnapshot make_audio_snapshot(
     snapshot.network_capture_epoch_frame = engine_snapshot.network_capture_epoch_frame;
     snapshot.network_capture_stale_frames_discarded = engine_snapshot.network_capture_stale_frames_discarded;
     snapshot.network_playback_enabled = engine_snapshot.network_playback_enabled;
+    snapshot.playback_ratio_ppm = engine_snapshot.playback_ratio_ppm;
     return snapshot;
 }
 

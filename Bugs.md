@@ -31,7 +31,19 @@ Sort the docs to be better formatting and manual
 
 Review all the stress and benchmark cases and wittle down what we do / dont need for fine tuning 
 
+when recording into a track with a wav in it makes a new one, discuss but could be fine, consider looking into it 
 
+when a network jitter happens it takes way too long to reduce the latency back down - should be fixed
+
+mac build gets a warning (might not be there stil)
+
+when you select wrong device for local there is no way to start the engine for local
+
+arm menu on mac is a bit messy
+
+on start jam and join jam we should add a test deice button nex tto sample rate where we can popup the current rate and then whether it supports 44100 or 48000 for easy usage
+
+add wasapi for local mode
 
 ## bugs
 

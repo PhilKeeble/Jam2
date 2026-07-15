@@ -2,28 +2,6 @@
 
 This file tracks future work that is not already implemented. User-facing documentation lives in `docs/`, with only `README.md` and this plan kept at the repository root. Completed refactor history, evidence, and supporting reviews live in [refactor-plan.md](refactor-plan.md) and its linked refactor documents.
 
-## Phase 12 Network and Asset Efficiency
-
-The authoritative implementation and completion contract is Phase 12 in
-[refactor-plan.md](refactor-plan.md). It now owns creator-selected session-wide
-PCM16/PCM24 network quality, one compact replacement UDP layout with no retained
-compatibility parser, bounded authenticated binary asset chunks, matched
-benchmark/stress comparisons using non-silent audio, and the new bounded
-`jam2_test.py fuzz` command family. The completed refactor ownership boundaries
-remain mandatory.
-
-The implemented fuzzer is intentionally frozen at its useful bounded baseline
-for Phase 12. Its existing native control, UDP PCM16/PCM24, binary-asset and WAV
-targets and retained smoke evidence are sufficient; broader corpus/state-space
-coverage, sanitizers, OS-level memory sandboxing, and further fuzz campaigns are
-optional future work. Current completion work focuses on protocol correctness
-and matched stress/benchmark measurement.
-
-PCM24 stays the temporary default while both formats are measured and manually
-checked. Choosing the eventual product default is intentionally a later product
-decision, not a Phase 12 completion gate. Track/Looper assets and recordings
-remain on their existing PCM16 WAV paths regardless of network quality.
-
 ## Practice Ideas (Visual Only)
 
 Consider adding lightweight visual practice generation to the existing Chord View and Beat View. This should remain a reference for musicians to play themselves, not an automatic accompaniment, assessment, or training platform. Users can already use the views for ear training, and can use the looper to record drum, chord, bass, or melody parts before playing another part over them.

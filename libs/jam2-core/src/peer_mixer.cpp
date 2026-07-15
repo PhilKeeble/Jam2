@@ -391,8 +391,18 @@ struct PeerMixer::Impl {
         }
         if (output != nullptr) {
             const int effective_release_ppm = std::min(config.adaptive_release_ppm, 5000);
-            const bool releasing = !missing && adaptive_target_frames > config.adaptive_min_frames &&
-                effective_release_ppm > 0;
+            const std::uint64_t actual_depth = output->depthFrames();
+            const std::uint64_t release_tolerance =
+                static_cast<std::uint64_t>(config.frames_per_block) * 4ULL;
+            const bool actual_depth_above_target =
+                actual_depth > adaptive_target_frames &&
+                actual_depth - adaptive_target_frames > release_tolerance;
+            // Keep draining the real device ring after the target counter reaches
+            // its minimum. Otherwise a burst can leave a permanent latency tail
+            // even though the diagnostic target appears to have recovered.
+            const bool releasing = !missing && effective_release_ppm > 0 &&
+                (adaptive_target_frames > config.adaptive_min_frames ||
+                 actual_depth_above_target);
             output->setResamplerRatio(
                 releasing ? 1.0 + static_cast<double>(effective_release_ppm) / 1000000.0 : 1.0);
         }

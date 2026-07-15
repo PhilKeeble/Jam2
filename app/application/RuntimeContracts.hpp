@@ -86,7 +86,7 @@ struct Jam2RuntimeOptions {
     std::size_t adaptive_playback_target_frames = 0;
     std::size_t adaptive_playback_min_frames = 0;
     std::size_t adaptive_playback_max_frames = 0;
-    int adaptive_playback_release_ppm = 1000;
+    int adaptive_playback_release_ppm = 5000;
     std::optional<std::uint64_t> session_id;
     std::optional<std::array<std::uint8_t, 16>> session_key;
     std::vector<jam2::Endpoint> mesh_peers;

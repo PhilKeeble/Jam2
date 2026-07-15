@@ -101,7 +101,8 @@ native scheduled actions, and expected technical behavior live in
   `clean-moderate-control`, `clean-safe-control`.
 - Delay, jitter, loss, and ordering: `jitter-20`, `jitter-50`, `jitter-100`,
   `burst-pause-250`, `burst-pause-500`, `burst-pause-1500`,
-  `transient-stall-recovery`, `loss-0.1`, `loss-0.5`, `loss-1.0`,
+  `transient-stall-recovery`, `transient-stall-250-recovery`, `loss-0.1`,
+  `loss-0.5`, `loss-1.0`,
   `reorder-small`, `duplicate-2.0`, `corrupt-1.0`.
 - UDP validation and bounded recovery: `near-wrap-sequence`, `malformed-udp`,
   `delayed-replay`, `forward-sequence-gap`, `extreme-sample-time`,
@@ -115,6 +116,12 @@ native scheduled actions, and expected technical behavior live in
   `jitter-buffer-512-adaptive-off-pressure`,
   `prefill-768-adaptive-off-pressure`, `jitter-buffer-1024-jitter-100`,
   `jitter-buffer-512-reorder-small`.
+
+The two transient recovery cases inject exactly one bidirectional 120 ms or
+250 ms stall. Their verdict requires the adaptive target to rise and fall, the
+bounded audio-control recovery ratio to be observed, steady packet/mixer flow,
+and the actual playback ring—not only its target counter—to return within four
+network packets of the configured minimum.
 - Metronome and grid: `metronome-shared-grid`, `metronome-leader-audio`,
   `metronome-listener-compensated`, `grid-authority-client-shared-grid`,
   `grid-authority-client-leader-audio`,

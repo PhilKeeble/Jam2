@@ -277,7 +277,6 @@ struct EngineControlMirror {
 void sync_engine_control(
     const RuntimeState& runtime,
     jam2::Engine* engine,
-    double playback_ratio,
     EngineControlMirror& mirror)
 {
     if (engine == nullptr) {
@@ -345,7 +344,6 @@ void sync_engine_control(
         jam2::EngineCommand command; command.type = jam2::EngineCommandType::SetMetronomeRenderOffset; command.signed_value = offset;
         if (submit(command)) mirror.snapshot.metronome_render_offset_frames = offset;
     }
-    engine->setNetworkPlaybackRatio(playback_ratio);
 }
 
 
@@ -2555,7 +2553,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             mesh_grid_last_update_us = now;
         }
         commit_due_transport(commands.state, audio.engine.get());
-        sync_engine_control(commands.state, audio.engine.get(), 1.0, engine_control_mirror);
+        sync_engine_control(commands.state, audio.engine.get(), engine_control_mirror);
         if (!timed_stream_audio_detached && now >= send_deadline) {
             detach_network_capture(audio);
             mesh_playback.detach();

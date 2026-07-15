@@ -56,6 +56,19 @@ class CsvSummaryTests(unittest.TestCase):
         scenario = {"source_scenario": "clean-control", "commands": []}
         self.assertEqual(_effective_stream_ms(scenario, 12000), 12000)
 
+    def test_single_250ms_stall_retains_recovery_tail(self):
+        scenario = {
+            "source_scenario": "transient-stall-250-recovery",
+            "impairment": type("Impairment", (), {
+                "client_to_server": type("Direction", (), {
+                    "burst_every_ms": 8000.0, "burst_pause_ms": 250.0})(),
+                "server_to_client": type("Direction", (), {
+                    "burst_every_ms": 8000.0, "burst_pause_ms": 250.0})(),
+            })(),
+            "commands": [],
+        }
+        self.assertEqual(_effective_stream_ms(scenario, 15000), 18000)
+
     def test_missing_first_click_is_a_startup_boundary(self):
         expected = [100, 1100, 2100]
         detected = [1105, 2104]
@@ -177,25 +190,34 @@ class CsvSummaryTests(unittest.TestCase):
         fields = [
             "row_type", "elapsed_ms", "adaptive_playback_padding_frames",
             "adaptive_playback_target_frames", "recv_packets", "mix_active_slots",
-            "mix_max_slots",
+            "mix_max_slots", "playback_ring_readable_frames", "audio_control_playback_ratio",
         ]
         rows = [
-            {"row_type": "periodic", "elapsed_ms": "13000",
+            {"row_type": "periodic", "elapsed_ms": "12000",
              "adaptive_playback_padding_frames": "2624",
              "adaptive_playback_target_frames": "1291", "recv_packets": "1000",
-             "mix_active_slots": "1", "mix_max_slots": "88"},
+             "mix_active_slots": "1", "mix_max_slots": "88",
+             "playback_ring_readable_frames": "1290", "audio_control_playback_ratio": "1.005"},
+            {"row_type": "periodic", "elapsed_ms": "14000",
+             "adaptive_playback_padding_frames": "2624",
+             "adaptive_playback_target_frames": "1150", "recv_packets": "2200",
+             "mix_active_slots": "1", "mix_max_slots": "88",
+             "playback_ring_readable_frames": "500", "audio_control_playback_ratio": "1.005"},
             {"row_type": "periodic", "elapsed_ms": "18000",
              "adaptive_playback_padding_frames": "2624",
              "adaptive_playback_target_frames": "1051", "recv_packets": "4000",
-             "mix_active_slots": "1", "mix_max_slots": "88"},
+             "mix_active_slots": "1", "mix_max_slots": "88",
+             "playback_ring_readable_frames": "400", "audio_control_playback_ratio": "1.005"},
             {"row_type": "periodic", "elapsed_ms": "19000",
              "adaptive_playback_padding_frames": "3648",
              "adaptive_playback_target_frames": "1536", "recv_packets": "4000",
-             "mix_active_slots": "0", "mix_max_slots": "88"},
+             "mix_active_slots": "0", "mix_max_slots": "88",
+             "playback_ring_readable_frames": "1536", "audio_control_playback_ratio": "1"},
             {"row_type": "final", "elapsed_ms": "19100",
              "adaptive_playback_padding_frames": "3648",
              "adaptive_playback_target_frames": "1536", "recv_packets": "4000",
-             "mix_active_slots": "0", "mix_max_slots": "88"},
+             "mix_active_slots": "0", "mix_max_slots": "88",
+             "playback_ring_readable_frames": "1536", "audio_control_playback_ratio": "1"},
         ]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "stats.csv"
@@ -206,6 +228,8 @@ class CsvSummaryTests(unittest.TestCase):
             summary = summarize_csv(path, assessment_elapsed_ms=18000)
             self.assertEqual(summary["recovery_adaptive_padding_frames_delta"], 0.0)
             self.assertEqual(summary["adaptive_playback_target_observed_max"], 1291.0)
+            self.assertEqual(summary["playback_ring_readable_recovery_max"], 500.0)
+            self.assertEqual(summary["audio_control_playback_ratio_observed_max"], 1.005)
 
 
 class NormalVerdictTests(unittest.TestCase):
@@ -289,7 +313,11 @@ class NormalVerdictTests(unittest.TestCase):
             recovery_adaptive_padding_frames_delta_total=0.0,
             adaptive_raise_events_total=40.0,
             adaptive_release_events_total=100.0,
-            adaptive_target_recovered_frames_min=400.0)
+            adaptive_target_recovered_frames_min=400.0,
+            adaptive_min_frames_max=256.0,
+            playback_ring_readable_recovery_max=320.0,
+            playback_ring_recovered_frames_min=900.0,
+            audio_control_playback_ratio_observed_max=1.005)
         result["requested_stream_ms"] = 18000
         result["metrics"]["combined"]["elapsed_s_min"] = 18.0
         result["proxy_stats"] = {
@@ -301,6 +329,34 @@ class NormalVerdictTests(unittest.TestCase):
 
         result["metrics"]["combined"]["recovery_mix_active_slots_ratio_end_max"] = 0.99
         self.assertEqual(verdict_for(result), "transient_stall_mixer_queue_not_recovered")
+        result["metrics"]["combined"]["recovery_mix_active_slots_ratio_end_max"] = 0.02
+
+        result["metrics"]["combined"]["audio_control_playback_ratio_observed_max"] = 1.0
+        self.assertEqual(
+            verdict_for(result), "transient_stall_adaptive_release_ratio_not_applied")
+        result["metrics"]["combined"]["audio_control_playback_ratio_observed_max"] = 1.005
+
+        result["metrics"]["combined"]["playback_ring_readable_recovery_max"] = 700.0
+        self.assertEqual(
+            verdict_for(result), "transient_stall_playback_latency_not_recovered")
+
+    def test_short_burst_requires_real_playback_latency_recovery(self):
+        result = normal_result(
+            "burst-pause-250",
+            playback_underrun_time_ms_total=20.0,
+            adaptive_raise_events_total=20.0,
+            adaptive_min_frames_max=256.0,
+            playback_ring_readable_recovery_max=320.0,
+            audio_control_playback_ratio_observed_max=1.005)
+        result["proxy_stats"] = {
+            "client_to_server_blackout_events": 1,
+            "server_to_client_blackout_events": 1,
+        }
+
+        self.assertEqual(verdict_for(result), "pass")
+
+        result["metrics"]["combined"]["playback_ring_readable_recovery_max"] = 1500.0
+        self.assertEqual(verdict_for(result), "burst_playback_latency_not_recovered")
 
     def test_transient_stall_rejects_continuing_padding(self):
         result = normal_result(
@@ -314,7 +370,11 @@ class NormalVerdictTests(unittest.TestCase):
             recovery_adaptive_padding_frames_delta_total=9000.0,
             adaptive_raise_events_total=40.0,
             adaptive_release_events_total=100.0,
-            adaptive_target_recovered_frames_min=400.0)
+            adaptive_target_recovered_frames_min=400.0,
+            adaptive_min_frames_max=256.0,
+            playback_ring_readable_recovery_max=320.0,
+            playback_ring_recovered_frames_min=900.0,
+            audio_control_playback_ratio_observed_max=1.005)
         result["requested_stream_ms"] = 18000
         result["metrics"]["combined"]["elapsed_s_min"] = 18.0
         result["proxy_stats"] = {

@@ -188,7 +188,7 @@ def _effective_stream_ms(scenario: dict[str, Any], requested_stream_ms: int) -> 
                     round(direction.burst_every_ms + direction.burst_pause_ms + 2000.0),
                 )
     source = scenario.get("source_scenario", "")
-    if source == "transient-stall-recovery":
+    if source in ("transient-stall-recovery", "transient-stall-250-recovery"):
         minimum_ms = max(minimum_ms, 18000)
     if (source.startswith("metronome-listener-compensated-pulse") or
             source == "metronome-listener-compensated-metro-pulse"):

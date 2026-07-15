@@ -1090,8 +1090,6 @@ Checks to run when useful:
   defaults. Retain exact commands, log locations, and the focused local GUI
   observations named in the execution contract when this evidence is rerun.
 
-## Remaining Work
-
 ### Phase 12: Final Wire Efficiency, Binary Assets, and Fuzzing
 
 #### Phase 12 execution contract
@@ -1108,10 +1106,11 @@ Checks to run when useful:
   `24-bit PCM`. The creator declares it in the authenticated session contract
   and every joiner follows it automatically; it is not a per-edge preference
   and must preserve encode-once fan-out. Both formats are mandatory capabilities
-  of the one current executable. Keep 24-bit PCM as the implementation/testing
-  default during this phase. Selecting the eventual product default is informed
-  by retained measurements and manual listening but is not a Phase 12
-  completion gate.
+  of the one current executable. Retained measurements and successful manual
+  listening found no audible difference while PCM16 saved about 28% of direct
+  network audio traffic, so Start Jam now defaults to 16-bit PCM while retaining
+  the explicit 24-bit choice. Headless/CLI runs continue to use their declared
+  native setting rather than inheriting a hidden GUI preference.
 - Replace the existing UDP layout once with the smallest fixed, explicitly
   encoded layout justified by a field-ownership audit. Preserve magic/version,
   packet type, session identity, sequence/replay identity, the type-appropriate
@@ -1168,7 +1167,7 @@ Checks to run when useful:
   PCM formats. Remove all old header/PCM24-only parsing and compatibility code;
   verify source/public-surface searches leave only intentional historical
   documentation and retained PCM24 codec support.
-- `[~]` Replace base64 Track/Looper chunk bodies with authenticated binary
+- `[x]` Replace base64 Track/Looper chunk bodies with authenticated binary
   chunks using the existing bounded streaming worker and atomic commit model.
   Remove old base64 serialization, validation, conversion, and compatibility
   branches. Add deterministic fragmentation/coalescing, malformed prefix,
@@ -1186,7 +1185,7 @@ Checks to run when useful:
   clean, jitter, loss/reorder/burst, lifecycle, and two/three/four-peer cases. A
   format-specific case fails if it silently runs the other format or produces
   no transmitted/received audio.
-- `[ ]` Run the focused two-physical-device PCM16/PCM24 stress coverage after
+- `[x]` Run the focused two-physical-device PCM16/PCM24 stress coverage after
   both quality choices have passed the final GUI/device check.
 - `[x]` Retain the implemented bounded `fuzz` command and isolated artifact/
   cleanup contract without expanding it during this phase. It must keep
@@ -1197,21 +1196,57 @@ Checks to run when useful:
   is sufficient Phase 12 execution evidence; exhaustive message/state coverage,
   OS-level memory sandboxing, sanitizers, and additional fuzz runs are not
   required.
-- `[!]` Complete the mandatory two-pass ownership/removal/security audit, exact
+- `[x]` Complete the mandatory two-pass ownership/removal/security audit, exact
   Windows build, macOS build confirmation for shared wire bytes, full relevant
   validation/stress/unit checks, review the retained bounded fuzz smoke, matched two-host PCM16/
   PCM24 benchmark, binary-asset transfer smoke, and focused manual confirmation
   that both Audio Quality choices connect and remain audibly functional. Do not
   require a final default-quality decision to close the phase.
 
-  Windows implementation and automated closeout are complete. This item is
-  blocked only on the macOS build/shared-byte confirmation, matched physical
-  two-host PCM16/PCM24 run, successful GUI binary multi-asset transfer, and
-  audible GUI/device confirmation for both quality choices.
+  Windows and macOS validation, matched physical two-host and two-device runs,
+  successful GUI binary multi-asset transfer, and audible confirmation of both
+  quality choices are complete. Phase 12 is formally closed.
 
 ## Work Log
 
 Add concise entries as implementation proceeds:
+
+### 2026-07-15 - Phase 12 physical acceptance, recovery correction, and formal completion
+
+- The uploaded macOS validation at
+  `incoming_uploads/validate_logs/validate_logs/20260715T215714Z_a37b0fe3`
+  passed all 13 cases, including the independent protocol-v2 PCM16/PCM24 golden
+  bytes, binary-asset boundaries, public/schema parity, controller lifecycle,
+  real-process hardening, and clean two/three/four-peer meshes.
+- Manual GUI acceptance completed both Audio Quality choices with good audible
+  two-way audio and successful binary multi-asset sharing. No audible difference
+  was found between PCM16 and PCM24, so Start Jam now defaults to PCM16 for its
+  measured bandwidth saving while retaining the explicit PCM24 choice.
+- The physical Windows/macOS coordinator/agent benchmark passed four non-silent
+  tone/pulse cases at `tools/benchmark_logs/20260715T220012Z_546777cc`, with two
+  complete format pairs, four accepted correlated uploads, `all_done`
+  acknowledged, both remote WAVs present per case, no pop/clipping events, and
+  a 28.07% PCM16 send-bitrate reduction. Short-run CPU remained inconclusive.
+- The first physical-device recovery audit used the user's devices 5 and 16 at
+  44100 Hz and reproduced the reported lingering latency. The outer runtime was
+  overwriting the mixer's adaptive playback ratio with 1.0, and the mixer then
+  stopped recovery when its target counter reached minimum even if the real
+  playback ring remained elevated. The runtime overwrite is removed; the mixer
+  owns the bounded ratio, all native profiles use the existing 5000-ppm ceiling,
+  and release continues until real ring depth is within four packets of target.
+  CSV now exposes `audio_control_playback_ratio`, and stress verdicts require
+  actual ring recovery rather than accepting target-counter movement.
+- The final matched physical-device matrix passed PCM16 and PCM24 under one-shot
+  120 ms and 250 ms bidirectional stalls at
+  `tools/stress_logs/20260715T222126Z_710bf548`. All four cases observed 1.005
+  recovery, returned from about 1500 frames to 394-480 frames, shed at least
+  1051 frames, retained packet/mixer flow, and recorded zero playback-underrun
+  time. PCM16 again reduced send bitrate by 28.07%; CPU differed only by noise.
+- The exact final elevated MSVC build passed, 48 Python unit tests passed, and
+  final `validate all` passed at
+  `tools/validate_logs/20260715T222404Z_f2453b81`. The retained bounded fuzz
+  smoke was not expanded or rerun. Final removal and document audits support
+  every Phase 12 checkbox, so the phase is moved into Completed Work.
 
 ### 2026-07-15 - Phase 11 manual acceptance and formal completion
 
@@ -1250,10 +1285,9 @@ Add concise entries as implementation proceeds:
 
 - Selected mandatory session-wide PCM16/PCM24 network quality rather than an
   optional experiment. The creator chooses once in Start Jam, all peers follow,
-  encode-once fan-out remains, the existing PCM24 choice stays the default while
-  evidence is gathered, and the final default decision is outside the phase
-  completion gate. Local processing, tracks, and PCM16 recording files do not
-  change.
+  and encode-once fan-out remains. PCM24 remained the temporary default while
+  evidence was gathered; the later final acceptance selected PCM16 as the GUI
+  default. Local processing, tracks, and PCM16 recording files do not change.
 - Selected one compact replacement UDP layout with no old encoder/parser or
   compatibility support. The implementation must preserve every justified
   timing, identity, authentication, replay, size, and diagnostic field, use

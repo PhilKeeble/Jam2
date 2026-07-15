@@ -519,8 +519,9 @@ Phase 12 decision:
   authenticated session value automatically, preserving encode-once fan-out.
 - Keep internal processing and PCM16 Track/Looper/recording WAV behavior
   unchanged; only network pack/unpack differs.
-- Keep PCM24 as the implementation/testing default while gathering evidence.
-  Choosing the eventual product default is not a Phase 12 completion gate.
+- Default Start Jam to PCM16 after matched measurements and manual listening
+  found no audible difference while preserving the explicit PCM24 choice.
+  Headless/CLI runs continue to use their declared native format.
 - Record format, header and payload bytes, bytes/sample, packet rate and bitrate
   in stats, CSV, native/Python manifests, stress results, and benchmarks.
 - Compare matched non-silent recordings plus clean and impaired two/three/four-
@@ -532,18 +533,26 @@ Phase 12 measured result on the 64-frame fast profile:
 - The compact current protocol uses a 36-byte header. PCM24 therefore produces
   a 228-byte audio datagram and PCM16 produces a 164-byte audio datagram at the
   same packet rate of about 750 packets/second.
-- Matched stress measured a 28.06% PCM16 send-bitrate reduction. The short
-  non-silent coordinator/agent benchmark measured a 28.07% packet-size and
-  28.04% send-bitrate reduction, with both received tone WAVs peaking at 0.125,
-  RMS 0.08837/0.08835, and no detected pop or clipping event.
+- Matched stress measured a 28.06% PCM16 send-bitrate reduction. The physical
+  Windows/macOS non-silent tone/pulse benchmark measured a 28.07% packet-size
+  and send-bitrate reduction, with both remote WAVs present for all four cases
+  and no detected pop or clipping event.
 - The retained pre-change physical benchmark used a 48-byte header and
   240-byte PCM24 datagrams. Compact PCM24 is 5% smaller without changing its
   192-byte payload; compact PCM16 is 31.67% smaller than that retained packet.
 - CPU differences in the short comparison changed with run order and are not
   evidence of a CPU improvement. Packet frequency and configured latency are
-  intentionally unchanged. Manual listening and physical cross-host evidence
-  remain required before phase closeout, and choosing the product default
-  remains a later evidence-based decision.
+  intentionally unchanged. Both formats passed manual listening, and PCM16 was
+  selected as the GUI default for its measured bandwidth saving.
+
+The final physical-device audit also found that adaptive recovery's requested
+playback ratio was being overwritten by the outer runtime loop and that release
+stopped when the target counter reached its minimum rather than when the real
+device ring recovered. The mixer now owns that ratio, uses the existing bounded
+5000-ppm ceiling, and continues until the actual ring is within four packets of
+the target. Matched 120 ms and 250 ms one-shot stalls in both formats recovered
+from roughly 1,500 frames to 394-480 frames, shedding 1,051-1,122 frames with no
+playback-underrun time.
 
 ### Peer JSON
 

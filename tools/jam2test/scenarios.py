@@ -98,6 +98,14 @@ def scenario_catalog(base_profile=FAST_PROFILE):
                 burst_limit=1)),
             "expect": "one bidirectional 120 ms stall should raise the cushion, then drain queued audio and resume steady mixing",
         },
+        "transient-stall-250-recovery": {
+            "profile": base_profile,
+            "impairment": ProxyImpairment.both(DirectionImpairment(
+                burst_pause_ms=250.0,
+                burst_every_ms=8000.0,
+                burst_limit=1)),
+            "expect": "one bidirectional 250 ms stall should fill the bounded cushion, then drain the real playback ring back near the minimum",
+        },
         "loss-0.1": {
             "profile": base_profile,
             "impairment": ProxyImpairment.both(DirectionImpairment(loss_percent=0.1)),

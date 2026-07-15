@@ -270,8 +270,8 @@ QWidget* MainWindowPages::buildSessionPage(MainWindow& w)
     w.frameSizeSpin_->setRange(32, 256);
     w.frameSizeSpin_->setValue(128);
     w.networkAudioFormatBox_ = new QComboBox(page);
-    w.networkAudioFormatBox_->addItem(QStringLiteral("24-bit PCM"), QStringLiteral("pcm24-mono"));
     w.networkAudioFormatBox_->addItem(QStringLiteral("16-bit PCM"), QStringLiteral("pcm16-mono"));
+    w.networkAudioFormatBox_->addItem(QStringLiteral("24-bit PCM"), QStringLiteral("pcm24-mono"));
     w.prefillSpin_ = new QSpinBox(page);
     w.prefillSpin_->setRange(0, 65536);
     w.prefillSpin_->setValue(1536);

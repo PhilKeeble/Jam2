@@ -848,6 +848,13 @@ native format, bytes/sample, packet/header/payload sizes, packet rate, bitrate,
 and received audio. Ordinary case failures remain failures rather than being
 hidden by comparison generation.
 
+Transient-stall recovery consumes the emitted audio-control playback ratio and
+actual playback-ring depth. A falling adaptive target alone is insufficient:
+the result fails if the bounded faster ratio was not applied or the real ring
+does not return within four packets of the configured adaptive minimum. The
+120 ms and 250 ms recovery cases each inject one burst per direction so the
+final recovery window cannot be contaminated by a later periodic burst.
+
 ### Multi-host direct benchmark
 
 Run one normal engine per real machine over the actual direct network, with the Python control plane used only for orchestration and artifact movement. These runs validate real network, hardware, and cross-machine clocks.

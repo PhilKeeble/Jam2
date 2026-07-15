@@ -427,6 +427,7 @@ public:
         std::uint64_t network_capture_epoch_frame = 0;
         std::uint64_t network_capture_stale_frames_discarded = 0;
         bool network_playback_enabled = false;
+        int playback_ratio_ppm = 1000000;
     };
 
     CsvStatsLog(const std::filesystem::path& folder, Context context)
@@ -540,7 +541,7 @@ public:
                 "leader_audio_injected_packets,transport_source_frame,transport_requested_target_frame,"
                 "transport_applied_target_frame,transport_action,udp_receive_batch_max,"
                 "network_audio_bytes_per_sample,udp_header_bytes,audio_payload_bytes,audio_packet_bytes,"
-                "send_packet_rate_pps,recv_packet_rate_pps\n";
+                "send_packet_rate_pps,recv_packet_rate_pps,audio_control_playback_ratio\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -923,7 +924,8 @@ public:
              << audio_payload_bytes(options.frame_size, options.network_audio_format) << ','
              << audio_packet_bytes(options.frame_size, options.network_audio_format) << ','
              << send_packet_rate << ','
-             << recv_packet_rate;
+             << recv_packet_rate << ','
+             << static_cast<double>(audio.playback_ratio_ppm) / 1000000.0;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -939,7 +941,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(351);
+        std::vector<std::string> fields(352);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1251,6 +1253,7 @@ public:
         set(348, audio_packet_bytes(options.frame_size, options.network_audio_format));
         set(349, seconds > 0.0 ? static_cast<double>(stats.sent_packets) / seconds : 0.0);
         set(350, seconds > 0.0 ? static_cast<double>(stats.recv_packets) / seconds : 0.0);
+        set(351, static_cast<double>(audio.playback_ratio_ppm) / 1000000.0);
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {

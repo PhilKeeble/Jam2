@@ -451,10 +451,23 @@ def protocol_verdict_for(result):
         if (
                 metrics.get("playback_underrun_time_ms_total", 0.0) <= 0.0
                 and metrics.get("missing_audio_frames_total", 0.0) <= 0.0
-                and metrics.get("sequence_lost_total", 0.0) <= 0.0):
+                and metrics.get("sequence_lost_total", 0.0) <= 0.0
+                and metrics.get("adaptive_raise_events_total", 0.0) <= 0.0
+                and metrics.get("jitter_max_ms", 0.0) < 50.0):
             return "burst_not_observed"
+        if scenario == "burst-pause-250":
+            if metrics.get("adaptive_raise_events_total", 0.0) <= 0.0:
+                return "burst_adaptive_raise_not_observed"
+            if metrics.get("audio_control_playback_ratio_observed_max", 0.0) <= 1.0:
+                return "burst_adaptive_release_ratio_not_applied"
+            recovered_depth_limit = (
+                metrics.get("adaptive_min_frames_max", 0.0) +
+                max(128.0, metrics.get("frame_size_max", 0.0) * 4.0)
+            )
+            if metrics.get("playback_ring_readable_recovery_max", 0.0) > recovered_depth_limit:
+                return "burst_playback_latency_not_recovered"
         return "pass"
-    if scenario == "transient-stall-recovery":
+    if scenario in ("transient-stall-recovery", "transient-stall-250-recovery"):
         blackouts = proxy.get("client_to_server_blackout_events", 0) + proxy.get("server_to_client_blackout_events", 0)
         if blackouts != 2:
             return "transient_stall_not_injected_once_per_direction"
@@ -478,6 +491,14 @@ def protocol_verdict_for(result):
         if metrics.get("adaptive_release_events_total", 0.0) <= 0.0 or \
                 metrics.get("adaptive_target_recovered_frames_min", 0.0) <= 0.0:
             return "transient_stall_adaptive_target_not_recovering"
+        if metrics.get("audio_control_playback_ratio_observed_max", 0.0) <= 1.0:
+            return "transient_stall_adaptive_release_ratio_not_applied"
+        recovered_depth_limit = (
+            metrics.get("adaptive_min_frames_max", 0.0) +
+            max(128.0, metrics.get("frame_size_max", 0.0) * 4.0)
+        )
+        if metrics.get("playback_ring_readable_recovery_max", 0.0) > recovered_depth_limit:
+            return "transient_stall_playback_latency_not_recovered"
         return "pass"
     if scenario == "reorder-small":
         if proxy.get("client_to_server_reordered", 0) + proxy.get("server_to_client_reordered", 0) <= 0:
