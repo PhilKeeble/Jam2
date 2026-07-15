@@ -30,6 +30,8 @@ Testing/
 /tools/benchmark_logs/
 /tools/stress_logs/
 /tools/stress_logs*
+/tools/validate_logs/
+/tools/connectivity_logs/
 /incoming_uploads/
 /artifacts/logs/
 /artifacts/release/

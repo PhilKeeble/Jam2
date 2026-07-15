@@ -1,6 +1,7 @@
 {
-  "schema": "jam2-debug-scenario-v1",
-  "run_id": "phase8-controller-lifecycle-validation",
+  "schema": "jam2-debug-scenario",
+  "run_id": "controller-lifecycle-validation",
   "operation": "validate.controller-lifecycle",
-  "arguments": []
+  "profile": "fast",
+  "artifacts": {"root": "../validate_logs/manual/controller-lifecycle-validation"}
 }

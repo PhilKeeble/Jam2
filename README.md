@@ -27,5 +27,7 @@ For LAN testing, use **No STUN** and a reachable LAN host/IP. For internet testi
 | [Profiles](docs/Profiles.md) | Current tested tuning profiles and what each numeric field does. |
 | [Diagnosing](docs/Diagnosing.md) | How to read Jam2 stats and troubleshoot network/audio issues. |
 | [Connection Test](docs/ConnectionTest.md) | Pre-flight UDP connectivity checks before running Jam2. |
-| [Test Cases](docs/TestCases.md) | Python stress and benchmark tools for repeatable performance runs. |
+| [Validation](docs/Validation.md) | Deterministic framework and native post-build checks. |
+| [Stress Tests](docs/StressTests.md) | Targeted impairment, recovery, timing, and full-mesh regression runs. |
+| [Benchmark](docs/Benchmark.md) | Two-machine coordinator/agent measurements, artifacts, and analysis. |
 | [Licensing](docs/Licensing.md) | Third-party notices and current licensing notes. |

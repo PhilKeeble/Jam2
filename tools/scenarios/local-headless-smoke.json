@@ -1,13 +1,15 @@
 {
-  "schema": "jam2-debug-scenario-v1",
+  "schema": "jam2-debug-scenario",
   "run_id": "local-headless-smoke",
   "operation": "local",
-  "arguments": [
-    "--headless-audio", "on",
-    "--audio-buffer-size", "256",
-    "--sample-rate", "48000",
-    "--stream-ms", "1000",
-    "--stats", "enabled",
-    "--stats-interval-ms", "250"
-  ]
+  "profile": "fast",
+  "runtime": {
+    "headless_audio": true,
+    "audio_buffer_size": 256,
+    "sample_rate": 48000,
+    "stream_ms": 1000,
+    "stats": true,
+    "stats_interval_ms": 250
+  },
+  "artifacts": {"root": "../validate_logs/manual/local-headless-smoke"}
 }

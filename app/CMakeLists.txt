@@ -40,12 +40,18 @@ add_executable(jam2 MACOSX_BUNDLE
     application/ApplicationEntrypoint.hpp
     application/ApplicationRuntime.cpp
     application/ApplicationRuntime.hpp
+    application/AutomationChannel.cpp
+    application/AutomationChannel.hpp
     application/ControlClient.cpp
     application/ControlClient.hpp
     application/ControlMessageValidation.cpp
     application/ControlMessageValidation.hpp
     application/ControllerLifecycleValidation.cpp
     application/ControllerLifecycleValidation.hpp
+    application/DebugActionValidation.cpp
+    application/DebugActionValidation.hpp
+    application/DebugAutomation.cpp
+    application/DebugAutomation.hpp
     application/RuntimeHost.cpp
     application/ControlProtocol.cpp
     application/ControlProtocol.hpp

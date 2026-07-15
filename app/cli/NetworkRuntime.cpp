@@ -1638,7 +1638,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     auto apply_runtime_host_commands = [&] {
         std::size_t processed = 0;
         while (processed < Jam2RuntimeHost::kCommandCapacity) {
-            const auto next = runtime_host.takeCommand();
+            const auto next = runtime_host.takeCommand(
+                current_engine_frame(audio.engine.get()));
             if (!next) {
                 break;
             }
@@ -3256,5 +3257,4 @@ int jam2_run_network_runtime(Jam2RuntimeOptions options, Jam2RuntimeHost& host)
         return 1;
     }
 }
-
 

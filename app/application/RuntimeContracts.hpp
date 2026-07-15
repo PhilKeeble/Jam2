@@ -145,7 +145,7 @@ struct Jam2RuntimeHost {
     bool submitCommand(const jam2::EngineCommand& command) noexcept;
     bool submitPeerUpdate(const std::vector<Jam2RuntimePeer>& peers);
     std::optional<std::vector<Jam2RuntimePeer>> takePeerUpdate();
-    std::optional<jam2::EngineCommand> takeCommand();
+    std::optional<jam2::EngineCommand> takeCommand(std::uint64_t current_frame);
     std::uint64_t nextGridRequestId() noexcept;
     std::uint64_t nextTransportEventId() noexcept;
     void reset() noexcept;

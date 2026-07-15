@@ -234,8 +234,10 @@ implementation before extracting it.
 - `[x]` Add deterministic duplication, corruption, replay, malformed traffic,
   near-wrap sequences, extreme timestamps, floods, and per-direction
   impairment.
-- `[x]` Keep versioned manifests and structured raw results with exact settings,
-  seeds, peer sides, artifacts, and technical failure reasons.
+- `[x]` Keep structured raw results with exact settings, seeds, peer sides,
+  artifacts, and technical failure reasons. The local version labels used at
+  this point were transitional and are superseded by Phase 10's unversioned
+  automation/manifest contract.
 - `[x]` Preserve existing local-stress and two-host benchmark commands while
   preparing adapters for the unified executable.
 
@@ -355,8 +357,10 @@ python tools\run_stress_local.py --headless-audio --headless-audio-buffer-frames
 
 - `[x]` Add bounded `debug describe` and `debug run` entry points to the unified
   executable.
-- `[x]` Add versioned scenario identification, effective-configuration output,
-  structured startup events, and retained result artifacts.
+- `[x]` Add the temporary versioned scenario identification,
+  effective-configuration output, structured startup events, and retained
+  result artifacts needed for migration. Phase 10 explicitly replaces that
+  local identifier rather than preserving it as a compatibility format.
 - `[x]` Generalize orchestration and result identities for two-, three-, and
   four-peer sessions, per-edge impairment, and independent headless drift.
 - `[x]` Expand Python protocol, authorization, model, asset, WAV, UDP, authority,
@@ -752,48 +756,77 @@ or explicitly assigned to a later phase whose scope owns the remaining check.
 
 ### Phase 10: Complete Native Automation and Python Tooling Contracts
 
-- `[ ]` Refactor the flat Python launchers into one dependency-free,
+Phase 10 execution contract:
+
+- Local automation formats are intentionally unversioned. Use the stable
+  identifiers `jam2-debug-scenario`, `jam2-debug-description`, and
+  `jam2-automation`, implement only the current supported shapes, and replace
+  the temporary `*-v1` argv-wrapper format without a compatibility parser.
+  Network-facing control and UDP protocol versions remain versioned because
+  independently running peers need compatibility checks.
+- Automation manifests are opt-in test artifacts, not a global application
+  behavior change. `jam2 debug run` emits a native per-process manifest;
+  `jam2_test.py` emits the higher-level invocation manifest for its command
+  families. GUI startup and direct ordinary use of `jam2 local`,
+  `network create`, or `network join` do not create automation manifests or
+  change lifecycle behavior.
+- Phase 10 migrates the cases and capabilities already retained in the current
+  tools. Phase 11 owns adding the broader missing lifecycle, endpoint,
+  mixed-device, and adversarial real-process scenarios listed there; those are
+  not concealed Phase 10 completion requirements.
+
+- `[x]` Refactor the flat Python launchers into one dependency-free,
   repository-local `tools/jam2_test.py` dispatcher backed by focused modules in
   a `tools/jam2test` package. Keep the dispatcher limited to argument parsing
   and command dispatch; process control, case catalogs, artifacts, analysis,
   impairment, and network diagnostics must remain separately owned modules.
   Expose the clear command families `validate`, `stress`, `benchmark`, and
   `connectivity` rather than a generic flavour flag.
-- `[ ]` Make bare `jam2_test.py validate` the post-compilation baseline. It
+- `[x]` Make bare `jam2_test.py validate` the post-compilation baseline. It
   defaults to the complete framework-self-test plus deterministic headless
   product-validation suite, with narrower `framework` and `product` selections
-  and explicit optional real-device/mixed-device extensions. Cover supported
+  and an explicit optional single-real-device extension. Mixed-device coverage
+  remains a Phase 11 addition. Cover supported
   CLI/debug parsing, representative valid and invalid numeric boundaries,
-  native option propagation, effective configuration, clean local/create/join/
-  mesh operation, scheduled controls, and required artifacts. Maintain a
-  coverage map so every supported native capability is automated or explicitly
-  classified as device/manual-only; do not attempt a Cartesian product of all
-  numeric combinations or claim that headless validation covers hardware.
-- `[ ]` Keep `jam2_test.py stress` for targeted feature regression,
+  native option propagation, effective configuration, clean local operation,
+  clean multi-peer create/join workflows over the universal mesh engine,
+  scheduled controls, and required artifacts. Maintain a coverage map for
+  every public CLI option, supported debug operation/protocol field, and
+  representative native-validator boundary. Classify uncovered entries as
+  device/manual-only where appropriate; this does not require automating every
+  GUI feature, every internal application action, or a Cartesian product of
+  numeric combinations, and headless validation does not cover hardware.
+- `[x]` Keep `jam2_test.py stress` for targeted feature regression,
   resilience, and improvement work under controlled loss, delay, jitter,
   reorder, duplication, stalls, clock differences, lifecycle changes, and mesh
   conditions. Stress cases assert the named feature response and recovery and
   retain raw technical evidence; they are separate from the clean post-build
   validation baseline and from non-gating benchmark comparisons.
-- `[ ]` Keep `jam2_test.py connectivity stun|direct` as an independently usable
+- `[x]` Keep `jam2_test.py connectivity stun|direct` as an independently usable
   user diagnostic for endpoint discovery, mapping stability, token exchange,
   and direct UDP reachability. It must not require the benchmark coordinator or
   turn connectivity results into subjective recommendations.
-- `[ ]` Replace the `debug run` argv wrapper with the smallest bounded,
-  versioned declarative contract needed to retire existing automation reliance
-  on stdin text commands, Python wall-clock action timing, duplicated native
-  defaults, human-output scraping, and newest-file discovery. Reuse the same
+- `[x]` Replace the `debug run` argv wrapper with the smallest bounded,
+  unversioned declarative contract needed to retire existing automation
+  reliance on stdin text commands, Python wall-clock action timing, duplicated
+  native defaults, human-output scraping, and newest-file discovery. Reuse the same
   typed application requests and native validators as GUI and ordinary
   headless paths; do not mirror the full GUI, accept arbitrary argv, or expose
   internal state mutation.
-- `[ ]` Admit scenario fields and operations only when a retained automated
+- `[x]` Admit scenario fields and operations only when a retained automated
   case needs them. Cover the startup audio/create/join configuration,
   profile/tuning selection, deterministic test input, local fixture/capture and
   artifact outputs, and typed scheduled actions already exercised by those
   cases. Keep ordinary `local` and `network create/join` commands as the simpler
   path for tests that do not need deterministic scheduling or structured
   automation results.
-- `[ ]` Add an optional dedicated inherited local length-prefixed automation
+- `[x]` Keep the focused `validate.boundaries` and
+  `validate.controller-lifecycle` debug operations used by retained executable
+  validation, and ensure `debug describe`, the scenario schema, and dispatch
+  all advertise the same operation set. `local`, `network.create`, and
+  `network.join` are the minimum runtime scenario operations, not an exclusive
+  list that removes focused native validators.
+- `[x]` Add an optional dedicated inherited local length-prefixed automation
   channel only for a `debug run` scenario that explicitly requests reactive
   commands/events. The parent controller creates and passes the handles; static
   `debug run`, `debug describe`, GUI, and ordinary CLI/network commands create
@@ -802,10 +835,10 @@ or explicitly assigned to a later phase whose scope owns the remaining check.
   not expose a LAN automation listener. Use an unpredictable OS-local named IPC
   endpoint only if a platform constraint makes inherited anonymous handles
   impractical.
-- `[ ]` Schedule frame-sensitive metronome, grid, transport, recording, and
+- `[x]` Schedule frame-sensitive metronome, grid, transport, recording, and
   recovery actions through the native engine frame scheduler rather than Python
   wall-clock sleeps.
-- `[ ]` Make native profile definitions and validation the single source of
+- `[x]` Make native profile definitions and validation the single source of
   truth consumed by GUI, CLI, debug descriptions, and Python; remove duplicated
   Python defaults. Preserve the benchmark's many-profile and tuning-matrix
   functionality by representing each experiment as a native named base profile
@@ -814,20 +847,34 @@ or explicitly assigned to a later phase whose scope owns the remaining check.
   construct and validate those matrices, and record each peer's emitted
   effective configuration rather than treating Python's request as proof of
   what ran.
-- `[ ]` Publish authoritative manifests containing run/machine/peer identity,
-  source/build identity, effective configuration, topology, impairments,
-  lifecycle result, and artifact paths/hashes. Local secrets may remain visible
+- `[x]` Publish two explicitly owned manifest layers. A native manifest is
+  emitted only by each `jam2 debug run` process and is authoritative for that
+  process's build identity, validated effective configuration, native
+  lifecycle result, and exact native artifact paths/hashes. A Python invocation
+  manifest is emitted by `jam2_test.py validate|stress|benchmark|connectivity`
+  and is authoritative for command-family/run identity, machines, peers,
+  topology, impairments, case/attempt state, process results, and collected
+  artifact references. Python records ordinary CLI launches itself; any case
+  that requires authoritative native configuration or native artifact
+  publication must use `debug run`. Neither GUI nor ordinary direct CLI use is
+  required to emit either automation manifest. Local secrets may remain visible
   in arguments, scenarios, logs, and artifacts.
-- `[ ]` Isolate artifacts by command family and invocation. Default to
+- `[x]` Isolate artifacts by command family and invocation. Default to
   `tools/validate_logs`, `tools/stress_logs`, `tools/benchmark_logs`, and
   `tools/connectivity_logs`, then create a collision-resistant
   UTC-timestamp-plus-run-ID child for every invocation instead of writing
   directly into a shared root. Treat an explicit output option as a root beneath
-  which the same family/run structure is created. For two-host benchmarks, use
-  the coordinator-issued suite ID plus stable machine, case, run, and attempt
-  identities so local and uploaded artifacts cannot overwrite or become
-  associated with another attempt.
-- `[ ]` Scope `--clean` to the selected command family's root. It intentionally
+  which the same family/run structure is created. For two-host benchmarks,
+  both machines use the coordinator-issued invocation and suite IDs and the
+  normalized layout
+  `benchmark_logs/<invocation>/suites/<suite-id>/machines/<machine-id>/cases/`
+  `<case-id>/runs/<run-id>/attempts/<attempt-id>/...`. Keep controller/agent,
+  Jam2 stdout/stderr, native manifest, result, and transfer logs at named paths
+  within that tree. The coordinator retains its local machine subtree and the
+  identity-validated uploaded agent subtree; the agent retains its own subtree
+  until upload acknowledgement. Retries and repeats never overwrite a prior
+  attempt.
+- `[x]` Scope `--clean` to the selected command family's root. It intentionally
   removes all previous results for that family before creating the new unique
   run directory: stress cleans only `stress_logs`, validation only
   `validate_logs`, benchmark only `benchmark_logs`, and connectivity only
@@ -836,9 +883,14 @@ or explicitly assigned to a later phase whose scope owns the remaining check.
   never delete another family's results. Resolve and verify the family path
   before recursive deletion and refuse any target that resolves to the output
   parent, repository root, or outside the selected family folder.
-- `[ ]` Remove newest-file discovery and human-output scraping from Python once
+- `[x]` Reserve top-level `--clean` exclusively for the safe pre-run
+  command-family cleanup above. Rename the benchmark agent's current
+  delete-local-artifacts-after-acknowledged-upload behavior to
+  `--delete-after-upload`; it may run only after the coordinator acknowledges
+  the validated upload and must never stand in for family cleanup.
+- `[x]` Remove newest-file discovery and human-output scraping from Python once
   structured events and manifests cover those uses.
-- `[ ]` Refactor the benchmark server/client scripts into
+- `[x]` Refactor the benchmark server/client scripts into
   `jam2_test.py benchmark coordinator|agent|analyze` while preserving the
   current robust two-host workflow as the required Phase 10 baseline: case and
   repeat selection, suite/run/attempt identity, reconnect and retry handling,
@@ -847,7 +899,17 @@ or explicitly assigned to a later phase whose scope owns the remaining check.
   Use normalized machine and peer identities internally so the model is not
   server/client-shaped, but do not make three- or four-host benchmarking a
   Phase 10 completion requirement.
-- `[ ]` Keep the old stress, validation, benchmark server/client/analyzer, and
+- `[ ]` Use a short live two-host benchmark smoke as the Phase 10 completion
+  gate instead of the comprehensive benchmark matrix: one native base profile,
+  one repeat, and a small representative subset of two or three short cases
+  that completes in a few minutes. It must exercise coordinator/agent
+  negotiation, normal create/join, recorded WAV/CSV and manifests, bounded
+  artifact packaging/upload, upload acknowledgement/result correlation, final
+  `all_done`, and retention of clearly named logs on both machines in the
+  normalized tree above. Preserve the comprehensive multi-profile/multi-repeat
+  workflow for deliberate benchmark use, but do not run it as Phase 10
+  closeout evidence.
+- `[x]` Keep the old stress, validation, benchmark server/client/analyzer, and
   connectivity scripts only as temporary wrappers while command, case,
   artifact, and verdict parity is being established. Remove those wrappers and
   migrated flat support modules before Phase 10 closes. Leave the temporary
@@ -864,6 +926,11 @@ Checks to run when useful:
   inventory, native arguments/scenarios, effective configuration, verdicts,
   repeat/attempt state, uploaded artifacts, and result schemas before removing
   the wrappers. Exact timing and network measurements need not match.
+- Run the short live two-host benchmark smoke defined above and confirm the
+  coordinator tree contains both normalized machine subtrees, the agent keeps
+  its local artifacts until acknowledgement, uploads are identity-correlated,
+  and both sides retain named logs. Do not substitute the long comprehensive
+  profile matrix for this closeout check.
 - Launch each command family twice with default output settings and confirm that
   both result sets remain intact in separate run directories. Then run stress
   with `--clean` and confirm all earlier stress runs are removed while existing
@@ -876,6 +943,9 @@ Checks to run when useful:
 - Verify ordinary and static-debug launches inherit no automation handles, the
   reactive channel closes cleanly with its controller, and every admitted
   schema field/message maps to a named retained test case.
+- Verify `debug describe` advertises the unversioned local format identifiers
+  and the same operation set accepted by `debug run`, including both focused
+  validator operations; verify obsolete `*-v1` local formats are rejected.
 
 ### Phase 11: Complete Hardening, Lifecycle Coverage, and Final Core Audit
 
@@ -941,6 +1011,115 @@ Checks to run when useful:
 ## Work Log
 
 Add concise entries as implementation proceeds:
+
+### 2026-07-15 - Phase 10 implementation and two-pass closeout awaiting live two-host smoke
+
+- Re-read `AGENTS.md`, Phase 10 and its execution contract, `PLAN.md`, and each
+  supporting refactor document under Purpose, then reconciled them against the
+  active native/Python call paths twice. `refactor-efficiency.md` confirmed all
+  automation and collection work remains bounded and outside the callback;
+  `refactor-security.md` confirmed inherited caller-owned local pipes, no LAN
+  automation listener, and bounded benchmark control/upload work;
+  `refactor-modes.md` and `refactor-binaries.md` confirmed one public `jam2`
+  executable and no manifest/handle side effects for GUI or ordinary commands;
+  `refactor-python.md` confirmed the narrow unversioned contracts, native
+  profile ownership, normalized two-host model, and retained comprehensive
+  matrices. `PLAN.md` adds no Phase 10 product scope.
+- Added the thin `tools/jam2_test.py` entry point plus package-owned dispatch,
+  validation, stress, benchmark, connectivity, impairment, protocol, result,
+  profile, analysis, artifact, and manifest modules under `tools/jam2test`.
+  Removed the migrated flat launchers/support files and retained only the
+  explicitly separate `tools/upload_server.py`.
+- Replaced `jam2-debug-scenario-v1` and the stdin text-command adapter with the
+  bounded unversioned `jam2-debug-scenario`, `jam2-debug-description`, and
+  `jam2-automation` contracts. Native `debug run` owns validation, effective
+  profiles/configuration, typed frame scheduling, per-process manifests, and
+  the optional inherited 64 KiB framed channel. The channel has 128-frame
+  native queues, eight-command event-loop turns, a five-second incomplete-frame
+  timeout, bounded event retention, partial-I/O handling, and explicit
+  stop/continue controller-loss behavior. No automation parsing or queue work
+  enters a real-time callback.
+- Published separate native-process and Python-invocation manifests; isolated
+  all four command-family roots; made cleanup family-scoped; retained
+  acknowledgement-only `--delete-after-upload`; normalized benchmark
+  suite/machine/case/run/attempt paths; bounded manifests, control queues,
+  connections, frames, uploads, archives, analysis, paths, and hashes; and
+  added a Windows native-path preflight with a clear shorter-`--output` error.
+- The first requirements/source pass found and resolved early-failure manifest,
+  schema/type rejection, automation-handle isolation, native action-validation,
+  reactive queue/drain, manifest identity, benchmark correlation, and copied
+  profile-default gaps. The second pass found and resolved future native
+  transport mirrors being consumed too early, dispatcher artifact ownership,
+  an unbounded Python event collector, a matrix-only `os_priority=off` type
+  conversion, and the last unused wall-clock sender/human-stdout verdict. The
+  final removal scan finds no legacy wrappers, stdin command parser, newest-file
+  discovery, or human-output scraping in the migrated framework.
+- Required build passed with the exact elevated repository-root command
+  `cmd.exe /d /c "call compile.cmd --in-dev-shell"`. Final baseline evidence is
+  `python tools/jam2_test.py validate all --output build/p10manifestfix --clean`
+  at `build/p10manifestfix/validate_logs/20260715T140554Z_f32a87a0`: 30 framework
+  tests and all 12 validation cases passed, covering 61 public options, six
+  operations, 15 actions, 46 runtime fields, 82 scenario fields, both
+  controller-loss policies, two/three/four-peer create/join, and zero
+  unclassified surfaces.
+- Representative retained stress passed at
+  `build/p10stress/stress_logs/20260715T134307Z_163688ea` (clean and duplicate),
+  `build/p10runtime/stress_logs/20260715T134719Z_37230b43` (structured runtime
+  controls), and
+  `build/phase10-final/stress_logs/20260715T131831Z_9f3a8787` plus
+  `20260715T131852Z_f31a3b3c` (distinct play/stop/restart transport and
+  three-peer mesh). Direct connectivity passed on both local peers under
+  `build/cxa` and `build/cxb`. The preserved benchmark inventory reports 94
+  cases at `build/p10inventory/benchmark_logs/20260715T134459Z_aa260a34`.
+- A final same-machine two-process dry run passed three short cases end to end
+  at `build/bcf/benchmark_logs/20260715T134834Z_b2f080eb` and
+  `build/baf/benchmark_logs/20260715T134834Z_b2f080eb`: both manifests passed,
+  all three results correlated two machine/peer records, uploads were
+  acknowledged, `all_done` was acknowledged, and both sides retained CSV, WAV,
+  native manifests, and named logs. Offline analysis and the separate
+  acknowledgement-only deletion smoke also passed. This exercises the workflow
+  but intentionally does not substitute for the required real second-machine
+  smoke.
+- The first user-authorized live-device attempt exposed one further manifest
+  finalization gap: its coordinator control log accepted a disconnect line
+  after the invocation inventory had hashed the file. The final audit therefore
+  rejected that preliminary evidence. Invocation manifests now rebuild their
+  bounded inventory during finalization, and benchmark control logs have an
+  explicit thread-safe freeze before the final refresh. Two regression tests
+  cover refreshed hashes/sizes and post-freeze log immutability.
+- The final public-documentation audit found that a clean successful agent did
+  not create its documented `agent.log`, and that neither role emitted the
+  separately named transfer log promised by `refactor-python.md`. Successful
+  benchmark roles now always create `coordinator.log` or `agent.log` plus
+  `transfer.log`; upload start, acknowledgement, and identity-validated receipt
+  are recorded outside the audio path. A one-case headless workflow passed on
+  both sides at `build/docc/benchmark_logs/20260715T141711Z_b93885b5` and
+  `build/doca/benchmark_logs/20260715T141711Z_b93885b5`, including `all_done`
+  and a zero-failure independent hash check over both final inventories.
+- The superseding initial live-device pass ran the same short suite at 44.1 kHz
+  on two distinct real ASIO devices attached to one Windows host: Focusrite USB
+  ASIO device 5 owned the coordinator and TONEX device 16 owned the agent.
+  `fast_silence`, `fast_tone-440`, and `fast_pulse-1s` each completed once under
+  native profile `fast`; both invocation manifests passed with code zero and
+  `all_done` acknowledged. All three coordinator results correlate the two
+  distinct peer/machine identities and acknowledged agent uploads, while both
+  normalized roots retain their native manifests, scenario, peer result, CSV,
+  five recording WAVs, and named stdout/stderr logs per attempt. Independent
+  integrity verification matched all 76 coordinator and 36 agent inventory
+  entries to their recorded size and SHA-256 with no omissions or truncation.
+  Evidence is `build/p10r5f/benchmark_logs/20260715T140634Z_df204c62` and
+  `build/p10r16f/benchmark_logs/20260715T140634Z_df204c62`; packaged analysis
+  passed with two verified output artifacts at
+  `build/p10real-analysis-f/benchmark_logs/20260715T140747Z_43124fbd`. Because
+  both devices still share one physical machine, this is recorded as the
+  requested initial pass and does not replace the later physical two-machine
+  completion gate.
+- Every Phase 10 implementation/removal checkbox is now verified. The phase
+  remains under Remaining Work and is not complete because the single explicit
+  completion-gate checkbox still requires the short three-case run across two
+  physical machines. Phase 11 remains owner of the reported mismatched-rate WAV
+  import error and the new lifecycle, endpoint-migration, mixed-device, and
+  adversarial scenarios.
 
 ### 2026-07-15 - Phase 9 mandatory closeout and completion
 
@@ -1008,6 +1187,32 @@ Add concise entries as implementation proceeds:
   with a unique child per invocation. `--clean` deliberately clears all old
   results for the selected family while the separate roots prevent it from
   erasing another command family's results.
+
+### 2026-07-15 - Finalize the Phase 10 execution contract
+
+- Made the three local automation formats intentionally unversioned and named
+  their stable identifiers. Phase 10 replaces the temporary `*-v1` argv wrapper
+  without a compatibility parser; control and UDP wire protocols remain
+  versioned for peer compatibility.
+- Limited native automation manifests to opt-in `debug run` processes and gave
+  `jam2_test.py` ownership of command-family invocation manifests. GUI and
+  ordinary direct CLI behavior remain unchanged, while tests that need
+  authoritative effective configuration or native artifacts use `debug run`.
+- Defined the capability map as public CLI options, debug operations/protocol
+  fields, and representative validator boundaries, not every GUI action or
+  numeric Cartesian product. Preserved both focused native validation
+  operations and clarified that clean mesh coverage means create/join peers on
+  the universal mesh engine rather than a public `mesh` command.
+- Reserved top-level `--clean` for safe pre-run family cleanup and renamed the
+  benchmark agent's distinct acknowledged-upload deletion policy to
+  `--delete-after-upload`.
+- Kept the comprehensive two-host benchmark workflow and profile matrix, but
+  made a one-profile, one-repeat, two-or-three-case live smoke lasting a few
+  minutes the Phase 10 closeout gate. Both machines retain clearly named logs
+  in the coordinator-issued normalized suite/machine/case/run/attempt tree.
+- Reaffirmed that Phase 10 migrates current retained cases. Phase 11 owns adding
+  the missing lifecycle, endpoint-migration, mixed-device, and adversarial
+  scenarios already assigned to it.
 
 ### 2026-07-15 - Remove encryption and redundant non-feature Phase 12 items
 
@@ -1651,10 +1856,11 @@ Add concise entries as implementation proceeds:
 
 ### 2026-07-14 - Phase 7 tooling migration and legacy retirement
 
-- Added the bounded versioned `debug` adapter, unified command discovery,
+- Added the then-versioned bounded `debug` adapter, unified command discovery,
   structured lifecycle/boundary events, exact artifact paths, and migrated
   stress/benchmark launch commands to the public `network create`/`join`
-  bootstrap.
+  bootstrap. Phase 10 now explicitly replaces this transitional local format
+  with the unversioned contract.
 - Added stable multi-peer identities, independent synthetic clocks, and named
   per-edge impairment proxies through an inherited debug-only candidate seam.
 - Removed the public static topology, old listen/connect packet loops, separate

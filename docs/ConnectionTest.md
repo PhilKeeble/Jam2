@@ -1,107 +1,120 @@
-# Connection Test Tool
+# Connectivity Tests
 
-`tools/connection_test.py` checks whether two peers can exchange UDP packets before running Jam2. It is useful for diagnosing firewall rules, port forwarding, public IP routing, LAN routing, and whether STUN hole punching is likely to work.
+`tools\jam2_test.py connectivity` provides independent STUN mapping and direct
+UDP reachability diagnostics. It does not launch Jam2, require an audio device,
+or use the benchmark coordinator.
 
-The tool does not run Jam2.
+Run commands from the repository root.
 
-## Modes
+## STUN Mapping
 
-- `stun`: uses Google STUN servers to discover each peer's public UDP endpoint, then tries a bidirectional UDP probe between the two public endpoints.
-- `direct`: skips STUN and tests a manually reachable endpoint, such as `127.0.0.1`, a LAN IP, or a known public IP with port forwarding.
+STUN reports the raw mapped endpoints observed through one local UDP socket and
+whether repeated results are stable. It does not perform the peer-to-peer probe
+itself.
 
-Both peers must run the tool at the same time. Each side prints a token. Paste the other side's token when prompted.
-
-There is no timeout while waiting at the paste prompt. After a peer token is pasted, the UDP probe runs for 120 seconds by default. Override this with `--probe-seconds`.
-
-## STUN Public Route
-
-Use this to test whether two peers on different networks can connect without manual port forwarding.
-
-Peer A:
-
-```bash
-python tools/connection_test.py --mode stun --name peer-a
+```powershell
+python tools\jam2_test.py connectivity stun --bind 0.0.0.0:0 --timeout-s 3 --output build\connectivity
 ```
 
-Peer B:
+The default server is `stun.l.google.com:19302`. Repeat `--server HOST:PORT` to
+query additional servers. One through eight server entries are accepted.
 
-```bash
-python tools/connection_test.py --mode stun --name peer-b
+Inspect `result.json` for each server's endpoint/error and
+`mapping_stable`. A failed mapping means no selected server returned a usable
+endpoint; it does not diagnose the exact firewall/NAT cause or make a
+playability recommendation.
+
+## Direct UDP Probe
+
+Direct mode is deliberately non-interactive. It uses two short invocations per
+peer: first generate/share tokens, then run both probes with the other peer's
+token.
+
+### 1. Generate Tokens
+
+Peer A (`192.168.1.10`):
+
+```powershell
+python tools\jam2_test.py connectivity direct --bind 0.0.0.0:49001 --direct-host 192.168.1.10 --name peer-a --duration-s 30 --output C:\j2-connect-a
 ```
 
-Expected good result:
+Peer B (`192.168.1.20`):
 
-```text
-[test] verdict: PASS - bidirectional UDP probe succeeded
+```powershell
+python tools\jam2_test.py connectivity direct --bind 0.0.0.0:49001 --direct-host 192.168.1.20 --name peer-b --duration-s 30 --output C:\j2-connect-b
 ```
 
-Useful failure clues:
+Each command prints a share token and saves it as `token.txt` under that
+invocation. With no `--peer-token`, the manifest state is `awaiting-peer` and
+the command exits successfully.
 
-- `no STUN mapping discovered`: outbound UDP to the STUN server failed.
-- `destination-dependent/symmetric NAT mapping`: STUN saw unstable mapped ports; STUN-only direct connection may not work reliably.
-- `UDP filtering, firewall, CGNAT, stale token, same-host public-IP hairpin failure, or only one side probing`: STUN mapping was stable, but peer UDP did not arrive.
+### 2. Probe Simultaneously
 
-## Direct LAN Route
+Run both commands within the selected duration. Peer A receives Peer B's token:
 
-Use this to check whether two machines on the same LAN can exchange UDP packets directly.
-
-Peer A:
-
-```bash
-python tools/connection_test.py --mode direct --bind 0.0.0.0:49001 --direct-host 192.168.1.10 --name peer-a
+```powershell
+python tools\jam2_test.py connectivity direct --bind 0.0.0.0:49001 --direct-host 192.168.1.10 --name peer-a --peer-token "<TOKEN_FROM_PEER_B>" --duration-s 30 --interval-s 0.5 --output C:\j2-connect-a
 ```
 
-Peer B:
+Peer B receives Peer A's token:
 
-```bash
-python tools/connection_test.py --mode direct --bind 0.0.0.0:49002 --direct-host 192.168.1.20 --name peer-b
+```powershell
+python tools\jam2_test.py connectivity direct --bind 0.0.0.0:49001 --direct-host 192.168.1.20 --name peer-b --peer-token "<TOKEN_FROM_PEER_A>" --duration-s 30 --interval-s 0.5 --output C:\j2-connect-b
 ```
 
-Replace `192.168.1.10` and `192.168.1.20` with each machine's LAN IP.
+A passing result requires `probe.peer_confirmed_local: true`: the peer received
+this side's nonce and returned that confirmation. `result.json` also retains
+`received_from_peer`, packet counts, ignored packets, reset events, and the peer
+endpoint.
 
-If this fails, check the OS firewall, wrong LAN IP, Wi-Fi client isolation, or whether both sides were running at the same time.
+Do not use `--clean` between token generation and the probe if you want to keep
+both invocations. Consecutive runs already receive unique invocation folders.
 
 ## Same-Machine Sanity Check
 
-Use this only to verify that the tool and local UDP sockets work. It does not test your router.
+Use distinct local ports. This checks only the tool and loopback sockets.
 
 Terminal 1:
 
-```bash
-python tools/connection_test.py --mode direct --bind 0.0.0.0:49001 --direct-host 127.0.0.1 --name one
+```powershell
+python tools\jam2_test.py connectivity direct --bind 127.0.0.1:49001 --direct-host 127.0.0.1 --name one --duration-s 20 --output build\connect-one
 ```
 
 Terminal 2:
 
-```bash
-python tools/connection_test.py --mode direct --bind 0.0.0.0:49002 --direct-host 127.0.0.1 --name two
+```powershell
+python tools\jam2_test.py connectivity direct --bind 127.0.0.1:49002 --direct-host 127.0.0.1 --name two --duration-s 20 --output build\connect-two
 ```
 
-Exchange the printed tokens between terminals.
+Exchange the tokens, then rerun both with the other's `--peer-token` and the
+same bind ports.
 
-## Public IP With Port Forwarding
+## Public Port Forwarding
 
-Use `direct` mode to test a known forwarded UDP port.
+Use direct mode with the local forwarded bind port and advertise the public IP
+the other peer can reach. Both routers/firewalls must permit the chosen UDP
+path. A same-network test through public addresses can fail when the router does
+not support hairpin/loopback; use LAN addresses to distinguish that case.
 
-Peer behind the forwarded router:
+## Artifacts And Interpretation
 
-```bash
-python tools/connection_test.py --mode direct --bind 0.0.0.0:49001 --direct-host 81.86.171.138 --name forwarded-peer
+Defaults are isolated below:
+
+```text
+tools/connectivity_logs/<invocation-id>/
 ```
 
-Remote peer:
+An explicit output parent creates
+`PATH/connectivity_logs/<invocation-id>`. Each run contains
+`invocation-manifest.json` and `result.json`; direct runs also contain
+`token.txt`. `--clean` removes only the selected parent's complete
+`connectivity_logs` family.
 
-```bash
-python tools/connection_test.py --mode direct --bind 0.0.0.0:49001 --direct-host REMOTE_PUBLIC_IP --name remote-peer
-```
+Exit code `0` means STUN mapping succeeded, a direct probe passed, or a token
+was generated and is awaiting its peer. Exit code `1` means the requested
+mapping/probe completed without success. Exit code `2` means invalid input or
+an infrastructure failure prevented a trustworthy test.
 
-For this route, the advertised `--direct-host` should be the address the other peer can actually reach.
-
-## Notes
-
-- The default bind is `0.0.0.0:49001` so it does not conflict with Jam2's usual `49000` port.
-- Use `--bind 0.0.0.0:0` to test an ephemeral UDP port.
-- Use `--probe-seconds 180` or similar if token exchange will be slow.
-- Same-machine STUN tests through your public IP may fail because many routers do not support UDP hairpin/loopback. Use `direct` mode with `127.0.0.1` for same-machine testing.
-- On Windows, UDP reset events can appear if the other side exits first. The tool reports them but does not treat them as a crash.
-- A `PASS` result means this simple UDP route works. It does not measure audio quality or latency.
+A direct pass proves that this simple bidirectional UDP route worked during the
+probe. It does not measure latency, jitter, audio quality, or whether every
+future NAT mapping will remain unchanged.

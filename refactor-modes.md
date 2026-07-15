@@ -841,7 +841,9 @@ or duplicate session policy.
 - `network create` and `network join` through the universal mesh engine.
 - Existing stress, validation, and two-host benchmark workflows through the
   unified/debug surface.
-- Typed startup/session events, manifests, and CSV consumers.
+- Typed debug/test startup and session events, opt-in automation manifests, and
+  CSV consumers; ordinary GUI and direct CLI use do not require manifest
+  output.
 
 ## Raw Measurements to Preserve
 

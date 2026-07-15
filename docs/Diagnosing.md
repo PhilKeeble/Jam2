@@ -44,4 +44,6 @@ Enable CSV logging during repeatable tests:
 
 CSV rows are useful for comparing one change at a time: frame size, audio buffer size, playback prefill, jitter-buffer frames, adaptive cushion, network path, or audio device.
 
-For automated stress and two-host benchmark runs, use [Test Cases](TestCases.md).
+For clean post-build checks use [Validation](Validation.md). For controlled
+impairment and recovery use [Stress Tests](StressTests.md), and for real
+two-machine measurements use [Benchmark](Benchmark.md).

@@ -45,4 +45,6 @@ Grid-aligned lane recording keeps the current running position while it waits fo
 - Keep metronome level low enough that it does not mask the remote instrument.
 - If timing feels unstable, inspect stats before changing metronome mode.
 - For repeatable metronome comparisons, record jam stems and compare the generated WAVs and CSV logs.
-- The benchmark tools include metronome timing scenarios documented in [Test Cases](TestCases.md).
+- Metronome timing and impairment scenarios are documented in
+  [Stress Tests](StressTests.md), with cross-machine measurements in
+  [Benchmark](Benchmark.md).

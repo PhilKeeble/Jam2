@@ -1,6 +1,6 @@
 """Reusable Jam2 stress scenario catalog and planning helpers."""
 
-from jam2_profiles import (
+from .profiles import (
     FAST_PROFILE,
     MODERATE_PROFILE,
     SAFE_PROFILE,
@@ -9,7 +9,7 @@ from jam2_profiles import (
     latency_matched_prefill_profile,
     variant,
 )
-from udp_stress_proxy import DirectionImpairment, ProxyImpairment
+from .impairment import DirectionImpairment, ProxyImpairment
 
 
 def selected_profile(profile_name):
@@ -410,7 +410,7 @@ def scenario_catalog(base_profile=FAST_PROFILE):
             "expect": "startup metronome and remote levels should be reflected in final CSV state",
         },
         "sample-time-playout-off": {
-            "profile": variant(base_profile, "sample_time_off", sample_time_playout="off"),
+            "profile": variant(base_profile, "sample_time_off", sample_time_playout=False),
             "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=20.0)),
             "expect": "non-sample-time playout mode should still stream cleanly and report the requested mode",
         },

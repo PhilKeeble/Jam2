@@ -9,8 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from jam2_results import mesh_collect_metrics, mesh_verdict, verdict_for
-from jam2_metrics import summarize_csv
+from jam2test.results import mesh_collect_metrics, mesh_verdict, verdict_for
+from jam2test.metrics import normalized_pair_summary, summarize_csv
 
 
 def normal_result(scenario="clean-control", **metric_overrides):
@@ -38,6 +38,15 @@ def normal_result(scenario="clean-control", **metric_overrides):
 
 
 class CsvSummaryTests(unittest.TestCase):
+    def test_benchmark_pair_summary_uses_normalized_machine_records(self):
+        value = normalized_pair_summary("machine-a", None, "machine-b", None)
+        self.assertEqual(["machine-a", "machine-b"],
+                         [peer["machine_id"] for peer in value["peers"]])
+        self.assertEqual({"coordinator", "agent"},
+                         {peer["role"] for peer in value["peers"]})
+        self.assertNotIn("server", value)
+        self.assertNotIn("client", value)
+
     def test_alignment_uses_last_periodic_row_before_shutdown(self):
         fields = [
             "row_type",
@@ -54,6 +63,10 @@ class CsvSummaryTests(unittest.TestCase):
             "metronome_compensation_offset_ms",
             "metronome_compensation_target_frames",
             "metronome_compensation_target_ms",
+            "playback_ring_underruns",
+            "playback_ring_underrun_events",
+            "playback_ring_underrun_time_ms",
+            "playback_ring_underrun_burst_max_ms",
             "recv_packets",
         ]
         rows = [
@@ -72,6 +85,10 @@ class CsvSummaryTests(unittest.TestCase):
                 "metronome_compensation_offset_ms": "1.451247",
                 "metronome_compensation_target_frames": "64",
                 "metronome_compensation_target_ms": "1.451247",
+                "playback_ring_underruns": "0",
+                "playback_ring_underrun_events": "0",
+                "playback_ring_underrun_time_ms": "0",
+                "playback_ring_underrun_burst_max_ms": "0",
                 "recv_packets": "1000",
             },
             {
@@ -89,6 +106,10 @@ class CsvSummaryTests(unittest.TestCase):
                 "metronome_compensation_offset_ms": "0",
                 "metronome_compensation_target_frames": "0",
                 "metronome_compensation_target_ms": "0",
+                "playback_ring_underruns": "128",
+                "playback_ring_underrun_events": "2",
+                "playback_ring_underrun_time_ms": "2.66667",
+                "playback_ring_underrun_burst_max_ms": "2.66667",
                 "recv_packets": "1032",
             },
         ]
@@ -99,7 +120,7 @@ class CsvSummaryTests(unittest.TestCase):
                 writer = csv.DictWriter(handle, fieldnames=fields)
                 writer.writeheader()
                 writer.writerows(rows)
-            summary = summarize_csv(path)
+            summary = summarize_csv(path, assessment_elapsed_ms=20000)
 
         self.assertEqual(summary["network_active_peer_count"], 0)
         self.assertEqual(summary["recv_packets"], 1032)
@@ -109,6 +130,8 @@ class CsvSummaryTests(unittest.TestCase):
         self.assertEqual(summary["metronome_beat_delta_abs"], 0)
         self.assertEqual(summary["metronome_compensation_active"], "yes")
         self.assertEqual(summary["metronome_compensation_offset_frames"], 64)
+        self.assertEqual(summary["playback_ring_underrun_time_ms"], 0)
+        self.assertAlmostEqual(summary["playback_ring_underrun_time_ms_final"], 2.66667)
 
 
 class NormalVerdictTests(unittest.TestCase):

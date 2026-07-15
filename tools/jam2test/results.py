@@ -2,12 +2,11 @@
 
 import json
 import math
-import time
 import wave
 from pathlib import Path
 
-from jam2_audio_analysis import analyze_metronome_wav, analyze_recording_dir
-from jam2_scenarios import audio_probe_health_ok
+from .audio_analysis import analyze_metronome_wav, analyze_recording_dir
+from .scenarios import audio_probe_health_ok
 
 
 METRONOME_WAV_TOLERANCE_FRAMES = 96
@@ -754,12 +753,20 @@ def protocol_verdict_for(result):
         return "pass"
     if scenario == "runtime-controls":
         client = result.get("metrics", {}).get("client", {})
-        observations = result.get("observations", {})
         if abs(client.get("final_metronome_level", 0.0) - 0.10) > 0.01:
             return "runtime_metronome_level_not_applied"
         if abs(client.get("final_remote_level", 0.0) - 0.75) > 0.01:
             return "runtime_remote_level_not_applied"
-        if not observations.get("server_audio_control_metronome_mode_listener_compensated", False):
+        coordinator = next(
+            (peer for peer in result.get("peers", [])
+             if peer.get("role") == "coordinator"), {})
+        applied_ids = {
+            event.get("id")
+            for event in coordinator.get("native_manifest", {})
+                .get("result", {}).get("events", [])
+            if event.get("event") == "command_applied"
+        }
+        if "catalog-0-2" not in applied_ids:
             return "runtime_metronome_mode_not_applied"
         return "pass"
     if scenario.startswith("audio-probe-"):
@@ -1221,36 +1228,3 @@ def analyze_listener_compensated_pulse(result, server_paths, client_paths):
             "missing_pulse_matches_total": server.get("missing_pulse_matches", 0) + client.get("missing_pulse_matches", 0),
         },
     }
-
-
-def run_runtime_commands(commands, server_process, client_process):
-    start = time.monotonic()
-    for command in sorted(commands, key=lambda item: item.get("at_s", 0.0)):
-        delay = start + float(command.get("at_s", 0.0)) - time.monotonic()
-        if delay > 0.0:
-            time.sleep(delay)
-        target = server_process if command.get("side") == "server" else client_process
-        target.send_line(command.get("line", ""))
-
-
-def text_contains(path, pattern):
-    try:
-        return pattern in Path(path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-
-
-def scenario_observations(scenario_id, scenario, server_paths, client_paths):
-    source = scenario.get("source_scenario", scenario_id)
-    observations = {}
-    if source == "runtime-controls":
-        observations["server_audio_control_metronome_mode_listener_compensated"] = text_contains(
-            server_paths["stdout"],
-            "Audio control metronome mode: listener-compensated")
-        observations["client_final_metronome_level_0_1"] = text_contains(
-            client_paths["stdout"],
-            "Final metronome level: 0.1")
-        observations["client_final_remote_level_0_75"] = text_contains(
-            client_paths["stdout"],
-            "Final remote playback level: 0.75")
-    return observations

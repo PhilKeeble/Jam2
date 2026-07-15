@@ -1,7 +1,9 @@
 #include "SessionController.hpp"
 
 #include "ApplicationRuntime.hpp"
+#include "AutomationChannel.hpp"
 #include "ControlProtocol.hpp"
+#include "DebugActionValidation.hpp"
 #include "SharedSessionController.hpp"
 
 #include "common.hpp"
@@ -16,6 +18,7 @@
 #include <QJsonObject>
 #include <QMap>
 #include <QMetaObject>
+#include <QPointer>
 #include <QTcpServer>
 #include <QTimer>
 #include <QUdpSocket>
@@ -23,12 +26,15 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <deque>
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <memory>
+#include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
-#include <thread>
 
 namespace {
 
@@ -97,6 +103,11 @@ public:
     NetworkCommandController(int argc, char* argv[])
         : runtime_(this), sessionController_(this)
     {
+        if (QCoreApplication::instance() != nullptr) {
+            debugScenario_ = QCoreApplication::instance()
+                ->property("jam2.debug.scenario").toJsonObject();
+            debugNetwork_ = debugScenario_.value(QStringLiteral("network")).toObject();
+        }
         if (argc < 3 || QString::fromLocal8Bit(argv[1]) != QStringLiteral("network")) {
             throw std::runtime_error("invalid network bootstrap command");
         }
@@ -138,10 +149,10 @@ public:
         sessionHex_ = sessionHex(session_.session_id);
         keyHex_ = keyHex(session_.key);
 
-        const QByteArray inheritedToken = qgetenv("JAM2_DEBUG_PEER_TOKEN");
-        const bool debugScenario = qgetenv("JAM2_DEBUG_SCENARIO") == QByteArrayLiteral("1");
-        if (debugScenario && jam2::control_protocol::decodeHex(QString::fromLatin1(inheritedToken), 16).size() == 16) {
-            localToken_ = QString::fromLatin1(inheritedToken).toLower();
+        const QString configuredToken = debugNetwork_.value(QStringLiteral("peer_token")).toString();
+        if (!debugScenario_.isEmpty() &&
+            jam2::control_protocol::decodeHex(configuredToken, 16).size() == 16) {
+            localToken_ = configuredToken.toLower();
         } else {
             localToken_ = jam2::control_protocol::encodeHex(jam2::control_protocol::randomNonce());
         }
@@ -149,11 +160,15 @@ public:
         runtime_.onStartup = [this](const Jam2RuntimeStartup& startup) {
             handleRuntimeStartup(startup);
         };
-        runtime_.onError = [](const QString& line) { writeConsoleLine(line, true); };
+        runtime_.onError = [this](const QString& line) {
+            writeConsoleLine(line, true);
+            emitAutomation(QStringLiteral("error"), {{QStringLiteral("message"), line}});
+        };
         runtime_.onEngineEvent = [this](const jam2::EngineEvent& event) {
             if (event.type == jam2::EngineEventType::JamRecordingStopped) {
                 writeRecordingSidecar();
             }
+            handleAutomationEngineEvent(event);
         };
         runtime_.onNetworkFinished = [this](int code) { handleRuntimeFinished(code); };
         sessionController_.onPeerAuthenticated = [this](const QString& token, const QJsonObject& message) {
@@ -168,7 +183,13 @@ public:
                 next[peer.token] = peer.endpoint;
             }
             peers_ = std::move(next);
+            maxRemotePeerCount_ = std::max(maxRemotePeerCount_, snapshot.remotePeerCount);
             coordinatorToken_ = snapshot.coordinatorToken;
+            emitAutomation(QStringLiteral("peer_snapshot"), {
+                {QStringLiteral("remote_peer_count"), snapshot.remotePeerCount},
+                {QStringLiteral("coordinator_token"), snapshot.coordinatorToken},
+                {QStringLiteral("network_attachment_ready"), snapshot.networkAttachmentReady},
+            });
             if (!creator_ && snapshot.networkAttachmentReady && runtimeStarted_) {
                 emitJoinConnected();
             }
@@ -205,7 +226,8 @@ public:
 
     void start()
     {
-        startConsoleInput();
+        startAutomation();
+        emitAutomation(QStringLiteral("controller_started"));
         if (waitMs_ > 0) {
             QTimer::singleShot(waitMs_, this, [this] {
                 if ((creator_ && !hadAuthenticatedPeer_) ||
@@ -235,6 +257,14 @@ private:
         int frameSize = 128;
     };
 
+    struct PendingControllerAction {
+        std::uint64_t target = 0;
+        bool shutdown = false;
+        bool snapshot = false;
+        bool enabled = false;
+        QString id;
+    };
+
     static QString metronomeModeText(jam2::EngineMetronomeMode mode)
     {
         switch (mode) {
@@ -261,58 +291,468 @@ private:
         }
     }
 
-    void startConsoleInput()
+    void startAutomation()
     {
-        // Console input is a headless adapter only. It translates legacy
-        // diagnostic lines into typed commands on the Qt owner thread; the
-        // engine and UDP workers never parse or block on stdin.
-        std::thread([this] {
-            std::string line;
-            while (std::getline(std::cin, line)) {
-                const QString command = QString::fromUtf8(line).trimmed();
-                QMetaObject::invokeMethod(this, [this, command] {
-                    handleConsoleCommand(command);
+        if (debugScenario_.isEmpty()) {
+            return;
+        }
+        pendingActions_ = debugScenario_.value(QStringLiteral("actions")).toArray();
+        const QJsonObject automation = debugScenario_.value(QStringLiteral("automation")).toObject();
+        controllerLossStops_ = automation
+            .value(QStringLiteral("controller_loss")).toString(QStringLiteral("stop")) ==
+            QStringLiteral("stop");
+        const bool reactive = automation.value(QStringLiteral("reactive")).toBool(false);
+        std::string channelError;
+        automationChannel_ = AutomationChannel::fromInheritedEnvironment(reactive, channelError);
+        if (!channelError.empty()) {
+            throw std::runtime_error(channelError);
+        }
+        if (!automationChannel_) {
+            return;
+        }
+        QPointer<NetworkCommandController> self(this);
+        automationChannel_->start(
+            [self](QJsonObject command) {
+                if (!self) return;
+                self->enqueueAutomationCommand(std::move(command));
+            },
+            [self](std::string error) {
+                if (!self) return;
+                QMetaObject::invokeMethod(self, [self, error = std::move(error)] {
+                    if (!self) return;
+                    self->automationDisconnects_++;
+                    writeConsoleLine(QString::fromStdString(error), true);
+                    if (self->controllerLossStops_) self->finish(5);
                 }, Qt::QueuedConnection);
-            }
-        }).detach();
+            });
+        emitAutomation(QStringLiteral("hello"), {
+            {QStringLiteral("run_id"), debugScenario_.value(QStringLiteral("run_id"))},
+            {QStringLiteral("queue_capacity"), static_cast<qint64>(AutomationChannel::kQueueCapacity)},
+            {QStringLiteral("max_frame_bytes"), static_cast<qint64>(AutomationChannel::kMaxFrameBytes)},
+            {QStringLiteral("commands_per_turn"), static_cast<qint64>(AutomationChannel::kCommandsPerTurn)},
+        });
     }
 
-    bool submitConsoleCommand(jam2::EngineCommand command, const QString& context)
+    void enqueueAutomationCommand(QJsonObject command)
+    {
+        bool schedule = false;
+        {
+            std::lock_guard<std::mutex> lock(automationCommandMutex_);
+            if (automationCommandQueue_.size() >= AutomationChannel::kQueueCapacity) {
+                automationCommandQueueDrops_++;
+                return;
+            }
+            automationCommandQueue_.push_back(std::move(command));
+            automationCommandQueueHighWater_ = std::max(
+                automationCommandQueueHighWater_, automationCommandQueue_.size());
+            if (!automationCommandDrainScheduled_) {
+                automationCommandDrainScheduled_ = true;
+                schedule = true;
+            }
+        }
+        if (!schedule) return;
+        QPointer<NetworkCommandController> self(this);
+        QMetaObject::invokeMethod(this, [self] {
+            if (self) self->drainAutomationCommands();
+        }, Qt::QueuedConnection);
+    }
+
+    void drainAutomationCommands()
+    {
+        std::vector<QJsonObject> commands;
+        commands.reserve(AutomationChannel::kCommandsPerTurn);
+        bool reschedule = false;
+        {
+            std::lock_guard<std::mutex> lock(automationCommandMutex_);
+            while (!automationCommandQueue_.empty() &&
+                   commands.size() < AutomationChannel::kCommandsPerTurn) {
+                commands.push_back(std::move(automationCommandQueue_.front()));
+                automationCommandQueue_.pop_front();
+            }
+            reschedule = !automationCommandQueue_.empty();
+            automationCommandDrainScheduled_ = reschedule;
+        }
+        for (const QJsonObject& command : commands) {
+            handleAutomationCommand(command);
+            if (finishing_) return;
+        }
+        if (reschedule) {
+            QPointer<NetworkCommandController> self(this);
+            QMetaObject::invokeMethod(this, [self] {
+                if (self) self->drainAutomationCommands();
+            }, Qt::QueuedConnection);
+        }
+    }
+
+    void emitAutomation(QString event, QJsonObject fields = {})
+    {
+        fields.insert(QStringLiteral("event"), event);
+        fields.insert(QStringLiteral("engine_frame"),
+            static_cast<qint64>(runtime_.engineSnapshot().engine_frame));
+        if (automationTrace_.size() < static_cast<qsizetype>(AutomationChannel::kQueueCapacity)) {
+            automationTrace_.push_back(fields);
+        } else {
+            automationTraceDrops_++;
+        }
+        if (automationChannel_ && !automationChannel_->send(fields)) {
+            automationEventRejects_++;
+        }
+        activateStaticActions(event);
+    }
+
+    void activateStaticActions(const QString& event)
+    {
+        if (pendingActions_.isEmpty()) return;
+        QJsonArray remaining;
+        QJsonArray activated;
+        for (const QJsonValue& value : pendingActions_) {
+            const QJsonObject action = value.toObject();
+            const QString after = action.value(QStringLiteral("after_event"))
+                .toString(QStringLiteral("controller_started"));
+            if (after == event) {
+                activated.push_back(action);
+            } else {
+                remaining.push_back(action);
+            }
+        }
+        pendingActions_ = remaining;
+        for (const QJsonValue& value : activated) {
+            executeAutomationAction(value.toObject());
+        }
+    }
+
+    void handleAutomationCommand(const QJsonObject& frame)
+    {
+        const QString type = frame.value(QStringLiteral("type")).toString();
+        if (type == QStringLiteral("action")) {
+            const QJsonObject action = frame.value(QStringLiteral("action")).toObject();
+            static const std::set<QString> frameFields{
+                QStringLiteral("format"), QStringLiteral("type"), QStringLiteral("action")};
+            QString validationError;
+            bool valid = jam2ValidateDebugAction(action, validationError) &&
+                !action.contains(QStringLiteral("after_event"));
+            for (auto it = frame.begin(); valid && it != frame.end(); ++it) {
+                valid = frameFields.contains(it.key());
+            }
+            if (valid) {
+                executeAutomationAction(action);
+                return;
+            }
+        }
+        if (type == QStringLiteral("snapshot")) {
+            static const std::set<QString> fields{
+                QStringLiteral("format"), QStringLiteral("type"), QStringLiteral("id")};
+            QJsonObject action = frame;
+            action.remove(QStringLiteral("format"));
+            QString validationError;
+            bool valid = jam2ValidateDebugAction(action, validationError);
+            for (auto it = frame.begin(); it != frame.end(); ++it) valid &= fields.contains(it.key());
+            if (valid) {
+                emitAutomationSnapshot(frame.value(QStringLiteral("id")).toString());
+                return;
+            }
+        }
+        if (type == QStringLiteral("shutdown")) {
+            static const std::set<QString> fields{
+                QStringLiteral("format"), QStringLiteral("type"), QStringLiteral("id"),
+                QStringLiteral("delay_frames"), QStringLiteral("apply_frame")};
+            QJsonObject action = frame;
+            action.remove(QStringLiteral("format"));
+            QString validationError;
+            bool valid = jam2ValidateDebugAction(action, validationError);
+            for (auto it = frame.begin(); it != frame.end(); ++it) valid &= fields.contains(it.key());
+            if (valid) {
+                scheduleControllerAction(frame, true);
+                return;
+            }
+        }
+        automationCommandRejects_++;
+        emitAutomation(QStringLiteral("command_rejected"), {
+            {QStringLiteral("id"), frame.value(QStringLiteral("id"))},
+            {QStringLiteral("reason"), QStringLiteral("unsupported automation command type")},
+        });
+    }
+
+    std::uint64_t automationTargetFrame(const QJsonObject& action) const
+    {
+        if (action.contains(QStringLiteral("apply_frame"))) {
+            return static_cast<std::uint64_t>(action.value(QStringLiteral("apply_frame")).toDouble());
+        }
+        if (action.contains(QStringLiteral("delay_frames"))) {
+            return runtime_.engineSnapshot().engine_frame +
+                static_cast<std::uint64_t>(action.value(QStringLiteral("delay_frames")).toDouble());
+        }
+        return 0;
+    }
+
+    QString actionIdentity(const QJsonObject& action)
+    {
+        const QString provided = action.value(QStringLiteral("id")).toString();
+        return provided.isEmpty()
+            ? QStringLiteral("action-%1").arg(++anonymousActionId_)
+            : provided;
+    }
+
+    bool submitAutomationCommand(
+        jam2::EngineCommand command,
+        const QString& id,
+        std::uint64_t applyFrame)
     {
         command.cookie = ++commandCookie_;
+        command.apply_frame = applyFrame;
+        commandActions_.insert(command.cookie, id);
         if (runtime_.submit(command)) {
+            automationCommandsSubmitted_++;
             return true;
         }
-        writeConsoleLine(QStringLiteral("headless command rejected: ") + context, true);
+        commandActions_.remove(command.cookie);
+        automationCommandRejects_++;
+        emitAutomation(QStringLiteral("command_rejected"), {
+            {QStringLiteral("id"), id},
+            {QStringLiteral("reason"), QStringLiteral("native engine command queue is full or unavailable")},
+            {QStringLiteral("requested_frame"), static_cast<qint64>(applyFrame)},
+        });
         return false;
     }
 
-    static int gainPpm(const QString& token, int current, bool& ok)
+    static bool actionGain(const QJsonObject& action, int& result)
     {
-        bool parsed = false;
-        const double value = token.toDouble(&parsed);
-        if (!parsed) {
-            ok = false;
-            return current;
-        }
-        const double gain = (token.startsWith(QLatin1Char('+')) || token.startsWith(QLatin1Char('-')))
-            ? static_cast<double>(current) / 1000000.0 + value
-            : value;
-        if (gain < 0.0 || gain > 4.0) {
-            ok = false;
-            return current;
-        }
-        ok = true;
-        return static_cast<int>(std::llround(gain * 1000000.0));
+        if (!action.value(QStringLiteral("value")).isDouble()) return false;
+        const double value = action.value(QStringLiteral("value")).toDouble();
+        if (!std::isfinite(value) || value < 0.0 || value > 4.0) return false;
+        result = static_cast<int>(std::llround(value * 1000000.0));
+        return true;
     }
 
-    std::uint64_t parseFrameOrNow(const QString& text, bool& ok) const
+    void executeAutomationAction(const QJsonObject& action)
     {
-        if (text.isEmpty() || text == QStringLiteral("now")) {
-            ok = true;
-            return runtime_.engineSnapshot().engine_frame;
+        const QString id = actionIdentity(action);
+        const QString type = action.value(QStringLiteral("type")).toString();
+        const std::uint64_t target = automationTargetFrame(action);
+        const jam2::EngineSnapshot snapshot = runtime_.engineSnapshot();
+        jam2::EngineCommand command;
+        bool valid = true;
+
+        if (type == QStringLiteral("metronome.enabled") &&
+            action.value(QStringLiteral("enabled")).isBool()) {
+            command.type = jam2::EngineCommandType::SetMetronomeEnabled;
+            command.enabled = action.value(QStringLiteral("enabled")).toBool();
+        } else if (type == QStringLiteral("metronome.bpm") &&
+                   action.value(QStringLiteral("value")).isDouble()) {
+            const int bpm = action.value(QStringLiteral("value")).toInt();
+            valid = bpm >= 1 && bpm <= 400;
+            command.type = jam2::EngineCommandType::SetMetronomePattern;
+            command.pattern = snapshot.metronome_pattern;
+            command.pattern.bpm = bpm;
+        } else if (type == QStringLiteral("metronome.mode")) {
+            const QString mode = action.value(QStringLiteral("mode")).toString();
+            valid = mode == QStringLiteral("shared-grid") ||
+                mode == QStringLiteral("leader-audio") ||
+                mode == QStringLiteral("listener-compensated");
+            command.type = jam2::EngineCommandType::SetMetronomeMode;
+            command.value = mode == QStringLiteral("leader-audio") ? 1 :
+                (mode == QStringLiteral("listener-compensated") ? 2 : 0);
+        } else if (type == QStringLiteral("metronome.level")) {
+            command.type = jam2::EngineCommandType::SetMetronomeLevel;
+            valid = actionGain(action, command.value);
+        } else if (type == QStringLiteral("remote.level")) {
+            command.type = jam2::EngineCommandType::SetRemoteLevel;
+            valid = actionGain(action, command.value);
+        } else if (type == QStringLiteral("track.sync") &&
+                   action.value(QStringLiteral("enabled")).isBool()) {
+            scheduleControllerAction(action, false);
+            return;
+        } else if (type == QStringLiteral("track.load")) {
+            command.type = jam2::EngineCommandType::LoadPreparedTrack;
+            const QString path = action.value(QStringLiteral("path")).toString();
+            const QString canonical = QFileInfo(path).canonicalFilePath();
+            const QJsonArray fixtures = debugScenario_.value(QStringLiteral("fixtures")).toArray();
+            valid = !canonical.isEmpty() && fixtures.contains(canonical) &&
+                jam2::engine_command_set_text(command, path.toStdString());
+        } else if (type == QStringLiteral("track.play") ||
+                   type == QStringLiteral("track.stop")) {
+            command.type = type == QStringLiteral("track.play")
+                ? jam2::EngineCommandType::PreparedPlay
+                : jam2::EngineCommandType::PreparedStop;
+            command.frame = target == 0 ? snapshot.engine_frame : target;
+            if (!submitAutomationCommand(command, id + QStringLiteral("/local"), target)) return;
+            if (!trackSyncEnabled_) return;
+            jam2::EngineCommand transport;
+            transport.type = jam2::EngineCommandType::ScheduleTransport;
+            transport.transport_action = type == QStringLiteral("track.play")
+                ? jam2::EngineTransportAction::TrackPlay
+                : jam2::EngineTransportAction::TrackStop;
+            transport.transport_target_frame = command.frame;
+            transport.transport_musical_frame = command.frame;
+            transport.transport_countdown_start_frame = command.frame;
+            (void)submitAutomationCommand(transport, id, target);
+            return;
+        } else if (type == QStringLiteral("track.restart") ||
+                   type == QStringLiteral("track.record-start")) {
+            const int countIn = action.value(QStringLiteral("count_in_bars"))
+                .toInt(type == QStringLiteral("track.record-start") ? 1 : 0);
+            valid = countIn >= 0 && countIn <= 8;
+            const std::uint64_t transportFrame = target == 0
+                ? nextBarTarget(snapshot, countIn)
+                : target;
+            jam2::EngineCommand seek;
+            seek.type = jam2::EngineCommandType::PreparedSeek;
+            seek.frame = transportFrame;
+            jam2::EngineCommand play;
+            play.type = jam2::EngineCommandType::PreparedPlay;
+            play.frame = transportFrame;
+            if (valid && !submitAutomationCommand(seek, id + QStringLiteral("/seek"), transportFrame)) return;
+            if (valid && !submitAutomationCommand(play, id + QStringLiteral("/play"), transportFrame)) return;
+            command.type = jam2::EngineCommandType::ScheduleTransport;
+            command.transport_action = type == QStringLiteral("track.record-start")
+                ? jam2::EngineTransportAction::RecordStart
+                : jam2::EngineTransportAction::TrackRestart;
+            command.transport_target_frame = transportFrame;
+            command.transport_musical_frame = transportFrame;
+            command.transport_countdown_start_frame = transportFrame;
+            if (valid && trackSyncEnabled_) {
+                (void)submitAutomationCommand(command, id, transportFrame);
+            }
+            return;
+        } else if (type == QStringLiteral("recording.start")) {
+            command.type = jam2::EngineCommandType::StartJamRecording;
+            const QString path = action.value(QStringLiteral("path")).toString();
+            const QString root = debugScenario_.value(QStringLiteral("artifacts"))
+                .toObject().value(QStringLiteral("root")).toString();
+            const QString absolute = QFileInfo(path).absoluteFilePath();
+            const QString relative = QDir(root).relativeFilePath(absolute);
+            valid = !root.isEmpty() && relative != QStringLiteral("..") &&
+                !relative.startsWith(QStringLiteral("../")) && !QFileInfo(relative).isAbsolute() &&
+                jam2::engine_command_set_text(command, path.toStdString());
+            if (valid) activeRecordingFolder_ = path;
+        } else if (type == QStringLiteral("recording.stop")) {
+            command.type = jam2::EngineCommandType::StopJamRecording;
+        } else if (type == QStringLiteral("snapshot")) {
+            if (target == 0) emitAutomationSnapshot(id);
+            else scheduleControllerAction(action, false, true);
+            return;
+        } else if (type == QStringLiteral("shutdown")) {
+            scheduleControllerAction(action, true);
+            return;
+        } else {
+            valid = false;
         }
-        return text.toULongLong(&ok);
+
+        if (!valid) {
+            automationCommandRejects_++;
+            emitAutomation(QStringLiteral("command_rejected"), {
+                {QStringLiteral("id"), id},
+                {QStringLiteral("reason"), QStringLiteral("invalid action fields")},
+            });
+            return;
+        }
+        (void)submitAutomationCommand(command, id, target);
+    }
+
+    void scheduleControllerAction(
+        const QJsonObject& action,
+        bool shutdown,
+        bool snapshot = false)
+    {
+        const QString id = actionIdentity(action);
+        const std::uint64_t target = automationTargetFrame(action);
+        if (target == 0 || runtime_.engineSnapshot().engine_frame >= target) {
+            if (shutdown) {
+                emitAutomation(QStringLiteral("command_applied"), {{QStringLiteral("id"), id}});
+                finish(0);
+            } else if (snapshot) {
+                emitAutomationSnapshot(id);
+            } else {
+                trackSyncEnabled_ = action.value(QStringLiteral("enabled")).toBool();
+                runtime_.setTrackSyncEnabled(trackSyncEnabled_);
+                emitAutomation(QStringLiteral("command_applied"), {{QStringLiteral("id"), id}});
+            }
+            return;
+        }
+        if (pendingControllerActions_.size() >= AutomationChannel::kQueueCapacity) {
+            automationCommandRejects_++;
+            emitAutomation(QStringLiteral("command_rejected"), {
+                {QStringLiteral("id"), id},
+                {QStringLiteral("reason"), QStringLiteral("native controller action queue is full")},
+            });
+            return;
+        }
+        pendingControllerActions_.push_back({target, shutdown, snapshot,
+            action.value(QStringLiteral("enabled")).toBool(), id});
+        if (!controllerActionTimer_.isActive()) {
+            controllerActionTimer_.setInterval(5);
+            connect(&controllerActionTimer_, &QTimer::timeout, this, [this] {
+                pollControllerActions();
+            });
+            controllerActionTimer_.start();
+        }
+    }
+
+    void pollControllerActions()
+    {
+        const std::uint64_t now = runtime_.engineSnapshot().engine_frame;
+        auto it = pendingControllerActions_.begin();
+        while (it != pendingControllerActions_.end()) {
+            if (it->target > now) { ++it; continue; }
+            const auto action = *it;
+            it = pendingControllerActions_.erase(it);
+            if (action.shutdown) {
+                emitAutomation(QStringLiteral("command_applied"), {
+                    {QStringLiteral("id"), action.id},
+                    {QStringLiteral("requested_frame"), static_cast<qint64>(action.target)},
+                    {QStringLiteral("applied_frame"), static_cast<qint64>(now)},
+                });
+                finish(0);
+                return;
+            }
+            if (action.snapshot) {
+                emitAutomationSnapshot(action.id);
+                continue;
+            }
+            trackSyncEnabled_ = action.enabled;
+            runtime_.setTrackSyncEnabled(trackSyncEnabled_);
+            emitAutomation(QStringLiteral("command_applied"), {
+                {QStringLiteral("id"), action.id},
+                {QStringLiteral("requested_frame"), static_cast<qint64>(action.target)},
+                {QStringLiteral("applied_frame"), static_cast<qint64>(now)},
+            });
+        }
+        if (pendingControllerActions_.empty()) controllerActionTimer_.stop();
+    }
+
+    void emitAutomationSnapshot(const QString& id)
+    {
+        const auto snapshot = runtime_.engineSnapshot();
+        const auto network = sessionController_.snapshot();
+        emitAutomation(QStringLiteral("snapshot"), {
+            {QStringLiteral("id"), id},
+            {QStringLiteral("metronome_enabled"), snapshot.metronome_enabled},
+            {QStringLiteral("bpm"), snapshot.metronome_pattern.bpm},
+            {QStringLiteral("remote_level_ppm"), snapshot.remote_level_ppm},
+            {QStringLiteral("track_sync"), trackSyncEnabled_},
+            {QStringLiteral("network_running"), runtime_.isNetworkRunning()},
+            {QStringLiteral("remote_peer_count"), network.remotePeerCount},
+        });
+    }
+
+    void handleAutomationEngineEvent(const jam2::EngineEvent& event)
+    {
+        if (event.type != jam2::EngineEventType::CommandApplied &&
+            event.type != jam2::EngineEventType::CommandRejected) return;
+        const QString id = commandActions_.take(event.cookie);
+        if (id.isEmpty()) return;
+        const qint64 difference = event.applied_frame >= event.requested_frame
+            ? static_cast<qint64>(event.applied_frame - event.requested_frame)
+            : -static_cast<qint64>(event.requested_frame - event.applied_frame);
+        emitAutomation(event.type == jam2::EngineEventType::CommandApplied
+                ? QStringLiteral("command_applied")
+                : QStringLiteral("command_rejected"), {
+            {QStringLiteral("id"), id},
+            {QStringLiteral("cookie"), static_cast<qint64>(event.cookie)},
+            {QStringLiteral("requested_frame"), static_cast<qint64>(event.requested_frame)},
+            {QStringLiteral("applied_frame"), static_cast<qint64>(event.applied_frame)},
+            {QStringLiteral("difference_frames"), difference},
+        });
     }
 
     std::uint64_t nextBarTarget(
@@ -409,173 +849,6 @@ private:
             writeConsoleLine(QStringLiteral("record jam sidecar failed: ") + file.fileName(), true);
         }
         activeRecordingFolder_.clear();
-    }
-
-    void handleConsoleCommand(const QString& line)
-    {
-        if (line.isEmpty()) {
-            return;
-        }
-        const QStringList parts = line.simplified().split(QLatin1Char(' '));
-        const QString command = parts.value(0);
-        const jam2::EngineSnapshot snapshot = runtime_.engineSnapshot();
-        jam2::EngineCommand engineCommand;
-        QString context = line;
-
-        if (command == QStringLiteral("quit") || command == QStringLiteral("exit")) {
-            finish(0);
-            return;
-        }
-        if (command == QStringLiteral("bpm") && parts.size() == 2) {
-            bool ok = false;
-            const int bpm = parts[1].toInt(&ok);
-            if (ok && bpm >= 1 && bpm <= 400) {
-                engineCommand.type = jam2::EngineCommandType::SetMetronomePattern;
-                engineCommand.pattern = snapshot.metronome_pattern;
-                engineCommand.pattern.bpm = bpm;
-                (void)submitConsoleCommand(engineCommand, context);
-                return;
-            }
-        } else if (command == QStringLiteral("metro") && parts.size() >= 2) {
-            const QString action = parts[1];
-            if (action == QStringLiteral("on") || action == QStringLiteral("off")) {
-                engineCommand.type = jam2::EngineCommandType::SetMetronomeEnabled;
-                engineCommand.enabled = action == QStringLiteral("on");
-                (void)submitConsoleCommand(engineCommand, context);
-                return;
-            }
-            if (action == QStringLiteral("mode") && parts.size() == 3) {
-                const QString mode = parts[2];
-                if (mode == QStringLiteral("shared-grid") || mode == QStringLiteral("leader-audio") ||
-                    mode == QStringLiteral("listener-compensated")) {
-                    engineCommand.type = jam2::EngineCommandType::SetMetronomeMode;
-                    engineCommand.value = mode == QStringLiteral("leader-audio") ? 1 :
-                        (mode == QStringLiteral("listener-compensated") ? 2 : 0);
-                    (void)submitConsoleCommand(engineCommand, context);
-                    return;
-                }
-            }
-            if (action == QStringLiteral("level") && parts.size() == 3) {
-                bool ok = false;
-                engineCommand.value = gainPpm(parts[2], snapshot.metronome_level_ppm, ok);
-                if (ok) {
-                    engineCommand.type = jam2::EngineCommandType::SetMetronomeLevel;
-                    (void)submitConsoleCommand(engineCommand, context);
-                    return;
-                }
-            }
-        } else if (command == QStringLiteral("remote") && parts.size() >= 2) {
-            engineCommand.type = jam2::EngineCommandType::SetRemoteLevel;
-            if (parts[1] == QStringLiteral("mute")) {
-                engineCommand.value = 0;
-            } else if (parts[1] == QStringLiteral("unmute")) {
-                engineCommand.value = 1000000;
-            } else if (parts[1] == QStringLiteral("level") && parts.size() == 3) {
-                bool ok = false;
-                engineCommand.value = gainPpm(parts[2], snapshot.remote_level_ppm, ok);
-                if (!ok) {
-                    writeConsoleLine(QStringLiteral("invalid headless command: ") + line, true);
-                    return;
-                }
-            } else {
-                writeConsoleLine(QStringLiteral("invalid headless command: ") + line, true);
-                return;
-            }
-            (void)submitConsoleCommand(engineCommand, context);
-            return;
-        } else if (command == QStringLiteral("track") && parts.size() >= 2) {
-            const QString action = parts[1];
-            if (action == QStringLiteral("sync") && parts.size() == 3 &&
-                (parts[2] == QStringLiteral("on") || parts[2] == QStringLiteral("off"))) {
-                trackSyncEnabled_ = parts[2] == QStringLiteral("on");
-                runtime_.setTrackSyncEnabled(trackSyncEnabled_);
-                return;
-            } else if (action == QStringLiteral("load")) {
-                const QString path = line.mid(line.indexOf(action) + action.size()).trimmed();
-                engineCommand.type = jam2::EngineCommandType::LoadPreparedTrack;
-                if (jam2::engine_command_set_text(engineCommand, path.toStdString())) {
-                    (void)submitConsoleCommand(engineCommand, context);
-                    return;
-                }
-            } else if (action == QStringLiteral("restart") ||
-                       action == QStringLiteral("record-start")) {
-                bool countInOk = true;
-                const int countInBars = action == QStringLiteral("record-start")
-                    ? (parts.size() == 3 ? parts[2].toInt(&countInOk) : 1)
-                    : 0;
-                if (!countInOk || countInBars < 0 || countInBars > 8 ||
-                    (action == QStringLiteral("restart") && parts.size() != 2) ||
-                    parts.size() > 3) {
-                    writeConsoleLine(QStringLiteral("invalid headless command: ") + line, true);
-                    return;
-                }
-                const std::uint64_t target = nextBarTarget(snapshot, countInBars);
-                jam2::EngineCommand seek;
-                seek.type = jam2::EngineCommandType::PreparedSeek;
-                seek.frame = target;
-                if (!submitConsoleCommand(seek, context + QStringLiteral(" seek"))) return;
-                jam2::EngineCommand play;
-                play.type = jam2::EngineCommandType::PreparedPlay;
-                play.frame = target;
-                if (!submitConsoleCommand(play, context + QStringLiteral(" play"))) return;
-                if (!trackSyncEnabled_) return;
-                engineCommand.type = jam2::EngineCommandType::ScheduleTransport;
-                engineCommand.transport_action = action == QStringLiteral("record-start")
-                    ? jam2::EngineTransportAction::RecordStart
-                    : jam2::EngineTransportAction::TrackRestart;
-                engineCommand.transport_target_frame = target;
-                engineCommand.transport_musical_frame = snapshot.metronome_render_offset_frames >= 0
-                    ? target + static_cast<std::uint64_t>(snapshot.metronome_render_offset_frames)
-                    : target > static_cast<std::uint64_t>(-snapshot.metronome_render_offset_frames)
-                        ? target - static_cast<std::uint64_t>(-snapshot.metronome_render_offset_frames)
-                        : 0ULL;
-                engineCommand.transport_countdown_start_frame = target;
-                (void)submitConsoleCommand(engineCommand, context);
-                return;
-            } else if ((action == QStringLiteral("play") || action == QStringLiteral("stop")) && parts.size() <= 3) {
-                bool ok = false;
-                engineCommand.frame = parseFrameOrNow(parts.value(2), ok);
-                if (ok) {
-                    engineCommand.type = action == QStringLiteral("play")
-                        ? jam2::EngineCommandType::PreparedPlay
-                        : jam2::EngineCommandType::PreparedStop;
-                    if (!submitConsoleCommand(engineCommand, context)) return;
-                    if (!trackSyncEnabled_) return;
-                    jam2::EngineCommand transport;
-                    transport.type = jam2::EngineCommandType::ScheduleTransport;
-                    transport.transport_action = action == QStringLiteral("play")
-                        ? jam2::EngineTransportAction::TrackPlay
-                        : jam2::EngineTransportAction::TrackStop;
-                    transport.transport_target_frame = engineCommand.frame;
-                    transport.transport_musical_frame = engineCommand.frame;
-                    transport.transport_countdown_start_frame = engineCommand.frame;
-                    (void)submitConsoleCommand(transport, context + QStringLiteral(" transport"));
-                    return;
-                }
-            }
-        } else if (command == QStringLiteral("record") && parts.size() >= 3 &&
-                   parts[1] == QStringLiteral("jam")) {
-            if (parts[2] == QStringLiteral("start")) {
-                const QString path = line.mid(line.indexOf(QStringLiteral("start")) + 5).trimmed();
-                engineCommand.type = jam2::EngineCommandType::StartJamRecording;
-                if (!path.isEmpty() && jam2::engine_command_set_text(engineCommand, path.toStdString()) &&
-                    submitConsoleCommand(engineCommand, context)) {
-                    activeRecordingFolder_ = path;
-                    return;
-                }
-            } else if (parts[2] == QStringLiteral("stop")) {
-                engineCommand.type = jam2::EngineCommandType::StopJamRecording;
-                (void)submitConsoleCommand(engineCommand, context);
-                return;
-            }
-        } else if (command == QStringLiteral("stats") || command == QStringLiteral("status")) {
-            writeConsoleLine(QStringLiteral("Headless runtime: frame=%1 network=%2 peers=%3")
-                .arg(snapshot.engine_frame)
-                .arg(runtime_.isNetworkRunning() ? QStringLiteral("on") : QStringLiteral("off"))
-                .arg(sessionController_.snapshot().remotePeerCount));
-            return;
-        }
-        writeConsoleLine(QStringLiteral("invalid headless command: ") + line, true);
     }
 
     QString takeOptionValue(int& index, const QString& name)
@@ -888,12 +1161,7 @@ private:
 
     QJsonObject debugTopology() const
     {
-        if (qgetenv("JAM2_DEBUG_SCENARIO") != QByteArrayLiteral("1")) {
-            return {};
-        }
-        QJsonParseError error;
-        const QJsonDocument document = QJsonDocument::fromJson(qgetenv("JAM2_DEBUG_TOPOLOGY"), &error);
-        return error.error == QJsonParseError::NoError && document.isObject() ? document.object() : QJsonObject{};
+        return debugNetwork_.value(QStringLiteral("topology")).toObject();
     }
 
     void handleCoordinatorMessage(const QJsonObject& message)
@@ -975,6 +1243,7 @@ private:
             object[QStringLiteral("error")] = error;
         }
         writeConsoleLine(QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact)));
+        emitAutomation(QStringLiteral("network.") + stage, object);
     }
 
     void finish(int code)
@@ -988,6 +1257,7 @@ private:
         if (runtime_.isNetworkRunning()) {
             runtime_.stopNetwork();
         } else {
+            publishAutomationResult(code);
             QCoreApplication::exit(code);
         }
     }
@@ -995,7 +1265,60 @@ private:
     void handleRuntimeFinished(int code)
     {
         sessionController_.close();
-        QCoreApplication::exit(exitOverride_.value_or(code));
+        const int finalCode = exitOverride_.value_or(code);
+        publishAutomationResult(finalCode);
+        QCoreApplication::exit(finalCode);
+    }
+
+    void publishAutomationResult(int code)
+    {
+        if (automationResultPublished_ || debugScenario_.isEmpty()) return;
+        automationResultPublished_ = true;
+        const auto snapshot = runtime_.engineSnapshot();
+        std::size_t commandQueuePending = 0;
+        std::size_t commandQueueHighWater = 0;
+        std::uint64_t commandQueueDrops = 0;
+        {
+            std::lock_guard<std::mutex> lock(automationCommandMutex_);
+            commandQueuePending = automationCommandQueue_.size();
+            commandQueueHighWater = automationCommandQueueHighWater_;
+            commandQueueDrops = automationCommandQueueDrops_;
+        }
+        QJsonObject result{
+            {QStringLiteral("ok"), code == 0},
+            {QStringLiteral("return_code"), code},
+            {QStringLiteral("final_engine_frame"), static_cast<qint64>(snapshot.engine_frame)},
+            {QStringLiteral("commands_submitted"), static_cast<qint64>(automationCommandsSubmitted_)},
+            {QStringLiteral("commands_rejected"), static_cast<qint64>(automationCommandRejects_)},
+            {QStringLiteral("event_rejects"), static_cast<qint64>(automationEventRejects_)},
+            {QStringLiteral("controller_disconnects"), static_cast<qint64>(automationDisconnects_)},
+            {QStringLiteral("pending_static_actions"), pendingActions_.size()},
+            {QStringLiteral("pending_controller_actions"), static_cast<qint64>(pendingControllerActions_.size())},
+            {QStringLiteral("automation_command_queue_pending"), static_cast<qint64>(commandQueuePending)},
+            {QStringLiteral("automation_command_queue_high_water"), static_cast<qint64>(commandQueueHighWater)},
+            {QStringLiteral("automation_command_queue_drops"), static_cast<qint64>(commandQueueDrops)},
+            {QStringLiteral("remote_peer_count"), maxRemotePeerCount_},
+            {QStringLiteral("local_peer_id"), localToken_.isEmpty()
+                ? QJsonValue(QJsonValue::Null)
+                : QJsonValue(QString::number(peerIdForToken(localToken_)))},
+            {QStringLiteral("events"), automationTrace_},
+            {QStringLiteral("event_trace_drops"), static_cast<qint64>(automationTraceDrops_)},
+        };
+        if (automationChannel_) {
+            result.insert(QStringLiteral("channel_queue_high_water"),
+                static_cast<qint64>(automationChannel_->eventQueueHighWater()));
+            result.insert(QStringLiteral("channel_rejected_frames"),
+                static_cast<qint64>(automationChannel_->rejectedFrames()));
+            result.insert(QStringLiteral("channel_rejected_events"),
+                static_cast<qint64>(automationChannel_->rejectedEvents()));
+            (void)automationChannel_->send(QJsonObject{
+                {QStringLiteral("event"), QStringLiteral("shutdown")},
+                {QStringLiteral("return_code"), code},
+                {QStringLiteral("engine_frame"), static_cast<qint64>(snapshot.engine_frame)},
+            });
+            automationChannel_->stop(true);
+        }
+        QCoreApplication::instance()->setProperty("jam2.debug.result", result);
     }
 
     bool creator_ = false;
@@ -1008,6 +1331,7 @@ private:
     bool finishing_ = false;
     int waitMs_ = 0;
     int sessionPeerLimit_ = 0;
+    int maxRemotePeerCount_ = 0;
     QStringList originalOptions_;
     QStringList runnerOptions_;
     QStringList bootstrapRunnerOptions_;
@@ -1029,7 +1353,28 @@ private:
     QMap<QString, QString> peers_;
     std::optional<int> exitOverride_;
     std::uint64_t commandCookie_ = 0;
+    std::uint64_t anonymousActionId_ = 0;
+    std::uint64_t automationCommandsSubmitted_ = 0;
+    std::uint64_t automationCommandRejects_ = 0;
+    std::uint64_t automationEventRejects_ = 0;
+    std::uint64_t automationDisconnects_ = 0;
+    std::uint64_t automationTraceDrops_ = 0;
+    mutable std::mutex automationCommandMutex_;
+    std::deque<QJsonObject> automationCommandQueue_;
+    std::size_t automationCommandQueueHighWater_ = 0;
+    std::uint64_t automationCommandQueueDrops_ = 0;
+    bool automationCommandDrainScheduled_ = false;
     bool trackSyncEnabled_ = true;
+    bool controllerLossStops_ = true;
+    bool automationResultPublished_ = false;
+    QJsonObject debugScenario_;
+    QJsonObject debugNetwork_;
+    QJsonArray pendingActions_;
+    QJsonArray automationTrace_;
+    QMap<std::uint64_t, QString> commandActions_;
+    std::vector<PendingControllerAction> pendingControllerActions_;
+    QTimer controllerActionTimer_;
+    std::unique_ptr<AutomationChannel> automationChannel_;
     ApplicationRuntime runtime_;
     SharedSessionController sessionController_;
 };
@@ -1077,7 +1422,14 @@ int SessionController::runNetworkCommand(int argc, char* argv[])
 {
     try {
         NetworkCommandController controller(argc, argv);
-        QTimer::singleShot(0, &controller, [&controller] { controller.start(); });
+        QTimer::singleShot(0, &controller, [&controller] {
+            try {
+                controller.start();
+            } catch (const std::exception& error) {
+                writeConsoleLine(QString::fromUtf8(error.what()), true);
+                QCoreApplication::exit(2);
+            }
+        });
         return QCoreApplication::exec();
     } catch (const std::exception& error) {
         writeConsoleLine(QString::fromUtf8(error.what()), true);

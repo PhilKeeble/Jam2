@@ -1,6 +1,8 @@
 {
-  "schema": "jam2-debug-scenario-v1",
-  "run_id": "phase8-boundary-validation",
+  "schema": "jam2-debug-scenario",
+  "run_id": "boundary-validation",
   "operation": "validate.boundaries",
-  "arguments": []
+  "profile": "fast",
+  "artifacts": {"root": "../validate_logs/manual/boundary-validation"},
+  "fixtures": []
 }

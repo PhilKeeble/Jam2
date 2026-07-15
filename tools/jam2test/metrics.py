@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+"""Raw CSV technical metric reduction."""
 
 import csv
 from pathlib import Path
@@ -76,7 +76,7 @@ def counter_growth(rows, field):
     return max(0.0, to_float(rows[-1], field) - to_float(rows[0], field))
 
 
-def summarize_csv(path):
+def summarize_csv(path, assessment_elapsed_ms=None):
     rows = read_rows(path)
     row = final_row(rows)
     periods = periodic_rows(rows)
@@ -89,10 +89,6 @@ def summarize_csv(path):
     reordered_lost = to_float(row, "reordered_lost")
     loss = max(sequence_lost, reordered_lost)
     loss_percent = loss * 100.0 / max(1.0, recv_packets + sequence_lost)
-    underrun_time_ms = to_float(row, "playback_ring_underrun_time_ms")
-    if underrun_time_ms <= 0.0:
-        underrun_time_ms = to_float(row, "playback_ring_underruns") * 1000.0 / sample_rate_for_row(row)
-
     periodic_depths = [to_float(period, "playback_depth_avg_ms") for period in periods]
     recovery_rows = periodic_tail(periods)
     recovery_slots = [to_float(period, "mix_active_slots") for period in recovery_rows]
@@ -101,7 +97,26 @@ def summarize_csv(path):
         for period in recovery_rows
     ]
     adaptive_targets = [to_float(period, "adaptive_playback_target_frames") for period in periods]
-    before_shutdown = periods[-1] if periods else row
+    assessment_periods = periods
+    if assessment_elapsed_ms is not None:
+        bounded = [
+            period for period in periods
+            if to_float(period, "elapsed_ms") <= float(assessment_elapsed_ms)
+        ]
+        if bounded:
+            assessment_periods = bounded
+    before_shutdown = assessment_periods[-1] if assessment_periods else row
+    final_underrun_time_ms = to_float(row, "playback_ring_underrun_time_ms")
+    if final_underrun_time_ms <= 0.0:
+        final_underrun_time_ms = (
+            to_float(row, "playback_ring_underruns") * 1000.0 / sample_rate_for_row(row)
+        )
+    underrun_time_ms = to_float(before_shutdown, "playback_ring_underrun_time_ms")
+    if underrun_time_ms <= 0.0:
+        underrun_time_ms = (
+            to_float(before_shutdown, "playback_ring_underruns") * 1000.0 /
+            sample_rate_for_row(before_shutdown)
+        )
     authority_rows = periods + [row]
     observed_rows = periods + [row]
     authority_ids_seen = sorted({
@@ -152,13 +167,14 @@ def summarize_csv(path):
         "mix_missing_peer_contributions": to_float(row, "mix_missing_peer_contributions"),
         "mix_missing_peer_frames": to_float(row, "mix_missing_peer_frames"),
         "mix_late_after_release_frames": to_float(row, "mix_late_after_release_frames"),
-        "mix_capacity_drops": to_float(row, "mix_capacity_drops"),
-        "mix_capacity_dropped_frames": to_float(row, "mix_capacity_dropped_frames"),
-        "mix_clipped_samples": to_float(row, "mix_clipped_samples"),
-        "mix_output_frames": to_float(row, "mix_output_frames"),
-        "mix_output_drop_requested_frames": to_float(row, "mix_output_drop_requested_frames"),
-        "mix_output_drop_request_events": to_float(row, "mix_output_drop_request_events"),
-        "mix_output_dropped_frames": to_float(row, "mix_output_dropped_frames"),
+        "mix_capacity_drops": to_float(before_shutdown, "mix_capacity_drops"),
+        "mix_capacity_dropped_frames": to_float(before_shutdown, "mix_capacity_dropped_frames"),
+        "mix_clipped_samples": to_float(before_shutdown, "mix_clipped_samples"),
+        "mix_output_frames": to_float(before_shutdown, "mix_output_frames"),
+        "mix_output_drop_requested_frames": to_float(before_shutdown, "mix_output_drop_requested_frames"),
+        "mix_output_drop_request_events": to_float(before_shutdown, "mix_output_drop_request_events"),
+        "mix_output_dropped_frames": to_float(before_shutdown, "mix_output_dropped_frames"),
+        "mix_output_dropped_frames_final": to_float(row, "mix_output_dropped_frames"),
         "mix_work_budget_yields": to_float(row, "mix_work_budget_yields"),
         "recovery_window_ms": (
             to_float(recovery_rows[-1], "elapsed_ms") - to_float(recovery_rows[0], "elapsed_ms")
@@ -243,16 +259,20 @@ def summarize_csv(path):
         "playback_depth_avg_ms": to_float(row, "playback_depth_avg_ms"),
         "playback_depth_max_ms": to_float(row, "playback_depth_max_ms"),
         "periodic_playback_depth_avg_ms_max": max(periodic_depths, default=0.0),
-        "playback_ring_underruns": to_float(row, "playback_ring_underruns"),
-        "playback_ring_underrun_events": to_float(row, "playback_ring_underrun_events"),
+        "playback_ring_underruns": to_float(before_shutdown, "playback_ring_underruns"),
+        "playback_ring_underruns_final": to_float(row, "playback_ring_underruns"),
+        "playback_ring_underrun_events": to_float(before_shutdown, "playback_ring_underrun_events"),
+        "playback_ring_underrun_events_final": to_float(row, "playback_ring_underrun_events"),
         "playback_ring_underrun_time_ms": underrun_time_ms,
+        "playback_ring_underrun_time_ms_final": final_underrun_time_ms,
         "playback_ring_underrun_time_ms_per_min": underrun_time_ms * 60.0 / elapsed_s if elapsed_s > 0.0 else 0.0,
-        "playback_ring_underrun_burst_max_ms": to_float(row, "playback_ring_underrun_burst_max_ms"),
-        "playback_ring_overruns": to_float(row, "playback_ring_overruns"),
-        "playback_dropped_frames": to_float(row, "playback_dropped_frames"),
-        "playback_dropped_time_ms": to_float(row, "playback_dropped_time_ms"),
-        "missing_audio_frames_inserted": to_float(row, "missing_audio_frames_inserted"),
-        "late_audio_frames_dropped": to_float(row, "late_audio_frames_dropped"),
+        "playback_ring_underrun_burst_max_ms": to_float(before_shutdown, "playback_ring_underrun_burst_max_ms"),
+        "playback_ring_underrun_burst_max_ms_final": to_float(row, "playback_ring_underrun_burst_max_ms"),
+        "playback_ring_overruns": to_float(before_shutdown, "playback_ring_overruns"),
+        "playback_dropped_frames": to_float(before_shutdown, "playback_dropped_frames"),
+        "playback_dropped_time_ms": to_float(before_shutdown, "playback_dropped_time_ms"),
+        "missing_audio_frames_inserted": to_float(before_shutdown, "missing_audio_frames_inserted"),
+        "late_audio_frames_dropped": to_float(before_shutdown, "late_audio_frames_dropped"),
         "drift_ppm": to_float(row, "drift_ppm"),
         "raw_drift_ppm": to_float(row, "raw_drift_ppm"),
         "resampler_ratio": to_float(row, "resampler_ratio"),
@@ -351,9 +371,9 @@ def summarize_csv(path):
     }
 
 
-def combined_summary(server_csv, client_csv):
-    server = summarize_csv(server_csv) if server_csv else {"has_csv": False}
-    client = summarize_csv(client_csv) if client_csv else {"has_csv": False}
+def combined_summary(server_csv, client_csv, assessment_elapsed_ms=None):
+    server = summarize_csv(server_csv, assessment_elapsed_ms) if server_csv else {"has_csv": False}
+    client = summarize_csv(client_csv, assessment_elapsed_ms) if client_csv else {"has_csv": False}
     sides = [side for side in (server, client) if side.get("has_csv")]
     if not sides:
         return {
@@ -509,6 +529,34 @@ def combined_summary(server_csv, client_csv):
         "jitter_capacity_drops_total": sum((side.get("jitter_capacity_drops", 0.0) for side in sides), 0.0),
     }
     return {"server": server, "client": client, "combined": combined}
+
+
+def normalized_pair_summary(
+        coordinator_machine_id, coordinator_csv,
+        agent_machine_id, agent_csv, assessment_elapsed_ms=None):
+    """Expose retained two-peer reduction under stable machine/peer identities.
+
+    `combined_summary` remains the compatibility-free internal reducer used by
+    the retained stress verdict code. Benchmark artifacts publish this
+    normalized shape and do not make server/client roles their data model.
+    """
+    reduced = combined_summary(coordinator_csv, agent_csv, assessment_elapsed_ms)
+    aggregate = {
+        key: value for key, value in reduced["combined"].items()
+        if not key.startswith("server_") and not key.startswith("client_")
+    }
+    peers = []
+    for machine_id, role, summary in (
+            (coordinator_machine_id, "coordinator", reduced["server"]),
+            (agent_machine_id, "agent", reduced["client"])):
+        peers.append({
+            "machine_id": machine_id,
+            "role": role,
+            "local_peer_id": summary.get("local_peer_id", 0),
+            "remote_peer_id": summary.get("remote_peer_id", 0),
+            "metrics": summary,
+        })
+    return {"peers": peers, "aggregate": aggregate}
 
 
 def write_results_csv(path, results):

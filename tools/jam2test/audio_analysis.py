@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+"""Offline WAV analysis for retained stress and benchmark artifacts."""
 
 import json
 import math

@@ -27,7 +27,7 @@ The unified `jam2` executable must retain an explicit headless/debug automation
 surface over the same shared session controller, `Engine`, and `NetworkSession`
 used by the GUI. Startup-static and scheduled cases should be expressible
 through a strictly validated scenario file ingested at startup. Tests that must
-react to runtime state use a bounded, versioned, inherited local pipe rather
+react to runtime state use a bounded, unversioned, inherited local pipe rather
 than stdin or an always-listening network service.
 
 This is a minimal replacement seam, not a second application API. Add a
@@ -45,6 +45,18 @@ The resulting ownership split is:
 | Python tooling | Process and machine orchestration, peer topology, impairment, retries, experiment matrices, artifact collection, repeated comparisons, offline WAV/CSV analysis |
 | GUI | Normal user workflow and an optional thin diagnostic-bundle action; not a benchmark coordinator |
 
+The local automation formats deliberately have no compatibility-version
+sequence. Their identifiers are `jam2-debug-scenario`,
+`jam2-debug-description`, and `jam2-automation`; Phase 10 replaces the
+temporary `*-v1` argv-wrapper shape and supports only the current documented
+shape. This does not remove version negotiation from the network-facing
+control and UDP protocols, where independently running peers need it.
+
+Automation output is likewise opt-in. A `debug run` process emits a native
+process manifest, and `jam2_test.py` emits a Python invocation manifest for the
+test command it owns. GUI launches and direct ordinary CLI use do not gain a
+manifest writer or any new lifecycle behavior.
+
 ## Goals
 
 - Preserve robust local stress and the complete two-host benchmark workflow
@@ -53,7 +65,7 @@ The resulting ownership split is:
 - Exercise exactly the same engine and network implementations used by ordinary GUI sessions.
 - Support local-only, create-jam, join-jam, and multi-peer full-mesh automation through the same public bootstrap.
 - Preserve both real-device ASIO/CoreAudio tests and headless synthetic tests.
-- Make scenarios reproducible through versioned declarative inputs and explicit numeric settings.
+- Make scenarios reproducible through bounded declarative inputs and explicit numeric settings without maintaining legacy local schema versions.
 - Keep the native automation schema no larger than the retained cases require;
   expand it only alongside a concrete case that cannot use an ordinary command.
 - Schedule timing-sensitive actions against the engine frame clock rather than Python wall-clock sleeps.
@@ -85,22 +97,24 @@ The current Python layer is not one subsystem. It performs several separate jobs
 
 | Current area | Current role |
 | --- | --- |
-| [tools/jam2_harness.py](tools/jam2_harness.py) | Launches Jam2 processes, watches structured startup lines, sends text runtime commands, and locates CSV artifacts |
-| [tools/run_stress_local.py](tools/run_stress_local.py) | Defines scenarios, launches local peers, schedules controls, applies impairment, analyzes recordings, and writes verdicts/results |
-| [tools/udp_stress_proxy.py](tools/udp_stress_proxy.py) | Applies deterministic two-endpoint delay, jitter, loss, reorder, and burst behavior |
-| [tools/run_benchmark_server.py](tools/run_benchmark_server.py) and [run_benchmark_client.py](tools/run_benchmark_client.py) | Coordinate two machines, launch one Jam2 side each, retry cases, and move artifacts |
-| [tools/jam2_benchmark_control.py](tools/jam2_benchmark_control.py) | Implements the current one-client benchmark lifecycle and artifact control connection |
-| [tools/jam2_profiles.py](tools/jam2_profiles.py) and [jam2_benchmark_suite.py](tools/jam2_benchmark_suite.py) | Define tuning variants and benchmark cases |
-| [tools/jam2_metrics.py](tools/jam2_metrics.py) | Reduces raw CSV into explicit technical summaries |
-| [tools/jam2_audio_analysis.py](tools/jam2_audio_analysis.py) | Performs offline stem, tone, pulse, clipping, pop, and metronome analysis |
+| [tools/jam2_test.py](tools/jam2_test.py) and [tools/jam2test/dispatch.py](tools/jam2test/dispatch.py) | Keep argument parsing in the thin entry script and route the `validate`, `stress`, `benchmark`, and `connectivity` command families through package-owned invocation setup |
+| [tools/jam2test/native.py](tools/jam2test/native.py) and [validation.py](tools/jam2test/validation.py) | Consume the native debug description, run static/reactive scenarios, and own the post-build validation suite |
+| [tools/jam2test/stress.py](tools/jam2test/stress.py), [scenarios.py](tools/jam2test/scenarios.py), and [impairment.py](tools/jam2test/impairment.py) | Launch retained local/mesh cases, apply deterministic impairment, schedule typed native actions, and write verdicts/results |
+| [tools/jam2test/benchmark.py](tools/jam2test/benchmark.py), [benchmark_control.py](tools/jam2test/benchmark_control.py), and [benchmark_suite.py](tools/jam2test/benchmark_suite.py) | Coordinate two machines, retain the comprehensive matrices, retry/correlate attempts, and stream bounded artifacts |
+| [tools/jam2test/profiles.py](tools/jam2test/profiles.py) | Represents experiments as a native named base profile plus sparse overrides |
+| [tools/jam2test/metrics.py](tools/jam2test/metrics.py), [results.py](tools/jam2test/results.py), and [audio_analysis.py](tools/jam2test/audio_analysis.py) | Reduce raw CSV and perform offline stem, tone, pulse, clipping, pop, and metronome analysis |
+| [tools/jam2test/connectivity.py](tools/jam2test/connectivity.py) | Diagnoses STUN mapping and direct UDP reachability independently of the benchmark coordinator |
 | [tools/upload_server.py](tools/upload_server.py) | Provides a temporary manual LAN log collector |
-| [tools/connection_test.py](tools/connection_test.py) | Diagnoses STUN mapping and direct UDP reachability independently of the app |
 
 With a real audio device, Jam2 currently creates test tone/pulse samples inside the ASIO or CoreAudio callback. Python selects the mode but does not synthesize or forward those live samples. The generated input then follows the normal capture ring, packet, receive, playback, and recording paths. This is valuable and must remain true after engine extraction.
 
 The current two-host benchmark control connection carries lifecycle messages and artifacts, not live audio. The Jam2 audio path remains direct UDP between the Jam2 processes.
 
-## Current Limitations to Preserve as Baseline Gaps
+## Pre-Phase 10 Limitations Preserved as Migration Baseline
+
+The following sections describe the legacy baseline that Phase 10 migrated.
+They remain here to explain the replacement requirements and parity decisions;
+they are not descriptions of live wrapper files.
 
 ### The tooling is coupled to legacy command names and output text
 
@@ -218,8 +232,9 @@ jam2 debug describe --json
   or the optional reactive channel; this does not require exposing every GUI
   action.
 - `debug run` is opt-in and is never activated by a received peer message.
-- `debug describe` reports supported scenario schema versions, commands, test
-  inputs, profiles, limits, protocol versions, and output schema.
+- `debug describe` reports the supported unversioned local format identifiers,
+  operations, commands, test inputs, profiles, limits, network protocol
+  versions, and output shape.
 - All commands instantiate the same `Engine` and, when requested, the same `NetworkSession`.
 
 The Python tools may call the direct headless commands for simple cases or generate a scenario file for deterministic scheduled cases.
@@ -242,12 +257,13 @@ JSON is suitable because this is bounded startup/debug input outside the fast pa
 
 ### Illustrative shape
 
-The exact names are provisional and the implemented schema may be smaller. A
-field is admitted only with a named retained case that consumes it:
+The `jam2-debug-scenario` identifier is exact. The illustrative payload field
+names below may be smaller in the implementation. A field is admitted only
+with a named retained case that consumes it:
 
 ```json
 {
-  "schema": "jam2-debug-scenario-v1",
+  "schema": "jam2-debug-scenario",
   "run_id": "run-id",
   "operation": "network.create",
   "audio": {
@@ -295,8 +311,19 @@ field is admitted only with a named retained case that consumes it:
 ### Required operation types
 
 - `local`: persistent engine with no UDP socket.
-- `network.create`: create a real network session and emit an invite through the protected automation channel.
-- `network.join`: receive an invite through the protected automation channel and join through the normal authenticated bootstrap path.
+- `network.create`: create a real network session and publish its invite as a
+  declared structured result; request the reactive channel only when another
+  process must receive it during the run.
+- `network.join`: receive an invite from validated local scenario input or the
+  explicitly requested reactive channel and join through the normal
+  authenticated bootstrap path.
+
+Retain the focused `validate.boundaries` and
+`validate.controller-lifecycle` executable operations. They use the same native
+validators/controllers and must appear consistently in the accepted scenario
+schema, dispatch, and `debug describe` operation list. The three runtime
+operations above are the minimum application-session operations, not an
+exclusive list that deletes focused validators.
 
 Deterministic local and multi-process stress still uses the public create/join bootstrap. A narrowly scoped inherited debug seam may override the candidate seen by each observer so impairment proxies can sit on individual UDP edges; it must not create a different receive, timing, mixing, authority, or membership implementation.
 
@@ -336,7 +363,8 @@ to name an arbitrary local file.
 
 ### Validation rules
 
-- Require a recognized schema identifier and reject unsupported versions.
+- Require exactly the recognized unversioned schema identifier and reject the
+  obsolete `*-v1` wrapper and every unknown identifier.
 - Apply a small hard file-size limit before parsing.
 - Bound every string, array, numeric value, scheduled command count, and output-path length.
 - Reject unknown operation and command names.
@@ -369,7 +397,8 @@ Static `debug run`, `debug describe`, GUI startup, and ordinary `local` or
 - If platform constraints make inherited anonymous handles impractical, use
   only an OS-local IPC mechanism with caller ownership and an unpredictable
   per-run name; do not expose it on the LAN.
-- Use bounded, versioned, length-prefixed frames rather than unbounded newline accumulation.
+- Use bounded, length-prefixed frames identified as `jam2-automation` rather
+  than unbounded newline accumulation or a local compatibility-version stack.
 - Cap input/output frame size, queued frames, frames processed per turn, and incomplete-frame time.
 - Separate structured protocol output from human stderr diagnostics.
 - Close the channel and stop or continue according to explicit scenario policy when the controller disappears.
@@ -378,10 +407,11 @@ JSON payloads remain acceptable for this cold, local, human-rate control layer. 
 
 ### Minimum message families
 
-- Hello/capability and schema negotiation.
+- Hello/capability publication and exact local-format identification.
 - Invite delivery needed to connect retained create/join processes.
-- Typed actions currently sent through stdin by retained cases, plus cancel and
-  orderly shutdown.
+- Typed actions currently sent through stdin by retained cases, plus orderly
+  shutdown. Python continues to own timeout/process cancellation; no separate
+  native cancel message is admitted without a retained case that needs it.
 - Lifecycle, peer-state, command-completion, and reason-specific error events on
   which retained controllers must react.
 - Effective configuration and artifact/result publication needed to remove
@@ -438,10 +468,10 @@ Python should query or receive:
 
 - Named profiles and all effective values.
 - Supported sample/frame formats and frame sizes.
-- Debug schema and automation protocol versions.
+- Debug scenario, description, and automation format identifiers.
 - Available test sources and command families.
 - Active device/backend/rate/buffer/channel configuration.
-- Control/UDP protocol and security-limit versions.
+- Control/UDP protocol versions and the current native security limits.
 
 Python may define experimental override matrices, but it must not duplicate the native defaults as authoritative values.
 
@@ -484,11 +514,14 @@ Command responsibilities are deliberately different:
   and explicit device selections extend rather than silently replace headless
   coverage. The suite distinguishes pass, failed behavior, infrastructure
   error, and device/manual-only coverage that was not requested.
-- Validation maps every supported native CLI/debug capability to an automated
-  case or an explicit device/manual-only classification. It checks parsing,
+- Validation maps every public CLI option, supported debug operation/protocol
+  field, and representative native-validator boundary to an automated case or
+  an explicit device/manual-only classification. It checks parsing,
   representative valid and invalid boundaries, propagation into emitted
-  effective configuration, clean workflows, scheduled controls, and artifact
-  contracts. It does not exhaustively combine every numeric control.
+  effective configuration, clean local and multi-peer create/join workflows,
+  scheduled controls, and artifact contracts. It does not exhaustively combine
+  every numeric control, automate every GUI feature, or imply a public `mesh`
+  command.
 - `stress` owns targeted feature regression and improvement scenarios under
   controlled impairment, clock, lifecycle, and mesh conditions. It asserts the
   named adaptive/recovery/correctness behavior and retains raw evidence; it is
@@ -505,6 +538,11 @@ Existing public scripts may be thin compatibility wrappers only during
 migration. Remove them after command, case, result, and artifact parity is
 demonstrated; do not retain permanent aliases. The temporary standalone upload
 server remains separate unless a bounded replacement is explicitly requested.
+
+Phase 10 migrates the retained cases that exist when the phase starts. The
+additional late-join/restart/endpoint-migration, mixed-device, and adversarial
+real-process cases assigned to Phase 11 are target coverage for the completed
+tooling, not extra Phase 10 gates.
 
 ### Artifact roots and safe cleanup
 
@@ -523,17 +561,32 @@ output-root option changes the parent location, not this family/run isolation.
 The runner creates the final directory atomically and selects a new run ID on a
 collision; it never reuses or chooses the newest directory implicitly.
 
-Benchmark layout is suite-aware. The coordinator creates the suite ID, and
-both machines retain stable machine/case/run/attempt subdirectories beneath
-that suite. Uploaded artifacts land in the matching coordinator suite and
-attempt tree only after their envelope identity is validated. Reconnects,
-retries, and repeated cases never overwrite a prior attempt.
+Benchmark layout is suite-aware. The coordinator creates and distributes the
+invocation and suite IDs, and both machines use:
+
+```text
+tools/benchmark_logs/<invocation>/suites/<suite-id>/machines/<machine-id>/
+    cases/<case-id>/runs/<run-id>/attempts/<attempt-id>/...
+```
+
+Controller/agent logs, Jam2 stdout/stderr, native manifests, transfer logs,
+results, WAV, and CSV use stable named paths within that tree. Uploaded
+artifacts land in the matching coordinator machine/attempt subtree only after
+their envelope identity is validated. The coordinator retains its own local
+subtree and the uploaded agent subtree. The agent retains its local subtree
+until the coordinator acknowledges the validated upload. Reconnects, retries,
+and repeated cases never overwrite a prior attempt.
 
 Default runs never delete earlier output. `--clean` intentionally removes all
 old results beneath the selected command-family root before allocating the new
 unique run directory. Thus `stress --clean` clears `stress_logs` but cannot
 touch `benchmark_logs`, `validate_logs`, or `connectivity_logs`; each other
 command behaves equivalently within its own family.
+
+Top-level `--clean` means only this safe pre-run family cleanup. The current
+benchmark-agent option that deletes local artifacts after a successful upload
+must be renamed `--delete-after-upload`; it may delete only after the
+coordinator acknowledges and correlates the validated upload.
 
 An explicit output option selects a parent directory, not a shared destination:
 the framework still creates the separate family folder beneath it. Before
@@ -543,6 +596,12 @@ parent itself, the repository root, or outside the selected family folder, and
 do not follow a symlink/reparse escape. Recreate only the selected family root
 and then create the new run directory.
 
+Output parents have a 2048-character framework bound. Before a live Windows
+benchmark starts, also project the normalized native attempt path and reject an
+output root that would leave insufficient room beneath the legacy native
+file-path budget; the error tells the operator to choose a shorter `--output`
+root instead of retrying cases that cannot create WAV/CSV files.
+
 Temporary legacy wrappers may translate their old `--logs` arguments into the
 new parent/family/run model, but must obey the same family isolation rather than
 deleting the common parent supplied by the caller.
@@ -550,7 +609,8 @@ deleting the common parent supplied by the caller.
 ### Scenario catalog
 
 - Defines case names, one-variable tuning variants, signals, durations, repeats, and expected hard invariants.
-- Produces versioned scenario JSON.
+- Produces bounded `jam2-debug-scenario` JSON in the one currently supported
+  local format.
 - Stores explicit impairment parameters and seeds.
 - May contain local session keys or invite URLs where convenient.
 - Does not copy native profile defaults; it requests a native profile name and
@@ -568,10 +628,13 @@ deleting the common parent supplied by the caller.
 - Creates local/create/join topology inputs over the universal mesh engine.
 - Starts per-edge impairment where requested.
 - Passes create/join session material through scenarios, arguments, or the
-  inherited automation pipe as appropriate.
+  inherited automation pipe only when a reactive scenario requests it.
 - Waits on structured lifecycle events instead of scraping human text.
 - Applies reactive commands and bounded timeouts.
-- Collects one artifact manifest per peer.
+- Collects one native process manifest per `debug run` peer. For an ordinary
+  CLI peer, records arguments, exact stdout/stderr paths, process result, and
+  collected files in the Python invocation manifest instead of imposing a
+  native automation manifest on that command.
 
 ### Two-host benchmark coordinator and agent
 
@@ -603,6 +666,16 @@ Build this by generalizing the current benchmark control and artifact code
 rather than replacing its proven state machine or introducing a new external
 dependency.
 
+Preserving the comprehensive many-profile, many-repeat workflow is an
+implementation requirement, but running that long matrix is not a Phase 10
+closeout gate. Close Phase 10 with one short live two-host smoke: one native
+base profile, one repeat, and two or three short representative cases that
+finish in a few minutes. The subset must prove negotiation, create/join,
+recorded WAV/CSV and native/Python manifests, bounded packaging and upload,
+upload acknowledgement/result correlation, final `all_done`, and clear log
+retention on both machines in the normalized tree. The comprehensive matrix
+remains available for deliberate performance work.
+
 ### Offline analysis
 
 Keep WAV and CSV analysis in Python because it is cold-path work, easy to inspect, and likely to evolve more rapidly than the engine.
@@ -619,6 +692,12 @@ Analysis should:
 ## Full-Mesh Stress and Impairment
 
 ### Required topology coverage
+
+This is target coverage across the remaining refactor. Phase 10 migrates the
+cases already retained by the current tools; Phase 11 adds the missing
+late-join/restart/endpoint-migration, mixed-device, and adversarial lifecycle
+cases. The list must not be read as silently moving those Phase 11 additions
+into the Phase 10 gate.
 
 - Two peers through the universal full-mesh engine.
 - Three peers with all edges clean.
@@ -647,19 +726,28 @@ defined above are part of the contract: validation, stress, benchmark, and
 connectivity output cannot overwrite one another, and consecutive runs of the
 same family remain independently inspectable.
 
-Every peer run should publish a final manifest containing at least:
+There are two owned manifest layers rather than one global application
+manifest:
 
-- Suite, run, attempt, machine, local-peer, and role identifiers.
-- Source revision or exact working-tree identity.
-- Executable/build identity and platform.
-- Audio backend, device identity, requested and active rate/buffer/channels.
-- Effective profile and every numeric override.
-- Debug scenario, automation, control, and UDP protocol versions.
-- Topology, peer count, and effective local session configuration.
-- Test input parameters.
-- Impairment parameters and random seed for every affected edge.
-- Start/end reason and process return state.
-- Paths and hashes for raw CSV, stdout/stderr diagnostics, recordings, analysis, and result files.
+- Each `jam2 debug run` process publishes a native manifest. It is
+  authoritative for source/build identity, executable/platform, local peer
+  identity, recognized local automation format identifiers, control/UDP
+  protocol versions, validated effective audio/profile/tuning/session
+  configuration, test input, native lifecycle/end reason, and exact native
+  artifact paths/hashes.
+- Every `jam2_test.py validate|stress|benchmark|connectivity` invocation
+  publishes a Python invocation manifest. It is authoritative for command
+  family, invocation/suite/case/run/attempt and machine/peer identities,
+  topology, impairments and seeds, retries/transfers, process return state,
+  omissions/classifications, analysis/results, and references to native
+  manifests and collected artifacts when applicable.
+
+Python records ordinary CLI launches and their exact arguments,
+stdout/stderr, return state, and collected files in its invocation manifest.
+If a case must prove native effective configuration, lifecycle publication, or
+native artifact identity, it uses `debug run` and consumes that process's
+native manifest. GUI and direct ordinary CLI users do not receive an automation
+manifest side effect.
 
 CSV/stat output must support:
 
@@ -670,7 +758,9 @@ CSV/stat output must support:
 - Queue capacities, high-water marks, and drop/rejection counters.
 - Callback, packet scheduler, per-peer clock/drift/playout, mix, metronome, transport, and lifecycle measurements required by [refactor-plan.md](refactor-plan.md).
 
-Python should consume the published manifest rather than choose the newest file in a directory.
+Python should consume a debug process's published native manifest rather than
+choose the newest file in a directory, and should link it from the Python
+invocation manifest.
 
 ## Test Layers
 
@@ -707,6 +797,9 @@ The required Phase 10 workflow is two hosts. Preserve its full case/repeat
 state machine, reconnect/retry behavior, upload acknowledgement, stale-attempt
 rejection, and correlated artifacts while changing server/client terminology to
 coordinator/agent and requested profiles to native-base-plus-override matrices.
+Validation at Phase 10 closeout uses only the short one-profile, one-repeat,
+two-or-three-case live smoke defined above; it must not require the long
+comprehensive benchmark matrix.
 
 ### Connectivity diagnosis
 
@@ -752,7 +845,8 @@ The GUI should not become a general upload server. Automated benchmark artifact 
   permitted.
 - Stream large artifacts instead of reading complete archives into memory.
 - Cap artifact bytes, files, duration, concurrency, and retained disk use.
-- Make debug-protocol version and all capacity limits visible in the effective run manifest.
+- Make the local automation format identifiers and all capacity limits visible
+  in the native debug-run manifest.
 
 ## Performance Rules
 
@@ -786,8 +880,12 @@ wire experiments are maintained only in
   `Engine`, and `NetworkSession` implementations.
 - Local, create, join, and multi-peer full-mesh scenarios are automatable through the same public bootstrap.
 - Supported lifecycle, metronome/grid, prepared-track, recording, track-take, gain/mute, tuning, asset, stats, error, and recovery paths are reachable through normal typed application actions.
-- Declarative scenarios are versioned and bounded; local session material is permitted.
+- Declarative scenarios use one unversioned bounded local format; local session
+  material is permitted.
 - Reactive automation is local-only, opt-in, bounded, and inactive during ordinary GUI startup.
+- Native automation manifests exist only for `debug run`; Python command
+  manifests own orchestration evidence, and ordinary GUI/direct CLI behavior
+  is unchanged.
 - Debug commands cannot bypass authentication, source authorization, endpoint proof, grid authority, or transport revision rules.
 - Real-device test input remains inside the ASIO/CoreAudio callback path.
 - Headless tests are labeled and do not claim hardware coverage.
@@ -798,6 +896,8 @@ wire experiments are maintained only in
 - Raw CSV, recordings, manifests, and repeat-level results remain available.
 - Results report hard measurements and deltas without subjective scores or hidden recommendations.
 - Artifact transfer is bounded and streamed outside real-time work.
+- Phase 10 closes with a few-minute live two-host smoke while the comprehensive
+  multi-profile benchmark remains available for deliberate runs.
 - Legacy scraping, text-control, and mode adapters are removed rather than retained as aliases.
 
 ## Decision Log
@@ -810,14 +910,17 @@ wire experiments are maintained only in
 | 2026-07-15 | Limit native automation to concrete retained-case needs | A full mirror of the GUI/application API would duplicate surfaces and expand maintenance/security cost without replacing a demonstrated tooling problem | Ordinary commands remain the default; each new schema field or message must replace a named stdin, timing, scraping, defaults, or artifact-discovery dependency |
 | 2026-07-15 | Unify Python tooling behind validation, stress, benchmark, and connectivity commands | The current flat launchers obscure ownership and mix clean regression, impairment, measurement, and diagnosis while still containing valuable working logic | A thin `jam2_test.py` dispatcher uses focused modules; validation becomes the post-build baseline, existing behavior migrates incrementally, and temporary wrappers are removed after parity |
 | 2026-07-15 | Preserve the robust two-host benchmark and many-profile matrices | Cross-host state, retries, uploads, and effective tuning evidence are core measurement capabilities rather than obsolete server/client details | Coordinator/agent naming and normalized identities replace role-shaped results, while native base profiles plus sparse overrides retain broad experiments without duplicated defaults or a Phase 10 multi-host requirement |
+| 2026-07-15 | Keep local automation formats unversioned | The temporary local adapter has no external compatibility promise and only the desired current behavior needs support | Replace `*-v1` with the three stable unversioned identifiers; retain versioning only for network protocols between independent peers |
+| 2026-07-15 | Keep manifests opt-in and split ownership | Ordinary GUI/direct CLI operation should not gain test-only output behavior, while native and orchestration facts have different authorities | `debug run` emits the native process manifest and `jam2_test.py` emits the command invocation manifest |
+| 2026-07-15 | Use a short two-host smoke for Phase 10 closeout | The comprehensive benchmark takes too long for a migration proof | Preserve the full workflow, but close with one profile, one repeat, and two or three short cases that exercise upload and retain clear logs on both machines |
 | 2026-07-14 | Treat local session-key exposure as outside the application boundary | A compromised host can already observe the process and audio; local automation should remain simple and inspectable | Keys and invites may appear in arguments, scenarios, logs, clipboard contents, benchmark state, and artifacts while network authentication remains mandatory |
 | 2026-07-13 | Keep impairment and offline analysis in Python | They are test/cold-path responsibilities and benefit from rapid iteration | Production audio stays direct and small; proxy overhead remains measurable |
 | 2026-07-13 | Schedule timing-sensitive actions using engine frames/events | Python wall-clock sleeps add supervisory jitter and cannot prove exact application time | Engine reports requested/applied timing while Python handles failure timeouts only |
 
 ## Remaining Tooling Context
 
-- The debug scenario, event, effective-configuration, and artifact-manifest
-  schemas cover the minimum retained-case needs rather than arbitrary argv or
+- The debug scenario, event, effective-configuration, and native-manifest
+  formats cover the minimum retained-case needs rather than arbitrary argv or
   the complete typed application surface.
 - Native profile/configuration reporting replaces duplicated Python defaults.
 - A native frame scheduler and deterministic test sources support timing cases
@@ -825,5 +928,5 @@ wire experiments are maintained only in
 - Local, impairment, metronome, lifecycle, two-/three-/four-peer, and
   multi-machine workflows share one normalized result model.
 - Human-output scraping, newest-file discovery, legacy mode adapters, and the
-  runtime stdin command loop disappear once structured events and manifests
-  cover their useful information.
+  runtime stdin command loop have been removed now that structured events and
+  manifests cover their useful information.

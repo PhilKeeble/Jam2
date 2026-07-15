@@ -6,7 +6,7 @@ import struct
 import threading
 import time
 
-from jam2_udp_protocol import MAGIC, VERSION, PacketType, parse_header, resign_packet
+from .udp_protocol import MAGIC, VERSION, PacketType, parse_header, resign_packet
 
 
 class PacketCapture:

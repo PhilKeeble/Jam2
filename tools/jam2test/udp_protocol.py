@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+"""Fixed-shape Jam2 UDP helpers for retained validation injections."""
 
 """Independent Jam2 UDP v1 fixtures for black-box validation tools.
 

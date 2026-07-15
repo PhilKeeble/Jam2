@@ -1,6 +1,5 @@
-#!/usr/bin/env python3
+"""Low-level STUN and direct UDP diagnostic primitives."""
 
-import argparse
 import base64
 import errno
 import json
@@ -8,7 +7,6 @@ import os
 import socket
 import struct
 import time
-from pathlib import Path
 
 
 MAGIC_COOKIE = 0x2112A442
@@ -239,94 +237,3 @@ def bind_socket(bind):
     sock.bind((host, port))
     return sock
 
-
-def main():
-    parser = argparse.ArgumentParser(description="Diagnose direct UDP and STUN hole-punch connectivity between two peers.")
-    parser.add_argument("--mode", choices=("stun", "direct"), default="stun", help="stun tests public STUN-discovered endpoints; direct tests a manually reachable endpoint")
-    parser.add_argument("--bind", default="0.0.0.0:49001", help="local UDP bind endpoint; use 0.0.0.0:0 to test an ephemeral port")
-    parser.add_argument("--direct-host", default="", help="host/IP this peer should advertise for direct mode; defaults to local socket address")
-    parser.add_argument("--name", default=socket.gethostname(), help="label included in the peer token")
-    parser.add_argument("--stun-server", action="append", default=[], help="STUN server host:port; repeat to test mapping stability")
-    parser.add_argument("--stun-timeout-s", type=float, default=3.0)
-    parser.add_argument("--peer-token", default="", help="token printed by the other peer; omit to paste interactively")
-    parser.add_argument("--probe-seconds", type=float, default=120.0)
-    parser.add_argument("--probe-interval-s", type=float, default=0.1)
-    parser.add_argument("--token-file", default="", help="optional path to write this peer's token")
-    args = parser.parse_args()
-
-    sock = bind_socket(args.bind)
-    local_endpoint = sock.getsockname()
-    print(f"[test] mode: {args.mode}", flush=True)
-    print(f"[test] local UDP bind: {local_endpoint[0]}:{local_endpoint[1]}", flush=True)
-    stun_results = []
-    stable_mapping = False
-    mapped = []
-    public_endpoint = None
-    if args.mode == "stun":
-        stun_servers = args.stun_server or [
-            "stun.l.google.com:19302",
-            "stun1.l.google.com:19302",
-        ]
-        stun_results, stable_mapping = discover_mapping(sock, stun_servers, args.stun_timeout_s)
-        mapped = [item["endpoint"] for item in stun_results if item.get("endpoint")]
-        if not mapped:
-            print("[test] verdict: FAIL - no STUN mapping discovered", flush=True)
-            return 2
-        public_endpoint = mapped[0]
-    direct_host = args.direct_host or local_endpoint[0]
-    if direct_host == "0.0.0.0":
-        direct_host = "127.0.0.1"
-    local_token = {
-        "version": 1,
-        "tool": Path(__file__).name,
-        "id": base64.urlsafe_b64encode(os.urandom(9)).decode("ascii").rstrip("="),
-        "name": args.name,
-        "mode": args.mode,
-        "local_endpoint": [local_endpoint[0], local_endpoint[1]],
-        "direct_endpoint": [direct_host, local_endpoint[1]],
-        "public_endpoint": public_endpoint,
-        "mapped_endpoints": mapped,
-        "mapping_stable": stable_mapping,
-    }
-    token = encode_token(local_token)
-    print("", flush=True)
-    print("[test] share this token with the other peer:", flush=True)
-    print(token, flush=True)
-    print("", flush=True)
-    if args.token_file:
-        Path(args.token_file).write_text(token + "\n", encoding="utf-8")
-        print(f"[test] wrote token to {args.token_file}", flush=True)
-    peer_token_text = args.peer_token.strip()
-    if not peer_token_text:
-        peer_token_text = input("[test] paste peer token, then press Enter: ").strip()
-    peer_token = decode_token(peer_token_text)
-    try:
-        peer_endpoint = token_endpoint(peer_token, args.mode)
-    except ValueError as error:
-        print(f"[test] verdict: FAIL - {error}", flush=True)
-        return 2
-    print(f"[test] peer name: {peer_token.get('name', '')}", flush=True)
-    print(f"[test] peer {args.mode} endpoint: {peer_endpoint[0]}:{peer_endpoint[1]}", flush=True)
-    if args.mode == "stun":
-        print(f"[test] local NAT mapping stable across STUN servers: {'yes' if stable_mapping else 'no'}", flush=True)
-    result = run_peer_probe(sock, local_token, peer_token, args.mode, args.probe_seconds, args.probe_interval_s)
-    if result["reset_events"]:
-        print(f"[test] UDP reset events observed: {result['reset_events']}", flush=True)
-    if result["peer_confirmed_local"]:
-        print("[test] verdict: PASS - bidirectional UDP probe succeeded", flush=True)
-        return 0
-    if result["received_from_peer"]:
-        print("[test] verdict: PARTIAL - received peer UDP, but peer did not confirm receiving this side", flush=True)
-        return 1
-    print(f"[test] verdict: FAIL - timed out after {args.probe_seconds:g}s with no peer UDP packets received", flush=True)
-    if args.mode == "stun" and not stable_mapping:
-        print("[test] likely cause: destination-dependent/symmetric NAT mapping", flush=True)
-    elif args.mode == "stun":
-        print("[test] likely cause: UDP filtering, firewall, CGNAT, stale token, same-host public-IP hairpin failure, or only one side probing", flush=True)
-    else:
-        print("[test] likely cause: wrong direct endpoint, local firewall, stale token, or only one side probing", flush=True)
-    return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

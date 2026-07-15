@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+"""Deterministic external UDP impairment used by retained stress cases."""
 
 import heapq
 import random

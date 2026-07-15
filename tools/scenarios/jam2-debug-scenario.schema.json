@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jam2-debug-scenario",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "run_id", "operation", "artifacts"],
+  "properties": {
+    "schema": {"const": "jam2-debug-scenario"},
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "operation": {
+      "enum": [
+        "local",
+        "lifecycle.local-network-local",
+        "validate.boundaries",
+        "validate.controller-lifecycle",
+        "network.create",
+        "network.join"
+      ]
+    },
+    "profile": {"type": "string", "minLength": 1, "maxLength": 128},
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "audio_device": {"type": "integer"},
+        "headless_audio": {"type": "boolean"},
+        "headless_clock_drift_ppm": {"type": "integer"},
+        "sample_rate": {"type": "integer"},
+        "audio_buffer_size": {"type": "integer"},
+        "frame_size": {"type": "integer"},
+        "capture_ring_frames": {"type": "integer"},
+        "playback_ring_frames": {"type": "integer"},
+        "playback_prefill_frames": {"type": "integer"},
+        "playback_max_frames": {"type": "integer"},
+        "drift_correction": {"type": "boolean"},
+        "drift_smoothing": {"type": "number"},
+        "drift_deadband_ppm": {"type": "integer"},
+        "drift_max_correction_ppm": {"type": "integer"},
+        "sample_time_playout": {"type": "boolean"},
+        "playout_delay_frames": {"type": "integer"},
+        "jitter_buffer_frames": {"type": "integer"},
+        "jitter_buffer_max_frames": {"type": "integer"},
+        "adaptive_playback_cushion": {"type": "boolean"},
+        "adaptive_playback_target_frames": {"type": "integer"},
+        "adaptive_playback_min_frames": {"type": "integer"},
+        "adaptive_playback_max_frames": {"type": "integer"},
+        "adaptive_playback_release_ppm": {"type": "integer"},
+        "metronome": {"type": "boolean"},
+        "bpm": {"type": "integer"},
+        "metronome_level": {"type": "number"},
+        "metronome_mode": {"type": "string"},
+        "metronome_compensation_max_ms": {"type": "number"},
+        "metronome_compensation_smoothing_ms": {"type": "number"},
+        "metronome_compensation_deadband_ms": {"type": "number"},
+        "metronome_compensation_slew_ms_per_sec": {"type": "number"},
+        "remote_level": {"type": "number"},
+        "send_level": {"type": "number"},
+        "local_monitor": {"type": "boolean"},
+        "local_monitor_level": {"type": "number"},
+        "test_input": {"type": "string"},
+        "os_priority": {"type": "string"},
+        "input_channels": {"type": "string"},
+        "output_channels": {"type": "string"},
+        "socket_send_buffer": {"type": "integer"},
+        "socket_recv_buffer": {"type": "integer"},
+        "stats": {"type": "boolean"},
+        "stats_interval_ms": {"type": "integer"},
+        "stats_warmup_ms": {"type": "integer"},
+        "stream_ms": {"type": "integer"},
+        "stream_linger_ms": {"type": "integer"}
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bind": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "join_url": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "no_stun": {"type": "boolean"},
+        "stun": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "stun_timeout_ms": {"type": "integer"},
+        "stun_retries": {"type": "integer"},
+        "wait_ms": {"type": "integer"},
+        "public_endpoint": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "session_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "session_key": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "max_peers": {"type": "integer"},
+        "peer_token": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "topology": {
+          "type": "object",
+          "maxProperties": 32,
+          "additionalProperties": {
+            "type": "object",
+            "maxProperties": 32,
+            "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 4096}
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root"],
+      "properties": {
+        "root": {"type": "string", "minLength": 1, "maxLength": 4096}
+      }
+    },
+    "actions": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1, "maxLength": 128},
+          "type": {
+            "enum": [
+              "metronome.enabled",
+              "metronome.bpm",
+              "metronome.mode",
+              "metronome.level",
+              "remote.level",
+              "track.sync",
+              "track.load",
+              "track.play",
+              "track.stop",
+              "track.restart",
+              "track.record-start",
+              "recording.start",
+              "recording.stop",
+              "snapshot",
+              "shutdown"
+            ]
+          },
+          "after_event": {
+            "enum": [
+              "controller_started",
+              "network.waiting",
+              "network.connected",
+              "peer_snapshot",
+              "command_applied"
+            ]
+          },
+          "delay_frames": {"type": "integer", "minimum": 0},
+          "apply_frame": {"type": "integer", "minimum": 0},
+          "enabled": {"type": "boolean"},
+          "value": {"type": "number"},
+          "mode": {"type": "string"},
+          "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+          "count_in_bars": {"type": "integer"}
+        },
+        "not": {"required": ["delay_frames", "apply_frame"]}
+      }
+    },
+    "automation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reactive": {"type": "boolean"},
+        "controller_loss": {"enum": ["stop", "continue"]}
+      }
+    },
+    "fixtures": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {"type": "string", "minLength": 1, "maxLength": 4096}
+    }
+  }
+}

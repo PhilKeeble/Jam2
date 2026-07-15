@@ -48,14 +48,21 @@ std::optional<std::vector<Jam2RuntimePeer>> Jam2RuntimeHost::takePeerUpdate()
     return result;
 }
 
-std::optional<jam2::EngineCommand> Jam2RuntimeHost::takeCommand()
+std::optional<jam2::EngineCommand> Jam2RuntimeHost::takeCommand(
+    std::uint64_t current_frame)
 {
     std::lock_guard<std::mutex> lock(command_mutex_);
-    if (commands_.empty()) {
+    const auto ready = std::find_if(
+        commands_.begin(),
+        commands_.end(),
+        [current_frame](const jam2::EngineCommand& command) {
+            return command.apply_frame == 0 || command.apply_frame <= current_frame;
+        });
+    if (ready == commands_.end()) {
         return std::nullopt;
     }
-    jam2::EngineCommand result = commands_.front();
-    commands_.pop_front();
+    jam2::EngineCommand result = *ready;
+    commands_.erase(ready);
     return result;
 }
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from jam2_profiles import (
+from .profiles import (
     AGGRESSIVE_LOCAL_PROFILE,
     SAFE_LOCAL_PROFILE,
     Jam2Profile,
@@ -23,31 +23,27 @@ class BenchmarkCase:
     case_id: str
     profile: Jam2Profile
     signal: str
-    server_signal: str = ""
-    client_signal: str = ""
+    coordinator_signal: str = ""
+    agent_signal: str = ""
     repeats: int = 1
     stream_ms: int = 30000
     expect_metronome: bool = False
-    server_args: tuple = field(default_factory=tuple)
-    client_args: tuple = field(default_factory=tuple)
 
     def __post_init__(self):
-        if not self.server_signal:
-            object.__setattr__(self, "server_signal", self.signal)
-        if not self.client_signal:
-            object.__setattr__(self, "client_signal", self.signal)
+        if not self.coordinator_signal:
+            object.__setattr__(self, "coordinator_signal", self.signal)
+        if not self.agent_signal:
+            object.__setattr__(self, "agent_signal", self.signal)
 
     def metadata(self):
         return {
             "case_id": self.case_id,
             "signal": self.signal,
-            "server_signal": self.server_signal,
-            "client_signal": self.client_signal,
+            "coordinator_signal": self.coordinator_signal,
+            "agent_signal": self.agent_signal,
             "repeats": self.repeats,
             "stream_ms": self.stream_ms,
             "expect_metronome": self.expect_metronome,
-            "server_args": list(self.server_args),
-            "client_args": list(self.client_args),
             "profile": self.profile.metadata(),
         }
 
@@ -59,7 +55,7 @@ def static_profiles():
         safe,
         aggressive,
         adaptive_off_profile(aggressive),
-        variant(safe, "sample_time_off", sample_time_playout="off"),
+        variant(safe, "sample_time_off", sample_time_playout=False),
         variant(safe, "playout_1024", playback_prefill_frames=1024, playback_max_frames=2048,
                 adaptive_playback_target_frames=1024, adaptive_playback_min_frames=1024,
                 adaptive_playback_max_frames=2048, playout_delay_frames=1024),
@@ -89,7 +85,7 @@ def static_profiles():
             jitter_buffer_max_frames=4096),
         latency_matched_prefill_profile(aggressive, total_frames=2304, adaptive=True),
         latency_matched_prefill_profile(aggressive, total_frames=2304, adaptive=False),
-        variant(safe, "drift_off", drift_correction="off"),
+        variant(safe, "drift_off", drift_correction=False),
         variant(safe, "drift_tight", drift_deadband_ppm=5, drift_smoothing=0.05),
         variant(safe, "socket_large", socket_send_buffer=1048576, socket_recv_buffer=1048576),
     ]
@@ -106,11 +102,11 @@ def wifi_diagnostic_profiles():
         "best_aggressive_jitter_sample_time_off": variant(
             best_aggressive_jitter,
             "sample_time_off",
-            sample_time_playout="off"),
+            sample_time_playout=False),
         "safe_sample_time_off": variant(
             SAFE_LOCAL_PROFILE,
             "sample_time_off",
-            sample_time_playout="off"),
+            sample_time_playout=False),
         "safe_socket_large": variant(
             SAFE_LOCAL_PROFILE,
             "socket_large",
@@ -184,16 +180,16 @@ def wifi_diagnostic_cases(selected_signals, stream_ms=30000, repeats=1):
                 case_id=f"{profile.name}_tone-server-to-client",
                 profile=profile,
                 signal="tone-server-to-client",
-                server_signal="tone-440",
-                client_signal="silence",
+                coordinator_signal="tone-440",
+                agent_signal="silence",
                 stream_ms=stream_ms,
                 repeats=repeats))
             cases.append(BenchmarkCase(
                 case_id=f"{profile.name}_tone-client-to-server",
                 profile=profile,
                 signal="tone-client-to-server",
-                server_signal="silence",
-                client_signal="tone-440",
+                coordinator_signal="silence",
+                agent_signal="tone-440",
                 stream_ms=stream_ms,
                 repeats=repeats))
 
@@ -221,7 +217,7 @@ def wifi_diagnostic_cases(selected_signals, stream_ms=30000, repeats=1):
 
 
 def metronome_profiles():
-    base = variant(SAFE_LOCAL_PROFILE, "metro", metronome="on", bpm=120, metronome_level=0.20)
+    base = variant(SAFE_LOCAL_PROFILE, "metro", metronome=True, bpm=120, metronome_level=0.20)
     return [
         variant(base, "shared_grid", metronome_mode="shared-grid"),
         variant(base, "leader_audio", metronome_mode="leader-audio"),
@@ -248,16 +244,16 @@ def benchmark_cases(signals=None, include_metronome=True, stream_ms=30000, repea
                 case_id=f"{profile.name}_tone-server-to-client",
                 profile=profile,
                 signal="tone-server-to-client",
-                server_signal="tone-440",
-                client_signal="silence",
+                coordinator_signal="tone-440",
+                agent_signal="silence",
                 repeats=repeats,
                 stream_ms=stream_ms))
             cases.append(BenchmarkCase(
                 case_id=f"{profile.name}_tone-client-to-server",
                 profile=profile,
                 signal="tone-client-to-server",
-                server_signal="silence",
-                client_signal="tone-440",
+                coordinator_signal="silence",
+                agent_signal="tone-440",
                 repeats=repeats,
                 stream_ms=stream_ms))
     if include_metronome:
@@ -275,12 +271,11 @@ def benchmark_cases(signals=None, include_metronome=True, stream_ms=30000, repea
         for os_priority in ("off", "high", "realtime"):
             cases.append(BenchmarkCase(
                 case_id=f"fast_os_priority_{os_priority}_tone-440",
-                profile=AGGRESSIVE_LOCAL_PROFILE,
+                profile=variant(AGGRESSIVE_LOCAL_PROFILE, f"os_priority_{os_priority}",
+                                os_priority=os_priority),
                 signal="tone-440",
                 repeats=repeats,
-                stream_ms=stream_ms,
-                server_args=("--os-priority", os_priority),
-                client_args=("--os-priority", os_priority)))
+                stream_ms=stream_ms))
     return cases
 
 
