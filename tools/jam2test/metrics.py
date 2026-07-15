@@ -3,6 +3,8 @@
 import csv
 from pathlib import Path
 
+from .udp_protocol import HEADER_SIZE
+
 
 FINAL_ROW = "final"
 PERIODIC_ROW = "periodic"
@@ -144,6 +146,9 @@ def summarize_csv(path, assessment_elapsed_ms=None):
         for item in authority_rows
         if to_float(item, "transport_action") > 0.0
     })
+    audio_format = row.get("session_audio_format", "")
+    audio_width = 2 if audio_format == "pcm16-mono" else 3 if audio_format == "pcm24-mono" else 0
+    frame_size = int(to_float(row, "frame_size"))
     return {
         "csv_path": str(path),
         "has_csv": True,
@@ -152,6 +157,11 @@ def summarize_csv(path, assessment_elapsed_ms=None):
         "bootstrap_role": row.get("bootstrap_role", ""),
         "session_protocol_version": int(to_float(row, "session_protocol_version")),
         "session_audio_format": row.get("session_audio_format", ""),
+        "network_audio_bytes_per_sample": int(
+            to_float(row, "network_audio_bytes_per_sample") or audio_width),
+        "udp_header_bytes": HEADER_SIZE,
+        "audio_payload_bytes": frame_size * audio_width,
+        "audio_packet_bytes": HEADER_SIZE + frame_size * audio_width,
         "session_sample_rate": int(to_float(row, "session_sample_rate")),
         "session_frames_per_packet": int(to_float(row, "session_frames_per_packet")),
         "network_peer_count": int(to_float(row, "network_peer_count")),
@@ -248,6 +258,14 @@ def summarize_csv(path, assessment_elapsed_ms=None):
         "elapsed_s": elapsed_s,
         "sent_packets": to_float(row, "sent_packets"),
         "recv_packets": recv_packets,
+        "send_packet_rate_pps": to_float(row, "send_packet_rate_pps") or (
+            to_float(row, "sent_packets") / elapsed_s if elapsed_s > 0.0 else 0.0),
+        "recv_packet_rate_pps": to_float(row, "recv_packet_rate_pps") or (
+            recv_packets / elapsed_s if elapsed_s > 0.0 else 0.0),
+        "sent_bytes": to_float(row, "sent_bytes"),
+        "recv_bytes": to_float(row, "recv_bytes"),
+        "send_bitrate_bps": to_float(row, "send_bitrate_bps"),
+        "recv_bitrate_bps": to_float(row, "recv_bitrate_bps"),
         "sequence_lost": sequence_lost,
         "sequence_loss_percent": loss_percent,
         "sequence_out_of_order": to_float(row, "sequence_out_of_order"),
@@ -355,8 +373,6 @@ def summarize_csv(path, assessment_elapsed_ms=None):
         "udp_wrong_magic": to_float(row, "udp_wrong_magic"),
         "udp_wrong_version": to_float(row, "udp_wrong_version"),
         "udp_unknown_type": to_float(row, "udp_unknown_type"),
-        "udp_invalid_flags": to_float(row, "udp_invalid_flags"),
-        "udp_invalid_reserved": to_float(row, "udp_invalid_reserved"),
         "udp_wrong_session": to_float(row, "udp_wrong_session"),
         "udp_invalid_payload_size": to_float(row, "udp_invalid_payload_size"),
         "udp_authentication_failed": to_float(row, "udp_authentication_failed"),
@@ -398,8 +414,8 @@ def combined_summary(server_csv, client_csv, assessment_elapsed_ms=None):
             and client.get("remote_peer_id") == server.get("local_peer_id")
             and client.get("bootstrap_role") == "joiner"),
         "session_contract_valid": all(
-            side.get("session_protocol_version") == 1
-            and side.get("session_audio_format") == "pcm24-mono"
+            side.get("session_protocol_version") == 2
+            and side.get("session_audio_format") in ("pcm16-mono", "pcm24-mono")
             and side.get("session_sample_rate", 0) > 0
             and side.get("session_frames_per_packet", 0) > 0
             and side.get("session_sample_rate") == int(side.get("requested_sample_rate", 0))
@@ -412,6 +428,23 @@ def combined_summary(server_csv, client_csv, assessment_elapsed_ms=None):
         "elapsed_s": max((side.get("elapsed_s", 0.0) for side in sides), default=0.0),
         "elapsed_s_min": min((side.get("elapsed_s", 0.0) for side in sides), default=0.0),
         "frame_size_max": max((side.get("frame_size", 0.0) for side in sides), default=0.0),
+        "network_audio_formats": sorted({side.get("session_audio_format", "") for side in sides}),
+        "udp_header_bytes": HEADER_SIZE,
+        "audio_payload_bytes_max": max((side.get("audio_payload_bytes", 0.0) for side in sides), default=0.0),
+        "audio_packet_bytes_max": max((side.get("audio_packet_bytes", 0.0) for side in sides), default=0.0),
+        "network_audio_bytes_per_sample_max": max(
+            (side.get("network_audio_bytes_per_sample", 0.0) for side in sides), default=0.0),
+        "send_packet_rate_pps_max": max(
+            (side.get("send_packet_rate_pps", 0.0) for side in sides), default=0.0),
+        "recv_packet_rate_pps_max": max(
+            (side.get("recv_packet_rate_pps", 0.0) for side in sides), default=0.0),
+        "sent_packets_min": min((side.get("sent_packets", 0.0) for side in sides), default=0.0),
+        "recv_packets_min": min((side.get("recv_packets", 0.0) for side in sides), default=0.0),
+        "sent_bytes_total": sum((side.get("sent_bytes", 0.0) for side in sides), 0.0),
+        "recv_bytes_total": sum((side.get("recv_bytes", 0.0) for side in sides), 0.0),
+        "send_bitrate_bps_max": max((side.get("send_bitrate_bps", 0.0) for side in sides), default=0.0),
+        "send_bitrate_bps_min": min((side.get("send_bitrate_bps", 0.0) for side in sides), default=0.0),
+        "recv_bitrate_bps_max": max((side.get("recv_bitrate_bps", 0.0) for side in sides), default=0.0),
         "audio_callbacks_min": min((side.get("audio_callbacks", 0.0) for side in sides), default=0.0),
         "audio_callback_interval_avg_ms_max": max(
             (side.get("audio_callback_interval_avg_ms", 0.0) for side in sides), default=0.0),
@@ -510,8 +543,6 @@ def combined_summary(server_csv, client_csv, assessment_elapsed_ms=None):
             side.get("udp_wrong_magic", 0.0) +
             side.get("udp_wrong_version", 0.0) +
             side.get("udp_unknown_type", 0.0) +
-            side.get("udp_invalid_flags", 0.0) +
-            side.get("udp_invalid_reserved", 0.0) +
             side.get("udp_wrong_session", 0.0) +
             side.get("udp_invalid_payload_size", 0.0) +
             side.get("udp_authentication_failed", 0.0)
@@ -578,6 +609,7 @@ def write_results_csv(path, results):
         "audio_health_observations",
         "duration_coverage_ratio_min",
         "source_scenario",
+        "requested_network_audio_format",
         "profile_family",
         "profile",
         "os_priority",
@@ -596,6 +628,20 @@ def write_results_csv(path, results):
         "proxy_server_to_client_unroutable_before_client",
         "peer_identity_valid",
         "session_contract_valid",
+        "network_audio_formats",
+        "udp_header_bytes",
+        "audio_payload_bytes_max",
+        "audio_packet_bytes_max",
+        "network_audio_bytes_per_sample_max",
+        "send_packet_rate_pps_max",
+        "recv_packet_rate_pps_max",
+        "sent_packets_min",
+        "recv_packets_min",
+        "sent_bytes_total",
+        "recv_bytes_total",
+        "send_bitrate_bps_max",
+        "send_bitrate_bps_min",
+        "recv_bitrate_bps_max",
         "loss_percent_max",
         "elapsed_s_min",
         "audio_callbacks_min",
@@ -747,6 +793,7 @@ def write_results_csv(path, results):
                 "audio_health_observations": ";".join(result.get("audio_health_observations", [])),
                 "duration_coverage_ratio_min": result.get("duration_coverage_ratio_min", ""),
                 "source_scenario": result.get("source_scenario", result.get("scenario", "")),
+                "requested_network_audio_format": result.get("requested_network_audio_format", ""),
                 "profile_family": result.get("profile_family", ""),
                 "profile": result.get("profile", ""),
                 "os_priority": result.get("os_priority", ""),
@@ -830,4 +877,17 @@ def write_results_csv(path, results):
                 "client_csv_path": result.get("client_csv_path", ""),
             }
             row.update(combined)
+            if mesh:
+                row.update({
+                    "network_audio_formats": mesh.get("network_audio_formats", ""),
+                    "audio_payload_bytes_max": mesh.get("audio_payload_bytes_max", ""),
+                    "audio_packet_bytes_max": mesh.get("audio_packet_bytes_max", ""),
+                    "network_audio_bytes_per_sample_max": mesh.get(
+                        "network_audio_bytes_per_sample_max", ""),
+                    "send_packet_rate_pps_max": mesh.get("send_packet_rate_pps_max", ""),
+                    "recv_packet_rate_pps_max": mesh.get("recv_packet_rate_pps_max", ""),
+                    "sent_bytes_total": mesh.get("sent_bytes_total", ""),
+                    "recv_bytes_total": mesh.get("recv_bytes_total", ""),
+                    "send_bitrate_bps_max": mesh.get("send_bitrate_bps_max", ""),
+                })
             writer.writerow(row)

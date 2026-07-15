@@ -51,8 +51,10 @@ The product selection verifies:
   `listen`, `connect`, and `mesh` aliases at both root and network levels;
 - parity among `debug describe`, the unversioned scenario schema, admitted
   operations, runtime fields, and typed actions;
-- native numeric/boundary and controller-lifecycle validators, including the
-  production 30000-ms/five-miss heartbeat policy and shortened debug expiry;
+- native numeric/boundary and controller-lifecycle validators, including UDP
+  v2 PCM16/PCM24 golden bytes/tags and exact sizes, authenticated binary asset
+  fragmentation/coalescing and state bounds, the production 30000-ms/five-miss
+  heartbeat policy, and shortened debug expiry;
 - authenticated real-process TCP fragmentation, admission, authorization,
   nested remote-model, asset/WAV, endpoint, and bounded-flood hardening;
 - one clean local effective-configuration run;

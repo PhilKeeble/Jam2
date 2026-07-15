@@ -36,6 +36,7 @@ public:
     void close();
     void send(const QJsonObject& message);
     bool sendTo(const QString& token, const QJsonObject& message, bool closeAfterWrite = false);
+    bool sendBinaryTo(const QString& token, const QByteArray& payload);
     bool rejectAuthenticatedPeer(const QString& token, const QString& reason);
     bool canQueueTo(const QString& token, qint64 additionalBytes) const;
     bool hasPeer() const;
@@ -43,6 +44,7 @@ public:
     Stats stats() const { return stats_; }
 
     std::function<void(const QString&, const QJsonObject&)> onMessage;
+    std::function<void(const QString&, const QByteArray&)> onBinaryMessage;
     std::function<void(const QString&, const QJsonObject&)> onAuthenticated;
     std::function<void(const QString&)> onDisconnected;
     std::function<void(const jam2::control_protocol::TransportEvent&)> onEvent;

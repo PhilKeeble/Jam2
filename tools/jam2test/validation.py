@@ -328,7 +328,7 @@ def _keyed_value(key: bytes, domain: bytes, transcript: bytes) -> bytes:
 
 def _authenticated_body(message: dict[str, Any], key: bytes, sequence: int) -> bytes:
     payload = json.dumps(message, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    body = b"\x01\x01\x00\x00" + struct.pack(">Q", sequence) + (b"\x00" * 16) + payload
+    body = b"\x02\x01\x00\x00" + struct.pack(">Q", sequence) + (b"\x00" * 16) + payload
     tag = hmac.new(key, body, hashlib.sha256).digest()[:16]
     return body[:12] + tag + body[28:]
 
@@ -344,7 +344,7 @@ def _authenticate_fragmented(
     server_nonce = bytes.fromhex(challenge["server_nonce"])
     client_nonce = bytes.fromhex("10" * 16)
     transcript = (
-        b"jam2-control-v1" +
+        b"jam2-control-v2" +
         _protocol_field(session_hex.encode("ascii")) +
         _protocol_field(server_nonce) +
         _protocol_field(client_nonce) +
@@ -354,7 +354,7 @@ def _authenticate_fragmented(
     master_key = bytes.fromhex(key_hex)
     proof = _keyed_value(master_key, b"jam2-control-client-proof", transcript)[:16]
     hello = {
-        "type": "hello.proof", "version": 1, "session": session_hex,
+        "type": "hello.proof", "version": 2, "session": session_hex,
         "client_nonce": client_nonce.hex(), "peer_token": peer_token,
         "udp_endpoint": udp_endpoint, "proof": proof.hex(),
     }

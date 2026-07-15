@@ -7,7 +7,9 @@
 namespace jam2::control_protocol {
 
 constexpr qsizetype kMaxJsonBytes = 64 * 1024;
+constexpr qsizetype kMaxBinaryBytes = 64 * 1024;
 constexpr qsizetype kAuthenticatedHeaderBytes = 28;
+constexpr int kControlProtocolVersion = 2;
 constexpr qint64 kOutputHighWaterBytes = 256 * 1024;
 constexpr int kAuthenticationDeadlineMs = 5000;
 constexpr int kIncompleteFrameDeadlineMs = 5000;
@@ -20,6 +22,17 @@ enum class TakeFrameResult {
     NeedMore,
     Ready,
     Invalid,
+};
+
+enum class AuthenticatedPayloadType : quint8 {
+    Json = 1,
+    AssetChunk = 2,
+};
+
+struct AuthenticatedPayload {
+    AuthenticatedPayloadType type = AuthenticatedPayloadType::Json;
+    QJsonObject message;
+    QByteArray binary;
 };
 
 // Cold control-plane state is kept typed so reconnect and failure policy never
@@ -87,13 +100,17 @@ QByteArray encodeAuthenticated(
     const QJsonObject& message,
     const QByteArray& directionKey,
     quint64 sequence);
+QByteArray encodeAuthenticatedBinary(
+    const QByteArray& payload,
+    const QByteArray& directionKey,
+    quint64 sequence);
 TakeFrameResult takeFrame(QByteArray& buffer, QByteArray& body, QString& error);
 bool decodeHandshake(const QByteArray& body, QJsonObject& message, QString& error);
 bool decodeAuthenticated(
     const QByteArray& body,
     const QByteArray& directionKey,
     quint64 expectedSequence,
-    QJsonObject& message,
+    AuthenticatedPayload& payload,
     QString& error);
 
 } // namespace jam2::control_protocol

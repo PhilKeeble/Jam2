@@ -5,8 +5,12 @@
 #include <QMessageAuthenticationCode>
 #include <QRandomGenerator>
 
+#include <algorithm>
+
 namespace jam2::control_protocol {
 namespace {
+
+QByteArray hmacSha256(const QByteArray& key, const QByteArray& data);
 
 void appendU32(QByteArray& out, quint32 value)
 {
@@ -55,6 +59,32 @@ QByteArray frameBody(const QByteArray& body)
     return frame;
 }
 
+QByteArray encodeAuthenticatedPayload(
+    AuthenticatedPayloadType type,
+    const QByteArray& payload,
+    const QByteArray& directionKey,
+    quint64 sequence)
+{
+    const qsizetype limit = type == AuthenticatedPayloadType::Json
+        ? kMaxJsonBytes
+        : kMaxBinaryBytes;
+    if (payload.isEmpty() || payload.size() > limit) {
+        return {};
+    }
+    QByteArray body;
+    body.reserve(kAuthenticatedHeaderBytes + payload.size());
+    body.append(static_cast<char>(kControlProtocolVersion));
+    body.append(static_cast<char>(type));
+    body.append('\0');
+    body.append('\0');
+    appendU64(body, sequence);
+    body.append(QByteArray(16, '\0'));
+    body.append(payload);
+    const QByteArray tag = hmacSha256(directionKey, body).left(16);
+    body.replace(12, 16, tag);
+    return frameBody(body);
+}
+
 QByteArray hmacSha256(const QByteArray& key, const QByteArray& data)
 {
     return QMessageAuthenticationCode::hash(data, key, QCryptographicHash::Sha256);
@@ -101,7 +131,7 @@ QByteArray makeTranscript(
     const QString& peerToken,
     const QString& udpEndpoint)
 {
-    QByteArray transcript("jam2-control-v1", 15);
+    QByteArray transcript("jam2-control-v2", 15);
     appendField(transcript, sessionHex.toLower().toLatin1());
     appendField(transcript, serverNonce);
     appendField(transcript, clientNonce);
@@ -149,18 +179,23 @@ QByteArray encodeAuthenticated(
     if (payload.isEmpty() || payload.size() > kMaxJsonBytes) {
         return {};
     }
-    QByteArray body;
-    body.reserve(kAuthenticatedHeaderBytes + payload.size());
-    body.append(static_cast<char>(1));
-    body.append(static_cast<char>(1));
-    body.append('\0');
-    body.append('\0');
-    appendU64(body, sequence);
-    body.append(QByteArray(16, '\0'));
-    body.append(payload);
-    const QByteArray tag = hmacSha256(directionKey, body).left(16);
-    body.replace(12, 16, tag);
-    return frameBody(body);
+    return encodeAuthenticatedPayload(
+        AuthenticatedPayloadType::Json,
+        payload,
+        directionKey,
+        sequence);
+}
+
+QByteArray encodeAuthenticatedBinary(
+    const QByteArray& payload,
+    const QByteArray& directionKey,
+    quint64 sequence)
+{
+    return encodeAuthenticatedPayload(
+        AuthenticatedPayloadType::AssetChunk,
+        payload,
+        directionKey,
+        sequence);
 }
 
 TakeFrameResult takeFrame(QByteArray& buffer, QByteArray& body, QString& error)
@@ -169,8 +204,9 @@ TakeFrameResult takeFrame(QByteArray& buffer, QByteArray& body, QString& error)
         return TakeFrameResult::NeedMore;
     }
     const quint32 size = readU32(buffer, 0);
-    if (size == 0 || size > static_cast<quint32>(kMaxJsonBytes + kAuthenticatedHeaderBytes)) {
-        error = QStringLiteral("control frame length is outside the v1 bound");
+    const qsizetype maximumPayload = std::max(kMaxJsonBytes, kMaxBinaryBytes);
+    if (size == 0 || size > static_cast<quint32>(maximumPayload + kAuthenticatedHeaderBytes)) {
+        error = QStringLiteral("control frame length is outside the v2 bound");
         return TakeFrameResult::Invalid;
     }
     if (buffer.size() < 4 + static_cast<qsizetype>(size)) {
@@ -184,7 +220,7 @@ TakeFrameResult takeFrame(QByteArray& buffer, QByteArray& body, QString& error)
 bool decodeHandshake(const QByteArray& body, QJsonObject& message, QString& error)
 {
     if (body.size() > kMaxJsonBytes) {
-        error = QStringLiteral("handshake JSON exceeds the v1 bound");
+        error = QStringLiteral("handshake JSON exceeds the v2 bound");
         return false;
     }
     QJsonParseError parseError;
@@ -201,15 +237,18 @@ bool decodeAuthenticated(
     const QByteArray& body,
     const QByteArray& directionKey,
     quint64 expectedSequence,
-    QJsonObject& message,
+    AuthenticatedPayload& payload,
     QString& error)
 {
-    if (body.size() < kAuthenticatedHeaderBytes || body.size() > kMaxJsonBytes + kAuthenticatedHeaderBytes) {
+    if (body.size() < kAuthenticatedHeaderBytes ||
+        body.size() > std::max(kMaxJsonBytes, kMaxBinaryBytes) + kAuthenticatedHeaderBytes) {
         error = QStringLiteral("authenticated control frame size is invalid");
         return false;
     }
-    if (static_cast<unsigned char>(body[0]) != 1 ||
-        static_cast<unsigned char>(body[1]) != 1 || body[2] != 0 || body[3] != 0) {
+    const auto type = static_cast<AuthenticatedPayloadType>(static_cast<unsigned char>(body[1]));
+    if (static_cast<unsigned char>(body[0]) != kControlProtocolVersion ||
+        (type != AuthenticatedPayloadType::Json && type != AuthenticatedPayloadType::AssetChunk) ||
+        body[2] != 0 || body[3] != 0) {
         error = QStringLiteral("authenticated control header is invalid");
         return false;
     }
@@ -225,13 +264,28 @@ bool decodeAuthenticated(
         error = QStringLiteral("authenticated control tag is invalid");
         return false;
     }
-    QJsonParseError parseError;
-    const QJsonDocument document = QJsonDocument::fromJson(body.mid(kAuthenticatedHeaderBytes), &parseError);
-    if (!document.isObject()) {
-        error = QStringLiteral("invalid authenticated JSON: ") + parseError.errorString();
-        return false;
+    const QByteArray decoded = body.mid(kAuthenticatedHeaderBytes);
+    payload = {};
+    payload.type = type;
+    if (type == AuthenticatedPayloadType::Json) {
+        if (decoded.size() > kMaxJsonBytes) {
+            error = QStringLiteral("authenticated JSON exceeds its bound");
+            return false;
+        }
+        QJsonParseError parseError;
+        const QJsonDocument document = QJsonDocument::fromJson(decoded, &parseError);
+        if (!document.isObject()) {
+            error = QStringLiteral("invalid authenticated JSON: ") + parseError.errorString();
+            return false;
+        }
+        payload.message = document.object();
+    } else {
+        if (decoded.size() > kMaxBinaryBytes) {
+            error = QStringLiteral("authenticated binary payload exceeds its bound");
+            return false;
+        }
+        payload.binary = decoded;
     }
-    message = document.object();
     return true;
 }
 

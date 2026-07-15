@@ -1,5 +1,7 @@
 #pragma once
 
+#include "AssetChunkProtocol.hpp"
+
 #include <QElapsedTimer>
 #include <QJsonObject>
 #include <QList>
@@ -20,9 +22,10 @@ public:
     void queueSend(const QString& hash, const QString& targetPeerToken);
     void continueSend();
     void cancel();
+    void peerDisconnected(const QString& peerToken);
     void resetIncoming();
     void receiveStart(const QJsonObject& message, const QString& sourcePeerToken);
-    void receiveChunk(const QJsonObject& message, const QString& sourcePeerToken);
+    void receiveChunk(const QByteArray& payload, const QString& sourcePeerToken);
     void receiveDone(const QJsonObject& message, const QString& sourcePeerToken);
 
 private:
@@ -34,13 +37,10 @@ private:
     MainWindow& window_;
 
     std::shared_ptr<IncomingWorkerState> incomingWorkerState_;
+    jam2::application::asset_chunk::ReceiveSequence incomingSequence_;
     QString incomingLooperAssetHash_;
-    QString incomingLooperAssetSourceToken_;
     qint64 incomingLooperAssetBytesExpected_ = 0;
-    qint64 incomingLooperAssetBytesReceived_ = 0;
-    int incomingLooperAssetChunkSize_ = 0;
-    int incomingLooperAssetNextChunk_ = 0;
-    QList<QPair<int, QString>> incomingLooperAssetQueue_;
+    QList<QPair<int, QByteArray>> incomingLooperAssetQueue_;
     bool incomingLooperAssetWritePending_ = false;
     bool incomingLooperAssetDonePending_ = false;
     int incomingLooperAssetDoneChunks_ = 0;

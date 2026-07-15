@@ -34,13 +34,13 @@ recording, manifests, upload acknowledgement, result correlation, and final
 Coordinator, using LAN address `192.168.1.50` and audio device `5`:
 
 ```powershell
-python tools\jam2_test.py benchmark coordinator --machine-id studio-a --audio-device 5 --sample-rate 44100 --profile fast --case fast_silence --case fast_tone-440 --case fast_pulse-1s --signals silence,tone-440,pulse-1s --stream-ms 5000 --repeats 1 --control 0.0.0.0:49000 --audio-bind 0.0.0.0:49001 --public-audio-host 192.168.1.50 --initial-agent-timeout-s 120 --case-timeout-s 45 --upload-timeout-s 120 --case-retry-limit 1 --finish-grace-s 30 --clean
+python tools\jam2_test.py benchmark coordinator --machine-id studio-a --audio-device 5 --sample-rate 44100 --profile fast --case fast_tone-440 --case fast_pulse-1s --signals tone-440,pulse-1s --network-audio-format both --stream-ms 5000 --repeats 1 --control 0.0.0.0:49000 --audio-bind 0.0.0.0:49001 --public-audio-host 192.168.1.50 --initial-agent-timeout-s 120 --case-timeout-s 45 --upload-timeout-s 120 --case-retry-limit 1 --finish-grace-s 30 --clean
 ```
 
 Agent, using audio device `16`:
 
 ```powershell
-python tools\jam2_test.py benchmark agent --machine-id studio-b --audio-device 16 --sample-rate 44100 --coordinator 192.168.1.50:49000 --connect-timeout-s 120 --case-timeout-s 45 --clean
+python tools\jam2_test.py benchmark agent --machine-id studio-b --audio-device 16 --sample-rate 44100 --network-audio-format both --coordinator 192.168.1.50:49000 --connect-timeout-s 120 --case-timeout-s 45 --clean
 ```
 
 Do not use `--delete-after-upload` when the purpose of the run requires logs on
@@ -72,6 +72,9 @@ Useful selection controls:
 - `--stream-ms N` sets each selected case duration.
 - `--repeats N` preserves each repeat as a separate run identity.
 - `--case NAME` selects an exact catalog case and may be repeated.
+- `--network-audio-format pcm16|pcm24|both` selects the offered session wire
+  format. `both` expands every selected base case into a correlated PCM16 and
+  PCM24 pair with identical profile, signal, duration, and repeat identity.
 
 The comprehensive workflow is intentionally retained. Omitting `--case` with
 `--profile all` exercises the broad profile, sparse tuning, directional tone,
@@ -125,12 +128,20 @@ agent subtree. The agent retains its local subtree unless
   `jam2.stdout.log`, and `jam2.stderr.log`;
 - per-attempt `csv/*.csv` and `recording/*.wav` plus `recording.json`;
 - coordinator-side `correlated-result.json`.
+- coordinator-side `format-comparison.json` and `format-comparison.csv` when
+  `--network-audio-format both` is selected.
 
 The invocation manifest records bounded artifact paths, byte counts, and
 SHA-256 hashes. A successful short run has `state: "passed"`, `return_code: 0`,
 and `all_done_acknowledged: true` on both machines. Each coordinator result
 must have `verdict: "complete"`, `agent_artifacts_received: true`, and two
 distinct peer/machine records.
+
+Every format-specific case also verifies the exact negotiated format, packet
+size, bidirectional packet/byte flow, and non-silent remote recording. The
+paired comparison retains packet/header/payload bytes, bitrate, CPU, callback
+timing, jitter/RTT/loss/drop/underrun/drift/mix data, and WAV peak/RMS/pop/
+clipping measurements without assigning a subjective score.
 
 `--clean` removes only the selected output parent's entire `benchmark_logs`
 family before allocating a new invocation. It does not clean validation,
@@ -148,7 +159,8 @@ Do not add `--clean` when the analysis source is inside the default
 `tools/benchmark_logs` family: family cleanup would also remove that source.
 
 The analyzer creates another isolated benchmark invocation containing
-`analysis.json`, `analysis.csv`, and its own invocation manifest.
+`analysis.json`, `analysis.csv`, `format-comparison.json`,
+`format-comparison.csv`, and its own invocation manifest.
 `analysis.json` preserves the complete case- and repeat-level correlated
 results, while `analysis.csv` is the compact identity/verdict index. The
 analyzer does not produce a subjective playability score or silently choose a

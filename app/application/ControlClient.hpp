@@ -34,11 +34,13 @@ public:
         const QString& meshUdpEndpoint = QString());
     void close();
     bool send(const QJsonObject& message);
+    bool sendBinary(const QByteArray& payload);
     bool canQueue(qint64 additionalBytes) const;
     bool isConnected() const;
     Stats stats() const { return stats_; }
 
     std::function<void(const QJsonObject&)> onMessage;
+    std::function<void(const QByteArray&)> onBinaryMessage;
     std::function<void(const jam2::control_protocol::TransportEvent&)> onEvent;
 
 private:

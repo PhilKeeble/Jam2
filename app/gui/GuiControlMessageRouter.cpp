@@ -79,8 +79,6 @@ void GuiControlMessageRouter::dispatch(
         w.assetTransfer_.handleRequest(message, sourcePeerToken);
     } else if (type == QStringLiteral("looper.asset.start")) {
         w.assetTransfer_.receiveStart(message, sourcePeerToken);
-    } else if (type == QStringLiteral("looper.asset.chunk")) {
-        w.assetTransfer_.receiveChunk(message, sourcePeerToken);
     } else if (type == QStringLiteral("looper.asset.done")) {
         w.assetTransfer_.receiveDone(message, sourcePeerToken);
     }

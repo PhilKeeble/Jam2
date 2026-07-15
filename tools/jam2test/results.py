@@ -56,6 +56,9 @@ def mesh_collect_metrics(peer_results, requested_stream_ms=0):
         "peer_count": len(peer_results),
         "peers_with_csv": len(peers_with_csv),
         "expected_remote_peers": expected_remote_peers,
+        "network_audio_formats": sorted({
+            row.get("session_audio_format", "") for row in summaries
+        }),
         "distinct_local_peer_ids": len({
             row.get("local_peer_id", 0) for row in summaries if row.get("local_peer_id", 0) != 0
         }),
@@ -135,6 +138,17 @@ def mesh_collect_metrics(peer_results, requested_stream_ms=0):
         "recv_packets_min": min((row.get("recv_packets", 0.0) for row in summaries), default=0.0),
         "sent_packets_total": sum((row.get("sent_packets", 0.0) for row in summaries), 0.0),
         "recv_packets_total": sum((row.get("recv_packets", 0.0) for row in summaries), 0.0),
+        "sent_bytes_total": sum((row.get("sent_bytes", 0.0) for row in summaries), 0.0),
+        "recv_bytes_total": sum((row.get("recv_bytes", 0.0) for row in summaries), 0.0),
+        "send_bitrate_bps_max": max((row.get("send_bitrate_bps", 0.0) for row in summaries), default=0.0),
+        "network_audio_bytes_per_sample_max": max(
+            (row.get("network_audio_bytes_per_sample", 0.0) for row in summaries), default=0.0),
+        "send_packet_rate_pps_max": max(
+            (row.get("send_packet_rate_pps", 0.0) for row in summaries), default=0.0),
+        "recv_packet_rate_pps_max": max(
+            (row.get("recv_packet_rate_pps", 0.0) for row in summaries), default=0.0),
+        "audio_payload_bytes_max": max((row.get("audio_payload_bytes", 0.0) for row in summaries), default=0.0),
+        "audio_packet_bytes_max": max((row.get("audio_packet_bytes", 0.0) for row in summaries), default=0.0),
         "sequence_lost_total": sum((row.get("sequence_lost", 0.0) for row in summaries), 0.0),
         "sequence_loss_percent_max": max((row.get("sequence_loss_percent", 0.0) for row in summaries), default=0.0),
         "sequence_out_of_order_total": sum((row.get("sequence_out_of_order", 0.0) for row in summaries), 0.0),
@@ -190,6 +204,11 @@ def mesh_verdict(result):
         protocol_verdict = "missing_csv"
     elif metrics.get("distinct_local_peer_ids", 0) != peer_count:
         protocol_verdict = "mesh_peer_identity_invalid"
+    elif result.get("requested_network_audio_format") and \
+            metrics.get("network_audio_formats", []) != [{
+                "pcm16": "pcm16-mono", "pcm24": "pcm24-mono"
+            }.get(result.get("requested_network_audio_format"), "")]:
+        protocol_verdict = "network_audio_format_mismatch"
     elif (metrics.get("network_peer_count_established_min", metrics.get("network_peer_count_min", -1)) !=
           metrics.get("expected_remote_peers", 0) or
           metrics.get("network_peer_count_established_max", metrics.get("network_peer_count_max", -1)) !=
@@ -398,6 +417,15 @@ def protocol_verdict_for(result):
         return "network_peer_identity_invalid"
     if not metrics.get("session_contract_valid", False):
         return "network_session_contract_invalid"
+    if result.get("requested_network_audio_format"):
+        expected_format = {
+            "pcm16": "pcm16-mono",
+            "pcm24": "pcm24-mono",
+        }.get(result.get("requested_network_audio_format"), "")
+        if not expected_format or metrics.get("network_audio_formats", []) != [expected_format]:
+            return "network_audio_format_mismatch"
+        if metrics.get("sent_packets_min", 0.0) <= 0.0 or metrics.get("recv_packets_min", 0.0) <= 0.0:
+            return "network_audio_packets_missing"
     scenario = result.get("source_scenario") or result.get("scenario", "")
     if scenario == "clean-control":
         if metrics.get("loss_percent_max", 0.0) > 0.0:

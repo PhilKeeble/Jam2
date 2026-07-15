@@ -25,6 +25,7 @@ from .benchmark_control import (
     same_run, start_control_server,
 )
 from .benchmark_suite import benchmark_cases
+from .format_comparison import write_format_comparison
 from .manifest import InvocationManifest
 from .metrics import normalized_pair_summary, summarize_csv
 from .native import NativeCapabilities, native_manifest, write_scenario
@@ -104,6 +105,44 @@ def _agent_attempt_status(upload_acknowledged: bool, return_code: int) -> str:
     return "passed" if upload_acknowledged and return_code == 0 else "failed"
 
 
+def _format_case_validation(result: dict[str, Any], case: Any) -> dict[str, Any]:
+    aggregate = result.get("metrics", {}).get("aggregate", {})
+    expected = f"{case.network_audio_format}-mono"
+    reasons = []
+    if aggregate.get("network_audio_formats") != [expected]:
+        reasons.append("session format did not match the offered benchmark case")
+    if aggregate.get("sent_packets_min", 0.0) <= 0.0 or aggregate.get("recv_packets_min", 0.0) <= 0.0:
+        reasons.append("bidirectional network packet flow was not observed")
+    if aggregate.get("send_bitrate_bps_max", 0.0) <= 0.0 or aggregate.get("recv_bitrate_bps_max", 0.0) <= 0.0:
+        reasons.append("network byte flow was not measured")
+    expected_width = 2 if case.network_audio_format == "pcm16" else 3
+    if aggregate.get("network_audio_bytes_per_sample_max") != expected_width:
+        reasons.append("measured bytes per sample did not match the selected PCM format")
+    expected_packet_bytes = 36 + int(aggregate.get("frame_size_max", 0.0)) * expected_width
+    if aggregate.get("audio_packet_bytes_max") != expected_packet_bytes:
+        reasons.append("measured audio packet size did not match the selected PCM format")
+    non_silent_requested = any(
+        signal not in ("", "silence", "metronome-only")
+        for signal in (case.coordinator_signal, case.agent_signal)
+    )
+    remote_peaks = [
+        float(peer.get("analysis", {}).get("stems", {}).get("their-input", {}).get("peak", 0.0) or 0.0)
+        for peer in result.get("peers", [])
+    ]
+    if non_silent_requested and max(remote_peaks, default=0.0) <= 0.0:
+        reasons.append("non-silent remote benchmark audio was not recorded")
+    return {
+        "ok": not reasons,
+        "expected_format": expected,
+        "observed_formats": aggregate.get("network_audio_formats", []),
+        "expected_audio_packet_bytes": expected_packet_bytes,
+        "observed_audio_packet_bytes": aggregate.get("audio_packet_bytes_max", 0.0),
+        "non_silent_requested": non_silent_requested,
+        "remote_peak_max": max(remote_peaks, default=0.0),
+        "reasons": reasons,
+    }
+
+
 def _failure_manifest(
     repo: Path,
     args: Any,
@@ -138,6 +177,7 @@ def _scenario(case: Any, operation: str, run_id: str, root: Path,
     runtime.setdefault("metronome_level", 0.20)
     runtime.update({
         "sample_rate": sample_rate,
+        "network_audio_format": case.network_audio_format,
         "stream_ms": 0,
         "test_input": "silence" if signal == "metronome-only" else signal,
     })
@@ -197,7 +237,12 @@ def _csv_path(root: Path, native: dict[str, Any]) -> Path | None:
 def _write_peer_result(root: Path, identity: dict[str, Any], machine_id: str,
                        role: str, return_code: int, timed_out: bool,
                        case: Any) -> dict[str, Any]:
-    native = native_manifest(root)
+    native_error = ""
+    try:
+        native = native_manifest(root)
+    except (OSError, ValueError) as error:
+        native = {}
+        native_error = f"{type(error).__name__}: {error}"
     csv_path = _csv_path(root, native)
     csv_summary = summarize_csv(csv_path) if csv_path else {"has_csv": False}
     try:
@@ -209,15 +254,27 @@ def _write_peer_result(root: Path, identity: dict[str, Any], machine_id: str,
         local_signal=case.coordinator_signal if role == "coordinator" else case.agent_signal,
         remote_signal=case.agent_signal if role == "coordinator" else case.coordinator_signal,
     )
+    native_result = native.get("result", {})
+    performance = {
+        key: native_result[key]
+        for key in (
+            "wall_elapsed_ms",
+            "process_cpu_time_ms",
+            "process_cpu_percent_one_core",
+        )
+        if key in native_result
+    }
     result = {
         **identity, "machine_id": machine_id, "role": role,
         "local_peer_id": local_peer_id,
         "remote_peer_id": int(csv_summary.get("remote_peer_id", 0) or 0),
         "return_code": return_code, "timed_out": timed_out,
-        "native_manifest": "native-manifest.json",
+        "native_manifest": "native-manifest.json" if native else "",
+        "native_manifest_error": native_error,
         "effective_configuration": native.get("effective_configuration", {}),
         "csv_path": csv_path.relative_to(root).as_posix() if csv_path else "",
         "analysis": analysis,
+        "performance": performance,
     }
     (root / "peer-result.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return result
@@ -273,16 +330,23 @@ def _selected_cases(args: Any, capabilities: NativeCapabilities) -> list[Any]:
     signals = tuple(value.strip() for value in args.signals.split(",") if value.strip())
     if not signals or len(signals) > len(BENCHMARK_SIGNALS) or not set(signals) <= BENCHMARK_SIGNALS:
         raise ValueError("--signals accepts a comma-separated subset of silence,tone-440,pulse-1s")
-    cases = benchmark_cases(
+    base_cases = benchmark_cases(
         signals=signals, include_metronome=not args.no_metronome_cases,
         stream_ms=args.stream_ms, repeats=args.repeats,
     )
-    if args.profile != "all": cases = [case for case in cases if case.profile.base_profile == args.profile]
+    if args.profile != "all": base_cases = [case for case in base_cases if case.profile.base_profile == args.profile]
     if args.case:
         requested = set(args.case)
-        cases = [case for case in cases if case.case_id in requested]
-        missing = requested - {case.case_id for case in cases}
+        base_cases = [case for case in base_cases if case.case_id in requested]
+        missing = requested - {case.case_id for case in base_cases}
         if missing: raise ValueError("unknown benchmark cases: " + ", ".join(sorted(missing)))
+    formats = ("pcm16", "pcm24") if args.network_audio_format == "both" else (args.network_audio_format,)
+    if formats == ("pcm24",):
+        cases = base_cases
+    else:
+        from dataclasses import replace
+        cases = [replace(case, case_id=f"{case.case_id}__{audio_format}", network_audio_format=audio_format)
+                 for case in base_cases for audio_format in formats]
     if not cases: raise ValueError("benchmark selection produced no cases")
     for case in cases:
         capabilities.validate_sparse_overrides(case.profile.overrides)
@@ -444,6 +508,10 @@ def _coordinator(args: Any, repo: Path, arguments: list[str]) -> int:
                             args.machine_id, coordinator_csv, agent_id, agent_csv)
                         result["verdict"], completed = _correlated_process_outcome(
                             code, agent_result)
+                        result["format_validation"] = _format_case_validation(result, case)
+                        if completed and not result["format_validation"]["ok"]:
+                            result["verdict"] = "format-validation-failed"
+                            completed = False
                     else:
                         result["verdict"] = "upload-timeout"
                     (attempt / "correlated-result.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -455,10 +523,19 @@ def _coordinator(args: Any, repo: Path, arguments: list[str]) -> int:
                     if completed: break
                     run_log(f"retrying {case.case_id} run={run_index} attempt={attempt_number}")
                 if not completed: raise RuntimeError(f"benchmark attempt retries exhausted: {case.case_id} run {run_index}")
+        format_comparison = None
+        if args.network_audio_format == "both":
+            format_comparison = write_format_comparison(invocation.root, results)
+            if format_comparison.get("pair_count", 0) != sum(case.repeats for case in cases) // 2:
+                raise RuntimeError("matched PCM16/PCM24 benchmark results are incomplete")
         state.mark_all_done()
         ack = state.wait_for(lambda: state.done_acked, args.finish_grace_s)
         manifest.finish("passed" if ack else "failed", 0 if ack else 1,
                         all_done_acknowledged=bool(ack), results=results,
+                        format_comparison=(
+                            {"json": "format-comparison.json", "csv": "format-comparison.csv",
+                             "pair_count": format_comparison["pair_count"]}
+                            if format_comparison else None),
                         native_profiles={name: capabilities.profile(name) for name in capabilities.profiles})
         return 0 if ack else 1
     except Exception as error:
@@ -573,7 +650,8 @@ def _agent(args: Any, repo: Path, arguments: list[str]) -> int:
             # identity, never from arbitrary offered argv.
             all_cases = benchmark_cases(
                 signals=("silence", "tone-440", "pulse-1s"),
-                stream_ms=offered_stream_ms, repeats=1)
+                stream_ms=offered_stream_ms, repeats=1,
+                audio_formats=("pcm16", "pcm24"))
             selected = next((case for case in all_cases if case.case_id == identity["case_id"]), None)
             if selected is None: raise ValueError(f"agent does not recognize offered case {identity['case_id']}")
             if selected.metadata()["profile"] != case_meta.get("profile"):
@@ -656,8 +734,13 @@ def _analyze(args: Any, repo: Path, arguments: list[str]) -> int:
             writer = csv.DictWriter(handle, fieldnames=("suite_id", "case_id", "run_index", "attempt_id", "verdict"))
             writer.writeheader()
             for item in results: writer.writerow({key: item.get(key, "") for key in writer.fieldnames})
+        comparison = write_format_comparison(invocation.root, results)
         manifest.add_case({"id": "analyze", "status": "passed", "attempts": len(results)})
-        manifest.finish("passed", 0)
+        manifest.finish("passed", 0, format_comparison={
+            "json": "format-comparison.json",
+            "csv": "format-comparison.csv",
+            "pair_count": comparison["pair_count"],
+        })
         return 0
     except Exception as error:
         manifest.add_case({"id": "analyze", "status": "infrastructure-error",

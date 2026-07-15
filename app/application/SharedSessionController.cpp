@@ -5,6 +5,7 @@
 #include "SharedSessionController.hpp"
 
 #include "ApplicationRuntime.hpp"
+#include "ContentLimits.hpp"
 #include "ControlMessageValidation.hpp"
 #include "ControlProtocol.hpp"
 
@@ -205,12 +206,22 @@ SharedSessionController::SharedSessionController(QObject* parent)
             onMessage(token, routed);
         }
     };
+    server_.onBinaryMessage = [this](const QString& token, const QByteArray& payload) {
+        if (onBinaryMessage) {
+            onBinaryMessage(token, payload);
+        }
+    };
     server_.onAuthenticated = [this](const QString& token, const QJsonObject& message) {
         handleAuthenticatedPeer(token, message);
     };
     server_.onDisconnected = [this](const QString& token) { handleDisconnectedPeer(token); };
     client_.onEvent = [this](const TransportEvent& event) { handleClientEvent(event); };
     client_.onMessage = [this](const QJsonObject& message) { handleClientMessage(message); };
+    client_.onBinaryMessage = [this](const QByteArray& payload) {
+        if (onBinaryMessage) {
+            onBinaryMessage(QString{}, payload);
+        }
+    };
 }
 
 void SharedSessionController::bindRuntime(
@@ -258,9 +269,25 @@ bool SharedSessionController::startCreator(const CreatorConfig& config)
     heartbeatTimer_.setInterval(heartbeatIntervalMs_);
     coordinatorToken_ = config.localToken;
     contract_ = config.contract;
-    contractReady_ = contract_.protocolVersion == 1 && !contract_.audioFormat.isEmpty() &&
-        contract_.sampleRate > 0 && contract_.frameSize > 0;
+    const auto audioFormat = jam2::protocol::parse_audio_format(
+        contract_.audioFormat.toStdString());
+    contractReady_ = contract_.protocolVersion == jam2::protocol::kProtocolVersion &&
+        audioFormat.has_value() &&
+        contract_.sampleRate >= jam2::application::limits::kMinimumSampleRate &&
+        contract_.sampleRate <= jam2::application::limits::kMaximumSampleRate &&
+        contract_.frameSize > 0 &&
+        contract_.frameSize <= static_cast<int>(jam2::protocol::kMaxAudioFramesPerPacket);
     contractRevision_ = contractReady_ ? 1 : 0;
+    if (!contractReady_) {
+        const QString detail = QStringLiteral(
+            "Creator session contract has an unsupported protocol, audio format, sample rate, or frame size");
+        fail(TransportFailure::InvalidConfiguration, detail, false);
+        publishTransportEvent(TransportEvent{
+            TransportEventType::Failure,
+            TransportFailure::InvalidConfiguration,
+            detail}, false);
+        return false;
+    }
     gridAuthorityToken_ = config.localToken;
     arrangementAuthorityToken_ = config.localToken;
     Peer local;
@@ -554,6 +581,14 @@ bool SharedSessionController::sendTo(
         return server_.sendTo(token, message, closeAfterWrite);
     }
     return role_ == Role::Joiner && token.isEmpty() && !closeAfterWrite && send(message);
+}
+
+bool SharedSessionController::sendBinaryTo(const QString& token, const QByteArray& payload)
+{
+    if (role_ == Role::Creator) {
+        return server_.sendBinaryTo(token, payload);
+    }
+    return role_ == Role::Joiner && token.isEmpty() && client_.sendBinary(payload);
 }
 
 bool SharedSessionController::canQueueTo(const QString& token, qint64 additionalBytes) const
@@ -885,8 +920,12 @@ bool SharedSessionController::acceptContract(const QJsonObject& message)
     next.sampleRate = message.value(QStringLiteral("sample_rate")).toInt();
     next.frameSize = message.value(QStringLiteral("frame_size")).toInt();
     const QString coordinator = message.value(QStringLiteral("coordinator_token")).toString();
-    if (next.protocolVersion != 1 || next.audioFormat != QStringLiteral("pcm24-mono") ||
-        next.sampleRate <= 0 || next.frameSize <= 0 ||
+    if (next.protocolVersion != jam2::protocol::kProtocolVersion ||
+        !jam2::protocol::parse_audio_format(next.audioFormat.toStdString()).has_value() ||
+        next.sampleRate < jam2::application::limits::kMinimumSampleRate ||
+        next.sampleRate > jam2::application::limits::kMaximumSampleRate ||
+        next.frameSize <= 0 ||
+        next.frameSize > static_cast<int>(jam2::protocol::kMaxAudioFramesPerPacket) ||
         !validToken(coordinator)) {
         return false;
     }

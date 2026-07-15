@@ -3,10 +3,21 @@
 #include "common.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
-namespace jam2::protocol {
+namespace jam2 {
+
+enum class NetworkAudioFormat : std::uint8_t {
+    Pcm16Mono = 1,
+    Pcm24Mono = 2,
+};
+
+namespace protocol {
+
+constexpr std::uint8_t kProtocolVersion = 2;
 
 enum class PacketType : std::uint8_t {
     Hello = 1,
@@ -21,16 +32,16 @@ enum class PacketType : std::uint8_t {
 
 struct Header {
     PacketType type{};
-    std::uint16_t flags{};
     std::uint64_t session_id{};
     std::uint32_t sequence{};
-    std::uint64_t sample_time{};
-    std::uint64_t send_time_us{};
+    // Audio/metronome/transport packets carry a sample-time value. Ping/pong
+    // packets carry their monotonic timing token. No packet needs both.
+    std::uint64_t timing_value{};
     std::uint16_t payload_length{};
     std::uint64_t auth_tag{};
 };
 
-constexpr std::size_t kHeaderSize = 48;
+constexpr std::size_t kHeaderSize = 36;
 constexpr std::size_t kMaxAudioFramesPerPacket = 256;
 constexpr std::size_t kMaxDatagramSize = kHeaderSize + kMaxAudioFramesPerPacket * 3;
 
@@ -40,8 +51,6 @@ enum class ParseError : std::uint8_t {
     WrongMagic,
     WrongVersion,
     UnknownType,
-    InvalidFlags,
-    InvalidReserved,
     WrongSession,
     InvalidPayloadSize,
     AuthenticationFailed,
@@ -122,24 +131,44 @@ private:
 std::vector<std::uint8_t> encode_packet(
     const Header& header,
     std::span<const std::uint8_t> payload,
-    const std::array<std::uint8_t, 16>& key);
+    const std::array<std::uint8_t, 16>& key,
+    NetworkAudioFormat audio_format);
 
 std::size_t encode_packet_into(
     const Header& header,
     std::span<const std::uint8_t> payload,
     const std::array<std::uint8_t, 16>& key,
+    NetworkAudioFormat audio_format,
     std::span<std::uint8_t> output);
 
 ParseResult parse_packet(
     std::span<const std::uint8_t> packet,
     const std::array<std::uint8_t, 16>& key,
-    std::uint64_t expected_session_id);
+    std::uint64_t expected_session_id,
+    NetworkAudioFormat audio_format);
 
 const char* parse_error_text(ParseError error);
+const char* audio_format_text(NetworkAudioFormat format) noexcept;
+std::optional<NetworkAudioFormat> parse_audio_format(std::string_view text) noexcept;
+std::size_t audio_bytes_per_sample(NetworkAudioFormat format) noexcept;
+std::size_t audio_payload_size(NetworkAudioFormat format, std::size_t frames) noexcept;
 
+std::vector<std::uint8_t> pack_pcm16(std::span<const std::int32_t> samples);
+std::vector<std::int32_t> unpack_pcm16(std::span<const std::uint8_t> bytes);
+bool pack_pcm16_into(std::span<const std::int32_t> samples, std::span<std::uint8_t> output) noexcept;
+bool unpack_pcm16_into(std::span<const std::uint8_t> bytes, std::span<std::int32_t> output) noexcept;
 std::vector<std::uint8_t> pack_pcm24(std::span<const std::int32_t> samples);
 std::vector<std::int32_t> unpack_pcm24(std::span<const std::uint8_t> bytes);
 bool pack_pcm24_into(std::span<const std::int32_t> samples, std::span<std::uint8_t> output) noexcept;
 bool unpack_pcm24_into(std::span<const std::uint8_t> bytes, std::span<std::int32_t> output) noexcept;
+bool pack_audio_into(
+    NetworkAudioFormat format,
+    std::span<const std::int32_t> samples,
+    std::span<std::uint8_t> output) noexcept;
+bool unpack_audio_into(
+    NetworkAudioFormat format,
+    std::span<const std::uint8_t> bytes,
+    std::span<std::int32_t> output) noexcept;
 
-} // namespace jam2::protocol
+} // namespace protocol
+} // namespace jam2

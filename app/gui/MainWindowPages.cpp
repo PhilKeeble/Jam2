@@ -269,6 +269,9 @@ QWidget* MainWindowPages::buildSessionPage(MainWindow& w)
     w.frameSizeSpin_ = new QSpinBox(page);
     w.frameSizeSpin_->setRange(32, 256);
     w.frameSizeSpin_->setValue(128);
+    w.networkAudioFormatBox_ = new QComboBox(page);
+    w.networkAudioFormatBox_->addItem(QStringLiteral("24-bit PCM"), QStringLiteral("pcm24-mono"));
+    w.networkAudioFormatBox_->addItem(QStringLiteral("16-bit PCM"), QStringLiteral("pcm16-mono"));
     w.prefillSpin_ = new QSpinBox(page);
     w.prefillSpin_->setRange(0, 65536);
     w.prefillSpin_->setValue(1536);
@@ -337,7 +340,7 @@ QWidget* MainWindowPages::buildSessionPage(MainWindow& w)
         w.streamMsSpin_, w.streamLingerMsSpin_, w.statsWarmupMsSpin_, w.logStatsEdit_,
         w.meshMaxPeersSpin_,
         w.socketSendBufferSpin_, w.socketRecvBufferSpin_, w.profileBox_, w.osPriorityBox_, w.deviceBox_, w.inputChannelsEdit_,
-        w.outputChannelsEdit_, w.sampleRateSpin_, w.bufferSizeSpin_, w.frameSizeSpin_, w.prefillSpin_,
+        w.outputChannelsEdit_, w.sampleRateSpin_, w.bufferSizeSpin_, w.frameSizeSpin_, w.networkAudioFormatBox_, w.prefillSpin_,
         w.playbackMaxSpin_, w.captureRingSpin_, w.playbackRingSpin_, w.driftSmoothingSpin_,
         w.driftDeadbandSpin_, w.driftMaxCorrectionSpin_, w.playoutDelaySpin_, w.jitterBufferSpin_,
         w.jitterBufferMaxSpin_, w.adaptiveTargetSpin_, w.adaptiveMinSpin_, w.adaptiveMaxSpin_,
@@ -352,7 +355,7 @@ QWidget* MainWindowPages::buildSessionPage(MainWindow& w)
         w.streamMsSpin_, w.streamLingerMsSpin_, w.statsCheck_, w.statsWarmupMsSpin_, w.logStatsEdit_,
         w.meshMaxPeersSpin_,
         w.socketSendBufferSpin_, w.socketRecvBufferSpin_, w.profileBox_, w.osPriorityBox_, w.deviceBox_, w.inputChannelsEdit_,
-        w.outputChannelsEdit_, w.sampleRateSpin_, w.bufferSizeSpin_, w.frameSizeSpin_, w.prefillSpin_,
+        w.outputChannelsEdit_, w.sampleRateSpin_, w.bufferSizeSpin_, w.frameSizeSpin_, w.networkAudioFormatBox_, w.prefillSpin_,
         w.playbackMaxSpin_, w.captureRingSpin_, w.playbackRingSpin_, w.driftCorrectionCheck_,
         w.driftSmoothingSpin_, w.driftDeadbandSpin_, w.driftMaxCorrectionSpin_, w.noStunCheck_,
         w.sampleTimePlayoutCheck_, w.playoutDelaySpin_, w.jitterBufferSpin_, w.jitterBufferMaxSpin_,

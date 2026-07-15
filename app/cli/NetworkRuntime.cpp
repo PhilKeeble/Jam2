@@ -983,6 +983,7 @@ jam2::PeerStreamConfig make_peer_stream_config(const Options& options, bool coll
     jam2::PeerStreamConfig config;
     config.sample_rate = options.sample_rate;
     config.frames_per_packet = options.frame_size;
+    config.audio_format = options.network_audio_format;
     config.sample_time_playout = options.sample_time_playout;
     config.playout_delay_frames = options.playout_delay_frames;
     config.playback_max_frames = options.playback_max_frames;
@@ -1005,7 +1006,12 @@ jam2::PeerStreamConfig make_peer_stream_config(const Options& options, bool coll
 
 jam2::NetworkSessionContract make_network_session_contract(const Options& options)
 {
-    return {1, jam2::NetworkAudioFormat::Pcm24Mono, options.sample_rate, options.frame_size};
+    return {
+        jam2::protocol::kProtocolVersion,
+        options.network_audio_format,
+        options.sample_rate,
+        options.frame_size,
+    };
 }
 
 jam2::PeerId compatibility_peer_id(const jam2::Endpoint& endpoint) noexcept
@@ -1881,8 +1887,9 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
 
     std::vector<std::int32_t> asio_frames(static_cast<std::size_t>(options.frame_size), 0);
     std::vector<std::int32_t> network_frames(static_cast<std::size_t>(options.frame_size), 0);
-    const auto silence_payload = jam2::protocol::pack_pcm24(network_frames);
-    const std::uint16_t audio_payload_size = static_cast<std::uint16_t>(silence_payload.size());
+    const std::uint16_t audio_payload_size = static_cast<std::uint16_t>(
+        jam2::protocol::audio_payload_size(options.network_audio_format, network_frames.size()));
+    const std::vector<std::uint8_t> silence_payload(audio_payload_size, 0);
     std::vector<std::uint8_t> packed_audio_payload(audio_payload_size);
     std::uint64_t mesh_work_budget_yields = 0;
     std::uint64_t mesh_receive_batch_max = 0;
@@ -2110,7 +2117,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         case jam2::SessionBootstrapRole::Joiner: stats.bootstrap_role = "joiner"; break;
         }
         stats.session_protocol_version = network_session.contract().protocol_version;
-        stats.session_audio_format = "pcm24-mono";
+        stats.session_audio_format = jam2::protocol::audio_format_text(options.network_audio_format);
         stats.session_sample_rate = network_session.contract().sample_rate;
         stats.session_frames_per_packet = network_session.contract().frames_per_packet;
         stats.network_peer_count = network_session.peerCount();
@@ -2584,7 +2591,10 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     mesh_leader_audio_source_peer_id = local_peer_id.value;
                     ++mesh_leader_audio_injected_packets;
                 }
-                (void)jam2::protocol::pack_pcm24_into(network_frames, packed_audio_payload);
+                (void)jam2::protocol::pack_audio_into(
+                    options.network_audio_format,
+                    network_frames,
+                    packed_audio_payload);
                 payload = packed_audio_payload;
             } else if (commands.state.metronome_mode.load(std::memory_order_relaxed) ==
                            metronome_mode_id(MetronomeMode::LeaderAudio) &&
@@ -2600,14 +2610,16 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     metronome_pattern_from_runtime(commands.state));
                 mesh_leader_audio_source_peer_id = local_peer_id.value;
                 ++mesh_leader_audio_injected_packets;
-                (void)jam2::protocol::pack_pcm24_into(network_frames, packed_audio_payload);
+                (void)jam2::protocol::pack_audio_into(
+                    options.network_audio_format,
+                    network_frames,
+                    packed_audio_payload);
                 payload = packed_audio_payload;
             }
             const auto send_result = network_session.sendToActive(
                 jam2::protocol::PacketType::Audio,
                 packet_schedule.audioSequence(),
                 packet_schedule.sampleTime(),
-                now,
                 payload);
             for (auto& entry : peers) {
                 auto& peer = entry.second;
@@ -2672,7 +2684,6 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     peer.peer_id,
                     jam2::protocol::PacketType::Ping,
                     ping_sequence,
-                    0,
                     now,
                     {},
                     true);
@@ -2712,7 +2723,6 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     jam2::protocol::PacketType::MetronomeState,
                     packet_schedule.takeControlSequence(),
                     current_engine_frame(audio.engine.get()),
-                    now,
                     payload);
                 ++mesh_grid_proposals_sent;
                 next_grid_proposal_send_us = now + 20000ULL;
@@ -2730,7 +2740,6 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     jam2::protocol::PacketType::MetronomeState,
                     packet_schedule.takeControlSequence(),
                     grid.authority_peer_id,
-                    now,
                     payload);
                 ++mesh_grid_assignments_sent;
                 next_grid_assignment_send_us = now + 100000ULL;
@@ -2748,7 +2757,6 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     jam2::protocol::PacketType::MetronomeState,
                     packet_schedule.takeControlSequence(),
                     current_engine_frame(audio.engine.get()),
-                    now,
                     payload);
                 ++mesh_grid_authority_states_sent;
             }
@@ -2793,7 +2801,6 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 jam2::protocol::PacketType::TransportState,
                 packet_schedule.takeControlSequence(),
                 engine_now,
-                now,
                 payload);
             mesh_transport_source_peer_id = local_peer_id.value;
             mesh_transport_event_counter = sending_transport_revision;
@@ -2885,8 +2892,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         peer.peer_id,
                         jam2::protocol::PacketType::Pong,
                         header.sequence,
-                        0,
-                        header.send_time_us,
+                        header.timing_value,
                         {},
                         true);
                     ++peer.sent_pongs;
@@ -2895,7 +2901,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         peer.probe_challenges[header.sequence % peer.probe_challenges.size()];
                     if (!challenge.used ||
                         challenge.sequence != header.sequence ||
-                        challenge.send_time_us != header.send_time_us) {
+                        challenge.send_time_us != header.timing_value) {
                         ++peer.proof_unmatched_pongs;
                         ++peer.ignored_packets;
                         continue;
@@ -2970,7 +2976,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     } else if (metronome.kind == GridMessageKind::Assignment) {
                         const jam2::GridAuthorityState assignment{
                             metronome.revision_or_request,
-                            header.sample_time,
+                            header.timing_value,
                             metronome.run_state,
                             metronome.mode,
                             metronome.epoch_sample_time,
@@ -3001,7 +3007,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                             metronome.run_state,
                             metronome.mode,
                             metronome.epoch_sample_time,
-                            header.sample_time,
+                            header.timing_value,
                         };
                         const auto result = authority.acceptGridAuthorityState(
                             peer.peer_id.value,
@@ -3016,7 +3022,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                             if (!commands.state.metronome_epoch_valid.load(std::memory_order_relaxed)) {
                                 (void)align_to_authority_clock(
                                     metronome,
-                                    header.sample_time,
+                                    header.timing_value,
                                     peer_stream);
                             }
                             if (metronome.mode == metronome_mode_id(MetronomeMode::SharedGrid) &&
@@ -3027,7 +3033,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                                 const std::uint64_t bar_frames = step_frames *
                                     static_cast<std::uint64_t>(pattern.step_count);
                                 if (bar_frames > 0) {
-                                    const std::uint64_t projected = header.sample_time +
+                                    const std::uint64_t projected = header.timing_value +
                                         peer_stream.stats().rtt_min_us *
                                             static_cast<std::uint64_t>(options.sample_rate) / 2000000ULL;
                                     const std::uint64_t local_frame = musical_frame_from_raw(
@@ -3094,7 +3100,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         mesh_transport_event_counter = transport.event_counter;
                         mesh_transport_grid_revision = transport.grid_revision;
                         mesh_transport_action = transport.action;
-                        mesh_transport_source_frame = header.sample_time;
+                        mesh_transport_source_frame = header.timing_value;
                         mesh_transport_requested_target_frame = transport.target_sender_frame;
                     }
                     if (track_transport && accepted_transport && !accept_track_transport) {
@@ -3106,8 +3112,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         peer_stream.stats().rtt_min_us > 0 &&
                         audio.engine != nullptr) {
                         const std::uint64_t sender_lead_frames =
-                            transport.target_sender_frame > header.sample_time
-                            ? transport.target_sender_frame - header.sample_time
+                            transport.target_sender_frame > header.timing_value
+                            ? transport.target_sender_frame - header.timing_value
                             : 0ULL;
                         const std::uint64_t one_way_frames = peer_stream.stats().rtt_min_us *
                             static_cast<std::uint64_t>(options.sample_rate) / 2000000ULL;
@@ -3184,7 +3190,6 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     network_session.sendToActive(
         jam2::protocol::PacketType::Bye,
         packet_schedule.takeControlSequence(),
-        0,
         now,
         {});
     const auto final_audio_snapshot = make_audio_snapshot(audio.engine.get());

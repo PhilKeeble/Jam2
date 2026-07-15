@@ -42,6 +42,8 @@ add_executable(jam2 MACOSX_BUNDLE
     application/ApplicationRuntime.hpp
     application/AutomationChannel.cpp
     application/AutomationChannel.hpp
+    application/AssetChunkProtocol.cpp
+    application/AssetChunkProtocol.hpp
     application/ControlClient.cpp
     application/ControlClient.hpp
     application/ContentLimits.hpp

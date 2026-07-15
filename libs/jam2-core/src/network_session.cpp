@@ -141,7 +141,8 @@ struct NetworkSession::Impl {
 
     void validateContract() const
     {
-        if (contract.protocol_version != 1 || contract.audio_format != NetworkAudioFormat::Pcm24Mono ||
+        if (contract.protocol_version != protocol::kProtocolVersion ||
+            protocol::audio_bytes_per_sample(contract.audio_format) == 0 ||
             contract.sample_rate <= 0 || contract.frames_per_packet <= 0 ||
             contract.frames_per_packet > static_cast<int>(protocol::kMaxAudioFramesPerPacket)) {
             throw std::runtime_error("unsupported immutable NetworkSession contract");
@@ -150,7 +151,8 @@ struct NetworkSession::Impl {
 
     void validatePeerConfig(const PeerStreamConfig& config) const
     {
-        if (config.sample_rate != contract.sample_rate ||
+        if (config.audio_format != contract.audio_format ||
+            config.sample_rate != contract.sample_rate ||
             config.frames_per_packet != contract.frames_per_packet) {
             throw std::runtime_error("PeerStream tuning does not match the NetworkSession contract");
         }
@@ -257,8 +259,7 @@ struct NetworkSession::Impl {
     std::span<const std::uint8_t> encode(
         protocol::PacketType type,
         std::uint32_t sequence,
-        std::uint64_t sample_time,
-        std::uint64_t send_time_us,
+        std::uint64_t timing_value,
         std::span<const std::uint8_t> payload)
     {
         if (bootstrap_state != SessionBootstrapState::Established) {
@@ -266,11 +267,9 @@ struct NetworkSession::Impl {
         }
         const protocol::Header header{
             type,
-            0,
             session.session_id,
             sequence,
-            sample_time,
-            send_time_us,
+            timing_value,
             0,
             0,
         };
@@ -278,9 +277,10 @@ struct NetworkSession::Impl {
             header,
             payload,
             session.key,
+            contract.audio_format,
             transmit_packet);
         if (packet_size == 0) {
-            throw std::runtime_error("failed to encode bounded UDP v1 packet");
+            throw std::runtime_error("failed to encode bounded current UDP packet");
         }
         return std::span<const std::uint8_t>(transmit_packet.data(), packet_size);
     }
@@ -542,11 +542,10 @@ void NetworkSession::finish(std::uint64_t now_us) noexcept
 NetworkSendResult NetworkSession::sendToActive(
     protocol::PacketType type,
     std::uint32_t sequence,
-    std::uint64_t sample_time,
-    std::uint64_t send_time_us,
+    std::uint64_t timing_value,
     std::span<const std::uint8_t> payload)
 {
-    const auto packet = impl_->encode(type, sequence, sample_time, send_time_us, payload);
+    const auto packet = impl_->encode(type, sequence, timing_value, payload);
     NetworkSendResult result;
     result.packet_size = packet.size();
     for (const auto& peer : impl_->peers) {
@@ -563,19 +562,17 @@ NetworkSendResult NetworkSession::sendToActive(
 std::size_t NetworkSession::send(
     protocol::PacketType type,
     std::uint32_t sequence,
-    std::uint64_t sample_time,
-    std::uint64_t send_time_us,
+    std::uint64_t timing_value,
     std::span<const std::uint8_t> payload)
 {
-    return sendToActive(type, sequence, sample_time, send_time_us, payload).packet_size;
+    return sendToActive(type, sequence, timing_value, payload).packet_size;
 }
 
 std::size_t NetworkSession::sendToPeer(
     PeerId peer_id,
     protocol::PacketType type,
     std::uint32_t sequence,
-    std::uint64_t sample_time,
-    std::uint64_t send_time_us,
+    std::uint64_t timing_value,
     std::span<const std::uint8_t> payload,
     bool allow_inactive)
 {
@@ -584,7 +581,7 @@ std::size_t NetworkSession::sendToPeer(
         (!allow_inactive && peer->descriptor.endpoint_state != PeerEndpointState::Active)) {
         return 0;
     }
-    const auto packet = impl_->encode(type, sequence, sample_time, send_time_us, payload);
+    const auto packet = impl_->encode(type, sequence, timing_value, payload);
     impl_->socket.send_to(peer->descriptor.endpoint, packet);
     return packet.size();
 }
@@ -603,7 +600,11 @@ std::optional<NetworkDatagram> NetworkSession::receiveFor(std::uint64_t timeout_
 
 protocol::ParseResult NetworkSession::parse(std::span<const std::uint8_t> packet) const noexcept
 {
-    return protocol::parse_packet(packet, impl_->session.key, impl_->session.session_id);
+    return protocol::parse_packet(
+        packet,
+        impl_->session.key,
+        impl_->session.session_id,
+        impl_->contract.audio_format);
 }
 
 void NetworkSession::close() noexcept

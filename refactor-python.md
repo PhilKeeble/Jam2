@@ -97,7 +97,7 @@ The current Python layer is not one subsystem. It performs several separate jobs
 
 | Current area | Current role |
 | --- | --- |
-| [tools/jam2_test.py](tools/jam2_test.py) and [tools/jam2test/dispatch.py](tools/jam2test/dispatch.py) | Keep argument parsing in the thin entry script and route the `validate`, `stress`, `benchmark`, and `connectivity` command families through package-owned invocation setup |
+| [tools/jam2_test.py](tools/jam2_test.py) and [tools/jam2test/dispatch.py](tools/jam2test/dispatch.py) | Keep argument parsing in the thin entry script and route the `validate`, `stress`, `benchmark`, `connectivity`, and Phase 12 `fuzz` command families through package-owned invocation setup |
 | [tools/jam2test/native.py](tools/jam2test/native.py) and [validation.py](tools/jam2test/validation.py) | Consume the native debug description, run static/reactive scenarios, and own the post-build validation suite |
 | [tools/jam2test/stress.py](tools/jam2test/stress.py), [scenarios.py](tools/jam2test/scenarios.py), and [impairment.py](tools/jam2test/impairment.py) | Launch retained local/mesh cases, apply deterministic impairment, schedule typed native actions, and write verdicts/results |
 | [tools/jam2test/benchmark.py](tools/jam2test/benchmark.py), [benchmark_control.py](tools/jam2test/benchmark_control.py), and [benchmark_suite.py](tools/jam2test/benchmark_suite.py) | Coordinate two machines, retain the comprehensive matrices, retry/correlate attempts, and stream bounded artifacts |
@@ -496,11 +496,13 @@ python tools/jam2_test.py benchmark coordinator [options]
 python tools/jam2_test.py benchmark agent [options]
 python tools/jam2_test.py benchmark analyze <results>
 python tools/jam2_test.py connectivity stun|direct [options]
+python tools/jam2_test.py fuzz [all|control|udp|asset|wav] [options]
 ```
 
 The entrypoint parses and dispatches only. A `tools/jam2test` package owns
 capability discovery, process execution, artifacts, and separate validation,
-stress, benchmark, connectivity, analysis, and network/impairment modules.
+stress, benchmark, connectivity, fuzzing, analysis, and network/impairment
+modules.
 Python command modules accept explicit configuration and return structured
 results; they do not parse `sys.argv` or terminate the interpreter themselves.
 Keep the package importable directly from the repository without installation
@@ -533,6 +535,12 @@ Command responsibilities are deliberately different:
 - `connectivity` owns standalone STUN mapping and direct UDP reachability
   diagnostics for users. It remains usable without starting a benchmark or a
   Jam2 audio session.
+- `fuzz` owns bounded mutation/generation, retained corpus replay, native
+  parser/real-process execution, stable failure classification and minimization,
+  and reproducible artifacts for the authenticated control, UDP, binary asset,
+  and WAV surfaces. It is a test-only family, not a remotely reachable runtime
+  service, and it distinguishes expected native rejection from crashes, hangs,
+  resource-bound violations, or invariant failures.
 
 Existing public scripts may be thin compatibility wrappers only during
 migration. Remove them after command, case, result, and artifact parity is
@@ -553,6 +561,7 @@ tools/validate_logs/
 tools/stress_logs/
 tools/benchmark_logs/
 tools/connectivity_logs/
+tools/fuzz_logs/
 ```
 
 Every invocation creates a new collision-resistant
@@ -580,8 +589,9 @@ and repeated cases never overwrite a prior attempt.
 Default runs never delete earlier output. `--clean` intentionally removes all
 old results beneath the selected command-family root before allocating the new
 unique run directory. Thus `stress --clean` clears `stress_logs` but cannot
-touch `benchmark_logs`, `validate_logs`, or `connectivity_logs`; each other
-command behaves equivalently within its own family.
+touch `benchmark_logs`, `validate_logs`, `connectivity_logs`, or `fuzz_logs`;
+each other command, including `fuzz`, behaves equivalently within its own
+family.
 
 Top-level `--clean` means only this safe pre-run family cleanup. The current
 benchmark-agent option that deletes local artifacts after a successful upload
@@ -735,7 +745,7 @@ manifest:
   protocol versions, validated effective audio/profile/tuning/session
   configuration, test input, native lifecycle/end reason, and exact native
   artifact paths/hashes.
-- Every `jam2_test.py validate|stress|benchmark|connectivity` invocation
+- Every `jam2_test.py validate|stress|benchmark|connectivity|fuzz` invocation
   publishes a Python invocation manifest. It is authoritative for command
   family, invocation/suite/case/run/attempt and machine/peer identities,
   topology, impairments and seeds, retries/transfers, process return state,
@@ -767,9 +777,10 @@ invocation manifest.
 The command families describe why a run exists, while the layers below describe
 where it executes. Clean deterministic framework and product checks belong to
 `validate`; controlled feature challenges and recovery assertions belong to
-`stress`; cross-host tuning comparisons belong to `benchmark`; and reachability
-diagnosis belongs to `connectivity`. Headless, real-device, local, and
-multi-host execution do not blur those result contracts.
+`stress`; cross-host tuning comparisons belong to `benchmark`; reachability
+diagnosis belongs to `connectivity`; and bounded mutation/corpus execution
+belongs to `fuzz`. Headless, real-device, local, and multi-host execution do not
+blur those result contracts.
 
 ### Focused protocol and component validation
 
@@ -781,6 +792,45 @@ behavior rather than only a separately compiled test harness. Keep small
 in-process Python checks for the independent generators themselves; do not add
 CMake/CTest scaffolding.
 
+### Bounded native fuzzing
+
+Phase 12 adds `tools/jam2test/fuzz.py` and focused helpers behind the thin
+dispatcher command:
+
+```text
+python tools/jam2_test.py fuzz [all|control|udp|asset|wav]
+```
+
+Python owns input generation, explicit seed/iteration/time/resource settings,
+corpus selection, process isolation, result classification, minimization, and
+artifacts. Native code remains authoritative for decoding, authentication,
+state transitions, checked arithmetic, bounds, and rejection reasons. Use the
+existing opt-in debug runner or a narrowly declared native debug operation;
+never add an ordinary GUI handle, stdin mutation path, public network listener,
+or Python parser whose success substitutes for exercising native code.
+
+Every invocation creates `tools/fuzz_logs/<invocation-id>` and records the
+target, master and derived seeds, corpus/input hashes, iteration counts, native
+build and protocol identity, command/scenario, limits, elapsed time, exit/end
+state, rejection/crash/hang/invariant classification, stable signature, and any
+minimized reproduction. `--clean` removes only the canonical fuzz family root.
+The implemented baseline caps individual inputs, native parser allocations by
+target/input bounds, process lifetime, iterations, captured output, retained
+failures, minimization work, and total invocation time. An OS-enforced memory
+sandbox is optional future hardening rather than a Phase 12 requirement.
+
+Targets are the final Phase 12 formats: length-prefixed authenticated control
+and strict model validation; compact authenticated UDP for both PCM16 and
+PCM24; binary asset framing/state; and the narrow PCM16 WAV parser. The retained
+seed and mutation corpus covers valid inputs plus representative truncation,
+coalescing, excess, authentication, arithmetic, replay, and malformed cases.
+Expected bounded validation errors are normal outcomes. Preserve and minimize
+crashes, hangs, resource-limit failures, inconsistent state/counters, or other
+explicit native invariants without changing their signature. Broader
+message-type/state-machine corpora and ASan/UBSan runs may be added later but
+are not Phase 12 completion work. The resumed Phase 12 run relies on its already
+retained successful bounded smoke and does not schedule another fuzz campaign.
+
 ### Headless deterministic integration
 
 Use headless peers for repeatable lifecycle, packet, mesh, CPU, memory, bandwidth, mix, command, and deterministic clock tests. These runs do not claim real device/driver coverage.
@@ -789,9 +839,27 @@ Use headless peers for repeatable lifecycle, packet, mesh, CPU, memory, bandwidt
 
 Use native callback test input with ASIO/CoreAudio devices and controlled localhost impairment. Compare the same case headless and real-device to isolate callback, driver, device buffer, OS priority, and hardware-clock effects.
 
+For Phase 12, `stress --network-audio-format both` expands each selected native
+case into matched PCM16 and PCM24 executions and writes
+`format-comparison.json` and `format-comparison.csv` in the invocation root.
+The pair is complete only when both formats passed with matching topology,
+profile, duration, impairment, and flow, and each result declares the expected
+native format, bytes/sample, packet/header/payload sizes, packet rate, bitrate,
+and received audio. Ordinary case failures remain failures rather than being
+hidden by comparison generation.
+
 ### Multi-host direct benchmark
 
 Run one normal engine per real machine over the actual direct network, with the Python control plane used only for orchestration and artifact movement. These runs validate real network, hardware, and cross-machine clocks.
+
+`benchmark coordinator|agent --network-audio-format both` uses the same paired
+dimension and retains the full per-side manifests, CSV/WAV files, upload
+acknowledgements, correlated results, and final `all_done` state. The coordinator
+comparison adds non-silent WAV peak/RMS/pop/clipping data when observed; it does
+not invent audio-analysis results for stress runs that did not record WAVs.
+Phase 12's local short tone comparison is retained at
+`tools/benchmark_logs/20260715T213324Z_99a9b776`, while the pre-change physical
+reference remains at `tools/benchmark_logs/20260715T153015Z_4fd412e0`.
 
 The required Phase 10 workflow is two hosts. Preserve its full case/repeat
 state machine, reconnect/retry behavior, upload acknowledgement, stale-attempt
@@ -868,7 +936,8 @@ wire experiments are maintained only in
 
 ## Target Capability Summary
 
-- Python validation, stress, two-host benchmark, and connectivity tooling
+- Python validation, stress, two-host benchmark, connectivity, and bounded
+  fuzzing tooling
   remains supported after binary consolidation through one thin
   `jam2_test.py` command surface and separately owned modules.
 - Bare validation is the deterministic headless post-build baseline, with
@@ -909,6 +978,7 @@ wire experiments are maintained only in
 | 2026-07-13 | Use declarative scenario files plus an optional inherited reactive channel | Startup files are reproducible, while recovery tests need event-driven control | Deterministic cases use the real create/join coordinator; reactive cases remain local, bounded, and opt-in |
 | 2026-07-15 | Limit native automation to concrete retained-case needs | A full mirror of the GUI/application API would duplicate surfaces and expand maintenance/security cost without replacing a demonstrated tooling problem | Ordinary commands remain the default; each new schema field or message must replace a named stdin, timing, scraping, defaults, or artifact-discovery dependency |
 | 2026-07-15 | Unify Python tooling behind validation, stress, benchmark, and connectivity commands | The current flat launchers obscure ownership and mix clean regression, impairment, measurement, and diagnosis while still containing valuable working logic | A thin `jam2_test.py` dispatcher uses focused modules; validation becomes the post-build baseline, existing behavior migrates incrementally, and temporary wrappers are removed after parity |
+| 2026-07-15 | Add bounded `fuzz` as a fifth isolated command family after final Phase 12 wire/asset formats land | Mutation should exercise the native formats that will ship while remaining reproducible, resource-bounded, and absent from ordinary runtime surfaces | `jam2_test.py fuzz` uses focused package modules, native debug execution, retained/minimized corpora, manifests, and `tools/fuzz_logs/<invocation-id>` with family-local cleanup |
 | 2026-07-15 | Preserve the robust two-host benchmark and many-profile matrices | Cross-host state, retries, uploads, and effective tuning evidence are core measurement capabilities rather than obsolete server/client details | Coordinator/agent naming and normalized identities replace role-shaped results, while native base profiles plus sparse overrides retain broad experiments without duplicated defaults or a Phase 10 multi-host requirement |
 | 2026-07-15 | Keep local automation formats unversioned | The temporary local adapter has no external compatibility promise and only the desired current behavior needs support | Replace `*-v1` with the three stable unversioned identifiers; retain versioning only for network protocols between independent peers |
 | 2026-07-15 | Keep manifests opt-in and split ownership | Ordinary GUI/direct CLI operation should not gain test-only output behavior, while native and orchestration facts have different authorities | `debug run` emits the native process manifest and `jam2_test.py` emits the command invocation manifest |

@@ -62,7 +62,7 @@ public:
     };
 
     struct SessionContract {
-        int protocolVersion = 1;
+        int protocolVersion = jam2::protocol::kProtocolVersion;
         QString audioFormat = QStringLiteral("pcm24-mono");
         QString profile;
         int sampleRate = 0;
@@ -155,6 +155,7 @@ public:
 
     bool send(const QJsonObject& message);
     bool sendTo(const QString& token, const QJsonObject& message, bool closeAfterWrite = false);
+    bool sendBinaryTo(const QString& token, const QByteArray& payload);
     bool canQueueTo(const QString& token, qint64 additionalBytes) const;
     bool hasPeer() const;
     bool isConnected() const;
@@ -167,6 +168,7 @@ public:
     std::function<void(const jam2::control_protocol::TransportEvent&, bool)> onTransportEvent;
     std::function<void(const Snapshot&)> onSnapshot;
     std::function<void(const QString&, const QJsonObject&)> onMessage;
+    std::function<void(const QString&, const QByteArray&)> onBinaryMessage;
     std::function<void(const QString&, const QJsonObject&)> onPeerAuthenticated;
     std::function<void(const QString&)> onPeerDisconnected;
     std::function<void(const SessionContract&)> onContract;

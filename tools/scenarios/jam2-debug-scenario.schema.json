@@ -28,6 +28,7 @@
         "sample_rate": {"type": "integer"},
         "audio_buffer_size": {"type": "integer"},
         "frame_size": {"type": "integer"},
+        "network_audio_format": {"enum": ["pcm16", "pcm24"]},
         "capture_ring_frames": {"type": "integer"},
         "playback_ring_frames": {"type": "integer"},
         "playback_prefill_frames": {"type": "integer"},

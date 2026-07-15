@@ -674,8 +674,10 @@ struct PeerStream::Impl {
         std::span<const std::uint8_t> payload,
         std::uint64_t receive_time_us) noexcept
     {
-        if (payload.size() != static_cast<std::size_t>(config.frames_per_packet) * 3U ||
-            payload.size() > protocol::kMaxAudioFramesPerPacket * 3U) {
+        const std::size_t bytes_per_sample = protocol::audio_bytes_per_sample(config.audio_format);
+        if (bytes_per_sample == 0 ||
+            payload.size() != static_cast<std::size_t>(config.frames_per_packet) * bytes_per_sample ||
+            payload.size() > protocol::kMaxAudioFramesPerPacket * bytes_per_sample) {
             return PeerAudioResult::InvalidPayload;
         }
         if (!expected_sequence_set) {
@@ -754,15 +756,15 @@ struct PeerStream::Impl {
             highest_sequence = header.sequence;
         }
 
-        const std::uint64_t packet_frames = payload.size() / 3U;
-        if (header.sample_time > (std::numeric_limits<std::uint64_t>::max)() - packet_frames) {
+        const std::uint64_t packet_frames = payload.size() / bytes_per_sample;
+        if (header.timing_value > (std::numeric_limits<std::uint64_t>::max)() - packet_frames) {
             if (header.sequence == expected_sequence) {
                 markExpectedLost();
             }
             ++stats.sample_time_future_rejects;
             return PeerAudioResult::FutureSampleTime;
         }
-        const std::uint64_t packet_end = header.sample_time + packet_frames;
+        const std::uint64_t packet_end = header.timing_value + packet_frames;
         if (!highest_remote_sample_time_set) {
             // A peer may join an already-running sender whose session sample
             // counter is well beyond zero.  The first authenticated packet is
@@ -779,8 +781,8 @@ struct PeerStream::Impl {
                 ++stats.sample_time_stale_rejects;
                 return PeerAudioResult::StaleSampleTime;
             }
-            if (header.sample_time > highest_remote_sample_time &&
-                header.sample_time - highest_remote_sample_time > sample_time_horizon_frames) {
+            if (header.timing_value > highest_remote_sample_time &&
+                header.timing_value - highest_remote_sample_time > sample_time_horizon_frames) {
                 if (header.sequence == expected_sequence) {
                     markExpectedLost();
                 }
@@ -792,12 +794,12 @@ struct PeerStream::Impl {
 
         PendingAudioPacket packet;
         packet.sequence = header.sequence;
-        packet.sample_time = header.sample_time;
+        packet.sample_time = header.timing_value;
         packet.receive_time = receive_time_us;
         packet.reordered = reordered;
         packet.sample_count = static_cast<std::size_t>(packet_frames);
         std::span<std::int32_t> decoded(packet.samples.data(), packet.sample_count);
-        if (!protocol::unpack_pcm24_into(payload, decoded)) {
+        if (!protocol::unpack_audio_into(config.audio_format, payload, decoded)) {
             return PeerAudioResult::InvalidPayload;
         }
         for (std::int32_t& sample : decoded) {

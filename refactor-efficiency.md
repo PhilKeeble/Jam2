@@ -481,15 +481,17 @@ Reducing the header from 48 to 32 bytes saves:
 
 This is real but not transformative. It also requires a wire-version decision and touches every packet type.
 
-Recommendation:
+The recommendation above governed the earlier fast-path phases. Phase 12 now
+owns the one final replacement: audit which fields each packet type actually
+uses, combine the mutually exclusive audio sample-time and ping timing-token
+slots where safe, remove unused flags/reserved bytes, and select the smallest
+fixed explicitly encoded header that preserves required timing, session,
+sequence/replay, strict-size, and authentication behavior. Do not force a
+particular byte count by deleting a justified field. Retain one current parser
+and encoder only; reject stale versions clearly and remove the old layout rather
+than maintaining compatibility.
 
-- Keep the current wire format during the first fast-path optimization.
-- Remove allocation, copying, resolution, and scheduling overhead first.
-- If measurements later justify v2, use a small fixed common prefix followed by fixed type-specific fields.
-- Continue explicit byte encoding; never transmit native structs.
-- Reject mismatched protocol versions clearly rather than guessing compatibility.
-
-### PCM16 experiment
+### PCM16 network format
 
 PCM16 reduces raw audio payload from 144 KB/sec to 96 KB/sec, saving 48 KB/sec per direction per remote peer regardless of packet size.
 
@@ -510,13 +512,38 @@ Fast PCM16 outbound: ~459 KB/sec / 3.67 Mbit/sec
 
 PCM16 is the only proposed wire change with a large predictable bandwidth gain. It could reduce Wi-Fi airtime, packet serialization, and burst pressure, but it does not reduce packet frequency, physical propagation time, or configured buffering.
 
-Recommendation:
+Phase 12 decision:
 
-- Keep PCM24 as the v1 default.
-- Add PCM16 only as an explicit matched-peer experiment.
-- Include network format in the handshake and fail on mismatch.
-- Record format, payload size, bytes/sample, and bitrate in stats/CSV.
-- Compare directional instrument/tone recordings, jitter, late packets, underruns, and burst behavior before deciding whether PCM16 is acceptable.
+- Implement both PCM16 and PCM24 as session-wide direct-network formats.
+- Let the creator select Audio Quality once and have every joiner adopt the
+  authenticated session value automatically, preserving encode-once fan-out.
+- Keep internal processing and PCM16 Track/Looper/recording WAV behavior
+  unchanged; only network pack/unpack differs.
+- Keep PCM24 as the implementation/testing default while gathering evidence.
+  Choosing the eventual product default is not a Phase 12 completion gate.
+- Record format, header and payload bytes, bytes/sample, packet rate and bitrate
+  in stats, CSV, native/Python manifests, stress results, and benchmarks.
+- Compare matched non-silent recordings plus clean and impaired two/three/four-
+  peer packet, callback, jitter, late/missing/drop/underrun, drift, queue, CPU,
+  and bitrate data before deciding which default is preferable.
+
+Phase 12 measured result on the 64-frame fast profile:
+
+- The compact current protocol uses a 36-byte header. PCM24 therefore produces
+  a 228-byte audio datagram and PCM16 produces a 164-byte audio datagram at the
+  same packet rate of about 750 packets/second.
+- Matched stress measured a 28.06% PCM16 send-bitrate reduction. The short
+  non-silent coordinator/agent benchmark measured a 28.07% packet-size and
+  28.04% send-bitrate reduction, with both received tone WAVs peaking at 0.125,
+  RMS 0.08837/0.08835, and no detected pop or clipping event.
+- The retained pre-change physical benchmark used a 48-byte header and
+  240-byte PCM24 datagrams. Compact PCM24 is 5% smaller without changing its
+  192-byte payload; compact PCM16 is 31.67% smaller than that retained packet.
+- CPU differences in the short comparison changed with run order and are not
+  evidence of a CPU improvement. Packet frequency and configured latency are
+  intentionally unchanged. Manual listening and physical cross-host evidence
+  remain required before phase closeout, and choosing the product default
+  remains a later evidence-based decision.
 
 ### Peer JSON
 
@@ -528,6 +555,22 @@ Recommended division:
 - Use explicit binary framing or raw framed chunks for large asset data to remove base64's roughly 33% size expansion and full-document copies.
 - Consider fixed binary messages for frequent clock, metronome, transport, and membership snapshots only if their measured rate warrants it.
 - Apply strict lengths and versions to both JSON and binary formats.
+
+Phase 12 adopts the raw-chunk part of this division. Keep human-paced metadata
+strictly validated and structured, but replace base64 asset bodies completely
+with bounded authenticated binary frames on the existing control plane. Preserve
+requested/source-bound transfer state, worker-thread streaming, checked
+length/count/offset arithmetic, incremental hashing, strict WAV validation,
+temporary-file cleanup and atomic commit. Do not add a second listener or a
+whole-file buffer, and keep heartbeat/control frames schedulable during a large
+transfer.
+
+The implemented frame carries one fixed 24 KiB non-final chunk at a time; only
+the final chunk may be smaller. A full chunk occupies 24,656 authenticated
+framed bytes versus 32,768 base64 characters for the replaced data field alone,
+which is at least a 24.76% wire reduction before the removed JSON field overhead
+is counted. The fixed chunk size and derived maximum count also prevent a sender
+from turning one permitted asset into an excessive number of tiny frames.
 
 ## Code Organization Review
 
@@ -697,19 +740,26 @@ Do not mix these fixes with a packet-header change.
 5. Remove second-binary staging and obsolete compatibility code.
 6. Update packaging, documentation, benchmark paths, and shutdown tests.
 
-### Measured wire experiments
+### Phase 12 measured wire work
 
-1. Add explicit PCM16 versus PCM24 comparison if Wi-Fi/mesh data justifies it.
-2. Consider a smaller type-specific v2 header only if header cost remains material.
-3. Consider binary peer-control messages selectively, especially raw asset chunks.
-4. Do not combine these experiments with engine extraction or consolidation.
+1. Add creator-selected session PCM16/PCM24 with automatic joiner adoption and
+   matched benchmark/stress dimensions using actual non-silent audio.
+2. Replace the current header once with the audited compact explicitly encoded
+   layout and remove the obsolete layout without a compatibility parser.
+3. Replace only asset chunk bodies with authenticated bounded binary frames;
+   retain structured control/project metadata.
+4. Implement these in the completed core/session/asset ownership boundaries;
+   retain the existing bounded native fuzz baseline while using matched stress
+   and benchmark runs as the Phase 12 performance and behavior evidence.
 
 ## Useful Validation Scenarios
 
 ### Protocol
 
 - Golden encoded bytes and SipHash tags for every packet type.
-- Truncated, oversized, wrong-version, unknown-type, invalid-flags, wrong-session, wrong-key, modified-tag, and wrong-payload cases.
+- Truncated, extended, wrong-version, unknown-type, wrong-session, wrong-key,
+  modified-tag, wrong-payload, and format-specific exact-size cases for the
+  compact current header.
 - Sequence wrap, gaps, duplicates, reorder recovery, late packets, and replay.
 - Output-buffer-too-small and slot-capacity failures without allocation or exceptions.
 

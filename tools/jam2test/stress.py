@@ -13,6 +13,7 @@ from typing import Any
 
 from .artifacts import InvocationArtifacts, normalized_path_id
 from .audio_analysis import analyze_recording_dir
+from .format_comparison import write_format_comparison
 from .manifest import InvocationManifest
 from .metrics import combined_summary, summarize_csv, write_results_csv
 from .native import NativeCapabilities, native_manifest, write_scenario
@@ -256,6 +257,7 @@ def _run_case(jam2: Path, case_id: str, scenario: dict[str, Any], args: Any,
         runtime.setdefault("metronome_level", 0.20)
         runtime.update({
             "sample_rate": args.sample_rate,
+            "network_audio_format": scenario.get("network_audio_format", "pcm24"),
             "stats_interval_ms": 1000,
             "os_priority": scenario.get("os_priority", "high"),
             "test_input": scenario.get("server_signal" if index == 0 else "client_signal", scenario.get("signal", "silence")),
@@ -346,6 +348,7 @@ def _run_case(jam2: Path, case_id: str, scenario: dict[str, Any], args: Any,
         proxy.close()
     result: dict[str, Any] = {
         "scenario": case_id, "source_scenario": scenario.get("source_scenario", case_id),
+        "requested_network_audio_format": scenario.get("network_audio_format", "pcm24"),
         "profile": profile.name, "base_profile": profile.base_profile,
         "sparse_overrides": profile.overrides,
         "requested_stream_ms": args.stream_ms,
@@ -410,17 +413,23 @@ def run(args: Any, repo: Path, invocation: InvocationArtifacts,
         if "all" in priorities:
             priorities = ["off", "high", "realtime"]
         priorities = list(dict.fromkeys(priorities))
+        formats = ["pcm16", "pcm24"] if args.network_audio_format == "both" else [args.network_audio_format]
         plan = []
         for case_id in ids:
             for priority in priorities:
-                planned_id = case_id if len(priorities) == 1 else f"{case_id}__os_{priority}"
-                selected = dict(catalog.get(case_id, {}))
-                profile = selected.get("profile")
-                if profile is not None:
-                    capabilities.validate_sparse_overrides(profile.overrides)
-                selected.setdefault("source_scenario", case_id)
-                selected["os_priority"] = priority
-                plan.append((planned_id, case_id, selected))
+                base_id = case_id if len(priorities) == 1 else f"{case_id}__os_{priority}"
+                for audio_format in formats:
+                    planned_id = base_id if args.network_audio_format == "pcm24" else f"{base_id}__{audio_format}"
+                    selected = dict(catalog.get(case_id, {}))
+                    profile = selected.get("profile")
+                    if profile is not None:
+                        capabilities.validate_sparse_overrides(profile.overrides)
+                    selected.setdefault("source_scenario", case_id)
+                    selected["os_priority"] = priority
+                    selected["network_audio_format"] = audio_format
+                    if args.network_audio_format != "pcm24":
+                        selected.setdefault("signal", "tone-440")
+                    plan.append((planned_id, case_id, selected))
         results = []
         for index, (planned_id, case_id, selected) in enumerate(plan):
             if case_id not in catalog: raise ValueError(f"unknown stress scenario: {case_id}")
@@ -436,6 +445,11 @@ def run(args: Any, repo: Path, invocation: InvocationArtifacts,
                 time.sleep(args.scenario_cooldown_s)
         write_results_csv(invocation.root / "results.csv", results)
         passed = all(case["status"] == "passed" for case in manifest.data["cases"])
+        if args.network_audio_format == "both":
+            comparison = write_format_comparison(invocation.root, results)
+            if passed and comparison.get("pair_count") != len(plan) // 2:
+                raise RuntimeError(
+                    "matched PCM16/PCM24 stress results did not produce every comparison pair")
         manifest.finish("passed" if passed else "failed", 0 if passed else 1,
                         profiles={name: capabilities.profile(name) for name in capabilities.profiles})
         return 0 if passed else 1

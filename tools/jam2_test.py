@@ -10,7 +10,7 @@ from jam2test.native import default_jam2
 
 def parser() -> argparse.ArgumentParser:
     root = Path(__file__).resolve().parents[1]
-    result = argparse.ArgumentParser(description="Jam2 validation, stress, benchmark, and connectivity tooling")
+    result = argparse.ArgumentParser(description="Jam2 validation, stress, benchmark, connectivity, and fuzz tooling")
     families = result.add_subparsers(dest="family", required=True)
 
     validate = families.add_parser("validate", help="run framework and deterministic product validation")
@@ -28,6 +28,8 @@ def parser() -> argparse.ArgumentParser:
     stress.add_argument("--profile", choices=("fast", "moderate", "safe", "all"), default="fast")
     stress.add_argument("--sample-rate", type=int, default=48000)
     stress.add_argument("--stream-ms", type=int, default=8000)
+    stress.add_argument("--network-audio-format", choices=("pcm16", "pcm24", "both"), default="pcm24",
+                        help="wire quality matrix; 'both' runs matched PCM16 and PCM24 cases")
     stress.add_argument("--headless-audio", action="store_true",
                         help="explicitly use deterministic synthetic audio (the default when devices are omitted)")
     stress.add_argument("--server-audio-device", type=int,
@@ -55,6 +57,8 @@ def parser() -> argparse.ArgumentParser:
         item.add_argument("--profile", choices=("fast", "moderate", "safe", "all"), default="all")
         item.add_argument("--sample-rate", type=int, default=48000)
         item.add_argument("--stream-ms", type=int, default=30000)
+        item.add_argument("--network-audio-format", choices=("pcm16", "pcm24", "both"), default="pcm24",
+                          help="coordinator case matrix; agent accepts the offered session format")
         item.add_argument("--case", action="append", default=[])
         item.add_argument("--repeats", type=int, default=1)
         item.add_argument("--signals", default="silence,tone-440,pulse-1s")
@@ -98,6 +102,18 @@ def parser() -> argparse.ArgumentParser:
     for item in (stun, direct):
         item.add_argument("--output", type=Path)
         item.add_argument("--clean", action="store_true")
+
+    fuzz = families.add_parser("fuzz", help="run bounded native parser mutation and corpus checks")
+    fuzz.add_argument("selection", choices=("all", "control", "udp", "asset", "wav"), nargs="?", default="all")
+    fuzz.add_argument("--jam2", type=Path, default=default_jam2(root))
+    fuzz.add_argument("--output", type=Path)
+    fuzz.add_argument("--clean", action="store_true")
+    fuzz.add_argument("--seed", type=int, default=1)
+    fuzz.add_argument("--iterations", type=int, default=32,
+                      help="bounded inputs per native target (1..10000)")
+    fuzz.add_argument("--input-timeout-s", type=float, default=2.0)
+    fuzz.add_argument("--total-timeout-s", type=float, default=180.0)
+    fuzz.add_argument("--max-input-bytes", type=int, default=64 * 1024)
     return result
 
 

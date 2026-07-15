@@ -2,23 +2,27 @@
 
 This file tracks future work that is not already implemented. User-facing documentation lives in `docs/`, with only `README.md` and this plan kept at the repository root. Completed refactor history, evidence, and supporting reviews live in [refactor-plan.md](refactor-plan.md) and its linked refactor documents.
 
-## Network Audio Format Experiments
+## Phase 12 Network and Asset Efficiency
 
-The current live UDP audio path uses mono PCM24 packets, while recording stems are written as PCM16 WAV files. A future tuning pass can add an explicit experimental PCM16 network mode to compare Wi-Fi behavior and audible quality against the current PCM24 default.
+The authoritative implementation and completion contract is Phase 12 in
+[refactor-plan.md](refactor-plan.md). It now owns creator-selected session-wide
+PCM16/PCM24 network quality, one compact replacement UDP layout with no retained
+compatibility parser, bounded authenticated binary asset chunks, matched
+benchmark/stress comparisons using non-silent audio, and the new bounded
+`jam2_test.py fuzz` command family. The completed refactor ownership boundaries
+remain mandatory.
 
-Goals:
+The implemented fuzzer is intentionally frozen at its useful bounded baseline
+for Phase 12. Its existing native control, UDP PCM16/PCM24, binary-asset and WAV
+targets and retained smoke evidence are sufficient; broader corpus/state-space
+coverage, sanitizers, OS-level memory sandboxing, and further fuzz campaigns are
+optional future work. Current completion work focuses on protocol correctness
+and matched stress/benchmark measurement.
 
-- Keep PCM24 as the default network format unless measurements show a clear reason to change it.
-- Add an explicit runtime option such as `--network-audio-format pcm24|pcm16`.
-- Measure whether PCM16's smaller packets reduce Wi-Fi burst impact, late packets, jitter-buffer drops, missing audio frames, playback underruns, or RTT spikes.
-- Check whether PCM16 causes any audible quality loss for direct instrument monitoring, metronome mixing, send-level changes, and recorded comparison runs.
-- Expose the active network format, bytes per sample, packet payload bytes, and estimated audio bitrate in machine-readable stats/CSV.
-
-Scope limits:
-
-- Do not add a codec framework, negotiation layer, compression, or automatic quality switching for the first experiment.
-- Keep packet parsing fixed-shape and allocation-light.
-- Require both peers to use the same explicit format for the experiment; fail clearly on mismatch rather than guessing.
+PCM24 stays the temporary default while both formats are measured and manually
+checked. Choosing the eventual product default is intentionally a later product
+decision, not a Phase 12 completion gate. Track/Looper assets and recordings
+remain on their existing PCM16 WAV paths regardless of network quality.
 
 ## Practice Ideas (Visual Only)
 

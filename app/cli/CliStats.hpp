@@ -57,8 +57,6 @@ struct UdpParseStats {
     std::uint64_t wrong_magic = 0;
     std::uint64_t wrong_version = 0;
     std::uint64_t unknown_type = 0;
-    std::uint64_t invalid_flags = 0;
-    std::uint64_t invalid_reserved = 0;
     std::uint64_t wrong_session = 0;
     std::uint64_t invalid_payload_size = 0;
     std::uint64_t authentication_failed = 0;
@@ -71,8 +69,6 @@ struct UdpParseStats {
         case jam2::protocol::ParseError::WrongMagic: ++wrong_magic; break;
         case jam2::protocol::ParseError::WrongVersion: ++wrong_version; break;
         case jam2::protocol::ParseError::UnknownType: ++unknown_type; break;
-        case jam2::protocol::ParseError::InvalidFlags: ++invalid_flags; break;
-        case jam2::protocol::ParseError::InvalidReserved: ++invalid_reserved; break;
         case jam2::protocol::ParseError::WrongSession: ++wrong_session; break;
         case jam2::protocol::ParseError::InvalidPayloadSize: ++invalid_payload_size; break;
         case jam2::protocol::ParseError::AuthenticationFailed: ++authentication_failed; break;
@@ -85,8 +81,6 @@ struct UdpParseStats {
         wrong_magic += other.wrong_magic;
         wrong_version += other.wrong_version;
         unknown_type += other.unknown_type;
-        invalid_flags += other.invalid_flags;
-        invalid_reserved += other.invalid_reserved;
         wrong_session += other.wrong_session;
         invalid_payload_size += other.invalid_payload_size;
         authentication_failed += other.authentication_failed;
@@ -94,8 +88,8 @@ struct UdpParseStats {
 
     std::uint64_t total() const
     {
-        return short_packet + wrong_magic + wrong_version + unknown_type + invalid_flags +
-            invalid_reserved + wrong_session + invalid_payload_size + authentication_failed;
+        return short_packet + wrong_magic + wrong_version + unknown_type + wrong_session +
+            invalid_payload_size + authentication_failed;
     }
 };
 
@@ -322,8 +316,8 @@ void copy_peer_mixer_stats(AudioPacketStats& target, const jam2::PeerMixerStats&
 double unit_from_ppm(int value);
 double frames_to_ms(std::size_t frames, double sample_rate);
 double signed_frames_to_ms(std::int64_t frames, double sample_rate);
-std::size_t audio_payload_bytes(int frame_size);
-std::size_t audio_packet_bytes(int frame_size);
+std::size_t audio_payload_bytes(int frame_size, jam2::NetworkAudioFormat format);
+std::size_t audio_packet_bytes(int frame_size, jam2::NetworkAudioFormat format);
 std::string platform_name();
 std::string csv_escape(std::string_view value);
 void append_os_scheduling_csv(std::ostream& out, const OsSchedulingStatus& status);
@@ -519,8 +513,8 @@ public:
                 "prepared_source_underruns,prepared_source_busy_events,"
                 "playback_drop_requested_frames,playback_drop_applied_frames,playback_drop_coalesced_requests,"
                 "playback_drop_pending_frames,playback_drop_max_batch_frames,"
-                "udp_short_packets,udp_wrong_magic,udp_wrong_version,udp_unknown_type,udp_invalid_flags,"
-                "udp_invalid_reserved,udp_wrong_session,udp_invalid_payload_size,udp_authentication_failed,"
+                "udp_short_packets,udp_wrong_magic,udp_wrong_version,udp_unknown_type,"
+                "udp_wrong_session,udp_invalid_payload_size,udp_authentication_failed,"
                 "udp_replay_rejects,udp_forward_gap_rejects,udp_forward_gap_resyncs,udp_sequence_ambiguous_rejects,"
                 "udp_sample_time_stale_rejects,udp_sample_time_future_rejects,udp_unmatched_pongs,"
                 "udp_ping_slot_overwrites,udp_work_budget_yields,reorder_pending_high_water,reorder_capacity_drops,"
@@ -544,7 +538,9 @@ public:
                 "transport_source_peer_id,transport_event_counter,transport_grid_revision,"
                 "transport_events_accepted,transport_events_rejected,leader_audio_source_peer_id,"
                 "leader_audio_injected_packets,transport_source_frame,transport_requested_target_frame,"
-                "transport_applied_target_frame,transport_action,udp_receive_batch_max\n";
+                "transport_applied_target_frame,transport_action,udp_receive_batch_max,"
+                "network_audio_bytes_per_sample,udp_header_bytes,audio_payload_bytes,audio_packet_bytes,"
+                "send_packet_rate_pps,recv_packet_rate_pps\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -563,6 +559,10 @@ public:
         const double seconds = elapsed_ms > 0 ? static_cast<double>(elapsed_ms) / 1000.0 : 0.0;
         const double send_bitrate = seconds > 0.0 ? (static_cast<double>(stats.sent_bytes) * 8.0 / seconds) : 0.0;
         const double recv_bitrate = seconds > 0.0 ? (static_cast<double>(stats.recv_bytes) * 8.0 / seconds) : 0.0;
+        const double send_packet_rate = seconds > 0.0
+            ? static_cast<double>(stats.sent_packets) / seconds : 0.0;
+        const double recv_packet_rate = seconds > 0.0
+            ? static_cast<double>(stats.recv_packets) / seconds : 0.0;
         const double jitter_min_ms = stats.jitter_samples > 0 ? static_cast<double>(stats.jitter_min_us) / 1000.0 : 0.0;
         const double jitter_avg_ms = stats.jitter_samples > 0 ?
             static_cast<double>(stats.jitter_sum_us) / static_cast<double>(stats.jitter_samples) / 1000.0 :
@@ -836,8 +836,6 @@ public:
              << stats.udp_parse.wrong_magic << ','
              << stats.udp_parse.wrong_version << ','
              << stats.udp_parse.unknown_type << ','
-             << stats.udp_parse.invalid_flags << ','
-             << stats.udp_parse.invalid_reserved << ','
              << stats.udp_parse.wrong_session << ','
              << stats.udp_parse.invalid_payload_size << ','
              << stats.udp_parse.authentication_failed << ','
@@ -919,7 +917,13 @@ public:
              << stats.transport_requested_target_frame << ','
              << stats.transport_applied_target_frame << ','
              << stats.transport_action << ','
-             << stats.udp_receive_batch_max;
+             << stats.udp_receive_batch_max << ','
+             << jam2::protocol::audio_bytes_per_sample(options.network_audio_format) << ','
+             << jam2::protocol::kHeaderSize << ','
+             << audio_payload_bytes(options.frame_size, options.network_audio_format) << ','
+             << audio_packet_bytes(options.frame_size, options.network_audio_format) << ','
+             << send_packet_rate << ','
+             << recv_packet_rate;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -935,7 +939,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(347);
+        std::vector<std::string> fields(351);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1159,90 +1163,94 @@ public:
         set(260, stats.udp_parse.wrong_magic);
         set(261, stats.udp_parse.wrong_version);
         set(262, stats.udp_parse.unknown_type);
-        set(263, stats.udp_parse.invalid_flags);
-        set(264, stats.udp_parse.invalid_reserved);
-        set(265, stats.udp_parse.wrong_session);
-        set(266, stats.udp_parse.invalid_payload_size);
-        set(267, stats.udp_parse.authentication_failed);
-        set(268, stats.udp_replay_rejects);
-        set(269, stats.udp_forward_gap_rejects);
-        set(270, stats.udp_forward_gap_resyncs);
-        set(271, stats.udp_sequence_ambiguous_rejects);
-        set(272, stats.udp_sample_time_stale_rejects);
-        set(273, stats.udp_sample_time_future_rejects);
-        set(274, stats.udp_unmatched_pongs);
-        set(275, stats.udp_ping_slot_overwrites);
-        set(276, stats.udp_work_budget_yields);
-        set(277, stats.reorder_pending_high_water);
-        set(278, stats.reorder_capacity_drops);
-        set(279, stats.jitter_pending_high_water);
-        set(280, stats.jitter_capacity_drops);
-        set(281, stats.jitter_buffer_forced_releases);
-        fields[282] = audio.network_capture_enabled ? "yes" : "no";
-        fields[283] = audio.network_capture_ready ? "yes" : "no";
-        set(284, audio.network_capture_generation);
-        set(285, audio.network_capture_epoch_frame);
-        set(286, audio.network_capture_stale_frames_discarded);
-        fields[287] = audio.network_playback_enabled ? "yes" : "no";
-        set(288, stats.local_peer_id);
-        set(289, stats.remote_peer_id);
-        fields[290] = stats.bootstrap_role;
-        set(291, stats.session_protocol_version);
-        fields[292] = stats.session_audio_format;
-        set(293, stats.session_sample_rate);
-        set(294, stats.session_frames_per_packet);
-        set(295, stats.network_peer_count);
-        set(296, stats.network_active_peer_count);
-        set(297, stats.mix_contributing_peers);
-        set(298, stats.mix_active_slots);
-        set(299, stats.mix_max_slots);
-        set(300, stats.mix_active_slots_high_water);
-        set(301, stats.mix_released_slots);
-        set(302, stats.mix_complete_slots);
-        set(303, stats.mix_deadline_slots);
-        set(304, stats.mix_missing_peer_contributions);
-        set(305, stats.mix_missing_peer_frames);
-        set(306, stats.mix_late_after_release_frames);
-        set(307, stats.mix_capacity_drops);
-        set(308, stats.mix_capacity_dropped_frames);
-        set(309, stats.mix_clipped_samples);
-        set(310, stats.mix_output_frames);
-        set(311, stats.mix_output_drop_requested_frames);
-        set(312, stats.mix_output_drop_request_events);
-        set(313, stats.mix_output_dropped_frames);
-        set(314, stats.mix_work_budget_yields);
-        set(315, stats.bootstrap_coordinator_peer_id);
-        set(316, stats.arrangement_authority_peer_id);
-        set(317, stats.grid_authority_peer_id);
-        set(318, stats.grid_revision);
-        set(319, stats.grid_run_state);
-        set(320, stats.grid_mode);
-        set(321, stats.grid_authority_epoch_frame);
-        set(322, stats.grid_mapped_epoch_frame);
-        set(323, stats.grid_authority_packet_frame);
-        set(324, stats.grid_mapping_error_frames);
-        set(325, stats.grid_proposals_sent);
-        set(326, stats.grid_proposals_accepted);
-        set(327, stats.grid_proposals_rejected);
-        set(328, stats.grid_assignments_sent);
-        set(329, stats.grid_assignments_accepted);
-        set(330, stats.grid_assignments_rejected);
-        set(331, stats.grid_authority_states_sent);
-        set(332, stats.grid_authority_states_accepted);
-        set(333, stats.grid_authority_states_rejected);
-        set(334, stats.grid_authority_missing_events);
-        set(335, stats.transport_source_peer_id);
-        set(336, stats.transport_event_counter);
-        set(337, stats.transport_grid_revision);
-        set(338, stats.transport_events_accepted);
-        set(339, stats.transport_events_rejected);
-        set(340, stats.leader_audio_source_peer_id);
-        set(341, stats.leader_audio_injected_packets);
-        set(342, stats.transport_source_frame);
-        set(343, stats.transport_requested_target_frame);
-        set(344, stats.transport_applied_target_frame);
-        set(345, stats.transport_action);
-        set(346, stats.udp_receive_batch_max);
+        set(263, stats.udp_parse.wrong_session);
+        set(264, stats.udp_parse.invalid_payload_size);
+        set(265, stats.udp_parse.authentication_failed);
+        set(266, stats.udp_replay_rejects);
+        set(267, stats.udp_forward_gap_rejects);
+        set(268, stats.udp_forward_gap_resyncs);
+        set(269, stats.udp_sequence_ambiguous_rejects);
+        set(270, stats.udp_sample_time_stale_rejects);
+        set(271, stats.udp_sample_time_future_rejects);
+        set(272, stats.udp_unmatched_pongs);
+        set(273, stats.udp_ping_slot_overwrites);
+        set(274, stats.udp_work_budget_yields);
+        set(275, stats.reorder_pending_high_water);
+        set(276, stats.reorder_capacity_drops);
+        set(277, stats.jitter_pending_high_water);
+        set(278, stats.jitter_capacity_drops);
+        set(279, stats.jitter_buffer_forced_releases);
+        fields[280] = audio.network_capture_enabled ? "yes" : "no";
+        fields[281] = audio.network_capture_ready ? "yes" : "no";
+        set(282, audio.network_capture_generation);
+        set(283, audio.network_capture_epoch_frame);
+        set(284, audio.network_capture_stale_frames_discarded);
+        fields[285] = audio.network_playback_enabled ? "yes" : "no";
+        set(286, stats.local_peer_id);
+        set(287, stats.remote_peer_id);
+        fields[288] = stats.bootstrap_role;
+        set(289, stats.session_protocol_version);
+        fields[290] = stats.session_audio_format;
+        set(291, stats.session_sample_rate);
+        set(292, stats.session_frames_per_packet);
+        set(293, stats.network_peer_count);
+        set(294, stats.network_active_peer_count);
+        set(295, stats.mix_contributing_peers);
+        set(296, stats.mix_active_slots);
+        set(297, stats.mix_max_slots);
+        set(298, stats.mix_active_slots_high_water);
+        set(299, stats.mix_released_slots);
+        set(300, stats.mix_complete_slots);
+        set(301, stats.mix_deadline_slots);
+        set(302, stats.mix_missing_peer_contributions);
+        set(303, stats.mix_missing_peer_frames);
+        set(304, stats.mix_late_after_release_frames);
+        set(305, stats.mix_capacity_drops);
+        set(306, stats.mix_capacity_dropped_frames);
+        set(307, stats.mix_clipped_samples);
+        set(308, stats.mix_output_frames);
+        set(309, stats.mix_output_drop_requested_frames);
+        set(310, stats.mix_output_drop_request_events);
+        set(311, stats.mix_output_dropped_frames);
+        set(312, stats.mix_work_budget_yields);
+        set(313, stats.bootstrap_coordinator_peer_id);
+        set(314, stats.arrangement_authority_peer_id);
+        set(315, stats.grid_authority_peer_id);
+        set(316, stats.grid_revision);
+        set(317, stats.grid_run_state);
+        set(318, stats.grid_mode);
+        set(319, stats.grid_authority_epoch_frame);
+        set(320, stats.grid_mapped_epoch_frame);
+        set(321, stats.grid_authority_packet_frame);
+        set(322, stats.grid_mapping_error_frames);
+        set(323, stats.grid_proposals_sent);
+        set(324, stats.grid_proposals_accepted);
+        set(325, stats.grid_proposals_rejected);
+        set(326, stats.grid_assignments_sent);
+        set(327, stats.grid_assignments_accepted);
+        set(328, stats.grid_assignments_rejected);
+        set(329, stats.grid_authority_states_sent);
+        set(330, stats.grid_authority_states_accepted);
+        set(331, stats.grid_authority_states_rejected);
+        set(332, stats.grid_authority_missing_events);
+        set(333, stats.transport_source_peer_id);
+        set(334, stats.transport_event_counter);
+        set(335, stats.transport_grid_revision);
+        set(336, stats.transport_events_accepted);
+        set(337, stats.transport_events_rejected);
+        set(338, stats.leader_audio_source_peer_id);
+        set(339, stats.leader_audio_injected_packets);
+        set(340, stats.transport_source_frame);
+        set(341, stats.transport_requested_target_frame);
+        set(342, stats.transport_applied_target_frame);
+        set(343, stats.transport_action);
+        set(344, stats.udp_receive_batch_max);
+        set(345, jam2::protocol::audio_bytes_per_sample(options.network_audio_format));
+        set(346, jam2::protocol::kHeaderSize);
+        set(347, audio_payload_bytes(options.frame_size, options.network_audio_format));
+        set(348, audio_packet_bytes(options.frame_size, options.network_audio_format));
+        set(349, seconds > 0.0 ? static_cast<double>(stats.sent_packets) / seconds : 0.0);
+        set(350, seconds > 0.0 ? static_cast<double>(stats.recv_packets) / seconds : 0.0);
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {

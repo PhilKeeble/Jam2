@@ -115,6 +115,7 @@ Audio and engine options:
   --sample-rate <hz>                   Device/session sample rate
   --audio-buffer-size <frames>         Requested audio callback size
   --frame-size <32|64|128|256>         Audio frames per UDP packet
+  --network-audio-format <pcm16|pcm24>  Session wire quality (default: pcm24)
   --input-channels <1,2,...>           One-based input channels mixed to mono
   --output-channels <1,2,...>          One-based outputs receiving mono playback
   --capture-ring-frames <frames>       Capture ring capacity
@@ -570,6 +571,13 @@ Options parse_options(int argc, char** argv, int start)
                 options.frame_size != 256) {
                 throw std::runtime_error("--frame-size must be 32, 64, 128, or 256");
             }
+        } else if (arg == "--network-audio-format") {
+            const auto parsed = jam2::protocol::parse_audio_format(
+                require_value(argc, argv, i, arg));
+            if (!parsed) {
+                throw std::runtime_error("--network-audio-format must be pcm16 or pcm24");
+            }
+            options.network_audio_format = *parsed;
         } else if (arg == "--drift-correction") {
             const std::string value{require_value(argc, argv, i, arg)};
             if (value == "on") {

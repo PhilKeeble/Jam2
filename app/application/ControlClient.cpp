@@ -141,6 +141,19 @@ bool ControlClient::send(const QJsonObject& message)
     return false;
 }
 
+bool ControlClient::sendBinary(const QByteArray& payload)
+{
+    if (!isConnected()) {
+        return false;
+    }
+    const QByteArray frame = encodeAuthenticatedBinary(payload, sendKey_, sendSequence_);
+    if (!frame.isEmpty() && writeFrame(frame)) {
+        ++sendSequence_;
+        return true;
+    }
+    return false;
+}
+
 bool ControlClient::canQueue(qint64 additionalBytes) const
 {
     return isConnected() && additionalBytes >= 0 && additionalBytes <= kOutputHighWaterBytes &&
@@ -199,7 +212,8 @@ void ControlClient::readSocket()
                 return;
             }
         } else {
-            if (!decodeAuthenticated(body, receiveKey_, receiveSequence_, message, error)) {
+            AuthenticatedPayload payload;
+            if (!decodeAuthenticated(body, receiveKey_, receiveSequence_, payload, error)) {
                 ++stats_.sequenceOrTagRejects;
                 reject(
                     QStringLiteral("TCP control authenticated frame rejected: ") + error,
@@ -208,8 +222,12 @@ void ControlClient::readSocket()
                 return;
             }
             ++receiveSequence_;
-            if (onMessage) {
-                onMessage(message);
+            if (payload.type == AuthenticatedPayloadType::Json) {
+                if (onMessage) {
+                    onMessage(payload.message);
+                }
+            } else if (onBinaryMessage) {
+                onBinaryMessage(payload.binary);
             }
         }
     }
@@ -238,7 +256,7 @@ void ControlClient::handleHandshake(const QJsonObject& message)
     if (handshakeState_ == HandshakeState::WaitingForChallenge) {
         serverNonce_ = decodeHex(message.value(QStringLiteral("server_nonce")).toString(), 16);
         if (type != QStringLiteral("hello.challenge") ||
-            message.value(QStringLiteral("version")).toInt() != 1 ||
+            message.value(QStringLiteral("version")).toInt() != kControlProtocolVersion ||
             message.value(QStringLiteral("session")).toString().toLower() != sessionHex_ ||
             serverNonce_.size() != 16) {
             ++stats_.authenticationRejects;
@@ -261,7 +279,7 @@ void ControlClient::handleHandshake(const QJsonObject& message)
             transcript_).left(16);
         const QByteArray response = encodeHandshake(QJsonObject{
             {QStringLiteral("type"), QStringLiteral("hello.proof")},
-            {QStringLiteral("version"), 1},
+            {QStringLiteral("version"), kControlProtocolVersion},
             {QStringLiteral("session"), sessionHex_},
             {QStringLiteral("client_nonce"), encodeHex(clientNonce_)},
             {QStringLiteral("peer_token"), meshPeerToken_},
@@ -281,7 +299,7 @@ void ControlClient::handleHandshake(const QJsonObject& message)
 
     if (handshakeState_ != HandshakeState::WaitingForServerProof ||
         type != QStringLiteral("hello.ok") ||
-        message.value(QStringLiteral("version")).toInt() != 1 ||
+        message.value(QStringLiteral("version")).toInt() != kControlProtocolVersion ||
         message.value(QStringLiteral("peer_token")).toString() != meshPeerToken_) {
         ++stats_.authenticationRejects;
         reject(

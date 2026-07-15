@@ -17,6 +17,16 @@ audio. A short two-peer smoke is:
 python tools\jam2_test.py stress --headless-audio --profile fast --scenario clean-control --scenario duplicate-2.0 --sample-rate 48000 --stream-ms 8000 --clean
 ```
 
+For a matched non-silent PCM comparison, add
+`--network-audio-format both`. Each selected base scenario runs once as PCM16
+and once as PCM24 under the same native profile, duration, impairment, and
+seed-derived plan. A format case fails if the native session silently uses the
+other format or bidirectional audio packets are absent.
+
+```powershell
+python tools\jam2_test.py stress --headless-audio --profile fast --network-audio-format both --scenario clean-control --scenario jitter-20 --scenario loss-0.5 --scenario reorder-small --sample-rate 48000 --stream-ms 5000
+```
+
 The bare command runs the complete standard two-peer catalog for one profile,
 which is intentionally much longer:
 
@@ -174,6 +184,8 @@ Important files are:
 - `invocation-manifest.json`: arguments, native profile descriptions, case
   states, and bounded artifact inventory;
 - `results.csv`: flattened comparison data across selected cases;
+- `format-comparison.json` and `format-comparison.csv`: paired raw/delta/
+  percentage measurements when `--network-audio-format both` is selected;
 - `cases/<case>/result.json`: scenario verdict, raw proxy counters, technical
   measurements, and failures/observations;
 - `cases/<case>/peer-N/`: scenario, native manifest, stdout/stderr, CSV, and any
@@ -185,6 +197,12 @@ Two-peer results normally separate `protocol_verdict`, `duration_verdict`, and
 not that the audio was subjectively good. Raw loss, jitter, RTT, queue,
 underrun, drift, callback, grid, transport, and proxy measurements remain the
 primary evidence.
+
+The paired report includes exact header/payload/packet bytes, packet and byte
+flow, bitrate, native process CPU, callback timing, jitter, RTT, loss/reorder/
+late/missing/drop/underrun, drift, mix, and recorded-WAV measurements when the
+selected scenario produces recording analysis. Short CPU differences are
+reported as raw data and are not treated as a recommendation.
 
 Exit code `0` means all selected cases passed or produced their expected
 impairment. Exit code `1` means a case verdict failed. Exit code `2` means the

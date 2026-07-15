@@ -15,6 +15,7 @@ FAMILY_DIRS = {
     "stress": "stress_logs",
     "benchmark": "benchmark_logs",
     "connectivity": "connectivity_logs",
+    "fuzz": "fuzz_logs",
 }
 
 # Native CSV/recording writers still pass through Windows APIs with the

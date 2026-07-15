@@ -1,6 +1,6 @@
 """Fixed-shape Jam2 UDP helpers for retained validation injections."""
 
-"""Independent Jam2 UDP v1 fixtures for black-box validation tools.
+"""Independent Jam2 UDP v2 fixtures for black-box validation tools.
 
 This module intentionally does not share code with the C++ codec.  It is used
 only by Python validators that observe or inject packets through real Jam2 UDP
@@ -14,12 +14,11 @@ from urllib.parse import parse_qs, urlparse
 
 
 MAGIC = 0x324D414A
-VERSION = 1
-HEADER_SIZE = 48
-AUTH_TAG_OFFSET = 38
+VERSION = 2
+HEADER_SIZE = 36
+AUTH_TAG_OFFSET = 28
 AUTH_TAG_SIZE = 8
-RESERVED_OFFSET = 46
-_HEADER = struct.Struct("<IBBHQIQQHQH")
+_HEADER = struct.Struct("<IBBHQIQQ")
 _MASK64 = (1 << 64) - 1
 
 
@@ -37,14 +36,11 @@ class PacketType:
 @dataclass(frozen=True)
 class PacketHeader:
     packet_type: int
-    flags: int = 0
     session_id: int = 0
     sequence: int = 0
-    sample_time: int = 0
-    send_time_us: int = 0
+    timing_value: int = 0
     payload_length: int = 0
     auth_tag: int = 0
-    reserved: int = 0
     magic: int = MAGIC
     version: int = VERSION
 
@@ -62,7 +58,7 @@ def _rotl64(value, bits):
 
 
 def siphash24(data, key):
-    """Return the SipHash-2-4 value used by the production UDP v1 codec."""
+    """Return the SipHash-2-4 value used by the production UDP v2 codec."""
     data = bytes(data)
     key = bytes(key)
     if len(key) != 16:
@@ -113,20 +109,17 @@ def siphash24(data, key):
 def parse_header(packet):
     packet = bytes(packet)
     if len(packet) < HEADER_SIZE:
-        raise ValueError("packet is shorter than the fixed UDP v1 header")
+        raise ValueError("packet is shorter than the fixed UDP v2 header")
     fields = _HEADER.unpack_from(packet)
     return PacketHeader(
         magic=fields[0],
         version=fields[1],
         packet_type=fields[2],
-        flags=fields[3],
+        payload_length=fields[3],
         session_id=fields[4],
         sequence=fields[5],
-        sample_time=fields[6],
-        send_time_us=fields[7],
-        payload_length=fields[8],
-        auth_tag=fields[9],
-        reserved=fields[10],
+        timing_value=fields[6],
+        auth_tag=fields[7],
     )
 
 
@@ -134,20 +127,17 @@ def encode_packet(header, payload, key):
     payload = bytes(payload)
     key = bytes(key)
     if len(payload) > 0xFFFF:
-        raise ValueError("payload is too large for UDP v1")
+        raise ValueError("payload is too large for UDP v2")
     unsigned_header = replace(header, payload_length=len(payload), auth_tag=0)
     packet = bytearray(_HEADER.pack(
         unsigned_header.magic,
         unsigned_header.version,
         unsigned_header.packet_type,
-        unsigned_header.flags,
+        unsigned_header.payload_length,
         unsigned_header.session_id,
         unsigned_header.sequence & 0xFFFFFFFF,
-        unsigned_header.sample_time,
-        unsigned_header.send_time_us,
-        unsigned_header.payload_length,
+        unsigned_header.timing_value,
         0,
-        unsigned_header.reserved,
     ))
     packet.extend(payload)
     struct.pack_into("<Q", packet, AUTH_TAG_OFFSET, siphash24(packet, key))
@@ -174,7 +164,7 @@ def verify_packet(packet, key, expected_session_id=None):
 
 
 def resign_packet(packet, key, **changes):
-    """Apply header changes and recompute the UDP v1 tag without changing payload."""
+    """Apply header changes and recompute the UDP v2 tag without changing payload."""
     packet = bytes(packet)
     header = parse_header(packet)
     payload = packet[HEADER_SIZE:]

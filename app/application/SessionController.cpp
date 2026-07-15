@@ -1109,6 +1109,14 @@ private:
             : jam2::SessionBootstrapRole::Joiner;
         options.local_peer_id = peerIdForToken(snapshot.localToken);
         options.bootstrap_coordinator_peer_id = peerIdForToken(snapshot.coordinatorToken);
+        options.sample_rate = snapshot.contract.sampleRate;
+        options.frame_size = snapshot.contract.frameSize;
+        const auto audioFormat = jam2::protocol::parse_audio_format(
+            snapshot.contract.audioFormat.toStdString());
+        if (!audioFormat) {
+            throw std::runtime_error("session contract has an unsupported network audio format");
+        }
+        options.network_audio_format = *audioFormat;
         options.arm_stream_on_first_peer = true;
         options.mesh_peers.clear();
         options.mesh_peer_ids.clear();
@@ -1161,8 +1169,8 @@ private:
             advertisedText,
             sessionPeerLimit_,
             SharedSessionController::SessionContract{
-                1,
-                QStringLiteral("pcm24-mono"),
+                jam2::protocol::kProtocolVersion,
+                QString::fromLatin1(jam2::protocol::audio_format_text(runtimeOptions_.network_audio_format)),
                 requestedContract_.profile,
                 requestedContract_.sampleRate,
                 requestedContract_.frameSize,
@@ -1245,13 +1253,13 @@ private:
             localToken_,
             localEndpointText_,
             SharedSessionController::SessionContract{
-                1,
-                QStringLiteral("pcm24-mono"),
+                jam2::protocol::kProtocolVersion,
+                QString(),
                 requestedContract_.profile,
                 requestedContract_.sampleRate,
                 requestedContract_.frameSize,
             },
-            true,
+            false,
         };
         controlConfig.heartbeatIntervalMs = debugNetwork_
             .value(QStringLiteral("heartbeat_interval_ms"))

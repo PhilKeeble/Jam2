@@ -182,6 +182,7 @@ private:
     void requestNextPendingTrackAsset();
     void applyPendingTrackContributions();
     bool sendControlTo(const QString& targetPeerToken, const QJsonObject& message);
+    bool sendBinaryControlTo(const QString& targetPeerToken, const QByteArray& payload);
     bool canQueueControlTo(const QString& targetPeerToken, qint64 estimatedBytes) const;
     void handleSongSet(const QJsonObject& message, const QString& sourcePeerToken);
     void handleTrackReady(const QJsonObject& message, const QString& sourcePeerToken);
@@ -258,6 +259,7 @@ private:
     QSpinBox* sampleRateSpin_ = nullptr;
     QSpinBox* bufferSizeSpin_ = nullptr;
     QSpinBox* frameSizeSpin_ = nullptr;
+    QComboBox* networkAudioFormatBox_ = nullptr;
     QSpinBox* prefillSpin_ = nullptr;
     QSpinBox* playbackMaxSpin_ = nullptr;
     QSpinBox* captureRingSpin_ = nullptr;

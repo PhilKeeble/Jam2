@@ -1,0 +1,82 @@
+{
+  "accepted": 22,
+  "arguments": [
+    "fuzz",
+    "all",
+    "--jam2",
+    "release\\jam2.exe",
+    "--iterations",
+    "8",
+    "--seed",
+    "12012",
+    "--total-timeout-s",
+    "120"
+  ],
+  "artifact_inventory": {
+    "max_files": 4096,
+    "max_hashed_bytes": 1073741824,
+    "truncated_files": 0
+  },
+  "artifacts": [
+    {
+      "bytes": 19173,
+      "owner": "python-invocation",
+      "path": "fuzz-results.json",
+      "sha256": "a260f986901aa612b07c72adfa66267e45d8af1d5237945b3594ba8dbe0bb96f"
+    }
+  ],
+  "cases": [
+    {
+      "derived_seed": 11400714819323210497,
+      "id": "control",
+      "iterations": 8,
+      "status": "passed"
+    },
+    {
+      "derived_seed": 4354685564936857366,
+      "id": "udp-pcm16",
+      "iterations": 8,
+      "status": "passed"
+    },
+    {
+      "derived_seed": 15755400384260055851,
+      "id": "udp-pcm24",
+      "iterations": 8,
+      "status": "passed"
+    },
+    {
+      "derived_seed": 8709371129873702720,
+      "id": "asset",
+      "iterations": 8,
+      "status": "passed"
+    },
+    {
+      "derived_seed": 1663341875487349589,
+      "id": "wav",
+      "iterations": 8,
+      "status": "passed"
+    }
+  ],
+  "failures": 0,
+  "family": "fuzz",
+  "finished_utc": "2026-07-15T20:43:15.566Z",
+  "invocation_id": "20260715T204314Z_617a8d84",
+  "machine": {
+    "hostname": "DESKTOP-EUDTLFT",
+    "id": "desktop-eudtlft",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "python": "3.10.11 (tags/v3.10.11:7d4cc5a, Apr  5 2023, 00:38:17) [MSC v.1929 64 bit (AMD64)]"
+  },
+  "master_seed": 12012,
+  "native_protocols": {
+    "control": 2,
+    "udp": 2
+  },
+  "omissions": [],
+  "rejected": 18,
+  "return_code": 0,
+  "schema": "jam2-test-invocation",
+  "started_utc": "2026-07-15T20:43:14.952Z",
+  "state": "passed",
+  "total_inputs": 40
+}

@@ -1,5 +1,6 @@
 #include "ControlMessageValidation.hpp"
 #include "ContentLimits.hpp"
+#include "protocol.hpp"
 
 #include <QJsonArray>
 #include <QJsonValue>
@@ -288,7 +289,6 @@ bool jam2::application::isTrackSyncControlMessageType(const QString& type) noexc
         type == QStringLiteral("looper.recording.offer") ||
         type == QStringLiteral("looper.asset.request") ||
         type == QStringLiteral("looper.asset.start") ||
-        type == QStringLiteral("looper.asset.chunk") ||
         type == QStringLiteral("looper.asset.done");
 }
 
@@ -350,8 +350,12 @@ bool jam2::application::validateControlMessage(
     }
     if (type == QStringLiteral("session.contract")) {
         static const QRegularExpression tokenExpression(QStringLiteral("^[0-9a-f]{32}$"));
-        return isBoundedInteger(message.value(QStringLiteral("protocol_version")), 1, 1) &&
-            message.value(QStringLiteral("audio_format")).toString() == QStringLiteral("pcm24-mono") &&
+        return isBoundedInteger(
+                   message.value(QStringLiteral("protocol_version")),
+                   jam2::protocol::kProtocolVersion,
+                   jam2::protocol::kProtocolVersion) &&
+            jam2::protocol::parse_audio_format(
+                message.value(QStringLiteral("audio_format")).toString().toStdString()).has_value() &&
             isBoundedString(message.value(QStringLiteral("profile")), 128) &&
             isBoundedInteger(message.value(QStringLiteral("sample_rate")),
                 limits::kMinimumSampleRate, limits::kMaximumSampleRate) &&
@@ -500,26 +504,15 @@ bool jam2::application::validateControlMessage(
         return isSha256Hex(message.value(QStringLiteral("sha256")).toString().toLower()) &&
             isBoundedInteger(message.value(QStringLiteral("file_bytes")), 44,
                 limits::kMaximumAssetBytes) &&
-            isBoundedInteger(message.value(QStringLiteral("chunk_size")), 1,
+            isBoundedInteger(message.value(QStringLiteral("chunk_size")),
+                limits::kMaximumAssetChunkBytes,
                 limits::kMaximumAssetChunkBytes)
             ? true : (reason = QStringLiteral("asset start is invalid"), false);
     }
-    if (type == QStringLiteral("looper.asset.chunk")) {
-        static const QRegularExpression base64Expression(QStringLiteral("^[A-Za-z0-9+/]*={0,2}$"));
-        const QString data = message.value(QStringLiteral("data")).toString();
-        return isSha256Hex(message.value(QStringLiteral("sha256")).toString().toLower()) &&
-            isBoundedInteger(message.value(QStringLiteral("index")), 0,
-                (std::numeric_limits<int>::max)()) &&
-            !data.isEmpty() &&
-            data.size() <= limits::kMaximumEncodedAssetChunkCharacters &&
-            data.size() % 4 == 0 &&
-            base64Expression.match(data).hasMatch()
-            ? true : (reason = QStringLiteral("asset chunk is invalid"), false);
-    }
     if (type == QStringLiteral("looper.asset.done")) {
         return isSha256Hex(message.value(QStringLiteral("sha256")).toString().toLower()) &&
-            isBoundedInteger(message.value(QStringLiteral("chunks")), 0,
-                (std::numeric_limits<int>::max)())
+            isBoundedInteger(message.value(QStringLiteral("chunks")), 1,
+                limits::kMaximumAssetChunks)
             ? true : (reason = QStringLiteral("asset completion is invalid"), false);
     }
     if (type == QStringLiteral("debug.lifecycle.disconnect")) {

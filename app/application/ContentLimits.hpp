@@ -24,6 +24,7 @@ inline constexpr int kMaximumLooperPathCharacters = 4096;
 inline constexpr qint64 kMaximumAssetBytes = 512LL * 1024LL * 1024LL;
 inline constexpr int kMaximumAssetRequests = 64;
 inline constexpr int kMaximumAssetChunkBytes = 24 * 1024;
-inline constexpr int kMaximumEncodedAssetChunkCharacters = 32 * 1024;
+inline constexpr int kMaximumAssetChunks = static_cast<int>(
+    (kMaximumAssetBytes + kMaximumAssetChunkBytes - 1) / kMaximumAssetChunkBytes);
 
 } // namespace jam2::application::limits

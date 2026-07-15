@@ -15,12 +15,8 @@
 
 namespace jam2 {
 
-enum class NetworkAudioFormat : std::uint8_t {
-    Pcm24Mono = 1,
-};
-
 struct NetworkSessionContract {
-    std::uint8_t protocol_version = 1;
+    std::uint8_t protocol_version = protocol::kProtocolVersion;
     NetworkAudioFormat audio_format = NetworkAudioFormat::Pcm24Mono;
     int sample_rate = 48000;
     int frames_per_packet = 128;
@@ -191,21 +187,18 @@ public:
     std::size_t send(
         protocol::PacketType type,
         std::uint32_t sequence,
-        std::uint64_t sample_time,
-        std::uint64_t send_time_us,
+        std::uint64_t timing_value,
         std::span<const std::uint8_t> payload);
     NetworkSendResult sendToActive(
         protocol::PacketType type,
         std::uint32_t sequence,
-        std::uint64_t sample_time,
-        std::uint64_t send_time_us,
+        std::uint64_t timing_value,
         std::span<const std::uint8_t> payload);
     std::size_t sendToPeer(
         PeerId peer_id,
         protocol::PacketType type,
         std::uint32_t sequence,
-        std::uint64_t sample_time,
-        std::uint64_t send_time_us,
+        std::uint64_t timing_value,
         std::span<const std::uint8_t> payload,
         bool allow_inactive = false);
     std::optional<NetworkDatagram> receiveFor(std::uint64_t timeout_us);

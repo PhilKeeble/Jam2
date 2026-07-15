@@ -26,10 +26,11 @@ remain in:
   focused manual checks for behavior that Python cannot judge usefully.
 - Keep exact commands under the phase after they are run so the scenarios and
   saved artifacts remain available for historical regression comparisons.
-  Device stress uses IDs `5` and `16` at 44100 Hz. Refactor artifacts use
-  top-level folders such as `tools\stress_logs_phase2_udp` or
-  `tools\stress_logs_phase2_mesh`, never subfolders of the normal
-  `tools\stress_logs` directory.
+  Device stress uses IDs `5` and `16` at 44100 Hz where those machine-local
+  identifiers still apply. The refactored dispatcher owns the canonical
+  `tools/<family>_logs/<invocation-id>` roots. Leave `--output` unset normally;
+  use an explicit short parent only when isolation or Windows path preflight
+  requires it, and do not invent phase-specific artifact families.
 - Compile from the repository root with
   `cmd.exe /d /c "call compile.cmd --in-dev-shell"`. Inspect the exit code,
   compiler output, relevant stress results, and historical logs before deciding
@@ -40,8 +41,10 @@ remain in:
   new exhaustive baseline before correcting known defects.
 - Do not add CMake/CTest test scaffolding. Python is the primary process-level
   validation, impairment, measurement, and artifact-analysis layer.
-- Keep UDP v1 bytes, PCM24, packet cadence, and configured latency behavior
-  stable until the optional protocol-experiment phase.
+- Keep the existing UDP bytes, PCM24 payloads, packet cadence, and configured
+  latency behavior stable until Phase 12 begins. Phase 12 replaces the wire
+  format once, without a retained compatibility implementation, while
+  preserving timing, authentication, session, and audio behavior.
 - Keep architectural, timing, and wire-format changes isolated from one another.
 - Keep raw measurements and explicit failure reasons. Do not add subjective
   playability scores or hidden recommendations.
@@ -1089,22 +1092,122 @@ Checks to run when useful:
 
 ## Remaining Work
 
-### Phase 12: Optional Protocol Experiments and Fuzzing Components
+### Phase 12: Final Wire Efficiency, Binary Assets, and Fuzzing
 
-- `[ ]` Compare PCM16 and PCM24 only if measured bandwidth or mesh scaling data
-  justifies it.
-- `[ ]` Consider a smaller versioned UDP header only as a separate compatibility
-  experiment.
-- `[ ]` Consider raw binary asset chunks separately from the engine refactor.
-- `[ ]` Consider dedicated Python mutation/generative fuzzing modules for the
-  length-prefixed authenticated control protocol, UDP packet parsing/replay and
-  endpoint-proof state, remote model/asset messages, and narrow WAV parsing.
-  Keep deterministic boundary fixtures in Phase 11 rather than making this
-  optional fuzzing infrastructure a core-refactor completion requirement.
-- `[ ]` If optional fuzzing is implemented, use reproducible seeds, retained
-  corpus replay, failure minimization, strict process/input/time/resource
-  bounds, and isolated real-process or parser-harness execution. Sanitizer runs
-  may supplement it where supported but remain test-only and non-gating.
+#### Phase 12 execution contract
+
+- Preserve application behavior. PCM selection changes only the direct-network
+  sample representation; device capture, internal engine/mix precision,
+  prepared playback, Track/Looper files, and recording remain on their existing
+  paths, with Track/Looper and recording WAVs remaining PCM16. Grid, transport,
+  metronome, collaboration, authentication, endpoint proof, reconnect, End Jam,
+  and asset semantics must not change. If a compact representation cannot
+  preserve a required timing, security, diagnostic, or boundedness field, keep
+  that field rather than forcing a target byte count.
+- **Start Jam** owns one session-wide **Audio Quality** choice: `16-bit PCM` or
+  `24-bit PCM`. The creator declares it in the authenticated session contract
+  and every joiner follows it automatically; it is not a per-edge preference
+  and must preserve encode-once fan-out. Both formats are mandatory capabilities
+  of the one current executable. Keep 24-bit PCM as the implementation/testing
+  default during this phase. Selecting the eventual product default is informed
+  by retained measurements and manual listening but is not a Phase 12
+  completion gate.
+- Replace the existing UDP layout once with the smallest fixed, explicitly
+  encoded layout justified by a field-ownership audit. Preserve magic/version,
+  packet type, session identity, sequence/replay identity, the type-appropriate
+  sample-time or timing token, strict size validation, and the keyed
+  authentication tag. A shared timing slot may have packet-type-specific
+  meaning where that removes the current unused duplicate. Do not transmit a
+  native struct. Support one current network protocol only: remove the old
+  encoder, decoder, constants, options, fixtures, and compatibility branches;
+  stale binaries receive a clear version/protocol failure, never a fallback or
+  dual-stack path. Git history is the rollback mechanism.
+- Replace only asset chunk bodies with bounded authenticated binary frames on
+  the existing TCP control plane. Keep human-paced project/session metadata in
+  its current strictly validated structured form. Binary chunks remain
+  requested-only, source/transfer-bound, incrementally hashed and written on the
+  bounded file worker, size/chunk/count/time/concurrency/disk bounded, and
+  committed atomically only after exact length, hash, and strict WAV validation.
+  Use checked arithmetic before allocation or I/O, keep heartbeat/control work
+  schedulable during transfers, remove the base64 chunk path completely, and
+  never allow remote metadata or bytes to select a local path.
+- Follow the completed refactor ownership. PCM codecs and UDP framing belong in
+  the Qt-free core protocol/network components; negotiated session format and
+  capability validation belong in application/session contracts; GUI and CLI
+  are thin adapters for the native setting; binary transfer framing/policy and
+  worker I/O remain in the authenticated control and asset services; native
+  profiles/effective configuration remain authoritative; Python only
+  orchestrates declared native settings and consumes emitted manifests/stats.
+  Do not put protocol, codec, transfer, or test policy back into `MainWindow`, a
+  monolithic CLI path, or duplicated Python defaults.
+- Extend the unified Python dispatcher with
+  `python tools/jam2_test.py fuzz [all|control|udp|asset|wav]`. The focused
+  `tools/jam2test` package owns generation, native execution, corpus replay,
+  failure classification/minimization, and manifests. Fuzzing is opt-in,
+  bounded, reproducible, test-only, and inactive in ordinary GUI/headless use;
+  it adds no GUI automation API or listening network service. Its isolated
+  family root is `tools/fuzz_logs/<invocation-id>`, and `--clean` may remove
+  only the selected fuzz family root. The implemented bounded baseline is the
+  Phase 12 requirement: retain its current control, UDP PCM16/PCM24, binary
+  asset, and PCM16 WAV native targets, deterministic seeds/mutations, limits,
+  classification, manifests, and minimization. Exhaustive message-type seeds,
+  broader state-machine exploration, sanitizer orchestration, an OS-enforced
+  memory sandbox, or a larger fuzz campaign are optional future work and are
+  not Phase 12 completion gates. Do not expand or rerun the fuzz campaign during
+  the resumed Phase 12 pass; use the already retained smoke evidence.
+
+- `[x]` Add allocation-free bounded PCM16 pack/unpack beside PCM24 while keeping
+  the internal sample path unchanged. Add the creator Audio Quality selector,
+  authenticated session propagation, automatic joiner adoption, headless/debug
+  configuration, effective native configuration, manifests, CSV/stats, and
+  clear active-format GUI status. Reject impossible/unknown formats before
+  network activation without disturbing existing local audio or tracks.
+- `[x]` Replace the 48-byte UDP header with the audited compact current layout,
+  update every packet type and authentication calculation, and add shared C++/
+  Python golden byte/tag vectors plus exact valid/invalid size coverage for both
+  PCM formats. Remove all old header/PCM24-only parsing and compatibility code;
+  verify source/public-surface searches leave only intentional historical
+  documentation and retained PCM24 codec support.
+- `[~]` Replace base64 Track/Looper chunk bodies with authenticated binary
+  chunks using the existing bounded streaming worker and atomic commit model.
+  Remove old base64 serialization, validation, conversion, and compatibility
+  branches. Add deterministic fragmentation/coalescing, malformed prefix,
+  oversize/count/offset/overlap/order, unsolicited/source mismatch, timeout,
+  disconnect, disk failure, hash/WAV failure, Track Sync cancellation, control/
+  heartbeat interleaving, and successful multi-asset coverage.
+- `[x]` Add matched PCM16-versus-PCM24 benchmark dimensions using identical
+  native profiles, topology, duration, impairment, and non-silent callback test
+  input. Retain comparable per-format bitrate/payload/header measurements, CPU,
+  packet/callback timing, jitter, RTT, loss/reorder/late/missing/drop/underrun,
+  drift/resampler, queue/capacity, mix, and WAV analysis without a subjective
+  score. Preserve the comprehensive two-host matrices and add short completion
+  comparisons that finish within a few minutes.
+- `[x]` Add stress coverage for both formats with real audio flowing through
+  clean, jitter, loss/reorder/burst, lifecycle, and two/three/four-peer cases. A
+  format-specific case fails if it silently runs the other format or produces
+  no transmitted/received audio.
+- `[ ]` Run the focused two-physical-device PCM16/PCM24 stress coverage after
+  both quality choices have passed the final GUI/device check.
+- `[x]` Retain the implemented bounded `fuzz` command and isolated artifact/
+  cleanup contract without expanding it during this phase. It must keep
+  replayable seeds, bounded generation/input/process/iteration/time/output and
+  minimization work, stable failure classification, artifact hashes/manifests,
+  and native control, UDP PCM16/PCM24, binary-asset, and PCM16 WAV targets.
+  Ordinary validation rejection is not a failure. The retained 40-input smoke
+  is sufficient Phase 12 execution evidence; exhaustive message/state coverage,
+  OS-level memory sandboxing, sanitizers, and additional fuzz runs are not
+  required.
+- `[!]` Complete the mandatory two-pass ownership/removal/security audit, exact
+  Windows build, macOS build confirmation for shared wire bytes, full relevant
+  validation/stress/unit checks, review the retained bounded fuzz smoke, matched two-host PCM16/
+  PCM24 benchmark, binary-asset transfer smoke, and focused manual confirmation
+  that both Audio Quality choices connect and remain audibly functional. Do not
+  require a final default-quality decision to close the phase.
+
+  Windows implementation and automated closeout are complete. This item is
+  blocked only on the macOS build/shared-byte confirmation, matched physical
+  two-host PCM16/PCM24 run, successful GUI binary multi-asset transfer, and
+  audible GUI/device confirmation for both quality choices.
 
 ## Work Log
 
@@ -1141,7 +1244,126 @@ Add concise entries as implementation proceeds:
 - All Phase 11 implementation, automated evidence, two-pass document/source
   audit, and focused manual acceptance are now complete. Every Phase 11 item is
   checked and the phase has moved out of `Remaining Work`; Phase 12 remains the
-  only planned work and is explicitly optional.
+  only planned refactor work.
+
+### 2026-07-15 - Phase 12 wire, asset, fuzzing, and ownership contract
+
+- Selected mandatory session-wide PCM16/PCM24 network quality rather than an
+  optional experiment. The creator chooses once in Start Jam, all peers follow,
+  encode-once fan-out remains, the existing PCM24 choice stays the default while
+  evidence is gathered, and the final default decision is outside the phase
+  completion gate. Local processing, tracks, and PCM16 recording files do not
+  change.
+- Selected one compact replacement UDP layout with no old encoder/parser or
+  compatibility support. The implementation must preserve every justified
+  timing, identity, authentication, replay, size, and diagnostic field, use
+  explicit bytes and golden cross-platform vectors, and remove the obsolete
+  layout completely.
+- Selected authenticated raw asset chunk bodies on the existing control plane,
+  retaining strict structured metadata, requested/source-bound transfers,
+  bounded worker streaming, incremental hash, safe path construction, strict
+  WAV inspection, and atomic commit. Base64 chunk compatibility is not retained.
+- Made matched PCM16/PCM24 benchmark and stress dimensions required with
+  non-silent audio under clean and impaired load. Added a bounded `fuzz` command
+  family to the refactored Python tooling for the final control, UDP, asset, and
+  WAV surfaces. Fuzz artifacts use an isolated family root and ordinary runtime
+  surfaces remain unchanged.
+- Assigned each change to the completed architecture: core protocol/network,
+  application/session contracts, thin GUI/CLI adapters, authenticated asset
+  service/file worker, native configuration/manifests, and focused Python
+  orchestration. Phase closeout must audit actual call paths and removal claims
+  so no convenience implementation regresses those ownership boundaries.
+
+### 2026-07-15 - Phase 12 resumed with bounded fuzz baseline frozen
+
+- Accepted the implemented opt-in fuzzer as the Phase 12 baseline: native
+  control, UDP PCM16/PCM24, binary-asset, and PCM16 WAV targets; deterministic
+  seeds and mutations; bounded input/iteration/process time/output/minimization;
+  rejection/failure classification; and isolated hashed manifests/artifacts.
+- The retained 40-input all-target smoke passed with 22 accepted inputs, 18
+  expected bounded rejections, and zero failures, crashes, or hangs at
+  `tools/fuzz_logs/20260715T204314Z_617a8d84`. No further fuzz execution or
+  expansion is required during this run. Exhaustive message/state corpora,
+  sanitizer orchestration, and OS-level memory sandboxing are optional future
+  improvements, not Phase 12 blockers.
+- Remaining Phase 12 work is focused on completing the compact UDP and binary
+  asset protocols, matched non-silent PCM16/PCM24 stress and benchmark
+  measurement, retained-result comparison, and the mandatory closeout audit.
+
+### 2026-07-15 - Phase 12 Windows implementation and automated closeout
+
+- Implemented one current UDP protocol v2 with an explicitly encoded 36-byte
+  header. The shared timing slot carries sample time or ping/pong token by
+  packet type; magic/version/type, session, sequence/replay identity, exact
+  payload length, and the 64-bit SipHash tag remain. PCM16 and PCM24 use the
+  same allocation-free encode-once fan-out and fixed internal signed-24 sample
+  domain. The authenticated session contract makes the creator's Audio Quality
+  selection mandatory for all joiners, while PCM24 remains the temporary
+  default. GUI status, CLI/debug configuration, native manifests, stats, CSV,
+  and Python results expose the active format and exact byte/rate data.
+- Replaced only Track/Looper chunk bodies with authenticated binary control
+  frames. Structured request/start/done metadata remains validated JSON. The
+  current transfer uses fixed 24 KiB non-final chunks, a derived maximum chunk
+  count, exact source/hash/index/offset/length/order/completion checks, an
+  eight-chunk receive queue, high-water backpressure, progress timeout,
+  disconnect/Track-Sync/session cancellation, incremental worker hashing and
+  writes, strict PCM16/sample-rate inspection, temporary cleanup, and atomic
+  commit. The old JSON/base64 message type, validation, conversion, constants,
+  and compatibility path are absent.
+- Added independent C++/Python v2 golden vectors, exact PCM16/PCM24 sizes,
+  fragmentation/coalescing and heartbeat interleaving, binary frame bounds,
+  asset source/order/offset/count/size/cancellation boundaries, authenticated
+  bidirectional controller binary frames, unknown creator-format rejection,
+  and removal/public-surface searches. The second source audit found and fixed
+  the noncanonical tiny-chunk count loophole and immediate peer/session
+  disconnect cancellation. It also corrected supporting historical-document
+  wording and the obsolete per-phase artifact-root rule.
+- `cmd.exe /d /c "call compile.cmd --in-dev-shell"` completed successfully on
+  the final source. `python -m unittest discover -s tools\jam2test -t tools -p
+  "test_*.py"` passed 46 tests. `python tools\jam2_test.py validate all --jam2
+  release\jam2.exe` passed all 13 groups at
+  `tools/validate_logs/20260715T213221Z_12f54f44`, including 75 boundary cases,
+  controller lifecycle, real-process control hardening, public/schema parity,
+  automation isolation, and clean two/three/four-peer meshes.
+- Matched headless stress passed clean/jitter/loss/reorder in eight cases at
+  `tools/stress_logs/20260715T210603Z_8314eb93`; burst recovery and shared-grid
+  stop/restart in four cases at
+  `tools/stress_logs/20260715T210856Z_f8b91fa4`; and clean two/three/four-peer
+  meshes in six cases at `tools/stress_logs/20260715T211019Z_bcac6700`. The
+  final rebuilt clean pair at `tools/stress_logs/20260715T213249Z_3e9a1028`
+  directly records protocol 2, 36 header bytes, 2/3 bytes per sample, 164/228
+  packet bytes, about 750 packets/second, and a 28.06% PCM16 send-bitrate
+  reduction.
+- The complete local coordinator/agent upload workflow passed one correlated
+  non-silent PCM16/PCM24 tone pair in 15 seconds at
+  `tools/benchmark_logs/20260715T213324Z_99a9b776`: negotiation, create/join,
+  WAV/CSV generation, native manifests, bounded upload and acknowledgement,
+  correlation, format validation, `all_done`, and retained logs all passed.
+  Both remote WAVs peaked at 0.125 with RMS 0.08837/0.08835 and no pop/clipping
+  event. Packet and send-bitrate reductions were 28.07% and 28.04%. Short-run
+  CPU differed by noise/run order and does not support a CPU-benefit claim.
+- Retained pre-change physical evidence at
+  `tools/benchmark_logs/20260715T153015Z_4fd412e0` records 64-frame protocol-v1
+  PCM24 packets at exactly 240 bytes. The current compact PCM24 packet is 228
+  bytes, a 5% reduction with unchanged 192-byte payload; current PCM16 is 164
+  bytes, 31.67% below the old packet and 28.07% below compact PCM24. A full
+  24 KiB binary asset chunk occupies 24,656 authenticated framed bytes versus
+  32,768 characters for the replaced encoded data alone, at least a 24.76%
+  transfer reduction before counting the removed JSON field overhead.
+- The final supporting-document pass now records the implemented fixed-chunk
+  bound/cancellation behavior, paired-result completeness rules, and measured
+  packet, bitrate, WAV, and asset-size evidence in `refactor-security.md`,
+  `refactor-python.md`, and `refactor-efficiency.md`. Current-source searches
+  are clean for the old 48-byte/protocol-v1 constants, PCM24-only parser,
+  base64 asset serialization/conversion, and legacy chunk message type. The
+  Phase 12 diff passes `git diff --check`; the repository-wide check reports
+  only a preserved trailing space in unrelated user-owned `Bugs.md` work.
+- The Windows implementation pass and both local source/document audits are
+  complete. Phase 12 remains in `Remaining Work` only for the macOS build and
+  shared golden-byte confirmation, a matched physical two-host non-silent
+  PCM16/PCM24 run, focused two-device/GUI audible confirmation for both quality
+  choices, and one successful GUI binary multi-asset transfer. The retained
+  fuzzer is not rerun under the resumed boundary.
 
 ### 2026-07-15 - Phase 11 implementation and automated closeout complete
 

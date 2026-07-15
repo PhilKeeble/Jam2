@@ -33,6 +33,9 @@ def run(args: Any, repo: Path, arguments: list[str]) -> int:
     if args.family == "stress":
         from .stress import run as run_stress
         return run_stress(args, repo, invocation, manifest)
+    if args.family == "fuzz":
+        from .fuzz import run as run_fuzz
+        return run_fuzz(args, repo, invocation, manifest)
 
     from .connectivity import run as run_connectivity
     return run_connectivity(args, invocation, manifest)

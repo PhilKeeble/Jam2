@@ -61,6 +61,7 @@ struct Jam2RuntimeOptions {
     std::optional<int> socket_recv_buffer;
     int sample_rate = 48000;
     int frame_size = 128;
+    jam2::NetworkAudioFormat network_audio_format = jam2::NetworkAudioFormat::Pcm24Mono;
     bool drift_correction = true;
     double drift_smoothing = 0.02;
     int drift_deadband_ppm = 25;

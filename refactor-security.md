@@ -297,9 +297,30 @@ Lightweight correction:
 - Avoid duplicate simultaneous requests for the same hash and cache a validated file's size/hash result for the session where safe.
 - Target asset responses to the requesting peer rather than broadcasting them.
 
-Base64 can remain temporarily if each encoded frame is bounded, but raw framed asset chunks are the preferred later efficiency change. Raw chunks remove the roughly 33% base64 expansion and several large text conversions. Streaming remains required regardless of encoding.
+Base64 remained bounded through Phase 11. Phase 12 now replaces that chunk body
+format completely with raw authenticated binary frames on the existing control
+plane; it does not retain a base64 compatibility decoder. Each frame has an
+exact bounded prefix and payload, is tied to an already requested transfer and
+authenticated source, and validates transfer identity, index/offset, payload
+length, cumulative bytes, chunk count and state transition with checked
+arithmetic before allocation or disk I/O. Metadata stays in the existing strict
+structured control model. Streaming, incremental hashing, temporary-file
+cleanup, strict WAV validation and atomic commit remain mandatory, and bounded
+chunk scheduling must not starve heartbeat or ordinary control frames.
 
-Expected cost: the same O(file bytes) hashing work, small per-chunk state, and much lower peak memory. Raw chunks later reduce transferred bytes by about 25% relative to the base64-encoded representation.
+The implemented current format requires a fixed 24 KiB declared chunk size and
+exact 24 KiB non-final chunks, permits only a smaller final chunk, and derives a
+hard maximum chunk count from the maximum asset size. The receiver enforces an
+eight-chunk queue and high-water backpressure. Peer disconnect, session stop,
+and Track Sync-off cancel the applicable queued, active, pending, and inbound
+work without discarding unrelated peers' transfers. Deterministic boundary
+coverage verifies exact size/count/order/offset/source/hash behavior,
+fragmentation/coalescing with ordinary control frames, and cancellation.
+
+Cost: the same O(file bytes) hashing work, small bounded per-chunk state, and
+much lower peak memory. A full 24 KiB chunk uses 24,656 authenticated framed
+bytes versus 32,768 base64 characters for the former data field alone, at least
+a 24.76% transfer reduction before removed JSON overhead.
 
 ### 7. Remote project paths must not select local files
 
@@ -335,8 +356,9 @@ No clear out-of-bounds read was confirmed in the reviewed 64-bit code. The
 larger practical risk is resource exhaustion or unexpected numeric state
 reaching the stretch/mix worker. Finite deterministic malformed and boundary
 coverage is required for core hardening because this parser receives
-network-originated bytes. Dedicated mutation/generative fuzzing and sanitizer
-orchestration are optional Phase 12 components.
+network-originated bytes. Phase 12 also retains an initial bounded native
+mutation corpus through the refactored Python tooling; broader fuzz coverage
+and sanitizer orchestration are optional future supplements.
 
 Lightweight correction for a deliberately narrow v1 WAV format:
 
@@ -347,8 +369,8 @@ Lightweight correction for a deliberately narrow v1 WAV format:
 - Do not allocate output until validated frame counts and processing-speed bounds establish the maximum.
 - Avoid duplicating the same WAV bytes for multiple lanes that reference the same hash.
 - Keep parse, hash, file I/O, stretch, and mix work on a bounded non-real-time worker.
-- In optional Phase 12 testing, fuzz the isolated parser under AddressSanitizer
-  and UndefinedBehaviorSanitizer where supported.
+- Retain the Phase 12 bounded native `jam2_test.py fuzz wav` target as an
+  additional regression tool; expanded campaigns and sanitizers are optional.
 
 If future versions accept broad codecs or complex container variants, a
 sandboxed decoder process would become more attractive. It is unnecessary for
@@ -483,9 +505,11 @@ The following set gives the best risk reduction without materially increasing au
 7. Requested-only, size/chunk/time/concurrency-bounded streaming asset transfer to a temporary file with incremental hashing and atomic commit.
 8. Content-hash-only remote asset references and locally constructed canonical paths.
 9. A narrow, strictly validated PCM16 WAV parser running on a bounded worker,
-   plus deterministic malformed/boundary coverage; fuzz/sanitizer modules are
-   optional Phase 12 work.
-10. Exact UDP type/flag/payload validation, allocation-free authentication, replay windows, wrap-safe sequences, sample-time horizons, bounded gap handling, and per-wake work budgets.
+   plus deterministic malformed/boundary coverage and the retained Phase 12
+   bounded native fuzz baseline.
+10. Exact UDP version/type/length validation for the one current compact layout,
+    allocation-free authentication, replay windows, wrap-safe sequences,
+    sample-time horizons, bounded gap handling, and per-wake work budgets.
 11. Authenticated UDP endpoint proof before audio activation.
 12. OS-backed secrets/nonces plus domain-separated control/UDP key derivation.
 
@@ -518,7 +542,7 @@ against malformed traffic and common implementation bugs.
 | Endpoint proof | Only during join/change | Small challenge state | A few probe packets; about one RTT before edge activation |
 | Incremental asset hash/write | Same O(n) work as whole-file hash | Much lower peak memory | Same with base64; lower after raw chunks |
 | Strict WAV checks | Negligible beside file I/O/DSP | Prevents invalid allocations | None |
-| Optional Phase 12 fuzz/sanitizer tests | Zero in release builds | Zero in release builds | None |
+| Phase 12 fuzz/sanitizer tests | Zero in release builds | Zero in release builds | None |
 | OS CSPRNG | Session/handshake only | Negligible | None |
 
 At a representative 750 UDP packets/sec per remote peer, a 20-operation validation/replay path is about 15,000 simple operations/sec per peer. Three remote peers would be about 45,000 operations/sec, which should be below measurement noise compared with socket calls, PCM packing, resampling, and the current dynamic maps. This is an order-of-magnitude illustration, not a substitute for the plan's before/after profiling.
@@ -613,12 +637,14 @@ maintained only in [refactor-plan.md](refactor-plan.md).
 - More simultaneous transfers and requests than allowed.
 - Verify temporary files are removed and existing valid assets are not truncated on failure.
 - RIFF size mismatch, truncated/oversized/padded chunks, excessive chunk count, missing/duplicate `fmt` or `data`, non-PCM tag, unsupported channels/rate/bits, invalid byte rate/block alignment, misaligned data, excessive frames, and arithmetic limits.
-- Optional Phase 12: fuzz the isolated frame decoder, JSON validators, asset
-  state machine, and WAV parser under sanitizers.
+- Retain the Phase 12 bounded native control, binary-asset, and WAV fuzz targets
+  as supplementary regression tools; exhaustive corpora and sanitizers are
+  optional.
 
 ### UDP and endpoint state
 
-- Wrong magic/version/session/key/tag/type/flags/reserved/payload length.
+- Wrong magic/version/session/key/tag/type/payload length and every compact
+  header truncation/extension boundary.
 - Sequence wrap, duplicate, reorder, replay outside window, and huge forward gap.
 - Sample/timestamp just inside/outside past and future horizons.
 - Burst beyond the per-wake budget while verifying send/callback deadline counters remain stable.
@@ -631,9 +657,10 @@ maintained only in [refactor-plan.md](refactor-plan.md).
 - Verify CSPRNG failure produces a clear session-creation failure rather than a weak fallback.
 - Record packet-loop CPU, allocations, copied bytes, send gaps, callback gaps, and UDP rejection counters before/after.
 - Record normal control join time, frame overhead, asset peak memory, and transfer bytes.
-- If the optional Phase 12 fuzzing components are implemented, run
-  fuzzers/sanitizers only in test configurations; release builds contain no
-  sanitizer cost.
+- Run the Phase 12 fuzz command only through opt-in local debug execution with
+  explicit input/process/iteration/time/output and native allocation bounds;
+  release builds gain no listening fuzz service, ordinary runtime mutation
+  path, or sanitizer cost. OS-level memory sandboxing is optional future work.
 
 ## Target Security Properties
 

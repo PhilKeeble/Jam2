@@ -111,6 +111,22 @@ bool ControlServer::sendTo(const QString& token, const QJsonObject& message, boo
     return false;
 }
 
+bool ControlServer::sendBinaryTo(const QString& token, const QByteArray& payload)
+{
+    for (Peer* peer : peers_) {
+        if (!peer || !peer->authenticated || peer->token != token) {
+            continue;
+        }
+        const QByteArray frame = encodeAuthenticatedBinary(payload, peer->sendKey, peer->sendSequence);
+        if (frame.isEmpty() || !writeFrame(peer, frame)) {
+            return false;
+        }
+        ++peer->sendSequence;
+        return true;
+    }
+    return false;
+}
+
 bool ControlServer::canQueueTo(const QString& token, qint64 additionalBytes) const
 {
     if (additionalBytes < 0 || additionalBytes > kOutputHighWaterBytes) {
@@ -281,7 +297,7 @@ void ControlServer::acceptPeer()
         peer->authenticationTimer->start(kAuthenticationDeadlineMs);
         const QByteArray challenge = encodeHandshake(QJsonObject{
             {QStringLiteral("type"), QStringLiteral("hello.challenge")},
-            {QStringLiteral("version"), 1},
+            {QStringLiteral("version"), kControlProtocolVersion},
             {QStringLiteral("session"), sessionHex_},
             {QStringLiteral("server_nonce"), encodeHex(peer->serverNonce)},
         });
@@ -347,7 +363,8 @@ void ControlServer::readPeer(Peer* peer)
                 return;
             }
         } else {
-            if (!decodeAuthenticated(body, peer->receiveKey, peer->receiveSequence, message, error)) {
+            AuthenticatedPayload payload;
+            if (!decodeAuthenticated(body, peer->receiveKey, peer->receiveSequence, payload, error)) {
                 ++stats_.sequenceOrTagRejects;
                 rejectPeer(
                     peer,
@@ -357,8 +374,12 @@ void ControlServer::readPeer(Peer* peer)
                 return;
             }
             ++peer->receiveSequence;
-            if (onMessage) {
-                onMessage(peer->token, message);
+            if (payload.type == AuthenticatedPayloadType::Json) {
+                if (onMessage) {
+                    onMessage(peer->token, payload.message);
+                }
+            } else if (onBinaryMessage) {
+                onBinaryMessage(peer->token, payload.binary);
             }
         }
     }
@@ -383,7 +404,7 @@ void ControlServer::handleHandshake(Peer* peer, const QJsonObject& message)
     const QString udpEndpoint = message.value(QStringLiteral("udp_endpoint")).toString();
     const bool tokenValid = token.isEmpty() || decodeHex(token, 16).size() == 16;
     if (type != QStringLiteral("hello.proof") ||
-        message.value(QStringLiteral("version")).toInt() != 1 ||
+        message.value(QStringLiteral("version")).toInt() != kControlProtocolVersion ||
         session != sessionHex_ || clientNonce.size() != 16 || clientProof.size() != 16 ||
         !tokenValid || !validUdpEndpointText(udpEndpoint)) {
         noteAuthenticationReject();
@@ -426,7 +447,7 @@ void ControlServer::handleHandshake(Peer* peer, const QJsonObject& message)
         peer->transcript).left(16);
     const QByteArray response = encodeHandshake(QJsonObject{
         {QStringLiteral("type"), QStringLiteral("hello.ok")},
-        {QStringLiteral("version"), 1},
+        {QStringLiteral("version"), kControlProtocolVersion},
         {QStringLiteral("role"), QStringLiteral("listener")},
         {QStringLiteral("peer_token"), token},
         {QStringLiteral("proof"), encodeHex(serverProof)},

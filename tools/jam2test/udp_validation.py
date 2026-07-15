@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Reusable real-process UDP v1 adversarial fixtures."""
+"""Reusable real-process UDP v2 adversarial fixtures."""
 
 import struct
 import threading
@@ -92,7 +92,7 @@ class OneShotAudioHeaderTransformer:
         self.transformed_by_direction[direction] = 1
         if self.mode == "forward-sequence-gap":
             return resign_packet(packet, self.key, sequence=(header.sequence + 100000) & 0xFFFFFFFF)
-        return resign_packet(packet, self.key, sample_time=(1 << 64) - 128)
+        return resign_packet(packet, self.key, timing_value=(1 << 64) - 128)
 
     def stats(self):
         return {
@@ -105,8 +105,8 @@ class OneShotAudioHeaderTransformer:
 def malformed_variants(packet):
     """Create inputs that exercise each cheap fixed-header rejection branch."""
     packet = bytes(packet)
-    if len(packet) < 48:
-        raise ValueError("a complete UDP v1 packet is required")
+    if len(packet) < 36:
+        raise ValueError("a complete UDP v2 packet is required")
 
     variants = [("short", packet[:12])]
 
@@ -118,12 +118,10 @@ def malformed_variants(packet):
     changed("magic", 0, 0, "I")
     changed("version", 4, (packet[4] + 1) & 0xFF)
     changed("type", 5, 0xFF)
-    changed("flags", 6, 1, "H")
-    changed("reserved", 46, 1, "H")
     changed("session", 8, 0, "Q")
-    changed("payload_size", 36, 0xFFFF, "H")
+    changed("payload_size", 6, 0xFFFF, "H")
     auth = bytearray(packet)
-    auth[38] ^= 0x01
+    auth[28] ^= 0x01
     variants.append(("authentication", bytes(auth)))
     return variants
 

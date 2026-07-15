@@ -1,8 +1,14 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include "DebugAutomation.hpp"
 
 #include "ApplicationRuntime.hpp"
 #include "AutomationChannel.hpp"
+#include "AssetChunkProtocol.hpp"
 #include "ControlProtocol.hpp"
+#include "ControlMessageValidation.hpp"
 #include "ControllerLifecycleValidation.hpp"
 #include "DebugActionValidation.hpp"
 #include "MainWindow.hpp"
@@ -10,6 +16,8 @@
 #include "CliEntrypoint.hpp"
 #include "CliOptions.hpp"
 #include "tuning_profile.hpp"
+#include "pcm16_wav.hpp"
+#include "protocol.hpp"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -40,6 +48,12 @@
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <sys/resource.h>
+#endif
+
 namespace {
 
 constexpr qsizetype kMaxScenarioBytes = 256 * 1024;
@@ -49,18 +63,51 @@ constexpr qsizetype kMaxActions = 128;
 constexpr qsizetype kMaxFixtures = 128;
 constexpr qsizetype kMaxArtifactFiles = 256;
 constexpr qint64 kMaxArtifactBytes = 1024LL * 1024LL * 1024LL;
+constexpr qint64 kMaxFuzzInputBytes = 1024LL * 1024LL;
 constexpr auto kScenarioFormat = "jam2-debug-scenario";
 constexpr auto kDescriptionFormat = "jam2-debug-description";
 constexpr auto kAutomationFormat = "jam2-automation";
 constexpr auto kScenarioProperty = "jam2.debug.scenario";
 
+std::optional<std::uint64_t> processCpuTimeNanoseconds() noexcept
+{
+#if defined(_WIN32)
+    FILETIME creation{};
+    FILETIME exit{};
+    FILETIME kernel{};
+    FILETIME user{};
+    if (!GetProcessTimes(GetCurrentProcess(), &creation, &exit, &kernel, &user)) {
+        return std::nullopt;
+    }
+    ULARGE_INTEGER kernelTicks{};
+    kernelTicks.LowPart = kernel.dwLowDateTime;
+    kernelTicks.HighPart = kernel.dwHighDateTime;
+    ULARGE_INTEGER userTicks{};
+    userTicks.LowPart = user.dwLowDateTime;
+    userTicks.HighPart = user.dwHighDateTime;
+    return (kernelTicks.QuadPart + userTicks.QuadPart) * 100ULL;
+#else
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) != 0) {
+        return std::nullopt;
+    }
+    const auto timevalNanoseconds = [](const timeval& value) {
+        return static_cast<std::uint64_t>(value.tv_sec) * 1000000000ULL +
+            static_cast<std::uint64_t>(value.tv_usec) * 1000ULL;
+    };
+    return timevalNanoseconds(usage.ru_utime) + timevalNanoseconds(usage.ru_stime);
+#endif
+}
+
 constexpr std::string_view kDebugUsage = R"(Usage:
   jam2 debug describe --json
   jam2 debug run <scenario.json>
+  jam2 debug fuzz <control|udp-pcm16|udp-pcm24|asset|wav> <input-file>
 
 Subcommands:
   describe    Emit the supported unversioned automation formats, operations, profiles, fields, and bounds
   run         Validate and execute a bounded declarative scenario
+  fuzz        Execute one bounded local native parser input (test-only)
 
 Run `jam2 debug <subcommand> -h` for details.
 )";
@@ -88,6 +135,7 @@ constexpr std::array kRuntimeFields{
     RuntimeField{"sample_rate", "--sample-rate", FieldKind::Integer, 1, 768000, ""},
     RuntimeField{"audio_buffer_size", "--audio-buffer-size", FieldKind::Integer, 1, 1048576, ""},
     RuntimeField{"frame_size", "--frame-size", FieldKind::Integer, 32, 256, "32|64|128|256"},
+    RuntimeField{"network_audio_format", "--network-audio-format", FieldKind::String, 0, 0, "pcm16|pcm24"},
     RuntimeField{"capture_ring_frames", "--capture-ring-frames", FieldKind::Integer, 1, 1073741824, ""},
     RuntimeField{"playback_ring_frames", "--playback-ring-frames", FieldKind::Integer, 1, 1073741824, ""},
     RuntimeField{"playback_prefill_frames", "--playback-prefill-frames", FieldKind::Integer, 0, 1073741824, ""},
@@ -180,6 +228,114 @@ The file must use schema `jam2-debug-scenario`. The temporary
 )";
 }
 
+void printFuzzHelp()
+{
+    std::cout << R"(Usage:
+  jam2 debug fuzz <control|udp-pcm16|udp-pcm24|asset|wav> <input-file>
+
+Runs one bounded local parser input and emits a JSON accepted/rejected result.
+This opt-in operation opens no listener and is intended for jam2_test.py fuzz.
+)";
+}
+
+int runFuzzInput(const QString& target, const QString& inputPath)
+{
+    QFile file(inputPath);
+    if (!file.open(QIODevice::ReadOnly) || file.size() < 0 || file.size() > kMaxFuzzInputBytes) {
+        throw std::runtime_error("fuzz input is unreadable or exceeds 1048576 bytes");
+    }
+    const QByteArray input = file.readAll();
+    bool accepted = false;
+    QString detail;
+
+    if (target == QStringLiteral("control")) {
+        QByteArray buffer = input;
+        quint64 sequence = 7;
+        accepted = !buffer.isEmpty();
+        while (accepted && !buffer.isEmpty()) {
+            QByteArray body;
+            const auto framed = jam2::control_protocol::takeFrame(buffer, body, detail);
+            if (framed != jam2::control_protocol::TakeFrameResult::Ready) {
+                if (framed == jam2::control_protocol::TakeFrameResult::NeedMore) {
+                    detail = QStringLiteral("incomplete control frame");
+                }
+                accepted = false;
+                break;
+            }
+            jam2::control_protocol::AuthenticatedPayload payload;
+            accepted = jam2::control_protocol::decodeAuthenticated(
+                body, QByteArray(32, 'k'), sequence++, payload, detail);
+            if (accepted && payload.type == jam2::control_protocol::AuthenticatedPayloadType::Json) {
+                QString validation;
+                accepted = jam2::application::validateControlMessage(payload.message, validation);
+                if (!accepted) detail = validation;
+            } else if (accepted) {
+                jam2::application::asset_chunk::Chunk chunk;
+                accepted = jam2::application::asset_chunk::decode(payload.binary, chunk, detail);
+            }
+        }
+    } else if (target == QStringLiteral("udp-pcm16") ||
+               target == QStringLiteral("udp-pcm24")) {
+        std::array<std::uint8_t, 16> key{};
+        for (std::size_t i = 0; i < key.size(); ++i) key[i] = static_cast<std::uint8_t>(i);
+        const auto format = target == QStringLiteral("udp-pcm16")
+            ? jam2::NetworkAudioFormat::Pcm16Mono
+            : jam2::NetworkAudioFormat::Pcm24Mono;
+        const auto bytes = std::span<const std::uint8_t>(
+            reinterpret_cast<const std::uint8_t*>(input.constData()),
+            static_cast<std::size_t>(input.size()));
+        const auto parsed = jam2::protocol::parse_packet(
+            bytes, key, 0x0102030405060708ULL, format);
+        accepted = static_cast<bool>(parsed);
+        if (accepted) {
+            jam2::protocol::ReplayWindow replay;
+            if (replay.observe(parsed.header.sequence) != jam2::protocol::ReplayResult::New ||
+                replay.observe(parsed.header.sequence) != jam2::protocol::ReplayResult::Duplicate) {
+                throw std::runtime_error("UDP replay invariant failed");
+            }
+            if (parsed.header.type == jam2::protocol::PacketType::Audio) {
+                const std::size_t frames = parsed.header.payload_length /
+                    jam2::protocol::audio_bytes_per_sample(format);
+                std::vector<std::int32_t> samples(frames);
+                if (!jam2::protocol::unpack_audio_into(
+                        format, bytes.subspan(jam2::protocol::kHeaderSize), samples)) {
+                    throw std::runtime_error("accepted UDP audio failed codec invariant");
+                }
+            }
+        } else {
+            detail = QString::fromLatin1(jam2::protocol::parse_error_text(parsed.error));
+        }
+    } else if (target == QStringLiteral("asset")) {
+        jam2::application::asset_chunk::Chunk chunk;
+        accepted = jam2::application::asset_chunk::decode(input, chunk, detail);
+    } else if (target == QStringLiteral("wav")) {
+#if defined(_WIN32)
+        const std::filesystem::path nativePath(inputPath.toStdWString());
+#else
+        const std::filesystem::path nativePath(inputPath.toUtf8().constData());
+#endif
+        const auto inspected = jam2::wav::inspect_pcm16_file(
+            nativePath,
+            static_cast<std::uint64_t>(kMaxFuzzInputBytes));
+        accepted = static_cast<bool>(inspected);
+        if (!accepted) detail = QString::fromStdString(inspected.error);
+    } else {
+        throw std::runtime_error("unknown native fuzz target");
+    }
+
+    std::cout << QJsonDocument(QJsonObject{
+        {QStringLiteral("event"), QStringLiteral("fuzz_result")},
+        {QStringLiteral("target"), target},
+        {QStringLiteral("accepted"), accepted},
+        {QStringLiteral("classification"), accepted ? QStringLiteral("accepted") : QStringLiteral("rejected")},
+        {QStringLiteral("detail"), detail.left(512)},
+        {QStringLiteral("input_bytes"), input.size()},
+        {QStringLiteral("control_protocol_version"), jam2::control_protocol::kControlProtocolVersion},
+        {QStringLiteral("udp_protocol_version"), jam2::protocol::kProtocolVersion},
+    }).toJson(QJsonDocument::Compact).constData() << '\n';
+    return 0;
+}
+
 QJsonObject profileJson(const jam2::TuningProfile& profile)
 {
     return {
@@ -248,8 +404,8 @@ QJsonObject descriptionJson()
         {QStringLiteral("schema"), QString::fromLatin1(kDescriptionFormat)},
         {QStringLiteral("scenario_schema"), QString::fromLatin1(kScenarioFormat)},
         {QStringLiteral("automation_protocol"), QString::fromLatin1(kAutomationFormat)},
-        {QStringLiteral("control_protocol_version"), 1},
-        {QStringLiteral("udp_protocol_version"), 1},
+        {QStringLiteral("control_protocol_version"), jam2::control_protocol::kControlProtocolVersion},
+        {QStringLiteral("udp_protocol_version"), jam2::protocol::kProtocolVersion},
         {QStringLiteral("max_scenario_bytes"), kMaxScenarioBytes},
         {QStringLiteral("max_string_bytes"), kMaxStringBytes},
         {QStringLiteral("max_actions"), kMaxActions},
@@ -260,6 +416,10 @@ QJsonObject descriptionJson()
         {QStringLiteral("max_pending_unauthenticated_peers"), jam2::control_protocol::kMaxPendingPeers},
         {QStringLiteral("authentication_failure_window_ms"), jam2::control_protocol::kAuthenticationFailureWindowMs},
         {QStringLiteral("max_authentication_failures_per_window"), jam2::control_protocol::kMaxAuthenticationFailuresPerWindow},
+        {QStringLiteral("fuzz_targets"), QJsonArray{
+            QStringLiteral("control"), QStringLiteral("udp-pcm16"),
+            QStringLiteral("udp-pcm24"), QStringLiteral("asset"), QStringLiteral("wav")}},
+        {QStringLiteral("max_fuzz_input_bytes"), kMaxFuzzInputBytes},
         {QStringLiteral("operations"), QJsonArray{
             QStringLiteral("local"),
             QStringLiteral("lifecycle.local-network-local"),
@@ -714,6 +874,8 @@ QJsonObject optionsJson(const Jam2RuntimeOptions& options)
         {QStringLiteral("sample_rate"), options.sample_rate},
         {QStringLiteral("audio_buffer_size"), static_cast<qint64>(options.audio_buffer_size)},
         {QStringLiteral("frame_size"), options.frame_size},
+        {QStringLiteral("network_audio_format"), QString::fromLatin1(
+            jam2::protocol::audio_format_text(options.network_audio_format))},
         {QStringLiteral("capture_ring_frames"), static_cast<qint64>(options.capture_ring_frames)},
         {QStringLiteral("playback_ring_frames"), static_cast<qint64>(options.playback_ring_frames)},
         {QStringLiteral("playback_prefill_frames"), static_cast<qint64>(options.playback_prefill_frames)},
@@ -901,8 +1063,8 @@ void writeManifest(
             {QStringLiteral("scenario"), QString::fromLatin1(kScenarioFormat)},
             {QStringLiteral("description"), QString::fromLatin1(kDescriptionFormat)},
             {QStringLiteral("automation"), QString::fromLatin1(kAutomationFormat)},
-            {QStringLiteral("control_version"), 1},
-            {QStringLiteral("udp_version"), 1}}},
+            {QStringLiteral("control_version"), jam2::control_protocol::kControlProtocolVersion},
+            {QStringLiteral("udp_version"), jam2::protocol::kProtocolVersion}}},
         {QStringLiteral("automation_limits"), QJsonObject{
             {QStringLiteral("max_scenario_bytes"), kMaxScenarioBytes},
             {QStringLiteral("max_string_bytes"), kMaxStringBytes},
@@ -1063,9 +1225,23 @@ int jam2RunDebugCommand(int argc, char* argv[])
         printRunHelp();
         return 0;
     }
+    if (subcommand == "fuzz" && hasHelpArgument(argc, argv, 3)) {
+        printFuzzHelp();
+        return 0;
+    }
     if (argc == 4 && subcommand == "describe" && std::string_view(argv[3]) == "--json") {
         std::cout << QJsonDocument(descriptionJson()).toJson(QJsonDocument::Compact).constData() << '\n';
         return 0;
+    }
+    if (argc == 5 && subcommand == "fuzz") {
+        try {
+            return runFuzzInput(
+                QString::fromLocal8Bit(argv[3]),
+                QFileInfo(QString::fromLocal8Bit(argv[4])).absoluteFilePath());
+        } catch (const std::exception& error) {
+            std::cerr << "debug fuzz failed: " << error.what() << '\n';
+            return 2;
+        }
     }
     if (argc != 4 || subcommand != "run") {
         std::cerr << kDebugUsage;
@@ -1096,7 +1272,21 @@ int jam2RunDebugCommand(int argc, char* argv[])
             throw std::runtime_error("automation handles do not match the scenario reactive contract");
         }
         QJsonObject result;
+        const auto wallStarted = std::chrono::steady_clock::now();
+        const auto cpuStarted = processCpuTimeNanoseconds();
         const int code = runScenario(*scenario, argc, argv, result);
+        const auto wallFinished = std::chrono::steady_clock::now();
+        const auto cpuFinished = processCpuTimeNanoseconds();
+        const double wallElapsedMs = std::chrono::duration<double, std::milli>(
+            wallFinished - wallStarted).count();
+        result.insert(QStringLiteral("wall_elapsed_ms"), wallElapsedMs);
+        if (cpuStarted && cpuFinished && *cpuFinished >= *cpuStarted) {
+            const double cpuElapsedMs = static_cast<double>(*cpuFinished - *cpuStarted) / 1000000.0;
+            result.insert(QStringLiteral("process_cpu_time_ms"), cpuElapsedMs);
+            result.insert(
+                QStringLiteral("process_cpu_percent_one_core"),
+                wallElapsedMs > 0.0 ? cpuElapsedMs * 100.0 / wallElapsedMs : 0.0);
+        }
         writeManifest(*scenario, code, startedUtc, result);
         std::cout << QJsonDocument(QJsonObject{
             {QStringLiteral("event"), QStringLiteral("debug_result")},

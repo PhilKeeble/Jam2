@@ -12,6 +12,7 @@ namespace jam2 {
 // Immutable local tuning for one remote audio clock. Wire/session values are
 // validated by NetworkSession before a PeerStream is constructed.
 struct PeerStreamConfig {
+    NetworkAudioFormat audio_format = NetworkAudioFormat::Pcm24Mono;
     int sample_rate = 48000;
     int frames_per_packet = 128;
     bool sample_time_playout = true;

@@ -4,6 +4,7 @@
 
 #include "ControllerLifecycleValidation.hpp"
 
+#include "AssetChunkProtocol.hpp"
 #include "ControlProtocol.hpp"
 #include "SharedSessionController.hpp"
 
@@ -90,7 +91,7 @@ bool pumpUntil(const std::function<bool()>& predicate, int timeoutMs)
 SharedSessionController::SessionContract contract()
 {
     SharedSessionController::SessionContract value;
-    value.protocolVersion = 1;
+    value.protocolVersion = jam2::protocol::kProtocolVersion;
     value.audioFormat = QStringLiteral("pcm24-mono");
     value.profile = QStringLiteral("fast");
     value.sampleRate = 48000;
@@ -208,6 +209,20 @@ QJsonObject jam2RunControllerLifecycleValidation(
     refused.close();
 
     const auto sessionPort = unusedLoopbackPort();
+    const auto invalidContractPort = unusedLoopbackPort();
+    SharedSessionController invalidContractCreator;
+    bool invalidContractRejected = false;
+    if (invalidContractPort) {
+        auto invalidConfig = creatorConfig(*invalidContractPort);
+        invalidConfig.contract.audioFormat = QStringLiteral("pcm32-mono");
+        invalidContractRejected = !invalidContractCreator.startCreator(invalidConfig);
+    }
+    check(QStringLiteral("controller.creator-rejects-unknown-audio-format-before-listen"),
+        invalidContractPort && invalidContractRejected &&
+            invalidContractCreator.snapshot().failure == TransportFailure::InvalidConfiguration &&
+            invalidContractCreator.snapshot().lifecycle == SharedSessionController::Lifecycle::Failed);
+    invalidContractCreator.close();
+
     SharedSessionController creator;
     const bool creatorStarted = sessionPort && creator.startCreator(creatorConfig(*sessionPort));
     check(QStringLiteral("controller.creator-listening"), creatorStarted &&
@@ -285,6 +300,31 @@ QJsonObject jam2RunControllerLifecycleValidation(
     }, 1000);
     check(QStringLiteral("controller.heartbeat-authenticated-and-acknowledged"),
         heartbeatObserved && joiner.snapshot().lastHeartbeatAgeMs >= 0);
+
+    const QByteArray binaryAsset = jam2::application::asset_chunk::encode({
+        QString(64, QLatin1Char('a')), 0, 0, QByteArray("binary-asset", 12)});
+    QByteArray creatorBinary;
+    QByteArray joinerBinary;
+    QString binarySource;
+    creator.onBinaryMessage = [&](const QString& source, const QByteArray& payload) {
+        binarySource = source;
+        creatorBinary = payload;
+    };
+    joiner.onBinaryMessage = [&](const QString&, const QByteArray& payload) {
+        joinerBinary = payload;
+    };
+    const bool joinerBinarySent = joined && !binaryAsset.isEmpty() &&
+        joiner.sendBinaryTo(QString{}, binaryAsset);
+    const bool creatorBinaryReceived = joinerBinarySent && pumpUntil([&] {
+        return creatorBinary == binaryAsset && binarySource == joiner.snapshot().localToken;
+    }, 1000);
+    const bool creatorBinarySent = creatorBinaryReceived &&
+        creator.sendBinaryTo(joiner.snapshot().localToken, binaryAsset);
+    const bool joinerBinaryReceived = creatorBinarySent && pumpUntil([&] {
+        return joinerBinary == binaryAsset;
+    }, 1000);
+    check(QStringLiteral("controller.authenticated-binary-asset-bidirectional"),
+        creatorBinaryReceived && joinerBinaryReceived);
 
     bool endpointMigrated = false;
     if (joined) {

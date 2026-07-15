@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .profiles import (
     AGGRESSIVE_LOCAL_PROFILE,
@@ -28,6 +28,7 @@ class BenchmarkCase:
     repeats: int = 1
     stream_ms: int = 30000
     expect_metronome: bool = False
+    network_audio_format: str = "pcm24"
 
     def __post_init__(self):
         if not self.coordinator_signal:
@@ -44,6 +45,7 @@ class BenchmarkCase:
             "repeats": self.repeats,
             "stream_ms": self.stream_ms,
             "expect_metronome": self.expect_metronome,
+            "network_audio_format": self.network_audio_format,
             "profile": self.profile.metadata(),
         }
 
@@ -225,7 +227,8 @@ def metronome_profiles():
     ]
 
 
-def benchmark_cases(signals=None, include_metronome=True, stream_ms=30000, repeats=1):
+def benchmark_cases(signals=None, include_metronome=True, stream_ms=30000, repeats=1,
+                    audio_formats=("pcm24",)):
     selected_signals = tuple(signals) if signals else DEFAULT_SIGNALS
     cases = []
     profiles = static_profiles()
@@ -276,7 +279,15 @@ def benchmark_cases(signals=None, include_metronome=True, stream_ms=30000, repea
                 signal="tone-440",
                 repeats=repeats,
                 stream_ms=stream_ms))
-    return cases
+    formats = tuple(audio_formats)
+    if not formats or not set(formats) <= {"pcm16", "pcm24"}:
+        raise ValueError("benchmark audio formats must be pcm16 and/or pcm24")
+    if formats == ("pcm24",):
+        return cases
+    return [
+        replace(case, case_id=f"{case.case_id}__{audio_format}", network_audio_format=audio_format)
+        for case in cases for audio_format in formats
+    ]
 
 
 def case_by_id(case_id, cases=None):

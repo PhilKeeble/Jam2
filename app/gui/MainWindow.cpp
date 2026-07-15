@@ -9,6 +9,7 @@
 #include "ControlProtocol.hpp"
 #include "ControlMessageValidation.hpp"
 #include "ContentLimits.hpp"
+#include "AssetChunkProtocol.hpp"
 
 #include "common.hpp"
 #include "audio_device.hpp"
@@ -719,9 +720,10 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
     QByteArray body;
     QString error;
     const bool framed = takeFrame(encoded, body, error) == TakeFrameResult::Ready;
-    QJsonObject decoded;
+    AuthenticatedPayload decoded;
     record(QStringLiteral("control.valid-authenticated-frame"),
-        framed && decodeAuthenticated(body, directionKey, 7, decoded, error) && decoded == controlMessage,
+        framed && decodeAuthenticated(body, directionKey, 7, decoded, error) &&
+            decoded.type == AuthenticatedPayloadType::Json && decoded.message == controlMessage,
         error);
 
     QByteArray tampered = body;
@@ -748,6 +750,200 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         takeFrame(excessiveFrame, body, error) == TakeFrameResult::Invalid, error);
     record(QStringLiteral("control.reject-excessive-json"),
         encodeHandshake(QJsonObject{{QStringLiteral("value"), QString(70 * 1024, QLatin1Char('x'))}}).isEmpty());
+
+    const jam2::application::asset_chunk::Chunk assetChunk{
+        QString(64, QLatin1Char('a')), 3, 12, QByteArray("raw-audio", 9)};
+    const QByteArray assetPayload = jam2::application::asset_chunk::encode(assetChunk);
+    QByteArray binaryFrame = encodeAuthenticatedBinary(assetPayload, directionKey, 9);
+    QByteArray binaryBody;
+    AuthenticatedPayload decodedBinary;
+    jam2::application::asset_chunk::Chunk decodedChunk;
+    error.clear();
+    const bool binaryFramed = takeFrame(binaryFrame, binaryBody, error) == TakeFrameResult::Ready;
+    const bool binaryAuthenticated = binaryFramed &&
+        decodeAuthenticated(binaryBody, directionKey, 9, decodedBinary, error);
+    QString chunkError;
+    const bool binaryDecoded = binaryAuthenticated &&
+        decodedBinary.type == AuthenticatedPayloadType::AssetChunk &&
+        jam2::application::asset_chunk::decode(decodedBinary.binary, decodedChunk, chunkError);
+    record(QStringLiteral("control.valid-authenticated-binary-asset-chunk"),
+        binaryDecoded && decodedChunk.sha256 == assetChunk.sha256 &&
+            decodedChunk.index == assetChunk.index && decodedChunk.offset == assetChunk.offset &&
+            decodedChunk.data == assetChunk.data,
+        error.isEmpty() ? chunkError : error);
+
+    const QJsonObject heartbeat{
+        {QStringLiteral("type"), QStringLiteral("session.heartbeat")},
+        {QStringLiteral("sample_rate"), 48000},
+        {QStringLiteral("heartbeat_id"), 1},
+    };
+    const QJsonObject heartbeatAck{
+        {QStringLiteral("type"), QStringLiteral("session.heartbeat.ack")},
+        {QStringLiteral("sample_rate"), 48000},
+        {QStringLiteral("heartbeat_id"), 1},
+    };
+    const QByteArray heartbeatFrame = encodeAuthenticated(heartbeat, directionKey, 10);
+    const QByteArray interleavedBinaryFrame = encodeAuthenticatedBinary(assetPayload, directionKey, 11);
+    const QByteArray heartbeatAckFrame = encodeAuthenticated(heartbeatAck, directionKey, 12);
+    QByteArray fragmented;
+    bool fragmentedNeedsMore = true;
+    for (qsizetype index = 0; index + 1 < interleavedBinaryFrame.size(); ++index) {
+        fragmented.append(interleavedBinaryFrame[index]);
+        QByteArray prematureBody;
+        QString prematureError;
+        fragmentedNeedsMore = fragmentedNeedsMore &&
+            takeFrame(fragmented, prematureBody, prematureError) == TakeFrameResult::NeedMore;
+    }
+    fragmented.append(interleavedBinaryFrame.back());
+    QByteArray fragmentedBody;
+    AuthenticatedPayload fragmentedPayload;
+    QString interleavingError;
+    const bool fragmentedReady =
+        takeFrame(fragmented, fragmentedBody, interleavingError) == TakeFrameResult::Ready &&
+        decodeAuthenticated(
+            fragmentedBody, directionKey, 11, fragmentedPayload, interleavingError) &&
+        fragmentedPayload.type == AuthenticatedPayloadType::AssetChunk && fragmented.isEmpty();
+
+    QByteArray coalesced = heartbeatFrame + interleavedBinaryFrame + heartbeatAckFrame;
+    bool interleaved = true;
+    for (quint64 sequence = 10; sequence <= 12; ++sequence) {
+        QByteArray nextBody;
+        AuthenticatedPayload nextPayload;
+        interleaved = interleaved &&
+            takeFrame(coalesced, nextBody, interleavingError) == TakeFrameResult::Ready &&
+            decodeAuthenticated(nextBody, directionKey, sequence, nextPayload, interleavingError);
+        if (sequence == 11) {
+            interleaved = interleaved &&
+                nextPayload.type == AuthenticatedPayloadType::AssetChunk &&
+                nextPayload.binary == assetPayload;
+        } else {
+            interleaved = interleaved && nextPayload.type == AuthenticatedPayloadType::Json;
+        }
+    }
+    record(QStringLiteral("control.binary-fragmentation-coalescing-heartbeat-interleaving"),
+        fragmentedNeedsMore && fragmentedReady && interleaved && coalesced.isEmpty(),
+        interleavingError);
+    record(QStringLiteral("control.reject-oversize-authenticated-binary"),
+        encodeAuthenticatedBinary(
+            QByteArray(kMaxBinaryBytes + 1, 'x'), directionKey, 13).isEmpty());
+
+    QByteArray malformedAsset = assetPayload;
+    malformedAsset[44] = 0x7f;
+    jam2::application::asset_chunk::Chunk rejectedChunk;
+    chunkError.clear();
+    record(QStringLiteral("asset.reject-malformed-declared-length"),
+        !jam2::application::asset_chunk::decode(malformedAsset, rejectedChunk, chunkError),
+        chunkError);
+    chunkError.clear();
+    record(QStringLiteral("asset.reject-truncated-prefix"),
+        !jam2::application::asset_chunk::decode(
+            assetPayload.left(jam2::application::asset_chunk::kHeaderBytes - 1),
+            rejectedChunk,
+            chunkError),
+        chunkError);
+
+    jam2::application::asset_chunk::ReceiveSequence assetSequence;
+    const QString assetHash(64, QLatin1Char('b'));
+    const int sequenceChunkBytes = jam2::application::limits::kMaximumAssetChunkBytes;
+    const qint64 sequenceFileBytes = static_cast<qint64>(sequenceChunkBytes) + 20;
+    QString sequenceError;
+    const bool sequenceStarted = assetSequence.begin(
+        assetHash, QStringLiteral("peer-a"), sequenceFileBytes, sequenceChunkBytes, sequenceError);
+    const jam2::application::asset_chunk::Chunk firstAsset{
+        assetHash, 0, 0, QByteArray(sequenceChunkBytes, 'a')};
+    const bool firstAccepted = assetSequence.accept(firstAsset, QStringLiteral("peer-a"), sequenceError);
+    auto overlappingAsset = firstAsset;
+    overlappingAsset.index = 1;
+    const bool overlapRejected = !assetSequence.accept(
+        overlappingAsset, QStringLiteral("peer-a"), sequenceError);
+    const jam2::application::asset_chunk::Chunk finalAsset{
+        assetHash, 1, static_cast<quint64>(sequenceChunkBytes), QByteArray(20, 'b')};
+    const bool finalAccepted = assetSequence.accept(finalAsset, QStringLiteral("peer-a"), sequenceError);
+    const bool completionAccepted = assetSequence.finish(
+        assetHash, QStringLiteral("peer-a"), 2, sequenceError);
+    record(QStringLiteral("asset.sequence-enforces-order-offset-and-completion"),
+        sequenceStarted && firstAccepted && overlapRejected && finalAccepted && completionAccepted,
+        sequenceError);
+    assetSequence.reset();
+    sequenceError.clear();
+    record(QStringLiteral("asset.sequence-cancel-rejects-late-chunk"),
+        !assetSequence.accept(finalAsset, QStringLiteral("peer-a"), sequenceError),
+        sequenceError);
+
+    jam2::application::asset_chunk::ReceiveSequence sourceBoundSequence;
+    sequenceError.clear();
+    const bool sourceBoundStarted = sourceBoundSequence.begin(
+        assetHash, QStringLiteral("peer-a"), sequenceFileBytes, sequenceChunkBytes, sequenceError);
+    const bool wrongSourceRejected = !sourceBoundSequence.accept(
+        firstAsset, QStringLiteral("peer-b"), sequenceError);
+    const bool correctSourceStillAccepted = sourceBoundSequence.accept(
+        firstAsset, QStringLiteral("peer-a"), sequenceError);
+    record(QStringLiteral("asset.sequence-source-mismatch-does-not-advance"),
+        sourceBoundStarted && wrongSourceRejected && correctSourceStillAccepted,
+        sequenceError);
+
+    jam2::application::asset_chunk::ReceiveSequence orderSequence;
+    sequenceError.clear();
+    const bool orderStarted = orderSequence.begin(
+        assetHash, QStringLiteral("peer-a"), sequenceFileBytes, sequenceChunkBytes, sequenceError);
+    auto outOfOrderAsset = firstAsset;
+    outOfOrderAsset.index = 1;
+    outOfOrderAsset.offset = static_cast<quint64>(sequenceChunkBytes);
+    const bool outOfOrderRejected = !orderSequence.accept(
+        outOfOrderAsset, QStringLiteral("peer-a"), sequenceError);
+    const bool earlyCompletionRejected = !orderSequence.finish(
+        assetHash, QStringLiteral("peer-a"), 0, sequenceError);
+    record(QStringLiteral("asset.sequence-rejects-out-of-order-and-early-completion"),
+        orderStarted && outOfOrderRejected && earlyCompletionRejected,
+        sequenceError);
+
+    jam2::application::asset_chunk::ReceiveSequence sizeSequence;
+    sequenceError.clear();
+    const bool sizeStarted = sizeSequence.begin(
+        assetHash, QStringLiteral("peer-a"), sequenceFileBytes, sequenceChunkBytes, sequenceError);
+    auto oversizedAsset = firstAsset;
+    oversizedAsset.data = QByteArray(sequenceChunkBytes + 1, 'x');
+    const bool oversizedRejected = !sizeSequence.accept(
+        oversizedAsset, QStringLiteral("peer-a"), sequenceError);
+    auto undersizedNonFinalAsset = firstAsset;
+    undersizedNonFinalAsset.data.chop(1);
+    const bool undersizedNonFinalRejected = !sizeSequence.accept(
+        undersizedNonFinalAsset, QStringLiteral("peer-a"), sequenceError);
+    auto wrongHashAsset = firstAsset;
+    wrongHashAsset.sha256 = QString(64, QLatin1Char('c'));
+    const bool wrongHashRejected = !sizeSequence.accept(
+        wrongHashAsset, QStringLiteral("peer-a"), sequenceError);
+    record(QStringLiteral("asset.sequence-rejects-chunk-bound-and-hash-mismatch"),
+        sizeStarted && oversizedRejected && undersizedNonFinalRejected && wrongHashRejected,
+        sequenceError);
+
+    jam2::application::asset_chunk::ReceiveSequence nonCanonicalChunkSequence;
+    sequenceError.clear();
+    record(QStringLiteral("asset.sequence-rejects-unbounded-chunk-count-declaration"),
+        !nonCanonicalChunkSequence.begin(
+            assetHash,
+            QStringLiteral("peer-a"),
+            sequenceFileBytes,
+            sequenceChunkBytes - 1,
+            sequenceError),
+        sequenceError);
+
+    const QByteArray maximumChunk = jam2::application::asset_chunk::encode({
+        assetHash,
+        0,
+        0,
+        QByteArray(jam2::application::limits::kMaximumAssetChunkBytes, 'm'),
+    });
+    const QByteArray excessiveChunk = jam2::application::asset_chunk::encode({
+        assetHash,
+        0,
+        0,
+        QByteArray(jam2::application::limits::kMaximumAssetChunkBytes + 1, 'x'),
+    });
+    record(QStringLiteral("asset.binary-codec-exact-chunk-bound"),
+        maximumChunk.size() == jam2::application::asset_chunk::kHeaderBytes +
+                jam2::application::limits::kMaximumAssetChunkBytes &&
+            excessiveChunk.isEmpty());
 
     QString modelError;
     record(QStringLiteral("model.accept-valid-beat"),
@@ -897,7 +1093,6 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.recording.offer")) &&
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.asset.request")) &&
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.asset.start")) &&
-        jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.asset.chunk")) &&
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.asset.done")) &&
         !jam2::application::isTrackSyncControlMessageType(QStringLiteral("metronome.settings")));
     const QJsonObject validTrackOffer{
@@ -1112,6 +1307,55 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
     }
 
     {
+        const std::array<std::int32_t, 5> samples{
+            -8388608, -256, 0, 256, 8388352};
+        const auto pcm16 = jam2::protocol::pack_pcm16(samples);
+        const auto pcm24 = jam2::protocol::pack_pcm24(samples);
+        record(QStringLiteral("protocol.pcm16-bounded-roundtrip"),
+            pcm16.size() == samples.size() * 2 &&
+            jam2::protocol::unpack_pcm16(pcm16) ==
+                std::vector<std::int32_t>(samples.begin(), samples.end()));
+        record(QStringLiteral("protocol.pcm24-bounded-roundtrip"),
+            pcm24.size() == samples.size() * 3 &&
+            jam2::protocol::unpack_pcm24(pcm24) ==
+                std::vector<std::int32_t>(samples.begin(), samples.end()));
+
+        std::array<std::uint8_t, 16> key{};
+        for (std::size_t index = 0; index < key.size(); ++index) {
+            key[index] = static_cast<std::uint8_t>(index);
+        }
+        jam2::protocol::Header header;
+        header.type = jam2::protocol::PacketType::Audio;
+        header.session_id = 0x0102030405060708ULL;
+        header.sequence = 0x0a0b0c0dU;
+        header.timing_value = 0x1112131415161718ULL;
+        auto packet16 = jam2::protocol::encode_packet(
+            header, pcm16, key, jam2::NetworkAudioFormat::Pcm16Mono);
+        const auto packet24 = jam2::protocol::encode_packet(
+            header, pcm24, key, jam2::NetworkAudioFormat::Pcm24Mono);
+        const QByteArray expected16 = QByteArray::fromHex(
+            "4a414d3202030a0008070605040302010d0c0b0a181716151413121145739dfac7e8d2bb0080ffff00000100ff7f");
+        const QByteArray expected24 = QByteArray::fromHex(
+            "4a414d3202030f0008070605040302010d0c0b0a1817161514131211f8f96efd3b229db200008000ffff00000000010000ff7f");
+        record(QStringLiteral("protocol.pcm16-golden-wire-vector"),
+            QByteArray(reinterpret_cast<const char*>(packet16.data()),
+                       static_cast<qsizetype>(packet16.size())) == expected16);
+        record(QStringLiteral("protocol.pcm24-golden-wire-vector"),
+            QByteArray(reinterpret_cast<const char*>(packet24.data()),
+                       static_cast<qsizetype>(packet24.size())) == expected24);
+        record(QStringLiteral("protocol.parse-both-audio-formats"),
+            jam2::protocol::parse_packet(
+                packet16, key, header.session_id, jam2::NetworkAudioFormat::Pcm16Mono) &&
+            jam2::protocol::parse_packet(
+                packet24, key, header.session_id, jam2::NetworkAudioFormat::Pcm24Mono));
+        packet16.pop_back();
+        record(QStringLiteral("protocol.reject-exact-size-mismatch"),
+            jam2::protocol::parse_packet(
+                packet16, key, header.session_id, jam2::NetworkAudioFormat::Pcm16Mono).error ==
+                jam2::protocol::ParseError::InvalidPayloadSize);
+    }
+
+    {
         jam2::PeerStreamConfig config;
         config.sample_rate = 44100;
         config.frames_per_packet = 64;
@@ -1121,17 +1365,17 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         jam2::protocol::Header header;
         header.type = jam2::protocol::PacketType::Audio;
         header.sequence = 1;
-        header.sample_time = 60ULL * 44100ULL;
+        header.timing_value = 60ULL * 44100ULL;
         header.payload_length = static_cast<std::uint16_t>(payload.size());
         jam2::PeerStream stream(config, 1, nullptr);
         record(QStringLiteral("peer-stream.accept-late-join-baseline"),
             stream.receiveAudio(header, payload, 2) == jam2::PeerAudioResult::Accepted);
         ++header.sequence;
-        header.sample_time += samples.size();
+        header.timing_value += samples.size();
         record(QStringLiteral("peer-stream.accept-contiguous-late-join-audio"),
             stream.receiveAudio(header, payload, 3) == jam2::PeerAudioResult::Accepted);
         ++header.sequence;
-        header.sample_time += 10ULL * 44100ULL + samples.size() + 1ULL;
+        header.timing_value += 10ULL * 44100ULL + samples.size() + 1ULL;
         record(QStringLiteral("peer-stream.reject-post-baseline-future-jump"),
             stream.receiveAudio(header, payload, 4) == jam2::PeerAudioResult::FutureSampleTime);
     }
@@ -1371,10 +1615,16 @@ MainWindow::MainWindow(QWidget* parent)
     sessionController_.onMessage = [this](const QString& sourcePeerToken, const QJsonObject& message) {
         GuiControlMessageRouter::dispatch(*this, message, sourcePeerToken);
     };
+    sessionController_.onBinaryMessage = [this](
+        const QString& sourcePeerToken,
+        const QByteArray& payload) {
+        assetTransfer_.receiveChunk(payload, sourcePeerToken);
+    };
     sessionController_.onPeerAuthenticated = [this](const QString& token, const QJsonObject& message) {
         handleMeshPeerAuthenticated(token, message);
     };
     sessionController_.onPeerDisconnected = [this](const QString& token) {
+        assetTransfer_.peerDisconnected(token);
         localMeshPeerTokens_.remove(token);
         updateMixRemotePeers();
     };
@@ -1395,6 +1645,13 @@ MainWindow::MainWindow(QWidget* parent)
             }
             sampleRateSpin_->setValue(contract.sampleRate);
             frameSizeSpin_->setValue(contract.frameSize);
+            if (networkAudioFormatBox_) {
+                const QSignalBlocker blocker(networkAudioFormatBox_);
+                const int index = networkAudioFormatBox_->findData(contract.audioFormat);
+                if (index >= 0) {
+                    networkAudioFormatBox_->setCurrentIndex(index);
+                }
+            }
         }
         auditWavCompatibilityForSession(contract.sampleRate, true);
     };
@@ -1817,8 +2074,10 @@ void MainWindow::startJam(bool createSession)
                     localMeshEndpoint(true),
                     meshMaxPeersSpin_ ? meshMaxPeersSpin_->value() : 0,
                     SharedSessionController::SessionContract{
-                        1,
-                        QStringLiteral("pcm24-mono"),
+                        jam2::protocol::kProtocolVersion,
+                        networkAudioFormatBox_
+                            ? networkAudioFormatBox_->currentData().toString()
+                            : QStringLiteral("pcm24-mono"),
                         profileBox_ ? profileBox_->currentData().toString() : QStringLiteral("fast"),
                         sampleRateSpin_->value(),
                         frameSizeSpin_->value(),
@@ -1900,6 +2159,9 @@ void MainWindow::launchLocalRuntime(Jam2RuntimeOptions options)
     startButton_->setEnabled(true);
     joinButton_->setEnabled(true);
     stopButton_->setEnabled(false);
+    if (networkAudioFormatBox_) {
+        networkAudioFormatBox_->setEnabled(true);
+    }
     if (refreshControlButton_) {
         refreshControlButton_->setEnabled(false);
     }
@@ -1930,6 +2192,9 @@ void MainWindow::prepareNetworkRuntimePresentation(bool createSession)
     startButton_->setEnabled(false);
     joinButton_->setEnabled(false);
     stopButton_->setEnabled(true);
+    if (networkAudioFormatBox_) {
+        networkAudioFormatBox_->setEnabled(false);
+    }
     if (refreshControlButton_) {
         refreshControlButton_->setEnabled(true);
     }
@@ -2181,7 +2446,7 @@ void MainWindow::showStartJamDialog()
     const QList<QWidget*> visibleWidgets{
         bindHostEdit_, portSpin_, publicHostEdit_,
         stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, noStunCheck_, profileBox_, deviceBox_,
-        inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_,
+        inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_, networkAudioFormatBox_,
         prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_,
         streamMsSpin_, streamLingerMsSpin_, statsCheck_, meshMaxPeersSpin_,
         statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
@@ -2217,6 +2482,7 @@ void MainWindow::showStartJamDialog()
     audioForm->addRow(QStringLiteral("Sample rate"), sampleRateSpin_);
     audioForm->addRow(QStringLiteral("Audio buffer size"), bufferSizeSpin_);
     audioForm->addRow(QStringLiteral("Frame size"), frameSizeSpin_);
+    audioForm->addRow(QStringLiteral("Audio quality"), networkAudioFormatBox_);
     audioForm->addRow(QStringLiteral("Playback prefill frames"), prefillSpin_);
     audioForm->addRow(QStringLiteral("Playback max frames"), playbackMaxSpin_);
     audioForm->addRow(QStringLiteral("Capture ring frames"), captureRingSpin_);
@@ -2283,7 +2549,7 @@ void MainWindow::showStartJamDialog()
         bindHostEdit_, portSpin_, publicHostEdit_,
 
         stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, noStunCheck_, profileBox_, deviceBox_,
-        inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_,
+        inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_, networkAudioFormatBox_,
         prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_,
         streamMsSpin_, streamLingerMsSpin_, statsCheck_, meshMaxPeersSpin_,
         statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
@@ -2389,6 +2655,7 @@ void MainWindow::stopJam(bool returnToLocal)
 {
     const bool shouldReturnToLocal = returnToLocal && !shuttingDown_;
     jamStartupPending_ = false;
+    assetTransfer_.cancel();
     sessionController_.close();
     // The Engine intentionally survives Leave so Perform can resume without a
     // device restart. Stop the old session click after detaching the network;
@@ -2444,6 +2711,9 @@ void MainWindow::stopJam(bool returnToLocal)
     startButton_->setEnabled(true);
     joinButton_->setEnabled(true);
     stopButton_->setEnabled(false);
+    if (networkAudioFormatBox_) {
+        networkAudioFormatBox_->setEnabled(true);
+    }
     if (refreshControlButton_) {
         refreshControlButton_->setEnabled(false);
     }
@@ -2573,7 +2843,12 @@ void MainWindow::applySessionSnapshot(const SharedSessionController::Snapshot& s
                 ++validRemotePeers;
             }
         }
-        sessionTopologyLabel_->setText(QStringLiteral("Remote Peers %1").arg(validRemotePeers));
+        const QString quality = snapshot.contract.audioFormat == QStringLiteral("pcm16-mono")
+            ? QStringLiteral("16-bit PCM")
+            : snapshot.contract.audioFormat == QStringLiteral("pcm24-mono")
+                ? QStringLiteral("24-bit PCM") : QStringLiteral("unknown PCM");
+        sessionTopologyLabel_->setText(
+            QStringLiteral("Remote Peers %1 · %2").arg(validRemotePeers).arg(quality));
         sessionTopologyLabel_->setToolTip(
             QStringLiteral("Authenticated TCP peers with an active UDP connection"));
     }
@@ -5398,6 +5673,17 @@ bool MainWindow::sendControlTo(const QString& targetPeerToken, const QJsonObject
     return sessionController_.sendTo(targetPeerToken, message);
 }
 
+bool MainWindow::sendBinaryControlTo(
+    const QString& targetPeerToken,
+    const QByteArray& payload)
+{
+    if (!looperProject_.trackSyncEnabled()) {
+        appendLog(QStringLiteral("suppressed local asset sync while sync is disabled"));
+        return false;
+    }
+    return sessionController_.sendBinaryTo(targetPeerToken, payload);
+}
+
 void MainWindow::handleSongSet(
     const QJsonObject& message,
     const QString& sourcePeerToken)
@@ -5766,6 +6052,14 @@ Jam2RuntimeOptions MainWindow::runtimeOptions() const
     }
     options.sample_rate = sampleRateSpin_->value();
     options.frame_size = frameSizeSpin_->value();
+    if (networkAudioFormatBox_) {
+        const auto format = jam2::protocol::parse_audio_format(
+            networkAudioFormatBox_->currentData().toString().toStdString());
+        if (!format) {
+            throw std::runtime_error("select a supported network audio quality");
+        }
+        options.network_audio_format = *format;
+    }
     options.drift_correction = driftCorrectionCheck_->isChecked();
     options.drift_smoothing = driftSmoothingSpin_->value();
     options.drift_deadband_ppm = driftDeadbandSpin_->value();
@@ -5829,6 +6123,14 @@ Jam2RuntimeOptions MainWindow::networkRuntimeOptions(
     options.bootstrap_role = snapshot.role == SharedSessionController::Role::Creator
         ? jam2::SessionBootstrapRole::Creator
         : jam2::SessionBootstrapRole::Joiner;
+    options.sample_rate = snapshot.contract.sampleRate;
+    options.frame_size = snapshot.contract.frameSize;
+    const auto networkAudioFormat = jam2::protocol::parse_audio_format(
+        snapshot.contract.audioFormat.toStdString());
+    if (!networkAudioFormat) {
+        throw std::runtime_error("session contract has an unsupported network audio format");
+    }
+    options.network_audio_format = *networkAudioFormat;
     options.mesh_peers_configured = true;
     for (const SharedSessionController::PeerSnapshot& peer : snapshot.peers) {
         if (peer.token == snapshot.localToken || peer.endpoint.isEmpty()) {

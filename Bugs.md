@@ -25,6 +25,13 @@ some cli commands can be removed, only really need list-device and test-device i
 
 need to add docs on how to use cli for mac as its embedded
 
+Consider adding recording for PCM24 as a choice with 16 as default since we have both in the application anyway
+
+Sort the docs to be better formatting and manual
+
+Review all the stress and benchmark cases and wittle down what we do / dont need for fine tuning 
+
+
 
 ## bugs
 

@@ -21,11 +21,11 @@ Sections describing the "current" two-process architecture record the original
 review baseline. They explain what the refactor is removing and are not current
 status; [refactor-plan.md](refactor-plan.md) is the status authority.
 
-## Current Architecture
+## Original Review Architecture (Historical)
 
 Jam2 currently uses three distinct communication paths:
 
-| Path | Current format | Relevance |
+| Path | Original review format | Relevance |
 | --- | --- | --- |
 | Engine-to-engine UDP | Fixed 48-byte binary header and packed PCM24 payload | Critical audio and timing path |
 | GUI-to-local engine | Binary framed TCP controls/meters, stdin commands, and JSONL stdout status | Local control and observability |
@@ -34,6 +34,12 @@ Jam2 currently uses three distinct communication paths:
 The live audio UDP protocol is already binary. Its header contains packet type, flags, session id, sequence, sample time, send time, payload length, and an authentication tag. Audio samples are packed as three-byte PCM24 values. Changing peer-control JSON would therefore not make received audio immediately ingestible; audio is already received through a separate binary path.
 
 The local GUI-engine control path has also partly moved away from JSON. It has a fixed binary frame header and numeric command opcodes for controls, meters, clock state, transport state, and recording events. JSON remains in engine startup/status output and the remote GUI control plane.
+
+The post-refactor implementation is different: one `jam2` application owns the
+engine in process; UDP protocol v2 uses one explicitly encoded 36-byte header
+and session-wide PCM16 or PCM24; and requested Track/Looper chunk bodies use
+bounded authenticated binary control frames. The table above remains only the
+baseline that motivated those changes.
 
 ## Benefits of Consolidation
 
@@ -97,14 +103,14 @@ Consolidation removes low-frequency control overhead:
 
 These changes can reduce incidental CPU work and improve responsiveness, but they are unlikely to materially reduce end-to-end audio latency because none of this work belongs in the real-time callback.
 
-### More Relevant UDP Fast-Path Work
+### Original UDP Fast-Path Findings (Now Implemented)
 
-The existing binary UDP implementation currently performs avoidable per-packet work:
+The original binary UDP implementation performed avoidable per-packet work:
 
 - Packet encoding returns a newly allocated `std::vector`.
-- PCM24 packing returns another allocated vector.
+- PCM24 packing returned another allocated vector.
 - Packet authentication during decoding copies the full packet so the authentication field can be zeroed.
-- PCM24 unpacking allocates a vector of decoded samples.
+- PCM24 unpacking allocated a vector of decoded samples.
 - Expected malformed network input is reported through exceptions in the receive path.
 
 Potential improvements include:
@@ -112,11 +118,14 @@ Potential improvements include:
 - Preallocated transmit and receive packet buffers.
 - Encoding into caller-owned spans.
 - Authentication without copying the packet.
-- Direct PCM24 unpacking into a preallocated audio block or ring reservation.
+- Direct PCM16/PCM24 unpacking into a preallocated audio block or ring reservation.
 - Fixed-capacity receive, reorder, and mesh-mix storage where practical.
 - Explicit parse-result codes for invalid packets instead of exceptions for routine rejection.
 
-These changes could matter more to packet processing and scaling than consolidating the binaries. They should be benchmarked independently for two-peer and mesh sessions.
+These changes now live in the Qt-free core and are measured independently for
+two-peer and mesh sessions. Phase 12 additionally replaced the old UDP layout
+once and added the creator-selected PCM16/PCM24 session format; no old parser or
+codec-selection compatibility branch remains.
 
 ### Peer JSON
 

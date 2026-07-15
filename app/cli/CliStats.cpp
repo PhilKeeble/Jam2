@@ -31,14 +31,16 @@ double signed_frames_to_ms(std::int64_t frames, double sample_rate)
     return sample_rate > 0.0 ? (static_cast<double>(frames) * 1000.0 / sample_rate) : 0.0;
 }
 
-std::size_t audio_payload_bytes(int frame_size)
+std::size_t audio_payload_bytes(int frame_size, jam2::NetworkAudioFormat format)
 {
-    return static_cast<std::size_t>(frame_size > 0 ? frame_size : 0) * 3U;
+    return jam2::protocol::audio_payload_size(
+        format,
+        static_cast<std::size_t>(frame_size > 0 ? frame_size : 0));
 }
 
-std::size_t audio_packet_bytes(int frame_size)
+std::size_t audio_packet_bytes(int frame_size, jam2::NetworkAudioFormat format)
 {
-    return jam2::protocol::kHeaderSize + audio_payload_bytes(frame_size);
+    return jam2::protocol::kHeaderSize + audio_payload_bytes(frame_size, format);
 }
 
 std::string platform_name()
@@ -62,8 +64,6 @@ void print_udp_parse_stats(const UdpParseStats& stats, std::ostream& out)
         << " magic=" << stats.wrong_magic
         << " version=" << stats.wrong_version
         << " type=" << stats.unknown_type
-        << " flags=" << stats.invalid_flags
-        << " reserved=" << stats.invalid_reserved
         << " session=" << stats.wrong_session
         << " size=" << stats.invalid_payload_size
         << " auth=" << stats.authentication_failed << "\n";
@@ -778,8 +778,13 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "OS realtime requested: " << stats.os_scheduling.realtime_requested << "\n";
     std::cout << "OS realtime active: " << stats.os_scheduling.realtime_active << "\n";
     std::cout << "OS realtime error: " << stats.os_scheduling.realtime_error << "\n";
-    std::cout << "Audio UDP payload bytes: " << audio_payload_bytes(options.frame_size) << "\n";
-    std::cout << "Audio UDP packet bytes: " << audio_packet_bytes(options.frame_size) << "\n";
+    std::cout << "Network audio bytes per sample: "
+              << jam2::protocol::audio_bytes_per_sample(options.network_audio_format) << "\n";
+    std::cout << "UDP header bytes: " << jam2::protocol::kHeaderSize << "\n";
+    std::cout << "Audio UDP payload bytes: "
+              << audio_payload_bytes(options.frame_size, options.network_audio_format) << "\n";
+    std::cout << "Audio UDP packet bytes: "
+              << audio_packet_bytes(options.frame_size, options.network_audio_format) << "\n";
     std::cout << "Audio buffer size frames: " << options.audio_buffer_size << "\n";
     std::cout << "Audio buffer size ms: "
               << frames_to_ms(static_cast<std::size_t>(options.audio_buffer_size > 0 ? options.audio_buffer_size : 0), options.sample_rate)
