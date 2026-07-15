@@ -20,13 +20,11 @@ look into why jam2-cli code still exists in repo and whether its beter just all 
 
 when start jam dialogue comes up with url it makes the windows error noise which sucks, also cant re add it to clipboard
 
+platform part of code could be labelled clearer with what is macos, what is windows etc. discuss at some point to find out how that split is handled 
 
+some cli commands can be removed, only really need list-device and test-device i think but need to discuss
 
 ## bugs
 
-volume meters seem to be stuck at the highest reached volume
+adding a track that is a non supported sample rate doesnt visibly error, still allows load then stops all playback, should just prevent the load and tell them the mismatch
 
-When i try to crop a track it is jittering and not letting me. I think the playhead marker movement seems to change it somehow. im considering removing the ability to click to move the playhead on the track or changing how it works if this is a persistent issue but it did appear to work before fine 
-
-
-max peers is not available to choose in the start jam dialogue 

@@ -94,8 +94,8 @@ These are meaningful foundations. The main v1 risks are not an obviously writabl
 
 Relevant sources:
 
-- [apps/jam2-gui/ControlServer.cpp](apps/jam2-gui/ControlServer.cpp)
-- [apps/jam2-gui/ControlClient.cpp](apps/jam2-gui/ControlClient.cpp)
+- [app/application/ControlServer.cpp](app/application/ControlServer.cpp)
+- [app/application/ControlClient.cpp](app/application/ControlClient.cpp)
 
 `ControlServer::listen` binds to `QHostAddress::Any`. That is necessary for direct remote control, but every interface can accept traffic for the duration of the session.
 
@@ -139,7 +139,7 @@ If a measured valid song/project snapshot exceeds the ordinary control-message m
 
 Relevant source:
 
-- [apps/jam2-gui/ControlClient.cpp](apps/jam2-gui/ControlClient.cpp)
+- [app/application/ControlClient.cpp](app/application/ControlClient.cpp)
 
 While `authenticated_` is false, the client specially handles `hello.ok` and `hello.error`, but any other valid JSON object falls through to `onMessage`. A malicious endpoint can send `session.settings`, `mesh.peer_list`, song, metronome, or asset messages before authentication succeeds.
 
@@ -158,8 +158,8 @@ Cost: a branch per handshake frame and no steady-state audio cost.
 
 Relevant sources:
 
-- [apps/jam2-gui/ControlServer.cpp](apps/jam2-gui/ControlServer.cpp)
-- [apps/jam2-gui/ControlClient.cpp](apps/jam2-gui/ControlClient.cpp)
+- [app/application/ControlServer.cpp](app/application/ControlServer.cpp)
+- [app/application/ControlClient.cpp](app/application/ControlClient.cpp)
 
 The client currently sends the session key as a JSON string in the initial TCP hello. TCP is not encrypted. A passive observer can obtain the key, while a malicious endpoint can return `hello.ok` without proving that it knows the key.
 
@@ -197,8 +197,8 @@ Expected cost: at most one extra handshake round trip, a few SHA-256 operations 
 
 Relevant sources:
 
-- [apps/jam2-gui/ControlServer.cpp](apps/jam2-gui/ControlServer.cpp)
-- [apps/jam2-gui/MainWindow.cpp](apps/jam2-gui/MainWindow.cpp)
+- [app/application/ControlServer.cpp](app/application/ControlServer.cpp)
+- [app/gui/MainWindow.cpp](app/gui/MainWindow.cpp)
 
 After authentication, `ControlServer` invokes `onMessage` without the source peer. Creator-side and joiner-side messages both enter `MainWindow::handleControlMessage`. The receiver therefore cannot reliably enforce which connection or role may send coordinator snapshots, membership, session errors, grid actions, project state, or assets.
 
@@ -232,10 +232,10 @@ Cost: a source lookup and a few comparisons per control message. It has no packe
 
 Relevant sources:
 
-- [apps/jam2-gui/MainWindow.cpp](apps/jam2-gui/MainWindow.cpp)
-- [apps/jam2-gui/BeatGridModel.cpp](apps/jam2-gui/BeatGridModel.cpp)
-- [apps/jam2-gui/LooperProject.cpp](apps/jam2-gui/LooperProject.cpp)
-- [apps/jam2-gui/SharedTrackController.cpp](apps/jam2-gui/SharedTrackController.cpp)
+- [app/gui/MainWindow.cpp](app/gui/MainWindow.cpp)
+- [app/gui/BeatGridModel.cpp](app/gui/BeatGridModel.cpp)
+- [app/gui/LooperProject.cpp](app/gui/LooperProject.cpp)
+- [app/gui/SharedTrackController.cpp](app/gui/SharedTrackController.cpp)
 
 Remote values are often converted with permissive `toInt`/`toDouble` defaults and then passed into models. `grid.resize`, for example, applies only a lower bound and resizes several vectors to the remote beat count. Song sections, lanes, lyrics, text fields, names, IDs, project arrays, frame positions, gains, and durations do not share one strict schema/limit layer.
 
@@ -262,7 +262,7 @@ The limits should be product-derived and centralized in one protocol/model-limit
 
 Relevant source:
 
-- [apps/jam2-gui/MainWindow.cpp](apps/jam2-gui/MainWindow.cpp)
+- [app/gui/AssetTransferService.cpp](app/gui/AssetTransferService.cpp)
 
 The sender reads the entire WAV, copies portions, base64-encodes each chunk, wraps the encoded text in JSON, and broadcasts through the generic control sender. The receiver trusts `file_bytes` enough to reserve from it, appends decoded chunks to one growing `QByteArray`, hashes only at completion, and writes the completed buffer directly to the final path.
 
@@ -291,9 +291,9 @@ Expected cost: the same O(file bytes) hashing work, small per-chunk state, and m
 
 Relevant sources:
 
-- [apps/jam2-gui/MainWindow.cpp](apps/jam2-gui/MainWindow.cpp)
-- [apps/jam2-gui/LooperProject.cpp](apps/jam2-gui/LooperProject.cpp)
-- [apps/jam2-gui/PreparedMixRenderer.cpp](apps/jam2-gui/PreparedMixRenderer.cpp)
+- [app/gui/MainWindow.cpp](app/gui/MainWindow.cpp)
+- [app/gui/LooperProject.cpp](app/gui/LooperProject.cpp)
+- [app/gui/PreparedMixRenderer.cpp](app/gui/PreparedMixRenderer.cpp)
 
 `normalizeLooperAssetPaths` replaces a lane's `asset_path` only when `asset_hash` is non-empty. A remote lane with no validated hash can therefore retain an absolute or relative path. Prepared-mix code resolves and attempts to open that path.
 
@@ -313,7 +313,7 @@ Cost: a hash-format check and local path construction per asset reference.
 
 Relevant source:
 
-- [apps/jam2-gui/PreparedMixRenderer.cpp](apps/jam2-gui/PreparedMixRenderer.cpp)
+- [app/gui/PreparedMixRenderer.cpp](app/gui/PreparedMixRenderer.cpp)
 
 The custom parser reads the complete file before applying the five-minute processed-output limit. It recognizes RIFF/WAVE and walks chunks with basic bounds, but it does not fully validate the RIFF declared size, PCM format tag, supported channel maximum, byte rate, block alignment, data alignment, duplicate critical chunks, chunk-count/header-work bounds, or all arithmetic before allocations and DSP work. It can also retain/copy large WAV data per lane.
 
@@ -348,7 +348,7 @@ Relevant sources:
 
 - [libs/jam2-core/src/protocol.cpp](libs/jam2-core/src/protocol.cpp)
 - [libs/jam2-core/src/udp_socket.cpp](libs/jam2-core/src/udp_socket.cpp)
-- [apps/jam2-cli/main.cpp](apps/jam2-cli/main.cpp)
+- [app/cli/NetworkRuntime.cpp](app/cli/NetworkRuntime.cpp)
 
 The current fixed UDP header and 64-bit SipHash tag provide session integrity at low overhead. Audio remains plaintext. The receive buffer is fixed to the expected maximum datagram size, which sharply limits direct packet-size abuse.
 
@@ -382,7 +382,7 @@ Expected steady cost is a few comparisons and bitmap operations per packet. At a
 
 Relevant sources:
 
-- [apps/jam2-gui/MainWindow.cpp](apps/jam2-gui/MainWindow.cpp)
+- [app/application/SharedSessionController.cpp](app/application/SharedSessionController.cpp)
 - [libs/jam2-core/src/udp_socket.cpp](libs/jam2-core/src/udp_socket.cpp)
 
 The current control flow accepts a peer-advertised `udp_endpoint`, distributes it, and restarts the mesh engine around the supplied endpoint. A malicious authenticated peer can advertise a third party's address, causing Jam2 peers to direct UDP traffic toward that address. A hostname can also cause repeated resolution in the current packet path.

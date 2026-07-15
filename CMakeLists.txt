@@ -16,8 +16,6 @@ else()
     endif()
 endif()
 
-option(JAM2_BUILD_GUI "Build the unified Jam2 GUI/CLI application" ON)
-
 set(JAM2_RELEASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/release" CACHE PATH "Directory for distributable app binaries")
 set(JAM2_BUILD_BIN_DIR "${CMAKE_BINARY_DIR}/bin" CACHE PATH "Directory for built app binaries before release staging")
 
@@ -74,9 +72,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE "${JAM2_BUILD_BIN_DIR}")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${JAM2_BUILD_BIN_DIR}")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${JAM2_BUILD_BIN_DIR}")
 
-if(JAM2_BUILD_GUI AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/apps/jam2-gui/CMakeLists.txt")
-    add_subdirectory(apps/jam2-gui)
-endif()
+add_subdirectory(app)
 
 unset(CMAKE_RUNTIME_OUTPUT_DIRECTORY)
 unset(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG)

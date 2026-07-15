@@ -68,6 +68,28 @@ Run the metronome timing scenarios with WAV recording/analysis:
 python tools\run_stress_local.py --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --scenario metronome-shared-grid --scenario metronome-leader-audio --scenario metronome-symmetric-delay --scenario metronome-listener-compensated --clean
 ```
 
+Run the focused shared-grid Stop/Start revision and epoch case with headless audio:
+
+```powershell
+python tools\run_stress_local.py --headless-audio --headless-audio-buffer-frames 256 --sample-rate 44100 --scenario grid-stop-restart-shared-grid --stream-ms 12000 --clean
+```
+
+Verify that repeated unchanged metronome controls neither replace a running
+authority epoch nor lose the absolute beat position when the second process
+adopts it:
+
+```powershell
+python tools\run_stress_local.py --headless-audio --sample-rate 48000 --scenario grid-noop-running-controls --stream-ms 15000 --clean
+```
+
+Run the focused peer-initiated recording reset and automatic authority-departure recovery cases:
+
+```powershell
+python tools\run_stress_local.py --headless-audio --headless-audio-buffer-frames 256 --sample-rate 44100 --scenario transport-record-start-joiner --scenario last-peer-departure-grid-restart --stream-ms 12000 --clean
+```
+
+The ordinary shared-grid verdicts compare the final periodic row before harness shutdown. This avoids treating the intentional survivor authority recovery, after the harness closes its first peer, as an active-jam disagreement. The departure case separately validates that final recovery transition.
+
 Include CLI/session/error validation checks:
 
 ```powershell

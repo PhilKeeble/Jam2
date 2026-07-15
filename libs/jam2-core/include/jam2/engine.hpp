@@ -51,6 +51,15 @@ enum class EngineTransportAction : std::uint8_t {
     TrackPlay,
 };
 
+inline constexpr bool is_track_sync_transport_action(
+    EngineTransportAction action) noexcept
+{
+    return action == EngineTransportAction::TrackRestart ||
+        action == EngineTransportAction::TrackStop ||
+        action == EngineTransportAction::TrackPlay ||
+        action == EngineTransportAction::RecordStart;
+}
+
 // Validated once by Engine::start and then retained unchanged for the lifetime
 // of the running local engine. Session/network configuration intentionally does
 // not belong here.
@@ -263,6 +272,17 @@ struct EngineSnapshot {
     std::uint64_t event_queue_drops = 0;
 };
 
+// Peaks accumulated specifically for one non-real-time GUI polling interval.
+// Consuming them resets only the GUI accumulators; lifetime diagnostic peaks
+// in EngineSnapshot remain unchanged for logs and benchmark comparisons.
+struct EngineGuiPeakSnapshot {
+    int input_peak_ppm = 0;
+    int monitor_peak_ppm = 0;
+    int remote_peak_ppm = 0;
+    int metronome_peak_ppm = 0;
+    int output_peak_ppm = 0;
+};
+
 // Cold metadata may own strings and channel lists. Keep it separate from the
 // fixed-shape snapshot used by frequent UI and diagnostics polling.
 struct EngineColdSnapshot {
@@ -298,6 +318,7 @@ public:
 
     bool submit(const EngineCommand& command) noexcept;
     EngineSnapshot snapshot() const noexcept;
+    EngineGuiPeakSnapshot consumeGuiPeaks() noexcept;
     EngineColdSnapshot coldSnapshot() const;
     bool pollEvent(EngineEvent& event) noexcept;
 

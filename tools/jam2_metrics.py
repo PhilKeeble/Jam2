@@ -174,8 +174,11 @@ def summarize_csv(path):
         "bootstrap_coordinator_peer_id": to_int(row, "bootstrap_coordinator_peer_id"),
         "arrangement_authority_peer_id": to_int(row, "arrangement_authority_peer_id"),
         "grid_authority_peer_id": to_int(row, "grid_authority_peer_id"),
+        "grid_authority_peer_id_before_shutdown": to_int(
+            before_shutdown, "grid_authority_peer_id"),
         "grid_authority_peer_ids_seen": authority_ids_seen,
         "grid_revision": int(to_float(row, "grid_revision")),
+        "grid_revision_before_shutdown": int(to_float(before_shutdown, "grid_revision")),
         "grid_revision_max": int(max(
             (to_float(item, "grid_revision") for item in authority_rows), default=0.0)),
         "grid_run_state": int(to_float(row, "grid_run_state")),
@@ -211,6 +214,11 @@ def summarize_csv(path):
         "transport_source_frame": to_float(row, "transport_source_frame"),
         "transport_requested_target_frame": to_float(row, "transport_requested_target_frame"),
         "transport_applied_target_frame": to_float(row, "transport_applied_target_frame"),
+        "prepared_source_frame": to_float(before_shutdown, "prepared_source_frame"),
+        "prepared_source_scheduled_start_frame": to_float(
+            before_shutdown, "prepared_source_scheduled_start_frame"),
+        "prepared_source_actual_start_frame": to_float(
+            before_shutdown, "prepared_source_actual_start_frame"),
         "requested_sample_rate": to_float(row, "requested_sample_rate") or to_float(row, "sample_rate"),
         "active_sample_rate": to_float(row, "active_sample_rate") or sample_rate_for_row(row),
         "frame_size": to_float(row, "frame_size"),
@@ -420,13 +428,13 @@ def combined_summary(server_csv, client_csv):
             (side.get("recovery_mix_active_slots_ratio_end", 0.0) for side in sides), default=0.0),
         "metronome_received_min": min((side.get("metronome_received", 0.0) for side in sides), default=0.0),
         "grid_authority_consensus": (
-            len({side.get("grid_authority_peer_id", 0) for side in sides}) == 1
-            and all(side.get("grid_authority_peer_id", 0) > 0 for side in sides)),
-        "grid_authority_peer_id": server.get("grid_authority_peer_id", 0),
+            len({side.get("grid_authority_peer_id_before_shutdown", 0) for side in sides}) == 1
+            and all(side.get("grid_authority_peer_id_before_shutdown", 0) > 0 for side in sides)),
+        "grid_authority_peer_id": server.get("grid_authority_peer_id_before_shutdown", 0),
         "grid_revision_consensus": (
-            len({side.get("grid_revision", 0) for side in sides}) == 1
-            and all(side.get("grid_revision", 0) > 0 for side in sides)),
-        "grid_revision": server.get("grid_revision", 0),
+            len({side.get("grid_revision_before_shutdown", 0) for side in sides}) == 1
+            and all(side.get("grid_revision_before_shutdown", 0) > 0 for side in sides)),
+        "grid_revision": server.get("grid_revision_before_shutdown", 0),
         "grid_authority_epoch_min": min((side.get("grid_authority_epoch_frame", 0.0) for side in sides), default=0.0),
         "grid_mapped_epoch_min": min((side.get("grid_mapped_epoch_frame", 0.0) for side in sides), default=0.0),
         "grid_proposals_sent_total": sum((side.get("grid_proposals_sent", 0.0) for side in sides), 0.0),

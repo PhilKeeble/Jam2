@@ -17,6 +17,12 @@ struct PatternSnapshot {
     std::uint64_t accent_mask_high = 0;
 };
 
+struct AuthorityClockMapping {
+    std::uint64_t epoch_sample_time = 0;
+    std::int64_t render_offset_frames = 0;
+    bool valid = false;
+};
+
 int clamp_bpm(int bpm);
 int clamp_beats_per_bar(int beats);
 int clamp_division(int division);
@@ -27,6 +33,10 @@ bool mask_enabled(std::uint64_t low, std::uint64_t high, int step);
 void set_mask_enabled(std::uint64_t& low, std::uint64_t& high, int step, bool enabled);
 
 std::uint64_t step_interval_samples(double sample_rate, int bpm, int division);
+AuthorityClockMapping map_authority_clock(
+    std::uint64_t authority_epoch_sample_time,
+    std::uint64_t projected_authority_sample_time,
+    std::uint64_t local_sample_time);
 double render_sample(const PatternSnapshot& pattern, std::uint64_t grid_sample, double sample_rate, double level);
 double render_sample(
     const PatternSnapshot& pattern,

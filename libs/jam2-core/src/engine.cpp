@@ -1401,6 +1401,21 @@ EngineSnapshot Engine::snapshot() const noexcept
     return result;
 }
 
+EngineGuiPeakSnapshot Engine::consumeGuiPeaks() noexcept
+{
+    EngineGuiPeakSnapshot result;
+    if (impl_ == nullptr || impl_->control == nullptr) {
+        return result;
+    }
+    auto& control = *impl_->control;
+    result.input_peak_ppm = control.gui_input_peak_ppm.exchange(0, std::memory_order_acq_rel);
+    result.monitor_peak_ppm = control.gui_monitor_peak_ppm.exchange(0, std::memory_order_acq_rel);
+    result.remote_peak_ppm = control.gui_remote_peak_ppm.exchange(0, std::memory_order_acq_rel);
+    result.metronome_peak_ppm = control.gui_metronome_peak_ppm.exchange(0, std::memory_order_acq_rel);
+    result.output_peak_ppm = control.gui_output_peak_ppm.exchange(0, std::memory_order_acq_rel);
+    return result;
+}
+
 EngineColdSnapshot Engine::coldSnapshot() const
 {
     EngineColdSnapshot result;

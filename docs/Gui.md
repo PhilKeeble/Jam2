@@ -13,6 +13,9 @@ On the host machine:
 5. Choose a tuning profile. `fast` is the default, `moderate` is more forgiving, and `safe` is the current Wi-Fi profile.
 6. Start the jam and send the generated `jam2://...` URL to the other player.
 
+If session startup fails, Jam2 shows one modal **Start Jam failed** dialog with the detailed in-process network error instead of relying on console output.
+On success, the **Jam Ready** invite window is non-modal: logging and session startup continue while it remains open, and closing it does not affect the jam.
+
 Use the same profile, sample rate, and frame size on both machines. Each player still chooses their own local device and channel numbers.
 
 ## Join A Jam
@@ -25,7 +28,7 @@ On the joining machine:
 4. The sample rate, tuning profile, and detailed engine settings are received from the host before the local engine starts.
 5. Connect.
 
-If the connection fails, first run the connection test tool described in [Connection Test](ConnectionTest.md).
+If the connection fails, Jam2 shows one modal **Join Jam failed** dialog with the detailed in-process network error. Use the connection test tool described in [Connection Test](ConnectionTest.md) if more detail is needed.
 
 ## Runtime Controls
 
@@ -68,16 +71,21 @@ The Track tab can:
 - Use a stacked lane editor with inline mute, solo, record-arm, gain, rename, remove, drag, and edge-crop controls.
 - Render the active bank to a prepared mono PCM16 cache.
 - In Perform mode, load that prepared cache into the engine and control play/stop/level there.
-- Sync host-authoritative arrangement snapshots and missing managed WAV assets by content hash when Track Sync is enabled.
+- Sync collaborative arrangement snapshots and missing managed WAV assets by content hash when Track Sync is enabled.
+- Use **Share Tracks** to explicitly reconcile all asset-backed local lanes with the jam.
 
 Perform prepared-cache playback uses the engine's ASIO/CoreAudio output path. Prepared caches must match the active engine sample rate; offline resampling is deferred.
 
-Any authenticated peer may originate shared prepared-track Play, Stop, or Restart while Track Sync is enabled. Disabling Track Sync keeps that peer's controls local and makes it disregard incoming peer track actions. Source event IDs persist across a leave/rejoin of the network worker so replay protection does not discard the first actions after reconnection.
+Any authenticated peer may originate shared arrangement edits or prepared-track Play, Stop, Restart, or Record Start while Track Sync is enabled. The creator validates each full-snapshot arrangement proposal, assigns the next ordered revision, and rebroadcasts it; this sequencing role does not make the creator the sole editor. Disabling Track Sync keeps that peer's controls local, prevents it from proposing shared edits or track actions, and makes it disregard incoming ones. The setting is peer-local and is not loaded from project or shared-arrangement snapshots. Source event IDs persist across a leave/rejoin of the network worker so replay protection does not discard the first actions after reconnection.
+
+Loading or recording a WAV while Track Sync is enabled automatically offers that local lane to the jam. Existing asset-backed lanes are also offered when a peer joins or re-enables Sync. Offers use stable contribution IDs and content hashes: a matching empty lane may be filled, while a conflicting occupied lane is preserved and the offered lane is appended. The creator requests the other peer's tracks before publishing its snapshot, so peers that built separate track sets with Sync off converge to the additive union regardless of which side re-enables Sync first. **Share Tracks** retries this reconciliation explicitly; it never replaces a different existing lane.
 
 Lane recording is local. The first version records one clip per lane, stages the recorded WAV, inserts it at timeline frame 0, and lets the user adjust the lane region afterward. The selected lane region can be moved by dragging the clip body and cropped by dragging either edge; numeric frame controls remain available for exact edits.
 
-Perform recording starts on the engine-scheduled boundary after the grid-aligned count-in. A manual Stop finishes at the next whole bar so the imported take remains bar-aligned. The waveform and Looper position markers follow the continuous engine transport and the configured beats per bar.
+Perform recording waits for a safe next whole bar, performs the grid-aligned count-in, and starts on a shared Track Sync boundary. On that boundary all opted-in peers return to `1.1` and restart prepared tracks, keeping their markers and backing tracks aligned with the take. A manual Stop finishes at the next whole bar so the imported take remains bar-aligned. The waveform and Looper position markers follow the continuous engine transport and the configured beats per bar.
 
 ## Track Recording From The GUI
 
 The GUI records Perform input takes through the running engine and records loopback takes internally, then imports the resulting WAV into the armed Track lane.
+
+The Arm dialog identifies its target by stable bank and lane IDs. If a synchronized arrangement update removes that lane or switches the active bank while the dialog is open, arming is cancelled with a warning instead of using stale lane storage.

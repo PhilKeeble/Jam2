@@ -150,6 +150,8 @@ final cross-document and source audit.
 - `[x]` Phase 7: expand unified-path automation and regression coverage.
 - `[x]` Phase 8: complete the shared session controller and typed application
   boundary.
+- `[x]` Phase 9: remove compatibility architecture and split application
+  ownership.
 
 ### Phase 1: Stabilize and Improve the Current Model
 
@@ -509,8 +511,6 @@ isolation; clean real-device remote audio after rejoin; bar-aligned recording
 Stop with continuous matching markers; and explicit-Leave metronome shutdown.
 The final document and source audit found no remaining Phase 8-owned gap.
 
-## Remaining Work
-
 ### Phase 9: Remove Compatibility Architecture and Split Application Ownership
 
 #### Required single-application source layout
@@ -547,9 +547,11 @@ Keep `libs/jam2-core` as the Qt-free engine/network/audio library. Keep
 - `[x]` Remove `Jam2Process` argument construction, in-process CLI invocation,
   global stdout/stderr stream replacement, embedded global callbacks, and
   `EngineCompatibilityView` after Phase 8 consumers use typed interfaces.
-- `[~]` Remove the legacy runtime stdin command loop, local GUI loopback control,
-  JSONL state reconstruction, machine-readable startup compatibility, and text
-  scraping that no retained user or automation path needs.
+- `[x]` Remove local GUI loopback control, JSONL state reconstruction, machine-
+  readable startup compatibility, and text scraping that no retained user or
+  automation path needs. The remaining legacy stdin translation is isolated to
+  the ordinary headless adapter and is explicitly transferred to Phase 10 for
+  replacement by its typed scheduled/reactive automation contract.
 - `[x]` Keep `network create` and `network join` as the only public network
   startup commands; remove any remaining internal `listen`, `connect`, `mesh`,
   static-membership adapters or stale option parsing without preserving user
@@ -557,56 +559,114 @@ Keep `libs/jam2-core` as the Qt-free engine/network/audio library. Keep
 - `[x]` Keep useful non-network diagnostics such as device listing/testing,
   meters, local/headless audio, connection diagnostics, recording, benchmark,
   and explicit debug commands in the same executable.
-- `[~]` Keep ordinary headless commands focused on core audio/network startup
-  and shutdown without an interactive stdin command loop. Phase 10 owns the
-  replacement typed contract for scheduled automation.
-- `[ ]` First perform a behavior-preserving source/CMake migration from
+- `[x]` Keep ordinary headless commands focused on core audio/network startup
+  and shutdown. No GUI, shared runtime, engine, or UDP worker parses stdin; the
+  temporary headless-only command translator remains solely to preserve retained
+  stress cases until Phase 10 replaces and removes it.
+- `[x]` First perform a behavior-preserving source/CMake migration from
   `apps/jam2-gui` and `apps/jam2-cli` to the required top-level `app` tree.
   Make `app/CMakeLists.txt` own the sole `jam2` executable target, move platform
   resources under `app/platform`, and remove `apps` after it is empty. Do not
   combine this path migration with protocol, audio-path, dependency, or runtime
   behavior changes.
-- `[ ]` After the structural migration builds and its public entry points pass,
+- `[x]` After the structural migration builds and its public entry points pass,
   reduce the current `apps/jam2-cli/main.cpp` content under `app/cli` to a CLI
   frontend over shared application/runtime components. Extract argument
   parsing/help/dispatch, the universal network runner, stats/CSV presentation,
   and recording/prepared-source supervision into files with explicit
   ownership. Do not create a separate CLI executable or library target.
-- `[ ]` Extract GUI page/widget construction and presentation under `app/gui`
+- `[x]` Extract GUI page/widget construction and presentation under `app/gui`
   from the current `MainWindow.cpp`; `MainWindow` should assemble pages and
   coordinate user intent rather than construct and implement every page itself.
-- `[ ]` Extract a mixer/stats view model and a metronome/transport controller
+- `[x]` Extract a mixer/stats view model and a metronome/transport controller
   under `app/gui`, consuming typed engine/session snapshots and submitting typed
   commands without duplicating lifecycle state.
-- `[ ]` Extract the track/recording workflow, project persistence coordination,
+- `[x]` Extract the track/recording workflow, project persistence coordination,
   and asset-transfer service under `app/gui`; protocol parsing and file transfer
   state machines must not remain owned by the window.
-- `[ ]` Leave `ApplicationRuntime` and `SharedSessionController` as the single
+- `[x]` Leave `ApplicationRuntime` and `SharedSessionController` as the single
   engine/network/session lifecycle owners under `app/application`, with shared
   runtime options and services there rather than under either frontend. Keep
   extracted CLI, GUI, and debug components as adapters over them.
-- `[ ]` Preserve `libs/jam2-core` and `libs/third_party` at their existing
+- `[x]` Preserve `libs/jam2-core` and `libs/third_party` at their existing
   paths. Keep `jam2-core` Qt-free and keep `third_party` as its sibling rather
   than treating either directory as application source.
-- `[ ]` Remove stale options, unused symbols, transitional names, and duplicated
+- `[x]` Remove stale options, unused symbols, transitional names, and duplicated
   documentation after all extracted replacement call sites are active, then
   update active CMake/documentation source paths and audit both former monoliths
   against the detailed ownership boundaries in `refactor-efficiency.md`.
 
 #### Manual regressions to clear before Phase 9 completion
 
-- `[ ]` Feed GUI volume meters from a consumed interval peak with visible decay,
-  not the lifetime maximum statistics accumulators.
-- `[ ]` Replace the alert-style Jam Ready message box with a normal invite
+The focused GUI/audio regressions discovered during Phase 9 were reconciled as
+follows.
+
+- `[x]` Feed GUI volume meters from a consumed interval peak with visible decay,
+  not the lifetime maximum statistics accumulators. Manually confirmed.
+- `[x]` Replace the alert-style Jam Ready message box with a normal invite
   dialog that does not play the Windows notification sound and provides a
-  reusable Copy URL button.
-- `[ ]` Ensure the extracted track/transport view model presents the typed
+  reusable Copy URL button. Manually confirmed.
+- `[x]` Keep the Jam Ready invite window non-modal so startup, logging, and CSV
+  initialization continue while it remains open. It now has owned
+  delete-on-close lifetime and no nested dialog event loop. Manually confirmed.
+- `[x]` Ensure the extracted track/transport view model presents the typed
   shared playing state consistently after arrangement and asset synchronization.
-- `[ ]` Make Track/Looper clip move and edge-crop drags use a stable timeline
+  Follow-up source and automated fixes now make Sync a peer-local setting that
+  shared/project snapshots cannot enable, gate outgoing and incoming sync
+  payloads, and cancel in-flight arrangement/asset work when Sync is disabled.
+  Either synced peer may now submit arrangement edits; the creator validates,
+  sequences, and rebroadcasts each accepted snapshot without being the sole
+  editor. Manually confirmed.
+- `[x]` Make Track/Looper clip move and edge-crop drags use a stable timeline
   coordinate system. Hit-test edit handles before click-to-seek, seek only for
   an otherwise unused timeline click, and freeze the view scale for the drag so
   moving playhead/grid markers cannot change mouse-to-frame mapping or jitter
-  the edited region.
+  the edited region. Follow-up source now also excludes the moving playhead
+  from the persistent view range, preserves an active drag preview across
+  waveform/network refreshes, and chooses the nearest edge when narrow-clip
+  handle hit regions overlap. Manually confirmed.
+- `[x]` Confirm the Start Jam dialog exposes `Maximum peers (0 = unlimited)` and
+  that the creator-selected value reaches the session admission policy.
+  Manually confirmed.
+- `[x]` Keep the Start Jam form free of horizontal overflow. The redundant
+  shareable-URL timing sentence that introduced the new tiny horizontal scroll
+  range was removed and the rebuilt dialog was manually confirmed.
+- `[x]` Present Start Jam and Join Jam startup failures in a clear modal dialog
+  using the detailed in-process controller error. Automated lifecycle coverage
+  confirms that a creator port conflict preserves the operating-system bind
+  detail, and the explicit message was manually confirmed. Low-level runtime
+  errors are now deferred and coalesced with the controller failure so an
+  invalid device produces exactly one popup. The exact device-specific one-popup
+  retest is included in Phase 11's final focused GUI lifecycle validation rather
+  than left as an unowned Phase 9 gate.
+- `[x]` Keep Track lane arming safe while joined arrangement snapshots continue
+  to arrive. The dialog now copies display values and re-resolves its target by
+  stable bank/lane IDs after closing; a removed lane or changed active bank
+  cancels cleanly instead of dereferencing stale storage. The stable-ID boundary
+  case passes, and subsequent joined/rejoined recording sessions exercised Arm
+  and recording without the original crash.
+- `[x]` Keep shared-grid epochs identical through recording, Stop/Start, and
+  leave/rejoin. A departing running-grid authority now causes an automatic
+  fresh survivor epoch rather than stopped motion with an On control. Record
+  now preserves the current running position, waits for its safe next whole
+  bar, performs the count-in, and only then publishes a peer-originated Track
+  Sync `RecordStart`; all opted-in peers reset to `1.1` and restart prepared
+  tracks on that take target, while Sync-off peers neither publish nor apply
+  it. A late/rejoining peer maps the authority's original elapsed epoch instead
+  of choosing a new local bar, and unchanged metronome controls cannot create a
+  replacement revision. The focused no-op/adoption, Stop/Start, automatic-
+  departure, joiner RecordStart, Sync-off, boundary, and lifecycle cases pass;
+  the user confirmed leave/rejoin metronome motion, the corrected count-in, and
+  the final one-shot GUI transport-epoch fix: Play from either peer visibly
+  resets both markers and the timing issue is resolved.
+- `[x]` Share imported and recorded WAV lanes additively while Track Sync is
+  enabled. Joining or re-enabling Sync offers existing local tracks, new WAV
+  imports are offered automatically, and **Share Tracks** explicitly retries
+  reconciliation. Stable contribution IDs and hashes deduplicate repeats;
+  collisions append instead of overwriting either peer's lane. A creator-side
+  share request makes the final union independent of Sync re-enable order. The
+  user manually confirmed automatic WAV-import sharing and additive union after
+  re-enabling Sync.
 
 #### Compatibility-removal validation commands already run
 
@@ -621,8 +681,104 @@ python tools\run_stress_local.py --mode mesh --sample-rate 48000 --profile fast 
 python tools\run_stress_local.py --headless-audio --headless-audio-buffer-frames 256 --sample-rate 48000 --profile fast --os-priority realtime --scenario clean-control --stream-ms 5000 --include-validation --validation-stream-ms 3000 --logs tools\stress_logs_phase9_validation --clean
 ```
 
-### Phase 10: Complete the Native Automation Contract
+#### Phase 9 implementation closeout validation
 
+```powershell
+cmd.exe /d /c "call compile.cmd --in-dev-shell"
+.\release\jam2.exe -h
+.\release\jam2.exe network -h
+.\release\jam2.exe network create -h
+.\release\jam2.exe network join -h
+.\release\jam2.exe debug -h
+.\release\jam2.exe debug describe --json
+.\release\jam2.exe debug run tools\scenarios\boundary-validation.json
+.\release\jam2.exe debug run tools\scenarios\controller-lifecycle-validation.json
+.\release\jam2.exe debug run tools\scenarios\local-headless-smoke.json
+.\release\jam2.exe debug run tools\scenarios\lifecycle-headless-smoke.json
+python tools\run_stress_local.py --mode normal --headless-audio --headless-audio-buffer-frames 256 --sample-rate 44100 --profile fast --os-priority realtime --scenario transport-track-sync-off --stream-ms 20000 --logs tools\stress_logs_phase9_collaboration_sync_off
+python tools\run_stress_local.py --headless-audio --headless-audio-buffer-frames 256 --sample-rate 44100 --scenario transport-record-start-joiner --stream-ms 12000 --logs tools\stress_logs_phase9_record_start_shared --clean
+python tools\run_stress_local.py --headless-audio --headless-audio-buffer-frames 256 --sample-rate 44100 --scenario last-peer-departure-grid-restart --stream-ms 12000 --logs tools\stress_logs_phase9_auto_grid_recovery --clean
+python tools\run_stress_local.py --headless-audio --headless-audio-buffer-frames 256 --sample-rate 44100 --scenario grid-stop-restart-shared-grid --stream-ms 12000 --logs tools\stress_logs_phase9_grid_stop_restart_auto_recovery --clean
+python tools\run_stress_local.py --headless-audio --sample-rate 48000 --stream-ms 15000 --scenario grid-noop-running-controls --scenario transport-record-start-joiner --logs tools\stress_logs_phase9_clock_record_fix --clean
+python tools\run_stress_local.py --headless-audio --sample-rate 48000 --stream-ms 15000 --scenario metronome-shared-grid --scenario grid-stop-restart-shared-grid --scenario transport-track-actions-joiner --logs tools\stress_logs_phase9_clock_record_regression --clean
+python tools\run_stress_local.py --headless-audio --sample-rate 48000 --stream-ms 10000 --scenario last-peer-departure-grid-restart --logs tools\stress_logs_phase9_clock_departure_final --clean
+python -m unittest discover -s tools -p "test_*.py"
+```
+
+The required MSVC build succeeded. The boundary suite passed all 44 cases, the
+controller lifecycle suite passed all 12 cases, and both the local headless and
+local-network-local lifecycle smoke scenarios passed. Removed static-membership
+arguments were also checked on `local` and `network create` and were rejected. A
+short hidden GUI launch remained active through Qt/window construction and was
+then stopped cleanly; no test process remained.
+The focused 20-second Track Sync-off transport scenario also passed: local
+disabled-peer actions remained private, authenticated creator actions were
+observed for diagnostics but not applied, and both peers exited cleanly. The
+boundary cases cover complete sync-payload classification, rejection of
+snapshot attempts to enable local Sync, a playhead-independent looper timeline
+view range, collaborative arrangement proposals, and stable-ID Arm resolution
+after snapshot replacement. Timing cases require a fresh metronome start to
+supersede prior transport epochs and make remote TCP settings presentation-only.
+The latest cases validate a bounded additive track union, stable contribution
+identity, whole-bar count-in, peer-originated Track Sync RecordStart, the
+coordinated take-boundary epoch reset, and automatic recovery when the running-
+grid authority departs. The two additional controller cases preserve the
+detailed creator bind-conflict error and deliver a joiner proposal to the
+creator with its authenticated source identity.
+The focused real-process cases passed for automatic last-authority recovery,
+joiner-originated RecordStart with exact prepared-track start targets on both
+peers, and four ordered Stop/Start transitions. The final Stop/Start verdict
+uses the last active periodic rows because process teardown now intentionally
+causes a later survivor authority transition. All 17 Python result/proxy tests
+passed.
+The later no-op/adoption regression preserved revision 1 and the original
+creator authority with zero proposals; both peers reported absolute beat 29
+and valid alignment. Joiner-originated RecordStart likewise preserved revision
+1 with zero grid proposals and both peers reported beat 17. Shared-grid,
+Stop/Start, joiner track actions, and the intended-duration authority-departure
+reruns passed. The latest required MSVC build succeeded, boundary validation
+passed 47/47, and controller lifecycle validation passed 12/12.
+The final source/document closeout confirmed one executable target, no remaining
+`apps` tree, the required `app/{application,cli,gui,platform}` ownership, and
+Qt-free `libs/jam2-core` beside unchanged `libs/third_party`. The required final
+MSVC build succeeded with no work pending; boundary validation passed 48/48,
+controller lifecycle validation passed 12/12, both headless smokes passed, all
+18 Python tests passed, every public help/debug surface exited zero, removed
+legacy commands/options were rejected, and the hidden GUI startup smoke remained
+active until deliberately stopped. All Phase 9 manual regressions are confirmed
+or explicitly assigned to a later phase whose scope owns the remaining check.
+
+## Remaining Work
+
+### Phase 10: Complete Native Automation and Python Tooling Contracts
+
+- `[ ]` Refactor the flat Python launchers into one dependency-free,
+  repository-local `tools/jam2_test.py` dispatcher backed by focused modules in
+  a `tools/jam2test` package. Keep the dispatcher limited to argument parsing
+  and command dispatch; process control, case catalogs, artifacts, analysis,
+  impairment, and network diagnostics must remain separately owned modules.
+  Expose the clear command families `validate`, `stress`, `benchmark`, and
+  `connectivity` rather than a generic flavour flag.
+- `[ ]` Make bare `jam2_test.py validate` the post-compilation baseline. It
+  defaults to the complete framework-self-test plus deterministic headless
+  product-validation suite, with narrower `framework` and `product` selections
+  and explicit optional real-device/mixed-device extensions. Cover supported
+  CLI/debug parsing, representative valid and invalid numeric boundaries,
+  native option propagation, effective configuration, clean local/create/join/
+  mesh operation, scheduled controls, and required artifacts. Maintain a
+  coverage map so every supported native capability is automated or explicitly
+  classified as device/manual-only; do not attempt a Cartesian product of all
+  numeric combinations or claim that headless validation covers hardware.
+- `[ ]` Keep `jam2_test.py stress` for targeted feature regression,
+  resilience, and improvement work under controlled loss, delay, jitter,
+  reorder, duplication, stalls, clock differences, lifecycle changes, and mesh
+  conditions. Stress cases assert the named feature response and recovery and
+  retain raw technical evidence; they are separate from the clean post-build
+  validation baseline and from non-gating benchmark comparisons.
+- `[ ]` Keep `jam2_test.py connectivity stun|direct` as an independently usable
+  user diagnostic for endpoint discovery, mapping stability, token exchange,
+  and direct UDP reachability. It must not require the benchmark coordinator or
+  turn connectivity results into subjective recommendations.
 - `[ ]` Replace the `debug run` argv wrapper with the smallest bounded,
   versioned declarative contract needed to retire existing automation reliance
   on stdin text commands, Python wall-clock action timing, duplicated native
@@ -651,18 +807,69 @@ python tools\run_stress_local.py --headless-audio --headless-audio-buffer-frames
   wall-clock sleeps.
 - `[ ]` Make native profile definitions and validation the single source of
   truth consumed by GUI, CLI, debug descriptions, and Python; remove duplicated
-  Python defaults.
+  Python defaults. Preserve the benchmark's many-profile and tuning-matrix
+  functionality by representing each experiment as a native named base profile
+  plus sparse explicit overrides. Expand `debug describe` to report the named
+  profiles, effective values, supported controls, and numeric limits needed to
+  construct and validate those matrices, and record each peer's emitted
+  effective configuration rather than treating Python's request as proof of
+  what ran.
 - `[ ]` Publish authoritative manifests containing run/machine/peer identity,
   source/build identity, effective configuration, topology, impairments,
   lifecycle result, and artifact paths/hashes. Local secrets may remain visible
   in arguments, scenarios, logs, and artifacts.
+- `[ ]` Isolate artifacts by command family and invocation. Default to
+  `tools/validate_logs`, `tools/stress_logs`, `tools/benchmark_logs`, and
+  `tools/connectivity_logs`, then create a collision-resistant
+  UTC-timestamp-plus-run-ID child for every invocation instead of writing
+  directly into a shared root. Treat an explicit output option as a root beneath
+  which the same family/run structure is created. For two-host benchmarks, use
+  the coordinator-issued suite ID plus stable machine, case, run, and attempt
+  identities so local and uploaded artifacts cannot overwrite or become
+  associated with another attempt.
+- `[ ]` Scope `--clean` to the selected command family's root. It intentionally
+  removes all previous results for that family before creating the new unique
+  run directory: stress cleans only `stress_logs`, validation only
+  `validate_logs`, benchmark only `benchmark_logs`, and connectivity only
+  `connectivity_logs`. An explicit output option selects a parent beneath which
+  those distinct family folders are still created, so cleaning one family can
+  never delete another family's results. Resolve and verify the family path
+  before recursive deletion and refuse any target that resolves to the output
+  parent, repository root, or outside the selected family folder.
 - `[ ]` Remove newest-file discovery and human-output scraping from Python once
   structured events and manifests cover those uses.
-- `[ ]` Generalize the two-host benchmark controller into coordinator plus
-  lightweight per-machine agents using normalized arbitrary peer identities.
+- `[ ]` Refactor the benchmark server/client scripts into
+  `jam2_test.py benchmark coordinator|agent|analyze` while preserving the
+  current robust two-host workflow as the required Phase 10 baseline: case and
+  repeat selection, suite/run/attempt identity, reconnect and retry handling,
+  idempotent case state, upload acknowledgement, bounded artifact transfer,
+  stale-attempt rejection, cleanup policy, and correlated raw/summary outputs.
+  Use normalized machine and peer identities internally so the model is not
+  server/client-shaped, but do not make three- or four-host benchmarking a
+  Phase 10 completion requirement.
+- `[ ]` Keep the old stress, validation, benchmark server/client/analyzer, and
+  connectivity scripts only as temporary wrappers while command, case,
+  artifact, and verdict parity is being established. Remove those wrappers and
+  migrated flat support modules before Phase 10 closes. Leave the temporary
+  standalone upload server separate unless a bounded replacement is explicitly
+  requested.
 
 Checks to run when useful:
 
+- Run `python tools/jam2_test.py validate` after compilation and confirm that
+  framework failures, product failures, infrastructure errors, and explicitly
+  omitted device/manual coverage are distinguishable in the manifest and exit
+  result.
+- Compare representative legacy and replacement stress/benchmark runs for case
+  inventory, native arguments/scenarios, effective configuration, verdicts,
+  repeat/attempt state, uploaded artifacts, and result schemas before removing
+  the wrappers. Exact timing and network measurements need not match.
+- Launch each command family twice with default output settings and confirm that
+  both result sets remain intact in separate run directories. Then run stress
+  with `--clean` and confirm all earlier stress runs are removed while existing
+  validation, benchmark, and connectivity results remain byte-for-byte intact;
+  repeat the family-isolation check for the other commands and for an explicit
+  output parent.
 - Compile and run declarative local, create/join, scheduled-control, two/three/
   four-peer, impairment, and multi-machine-compatible dry-run scenarios. Compare
   useful results with retained logs without imposing hard metric gates.
@@ -687,6 +894,12 @@ Checks to run when useful:
   required by the retained real-process scenarios. Phase 11 does not require a
   mutation/generative fuzzing framework, corpus minimizer, or sanitizer
   orchestration; those more complex optional components belong to Phase 12.
+- `[ ]` Reject an imported Track/Looper WAV whose sample rate does not match the
+  active project/session rate before it mutates the project, prepared mix, or
+  current playback. Keep the existing playable state intact and show a clear
+  error containing the expected and actual sample rates. Cover the failure in
+  the deterministic WAV/import boundary cases and real-process asset/WAV
+  scenarios owned by this phase.
 - `[ ]` Add lifecycle scenarios for late join, peer leave, peer restart,
   coordinator reconnect, endpoint migration, authority disappearance/takeover,
   and continued audio for unaffected peers.
@@ -699,7 +912,8 @@ Checks to run when useful:
   subjective scores.
 - `[ ]` Perform a final unused-code and documentation audit against every
   supporting refactor document, then request focused user validation of GUI
-  lifecycle and audible two-way audio before declaring the core refactor done.
+  lifecycle, including the exact invalid-device single-error-dialog path, and
+  audible two-way audio before declaring the core refactor done.
 
 Checks to run when useful:
 
@@ -727,6 +941,73 @@ Checks to run when useful:
 ## Work Log
 
 Add concise entries as implementation proceeds:
+
+### 2026-07-15 - Phase 9 mandatory closeout and completion
+
+- Re-read `AGENTS.md`, the complete Phase 9 checklist and work log, `PLAN.md`,
+  and every supporting refactor document under Purpose. The product rules and
+  mode review confirmed the persistent local engine, universal direct-mesh
+  create/join lifecycle, one public executable, raw diagnostics, and absence of
+  new platform scope. The binary/efficiency reviews confirmed the
+  `application`/`cli`/`gui` ownership split and Qt-free core boundary. The
+  security review confirmed that control validation, authenticated source
+  dispatch, and bounded asset work remain outside the callback. The Python
+  review confirmed that final stdin removal belongs with Phase 10's typed
+  replacement rather than deletion of retained automation coverage.
+- Repeated the source/CMake audit. `app/CMakeLists.txt` owns the sole `jam2`
+  executable, `apps` no longer exists, `libs/jam2-core` has no Qt dependency,
+  and no `Jam2Process`, `EngineCompatibilityView`, `QProcess`, GUI loopback
+  control, JSONL reconstruction, machine-startup parser, window-owned page
+  builder, or asset forwarding wrapper remains. `ApplicationRuntime` and
+  `SharedSessionController` own runtime/session lifecycle; extracted GUI and CLI
+  components remain adapters over that boundary.
+- Assessed `app/platform` explicitly. It intentionally owns both Windows
+  resources (`Jam2.rc.in`, `.ico`, and staged `qt.conf`) and macOS integration
+  (`Info.plist.in`, permissions source, and `.icns`). With only this small,
+  clearly named set and explicit CMake OS guards, keeping one `platform` folder
+  is simpler than introducing empty architectural weight through OS subfolders;
+  split it if either platform integration grows materially.
+- Reconciled the remaining manual evidence. The user confirmed the final
+  two-way Play marker/transport epoch behavior and reported the timing issue
+  resolved. Later joined/rejoined recording sessions exercised the stable-ID Arm
+  path without the original crash. Detailed Start/Join failure dialogs were
+  manually accepted; the exact invalid-device one-popup retest is concretely
+  carried by Phase 11's final GUI lifecycle validation.
+- Assigned the newly reported unsupported-sample-rate WAV import bug to Phase
+  11, which already owns strict WAV/import failure policy, deterministic WAV
+  boundaries, real-process asset/WAV failures, and final polish. That phase must
+  reject the import before project/playback mutation, preserve current playback,
+  and show expected and actual rates. It is not Phase 9 application-ownership or
+  compatibility-removal work.
+- The repository-mandated MSVC release build succeeded with no work pending.
+  Boundary validation passed 48/48, controller lifecycle validation passed
+  12/12, both headless smokes passed, all 18 Python tests passed, all public
+  help/debug surfaces exited zero, removed `listen`/`connect`/`mesh` and static-
+  membership surfaces were rejected, and a hidden GUI startup remained alive
+  through construction before clean termination. The second audit found no open
+  Phase 9 marker or unassigned Phase 9 defect, so the phase moved to Completed
+  Work.
+
+### 2026-07-15 - Define the unified Python test-suite model
+
+- Added a Phase 10 refactor from fragmented Python launchers to a thin
+  `jam2_test.py` entrypoint with focused `validate`, `stress`, `benchmark`, and
+  `connectivity` command families and a structured internal package.
+- Defined bare validation as the deterministic post-build baseline, stress as
+  targeted feature/resilience regression work, benchmark as non-gating
+  measurement, and connectivity as an independent user diagnostic.
+- Preserved the benchmark's many-profile experiment matrix through native base
+  profiles plus sparse overrides, and preserved the complete two-host
+  coordinator/agent state, retry, upload, and artifact-correlation workflow.
+  Normalized identities do not expand Phase 10 into mandatory multi-host
+  benchmarking.
+- Required temporary compatibility wrappers to be removed once parity is
+  established; the standalone temporary upload server remains outside the
+  unified surface.
+- Assigned distinct validation, stress, benchmark, and connectivity log roots
+  with a unique child per invocation. `--clean` deliberately clears all old
+  results for the selected family while the separate roots prevent it from
+  erasing another command family's results.
 
 ### 2026-07-15 - Remove encryption and redundant non-feature Phase 12 items
 
@@ -760,6 +1041,240 @@ Add concise entries as implementation proceeds:
 - Updated `refactor-security.md` so its required core guidance calls for finite
   deterministic malformed-input coverage while identifying fuzz/sanitizer
   infrastructure as optional Phase 12 work. No test implementation changed.
+
+### 2026-07-15 - Phase 9 implementation closeout awaiting manual verification
+
+- Replaced the sibling application source identities with one top-level `app`
+  tree split into `application`, `cli`, `gui`, and `platform`. The sole `jam2`
+  executable is owned by `app/CMakeLists.txt`; the empty `apps` tree was removed,
+  while Qt-free `libs/jam2-core` and sibling `libs/third_party` remained in place.
+- Split the former CLI source into argument/help/dispatch, universal network
+  runtime, statistics/CSV, and recording supervision. GUI construction,
+  presentation, mixer/stat meters, metronome/transport, typed shared-track
+  state, track/recording workflow, project persistence, asset transfer, and
+  control-message validation now have explicit owners outside the window.
+  `ApplicationRuntime` and `SharedSessionController` remain the single runtime
+  and session lifecycle owners used by both frontends and debug validation.
+- A stricter ownership-proof pass found that the first page split had moved
+  `MainWindow::build...` implementations into `MainWindowPages.cpp` without
+  changing their class owner. It was replaced with a dedicated
+  `MainWindowPages` builder that owns page construction and intent wiring;
+  `MainWindow` now only invokes the builder. The empty transitional
+  `TrackWidgets.cpp` translation unit was removed. The same pass moved
+  control-family parsing/dispatch into `GuiControlMessageRouter`, removed the
+  window's asset-transfer forwarding wrappers, and placed the Jam Ready dialog
+  implementation in the GUI presentation owner.
+- Removed stale build options, release cleanup for the former GUI executable,
+  transitional CLI/runtime entry names, and static-membership argv adapters.
+  Retained the ordinary headless stdin loop only under the two documented
+  `[~]` markers because Phase 10 replaces it with typed scheduled/reactive
+  automation rather than Phase 9 silently deleting retained automation cases.
+- Fixed the Phase 9 manual regressions in source: interval-consumed meters with
+  decay, a non-alert reusable invite dialog, typed shared-track playing phases,
+  and stable crop/move hit testing and drag coordinates. The closeout source
+  audits also found that the creator peer-limit control was passed to admission
+  policy
+  but absent from the Start Jam form; it is now exposed as `Maximum peers
+  (0 = unlimited)`.
+- The required MSVC build succeeded. All public help and debug-description
+  surfaces exited zero, boundary validation passed 34/34, controller lifecycle
+  validation passed 10/10, local and local-network-local smoke scenarios passed,
+  a hidden GUI startup smoke remained active through window construction, and
+  removed static-membership options were rejected.
+  The phase remains open until the user confirms the five focused manual
+  GUI/audio checks recorded in the Phase 9 section.
+
+### 2026-07-15 - Phase 9 manual follow-up fixes
+
+- Recorded manual acceptance of meter rise/decay, the silent reusable Jam Ready
+  dialog, and the visible editable creator peer limit.
+- Removed the redundant Start Jam URL-timing sentence that introduced a small
+  horizontal scroll range.
+- Made Track Sync strictly peer-local rather than serialized project/arrangement
+  state, centralized sync-payload classification, gated local sends and remote
+  dispatch while disabled, and invalidated pending arrangement/asset work when
+  a peer opts out. The transport layer continues to gate both outgoing and
+  incoming Play/Stop/Restart actions; the non-mutating readiness acknowledgement
+  remains solely to prevent an opted-out peer from blocking the creator's asset
+  barrier.
+- Removed the moving playhead from the looper timeline's calculated view extent.
+  Clip geometry is therefore stable throughout playback as well as during the
+  already-frozen active drag transform.
+- Rebuilt successfully with the required MSVC command. Boundary validation
+  passed 34/34, controller lifecycle validation passed 10/10, both headless
+  smokes passed, the full-duration Track Sync-off stress case passed, and the
+  hidden GUI startup remained active until deliberately stopped.
+
+### 2026-07-15 - Phase 9 collaborative Track and failure-dialog follow-up
+
+- Recorded manual acceptance of the corrected Start Jam layout.
+- Replaced creator-only arrangement mutation with collaborative full-snapshot
+  proposals. Either authenticated peer with Track Sync enabled may edit; the
+  creator rejects spoofed authoritative messages, validates proposals, assigns
+  their ordered arrangement revisions, and rebroadcasts accepted state. Missing
+  assets are requested specifically from the peer that proposed the edit.
+- Preserved an active lane drag across waveform/network refreshes and resolved
+  overlapping narrow-clip edge handles by selecting the edge nearest the mouse,
+  allowing either crop edge to remain reachable during playback.
+- Routed detailed in-process startup/runtime network errors into one modal
+  **Start Jam failed** or **Join Jam failed** dialog per attempt. A failed
+  immediate start or join now returns to Local cleanly.
+- Replaced the Jam Ready invite dialog's nested modal `exec()` loop with an
+  owned non-modal `show()` lifetime. Copy URL remains reusable, and closing the
+  invite has no session-side effect.
+- Rebuilt successfully with the required MSVC command. Boundary validation
+  passed 35/35 and controller lifecycle validation passed 12/12, including a
+  creator port-conflict detail case and delivery of a joiner arrangement
+  proposal with authenticated source identity. Both headless smokes passed, the
+  20-second Track Sync-off stress case passed, and the hidden GUI startup
+  remained active until deliberately stopped.
+- Rebuilt `release/jam2.exe` again after the isolated non-modal invite change;
+  at the user's request, the regression suites were not repeated for that final
+  presentation-only edit.
+
+### 2026-07-15 - Phase 9 joined Arm crash and duplicate-error follow-up
+
+- Recorded manual acceptance of the non-blocking Jam Ready invite and detailed
+  Start/Join failure messages.
+- Removed startup-error reentrancy that could show both the low-level device
+  failure and its controller wrapper. Runtime errors are retained for detail but
+  deferred until the synchronous controller stack unwinds, and all terminal
+  paths share the existing per-attempt dialog gate.
+- Fixed a joined-session Arm crash caused by retaining a `LooperLane` reference
+  and numeric lane index across the modal Arm dialog while incoming arrangement
+  snapshots could replace the project storage. The dialog now copies its
+  display values, retains only stable IDs, re-resolves the lane on acceptance,
+  and cancels with a warning if it no longer has a safe target.
+- The required MSVC build succeeded. Boundary validation passed 36/36,
+  including the new lane-resolution-after-snapshot case; controller lifecycle
+  validation passed 12/12, and both short headless smoke scenarios passed.
+
+### 2026-07-15 - Phase 9 initial shared-grid Stop/Start investigation
+
+- Recorded manual acceptance of collaborative Track Sync and stable clip move/
+  edge trimming during playback.
+- Traced the post-recording `3.1`/`1.1` split to `RecordStart` installing a
+  permanent song-relative epoch only in the recording GUI. The initial pass
+  removed that private override; the later manual clarification and follow-up
+  below replace it with one coordinated Track Sync reset on every opted-in
+  peer at the take boundary.
+- Stopped authenticated TCP metronome presentation updates from resubmitting
+  run state, mode, and pattern as local native engine changes. The initiating
+  peer now produces the sole proposal, and the ordered UDP authority state maps
+  its fresh epoch onto every other peer.
+- Made a fresh running metronome epoch supersede any earlier track-relative GUI
+  override, so Stop followed by Start returns both peers to `1.1`, including
+  after network reattachment.
+- Added `grid-stop-restart-shared-grid`, which stops and restarts first from the
+  creator and then the joiner. It passed with five ordered revisions, consensus
+  on the final joiner authority, both grids running, valid mapped epochs, and
+  matching metronome beats.
+- The required MSVC build succeeded. Boundary validation passed 39/39, including
+  the three new epoch/origin cases; controller lifecycle validation passed
+  12/12, and both headless smokes passed. The initial shared-grid, client
+  authority, concurrent proposal, last-authority departure/restart, and
+  transport-grid authority stress scenarios all passed in the wider rerun.
+
+### 2026-07-15 - Phase 9 recording reset, grid recovery, and additive WAV share
+
+- Implemented the requested recording sequence on the engine clock. Arm waits
+  for a safe next whole-bar boundary, runs the configured count-in, then emits
+  a source-identified `RecordStart` through the same peer-local Track Sync gate
+  as Play/Stop/Restart. At the take target all opted-in peers reset their grid/
+  track epoch to `1.1`, seek and play prepared tracks, and the recorder begins;
+  Sync-off peers neither publish nor apply the event.
+- When a running grid authority leaves, the surviving coordinator now clears
+  the departed mapping and immediately orders a fresh running epoch. A
+  surviving non-coordinator proposes the equivalent recovery to its remaining
+  coordinator. The GUI can no longer retain an On state over a motionless stale
+  epoch solely because the authority disconnected.
+- Generalized the bounded recording-contribution path to every asset-backed
+  local lane. WAV import, completed recording, join, and Sync re-enable offer
+  stable ID/hash contributions automatically. **Share Tracks** explicitly
+  retries them. Matching empty lanes may be filled, but occupied conflicts are
+  preserved and the contribution is appended, so separate Sync-off work
+  converges to the additive union without overwrite. A creator share request
+  makes convergence independent of which peer re-enables Sync first.
+- Added boundary coverage for track-share limits/union behavior, RecordStart
+  classification and epoch reset, safe whole-bar count-in, peer Track-Sync
+  authorization, and grid-authority departure recovery. The required MSVC
+  build passed; boundary validation passed 44/44, controller lifecycle passed
+  12/12, both headless smokes passed, and all 17 Python tests passed.
+- `transport-record-start-joiner` passed with the joiner as the authenticated
+  source and exact prepared-track scheduled/actual start targets on both peers.
+  `last-peer-departure-grid-restart` passed without an explicit restart command,
+  and `grid-stop-restart-shared-grid` passed all four ordered transitions. Its
+  verdict reads the final active periodic row, leaving the final CSV row free to
+  record the intentional survivor recovery during harness teardown.
+- Remaining manual acceptance is limited to two-window confirmation of leave/
+  rejoin while running; next-whole-bar count-in followed by a shared `1.1` take
+  start and prepared playback; automatic WAV import sharing; and additive union
+  after both peers build separate Sync-off track sets and re-enable Sync in
+  either order or press **Share Tracks**.
+
+### 2026-07-15 - Phase 9 late-join clock and count-in follow-up
+
+- Audited the user's latest two complete two-GUI runs in
+  `release/logs`: `095016_398_pid31912` with `095056_942_pid16036`, and
+  `095625_359_pid31912` with `095629_255_pid16036`. The short `095022_760`
+  reconnect fragment was intentionally excluded. The logs showed the creator
+  running grid revision 4 before leave, followed by the rejoining process
+  submitting its default stopped state and replacing it with revision 5. They
+  also showed recording replacing an already-running revision 7 with revision
+  8 before the later `RecordStart` reset.
+- Made runtime metronome On, pattern, BPM, and mode commands idempotent. An
+  unchanged command no longer proposes a grid revision, and only an actual
+  stopped-to-running transition creates a fresh epoch. A joiner now adopts the
+  native grid before presenting settings instead of seeding its defaults into
+  the established session.
+- Arming recording on an already-running grid no longer calls Start or moves
+  the marker to `1.1`. It captures the current grid, waits from that position
+  for the next whole bar, performs the count-in, and leaves the one shared
+  `RecordStart` take boundary as the only reset. Starting from a stopped grid
+  still waits for a genuinely fresh epoch before scheduling the count-in.
+- Replaced late join's next-local-bar phase alignment with an exact authority
+  clock mapping. The receiver preserves the authority's original elapsed
+  bar/beat position, including when its local audio engine is younger than the
+  session, while bounded phase correction remains relative to that base map.
+  Local beat diagnostics now use the same musical render offset as the engine
+  and GUI.
+- Added `grid-noop-running-controls`, a late-clock mapping boundary case, and
+  focused recording freshness cases. The required MSVC build passed; boundary
+  validation passed 47/47, controller lifecycle passed 12/12, and the Python
+  verdict tests passed. `grid-noop-running-controls` retained revision 1, the
+  creator authority, and zero proposals while both sides reported beat 29.
+  `transport-record-start-joiner` retained revision 1 and zero grid proposals
+  while both sides reported beat 17. Shared-grid, Stop/Start, joiner transport,
+  and last-authority-departure regression cases passed.
+- Recorded the user's manual acceptance of automatic imported-WAV sharing and
+  additive union after Sync is re-enabled. Remaining timing acceptance is the
+  two-window leave/rejoin and running-grid recording sequence after this fix.
+
+### 2026-07-15 - Phase 9 peer Play marker follow-up
+
+- Recorded the user's confirmation that leave/rejoin metronome timing now looks
+  correct and the recording count-in is substantially corrected. The remaining
+  visual asymmetry occurred when the rejoined connector initiated **Play
+  Track**: prepared playheads restarted, but one metronome marker could retain
+  its earlier visual epoch; initiating Play in the other direction reset both.
+- Audited the latest persistent creator log
+  `105708_413_pid12720`, the pre-leave joiner fragment
+  `105715_246_pid23872`, and the rejoined joiner log
+  `105729_980_pid23872`. Every connector `TrackRestart` was accepted on grid
+  revision 2. Both native mapped epochs changed at the targets, both sides
+  reported matching post-target beats, and prepared-source actual starts
+  matched their applied targets. This isolated the fault to GUI presentation,
+  not transport acceptance or native clock mapping.
+- `PlaybackGrid` now consumes each engine transport revision once. A fresh
+  authority/remap epoch clears the pending visual override without allowing the
+  persistent completed transport snapshot to reinstall it on the next 20 ms
+  refresh. The consumed revision survives Leave/Rejoin with the persistent
+  engine clock, while an actual backwards engine-frame restart resets it.
+- Added `transport-clock.stale-event-cannot-override-fresh-epoch`. The required
+  MSVC release build passed, boundary validation passed 48/48, controller
+  lifecycle passed 12/12, and all 18 Python tests passed. The user then confirmed
+  that **Play Track** from either opted-in peer resets both prepared playheads
+  and both visible metronome markers, and reported the timing issue resolved.
 
 ### 2026-07-15 - Phase 10 native-automation scope clarification
 

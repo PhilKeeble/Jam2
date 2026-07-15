@@ -26,6 +26,18 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 
+void update_interval_peak(std::atomic<int>& target, int value) noexcept
+{
+    int current = target.load(std::memory_order_relaxed);
+    while (value > current &&
+           !target.compare_exchange_weak(
+               current,
+               value,
+               std::memory_order_relaxed,
+               std::memory_order_relaxed)) {
+    }
+}
+
 class RegistryKey {
 public:
     RegistryKey() = default;
@@ -687,7 +699,7 @@ void mix_local_monitor(DuplexContext& context, std::span<std::int32_t> output, s
     const double normalized = static_cast<double>(monitor_peak) / 2147483647.0;
     const int peak_ppm = static_cast<int>(std::clamp(normalized, 0.0, 1.0) * 1000000.0);
     context.control->monitor_peak_ppm.store(peak_ppm, std::memory_order_relaxed);
-    context.control->gui_monitor_peak_ppm.store(peak_ppm, std::memory_order_relaxed);
+    update_interval_peak(context.control->gui_monitor_peak_ppm, peak_ppm);
 }
 
 void mix_prepared_source(DuplexContext& context, std::span<std::int32_t> output, std::uint64_t frame)

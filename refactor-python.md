@@ -47,7 +47,9 @@ The resulting ownership split is:
 
 ## Goals
 
-- Preserve robust local stress, two-host benchmark, and future three/four-peer benchmark workflows after binary consolidation.
+- Preserve robust local stress and the complete two-host benchmark workflow
+  after binary consolidation. Keep three/four-peer coverage in the shared
+  stress/result model without requiring multi-host benchmark coordination.
 - Exercise exactly the same engine and network implementations used by ordinary GUI sessions.
 - Support local-only, create-jam, join-jam, and multi-peer full-mesh automation through the same public bootstrap.
 - Preserve both real-device ASIO/CoreAudio tests and headless synthetic tests.
@@ -124,7 +126,13 @@ It is useful for current process, packet, fan-out, and mix evidence, but it is n
 
 ### The benchmark coordinator is one-client shaped
 
-The current benchmark control state owns one active remote peer. It cannot coordinate an arbitrary two-, three-, or four-peer full mesh, assign per-peer roles, or collect N correlated artifact sets.
+The current benchmark control state owns one active remote peer, which is the
+required two-host benchmark topology, but it also bakes `server` and `client`
+roles into control state, retries, artifacts, and aggregation. Phase 10 must
+normalize machine, peer, suite, run, and attempt identities without weakening
+that working two-host state machine. Supporting arbitrary three-/four-machine
+benchmark coordination may remain a later extension rather than a core-refactor
+gate.
 
 ### Native and Python profile definitions can drift
 
@@ -439,7 +447,105 @@ Python may define experimental override matrices, but it must not duplicate the 
 
 ## Python Architecture
 
-The existing scripts can migrate incrementally; a broad framework rewrite is unnecessary. The eventual responsibilities should be separated clearly enough that two-peer and mesh cases share the same runner and result model.
+The existing scripts should migrate incrementally into a small, dependency-free
+repository-local framework. This is a bounded ownership refactor, not a rewrite
+of the working scenario, impairment, analysis, benchmark-control, upload, or
+result logic. It is justified because the current flat launchers mix argument
+parsing, orchestration, validation, case definition, and artifact handling in
+several large files.
+
+### Unified Python command surface
+
+Use one thin entrypoint with explicit subcommands rather than a generic flavour
+argument:
+
+```text
+python tools/jam2_test.py validate [all|framework|product]
+python tools/jam2_test.py stress [options]
+python tools/jam2_test.py benchmark coordinator [options]
+python tools/jam2_test.py benchmark agent [options]
+python tools/jam2_test.py benchmark analyze <results>
+python tools/jam2_test.py connectivity stun|direct [options]
+```
+
+The entrypoint parses and dispatches only. A `tools/jam2test` package owns
+capability discovery, process execution, artifacts, and separate validation,
+stress, benchmark, connectivity, analysis, and network/impairment modules.
+Python command modules accept explicit configuration and return structured
+results; they do not parse `sys.argv` or terminate the interpreter themselves.
+Keep the package importable directly from the repository without installation
+or new third-party dependencies.
+
+Command responsibilities are deliberately different:
+
+- Bare `validate` defaults to `all`: run the fast deterministic framework
+  self-tests first and then the complete headless product-validation suite as
+  the normal post-build baseline. `framework` and `product` remain selectable,
+  and explicit device selections extend rather than silently replace headless
+  coverage. The suite distinguishes pass, failed behavior, infrastructure
+  error, and device/manual-only coverage that was not requested.
+- Validation maps every supported native CLI/debug capability to an automated
+  case or an explicit device/manual-only classification. It checks parsing,
+  representative valid and invalid boundaries, propagation into emitted
+  effective configuration, clean workflows, scheduled controls, and artifact
+  contracts. It does not exhaustively combine every numeric control.
+- `stress` owns targeted feature regression and improvement scenarios under
+  controlled impairment, clock, lifecycle, and mesh conditions. It asserts the
+  named adaptive/recovery/correctness behavior and retains raw evidence; it is
+  neither the clean post-build baseline nor a comparative benchmark.
+- `benchmark` owns repeatable measurement matrices and raw comparisons. A case
+  may be invalid when it failed to establish or produce its required evidence,
+  but network/audio quality is not converted into a release gate or subjective
+  score.
+- `connectivity` owns standalone STUN mapping and direct UDP reachability
+  diagnostics for users. It remains usable without starting a benchmark or a
+  Jam2 audio session.
+
+Existing public scripts may be thin compatibility wrappers only during
+migration. Remove them after command, case, result, and artifact parity is
+demonstrated; do not retain permanent aliases. The temporary standalone upload
+server remains separate unless a bounded replacement is explicitly requested.
+
+### Artifact roots and safe cleanup
+
+Each command family has its own default root:
+
+```text
+tools/validate_logs/
+tools/stress_logs/
+tools/benchmark_logs/
+tools/connectivity_logs/
+```
+
+Every invocation creates a new collision-resistant
+`<UTC timestamp>_<run ID>` directory beneath its family root. An explicit
+output-root option changes the parent location, not this family/run isolation.
+The runner creates the final directory atomically and selects a new run ID on a
+collision; it never reuses or chooses the newest directory implicitly.
+
+Benchmark layout is suite-aware. The coordinator creates the suite ID, and
+both machines retain stable machine/case/run/attempt subdirectories beneath
+that suite. Uploaded artifacts land in the matching coordinator suite and
+attempt tree only after their envelope identity is validated. Reconnects,
+retries, and repeated cases never overwrite a prior attempt.
+
+Default runs never delete earlier output. `--clean` intentionally removes all
+old results beneath the selected command-family root before allocating the new
+unique run directory. Thus `stress --clean` clears `stress_logs` but cannot
+touch `benchmark_logs`, `validate_logs`, or `connectivity_logs`; each other
+command behaves equivalently within its own family.
+
+An explicit output option selects a parent directory, not a shared destination:
+the framework still creates the separate family folder beneath it. Before
+recursive cleanup, resolve the canonical family path and verify that it is the
+expected direct child of that parent. Refuse a path that resolves to the output
+parent itself, the repository root, or outside the selected family folder, and
+do not follow a symlink/reparse escape. Recreate only the selected family root
+and then create the new run directory.
+
+Temporary legacy wrappers may translate their old `--logs` arguments into the
+new parent/family/run model, but must obey the same family isolation rather than
+deleting the common parent supplied by the caller.
 
 ### Scenario catalog
 
@@ -447,7 +553,11 @@ The existing scripts can migrate incrementally; a broad framework rewrite is unn
 - Produces versioned scenario JSON.
 - Stores explicit impairment parameters and seeds.
 - May contain local session keys or invite URLs where convenient.
-- Does not copy native profile defaults; it requests a profile name and explicit overrides.
+- Does not copy native profile defaults; it requests a native profile name and
+  sparse explicit overrides. Benchmark catalogs may retain many experimental
+  combinations across frame size, buffering, jitter, adaptation, drift,
+  sockets, metronome, priority, signal direction, and other supported tuning
+  controls.
 
 ### Local controller
 
@@ -463,18 +573,35 @@ The existing scripts can migrate incrementally; a broad framework rewrite is unn
 - Applies reactive commands and bounded timeouts.
 - Collects one artifact manifest per peer.
 
-### Multi-machine coordinator and agent
+### Two-host benchmark coordinator and agent
 
-The current server/client naming should evolve toward one coordinator plus one lightweight agent per machine:
+The current robust two-host benchmark is required behavior, not a transitional
+script to replace with a simpler fire-and-forget runner. Its server/client
+naming should evolve toward one coordinator and one lightweight agent per
+machine while retaining the working control, upload, and state-management
+semantics:
 
-- The coordinator owns suite/run/attempt identity and the peer/topology plan.
-- An agent can launch one or more local Jam2 peers when a test requires it.
-- The same agent protocol supports two, three, or four machines.
-- Every peer reports stable peer ID, machine ID, role, actual endpoint state, and artifact manifest.
-- A reconnect never associates stale artifacts with a newer attempt.
-- Coordinator/agent traffic remains outside the audio path.
+- The coordinator owns suite, case, run, attempt, and peer/topology identity;
+  selects cases, profiles, signals, durations, and repeats; and publishes an
+  idempotent current state.
+- The agent reconnects safely, accepts only the active attempt, launches its
+  local Jam2 peer, retains artifacts until acknowledgement, retries bounded
+  transfers, and never associates stale artifacts with a newer attempt.
+- Case retry/exhaustion, completion acknowledgement, post-case grace, optional
+  cleanup, and final `all_done` acknowledgement remain explicit and bounded.
+- Artifact upload remains outside the audio path, uses bounded streaming rather
+  than whole-archive memory reads, and correlates both machines' manifests,
+  recordings, CSV, analysis, and raw diagnostics before aggregation.
+- Every result records stable machine and peer IDs, actual endpoint/network
+  metadata, requested base profile and sparse overrides, and the native emitted
+  effective configuration from each side.
+- The initial required workflow remains two hosts. Normalized identities and a
+  reusable agent model prevent server/client-shaped results and permit later
+  extension, but three- or four-host benchmarking is not a Phase 10 gate.
 
-This can be built by generalizing the current benchmark control code rather than introducing a new external dependency.
+Build this by generalizing the current benchmark control and artifact code
+rather than replacing its proven state machine or introducing a new external
+dependency.
 
 ### Offline analysis
 
@@ -514,6 +641,12 @@ Independent positive/negative clock drift is better implemented through a determ
 
 ## Evidence and Artifact Contract
 
+Artifacts are addressed by their manifest and exact run-relative path, never by
+directory recency. The command-family roots and unique invocation directories
+defined above are part of the contract: validation, stress, benchmark, and
+connectivity output cannot overwrite one another, and consecutive runs of the
+same family remain independently inspectable.
+
 Every peer run should publish a final manifest containing at least:
 
 - Suite, run, attempt, machine, local-peer, and role identifiers.
@@ -541,6 +674,13 @@ Python should consume the published manifest rather than choose the newest file 
 
 ## Test Layers
 
+The command families describe why a run exists, while the layers below describe
+where it executes. Clean deterministic framework and product checks belong to
+`validate`; controlled feature challenges and recovery assertions belong to
+`stress`; cross-host tuning comparisons belong to `benchmark`; and reachability
+diagnosis belongs to `connectivity`. Headless, real-device, local, and
+multi-host execution do not blur those result contracts.
+
 ### Focused protocol and component validation
 
 Use independent Python codecs, malformed-input generators, deterministic process
@@ -562,6 +702,19 @@ Use native callback test input with ASIO/CoreAudio devices and controlled localh
 ### Multi-host direct benchmark
 
 Run one normal engine per real machine over the actual direct network, with the Python control plane used only for orchestration and artifact movement. These runs validate real network, hardware, and cross-machine clocks.
+
+The required Phase 10 workflow is two hosts. Preserve its full case/repeat
+state machine, reconnect/retry behavior, upload acknowledgement, stale-attempt
+rejection, and correlated artifacts while changing server/client terminology to
+coordinator/agent and requested profiles to native-base-plus-override matrices.
+
+### Connectivity diagnosis
+
+Keep STUN mapping stability and exchanged-token direct UDP probes available as
+short standalone diagnostics. Report the observed local/public endpoints,
+mapping consistency, probes sent/received, elapsed time, and explicit failure
+reason. Do not require an audio device, benchmark agent, or running Jam2 session
+and do not infer a subjective connection-quality score.
 
 ### Real-session diagnostic capture
 
@@ -621,7 +774,14 @@ wire experiments are maintained only in
 
 ## Target Capability Summary
 
-- Python stress and benchmark tooling remains supported after binary consolidation.
+- Python validation, stress, two-host benchmark, and connectivity tooling
+  remains supported after binary consolidation through one thin
+  `jam2_test.py` command surface and separately owned modules.
+- Bare validation is the deterministic headless post-build baseline, with
+  explicit optional real-device extensions and visible manual/device-only gaps.
+- Stress remains the controlled feature-regression and recovery surface;
+  benchmark remains a many-profile measurement workflow rather than a quality
+  gate; connectivity remains a standalone direct-path diagnostic.
 - GUI and debug/headless runs instantiate the same shared session controller,
   `Engine`, and `NetworkSession` implementations.
 - Local, create, join, and multi-peer full-mesh scenarios are automatable through the same public bootstrap.
@@ -648,6 +808,8 @@ wire experiments are maintained only in
 | 2026-07-13 | Use the same native engine for GUI, direct headless commands, and debug scenarios | A separate benchmark engine could pass while production behavior regresses | Debug mode changes configuration/control only, never audio/network implementation |
 | 2026-07-13 | Use declarative scenario files plus an optional inherited reactive channel | Startup files are reproducible, while recovery tests need event-driven control | Deterministic cases use the real create/join coordinator; reactive cases remain local, bounded, and opt-in |
 | 2026-07-15 | Limit native automation to concrete retained-case needs | A full mirror of the GUI/application API would duplicate surfaces and expand maintenance/security cost without replacing a demonstrated tooling problem | Ordinary commands remain the default; each new schema field or message must replace a named stdin, timing, scraping, defaults, or artifact-discovery dependency |
+| 2026-07-15 | Unify Python tooling behind validation, stress, benchmark, and connectivity commands | The current flat launchers obscure ownership and mix clean regression, impairment, measurement, and diagnosis while still containing valuable working logic | A thin `jam2_test.py` dispatcher uses focused modules; validation becomes the post-build baseline, existing behavior migrates incrementally, and temporary wrappers are removed after parity |
+| 2026-07-15 | Preserve the robust two-host benchmark and many-profile matrices | Cross-host state, retries, uploads, and effective tuning evidence are core measurement capabilities rather than obsolete server/client details | Coordinator/agent naming and normalized identities replace role-shaped results, while native base profiles plus sparse overrides retain broad experiments without duplicated defaults or a Phase 10 multi-host requirement |
 | 2026-07-14 | Treat local session-key exposure as outside the application boundary | A compromised host can already observe the process and audio; local automation should remain simple and inspectable | Keys and invites may appear in arguments, scenarios, logs, clipboard contents, benchmark state, and artifacts while network authentication remains mandatory |
 | 2026-07-13 | Keep impairment and offline analysis in Python | They are test/cold-path responsibilities and benefit from rapid iteration | Production audio stays direct and small; proxy overhead remains measurable |
 | 2026-07-13 | Schedule timing-sensitive actions using engine frames/events | Python wall-clock sleeps add supervisory jitter and cannot prove exact application time | Engine reports requested/applied timing while Python handles failure timeouts only |

@@ -227,6 +227,36 @@ class NormalVerdictTests(unittest.TestCase):
 
         self.assertEqual(verdict_for(result), "transient_stall_adaptive_padding_not_recovered")
 
+    def test_noop_metronome_controls_preserve_initial_grid(self):
+        result = normal_result("grid-noop-running-controls")
+        result["metrics"]["server"].update({
+            "local_peer_id": 1,
+            "grid_mode": 0,
+            "grid_revision_before_shutdown": 1,
+            "grid_authority_peer_id_before_shutdown": 1,
+        })
+        result["metrics"]["client"].update({
+            "local_peer_id": 2,
+            "grid_mode": 0,
+            "grid_revision_before_shutdown": 1,
+            "grid_authority_peer_id_before_shutdown": 1,
+        })
+        result["metrics"]["combined"].update({
+            "grid_authority_consensus": True,
+            "grid_revision_consensus": True,
+            "grid_authority_epoch_min": 1000,
+            "grid_mapped_epoch_min": 1000,
+            "grid_authority_states_sent_total": 1,
+            "grid_authority_states_accepted_total": 1,
+            "metronome_alignment_valid_sides": 2,
+            "grid_proposals_sent_total": 0,
+        })
+
+        self.assertEqual(verdict_for(result), "pass")
+
+        result["metrics"]["client"]["grid_revision_before_shutdown"] = 2
+        self.assertEqual(verdict_for(result), "noop_controls_created_grid_revision")
+
 
 class HeadlessVerdictTests(unittest.TestCase):
     def test_mesh_teardown_uses_established_membership_high_water(self):

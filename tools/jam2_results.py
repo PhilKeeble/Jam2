@@ -579,6 +579,41 @@ def protocol_verdict_for(result):
         if server.get("grid_authority_peer_id") != client.get("grid_authority_peer_id"):
             return "concurrent_grid_authority_conflict"
         return "pass"
+    if scenario == "grid-stop-restart-shared-grid":
+        base = metronome_verdict(result, "shared-grid")
+        if base != "pass":
+            return base
+        metrics_set = result.get("metrics", {})
+        server = metrics_set.get("server", {})
+        client = metrics_set.get("client", {})
+        if min(server.get("grid_revision_before_shutdown", 0),
+               client.get("grid_revision_before_shutdown", 0)) < 5:
+            return "stop_restart_grid_revisions_missing"
+        if (server.get("grid_authority_peer_id_before_shutdown") != client.get("local_peer_id") or
+                client.get("grid_authority_peer_id_before_shutdown") != client.get("local_peer_id")):
+            return "final_starter_not_grid_authority"
+        if min(server.get("grid_run_state_before_shutdown", 0),
+               client.get("grid_run_state_before_shutdown", 0)) != 1:
+            return "stop_restart_grid_not_running"
+        if metrics_set.get("combined", {}).get("grid_proposals_sent_total", 0) < 4:
+            return "stop_restart_grid_proposals_missing"
+        return "pass"
+    if scenario == "grid-noop-running-controls":
+        base = metronome_verdict(result, "shared-grid")
+        if base != "pass":
+            return base
+        metrics_set = result.get("metrics", {})
+        server = metrics_set.get("server", {})
+        client = metrics_set.get("client", {})
+        if (server.get("grid_revision_before_shutdown") != 1 or
+                client.get("grid_revision_before_shutdown") != 1):
+            return "noop_controls_created_grid_revision"
+        if (server.get("grid_authority_peer_id_before_shutdown") != server.get("local_peer_id") or
+                client.get("grid_authority_peer_id_before_shutdown") != server.get("local_peer_id")):
+            return "noop_controls_changed_grid_authority"
+        if metrics_set.get("combined", {}).get("grid_proposals_sent_total", 0) != 0:
+            return "noop_controls_sent_grid_proposal"
+        return "pass"
     if scenario == "last-peer-departure-grid-restart":
         server = result.get("metrics", {}).get("server", {})
         client = result.get("metrics", {}).get("client", {})
@@ -588,8 +623,9 @@ def protocol_verdict_for(result):
             return "creator_did_not_take_fresh_grid_authority"
         if server.get("grid_revision", 0) < 3:
             return "post_departure_grid_revision_not_ordered"
-        authorities = server.get("grid_authority_peer_ids_seen", [])
-        if client.get("local_peer_id") not in authorities or server.get("local_peer_id") not in authorities:
+        if (client.get("grid_authority_peer_id") != client.get("local_peer_id") or
+                client.get("grid_revision", 0) < 2 or
+                server.get("grid_revision", 0) <= client.get("grid_revision", 0)):
             return "post_departure_authority_transition_not_observed"
         if server.get("grid_authority_epoch_frame", 0) <= 0 or \
                 server.get("grid_mapped_epoch_frame", 0) <= 0:
@@ -641,6 +677,28 @@ def protocol_verdict_for(result):
         receiver = server if scenario == "transport-track-actions-joiner" else client
         if receiver.get("transport_events_accepted", 0.0) < 3.0:
             return "transport_actions_not_accepted"
+        return "pass"
+    if scenario == "transport-record-start-joiner":
+        metric_set = result.get("metrics", {})
+        server = metric_set.get("server", {})
+        client = metric_set.get("client", {})
+        expected_source = client.get("local_peer_id")
+        if (server.get("transport_source_peer_ids_seen") != [expected_source] or
+                client.get("transport_source_peer_ids_seen") != [expected_source]):
+            return "record_start_source_identity_invalid"
+        if (server.get("transport_actions_seen") != [2] or
+                client.get("transport_actions_seen") != [2]):
+            return "record_start_action_not_shared"
+        if server.get("transport_events_accepted", 0.0) <= 0.0:
+            return "record_start_not_accepted_from_joiner"
+        if min(server.get("transport_applied_target_frame", 0.0),
+               client.get("transport_applied_target_frame", 0.0)) <= 0.0:
+            return "record_start_target_not_applied"
+        for side in (server, client):
+            applied = side.get("transport_applied_target_frame", 0.0)
+            if (side.get("prepared_source_scheduled_start_frame", 0.0) != applied or
+                    side.get("prepared_source_actual_start_frame", 0.0) != applied):
+                return "record_start_did_not_play_prepared_tracks"
         return "pass"
     if scenario == "transport-track-sync-off":
         metric_set = result.get("metrics", {})

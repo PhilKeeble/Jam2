@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace jam2::metronome {
 
@@ -128,6 +129,33 @@ std::uint64_t step_interval_samples(double sample_rate, int bpm, int division)
     const double interval = (60.0 * sample_rate) /
         static_cast<double>(clamp_bpm(bpm) * clamp_division(division));
     return static_cast<std::uint64_t>(std::max(1.0, std::round(interval)));
+}
+
+AuthorityClockMapping map_authority_clock(
+    std::uint64_t authority_epoch_sample_time,
+    std::uint64_t projected_authority_sample_time,
+    std::uint64_t local_sample_time)
+{
+    if (projected_authority_sample_time < authority_epoch_sample_time) {
+        const std::uint64_t lead =
+            authority_epoch_sample_time - projected_authority_sample_time;
+        if (local_sample_time > (std::numeric_limits<std::uint64_t>::max)() - lead) {
+            return {};
+        }
+        return {local_sample_time + lead, 0, true};
+    }
+
+    const std::uint64_t elapsed =
+        projected_authority_sample_time - authority_epoch_sample_time;
+    if (local_sample_time >= elapsed) {
+        return {local_sample_time - elapsed, 0, true};
+    }
+
+    const std::uint64_t offset = elapsed - local_sample_time;
+    if (offset > static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)())) {
+        return {};
+    }
+    return {0, static_cast<std::int64_t>(offset), true};
 }
 
 double render_sample(const PatternSnapshot& input, std::uint64_t grid_sample, double sample_rate, double level)
