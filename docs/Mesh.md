@@ -60,7 +60,19 @@ A peer behind CGNAT or restrictive/symmetric NAT can fail to form one or more di
 
 ## Coordinator Loss
 
-If the creator's TCP coordinator disappears, already proven UDP audio edges continue. Membership and shared coordinator state freeze because nobody else is promoted to coordinator. Joiners attempt to reconnect to the original creator; new participants cannot join and membership cannot change until it returns.
+If the creator's TCP coordinator disappears, already proven UDP audio edges may
+continue during a bounded reconnect grace period. The creator sends an
+authenticated heartbeat every 30 seconds; a joiner allows five consecutive
+misses (about 150 seconds) for the same coordinator to return. Membership and
+new shared revisions remain uncommitted during that interruption because
+nobody else is promoted to coordinator.
+
+A valid heartbeat after reauthentication cancels the fallback. If the grace
+period expires, GUI joiners stop the network session and return to Local with a
+clear coordinator-timeout reason; headless joiners exit with the same typed
+reason. **End Jam** from the creator sends an authenticated session-end message
+and returns joiners to Local immediately. **Leave Jam** from an ordinary peer
+removes only that peer.
 
 This keeps the failure behavior simple and avoids adding leader election or a room-service protocol.
 

@@ -188,10 +188,12 @@ private:
     void maybeScheduleSharedTrackRestart();
     void applyPendingSongIfAssetsReady();
     QJsonObject normalizeLooperAssetPaths(QJsonObject song) const;
+    QJsonObject preserveQuarantinedLocalLanes(QJsonObject song);
     QString looperAssetPathForHash(const QString& hash) const;
     QJsonObject trackToJson() const;
     void loadTrackJson(const QJsonObject& object);
-    QJsonObject songToJson() const;
+    QJsonObject songToJson(bool syncCompatibleOnly = false) const;
+    void auditWavCompatibilityForSession(int expectedSampleRate, bool showModal);
     bool loadSongJson(const QJsonObject& object);
     void newSong();
     void openSong();
@@ -432,12 +434,16 @@ private:
     };
     QMap<QString, LooperWaveformPreview> looperWaveformCache_;
     bool looperWaveformWorkerRunning_ = false;
+    bool wavCompatibilityAuditRunning_ = false;
+    int pendingWavCompatibilityAuditRate_ = 0;
+    QSet<QString> reportedIncompatibleWavs_;
     struct PendingTrackContribution {
         QString sourcePeerToken;
         int bankIndex = 0;
         QString targetLaneId;
         QString assetHash;
         QString name;
+        int sampleRate = 0;
     };
     QMap<QString, PendingTrackContribution> pendingTrackContributions_;
     QSet<QString> appliedTrackContributionIds_;

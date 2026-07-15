@@ -228,6 +228,22 @@ void add_peer_stream_stats(
         target.drift_ppm = source.drift_ppm;
         target.resampler_ratio = source.resampler_ratio;
     }
+    if (source.resampler_ratio_samples > 0) {
+        if (target.resampler_ratio_samples == 0 ||
+            source.resampler_ratio_min < target.resampler_ratio_min) {
+            target.resampler_ratio_min = source.resampler_ratio_min;
+        }
+        target.resampler_ratio_max = std::max(
+            target.resampler_ratio_max,
+            source.resampler_ratio_max);
+        target.resampler_ratio_sum += source.resampler_ratio_sum;
+        target.resampler_ratio_samples += source.resampler_ratio_samples;
+        target.drift_correction_active_samples += source.drift_correction_active_samples;
+        target.drift_correction_clamped_samples += source.drift_correction_clamped_samples;
+        target.resampler_ratio_change_max_ppm_per_second = std::max(
+            target.resampler_ratio_change_max_ppm_per_second,
+            source.resampler_ratio_change_max_ppm_per_second);
+    }
     target.missing_sample_ranges += source.missing_sample_ranges;
     target.missing_audio_frames_inserted += source.missing_audio_frames_inserted;
     target.late_audio_frames_dropped += source.late_audio_frames_dropped;
@@ -250,10 +266,24 @@ void add_peer_stream_stats(
     target.adaptive_playback_target_frames = std::max(
         target.adaptive_playback_target_frames,
         source.adaptive_playback_target_frames);
+    target.adaptive_playback_min_frames = std::max(
+        target.adaptive_playback_min_frames,
+        source.adaptive_playback_min_frames);
+    target.adaptive_playback_max_frames = std::max(
+        target.adaptive_playback_max_frames,
+        source.adaptive_playback_max_frames);
     target.adaptive_playback_raise_events += source.adaptive_playback_raise_events;
     target.adaptive_playback_release_events += source.adaptive_playback_release_events;
     target.adaptive_playback_burst_events += source.adaptive_playback_burst_events;
     target.adaptive_playback_padding_frames += source.adaptive_playback_padding_frames;
+    target.adaptive_playback_time_above_target_us += source.adaptive_playback_time_above_target_us;
+    target.adaptive_playback_time_under_target_us += source.adaptive_playback_time_under_target_us;
+    target.adaptive_playback_longest_above_target_us = std::max(
+        target.adaptive_playback_longest_above_target_us,
+        source.adaptive_playback_longest_above_target_us);
+    target.adaptive_playback_longest_under_target_us = std::max(
+        target.adaptive_playback_longest_under_target_us,
+        source.adaptive_playback_longest_under_target_us);
 }
 
 void copy_peer_mixer_stats(

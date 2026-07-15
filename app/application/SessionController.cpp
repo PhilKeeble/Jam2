@@ -170,6 +170,31 @@ public:
             }
             handleAutomationEngineEvent(event);
         };
+        runtime_.onNetworkSnapshot = [this](const jam2::NetworkSessionSnapshot& snapshot) {
+            for (const jam2::NetworkPeerSnapshot& peer : snapshot.peers) {
+                const SharedSessionController::EdgeState edge =
+                    peer.descriptor.endpoint_state == jam2::PeerEndpointState::Active
+                        ? SharedSessionController::EdgeState::Active
+                        : peer.descriptor.endpoint_state == jam2::PeerEndpointState::Probing
+                            ? SharedSessionController::EdgeState::Probing
+                            : peer.descriptor.endpoint_state == jam2::PeerEndpointState::Failed
+                                ? SharedSessionController::EdgeState::Failed
+                                : SharedSessionController::EdgeState::Candidate;
+                const QString proof =
+                    peer.descriptor.endpoint_state == jam2::PeerEndpointState::Active
+                        ? QStringLiteral("active")
+                        : peer.descriptor.endpoint_state == jam2::PeerEndpointState::Probing
+                            ? QStringLiteral("probing")
+                            : peer.descriptor.endpoint_state == jam2::PeerEndpointState::Failed
+                                ? QStringLiteral("failed") : QStringLiteral("candidate");
+                sessionController_.updatePeerEdgeState(
+                    peer.descriptor.peer_id.value,
+                    edge,
+                    proof,
+                    peer.stream.expected_remote_sample_time > 0
+                        ? QStringLiteral("receiving") : QStringLiteral("waiting"));
+            }
+        };
         runtime_.onNetworkFinished = [this](int code) { handleRuntimeFinished(code); };
         sessionController_.onPeerAuthenticated = [this](const QString& token, const QJsonObject& message) {
             handleAuthenticatedPeer(token, message);
@@ -184,6 +209,14 @@ public:
             }
             peers_ = std::move(next);
             maxRemotePeerCount_ = std::max(maxRemotePeerCount_, snapshot.remotePeerCount);
+            int activeRemotePeers = 0;
+            for (const SharedSessionController::PeerSnapshot& peer : snapshot.peers) {
+                if (peer.token != snapshot.localToken &&
+                    peer.edgeState == SharedSessionController::EdgeState::Active) {
+                    ++activeRemotePeers;
+                }
+            }
+            maxActiveRemotePeerCount_ = std::max(maxActiveRemotePeerCount_, activeRemotePeers);
             coordinatorToken_ = snapshot.coordinatorToken;
             emitAutomation(QStringLiteral("peer_snapshot"), {
                 {QStringLiteral("remote_peer_count"), snapshot.remotePeerCount},
@@ -1120,20 +1153,27 @@ private:
             }
             advertisedText = QStringLiteral("%1:%2").arg(host).arg(local.port);
         }
-        if (!sessionController_.startCreator(SharedSessionController::CreatorConfig{
-                local.port,
-                sessionHex_,
-                keyHex_,
-                localToken_,
-                advertisedText,
-                sessionPeerLimit_,
-                SharedSessionController::SessionContract{
-                    1,
-                    QStringLiteral("pcm24-mono"),
-                    requestedContract_.profile,
-                    requestedContract_.sampleRate,
-                    requestedContract_.frameSize,
-                }})) {
+        SharedSessionController::CreatorConfig controlConfig{
+            local.port,
+            sessionHex_,
+            keyHex_,
+            localToken_,
+            advertisedText,
+            sessionPeerLimit_,
+            SharedSessionController::SessionContract{
+                1,
+                QStringLiteral("pcm24-mono"),
+                requestedContract_.profile,
+                requestedContract_.sampleRate,
+                requestedContract_.frameSize,
+            }};
+        controlConfig.heartbeatIntervalMs = debugNetwork_
+            .value(QStringLiteral("heartbeat_interval_ms"))
+            .toInt(SharedSessionController::kDefaultHeartbeatIntervalMs);
+        controlConfig.heartbeatMissLimit = debugNetwork_
+            .value(QStringLiteral("heartbeat_miss_limit"))
+            .toInt(SharedSessionController::kDefaultHeartbeatMissLimit);
+        if (!sessionController_.startCreator(controlConfig)) {
             writeConsoleLine(QStringLiteral("TCP coordinator listen failed: ") + sessionController_.errorString(), true);
             finish(2);
             return;
@@ -1178,7 +1218,14 @@ private:
     {
         using jam2::control_protocol::TransportEventType;
         writeConsoleLine(QStringLiteral("TCP control: ") + event.detail);
-        if (event.type == TransportEventType::Failure && !event.retryable) {
+        if (event.type == TransportEventType::SessionEnded) {
+            controlEndReason_ = event.detail;
+            controlEndFailure_ = event.failure;
+            writeConsoleLine(QStringLiteral("Jam ended by creator; network join is stopping."));
+            finish(0);
+        } else if (event.type == TransportEventType::Failure && !event.retryable) {
+            controlEndReason_ = event.detail;
+            controlEndFailure_ = event.failure;
             finish(4);
         } else if (event.type == TransportEventType::Disconnected && !finishing_) {
             if (runtime_.isNetworkRunning()) {
@@ -1190,7 +1237,7 @@ private:
 
     void connectCoordinator()
     {
-        sessionController_.startJoiner(SharedSessionController::JoinerConfig{
+        SharedSessionController::JoinerConfig controlConfig{
             QString::fromStdString(session_.endpoint.host),
             session_.endpoint.port,
             sessionHex_,
@@ -1205,7 +1252,14 @@ private:
                 requestedContract_.frameSize,
             },
             true,
-        });
+        };
+        controlConfig.heartbeatIntervalMs = debugNetwork_
+            .value(QStringLiteral("heartbeat_interval_ms"))
+            .toInt(SharedSessionController::kDefaultHeartbeatIntervalMs);
+        controlConfig.heartbeatMissLimit = debugNetwork_
+            .value(QStringLiteral("heartbeat_miss_limit"))
+            .toInt(SharedSessionController::kDefaultHeartbeatMissLimit);
+        (void)sessionController_.startJoiner(controlConfig);
     }
 
     void emitJoinConnected()
@@ -1253,6 +1307,8 @@ private:
         }
         finishing_ = true;
         exitOverride_ = code;
+        finalControlSnapshot_ = sessionController_.snapshot();
+        hasFinalControlSnapshot_ = true;
         sessionController_.close();
         if (runtime_.isNetworkRunning()) {
             runtime_.stopNetwork();
@@ -1264,6 +1320,10 @@ private:
 
     void handleRuntimeFinished(int code)
     {
+        if (!hasFinalControlSnapshot_) {
+            finalControlSnapshot_ = sessionController_.snapshot();
+            hasFinalControlSnapshot_ = true;
+        }
         sessionController_.close();
         const int finalCode = exitOverride_.value_or(code);
         publishAutomationResult(finalCode);
@@ -1284,6 +1344,17 @@ private:
             commandQueueHighWater = automationCommandQueueHighWater_;
             commandQueueDrops = automationCommandQueueDrops_;
         }
+        const SharedSessionController::Snapshot controlSnapshot = hasFinalControlSnapshot_
+            ? finalControlSnapshot_ : sessionController_.snapshot();
+        const ControlServer::Stats controlServerStats = sessionController_.serverStats();
+        const ControlClient::Stats controlClientStats = sessionController_.clientStats();
+        int activeControlPeers = 0;
+        for (const SharedSessionController::PeerSnapshot& peer : controlSnapshot.peers) {
+            if (peer.token != controlSnapshot.localToken &&
+                peer.edgeState == SharedSessionController::EdgeState::Active) {
+                ++activeControlPeers;
+            }
+        }
         QJsonObject result{
             {QStringLiteral("ok"), code == 0},
             {QStringLiteral("return_code"), code},
@@ -1303,6 +1374,37 @@ private:
                 : QJsonValue(QString::number(peerIdForToken(localToken_)))},
             {QStringLiteral("events"), automationTrace_},
             {QStringLiteral("event_trace_drops"), static_cast<qint64>(automationTraceDrops_)},
+            {QStringLiteral("heartbeat_interval_ms"), controlSnapshot.heartbeatIntervalMs},
+            {QStringLiteral("heartbeat_miss_limit"), controlSnapshot.heartbeatMissLimit},
+            {QStringLiteral("heartbeat_missed"), controlSnapshot.heartbeatMissed},
+            {QStringLiteral("last_heartbeat_age_ms"), controlSnapshot.lastHeartbeatAgeMs},
+            {QStringLiteral("heartbeats_sent"), static_cast<qint64>(controlSnapshot.heartbeatsSent)},
+            {QStringLiteral("heartbeats_received"), static_cast<qint64>(controlSnapshot.heartbeatsReceived)},
+            {QStringLiteral("heartbeat_acks_received"), static_cast<qint64>(controlSnapshot.heartbeatAcksReceived)},
+            {QStringLiteral("control_validation_rejections"), static_cast<qint64>(controlSnapshot.validationRejections)},
+            {QStringLiteral("control_authorization_rejections"), static_cast<qint64>(controlSnapshot.authorizationRejections)},
+            {QStringLiteral("control_active_remote_peers"), activeControlPeers},
+            {QStringLiteral("control_max_active_remote_peers"), maxActiveRemotePeerCount_},
+            {QStringLiteral("control_failure"), static_cast<int>(controlEndFailure_)},
+            {QStringLiteral("control_end_reason"), controlEndReason_.isEmpty()
+                ? controlSnapshot.failureDetail : controlEndReason_},
+            {QStringLiteral("control_server"), QJsonObject{
+                {QStringLiteral("accepted_connections"), static_cast<qint64>(controlServerStats.acceptedConnections)},
+                {QStringLiteral("pending_cap_rejects"), static_cast<qint64>(controlServerStats.pendingCapRejects)},
+                {QStringLiteral("authentication_rate_limit_rejects"), static_cast<qint64>(controlServerStats.authenticationRateLimitRejects)},
+                {QStringLiteral("authentication_rejects"), static_cast<qint64>(controlServerStats.authenticationRejects)},
+                {QStringLiteral("frame_rejects"), static_cast<qint64>(controlServerStats.frameRejects)},
+                {QStringLiteral("tag_or_sequence_rejects"), static_cast<qint64>(controlServerStats.sequenceOrTagRejects)},
+                {QStringLiteral("input_high_water_bytes"), static_cast<qint64>(controlServerStats.maxBufferedInputBytes)},
+                {QStringLiteral("output_high_water_bytes"), static_cast<qint64>(controlServerStats.maxQueuedOutputBytes)},
+            }},
+            {QStringLiteral("control_client"), QJsonObject{
+                {QStringLiteral("authentication_rejects"), static_cast<qint64>(controlClientStats.authenticationRejects)},
+                {QStringLiteral("frame_rejects"), static_cast<qint64>(controlClientStats.frameRejects)},
+                {QStringLiteral("tag_or_sequence_rejects"), static_cast<qint64>(controlClientStats.sequenceOrTagRejects)},
+                {QStringLiteral("input_high_water_bytes"), static_cast<qint64>(controlClientStats.maxBufferedInputBytes)},
+                {QStringLiteral("output_high_water_bytes"), static_cast<qint64>(controlClientStats.maxQueuedOutputBytes)},
+            }},
         };
         if (automationChannel_) {
             result.insert(QStringLiteral("channel_queue_high_water"),
@@ -1329,6 +1431,12 @@ private:
     bool joinedStartupEmitted_ = false;
     bool hadAuthenticatedPeer_ = false;
     bool finishing_ = false;
+    int maxActiveRemotePeerCount_ = 0;
+    QString controlEndReason_;
+    jam2::control_protocol::TransportFailure controlEndFailure_ =
+        jam2::control_protocol::TransportFailure::None;
+    SharedSessionController::Snapshot finalControlSnapshot_;
+    bool hasFinalControlSnapshot_ = false;
     int waitMs_ = 0;
     int sessionPeerLimit_ = 0;
     int maxRemotePeerCount_ = 0;

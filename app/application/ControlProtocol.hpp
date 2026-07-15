@@ -36,6 +36,7 @@ enum class TransportEventType {
     RefreshRequested,
     ReconnectScheduled,
     ReconnectAttempt,
+    SessionEnded,
     Failure,
 };
 
@@ -57,6 +58,7 @@ enum class TransportFailure {
     ContractRejected,
     MembershipRejected,
     ReconnectExhausted,
+    CoordinatorTimeout,
     RuntimeStartFailed,
 };
 

@@ -7,7 +7,6 @@ in mesh when dialogue comes up you cant re get it on clipboard as you cant highl
 
 do STUN testing with other netwroks to see what works and whether port forwarding needed 
 
-
 add user preferences so that users cna set devices for loopback / asio once and then not have to set it again unless they need to change it, maybe a seperate settings button that loads a file off disk for user preferences? 
 
 saw in output somewhere about MVP sections, make a note to look through code and finalise for release and remove stuff like that 
@@ -24,7 +23,12 @@ platform part of code could be labelled clearer with what is macos, what is wind
 
 some cli commands can be removed, only really need list-device and test-device i think but need to discuss
 
+need to add docs on how to use cli for mac as its embedded
+
+
 ## bugs
 
-adding a track that is a non supported sample rate doesnt visibly error, still allows load then stops all playback, should just prevent the load and tell them the mismatch
-
+selecting an unavailable or disconnected audio device can produce two
+sequential error dialogs. Consolidate these into one clear dialog during
+general post-refactor polish. This was explicitly accepted as non-blocking for
+Phase 11 closeout on 2026-07-15; the invalid device is still rejected visibly.

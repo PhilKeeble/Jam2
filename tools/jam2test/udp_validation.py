@@ -163,21 +163,55 @@ def inject_delayed_replay(proxy, capture, timeout_s=3.0, delay_s=0.25):
     return outcomes
 
 
-def inject_short_packet_flood(proxy, capture, packets_per_direction=2048, timeout_s=3.0):
+def inject_short_packet_flood(
+        proxy,
+        capture,
+        packets_per_direction=32768,
+        timeout_s=3.0,
+        workers_per_direction=8):
     outcomes = []
-    for direction, inject in (
-            ("client_to_server", proxy.inject_client_to_server),
-            ("server_to_client", proxy.inject_server_to_client)):
+    directions = (
+        ("client_to_server", proxy.inject_client_to_server),
+        ("server_to_client", proxy.inject_server_to_client),
+    )
+    ready = []
+    for direction, inject in directions:
         if capture.wait_for(direction, PacketType.AUDIO, timeout_s) is None:
             outcomes.append({"direction": direction, "error": "audio_capture_timeout"})
             continue
+        ready.append((direction, inject))
+
+    lock = threading.Lock()
+    sent_by_direction = {direction: 0 for direction, _ in ready}
+
+    def flood(direction, inject, start, count):
         sent = 0
-        for index in range(int(packets_per_direction)):
+        for index in range(start, start + count):
             sent += 1 if inject(struct.pack("<Q", index)) else 0
+        with lock:
+            sent_by_direction[direction] += sent
+
+    workers = max(1, int(workers_per_direction))
+    threads = []
+    for direction, inject in ready:
+        base, remainder = divmod(int(packets_per_direction), workers)
+        start = 0
+        for worker in range(workers):
+            count = base + (1 if worker < remainder else 0)
+            threads.append(threading.Thread(
+                target=flood,
+                args=(direction, inject, start, count)))
+            start += count
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    for direction, _ in ready:
         outcomes.append({
             "direction": direction,
             "requested": int(packets_per_direction),
-            "injected": sent,
+            "injected": sent_by_direction[direction],
             "datagram_bytes": 8,
+            "workers": workers,
         })
     return outcomes

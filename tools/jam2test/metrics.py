@@ -89,14 +89,6 @@ def summarize_csv(path, assessment_elapsed_ms=None):
     reordered_lost = to_float(row, "reordered_lost")
     loss = max(sequence_lost, reordered_lost)
     loss_percent = loss * 100.0 / max(1.0, recv_packets + sequence_lost)
-    periodic_depths = [to_float(period, "playback_depth_avg_ms") for period in periods]
-    recovery_rows = periodic_tail(periods)
-    recovery_slots = [to_float(period, "mix_active_slots") for period in recovery_rows]
-    recovery_slot_ratios = [
-        to_float(period, "mix_active_slots") / max(1.0, to_float(period, "mix_max_slots"))
-        for period in recovery_rows
-    ]
-    adaptive_targets = [to_float(period, "adaptive_playback_target_frames") for period in periods]
     assessment_periods = periods
     if assessment_elapsed_ms is not None:
         bounded = [
@@ -105,6 +97,19 @@ def summarize_csv(path, assessment_elapsed_ms=None):
         ]
         if bounded:
             assessment_periods = bounded
+    periodic_depths = [
+        to_float(period, "playback_depth_avg_ms") for period in assessment_periods
+    ]
+    recovery_rows = periodic_tail(assessment_periods)
+    recovery_slots = [to_float(period, "mix_active_slots") for period in recovery_rows]
+    recovery_slot_ratios = [
+        to_float(period, "mix_active_slots") / max(1.0, to_float(period, "mix_max_slots"))
+        for period in recovery_rows
+    ]
+    adaptive_targets = [
+        to_float(period, "adaptive_playback_target_frames")
+        for period in assessment_periods
+    ]
     before_shutdown = assessment_periods[-1] if assessment_periods else row
     final_underrun_time_ms = to_float(row, "playback_ring_underrun_time_ms")
     if final_underrun_time_ms <= 0.0:
@@ -216,20 +221,20 @@ def summarize_csv(path, assessment_elapsed_ms=None):
         "grid_authority_missing_events": to_float(row, "grid_authority_missing_events"),
         "leader_audio_source_peer_id": to_int(row, "leader_audio_source_peer_id"),
         "leader_audio_injected_packets": to_float(row, "leader_audio_injected_packets"),
-        "transport_source_peer_id": to_int(row, "transport_source_peer_id"),
+        "transport_source_peer_id": to_int(before_shutdown, "transport_source_peer_id"),
         "transport_source_peer_ids_seen": transport_source_ids_seen,
-        "transport_event_counter": int(to_float(row, "transport_event_counter")),
+        "transport_event_counter": int(to_float(before_shutdown, "transport_event_counter")),
         "transport_event_counter_max": int(max(
             (to_float(item, "transport_event_counter") for item in authority_rows), default=0.0)),
-        "transport_grid_revision": int(to_float(row, "transport_grid_revision")),
+        "transport_grid_revision": int(to_float(before_shutdown, "transport_grid_revision")),
         "transport_grid_revisions_seen": transport_grid_revisions_seen,
-        "transport_action": int(to_float(row, "transport_action")),
+        "transport_action": int(to_float(before_shutdown, "transport_action")),
         "transport_actions_seen": transport_actions_seen,
-        "transport_events_accepted": to_float(row, "transport_events_accepted"),
-        "transport_events_rejected": to_float(row, "transport_events_rejected"),
-        "transport_source_frame": to_float(row, "transport_source_frame"),
-        "transport_requested_target_frame": to_float(row, "transport_requested_target_frame"),
-        "transport_applied_target_frame": to_float(row, "transport_applied_target_frame"),
+        "transport_events_accepted": to_float(before_shutdown, "transport_events_accepted"),
+        "transport_events_rejected": to_float(before_shutdown, "transport_events_rejected"),
+        "transport_source_frame": to_float(before_shutdown, "transport_source_frame"),
+        "transport_requested_target_frame": to_float(before_shutdown, "transport_requested_target_frame"),
+        "transport_applied_target_frame": to_float(before_shutdown, "transport_applied_target_frame"),
         "prepared_source_frame": to_float(before_shutdown, "prepared_source_frame"),
         "prepared_source_scheduled_start_frame": to_float(
             before_shutdown, "prepared_source_scheduled_start_frame"),
@@ -364,6 +369,7 @@ def summarize_csv(path, assessment_elapsed_ms=None):
         "udp_unmatched_pongs": to_float(row, "udp_unmatched_pongs"),
         "udp_ping_slot_overwrites": to_float(row, "udp_ping_slot_overwrites"),
         "udp_work_budget_yields": to_float(row, "udp_work_budget_yields"),
+        "udp_receive_batch_max": to_float(row, "udp_receive_batch_max"),
         "reorder_pending_high_water": to_float(row, "reorder_pending_high_water"),
         "reorder_capacity_drops": to_float(row, "reorder_capacity_drops"),
         "jitter_pending_high_water": to_float(row, "jitter_pending_high_water"),
@@ -523,6 +529,8 @@ def combined_summary(server_csv, client_csv, assessment_elapsed_ms=None):
             for side in sides), 0.0),
         "udp_unmatched_pongs_total": sum((side.get("udp_unmatched_pongs", 0.0) for side in sides), 0.0),
         "udp_work_budget_yields_total": sum((side.get("udp_work_budget_yields", 0.0) for side in sides), 0.0),
+        "udp_receive_batch_max": max(
+            (side.get("udp_receive_batch_max", 0.0) for side in sides), default=0.0),
         "reorder_pending_high_water_max": max((side.get("reorder_pending_high_water", 0.0) for side in sides), default=0.0),
         "reorder_capacity_drops_total": sum((side.get("reorder_capacity_drops", 0.0) for side in sides), 0.0),
         "jitter_pending_high_water_max": max((side.get("jitter_pending_high_water", 0.0) for side in sides), default=0.0),
@@ -585,6 +593,7 @@ def write_results_csv(path, results):
         "proxy_server_to_client_recv_errors",
         "proxy_client_to_server_send_errors",
         "proxy_server_to_client_send_errors",
+        "proxy_server_to_client_unroutable_before_client",
         "peer_identity_valid",
         "session_contract_valid",
         "loss_percent_max",
@@ -649,6 +658,7 @@ def write_results_csv(path, results):
         "udp_sample_time_stale_rejects_total",
         "udp_sample_time_future_rejects_total",
         "udp_work_budget_yields_total",
+        "udp_receive_batch_max",
         "reorder_capacity_drops_total",
         "jitter_capacity_drops_total",
         "metronome_wav_ok",
@@ -752,6 +762,8 @@ def write_results_csv(path, results):
                 "proxy_server_to_client_recv_errors": proxy.get("server_to_client_recv_errors", 0),
                 "proxy_client_to_server_send_errors": proxy.get("client_to_server_send_errors", 0),
                 "proxy_server_to_client_send_errors": proxy.get("server_to_client_send_errors", 0),
+                "proxy_server_to_client_unroutable_before_client": proxy.get(
+                    "server_to_client_unroutable_before_client", 0),
                 "metronome_wav_ok": "yes" if wav.get("ok", False) else ("no" if wav else ""),
                 "metronome_wav_verdict": wav.get("verdict", ""),
                 "audio_probe_ok": "yes" if audio_probe.get("ok", False) else ("no" if audio_probe else ""),

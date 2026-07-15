@@ -131,7 +131,7 @@ PreparedMixResult PreparedMixRenderer::render(const LooperProject& project, cons
     const LooperBank& bank = project.banks().at(project.activeBankIndex());
     bool anySolo = false;
     for (const LooperLane& lane : bank.lanes) {
-        anySolo = anySolo || (lane.solo && !lane.muted);
+        anySolo = anySolo || (lane.sampleRateCompatible && lane.solo && !lane.muted);
     }
 
     const qint64 maxFrames = 5LL * 60LL * qMax(1, sampleRate);
@@ -149,7 +149,8 @@ PreparedMixResult PreparedMixRenderer::render(const LooperProject& project, cons
     qint64 length = 0;
 
     for (const LooperLane& lane : bank.lanes) {
-        if (lane.muted || (anySolo && !lane.solo) || lane.assetPath.trimmed().isEmpty()) {
+        if (!lane.sampleRateCompatible || lane.muted || (anySolo && !lane.solo) ||
+            lane.assetPath.trimmed().isEmpty()) {
             continue;
         }
         const QString path = absoluteAsset(projectFolder, lane.assetPath);

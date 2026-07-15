@@ -44,6 +44,7 @@ add_executable(jam2 MACOSX_BUNDLE
     application/AutomationChannel.hpp
     application/ControlClient.cpp
     application/ControlClient.hpp
+    application/ContentLimits.hpp
     application/ControlMessageValidation.cpp
     application/ControlMessageValidation.hpp
     application/ControllerLifecycleValidation.cpp

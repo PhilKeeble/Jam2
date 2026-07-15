@@ -85,6 +85,8 @@
         "session_id": {"type": "string", "minLength": 1, "maxLength": 4096},
         "session_key": {"type": "string", "minLength": 1, "maxLength": 4096},
         "max_peers": {"type": "integer"},
+        "heartbeat_interval_ms": {"type": "integer", "minimum": 10, "maximum": 60000},
+        "heartbeat_miss_limit": {"type": "integer", "minimum": 1, "maximum": 20},
         "peer_token": {"type": "string", "minLength": 1, "maxLength": 4096},
         "topology": {
           "type": "object",

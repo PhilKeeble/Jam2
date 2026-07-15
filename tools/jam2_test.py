@@ -30,8 +30,10 @@ def parser() -> argparse.ArgumentParser:
     stress.add_argument("--stream-ms", type=int, default=8000)
     stress.add_argument("--headless-audio", action="store_true",
                         help="explicitly use deterministic synthetic audio (the default when devices are omitted)")
-    stress.add_argument("--server-audio-device", type=int)
-    stress.add_argument("--client-audio-device", type=int)
+    stress.add_argument("--server-audio-device", type=int,
+                        help="physical device for peer 1; omit the other peer device for a mixed real/headless run")
+    stress.add_argument("--client-audio-device", type=int,
+                        help="physical device for peer 2; omit the other peer device for a mixed real/headless run")
     stress.add_argument("--headless-audio-buffer-frames", type=int, default=256)
     stress.add_argument("--startup-timeout-s", type=float, default=10.0)
     stress.add_argument("--scenario-cooldown-s", type=float, default=0.0)

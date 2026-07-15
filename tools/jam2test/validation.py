@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import csv
 import json
+import hashlib
+import hmac
 import os
 import re
 import secrets
 import socket
+import struct
 import subprocess
 import sys
 import time
+import wave
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +80,38 @@ def _base_scenario(run_id: str, operation: str, root: Path) -> dict[str, Any]:
     }
 
 
+def _wav_boundary_fixtures(root: Path) -> list[str]:
+    fixture_root = root / "generated-corpus"
+    fixture_root.mkdir()
+
+    def write_pcm16(path: Path, sample_rate: int) -> None:
+        with wave.open(str(path), "wb") as output:
+            output.setnchannels(1)
+            output.setsampwidth(2)
+            output.setframerate(sample_rate)
+            output.writeframes(struct.pack("<" + "h" * 128, *([0] * 128)))
+
+    matching = fixture_root / "pcm16-48000.wav"
+    mismatch = fixture_root / "pcm16-44100.wav"
+    write_pcm16(matching, 48000)
+    write_pcm16(mismatch, 44100)
+    truncated = fixture_root / "truncated-riff.wav"
+    truncated.write_bytes(b"RIFF\x10\x00\x00\x00WAVEfmt ")
+    excessive = fixture_root / "excessive-data.wav"
+    excessive.write_bytes(
+        b"RIFF" + struct.pack("<I", 36) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, 48000, 96000, 2, 16) +
+        b"data" + struct.pack("<I", 0x7FFFFFF0)
+    )
+    return [
+        f"valid:{matching}",
+        f"valid:{mismatch}",
+        f"invalid:{truncated}",
+        f"invalid:{excessive}",
+        f"import-match-48000:{matching}",
+        f"import-mismatch-48000:{mismatch}",
+    ]
+
+
 def _run_framework(repo: Path, invocation: InvocationArtifacts, manifest: InvocationManifest) -> bool:
     case_root = invocation.root / "framework"
     case_root.mkdir()
@@ -98,12 +135,25 @@ def _run_help_contract(jam2: Path, invocation: InvocationArtifacts, manifest: In
         result = run_logged(command, case_root / f"{index:02d}.stdout.log", case_root / f"{index:02d}.stderr.log", timeout=20)
         results.append(result)
         ok &= result["return_code"] == 0
-    removed = run_logged(
-        [str(jam2), "mesh", "-h"], case_root / "removed.stdout.log",
-        case_root / "removed.stderr.log", timeout=20,
-    )
-    ok &= removed["return_code"] != 0
-    return _case(manifest, "public-command-surface", "passed" if ok else "failed", processes=results, removed_mesh=removed)
+    removed_commands = [
+        [str(jam2), "listen", "-h"],
+        [str(jam2), "connect", "-h"],
+        [str(jam2), "mesh", "-h"],
+        [str(jam2), "network", "listen", "-h"],
+        [str(jam2), "network", "connect", "-h"],
+        [str(jam2), "network", "mesh", "-h"],
+    ]
+    removed_results = []
+    for index, command in enumerate(removed_commands):
+        result = run_logged(
+            command, case_root / f"removed-{index:02d}.stdout.log",
+            case_root / f"removed-{index:02d}.stderr.log", timeout=20,
+        )
+        removed_results.append(result)
+        ok &= result["return_code"] != 0
+    return _case(
+        manifest, "public-command-surface", "passed" if ok else "failed",
+        processes=results, removed_commands=removed_results)
 
 
 def _run_focused(jam2: Path, invocation: InvocationArtifacts, manifest: InvocationManifest) -> bool:
@@ -114,6 +164,13 @@ def _run_focused(jam2: Path, invocation: InvocationArtifacts, manifest: Invocati
         root.mkdir()
         scenario = _base_scenario(name, operation, root)
         scenario.pop("runtime")
+        if operation == "validate.boundaries":
+            scenario["fixtures"] = _wav_boundary_fixtures(root)
+        elif operation == "validate.controller-lifecycle":
+            scenario["network"] = {
+                "heartbeat_interval_ms": 20,
+                "heartbeat_miss_limit": 3,
+            }
         scenario_path = root / "scenario.json"
         write_scenario(scenario_path, scenario)
         result = run_logged(
@@ -230,6 +287,247 @@ def _run_invalid_contracts(jam2: Path, invocation: InvocationArtifacts, manifest
         results.append(result)
         ok &= result["return_code"] != 0
     return _case(manifest, "schema-and-numeric-rejection", "passed" if ok else "failed", processes=results)
+
+
+def _recv_exact(connection: socket.socket, size: int) -> bytes:
+    output = bytearray()
+    while len(output) < size:
+        block = connection.recv(size - len(output))
+        if not block:
+            raise RuntimeError("control socket closed while receiving a frame")
+        output.extend(block)
+    return bytes(output)
+
+
+def _recv_control_frame(connection: socket.socket) -> bytes:
+    size = struct.unpack(">I", _recv_exact(connection, 4))[0]
+    if size < 1 or size > 65564:
+        raise RuntimeError(f"control frame length is outside the native bound: {size}")
+    return _recv_exact(connection, size)
+
+
+def _send_fragmented(connection: socket.socket, payload: bytes) -> None:
+    framed = struct.pack(">I", len(payload)) + payload
+    offsets = (1, 2, 3, 5, 8, 13)
+    position = 0
+    index = 0
+    while position < len(framed):
+        amount = offsets[index % len(offsets)]
+        connection.sendall(framed[position:position + amount])
+        position += amount
+        index += 1
+
+
+def _protocol_field(value: bytes) -> bytes:
+    return struct.pack(">I", len(value)) + value
+
+
+def _keyed_value(key: bytes, domain: bytes, transcript: bytes) -> bytes:
+    return hmac.new(key, _protocol_field(domain) + transcript, hashlib.sha256).digest()
+
+
+def _authenticated_body(message: dict[str, Any], key: bytes, sequence: int) -> bytes:
+    payload = json.dumps(message, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    body = b"\x01\x01\x00\x00" + struct.pack(">Q", sequence) + (b"\x00" * 16) + payload
+    tag = hmac.new(key, body, hashlib.sha256).digest()[:16]
+    return body[:12] + tag + body[28:]
+
+
+def _authenticate_fragmented(
+    connection: socket.socket,
+    session_hex: str,
+    key_hex: str,
+    peer_token: str,
+    udp_endpoint: str,
+) -> bytes:
+    challenge = json.loads(_recv_control_frame(connection).decode("utf-8"))
+    server_nonce = bytes.fromhex(challenge["server_nonce"])
+    client_nonce = bytes.fromhex("10" * 16)
+    transcript = (
+        b"jam2-control-v1" +
+        _protocol_field(session_hex.encode("ascii")) +
+        _protocol_field(server_nonce) +
+        _protocol_field(client_nonce) +
+        _protocol_field(peer_token.encode("utf-8")) +
+        _protocol_field(udp_endpoint.encode("utf-8"))
+    )
+    master_key = bytes.fromhex(key_hex)
+    proof = _keyed_value(master_key, b"jam2-control-client-proof", transcript)[:16]
+    hello = {
+        "type": "hello.proof", "version": 1, "session": session_hex,
+        "client_nonce": client_nonce.hex(), "peer_token": peer_token,
+        "udp_endpoint": udp_endpoint, "proof": proof.hex(),
+    }
+    _send_fragmented(
+        connection,
+        json.dumps(hello, separators=(",", ":")).encode("utf-8"),
+    )
+    response = json.loads(_recv_control_frame(connection).decode("utf-8"))
+    expected_server_proof = _keyed_value(
+        master_key, b"jam2-control-server-proof", transcript)[:16].hex()
+    if response.get("type") != "hello.ok" or response.get("proof") != expected_server_proof:
+        raise RuntimeError("fragmented control authentication did not produce a valid server proof")
+    return _keyed_value(master_key, b"jam2-control-c2s", transcript)
+
+
+def _run_real_process_control_hardening(
+    jam2: Path,
+    invocation: InvocationArtifacts,
+    manifest: InvocationManifest,
+) -> bool:
+    root = invocation.root / "real-process-control-hardening"
+    root.mkdir()
+    port = _reserve_dual_port()
+    session_hex = "1020304050607080"
+    key_hex = "00112233445566778899aabbccddeeff"
+    creator_token = "00000000000000010000000000000001"
+    peer_token = "00000000000000020000000000000002"
+    scenario = _base_scenario("real-process-control-hardening", "network.create", root)
+    scenario["runtime"].update({"stream_ms": 0, "test_input": "silence"})
+    scenario["network"] = {
+        "bind": f"127.0.0.1:{port}", "no_stun": True,
+        "session_id": session_hex, "session_key": key_hex,
+        "peer_token": creator_token, "max_peers": 4,
+    }
+    scenario["actions"] = [{
+        "id": "bounded-hardening-shutdown", "type": "shutdown",
+        "after_event": "controller_started", "delay_frames": 144000,
+    }]
+    scenario_path = root / "scenario.json"
+    write_scenario(scenario_path, scenario)
+    valid_section = {
+        "label": "A", "name": "Verse", "beats": 4,
+        "chords": [], "beat_notes": [], "lyrics": [], "beat_patterns": [],
+    }
+    mismatched_banks = [
+        {"id": chr(ord("A") + index), "lanes": []} for index in range(4)
+    ]
+    mismatched_banks[0]["lanes"].append({
+        "id": "wrong-rate-lane", "asset_hash": "b" * 64,
+        "name": "Wrong Rate WAV", "sample_rate": 44100,
+        "start_frame": "0", "stop_frame": "-1",
+        "loop_start_frame": "-1", "loop_end_frame": "-1",
+        "gain_db": 0.0, "muted": False, "solo": False,
+        "loop_enabled": True,
+    })
+    corpus = [
+        {
+            "type": "session.membership", "revision": 1,
+            "page_index": 0, "page_count": 1,
+            "coordinator_token": creator_token, "peers": [],
+        },
+        {"type": "metronome.settings", "bpm": 126},
+        {
+            "type": "looper.recording.offer",
+            "recording_id": "12345678-1234-1234-1234-123456789abc",
+            "bank": 0, "target_lane_id": "peer-lane",
+            "sha256": "a" * 64, "name": "wrong-rate", "sample_rate": 44100,
+        },
+        {"type": "looper.asset.request", "hashes": ["a" * 64] * 65},
+        {
+            "type": "song.set", "arrangement_revision": 1,
+            "song": {
+                "format": "jam2.song.v1", "title": "wrong-rate asset",
+                "lyrics_text": "", "sections": [valid_section],
+                "looper": {
+                    "format": "jam2.looper.v1", "active_bank": 0,
+                    "grid_lock": True, "banks": mismatched_banks,
+                },
+            },
+        },
+        {
+            "type": "song.set", "arrangement_revision": 1,
+            "song": {
+                "format": "jam2.song.v1", "title": "hostile nested model",
+                "lyrics_text": "", "sections": [{
+                    "label": "A", "name": "Verse", "beats": 513,
+                    "chords": [], "beat_notes": [], "lyrics": [],
+                    "beat_patterns": [],
+                }],
+            },
+        },
+    ]
+    (root / "generated-control-corpus.json").write_text(
+        json.dumps(corpus, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    stdout = (root / "stdout.log").open("w", encoding="utf-8", newline="")
+    stderr = (root / "stderr.log").open("w", encoding="utf-8", newline="")
+    process = subprocess.Popen(
+        [str(jam2), "debug", "run", str(scenario_path)],
+        stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, text=True,
+    )
+    connection: socket.socket | None = None
+    pending: list[socket.socket] = []
+    protocol_error = ""
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                connection = socket.create_connection(("127.0.0.1", port), timeout=0.5)
+                break
+            except OSError:
+                if process.poll() is not None:
+                    break
+                time.sleep(0.02)
+        if connection is None:
+            raise RuntimeError("native coordinator did not open its TCP control listener")
+        connection.settimeout(2)
+        c2s_key = _authenticate_fragmented(
+            connection, session_hex, key_hex, peer_token, "127.0.0.1:41002")
+        sequence = 1
+        for message in corpus:
+            _send_fragmented(connection, _authenticated_body(message, c2s_key, sequence))
+            sequence += 1
+        for index in range(48):
+            _send_fragmented(
+                connection,
+                _authenticated_body(
+                    {"type": "unsupported.flood", "index": index}, c2s_key, sequence),
+            )
+            sequence += 1
+        for _ in range(12):
+            try:
+                candidate = socket.create_connection(("127.0.0.1", port), timeout=0.2)
+                candidate.settimeout(0.2)
+                pending.append(candidate)
+            except OSError:
+                pass
+        time.sleep(0.25)
+        invalid_tag = bytearray(_authenticated_body(
+            {"type": "session.heartbeat.ack", "sequence": 1}, c2s_key, sequence))
+        invalid_tag[12] ^= 0x01
+        _send_fragmented(connection, bytes(invalid_tag))
+        time.sleep(0.1)
+    except Exception as error:
+        protocol_error = f"{type(error).__name__}: {error}"
+    finally:
+        if connection is not None:
+            connection.close()
+        for candidate in pending:
+            candidate.close()
+        code, timed_out = _wait_process(process, 12)
+        stdout.close()
+        stderr.close()
+
+    try:
+        native = native_manifest(root)
+        result = native.get("result", {})
+        server = result.get("control_server", {})
+        passed = (
+            not protocol_error and code == 0 and not timed_out and native.get("ok") is True and
+            result.get("control_authorization_rejections", 0) >= 1 and
+            result.get("control_validation_rejections", 0) >= 53 and
+            server.get("pending_cap_rejects", 0) >= 1 and
+            server.get("tag_or_sequence_rejects", 0) >= 1 and
+            server.get("input_high_water_bytes", 0) <= 65568
+        )
+    except Exception as error:
+        native = {"error": str(error)}
+        passed = False
+    return _case(
+        manifest, "real-process-control-hardening", "passed" if passed else "failed",
+        process={"return_code": code, "timed_out": timed_out},
+        protocol_error=protocol_error, pending_connections=len(pending), native=native)
 
 
 def _run_reactive_channel(jam2: Path, invocation: InvocationArtifacts,
@@ -378,6 +676,28 @@ def _wait_process(process: subprocess.Popen[str], timeout: float) -> tuple[int, 
         return process.returncode, True
 
 
+def _survivor_audio_continued(peer_root: Path) -> bool:
+    csv_files = sorted((peer_root / "csv").glob("*.csv"))
+    if len(csv_files) != 1:
+        return False
+    with csv_files[0].open("r", encoding="utf-8", newline="") as handle:
+        rows = [
+            row for row in csv.DictReader(handle)
+            if row.get("row_type") == "periodic" and
+            1600.0 <= float(row.get("elapsed_ms", 0.0)) <= 2600.0
+        ]
+    if len(rows) < 2:
+        return False
+    return (
+        int(float(rows[0].get("network_active_peer_count", 0))) >= 1 and
+        int(float(rows[-1].get("network_active_peer_count", 0))) >= 1 and
+        float(rows[-1].get("recv_packets", 0.0)) >
+            float(rows[0].get("recv_packets", 0.0)) and
+        float(rows[-1].get("mix_output_frames", 0.0)) >
+            float(rows[0].get("mix_output_frames", 0.0))
+    )
+
+
 def _run_mesh(jam2: Path, invocation: InvocationArtifacts, manifest: InvocationManifest, peers: int) -> bool:
     case_id = f"clean-mesh-{peers}-peers"
     root = invocation.root / case_id
@@ -409,8 +729,13 @@ def _run_mesh(jam2: Path, invocation: InvocationArtifacts, manifest: InvocationM
                 {"id": f"bpm-{index}", "type": "metronome.bpm", "value": 133, "after_event": "network.connected", "delay_frames": 9600},
                 ({"id": f"snapshot-{index}", "type": "snapshot", "apply_frame": 14400}
                  if index == 0 else
-                 {"id": f"snapshot-{index}", "type": "snapshot", "after_event": "network.connected", "delay_frames": 14400}),
+                {"id": f"snapshot-{index}", "type": "snapshot", "after_event": "network.connected", "delay_frames": 14400}),
             ]
+        elif peers == 3 and index == 2:
+            scenario["actions"] = [{
+                "id": "ordinary-peer-leave", "type": "shutdown",
+                "after_event": "network.connected", "delay_frames": 48000,
+            }]
         path = peer_root / "scenario.json"
         write_scenario(path, scenario)
         scenarios.append((path, peer_root))
@@ -434,12 +759,30 @@ def _run_mesh(jam2: Path, invocation: InvocationArtifacts, manifest: InvocationM
                 native = native_manifest(peer_root)
                 remote_count = native.get("result", {}).get("remote_peer_count")
                 native_ok = native.get("ok") is True
+                active_control_peers = int(native.get("result", {}).get("control_max_active_remote_peers", 0))
             except Exception as error:
                 native = {"error": str(error)}
                 remote_count = None
                 native_ok = False
-            passed &= code == 0 and not timed_out and native_ok
-            outcomes.append({"peer": peer_root.name, "return_code": code, "timed_out": timed_out, "remote_peer_count": remote_count, "native": native})
+                active_control_peers = 0
+            passed &= code == 0 and not timed_out and native_ok and active_control_peers >= 1
+            outcomes.append({"peer": peer_root.name, "return_code": code, "timed_out": timed_out, "remote_peer_count": remote_count, "active_control_peers": active_control_peers, "native": native})
+        if peers == 3 and len(outcomes) == 3:
+            continuing_frames = [
+                int(outcomes[index]["native"].get("result", {}).get("final_engine_frame", 0))
+                for index in (0, 1)
+            ]
+            leaving_frame = int(outcomes[2]["native"].get("result", {}).get("final_engine_frame", 0))
+            continued_audio = [
+                _survivor_audio_continued(root / f"peer-{index}") for index in (0, 1)
+            ]
+            for index, continued in enumerate(continued_audio):
+                outcomes[index]["audio_continued_after_peer_leave"] = continued
+            passed &= (
+                min(continuing_frames) > leaving_frame and
+                leaving_frame >= 48000 and
+                all(continued_audio)
+            )
     finally:
         for process, stdout, stderr, _ in processes:
             if process.poll() is None:
@@ -481,8 +824,6 @@ def _coverage_map(capabilities: NativeCapabilities, jam2: Path, root: Path) -> d
             return {"coverage": "automated", "case": "every debug-run artifact contract"}
         if option == "--record-jam-folder":
             return {"coverage": "retained-catalog", "case": "recording.start/stop stress and artifact analysis"}
-        if option == "--grid-coordinator":
-            return {"coverage": "native-validator/retained-catalog", "case": "focused boundaries and grid authority stress"}
         if option in runtime_options or option == "--profile":
             return {"coverage": "automated-or-native-validator",
                     "case": "effective configuration, focused boundaries, and stress/benchmark matrices"}
@@ -522,6 +863,8 @@ def _coverage_map(capabilities: NativeCapabilities, jam2: Path, root: Path) -> d
         "network.session_id": "clean-mesh and benchmark create",
         "network.session_key": "clean-mesh and benchmark create",
         "network.max_peers": "clean-mesh and benchmark create",
+        "network.heartbeat_interval_ms": "real-process lifecycle with native override",
+        "network.heartbeat_miss_limit": "real-process lifecycle with native override",
         "network.peer_token": "reactive, stress, and benchmark peers",
         "network.topology": "retained impairment stress edges",
         "artifacts.root": "every debug-run artifact contract",
@@ -567,7 +910,7 @@ def _coverage_map(capabilities: NativeCapabilities, jam2: Path, root: Path) -> d
         ],
         "scenario_fields": scenario_entries,
         "representative_boundaries": ["frame_size below minimum", "unknown runtime field", "obsolete local format", "native focused boundary corpus"],
-        "explicit_omissions": ["physical audio devices", "GUI-only interaction", "Phase 11 lifecycle/endpoint/mixed-device/WAV/adversarial additions"],
+        "explicit_omissions": ["physical audio devices", "GUI-only interaction"],
         "unclassified_public_cli_options": [
             item["name"] for item in public_entries if item["coverage"] == "unclassified"
         ],
@@ -611,6 +954,7 @@ def run(
             passed &= _run_help_contract(jam2, invocation, manifest)
             passed &= _run_schema_parity(repo, capabilities, manifest)
             passed &= _run_focused(jam2, invocation, manifest)
+            passed &= _run_real_process_control_hardening(jam2, invocation, manifest)
             passed &= _run_local(jam2, invocation, manifest)
             passed &= _run_invalid_contracts(jam2, invocation, manifest)
             passed &= _run_reactive_channel(jam2, invocation, manifest)

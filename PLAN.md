@@ -1,6 +1,6 @@
 # Jam2 Future Plan
 
-This file tracks future work that is not already implemented. User-facing documentation lives in `docs/`, with only `README.md` and this plan kept at the repository root.
+This file tracks future work that is not already implemented. User-facing documentation lives in `docs/`, with only `README.md` and this plan kept at the repository root. Completed refactor history, evidence, and supporting reviews live in [refactor-plan.md](refactor-plan.md) and its linked refactor documents.
 
 ## Network Audio Format Experiments
 
@@ -19,37 +19,6 @@ Scope limits:
 - Do not add a codec framework, negotiation layer, compression, or automatic quality switching for the first experiment.
 - Keep packet parsing fixed-shape and allocation-light.
 - Require both peers to use the same explicit format for the experiment; fail clearly on mismatch rather than guessing.
-
-## UDP Packet Fast-Path Efficiency Review
-
-Review the binary UDP audio path independently of GUI/engine consolidation.
-Use retained and new measurements when they help explain material changes, but
-do not treat a fixed baseline or numeric threshold as a completion gate.
-
-- Instrument or benchmark packet encode, authentication, PCM24 pack/unpack, receive parsing, reorder handling, and mesh mixing for two peers and representative three/four-peer sessions.
-- Measure CPU time, allocations per packet, bytes copied per packet, packet-loop gaps, callback gaps, jitter, late packets, loss, playback underruns, and aggregate/per-peer mesh cost.
-- Investigate caller-owned preallocated transmit/receive buffers and direct PCM24 conversion into preallocated audio blocks or ring reservations.
-- Investigate computing or verifying the authentication tag without copying the complete packet solely to clear the tag field.
-- Replace exceptions for ordinary malformed or unauthenticated datagrams with explicit parse results if measurements or profiling show a meaningful benefit.
-- Keep the current fixed binary wire format and observable behavior unchanged during the first optimization pass so results can be compared directly.
-- Keep all storage bounded and expose any new buffer capacity or drop counters through technical stats and CSV output.
-
-Useful evaluation evidence:
-
-- No regression in authentication, session validation, sequence tracking, audio correctness, metronome/transport timing, or malformed-packet rejection.
-- Benchmark results record before/after measurements rather than assuming that fewer allocations improve real-world latency.
-- Optimizations improve or preserve packet processing and callback timing for both the primary two-person flow and small mesh sessions.
-
-## Application Refactoring
-
-Jam2 is consolidating the GUI and audio engine into one public `jam2`
-application, with the GUI as the primary use case and public headless/debug
-commands retained. Public networking uses only `network create` and `network
-join` over the universal direct-mesh engine. Three/four peers are the expected
-small-group case; larger meshes have no application-wide cap and remain
-experimental, while a creator may optionally limit a particular jam.
-
-See [refactor-plan.md](refactor-plan.md) for the dependency-ordered worker plan, [refactor-binaries.md](refactor-binaries.md) for the single-application architecture review, [refactor-efficiency.md](refactor-efficiency.md) for the broader v1 code, protocol, data-flow, and efficiency audit, [refactor-modes.md](refactor-modes.md) for the local/network lifecycle and full-mesh consolidation review, and [refactor-security.md](refactor-security.md) for the lightweight network/control/asset/WAV security review and its measured v1 threat boundary.
 
 ## Practice Ideas (Visual Only)
 

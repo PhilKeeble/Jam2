@@ -14,7 +14,7 @@ When audio-device options are omitted, stress uses deterministic headless
 audio. A short two-peer smoke is:
 
 ```powershell
-python tools\jam2_test.py stress --headless-audio --profile fast --scenario clean-control --scenario duplicate-2.0 --sample-rate 48000 --stream-ms 8000 --output build\stress-smoke --clean
+python tools\jam2_test.py stress --headless-audio --profile fast --scenario clean-control --scenario duplicate-2.0 --sample-rate 48000 --stream-ms 8000 --clean
 ```
 
 The bare command runs the complete standard two-peer catalog for one profile,
@@ -27,22 +27,38 @@ python tools\jam2_test.py stress
 Select a case by repeating `--scenario`. `--profile all` multiplies the selected
 cases across `fast`, `moderate`, and `safe`; `--os-priority all` multiplies them
 again across `off`, `high`, and `realtime`. Use these matrices deliberately.
+`--stream-ms` is a minimum duration: a retained case is automatically extended
+when its last native action, impairment injection, or recovery assertion needs
+more time. Both the requested and effective durations are written to
+`result.json`.
 
 ## Real-Device Stress
 
-Supply both device IDs together. One-sided device selection is rejected.
+Supply both device IDs for the bounded two-physical-device completion smoke.
 
 ```powershell
-python tools\jam2_test.py stress --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --profile fast --scenario clean-control --scenario jitter-50 --stream-ms 12000 --scenario-cooldown-s 2 --output C:\j2-stress --clean
+python tools\jam2_test.py stress --server-audio-device 5 --client-audio-device 16 --sample-rate 44100 --profile fast --scenario clean-control --scenario jitter-50 --stream-ms 12000 --scenario-cooldown-s 2
 ```
 
 This uses normal native callback/device paths on both local interfaces while
 the UDP impairment proxy remains on localhost. Confirm both devices support the
 same sample rate first. Device IDs are machine-local.
 
+For the mixed lifecycle case, supply exactly one device. The other peer uses
+the deterministic headless callback while the real-device peer still follows
+the normal create/join, control, UDP, callback, stats, and artifact paths:
+
+```powershell
+python tools\jam2_test.py stress --server-audio-device 16 --profile fast --scenario clean-control --sample-rate 44100 --stream-ms 8000
+```
+
 Use `--headless-audio-buffer-frames N` only for the synthetic callback size.
 Network frame size and other tuning continue to come from the native profile
 plus the case's sparse overrides.
+
+The device examples omit `--clean` so they can be run after the complete
+headless family without deleting its retained evidence. Use `--clean` once on
+the first intended stress invocation when a fresh family root is wanted.
 
 ## Full-Mesh Stress
 
@@ -50,7 +66,7 @@ Providing `--mesh-peers` selects the deterministic headless mesh catalog.
 Physical device options are rejected in mesh mode.
 
 ```powershell
-python tools\jam2_test.py stress --mesh-peers 3 --profile fast --scenario mesh-3-clean --scenario mesh-3-edge-jitter --scenario mesh-3-authority-last --sample-rate 48000 --stream-ms 12000 --output build\mesh-stress --clean
+python tools\jam2_test.py stress --mesh-peers 3 --profile fast --scenario mesh-3-clean --scenario mesh-3-edge-jitter --scenario mesh-3-authority-last --sample-rate 48000 --stream-ms 12000 --clean
 ```
 
 Repeat `--mesh-peers` to select more than one size. For a selected peer count
@@ -134,6 +150,11 @@ corruption, bursts, and packet transforms outside the Jam2 process. Every run
 records its seed and per-direction proxy counters so proxy behavior can be
 compared with native receive/rejection counters. A clean zero-impairment case
 is the appropriate baseline before interpreting an impaired run.
+
+A server packet that arrives before the proxy has learned the client's
+ephemeral endpoint is retained as
+`server_to_client_unroutable_before_client`; it is not counted as deliberate
+proxy loss and cannot satisfy or fail a loss/jitter verdict.
 
 ## Artifacts And Verdicts
 

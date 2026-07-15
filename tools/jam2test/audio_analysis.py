@@ -199,10 +199,15 @@ def _analyze_dynamic_metronome(
     }
 
 
-def analyze_metronome_wav(recording_dir, tolerance_frames=96, allow_silent=False):
+def analyze_metronome_wav(
+        recording_dir,
+        tolerance_frames=96,
+        allow_silent=False,
+        wav_name="metronome.wav",
+        dynamic_phase=False):
     recording_dir = Path(recording_dir)
     sidecar = recording_dir / "recording.json"
-    wav_path = recording_dir / "metronome.wav"
+    wav_path = recording_dir / wav_name
     if not wav_path.exists():
         return {"ok": False, "verdict": "metronome_wav_missing", "recording_dir": str(recording_dir)}
     meta = {}
@@ -214,7 +219,7 @@ def analyze_metronome_wav(recording_dir, tolerance_frames=96, allow_silent=False
     if allow_silent and not actual:
         return {"ok": True, "verdict": "metronome_silent_expected", "clicks": 0, "recording_dir": str(recording_dir)}
     expected = _expected_metronome_frames({**meta, "sample_rate": wav["sample_rate"]}, len(samples))
-    if meta.get("metronome_mode", "") in {"shared-grid", "listener-compensated"}:
+    if dynamic_phase or meta.get("metronome_mode", "") in {"shared-grid", "listener-compensated"}:
         dynamic = _analyze_dynamic_metronome(
             recording_dir,
             actual,

@@ -324,6 +324,16 @@ void sync_engine_control(
         jam2::EngineCommand command; command.type = jam2::EngineCommandType::SetMetronomeMode; command.value = mode;
         if (submit(command)) mirror.snapshot.metronome_mode = static_cast<jam2::EngineMetronomeMode>(mode);
     }
+    const bool leader_audio_local_click =
+        runtime.leader_audio_local_click.load(std::memory_order_relaxed);
+    if (mirror.snapshot.leader_audio_local_click != leader_audio_local_click) {
+        jam2::EngineCommand command;
+        command.type = jam2::EngineCommandType::SetLeaderAudioLocalClick;
+        command.enabled = leader_audio_local_click;
+        if (submit(command)) {
+            mirror.snapshot.leader_audio_local_click = leader_audio_local_click;
+        }
+    }
     const std::uint64_t epoch = runtime.metronome_epoch_sample_time.load(std::memory_order_relaxed);
     const bool epoch_valid = runtime.metronome_epoch_valid.load(std::memory_order_relaxed);
     if (mirror.snapshot.metronome_epoch_frame != epoch || mirror.snapshot.metronome_epoch_valid != epoch_valid) {
@@ -1875,6 +1885,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     const std::uint16_t audio_payload_size = static_cast<std::uint16_t>(silence_payload.size());
     std::vector<std::uint8_t> packed_audio_payload(audio_payload_size);
     std::uint64_t mesh_work_budget_yields = 0;
+    std::uint64_t mesh_receive_batch_max = 0;
     std::uint64_t last_local_grid_request_sequence =
         commands.state.grid_request_sequence.load(std::memory_order_acquire);
     std::optional<jam2::GridProposal> pending_local_grid_proposal;
@@ -2167,6 +2178,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         stats.jitter_buffer_target_frames = playout_delay_frames;
         stats.jitter_buffer_max_frames = static_cast<std::uint64_t>(options.jitter_buffer_max_frames);
         stats.udp_work_budget_yields = mesh_work_budget_yields;
+        stats.udp_receive_batch_max = mesh_receive_batch_max;
         for (const auto& entry : peers) {
             const auto& peer = entry.second;
             stats.sent_packets += peer.sent_packets;
@@ -3155,6 +3167,9 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 ++peer.ignored_packets;
             }
         }
+        mesh_receive_batch_max = std::max<std::uint64_t>(
+            mesh_receive_batch_max,
+            static_cast<std::uint64_t>(mesh_datagrams_this_wake));
         if (mesh_datagrams_this_wake == 64) {
             ++mesh_work_budget_yields;
         }
@@ -3257,4 +3272,3 @@ int jam2_run_network_runtime(Jam2RuntimeOptions options, Jam2RuntimeHost& host)
         return 1;
     }
 }
-

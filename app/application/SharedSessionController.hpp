@@ -5,6 +5,7 @@
 #include "RuntimeContracts.hpp"
 
 #include <QJsonObject>
+#include <QElapsedTimer>
 #include <QMap>
 #include <QObject>
 #include <QString>
@@ -22,6 +23,9 @@ class ApplicationRuntime;
 // engine lifecycle to this same controller.
 class SharedSessionController final : public QObject {
 public:
+    static constexpr int kDefaultHeartbeatIntervalMs = 30000;
+    static constexpr int kDefaultHeartbeatMissLimit = 5;
+
     enum class Role {
         Inactive,
         Local,
@@ -80,6 +84,15 @@ public:
         int reconnectAttempts = 0;
         int reconnectAttemptLimit = 0;
         int reconnectIntervalMs = 0;
+        int heartbeatIntervalMs = 0;
+        int heartbeatMissLimit = 0;
+        int heartbeatMissed = 0;
+        qint64 lastHeartbeatAgeMs = -1;
+        quint64 heartbeatsSent = 0;
+        quint64 heartbeatsReceived = 0;
+        quint64 heartbeatAcksReceived = 0;
+        quint64 validationRejections = 0;
+        quint64 authorizationRejections = 0;
         int totalPeerCount = 0;
         int remotePeerCount = 0;
         bool contractReady = false;
@@ -101,6 +114,8 @@ public:
         QString localEndpoint;
         int sessionPeerLimit = 0; // Remote peers; zero means unlimited.
         SessionContract contract;
+        int heartbeatIntervalMs = kDefaultHeartbeatIntervalMs;
+        int heartbeatMissLimit = kDefaultHeartbeatMissLimit;
     };
 
     struct JoinerConfig {
@@ -114,6 +129,8 @@ public:
         bool enforceExpectedContract = false;
         int reconnectIntervalMs = 2000;
         int reconnectAttemptLimit = 15;
+        int heartbeatIntervalMs = kDefaultHeartbeatIntervalMs;
+        int heartbeatMissLimit = kDefaultHeartbeatMissLimit;
     };
 
     explicit SharedSessionController(QObject* parent = nullptr);
@@ -124,6 +141,7 @@ public:
     bool startLocal(const Jam2RuntimeOptions& options);
     bool startCreator(const CreatorConfig& config);
     bool startJoiner(const JoinerConfig& config);
+    bool endSession(const QString& detail = QStringLiteral("The jam creator ended the session"));
     void close();
     void refresh();
     void setReconnectEnabled(bool enabled);
@@ -193,6 +211,9 @@ private:
     void broadcastMembership();
     void scheduleReconnect();
     void connectJoiner();
+    void sendHeartbeat(const QString& targetToken = {});
+    void checkHeartbeatDeadline();
+    void expireCoordinatorHeartbeat();
     void publishSnapshot();
     void setLifecycle(Lifecycle lifecycle);
     void reconcileRuntime(const Snapshot& snapshot);
@@ -221,6 +242,7 @@ private:
     bool contractReady_ = false;
     SessionContract contract_;
     bool reconnectEnabled_ = false;
+    bool everAuthenticated_ = false;
     bool closing_ = false;
     int reconnectAttempts_ = 0;
     int reconnectAttemptLimit_ = 15;
@@ -230,12 +252,23 @@ private:
     bool failureRetryable_ = false;
     QJsonObject gridState_;
     QJsonObject arrangementState_;
+    int heartbeatIntervalMs_ = kDefaultHeartbeatIntervalMs;
+    int heartbeatMissLimit_ = kDefaultHeartbeatMissLimit;
+    int heartbeatSequence_ = 0;
+    quint64 heartbeatsSent_ = 0;
+    quint64 heartbeatsReceived_ = 0;
+    quint64 heartbeatAcksReceived_ = 0;
+    quint64 validationRejections_ = 0;
+    quint64 authorizationRejections_ = 0;
+    QElapsedTimer lastHeartbeat_;
     ApplicationRuntime* runtime_ = nullptr;
     std::function<Jam2RuntimeOptions(const Snapshot&)> networkOptionsFactory_;
     std::vector<Jam2RuntimePeer> runtimePeers_;
     bool runtimeAttachmentEnabled_ = false;
     bool reconcilingRuntime_ = false;
     QTimer reconnectTimer_;
+    QTimer heartbeatTimer_;
+    QTimer heartbeatDeadlineTimer_;
     ControlServer server_;
     ControlClient client_;
 };

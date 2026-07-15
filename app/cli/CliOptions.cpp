@@ -183,7 +183,6 @@ Network options:
   --bind <host:port>                  Local network bind endpoint
   --socket-send-buffer <bytes>        Request the OS UDP send buffer size
   --socket-recv-buffer <bytes>        Request the OS UDP receive buffer size
-  --grid-coordinator <on|off>         Start as the initial grid coordinator
 )";
 }
 
@@ -489,15 +488,6 @@ Options parse_options(int argc, char** argv, int start)
             (void)require_value(argc, argv, i, arg);
         } else if (arg == "--bind") {
             options.bind = jam2::parse_bind_endpoint(require_value(argc, argv, i, arg));
-        } else if (arg == "--grid-coordinator") {
-            const std::string value{require_value(argc, argv, i, arg)};
-            if (value == "on") {
-                options.grid_coordinator = true;
-            } else if (value == "off") {
-                options.grid_coordinator = false;
-            } else {
-                throw std::runtime_error("--grid-coordinator must be on or off");
-            }
         } else if (arg == "--stun") {
             options.stun_server = jam2::parse_endpoint(require_value(argc, argv, i, arg));
             options.no_stun = false;

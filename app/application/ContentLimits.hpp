@@ -1,0 +1,29 @@
+#pragma once
+
+#include <QtGlobal>
+
+namespace jam2::application::limits {
+
+inline constexpr int kMinimumSampleRate = 8000;
+inline constexpr int kMaximumSampleRate = 384000;
+
+inline constexpr int kMaximumSongSections = 64;
+inline constexpr int kMinimumBeatsPerSection = 4;
+inline constexpr int kMaximumBeatsPerSection = 512;
+inline constexpr int kMaximumBeatLanes = 11;
+inline constexpr int kMaximumCellCharacters = 4096;
+inline constexpr int kMaximumTitleCharacters = 512;
+inline constexpr int kMaximumLyricsCharacters = 1024 * 1024;
+
+inline constexpr int kLooperBankCount = 4;
+inline constexpr int kMaximumLooperLanesPerBank = 128;
+inline constexpr int kMaximumLooperIdCharacters = 80;
+inline constexpr int kMaximumLooperNameCharacters = 512;
+inline constexpr int kMaximumLooperPathCharacters = 4096;
+
+inline constexpr qint64 kMaximumAssetBytes = 512LL * 1024LL * 1024LL;
+inline constexpr int kMaximumAssetRequests = 64;
+inline constexpr int kMaximumAssetChunkBytes = 24 * 1024;
+inline constexpr int kMaximumEncodedAssetChunkCharacters = 32 * 1024;
+
+} // namespace jam2::application::limits

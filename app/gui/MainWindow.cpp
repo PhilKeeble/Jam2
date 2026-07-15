@@ -8,6 +8,7 @@
 #include "SessionController.hpp"
 #include "ControlProtocol.hpp"
 #include "ControlMessageValidation.hpp"
+#include "ContentLimits.hpp"
 
 #include "common.hpp"
 #include "audio_device.hpp"
@@ -89,12 +90,9 @@
 
 namespace {
 
-constexpr qint64 kMaxLooperAssetBytes = 512LL * 1024LL * 1024LL;
-constexpr int kLooperAssetChunkBytes = 24 * 1024;
-constexpr int kMaxLooperAssetRequests = 64;
+constexpr qint64 kMaxLooperAssetBytes = jam2::application::limits::kMaximumAssetBytes;
+constexpr int kMaxLooperAssetRequests = jam2::application::limits::kMaximumAssetRequests;
 constexpr int kMaxLooperTrackContributions = 512;
-constexpr qint64 kLooperAssetFrameQueueEstimate = 48 * 1024;
-constexpr int kLooperAssetProgressDeadlineMs = 10000;
 
 QString normalizedNetworkHost(QString host)
 {
@@ -481,7 +479,10 @@ struct StagedPcm16Asset {
     QString error;
 };
 
-StagedPcm16Asset stagePcm16Asset(const QString& sourcePath, const QString& stagingFolder)
+StagedPcm16Asset stagePcm16Asset(
+    const QString& sourcePath,
+    const QString& stagingFolder,
+    int expectedSampleRate = 0)
 {
     StagedPcm16Asset result;
     const QFileInfo sourceInfo(sourcePath);
@@ -495,6 +496,14 @@ StagedPcm16Asset stagePcm16Asset(const QString& sourcePath, const QString& stagi
     }
     if (result.metadata.dataBytes <= 0) {
         result.error = QStringLiteral("WAV contains no audio frames");
+        return result;
+    }
+    if (expectedSampleRate > 0 && result.metadata.sampleRate != expectedSampleRate) {
+        result.error = QStringLiteral(
+            "Sample-rate mismatch: this jam uses %1 Hz but the WAV is %2 Hz. "
+            "The WAV was not loaded; convert it or use a %1 Hz source.")
+            .arg(expectedSampleRate)
+            .arg(result.metadata.sampleRate);
         return result;
     }
     result.sha256 = result.metadata.sha256;
@@ -531,6 +540,61 @@ StagedPcm16Asset stagePcm16Asset(const QString& sourcePath, const QString& stagi
         return result;
     }
     return result;
+}
+
+int mergeQuarantinedLocalLanes(
+    QJsonObject& song,
+    const LooperProject& localProject,
+    int expectedSampleRate)
+{
+    if (expectedSampleRate <= 0) {
+        return 0;
+    }
+    LooperProject received;
+    const QJsonObject receivedLooper = song.value(QStringLiteral("looper")).toObject();
+    if (receivedLooper.isEmpty() || !received.loadJson(receivedLooper)) {
+        return 0;
+    }
+
+    int preserved = 0;
+    for (int bankIndex = 0;
+         bankIndex < localProject.banks().size() && bankIndex < received.banks().size();
+         ++bankIndex) {
+        for (const LooperLane& local : localProject.banks().at(bankIndex).lanes) {
+            if (local.assetPath.trimmed().isEmpty() ||
+                local.sampleRate == expectedSampleRate) {
+                continue;
+            }
+            const bool alreadyPresent = std::any_of(
+                received.banks().at(bankIndex).lanes.cbegin(),
+                received.banks().at(bankIndex).lanes.cend(),
+                [&local](const LooperLane& candidate) {
+                    return !local.assetHash.isEmpty() &&
+                        candidate.assetHash == local.assetHash;
+                });
+            if (alreadyPresent) {
+                continue;
+            }
+            LooperLane quarantined = local;
+            const bool idCollision = std::any_of(
+                received.banks().at(bankIndex).lanes.cbegin(),
+                received.banks().at(bankIndex).lanes.cend(),
+                [&quarantined](const LooperLane& candidate) {
+                    return !quarantined.id.isEmpty() && candidate.id == quarantined.id;
+                });
+            if (idCollision) {
+                quarantined.id.clear();
+            }
+            quarantined.sampleRateCompatible = false;
+            if (received.appendLane(bankIndex, std::move(quarantined))) {
+                ++preserved;
+            }
+        }
+    }
+    if (preserved > 0) {
+        song.insert(QStringLiteral("looper"), received.toJson());
+    }
+    return preserved;
 }
 
 
@@ -733,11 +797,14 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
     for (int index = 0; index < 5; ++index) {
         invalidBanks.append(QJsonObject{{QStringLiteral("lanes"), QJsonArray{}}});
     }
+    QJsonObject invalidSongModel = BeatGridModel{}.toJson();
+    invalidSongModel.insert(
+        QStringLiteral("looper"),
+        QJsonObject{{QStringLiteral("banks"), invalidBanks}});
     const QJsonObject invalidSong{
         {QStringLiteral("type"), QStringLiteral("song.set")},
         {QStringLiteral("arrangement_revision"), 1},
-        {QStringLiteral("song"), QJsonObject{
-            {QStringLiteral("looper"), QJsonObject{{QStringLiteral("banks"), invalidBanks}}}}},
+        {QStringLiteral("song"), invalidSongModel},
     };
     modelError.clear();
     record(QStringLiteral("asset-model.reject-excessive-banks"),
@@ -745,12 +812,51 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
     QJsonObject collaborativeSong = invalidSong;
     collaborativeSong[QStringLiteral("arrangement_revision")] = 0;
     collaborativeSong[QStringLiteral("host_authoritative")] = false;
-    collaborativeSong[QStringLiteral("song")] = QJsonObject{
-        {QStringLiteral("looper"), LooperProject{}.toJson()},
-    };
+    QJsonObject collaborativeSongModel = BeatGridModel{}.toJson();
+    collaborativeSongModel.insert(QStringLiteral("looper"), LooperProject{}.toJson());
+    collaborativeSong[QStringLiteral("song")] = collaborativeSongModel;
     modelError.clear();
     record(QStringLiteral("asset-model.accept-collaborative-proposal"),
         jam2::application::validateControlMessage(collaborativeSong, modelError),
+        modelError);
+    {
+        LooperProject local;
+        LooperLane incompatible;
+        incompatible.id = QStringLiteral("local-wrong-rate");
+        incompatible.assetPath = QStringLiteral("C:/fixtures/wrong-rate.wav");
+        incompatible.assetHash = QString(64, QLatin1Char('c'));
+        incompatible.name = QStringLiteral("Local 44.1 kHz lane");
+        incompatible.sampleRate = 44100;
+        incompatible.sampleRateCompatible = false;
+        const bool appended = local.appendLane(0, std::move(incompatible));
+        QJsonObject incoming = BeatGridModel{}.toJson();
+        incoming.insert(QStringLiteral("looper"), LooperProject{}.toJson());
+        const int preserved = mergeQuarantinedLocalLanes(incoming, local, 48000);
+        LooperProject merged;
+        const bool loaded = merged.loadJson(incoming.value(QStringLiteral("looper")).toObject());
+        if (loaded && !merged.banks().at(0).lanes.isEmpty()) {
+            merged.banks()[0].lanes[0].sampleRateCompatible =
+                merged.banks().at(0).lanes.at(0).sampleRate == 48000;
+        }
+        const QJsonArray syncBanks = merged.toJson(true)
+            .value(QStringLiteral("banks")).toArray();
+        record(QStringLiteral("wav.quarantine-preserved-and-excluded-from-sync"),
+            appended && preserved == 1 && loaded &&
+            merged.banks().at(0).lanes.size() == 1 &&
+            merged.banks().at(0).lanes.at(0).sampleRate == 44100 &&
+            syncBanks.at(0).toObject().value(QStringLiteral("lanes")).toArray().isEmpty());
+    }
+    QJsonObject invalidNestedSong = collaborativeSong;
+    QJsonObject invalidNestedModel = collaborativeSongModel;
+    QJsonArray invalidNestedSections = invalidNestedModel.value(QStringLiteral("sections")).toArray();
+    QJsonObject invalidNestedSection = invalidNestedSections.at(0).toObject();
+    invalidNestedSection[QStringLiteral("beats")] = 513;
+    invalidNestedSections[0] = invalidNestedSection;
+    invalidNestedModel[QStringLiteral("sections")] = invalidNestedSections;
+    invalidNestedSong[QStringLiteral("song")] = invalidNestedModel;
+    modelError.clear();
+    record(QStringLiteral("model.reject-invalid-nested-song-before-mutation"),
+        !jam2::application::validateControlMessage(invalidNestedSong, modelError),
         modelError);
     {
         LooperProject initial;
@@ -801,6 +907,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         {QStringLiteral("target_lane_id"), QStringLiteral("peer-lane")},
         {QStringLiteral("sha256"), QString(64, QLatin1Char('a'))},
         {QStringLiteral("name"), QStringLiteral("Peer WAV")},
+        {QStringLiteral("sample_rate"), 48000},
     };
     modelError.clear();
     record(QStringLiteral("track-share.accepts-bounded-additive-offer"),
@@ -1110,18 +1217,38 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             const qsizetype separator = spec.indexOf(QLatin1Char(':'));
             const QString expectation = separator > 0 ? spec.left(separator) : QString();
             const QString path = separator > 0 ? spec.mid(separator + 1) : QString();
-            if ((expectation != QStringLiteral("valid") && expectation != QStringLiteral("invalid")) ||
+            const bool importMatch = expectation == QStringLiteral("import-match-48000");
+            const bool importMismatch = expectation == QStringLiteral("import-mismatch-48000");
+            if ((expectation != QStringLiteral("valid") && expectation != QStringLiteral("invalid") &&
+                 !importMatch && !importMismatch) ||
                 path.isEmpty() || path.toUtf8().size() > 4096) {
                 record(QStringLiteral("wav.fixture-spec-bound"), false, QStringLiteral("invalid fixture spec"));
                 continue;
             }
-            const jam2::wav::InspectResult inspected = jam2::wav::inspect_pcm16_file(
-                nativeFilePath(path), 8ULL * 1024ULL * 1024ULL);
-            const bool expectedValid = expectation == QStringLiteral("valid");
-            record(
-                QStringLiteral("wav.%1.%2").arg(expectation, QFileInfo(path).fileName()),
-                static_cast<bool>(inspected) == expectedValid,
-                QString::fromStdString(inspected.error));
+            if (importMatch || importMismatch) {
+                const StagedPcm16Asset staged = stagePcm16Asset(
+                    path,
+                    QDir(QFileInfo(path).absolutePath()).filePath(QStringLiteral("staged")),
+                    48000);
+                const bool ok = importMatch
+                    ? staged.error.isEmpty() && staged.metadata.sampleRate == 48000 &&
+                        QFileInfo::exists(staged.stagedPath)
+                    : !staged.error.isEmpty() && staged.stagedPath.isEmpty() &&
+                        staged.error.contains(QStringLiteral("48000")) &&
+                        staged.error.contains(QStringLiteral("44100"));
+                record(
+                    QStringLiteral("wav.%1.%2").arg(expectation, QFileInfo(path).fileName()),
+                    ok,
+                    staged.error);
+            } else {
+                const jam2::wav::InspectResult inspected = jam2::wav::inspect_pcm16_file(
+                    nativeFilePath(path), 8ULL * 1024ULL * 1024ULL);
+                const bool expectedValid = expectation == QStringLiteral("valid");
+                record(
+                    QStringLiteral("wav.%1.%2").arg(expectation, QFileInfo(path).fileName()),
+                    static_cast<bool>(inspected) == expectedValid,
+                    QString::fromStdString(inspected.error));
+            }
         }
     }
 
@@ -1203,6 +1330,12 @@ MainWindow::MainWindow(QWidget* parent)
             appendLog(QStringLiteral("Stats CSV: ") + QString::fromStdString(startup.stats_csv->string()));
         }
         updateRuntimeControls();
+        const SharedSessionController::Snapshot session = sessionController_.snapshot();
+        if ((session.role == SharedSessionController::Role::Creator ||
+             session.role == SharedSessionController::Role::Joiner) &&
+            session.contract.sampleRate > 0) {
+            auditWavCompatibilityForSession(session.contract.sampleRate, true);
+        }
         if (sessionController_.isServer()) {
             // A joiner must adopt the existing ordered grid before it may
             // originate edits. Publishing its retained local/default settings
@@ -1263,6 +1396,7 @@ MainWindow::MainWindow(QWidget* parent)
             sampleRateSpin_->setValue(contract.sampleRate);
             frameSizeSpin_->setValue(contract.frameSize);
         }
+        auditWavCompatibilityForSession(contract.sampleRate, true);
     };
     sessionController_.onSnapshot = [this](const SharedSessionController::Snapshot& snapshot) {
         applySessionSnapshot(snapshot);
@@ -2408,6 +2542,10 @@ void MainWindow::applySessionSnapshot(const SharedSessionController::Snapshot& s
     }
     meshPeerEndpoints_ = std::move(endpoints);
     localMeshPeerTokens_ = std::move(sameMachineTokens);
+    if (stopButton_) {
+        stopButton_->setText(snapshot.role == SharedSessionController::Role::Creator
+            ? QStringLiteral("End Jam") : QStringLiteral("Leave Jam"));
+    }
     maybeScheduleSharedTrackRestart();
 
     if (snapshot.membershipRevision > 0) {
@@ -2469,6 +2607,16 @@ void MainWindow::handleControlEvent(
     case TransportEventType::AlreadyConnected:
         displayState = QStringLiteral("TCP peer authenticated");
         break;
+    case TransportEventType::RefreshRequested:
+        displayState = QStringLiteral("Refreshing");
+        break;
+    case TransportEventType::ReconnectScheduled:
+    case TransportEventType::ReconnectAttempt:
+        displayState = QStringLiteral("Reconnecting");
+        break;
+    case TransportEventType::SessionEnded:
+        displayState = QStringLiteral("Local");
+        break;
     case TransportEventType::Failure:
         if (event.retryable) {
             displayState = QStringLiteral("Reconnecting");
@@ -2479,6 +2627,20 @@ void MainWindow::handleControlEvent(
     appendLog(QStringLiteral("control: ") + event.detail);
     if (event.type == TransportEventType::Disconnected ||
         event.type == TransportEventType::Failure) {
+        const SharedSessionController::Snapshot policy = sessionController_.snapshot();
+        appendLog(QStringLiteral(
+            "control_policy_stats validation_rejects=%1 authorization_rejects=%2 "
+            "heartbeat_interval_ms=%3 heartbeat_miss_limit=%4 heartbeat_missed=%5 "
+            "last_heartbeat_age_ms=%6 heartbeats_sent=%7 heartbeats_received=%8 heartbeat_acks=%9")
+            .arg(policy.validationRejections)
+            .arg(policy.authorizationRejections)
+            .arg(policy.heartbeatIntervalMs)
+            .arg(policy.heartbeatMissLimit)
+            .arg(policy.heartbeatMissed)
+            .arg(policy.lastHeartbeatAgeMs)
+            .arg(policy.heartbeatsSent)
+            .arg(policy.heartbeatsReceived)
+            .arg(policy.heartbeatAcksReceived));
         if (serverSide) {
             const ControlServer::Stats stats = sessionController_.serverStats();
             appendLog(QStringLiteral(
@@ -2514,7 +2676,10 @@ void MainWindow::handleControlEvent(
                 .arg(stats.maxQueuedOutputBytes));
         }
     }
-    if (event.type == TransportEventType::Authenticated) {
+    if (event.type == TransportEventType::SessionEnded) {
+        appendLog(QStringLiteral("jam ended by creator; returning to local mode"));
+        QTimer::singleShot(0, this, [this] { stopJam(true); });
+    } else if (event.type == TransportEventType::Authenticated) {
         setMixRemotePeerVisible(true);
         if (looperProject_.trackSyncEnabled()) {
             if (serverSide) {
@@ -2729,6 +2894,163 @@ void MainWindow::updateRuntimeControls()
     submitEngineGain(jam2::EngineCommandType::SetLocalMonitorLevel, monitorLevel, QStringLiteral("monitor level"));
 }
 
+void MainWindow::auditWavCompatibilityForSession(int expectedSampleRate, bool showModal)
+{
+    if (expectedSampleRate <= 0) {
+        return;
+    }
+    if (wavCompatibilityAuditRunning_) {
+        pendingWavCompatibilityAuditRate_ = expectedSampleRate;
+        return;
+    }
+
+    struct Input {
+        int bank = -1;
+        QString laneId;
+        QString name;
+        QString path;
+        bool track = false;
+    };
+    struct Result {
+        Input input;
+        int sampleRate = 0;
+        QString error;
+    };
+    auto inputs = std::make_shared<QVector<Input>>();
+    for (int bankIndex = 0; bankIndex < looperProject_.banks().size(); ++bankIndex) {
+        for (LooperLane& lane : looperProject_.banks()[bankIndex].lanes) {
+            if (lane.assetPath.trimmed().isEmpty()) {
+                lane.sampleRateCompatible = true;
+                continue;
+            }
+            lane.sampleRateCompatible = lane.sampleRate > 0 &&
+                lane.sampleRate == expectedSampleRate;
+            inputs->append(Input{
+                bankIndex, lane.id, lane.name, looperAssetAbsolutePath(lane), false});
+        }
+    }
+    SharedTrackModel& track = trackController_.model();
+    if (!track.filePath.trimmed().isEmpty()) {
+        track.sampleRateCompatible = track.sampleRate > 0 &&
+            track.sampleRate == expectedSampleRate;
+        inputs->append(Input{-1, {}, track.fileName, track.filePath, true});
+    } else {
+        track.sampleRateCompatible = true;
+    }
+    refreshLooperLanes();
+    updateTrackControls();
+    regeneratePreparedMix();
+    if (inputs->isEmpty()) {
+        return;
+    }
+
+    auto results = std::make_shared<QVector<Result>>();
+    results->reserve(inputs->size());
+    wavCompatibilityAuditRunning_ = true;
+    const bool started = startFileWorkerTask(
+        [inputs, results] {
+            for (const Input& input : *inputs) {
+                Result result;
+                result.input = input;
+                const jam2::wav::InspectResult inspected = jam2::wav::inspect_pcm16_file(
+                    nativeFilePath(input.path), static_cast<std::uint64_t>(kMaxLooperAssetBytes));
+                if (!inspected) {
+                    result.error = QString::fromStdString(inspected.error);
+                } else {
+                    result.sampleRate = static_cast<int>(inspected.info.sample_rate);
+                }
+                results->append(std::move(result));
+            }
+        },
+        [this, expectedSampleRate, showModal, results] {
+            wavCompatibilityAuditRunning_ = false;
+            QStringList newlyQuarantined;
+            for (const Result& result : *results) {
+                bool stillPresent = false;
+                if (result.input.track) {
+                    SharedTrackModel& current = trackController_.model();
+                    stillPresent = current.filePath == result.input.path;
+                    if (stillPresent) {
+                        current.sampleRate = result.sampleRate;
+                        current.sampleRateCompatible = result.error.isEmpty() &&
+                            result.sampleRate == expectedSampleRate;
+                    }
+                } else if (result.input.bank >= 0 &&
+                           result.input.bank < looperProject_.banks().size()) {
+                    for (LooperLane& lane : looperProject_.banks()[result.input.bank].lanes) {
+                        if (lane.id == result.input.laneId &&
+                            looperAssetAbsolutePath(lane) == result.input.path) {
+                            stillPresent = true;
+                            lane.sampleRate = result.sampleRate;
+                            lane.sampleRateCompatible = result.error.isEmpty() &&
+                                result.sampleRate == expectedSampleRate;
+                            break;
+                        }
+                    }
+                }
+                if (!stillPresent ||
+                    (result.error.isEmpty() && result.sampleRate == expectedSampleRate)) {
+                    continue;
+                }
+                const QString identity = result.input.path + QLatin1Char('|') +
+                    QString::number(expectedSampleRate) + QLatin1Char('|') +
+                    QString::number(result.sampleRate);
+                if (!reportedIncompatibleWavs_.contains(identity) && newlyQuarantined.size() < 8) {
+                    reportedIncompatibleWavs_.insert(identity);
+                    newlyQuarantined.append(result.error.isEmpty()
+                        ? QStringLiteral("%1 — expected %2 Hz, actual %3 Hz")
+                            .arg(result.input.name)
+                            .arg(expectedSampleRate)
+                            .arg(result.sampleRate)
+                        : QStringLiteral("%1 — expected %2 Hz, WAV could not be inspected: %3")
+                            .arg(result.input.name)
+                            .arg(expectedSampleRate)
+                            .arg(result.error));
+                }
+            }
+            while (reportedIncompatibleWavs_.size() > 256) {
+                reportedIncompatibleWavs_.erase(reportedIncompatibleWavs_.begin());
+            }
+            refreshLooperLanes();
+            updateTrackControls();
+            regeneratePreparedMix();
+            if (showModal && !newlyQuarantined.isEmpty()) {
+                QMessageBox::warning(
+                    this,
+                    QStringLiteral("WAV Sample-Rate Mismatch"),
+                    QStringLiteral(
+                        "These WAVs are quarantined from playback and Track Sync. "
+                        "Unload or replace them with files matching the jam:\n\n") +
+                        newlyQuarantined.join(QStringLiteral("\n")));
+            }
+            if (pendingWavCompatibilityAuditRate_ > 0) {
+                const int pending = pendingWavCompatibilityAuditRate_;
+                pendingWavCompatibilityAuditRate_ = 0;
+                auditWavCompatibilityForSession(pending, showModal);
+            } else if (looperProject_.trackSyncEnabled() && jam2_.isNetworkRunning()) {
+                shareLocalTracks();
+            }
+        },
+        [this, expectedSampleRate, showModal](const QString&) {
+            wavCompatibilityAuditRunning_ = false;
+            pendingWavCompatibilityAuditRate_ = expectedSampleRate;
+            QTimer::singleShot(100, this, [this, showModal] {
+                const int pending = pendingWavCompatibilityAuditRate_;
+                pendingWavCompatibilityAuditRate_ = 0;
+                auditWavCompatibilityForSession(pending, showModal);
+            });
+        });
+    if (!started) {
+        wavCompatibilityAuditRunning_ = false;
+        pendingWavCompatibilityAuditRate_ = expectedSampleRate;
+        QTimer::singleShot(100, this, [this, showModal] {
+            const int pending = pendingWavCompatibilityAuditRate_;
+            pendingWavCompatibilityAuditRate_ = 0;
+            auditWavCompatibilityForSession(pending, showModal);
+        });
+    }
+}
+
 void MainWindow::refreshLooperLanes()
 {
     for (int i = 0; i < static_cast<int>(looperBankButtons_.size()); ++i) {
@@ -2755,6 +3077,9 @@ void MainWindow::refreshLooperLanes()
     for (const LooperLane& lane : bank.lanes) {
         LooperLaneStackWidget::LaneView view;
         view.lane = lane;
+        if (!lane.sampleRateCompatible) {
+            view.lane.name += QStringLiteral(" [quarantined: sample-rate mismatch]");
+        }
         view.assetPath = looperAssetAbsolutePath(lane);
         if (!lane.assetPath.trimmed().isEmpty()) {
             const auto cached = looperWaveformCache_.constFind(view.assetPath);
@@ -2888,7 +3213,8 @@ void MainWindow::addLooperWavs()
     if (paths.isEmpty()) {
         return;
     }
-    constexpr int maxLanesPerBank = 128;
+    constexpr int maxLanesPerBank =
+        jam2::application::limits::kMaximumLooperLanesPerBank;
     const int bankIndex = looperProject_.activeBankIndex();
     const int remaining = qMax(0, maxLanesPerBank - looperProject_.banks().at(bankIndex).lanes.size());
     if (paths.size() > remaining) {
@@ -2901,12 +3227,13 @@ void MainWindow::addLooperWavs()
         return;
     }
     const QString stagingFolder = projectPersistence_.workspaceFolder();
+    const int expectedSampleRate = sampleRateSpin_ ? sampleRateSpin_->value() : 48000;
     auto results = std::make_shared<std::vector<StagedPcm16Asset>>();
     results->reserve(static_cast<std::size_t>(paths.size()));
     (void)startFileWorkerTask(
-        [paths, stagingFolder, results] {
+        [paths, stagingFolder, expectedSampleRate, results] {
             for (const QString& path : paths) {
-                results->push_back(stagePcm16Asset(path, stagingFolder));
+                results->push_back(stagePcm16Asset(path, stagingFolder, expectedSampleRate));
             }
         },
         [this, bankIndex, results] {
@@ -2914,11 +3241,15 @@ void MainWindow::addLooperWavs()
                 return;
             }
             int imported = 0;
+            QStringList failures;
             for (const StagedPcm16Asset& asset : *results) {
                 if (!asset.error.isEmpty()) {
 
                     appendLog(QStringLiteral("could not import WAV %1: %2")
                         .arg(asset.sourcePath, asset.error));
+                    if (failures.size() < 8) {
+                        failures.append(QFileInfo(asset.sourcePath).fileName() + QStringLiteral(": ") + asset.error);
+                    }
                     continue;
                 }
                 registerTransientTrackWav(asset.stagedPath);
@@ -2927,6 +3258,8 @@ void MainWindow::addLooperWavs()
                 lane.assetPath = asset.stagedPath;
                 lane.assetHash = asset.sha256;
                 lane.name = asset.displayName;
+                lane.sampleRate = asset.metadata.sampleRate;
+                lane.sampleRateCompatible = true;
                 if (!looperProject_.appendLane(bankIndex, std::move(lane))) {
                     appendLog(QStringLiteral("could not add WAV lane: ") + asset.sourcePath);
                     continue;
@@ -2940,6 +3273,12 @@ void MainWindow::addLooperWavs()
                 .arg(fileWorkerTasksHighWater_)
                 .arg(fileWorkerTasksCompleted_)
                 .arg(fileWorkerTasksRejected_));
+            if (!failures.isEmpty()) {
+                QMessageBox::warning(
+                    this,
+                    QStringLiteral("WAV Import"),
+                    QStringLiteral("Some WAVs were not loaded:\n\n") + failures.join(QStringLiteral("\n")));
+            }
             refreshLooperLanes();
             regeneratePreparedMix();
             if (imported > 0 && looperProject_.trackSyncEnabled() && jam2_.isNetworkRunning()) {
@@ -3002,10 +3341,11 @@ void MainWindow::loadWavIntoLooperLane()
         ? bank.lanes.at(selectedLaneIndex).id
         : QString{};
     const QString stagingFolder = projectPersistence_.workspaceFolder();
+    const int expectedSampleRate = sampleRateSpin_ ? sampleRateSpin_->value() : 48000;
     auto result = std::make_shared<StagedPcm16Asset>();
     (void)startFileWorkerTask(
-        [sourcePath, stagingFolder, result] {
-            *result = stagePcm16Asset(sourcePath, stagingFolder);
+        [sourcePath, stagingFolder, expectedSampleRate, result] {
+            *result = stagePcm16Asset(sourcePath, stagingFolder, expectedSampleRate);
         },
         [this, bankIndex, targetLaneId, result] {
             if (!result->error.isEmpty()) {
@@ -3040,6 +3380,8 @@ void MainWindow::loadWavIntoLooperLane()
             LooperLane& lane = looperProject_.banks()[bankIndex].lanes[laneIndex];
             lane.assetPath = result->stagedPath;
             lane.assetHash = result->sha256;
+            lane.sampleRate = result->metadata.sampleRate;
+            lane.sampleRateCompatible = true;
             if (isDefaultEmptyTrackName(lane.name) || lane.name.trimmed().isEmpty()) {
                 lane.name = result->displayName;
             }
@@ -3312,10 +3654,11 @@ void MainWindow::importLastCaptureToArmedLane()
         .lanes.at(trackRecordingWorkflow_.armedLane()).id;
     const QString sourcePath = trackRecordingWorkflow_.lastCapturePath();
     const QString stagingFolder = projectPersistence_.workspaceFolder();
+    const int expectedSampleRate = sampleRateSpin_ ? sampleRateSpin_->value() : 48000;
     auto result = std::make_shared<StagedPcm16Asset>();
     (void)startFileWorkerTask(
-        [sourcePath, stagingFolder, result] {
-            *result = stagePcm16Asset(sourcePath, stagingFolder);
+        [sourcePath, stagingFolder, expectedSampleRate, result] {
+            *result = stagePcm16Asset(sourcePath, stagingFolder, expectedSampleRate);
         },
         [this, bankIndex, laneId, result] {
             if (!result->error.isEmpty()) {
@@ -3342,6 +3685,8 @@ void MainWindow::importLastCaptureToArmedLane()
             LooperLane& lane = looperProject_.banks()[bankIndex].lanes[laneIndex];
             lane.assetPath = result->stagedPath;
             lane.assetHash = result->sha256;
+            lane.sampleRate = result->metadata.sampleRate;
+            lane.sampleRateCompatible = true;
             if (isDefaultEmptyTrackName(lane.name) || lane.name.trimmed().isEmpty()) {
                 lane.name = result->displayName;
             }
@@ -3945,13 +4290,15 @@ void MainWindow::updateTrackControls()
         const QSignalBlocker blocker(trackSyncCheck_);
         trackSyncCheck_->setChecked(looperProject_.trackSyncEnabled());
     }
+    const bool trackCompatible = trackController_.model().sampleRateCompatible;
     if (playTrackButton_) {
-        playTrackButton_->setEnabled(true);
-        playTrackButton_->setToolTip(QString{});
+        playTrackButton_->setEnabled(trackCompatible);
+        playTrackButton_->setToolTip(trackCompatible ? QString{} : QStringLiteral(
+            "This track is quarantined because its sample rate does not match the jam"));
     }
     if (stopTrackButton_) {
-        stopTrackButton_->setEnabled(true);
-        stopTrackButton_->setToolTip(QString{});
+        stopTrackButton_->setEnabled(trackCompatible);
+        stopTrackButton_->setToolTip(playTrackButton_ ? playTrackButton_->toolTip() : QString{});
     }
 }
 
@@ -3996,10 +4343,23 @@ void MainWindow::loadTrackMetadata()
                 QMessageBox::warning(this, QStringLiteral("Jam2 Track"), *error);
                 return;
             }
+            const int expectedSampleRate = sampleRateSpin_ ? sampleRateSpin_->value() : 48000;
+            if (metadata->sampleRate != expectedSampleRate) {
+                QMessageBox::warning(
+                    this,
+                    QStringLiteral("Jam2 Track"),
+                    QStringLiteral(
+                        "Sample-rate mismatch: this jam uses %1 Hz but the WAV is %2 Hz. "
+                        "The track was not loaded; convert it or use a %1 Hz source.")
+                        .arg(expectedSampleRate)
+                        .arg(metadata->sampleRate));
+                return;
+            }
             trackController_.model().fileName = info.fileName();
             trackController_.model().filePath = info.absoluteFilePath();
             trackController_.model().fileBytes = info.size();
-            trackController_.model().sampleRate = sidecar->value(QStringLiteral("sample_rate")).toInt(metadata->sampleRate);
+            trackController_.model().sampleRate = metadata->sampleRate;
+            trackController_.model().sampleRateCompatible = true;
             trackController_.model().durationMs = sidecar->value(QStringLiteral("duration_ms")).toInt(metadata->durationMs);
             trackController_.model().sha256 = metadata->sha256;
             trackController_.model().guessedBpm = 0.0;
@@ -4781,6 +5141,7 @@ void MainWindow::publishLocalTrackOffer(
     if (!looperProject_.trackSyncEnabled() || !jam2_.isRunning() ||
         sessionController_.snapshot().role != SharedSessionController::Role::Joiner ||
         bankIndex < 0 || bankIndex >= looperProject_.banks().size() || targetLaneId.isEmpty() ||
+        !lane.sampleRateCompatible || lane.sampleRate <= 0 ||
         !isSha256Hex(lane.assetHash) || lane.assetPath.isEmpty()) {
         return;
     }
@@ -4809,6 +5170,7 @@ void MainWindow::publishLocalTrackOffer(
         {QStringLiteral("target_lane_id"), targetLaneId},
         {QStringLiteral("sha256"), lane.assetHash},
         {QStringLiteral("name"), lane.name.left(512)},
+        {QStringLiteral("sample_rate"), lane.sampleRate},
     };
     localTrackOffers_.insert(contributionId, offer);
     trackOfferAssetPaths_.insert(lane.assetHash, lane.assetPath);
@@ -4838,7 +5200,8 @@ void MainWindow::shareLocalTracks()
     for (int bankIndex = 0; bankIndex < looperProject_.banks().size(); ++bankIndex) {
         const LooperBank& bank = looperProject_.banks().at(bankIndex);
         for (const LooperLane& lane : bank.lanes) {
-            if (!isSha256Hex(lane.assetHash) || lane.assetPath.isEmpty()) {
+            if (!lane.sampleRateCompatible || lane.sampleRate <= 0 ||
+                !isSha256Hex(lane.assetHash) || lane.assetPath.isEmpty()) {
                 continue;
             }
             publishLocalTrackOffer(bankIndex, lane.id, lane);
@@ -4871,6 +5234,7 @@ void MainWindow::handleTrackOffer(const QJsonObject& message, const QString& sou
             message.value(QStringLiteral("target_lane_id")).toString(),
             hash,
             message.value(QStringLiteral("name")).toString(),
+            message.value(QStringLiteral("sample_rate")).toInt(),
         });
     }
     if (!validatedTrackAssetHashes_.contains(hash)) {
@@ -4965,6 +5329,8 @@ void MainWindow::applyPendingTrackContributions()
             LooperLane& lane = lanes[targetIndex];
             lane.assetPath = assetPath;
             lane.assetHash = contribution.assetHash;
+            lane.sampleRate = contribution.sampleRate;
+            lane.sampleRateCompatible = true;
             if (!contribution.name.trimmed().isEmpty() &&
                 (lane.name.trimmed().isEmpty() || isDefaultEmptyTrackName(lane.name))) {
                 lane.name = contribution.name;
@@ -4983,6 +5349,8 @@ void MainWindow::applyPendingTrackContributions()
             lane.assetHash = contribution.assetHash;
             lane.name = contribution.name.trimmed().isEmpty()
                 ? QStringLiteral("Peer track") : contribution.name;
+            lane.sampleRate = contribution.sampleRate;
+            lane.sampleRateCompatible = true;
             if (looperProject_.appendLane(contribution.bankIndex, std::move(lane))) {
                 arrangementChanged = true;
                 applied = true;
@@ -5079,9 +5447,11 @@ void MainWindow::handleSongSet(
         appendLog(QStringLiteral("ignored stale host arrangement revision %1").arg(revision));
         return;
     }
-    const QJsonObject song = normalizeLooperAssetPaths(message.value(QStringLiteral("song")).toObject());
+    const QJsonObject normalizedSong =
+        normalizeLooperAssetPaths(message.value(QStringLiteral("song")).toObject());
     QStringList referencedHashes;
-    const QJsonArray banks = song.value(QStringLiteral("looper")).toObject().value(QStringLiteral("banks")).toArray();
+    const QJsonArray banks = normalizedSong.value(QStringLiteral("looper"))
+        .toObject().value(QStringLiteral("banks")).toArray();
     for (const QJsonValue& bankValue : banks) {
         for (const QJsonValue& laneValue : bankValue.toObject().value(QStringLiteral("lanes")).toArray()) {
             const QString hash = laneValue.toObject().value(QStringLiteral("asset_hash")).toString().toLower();
@@ -5096,11 +5466,14 @@ void MainWindow::handleSongSet(
             .arg(kMaxLooperAssetRequests));
         return;
     }
+    const QJsonObject song = preserveQuarantinedLocalLanes(normalizedSong);
     const QString assetFolder = QDir(projectPersistence_.workspaceFolder()).absoluteFilePath(QStringLiteral("wavs"));
     const std::uint64_t checkRevision = ++songAssetCheckRevision_;
     auto missing = std::make_shared<QStringList>();
+    auto assetFailure = std::make_shared<QString>();
+    const int expectedSampleRate = sessionController_.snapshot().contract.sampleRate;
     const bool started = startFileWorkerTask(
-        [referencedHashes, assetFolder, missing] {
+        [referencedHashes, assetFolder, expectedSampleRate, missing, assetFailure] {
             for (const QString& hash : referencedHashes) {
                 if (!isSha256Hex(hash)) {
                     missing->append(hash);
@@ -5111,12 +5484,25 @@ void MainWindow::handleSongSet(
                     nativeFilePath(path), static_cast<std::uint64_t>(kMaxLooperAssetBytes));
                 if (!QFileInfo::exists(path) || !inspected || sha256FileHex(path) != hash) {
                     missing->append(hash);
+                } else if (expectedSampleRate > 0 &&
+                           inspected.info.sample_rate !=
+                               static_cast<std::uint32_t>(expectedSampleRate)) {
+                    *assetFailure = QStringLiteral(
+                        "WAV asset %1 has sample rate %2 Hz; expected %3 Hz")
+                        .arg(hash.left(12))
+                        .arg(inspected.info.sample_rate)
+                        .arg(expectedSampleRate);
+                    return;
                 }
             }
         },
         [this, song, revision, restartTrack, hostAuthoritative, fromPeerProposal,
-         sourcePeerToken, checkRevision, missing] {
+         sourcePeerToken, checkRevision, missing, assetFailure] {
             if (checkRevision != songAssetCheckRevision_) {
+                return;
+            }
+            if (!assetFailure->isEmpty()) {
+                appendLog(QStringLiteral("rejected arrangement asset: ") + *assetFailure);
                 return;
             }
             if (!missing->isEmpty()) {
@@ -5329,6 +5715,19 @@ QJsonObject MainWindow::normalizeLooperAssetPaths(QJsonObject song) const
     return song;
 }
 
+QJsonObject MainWindow::preserveQuarantinedLocalLanes(QJsonObject song)
+{
+    const int expectedSampleRate = sessionController_.snapshot().contract.sampleRate;
+    const int preserved = mergeQuarantinedLocalLanes(
+        song, looperProject_, expectedSampleRate);
+    if (preserved > 0) {
+        appendLog(QStringLiteral(
+            "preserved %1 incompatible local WAV lane(s) as quarantined during arrangement sync")
+            .arg(preserved));
+    }
+    return song;
+}
+
 QString MainWindow::looperAssetPathForHash(const QString& hash) const
 {
     if (!isSha256Hex(hash)) {
@@ -5430,7 +5829,6 @@ Jam2RuntimeOptions MainWindow::networkRuntimeOptions(
     options.bootstrap_role = snapshot.role == SharedSessionController::Role::Creator
         ? jam2::SessionBootstrapRole::Creator
         : jam2::SessionBootstrapRole::Joiner;
-    options.grid_coordinator = snapshot.role == SharedSessionController::Role::Creator;
     options.mesh_peers_configured = true;
     for (const SharedSessionController::PeerSnapshot& peer : snapshot.peers) {
         if (peer.token == snapshot.localToken || peer.endpoint.isEmpty()) {
@@ -5511,13 +5909,13 @@ void MainWindow::loadTrackJson(const QJsonObject& object)
     loadTrackWaveform();
 }
 
-QJsonObject MainWindow::songToJson() const
+QJsonObject MainWindow::songToJson(bool syncCompatibleOnly) const
 {
     QJsonObject root = chordModel_.toJson();
     root.insert(QStringLiteral("independent_views"), true);
     root.insert(QStringLiteral("beat_view"), beatModel_.toJson());
     root.insert(QStringLiteral("lyric_view"), lyricModel_.toJson());
-    root.insert(QStringLiteral("looper"), looperProject_.toJson());
+    root.insert(QStringLiteral("looper"), looperProject_.toJson(syncCompatibleOnly));
     return root;
 }
 
@@ -5557,8 +5955,29 @@ bool MainWindow::loadSongJson(const QJsonObject& object)
     chordModel_ = loadedChord;
     beatModel_ = loadedBeat;
     lyricModel_ = loadedLyric;
+    const int expectedSampleRate = sessionController_.snapshot().contract.sampleRate > 0
+        ? sessionController_.snapshot().contract.sampleRate
+        : (sampleRateSpin_ ? sampleRateSpin_->value() : 48000);
+    bool needsCompatibilityAudit = false;
+    for (LooperBank& bank : loadedLooper.banks()) {
+        for (LooperLane& lane : bank.lanes) {
+            if (lane.assetPath.trimmed().isEmpty()) {
+                lane.sampleRateCompatible = true;
+                continue;
+            }
+            lane.sampleRateCompatible = lane.sampleRate > 0 &&
+                lane.sampleRate == expectedSampleRate;
+            needsCompatibilityAudit = needsCompatibilityAudit ||
+                !lane.sampleRateCompatible;
+        }
+    }
     looperProject_ = std::move(loadedLooper);
     refreshLooperLanes();
+    if (needsCompatibilityAudit) {
+        QTimer::singleShot(0, this, [this, expectedSampleRate] {
+            auditWavCompatibilityForSession(expectedSampleRate, true);
+        });
+    }
     return true;
 }
 
@@ -5903,7 +6322,7 @@ void MainWindow::sendSongSnapshot(std::optional<bool> trackPlayingOverride)
             {QStringLiteral("host_authoritative"), false},
             {QStringLiteral("track_playing"), trackPlayingOverride.value_or(
                 trackRecordingWorkflow_.preparedPlaying())},
-            {QStringLiteral("song"), songToJson()},
+            {QStringLiteral("song"), songToJson(true)},
         });
         appendLog(QStringLiteral("submitted collaborative arrangement edit"));
         return;
@@ -5935,7 +6354,7 @@ void MainWindow::sendSongSnapshot(std::optional<bool> trackPlayingOverride)
         {QStringLiteral("arrangement_revision"), revision},
         {QStringLiteral("host_authoritative"), true},
         {QStringLiteral("track_playing"), trackPlaying},
-        {QStringLiteral("song"), songToJson()},
+        {QStringLiteral("song"), songToJson(true)},
     });
     const SharedSessionController::Snapshot after = sessionController_.snapshot();
     if (coordinateTrackRestart && after.arrangementRevision != expectedArrangementRevision) {

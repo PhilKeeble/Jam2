@@ -1,4 +1,5 @@
 #include "LooperProject.hpp"
+#include "ContentLimits.hpp"
 
 #include <QJsonArray>
 #include <QJsonValue>
@@ -9,11 +10,11 @@
 #include <limits>
 
 namespace {
-constexpr int kBankCount = 4;
-constexpr int kMaxLanesPerBank = 128;
-constexpr int kMaxIdCharacters = 80;
-constexpr int kMaxNameCharacters = 512;
-constexpr int kMaxPathCharacters = 4096;
+constexpr int kBankCount = jam2::application::limits::kLooperBankCount;
+constexpr int kMaxLanesPerBank = jam2::application::limits::kMaximumLooperLanesPerBank;
+constexpr int kMaxIdCharacters = jam2::application::limits::kMaximumLooperIdCharacters;
+constexpr int kMaxNameCharacters = jam2::application::limits::kMaximumLooperNameCharacters;
+constexpr int kMaxPathCharacters = jam2::application::limits::kMaximumLooperPathCharacters;
 
 QString laneId(const QString& value)
 {
@@ -151,14 +152,18 @@ bool LooperProject::renameLane(int bankIndex, int laneIndex, const QString& name
     return true;
 }
 
-QJsonObject LooperProject::toJson() const
+QJsonObject LooperProject::toJson(bool syncCompatibleOnly) const
 {
     QJsonArray banks;
     for (const LooperBank& bank : banks_) {
         QJsonArray lanes;
         for (const LooperLane& lane : bank.lanes) {
+            if (syncCompatibleOnly && !lane.sampleRateCompatible) {
+                continue;
+            }
             lanes.append(QJsonObject{{"id", lane.id}, {"asset_path", lane.assetPath}, {"asset_hash", lane.assetHash},
-                {"name", lane.name}, {"start_frame", QString::number(lane.startFrame)}, {"stop_frame", QString::number(lane.stopFrame)},
+                {"name", lane.name}, {"sample_rate", lane.sampleRate},
+                {"start_frame", QString::number(lane.startFrame)}, {"stop_frame", QString::number(lane.stopFrame)},
                 {"loop_start_frame", QString::number(lane.loopStartFrame)}, {"loop_end_frame", QString::number(lane.loopEndFrame)},
                 {"gain_db", lane.gainDb}, {"muted", lane.muted}, {"solo", lane.solo}, {"loop_enabled", lane.loopEnabled}});
         }
@@ -215,11 +220,19 @@ bool LooperProject::loadJson(const QJsonObject& object)
             if (!gain.isUndefined() && (!gain.isDouble() || !std::isfinite(gain.toDouble()))) {
                 return false;
             }
+            const QJsonValue sampleRate = laneObject.value(QStringLiteral("sample_rate"));
+            if (!sampleRate.isUndefined() &&
+                (!sampleRate.isDouble() || sampleRate.toDouble() < 0 ||
+                 sampleRate.toDouble() > jam2::application::limits::kMaximumSampleRate ||
+                 std::floor(sampleRate.toDouble()) != sampleRate.toDouble())) {
+                return false;
+            }
             LooperLane lane;
             lane.id = laneId(laneObject.value(QStringLiteral("id")).toString());
             lane.assetPath = laneObject.value(QStringLiteral("asset_path")).toString();
             lane.assetHash = laneObject.value(QStringLiteral("asset_hash")).toString();
             lane.name = laneObject.value(QStringLiteral("name")).toString();
+            lane.sampleRate = laneObject.value(QStringLiteral("sample_rate")).toInt();
             lane.startFrame = jsonFrame(laneObject, "start_frame", 0);
             lane.stopFrame = jsonFrame(laneObject, "stop_frame", -1);
             lane.loopStartFrame = jsonFrame(laneObject, "loop_start_frame", -1);

@@ -71,6 +71,9 @@ bool SharedTrackController::observeEnginePlaying(bool playing) noexcept
 
 QString SharedTrackController::playbackStatusText(bool syncEnabled) const
 {
+    if (!model_.sampleRateCompatible) {
+        return QStringLiteral("Quarantined: sample-rate mismatch; unload or replace track");
+    }
     const QString scope = syncEnabled ? QStringLiteral("Shared") : QStringLiteral("Independent");
     switch (playback_.phase) {
     case PlaybackPhase::WaitingForAssets:

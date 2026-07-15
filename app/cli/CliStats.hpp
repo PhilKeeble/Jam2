@@ -173,6 +173,7 @@ struct AudioPacketStats {
     std::uint64_t udp_unmatched_pongs = 0;
     std::uint64_t udp_ping_slot_overwrites = 0;
     std::uint64_t udp_work_budget_yields = 0;
+    std::uint64_t udp_receive_batch_max = 0;
     std::uint64_t reorder_pending_high_water = 0;
     std::uint64_t reorder_capacity_drops = 0;
     std::uint64_t jitter_pending_high_water = 0;
@@ -444,6 +445,7 @@ public:
 
             throw std::runtime_error("failed to open stats CSV: " + path_.string());
         }
+        out_ << std::setprecision(12);
         out_ << "row_type,elapsed_ms,command_line,mode,platform,local_endpoint,peer_endpoint,endpoint_mode,"
                 "socket_send_buffer_bytes,socket_recv_buffer_bytes,requested_socket_send_buffer_bytes,requested_socket_recv_buffer_bytes,"
                 "audio_device_id,device_backend,device_name,device_driver_id,device_path,backend_sample_format,"
@@ -542,7 +544,7 @@ public:
                 "transport_source_peer_id,transport_event_counter,transport_grid_revision,"
                 "transport_events_accepted,transport_events_rejected,leader_audio_source_peer_id,"
                 "leader_audio_injected_packets,transport_source_frame,transport_requested_target_frame,"
-                "transport_applied_target_frame,transport_action\n";
+                "transport_applied_target_frame,transport_action,udp_receive_batch_max\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -916,7 +918,8 @@ public:
              << stats.transport_source_frame << ','
              << stats.transport_requested_target_frame << ','
              << stats.transport_applied_target_frame << ','
-             << stats.transport_action;
+             << stats.transport_action << ','
+             << stats.udp_receive_batch_max;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -932,7 +935,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(346);
+        std::vector<std::string> fields(347);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1239,6 +1242,7 @@ public:
         set(343, stats.transport_requested_target_frame);
         set(344, stats.transport_applied_target_frame);
         set(345, stats.transport_action);
+        set(346, stats.udp_receive_batch_max);
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {

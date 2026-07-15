@@ -164,6 +164,37 @@ def _wait(process: subprocess.Popen[str], timeout: float) -> tuple[int, bool]:
         return process.returncode, True
 
 
+def _effective_stream_ms(scenario: dict[str, Any], requested_stream_ms: int) -> int:
+    """Return the bounded duration needed to exercise the selected case.
+
+    ``--stream-ms`` remains the caller's requested minimum. Retained catalog
+    cases may contain later native actions or an impairment/recovery window
+    which cannot truthfully be assessed in a shorter run.
+    """
+    minimum_ms = 0
+    commands = scenario.get("commands", [])
+    if commands:
+        minimum_ms = max(
+            minimum_ms,
+            round((max(float(item.get("at_s", 0.0)) for item in commands) + 2.0) * 1000.0),
+        )
+    impairment = scenario.get("impairment")
+    if impairment is not None:
+        for direction in (impairment.client_to_server, impairment.server_to_client):
+            if direction.burst_every_ms > 0.0:
+                minimum_ms = max(
+                    minimum_ms,
+                    round(direction.burst_every_ms + direction.burst_pause_ms + 2000.0),
+                )
+    source = scenario.get("source_scenario", "")
+    if source == "transient-stall-recovery":
+        minimum_ms = max(minimum_ms, 18000)
+    if (source.startswith("metronome-listener-compensated-pulse") or
+            source == "metronome-listener-compensated-metro-pulse"):
+        minimum_ms = max(minimum_ms, 12000)
+    return max(int(requested_stream_ms), minimum_ms)
+
+
 def _run_case(jam2: Path, case_id: str, scenario: dict[str, Any], args: Any,
               case_root: Path, seed: int) -> dict[str, Any]:
     peer_count = int(scenario.get("mesh_peers", 2))
@@ -175,7 +206,8 @@ def _run_case(jam2: Path, case_id: str, scenario: dict[str, Any], args: Any,
     invite = f"jam2://v1?endpoint=127.0.0.1:{ports[0]}&session={session_id}&key={session_key}"
     tokens = [secrets.token_hex(16) for _ in range(peer_count)]
     profile = scenario["profile"]
-    profile_runtime = profile.runtime(args.stream_ms)
+    effective_stream_ms = _effective_stream_ms(scenario, args.stream_ms)
+    profile_runtime = profile.runtime(effective_stream_ms)
     prepared_track = None
     if scenario.get("prepared_track"):
         prepared_track = case_root / "prepared-track.wav"
@@ -239,14 +271,15 @@ def _run_case(jam2: Path, case_id: str, scenario: dict[str, Any], args: Any,
         else:
             runtime["audio_device"] = device
         recording = peer_root / "recording" if record else None
-        actions = _actions_for_peer(scenario, index, args.sample_rate, recording, prepared_track, args.stream_ms)
+        actions = _actions_for_peer(
+            scenario, index, args.sample_rate, recording, prepared_track, effective_stream_ms)
         native_scenario = {
             "schema": "jam2-debug-scenario", "run_id": f"{case_id}-peer-{index + 1}",
             "operation": operation, "profile": profile.base_profile,
             "runtime": runtime, "artifacts": {"root": str(peer_root)},
             "network": {
                 "bind": f"127.0.0.1:{ports[index]}", "no_stun": True,
-                "wait_ms": max(10000, args.stream_ms + 10000),
+                "wait_ms": max(10000, effective_stream_ms + 10000),
                 "peer_token": tokens[index], "topology": topology,
             },
             "actions": actions,
@@ -279,7 +312,7 @@ def _run_case(jam2: Path, case_id: str, scenario: dict[str, Any], args: Any,
         for process, stdout, stderr, peer_root in processes:
             code, timed_out = _wait(
                 process,
-                max(5.0, args.stream_ms / 1000.0 + args.startup_timeout_s + 5.0),
+                max(5.0, effective_stream_ms / 1000.0 + args.startup_timeout_s + 5.0),
             )
             stdout.close(); stderr.close()
             try:
@@ -287,7 +320,7 @@ def _run_case(jam2: Path, case_id: str, scenario: dict[str, Any], args: Any,
                 csv_path = _csv_from_manifest(peer_root, native)
             except Exception as error:
                 native = {"error": str(error)}; csv_path = None
-            csv_summary = summarize_csv(csv_path, assessment_elapsed_ms=args.stream_ms)
+            csv_summary = summarize_csv(csv_path, assessment_elapsed_ms=effective_stream_ms)
             audio = analyze_recording_dir(peer_root / "recording", scenario.get("signal", "silence")) if (peer_root / "recording").exists() else {}
             peer_results.append({
                 "process_id": peer_root.name,
@@ -314,8 +347,11 @@ def _run_case(jam2: Path, case_id: str, scenario: dict[str, Any], args: Any,
     result: dict[str, Any] = {
         "scenario": case_id, "source_scenario": scenario.get("source_scenario", case_id),
         "profile": profile.name, "base_profile": profile.base_profile,
-        "sparse_overrides": profile.overrides, "requested_stream_ms": args.stream_ms,
+        "sparse_overrides": profile.overrides,
+        "requested_stream_ms": args.stream_ms,
+        "effective_stream_ms": effective_stream_ms,
         "expect": scenario["expect"], "peers": peer_results,
+        "expected_early_client_exit": bool(scenario.get("expected_early_client_exit", False)),
         "headless_clock_drift_ppm": clock_drifts, "edge_impairments": [
             {**{k: v for k, v in edge.items() if k != "impairment"}, "impairment": asdict(edge["impairment"])}
             for edge in edge_specs], "edge_proxy_stats": edge_stats,
@@ -331,7 +367,7 @@ def _run_case(jam2: Path, case_id: str, scenario: dict[str, Any], args: Any,
         result["client_csv_path"] = str(client_csv or "")
         result["proxy_stats"] = edge_stats[0]["stats"] if edge_stats else {}
         result["metrics"] = combined_summary(
-            server_csv, client_csv, assessment_elapsed_ms=args.stream_ms,
+            server_csv, client_csv, assessment_elapsed_ms=effective_stream_ms,
         )
         server_paths = {"dir": str(case_root / "peer-1")}; client_paths = {"dir": str(case_root / "peer-2")}
         wav = analyze_metronome_recordings(result, server_paths, client_paths)
@@ -342,7 +378,7 @@ def _run_case(jam2: Path, case_id: str, scenario: dict[str, Any], args: Any,
         if epoch: result["metro_pulse_epoch_analysis"] = epoch
         result["verdict"] = verdict_for(result)
     else:
-        result["mesh_metrics"] = mesh_collect_metrics(peer_results, args.stream_ms)
+        result["mesh_metrics"] = mesh_collect_metrics(peer_results, effective_stream_ms)
         result["verdict"] = mesh_verdict(result)
     (case_root / "result.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return result
@@ -360,9 +396,7 @@ def run(args: Any, repo: Path, invocation: InvocationArtifacts,
         if args.headless_audio_buffer_frames <= 0:
             raise ValueError("--headless-audio-buffer-frames must be positive")
         devices = (args.server_audio_device, args.client_audio_device)
-        if (devices[0] is None) != (devices[1] is None):
-            raise ValueError("--server-audio-device and --client-audio-device must be supplied together")
-        if args.mesh_peers and devices[0] is not None:
+        if args.mesh_peers and any(device is not None for device in devices):
             raise ValueError("mesh stress retains deterministic headless audio; omit physical device options")
         capabilities = NativeCapabilities(args.jam2)
         configure_native_profiles(capabilities.description)

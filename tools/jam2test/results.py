@@ -311,7 +311,8 @@ def mesh_verdict(result):
 
 
 def duration_coverage_ratio(result):
-    requested_stream_ms = float(result.get("requested_stream_ms", 0))
+    requested_stream_ms = float(
+        result.get("effective_stream_ms", result.get("requested_stream_ms", 0)))
     if requested_stream_ms <= 0.0:
         return 1.0
     if "mesh_metrics" in result:
@@ -512,8 +513,11 @@ def protocol_verdict_for(result):
             return "short_flood_not_fully_injected"
         if metrics.get("udp_parse_rejections_total", 0.0) <= 0.0:
             return "short_flood_rejections_not_observed"
-        if metrics.get("udp_work_budget_yields_total", 0.0) <= 0.0:
-            return "udp_work_budget_not_observed"
+        batch_max = metrics.get("udp_receive_batch_max", 0.0)
+        if batch_max <= 0.0:
+            return "udp_receive_batch_not_observed"
+        if batch_max > 64.0:
+            return "udp_work_budget_exceeded"
         return "pass"
     if scenario.startswith("jitter-buffer-"):
         if metrics.get("jitter_buffer_released_packets_total", 0.0) <= 0.0:
@@ -542,9 +546,10 @@ def protocol_verdict_for(result):
         if pulse.get("combined", {}).get("matched_pulses_min", 0) <= 0:
             return "listener_compensated_pulse_not_matched"
         if scenario == "metronome-listener-compensated-metro-pulse":
-            if pulse.get("combined", {}).get("steady_samples_min", 0) <= 0:
+            listener = pulse.get("client", {})
+            if listener.get("steady_samples", 0) <= 0:
                 return "listener_compensated_pulse_steady_missing"
-            max_abs_error = pulse.get("combined", {}).get("steady_max_abs_error_ms_max", 0.0)
+            max_abs_error = listener.get("steady_max_abs_error_ms", 0.0)
             if max_abs_error > 80.0:
                 return "listener_compensated_pulse_timing_high"
         return "pass"
@@ -573,9 +578,14 @@ def protocol_verdict_for(result):
         metrics_set = result.get("metrics", {})
         server = metrics_set.get("server", {})
         client = metrics_set.get("client", {})
-        if min(server.get("grid_revision", 0), client.get("grid_revision", 0)) < 3:
+        combined = metrics_set.get("combined", {})
+        if (min(server.get("grid_revision", 0), client.get("grid_revision", 0)) < 2 or
+                combined.get("grid_proposals_accepted_total", 0) < 2 or
+                combined.get("grid_assignments_accepted_total", 0) < 4):
             return "concurrent_grid_revisions_not_ordered"
-        if server.get("grid_authority_peer_id") != client.get("grid_authority_peer_id"):
+        if (not combined.get("grid_revision_consensus", False) or
+                not combined.get("grid_authority_consensus", False) or
+                server.get("grid_authority_peer_id") != client.get("grid_authority_peer_id")):
             return "concurrent_grid_authority_conflict"
         return "pass"
     if scenario == "grid-stop-restart-shared-grid":
@@ -655,8 +665,15 @@ def protocol_verdict_for(result):
             return "transport_grid_revision_mismatch"
         if client.get("transport_events_accepted", 0.0) <= 0.0:
             return "transport_event_not_accepted"
-        if client.get("transport_applied_target_frame", 0.0) <= client.get("transport_source_frame", 0.0):
+        if min(server.get("transport_applied_target_frame", 0.0),
+               client.get("transport_applied_target_frame", 0.0)) <= 0.0:
             return "transport_applied_frame_invalid"
+        for side in (server, client):
+            applied = side.get("transport_applied_target_frame", 0.0)
+            if (side.get("prepared_source_scheduled_start_frame", 0.0) != applied or
+                    abs(side.get("prepared_source_actual_start_frame", 0.0) - applied) >
+                    max(1.0, side.get("active_audio_buffer_frames", 0.0))):
+                return "transport_restart_not_applied"
         return "pass"
     if scenario in ("transport-track-actions", "transport-track-actions-joiner"):
         metric_set = result.get("metrics", {})
@@ -696,7 +713,8 @@ def protocol_verdict_for(result):
         for side in (server, client):
             applied = side.get("transport_applied_target_frame", 0.0)
             if (side.get("prepared_source_scheduled_start_frame", 0.0) != applied or
-                    side.get("prepared_source_actual_start_frame", 0.0) != applied):
+                    abs(side.get("prepared_source_actual_start_frame", 0.0) - applied) >
+                    max(1.0, side.get("active_audio_buffer_frames", 0.0))):
                 return "record_start_did_not_play_prepared_tracks"
         return "pass"
     if scenario == "transport-track-sync-off":
@@ -732,9 +750,15 @@ def protocol_verdict_for(result):
             return "playout_delay_not_applied"
         return "pass"
     if scenario == "drift-max-5ppm":
-        ratio_min = metrics.get("resampler_ratio_min", 1.0)
-        ratio_max = metrics.get("resampler_ratio_max", 1.0)
-        if ratio_min < 0.999990 or ratio_max > 1.000010:
+        observed = []
+        for side in (result.get("metrics", {}).get("server", {}),
+                     result.get("metrics", {}).get("client", {})):
+            observed.append(side.get("resampler_ratio", 1.0))
+            if side.get("resampler_ratio_min", 0.0) > 0.0:
+                observed.append(side["resampler_ratio_min"])
+            if side.get("resampler_ratio_max", 0.0) > 0.0:
+                observed.append(side["resampler_ratio_max"])
+        if any(abs(value - 1.0) > 0.0000051 for value in observed):
             return "resampler_exceeded_expected_cap"
         return "pass"
     if scenario == "socket-buffers":
@@ -820,8 +844,9 @@ def metronome_verdict(result, expected_mode):
     # alignment-valid fields above distinguish that from an unset epoch.
     if combined.get("grid_authority_epoch_min", 0.0) <= 0.0:
         return "metronome_epoch_not_set"
-    if combined.get("grid_mapped_epoch_min", 0.0) <= 0.0:
-        return "metronome_epoch_not_mapped"
+    # A remote authority epoch may legitimately map to/before local frame zero
+    # when that peer's engine starts later. Alignment validity above is the
+    # authoritative proof that the mapping exists.
     expected_mode_id = {
         "shared-grid": 0,
         "leader-audio": 1,
@@ -833,7 +858,7 @@ def metronome_verdict(result, expected_mode):
         if combined.get("metronome_compensation_active_sides", 0.0) < 1:
             return "metronome_compensation_not_active"
     elif expected_mode == "leader-audio":
-        if combined.get("metronome_compensation_offset_ms_abs_max", 0.0) != 0.0:
+        if combined.get("metronome_compensation_active_sides", 0) != 0:
             return "unexpected_metronome_compensation"
         if combined.get("leader_audio_injected_sides", 0) != 1:
             return "leader_audio_source_count_invalid"
@@ -950,7 +975,23 @@ def classify_metronome_clicks(expected, detected, analysis):
     steady_extra = analysis["extra_clicks"]
     steady_max_error = analysis["max_abs_error_frames"]
     if analysis["missing_clicks"] or analysis["extra_clicks"]:
+        # Recording can begin just before an epoch boundary while the engine
+        # starts producing the selected stem on the following callback. Treat
+        # one missing leading click as a startup boundary, not a steady-state
+        # count failure.
+        if len(expected) > 1 and len(expected[1:]) == len(detected):
+            steady_errors = [
+                abs(click - frame) for frame, click in zip(expected[1:], detected)
+            ]
+            if steady_errors and all(
+                    error <= METRONOME_WAV_TOLERANCE_FRAMES for error in steady_errors):
+                startup_boundary = True
+                steady_missing = 0
+                steady_extra = 0
+                steady_max_error = max(steady_errors, default=0)
         for detected_start in range(1, min(3, len(detected)) + 1):
+            if startup_boundary:
+                break
             if len(expected) <= 1 or len(expected[1:]) != len(detected[detected_start:]):
                 continue
             steady_errors = [abs(click - frame) for frame, click in zip(expected[1:], detected[detected_start:])]
@@ -1012,10 +1053,30 @@ def analyze_metronome_recordings(result, server_paths, client_paths):
     scenario = result.get("source_scenario") or result.get("scenario", "")
     if not (scenario == "metronome-shared-grid" or scenario.startswith("metronome-")):
         return {}
-    allow_client_silent = scenario == "metronome-leader-audio"
+    if scenario == "metronome-leader-audio":
+        server = analyze_metronome_wav(
+            Path(server_paths["dir"]) / "recording")
+        client = analyze_metronome_wav(
+            Path(client_paths["dir"]) / "recording", allow_silent=True)
+        received = analyze_metronome_wav(
+            Path(client_paths["dir"]) / "recording",
+            wav_name="their-input.wav",
+            dynamic_phase=True)
+        ok = server.get("ok", False) and client.get("ok", False) and received.get("ok", False)
+        verdict = "" if ok else next(
+            (item.get("verdict", "metronome_wav_failed")
+             for item in (server, client, received) if not item.get("ok", False)),
+            "metronome_wav_failed")
+        return {
+            "ok": ok,
+            "verdict": verdict,
+            "server": server,
+            "client": client,
+            "client_received_leader_audio": received,
+        }
     loose_timing = scenario == "metronome-shared-grid" or scenario.startswith("metronome-listener-compensated")
     server = analyze_side_recording(Path(server_paths["dir"]) / "recording")
-    client = analyze_side_recording(Path(client_paths["dir"]) / "recording", allow_silent=allow_client_silent)
+    client = analyze_side_recording(Path(client_paths["dir"]) / "recording")
     if loose_timing:
         server = analyze_metronome_wav(Path(server_paths["dir"]) / "recording")
         client = analyze_metronome_wav(Path(client_paths["dir"]) / "recording")

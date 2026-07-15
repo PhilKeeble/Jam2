@@ -33,9 +33,10 @@ struct PeerStreamConfig {
     bool collect_diagnostics = false;
 };
 
-// Network-thread sink used by the one-peer compatibility path. Phase 4 can
-// replace this with a per-peer local-timeline/mix sink without changing the
-// packet acceptance and clock-correction implementation.
+// Network-thread sink for accepted, clock-corrected peer audio. A one-peer
+// session may attach a local playback sink directly; mesh sessions attach one
+// fixed-capacity PeerMixer slot per PeerStream without changing packet
+// acceptance or clock correction.
 class PeerStreamPlayback {
 public:
     virtual ~PeerStreamPlayback() = default;

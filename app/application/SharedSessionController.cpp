@@ -5,6 +5,7 @@
 #include "SharedSessionController.hpp"
 
 #include "ApplicationRuntime.hpp"
+#include "ControlMessageValidation.hpp"
 #include "ControlProtocol.hpp"
 
 #include <QHostAddress>
@@ -26,17 +27,12 @@ constexpr double kMaxExactJsonInteger = 9007199254740991.0;
 
 bool isGridAction(const QString& type)
 {
-    return type == QStringLiteral("metronome.settings") ||
-        type == QStringLiteral("beat.set") ||
-        type == QStringLiteral("beat.hit") ||
-        type == QStringLiteral("beat.division") ||
-        type == QStringLiteral("grid.resize") ||
-        type == QStringLiteral("lyrics.set");
+    return jam2::application::isGridControlMessageType(type);
 }
 
 bool isArrangementAction(const QString& type)
 {
-    return type == QStringLiteral("song.set");
+    return jam2::application::isArrangementControlMessageType(type);
 }
 
 bool validToken(const QString& token)
@@ -92,6 +88,34 @@ bool isWildcardEndpoint(const QString& endpoint, int& separator)
         host == QStringLiteral("[::]");
 }
 
+bool matchesContractSampleRate(const QJsonObject& message, int expectedSampleRate)
+{
+    if (expectedSampleRate <= 0) {
+        return true;
+    }
+    const QString type = message.value(QStringLiteral("type")).toString();
+    if (type == QStringLiteral("looper.recording.offer")) {
+        return message.value(QStringLiteral("sample_rate")).toInt() == expectedSampleRate;
+    }
+    if (type != QStringLiteral("song.set")) {
+        return true;
+    }
+    const QJsonArray banks = message.value(QStringLiteral("song")).toObject()
+        .value(QStringLiteral("looper")).toObject()
+        .value(QStringLiteral("banks")).toArray();
+    for (const QJsonValue& bankValue : banks) {
+        for (const QJsonValue& laneValue : bankValue.toObject()
+                 .value(QStringLiteral("lanes")).toArray()) {
+            const QJsonObject lane = laneValue.toObject();
+            if (!lane.value(QStringLiteral("asset_hash")).toString().isEmpty() &&
+                lane.value(QStringLiteral("sample_rate")).toInt() != expectedSampleRate) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 }
 
 SharedSessionController::SharedSessionController(QObject* parent)
@@ -111,13 +135,54 @@ SharedSessionController::SharedSessionController(QObject* parent)
             true}, false);
         connectJoiner();
     });
+    heartbeatTimer_.setSingleShot(false);
+    QObject::connect(&heartbeatTimer_, &QTimer::timeout, this, [this] {
+        sendHeartbeat();
+    });
+    heartbeatDeadlineTimer_.setSingleShot(false);
+    QObject::connect(&heartbeatDeadlineTimer_, &QTimer::timeout, this, [this] {
+        checkHeartbeatDeadline();
+    });
 
     server_.onEvent = [this](const TransportEvent& event) { handleServerEvent(event); };
     server_.onMessage = [this](const QString& token, const QJsonObject& message) {
         const QString type = message.value(QStringLiteral("type")).toString();
-        if (type == QStringLiteral("session.membership") ||
-            type == QStringLiteral("session.contract") ||
-            type == QStringLiteral("session.settings")) {
+        const auto decision = jam2::application::evaluateControlMessage(
+            message, jam2::application::ControlMessageSource::AuthenticatedPeer);
+        if (!decision.accepted) {
+            if (decision.rejection == jam2::application::ControlMessageRejection::Authorization) {
+                ++authorizationRejections_;
+            } else {
+                ++validationRejections_;
+            }
+            return;
+        }
+        if (!matchesContractSampleRate(message, contract_.sampleRate)) {
+            ++validationRejections_;
+            return;
+        }
+        if (type == QStringLiteral("session.heartbeat.ack")) {
+            ++heartbeatAcksReceived_;
+            publishSnapshot();
+            return;
+        }
+        if (type == QStringLiteral("session.endpoint.update")) {
+            const QString endpoint = message.value(QStringLiteral("udp_endpoint")).toString();
+            auto peer = peers_.find(token);
+            if (peer == peers_.end() || peer->endpoint == endpoint) {
+                return;
+            }
+            try {
+                (void)jam2::parse_endpoint(endpoint.toStdString());
+            } catch (const std::exception&) {
+                ++validationRejections_;
+                return;
+            }
+            peer->endpoint = endpoint;
+            peer->edgeState = EdgeState::Candidate;
+            peer->proofState = QStringLiteral("endpoint-updated");
+            peer->streamState = QStringLiteral("candidate");
+            broadcastMembership();
             return;
         }
         QJsonObject routed = message;
@@ -188,6 +253,9 @@ bool SharedSessionController::startCreator(const CreatorConfig& config)
     runtimeAttachmentEnabled_ = false;
     creator_ = config;
     creator_.sessionPeerLimit = std::max(0, creator_.sessionPeerLimit);
+    heartbeatIntervalMs_ = std::clamp(config.heartbeatIntervalMs, 10, 60000);
+    heartbeatMissLimit_ = std::clamp(config.heartbeatMissLimit, 1, 20);
+    heartbeatTimer_.setInterval(heartbeatIntervalMs_);
     coordinatorToken_ = config.localToken;
     contract_ = config.contract;
     contractReady_ = contract_.protocolVersion == 1 && !contract_.audioFormat.isEmpty() &&
@@ -211,6 +279,7 @@ bool SharedSessionController::startCreator(const CreatorConfig& config)
         return false;
     }
     runtimeAttachmentEnabled_ = true;
+    heartbeatTimer_.start();
     setLifecycle(Lifecycle::Listening);
     return true;
 }
@@ -224,7 +293,10 @@ bool SharedSessionController::startJoiner(const JoinerConfig& config)
     joiner_ = config;
     joiner_.reconnectIntervalMs = std::clamp(config.reconnectIntervalMs, 10, 60000);
     joiner_.reconnectAttemptLimit = std::clamp(config.reconnectAttemptLimit, 1, 100);
+    heartbeatIntervalMs_ = std::clamp(config.heartbeatIntervalMs, 10, 60000);
+    heartbeatMissLimit_ = std::clamp(config.heartbeatMissLimit, 1, 20);
     reconnectTimer_.setInterval(joiner_.reconnectIntervalMs);
+    heartbeatDeadlineTimer_.setInterval(std::clamp(heartbeatIntervalMs_ / 2, 10, 1000));
     reconnectAttemptLimit_ = joiner_.reconnectAttemptLimit;
     reconnectEnabled_ = true;
     reconnectAttempts_ = 0;
@@ -233,6 +305,26 @@ bool SharedSessionController::startJoiner(const JoinerConfig& config)
     failureRetryable_ = false;
     setLifecycle(Lifecycle::Connecting);
     connectJoiner();
+    return true;
+}
+
+bool SharedSessionController::endSession(const QString& detail)
+{
+    if (role_ != Role::Creator) {
+        return false;
+    }
+    const QJsonObject message{
+        {QStringLiteral("type"), QStringLiteral("session.end")},
+        {QStringLiteral("detail"), detail.left(512)},
+    };
+    const auto decision = jam2::application::evaluateControlMessage(
+        message, jam2::application::ControlMessageSource::LocalCreator);
+    if (!decision.accepted) {
+        ++validationRejections_;
+        publishSnapshot();
+        return false;
+    }
+    server_.send(message);
     return true;
 }
 
@@ -248,6 +340,8 @@ void SharedSessionController::reset(bool stopRuntime)
     runtimePeers_.clear();
     reconnectEnabled_ = false;
     reconnectTimer_.stop();
+    heartbeatTimer_.stop();
+    heartbeatDeadlineTimer_.stop();
     server_.close();
     client_.close();
     if (stopRuntime && runtime_ != nullptr && runtime_->isNetworkRunning()) {
@@ -270,11 +364,21 @@ void SharedSessionController::reset(bool stopRuntime)
     contract_ = {};
     reconnectAttempts_ = 0;
     reconnectAttemptLimit_ = 15;
+    everAuthenticated_ = false;
     failure_ = TransportFailure::None;
     failureDetail_.clear();
     failureRetryable_ = false;
     gridState_ = {};
     arrangementState_ = {};
+    heartbeatIntervalMs_ = kDefaultHeartbeatIntervalMs;
+    heartbeatMissLimit_ = kDefaultHeartbeatMissLimit;
+    heartbeatSequence_ = 0;
+    heartbeatsSent_ = 0;
+    heartbeatsReceived_ = 0;
+    heartbeatAcksReceived_ = 0;
+    validationRejections_ = 0;
+    authorizationRejections_ = 0;
+    lastHeartbeat_.invalidate();
     publishSnapshot();
 }
 
@@ -340,6 +444,12 @@ void SharedSessionController::updateLocalEndpoint(const QString& endpoint)
             broadcastMembership();
         } else {
             publishSnapshot();
+            if (client_.isConnected()) {
+                (void)send(QJsonObject{
+                    {QStringLiteral("type"), QStringLiteral("session.endpoint.update")},
+                    {QStringLiteral("udp_endpoint"), endpoint},
+                });
+            }
         }
     }
 }
@@ -354,6 +464,9 @@ void SharedSessionController::updatePeerEdgeState(
         if (it->peerId != peerId) {
             continue;
         }
+        const EdgeState beforeState = it->edgeState;
+        const QString beforeProof = it->proofState;
+        const QString beforeStream = it->streamState;
         it->edgeState = state;
         if (!proofState.isEmpty()) {
             it->proofState = proofState;
@@ -361,13 +474,34 @@ void SharedSessionController::updatePeerEdgeState(
         if (!streamState.isEmpty()) {
             it->streamState = streamState;
         }
-        publishSnapshot();
+        if (it->edgeState != beforeState || it->proofState != beforeProof ||
+            it->streamState != beforeStream) {
+            publishSnapshot();
+        }
         return;
     }
 }
 
 bool SharedSessionController::send(const QJsonObject& message)
 {
+    const auto source = role_ == Role::Creator
+        ? jam2::application::ControlMessageSource::LocalCreator
+        : jam2::application::ControlMessageSource::LocalJoiner;
+    const auto decision = jam2::application::evaluateControlMessage(message, source);
+    if (!decision.accepted) {
+        if (decision.rejection == jam2::application::ControlMessageRejection::Authorization) {
+            ++authorizationRejections_;
+        } else {
+            ++validationRejections_;
+        }
+        publishSnapshot();
+        return false;
+    }
+    if (!matchesContractSampleRate(message, contract_.sampleRate)) {
+        ++validationRejections_;
+        publishSnapshot();
+        return false;
+    }
     if (role_ == Role::Creator) {
         QJsonObject routed = message;
         const QString type = routed.value(QStringLiteral("type")).toString();
@@ -403,9 +537,23 @@ bool SharedSessionController::sendTo(
     bool closeAfterWrite)
 {
     if (role_ == Role::Creator) {
+        const auto source = message.value(QStringLiteral("type")).toString() ==
+                QStringLiteral("debug.lifecycle.disconnect")
+            ? jam2::application::ControlMessageSource::Internal
+            : jam2::application::ControlMessageSource::LocalCreator;
+        const auto decision = jam2::application::evaluateControlMessage(message, source);
+        if (!decision.accepted) {
+            if (decision.rejection == jam2::application::ControlMessageRejection::Authorization) {
+                ++authorizationRejections_;
+            } else {
+                ++validationRejections_;
+            }
+            publishSnapshot();
+            return false;
+        }
         return server_.sendTo(token, message, closeAfterWrite);
     }
-    return role_ == Role::Joiner && token.isEmpty() && !closeAfterWrite && client_.send(message);
+    return role_ == Role::Joiner && token.isEmpty() && !closeAfterWrite && send(message);
 }
 
 bool SharedSessionController::canQueueTo(const QString& token, qint64 additionalBytes) const
@@ -448,6 +596,16 @@ SharedSessionController::Snapshot SharedSessionController::snapshot() const
     result.reconnectAttempts = reconnectAttempts_;
     result.reconnectAttemptLimit = role_ == Role::Joiner ? reconnectAttemptLimit_ : 0;
     result.reconnectIntervalMs = role_ == Role::Joiner ? reconnectTimer_.interval() : 0;
+    result.heartbeatIntervalMs = heartbeatIntervalMs_;
+    result.heartbeatMissLimit = heartbeatMissLimit_;
+    result.lastHeartbeatAgeMs = lastHeartbeat_.isValid() ? lastHeartbeat_.elapsed() : -1;
+    result.heartbeatMissed = result.lastHeartbeatAgeMs < 0 ? 0 : std::min(
+        heartbeatMissLimit_, static_cast<int>(result.lastHeartbeatAgeMs / heartbeatIntervalMs_));
+    result.heartbeatsSent = heartbeatsSent_;
+    result.heartbeatsReceived = heartbeatsReceived_;
+    result.heartbeatAcksReceived = heartbeatAcksReceived_;
+    result.validationRejections = validationRejections_;
+    result.authorizationRejections = authorizationRejections_;
     result.totalPeerCount = static_cast<int>(peers_.size());
     const QString localToken = result.localToken;
     result.remotePeerCount = result.totalPeerCount - (peers_.contains(localToken) ? 1 : 0);
@@ -506,8 +664,14 @@ void SharedSessionController::handleServerEvent(const TransportEvent& event)
 void SharedSessionController::handleClientEvent(const TransportEvent& event)
 {
     if (event.type == TransportEventType::Authenticated) {
+        const bool firstAuthentication = !everAuthenticated_;
+        everAuthenticated_ = true;
         reconnectAttempts_ = 0;
         reconnectTimer_.stop();
+        if (firstAuthentication || !lastHeartbeat_.isValid()) {
+            lastHeartbeat_.start();
+        }
+        heartbeatDeadlineTimer_.start();
         failure_ = TransportFailure::None;
         failureDetail_.clear();
         failureRetryable_ = false;
@@ -588,6 +752,7 @@ void SharedSessionController::handleAuthenticatedPeer(
     if (!arrangementState_.isEmpty()) {
         server_.sendTo(token, arrangementState_);
     }
+    sendHeartbeat(token);
     if (onPeerAuthenticated) {
         onPeerAuthenticated(token, message);
     }
@@ -613,6 +778,59 @@ void SharedSessionController::handleDisconnectedPeer(const QString& token)
 void SharedSessionController::handleClientMessage(const QJsonObject& message)
 {
     const QString type = message.value(QStringLiteral("type")).toString();
+    const auto decision = jam2::application::evaluateControlMessage(
+        message, jam2::application::ControlMessageSource::Coordinator);
+    if (!decision.accepted) {
+        if (decision.rejection == jam2::application::ControlMessageRejection::Authorization) {
+            ++authorizationRejections_;
+        } else {
+            ++validationRejections_;
+        }
+        publishTransportEvent(TransportEvent{
+            TransportEventType::Failure,
+            TransportFailure::AuthenticatedFrameRejected,
+            decision.reason}, false);
+        publishSnapshot();
+        return;
+    }
+    if (!matchesContractSampleRate(message, contract_.sampleRate)) {
+        ++validationRejections_;
+        publishTransportEvent(TransportEvent{
+            TransportEventType::Failure,
+            TransportFailure::AuthenticatedFrameRejected,
+            QStringLiteral("Control message WAV sample rate does not match the session contract")}, false);
+        publishSnapshot();
+        return;
+    }
+    if (type == QStringLiteral("session.heartbeat")) {
+        ++heartbeatsReceived_;
+        lastHeartbeat_.restart();
+        (void)send(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("session.heartbeat.ack")},
+            {QStringLiteral("sequence"), message.value(QStringLiteral("sequence"))},
+        });
+        publishSnapshot();
+        return;
+    }
+    if (type == QStringLiteral("session.end")) {
+        reconnectEnabled_ = false;
+        reconnectTimer_.stop();
+        heartbeatDeadlineTimer_.stop();
+        runtimeAttachmentEnabled_ = false;
+        if (runtime_ != nullptr && runtime_->isNetworkRunning()) {
+            runtime_->stopNetwork();
+        }
+        client_.close();
+        lifecycle_ = Lifecycle::Inactive;
+        const QString detail = message.value(QStringLiteral("detail")).toString(
+            QStringLiteral("The jam creator ended the session"));
+        publishSnapshot();
+        publishTransportEvent(TransportEvent{
+            TransportEventType::SessionEnded,
+            TransportFailure::None,
+            detail}, false);
+        return;
+    }
     if (type == QStringLiteral("session.contract")) {
         if (!acceptContract(message)) {
             client_.send(QJsonObject{
@@ -929,7 +1147,13 @@ void SharedSessionController::scheduleReconnect()
     if (!reconnectEnabled_ || closing_ || role_ != Role::Joiner || reconnectTimer_.isActive()) {
         return;
     }
-    if (reconnectAttempts_ >= reconnectAttemptLimit_) {
+    if (everAuthenticated_ && lastHeartbeat_.isValid() &&
+        lastHeartbeat_.elapsed() >=
+            static_cast<qint64>(heartbeatIntervalMs_) * heartbeatMissLimit_) {
+        expireCoordinatorHeartbeat();
+        return;
+    }
+    if (!everAuthenticated_ && reconnectAttempts_ >= reconnectAttemptLimit_) {
         const QString detail = QStringLiteral("TCP control reconnect attempts exhausted");
         reconnectEnabled_ = false;
         fail(TransportFailure::ReconnectExhausted, detail, false);
@@ -960,6 +1184,68 @@ void SharedSessionController::connectJoiner()
         joiner_.keyHex,
         joiner_.localToken,
         joiner_.localEndpoint);
+}
+
+void SharedSessionController::sendHeartbeat(const QString& targetToken)
+{
+    if (role_ != Role::Creator || closing_) {
+        return;
+    }
+    heartbeatSequence_ = heartbeatSequence_ >= (std::numeric_limits<int>::max)()
+        ? 1 : heartbeatSequence_ + 1;
+    const QJsonObject heartbeat{
+        {QStringLiteral("type"), QStringLiteral("session.heartbeat")},
+        {QStringLiteral("sequence"), heartbeatSequence_},
+    };
+    bool queued = false;
+    if (targetToken.isEmpty()) {
+        server_.send(heartbeat);
+        queued = server_.hasPeer();
+    } else {
+        queued = server_.sendTo(targetToken, heartbeat);
+    }
+    if (queued) {
+        ++heartbeatsSent_;
+        publishSnapshot();
+    }
+}
+
+void SharedSessionController::checkHeartbeatDeadline()
+{
+    if (role_ != Role::Joiner || closing_ || !everAuthenticated_ ||
+        !lastHeartbeat_.isValid()) {
+        return;
+    }
+    if (lastHeartbeat_.elapsed() >=
+        static_cast<qint64>(heartbeatIntervalMs_) * heartbeatMissLimit_) {
+        expireCoordinatorHeartbeat();
+    } else {
+        publishSnapshot();
+    }
+}
+
+void SharedSessionController::expireCoordinatorHeartbeat()
+{
+    if (role_ != Role::Joiner || closing_ || !reconnectEnabled_) {
+        return;
+    }
+    reconnectEnabled_ = false;
+    reconnectTimer_.stop();
+    heartbeatDeadlineTimer_.stop();
+    client_.close();
+    runtimeAttachmentEnabled_ = false;
+    if (runtime_ != nullptr && runtime_->isNetworkRunning()) {
+        runtime_->stopNetwork();
+    }
+    const QString detail = QStringLiteral(
+        "Jam creator heartbeat timed out after %1 missed check-ins (%2 ms)")
+        .arg(heartbeatMissLimit_)
+        .arg(static_cast<qint64>(heartbeatIntervalMs_) * heartbeatMissLimit_);
+    fail(TransportFailure::CoordinatorTimeout, detail, false);
+    publishTransportEvent(TransportEvent{
+        TransportEventType::Failure,
+        TransportFailure::CoordinatorTimeout,
+        detail}, false);
 }
 
 void SharedSessionController::publishSnapshot()

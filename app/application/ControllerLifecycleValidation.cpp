@@ -33,6 +33,8 @@ struct EventCapture {
     int reconnectScheduled = 0;
     int reconnectAttempt = 0;
     int reconnectExhausted = 0;
+    int sessionEnded = 0;
+    int coordinatorTimeout = 0;
     int maxReconnectAttempts = 0;
     bool sawReconnecting = false;
 
@@ -49,6 +51,9 @@ struct EventCapture {
         reconnectAttempt += value.type == TransportEventType::ReconnectAttempt;
         reconnectExhausted += value.type == TransportEventType::Failure &&
             value.failure == TransportFailure::ReconnectExhausted;
+        sessionEnded += value.type == TransportEventType::SessionEnded;
+        coordinatorTimeout += value.type == TransportEventType::Failure &&
+            value.failure == TransportFailure::CoordinatorTimeout;
     }
 
     void snapshot(const SharedSessionController::Snapshot& value)
@@ -91,6 +96,24 @@ SharedSessionController::SessionContract contract()
     value.sampleRate = 48000;
     value.frameSize = 64;
     return value;
+}
+
+QJsonObject minimalValidSong()
+{
+    return QJsonObject{
+        {QStringLiteral("format"), QStringLiteral("jam2.song.v1")},
+        {QStringLiteral("title"), QStringLiteral("Lifecycle Fixture")},
+        {QStringLiteral("lyrics_text"), QString()},
+        {QStringLiteral("sections"), QJsonArray{QJsonObject{
+            {QStringLiteral("label"), QStringLiteral("A")},
+            {QStringLiteral("name"), QStringLiteral("Section")},
+            {QStringLiteral("beats"), 4},
+            {QStringLiteral("chords"), QJsonArray{}},
+            {QStringLiteral("beat_notes"), QJsonArray{}},
+            {QStringLiteral("lyrics"), QJsonArray{}},
+            {QStringLiteral("beat_patterns"), QJsonArray{}},
+        }}},
+    };
 }
 
 SharedSessionController::CreatorConfig creatorConfig(quint16 port)
@@ -137,7 +160,9 @@ void addCase(QJsonArray& cases, const QString& name, bool ok, const QString& det
 
 } // namespace
 
-QJsonObject jam2RunControllerLifecycleValidation()
+QJsonObject jam2RunControllerLifecycleValidation(
+    int heartbeatIntervalMs,
+    int heartbeatMissLimit)
 {
     QJsonArray cases;
     bool allOk = true;
@@ -188,6 +213,11 @@ QJsonObject jam2RunControllerLifecycleValidation()
     check(QStringLiteral("controller.creator-listening"), creatorStarted &&
         creator.snapshot().lifecycle == SharedSessionController::Lifecycle::Listening,
         creator.errorString());
+    check(QStringLiteral("controller.production-heartbeat-policy"),
+        creator.snapshot().heartbeatIntervalMs == 30000 &&
+            creator.snapshot().heartbeatMissLimit == 5 &&
+            SharedSessionController::kDefaultHeartbeatIntervalMs == 30000 &&
+            SharedSessionController::kDefaultHeartbeatMissLimit == 5);
 
     SharedSessionController conflictingCreator;
     const bool conflictingCreatorRejected = sessionPort && creatorStarted &&
@@ -249,6 +279,77 @@ QJsonObject jam2RunControllerLifecycleValidation()
     check(QStringLiteral("controller.join-contract-membership-ready"),
         joinerStarted && joined && joiner.snapshot().contractRevision == 1 &&
             joiner.snapshot().arrangementAuthorityToken == creator.snapshot().localToken);
+    const bool heartbeatObserved = joined && pumpUntil([&] {
+        return joiner.snapshot().heartbeatsReceived > 0 &&
+            creator.snapshot().heartbeatAcksReceived > 0;
+    }, 1000);
+    check(QStringLiteral("controller.heartbeat-authenticated-and-acknowledged"),
+        heartbeatObserved && joiner.snapshot().lastHeartbeatAgeMs >= 0);
+
+    bool endpointMigrated = false;
+    if (joined) {
+        const quint64 priorRevision = creator.snapshot().membershipRevision;
+        joiner.updateLocalEndpoint(QStringLiteral("127.0.0.1:42002"));
+        endpointMigrated = pumpUntil([&] {
+            const auto creatorSnapshot = creator.snapshot();
+            const auto joinerSnapshot = joiner.snapshot();
+            bool creatorSeesEndpoint = false;
+            for (const auto& peer : creatorSnapshot.peers) {
+                creatorSeesEndpoint = creatorSeesEndpoint ||
+                    (peer.token == joinerSnapshot.localToken &&
+                     peer.endpoint == QStringLiteral("127.0.0.1:42002"));
+            }
+            return creatorSnapshot.membershipRevision > priorRevision && creatorSeesEndpoint;
+        }, 1000);
+    }
+    check(QStringLiteral("controller.endpoint-update-source-bound-and-republished"), endpointMigrated);
+
+    ControlClient directClient;
+    bool directAuthenticated = false;
+    directClient.onEvent = [&](const TransportEvent& event) {
+        directAuthenticated = directAuthenticated || event.type == TransportEventType::Authenticated;
+    };
+    if (sessionPort && creatorStarted) {
+        directClient.connectToHost(
+            QStringLiteral("127.0.0.1"),
+            *sessionPort,
+            QStringLiteral("0102030405060708"),
+            QStringLiteral("000102030405060708090a0b0c0d0e0f"),
+            QStringLiteral("00000000000000040000000000000004"),
+            QStringLiteral("127.0.0.1:41004"));
+        (void)pumpUntil([&] { return directAuthenticated; }, 1000);
+    }
+    const auto beforeRejected = creator.snapshot();
+    const bool invalidQueued = directAuthenticated && directClient.send(QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("metronome.settings")},
+        {QStringLiteral("bpm"), 126},
+    });
+    const bool invalidRejected = invalidQueued && pumpUntil([&] {
+        return creator.snapshot().validationRejections > beforeRejected.validationRejections;
+    }, 1000);
+    const auto afterInvalid = creator.snapshot();
+    check(QStringLiteral("controller.invalid-peer-message-cannot-mutate-authority"),
+        invalidRejected && afterInvalid.gridRevision == beforeRejected.gridRevision &&
+            afterInvalid.gridAuthorityToken == beforeRejected.gridAuthorityToken);
+
+    const QJsonObject unauthorizedMembership{
+        {QStringLiteral("type"), QStringLiteral("session.membership")},
+        {QStringLiteral("revision"), 1},
+        {QStringLiteral("page_index"), 0},
+        {QStringLiteral("page_count"), 1},
+        {QStringLiteral("coordinator_token"), creator.snapshot().localToken},
+        {QStringLiteral("peers"), QJsonArray{}},
+    };
+    const quint64 membershipBeforeUnauthorized = creator.snapshot().membershipRevision;
+    const quint64 authorizationBefore = creator.snapshot().authorizationRejections;
+    const bool unauthorizedQueued = directAuthenticated && directClient.send(unauthorizedMembership);
+    const bool unauthorizedRejected = unauthorizedQueued && pumpUntil([&] {
+        return creator.snapshot().authorizationRejections > authorizationBefore;
+    }, 1000);
+    check(QStringLiteral("controller.peer-cannot-originate-membership"),
+        unauthorizedRejected && creator.snapshot().membershipRevision == membershipBeforeUnauthorized);
+    directClient.close();
+    (void)pumpUntil([&] { return creator.snapshot().remotePeerCount == 1; }, 500);
 
     QString proposalSourceToken;
     QJsonObject receivedProposal;
@@ -265,7 +366,7 @@ QJsonObject jam2RunControllerLifecycleValidation()
             {QStringLiteral("arrangement_revision"), 0},
             {QStringLiteral("host_authoritative"), false},
             {QStringLiteral("track_playing"), false},
-            {QStringLiteral("song"), QJsonObject{}},
+            {QStringLiteral("song"), minimalValidSong()},
         });
         collaborativeProposalDelivered = sent && pumpUntil([&] {
             return proposalSourceToken == joiner.snapshot().localToken &&
@@ -280,6 +381,15 @@ QJsonObject jam2RunControllerLifecycleValidation()
         const bool sent = joiner.send(QJsonObject{
             {QStringLiteral("type"), QStringLiteral("metronome.settings")},
             {QStringLiteral("bpm"), 126},
+            {QStringLiteral("running"), true},
+            {QStringLiteral("leader"), true},
+            {QStringLiteral("mode"), QStringLiteral("shared-grid")},
+            {QStringLiteral("beats"), 4},
+            {QStringLiteral("division"), 4},
+            {QStringLiteral("play_mask_low"), QStringLiteral("ffff")},
+            {QStringLiteral("play_mask_high"), QStringLiteral("0")},
+            {QStringLiteral("accent_mask_low"), QStringLiteral("1111")},
+            {QStringLiteral("accent_mask_high"), QStringLiteral("0")},
         });
         nonCoordinatorAuthority = sent && pumpUntil([&] {
             return creator.snapshot().gridRevision == 1 &&
@@ -310,7 +420,12 @@ QJsonObject jam2RunControllerLifecycleValidation()
     }
     check(QStringLiteral("controller.late-join-authority-snapshot"), lateJoinReady);
     lateJoiner.close();
-    (void)pumpUntil([&] { return creator.snapshot().remotePeerCount == 1; }, 500);
+    const bool ordinaryLeavePreservedSession = pumpUntil([&] {
+        return creator.snapshot().remotePeerCount == 1 &&
+            creator.snapshot().lifecycle == SharedSessionController::Lifecycle::Active;
+    }, 500);
+    check(QStringLiteral("controller.ordinary-peer-leave-preserves-session"),
+        ordinaryLeavePreservedSession);
 
     const QString joinerToken = joiner.snapshot().localToken;
     const quint64 revisionBeforeAutoReconnect = joiner.snapshot().membershipRevision;
@@ -356,8 +471,54 @@ QJsonObject jam2RunControllerLifecycleValidation()
             finalJoiner.contractReady && finalJoiner.membershipReady &&
             finalJoiner.failure == TransportFailure::None);
 
+    const bool endQueued = creator.endSession(QStringLiteral("test creator end"));
+    const bool gracefulEnd = endQueued && pumpUntil([&] {
+        return joinerCapture.sessionEnded == 1 &&
+            joiner.snapshot().lifecycle == SharedSessionController::Lifecycle::Inactive;
+    }, 1000);
+    check(QStringLiteral("controller.creator-end-propagates-typed-session-end"), gracefulEnd);
     joiner.close();
     creator.close();
+
+    const auto heartbeatPort = unusedLoopbackPort();
+    SharedSessionController heartbeatCreator;
+    SharedSessionController heartbeatJoiner;
+    EventCapture heartbeatCapture;
+    heartbeatJoiner.onTransportEvent = [&](const TransportEvent& event, bool) {
+        heartbeatCapture.event(event);
+    };
+    bool heartbeatPairReady = false;
+    if (heartbeatPort) {
+        auto creatorHeartbeatConfig = creatorConfig(*heartbeatPort);
+        creatorHeartbeatConfig.heartbeatIntervalMs = heartbeatIntervalMs;
+        creatorHeartbeatConfig.heartbeatMissLimit = heartbeatMissLimit;
+        if (heartbeatCreator.startCreator(creatorHeartbeatConfig)) {
+            auto joinerHeartbeatConfig = joinerConfig(*heartbeatPort);
+            joinerHeartbeatConfig.reconnectIntervalMs = 20;
+            joinerHeartbeatConfig.reconnectAttemptLimit = 2;
+            joinerHeartbeatConfig.heartbeatIntervalMs = heartbeatIntervalMs;
+            joinerHeartbeatConfig.heartbeatMissLimit = heartbeatMissLimit;
+            (void)heartbeatJoiner.startJoiner(joinerHeartbeatConfig);
+            heartbeatPairReady = pumpUntil([&] {
+                return heartbeatJoiner.snapshot().lifecycle ==
+                        SharedSessionController::Lifecycle::Active &&
+                    heartbeatJoiner.snapshot().heartbeatsReceived > 0;
+            }, 1000);
+        }
+    }
+    if (heartbeatPairReady) {
+        heartbeatCreator.close();
+    }
+    const bool heartbeatExpired = heartbeatPairReady && pumpUntil([&] {
+        return heartbeatJoiner.snapshot().failure == TransportFailure::CoordinatorTimeout &&
+            heartbeatJoiner.snapshot().lifecycle == SharedSessionController::Lifecycle::Failed;
+    }, 1000);
+    check(QStringLiteral("controller.creator-loss-expires-after-native-heartbeat-grace"),
+        heartbeatExpired && heartbeatCapture.coordinatorTimeout == 1 &&
+            heartbeatJoiner.snapshot().heartbeatIntervalMs == heartbeatIntervalMs &&
+            heartbeatJoiner.snapshot().heartbeatMissLimit == heartbeatMissLimit);
+    heartbeatJoiner.close();
+    heartbeatCreator.close();
 
     return QJsonObject{
         {QStringLiteral("event"), QStringLiteral("debug_controller_lifecycle_result")},
@@ -368,5 +529,7 @@ QJsonObject jam2RunControllerLifecycleValidation()
         {QStringLiteral("bounded_reconnect_attempts"), refusedCapture.maxReconnectAttempts},
         {QStringLiteral("automatic_reconnect_events"), joinerCapture.reconnectAttempt},
         {QStringLiteral("manual_refresh_events"), joinerCapture.refreshRequested},
+        {QStringLiteral("debug_heartbeat_interval_ms"), heartbeatIntervalMs},
+        {QStringLiteral("debug_heartbeat_miss_limit"), heartbeatMissLimit},
     };
 }

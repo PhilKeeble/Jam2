@@ -89,6 +89,7 @@ class UdpStressProxy:
             "server_to_client_recv_errors": 0,
             "client_to_server_send_errors": 0,
             "server_to_client_send_errors": 0,
+            "server_to_client_unroutable_before_client": 0,
             "client_to_server_injected": 0,
             "server_to_client_injected": 0,
             "packet_observer_errors": 0,
@@ -185,16 +186,22 @@ class UdpStressProxy:
             except OSError:
                 self.stats["server_to_client_recv_errors"] += 1
                 return
-            if self.client_endpoint is None:
-                self.stats["server_to_client_dropped"] += 1
-                continue
-            self._schedule(
-                data,
-                self.client_sock,
-                self.client_endpoint,
-                self.impairment.server_to_client,
-                "server_to_client",
-            )
+            self._forward_server_datagram(data)
+
+    def _forward_server_datagram(self, data):
+        if self.client_endpoint is None:
+            # The server can emit endpoint-proof traffic before the client has
+            # sent its first datagram through this proxy. That packet is not an
+            # injected impairment and must not satisfy/fail loss assertions.
+            self.stats["server_to_client_unroutable_before_client"] += 1
+            return
+        self._schedule(
+            data,
+            self.client_sock,
+            self.client_endpoint,
+            self.impairment.server_to_client,
+            "server_to_client",
+        )
 
     def _schedule(self, data, out_sock, destination, impairment, prefix):
         self.stats[f"{prefix}_packets"] += 1

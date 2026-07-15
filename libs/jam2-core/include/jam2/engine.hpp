@@ -227,6 +227,7 @@ struct EngineSnapshot {
     bool metronome_enabled = false;
     metronome::PatternSnapshot metronome_pattern{};
     EngineMetronomeMode metronome_mode = EngineMetronomeMode::SharedGrid;
+    bool leader_audio_local_click = false;
     int metronome_level_ppm = 0;
     int remote_level_ppm = 0;
     int send_level_ppm = 0;

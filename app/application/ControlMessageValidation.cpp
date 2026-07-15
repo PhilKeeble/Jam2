@@ -1,4 +1,5 @@
 #include "ControlMessageValidation.hpp"
+#include "ContentLimits.hpp"
 
 #include <QJsonArray>
 #include <QJsonValue>
@@ -10,6 +11,8 @@
 #include <limits>
 
 namespace {
+
+namespace limits = jam2::application::limits;
 
 bool isSha256Hex(const QString& value)
 {
@@ -32,8 +35,238 @@ bool isBoundedString(const QJsonValue& value, qsizetype maximum)
     return value.isString() && value.toString().size() <= maximum;
 }
 
-bool validateRemoteSongAssets(const QJsonObject& song, QString& reason)
+bool isOptionalBoundedString(const QJsonObject& object, const QString& key, qsizetype maximum)
 {
+    const QJsonValue value = object.value(key);
+    return value.isUndefined() || isBoundedString(value, maximum);
+}
+
+bool isOptionalBoolean(const QJsonObject& object, const QString& key)
+{
+    const QJsonValue value = object.value(key);
+    return value.isUndefined() || value.isBool();
+}
+
+bool validateTextArray(
+    const QJsonObject& object,
+    const QString& key,
+    int maximumCount,
+    QString& reason)
+{
+    const QJsonValue value = object.value(key);
+    if (value.isUndefined()) {
+        return true;
+    }
+    if (!value.isArray() || value.toArray().size() > maximumCount) {
+        reason = QStringLiteral("song grid text array is invalid");
+        return false;
+    }
+    for (const QJsonValue& cell : value.toArray()) {
+        if (!isBoundedString(cell, limits::kMaximumCellCharacters)) {
+            reason = QStringLiteral("song grid cell text is invalid");
+            return false;
+        }
+    }
+    return true;
+}
+
+bool validateBeatGrid(const QJsonObject& grid, QString& reason)
+{
+    if (grid.value(QStringLiteral("format")).toString() != QStringLiteral("jam2.song.v1") ||
+        !isOptionalBoundedString(grid, QStringLiteral("title"), limits::kMaximumTitleCharacters) ||
+        !isOptionalBoundedString(grid, QStringLiteral("lyrics_text"), limits::kMaximumLyricsCharacters) ||
+        !grid.value(QStringLiteral("sections")).isArray()) {
+        reason = QStringLiteral("song grid header is invalid");
+        return false;
+    }
+
+    const QJsonArray sections = grid.value(QStringLiteral("sections")).toArray();
+    if (sections.isEmpty() || sections.size() > limits::kMaximumSongSections) {
+        reason = QStringLiteral("song grid section count is invalid");
+        return false;
+    }
+    static const QList<int> allowedDivisions{1, 2, 3, 4, 6, 8};
+    for (const QJsonValue& sectionValue : sections) {
+        if (!sectionValue.isObject()) {
+            reason = QStringLiteral("song grid section is not an object");
+            return false;
+        }
+        const QJsonObject section = sectionValue.toObject();
+        const QJsonValue beatsValue = section.value(QStringLiteral("beats"));
+        const int beats = beatsValue.isUndefined() ? 8 : beatsValue.toInt(-1);
+        if (!isOptionalBoundedString(section, QStringLiteral("label"), limits::kMaximumCellCharacters) ||
+            !isOptionalBoundedString(section, QStringLiteral("name"), limits::kMaximumCellCharacters) ||
+            (!beatsValue.isUndefined() && !isBoundedInteger(
+                beatsValue, limits::kMinimumBeatsPerSection, limits::kMaximumBeatsPerSection)) ||
+            beats < limits::kMinimumBeatsPerSection ||
+            beats > limits::kMaximumBeatsPerSection ||
+            !validateTextArray(section, QStringLiteral("chords"), beats, reason) ||
+            !validateTextArray(section, QStringLiteral("beat_notes"), beats, reason) ||
+            !validateTextArray(section, QStringLiteral("lyrics"), beats, reason)) {
+            if (reason.isEmpty()) {
+                reason = QStringLiteral("song grid section fields are invalid");
+            }
+            return false;
+        }
+
+        const QJsonValue patternsValue = section.value(QStringLiteral("beat_patterns"));
+        if (patternsValue.isUndefined()) {
+            continue;
+        }
+        if (!patternsValue.isArray() || patternsValue.toArray().size() > beats) {
+            reason = QStringLiteral("song beat pattern count is invalid");
+            return false;
+        }
+        for (const QJsonValue& patternValue : patternsValue.toArray()) {
+            if (!patternValue.isObject()) {
+                reason = QStringLiteral("song beat pattern is not an object");
+                return false;
+            }
+            const QJsonObject pattern = patternValue.toObject();
+            const QJsonValue divisionValue = pattern.value(QStringLiteral("division"));
+            const int division = divisionValue.isUndefined() ? 4 : divisionValue.toInt(-1);
+            if ((!divisionValue.isUndefined() && !isBoundedInteger(divisionValue, 1, 8)) ||
+                !allowedDivisions.contains(division)) {
+                reason = QStringLiteral("song beat division is invalid");
+                return false;
+            }
+            if (!validateTextArray(
+                    pattern, QStringLiteral("lanes"), limits::kMaximumBeatLanes, reason)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool readJsonFrame(const QJsonValue& value, qint64 fallback, qint64& result)
+{
+    if (value.isUndefined()) {
+        result = fallback;
+        return true;
+    }
+    if (value.isString()) {
+        bool ok = false;
+        result = value.toString().toLongLong(&ok);
+        return ok;
+    }
+    if (!value.isDouble()) {
+        return false;
+    }
+    const double number = value.toDouble();
+    constexpr double maximumExactJsonInteger = 9007199254740991.0;
+    if (!std::isfinite(number) || std::floor(number) != number ||
+        number < -maximumExactJsonInteger || number > maximumExactJsonInteger) {
+        return false;
+    }
+    result = static_cast<qint64>(number);
+    return true;
+}
+
+bool validateRemoteLooper(const QJsonObject& looper, QString& reason)
+{
+    const QJsonValue format = looper.value(QStringLiteral("format"));
+    const QJsonValue activeBank = looper.value(QStringLiteral("active_bank"));
+    if ((!format.isUndefined() && format.toString() != QStringLiteral("jam2.looper.v1")) ||
+        (!activeBank.isUndefined() &&
+         !isBoundedInteger(activeBank, 0, limits::kLooperBankCount - 1)) ||
+        !isOptionalBoolean(looper, QStringLiteral("grid_lock")) ||
+        !looper.value(QStringLiteral("banks")).isArray()) {
+        reason = QStringLiteral("song looper header is invalid");
+        return false;
+    }
+    const QJsonArray banks = looper.value(QStringLiteral("banks")).toArray();
+    if (banks.size() != limits::kLooperBankCount) {
+        reason = QStringLiteral("song looper bank count is invalid");
+        return false;
+    }
+    for (int bankIndex = 0; bankIndex < banks.size(); ++bankIndex) {
+        const QJsonValue& bankValue = banks[bankIndex];
+        if (!bankValue.isObject()) {
+            reason = QStringLiteral("song looper bank is not an object");
+            return false;
+        }
+        const QJsonObject bank = bankValue.toObject();
+        const QJsonValue bankId = bank.value(QStringLiteral("id"));
+        const QJsonValue lanesValue = bank.value(QStringLiteral("lanes"));
+        if ((!bankId.isUndefined() &&
+             bankId.toString() != QString(QChar(static_cast<ushort>('A' + bankIndex)))) ||
+            !lanesValue.isArray() ||
+            lanesValue.toArray().size() > limits::kMaximumLooperLanesPerBank) {
+            reason = QStringLiteral("song looper bank fields are invalid");
+            return false;
+        }
+        for (const QJsonValue& laneValue : lanesValue.toArray()) {
+            if (!laneValue.isObject()) {
+                reason = QStringLiteral("song looper lane is not an object");
+                return false;
+            }
+            const QJsonObject lane = laneValue.toObject();
+            if (!isOptionalBoundedString(
+                    lane, QStringLiteral("id"), limits::kMaximumLooperIdCharacters) ||
+                !isOptionalBoundedString(
+                    lane, QStringLiteral("asset_path"), limits::kMaximumLooperPathCharacters) ||
+                !isOptionalBoundedString(lane, QStringLiteral("asset_hash"), 64) ||
+                !isOptionalBoundedString(
+                    lane, QStringLiteral("name"), limits::kMaximumLooperNameCharacters) ||
+                !isOptionalBoolean(lane, QStringLiteral("muted")) ||
+                !isOptionalBoolean(lane, QStringLiteral("solo")) ||
+                !isOptionalBoolean(lane, QStringLiteral("loop_enabled"))) {
+                reason = QStringLiteral("song looper lane fields are invalid");
+                return false;
+            }
+            const QString hash = lane.value(QStringLiteral("asset_hash")).toString();
+            const QJsonValue sampleRate = lane.value(QStringLiteral("sample_rate"));
+            const QJsonValue gain = lane.value(QStringLiteral("gain_db"));
+            qint64 startFrame = 0;
+            qint64 stopFrame = -1;
+            qint64 loopStartFrame = -1;
+            qint64 loopEndFrame = -1;
+            if ((!hash.isEmpty() && !isSha256Hex(hash)) ||
+                (!sampleRate.isUndefined() &&
+                 !isBoundedInteger(sampleRate, 0, limits::kMaximumSampleRate)) ||
+                (!hash.isEmpty() && !isBoundedInteger(
+                    sampleRate, limits::kMinimumSampleRate, limits::kMaximumSampleRate)) ||
+                (!gain.isUndefined() &&
+                 (!gain.isDouble() || !std::isfinite(gain.toDouble()) ||
+                  gain.toDouble() < -120.0 || gain.toDouble() > 24.0)) ||
+                !readJsonFrame(lane.value(QStringLiteral("start_frame")), 0, startFrame) ||
+                !readJsonFrame(lane.value(QStringLiteral("stop_frame")), -1, stopFrame) ||
+                !readJsonFrame(lane.value(QStringLiteral("loop_start_frame")), -1, loopStartFrame) ||
+                !readJsonFrame(lane.value(QStringLiteral("loop_end_frame")), -1, loopEndFrame) ||
+                startFrame < 0 || (stopFrame >= 0 && stopFrame < startFrame) ||
+                (loopStartFrame >= 0 && loopEndFrame >= 0 && loopEndFrame <= loopStartFrame)) {
+                reason = QStringLiteral("song looper lane values are invalid");
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool validateRemoteSong(const QJsonObject& song, QString& reason)
+{
+    if (!validateBeatGrid(song, reason)) {
+        return false;
+    }
+    const QJsonValue independentViews = song.value(QStringLiteral("independent_views"));
+    if (!independentViews.isUndefined() && !independentViews.isBool()) {
+        reason = QStringLiteral("song independent-view flag is invalid");
+        return false;
+    }
+    for (const QString& key : {QStringLiteral("beat_view"), QStringLiteral("lyric_view")}) {
+        const QJsonValue viewValue = song.value(key);
+        if (viewValue.isUndefined()) {
+            continue;
+        }
+        if (!viewValue.isObject()) {
+            reason = QStringLiteral("song independent grid is not an object");
+            return false;
+        }
+        if (!viewValue.toObject().isEmpty() && !validateBeatGrid(viewValue.toObject(), reason)) {
+            return false;
+        }
+    }
     const QJsonValue looperValue = song.value(QStringLiteral("looper"));
     if (looperValue.isUndefined()) {
         return true;
@@ -42,34 +275,7 @@ bool validateRemoteSongAssets(const QJsonObject& song, QString& reason)
         reason = QStringLiteral("song looper field is not an object");
         return false;
     }
-    const QJsonArray banks = looperValue.toObject().value(QStringLiteral("banks")).toArray();
-    if (banks.size() > 4) {
-        reason = QStringLiteral("song contains too many looper banks");
-        return false;
-    }
-    for (const QJsonValue& bankValue : banks) {
-        if (!bankValue.isObject()) {
-            reason = QStringLiteral("song looper bank is not an object");
-            return false;
-        }
-        const QJsonArray lanes = bankValue.toObject().value(QStringLiteral("lanes")).toArray();
-        if (lanes.size() > 128) {
-            reason = QStringLiteral("song looper bank contains too many lanes");
-            return false;
-        }
-        for (const QJsonValue& laneValue : lanes) {
-            if (!laneValue.isObject()) {
-                reason = QStringLiteral("song looper lane is not an object");
-                return false;
-            }
-            const QString hash = laneValue.toObject().value(QStringLiteral("asset_hash")).toString();
-            if (!hash.isEmpty() && !isSha256Hex(hash)) {
-                reason = QStringLiteral("song contains an invalid asset hash");
-                return false;
-            }
-        }
-    }
-    return true;
+    return looperValue.toObject().isEmpty() || validateRemoteLooper(looperValue.toObject(), reason);
 }
 
 }
@@ -84,6 +290,21 @@ bool jam2::application::isTrackSyncControlMessageType(const QString& type) noexc
         type == QStringLiteral("looper.asset.start") ||
         type == QStringLiteral("looper.asset.chunk") ||
         type == QStringLiteral("looper.asset.done");
+}
+
+bool jam2::application::isGridControlMessageType(const QString& type) noexcept
+{
+    return type == QStringLiteral("metronome.settings") ||
+        type == QStringLiteral("beat.set") ||
+        type == QStringLiteral("beat.hit") ||
+        type == QStringLiteral("beat.division") ||
+        type == QStringLiteral("grid.resize") ||
+        type == QStringLiteral("lyrics.set");
+}
+
+bool jam2::application::isArrangementControlMessageType(const QString& type) noexcept
+{
+    return type == QStringLiteral("song.set");
 }
 
 bool jam2::application::validateControlMessage(
@@ -126,6 +347,34 @@ bool jam2::application::validateControlMessage(
             }
         }
         return true;
+    }
+    if (type == QStringLiteral("session.contract")) {
+        static const QRegularExpression tokenExpression(QStringLiteral("^[0-9a-f]{32}$"));
+        return isBoundedInteger(message.value(QStringLiteral("protocol_version")), 1, 1) &&
+            message.value(QStringLiteral("audio_format")).toString() == QStringLiteral("pcm24-mono") &&
+            isBoundedString(message.value(QStringLiteral("profile")), 128) &&
+            isBoundedInteger(message.value(QStringLiteral("sample_rate")),
+                limits::kMinimumSampleRate, limits::kMaximumSampleRate) &&
+            isBoundedInteger(message.value(QStringLiteral("frame_size")), 1, 8192) &&
+            tokenExpression.match(message.value(QStringLiteral("coordinator_token")).toString()).hasMatch()
+            ? true : (reason = QStringLiteral("session contract is invalid"), false);
+    }
+    if (type == QStringLiteral("session.heartbeat") ||
+        type == QStringLiteral("session.heartbeat.ack")) {
+        return isBoundedInteger(message.value(QStringLiteral("sequence")), 1,
+            (std::numeric_limits<int>::max)())
+            ? true : (reason = QStringLiteral("heartbeat sequence is invalid"), false);
+    }
+    if (type == QStringLiteral("session.endpoint.update")) {
+        const QString endpoint = message.value(QStringLiteral("udp_endpoint")).toString();
+        return !endpoint.isEmpty() && endpoint.size() <= 255 &&
+            endpoint.lastIndexOf(QLatin1Char(':')) > 0
+            ? true : (reason = QStringLiteral("UDP endpoint update is invalid"), false);
+    }
+    if (type == QStringLiteral("session.end")) {
+        const QJsonValue detail = message.value(QStringLiteral("detail"));
+        return detail.isUndefined() || isBoundedString(detail, 512)
+            ? true : (reason = QStringLiteral("session end detail is invalid"), false);
     }
     if (type == QStringLiteral("session.error")) {
         return isBoundedString(message.value(QStringLiteral("message")), 4096)
@@ -201,7 +450,7 @@ bool jam2::application::validateControlMessage(
             reason = QStringLiteral("song snapshot or revision is invalid");
             return false;
         }
-        return validateRemoteSongAssets(songValue.toObject(), reason);
+        return validateRemoteSong(songValue.toObject(), reason);
     }
     if (type == QStringLiteral("track.ready")) {
         return isBoundedInteger(
@@ -222,22 +471,99 @@ bool jam2::application::validateControlMessage(
         return recordingIdExpression.match(recordingId).hasMatch() &&
             isBoundedInteger(message.value(QStringLiteral("bank")), 0, 3) &&
             !targetLaneId.isEmpty() && targetLaneId.size() <= 80 &&
-            isSha256Hex(hash) && isBoundedString(message.value(QStringLiteral("name")), 512)
+            isSha256Hex(hash) && isBoundedString(message.value(QStringLiteral("name")), 512) &&
+            isBoundedInteger(message.value(QStringLiteral("sample_rate")),
+                limits::kMinimumSampleRate, limits::kMaximumSampleRate)
             ? true : (reason = QStringLiteral("recording offer is invalid"), false);
     }
     if (type == QStringLiteral("looper.asset.request")) {
         const QJsonValue arrangementRevision =
             message.value(QStringLiteral("arrangement_revision"));
-        return message.value(QStringLiteral("hashes")).isArray() &&
+        const QJsonArray hashes = message.value(QStringLiteral("hashes")).toArray();
+        if (!message.value(QStringLiteral("hashes")).isArray() ||
+            hashes.isEmpty() || hashes.size() > limits::kMaximumAssetRequests ||
             (arrangementRevision.isUndefined() ||
              isBoundedInteger(
-                 arrangementRevision, 0, (std::numeric_limits<int>::max)()));
+                 arrangementRevision, 0, (std::numeric_limits<int>::max)())) == false) {
+            reason = QStringLiteral("asset request is invalid");
+            return false;
+        }
+        for (const QJsonValue& hash : hashes) {
+            if (!hash.isString() || !isSha256Hex(hash.toString().toLower())) {
+                reason = QStringLiteral("asset request hash is invalid");
+                return false;
+            }
+        }
+        return true;
     }
-    if (type == QStringLiteral("looper.asset.start") ||
-        type == QStringLiteral("looper.asset.chunk") ||
-        type == QStringLiteral("looper.asset.done")) {
-        return true; // The asset service applies transfer-specific strict checks before file mutation.
+    if (type == QStringLiteral("looper.asset.start")) {
+        return isSha256Hex(message.value(QStringLiteral("sha256")).toString().toLower()) &&
+            isBoundedInteger(message.value(QStringLiteral("file_bytes")), 44,
+                limits::kMaximumAssetBytes) &&
+            isBoundedInteger(message.value(QStringLiteral("chunk_size")), 1,
+                limits::kMaximumAssetChunkBytes)
+            ? true : (reason = QStringLiteral("asset start is invalid"), false);
+    }
+    if (type == QStringLiteral("looper.asset.chunk")) {
+        static const QRegularExpression base64Expression(QStringLiteral("^[A-Za-z0-9+/]*={0,2}$"));
+        const QString data = message.value(QStringLiteral("data")).toString();
+        return isSha256Hex(message.value(QStringLiteral("sha256")).toString().toLower()) &&
+            isBoundedInteger(message.value(QStringLiteral("index")), 0,
+                (std::numeric_limits<int>::max)()) &&
+            !data.isEmpty() &&
+            data.size() <= limits::kMaximumEncodedAssetChunkCharacters &&
+            data.size() % 4 == 0 &&
+            base64Expression.match(data).hasMatch()
+            ? true : (reason = QStringLiteral("asset chunk is invalid"), false);
+    }
+    if (type == QStringLiteral("looper.asset.done")) {
+        return isSha256Hex(message.value(QStringLiteral("sha256")).toString().toLower()) &&
+            isBoundedInteger(message.value(QStringLiteral("chunks")), 0,
+                (std::numeric_limits<int>::max)())
+            ? true : (reason = QStringLiteral("asset completion is invalid"), false);
+    }
+    if (type == QStringLiteral("debug.lifecycle.disconnect")) {
+        return true;
     }
     reason = QStringLiteral("unknown message type");
     return false;
+}
+
+jam2::application::ControlMessageDecision jam2::application::evaluateControlMessage(
+    const QJsonObject& message,
+    ControlMessageSource source)
+{
+    ControlMessageDecision decision;
+    if (!validateControlMessage(message, decision.reason)) {
+        return decision;
+    }
+
+    const QString type = message.value(QStringLiteral("type")).toString();
+    const bool coordinatorOnly = type == QStringLiteral("session.contract") ||
+        type == QStringLiteral("session.membership") ||
+        type == QStringLiteral("session.heartbeat") ||
+        type == QStringLiteral("session.end") ||
+        type == QStringLiteral("looper.track.share.request");
+    const bool peerOnly = type == QStringLiteral("session.heartbeat.ack") ||
+        type == QStringLiteral("session.endpoint.update");
+    const bool internalOnly = type == QStringLiteral("debug.lifecycle.disconnect");
+
+    const bool authorized = internalOnly
+        ? source == ControlMessageSource::Internal
+        : coordinatorOnly
+            ? source == ControlMessageSource::Coordinator ||
+                source == ControlMessageSource::LocalCreator
+            : peerOnly
+                ? source == ControlMessageSource::AuthenticatedPeer ||
+                    source == ControlMessageSource::LocalJoiner
+                : source != ControlMessageSource::Internal;
+    if (!authorized) {
+        decision.rejection = ControlMessageRejection::Authorization;
+        decision.reason = QStringLiteral("message family is not authorized for its authenticated source");
+        return decision;
+    }
+    decision.accepted = true;
+    decision.rejection = ControlMessageRejection::None;
+    decision.reason.clear();
+    return decision;
 }

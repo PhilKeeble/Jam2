@@ -13,7 +13,7 @@ whether repeated results are stable. It does not perform the peer-to-peer probe
 itself.
 
 ```powershell
-python tools\jam2_test.py connectivity stun --bind 0.0.0.0:0 --timeout-s 3 --output build\connectivity
+python tools\jam2_test.py connectivity stun --bind 0.0.0.0:0 --timeout-s 3
 ```
 
 The default server is `stun.l.google.com:19302`. Repeat `--server HOST:PORT` to
@@ -35,13 +35,13 @@ token.
 Peer A (`192.168.1.10`):
 
 ```powershell
-python tools\jam2_test.py connectivity direct --bind 0.0.0.0:49001 --direct-host 192.168.1.10 --name peer-a --duration-s 30 --output C:\j2-connect-a
+python tools\jam2_test.py connectivity direct --bind 0.0.0.0:49001 --direct-host 192.168.1.10 --name peer-a --duration-s 30
 ```
 
 Peer B (`192.168.1.20`):
 
 ```powershell
-python tools\jam2_test.py connectivity direct --bind 0.0.0.0:49001 --direct-host 192.168.1.20 --name peer-b --duration-s 30 --output C:\j2-connect-b
+python tools\jam2_test.py connectivity direct --bind 0.0.0.0:49001 --direct-host 192.168.1.20 --name peer-b --duration-s 30
 ```
 
 Each command prints a share token and saves it as `token.txt` under that
@@ -53,13 +53,13 @@ the command exits successfully.
 Run both commands within the selected duration. Peer A receives Peer B's token:
 
 ```powershell
-python tools\jam2_test.py connectivity direct --bind 0.0.0.0:49001 --direct-host 192.168.1.10 --name peer-a --peer-token "<TOKEN_FROM_PEER_B>" --duration-s 30 --interval-s 0.5 --output C:\j2-connect-a
+python tools\jam2_test.py connectivity direct --bind 0.0.0.0:49001 --direct-host 192.168.1.10 --name peer-a --peer-token "<TOKEN_FROM_PEER_B>" --duration-s 30 --interval-s 0.5
 ```
 
 Peer B receives Peer A's token:
 
 ```powershell
-python tools\jam2_test.py connectivity direct --bind 0.0.0.0:49001 --direct-host 192.168.1.20 --name peer-b --peer-token "<TOKEN_FROM_PEER_A>" --duration-s 30 --interval-s 0.5 --output C:\j2-connect-b
+python tools\jam2_test.py connectivity direct --bind 0.0.0.0:49001 --direct-host 192.168.1.20 --name peer-b --peer-token "<TOKEN_FROM_PEER_A>" --duration-s 30 --interval-s 0.5
 ```
 
 A passing result requires `probe.peer_confirmed_local: true`: the peer received
@@ -77,13 +77,13 @@ Use distinct local ports. This checks only the tool and loopback sockets.
 Terminal 1:
 
 ```powershell
-python tools\jam2_test.py connectivity direct --bind 127.0.0.1:49001 --direct-host 127.0.0.1 --name one --duration-s 20 --output build\connect-one
+python tools\jam2_test.py connectivity direct --bind 127.0.0.1:49001 --direct-host 127.0.0.1 --name one --duration-s 20
 ```
 
 Terminal 2:
 
 ```powershell
-python tools\jam2_test.py connectivity direct --bind 127.0.0.1:49002 --direct-host 127.0.0.1 --name two --duration-s 20 --output build\connect-two
+python tools\jam2_test.py connectivity direct --bind 127.0.0.1:49002 --direct-host 127.0.0.1 --name two --duration-s 20
 ```
 
 Exchange the tokens, then rerun both with the other's `--peer-token` and the

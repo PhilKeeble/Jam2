@@ -376,7 +376,14 @@ QWidget* MainWindowPages::buildSessionPage(MainWindow& w)
 
     QObject::connect(w.startButton_, &QPushButton::clicked, &w, [&w] { w.showStartJamDialog(); });
     QObject::connect(w.joinButton_, &QPushButton::clicked, &w, [&w] { w.showJoinJamDialog(); });
-    QObject::connect(w.stopButton_, &QPushButton::clicked, &w, [&w] { w.stopJam(); });
+    QObject::connect(w.stopButton_, &QPushButton::clicked, &w, [&w] {
+        if (w.sessionController_.snapshot().role == SharedSessionController::Role::Creator) {
+            (void)w.sessionController_.endSession();
+            QTimer::singleShot(100, &w, [&w] { w.stopJam(); });
+        } else {
+            w.stopJam();
+        }
+    });
     QObject::connect(w.refreshControlButton_, &QPushButton::clicked, &w, [&w] { w.refreshControlConnection(); });
     QObject::connect(w.profileBox_, qOverload<int>(&QComboBox::currentIndexChanged), &w, [&w] {
         w.applyTuningProfileName(w.profileBox_->currentData().toString());
@@ -821,7 +828,9 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
             w.pendingLooperAssetHashes_.clear();
             w.deferredSongSetSourcePeerToken_.clear();
             w.pendingPreparedTrackReadyRevision_ = 0;
-            w.assetTransfer_.resetIncoming();
+            w.assetTransfer_.cancel();
+            w.pendingTrackContributions_.clear();
+            w.pendingTrackAssetSources_.clear();
             w.trackController_.requestPlayback(
                 w.trackRecordingWorkflow_.preparedPlaying());
             w.trackController_.observeEnginePlaying(

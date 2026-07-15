@@ -1,4 +1,5 @@
 #include "BeatGridModel.hpp"
+#include "ContentLimits.hpp"
 
 #include <QJsonArray>
 #include <QJsonObject>
@@ -9,12 +10,12 @@
 namespace {
 
 constexpr int kDefaultBeatDivision = 4;
-constexpr int kMinBeatsPerSection = 4;
-constexpr int kMaxBeatsPerSection = 512;
-constexpr int kMaxSections = 64;
-constexpr int kMaxCellCharacters = 4096;
-constexpr int kMaxTitleCharacters = 512;
-constexpr int kMaxLyricsCharacters = 1024 * 1024;
+constexpr int kMinBeatsPerSection = jam2::application::limits::kMinimumBeatsPerSection;
+constexpr int kMaxBeatsPerSection = jam2::application::limits::kMaximumBeatsPerSection;
+constexpr int kMaxSections = jam2::application::limits::kMaximumSongSections;
+constexpr int kMaxCellCharacters = jam2::application::limits::kMaximumCellCharacters;
+constexpr int kMaxTitleCharacters = jam2::application::limits::kMaximumTitleCharacters;
+constexpr int kMaxLyricsCharacters = jam2::application::limits::kMaximumLyricsCharacters;
 
 bool validTextArray(const QJsonArray& values, int maximumCount)
 {

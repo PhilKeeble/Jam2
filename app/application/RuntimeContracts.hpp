@@ -94,7 +94,6 @@ struct Jam2RuntimeOptions {
     std::optional<std::uint64_t> local_peer_id;
     std::optional<std::uint64_t> bootstrap_coordinator_peer_id;
     jam2::SessionBootstrapRole bootstrap_role = jam2::SessionBootstrapRole::Creator;
-    bool grid_coordinator = false;
     std::optional<int> audio_device_id;
     bool headless_audio = false;
     int headless_clock_drift_ppm = 0;

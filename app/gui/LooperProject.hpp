@@ -9,6 +9,8 @@ struct LooperLane {
     QString assetPath;
     QString assetHash;
     QString name;
+    int sampleRate = 0;
+    bool sampleRateCompatible = true;
     qint64 startFrame = 0;
     qint64 stopFrame = -1;
     qint64 loopStartFrame = -1;
@@ -45,7 +47,7 @@ public:
     bool moveLane(int bankIndex, int from, int to);
     bool renameLane(int bankIndex, int laneIndex, const QString& name);
 
-    QJsonObject toJson() const;
+    QJsonObject toJson(bool syncCompatibleOnly = false) const;
     bool loadJson(const QJsonObject& object);
 
 private:

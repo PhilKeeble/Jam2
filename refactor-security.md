@@ -221,12 +221,26 @@ Minimum authorization matrix:
 | Membership/peer-list snapshot | Bootstrap coordinator | Each advertised peer is also subject to endpoint proof |
 | Grid/transport proposal | Any authenticated peer | Receiver overwrites source with connection identity; coordinator orders it |
 | Accepted grid/transport revision | Current coordinator/authority as defined by the protocol | Revision and source role must match |
-| Collaborative song edit | Explicitly allowed authenticated peer | Validate and order/rebroadcast according to the selected collaboration policy |
+| Collaborative song/track edit | Any authenticated peer | Validate and order/rebroadcast it; local Sync off suppresses outbound actions and ignores inbound application |
 | Asset request | Authenticated peer | Hash must be referenced by accepted project state and response is targeted |
 | Asset start/chunk/done | The peer from which that hash was explicitly requested | Reject unsolicited or overlapping transfer state |
-| Heartbeat/close | Bound authenticated peer | Cannot name or remove another peer |
+| Heartbeat/acknowledgement | Bound authenticated peer | Sequence and source come from the authenticated connection; it cannot name or remove another peer |
+| Leave request | Bound authenticated peer | Removes only the requesting peer |
+| Session end | Bootstrap coordinator | Joiners reject attempts by any other peer to end the jam |
 
 Cost: a source lookup and a few comparisons per control message. It has no packet-rate audio cost.
+
+The TCP control plane uses a bounded heartbeat outside every real-time path. The
+creator sends a check-in every 30000 ms; five consecutive misses expire the
+approximately 150-second joiner grace period. Reauthentication and a valid
+heartbeat inside that window resume the session. Expiry returns a GUI joiner to
+Local or terminates a headless `network join` command with an explicit reason.
+An authenticated coordinator-only End Jam bypasses the grace period. Missing an
+ordinary peer removes only that peer and never ends the creator's session.
+Control heartbeat interval/miss/age counters stay visible in native stats and
+configuration; UDP-only engine/debug cases have no such lifecycle policy.
+Deterministic native debug scenarios may use an explicit shorter interval and
+threshold, while production continues to assert the 30000-ms/five-miss default.
 
 ### 5. Remote JSON can drive unbounded model growth and unsafe numeric conversion
 

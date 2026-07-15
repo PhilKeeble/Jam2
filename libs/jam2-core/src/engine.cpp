@@ -1303,6 +1303,8 @@ EngineSnapshot Engine::snapshot() const noexcept
     result.metronome_enabled = control.metronome_enabled.load(std::memory_order_relaxed);
     result.metronome_mode = static_cast<EngineMetronomeMode>(
         std::clamp(control.metronome_mode.load(std::memory_order_relaxed), 0, 2));
+    result.leader_audio_local_click =
+        control.leader_audio_local_click.load(std::memory_order_relaxed);
     result.metronome_pattern = metronome::sanitize({
         control.metronome_bpm.load(std::memory_order_relaxed),
         control.metronome_beats_per_bar.load(std::memory_order_relaxed),

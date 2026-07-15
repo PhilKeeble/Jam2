@@ -4,7 +4,7 @@ Running `jam2` with no arguments is the normal way to use Jam2. The GUI and pers
 
 ## Start A Jam
 
-On the host machine:
+On the creator's machine:
 
 1. Open `jam2`.
 2. In **Start Jam**, choose the bind host and UDP port. `0.0.0.0:49000` is the usual starting point.
@@ -25,7 +25,9 @@ On the joining machine:
 1. Open `jam2`.
 2. Paste the `jam2://...` URL into **Join Jam**.
 3. Choose the local audio device and channels.
-4. The sample rate, tuning profile, and detailed engine settings are received from the host before the local engine starts.
+4. The sample rate, network frame size, and named session profile are received
+   from the creator before network audio starts. Device, channels, levels, and
+   local tolerance/tuning controls remain local choices.
 5. Connect.
 
 If the connection fails, Jam2 shows one modal **Join Jam failed** dialog with the detailed in-process network error. Use the connection test tool described in [Connection Test](ConnectionTest.md) if more detail is needed.
@@ -59,7 +61,8 @@ The song grid lets both players share simple song structure:
 - Beat divisions.
 - Section sizes.
 
-The current GUI control plane is a direct single-peer TCP connection authenticated with the session id and key. It is not a room server and does not relay audio.
+The GUI control plane uses authenticated TCP connections to the creator for
+ordering and distribution. It is not a room server and does not relay audio.
 
 ## Track And Looper
 
@@ -67,7 +70,9 @@ The Track tab can:
 
 - Manage four looper banks.
 - Add PCM16 WAV lanes to the active bank.
-- Add empty lanes and arm a lane for recording. Perform input takes are recorded by the persistent engine through the in-process control bridge; loopback takes are recorded by the GUI.
+- Add empty lanes and arm a lane for recording. Perform input takes are recorded
+  by the persistent engine through typed in-process commands; loopback takes
+  are recorded by the GUI.
 - Use a stacked lane editor with inline mute, solo, record-arm, gain, rename, remove, drag, and edge-crop controls.
 - Render the active bank to a prepared mono PCM16 cache.
 - In Perform mode, load that prepared cache into the engine and control play/stop/level there.
@@ -75,6 +80,12 @@ The Track tab can:
 - Use **Share Tracks** to explicitly reconcile all asset-backed local lanes with the jam.
 
 Perform prepared-cache playback uses the engine's ASIO/CoreAudio output path. Prepared caches must match the active engine sample rate; offline resampling is deferred.
+
+A newly selected WAV with a different sample rate is rejected before it changes
+the track, looper bank, prepared mix, or current playback, and the dialog shows
+both expected and actual rates. If an existing local lane is incompatible with
+a jam being joined, Jam2 leaves it visible but quarantines it from playback and
+Track Sync until it is unloaded or replaced.
 
 Any authenticated peer may originate shared arrangement edits or prepared-track Play, Stop, Restart, or Record Start while Track Sync is enabled. The creator validates each full-snapshot arrangement proposal, assigns the next ordered revision, and rebroadcasts it; this sequencing role does not make the creator the sole editor. Disabling Track Sync keeps that peer's controls local, prevents it from proposing shared edits or track actions, and makes it disregard incoming ones. The setting is peer-local and is not loaded from project or shared-arrangement snapshots. Source event IDs persist across a leave/rejoin of the network worker so replay protection does not discard the first actions after reconnection.
 
@@ -89,3 +100,7 @@ Perform recording waits for a safe next whole bar, performs the grid-aligned cou
 The GUI records Perform input takes through the running engine and records loopback takes internally, then imports the resulting WAV into the armed Track lane.
 
 The Arm dialog identifies its target by stable bank and lane IDs. If a synchronized arrangement update removes that lane or switches the active bank while the dialog is open, arming is cancelled with a warning instead of using stale lane storage.
+
+The network button is **End Jam** for the creator and **Leave Jam** for every
+other participant. End Jam returns connected GUIs to Local immediately; Leave
+Jam affects only that participant.

@@ -137,11 +137,11 @@ closeout audit pending", not "phase complete".
 Last plan reconciliation: 2026-07-15.
 
 Historical status note: Phases 1-7 were marked complete before the mandatory
-closeout procedure existed. Phase 11 must apply that procedure retroactively
-and reopen any unsupported or partial item; these summaries do not waive the
-final cross-document and source audit.
+closeout procedure existed. Phase 11 applied it retroactively, reopened two
+Phase 1 ownership gaps, implemented them, and repeated the source/removal audit.
 
-- `[x]` Phase 1: stabilize and improve the current model.
+- `[x]` Phase 1: stabilize and improve the current model. The Phase 11
+  retroactive audit closed the two reopened ownership clauses below.
 - `[x]` Phase 2: extract the persistent local engine.
 - `[x]` Phase 3: extract the mature one-peer network path.
 - `[x]` Phase 4: generalize to universal direct full mesh.
@@ -152,6 +152,11 @@ final cross-document and source audit.
   boundary.
 - `[x]` Phase 9: remove compatibility architecture and split application
   ownership.
+- `[x]` Phase 10: complete native automation and Python tooling contracts.
+- `[x]` Phase 11: complete hardening, lifecycle coverage, and final core audit.
+  Focused local GUI/audio acceptance completed on 2026-07-15; the remaining
+  duplicate unavailable-device dialog is explicitly tracked as post-refactor
+  polish rather than a core-refactor blocker.
 
 ### Phase 1: Stabilize and Improve the Current Model
 
@@ -752,8 +757,6 @@ legacy commands/options were rejected, and the hidden GUI startup smoke remained
 active until deliberately stopped. All Phase 9 manual regressions are confirmed
 or explicitly assigned to a later phase whose scope owns the remaining check.
 
-## Remaining Work
-
 ### Phase 10: Complete Native Automation and Python Tooling Contracts
 
 Phase 10 execution contract:
@@ -899,7 +902,7 @@ Phase 10 execution contract:
   Use normalized machine and peer identities internally so the model is not
   server/client-shaped, but do not make three- or four-host benchmarking a
   Phase 10 completion requirement.
-- `[ ]` Use a short live two-host benchmark smoke as the Phase 10 completion
+- `[x]` Use a short live two-host benchmark smoke as the Phase 10 completion
   gate instead of the comprehensive benchmark matrix: one native base profile,
   one repeat, and a small representative subset of two or three short cases
   that completes in a few minutes. It must exercise coordinator/agent
@@ -949,47 +952,142 @@ Checks to run when useful:
 
 ### Phase 11: Complete Hardening, Lifecycle Coverage, and Final Core Audit
 
-- `[ ]` Apply the mandatory closeout procedure retroactively to Phases 1-7,
+#### Phase 11 execution contract
+
+- Treat every authenticated jam member as an equal musical collaborator. Any
+  peer with its local Track Sync control enabled may originate grid, transport,
+  song, track, crop, move, playback, recording, or additive asset changes. The
+  creator is different only because it owns bootstrap, authentication,
+  membership distribution, and serialization of accepted revisions. A
+  coordinator or arrangement-authority token is an ordering/distribution token,
+  never host-only permission to edit the Track view. Track Sync off suppresses
+  outbound shared-track actions and ignores/cancels inbound shared-track work on
+  that peer.
+- Do not elect or transfer the bootstrap coordinator. The creator sends a small
+  authenticated TCP heartbeat every 30000 ms and peers allow five consecutive
+  missed check-ins (approximately 150 seconds) before the session is considered
+  lost. A disconnected joiner may use the existing reconnect path only inside
+  that same grace period; a valid heartbeat after reauthentication cancels the
+  fallback. During the grace period existing direct UDP audio may continue, but
+  unacknowledged shared mutations must not be treated as committed. At expiry a
+  GUI peer stops the network session and returns to Local, with one clear reason;
+  it does not keep reconnecting in the background. A headless `network join`
+  command terminates with an explicit coordinator-timeout result because it has
+  no GUI Local state. Lower-level UDP-only debug/engine cases have no TCP
+  coordinator and are unaffected. The heartbeat interval, missed count, last
+  valid check-in age, and fallback reason remain native configuration/stats, not
+  duplicated Python policy. The 30000-ms/five-miss values are production
+  defaults. Native debug scenarios may explicitly shorten them for deterministic
+  lifecycle validation; Python schedules and records that native override but
+  must not carry a second authoritative default.
+- Present the creator's session-exit action as **End Jam** and an ordinary
+  peer's action as **Leave Jam**. A creator choosing **End Jam** sends an
+  authenticated coordinator-only `session.end` before closing. Receiving GUI
+  peers return to Local immediately rather than waiting for heartbeat expiry;
+  receiving headless joiners terminate with the explicit remote-end reason. A
+  non-creator leaving removes only that peer. Losing one client never ends the
+  creator's jam. A grid-authority change remains an ordinary ordered musical
+  transition and is not coordinator takeover.
+- Reject a newly imported Track/Looper WAV before project mutation when its
+  sample rate differs from the active project/session rate. If a peer already
+  has a local lane at another rate when it joins a jam, keep that lane visibly
+  quarantined from prepared playback and synchronization, show one bounded modal
+  identifying the lane plus expected and actual rates, and require it to be
+  unloaded or corrected before it can participate. Never offer or transfer an
+  incompatible lane to peers.
+- Phase closeout requires the complete local validation and stress families plus
+  short local two-instance benchmark/stress coverage using two physical audio
+  devices. Keep the run bounded to a few minutes while exercising real create/
+  join, control, audio, artifacts, and failure reporting. A separate-machine or
+  comprehensive benchmark run is useful optional evidence, not a Phase 11
+  completion gate. Before final completion, focused local GUI confirmation is
+  limited to the unavailable-device error path, mismatched-rate WAV modal/
+  quarantine, creator End Jam returning both GUIs to Local, and audible two-way
+  audio on the two physical devices. The intended unavailable-device UX is one
+  clear dialog; the 2026-07-15 closeout explicitly accepts its remaining two
+  sequential dialogs as general post-refactor polish, recorded in `Bugs.md`,
+  because the failure is visible and safely prevents invalid device use.
+  Heartbeat expiry itself uses the shortened native lifecycle scenario and does
+  not require a 150-second manual wait.
+
+- `[x]` Apply the mandatory closeout procedure retroactively to Phases 1-7,
   reviewing every supporting refactor document against their real call paths,
   ownership, removal claims, tests, and known regressions. Reopen and implement
   any partial or unsupported item rather than grandfathering its `[x]` status.
-- `[ ]` Centralize reusable control authorization, remote-model validation,
+- `[x]` Centralize reusable control authorization, remote-model validation,
   connection admission, asset-transfer, and failure-reason policy outside GUI
   mutation code while keeping all work off the real-time callback.
-- `[ ]` Add real-process Python scenarios for TCP fragmentation and admission,
+- `[x]` Add real-process Python scenarios for TCP fragmentation and admission,
   authentication/source rejection, remote model boundaries, asset/WAV failures,
   endpoint proof, and bounded malformed/flood behavior.
-- `[ ]` Keep frame decoders, validators, asset state, and WAV parsing reachable
+- `[x]` Keep frame decoders, validators, asset state, and WAV parsing reachable
   through finite deterministic Python-generated malformed and boundary corpora
   required by the retained real-process scenarios. Phase 11 does not require a
   mutation/generative fuzzing framework, corpus minimizer, or sanitizer
   orchestration; those more complex optional components belong to Phase 12.
-- `[ ]` Reject an imported Track/Looper WAV whose sample rate does not match the
+- `[x]` Reject an imported Track/Looper WAV whose sample rate does not match the
   active project/session rate before it mutates the project, prepared mix, or
   current playback. Keep the existing playable state intact and show a clear
-  error containing the expected and actual sample rates. Cover the failure in
-  the deterministic WAV/import boundary cases and real-process asset/WAV
-  scenarios owned by this phase.
-- `[ ]` Add lifecycle scenarios for late join, peer leave, peer restart,
-  coordinator reconnect, endpoint migration, authority disappearance/takeover,
-  and continued audio for unaffected peers.
-- `[ ]` Add a mixed test with one real-device peer and remaining local headless
-  peers; retain separate-machine testing as the final check for real network and
-  independent hardware clocks.
-- `[ ]` Review raw two-, three-, and four-peer CPU, packet, callback, jitter,
+  error containing the expected and actual sample rates. Quarantine any
+  pre-existing incompatible local lane discovered while joining: keep it out of
+  playback and synchronization, identify it with expected/actual rates, and
+  require unload or correction. Cover both failures in the deterministic WAV/
+  import boundary cases and real-process asset/WAV scenarios owned by this
+  phase.
+- `[x]` Add lifecycle scenarios for late join, peer leave, peer restart,
+  bounded coordinator heartbeat/reconnect grace, explicit creator End Jam,
+  heartbeat-expiry fallback, endpoint migration, grid-authority disappearance/
+  transition, and continued audio for unaffected peers. Do not add bootstrap
+  coordinator election or takeover.
+- `[x]` Add a mixed test with one real-device peer and remaining local headless
+  peers, then run the bounded local two-instance/two-physical-device completion
+  smoke. Separate-machine testing remains optional evidence for real network and
+  independent hardware clocks rather than a completion gate.
+- `[x]` Review raw two-, three-, and four-peer CPU, packet, callback, jitter,
   drift, queue, underrun, and recovery data against retained refactor logs when
   investigating material changes; do not turn those numbers into hard gates or
   subjective scores.
-- `[ ]` Perform a final unused-code and documentation audit against every
-  supporting refactor document, then request focused user validation of GUI
-  lifecycle, including the exact invalid-device single-error-dialog path, and
-  audible two-way audio before declaring the core refactor done.
+- `[x]` Perform a final unused-code and documentation audit against every
+  supporting refactor document.
+- `[x]` Obtain the focused local GUI confirmation named in the execution
+  contract before declaring the core refactor done.
+
+#### Retroactive Phase 1-7 closeout audit status
+
+The 2026-07-15 source/document audit reviewed `refactor-binaries.md`,
+`refactor-efficiency.md`, `refactor-security.md`, `refactor-modes.md`, and
+`refactor-python.md` against the current application, core library, public
+surface, and Python tooling. The supporting documents explicitly preserve
+their original baseline descriptions; live status remains here.
+
+| Phase | Audit result |
+| --- | --- |
+| 1 | Supported after reopening and closing two clauses. `SharedSessionController` now validates and authorizes complete nested remote models before revision/authority mutation or rebroadcast. Incremental asset validation, reads, writes, hashing, WAV inspection, and atomic commit use the bounded file worker rather than the Qt event thread; disabling Track Sync cancels queued transfer work with generation-guarded stale completions. |
+| 2 | Supported by the Qt-free `Engine`, typed fixed-capacity command/event interfaces, callback-frame capture attachment, persistent local/device and headless paths, and the real `ApplicationRuntime` call path. No item reopened. |
+| 3 | Supported by the mature per-peer `PeerStream`, `NetworkSession` socket/schedule/session ownership, resolved endpoints, and one-peer use of the universal path. A stale pre-Phase-4 compatibility comment was corrected; no implementation item reopened. |
+| 4 | Supported by encode-once fan-out, per-peer streams and fixed-capacity mixer queues, deadline mixing, dynamic peer/endpoint updates, and the absence of a duplicate public mesh packet loop. No item reopened. |
+| 5 | Authority, revisions, clock mapping, and source-identified transport remain live and covered. The obsolete public `--grid-coordinator` flag was accepted but unused; it was removed because authority is now assigned by controller state and ordered grid actions. No item remains reopened. |
+| 6 | One `jam2` target remains; no arguments launch the GUI, public networking is only `network create/join`, the engine and UDP worker stay off the Qt event thread, and no child-process engine path remains. No item reopened. |
+| 7 | The bounded unified debug surface and retained validate/stress/benchmark/connectivity tooling remain live. Public-surface validation now asserts removal of root and network-form `listen`, `connect`, and `mesh` aliases, not only root `mesh`. No item remains reopened. |
+
+The mismatched-rate WAV implementation and the two reopened Phase 1 clauses are
+closed. The second pass found and corrected stale outbound asset work after
+Track Sync was disabled, centralized shared content bounds, and verified that
+the supporting reviews' baseline sections remain historical context rather
+than live ownership claims. The four focused GUI/audio observations are now
+closed. The remaining duplicate unavailable-device dialog is explicitly
+accepted and recorded as general post-refactor polish; it does not reopen a
+Phase 1-7 architecture claim.
 
 Checks to run when useful:
 
 - Compile and run the relevant lifecycle, malformed-input, mixed-device, and
-  full-mesh suites. Record exact commands and log locations, then record the
-  focused manual checks still requested from the user.
+  full-mesh suites. Use explicit short native heartbeat timing in lifecycle
+  scenarios while separately asserting the 30000-ms/five-miss production
+  defaults. Retain exact commands, log locations, and the focused local GUI
+  observations named in the execution contract when this evidence is rerun.
+
+## Remaining Work
 
 ### Phase 12: Optional Protocol Experiments and Fuzzing Components
 
@@ -1011,6 +1109,202 @@ Checks to run when useful:
 ## Work Log
 
 Add concise entries as implementation proceeds:
+
+### 2026-07-15 - Phase 11 manual acceptance and formal completion
+
+- Focused local GUI/audio acceptance confirmed correct mismatched-rate WAV
+  handling, creator **End Jam**, and audible two-way audio on the Focusrite and
+  TONEX devices. Selecting an unavailable device visibly prevented use but
+  produced two sequential error dialogs; by explicit user acceptance this one
+  remaining presentation defect is recorded in `Bugs.md` for general
+  post-refactor polish and is not a Phase 11 blocker.
+- Inspected the latest sustained pair at
+  `release/logs/jam2_stats_20260715_203712_523_pid44304.csv` and
+  `release/logs/jam2_stats_20260715_203726_628_pid50184.csv`: both ran PCM24
+  mono at 44100 Hz with 64-frame packets for 109.177 and 94.992 seconds. The
+  creator recorded 68280 sent/68275 received packets across both join attempts;
+  the sustained joiner recorded 65452/65452. Both reported zero sequence loss,
+  unrecovered reorder, dropped playback frames, inserted missing frames, late
+  frames, jitter-buffer drops, mix-capacity drops, and capture overruns or
+  underruns. Reordering recovered 5 and 11 packets without loss. Average/max
+  jitter was 0.875/8.065 ms and 0.928/8.736 ms; average/max RTT was
+  5.186/16.151 ms and 5.184/12.962 ms.
+- The separate 4.152-second preliminary join at
+  `release/logs/jam2_stats_20260715_203717_073_pid50184.csv` explains the first
+  creator packet interval. The creator playback-underrun counter accumulated
+  242624 frames while it had no active peer between attempts and 5472 frames at
+  the successful join transition, then remained unchanged from 15 through 109
+  seconds of active playback; 3072 more frames were counted after teardown.
+  The sustained joiner recorded zero playback underruns. Both sustained final
+  rows had network capture and playback disabled, consistent with the accepted
+  End Jam result.
+- All Phase 11 implementation, automated evidence, two-pass document/source
+  audit, and focused manual acceptance are now complete. Every Phase 11 item is
+  checked and the phase has moved out of `Remaining Work`; Phase 12 remains the
+  only planned work and is explicitly optional.
+
+### 2026-07-15 - Phase 11 implementation and automated closeout complete
+
+- Centralized authenticated control validation/authorization before controller
+  revision or authority mutation, including complete nested song/grid/looper
+  bounds, source-aware coordinator/peer permissions, source-bound endpoint
+  updates, shared content limits, typed transport failures, and bounded
+  connection/admission policy. Kept all of this outside the real-time callback.
+- Moved incremental outgoing asset validation/reads and incoming writes,
+  hashing, WAV inspection, and atomic commit onto the bounded file worker.
+  Track Sync-off now cancels incoming and outgoing asset work, clears pending
+  peer contributions, and generation-guards stale worker completion.
+- Rejected mismatched-rate Track/Looper imports before project or prepared-mix
+  mutation. Existing incompatible local WAVs remain visible but are quarantined
+  from playback and sync, are preserved additively across an incoming snapshot,
+  and report expected/actual rates. Remote snapshots/offers and the received
+  WAV's inspected rate must match the session contract before distribution or
+  commit.
+- Implemented the native 30000-ms/five-miss coordinator heartbeat policy,
+  bounded same-coordinator reconnect grace, explicit creator `session.end`,
+  GUI Local/headless typed termination outcomes, and no coordinator takeover.
+  Late join, leave, restart/reconnect, endpoint update, authority departure,
+  End Jam, heartbeat expiry, and continued survivor audio are retained real
+  process/lifecycle cases.
+- The mandatory second audit reread all five supporting refactor documents and
+  traced their live call paths, removal claims, public commands, worker
+  ownership, limits, and known regressions. It closed both reopened Phase 1
+  clauses and found the Track Sync cancellation edge above. `git diff --check`
+  reported no whitespace errors; the single public executable and removal of
+  former `listen`, `connect`, `mesh`, child-process, and legacy Python wrapper
+  paths remain supported.
+- The exact elevated MSVC build
+  `cmd.exe /d /c "call compile.cmd --in-dev-shell"` passed. All 39 Python unit
+  tests passed. `validate all --clean` passed 56 native boundary cases, 20
+  controller lifecycle cases, real-process hardening (53 validation rejects,
+  bounded admission/source rejection), public/schema/reactive checks, and
+  clean two/three/four-peer runs at
+  `tools/validate_logs/20260715T191300Z_392849f3`.
+- The final complete standard stress catalogue passed 59/59 at
+  `tools/stress_logs/20260715T191505Z_5101c690`. The focused Track Sync-off case
+  passed at `tools/stress_logs/20260715T191331Z_13aba87d`. Explicit two/three/
+  four-peer mesh authority cases passed at
+  `tools/stress_logs/20260715T185730Z_acadc1d2`.
+- Mixed TONEX/headless coverage passed at
+  `tools/stress_logs/20260715T185851Z_b025ce7a`. The two-physical-device
+  Focusrite/TONEX clean plus scheduled Track actions passed at
+  `tools/stress_logs/20260715T190018Z_a9e67586`; the documented clean plus
+  jitter smoke also passed at `tools/stress_logs/20260715T191218Z_19811399`.
+  A proxy packet received before learning the client's ephemeral endpoint is
+  now recorded separately as startup-unroutable traffic rather than falsely
+  counted as injected loss.
+- A like-for-like 1024-frame/realtime mesh comparison against
+  `tools/stress_logs_phase7_mesh` passed at
+  `tools/stress_logs/20260715T190226Z_87cc04d5`. Two-peer minimum receive count
+  was 9321 versus 9359 retained; three-peer 18646 versus 18373; four-peer 27963
+  versus 27670. Minimum callbacks were 595 versus 587 and average callback
+  interval remained about 21.336 ms. CPU/scheduling context stayed 32 logical
+  CPUs with high process priority. Capacity drops, late-after-release frames,
+  playback drops, steady missing-audio frames, and forced releases remained
+  zero. Higher final missing-peer-frame totals occurred only after scheduled
+  shutdown during linger; every periodic row through 12 seconds remained zero.
+- At this implementation/automated-closeout checkpoint, Phase 11 remained
+  under `Remaining Work` solely for the four focused local GUI/audio
+  observations. Those observations and the accepted unavailable-device dialog
+  deferral are resolved by the formal-completion entry above.
+
+### 2026-07-15 - Phase 11 collaboration, coordinator-loss, WAV, and closeout contract
+
+- Made authenticated peers equal musical and Track-view collaborators. The
+  creator owns bootstrap, membership, ordering, and distribution only;
+  arrangement authority is not host-only edit permission, and local Track Sync
+  remains the outbound/inbound participation boundary.
+- Selected no coordinator election or takeover. The native TCP control plane
+  uses a 30000-ms heartbeat and a five-miss/approximately 150-second recovery
+  grace. A recovered authenticated connection resumes; expiry returns GUI peers
+  to Local and ends headless `network join` with an explicit reason. Creator
+  **End Jam** is immediate and authenticated, while an ordinary **Leave Jam**
+  removes only that peer. UDP-only engine/debug cases remain unaffected.
+- Clarified mismatched-rate WAV behavior for both new imports and incompatible
+  lanes already present when joining, including expected/actual-rate reporting,
+  quarantine from playback/sync, and required unload or correction.
+- Made complete local validation/stress plus a short local two-instance test on
+  two physical devices the Phase 11 completion gate. Separate-machine and long
+  comprehensive benchmark runs remain optional evidence.
+
+### 2026-07-15 - Retroactive Phase 1-7 closeout audit opened two Phase 1 clauses
+
+- Read every Phase 1-7 checklist item and all five supporting refactor reviews,
+  then traced the current playback ring, UDP parser/socket/packet loop,
+  authenticated control plane, remote models, asset/WAV paths, Qt-free engine,
+  `PeerStream`, `NetworkSession`, `PeerMixer`, authority state, application
+  lifecycle, public command dispatch, debug automation, and Python dispatcher.
+- Reopened remote validation-before-mutation because authenticated grid edits
+  currently advance controller authority/revision and rebroadcast before the
+  GUI-owned validator runs. Reopened worker ownership because bounded asset
+  transfer reads, writes, and incremental hash updates still occur on the Qt
+  event thread even though validation and final commit use the file worker.
+- Removed the completed UDP fast-path review and completed application refactor
+  from `PLAN.md`; their retained design/evidence belongs in the refactor
+  documents. Removed the accepted-but-unused `--grid-coordinator` public flag,
+  corrected stale one-peer compatibility and two-person-only metadata, and
+  expanded the public removal assertions to all former `listen`, `connect`,
+  and `mesh` spellings.
+- Normalized the primary validation, stress, and connectivity documentation
+  examples to their default isolated `tools/*_logs/<invocation-id>` roots.
+- The required elevated `cmd.exe /d /c "call compile.cmd --in-dev-shell"`
+  rebuild passed. `python tools\jam2_test.py validate all --jam2
+  release\jam2.exe` then passed all 12 framework/product cases, including
+  public removal checks, native boundaries, controller lifecycle, schema
+  parity, reactive isolation, and live two/three/four-peer headless sessions;
+  evidence is retained under
+  `tools/validate_logs/20260715T160004Z_f6adeae4`.
+- Phase 2-7 implementation claims remain supported after those small
+  corrections. Phase 1 and this Phase 11 audit remain in progress until the
+  two substantive ownership gaps are implemented and closeout is repeated.
+
+### 2026-07-15 - Phase 10 live two-host closeout and completion
+
+- Completed the required physical Windows/macOS benchmark smoke with native
+  `fast` profile, one repeat, and the 5-second `fast_silence`,
+  `fast_tone-440`, and `fast_pulse-1s` cases at 44100 Hz. The coordinator used
+  Windows device 16, the agent used macOS device 0, and the retained
+  coordinator invocation is
+  `tools/benchmark_logs/20260715T153015Z_4fd412e0` with suite
+  `218bf09b9400`.
+- The invocation manifest reports `passed`, return code 0, two normalized
+  machines/two peers, three `complete` correlated results, and acknowledged
+  final `all_done`. All six native processes returned 0 and all six stderr
+  logs are empty. Both machine subtrees contain their CSV, five WAV stems,
+  recording manifest, scenario, native manifest, peer result, and process
+  logs for every case; the coordinator also retained each correlated result
+  plus named coordinator/transfer logs.
+- Audited all 77 manifest artifact entries against the retained files: every
+  byte count and SHA-256 matched, no inventory truncation occurred, and all 78
+  physical files were accounted for including the self-manifest. The three
+  uploads were identity-correlated and acknowledged. The agent ran without
+  `--delete-after-upload`; its attempt subtree therefore remained through
+  acknowledgement and its named agent/transfer logs and invocation manifest
+  were finalized in the coordinator-issued local invocation root.
+- The first physical attempt exposed an asynchronous CoreAudio nominal-rate
+  transition and a false-green benchmark verdict for nonzero peer exits.
+  CoreAudio configuration now waits for the requested supported sample rate
+  to settle before stream startup and refreshes device metadata afterward.
+  Benchmark correlation now requires both native return codes to be zero,
+  retries failed peer attempts, and records an agent attempt as passed only
+  after both process success and upload acknowledgement. Focused regression
+  coverage was added for those verdict rules. The final physical run then
+  completed its formerly failing first 44100-Hz macOS case on the first
+  attempt.
+- Final closeout evidence includes the required elevated Windows command
+  `cmd.exe /d /c "call compile.cmd --in-dev-shell"` succeeding with exit code
+  0, all 32 `tools/jam2test` unit tests passing, and
+  `python tools/jam2_test.py validate framework` passing at
+  `tools/validate_logs/20260715T153427Z_9b4c06a8`. Offline analysis of the live
+  invocation passed with three attempts/three complete results at
+  `tools/benchmark_logs/20260715T153427Z_a6c01938`.
+- Repeated the Phase 10 document/source audit after the live-run fixes. The
+  unversioned native contract, opt-in inherited channel/manifests, native
+  profile ownership, isolated artifact/cleanup behavior, normalized benchmark
+  state, retained comprehensive matrices, migrated command families, and
+  legacy-wrapper removal remain active with no Phase 10-owned gap. Phase 11
+  continues to own the already documented new lifecycle, endpoint-migration,
+  mixed-device, WAV-import, and adversarial scenarios. Phase 10 is complete.
 
 ### 2026-07-15 - Phase 10 implementation and two-pass closeout awaiting live two-host smoke
 

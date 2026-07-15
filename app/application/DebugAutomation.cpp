@@ -509,7 +509,8 @@ ParsedScenario parseScenario(const QString& path, const QJsonObject& source, con
         QStringLiteral("stun_retries"), QStringLiteral("wait_ms"),
         QStringLiteral("public_endpoint"), QStringLiteral("session_id"),
         QStringLiteral("session_key"), QStringLiteral("max_peers"),
-        QStringLiteral("peer_token"), QStringLiteral("topology")};
+        QStringLiteral("peer_token"), QStringLiteral("topology"),
+        QStringLiteral("heartbeat_interval_ms"), QStringLiteral("heartbeat_miss_limit")};
     for (auto it = network.begin(); it != network.end(); ++it) {
         if (!networkFields.contains(it.key())) {
             throw std::runtime_error("debug scenario network contains an unknown field");
@@ -566,6 +567,19 @@ ParsedScenario parseScenario(const QString& path, const QJsonObject& source, con
             throw std::runtime_error("debug scenario network integer is invalid");
         }
         result.optionArguments << item.second << QString::number(static_cast<int>(number));
+    }
+    for (const auto& item : std::array{
+             std::pair{QStringLiteral("heartbeat_interval_ms"), std::pair{10, 60000}},
+             std::pair{QStringLiteral("heartbeat_miss_limit"), std::pair{1, 20}}}) {
+        if (!network.contains(item.first)) continue;
+        const QJsonValue value = network.value(item.first);
+        const double number = value.toDouble(-1.0);
+        if (!value.isDouble() || std::floor(number) != number ||
+            number < item.second.first || number > item.second.second) {
+            throw std::runtime_error(
+                (QStringLiteral("debug scenario heartbeat field is invalid: ") +
+                 item.first).toStdString());
+        }
     }
     if (network.contains(QStringLiteral("no_stun"))) {
         if (!network.value(QStringLiteral("no_stun")).isBool()) {
@@ -928,7 +942,10 @@ int runFocusedOperation(const ParsedScenario& scenario, QJsonObject& result)
         return result.value(QStringLiteral("ok")).toBool(false) ? 0 : 3;
     }
     if (scenario.operation == QStringLiteral("validate.controller-lifecycle")) {
-        result = jam2RunControllerLifecycleValidation();
+        const QJsonObject network = scenario.source.value(QStringLiteral("network")).toObject();
+        result = jam2RunControllerLifecycleValidation(
+            network.value(QStringLiteral("heartbeat_interval_ms")).toInt(20),
+            network.value(QStringLiteral("heartbeat_miss_limit")).toInt(3));
         return result.value(QStringLiteral("ok")).toBool(false) ? 0 : 3;
     }
     return -1;

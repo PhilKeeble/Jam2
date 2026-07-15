@@ -9,8 +9,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from jam2test.results import mesh_collect_metrics, mesh_verdict, verdict_for
+from jam2test.results import (
+    classify_metronome_clicks,
+    match_clicks,
+    mesh_collect_metrics,
+    mesh_verdict,
+    verdict_for,
+)
 from jam2test.metrics import normalized_pair_summary, summarize_csv
+from jam2test.stress import _effective_stream_ms
 
 
 def normal_result(scenario="clean-control", **metric_overrides):
@@ -38,6 +45,39 @@ def normal_result(scenario="clean-control", **metric_overrides):
 
 
 class CsvSummaryTests(unittest.TestCase):
+    def test_catalog_duration_extends_past_last_native_action(self):
+        scenario = {
+            "source_scenario": "transport-track-sync-off",
+            "commands": [{"at_s": 15.0}],
+        }
+        self.assertEqual(_effective_stream_ms(scenario, 8000), 17000)
+
+    def test_requested_duration_remains_minimum_when_already_longer(self):
+        scenario = {"source_scenario": "clean-control", "commands": []}
+        self.assertEqual(_effective_stream_ms(scenario, 12000), 12000)
+
+    def test_missing_first_click_is_a_startup_boundary(self):
+        expected = [100, 1100, 2100]
+        detected = [1105, 2104]
+        result = classify_metronome_clicks(
+            expected, detected, match_clicks(expected, detected))
+        self.assertTrue(result["startup_boundary_mismatch"])
+        self.assertEqual(result["steady_missing_clicks"], 0)
+        self.assertEqual(result["steady_extra_clicks"], 0)
+
+    def test_udp_flood_proves_bounded_observed_receive_batch(self):
+        result = normal_result(
+            "udp-short-flood",
+            udp_parse_rejections_total=4096.0,
+            udp_receive_batch_max=64.0)
+        result["udp_validation"] = {
+            "injections": [{"injected": 2048}, {"injected": 2048}],
+        }
+        self.assertEqual(verdict_for(result), "pass")
+
+        result["metrics"]["combined"]["udp_receive_batch_max"] = 65.0
+        self.assertEqual(verdict_for(result), "udp_work_budget_exceeded")
+
     def test_benchmark_pair_summary_uses_normalized_machine_records(self):
         value = normalized_pair_summary("machine-a", None, "machine-b", None)
         self.assertEqual(["machine-a", "machine-b"],
@@ -132,6 +172,40 @@ class CsvSummaryTests(unittest.TestCase):
         self.assertEqual(summary["metronome_compensation_offset_frames"], 64)
         self.assertEqual(summary["playback_ring_underrun_time_ms"], 0)
         self.assertAlmostEqual(summary["playback_ring_underrun_time_ms_final"], 2.66667)
+
+    def test_recovery_window_excludes_post_assessment_teardown(self):
+        fields = [
+            "row_type", "elapsed_ms", "adaptive_playback_padding_frames",
+            "adaptive_playback_target_frames", "recv_packets", "mix_active_slots",
+            "mix_max_slots",
+        ]
+        rows = [
+            {"row_type": "periodic", "elapsed_ms": "13000",
+             "adaptive_playback_padding_frames": "2624",
+             "adaptive_playback_target_frames": "1291", "recv_packets": "1000",
+             "mix_active_slots": "1", "mix_max_slots": "88"},
+            {"row_type": "periodic", "elapsed_ms": "18000",
+             "adaptive_playback_padding_frames": "2624",
+             "adaptive_playback_target_frames": "1051", "recv_packets": "4000",
+             "mix_active_slots": "1", "mix_max_slots": "88"},
+            {"row_type": "periodic", "elapsed_ms": "19000",
+             "adaptive_playback_padding_frames": "3648",
+             "adaptive_playback_target_frames": "1536", "recv_packets": "4000",
+             "mix_active_slots": "0", "mix_max_slots": "88"},
+            {"row_type": "final", "elapsed_ms": "19100",
+             "adaptive_playback_padding_frames": "3648",
+             "adaptive_playback_target_frames": "1536", "recv_packets": "4000",
+             "mix_active_slots": "0", "mix_max_slots": "88"},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "stats.csv"
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(rows)
+            summary = summarize_csv(path, assessment_elapsed_ms=18000)
+            self.assertEqual(summary["recovery_adaptive_padding_frames_delta"], 0.0)
+            self.assertEqual(summary["adaptive_playback_target_observed_max"], 1291.0)
 
 
 class NormalVerdictTests(unittest.TestCase):
@@ -279,6 +353,34 @@ class NormalVerdictTests(unittest.TestCase):
 
         result["metrics"]["client"]["grid_revision_before_shutdown"] = 2
         self.assertEqual(verdict_for(result), "noop_controls_created_grid_revision")
+
+    def test_concurrent_grid_edits_require_two_ordered_assignments_not_startup_revision(self):
+        result = normal_result("grid-authority-concurrent")
+        result["metrics"]["server"].update({
+            "grid_mode": 0,
+            "grid_revision": 2,
+            "grid_authority_peer_id": 1,
+        })
+        result["metrics"]["client"].update({
+            "grid_mode": 0,
+            "grid_revision": 2,
+            "grid_authority_peer_id": 1,
+        })
+        result["metrics"]["combined"].update({
+            "grid_revision_consensus": True,
+            "grid_authority_consensus": True,
+            "grid_authority_states_sent_total": 2,
+            "grid_authority_states_accepted_total": 2,
+            "metronome_alignment_valid_sides": 2,
+            "grid_authority_epoch_min": 1000,
+            "grid_proposals_accepted_total": 2,
+            "grid_assignments_accepted_total": 4,
+        })
+
+        self.assertEqual(verdict_for(result), "pass")
+
+        result["metrics"]["combined"]["grid_assignments_accepted_total"] = 3
+        self.assertEqual(verdict_for(result), "concurrent_grid_revisions_not_ordered")
 
 
 class HeadlessVerdictTests(unittest.TestCase):

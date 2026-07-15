@@ -7,6 +7,7 @@ struct SharedTrackModel {
     QString filePath;
     qint64 fileBytes = 0;
     int sampleRate = 0;
+    bool sampleRateCompatible = true;
     int durationMs = 0;
     QString sha256;
     double guessedBpm = 0.0;

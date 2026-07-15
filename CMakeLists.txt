@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(Jam2
     VERSION 0.1.0
-    DESCRIPTION "Two-person low-latency direct UDP music streaming tool"
+    DESCRIPTION "Low-latency direct UDP music collaboration tool"
     LANGUAGES CXX
 )
 

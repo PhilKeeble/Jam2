@@ -1,6 +1,6 @@
 #include "GuiControlMessageRouter.hpp"
 
-#include "ControlMessageValidation.hpp"
+#include "application/ControlMessageValidation.hpp"
 #include "MainWindow.hpp"
 
 #include <QMessageBox>
@@ -11,19 +11,6 @@ void GuiControlMessageRouter::dispatch(
     const QString& sourcePeerToken)
 {
     const QString type = message.value(QStringLiteral("type")).toString();
-    QString validationError;
-    if (!jam2::application::validateControlMessage(message, validationError)) {
-        w.appendLog(QStringLiteral("rejected control message: ") + validationError);
-        return;
-    }
-    const bool fromJoinerConnection = !sourcePeerToken.isEmpty();
-    if (fromJoinerConnection &&
-        (type == QStringLiteral("session.settings") ||
-         type == QStringLiteral("session.membership"))) {
-        w.appendLog(QStringLiteral("rejected unauthorized control family from peer ") +
-            sourcePeerToken.left(8) + QStringLiteral(": ") + type);
-        return;
-    }
     if (type != QStringLiteral("song.set") &&
         jam2::application::isTrackSyncControlMessageType(type) &&
         !w.looperProject_.trackSyncEnabled()) {

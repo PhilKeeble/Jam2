@@ -21,11 +21,12 @@ the deterministic headless product suite.
 Use a separate output parent when retaining evidence for a particular change:
 
 ```powershell
-python tools\jam2_test.py validate all --output build\validation --clean
+python tools\jam2_test.py validate all --clean
 ```
 
-The resulting root is
-`build/validation/validate_logs/<invocation-id>`, not the output parent itself.
+The resulting root is `tools/validate_logs/<invocation-id>`, not `tools`
+itself. With `--output PATH`, it is
+`PATH/validate_logs/<invocation-id>`.
 
 ## Selections
 
@@ -46,11 +47,14 @@ python tools\jam2_test.py validate all
 
 The product selection verifies:
 
-- public `jam2` help/command surfaces and rejection of the removed public mesh
-  command;
+- public `jam2` help/command surfaces and rejection of the former public
+  `listen`, `connect`, and `mesh` aliases at both root and network levels;
 - parity among `debug describe`, the unversioned scenario schema, admitted
   operations, runtime fields, and typed actions;
-- native numeric/boundary and controller-lifecycle validators;
+- native numeric/boundary and controller-lifecycle validators, including the
+  production 30000-ms/five-miss heartbeat policy and shortened debug expiry;
+- authenticated real-process TCP fragmentation, admission, authorization,
+  nested remote-model, asset/WAV, endpoint, and bounded-flood hardening;
 - one clean local effective-configuration run;
 - rejection of obsolete `*-v1`, unknown, wrongly typed, and out-of-range local
   automation input;
@@ -58,7 +62,8 @@ The product selection verifies:
 - rejection of automation handles by GUI, ordinary CLI, describe, and static
   debug launches;
 - clean two-, three-, and four-peer create/join runs through the universal
-  direct-mesh engine.
+  direct-mesh engine, including continued packet/mix progress for two survivors
+  after an ordinary third peer leaves.
 
 `coverage-map.json` classifies every public CLI option and scenario field as
 automated or explicitly device/manual-only. Unclassified surfaces fail the
@@ -70,7 +75,7 @@ Add one short native-device extension while retaining the full headless
 baseline:
 
 ```powershell
-python tools\jam2_test.py validate all --real-device 5 --output build\validation-device --clean
+python tools\jam2_test.py validate all --real-device 5 --clean
 ```
 
 The extension runs a short local tone scenario and verifies that the native
@@ -114,8 +119,8 @@ Manifest states and exit codes distinguish outcomes:
   executed or inspected reliably.
 
 The manifest's `omissions` field remains explicit. Headless validation does not
-claim GUI interaction, physical audio behavior unless `--real-device` was
-supplied, or scenarios intentionally assigned to later hardening work.
+claim GUI interaction or physical audio behavior unless `--real-device` was
+supplied.
 
 Use [Stress Tests](StressTests.md) for controlled impairment/recovery and
 [Benchmark](Benchmark.md) for two-machine device/network measurements.

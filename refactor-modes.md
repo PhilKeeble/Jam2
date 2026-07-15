@@ -175,9 +175,17 @@ The peer that starts the jam initially:
 - Publishes the invite endpoint.
 - Authenticates joining GUI/control connections.
 - Distributes the immutable session contract and current membership.
-- Serializes membership changes and conflicting musical-control requests.
+- Orders and redistributes accepted shared revisions when simultaneous requests
+  need a deterministic sequence.
 
 This is a control-plane responsibility. It does not make that peer special in UDP audio mixing.
+
+It also does not grant host-only musical or Track-view permissions. Every
+authenticated peer is an equal collaborator and may originate valid grid,
+transport, song, arrangement, crop, move, playback, recording, and additive
+asset actions while that peer's local synchronization control is enabled. The
+coordinator validates, orders, and distributes those actions; it does not decide
+which collaborator is allowed to edit.
 
 The first implementation can keep the current creator GUI as coordinator. Coordinator election or serverless membership recovery is unnecessary for v1.
 
@@ -210,9 +218,20 @@ For a lightweight first implementation, any peer's GUI sends “start grid” to
 
 Song arrangement, prepared-track state, quantized restart, and recording commands are separate from audio and grid authority.
 
-The current host-authoritative song/asset model can remain initially, but transport packets need a source peer id and globally unambiguous event id. Local revision counters from different peers are not comparable by themselves.
+`Arrangement authority` names the source of the accepted ordered revision; it
+does not mean that the creator owns the arrangement or has exclusive edit
+permission. Any authenticated synchronized peer may propose an arrangement
+change. The coordinator validates it, resolves simultaneous requests, assigns a
+globally unambiguous revision/event id, and redistributes the accepted result.
+Local revision counters from different peers are not comparable by themselves.
 
-A completed peer recording is a contribution, not an unrestricted arrangement edit. The recording peer offers a unique contribution id plus its intended bank/lane and content hash; the arrangement authority requests and validates the asset, fills the target only when it is still empty, otherwise appends a lane, and then publishes a new authoritative arrangement revision. This preserves simultaneous takes without allowing competing full snapshots to overwrite one another.
+A completed recording or imported WAV is an additive contribution. The
+recording/importing peer offers a unique contribution id plus its intended
+bank/lane and content hash; the coordinator requests and validates the asset,
+fills the target only when it is still empty, otherwise appends a lane, and then
+publishes the accepted arrangement revision. This preserves simultaneous takes
+without allowing competing snapshots to overwrite one another. Local arming and
+file writing still require local consent.
 
 Separating these roles avoids replacing one fixed `listener_side` flag with a different fixed “host is everything” flag.
 
@@ -521,7 +540,9 @@ The current receive path accepts both `TrackRestart` and `RecordStart` but uses 
 - Arming and writing an input take remain local.
 - A shared record countdown does not imply that another peer can write or control a local file without explicit local consent.
 
-Arrangement authority can initially remain with the session creator while grid authority remains dynamic.
+The session creator may remain the initial arrangement revision distributor
+while grid authority remains dynamic, but every synchronized peer has equal
+permission to originate arrangement actions.
 
 ## Session Configuration
 
@@ -743,7 +764,18 @@ Networking cannot begin by draining a ring filled during local operation. Captur
 
 Allowing any peer to start the metronome requires ordered authority changes. A coordinator-serialized grid revision is small and deterministic, but it means loss of the control coordinator limits new membership and authority changes until reconnected.
 
-That limitation is acceptable for v1 if exposed clearly.
+Jam2 does not elect a replacement bootstrap coordinator. The creator emits a
+small authenticated TCP heartbeat every 30 seconds. Five consecutive missed
+check-ins form an approximately 150-second grace period in which the existing
+reconnect path may recover and established direct UDP audio may continue. If the
+same coordinator does not reauthenticate and resume heartbeats within that
+period, GUI joiners stop the network session and return to Local; headless
+`network join` commands terminate with an explicit coordinator-timeout result.
+An authenticated creator-only End Jam message causes that transition
+immediately. Lower-level UDP-only debug/engine cases do not participate in this
+control-plane lifecycle. The 30-second/five-miss production default remains
+native-owned; deterministic debug lifecycle scenarios may explicitly shorten
+the interval without creating a Python-owned runtime default.
 
 ### NAT behavior
 
@@ -816,7 +848,8 @@ or duplicate session policy.
 - Shared-grid phase correction remains bounded.
 - Leader-audio click exists in exactly one outgoing stream.
 - Leader-audio authority disconnects and reports missing authority.
-- Explicit takeover creates a new epoch.
+- The ordered surviving peer creates a fresh epoch automatically; this is a
+  grid-authority transition, never bootstrap-coordinator takeover.
 - Listener compensation uses only the authority stream and reports stale reference.
 
 ### Transport
@@ -876,10 +909,18 @@ The following defaults best match the current product constraints:
 - Use the same full-mesh audio path for one or many remote peers.
 - Keep Start Jam and Join Jam as bootstrap workflows.
 - Keep the session creator as the initial control/membership coordinator only.
+- Treat all authenticated synchronized peers as equal musical and Track-view
+  editors; coordinator ownership grants ordering/distribution responsibility,
+  not edit authority.
 - Let the initiator of a metronome start become grid authority for that revision.
 - In leader-audio, only that authority injects and locally renders the authoritative click.
-- Require explicit user takeover when a leader-audio authority disappears.
-- Keep arrangement authority separate and initially creator-controlled.
+- Recover a departed running-grid authority through the existing ordered fresh
+  survivor epoch; this is a musical transition, not bootstrap coordinator
+  takeover.
+- Keep arrangement revision distribution separate while allowing every
+  synchronized peer to originate arrangement changes.
+- Use authenticated TCP heartbeat expiry or an explicit creator End Jam to
+  return joiners to Local; do not elect or transfer the bootstrap coordinator.
 - Keep wire-required settings session-wide and tuning/mix/device settings local.
 - Preserve join-initiated UDP probing and add symmetric per-edge handshakes.
 - Require per-peer drift correction before claiming mesh parity.

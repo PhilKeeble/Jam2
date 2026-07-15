@@ -71,6 +71,16 @@ class ProxySchedulingTests(unittest.TestCase):
         finally:
             proxy.close()
 
+    def test_server_packet_before_client_endpoint_is_not_injected_loss(self):
+        proxy = self.make_proxy()
+        try:
+            proxy._forward_server_datagram(b"endpoint-proof")
+            self.assertEqual(proxy.stats["server_to_client_dropped"], 0)
+            self.assertEqual(
+                proxy.stats["server_to_client_unroutable_before_client"], 1)
+        finally:
+            proxy.close()
+
     def test_one_shot_burst_disarms_after_first_blackout(self):
         proxy = self.make_proxy()
         impairment = DirectionImpairment(
