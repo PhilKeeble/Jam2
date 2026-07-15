@@ -78,35 +78,18 @@ The creator's TCP coordinator authenticates the joiner, checks the immutable sam
 | `--log-stats` | Writes stats CSV files to a folder. |
 | `--record-jam-folder` | Records local jam stems for later inspection. |
 
-## Runtime Commands
+## Runtime Control
 
-While a direct headless command is running, stdin accepts:
-
-```text
-stats
-status
-bpm 140
-metro off
-metro on
-metro mode shared-grid
-metro level 0.15
-metro level +0.05
-remote level 0.75
-remote mute
-remote unmute
-track load C:\path\prepared.wav
-track play
-track stop
-track level 0.75
-track loop on
-quit
-```
-
-`track load` accepts the GUI-rendered active-bank prepared mix. The file must be mono PCM16 at the active engine sample rate and no longer than five minutes. Resampling is not done in the engine.
+Normal product interaction does not depend on an interactive stdin protocol.
+Configure initial headless audio/network state with command-line options and
+use `--stream-ms` or normal process signals for bounded shutdown. The GUI
+submits typed commands directly to its in-process engine. The local stress
+harness currently uses a small transitional headless line adapter for Phase 8
+regressions; Phase 10 replaces it with the bounded native automation contract.
 
 ## Stats Output
 
-Use stats while testing and tuning. The engine reports raw measurements such as packet loss, jitter, RTT, bitrate, playback depth, underruns, overruns, drift ppm, resampler ratio, jitter-buffer drops, adaptive cushion movement, receive loop gaps, audio callback gaps, and prepared-source frame/underrun/busy counters.
+Use stats while testing and tuning. The engine reports raw measurements such as packet loss, jitter, RTT, bitrate, playback depth, underruns, overruns, drift ppm, resampler ratio, jitter-buffer drops, adaptive cushion movement, requested/applied playback drops, receive loop gaps, audio callback gaps, and prepared-source frame/underrun/busy counters. Transport diagnostics retain the authenticated source peer, event counter, grid revision, typed action, source frame, requested target, and locally applied target.
 
 Use CSV logs for comparisons between runs:
 

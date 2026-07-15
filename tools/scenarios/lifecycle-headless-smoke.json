@@ -7,7 +7,6 @@
     "--audio-buffer-size", "256",
     "--sample-rate", "48000",
     "--stats", "enabled",
-    "--status-format", "jsonl",
     "--stats-interval-ms", "250",
     "--os-priority", "realtime"
   ]

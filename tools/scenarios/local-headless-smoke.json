@@ -8,7 +8,6 @@
     "--sample-rate", "48000",
     "--stream-ms", "1000",
     "--stats", "enabled",
-    "--status-format", "jsonl",
     "--stats-interval-ms", "250"
   ]
 }

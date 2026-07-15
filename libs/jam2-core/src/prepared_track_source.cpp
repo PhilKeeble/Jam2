@@ -43,13 +43,21 @@ bool PreparedTrackSource::enqueueBatch(std::span<const Command> commands)
     if (commands.size() > available) {
         return false;
     }
+    const std::uint64_t generation = generation_.load(std::memory_order_acquire);
     for (const Command& command : commands) {
         queue_[write] = command;
+        queue_[write].generation = generation;
         write = (write + 1U) % capacity;
     }
     write_.store(write, std::memory_order_release);
     return true;
 }
+
+void PreparedTrackSource::cancelScheduled() noexcept
+{
+    generation_.fetch_add(1, std::memory_order_acq_rel);
+}
+
 void PreparedTrackSource::mix(
     std::int32_t* output,
     std::size_t frames,
@@ -64,6 +72,12 @@ void PreparedTrackSource::mix(
                 break;
             }
             const Command command = queue_[read];
+            if (command.generation != generation_.load(std::memory_order_acquire)) {
+                read_.store(
+                    (read + 1U) % static_cast<std::uint32_t>(kCommandCapacity),
+                    std::memory_order_release);
+                continue;
+            }
             if (command.targetFrame > currentFrame) {
                 break;
             }

@@ -83,7 +83,6 @@ class Jam2Profile:
             "--stats-interval-ms", str(STATS_INTERVAL_MS),
             "--stream-ms", str(stream_ms),
             "--stream-linger-ms", "500",
-            "--machine-readable-startup", "on",
         ])
         if self.socket_send_buffer > 0:
             args.extend(["--socket-send-buffer", str(self.socket_send_buffer)])

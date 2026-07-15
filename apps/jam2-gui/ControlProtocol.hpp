@@ -13,11 +13,59 @@ constexpr int kAuthenticationDeadlineMs = 5000;
 constexpr int kIncompleteFrameDeadlineMs = 5000;
 constexpr int kFramesPerTurn = 32;
 constexpr int kMaxPendingPeers = 8;
+constexpr int kAuthenticationFailureWindowMs = 10000;
+constexpr int kMaxAuthenticationFailuresPerWindow = 64;
 
 enum class TakeFrameResult {
     NeedMore,
     Ready,
     Invalid,
+};
+
+// Cold control-plane state is kept typed so reconnect and failure policy never
+// depends on matching human-readable diagnostic text.
+enum class TransportEventType {
+    Listening,
+    Connecting,
+    Connected,
+    ChallengeSent,
+    ProofSent,
+    Authenticated,
+    Disconnected,
+    AlreadyConnected,
+    RefreshRequested,
+    ReconnectScheduled,
+    ReconnectAttempt,
+    Failure,
+};
+
+enum class TransportFailure {
+    None,
+    InvalidConfiguration,
+    ConnectionRefused,
+    HostNotFound,
+    NetworkUnavailable,
+    TransportError,
+    AuthenticationRejected,
+    AuthenticationTimeout,
+    FrameTimeout,
+    FrameRejected,
+    AuthenticatedFrameRejected,
+    OutputHighWater,
+    WriteFailed,
+    SessionPeerLimit,
+    ContractRejected,
+    MembershipRejected,
+    ReconnectExhausted,
+    RuntimeStartFailed,
+};
+
+struct TransportEvent {
+    TransportEventType type = TransportEventType::Connecting;
+    TransportFailure failure = TransportFailure::None;
+    QString detail;
+    bool retryable = false;
+    bool authenticated = false;
 };
 
 QByteArray randomNonce();

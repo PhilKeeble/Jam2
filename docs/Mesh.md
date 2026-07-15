@@ -12,7 +12,8 @@ The TCP coordinator only handles session setup and control:
 - checking the immutable protocol, sample-rate, and frame-size contract;
 - assigning stable peer identities;
 - distributing the current peer membership and each peer's UDP candidate;
-- carrying shared settings and GUI control messages.
+- carrying revisioned grid/arrangement authority state and authenticated routed
+  control messages.
 
 The creator binds TCP and UDP to the same local numeric port. A joiner first authenticates to that TCP port, receives the contract and membership, then starts its UDP session. TCP never carries or relays audio.
 
@@ -46,7 +47,8 @@ The GUI exposes the same create/join model as **Start Jam** and **Join Jam**:
 4. The creator authenticates the joiner and distributes updated membership.
 5. The existing audio engine adds or updates only the affected peer stream; unchanged audio devices and peer streams keep running.
 
-The creator may optionally impose a GUI peer limit. `0` means no user-selected cap.
+The creator may optionally impose a session peer limit through the GUI or
+`network create --max-peers`. `0` means no user-selected cap.
 
 ## Address Discovery And Reachability
 
@@ -66,15 +68,19 @@ This keeps the failure behavior simple and avoids adding leader election or a ro
 
 Periodic stats include aggregate `mesh_stats` and one `mesh_peer` record per remote peer. Watch:
 
-- `peer_count` and `active_peers` for membership and proven edge state;
+- explicit total/remote peer counts and active edges for membership and proven
+  edge state;
 - sent/received packets, loss, duplicate, reorder, late, and replay counters;
 - per-peer RTT, jitter, playout depth, drift ppm, and resampler ratio;
 - mixer released/deadline slots, missing frames, and capacity drops;
 - playback ring depth, underruns, and overruns;
+- revisioned transport source, action, requested target, and applied target;
 - input, send, remote, and output peak levels;
 - outbound and inbound bitrate as peer count grows.
 
 CSV logs keep the same raw fields for regression comparisons. Increase peer count gradually and compare the per-peer routes: one weak route should be diagnosable without hiding it behind a subjective score.
+
+Track transport replay counters are source-specific and remain monotonic across local network-worker reattachment. A repeated authenticated transport event is not accepted until the re-established direct UDP edge has enough clock mapping to schedule it; this preserves replay rejection without dropping the first Play, Stop, or Restart after rejoin.
 
 ## Practical Limits
 

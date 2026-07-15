@@ -353,6 +353,28 @@ std::size_t NetworkSession::activePeerCount() const noexcept
         }));
 }
 
+NetworkSessionSnapshot NetworkSession::snapshot() const
+{
+    NetworkSessionSnapshot result;
+    result.contract = impl_->contract;
+    result.bootstrap_role = impl_->bootstrap_role;
+    result.bootstrap_state = impl_->bootstrap_state;
+    result.local_peer_id = impl_->local_peer_id;
+    result.mix = impl_->mixer.stats();
+    result.peers.reserve(impl_->peers.size());
+    for (const auto& peer : impl_->peers) {
+        NetworkPeerSnapshot value;
+        value.descriptor = peer->descriptor;
+        value.stream = peer->stream->stats();
+        if (const PeerMixerPeerStats* mix = impl_->mixer.peerStats(peer->descriptor.peer_id.value)) {
+            value.mix = *mix;
+            value.has_mix_stats = true;
+        }
+        result.peers.push_back(std::move(value));
+    }
+    return result;
+}
+
 const NetworkPeerDescriptor& NetworkSession::remotePeer() const
 {
     if (impl_->peers.empty()) {

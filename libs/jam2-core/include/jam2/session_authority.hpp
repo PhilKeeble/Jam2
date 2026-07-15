@@ -85,7 +85,8 @@ public:
     bool acceptTransportEvent(
         std::uint64_t source_peer_id,
         std::uint64_t event_counter,
-        std::uint64_t grid_revision) noexcept;
+        std::uint64_t grid_revision,
+        bool requires_arrangement_authority) noexcept;
 
 private:
     struct RequestTracker {
@@ -96,10 +97,10 @@ private:
     std::uint64_t local_peer_id_ = 0;
     std::uint64_t bootstrap_coordinator_peer_id_ = 0;
     std::uint64_t arrangement_authority_peer_id_ = 0;
-    std::uint64_t last_transport_event_counter_ = 0;
     GridAuthorityState grid_;
     SessionAuthorityStats stats_;
     std::vector<RequestTracker> request_trackers_;
+    std::vector<RequestTracker> transport_trackers_;
 };
 
 } // namespace jam2

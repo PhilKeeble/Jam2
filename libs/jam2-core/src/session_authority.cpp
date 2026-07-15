@@ -180,16 +180,30 @@ bool SessionAuthority::markPeerInactive(std::uint64_t peer_id) noexcept
 bool SessionAuthority::acceptTransportEvent(
     std::uint64_t source_peer_id,
     std::uint64_t event_counter,
-    std::uint64_t grid_revision) noexcept
+    std::uint64_t grid_revision,
+    bool requires_arrangement_authority) noexcept
 {
     const bool grid_matches = grid_revision == grid_.revision ||
         (grid_revision == 0 && grid_.revision == 0);
-    if (source_peer_id != arrangement_authority_peer_id_ || event_counter == 0 ||
-        event_counter <= last_transport_event_counter_ || !grid_matches) {
+    if (source_peer_id == 0 || event_counter == 0 || !grid_matches ||
+        (requires_arrangement_authority && source_peer_id != arrangement_authority_peer_id_)) {
         ++stats_.transport_events_rejected;
         return false;
     }
-    last_transport_event_counter_ = event_counter;
+
+    const auto tracker = std::find_if(
+        transport_trackers_.begin(),
+        transport_trackers_.end(),
+        [source_peer_id](const RequestTracker& value) { return value.peer_id == source_peer_id; });
+    if (tracker != transport_trackers_.end()) {
+        if (event_counter <= tracker->last_request_id) {
+            ++stats_.transport_events_rejected;
+            return false;
+        }
+        tracker->last_request_id = event_counter;
+    } else {
+        transport_trackers_.push_back({source_peer_id, event_counter});
+    }
     ++stats_.transport_events_accepted;
     return true;
 }

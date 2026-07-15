@@ -302,19 +302,12 @@ void TrackTakeRecorder::record(std::uint64_t audio_frame_start, std::span<const 
     }
 }
 
-TrackTakeRecorderStats TrackTakeRecorder::stats() const
+TrackTakeRecorderSnapshot TrackTakeRecorder::snapshot() const noexcept
 {
-    TrackTakeRecorderStats out;
+    TrackTakeRecorderSnapshot out;
     out.armed = armed_.load(std::memory_order_acquire);
     out.recording = recording_.load(std::memory_order_acquire);
     out.finalized = finalized_.load(std::memory_order_acquire);
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        out.take_id = take_id_;
-        out.output_path = output_path_.string();
-        out.last_error = last_error_;
-        out.sample_rate = sample_rate_;
-    }
     out.start_frame = start_frame_.load(std::memory_order_acquire);
     out.stop_frame = stop_frame_.load(std::memory_order_acquire);
     out.frames_queued = frames_queued_.load(std::memory_order_relaxed);
@@ -324,6 +317,32 @@ TrackTakeRecorderStats TrackTakeRecorder::stats() const
     out.writer_errors = writer_errors_.load(std::memory_order_relaxed);
     out.queue_depth_frames = queue_ ? queue_->depth() : 0;
     out.queue_capacity_frames = queue_capacity_frames_;
+    return out;
+}
+
+TrackTakeRecorderStats TrackTakeRecorder::stats() const
+{
+    const auto fixed = snapshot();
+    TrackTakeRecorderStats out;
+    out.armed = fixed.armed;
+    out.recording = fixed.recording;
+    out.finalized = fixed.finalized;
+    out.start_frame = fixed.start_frame;
+    out.stop_frame = fixed.stop_frame;
+    out.frames_queued = fixed.frames_queued;
+    out.frames_written = fixed.frames_written;
+    out.dropped_frames = fixed.dropped_frames;
+    out.drop_events = fixed.drop_events;
+    out.writer_errors = fixed.writer_errors;
+    out.queue_depth_frames = fixed.queue_depth_frames;
+    out.queue_capacity_frames = fixed.queue_capacity_frames;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        out.take_id = take_id_;
+        out.output_path = output_path_.string();
+        out.last_error = last_error_;
+        out.sample_rate = sample_rate_;
+    }
     return out;
 }
 

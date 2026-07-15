@@ -33,6 +33,21 @@ struct TrackTakeRecorderStats {
     std::size_t queue_capacity_frames = 0;
 };
 
+struct TrackTakeRecorderSnapshot {
+    bool armed = false;
+    bool recording = false;
+    bool finalized = false;
+    std::uint64_t start_frame = 0;
+    std::uint64_t stop_frame = 0;
+    std::uint64_t frames_queued = 0;
+    std::uint64_t frames_written = 0;
+    std::uint64_t dropped_frames = 0;
+    std::uint64_t drop_events = 0;
+    std::uint64_t writer_errors = 0;
+    std::size_t queue_depth_frames = 0;
+    std::size_t queue_capacity_frames = 0;
+};
+
 struct TrackTakeRecorderCompletion {
     bool available = false;
     bool ok = false;
@@ -65,6 +80,7 @@ public:
     void cancel() noexcept;
     void record(std::uint64_t audio_frame_start, std::span<const std::int32_t> input) noexcept;
 
+    TrackTakeRecorderSnapshot snapshot() const noexcept;
     TrackTakeRecorderStats stats() const;
     TrackTakeRecorderCompletion consume_completion();
 

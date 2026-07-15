@@ -7,7 +7,6 @@ in mesh when dialogue comes up you cant re get it on clipboard as you cant highl
 
 do STUN testing with other netwroks to see what works and whether port forwarding needed 
 
-when severe wifi burst happens ring cant catch back up, might need tuning or testing with alternate profile - analysis is next to jam log files to keep track of
 
 add user preferences so that users cna set devices for loopback / asio once and then not have to set it again unless they need to change it, maybe a seperate settings button that loads a file off disk for user preferences? 
 
@@ -21,12 +20,13 @@ look into why jam2-cli code still exists in repo and whether its beter just all 
 
 when start jam dialogue comes up with url it makes the windows error noise which sucks, also cant re add it to clipboard
 
-on latest run there was audio and then latency increase but never seemed to come back down? 
 
-on latest run server was left in 0 person mesh channel and metronome was taking a while to start like it was waiting for the next bar 
 
 ## bugs
 
+volume meters seem to be stuck at the highest reached volume
+
+When i try to crop a track it is jittering and not letting me. I think the playhead marker movement seems to change it somehow. im considering removing the ability to click to move the playhead on the track or changing how it works if this is a persistent issue but it did appear to work before fine 
 
 
-
+max peers is not available to choose in the start jam dialogue 

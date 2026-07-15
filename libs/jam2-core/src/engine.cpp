@@ -645,6 +645,7 @@ struct Engine::Impl {
     std::unique_ptr<audio::MonoRingBuffer> capture_ring;
     std::unique_ptr<audio::MonoRingBuffer> playback_ring;
     std::unique_ptr<audio::DeviceStream> stream;
+    audio::StreamInfo stream_info;
     FixedQueue<EngineCommand, Engine::kCommandCapacity> commands;
     FixedQueue<EngineEvent, Engine::kEventCapacity> events;
     std::array<ScheduledCommand, Engine::kScheduledCommandCapacity> scheduled{};
@@ -657,7 +658,6 @@ struct Engine::Impl {
     std::atomic<std::uint64_t> capture_frames_popped{0};
     std::atomic<std::uint64_t> capture_attach_count{0};
     std::atomic<std::uint64_t> capture_detach_count{0};
-    std::atomic<bool> compatibility_completion_consumer{false};
     std::atomic<std::uint64_t> transport_revision{0};
     std::atomic<EngineTransportAction> transport_action{EngineTransportAction::None};
     std::atomic<std::uint64_t> transport_target_frame{0};
@@ -782,8 +782,11 @@ struct Engine::Impl {
             return true;
         }
         case EngineCommandType::ScheduleTransport: {
-            if (command.transport_action == EngineTransportAction::None ||
-                command.transport_action > EngineTransportAction::RecordStop) {
+            if (command.transport_action != EngineTransportAction::TrackRestart &&
+                command.transport_action != EngineTransportAction::TrackStop &&
+                command.transport_action != EngineTransportAction::TrackPlay &&
+                command.transport_action != EngineTransportAction::RecordStart &&
+                command.transport_action != EngineTransportAction::RecordStop) {
                 error = "transport action is invalid";
                 return false;
             }
@@ -803,6 +806,7 @@ struct Engine::Impl {
             return true;
         }
         case EngineCommandType::CancelTransport:
+            prepared_source->cancelScheduled();
             transport_pending.store(false, std::memory_order_release);
             transport_action.store(EngineTransportAction::None, std::memory_order_relaxed);
             transport_cookie.store(0, std::memory_order_relaxed);
@@ -1017,8 +1021,7 @@ struct Engine::Impl {
                     ++processed;
                 }
                 commit_due_transport(frame);
-                if (track_take_recorder != nullptr &&
-                    !compatibility_completion_consumer.load(std::memory_order_relaxed)) {
+                if (track_take_recorder != nullptr) {
                     const auto completion = track_take_recorder->consume_completion();
                     if (completion.available) {
                         push_event(
@@ -1191,7 +1194,8 @@ void Engine::start(const EngineConfig& requested)
                 impl_->recorder.get(),
                 impl_->track_take_recorder.get());
         }
-        const double active_rate = impl_->stream != nullptr ? impl_->stream->info().sample_rate : 0.0;
+        impl_->stream_info = impl_->stream != nullptr ? impl_->stream->info() : audio::StreamInfo{};
+        const double active_rate = impl_->stream_info.sample_rate;
         if (active_rate > 0.0 &&
             std::abs(active_rate - static_cast<double>(impl_->config.sample_rate)) > 1.0) {
             std::ostringstream message;
@@ -1297,6 +1301,8 @@ EngineSnapshot Engine::snapshot() const noexcept
     result.network_capture_detach_count = impl_->capture_detach_count.load(std::memory_order_relaxed);
     result.network_playback_enabled = control.network_playback_enabled.load(std::memory_order_relaxed);
     result.metronome_enabled = control.metronome_enabled.load(std::memory_order_relaxed);
+    result.metronome_mode = static_cast<EngineMetronomeMode>(
+        std::clamp(control.metronome_mode.load(std::memory_order_relaxed), 0, 2));
     result.metronome_pattern = metronome::sanitize({
         control.metronome_bpm.load(std::memory_order_relaxed),
         control.metronome_beats_per_bar.load(std::memory_order_relaxed),
@@ -1338,6 +1344,7 @@ EngineSnapshot Engine::snapshot() const noexcept
         control.prepared_source_actual_start_frame.load(std::memory_order_relaxed);
     result.prepared_source_underruns = control.prepared_source_underruns.load(std::memory_order_relaxed);
     result.prepared_source_busy_events = control.prepared_source_busy_events.load(std::memory_order_relaxed);
+    result.prepared_source_playing = impl_->prepared_source != nullptr && impl_->prepared_source->playing();
     if (impl_->capture_ring != nullptr) {
         result.capture_ring_capacity_frames = impl_->capture_ring->capacity();
         result.capture_ring_depth_frames = impl_->capture_ring->available_read();
@@ -1349,32 +1356,33 @@ EngineSnapshot Engine::snapshot() const noexcept
         result.playback_ring = impl_->playback_ring->stats();
     }
     if (impl_->stream != nullptr) {
-        const auto info = impl_->stream->info();
-        result.sample_rate = info.sample_rate;
-        result.audio_buffer_frames = info.buffer_size;
-        result.input_latency_frames = info.input_latency_frames;
-        result.output_latency_frames = info.output_latency_frames;
+        result.sample_rate = impl_->stream_info.sample_rate;
+        result.audio_buffer_frames = impl_->stream_info.buffer_size;
+        result.input_latency_frames = impl_->stream_info.input_latency_frames;
+        result.output_latency_frames = impl_->stream_info.output_latency_frames;
+        result.recording_latency_adjustment_frames =
+            control.recording_latency_adjustment_frames.load(std::memory_order_relaxed);
+        result.recording_latency_compensation_frames =
+            control.recording_latency_compensation_frames.load(std::memory_order_relaxed);
         result.callbacks = impl_->stream->callbacks();
         result.playback_prefilled = impl_->stream->playback_prefilled();
         result.callback_timing = impl_->stream->callback_timing_stats();
     }
     if (impl_->recorder != nullptr) {
-        const auto recording = impl_->recorder->stats();
-        result.jam_recording = {
-            recording.active,
-            recording.start_audio_frame,
-            recording.stop_audio_frame,
-            recording.frames_queued,
-            recording.frames_written,
-            recording.dropped_frames,
-            recording.drop_events,
-            recording.writer_errors,
-            recording.queue_depth_frames,
-            recording.queue_capacity_frames,
-        };
+        const auto recording = impl_->recorder->snapshot();
+        result.jam_recording.active = recording.active;
+        result.jam_recording.start_frame = recording.start_audio_frame;
+        result.jam_recording.stop_frame = recording.stop_audio_frame;
+        result.jam_recording.frames_queued = recording.frames_queued;
+        result.jam_recording.frames_written = recording.frames_written;
+        result.jam_recording.dropped_frames = recording.dropped_frames;
+        result.jam_recording.drop_events = recording.drop_events;
+        result.jam_recording.writer_errors = recording.writer_errors;
+        result.jam_recording.queue_depth_frames = recording.queue_depth_frames;
+        result.jam_recording.queue_capacity_frames = recording.queue_capacity_frames;
     }
     if (impl_->track_take_recorder != nullptr) {
-        const auto take = impl_->track_take_recorder->stats();
+        const auto take = impl_->track_take_recorder->snapshot();
         result.track_take = {
             take.armed,
             take.recording,
@@ -1389,6 +1397,22 @@ EngineSnapshot Engine::snapshot() const noexcept
             take.queue_depth_frames,
             take.queue_capacity_frames,
         };
+    }
+    return result;
+}
+
+EngineColdSnapshot Engine::coldSnapshot() const
+{
+    EngineColdSnapshot result;
+    if (impl_ == nullptr) {
+        return result;
+    }
+    std::lock_guard<std::mutex> lock(impl_->lifecycle_mutex);
+    result.stream = impl_->stream_info;
+    if (impl_->recorder != nullptr) {
+        const auto recording = impl_->recorder->stats();
+        result.recording_folder = recording.folder;
+        result.recording_sample_rate = recording.sample_rate;
     }
     return result;
 }
@@ -1456,8 +1480,17 @@ CapturedAudioBlock Engine::popNetworkCapture(
     if (!networkCaptureReady(attachment) || impl_->capture_ring == nullptr || output.empty()) {
         return {};
     }
+    // Network packets are fixed-size blocks.  Consuming a partial device
+    // callback here loses those frames permanently when the device buffer is
+    // smaller than the packet size (for example 32-frame ASIO callbacks and
+    // 64-frame packets).  There is one capture consumer and the producer can
+    // only increase the readable depth, so this availability check is stable
+    // until the following pop.
+    if (impl_->capture_ring->available_read() < output.size()) {
+        return {};
+    }
     const std::size_t frames = impl_->capture_ring->pop(output);
-    if (frames == 0) {
+    if (frames != output.size()) {
         return {};
     }
     const std::uint64_t offset = impl_->capture_frames_popped.fetch_add(frames, std::memory_order_relaxed);
@@ -1497,23 +1530,6 @@ void Engine::setNetworkPlaybackRatio(double ratio) noexcept
     }
     const int ratio_ppm = clamp_ratio(static_cast<int>(std::llround(ratio * 1000000.0)));
     impl_->control->playback_ratio_ppm.store(ratio_ppm, std::memory_order_relaxed);
-}
-
-EngineCompatibilityView Engine::compatibilityView() noexcept
-{
-    if (impl_ == nullptr) {
-        return {};
-    }
-    impl_->compatibility_completion_consumer.store(true, std::memory_order_relaxed);
-    return {
-        impl_->control.get(),
-        impl_->recorder.get(),
-        impl_->track_take_recorder.get(),
-        impl_->prepared_source.get(),
-        impl_->capture_ring.get(),
-        impl_->playback_ring.get(),
-        impl_->stream.get(),
-    };
 }
 
 const EngineConfig* Engine::config() const noexcept

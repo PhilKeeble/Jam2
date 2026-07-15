@@ -1,5 +1,8 @@
 #include "MainWindow.hpp"
 #include "SessionController.hpp"
+#include "ApplicationRuntime.hpp"
+#include "ControlProtocol.hpp"
+#include "ControllerLifecycleValidation.hpp"
 #include "cli_entry.hpp"
 
 #include <QApplication>
@@ -91,7 +94,7 @@ The file must use schema `jam2-debug-scenario-v1` and contain only:
   schema       Required schema name
   run_id       Required non-secret run identity (1..128 UTF-8 bytes)
   operation    local, lifecycle.local-network-local, validate.boundaries,
-               network.create, or network.join
+               validate.controller-lifecycle, network.create, or network.join
   arguments    Array of at most 128 non-secret CLI argument strings
 
 Limits:
@@ -231,10 +234,15 @@ int runDebugCommand(int argc, char* argv[])
             {QStringLiteral("max_scenario_bytes"), 256 * 1024},
             {QStringLiteral("max_arguments"), 128},
             {QStringLiteral("max_argument_bytes"), 4096},
+            {QStringLiteral("max_pending_unauthenticated_peers"), jam2::control_protocol::kMaxPendingPeers},
+            {QStringLiteral("authentication_failure_window_ms"), jam2::control_protocol::kAuthenticationFailureWindowMs},
+            {QStringLiteral("max_authentication_failures_per_window"), jam2::control_protocol::kMaxAuthenticationFailuresPerWindow},
+            {QStringLiteral("membership_entries_per_page"), 64},
             {QStringLiteral("operations"), QJsonArray{
                 QStringLiteral("local"),
                 QStringLiteral("lifecycle.local-network-local"),
                 QStringLiteral("validate.boundaries"),
+                QStringLiteral("validate.controller-lifecycle"),
                 QStringLiteral("network.create"),
                 QStringLiteral("network.join")}},
             {QStringLiteral("secret_environment"), QJsonArray{
@@ -289,9 +297,11 @@ int runDebugCommand(int argc, char* argv[])
     storage.push_back(argv[0]);
     const bool lifecycleSmoke = operation == QStringLiteral("lifecycle.local-network-local");
     const bool boundaryValidation = operation == QStringLiteral("validate.boundaries");
+    const bool controllerLifecycleValidation =
+        operation == QStringLiteral("validate.controller-lifecycle");
     if (operation == QStringLiteral("local") || lifecycleSmoke) {
         storage.emplace_back("local");
-    } else if (boundaryValidation) {
+    } else if (boundaryValidation || controllerLifecycleValidation) {
     } else if (operation == QStringLiteral("network.create")) {
         storage.insert(storage.end(), {"network", "create"});
     } else if (operation == QStringLiteral("network.join")) {
@@ -335,45 +345,71 @@ int runDebugCommand(int argc, char* argv[])
         return result.value(QStringLiteral("ok")).toBool(false) ? 0 : 3;
     }
 
+    if (controllerLifecycleValidation) {
+        int appArgc = argc;
+        QCoreApplication controllerApp(appArgc, argv);
+        const QJsonObject result = jam2RunControllerLifecycleValidation();
+        std::cout << QJsonDocument(result).toJson(QJsonDocument::Compact).constData() << '\n';
+        return result.value(QStringLiteral("ok")).toBool(false) ? 0 : 3;
+    }
+
     if (lifecycleSmoke) {
-        Jam2CliHost host;
-        jam2_cli_set_host(&host);
-        const auto invoke = [&](std::vector<std::string> phase) {
-            phase.insert(phase.end(), scenarioArguments.begin(), scenarioArguments.end());
-            phase.insert(phase.end(), {"--stream-ms", "750"});
-            std::vector<char*> phaseArgv;
-            phaseArgv.reserve(phase.size());
-            for (std::string& value : phase) phaseArgv.push_back(value.data());
-            return jam2_cli_main(static_cast<int>(phaseArgv.size()), phaseArgv.data());
+        int appArgc = argc;
+        QCoreApplication lifecycleApp(appArgc, argv);
+        std::vector<std::string> optionStorage{argv[0]};
+        optionStorage.insert(optionStorage.end(), scenarioArguments.begin(), scenarioArguments.end());
+        std::vector<char*> optionArgv;
+        optionArgv.reserve(optionStorage.size());
+        for (std::string& value : optionStorage) optionArgv.push_back(value.data());
+        Jam2RuntimeOptions localOptions = jam2_parse_runtime_options(
+            static_cast<int>(optionArgv.size()), optionArgv.data(), 1);
+        ApplicationRuntime runtime;
+        const bool localBefore = runtime.startLocal(localOptions);
+        const auto pumpFor = [](int milliseconds) {
+            const auto deadline = std::chrono::steady_clock::now() +
+                std::chrono::milliseconds(milliseconds);
+            while (std::chrono::steady_clock::now() < deadline) {
+                QCoreApplication::processEvents();
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
         };
-        const std::string executable = argv[0];
-        const int localBefore = invoke({executable, "local"});
-        const std::uint64_t frameBefore = jam2_cli_embedded_engine_stats().engine_frame;
-        const int network = invoke({
-            executable, "network", "_run",
-            "--bind", "127.0.0.1:0", "--session-id", "1",
-            "--session-key", "00000000000000000000000000000001",
-            "--no-stun",
-            "--bootstrap-role", "creator",
-            "--peers", ""});
-        const std::uint64_t frameNetwork = jam2_cli_embedded_engine_stats().engine_frame;
-        const int localAfter = invoke({executable, "local"});
-        const Jam2EmbeddedEngineStats stats = jam2_cli_embedded_engine_stats();
-        jam2_cli_set_host(nullptr);
-        jam2_cli_shutdown_embedded_engine();
-        const bool ok = localBefore == 0 && network == 0 && localAfter == 0 &&
-            stats.starts == 1 && stats.restarts == 0 && stats.reuses == 2 &&
-            frameBefore > 0 && frameNetwork > frameBefore && stats.engine_frame > frameNetwork;
+        pumpFor(750);
+        const std::uint64_t frameBefore = runtime.engineSnapshot().engine_frame;
+        Jam2RuntimeOptions networkOptions = localOptions;
+        networkOptions.bind = jam2::parse_bind_endpoint("127.0.0.1:0");
+        networkOptions.session_id = 1;
+        networkOptions.session_key = std::array<std::uint8_t, 16>{
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+        networkOptions.no_stun = true;
+        networkOptions.bootstrap_role = jam2::SessionBootstrapRole::Creator;
+        networkOptions.local_peer_id = 1;
+        networkOptions.bootstrap_coordinator_peer_id = 1;
+        networkOptions.mesh_peers_configured = true;
+        networkOptions.stream_ms = 750;
+        networkOptions.arm_stream_on_first_peer = false;
+        const bool networkStarted = runtime.startNetwork(networkOptions);
+        while (runtime.isNetworkRunning()) pumpFor(10);
+        const std::uint64_t frameNetwork = runtime.engineSnapshot().engine_frame;
+        const bool localAfter = runtime.startLocal(localOptions);
+        pumpFor(750);
+        const std::uint64_t finalFrame = runtime.engineSnapshot().engine_frame;
+        const std::uint64_t starts = runtime.engineStarts();
+        const std::uint64_t restarts = runtime.engineRestarts();
+        const std::uint64_t reuses = runtime.engineReuses();
+        runtime.shutdown();
+        const bool ok = localBefore && networkStarted && localAfter &&
+            starts == 1 && restarts == 0 && reuses == 2 &&
+            frameBefore > 0 && frameNetwork > frameBefore && finalFrame > frameNetwork;
         const QJsonObject result{
             {QStringLiteral("event"), QStringLiteral("debug_lifecycle_result")},
             {QStringLiteral("schema"), 1},
             {QStringLiteral("ok"), ok},
-            {QStringLiteral("engine_starts"), static_cast<qint64>(stats.starts)},
-            {QStringLiteral("engine_restarts"), static_cast<qint64>(stats.restarts)},
-            {QStringLiteral("engine_reuses"), static_cast<qint64>(stats.reuses)},
+            {QStringLiteral("engine_starts"), static_cast<qint64>(starts)},
+            {QStringLiteral("engine_restarts"), static_cast<qint64>(restarts)},
+            {QStringLiteral("engine_reuses"), static_cast<qint64>(reuses)},
             {QStringLiteral("frame_before_network"), static_cast<qint64>(frameBefore)},
             {QStringLiteral("frame_after_network"), static_cast<qint64>(frameNetwork)},
-            {QStringLiteral("frame_after_return_local"), static_cast<qint64>(stats.engine_frame)},
+            {QStringLiteral("frame_after_return_local"), static_cast<qint64>(finalFrame)},
         };
         std::cout << QJsonDocument(result).toJson(QJsonDocument::Compact).constData() << '\n';
         return ok ? 0 : 3;

@@ -47,6 +47,19 @@ struct OutputRecorderStats {
     std::string last_error;
 };
 
+struct OutputRecorderSnapshot {
+    bool active = false;
+    std::size_t queue_capacity_frames = 0;
+    std::uint64_t start_audio_frame = 0;
+    std::uint64_t stop_audio_frame = 0;
+    std::uint64_t frames_queued = 0;
+    std::uint64_t frames_written = 0;
+    std::uint64_t dropped_frames = 0;
+    std::uint64_t drop_events = 0;
+    std::uint64_t writer_errors = 0;
+    std::size_t queue_depth_frames = 0;
+};
+
 class OutputRecorder {
 public:
     explicit OutputRecorder(std::size_t queue_capacity_frames = 262144);
@@ -58,6 +71,7 @@ public:
     bool start(const std::filesystem::path& folder, int sample_rate, std::string& error);
     bool stop(std::string& error);
     void record(const RecordBlock& block) noexcept;
+    OutputRecorderSnapshot snapshot() const noexcept;
     OutputRecorderStats stats() const;
 
     static constexpr std::array<const char*, static_cast<std::size_t>(RecordStem::Count)> stem_file_names{

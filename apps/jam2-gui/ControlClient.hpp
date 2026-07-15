@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ControlProtocol.hpp"
+
 #include <QJsonObject>
 #include <QTcpSocket>
 #include <QTimer>
@@ -37,7 +39,7 @@ public:
     Stats stats() const { return stats_; }
 
     std::function<void(const QJsonObject&)> onMessage;
-    std::function<void(const QString&)> onState;
+    std::function<void(const jam2::control_protocol::TransportEvent&)> onEvent;
 
 private:
     enum class HandshakeState {
@@ -49,7 +51,12 @@ private:
     void readSocket();
     void handleHandshake(const QJsonObject& message);
     bool writeFrame(const QByteArray& frame);
-    void reject(const QString& reason, bool abort = false);
+    void reject(
+        const QString& reason,
+        jam2::control_protocol::TransportFailure failure,
+        bool abort = false,
+        bool retryable = false);
+    void publishEvent(jam2::control_protocol::TransportEvent event);
 
     QTcpSocket socket_;
     QTimer authenticationTimer_;
@@ -68,5 +75,7 @@ private:
     quint64 receiveSequence_ = 1;
     quint64 sendSequence_ = 1;
     bool readScheduled_ = false;
+    bool manualClose_ = true;
+    bool failureReportedForAttempt_ = false;
     Stats stats_;
 };

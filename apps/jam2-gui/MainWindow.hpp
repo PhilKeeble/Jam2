@@ -1,14 +1,13 @@
 #pragma once
 
+#include "ApplicationRuntime.hpp"
 #include "BeatGridWidget.hpp"
-#include "ControlClient.hpp"
-#include "ControlServer.hpp"
 #include "GuiLoopbackRecorder.hpp"
-#include "Jam2Process.hpp"
 #include "LooperProject.hpp"
 #include "PlaybackGrid.hpp"
 #include "PreparedMixRenderer.hpp"
 #include "SharedTrackController.hpp"
+#include "SharedSessionController.hpp"
 
 #include "metronome.hpp"
 
@@ -38,6 +37,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
 class QFile;
@@ -71,7 +71,7 @@ private:
     QWidget* buildMetronomePage();
     QWidget* buildMixPage();
 
-    void startJam();
+    void startJam(bool createSession);
     void showLocalPerformSetup();
     void startLocalPerform();
     void showStartJamDialog();
@@ -79,34 +79,40 @@ private:
     void stopJam(bool returnToLocal = true);
     void refreshDevices();
     void appendLog(const QString& line);
-    void handleOutputLine(const QString& line);
-    void handleStatsLine(const QString& line);
     void updateStatsDisplay(const QJsonObject& stats);
     void updateMixMeters(const QJsonObject& stats);
     void handleControlMessage(const QJsonObject& message, const QString& sourcePeerToken = QString());
     void sendControl(const QJsonObject& message);
-    void handleControlState(const QString& state, bool serverSide);
+    void handleControlEvent(
+        const jam2::control_protocol::TransportEvent& event,
+        bool serverSide);
+    void applySessionSnapshot(const SharedSessionController::Snapshot& snapshot);
     void refreshControlConnection();
-    void scheduleControlReconnect();
-    void sendLeaderSettings();
-    QJsonObject leaderSettingsMessage() const;
-    void applyLeaderSettings(const QJsonObject& settings);
     void handleMeshPeerAuthenticated(const QString& token, const QJsonObject& message);
-    void broadcastMeshPeerList();
-    void applyMeshPeerList(const QJsonObject& message);
-    void restartMeshEngineFromPeerList();
     QStringList meshPeerEndpointsExcludingSelf() const;
-    QStringList meshPeerSpecsExcludingSelf() const;
     quint64 meshPeerIdForToken(const QString& token) const;
     QString meshBindEndpoint() const;
-    QString localMeshEndpoint() const;
+    QString localMeshEndpoint(bool createSession) const;
     QString meshPeerToken();
     bool selectedDeviceSupportsSampleRate(int sampleRate);
-    void launchJamProcess(QStringList args);
-    void launchLocalPerformProcess(QStringList args);
-    void launchPendingJoin();
-    void sendJamCommand(const QString& line);
-    void handleGuiControlFrame(quint16 type, const QByteArray& payload);
+    void prepareNetworkRuntimePresentation(bool createSession);
+    void launchLocalRuntime(Jam2RuntimeOptions options);
+    bool submitEngineCommand(jam2::EngineCommand command, const QString& context);
+    void submitEngineGain(jam2::EngineCommandType type, double gain, const QString& context);
+    void submitEngineToggle(jam2::EngineCommandType type, bool enabled, const QString& context);
+    void submitEngineFrame(jam2::EngineCommandType type, std::uint64_t frame, const QString& context);
+    void submitEngineText(jam2::EngineCommandType type, const QString& text, const QString& context);
+    void seekPreparedTrack(std::uint64_t sourceFrame, std::uint64_t targetFrame);
+    void setPreparedTrackLoop(bool enabled, std::uint64_t startFrame = 0, std::uint64_t endFrame = 0);
+    std::uint64_t quantizedEngineTarget(int countInBars) const;
+    void restartPreparedTrackQuantized();
+    void armTrackTake(const QString& id, const QString& output);
+    void startTrackTake(std::uint64_t targetFrame);
+    void startTrackTakeQuantized(int countInBars);
+    void stopTrackTake(std::uint64_t targetFrame);
+    void handleEngineSnapshot(const jam2::EngineSnapshot& snapshot);
+    void handleEngineEvent(const jam2::EngineEvent& event);
+    void handleNetworkSnapshot(const jam2::NetworkSessionSnapshot& snapshot);
     void updateRuntimeControls();
     void updateMixControls();
     void setMixRemotePeerVisible(bool visible);
@@ -185,6 +191,8 @@ private:
     void receiveLooperAssetChunk(const QJsonObject& message, const QString& sourcePeerToken);
     void receiveLooperAssetDone(const QJsonObject& message, const QString& sourcePeerToken);
     void handleSongSet(const QJsonObject& message);
+    void handleTrackReady(const QJsonObject& message, const QString& sourcePeerToken);
+    void maybeScheduleSharedTrackRestart();
     void applyPendingSongIfAssetsReady();
     QJsonObject normalizeLooperAssetPaths(QJsonObject song) const;
     QString looperAssetPathForHash(const QString& hash) const;
@@ -204,19 +212,23 @@ private:
     void updatePlaybackGrid();
     void updateRecordingCountdown(const PlaybackGrid::Position& position);
     void updateRecordingLatencyDisplay();
-    void runGridLockedEngineAction(const QString& actionName, const std::function<void(std::uint64_t)>& action);
-    void sendSongSnapshot();
+    void runGridLockedEngineAction(
+        const QString& actionName,
+        const std::function<void(std::uint64_t)>& action,
+        bool quantizeToBar = false);
+    void sendSongSnapshot(std::optional<bool> trackPlayingOverride = std::nullopt);
 
-    QStringList commonJamArgs(bool includeExtraArgs = true) const;
+    Jam2RuntimeOptions runtimeOptions() const;
+    Jam2RuntimeOptions networkRuntimeOptions(
+        const SharedSessionController::Snapshot& snapshot) const;
     void applyTuningProfileName(const QString& name);
     QString sessionHex() const;
     QString keyHex() const;
     void generateSession();
 
-    Jam2Process jam2_;
+    ApplicationRuntime jam2_;
     GuiLoopbackRecorder loopbackRecorder_;
-    ControlServer controlServer_;
-    ControlClient controlClient_;
+    SharedSessionController sessionController_;
     SharedTrackController trackController_;
     LooperProject looperProject_;
     PlaybackGrid playbackGrid_;
@@ -275,13 +287,13 @@ private:
     QSpinBox* adaptiveMinSpin_ = nullptr;
     QSpinBox* adaptiveMaxSpin_ = nullptr;
     QSpinBox* adaptiveReleaseSpin_ = nullptr;
-    QLineEdit* extraArgsEdit_ = nullptr;
     QPushButton* startButton_ = nullptr;
     QPushButton* joinButton_ = nullptr;
     QPushButton* stopButton_ = nullptr;
     QPushButton* refreshControlButton_ = nullptr;
     QLabel* connectionLabel_ = nullptr;
     QLabel* engineModeLabel_ = nullptr;
+    QLabel* sessionTopologyLabel_ = nullptr;
     QLabel* jitterLabel_ = nullptr;
     QLabel* lossLabel_ = nullptr;
     QLabel* depthLabel_ = nullptr;
@@ -418,7 +430,11 @@ private:
     bool preparedMixWorkerRunning_ = false;
     bool preparedMixRerunPending_ = false;
     bool playPreparedMixWhenReady_ = false;
-    bool restartPreparedMixWhenReady_ = false;
+    int pendingPreparedTrackReadyRevision_ = 0;
+    quint64 pendingSharedTrackRevision_ = 0;
+    bool pendingSharedTrackHostReady_ = true;
+    QSet<QString> pendingSharedTrackReadyTokens_;
+    bool publishStoppedTrackStateWhenApplied_ = false;
     std::uint64_t preparedMixRequests_ = 0;
     std::uint64_t preparedMixCoalesced_ = 0;
     std::uint64_t preparedMixFailures_ = 0;
@@ -482,44 +498,26 @@ private:
     int lastAppliedHostArrangementRevision_ = 0;
     QTimer trackTimelineTimer_;
     QTimer playbackGridTimer_;
-    QTimer controlReconnectTimer_;
     quint64 recordingScheduleRevision_ = 0;
     quint64 recordingCountdownStartFrame_ = 0;
     quint64 recordingStartFrame_ = 0;
+    int pendingCountInBars_ = 0;
     bool stopMetronomeAtRecordingStart_ = false;
     quint32 recordingInputLatencyFrames_ = 0;
     quint32 recordingOutputLatencyFrames_ = 0;
     quint64 recordingAppliedLatencyFrames_ = 0;
     int recordingLatencySampleRate_ = 48000;
-    QString controlHost_;
-    quint16 controlPort_ = 0;
-    QString controlSessionHex_;
-    QString controlKeyHex_;
-    bool controlServerMode_ = false;
-    bool controlReconnectEnabled_ = false;
-    int controlReconnectAttempts_ = 0;
-    QStringList pendingJoinBaseArgs_;
-    bool pendingJoinLaunch_ = false;
-    bool pendingJoinSettingsReady_ = false;
-    bool pendingJoinMembershipReady_ = false;
-    bool meshActive_ = false;
-    bool localEngineActive_ = false;
-    bool sessionCreator_ = true;
-    bool replacingLocalEngine_ = false;
-    bool returnToLocalAfterStop_ = false;
     bool shuttingDown_ = false;
-    bool remotePeerConnected_ = false;
-    bool meshRestarting_ = false;
     bool pendingMeshInvitePopup_ = false;
     QString activePublicEndpoint_;
     QString meshPeerToken_;
-    QString meshCoordinatorToken_;
+    QString lastLoggedSessionSummary_;
     QSet<QString> localMeshPeerTokens_;
     QMap<QString, QString> meshPeerEndpoints_;
-    QStringList currentMeshPeers_;
     bool localMetronomeRunning_ = false;
     bool localMetronomeLeader_ = false;
     bool applyingRemoteMetronomeSettings_ = false;
+    std::uint64_t engineCommandCookie_ = 0;
     QVector<bool> metronomeEnabledSteps_;
     QVector<bool> metronomeAccents_;
 };

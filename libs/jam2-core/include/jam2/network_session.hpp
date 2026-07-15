@@ -56,6 +56,22 @@ struct NetworkPeerDescriptor {
     PeerEndpointState endpoint_state = PeerEndpointState::Active;
 };
 
+struct NetworkPeerSnapshot {
+    NetworkPeerDescriptor descriptor;
+    PeerStreamStats stream;
+    PeerMixerPeerStats mix;
+    bool has_mix_stats = false;
+};
+
+struct NetworkSessionSnapshot {
+    NetworkSessionContract contract;
+    SessionBootstrapRole bootstrap_role = SessionBootstrapRole::Joiner;
+    SessionBootstrapState bootstrap_state = SessionBootstrapState::Configured;
+    PeerId local_peer_id;
+    PeerMixerStats mix;
+    std::vector<NetworkPeerSnapshot> peers;
+};
+
 class NetworkPacketSchedule {
 public:
     NetworkPacketSchedule(
@@ -141,6 +157,9 @@ public:
     PeerId localPeerId() const noexcept;
     std::size_t peerCount() const noexcept;
     std::size_t activePeerCount() const noexcept;
+    // Non-real-time diagnostic view. Storage grows only when the caller asks
+    // for a snapshot; each peer's stream and mixer queues remain bounded.
+    NetworkSessionSnapshot snapshot() const;
     const NetworkPeerDescriptor& remotePeer() const;
     const NetworkPeerDescriptor* peer(PeerId peer_id) const noexcept;
     PeerId peerIdForEndpoint(const Endpoint& endpoint) const noexcept;

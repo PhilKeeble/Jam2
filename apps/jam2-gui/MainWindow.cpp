@@ -6,8 +6,10 @@
 
 #include "common.hpp"
 #include "audio_device.hpp"
-#include "gui_control_protocol.hpp"
+#include "engine.hpp"
+#include "peer_stream.hpp"
 #include "pcm16_wav.hpp"
+#include "session_authority.hpp"
 #include "tuning_profile.hpp"
 
 #include <QAbstractSlider>
@@ -72,6 +74,8 @@
 #include <QUuid>
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -82,6 +86,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <functional>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -114,12 +119,6 @@ bool isLocalMachineAddress(const QString& host)
     return std::any_of(localAddresses.cbegin(), localAddresses.cend(), [&address](const QHostAddress& local) {
         return local == address;
     });
-}
-
-QString endpointWithHost(const QString& endpoint, const QString& host)
-{
-    const jam2::Endpoint parsed = jam2::parse_endpoint(endpoint.toStdString());
-    return QString::fromStdString(jam2::endpoint_to_string({host.toStdString(), parsed.port}));
 }
 
 std::filesystem::path nativeFilePath(const QString& path)
@@ -274,33 +273,13 @@ bool validateControlMessageShape(const QJsonObject& message, QString& reason)
         reason = QStringLiteral("message revision is invalid");
         return false;
     }
-    if (type == QStringLiteral("session.settings")) {
-        const QJsonValue settingsValue = message.value(QStringLiteral("settings"));
-        if (!settingsValue.isObject()) {
-            reason = QStringLiteral("session settings shape is invalid");
-            return false;
-        }
-        const QJsonObject settings = settingsValue.toObject();
-        if (settings.size() > 40) {
-            reason = QStringLiteral("session settings shape is invalid");
-            return false;
-        }
-        for (auto it = settings.constBegin(); it != settings.constEnd(); ++it) {
-            if (it.key().size() > 64 ||
-                !(it.value().isBool() ||
-                  (it.value().isString() && it.value().toString().size() <= 64) ||
-                  (it.value().isDouble() && std::isfinite(it.value().toDouble()) &&
-                   std::abs(it.value().toDouble()) <= 1.0e9))) {
-                reason = QStringLiteral("session setting value is invalid");
-                return false;
-            }
-        }
-        return true;
-    }
     if (type == QStringLiteral("session.membership")) {
         const QJsonValue peersValue = message.value(QStringLiteral("peers"));
-        if (!peersValue.isArray() || peersValue.toArray().size() > 4096) {
-            reason = QStringLiteral("network membership list is invalid or exceeds its safety bound");
+        const int pageIndex = message.value(QStringLiteral("page_index")).toInt(-1);
+        const int pageCount = message.value(QStringLiteral("page_count")).toInt(-1);
+        if (!peersValue.isArray() || peersValue.toArray().size() > 64 ||
+            pageIndex < 0 || pageCount <= 0 || pageIndex >= pageCount) {
+            reason = QStringLiteral("network membership page is invalid");
             return false;
         }
         static const QRegularExpression tokenExpression(QStringLiteral("^[0-9a-f]{32}$"));
@@ -389,6 +368,13 @@ bool validateControlMessageShape(const QJsonObject& message, QString& reason)
             return false;
         }
         return validateRemoteSongAssets(songValue.toObject(), reason);
+    }
+    if (type == QStringLiteral("track.ready")) {
+        return isBoundedInteger(
+            message.value(QStringLiteral("arrangement_revision")),
+            1,
+            std::numeric_limits<int>::max())
+            ? true : (reason = QStringLiteral("track readiness revision is invalid"), false);
     }
     if (type == QStringLiteral("looper.recording.offer")) {
         static const QRegularExpression recordingIdExpression(
@@ -539,272 +525,61 @@ QString frameText(qint64 frame)
     return frame >= 0 ? QString::number(frame) : QStringLiteral("-");
 }
 
-void appendGuiU16(QByteArray& out, quint16 value)
-{
-    out.append(char(value & 0xffU));
-    out.append(char((value >> 8) & 0xffU));
-}
-
-void appendGuiU32(QByteArray& out, quint32 value)
-{
-    for (int shift = 0; shift < 32; shift += 8) {
-        out.append(char((value >> shift) & 0xffU));
-    }
-}
-
-void appendGuiU64(QByteArray& out, quint64 value)
-{
-    for (int shift = 0; shift < 64; shift += 8) {
-        out.append(char((value >> shift) & 0xffU));
-    }
-}
-
-void appendGuiI64(QByteArray& out, qint64 value)
-{
-    appendGuiU64(out, static_cast<quint64>(value));
-}
-
-void appendGuiF64(QByteArray& out, double value)
-{
-    quint64 bits = 0;
-    static_assert(sizeof(bits) == sizeof(value));
-    std::memcpy(&bits, &value, sizeof(bits));
-    appendGuiU64(out, bits);
-}
-
-quint16 guiU16(const QByteArray& data, qsizetype offset)
-{
-    return quint16(uchar(data[offset])) | quint16(uchar(data[offset + 1]) << 8);
-}
-
-quint32 guiU32(const QByteArray& data, qsizetype offset)
-{
-    quint32 value = 0;
-    for (int shift = 0; shift < 32; shift += 8) {
-        value |= quint32(uchar(data[offset + shift / 8])) << shift;
-    }
-    return value;
-}
-
-quint64 guiU64(const QByteArray& data, qsizetype offset)
-{
-    quint64 value = 0;
-    for (int shift = 0; shift < 64; shift += 8) {
-        value |= quint64(uchar(data[offset + shift / 8])) << shift;
-    }
-    return value;
-}
-
-qint64 guiI64(const QByteArray& data, qsizetype offset)
-{
-    return static_cast<qint64>(guiU64(data, offset));
-}
-
-double guiF64(const QByteArray& data, qsizetype offset)
-{
-    const quint64 bits = guiU64(data, offset);
-    double value = 0.0;
-    std::memcpy(&value, &bits, sizeof(value));
-    return value;
-}
-
-struct GuiBinaryCommand {
-    jam2::gui_control::CommandOpcode opcode = jam2::gui_control::CommandOpcode::None;
-    quint16 flags = 0;
-    std::array<qint64, 8> i{};
-    std::array<double, 4> d{};
-    QByteArray text;
-};
-
-QByteArray encodeGuiCommandPayload(const GuiBinaryCommand& command)
-{
-    QByteArray payload;
-    appendGuiU16(payload, static_cast<quint16>(command.opcode));
-    appendGuiU16(payload, command.flags);
-    appendGuiU32(payload, static_cast<quint32>(command.text.size()));
-    for (const qint64 value : command.i) {
-        appendGuiI64(payload, value);
-    }
-    for (const double value : command.d) {
-        appendGuiF64(payload, value);
-    }
-    payload.append(command.text);
-    return payload;
-}
-
-bool parseDoubleToken(const QString& value, double& out)
-{
-    bool ok = false;
-    out = value.toDouble(&ok);
-    return ok;
-}
-
-bool parseI64Token(const QString& value, qint64& out)
-{
-    bool ok = false;
-    out = value.toLongLong(&ok, 0);
-    return ok;
-}
-
-bool parseU64Token(const QString& value, qint64& out)
-{
-    bool ok = false;
-    out = static_cast<qint64>(value.toULongLong(&ok, 0));
-    return ok;
-}
-
-bool encodeJamTextCommand(const QString& line, GuiBinaryCommand& command)
-{
-    const QString trimmed = line.trimmed();
-    const QStringList parts = trimmed.split(QLatin1Char(' '), Qt::SkipEmptyParts);
-    if (parts.isEmpty()) {
-        return false;
-    }
-    if (parts[0] == QStringLiteral("metro") && parts.size() >= 2) {
-        if (parts[1] == QStringLiteral("on") || parts[1] == QStringLiteral("off")) {
-            command.opcode = jam2::gui_control::CommandOpcode::MetronomeEnabled;
-            command.flags = parts[1] == QStringLiteral("on") ? 1 : 0;
-            return true;
-        }
-        if (parts[1] == QStringLiteral("leader") && parts.size() >= 3) {
-            command.opcode = jam2::gui_control::CommandOpcode::MetronomeLeader;
-            command.flags = parts[2] == QStringLiteral("on") ? 1 : 0;
-            return true;
-        }
-        if (parts[1] == QStringLiteral("mode") && parts.size() >= 3) {
-            command.opcode = jam2::gui_control::CommandOpcode::MetronomeMode;
-            command.text = parts[2].toUtf8();
-            return true;
-        }
-        if (parts[1] == QStringLiteral("level") && parts.size() >= 3) {
-            command.opcode = jam2::gui_control::CommandOpcode::MetronomeLevel;
-            return parseDoubleToken(parts[2], command.d[0]);
-        }
-        if (parts[1] == QStringLiteral("pattern") && parts.size() >= 9) {
-            command.opcode = jam2::gui_control::CommandOpcode::MetronomePattern;
-            for (int i = 0; i < 3; ++i) {
-                if (!parseI64Token(parts[2 + i], command.i[static_cast<std::size_t>(i)])) return false;
-            }
-            for (int i = 0; i < 4; ++i) {
-                if (!parseU64Token(parts[5 + i], command.i[static_cast<std::size_t>(3 + i)])) return false;
-            }
-            return true;
-        }
-    }
-    if ((parts[0] == QStringLiteral("remote") || parts[0] == QStringLiteral("send")) &&
-        parts.size() >= 3 &&
-        parts[1] == QStringLiteral("level")) {
-        command.opcode = parts[0] == QStringLiteral("remote")
-            ? jam2::gui_control::CommandOpcode::RemoteLevel
-            : jam2::gui_control::CommandOpcode::SendLevel;
-        return parseDoubleToken(parts[2], command.d[0]);
-    }
-    if (parts[0] == QStringLiteral("monitor") && parts.size() >= 2) {
-        if (parts[1] == QStringLiteral("on") || parts[1] == QStringLiteral("off")) {
-            command.opcode = jam2::gui_control::CommandOpcode::MonitorEnabled;
-            command.flags = parts[1] == QStringLiteral("on") ? 1 : 0;
-            return true;
-        }
-        if (parts[1] == QStringLiteral("level") && parts.size() >= 3) {
-            command.opcode = jam2::gui_control::CommandOpcode::MonitorLevel;
-            return parseDoubleToken(parts[2], command.d[0]);
-        }
-    }
-    if (parts[0] == QStringLiteral("bpm") && parts.size() >= 2) {
-        command.opcode = jam2::gui_control::CommandOpcode::Bpm;
-        return parseI64Token(parts[1], command.i[0]);
-    }
-    if (trimmed.startsWith(QStringLiteral("record jam start "))) {
-        command.opcode = jam2::gui_control::CommandOpcode::RecordJamStart;
-        command.text = trimmed.mid(QStringLiteral("record jam start ").size()).toUtf8();
-        return !command.text.isEmpty();
-    }
-    if (trimmed == QStringLiteral("record jam stop")) {
-        command.opcode = jam2::gui_control::CommandOpcode::RecordJamStop;
-        return true;
-    }
-    if (parts[0] == QStringLiteral("record") &&
-        parts.size() >= 3 &&
-        parts[1] == QStringLiteral("latency_adjust")) {
-        command.opcode = jam2::gui_control::CommandOpcode::RecordingLatencyAdjustment;
-        return parseI64Token(parts[2], command.i[0]);
-    }
-    if (parts[0] == QStringLiteral("track") && parts.size() >= 2) {
-        if (trimmed.startsWith(QStringLiteral("track load "))) {
-            command.opcode = jam2::gui_control::CommandOpcode::TrackLoad;
-            command.text = trimmed.mid(QStringLiteral("track load ").size()).toUtf8();
-            return !command.text.isEmpty();
-        }
-        if (parts[1] == QStringLiteral("restart")) {
-            command.opcode = jam2::gui_control::CommandOpcode::TrackRestartQuantized;
-            return true;
-        }
-        if (parts[1] == QStringLiteral("play") && parts.size() >= 3) {
-            command.opcode = jam2::gui_control::CommandOpcode::TrackPlay;
-            return parseI64Token(parts[2], command.i[0]);
-        }
-        if (parts[1] == QStringLiteral("stop") && parts.size() >= 3) {
-            command.opcode = jam2::gui_control::CommandOpcode::TrackStop;
-            return parseI64Token(parts[2], command.i[0]);
-        }
-        if (parts[1] == QStringLiteral("seek") && parts.size() >= 4) {
-            command.opcode = jam2::gui_control::CommandOpcode::TrackSeek;
-            return parseI64Token(parts[2], command.i[0]) && parseI64Token(parts[3], command.i[1]);
-        }
-        if (parts[1] == QStringLiteral("level") && parts.size() >= 3) {
-            command.opcode = jam2::gui_control::CommandOpcode::TrackLevel;
-            return parseDoubleToken(parts[2], command.d[0]);
-        }
-        if (parts[1] == QStringLiteral("loop") && parts.size() >= 3) {
-            command.opcode = jam2::gui_control::CommandOpcode::TrackLoop;
-            command.flags = parts[2] == QStringLiteral("on") ? 1 : 0;
-            if (parts.size() >= 5) {
-                return parseI64Token(parts[3], command.i[0]) && parseI64Token(parts[4], command.i[1]);
-            }
-            return true;
-        }
-    }
-    if (trimmed.startsWith(QStringLiteral("track_take arm input "))) {
-        const QString rest = trimmed.mid(QStringLiteral("track_take arm input ").size());
-        const int split = rest.indexOf(QLatin1Char(' '));
-        if (split <= 0) return false;
-        command.opcode = jam2::gui_control::CommandOpcode::TrackTakeArmInput;
-        command.text = rest.left(split).toUtf8();
-        command.text.append('\n');
-        command.text.append(rest.mid(split + 1).toUtf8());
-        return true;
-    }
-    if (parts[0] == QStringLiteral("track_take") && parts.size() >= 3) {
-        if (parts[1] == QStringLiteral("start_quantized") && parts.size() >= 4) {
-            command.opcode = jam2::gui_control::CommandOpcode::TrackTakeStartQuantized;
-            command.text = parts[2].toUtf8();
-            return parseI64Token(parts[3], command.i[0]);
-        }
-        if (parts[1] == QStringLiteral("start") && parts.size() >= 4) {
-            command.opcode = jam2::gui_control::CommandOpcode::TrackTakeStart;
-            command.text = parts[2].toUtf8();
-            return parseI64Token(parts[3], command.i[0]);
-        }
-        if (parts[1] == QStringLiteral("stop") && parts.size() >= 4) {
-            command.opcode = jam2::gui_control::CommandOpcode::TrackTakeStop;
-            command.text = parts[2].toUtf8();
-            return parseI64Token(parts[3], command.i[0]);
-        }
-        if (parts[1] == QStringLiteral("cancel")) {
-            command.opcode = jam2::gui_control::CommandOpcode::TrackTakeCancel;
-            return true;
-        }
-    }
-    return false;
-}
-
 std::uint64_t rawFrameFromMusicalFrame(std::uint64_t musicalFrame, std::int64_t renderOffsetFrames)
 {
     if (renderOffsetFrames >= 0) {
         const std::uint64_t offset = static_cast<std::uint64_t>(renderOffsetFrames);
         return musicalFrame > offset ? musicalFrame - offset : 0ULL;
     }
-    return musicalFrame + static_cast<std::uint64_t>(-renderOffsetFrames);
+    const std::uint64_t offset = static_cast<std::uint64_t>(-(renderOffsetFrames + 1)) + 1ULL;
+    return musicalFrame > (std::numeric_limits<std::uint64_t>::max)() - offset
+        ? (std::numeric_limits<std::uint64_t>::max)()
+        : musicalFrame + offset;
+}
+
+std::uint64_t musicalFrameFromRawFrame(std::uint64_t rawFrame, std::int64_t renderOffsetFrames)
+{
+    if (renderOffsetFrames >= 0) {
+        const std::uint64_t offset = static_cast<std::uint64_t>(renderOffsetFrames);
+        return rawFrame > (std::numeric_limits<std::uint64_t>::max)() - offset
+            ? (std::numeric_limits<std::uint64_t>::max)()
+            : rawFrame + offset;
+    }
+    const std::uint64_t offset = static_cast<std::uint64_t>(-(renderOffsetFrames + 1)) + 1ULL;
+    return rawFrame > offset ? rawFrame - offset : 0ULL;
+}
+
+int recordingCountInBeat(
+    std::uint64_t currentFrame,
+    std::uint64_t recordingStartFrame,
+    std::uint64_t beatFrames)
+{
+    if (beatFrames == 0 || currentFrame >= recordingStartFrame) {
+        return 0;
+    }
+    const std::uint64_t remaining = recordingStartFrame - currentFrame;
+    const std::uint64_t beats = (remaining - 1ULL) / beatFrames + 1ULL;
+    return static_cast<int>(std::min<std::uint64_t>(
+        beats,
+        static_cast<std::uint64_t>((std::numeric_limits<int>::max)())));
+}
+
+std::uint64_t nextGridBoundaryBeat(
+    std::uint64_t absoluteBeat,
+    int beatsPerBar,
+    bool quantizeToBar)
+{
+    if (!quantizeToBar) {
+        return absoluteBeat == (std::numeric_limits<std::uint64_t>::max)()
+            ? absoluteBeat
+            : absoluteBeat + 1ULL;
+    }
+    const std::uint64_t barBeats = static_cast<std::uint64_t>(qMax(1, beatsPerBar));
+    const std::uint64_t bar = absoluteBeat / barBeats;
+    if (bar >= (std::numeric_limits<std::uint64_t>::max)() / barBeats) {
+        return (std::numeric_limits<std::uint64_t>::max)();
+    }
+    return (bar + 1ULL) * barBeats;
 }
 
 bool promptFrame(QWidget* parent, const QString& title, const QString& label, qint64 current, qint64& out)
@@ -872,10 +647,11 @@ public:
         update();
     }
 
-    void setGridPosition(std::uint64_t absoluteBeat, bool running)
+    void setGridPosition(qint64 positionMs, bool running, int beatsPerBar)
     {
-        gridAbsoluteBeat_ = absoluteBeat;
+        gridPositionMs_ = qMax<qint64>(0, positionMs);
         gridRunning_ = running;
+        beatsPerBar_ = qMax(1, beatsPerBar);
         update();
     }
 
@@ -912,7 +688,7 @@ protected:
             for (int beat = 0; beat <= beats + 1; ++beat) {
                 const qint64 beatPosition = static_cast<qint64>(std::llround(beat * beatMs));
                 const int x = xForMs(beatPosition);
-                const bool bar = beat % 4 == 0;
+                const bool bar = beat % beatsPerBar_ == 0;
                 painter.setPen(bar ? QColor(76, 86, 96) : QColor(42, 48, 54));
                 painter.drawLine(x, 0, x, height());
                 if (bar) {
@@ -920,10 +696,8 @@ protected:
                     painter.drawText(x + 4, 18, QString::number(beat + 1));
                 }
             }
-            const int totalBeats = qMax(1, static_cast<int>(std::ceil(static_cast<double>(durationMs_) / beatMs)));
             if (gridRunning_) {
-                const int currentBeat = static_cast<int>(gridAbsoluteBeat_ % static_cast<std::uint64_t>(totalBeats));
-                const qint64 beatPosition = static_cast<qint64>(std::llround(currentBeat * beatMs));
+                const qint64 beatPosition = durationMs_ > 0 ? gridPositionMs_ % durationMs_ : 0;
                 painter.setPen(Qt::NoPen);
                 painter.setBrush(QColor(102, 198, 166));
                 painter.drawEllipse(QPoint(xForMs(beatPosition), 7), 4, 4);
@@ -1027,7 +801,8 @@ private:
     qint64 loopStartMs_ = -1;
     qint64 loopEndMs_ = -1;
     double bpm_ = 120.0;
-    std::uint64_t gridAbsoluteBeat_ = 0;
+    qint64 gridPositionMs_ = 0;
+    int beatsPerBar_ = 4;
     bool gridRunning_ = false;
 };
 
@@ -1082,11 +857,12 @@ public:
         update();
     }
 
-    void setGridPosition(std::uint64_t absoluteBeat, bool running, double bpm)
+    void setGridPosition(qint64 positionMs, bool running, double bpm, int beatsPerBar)
     {
-        gridAbsoluteBeat_ = absoluteBeat;
+        gridPositionMs_ = qMax<qint64>(0, positionMs);
         gridRunning_ = running;
         bpm_ = qBound(1.0, bpm, 400.0);
+        beatsPerBar_ = qMax(1, beatsPerBar);
         update();
     }
 
@@ -1382,12 +1158,12 @@ private:
             for (int beat = 0; beat < 128; ++beat) {
                 const int x = xForFrame(static_cast<qint64>(std::llround(beat * beatFrames)));
                 if (x >= area.right()) break;
-                painter.setPen(beat % 4 == 0 ? QColor(90, 100, 110) : QColor(56, 62, 68));
+                painter.setPen(beat % beatsPerBar_ == 0 ? QColor(90, 100, 110) : QColor(56, 62, 68));
                 const int gridBottom = kToolbarHeight + visualLaneCount() * kLaneHeight - 1;
                 painter.drawLine(x, 0, x, gridBottom);
-                if (beat % 4 == 0) {
+                if (beat % beatsPerBar_ == 0) {
                     painter.setPen(QColor(168, 176, 184));
-                    painter.drawText(x + 4, 20, QString::number(beat / 4 + 1));
+                    painter.drawText(x + 4, 20, QString::number(beat / beatsPerBar_ + 1));
                 }
             }
         }
@@ -1416,9 +1192,10 @@ private:
             drawMarker(loopEndMs_, QColor(86, 210, 124), 2);
         }
         if (gridRunning_) {
-            const double beatFrames = static_cast<double>(rate) * 60.0 / qMax(1.0, bpm_);
-            const std::uint64_t totalBeats = qMax<std::uint64_t>(1ULL, static_cast<std::uint64_t>(std::ceil(static_cast<double>(viewFrames()) / beatFrames)));
-            const qint64 currentBeatFrame = static_cast<qint64>(std::llround(static_cast<double>(gridAbsoluteBeat_ % totalBeats) * beatFrames));
+            const qint64 frames = viewFrames();
+            const qint64 currentBeatFrame = frames > 0
+                ? (gridPositionMs_ * static_cast<qint64>(rate) / 1000) % frames
+                : 0;
             const int x = xForFrame(currentBeatFrame);
             painter.setPen(QPen(QColor(102, 198, 166, 150), 1));
             painter.drawLine(x, top, x, bottom);
@@ -1602,7 +1379,8 @@ private:
     int armedLane_ = -1;
     double bpm_ = 120.0;
     bool gridLockEnabled_ = true;
-    std::uint64_t gridAbsoluteBeat_ = 0;
+    qint64 gridPositionMs_ = 0;
+    int beatsPerBar_ = 4;
     bool gridRunning_ = false;
     qint64 playheadMs_ = -1;
     qint64 loopStartMs_ = -1;
@@ -2094,6 +1872,28 @@ double gainFromDb(double db)
     return std::pow(10.0, db / 20.0);
 }
 
+std::vector<int> parseUiChannels(const QString& text, const char* label)
+{
+    std::vector<int> result;
+    const QStringList parts = text.split(QLatin1Char(','), Qt::KeepEmptyParts);
+    if (parts.isEmpty()) {
+        throw std::runtime_error(std::string(label) + " requires at least one channel");
+    }
+    result.reserve(static_cast<std::size_t>(parts.size()));
+    for (const QString& part : parts) {
+        bool ok = false;
+        const int channel = part.trimmed().toInt(&ok);
+        if (!ok || channel <= 0) {
+            throw std::runtime_error(std::string(label) + " channels must be positive 1-based numbers");
+        }
+        if (std::find(result.begin(), result.end(), channel - 1) != result.end()) {
+            throw std::runtime_error(std::string(label) + " contains a duplicate channel");
+        }
+        result.push_back(channel - 1);
+    }
+    return result;
+}
+
 double dbFromGain(double gain)
 {
     if (gain <= 0.0) {
@@ -2217,6 +2017,35 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             QJsonObject{{QStringLiteral("type"), QStringLiteral("debug.set-remote-state")}},
             modelError),
         modelError);
+    QJsonArray membershipEntries;
+    for (int index = 0; index < 64; ++index) {
+        membershipEntries.append(QJsonObject{
+            {QStringLiteral("token"), QStringLiteral("%1").arg(index + 1, 32, 16, QLatin1Char('0'))},
+            {QStringLiteral("peer_id"), QString::number(index + 1)},
+            {QStringLiteral("endpoint"), QStringLiteral("127.0.0.1:%1").arg(49000 + index)},
+        });
+    }
+    const QJsonObject validMembershipPage{
+        {QStringLiteral("type"), QStringLiteral("session.membership")},
+        {QStringLiteral("revision"), 1},
+        {QStringLiteral("page_index"), 0},
+        {QStringLiteral("page_count"), 2},
+        {QStringLiteral("coordinator_token"), QString(32, QLatin1Char('1'))},
+        {QStringLiteral("peers"), membershipEntries},
+    };
+    modelError.clear();
+    record(QStringLiteral("membership.accept-bounded-page"),
+        validateControlMessageShape(validMembershipPage, modelError), modelError);
+    membershipEntries.append(QJsonObject{
+        {QStringLiteral("token"), QString(32, QLatin1Char('f'))},
+        {QStringLiteral("peer_id"), QStringLiteral("65")},
+        {QStringLiteral("endpoint"), QStringLiteral("127.0.0.1:49065")},
+    });
+    QJsonObject excessiveMembershipPage = validMembershipPage;
+    excessiveMembershipPage[QStringLiteral("peers")] = membershipEntries;
+    modelError.clear();
+    record(QStringLiteral("membership.reject-oversized-page"),
+        !validateControlMessageShape(excessiveMembershipPage, modelError), modelError);
     QJsonArray invalidBanks;
     for (int index = 0; index < 5; ++index) {
         invalidBanks.append(QJsonObject{{QStringLiteral("lanes"), QJsonArray{}}});
@@ -2230,6 +2059,171 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
     modelError.clear();
     record(QStringLiteral("asset-model.reject-excessive-banks"),
         !validateControlMessageShape(invalidSong, modelError), modelError);
+    const QJsonObject validTrackReady{
+        {QStringLiteral("type"), QStringLiteral("track.ready")},
+        {QStringLiteral("arrangement_revision"), 1},
+    };
+    modelError.clear();
+    record(QStringLiteral("track-ready.accept-positive-revision"),
+        validateControlMessageShape(validTrackReady, modelError), modelError);
+    QJsonObject invalidTrackReady = validTrackReady;
+    invalidTrackReady[QStringLiteral("arrangement_revision")] = 0;
+    modelError.clear();
+    record(QStringLiteral("track-ready.reject-zero-revision"),
+        !validateControlMessageShape(invalidTrackReady, modelError), modelError);
+
+    record(QStringLiteral("transport-clock.map-positive-render-offset"),
+        rawFrameFromMusicalFrame(
+            musicalFrameFromRawFrame(1000, 200),
+            200) == 1000);
+    record(QStringLiteral("transport-clock.map-negative-render-offset"),
+        rawFrameFromMusicalFrame(
+            musicalFrameFromRawFrame(1200, -200),
+            -200) == 1200);
+    record(QStringLiteral("record-count-in.wait-then-4-3-2-1"),
+        recordingCountInBeat(1000, 5000, 1000) == 4 &&
+        recordingCountInBeat(2000, 5000, 1000) == 3 &&
+        recordingCountInBeat(3000, 5000, 1000) == 2 &&
+        recordingCountInBeat(4000, 5000, 1000) == 1 &&
+        recordingCountInBeat(5000, 5000, 1000) == 0);
+    record(QStringLiteral("record-stop.quantizes-to-next-whole-bar"),
+        nextGridBoundaryBeat(0, 4, true) == 4 &&
+        nextGridBoundaryBeat(3, 4, true) == 4 &&
+        nextGridBoundaryBeat(4, 4, true) == 8 &&
+        nextGridBoundaryBeat(15, 4, true) == 16 &&
+        nextGridBoundaryBeat(8, 3, true) == 9 &&
+        nextGridBoundaryBeat(8, 3, false) == 9);
+    {
+        Jam2RuntimeHost requestIds;
+        const std::uint64_t gridBeforeReset = requestIds.nextGridRequestId();
+        const std::uint64_t transportBeforeReset = requestIds.nextTransportEventId();
+        requestIds.reset();
+        const std::uint64_t gridAfterReset = requestIds.nextGridRequestId();
+        const std::uint64_t transportAfterReset = requestIds.nextTransportEventId();
+        record(QStringLiteral("grid-request.monotonic-across-network-reset"),
+            gridBeforeReset != 0 && gridAfterReset > gridBeforeReset);
+        record(QStringLiteral("transport-event.monotonic-across-network-reset"),
+            transportBeforeReset != 0 && transportAfterReset > transportBeforeReset);
+    }
+
+    {
+        jam2::SessionAuthority authority(1, 1, 1);
+        jam2::GridProposal proposal;
+        proposal.requester_peer_id = 1;
+        proposal.request_id = 1;
+        proposal.run_state = jam2::GridRunState::Running;
+        const auto grid = authority.orderGridProposal(proposal);
+        record(QStringLiteral("transport-authority.create-grid"), grid.has_value());
+        const std::uint64_t gridRevision = grid ? grid->revision : 0;
+        record(QStringLiteral("transport-authority.accept-track-from-peer"),
+            authority.acceptTransportEvent(2, 1, gridRevision, false));
+        record(QStringLiteral("transport-authority.reject-peer-replay"),
+            !authority.acceptTransportEvent(2, 1, gridRevision, false));
+        record(QStringLiteral("transport-authority.accept-independent-peer-counter"),
+            authority.acceptTransportEvent(3, 1, gridRevision, false));
+        record(QStringLiteral("transport-authority.reject-peer-record"),
+            !authority.acceptTransportEvent(2, 2, gridRevision, true));
+        record(QStringLiteral("transport-authority.accept-authority-record"),
+            authority.acceptTransportEvent(1, 1, gridRevision, true));
+    }
+
+    {
+        jam2::PeerStreamConfig config;
+        config.sample_rate = 44100;
+        config.frames_per_packet = 64;
+        config.stats_warmup_us = 0;
+        std::array<std::int32_t, 64> samples{};
+        const std::vector<std::uint8_t> payload = jam2::protocol::pack_pcm24(samples);
+        jam2::protocol::Header header;
+        header.type = jam2::protocol::PacketType::Audio;
+        header.sequence = 1;
+        header.sample_time = 60ULL * 44100ULL;
+        header.payload_length = static_cast<std::uint16_t>(payload.size());
+        jam2::PeerStream stream(config, 1, nullptr);
+        record(QStringLiteral("peer-stream.accept-late-join-baseline"),
+            stream.receiveAudio(header, payload, 2) == jam2::PeerAudioResult::Accepted);
+        ++header.sequence;
+        header.sample_time += samples.size();
+        record(QStringLiteral("peer-stream.accept-contiguous-late-join-audio"),
+            stream.receiveAudio(header, payload, 3) == jam2::PeerAudioResult::Accepted);
+        ++header.sequence;
+        header.sample_time += 10ULL * 44100ULL + samples.size() + 1ULL;
+        record(QStringLiteral("peer-stream.reject-post-baseline-future-jump"),
+            stream.receiveAudio(header, payload, 4) == jam2::PeerAudioResult::FutureSampleTime);
+    }
+
+    {
+        bool initialReady = false;
+        bool initialFullBlock = false;
+        bool initialPartialBlock = false;
+        bool reattachReady = false;
+        bool reattachFullBlock = false;
+        bool reattachPartialBlock = false;
+        QString captureError;
+        jam2::Engine engine;
+        bool engineStarted = false;
+        try {
+            jam2::EngineConfig config;
+            config.backend = jam2::EngineAudioBackend::Headless;
+            config.sample_rate = 44100;
+            config.audio_buffer_frames = 32;
+            config.capture_ring_frames = 512;
+            config.playback_ring_frames = 512;
+            config.test_input = jam2::EngineTestInput::Tone440;
+            engine.start(config);
+            engineStarted = true;
+
+            const auto exerciseAttachment = [&](jam2::NetworkCaptureAttachment attachment,
+                                                bool& ready,
+                                                bool& fullBlock,
+                                                bool& partialBlock) {
+                const std::uint64_t readyDeadline = jam2::monotonic_us() + 1000000ULL;
+                while (!engine.networkCaptureReady(attachment) &&
+                       jam2::monotonic_us() < readyDeadline) {
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                }
+                ready = engine.networkCaptureReady(attachment);
+                if (!ready) {
+                    return;
+                }
+                std::array<std::int32_t, 64> packet{};
+                const std::uint64_t exerciseDeadline = jam2::monotonic_us() + 100000ULL;
+                while (jam2::monotonic_us() < exerciseDeadline) {
+                    const jam2::CapturedAudioBlock captured = engine.popNetworkCapture(attachment, packet);
+                    if (captured.frames == packet.size()) {
+                        fullBlock = true;
+                    } else if (captured.frames != 0) {
+                        partialBlock = true;
+                    }
+                    std::this_thread::sleep_for(std::chrono::microseconds(50));
+                }
+            };
+
+            jam2::NetworkCaptureAttachment attachment = engine.attachNetworkCapture();
+            exerciseAttachment(attachment, initialReady, initialFullBlock, initialPartialBlock);
+            engine.detachNetworkCapture(attachment);
+            const std::uint64_t detachDeadline = jam2::monotonic_us() + 1000000ULL;
+            while (engine.snapshot().network_capture_enabled &&
+                   jam2::monotonic_us() < detachDeadline) {
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+            attachment = engine.attachNetworkCapture();
+            exerciseAttachment(attachment, reattachReady, reattachFullBlock, reattachPartialBlock);
+            engine.detachNetworkCapture(attachment);
+        } catch (const std::exception& exception) {
+            captureError = QString::fromUtf8(exception.what());
+        }
+        if (engineStarted) {
+            engine.requestStop();
+            engine.join();
+        }
+        record(QStringLiteral("engine-capture.exact-64-from-32-initial"),
+            captureError.isEmpty() && initialReady && initialFullBlock && !initialPartialBlock,
+            captureError);
+        record(QStringLiteral("engine-capture.exact-64-from-32-reattach"),
+            captureError.isEmpty() && reattachReady && reattachFullBlock && !reattachPartialBlock,
+            captureError);
+    }
 
     if (fixtureSpecs.size() > 32) {
         record(QStringLiteral("wav.fixture-count-bound"), false, QStringLiteral("too many fixture specs"));
@@ -2275,90 +2269,101 @@ MainWindow::MainWindow(QWidget* parent)
     savedProjectSnapshot_ = currentProjectSnapshot();
     QApplication::instance()->installEventFilter(this);
 
-    jam2_.onOutputLine = [this](const QString& line) { handleOutputLine(line); };
-    jam2_.onErrorLine = [this](const QString& line) { appendLog(QStringLiteral("stderr: ") + line); };
-    jam2_.onControlFrame = [this](quint16 type, const QByteArray& payload) {
-        handleGuiControlFrame(type, payload);
+    jam2_.onLog = [this](const QString& line) { appendLog(line); };
+    jam2_.onError = [this](const QString& line) { appendLog(QStringLiteral("runtime error: ") + line); };
+    jam2_.onEngineSnapshot = [this](const jam2::EngineSnapshot& snapshot) {
+        handleEngineSnapshot(snapshot);
     };
-    jam2_.onFinished = [this](int code) {
-        const bool endedJam = !localEngineActive_;
-        appendLog(QStringLiteral("jam2 exited rc=%1").arg(code));
-        localEngineActive_ = false;
-        if (replacingLocalEngine_) {
-            replacingLocalEngine_ = false;
-            return;
+    jam2_.onEngineEvent = [this](const jam2::EngineEvent& event) {
+        handleEngineEvent(event);
+    };
+    jam2_.onNetworkSnapshot = [this](const jam2::NetworkSessionSnapshot& snapshot) {
+        handleNetworkSnapshot(snapshot);
+    };
+    jam2_.onStartup = [this](const Jam2RuntimeStartup& startup) {
+        const QString local = QString::fromStdString(jam2::endpoint_to_string(startup.local_endpoint));
+        appendLog(QStringLiteral("native UDP session ready: ") + local);
+        if (startup.public_candidate) {
+            activePublicEndpoint_ = QString::fromStdString(jam2::endpoint_to_string(*startup.public_candidate));
+            if (publicHostEdit_) {
+                publicHostEdit_->setText(QString::fromStdString(startup.public_candidate->host));
+            }
         }
-        if (meshRestarting_) {
-            meshRestarting_ = false;
-            return;
+        if (sessionController_.isServer()) {
+            const QString advertised = activePublicEndpoint_.isEmpty() ? local : activePublicEndpoint_;
+            meshPeerEndpoints_[meshPeerToken()] = advertised;
+            sessionController_.updateLocalEndpoint(advertised);
+            showPendingMeshInviteUrl();
         }
-        connectionLabel_->setText(QStringLiteral("Stopped"));
-        controlReconnectEnabled_ = false;
-        controlReconnectTimer_.stop();
-        controlServer_.close();
-        controlClient_.close();
-        pendingJoinLaunch_ = false;
-        pendingJoinSettingsReady_ = false;
-        pendingJoinMembershipReady_ = false;
-        pendingJoinBaseArgs_.clear();
-        meshActive_ = false;
-        localMeshPeerTokens_.clear();
-        meshPeerEndpoints_.clear();
-        currentMeshPeers_.clear();
-        pendingMeshInvitePopup_ = false;
-        activePublicEndpoint_.clear();
-        remotePeerConnected_ = false;
-        localMetronomeRunning_ = false;
-        localMetronomeLeader_ = false;
-        playbackGrid_.clearEngine();
-        if (trackMetronomeLabel_) {
-            trackMetronomeLabel_->setText(QStringLiteral("Local metronome stopped"));
+        if (startup.stats_csv) {
+            appendLog(QStringLiteral("Stats CSV: ") + QString::fromStdString(startup.stats_csv->string()));
         }
-        if (startTrackMetronomeButton_) {
-            startTrackMetronomeButton_->setEnabled(true);
-        }
-        if (stopTrackMetronomeButton_) {
-            stopTrackMetronomeButton_->setEnabled(false);
-        }
-        startButton_->setEnabled(true);
-        joinButton_->setEnabled(true);
-        stopButton_->setEnabled(false);
-        if (refreshControlButton_) {
-            refreshControlButton_->setEnabled(false);
-        }
-        jamRecordingActive_ = false;
-        updateJamRecordingControls();
-        updateMixControls();
-        setMixRemotePeerVisible(false);
-        const bool restoreLocal = !shuttingDown_ && (returnToLocalAfterStop_ || endedJam);
-        returnToLocalAfterStop_ = false;
-        if (restoreLocal) {
-            QTimer::singleShot(0, this, [this] {
-                if (!shuttingDown_ && !jam2_.isRunning()) {
-                    startLocalPerform();
-                }
-            });
+        updateRuntimeControls();
+        sendMetronomeModeToJam();
+        sendMetronomePatternToJam();
+        if (sessionController_.isServer()) {
+            sendMetronomeSettingsToPeer();
+            if (looperProject_.trackSyncEnabled()) {
+                sendSongSnapshot();
+            }
         }
     };
-    controlServer_.onState = [this](const QString& state) { handleControlState(state, true); };
-    controlServer_.onMessage = [this](const QString& sourcePeerToken, const QJsonObject& message) {
+    jam2_.onNetworkFinished = [this](int code) {
+        appendLog(QStringLiteral("network runtime finished rc=%1").arg(code));
+        const SharedSessionController::Role role = sessionController_.snapshot().role;
+        if (code != 0 && !shuttingDown_ &&
+            (role == SharedSessionController::Role::Creator ||
+             role == SharedSessionController::Role::Joiner)) {
+            QTimer::singleShot(0, this, [this] { stopJam(true); });
+        }
+    };
+    sessionController_.onTransportEvent = [this](
+        const jam2::control_protocol::TransportEvent& event,
+        bool serverSide) {
+        handleControlEvent(event, serverSide);
+    };
+    sessionController_.onMessage = [this](const QString& sourcePeerToken, const QJsonObject& message) {
         handleControlMessage(message, sourcePeerToken);
     };
-    controlServer_.onAuthenticated = [this](const QString& token, const QJsonObject& message) {
+    sessionController_.onPeerAuthenticated = [this](const QString& token, const QJsonObject& message) {
         handleMeshPeerAuthenticated(token, message);
     };
-    controlServer_.onDisconnected = [this](const QString& token) {
+    sessionController_.onPeerDisconnected = [this](const QString& token) {
         localMeshPeerTokens_.remove(token);
-        if (meshActive_ && meshPeerEndpoints_.remove(token) > 0) {
-            broadcastMeshPeerList();
-            updateMixRemotePeers();
-            restartMeshEngineFromPeerList();
+        updateMixRemotePeers();
+    };
+    sessionController_.onContract = [this](const SharedSessionController::SessionContract& contract) {
+        appendLog(QStringLiteral("session contract protocol=%1 format=%2 profile=%3 sample_rate=%4 frame_size=%5")
+            .arg(contract.protocolVersion)
+            .arg(contract.audioFormat, contract.profile)
+            .arg(contract.sampleRate)
+            .arg(contract.frameSize));
+        if (sessionController_.snapshot().role == SharedSessionController::Role::Joiner) {
+            if (profileBox_) {
+                const QSignalBlocker blocker(profileBox_);
+                const int index = profileBox_->findData(contract.profile);
+                if (index >= 0) {
+                    profileBox_->setCurrentIndex(index);
+                }
+            }
+            sampleRateSpin_->setValue(contract.sampleRate);
+            frameSizeSpin_->setValue(contract.frameSize);
         }
     };
-    controlClient_.onState = [this](const QString& state) { handleControlState(state, false); };
-    controlClient_.onMessage = [this](const QJsonObject& message) { handleControlMessage(message); };
-    controlReconnectTimer_.setInterval(2000);
-    QObject::connect(&controlReconnectTimer_, &QTimer::timeout, this, [this] { refreshControlConnection(); });
+    sessionController_.onSnapshot = [this](const SharedSessionController::Snapshot& snapshot) {
+        applySessionSnapshot(snapshot);
+    };
+    sessionController_.bindRuntime(
+        jam2_,
+        [this](const SharedSessionController::Snapshot& snapshot) {
+            if (snapshot.role == SharedSessionController::Role::Joiner &&
+                !selectedDeviceSupportsSampleRate(snapshot.contract.sampleRate)) {
+                throw std::runtime_error(
+                    QStringLiteral("Selected audio device does not support session sample rate %1")
+                        .arg(snapshot.contract.sampleRate).toStdString());
+            }
+            return networkRuntimeOptions(snapshot);
+        });
     outgoingLooperAssetTimer_.setInterval(5);
     QObject::connect(&outgoingLooperAssetTimer_, &QTimer::timeout, this, [this] { continueLooperAssetSend(); });
     songAssetCheckRetryTimer_.setSingleShot(true);
@@ -2468,8 +2473,11 @@ void MainWindow::buildUi()
     engineModeLabel_->setObjectName(QStringLiteral("StatusPill"));
     engineModeLabel_->setAlignment(Qt::AlignCenter);
     engineModeLabel_->setMinimumWidth(72);
+    sessionTopologyLabel_ = new QLabel(QStringLiteral("Remote Peers 0"), this);
+    sessionTopologyLabel_->setObjectName(QStringLiteral("StatusPill"));
     header->addWidget(engineModeLabel_);
     header->addWidget(connectionLabel_);
+    header->addWidget(sessionTopologyLabel_);
 
     songTitleEdit_ = new QLineEdit(chordModel_.title(), this);
     songTitleEdit_->setMinimumWidth(300);
@@ -2640,7 +2648,7 @@ QWidget* MainWindow::buildSessionPage()
     statsCheck_ = new QCheckBox(QStringLiteral("Periodic stats"), page);
     statsCheck_->setChecked(true);
     meshMaxPeersSpin_ = new QSpinBox(page);
-    meshMaxPeersSpin_->setRange(0, 64);
+    meshMaxPeersSpin_->setRange(0, 1000000);
     meshMaxPeersSpin_->setValue(0);
     statsWarmupMsSpin_ = new QSpinBox(page);
     statsWarmupMsSpin_->setRange(0, 600000);
@@ -2727,7 +2735,6 @@ QWidget* MainWindow::buildSessionPage()
     adaptiveReleaseSpin_ = new QSpinBox(page);
     adaptiveReleaseSpin_->setRange(0, 1000000);
     adaptiveReleaseSpin_->setValue(1000);
-    extraArgsEdit_ = new QLineEdit(page);
     startButton_ = new QPushButton(QStringLiteral("Start Jam"), page);
     joinButton_ = new QPushButton(QStringLiteral("Join Jam"), page);
     stopButton_ = new QPushButton(QStringLiteral("End Jam"), page);
@@ -2748,7 +2755,7 @@ QWidget* MainWindow::buildSessionPage()
         playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, driftSmoothingSpin_,
         driftDeadbandSpin_, driftMaxCorrectionSpin_, playoutDelaySpin_, jitterBufferSpin_,
         jitterBufferMaxSpin_, adaptiveTargetSpin_, adaptiveMinSpin_, adaptiveMaxSpin_,
-        adaptiveReleaseSpin_, extraArgsEdit_,
+        adaptiveReleaseSpin_,
     };
     for (QWidget* widget : sessionEditors) {
         applyMutedEditorStyle(widget);
@@ -2764,7 +2771,7 @@ QWidget* MainWindow::buildSessionPage()
         driftSmoothingSpin_, driftDeadbandSpin_, driftMaxCorrectionSpin_, noStunCheck_,
         sampleTimePlayoutCheck_, playoutDelaySpin_, jitterBufferSpin_, jitterBufferMaxSpin_,
         adaptiveCushionCheck_, adaptiveTargetSpin_, adaptiveMinSpin_, adaptiveMaxSpin_,
-        adaptiveReleaseSpin_, extraArgsEdit_,
+        adaptiveReleaseSpin_,
     };
     for (QWidget* widget : sessionDialogWidgets) {
         widget->hide();
@@ -3118,7 +3125,7 @@ QWidget* MainWindow::buildTrackPage()
         trackWaveform_->onSeekMs = [this](qint64 positionMs) {
             const qint64 frame = positionMs * qMax(1, preparedSourceSampleRate_) / 1000;
             runGridLockedEngineAction(QStringLiteral("track.seek"), [this, frame](std::uint64_t targetFrame) {
-                sendJamCommand(QStringLiteral("track seek %1 %2").arg(frame).arg(targetFrame));
+                seekPreparedTrack(static_cast<std::uint64_t>(qMax<qint64>(0, frame)), targetFrame);
                 preparedSourceFrame_ = frame;
                 preparedSourceEngineFrame_ = static_cast<qint64>(playbackGrid_.position().rawCurrentFrame);
                 updateTrackTimeline();
@@ -3209,6 +3216,13 @@ QWidget* MainWindow::buildTrackPage()
     QObject::connect(trackSyncCheck_, &QCheckBox::toggled, this, [this](bool checked) {
         looperProject_.setTrackSyncEnabled(checked);
         trackController_.model().syncControls = checked;
+        jam2_.setTrackSyncEnabled(checked);
+        if (!checked && sessionController_.isServer()) {
+            pendingSharedTrackRevision_ = 0;
+            pendingSharedTrackHostReady_ = true;
+            pendingSharedTrackReadyTokens_.clear();
+        }
+        updateTrackControls();
     });
     QObject::connect(gridLockBox, &QCheckBox::toggled, this, [this](bool checked) {
         looperProject_.setGridLockEnabled(checked);
@@ -3217,7 +3231,10 @@ QWidget* MainWindow::buildTrackPage()
     QObject::connect(recordingLatencyAdjustmentSpin_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int frames) {
         updateRecordingLatencyDisplay();
         if (jam2_.isRunning()) {
-            sendJamCommand(QStringLiteral("record latency_adjust %1").arg(frames));
+            jam2::EngineCommand command;
+            command.type = jam2::EngineCommandType::SetRecordingLatencyAdjustment;
+            command.signed_value = frames;
+            (void)submitEngineCommand(command, QStringLiteral("recording latency adjustment"));
         }
     });
     QObject::connect(captureManualStopCheck_, &QCheckBox::toggled, this, [this](bool checked) {
@@ -3228,7 +3245,10 @@ QWidget* MainWindow::buildTrackPage()
         if (loopbackRecorder_.isRunning()) {
             loopbackRecorder_.stop();
         } else {
-            runGridLockedEngineAction(QStringLiteral("record.stop"), [this](std::uint64_t targetFrame) { stopInputCapture(targetFrame); });
+            runGridLockedEngineAction(
+                QStringLiteral("record.stop"),
+                [this](std::uint64_t targetFrame) { stopInputCapture(targetFrame); },
+                true);
         }
     });
     QObject::connect(loadWavButton_, &QPushButton::clicked, this, [this] { loadWavIntoLooperLane(); });
@@ -3259,7 +3279,7 @@ QWidget* MainWindow::buildTrackPage()
     };
     looperStack_->onSeekFrame = [this](qint64 frame) {
         runGridLockedEngineAction(QStringLiteral("track.seek"), [this, frame](std::uint64_t targetFrame) {
-            sendJamCommand(QStringLiteral("track seek %1 %2").arg(frame).arg(targetFrame));
+            seekPreparedTrack(static_cast<std::uint64_t>(qMax<qint64>(0, frame)), targetFrame);
             preparedSourceFrame_ = frame;
             preparedSourceEngineFrame_ = static_cast<qint64>(playbackGrid_.position().rawCurrentFrame);
             updateTrackTimeline();
@@ -3651,7 +3671,10 @@ QWidget* MainWindow::buildMixPage()
         }
         if (jam2_.isRunning()) {
             const double metronomeLevel = gainFromDb(static_cast<double>(value));
-            sendJamCommand(QStringLiteral("metro level %1").arg(metronomeLevel, 0, 'f', 3));
+            submitEngineGain(
+                jam2::EngineCommandType::SetMetronomeLevel,
+                metronomeLevel,
+                QStringLiteral("metronome level"));
         }
     });
     QObject::connect(remoteLevelSlider_, &QSlider::valueChanged, this, [this](int value) {
@@ -3742,19 +3765,19 @@ void MainWindow::updateMixControls()
 
 void MainWindow::setMixRemotePeerVisible(bool visible)
 {
-    if (!meshActive_) {
-        remotePeerConnected_ = visible;
-    }
+    (void)visible;
     updateMixRemotePeers();
+    updateTrackControls();
 }
 
 void MainWindow::updateMixRemotePeers()
 {
+    const SharedSessionController::Role role = sessionController_.snapshot().role;
+    const bool networkSession = role == SharedSessionController::Role::Creator ||
+        role == SharedSessionController::Role::Joiner;
     QStringList peers;
-    if (meshActive_) {
+    if (networkSession) {
         peers = meshPeerEndpointsExcludingSelf();
-    } else if (remotePeerConnected_) {
-        peers << QStringLiteral("Connected peer");
     }
 
     if (mixRemotePeerListLayout_) {
@@ -3764,7 +3787,7 @@ void MainWindow::updateMixRemotePeers()
         }
         for (int index = 0; index < peers.size(); ++index) {
             auto* label = new QLabel(
-                meshActive_
+                networkSession
                     ? QStringLiteral("Peer %1 - %2").arg(index + 1).arg(peers.at(index))
                     : peers.at(index),
                 mixRemotePeerRow_);
@@ -3791,7 +3814,10 @@ void MainWindow::startJamRecording()
     }
     jamRecordingFolder_ = timestampedJamRecordingFolder();
     QDir().mkpath(jamRecordingFolder_);
-    sendJamCommand(QStringLiteral("record jam start %1").arg(jamRecordingFolder_));
+    submitEngineText(
+        jam2::EngineCommandType::StartJamRecording,
+        jamRecordingFolder_,
+        QStringLiteral("start jam recording"));
     appendLog(QStringLiteral("record jam start: ") + jamRecordingFolder_);
     jamRecordingActive_ = true;
     updateJamRecordingControls();
@@ -3802,7 +3828,9 @@ void MainWindow::stopJamRecording()
     if (!jam2_.isRunning()) {
         return;
     }
-    sendJamCommand(QStringLiteral("record jam stop"));
+    jam2::EngineCommand command;
+    command.type = jam2::EngineCommandType::StopJamRecording;
+    (void)submitEngineCommand(command, QStringLiteral("stop jam recording"));
     appendLog(QStringLiteral("record jam stop"));
     jamRecordingActive_ = false;
     updateJamRecordingControls();
@@ -3848,7 +3876,7 @@ QString MainWindow::meshInviteUrl() const
 
 void MainWindow::showPendingMeshInviteUrl()
 {
-    if (!pendingMeshInvitePopup_ || !meshActive_ || !controlServerMode_) {
+    if (!pendingMeshInvitePopup_ || !sessionController_.isServer()) {
         return;
     }
     pendingMeshInvitePopup_ = false;
@@ -3938,17 +3966,21 @@ void MainWindow::startLocalPerform()
         QMessageBox::warning(this, QStringLiteral("Jam2 Microphone Access"), permissionError);
         return;
     }
-    QStringList args{QStringLiteral("local")};
-    args << commonJamArgs();
     if (engineModeLabel_) {
         engineModeLabel_->setText(QStringLiteral("Local"));
     }
-    launchLocalPerformProcess(args);
+    try {
+        launchLocalRuntime(runtimeOptions());
+    } catch (const std::exception& error) {
+        QMessageBox::warning(this, QStringLiteral("Jam2"), QString::fromUtf8(error.what()));
+    }
 }
 
-void MainWindow::startJam()
+void MainWindow::startJam(bool createSession)
 {
-    if (jam2_.isRunning() && !localEngineActive_) {
+    const SharedSessionController::Role activeRole = sessionController_.snapshot().role;
+    if (activeRole == SharedSessionController::Role::Creator ||
+        activeRole == SharedSessionController::Role::Joiner) {
         return;
     }
     QString permissionError;
@@ -3957,23 +3989,12 @@ void MainWindow::startJam()
         appendLog(permissionError);
         return;
     }
-    if (localEngineActive_) {
-        replacingLocalEngine_ = true;
-        jam2_.stop();
-        localEngineActive_ = false;
-    }
-    QStringList args;
     if (engineModeLabel_) {
         engineModeLabel_->setText(QStringLiteral("Network"));
     }
-    meshActive_ = true;
+    jam2_.setTrackSyncEnabled(looperProject_.trackSyncEnabled());
     activePublicEndpoint_.clear();
-    pendingJoinLaunch_ = false;
-    pendingJoinSettingsReady_ = false;
-    pendingJoinMembershipReady_ = false;
-    pendingJoinBaseArgs_.clear();
-    currentMeshPeers_.clear();
-    meshCoordinatorToken_.clear();
+    lastLoggedSessionSummary_.clear();
     localMeshPeerTokens_.clear();
     pendingRecordingContributions_.clear();
     appliedRecordingContributionIds_.clear();
@@ -3981,85 +4002,71 @@ void MainWindow::startJam()
     recordingOfferAssetPaths_.clear();
     pendingRecordingAssetSources_.clear();
     validatedRecordingAssetHashes_.clear();
+    prepareNetworkRuntimePresentation(createSession);
     try {
-        if (sessionCreator_) {
+        if (createSession) {
             meshPeerEndpoints_.clear();
-            meshCoordinatorToken_ = meshPeerToken();
-            meshPeerEndpoints_[meshPeerToken()] = localMeshEndpoint();
-            args << QStringLiteral("network") << QStringLiteral("_run")
-                 << QStringLiteral("--bind") << meshBindEndpoint()
-                 << QStringLiteral("--session-id") << sessionHex()
-                 << QStringLiteral("--session-key") << keyHex()
-                 << QStringLiteral("--bootstrap-role") << QStringLiteral("creator")
-                 << QStringLiteral("--local-peer-id") << QString::number(meshPeerIdForToken(meshPeerToken()))
-                 << QStringLiteral("--bootstrap-coordinator-peer-id") << QString::number(meshPeerIdForToken(meshCoordinatorToken_))
-                 << QStringLiteral("--peers") << QString();
-            if (!controlServer_.listen(static_cast<quint16>(portSpin_->value()), sessionHex(), keyHex())) {
-                const QString error = QStringLiteral("control server failed: ") + controlServer_.errorString();
+            meshPeerEndpoints_[meshPeerToken()] = localMeshEndpoint(true);
+            if (!sessionController_.startCreator(SharedSessionController::CreatorConfig{
+                    static_cast<quint16>(portSpin_->value()),
+                    sessionHex(),
+                    keyHex(),
+                    meshPeerToken(),
+                    localMeshEndpoint(true),
+                    meshMaxPeersSpin_ ? meshMaxPeersSpin_->value() : 0,
+                    SharedSessionController::SessionContract{
+                        1,
+                        QStringLiteral("pcm24-mono"),
+                        profileBox_ ? profileBox_->currentData().toString() : QStringLiteral("fast"),
+                        sampleRateSpin_->value(),
+                        frameSizeSpin_->value(),
+                    }})) {
+                const QString error = QStringLiteral("control server failed: ") + sessionController_.errorString();
                 appendLog(error);
-                meshActive_ = false;
                 QMessageBox::warning(this, QStringLiteral("Jam2"), error);
                 return;
             }
             pendingMeshInvitePopup_ = true;
-            controlServerMode_ = true;
-            controlHost_ = bindHostEdit_->text();
-            controlPort_ = static_cast<quint16>(portSpin_->value());
-            controlSessionHex_ = sessionHex();
-            controlKeyHex_ = keyHex();
         } else {
             const std::string url = connectUrlEdit_->text().toStdString();
             const jam2::SessionInfo info = jam2::parse_jam_url(url);
             sessionId_ = info.session_id;
             sessionKey_ = info.key;
             meshPeerEndpoints_.clear();
-            meshPeerEndpoints_[meshPeerToken()] = localMeshEndpoint();
-            pendingJoinLaunch_ = true;
-            controlServerMode_ = false;
-            controlHost_ = QString::fromStdString(info.endpoint.host);
-            controlPort_ = info.endpoint.port;
-            controlSessionHex_ = sessionHex();
-            controlKeyHex_ = keyHex();
-            controlClient_.connectToHost(
+            meshPeerEndpoints_[meshPeerToken()] = localMeshEndpoint(false);
+            sessionController_.startJoiner(SharedSessionController::JoinerConfig{
                 QString::fromStdString(info.endpoint.host),
                 info.endpoint.port,
                 sessionHex(),
                 keyHex(),
                 meshPeerToken(),
-                localMeshEndpoint());
+                localMeshEndpoint(false),
+                {},
+                false,
+            });
         }
     } catch (const std::exception& error) {
         QMessageBox::warning(this, QStringLiteral("Jam2"), QString::fromUtf8(error.what()));
         return;
     }
 
-    controlReconnectEnabled_ = true;
-    controlReconnectAttempts_ = 0;
-    if (!sessionCreator_) {
-        appendLog(QStringLiteral("waiting for leader settings and membership before launching Jam2"));
-        startButton_->setEnabled(false);
-        joinButton_->setEnabled(false);
-        stopButton_->setEnabled(true);
-        if (refreshControlButton_) {
-            refreshControlButton_->setEnabled(true);
-        }
-        scheduleControlReconnect();
+    sessionController_.setReconnectEnabled(true);
+    if (!createSession) {
+        appendLog(QStringLiteral("waiting for the session contract and membership before network attachment"));
         return;
     }
-    args << commonJamArgs();
-    currentMeshPeers_ = meshPeerSpecsExcludingSelf();
-    launchJamProcess(args);
 }
 
-void MainWindow::launchLocalPerformProcess(QStringList args)
+void MainWindow::launchLocalRuntime(Jam2RuntimeOptions options)
 {
-    controlServer_.close();
-    controlClient_.close();
-    controlReconnectEnabled_ = false;
-    meshActive_ = false;
-    localEngineActive_ = true;
-    jam2_.start(QCoreApplication::applicationFilePath(), args);
-    appendLog(QStringLiteral("starting embedded local engine: %1").arg(args.join(QLatin1Char(' '))));
+    if (sessionTopologyLabel_) {
+        sessionTopologyLabel_->setText(QStringLiteral("Remote Peers 0"));
+        sessionTopologyLabel_->setToolTip(QString{});
+    }
+    if (!sessionController_.startLocal(options)) {
+        throw std::runtime_error("local engine failed to start");
+    }
+    appendLog(QStringLiteral("local engine active through typed runtime"));
     startButton_->setEnabled(true);
     joinButton_->setEnabled(true);
     stopButton_->setEnabled(false);
@@ -4074,32 +4081,23 @@ void MainWindow::launchLocalPerformProcess(QStringList args)
     });
 }
 
-void MainWindow::launchJamProcess(QStringList args)
+void MainWindow::prepareNetworkRuntimePresentation(bool createSession)
 {
-    QString permissionError;
-    if (!jam2EnsureMicrophonePermission(&permissionError)) {
-        QMessageBox::warning(this, QStringLiteral("Jam2 Microphone Access"), permissionError);
-        appendLog(permissionError);
-        return;
-    }
-
-    if (controlServerMode_) {
+    if (createSession) {
         localMetronomeRunning_ = false;
         localMetronomeLeader_ = false;
     }
     playbackGrid_.clearEngine();
-    if (controlServerMode_ && trackMetronomeLabel_) {
+    if (createSession && trackMetronomeLabel_) {
         trackMetronomeLabel_->setText(QStringLiteral("Jam metronome stopped"));
     }
-    if (controlServerMode_ && startTrackMetronomeButton_) {
+    if (createSession && startTrackMetronomeButton_) {
         startTrackMetronomeButton_->setEnabled(true);
     }
-    if (controlServerMode_ && stopTrackMetronomeButton_) {
+    if (createSession && stopTrackMetronomeButton_) {
         stopTrackMetronomeButton_->setEnabled(false);
     }
-    localEngineActive_ = false;
-    jam2_.start(QCoreApplication::applicationFilePath(), args);
-    appendLog(QStringLiteral("starting embedded network session"));
+    appendLog(QStringLiteral("starting typed session lifecycle"));
     startButton_->setEnabled(false);
     joinButton_->setEnabled(false);
     stopButton_->setEnabled(true);
@@ -4110,210 +4108,376 @@ void MainWindow::launchJamProcess(QStringList args)
     updateJamRecordingControls();
     updateMixControls();
     connectionLabel_->setText(
-        (!controlServerMode_ && controlClient_.isConnected()) ||
-                (controlServerMode_ && controlServer_.hasPeer())
+        sessionController_.isConnected()
             ? QStringLiteral("TCP peer authenticated")
             : QStringLiteral("Starting"));
 }
 
-void MainWindow::sendJamCommand(const QString& line)
+bool MainWindow::submitEngineCommand(jam2::EngineCommand command, const QString& context)
 {
-    GuiBinaryCommand command;
-    if (!encodeJamTextCommand(line, command)) {
-        appendLog(QStringLiteral("embedded engine unsupported command: ") + line);
+    command.cookie = ++engineCommandCookie_;
+    if (jam2_.submit(command)) {
+        return true;
+    }
+    appendLog(QStringLiteral("engine command queue unavailable: ") + context);
+    return false;
+}
+
+void MainWindow::submitEngineGain(
+    jam2::EngineCommandType type,
+    double gain,
+    const QString& context)
+{
+    jam2::EngineCommand command;
+    command.type = type;
+    command.value = static_cast<int>(std::clamp(std::llround(gain * 1000000.0), 0LL, 4000000LL));
+    (void)submitEngineCommand(command, context);
+}
+
+void MainWindow::submitEngineToggle(
+    jam2::EngineCommandType type,
+    bool enabled,
+    const QString& context)
+{
+    jam2::EngineCommand command;
+    command.type = type;
+    command.enabled = enabled;
+    (void)submitEngineCommand(command, context);
+}
+
+void MainWindow::submitEngineFrame(
+    jam2::EngineCommandType type,
+    std::uint64_t frame,
+    const QString& context)
+{
+    jam2::EngineCommand command;
+    command.type = type;
+    command.frame = frame;
+    (void)submitEngineCommand(command, context);
+}
+
+void MainWindow::submitEngineText(
+    jam2::EngineCommandType type,
+    const QString& text,
+    const QString& context)
+{
+    jam2::EngineCommand command;
+    command.type = type;
+    if (!jam2::engine_command_set_text(command, text.toStdString())) {
+        appendLog(QStringLiteral("engine command text is too long: ") + context);
         return;
     }
-    if (!jam2_.sendControl(encodeGuiCommandPayload(command))) {
-        appendLog(QStringLiteral("embedded engine command unavailable: ") + line);
+    (void)submitEngineCommand(command, context);
+}
+
+void MainWindow::seekPreparedTrack(std::uint64_t sourceFrame, std::uint64_t targetFrame)
+{
+    jam2::EngineCommand command;
+    command.type = jam2::EngineCommandType::PreparedSeek;
+    command.frame = targetFrame;
+    command.frame_end = sourceFrame;
+    (void)submitEngineCommand(command, QStringLiteral("prepared track seek"));
+}
+
+void MainWindow::setPreparedTrackLoop(bool enabled, std::uint64_t startFrame, std::uint64_t endFrame)
+{
+    jam2::EngineCommand command;
+    command.type = jam2::EngineCommandType::PreparedSetLoop;
+    command.frame_end = enabled ? startFrame : 0ULL;
+    command.signed_value = enabled && endFrame > startFrame
+        ? static_cast<std::int64_t>(endFrame)
+        : (enabled ? std::numeric_limits<std::int64_t>::max() : 0);
+    (void)submitEngineCommand(command, QStringLiteral("prepared track loop"));
+}
+
+std::uint64_t MainWindow::quantizedEngineTarget(int countInBars) const
+{
+    const PlaybackGrid::Position position = playbackGrid_.position();
+    if (!position.engineAnchored || position.sampleRate <= 0) {
+        return 0;
+    }
+    const int beatsPerBar = qMax(1, currentMetronomePattern().beats_per_bar);
+    const std::uint64_t nextBarBeat =
+        ((position.absoluteBeat / static_cast<std::uint64_t>(beatsPerBar)) +
+         1ULL + static_cast<std::uint64_t>(qMax(0, countInBars))) *
+        static_cast<std::uint64_t>(beatsPerBar);
+    const std::uint64_t musical = position.epochFrame + static_cast<std::uint64_t>(std::llround(
+        static_cast<double>(nextBarBeat) * position.secondsPerBeat * static_cast<double>(position.sampleRate)));
+    return rawFrameFromMusicalFrame(musical, position.renderOffsetFrames);
+}
+
+void MainWindow::restartPreparedTrackQuantized()
+{
+    const PlaybackGrid::Position position = playbackGrid_.position();
+    std::uint64_t target = position.running ? quantizedEngineTarget(0) : 0;
+    const std::uint64_t minimumLead = position.engineAnchored && position.sampleRate > 0
+        ? position.rawCurrentFrame + static_cast<std::uint64_t>(position.sampleRate / 5)
+        : 0;
+    if (position.running && target > 0 && target < minimumLead) {
+        target = quantizedEngineTarget(1);
+    }
+    if (target == 0 && position.engineAnchored && position.sampleRate > 0) {
+        target = minimumLead;
+    }
+    if (target == 0) return;
+    jam2::EngineCommand seek;
+    seek.type = jam2::EngineCommandType::PreparedSeek;
+    seek.frame = target;
+    if (!submitEngineCommand(seek, QStringLiteral("prepared track quantized seek"))) return;
+    jam2::EngineCommand play;
+    play.type = jam2::EngineCommandType::PreparedPlay;
+    play.frame = target;
+    if (!submitEngineCommand(play, QStringLiteral("prepared track quantized play"))) return;
+    if (looperProject_.trackSyncEnabled()) {
+        jam2::EngineCommand transport;
+        transport.type = jam2::EngineCommandType::ScheduleTransport;
+        transport.transport_action = jam2::EngineTransportAction::TrackRestart;
+        transport.transport_target_frame = target;
+        transport.transport_musical_frame = musicalFrameFromRawFrame(
+            target,
+            position.renderOffsetFrames);
+        transport.transport_countdown_start_frame = target;
+        (void)submitEngineCommand(transport, QStringLiteral("prepared track transport"));
     }
 }
 
-void MainWindow::handleGuiControlFrame(quint16 type, const QByteArray& payload)
+void MainWindow::armTrackTake(const QString& id, const QString& output)
 {
-    const auto messageType = static_cast<jam2::gui_control::MessageType>(type);
-    if (messageType == jam2::gui_control::MessageType::Hello) {
+    jam2::EngineCommand command;
+    command.type = jam2::EngineCommandType::ArmTrackTake;
+    if (!jam2::engine_command_set_id(command, id.toStdString()) ||
+        !jam2::engine_command_set_text(command, output.toStdString())) {
+        appendLog(QStringLiteral("track take id or output path is too long"));
         return;
     }
-    if (messageType == jam2::gui_control::MessageType::ClockState) {
-        if (payload.size() < 60) {
-            return;
-        }
-        const quint64 rawFrame = guiU64(payload, 0);
-        const quint64 musicalFrame = guiU64(payload, 8);
-        const quint64 epochFrame = guiU64(payload, 16);
-        const qint64 offsetFrames = guiI64(payload, 24);
-        const int sampleRate = static_cast<int>(guiU32(payload, 32));
-        const int bpm = static_cast<int>(guiU32(payload, 36));
-        const int beats = static_cast<int>(guiU32(payload, 40));
-        const int division = static_cast<int>(guiU32(payload, 44));
-        const bool running = guiU16(payload, 56) != 0;
-        playbackGrid_.setPattern(bpm, beats, division);
-        playbackGrid_.updateEngine(rawFrame, musicalFrame, epochFrame, offsetFrames, sampleRate, running);
-        if (payload.size() >= 84) {
-            recordingInputLatencyFrames_ = guiU32(payload, 60);
-            recordingOutputLatencyFrames_ = guiU32(payload, 64);
-            const qint64 adjustmentFrames = guiI64(payload, 68);
-            recordingAppliedLatencyFrames_ = guiU64(payload, 76);
-            recordingLatencySampleRate_ = qMax(1, sampleRate);
-            if (recordingLatencyAdjustmentSpin_) {
-                const QSignalBlocker blocker(recordingLatencyAdjustmentSpin_);
-                recordingLatencyAdjustmentSpin_->setValue(static_cast<int>(qBound<qint64>(
-                    static_cast<qint64>(recordingLatencyAdjustmentSpin_->minimum()),
-                    adjustmentFrames,
-                    static_cast<qint64>(recordingLatencyAdjustmentSpin_->maximum()))));
-            }
-            updateRecordingLatencyDisplay();
-        }
-        updatePlaybackGrid();
+    (void)submitEngineCommand(command, QStringLiteral("arm track take"));
+}
+
+void MainWindow::startTrackTake(std::uint64_t targetFrame)
+{
+    submitEngineFrame(jam2::EngineCommandType::StartTrackTake, targetFrame, QStringLiteral("start track take"));
+}
+
+void MainWindow::startTrackTakeQuantized(int countInBars)
+{
+    const PlaybackGrid::Position position = playbackGrid_.position();
+    if (!position.engineAnchored || !position.running || position.sampleRate <= 0) {
+        appendLog(QStringLiteral("recording count-in is waiting for a running engine grid"));
         return;
     }
-    if (messageType == jam2::gui_control::MessageType::Meters) {
-        if (payload.size() < 56) {
-            return;
-        }
-        QJsonObject stats;
-        stats.insert(QStringLiteral("event"), QStringLiteral("meters"));
-        stats.insert(QStringLiteral("input_peak"), guiF64(payload, 0));
-        stats.insert(QStringLiteral("send_peak"), guiF64(payload, 8));
-        stats.insert(QStringLiteral("monitor_peak"), guiF64(payload, 16));
-        stats.insert(QStringLiteral("remote_peak"), guiF64(payload, 24));
-        stats.insert(QStringLiteral("metronome_peak"), guiF64(payload, 32));
-        stats.insert(QStringLiteral("output_peak"), guiF64(payload, 40));
-        stats.insert(QStringLiteral("output_clipped_samples"), static_cast<double>(guiU64(payload, 48)));
-        updateMixMeters(stats);
+    const int beatsPerBar = qMax(1, currentMetronomePattern().beats_per_bar);
+    const std::uint64_t nextBarBeat =
+        (position.absoluteBeat / static_cast<std::uint64_t>(beatsPerBar) + 1ULL) *
+        static_cast<std::uint64_t>(beatsPerBar);
+    const std::uint64_t beatFrames = static_cast<std::uint64_t>(std::llround(
+        position.secondsPerBeat * static_cast<double>(position.sampleRate)));
+    if (beatFrames == 0 || nextBarBeat >
+        ((std::numeric_limits<std::uint64_t>::max)() - position.epochFrame) / beatFrames) {
+        appendLog(QStringLiteral("recording count-in target exceeds the engine clock range"));
         return;
     }
-    if (messageType == jam2::gui_control::MessageType::TransportState) {
-        if (payload.size() < 40) {
-            return;
-        }
-        const quint64 revision = guiU64(payload, 0);
-        const quint64 targetRawFrame = guiU64(payload, 8);
-        const quint64 targetMusicalFrame = guiU64(payload, 16);
-        const quint64 countdownStartFrame = guiU64(payload, 24);
-        const auto action = static_cast<jam2::gui_control::TransportAction>(guiU16(payload, 32));
-        if (action == jam2::gui_control::TransportAction::TrackRestart && revision > 0) {
-            playbackGrid_.scheduleEpoch(targetRawFrame, targetMusicalFrame, revision);
-            if (gridScheduleLabel_) {
-                gridScheduleLabel_->setText(QStringLiteral("Track restart: engine target_frame=%1 revision=%2")
-                    .arg(targetRawFrame)
-                    .arg(revision));
-            }
-        } else if (action == jam2::gui_control::TransportAction::RecordStart &&
-                   revision > recordingScheduleRevision_) {
-            playbackGrid_.scheduleEpoch(targetRawFrame, targetMusicalFrame, revision);
-            recordingScheduleRevision_ = revision;
-            recordingCountdownStartFrame_ = countdownStartFrame;
-            recordingStartFrame_ = targetRawFrame;
-            if ((!captureManualStopCheck_ || !captureManualStopCheck_->isChecked()) &&
-                captureDurationSpin_) {
-                const PlaybackGrid::Position position = playbackGrid_.position();
-                const quint64 framesUntilStart = targetRawFrame > position.rawCurrentFrame
-                    ? targetRawFrame - position.rawCurrentFrame
-                    : 0ULL;
-                const int delayMs = position.sampleRate > 0
-                    ? static_cast<int>(framesUntilStart * 1000ULL / static_cast<quint64>(position.sampleRate))
-                    : 0;
-                const QString takeId = activeTrackTakeId_;
-                QTimer::singleShot(delayMs + captureDurationSpin_->value() * 1000, this, [this, takeId] {
-                    if (trackTakeRecordingActive_ && activeTrackTakeId_ == takeId) {
-                        runGridLockedEngineAction(QStringLiteral("record.stop"), [this](std::uint64_t stopFrame) {
-                            stopInputCapture(stopFrame);
-                        });
-                    }
-                });
-            }
-            if (recordingCountdownLabel_) {
-                recordingCountdownLabel_->setText(QStringLiteral("WAITING FOR NEXT BAR"));
-                recordingCountdownLabel_->show();
-            }
-            if (gridScheduleLabel_) {
-                gridScheduleLabel_->setText(QStringLiteral("Recording: engine countdown_start_frame=%1 start_frame=%2 revision=%3")
-                    .arg(countdownStartFrame)
-                    .arg(targetRawFrame)
-                    .arg(revision));
-            }
-        }
+    const std::uint64_t countdownMusicalFrame = position.epochFrame + nextBarBeat * beatFrames;
+    const std::uint64_t countInBeats = static_cast<std::uint64_t>(qMax(0, countInBars)) *
+        static_cast<std::uint64_t>(beatsPerBar);
+    if (countInBeats >
+        ((std::numeric_limits<std::uint64_t>::max)() - countdownMusicalFrame) / beatFrames) {
+        appendLog(QStringLiteral("recording start target exceeds the engine clock range"));
         return;
     }
-    if (messageType == jam2::gui_control::MessageType::TrackState) {
-        if (payload.size() < 56) {
-            return;
-        }
-        preparedSourceEngineFrame_ = static_cast<qint64>(guiU64(payload, 0));
-        preparedSourceFrame_ = static_cast<qint64>(guiU64(payload, 8));
-        const int sampleRate = static_cast<int>(guiU32(payload, 48));
-        preparedSourcePlaying_ = guiU16(payload, 52) != 0;
-        if (sampleRate > 0) {
-            preparedSourceSampleRate_ = sampleRate;
-        }
-        return;
+    const std::uint64_t targetMusicalFrame = countdownMusicalFrame + countInBeats * beatFrames;
+    const std::uint64_t countdownStart = rawFrameFromMusicalFrame(
+        countdownMusicalFrame,
+        position.renderOffsetFrames);
+    const std::uint64_t target = rawFrameFromMusicalFrame(
+        targetMusicalFrame,
+        position.renderOffsetFrames);
+    recordingCountdownStartFrame_ = countdownStart;
+    recordingStartFrame_ = target;
+    if (recordingCountdownLabel_) {
+        recordingCountdownLabel_->setText(QStringLiteral("WAITING FOR NEXT BAR..."));
+        recordingCountdownLabel_->show();
     }
-    if (messageType == jam2::gui_control::MessageType::TrackTakeEvent) {
-        if (payload.size() < 60) {
-            return;
-        }
-        const quint16 eventType = guiU16(payload, 0);
-        const quint32 takeSize = guiU32(payload, 4);
-        const quint32 pathSize = guiU32(payload, 8);
-        const quint32 errorSize = guiU32(payload, 12);
-        const quint64 startFrame = guiU64(payload, 20);
-        const quint64 stopFrame = guiU64(payload, 28);
-        const quint64 framesWritten = guiU64(payload, 36);
-        const quint64 droppedFrames = guiU64(payload, 44);
-        const quint64 writerErrors = guiU64(payload, 52);
-        const qsizetype total = 60 + static_cast<qsizetype>(takeSize + pathSize + errorSize);
-        if (payload.size() < total) {
-            return;
-        }
-        qsizetype offset = 60;
-        const QString takeId = QString::fromUtf8(payload.mid(offset, static_cast<qsizetype>(takeSize)));
-        offset += static_cast<qsizetype>(takeSize);
-        const QString wav = QString::fromUtf8(payload.mid(offset, static_cast<qsizetype>(pathSize)));
-        offset += static_cast<qsizetype>(pathSize);
-        const QString error = QString::fromUtf8(payload.mid(offset, static_cast<qsizetype>(errorSize)));
-        if (takeId == activeTrackTakeId_) {
-            trackTakeRecordingActive_ = false;
-            activeTrackTakeId_.clear();
-            if (stopCaptureButton_) stopCaptureButton_->setEnabled(false);
-            recordingStartFrame_ = 0;
-            recordingCountdownStartFrame_ = 0;
-            stopMetronomeAtRecordingStart_ = false;
-            if (recordingCountdownLabel_) recordingCountdownLabel_->hide();
-            if (eventType == static_cast<quint16>(jam2::gui_control::TrackTakeEventType::Stopped) && !wav.isEmpty()) {
-                lastCapturePath_ = QDir::fromNativeSeparators(wav);
-                if (!pendingTransientCapturePath_.isEmpty()) {
-                    registerTransientTrackWav(pendingTransientCapturePath_);
-                }
-                pendingTransientCapturePath_.clear();
-                importLastCaptureToArmedLane();
-            } else {
-                if (!pendingTransientCapturePath_.isEmpty() && QFileInfo::exists(pendingTransientCapturePath_)) {
-                    registerTransientTrackWav(pendingTransientCapturePath_);
-                }
-                pendingTransientCapturePath_.clear();
-            }
-            if (loadWavButton_) loadWavButton_->setEnabled(true);
-        }
-        if (eventType == static_cast<quint16>(jam2::gui_control::TrackTakeEventType::Stopped)) {
-            appendLog(QStringLiteral("track take stopped: take_id=%1 wav=%2 start_frame=%3 stop_frame=%4 frames=%5 dropped_frames=%6 writer_errors=%7")
-                .arg(takeId)
-                .arg(wav)
-                .arg(startFrame)
-                .arg(stopFrame)
-                .arg(framesWritten)
-                .arg(droppedFrames)
-                .arg(writerErrors));
-        } else {
-            appendLog(QStringLiteral("track take error: take_id=%1 reason=%2").arg(takeId, error));
-        }
-        return;
+    jam2::EngineCommand start;
+    start.type = jam2::EngineCommandType::StartTrackTake;
+    start.frame = target;
+    if (!submitEngineCommand(start, QStringLiteral("start quantized track take"))) return;
+    jam2::EngineCommand transport;
+    transport.type = jam2::EngineCommandType::ScheduleTransport;
+    transport.transport_action = jam2::EngineTransportAction::RecordStart;
+    transport.transport_target_frame = target;
+    transport.transport_musical_frame = targetMusicalFrame;
+    transport.transport_countdown_start_frame = countdownStart;
+    (void)submitEngineCommand(transport, QStringLiteral("track take transport"));
+}
+
+void MainWindow::stopTrackTake(std::uint64_t targetFrame)
+{
+    submitEngineFrame(jam2::EngineCommandType::StopTrackTake, targetFrame, QStringLiteral("stop track take"));
+}
+
+void MainWindow::handleEngineSnapshot(const jam2::EngineSnapshot& snapshot)
+{
+    const auto pattern = snapshot.metronome_pattern;
+    const qint64 offset = snapshot.metronome_render_offset_frames;
+    const quint64 musical = offset >= 0
+        ? snapshot.engine_frame + static_cast<quint64>(offset)
+        : snapshot.engine_frame > static_cast<quint64>(-offset)
+            ? snapshot.engine_frame - static_cast<quint64>(-offset) : 0ULL;
+    playbackGrid_.setPattern(pattern.bpm, pattern.beats_per_bar, pattern.division);
+    playbackGrid_.updateEngine(
+        snapshot.engine_frame,
+        musical,
+        snapshot.metronome_epoch_frame,
+        offset,
+        static_cast<int>(std::lround(snapshot.sample_rate)),
+        snapshot.metronome_enabled && snapshot.metronome_epoch_valid);
+    recordingInputLatencyFrames_ = static_cast<quint32>(qMax<long>(0, snapshot.input_latency_frames));
+    recordingOutputLatencyFrames_ = static_cast<quint32>(qMax<long>(0, snapshot.output_latency_frames));
+    recordingAppliedLatencyFrames_ = snapshot.recording_latency_compensation_frames;
+    recordingLatencySampleRate_ = qMax(1, static_cast<int>(std::lround(snapshot.sample_rate)));
+    if (recordingLatencyAdjustmentSpin_) {
+        const QSignalBlocker blocker(recordingLatencyAdjustmentSpin_);
+        recordingLatencyAdjustmentSpin_->setValue(static_cast<int>(qBound<qint64>(
+            static_cast<qint64>(recordingLatencyAdjustmentSpin_->minimum()),
+            snapshot.recording_latency_adjustment_frames,
+            static_cast<qint64>(recordingLatencyAdjustmentSpin_->maximum()))));
     }
+    updateRecordingLatencyDisplay();
+    if (pendingCountInBars_ > 0 && snapshot.metronome_enabled && snapshot.metronome_epoch_valid) {
+        const int bars = std::exchange(pendingCountInBars_, 0);
+        startInputCapture(0, bars);
+    }
+    preparedSourceEngineFrame_ = static_cast<qint64>(snapshot.engine_frame);
+    preparedSourceFrame_ = static_cast<qint64>(snapshot.prepared_source_frame);
+    preparedSourcePlaying_ = snapshot.prepared_source_playing;
+    if (publishStoppedTrackStateWhenApplied_ && !preparedSourcePlaying_ &&
+        sessionController_.isServer()) {
+        publishStoppedTrackStateWhenApplied_ = false;
+        sendSongSnapshot(false);
+    }
+    if (snapshot.sample_rate > 0.0) preparedSourceSampleRate_ = static_cast<int>(std::lround(snapshot.sample_rate));
+
+    QJsonObject meters{
+        {QStringLiteral("input_peak"), static_cast<double>(snapshot.input_peak_ppm) / 1000000.0},
+        {QStringLiteral("send_peak"), static_cast<double>(snapshot.send_peak_ppm) / 1000000.0},
+        {QStringLiteral("monitor_peak"), static_cast<double>(snapshot.monitor_peak_ppm) / 1000000.0},
+        {QStringLiteral("remote_peak"), static_cast<double>(snapshot.remote_peak_ppm) / 1000000.0},
+        {QStringLiteral("metronome_peak"), static_cast<double>(snapshot.metronome_peak_ppm) / 1000000.0},
+        {QStringLiteral("output_peak"), static_cast<double>(snapshot.output_peak_ppm) / 1000000.0},
+        {QStringLiteral("output_clipped_samples"), static_cast<double>(snapshot.output_clipped_samples)},
+    };
+    updateMixMeters(meters);
+
+    const quint64 revision = snapshot.transport_revision;
+    if (snapshot.transport_action == jam2::EngineTransportAction::TrackRestart && revision > 0) {
+        playbackGrid_.scheduleEpoch(snapshot.transport_target_frame, snapshot.transport_musical_frame, revision);
+    } else if (snapshot.transport_action == jam2::EngineTransportAction::RecordStart &&
+               revision > recordingScheduleRevision_) {
+        playbackGrid_.scheduleEpoch(snapshot.transport_target_frame, snapshot.transport_musical_frame, revision);
+        recordingScheduleRevision_ = revision;
+        recordingCountdownStartFrame_ = snapshot.transport_countdown_start_frame;
+        recordingStartFrame_ = snapshot.transport_target_frame;
+    }
+    updatePlaybackGrid();
+}
+
+void MainWindow::handleEngineEvent(const jam2::EngineEvent& event)
+{
+    const QString text = QString::fromUtf8(
+        jam2::engine_event_text(event).data(),
+        static_cast<qsizetype>(jam2::engine_event_text(event).size()));
+    if (!event.ok || event.type == jam2::EngineEventType::Error ||
+        event.type == jam2::EngineEventType::CommandRejected) {
+        appendLog(QStringLiteral("engine event type=%1 ok=%2%3")
+            .arg(static_cast<int>(event.type))
+            .arg(event.ok ? QStringLiteral("yes") : QStringLiteral("no"))
+            .arg(text.isEmpty() ? QString{} : QStringLiteral(" message=") + text));
+    }
+    if (event.type == jam2::EngineEventType::JamRecordingStarted) {
+        jamRecordingActive_ = true;
+        updateJamRecordingControls();
+    } else if (event.type == jam2::EngineEventType::JamRecordingStopped) {
+        jamRecordingActive_ = false;
+        updateJamRecordingControls();
+    } else if (event.type == jam2::EngineEventType::TrackTakeCompleted) {
+        const QString takeId = activeTrackTakeId_;
+        const QString wav = pendingTransientCapturePath_;
+        trackTakeRecordingActive_ = false;
+        activeTrackTakeId_.clear();
+        if (stopCaptureButton_) stopCaptureButton_->setEnabled(false);
+        recordingStartFrame_ = 0;
+        recordingCountdownStartFrame_ = 0;
+        pendingCountInBars_ = 0;
+        stopMetronomeAtRecordingStart_ = false;
+        if (recordingCountdownLabel_) recordingCountdownLabel_->hide();
+        if (event.ok && !wav.isEmpty()) {
+            lastCapturePath_ = QDir::fromNativeSeparators(wav);
+            registerTransientTrackWav(wav);
+            pendingTransientCapturePath_.clear();
+            importLastCaptureToArmedLane();
+        }
+        if (loadWavButton_) loadWavButton_->setEnabled(true);
+        appendLog(event.ok
+            ? QStringLiteral("track take stopped: take_id=%1 wav=%2 frames=%3").arg(takeId, wav).arg(event.value)
+            : QStringLiteral("track take error: take_id=%1 reason=%2").arg(takeId, text));
+    }
+}
+
+void MainWindow::handleNetworkSnapshot(const jam2::NetworkSessionSnapshot& snapshot)
+{
+    QJsonObject stats{
+        {QStringLiteral("event"), QStringLiteral("mesh_stats")},
+        {QStringLiteral("peer_count"), static_cast<double>(snapshot.peers.size())},
+        {QStringLiteral("network_active_peer_count"), static_cast<double>(snapshot.mix.active_peers)},
+        {QStringLiteral("mix_contributing_peers"), static_cast<double>(snapshot.mix.contributing_peers)},
+        {QStringLiteral("mix_released_slots"), static_cast<double>(snapshot.mix.released_slots)},
+        {QStringLiteral("mix_deadline_slots"), static_cast<double>(snapshot.mix.deadline_slots)},
+        {QStringLiteral("mix_missing_peer_frames"), static_cast<double>(snapshot.mix.missing_peer_frames)},
+        {QStringLiteral("mix_capacity_drops"), static_cast<double>(snapshot.mix.capacity_drops)},
+    };
+    std::uint64_t lost = 0;
+    std::uint64_t jitterSum = 0;
+    std::uint64_t jitterSamples = 0;
+    std::uint64_t jitterMax = 0;
+    std::uint64_t rttSum = 0;
+    std::uint64_t rttSamples = 0;
+    for (const jam2::NetworkPeerSnapshot& peer : snapshot.peers) {
+        lost += peer.stream.sequence.lost;
+        jitterSum += peer.stream.jitter_sum_us;
+        jitterSamples += peer.stream.jitter_samples;
+        jitterMax = std::max(jitterMax, peer.stream.jitter_max_us);
+        rttSum += peer.stream.rtt_sum_us;
+        rttSamples += peer.stream.rtt_samples;
+        const SharedSessionController::EdgeState edge =
+            peer.descriptor.endpoint_state == jam2::PeerEndpointState::Active
+                ? SharedSessionController::EdgeState::Active
+                : peer.descriptor.endpoint_state == jam2::PeerEndpointState::Probing
+                    ? SharedSessionController::EdgeState::Probing
+                    : peer.descriptor.endpoint_state == jam2::PeerEndpointState::Failed
+                        ? SharedSessionController::EdgeState::Failed
+                        : SharedSessionController::EdgeState::Candidate;
+        const QString proof = peer.descriptor.endpoint_state == jam2::PeerEndpointState::Active
+            ? QStringLiteral("active") : peer.descriptor.endpoint_state == jam2::PeerEndpointState::Probing
+                ? QStringLiteral("probing") : peer.descriptor.endpoint_state == jam2::PeerEndpointState::Failed
+                    ? QStringLiteral("failed") : QStringLiteral("candidate");
+        sessionController_.updatePeerEdgeState(
+            peer.descriptor.peer_id.value,
+            edge,
+            proof,
+            peer.stream.expected_remote_sample_time > 0 ? QStringLiteral("receiving") : QStringLiteral("waiting"));
+    }
+    stats.insert(QStringLiteral("sequence_lost"), static_cast<double>(lost));
+    stats.insert(QStringLiteral("jitter_avg_ms"), jitterSamples > 0 ? static_cast<double>(jitterSum) / jitterSamples / 1000.0 : 0.0);
+    stats.insert(QStringLiteral("jitter_max_ms"), static_cast<double>(jitterMax) / 1000.0);
+    stats.insert(QStringLiteral("rtt_avg_ms"), rttSamples > 0 ? static_cast<double>(rttSum) / rttSamples / 1000.0 : 0.0);
+    updateStatsDisplay(stats);
 }
 
 void MainWindow::showStartJamDialog()
 {
-    if (jam2_.isRunning() && !localEngineActive_) {
+    const SharedSessionController::Role role = sessionController_.snapshot().role;
+    if (role == SharedSessionController::Role::Creator ||
+        role == SharedSessionController::Role::Joiner) {
         return;
     }
 
@@ -4335,7 +4499,7 @@ void MainWindow::showStartJamDialog()
         socketRecvBufferSpin_, osPriorityBox_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
         driftMaxCorrectionSpin_, sampleTimePlayoutCheck_, playoutDelaySpin_, jitterBufferSpin_,
         jitterBufferMaxSpin_, adaptiveCushionCheck_, adaptiveTargetSpin_, adaptiveMinSpin_,
-        adaptiveMaxSpin_, adaptiveReleaseSpin_, extraArgsEdit_,
+        adaptiveMaxSpin_, adaptiveReleaseSpin_,
     };
     for (QWidget* widget : visibleWidgets) {
         widget->show();
@@ -4398,7 +4562,6 @@ void MainWindow::showStartJamDialog()
     advancedForm->addRow(QStringLiteral("Adaptive min frames"), adaptiveMinSpin_);
     advancedForm->addRow(QStringLiteral("Adaptive max frames"), adaptiveMaxSpin_);
     advancedForm->addRow(QStringLiteral("Adaptive release ppm"), adaptiveReleaseSpin_);
-    advancedForm->addRow(QStringLiteral("Extra jam2 args"), extraArgsEdit_);
     auto* advancedBox = new QGroupBox(QStringLiteral("Engine Options"), content);
     advancedBox->setLayout(advancedForm);
     layout->addWidget(advancedBox);
@@ -4439,22 +4602,23 @@ void MainWindow::showStartJamDialog()
         socketRecvBufferSpin_, osPriorityBox_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
         driftMaxCorrectionSpin_, sampleTimePlayoutCheck_, playoutDelaySpin_, jitterBufferSpin_,
         jitterBufferMaxSpin_, adaptiveCushionCheck_, adaptiveTargetSpin_, adaptiveMinSpin_,
-        adaptiveMaxSpin_, adaptiveReleaseSpin_, extraArgsEdit_,
+        adaptiveMaxSpin_, adaptiveReleaseSpin_,
     };
     for (QWidget* widget : startWidgets) {
         widget->setParent(this);
         widget->hide();
     }
     if (result == QDialog::Accepted) {
-        sessionCreator_ = true;
         connectionLabel_->setText(QStringLiteral("Starting listener"));
-        startJam();
+        startJam(true);
     }
 }
 
 void MainWindow::showJoinJamDialog()
 {
-    if (jam2_.isRunning() && !localEngineActive_) {
+    const SharedSessionController::Role role = sessionController_.snapshot().role;
+    if (role == SharedSessionController::Role::Creator ||
+        role == SharedSessionController::Role::Joiner) {
         return;
     }
 
@@ -4528,33 +4692,47 @@ void MainWindow::showJoinJamDialog()
         widget->hide();
     }
     if (result == QDialog::Accepted) {
-        sessionCreator_ = false;
         connectionLabel_->setText(QStringLiteral("Joining"));
-        startJam();
+        startJam(false);
     }
 }
 
 void MainWindow::stopJam(bool returnToLocal)
 {
-    returnToLocalAfterStop_ = returnToLocal && !shuttingDown_;
-    const bool processWasRunning = jam2_.isRunning();
-    controlReconnectEnabled_ = false;
-    controlReconnectTimer_.stop();
-    controlServer_.close();
-    controlClient_.close();
-    pendingJoinLaunch_ = false;
-    pendingJoinSettingsReady_ = false;
-    pendingJoinMembershipReady_ = false;
-    pendingJoinBaseArgs_.clear();
-    meshActive_ = false;
+    const bool shouldReturnToLocal = returnToLocal && !shuttingDown_;
+    sessionController_.close();
+    // The Engine intentionally survives Leave so Perform can resume without a
+    // device restart. Stop the old session click after detaching the network;
+    // otherwise the audio callback keeps rendering it while the local UI has
+    // already changed back to the stopped state.
+    if (jam2_.isRunning()) {
+        submitEngineToggle(
+            jam2::EngineCommandType::SetLeaderAudioLocalClick,
+            false,
+            QStringLiteral("leave metronome leader"));
+        submitEngineToggle(
+            jam2::EngineCommandType::SetMetronomeEnabled,
+            false,
+            QStringLiteral("leave metronome enabled"));
+    }
+    if (sessionTopologyLabel_) {
+        sessionTopologyLabel_->setText(QStringLiteral("Remote Peers 0"));
+        sessionTopologyLabel_->setToolTip(QString{});
+    }
     localMeshPeerTokens_.clear();
     meshPeerEndpoints_.clear();
-    meshCoordinatorToken_.clear();
-    currentMeshPeers_.clear();
+    lastLoggedSessionSummary_.clear();
     pendingMeshInvitePopup_ = false;
     activePublicEndpoint_.clear();
-    remotePeerConnected_ = false;
-    jam2_.stop();
+    pendingPreparedTrackReadyRevision_ = 0;
+    pendingSharedTrackRevision_ = 0;
+    pendingSharedTrackHostReady_ = true;
+    pendingSharedTrackReadyTokens_.clear();
+    publishStoppedTrackStateWhenApplied_ = false;
+    pendingCountInBars_ = 0;
+    recordingCountdownStartFrame_ = 0;
+    recordingStartFrame_ = 0;
+    if (recordingCountdownLabel_) recordingCountdownLabel_->hide();
     localMetronomeRunning_ = false;
     localMetronomeLeader_ = false;
     if (trackMetronomeLabel_) {
@@ -4576,13 +4754,20 @@ void MainWindow::stopJam(bool returnToLocal)
     updateJamRecordingControls();
     updateMixControls();
     setMixRemotePeerVisible(false);
-    if (returnToLocalAfterStop_ && !processWasRunning) {
-        returnToLocalAfterStop_ = false;
-        QTimer::singleShot(0, this, [this] {
-            if (!shuttingDown_ && !jam2_.isRunning()) {
-                startLocalPerform();
+    if (shouldReturnToLocal && jam2_.isRunning()) {
+        try {
+            if (!sessionController_.startLocal(runtimeOptions())) {
+                throw std::runtime_error("local runtime failed to resume");
             }
-        });
+        } catch (const std::exception& error) {
+            appendLog(QStringLiteral("local resume failed: ") + QString::fromUtf8(error.what()));
+            return;
+        }
+        if (engineModeLabel_) engineModeLabel_->setText(QStringLiteral("Local"));
+        connectionLabel_->setText(QStringLiteral("Local"));
+        updateRuntimeControls();
+        sendMetronomeModeToJam();
+        sendMetronomePatternToJam();
     }
 }
 
@@ -4611,79 +4796,6 @@ void MainWindow::appendLog(const QString& line)
     if (logEdit_) {
         logEdit_->appendPlainText(line);
     }
-}
-
-void MainWindow::handleOutputLine(const QString& line)
-{
-    if (!line.startsWith(QStringLiteral("{\"event\":\"status\"")) &&
-        !line.startsWith(QStringLiteral("{\"event\":\"mesh_stats\"")) &&
-        !line.startsWith(QStringLiteral("mesh_stats ")) &&
-        !line.startsWith(QStringLiteral("stats "))) {
-        appendLog(line);
-    }
-    if (line.startsWith(QStringLiteral("Public UDP candidate: "))) {
-        const QString endpoint = line.mid(QStringLiteral("Public UDP candidate: ").size()).trimmed();
-        try {
-            const jam2::Endpoint parsed = jam2::parse_endpoint(endpoint.toStdString());
-            activePublicEndpoint_ = QString::fromStdString(jam2::endpoint_to_string(parsed));
-            if (publicHostEdit_) {
-                publicHostEdit_->setText(QString::fromStdString(parsed.host));
-            }
-            if (meshActive_ && controlServerMode_) {
-                meshPeerEndpoints_[meshPeerToken()] = activePublicEndpoint_;
-            }
-        } catch (const std::exception& error) {
-            appendLog(QStringLiteral("ignored invalid public UDP candidate: ") + QString::fromUtf8(error.what()));
-        }
-    }
-    if (line == QStringLiteral("Embedded network controls ready")) {
-        updateRuntimeControls();
-        sendJamCommand(localMetronomeLeader_
-            ? QStringLiteral("metro leader on")
-            : QStringLiteral("metro leader off"));
-        sendMetronomeModeToJam();
-        sendMetronomePatternToJam();
-        sendJamCommand(localMetronomeRunning_
-            ? QStringLiteral("metro on")
-            : QStringLiteral("metro off"));
-        showPendingMeshInviteUrl();
-    }
-    handleStatsLine(line);
-}
-
-void MainWindow::handleStatsLine(const QString& line)
-{
-    const bool statsLine = line.startsWith(QStringLiteral("stats "));
-    const bool meshStatsLine = line.startsWith(QStringLiteral("mesh_stats "));
-    if (!statsLine && !meshStatsLine) {
-        return;
-    }
-    QJsonObject stats;
-    stats.insert(QStringLiteral("event"), statsLine ? QStringLiteral("stats") : QStringLiteral("mesh_stats"));
-    const QRegularExpression fieldRe(QStringLiteral("(\\S+)=([^\\s]+)"));
-    auto it = fieldRe.globalMatch(line.mid(statsLine ? 6 : 11));
-    while (it.hasNext()) {
-        const QRegularExpressionMatch match = it.next();
-        const QString key = match.captured(1);
-        const QString value = match.captured(2);
-        bool ok = false;
-        const double number = value.toDouble(&ok);
-        if (ok) {
-            stats.insert(key, number);
-        } else {
-            stats.insert(key, value);
-        }
-    }
-    if (stats.contains(QStringLiteral("sent")) && !stats.contains(QStringLiteral("sent_packets"))) {
-        stats.insert(QStringLiteral("sent_packets"), stats.value(QStringLiteral("sent")).toDouble());
-    }
-    if (stats.contains(QStringLiteral("recv")) && !stats.contains(QStringLiteral("recv_packets"))) {
-        stats.insert(QStringLiteral("recv_packets"), stats.value(QStringLiteral("recv")).toDouble());
-    }
-    if (meshStatsLine) {
-        updateMixMeters(stats);
-    }
-    updateStatsDisplay(stats);
 }
 
 void MainWindow::updateStatsDisplay(const QJsonObject& stats)
@@ -4804,6 +4916,7 @@ void MainWindow::handleControlMessage(const QJsonObject& message, const QString&
         return;
     }
     const bool trackMessage =
+        type == QStringLiteral("track.ready") ||
         type == QStringLiteral("looper.recording.offer") ||
         type == QStringLiteral("looper.asset.request") ||
         type == QStringLiteral("looper.asset.start") ||
@@ -4813,13 +4926,7 @@ void MainWindow::handleControlMessage(const QJsonObject& message, const QString&
         appendLog(QStringLiteral("ignored remote track sync while local sync is disabled"));
         return;
     }
-    if (type == QStringLiteral("session.settings")) {
-        applyLeaderSettings(message.value(QStringLiteral("settings")).toObject());
-        pendingJoinSettingsReady_ = true;
-        launchPendingJoin();
-    } else if (type == QStringLiteral("session.membership")) {
-        applyMeshPeerList(message);
-    } else if (type == QStringLiteral("session.error")) {
+    if (type == QStringLiteral("session.error")) {
         const QString text = message.value(QStringLiteral("message")).toString(QStringLiteral("Session error"));
         appendLog(QStringLiteral("peer session error: ") + text);
         QMessageBox::warning(this, QStringLiteral("Jam2"), text);
@@ -4864,6 +4971,8 @@ void MainWindow::handleControlMessage(const QJsonObject& message, const QString&
         refreshSongView(QStringLiteral("lyric"));
     } else if (type == QStringLiteral("song.set")) {
         handleSongSet(message);
+    } else if (type == QStringLiteral("track.ready")) {
+        handleTrackReady(message, sourcePeerToken);
     } else if (type == QStringLiteral("looper.recording.offer")) {
         handleRecordingOffer(message, sourcePeerToken);
     } else if (type == QStringLiteral("looper.asset.request")) {
@@ -4877,23 +4986,102 @@ void MainWindow::handleControlMessage(const QJsonObject& message, const QString&
     }
 }
 
-void MainWindow::handleControlState(const QString& state, bool serverSide)
+void MainWindow::applySessionSnapshot(const SharedSessionController::Snapshot& snapshot)
 {
-    const QString displayState = !serverSide && state == QStringLiteral("TCP control authenticated")
-        ? QStringLiteral("TCP peer authenticated")
-        : state;
+    if (snapshot.role != SharedSessionController::Role::Creator &&
+        snapshot.role != SharedSessionController::Role::Joiner) {
+        return;
+    }
+    QMap<QString, QString> endpoints;
+    QSet<QString> sameMachineTokens;
+    for (const SharedSessionController::PeerSnapshot& peer : snapshot.peers) {
+        endpoints[peer.token] = peer.endpoint;
+        if (peer.sameMachine) {
+            sameMachineTokens.insert(peer.token);
+        }
+    }
+    meshPeerEndpoints_ = std::move(endpoints);
+    localMeshPeerTokens_ = std::move(sameMachineTokens);
+    maybeScheduleSharedTrackRestart();
+
+    if (snapshot.membershipRevision > 0) {
+        const QString summary = QStringLiteral(
+            "session snapshot membership_revision=%1 total_peers=%2 remote_peers=%3 "
+            "coordinator=%4 grid_authority=%5 grid_revision=%6 "
+            "arrangement_authority=%7 arrangement_revision=%8")
+            .arg(snapshot.membershipRevision)
+            .arg(snapshot.totalPeerCount)
+            .arg(snapshot.remotePeerCount)
+            .arg(snapshot.coordinatorToken.left(8), snapshot.gridAuthorityToken.left(8))
+            .arg(snapshot.gridRevision)
+            .arg(snapshot.arrangementAuthorityToken.left(8))
+            .arg(snapshot.arrangementRevision);
+        if (summary != lastLoggedSessionSummary_) {
+            lastLoggedSessionSummary_ = summary;
+            appendLog(summary);
+        }
+    }
+    if (sessionTopologyLabel_) {
+        int validRemotePeers = 0;
+        for (const SharedSessionController::PeerSnapshot& peer : snapshot.peers) {
+            if (peer.token != snapshot.localToken &&
+                peer.edgeState == SharedSessionController::EdgeState::Active) {
+                ++validRemotePeers;
+            }
+        }
+        sessionTopologyLabel_->setText(QStringLiteral("Remote Peers %1").arg(validRemotePeers));
+        sessionTopologyLabel_->setToolTip(
+            QStringLiteral("Authenticated TCP peers with an active UDP connection"));
+    }
+    updateMixRemotePeers();
+    updateTrackControls();
+}
+
+void MainWindow::handleControlEvent(
+    const jam2::control_protocol::TransportEvent& event,
+    bool serverSide)
+{
+    using jam2::control_protocol::TransportEventType;
+    QString displayState = event.detail;
+    switch (event.type) {
+    case TransportEventType::Listening:
+        displayState = QStringLiteral("Waiting for peers");
+        break;
+    case TransportEventType::Connecting:
+    case TransportEventType::Connected:
+    case TransportEventType::ChallengeSent:
+    case TransportEventType::ProofSent:
+        displayState = QStringLiteral("Connecting");
+        break;
+    case TransportEventType::Authenticated:
+        displayState = QStringLiteral("TCP peer authenticated");
+        break;
+    case TransportEventType::Disconnected:
+        displayState = serverSide ? QStringLiteral("Waiting for peers") : QStringLiteral("Reconnecting");
+        break;
+    case TransportEventType::AlreadyConnected:
+        displayState = QStringLiteral("TCP peer authenticated");
+        break;
+    case TransportEventType::Failure:
+        if (event.retryable) {
+            displayState = QStringLiteral("Reconnecting");
+        }
+        break;
+    }
     connectionLabel_->setText(displayState);
-    appendLog(QStringLiteral("control: ") + state);
-    if (state.contains(QStringLiteral("disconnected"), Qt::CaseInsensitive) ||
-        state.contains(QStringLiteral("rejected"), Qt::CaseInsensitive) ||
-        state.contains(QStringLiteral("timeout"), Qt::CaseInsensitive) ||
-        state.contains(QStringLiteral("high-water"), Qt::CaseInsensitive)) {
+    appendLog(QStringLiteral("control: ") + event.detail);
+    if (event.type == TransportEventType::Disconnected ||
+        event.type == TransportEventType::Failure) {
         if (serverSide) {
-            const ControlServer::Stats stats = controlServer_.stats();
+            const ControlServer::Stats stats = sessionController_.serverStats();
             appendLog(QStringLiteral(
-                "control_stats side=server accepted=%1 auth_rejects=%2 auth_timeouts=%3 frame_rejects=%4 "
-                "frame_timeouts=%5 tag_or_sequence_rejects=%6 output_rejects=%7 input_high_water=%8 output_high_water=%9")
+                "control_stats side=server accepted=%1 pending_cap_rejects=%2 auth_rate_limit_rejects=%3 "
+                "session_cap_rejects=%4 auth_rejects=%5 auth_timeouts=%6 frame_rejects=%7 "
+                "frame_timeouts=%8 tag_or_sequence_rejects=%9 output_rejects=%10 input_high_water=%11 output_high_water=%12")
                 .arg(stats.acceptedConnections)
+                .arg(stats.pendingCapRejects)
+                .arg(stats.authenticationRateLimitRejects)
+                .arg(stats.authenticatedCapRejects)
                 .arg(stats.authenticationRejects)
                 .arg(stats.authenticationTimeouts)
                 .arg(stats.frameRejects)
@@ -4903,7 +5091,7 @@ void MainWindow::handleControlState(const QString& state, bool serverSide)
                 .arg(stats.maxBufferedInputBytes)
                 .arg(stats.maxQueuedOutputBytes));
         } else {
-            const ControlClient::Stats stats = controlClient_.stats();
+            const ControlClient::Stats stats = sessionController_.clientStats();
             appendLog(QStringLiteral(
                 "control_stats side=client auth_rejects=%1 auth_timeouts=%2 frame_rejects=%3 frame_timeouts=%4 "
                 "tag_or_sequence_rejects=%5 output_rejects=%6 input_high_water=%7 output_high_water=%8")
@@ -4917,32 +5105,17 @@ void MainWindow::handleControlState(const QString& state, bool serverSide)
                 .arg(stats.maxQueuedOutputBytes));
         }
     }
-    if (serverSide && state == QStringLiteral("TCP peer authenticated")) {
-        remotePeerConnected_ = true;
-        controlReconnectAttempts_ = 0;
-        controlReconnectTimer_.stop();
+    if (event.type == TransportEventType::Authenticated) {
         setMixRemotePeerVisible(true);
-        sendLeaderSettings();
-        sendMetronomeSettingsToPeer();
-        if (looperProject_.trackSyncEnabled()) {
-            sendSongSnapshot();
+        if (!serverSide) {
+            for (const QJsonObject& offer : localRecordingOffers_) {
+                sendControl(offer);
+            }
         }
-    } else if (!serverSide && state == QStringLiteral("TCP control authenticated")) {
-        remotePeerConnected_ = true;
-        controlReconnectAttempts_ = 0;
-        controlReconnectTimer_.stop();
-        setMixRemotePeerVisible(true);
-        for (const QJsonObject& offer : localRecordingOffers_) {
-            sendControl(offer);
-        }
-    } else if (state.startsWith(QStringLiteral("TCP auth failed:"))) {
-        remotePeerConnected_ = false;
-        controlReconnectEnabled_ = false;
-        controlReconnectTimer_.stop();
-        pendingJoinLaunch_ = false;
-        pendingJoinSettingsReady_ = false;
-        pendingJoinMembershipReady_ = false;
-        pendingJoinBaseArgs_.clear();
+    } else if (event.type == TransportEventType::Failure && !serverSide &&
+               !event.retryable &&
+               sessionController_.snapshot().lifecycle ==
+                   SharedSessionController::Lifecycle::Failed) {
         if (startButton_) {
             startButton_->setEnabled(true);
         }
@@ -4953,174 +5126,29 @@ void MainWindow::handleControlState(const QString& state, bool serverSide)
             stopButton_->setEnabled(false);
         }
         setMixRemotePeerVisible(false);
-        QMessageBox::warning(this, QStringLiteral("Jam2"), state);
-    } else if ((jam2_.isRunning() || pendingJoinLaunch_) && controlReconnectEnabled_ &&
-        (state == QStringLiteral("TCP control disconnected") || state == QStringLiteral("TCP peer disconnected"))) {
-        remotePeerConnected_ = false;
-        setMixRemotePeerVisible(false);
+        QMessageBox::warning(this, QStringLiteral("Jam2"), event.detail);
+    } else if (event.type == TransportEventType::Disconnected) {
         if (serverSide) {
-            connectionLabel_->setText(QStringLiteral("Waiting for peers"));
-            return;
+            setMixRemotePeerVisible(sessionController_.hasPeer());
+        } else {
+            setMixRemotePeerVisible(false);
         }
-        if (meshActive_) {
-            meshPeerEndpoints_.clear();
-            meshPeerEndpoints_[meshPeerToken()] = localMeshEndpoint();
-            meshCoordinatorToken_.clear();
-            pendingJoinSettingsReady_ = false;
-            pendingJoinMembershipReady_ = false;
-        }
-        scheduleControlReconnect();
     }
 }
 
 void MainWindow::refreshControlConnection()
 {
-    if (!controlReconnectEnabled_ || controlHost_.isEmpty() || controlPort_ == 0) {
-        return;
-    }
-    if (controlServerMode_ && controlServer_.hasPeer()) {
-        sendLeaderSettings();
-        appendLog(QStringLiteral("TCP control already connected; resent leader settings"));
-        return;
-    }
-    if (!controlServerMode_ && controlClient_.isConnected()) {
+    if (sessionController_.isServer() && sessionController_.hasPeer()) {
         appendLog(QStringLiteral("TCP control already connected"));
         return;
     }
-    ++controlReconnectAttempts_;
-    if (connectionLabel_) {
-        connectionLabel_->setText(QStringLiteral("Refreshing TCP control (%1)").arg(controlReconnectAttempts_));
-    }
-    appendLog(QStringLiteral("refreshing TCP control attempt %1").arg(controlReconnectAttempts_));
-    if (controlServerMode_) {
-        if (!controlServer_.listen(controlPort_, controlSessionHex_, controlKeyHex_)) {
-            appendLog(QStringLiteral("control server refresh failed: ") + controlServer_.errorString());
-        }
-    } else {
-        controlClient_.connectToHost(
-            controlHost_,
-            controlPort_,
-            controlSessionHex_,
-            controlKeyHex_,
-            meshActive_ ? meshPeerToken() : QString(),
-            meshActive_ ? localMeshEndpoint() : QString());
-    }
-    if (controlReconnectAttempts_ >= 15) {
-        controlReconnectTimer_.stop();
-        if (connectionLabel_) {
-            connectionLabel_->setText(QStringLiteral("TCP refresh required"));
-        }
-        appendLog(QStringLiteral("TCP control auto reconnect paused; use Refresh Control to retry"));
-    }
-}
-
-void MainWindow::scheduleControlReconnect()
-{
-    if (!controlReconnectEnabled_ || controlReconnectTimer_.isActive()) {
+    if (!sessionController_.isServer() && sessionController_.isConnected()) {
+        appendLog(QStringLiteral("TCP control already connected"));
         return;
     }
-    controlReconnectAttempts_ = 0;
-    controlReconnectTimer_.start();
-}
-
-void MainWindow::sendLeaderSettings()
-{
-    if (!controlServer_.hasPeer()) {
-        return;
-    }
-    controlServer_.send(QJsonObject{
-        {QStringLiteral("type"), QStringLiteral("session.settings")},
-        {QStringLiteral("settings"), leaderSettingsMessage()},
-    });
-}
-
-QJsonObject MainWindow::leaderSettingsMessage() const
-{
-    return QJsonObject{
-        {QStringLiteral("profile"), profileBox_ ? profileBox_->currentData().toString() : QStringLiteral("fast")},
-        {QStringLiteral("sample_rate"), sampleRateSpin_->value()},
-        {QStringLiteral("audio_buffer_size"), bufferSizeSpin_->value()},
-        {QStringLiteral("frame_size"), frameSizeSpin_->value()},
-        {QStringLiteral("playback_prefill_frames"), prefillSpin_->value()},
-        {QStringLiteral("playback_max_frames"), playbackMaxSpin_->value()},
-        {QStringLiteral("capture_ring_frames"), captureRingSpin_->value()},
-        {QStringLiteral("playback_ring_frames"), playbackRingSpin_->value()},
-        {QStringLiteral("stats_warmup_ms"), statsWarmupMsSpin_->value()},
-        {QStringLiteral("socket_send_buffer"), socketSendBufferSpin_->value()},
-        {QStringLiteral("socket_recv_buffer"), socketRecvBufferSpin_->value()},
-        {QStringLiteral("drift_correction"), driftCorrectionCheck_->isChecked()},
-        {QStringLiteral("drift_smoothing"), driftSmoothingSpin_->value()},
-        {QStringLiteral("drift_deadband_ppm"), driftDeadbandSpin_->value()},
-        {QStringLiteral("drift_max_correction_ppm"), driftMaxCorrectionSpin_->value()},
-        {QStringLiteral("bpm"), metronomeBpmSpin_ ? metronomeBpmSpin_->value() : bpmSpin_->value()},
-        {QStringLiteral("remote_level"), gainFromDb(static_cast<double>(remoteLevelSlider_->value()))},
-        {QStringLiteral("metronome_mode"), metronomeModeBox_->currentText()},
-        {QStringLiteral("metronome_compensation_max_ms"), metronomeCompensationMaxSpin_ ? metronomeCompensationMaxSpin_->value() : 250.0},
-        {QStringLiteral("metronome_compensation_smoothing_ms"), metronomeCompensationSmoothingSpin_ ? metronomeCompensationSmoothingSpin_->value() : 750.0},
-        {QStringLiteral("metronome_compensation_deadband_ms"), metronomeCompensationDeadbandSpin_ ? metronomeCompensationDeadbandSpin_->value() : 1.0},
-        {QStringLiteral("metronome_compensation_slew_ms_per_sec"), metronomeCompensationSlewSpin_ ? metronomeCompensationSlewSpin_->value() : 40.0},
-        {QStringLiteral("sample_time_playout"), sampleTimePlayoutCheck_->isChecked()},
-        {QStringLiteral("playout_delay_frames"), playoutDelaySpin_->value()},
-        {QStringLiteral("jitter_buffer_frames"), jitterBufferSpin_->value()},
-        {QStringLiteral("jitter_buffer_max_frames"), jitterBufferMaxSpin_->value()},
-        {QStringLiteral("adaptive_playback_cushion"), adaptiveCushionCheck_->isChecked()},
-        {QStringLiteral("adaptive_target_frames"), adaptiveTargetSpin_->value()},
-        {QStringLiteral("adaptive_min_frames"), adaptiveMinSpin_->value()},
-        {QStringLiteral("adaptive_max_frames"), adaptiveMaxSpin_->value()},
-        {QStringLiteral("adaptive_release_ppm"), adaptiveReleaseSpin_->value()},
-    };
-}
-
-void MainWindow::applyLeaderSettings(const QJsonObject& settings)
-{
-    applyTuningProfileName(settings.value(QStringLiteral("profile")).toString(
-        profileBox_ ? profileBox_->currentData().toString() : QStringLiteral("fast")));
-    sampleRateSpin_->setValue(settings.value(QStringLiteral("sample_rate")).toInt(sampleRateSpin_->value()));
-    bufferSizeSpin_->setValue(settings.value(QStringLiteral("audio_buffer_size")).toInt(bufferSizeSpin_->value()));
-    frameSizeSpin_->setValue(settings.value(QStringLiteral("frame_size")).toInt(frameSizeSpin_->value()));
-    prefillSpin_->setValue(settings.value(QStringLiteral("playback_prefill_frames")).toInt(prefillSpin_->value()));
-    playbackMaxSpin_->setValue(settings.value(QStringLiteral("playback_max_frames")).toInt(playbackMaxSpin_->value()));
-    captureRingSpin_->setValue(settings.value(QStringLiteral("capture_ring_frames")).toInt(captureRingSpin_->value()));
-    playbackRingSpin_->setValue(settings.value(QStringLiteral("playback_ring_frames")).toInt(playbackRingSpin_->value()));
-    statsWarmupMsSpin_->setValue(settings.value(QStringLiteral("stats_warmup_ms")).toInt(statsWarmupMsSpin_->value()));
-    socketSendBufferSpin_->setValue(settings.value(QStringLiteral("socket_send_buffer")).toInt(socketSendBufferSpin_->value()));
-    socketRecvBufferSpin_->setValue(settings.value(QStringLiteral("socket_recv_buffer")).toInt(socketRecvBufferSpin_->value()));
-    driftCorrectionCheck_->setChecked(settings.value(QStringLiteral("drift_correction")).toBool(driftCorrectionCheck_->isChecked()));
-    driftSmoothingSpin_->setValue(settings.value(QStringLiteral("drift_smoothing")).toDouble(driftSmoothingSpin_->value()));
-    driftDeadbandSpin_->setValue(settings.value(QStringLiteral("drift_deadband_ppm")).toInt(driftDeadbandSpin_->value()));
-    driftMaxCorrectionSpin_->setValue(settings.value(QStringLiteral("drift_max_correction_ppm")).toInt(driftMaxCorrectionSpin_->value()));
-    if (metronomeBpmSpin_) {
-        metronomeBpmSpin_->setValue(settings.value(QStringLiteral("bpm")).toInt(metronomeBpmSpin_->value()));
-    }
-    remoteLevelSlider_->setValue(qBound(-60, qRound(dbFromGain(settings.value(QStringLiteral("remote_level")).toDouble(
-        gainFromDb(static_cast<double>(remoteLevelSlider_->value()))))), 12));
-    const QString mode = settings.value(QStringLiteral("metronome_mode")).toString(metronomeModeBox_->currentText());
-    const int modeIndex = metronomeModeBox_->findText(mode);
-    if (modeIndex >= 0) {
-        metronomeModeBox_->setCurrentIndex(modeIndex);
-    }
-    if (metronomeCompensationMaxSpin_) {
-        metronomeCompensationMaxSpin_->setValue(settings.value(QStringLiteral("metronome_compensation_max_ms")).toDouble(metronomeCompensationMaxSpin_->value()));
-    }
-    if (metronomeCompensationSmoothingSpin_) {
-        metronomeCompensationSmoothingSpin_->setValue(settings.value(QStringLiteral("metronome_compensation_smoothing_ms")).toDouble(metronomeCompensationSmoothingSpin_->value()));
-    }
-    if (metronomeCompensationDeadbandSpin_) {
-        metronomeCompensationDeadbandSpin_->setValue(settings.value(QStringLiteral("metronome_compensation_deadband_ms")).toDouble(metronomeCompensationDeadbandSpin_->value()));
-    }
-    if (metronomeCompensationSlewSpin_) {
-        metronomeCompensationSlewSpin_->setValue(settings.value(QStringLiteral("metronome_compensation_slew_ms_per_sec")).toDouble(metronomeCompensationSlewSpin_->value()));
-    }
-    updateMetronomeCompensationVisibility();
-    sampleTimePlayoutCheck_->setChecked(settings.value(QStringLiteral("sample_time_playout")).toBool(sampleTimePlayoutCheck_->isChecked()));
-    playoutDelaySpin_->setValue(settings.value(QStringLiteral("playout_delay_frames")).toInt(playoutDelaySpin_->value()));
-    jitterBufferSpin_->setValue(settings.value(QStringLiteral("jitter_buffer_frames")).toInt(jitterBufferSpin_->value()));
-    jitterBufferMaxSpin_->setValue(settings.value(QStringLiteral("jitter_buffer_max_frames")).toInt(jitterBufferMaxSpin_->value()));
-    adaptiveCushionCheck_->setChecked(settings.value(QStringLiteral("adaptive_playback_cushion")).toBool(adaptiveCushionCheck_->isChecked()));
-    adaptiveTargetSpin_->setValue(settings.value(QStringLiteral("adaptive_target_frames")).toInt(adaptiveTargetSpin_->value()));
-    adaptiveMinSpin_->setValue(settings.value(QStringLiteral("adaptive_min_frames")).toInt(adaptiveMinSpin_->value()));
-    adaptiveMaxSpin_->setValue(settings.value(QStringLiteral("adaptive_max_frames")).toInt(adaptiveMaxSpin_->value()));
-    adaptiveReleaseSpin_->setValue(settings.value(QStringLiteral("adaptive_release_ppm")).toInt(adaptiveReleaseSpin_->value()));
+    appendLog(QStringLiteral("refreshing TCP control"));
+    sessionController_.setReconnectEnabled(true);
+    sessionController_.refresh();
 }
 
 void MainWindow::applyTuningProfileName(const QString& name)
@@ -5190,13 +5218,12 @@ QString MainWindow::meshPeerToken()
     return meshPeerToken_;
 }
 
-QString MainWindow::localMeshEndpoint() const
+QString MainWindow::localMeshEndpoint(bool createSession) const
 {
-    if (sessionCreator_ && !activePublicEndpoint_.isEmpty()) {
+    if (createSession && !activePublicEndpoint_.isEmpty()) {
         return activePublicEndpoint_;
     }
-    const bool listenMode = sessionCreator_;
-    QString host = listenMode && publicHostEdit_ && !publicHostEdit_->text().trimmed().isEmpty()
+    QString host = createSession && publicHostEdit_ && !publicHostEdit_->text().trimmed().isEmpty()
         ? publicHostEdit_->text().trimmed()
         : (bindHostEdit_ && !bindHostEdit_->text().trimmed().isEmpty()
             ? bindHostEdit_->text().trimmed()
@@ -5234,27 +5261,9 @@ quint64 MainWindow::meshPeerIdForToken(const QString& token) const
     return ok && value != 0 ? value : 1ULL;
 }
 
-QStringList MainWindow::meshPeerSpecsExcludingSelf() const
-{
-    QStringList peers;
-    const QString self = meshPeerToken_;
-    for (auto it = meshPeerEndpoints_.cbegin(); it != meshPeerEndpoints_.cend(); ++it) {
-        if (it.key() == self || it.value().isEmpty()) {
-            continue;
-        }
-        const QString spec = QStringLiteral("%1@%2")
-            .arg(meshPeerIdForToken(it.key()))
-            .arg(it.value());
-        if (!peers.contains(spec)) {
-            peers << spec;
-        }
-    }
-    return peers;
-}
-
 void MainWindow::handleMeshPeerAuthenticated(const QString& token, const QJsonObject& message)
 {
-    if (!meshActive_ || token.isEmpty()) {
+    if (!sessionController_.isServer() || token.isEmpty()) {
         return;
     }
     const QString tcpPeerHost = normalizedNetworkHost(
@@ -5267,186 +5276,17 @@ void MainWindow::handleMeshPeerAuthenticated(const QString& token, const QJsonOb
     }
     appendLog(QStringLiteral("mesh peer TCP source token=%1 host=%2 same_machine=%3")
         .arg(token.left(8), tcpPeerHost, localMachinePeer ? QStringLiteral("yes") : QStringLiteral("no")));
-    QString endpoint = message.value(QStringLiteral("udp_endpoint")).toString();
-    if (endpoint.isEmpty()) {
-        appendLog(QStringLiteral("mesh peer authenticated without UDP endpoint token=") + token.left(8));
-        return;
+    if (looperProject_.trackSyncEnabled() && jam2_.isRunning()) {
+        // Publish a fresh arrangement revision so a late or reconnected peer
+        // participates in the same asset-readiness barrier and transport target
+        // as every already-present peer.
+        sendSongSnapshot();
     }
-    const int separator = endpoint.lastIndexOf(QLatin1Char(':'));
-    const QString host = separator > 0 ? endpoint.left(separator) : endpoint;
-    if (host == QStringLiteral("0.0.0.0") || host == QStringLiteral("::") || host == QStringLiteral("[::]")) {
-        if (tcpPeerHost.isEmpty()) {
-            appendLog(QStringLiteral("mesh peer advertised wildcard UDP endpoint without TCP peer host token=") + token.left(8));
-            return;
-        }
-        endpoint = tcpPeerHost + endpoint.mid(separator);
-        appendLog(QStringLiteral("mesh peer wildcard endpoint resolved via TCP host: %1").arg(endpoint));
-    }
-    if (meshMaxPeersSpin_ && meshMaxPeersSpin_->value() > 0 &&
-        !meshPeerEndpoints_.contains(token) &&
-        meshPeerEndpoints_.size() >= meshMaxPeersSpin_->value() + 1) {
-        controlServer_.sendTo(token, QJsonObject{
-            {QStringLiteral("type"), QStringLiteral("session.error")},
-            {QStringLiteral("message"), QStringLiteral("Mesh peer cap reached")},
-        }, true);
-        appendLog(QStringLiteral("mesh peer rejected by max peer cap"));
-        return;
-    }
-    const bool changed = meshPeerEndpoints_.value(token) != endpoint;
-    meshPeerEndpoints_[token] = endpoint;
-    updateMixRemotePeers();
-    if (changed) {
-        appendLog(QStringLiteral("mesh peer endpoint %1 -> %2").arg(token.left(8), endpoint));
-        broadcastMeshPeerList();
-        restartMeshEngineFromPeerList();
-    }
-}
-
-void MainWindow::broadcastMeshPeerList()
-{
-    const QString selfToken = meshPeerToken();
-    for (auto observer = meshPeerEndpoints_.cbegin(); observer != meshPeerEndpoints_.cend(); ++observer) {
-        if (observer.key() == selfToken) {
-            continue;
-        }
-        const bool observerIsLocal = localMeshPeerTokens_.contains(observer.key());
-        QJsonArray peers;
-        int index = 1;
-        for (auto it = meshPeerEndpoints_.cbegin(); it != meshPeerEndpoints_.cend(); ++it, ++index) {
-            QString endpoint = it.value();
-            if (observerIsLocal && it.key() == selfToken) {
-                endpoint = endpointWithHost(endpoint, QStringLiteral("127.0.0.1"));
-            }
-            peers.append(QJsonObject{
-                {QStringLiteral("id"), QStringLiteral("peer%1").arg(index)},
-                {QStringLiteral("token"), it.key()},
-                {QStringLiteral("endpoint"), endpoint},
-            });
-        }
-        controlServer_.sendTo(observer.key(), QJsonObject{
-            {QStringLiteral("type"), QStringLiteral("session.membership")},
-            {QStringLiteral("session"), sessionHex()},
-            {QStringLiteral("coordinator_token"), meshCoordinatorToken_},
-            {QStringLiteral("peers"), peers},
-        });
-    }
-}
-
-void MainWindow::applyMeshPeerList(const QJsonObject& message)
-{
-    const QString coordinatorToken = message.value(QStringLiteral("coordinator_token")).toString();
-    QMap<QString, QString> endpoints;
-    const QJsonArray peers = message.value(QStringLiteral("peers")).toArray();
-    for (const QJsonValue& value : peers) {
-        const QJsonObject peer = value.toObject();
-        const QString token = peer.value(QStringLiteral("token")).toString();
-        const QString endpoint = peer.value(QStringLiteral("endpoint")).toString();
-        if (!token.isEmpty() && !endpoint.isEmpty()) {
-            endpoints[token] = endpoint;
-        }
-    }
-    const QString selfToken = meshPeerToken();
-    if (coordinatorToken.isEmpty() || coordinatorToken == selfToken ||
-        !endpoints.contains(selfToken) || !endpoints.contains(coordinatorToken)) {
-        pendingJoinMembershipReady_ = false;
-        appendLog(QStringLiteral("rejected incomplete network membership; waiting for coordinator and local peer entries"));
-        return;
-    }
-    meshCoordinatorToken_ = coordinatorToken;
-    meshPeerEndpoints_ = std::move(endpoints);
-    pendingJoinMembershipReady_ = true;
-    updateMixRemotePeers();
-    if (pendingJoinLaunch_) {
-        launchPendingJoin();
-    } else {
-        restartMeshEngineFromPeerList();
-    }
-}
-
-void MainWindow::restartMeshEngineFromPeerList()
-{
-    if (!meshActive_) {
-        return;
-    }
-    const QString selfToken = meshPeerToken();
-    if (!controlServerMode_ &&
-        (meshCoordinatorToken_.isEmpty() || meshCoordinatorToken_ == selfToken ||
-         !meshPeerEndpoints_.contains(meshCoordinatorToken_))) {
-        appendLog(QStringLiteral("network launch deferred until coordinator membership is complete"));
-        return;
-    }
-    const QStringList peers = meshPeerSpecsExcludingSelf();
-    updateMixRemotePeers();
-    if (jam2_.isRunning() && peers == currentMeshPeers_) {
-        return;
-    }
-    currentMeshPeers_ = peers;
-    if (jam2_.isRunning() && jam2_.updatePeers(peers)) {
-        appendLog(QStringLiteral("updated embedded network membership without restarting the audio engine"));
-        return;
-    }
-    QStringList args;
-    args << QStringLiteral("network") << QStringLiteral("_run")
-         << QStringLiteral("--bind") << meshBindEndpoint()
-         << QStringLiteral("--session-id") << sessionHex()
-         << QStringLiteral("--session-key") << keyHex()
-         << QStringLiteral("--bootstrap-role")
-         << (controlServerMode_ ? QStringLiteral("creator") : QStringLiteral("joiner"))
-         << QStringLiteral("--local-peer-id") << QString::number(meshPeerIdForToken(meshPeerToken()))
-         << QStringLiteral("--bootstrap-coordinator-peer-id") << QString::number(meshPeerIdForToken(meshCoordinatorToken_))
-         << QStringLiteral("--peers") << peers.join(QLatin1Char(','));
-    args << commonJamArgs(false);
-    if (controlServerMode_) {
-        args << QStringLiteral("--grid-coordinator") << QStringLiteral("on");
-    }
-    if (jam2_.isRunning()) {
-        appendLog(QStringLiteral("embedded membership update unavailable; restarting only the network adapter"));
-        meshRestarting_ = true;
-        jam2_.stop();
-    }
-    pendingJoinLaunch_ = false;
-    pendingJoinBaseArgs_.clear();
-    launchJamProcess(args);
-}
-
-void MainWindow::launchPendingJoin()
-{
-    if (!pendingJoinLaunch_ || jam2_.isRunning()) {
-        return;
-    }
-    if (!pendingJoinSettingsReady_ || !pendingJoinMembershipReady_) {
-        return;
-    }
-    const QString selfToken = meshPeerToken();
-    if (meshCoordinatorToken_.isEmpty() || meshCoordinatorToken_ == selfToken ||
-        !meshPeerEndpoints_.contains(selfToken) || !meshPeerEndpoints_.contains(meshCoordinatorToken_)) {
-        pendingJoinMembershipReady_ = false;
-        appendLog(QStringLiteral("network launch deferred because membership does not identify both joiner and coordinator"));
-        return;
-    }
-    if (!selectedDeviceSupportsSampleRate(sampleRateSpin_->value())) {
-        const QString message = QStringLiteral("Selected joiner audio device does not support leader sample rate %1").arg(sampleRateSpin_->value());
-        appendLog(message);
-        sendControl(QJsonObject{{QStringLiteral("type"), QStringLiteral("session.error")}, {QStringLiteral("message"), message}});
-        QMessageBox::warning(this, QStringLiteral("Jam2"), message);
-        pendingJoinLaunch_ = false;
-        return;
-    }
-    if (meshActive_) {
-        restartMeshEngineFromPeerList();
-        return;
-    }
-    QStringList args = pendingJoinBaseArgs_;
-    args << commonJamArgs(false);
-    pendingJoinLaunch_ = false;
-    pendingJoinBaseArgs_.clear();
-    launchJamProcess(args);
 }
 
 void MainWindow::sendControl(const QJsonObject& message)
 {
-    controlServer_.send(message);
-    controlClient_.send(message);
+    sessionController_.send(message);
 }
 
 void MainWindow::updateRuntimeControls()
@@ -5456,13 +5296,16 @@ void MainWindow::updateRuntimeControls()
     }
     const double metronomeLevel = gainFromDb(static_cast<double>(metronomeLevelSlider_ ? metronomeLevelSlider_->value() : -10));
     const double remoteLevel = gainFromDb(static_cast<double>(remoteLevelSlider_ ? remoteLevelSlider_->value() : 0));
-    sendJamCommand(QStringLiteral("metro level %1").arg(metronomeLevel, 0, 'f', 3));
-    sendJamCommand(QStringLiteral("remote level %1").arg(remoteLevel, 0, 'f', 3));
+    submitEngineGain(jam2::EngineCommandType::SetMetronomeLevel, metronomeLevel, QStringLiteral("metronome level"));
+    submitEngineGain(jam2::EngineCommandType::SetRemoteLevel, remoteLevel, QStringLiteral("remote level"));
     const double sendLevel = gainFromDb(static_cast<double>(mixSendLevelSlider_ ? mixSendLevelSlider_->value() : 0));
     const double monitorLevel = gainFromDb(static_cast<double>(mixMonitorLevelSlider_ ? mixMonitorLevelSlider_->value() : -18));
-    sendJamCommand(QStringLiteral("send level %1").arg(sendLevel, 0, 'f', 3));
-    sendJamCommand(QStringLiteral("monitor %1").arg(mixMonitorCheck_ && mixMonitorCheck_->isChecked() ? QStringLiteral("on") : QStringLiteral("off")));
-    sendJamCommand(QStringLiteral("monitor level %1").arg(monitorLevel, 0, 'f', 3));
+    submitEngineGain(jam2::EngineCommandType::SetSendLevel, sendLevel, QStringLiteral("send level"));
+    submitEngineToggle(
+        jam2::EngineCommandType::SetLocalMonitorEnabled,
+        mixMonitorCheck_ && mixMonitorCheck_->isChecked(),
+        QStringLiteral("local monitor"));
+    submitEngineGain(jam2::EngineCommandType::SetLocalMonitorLevel, monitorLevel, QStringLiteral("monitor level"));
 }
 
 void MainWindow::refreshLooperLanes()
@@ -5959,12 +5802,22 @@ void MainWindow::startArmedLooperLaneRecording()
         }
         appendLog(countInText);
         if (engineInput) {
+            pendingCountInBars_ = 0;
             stopMetronomeAtRecordingStart_ = countInMetronome && !keepMetronome;
-            startInputCapture(0, bars);
+            if (!playbackGrid_.position().running) {
+                pendingCountInBars_ = bars;
+                if (recordingCountdownLabel_) {
+                    recordingCountdownLabel_->setText(QStringLiteral("WAITING FOR NEXT BAR..."));
+                    recordingCountdownLabel_->show();
+                }
+            } else {
+                startInputCapture(0, bars);
+            }
         } else {
             startLoopbackCapture();
         }
     } else {
+        pendingCountInBars_ = 0;
         if (engineInput) {
             startInputCapture(0, 0);
         } else {
@@ -6217,9 +6070,9 @@ void MainWindow::editSelectedLooperLaneRegion()
 
 void MainWindow::syncLooperArrangement()
 {
-    if (looperProject_.trackSyncEnabled() && jam2_.isRunning() && controlServerMode_) {
+    if (looperProject_.trackSyncEnabled() && jam2_.isRunning() && sessionController_.isServer()) {
         sendSongSnapshot();
-    } else if (looperProject_.trackSyncEnabled() && jam2_.isRunning() && !controlServerMode_) {
+    } else if (looperProject_.trackSyncEnabled() && jam2_.isRunning() && !sessionController_.isServer()) {
         appendLog(QStringLiteral("local arrangement edit kept local; host owns Track Sync revisions"));
     }
 }
@@ -6443,7 +6296,6 @@ void MainWindow::applyPreparedMixResult(PreparedMixResult result)
             .arg(preparedMixCoalesced_)
             .arg(preparedMixFailures_));
         playPreparedMixWhenReady_ = false;
-        restartPreparedMixWhenReady_ = false;
         return;
     }
     try {
@@ -6463,15 +6315,26 @@ void MainWindow::applyPreparedMixResult(PreparedMixResult result)
             .arg(preparedMixRequests_)
             .arg(preparedMixCoalesced_)
             .arg(preparedMixFailures_));
-        if (playPreparedMixWhenReady_) {
+        if (sessionController_.isServer() && pendingSharedTrackRevision_ > 0) {
+            pendingSharedTrackHostReady_ = true;
+            maybeScheduleSharedTrackRestart();
+        }
+        if (pendingPreparedTrackReadyRevision_ > 0) {
+            const int revision = pendingPreparedTrackReadyRevision_;
+            pendingPreparedTrackReadyRevision_ = 0;
             playPreparedMixWhenReady_ = false;
-            sendJamCommand(QStringLiteral("track restart"));
+            sendControl(QJsonObject{
+                {QStringLiteral("type"), QStringLiteral("track.ready")},
+                {QStringLiteral("arrangement_revision"), revision},
+            });
+            appendLog(QStringLiteral("prepared synchronized track revision %1; waiting for authority target")
+                .arg(revision));
+        } else if (playPreparedMixWhenReady_) {
+            playPreparedMixWhenReady_ = false;
+            restartPreparedTrackQuantized();
             if (gridScheduleLabel_) {
                 gridScheduleLabel_->setText(QStringLiteral("Track restart: waiting for engine bar schedule"));
             }
-        } else if (restartPreparedMixWhenReady_) {
-            restartPreparedMixWhenReady_ = false;
-            sendJamCommand(QStringLiteral("track restart"));
         }
     } catch (const std::exception& error) {
         preparedMix_.error = QString::fromUtf8(error.what());
@@ -6480,7 +6343,6 @@ void MainWindow::applyPreparedMixResult(PreparedMixResult result)
             .arg(preparedMix_.error)
             .arg(preparedMixFailures_));
         playPreparedMixWhenReady_ = false;
-        restartPreparedMixWhenReady_ = false;
     }
 }
 
@@ -6489,7 +6351,10 @@ void MainWindow::loadPreparedMixIntoEngine()
     if (!jam2_.isRunning() || preparedMix_.path.isEmpty() || !preparedMix_.error.isEmpty()) {
         return;
     }
-    sendJamCommand(QStringLiteral("track load %1").arg(QDir::toNativeSeparators(preparedMix_.path)));
+    submitEngineText(
+        jam2::EngineCommandType::LoadPreparedTrack,
+        QDir::toNativeSeparators(preparedMix_.path),
+        QStringLiteral("load prepared track"));
     const auto& model = trackController_.model();
     if (model.loopEnabled) {
         const qint64 loopStartFrame = model.loopStartSeconds >= 0.0
@@ -6498,9 +6363,12 @@ void MainWindow::loadPreparedMixIntoEngine()
         const qint64 loopEndFrame = model.loopEndSeconds > model.loopStartSeconds
             ? qMax<qint64>(loopStartFrame + 1, static_cast<qint64>(std::llround(model.loopEndSeconds * preparedSourceSampleRate_)))
             : qMax<qint64>(loopStartFrame + 1, preparedMix_.frames);
-        sendJamCommand(QStringLiteral("track loop on %1 %2").arg(loopStartFrame).arg(loopEndFrame));
+        setPreparedTrackLoop(
+            true,
+            static_cast<std::uint64_t>(loopStartFrame),
+            static_cast<std::uint64_t>(loopEndFrame));
     } else {
-        sendJamCommand(QStringLiteral("track loop off"));
+        setPreparedTrackLoop(false);
     }
     sendPreparedTrackLevel();
 }
@@ -6508,7 +6376,7 @@ void MainWindow::loadPreparedMixIntoEngine()
 void MainWindow::sendPreparedTrackLevel()
 {
     const double gain = gainFromDb(trackController_.model().trackGainDb);
-    sendJamCommand(QStringLiteral("track level %1").arg(gain, 0, 'f', 6));
+    submitEngineGain(jam2::EngineCommandType::PreparedSetLevel, gain, QStringLiteral("prepared track level"));
 }
 
 void MainWindow::updateTrackControls()
@@ -6592,6 +6460,14 @@ void MainWindow::updateTrackControls()
     if (trackSyncCheck_) {
         const QSignalBlocker blocker(trackSyncCheck_);
         trackSyncCheck_->setChecked(looperProject_.trackSyncEnabled());
+    }
+    if (playTrackButton_) {
+        playTrackButton_->setEnabled(true);
+        playTrackButton_->setToolTip(QString{});
+    }
+    if (stopTrackButton_) {
+        stopTrackButton_->setEnabled(true);
+        stopTrackButton_->setToolTip(QString{});
     }
 }
 
@@ -6709,11 +6585,11 @@ void MainWindow::startInputCapture(std::uint64_t targetFrame, int countInBars)
     lastCapturePath_ = output;
     lastCaptureSummary_ = QJsonObject{};
     activeTrackTakeId_ = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    sendJamCommand(QStringLiteral("track_take arm input %1 %2").arg(activeTrackTakeId_, QDir::toNativeSeparators(output)));
+    armTrackTake(activeTrackTakeId_, QDir::toNativeSeparators(output));
     if (countInBars >= 0) {
-        sendJamCommand(QStringLiteral("track_take start_quantized %1 %2").arg(activeTrackTakeId_).arg(countInBars));
+        startTrackTakeQuantized(countInBars);
     } else {
-        sendJamCommand(QStringLiteral("track_take start %1 %2").arg(activeTrackTakeId_).arg(targetFrame));
+        startTrackTake(targetFrame);
     }
     trackTakeRecordingActive_ = true;
     const QString startText = countInBars >= 0
@@ -6734,7 +6610,10 @@ void MainWindow::startInputCapture(std::uint64_t targetFrame, int countInBars)
     if (countInBars < 0 && (!captureManualStopCheck_ || !captureManualStopCheck_->isChecked())) {
         QTimer::singleShot(captureDurationSpin_->value() * 1000, this, [this] {
             if (trackTakeRecordingActive_) {
-                runGridLockedEngineAction(QStringLiteral("record.stop"), [this](std::uint64_t stopFrame) { stopInputCapture(stopFrame); });
+                runGridLockedEngineAction(
+                    QStringLiteral("record.stop"),
+                    [this](std::uint64_t stopFrame) { stopInputCapture(stopFrame); },
+                    true);
             }
         });
     }
@@ -6816,7 +6695,7 @@ void MainWindow::startLoopbackCapture()
 void MainWindow::stopInputCapture(std::uint64_t targetFrame)
 {
     if (trackTakeRecordingActive_ && !activeTrackTakeId_.isEmpty()) {
-        sendJamCommand(QStringLiteral("track_take stop %1 %2").arg(activeTrackTakeId_).arg(targetFrame));
+        stopTrackTake(targetFrame);
         const QString stopText = QStringLiteral("Recording: stop requested target_frame=%1").arg(targetFrame);
         if (gridScheduleLabel_) {
             gridScheduleLabel_->setText(stopText);
@@ -6886,13 +6765,33 @@ void MainWindow::playTrack()
         QMessageBox::warning(this, QStringLiteral("Jam2 Track"), QStringLiteral("Start the local engine before playing the prepared mix."));
         return;
     }
+    const SharedSessionController::Snapshot session = sessionController_.snapshot();
+    publishStoppedTrackStateWhenApplied_ = false;
+    const bool sharedAuthority = looperProject_.trackSyncEnabled() &&
+        session.role == SharedSessionController::Role::Creator && session.remotePeerCount > 0;
     if (preparedMixWorkerRunning_ || preparedMix_.path.isEmpty() || !preparedMix_.error.isEmpty()) {
+        if (sharedAuthority) {
+            playPreparedMixWhenReady_ = false;
+            regeneratePreparedMix();
+            sendSongSnapshot(true);
+            if (gridScheduleLabel_) {
+                gridScheduleLabel_->setText(QStringLiteral("Track play: waiting for shared asset readiness"));
+            }
+            return;
+        }
         playPreparedMixWhenReady_ = true;
         regeneratePreparedMix();
         return;
     }
+    if (sharedAuthority) {
+        sendSongSnapshot(true);
+        if (gridScheduleLabel_) {
+            gridScheduleLabel_->setText(QStringLiteral("Track play: waiting for shared asset readiness"));
+        }
+        return;
+    }
     loadPreparedMixIntoEngine();
-    sendJamCommand(QStringLiteral("track restart"));
+    restartPreparedTrackQuantized();
     if (gridScheduleLabel_) {
         gridScheduleLabel_->setText(QStringLiteral("Track restart: waiting for engine bar schedule"));
     }
@@ -6904,7 +6803,22 @@ void MainWindow::stopTrack(std::uint64_t targetFrame)
         QMessageBox::warning(this, QStringLiteral("Jam2 Track"), QStringLiteral("Start the local engine before stopping the prepared mix."));
         return;
     }
-    sendJamCommand(QStringLiteral("track stop %1").arg(targetFrame));
+    submitEngineFrame(jam2::EngineCommandType::PreparedStop, targetFrame, QStringLiteral("stop prepared track"));
+    if (looperProject_.trackSyncEnabled()) {
+        jam2::EngineCommand transport;
+        transport.type = jam2::EngineCommandType::ScheduleTransport;
+        transport.transport_action = jam2::EngineTransportAction::TrackStop;
+        transport.transport_target_frame = targetFrame;
+        transport.transport_musical_frame = playbackGrid_.position().currentFrame;
+        transport.transport_countdown_start_frame = targetFrame;
+        (void)submitEngineCommand(transport, QStringLiteral("stop prepared track transport"));
+    }
+    if (looperProject_.trackSyncEnabled() && sessionController_.isServer()) {
+        pendingSharedTrackRevision_ = 0;
+        pendingSharedTrackHostReady_ = true;
+        pendingSharedTrackReadyTokens_.clear();
+        publishStoppedTrackStateWhenApplied_ = true;
+    }
     updateTrackTimeline();
 }
 
@@ -6994,8 +6908,14 @@ void MainWindow::startTrackMetronome()
         localMetronomeRunning_ = true;
         localMetronomeLeader_ = true;
         updateRuntimeControls();
-        sendJamCommand(QStringLiteral("metro leader on"));
-        sendJamCommand(QStringLiteral("metro on"));
+        submitEngineToggle(
+            jam2::EngineCommandType::SetLeaderAudioLocalClick,
+            true,
+            QStringLiteral("metronome leader"));
+        submitEngineToggle(
+            jam2::EngineCommandType::SetMetronomeEnabled,
+            true,
+            QStringLiteral("metronome enabled"));
         sendMetronomeSettingsToPeer();
         if (trackMetronomeLabel_) {
             trackMetronomeLabel_->setText(QStringLiteral("Jam metronome running"));
@@ -7021,8 +6941,14 @@ void MainWindow::stopTrackMetronome()
     localMetronomeRunning_ = false;
     localMetronomeLeader_ = false;
     if (jamMetronomeWasRunning) {
-        sendJamCommand(QStringLiteral("metro leader off"));
-        sendJamCommand(QStringLiteral("metro off"));
+        submitEngineToggle(
+            jam2::EngineCommandType::SetLeaderAudioLocalClick,
+            false,
+            QStringLiteral("metronome leader"));
+        submitEngineToggle(
+            jam2::EngineCommandType::SetMetronomeEnabled,
+            false,
+            QStringLiteral("metronome enabled"));
         sendMetronomeSettingsToPeer();
     }
     if (trackMetronomeLabel_) {
@@ -7140,7 +7066,11 @@ void MainWindow::sendMetronomeModeToJam()
     if (!jam2_.isRunning() || !metronomeModeBox_) {
         return;
     }
-    sendJamCommand(QStringLiteral("metro mode %1").arg(metronomeModeBox_->currentText()));
+    jam2::EngineCommand command;
+    command.type = jam2::EngineCommandType::SetMetronomeMode;
+    command.value = metronomeModeBox_->currentText() == QStringLiteral("leader-audio") ? 1 :
+        metronomeModeBox_->currentText() == QStringLiteral("listener-compensated") ? 2 : 0;
+    (void)submitEngineCommand(command, QStringLiteral("metronome mode"));
 }
 
 void MainWindow::showMetronomeCompensationDialog()
@@ -7209,14 +7139,10 @@ void MainWindow::sendMetronomePatternToJam()
         return;
     }
     const jam2::metronome::PatternSnapshot pattern = currentMetronomePattern();
-    sendJamCommand(QStringLiteral("metro pattern %1 %2 %3 0x%4 0x%5 0x%6 0x%7")
-        .arg(pattern.bpm)
-        .arg(pattern.beats_per_bar)
-        .arg(pattern.division)
-        .arg(QString::number(static_cast<qulonglong>(pattern.play_mask_low), 16))
-        .arg(QString::number(static_cast<qulonglong>(pattern.play_mask_high), 16))
-        .arg(QString::number(static_cast<qulonglong>(pattern.accent_mask_low), 16))
-        .arg(QString::number(static_cast<qulonglong>(pattern.accent_mask_high), 16)));
+    jam2::EngineCommand command;
+    command.type = jam2::EngineCommandType::SetMetronomePattern;
+    command.pattern = pattern;
+    (void)submitEngineCommand(command, QStringLiteral("metronome pattern"));
 }
 
 void MainWindow::sendMetronomeSettingsToPeer()
@@ -7315,10 +7241,16 @@ void MainWindow::applyRemoteMetronomeSettings(const QJsonObject& message)
     applyingRemoteMetronomeSettings_ = false;
 
     if (jam2_.isRunning()) {
-        sendJamCommand(localMetronomeLeader_ ? QStringLiteral("metro leader on") : QStringLiteral("metro leader off"));
+        submitEngineToggle(
+            jam2::EngineCommandType::SetLeaderAudioLocalClick,
+            localMetronomeLeader_,
+            QStringLiteral("metronome leader"));
         sendMetronomeModeToJam();
         sendMetronomePatternToJam();
-        sendJamCommand(running ? QStringLiteral("metro on") : QStringLiteral("metro off"));
+        submitEngineToggle(
+            jam2::EngineCommandType::SetMetronomeEnabled,
+            running,
+            QStringLiteral("metronome enabled"));
     }
     if (trackMetronomeLabel_) {
         trackMetronomeLabel_->setText(running
@@ -7338,7 +7270,7 @@ void MainWindow::publishLocalRecordingOffer(
     const QString& targetLaneId,
     const LooperLane& lane)
 {
-    if (!looperProject_.trackSyncEnabled() || !jam2_.isRunning() || controlServerMode_ ||
+    if (!looperProject_.trackSyncEnabled() || !jam2_.isRunning() || sessionController_.isServer() ||
         bankIndex < 0 || bankIndex >= looperProject_.banks().size() || targetLaneId.isEmpty() ||
         !isSha256Hex(lane.assetHash) || lane.assetPath.isEmpty()) {
         return;
@@ -7367,7 +7299,7 @@ void MainWindow::publishLocalRecordingOffer(
 
 void MainWindow::handleRecordingOffer(const QJsonObject& message, const QString& sourcePeerToken)
 {
-    if (!controlServerMode_ || sourcePeerToken.isEmpty()) {
+    if (!sessionController_.isServer() || sourcePeerToken.isEmpty()) {
         appendLog(QStringLiteral("rejected recording offer from a non-joiner control path"));
         return;
     }
@@ -7412,7 +7344,7 @@ void MainWindow::handleRecordingOffer(const QJsonObject& message, const QString&
 
 void MainWindow::applyPendingRecordingContributions()
 {
-    if (!controlServerMode_) {
+    if (!sessionController_.isServer()) {
         return;
     }
     QStringList completedIds;
@@ -7531,16 +7463,12 @@ void MainWindow::sendLooperAsset(const QString& hash, const QString& targetPeerT
 
 bool MainWindow::canQueueControlTo(const QString& targetPeerToken, qint64 estimatedBytes) const
 {
-    return targetPeerToken.isEmpty()
-        ? controlClient_.canQueue(estimatedBytes)
-        : controlServer_.canQueueTo(targetPeerToken, estimatedBytes);
+    return sessionController_.canQueueTo(targetPeerToken, estimatedBytes);
 }
 
 bool MainWindow::sendControlTo(const QString& targetPeerToken, const QJsonObject& message)
 {
-    return targetPeerToken.isEmpty()
-        ? controlClient_.send(message)
-        : controlServer_.sendTo(targetPeerToken, message);
+    return sessionController_.sendTo(targetPeerToken, message);
 }
 
 void MainWindow::continueLooperAssetSend()
@@ -7881,9 +7809,19 @@ void MainWindow::handleSongSet(const QJsonObject& message)
     if (message.value(QStringLiteral("host_authoritative")).toBool(false) &&
         !looperProject_.trackSyncEnabled()) {
         appendLog(QStringLiteral("ignored host arrangement while Track Sync is disabled"));
+        const qint64 revision = message.value(QStringLiteral("arrangement_revision")).toInteger();
+        if (message.value(QStringLiteral("track_playing")).toBool(false) && revision > 0) {
+            // A peer that opted out must not hold the creator's bounded asset
+            // readiness barrier open.  This acknowledges the revision without
+            // applying its arrangement or transport locally.
+            sendControl(QJsonObject{
+                {QStringLiteral("type"), QStringLiteral("track.ready")},
+                {QStringLiteral("arrangement_revision"), revision},
+            });
+        }
         return;
     }
-    if (controlServerMode_ && message.value(QStringLiteral("host_authoritative")).toBool(false)) {
+    if (sessionController_.isServer() && message.value(QStringLiteral("host_authoritative")).toBool(false)) {
         appendLog(QStringLiteral("ignored host-authoritative song snapshot while hosting"));
         return;
     }
@@ -7967,10 +7905,12 @@ void MainWindow::handleSongSet(const QJsonObject& message)
                 }
                 refreshSongViews();
                 refreshLooperLanes();
-                restartPreparedMixWhenReady_ = restartTrack && jam2_.isRunning();
+                pendingPreparedTrackReadyRevision_ = restartTrack && jam2_.isRunning()
+                    ? revision : 0;
                 regeneratePreparedMix();
-                if (restartPreparedMixWhenReady_) {
-                    appendLog(QStringLiteral("scheduled synchronized track restart for arrangement revision %1").arg(revision));
+                if (pendingPreparedTrackReadyRevision_ > 0) {
+                    appendLog(QStringLiteral("preparing synchronized track revision %1 before requesting an authority target")
+                        .arg(revision));
                 }
             }
         },
@@ -7987,6 +7927,69 @@ void MainWindow::handleSongSet(const QJsonObject& message)
         }
         appendLog(QStringLiteral("arrangement asset validation deferred by saturated file worker"));
     }
+}
+
+void MainWindow::handleTrackReady(
+    const QJsonObject& message,
+    const QString& sourcePeerToken)
+{
+    if (!sessionController_.isServer() || sourcePeerToken.isEmpty()) {
+        appendLog(QStringLiteral("rejected track readiness outside the arrangement authority"));
+        return;
+    }
+    const quint64 revision = static_cast<quint64>(
+        message.value(QStringLiteral("arrangement_revision")).toInteger());
+    if (revision == 0 || revision != pendingSharedTrackRevision_) {
+        appendLog(QStringLiteral("ignored stale track readiness revision %1 from %2")
+            .arg(revision)
+            .arg(sourcePeerToken.left(8)));
+        return;
+    }
+    if (!meshPeerEndpoints_.contains(sourcePeerToken) || sourcePeerToken == meshPeerToken_) {
+        appendLog(QStringLiteral("rejected track readiness from non-member %1")
+            .arg(sourcePeerToken.left(8)));
+        return;
+    }
+    pendingSharedTrackReadyTokens_.insert(sourcePeerToken);
+    appendLog(QStringLiteral("track revision %1 ready on peer %2")
+        .arg(revision)
+        .arg(sourcePeerToken.left(8)));
+    maybeScheduleSharedTrackRestart();
+}
+
+void MainWindow::maybeScheduleSharedTrackRestart()
+{
+    if (!sessionController_.isServer() || pendingSharedTrackRevision_ == 0) {
+        return;
+    }
+    QSet<QString> expected;
+    for (auto it = meshPeerEndpoints_.cbegin(); it != meshPeerEndpoints_.cend(); ++it) {
+        if (it.key() != meshPeerToken_) {
+            expected.insert(it.key());
+        }
+    }
+    if (expected.isEmpty()) {
+        pendingSharedTrackRevision_ = 0;
+        pendingSharedTrackHostReady_ = true;
+        pendingSharedTrackReadyTokens_.clear();
+        return;
+    }
+    if (!pendingSharedTrackHostReady_) {
+        return;
+    }
+    for (const QString& token : expected) {
+        if (!pendingSharedTrackReadyTokens_.contains(token)) {
+            return;
+        }
+    }
+    const quint64 revision = pendingSharedTrackRevision_;
+    pendingSharedTrackRevision_ = 0;
+    pendingSharedTrackHostReady_ = true;
+    pendingSharedTrackReadyTokens_.clear();
+    restartPreparedTrackQuantized();
+    appendLog(QStringLiteral("arrangement authority scheduled shared track revision %1 after %2 peer readiness acknowledgements")
+        .arg(revision)
+        .arg(expected.size()));
 }
 
 void MainWindow::applyPendingSongIfAssetsReady()
@@ -8010,10 +8013,12 @@ void MainWindow::applyPendingSongIfAssetsReady()
         lastAppliedHostArrangementRevision_ = qMax(lastAppliedHostArrangementRevision_, revision);
         refreshSongViews();
         refreshLooperLanes();
-        restartPreparedMixWhenReady_ = restartTrack && jam2_.isRunning();
+        pendingPreparedTrackReadyRevision_ = restartTrack && jam2_.isRunning()
+            ? revision : 0;
         regeneratePreparedMix();
-        if (restartPreparedMixWhenReady_) {
-            appendLog(QStringLiteral("scheduled synchronized track restart for received arrangement revision %1").arg(revision));
+        if (pendingPreparedTrackReadyRevision_ > 0) {
+            appendLog(QStringLiteral("preparing received track revision %1 before requesting an authority target")
+                .arg(revision));
         }
         appendLog(QStringLiteral("applied pending looper arrangement after asset sync"));
     }
@@ -8055,90 +8060,106 @@ QString MainWindow::looperAssetPathForHash(const QString& hash) const
         QStringLiteral("wavs/") + hash + QStringLiteral(".wav"));
 }
 
-QStringList MainWindow::commonJamArgs(bool includeExtraArgs) const
+Jam2RuntimeOptions MainWindow::runtimeOptions() const
 {
-    QStringList args;
-    args << QStringLiteral("--audio-device") << selectedDeviceId()
-         << QStringLiteral("--profile") << (profileBox_ ? profileBox_->currentData().toString() : QStringLiteral("fast"))
-         << QStringLiteral("--sample-rate") << QString::number(sampleRateSpin_->value())
-         << QStringLiteral("--audio-buffer-size") << QString::number(bufferSizeSpin_->value())
-         << QStringLiteral("--frame-size") << QString::number(frameSizeSpin_->value())
-         << QStringLiteral("--os-priority") << (osPriorityBox_ ? osPriorityBox_->currentData().toString() : QStringLiteral("high"))
-         << QStringLiteral("--playback-prefill-frames") << QString::number(prefillSpin_->value())
-         << QStringLiteral("--capture-ring-frames") << QString::number(captureRingSpin_->value())
-         << QStringLiteral("--playback-ring-frames") << QString::number(playbackRingSpin_->value())
-         << QStringLiteral("--input-channels") << inputChannelsEdit_->text()
-         << QStringLiteral("--output-channels") << outputChannelsEdit_->text()
-         << QStringLiteral("--stats") << (statsCheck_->isChecked() ? QStringLiteral("enabled") : QStringLiteral("disabled"))
-         << QStringLiteral("--machine-readable-startup") << QStringLiteral("off")
-         << QStringLiteral("--status-format") << QStringLiteral("text")
-         << QStringLiteral("--metronome") << QStringLiteral("off")
-         << QStringLiteral("--bpm") << QString::number(metronomeBpmSpin_ ? metronomeBpmSpin_->value() : bpmSpin_->value())
-         << QStringLiteral("--metronome-level") << QString::number(gainFromDb(static_cast<double>(metronomeLevelSlider_ ? metronomeLevelSlider_->value() : -10)), 'f', 3)
-         << QStringLiteral("--remote-level") << QString::number(gainFromDb(static_cast<double>(remoteLevelSlider_ ? remoteLevelSlider_->value() : 0)), 'f', 3)
-         << QStringLiteral("--send-level") << QString::number(gainFromDb(static_cast<double>(mixSendLevelSlider_ ? mixSendLevelSlider_->value() : 0)), 'f', 3)
-         << QStringLiteral("--local-monitor") << onOff(mixMonitorCheck_ && mixMonitorCheck_->isChecked())
-         << QStringLiteral("--local-monitor-level") << QString::number(gainFromDb(static_cast<double>(mixMonitorLevelSlider_ ? mixMonitorLevelSlider_->value() : -18)), 'f', 3)
-         << QStringLiteral("--metronome-mode") << metronomeModeBox_->currentText()
-         << QStringLiteral("--metronome-compensation-max-ms") << QString::number(metronomeCompensationMaxSpin_ ? metronomeCompensationMaxSpin_->value() : 250.0, 'f', 1)
-         << QStringLiteral("--metronome-compensation-smoothing-ms") << QString::number(metronomeCompensationSmoothingSpin_ ? metronomeCompensationSmoothingSpin_->value() : 750.0, 'f', 1)
-         << QStringLiteral("--metronome-compensation-deadband-ms") << QString::number(metronomeCompensationDeadbandSpin_ ? metronomeCompensationDeadbandSpin_->value() : 1.0, 'f', 1)
-         << QStringLiteral("--metronome-compensation-slew-ms-per-sec") << QString::number(metronomeCompensationSlewSpin_ ? metronomeCompensationSlewSpin_->value() : 40.0, 'f', 1)
-         << QStringLiteral("--sample-time-playout") << onOff(sampleTimePlayoutCheck_->isChecked())
-         << QStringLiteral("--adaptive-playback-cushion") << onOff(adaptiveCushionCheck_->isChecked())
-         << QStringLiteral("--adaptive-playback-release-ppm") << QString::number(adaptiveReleaseSpin_->value())
-         << QStringLiteral("--drift-correction") << onOff(driftCorrectionCheck_->isChecked())
-         << QStringLiteral("--drift-smoothing") << QString::number(driftSmoothingSpin_->value(), 'f', 3)
-         << QStringLiteral("--drift-deadband-ppm") << QString::number(driftDeadbandSpin_->value())
-         << QStringLiteral("--drift-max-correction-ppm") << QString::number(driftMaxCorrectionSpin_->value())
-         << QStringLiteral("--stream-linger-ms") << QString::number(streamLingerMsSpin_->value());
-    if (statsCheck_->isChecked()) {
-        args << QStringLiteral("--stats-interval-ms") << QStringLiteral("1000")
-             << QStringLiteral("--stats-warmup-ms") << QString::number(statsWarmupMsSpin_->value());
+    Jam2RuntimeOptions options;
+    options.bind = jam2::parse_bind_endpoint(meshBindEndpoint().toStdString());
+    if (stunServerEdit_ && !stunServerEdit_->text().trimmed().isEmpty()) {
+        options.stun_server = jam2::parse_endpoint(stunServerEdit_->text().trimmed().toStdString());
     }
-    if (playbackMaxSpin_->value() > 0) {
-        args << QStringLiteral("--playback-max-frames") << QString::number(playbackMaxSpin_->value());
+    options.no_stun = noStunCheck_ && noStunCheck_->isChecked();
+    options.stun_timeout_ms = stunTimeoutSpin_ ? stunTimeoutSpin_->value() : 1000;
+    options.stun_retries = stunRetriesSpin_ ? stunRetriesSpin_->value() : 3;
+    options.wait_ms = waitMsSpin_ ? waitMsSpin_->value() : 0;
+    options.stream_ms = streamMsSpin_ ? streamMsSpin_->value() : 0;
+    options.stream_linger_ms = streamLingerMsSpin_ ? streamLingerMsSpin_->value() : 100;
+    options.stats_enabled = statsCheck_ && statsCheck_->isChecked();
+    options.stats_interval_ms = options.stats_enabled ? 1000 : 0;
+    options.stats_warmup_ms = statsWarmupMsSpin_ ? statsWarmupMsSpin_->value() : 3000;
+    if (options.stats_enabled && logStatsEdit_ && !logStatsEdit_->text().trimmed().isEmpty()) {
+        options.log_stats_dir = nativeFilePath(logStatsEdit_->text().trimmed());
     }
-    if (waitMsSpin_->value() > 0) {
-        args << QStringLiteral("--wait-ms") << QString::number(waitMsSpin_->value());
+    if (socketSendBufferSpin_ && socketSendBufferSpin_->value() > 0) {
+        options.socket_send_buffer = socketSendBufferSpin_->value();
     }
-    if (streamMsSpin_->value() > 0) {
-        args << QStringLiteral("--stream-ms") << QString::number(streamMsSpin_->value());
+    if (socketRecvBufferSpin_ && socketRecvBufferSpin_->value() > 0) {
+        options.socket_recv_buffer = socketRecvBufferSpin_->value();
     }
-    if (statsCheck_->isChecked() && !logStatsEdit_->text().trimmed().isEmpty()) {
-        args << QStringLiteral("--log-stats") << logStatsEdit_->text().trimmed();
+    options.sample_rate = sampleRateSpin_->value();
+    options.frame_size = frameSizeSpin_->value();
+    options.drift_correction = driftCorrectionCheck_->isChecked();
+    options.drift_smoothing = driftSmoothingSpin_->value();
+    options.drift_deadband_ppm = driftDeadbandSpin_->value();
+    options.drift_max_correction_ppm = driftMaxCorrectionSpin_->value();
+    options.metronome = false;
+    options.bpm = metronomeBpmSpin_ ? metronomeBpmSpin_->value() : bpmSpin_->value();
+    options.metronome_level = gainFromDb(static_cast<double>(metronomeLevelSlider_ ? metronomeLevelSlider_->value() : -10));
+    const QString metronomeMode = metronomeModeBox_->currentText();
+    options.metronome_mode = metronomeMode == QStringLiteral("leader-audio")
+        ? Jam2MetronomeMode::LeaderAudio
+        : metronomeMode == QStringLiteral("listener-compensated")
+            ? Jam2MetronomeMode::ListenerCompensated
+            : Jam2MetronomeMode::SharedGrid;
+    options.metronome_compensation_max_ms = metronomeCompensationMaxSpin_ ? metronomeCompensationMaxSpin_->value() : 250.0;
+    options.metronome_compensation_smoothing_ms = metronomeCompensationSmoothingSpin_ ? metronomeCompensationSmoothingSpin_->value() : 750.0;
+    options.metronome_compensation_deadband_ms = metronomeCompensationDeadbandSpin_ ? metronomeCompensationDeadbandSpin_->value() : 1.0;
+    options.metronome_compensation_slew_ms_per_sec = metronomeCompensationSlewSpin_ ? metronomeCompensationSlewSpin_->value() : 40.0;
+    options.remote_level = gainFromDb(static_cast<double>(remoteLevelSlider_ ? remoteLevelSlider_->value() : 0));
+    options.send_level = gainFromDb(static_cast<double>(mixSendLevelSlider_ ? mixSendLevelSlider_->value() : 0));
+    options.local_monitor = mixMonitorCheck_ && mixMonitorCheck_->isChecked();
+    options.local_monitor_level = gainFromDb(static_cast<double>(mixMonitorLevelSlider_ ? mixMonitorLevelSlider_->value() : -18));
+    options.sample_time_playout = sampleTimePlayoutCheck_->isChecked();
+    options.playout_delay_frames = static_cast<std::size_t>(playoutDelaySpin_->value());
+    options.jitter_buffer_frames = static_cast<std::size_t>(jitterBufferSpin_->value());
+    options.jitter_buffer_max_frames = static_cast<std::size_t>(jitterBufferMaxSpin_->value());
+    options.adaptive_playback_cushion = adaptiveCushionCheck_->isChecked();
+    options.adaptive_playback_target_frames = static_cast<std::size_t>(adaptiveTargetSpin_->value());
+    options.adaptive_playback_min_frames = static_cast<std::size_t>(adaptiveMinSpin_->value());
+    options.adaptive_playback_max_frames = static_cast<std::size_t>(adaptiveMaxSpin_->value());
+    options.adaptive_playback_release_ppm = adaptiveReleaseSpin_->value();
+    bool deviceOk = false;
+    const int device = selectedDeviceId().toInt(&deviceOk);
+    if (!deviceOk || device < 0) {
+        throw std::runtime_error("select a valid low-latency audio device");
     }
-    if (socketSendBufferSpin_->value() > 0) {
-        args << QStringLiteral("--socket-send-buffer") << QString::number(socketSendBufferSpin_->value());
+    options.audio_device_id = device;
+    options.profile_name = (profileBox_ ? profileBox_->currentData().toString() : QStringLiteral("fast")).toStdString();
+    options.audio_buffer_size = bufferSizeSpin_->value();
+    options.input_channels = jam2::audio::InputChannels::Mono;
+    options.channel_selection.input = parseUiChannels(inputChannelsEdit_->text(), "input");
+    options.channel_selection.output = parseUiChannels(outputChannelsEdit_->text(), "output");
+    options.capture_ring_frames = static_cast<std::size_t>(captureRingSpin_->value());
+    options.playback_ring_frames = static_cast<std::size_t>(playbackRingSpin_->value());
+    options.playback_prefill_frames = static_cast<std::size_t>(prefillSpin_->value());
+    options.playback_max_frames = static_cast<std::size_t>(playbackMaxSpin_->value());
+    const QString priority = osPriorityBox_ ? osPriorityBox_->currentData().toString() : QStringLiteral("high");
+    options.os_priority = priority == QStringLiteral("realtime")
+        ? Jam2OsPriorityMode::Realtime
+        : priority == QStringLiteral("off") ? Jam2OsPriorityMode::Off : Jam2OsPriorityMode::High;
+    return options;
+}
+
+Jam2RuntimeOptions MainWindow::networkRuntimeOptions(
+    const SharedSessionController::Snapshot& snapshot) const
+{
+    Jam2RuntimeOptions options = runtimeOptions();
+    options.session_id = sessionId_;
+    options.session_key = sessionKey_;
+    options.local_peer_id = meshPeerIdForToken(snapshot.localToken);
+    options.bootstrap_coordinator_peer_id = meshPeerIdForToken(snapshot.coordinatorToken);
+    options.bootstrap_role = snapshot.role == SharedSessionController::Role::Creator
+        ? jam2::SessionBootstrapRole::Creator
+        : jam2::SessionBootstrapRole::Joiner;
+    options.grid_coordinator = snapshot.role == SharedSessionController::Role::Creator;
+    options.mesh_peers_configured = true;
+    for (const SharedSessionController::PeerSnapshot& peer : snapshot.peers) {
+        if (peer.token == snapshot.localToken || peer.endpoint.isEmpty()) {
+            continue;
+        }
+        options.mesh_peer_ids.push_back(peer.peerId);
+        options.mesh_peers.push_back(jam2::parse_endpoint(peer.endpoint.toStdString()));
     }
-    if (socketRecvBufferSpin_->value() > 0) {
-        args << QStringLiteral("--socket-recv-buffer") << QString::number(socketRecvBufferSpin_->value());
-    }
-    if (playoutDelaySpin_->value() > 0) {
-        args << QStringLiteral("--playout-delay-frames") << QString::number(playoutDelaySpin_->value());
-    }
-    if (jitterBufferSpin_->value() > 0) {
-        args << QStringLiteral("--jitter-buffer-frames") << QString::number(jitterBufferSpin_->value());
-    }
-    if (jitterBufferSpin_->value() > 0 && jitterBufferMaxSpin_->value() > 0) {
-        args << QStringLiteral("--jitter-buffer-max-frames") << QString::number(jitterBufferMaxSpin_->value());
-    }
-    if (adaptiveTargetSpin_->value() > 0) {
-        args << QStringLiteral("--adaptive-playback-target-frames") << QString::number(adaptiveTargetSpin_->value());
-    }
-    if (adaptiveMinSpin_->value() > 0) {
-        args << QStringLiteral("--adaptive-playback-min-frames") << QString::number(adaptiveMinSpin_->value());
-    }
-    if (adaptiveMaxSpin_->value() > 0) {
-        args << QStringLiteral("--adaptive-playback-max-frames") << QString::number(adaptiveMaxSpin_->value());
-    }
-    if (noStunCheck_->isChecked()) {
-        args << QStringLiteral("--no-stun");
-    }
-    if (includeExtraArgs && !extraArgsEdit_->text().trimmed().isEmpty()) {
-        args << QProcess::splitCommand(extraArgsEdit_->text().trimmed());
-    }
-    return args;
+    return options;
 }
 
 QString MainWindow::selectedDeviceId() const
@@ -8312,10 +8333,21 @@ void MainWindow::updatePlaybackGrid()
     }
     if (trackWaveform_) {
         trackWaveform_->setBpm(playbackGrid_.bpm());
-        trackWaveform_->setGridPosition(position.absoluteBeat, markerRunning);
+        const qint64 gridPositionMs = static_cast<qint64>(std::llround(
+            qMax(0.0, position.secondsFromEpoch) * 1000.0));
+        trackWaveform_->setGridPosition(
+            gridPositionMs,
+            markerRunning,
+            currentMetronomePattern().beats_per_bar);
     }
     if (looperStack_) {
-        looperStack_->setGridPosition(position.absoluteBeat, markerRunning, playbackGrid_.bpm());
+        const qint64 gridPositionMs = static_cast<qint64>(std::llround(
+            qMax(0.0, position.secondsFromEpoch) * 1000.0));
+        looperStack_->setGridPosition(
+            gridPositionMs,
+            markerRunning,
+            playbackGrid_.bpm(),
+            currentMetronomePattern().beats_per_bar);
     }
 }
 
@@ -8325,16 +8357,19 @@ void MainWindow::updateRecordingCountdown(const PlaybackGrid::Position& position
         return;
     }
     if (position.rawCurrentFrame < recordingCountdownStartFrame_) {
-        recordingCountdownLabel_->setText(QStringLiteral("WAITING FOR NEXT BAR"));
+        recordingCountdownLabel_->setText(QStringLiteral("WAITING FOR NEXT BAR..."));
         recordingCountdownLabel_->show();
         return;
     }
     if (position.rawCurrentFrame < recordingStartFrame_) {
-        const double beatFrames = position.secondsPerBeat > 0.0 && position.sampleRate > 0
-            ? position.secondsPerBeat * static_cast<double>(position.sampleRate)
-            : static_cast<double>(qMax(1, position.sampleRate)) * 0.5;
-        const quint64 remainingFrames = recordingStartFrame_ - position.rawCurrentFrame;
-        const int remainingBeats = qMax(1, static_cast<int>(std::ceil(static_cast<double>(remainingFrames) / beatFrames)));
+        const std::uint64_t beatFrames = position.secondsPerBeat > 0.0 && position.sampleRate > 0
+            ? static_cast<std::uint64_t>(std::llround(
+                position.secondsPerBeat * static_cast<double>(position.sampleRate)))
+            : static_cast<std::uint64_t>(qMax(1, position.sampleRate)) / 2ULL;
+        const int remainingBeats = recordingCountInBeat(
+            position.rawCurrentFrame,
+            recordingStartFrame_,
+            std::max<std::uint64_t>(1ULL, beatFrames));
         recordingCountdownLabel_->setText(QString::number(remainingBeats));
         recordingCountdownLabel_->show();
         return;
@@ -8370,7 +8405,10 @@ void MainWindow::updateRecordingLatencyDisplay()
         .arg(milliseconds(recordingAppliedLatencyFrames_), 0, 'f', 2));
 }
 
-void MainWindow::runGridLockedEngineAction(const QString& actionName, const std::function<void(std::uint64_t)>& action)
+void MainWindow::runGridLockedEngineAction(
+    const QString& actionName,
+    const std::function<void(std::uint64_t)>& action,
+    bool quantizeToBar)
 {
     const PlaybackGrid::Position position = playbackGrid_.position();
     if (!position.engineAnchored || position.sampleRate <= 0) {
@@ -8384,7 +8422,10 @@ void MainWindow::runGridLockedEngineAction(const QString& actionName, const std:
     std::uint64_t targetFrame = position.rawCurrentFrame;
     QString targetText;
     if (looperProject_.gridLockEnabled() && position.running && position.secondsPerBeat > 0.0) {
-        const std::uint64_t targetBeat = position.absoluteBeat + 1ULL;
+        const std::uint64_t targetBeat = nextGridBoundaryBeat(
+            position.absoluteBeat,
+            currentMetronomePattern().beats_per_bar,
+            quantizeToBar);
         const std::uint64_t targetStep = targetBeat * static_cast<std::uint64_t>(qMax(1, currentMetronomePattern().division));
         const std::uint64_t targetMusicalFrame = position.epochFrame +
             static_cast<std::uint64_t>(std::llround(static_cast<double>(targetBeat) * position.secondsPerBeat * static_cast<double>(position.sampleRate)));
@@ -8393,8 +8434,9 @@ void MainWindow::runGridLockedEngineAction(const QString& actionName, const std:
             ? (static_cast<double>(targetFrame - position.rawCurrentFrame) * 1000.0 / static_cast<double>(position.sampleRate))
             : 0.0;
         targetText = QStringLiteral(
-            "Grid lock: %1 engine target_beat=%2 target_step=%3 target_musical_frame=%4 target_raw_frame=%5 current_musical_frame=%6 current_raw_frame=%7 offset_frames=%8 delay_ms=%9")
+            "Grid lock: %1 engine boundary=%2 target_beat=%3 target_step=%4 target_musical_frame=%5 target_raw_frame=%6 current_musical_frame=%7 current_raw_frame=%8 offset_frames=%9 delay_ms=%10")
             .arg(actionName)
+            .arg(quantizeToBar ? QStringLiteral("bar") : QStringLiteral("beat"))
             .arg(targetBeat)
             .arg(targetStep)
             .arg(targetMusicalFrame)
@@ -8600,17 +8642,45 @@ void MainWindow::cleanupTransientTrackWavs()
     }));
 }
 
-void MainWindow::sendSongSnapshot()
+void MainWindow::sendSongSnapshot(std::optional<bool> trackPlayingOverride)
 {
     const int revision = ++looperArrangementRevision_;
-    sendControl(QJsonObject{
+    const SharedSessionController::Snapshot before = sessionController_.snapshot();
+    const bool trackPlaying = trackPlayingOverride.value_or(preparedSourcePlaying_);
+    const bool coordinateTrackRestart = sessionController_.isServer() &&
+        before.remotePeerCount > 0 && trackPlaying;
+    const quint64 expectedArrangementRevision = before.arrangementRevision + 1;
+    if (coordinateTrackRestart) {
+        pendingSharedTrackRevision_ = expectedArrangementRevision;
+        pendingSharedTrackHostReady_ = !preparedMixWorkerRunning_;
+        pendingSharedTrackReadyTokens_.clear();
+        appendLog(QStringLiteral(
+            "arrangement authority waiting for track revision %1 readiness host_ready=%2 remote_peers=%3")
+            .arg(expectedArrangementRevision)
+            .arg(pendingSharedTrackHostReady_ ? QStringLiteral("yes") : QStringLiteral("no"))
+            .arg(before.remotePeerCount));
+    } else {
+        pendingSharedTrackRevision_ = 0;
+        pendingSharedTrackHostReady_ = true;
+        pendingSharedTrackReadyTokens_.clear();
+    }
+    (void)sessionController_.send(QJsonObject{
         {QStringLiteral("type"), QStringLiteral("song.set")},
         {QStringLiteral("revision"), revision},
         {QStringLiteral("arrangement_revision"), revision},
         {QStringLiteral("host_authoritative"), true},
-        {QStringLiteral("track_playing"), preparedSourcePlaying_},
+        {QStringLiteral("track_playing"), trackPlaying},
         {QStringLiteral("song"), songToJson()},
     });
+    const SharedSessionController::Snapshot after = sessionController_.snapshot();
+    if (coordinateTrackRestart && after.arrangementRevision != expectedArrangementRevision) {
+        pendingSharedTrackRevision_ = 0;
+        pendingSharedTrackHostReady_ = true;
+        pendingSharedTrackReadyTokens_.clear();
+        appendLog(QStringLiteral("could not publish shared track arrangement revision"));
+        return;
+    }
+    maybeScheduleSharedTrackRestart();
 }
 
 void MainWindow::refreshSongViews()

@@ -764,13 +764,10 @@ struct PeerStream::Impl {
         }
         const std::uint64_t packet_end = header.sample_time + packet_frames;
         if (!highest_remote_sample_time_set) {
-            if (header.sample_time > sample_time_horizon_frames) {
-                if (header.sequence == expected_sequence) {
-                    markExpectedLost();
-                }
-                ++stats.sample_time_future_rejects;
-                return PeerAudioResult::FutureSampleTime;
-            }
+            // A peer may join an already-running sender whose session sample
+            // counter is well beyond zero.  The first authenticated packet is
+            // the bounded stream baseline; the horizon applies to subsequent
+            // discontinuities, not to its absolute value.
             highest_remote_sample_time_set = true;
             highest_remote_sample_time = packet_end;
         } else {

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
+import csv
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -8,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from jam2_results import mesh_collect_metrics, mesh_verdict, verdict_for
+from jam2_metrics import summarize_csv
 
 
 def normal_result(scenario="clean-control", **metric_overrides):
@@ -32,6 +35,80 @@ def normal_result(scenario="clean-control", **metric_overrides):
             "combined": metrics,
         },
     }
+
+
+class CsvSummaryTests(unittest.TestCase):
+    def test_alignment_uses_last_periodic_row_before_shutdown(self):
+        fields = [
+            "row_type",
+            "elapsed_ms",
+            "network_active_peer_count",
+            "grid_mapped_epoch_frame",
+            "grid_mapping_error_frames",
+            "metronome_alignment_valid",
+            "metronome_epoch_sample_time",
+            "local_metronome_beat",
+            "remote_metronome_beat",
+            "metronome_compensation_active",
+            "metronome_compensation_offset_frames",
+            "metronome_compensation_offset_ms",
+            "metronome_compensation_target_frames",
+            "metronome_compensation_target_ms",
+            "recv_packets",
+        ]
+        rows = [
+            {
+                "row_type": "periodic",
+                "elapsed_ms": "20000",
+                "network_active_peer_count": "1",
+                "grid_mapped_epoch_frame": "148200",
+                "grid_mapping_error_frames": "0",
+                "metronome_alignment_valid": "yes",
+                "metronome_epoch_sample_time": "148200",
+                "local_metronome_beat": "3",
+                "remote_metronome_beat": "3",
+                "metronome_compensation_active": "yes",
+                "metronome_compensation_offset_frames": "64",
+                "metronome_compensation_offset_ms": "1.451247",
+                "metronome_compensation_target_frames": "64",
+                "metronome_compensation_target_ms": "1.451247",
+                "recv_packets": "1000",
+            },
+            {
+                "row_type": "final",
+                "elapsed_ms": "20634",
+                "network_active_peer_count": "0",
+                "grid_mapped_epoch_frame": "0",
+                "grid_mapping_error_frames": "0",
+                "metronome_alignment_valid": "no",
+                "metronome_epoch_sample_time": "0",
+                "local_metronome_beat": "0",
+                "remote_metronome_beat": "0",
+                "metronome_compensation_active": "no",
+                "metronome_compensation_offset_frames": "0",
+                "metronome_compensation_offset_ms": "0",
+                "metronome_compensation_target_frames": "0",
+                "metronome_compensation_target_ms": "0",
+                "recv_packets": "1032",
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "stats.csv"
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(rows)
+            summary = summarize_csv(path)
+
+        self.assertEqual(summary["network_active_peer_count"], 0)
+        self.assertEqual(summary["recv_packets"], 1032)
+        self.assertEqual(summary["grid_mapped_epoch_frame"], 148200)
+        self.assertEqual(summary["metronome_alignment_valid"], "yes")
+        self.assertEqual(summary["metronome_epoch_sample_time"], 148200)
+        self.assertEqual(summary["metronome_beat_delta_abs"], 0)
+        self.assertEqual(summary["metronome_compensation_active"], "yes")
+        self.assertEqual(summary["metronome_compensation_offset_frames"], 64)
 
 
 class NormalVerdictTests(unittest.TestCase):
@@ -110,7 +187,8 @@ class NormalVerdictTests(unittest.TestCase):
             recovery_recv_packets_delta_min=3000.0,
             mix_capacity_drops_total=0.0,
             recovery_mix_capacity_drops_delta_total=0.0,
-            recovery_mix_active_slots_ratio_max=0.02,
+            recovery_mix_active_slots_ratio_max=0.99,
+            recovery_mix_active_slots_ratio_end_max=0.02,
             recovery_adaptive_padding_frames_delta_total=0.0,
             adaptive_raise_events_total=40.0,
             adaptive_release_events_total=100.0,
@@ -124,7 +202,7 @@ class NormalVerdictTests(unittest.TestCase):
 
         self.assertEqual(verdict_for(result), "pass")
 
-        result["metrics"]["combined"]["recovery_mix_active_slots_ratio_max"] = 0.99
+        result["metrics"]["combined"]["recovery_mix_active_slots_ratio_end_max"] = 0.99
         self.assertEqual(verdict_for(result), "transient_stall_mixer_queue_not_recovered")
 
     def test_transient_stall_rejects_continuing_padding(self):
@@ -135,6 +213,7 @@ class NormalVerdictTests(unittest.TestCase):
             recovery_window_ms_min=5000.0,
             recovery_recv_packets_delta_min=3000.0,
             recovery_mix_active_slots_ratio_max=0.02,
+            recovery_mix_active_slots_ratio_end_max=0.02,
             recovery_adaptive_padding_frames_delta_total=9000.0,
             adaptive_raise_events_total=40.0,
             adaptive_release_events_total=100.0,

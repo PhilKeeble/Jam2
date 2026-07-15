@@ -47,6 +47,8 @@ enum class EngineTransportAction : std::uint8_t {
     TrackRestart,
     RecordStart,
     RecordStop,
+    TrackStop,
+    TrackPlay,
 };
 
 // Validated once by Engine::start and then retained unchanged for the lifetime
@@ -195,6 +197,8 @@ struct EngineSnapshot {
     long callbacks = 0;
     long input_latency_frames = 0;
     long output_latency_frames = 0;
+    std::int64_t recording_latency_adjustment_frames = 0;
+    std::uint64_t recording_latency_compensation_frames = 0;
     bool playback_prefilled = false;
     std::size_t capture_ring_capacity_frames = 0;
     std::size_t capture_ring_depth_frames = 0;
@@ -213,6 +217,7 @@ struct EngineSnapshot {
     bool network_playback_enabled = false;
     bool metronome_enabled = false;
     metronome::PatternSnapshot metronome_pattern{};
+    EngineMetronomeMode metronome_mode = EngineMetronomeMode::SharedGrid;
     int metronome_level_ppm = 0;
     int remote_level_ppm = 0;
     int send_level_ppm = 0;
@@ -241,6 +246,7 @@ struct EngineSnapshot {
     std::uint64_t prepared_source_actual_start_frame = 0;
     std::uint64_t prepared_source_underruns = 0;
     std::uint64_t prepared_source_busy_events = 0;
+    bool prepared_source_playing = false;
     EngineRecordingSnapshot jam_recording;
     EngineTrackTakeSnapshot track_take;
     std::size_t command_queue_capacity = 0;
@@ -257,6 +263,14 @@ struct EngineSnapshot {
     std::uint64_t event_queue_drops = 0;
 };
 
+// Cold metadata may own strings and channel lists. Keep it separate from the
+// fixed-shape snapshot used by frequent UI and diagnostics polling.
+struct EngineColdSnapshot {
+    audio::StreamInfo stream;
+    std::string recording_folder;
+    int recording_sample_rate = 0;
+};
+
 struct NetworkCaptureAttachment {
     std::uint64_t generation = 0;
 };
@@ -264,18 +278,6 @@ struct NetworkCaptureAttachment {
 struct CapturedAudioBlock {
     std::uint64_t first_frame = 0;
     std::size_t frames = 0;
-};
-
-// Transitional, non-owning view retained by CLI control/status adapters until
-// typed GUI integration. Network audio data uses Engine's attachment methods.
-struct EngineCompatibilityView {
-    audio::StreamControl* control = nullptr;
-    audio::OutputRecorder* recorder = nullptr;
-    audio::TrackTakeRecorder* track_take_recorder = nullptr;
-    audio::PreparedTrackSource* prepared_source = nullptr;
-    audio::MonoRingBuffer* capture_ring = nullptr;
-    audio::MonoRingBuffer* playback_ring = nullptr;
-    audio::DeviceStream* stream = nullptr;
 };
 
 class Engine {
@@ -296,6 +298,7 @@ public:
 
     bool submit(const EngineCommand& command) noexcept;
     EngineSnapshot snapshot() const noexcept;
+    EngineColdSnapshot coldSnapshot() const;
     bool pollEvent(EngineEvent& event) noexcept;
 
     // One non-real-time capture consumer may use an attachment at a time.
@@ -313,7 +316,6 @@ public:
     void requestNetworkPlaybackDrop(std::size_t frames) noexcept;
     void setNetworkPlaybackRatio(double ratio) noexcept;
 
-    EngineCompatibilityView compatibilityView() noexcept;
     const EngineConfig* config() const noexcept;
 
 private:

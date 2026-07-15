@@ -16,31 +16,66 @@ ControlClient::ControlClient(QObject* parent)
     QObject::connect(&authenticationTimer_, &QTimer::timeout, this, [this] {
         if (!isConnected()) {
             ++stats_.authenticationTimeouts;
-            reject(QStringLiteral("TCP control authentication timeout"), true);
+            reject(
+                QStringLiteral("TCP control authentication timeout"),
+                TransportFailure::AuthenticationTimeout,
+                true);
         }
     });
     QObject::connect(&frameTimer_, &QTimer::timeout, this, [this] {
         if (!buffer_.isEmpty()) {
             ++stats_.frameTimeouts;
-            reject(QStringLiteral("TCP control incomplete-frame timeout"), true);
+            reject(
+                QStringLiteral("TCP control incomplete-frame timeout"),
+                TransportFailure::FrameTimeout,
+                true);
         }
     });
     QObject::connect(&socket_, &QTcpSocket::connected, this, [this] {
         socket_.setReadBufferSize(kMaxJsonBytes + kAuthenticatedHeaderBytes + 4);
+        failureReportedForAttempt_ = false;
         authenticationTimer_.start(kAuthenticationDeadlineMs);
-        if (onState) {
-            onState(QStringLiteral("TCP connected; waiting for bounded auth challenge"));
-        }
+        publishEvent(TransportEvent{
+            TransportEventType::Connected,
+            TransportFailure::None,
+            QStringLiteral("TCP connected; waiting for bounded auth challenge")});
     });
     QObject::connect(&socket_, &QTcpSocket::readyRead, this, [this] { readSocket(); });
+    QObject::connect(&socket_, &QTcpSocket::errorOccurred, this,
+        [this](QAbstractSocket::SocketError socketError) {
+            if (manualClose_ || failureReportedForAttempt_ ||
+                socketError == QAbstractSocket::RemoteHostClosedError) {
+                return;
+            }
+            TransportFailure failure = TransportFailure::TransportError;
+            if (socketError == QAbstractSocket::ConnectionRefusedError) {
+                failure = TransportFailure::ConnectionRefused;
+            } else if (socketError == QAbstractSocket::HostNotFoundError) {
+                failure = TransportFailure::HostNotFound;
+            } else if (socketError == QAbstractSocket::NetworkError) {
+                failure = TransportFailure::NetworkUnavailable;
+            }
+            failureReportedForAttempt_ = true;
+            publishEvent(TransportEvent{
+                TransportEventType::Failure,
+                failure,
+                QStringLiteral("TCP control transport error: ") + socket_.errorString(),
+                true});
+        });
     QObject::connect(&socket_, &QTcpSocket::disconnected, this, [this] {
+        const bool wasAuthenticated = handshakeState_ == HandshakeState::Authenticated;
         authenticationTimer_.stop();
         frameTimer_.stop();
         handshakeState_ = HandshakeState::WaitingForChallenge;
         receiveKey_.clear();
         sendKey_.clear();
-        if (onState) {
-            onState(QStringLiteral("TCP control disconnected"));
+        if (!manualClose_) {
+            publishEvent(TransportEvent{
+                TransportEventType::Disconnected,
+                TransportFailure::None,
+                QStringLiteral("TCP control disconnected"),
+                true,
+                wasAuthenticated});
         }
     });
 }
@@ -54,23 +89,33 @@ void ControlClient::connectToHost(
     const QString& meshUdpEndpoint)
 {
     close();
+    manualClose_ = false;
+    failureReportedForAttempt_ = false;
     sessionHex_ = sessionHex.toLower();
     masterKey_ = decodeHex(keyHex, 16);
     meshPeerToken_ = meshPeerToken.isEmpty() ? encodeHex(randomNonce()) : meshPeerToken.toLower();
     meshUdpEndpoint_ = meshUdpEndpoint;
     if (decodeHex(sessionHex_, 8).size() != 8 || masterKey_.size() != 16 ||
         decodeHex(meshPeerToken_, 16).size() != 16 || meshUdpEndpoint_.size() > 255) {
-        reject(QStringLiteral("TCP control session, key, token, or endpoint is invalid"), true);
+        reject(
+            QStringLiteral("TCP control session, key, token, or endpoint is invalid"),
+            TransportFailure::InvalidConfiguration,
+            true);
         return;
     }
     handshakeState_ = HandshakeState::WaitingForChallenge;
     receiveSequence_ = 1;
     sendSequence_ = 1;
+    publishEvent(TransportEvent{
+        TransportEventType::Connecting,
+        TransportFailure::None,
+        QStringLiteral("TCP control connecting")});
     socket_.connectToHost(host, port);
 }
 
 void ControlClient::close()
 {
+    manualClose_ = true;
     authenticationTimer_.stop();
     frameTimer_.stop();
     buffer_.clear();
@@ -129,7 +174,10 @@ void ControlClient::readSocket()
         }
         if (result == TakeFrameResult::Invalid) {
             ++stats_.frameRejects;
-            reject(QStringLiteral("TCP control frame rejected: ") + error, true);
+            reject(
+                QStringLiteral("TCP control frame rejected: ") + error,
+                TransportFailure::FrameRejected,
+                true);
             return;
         }
         frameTimer_.stop();
@@ -140,7 +188,10 @@ void ControlClient::readSocket()
         if (handshakeState_ != HandshakeState::Authenticated) {
             if (!decodeHandshake(body, message, error)) {
                 ++stats_.authenticationRejects;
-                reject(QStringLiteral("TCP control handshake rejected: ") + error, true);
+                reject(
+                    QStringLiteral("TCP control handshake rejected: ") + error,
+                    TransportFailure::AuthenticationRejected,
+                    true);
                 return;
             }
             handleHandshake(message);
@@ -150,7 +201,10 @@ void ControlClient::readSocket()
         } else {
             if (!decodeAuthenticated(body, receiveKey_, receiveSequence_, message, error)) {
                 ++stats_.sequenceOrTagRejects;
-                reject(QStringLiteral("TCP control authenticated frame rejected: ") + error, true);
+                reject(
+                    QStringLiteral("TCP control authenticated frame rejected: ") + error,
+                    TransportFailure::AuthenticatedFrameRejected,
+                    true);
                 return;
             }
             ++receiveSequence_;
@@ -176,7 +230,8 @@ void ControlClient::handleHandshake(const QJsonObject& message)
     if (type == QStringLiteral("hello.error")) {
         ++stats_.authenticationRejects;
         reject(QStringLiteral("TCP auth failed: ") +
-            message.value(QStringLiteral("reason")).toString(QStringLiteral("auth failed")));
+            message.value(QStringLiteral("reason")).toString(QStringLiteral("auth failed")),
+            TransportFailure::AuthenticationRejected);
         return;
     }
 
@@ -187,7 +242,10 @@ void ControlClient::handleHandshake(const QJsonObject& message)
             message.value(QStringLiteral("session")).toString().toLower() != sessionHex_ ||
             serverNonce_.size() != 16) {
             ++stats_.authenticationRejects;
-            reject(QStringLiteral("TCP control server challenge is invalid"), true);
+            reject(
+                QStringLiteral("TCP control server challenge is invalid"),
+                TransportFailure::AuthenticationRejected,
+                true);
             return;
         }
         clientNonce_ = randomNonce();
@@ -214,9 +272,10 @@ void ControlClient::handleHandshake(const QJsonObject& message)
             return;
         }
         handshakeState_ = HandshakeState::WaitingForServerProof;
-        if (onState) {
-            onState(QStringLiteral("TCP connected; sent challenge proof"));
-        }
+        publishEvent(TransportEvent{
+            TransportEventType::ProofSent,
+            TransportFailure::None,
+            QStringLiteral("TCP connected; sent challenge proof")});
         return;
     }
 
@@ -225,7 +284,10 @@ void ControlClient::handleHandshake(const QJsonObject& message)
         message.value(QStringLiteral("version")).toInt() != 1 ||
         message.value(QStringLiteral("peer_token")).toString() != meshPeerToken_) {
         ++stats_.authenticationRejects;
-        reject(QStringLiteral("TCP control server proof state is invalid"), true);
+        reject(
+            QStringLiteral("TCP control server proof state is invalid"),
+            TransportFailure::AuthenticationRejected,
+            true);
         return;
     }
     const QByteArray receivedProof = decodeHex(message.value(QStringLiteral("proof")).toString(), 16);
@@ -235,7 +297,10 @@ void ControlClient::handleHandshake(const QJsonObject& message)
         transcript_).left(16);
     if (!constantTimeEqual(receivedProof, expectedProof)) {
         ++stats_.authenticationRejects;
-        reject(QStringLiteral("TCP control server proof is invalid"), true);
+        reject(
+            QStringLiteral("TCP control server proof is invalid"),
+            TransportFailure::AuthenticationRejected,
+            true);
         return;
     }
 
@@ -243,9 +308,12 @@ void ControlClient::handleHandshake(const QJsonObject& message)
     sendKey_ = keyedValue(masterKey_, QByteArrayLiteral("jam2-control-c2s"), transcript_);
     handshakeState_ = HandshakeState::Authenticated;
     authenticationTimer_.stop();
-    if (onState) {
-        onState(QStringLiteral("TCP control authenticated"));
-    }
+    publishEvent(TransportEvent{
+        TransportEventType::Authenticated,
+        TransportFailure::None,
+        QStringLiteral("TCP control authenticated"),
+        false,
+        true});
 }
 
 bool ControlClient::writeFrame(const QByteArray& frame)
@@ -257,11 +325,19 @@ bool ControlClient::writeFrame(const QByteArray& frame)
     stats_.maxQueuedOutputBytes = std::max<quint64>(stats_.maxQueuedOutputBytes, queued);
     if (queued + frame.size() > kOutputHighWaterBytes) {
         ++stats_.outputHighWaterRejects;
-        reject(QStringLiteral("TCP control output high-water exceeded"), true);
+        reject(
+            QStringLiteral("TCP control output high-water exceeded"),
+            TransportFailure::OutputHighWater,
+            true,
+            true);
         return false;
     }
     if (socket_.write(frame) != frame.size()) {
-        reject(QStringLiteral("TCP control write failed"), true);
+        reject(
+            QStringLiteral("TCP control write failed"),
+            TransportFailure::WriteFailed,
+            true,
+            true);
         return false;
     }
     ++stats_.framesSent;
@@ -269,14 +345,29 @@ bool ControlClient::writeFrame(const QByteArray& frame)
     return true;
 }
 
-void ControlClient::reject(const QString& reason, bool abort)
+void ControlClient::reject(
+    const QString& reason,
+    TransportFailure failure,
+    bool abort,
+    bool retryable)
 {
-    if (onState) {
-        onState(reason);
-    }
+    failureReportedForAttempt_ = true;
+    publishEvent(TransportEvent{
+        TransportEventType::Failure,
+        failure,
+        reason,
+        retryable,
+        handshakeState_ == HandshakeState::Authenticated});
     if (abort) {
         socket_.abort();
     } else {
         socket_.disconnectFromHost();
+    }
+}
+
+void ControlClient::publishEvent(TransportEvent event)
+{
+    if (onEvent) {
+        onEvent(event);
     }
 }

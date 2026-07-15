@@ -101,12 +101,28 @@ def summarize_csv(path):
         for period in recovery_rows
     ]
     adaptive_targets = [to_float(period, "adaptive_playback_target_frames") for period in periods]
+    before_shutdown = periods[-1] if periods else row
     authority_rows = periods + [row]
     observed_rows = periods + [row]
     authority_ids_seen = sorted({
         to_int(item, "grid_authority_peer_id")
         for item in authority_rows
         if to_int(item, "grid_authority_peer_id") > 0
+    })
+    transport_source_ids_seen = sorted({
+        to_int(item, "transport_source_peer_id")
+        for item in authority_rows
+        if to_int(item, "transport_source_peer_id") > 0
+    })
+    transport_grid_revisions_seen = sorted({
+        int(to_float(item, "transport_grid_revision"))
+        for item in authority_rows
+        if to_float(item, "transport_grid_revision") > 0.0
+    })
+    transport_actions_seen = sorted({
+        int(to_float(item, "transport_action"))
+        for item in authority_rows
+        if to_float(item, "transport_action") > 0.0
     })
     return {
         "csv_path": str(path),
@@ -153,6 +169,8 @@ def summarize_csv(path):
             recovery_rows, "adaptive_playback_padding_frames"),
         "recovery_mix_active_slots_max": max(recovery_slots, default=0.0),
         "recovery_mix_active_slots_ratio_max": max(recovery_slot_ratios, default=0.0),
+        "recovery_mix_active_slots_end": recovery_slots[-1] if recovery_slots else 0.0,
+        "recovery_mix_active_slots_ratio_end": recovery_slot_ratios[-1] if recovery_slot_ratios else 0.0,
         "bootstrap_coordinator_peer_id": to_int(row, "bootstrap_coordinator_peer_id"),
         "arrangement_authority_peer_id": to_int(row, "arrangement_authority_peer_id"),
         "grid_authority_peer_id": to_int(row, "grid_authority_peer_id"),
@@ -164,9 +182,9 @@ def summarize_csv(path):
         "grid_run_state_before_shutdown": int(to_float(periods[-1], "grid_run_state")) if periods else int(to_float(row, "grid_run_state")),
         "grid_mode": int(to_float(row, "grid_mode")),
         "grid_authority_epoch_frame": to_float(row, "grid_authority_epoch_frame"),
-        "grid_mapped_epoch_frame": to_float(row, "grid_mapped_epoch_frame"),
+        "grid_mapped_epoch_frame": to_float(before_shutdown, "grid_mapped_epoch_frame"),
         "grid_authority_packet_frame": to_float(row, "grid_authority_packet_frame"),
-        "grid_mapping_error_frames": to_float(row, "grid_mapping_error_frames"),
+        "grid_mapping_error_frames": to_float(before_shutdown, "grid_mapping_error_frames"),
         "grid_proposals_sent": to_float(row, "grid_proposals_sent"),
         "grid_proposals_accepted": to_float(row, "grid_proposals_accepted"),
         "grid_proposals_rejected": to_float(row, "grid_proposals_rejected"),
@@ -180,8 +198,14 @@ def summarize_csv(path):
         "leader_audio_source_peer_id": to_int(row, "leader_audio_source_peer_id"),
         "leader_audio_injected_packets": to_float(row, "leader_audio_injected_packets"),
         "transport_source_peer_id": to_int(row, "transport_source_peer_id"),
+        "transport_source_peer_ids_seen": transport_source_ids_seen,
         "transport_event_counter": int(to_float(row, "transport_event_counter")),
+        "transport_event_counter_max": int(max(
+            (to_float(item, "transport_event_counter") for item in authority_rows), default=0.0)),
         "transport_grid_revision": int(to_float(row, "transport_grid_revision")),
+        "transport_grid_revisions_seen": transport_grid_revisions_seen,
+        "transport_action": int(to_float(row, "transport_action")),
+        "transport_actions_seen": transport_actions_seen,
         "transport_events_accepted": to_float(row, "transport_events_accepted"),
         "transport_events_rejected": to_float(row, "transport_events_rejected"),
         "transport_source_frame": to_float(row, "transport_source_frame"),
@@ -252,11 +276,13 @@ def summarize_csv(path):
         "audio_callback_gap_over_2x_count": to_float(row, "audio_callback_gap_over_2x_count"),
         "metronome_sent": to_float(row, "metronome_states_sent") or to_float(row, "metronome_sent"),
         "metronome_received": to_float(row, "metronome_states_received") or to_float(row, "metronome_received"),
-        "metronome_alignment_valid": row.get("metronome_alignment_valid", ""),
-        "metronome_epoch_sample_time": to_float(row, "metronome_epoch_sample_time"),
-        "local_metronome_beat": to_float(row, "local_metronome_beat"),
-        "remote_metronome_beat": to_float(row, "remote_metronome_beat"),
-        "metronome_beat_delta_abs": abs(to_float(row, "local_metronome_beat") - to_float(row, "remote_metronome_beat")),
+        "metronome_alignment_valid": before_shutdown.get("metronome_alignment_valid", ""),
+        "metronome_epoch_sample_time": to_float(before_shutdown, "metronome_epoch_sample_time"),
+        "local_metronome_beat": to_float(before_shutdown, "local_metronome_beat"),
+        "remote_metronome_beat": to_float(before_shutdown, "remote_metronome_beat"),
+        "metronome_beat_delta_abs": abs(
+            to_float(before_shutdown, "local_metronome_beat") -
+            to_float(before_shutdown, "remote_metronome_beat")),
         "final_metronome": row.get("final_metronome", ""),
         "final_bpm": to_float(row, "final_bpm"),
         "metronome_level": to_float(row, "metronome_level"),
@@ -264,11 +290,11 @@ def summarize_csv(path):
         "final_metronome_level": to_float(row, "final_metronome_level"),
         "final_remote_level": to_float(row, "final_remote_level"),
         "metronome_mode": row.get("metronome_mode", ""),
-        "metronome_compensation_active": row.get("metronome_compensation_active", ""),
-        "metronome_compensation_offset_frames": to_float(row, "metronome_compensation_offset_frames"),
-        "metronome_compensation_offset_ms": to_float(row, "metronome_compensation_offset_ms"),
-        "metronome_compensation_target_frames": to_float(row, "metronome_compensation_target_frames"),
-        "metronome_compensation_target_ms": to_float(row, "metronome_compensation_target_ms"),
+        "metronome_compensation_active": before_shutdown.get("metronome_compensation_active", ""),
+        "metronome_compensation_offset_frames": to_float(before_shutdown, "metronome_compensation_offset_frames"),
+        "metronome_compensation_offset_ms": to_float(before_shutdown, "metronome_compensation_offset_ms"),
+        "metronome_compensation_target_frames": to_float(before_shutdown, "metronome_compensation_target_frames"),
+        "metronome_compensation_target_ms": to_float(before_shutdown, "metronome_compensation_target_ms"),
         "metronome_compensation_clamp_events": to_float(row, "metronome_compensation_clamp_events"),
         "metronome_compensation_stale_events": to_float(row, "metronome_compensation_stale_events"),
         "sample_time_playout": row.get("sample_time_playout", ""),
@@ -388,6 +414,10 @@ def combined_summary(server_csv, client_csv):
             (side.get("recovery_mix_active_slots_max", 0.0) for side in sides), default=0.0),
         "recovery_mix_active_slots_ratio_max": max(
             (side.get("recovery_mix_active_slots_ratio_max", 0.0) for side in sides), default=0.0),
+        "recovery_mix_active_slots_end_max": max(
+            (side.get("recovery_mix_active_slots_end", 0.0) for side in sides), default=0.0),
+        "recovery_mix_active_slots_ratio_end_max": max(
+            (side.get("recovery_mix_active_slots_ratio_end", 0.0) for side in sides), default=0.0),
         "metronome_received_min": min((side.get("metronome_received", 0.0) for side in sides), default=0.0),
         "grid_authority_consensus": (
             len({side.get("grid_authority_peer_id", 0) for side in sides}) == 1
@@ -528,6 +558,8 @@ def write_results_csv(path, results):
         "recovery_adaptive_padding_frames_delta_total",
         "recovery_mix_active_slots_max",
         "recovery_mix_active_slots_ratio_max",
+        "recovery_mix_active_slots_end_max",
+        "recovery_mix_active_slots_ratio_end_max",
         "metronome_received_min",
         "metronome_epoch_sample_time_min",
         "local_metronome_beat_max",

@@ -220,7 +220,11 @@ A lightweight improvement is challenge-response authentication:
 2. Client returns session id plus a keyed authenticator over the nonce and protocol context.
 3. Server compares the authenticator and never receives the raw key.
 
-This does not provide confidentiality. The limitation should be documented accurately rather than implying encrypted transport. Adding TLS would be a separate product/security decision and is not required for the audio fast path.
+This does not provide confidentiality. The limitation should be documented
+accurately rather than implying encrypted transport. Traffic encryption is not
+a Jam2 product/refactor goal: invited participants are trusted, while the
+lightweight authentication, integrity, and authorization controls remain
+necessary for session safety without adding TLS deployment complexity.
 
 ## Quantified Fast-Path Baseline
 

@@ -320,7 +320,10 @@ def duration_coverage_ratio(result):
         return min(
             metrics.get("stats_duration_coverage_ratio_min", 0.0),
             metrics.get("recording_duration_coverage_ratio_min", 0.0))
-    elapsed_s = result.get("metrics", {}).get("combined", {}).get("elapsed_s_min", 0.0)
+    if result.get("expected_early_client_exit", False):
+        elapsed_s = result.get("metrics", {}).get("server", {}).get("elapsed_s", 0.0)
+    else:
+        elapsed_s = result.get("metrics", {}).get("combined", {}).get("elapsed_s_min", 0.0)
     return elapsed_s / (requested_stream_ms / 1000.0)
 
 
@@ -437,7 +440,7 @@ def protocol_verdict_for(result):
             return "transient_stall_mixer_capacity_drops"
         if metrics.get("recovery_mix_capacity_drops_delta_total", 0.0) > 0.0:
             return "transient_stall_mixer_still_dropping"
-        if metrics.get("recovery_mix_active_slots_ratio_max", 0.0) > 0.25:
+        if metrics.get("recovery_mix_active_slots_ratio_end_max", 0.0) > 0.25:
             return "transient_stall_mixer_queue_not_recovered"
         padding_limit = max(128.0, metrics.get("frame_size_max", 0.0) * 4.0)
         if metrics.get("recovery_adaptive_padding_frames_delta_total", 0.0) > padding_limit:
@@ -576,6 +579,27 @@ def protocol_verdict_for(result):
         if server.get("grid_authority_peer_id") != client.get("grid_authority_peer_id"):
             return "concurrent_grid_authority_conflict"
         return "pass"
+    if scenario == "last-peer-departure-grid-restart":
+        server = result.get("metrics", {}).get("server", {})
+        client = result.get("metrics", {}).get("client", {})
+        if server.get("network_peer_count", -1) != 0:
+            return "departed_peer_still_in_membership"
+        if server.get("grid_authority_peer_id") != server.get("local_peer_id"):
+            return "creator_did_not_take_fresh_grid_authority"
+        if server.get("grid_revision", 0) < 3:
+            return "post_departure_grid_revision_not_ordered"
+        authorities = server.get("grid_authority_peer_ids_seen", [])
+        if client.get("local_peer_id") not in authorities or server.get("local_peer_id") not in authorities:
+            return "post_departure_authority_transition_not_observed"
+        if server.get("grid_authority_epoch_frame", 0) <= 0 or \
+                server.get("grid_mapped_epoch_frame", 0) <= 0:
+            return "post_departure_fresh_epoch_missing"
+        if server.get("grid_run_state_before_shutdown", 0) != 1:
+            return "post_departure_grid_not_running"
+        if server.get("transport_source_peer_id", 0) != 0 or \
+                server.get("transport_event_counter", 0) != 0:
+            return "post_departure_stale_transport_retained"
+        return "pass"
     if scenario == "transport-grid-authority":
         metric_set = result.get("metrics", {})
         server = metric_set.get("server", {})
@@ -585,18 +609,54 @@ def protocol_verdict_for(result):
         if (server.get("arrangement_authority_peer_id") != server.get("local_peer_id") or
                 client.get("arrangement_authority_peer_id") != server.get("local_peer_id")):
             return "transport_arrangement_authority_invalid"
-        if (server.get("transport_source_peer_id") != server.get("local_peer_id") or
-                client.get("transport_source_peer_id") != server.get("local_peer_id")):
+        expected_source = server.get("local_peer_id")
+        if (server.get("transport_source_peer_ids_seen") != [expected_source] or
+                client.get("transport_source_peer_ids_seen") != [expected_source]):
             return "transport_source_identity_invalid"
-        if min(server.get("transport_event_counter", 0), client.get("transport_event_counter", 0)) <= 0:
+        if min(server.get("transport_event_counter_max", 0), client.get("transport_event_counter_max", 0)) <= 0:
             return "transport_event_not_observed"
-        if (server.get("transport_grid_revision") != server.get("grid_revision") or
-                client.get("transport_grid_revision") != client.get("grid_revision")):
+        if (server.get("grid_revision") not in server.get("transport_grid_revisions_seen", []) or
+                client.get("grid_revision") not in client.get("transport_grid_revisions_seen", [])):
             return "transport_grid_revision_mismatch"
         if client.get("transport_events_accepted", 0.0) <= 0.0:
             return "transport_event_not_accepted"
         if client.get("transport_applied_target_frame", 0.0) <= client.get("transport_source_frame", 0.0):
             return "transport_applied_frame_invalid"
+        return "pass"
+    if scenario in ("transport-track-actions", "transport-track-actions-joiner"):
+        metric_set = result.get("metrics", {})
+        server = metric_set.get("server", {})
+        client = metric_set.get("client", {})
+        expected_source = (client if scenario == "transport-track-actions-joiner" else server).get("local_peer_id")
+        if (server.get("transport_source_peer_ids_seen") != [expected_source] or
+                client.get("transport_source_peer_ids_seen") != [expected_source]):
+            return "transport_action_source_identity_invalid"
+        if min(server.get("transport_event_counter_max", 0),
+               client.get("transport_event_counter_max", 0)) < 3:
+            return "transport_action_sequence_incomplete"
+        expected_actions = [1, 4, 5]
+        if (server.get("transport_actions_seen") != expected_actions or
+                client.get("transport_actions_seen") != expected_actions):
+            return "transport_action_types_incomplete"
+        receiver = server if scenario == "transport-track-actions-joiner" else client
+        if receiver.get("transport_events_accepted", 0.0) < 3.0:
+            return "transport_actions_not_accepted"
+        return "pass"
+    if scenario == "transport-track-sync-off":
+        metric_set = result.get("metrics", {})
+        server = metric_set.get("server", {})
+        client = metric_set.get("client", {})
+        expected_source = server.get("local_peer_id")
+        if (server.get("transport_source_peer_ids_seen") != [expected_source] or
+                client.get("transport_source_peer_ids_seen") != [expected_source]):
+            return "transport_sync_off_private_actions_leaked"
+        if (server.get("transport_actions_seen") != [4, 5] or
+                client.get("transport_actions_seen") != [4, 5]):
+            return "transport_sync_off_peer_actions_missing"
+        if client.get("transport_events_accepted", 0.0) < 2.0:
+            return "transport_sync_off_peer_actions_not_authenticated"
+        if client.get("transport_applied_target_frame", 0.0) != 0.0:
+            return "transport_sync_off_peer_action_applied"
         return "pass"
     if scenario == "levels-low":
         server = result.get("metrics", {}).get("server", {})

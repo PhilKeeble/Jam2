@@ -317,7 +317,12 @@ Relevant source:
 
 The custom parser reads the complete file before applying the five-minute processed-output limit. It recognizes RIFF/WAVE and walks chunks with basic bounds, but it does not fully validate the RIFF declared size, PCM format tag, supported channel maximum, byte rate, block alignment, data alignment, duplicate critical chunks, chunk-count/header-work bounds, or all arithmetic before allocations and DSP work. It can also retain/copy large WAV data per lane.
 
-No clear out-of-bounds read was confirmed in the reviewed 64-bit code. The larger practical risk is resource exhaustion or unexpected numeric state reaching the stretch/mix worker. Fuzzing is still required because this parser receives network-originated bytes.
+No clear out-of-bounds read was confirmed in the reviewed 64-bit code. The
+larger practical risk is resource exhaustion or unexpected numeric state
+reaching the stretch/mix worker. Finite deterministic malformed and boundary
+coverage is required for core hardening because this parser receives
+network-originated bytes. Dedicated mutation/generative fuzzing and sanitizer
+orchestration are optional Phase 12 components.
 
 Lightweight correction for a deliberately narrow v1 WAV format:
 
@@ -328,9 +333,14 @@ Lightweight correction for a deliberately narrow v1 WAV format:
 - Do not allocate output until validated frame counts and processing-speed bounds establish the maximum.
 - Avoid duplicating the same WAV bytes for multiple lanes that reference the same hash.
 - Keep parse, hash, file I/O, stretch, and mix work on a bounded non-real-time worker.
-- Fuzz the isolated parser under AddressSanitizer and UndefinedBehaviorSanitizer where supported.
+- In optional Phase 12 testing, fuzz the isolated parser under AddressSanitizer
+  and UndefinedBehaviorSanitizer where supported.
 
-If future versions accept broad codecs or complex container variants, a sandboxed decoder process would become more attractive. It is unnecessary for the narrow PCM16 v1 format if the local parser is bounded, isolated, and fuzzed.
+If future versions accept broad codecs or complex container variants, a
+sandboxed decoder process would become more attractive. It is unnecessary for
+the narrow PCM16 v1 format if the local parser is bounded, isolated, and covered
+by deterministic malformed-input regressions; optional fuzzing can add further
+confidence without gating the core refactor.
 
 ### 9. UDP has good authentication foundations but incomplete abuse bounds
 
@@ -388,7 +398,7 @@ Lightweight correction:
 
 Expected cost: a few small packets and at most roughly one extra round trip during edge activation. All mesh edges can probe in parallel. There is no steady-state bandwidth or audio-latency increase.
 
-### 11. Shared session keys limit insider isolation and do not provide privacy
+### 11. Trusted invited peers share one non-confidential session boundary
 
 The UDP SipHash tag authenticates possession of the shared session key; it does not encrypt audio. Current TCP control and asset content are also plaintext. A peer with the group key can potentially forge another peer's UDP packets if identity is not additionally bound, and any observer on the traffic path can hear/read content.
 
@@ -396,8 +406,11 @@ For the stated controlled-peer v1 use case:
 
 - Keep a shared session master key.
 - Derive protocol-specific keys and bind stable peer/source identities wherever possible.
-- State clearly that v1 direct traffic is authenticated for session safety but is not confidential.
-- Defer UDP AEAD, pairwise public-key exchange, and per-edge cryptographic identities unless the threat model expands to malicious invited peers or privacy on untrusted networks.
+- State clearly that v1 direct traffic is authenticated for session safety but
+  is not confidential.
+- Require users to invite only trusted participants. Traffic encryption,
+  pairwise public-key exchange, and per-edge cryptographic isolation are not
+  Jam2 product or refactor goals.
 
 Pairwise UDP keys would require at least per-destination final authentication even when audio payload encoding is shared. The raw cryptographic CPU would still be small at Jam2's bitrate, but negotiation, identity, recovery, testing, and fan-out complexity are not justified for this v1 balance.
 
@@ -455,12 +468,14 @@ The following set gives the best risk reduction without materially increasing au
 6. Central strict schemas and product-derived bounds for all remote JSON/model values.
 7. Requested-only, size/chunk/time/concurrency-bounded streaming asset transfer to a temporary file with incremental hashing and atomic commit.
 8. Content-hash-only remote asset references and locally constructed canonical paths.
-9. A narrow, strictly validated PCM16 WAV parser running on a bounded worker, plus fuzz/sanitizer coverage.
+9. A narrow, strictly validated PCM16 WAV parser running on a bounded worker,
+   plus deterministic malformed/boundary coverage; fuzz/sanitizer modules are
+   optional Phase 12 work.
 10. Exact UDP type/flag/payload validation, allocation-free authentication, replay windows, wrap-safe sequences, sample-time horizons, bounded gap handling, and per-wake work budgets.
 11. Authenticated UDP endpoint proof before audio activation.
 12. OS-backed secrets/nonces plus domain-separated control/UDP key derivation.
 
-### Explicitly deferred unless the threat model changes
+### Explicit product non-goals
 
 - TLS certificates, certificate pinning UI, or a private certificate authority.
 - UDP encryption/AEAD and audio confidentiality.
@@ -469,7 +484,11 @@ The following set gives the best risk reduction without materially increasing au
 - Relay/TURN audio paths.
 - A sandboxed codec service while only the bounded PCM16 WAV subset is accepted.
 
-These deferred items address privacy, malicious invited peers, persistent identity, or broad public-service operation. They are not needed merely to keep a short direct session robust against malformed traffic and common implementation bugs.
+These items address privacy, malicious invited peers, persistent identity, or
+broad public-service operation. Jam2 instead assumes short direct sessions
+among trusted invited participants and focuses its security work on
+authentication, integrity, authorization, bounded resource use, and robustness
+against malformed traffic and common implementation bugs.
 
 ## Computational and Network Cost
 
@@ -485,7 +504,7 @@ These deferred items address privacy, malicious invited peers, persistent identi
 | Endpoint proof | Only during join/change | Small challenge state | A few probe packets; about one RTT before edge activation |
 | Incremental asset hash/write | Same O(n) work as whole-file hash | Much lower peak memory | Same with base64; lower after raw chunks |
 | Strict WAV checks | Negligible beside file I/O/DSP | Prevents invalid allocations | None |
-| Fuzz/sanitizer tests | Zero in release builds | Zero in release builds | None |
+| Optional Phase 12 fuzz/sanitizer tests | Zero in release builds | Zero in release builds | None |
 | OS CSPRNG | Session/handshake only | Negligible | None |
 
 At a representative 750 UDP packets/sec per remote peer, a 20-operation validation/replay path is about 15,000 simple operations/sec per peer. Three remote peers would be about 45,000 operations/sec, which should be below measurement noise compared with socket calls, PCM packing, resampling, and the current dynamic maps. This is an order-of-magnitude illustration, not a substitute for the plan's before/after profiling.
@@ -580,7 +599,8 @@ maintained only in [refactor-plan.md](refactor-plan.md).
 - More simultaneous transfers and requests than allowed.
 - Verify temporary files are removed and existing valid assets are not truncated on failure.
 - RIFF size mismatch, truncated/oversized/padded chunks, excessive chunk count, missing/duplicate `fmt` or `data`, non-PCM tag, unsupported channels/rate/bits, invalid byte rate/block alignment, misaligned data, excessive frames, and arithmetic limits.
-- Fuzz the isolated frame decoder, JSON validators, asset state machine, and WAV parser under sanitizers.
+- Optional Phase 12: fuzz the isolated frame decoder, JSON validators, asset
+  state machine, and WAV parser under sanitizers.
 
 ### UDP and endpoint state
 
@@ -597,7 +617,9 @@ maintained only in [refactor-plan.md](refactor-plan.md).
 - Verify CSPRNG failure produces a clear session-creation failure rather than a weak fallback.
 - Record packet-loop CPU, allocations, copied bytes, send gaps, callback gaps, and UDP rejection counters before/after.
 - Record normal control join time, frame overhead, asset peak memory, and transfer bytes.
-- Run fuzzers/sanitizers only in test configurations; release builds contain no sanitizer cost.
+- If the optional Phase 12 fuzzing components are implemented, run
+  fuzzers/sanitizers only in test configurations; release builds contain no
+  sanitizer cost.
 
 ## Target Security Properties
 
@@ -627,4 +649,7 @@ source-aware authorization, streaming file handling, replay/timeline bounds,
 and endpoint proof. They prevent both deliberate abuse and ordinary peer bugs
 while adding effectively no steady audio latency or bandwidth.
 
-Do not add TLS, accounts, relay infrastructure, or encrypted UDP as part of this v1 refactor. Revisit confidentiality and malicious-invited-peer isolation only if Jam2's deployment model expands beyond short direct sessions among controlled users.
+Do not add TLS, encrypted UDP, pairwise cryptographic identity, accounts, or
+relay infrastructure. Jam2's model is short direct sessions among trusted
+invited users; authentication, integrity, authorization, and bounded handling
+remain required even though confidentiality is not a product goal.

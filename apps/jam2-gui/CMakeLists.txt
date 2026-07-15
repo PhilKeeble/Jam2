@@ -34,6 +34,8 @@ endif()
 # The unified Windows binary uses the console subsystem so shells wait for
 # command-line invocations. The no-argument GUI path detaches immediately.
 add_executable(jam2 MACOSX_BUNDLE
+    ApplicationRuntime.cpp
+    ApplicationRuntime.hpp
     BeatGridModel.cpp
     BeatGridModel.hpp
     BeatGridWidget.cpp
@@ -44,10 +46,10 @@ add_executable(jam2 MACOSX_BUNDLE
     ControlProtocol.hpp
     ControlServer.cpp
     ControlServer.hpp
+    ControllerLifecycleValidation.cpp
+    ControllerLifecycleValidation.hpp
     GuiLoopbackRecorder.cpp
     GuiLoopbackRecorder.hpp
-    Jam2Process.cpp
-    Jam2Process.hpp
     LooperProject.cpp
     LooperProject.hpp
     MainWindow.cpp
@@ -58,12 +60,15 @@ add_executable(jam2 MACOSX_BUNDLE
     PreparedMixRenderer.hpp
     SessionController.cpp
     SessionController.hpp
+    SharedSessionController.cpp
+    SharedSessionController.hpp
     SharedTrackController.cpp
     SharedTrackController.hpp
     SharedTrackModel.hpp
     main.cpp
     ../jam2-cli/main.cpp
     ../jam2-cli/cli_entry.hpp
+    ../jam2-cli/runtime_entry.hpp
 )
 
 if(WIN32)

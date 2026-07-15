@@ -273,16 +273,10 @@ void OutputRecorder::record(const RecordBlock& block) noexcept
     frames_queued_.fetch_add(pushed, std::memory_order_relaxed);
 }
 
-OutputRecorderStats OutputRecorder::stats() const
+OutputRecorderSnapshot OutputRecorder::snapshot() const noexcept
 {
-    OutputRecorderStats out;
+    OutputRecorderSnapshot out;
     out.active = active_.load(std::memory_order_acquire);
-    {
-        std::lock_guard<std::mutex> lock(error_mutex_);
-        out.folder = folder_.string();
-        out.sample_rate = sample_rate_;
-        out.last_error = last_error_;
-    }
     out.queue_capacity_frames = queue_capacity_frames_;
     out.start_audio_frame = start_audio_frame_.load(std::memory_order_acquire);
     out.stop_audio_frame = stop_audio_frame_.load(std::memory_order_acquire);
@@ -292,6 +286,29 @@ OutputRecorderStats OutputRecorder::stats() const
     out.drop_events = drop_events_.load(std::memory_order_relaxed);
     out.writer_errors = writer_errors_.load(std::memory_order_relaxed);
     out.queue_depth_frames = queues_[0] ? queues_[0]->depth() : 0;
+    return out;
+}
+
+OutputRecorderStats OutputRecorder::stats() const
+{
+    const auto fixed = snapshot();
+    OutputRecorderStats out;
+    out.active = fixed.active;
+    out.queue_capacity_frames = fixed.queue_capacity_frames;
+    out.start_audio_frame = fixed.start_audio_frame;
+    out.stop_audio_frame = fixed.stop_audio_frame;
+    out.frames_queued = fixed.frames_queued;
+    out.frames_written = fixed.frames_written;
+    out.dropped_frames = fixed.dropped_frames;
+    out.drop_events = fixed.drop_events;
+    out.writer_errors = fixed.writer_errors;
+    out.queue_depth_frames = fixed.queue_depth_frames;
+    {
+        std::lock_guard<std::mutex> lock(error_mutex_);
+        out.folder = folder_.string();
+        out.sample_rate = sample_rate_;
+        out.last_error = last_error_;
+    }
     return out;
 }
 

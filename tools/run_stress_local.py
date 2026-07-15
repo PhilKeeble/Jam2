@@ -251,7 +251,6 @@ def run_mesh_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
             "--test-input", scenario.get("signal", "tone-440"),
             "--record-jam-folder", str(recording),
             "--os-priority", os_priority,
-            "--status-format", "jsonl",
         ]
         common_args.extend(profile.args(args_ns.stream_ms))
         common_args.extend(["--audio-buffer-size", str(args_ns.headless_audio_buffer_frames)])
@@ -367,6 +366,7 @@ def run_mesh_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
         "expect": scenario["expect"],
         "profile_metadata": profile.metadata(),
         "requested_stream_ms": args_ns.stream_ms,
+        "expected_early_client_exit": scenario.get("expected_early_client_exit", False),
         "headless_audio_buffer_frames": args_ns.headless_audio_buffer_frames,
         "mesh_peers": peer_count,
         "mesh_endpoints": endpoints,
@@ -590,6 +590,7 @@ def run_scenario(jam2, scenario_id, scenario, args_ns, output_dir, seed):
         "expect": scenario["expect"],
         "profile_metadata": profile.metadata(),
         "requested_stream_ms": args_ns.stream_ms,
+        "expected_early_client_exit": scenario.get("expected_early_client_exit", False),
         "native_effective_config": native_effective_config,
         "server_return_code": server_rc,
         "client_return_code": client_rc,
@@ -799,7 +800,6 @@ def validation_profile_equivalence(jam2, profile_name, profile, output_dir, stre
         "--bind", "127.0.0.1:0",
         "--no-stun",
         "--wait-ms", "250",
-        "--machine-readable-startup", "on",
     ]
     profile_args = common + ["--profile", profile_name]
     explicit_args = common + [
@@ -977,6 +977,92 @@ def run_pair_validation(
     }
 
 
+def validation_session_peer_limit(jam2, args_ns, output_dir):
+    stream_ms = max(6000, args_ns.validation_stream_ms)
+    bind = select_network_endpoint()
+    common = ["--headless-audio", "on", "--audio-buffer-size", "256"]
+    creator, creator_paths = start_listener(
+        jam2,
+        None,
+        args_ns.sample_rate,
+        FAST_PROFILE,
+        stream_ms,
+        output_dir / "creator",
+        extra_args=common + ["--max-peers", "1"],
+        bind=bind)
+    waiting = creator.wait_for_startup("waiting", args_ns.startup_timeout_s)
+    if waiting is None:
+        creator.terminate()
+        return {
+            "validation": "session-peer-limit",
+            "verdict": "creator_startup_failed",
+            "creator_return_code": creator.poll(),
+        }
+
+    accepted, accepted_paths = start_connector(
+        jam2,
+        waiting["connection_url"],
+        None,
+        args_ns.sample_rate,
+        FAST_PROFILE,
+        stream_ms,
+        output_dir / "accepted",
+        extra_args=common)
+    accepted_startup = accepted.wait_for_startup("connected", args_ns.startup_timeout_s)
+    if accepted_startup is None:
+        accepted.terminate()
+        creator.terminate()
+        return {
+            "validation": "session-peer-limit",
+            "verdict": "first_peer_not_accepted",
+            "creator_return_code": creator.poll(),
+            "accepted_return_code": accepted.poll(),
+        }
+
+    rejected, rejected_paths = start_connector(
+        jam2,
+        waiting["connection_url"],
+        None,
+        args_ns.sample_rate,
+        FAST_PROFILE,
+        stream_ms,
+        output_dir / "rejected",
+        extra_args=common)
+    rejected_rc = rejected.wait(timeout=10.0)
+    if rejected_rc is None:
+        rejected.terminate()
+        rejected_rc = rejected.poll()
+    accepted_rc = accepted.wait(timeout=stream_ms / 1000.0 + 15.0)
+    if accepted_rc is None:
+        accepted.terminate()
+        accepted_rc = accepted.poll()
+    creator_rc = creator.wait(timeout=10.0)
+    if creator_rc is None:
+        creator.terminate()
+        creator_rc = creator.poll()
+
+    creator_text = Path(creator_paths["stdout"]).read_text(encoding="utf-8", errors="replace")
+    rejected_text = (
+        Path(rejected_paths["stdout"]).read_text(encoding="utf-8", errors="replace") +
+        Path(rejected_paths["stderr"]).read_text(encoding="utf-8", errors="replace"))
+    ok = (
+        creator_rc == 0 and accepted_rc == 0 and rejected_rc not in (None, 0) and
+        "Session peer limit reached" in creator_text and
+        "Session peer limit reached" in rejected_text)
+    return {
+        "validation": "session-peer-limit",
+        "verdict": "pass" if ok else "peer_limit_not_enforced",
+        "creator_return_code": creator_rc,
+        "accepted_return_code": accepted_rc,
+        "rejected_return_code": rejected_rc,
+        "creator_args": creator.artifact_args(),
+        "accepted_args": accepted.artifact_args(),
+        "rejected_args": rejected.artifact_args(),
+        "creator_csv_path": str(collect_side_csv(creator_paths, creator) or ""),
+        "accepted_csv_path": str(collect_side_csv(accepted_paths, accepted) or ""),
+    }
+
+
 def run_validations(jam2, args_ns, logs):
     validations_dir = ensure_dir(logs / "validation")
     results = []
@@ -1010,6 +1096,13 @@ def run_validations(jam2, args_ns, logs):
         debug_dir / "valid-lifecycle-smoke",
         0,
         "debug-valid-lifecycle-smoke"))
+    results.append(validation_command(
+        jam2,
+        ["debug", "run", str(
+            repo_root() / "tools" / "scenarios" / "controller-lifecycle-validation.json")],
+        debug_dir / "valid-controller-lifecycle",
+        0,
+        "debug-valid-controller-lifecycle"))
 
     boundary_fixtures = ensure_dir(debug_dir / "boundary-fixtures")
     valid_wav = boundary_fixtures / "valid.wav"
@@ -1103,7 +1196,7 @@ def run_validations(jam2, args_ns, logs):
         jam2,
         ["network", "create", "--profile", "fast", "--definitely-bad-option"],
         validations_dir / "bad-option",
-        1,
+        2,
         "bad-option"))
     results.append(validation_command(
         jam2,
@@ -1113,10 +1206,27 @@ def run_validations(jam2, args_ns, logs):
         "bad-url"))
     results.append(validation_command(
         jam2,
-        ["network", "create", "--profile", "fast", "--bind", "127.0.0.1:0", "--no-stun", "--wait-ms", "250", "--machine-readable-startup", "on"],
+        ["network", "create", "--profile", "fast", "--bind", "127.0.0.1:0", "--no-stun", "--wait-ms", "250"],
         validations_dir / "listen-timeout",
         3,
         "listen-timeout"))
+    refused_dir = validations_dir / "initial-connect-refused"
+    refused = validation_command(
+        jam2,
+        [
+            "network", "join",
+            "jam2://v1?endpoint=127.0.0.1:1&session=1&key=00000000000000000000000000000001",
+            "--profile", "fast", "--bind", "127.0.0.1:0", "--wait-ms", "6000",
+        ],
+        refused_dir,
+        3,
+        "initial-connect-refused")
+    refused_output = (
+        (refused_dir / "stdout.txt").read_text(encoding="utf-8", errors="replace") +
+        (refused_dir / "stderr.txt").read_text(encoding="utf-8", errors="replace"))
+    if refused["verdict"] == "pass" and "TCP control transport error:" not in refused_output:
+        refused["verdict"] = "typed_transport_failure_missing"
+    results.append(refused)
     for profile_name, profile in (
             ("fast", FAST_PROFILE),
             ("moderate", MODERATE_PROFILE),
@@ -1163,6 +1273,10 @@ def run_validations(jam2, args_ns, logs):
         MODERATE_PROFILE,
         False,
         lambda url: replace_url_key(url, "ffffffffffffffffffffffffffffffff")))
+    results.append(validation_session_peer_limit(
+        jam2,
+        args_ns,
+        validations_dir / "session-peer-limit"))
     results.append(run_pair_validation(
         jam2,
         "mismatched-frame-size",
@@ -1275,6 +1389,7 @@ def main():
             "server_signal": scenario.get("server_signal", ""),
             "client_signal": scenario.get("client_signal", ""),
             "udp_validation": scenario.get("udp_validation", ""),
+            "expected_early_client_exit": scenario.get("expected_early_client_exit", False),
         })
         if args_ns.mode == "mesh":
             result = run_mesh_scenario(jam2, planned_id, scenario, args_ns, scenario_dir, args_ns.seed + index)

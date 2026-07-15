@@ -38,7 +38,7 @@ The GUI exposes the useful live controls from the engine:
 - Adjust local remote playback level or mute the remote peer.
 - Enable stats and CSV logging while testing.
 
-These controls use the in-process typed binary engine bridge; they do not use a child process, stdin, loopback control socket, or JSONL state reconstruction.
+These controls submit fixed-shape typed commands directly to the in-process engine; they do not use a child process, stdin, loopback control socket, binary framing, or JSONL state reconstruction.
 
 ## Stats
 
@@ -72,7 +72,11 @@ The Track tab can:
 
 Perform prepared-cache playback uses the engine's ASIO/CoreAudio output path. Prepared caches must match the active engine sample rate; offline resampling is deferred.
 
+Any authenticated peer may originate shared prepared-track Play, Stop, or Restart while Track Sync is enabled. Disabling Track Sync keeps that peer's controls local and makes it disregard incoming peer track actions. Source event IDs persist across a leave/rejoin of the network worker so replay protection does not discard the first actions after reconnection.
+
 Lane recording is local. The first version records one clip per lane, stages the recorded WAV, inserts it at timeline frame 0, and lets the user adjust the lane region afterward. The selected lane region can be moved by dragging the clip body and cropped by dragging either edge; numeric frame controls remain available for exact edits.
+
+Perform recording starts on the engine-scheduled boundary after the grid-aligned count-in. A manual Stop finishes at the next whole bar so the imported take remains bar-aligned. The waveform and Looper position markers follow the continuous engine transport and the configured beats per bar.
 
 ## Track Recording From The GUI
 
