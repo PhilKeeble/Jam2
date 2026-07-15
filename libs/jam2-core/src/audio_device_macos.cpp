@@ -24,6 +24,9 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr AudioObjectPropertyElement kMainElement = kAudioObjectPropertyElementMain;
+constexpr double kSampleRateToleranceHz = 1.0;
+constexpr auto kDeviceConfigurationPollInterval = std::chrono::milliseconds(10);
+constexpr auto kDeviceConfigurationTimeout = std::chrono::milliseconds(3000);
 
 void update_interval_peak(std::atomic<int>& target, int value) noexcept
 {
@@ -312,6 +315,49 @@ bool sample_rate_supported(AudioObjectID device, double sample_rate)
     });
 }
 
+double wait_for_nominal_sample_rate(AudioObjectID device, double requested_sample_rate)
+{
+    // CoreAudio may acknowledge the setter before the device publishes the new
+    // nominal rate. Keep that cold-path transition bounded before stream setup.
+    const auto deadline = std::chrono::steady_clock::now() + kDeviceConfigurationTimeout;
+    double active_sample_rate = get_double_property_or_zero(
+        device,
+        kAudioDevicePropertyNominalSampleRate);
+    while (std::abs(active_sample_rate - requested_sample_rate) > kSampleRateToleranceHz &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(kDeviceConfigurationPollInterval);
+        active_sample_rate = get_double_property_or_zero(
+            device,
+            kAudioDevicePropertyNominalSampleRate);
+    }
+    if (std::abs(active_sample_rate - requested_sample_rate) > kSampleRateToleranceHz) {
+        std::ostringstream message;
+        message << "CoreAudio sample rate change did not settle within "
+                << kDeviceConfigurationTimeout.count() << " ms: requested "
+                << requested_sample_rate << " Hz, last reported "
+                << active_sample_rate << " Hz";
+        throw std::runtime_error(message.str());
+    }
+    return active_sample_rate;
+}
+
+double configure_nominal_sample_rate(AudioObjectID device, double requested_sample_rate)
+{
+    double active_sample_rate = get_double_property_or_zero(
+        device,
+        kAudioDevicePropertyNominalSampleRate);
+    if (std::abs(active_sample_rate - requested_sample_rate) <= kSampleRateToleranceHz) {
+        return active_sample_rate;
+    }
+
+    Float64 rate = requested_sample_rate;
+    auto property = address(kAudioDevicePropertyNominalSampleRate);
+    require_ok(
+        AudioObjectSetPropertyData(device, &property, 0, nullptr, sizeof(rate), &rate),
+        "AudioObjectSetPropertyData nominal sample rate");
+    return wait_for_nominal_sample_rate(device, requested_sample_rate);
+}
+
 AudioValueRange buffer_frame_range(AudioObjectID device)
 {
     AudioValueRange range{};
@@ -518,7 +564,7 @@ DeviceMeterResult run_exploratory_io(
     if (duration_ms <= 0) {
         throw std::runtime_error("duration must be positive");
     }
-    const auto selected = select_device(id);
+    auto selected = select_device(id);
     const UInt32 input_channels = device_channels(selected.object, kAudioDevicePropertyScopeInput);
     const UInt32 output_channels = device_channels(selected.object, kAudioDevicePropertyScopeOutput);
     if (input_channels == 0 && output_channels == 0) {
@@ -526,11 +572,7 @@ DeviceMeterResult run_exploratory_io(
     }
 
     if (requested_sample_rate > 0.0 && sample_rate_supported(selected.object, requested_sample_rate)) {
-        Float64 rate = requested_sample_rate;
-        auto property = address(kAudioDevicePropertyNominalSampleRate);
-        require_ok(
-            AudioObjectSetPropertyData(selected.object, &property, 0, nullptr, sizeof(rate), &rate),
-            "AudioObjectSetPropertyData nominal sample rate");
+        (void)configure_nominal_sample_rate(selected.object, requested_sample_rate);
     }
 
     if (requested_buffer_size > 0) {
@@ -547,6 +589,7 @@ DeviceMeterResult run_exploratory_io(
             "AudioObjectSetPropertyData buffer frame size");
     }
 
+    selected.info = make_device_info(id, selected.object);
     const UInt32 buffer_frames = get_u32_property_or_zero(selected.object, kAudioDevicePropertyBufferFrameSize);
     if (ring_capacity_frames != 0 && buffer_frames != 0 && ring_capacity_frames < buffer_frames) {
         throw std::runtime_error("ring capacity must be at least one CoreAudio buffer");
@@ -594,11 +637,7 @@ void configure_device(AudioObjectID device, double requested_sample_rate, long r
         if (!sample_rate_supported(device, requested_sample_rate)) {
             throw std::runtime_error("requested CoreAudio sample rate is not supported");
         }
-        Float64 rate = requested_sample_rate;
-        auto property = address(kAudioDevicePropertyNominalSampleRate);
-        require_ok(
-            AudioObjectSetPropertyData(device, &property, 0, nullptr, sizeof(rate), &rate),
-            "AudioObjectSetPropertyData nominal sample rate");
+        (void)configure_nominal_sample_rate(device, requested_sample_rate);
     }
 
     if (requested_buffer_size > 0) {
@@ -1429,7 +1468,7 @@ DeviceRingResult ring_device(
         throw std::runtime_error("ring capacity must be positive");
     }
 
-    const auto selected = select_device(id);
+    auto selected = select_device(id);
     const UInt32 input_channels = device_channels(selected.object, kAudioDevicePropertyScopeInput);
     const UInt32 output_channels = device_channels(selected.object, kAudioDevicePropertyScopeOutput);
     if (input_channels <= 0 || output_channels <= 0) {
@@ -1441,6 +1480,7 @@ DeviceRingResult ring_device(
     }
 
     configure_device(selected.object, requested_sample_rate, buffer_size);
+    selected.info = make_device_info(id, selected.object);
     const long active_buffer_size =
         static_cast<long>(get_u32_property_or_zero(selected.object, kAudioDevicePropertyBufferFrameSize));
     if (active_buffer_size <= 0) {
@@ -1507,7 +1547,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     OutputRecorder* recorder,
     TrackTakeRecorder* track_take_recorder)
 {
-    const auto selected = select_device(id);
+    auto selected = select_device(id);
     const UInt32 input_channels = device_channels(selected.object, kAudioDevicePropertyScopeInput);
     const UInt32 output_channels = device_channels(selected.object, kAudioDevicePropertyScopeOutput);
     if (channels.input.empty()) {
@@ -1531,6 +1571,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     }
 
     configure_device(selected.object, requested_sample_rate, requested_buffer_size);
+    selected.info = make_device_info(id, selected.object);
     const long buffer_size =
         static_cast<long>(get_u32_property_or_zero(selected.object, kAudioDevicePropertyBufferFrameSize));
     if (buffer_size <= 0) {

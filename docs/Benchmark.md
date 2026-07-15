@@ -16,9 +16,10 @@ Run all commands from the repository root. The default executable is
 - On the coordinator, allow TCP `49000` for Python benchmark control and both
   TCP and UDP `49001` for the normal Jam2 create/join path. The ports are
   independently configurable.
-- Use a short `--output` parent on Windows. Native attempt paths are checked
-  before the suite starts so generated CSV and WAV names remain within the
-  Windows path budget.
+- Leave `--output` unset for the normal
+  `tools/benchmark_logs/<invocation-id>` location. Native attempt paths are
+  checked before the suite starts; provide a shorter output parent only if
+  Windows explicitly reports that the repository path exceeds its path budget.
 - Start the coordinator first, then the agent.
 
 `--network-profile auto|wired|wifi|unknown` records metadata only. It never
@@ -33,13 +34,13 @@ recording, manifests, upload acknowledgement, result correlation, and final
 Coordinator, using LAN address `192.168.1.50` and audio device `5`:
 
 ```powershell
-python tools\jam2_test.py benchmark coordinator --machine-id studio-a --audio-device 5 --sample-rate 44100 --profile fast --case fast_silence --case fast_tone-440 --case fast_pulse-1s --signals silence,tone-440,pulse-1s --stream-ms 5000 --repeats 1 --control 0.0.0.0:49000 --audio-bind 0.0.0.0:49001 --public-audio-host 192.168.1.50 --initial-agent-timeout-s 120 --case-timeout-s 45 --upload-timeout-s 120 --case-retry-limit 1 --finish-grace-s 30 --output C:\j2c --clean
+python tools\jam2_test.py benchmark coordinator --machine-id studio-a --audio-device 5 --sample-rate 44100 --profile fast --case fast_silence --case fast_tone-440 --case fast_pulse-1s --signals silence,tone-440,pulse-1s --stream-ms 5000 --repeats 1 --control 0.0.0.0:49000 --audio-bind 0.0.0.0:49001 --public-audio-host 192.168.1.50 --initial-agent-timeout-s 120 --case-timeout-s 45 --upload-timeout-s 120 --case-retry-limit 1 --finish-grace-s 30 --clean
 ```
 
 Agent, using audio device `16`:
 
 ```powershell
-python tools\jam2_test.py benchmark agent --machine-id studio-b --audio-device 16 --sample-rate 44100 --coordinator 192.168.1.50:49000 --connect-timeout-s 120 --case-timeout-s 45 --output C:\j2a --clean
+python tools\jam2_test.py benchmark agent --machine-id studio-b --audio-device 16 --sample-rate 44100 --coordinator 192.168.1.50:49000 --connect-timeout-s 120 --case-timeout-s 45 --clean
 ```
 
 Do not use `--delete-after-upload` when the purpose of the run requires logs on
@@ -55,7 +56,7 @@ hardware-clock, or callback coverage.
 List the cases produced by the current native profiles and retained matrix:
 
 ```powershell
-python tools\jam2_test.py benchmark coordinator --machine-id catalog --list-cases --output build\benchmark-catalog
+python tools\jam2_test.py benchmark coordinator --machine-id catalog --list-cases
 ```
 
 The listing records each case ID, native base profile, sparse override object,
@@ -99,10 +100,11 @@ Without `--output`, artifacts are placed below:
 tools/benchmark_logs/<invocation-id>/
 ```
 
-With `--output C:\j2c`, the family folder is still included:
+If path preflight requires an explicit `--output PATH`, the family folder is
+still included beneath that parent:
 
 ```text
-C:/j2c/benchmark_logs/<invocation-id>/
+PATH/benchmark_logs/<invocation-id>/
 ```
 
 The normalized attempt tree is:
@@ -139,13 +141,18 @@ stress, or connectivity artifacts.
 Analyze a coordinator invocation containing `correlated-result.json` files:
 
 ```powershell
-python tools\jam2_test.py benchmark analyze C:\j2c\benchmark_logs\<invocation-id> --output C:\j2-analysis --clean
+python tools\jam2_test.py benchmark analyze tools\benchmark_logs\<invocation-id>
 ```
 
+Do not add `--clean` when the analysis source is inside the default
+`tools/benchmark_logs` family: family cleanup would also remove that source.
+
 The analyzer creates another isolated benchmark invocation containing
-`analysis.json`, `analysis.csv`, and its own invocation manifest. It preserves
-case- and repeat-level raw measurements; it does not produce a subjective
-playability score or silently choose a profile.
+`analysis.json`, `analysis.csv`, and its own invocation manifest.
+`analysis.json` preserves the complete case- and repeat-level correlated
+results, while `analysis.csv` is the compact identity/verdict index. The
+analyzer does not produce a subjective playability score or silently choose a
+profile.
 
 For controlled local impairment and feature recovery, use
 [Stress Tests](StressTests.md). For the deterministic post-build baseline, use

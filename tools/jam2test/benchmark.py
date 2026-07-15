@@ -89,6 +89,21 @@ def _validate_common_arguments(args: Any) -> None:
             raise ValueError("--audio-device is outside the native bound")
 
 
+def _correlated_process_outcome(
+    coordinator_return_code: int,
+    agent_result: dict[str, Any],
+) -> tuple[str, bool]:
+    succeeded = (
+        coordinator_return_code == 0 and
+        agent_result.get("return_code") == 0
+    )
+    return ("complete" if succeeded else "process-failed", succeeded)
+
+
+def _agent_attempt_status(upload_acknowledged: bool, return_code: int) -> str:
+    return "passed" if upload_acknowledged and return_code == 0 else "failed"
+
+
 def _failure_manifest(
     repo: Path,
     args: Any,
@@ -427,8 +442,8 @@ def _coordinator(args: Any, repo: Path, arguments: list[str]) -> int:
                         result["peers"].append(agent_result)
                         result["metrics"] = normalized_pair_summary(
                             args.machine_id, coordinator_csv, agent_id, agent_csv)
-                        result["verdict"] = "complete" if code == 0 and agent_result["return_code"] == 0 else "process-failed"
-                        completed = True
+                        result["verdict"], completed = _correlated_process_outcome(
+                            code, agent_result)
                     else:
                         result["verdict"] = "upload-timeout"
                     (attempt / "correlated-result.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -593,7 +608,8 @@ def _agent(args: Any, repo: Path, arguments: list[str]) -> int:
                 f"run={identity['run_index']} attempt={identity['attempt_id']}"
             )
             manifest.add_case({"id": identity["case_id"], "run_index": identity["run_index"],
-                               "attempt_id": identity["attempt_id"], "status": "passed" if acknowledged else "failed",
+                               "attempt_id": identity["attempt_id"],
+                               "status": _agent_attempt_status(acknowledged, code),
                                "return_code": code, "native_effective_configuration": peer["effective_configuration"]})
             if not acknowledged: raise RuntimeError("coordinator rejected or did not acknowledge artifact upload")
             completed.add(key)
