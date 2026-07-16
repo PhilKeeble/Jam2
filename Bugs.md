@@ -30,22 +30,15 @@ ask about 8,000..384,000-Hz range for sample rate
 
 loopback recording dialogue box has empty options that are currently there for input 
 
+mac bug was caused by a use after free vuln, i should look for more of these throughout the code
+
+join jam doesnt expose using a different network profile like safe even though asymmetrical profiles should be supported, could help with one on wired, one on wifi deals
+
 ## bugs
-
-selecting an unavailable or disconnected audio device can produce two
-sequential error dialogs. Consolidate these into one clear dialog during
-general post-refactor polish. This was explicitly accepted as non-blocking for
-Phase 11 closeout on 2026-07-15; the invalid device is still rejected visibly.
-
 
 when mac is server it crashes
 
-mac when joining says no route to host on local network UDP ?? connection works over stun
-
-mac audio cant be heard and the metronome is not ticking in a jam either, it doesnt seem to respect other peoples 
-
 stats dont update on the gui 
 
-when you select wrong device for local there is no way to start the engine for local
+when starting a jam it always tells you the track sample rate is bad even when it amtches local sample rate
 
-stun dialogue blanked out even when using STUN and public endpoint always showin 

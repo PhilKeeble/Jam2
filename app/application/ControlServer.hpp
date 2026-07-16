@@ -5,11 +5,13 @@
 #include <QJsonObject>
 #include <QElapsedTimer>
 #include <QList>
+#include <QPointer>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
 
 #include <functional>
+#include <memory>
 
 class ControlServer : public QObject {
 public:
@@ -51,7 +53,7 @@ public:
 
 private:
     struct Peer {
-        QTcpSocket* socket = nullptr;
+        QPointer<QTcpSocket> socket;
         QTimer* authenticationTimer = nullptr;
         QTimer* frameTimer = nullptr;
         QByteArray buffer;
@@ -66,24 +68,29 @@ private:
         QString token;
     };
 
+    using PeerHandle = std::shared_ptr<Peer>;
+
     void acceptPeer();
-    void readPeer(Peer* peer);
-    void handleHandshake(Peer* peer, const QJsonObject& message);
-    bool writeFrame(Peer* peer, const QByteArray& frame, bool closeAfterWrite = false);
+    void readPeer(const PeerHandle& peer);
+    void handleHandshake(const PeerHandle& peer, const QJsonObject& message);
+    bool writeFrame(
+        const PeerHandle& peer,
+        const QByteArray& frame,
+        bool closeAfterWrite = false);
     void rejectPeer(
-        Peer* peer,
+        const PeerHandle& peer,
         const QString& reason,
         jam2::control_protocol::TransportFailure failure,
         bool abort = false);
     void publishEvent(jam2::control_protocol::TransportEvent event);
-    Peer* findPeer(QTcpSocket* socket);
+    PeerHandle findPeer(QTcpSocket* socket) const;
     int authenticatedPeerCount() const;
     int pendingPeerCount() const;
     void noteAuthenticationReject();
     bool authenticationWorkAvailable();
 
     QTcpServer server_;
-    QList<Peer*> peers_;
+    QList<PeerHandle> peers_;
     QString sessionHex_;
     QByteArray masterKey_;
     QElapsedTimer authenticationFailureWindow_;

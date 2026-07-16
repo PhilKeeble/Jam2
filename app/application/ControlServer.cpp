@@ -6,6 +6,7 @@
 #include <QTimer>
 
 #include <algorithm>
+#include <utility>
 
 using namespace jam2::control_protocol;
 
@@ -69,23 +70,23 @@ bool ControlServer::listen(quint16 port, const QString& sessionHex, const QStrin
 
 void ControlServer::close()
 {
-    for (Peer* peer : peers_) {
+    const QList<PeerHandle> peers = std::move(peers_);
+    peers_.clear();
+    for (const PeerHandle& peer : peers) {
         if (peer->socket) {
             peer->socket->disconnect(this);
             peer->socket->abort();
             peer->socket->deleteLater();
         }
-        delete peer;
     }
-    peers_.clear();
     server_.close();
     masterKey_.clear();
 }
 
 void ControlServer::send(const QJsonObject& message)
 {
-    const QList<Peer*> peers = peers_;
-    for (Peer* peer : peers) {
+    const QList<PeerHandle> peers = peers_;
+    for (const PeerHandle& peer : peers) {
         if (peer && peer->socket && peer->authenticated) {
             const QByteArray frame = encodeAuthenticated(message, peer->sendKey, peer->sendSequence);
             if (!frame.isEmpty() && writeFrame(peer, frame)) {
@@ -97,7 +98,7 @@ void ControlServer::send(const QJsonObject& message)
 
 bool ControlServer::sendTo(const QString& token, const QJsonObject& message, bool closeAfterWrite)
 {
-    for (Peer* peer : peers_) {
+    for (const PeerHandle& peer : peers_) {
         if (!peer || !peer->authenticated || peer->token != token) {
             continue;
         }
@@ -113,7 +114,7 @@ bool ControlServer::sendTo(const QString& token, const QJsonObject& message, boo
 
 bool ControlServer::sendBinaryTo(const QString& token, const QByteArray& payload)
 {
-    for (Peer* peer : peers_) {
+    for (const PeerHandle& peer : peers_) {
         if (!peer || !peer->authenticated || peer->token != token) {
             continue;
         }
@@ -132,7 +133,7 @@ bool ControlServer::canQueueTo(const QString& token, qint64 additionalBytes) con
     if (additionalBytes < 0 || additionalBytes > kOutputHighWaterBytes) {
         return false;
     }
-    for (const Peer* peer : peers_) {
+    for (const PeerHandle& peer : peers_) {
         if (peer && peer->authenticated && peer->token == token && peer->socket) {
             return peer->socket->state() == QAbstractSocket::ConnectedState &&
                 peer->socket->bytesToWrite() <= kOutputHighWaterBytes - additionalBytes;
@@ -169,20 +170,20 @@ QString ControlServer::errorString() const
     return server_.errorString();
 }
 
-ControlServer::Peer* ControlServer::findPeer(QTcpSocket* socket)
+ControlServer::PeerHandle ControlServer::findPeer(QTcpSocket* socket) const
 {
-    for (Peer* peer : peers_) {
+    for (const PeerHandle& peer : peers_) {
         if (peer->socket == socket) {
             return peer;
         }
     }
-    return nullptr;
+    return {};
 }
 
 int ControlServer::authenticatedPeerCount() const
 {
     int count = 0;
-    for (const Peer* peer : peers_) {
+    for (const PeerHandle& peer : peers_) {
         count += peer && peer->authenticated ? 1 : 0;
     }
     return count;
@@ -191,7 +192,7 @@ int ControlServer::authenticatedPeerCount() const
 int ControlServer::pendingPeerCount() const
 {
     int count = 0;
-    for (const Peer* peer : peers_) {
+    for (const PeerHandle& peer : peers_) {
         count += peer && !peer->authenticated ? 1 : 0;
     }
     return count;
@@ -234,7 +235,7 @@ void ControlServer::acceptPeer()
             continue;
         }
 
-        auto* peer = new Peer;
+        auto peer = std::make_shared<Peer>();
         peer->socket = socket;
         peer->serverNonce = randomNonce();
         peer->authenticationTimer = new QTimer(socket);
@@ -246,7 +247,7 @@ void ControlServer::acceptPeer()
         ++stats_.acceptedConnections;
 
         QObject::connect(peer->authenticationTimer, &QTimer::timeout, this, [this, socket] {
-            if (Peer* current = findPeer(socket); current && !current->authenticated) {
+            if (const PeerHandle current = findPeer(socket); current && !current->authenticated) {
                 ++stats_.authenticationTimeouts;
                 rejectPeer(
                     current,
@@ -256,7 +257,7 @@ void ControlServer::acceptPeer()
             }
         });
         QObject::connect(peer->frameTimer, &QTimer::timeout, this, [this, socket] {
-            if (Peer* current = findPeer(socket); current && !current->buffer.isEmpty()) {
+            if (const PeerHandle current = findPeer(socket); current && !current->buffer.isEmpty()) {
                 ++stats_.frameTimeouts;
                 rejectPeer(
                     current,
@@ -266,13 +267,13 @@ void ControlServer::acceptPeer()
             }
         });
         QObject::connect(socket, &QTcpSocket::readyRead, this, [this, socket] {
-            if (Peer* current = findPeer(socket)) {
+            if (const PeerHandle current = findPeer(socket)) {
                 readPeer(current);
             }
         });
         QObject::connect(socket, &QTcpSocket::disconnected, this, [this, socket] {
             for (qsizetype i = 0; i < peers_.size(); ++i) {
-                Peer* current = peers_[i];
+                const PeerHandle current = peers_[i];
                 if (current->socket != socket) {
                     continue;
                 }
@@ -289,7 +290,6 @@ void ControlServer::acceptPeer()
                     false,
                     wasAuthenticated});
                 socket->deleteLater();
-                delete current;
                 return;
             }
         });
@@ -311,7 +311,7 @@ void ControlServer::acceptPeer()
     }
 }
 
-void ControlServer::readPeer(Peer* peer)
+void ControlServer::readPeer(const PeerHandle& peer)
 {
     if (!peer || !peer->socket) {
         return;
@@ -356,10 +356,11 @@ void ControlServer::readPeer(Peer* peer)
                     TransportFailure::AuthenticationRejected);
                 return;
             }
-            QTcpSocket* const socket = peer->socket;
+            const QPointer<QTcpSocket> socket = peer->socket;
             handleHandshake(peer, message);
-            Peer* const current = findPeer(socket);
-            if (!current || socket->state() == QAbstractSocket::UnconnectedState) {
+            const PeerHandle current = findPeer(socket.data());
+            if (!socket || !current ||
+                socket->state() == QAbstractSocket::UnconnectedState) {
                 return;
             }
         } else {
@@ -387,14 +388,18 @@ void ControlServer::readPeer(Peer* peer)
     if (!peer->buffer.isEmpty() && !peer->readScheduled) {
         peer->readScheduled = true;
         QTimer::singleShot(0, this, [this, socket = peer->socket] {
-            if (Peer* current = findPeer(socket)) {
+            if (socket) {
+                const PeerHandle current = findPeer(socket.data());
+                if (!current) {
+                    return;
+                }
                 readPeer(current);
             }
         });
     }
 }
 
-void ControlServer::handleHandshake(Peer* peer, const QJsonObject& message)
+void ControlServer::handleHandshake(const PeerHandle& peer, const QJsonObject& message)
 {
     const QString type = message.value(QStringLiteral("type")).toString();
     const QString session = message.value(QStringLiteral("session")).toString().toLower();
@@ -417,7 +422,7 @@ void ControlServer::handleHandshake(Peer* peer, const QJsonObject& message)
     if (token.isEmpty()) {
         token = randomPeerToken();
     }
-    for (const Peer* existing : peers_) {
+    for (const PeerHandle& existing : peers_) {
         if (existing != peer && existing && existing->authenticated && existing->token == token) {
             noteAuthenticationReject();
             rejectPeer(
@@ -467,22 +472,27 @@ void ControlServer::handleHandshake(Peer* peer, const QJsonObject& message)
         QStringLiteral("TCP peer authenticated"),
         false,
         true});
-    if (onAuthenticated) {
+    const QPointer<QTcpSocket> socket = peer->socket;
+    if (socket && findPeer(socket.data()) && onAuthenticated) {
         QJsonObject authenticatedMessage{
             {QStringLiteral("peer_token"), token},
             {QStringLiteral("udp_endpoint"), udpEndpoint},
-            {QStringLiteral("tcp_peer_host"), peer->socket->peerAddress().toString()},
+            {QStringLiteral("tcp_peer_host"), socket->peerAddress().toString()},
         };
         onAuthenticated(token, authenticatedMessage);
     }
 }
 
-bool ControlServer::writeFrame(Peer* peer, const QByteArray& frame, bool closeAfterWrite)
+bool ControlServer::writeFrame(
+    const PeerHandle& peer,
+    const QByteArray& frame,
+    bool closeAfterWrite)
 {
-    if (!peer || !peer->socket || frame.isEmpty()) {
+    QPointer<QTcpSocket> socket = peer ? peer->socket : nullptr;
+    if (!socket || socket->state() != QAbstractSocket::ConnectedState || frame.isEmpty()) {
         return false;
     }
-    const qint64 queued = peer->socket->bytesToWrite();
+    const qint64 queued = socket->bytesToWrite();
     stats_.maxQueuedOutputBytes = std::max<quint64>(stats_.maxQueuedOutputBytes, queued);
     if (queued + frame.size() > kOutputHighWaterBytes) {
         ++stats_.outputHighWaterRejects;
@@ -493,7 +503,7 @@ bool ControlServer::writeFrame(Peer* peer, const QByteArray& frame, bool closeAf
             true);
         return false;
     }
-    if (peer->socket->write(frame) != frame.size()) {
+    if (socket->write(frame) != frame.size()) {
         rejectPeer(
             peer,
             QStringLiteral("TCP control write failed"),
@@ -501,27 +511,31 @@ bool ControlServer::writeFrame(Peer* peer, const QByteArray& frame, bool closeAf
             true);
         return false;
     }
-    // Push the small authentication/control frame to the kernel immediately.
-    // In particular, the challenge must not remain only in Qt's userspace
-    // queue if cold audio-device setup briefly occupies the GUI event loop.
-    (void)peer->socket->flush();
+    // QTcpSocket::write() may synchronously deliver a disconnect/error on some
+    // platforms. The Peer handle keeps metadata alive across that re-entry;
+    // QPointer and the registry check keep us from touching a retired socket.
+    if (!socket || socket->state() == QAbstractSocket::UnconnectedState ||
+        !findPeer(socket.data())) {
+        return false;
+    }
     ++stats_.framesSent;
     stats_.maxQueuedOutputBytes = std::max<quint64>(
         stats_.maxQueuedOutputBytes,
-        peer->socket->bytesToWrite());
+        socket->bytesToWrite());
     if (closeAfterWrite) {
-        peer->socket->disconnectFromHost();
+        socket->disconnectFromHost();
     }
     return true;
 }
 
 void ControlServer::rejectPeer(
-    Peer* peer,
+    const PeerHandle& peer,
     const QString& reason,
     TransportFailure failure,
     bool abort)
 {
-    if (!peer || !peer->socket) {
+    QPointer<QTcpSocket> socket = peer ? peer->socket : nullptr;
+    if (!socket) {
         return;
     }
     publishEvent(TransportEvent{
@@ -530,18 +544,23 @@ void ControlServer::rejectPeer(
         reason,
         false,
         peer->authenticated});
+    if (!socket) {
+        return;
+    }
     if (abort) {
-        peer->socket->abort();
+        socket->abort();
         return;
     }
     const QByteArray errorFrame = encodeHandshake(QJsonObject{
         {QStringLiteral("type"), QStringLiteral("hello.error")},
         {QStringLiteral("reason"), reason},
     });
-    if (!errorFrame.isEmpty() && peer->socket->bytesToWrite() + errorFrame.size() <= kOutputHighWaterBytes) {
-        peer->socket->write(errorFrame);
+    if (!errorFrame.isEmpty() && socket->bytesToWrite() + errorFrame.size() <= kOutputHighWaterBytes) {
+        socket->write(errorFrame);
     }
-    peer->socket->disconnectFromHost();
+    if (socket) {
+        socket->disconnectFromHost();
+    }
 }
 
 void ControlServer::publishEvent(TransportEvent event)

@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <functional>
 #include <optional>
+#include <thread>
 
 using jam2::control_protocol::TransportEvent;
 using jam2::control_protocol::TransportEventType;
@@ -268,6 +269,31 @@ QJsonObject jam2RunControllerLifecycleValidation(
     check(QStringLiteral("controller.pre-auth-challenge-immediate-and-repeatable"),
         repeatedPreAuthDisconnectsSafe && preAuthChallenges == 3 &&
             creator.serverStats().acceptedConnections >= 3);
+
+    const quint64 acceptedBeforeClosedBacklog = creator.serverStats().acceptedConnections;
+    int closedBacklogConnections = 0;
+    if (sessionPort && creatorStarted) {
+        // Establish and close on another thread while deliberately not pumping
+        // the server event loop. acceptPeer() must safely encounter sockets
+        // whose remote side disappeared before the challenge write.
+        std::thread closedBacklogClient([&] {
+            for (int attempt = 0; attempt < 8; ++attempt) {
+                QTcpSocket socket;
+                socket.connectToHost(QHostAddress::LocalHost, *sessionPort);
+                if (socket.waitForConnected(1000)) {
+                    ++closedBacklogConnections;
+                    socket.abort();
+                }
+            }
+        });
+        closedBacklogClient.join();
+    }
+    const bool closedBacklogHandled = closedBacklogConnections > 0 && pumpUntil([&] {
+        return creator.serverStats().acceptedConnections > acceptedBeforeClosedBacklog;
+    }, 1000);
+    check(QStringLiteral("controller.closed-pre-auth-backlog-preserves-listener"),
+        closedBacklogHandled &&
+            creator.snapshot().lifecycle == SharedSessionController::Lifecycle::Listening);
 
     EventCapture wrongKeyCapture;
     SharedSessionController wrongKey;
