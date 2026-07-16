@@ -14,6 +14,7 @@
 #include <QHostAddress>
 #include <QJsonArray>
 #include <QTcpServer>
+#include <QTcpSocket>
 #include <QThread>
 
 #include <algorithm>
@@ -224,7 +225,13 @@ QJsonObject jam2RunControllerLifecycleValidation(
     invalidContractCreator.close();
 
     SharedSessionController creator;
-    const bool creatorStarted = sessionPort && creator.startCreator(creatorConfig(*sessionPort));
+    auto primaryCreatorConfig = sessionPort
+        ? creatorConfig(*sessionPort) : SharedSessionController::CreatorConfig{};
+    // Model a LAN invite while the creator has also retained a public/STUN UDP
+    // candidate. The joiner's explicit private TCP route must win for the
+    // coordinator UDP edge, including its local shared TCP/UDP port.
+    primaryCreatorConfig.localEndpoint = QStringLiteral("198.51.100.10:49999");
+    const bool creatorStarted = sessionPort && creator.startCreator(primaryCreatorConfig);
     check(QStringLiteral("controller.creator-listening"), creatorStarted &&
         creator.snapshot().lifecycle == SharedSessionController::Lifecycle::Listening,
         creator.errorString());
@@ -241,6 +248,26 @@ QJsonObject jam2RunControllerLifecycleValidation(
         conflictingCreatorRejected && !conflictingCreator.errorString().trimmed().isEmpty(),
         conflictingCreator.errorString());
     conflictingCreator.close();
+
+    bool repeatedPreAuthDisconnectsSafe = creatorStarted;
+    int preAuthChallenges = 0;
+    if (sessionPort && creatorStarted) {
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            QTcpSocket socket;
+            socket.connectToHost(QHostAddress::LocalHost, *sessionPort);
+            const bool challenged = pumpUntil([&] {
+                return socket.bytesAvailable() > 0 ||
+                    socket.state() == QAbstractSocket::UnconnectedState;
+            }, 500) && socket.bytesAvailable() > 0;
+            preAuthChallenges += challenged ? 1 : 0;
+            repeatedPreAuthDisconnectsSafe = repeatedPreAuthDisconnectsSafe && challenged;
+            socket.abort();
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        }
+    }
+    check(QStringLiteral("controller.pre-auth-challenge-immediate-and-repeatable"),
+        repeatedPreAuthDisconnectsSafe && preAuthChallenges == 3 &&
+            creator.serverStats().acceptedConnections >= 3);
 
     EventCapture wrongKeyCapture;
     SharedSessionController wrongKey;
@@ -294,6 +321,17 @@ QJsonObject jam2RunControllerLifecycleValidation(
     check(QStringLiteral("controller.join-contract-membership-ready"),
         joinerStarted && joined && joiner.snapshot().contractRevision == 1 &&
             joiner.snapshot().arrangementAuthorityToken == creator.snapshot().localToken);
+    bool lanInviteCoordinatorSelected = false;
+    if (joined && sessionPort) {
+        for (const auto& peer : joiner.snapshot().peers) {
+            lanInviteCoordinatorSelected = lanInviteCoordinatorSelected ||
+                (peer.token == joiner.snapshot().coordinatorToken &&
+                 peer.endpoint == QStringLiteral("127.0.0.1:%1").arg(*sessionPort) &&
+                 peer.proofState == QStringLiteral("candidate-lan-invite"));
+        }
+    }
+    check(QStringLiteral("controller.private-invite-selects-lan-coordinator-endpoint"),
+        lanInviteCoordinatorSelected);
     const bool heartbeatObserved = joined && pumpUntil([&] {
         return joiner.snapshot().heartbeatsReceived > 0 &&
             creator.snapshot().heartbeatAcksReceived > 0;

@@ -1977,9 +1977,27 @@ void MainWindow::applySessionSnapshot(const SharedSessionController::Snapshot& s
             .arg(snapshot.gridRevision)
             .arg(snapshot.arrangementAuthorityToken.left(8))
             .arg(snapshot.arrangementRevision);
-        if (summary != lastLoggedSessionSummary_) {
-            lastLoggedSessionSummary_ = summary;
+        QString diagnosticKey = summary;
+        for (const SharedSessionController::PeerSnapshot& peer : snapshot.peers) {
+            if (peer.token != snapshot.localToken) {
+                diagnosticKey += QStringLiteral("|%1|%2|%3|%4")
+                    .arg(peer.token, peer.endpoint)
+                    .arg(static_cast<int>(peer.edgeState))
+                    .arg(peer.proofState);
+            }
+        }
+        if (diagnosticKey != lastLoggedSessionSummary_) {
+            lastLoggedSessionSummary_ = diagnosticKey;
             appendLog(summary);
+            for (const SharedSessionController::PeerSnapshot& peer : snapshot.peers) {
+                if (peer.token != snapshot.localToken) {
+                    appendLog(QStringLiteral(
+                        "session peer token=%1 endpoint=%2 edge=%3 proof=%4")
+                        .arg(peer.token.left(8), peer.endpoint)
+                        .arg(static_cast<int>(peer.edgeState))
+                        .arg(peer.proofState));
+                }
+            }
         }
     }
     if (sessionTopologyLabel_) {

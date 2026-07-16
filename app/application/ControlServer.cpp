@@ -501,6 +501,10 @@ bool ControlServer::writeFrame(Peer* peer, const QByteArray& frame, bool closeAf
             true);
         return false;
     }
+    // Push the small authentication/control frame to the kernel immediately.
+    // In particular, the challenge must not remain only in Qt's userspace
+    // queue if cold audio-device setup briefly occupies the GUI event loop.
+    (void)peer->socket->flush();
     ++stats_.framesSent;
     stats_.maxQueuedOutputBytes = std::max<quint64>(
         stats_.maxQueuedOutputBytes,

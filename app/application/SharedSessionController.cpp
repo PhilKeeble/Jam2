@@ -78,6 +78,21 @@ bool isSameMachine(const QString& host)
     });
 }
 
+bool isPrivateOrLocalIpv4(const QString& host)
+{
+    bool ok = false;
+    const quint32 address = QHostAddress(normalizedHost(host)).toIPv4Address(&ok);
+    if (!ok) {
+        return false;
+    }
+    return (address & 0xff000000U) == 0x0a000000U ||
+        (address & 0xfff00000U) == 0xac100000U ||
+        (address & 0xffff0000U) == 0xc0a80000U ||
+        (address & 0xffff0000U) == 0xa9fe0000U ||
+        (address & 0xffc00000U) == 0x64400000U ||
+        (address & 0xff000000U) == 0x7f000000U;
+}
+
 bool isWildcardEndpoint(const QString& endpoint, int& separator)
 {
     separator = endpoint.lastIndexOf(QLatin1Char(':'));
@@ -1101,7 +1116,7 @@ bool SharedSessionController::acceptMembershipPage(const QJsonObject& message)
         for (const QJsonValue& value : values) {
             const QJsonObject object = value.toObject();
             const QString token = object.value(QStringLiteral("token")).toString();
-            const QString endpoint = object.value(QStringLiteral("endpoint")).toString();
+            QString endpoint = object.value(QStringLiteral("endpoint")).toString();
             bool idOk = false;
             const quint64 peerId = object.value(QStringLiteral("peer_id")).toString().toULongLong(&idOk);
             const auto derivedPeerId = peerIdFromToken(token);
@@ -1111,11 +1126,25 @@ bool SharedSessionController::acceptMembershipPage(const QJsonObject& message)
                 membershipAssembly_ = {};
                 return false;
             }
+            const bool coordinatorViaLanInvite = token == coordinator &&
+                isPrivateOrLocalIpv4(joiner_.host);
+            if (coordinatorViaLanInvite) {
+                // The TCP invite is the strongest route evidence for a private
+                // LAN join. A creator may also publish a STUN candidate, but
+                // feeding that public address back to a same-LAN peer can fail
+                // on routers without NAT hairpinning and makes valid UDP proof
+                // packets look as though they came from an unknown endpoint.
+                endpoint = QStringLiteral("%1:%2").arg(joiner_.host).arg(joiner_.port);
+            }
             Peer peer;
             peer.endpoint = endpoint;
             peer.peerId = peerId;
             peer.edgeState = token == joiner_.localToken ? EdgeState::Active : EdgeState::Candidate;
-            peer.proofState = token == joiner_.localToken ? QStringLiteral("local") : QStringLiteral("candidate");
+            peer.proofState = token == joiner_.localToken
+                ? QStringLiteral("local")
+                : coordinatorViaLanInvite
+                    ? QStringLiteral("candidate-lan-invite")
+                    : QStringLiteral("candidate");
             peer.streamState = token == joiner_.localToken ? QStringLiteral("local") : QStringLiteral("candidate");
             next.insert(token, peer);
         }
