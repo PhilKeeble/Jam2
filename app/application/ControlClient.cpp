@@ -212,6 +212,9 @@ void ControlClient::readConnection(
     readScheduled_ = false;
     buffer_ += bytes;
     stats_.maxBufferedInputBytes = std::max<quint64>(stats_.maxBufferedInputBytes, buffer_.size());
+    stats_.maxBufferedInputBytes = std::max<quint64>(
+        stats_.maxBufferedInputBytes,
+        static_cast<quint64>(std::max<qint64>(0, connection->maxPendingReadBytes())));
 
     int handled = 0;
     while (handled < kFramesPerTurn) {
@@ -296,6 +299,9 @@ void ControlClient::connectionClosed(
         return;
     }
     const bool wasAuthenticated = handshakeState_ == HandshakeState::Authenticated;
+    stats_.maxBufferedInputBytes = std::max<quint64>(
+        stats_.maxBufferedInputBytes,
+        static_cast<quint64>(std::max<qint64>(0, connection->maxPendingReadBytes())));
     authenticationTimer_.stop();
     frameTimer_.stop();
     handshakeState_ = HandshakeState::WaitingForChallenge;

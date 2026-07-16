@@ -321,6 +321,10 @@ void ControlServer::acceptPeer(const NativeTcpConnection::Pointer& connection)
             current->buffer += bytes;
             stats_.maxBufferedInputBytes = std::max<quint64>(
                 stats_.maxBufferedInputBytes, current->buffer.size());
+            stats_.maxBufferedInputBytes = std::max<quint64>(
+                stats_.maxBufferedInputBytes,
+                static_cast<quint64>(std::max<qint64>(
+                    0, current->connection->maxPendingReadBytes())));
             readPeer(current);
         },
         [this, weakPeer](const QString& detail) {
@@ -352,6 +356,12 @@ void ControlServer::disconnectPeer(const PeerHandle& peer, const QString& detail
         }
         if (peer->frameTimer) {
             peer->frameTimer->stop();
+        }
+        if (peer->connection) {
+            stats_.maxBufferedInputBytes = std::max<quint64>(
+                stats_.maxBufferedInputBytes,
+                static_cast<quint64>(std::max<qint64>(
+                    0, peer->connection->maxPendingReadBytes())));
         }
         peers_.removeAt(i);
         peer->connection.reset();

@@ -39,6 +39,7 @@ public:
     void close();
     bool isConnected() const;
     qint64 bytesToWrite() const;
+    qint64 maxPendingReadBytes() const;
     QString peerHost() const;
 
 private:
