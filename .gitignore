@@ -26,15 +26,9 @@ Testing/
 *.log
 *.csv
 /logs/
-/tools/logs/
-/tools/benchmark_logs/
-/tools/stress_logs/
-/tools/stress_logs*
-/tools/validate_logs/
-/tools/connectivity_logs/
+/tools/*logs/
 /incoming_uploads/
-/artifacts/logs/
-/artifacts/release/
+/artifacts/
 __pycache__/
 *.pyc
 

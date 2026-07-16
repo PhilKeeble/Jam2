@@ -940,8 +940,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
     record(QStringLiteral("engine-playback-ratio.ramps-back-to-unity"),
         std::abs(unityRampLast - 1.0) < 0.0000001 && ratioSmoother.steadyUnity());
     const bool profileRatioPolicy = std::all_of(
-        jam2::tuning_profiles().begin(), jam2::tuning_profiles().end(),
-        [](const jam2::TuningProfile& profile) {
+        jam2::join_profiles().begin(), jam2::join_profiles().end(),
+        [](const jam2::JoinProfile& profile) {
             return profile.adaptive_playback_release_ppm == 5000 &&
                 profile.adaptive_playback_ratio_ramp_ms == 250;
         });

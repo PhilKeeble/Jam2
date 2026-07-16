@@ -31,6 +31,10 @@ int test_input_mode_id(Jam2TestInputMode mode);
 std::string channel_selection_text(const jam2::audio::ChannelSelection& channels);
 std::string mono_mix_mode_text(std::size_t channel_count);
 std::string_view os_priority_text(Jam2OsPriorityMode mode);
-Jam2RuntimeOptions parse_options(int argc, char** argv, int start);
+Jam2RuntimeOptions parse_options(
+    int argc,
+    char** argv,
+    int start,
+    Jam2ProfileApplication profile_application = Jam2ProfileApplication::Create);
 
 } // namespace jam2::cli

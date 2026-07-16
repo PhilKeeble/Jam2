@@ -411,19 +411,6 @@ SelectedDevice select_device(int id)
     return SelectedDevice{make_device_info(id, devices[static_cast<std::size_t>(id)]), devices[static_cast<std::size_t>(id)]};
 }
 
-struct ProbeContext {
-    std::atomic<long> callbacks{0};
-    std::atomic<int> input_peak_ppm{0};
-};
-
-struct RingContext {
-    MonoRingBuffer* ring = nullptr;
-    std::vector<std::int32_t> capture_scratch;
-    std::vector<std::int32_t> playback_scratch;
-    InputChannels input_channels = InputChannels::Mono;
-    std::atomic<long> callbacks{0};
-};
-
 std::size_t buffer_frames(const AudioBufferList* buffers);
 float read_float_channel(const AudioBufferList* buffers, std::size_t frame, UInt32 channel);
 void write_float_channel(AudioBufferList* buffers, std::size_t frame, UInt32 channel, float value);
@@ -470,165 +457,6 @@ std::int32_t scale_i32_sample(std::int32_t sample, double level)
 void observe_peak(std::atomic<int>& peak, std::span<const std::int32_t> samples)
 {
     update_peak(peak, i32_peak_ppm(samples));
-}
-
-void observe_float_peak(const AudioBufferList* input, ProbeContext& context)
-{
-    if (input == nullptr) {
-        return;
-    }
-    double peak = 0.0;
-    for (UInt32 buffer_index = 0; buffer_index < input->mNumberBuffers; ++buffer_index) {
-        const AudioBuffer& buffer = input->mBuffers[buffer_index];
-        if (buffer.mData == nullptr || buffer.mDataByteSize == 0) {
-            continue;
-        }
-        const auto* samples = static_cast<const float*>(buffer.mData);
-        const std::size_t sample_count = buffer.mDataByteSize / sizeof(float);
-        for (std::size_t i = 0; i < sample_count; ++i) {
-            peak = std::max(peak, std::abs(static_cast<double>(samples[i])));
-        }
-    }
-    update_peak(context.input_peak_ppm, static_cast<int>(std::clamp(peak, 0.0, 1.0) * 1000000.0));
-}
-
-OSStatus exploratory_io_proc(
-    AudioObjectID,
-    const AudioTimeStamp*,
-    const AudioBufferList* input,
-    const AudioTimeStamp*,
-    AudioBufferList* output,
-    const AudioTimeStamp*,
-    void* client_data)
-{
-    auto* context = static_cast<ProbeContext*>(client_data);
-    if (context != nullptr) {
-        observe_float_peak(input, *context);
-        context->callbacks.fetch_add(1, std::memory_order_relaxed);
-    }
-    clear_output(output);
-    return noErr;
-}
-
-OSStatus ring_io_proc(
-    AudioObjectID,
-    const AudioTimeStamp*,
-    const AudioBufferList* input,
-    const AudioTimeStamp*,
-    AudioBufferList* output,
-    const AudioTimeStamp*,
-    void* client_data)
-{
-    auto* context = static_cast<RingContext*>(client_data);
-    if (context == nullptr || context->ring == nullptr) {
-        clear_output(output);
-        return noErr;
-    }
-
-    const std::size_t input_frames = std::min(buffer_frames(input), context->capture_scratch.size());
-    if (input_frames > 0) {
-        for (std::size_t frame = 0; frame < input_frames; ++frame) {
-            const float left = read_float_channel(input, frame, 0);
-            if (context->input_channels == InputChannels::Stereo) {
-                const float right = read_float_channel(input, frame, 1);
-                context->capture_scratch[frame] = float_to_i32((left + right) * 0.5F);
-            } else {
-                context->capture_scratch[frame] = float_to_i32(left);
-            }
-        }
-        context->ring->push(std::span<const std::int32_t>(context->capture_scratch.data(), input_frames));
-    }
-
-    const std::size_t output_frames = std::min(buffer_frames(output), context->playback_scratch.size());
-    if (output_frames > 0) {
-        auto playback = std::span<std::int32_t>(context->playback_scratch.data(), output_frames);
-        context->ring->pop(playback);
-        for (std::size_t frame = 0; frame < output_frames; ++frame) {
-            const float sample = i32_to_float(context->playback_scratch[frame]);
-            write_float_channel(output, frame, 0, sample);
-            write_float_channel(output, frame, 1, sample);
-        }
-    }
-
-    context->callbacks.fetch_add(1, std::memory_order_relaxed);
-    return noErr;
-}
-
-DeviceMeterResult run_exploratory_io(
-    int id,
-    double requested_sample_rate,
-    long requested_buffer_size,
-    int duration_ms,
-    std::size_t ring_capacity_frames)
-{
-    if (duration_ms <= 0) {
-        throw std::runtime_error("duration must be positive");
-    }
-    auto selected = select_device(id);
-    const UInt32 input_channels = device_channels(selected.object, kAudioDevicePropertyScopeInput);
-    const UInt32 output_channels = device_channels(selected.object, kAudioDevicePropertyScopeOutput);
-    if (input_channels == 0 && output_channels == 0) {
-        throw std::runtime_error("selected CoreAudio device has no input or output channels");
-    }
-
-    if (requested_sample_rate > 0.0 && sample_rate_supported(selected.object, requested_sample_rate)) {
-        (void)configure_nominal_sample_rate(selected.object, requested_sample_rate);
-    }
-
-    if (requested_buffer_size > 0) {
-        const AudioValueRange range = buffer_frame_range(selected.object);
-        if (range.mMinimum > 0.0 &&
-            (requested_buffer_size < static_cast<long>(range.mMinimum) ||
-             requested_buffer_size > static_cast<long>(range.mMaximum))) {
-            throw std::runtime_error("requested CoreAudio buffer size is outside the device min/max range");
-        }
-        UInt32 frames = static_cast<UInt32>(requested_buffer_size);
-        auto property = address(kAudioDevicePropertyBufferFrameSize);
-        require_ok(
-            AudioObjectSetPropertyData(selected.object, &property, 0, nullptr, sizeof(frames), &frames),
-            "AudioObjectSetPropertyData buffer frame size");
-    }
-
-    selected.info = make_device_info(id, selected.object);
-    const UInt32 buffer_frames = get_u32_property_or_zero(selected.object, kAudioDevicePropertyBufferFrameSize);
-    if (ring_capacity_frames != 0 && buffer_frames != 0 && ring_capacity_frames < buffer_frames) {
-        throw std::runtime_error("ring capacity must be at least one CoreAudio buffer");
-    }
-
-    ProbeContext context;
-    AudioDeviceIOProcID proc_id = nullptr;
-    require_ok(
-        AudioDeviceCreateIOProcID(selected.object, exploratory_io_proc, &context, &proc_id),
-        "AudioDeviceCreateIOProcID");
-
-    struct ProcGuard {
-        AudioObjectID device = kAudioObjectUnknown;
-        AudioDeviceIOProcID proc = nullptr;
-        bool started = false;
-        ~ProcGuard()
-        {
-            if (proc != nullptr) {
-                if (started) {
-                    (void)AudioDeviceStop(device, proc);
-                }
-                (void)AudioDeviceDestroyIOProcID(device, proc);
-            }
-        }
-    } guard{selected.object, proc_id, false};
-
-    require_ok(AudioDeviceStart(selected.object, proc_id), "AudioDeviceStart");
-    guard.started = true;
-    std::this_thread::sleep_for(std::chrono::milliseconds(duration_ms));
-
-    DeviceMeterResult result;
-    result.device = selected.info;
-    result.sample_rate = get_double_property_or_zero(selected.object, kAudioDevicePropertyNominalSampleRate);
-    result.buffer_size = static_cast<long>(get_u32_property_or_zero(selected.object, kAudioDevicePropertyBufferFrameSize));
-    result.callbacks = context.callbacks.load(std::memory_order_relaxed);
-    result.input_sample_type = static_cast<long>(input_channels);
-    result.output_sample_type = static_cast<long>(output_channels);
-    result.input_peak = static_cast<double>(context.input_peak_ppm.load(std::memory_order_relaxed)) / 1000000.0;
-    return result;
 }
 
 void configure_device(AudioObjectID device, double requested_sample_rate, long requested_buffer_size)
@@ -1437,114 +1265,24 @@ std::vector<DeviceInfo> list_devices()
     return devices;
 }
 
-DeviceProbe probe_device(int id, double requested_sample_rate)
+DeviceTestResult test_device(int id)
 {
     const auto selected = select_device(id);
-    DeviceProbe probe;
-    probe.device = selected.info;
-    probe.driver_name = get_cf_string_property(selected.object, kAudioDevicePropertyDeviceUID);
-    probe.driver_version = static_cast<long>(get_u32_property_or_zero(selected.object, kAudioDevicePropertyTransportType));
-    probe.input_channels = static_cast<long>(device_channels(selected.object, kAudioDevicePropertyScopeInput));
-    probe.output_channels = static_cast<long>(device_channels(selected.object, kAudioDevicePropertyScopeOutput));
-    probe.input_latency_samples =
-        static_cast<long>(get_u32_property_or_zero(selected.object, kAudioDevicePropertyLatency, kAudioDevicePropertyScopeInput)) +
-        static_cast<long>(get_u32_property_or_zero(selected.object, kAudioDevicePropertySafetyOffset, kAudioDevicePropertyScopeInput));
-    probe.output_latency_samples =
-        static_cast<long>(get_u32_property_or_zero(selected.object, kAudioDevicePropertyLatency, kAudioDevicePropertyScopeOutput)) +
-        static_cast<long>(get_u32_property_or_zero(selected.object, kAudioDevicePropertySafetyOffset, kAudioDevicePropertyScopeOutput));
+    DeviceTestResult capabilities;
+    capabilities.device = selected.info;
     const AudioValueRange buffer_range = buffer_frame_range(selected.object);
-    probe.min_buffer_size = static_cast<long>(buffer_range.mMinimum);
-    probe.max_buffer_size = static_cast<long>(buffer_range.mMaximum);
-    probe.preferred_buffer_size = static_cast<long>(get_u32_property_or_zero(selected.object, kAudioDevicePropertyBufferFrameSize));
-    probe.buffer_granularity = 1;
-    probe.current_sample_rate = get_double_property_or_zero(selected.object, kAudioDevicePropertyNominalSampleRate);
-    probe.requested_sample_rate_supported = sample_rate_supported(selected.object, requested_sample_rate);
-    return probe;
-}
-
-DeviceMeterResult meter_device(int id, double requested_sample_rate, long buffer_size, int duration_ms)
-{
-    return run_exploratory_io(id, requested_sample_rate, buffer_size, duration_ms, 0);
-}
-
-DeviceRingResult ring_device(
-    int id,
-    double requested_sample_rate,
-    long buffer_size,
-    int duration_ms,
-    std::size_t ring_capacity_frames)
-{
-    if (duration_ms <= 0) {
-        throw std::runtime_error("ring duration must be positive");
+    capabilities.current_sample_rate =
+        get_double_property_or_zero(selected.object, kAudioDevicePropertyNominalSampleRate);
+    for (std::size_t index = 0; index < kTestSampleRates.size(); ++index) {
+        capabilities.sample_rate_supported[index] =
+            sample_rate_supported(selected.object, kTestSampleRates[index]);
     }
-    if (ring_capacity_frames == 0) {
-        throw std::runtime_error("ring capacity must be positive");
+    for (std::size_t index = 0; index < kTestBufferSizes.size(); ++index) {
+        const double size = static_cast<double>(kTestBufferSizes[index]);
+        capabilities.buffer_size_supported[index] =
+            buffer_range.mMinimum > 0.0 && size >= buffer_range.mMinimum && size <= buffer_range.mMaximum;
     }
-
-    auto selected = select_device(id);
-    const UInt32 input_channels = device_channels(selected.object, kAudioDevicePropertyScopeInput);
-    const UInt32 output_channels = device_channels(selected.object, kAudioDevicePropertyScopeOutput);
-    if (input_channels <= 0 || output_channels <= 0) {
-        throw std::runtime_error("CoreAudio ring validation requires at least one input and one output channel");
-    }
-    if (!is_supported_float32_format(selected.object, kAudioDevicePropertyScopeInput) ||
-        !is_supported_float32_format(selected.object, kAudioDevicePropertyScopeOutput)) {
-        throw std::runtime_error("CoreAudio ring validation currently supports float32 linear PCM input/output only");
-    }
-
-    configure_device(selected.object, requested_sample_rate, buffer_size);
-    selected.info = make_device_info(id, selected.object);
-    const long active_buffer_size =
-        static_cast<long>(get_u32_property_or_zero(selected.object, kAudioDevicePropertyBufferFrameSize));
-    if (active_buffer_size <= 0) {
-        throw std::runtime_error("CoreAudio reported an invalid buffer frame size");
-    }
-    if (ring_capacity_frames < static_cast<std::size_t>(active_buffer_size)) {
-        throw std::runtime_error("ring capacity must be at least one CoreAudio buffer");
-    }
-
-    MonoRingBuffer ring(ring_capacity_frames);
-    RingContext context;
-    context.ring = &ring;
-    context.capture_scratch.resize(static_cast<std::size_t>(active_buffer_size));
-    context.playback_scratch.resize(static_cast<std::size_t>(active_buffer_size));
-    context.input_channels = InputChannels::Mono;
-
-    AudioDeviceIOProcID proc_id = nullptr;
-    require_ok(
-        AudioDeviceCreateIOProcID(selected.object, ring_io_proc, &context, &proc_id),
-        "AudioDeviceCreateIOProcID");
-
-    struct ProcGuard {
-        AudioObjectID device = kAudioObjectUnknown;
-        AudioDeviceIOProcID proc = nullptr;
-        bool started = false;
-        ~ProcGuard()
-        {
-            if (proc != nullptr) {
-                if (started) {
-                    (void)AudioDeviceStop(device, proc);
-                }
-                (void)AudioDeviceDestroyIOProcID(device, proc);
-            }
-        }
-    } guard{selected.object, proc_id, false};
-
-    require_ok(AudioDeviceStart(selected.object, proc_id), "AudioDeviceStart");
-    guard.started = true;
-    std::this_thread::sleep_for(std::chrono::milliseconds(duration_ms));
-
-    const auto ring_stats = ring.stats();
-    DeviceRingResult result;
-    result.device = selected.info;
-    result.sample_rate = get_double_property_or_zero(selected.object, kAudioDevicePropertyNominalSampleRate);
-    result.buffer_size = active_buffer_size;
-    result.callbacks = context.callbacks.load(std::memory_order_relaxed);
-    result.ring_overruns = ring_stats.overruns;
-    result.ring_underruns = ring_stats.underruns;
-    result.ring_underrun_events = ring_stats.underrun_events;
-    result.ring_readable = ring.available_read();
-    return result;
+    return capabilities;
 }
 
 std::unique_ptr<DeviceStream> start_duplex_stream(

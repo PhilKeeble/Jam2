@@ -173,6 +173,7 @@ def _effective_stream_ms(scenario: dict[str, Any], requested_stream_ms: int) -> 
     which cannot truthfully be assessed in a shorter run.
     """
     minimum_ms = 0
+    minimum_ms = max(minimum_ms, int(scenario.get("minimum_stream_ms", 0)))
     commands = scenario.get("commands", [])
     if commands:
         minimum_ms = max(
@@ -208,7 +209,9 @@ def _run_case(jam2: Path, case_id: str, scenario: dict[str, Any], args: Any,
     tokens = [secrets.token_hex(16) for _ in range(peer_count)]
     profile = scenario["profile"]
     effective_stream_ms = _effective_stream_ms(scenario, args.stream_ms)
-    profile_runtime = profile.runtime(effective_stream_ms)
+    peer_profiles = list(scenario.get("peer_profiles", [profile] * peer_count))
+    if len(peer_profiles) != peer_count:
+        raise ValueError("peer_profiles must contain one profile per peer")
     prepared_track = None
     if scenario.get("prepared_track"):
         prepared_track = case_root / "prepared-track.wav"
@@ -249,7 +252,8 @@ def _run_case(jam2: Path, case_id: str, scenario: dict[str, Any], args: Any,
         peer_root = case_root / f"peer-{index + 1}"
         peer_root.mkdir(parents=True)
         operation = "network.create" if index == 0 else "network.join"
-        runtime = dict(profile_runtime)
+        peer_profile = peer_profiles[index]
+        runtime = dict(peer_profile.runtime(effective_stream_ms))
         # Retained stress cases deliberately run a shared grid. These are test
         # settings, not copied native profile defaults.
         runtime.setdefault("metronome", True)
@@ -268,6 +272,10 @@ def _run_case(jam2: Path, case_id: str, scenario: dict[str, Any], args: Any,
         if device is None:
             runtime.update({
                 "headless_audio": True,
+                # Keep one stable synthetic callback cadence. The asymmetric
+                # cases compare the real local receive/playout profile values;
+                # sub-millisecond native callback sizes are not wall-clock
+                # accurate under the Windows test scheduler.
                 "audio_buffer_size": args.headless_audio_buffer_frames,
             })
         else:
@@ -277,7 +285,7 @@ def _run_case(jam2: Path, case_id: str, scenario: dict[str, Any], args: Any,
             scenario, index, args.sample_rate, recording, prepared_track, effective_stream_ms)
         native_scenario = {
             "schema": "jam2-debug-scenario", "run_id": f"{case_id}-peer-{index + 1}",
-            "operation": operation, "profile": profile.base_profile,
+            "operation": operation, "profile": peer_profile.base_profile,
             "runtime": runtime, "artifacts": {"root": str(peer_root)},
             "network": {
                 "bind": f"127.0.0.1:{ports[index]}", "no_stun": True,
@@ -322,7 +330,10 @@ def _run_case(jam2: Path, case_id: str, scenario: dict[str, Any], args: Any,
                 csv_path = _csv_from_manifest(peer_root, native)
             except Exception as error:
                 native = {"error": str(error)}; csv_path = None
-            csv_summary = summarize_csv(csv_path, assessment_elapsed_ms=effective_stream_ms)
+            csv_summary = summarize_csv(
+                csv_path if csv_path is not None else peer_root / "missing.csv",
+                assessment_elapsed_ms=effective_stream_ms,
+            )
             audio = analyze_recording_dir(peer_root / "recording", scenario.get("signal", "silence")) if (peer_root / "recording").exists() else {}
             peer_results.append({
                 "process_id": peer_root.name,
@@ -333,6 +344,7 @@ def _run_case(jam2: Path, case_id: str, scenario: dict[str, Any], args: Any,
                 "native_manifest": native, "csv_path": str(csv_path) if csv_path else "",
                 "csv_summary": csv_summary,
                 "audio_analysis": audio,
+                "local_profile": peer_profiles[len(peer_results)].base_profile,
             })
     finally:
         for process, stdout, stderr, _ in processes:
@@ -351,6 +363,9 @@ def _run_case(jam2: Path, case_id: str, scenario: dict[str, Any], args: Any,
         "requested_network_audio_format": scenario.get("network_audio_format", "pcm24"),
         "profile": profile.name, "base_profile": profile.base_profile,
         "sparse_overrides": profile.overrides,
+        "session_profile": peer_profiles[0].base_profile,
+        "local_profiles": [item.base_profile for item in peer_profiles],
+        "session_frame_size": peer_profiles[0].frame_size,
         "requested_stream_ms": args.stream_ms,
         "effective_stream_ms": effective_stream_ms,
         "expect": scenario["expect"], "peers": peer_results,
@@ -372,6 +387,35 @@ def _run_case(jam2: Path, case_id: str, scenario: dict[str, Any], args: Any,
         result["metrics"] = combined_summary(
             server_csv, client_csv, assessment_elapsed_ms=effective_stream_ms,
         )
+        if "peer_profiles" in scenario:
+            local_contracts = []
+            for peer_profile, peer_result in zip(peer_profiles, peer_results):
+                actual = peer_result["csv_summary"]
+                expected = {
+                    "playback_prefill_frames": peer_profile.playback_prefill_frames,
+                    "playback_max_frames": peer_profile.playback_max_frames,
+                    "capture_ring_frames": peer_profile.capture_ring_frames,
+                    "playback_ring_frames": peer_profile.playback_ring_frames,
+                    "playout_delay_frames": peer_profile.playout_delay_frames,
+                    "jitter_buffer_target_frames": peer_profile.jitter_buffer_frames,
+                    "jitter_buffer_max_frames": peer_profile.jitter_buffer_max_frames,
+                }
+                observed = {name: int(actual.get(name, 0)) for name in expected}
+                local_contracts.append({
+                    "profile": peer_profile.base_profile,
+                    "expected": expected,
+                    "observed": observed,
+                    "ok": observed == expected,
+                })
+            result["local_profile_contracts"] = local_contracts
+            result["asymmetric_profile_contract_valid"] = (
+                all(item["ok"] for item in local_contracts)
+                and all(
+                    int(peer["csv_summary"].get("session_frames_per_packet", 0)) ==
+                        int(peer_profiles[0].frame_size)
+                    for peer in peer_results
+                )
+            )
         server_paths = {"dir": str(case_root / "peer-1")}; client_paths = {"dir": str(case_root / "peer-2")}
         wav = analyze_metronome_recordings(result, server_paths, client_paths)
         if wav: result["metronome_wav_analysis"] = wav
@@ -424,6 +468,8 @@ def run(args: Any, repo: Path, invocation: InvocationArtifacts,
                     profile = selected.get("profile")
                     if profile is not None:
                         capabilities.validate_sparse_overrides(profile.overrides)
+                    for peer_profile in selected.get("peer_profiles", []):
+                        capabilities.validate_sparse_overrides(peer_profile.overrides)
                     selected.setdefault("source_scenario", case_id)
                     selected["os_priority"] = priority
                     selected["network_audio_format"] = audio_format

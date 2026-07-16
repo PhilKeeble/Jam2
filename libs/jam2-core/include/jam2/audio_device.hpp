@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
@@ -87,42 +88,15 @@ struct DeviceInfo {
     std::string driver_path;
 };
 
-struct DeviceProbe {
+struct DeviceTestResult {
     DeviceInfo device;
-    std::string driver_name;
-    long driver_version = 0;
-    long input_channels = 0;
-    long output_channels = 0;
-    long input_latency_samples = 0;
-    long output_latency_samples = 0;
-    long min_buffer_size = 0;
-    long max_buffer_size = 0;
-    long preferred_buffer_size = 0;
-    long buffer_granularity = 0;
     double current_sample_rate = 0.0;
-    bool requested_sample_rate_supported = false;
+    std::array<bool, 2> sample_rate_supported{};
+    std::array<bool, 4> buffer_size_supported{};
 };
 
-struct DeviceMeterResult {
-    DeviceInfo device;
-    double sample_rate = 0.0;
-    long buffer_size = 0;
-    long callbacks = 0;
-    long input_sample_type = 0;
-    long output_sample_type = 0;
-    double input_peak = 0.0;
-};
-
-struct DeviceRingResult {
-    DeviceInfo device;
-    double sample_rate = 0.0;
-    long buffer_size = 0;
-    long callbacks = 0;
-    std::uint64_t ring_overruns = 0;
-    std::uint64_t ring_underruns = 0;
-    std::uint64_t ring_underrun_events = 0;
-    std::size_t ring_readable = 0;
-};
+inline constexpr std::array<int, 2> kTestSampleRates{44100, 48000};
+inline constexpr std::array<long, 4> kTestBufferSizes{32, 64, 128, 256};
 
 struct MetronomeConfig {
     bool enabled = false;
@@ -241,14 +215,7 @@ protected:
 };
 
 std::vector<DeviceInfo> list_devices();
-DeviceProbe probe_device(int id, double requested_sample_rate);
-DeviceMeterResult meter_device(int id, double requested_sample_rate, long buffer_size, int duration_ms);
-DeviceRingResult ring_device(
-    int id,
-    double requested_sample_rate,
-    long buffer_size,
-    int duration_ms,
-    std::size_t ring_capacity_frames);
+DeviceTestResult test_device(int id);
 std::unique_ptr<DeviceStream> start_duplex_stream(
     int id,
     double requested_sample_rate,

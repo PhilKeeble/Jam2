@@ -24,9 +24,7 @@ Usage:
 
 Commands:
   list-devices                      List available low-latency audio devices
-  test-device <id>                  Show device capabilities
-  meter-device <id>                 Run an input meter
-  ring-device <id>                  Exercise device/ring handoff
+  test-device <id>                  Test supported sample rates and buffers
   local                             Run the local audio engine without networking
   network create                    Create a coordinated direct Jam2 session
   network join <jam2-url>           Join a direct Jam2 session
@@ -77,30 +75,12 @@ audio device. Use an id with --audio-device or the device diagnostic commands.
 )";
     } else if (command == "test-device") {
         std::cout << R"(Usage:
-  jam2 test-device <id> [--sample-rate <hz>]
+  jam2 test-device <id>
 
-Options:
-  --sample-rate <hz>    Rate to check for device support (default: 48000)
-)";
-    } else if (command == "meter-device") {
-        std::cout << R"(Usage:
-  jam2 meter-device <id> [options]
-
-Options:
-  --sample-rate <hz>       Device sample rate (default: 48000)
-  --buffer-size <frames>   Requested callback buffer size
-  --duration-ms <ms>       Meter duration (default: 3000)
+Checks support for 44100/48000 Hz and 32/64/128/256-frame buffers.
 )";
     } else {
-        std::cout << R"(Usage:
-  jam2 ring-device <id> [options]
-
-Options:
-  --sample-rate <hz>       Device sample rate (default: 48000)
-  --buffer-size <frames>   Requested callback buffer size
-  --duration-ms <ms>       Test duration (default: 3000)
-  --ring-frames <frames>   Ring capacity (default: 4096)
-)";
+        throw std::runtime_error("unknown device command");
     }
 }
 
@@ -161,7 +141,7 @@ Runtime, diagnostics, and artifacts:
   --stream-ms <ms>                    Stop after this duration; 0 means no limit
   --stream-linger-ms <ms>             Receive linger after the send deadline
   --stats <enabled|disabled>
-  --stats-interval-ms <ms>            Periodic stats interval; 0 disables it
+  --stats-interval-ms <ms>            Structured CSV sampling interval; 0 disables sampling
   --stats-warmup-ms <ms>              Exclude startup packets from measurements
   --log-stats <folder>                Write the exact emitted CSV path there
   --record-jam-folder <folder>        Record local jam stems
@@ -233,12 +213,10 @@ using OsPriorityMode = Jam2OsPriorityMode;
 using Options = Jam2RuntimeOptions;
 
 
-void apply_tuning_profile(Options& options, const jam2::TuningProfile& profile)
+void apply_join_profile(Options& options, const jam2::JoinProfile& profile)
 {
     options.profile_name.assign(profile.name.data(), profile.name.size());
-    options.sample_rate = profile.sample_rate;
     options.audio_buffer_size = profile.audio_buffer_size;
-    options.frame_size = profile.frame_size;
     options.playback_prefill_frames = profile.playback_prefill_frames;
     options.playback_ring_frames = profile.playback_ring_frames;
     options.playback_max_frames = profile.playback_max_frames;
@@ -257,6 +235,14 @@ void apply_tuning_profile(Options& options, const jam2::TuningProfile& profile)
     options.adaptive_playback_max_frames = profile.adaptive_playback_max_frames;
     options.adaptive_playback_release_ppm = profile.adaptive_playback_release_ppm;
     options.adaptive_playback_ratio_ramp_ms = profile.adaptive_playback_ratio_ramp_ms;
+}
+
+void apply_create_profile(Options& options, const jam2::CreateProfile& profile)
+{
+    options.session_profile_name.assign(profile.name.data(), profile.name.size());
+    options.sample_rate = profile.sample_rate;
+    options.frame_size = profile.frame_size;
+    apply_join_profile(options, *profile.local);
 }
 
 std::string_view require_value(int argc, char** argv, int& i, std::string_view name)
@@ -471,21 +457,29 @@ OsPriorityMode parse_os_priority(std::string_view value)
     throw std::runtime_error("--os-priority must be off, high, or realtime");
 }
 
-Options parse_options(int argc, char** argv, int start)
+Options parse_options(
+    int argc,
+    char** argv,
+    int start,
+    Jam2ProfileApplication profile_application)
 {
     Options options;
-    const jam2::TuningProfile* selected_profile = &jam2::default_tuning_profile();
+    std::string_view selected_profile_name = jam2::default_join_profile().name;
     for (int i = start; i < argc; ++i) {
         const std::string_view arg{argv[i]};
         if (arg == "--profile") {
             const auto value = require_value(argc, argv, i, arg);
-            selected_profile = jam2::find_tuning_profile(value);
-            if (selected_profile == nullptr) {
+            if (jam2::find_join_profile(value) == nullptr) {
                 throw std::runtime_error("--profile must be one of: " + jam2::tuning_profile_names());
             }
+            selected_profile_name = value;
         }
     }
-    apply_tuning_profile(options, *selected_profile);
+    if (profile_application == Jam2ProfileApplication::Create) {
+        apply_create_profile(options, *jam2::find_create_profile(selected_profile_name));
+    } else {
+        apply_join_profile(options, *jam2::find_join_profile(selected_profile_name));
+    }
     for (int i = start; i < argc; ++i) {
         const std::string_view arg{argv[i]};
         if (arg == "--profile") {

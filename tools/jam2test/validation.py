@@ -994,6 +994,17 @@ def _mesh_edge_summaries(path: Path) -> dict[str, dict[str, Any]]:
     return edges
 
 
+def _csv_full_mesh_contract(summary: dict[str, Any], expected_remote_peers: int) -> bool:
+    """Use structured interval data, which survives orderly peer teardown."""
+    return bool(summary.get("has_csv", False)) and (
+        int(summary.get("network_peer_count_observed_max", 0)) >= expected_remote_peers and
+        int(summary.get("network_active_peer_count_observed_max", 0)) >= expected_remote_peers and
+        float(summary.get("sent_packets", 0.0)) > 0.0 and
+        float(summary.get("recv_packets", 0.0)) > 0.0 and
+        float(summary.get("udp_authentication_failed", 0.0)) == 0.0
+    )
+
+
 def _steady_tone(recording_dir: Path, stem: str) -> dict[str, Any]:
     wav = read_wav_mono(recording_dir / f"{stem}.wav")
     rate = int(wav["sample_rate"])
@@ -1437,7 +1448,7 @@ def _run_public_network_case(
             (index > 0 and "connecting" in stages and "connected" in stages)
         )
         edges = _mesh_edge_summaries(item["stdout_path"])
-        edge_contract_ok = (
+        stdout_edge_contract_ok = (
             len(edges) == 3 and all(
                 edge.get("endpoint_proof_verified", False) and
                 edge.get("sent_packets", 0) > 0 and
@@ -1445,6 +1456,8 @@ def _run_public_network_case(
                 for edge in edges.values()
             )
         )
+        csv_edge_contract_ok = _csv_full_mesh_contract(csv_summary, 3)
+        edge_contract_ok = stdout_edge_contract_ok or csv_edge_contract_ok
         peer_results.append({
             "peer": item["peer"],
             "role": "coordinator" if index == 0 else "peer",
@@ -1456,6 +1469,8 @@ def _run_public_network_case(
             "startup_events": startup,
             "startup_ok": startup_ok,
             "mesh_edges": list(edges.values()),
+            "edge_evidence": "stdout" if stdout_edge_contract_ok else
+                "structured_csv" if csv_edge_contract_ok else "incomplete",
             "edge_contract_ok": edge_contract_ok,
         })
 

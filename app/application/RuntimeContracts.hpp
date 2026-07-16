@@ -38,6 +38,11 @@ enum class Jam2OsPriorityMode {
     Realtime,
 };
 
+enum class Jam2ProfileApplication {
+    Create,
+    Join,
+};
+
 // Validated cold-path application configuration shared by the CLI parser,
 // native GUI runtime, and explicit debug adapter. It is never read directly
 // by the real-time callback.
@@ -99,7 +104,9 @@ struct Jam2RuntimeOptions {
     std::optional<int> audio_device_id;
     bool headless_audio = false;
     int headless_clock_drift_ppm = 0;
+    // Local tuning can differ from the creator-owned session profile.
     std::string profile_name;
+    std::string session_profile_name;
     long audio_buffer_size = 0;
     jam2::audio::InputChannels input_channels = jam2::audio::InputChannels::Mono;
     jam2::audio::ChannelSelection channel_selection;
@@ -115,6 +122,51 @@ struct Jam2RuntimeStartup {
     jam2::Endpoint local_endpoint;
     std::optional<jam2::Endpoint> public_candidate;
     std::optional<std::filesystem::path> stats_csv;
+};
+
+struct Jam2OperationalPeer {
+    std::uint64_t peer_id = 0;
+    jam2::Endpoint endpoint;
+    jam2::PeerEndpointState endpoint_state = jam2::PeerEndpointState::Candidate;
+    bool receiving_audio = false;
+};
+
+struct Jam2NetworkOperationalSnapshot {
+    jam2::NetworkSessionContract contract;
+    jam2::SessionBootstrapRole bootstrap_role = jam2::SessionBootstrapRole::Joiner;
+    jam2::SessionBootstrapState bootstrap_state = jam2::SessionBootstrapState::Configured;
+    std::uint64_t local_peer_id = 0;
+    std::vector<Jam2OperationalPeer> peers;
+};
+
+struct Jam2PeerDiagnostics {
+    std::uint64_t peer_id = 0;
+    double rtt_ms = 0.0;
+    bool has_rtt = false;
+};
+
+struct ConnectionDiagnosticsSnapshot {
+    std::uint64_t elapsed_ms = 0;
+    std::uint64_t interval_ms = 0;
+    std::vector<Jam2PeerDiagnostics> peers;
+    double jitter_average_ms = 0.0;
+    double jitter_max_ms = 0.0;
+    double packet_loss_percent = 0.0;
+    std::uint64_t received_packets = 0;
+    std::uint64_t loss_events = 0;
+    std::uint64_t loss_max_gap = 0;
+    std::uint64_t reordered_or_late_packets = 0;
+    std::uint64_t missing_audio_frames = 0;
+    std::uint64_t late_audio_frames = 0;
+    std::uint64_t packet_gap_over_4x = 0;
+    std::uint64_t packet_gap_samples = 0;
+    std::uint64_t output_underrun_frames = 0;
+    std::uint64_t output_underrun_events = 0;
+    double output_underrun_ms = 0.0;
+    double output_underrun_burst_max_ms = 0.0;
+    std::uint64_t callback_gap_over_2x = 0;
+    std::uint64_t drift_clamped_samples = 0;
+    double drift_abs_ppm_max = 0.0;
 };
 
 struct Jam2RuntimePeer {
@@ -139,7 +191,8 @@ struct Jam2RuntimeHost {
     // default.
     std::atomic<bool> track_sync_enabled{true};
     std::function<void(const Jam2RuntimeStartup&)> startup;
-    std::function<void(const jam2::NetworkSessionSnapshot&)> network_snapshot;
+    std::function<void(const Jam2NetworkOperationalSnapshot&)> network_snapshot;
+    std::function<void(const ConnectionDiagnosticsSnapshot&)> connection_diagnostics;
     std::function<void(std::string_view)> log;
     std::function<void(std::string_view)> error;
 
@@ -164,7 +217,11 @@ private:
     std::atomic<std::uint64_t> transport_event_id_{0};
 };
 
-Jam2RuntimeOptions jam2_parse_runtime_options(int argc, char** argv, int start_index);
+Jam2RuntimeOptions jam2_parse_runtime_options(
+    int argc,
+    char** argv,
+    int start_index,
+    Jam2ProfileApplication profile_application = Jam2ProfileApplication::Create);
 jam2::EngineConfig jam2_make_engine_config(
     const Jam2RuntimeOptions& options,
     bool leader_audio_local_click);

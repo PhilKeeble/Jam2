@@ -467,6 +467,51 @@ def scenario_catalog(base_profile=FAST_PROFILE):
             ],
             "expect": "runtime command path should update final levels/mode while audio continues",
         },
+        "asymmetric-fast-create-safe-join-clean": {
+            "profile": FAST_PROFILE,
+            "peer_profiles": [FAST_PROFILE, SAFE_PROFILE],
+            "impairment": ProxyImpairment.both(DirectionImpairment()),
+            "minimum_stream_ms": 10000,
+            "expect": "raw Fast-creator/Safe-joiner latency and buffering baseline",
+        },
+        "asymmetric-safe-create-fast-join-clean": {
+            "profile": SAFE_PROFILE,
+            "peer_profiles": [SAFE_PROFILE, FAST_PROFILE],
+            "impairment": ProxyImpairment.both(DirectionImpairment()),
+            "minimum_stream_ms": 10000,
+            "expect": "raw Safe-creator/Fast-joiner latency and buffering baseline",
+        },
+        "asymmetric-safe-create-safe-join-clean": {
+            "profile": SAFE_PROFILE,
+            "peer_profiles": [SAFE_PROFILE, SAFE_PROFILE],
+            "impairment": ProxyImpairment.both(DirectionImpairment()),
+            "minimum_stream_ms": 10000,
+            "expect": "raw Safe/Safe latency and buffering control",
+        },
+        "asymmetric-fast-create-safe-join-pressure": {
+            "profile": FAST_PROFILE,
+            "peer_profiles": [FAST_PROFILE, SAFE_PROFILE],
+            "impairment": ProxyImpairment.both(DirectionImpairment(
+                jitter_ms=50.0, burst_pause_ms=250.0, burst_every_ms=8000.0)),
+            "minimum_stream_ms": 18000,
+            "expect": "raw Fast-creator/Safe-joiner behavior under bidirectional pressure",
+        },
+        "asymmetric-safe-create-fast-join-pressure": {
+            "profile": SAFE_PROFILE,
+            "peer_profiles": [SAFE_PROFILE, FAST_PROFILE],
+            "impairment": ProxyImpairment.both(DirectionImpairment(
+                jitter_ms=50.0, burst_pause_ms=250.0, burst_every_ms=8000.0)),
+            "minimum_stream_ms": 18000,
+            "expect": "raw Safe-creator/Fast-joiner behavior under bidirectional pressure",
+        },
+        "asymmetric-safe-create-safe-join-pressure": {
+            "profile": SAFE_PROFILE,
+            "peer_profiles": [SAFE_PROFILE, SAFE_PROFILE],
+            "impairment": ProxyImpairment.both(DirectionImpairment(
+                jitter_ms=50.0, burst_pause_ms=250.0, burst_every_ms=8000.0)),
+            "minimum_stream_ms": 18000,
+            "expect": "raw Safe/Safe behavior under bidirectional pressure",
+        },
     }
 
 
@@ -642,6 +687,15 @@ def expand_scenarios(scenario_ids):
                 "audio-probe-prefill-768-tone",
                 "audio-probe-jitter-buffer-512-metronome",
                 "audio-probe-prefill-768-metronome",
+            ])
+        elif scenario_id == "asymmetric-profile-comparison":
+            expanded.extend([
+                "asymmetric-fast-create-safe-join-clean",
+                "asymmetric-safe-create-fast-join-clean",
+                "asymmetric-safe-create-safe-join-clean",
+                "asymmetric-fast-create-safe-join-pressure",
+                "asymmetric-safe-create-fast-join-pressure",
+                "asymmetric-safe-create-safe-join-pressure",
             ])
         else:
             expanded.append(scenario_id)

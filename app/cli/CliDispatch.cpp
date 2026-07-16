@@ -49,22 +49,6 @@ int run(int argc, char** argv)
         return runTestDevice(argc, argv);
     }
 
-    if (command == "meter-device") {
-        if (has_help_argument(argc, argv, 2)) {
-            print_device_help(command);
-            return 0;
-        }
-        return runMeterDevice(argc, argv);
-    }
-
-    if (command == "ring-device") {
-        if (has_help_argument(argc, argv, 2)) {
-            print_device_help(command);
-            return 0;
-        }
-        return runRingDevice(argc, argv);
-    }
-
     if (command == "local") {
         if (has_help_argument(argc, argv, 2)) {
             print_local_help();

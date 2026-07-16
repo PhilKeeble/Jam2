@@ -17,8 +17,11 @@ ApplicationRuntime::ApplicationRuntime(QObject* parent)
             if (onStartup) onStartup(startup);
         }, Qt::QueuedConnection);
     };
-    host_.network_snapshot = [this](const jam2::NetworkSessionSnapshot& snapshot) {
+    host_.network_snapshot = [this](const Jam2NetworkOperationalSnapshot& snapshot) {
         publishNetworkSnapshot(snapshot);
+    };
+    host_.connection_diagnostics = [this](const ConnectionDiagnosticsSnapshot& snapshot) {
+        publishConnectionDiagnostics(snapshot);
     };
     host_.log = [this](std::string_view message) {
         const QString text = QString::fromUtf8(message.data(), static_cast<qsizetype>(message.size()));
@@ -170,7 +173,7 @@ jam2::EngineGuiPeakSnapshot ApplicationRuntime::consumeGuiPeaks() noexcept
     return engine_ != nullptr ? engine_->consumeGuiPeaks() : jam2::EngineGuiPeakSnapshot{};
 }
 
-std::optional<jam2::NetworkSessionSnapshot> ApplicationRuntime::networkSnapshot() const
+std::optional<Jam2NetworkOperationalSnapshot> ApplicationRuntime::networkSnapshot() const
 {
     std::lock_guard<std::mutex> lock(network_snapshot_mutex_);
     return network_snapshot_;
@@ -191,7 +194,7 @@ void ApplicationRuntime::pollEngine()
     }
 }
 
-void ApplicationRuntime::publishNetworkSnapshot(jam2::NetworkSessionSnapshot snapshot)
+void ApplicationRuntime::publishNetworkSnapshot(Jam2NetworkOperationalSnapshot snapshot)
 {
     {
         std::lock_guard<std::mutex> lock(network_snapshot_mutex_);
@@ -199,5 +202,12 @@ void ApplicationRuntime::publishNetworkSnapshot(jam2::NetworkSessionSnapshot sna
     }
     QMetaObject::invokeMethod(this, [this, snapshot = std::move(snapshot)] {
         if (onNetworkSnapshot) onNetworkSnapshot(snapshot);
+    }, Qt::QueuedConnection);
+}
+
+void ApplicationRuntime::publishConnectionDiagnostics(ConnectionDiagnosticsSnapshot snapshot)
+{
+    QMetaObject::invokeMethod(this, [this, snapshot = std::move(snapshot)] {
+        if (onConnectionDiagnostics) onConnectionDiagnostics(snapshot);
     }, Qt::QueuedConnection);
 }

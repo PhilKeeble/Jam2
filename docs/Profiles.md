@@ -8,7 +8,15 @@ Jam2 supports three named tuning profiles:
 | `moderate` | More forgiving general-purpose profile with a larger jitter buffer and lower packet rate. |
 | `safe` | Safest Wi-Fi profile measured so far; higher latency, but best current dropout resistance. |
 
-The CLI accepts `--profile fast`, `--profile moderate`, or `--profile safe` on `network create` and `network join`. The GUI exposes the profiles on **Start Jam** and sends the selected settings to joining peers before their network sessions start. Explicit numeric CLI flags still override the selected profile.
+The CLI accepts `--profile fast`, `--profile moderate`, or `--profile safe` on
+both `network create` and `network join`, and the GUI has separate profile
+selectors in **Start Jam** and **Join Jam**. A create profile owns the session's
+sample rate and packet frame size plus the creator's local tuning. A join
+profile contains only that participant's callback buffer, prefill, rings,
+jitter/playout, adaptive cushion, and drift settings. This permits, for
+example, a wired creator on `fast` and a Wi-Fi joiner on `safe` without either
+peer changing the other one's local buffering. Explicit numeric CLI flags
+still override the selected local profile values.
 
 ## Fast Profile
 

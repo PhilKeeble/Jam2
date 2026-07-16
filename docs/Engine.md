@@ -6,8 +6,7 @@
 
 ```text
 jam2 list-devices
-jam2 test-device <id> [--sample-rate n]
-jam2 meter-device <id> [--sample-rate n] [--buffer-size n] [--duration-ms n]
+jam2 test-device <id>
 jam2 local [audio options]
 jam2 network create [--profile fast|moderate|safe] [options]
 jam2 network join <jam2-url> [--profile fast|moderate|safe] [options]
@@ -15,7 +14,10 @@ jam2 debug describe --json
 jam2 debug run <scenario.json>
 ```
 
-Use `list-devices` first on each host, then use the local device id in the GUI or CLI.
+Use `list-devices` first on each host, then `test-device <id>` to report the
+device's current sample rate and support for 44100/48000 Hz and
+32/64/128/256-frame buffers. The GUI's **Test Device** buttons call the same
+core operation.
 
 ## CLI Help
 
@@ -46,7 +48,10 @@ Client:
 .\release\jam2.exe network join "jam2://..." --profile fast --audio-device 0 --input-channels 1 --output-channels 1,2
 ```
 
-The creator's TCP coordinator authenticates the joiner, checks the immutable sample-rate/frame-size contract, and distributes direct UDP candidates and current membership. Device ids and channel selections remain local to each machine.
+The creator's TCP coordinator authenticates the joiner, supplies the immutable
+sample-rate/frame-size contract, and distributes direct UDP candidates and
+current membership. Device ids, channel selections, callback buffer size, and
+receive/playout tuning remain local to each machine.
 
 ## Important Options
 
@@ -54,7 +59,7 @@ The creator's TCP coordinator authenticates the joiner, checks the immutable sam
 | --- | --- |
 | `--profile fast\|moderate\|safe` | Applies a named set of numeric tuning values. Explicit numeric flags override the selected profile. |
 | `--audio-device` | Selects the host audio device id. |
-| `--sample-rate` | Sets device and stream sample rate. Keep both peers matching. |
+| `--sample-rate` | Creator-owned session sample rate. A joiner receives it from the session contract. |
 | `--audio-buffer-size` | Sets the host audio callback size in frames. |
 | `--headless-clock-drift-ppm` | Test-only synthetic device clock offset (`-5000..5000` ppm); requires headless audio. |
 | `--frame-size` | Sets audio frames per UDP packet. |
@@ -73,8 +78,8 @@ The creator's TCP coordinator authenticates the joiner, checks the immutable sam
 | `--drift-deadband-ppm` | Avoids tiny correction changes inside a ppm deadband. |
 | `--drift-max-correction-ppm` | Caps resampler correction. |
 | `--socket-send-buffer` / `--socket-recv-buffer` | Requests OS UDP socket buffer sizes. |
-| `--stats` | Enables live and final stats. |
-| `--stats-interval-ms` | Prints periodic stats. |
+| `--stats` | Enables diagnostic collection and final/on-demand human output. |
+| `--stats-interval-ms` | Sets structured CSV sampling; it does not print recurring human stats. |
 | `--log-stats` | Writes stats CSV files to a folder. |
 | `--record-jam-folder` | Records local jam stems for later inspection. |
 

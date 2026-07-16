@@ -14,6 +14,7 @@
 #include "SharedSessionController.hpp"
 #include "TrackRecordingWorkflow.hpp"
 #include "TrackWorkspaceController.hpp"
+#include "UserPreferences.hpp"
 
 #include "metronome.hpp"
 
@@ -74,11 +75,12 @@ private:
     void startLocalPerform();
     void showStartJamDialog();
     void showJoinJamDialog();
+    void showSettingsDialog();
     void stopJam(bool returnToLocal = true);
     void showJamFailure(const QString& detail);
     void refreshDevices();
     void appendLog(const QString& line);
-    void updateStatsDisplay(const QJsonObject& stats);
+    void updateStatsDisplay(const ConnectionDiagnosticsSnapshot* stats);
     void updateMixMeters(const MixerMeterLevels& levels);
     void sendControl(const QJsonObject& message);
     void handleControlEvent(
@@ -93,6 +95,13 @@ private:
     QString localMeshEndpoint(bool createSession) const;
     QString meshPeerToken();
     bool selectedDeviceSupportsSampleRate(int sampleRate);
+    void testDeviceSelection(QComboBox* device, QPushButton* button, QWidget* dialogParent);
+    void applyJoinProfileName(const QString& name);
+    void applyPreferencesToControls();
+    void applyCreateDefaultsToControls();
+    void applyJoinDefaultsToControls();
+    void saveCreateDefaults();
+    void saveJoinDefaults();
     void prepareNetworkRuntimePresentation(bool createSession);
     void launchLocalRuntime(Jam2RuntimeOptions options);
     bool submitEngineCommand(jam2::EngineCommand command, const QString& context);
@@ -106,7 +115,8 @@ private:
     void restartPreparedTrackQuantized();
     void handleEngineSnapshot(const jam2::EngineSnapshot& snapshot);
     void handleEngineEvent(const jam2::EngineEvent& event);
-    void handleNetworkSnapshot(const jam2::NetworkSessionSnapshot& snapshot);
+    void handleNetworkSnapshot(const Jam2NetworkOperationalSnapshot& snapshot);
+    void handleConnectionDiagnostics(const ConnectionDiagnosticsSnapshot& snapshot);
     void updateRuntimeControls();
     void updateMixControls();
     void setMixRemotePeerVisible(bool visible);
@@ -220,6 +230,10 @@ private:
     void generateSession();
 
     ApplicationRuntime jam2_;
+    UserPreferences preferences_;
+    std::vector<jam2::audio::DeviceInfo> availableDevices_;
+    QMap<QString, jam2::audio::DeviceTestResult> deviceCapabilitiesCache_;
+    QString joinProfileName_ = QStringLiteral("fast");
     GuiLoopbackRecorder loopbackRecorder_;
     SharedSessionController sessionController_;
     TrackWorkspaceController trackWorkspace_;
@@ -296,12 +310,8 @@ private:
     QLabel* sessionTopologyLabel_ = nullptr;
     QLabel* jitterLabel_ = nullptr;
     QLabel* lossLabel_ = nullptr;
-    QLabel* depthLabel_ = nullptr;
     QLabel* underrunLabel_ = nullptr;
-    QLabel* driftLabel_ = nullptr;
     QLabel* latencyLabel_ = nullptr;
-    QLabel* ringDepthLabel_ = nullptr;
-    QLabel* missingFramesLabel_ = nullptr;
     QLabel* diagnosisLabel_ = nullptr;
     QLabel* trackNameLabel_ = nullptr;
     QLabel* gridPositionLabel_ = nullptr;
@@ -437,6 +447,8 @@ private:
     bool& wavCompatibilityAuditRunning_;
     int& pendingWavCompatibilityAuditRate_;
     QSet<QString>& reportedIncompatibleWavs_;
+    QString lastWavCompatibilityAuditSignature_;
+    std::uint64_t wavCompatibilityAuditGeneration_ = 0;
     using PendingTrackContribution = TrackWorkspaceController::PendingTrackContribution;
     QMap<QString, PendingTrackContribution>& pendingTrackContributions_;
     QSet<QString>& appliedTrackContributionIds_;

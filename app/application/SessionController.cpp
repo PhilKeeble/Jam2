@@ -174,28 +174,28 @@ public:
             }
             handleAutomationEngineEvent(event);
         };
-        runtime_.onNetworkSnapshot = [this](const jam2::NetworkSessionSnapshot& snapshot) {
-            for (const jam2::NetworkPeerSnapshot& peer : snapshot.peers) {
+        runtime_.onNetworkSnapshot = [this](const Jam2NetworkOperationalSnapshot& snapshot) {
+            for (const Jam2OperationalPeer& peer : snapshot.peers) {
                 const SharedSessionController::EdgeState edge =
-                    peer.descriptor.endpoint_state == jam2::PeerEndpointState::Active
+                    peer.endpoint_state == jam2::PeerEndpointState::Active
                         ? SharedSessionController::EdgeState::Active
-                        : peer.descriptor.endpoint_state == jam2::PeerEndpointState::Probing
+                        : peer.endpoint_state == jam2::PeerEndpointState::Probing
                             ? SharedSessionController::EdgeState::Probing
-                            : peer.descriptor.endpoint_state == jam2::PeerEndpointState::Failed
+                            : peer.endpoint_state == jam2::PeerEndpointState::Failed
                                 ? SharedSessionController::EdgeState::Failed
                                 : SharedSessionController::EdgeState::Candidate;
                 const QString proof =
-                    peer.descriptor.endpoint_state == jam2::PeerEndpointState::Active
+                    peer.endpoint_state == jam2::PeerEndpointState::Active
                         ? QStringLiteral("active")
-                        : peer.descriptor.endpoint_state == jam2::PeerEndpointState::Probing
+                        : peer.endpoint_state == jam2::PeerEndpointState::Probing
                             ? QStringLiteral("probing")
-                            : peer.descriptor.endpoint_state == jam2::PeerEndpointState::Failed
+                            : peer.endpoint_state == jam2::PeerEndpointState::Failed
                                 ? QStringLiteral("failed") : QStringLiteral("candidate");
                 sessionController_.updatePeerEdgeState(
-                    peer.descriptor.peer_id.value,
+                    peer.peer_id,
                     edge,
                     proof,
-                    peer.stream.expected_remote_sample_time > 0
+                    peer.receiving_audio
                         ? QStringLiteral("receiving") : QStringLiteral("waiting"));
             }
         };
@@ -896,7 +896,7 @@ private:
         return originalOptions_[++index];
     }
 
-    static Jam2RuntimeOptions parseRuntimeOptions(const QStringList& options)
+    Jam2RuntimeOptions parseRuntimeOptions(const QStringList& options) const
     {
         std::vector<QByteArray> storage;
         storage.reserve(static_cast<std::size_t>(options.size() + 1));
@@ -909,7 +909,11 @@ private:
         for (QByteArray& value : storage) {
             argv.push_back(value.data());
         }
-        return jam2_parse_runtime_options(static_cast<int>(argv.size()), argv.data(), 1);
+        return jam2_parse_runtime_options(
+            static_cast<int>(argv.size()),
+            argv.data(),
+            1,
+            creator_ ? Jam2ProfileApplication::Create : Jam2ProfileApplication::Join);
     }
 
     void parseBootstrapOptions()
@@ -968,8 +972,19 @@ private:
                 profileName = originalOptions_[i + 1];
             }
         }
+        localProfileName_ = profileName;
         const QByteArray profileBytes = profileName.toUtf8();
-        const jam2::TuningProfile* profile = jam2::find_tuning_profile(
+        if (jam2::find_join_profile(
+                std::string_view(profileBytes.constData(), static_cast<std::size_t>(profileBytes.size()))) == nullptr) {
+            throw std::runtime_error("--profile must be fast, moderate, or safe");
+        }
+        if (!creator_) {
+            requestedContract_ = {};
+            requestedContract_.sampleRate = 0;
+            requestedContract_.frameSize = 0;
+            return;
+        }
+        const jam2::CreateProfile* profile = jam2::find_create_profile(
             std::string_view(profileBytes.constData(), static_cast<std::size_t>(profileBytes.size())));
         if (profile == nullptr) {
             throw std::runtime_error("--profile must be fast, moderate, or safe");
@@ -1105,6 +1120,7 @@ private:
         }
         options.local_peer_id = snapshot.localPeerId;
         options.bootstrap_coordinator_peer_id = snapshot.coordinatorPeerId;
+        options.session_profile_name = snapshot.contract.profile.toStdString();
         options.sample_rate = snapshot.contract.sampleRate;
         options.frame_size = snapshot.contract.frameSize;
         const auto audioFormat = jam2::protocol::parse_audio_format(
@@ -1282,9 +1298,22 @@ private:
         object[QStringLiteral("event")] = QStringLiteral("startup");
         object[QStringLiteral("mode")] = creator_ ? QStringLiteral("create") : QStringLiteral("join");
         object[QStringLiteral("stage")] = stage;
-        object[QStringLiteral("profile")] = requestedContract_.profile;
-        object[QStringLiteral("sample_rate")] = requestedContract_.sampleRate;
-        object[QStringLiteral("frame_size")] = requestedContract_.frameSize;
+        object[QStringLiteral("profile")] = localProfileName_;
+        object[QStringLiteral("local_profile")] = localProfileName_;
+        const SharedSessionController::Snapshot current = sessionController_.snapshot();
+        const QString sessionProfile = creator_
+            ? requestedContract_.profile : current.contract.profile;
+        const int sessionSampleRate = creator_
+            ? requestedContract_.sampleRate : current.contract.sampleRate;
+        const int sessionFrameSize = creator_
+            ? requestedContract_.frameSize : current.contract.frameSize;
+        if (!sessionProfile.isEmpty()) {
+            object[QStringLiteral("session_profile")] = sessionProfile;
+        }
+        if (sessionSampleRate > 0 && sessionFrameSize > 0) {
+            object[QStringLiteral("sample_rate")] = sessionSampleRate;
+            object[QStringLiteral("frame_size")] = sessionFrameSize;
+        }
         if (!localEndpointText_.isEmpty()) {
             object[QStringLiteral("local_endpoint")] = localEndpointText_;
         }
@@ -1465,6 +1494,7 @@ private:
     QString coordinatorToken_;
     QString localEndpointText_;
     QString connectionUrl_;
+    QString localProfileName_;
     QString activeRecordingFolder_;
     Contract requestedContract_;
     Jam2RuntimeOptions runtimeOptions_;

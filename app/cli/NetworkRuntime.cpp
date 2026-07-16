@@ -1042,8 +1042,7 @@ bool engine_restart_required(
 
 jam2::EngineConfig make_engine_config_impl(const Options& options, bool leader_audio_local_click)
 {
-    const bool diagnostics_enabled =
-        options.stats_enabled && (options.log_stats_dir.has_value() || options.stats_interval_ms > 0);
+    const bool diagnostics_enabled = options.stats_enabled;
     jam2::EngineConfig config;
     config.backend = options.headless_audio
         ? jam2::EngineAudioBackend::Headless
@@ -1352,169 +1351,25 @@ int run_test_device(int argc, char** argv)
         throw std::runtime_error("test-device requires a device id");
     }
     const int id = std::stoi(argv[2]);
-    double sample_rate = 48000.0;
-    for (int i = 3; i < argc; ++i) {
-        const std::string_view arg{argv[i]};
-        if (arg == "--sample-rate") {
-            sample_rate = std::stod(std::string(require_value(argc, argv, i, arg)));
-            if (sample_rate <= 0.0) {
-                throw std::runtime_error("--sample-rate must be positive");
-            }
-        } else {
-            throw std::runtime_error("unknown option: " + std::string(arg));
-        }
+    if (argc > 3) {
+        throw std::runtime_error("test-device accepts only a device id");
     }
 
-    const auto probe = jam2::audio::probe_device(id, sample_rate);
-    std::cout << "Device: [" << probe.device.id << "] " << probe.device.backend << " " << probe.device.name << "\n";
-    if (!probe.driver_name.empty()) {
-        std::cout << "Driver name: " << probe.driver_name << "\n";
+    const auto capabilities = jam2::audio::test_device(id);
+    std::cout << "Device: [" << capabilities.device.id << "] "
+              << capabilities.device.backend << " " << capabilities.device.name << "\n";
+    std::cout << "Current sample rate: " << capabilities.current_sample_rate << "\n";
+    for (std::size_t index = 0; index < jam2::audio::kTestSampleRates.size(); ++index) {
+        std::cout << "Sample rate " << jam2::audio::kTestSampleRates[index] << ": "
+                  << (capabilities.sample_rate_supported[index] ? "supported" : "not supported") << "\n";
     }
-    std::cout << "Driver version: " << probe.driver_version << "\n";
-    std::cout << "Channels: input=" << probe.input_channels << " output=" << probe.output_channels << "\n";
-    std::cout << "Latencies samples: input=" << probe.input_latency_samples
-              << " output=" << probe.output_latency_samples << "\n";
-    std::cout << "Buffer sizes samples: min=" << probe.min_buffer_size
-              << " max=" << probe.max_buffer_size
-              << " preferred=" << probe.preferred_buffer_size
-              << " granularity=" << probe.buffer_granularity << "\n";
-    std::cout << "Current sample rate: " << probe.current_sample_rate << "\n";
-    std::cout << "Requested sample rate " << sample_rate << ": "
-              << (probe.requested_sample_rate_supported ? "supported" : "not supported") << "\n";
-    std::cout << "Input channel ids: ";
-    if (probe.input_channels <= 0) {
-        std::cout << "none";
-    } else {
-        for (long channel = 1; channel <= probe.input_channels; ++channel) {
-            std::cout << (channel == 1 ? "" : ",") << channel;
-        }
-    }
-
-    std::cout << "\n";
-    std::cout << "Output channel ids: ";
-    if (probe.output_channels <= 0) {
-        std::cout << "none";
-    } else {
-        for (long channel = 1; channel <= probe.output_channels; ++channel) {
-            std::cout << (channel == 1 ? "" : ",") << channel;
-
-        }
-    }
-    std::cout << "\n";
-    if (probe.input_channels > 0) {
-
-        std::cout << "Example one-channel input mixed to mono stream: --input-channels 1\n";
-    }
-    if (probe.input_channels > 1) {
-        std::cout << "Example two-channel input mixed to mono stream: --input-channels 1,2\n";
-    }
-    if (probe.input_channels > 2) {
-        std::cout << "Example multi-input mix to mono stream: --input-channels 1,2,3,4\n";
-    }
-    if (probe.output_channels > 0) {
-        std::cout << "Example one-channel output: --output-channels 1\n";
-    }
-    if (probe.output_channels > 1) {
-        std::cout << "Example duplicated two-output mono: --output-channels 1,2\n";
-    }
-    if (probe.output_channels > 2) {
-        std::cout << "Example duplicated multi-output: --output-channels 1,2,3,4\n";
+    for (std::size_t index = 0; index < jam2::audio::kTestBufferSizes.size(); ++index) {
+        std::cout << "Buffer size " << jam2::audio::kTestBufferSizes[index] << ": "
+                  << (capabilities.buffer_size_supported[index] ? "supported" : "not supported") << "\n";
     }
     return 0;
 }
 
-
-int run_meter_device(int argc, char** argv)
-{
-    if (argc < 3) {
-        throw std::runtime_error("meter-device requires a device id");
-    }
-    const int id = std::stoi(argv[2]);
-    double sample_rate = 48000.0;
-    long buffer_size = 0;
-    int duration_ms = 3000;
-    for (int i = 3; i < argc; ++i) {
-        const std::string_view arg{argv[i]};
-        if (arg == "--sample-rate") {
-            sample_rate = std::stod(std::string(require_value(argc, argv, i, arg)));
-            if (sample_rate <= 0.0) {
-                throw std::runtime_error("--sample-rate must be positive");
-            }
-        } else if (arg == "--buffer-size") {
-            buffer_size = std::stol(std::string(require_value(argc, argv, i, arg)));
-            if (buffer_size <= 0) {
-                throw std::runtime_error("--buffer-size must be positive");
-            }
-        } else if (arg == "--duration-ms") {
-            duration_ms = std::stoi(std::string(require_value(argc, argv, i, arg)));
-            if (duration_ms <= 0) {
-                throw std::runtime_error("--duration-ms must be positive");
-            }
-        } else {
-            throw std::runtime_error("unknown option: " + std::string(arg));
-        }
-    }
-
-    const auto result = jam2::audio::meter_device(id, sample_rate, buffer_size, duration_ms);
-    std::cout << "Device: [" << result.device.id << "] " << result.device.backend << " " << result.device.name << "\n";
-    std::cout << "Sample rate: " << result.sample_rate << "\n";
-    std::cout << "Buffer size samples: " << result.buffer_size << "\n";
-    std::cout << "Callbacks: " << result.callbacks << "\n";
-    std::cout << "Input sample type: " << result.input_sample_type << "\n";
-    std::cout << "Output sample type: " << result.output_sample_type << "\n";
-    std::cout << "Input peak: " << result.input_peak << "\n";
-    return 0;
-}
-
-int run_ring_device(int argc, char** argv)
-{
-    if (argc < 3) {
-        throw std::runtime_error("ring-device requires a device id");
-    }
-    const int id = std::stoi(argv[2]);
-    double sample_rate = 48000.0;
-    long buffer_size = 0;
-    int duration_ms = 3000;
-    std::size_t ring_frames = 4096;
-    for (int i = 3; i < argc; ++i) {
-        const std::string_view arg{argv[i]};
-        if (arg == "--sample-rate") {
-            sample_rate = std::stod(std::string(require_value(argc, argv, i, arg)));
-            if (sample_rate <= 0.0) {
-                throw std::runtime_error("--sample-rate must be positive");
-            }
-        } else if (arg == "--buffer-size") {
-            buffer_size = std::stol(std::string(require_value(argc, argv, i, arg)));
-            if (buffer_size <= 0) {
-                throw std::runtime_error("--buffer-size must be positive");
-            }
-        } else if (arg == "--duration-ms") {
-            duration_ms = std::stoi(std::string(require_value(argc, argv, i, arg)));
-            if (duration_ms <= 0) {
-                throw std::runtime_error("--duration-ms must be positive");
-            }
-        } else if (arg == "--ring-frames") {
-            const auto parsed = std::stoull(std::string(require_value(argc, argv, i, arg)));
-            if (parsed == 0) {
-                throw std::runtime_error("--ring-frames must be positive");
-            }
-            ring_frames = static_cast<std::size_t>(parsed);
-        } else {
-            throw std::runtime_error("unknown option: " + std::string(arg));
-        }
-    }
-
-    const auto result = jam2::audio::ring_device(id, sample_rate, buffer_size, duration_ms, ring_frames);
-    std::cout << "Device: [" << result.device.id << "] " << result.device.backend << " " << result.device.name << "\n";
-    std::cout << "Sample rate: " << result.sample_rate << "\n";
-    std::cout << "Buffer size samples: " << result.buffer_size << "\n";
-    std::cout << "Callbacks: " << result.callbacks << "\n";
-    std::cout << "Ring overruns frames: " << result.ring_overruns << "\n";
-    std::cout << "Ring underruns frames: " << result.ring_underruns << "\n";
-    std::cout << "Ring underrun events: " << result.ring_underrun_events << "\n";
-    std::cout << "Ring readable frames: " << result.ring_readable << "\n";
-    return 0;
-}
 
 int run_local(int argc, char** argv)
 {
@@ -1831,7 +1686,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
 
     const jam2::PeerStreamConfig peer_stream_config = make_peer_stream_config(
         options,
-        options.stats_enabled && (csv_log.has_value() || options.stats_interval_ms > 0));
+        options.stats_enabled);
     CliPeerStreamPlayback mesh_playback(audio.engine.get());
     jam2::NetworkSession network_session(
         std::move(socket),
@@ -1880,9 +1735,31 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     std::uint64_t next_transport_send = 0;
     bool sent_current_transport = false;
     const std::uint64_t start_time = packet_schedule.startTimeUs();
-    std::uint64_t next_stats = options.stats_enabled && options.stats_interval_ms > 0
+    std::uint64_t next_stats = options.stats_enabled && csv_log && options.stats_interval_ms > 0
         ? start_time + static_cast<std::uint64_t>(options.stats_interval_ms) * 1000ULL
         : 0;
+    std::uint64_t next_operational_snapshot = start_time;
+    std::uint64_t next_connection_diagnostics = options.stats_enabled
+        ? start_time + 2000000ULL
+        : 0;
+    struct DiagnosticsBaseline {
+        std::uint64_t received_packets = 0;
+        std::uint64_t lost_packets = 0;
+        std::uint64_t loss_events = 0;
+        std::uint64_t jitter_sum_us = 0;
+        std::uint64_t jitter_samples = 0;
+        std::uint64_t rtt_sum_us = 0;
+        std::uint64_t rtt_samples = 0;
+        std::uint64_t reordered_or_late = 0;
+        std::uint64_t missing_audio_frames = 0;
+        std::uint64_t late_audio_frames = 0;
+        std::uint64_t packet_gap_over_4x = 0;
+        std::uint64_t packet_gap_samples = 0;
+        std::uint64_t drift_clamped_samples = 0;
+    };
+    std::map<std::uint64_t, DiagnosticsBaseline> diagnostics_baselines;
+    jam2::EngineSnapshot diagnostics_engine_baseline;
+    std::uint64_t diagnostics_baseline_us = start_time;
     // Public create/join validation measures established UDP audio, not
     // TCP/audio bootstrap time. Standalone internal lifecycle runs retain a
     // finite local deadline even when their intentional peer list is empty.
@@ -2322,9 +2199,141 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                           << "\n";
             }
         }
-        if (runtime_host.network_snapshot) {
-            runtime_host.network_snapshot(network_session.snapshot());
+    };
+
+    auto publish_operational_snapshot = [&]() {
+        if (!runtime_host.network_snapshot) {
+            return;
         }
+        Jam2NetworkOperationalSnapshot snapshot;
+        snapshot.contract = network_session.contract();
+        snapshot.bootstrap_role = network_session.bootstrapRole();
+        snapshot.bootstrap_state = network_session.bootstrapState();
+        snapshot.local_peer_id = network_session.localPeerId().value;
+        snapshot.peers.reserve(peers.size());
+        for (const auto& entry : peers) {
+            const auto& peer = entry.second;
+            const auto* descriptor = network_session.peer(peer.peer_id);
+            if (descriptor == nullptr) {
+                continue;
+            }
+            snapshot.peers.push_back({
+                peer.peer_id.value,
+                jam2::format_udp_endpoint(descriptor->endpoint),
+                descriptor->endpoint_state,
+                network_session.peerStream(peer.peer_id).stats().expected_remote_sample_time > 0,
+            });
+        }
+        runtime_host.network_snapshot(snapshot);
+    };
+
+    auto publish_connection_diagnostics = [&](std::uint64_t now_us) {
+        if (!options.stats_enabled || !runtime_host.connection_diagnostics) {
+            return;
+        }
+        const auto counter_delta = [](std::uint64_t current, std::uint64_t previous) {
+            return current >= previous ? current - previous : current;
+        };
+        ConnectionDiagnosticsSnapshot snapshot;
+        snapshot.elapsed_ms = (now_us - start_time) / 1000ULL;
+        snapshot.interval_ms = (now_us - diagnostics_baseline_us) / 1000ULL;
+        snapshot.peers.reserve(peers.size());
+        std::uint64_t jitter_sum_us = 0;
+        std::uint64_t jitter_samples = 0;
+        std::uint64_t lost_packets = 0;
+        for (const auto& entry : peers) {
+            const auto& peer = entry.second;
+            const auto& stats = network_session.peerStream(peer.peer_id).stats();
+            DiagnosticsBaseline& previous = diagnostics_baselines[peer.peer_id.value];
+            const std::uint64_t rtt_sum = counter_delta(stats.rtt_sum_us, previous.rtt_sum_us);
+            const std::uint64_t rtt_samples = counter_delta(stats.rtt_samples, previous.rtt_samples);
+            snapshot.peers.push_back({
+                peer.peer_id.value,
+                rtt_samples > 0 ? static_cast<double>(rtt_sum) /
+                    static_cast<double>(rtt_samples) / 1000.0 : 0.0,
+                rtt_samples > 0,
+            });
+            const std::uint64_t peer_jitter_sum =
+                counter_delta(stats.jitter_sum_us, previous.jitter_sum_us);
+            const std::uint64_t peer_jitter_samples =
+                counter_delta(stats.jitter_samples, previous.jitter_samples);
+            jitter_sum_us += peer_jitter_sum;
+            jitter_samples += peer_jitter_samples;
+            snapshot.jitter_max_ms = std::max(
+                snapshot.jitter_max_ms,
+                static_cast<double>(stats.jitter_max_us) / 1000.0);
+            const std::uint64_t peer_lost = counter_delta(stats.sequence.lost, previous.lost_packets);
+            lost_packets += peer_lost;
+            snapshot.received_packets += counter_delta(peer.recv_packets, previous.received_packets);
+            snapshot.loss_events += counter_delta(stats.sequence.loss_events, previous.loss_events);
+            snapshot.loss_max_gap = std::max(snapshot.loss_max_gap, stats.sequence.loss_max_gap);
+            snapshot.reordered_or_late_packets += counter_delta(
+                stats.sequence.out_of_order + stats.sequence.late + stats.reordered_lost,
+                previous.reordered_or_late);
+            snapshot.missing_audio_frames += counter_delta(
+                stats.missing_audio_frames_inserted, previous.missing_audio_frames);
+            snapshot.late_audio_frames += counter_delta(
+                stats.late_audio_frames_dropped, previous.late_audio_frames);
+            snapshot.packet_gap_over_4x += counter_delta(
+                stats.audio_packet_gap_over_4x_count, previous.packet_gap_over_4x);
+            snapshot.packet_gap_samples += counter_delta(
+                stats.audio_packet_gap_samples, previous.packet_gap_samples);
+            snapshot.drift_clamped_samples += counter_delta(
+                stats.drift_correction_clamped_samples, previous.drift_clamped_samples);
+            snapshot.drift_abs_ppm_max = std::max(snapshot.drift_abs_ppm_max, std::abs(stats.drift_ppm));
+            previous = {
+                peer.recv_packets,
+                stats.sequence.lost,
+                stats.sequence.loss_events,
+                stats.jitter_sum_us,
+                stats.jitter_samples,
+                stats.rtt_sum_us,
+                stats.rtt_samples,
+                stats.sequence.out_of_order + stats.sequence.late + stats.reordered_lost,
+                stats.missing_audio_frames_inserted,
+                stats.late_audio_frames_dropped,
+                stats.audio_packet_gap_over_4x_count,
+                stats.audio_packet_gap_samples,
+                stats.drift_correction_clamped_samples,
+            };
+        }
+        for (auto it = diagnostics_baselines.begin(); it != diagnostics_baselines.end();) {
+            if (peers.find(it->first) == peers.end()) {
+                it = diagnostics_baselines.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        snapshot.jitter_average_ms = jitter_samples > 0
+            ? static_cast<double>(jitter_sum_us) / static_cast<double>(jitter_samples) / 1000.0
+            : 0.0;
+        const std::uint64_t expected_packets = snapshot.received_packets + lost_packets;
+        snapshot.packet_loss_percent = expected_packets > 0
+            ? static_cast<double>(lost_packets) * 100.0 / static_cast<double>(expected_packets)
+            : 0.0;
+        const jam2::EngineSnapshot engine = audio.engine
+            ? audio.engine->snapshot()
+            : jam2::EngineSnapshot{};
+        snapshot.output_underrun_frames = counter_delta(
+            engine.playback_ring.underruns,
+            diagnostics_engine_baseline.playback_ring.underruns);
+        snapshot.output_underrun_events = counter_delta(
+            engine.playback_ring.underrun_events,
+            diagnostics_engine_baseline.playback_ring.underrun_events);
+        snapshot.output_underrun_ms = options.sample_rate > 0
+            ? static_cast<double>(snapshot.output_underrun_frames) * 1000.0 /
+                static_cast<double>(options.sample_rate)
+            : 0.0;
+        snapshot.output_underrun_burst_max_ms = options.sample_rate > 0
+            ? static_cast<double>(engine.playback_ring.underrun_burst_max_frames) * 1000.0 /
+                static_cast<double>(options.sample_rate)
+            : 0.0;
+        snapshot.callback_gap_over_2x = counter_delta(
+            engine.callback_timing.gap_over_2x_count,
+            diagnostics_engine_baseline.callback_timing.gap_over_2x_count);
+        diagnostics_engine_baseline = engine;
+        diagnostics_baseline_us = now_us;
+        runtime_host.connection_diagnostics(snapshot);
     };
 
     auto apply_membership_update = [&]() {
@@ -2449,6 +2458,14 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         apply_runtime_host_commands();
         apply_membership_update();
         const std::uint64_t now = jam2::monotonic_us();
+        if (now >= next_operational_snapshot) {
+            publish_operational_snapshot();
+            next_operational_snapshot = now + 100000ULL;
+        }
+        if (next_connection_diagnostics != 0 && now >= next_connection_diagnostics) {
+            publish_connection_diagnostics(now);
+            next_connection_diagnostics = now + 2000000ULL;
+        }
         if (!timed_stream_clock_armed && options.stream_ms > 0 && network_session.activePeerCount() > 0) {
             send_deadline = now + static_cast<std::uint64_t>(options.stream_ms) * 1000ULL;
             receive_deadline = send_deadline +
@@ -2893,9 +2910,6 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             print_mesh_stats(now);
         }
         if (next_stats != 0 && now >= next_stats) {
-            if (commands.state.stats_enabled.load(std::memory_order_relaxed)) {
-                print_mesh_stats(now);
-            }
             if (csv_log) {
                 csv_log->write_periodic(
                     (now - start_time) / 1000ULL,
@@ -3317,25 +3331,19 @@ int jam2::cli::runTestDevice(int argc, char** argv)
     return run_test_device(argc, argv);
 }
 
-int jam2::cli::runMeterDevice(int argc, char** argv)
-{
-    return run_meter_device(argc, argv);
-}
-
-int jam2::cli::runRingDevice(int argc, char** argv)
-{
-    return run_ring_device(argc, argv);
-}
-
 int jam2::cli::runLocal(int argc, char** argv)
 {
     return run_local(argc, argv);
 }
 
 
-Jam2RuntimeOptions jam2_parse_runtime_options(int argc, char** argv, int start_index)
+Jam2RuntimeOptions jam2_parse_runtime_options(
+    int argc,
+    char** argv,
+    int start_index,
+    Jam2ProfileApplication profile_application)
 {
-    return parse_options(argc, argv, start_index);
+    return parse_options(argc, argv, start_index, profile_application);
 }
 
 jam2::EngineConfig jam2_make_engine_config(

@@ -1,21 +1,18 @@
 #pragma once
 
+#include "RuntimeContracts.hpp"
 #include "engine.hpp"
 
-#include <QJsonObject>
 #include <QString>
 
 #include <cstdint>
 
 struct MixerStatsLabels {
     QString latency;
+    QString latencyTooltip;
     QString jitter;
     QString loss;
-    QString depth;
-    QString reorder;
     QString underrun;
-    QString stalls;
-    QString drift;
     QString diagnosis;
 };
 
@@ -31,12 +28,11 @@ struct MixerMeterLevels {
 
 class MixerStatsViewModel {
 public:
-    MixerStatsLabels present(const QJsonObject& stats) const;
+    MixerStatsLabels present(const ConnectionDiagnosticsSnapshot* stats) const;
     MixerMeterLevels consume(
         const jam2::EngineGuiPeakSnapshot& intervalPeaks,
         double sendGain,
         std::uint64_t outputClippedSamples);
-    MixerMeterLevels consumeStructured(const QJsonObject& stats);
     void reset() noexcept;
 
 private:

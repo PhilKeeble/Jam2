@@ -344,32 +344,33 @@ int runFuzzInput(const QString& target, const QString& inputPath)
     return 0;
 }
 
-QJsonObject profileJson(const jam2::TuningProfile& profile)
+QJsonObject profileJson(const jam2::CreateProfile& profile)
 {
+    const jam2::JoinProfile& local = *profile.local;
     return {
         {QStringLiteral("name"), QString::fromUtf8(profile.name.data(), static_cast<qsizetype>(profile.name.size()))},
         {QStringLiteral("label"), QString::fromUtf8(profile.label.data(), static_cast<qsizetype>(profile.label.size()))},
         {QStringLiteral("sample_rate"), profile.sample_rate},
-        {QStringLiteral("audio_buffer_size"), static_cast<qint64>(profile.audio_buffer_size)},
+        {QStringLiteral("audio_buffer_size"), static_cast<qint64>(local.audio_buffer_size)},
         {QStringLiteral("frame_size"), profile.frame_size},
-        {QStringLiteral("playback_prefill_frames"), static_cast<qint64>(profile.playback_prefill_frames)},
-        {QStringLiteral("playback_ring_frames"), static_cast<qint64>(profile.playback_ring_frames)},
-        {QStringLiteral("playback_max_frames"), static_cast<qint64>(profile.playback_max_frames)},
-        {QStringLiteral("capture_ring_frames"), static_cast<qint64>(profile.capture_ring_frames)},
-        {QStringLiteral("drift_correction"), profile.drift_correction},
-        {QStringLiteral("drift_smoothing"), profile.drift_smoothing},
-        {QStringLiteral("drift_deadband_ppm"), profile.drift_deadband_ppm},
-        {QStringLiteral("drift_max_correction_ppm"), profile.drift_max_correction_ppm},
-        {QStringLiteral("sample_time_playout"), profile.sample_time_playout},
-        {QStringLiteral("playout_delay_frames"), static_cast<qint64>(profile.playout_delay_frames)},
-        {QStringLiteral("jitter_buffer_frames"), static_cast<qint64>(profile.jitter_buffer_frames)},
-        {QStringLiteral("jitter_buffer_max_frames"), static_cast<qint64>(profile.jitter_buffer_max_frames)},
-        {QStringLiteral("adaptive_playback_cushion"), profile.adaptive_playback_cushion},
-        {QStringLiteral("adaptive_playback_target_frames"), static_cast<qint64>(profile.adaptive_playback_target_frames)},
-        {QStringLiteral("adaptive_playback_min_frames"), static_cast<qint64>(profile.adaptive_playback_min_frames)},
-        {QStringLiteral("adaptive_playback_max_frames"), static_cast<qint64>(profile.adaptive_playback_max_frames)},
-        {QStringLiteral("adaptive_playback_release_ppm"), profile.adaptive_playback_release_ppm},
-        {QStringLiteral("adaptive_playback_ratio_ramp_ms"), profile.adaptive_playback_ratio_ramp_ms},
+        {QStringLiteral("playback_prefill_frames"), static_cast<qint64>(local.playback_prefill_frames)},
+        {QStringLiteral("playback_ring_frames"), static_cast<qint64>(local.playback_ring_frames)},
+        {QStringLiteral("playback_max_frames"), static_cast<qint64>(local.playback_max_frames)},
+        {QStringLiteral("capture_ring_frames"), static_cast<qint64>(local.capture_ring_frames)},
+        {QStringLiteral("drift_correction"), local.drift_correction},
+        {QStringLiteral("drift_smoothing"), local.drift_smoothing},
+        {QStringLiteral("drift_deadband_ppm"), local.drift_deadband_ppm},
+        {QStringLiteral("drift_max_correction_ppm"), local.drift_max_correction_ppm},
+        {QStringLiteral("sample_time_playout"), local.sample_time_playout},
+        {QStringLiteral("playout_delay_frames"), static_cast<qint64>(local.playout_delay_frames)},
+        {QStringLiteral("jitter_buffer_frames"), static_cast<qint64>(local.jitter_buffer_frames)},
+        {QStringLiteral("jitter_buffer_max_frames"), static_cast<qint64>(local.jitter_buffer_max_frames)},
+        {QStringLiteral("adaptive_playback_cushion"), local.adaptive_playback_cushion},
+        {QStringLiteral("adaptive_playback_target_frames"), static_cast<qint64>(local.adaptive_playback_target_frames)},
+        {QStringLiteral("adaptive_playback_min_frames"), static_cast<qint64>(local.adaptive_playback_min_frames)},
+        {QStringLiteral("adaptive_playback_max_frames"), static_cast<qint64>(local.adaptive_playback_max_frames)},
+        {QStringLiteral("adaptive_playback_release_ppm"), local.adaptive_playback_release_ppm},
+        {QStringLiteral("adaptive_playback_ratio_ramp_ms"), local.adaptive_playback_ratio_ramp_ms},
     };
 }
 
@@ -387,7 +388,7 @@ QString fieldKindText(FieldKind kind)
 QJsonObject descriptionJson()
 {
     QJsonArray profiles;
-    for (const auto& profile : jam2::tuning_profiles()) {
+    for (const auto& profile : jam2::create_profiles()) {
         profiles.push_back(profileJson(profile));
     }
     QJsonArray fields;
@@ -447,7 +448,7 @@ QJsonObject descriptionJson()
             QStringLiteral("shutdown")}},
         {QStringLiteral("runtime_fields"), fields},
         {QStringLiteral("profiles"), profiles},
-        {QStringLiteral("default_profile"), QString::fromUtf8(jam2::default_tuning_profile().name.data(), static_cast<qsizetype>(jam2::default_tuning_profile().name.size()))},
+        {QStringLiteral("default_profile"), QString::fromUtf8(jam2::default_create_profile().name.data(), static_cast<qsizetype>(jam2::default_create_profile().name.size()))},
         {QStringLiteral("test_inputs"), QJsonArray{
             QStringLiteral("off"), QStringLiteral("silence"), QStringLiteral("tone-440"),
             QStringLiteral("pulse-1s"), QStringLiteral("metro-pulse")}},
@@ -543,7 +544,10 @@ std::vector<std::string> toStorage(const QStringList& arguments, const char* exe
     return storage;
 }
 
-Jam2RuntimeOptions parseRuntimeArguments(const QStringList& arguments, const char* executable)
+Jam2RuntimeOptions parseRuntimeArguments(
+    const QStringList& arguments,
+    const char* executable,
+    Jam2ProfileApplication profileApplication)
 {
     auto storage = toStorage(arguments, executable);
     std::vector<char*> argv;
@@ -551,7 +555,8 @@ Jam2RuntimeOptions parseRuntimeArguments(const QStringList& arguments, const cha
     for (std::string& value : storage) {
         argv.push_back(value.data());
     }
-    return jam2_parse_runtime_options(static_cast<int>(argv.size()), argv.data(), 1);
+    return jam2_parse_runtime_options(
+        static_cast<int>(argv.size()), argv.data(), 1, profileApplication);
 }
 
 QString canonicalArtifactRoot(const QString& scenarioPath, const QJsonObject& artifacts)
@@ -646,7 +651,7 @@ ParsedScenario parseScenario(const QString& path, const QJsonObject& source, con
 
     const QString profile = source.value(QStringLiteral("profile")).toString(QStringLiteral("fast"));
     const QByteArray profileBytes = profile.toUtf8();
-    if (jam2::find_tuning_profile(std::string_view(
+    if (jam2::find_join_profile(std::string_view(
             profileBytes.constData(), static_cast<std::size_t>(profileBytes.size()))) == nullptr) {
         throw std::runtime_error("debug scenario profile is not supported");
     }
@@ -669,7 +674,12 @@ ParsedScenario parseScenario(const QString& path, const QJsonObject& source, con
     // bootstrap fields. SessionController owns --wait-ms, --max-peers and
     // explicit session material; they are intentionally not CLI runtime
     // options and must not be fed through the audio option parser.
-    result.effectiveOptions = parseRuntimeArguments(result.optionArguments, executable);
+    result.effectiveOptions = parseRuntimeArguments(
+        result.optionArguments,
+        executable,
+        result.operation == QStringLiteral("network.join")
+            ? Jam2ProfileApplication::Join
+            : Jam2ProfileApplication::Create);
 
     const QJsonObject network = source.value(QStringLiteral("network")).toObject();
     static const std::set<QString> networkFields{
@@ -880,6 +890,8 @@ QJsonObject optionsJson(const Jam2RuntimeOptions& options)
     };
     return {
         {QStringLiteral("profile"), QString::fromStdString(options.profile_name)},
+        {QStringLiteral("local_profile"), QString::fromStdString(options.profile_name)},
+        {QStringLiteral("session_profile"), QString::fromStdString(options.session_profile_name)},
         {QStringLiteral("sample_rate"), options.sample_rate},
         {QStringLiteral("audio_buffer_size"), static_cast<qint64>(options.audio_buffer_size)},
         {QStringLiteral("frame_size"), options.frame_size},

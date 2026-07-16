@@ -98,6 +98,123 @@ constexpr int kMaxLooperTrackContributions = 512;
 constexpr int kFirewallGuidanceDisconnectThreshold = 3;
 constexpr int kFirewallGuidanceWindowMs = 10000;
 
+QComboBox* fixedSampleRateCombo(QWidget* parent, int value)
+{
+    auto* combo = new QComboBox(parent);
+    for (const int rate : jam2::audio::kTestSampleRates) {
+        combo->addItem(QString::number(rate), rate);
+    }
+    const int index = combo->findData(value);
+    combo->setCurrentIndex(index >= 0 ? index : combo->findData(48000));
+    return combo;
+}
+
+QComboBox* fixedBufferSizeCombo(QWidget* parent, int value)
+{
+    auto* combo = new QComboBox(parent);
+    for (const long size : jam2::audio::kTestBufferSizes) {
+        combo->addItem(QString::number(size), static_cast<int>(size));
+    }
+    const int index = combo->findData(value);
+    combo->setCurrentIndex(index >= 0 ? index : combo->findData(64));
+    return combo;
+}
+
+QString devicePreferenceKey(const jam2::audio::DeviceInfo& device)
+{
+    return QString::fromStdString(device.backend) + QLatin1Char('|') +
+        QString::fromStdString(device.clsid.empty() ? device.name : device.clsid);
+}
+
+int preferredDeviceIndex(
+    const QComboBox* combo,
+    const std::vector<jam2::audio::DeviceInfo>& devices,
+    const AudioDevicePreference& preference)
+{
+    if (combo == nullptr) return -1;
+    for (const auto& device : devices) {
+        const QString stable = QString::fromStdString(
+            device.clsid.empty() ? device.name : device.clsid);
+        if (QString::fromStdString(device.backend) == preference.backend &&
+            stable == preference.stableId) {
+            return combo->findData(QString::number(device.id));
+        }
+    }
+    return -1;
+}
+
+void selectPreferredDevice(
+    QComboBox* combo,
+    const std::vector<jam2::audio::DeviceInfo>& devices,
+    const AudioDevicePreference& preference)
+{
+    const int index = preferredDeviceIndex(combo, devices, preference);
+    if (index >= 0) combo->setCurrentIndex(index);
+}
+
+void storeSelectedDevice(
+    AudioDevicePreference& preference,
+    const QComboBox* combo,
+    const std::vector<jam2::audio::DeviceInfo>& devices)
+{
+    if (combo == nullptr) return;
+    bool ok = false;
+    const int id = combo->currentData().toInt(&ok);
+    if (!ok) return;
+    const auto selected = std::find_if(devices.begin(), devices.end(),
+        [id](const auto& item) { return item.id == id; });
+    if (selected == devices.end()) return;
+    preference.backend = QString::fromStdString(selected->backend);
+    preference.stableId = QString::fromStdString(
+        selected->clsid.empty() ? selected->name : selected->clsid);
+    preference.name = QString::fromStdString(selected->name);
+}
+
+QString deviceCapabilitiesText(const jam2::audio::DeviceTestResult& capabilities)
+{
+    QStringList lines{
+        QStringLiteral("Device: %1 %2")
+            .arg(QString::fromStdString(capabilities.device.backend),
+                 QString::fromStdString(capabilities.device.name)),
+        QStringLiteral("Current device sample rate: %1 Hz")
+            .arg(capabilities.current_sample_rate, 0, 'f', 0),
+        QStringLiteral(""),
+        QStringLiteral("Sample rates:"),
+    };
+    for (std::size_t index = 0; index < jam2::audio::kTestSampleRates.size(); ++index) {
+        lines.append(QStringLiteral("  %1 Hz: %2")
+            .arg(jam2::audio::kTestSampleRates[index])
+            .arg(capabilities.sample_rate_supported[index]
+                ? QStringLiteral("supported") : QStringLiteral("not supported")));
+    }
+    lines.append(QStringLiteral(""));
+    lines.append(QStringLiteral("Buffer sizes:"));
+    for (std::size_t index = 0; index < jam2::audio::kTestBufferSizes.size(); ++index) {
+        lines.append(QStringLiteral("  %1 frames: %2")
+            .arg(jam2::audio::kTestBufferSizes[index])
+            .arg(capabilities.buffer_size_supported[index]
+                ? QStringLiteral("supported") : QStringLiteral("not supported")));
+    }
+    return lines.join(QLatin1Char('\n'));
+}
+
+void showQuietDeviceMessage(QWidget* parent, const QString& text)
+{
+    QDialog dialog(parent);
+    dialog.setWindowTitle(QStringLiteral("Test Device"));
+    dialog.setModal(true);
+    auto* message = new QLabel(text, &dialog);
+    message->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
+    message->setWordWrap(true);
+    message->setMinimumWidth(430);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok, &dialog);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->addWidget(message);
+    layout->addWidget(buttons);
+    dialog.exec();
+}
+
 QString creatorFirewallGuidance()
 {
 #if defined(__APPLE__)
@@ -244,15 +361,16 @@ bool isSha256Hex(const QString& value)
 
 
 
-QString timestampedCapturePath(const QString& prefix)
+QString timestampedCapturePath(const QString& prefix, const QString& folder = {})
 {
-    return appReleaseFilePath(
-        QStringLiteral("captures"),
-        QStringLiteral("%1-%2-%3.wav")
-            .arg(
-                prefix,
-                QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss-zzz")),
-                QUuid::createUuid().toString(QUuid::WithoutBraces).left(8)));
+    const QString fileName = QStringLiteral("%1-%2-%3.wav")
+        .arg(
+            prefix,
+            QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-hhmmss-zzz")),
+            QUuid::createUuid().toString(QUuid::WithoutBraces).left(8));
+    return folder.trimmed().isEmpty()
+        ? appReleaseFilePath(QStringLiteral("captures"), fileName)
+        : QDir(folder).absoluteFilePath(fileName);
 }
 
 QString safeFileName(QString name)
@@ -570,6 +688,7 @@ void scrollAreaByWheel(QScrollArea& scrollArea, QWheelEvent& wheel)
 
 MainWindow::MainWindow(QWidget* parent)
     : QWidget(parent)
+    , preferences_(UserPreferencesStore::load())
     , trackWorkspace_(jam2_, this)
     , trackController_(trackWorkspace_.trackController)
     , looperProject_(trackWorkspace_.looperProject)
@@ -643,6 +762,7 @@ MainWindow::MainWindow(QWidget* parent)
     projectPersistence_.initializeWorkspace(appReleaseFolderPath(
         QStringLiteral("song_staging/") + QUuid::createUuid().toString(QUuid::WithoutBraces)));
     MainWindowPages::build(*this);
+    applyPreferencesToControls();
     projectPersistence_.acceptNewProject(currentProjectSnapshot());
     QApplication::instance()->installEventFilter(this);
 
@@ -675,8 +795,11 @@ MainWindow::MainWindow(QWidget* parent)
     jam2_.onEngineEvent = [this](const jam2::EngineEvent& event) {
         handleEngineEvent(event);
     };
-    jam2_.onNetworkSnapshot = [this](const jam2::NetworkSessionSnapshot& snapshot) {
+    jam2_.onNetworkSnapshot = [this](const Jam2NetworkOperationalSnapshot& snapshot) {
         handleNetworkSnapshot(snapshot);
+    };
+    jam2_.onConnectionDiagnostics = [this](const ConnectionDiagnosticsSnapshot& snapshot) {
+        handleConnectionDiagnostics(snapshot);
     };
     jam2_.onStartup = [this](const Jam2RuntimeStartup& startup) {
         jamStartupPending_ = false;
@@ -783,14 +906,6 @@ MainWindow::MainWindow(QWidget* parent)
             .arg(contract.sampleRate)
             .arg(contract.frameSize));
         if (sessionController_.snapshot().role == SharedSessionController::Role::Joiner) {
-            if (profileBox_) {
-                const QSignalBlocker blocker(profileBox_);
-
-                const int index = profileBox_->findData(contract.profile);
-                if (index >= 0) {
-                    profileBox_->setCurrentIndex(index);
-                }
-            }
             sampleRateSpin_->setValue(contract.sampleRate);
             frameSizeSpin_->setValue(contract.frameSize);
             if (networkAudioFormatBox_) {
@@ -1128,25 +1243,38 @@ void MainWindow::showLocalPerformSetup()
     for (int index = 0; deviceBox_ && index < deviceBox_->count(); ++index) {
         device->addItem(deviceBox_->itemText(index), deviceBox_->itemData(index));
     }
-    if (deviceBox_) {
-        device->setCurrentIndex(qMax(0, device->findData(deviceBox_->currentData())));
+    int preferredDevice = -1;
+    for (const auto& info : availableDevices_) {
+        const QString stable = QString::fromStdString(info.clsid.empty() ? info.name : info.clsid);
+        if (QString::fromStdString(info.backend) == preferences_.localAudio.backend &&
+            stable == preferences_.localAudio.stableId) {
+            preferredDevice = device->findData(QString::number(info.id));
+            break;
+        }
     }
-    auto* sampleRate = new QSpinBox(&dialog);
-    sampleRate->setRange(
-        jam2::application::limits::kMinimumSampleRate,
-        jam2::application::limits::kMaximumSampleRate);
-    sampleRate->setValue(sampleRateSpin_ ? sampleRateSpin_->value() : 48000);
-    auto* inputChannels = new QLineEdit(inputChannelsEdit_ ? inputChannelsEdit_->text() : QStringLiteral("0"), &dialog);
-    auto* outputChannels = new QLineEdit(outputChannelsEdit_ ? outputChannelsEdit_->text() : QStringLiteral("0,1"), &dialog);
+    if (preferredDevice < 0 && deviceBox_) preferredDevice = device->findData(deviceBox_->currentData());
+    device->setCurrentIndex(qMax(0, preferredDevice));
+    auto* sampleRate = fixedSampleRateCombo(&dialog, preferences_.localAudio.sampleRate);
+    auto* bufferSize = fixedBufferSizeCombo(&dialog, preferences_.localAudio.bufferSize);
+    auto* inputChannels = new QLineEdit(preferences_.localAudio.inputChannels, &dialog);
+    auto* outputChannels = new QLineEdit(preferences_.localAudio.outputChannels, &dialog);
+    auto* testDevice = new QPushButton(QStringLiteral("Test Device"), &dialog);
+    auto* saveDefaults = new QCheckBox(QStringLiteral("Save as Local defaults"), &dialog);
     form->addRow(QStringLiteral("Low-latency device"), device);
     form->addRow(QStringLiteral("Sample rate"), sampleRate);
+    form->addRow(QStringLiteral("Buffer size"), bufferSize);
     form->addRow(QStringLiteral("Input channels"), inputChannels);
     form->addRow(QStringLiteral("Output channels"), outputChannels);
+    form->addRow(QString(), testDevice);
+    form->addRow(QString(), saveDefaults);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
     buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Start Engine"));
     form->addRow(buttons);
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    QObject::connect(testDevice, &QPushButton::clicked, this, [this, device, testDevice, &dialog] {
+        testDeviceSelection(device, testDevice, &dialog);
+    });
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }
@@ -1155,9 +1283,27 @@ void MainWindow::showLocalPerformSetup()
         return;
     }
     deviceBox_->setCurrentIndex(qMax(0, deviceBox_->findData(device->currentData())));
-    sampleRateSpin_->setValue(sampleRate->value());
+    sampleRateSpin_->setValue(sampleRate->currentData().toInt());
+    bufferSizeSpin_->setValue(bufferSize->currentData().toInt());
     inputChannelsEdit_->setText(inputChannels->text().trimmed());
     outputChannelsEdit_->setText(outputChannels->text().trimmed());
+    if (saveDefaults->isChecked()) {
+        preferences_.localAudio.sampleRate = sampleRateSpin_->value();
+        preferences_.localAudio.bufferSize = bufferSizeSpin_->value();
+        preferences_.localAudio.inputChannels = inputChannelsEdit_->text();
+        preferences_.localAudio.outputChannels = outputChannelsEdit_->text();
+        bool idOk = false;
+        const int id = device->currentData().toInt(&idOk);
+        const auto info = std::find_if(availableDevices_.begin(), availableDevices_.end(),
+            [id](const auto& item) { return item.id == id; });
+        if (idOk && info != availableDevices_.end()) {
+            preferences_.localAudio.backend = QString::fromStdString(info->backend);
+            preferences_.localAudio.stableId = QString::fromStdString(
+                info->clsid.empty() ? info->name : info->clsid);
+            preferences_.localAudio.name = QString::fromStdString(info->name);
+        }
+        UserPreferencesStore::save(preferences_);
+    }
     startLocalPerform();
 }
 
@@ -1557,56 +1703,32 @@ void MainWindow::handleEngineEvent(const jam2::EngineEvent& event)
 }
 
 
-void MainWindow::handleNetworkSnapshot(const jam2::NetworkSessionSnapshot& snapshot)
+void MainWindow::handleNetworkSnapshot(const Jam2NetworkOperationalSnapshot& snapshot)
 {
-    QJsonObject stats{
-        {QStringLiteral("event"), QStringLiteral("mesh_stats")},
-        {QStringLiteral("peer_count"), static_cast<double>(snapshot.peers.size())},
-        {QStringLiteral("network_active_peer_count"), static_cast<double>(snapshot.mix.active_peers)},
-        {QStringLiteral("mix_contributing_peers"), static_cast<double>(snapshot.mix.contributing_peers)},
-        {QStringLiteral("mix_released_slots"), static_cast<double>(snapshot.mix.released_slots)},
-        {QStringLiteral("mix_deadline_slots"), static_cast<double>(snapshot.mix.deadline_slots)},
-        {QStringLiteral("mix_missing_peer_frames"), static_cast<double>(snapshot.mix.missing_peer_frames)},
-
-        {QStringLiteral("mix_capacity_drops"), static_cast<double>(snapshot.mix.capacity_drops)},
-    };
-    std::uint64_t lost = 0;
-    std::uint64_t jitterSum = 0;
-    std::uint64_t jitterSamples = 0;
-    std::uint64_t jitterMax = 0;
-    std::uint64_t rttSum = 0;
-    std::uint64_t rttSamples = 0;
-
-    for (const jam2::NetworkPeerSnapshot& peer : snapshot.peers) {
-        lost += peer.stream.sequence.lost;
-        jitterSum += peer.stream.jitter_sum_us;
-        jitterSamples += peer.stream.jitter_samples;
-        jitterMax = std::max(jitterMax, peer.stream.jitter_max_us);
-        rttSum += peer.stream.rtt_sum_us;
-        rttSamples += peer.stream.rtt_samples;
+    for (const Jam2OperationalPeer& peer : snapshot.peers) {
         const SharedSessionController::EdgeState edge =
-            peer.descriptor.endpoint_state == jam2::PeerEndpointState::Active
+            peer.endpoint_state == jam2::PeerEndpointState::Active
                 ? SharedSessionController::EdgeState::Active
-                : peer.descriptor.endpoint_state == jam2::PeerEndpointState::Probing
+                : peer.endpoint_state == jam2::PeerEndpointState::Probing
                     ? SharedSessionController::EdgeState::Probing
-                    : peer.descriptor.endpoint_state == jam2::PeerEndpointState::Failed
+                    : peer.endpoint_state == jam2::PeerEndpointState::Failed
                         ? SharedSessionController::EdgeState::Failed
                         : SharedSessionController::EdgeState::Candidate;
-        const QString proof = peer.descriptor.endpoint_state == jam2::PeerEndpointState::Active
-            ? QStringLiteral("active") : peer.descriptor.endpoint_state == jam2::PeerEndpointState::Probing
-                ? QStringLiteral("probing") : peer.descriptor.endpoint_state == jam2::PeerEndpointState::Failed
+        const QString proof = peer.endpoint_state == jam2::PeerEndpointState::Active
+            ? QStringLiteral("active") : peer.endpoint_state == jam2::PeerEndpointState::Probing
+                ? QStringLiteral("probing") : peer.endpoint_state == jam2::PeerEndpointState::Failed
                     ? QStringLiteral("failed") : QStringLiteral("candidate");
         sessionController_.updatePeerEdgeState(
-            peer.descriptor.peer_id.value,
+            peer.peer_id,
             edge,
             proof,
-            peer.stream.expected_remote_sample_time > 0 ? QStringLiteral("receiving") : QStringLiteral("waiting"));
+            peer.receiving_audio ? QStringLiteral("receiving") : QStringLiteral("waiting"));
     }
-    stats.insert(QStringLiteral("sequence_lost"), static_cast<double>(lost));
-    stats.insert(QStringLiteral("jitter_avg_ms"), jitterSamples > 0 ? static_cast<double>(jitterSum) / jitterSamples / 1000.0 : 0.0);
-    stats.insert(QStringLiteral("jitter_max_ms"), static_cast<double>(jitterMax) / 1000.0);
-    stats.insert(QStringLiteral("rtt_avg_ms"), rttSamples > 0 ? static_cast<double>(rttSum) / rttSamples / 1000.0 : 0.0);
-    updateStatsDisplay(stats);
+}
+
+void MainWindow::handleConnectionDiagnostics(const ConnectionDiagnosticsSnapshot& snapshot)
+{
+    updateStatsDisplay(&snapshot);
 }
 
 void MainWindow::showStartJamDialog()
@@ -1616,6 +1738,10 @@ void MainWindow::showStartJamDialog()
         role == SharedSessionController::Role::Joiner) {
         return;
     }
+
+    applyCreateDefaultsToControls();
+    refreshDevices();
+    selectPreferredDevice(deviceBox_, availableDevices_, preferences_.networkAudio);
 
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Start Jam"));
@@ -1628,7 +1754,7 @@ void MainWindow::showStartJamDialog()
     const QList<QWidget*> visibleWidgets{
         bindHostEdit_, portSpin_, publicHostEdit_,
         stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, noStunCheck_, profileBox_, deviceBox_,
-        inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_, networkAudioFormatBox_,
+        inputChannelsEdit_, outputChannelsEdit_, frameSizeSpin_, networkAudioFormatBox_,
         prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_,
         streamMsSpin_, streamLingerMsSpin_, statsCheck_, meshMaxPeersSpin_,
         statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
@@ -1657,12 +1783,16 @@ void MainWindow::showStartJamDialog()
 
     auto* audioForm = new QFormLayout();
     audioForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    auto* sampleRate = fixedSampleRateCombo(content, sampleRateSpin_->value());
+    auto* bufferSize = fixedBufferSizeCombo(content, bufferSizeSpin_->value());
+    auto* testDevice = new QPushButton(QStringLiteral("Test Device"), content);
     audioForm->addRow(QStringLiteral("Profile"), profileBox_);
     audioForm->addRow(QStringLiteral("Audio device"), deviceBox_);
     audioForm->addRow(QStringLiteral("Input channels"), inputChannelsEdit_);
     audioForm->addRow(QStringLiteral("Output channels"), outputChannelsEdit_);
-    audioForm->addRow(QStringLiteral("Sample rate"), sampleRateSpin_);
-    audioForm->addRow(QStringLiteral("Audio buffer size"), bufferSizeSpin_);
+    audioForm->addRow(QStringLiteral("Sample rate"), sampleRate);
+    audioForm->addRow(QStringLiteral("Audio buffer size"), bufferSize);
+    audioForm->addRow(QString(), testDevice);
     audioForm->addRow(QStringLiteral("Frame size"), frameSizeSpin_);
     audioForm->addRow(QStringLiteral("Audio quality"), networkAudioFormatBox_);
     audioForm->addRow(QStringLiteral("Playback prefill frames"), prefillSpin_);
@@ -1708,6 +1838,7 @@ void MainWindow::showStartJamDialog()
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, &dialog);
     auto* start = buttons->addButton(QStringLiteral("Start"), QDialogButtonBox::AcceptRole);
+    auto* saveDefaults = buttons->addButton(QStringLiteral("Save Defaults"), QDialogButtonBox::ActionRole);
     auto* refresh = buttons->addButton(QStringLiteral("Refresh Devices"), QDialogButtonBox::ActionRole);
     auto* regen = buttons->addButton(QStringLiteral("New Session"), QDialogButtonBox::ActionRole);
     QObject::connect(refresh, &QPushButton::clicked, this, [this] {
@@ -1716,6 +1847,20 @@ void MainWindow::showStartJamDialog()
     QObject::connect(regen, &QPushButton::clicked, this, [this] {
         generateSession();
     });
+    QObject::connect(testDevice, &QPushButton::clicked, this, [this, testDevice, &dialog] {
+        testDeviceSelection(deviceBox_, testDevice, &dialog);
+    });
+    QObject::connect(profileBox_, qOverload<int>(&QComboBox::currentIndexChanged), &dialog,
+        [this, sampleRate, bufferSize] {
+            sampleRate->setCurrentIndex(qMax(0, sampleRate->findData(sampleRateSpin_->value())));
+            bufferSize->setCurrentIndex(qMax(0, bufferSize->findData(bufferSizeSpin_->value())));
+        });
+    QObject::connect(saveDefaults, &QPushButton::clicked, &dialog,
+        [this, sampleRate, bufferSize] {
+            sampleRateSpin_->setValue(sampleRate->currentData().toInt());
+            bufferSizeSpin_->setValue(bufferSize->currentData().toInt());
+            saveCreateDefaults();
+        });
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     QObject::connect(noStunCheck_, &QCheckBox::toggled, &dialog, [this] {
@@ -1732,7 +1877,7 @@ void MainWindow::showStartJamDialog()
         bindHostEdit_, portSpin_, publicHostEdit_,
 
         stunServerEdit_, stunTimeoutSpin_, stunRetriesSpin_, noStunCheck_, profileBox_, deviceBox_,
-        inputChannelsEdit_, outputChannelsEdit_, sampleRateSpin_, bufferSizeSpin_, frameSizeSpin_, networkAudioFormatBox_,
+        inputChannelsEdit_, outputChannelsEdit_, frameSizeSpin_, networkAudioFormatBox_,
         prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_,
         streamMsSpin_, streamLingerMsSpin_, statsCheck_, meshMaxPeersSpin_,
         statsWarmupMsSpin_, logStatsEdit_, socketSendBufferSpin_,
@@ -1746,6 +1891,8 @@ void MainWindow::showStartJamDialog()
         widget->hide();
     }
     if (result == QDialog::Accepted) {
+        sampleRateSpin_->setValue(sampleRate->currentData().toInt());
+        bufferSizeSpin_->setValue(bufferSize->currentData().toInt());
         connectionLabel_->setText(QStringLiteral("Starting listener"));
         startJam(true);
     }
@@ -1759,6 +1906,10 @@ void MainWindow::showJoinJamDialog()
         return;
     }
 
+    applyJoinDefaultsToControls();
+    refreshDevices();
+    selectPreferredDevice(deviceBox_, availableDevices_, preferences_.networkAudio);
+
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Join Jam"));
     dialog.resize(680, 520);
@@ -1767,7 +1918,12 @@ void MainWindow::showJoinJamDialog()
     auto* layout = new QVBoxLayout(content);
     const QList<QWidget*> visibleWidgets{
         connectUrlEdit_, bindHostEdit_, portSpin_, deviceBox_, inputChannelsEdit_, outputChannelsEdit_,
-        statsCheck_, statsWarmupMsSpin_, logStatsEdit_, osPriorityBox_,
+        prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_, streamMsSpin_,
+        streamLingerMsSpin_, statsCheck_, statsWarmupMsSpin_, logStatsEdit_, osPriorityBox_,
+        driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_, driftMaxCorrectionSpin_,
+        sampleTimePlayoutCheck_, playoutDelaySpin_, jitterBufferSpin_, jitterBufferMaxSpin_,
+        adaptiveCushionCheck_, adaptiveTargetSpin_, adaptiveMinSpin_, adaptiveMaxSpin_,
+        adaptiveReleaseSpin_, adaptiveRatioRampSpin_,
     };
     for (QWidget* widget : visibleWidgets) {
         widget->show();
@@ -1784,9 +1940,27 @@ void MainWindow::showJoinJamDialog()
 
     auto* audioForm = new QFormLayout();
     audioForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    auto* joinProfile = new QComboBox(content);
+    for (const jam2::JoinProfile& profile : jam2::join_profiles()) {
+        joinProfile->addItem(
+            QString::fromUtf8(profile.label.data(), static_cast<qsizetype>(profile.label.size())),
+            QString::fromUtf8(profile.name.data(), static_cast<qsizetype>(profile.name.size())));
+    }
+    joinProfile->setCurrentIndex(qMax(0, joinProfile->findData(joinProfileName_)));
+    auto* bufferSize = fixedBufferSizeCombo(content, bufferSizeSpin_->value());
+    auto* testDevice = new QPushButton(QStringLiteral("Test Device"), content);
+    audioForm->addRow(QStringLiteral("Join profile"), joinProfile);
     audioForm->addRow(QStringLiteral("Audio device"), deviceBox_);
     audioForm->addRow(QStringLiteral("Input channels"), inputChannelsEdit_);
     audioForm->addRow(QStringLiteral("Output channels"), outputChannelsEdit_);
+    audioForm->addRow(QStringLiteral("Audio buffer size"), bufferSize);
+    audioForm->addRow(QString(), new QLabel(
+        QStringLiteral("The creator supplies the session sample rate and frame size."), content));
+    audioForm->addRow(QString(), testDevice);
+    audioForm->addRow(QStringLiteral("Playback prefill frames"), prefillSpin_);
+    audioForm->addRow(QStringLiteral("Playback max frames"), playbackMaxSpin_);
+    audioForm->addRow(QStringLiteral("Capture ring frames"), captureRingSpin_);
+    audioForm->addRow(QStringLiteral("Playback ring frames"), playbackRingSpin_);
     auto* audioBox = new QGroupBox(QStringLiteral("Local Audio"), content);
     audioBox->setLayout(audioForm);
     layout->addWidget(audioBox);
@@ -1797,9 +1971,32 @@ void MainWindow::showJoinJamDialog()
     statsForm->addRow(QStringLiteral("Stats warmup ms"), statsWarmupMsSpin_);
     statsForm->addRow(QStringLiteral("Log stats folder"), logStatsEdit_);
     statsForm->addRow(QStringLiteral("OS priority"), osPriorityBox_);
+    statsForm->addRow(QStringLiteral("Wait ms"), waitMsSpin_);
+    statsForm->addRow(QStringLiteral("Stream ms"), streamMsSpin_);
+    statsForm->addRow(QStringLiteral("Stream linger ms"), streamLingerMsSpin_);
     auto* statsBox = new QGroupBox(QStringLiteral("Local Stats"), content);
     statsBox->setLayout(statsForm);
     layout->addWidget(statsBox);
+
+    auto* tuningForm = new QFormLayout();
+    tuningForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    tuningForm->addRow(QString(), driftCorrectionCheck_);
+    tuningForm->addRow(QStringLiteral("Drift smoothing"), driftSmoothingSpin_);
+    tuningForm->addRow(QStringLiteral("Drift deadband ppm"), driftDeadbandSpin_);
+    tuningForm->addRow(QStringLiteral("Drift max correction ppm"), driftMaxCorrectionSpin_);
+    tuningForm->addRow(QString(), sampleTimePlayoutCheck_);
+    tuningForm->addRow(QStringLiteral("Playout delay frames"), playoutDelaySpin_);
+    tuningForm->addRow(QStringLiteral("Jitter buffer frames"), jitterBufferSpin_);
+    tuningForm->addRow(QStringLiteral("Jitter buffer max frames"), jitterBufferMaxSpin_);
+    tuningForm->addRow(QString(), adaptiveCushionCheck_);
+    tuningForm->addRow(QStringLiteral("Adaptive target frames"), adaptiveTargetSpin_);
+    tuningForm->addRow(QStringLiteral("Adaptive min frames"), adaptiveMinSpin_);
+    tuningForm->addRow(QStringLiteral("Adaptive max frames"), adaptiveMaxSpin_);
+    tuningForm->addRow(QStringLiteral("Adaptive release ppm"), adaptiveReleaseSpin_);
+    tuningForm->addRow(QStringLiteral("Adaptive ratio ramp ms"), adaptiveRatioRampSpin_);
+    auto* tuningBox = new QGroupBox(QStringLiteral("Local Engine Options"), content);
+    tuningBox->setLayout(tuningForm);
+    layout->addWidget(tuningBox);
 
     auto* scroll = new QScrollArea(&dialog);
     scroll->setWidgetResizable(true);
@@ -1807,10 +2004,25 @@ void MainWindow::showJoinJamDialog()
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, &dialog);
     auto* join = buttons->addButton(QStringLiteral("Join"), QDialogButtonBox::AcceptRole);
+    auto* saveDefaults = buttons->addButton(QStringLiteral("Save Defaults"), QDialogButtonBox::ActionRole);
     auto* refresh = buttons->addButton(QStringLiteral("Refresh Devices"), QDialogButtonBox::ActionRole);
     QObject::connect(refresh, &QPushButton::clicked, this, [this] {
         refreshDevices();
     });
+    QObject::connect(testDevice, &QPushButton::clicked, this, [this, testDevice, &dialog] {
+        testDeviceSelection(deviceBox_, testDevice, &dialog);
+    });
+    QObject::connect(joinProfile, qOverload<int>(&QComboBox::currentIndexChanged), &dialog,
+        [this, joinProfile, bufferSize] {
+            applyJoinProfileName(joinProfile->currentData().toString());
+            bufferSize->setCurrentIndex(qMax(0, bufferSize->findData(bufferSizeSpin_->value())));
+        });
+    QObject::connect(saveDefaults, &QPushButton::clicked, &dialog,
+        [this, joinProfile, bufferSize] {
+            joinProfileName_ = joinProfile->currentData().toString();
+            bufferSizeSpin_->setValue(bufferSize->currentData().toInt());
+            saveJoinDefaults();
+        });
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 
@@ -1822,22 +2034,570 @@ void MainWindow::showJoinJamDialog()
     const int result = dialog.exec();
     const QList<QWidget*> joinWidgets{
         connectUrlEdit_, bindHostEdit_, portSpin_, deviceBox_, inputChannelsEdit_, outputChannelsEdit_,
-        statsCheck_, statsWarmupMsSpin_, logStatsEdit_, osPriorityBox_,
+        prefillSpin_, playbackMaxSpin_, captureRingSpin_, playbackRingSpin_, waitMsSpin_, streamMsSpin_,
+        streamLingerMsSpin_, statsCheck_, statsWarmupMsSpin_, logStatsEdit_, osPriorityBox_,
+        driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_, driftMaxCorrectionSpin_,
+        sampleTimePlayoutCheck_, playoutDelaySpin_, jitterBufferSpin_, jitterBufferMaxSpin_,
+        adaptiveCushionCheck_, adaptiveTargetSpin_, adaptiveMinSpin_, adaptiveMaxSpin_,
+        adaptiveReleaseSpin_, adaptiveRatioRampSpin_,
     };
     for (QWidget* widget : joinWidgets) {
         widget->setParent(this);
         widget->hide();
     }
     if (result == QDialog::Accepted) {
+        joinProfileName_ = joinProfile->currentData().toString();
+        bufferSizeSpin_->setValue(bufferSize->currentData().toInt());
         connectionLabel_->setText(QStringLiteral("Joining"));
         startJam(false);
     }
+}
+
+void MainWindow::showSettingsDialog()
+{
+    refreshDevices();
+    refreshLoopbackSources();
+    const bool networkActive = jam2_.isNetworkRunning() ||
+        sessionController_.snapshot().role == SharedSessionController::Role::Creator ||
+        sessionController_.snapshot().role == SharedSessionController::Role::Joiner;
+    const bool localActive = jam2_.isRunning() && !networkActive;
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Settings"));
+    dialog.resize(860, 700);
+
+    auto makeSpin = [&dialog](int value, int minimum, int maximum) {
+        auto* spin = new QSpinBox(&dialog);
+        spin->setRange(minimum, maximum);
+        spin->setValue(value);
+        return spin;
+    };
+    auto makeDoubleSpin = [&dialog](double value, double minimum, double maximum, int decimals) {
+        auto* spin = new QDoubleSpinBox(&dialog);
+        spin->setRange(minimum, maximum);
+        spin->setDecimals(decimals);
+        spin->setValue(value);
+        return spin;
+    };
+    auto makePriority = [&dialog](const QString& value) {
+        auto* combo = new QComboBox(&dialog);
+        combo->addItem(QStringLiteral("Realtime"), QStringLiteral("realtime"));
+        combo->addItem(QStringLiteral("High"), QStringLiteral("high"));
+        combo->addItem(QStringLiteral("Off"), QStringLiteral("off"));
+        combo->setCurrentIndex(qMax(0, combo->findData(value)));
+        return combo;
+    };
+    auto makeScrollTab = [&dialog](QWidget* content) {
+        auto* scroll = new QScrollArea(&dialog);
+        scroll->setWidgetResizable(true);
+        scroll->setWidget(content);
+        return scroll;
+    };
+
+    auto makeDeviceCombo = [this, &dialog](const AudioDevicePreference& preference) {
+        auto* combo = new QComboBox(&dialog);
+        for (int index = 0; deviceBox_ && index < deviceBox_->count(); ++index) {
+            combo->addItem(deviceBox_->itemText(index), deviceBox_->itemData(index));
+        }
+        selectPreferredDevice(combo, availableDevices_, preference);
+        if (combo->currentIndex() < 0 && combo->count() > 0) combo->setCurrentIndex(0);
+        return combo;
+    };
+
+    AudioDevicePreference localInitial = preferences_.localAudio;
+    if (localActive) {
+        localInitial.sampleRate = sampleRateSpin_->value();
+        localInitial.bufferSize = bufferSizeSpin_->value();
+        localInitial.inputChannels = inputChannelsEdit_->text();
+        localInitial.outputChannels = outputChannelsEdit_->text();
+        storeSelectedDevice(localInitial, deviceBox_, availableDevices_);
+    }
+
+    auto* localDevice = makeDeviceCombo(localInitial);
+    auto* localSampleRate = fixedSampleRateCombo(&dialog, localInitial.sampleRate);
+    auto* localBufferSize = fixedBufferSizeCombo(&dialog, localInitial.bufferSize);
+    auto* localInput = new QLineEdit(localInitial.inputChannels, &dialog);
+    auto* localOutput = new QLineEdit(localInitial.outputChannels, &dialog);
+    auto* localTest = new QPushButton(QStringLiteral("Test Device"), &dialog);
+    auto* localForm = new QFormLayout();
+    localForm->addRow(QStringLiteral("Device"), localDevice);
+    localForm->addRow(QStringLiteral("Sample rate"), localSampleRate);
+    localForm->addRow(QStringLiteral("Buffer size"), localBufferSize);
+    localForm->addRow(QStringLiteral("Input channels"), localInput);
+    localForm->addRow(QStringLiteral("Output channels"), localOutput);
+    localForm->addRow(QString(), localTest);
+    auto* localBox = new QGroupBox(QStringLiteral("Local Audio"), &dialog);
+    localBox->setLayout(localForm);
+
+    auto* networkDevice = makeDeviceCombo(preferences_.networkAudio);
+    auto* networkInput = new QLineEdit(preferences_.networkAudio.inputChannels, &dialog);
+    auto* networkOutput = new QLineEdit(preferences_.networkAudio.outputChannels, &dialog);
+    auto* networkTest = new QPushButton(QStringLiteral("Test Device"), &dialog);
+    auto* networkForm = new QFormLayout();
+    networkForm->addRow(QStringLiteral("Device"), networkDevice);
+    networkForm->addRow(QStringLiteral("Input channels"), networkInput);
+    networkForm->addRow(QStringLiteral("Output channels"), networkOutput);
+    networkForm->addRow(QString(), networkTest);
+    auto* networkBox = new QGroupBox(QStringLiteral("Network Audio"), &dialog);
+    networkBox->setLayout(networkForm);
+
+    auto* audioContent = new QWidget(&dialog);
+    auto* audioLayout = new QVBoxLayout(audioContent);
+    audioLayout->addWidget(localBox);
+    audioLayout->addWidget(networkBox);
+    audioLayout->addStretch(1);
+
+    auto* createBind = new QLineEdit(preferences_.create.bindHost, &dialog);
+    auto* createPort = makeSpin(preferences_.create.port, 1, 65535);
+    auto* createManualEndpoint = new QCheckBox(QStringLiteral("Use manual public endpoint (disable STUN)"), &dialog);
+    createManualEndpoint->setChecked(preferences_.create.noStun);
+    auto* createPublicHost = new QLineEdit(preferences_.create.publicHost, &dialog);
+    auto* createStun = new QLineEdit(preferences_.create.stunServer, &dialog);
+    auto* createStunTimeout = makeSpin(preferences_.create.stunTimeoutMs, 1, 60000);
+    auto* createStunRetries = makeSpin(preferences_.create.stunRetries, 0, 100);
+    auto* createMaxPeers = makeSpin(preferences_.create.maxPeers, 0, 1024);
+    auto* createSocketSend = makeSpin(preferences_.create.socketSendBuffer, 0, 16777216);
+    auto* createSocketReceive = makeSpin(preferences_.create.socketRecvBuffer, 0, 16777216);
+    auto* connectionContent = new QWidget(&dialog);
+    auto* connectionForm = new QFormLayout(connectionContent);
+    connectionForm->addRow(QStringLiteral("Bind host"), createBind);
+    connectionForm->addRow(QStringLiteral("Port"), createPort);
+    connectionForm->addRow(QString(), createManualEndpoint);
+    connectionForm->addRow(QStringLiteral("Public endpoint host"), createPublicHost);
+    connectionForm->addRow(QStringLiteral("STUN server"), createStun);
+    connectionForm->addRow(QStringLiteral("STUN timeout ms"), createStunTimeout);
+    connectionForm->addRow(QStringLiteral("STUN retries"), createStunRetries);
+    connectionForm->addRow(QStringLiteral("Maximum peers (0 = unlimited)"), createMaxPeers);
+    connectionForm->addRow(QStringLiteral("Socket send buffer (0 = system)"), createSocketSend);
+    connectionForm->addRow(QStringLiteral("Socket receive buffer (0 = system)"), createSocketReceive);
+    auto updateDiscoveryControls = [=] {
+        const bool manual = createManualEndpoint->isChecked();
+        createPublicHost->setEnabled(manual);
+        createStun->setEnabled(!manual);
+        createStunTimeout->setEnabled(!manual);
+        createStunRetries->setEnabled(!manual);
+    };
+    QObject::connect(createManualEndpoint, &QCheckBox::toggled, &dialog, updateDiscoveryControls);
+    updateDiscoveryControls();
+
+    struct TuningEditors {
+        QComboBox* profile = nullptr;
+        QComboBox* buffer = nullptr;
+        QSpinBox* frame = nullptr;
+        QSpinBox* prefill = nullptr;
+        QSpinBox* playbackMax = nullptr;
+        QSpinBox* captureRing = nullptr;
+        QSpinBox* playbackRing = nullptr;
+        QCheckBox* drift = nullptr;
+        QDoubleSpinBox* driftSmoothing = nullptr;
+        QSpinBox* driftDeadband = nullptr;
+        QSpinBox* driftMax = nullptr;
+        QCheckBox* sampleTime = nullptr;
+        QSpinBox* playout = nullptr;
+        QSpinBox* jitter = nullptr;
+        QSpinBox* jitterMax = nullptr;
+        QCheckBox* adaptive = nullptr;
+        QSpinBox* adaptiveTarget = nullptr;
+        QSpinBox* adaptiveMin = nullptr;
+        QSpinBox* adaptiveMax = nullptr;
+        QSpinBox* adaptiveRelease = nullptr;
+        QSpinBox* adaptiveRamp = nullptr;
+    };
+    struct RuntimeEditors {
+        QCheckBox* diagnostics = nullptr;
+        QSpinBox* warmup = nullptr;
+        QComboBox* priority = nullptr;
+        QSpinBox* wait = nullptr;
+        QSpinBox* stream = nullptr;
+        QSpinBox* linger = nullptr;
+    };
+    auto addTuning = [&](QFormLayout* form, const LocalTuningPreference& p, bool creator) {
+        TuningEditors e;
+        e.profile = new QComboBox(&dialog);
+        if (creator) {
+            for (const jam2::CreateProfile& profile : jam2::create_profiles()) {
+                e.profile->addItem(
+                    QString::fromUtf8(profile.label.data(), static_cast<qsizetype>(profile.label.size())),
+                    QString::fromUtf8(profile.name.data(), static_cast<qsizetype>(profile.name.size())));
+            }
+        } else {
+            for (const jam2::JoinProfile& profile : jam2::join_profiles()) {
+                e.profile->addItem(
+                    QString::fromUtf8(profile.label.data(), static_cast<qsizetype>(profile.label.size())),
+                    QString::fromUtf8(profile.name.data(), static_cast<qsizetype>(profile.name.size())));
+            }
+        }
+        e.profile->setCurrentIndex(qMax(0, e.profile->findData(p.profile)));
+        e.buffer = fixedBufferSizeCombo(&dialog, p.bufferSize);
+        e.frame = makeSpin(p.frameSize, 32, 256);
+        e.prefill = makeSpin(p.prefillFrames, 0, 1048576);
+        e.playbackMax = makeSpin(p.playbackMaxFrames, 0, 1048576);
+        e.captureRing = makeSpin(p.captureRingFrames, 1, 1048576);
+        e.playbackRing = makeSpin(p.playbackRingFrames, 1, 1048576);
+        e.drift = new QCheckBox(QStringLiteral("Drift correction"), &dialog); e.drift->setChecked(p.driftCorrection);
+        e.driftSmoothing = makeDoubleSpin(p.driftSmoothing, 0.0, 1.0, 3); e.driftSmoothing->setSingleStep(0.005);
+        e.driftDeadband = makeSpin(p.driftDeadbandPpm, 0, 50000);
+        e.driftMax = makeSpin(p.driftMaxCorrectionPpm, 0, 50000);
+        e.sampleTime = new QCheckBox(QStringLiteral("Sample-time playout"), &dialog); e.sampleTime->setChecked(p.sampleTimePlayout);
+        e.playout = makeSpin(p.playoutDelayFrames, 0, 1048576);
+        e.jitter = makeSpin(p.jitterBufferFrames, 0, 1048576);
+        e.jitterMax = makeSpin(p.jitterBufferMaxFrames, 0, 1048576);
+        e.adaptive = new QCheckBox(QStringLiteral("Adaptive playback cushion"), &dialog); e.adaptive->setChecked(p.adaptiveCushion);
+        e.adaptiveTarget = makeSpin(p.adaptiveTargetFrames, 0, 1048576);
+        e.adaptiveMin = makeSpin(p.adaptiveMinFrames, 0, 1048576);
+        e.adaptiveMax = makeSpin(p.adaptiveMaxFrames, 0, 1048576);
+        e.adaptiveRelease = makeSpin(p.adaptiveReleasePpm, 0, 1000000);
+        e.adaptiveRamp = makeSpin(p.adaptiveRatioRampMs, 0, 60000);
+        form->addRow(QStringLiteral("Profile"), e.profile);
+        form->addRow(QStringLiteral("Local device buffer"), e.buffer);
+        if (creator) form->addRow(QStringLiteral("Session frame size"), e.frame);
+        form->addRow(QStringLiteral("Playback prefill frames"), e.prefill);
+        form->addRow(QStringLiteral("Playback max frames"), e.playbackMax);
+        form->addRow(QStringLiteral("Capture ring frames"), e.captureRing);
+        form->addRow(QStringLiteral("Playback ring frames"), e.playbackRing);
+        form->addRow(QString(), e.drift);
+        form->addRow(QStringLiteral("Drift smoothing"), e.driftSmoothing);
+        form->addRow(QStringLiteral("Drift deadband ppm"), e.driftDeadband);
+        form->addRow(QStringLiteral("Drift max correction ppm"), e.driftMax);
+        form->addRow(QString(), e.sampleTime);
+        form->addRow(QStringLiteral("Playout delay frames"), e.playout);
+        form->addRow(QStringLiteral("Jitter target frames"), e.jitter);
+        form->addRow(QStringLiteral("Jitter max frames"), e.jitterMax);
+        form->addRow(QString(), e.adaptive);
+        form->addRow(QStringLiteral("Adaptive target frames"), e.adaptiveTarget);
+        form->addRow(QStringLiteral("Adaptive minimum frames"), e.adaptiveMin);
+        form->addRow(QStringLiteral("Adaptive maximum frames"), e.adaptiveMax);
+        form->addRow(QStringLiteral("Adaptive release ppm"), e.adaptiveRelease);
+        form->addRow(QStringLiteral("Adaptive ratio ramp ms"), e.adaptiveRamp);
+        return e;
+    };
+    auto addRuntime = [&](QFormLayout* form, const RuntimePreference& p) {
+        RuntimeEditors e;
+        e.diagnostics = new QCheckBox(QStringLiteral("Connection diagnostics and CSV logging"), &dialog);
+        e.diagnostics->setChecked(p.diagnostics);
+        e.warmup = makeSpin(p.diagnosticsWarmupMs, 0, 3600000);
+        e.priority = makePriority(p.osPriority);
+        e.wait = makeSpin(p.waitMs, 0, 86400000);
+        e.stream = makeSpin(p.streamMs, 0, 86400000);
+        e.linger = makeSpin(p.streamLingerMs, 0, 3600000);
+        form->addRow(QString(), e.diagnostics);
+        form->addRow(QStringLiteral("Stats warmup ms"), e.warmup);
+        form->addRow(QStringLiteral("OS priority"), e.priority);
+        form->addRow(QStringLiteral("Wait ms"), e.wait);
+        form->addRow(QStringLiteral("Stream limit ms (0 = unlimited)"), e.stream);
+        form->addRow(QStringLiteral("Stream linger ms"), e.linger);
+        return e;
+    };
+
+    auto* createContent = new QWidget(&dialog);
+    auto* createForm = new QFormLayout(createContent);
+    auto* createRate = fixedSampleRateCombo(&dialog, preferences_.create.sampleRate);
+    auto* createQuality = new QComboBox(&dialog);
+    createQuality->addItem(QStringLiteral("16-bit PCM"), QStringLiteral("pcm16-mono"));
+    createQuality->addItem(QStringLiteral("24-bit PCM"), QStringLiteral("pcm24-mono"));
+    createQuality->setCurrentIndex(qMax(0, createQuality->findData(preferences_.create.audioFormat)));
+    createForm->addRow(QStringLiteral("Session sample rate"), createRate);
+    createForm->addRow(QStringLiteral("Audio quality"), createQuality);
+    TuningEditors createTuning = addTuning(createForm, preferences_.create.tuning, true);
+    RuntimeEditors createRuntime = addRuntime(createForm, preferences_.create.runtime);
+
+    auto* joinContent = new QWidget(&dialog);
+    auto* joinForm = new QFormLayout(joinContent);
+    auto* joinBind = new QLineEdit(preferences_.join.bindHost, &dialog);
+    auto* joinPort = makeSpin(preferences_.join.port, 1, 65535);
+    joinForm->addRow(QStringLiteral("Local bind host"), joinBind);
+    joinForm->addRow(QStringLiteral("Local bind port"), joinPort);
+    auto* joinContractNotice = new QLabel(
+        QStringLiteral("The creator supplies sample rate, frame size, and audio quality."), &dialog);
+    joinContractNotice->setWordWrap(true);
+    joinForm->addRow(QString(), joinContractNotice);
+    TuningEditors joinTuning = addTuning(joinForm, preferences_.join.tuning, false);
+    RuntimeEditors joinRuntime = addRuntime(joinForm, preferences_.join.runtime);
+
+    auto applyJoinProfile = [](TuningEditors& e, const jam2::JoinProfile& p) {
+        e.buffer->setCurrentIndex(qMax(0, e.buffer->findData(static_cast<int>(p.audio_buffer_size))));
+        e.prefill->setValue(static_cast<int>(p.playback_prefill_frames));
+        e.playbackMax->setValue(static_cast<int>(p.playback_max_frames));
+        e.captureRing->setValue(static_cast<int>(p.capture_ring_frames));
+        e.playbackRing->setValue(static_cast<int>(p.playback_ring_frames));
+        e.drift->setChecked(p.drift_correction); e.driftSmoothing->setValue(p.drift_smoothing);
+        e.driftDeadband->setValue(p.drift_deadband_ppm); e.driftMax->setValue(p.drift_max_correction_ppm);
+        e.sampleTime->setChecked(p.sample_time_playout); e.playout->setValue(static_cast<int>(p.playout_delay_frames));
+        e.jitter->setValue(static_cast<int>(p.jitter_buffer_frames)); e.jitterMax->setValue(static_cast<int>(p.jitter_buffer_max_frames));
+        e.adaptive->setChecked(p.adaptive_playback_cushion);
+        e.adaptiveTarget->setValue(static_cast<int>(p.adaptive_playback_target_frames));
+        e.adaptiveMin->setValue(static_cast<int>(p.adaptive_playback_min_frames));
+        e.adaptiveMax->setValue(static_cast<int>(p.adaptive_playback_max_frames));
+        e.adaptiveRelease->setValue(p.adaptive_playback_release_ppm);
+        e.adaptiveRamp->setValue(p.adaptive_playback_ratio_ramp_ms);
+    };
+    QObject::connect(createTuning.profile, qOverload<int>(&QComboBox::activated), &dialog,
+        [=, &createTuning](int) {
+            const auto* p = jam2::find_create_profile(createTuning.profile->currentData().toString().toStdString());
+            if (!p || !p->local) return;
+            createRate->setCurrentIndex(qMax(0, createRate->findData(p->sample_rate)));
+            createTuning.frame->setValue(p->frame_size);
+            applyJoinProfile(createTuning, *p->local);
+        });
+    QObject::connect(joinTuning.profile, qOverload<int>(&QComboBox::activated), &dialog,
+        [=, &joinTuning](int) {
+            const auto* p = jam2::find_join_profile(joinTuning.profile->currentData().toString().toStdString());
+            if (p) applyJoinProfile(joinTuning, *p);
+        });
+
+    auto* logContent = new QWidget(&dialog);
+    auto* logForm = new QFormLayout(logContent);
+    auto* logFolder = new QLineEdit(preferences_.logging.folder, &dialog);
+    auto* browseLogs = new QPushButton(QStringLiteral("Browse"), &dialog);
+    auto* logRow = new QWidget(&dialog); auto* logRowLayout = new QHBoxLayout(logRow);
+    logRowLayout->setContentsMargins(0, 0, 0, 0); logRowLayout->addWidget(logFolder, 1); logRowLayout->addWidget(browseLogs);
+    logForm->addRow(QStringLiteral("GUI and CSV log folder"), logRow);
+    auto* logNote = new QLabel(
+        QStringLiteral("GUI jams write hidden 2-second CSV samples plus a final row. The GUI display remains compact and stdout remains quiet."),
+        &dialog);
+    logNote->setWordWrap(true); logForm->addRow(QString(), logNote);
+    QObject::connect(browseLogs, &QPushButton::clicked, &dialog, [&dialog, logFolder] {
+        const QString folder = QFileDialog::getExistingDirectory(&dialog, QStringLiteral("Log Folder"), logFolder->text());
+        if (!folder.isEmpty()) logFolder->setText(QDir::toNativeSeparators(folder));
+    });
+
+    auto* recordingContent = new QWidget(&dialog);
+    auto* recordingLayout = new QVBoxLayout(recordingContent);
+    auto* preferredMode = new QComboBox(&dialog);
+    preferredMode->addItem(QStringLiteral("Input"), QStringLiteral("input"));
+    preferredMode->addItem(QStringLiteral("Loopback"), QStringLiteral("loopback"));
+    preferredMode->setCurrentIndex(qMax(0, preferredMode->findData(preferences_.recording.preferredMode)));
+    auto* preferredForm = new QFormLayout(); preferredForm->addRow(QStringLiteral("Preferred recording mode"), preferredMode);
+    recordingLayout->addLayout(preferredForm);
+
+    auto makeFolderRow = [&](const QString& value) {
+        auto* edit = new QLineEdit(value, &dialog);
+        auto* browse = new QPushButton(QStringLiteral("Browse"), &dialog);
+        auto* row = new QWidget(&dialog); auto* layout = new QHBoxLayout(row);
+        layout->setContentsMargins(0, 0, 0, 0); layout->addWidget(edit, 1); layout->addWidget(browse);
+        QObject::connect(browse, &QPushButton::clicked, &dialog, [&dialog, edit] {
+            const QString folder = QFileDialog::getExistingDirectory(&dialog, QStringLiteral("Recording Folder"), edit->text());
+            if (!folder.isEmpty()) edit->setText(QDir::toNativeSeparators(folder));
+        });
+        return std::pair<QLineEdit*, QWidget*>{edit, row};
+    };
+    const auto inputFolderRow = makeFolderRow(preferences_.recording.input.outputFolder);
+    auto* inputUntilStopped = new QCheckBox(QStringLiteral("Record until stopped"), &dialog);
+    inputUntilStopped->setChecked(preferences_.recording.input.recordUntilStopped);
+    auto* inputDuration = makeSpin(preferences_.recording.input.durationSeconds, 1, 600);
+    auto* inputCountIn = new QCheckBox(QStringLiteral("Count-in"), &dialog); inputCountIn->setChecked(preferences_.recording.input.countIn);
+    auto* inputCountBars = makeSpin(preferences_.recording.input.countInBars, 1, 8);
+    auto* inputCountMetro = new QCheckBox(QStringLiteral("Metronome during count-in"), &dialog); inputCountMetro->setChecked(preferences_.recording.input.countInMetronome);
+    auto* inputKeepMetro = new QCheckBox(QStringLiteral("Keep metronome on while recording"), &dialog); inputKeepMetro->setChecked(preferences_.recording.input.keepMetronome);
+    auto* inputLatency = makeSpin(preferences_.recording.input.latencyAdjustmentFrames, -8192, 8192);
+    auto* inputForm = new QFormLayout();
+    inputForm->addRow(QStringLiteral("Output folder"), inputFolderRow.second);
+    inputForm->addRow(QString(), inputUntilStopped); inputForm->addRow(QStringLiteral("Duration seconds"), inputDuration);
+    inputForm->addRow(QString(), inputCountIn); inputForm->addRow(QStringLiteral("Count-in bars"), inputCountBars);
+    inputForm->addRow(QString(), inputCountMetro); inputForm->addRow(QString(), inputKeepMetro);
+    inputForm->addRow(QStringLiteral("Manual latency adjustment frames"), inputLatency);
+    auto* inputBox = new QGroupBox(QStringLiteral("Input Recording"), &dialog); inputBox->setLayout(inputForm);
+    recordingLayout->addWidget(inputBox);
+    inputDuration->setEnabled(!inputUntilStopped->isChecked());
+    QObject::connect(inputUntilStopped, &QCheckBox::toggled, inputDuration, [=](bool checked) { inputDuration->setEnabled(!checked); });
+
+    const auto loopFolderRow = makeFolderRow(preferences_.recording.loopback.outputFolder);
+    auto* loopSource = new QComboBox(&dialog); loopSource->setEditable(true);
+    auto populateLoopSources = [=, this] {
+        const QString wanted = loopSource->currentData().toString().isEmpty()
+            ? preferences_.recording.loopback.sourceId : loopSource->currentData().toString();
+        loopSource->clear();
+        for (int i = 0; loopbackSourceBox_ && i < loopbackSourceBox_->count(); ++i) {
+            loopSource->addItem(loopbackSourceBox_->itemText(i), loopbackSourceBox_->itemData(i));
+        }
+        int index = loopSource->findData(wanted);
+        if (index < 0) index = loopSource->findText(preferences_.recording.loopback.sourceName);
+        if (index < 0) index = loopSource->findData(QStringLiteral("default"));
+        loopSource->setCurrentIndex(qMax(0, index));
+    };
+    populateLoopSources();
+    auto* refreshLoopSources = new QPushButton(QStringLiteral("Refresh Sources"), &dialog);
+    auto* loopSourceRow = new QWidget(&dialog); auto* loopSourceLayout = new QHBoxLayout(loopSourceRow);
+    loopSourceLayout->setContentsMargins(0, 0, 0, 0); loopSourceLayout->addWidget(loopSource, 1); loopSourceLayout->addWidget(refreshLoopSources);
+    QObject::connect(refreshLoopSources, &QPushButton::clicked, &dialog, [=, this] { refreshLoopbackSources(); populateLoopSources(); });
+    auto* loopUntilStopped = new QCheckBox(QStringLiteral("Record until stopped"), &dialog); loopUntilStopped->setChecked(preferences_.recording.loopback.recordUntilStopped);
+    auto* loopDuration = makeSpin(preferences_.recording.loopback.durationSeconds, 1, 600);
+    auto* loopTrigger = new QCheckBox(QStringLiteral("Trigger on signal"), &dialog); loopTrigger->setChecked(preferences_.recording.loopback.trigger);
+    auto* loopTriggerThreshold = makeDoubleSpin(preferences_.recording.loopback.triggerThresholdDb, -120.0, 0.0, 1);
+    auto* loopTriggerHold = makeSpin(preferences_.recording.loopback.triggerHoldMs, 1, 5000);
+    auto* loopPreRoll = makeSpin(preferences_.recording.loopback.preRollMs, 0, 10000);
+    auto* loopTailThreshold = makeDoubleSpin(preferences_.recording.loopback.tailThresholdDb, -120.0, 0.0, 1);
+    auto* loopTailSilence = makeSpin(preferences_.recording.loopback.tailSilenceMs, 0, 30000);
+    auto* loopTrimLeading = new QCheckBox(QStringLiteral("Trim leading silence"), &dialog); loopTrimLeading->setChecked(preferences_.recording.loopback.trimLeading);
+    auto* loopTrimTrailing = new QCheckBox(QStringLiteral("Trim trailing silence"), &dialog); loopTrimTrailing->setChecked(preferences_.recording.loopback.trimTrailing);
+    auto* loopForm = new QFormLayout();
+    loopForm->addRow(QStringLiteral("Output folder"), loopFolderRow.second); loopForm->addRow(QStringLiteral("Loopback source"), loopSourceRow);
+    loopForm->addRow(QString(), loopUntilStopped); loopForm->addRow(QStringLiteral("Duration seconds"), loopDuration);
+    loopForm->addRow(QString(), loopTrigger); loopForm->addRow(QStringLiteral("Trigger threshold dB"), loopTriggerThreshold);
+    loopForm->addRow(QStringLiteral("Trigger hold ms"), loopTriggerHold); loopForm->addRow(QStringLiteral("Pre-roll ms"), loopPreRoll);
+    loopForm->addRow(QStringLiteral("Tail threshold dB"), loopTailThreshold); loopForm->addRow(QStringLiteral("Tail silence ms"), loopTailSilence);
+    loopForm->addRow(QString(), loopTrimLeading); loopForm->addRow(QString(), loopTrimTrailing);
+    auto* loopBox = new QGroupBox(QStringLiteral("Loopback Recording"), &dialog); loopBox->setLayout(loopForm);
+    recordingLayout->addWidget(loopBox); recordingLayout->addStretch(1);
+    loopDuration->setEnabled(!loopUntilStopped->isChecked());
+    QObject::connect(loopUntilStopped, &QCheckBox::toggled, loopDuration, [=](bool checked) { loopDuration->setEnabled(!checked); });
+
+    if (networkActive) {
+        localBox->setEnabled(false);
+        networkBox->setEnabled(false);
+    }
+
+    auto* notice = new QLabel(
+        networkActive
+            ? QStringLiteral("Leave the active jam before changing audio hardware settings.")
+            : QStringLiteral("Saved in %1").arg(QDir::toNativeSeparators(UserPreferencesStore::filePath())),
+        &dialog);
+    notice->setWordWrap(true);
+
+    audioLayout->addWidget(notice);
+    auto* tabs = new QTabWidget(&dialog);
+    tabs->addTab(makeScrollTab(audioContent), QStringLiteral("Audio"));
+    tabs->addTab(makeScrollTab(connectionContent), QStringLiteral("Create Connection"));
+    tabs->addTab(makeScrollTab(createContent), QStringLiteral("Create Defaults"));
+    tabs->addTab(makeScrollTab(joinContent), QStringLiteral("Join Defaults"));
+    tabs->addTab(makeScrollTab(logContent), QStringLiteral("Logs"));
+    tabs->addTab(makeScrollTab(recordingContent), QStringLiteral("Recording"));
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    QObject::connect(localTest, &QPushButton::clicked, this, [this, localDevice, localTest, &dialog] {
+        testDeviceSelection(localDevice, localTest, &dialog);
+    });
+    QObject::connect(networkTest, &QPushButton::clicked, this, [this, networkDevice, networkTest, &dialog] {
+        testDeviceSelection(networkDevice, networkTest, &dialog);
+    });
+    auto* outer = new QVBoxLayout(&dialog);
+    outer->addWidget(tabs, 1);
+    outer->addWidget(buttons);
+
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    UserPreferences updated = preferences_;
+    updated.localAudio.sampleRate = localSampleRate->currentData().toInt();
+    updated.localAudio.bufferSize = localBufferSize->currentData().toInt();
+    updated.localAudio.inputChannels = localInput->text().trimmed();
+    updated.localAudio.outputChannels = localOutput->text().trimmed();
+    storeSelectedDevice(updated.localAudio, localDevice, availableDevices_);
+    updated.networkAudio.inputChannels = networkInput->text().trimmed();
+    updated.networkAudio.outputChannels = networkOutput->text().trimmed();
+    storeSelectedDevice(updated.networkAudio, networkDevice, availableDevices_);
+    updated.create.bindHost = createBind->text().trimmed(); updated.create.port = createPort->value();
+    updated.create.noStun = createManualEndpoint->isChecked(); updated.create.publicHost = createPublicHost->text().trimmed();
+    updated.create.stunServer = createStun->text().trimmed(); updated.create.stunTimeoutMs = createStunTimeout->value();
+    updated.create.stunRetries = createStunRetries->value(); updated.create.maxPeers = createMaxPeers->value();
+    updated.create.socketSendBuffer = createSocketSend->value(); updated.create.socketRecvBuffer = createSocketReceive->value();
+    updated.create.tuning.profile = createTuning.profile->currentData().toString();
+    updated.create.sampleRate = createRate->currentData().toInt();
+    updated.create.audioFormat = createQuality->currentData().toString();
+    updated.join.bindHost = joinBind->text().trimmed(); updated.join.port = joinPort->value();
+    auto storeTuning = [](LocalTuningPreference& p, const TuningEditors& e, bool creator) {
+        p.profile = e.profile->currentData().toString(); p.bufferSize = e.buffer->currentData().toInt();
+        if (creator) p.frameSize = e.frame->value();
+        p.prefillFrames = e.prefill->value(); p.playbackMaxFrames = e.playbackMax->value();
+        p.captureRingFrames = e.captureRing->value(); p.playbackRingFrames = e.playbackRing->value();
+        p.driftCorrection = e.drift->isChecked(); p.driftSmoothing = e.driftSmoothing->value();
+        p.driftDeadbandPpm = e.driftDeadband->value(); p.driftMaxCorrectionPpm = e.driftMax->value();
+        p.sampleTimePlayout = e.sampleTime->isChecked(); p.playoutDelayFrames = e.playout->value();
+        p.jitterBufferFrames = e.jitter->value(); p.jitterBufferMaxFrames = e.jitterMax->value();
+        p.adaptiveCushion = e.adaptive->isChecked(); p.adaptiveTargetFrames = e.adaptiveTarget->value();
+        p.adaptiveMinFrames = e.adaptiveMin->value(); p.adaptiveMaxFrames = e.adaptiveMax->value();
+        p.adaptiveReleasePpm = e.adaptiveRelease->value(); p.adaptiveRatioRampMs = e.adaptiveRamp->value();
+    };
+    auto storeRuntime = [](RuntimePreference& p, const RuntimeEditors& e) {
+        p.diagnostics = e.diagnostics->isChecked(); p.diagnosticsWarmupMs = e.warmup->value();
+        p.osPriority = e.priority->currentData().toString(); p.waitMs = e.wait->value();
+        p.streamMs = e.stream->value(); p.streamLingerMs = e.linger->value();
+    };
+    storeTuning(updated.create.tuning, createTuning, true); storeRuntime(updated.create.runtime, createRuntime);
+    storeTuning(updated.join.tuning, joinTuning, false); storeRuntime(updated.join.runtime, joinRuntime);
+    updated.logging.folder = logFolder->text().trimmed();
+    if (updated.logging.folder.isEmpty()) {
+        updated.logging.folder = appReleaseFolderPath(QStringLiteral("logs"));
+    }
+    updated.create.runtime.logStatsFolder = updated.logging.folder;
+    updated.join.runtime.logStatsFolder = updated.logging.folder;
+    updated.recording.preferredMode = preferredMode->currentData().toString();
+    updated.recording.input.outputFolder = inputFolderRow.first->text().trimmed();
+    if (updated.recording.input.outputFolder.isEmpty()) {
+        updated.recording.input.outputFolder = appReleaseFolderPath(QStringLiteral("captures"));
+    }
+    updated.recording.input.recordUntilStopped = inputUntilStopped->isChecked();
+    updated.recording.input.durationSeconds = inputDuration->value();
+    updated.recording.input.countIn = inputCountIn->isChecked(); updated.recording.input.countInBars = inputCountBars->value();
+    updated.recording.input.countInMetronome = inputCountMetro->isChecked(); updated.recording.input.keepMetronome = inputKeepMetro->isChecked();
+    updated.recording.input.latencyAdjustmentFrames = inputLatency->value();
+    updated.recording.loopback.outputFolder = loopFolderRow.first->text().trimmed();
+    if (updated.recording.loopback.outputFolder.isEmpty()) {
+        updated.recording.loopback.outputFolder = appReleaseFolderPath(QStringLiteral("captures"));
+    }
+    updated.recording.loopback.sourceId = loopSource->currentData().toString().isEmpty()
+        ? loopSource->currentText().trimmed() : loopSource->currentData().toString();
+    updated.recording.loopback.sourceName = loopSource->currentText().trimmed();
+    updated.recording.loopback.recordUntilStopped = loopUntilStopped->isChecked();
+    updated.recording.loopback.durationSeconds = loopDuration->value(); updated.recording.loopback.trigger = loopTrigger->isChecked();
+    updated.recording.loopback.triggerThresholdDb = loopTriggerThreshold->value(); updated.recording.loopback.triggerHoldMs = loopTriggerHold->value();
+    updated.recording.loopback.preRollMs = loopPreRoll->value(); updated.recording.loopback.tailThresholdDb = loopTailThreshold->value();
+    updated.recording.loopback.tailSilenceMs = loopTailSilence->value(); updated.recording.loopback.trimLeading = loopTrimLeading->isChecked();
+    updated.recording.loopback.trimTrailing = loopTrimTrailing->isChecked();
+
+    const bool localChanged = !networkActive && (
+        localInitial.backend != updated.localAudio.backend ||
+        localInitial.stableId != updated.localAudio.stableId ||
+        localInitial.sampleRate != updated.localAudio.sampleRate ||
+        localInitial.bufferSize != updated.localAudio.bufferSize ||
+        localInitial.inputChannels != updated.localAudio.inputChannels ||
+        localInitial.outputChannels != updated.localAudio.outputChannels);
+    if (localActive && localChanged) {
+        std::optional<Jam2RuntimeOptions> previousOptions;
+        const QString previousDevice = selectedDeviceId();
+        const QString previousInput = inputChannelsEdit_->text();
+        const QString previousOutput = outputChannelsEdit_->text();
+        const int previousRate = sampleRateSpin_->value();
+        const int previousBuffer = bufferSizeSpin_->value();
+        bool restartAttempted = false;
+        try {
+            previousOptions = runtimeOptions();
+            deviceBox_->setCurrentIndex(qMax(0, deviceBox_->findData(localDevice->currentData())));
+            inputChannelsEdit_->setText(updated.localAudio.inputChannels);
+            outputChannelsEdit_->setText(updated.localAudio.outputChannels);
+            sampleRateSpin_->setValue(updated.localAudio.sampleRate);
+            bufferSizeSpin_->setValue(updated.localAudio.bufferSize);
+            restartAttempted = true;
+            if (!sessionController_.startLocal(runtimeOptions())) {
+                throw std::runtime_error("the new local audio configuration did not start");
+            }
+        } catch (const std::exception& error) {
+            deviceBox_->setCurrentIndex(qMax(0, deviceBox_->findData(previousDevice)));
+            inputChannelsEdit_->setText(previousInput);
+            outputChannelsEdit_->setText(previousOutput);
+            sampleRateSpin_->setValue(previousRate);
+            bufferSizeSpin_->setValue(previousBuffer);
+            const bool restored = !restartAttempted ||
+                (previousOptions && sessionController_.startLocal(*previousOptions));
+            QMessageBox::warning(this, QStringLiteral("Settings not applied"),
+                QStringLiteral("%1\n\nPrevious local audio settings %2.")
+                    .arg(QString::fromUtf8(error.what()),
+                         restored ? QStringLiteral("were restored") : QStringLiteral("could not be restored")));
+            return;
+        }
+    }
+
+    preferences_ = std::move(updated);
+    joinProfileName_ = preferences_.join.tuning.profile;
+    UserPreferencesStore::save(preferences_);
+    appendLog(QStringLiteral("preferences saved"));
 }
 
 void MainWindow::stopJam(bool returnToLocal)
 {
     const bool shouldReturnToLocal = returnToLocal && !shuttingDown_;
     jamStartupPending_ = false;
+    updateStatsDisplay(nullptr);
     assetTransfer_.cancel();
     sessionController_.close();
     // The Engine intentionally survives Leave so Perform can resume without a
@@ -1922,9 +2682,12 @@ void MainWindow::stopJam(bool returnToLocal)
 
 void MainWindow::refreshDevices()
 {
+    const QString previous = deviceBox_->currentData().toString();
     deviceBox_->clear();
+    availableDevices_.clear();
     try {
-        for (const jam2::audio::DeviceInfo& device : jam2::audio::list_devices()) {
+        availableDevices_ = jam2::audio::list_devices();
+        for (const jam2::audio::DeviceInfo& device : availableDevices_) {
             const QString text = QStringLiteral("[%1] %2 %3")
                 .arg(device.id)
                 .arg(QString::fromStdString(device.backend), QString::fromStdString(device.name));
@@ -1936,6 +2699,19 @@ void MainWindow::refreshDevices()
     if (deviceBox_->count() == 0) {
         appendLog(QStringLiteral("no audio devices returned by the local engine"));
     } else {
+        int selected = deviceBox_->findData(previous);
+        if (selected < 0) {
+            for (const auto& device : availableDevices_) {
+                const QString stable = QString::fromStdString(
+                    device.clsid.empty() ? device.name : device.clsid);
+                if (QString::fromStdString(device.backend) == preferences_.networkAudio.backend &&
+                    stable == preferences_.networkAudio.stableId) {
+                    selected = deviceBox_->findData(QString::number(device.id));
+                    break;
+                }
+            }
+        }
+        deviceBox_->setCurrentIndex(selected >= 0 ? selected : 0);
         appendLog(QStringLiteral("loaded %1 audio devices").arg(deviceBox_->count()));
     }
 }
@@ -1946,7 +2722,7 @@ void MainWindow::appendLog(const QString& line)
         logEdit_->appendPlainText(line);
     }
     if (!guiLogFile_) {
-        QString root = logStatsEdit_ ? logStatsEdit_->text().trimmed() : QString{};
+        QString root = preferences_.logging.folder.trimmed();
         if (root.isEmpty()) {
             root = appReleaseFolderPath(QStringLiteral("logs"));
         }
@@ -1970,22 +2746,15 @@ void MainWindow::appendLog(const QString& line)
     }
 }
 
-void MainWindow::updateStatsDisplay(const QJsonObject& stats)
+void MainWindow::updateStatsDisplay(const ConnectionDiagnosticsSnapshot* stats)
 {
     const MixerStatsLabels labels = mixerStatsViewModel_.present(stats);
     latencyLabel_->setText(labels.latency);
+    latencyLabel_->setToolTip(labels.latencyTooltip);
     jitterLabel_->setText(labels.jitter);
     lossLabel_->setText(labels.loss);
-    depthLabel_->setText(labels.depth);
-    ringDepthLabel_->setText(labels.reorder);
     underrunLabel_->setText(labels.underrun);
-    missingFramesLabel_->setText(labels.stalls);
-    driftLabel_->setText(labels.drift);
     diagnosisLabel_->setText(labels.diagnosis);
-
-    if (!jam2_.isRunning()) {
-        updateMixMeters(mixerStatsViewModel_.consumeStructured(stats));
-    }
 }
 
 void MainWindow::updateMixMeters(const MixerMeterLevels& levels)
@@ -2283,15 +3052,46 @@ void MainWindow::applyTuningProfileName(const QString& name)
     }
 
     const QByteArray utf8 = name.toUtf8();
-    const jam2::TuningProfile* profile = jam2::find_tuning_profile(
+    const jam2::CreateProfile* profile = jam2::find_create_profile(
         std::string_view(utf8.constData(), static_cast<std::size_t>(utf8.size())));
     if (profile == nullptr) {
-        profile = &jam2::default_tuning_profile();
+        profile = &jam2::default_create_profile();
     }
 
+    const jam2::JoinProfile& local = *profile->local;
+
     sampleRateSpin_->setValue(profile->sample_rate);
-    bufferSizeSpin_->setValue(static_cast<int>(profile->audio_buffer_size));
+    bufferSizeSpin_->setValue(static_cast<int>(local.audio_buffer_size));
     frameSizeSpin_->setValue(profile->frame_size);
+    prefillSpin_->setValue(static_cast<int>(local.playback_prefill_frames));
+    playbackMaxSpin_->setValue(static_cast<int>(local.playback_max_frames));
+    captureRingSpin_->setValue(static_cast<int>(local.capture_ring_frames));
+    playbackRingSpin_->setValue(static_cast<int>(local.playback_ring_frames));
+    driftCorrectionCheck_->setChecked(local.drift_correction);
+    driftSmoothingSpin_->setValue(local.drift_smoothing);
+    driftDeadbandSpin_->setValue(local.drift_deadband_ppm);
+    driftMaxCorrectionSpin_->setValue(local.drift_max_correction_ppm);
+    sampleTimePlayoutCheck_->setChecked(local.sample_time_playout);
+    playoutDelaySpin_->setValue(static_cast<int>(local.playout_delay_frames));
+    jitterBufferSpin_->setValue(static_cast<int>(local.jitter_buffer_frames));
+    jitterBufferMaxSpin_->setValue(static_cast<int>(local.jitter_buffer_max_frames));
+    adaptiveCushionCheck_->setChecked(local.adaptive_playback_cushion);
+    adaptiveTargetSpin_->setValue(static_cast<int>(local.adaptive_playback_target_frames));
+    adaptiveMinSpin_->setValue(static_cast<int>(local.adaptive_playback_min_frames));
+    adaptiveMaxSpin_->setValue(static_cast<int>(local.adaptive_playback_max_frames));
+    adaptiveReleaseSpin_->setValue(local.adaptive_playback_release_ppm);
+    adaptiveRatioRampSpin_->setValue(local.adaptive_playback_ratio_ramp_ms);
+}
+
+void MainWindow::applyJoinProfileName(const QString& name)
+{
+    const QByteArray utf8 = name.toUtf8();
+    const jam2::JoinProfile* profile = jam2::find_join_profile(
+        std::string_view(utf8.constData(), static_cast<std::size_t>(utf8.size())));
+    if (profile == nullptr) profile = &jam2::default_join_profile();
+    joinProfileName_ = QString::fromUtf8(
+        profile->name.data(), static_cast<qsizetype>(profile->name.size()));
+    bufferSizeSpin_->setValue(static_cast<int>(profile->audio_buffer_size));
     prefillSpin_->setValue(static_cast<int>(profile->playback_prefill_frames));
     playbackMaxSpin_->setValue(static_cast<int>(profile->playback_max_frames));
     captureRingSpin_->setValue(static_cast<int>(profile->capture_ring_frames));
@@ -2312,6 +3112,188 @@ void MainWindow::applyTuningProfileName(const QString& name)
     adaptiveRatioRampSpin_->setValue(profile->adaptive_playback_ratio_ramp_ms);
 }
 
+void MainWindow::applyCreateDefaultsToControls()
+{
+    const auto& p = preferences_.create;
+    applyTuningProfileName(p.tuning.profile);
+    bindHostEdit_->setText(p.bindHost);
+    portSpin_->setValue(p.port);
+    publicHostEdit_->setText(p.publicHost);
+    stunServerEdit_->setText(p.stunServer);
+    stunTimeoutSpin_->setValue(p.stunTimeoutMs);
+    stunRetriesSpin_->setValue(p.stunRetries);
+    noStunCheck_->setChecked(p.noStun);
+    meshMaxPeersSpin_->setValue(p.maxPeers);
+    sampleRateSpin_->setValue(p.sampleRate);
+    bufferSizeSpin_->setValue(p.tuning.bufferSize);
+    frameSizeSpin_->setValue(p.tuning.frameSize);
+    prefillSpin_->setValue(p.tuning.prefillFrames);
+    playbackMaxSpin_->setValue(p.tuning.playbackMaxFrames);
+    captureRingSpin_->setValue(p.tuning.captureRingFrames);
+    playbackRingSpin_->setValue(p.tuning.playbackRingFrames);
+    driftCorrectionCheck_->setChecked(p.tuning.driftCorrection);
+    driftSmoothingSpin_->setValue(p.tuning.driftSmoothing);
+    driftDeadbandSpin_->setValue(p.tuning.driftDeadbandPpm);
+    driftMaxCorrectionSpin_->setValue(p.tuning.driftMaxCorrectionPpm);
+    sampleTimePlayoutCheck_->setChecked(p.tuning.sampleTimePlayout);
+    playoutDelaySpin_->setValue(p.tuning.playoutDelayFrames);
+    jitterBufferSpin_->setValue(p.tuning.jitterBufferFrames);
+    jitterBufferMaxSpin_->setValue(p.tuning.jitterBufferMaxFrames);
+    adaptiveCushionCheck_->setChecked(p.tuning.adaptiveCushion);
+    adaptiveTargetSpin_->setValue(p.tuning.adaptiveTargetFrames);
+    adaptiveMinSpin_->setValue(p.tuning.adaptiveMinFrames);
+    adaptiveMaxSpin_->setValue(p.tuning.adaptiveMaxFrames);
+    adaptiveReleaseSpin_->setValue(p.tuning.adaptiveReleasePpm);
+    adaptiveRatioRampSpin_->setValue(p.tuning.adaptiveRatioRampMs);
+    statsCheck_->setChecked(p.runtime.diagnostics);
+    statsWarmupMsSpin_->setValue(p.runtime.diagnosticsWarmupMs);
+    if (!p.runtime.logStatsFolder.isEmpty()) logStatsEdit_->setText(p.runtime.logStatsFolder);
+    const int priority = osPriorityBox_->findData(p.runtime.osPriority);
+    if (priority >= 0) osPriorityBox_->setCurrentIndex(priority);
+    waitMsSpin_->setValue(p.runtime.waitMs);
+    streamMsSpin_->setValue(p.runtime.streamMs);
+    streamLingerMsSpin_->setValue(p.runtime.streamLingerMs);
+    socketSendBufferSpin_->setValue(p.socketSendBuffer);
+    socketRecvBufferSpin_->setValue(p.socketRecvBuffer);
+    const int format = networkAudioFormatBox_->findData(p.audioFormat);
+    if (format >= 0) networkAudioFormatBox_->setCurrentIndex(format);
+    inputChannelsEdit_->setText(preferences_.networkAudio.inputChannels);
+    outputChannelsEdit_->setText(preferences_.networkAudio.outputChannels);
+    updateConnectionControlState();
+}
+
+void MainWindow::applyJoinDefaultsToControls()
+{
+    const auto& p = preferences_.join;
+    applyJoinProfileName(p.tuning.profile);
+    bindHostEdit_->setText(p.bindHost);
+    portSpin_->setValue(p.port);
+    bufferSizeSpin_->setValue(p.tuning.bufferSize);
+    prefillSpin_->setValue(p.tuning.prefillFrames);
+    playbackMaxSpin_->setValue(p.tuning.playbackMaxFrames);
+    captureRingSpin_->setValue(p.tuning.captureRingFrames);
+    playbackRingSpin_->setValue(p.tuning.playbackRingFrames);
+    driftCorrectionCheck_->setChecked(p.tuning.driftCorrection);
+    driftSmoothingSpin_->setValue(p.tuning.driftSmoothing);
+    driftDeadbandSpin_->setValue(p.tuning.driftDeadbandPpm);
+    driftMaxCorrectionSpin_->setValue(p.tuning.driftMaxCorrectionPpm);
+    sampleTimePlayoutCheck_->setChecked(p.tuning.sampleTimePlayout);
+    playoutDelaySpin_->setValue(p.tuning.playoutDelayFrames);
+    jitterBufferSpin_->setValue(p.tuning.jitterBufferFrames);
+    jitterBufferMaxSpin_->setValue(p.tuning.jitterBufferMaxFrames);
+    adaptiveCushionCheck_->setChecked(p.tuning.adaptiveCushion);
+    adaptiveTargetSpin_->setValue(p.tuning.adaptiveTargetFrames);
+    adaptiveMinSpin_->setValue(p.tuning.adaptiveMinFrames);
+    adaptiveMaxSpin_->setValue(p.tuning.adaptiveMaxFrames);
+    adaptiveReleaseSpin_->setValue(p.tuning.adaptiveReleasePpm);
+    adaptiveRatioRampSpin_->setValue(p.tuning.adaptiveRatioRampMs);
+    statsCheck_->setChecked(p.runtime.diagnostics);
+    statsWarmupMsSpin_->setValue(p.runtime.diagnosticsWarmupMs);
+    if (!p.runtime.logStatsFolder.isEmpty()) logStatsEdit_->setText(p.runtime.logStatsFolder);
+    const int priority = osPriorityBox_->findData(p.runtime.osPriority);
+    if (priority >= 0) osPriorityBox_->setCurrentIndex(priority);
+    waitMsSpin_->setValue(p.runtime.waitMs);
+    streamMsSpin_->setValue(p.runtime.streamMs);
+    streamLingerMsSpin_->setValue(p.runtime.streamLingerMs);
+    inputChannelsEdit_->setText(preferences_.networkAudio.inputChannels);
+    outputChannelsEdit_->setText(preferences_.networkAudio.outputChannels);
+}
+
+void MainWindow::applyPreferencesToControls()
+{
+    if (preferences_.logging.folder.trimmed().isEmpty()) {
+        preferences_.logging.folder = appReleaseFolderPath(QStringLiteral("logs"));
+    }
+    preferences_.create.runtime.logStatsFolder = preferences_.logging.folder;
+    preferences_.join.runtime.logStatsFolder = preferences_.logging.folder;
+    if (preferences_.recording.input.outputFolder.trimmed().isEmpty()) {
+        preferences_.recording.input.outputFolder = appReleaseFolderPath(QStringLiteral("captures"));
+    }
+    if (preferences_.recording.loopback.outputFolder.trimmed().isEmpty()) {
+        preferences_.recording.loopback.outputFolder = appReleaseFolderPath(QStringLiteral("captures"));
+    }
+    applyCreateDefaultsToControls();
+    joinProfileName_ = preferences_.join.tuning.profile;
+}
+
+void MainWindow::saveCreateDefaults()
+{
+    auto& p = preferences_.create;
+    p.bindHost = bindHostEdit_->text().trimmed(); p.port = portSpin_->value();
+    p.publicHost = publicHostEdit_->text().trimmed(); p.stunServer = stunServerEdit_->text().trimmed();
+    p.stunTimeoutMs = stunTimeoutSpin_->value(); p.stunRetries = stunRetriesSpin_->value();
+    p.noStun = noStunCheck_->isChecked(); p.maxPeers = meshMaxPeersSpin_->value();
+    p.sampleRate = sampleRateSpin_->value(); p.audioFormat = networkAudioFormatBox_->currentData().toString();
+    p.socketSendBuffer = socketSendBufferSpin_->value(); p.socketRecvBuffer = socketRecvBufferSpin_->value();
+    p.tuning.profile = profileBox_->currentData().toString();
+    p.tuning.bufferSize = bufferSizeSpin_->value(); p.tuning.frameSize = frameSizeSpin_->value();
+    p.tuning.prefillFrames = prefillSpin_->value(); p.tuning.playbackMaxFrames = playbackMaxSpin_->value();
+    p.tuning.captureRingFrames = captureRingSpin_->value(); p.tuning.playbackRingFrames = playbackRingSpin_->value();
+    p.tuning.driftCorrection = driftCorrectionCheck_->isChecked(); p.tuning.driftSmoothing = driftSmoothingSpin_->value();
+    p.tuning.driftDeadbandPpm = driftDeadbandSpin_->value(); p.tuning.driftMaxCorrectionPpm = driftMaxCorrectionSpin_->value();
+    p.tuning.sampleTimePlayout = sampleTimePlayoutCheck_->isChecked(); p.tuning.playoutDelayFrames = playoutDelaySpin_->value();
+    p.tuning.jitterBufferFrames = jitterBufferSpin_->value(); p.tuning.jitterBufferMaxFrames = jitterBufferMaxSpin_->value();
+    p.tuning.adaptiveCushion = adaptiveCushionCheck_->isChecked(); p.tuning.adaptiveTargetFrames = adaptiveTargetSpin_->value();
+    p.tuning.adaptiveMinFrames = adaptiveMinSpin_->value(); p.tuning.adaptiveMaxFrames = adaptiveMaxSpin_->value();
+    p.tuning.adaptiveReleasePpm = adaptiveReleaseSpin_->value(); p.tuning.adaptiveRatioRampMs = adaptiveRatioRampSpin_->value();
+    p.runtime.diagnostics = statsCheck_->isChecked(); p.runtime.diagnosticsWarmupMs = statsWarmupMsSpin_->value();
+    p.runtime.logStatsFolder = logStatsEdit_->text().trimmed(); p.runtime.osPriority = osPriorityBox_->currentData().toString();
+    p.runtime.waitMs = waitMsSpin_->value(); p.runtime.streamMs = streamMsSpin_->value(); p.runtime.streamLingerMs = streamLingerMsSpin_->value();
+    preferences_.networkAudio.inputChannels = inputChannelsEdit_->text().trimmed();
+    preferences_.networkAudio.outputChannels = outputChannelsEdit_->text().trimmed();
+    preferences_.logging.folder = p.runtime.logStatsFolder;
+    preferences_.join.runtime.logStatsFolder = preferences_.logging.folder;
+    bool deviceOk = false;
+    const int deviceId = selectedDeviceId().toInt(&deviceOk);
+    if (deviceOk) {
+        const auto device = std::find_if(availableDevices_.begin(), availableDevices_.end(),
+            [deviceId](const auto& item) { return item.id == deviceId; });
+        if (device != availableDevices_.end()) {
+            preferences_.networkAudio.backend = QString::fromStdString(device->backend);
+            preferences_.networkAudio.stableId = QString::fromStdString(
+                device->clsid.empty() ? device->name : device->clsid);
+            preferences_.networkAudio.name = QString::fromStdString(device->name);
+        }
+    }
+    UserPreferencesStore::save(preferences_);
+}
+
+void MainWindow::saveJoinDefaults()
+{
+    auto& p = preferences_.join;
+    p.bindHost = bindHostEdit_->text().trimmed(); p.port = portSpin_->value();
+    p.tuning.profile = joinProfileName_; p.tuning.bufferSize = bufferSizeSpin_->value();
+    p.tuning.prefillFrames = prefillSpin_->value(); p.tuning.playbackMaxFrames = playbackMaxSpin_->value();
+    p.tuning.captureRingFrames = captureRingSpin_->value(); p.tuning.playbackRingFrames = playbackRingSpin_->value();
+    p.tuning.driftCorrection = driftCorrectionCheck_->isChecked(); p.tuning.driftSmoothing = driftSmoothingSpin_->value();
+    p.tuning.driftDeadbandPpm = driftDeadbandSpin_->value(); p.tuning.driftMaxCorrectionPpm = driftMaxCorrectionSpin_->value();
+    p.tuning.sampleTimePlayout = sampleTimePlayoutCheck_->isChecked(); p.tuning.playoutDelayFrames = playoutDelaySpin_->value();
+    p.tuning.jitterBufferFrames = jitterBufferSpin_->value(); p.tuning.jitterBufferMaxFrames = jitterBufferMaxSpin_->value();
+    p.tuning.adaptiveCushion = adaptiveCushionCheck_->isChecked(); p.tuning.adaptiveTargetFrames = adaptiveTargetSpin_->value();
+    p.tuning.adaptiveMinFrames = adaptiveMinSpin_->value(); p.tuning.adaptiveMaxFrames = adaptiveMaxSpin_->value();
+    p.tuning.adaptiveReleasePpm = adaptiveReleaseSpin_->value(); p.tuning.adaptiveRatioRampMs = adaptiveRatioRampSpin_->value();
+    p.runtime.diagnostics = statsCheck_->isChecked(); p.runtime.diagnosticsWarmupMs = statsWarmupMsSpin_->value();
+    p.runtime.logStatsFolder = logStatsEdit_->text().trimmed(); p.runtime.osPriority = osPriorityBox_->currentData().toString();
+    p.runtime.waitMs = waitMsSpin_->value(); p.runtime.streamMs = streamMsSpin_->value(); p.runtime.streamLingerMs = streamLingerMsSpin_->value();
+    preferences_.networkAudio.inputChannels = inputChannelsEdit_->text().trimmed();
+    preferences_.networkAudio.outputChannels = outputChannelsEdit_->text().trimmed();
+    preferences_.logging.folder = p.runtime.logStatsFolder;
+    preferences_.create.runtime.logStatsFolder = preferences_.logging.folder;
+    bool deviceOk = false;
+    const int deviceId = selectedDeviceId().toInt(&deviceOk);
+    if (deviceOk) {
+        const auto device = std::find_if(availableDevices_.begin(), availableDevices_.end(),
+            [deviceId](const auto& item) { return item.id == deviceId; });
+        if (device != availableDevices_.end()) {
+            preferences_.networkAudio.backend = QString::fromStdString(device->backend);
+            preferences_.networkAudio.stableId = QString::fromStdString(
+                device->clsid.empty() ? device->name : device->clsid);
+            preferences_.networkAudio.name = QString::fromStdString(device->name);
+        }
+    }
+    UserPreferencesStore::save(preferences_);
+}
+
 bool MainWindow::selectedDeviceSupportsSampleRate(int sampleRate)
 {
 
@@ -2319,8 +3301,27 @@ bool MainWindow::selectedDeviceSupportsSampleRate(int sampleRate)
         return false;
     }
     try {
-        const auto probe = jam2::audio::probe_device(selectedDeviceId().toInt(), sampleRate);
-        if (probe.requested_sample_rate_supported) {
+        const int deviceId = selectedDeviceId().toInt();
+        const auto device = std::find_if(availableDevices_.begin(), availableDevices_.end(),
+            [deviceId](const auto& item) { return item.id == deviceId; });
+        const QString key = device != availableDevices_.end()
+            ? devicePreferenceKey(*device)
+            : QString::number(deviceId);
+        jam2::audio::DeviceTestResult capabilities;
+        if ((jam2_.isRunning() || jam2_.isNetworkRunning()) &&
+            deviceCapabilitiesCache_.contains(key)) {
+            capabilities = deviceCapabilitiesCache_.value(key);
+        } else {
+            capabilities = jam2::audio::test_device(deviceId);
+            deviceCapabilitiesCache_.insert(key, capabilities);
+        }
+        const auto rate = std::find(
+            jam2::audio::kTestSampleRates.begin(),
+            jam2::audio::kTestSampleRates.end(),
+            sampleRate);
+        if (rate != jam2::audio::kTestSampleRates.end() &&
+            capabilities.sample_rate_supported[static_cast<std::size_t>(
+                std::distance(jam2::audio::kTestSampleRates.begin(), rate))]) {
             return true;
         }
         appendLog(QStringLiteral("device sample-rate preflight failed: device %1 does not support %2 Hz")
@@ -2329,6 +3330,58 @@ bool MainWindow::selectedDeviceSupportsSampleRate(int sampleRate)
     } catch (const std::exception& error) {
         appendLog(QStringLiteral("device sample-rate preflight failed: ") + QString::fromUtf8(error.what()));
         return false;
+    }
+}
+
+void MainWindow::testDeviceSelection(
+    QComboBox* device,
+    QPushButton* button,
+    QWidget* dialogParent)
+{
+    if (device == nullptr || device->currentData().toString().isEmpty()) {
+        showQuietDeviceMessage(dialogParent, QStringLiteral("Select a low-latency audio device first."));
+        return;
+    }
+    bool ok = false;
+    const int deviceId = device->currentData().toInt(&ok);
+    if (!ok) {
+        showQuietDeviceMessage(dialogParent, QStringLiteral("The selected device id is invalid."));
+        return;
+    }
+    const auto info = std::find_if(availableDevices_.begin(), availableDevices_.end(),
+        [deviceId](const auto& item) { return item.id == deviceId; });
+    const QString key = info != availableDevices_.end()
+        ? devicePreferenceKey(*info)
+        : QString::number(deviceId);
+    if ((jam2_.isRunning() || jam2_.isNetworkRunning()) &&
+        deviceCapabilitiesCache_.contains(key)) {
+        showQuietDeviceMessage(dialogParent, deviceCapabilitiesText(deviceCapabilitiesCache_.value(key)));
+        return;
+    }
+    if (button != nullptr) button->setEnabled(false);
+    auto result = std::make_shared<std::optional<jam2::audio::DeviceTestResult>>();
+    const QPointer<QWidget> parentGuard(dialogParent);
+    const QPointer<QPushButton> buttonGuard(button);
+    const bool started = startFileWorkerTask(
+        [deviceId, result] { *result = jam2::audio::test_device(deviceId); },
+        [this, result, key, parentGuard, buttonGuard] {
+            if (buttonGuard) buttonGuard->setEnabled(true);
+            if (!*result) return;
+            deviceCapabilitiesCache_.insert(key, **result);
+            if (parentGuard) {
+                showQuietDeviceMessage(parentGuard, deviceCapabilitiesText(**result));
+            }
+        },
+        [parentGuard, buttonGuard](const QString& error) {
+            if (buttonGuard) buttonGuard->setEnabled(true);
+            if (parentGuard) {
+                showQuietDeviceMessage(parentGuard, error);
+            }
+        });
+    if (!started) {
+        if (buttonGuard) buttonGuard->setEnabled(true);
+        showQuietDeviceMessage(dialogParent,
+            QStringLiteral("Device testing is temporarily busy; try again."));
     }
 }
 
@@ -2457,36 +3510,41 @@ void MainWindow::auditWavCompatibilityForSession(int expectedSampleRate, bool sh
         QString error;
     };
     auto inputs = std::make_shared<QVector<Input>>();
+    QStringList signatureParts{QString::number(expectedSampleRate)};
     for (int bankIndex = 0; bankIndex < looperProject_.banks().size(); ++bankIndex) {
         for (LooperLane& lane : looperProject_.banks()[bankIndex].lanes) {
             if (lane.assetPath.trimmed().isEmpty()) {
                 lane.sampleRateCompatible = true;
                 continue;
             }
-            lane.sampleRateCompatible = lane.sampleRate > 0 &&
-                lane.sampleRate == expectedSampleRate;
-            inputs->append(Input{
-                bankIndex, lane.id, lane.name, looperAssetAbsolutePath(lane), false});
+            const QString path = looperAssetAbsolutePath(lane);
+            inputs->append(Input{bankIndex, lane.id, lane.name, path, false});
+            signatureParts.append(QStringLiteral("lane:%1:%2").arg(lane.id, QDir::cleanPath(path)));
         }
     }
     SharedTrackModel& track = trackController_.model();
-    if (!track.filePath.trimmed().isEmpty()) {
-        track.sampleRateCompatible = track.sampleRate > 0 &&
-            track.sampleRate == expectedSampleRate;
+    if (track.userProvidedSource && !track.filePath.trimmed().isEmpty()) {
         inputs->append(Input{-1, {}, track.fileName, track.filePath, true});
+        signatureParts.append(QStringLiteral("track:%1").arg(QDir::cleanPath(track.filePath)));
     } else {
         track.sampleRateCompatible = true;
     }
+    signatureParts.sort();
+    const QString auditSignature = signatureParts.join(QLatin1Char('|'));
     refreshLooperLanes();
     updateTrackControls();
-    regeneratePreparedMix();
     if (inputs->isEmpty()) {
+        lastWavCompatibilityAuditSignature_ = auditSignature;
+        return;
+    }
+    if (auditSignature == lastWavCompatibilityAuditSignature_) {
         return;
     }
 
     auto results = std::make_shared<QVector<Result>>();
     results->reserve(inputs->size());
     wavCompatibilityAuditRunning_ = true;
+    const std::uint64_t generation = ++wavCompatibilityAuditGeneration_;
     const bool started = startFileWorkerTask(
         [inputs, results] {
             for (const Input& input : *inputs) {
@@ -2502,8 +3560,18 @@ void MainWindow::auditWavCompatibilityForSession(int expectedSampleRate, bool sh
                 results->append(std::move(result));
             }
         },
-        [this, expectedSampleRate, showModal, results] {
+        [this, expectedSampleRate, showModal, results, auditSignature, generation] {
             wavCompatibilityAuditRunning_ = false;
+            if (generation != wavCompatibilityAuditGeneration_) {
+                return;
+            }
+            if (pendingWavCompatibilityAuditRate_ > 0 &&
+                pendingWavCompatibilityAuditRate_ != expectedSampleRate) {
+                const int pending = pendingWavCompatibilityAuditRate_;
+                pendingWavCompatibilityAuditRate_ = 0;
+                auditWavCompatibilityForSession(pending, showModal);
+                return;
+            }
             QStringList newlyQuarantined;
             for (const Result& result : *results) {
                 bool stillPresent = false;
@@ -2538,11 +3606,11 @@ void MainWindow::auditWavCompatibilityForSession(int expectedSampleRate, bool sh
                 if (!reportedIncompatibleWavs_.contains(identity) && newlyQuarantined.size() < 8) {
                     reportedIncompatibleWavs_.insert(identity);
                     newlyQuarantined.append(result.error.isEmpty()
-                        ? QStringLiteral("%1 — expected %2 Hz, actual %3 Hz")
+                        ? QStringLiteral("%1 - expected %2 Hz, actual %3 Hz")
                             .arg(result.input.name)
                             .arg(expectedSampleRate)
                             .arg(result.sampleRate)
-                        : QStringLiteral("%1 — expected %2 Hz, WAV could not be inspected: %3")
+                        : QStringLiteral("%1 - expected %2 Hz, WAV could not be inspected: %3")
                             .arg(result.input.name)
                             .arg(expectedSampleRate)
                             .arg(result.error));
@@ -2551,6 +3619,7 @@ void MainWindow::auditWavCompatibilityForSession(int expectedSampleRate, bool sh
             while (reportedIncompatibleWavs_.size() > 256) {
                 reportedIncompatibleWavs_.erase(reportedIncompatibleWavs_.begin());
             }
+            lastWavCompatibilityAuditSignature_ = auditSignature;
             refreshLooperLanes();
             updateTrackControls();
             regeneratePreparedMix();
@@ -2571,23 +3640,13 @@ void MainWindow::auditWavCompatibilityForSession(int expectedSampleRate, bool sh
                 shareLocalTracks();
             }
         },
-        [this, expectedSampleRate, showModal](const QString&) {
+        [this](const QString& error) {
             wavCompatibilityAuditRunning_ = false;
-            pendingWavCompatibilityAuditRate_ = expectedSampleRate;
-            QTimer::singleShot(100, this, [this, showModal] {
-                const int pending = pendingWavCompatibilityAuditRate_;
-                pendingWavCompatibilityAuditRate_ = 0;
-                auditWavCompatibilityForSession(pending, showModal);
-            });
+            appendLog(QStringLiteral("WAV compatibility audit failed: ") + error);
         });
     if (!started) {
         wavCompatibilityAuditRunning_ = false;
-        pendingWavCompatibilityAuditRate_ = expectedSampleRate;
-        QTimer::singleShot(100, this, [this, showModal] {
-            const int pending = pendingWavCompatibilityAuditRate_;
-            pendingWavCompatibilityAuditRate_ = 0;
-            auditWavCompatibilityForSession(pending, showModal);
-        });
+        appendLog(QStringLiteral("WAV compatibility audit could not be queued"));
     }
 }
 
@@ -2954,7 +4013,6 @@ void MainWindow::addEmptyLooperLane()
 }
 
 bool MainWindow::armSelectedLooperLaneRecording()
-
 {
     if (selectedLooperLane_ < 0) {
         if (looperProject_.banks().at(looperProject_.activeBankIndex()).lanes.isEmpty()) {
@@ -2984,11 +4042,11 @@ bool MainWindow::armSelectedLooperLaneRecording()
     auto* modeBox = new QComboBox(content);
     modeBox->addItem(QStringLiteral("Input"), QStringLiteral("input"));
     modeBox->addItem(QStringLiteral("Loopback"), QStringLiteral("loopback"));
+    modeBox->setCurrentIndex(qMax(0, modeBox->findData(preferences_.recording.preferredMode)));
     applyMutedEditorStyle(modeBox);
 
     const QList<QWidget*> widgets{
-        captureOutputEdit_, deviceBox_, inputChannelsEdit_, loopbackSourceBox_,
-        sampleRateSpin_, bufferSizeSpin_, captureManualStopCheck_, captureDurationSpin_,
+        captureOutputEdit_, loopbackSourceBox_, captureManualStopCheck_, captureDurationSpin_,
         captureCountInCheck_, captureCountInMetronomeCheck_, captureKeepMetronomeCheck_, captureCountInBarsSpin_, captureTriggerCheck_, triggerThresholdSpin_,
         triggerHoldSpin_, preRollSpin_, tailThresholdSpin_, tailSilenceSpin_, trimLeadingCheck_,
         trimTrailingCheck_, recordingLatencyLabel_, recordingLatencyAdjustmentSpin_,
@@ -2996,56 +4054,63 @@ bool MainWindow::armSelectedLooperLaneRecording()
     for (QWidget* widget : widgets) {
         widget->show();
     }
-    const QString laneFileName = safeFileName(laneName);
-    captureOutputEdit_->setText(timestampedCapturePath(laneFileName.isEmpty() ? QStringLiteral("lane") : laneFileName));
+    const QString laneFileName = safeFileName(laneName).isEmpty()
+        ? QStringLiteral("lane") : safeFileName(laneName);
+    InputRecordingPreference inputDraft = preferences_.recording.input;
+    LoopbackRecordingPreference loopbackDraft = preferences_.recording.loopback;
+    QString inputOutput = timestampedCapturePath(laneFileName, inputDraft.outputFolder);
+    QString loopbackOutput = timestampedCapturePath(laneFileName + QStringLiteral("-loopback"), loopbackDraft.outputFolder);
 
-    auto* outputLayout = new QHBoxLayout();
+    auto* outputRow = new QWidget(content);
+    auto* outputLayout = new QHBoxLayout(outputRow);
+    outputLayout->setContentsMargins(0, 0, 0, 0);
     outputLayout->addWidget(captureOutputEdit_, 1);
-
     auto* browse = new QPushButton(QStringLiteral("Browse"), content);
     outputLayout->addWidget(browse);
-    auto* sourceLayout = new QHBoxLayout();
+
+    auto* sourceRow = new QWidget(content);
+    auto* sourceLayout = new QHBoxLayout(sourceRow);
+    sourceLayout->setContentsMargins(0, 0, 0, 0);
     sourceLayout->addWidget(loopbackSourceBox_, 1);
     auto* refreshSources = new QPushButton(QStringLiteral("Refresh Sources"), content);
     sourceLayout->addWidget(refreshSources);
-    auto* countInLayout = new QHBoxLayout();
-    countInLayout->addWidget(captureCountInCheck_);
 
+    auto* countInRow = new QWidget(content);
+    auto* countInLayout = new QHBoxLayout(countInRow);
+    countInLayout->setContentsMargins(0, 0, 0, 0);
+    countInLayout->addWidget(captureCountInCheck_);
     countInLayout->addWidget(captureCountInBarsSpin_);
     countInLayout->addStretch(1);
-    auto* metronomeLayout = new QHBoxLayout();
+
+    auto* metronomeRow = new QWidget(content);
+    auto* metronomeLayout = new QHBoxLayout(metronomeRow);
+    metronomeLayout->setContentsMargins(0, 0, 0, 0);
     metronomeLayout->addWidget(captureCountInMetronomeCheck_);
     metronomeLayout->addWidget(captureKeepMetronomeCheck_);
     metronomeLayout->addStretch(1);
-    auto* latencyLayout = new QHBoxLayout();
+
+    auto* latencyRow = new QWidget(content);
+    auto* latencyLayout = new QHBoxLayout(latencyRow);
+    latencyLayout->setContentsMargins(0, 0, 0, 0);
     latencyLayout->addWidget(recordingLatencyLabel_, 1);
     latencyLayout->addWidget(recordingLatencyAdjustmentSpin_);
-
-    auto refreshMode = [this, modeBox] {
-        const bool inputMode = modeBox->currentData().toString() == QStringLiteral("input");
-        deviceBox_->setVisible(inputMode);
-        inputChannelsEdit_->setVisible(inputMode);
-        sampleRateSpin_->setVisible(inputMode);
-        bufferSizeSpin_->setVisible(inputMode);
-        recordingLatencyLabel_->setVisible(inputMode);
-        recordingLatencyAdjustmentSpin_->setVisible(inputMode);
-        loopbackSourceBox_->setVisible(!inputMode);
-    };
+    auto* engineStatus = new QLabel(content);
+    engineStatus->setWordWrap(true);
+    engineStatus->setText(jam2_.isRunning()
+        ? QStringLiteral("Records the input of the currently loaded engine.")
+        : QStringLiteral("Start Perform or a jam before recording engine input."));
 
     form->addRow(QStringLiteral("Lane"), new QLabel(laneName, content));
     form->addRow(QStringLiteral("Source"), modeBox);
-    form->addRow(QStringLiteral("Take WAV"), outputLayout);
-    form->addRow(QStringLiteral("Audio device"), deviceBox_);
-    form->addRow(QStringLiteral("Input channels"), inputChannelsEdit_);
-    form->addRow(QStringLiteral("Loopback source"), sourceLayout);
-    form->addRow(QStringLiteral("Sample rate"), sampleRateSpin_);
-    form->addRow(QStringLiteral("Buffer size"), bufferSizeSpin_);
-    form->addRow(QStringLiteral("Recording alignment"), latencyLayout);
+    form->addRow(QStringLiteral("Take WAV"), outputRow);
+    form->addRow(QStringLiteral("Input"), engineStatus);
+    form->addRow(QStringLiteral("Loopback source"), sourceRow);
+    form->addRow(QStringLiteral("Recording alignment"), latencyRow);
     form->addRow(captureManualStopCheck_);
     auto* durationLabel = new QLabel(QStringLiteral("Duration limit"), content);
     form->addRow(durationLabel, captureDurationSpin_);
-    form->addRow(QStringLiteral("Count-in"), countInLayout);
-    form->addRow(QStringLiteral("Metronome"), metronomeLayout);
+    form->addRow(QStringLiteral("Count-in"), countInRow);
+    form->addRow(QStringLiteral("Metronome"), metronomeRow);
     form->addRow(captureTriggerCheck_);
     form->addRow(QStringLiteral("Trigger threshold"), triggerThresholdSpin_);
     form->addRow(QStringLiteral("Trigger hold"), triggerHoldSpin_);
@@ -3055,14 +4120,10 @@ bool MainWindow::armSelectedLooperLaneRecording()
     form->addRow(trimLeadingCheck_);
     form->addRow(trimTrailingCheck_);
 
-    QObject::connect(modeBox, qOverload<int>(&QComboBox::currentIndexChanged), &dialog, refreshMode);
     QObject::connect(browse, &QPushButton::clicked, this, [this] { chooseCaptureFolder(); });
-    QObject::connect(refreshSources, &QPushButton::clicked, this, [this] { refreshLoopbackSources(); });
     QObject::connect(captureManualStopCheck_, &QCheckBox::toggled, &dialog, [this, durationLabel] {
         updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_, durationLabel);
     });
-    updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_, durationLabel);
-    refreshMode();
 
     auto* scroll = new QScrollArea(&dialog);
     scroll->setWidgetResizable(true);
@@ -3076,7 +4137,105 @@ bool MainWindow::armSelectedLooperLaneRecording()
     layout->addWidget(buttons);
     arm->setDefault(true);
 
+    auto selectLoopbackSource = [this](const QString& id, const QString& name) {
+        int index = loopbackSourceBox_->findData(id);
+        if (index < 0) index = loopbackSourceBox_->findText(name);
+        if (index < 0) index = loopbackSourceBox_->findData(QStringLiteral("default"));
+        loopbackSourceBox_->setCurrentIndex(qMax(0, index));
+        if (index < 0 && loopbackSourceBox_->isEditable()) loopbackSourceBox_->setEditText(name);
+    };
+    auto storeDraft = [&](const QString& mode) {
+        if (mode == QStringLiteral("input")) {
+            inputOutput = captureOutputEdit_->text().trimmed();
+            inputDraft.recordUntilStopped = captureManualStopCheck_->isChecked();
+            inputDraft.durationSeconds = captureDurationSpin_->value();
+            inputDraft.countIn = captureCountInCheck_->isChecked();
+            inputDraft.countInBars = captureCountInBarsSpin_->value();
+            inputDraft.countInMetronome = captureCountInMetronomeCheck_->isChecked();
+            inputDraft.keepMetronome = captureKeepMetronomeCheck_->isChecked();
+            inputDraft.latencyAdjustmentFrames = recordingLatencyAdjustmentSpin_->value();
+        } else {
+            loopbackOutput = captureOutputEdit_->text().trimmed();
+            loopbackDraft.sourceId = loopbackSourceBox_->currentData().toString().isEmpty()
+                ? loopbackSourceBox_->currentText().trimmed()
+                : loopbackSourceBox_->currentData().toString();
+            loopbackDraft.sourceName = loopbackSourceBox_->currentText().trimmed();
+            loopbackDraft.recordUntilStopped = captureManualStopCheck_->isChecked();
+            loopbackDraft.durationSeconds = captureDurationSpin_->value();
+            loopbackDraft.trigger = captureTriggerCheck_->isChecked();
+            loopbackDraft.triggerThresholdDb = triggerThresholdSpin_->value();
+            loopbackDraft.triggerHoldMs = triggerHoldSpin_->value();
+            loopbackDraft.preRollMs = preRollSpin_->value();
+            loopbackDraft.tailThresholdDb = tailThresholdSpin_->value();
+            loopbackDraft.tailSilenceMs = tailSilenceSpin_->value();
+            loopbackDraft.trimLeading = trimLeadingCheck_->isChecked();
+            loopbackDraft.trimTrailing = trimTrailingCheck_->isChecked();
+        }
+    };
+    auto loadDraft = [&](const QString& mode) {
+        if (mode == QStringLiteral("input")) {
+            captureOutputEdit_->setText(inputOutput);
+            captureManualStopCheck_->setChecked(inputDraft.recordUntilStopped);
+            captureDurationSpin_->setValue(inputDraft.durationSeconds);
+            captureCountInCheck_->setChecked(inputDraft.countIn);
+            captureCountInBarsSpin_->setValue(inputDraft.countInBars);
+            captureCountInMetronomeCheck_->setChecked(inputDraft.countInMetronome);
+            captureKeepMetronomeCheck_->setChecked(inputDraft.keepMetronome);
+            recordingLatencyAdjustmentSpin_->setValue(inputDraft.latencyAdjustmentFrames);
+        } else {
+            captureOutputEdit_->setText(loopbackOutput);
+            selectLoopbackSource(loopbackDraft.sourceId, loopbackDraft.sourceName);
+            captureManualStopCheck_->setChecked(loopbackDraft.recordUntilStopped);
+            captureDurationSpin_->setValue(loopbackDraft.durationSeconds);
+            captureTriggerCheck_->setChecked(loopbackDraft.trigger);
+            triggerThresholdSpin_->setValue(loopbackDraft.triggerThresholdDb);
+            triggerHoldSpin_->setValue(loopbackDraft.triggerHoldMs);
+            preRollSpin_->setValue(loopbackDraft.preRollMs);
+            tailThresholdSpin_->setValue(loopbackDraft.tailThresholdDb);
+            tailSilenceSpin_->setValue(loopbackDraft.tailSilenceMs);
+            trimLeadingCheck_->setChecked(loopbackDraft.trimLeading);
+            trimTrailingCheck_->setChecked(loopbackDraft.trimTrailing);
+        }
+        updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_, durationLabel);
+    };
+    auto setRowVisible = [form](QWidget* field, bool visible) {
+        field->setVisible(visible);
+        if (QWidget* label = form->labelForField(field)) label->setVisible(visible);
+    };
+    QString activeMode = modeBox->currentData().toString();
+    auto refreshMode = [&] {
+        const bool inputMode = activeMode == QStringLiteral("input");
+        setRowVisible(engineStatus, inputMode);
+        setRowVisible(latencyRow, inputMode);
+        setRowVisible(countInRow, inputMode);
+        setRowVisible(metronomeRow, inputMode);
+        setRowVisible(sourceRow, !inputMode);
+        setRowVisible(captureTriggerCheck_, !inputMode);
+        setRowVisible(triggerThresholdSpin_, !inputMode);
+        setRowVisible(triggerHoldSpin_, !inputMode);
+        setRowVisible(preRollSpin_, !inputMode);
+        setRowVisible(tailThresholdSpin_, !inputMode);
+        setRowVisible(tailSilenceSpin_, !inputMode);
+        setRowVisible(trimLeadingCheck_, !inputMode);
+        setRowVisible(trimTrailingCheck_, !inputMode);
+        arm->setEnabled(!inputMode || jam2_.isRunning());
+    };
+    loadDraft(activeMode);
+    refreshMode();
+    QObject::connect(modeBox, qOverload<int>(&QComboBox::currentIndexChanged), &dialog, [&](int) {
+        storeDraft(activeMode);
+        activeMode = modeBox->currentData().toString();
+        loadDraft(activeMode);
+        refreshMode();
+    });
+    QObject::connect(refreshSources, &QPushButton::clicked, this, [&] {
+        if (activeMode == QStringLiteral("loopback")) storeDraft(activeMode);
+        refreshLoopbackSources();
+        if (activeMode == QStringLiteral("loopback")) loadDraft(activeMode);
+    });
+
     const int result = dialog.exec();
+    storeDraft(activeMode);
     for (QWidget* widget : widgets) {
         widget->setParent(this);
         widget->hide();
@@ -3085,7 +4244,7 @@ bool MainWindow::armSelectedLooperLaneRecording()
         return false;
     }
     const TrackRecordingWorkflow::CaptureMode captureMode =
-        modeBox->currentData().toString() == QStringLiteral("loopback")
+        activeMode == QStringLiteral("loopback")
         ? TrackRecordingWorkflow::CaptureMode::Loopback
         : TrackRecordingWorkflow::CaptureMode::Input;
     const LooperLaneLocation resolved = findLooperLaneLocation(
@@ -3125,7 +4284,7 @@ void MainWindow::startArmedLooperLaneRecording()
     }
     const bool engineInput =
         trackRecordingWorkflow_.captureMode() == TrackRecordingWorkflow::CaptureMode::Input;
-    if (captureCountInCheck_ && captureCountInCheck_->isChecked()) {
+    if (engineInput && captureCountInCheck_ && captureCountInCheck_->isChecked()) {
         const bool countInMetronome = captureCountInMetronomeCheck_ && captureCountInMetronomeCheck_->isChecked();
         const bool keepMetronome = captureKeepMetronomeCheck_ && captureKeepMetronomeCheck_->isChecked();
         const PlaybackGrid::Position initialGridPosition =
@@ -3607,6 +4766,8 @@ void MainWindow::applyPreparedMixResult(PreparedMixResult result)
         track.filePath = preparedMix_.path;
         track.fileBytes = preparedMix_.fileBytes;
         track.sampleRate = preparedMix_.sampleRate;
+        track.sampleRateCompatible = true;
+        track.userProvidedSource = false;
         track.durationMs = preparedMix_.durationMs;
         track.sha256 = preparedMix_.sha256;
         updateTrackControls();
@@ -3845,6 +5006,7 @@ void MainWindow::loadTrackMetadata()
             trackController_.model().fileBytes = info.size();
             trackController_.model().sampleRate = metadata->sampleRate;
             trackController_.model().sampleRateCompatible = true;
+            trackController_.model().userProvidedSource = true;
             trackController_.model().durationMs = sidecar->value(QStringLiteral("duration_ms")).toInt(metadata->durationMs);
             trackController_.model().sha256 = metadata->sha256;
             trackController_.model().guessedBpm = 0.0;
@@ -5249,10 +6411,13 @@ Jam2RuntimeOptions MainWindow::runtimeOptions() const
     options.stream_ms = streamMsSpin_ ? streamMsSpin_->value() : 0;
     options.stream_linger_ms = streamLingerMsSpin_ ? streamLingerMsSpin_->value() : 100;
     options.stats_enabled = statsCheck_ && statsCheck_->isChecked();
-    options.stats_interval_ms = options.stats_enabled ? 1000 : 0;
+    // The GUI receives its compact diagnostics through the in-process callback.
+    // Logged GUI jams retain a hidden two-second CSV timeline for later analysis.
+    options.stats_interval_ms = 0;
     options.stats_warmup_ms = statsWarmupMsSpin_ ? statsWarmupMsSpin_->value() : 3000;
     if (options.stats_enabled && logStatsEdit_ && !logStatsEdit_->text().trimmed().isEmpty()) {
         options.log_stats_dir = nativeFilePath(logStatsEdit_->text().trimmed());
+        options.stats_interval_ms = 2000;
     }
     if (socketSendBufferSpin_ && socketSendBufferSpin_->value() > 0) {
         options.socket_send_buffer = socketSendBufferSpin_->value();
@@ -5308,6 +6473,7 @@ Jam2RuntimeOptions MainWindow::runtimeOptions() const
     }
     options.audio_device_id = device;
     options.profile_name = (profileBox_ ? profileBox_->currentData().toString() : QStringLiteral("fast")).toStdString();
+    options.session_profile_name = options.profile_name;
     options.audio_buffer_size = bufferSizeSpin_->value();
     options.input_channels = jam2::audio::InputChannels::Mono;
     options.channel_selection.input = parseUiChannels(inputChannelsEdit_->text(), "input");
@@ -5337,6 +6503,10 @@ Jam2RuntimeOptions MainWindow::networkRuntimeOptions(
     options.bootstrap_role = snapshot.role == SharedSessionController::Role::Creator
         ? jam2::SessionBootstrapRole::Creator
         : jam2::SessionBootstrapRole::Joiner;
+    if (snapshot.role == SharedSessionController::Role::Joiner) {
+        options.profile_name = joinProfileName_.toStdString();
+    }
+    options.session_profile_name = snapshot.contract.profile.toStdString();
     options.sample_rate = snapshot.contract.sampleRate;
     options.frame_size = snapshot.contract.frameSize;
     const auto networkAudioFormat = jam2::protocol::parse_audio_format(
@@ -5483,8 +6653,7 @@ bool MainWindow::loadSongJson(const QJsonObject& object)
             }
             lane.sampleRateCompatible = lane.sampleRate > 0 &&
                 lane.sampleRate == expectedSampleRate;
-            needsCompatibilityAudit = needsCompatibilityAudit ||
-                !lane.sampleRateCompatible;
+            needsCompatibilityAudit = true;
         }
     }
     looperProject_ = std::move(loadedLooper);

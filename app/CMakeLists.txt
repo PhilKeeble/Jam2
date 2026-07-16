@@ -115,6 +115,8 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/TrackWorkspaceController.hpp
     gui/TrackWorkspaceSupport.cpp
     gui/TrackWorkspaceSupport.hpp
+    gui/UserPreferences.cpp
+    gui/UserPreferences.hpp
     main.cpp
 )
 

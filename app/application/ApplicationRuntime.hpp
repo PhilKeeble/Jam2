@@ -32,14 +32,15 @@ public:
 
     jam2::EngineSnapshot engineSnapshot() const noexcept;
     jam2::EngineGuiPeakSnapshot consumeGuiPeaks() noexcept;
-    std::optional<jam2::NetworkSessionSnapshot> networkSnapshot() const;
+    std::optional<Jam2NetworkOperationalSnapshot> networkSnapshot() const;
     std::uint64_t engineStarts() const noexcept { return engine_starts_; }
     std::uint64_t engineRestarts() const noexcept { return engine_restarts_; }
     std::uint64_t engineReuses() const noexcept { return engine_reuses_; }
 
     std::function<void(const jam2::EngineSnapshot&)> onEngineSnapshot;
     std::function<void(const jam2::EngineEvent&)> onEngineEvent;
-    std::function<void(const jam2::NetworkSessionSnapshot&)> onNetworkSnapshot;
+    std::function<void(const Jam2NetworkOperationalSnapshot&)> onNetworkSnapshot;
+    std::function<void(const ConnectionDiagnosticsSnapshot&)> onConnectionDiagnostics;
     std::function<void(const Jam2RuntimeStartup&)> onStartup;
     std::function<void(const QString&)> onLog;
     std::function<void(const QString&)> onError;
@@ -48,7 +49,8 @@ public:
 private:
     bool ensureEngine(const Jam2RuntimeOptions& options, bool leaderAudioLocalClick);
     void pollEngine();
-    void publishNetworkSnapshot(jam2::NetworkSessionSnapshot snapshot);
+    void publishNetworkSnapshot(Jam2NetworkOperationalSnapshot snapshot);
+    void publishConnectionDiagnostics(ConnectionDiagnosticsSnapshot snapshot);
 
     std::unique_ptr<jam2::Engine> engine_;
     Jam2RuntimeHost host_;
@@ -56,7 +58,7 @@ private:
     std::atomic<bool> network_running_{false};
     std::atomic<bool> track_sync_enabled_{true};
     mutable std::mutex network_snapshot_mutex_;
-    std::optional<jam2::NetworkSessionSnapshot> network_snapshot_;
+    std::optional<Jam2NetworkOperationalSnapshot> network_snapshot_;
     QTimer poll_timer_;
     std::uint64_t engine_starts_ = 0;
     std::uint64_t engine_restarts_ = 0;

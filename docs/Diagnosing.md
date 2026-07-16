@@ -5,10 +5,10 @@ Jam2 exposes raw technical data so tuning can be based on measured behavior inst
 ## Before A Jam
 
 1. Confirm both players can see their audio devices with `jam2 list-devices`.
-2. Run `test-device` or `meter-device` locally if device setup is uncertain.
+2. Run `test-device <id>` locally, or use **Test Device** in the GUI, if device setup is uncertain.
 3. Use [Connection Test](ConnectionTest.md) to check UDP reachability before debugging Jam2 itself.
 4. Start with a known profile from [Profiles](Profiles.md).
-5. Keep sample rate and frame size identical on both peers.
+5. Let the creator choose the session sample rate and frame size; joiners receive both through the authenticated session contract.
 
 ## Common Symptoms
 
@@ -43,6 +43,14 @@ Enable CSV logging during repeatable tests:
 ```
 
 CSV rows are useful for comparing one change at a time: frame size, audio buffer size, playback prefill, jitter-buffer frames, adaptive cushion, network path, or audio device.
+
+GUI jams write a periodic row every two seconds and a final aggregate row when
+stats are enabled. Use the periodic rows and `network_active_peer_count` when
+analysing a particular connection interval. In particular, separate rows where
+a peer is connected from time after the last peer leaves. A final aggregate row
+spans the whole runtime and by itself cannot attribute increasing counters to
+the connected portion of the jam. Disabling GUI diagnostics also disables this
+collection and CSV path.
 
 For clean post-build checks use [Validation](Validation.md). For controlled
 impairment and recovery use [Stress Tests](StressTests.md), and for real

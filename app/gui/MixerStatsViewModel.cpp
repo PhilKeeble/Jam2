@@ -1,228 +1,89 @@
 #include "MixerStatsViewModel.hpp"
 
-#include <QtGlobal>
+#include <QStringList>
 
 #include <algorithm>
 #include <cmath>
 
 namespace {
 
-bool hasNumber(const QJsonObject& object, const QString& key)
+QString diagnosis(const ConnectionDiagnosticsSnapshot& stats)
 {
-    return object.contains(key) && object.value(key).isDouble();
-}
-
-QString numberText(
-    const QJsonObject& object,
-    const QString& key,
-    const QString& suffix = QString(),
-    int precision = 1)
-{
-    if (!hasNumber(object, key)) {
-        return QStringLiteral("-");
+    if (stats.output_underrun_events > 0) {
+        return QStringLiteral("Diagnosis: output underruns (%1, %2 ms); increase local prefill or buffer")
+            .arg(stats.output_underrun_events)
+            .arg(stats.output_underrun_ms, 0, 'f', 1);
     }
-    return QString::number(object.value(key).toDouble(), 'f', precision) + suffix;
-}
-
-QString integerText(
-    const QJsonObject& object,
-    const QString& key,
-    const QString& fallbackKey = QString())
-{
-    QString actualKey = key;
-    if (!hasNumber(object, actualKey) && !fallbackKey.isEmpty()) {
-        actualKey = fallbackKey;
+    if (stats.packet_loss_percent >= 0.5) {
+        return QStringLiteral("Diagnosis: packet loss %1%; try wired networking or a larger frame size")
+            .arg(stats.packet_loss_percent, 0, 'f', 2);
     }
-    if (!hasNumber(object, actualKey)) {
-        return QStringLiteral("-");
+    const double burstPercent = stats.packet_gap_samples > 0
+        ? static_cast<double>(stats.packet_gap_over_4x) * 100.0 /
+            static_cast<double>(stats.packet_gap_samples)
+        : 0.0;
+    const double latePercent = stats.received_packets > 0
+        ? static_cast<double>(stats.reordered_or_late_packets) * 100.0 /
+            static_cast<double>(stats.received_packets)
+        : 0.0;
+    if (burstPercent >= 0.5 || latePercent >= 0.25) {
+        return QStringLiteral("Diagnosis: jitter/reordering pressure; increase local playout or prefill");
     }
-    return QString::number(static_cast<qlonglong>(object.value(actualKey).toDouble()));
-}
-
-QString durationText(double milliseconds)
-{
-    if (milliseconds >= 1000.0) {
-        return QString::number(milliseconds / 1000.0, 'f', 2) + QStringLiteral(" s");
+    if (stats.callback_gap_over_2x > 0) {
+        return QStringLiteral("Diagnosis: audio callback gaps; try a larger device buffer");
     }
-    return QString::number(milliseconds, 'f', 1) + QStringLiteral(" ms");
-}
-
-QString metricText(
-    const QJsonObject& object,
-    const QString& key,
-    const QString& suffix = QString(),
-    int precision = 1,
-    const QString& fallbackKey = QString())
-{
-    QString actualKey = key;
-    if (!hasNumber(object, actualKey) && !fallbackKey.isEmpty()) {
-        actualKey = fallbackKey;
+    if (stats.drift_clamped_samples > 0 || stats.drift_abs_ppm_max >= 200.0) {
+        return QStringLiteral("Diagnosis: clock drift correction is under pressure; increase local buffering");
     }
-    return numberText(object, actualKey, suffix, precision);
-}
-
-double metricValue(const QJsonObject& object, const QString& key, double fallback = 0.0)
-{
-    return hasNumber(object, key) ? object.value(key).toDouble() : fallback;
-}
-
-double percentOf(double part, double whole)
-{
-    return whole > 0.0 ? part * 100.0 / whole : 0.0;
-}
-
-double perMinute(double count, double elapsedMilliseconds)
-{
-    return elapsedMilliseconds > 0.0 ? count * 60000.0 / elapsedMilliseconds : 0.0;
-}
-
-QString percentText(double value, int precision = 2)
-{
-    return QString::number(value, 'f', precision) + QStringLiteral("%");
-}
-
-QString diagnoseStats(const QJsonObject& stats)
-{
-    if (!hasNumber(stats, QStringLiteral("elapsed_ms"))) {
-        return QStringLiteral("Diagnosis -");
+    const auto highRtt = std::find_if(stats.peers.begin(), stats.peers.end(), [](const auto& peer) {
+        return peer.has_rtt && peer.rtt_ms >= 100.0;
+    });
+    if (highRtt != stats.peers.end()) {
+        return QStringLiteral("Diagnosis: high network RTT; physical distance is limiting latency");
     }
-
-    QStringList findings;
-    const double elapsedMs = metricValue(stats, QStringLiteral("elapsed_ms"));
-    const double recvPackets = metricValue(stats, QStringLiteral("recv_packets"));
-    const double frameSize = metricValue(stats, QStringLiteral("frame_size"));
-    const double receivedFrames = recvPackets * frameSize;
-    const double packetGapSamples = metricValue(stats, QStringLiteral("audio_packet_gap_samples"));
-    const double lossPercent = metricValue(stats, QStringLiteral("sequence_loss_percent"));
-    const double underrunMs = metricValue(stats, QStringLiteral("playback_ring_underrun_time_ms"));
-    const double underrunEvents = metricValue(stats, QStringLiteral("playback_ring_underrun_events"));
-    const double underrunBurstMaxMs = metricValue(stats, QStringLiteral("playback_ring_underrun_burst_max_ms"));
-    const double gapOver4x = metricValue(stats, QStringLiteral("audio_packet_gap_over_4x_count"));
-    const double reorderedLost = metricValue(stats, QStringLiteral("reordered_lost"));
-    const double sequenceLate = metricValue(stats, QStringLiteral("sequence_late"));
-    const double lateFrames = metricValue(stats, QStringLiteral("late_audio_frames_dropped"));
-    const double missingFrames = metricValue(stats, QStringLiteral("missing_audio_frames_inserted"));
-    const double driftPpm = std::abs(metricValue(stats, QStringLiteral("drift_ppm")));
-
-    const double underrunPercent = percentOf(underrunMs, elapsedMs);
-    const double underrunEventsPerMinute = perMinute(underrunEvents, elapsedMs);
-    const double gapOver4xPercent = percentOf(gapOver4x, packetGapSamples);
-    const double gapOver4xPerMinute = perMinute(gapOver4x, elapsedMs);
-    const double reorderLatePercent = percentOf(reorderedLost + sequenceLate, recvPackets);
-    const double lateFramePercent = percentOf(lateFrames, lateFrames + missingFrames + receivedFrames);
-    const double missingPressurePercent = percentOf(missingFrames, missingFrames + lateFrames + receivedFrames);
-
-    if (underrunPercent >= 0.10 || underrunEventsPerMinute >= 2.0 || underrunBurstMaxMs >= 10.0) {
-        findings << QStringLiteral("Underrun %1: +prefill/+max").arg(percentText(underrunPercent));
-    }
-    if (gapOver4xPercent >= 0.50 || gapOver4xPerMinute >= 2.0) {
-        findings << QStringLiteral("Bursts %1: +prefill/+adaptive max").arg(percentText(gapOver4xPercent));
-    }
-    if (lossPercent >= 0.50) {
-        findings << QStringLiteral("Loss %1: +frame/wired").arg(
-            metricText(stats, QStringLiteral("sequence_loss_percent"), QStringLiteral("%"), 2));
-    }
-    if (reorderLatePercent >= 0.25 || lateFramePercent >= 0.25) {
-        findings << QStringLiteral("Late/reorder %1: +playout").arg(
-            percentText(qMax(reorderLatePercent, lateFramePercent)));
-    }
-    if (missingPressurePercent >= 0.25 && findings.size() < 2) {
-        findings << QStringLiteral("Missing %1: +playout/prefill").arg(
-            percentText(missingPressurePercent));
-    }
-    if (driftPpm >= 200.0 && findings.size() < 2) {
-        findings << QStringLiteral("Drift %1ppm: +correction").arg(
-            metricText(stats, QStringLiteral("drift_ppm"), QString{}, 0));
-    }
-
-    if (findings.isEmpty()) {
-        return QStringLiteral("Diagnosis OK");
-    }
-    while (findings.size() > 2) {
-        findings.removeLast();
-    }
-    return QStringLiteral("Diagnosis ") + findings.join(QStringLiteral(" | "));
-}
-
-double jsonPeak(const QJsonObject& stats, const char* name)
-{
-    return std::clamp(stats.value(QLatin1StringView(name)).toDouble(0.0), 0.0, 1.0);
+    return QStringLiteral("Diagnosis OK");
 }
 
 } // namespace
 
-MixerStatsLabels MixerStatsViewModel::present(const QJsonObject& stats) const
+MixerStatsLabels MixerStatsViewModel::present(const ConnectionDiagnosticsSnapshot* stats) const
 {
-    MixerStatsLabels labels;
-    QString latency = metricText(stats, QStringLiteral("estimated_one_way_ms"), QStringLiteral(" ms"));
-    if (latency == QStringLiteral("-")) {
-        latency = metricText(stats, QStringLiteral("rtt_avg_ms"), QStringLiteral(" ms"));
+    if (stats == nullptr) {
+        return {
+            QStringLiteral("RTT -"), {}, QStringLiteral("Jitter -"),
+            QStringLiteral("Loss -"), QStringLiteral("Underruns -"),
+            QStringLiteral("Diagnosis -"),
+        };
     }
-    labels.latency = QStringLiteral("Latency ") + latency;
-    labels.jitter = QStringLiteral("Jitter %1/%2 gap %3").arg(
-        metricText(stats, QStringLiteral("jitter_avg_ms"), QStringLiteral(" ms")),
-        metricText(stats, QStringLiteral("jitter_max_ms"), QStringLiteral(" ms")),
-        metricText(stats, QStringLiteral("audio_packet_gap_max_ms"), QStringLiteral(" ms")));
-    labels.loss = QStringLiteral("Loss %1 lost %2 ev %3 max %4p")
-        .arg(metricText(stats, QStringLiteral("sequence_loss_percent"), QStringLiteral("%"), 2))
-        .arg(integerText(stats, QStringLiteral("sequence_lost")))
-        .arg(integerText(stats, QStringLiteral("sequence_loss_events")))
-        .arg(integerText(stats, QStringLiteral("sequence_loss_max_gap")));
-    labels.depth = QStringLiteral("Depth ") + metricText(
-        stats,
-        QStringLiteral("playback_depth_avg_ms"),
-        QStringLiteral(" ms"),
-        1,
-        QStringLiteral("playback_depth_ms"));
 
-    QString outOfOrder = integerText(stats, QStringLiteral("sequence_out_of_order"));
-    if (outOfOrder == QStringLiteral("-")) {
-        outOfOrder = integerText(stats, QStringLiteral("out_of_order"));
+    QStringList visiblePeers;
+    QStringList allPeers;
+    for (std::size_t index = 0; index < stats->peers.size(); ++index) {
+        const auto& peer = stats->peers[index];
+        const QString value = peer.has_rtt
+            ? QStringLiteral("P%1 %2 ms").arg(index + 1).arg(peer.rtt_ms, 0, 'f', 1)
+            : QStringLiteral("P%1 -").arg(index + 1);
+        allPeers.push_back(value);
+        if (index < 4) visiblePeers.push_back(value);
     }
-    QString latePackets = integerText(stats, QStringLiteral("sequence_late"));
-    if (latePackets == QStringLiteral("-")) {
-        latePackets = integerText(stats, QStringLiteral("late"));
+    QString latency = visiblePeers.isEmpty()
+        ? QStringLiteral("RTT -")
+        : QStringLiteral("RTT ") + visiblePeers.join(QStringLiteral(" · "));
+    if (stats->peers.size() > 4) {
+        latency += QStringLiteral(" · +%1").arg(stats->peers.size() - 4);
     }
-    labels.reorder = QStringLiteral("Reorder oo %1 rec %2 lost %3 late %4 max %5p")
-        .arg(outOfOrder)
-        .arg(integerText(stats, QStringLiteral("reordered_recovered")))
-        .arg(integerText(stats, QStringLiteral("reordered_lost")))
-        .arg(latePackets)
-        .arg(integerText(stats, QStringLiteral("reordered_max_distance_packets")));
-
-    QString underrun = QStringLiteral("-");
-    if (hasNumber(stats, QStringLiteral("playback_ring_underrun_time_ms"))) {
-        underrun = durationText(stats.value(QStringLiteral("playback_ring_underrun_time_ms")).toDouble());
-        if (hasNumber(stats, QStringLiteral("playback_ring_underrun_events"))) {
-            underrun += QStringLiteral(" ev %1").arg(
-                integerText(stats, QStringLiteral("playback_ring_underrun_events")));
-        }
-        if (hasNumber(stats, QStringLiteral("playback_ring_underrun_event_max_ms"))) {
-            underrun += QStringLiteral(" max %1").arg(metricText(
-                stats,
-                QStringLiteral("playback_ring_underrun_event_max_ms"),
-                QStringLiteral(" ms")));
-        }
-        if (hasNumber(stats, QStringLiteral("playback_ring_underrun_burst_max_ms"))) {
-            underrun += QStringLiteral(" burst %1").arg(metricText(
-                stats,
-                QStringLiteral("playback_ring_underrun_burst_max_ms"),
-                QStringLiteral(" ms")));
-        }
-    } else if (hasNumber(stats, QStringLiteral("playback_ring_underruns"))) {
-        underrun = integerText(stats, QStringLiteral("playback_ring_underruns")) + QStringLiteral(" fr");
+    QString underrun = QStringLiteral("Underruns %1").arg(stats->output_underrun_events);
+    if (stats->output_underrun_frames > 0) {
+        underrun += QStringLiteral(" (%1 ms)").arg(stats->output_underrun_ms, 0, 'f', 1);
     }
-    labels.underrun = QStringLiteral("Underrun ") + underrun;
-    labels.stalls = QStringLiteral("Stall loop %1 burst %2p gap>2x %3 missing %4 latefr %5")
-        .arg(metricText(stats, QStringLiteral("receive_loop_gap_max_ms"), QStringLiteral(" ms")))
-        .arg(integerText(stats, QStringLiteral("receive_burst_packets_max")))
-        .arg(integerText(stats, QStringLiteral("audio_packet_gap_over_2x_count")))
-        .arg(integerText(stats, QStringLiteral("missing_audio_frames_inserted")))
-        .arg(integerText(stats, QStringLiteral("late_audio_frames_dropped")));
-    labels.drift = QStringLiteral("Drift ") +
-        metricText(stats, QStringLiteral("drift_ppm"), QStringLiteral(" ppm"));
-    labels.diagnosis = diagnoseStats(stats);
-    return labels;
+    return {
+        latency,
+        allPeers.join(QStringLiteral("\n")),
+        QStringLiteral("Jitter %1 ms").arg(stats->jitter_average_ms, 0, 'f', 1),
+        QStringLiteral("Loss %1%").arg(stats->packet_loss_percent, 0, 'f', 2),
+        underrun,
+        diagnosis(*stats),
+    };
 }
 
 MixerMeterLevels MixerStatsViewModel::consume(
@@ -240,24 +101,7 @@ MixerMeterLevels MixerStatsViewModel::consume(
     return levels_;
 }
 
-MixerMeterLevels MixerStatsViewModel::consumeStructured(const QJsonObject& stats)
-{
-    levels_.input = decay(levels_.input, jsonPeak(stats, "input_peak"));
-    levels_.send = decay(levels_.send, jsonPeak(stats, "send_peak"));
-    levels_.monitor = decay(levels_.monitor, jsonPeak(stats, "monitor_peak"));
-    levels_.remote = decay(levels_.remote, jsonPeak(stats, "remote_peak"));
-    levels_.metronome = decay(levels_.metronome, jsonPeak(stats, "metronome_peak"));
-    levels_.output = decay(levels_.output, jsonPeak(stats, "output_peak"));
-    levels_.outputClippedSamples = static_cast<std::uint64_t>(std::max(
-        0.0,
-        stats.value(QStringLiteral("output_clipped_samples")).toDouble(0.0)));
-    return levels_;
-}
-
-void MixerStatsViewModel::reset() noexcept
-{
-    levels_ = {};
-}
+void MixerStatsViewModel::reset() noexcept { levels_ = {}; }
 
 double MixerStatsViewModel::normalized(int peakPpm) noexcept
 {

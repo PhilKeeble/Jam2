@@ -2,9 +2,17 @@ import unittest
 
 from jam2test.profiles import FAST_PROFILE, configure_native_profiles, variant
 from jam2test.native import NativeCapabilities
+from jam2test.scenarios import expand_scenarios
 
 
 class ProfileTests(unittest.TestCase):
+    def test_asymmetric_profile_comparison_expands_both_roles_and_control(self):
+        cases = expand_scenarios(["asymmetric-profile-comparison"])
+        self.assertEqual(6, len(cases))
+        self.assertIn("asymmetric-fast-create-safe-join-clean", cases)
+        self.assertIn("asymmetric-safe-create-fast-join-pressure", cases)
+        self.assertIn("asymmetric-safe-create-safe-join-pressure", cases)
+
     def test_native_base_and_sparse_override_are_distinct(self):
         configure_native_profiles({"profiles": [{"name": "fast", "frame_size": 64,
                                                    "playback_ring_frames": 4096}]})

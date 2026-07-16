@@ -31,6 +31,7 @@
 #include <QTableWidgetItem>
 #include <QTabWidget>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -65,6 +66,14 @@ void MainWindowPages::build(MainWindow& w)
         w.showLocalPerformSetup();
     });
     header->addWidget(w.localEngineButton_);
+    auto* settingsButton = new QToolButton(&w);
+    settingsButton->setText(QString(QChar(0x2699)));
+    settingsButton->setToolTip(QStringLiteral("Audio and jam defaults"));
+    settingsButton->setAccessibleName(QStringLiteral("Settings"));
+    QObject::connect(settingsButton, &QToolButton::clicked, &w, [&w] {
+        w.showSettingsDialog();
+    });
+    header->addWidget(settingsButton);
     header->addWidget(w.engineModeLabel_);
     header->addWidget(w.connectionLabel_);
     header->addWidget(w.sessionTopologyLabel_);
@@ -158,18 +167,10 @@ void MainWindowPages::build(MainWindow& w)
     };
     w.lyricGrid_->onGridResized = w.beatGrid_->onGridResized;
 
-    w.latencyLabel_ = new QLabel(QStringLiteral("Latency -"), &w);
+    w.latencyLabel_ = new QLabel(QStringLiteral("RTT -"), &w);
     w.latencyLabel_->setObjectName(QStringLiteral("StatusPill"));
-    w.depthLabel_ = new QLabel(QStringLiteral("Depth -"), &w);
-    w.depthLabel_->setObjectName(QStringLiteral("StatusPill"));
-    w.ringDepthLabel_ = new QLabel(QStringLiteral("Ring -"), &w);
-    w.ringDepthLabel_->setObjectName(QStringLiteral("StatusPill"));
-    w.underrunLabel_ = new QLabel(QStringLiteral("Underrun -"), &w);
+    w.underrunLabel_ = new QLabel(QStringLiteral("Underruns -"), &w);
     w.underrunLabel_->setObjectName(QStringLiteral("StatusPill"));
-    w.missingFramesLabel_ = new QLabel(QStringLiteral("Missing -"), &w);
-    w.missingFramesLabel_->setObjectName(QStringLiteral("StatusPill"));
-    w.driftLabel_ = new QLabel(QStringLiteral("Drift -"), &w);
-    w.driftLabel_->setObjectName(QStringLiteral("StatusPill"));
     w.diagnosisLabel_ = new QLabel(QStringLiteral("Diagnosis -"), &w);
     w.diagnosisLabel_->setObjectName(QStringLiteral("StatusPill"));
     w.diagnosisLabel_->setMinimumWidth(260);
@@ -178,11 +179,7 @@ void MainWindowPages::build(MainWindow& w)
     footer->addWidget(w.latencyLabel_);
     footer->addWidget(w.jitterLabel_);
     footer->addWidget(w.lossLabel_);
-    footer->addWidget(w.depthLabel_);
-    footer->addWidget(w.ringDepthLabel_);
     footer->addWidget(w.underrunLabel_);
-    footer->addWidget(w.missingFramesLabel_);
-    footer->addWidget(w.driftLabel_);
     footer->addStretch(1);
     footer->addWidget(w.diagnosisLabel_);
 
@@ -236,8 +233,11 @@ QWidget* MainWindowPages::buildSessionPage(MainWindow& w)
     w.streamLingerMsSpin_ = new QSpinBox(page);
     w.streamLingerMsSpin_->setRange(0, 60000);
     w.streamLingerMsSpin_->setValue(100);
-    w.statsCheck_ = new QCheckBox(QStringLiteral("Periodic stats"), page);
+    w.statsCheck_ = new QCheckBox(QStringLiteral("Connection diagnostics"), page);
     w.statsCheck_->setChecked(true);
+    QObject::connect(w.statsCheck_, &QCheckBox::toggled, &w, [&w](bool enabled) {
+        if (!enabled) w.updateStatsDisplay(nullptr);
+    });
     w.meshMaxPeersSpin_ = new QSpinBox(page);
     w.meshMaxPeersSpin_->setRange(0, 1000000);
     w.meshMaxPeersSpin_->setValue(0);
@@ -254,7 +254,7 @@ QWidget* MainWindowPages::buildSessionPage(MainWindow& w)
     w.socketRecvBufferSpin_->setValue(0);
 
     w.profileBox_ = new QComboBox(page);
-    for (const jam2::TuningProfile& profile : jam2::tuning_profiles()) {
+    for (const jam2::CreateProfile& profile : jam2::create_profiles()) {
         w.profileBox_->addItem(QString::fromUtf8(profile.label.data(), static_cast<qsizetype>(profile.label.size())),
                              QString::fromUtf8(profile.name.data(), static_cast<qsizetype>(profile.name.size())));
     }

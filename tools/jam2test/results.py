@@ -501,6 +501,9 @@ def protocol_verdict_for(result):
         if metrics.get("sent_packets_min", 0.0) <= 0.0 or metrics.get("recv_packets_min", 0.0) <= 0.0:
             return "network_audio_packets_missing"
     scenario = result.get("source_scenario") or result.get("scenario", "")
+    if scenario.startswith("asymmetric-") and not result.get(
+            "asymmetric_profile_contract_valid", False):
+        return "asymmetric_profile_contract_not_applied"
     if scenario == "clean-control":
         if metrics.get("loss_percent_max", 0.0) > 0.0:
             return "unexpected_loss"

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from jam2test.validation import (
     ValidationReporter,
+    _csv_full_mesh_contract,
     _listener_compensation_contract,
     _mesh_edge_summaries,
     _startup_events,
@@ -60,6 +61,21 @@ class ValidationReportingTests(unittest.TestCase):
             self.assertTrue(edges["7"]["endpoint_proof_verified"])
             self.assertEqual(edges["7"]["sent_packets"], 100)
             self.assertEqual(edges["7"]["recv_packets"], 99)
+
+    def test_structured_csv_full_mesh_contract_survives_final_teardown_row(self):
+        summary = {
+            "has_csv": True,
+            "network_peer_count": 0,
+            "network_active_peer_count": 0,
+            "network_peer_count_observed_max": 3,
+            "network_active_peer_count_observed_max": 3,
+            "sent_packets": 1000,
+            "recv_packets": 999,
+            "udp_authentication_failed": 0,
+        }
+        self.assertTrue(_csv_full_mesh_contract(summary, 3))
+        summary["network_active_peer_count_observed_max"] = 2
+        self.assertFalse(_csv_full_mesh_contract(summary, 3))
 
     def test_listener_compensation_contract_requires_all_peers_and_average_target(self):
         csv_summary = {

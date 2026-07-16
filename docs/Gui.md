@@ -16,7 +16,9 @@ On the creator's machine:
 If session startup fails, Jam2 shows one modal **Start Jam failed** dialog with the detailed in-process network error instead of relying on console output.
 On success, the **Jam Ready** invite window is non-modal: logging and session startup continue while it remains open, and closing it does not affect the jam.
 
-Use the same profile, sample rate, and frame size on both machines. Each player still chooses their own local device and channel numbers.
+The creator's profile selects the session sample rate and frame size. Each
+player independently chooses a local profile, audio device, channels, callback
+buffer, prefill, and jitter/playout settings.
 
 ## Join A Jam
 
@@ -24,11 +26,12 @@ On the joining machine:
 
 1. Open `jam2`.
 2. Paste the `jam2://...` URL into **Join Jam**.
-3. Choose the local audio device and channels.
+3. Choose the local audio device, channels, and Join profile.
 4. The sample rate, network frame size, and named session profile are received
    from the creator before network audio starts. Device, channels, levels, and
    local tolerance/tuning controls remain local choices.
-5. Connect.
+5. Connect. Choosing `safe` here changes only this machine's receive/playback
+   tolerance; it does not change the creator or the jam packet format.
 
 If the connection fails, Jam2 shows one modal **Join Jam failed** dialog with the detailed in-process network error. Use the connection test tool described in [Connection Test](ConnectionTest.md) if more detail is needed.
 
@@ -41,13 +44,37 @@ The GUI exposes the useful live controls from the engine:
 - Change metronome mode.
 - Adjust local metronome level.
 - Adjust local remote playback level or mute the remote peer.
-- Enable stats and CSV logging while testing.
+- Enable or disable connection diagnostics while testing.
 
 These controls submit fixed-shape typed commands directly to the in-process engine; they do not use a child process, stdin, loopback control socket, binary framing, or JSONL state reconstruction.
 
+## Settings And Device Tests
+
+The cog in the header opens persistent Audio, Create Connection, Create
+Defaults, Join Defaults, Logs, and Recording settings. Create and Join keep
+separate local tuning profiles; the creator still owns session-wide values such
+as session sample rate, frame size, and audio quality. Discovery and public
+endpoint defaults apply only when creating a jam.
+
+Local, Start, and Join setup use fixed 44100/48000 sample-rate and
+32/64/128/256 buffer-size choices. **Test Device** reports the device's current
+rate and which of those combinations can open, using an in-app silent result
+dialog. Changing active Local Audio settings restarts the local engine; if the
+new configuration cannot start, Jam2 attempts to restore the previous one.
+Audio hardware controls are disabled while a jam is active.
+
+The Logs tab selects one folder for GUI event logs and network stats CSV files.
+Recording defaults are independent for Perform Input and System Loopback, with
+separate output folders and a preferred recording mode.
+
 ## Stats
 
-The GUI displays hard measurements from the engine. The most useful fields while tuning are packet loss, jitter, RTT, playback depth, underruns, overruns, drift ppm, resampler ratio, receive loop stalls, and callback gaps.
+Every two seconds the GUI displays a deliberately small diagnostic set: RTT per
+peer, weighted average jitter, interval packet loss, local output underruns,
+and one diagnosis hint. When diagnostics are disabled these fields stay at
+`-`, and the optional collection/aggregation path is not run. Detailed raw
+measurements are written as hidden two-second CSV samples plus a final row for
+post-jam analysis; they are not printed periodically to GUI stdout.
 
 For repeatable comparisons, enable stats logging and compare the generated CSV files. See [Diagnosing](Diagnosing.md) for what the common stats mean.
 
@@ -97,7 +124,15 @@ Perform recording waits for a safe next whole bar, performs the grid-aligned cou
 
 ## Track Recording From The GUI
 
-The GUI records Perform input takes through the running engine and records loopback takes internally, then imports the resulting WAV into the armed Track lane.
+The GUI records Perform Input takes through the already-loaded local or network
+engine and records System Loopback takes internally, then imports the resulting
+WAV into the armed Track lane. Perform Input therefore has no separate device,
+channel, sample-rate, or buffer selector. It exposes duration/stop behavior,
+count-in and metronome behavior, and manual latency adjustment. System Loopback
+instead exposes its preferred source, duration/stop behavior, trigger,
+threshold, hold, pre-roll, tail, and trim controls; it has no Perform Input
+count-in, metronome, latency, or ASIO controls. Arm-dialog changes apply to that
+take only and do not overwrite the saved defaults.
 
 The Arm dialog identifies its target by stable bank and lane IDs. If a synchronized arrangement update removes that lane or switches the active bank while the dialog is open, arming is cancelled with a warning instead of using stale lane storage.
 

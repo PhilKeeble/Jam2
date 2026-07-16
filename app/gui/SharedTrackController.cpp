@@ -120,6 +120,7 @@ void SharedTrackController::applyProcessingMessage(const QJsonObject& message)
     model_.speed = message.value(QStringLiteral("speed")).toDouble(model_.speed);
     model_.fileName = message.value(QStringLiteral("file_name")).toString(model_.fileName);
     model_.filePath = message.value(QStringLiteral("file_path")).toString(model_.filePath);
+    model_.userProvidedSource = false;
     model_.fileBytes = static_cast<qint64>(message.value(QStringLiteral("file_bytes")).toDouble(model_.fileBytes));
     model_.sampleRate = message.value(QStringLiteral("sample_rate")).toInt(model_.sampleRate);
     model_.durationMs = message.value(QStringLiteral("duration_ms")).toInt(model_.durationMs);

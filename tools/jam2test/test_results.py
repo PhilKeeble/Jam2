@@ -45,6 +45,12 @@ def normal_result(scenario="clean-control", **metric_overrides):
 
 
 class CsvSummaryTests(unittest.TestCase):
+    def test_asymmetric_pressure_uses_explicit_minimum_duration(self):
+        self.assertEqual(18000, _effective_stream_ms({
+            "minimum_stream_ms": 18000,
+            "source_scenario": "asymmetric-safe-create-fast-join-pressure",
+        }, 5000))
+
     def test_listener_compensated_verdict_requires_both_peer_contracts(self):
         result = normal_result("metronome-listener-compensated-metro-pulse")
         result["metrics"]["combined"].update({

@@ -155,36 +155,6 @@ void require_asio_ok(ASIOError error, const char* operation)
     }
 }
 
-int sample_bytes(ASIOSampleType type)
-{
-    switch (type) {
-    case ASIOSTInt16LSB:
-    case ASIOSTInt16MSB:
-        return 2;
-    case ASIOSTInt24LSB:
-    case ASIOSTInt24MSB:
-        return 3;
-    case ASIOSTInt32LSB:
-    case ASIOSTInt32MSB:
-    case ASIOSTInt32LSB16:
-    case ASIOSTInt32LSB18:
-    case ASIOSTInt32LSB20:
-    case ASIOSTInt32LSB24:
-    case ASIOSTInt32MSB16:
-    case ASIOSTInt32MSB18:
-    case ASIOSTInt32MSB20:
-    case ASIOSTInt32MSB24:
-    case ASIOSTFloat32LSB:
-    case ASIOSTFloat32MSB:
-        return 4;
-    case ASIOSTFloat64LSB:
-    case ASIOSTFloat64MSB:
-        return 8;
-    default:
-        return 0;
-    }
-}
-
 std::string asio_sample_type_name(ASIOSampleType type)
 {
     switch (type) {
@@ -248,30 +218,6 @@ std::string channel_range_error(
         << " channel(s)";
     return out.str();
 }
-
-struct MeterContext {
-    ASIOBufferInfo* input = nullptr;
-    ASIOBufferInfo* output = nullptr;
-    long buffer_size = 0;
-    ASIOSampleType input_type = ASIOSTInt32LSB;
-    ASIOSampleType output_type = ASIOSTInt32LSB;
-    std::atomic<long> callbacks{0};
-    std::atomic<int> peak_ppm{0};
-};
-
-MeterContext* g_meter_context = nullptr;
-
-struct RingContext {
-    ASIOBufferInfo* input = nullptr;
-    ASIOBufferInfo* output = nullptr;
-    long buffer_size = 0;
-    ASIOSampleType input_type = ASIOSTInt32LSB;
-    ASIOSampleType output_type = ASIOSTInt32LSB;
-    MonoRingBuffer* ring = nullptr;
-    std::atomic<long> callbacks{0};
-};
-
-RingContext* g_ring_context = nullptr;
 
 struct DuplexContext {
     std::vector<ASIOBufferInfo*> inputs;
@@ -363,65 +309,6 @@ void observe_callback_interval(DuplexContext& context)
     }
 }
 
-int read_signed24_lsb(const std::uint8_t* bytes)
-{
-    int value = static_cast<int>(bytes[0]) |
-        (static_cast<int>(bytes[1]) << 8) |
-        (static_cast<int>(bytes[2]) << 16);
-    if ((value & 0x00800000) != 0) {
-        value |= static_cast<int>(0xff000000);
-    }
-    return value;
-}
-
-int read_signed24_msb(const std::uint8_t* bytes)
-{
-    int value = (static_cast<int>(bytes[0]) << 16) |
-        (static_cast<int>(bytes[1]) << 8) |
-        static_cast<int>(bytes[2]);
-    if ((value & 0x00800000) != 0) {
-        value |= static_cast<int>(0xff000000);
-    }
-    return value;
-}
-
-double sample_abs(const void* data, long index, ASIOSampleType type)
-{
-    const auto* bytes = static_cast<const std::uint8_t*>(data);
-    switch (type) {
-    case ASIOSTInt16LSB: {
-        std::int16_t value = 0;
-        std::memcpy(&value, bytes + index * 2, sizeof(value));
-        return std::abs(static_cast<double>(value)) / 32768.0;
-    }
-    case ASIOSTInt24LSB:
-        return std::abs(static_cast<double>(read_signed24_lsb(bytes + index * 3))) / 8388608.0;
-    case ASIOSTInt24MSB:
-        return std::abs(static_cast<double>(read_signed24_msb(bytes + index * 3))) / 8388608.0;
-    case ASIOSTInt32LSB:
-    case ASIOSTInt32LSB16:
-    case ASIOSTInt32LSB18:
-    case ASIOSTInt32LSB20:
-    case ASIOSTInt32LSB24: {
-        std::int32_t value = 0;
-        std::memcpy(&value, bytes + index * 4, sizeof(value));
-        return std::abs(static_cast<double>(value)) / 2147483648.0;
-    }
-    case ASIOSTFloat32LSB: {
-        float value = 0.0F;
-        std::memcpy(&value, bytes + index * 4, sizeof(value));
-        return std::abs(static_cast<double>(value));
-    }
-    case ASIOSTFloat64LSB: {
-        double value = 0.0;
-        std::memcpy(&value, bytes + index * 8, sizeof(value));
-        return std::abs(value);
-    }
-    default:
-        return 0.0;
-    }
-}
-
 void update_peak(std::atomic<int>& peak, int candidate)
 {
     int current = peak.load(std::memory_order_relaxed);
@@ -454,91 +341,16 @@ void observe_peak(std::atomic<int>& peak, std::span<const std::int32_t> samples)
     update_peak(peak, i32_peak_ppm(samples));
 }
 
-void meter_buffer_switch(long double_buffer_index, ASIOBool)
-{
-    MeterContext* context = g_meter_context;
-    if (context == nullptr) {
-        return;
-    }
-
-    if (context->output != nullptr && context->output->buffers[double_buffer_index] != nullptr) {
-        const int bytes_per_sample = sample_bytes(context->output_type);
-        if (bytes_per_sample > 0) {
-            std::memset(
-                context->output->buffers[double_buffer_index],
-                0,
-                static_cast<std::size_t>(bytes_per_sample) * static_cast<std::size_t>(context->buffer_size));
-        }
-    }
-
-    double peak = 0.0;
-    if (context->input != nullptr && context->input->buffers[double_buffer_index] != nullptr) {
-        for (long i = 0; i < context->buffer_size; ++i) {
-            const double value = sample_abs(context->input->buffers[double_buffer_index], i, context->input_type);
-            if (value > peak) {
-                peak = value;
-            }
-        }
-    }
-    const int peak_ppm = static_cast<int>((peak > 1.0 ? 1.0 : peak) * 1000000.0);
-    update_peak(context->peak_ppm, peak_ppm);
-    context->callbacks.fetch_add(1, std::memory_order_relaxed);
-}
-
-void meter_sample_rate_changed(ASIOSampleRate)
+void asio_sample_rate_changed(ASIOSampleRate)
 {
 }
 
-long meter_asio_message(long selector, long, void*, double*)
+long asio_message(long selector, long, void*, double*)
 {
     if (selector == kAsioSelectorSupported || selector == kAsioEngineVersion) {
         return 2;
     }
     return 0;
-}
-
-ASIOTime* meter_buffer_switch_time_info(ASIOTime* params, long double_buffer_index, ASIOBool direct_process)
-{
-    meter_buffer_switch(double_buffer_index, direct_process);
-    return params;
-}
-
-void ring_buffer_switch(long double_buffer_index, ASIOBool)
-{
-    RingContext* context = g_ring_context;
-    if (context == nullptr || context->ring == nullptr) {
-        return;
-    }
-
-    if (context->input != nullptr &&
-        context->input->buffers[double_buffer_index] != nullptr &&
-        context->input_type == ASIOSTInt32LSB) {
-        const auto* input = static_cast<const std::int32_t*>(context->input->buffers[double_buffer_index]);
-        context->ring->push(std::span<const std::int32_t>(input, static_cast<std::size_t>(context->buffer_size)));
-    }
-
-    if (context->output != nullptr &&
-        context->output->buffers[double_buffer_index] != nullptr &&
-        context->output_type == ASIOSTInt32LSB) {
-        auto* output = static_cast<std::int32_t*>(context->output->buffers[double_buffer_index]);
-        context->ring->pop(std::span<std::int32_t>(output, static_cast<std::size_t>(context->buffer_size)));
-    }
-
-    context->callbacks.fetch_add(1, std::memory_order_relaxed);
-}
-
-long ring_asio_message(long selector, long, void*, double*)
-{
-    if (selector == kAsioSelectorSupported || selector == kAsioEngineVersion) {
-        return 2;
-    }
-    return 0;
-}
-
-ASIOTime* ring_buffer_switch_time_info(ASIOTime* params, long double_buffer_index, ASIOBool direct_process)
-{
-    ring_buffer_switch(double_buffer_index, direct_process);
-    return params;
 }
 
 void mix_metronome_click(DuplexContext& context, std::span<std::int32_t> output, std::span<std::int32_t> metronome_stem)
@@ -1026,34 +838,6 @@ ASIOTime* duplex_buffer_switch_time_info(ASIOTime* params, long double_buffer_in
     return params;
 }
 
-class AsioBuffers {
-public:
-    explicit AsioBuffers(IASIO* driver) : driver_(driver) {}
-    ~AsioBuffers()
-    {
-        if (started_) {
-            (void)driver_->stop();
-        }
-        if (created_) {
-            (void)driver_->disposeBuffers();
-        }
-        g_meter_context = nullptr;
-        g_ring_context = nullptr;
-        g_duplex_context = nullptr;
-    }
-
-    AsioBuffers(const AsioBuffers&) = delete;
-    AsioBuffers& operator=(const AsioBuffers&) = delete;
-
-    void mark_created() { created_ = true; }
-    void mark_started() { started_ = true; }
-
-private:
-    IASIO* driver_ = nullptr;
-    bool created_ = false;
-    bool started_ = false;
-};
-
 class WindowsDeviceStream final : public DeviceStream {
 public:
     WindowsDeviceStream(
@@ -1126,8 +910,8 @@ public:
     void start()
     {
         callbacks_.bufferSwitch = duplex_buffer_switch;
-        callbacks_.sampleRateDidChange = meter_sample_rate_changed;
-        callbacks_.asioMessage = ring_asio_message;
+        callbacks_.sampleRateDidChange = asio_sample_rate_changed;
+        callbacks_.asioMessage = asio_message;
         callbacks_.bufferSwitchTimeInfo = duplex_buffer_switch_time_info;
 
         g_duplex_context = &context_;
@@ -1310,7 +1094,7 @@ std::vector<DeviceInfo> list_devices()
     return devices;
 }
 
-DeviceProbe probe_device(int id, double requested_sample_rate)
+DeviceTestResult test_device(int id)
 {
     const auto devices = list_devices();
     if (id < 0 || static_cast<std::size_t>(id) >= devices.size()) {
@@ -1354,301 +1138,47 @@ DeviceProbe probe_device(int id, double requested_sample_rate)
         throw std::runtime_error(text.empty() ? "ASIO init failed" : "ASIO init failed: " + text);
     }
 
-    DeviceProbe probe;
-    probe.device = device;
-    std::array<char, 128> driver_name{};
-    driver.get()->getDriverName(driver_name.data());
-    probe.driver_name = driver_name.data();
-    probe.driver_version = driver.get()->getDriverVersion();
-    require_asio_ok(driver.get()->getChannels(&probe.input_channels, &probe.output_channels), "ASIO getChannels");
-    require_asio_ok(driver.get()->getLatencies(&probe.input_latency_samples, &probe.output_latency_samples), "ASIO getLatencies");
+    DeviceTestResult capabilities;
+    capabilities.device = device;
+    long input_channels = 0;
+    long output_channels = 0;
+    require_asio_ok(driver.get()->getChannels(&input_channels, &output_channels), "ASIO getChannels");
+    long min_buffer_size = 0;
+    long max_buffer_size = 0;
+    long preferred_buffer_size = 0;
+    long buffer_granularity = 0;
     require_asio_ok(
         driver.get()->getBufferSize(
-            &probe.min_buffer_size,
-            &probe.max_buffer_size,
-            &probe.preferred_buffer_size,
-            &probe.buffer_granularity),
+            &min_buffer_size,
+            &max_buffer_size,
+            &preferred_buffer_size,
+            &buffer_granularity),
         "ASIO getBufferSize");
 
     ASIOSampleRate current_rate = 0.0;
     const ASIOError rate_error = driver.get()->getSampleRate(&current_rate);
     if (rate_error == ASE_OK || rate_error == ASE_SUCCESS) {
-        probe.current_sample_rate = current_rate;
+        capabilities.current_sample_rate = current_rate;
     }
-    const ASIOError can_rate = driver.get()->canSampleRate(requested_sample_rate);
-    probe.requested_sample_rate_supported = can_rate == ASE_OK || can_rate == ASE_SUCCESS;
-    return probe;
-}
-
-DeviceMeterResult meter_device(int id, double requested_sample_rate, long buffer_size, int duration_ms)
-{
-    if (duration_ms <= 0) {
-        throw std::runtime_error("meter duration must be positive");
+    for (std::size_t index = 0; index < kTestSampleRates.size(); ++index) {
+        const ASIOError result = driver.get()->canSampleRate(kTestSampleRates[index]);
+        capabilities.sample_rate_supported[index] = result == ASE_OK || result == ASE_SUCCESS;
     }
-    const auto devices = list_devices();
-    if (id < 0 || static_cast<std::size_t>(id) >= devices.size()) {
-        throw std::runtime_error("audio device id is out of range");
-    }
-    const DeviceInfo& device = devices[static_cast<std::size_t>(id)];
-    if (device.clsid.empty()) {
-        throw std::runtime_error("selected ASIO device has no CLSID");
-    }
-
-    ComRuntime com;
-    wchar_t wide_clsid[64]{};
-    const int converted = MultiByteToWideChar(
-        CP_UTF8,
-        0,
-        device.clsid.c_str(),
-        -1,
-        wide_clsid,
-        static_cast<int>(std::size(wide_clsid)));
-    if (converted <= 0) {
-        throw std::runtime_error("failed to convert ASIO CLSID");
-    }
-
-    CLSID clsid{};
-    HRESULT hr = CLSIDFromString(wide_clsid, &clsid);
-    if (FAILED(hr)) {
-        throw std::runtime_error("CLSIDFromString failed: " + hresult_text(hr));
-    }
-
-    IASIO* raw_driver = nullptr;
-    hr = CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, clsid, reinterpret_cast<void**>(&raw_driver));
-    if (FAILED(hr) || raw_driver == nullptr) {
-        throw std::runtime_error("CoCreateInstance failed for ASIO driver: " + hresult_text(hr));
-    }
-    AsioDriver driver(raw_driver);
-
-    if (driver.get()->init(GetConsoleWindow()) != ASIOTrue) {
-        std::array<char, 256> message{};
-        driver.get()->getErrorMessage(message.data());
-        const std::string text = message.data();
-        throw std::runtime_error(text.empty() ? "ASIO init failed" : "ASIO init failed: " + text);
-    }
-
-    long input_channels = 0;
-    long output_channels = 0;
-    require_asio_ok(driver.get()->getChannels(&input_channels, &output_channels), "ASIO getChannels");
-    if (input_channels <= 0 || output_channels <= 0) {
-        throw std::runtime_error("ASIO meter requires at least one input and one output channel");
-    }
-
-    long min_buffer = 0;
-    long max_buffer = 0;
-    long preferred_buffer = 0;
-    long granularity = 0;
-    require_asio_ok(driver.get()->getBufferSize(&min_buffer, &max_buffer, &preferred_buffer, &granularity), "ASIO getBufferSize");
-    if (buffer_size <= 0) {
-        buffer_size = preferred_buffer;
-    }
-    if (buffer_size < min_buffer || buffer_size > max_buffer) {
-        throw std::runtime_error("requested ASIO buffer size is outside the device min/max range");
-    }
-
-    ASIOSampleRate current_rate = 0.0;
-    (void)driver.get()->getSampleRate(&current_rate);
-    if (requested_sample_rate > 0.0 && current_rate != requested_sample_rate) {
-        const ASIOError can_rate = driver.get()->canSampleRate(requested_sample_rate);
-        if (can_rate != ASE_OK && can_rate != ASE_SUCCESS) {
-            throw std::runtime_error("requested ASIO sample rate is not supported");
+    for (std::size_t index = 0; index < kTestBufferSizes.size(); ++index) {
+        const long size = kTestBufferSizes[index];
+        bool supported = size >= min_buffer_size && size <= max_buffer_size;
+        if (supported && min_buffer_size == max_buffer_size) {
+            supported = size == min_buffer_size;
+        } else if (supported && buffer_granularity == -1) {
+            supported = size > 0 && (size & (size - 1)) == 0;
+        } else if (supported && buffer_granularity == 0) {
+            supported = size == preferred_buffer_size;
+        } else if (supported && buffer_granularity > 0) {
+            supported = (size - min_buffer_size) % buffer_granularity == 0;
         }
-        require_asio_ok(driver.get()->setSampleRate(requested_sample_rate), "ASIO setSampleRate");
-        (void)driver.get()->getSampleRate(&current_rate);
+        capabilities.buffer_size_supported[index] = supported;
     }
-
-    ASIOChannelInfo input_info{};
-    input_info.channel = 0;
-    input_info.isInput = ASIOTrue;
-    require_asio_ok(driver.get()->getChannelInfo(&input_info), "ASIO getChannelInfo input");
-
-    ASIOChannelInfo output_info{};
-    output_info.channel = 0;
-    output_info.isInput = ASIOFalse;
-    require_asio_ok(driver.get()->getChannelInfo(&output_info), "ASIO getChannelInfo output");
-    if (sample_bytes(input_info.type) == 0 || sample_bytes(output_info.type) == 0) {
-        throw std::runtime_error("ASIO sample type is not supported by the meter probe");
-    }
-
-    std::array<ASIOBufferInfo, 2> buffers{};
-    buffers[0].isInput = ASIOTrue;
-    buffers[0].channelNum = 0;
-    buffers[1].isInput = ASIOFalse;
-    buffers[1].channelNum = 0;
-
-    MeterContext context;
-    context.input = &buffers[0];
-    context.output = &buffers[1];
-    context.buffer_size = buffer_size;
-    context.input_type = input_info.type;
-    context.output_type = output_info.type;
-
-    ASIOCallbacks callbacks{};
-    callbacks.bufferSwitch = meter_buffer_switch;
-    callbacks.sampleRateDidChange = meter_sample_rate_changed;
-    callbacks.asioMessage = meter_asio_message;
-    callbacks.bufferSwitchTimeInfo = meter_buffer_switch_time_info;
-
-    AsioBuffers session(driver.get());
-    g_meter_context = &context;
-    require_asio_ok(driver.get()->createBuffers(buffers.data(), static_cast<long>(buffers.size()), buffer_size, &callbacks), "ASIO createBuffers");
-    session.mark_created();
-    require_asio_ok(driver.get()->start(), "ASIO start");
-    session.mark_started();
-    Sleep(static_cast<DWORD>(duration_ms));
-
-    DeviceMeterResult result;
-    result.device = device;
-    result.sample_rate = current_rate;
-    result.buffer_size = buffer_size;
-    result.callbacks = context.callbacks.load(std::memory_order_relaxed);
-    result.input_sample_type = input_info.type;
-    result.output_sample_type = output_info.type;
-    result.input_peak = static_cast<double>(context.peak_ppm.load(std::memory_order_relaxed)) / 1000000.0;
-    return result;
-}
-
-DeviceRingResult ring_device(
-    int id,
-    double requested_sample_rate,
-    long buffer_size,
-    int duration_ms,
-    std::size_t ring_capacity_frames)
-{
-    if (duration_ms <= 0) {
-        throw std::runtime_error("ring duration must be positive");
-    }
-    if (ring_capacity_frames == 0) {
-        throw std::runtime_error("ring capacity must be positive");
-    }
-    const auto devices = list_devices();
-    if (id < 0 || static_cast<std::size_t>(id) >= devices.size()) {
-        throw std::runtime_error("audio device id is out of range");
-    }
-    const DeviceInfo& device = devices[static_cast<std::size_t>(id)];
-    if (device.clsid.empty()) {
-        throw std::runtime_error("selected ASIO device has no CLSID");
-    }
-
-    ComRuntime com;
-    wchar_t wide_clsid[64]{};
-    const int converted = MultiByteToWideChar(
-        CP_UTF8,
-        0,
-        device.clsid.c_str(),
-        -1,
-        wide_clsid,
-        static_cast<int>(std::size(wide_clsid)));
-    if (converted <= 0) {
-        throw std::runtime_error("failed to convert ASIO CLSID");
-    }
-
-    CLSID clsid{};
-    HRESULT hr = CLSIDFromString(wide_clsid, &clsid);
-    if (FAILED(hr)) {
-        throw std::runtime_error("CLSIDFromString failed: " + hresult_text(hr));
-    }
-
-    IASIO* raw_driver = nullptr;
-    hr = CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, clsid, reinterpret_cast<void**>(&raw_driver));
-    if (FAILED(hr) || raw_driver == nullptr) {
-        throw std::runtime_error("CoCreateInstance failed for ASIO driver: " + hresult_text(hr));
-    }
-    AsioDriver driver(raw_driver);
-
-    if (driver.get()->init(GetConsoleWindow()) != ASIOTrue) {
-        std::array<char, 256> message{};
-        driver.get()->getErrorMessage(message.data());
-        const std::string text = message.data();
-        throw std::runtime_error(text.empty() ? "ASIO init failed" : "ASIO init failed: " + text);
-    }
-
-    long input_channels = 0;
-    long output_channels = 0;
-    require_asio_ok(driver.get()->getChannels(&input_channels, &output_channels), "ASIO getChannels");
-    if (input_channels <= 0 || output_channels <= 0) {
-        throw std::runtime_error("ASIO ring validation requires at least one input and one output channel");
-    }
-
-    long min_buffer = 0;
-    long max_buffer = 0;
-    long preferred_buffer = 0;
-    long granularity = 0;
-    require_asio_ok(driver.get()->getBufferSize(&min_buffer, &max_buffer, &preferred_buffer, &granularity), "ASIO getBufferSize");
-    if (buffer_size <= 0) {
-        buffer_size = preferred_buffer;
-    }
-    if (buffer_size < min_buffer || buffer_size > max_buffer) {
-        throw std::runtime_error("requested ASIO buffer size is outside the device min/max range");
-    }
-    if (ring_capacity_frames < static_cast<std::size_t>(buffer_size)) {
-        throw std::runtime_error("ring capacity must be at least one ASIO buffer");
-    }
-
-    ASIOSampleRate current_rate = 0.0;
-    (void)driver.get()->getSampleRate(&current_rate);
-    if (requested_sample_rate > 0.0 && current_rate != requested_sample_rate) {
-        const ASIOError can_rate = driver.get()->canSampleRate(requested_sample_rate);
-        if (can_rate != ASE_OK && can_rate != ASE_SUCCESS) {
-            throw std::runtime_error("requested ASIO sample rate is not supported");
-        }
-        require_asio_ok(driver.get()->setSampleRate(requested_sample_rate), "ASIO setSampleRate");
-        (void)driver.get()->getSampleRate(&current_rate);
-    }
-
-    ASIOChannelInfo input_info{};
-    input_info.channel = 0;
-    input_info.isInput = ASIOTrue;
-    require_asio_ok(driver.get()->getChannelInfo(&input_info), "ASIO getChannelInfo input");
-
-    ASIOChannelInfo output_info{};
-    output_info.channel = 0;
-    output_info.isInput = ASIOFalse;
-    require_asio_ok(driver.get()->getChannelInfo(&output_info), "ASIO getChannelInfo output");
-    if (input_info.type != ASIOSTInt32LSB || output_info.type != ASIOSTInt32LSB) {
-        throw std::runtime_error("ASIO ring validation currently supports Int32LSB input/output only");
-    }
-
-    std::array<ASIOBufferInfo, 2> buffers{};
-    buffers[0].isInput = ASIOTrue;
-    buffers[0].channelNum = 0;
-    buffers[1].isInput = ASIOFalse;
-    buffers[1].channelNum = 0;
-
-    MonoRingBuffer ring(ring_capacity_frames);
-    RingContext context;
-    context.input = &buffers[0];
-    context.output = &buffers[1];
-    context.buffer_size = buffer_size;
-    context.input_type = input_info.type;
-    context.output_type = output_info.type;
-    context.ring = &ring;
-
-    ASIOCallbacks callbacks{};
-    callbacks.bufferSwitch = ring_buffer_switch;
-    callbacks.sampleRateDidChange = meter_sample_rate_changed;
-    callbacks.asioMessage = ring_asio_message;
-    callbacks.bufferSwitchTimeInfo = ring_buffer_switch_time_info;
-
-    AsioBuffers session(driver.get());
-    g_ring_context = &context;
-    require_asio_ok(driver.get()->createBuffers(buffers.data(), static_cast<long>(buffers.size()), buffer_size, &callbacks), "ASIO createBuffers");
-    session.mark_created();
-    require_asio_ok(driver.get()->start(), "ASIO start");
-    session.mark_started();
-    Sleep(static_cast<DWORD>(duration_ms));
-
-    const auto ring_stats = ring.stats();
-    DeviceRingResult result;
-    result.device = device;
-    result.sample_rate = current_rate;
-    result.buffer_size = buffer_size;
-    result.callbacks = context.callbacks.load(std::memory_order_relaxed);
-    result.ring_overruns = ring_stats.overruns;
-    result.ring_underruns = ring_stats.underruns;
-    result.ring_underrun_events = ring_stats.underrun_events;
-    result.ring_readable = ring.available_read();
-    return result;
+    return capabilities;
 }
 
 std::unique_ptr<DeviceStream> start_duplex_stream(

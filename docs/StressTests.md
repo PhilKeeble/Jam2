@@ -99,6 +99,17 @@ native scheduled actions, and expected technical behavior live in
 
 - Baselines: `clean-control`, `clean-fast-control`,
   `clean-moderate-control`, `clean-safe-control`.
+- Asymmetric local-profile comparison: select the macro
+  `asymmetric-profile-comparison` to run Fast-creator/Safe-joiner,
+  Safe-creator/Fast-joiner, and Safe/Safe controls in both clean and
+  bidirectional jitter/burst-pressure forms. Results record the creator-owned
+  session profile separately from each peer's local profile and expose the
+  latency, jitter, RTT, and playback-depth fields needed for comparison.
+  Headless runs retain the harness's common synthetic callback size so Windows
+  scheduler resolution does not distort the frame-based duration; the named
+  profiles still supply their distinct prefill, rings, jitter/playout,
+  adaptive-cushion, and drift values. Use physical devices for callback-buffer
+  comparisons.
 - Delay, jitter, loss, and ordering: `jitter-20`, `jitter-50`, `jitter-100`,
   `burst-pause-250`, `burst-pause-500`, `burst-pause-1500`,
   `transient-stall-recovery`, `transient-stall-250-recovery`, `loss-0.1`,

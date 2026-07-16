@@ -7,12 +7,12 @@
 
 namespace jam2 {
 
-struct TuningProfile {
+// Local receive/playback tuning. These values belong to one participant and
+// may differ between peers in the same session.
+struct JoinProfile {
     std::string_view name;
     std::string_view label;
-    int sample_rate;
     long audio_buffer_size;
-    int frame_size;
     std::size_t playback_prefill_frames;
     std::size_t playback_ring_frames;
     std::size_t playback_max_frames;
@@ -33,9 +33,21 @@ struct TuningProfile {
     int adaptive_playback_ratio_ramp_ms;
 };
 
-std::span<const TuningProfile> tuning_profiles();
-const TuningProfile* find_tuning_profile(std::string_view name);
-const TuningProfile& default_tuning_profile();
+// Creator-owned session packetization plus the creator's local tuning.
+struct CreateProfile {
+    std::string_view name;
+    std::string_view label;
+    int sample_rate;
+    int frame_size;
+    const JoinProfile* local;
+};
+
+std::span<const JoinProfile> join_profiles();
+std::span<const CreateProfile> create_profiles();
+const JoinProfile* find_join_profile(std::string_view name);
+const CreateProfile* find_create_profile(std::string_view name);
+const JoinProfile& default_join_profile();
+const CreateProfile& default_create_profile();
 std::string tuning_profile_names();
 
 } // namespace jam2
