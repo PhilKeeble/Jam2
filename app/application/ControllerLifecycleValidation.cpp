@@ -266,9 +266,13 @@ QJsonObject jam2RunControllerLifecycleValidation(
             QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
         }
     }
+    const bool preAuthSocketsRetired = pumpUntil([&] {
+        return creator.serverStats().retiredSocketHighWater >= 3;
+    }, 500);
     check(QStringLiteral("controller.pre-auth-challenge-immediate-and-repeatable"),
         repeatedPreAuthDisconnectsSafe && preAuthChallenges == 3 &&
-            creator.serverStats().acceptedConnections >= 3);
+            creator.serverStats().acceptedConnections >= 3 &&
+            preAuthSocketsRetired);
 
     const quint64 acceptedBeforeClosedBacklog = creator.serverStats().acceptedConnections;
     int closedBacklogConnections = 0;
@@ -545,7 +549,8 @@ QJsonObject jam2RunControllerLifecycleValidation(
     }
     check(QStringLiteral("controller.established-disconnect-auto-reconnect"),
         autoReconnected && joinerCapture.reconnectScheduled >= 1 &&
-            joinerCapture.maxReconnectAttempts >= 1 && joiner.snapshot().reconnectAttempts == 0);
+            joinerCapture.maxReconnectAttempts >= 1 && joiner.snapshot().reconnectAttempts == 0 &&
+            joiner.clientStats().retiredSocketHighWater >= 1);
 
     const quint64 revisionBeforeRefresh = joiner.snapshot().membershipRevision;
     bool manualRefreshReconnected = false;

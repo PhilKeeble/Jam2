@@ -1,4 +1,4 @@
-## Thoughts
+## Tweaks
 
 make sample rate a dropdown for 44100 or 48000 maybe?? how often does it land on something else? Maybe consider for other values like audio buffer size etc so its discreet values
 
@@ -31,10 +31,11 @@ ask about 8,000..384,000-Hz range for sample rate
 loopback recording dialogue box has empty options that are currently there for input 
 
 mac bug was caused by a use after free vuln, i should look for more of these throughout the code
+second crash through another pointer issue with Qt, should look over error handling and make sure all GUI / TCP side elements are robust and have proper exception handling
 
 join jam doesnt expose using a different network profile like safe even though asymmetrical profiles should be supported, could help with one on wired, one on wifi deals
 
-## bugs
+## Bugs
 
 when mac is server it crashes
 

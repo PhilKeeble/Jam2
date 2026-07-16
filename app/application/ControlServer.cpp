@@ -12,6 +12,14 @@ using namespace jam2::control_protocol;
 
 namespace {
 
+// Cocoa can still have a native CFSocket delivery queued after Qt reports a
+// TCP socket disconnected. Keep the QObject alive long enough for those
+// deliveries to drain instead of immediately recycling its notifier address.
+constexpr int kSocketRetirementDelayMs = 60000;
+constexpr qsizetype kMaxRetiredControlSockets =
+    jam2::control_protocol::kMaxPendingPeers +
+    jam2::control_protocol::kMaxAuthenticationFailuresPerWindow;
+
 bool validUdpEndpointText(const QString& endpoint)
 {
     if (endpoint.isEmpty()) {
@@ -43,6 +51,7 @@ ControlServer::ControlServer(QObject* parent)
 bool ControlServer::listen(quint16 port, const QString& sessionHex, const QString& keyHex)
 {
     close();
+    purgeRetiredSockets();
     sessionHex_ = sessionHex.toLower();
     masterKey_ = decodeHex(keyHex, 16);
     if (decodeHex(sessionHex_, 8).size() != 8 || masterKey_.size() != 16) {
@@ -61,6 +70,7 @@ bool ControlServer::listen(quint16 port, const QString& sessionHex, const QStrin
             QStringLiteral("TCP control listen failed: ") + server_.errorString()});
         return false;
     }
+    acceptingPausedForRetirement_ = false;
     publishEvent(TransportEvent{
         TransportEventType::Listening,
         TransportFailure::None,
@@ -74,12 +84,11 @@ void ControlServer::close()
     peers_.clear();
     for (const PeerHandle& peer : peers) {
         if (peer->socket) {
-            peer->socket->disconnect(this);
-            peer->socket->abort();
-            peer->socket->deleteLater();
+            retireSocket(peer->socket.data());
         }
     }
     server_.close();
+    acceptingPausedForRetirement_ = false;
     masterKey_.clear();
 }
 
@@ -218,20 +227,21 @@ bool ControlServer::authenticationWorkAvailable()
 void ControlServer::acceptPeer()
 {
     while (server_.hasPendingConnections()) {
+        if (applyRetirementBackpressure()) {
+            return;
+        }
         QTcpSocket* socket = server_.nextPendingConnection();
         if (!socket) {
             return;
         }
         if (!authenticationWorkAvailable()) {
             ++stats_.authenticationRateLimitRejects;
-            socket->abort();
-            socket->deleteLater();
+            retireSocket(socket);
             continue;
         }
         if (pendingPeerCount() >= kMaxPendingPeers) {
             ++stats_.pendingCapRejects;
-            socket->abort();
-            socket->deleteLater();
+            retireSocket(socket);
             continue;
         }
 
@@ -289,7 +299,7 @@ void ControlServer::acceptPeer()
                     QStringLiteral("TCP peer disconnected"),
                     false,
                     wasAuthenticated});
-                socket->deleteLater();
+                retireSocket(socket);
                 return;
             }
         });
@@ -381,6 +391,9 @@ void ControlServer::readPeer(const PeerHandle& peer)
                 }
             } else if (onBinaryMessage) {
                 onBinaryMessage(peer->token, payload.binary);
+            }
+            if (!peer->socket || !findPeer(peer->socket.data())) {
+                return;
             }
         }
     }
@@ -535,7 +548,7 @@ void ControlServer::rejectPeer(
     bool abort)
 {
     QPointer<QTcpSocket> socket = peer ? peer->socket : nullptr;
-    if (!socket) {
+    if (!socket || !findPeer(socket.data())) {
         return;
     }
     publishEvent(TransportEvent{
@@ -544,11 +557,11 @@ void ControlServer::rejectPeer(
         reason,
         false,
         peer->authenticated});
-    if (!socket) {
+    if (!socket || !findPeer(socket.data())) {
         return;
     }
     if (abort) {
-        socket->abort();
+        socket->disconnectFromHost();
         return;
     }
     const QByteArray errorFrame = encodeHandshake(QJsonObject{
@@ -561,6 +574,82 @@ void ControlServer::rejectPeer(
     if (socket) {
         socket->disconnectFromHost();
     }
+}
+
+void ControlServer::retireSocket(QTcpSocket* socket)
+{
+    if (!socket) {
+        return;
+    }
+    purgeRetiredSockets();
+    for (const QPointer<QTcpSocket>& retired : retiredSockets_) {
+        if (retired == socket) {
+            return;
+        }
+    }
+
+    socket->disconnect(this);
+    if (socket->state() != QAbstractSocket::UnconnectedState) {
+        // A graceful close lets Qt unwind its platform notifier in its normal
+        // event path. In particular, do not abort and destroy the notifier
+        // while Cocoa may already have a delivery queued for it.
+        socket->disconnectFromHost();
+    }
+    const QPointer<QTcpSocket> guardedSocket(socket);
+    retiredSockets_.push_back(guardedSocket);
+    stats_.retiredSockets = static_cast<quint64>(retiredSockets_.size());
+    stats_.retiredSocketHighWater = std::max(
+        stats_.retiredSocketHighWater,
+        stats_.retiredSockets);
+
+    QTimer::singleShot(kSocketRetirementDelayMs, this, [this, guardedSocket] {
+        completeSocketRetirement(guardedSocket);
+    });
+}
+
+void ControlServer::completeSocketRetirement(const QPointer<QTcpSocket>& socket)
+{
+    if (socket && socket->state() != QAbstractSocket::UnconnectedState) {
+        socket->disconnectFromHost();
+        QTimer::singleShot(1000, this, [this, socket] {
+            completeSocketRetirement(socket);
+        });
+        return;
+    }
+    if (socket) {
+        socket->deleteLater();
+    }
+    QTimer::singleShot(0, this, [this] {
+        purgeRetiredSockets();
+        if (acceptingPausedForRetirement_ && server_.isListening() &&
+            retiredSockets_.size() < kMaxRetiredControlSockets) {
+            acceptingPausedForRetirement_ = false;
+            server_.resumeAccepting();
+            acceptPeer();
+        }
+    });
+}
+
+void ControlServer::purgeRetiredSockets()
+{
+    retiredSockets_.removeIf([](const QPointer<QTcpSocket>& socket) {
+        return socket.isNull();
+    });
+    stats_.retiredSockets = static_cast<quint64>(retiredSockets_.size());
+}
+
+bool ControlServer::applyRetirementBackpressure()
+{
+    purgeRetiredSockets();
+    if (retiredSockets_.size() < kMaxRetiredControlSockets) {
+        return false;
+    }
+    if (!acceptingPausedForRetirement_) {
+        acceptingPausedForRetirement_ = true;
+        ++stats_.retirementBackpressureEvents;
+        server_.pauseAccepting();
+    }
+    return true;
 }
 
 void ControlServer::publishEvent(TransportEvent event)

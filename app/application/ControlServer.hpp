@@ -30,6 +30,9 @@ public:
         quint64 framesSent = 0;
         quint64 maxBufferedInputBytes = 0;
         quint64 maxQueuedOutputBytes = 0;
+        quint64 retiredSockets = 0;
+        quint64 retiredSocketHighWater = 0;
+        quint64 retirementBackpressureEvents = 0;
     };
 
     explicit ControlServer(QObject* parent = nullptr);
@@ -83,6 +86,10 @@ private:
         jam2::control_protocol::TransportFailure failure,
         bool abort = false);
     void publishEvent(jam2::control_protocol::TransportEvent event);
+    void retireSocket(QTcpSocket* socket);
+    void completeSocketRetirement(const QPointer<QTcpSocket>& socket);
+    void purgeRetiredSockets();
+    bool applyRetirementBackpressure();
     PeerHandle findPeer(QTcpSocket* socket) const;
     int authenticatedPeerCount() const;
     int pendingPeerCount() const;
@@ -91,6 +98,8 @@ private:
 
     QTcpServer server_;
     QList<PeerHandle> peers_;
+    QList<QPointer<QTcpSocket>> retiredSockets_;
+    bool acceptingPausedForRetirement_ = false;
     QString sessionHex_;
     QByteArray masterKey_;
     QElapsedTimer authenticationFailureWindow_;

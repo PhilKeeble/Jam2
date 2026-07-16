@@ -3,6 +3,8 @@
 #include "ControlProtocol.hpp"
 
 #include <QJsonObject>
+#include <QList>
+#include <QPointer>
 #include <QTcpSocket>
 #include <QTimer>
 
@@ -21,6 +23,8 @@ public:
         quint64 framesSent = 0;
         quint64 maxBufferedInputBytes = 0;
         quint64 maxQueuedOutputBytes = 0;
+        quint64 retiredSockets = 0;
+        quint64 retiredSocketHighWater = 0;
     };
 
     explicit ControlClient(QObject* parent = nullptr);
@@ -50,9 +54,13 @@ private:
         Authenticated,
     };
 
-    void readSocket();
+    void installSocket(QTcpSocket* socket);
+    void readSocket(QTcpSocket* socket);
     void handleHandshake(const QJsonObject& message);
     bool writeFrame(const QByteArray& frame);
+    void retireSocket(QTcpSocket* socket);
+    void completeSocketRetirement(const QPointer<QTcpSocket>& socket);
+    void purgeRetiredSockets();
     void reject(
         const QString& reason,
         jam2::control_protocol::TransportFailure failure,
@@ -60,7 +68,8 @@ private:
         bool retryable = false);
     void publishEvent(jam2::control_protocol::TransportEvent event);
 
-    QTcpSocket socket_;
+    QPointer<QTcpSocket> socket_;
+    QList<QPointer<QTcpSocket>> retiredSockets_;
     QTimer authenticationTimer_;
     QTimer frameTimer_;
     QByteArray buffer_;

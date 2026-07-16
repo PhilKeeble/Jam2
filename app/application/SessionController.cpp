@@ -1414,6 +1414,9 @@ private:
                 {QStringLiteral("tag_or_sequence_rejects"), static_cast<qint64>(controlServerStats.sequenceOrTagRejects)},
                 {QStringLiteral("input_high_water_bytes"), static_cast<qint64>(controlServerStats.maxBufferedInputBytes)},
                 {QStringLiteral("output_high_water_bytes"), static_cast<qint64>(controlServerStats.maxQueuedOutputBytes)},
+                {QStringLiteral("retired_sockets"), static_cast<qint64>(controlServerStats.retiredSockets)},
+                {QStringLiteral("retired_socket_high_water"), static_cast<qint64>(controlServerStats.retiredSocketHighWater)},
+                {QStringLiteral("retirement_backpressure_events"), static_cast<qint64>(controlServerStats.retirementBackpressureEvents)},
             }},
             {QStringLiteral("control_client"), QJsonObject{
                 {QStringLiteral("authentication_rejects"), static_cast<qint64>(controlClientStats.authenticationRejects)},
@@ -1421,6 +1424,8 @@ private:
                 {QStringLiteral("tag_or_sequence_rejects"), static_cast<qint64>(controlClientStats.sequenceOrTagRejects)},
                 {QStringLiteral("input_high_water_bytes"), static_cast<qint64>(controlClientStats.maxBufferedInputBytes)},
                 {QStringLiteral("output_high_water_bytes"), static_cast<qint64>(controlClientStats.maxQueuedOutputBytes)},
+                {QStringLiteral("retired_sockets"), static_cast<qint64>(controlClientStats.retiredSockets)},
+                {QStringLiteral("retired_socket_high_water"), static_cast<qint64>(controlClientStats.retiredSocketHighWater)},
             }},
         };
         if (automationChannel_) {

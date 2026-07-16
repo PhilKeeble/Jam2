@@ -8,6 +8,12 @@
 
 using namespace jam2::control_protocol;
 
+namespace {
+
+constexpr int kSocketRetirementDelayMs = 60000;
+
+} // namespace
+
 ControlClient::ControlClient(QObject* parent)
     : QObject(parent)
 {
@@ -31,8 +37,17 @@ ControlClient::ControlClient(QObject* parent)
                 true);
         }
     });
-    QObject::connect(&socket_, &QTcpSocket::connected, this, [this] {
-        socket_.setReadBufferSize(kMaxJsonBytes + kAuthenticatedHeaderBytes + 4);
+}
+
+void ControlClient::installSocket(QTcpSocket* socket)
+{
+    socket_ = socket;
+    const QPointer<QTcpSocket> guardedSocket(socket);
+    QObject::connect(socket, &QTcpSocket::connected, this, [this, guardedSocket] {
+        if (!guardedSocket || socket_ != guardedSocket) {
+            return;
+        }
+        guardedSocket->setReadBufferSize(kMaxJsonBytes + kAuthenticatedHeaderBytes + 4);
         failureReportedForAttempt_ = false;
         authenticationTimer_.start(kAuthenticationDeadlineMs);
         publishEvent(TransportEvent{
@@ -40,10 +55,15 @@ ControlClient::ControlClient(QObject* parent)
             TransportFailure::None,
             QStringLiteral("TCP connected; waiting for bounded auth challenge")});
     });
-    QObject::connect(&socket_, &QTcpSocket::readyRead, this, [this] { readSocket(); });
-    QObject::connect(&socket_, &QTcpSocket::errorOccurred, this,
-        [this](QAbstractSocket::SocketError socketError) {
-            if (manualClose_ || failureReportedForAttempt_ ||
+    QObject::connect(socket, &QTcpSocket::readyRead, this, [this, guardedSocket] {
+        if (guardedSocket && socket_ == guardedSocket) {
+            readSocket(guardedSocket.data());
+        }
+    });
+    QObject::connect(socket, &QTcpSocket::errorOccurred, this,
+        [this, guardedSocket](QAbstractSocket::SocketError socketError) {
+            if (!guardedSocket || socket_ != guardedSocket || manualClose_ ||
+                failureReportedForAttempt_ ||
                 socketError == QAbstractSocket::RemoteHostClosedError) {
                 return;
             }
@@ -59,16 +79,20 @@ ControlClient::ControlClient(QObject* parent)
             publishEvent(TransportEvent{
                 TransportEventType::Failure,
                 failure,
-                QStringLiteral("TCP control transport error: ") + socket_.errorString(),
+                QStringLiteral("TCP control transport error: ") + guardedSocket->errorString(),
                 true});
         });
-    QObject::connect(&socket_, &QTcpSocket::disconnected, this, [this] {
+    QObject::connect(socket, &QTcpSocket::disconnected, this, [this, guardedSocket] {
+        if (!guardedSocket || socket_ != guardedSocket) {
+            return;
+        }
         const bool wasAuthenticated = handshakeState_ == HandshakeState::Authenticated;
         authenticationTimer_.stop();
         frameTimer_.stop();
         handshakeState_ = HandshakeState::WaitingForChallenge;
         receiveKey_.clear();
         sendKey_.clear();
+        socket_.clear();
         if (!manualClose_) {
             publishEvent(TransportEvent{
                 TransportEventType::Disconnected,
@@ -77,6 +101,7 @@ ControlClient::ControlClient(QObject* parent)
                 true,
                 wasAuthenticated});
         }
+        retireSocket(guardedSocket.data());
     });
 }
 
@@ -110,7 +135,9 @@ void ControlClient::connectToHost(
         TransportEventType::Connecting,
         TransportFailure::None,
         QStringLiteral("TCP control connecting")});
-    socket_.connectToHost(host, port);
+    auto* socket = new QTcpSocket(this);
+    installSocket(socket);
+    socket->connectToHost(host, port);
 }
 
 void ControlClient::close()
@@ -125,7 +152,11 @@ void ControlClient::close()
     receiveKey_.clear();
     sendKey_.clear();
     handshakeState_ = HandshakeState::WaitingForChallenge;
-    socket_.abort();
+    const QPointer<QTcpSocket> socket = socket_;
+    socket_.clear();
+    if (socket) {
+        retireSocket(socket.data());
+    }
 }
 
 bool ControlClient::send(const QJsonObject& message)
@@ -157,19 +188,23 @@ bool ControlClient::sendBinary(const QByteArray& payload)
 bool ControlClient::canQueue(qint64 additionalBytes) const
 {
     return isConnected() && additionalBytes >= 0 && additionalBytes <= kOutputHighWaterBytes &&
-        socket_.bytesToWrite() <= kOutputHighWaterBytes - additionalBytes;
+        socket_->bytesToWrite() <= kOutputHighWaterBytes - additionalBytes;
 }
 
 bool ControlClient::isConnected() const
 {
-    return socket_.state() == QTcpSocket::ConnectedState &&
+    return socket_ && socket_->state() == QTcpSocket::ConnectedState &&
         handshakeState_ == HandshakeState::Authenticated;
 }
 
-void ControlClient::readSocket()
+void ControlClient::readSocket(QTcpSocket* expectedSocket)
 {
+    const QPointer<QTcpSocket> socket = socket_;
+    if (!socket || socket != expectedSocket) {
+        return;
+    }
     readScheduled_ = false;
-    buffer_ += socket_.readAll();
+    buffer_ += socket->readAll();
     stats_.maxBufferedInputBytes = std::max<quint64>(stats_.maxBufferedInputBytes, buffer_.size());
 
     int handled = 0;
@@ -208,7 +243,8 @@ void ControlClient::readSocket()
                 return;
             }
             handleHandshake(message);
-            if (socket_.state() == QAbstractSocket::UnconnectedState) {
+            if (!socket_ || socket_ != socket ||
+                socket->state() == QAbstractSocket::UnconnectedState) {
                 return;
             }
         } else {
@@ -229,14 +265,18 @@ void ControlClient::readSocket()
             } else if (onBinaryMessage) {
                 onBinaryMessage(payload.binary);
             }
+            if (!socket_ || socket_ != socket) {
+                return;
+            }
         }
     }
 
     if (!buffer_.isEmpty() && !readScheduled_) {
         readScheduled_ = true;
-        QTimer::singleShot(0, this, [this] {
-            if (socket_.state() != QAbstractSocket::UnconnectedState) {
-                readSocket();
+        QTimer::singleShot(0, this, [this, socket] {
+            if (socket && socket_ == socket &&
+                socket->state() != QAbstractSocket::UnconnectedState) {
+                readSocket(socket.data());
             }
         });
     }
@@ -336,10 +376,12 @@ void ControlClient::handleHandshake(const QJsonObject& message)
 
 bool ControlClient::writeFrame(const QByteArray& frame)
 {
-    if (frame.isEmpty() || socket_.state() == QAbstractSocket::UnconnectedState) {
+    const QPointer<QTcpSocket> socket = socket_;
+    if (!socket || frame.isEmpty() ||
+        socket->state() == QAbstractSocket::UnconnectedState) {
         return false;
     }
-    const qint64 queued = socket_.bytesToWrite();
+    const qint64 queued = socket->bytesToWrite();
     stats_.maxQueuedOutputBytes = std::max<quint64>(stats_.maxQueuedOutputBytes, queued);
     if (queued + frame.size() > kOutputHighWaterBytes) {
         ++stats_.outputHighWaterRejects;
@@ -350,7 +392,7 @@ bool ControlClient::writeFrame(const QByteArray& frame)
             true);
         return false;
     }
-    if (socket_.write(frame) != frame.size()) {
+    if (socket->write(frame) != frame.size()) {
         reject(
             QStringLiteral("TCP control write failed"),
             TransportFailure::WriteFailed,
@@ -358,8 +400,14 @@ bool ControlClient::writeFrame(const QByteArray& frame)
             true);
         return false;
     }
+    if (!socket || socket_ != socket ||
+        socket->state() == QAbstractSocket::UnconnectedState) {
+        return false;
+    }
     ++stats_.framesSent;
-    stats_.maxQueuedOutputBytes = std::max<quint64>(stats_.maxQueuedOutputBytes, socket_.bytesToWrite());
+    stats_.maxQueuedOutputBytes = std::max<quint64>(
+        stats_.maxQueuedOutputBytes,
+        socket->bytesToWrite());
     return true;
 }
 
@@ -369,6 +417,7 @@ void ControlClient::reject(
     bool abort,
     bool retryable)
 {
+    const QPointer<QTcpSocket> socket = socket_;
     failureReportedForAttempt_ = true;
     publishEvent(TransportEvent{
         TransportEventType::Failure,
@@ -376,11 +425,65 @@ void ControlClient::reject(
         reason,
         retryable,
         handshakeState_ == HandshakeState::Authenticated});
-    if (abort) {
-        socket_.abort();
-    } else {
-        socket_.disconnectFromHost();
+    if (!socket || socket_ != socket) {
+        return;
     }
+    // Both protocol rejection modes retire this generation. A graceful close
+    // avoids tearing down Cocoa's native notifier while a delivery for it may
+    // already be queued; the generation is no longer used either way.
+    (void)abort;
+    socket_.clear();
+    retireSocket(socket.data());
+}
+
+void ControlClient::retireSocket(QTcpSocket* socket)
+{
+    if (!socket) {
+        return;
+    }
+    purgeRetiredSockets();
+    for (const QPointer<QTcpSocket>& retired : retiredSockets_) {
+        if (retired == socket) {
+            return;
+        }
+    }
+
+    socket->disconnect(this);
+    if (socket->state() != QAbstractSocket::UnconnectedState) {
+        socket->disconnectFromHost();
+    }
+    const QPointer<QTcpSocket> guardedSocket(socket);
+    retiredSockets_.push_back(guardedSocket);
+    stats_.retiredSockets = static_cast<quint64>(retiredSockets_.size());
+    stats_.retiredSocketHighWater = std::max(
+        stats_.retiredSocketHighWater,
+        stats_.retiredSockets);
+    QTimer::singleShot(kSocketRetirementDelayMs, this, [this, guardedSocket] {
+        completeSocketRetirement(guardedSocket);
+    });
+}
+
+void ControlClient::completeSocketRetirement(const QPointer<QTcpSocket>& socket)
+{
+    if (socket && socket->state() != QAbstractSocket::UnconnectedState) {
+        socket->disconnectFromHost();
+        QTimer::singleShot(1000, this, [this, socket] {
+            completeSocketRetirement(socket);
+        });
+        return;
+    }
+    if (socket) {
+        socket->deleteLater();
+    }
+    QTimer::singleShot(0, this, [this] { purgeRetiredSockets(); });
+}
+
+void ControlClient::purgeRetiredSockets()
+{
+    retiredSockets_.removeIf([](const QPointer<QTcpSocket>& socket) {
+        return socket.isNull();
+    });
+    stats_.retiredSockets = static_cast<quint64>(retiredSockets_.size());
 }
 
 void ControlClient::publishEvent(TransportEvent event)
