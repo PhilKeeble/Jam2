@@ -17,8 +17,24 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import InvocationArtifacts
+from .audio_analysis import (
+    analyze_metronome_wav,
+    analyze_recording_dir,
+    basic_stats,
+    detect_transients,
+    estimate_tone,
+    read_wav_mono,
+)
 from .manifest import InvocationManifest
+from .metrics import summarize_csv
 from .native import NativeCapabilities, ReactiveProcess, native_manifest, run_logged, write_scenario
+from .results import (
+    METRONOME_WAV_TOLERANCE_FRAMES,
+    analyze_listener_compensated_pulse_side,
+    analyze_metro_pulse_epoch_side,
+    mesh_collect_metrics,
+    mesh_verdict,
+)
 
 
 ACTION_CASES = {
@@ -40,9 +56,84 @@ ACTION_CASES = {
 }
 
 
-def _case(manifest: InvocationManifest, name: str, status: str, **evidence: Any) -> bool:
+class ValidationReporter:
+    def __init__(self, total: int, artifact_root: Path) -> None:
+        self.total = total
+        self.artifact_root = artifact_root
+        self.started_at = time.monotonic()
+        self.index = 0
+        self.passed = 0
+        self.active_name: str | None = None
+        self.active_started_at = 0.0
+
+    def start(self, name: str) -> None:
+        if self.active_name is not None:
+            raise RuntimeError(f"validation reporter still has an active case: {self.active_name}")
+        self.index += 1
+        self.active_name = name
+        self.active_started_at = time.monotonic()
+        print(f"[RUN ] {self.index:02d}/{self.total:02d} {name}", flush=True)
+
+    def finish(self, name: str, passed: bool, summary: str = "", failure_detail: str = "") -> None:
+        if self.active_name != name:
+            raise RuntimeError(
+                f"validation reporter expected {self.active_name!r}, received {name!r}")
+        elapsed = time.monotonic() - self.active_started_at
+        if passed:
+            self.passed += 1
+        label = "PASS" if passed else "FAIL"
+        detail = summary if passed else (failure_detail or summary)
+        suffix = f" {detail}" if detail else ""
+        print(
+            f"[{label}] {self.index:02d}/{self.total:02d} {name} ({elapsed:.1f}s){suffix}",
+            flush=True,
+        )
+        self.active_name = None
+
+    def fail_setup(self, error: str) -> None:
+        if self.active_name is not None:
+            self.finish(
+                self.active_name, False,
+                failure_detail=f"reason={error} artifacts={self.artifact_root}",
+            )
+        else:
+            print(f"[FAIL] setup reason={error} artifacts={self.artifact_root}", flush=True)
+
+    def summary(self, passed: bool, infrastructure_error: str | None = None) -> None:
+        elapsed = time.monotonic() - self.started_at
+        if infrastructure_error is not None:
+            print(
+                f"[SUMMARY] INFRASTRUCTURE-ERROR artifacts={self.artifact_root}",
+                flush=True,
+            )
+            return
+        label = "PASS" if passed else "FAIL"
+        print(
+            f"[SUMMARY] {label} {self.passed}/{self.total} ({elapsed:.1f}s) "
+            f"artifacts={self.artifact_root}",
+            flush=True,
+        )
+
+
+def _case(
+    manifest: InvocationManifest,
+    reporter: ValidationReporter,
+    name: str,
+    status: str,
+    *,
+    console_summary: str = "",
+    failure_detail: str = "",
+    **evidence: Any,
+) -> bool:
     manifest.add_case({"id": name, "status": status, **evidence})
-    return status == "passed"
+    passed = status == "passed"
+    reporter.finish(
+        name,
+        passed,
+        console_summary,
+        failure_detail or f"artifacts={reporter.artifact_root / name}",
+    )
+    return passed
 
 
 def _reserve_dual_port() -> int:
@@ -112,15 +203,19 @@ def _wav_boundary_fixtures(root: Path) -> list[str]:
     ]
 
 
-def _run_framework(repo: Path, invocation: InvocationArtifacts, manifest: InvocationManifest) -> bool:
+def _run_framework(repo: Path, invocation: InvocationArtifacts, manifest: InvocationManifest,
+                   reporter: ValidationReporter) -> bool:
+    reporter.start("framework-self-tests")
     case_root = invocation.root / "framework"
     case_root.mkdir()
     command = [sys.executable, "-m", "unittest", "discover", "-s", str(repo / "tools"), "-p", "test_*.py"]
     result = run_logged(command, case_root / "stdout.log", case_root / "stderr.log", timeout=120)
-    return _case(manifest, "framework-self-tests", "passed" if result["return_code"] == 0 else "failed", process=result)
+    return _case(manifest, reporter, "framework-self-tests", "passed" if result["return_code"] == 0 else "failed", process=result)
 
 
-def _run_help_contract(jam2: Path, invocation: InvocationArtifacts, manifest: InvocationManifest) -> bool:
+def _run_help_contract(jam2: Path, invocation: InvocationArtifacts, manifest: InvocationManifest,
+                       reporter: ValidationReporter) -> bool:
+    reporter.start("public-command-surface")
     case_root = invocation.root / "public-surface"
     case_root.mkdir()
     commands = [
@@ -152,14 +247,16 @@ def _run_help_contract(jam2: Path, invocation: InvocationArtifacts, manifest: In
         removed_results.append(result)
         ok &= result["return_code"] != 0
     return _case(
-        manifest, "public-command-surface", "passed" if ok else "failed",
+        manifest, reporter, "public-command-surface", "passed" if ok else "failed",
         processes=results, removed_commands=removed_results)
 
 
-def _run_focused(jam2: Path, invocation: InvocationArtifacts, manifest: InvocationManifest) -> bool:
+def _run_focused(jam2: Path, invocation: InvocationArtifacts, manifest: InvocationManifest,
+                 reporter: ValidationReporter) -> bool:
     ok = True
     for operation in ("validate.boundaries", "validate.controller-lifecycle"):
         name = operation.replace(".", "-")
+        reporter.start(name)
         root = invocation.root / name
         root.mkdir()
         scenario = _base_scenario(name, operation, root)
@@ -183,12 +280,13 @@ def _run_focused(jam2: Path, invocation: InvocationArtifacts, manifest: Invocati
         except Exception as error:
             native = {"error": str(error)}
             passed = False
-        ok &= _case(manifest, name, "passed" if passed else "failed", process=result, native=native)
+        ok &= _case(manifest, reporter, name, "passed" if passed else "failed", process=result, native=native)
     return ok
 
 
 def _run_schema_parity(repo: Path, capabilities: NativeCapabilities,
-                       manifest: InvocationManifest) -> bool:
+                       manifest: InvocationManifest, reporter: ValidationReporter) -> bool:
+    reporter.start("description-schema-operation-parity")
     schema_path = repo / "tools" / "scenarios" / "jam2-debug-scenario.schema.json"
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     schema_operations = schema["properties"]["operation"]["enum"]
@@ -204,7 +302,7 @@ def _run_schema_parity(repo: Path, capabilities: NativeCapabilities,
               schema["properties"]["actions"]["maxItems"] == capabilities.description["max_actions"] and
               set(ACTION_CASES) == set(capabilities.description["actions"]))
     return _case(
-        manifest, "description-schema-operation-parity",
+        manifest, reporter, "description-schema-operation-parity",
         "passed" if passed else "failed",
         schema_operations=schema_operations,
         described_operations=described_operations,
@@ -213,7 +311,9 @@ def _run_schema_parity(repo: Path, capabilities: NativeCapabilities,
     )
 
 
-def _run_local(jam2: Path, invocation: InvocationArtifacts, manifest: InvocationManifest) -> bool:
+def _run_local(jam2: Path, invocation: InvocationArtifacts, manifest: InvocationManifest,
+               reporter: ValidationReporter) -> bool:
+    reporter.start("local-effective-configuration")
     root = invocation.root / "local-effective-configuration"
     root.mkdir()
     scenario = _base_scenario("local-effective-configuration", "local", root)
@@ -231,11 +331,13 @@ def _run_local(jam2: Path, invocation: InvocationArtifacts, manifest: Invocation
     except Exception as error:
         native = {"error": str(error)}
         passed = False
-    return _case(manifest, "local-effective-configuration", "passed" if passed else "failed", process=result, native=native)
+    return _case(manifest, reporter, "local-effective-configuration", "passed" if passed else "failed", process=result, native=native)
 
 
 def _run_real_device(jam2: Path, invocation: InvocationArtifacts,
-                     manifest: InvocationManifest, device_text: str) -> bool:
+                     manifest: InvocationManifest, device_text: str,
+                     reporter: ValidationReporter) -> bool:
+    reporter.start("real-device-extension")
     root = invocation.root / "real-device-extension"
     root.mkdir()
     try:
@@ -262,12 +364,14 @@ def _run_real_device(jam2: Path, invocation: InvocationArtifacts,
     except Exception as error:
         native = {"error": str(error)}
         passed = False
-    return _case(manifest, "real-device-extension", "passed" if passed else "failed",
+    return _case(manifest, reporter, "real-device-extension", "passed" if passed else "failed",
                  process=result, native=native,
                  coverage="explicit physical-device extension; headless baseline also ran")
 
 
-def _run_invalid_contracts(jam2: Path, invocation: InvocationArtifacts, manifest: InvocationManifest) -> bool:
+def _run_invalid_contracts(jam2: Path, invocation: InvocationArtifacts, manifest: InvocationManifest,
+                           reporter: ValidationReporter) -> bool:
+    reporter.start("schema-and-numeric-rejection")
     root = invocation.root / "invalid-contracts"
     root.mkdir()
     cases = [
@@ -286,7 +390,7 @@ def _run_invalid_contracts(jam2: Path, invocation: InvocationArtifacts, manifest
         result = run_logged([str(jam2), "debug", "run", str(path)], root / f"{name}.stdout.log", root / f"{name}.stderr.log", timeout=20)
         results.append(result)
         ok &= result["return_code"] != 0
-    return _case(manifest, "schema-and-numeric-rejection", "passed" if ok else "failed", processes=results)
+    return _case(manifest, reporter, "schema-and-numeric-rejection", "passed" if ok else "failed", processes=results)
 
 
 def _recv_exact(connection: socket.socket, size: int) -> bytes:
@@ -374,7 +478,9 @@ def _run_real_process_control_hardening(
     jam2: Path,
     invocation: InvocationArtifacts,
     manifest: InvocationManifest,
+    reporter: ValidationReporter,
 ) -> bool:
+    reporter.start("real-process-control-hardening")
     root = invocation.root / "real-process-control-hardening"
     root.mkdir()
     port = _reserve_dual_port()
@@ -525,13 +631,14 @@ def _run_real_process_control_hardening(
         native = {"error": str(error)}
         passed = False
     return _case(
-        manifest, "real-process-control-hardening", "passed" if passed else "failed",
+        manifest, reporter, "real-process-control-hardening", "passed" if passed else "failed",
         process={"return_code": code, "timed_out": timed_out},
         protocol_error=protocol_error, pending_connections=len(pending), native=native)
 
 
 def _run_reactive_channel(jam2: Path, invocation: InvocationArtifacts,
-                          manifest: InvocationManifest) -> bool:
+                          manifest: InvocationManifest, reporter: ValidationReporter) -> bool:
+    reporter.start("reactive-inherited-channel")
     root = invocation.root / "reactive-channel"
     root.mkdir()
     port = _reserve_dual_port()
@@ -626,14 +733,15 @@ def _run_reactive_channel(jam2: Path, invocation: InvocationArtifacts,
             "policy": policy, "passed": loss_ok, "return_code": loss_code,
             "python_event_drops": loss_process.event_drops, "native": loss_native,
         })
-    return _case(manifest, "reactive-inherited-channel", "passed" if passed else "failed",
+    return _case(manifest, reporter, "reactive-inherited-channel", "passed" if passed else "failed",
                  return_code=code, events=[event.get("event") for event in events],
                  python_event_drops=process.event_drops, native=native,
                  controller_loss_policies=loss_results)
 
 
 def _run_handle_isolation(jam2: Path, invocation: InvocationArtifacts,
-                          manifest: InvocationManifest) -> bool:
+                          manifest: InvocationManifest, reporter: ValidationReporter) -> bool:
+    reporter.start("automation-handle-isolation")
     root = invocation.root / "automation-handle-isolation"
     root.mkdir()
     static_root = root / "static"
@@ -659,7 +767,7 @@ def _run_handle_isolation(jam2: Path, invocation: InvocationArtifacts,
         for index, command in enumerate(commands)
     ]
     passed = all(result["return_code"] != 0 and not result["timed_out"] for result in results)
-    return _case(manifest, "automation-handle-isolation", "passed" if passed else "failed",
+    return _case(manifest, reporter, "automation-handle-isolation", "passed" if passed else "failed",
                  processes=results)
 
 
@@ -698,8 +806,10 @@ def _survivor_audio_continued(peer_root: Path) -> bool:
     )
 
 
-def _run_mesh(jam2: Path, invocation: InvocationArtifacts, manifest: InvocationManifest, peers: int) -> bool:
+def _run_mesh(jam2: Path, invocation: InvocationArtifacts, manifest: InvocationManifest,
+              peers: int, reporter: ValidationReporter) -> bool:
     case_id = f"clean-mesh-{peers}-peers"
+    reporter.start(case_id)
     root = invocation.root / case_id
     root.mkdir()
     port = _reserve_dual_port()
@@ -790,7 +900,594 @@ def _run_mesh(jam2: Path, invocation: InvocationArtifacts, manifest: InvocationM
                 process.wait()
             if not stdout.closed: stdout.close()
             if not stderr.closed: stderr.close()
-    return _case(manifest, case_id, "passed" if passed else "failed", topology={"peers": peers, "engine": "universal-direct-mesh"}, processes=outcomes)
+    return _case(manifest, reporter, case_id, "passed" if passed else "failed", topology={"peers": peers, "engine": "universal-direct-mesh"}, processes=outcomes)
+
+
+PUBLIC_NETWORK_CASES = (
+    "public-cli-network-clean",
+    "public-cli-network-tone",
+    "public-cli-metronome-shared-grid",
+    "public-cli-metronome-leader-audio",
+    "public-cli-metronome-metro-pulse",
+)
+PUBLIC_NETWORK_STREAM_MS = 10_000
+
+
+def _reserve_unique_dual_ports(count: int) -> list[int]:
+    ports: list[int] = []
+    while len(ports) < count:
+        port = _reserve_dual_port()
+        if port not in ports:
+            ports.append(port)
+    return ports
+
+
+def _startup_events(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    decoder = json.JSONDecoder()
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        offset = 0
+        while True:
+            start = line.find("{", offset)
+            if start < 0:
+                break
+            try:
+                value, consumed = decoder.raw_decode(line[start:])
+            except json.JSONDecodeError:
+                offset = start + 1
+                continue
+            if isinstance(value, dict) and value.get("event") == "startup":
+                events.append(value)
+            offset = start + max(1, consumed)
+    return events
+
+
+def _wait_for_creator_invite(
+    process: subprocess.Popen[str], stdout_path: Path, timeout_s: float,
+) -> str:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        for event in _startup_events(stdout_path):
+            if event.get("mode") == "create" and event.get("stage") == "waiting":
+                invite = str(event.get("connection_url", ""))
+                if invite.startswith("jam2://"):
+                    return invite
+        if process.poll() is not None:
+            break
+        time.sleep(0.02)
+    raise RuntimeError("public CLI creator did not emit its waiting invitation")
+
+
+def _mesh_edge_summaries(path: Path) -> dict[str, dict[str, Any]]:
+    edges: dict[str, dict[str, Any]] = {}
+    if not path.exists():
+        return edges
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.startswith("mesh_peer "):
+            continue
+        fields: dict[str, str] = {}
+        for token in line.split()[1:]:
+            key, separator, value = token.partition("=")
+            if separator:
+                fields[key] = value
+        peer_id = fields.get("peer_id", "")
+        if not peer_id:
+            continue
+        edge = edges.setdefault(peer_id, {
+            "peer_id": peer_id,
+            "endpoint": fields.get("endpoint", ""),
+            "endpoint_proof_verified": False,
+            "sent_packets": 0,
+            "recv_packets": 0,
+        })
+        edge["endpoint_proof_verified"] |= fields.get("endpoint_proof_state") in {
+            "active", "verified",
+        }
+        for name in ("sent_packets", "recv_packets"):
+            try:
+                edge[name] = max(int(edge[name]), int(fields.get(name, "0")))
+            except ValueError:
+                pass
+    return edges
+
+
+def _steady_tone(recording_dir: Path, stem: str) -> dict[str, Any]:
+    wav = read_wav_mono(recording_dir / f"{stem}.wav")
+    rate = int(wav["sample_rate"])
+    samples = wav["samples"]
+    start = min(len(samples), rate)
+    stop = max(start, len(samples) - rate // 2)
+    steady = samples[start:stop]
+    stats = basic_stats(steady)
+    tone = estimate_tone(steady, rate, 440.0)
+    ok = (
+        stats.get("rms", 0.0) >= 0.01 and
+        stats.get("dropout_runs", 0) == 0 and
+        tone.get("tone_present", False) and
+        abs(tone.get("error_hz", 999.0)) <= 5.0
+    )
+    return {"ok": ok, "stem": stem, "steady_stats": stats, "tone": tone}
+
+
+def _pulse_count(recording_dir: Path, stem: str) -> dict[str, Any]:
+    wav = read_wav_mono(recording_dir / f"{stem}.wav")
+    rate = int(wav["sample_rate"])
+    samples = wav["samples"][min(len(wav["samples"]), rate):]
+    frames = detect_transients(
+        samples, threshold=0.08, refractory_frames=max(512, rate // 2))
+    return {"ok": len(frames) >= 6, "stem": stem, "count": len(frames)}
+
+
+def _analyze_received_leader_audio(recording_dir: Path) -> dict[str, Any]:
+    wav = read_wav_mono(recording_dir / "their-input.wav")
+    rate = int(wav["sample_rate"])
+    clicks = detect_transients(
+        wav["samples"], threshold=0.5, refractory_frames=max(1024, rate // 4))
+    expected_interval = rate // 2
+    errors = [
+        abs((current - previous) - expected_interval)
+        for previous, current in zip(clicks, clicks[1:])
+    ]
+    tone = estimate_tone(wav["samples"], rate, 440.0)
+    max_error = max(errors, default=0)
+    ok = (
+        16 <= len(clicks) <= 24 and
+        bool(errors) and max_error <= 240 and
+        tone.get("tone_present", False) and
+        abs(tone.get("error_hz", 999.0)) <= 5.0
+    )
+    return {
+        "ok": ok,
+        "verdict": "pass" if ok else "leader_audio_content_or_click_timing_failed",
+        "actual_clicks": len(clicks),
+        "expected_interval_frames": expected_interval,
+        "max_interval_error_frames": max_error,
+        "tone": tone,
+        "recording_dir": str(recording_dir),
+    }
+
+
+def _public_audio_analysis(case_id: str, peer_index: int, recording_dir: Path) -> dict[str, Any]:
+    if case_id == "public-cli-network-clean":
+        analysis = analyze_recording_dir(recording_dir, signal="silence")
+        metro = analyze_metronome_wav(recording_dir, allow_silent=True)
+        analysis["metronome"] = metro
+        if not metro.get("ok", False):
+            analysis["tags"].append(metro.get("verdict", "unexpected_metronome_audio"))
+        analysis["ok"] = not analysis["tags"]
+        return analysis
+
+    if case_id == "public-cli-network-tone":
+        local_signals = ("tone-440", "pulse-1s", "silence", "silence")
+        remote_signals = ("pulse-1s", "tone-440", "tone-440", "tone-440")
+        analysis = analyze_recording_dir(
+            recording_dir,
+            signal="mixed-audio",
+            local_signal=local_signals[peer_index],
+            remote_signal=remote_signals[peer_index],
+            ignore_pop_events=True,
+        )
+        probes = []
+        if peer_index == 0:
+            probes.extend((_steady_tone(recording_dir, "my-input"),
+                           _pulse_count(recording_dir, "their-input")))
+        elif peer_index == 1:
+            probes.extend((_pulse_count(recording_dir, "my-input"),
+                           _steady_tone(recording_dir, "their-input")))
+        else:
+            probes.append(_steady_tone(recording_dir, "their-input"))
+        analysis["validation_probes"] = probes
+        for probe in probes:
+            if not probe.get("ok", False):
+                analysis["tags"].append(f"{probe.get('stem', 'audio')}_steady_probe_failed")
+        analysis["ok"] = not analysis["tags"]
+        return analysis
+
+    if case_id == "public-cli-metronome-leader-audio":
+        analysis = analyze_recording_dir(
+            recording_dir,
+            signal="leader-audio",
+            local_signal="tone-440" if peer_index == 0 else "silence",
+            remote_signal="silence" if peer_index == 0 else "tone-440",
+            ignore_pop_events=True,
+        )
+        local_metro = analyze_metronome_wav(
+            recording_dir, allow_silent=peer_index != 0)
+        analysis["metronome"] = local_metro
+        received = None
+        if peer_index == 0:
+            tone_probe = _steady_tone(recording_dir, "my-input")
+            analysis["leader_audio_tone"] = tone_probe
+            if not tone_probe.get("ok", False):
+                analysis["tags"].append("leader_local_tone_steady_probe_failed")
+            if not local_metro.get("ok", False) or local_metro.get("actual_clicks", 0) < 16:
+                analysis["tags"].append(
+                    local_metro.get("verdict", "leader_local_clicks_insufficient"))
+        else:
+            received = _analyze_received_leader_audio(recording_dir)
+            analysis["leader_audio_received"] = received
+            tone_probe = _steady_tone(recording_dir, "their-input")
+            analysis["leader_audio_tone"] = tone_probe
+            if local_metro.get("clicks", 0) != 0:
+                analysis["tags"].append("listener_local_metronome_not_silent")
+            if not received.get("ok", False) or received.get("actual_clicks", 0) < 16:
+                analysis["tags"].append(
+                    received.get("verdict", "leader_audio_clicks_insufficient"))
+            if not tone_probe.get("ok", False):
+                analysis["tags"].append("listener_leader_tone_steady_probe_failed")
+        click_count = int(
+            local_metro.get("actual_clicks", 0) if peer_index == 0
+            else (received or {}).get("actual_clicks", 0))
+        intentional_clipping = {}
+        expected_clipped_stems = (
+            ("metronome", "mix") if peer_index == 0
+            else ("their-input", "inputs-mix", "mix"))
+        for stem in expected_clipped_stems:
+            clipped = int(analysis.get("stems", {}).get(stem, {}).get("clipped_frames", 0))
+            tag = f"{stem}_clipping_detected"
+            if (stem == "mix" or clipped <= click_count) and tag in analysis["tags"]:
+                analysis["tags"].remove(tag)
+                intentional_clipping[stem] = clipped
+        analysis["intentional_click_clipping_frames"] = intentional_clipping
+        analysis["ok"] = not analysis["tags"]
+        return analysis
+
+    analysis = analyze_recording_dir(
+        recording_dir,
+        signal="metro-pulse" if case_id.endswith("metro-pulse") else "silence",
+        ignore_pop_events=True,
+    )
+    metro = analyze_metronome_wav(recording_dir)
+    analysis["metronome"] = metro
+    # The deterministic click's single-sample peak intentionally reaches PCM16
+    # full scale. Treat at most one such sample per detected click in the local
+    # metronome and resulting mix as the click shape, not arbitrary clipping.
+    click_count = int(metro.get("actual_clicks", 0))
+    intentional_clipping = {}
+    for stem in ("metronome", "mix"):
+        clipped = int(analysis.get("stems", {}).get(stem, {}).get("clipped_frames", 0))
+        tag = f"{stem}_clipping_detected"
+        # The output mix can also saturate where a deterministic metro-pulse
+        # overlaps the full-scale click. Source stems remain independently
+        # checked, so mix-only clipping is expected for this constructed case.
+        expected = stem == "mix" or clipped <= click_count
+        if expected and tag in analysis["tags"]:
+            analysis["tags"].remove(tag)
+            intentional_clipping[stem] = clipped
+    analysis["intentional_click_clipping_frames"] = intentional_clipping
+    if not metro.get("ok", False) or metro.get("actual_clicks", 0) < 16:
+        analysis["tags"].append(metro.get("verdict", "metronome_clicks_insufficient"))
+    if (case_id == "public-cli-metronome-shared-grid" and
+            metro.get("max_interval_error_frames", 999) > 240):
+        analysis["tags"].append("shared_grid_click_interval_not_tight")
+    if case_id.endswith("metro-pulse"):
+        epoch = analyze_metro_pulse_epoch_side(recording_dir)
+        listener = analyze_listener_compensated_pulse_side(recording_dir)
+        listener_ok = (
+            listener.get("ok", False) and
+            listener.get("steady_samples", 0) >= 10 and
+            listener.get("missing_pulse_matches", 0) == 0 and
+            listener.get("steady_max_abs_error_ms", 999.0) <= 80.0
+        )
+        analysis["metro_pulse_epoch"] = epoch
+        analysis["listener_compensated_pulse"] = listener
+        if not epoch.get("ok", False):
+            analysis["tags"].append(epoch.get("verdict", "metro_pulse_epoch_failed"))
+        if not listener_ok:
+            analysis["tags"].append(listener.get("verdict", "listener_pulse_timing_failed"))
+    analysis["ok"] = not analysis["tags"]
+    return analysis
+
+
+def _public_case_console_summary(case_id: str, result: dict[str, Any]) -> str:
+    metrics = result["mesh_metrics"]
+    if case_id == "public-cli-network-clean":
+        return (
+            f"peers=4 active={metrics['network_active_peer_count_established_min']} "
+            f"sent={int(metrics['sent_packets_total'])} recv={int(metrics['recv_packets_total'])}"
+        )
+    analyses = [peer["audio_analysis"] for peer in result["peer_results"]]
+    if case_id == "public-cli-network-tone":
+        frequencies = [
+            probe["tone"]["estimated_hz"]
+            for analysis in analyses
+            for probe in analysis.get("validation_probes", [])
+            if "tone" in probe and probe["tone"].get("tone_present", False)
+        ]
+        pulses = [
+            probe["count"]
+            for analysis in analyses
+            for probe in analysis.get("validation_probes", [])
+            if "count" in probe
+        ]
+        return (
+            f"tone={min(frequencies, default=0.0):.1f}-{max(frequencies, default=0.0):.1f}Hz "
+            f"pulses={min(pulses, default=0)}-{max(pulses, default=0)}"
+        )
+    if case_id == "public-cli-metronome-shared-grid":
+        metro = [analysis["metronome"] for analysis in analyses]
+        clicks = [item.get("actual_clicks", 0) for item in metro]
+        max_frames = max((item.get("max_interval_error_frames", 0) for item in metro), default=0)
+        mapping_frames = result.get("shared_grid_alignment", {}).get(
+            "max_abs_mapping_error_frames", 0.0)
+        return (
+            f"clicks={min(clicks, default=0)}-{max(clicks, default=0)} "
+            f"max_interval_error={max_frames * 1000.0 / 48000.0:.1f}ms "
+            f"max_grid_error={mapping_frames * 1000.0 / 48000.0:.1f}ms"
+        )
+    if case_id == "public-cli-metronome-leader-audio":
+        received = [
+            analysis["leader_audio_received"] for analysis in analyses[1:]
+        ]
+        clicks = [item.get("actual_clicks", 0) for item in received]
+        max_frames = max(
+            (item.get("max_interval_error_frames", 0) for item in received), default=0)
+        frequencies = [
+            analysis.get("leader_audio_tone", {}).get("tone", {}).get("estimated_hz", 0.0)
+            for analysis in analyses
+        ]
+        return (
+            f"leader_clicks={min(clicks, default=0)}-{max(clicks, default=0)} "
+            f"max_interval_error={max_frames * 1000.0 / 48000.0:.1f}ms "
+            f"tone={min(frequencies, default=0.0):.1f}-{max(frequencies, default=0.0):.1f}Hz "
+            f"source_peers=1"
+        )
+    listeners = [analysis["listener_compensated_pulse"] for analysis in analyses]
+    samples = [item.get("steady_samples", 0) for item in listeners]
+    max_error = max((item.get("steady_max_abs_error_ms", 0.0) for item in listeners), default=0.0)
+    return (
+        f"steady_matches={min(samples, default=0)}-{max(samples, default=0)} "
+        f"max_error={max_error:.1f}ms"
+    )
+
+
+def _public_case_failure(result: dict[str, Any]) -> str:
+    verdict = result.get("verdict", "unknown_failure")
+    for peer in result.get("peer_results", []):
+        if peer.get("return_code") != 0:
+            return f"peer={peer['peer']} reason=process_exit_{peer.get('return_code')}"
+        if peer.get("timed_out"):
+            return f"peer={peer['peer']} reason=process_timeout"
+        if not peer.get("startup_ok", False):
+            return f"peer={peer['peer']} reason=startup_contract_failed"
+        if not peer.get("edge_contract_ok", False):
+            return f"peer={peer['peer']} reason=full_mesh_edges_incomplete"
+        audio = peer.get("audio_analysis", {})
+        if not audio.get("ok", False):
+            tags = ",".join(audio.get("tags", [])) or "audio_analysis_failed"
+            return f"peer={peer['peer']} reason={tags}"
+    return f"reason={verdict}"
+
+
+def _run_public_network_case(
+    jam2: Path,
+    invocation: InvocationArtifacts,
+    manifest: InvocationManifest,
+    case_id: str,
+    reporter: ValidationReporter,
+) -> bool:
+    reporter.start(case_id)
+    root = invocation.root / case_id
+    root.mkdir()
+    ports = _reserve_unique_dual_ports(4)
+    session_id = f"{secrets.randbits(64) or 1:016x}"
+    session_key = secrets.token_hex(16)
+    metronome = case_id.startswith("public-cli-metronome-")
+    listener_mode = case_id.endswith("metro-pulse")
+    leader_mode = case_id.endswith("leader-audio")
+    signals = (
+        ("tone-440", "pulse-1s", "silence", "silence")
+        if case_id == "public-cli-network-tone" else
+        ("tone-440", "silence", "silence", "silence")
+        if leader_mode else
+        (("metro-pulse",) * 4 if listener_mode else ("silence",) * 4)
+    )
+    environment = os.environ.copy()
+    for name in (
+        "JAM2_AUTOMATION_COMMAND_HANDLE", "JAM2_AUTOMATION_EVENT_HANDLE",
+        "JAM2_AUTOMATION_COMMAND_FD", "JAM2_AUTOMATION_EVENT_FD",
+    ):
+        environment.pop(name, None)
+
+    processes: list[dict[str, Any]] = []
+
+    def start_peer(index: int, command: list[str]) -> subprocess.Popen[str]:
+        peer_root = root / f"peer-{index}"
+        peer_root.mkdir()
+        stdout_path = peer_root / "stdout.log"
+        stderr_path = peer_root / "stderr.log"
+        stdout = stdout_path.open("w", encoding="utf-8", newline="")
+        stderr = stderr_path.open("w", encoding="utf-8", newline="")
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=stderr,
+            text=True,
+            env=environment,
+        )
+        processes.append({
+            "peer": f"peer-{index}", "peer_root": peer_root,
+            "process": process, "stdout": stdout, "stderr": stderr,
+            "stdout_path": stdout_path, "command": command,
+        })
+        return process
+
+    def common(index: int, stream_ms: int) -> list[str]:
+        peer_root = root / f"peer-{index}"
+        return [
+            "--profile", "fast",
+            "--headless-audio", "on",
+            "--sample-rate", "48000",
+            "--audio-buffer-size", "256",
+            "--frame-size", "64",
+            "--network-audio-format", "pcm16",
+            "--test-input", signals[index],
+            "--metronome", "on" if metronome else "off",
+            "--bpm", "120",
+            "--metronome-mode", (
+                "listener-compensated" if listener_mode else
+                "leader-audio" if leader_mode else "shared-grid"),
+            "--stats", "enabled",
+            "--stats-interval-ms", "250",
+            "--stats-warmup-ms", "1000",
+            "--log-stats", str(peer_root / "csv"),
+            "--record-jam-folder", str(peer_root / "recording"),
+            "--stream-ms", str(stream_ms),
+            "--stream-linger-ms", "100",
+        ]
+
+    infrastructure_error = ""
+    try:
+        creator_command = [
+            str(jam2), "network", "create",
+            "--bind", f"127.0.0.1:{ports[0]}",
+            "--public-endpoint", f"127.0.0.1:{ports[0]}",
+            "--no-stun",
+            "--wait-ms", "10000",
+            "--session-id", session_id,
+            "--session-key", session_key,
+            "--max-peers", "3",
+            *common(0, PUBLIC_NETWORK_STREAM_MS + 1000),
+        ]
+        creator = start_peer(0, creator_command)
+        invite = _wait_for_creator_invite(creator, processes[0]["stdout_path"], 5.0)
+        for index in range(1, 4):
+            command = [
+                str(jam2), "network", "join", invite,
+                "--bind", f"127.0.0.1:{ports[index]}",
+                "--wait-ms", "10000",
+                *common(index, PUBLIC_NETWORK_STREAM_MS),
+            ]
+            start_peer(index, command)
+        for item in processes:
+            code, timed_out = _wait_process(item["process"], 22.0)
+            item["return_code"] = code
+            item["timed_out"] = timed_out
+            item["stdout"].close()
+            item["stderr"].close()
+    except Exception as error:
+        infrastructure_error = f"{type(error).__name__}: {error}"
+    finally:
+        for item in processes:
+            process = item["process"]
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+            item.setdefault("return_code", process.returncode)
+            item.setdefault("timed_out", False)
+            if not item["stdout"].closed:
+                item["stdout"].close()
+            if not item["stderr"].closed:
+                item["stderr"].close()
+
+    peer_results = []
+    for index, item in enumerate(processes):
+        peer_root = item["peer_root"]
+        csv_files = sorted((peer_root / "csv").glob("*.csv"))
+        csv_summary = summarize_csv(
+            csv_files[0] if len(csv_files) == 1 else peer_root / "missing.csv",
+            assessment_elapsed_ms=PUBLIC_NETWORK_STREAM_MS,
+        )
+        try:
+            audio = _public_audio_analysis(case_id, index, peer_root / "recording")
+        except Exception as error:
+            audio = {"ok": False, "tags": [f"analysis_error:{type(error).__name__}:{error}"]}
+        startup = _startup_events(item["stdout_path"])
+        stages = [event.get("stage") for event in startup]
+        startup_ok = (
+            (index == 0 and "waiting" in stages and stages.count("connected") >= 3) or
+            (index > 0 and "connecting" in stages and "connected" in stages)
+        )
+        edges = _mesh_edge_summaries(item["stdout_path"])
+        edge_contract_ok = (
+            len(edges) == 3 and all(
+                edge.get("endpoint_proof_verified", False) and
+                edge.get("sent_packets", 0) > 0 and
+                edge.get("recv_packets", 0) > 0
+                for edge in edges.values()
+            )
+        )
+        peer_results.append({
+            "peer": item["peer"],
+            "role": "coordinator" if index == 0 else "peer",
+            "return_code": item["return_code"],
+            "timed_out": item["timed_out"],
+            "csv_path": str(csv_files[0]) if len(csv_files) == 1 else "",
+            "csv_summary": csv_summary,
+            "audio_analysis": audio,
+            "startup_events": startup,
+            "startup_ok": startup_ok,
+            "mesh_edges": list(edges.values()),
+            "edge_contract_ok": edge_contract_ok,
+        })
+
+    result: dict[str, Any] = {
+        "schema": "jam2-public-cli-validation-result",
+        "case": case_id,
+        "requested_stream_ms": PUBLIC_NETWORK_STREAM_MS,
+        "effective_stream_ms": PUBLIC_NETWORK_STREAM_MS,
+        "requested_network_audio_format": "pcm16",
+        "headless_clock_drift_ppm": [0, 0, 0, 0],
+        "topology": {"peers": 4, "creator": 1, "joiners": 3, "engine": "public-cli-direct-mesh"},
+        "infrastructure_error": infrastructure_error,
+        "peer_results": peer_results,
+    }
+    result["mesh_metrics"] = mesh_collect_metrics(
+        peer_results, requested_stream_ms=PUBLIC_NETWORK_STREAM_MS)
+    result["verdict"] = mesh_verdict(result)
+    if case_id == "public-cli-metronome-shared-grid" and result["verdict"] == "pass":
+        mapping_errors = [
+            abs(peer.get("csv_summary", {}).get("grid_mapping_error_frames", 999.0))
+            for peer in peer_results
+        ]
+        result["shared_grid_alignment"] = {
+            "max_abs_mapping_error_frames": max(mapping_errors, default=999.0),
+            "tolerance_frames": 240,
+        }
+        if not mapping_errors or max(mapping_errors) > 240:
+            result["verdict"] = "shared_grid_mapping_not_tight"
+    if case_id == "public-cli-metronome-leader-audio" and result["verdict"] == "pass":
+        creator_id = (
+            peer_results[0].get("csv_summary", {}).get("local_peer_id", 0)
+            if peer_results else 0)
+        metrics = result["mesh_metrics"]
+        if (metrics.get("leader_audio_injected_peers", 0) != 1 or
+                metrics.get("leader_audio_source_peer_ids", []) != [creator_id]):
+            result["verdict"] = "leader_audio_source_invalid"
+    if not infrastructure_error and not all(
+            peer.get("startup_ok", False) and peer.get("edge_contract_ok", False)
+            for peer in peer_results):
+        if result["verdict"] == "pass":
+            result["verdict"] = "public_cli_lifecycle_or_edge_contract_failed"
+    passed = (
+        not infrastructure_error and len(peer_results) == 4 and
+        result["verdict"] == "pass" and
+        all(peer.get("startup_ok", False) and peer.get("edge_contract_ok", False)
+            for peer in peer_results)
+    )
+    (root / "result.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    summary = _public_case_console_summary(case_id, result) if peer_results else ""
+    failure = (
+        f"reason={infrastructure_error}" if infrastructure_error
+        else _public_case_failure(result)
+    )
+    return _case(
+        manifest,
+        reporter,
+        case_id,
+        "passed" if passed else "failed",
+        console_summary=summary,
+        failure_detail=f"{failure} artifacts={root}",
+        result=result,
+    )
 
 
 def _coverage_map(capabilities: NativeCapabilities, jam2: Path, root: Path) -> dict[str, Any]:
@@ -930,6 +1627,11 @@ def run(
 ) -> int:
     passed = True
     infrastructure_error: str | None = None
+    product_selected = selection in ("all", "product")
+    total = (1 if selection in ("all", "framework") else 0) + (17 if product_selected else 0)
+    if product_selected and real_device:
+        total += 1
+    reporter = ValidationReporter(total, invocation.root)
     try:
         capabilities = NativeCapabilities(jam2)
         (invocation.root / "debug-description.json").write_text(json.dumps(capabilities.description, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -949,25 +1651,31 @@ def run(
                 ", ".join(coverage["unclassified_public_cli_options"] +
                           coverage["unclassified_scenario_fields"]))
         if selection in ("all", "framework"):
-            passed &= _run_framework(repo, invocation, manifest)
-        if selection in ("all", "product"):
-            passed &= _run_help_contract(jam2, invocation, manifest)
-            passed &= _run_schema_parity(repo, capabilities, manifest)
-            passed &= _run_focused(jam2, invocation, manifest)
-            passed &= _run_real_process_control_hardening(jam2, invocation, manifest)
-            passed &= _run_local(jam2, invocation, manifest)
-            passed &= _run_invalid_contracts(jam2, invocation, manifest)
-            passed &= _run_reactive_channel(jam2, invocation, manifest)
-            passed &= _run_handle_isolation(jam2, invocation, manifest)
+            passed &= _run_framework(repo, invocation, manifest, reporter)
+        if product_selected:
+            passed &= _run_help_contract(jam2, invocation, manifest, reporter)
+            passed &= _run_schema_parity(repo, capabilities, manifest, reporter)
+            passed &= _run_focused(jam2, invocation, manifest, reporter)
+            passed &= _run_real_process_control_hardening(jam2, invocation, manifest, reporter)
+            passed &= _run_local(jam2, invocation, manifest, reporter)
+            passed &= _run_invalid_contracts(jam2, invocation, manifest, reporter)
+            passed &= _run_reactive_channel(jam2, invocation, manifest, reporter)
+            passed &= _run_handle_isolation(jam2, invocation, manifest, reporter)
             for peers in (2, 3, 4):
-                passed &= _run_mesh(jam2, invocation, manifest, peers)
+                passed &= _run_mesh(jam2, invocation, manifest, peers, reporter)
+            for case_id in PUBLIC_NETWORK_CASES:
+                passed &= _run_public_network_case(
+                    jam2, invocation, manifest, case_id, reporter)
             if real_device:
-                passed &= _run_real_device(jam2, invocation, manifest, real_device)
+                passed &= _run_real_device(
+                    jam2, invocation, manifest, real_device, reporter)
     except Exception as error:
         infrastructure_error = f"{type(error).__name__}: {error}"
         passed = False
         manifest.add_case({"id": "validation-infrastructure", "status": "infrastructure-error", "error": infrastructure_error})
+        reporter.fail_setup(infrastructure_error)
     status = "passed" if passed else ("infrastructure-error" if infrastructure_error else "failed")
     code = 0 if passed else (2 if infrastructure_error else 1)
     manifest.finish(status, code, selection=selection)
+    reporter.summary(passed, infrastructure_error)
     return code

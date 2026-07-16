@@ -229,6 +229,7 @@ bool postTo(QObject* context, Function&& function)
 struct PendingWrite {
     QByteArray bytes;
     bool closeAfterWrite = false;
+    bool opensReadGateAfterWrite = false;
 };
 
 void finishThread(std::thread& thread)
@@ -273,17 +274,20 @@ public:
         context = target;
         onData = std::move(dataHandler);
         onDisconnected = std::move(disconnectHandler);
+        {
+            std::lock_guard lock(queueMutex);
+            if (writes.empty()) {
+                readGateOpen = true;
+            } else {
+                // The control protocol is server-speaks-first. Writes queued
+                // before start() (currently the authentication challenge)
+                // must reach the peer before this connection can enter recv().
+                // Mark the end of that fixed bootstrap prefix so later writes
+                // do not delay the receive side.
+                writes.back().opensReadGateAfterWrite = true;
+            }
+        }
         try {
-            reader = std::thread([this] {
-                try {
-                    readLoop();
-                } catch (const std::exception& error) {
-                    transportEnded(QStringLiteral("TCP reader failed: ") +
-                        QString::fromUtf8(error.what()));
-                } catch (...) {
-                    transportEnded(QStringLiteral("TCP reader failed with an unknown exception"));
-                }
-            });
             writer = std::thread([this] {
                 try {
                     writeLoop();
@@ -292,6 +296,16 @@ public:
                         QString::fromUtf8(error.what()));
                 } catch (...) {
                     transportEnded(QStringLiteral("TCP writer failed with an unknown exception"));
+                }
+            });
+            reader = std::thread([this] {
+                try {
+                    readLoop();
+                } catch (const std::exception& error) {
+                    transportEnded(QStringLiteral("TCP reader failed: ") +
+                        QString::fromUtf8(error.what()));
+                } catch (...) {
+                    transportEnded(QStringLiteral("TCP reader failed with an unknown exception"));
                 }
             });
         } catch (const std::exception& error) {
@@ -314,7 +328,7 @@ public:
             return false;
         }
         queuedBytes.fetch_add(bytes.size());
-        writes.push_back(PendingWrite{bytes, closeAfterWrite});
+        writes.push_back(PendingWrite{bytes, closeAfterWrite, false});
         queueReady.notify_one();
         return true;
     }
@@ -358,6 +372,15 @@ public:
 
     void readLoop()
     {
+        {
+            std::unique_lock lock(queueMutex);
+            queueReady.wait(lock, [this] {
+                return stopping.load() || readGateOpen;
+            });
+            if (stopping.load()) {
+                return;
+            }
+        }
         std::array<char, 64 * 1024> buffer{};
         while (!stopping.load()) {
             const NativeHandle current = handle.load();
@@ -439,6 +462,13 @@ public:
                 transportEnded({});
                 return;
             }
+            if (pending.opensReadGateAfterWrite && offset == pending.bytes.size()) {
+                {
+                    std::lock_guard lock(queueMutex);
+                    readGateOpen = true;
+                }
+                queueReady.notify_all();
+            }
         }
     }
 
@@ -456,6 +486,7 @@ public:
     std::mutex queueMutex;
     std::condition_variable_any queueReady;
     std::deque<PendingWrite> writes;
+    bool readGateOpen = false;
     std::thread reader;
     std::thread writer;
 };

@@ -302,6 +302,15 @@ void ControlServer::acceptPeer(const NativeTcpConnection::Pointer& connection)
                 true);
         }
     });
+    const QByteArray challenge = encodeHandshake(QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("hello.challenge")},
+        {QStringLiteral("version"), kControlProtocolVersion},
+        {QStringLiteral("session"), sessionHex_},
+        {QStringLiteral("server_nonce"), encodeHex(peer->serverNonce)},
+    });
+    if (!writeFrame(peer, challenge)) {
+        return;
+    }
     connection->start(
         this,
         [this, weakPeer](const QByteArray& bytes) {
@@ -321,15 +330,6 @@ void ControlServer::acceptPeer(const NativeTcpConnection::Pointer& connection)
         });
 
     peer->authenticationTimer->start(kAuthenticationDeadlineMs);
-    const QByteArray challenge = encodeHandshake(QJsonObject{
-        {QStringLiteral("type"), QStringLiteral("hello.challenge")},
-        {QStringLiteral("version"), kControlProtocolVersion},
-        {QStringLiteral("session"), sessionHex_},
-        {QStringLiteral("server_nonce"), encodeHex(peer->serverNonce)},
-    });
-    if (!writeFrame(peer, challenge)) {
-        return;
-    }
     publishEvent(TransportEvent{
         TransportEventType::ChallengeSent,
         TransportFailure::None,

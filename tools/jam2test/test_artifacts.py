@@ -35,6 +35,24 @@ class ArtifactTests(unittest.TestCase):
             self.assertFalse(stress.root.exists())
             self.assertTrue(replacement.root.exists())
 
+    def test_validate_clean_removes_selected_validate_root_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            tools = parent / "repo" / "tools"
+            tools.mkdir(parents=True)
+            validation = allocate_invocation("validate", tools, parent, "old")
+            stress = allocate_invocation("stress", tools, parent, "keep")
+            validation_marker = validation.root / "old-evidence"
+            stress_marker = stress.root / "retained-evidence"
+            validation_marker.write_text("old")
+            stress_marker.write_text("keep")
+            replacement = allocate_invocation(
+                "validate", tools, parent, "new", clean=True)
+            self.assertFalse(validation.root.exists())
+            self.assertFalse(validation_marker.exists())
+            self.assertTrue(stress_marker.exists())
+            self.assertTrue(replacement.root.exists())
+
     def test_benchmark_attempt_uses_normalized_nested_tree(self):
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory)

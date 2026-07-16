@@ -22,7 +22,8 @@ def run(args: Any, repo: Path, arguments: list[str]) -> int:
         invocation.root / "invocation-manifest.json",
         args.family, invocation.invocation_id, arguments,
     )
-    print(f"[{args.family}] artifacts: {invocation.root}", flush=True)
+    if args.family != "validate":
+        print(f"[{args.family}] artifacts: {invocation.root}", flush=True)
 
     if args.family == "validate":
         from .validation import run as run_validation

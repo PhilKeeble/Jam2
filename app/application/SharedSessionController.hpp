@@ -268,6 +268,7 @@ private:
     std::function<Jam2RuntimeOptions(const Snapshot&)> networkOptionsFactory_;
     std::vector<Jam2RuntimePeer> runtimePeers_;
     bool runtimeAttachmentEnabled_ = false;
+    bool runtimeAttachedForSession_ = false;
     bool reconcilingRuntime_ = false;
     QTimer reconnectTimer_;
     QTimer heartbeatTimer_;

@@ -400,6 +400,7 @@ void SharedSessionController::reset(bool stopRuntime)
 {
     closing_ = true;
     runtimeAttachmentEnabled_ = false;
+    runtimeAttachedForSession_ = false;
     runtimePeers_.clear();
     reconnectEnabled_ = false;
     reconnectTimer_.stop();
@@ -1419,14 +1420,16 @@ void SharedSessionController::reconcileRuntime(const Snapshot& snapshot)
     reconcilingRuntime_ = true;
     try {
         if (runtime_->isNetworkRunning()) {
+            runtimeAttachedForSession_ = true;
             if (peers != runtimePeers_ && runtime_->updatePeers(peers)) {
                 runtimePeers_ = std::move(peers);
             }
-        } else {
+        } else if (!runtimeAttachedForSession_) {
             Jam2RuntimeOptions options = networkOptionsFactory_(runtimeSnapshot);
             if (!runtime_->startNetwork(options)) {
                 throw std::runtime_error("network audio runtime failed to start");
             }
+            runtimeAttachedForSession_ = true;
             runtimePeers_ = std::move(peers);
         }
         reconcilingRuntime_ = false;

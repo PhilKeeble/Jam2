@@ -256,10 +256,30 @@ QJsonObject jam2RunControllerLifecycleValidation(
         for (int attempt = 0; attempt < 3; ++attempt) {
             QTcpSocket socket;
             socket.connectToHost(QHostAddress::LocalHost, *sessionPort);
+            if (attempt == 2) {
+                // Exercise a client that transmits before receiving the
+                // required server-first challenge. The native transport must
+                // still put the complete challenge on the wire first.
+                socket.write(QByteArray(1, '\0'));
+            }
+            QByteArray challengeBytes;
+            bool completeChallenge = false;
             const bool challenged = pumpUntil([&] {
-                return socket.bytesAvailable() > 0 ||
+                challengeBytes += socket.readAll();
+                QByteArray probe = challengeBytes;
+                QByteArray body;
+                QString error;
+                if (jam2::control_protocol::takeFrame(probe, body, error) ==
+                    jam2::control_protocol::TakeFrameResult::Ready) {
+                    QJsonObject message;
+                    completeChallenge = jam2::control_protocol::decodeHandshake(
+                        body, message, error) &&
+                        message.value(QStringLiteral("type")).toString() ==
+                            QStringLiteral("hello.challenge");
+                }
+                return completeChallenge ||
                     socket.state() == QAbstractSocket::UnconnectedState;
-            }, 500) && socket.bytesAvailable() > 0;
+            }, 500) && completeChallenge;
             preAuthChallenges += challenged ? 1 : 0;
             repeatedPreAuthDisconnectsSafe = repeatedPreAuthDisconnectsSafe && challenged;
             socket.abort();
