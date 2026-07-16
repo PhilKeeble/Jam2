@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <condition_variable>
 #include <deque>
 #include <limits>
@@ -56,6 +57,13 @@ public:
         if (WSAStartup(MAKEWORD(2, 2), &data) != 0) {
             throw std::runtime_error("WSAStartup failed");
         }
+#else
+        // A reset control peer is an ordinary recoverable network event. The
+        // default POSIX SIGPIPE action would terminate the entire GUI before
+        // the writer can report EPIPE, including from any future socket path
+        // that forgets to opt out per descriptor.
+        static std::once_flag signalOnce;
+        std::call_once(signalOnce, [] { (void)std::signal(SIGPIPE, SIG_IGN); });
 #endif
     }
 
@@ -223,6 +231,18 @@ struct PendingWrite {
     bool closeAfterWrite = false;
 };
 
+void finishThread(std::thread& thread)
+{
+    if (!thread.joinable()) {
+        return;
+    }
+    if (thread.get_id() == std::this_thread::get_id()) {
+        thread.detach();
+    } else {
+        thread.join();
+    }
+}
+
 } // namespace
 
 class NativeTcpConnection::Impl {
@@ -253,8 +273,35 @@ public:
         context = target;
         onData = std::move(dataHandler);
         onDisconnected = std::move(disconnectHandler);
-        reader = std::thread([this] { readLoop(); });
-        writer = std::thread([this] { writeLoop(); });
+        try {
+            reader = std::thread([this] {
+                try {
+                    readLoop();
+                } catch (const std::exception& error) {
+                    transportEnded(QStringLiteral("TCP reader failed: ") +
+                        QString::fromUtf8(error.what()));
+                } catch (...) {
+                    transportEnded(QStringLiteral("TCP reader failed with an unknown exception"));
+                }
+            });
+            writer = std::thread([this] {
+                try {
+                    writeLoop();
+                } catch (const std::exception& error) {
+                    transportEnded(QStringLiteral("TCP writer failed: ") +
+                        QString::fromUtf8(error.what()));
+                } catch (...) {
+                    transportEnded(QStringLiteral("TCP writer failed with an unknown exception"));
+                }
+            });
+        } catch (const std::exception& error) {
+            transportEnded(QStringLiteral("TCP worker creation failed: ") +
+                QString::fromUtf8(error.what()));
+            join();
+        } catch (...) {
+            transportEnded(QStringLiteral("TCP worker creation failed with an unknown exception"));
+            join();
+        }
     }
 
     bool queueWrite(const QByteArray& bytes, bool closeAfterWrite)
@@ -287,12 +334,8 @@ public:
 
     void join()
     {
-        if (reader.joinable() && reader.get_id() != std::this_thread::get_id()) {
-            reader.join();
-        }
-        if (writer.joinable() && writer.get_id() != std::this_thread::get_id()) {
-            writer.join();
-        }
+        finishThread(reader);
+        finishThread(writer);
     }
 
     void transportEnded(const QString& detail)
@@ -518,7 +561,31 @@ public:
         port.store(ntohs(local.sin_port));
         handle.store(toNative(socket));
         listening.store(true);
-        thread = std::thread([this] { acceptLoop(); });
+        try {
+            thread = std::thread([this] {
+                try {
+                    acceptLoop();
+                } catch (const std::exception& error) {
+                    listening.store(false);
+                    postError(QStringLiteral("TCP accept worker failed: ") +
+                        QString::fromUtf8(error.what()));
+                } catch (...) {
+                    listening.store(false);
+                    postError(QStringLiteral("TCP accept worker failed with an unknown exception"));
+                }
+            });
+        } catch (const std::exception& error) {
+            listening.store(false);
+            closeAtomicSocket(handle);
+            setError(QStringLiteral("TCP accept worker creation failed: ") +
+                QString::fromUtf8(error.what()));
+            return false;
+        } catch (...) {
+            listening.store(false);
+            closeAtomicSocket(handle);
+            setError(QStringLiteral("TCP accept worker creation failed with an unknown exception"));
+            return false;
+        }
         return true;
     }
 
@@ -526,9 +593,7 @@ public:
     {
         listening.store(false);
         closeAtomicSocket(handle);
-        if (thread.joinable() && thread.get_id() != std::this_thread::get_id()) {
-            thread.join();
-        }
+        finishThread(thread);
         port.store(0);
     }
 
@@ -674,18 +739,42 @@ public:
         onConnected = std::move(connectedHandler);
         onError = std::move(errorHandler);
         cancelled.store(false);
-        thread = std::thread([this, requestedHost, requestedPort] {
-            connectLoop(requestedHost, requestedPort);
-        });
+        try {
+            thread = std::thread([this, requestedHost, requestedPort] {
+                try {
+                    connectLoop(requestedHost, requestedPort);
+                } catch (const std::exception& error) {
+                    if (!cancelled.load()) {
+                        postFailure(NativeTcpError{
+                            NativeTcpError::Code::Transport,
+                            QStringLiteral("TCP connect worker failed: ") +
+                                QString::fromUtf8(error.what())});
+                    }
+                } catch (...) {
+                    if (!cancelled.load()) {
+                        postFailure(NativeTcpError{
+                            NativeTcpError::Code::Transport,
+                            QStringLiteral("TCP connect worker failed with an unknown exception")});
+                    }
+                }
+            });
+        } catch (const std::exception& error) {
+            postFailure(NativeTcpError{
+                NativeTcpError::Code::Transport,
+                QStringLiteral("TCP connect worker creation failed: ") +
+                    QString::fromUtf8(error.what())});
+        } catch (...) {
+            postFailure(NativeTcpError{
+                NativeTcpError::Code::Transport,
+                QStringLiteral("TCP connect worker creation failed with an unknown exception")});
+        }
     }
 
     void cancel()
     {
         cancelled.store(true);
         closeAtomicSocket(connectingHandle);
-        if (thread.joinable() && thread.get_id() != std::this_thread::get_id()) {
-            thread.join();
-        }
+        finishThread(thread);
     }
 
     void connectLoop(const QString& host, quint16 port)

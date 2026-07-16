@@ -1909,6 +1909,29 @@ void MainWindow::appendLog(const QString& line)
     if (logEdit_) {
         logEdit_->appendPlainText(line);
     }
+    if (!guiLogFile_) {
+        QString root = logStatsEdit_ ? logStatsEdit_->text().trimmed() : QString{};
+        if (root.isEmpty()) {
+            root = appReleaseFolderPath(QStringLiteral("logs"));
+        }
+        QDir directory(root);
+        if (directory.mkpath(QStringLiteral("."))) {
+            guiLogPath_ = directory.filePath(QStringLiteral("jam2_gui_%1_pid%2.log")
+                .arg(QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd_HHmmss_zzz")))
+                .arg(QCoreApplication::applicationPid()));
+            auto file = std::make_unique<QFile>(guiLogPath_);
+            if (file->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+                guiLogFile_ = std::move(file);
+            }
+        }
+    }
+    if (guiLogFile_ && guiLogFile_->isOpen()) {
+        const QByteArray record = QStringLiteral("%1 %2\n")
+            .arg(QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs), line)
+            .toUtf8();
+        (void)guiLogFile_->write(record);
+        (void)guiLogFile_->flush();
+    }
 }
 
 void MainWindow::updateStatsDisplay(const QJsonObject& stats)

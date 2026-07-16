@@ -400,6 +400,8 @@ private:
     QLabel* recordingLatencyLabel_ = nullptr;
     QSpinBox* recordingLatencyAdjustmentSpin_ = nullptr;
     QPlainTextEdit* logEdit_ = nullptr;
+    std::unique_ptr<QFile> guiLogFile_;
+    QString guiLogPath_;
     BeatGridWidget* chordGrid_ = nullptr;
     BeatGridWidget* beatGrid_ = nullptr;
     BeatGridWidget* lyricGrid_ = nullptr;
