@@ -35,6 +35,8 @@ second crash through another pointer issue with Qt, should look over error handl
 
 join jam doesnt expose using a different network profile like safe even though asymmetrical profiles should be supported, could help with one on wired, one on wifi deals
 
+Qt Networking stack causing crashes on mac, look into how baked in the Qt sockets are, since that could just be handled natively as long as we are careful on buffers, pointers, lifecycle and vulns
+
 ## Bugs
 
 when mac is server it crashes

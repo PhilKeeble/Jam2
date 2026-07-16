@@ -1,13 +1,11 @@
 #pragma once
 
 #include "ControlProtocol.hpp"
+#include "NativeTcpTransport.hpp"
 
 #include <QJsonObject>
 #include <QElapsedTimer>
 #include <QList>
-#include <QPointer>
-#include <QTcpServer>
-#include <QTcpSocket>
 #include <QTimer>
 
 #include <functional>
@@ -30,12 +28,13 @@ public:
         quint64 framesSent = 0;
         quint64 maxBufferedInputBytes = 0;
         quint64 maxQueuedOutputBytes = 0;
-        quint64 retiredSockets = 0;
-        quint64 retiredSocketHighWater = 0;
-        quint64 retirementBackpressureEvents = 0;
+        quint64 activeConnections = 0;
+        quint64 activeConnectionHighWater = 0;
+        quint64 disconnectedConnections = 0;
     };
 
     explicit ControlServer(QObject* parent = nullptr);
+    ~ControlServer() override;
 
     bool listen(quint16 port, const QString& sessionHex, const QString& keyHex);
     void close();
@@ -56,9 +55,9 @@ public:
 
 private:
     struct Peer {
-        QPointer<QTcpSocket> socket;
-        QTimer* authenticationTimer = nullptr;
-        QTimer* frameTimer = nullptr;
+        jam2::application::NativeTcpConnection::Pointer connection;
+        std::unique_ptr<QTimer> authenticationTimer;
+        std::unique_ptr<QTimer> frameTimer;
         QByteArray buffer;
         QByteArray serverNonce;
         QByteArray transcript;
@@ -73,7 +72,8 @@ private:
 
     using PeerHandle = std::shared_ptr<Peer>;
 
-    void acceptPeer();
+    void acceptPeer(const jam2::application::NativeTcpConnection::Pointer& connection);
+    void disconnectPeer(const PeerHandle& peer, const QString& detail = QString());
     void readPeer(const PeerHandle& peer);
     void handleHandshake(const PeerHandle& peer, const QJsonObject& message);
     bool writeFrame(
@@ -86,20 +86,16 @@ private:
         jam2::control_protocol::TransportFailure failure,
         bool abort = false);
     void publishEvent(jam2::control_protocol::TransportEvent event);
-    void retireSocket(QTcpSocket* socket);
-    void completeSocketRetirement(const QPointer<QTcpSocket>& socket);
-    void purgeRetiredSockets();
-    bool applyRetirementBackpressure();
-    PeerHandle findPeer(QTcpSocket* socket) const;
+    PeerHandle findPeer(
+        const jam2::application::NativeTcpConnection::Pointer& connection) const;
     int authenticatedPeerCount() const;
     int pendingPeerCount() const;
     void noteAuthenticationReject();
     bool authenticationWorkAvailable();
 
-    QTcpServer server_;
+    jam2::application::NativeTcpListener server_;
     QList<PeerHandle> peers_;
-    QList<QPointer<QTcpSocket>> retiredSockets_;
-    bool acceptingPausedForRetirement_ = false;
+    quint64 listenGeneration_ = 0;
     QString sessionHex_;
     QByteArray masterKey_;
     QElapsedTimer authenticationFailureWindow_;

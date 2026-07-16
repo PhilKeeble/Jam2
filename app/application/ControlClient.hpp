@@ -1,11 +1,9 @@
 #pragma once
 
 #include "ControlProtocol.hpp"
+#include "NativeTcpTransport.hpp"
 
 #include <QJsonObject>
-#include <QList>
-#include <QPointer>
-#include <QTcpSocket>
 #include <QTimer>
 
 #include <functional>
@@ -23,11 +21,13 @@ public:
         quint64 framesSent = 0;
         quint64 maxBufferedInputBytes = 0;
         quint64 maxQueuedOutputBytes = 0;
-        quint64 retiredSockets = 0;
-        quint64 retiredSocketHighWater = 0;
+        quint64 connectionAttempts = 0;
+        quint64 completedConnections = 0;
+        quint64 disconnectedConnections = 0;
     };
 
     explicit ControlClient(QObject* parent = nullptr);
+    ~ControlClient() override;
 
     void connectToHost(
         const QString& host,
@@ -54,13 +54,17 @@ private:
         Authenticated,
     };
 
-    void installSocket(QTcpSocket* socket);
-    void readSocket(QTcpSocket* socket);
+    void installConnection(
+        const jam2::application::NativeTcpConnection::Pointer& connection,
+        quint64 generation);
+    void readConnection(
+        const jam2::application::NativeTcpConnection::Pointer& connection,
+        const QByteArray& bytes);
+    void connectionClosed(
+        const jam2::application::NativeTcpConnection::Pointer& connection,
+        const QString& detail);
     void handleHandshake(const QJsonObject& message);
     bool writeFrame(const QByteArray& frame);
-    void retireSocket(QTcpSocket* socket);
-    void completeSocketRetirement(const QPointer<QTcpSocket>& socket);
-    void purgeRetiredSockets();
     void reject(
         const QString& reason,
         jam2::control_protocol::TransportFailure failure,
@@ -68,8 +72,9 @@ private:
         bool retryable = false);
     void publishEvent(jam2::control_protocol::TransportEvent event);
 
-    QPointer<QTcpSocket> socket_;
-    QList<QPointer<QTcpSocket>> retiredSockets_;
+    jam2::application::NativeTcpConnection::Pointer connection_;
+    jam2::application::NativeTcpConnector connector_;
+    quint64 connectionGeneration_ = 0;
     QTimer authenticationTimer_;
     QTimer frameTimer_;
     QByteArray buffer_;

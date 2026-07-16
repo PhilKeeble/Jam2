@@ -57,6 +57,8 @@ add_executable(jam2 MACOSX_BUNDLE
     application/DebugActionValidation.hpp
     application/DebugAutomation.cpp
     application/DebugAutomation.hpp
+    application/NativeTcpTransport.cpp
+    application/NativeTcpTransport.hpp
     application/RuntimeHost.cpp
     application/ControlProtocol.cpp
     application/ControlProtocol.hpp

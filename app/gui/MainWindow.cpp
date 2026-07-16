@@ -2087,7 +2087,7 @@ void MainWindow::handleControlEvent(
                 "control_stats side=server accepted=%1 pending_cap_rejects=%2 auth_rate_limit_rejects=%3 "
                 "session_cap_rejects=%4 auth_rejects=%5 auth_timeouts=%6 frame_rejects=%7 "
                 "frame_timeouts=%8 tag_or_sequence_rejects=%9 output_rejects=%10 input_high_water=%11 output_high_water=%12 "
-                "retired_sockets=%13 retired_socket_high_water=%14 retirement_backpressure=%15")
+                "active_connections=%13 active_connection_high_water=%14 disconnected_connections=%15")
                 .arg(stats.acceptedConnections)
                 .arg(stats.pendingCapRejects)
                 .arg(stats.authenticationRateLimitRejects)
@@ -2101,15 +2101,15 @@ void MainWindow::handleControlEvent(
 
                 .arg(stats.maxBufferedInputBytes)
                 .arg(stats.maxQueuedOutputBytes)
-                .arg(stats.retiredSockets)
-                .arg(stats.retiredSocketHighWater)
-                .arg(stats.retirementBackpressureEvents));
+                .arg(stats.activeConnections)
+                .arg(stats.activeConnectionHighWater)
+                .arg(stats.disconnectedConnections));
         } else {
             const ControlClient::Stats stats = sessionController_.clientStats();
             appendLog(QStringLiteral(
                 "control_stats side=client auth_rejects=%1 auth_timeouts=%2 frame_rejects=%3 frame_timeouts=%4 "
                 "tag_or_sequence_rejects=%5 output_rejects=%6 input_high_water=%7 output_high_water=%8 "
-                "retired_sockets=%9 retired_socket_high_water=%10")
+                "connection_attempts=%9 completed_connections=%10 disconnected_connections=%11")
                 .arg(stats.authenticationRejects)
                 .arg(stats.authenticationTimeouts)
                 .arg(stats.frameRejects)
@@ -2119,8 +2119,9 @@ void MainWindow::handleControlEvent(
                 .arg(stats.outputHighWaterRejects)
                 .arg(stats.maxBufferedInputBytes)
                 .arg(stats.maxQueuedOutputBytes)
-                .arg(stats.retiredSockets)
-                .arg(stats.retiredSocketHighWater));
+                .arg(stats.connectionAttempts)
+                .arg(stats.completedConnections)
+                .arg(stats.disconnectedConnections));
         }
     }
     if (event.type == TransportEventType::SessionEnded) {

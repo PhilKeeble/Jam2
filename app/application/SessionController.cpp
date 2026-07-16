@@ -4,24 +4,23 @@
 #include "AutomationChannel.hpp"
 #include "ControlProtocol.hpp"
 #include "DebugActionValidation.hpp"
+#include "NativeTcpTransport.hpp"
 #include "SharedSessionController.hpp"
 
 #include "common.hpp"
 #include "tuning_profile.hpp"
+#include "udp_socket.hpp"
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
-#include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMap>
 #include <QMetaObject>
 #include <QPointer>
-#include <QTcpServer>
 #include <QTimer>
-#include <QUdpSocket>
 
 #include <algorithm>
 #include <cmath>
@@ -991,21 +990,13 @@ private:
     {
         const QString requested = bindText_.isEmpty() ? QStringLiteral("0.0.0.0:0") : bindText_;
         const jam2::Endpoint endpoint = jam2::parse_bind_endpoint(requested.toStdString());
-        QHostAddress address(QString::fromStdString(endpoint.host));
-        if (address.isNull() && endpoint.host == "0.0.0.0") {
-            address = QHostAddress::AnyIPv4;
-        }
-        if (address.isNull()) {
-            throw std::runtime_error("join --bind host must be a numeric local address");
-        }
-        QUdpSocket reservation;
-        if (!reservation.bind(address, endpoint.port)) {
-            throw std::runtime_error((QStringLiteral("could not reserve join UDP endpoint: ") + reservation.errorString()).toStdString());
-        }
+        jam2::NetworkRuntime networkRuntime;
+        jam2::UdpSocket reservation;
+        reservation.bind(endpoint);
+        const jam2::Endpoint local = reservation.local_endpoint();
         localEndpointText_ = QStringLiteral("%1:%2")
             .arg(QString::fromStdString(endpoint.host))
-            .arg(reservation.localPort());
-        reservation.close();
+            .arg(local.port);
     }
 
     QString reserveCreatorEndpoint() const
@@ -1018,21 +1009,17 @@ private:
             return requested;
         }
 
-        QHostAddress address(QString::fromStdString(endpoint.host));
-        if (address.isNull() && endpoint.host == "0.0.0.0") {
-            address = QHostAddress::AnyIPv4;
-        }
-        if (address.isNull()) {
-            throw std::runtime_error("create --bind host must be a numeric local address");
-        }
+        jam2::NetworkRuntime networkRuntime;
         for (int attempt = 0; attempt < 32; ++attempt) {
-            QTcpServer tcpReservation;
-            if (!tcpReservation.listen(address, 0)) {
+            jam2::application::NativeTcpPortReservation tcpReservation;
+            if (!tcpReservation.bind(QString::fromStdString(endpoint.host), 0)) {
                 continue;
             }
-            const quint16 port = tcpReservation.serverPort();
-            QUdpSocket udpReservation;
-            if (!udpReservation.bind(address, port)) {
+            const quint16 port = tcpReservation.localPort();
+            try {
+                jam2::UdpSocket udpReservation;
+                udpReservation.bind(jam2::Endpoint{endpoint.host, port});
+            } catch (const std::exception&) {
                 continue;
             }
             return QStringLiteral("%1:%2")
@@ -1414,9 +1401,9 @@ private:
                 {QStringLiteral("tag_or_sequence_rejects"), static_cast<qint64>(controlServerStats.sequenceOrTagRejects)},
                 {QStringLiteral("input_high_water_bytes"), static_cast<qint64>(controlServerStats.maxBufferedInputBytes)},
                 {QStringLiteral("output_high_water_bytes"), static_cast<qint64>(controlServerStats.maxQueuedOutputBytes)},
-                {QStringLiteral("retired_sockets"), static_cast<qint64>(controlServerStats.retiredSockets)},
-                {QStringLiteral("retired_socket_high_water"), static_cast<qint64>(controlServerStats.retiredSocketHighWater)},
-                {QStringLiteral("retirement_backpressure_events"), static_cast<qint64>(controlServerStats.retirementBackpressureEvents)},
+                {QStringLiteral("active_connections"), static_cast<qint64>(controlServerStats.activeConnections)},
+                {QStringLiteral("active_connection_high_water"), static_cast<qint64>(controlServerStats.activeConnectionHighWater)},
+                {QStringLiteral("disconnected_connections"), static_cast<qint64>(controlServerStats.disconnectedConnections)},
             }},
             {QStringLiteral("control_client"), QJsonObject{
                 {QStringLiteral("authentication_rejects"), static_cast<qint64>(controlClientStats.authenticationRejects)},
@@ -1424,8 +1411,9 @@ private:
                 {QStringLiteral("tag_or_sequence_rejects"), static_cast<qint64>(controlClientStats.sequenceOrTagRejects)},
                 {QStringLiteral("input_high_water_bytes"), static_cast<qint64>(controlClientStats.maxBufferedInputBytes)},
                 {QStringLiteral("output_high_water_bytes"), static_cast<qint64>(controlClientStats.maxQueuedOutputBytes)},
-                {QStringLiteral("retired_sockets"), static_cast<qint64>(controlClientStats.retiredSockets)},
-                {QStringLiteral("retired_socket_high_water"), static_cast<qint64>(controlClientStats.retiredSocketHighWater)},
+                {QStringLiteral("connection_attempts"), static_cast<qint64>(controlClientStats.connectionAttempts)},
+                {QStringLiteral("completed_connections"), static_cast<qint64>(controlClientStats.completedConnections)},
+                {QStringLiteral("disconnected_connections"), static_cast<qint64>(controlClientStats.disconnectedConnections)},
             }},
         };
         if (automationChannel_) {

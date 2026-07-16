@@ -5,14 +5,11 @@
 #include <QTimer>
 
 #include <algorithm>
+#include <memory>
 
 using namespace jam2::control_protocol;
-
-namespace {
-
-constexpr int kSocketRetirementDelayMs = 60000;
-
-} // namespace
+using jam2::application::NativeTcpConnection;
+using jam2::application::NativeTcpError;
 
 ControlClient::ControlClient(QObject* parent)
     : QObject(parent)
@@ -39,70 +36,44 @@ ControlClient::ControlClient(QObject* parent)
     });
 }
 
-void ControlClient::installSocket(QTcpSocket* socket)
+ControlClient::~ControlClient()
 {
-    socket_ = socket;
-    const QPointer<QTcpSocket> guardedSocket(socket);
-    QObject::connect(socket, &QTcpSocket::connected, this, [this, guardedSocket] {
-        if (!guardedSocket || socket_ != guardedSocket) {
-            return;
+    close();
+}
+
+void ControlClient::installConnection(
+    const NativeTcpConnection::Pointer& connection,
+    quint64 generation)
+{
+    if (!connection || generation != connectionGeneration_ || manualClose_) {
+        if (connection) {
+            connection->close();
         }
-        guardedSocket->setReadBufferSize(kMaxJsonBytes + kAuthenticatedHeaderBytes + 4);
-        failureReportedForAttempt_ = false;
-        authenticationTimer_.start(kAuthenticationDeadlineMs);
-        publishEvent(TransportEvent{
-            TransportEventType::Connected,
-            TransportFailure::None,
-            QStringLiteral("TCP connected; waiting for bounded auth challenge")});
-    });
-    QObject::connect(socket, &QTcpSocket::readyRead, this, [this, guardedSocket] {
-        if (guardedSocket && socket_ == guardedSocket) {
-            readSocket(guardedSocket.data());
-        }
-    });
-    QObject::connect(socket, &QTcpSocket::errorOccurred, this,
-        [this, guardedSocket](QAbstractSocket::SocketError socketError) {
-            if (!guardedSocket || socket_ != guardedSocket || manualClose_ ||
-                failureReportedForAttempt_ ||
-                socketError == QAbstractSocket::RemoteHostClosedError) {
-                return;
+        return;
+    }
+    connection_ = connection;
+    ++stats_.completedConnections;
+    const std::weak_ptr<NativeTcpConnection> weakConnection = connection;
+    connection->start(
+        this,
+        [this, weakConnection, generation](const QByteArray& bytes) {
+            const auto current = weakConnection.lock();
+            if (current && generation == connectionGeneration_ && connection_ == current) {
+                readConnection(current, bytes);
             }
-            TransportFailure failure = TransportFailure::TransportError;
-            if (socketError == QAbstractSocket::ConnectionRefusedError) {
-                failure = TransportFailure::ConnectionRefused;
-            } else if (socketError == QAbstractSocket::HostNotFoundError) {
-                failure = TransportFailure::HostNotFound;
-            } else if (socketError == QAbstractSocket::NetworkError) {
-                failure = TransportFailure::NetworkUnavailable;
+        },
+        [this, weakConnection, generation](const QString& detail) {
+            const auto current = weakConnection.lock();
+            if (current && generation == connectionGeneration_ && connection_ == current) {
+                connectionClosed(current, detail);
             }
-            failureReportedForAttempt_ = true;
-            publishEvent(TransportEvent{
-                TransportEventType::Failure,
-                failure,
-                QStringLiteral("TCP control transport error: ") + guardedSocket->errorString(),
-                true});
         });
-    QObject::connect(socket, &QTcpSocket::disconnected, this, [this, guardedSocket] {
-        if (!guardedSocket || socket_ != guardedSocket) {
-            return;
-        }
-        const bool wasAuthenticated = handshakeState_ == HandshakeState::Authenticated;
-        authenticationTimer_.stop();
-        frameTimer_.stop();
-        handshakeState_ = HandshakeState::WaitingForChallenge;
-        receiveKey_.clear();
-        sendKey_.clear();
-        socket_.clear();
-        if (!manualClose_) {
-            publishEvent(TransportEvent{
-                TransportEventType::Disconnected,
-                TransportFailure::None,
-                QStringLiteral("TCP control disconnected"),
-                true,
-                wasAuthenticated});
-        }
-        retireSocket(guardedSocket.data());
-    });
+    failureReportedForAttempt_ = false;
+    authenticationTimer_.start(kAuthenticationDeadlineMs);
+    publishEvent(TransportEvent{
+        TransportEventType::Connected,
+        TransportFailure::None,
+        QStringLiteral("TCP connected; waiting for bounded auth challenge")});
 }
 
 void ControlClient::connectToHost(
@@ -131,20 +102,55 @@ void ControlClient::connectToHost(
     handshakeState_ = HandshakeState::WaitingForChallenge;
     receiveSequence_ = 1;
     sendSequence_ = 1;
+    const quint64 generation = ++connectionGeneration_;
+    ++stats_.connectionAttempts;
     publishEvent(TransportEvent{
         TransportEventType::Connecting,
         TransportFailure::None,
         QStringLiteral("TCP control connecting")});
-    auto* socket = new QTcpSocket(this);
-    installSocket(socket);
-    socket->connectToHost(host, port);
+    connector_.connectToHost(
+        host,
+        port,
+        this,
+        [this, generation](const NativeTcpConnection::Pointer& connection) {
+            installConnection(connection, generation);
+        },
+        [this, generation](const NativeTcpError& error) {
+            if (generation != connectionGeneration_ || manualClose_ || failureReportedForAttempt_) {
+                return;
+            }
+            failureReportedForAttempt_ = true;
+            TransportFailure failure = TransportFailure::TransportError;
+            switch (error.code) {
+            case NativeTcpError::Code::HostNotFound:
+                failure = TransportFailure::HostNotFound;
+                break;
+            case NativeTcpError::Code::ConnectionRefused:
+                failure = TransportFailure::ConnectionRefused;
+                break;
+            case NativeTcpError::Code::NetworkUnavailable:
+                failure = TransportFailure::NetworkUnavailable;
+                break;
+            case NativeTcpError::Code::None:
+            case NativeTcpError::Code::Timeout:
+            case NativeTcpError::Code::Transport:
+                break;
+            }
+            publishEvent(TransportEvent{
+                TransportEventType::Failure,
+                failure,
+                error.message,
+                true});
+        });
 }
 
 void ControlClient::close()
 {
     manualClose_ = true;
+    ++connectionGeneration_;
     authenticationTimer_.stop();
     frameTimer_.stop();
+    connector_.cancel();
     buffer_.clear();
     serverNonce_.clear();
     clientNonce_.clear();
@@ -152,10 +158,9 @@ void ControlClient::close()
     receiveKey_.clear();
     sendKey_.clear();
     handshakeState_ = HandshakeState::WaitingForChallenge;
-    const QPointer<QTcpSocket> socket = socket_;
-    socket_.clear();
-    if (socket) {
-        retireSocket(socket.data());
+    const NativeTcpConnection::Pointer connection = std::move(connection_);
+    if (connection) {
+        connection->close();
     }
 }
 
@@ -188,23 +193,24 @@ bool ControlClient::sendBinary(const QByteArray& payload)
 bool ControlClient::canQueue(qint64 additionalBytes) const
 {
     return isConnected() && additionalBytes >= 0 && additionalBytes <= kOutputHighWaterBytes &&
-        socket_->bytesToWrite() <= kOutputHighWaterBytes - additionalBytes;
+        connection_->bytesToWrite() <= kOutputHighWaterBytes - additionalBytes;
 }
 
 bool ControlClient::isConnected() const
 {
-    return socket_ && socket_->state() == QTcpSocket::ConnectedState &&
+    return connection_ && connection_->isConnected() &&
         handshakeState_ == HandshakeState::Authenticated;
 }
 
-void ControlClient::readSocket(QTcpSocket* expectedSocket)
+void ControlClient::readConnection(
+    const NativeTcpConnection::Pointer& connection,
+    const QByteArray& bytes)
 {
-    const QPointer<QTcpSocket> socket = socket_;
-    if (!socket || socket != expectedSocket) {
+    if (!connection || connection_ != connection) {
         return;
     }
     readScheduled_ = false;
-    buffer_ += socket->readAll();
+    buffer_ += bytes;
     stats_.maxBufferedInputBytes = std::max<quint64>(stats_.maxBufferedInputBytes, buffer_.size());
 
     int handled = 0;
@@ -243,8 +249,7 @@ void ControlClient::readSocket(QTcpSocket* expectedSocket)
                 return;
             }
             handleHandshake(message);
-            if (!socket_ || socket_ != socket ||
-                socket->state() == QAbstractSocket::UnconnectedState) {
+            if (!connection_ || connection_ != connection || !connection->isConnected()) {
                 return;
             }
         } else {
@@ -265,7 +270,7 @@ void ControlClient::readSocket(QTcpSocket* expectedSocket)
             } else if (onBinaryMessage) {
                 onBinaryMessage(payload.binary);
             }
-            if (!socket_ || socket_ != socket) {
+            if (!connection_ || connection_ != connection) {
                 return;
             }
         }
@@ -273,12 +278,47 @@ void ControlClient::readSocket(QTcpSocket* expectedSocket)
 
     if (!buffer_.isEmpty() && !readScheduled_) {
         readScheduled_ = true;
-        QTimer::singleShot(0, this, [this, socket] {
-            if (socket && socket_ == socket &&
-                socket->state() != QAbstractSocket::UnconnectedState) {
-                readSocket(socket.data());
+        const std::weak_ptr<NativeTcpConnection> weakConnection = connection;
+        QTimer::singleShot(0, this, [this, weakConnection] {
+            const auto current = weakConnection.lock();
+            if (current && connection_ == current && current->isConnected()) {
+                readConnection(current, {});
             }
         });
+    }
+}
+
+void ControlClient::connectionClosed(
+    const NativeTcpConnection::Pointer& connection,
+    const QString& detail)
+{
+    if (!connection || connection_ != connection) {
+        return;
+    }
+    const bool wasAuthenticated = handshakeState_ == HandshakeState::Authenticated;
+    authenticationTimer_.stop();
+    frameTimer_.stop();
+    handshakeState_ = HandshakeState::WaitingForChallenge;
+    receiveKey_.clear();
+    sendKey_.clear();
+    connection_.reset();
+    ++stats_.disconnectedConnections;
+    if (!manualClose_) {
+        if (!detail.isEmpty() && !failureReportedForAttempt_) {
+            failureReportedForAttempt_ = true;
+            publishEvent(TransportEvent{
+                TransportEventType::Failure,
+                TransportFailure::TransportError,
+                detail,
+                true,
+                wasAuthenticated});
+        }
+        publishEvent(TransportEvent{
+            TransportEventType::Disconnected,
+            TransportFailure::None,
+            QStringLiteral("TCP control disconnected"),
+            true,
+            wasAuthenticated});
     }
 }
 
@@ -308,15 +348,9 @@ void ControlClient::handleHandshake(const QJsonObject& message)
         }
         clientNonce_ = randomNonce();
         transcript_ = makeTranscript(
-            sessionHex_,
-            serverNonce_,
-            clientNonce_,
-            meshPeerToken_,
-            meshUdpEndpoint_);
+            sessionHex_, serverNonce_, clientNonce_, meshPeerToken_, meshUdpEndpoint_);
         const QByteArray proof = keyedValue(
-            masterKey_,
-            QByteArrayLiteral("jam2-control-client-proof"),
-            transcript_).left(16);
+            masterKey_, QByteArrayLiteral("jam2-control-client-proof"), transcript_).left(16);
         const QByteArray response = encodeHandshake(QJsonObject{
             {QStringLiteral("type"), QStringLiteral("hello.proof")},
             {QStringLiteral("version"), kControlProtocolVersion},
@@ -350,9 +384,7 @@ void ControlClient::handleHandshake(const QJsonObject& message)
     }
     const QByteArray receivedProof = decodeHex(message.value(QStringLiteral("proof")).toString(), 16);
     const QByteArray expectedProof = keyedValue(
-        masterKey_,
-        QByteArrayLiteral("jam2-control-server-proof"),
-        transcript_).left(16);
+        masterKey_, QByteArrayLiteral("jam2-control-server-proof"), transcript_).left(16);
     if (!constantTimeEqual(receivedProof, expectedProof)) {
         ++stats_.authenticationRejects;
         reject(
@@ -376,12 +408,11 @@ void ControlClient::handleHandshake(const QJsonObject& message)
 
 bool ControlClient::writeFrame(const QByteArray& frame)
 {
-    const QPointer<QTcpSocket> socket = socket_;
-    if (!socket || frame.isEmpty() ||
-        socket->state() == QAbstractSocket::UnconnectedState) {
+    const NativeTcpConnection::Pointer connection = connection_;
+    if (!connection || frame.isEmpty() || !connection->isConnected()) {
         return false;
     }
-    const qint64 queued = socket->bytesToWrite();
+    const qint64 queued = connection->bytesToWrite();
     stats_.maxQueuedOutputBytes = std::max<quint64>(stats_.maxQueuedOutputBytes, queued);
     if (queued + frame.size() > kOutputHighWaterBytes) {
         ++stats_.outputHighWaterRejects;
@@ -392,7 +423,7 @@ bool ControlClient::writeFrame(const QByteArray& frame)
             true);
         return false;
     }
-    if (socket->write(frame) != frame.size()) {
+    if (!connection->write(frame)) {
         reject(
             QStringLiteral("TCP control write failed"),
             TransportFailure::WriteFailed,
@@ -400,14 +431,9 @@ bool ControlClient::writeFrame(const QByteArray& frame)
             true);
         return false;
     }
-    if (!socket || socket_ != socket ||
-        socket->state() == QAbstractSocket::UnconnectedState) {
-        return false;
-    }
     ++stats_.framesSent;
     stats_.maxQueuedOutputBytes = std::max<quint64>(
-        stats_.maxQueuedOutputBytes,
-        socket->bytesToWrite());
+        stats_.maxQueuedOutputBytes, connection->bytesToWrite());
     return true;
 }
 
@@ -417,7 +443,8 @@ void ControlClient::reject(
     bool abort,
     bool retryable)
 {
-    const QPointer<QTcpSocket> socket = socket_;
+    (void)abort;
+    const NativeTcpConnection::Pointer connection = connection_;
     failureReportedForAttempt_ = true;
     publishEvent(TransportEvent{
         TransportEventType::Failure,
@@ -425,65 +452,11 @@ void ControlClient::reject(
         reason,
         retryable,
         handshakeState_ == HandshakeState::Authenticated});
-    if (!socket || socket_ != socket) {
+    if (!connection || connection_ != connection) {
         return;
     }
-    // Both protocol rejection modes retire this generation. A graceful close
-    // avoids tearing down Cocoa's native notifier while a delivery for it may
-    // already be queued; the generation is no longer used either way.
-    (void)abort;
-    socket_.clear();
-    retireSocket(socket.data());
-}
-
-void ControlClient::retireSocket(QTcpSocket* socket)
-{
-    if (!socket) {
-        return;
-    }
-    purgeRetiredSockets();
-    for (const QPointer<QTcpSocket>& retired : retiredSockets_) {
-        if (retired == socket) {
-            return;
-        }
-    }
-
-    socket->disconnect(this);
-    if (socket->state() != QAbstractSocket::UnconnectedState) {
-        socket->disconnectFromHost();
-    }
-    const QPointer<QTcpSocket> guardedSocket(socket);
-    retiredSockets_.push_back(guardedSocket);
-    stats_.retiredSockets = static_cast<quint64>(retiredSockets_.size());
-    stats_.retiredSocketHighWater = std::max(
-        stats_.retiredSocketHighWater,
-        stats_.retiredSockets);
-    QTimer::singleShot(kSocketRetirementDelayMs, this, [this, guardedSocket] {
-        completeSocketRetirement(guardedSocket);
-    });
-}
-
-void ControlClient::completeSocketRetirement(const QPointer<QTcpSocket>& socket)
-{
-    if (socket && socket->state() != QAbstractSocket::UnconnectedState) {
-        socket->disconnectFromHost();
-        QTimer::singleShot(1000, this, [this, socket] {
-            completeSocketRetirement(socket);
-        });
-        return;
-    }
-    if (socket) {
-        socket->deleteLater();
-    }
-    QTimer::singleShot(0, this, [this] { purgeRetiredSockets(); });
-}
-
-void ControlClient::purgeRetiredSockets()
-{
-    retiredSockets_.removeIf([](const QPointer<QTcpSocket>& socket) {
-        return socket.isNull();
-    });
-    stats_.retiredSockets = static_cast<quint64>(retiredSockets_.size());
+    connection_.reset();
+    connection->close();
 }
 
 void ControlClient::publishEvent(TransportEvent event)
