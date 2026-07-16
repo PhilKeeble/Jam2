@@ -318,6 +318,7 @@ void ControlServer::acceptPeer(const NativeTcpConnection::Pointer& connection)
             if (!current || !findPeer(current->connection)) {
                 return;
             }
+            current->receivedAnyInput = current->receivedAnyInput || !bytes.isEmpty();
             current->buffer += bytes;
             stats_.maxBufferedInputBytes = std::max<quint64>(
                 stats_.maxBufferedInputBytes, current->buffer.size());
@@ -351,6 +352,8 @@ void ControlServer::disconnectPeer(const PeerHandle& peer, const QString& detail
         }
         const QString token = peer->token;
         const bool wasAuthenticated = peer->authenticated;
+        const bool disconnectedBeforeAuthenticationInput =
+            !wasAuthenticated && !peer->receivedAnyInput;
         if (peer->authenticationTimer) {
             peer->authenticationTimer->stop();
         }
@@ -367,10 +370,23 @@ void ControlServer::disconnectPeer(const PeerHandle& peer, const QString& detail
         peer->connection.reset();
         stats_.activeConnections = static_cast<quint64>(peers_.size());
         ++stats_.disconnectedConnections;
+        if (disconnectedBeforeAuthenticationInput) {
+            ++stats_.preAuthenticationDisconnects;
+        }
         if (onDisconnected && wasAuthenticated) {
             onDisconnected(token);
         }
-        if (!detail.isEmpty()) {
+        if (disconnectedBeforeAuthenticationInput) {
+            const QString reason = detail.isEmpty()
+                ? QStringLiteral("TCP peer disconnected before sending authentication data")
+                : QStringLiteral("TCP peer disconnected before sending authentication data: ") + detail;
+            publishEvent(TransportEvent{
+                TransportEventType::Failure,
+                TransportFailure::PreAuthenticationDisconnect,
+                reason,
+                false,
+                false});
+        } else if (!detail.isEmpty()) {
             publishEvent(TransportEvent{
                 TransportEventType::Failure,
                 TransportFailure::TransportError,

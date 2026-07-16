@@ -513,6 +513,7 @@ std::uint64_t read_u64_le(std::span<const std::uint8_t> payload, std::size_t off
 }
 
 enum class GridMessageKind : std::uint8_t {
+    PeerPhase = 0,
     Proposal = 1,
     Assignment = 2,
     AuthorityState = 3,
@@ -594,8 +595,7 @@ MetronomePayload decode_metronome_payload(std::span<const std::uint8_t> payload)
     decoded.mode = static_cast<std::uint8_t>((control >> 2U) & 0x03U);
     decoded.run_state = static_cast<jam2::GridRunState>((control >> 4U) & 0x03U);
     const auto kind = static_cast<std::uint8_t>(decoded.kind);
-    if (kind < static_cast<std::uint8_t>(GridMessageKind::Proposal) ||
-        kind > static_cast<std::uint8_t>(GridMessageKind::AuthorityState) ||
+    if (kind > static_cast<std::uint8_t>(GridMessageKind::AuthorityState) ||
         decoded.mode > 2 ||
         static_cast<std::uint8_t>(decoded.run_state) >
             static_cast<std::uint8_t>(jam2::GridRunState::AuthorityMissing)) {
@@ -1773,6 +1773,9 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         std::uint64_t sent_pongs = 0;
         std::uint64_t recv_pongs = 0;
         std::uint64_t last_transport_revision = 0;
+        std::uint64_t listener_epoch_frame = 0;
+        std::uint64_t listener_epoch_revision = 0;
+        std::uint64_t listener_phase_received_us = 0;
     };
 
     auto endpoint_proof_name = [](jam2::PeerEndpointState state) -> const char* {
@@ -1872,6 +1875,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     std::optional<jam2::GridProposal> pending_local_grid_proposal;
     std::uint64_t next_grid_proposal_send_us = 0;
     std::uint64_t next_grid_assignment_send_us = 0;
+    std::uint64_t next_peer_phase_send_us = 0;
     std::uint64_t sending_transport_revision = 0;
     std::uint64_t next_transport_send = 0;
     bool sent_current_transport = false;
@@ -1897,6 +1901,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     std::uint64_t mesh_grid_proposals_sent = 0;
     std::uint64_t mesh_grid_assignments_sent = 0;
     std::uint64_t mesh_grid_authority_states_sent = 0;
+    std::uint64_t mesh_grid_peer_phases_sent = 0;
     std::uint64_t mesh_transport_source_peer_id = 0;
     std::uint64_t mesh_transport_event_counter = 0;
     std::uint64_t mesh_transport_grid_revision = 0;
@@ -1908,9 +1913,11 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     std::uint64_t mesh_transport_applied_target_frame = 0;
     std::uint64_t mesh_compensation_stale_events = 0;
     bool mesh_compensation_was_stale = false;
+    std::uint64_t mesh_compensation_clamp_events = 0;
+    bool mesh_compensation_was_clamped = false;
+    std::uint64_t mesh_compensation_average_latency_frames = 0;
+    std::uint64_t mesh_compensation_peer_count = 0;
     bool timed_stream_audio_detached = false;
-    std::uint64_t last_authority_state_received_us = 0;
-    std::uint64_t remote_authority_epoch_frame = 0;
     std::int64_t mesh_grid_base_offset_frames = 0;
     std::int64_t mesh_grid_target_offset_frames = 0;
     bool mesh_grid_target_valid = false;
@@ -1975,12 +1982,13 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         commands.state.metronome_local_authority.store(false, std::memory_order_relaxed);
         commands.state.leader_audio_local_click.store(false, std::memory_order_relaxed);
         pending_local_grid_proposal.reset();
-        last_authority_state_received_us = 0;
-        remote_authority_epoch_frame = 0;
         mesh_grid_base_offset_frames = 0;
         mesh_grid_target_offset_frames = 0;
         mesh_grid_target_valid = false;
         mesh_grid_last_update_us = 0;
+        mesh_compensation_average_latency_frames = 0;
+        mesh_compensation_peer_count = 0;
+        mesh_compensation_was_clamped = false;
         {
             std::lock_guard<std::mutex> lock(commands.state.transport_mutex);
             commands.state.transport_pending.store(false, std::memory_order_release);
@@ -2124,7 +2132,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         stats.grid_proposals_sent = mesh_grid_proposals_sent;
         stats.grid_assignments_sent = mesh_grid_assignments_sent;
         stats.grid_authority_states_sent = mesh_grid_authority_states_sent;
-        stats.metronome_sent = mesh_grid_authority_states_sent;
+        stats.metronome_sent = mesh_grid_authority_states_sent + mesh_grid_peer_phases_sent;
         stats.metronome_received = authority_stats.grid_authority_states_accepted;
         stats.grid_mapping_error_frames = mesh_grid_target_valid
             ? mesh_grid_target_offset_frames -
@@ -2140,6 +2148,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         stats.transport_requested_target_frame = mesh_transport_requested_target_frame;
         stats.transport_applied_target_frame = mesh_transport_applied_target_frame;
         stats.metronome_compensation_stale_events = mesh_compensation_stale_events;
+        stats.metronome_compensation_clamp_events = mesh_compensation_clamp_events;
         stats.final_metronome_enabled = commands.state.metronome.load(std::memory_order_relaxed);
         stats.final_bpm = commands.state.bpm.load(std::memory_order_relaxed);
         stats.final_metronome_level = gain_from_ppm(
@@ -2226,10 +2235,14 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         stats.metronome_compensation_target_frames = mesh_grid_target_valid
             ? mesh_grid_target_offset_frames
             : stats.metronome_compensation_offset_frames;
+        stats.metronome_compensation_base_frames = mesh_grid_base_offset_frames;
+        stats.metronome_compensation_average_latency_frames =
+            mesh_compensation_average_latency_frames;
+        stats.metronome_compensation_peer_count = mesh_compensation_peer_count;
         stats.metronome_compensation_active =
             commands.state.metronome_mode.load(std::memory_order_relaxed) ==
                 metronome_mode_id(MetronomeMode::ListenerCompensated) &&
-            !authority.localIsGridAuthority() && epoch_valid && mesh_grid_target_valid;
+            epoch_valid && mesh_grid_target_valid && mesh_compensation_peer_count > 0;
         copy_peer_mixer_stats(stats, network_session.mixStats());
         stats.udp_work_budget_yields += network_session.mixStats().work_budget_yields;
         return stats;
@@ -2471,61 +2484,97 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         const int grid_mode = commands.state.metronome_mode.load(std::memory_order_relaxed);
         const bool listener_compensated =
             grid_mode == metronome_mode_id(MetronomeMode::ListenerCompensated);
-        if (listener_compensated && !authority.localIsGridAuthority()) {
-            const jam2::PeerId authority_peer{authority.grid().authority_peer_id};
-            const jam2::PeerStream* authority_stream = nullptr;
-            for (const auto& entry : peers) {
-                if (entry.second.peer_id == authority_peer) {
-                    authority_stream = &network_session.peerStream(authority_peer);
-                    break;
-                }
-            }
-            const auto* authority_mix = network_session.peerMixStats(authority_peer);
-            const bool fresh = authority_stream != nullptr && authority_mix != nullptr &&
-                authority.grid().run_state != jam2::GridRunState::AuthorityMissing &&
-                last_authority_state_received_us != 0 &&
-                now - last_authority_state_received_us <= 500000ULL &&
-                authority_stream->playoutSampleTimeInitialized() &&
-                commands.state.metronome_epoch_valid.load(std::memory_order_relaxed);
-            if (fresh) {
-                const std::uint64_t remote_head =
-                    authority_stream->nextPlayoutRemoteSampleTime() > authority_mix->queue_depth_frames
-                    ? authority_stream->nextPlayoutRemoteSampleTime() - authority_mix->queue_depth_frames
-                    : 0ULL;
-                const std::uint64_t local_frame = musical_frame_from_raw(
-                    current_engine_frame(audio.engine.get()),
-                    commands.state.metronome_render_offset_frames.load(std::memory_order_relaxed));
-                const std::uint64_t local_epoch =
-                    commands.state.metronome_epoch_sample_time.load(std::memory_order_relaxed);
+        if (listener_compensated) {
+            long double total_phase_error_frames = 0.0L;
+            std::uint64_t contributing_peers = 0;
+            std::int64_t phase_error_reference = 0;
+            if (commands.state.metronome_epoch_valid.load(std::memory_order_relaxed)) {
                 const auto pattern = metronome_pattern_from_runtime(commands.state);
                 const std::int64_t interval = static_cast<std::int64_t>(
                     jam2::metronome::step_interval_samples(
                         static_cast<double>(options.sample_rate), pattern.bpm, pattern.division));
                 if (interval > 0) {
-                    auto phase = [&](std::uint64_t frame, std::uint64_t epoch) {
+                    const std::int64_t current_offset =
+                        commands.state.metronome_render_offset_frames.load(std::memory_order_relaxed);
+                    const std::uint64_t local_frame = musical_frame_from_raw(
+                        current_engine_frame(audio.engine.get()), current_offset);
+                    const std::uint64_t local_epoch =
+                        commands.state.metronome_epoch_sample_time.load(std::memory_order_relaxed);
+                    const std::uint64_t output_queue_depth = audio.engine != nullptr
+                        ? static_cast<std::uint64_t>(audio.engine->networkPlaybackDepth())
+                        : 0ULL;
+                    auto phase = [interval](std::uint64_t frame, std::uint64_t epoch) {
                         const std::int64_t position = frame >= epoch
-                            ? static_cast<std::int64_t>(frame - epoch)
-                            : -static_cast<std::int64_t>(epoch - frame);
+                            ? static_cast<std::int64_t>((frame - epoch) % static_cast<std::uint64_t>(interval))
+                            : -static_cast<std::int64_t>((epoch - frame) % static_cast<std::uint64_t>(interval));
                         const std::int64_t value = position % interval;
                         return value < 0 ? value + interval : value;
                     };
-                    std::int64_t error = phase(remote_head, remote_authority_epoch_frame) -
-                        phase(local_frame, local_epoch);
-                    if (error > interval / 2) error -= interval;
-                    if (error < -interval / 2) error += interval;
-                    mesh_grid_target_offset_frames =
-                        commands.state.metronome_render_offset_frames.load(std::memory_order_relaxed) + error;
-                    mesh_grid_target_valid = true;
+                    for (const auto& entry : peers) {
+                        const auto& peer = entry.second;
+                        const auto* mix = network_session.peerMixStats(peer.peer_id);
+                        const auto& stream = network_session.peerStream(peer.peer_id);
+                        const bool phase_fresh = peer.listener_phase_received_us != 0 &&
+                            now >= peer.listener_phase_received_us &&
+                            now - peer.listener_phase_received_us <= 500000ULL;
+                        if (peer_endpoint_state(peer.peer_id) != jam2::PeerEndpointState::Active ||
+                            mix == nullptr || !stream.playoutSampleTimeInitialized() ||
+                            peer.listener_epoch_revision != authority.grid().revision ||
+                            !phase_fresh) {
+                            continue;
+                        }
+                        const std::uint64_t remote_next = stream.nextPlayoutRemoteSampleTime();
+                        const std::uint64_t queued_frames = mix->queue_depth_frames + output_queue_depth;
+                        const std::uint64_t remote_head = remote_next > queued_frames
+                            ? remote_next - queued_frames
+                            : 0ULL;
+                        std::int64_t error = phase(remote_head, peer.listener_epoch_frame) -
+                            phase(local_frame, local_epoch);
+                        if (error > interval / 2) error -= interval;
+                        if (error < -interval / 2) error += interval;
+                        if (contributing_peers == 0) {
+                            phase_error_reference = error;
+                        } else {
+                            if (error - phase_error_reference > interval / 2) error -= interval;
+                            if (error - phase_error_reference < -interval / 2) error += interval;
+                        }
+                        total_phase_error_frames += static_cast<long double>(error);
+                        ++contributing_peers;
+                    }
+                    if (contributing_peers > 0) {
+                        const std::int64_t average_error = static_cast<std::int64_t>(std::llround(
+                            total_phase_error_frames / static_cast<long double>(contributing_peers)));
+                        mesh_grid_target_offset_frames = current_offset + average_error;
+                        mesh_grid_target_valid = true;
+                        const std::int64_t target_delta =
+                            mesh_grid_target_offset_frames - mesh_grid_base_offset_frames;
+                        mesh_compensation_average_latency_frames = static_cast<std::uint64_t>(
+                            target_delta < 0 ? -target_delta : target_delta);
+                        const std::uint64_t max_frames = static_cast<std::uint64_t>(std::abs(
+                            ms_to_signed_frames(options.metronome_compensation_max_ms, options.sample_rate)));
+                        const bool clamped = mesh_compensation_average_latency_frames > max_frames;
+                        if (clamped && !mesh_compensation_was_clamped) {
+                            ++mesh_compensation_clamp_events;
+                        }
+                        mesh_compensation_was_clamped = clamped;
+                        mesh_compensation_was_stale = false;
+                    }
                 }
-                mesh_compensation_was_stale = false;
-            } else if (!mesh_compensation_was_stale) {
+            }
+            mesh_compensation_peer_count = contributing_peers;
+            if (contributing_peers == 0 && !mesh_compensation_was_stale) {
                 ++mesh_compensation_stale_events;
                 mesh_compensation_was_stale = true;
             }
+        } else {
+            mesh_compensation_average_latency_frames = 0;
+            mesh_compensation_peer_count = 0;
+            mesh_compensation_was_clamped = false;
         }
-        const bool correction_enabled = !authority.localIsGridAuthority() &&
-            (grid_mode == metronome_mode_id(MetronomeMode::SharedGrid) || listener_compensated) &&
-            mesh_grid_target_valid;
+        const bool correction_enabled = mesh_grid_target_valid &&
+            (listener_compensated ||
+             (!authority.localIsGridAuthority() &&
+              grid_mode == metronome_mode_id(MetronomeMode::SharedGrid)));
         if (correction_enabled &&
             (mesh_grid_last_update_us == 0 || now - mesh_grid_last_update_us >= 10000ULL)) {
             const std::int64_t current =
@@ -2766,6 +2815,26 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     payload);
                 ++mesh_grid_authority_states_sent;
             }
+            if (!authority.localIsGridAuthority() &&
+                listener_compensated &&
+                authority.grid().revision != 0 &&
+                commands.state.metronome_epoch_valid.load(std::memory_order_relaxed) &&
+                now >= next_peer_phase_send_us) {
+                const auto& grid = authority.grid();
+                const auto payload = make_grid_payload(
+                    GridMessageKind::PeerPhase,
+                    grid.revision,
+                    commands.state.metronome_epoch_sample_time.load(std::memory_order_relaxed),
+                    grid.mode,
+                    grid.run_state);
+                network_session.sendToActive(
+                    jam2::protocol::PacketType::MetronomeState,
+                    packet_schedule.takeControlSequence(),
+                    current_engine_frame(audio.engine.get()),
+                    payload);
+                ++mesh_grid_peer_phases_sent;
+                next_peer_phase_send_us = now + 100000ULL;
+            }
             packet_schedule.scheduleNextGridState(now, 20000ULL);
         }
 
@@ -2962,7 +3031,20 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                             std::memory_order_relaxed);
                         commands.state.metronome_mode.store(metronome.mode, std::memory_order_relaxed);
                     };
-                    if (metronome.kind == GridMessageKind::Proposal) {
+                    if (metronome.kind == GridMessageKind::PeerPhase) {
+                        const auto& grid = authority.grid();
+                        if (grid.revision == 0 ||
+                            metronome.revision_or_request != grid.revision ||
+                            metronome.mode != metronome_mode_id(MetronomeMode::ListenerCompensated) ||
+                            grid.mode != metronome_mode_id(MetronomeMode::ListenerCompensated) ||
+                            metronome.run_state != grid.run_state) {
+                            ++peer.ignored_packets;
+                            continue;
+                        }
+                        peer.listener_epoch_frame = metronome.epoch_sample_time;
+                        peer.listener_epoch_revision = metronome.revision_or_request;
+                        peer.listener_phase_received_us = jam2::monotonic_us();
+                    } else if (metronome.kind == GridMessageKind::Proposal) {
 
                         const auto ordered = authority.orderGridProposal({
                             peer.peer_id.value,
@@ -3027,8 +3109,9 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                             commands.state.metronome_revision.store(
                                 remote_state.revision,
                                 std::memory_order_relaxed);
-                            remote_authority_epoch_frame = metronome.epoch_sample_time;
-                            last_authority_state_received_us = jam2::monotonic_us();
+                            peer.listener_epoch_frame = metronome.epoch_sample_time;
+                            peer.listener_epoch_revision = metronome.revision_or_request;
+                            peer.listener_phase_received_us = jam2::monotonic_us();
                             if (!commands.state.metronome_epoch_valid.load(std::memory_order_relaxed)) {
                                 (void)align_to_authority_clock(
                                     metronome,

@@ -38,6 +38,7 @@ struct EventCapture {
     int reconnectExhausted = 0;
     int sessionEnded = 0;
     int coordinatorTimeout = 0;
+    int preAuthenticationDisconnect = 0;
     int maxReconnectAttempts = 0;
     bool sawReconnecting = false;
 
@@ -57,6 +58,8 @@ struct EventCapture {
         sessionEnded += value.type == TransportEventType::SessionEnded;
         coordinatorTimeout += value.type == TransportEventType::Failure &&
             value.failure == TransportFailure::CoordinatorTimeout;
+        preAuthenticationDisconnect += value.type == TransportEventType::Failure &&
+            value.failure == TransportFailure::PreAuthenticationDisconnect;
     }
 
     void snapshot(const SharedSessionController::Snapshot& value)
@@ -226,6 +229,10 @@ QJsonObject jam2RunControllerLifecycleValidation(
     invalidContractCreator.close();
 
     SharedSessionController creator;
+    EventCapture creatorCapture;
+    creator.onTransportEvent = [&](const TransportEvent& event, bool) {
+        creatorCapture.event(event);
+    };
     auto primaryCreatorConfig = sessionPort
         ? creatorConfig(*sessionPort) : SharedSessionController::CreatorConfig{};
     // Model a LAN invite while the creator has also retained a public/STUN UDP
@@ -292,7 +299,9 @@ QJsonObject jam2RunControllerLifecycleValidation(
     check(QStringLiteral("controller.pre-auth-challenge-immediate-and-repeatable"),
         repeatedPreAuthDisconnectsSafe && preAuthChallenges == 3 &&
             creator.serverStats().acceptedConnections >= 3 &&
-            preAuthDisconnectsObserved);
+            preAuthDisconnectsObserved &&
+            creator.serverStats().preAuthenticationDisconnects >= 2 &&
+            creatorCapture.preAuthenticationDisconnect >= 2);
 
     const quint64 acceptedBeforeClosedBacklog = creator.serverStats().acceptedConnections;
     int closedBacklogConnections = 0;

@@ -383,6 +383,14 @@ def summarize_csv(path, assessment_elapsed_ms=None):
         "metronome_compensation_offset_ms": to_float(before_shutdown, "metronome_compensation_offset_ms"),
         "metronome_compensation_target_frames": to_float(before_shutdown, "metronome_compensation_target_frames"),
         "metronome_compensation_target_ms": to_float(before_shutdown, "metronome_compensation_target_ms"),
+        "metronome_compensation_base_frames": to_float(before_shutdown, "metronome_compensation_base_frames"),
+        "metronome_compensation_base_ms": to_float(before_shutdown, "metronome_compensation_base_ms"),
+        "metronome_compensation_average_latency_frames": to_float(
+            before_shutdown, "metronome_compensation_average_latency_frames"),
+        "metronome_compensation_average_latency_ms": to_float(
+            before_shutdown, "metronome_compensation_average_latency_ms"),
+        "metronome_compensation_peer_count": to_float(
+            before_shutdown, "metronome_compensation_peer_count"),
         "metronome_compensation_clamp_events": to_float(row, "metronome_compensation_clamp_events"),
         "metronome_compensation_stale_events": to_float(row, "metronome_compensation_stale_events"),
         "sample_time_playout": row.get("sample_time_playout", ""),
@@ -566,6 +574,14 @@ def combined_summary(server_csv, client_csv, assessment_elapsed_ms=None):
             (abs(side.get("metronome_compensation_offset_ms", 0.0)) for side in sides), default=0.0),
         "metronome_compensation_target_ms_abs_max": max(
             (abs(side.get("metronome_compensation_target_ms", 0.0)) for side in sides), default=0.0),
+        "metronome_compensation_average_latency_ms_min": min(
+            (side.get("metronome_compensation_average_latency_ms", 0.0) for side in sides), default=0.0),
+        "metronome_compensation_average_latency_ms_max": max(
+            (side.get("metronome_compensation_average_latency_ms", 0.0) for side in sides), default=0.0),
+        "metronome_compensation_peer_count_min": min(
+            (side.get("metronome_compensation_peer_count", 0.0) for side in sides), default=0.0),
+        "metronome_compensation_peer_count_max": max(
+            (side.get("metronome_compensation_peer_count", 0.0) for side in sides), default=0.0),
         "metronome_compensation_clamp_events_total": sum(
             (side.get("metronome_compensation_clamp_events", 0.0) for side in sides), 0.0),
         "metronome_compensation_stale_events_total": sum(
@@ -729,6 +745,10 @@ def write_results_csv(path, results):
         "metronome_compensation_active_sides",
         "metronome_compensation_offset_ms_abs_max",
         "metronome_compensation_target_ms_abs_max",
+        "metronome_compensation_average_latency_ms_min",
+        "metronome_compensation_average_latency_ms_max",
+        "metronome_compensation_peer_count_min",
+        "metronome_compensation_peer_count_max",
         "metronome_compensation_clamp_events_total",
         "metronome_compensation_stale_events_total",
         "sequence_lost_total",

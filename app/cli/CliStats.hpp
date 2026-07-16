@@ -302,6 +302,9 @@ struct AudioPacketStats {
     bool metronome_compensation_active = false;
     std::int64_t metronome_compensation_offset_frames = 0;
     std::int64_t metronome_compensation_target_frames = 0;
+    std::int64_t metronome_compensation_base_frames = 0;
+    std::uint64_t metronome_compensation_average_latency_frames = 0;
+    std::uint64_t metronome_compensation_peer_count = 0;
     std::uint64_t metronome_compensation_clamp_events = 0;
     std::uint64_t metronome_compensation_stale_events = 0;
     std::uint64_t elapsed_ms = 0;
@@ -554,7 +557,10 @@ public:
                 "udp_send_would_block_drops,udp_send_no_buffer_drops,udp_send_unreachable_errors,"
                 "udp_send_refused_errors,udp_send_fatal_errors,udp_send_path_reprobe_transitions,"
                 "udp_send_consecutive_path_errors_max,adaptive_playback_ratio_ramp_ms,"
-                "audio_applied_playback_ratio,audio_playback_ratio_ramping\n";
+                "audio_applied_playback_ratio,audio_playback_ratio_ramping,"
+                "metronome_compensation_base_frames,metronome_compensation_base_ms,"
+                "metronome_compensation_average_latency_frames,metronome_compensation_average_latency_ms,"
+                "metronome_compensation_peer_count\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -948,7 +954,14 @@ public:
              << stats.udp_send_consecutive_path_errors_max << ','
              << options.adaptive_playback_ratio_ramp_ms << ','
              << static_cast<double>(audio.playback_ratio_applied_ppm) / 1000000.0 << ','
-             << (audio.playback_ratio_ramping ? "yes" : "no");
+             << (audio.playback_ratio_ramping ? "yes" : "no") << ','
+             << stats.metronome_compensation_base_frames << ','
+             << signed_frames_to_ms(stats.metronome_compensation_base_frames, active_sample_rate) << ','
+             << stats.metronome_compensation_average_latency_frames << ','
+             << frames_to_ms(
+                    static_cast<std::size_t>(stats.metronome_compensation_average_latency_frames),
+                    active_sample_rate) << ','
+             << stats.metronome_compensation_peer_count;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -964,7 +977,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(362);
+        std::vector<std::string> fields(367);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1287,6 +1300,13 @@ public:
         set(359, options.adaptive_playback_ratio_ramp_ms);
         set(360, static_cast<double>(audio.playback_ratio_applied_ppm) / 1000000.0);
         fields[361] = audio.playback_ratio_ramping ? "yes" : "no";
+        set(362, stats.metronome_compensation_base_frames);
+        set(363, signed_frames_to_ms(stats.metronome_compensation_base_frames, options.sample_rate));
+        set(364, stats.metronome_compensation_average_latency_frames);
+        set(365, frames_to_ms(
+            static_cast<std::size_t>(stats.metronome_compensation_average_latency_frames),
+            options.sample_rate));
+        set(366, stats.metronome_compensation_peer_count);
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {

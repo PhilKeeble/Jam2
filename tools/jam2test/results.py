@@ -11,6 +11,11 @@ from .scenarios import audio_probe_health_ok
 
 METRONOME_WAV_TOLERANCE_FRAMES = 96
 LISTENER_PULSE_STEADY_SKIP = 8
+LISTENER_COMPENSATED_MAX_MS = 250.0
+LISTENER_COMPENSATED_TARGET_TOLERANCE_FRAMES = 2.0
+LISTENER_COMPENSATED_CONVERGENCE_TOLERANCE_MS = 5.0
+LISTENER_COMPENSATED_AVERAGE_ALIGNMENT_TOLERANCE_MS = 12.0
+LISTENER_COMPENSATED_PEAK_ALIGNMENT_TOLERANCE_MS = 25.0
 MIN_DURATION_COVERAGE_RATIO = 0.90
 STRICT_AUDIO_HEALTH_SCENARIOS = {
     "clean-control",
@@ -20,6 +25,63 @@ STRICT_AUDIO_HEALTH_SCENARIOS = {
     "extreme-sample-time",
     "udp-short-flood",
 }
+
+
+def listener_compensation_contract(csv_summary, audio_analysis, expected_remote_peers):
+    """Prove one peer adjusted its own click toward all audible remote streams."""
+    sample_rate = float(csv_summary.get("active_sample_rate", 0.0))
+    base_frames = float(csv_summary.get("metronome_compensation_base_frames", 0.0))
+    target_frames = float(csv_summary.get("metronome_compensation_target_frames", 0.0))
+    offset_frames = float(csv_summary.get("metronome_compensation_offset_frames", 0.0))
+    average_latency_frames = float(
+        csv_summary.get("metronome_compensation_average_latency_frames", 0.0))
+    compensation_peers = int(csv_summary.get("metronome_compensation_peer_count", 0.0))
+    applied_latency_frames = min(
+        average_latency_frames,
+        sample_rate * LISTENER_COMPENSATED_MAX_MS / 1000.0,
+    ) if sample_rate > 0.0 else 0.0
+    target_formula_error_frames = abs(
+        (target_frames - base_frames) + applied_latency_frames)
+    convergence_error_frames = abs(offset_frames - target_frames)
+    convergence_tolerance_frames = (
+        sample_rate * LISTENER_COMPENSATED_CONVERGENCE_TOLERANCE_MS / 1000.0)
+    pulse = audio_analysis.get("listener_compensated_pulse", {})
+    average_alignment_error_ms = float(pulse.get("steady_avg_abs_error_ms", 999.0))
+    peak_alignment_error_ms = float(pulse.get("steady_max_abs_error_ms", 999.0))
+    checks = {
+        "active": csv_summary.get("metronome_compensation_active") == "yes",
+        "all_remote_peers_averaged": compensation_peers == expected_remote_peers,
+        "average_latency_measured": average_latency_frames > 0.0,
+        "target_matches_average_latency": (
+            target_formula_error_frames <= LISTENER_COMPENSATED_TARGET_TOLERANCE_FRAMES),
+        "offset_converged_to_target": (
+            convergence_error_frames <= convergence_tolerance_frames),
+        "click_near_average_remote_audio": (
+            average_alignment_error_ms <=
+            LISTENER_COMPENSATED_AVERAGE_ALIGNMENT_TOLERANCE_MS),
+        "click_peak_error_bounded": (
+            peak_alignment_error_ms <= LISTENER_COMPENSATED_PEAK_ALIGNMENT_TOLERANCE_MS),
+    }
+    return {
+        "ok": all(checks.values()),
+        "verdict": "pass" if all(checks.values()) else "listener_compensation_contract_failed",
+        "checks": checks,
+        "sample_rate": sample_rate,
+        "expected_remote_peers": expected_remote_peers,
+        "compensation_peer_count": compensation_peers,
+        "base_frames": base_frames,
+        "target_frames": target_frames,
+        "offset_frames": offset_frames,
+        "average_latency_frames": average_latency_frames,
+        "average_latency_ms": (
+            average_latency_frames * 1000.0 / sample_rate if sample_rate > 0.0 else 0.0),
+        "applied_latency_frames": applied_latency_frames,
+        "target_formula_error_frames": target_formula_error_frames,
+        "convergence_error_frames": convergence_error_frames,
+        "convergence_tolerance_frames": convergence_tolerance_frames,
+        "average_alignment_error_ms": average_alignment_error_ms,
+        "peak_alignment_error_ms": peak_alignment_error_ms,
+    }
 
 
 def _recording_coverage(peer, requested_stream_ms):
@@ -155,6 +217,18 @@ def mesh_collect_metrics(peer_results, requested_stream_ms=0):
         "sequence_duplicate_total": sum((row.get("sequence_duplicate", 0.0) for row in summaries), 0.0),
         "jitter_max_ms": max((row.get("jitter_max_ms", 0.0) for row in summaries), default=0.0),
         "rtt_max_ms": max((row.get("rtt_max_ms", 0.0) for row in summaries), default=0.0),
+        "metronome_compensation_average_latency_ms_min": min(
+            (row.get("metronome_compensation_average_latency_ms", 0.0) for row in summaries),
+            default=0.0),
+        "metronome_compensation_average_latency_ms_max": max(
+            (row.get("metronome_compensation_average_latency_ms", 0.0) for row in summaries),
+            default=0.0),
+        "metronome_compensation_peer_count_min": min(
+            (row.get("metronome_compensation_peer_count", 0.0) for row in summaries),
+            default=0.0),
+        "metronome_compensation_peer_count_max": max(
+            (row.get("metronome_compensation_peer_count", 0.0) for row in summaries),
+            default=0.0),
         "drift_abs_ppm_max": max((abs(row.get("drift_ppm", 0.0)) for row in summaries), default=0.0),
         "drift_correction_active_peers": sum(
             1 for row in summaries
@@ -602,12 +676,16 @@ def protocol_verdict_for(result):
         if pulse.get("combined", {}).get("matched_pulses_min", 0) <= 0:
             return "listener_compensated_pulse_not_matched"
         if scenario == "metronome-listener-compensated-metro-pulse":
-            listener = pulse.get("client", {})
-            if listener.get("steady_samples", 0) <= 0:
-                return "listener_compensated_pulse_steady_missing"
-            max_abs_error = listener.get("steady_max_abs_error_ms", 0.0)
-            if max_abs_error > 80.0:
-                return "listener_compensated_pulse_timing_high"
+            contracts = pulse.get("contracts", {})
+            for side in ("server", "client"):
+                contract = contracts.get(side, {})
+                if not contract:
+                    return f"listener_compensated_{side}_contract_missing"
+                if not contract.get("ok", False):
+                    failed = next(
+                        (name for name, passed in contract.get("checks", {}).items() if not passed),
+                        "contract_failed")
+                    return f"listener_compensated_{side}_{failed}"
         return "pass"
     if scenario.startswith("metronome-"):
         expected = scenario.removeprefix("metronome-")
@@ -911,7 +989,7 @@ def metronome_verdict(result, expected_mode):
     if server.get("grid_mode", -1) != expected_mode_id or client.get("grid_mode", -1) != expected_mode_id:
         return "metronome_mode_not_applied"
     if expected_mode == "listener-compensated":
-        if combined.get("metronome_compensation_active_sides", 0.0) < 1:
+        if combined.get("metronome_compensation_active_sides", 0.0) < 2:
             return "metronome_compensation_not_active"
     elif expected_mode == "leader-audio":
         if combined.get("metronome_compensation_active_sides", 0) != 0:
@@ -1149,7 +1227,7 @@ def is_listener_compensated_pulse_tracking_scenario(scenario):
         scenario.startswith("metronome-listener-compensated-pulse"))
 
 
-def nearest_errors(reference_frames, measured_frames):
+def nearest_errors(reference_frames, measured_frames, max_abs_error=None):
     errors = []
     used = set()
     missing = 0
@@ -1167,6 +1245,9 @@ def nearest_errors(reference_frames, measured_frames):
                 best_abs = absolute
                 best_signed = signed
         if best_index is None:
+            missing += 1
+            continue
+        if max_abs_error is not None and best_abs > max_abs_error:
             missing += 1
             continue
         used.add(best_index)
@@ -1241,7 +1322,11 @@ def analyze_listener_compensated_pulse_side(recording_dir):
             "missing_pulse_matches": 0,
             "extra_clicks": 0,
         }
-    errors, missing_pulses, extra_clicks = nearest_errors(pulses, clicks)
+    # A recording can begin between the first remote pulse and first local
+    # click. Do not let that startup-only missing click shift every subsequent
+    # one-to-one match by a full beat.
+    errors, missing_pulses, extra_clicks = nearest_errors(
+        pulses, clicks, max_abs_error=max(1, sample_rate // 4))
     summary = summarize_signed_errors(errors, sample_rate)
     steady_errors = errors[LISTENER_PULSE_STEADY_SKIP:] if len(errors) > LISTENER_PULSE_STEADY_SKIP else []
     steady_summary = summarize_signed_errors(steady_errors, sample_rate)
@@ -1325,12 +1410,20 @@ def analyze_listener_compensated_pulse(result, server_paths, client_paths):
         return {}
     server = analyze_listener_compensated_pulse_side(Path(server_paths["dir"]) / "recording")
     client = analyze_listener_compensated_pulse_side(Path(client_paths["dir"]) / "recording")
+    metrics = result.get("metrics", {})
+    contracts = {
+        "server": listener_compensation_contract(
+            metrics.get("server", {}), {"listener_compensated_pulse": server}, 1),
+        "client": listener_compensation_contract(
+            metrics.get("client", {}), {"listener_compensated_pulse": client}, 1),
+    }
     ok = server.get("ok", False) and client.get("ok", False)
     return {
         "ok": ok,
         "verdict": "pass" if ok else "listener_compensated_pulse_analysis_failed",
         "server": server,
         "client": client,
+        "contracts": contracts,
         "combined": {
             "matched_pulses_min": min(server.get("matched_pulses", 0), client.get("matched_pulses", 0)),
             "avg_abs_error_ms_max": max(server.get("avg_abs_error_ms", 0.0), client.get("avg_abs_error_ms", 0.0)),

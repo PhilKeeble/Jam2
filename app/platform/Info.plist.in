@@ -24,5 +24,7 @@
     <string>Jam2 uses the microphone or selected audio input so you can send and record instrument audio.</string>
     <key>NSAudioCaptureUsageDescription</key>
     <string>Jam2 records system audio when you use loopback capture.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Jam2 connects directly to other musicians on your local network to exchange authenticated session control and live audio.</string>
 </dict>
 </plist>

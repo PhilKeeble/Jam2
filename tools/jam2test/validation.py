@@ -32,6 +32,7 @@ from .results import (
     METRONOME_WAV_TOLERANCE_FRAMES,
     analyze_listener_compensated_pulse_side,
     analyze_metro_pulse_epoch_side,
+    listener_compensation_contract,
     mesh_collect_metrics,
     mesh_verdict,
 )
@@ -1049,6 +1050,15 @@ def _analyze_received_leader_audio(recording_dir: Path) -> dict[str, Any]:
     }
 
 
+def _listener_compensation_contract(
+    csv_summary: dict[str, Any],
+    audio_analysis: dict[str, Any],
+    expected_remote_peers: int,
+) -> dict[str, Any]:
+    return listener_compensation_contract(
+        csv_summary, audio_analysis, expected_remote_peers)
+
+
 def _public_audio_analysis(case_id: str, peer_index: int, recording_dir: Path) -> dict[str, Any]:
     if case_id == "public-cli-network-clean":
         analysis = analyze_recording_dir(recording_dir, signal="silence")
@@ -1157,7 +1167,14 @@ def _public_audio_analysis(case_id: str, peer_index: int, recording_dir: Path) -
             analysis["tags"].remove(tag)
             intentional_clipping[stem] = clipped
     analysis["intentional_click_clipping_frames"] = intentional_clipping
-    if not metro.get("ok", False) or metro.get("actual_clicks", 0) < 16:
+    if case_id.endswith("metro-pulse"):
+        listener_clicks_ok = (
+            metro.get("actual_clicks", 0) >= 16 and
+            metro.get("max_interval_error_frames", 999999) <= 1200
+        )
+        if not listener_clicks_ok:
+            analysis["tags"].append("listener_compensated_click_interval_or_count_failed")
+    elif not metro.get("ok", False) or metro.get("actual_clicks", 0) < 16:
         analysis["tags"].append(metro.get("verdict", "metronome_clicks_insufficient"))
     if (case_id == "public-cli-metronome-shared-grid" and
             metro.get("max_interval_error_frames", 999) > 240):
@@ -1168,8 +1185,7 @@ def _public_audio_analysis(case_id: str, peer_index: int, recording_dir: Path) -
         listener_ok = (
             listener.get("ok", False) and
             listener.get("steady_samples", 0) >= 10 and
-            listener.get("missing_pulse_matches", 0) == 0 and
-            listener.get("steady_max_abs_error_ms", 999.0) <= 80.0
+            listener.get("missing_pulse_matches", 0) == 0
         )
         analysis["metro_pulse_epoch"] = epoch
         analysis["listener_compensated_pulse"] = listener
@@ -1235,11 +1251,17 @@ def _public_case_console_summary(case_id: str, result: dict[str, Any]) -> str:
             f"source_peers=1"
         )
     listeners = [analysis["listener_compensated_pulse"] for analysis in analyses]
+    contracts = [analysis.get("listener_compensation_contract", {}) for analysis in analyses]
     samples = [item.get("steady_samples", 0) for item in listeners]
     max_error = max((item.get("steady_max_abs_error_ms", 0.0) for item in listeners), default=0.0)
+    average_latencies = [item.get("average_latency_ms", 0.0) for item in contracts]
+    convergence_frames = [item.get("convergence_error_frames", 0.0) for item in contracts]
     return (
         f"steady_matches={min(samples, default=0)}-{max(samples, default=0)} "
-        f"max_error={max_error:.1f}ms"
+        f"average_latency={min(average_latencies, default=0.0):.1f}-"
+        f"{max(average_latencies, default=0.0):.1f}ms "
+        f"max_landing_error={max_error:.1f}ms "
+        f"max_target_error={max(convergence_frames, default=0.0) * 1000.0 / 48000.0:.1f}ms"
     )
 
 
@@ -1399,6 +1421,15 @@ def _run_public_network_case(
             audio = _public_audio_analysis(case_id, index, peer_root / "recording")
         except Exception as error:
             audio = {"ok": False, "tags": [f"analysis_error:{type(error).__name__}:{error}"]}
+        if listener_mode and csv_summary.get("has_csv", False):
+            compensation = _listener_compensation_contract(csv_summary, audio, 3)
+            audio["listener_compensation_contract"] = compensation
+            if not compensation["ok"]:
+                failed_checks = ",".join(
+                    name for name, passed in compensation["checks"].items() if not passed)
+                audio.setdefault("tags", []).append(
+                    f"listener_compensation_contract_failed:{failed_checks}")
+                audio["ok"] = False
         startup = _startup_events(item["stdout_path"])
         stages = [event.get("stage") for event in startup]
         startup_ok = (

@@ -135,6 +135,10 @@ network packets of the configured minimum.
   `metronome-listener-compensated-pulse-jitter`,
   `metronome-listener-compensated-pulse-burst`,
   `metronome-listener-compensated-pulse-loss`.
+  The `metro-pulse` verdict evaluates creator and joiner independently. Both
+  must compensate their own click, include every remote path, converge on the
+  measured average target, and satisfy the recorded steady average/peak
+  landing bounds; one good side cannot hide a failure on the other.
 - Runtime/tuning checks: `levels-low`, `sample-time-playout-off`,
   `playout-delay-3072`, `drift-max-5ppm`, `drift-smoothing-fast`,
   `socket-buffers`, `channels-1-to-1`, `runtime-controls`.

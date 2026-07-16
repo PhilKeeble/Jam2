@@ -62,6 +62,7 @@ enum class TransportFailure {
     HostNotFound,
     NetworkUnavailable,
     TransportError,
+    PreAuthenticationDisconnect,
     AuthenticationRejected,
     AuthenticationTimeout,
     FrameTimeout,

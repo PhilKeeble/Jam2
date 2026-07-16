@@ -74,9 +74,12 @@ The product selection verifies:
   injection, shared-grid metronome timing, leader-audio distribution, and
   listener-compensated `metro-pulse` timing. Shared-grid requires one common
   authority/revision plus a tight five-millisecond mapped-grid and click-interval
-  bound on every peer. Listener-compensated requires each listener's locally
-  rendered click to remain within the looser 80-millisecond best-effort bound
-  against the mixture of remote metro pulses. Leader-audio requires one
+  bound on every peer. Listener-compensated independently checks all four
+  peers, including the creator: each must report all three active remote phase
+  paths, derive its target from their average audible playout phase, converge
+  within five milliseconds, and land its locally rendered click within a
+  12-millisecond steady average and 25-millisecond peak bound against the
+  remote metro-pulse mixture. Leader-audio requires one
   authoritative click source, silent local metronomes on all listeners, and
   a continuous 440 Hz leader signal plus timing-correct embedded clicks in
   every listener's received-audio stem. Each case records and analyzes 10 seconds on all four peers,
@@ -144,7 +147,7 @@ start line and one result line per case, then one summary, for example:
 [RUN ] 16/17 public-cli-metronome-leader-audio
 [PASS] 16/17 public-cli-metronome-leader-audio (16.0s) leader_clicks=20-20 max_interval_error=0.1ms tone=440.4-440.4Hz source_peers=1
 [RUN ] 17/17 public-cli-metronome-metro-pulse
-[PASS] 17/17 public-cli-metronome-metro-pulse (16.0s) steady_matches=12-12 max_error=22.4ms
+[PASS] 17/17 public-cli-metronome-metro-pulse (15.8s) steady_matches=11-13 average_latency=27.0-29.5ms max_landing_error=6.7ms max_target_error=0.7ms
 [SUMMARY] PASS 17/17 (99.0s) artifacts=C:\path\to\Jam2\tools\validate_logs\<invocation-id>
 ```
 

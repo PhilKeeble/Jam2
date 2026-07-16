@@ -31,6 +31,7 @@ public:
         quint64 activeConnections = 0;
         quint64 activeConnectionHighWater = 0;
         quint64 disconnectedConnections = 0;
+        quint64 preAuthenticationDisconnects = 0;
     };
 
     explicit ControlServer(QObject* parent = nullptr);
@@ -64,6 +65,7 @@ private:
         QByteArray receiveKey;
         QByteArray sendKey;
         bool authenticated = false;
+        bool receivedAnyInput = false;
         bool readScheduled = false;
         quint64 receiveSequence = 1;
         quint64 sendSequence = 1;

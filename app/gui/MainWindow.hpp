@@ -84,6 +84,7 @@ private:
     void handleControlEvent(
         const jam2::control_protocol::TransportEvent& event,
         bool serverSide);
+    void notePreAuthenticationDisconnect();
     void applySessionSnapshot(const SharedSessionController::Snapshot& snapshot);
     void refreshControlConnection();
     void handleMeshPeerAuthenticated(const QString& token, const QJsonObject& message);
@@ -465,6 +466,9 @@ private:
     QString lastJamFailureDialog_;
     QString queuedJamFailureDetail_;
     bool jamFailureDialogQueued_ = false;
+    QElapsedTimer preAuthenticationDisconnectWindow_;
+    int preAuthenticationDisconnectCount_ = 0;
+    bool firewallGuidanceShown_ = false;
     QString activePublicEndpoint_;
     QString meshPeerToken_;
     QString lastLoggedSessionSummary_;

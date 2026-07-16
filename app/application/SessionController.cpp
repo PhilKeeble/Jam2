@@ -1404,6 +1404,7 @@ private:
                 {QStringLiteral("active_connections"), static_cast<qint64>(controlServerStats.activeConnections)},
                 {QStringLiteral("active_connection_high_water"), static_cast<qint64>(controlServerStats.activeConnectionHighWater)},
                 {QStringLiteral("disconnected_connections"), static_cast<qint64>(controlServerStats.disconnectedConnections)},
+                {QStringLiteral("pre_authentication_disconnects"), static_cast<qint64>(controlServerStats.preAuthenticationDisconnects)},
             }},
             {QStringLiteral("control_client"), QJsonObject{
                 {QStringLiteral("authentication_rejects"), static_cast<qint64>(controlClientStats.authenticationRejects)},

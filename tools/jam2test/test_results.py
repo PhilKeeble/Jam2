@@ -45,6 +45,36 @@ def normal_result(scenario="clean-control", **metric_overrides):
 
 
 class CsvSummaryTests(unittest.TestCase):
+    def test_listener_compensated_verdict_requires_both_peer_contracts(self):
+        result = normal_result("metronome-listener-compensated-metro-pulse")
+        result["metrics"]["combined"].update({
+            "grid_authority_consensus": True,
+            "grid_revision_consensus": True,
+            "grid_authority_states_sent_total": 1.0,
+            "grid_authority_states_accepted_total": 1.0,
+            "metronome_alignment_valid_sides": 2.0,
+            "grid_authority_epoch_min": 1.0,
+            "metronome_compensation_active_sides": 2.0,
+        })
+        result["metrics"]["server"]["grid_mode"] = 2
+        result["metrics"]["client"]["grid_mode"] = 2
+        result["metro_pulse_epoch_analysis"] = {"ok": True}
+        passing = {"ok": True, "checks": {"click_near_average_remote_audio": True}}
+        result["listener_compensated_pulse_analysis"] = {
+            "ok": True,
+            "combined": {"matched_pulses_min": 10},
+            "contracts": {"server": passing, "client": passing},
+        }
+        self.assertEqual(verdict_for(result), "pass")
+
+        result["listener_compensated_pulse_analysis"]["contracts"]["server"] = {
+            "ok": False,
+            "checks": {"click_near_average_remote_audio": False},
+        }
+        self.assertEqual(
+            verdict_for(result),
+            "listener_compensated_server_click_near_average_remote_audio")
+
     def test_catalog_duration_extends_past_last_native_action(self):
         scenario = {
             "source_scenario": "transport-track-sync-off",

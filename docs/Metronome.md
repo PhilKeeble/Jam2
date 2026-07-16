@@ -32,9 +32,16 @@ The GUI exposes the same controls in its runtime/metronome area.
 | --- | --- |
 | `shared-grid` | Default mode. Both peers generate the click from the shared timing grid. |
 | `leader-audio` | Useful for comparing click timing against the listener's audio path. |
-| `listener-compensated` | Experimental mode for comparing listener-side compensation behavior. |
+| `listener-compensated` | Every peer shifts its own local click toward the average audible phase of all active remote peers. With two peers, each side follows the other's received audio timing. |
 
 Use `shared-grid` first. Compare the other modes only when collecting timing data or validating metronome behavior.
+
+Listener compensation does not give the creator or grid authority special
+rendering control. Every participant publishes its mapped grid phase and uses
+the fresh playout phase of every active remote stream. Each participant then
+adjusts only its own click toward that group average; the shared grid and audio
+remain otherwise unchanged. CSV stats expose the base, target, applied offset,
+averaged latency, contributing-peer count, clamp events, and stale events.
 
 Every fresh Start after Stop creates a new ordered grid revision and epoch, so both connected peers begin again at `1.1`. A late or rejoining peer does not restart that running grid: it maps the authority's original epoch and elapsed frame position onto its local engine, then joins the current absolute bar and beat. Repeating an unchanged On, BPM, pattern, or mode control also leaves the current revision and authority epoch intact. If the current grid authority leaves while the metronome is running, the surviving coordinator immediately orders a fresh running epoch instead of leaving a stopped clock with an On control. Authenticated TCP metronome messages update the remote GUI presentation; the native UDP authority state alone applies the run state, mode, pattern, and mapped epoch to the remote engine so it cannot create a competing local proposal.
 

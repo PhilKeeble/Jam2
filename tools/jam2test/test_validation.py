@@ -6,6 +6,7 @@ from pathlib import Path
 
 from jam2test.validation import (
     ValidationReporter,
+    _listener_compensation_contract,
     _mesh_edge_summaries,
     _startup_events,
 )
@@ -59,6 +60,32 @@ class ValidationReportingTests(unittest.TestCase):
             self.assertTrue(edges["7"]["endpoint_proof_verified"])
             self.assertEqual(edges["7"]["sent_packets"], 100)
             self.assertEqual(edges["7"]["recv_packets"], 99)
+
+    def test_listener_compensation_contract_requires_all_peers_and_average_target(self):
+        csv_summary = {
+            "active_sample_rate": 48000.0,
+            "metronome_compensation_active": "yes",
+            "metronome_compensation_base_frames": 100.0,
+            "metronome_compensation_target_frames": -860.0,
+            "metronome_compensation_offset_frames": -850.0,
+            "metronome_compensation_average_latency_frames": 960.0,
+            "metronome_compensation_peer_count": 3.0,
+        }
+        audio = {
+            "listener_compensated_pulse": {
+                "steady_avg_abs_error_ms": 2.0,
+                "steady_max_abs_error_ms": 4.0,
+            }
+        }
+        result = _listener_compensation_contract(csv_summary, audio, 3)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["checks"]["all_remote_peers_averaged"])
+        self.assertTrue(result["checks"]["target_matches_average_latency"])
+
+        csv_summary["metronome_compensation_peer_count"] = 1.0
+        result = _listener_compensation_contract(csv_summary, audio, 3)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["checks"]["all_remote_peers_averaged"])
 
 
 if __name__ == "__main__":

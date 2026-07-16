@@ -39,8 +39,6 @@ Qt Networking stack causing crashes on mac, look into how baked in the Qt socket
 
 ## Bugs
 
-when mac is server it crashes
-
 stats dont update on the gui 
 
 when starting a jam it always tells you the track sample rate is bad even when it amtches local sample rate

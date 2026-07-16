@@ -95,6 +95,39 @@ namespace {
 constexpr qint64 kMaxLooperAssetBytes = jam2::application::limits::kMaximumAssetBytes;
 constexpr int kMaxLooperAssetRequests = jam2::application::limits::kMaximumAssetRequests;
 constexpr int kMaxLooperTrackContributions = 512;
+constexpr int kFirewallGuidanceDisconnectThreshold = 3;
+constexpr int kFirewallGuidanceWindowMs = 10000;
+
+QString creatorFirewallGuidance()
+{
+#if defined(__APPLE__)
+    return QStringLiteral(
+        "Jam2 accepted incoming TCP connections, but they closed before authentication began. "
+        "macOS Firewall may be blocking Jam2.\n\n"
+        "Open System Settings > Network > Firewall > Options and set Jam2 to Allow incoming "
+        "connections, then ask the peer to retry.");
+#elif defined(_WIN32)
+    return QStringLiteral(
+        "Jam2 accepted incoming TCP connections, but they closed before authentication began. "
+        "Windows Firewall or other network security software on either computer may be blocking "
+        "the connection.\n\n"
+        "Open Windows Security > Firewall & network protection > Allow an app through firewall, "
+        "allow Jam2 on the active network, then ask the peer to retry.");
+#else
+    return QStringLiteral(
+        "Jam2 accepted incoming TCP connections, but they closed before authentication began. "
+        "Check firewall and network security settings on both computers, then ask the peer to retry.");
+#endif
+}
+
+QString joinerFirewallGuidance()
+{
+    return QStringLiteral(
+        "\n\nNo authenticated TCP control connection was established. Confirm that the creator is "
+        "still hosting and that the invite address is correct. Also check that Jam2 is allowed "
+        "through macOS Firewall or Windows Firewall on the creator's computer and through any "
+        "third-party network security software on both computers.");
+}
 
 QString normalizedNetworkHost(QString host)
 {
@@ -1180,6 +1213,9 @@ void MainWindow::startJam(bool createSession)
     lastJamFailureDialog_.clear();
     queuedJamFailureDetail_.clear();
     jamFailureDialogQueued_ = false;
+    preAuthenticationDisconnectWindow_.invalidate();
+    preAuthenticationDisconnectCount_ = 0;
+    firewallGuidanceShown_ = false;
     jam2_.setTrackSyncEnabled(looperProject_.trackSyncEnabled());
     activePublicEndpoint_.clear();
     lastLoggedSessionSummary_.clear();
@@ -2110,7 +2146,8 @@ void MainWindow::handleControlEvent(
                 "control_stats side=server accepted=%1 pending_cap_rejects=%2 auth_rate_limit_rejects=%3 "
                 "session_cap_rejects=%4 auth_rejects=%5 auth_timeouts=%6 frame_rejects=%7 "
                 "frame_timeouts=%8 tag_or_sequence_rejects=%9 output_rejects=%10 input_high_water=%11 output_high_water=%12 "
-                "active_connections=%13 active_connection_high_water=%14 disconnected_connections=%15")
+                "active_connections=%13 active_connection_high_water=%14 disconnected_connections=%15 "
+                "pre_authentication_disconnects=%16")
                 .arg(stats.acceptedConnections)
                 .arg(stats.pendingCapRejects)
                 .arg(stats.authenticationRateLimitRejects)
@@ -2126,7 +2163,8 @@ void MainWindow::handleControlEvent(
                 .arg(stats.maxQueuedOutputBytes)
                 .arg(stats.activeConnections)
                 .arg(stats.activeConnectionHighWater)
-                .arg(stats.disconnectedConnections));
+                .arg(stats.disconnectedConnections)
+                .arg(stats.preAuthenticationDisconnects));
         } else {
             const ControlClient::Stats stats = sessionController_.clientStats();
             appendLog(QStringLiteral(
@@ -2146,6 +2184,10 @@ void MainWindow::handleControlEvent(
                 .arg(stats.completedConnections)
                 .arg(stats.disconnectedConnections));
         }
+    }
+    if (serverSide && event.type == TransportEventType::Failure &&
+        event.failure == jam2::control_protocol::TransportFailure::PreAuthenticationDisconnect) {
+        notePreAuthenticationDisconnect();
     }
     if (event.type == TransportEventType::SessionEnded) {
         appendLog(QStringLiteral("jam ended by creator; returning to local mode"));
@@ -2173,8 +2215,13 @@ void MainWindow::handleControlEvent(
             stopButton_->setEnabled(false);
         }
         setMixRemotePeerVisible(false);
-        showJamFailure(pendingJamRuntimeError_.isEmpty()
-            ? event.detail : pendingJamRuntimeError_);
+        QString detail = pendingJamRuntimeError_.isEmpty()
+            ? event.detail : pendingJamRuntimeError_;
+        if (event.failure == jam2::control_protocol::TransportFailure::ReconnectExhausted &&
+            !detail.contains(QStringLiteral("firewall"), Qt::CaseInsensitive)) {
+            detail += joinerFirewallGuidance();
+        }
+        showJamFailure(detail);
         QTimer::singleShot(0, this, [this] { stopJam(true); });
     } else if (event.type == TransportEventType::Disconnected) {
         if (serverSide) {
@@ -2183,6 +2230,31 @@ void MainWindow::handleControlEvent(
             setMixRemotePeerVisible(false);
         }
     }
+}
+
+void MainWindow::notePreAuthenticationDisconnect()
+{
+    if (firewallGuidanceShown_ || shuttingDown_ || !sessionController_.isServer()) {
+        return;
+    }
+    if (!preAuthenticationDisconnectWindow_.isValid() ||
+        preAuthenticationDisconnectWindow_.elapsed() > kFirewallGuidanceWindowMs) {
+        preAuthenticationDisconnectWindow_.restart();
+        preAuthenticationDisconnectCount_ = 0;
+    }
+    ++preAuthenticationDisconnectCount_;
+    if (preAuthenticationDisconnectCount_ < kFirewallGuidanceDisconnectThreshold) {
+        return;
+    }
+    firewallGuidanceShown_ = true;
+    QTimer::singleShot(0, this, [this] {
+        if (!shuttingDown_ && sessionController_.isServer()) {
+            QMessageBox::warning(
+                this,
+                QStringLiteral("Incoming connection may be blocked"),
+                creatorFirewallGuidance());
+        }
+    });
 }
 
 void MainWindow::refreshControlConnection()
