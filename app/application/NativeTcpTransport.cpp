@@ -10,7 +10,6 @@
 #include <limits>
 #include <mutex>
 #include <stdexcept>
-#include <stop_token>
 #include <thread>
 #include <utility>
 
@@ -254,8 +253,8 @@ public:
         context = target;
         onData = std::move(dataHandler);
         onDisconnected = std::move(disconnectHandler);
-        reader = std::jthread([this](std::stop_token token) { readLoop(token); });
-        writer = std::jthread([this](std::stop_token token) { writeLoop(token); });
+        reader = std::thread([this] { readLoop(); });
+        writer = std::thread([this] { writeLoop(); });
     }
 
     bool queueWrite(const QByteArray& bytes, bool closeAfterWrite)
@@ -277,12 +276,6 @@ public:
     {
         stopping.store(true);
         connected.store(false);
-        if (reader.joinable()) {
-            reader.request_stop();
-        }
-        if (writer.joinable()) {
-            writer.request_stop();
-        }
         closeAtomicSocket(handle);
         {
             std::lock_guard lock(queueMutex);
@@ -320,10 +313,10 @@ public:
         });
     }
 
-    void readLoop(std::stop_token token)
+    void readLoop()
     {
         std::array<char, 64 * 1024> buffer{};
-        while (!token.stop_requested() && !stopping.load()) {
+        while (!stopping.load()) {
             const NativeHandle current = handle.load();
             if (current == kInvalidHandle) {
                 break;
@@ -358,16 +351,16 @@ public:
         }
     }
 
-    void writeLoop(std::stop_token token)
+    void writeLoop()
     {
-        while (!token.stop_requested()) {
+        while (!stopping.load()) {
             PendingWrite pending;
             {
                 std::unique_lock lock(queueMutex);
-                queueReady.wait(lock, token, [this] {
+                queueReady.wait(lock, [this] {
                     return stopping.load() || !writes.empty();
                 });
-                if (stopping.load() || token.stop_requested()) {
+                if (stopping.load()) {
                     return;
                 }
                 pending = std::move(writes.front());
@@ -375,7 +368,7 @@ public:
             }
 
             qsizetype offset = 0;
-            while (offset < pending.bytes.size() && !token.stop_requested() && !stopping.load()) {
+            while (offset < pending.bytes.size() && !stopping.load()) {
                 const NativeHandle current = handle.load();
                 if (current == kInvalidHandle) {
                     return;
@@ -420,8 +413,8 @@ public:
     std::mutex queueMutex;
     std::condition_variable_any queueReady;
     std::deque<PendingWrite> writes;
-    std::jthread reader;
-    std::jthread writer;
+    std::thread reader;
+    std::thread writer;
 };
 
 NativeTcpConnection::NativeTcpConnection(std::unique_ptr<Impl> impl)
@@ -525,16 +518,13 @@ public:
         port.store(ntohs(local.sin_port));
         handle.store(toNative(socket));
         listening.store(true);
-        thread = std::jthread([this](std::stop_token token) { acceptLoop(token); });
+        thread = std::thread([this] { acceptLoop(); });
         return true;
     }
 
     void close()
     {
         listening.store(false);
-        if (thread.joinable()) {
-            thread.request_stop();
-        }
         closeAtomicSocket(handle);
         if (thread.joinable() && thread.get_id() != std::this_thread::get_id()) {
             thread.join();
@@ -542,9 +532,9 @@ public:
         port.store(0);
     }
 
-    void acceptLoop(std::stop_token token)
+    void acceptLoop()
     {
-        while (!token.stop_requested() && listening.load()) {
+        while (listening.load()) {
             const NativeHandle current = handle.load();
             if (current == kInvalidHandle) {
                 return;
@@ -645,7 +635,7 @@ public:
     std::shared_ptr<std::atomic<int>> pendingDeliveries;
     mutable std::mutex errorMutex;
     QString lastError;
-    std::jthread thread;
+    std::thread thread;
 };
 
 NativeTcpListener::NativeTcpListener() : impl_(std::make_unique<Impl>()) {}
@@ -683,23 +673,22 @@ public:
         context = target;
         onConnected = std::move(connectedHandler);
         onError = std::move(errorHandler);
-        thread = std::jthread([this, requestedHost, requestedPort](std::stop_token token) {
-            connectLoop(requestedHost, requestedPort, token);
+        cancelled.store(false);
+        thread = std::thread([this, requestedHost, requestedPort] {
+            connectLoop(requestedHost, requestedPort);
         });
     }
 
     void cancel()
     {
-        if (thread.joinable()) {
-            thread.request_stop();
-        }
+        cancelled.store(true);
         closeAtomicSocket(connectingHandle);
         if (thread.joinable() && thread.get_id() != std::this_thread::get_id()) {
             thread.join();
         }
     }
 
-    void connectLoop(const QString& host, quint16 port, std::stop_token token)
+    void connectLoop(const QString& host, quint16 port)
     {
         addrinfo hints{};
         hints.ai_family = AF_INET;
@@ -720,7 +709,7 @@ public:
         NativeTcpError lastError{
             NativeTcpError::Code::Transport,
             QStringLiteral("TCP connection failed")};
-        for (addrinfo* address = addresses; address && !token.stop_requested();
+        for (addrinfo* address = addresses; address && !cancelled.load();
              address = address->ai_next) {
             const OsSocket socket = ::socket(address->ai_family, address->ai_socktype, address->ai_protocol);
             if (socket == kInvalidSocket) {
@@ -748,7 +737,7 @@ public:
                 const auto deadline = std::chrono::steady_clock::now() +
                     std::chrono::milliseconds(kConnectTimeoutMs);
                 bool completed = false;
-                while (!token.stop_requested() && std::chrono::steady_clock::now() < deadline) {
+                while (!cancelled.load() && std::chrono::steady_clock::now() < deadline) {
                     fd_set writeSet;
                     fd_set errorSet;
                     FD_ZERO(&writeSet);
@@ -784,7 +773,7 @@ public:
                     break;
                 }
                 if (!completed) {
-                    if (!token.stop_requested() && connectError == 0) {
+                    if (!cancelled.load() && connectError == 0) {
 #if defined(_WIN32)
                         connectError = WSAETIMEDOUT;
 #else
@@ -797,7 +786,7 @@ public:
                 }
             }
 
-            if (token.stop_requested()) {
+            if (cancelled.load()) {
                 closeAtomicSocket(connectingHandle);
                 break;
             }
@@ -818,7 +807,7 @@ public:
             return;
         }
         freeaddrinfo(addresses);
-        if (!token.stop_requested()) {
+        if (!cancelled.load()) {
             postFailure(NativeTcpError{
                 lastError.code,
                 QStringLiteral("TCP control transport error: ") + lastError.message});
@@ -837,10 +826,11 @@ public:
 
     std::shared_ptr<SocketRuntime> runtime;
     std::atomic<NativeHandle> connectingHandle{kInvalidHandle};
+    std::atomic<bool> cancelled{true};
     QObject* context = nullptr;
     ConnectedHandler onConnected;
     ErrorHandler onError;
-    std::jthread thread;
+    std::thread thread;
 };
 
 NativeTcpConnector::NativeTcpConnector() : impl_(std::make_unique<Impl>()) {}
