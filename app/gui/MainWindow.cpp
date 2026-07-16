@@ -1599,7 +1599,7 @@ void MainWindow::showStartJamDialog()
         socketRecvBufferSpin_, osPriorityBox_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
         driftMaxCorrectionSpin_, sampleTimePlayoutCheck_, playoutDelaySpin_, jitterBufferSpin_,
         jitterBufferMaxSpin_, adaptiveCushionCheck_, adaptiveTargetSpin_, adaptiveMinSpin_,
-        adaptiveMaxSpin_, adaptiveReleaseSpin_,
+        adaptiveMaxSpin_, adaptiveReleaseSpin_, adaptiveRatioRampSpin_,
     };
     for (QWidget* widget : visibleWidgets) {
         widget->show();
@@ -1661,6 +1661,7 @@ void MainWindow::showStartJamDialog()
     advancedForm->addRow(QStringLiteral("Adaptive min frames"), adaptiveMinSpin_);
     advancedForm->addRow(QStringLiteral("Adaptive max frames"), adaptiveMaxSpin_);
     advancedForm->addRow(QStringLiteral("Adaptive release ppm"), adaptiveReleaseSpin_);
+    advancedForm->addRow(QStringLiteral("Adaptive ratio ramp ms"), adaptiveRatioRampSpin_);
     auto* advancedBox = new QGroupBox(QStringLiteral("Engine Options"), content);
     advancedBox->setLayout(advancedForm);
     layout->addWidget(advancedBox);
@@ -1702,7 +1703,7 @@ void MainWindow::showStartJamDialog()
         socketRecvBufferSpin_, osPriorityBox_, driftCorrectionCheck_, driftSmoothingSpin_, driftDeadbandSpin_,
         driftMaxCorrectionSpin_, sampleTimePlayoutCheck_, playoutDelaySpin_, jitterBufferSpin_,
         jitterBufferMaxSpin_, adaptiveCushionCheck_, adaptiveTargetSpin_, adaptiveMinSpin_,
-        adaptiveMaxSpin_, adaptiveReleaseSpin_,
+        adaptiveMaxSpin_, adaptiveReleaseSpin_, adaptiveRatioRampSpin_,
     };
     for (QWidget* widget : startWidgets) {
         widget->setParent(this);
@@ -2187,6 +2188,7 @@ void MainWindow::applyTuningProfileName(const QString& name)
     adaptiveMinSpin_->setValue(static_cast<int>(profile->adaptive_playback_min_frames));
     adaptiveMaxSpin_->setValue(static_cast<int>(profile->adaptive_playback_max_frames));
     adaptiveReleaseSpin_->setValue(profile->adaptive_playback_release_ppm);
+    adaptiveRatioRampSpin_->setValue(profile->adaptive_playback_ratio_ramp_ms);
 }
 
 bool MainWindow::selectedDeviceSupportsSampleRate(int sampleRate)
@@ -5177,6 +5179,7 @@ Jam2RuntimeOptions MainWindow::runtimeOptions() const
     options.adaptive_playback_min_frames = static_cast<std::size_t>(adaptiveMinSpin_->value());
     options.adaptive_playback_max_frames = static_cast<std::size_t>(adaptiveMaxSpin_->value());
     options.adaptive_playback_release_ppm = adaptiveReleaseSpin_->value();
+    options.adaptive_playback_ratio_ramp_ms = adaptiveRatioRampSpin_->value();
     bool deviceOk = false;
     const int device = selectedDeviceId().toInt(&deviceOk);
     if (!deviceOk || device < 0) {

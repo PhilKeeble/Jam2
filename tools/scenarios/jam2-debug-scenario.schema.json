@@ -46,6 +46,7 @@
         "adaptive_playback_min_frames": {"type": "integer"},
         "adaptive_playback_max_frames": {"type": "integer"},
         "adaptive_playback_release_ppm": {"type": "integer"},
+        "adaptive_playback_ratio_ramp_ms": {"type": "integer"},
         "metronome": {"type": "boolean"},
         "bpm": {"type": "integer"},
         "metronome_level": {"type": "number"},

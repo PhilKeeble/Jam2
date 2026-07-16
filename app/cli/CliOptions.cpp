@@ -136,6 +136,7 @@ Playout and drift options:
   --adaptive-playback-min-frames <frames>
   --adaptive-playback-max-frames <frames>
   --adaptive-playback-release-ppm <0..1000000>
+  --adaptive-playback-ratio-ramp-ms <0..60000>
   --drift-correction <on|off>          Enable receive-side resampling
   --drift-smoothing <0..1>             Drift estimate smoothing alpha
   --drift-deadband-ppm <0..50000>      Correction deadband
@@ -255,6 +256,7 @@ void apply_tuning_profile(Options& options, const jam2::TuningProfile& profile)
     options.adaptive_playback_min_frames = profile.adaptive_playback_min_frames;
     options.adaptive_playback_max_frames = profile.adaptive_playback_max_frames;
     options.adaptive_playback_release_ppm = profile.adaptive_playback_release_ppm;
+    options.adaptive_playback_ratio_ramp_ms = profile.adaptive_playback_ratio_ramp_ms;
 }
 
 std::string_view require_value(int argc, char** argv, int& i, std::string_view name)
@@ -711,6 +713,14 @@ Options parse_options(int argc, char** argv, int start)
             options.adaptive_playback_release_ppm = std::stoi(std::string(require_value(argc, argv, i, arg)));
             if (options.adaptive_playback_release_ppm < 0 || options.adaptive_playback_release_ppm > 1000000) {
                 throw std::runtime_error("--adaptive-playback-release-ppm must be 0..1000000");
+            }
+        } else if (arg == "--adaptive-playback-ratio-ramp-ms") {
+            options.adaptive_playback_ratio_ramp_ms = std::stoi(
+                std::string(require_value(argc, argv, i, arg)));
+            if (options.adaptive_playback_ratio_ramp_ms < 0 ||
+                options.adaptive_playback_ratio_ramp_ms > 60000) {
+                throw std::runtime_error(
+                    "--adaptive-playback-ratio-ramp-ms must be 0..60000");
             }
         } else if (arg == "--session-id") {
             options.session_id = jam2::parse_hex_u64(require_value(argc, argv, i, arg));

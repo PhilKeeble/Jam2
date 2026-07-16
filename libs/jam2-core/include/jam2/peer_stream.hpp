@@ -25,7 +25,7 @@ struct PeerStreamConfig {
     std::size_t adaptive_playback_target_frames = 0;
     std::size_t adaptive_playback_min_frames = 0;
     std::size_t adaptive_playback_max_frames = 0;
-    int adaptive_playback_release_ppm = 20000;
+    int adaptive_playback_release_ppm = 5000;
     bool drift_correction = true;
     double drift_smoothing = 0.02;
     int drift_deadband_ppm = 25;

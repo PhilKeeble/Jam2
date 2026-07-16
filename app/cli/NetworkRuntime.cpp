@@ -1034,6 +1034,7 @@ bool engine_restart_required(
         active.capture_ring_frames != requested.capture_ring_frames ||
         active.playback_ring_frames != requested.playback_ring_frames ||
         active.playback_prefill_frames != requested.playback_prefill_frames ||
+        active.playback_ratio_ramp_ms != requested.playback_ratio_ramp_ms ||
         active.diagnostics_enabled != requested.diagnostics_enabled ||
         active.test_input != requested.test_input ||
         active.prepared_track_max_frames != requested.prepared_track_max_frames;
@@ -1058,6 +1059,7 @@ jam2::EngineConfig make_engine_config_impl(const Options& options, bool leader_a
     config.capture_ring_frames = options.capture_ring_frames;
     config.playback_ring_frames = options.playback_ring_frames;
     config.playback_prefill_frames = options.playback_prefill_frames;
+    config.playback_ratio_ramp_ms = options.adaptive_playback_ratio_ramp_ms;
     config.diagnostics_enabled = diagnostics_enabled;
     config.metronome_enabled = options.metronome;
     config.metronome_pattern = jam2::metronome::sanitize({options.bpm, 4, 1, 4, 0x0fULL, 0, 0x01ULL, 0});
@@ -1336,7 +1338,12 @@ void print_optional_audio_stats(const OptionalAudioStream& audio, const Options&
     std::cout << "Audio control metronome mode: " << metronome_mode_text(static_cast<int>(engine_snapshot.metronome_mode)) << "\n";
     std::cout << "Audio control metronome epoch sample time: " << engine_snapshot.metronome_epoch_frame << "\n";
     std::cout << "Audio control metronome epoch valid: " << (engine_snapshot.metronome_epoch_valid ? "yes" : "no") << "\n";
-    std::cout << "Audio control resampler ratio: " << (static_cast<double>(engine_snapshot.playback_ratio_ppm) / 1000000.0) << "\n";
+    std::cout << "Audio control resampler target ratio: "
+              << (static_cast<double>(engine_snapshot.playback_ratio_ppm) / 1000000.0) << "\n";
+    std::cout << "Audio control resampler applied ratio: "
+              << (static_cast<double>(engine_snapshot.playback_ratio_applied_ppm) / 1000000.0) << "\n";
+    std::cout << "Audio control resampler ramping: "
+              << (engine_snapshot.playback_ratio_ramping ? "yes" : "no") << "\n";
 }
 
 int run_test_device(int argc, char** argv)

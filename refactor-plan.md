@@ -1280,17 +1280,21 @@ Add concise entries as implementation proceeds:
 - Focused stress exposed two additional verification defects. The malformed
   verdict still assumed the old corpus size; it now requires every generated
   current-header variant and matching native rejection. Adaptive release was
-  silently capped to 5,000 ppm in core and platform callbacks while reporting a
-  higher requested value, and headless ignored the playback ratio. The numeric
-  control is now authoritative, native profiles use 20,000 ppm, and ASIO,
-  CoreAudio, and headless all apply it without callback allocation or blocking.
+  silently capped in core and platform callbacks while reporting a different
+  requested value, and headless ignored the playback ratio. The numeric control
+  is now authoritative and ASIO, CoreAudio, and headless all apply it without
+  callback allocation or blocking. Follow-up listening and CSV evidence showed
+  that the briefly selected 20,000-ppm release was itself audible, so all native
+  profiles now use an explicit 5,000 ppm with a 250-ms applied-ratio ramp.
 - The final exact elevated MSVC build succeeded. `validate all` passed 13/13 at
-  `tools/validate_logs/20260716T090241Z_7e59bee8`, including 76/76 boundary and
-  22/22 lifecycle cases; all 49 Python units passed. The physical PCM16
+  `tools/validate_logs/20260716T094910Z_b0052e8f`, including 79/79 boundary and
+  22/22 lifecycle cases; all 49 Python units passed. The final physical PCM16
   44.1-kHz 250-ms recovery case on devices 16/5 passed at
-  `tools/stress_logs/20260716T084316Z_6c7f782c`: rings rose to about 1,500
-  frames and recovered to 416 or below with a 1.02 ratio and zero playback
-  underrun. The final headless malformed/recovery pair passed at
+  `tools/stress_logs/20260716T094822Z_cf5658e6`: rings rose to about 1,531
+  frames and recovered to 416 or below with a smoothly applied maximum 1.005
+  ratio and zero packet loss or playback-underrun time. Separate release
+  start/stop bands prevent callback-scale ring movement from repeatedly
+  restarting the ratio ramp. The final headless malformed/recovery pair passed at
   `tools/stress_logs/20260716T085001Z_547be3d5`, with all 14 generated malformed
   packets rejected and the real ring recovered to 504 frames or below. The
   retained bounded fuzzer was not expanded or rerun.

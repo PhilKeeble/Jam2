@@ -18,7 +18,7 @@ struct PeerMixerConfig {
     std::size_t adaptive_target_frames = 0;
     std::size_t adaptive_min_frames = 0;
     std::size_t adaptive_max_frames = 0;
-    int adaptive_release_ppm = 20000;
+    int adaptive_release_ppm = 5000;
 };
 
 struct PeerMixerPeerStats {

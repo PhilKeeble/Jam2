@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -14,6 +16,68 @@
 #include "track_take_recorder.hpp"
 
 namespace jam2::audio {
+
+class PlaybackRatioSmoother final {
+public:
+    void reset() noexcept
+    {
+        currentPpm_ = 1000000.0;
+        stepPpm_ = 0.0;
+        remainingFrames_ = 0;
+        targetPpm_ = 1000000;
+    }
+
+    void setTargetPpm(int targetPpm, std::uint64_t rampFrames) noexcept
+    {
+        targetPpm = std::clamp(targetPpm, 500000, 2000000);
+        if (targetPpm == targetPpm_) {
+            return;
+        }
+        targetPpm_ = targetPpm;
+        if (rampFrames == 0) {
+            currentPpm_ = static_cast<double>(targetPpm_);
+            stepPpm_ = 0.0;
+            remainingFrames_ = 0;
+            return;
+        }
+        remainingFrames_ = rampFrames;
+        stepPpm_ = (static_cast<double>(targetPpm_) - currentPpm_) /
+            static_cast<double>(remainingFrames_);
+    }
+
+    double nextRatio() noexcept
+    {
+        if (remainingFrames_ > 0) {
+            currentPpm_ += stepPpm_;
+            --remainingFrames_;
+            if (remainingFrames_ == 0) {
+                currentPpm_ = static_cast<double>(targetPpm_);
+                stepPpm_ = 0.0;
+            }
+        }
+        return currentPpm_ / 1000000.0;
+    }
+
+    bool steadyUnity() const noexcept
+    {
+        return remainingFrames_ == 0 && targetPpm_ == 1000000 &&
+            std::abs(currentPpm_ - 1000000.0) < 0.5;
+    }
+
+    bool ramping() const noexcept { return remainingFrames_ != 0; }
+
+    int appliedPpm() const noexcept
+    {
+        return std::clamp(
+            static_cast<int>(std::llround(currentPpm_)), 500000, 2000000);
+    }
+
+private:
+    double currentPpm_ = 1000000.0;
+    double stepPpm_ = 0.0;
+    std::uint64_t remainingFrames_ = 0;
+    int targetPpm_ = 1000000;
+};
 
 struct DeviceInfo {
     int id = 0;
@@ -82,6 +146,9 @@ struct StreamControl {
     std::atomic<int> local_monitor_level_ppm{250000};
     std::atomic<int> send_level_ppm{1000000};
     std::atomic<int> playback_ratio_ppm{1000000};
+    std::atomic<int> playback_ratio_applied_ppm{1000000};
+    std::atomic<bool> playback_ratio_ramping{false};
+    std::atomic<std::uint64_t> playback_ratio_ramp_frames{0};
     std::atomic<int> metronome_mode{0};
     std::atomic<bool> leader_audio_local_click{false};
     std::atomic<std::uint64_t> metronome_epoch_sample_time{0};

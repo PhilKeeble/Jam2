@@ -160,6 +160,7 @@ constexpr std::array kRuntimeFields{
     RuntimeField{"adaptive_playback_min_frames", "--adaptive-playback-min-frames", FieldKind::Integer, 0, 1073741824, ""},
     RuntimeField{"adaptive_playback_max_frames", "--adaptive-playback-max-frames", FieldKind::Integer, 0, 1073741824, ""},
     RuntimeField{"adaptive_playback_release_ppm", "--adaptive-playback-release-ppm", FieldKind::Integer, 0, 1000000, ""},
+    RuntimeField{"adaptive_playback_ratio_ramp_ms", "--adaptive-playback-ratio-ramp-ms", FieldKind::Integer, 0, 60000, ""},
     RuntimeField{"metronome", "--metronome", FieldKind::Boolean, 0, 1, ""},
     RuntimeField{"bpm", "--bpm", FieldKind::Integer, 1, 400, ""},
     RuntimeField{"metronome_level", "--metronome-level", FieldKind::Number, 0, 4, ""},
@@ -368,6 +369,7 @@ QJsonObject profileJson(const jam2::TuningProfile& profile)
         {QStringLiteral("adaptive_playback_min_frames"), static_cast<qint64>(profile.adaptive_playback_min_frames)},
         {QStringLiteral("adaptive_playback_max_frames"), static_cast<qint64>(profile.adaptive_playback_max_frames)},
         {QStringLiteral("adaptive_playback_release_ppm"), profile.adaptive_playback_release_ppm},
+        {QStringLiteral("adaptive_playback_ratio_ramp_ms"), profile.adaptive_playback_ratio_ramp_ms},
     };
 }
 
@@ -900,6 +902,7 @@ QJsonObject optionsJson(const Jam2RuntimeOptions& options)
         {QStringLiteral("adaptive_playback_min_frames"), static_cast<qint64>(options.adaptive_playback_min_frames)},
         {QStringLiteral("adaptive_playback_max_frames"), static_cast<qint64>(options.adaptive_playback_max_frames)},
         {QStringLiteral("adaptive_playback_release_ppm"), options.adaptive_playback_release_ppm},
+        {QStringLiteral("adaptive_playback_ratio_ramp_ms"), options.adaptive_playback_ratio_ramp_ms},
         {QStringLiteral("headless_audio"), options.headless_audio},
         {QStringLiteral("headless_clock_drift_ppm"), options.headless_clock_drift_ppm},
         {QStringLiteral("audio_device"), options.audio_device_id ? QJsonValue(*options.audio_device_id) : QJsonValue(QJsonValue::Null)},

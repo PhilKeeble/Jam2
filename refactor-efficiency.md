@@ -549,13 +549,17 @@ The final physical-device audit also found that adaptive recovery's requested
 playback ratio was being overwritten by the outer runtime loop and that release
 stopped when the target counter reached its minimum rather than when the real
 device ring recovered. The mixer owns that ratio and continues until the actual
-ring is within four packets of the target. The final reconciliation removed
-hidden 5,000-ppm callback/core caps, made the configured numeric control
-authoritative, and set the native profiles to an explicit 20,000 ppm. The
-44.1-kHz physical PCM16 250-ms stall rerun recovered both rings from roughly
-1,500 frames to 416 frames or below, shed 1,117-1,244 frames, retained packet
-and mixer flow, and recorded no playback-underrun time. Headless audio now uses
-the same bounded playback-ratio behavior instead of ignoring the control.
+ring is within four packets of the target. The reconciliation removed hidden
+callback/core caps and made the configured numeric control authoritative.
+Follow-up listening and CSV evidence showed the 20,000-ppm setting producing an
+audible speed/pitch change, so the native profiles now use 5,000 ppm and apply
+target changes over a 250-ms ramp in ASIO, CoreAudio, and headless audio. A
+separate seven-packet start band and four-packet stop band prevent normal device
+callback movement from retriggering the ramp. The final 44.1-kHz physical PCM16
+250-ms stall rerun recovered the real ring from about 1,531 to at most 416
+frames, shed at least 1,115 frames, retained packet and mixer flow, and recorded
+no packet loss or playback-underrun time. Target ratio, applied ratio, ramp
+state, and ramp duration are available in structured stats.
 
 ### Peer JSON
 

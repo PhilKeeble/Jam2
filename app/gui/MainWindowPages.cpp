@@ -331,7 +331,10 @@ QWidget* MainWindowPages::buildSessionPage(MainWindow& w)
     w.adaptiveMaxSpin_->setRange(0, 1048576);
     w.adaptiveReleaseSpin_ = new QSpinBox(page);
     w.adaptiveReleaseSpin_->setRange(0, 1000000);
-    w.adaptiveReleaseSpin_->setValue(1000);
+    w.adaptiveReleaseSpin_->setValue(5000);
+    w.adaptiveRatioRampSpin_ = new QSpinBox(page);
+    w.adaptiveRatioRampSpin_->setRange(0, 60000);
+    w.adaptiveRatioRampSpin_->setValue(250);
     w.startButton_ = new QPushButton(QStringLiteral("Start Jam"), page);
     w.joinButton_ = new QPushButton(QStringLiteral("Join Jam"), page);
     w.stopButton_ = new QPushButton(QStringLiteral("End Jam"), page);
@@ -352,7 +355,7 @@ QWidget* MainWindowPages::buildSessionPage(MainWindow& w)
         w.playbackMaxSpin_, w.captureRingSpin_, w.playbackRingSpin_, w.driftSmoothingSpin_,
         w.driftDeadbandSpin_, w.driftMaxCorrectionSpin_, w.playoutDelaySpin_, w.jitterBufferSpin_,
         w.jitterBufferMaxSpin_, w.adaptiveTargetSpin_, w.adaptiveMinSpin_, w.adaptiveMaxSpin_,
-        w.adaptiveReleaseSpin_,
+        w.adaptiveReleaseSpin_, w.adaptiveRatioRampSpin_,
     };
     for (QWidget* widget : sessionEditors) {
         applyMutedEditorStyle(widget);
@@ -368,7 +371,7 @@ QWidget* MainWindowPages::buildSessionPage(MainWindow& w)
         w.driftSmoothingSpin_, w.driftDeadbandSpin_, w.driftMaxCorrectionSpin_, w.noStunCheck_,
         w.sampleTimePlayoutCheck_, w.playoutDelaySpin_, w.jitterBufferSpin_, w.jitterBufferMaxSpin_,
         w.adaptiveCushionCheck_, w.adaptiveTargetSpin_, w.adaptiveMinSpin_, w.adaptiveMaxSpin_,
-        w.adaptiveReleaseSpin_,
+        w.adaptiveReleaseSpin_, w.adaptiveRatioRampSpin_,
     };
     for (QWidget* widget : sessionDialogWidgets) {
         widget->hide();

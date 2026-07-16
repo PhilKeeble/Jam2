@@ -124,6 +124,15 @@ def summarize_csv(path, assessment_elapsed_ms=None):
         to_float(period, "audio_control_playback_ratio")
         for period in assessment_periods
     ]
+    audio_applied_playback_ratios = [
+        to_float(period, "audio_applied_playback_ratio")
+        for period in assessment_periods
+    ]
+    audio_playback_ratio_ramping_rows = sum(
+        1 for period in assessment_periods
+        if str(period.get("audio_playback_ratio_ramping", "")).lower()
+        in {"yes", "true", "1", "on"}
+    )
     before_shutdown = assessment_periods[-1] if assessment_periods else row
     final_underrun_time_ms = to_float(row, "playback_ring_underrun_time_ms")
     if final_underrun_time_ms <= 0.0:
@@ -338,6 +347,13 @@ def summarize_csv(path, assessment_elapsed_ms=None):
         "audio_control_playback_ratio": to_float(row, "audio_control_playback_ratio"),
         "audio_control_playback_ratio_observed_max": max(
             audio_control_playback_ratios, default=0.0),
+        "audio_applied_playback_ratio_observed_min": min(
+            audio_applied_playback_ratios, default=0.0),
+        "audio_applied_playback_ratio_observed_max": max(
+            audio_applied_playback_ratios, default=0.0),
+        "audio_playback_ratio_ramping_rows": audio_playback_ratio_ramping_rows,
+        "adaptive_playback_ratio_ramp_ms": to_float(
+            row, "adaptive_playback_ratio_ramp_ms"),
         "audio_callbacks": to_float(row, "audio_callbacks"),
         "audio_callback_interval_min_ms": to_float(row, "audio_callback_interval_min_ms"),
         "audio_callback_interval_avg_ms": to_float(row, "audio_callback_interval_avg_ms"),
@@ -498,6 +514,10 @@ def combined_summary(server_csv, client_csv, assessment_elapsed_ms=None):
             (side.get("playback_ring_recovered_frames", 0.0) for side in sides), default=0.0),
         "audio_control_playback_ratio_observed_max": max(
             (side.get("audio_control_playback_ratio_observed_max", 0.0) for side in sides), default=0.0),
+        "audio_applied_playback_ratio_observed_max": max(
+            (side.get("audio_applied_playback_ratio_observed_max", 0.0) for side in sides), default=0.0),
+        "audio_playback_ratio_ramping_rows_total": sum(
+            (side.get("audio_playback_ratio_ramping_rows", 0.0) for side in sides), 0.0),
         "mix_capacity_drops_total": sum((side.get("mix_capacity_drops", 0.0) for side in sides), 0.0),
         "recovery_window_ms_min": min((side.get("recovery_window_ms", 0.0) for side in sides), default=0.0),
         "recovery_recv_packets_delta_min": min(

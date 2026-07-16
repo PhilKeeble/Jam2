@@ -403,6 +403,9 @@ private:
             resample_has_current_ = false;
             resample_has_next_ = false;
             resample_phase_ = 0.0;
+            ratio_smoother_.reset();
+            control_.playback_ratio_applied_ppm.store(1000000, std::memory_order_relaxed);
+            control_.playback_ratio_ramping.store(false, std::memory_order_relaxed);
             std::fill(playback_scratch_.begin(), playback_scratch_.end(), 0);
         } else if (!playback_prefilled_.load(std::memory_order_relaxed)) {
             if (playback_ring_.available_read() >= playback_prefill_frames_) {
@@ -487,11 +490,14 @@ private:
 
     void pop_resampled_playback() noexcept
     {
-        const int ratio_ppm = control_.playback_ratio_ppm.load(std::memory_order_relaxed);
-        const double ratio = static_cast<double>(
-            std::clamp(ratio_ppm, 500000, 2000000)) / 1000000.0;
-        if (ratio_ppm == 1000000 && !resample_has_current_ && !resample_has_next_) {
+        const int target_ppm = control_.playback_ratio_ppm.load(std::memory_order_relaxed);
+        ratio_smoother_.setTargetPpm(
+            target_ppm,
+            control_.playback_ratio_ramp_frames.load(std::memory_order_relaxed));
+        if (ratio_smoother_.steadyUnity() && !resample_has_current_ && !resample_has_next_) {
             playback_ring_.pop(playback_scratch_);
+            control_.playback_ratio_applied_ppm.store(1000000, std::memory_order_relaxed);
+            control_.playback_ratio_ramping.store(false, std::memory_order_relaxed);
             return;
         }
         if (!resample_has_current_) {
@@ -503,6 +509,7 @@ private:
             resample_has_next_ = true;
         }
         for (std::int32_t& sample : playback_scratch_) {
+            const double ratio = ratio_smoother_.nextRatio();
             const double mixed =
                 static_cast<double>(resample_current_) +
                 static_cast<double>(resample_next_ - resample_current_) * resample_phase_;
@@ -514,6 +521,10 @@ private:
                 resample_next_ = pop_playback_frame();
             }
         }
+        control_.playback_ratio_applied_ppm.store(
+            ratio_smoother_.appliedPpm(), std::memory_order_relaxed);
+        control_.playback_ratio_ramping.store(
+            ratio_smoother_.ramping(), std::memory_order_relaxed);
     }
 
     void run() noexcept
@@ -572,6 +583,7 @@ private:
     double resample_phase_ = 0.0;
     bool resample_has_current_ = false;
     bool resample_has_next_ = false;
+    audio::PlaybackRatioSmoother ratio_smoother_;
 };
 
 struct PreparedLoadResult {
@@ -1147,6 +1159,9 @@ void Engine::start(const EngineConfig& requested)
     if (requested.playback_prefill_frames > requested.playback_ring_frames) {
         throw std::runtime_error("engine playback prefill must fit the playback ring");
     }
+    if (requested.playback_ratio_ramp_ms < 0 || requested.playback_ratio_ramp_ms > 60000) {
+        throw std::runtime_error("engine playback-ratio ramp must be 0..60000 ms");
+    }
     if (requested.backend == EngineAudioBackend::Device && requested.channels.input.empty()) {
         throw std::runtime_error("device engine requires at least one input channel");
     }
@@ -1195,6 +1210,12 @@ void Engine::start(const EngineConfig& requested)
         control.local_monitor_enabled.store(impl_->config.local_monitor_enabled, std::memory_order_relaxed);
         control.local_monitor_level_ppm.store(clamp_gain(impl_->config.local_monitor_level_ppm), std::memory_order_relaxed);
         control.playback_ratio_ppm.store(1000000, std::memory_order_relaxed);
+        control.playback_ratio_applied_ppm.store(1000000, std::memory_order_relaxed);
+        control.playback_ratio_ramping.store(false, std::memory_order_relaxed);
+        control.playback_ratio_ramp_frames.store(
+            static_cast<std::uint64_t>(impl_->config.sample_rate) *
+                static_cast<std::uint64_t>(impl_->config.playback_ratio_ramp_ms) / 1000ULL,
+            std::memory_order_relaxed);
         control.metronome_mode.store(static_cast<int>(impl_->config.metronome_mode), std::memory_order_relaxed);
         control.leader_audio_local_click.store(impl_->config.leader_audio_local_click, std::memory_order_relaxed);
         control.metronome_epoch_sample_time.store(0, std::memory_order_relaxed);
@@ -1370,6 +1391,11 @@ EngineSnapshot Engine::snapshot() const noexcept
     result.local_monitor_enabled = control.local_monitor_enabled.load(std::memory_order_relaxed);
     result.local_monitor_level_ppm = control.local_monitor_level_ppm.load(std::memory_order_relaxed);
     result.playback_ratio_ppm = control.playback_ratio_ppm.load(std::memory_order_relaxed);
+    result.playback_ratio_applied_ppm =
+        control.playback_ratio_applied_ppm.load(std::memory_order_relaxed);
+    result.playback_ratio_ramping =
+        control.playback_ratio_ramping.load(std::memory_order_relaxed);
+    result.playback_ratio_ramp_ms = impl_->config.playback_ratio_ramp_ms;
     result.metronome_epoch_frame = control.metronome_epoch_sample_time.load(std::memory_order_relaxed);
     result.metronome_epoch_valid = control.metronome_epoch_valid.load(std::memory_order_relaxed);
     result.metronome_render_offset_frames = control.metronome_render_offset_frames.load(std::memory_order_relaxed);

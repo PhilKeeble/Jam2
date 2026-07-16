@@ -20,8 +20,6 @@ Review all the stress and benchmark cases and wittle down what we do / dont need
 
 when recording into a track with a wav in it makes a new one, discuss but could be fine, consider looking into it 
 
-mac build gets a warning (might not be there stil)
-
 arm menu on mac is a bit messy
 
 on start jam and join jam we should add a test deice button nex tto sample rate where we can popup the current rate and then whether it supports 44100 or 48000 for easy usage
@@ -30,6 +28,7 @@ add wasapi for local mode
 
 ask about 8,000..384,000-Hz range for sample rate 
 
+loopback recording dialogue box has empty options that are currently there for input 
 
 ## bugs
 

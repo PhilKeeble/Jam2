@@ -22,6 +22,7 @@
 #include "pcm16_wav.hpp"
 #include "protocol.hpp"
 #include "session_authority.hpp"
+#include "tuning_profile.hpp"
 
 #include <QByteArray>
 #include <QFile>
@@ -34,6 +35,7 @@
 #include <QtGlobal>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -919,6 +921,31 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             captureError.isEmpty() && reattachReady && reattachFullBlock && !reattachPartialBlock,
             captureError);
     }
+
+    jam2::audio::PlaybackRatioSmoother ratioSmoother;
+    ratioSmoother.setTargetPpm(1005000, 4);
+    const double rampFirst = ratioSmoother.nextRatio();
+    (void)ratioSmoother.nextRatio();
+    (void)ratioSmoother.nextRatio();
+    const double rampLast = ratioSmoother.nextRatio();
+    record(QStringLiteral("engine-playback-ratio.ramps-to-target"),
+        std::abs(rampFirst - 1.00125) < 0.0000001 &&
+            std::abs(rampLast - 1.005) < 0.0000001 &&
+            ratioSmoother.appliedPpm() == 1005000 && !ratioSmoother.ramping());
+    ratioSmoother.setTargetPpm(1000000, 4);
+    (void)ratioSmoother.nextRatio();
+    (void)ratioSmoother.nextRatio();
+    (void)ratioSmoother.nextRatio();
+    const double unityRampLast = ratioSmoother.nextRatio();
+    record(QStringLiteral("engine-playback-ratio.ramps-back-to-unity"),
+        std::abs(unityRampLast - 1.0) < 0.0000001 && ratioSmoother.steadyUnity());
+    const bool profileRatioPolicy = std::all_of(
+        jam2::tuning_profiles().begin(), jam2::tuning_profiles().end(),
+        [](const jam2::TuningProfile& profile) {
+            return profile.adaptive_playback_release_ppm == 5000 &&
+                profile.adaptive_playback_ratio_ramp_ms == 250;
+        });
+    record(QStringLiteral("profiles.adaptive-release-is-audibility-bounded"), profileRatioPolicy);
 
     if (fixtureSpecs.size() > 32) {
         record(QStringLiteral("wav.fixture-count-bound"), false, QStringLiteral("too many fixture specs"));

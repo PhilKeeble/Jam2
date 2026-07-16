@@ -574,6 +574,8 @@ CsvStatsLog::AudioSnapshot make_audio_snapshot(
     snapshot.network_capture_stale_frames_discarded = engine_snapshot.network_capture_stale_frames_discarded;
     snapshot.network_playback_enabled = engine_snapshot.network_playback_enabled;
     snapshot.playback_ratio_ppm = engine_snapshot.playback_ratio_ppm;
+    snapshot.playback_ratio_applied_ppm = engine_snapshot.playback_ratio_applied_ppm;
+    snapshot.playback_ratio_ramping = engine_snapshot.playback_ratio_ramping;
     return snapshot;
 }
 
@@ -821,6 +823,8 @@ void print_audio_packet_stats(const AudioPacketStats& stats, const Options& opti
     std::cout << "Adaptive playback min frames requested: " << options.adaptive_playback_min_frames << "\n";
     std::cout << "Adaptive playback max frames requested: " << options.adaptive_playback_max_frames << "\n";
     std::cout << "Adaptive playback release ppm: " << options.adaptive_playback_release_ppm << "\n";
+    std::cout << "Adaptive playback ratio ramp ms: "
+              << options.adaptive_playback_ratio_ramp_ms << "\n";
     std::cout << "Final metronome: " << (stats.final_metronome_enabled ? "on" : "off") << "\n";
     std::cout << "Final BPM: " << stats.final_bpm << "\n";
     std::cout << "Final metronome level: " << stats.final_metronome_level << "\n";

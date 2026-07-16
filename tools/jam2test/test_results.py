@@ -347,6 +347,9 @@ class NormalVerdictTests(unittest.TestCase):
             verdict_for(result), "transient_stall_adaptive_release_ratio_not_applied")
         result["metrics"]["combined"]["audio_control_playback_ratio_observed_max"] = 1.005
 
+        result["metrics"]["combined"]["playback_ring_readable_recovery_max"] = 539.0
+        self.assertEqual(verdict_for(result), "pass")
+
         result["metrics"]["combined"]["playback_ring_readable_recovery_max"] = 700.0
         self.assertEqual(
             verdict_for(result), "transient_stall_playback_latency_not_recovered")

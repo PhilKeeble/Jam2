@@ -28,7 +28,8 @@ constexpr std::array<TuningProfile, 3> kProfiles{{
         256,
         256,
         1536,
-        20000,
+        5000,
+        250,
     },
     {
         "moderate",
@@ -52,7 +53,8 @@ constexpr std::array<TuningProfile, 3> kProfiles{{
         512,
         512,
         4096,
-        20000,
+        5000,
+        250,
     },
     {
         "safe",
@@ -76,7 +78,8 @@ constexpr std::array<TuningProfile, 3> kProfiles{{
         1024,
         1024,
         7168,
-        20000,
+        5000,
+        250,
     },
 }};
 

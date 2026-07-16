@@ -74,6 +74,7 @@ struct EngineConfig {
     std::size_t capture_ring_frames = 4096;
     std::size_t playback_ring_frames = 4096;
     std::size_t playback_prefill_frames = 0;
+    int playback_ratio_ramp_ms = 250;
     bool diagnostics_enabled = false;
     bool metronome_enabled = false;
     metronome::PatternSnapshot metronome_pattern{};
@@ -234,6 +235,9 @@ struct EngineSnapshot {
     bool local_monitor_enabled = false;
     int local_monitor_level_ppm = 0;
     int playback_ratio_ppm = 1000000;
+    int playback_ratio_applied_ppm = 1000000;
+    bool playback_ratio_ramping = false;
+    int playback_ratio_ramp_ms = 250;
     std::uint64_t metronome_epoch_frame = 0;
     bool metronome_epoch_valid = false;
     std::int64_t metronome_render_offset_frames = 0;

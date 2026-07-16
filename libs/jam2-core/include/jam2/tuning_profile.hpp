@@ -30,6 +30,7 @@ struct TuningProfile {
     std::size_t adaptive_playback_min_frames;
     std::size_t adaptive_playback_max_frames;
     int adaptive_playback_release_ppm;
+    int adaptive_playback_ratio_ramp_ms;
 };
 
 std::span<const TuningProfile> tuning_profiles();

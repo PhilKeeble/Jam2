@@ -462,7 +462,7 @@ def protocol_verdict_for(result):
                 return "burst_adaptive_release_ratio_not_applied"
             recovered_depth_limit = (
                 metrics.get("adaptive_min_frames_max", 0.0) +
-                max(128.0, metrics.get("frame_size_max", 0.0) * 4.0)
+                max(128.0, metrics.get("frame_size_max", 0.0) * 5.0)
             )
             if metrics.get("playback_ring_readable_recovery_max", 0.0) > recovered_depth_limit:
                 return "burst_playback_latency_not_recovered"
@@ -499,7 +499,10 @@ def protocol_verdict_for(result):
             return "transient_stall_adaptive_release_ratio_not_applied"
         recovered_depth_limit = (
             metrics.get("adaptive_min_frames_max", 0.0) +
-            max(128.0, metrics.get("frame_size_max", 0.0) * 4.0)
+            # Allow one additional packet of normal device-callback phase
+            # movement beyond the four-block release stop band. The ratio must
+            # already be back at unity; a larger retained tail still fails.
+            max(128.0, metrics.get("frame_size_max", 0.0) * 5.0)
         )
         if metrics.get("playback_ring_readable_recovery_max", 0.0) > recovered_depth_limit:
             return "transient_stall_playback_latency_not_recovered"

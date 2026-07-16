@@ -201,6 +201,7 @@ struct PeerMixer::Impl {
     std::uint64_t adaptive_target_frames = 0;
     std::uint64_t adaptive_last_update_us = 0;
     double adaptive_release_accumulator_frames = 0.0;
+    bool adaptive_release_active = false;
     std::uint64_t consecutive_deadline_slots = 0;
 
     Impl(const PeerMixerConfig& requested, PeerStreamPlayback* sink)
@@ -362,6 +363,7 @@ struct PeerMixer::Impl {
         }
         if (missing) {
             adaptive_release_accumulator_frames = 0.0;
+            adaptive_release_active = false;
             if (adaptive_target_frames < config.adaptive_max_frames) {
                 adaptive_target_frames = std::min<std::uint64_t>(
                     config.adaptive_max_frames,
@@ -396,17 +398,33 @@ struct PeerMixer::Impl {
         if (output != nullptr) {
             const int effective_release_ppm = config.adaptive_release_ppm;
             const std::uint64_t actual_depth = output->depthFrames();
-            const std::uint64_t release_tolerance =
+            const std::uint64_t release_stop_tolerance =
                 static_cast<std::uint64_t>(config.frames_per_block) * 4ULL;
-            const bool actual_depth_above_target =
+            const std::uint64_t release_start_tolerance =
+                static_cast<std::uint64_t>(config.frames_per_block) * 7ULL;
+            const bool actual_depth_above_start =
                 actual_depth > adaptive_target_frames &&
-                actual_depth - adaptive_target_frames > release_tolerance;
+                actual_depth - adaptive_target_frames > release_start_tolerance;
+            const bool actual_depth_at_stop =
+                actual_depth <= adaptive_target_frames ||
+                actual_depth - adaptive_target_frames <= release_stop_tolerance;
             // Keep draining the real device ring after the target counter reaches
             // its minimum. Otherwise a burst can leave a permanent latency tail
-            // even though the diagnostic target appears to have recovered.
-            const bool releasing = !missing && effective_release_ppm > 0 &&
+            // even though the diagnostic target appears to have recovered. The
+            // separate start/stop bands prevent normal callback-scale depth
+            // movement from repeatedly restarting the audible ratio ramp.
+            if (!missing && effective_release_ppm > 0 &&
                 (adaptive_target_frames > config.adaptive_min_frames ||
-                 actual_depth_above_target);
+                 actual_depth_above_start)) {
+                adaptive_release_active = true;
+            }
+            if (adaptive_release_active &&
+                adaptive_target_frames == config.adaptive_min_frames &&
+                actual_depth_at_stop) {
+                adaptive_release_active = false;
+            }
+            const bool releasing = !missing && effective_release_ppm > 0 &&
+                adaptive_release_active;
             output->setResamplerRatio(
                 releasing ? 1.0 + static_cast<double>(effective_release_ppm) / 1000000.0 : 1.0);
         }
@@ -498,6 +516,7 @@ struct PeerMixer::Impl {
             if (output != nullptr) {
                 output->setResamplerRatio(1.0);
             }
+            adaptive_release_active = false;
             return;
         }
         if (!started) {

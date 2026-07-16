@@ -284,6 +284,7 @@ private:
     QSpinBox* adaptiveMinSpin_ = nullptr;
     QSpinBox* adaptiveMaxSpin_ = nullptr;
     QSpinBox* adaptiveReleaseSpin_ = nullptr;
+    QSpinBox* adaptiveRatioRampSpin_ = nullptr;
     QPushButton* startButton_ = nullptr;
     QPushButton* joinButton_ = nullptr;
     QPushButton* localEngineButton_ = nullptr;

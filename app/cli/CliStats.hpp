@@ -435,6 +435,8 @@ public:
         std::uint64_t network_capture_stale_frames_discarded = 0;
         bool network_playback_enabled = false;
         int playback_ratio_ppm = 1000000;
+        int playback_ratio_applied_ppm = 1000000;
+        bool playback_ratio_ramping = false;
     };
 
     CsvStatsLog(const std::filesystem::path& folder, Context context)
@@ -551,7 +553,8 @@ public:
                 "send_packet_rate_pps,recv_packet_rate_pps,audio_control_playback_ratio,"
                 "udp_send_would_block_drops,udp_send_no_buffer_drops,udp_send_unreachable_errors,"
                 "udp_send_refused_errors,udp_send_fatal_errors,udp_send_path_reprobe_transitions,"
-                "udp_send_consecutive_path_errors_max\n";
+                "udp_send_consecutive_path_errors_max,adaptive_playback_ratio_ramp_ms,"
+                "audio_applied_playback_ratio,audio_playback_ratio_ramping\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -942,7 +945,10 @@ public:
              << stats.udp_send_refused_errors << ','
              << stats.udp_send_fatal_errors << ','
              << stats.udp_send_path_reprobe_transitions << ','
-             << stats.udp_send_consecutive_path_errors_max;
+             << stats.udp_send_consecutive_path_errors_max << ','
+             << options.adaptive_playback_ratio_ramp_ms << ','
+             << static_cast<double>(audio.playback_ratio_applied_ppm) / 1000000.0 << ','
+             << (audio.playback_ratio_ramping ? "yes" : "no");
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -958,7 +964,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(359);
+        std::vector<std::string> fields(362);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1278,6 +1284,9 @@ public:
         set(356, stats.udp_send_fatal_errors);
         set(357, stats.udp_send_path_reprobe_transitions);
         set(358, stats.udp_send_consecutive_path_errors_max);
+        set(359, options.adaptive_playback_ratio_ramp_ms);
+        set(360, static_cast<double>(audio.playback_ratio_applied_ppm) / 1000000.0);
+        fields[361] = audio.playback_ratio_ramping ? "yes" : "no";
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {

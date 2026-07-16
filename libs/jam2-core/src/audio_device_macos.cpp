@@ -768,6 +768,7 @@ struct CoreAudioDuplexContext {
     bool resample_has_current = false;
     bool resample_has_next = false;
     double resample_phase = 0.0;
+    PlaybackRatioSmoother ratio_smoother;
     std::atomic<long> callbacks{0};
     std::atomic<bool> playback_prefilled{false};
     std::atomic<std::uint64_t> last_callback_us{0};
@@ -839,13 +840,14 @@ void pop_resampled_playback(CoreAudioDuplexContext& context, std::span<std::int3
         return;
     }
 
-    const int ratio_ppm = context.control->playback_ratio_ppm.load(std::memory_order_relaxed);
-    const double ratio = static_cast<double>(std::clamp(ratio_ppm, 500000, 2000000)) / 1000000.0;
-    if (ratio_ppm == 1000000 && !context.resample_has_current && !context.resample_has_next) {
-        context.resample_has_current = false;
-        context.resample_has_next = false;
-        context.resample_phase = 0.0;
+    context.ratio_smoother.setTargetPpm(
+        context.control->playback_ratio_ppm.load(std::memory_order_relaxed),
+        context.control->playback_ratio_ramp_frames.load(std::memory_order_relaxed));
+    if (context.ratio_smoother.steadyUnity() &&
+        !context.resample_has_current && !context.resample_has_next) {
         context.playback->pop(output);
+        context.control->playback_ratio_applied_ppm.store(1000000, std::memory_order_relaxed);
+        context.control->playback_ratio_ramping.store(false, std::memory_order_relaxed);
         return;
     }
 
@@ -859,6 +861,7 @@ void pop_resampled_playback(CoreAudioDuplexContext& context, std::span<std::int3
     }
 
     for (std::int32_t& sample : output) {
+        const double ratio = context.ratio_smoother.nextRatio();
         const double mixed =
             static_cast<double>(context.resample_current) +
             (static_cast<double>(context.resample_next - context.resample_current) * context.resample_phase);
@@ -871,6 +874,10 @@ void pop_resampled_playback(CoreAudioDuplexContext& context, std::span<std::int3
             context.resample_next = pop_one_frame(*context.playback);
         }
     }
+    context.control->playback_ratio_applied_ppm.store(
+        context.ratio_smoother.appliedPpm(), std::memory_order_relaxed);
+    context.control->playback_ratio_ramping.store(
+        context.ratio_smoother.ramping(), std::memory_order_relaxed);
 }
 
 void apply_remote_level(CoreAudioDuplexContext& context, std::span<std::int32_t> output)
@@ -1185,6 +1192,12 @@ OSStatus duplex_io_proc(
         if (!network_playback_enabled) {
             context->playback_prefilled.store(false, std::memory_order_relaxed);
             context->playback->pop(std::span<std::int32_t>{}, false);
+            context->resample_has_current = false;
+            context->resample_has_next = false;
+            context->resample_phase = 0.0;
+            context->ratio_smoother.reset();
+            context->control->playback_ratio_applied_ppm.store(1000000, std::memory_order_relaxed);
+            context->control->playback_ratio_ramping.store(false, std::memory_order_relaxed);
             std::fill(playback.begin(), playback.end(), 0);
         } else if (!context->playback_prefilled.load(std::memory_order_relaxed)) {
             if (context->playback->available_read() >= context->playback_prefill_frames) {
