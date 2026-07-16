@@ -1,4 +1,5 @@
 #include "engine.hpp"
+#include "runtime_limits.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -399,6 +400,9 @@ private:
         if (!network_playback) {
             playback_prefilled_.store(false, std::memory_order_relaxed);
             playback_ring_.pop(std::span<std::int32_t>{}, false);
+            resample_has_current_ = false;
+            resample_has_next_ = false;
+            resample_phase_ = 0.0;
             std::fill(playback_scratch_.begin(), playback_scratch_.end(), 0);
         } else if (!playback_prefilled_.load(std::memory_order_relaxed)) {
             if (playback_ring_.available_read() >= playback_prefill_frames_) {
@@ -408,7 +412,7 @@ private:
             }
         }
         if (network_playback && playback_prefilled_.load(std::memory_order_relaxed)) {
-            playback_ring_.pop(playback_scratch_);
+            pop_resampled_playback();
         }
         control_.network_playback_enabled_applied.store(network_playback, std::memory_order_release);
         const int remote_peak = peak_ppm(playback_scratch_);
@@ -474,6 +478,44 @@ private:
         }
     }
 
+    std::int32_t pop_playback_frame() noexcept
+    {
+        std::array<std::int32_t, 1> frame{};
+        (void)playback_ring_.pop(frame, false);
+        return frame[0];
+    }
+
+    void pop_resampled_playback() noexcept
+    {
+        const int ratio_ppm = control_.playback_ratio_ppm.load(std::memory_order_relaxed);
+        const double ratio = static_cast<double>(
+            std::clamp(ratio_ppm, 500000, 2000000)) / 1000000.0;
+        if (ratio_ppm == 1000000 && !resample_has_current_ && !resample_has_next_) {
+            playback_ring_.pop(playback_scratch_);
+            return;
+        }
+        if (!resample_has_current_) {
+            resample_current_ = pop_playback_frame();
+            resample_has_current_ = true;
+        }
+        if (!resample_has_next_) {
+            resample_next_ = pop_playback_frame();
+            resample_has_next_ = true;
+        }
+        for (std::int32_t& sample : playback_scratch_) {
+            const double mixed =
+                static_cast<double>(resample_current_) +
+                static_cast<double>(resample_next_ - resample_current_) * resample_phase_;
+            sample = clamp_i32(mixed);
+            resample_phase_ += ratio;
+            while (resample_phase_ >= 1.0) {
+                resample_phase_ -= 1.0;
+                resample_current_ = resample_next_;
+                resample_next_ = pop_playback_frame();
+            }
+        }
+    }
+
     void run() noexcept
     {
         using clock = std::chrono::steady_clock;
@@ -525,6 +567,11 @@ private:
     std::uint64_t last_callback_us_ = 0;
     std::uint64_t test_input_frame_ = 0;
     std::uint64_t engine_frame_ = 0;
+    std::int32_t resample_current_ = 0;
+    std::int32_t resample_next_ = 0;
+    double resample_phase_ = 0.0;
+    bool resample_has_current_ = false;
+    bool resample_has_next_ = false;
 };
 
 struct PreparedLoadResult {
@@ -1068,8 +1115,10 @@ void Engine::start(const EngineConfig& requested)
         impl_->stream != nullptr || impl_->supervisor.joinable()) {
         throw std::runtime_error("engine instances are single-start and this instance has already run");
     }
-    if (requested.sample_rate <= 0 || requested.sample_rate > 384000) {
-        throw std::runtime_error("engine sample rate must be 1..384000 Hz");
+    if (!limits::valid_sample_rate(requested.sample_rate)) {
+        throw std::runtime_error(
+            "engine sample rate must be " + std::to_string(limits::kMinimumSampleRate) +
+            ".." + std::to_string(limits::kMaximumSampleRate) + " Hz");
     }
     if (requested.backend != EngineAudioBackend::Device && requested.backend != EngineAudioBackend::Headless) {
         throw std::runtime_error("engine audio backend is invalid");

@@ -68,11 +68,10 @@ class _RunLog:
             self._frozen = True
 
 
-def _validate_common_arguments(args: Any) -> None:
+def _validate_common_arguments(args: Any, capabilities: NativeCapabilities) -> None:
     if not SAFE_ID.fullmatch(args.machine_id):
         raise ValueError("--machine-id must use 1..64 letters, numbers, dot, underscore, or hyphen")
-    if not 1 <= args.sample_rate <= 768000:
-        raise ValueError("--sample-rate is outside the native bound")
+    capabilities.validate_sparse_overrides({"sample_rate": args.sample_rate})
     if not 100 <= args.stream_ms <= 86_400_000:
         raise ValueError("--stream-ms must be from 100 ms through 24 hours")
     if not 1 <= args.repeats <= 100:
@@ -86,8 +85,7 @@ def _validate_common_arguments(args: Any) -> None:
             device_id = int(args.audio_device)
         except ValueError as error:
             raise ValueError("--audio-device must be a numeric native device identifier") from error
-        if not 0 <= device_id <= 65535:
-            raise ValueError("--audio-device is outside the native bound")
+        capabilities.validate_sparse_overrides({"audio_device": device_id})
 
 
 def _correlated_process_outcome(
@@ -358,7 +356,8 @@ def _coordinator(args: Any, repo: Path, arguments: list[str]) -> int:
     manifest = InvocationManifest(invocation.root / "invocation-manifest.json", "benchmark", invocation.invocation_id, arguments)
     log_path = invocation.root / "coordinator.log"
     try:
-        _validate_common_arguments(args)
+        capabilities = NativeCapabilities(args.jam2)
+        _validate_common_arguments(args, capabilities)
         if not 0 <= args.case_retry_limit <= 20:
             raise ValueError("--case-retry-limit must be from 0 through 20")
         for value, name in ((args.initial_agent_timeout_s, "--initial-agent-timeout-s"),
@@ -372,7 +371,6 @@ def _coordinator(args: Any, repo: Path, arguments: list[str]) -> int:
                 raise ValueError(f"{name} must identify a host and port from 1 through 65535")
         if args.public_audio_host and len(args.public_audio_host) > 255:
             raise ValueError("--public-audio-host exceeds its 255-character bound")
-        capabilities = NativeCapabilities(args.jam2)
         cases = _selected_cases(args, capabilities)
     except Exception as error:
         _log(log_path, traceback.format_exc().rstrip())
@@ -552,7 +550,8 @@ def _coordinator(args: Any, repo: Path, arguments: list[str]) -> int:
 
 def _agent(args: Any, repo: Path, arguments: list[str]) -> int:
     try:
-        _validate_common_arguments(args)
+        capabilities = NativeCapabilities(args.jam2)
+        _validate_common_arguments(args, capabilities)
         if args.audio_device is None and not args.headless_audio:
             raise ValueError("benchmark agent requires --audio-device or --headless-audio")
         if not 0.1 <= args.connect_timeout_s <= 86_500:
@@ -583,7 +582,6 @@ def _agent(args: Any, repo: Path, arguments: list[str]) -> int:
         run_log = _RunLog(log_path)
         transfer_log = _RunLog(invocation.root / "transfer.log")
         control.log = run_log
-        capabilities = NativeCapabilities(args.jam2)
         configure_native_profiles(capabilities.description)
         validate_native_attempt_root(benchmark_attempt_path(
             invocation, control.suite_id, args.machine_id, "x" * 24,

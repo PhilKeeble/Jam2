@@ -3,6 +3,8 @@
 #endif
 
 #include "DebugAutomation.hpp"
+#include "BoundaryValidation.hpp"
+#include "runtime_limits.hpp"
 
 #include "ApplicationRuntime.hpp"
 #include "AutomationChannel.hpp"
@@ -11,7 +13,6 @@
 #include "ControlMessageValidation.hpp"
 #include "ControllerLifecycleValidation.hpp"
 #include "DebugActionValidation.hpp"
-#include "MainWindow.hpp"
 #include "SessionController.hpp"
 #include "CliEntrypoint.hpp"
 #include "CliOptions.hpp"
@@ -132,7 +133,13 @@ constexpr std::array kRuntimeFields{
     RuntimeField{"audio_device", "--audio-device", FieldKind::Integer, 0, 65535, ""},
     RuntimeField{"headless_audio", "--headless-audio", FieldKind::Boolean, 0, 1, ""},
     RuntimeField{"headless_clock_drift_ppm", "--headless-clock-drift-ppm", FieldKind::Integer, -5000, 5000, ""},
-    RuntimeField{"sample_rate", "--sample-rate", FieldKind::Integer, 1, 768000, ""},
+    RuntimeField{
+        "sample_rate",
+        "--sample-rate",
+        FieldKind::Integer,
+        jam2::limits::kMinimumSampleRate,
+        jam2::limits::kMaximumSampleRate,
+        ""},
     RuntimeField{"audio_buffer_size", "--audio-buffer-size", FieldKind::Integer, 1, 1048576, ""},
     RuntimeField{"frame_size", "--frame-size", FieldKind::Integer, 32, 256, "32|64|128|256"},
     RuntimeField{"network_audio_format", "--network-audio-format", FieldKind::String, 0, 0, "pcm16|pcm24"},

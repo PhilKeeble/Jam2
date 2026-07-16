@@ -38,7 +38,7 @@ bool isArrangementAction(const QString& type)
 
 bool validToken(const QString& token)
 {
-    return decodeHex(token, 16).size() == 16;
+    return peerIdFromToken(token).has_value();
 }
 
 bool parseRevision(const QJsonValue& value, quint64& revision, bool allowZero)
@@ -288,11 +288,22 @@ bool SharedSessionController::startCreator(const CreatorConfig& config)
             detail}, false);
         return false;
     }
+    const auto localPeerId = peerIdFromToken(config.localToken);
+    if (!localPeerId) {
+        const QString detail = QStringLiteral(
+            "Creator peer token must encode a stable non-zero peer id");
+        fail(TransportFailure::InvalidConfiguration, detail, false);
+        publishTransportEvent(TransportEvent{
+            TransportEventType::Failure,
+            TransportFailure::InvalidConfiguration,
+            detail}, false);
+        return false;
+    }
     gridAuthorityToken_ = config.localToken;
     arrangementAuthorityToken_ = config.localToken;
     Peer local;
     local.endpoint = config.localEndpoint;
-    local.peerId = peerIdForToken(config.localToken);
+    local.peerId = *localPeerId;
     local.edgeState = EdgeState::Active;
     local.proofState = QStringLiteral("local");
     local.streamState = QStringLiteral("local");
@@ -330,6 +341,16 @@ bool SharedSessionController::startJoiner(const JoinerConfig& config)
     failure_ = TransportFailure::None;
     failureDetail_.clear();
     failureRetryable_ = false;
+    if (!peerIdFromToken(config.localToken).has_value()) {
+        const QString detail = QStringLiteral(
+            "Joiner peer token must encode a stable non-zero peer id");
+        fail(TransportFailure::InvalidConfiguration, detail, false);
+        publishTransportEvent(TransportEvent{
+            TransportEventType::Failure,
+            TransportFailure::InvalidConfiguration,
+            detail}, false);
+        return false;
+    }
     setLifecycle(Lifecycle::Connecting);
     connectJoiner();
     return true;
@@ -621,6 +642,13 @@ SharedSessionController::Snapshot SharedSessionController::snapshot() const
     result.lifecycle = lifecycle_;
     result.localToken = role_ == Role::Creator ? creator_.localToken : joiner_.localToken;
     result.coordinatorToken = coordinatorToken_;
+    if (const auto local = peers_.constFind(result.localToken); local != peers_.cend()) {
+        result.localPeerId = local->peerId;
+    }
+    if (const auto coordinator = peers_.constFind(result.coordinatorToken);
+        coordinator != peers_.cend()) {
+        result.coordinatorPeerId = coordinator->peerId;
+    }
     result.gridAuthorityToken = gridAuthorityToken_;
     result.arrangementAuthorityToken = arrangementAuthorityToken_;
     result.membershipRevision = membershipRevision_;
@@ -661,13 +689,6 @@ SharedSessionController::Snapshot SharedSessionController::snapshot() const
             it->proofState, it->streamState, it->sameMachine});
     }
     return result;
-}
-
-quint64 SharedSessionController::peerIdForToken(const QString& token)
-{
-    bool ok = false;
-    const quint64 value = token.left(16).toULongLong(&ok, 16);
-    return ok && value != 0 ? value : 1ULL;
 }
 
 void SharedSessionController::handleServerEvent(const TransportEvent& event)
@@ -769,9 +790,18 @@ void SharedSessionController::handleAuthenticatedPeer(
         return;
     }
 
+    const auto peerId = peerIdFromToken(token);
+    if (!peerId) {
+        server_.sendTo(token, QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("session.error")},
+            {QStringLiteral("message"), QStringLiteral("Authenticated peer token has no valid peer id")},
+        }, true);
+        return;
+    }
+
     Peer peer;
     peer.endpoint = endpoint;
-    peer.peerId = peerIdForToken(token);
+    peer.peerId = *peerId;
     peer.edgeState = EdgeState::Authenticated;
     peer.proofState = QStringLiteral("authenticated");
     peer.streamState = QStringLiteral("candidate");
@@ -1074,7 +1104,8 @@ bool SharedSessionController::acceptMembershipPage(const QJsonObject& message)
             const QString endpoint = object.value(QStringLiteral("endpoint")).toString();
             bool idOk = false;
             const quint64 peerId = object.value(QStringLiteral("peer_id")).toString().toULongLong(&idOk);
-            if (!validToken(token) ||
+            const auto derivedPeerId = peerIdFromToken(token);
+            if (!derivedPeerId || *derivedPeerId != peerId ||
                 endpoint.isEmpty() || endpoint.size() > 255 || !idOk || peerId == 0 ||
                 next.contains(token)) {
                 membershipAssembly_ = {};

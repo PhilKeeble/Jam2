@@ -19,6 +19,13 @@ Sections describing current or legacy tooling record the migration baseline.
 They do not require preservation of legacy command aliases or text-control
 interfaces.
 
+The final implementation reconciliation keeps native configuration
+authoritative: sample rate is described and validated by Jam2 over the single
+8,000..384,000-Hz range, while Python validates sparse overrides against that
+description rather than maintaining a second device/rate default. Malformed
+UDP stress verdicts derive their expected rejection count from the generated
+current-header corpus instead of retaining an obsolete packet-shape constant.
+
 ## Decision Summary
 
 Keep Python as the external test orchestrator and offline analysis layer.

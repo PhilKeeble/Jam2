@@ -135,9 +135,32 @@ closeout audit pending", not "phase complete".
     headless, diagnostic, and automation commands. Public network startup uses
     only `network create` and `network join`, both over the universal mesh path.
 
+## Remaining Work
+
+### Final cross-phase refactor reconciliation
+
+- `[x]` Re-audit the implemented refactor against every supporting refactor
+  document and the real source call paths rather than accepting phase markers
+  alone. Close the reopened UDP endpoint/send-error, native-limit, GUI
+  ownership, stale compatibility, startup-error, and documentation gaps.
+- `[x]` Complete the Windows implementation and automated closeout: exact
+  elevated MSVC build, native boundary/lifecycle suites, validation families,
+  unit tests, public/removal scans, and focused 44100-Hz PCM16 stress on
+  physical devices 16 and 5.
+- `[ ]` Rebuild on macOS and clear the uploaded macOS regression gate. Confirm
+  warning-free compilation, one clear recoverable local-device failure,
+  correct STUN/manual-endpoint control state, successful create/join without a
+  process-fatal UDP route error, active bidirectional audio/metronome/stats,
+  and clean leave/rejoin. The source fixes are present, but the old uploaded
+  failing binaries cannot prove the rebuilt behavior.
+
+The individual phase closures below remain the historical phase record. The
+refactor as a whole must not be called finally complete until the last macOS
+checkbox above is confirmed.
+
 ## Completed Work
 
-Last plan reconciliation: 2026-07-15.
+Last plan reconciliation: 2026-07-16.
 
 Historical status note: Phases 1-7 were marked complete before the mandatory
 closeout procedure existed. Phase 11 applied it retroactively, reopened two
@@ -157,9 +180,13 @@ Phase 1 ownership gaps, implemented them, and repeated the source/removal audit.
   ownership.
 - `[x]` Phase 10: complete native automation and Python tooling contracts.
 - `[x]` Phase 11: complete hardening, lifecycle coverage, and final core audit.
-  Focused local GUI/audio acceptance completed on 2026-07-15; the remaining
-  duplicate unavailable-device dialog is explicitly tracked as post-refactor
-  polish rather than a core-refactor blocker.
+  Focused local GUI/audio acceptance completed on 2026-07-15. The later final
+  reconciliation coalesces duplicate startup failures and restores an explicit
+  local-engine retry route; rebuilt macOS confirmation is tracked above rather
+  than rewriting the historical Phase 11 closeout.
+- `[x]` Phase 12: complete compact UDP framing, session PCM16/PCM24 quality,
+  authenticated binary asset chunks, and the bounded fuzz baseline. PCM16 is
+  the GUI default; both current formats remain explicitly selectable.
 
 ### Phase 1: Stabilize and Improve the Current Model
 
@@ -1210,6 +1237,70 @@ Checks to run when useful:
 ## Work Log
 
 Add concise entries as implementation proceeds:
+
+### 2026-07-16 - Final cross-phase implementation audit and macOS gate
+
+- Re-read the authoritative plan and every supporting refactor document against
+  the active application, GUI, core, protocol, and Python call paths. The audit
+  reopened real gaps despite the historical completion markers: packet-rate
+  textual endpoint conversion/lookup, fallback endpoint-derived peer identity,
+  unclassified UDP send failures, one allocating receive overload, stale
+  compatibility decoders/symbols, duplicated sample-rate bounds, residual Track
+  workspace/window ownership, window-owned boundary validation, duplicate
+  startup presentation, and stale current-state documentation.
+- UDP endpoints are resolved once and remain numeric through `NetworkSession`.
+  Stable nonzero peer IDs are mandatory; fallback identities and coordinator
+  selection are removed. Token-to-ID validation now has one authenticated
+  control-layer implementation, while controller snapshots carry the resolved
+  local/coordinator IDs to GUI and headless consumers. Send outcomes now distinguish pressure drops,
+  unreachable/refused edge failures, and fatal socket failures. Three
+  consecutive path errors move only that active edge back to bounded proof;
+  would-block/no-buffer errors remain measured drops. Seven new CSV/stat fields
+  expose those outcomes and reprobe state. Caller-owned receive storage is now
+  the only datagram API, and expected macOS ICMP route/refusal results no longer
+  terminate the runtime.
+- Removed the unused sequence tracker and permissive legacy metronome payload
+  forms. The current 36-byte UDP-v2 PCM16/PCM24 protocol remains unchanged;
+  this audit added no compatibility parser or new fuzz scope.
+- Native `runtime_limits.hpp` now owns the 8,000..384,000-Hz sample-rate range
+  consumed by engine, network, WAV, GUI, debug-description, CLI, and Python
+  sparse-override validation. Operational checks rejected 7,999/384,001 and
+  started bounded headless runs at 8,000/384,000.
+- Added a non-widget Track workspace owner for models, recording/persistence,
+  prepared-mix/WAV/contribution state, bounded workers, and asset transfer.
+  `AssetTransferService` now depends on a narrow context, the control router
+  uses explicit handlers, WAV/merge support and boundary validation no longer
+  live in `MainWindow`, and debug automation has no window dependency. Page
+  construction remains the window's sole friendship.
+- Startup failures are deferred/coalesced through one presenter; local-device
+  failure reopens setup and the persistent **Start Local Engine** action keeps a
+  retry route. STUN and manual-public-endpoint controls now enable their correct
+  mutually exclusive fields. The macOS switch warning's missing transport event
+  cases are present in the exhaustive GUI switch.
+- Focused stress exposed two additional verification defects. The malformed
+  verdict still assumed the old corpus size; it now requires every generated
+  current-header variant and matching native rejection. Adaptive release was
+  silently capped to 5,000 ppm in core and platform callbacks while reporting a
+  higher requested value, and headless ignored the playback ratio. The numeric
+  control is now authoritative, native profiles use 20,000 ppm, and ASIO,
+  CoreAudio, and headless all apply it without callback allocation or blocking.
+- The final exact elevated MSVC build succeeded. `validate all` passed 13/13 at
+  `tools/validate_logs/20260716T090241Z_7e59bee8`, including 76/76 boundary and
+  22/22 lifecycle cases; all 49 Python units passed. The physical PCM16
+  44.1-kHz 250-ms recovery case on devices 16/5 passed at
+  `tools/stress_logs/20260716T084316Z_6c7f782c`: rings rose to about 1,500
+  frames and recovered to 416 or below with a 1.02 ratio and zero playback
+  underrun. The final headless malformed/recovery pair passed at
+  `tools/stress_logs/20260716T085001Z_547be3d5`, with all 14 generated malformed
+  packets rejected and the real ring recovered to 504 frames or below. The
+  retained bounded fuzzer was not expanded or rerun.
+- The eight uploaded files in `incoming_uploads/macbroken-logs/logs` show the
+  old joiner creating one peer but never activating its UDP edge: audio receive,
+  metronome receive, and active-peer counts stayed zero while probes received
+  no pong; three files stopped before a data row. That evidence motivated the
+  route-error containment above but predates the fixes. Final refactor status is
+  therefore held at the explicit macOS rebuild/manual gate above; `Bugs.md`,
+  including `## Thoughts`, was not edited.
 
 ### 2026-07-15 - Phase 12 physical acceptance, recovery correction, and formal completion
 

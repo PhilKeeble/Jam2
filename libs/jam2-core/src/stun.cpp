@@ -126,19 +126,33 @@ Endpoint discover_public_endpoint(
     if (timeout_ms <= 0 || retries <= 0) {
         throw std::runtime_error("STUN timeout and retries must be positive");
     }
+    const ResolvedUdpEndpoint resolved_server = resolve_udp_endpoint(stun_server);
+    std::array<std::uint8_t, 2048> receive_buffer{};
     for (int attempt = 0; attempt < retries; ++attempt) {
         const BindingRequest request = make_binding_request();
-        socket.send_to(stun_server, request.bytes);
+        const UdpSendResult send = socket.send_to(resolved_server, request.bytes);
+        if (send.outcome == UdpSendOutcome::Fatal) {
+            throw std::runtime_error(
+                "failed to send STUN binding request (socket error " +
+                std::to_string(send.error_code) + ")");
+        }
+        if (send.outcome != UdpSendOutcome::Sent) {
+            continue;
+        }
         const auto deadline = monotonic_us() + static_cast<std::uint64_t>(timeout_ms) * 1000ULL;
         while (monotonic_us() < deadline) {
             const auto remaining_us = deadline - monotonic_us();
             const int wait_ms = static_cast<int>(remaining_us / 1000ULL) + 1;
-            const auto received = socket.recv_from(wait_ms > timeout_ms ? timeout_ms : wait_ms);
+            const auto received = socket.recv_from(
+                receive_buffer,
+                wait_ms > timeout_ms ? timeout_ms : wait_ms);
             if (!received) {
                 continue;
             }
             try {
-                return parse_binding_response(received->second, request.transaction_id);
+                return parse_binding_response(
+                    std::span<const std::uint8_t>(receive_buffer.data(), received->size),
+                    request.transaction_id);
             } catch (const std::exception&) {
                 continue;
             }

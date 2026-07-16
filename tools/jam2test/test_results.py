@@ -233,6 +233,17 @@ class CsvSummaryTests(unittest.TestCase):
 
 
 class NormalVerdictTests(unittest.TestCase):
+    def test_malformed_verdict_tracks_generated_corpus_size(self):
+        result = normal_result("malformed-udp", udp_parse_rejections_total=14.0)
+        result["udp_validation"] = {
+            "injections": [{"injected": True} for _ in range(14)],
+        }
+
+        self.assertEqual(verdict_for(result), "pass")
+
+        result["udp_validation"]["injections"][-1]["injected"] = False
+        self.assertEqual(verdict_for(result), "malformed_corpus_not_fully_injected")
+
     def test_clean_protocol_can_pass_while_audio_health_fails(self):
         result = normal_result(
             audio_callback_gap_over_2x_total=1.0,

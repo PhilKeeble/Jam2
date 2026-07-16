@@ -20,11 +20,6 @@
 namespace jam2 {
 namespace {
 
-constexpr std::size_t kJam2HeaderBytes = 48;
-constexpr std::size_t kMaxAudioFramesPerPacket = 256;
-constexpr std::size_t kPcm24BytesPerFrame = 3;
-constexpr std::size_t kMaxExpectedDatagramBytes = kJam2HeaderBytes + (kMaxAudioFramesPerPacket * kPcm24BytesPerFrame);
-
 std::string socket_error_text()
 {
 #if defined(_WIN32)
@@ -68,13 +63,64 @@ Endpoint from_sockaddr(const sockaddr_in& addr)
     return Endpoint{host.data(), ntohs(addr.sin_port)};
 }
 
+ResolvedUdpEndpoint resolved_from_sockaddr(const sockaddr_in& addr) noexcept
+{
+    return ResolvedUdpEndpoint{addr.sin_addr.s_addr, ntohs(addr.sin_port)};
+}
+
+sockaddr_in to_sockaddr(const ResolvedUdpEndpoint& endpoint) noexcept
+{
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(endpoint.port);
+    addr.sin_addr.s_addr = endpoint.address;
+    return addr;
+}
+
+int last_socket_error() noexcept
+{
+#if defined(_WIN32)
+    return WSAGetLastError();
+#else
+    return errno;
+#endif
+}
+
+UdpSendOutcome classify_send_error(int error) noexcept
+{
+#if defined(_WIN32)
+    switch (error) {
+    case WSAEWOULDBLOCK: return UdpSendOutcome::WouldBlock;
+    case WSAENOBUFS: return UdpSendOutcome::NoBufferSpace;
+    case WSAEHOSTUNREACH:
+    case WSAENETUNREACH: return UdpSendOutcome::Unreachable;
+    case WSAECONNREFUSED: return UdpSendOutcome::Refused;
+    default: return UdpSendOutcome::Fatal;
+    }
+#else
+    if (error == EAGAIN || error == EWOULDBLOCK) {
+        return UdpSendOutcome::WouldBlock;
+    }
+    switch (error) {
+    case ENOBUFS: return UdpSendOutcome::NoBufferSpace;
+    case EHOSTUNREACH:
+    case ENETUNREACH: return UdpSendOutcome::Unreachable;
+    case ECONNREFUSED: return UdpSendOutcome::Refused;
+    default: return UdpSendOutcome::Fatal;
+    }
+#endif
+}
+
 } // namespace
 
-Endpoint resolve_udp_endpoint(const Endpoint& endpoint)
+ResolvedUdpEndpoint resolve_udp_endpoint(const Endpoint& endpoint)
 {
-    sockaddr_in address = to_sockaddr(endpoint);
-    address.sin_port = htons(endpoint.port);
-    return from_sockaddr(address);
+    return resolved_from_sockaddr(to_sockaddr(endpoint));
+}
+
+Endpoint format_udp_endpoint(const ResolvedUdpEndpoint& endpoint)
+{
+    return from_sockaddr(to_sockaddr(endpoint));
 }
 
 NetworkRuntime::NetworkRuntime()
@@ -208,7 +254,9 @@ int UdpSocket::recv_buffer_size() const
     return bytes;
 }
 
-void UdpSocket::send_to(const Endpoint& endpoint, std::span<const std::uint8_t> bytes) const
+UdpSendResult UdpSocket::send_to(
+    const ResolvedUdpEndpoint& endpoint,
+    std::span<const std::uint8_t> bytes) const noexcept
 {
     const sockaddr_in addr = to_sockaddr(endpoint);
     const int sent = ::sendto(
@@ -218,20 +266,14 @@ void UdpSocket::send_to(const Endpoint& endpoint, std::span<const std::uint8_t> 
         0,
         reinterpret_cast<const sockaddr*>(&addr),
         sizeof(addr));
-    if (sent < 0 || static_cast<std::size_t>(sent) != bytes.size()) {
-        throw std::runtime_error("failed to send UDP packet: " + socket_error_text());
+    if (sent < 0) {
+        const int error = last_socket_error();
+        return UdpSendResult{classify_send_error(error), error};
     }
-}
-
-std::optional<std::pair<Endpoint, std::vector<std::uint8_t>>> UdpSocket::recv_from(int timeout_ms) const
-{
-    std::vector<std::uint8_t> buffer(kMaxExpectedDatagramBytes);
-    const auto received = recv_from(buffer, timeout_ms);
-    if (!received) {
-        return std::nullopt;
+    if (static_cast<std::size_t>(sent) != bytes.size()) {
+        return UdpSendResult{UdpSendOutcome::Fatal, 0};
     }
-    buffer.resize(received->size);
-    return std::make_pair(received->endpoint, std::move(buffer));
+    return {};
 }
 
 std::optional<UdpSocket::ReceivedDatagram> UdpSocket::recv_from(
@@ -258,6 +300,15 @@ std::optional<UdpSocket::ReceivedDatagram> UdpSocket::recv_from_for(
     timeout.tv_usec = static_cast<long>(timeout_us % 1000000ULL);
     const int ready = select(static_cast<int>(handle_ + 1), &read_set, nullptr, nullptr, &timeout);
     if (ready < 0) {
+#if defined(_WIN32)
+        if (WSAGetLastError() == WSAEINTR) {
+            return std::nullopt;
+        }
+#else
+        if (errno == EINTR) {
+            return std::nullopt;
+        }
+#endif
         throw std::runtime_error("UDP select failed: " + socket_error_text());
     }
     if (ready == 0) {
@@ -288,14 +339,16 @@ std::optional<UdpSocket::ReceivedDatagram> UdpSocket::recv_from_for(
 #endif
     if (received < 0) {
 #if defined(_WIN32)
-        if (WSAGetLastError() == WSAECONNRESET) {
-            return std::nullopt;
-        }
-        if (WSAGetLastError() == WSAEMSGSIZE) {
+        const int error = WSAGetLastError();
+        if (error == WSAECONNRESET || error == WSAECONNREFUSED ||
+            error == WSAEHOSTUNREACH || error == WSAENETUNREACH ||
+            error == WSAEWOULDBLOCK || error == WSAEINTR || error == WSAEMSGSIZE) {
             return std::nullopt;
         }
 #else
-        if (errno == EMSGSIZE) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR ||
+            errno == EMSGSIZE || errno == ECONNREFUSED ||
+            errno == EHOSTUNREACH || errno == ENETUNREACH) {
             return std::nullopt;
         }
 #endif
@@ -306,7 +359,7 @@ std::optional<UdpSocket::ReceivedDatagram> UdpSocket::recv_from_for(
         return std::nullopt;
     }
 #endif
-    return ReceivedDatagram{from_sockaddr(from), static_cast<std::size_t>(received)};
+    return ReceivedDatagram{resolved_from_sockaddr(from), static_cast<std::size_t>(received)};
 }
 
 } // namespace jam2

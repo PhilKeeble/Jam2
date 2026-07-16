@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <optional>
 #include <span>
-#include <vector>
 
 #if defined(_WIN32)
 #include <winsock2.h>
@@ -15,7 +14,32 @@
 
 namespace jam2 {
 
-Endpoint resolve_udp_endpoint(const Endpoint& endpoint);
+// Numeric IPv4 endpoint used by the UDP data plane. Text parsing and DNS are
+// deliberately confined to resolve_udp_endpoint(), before an endpoint enters
+// a packet-rate send/receive path.
+struct ResolvedUdpEndpoint {
+    std::uint32_t address = 0; // Network byte order.
+    std::uint16_t port = 0;    // Host byte order.
+
+    friend constexpr bool operator==(ResolvedUdpEndpoint, ResolvedUdpEndpoint) = default;
+};
+
+ResolvedUdpEndpoint resolve_udp_endpoint(const Endpoint& endpoint);
+Endpoint format_udp_endpoint(const ResolvedUdpEndpoint& endpoint);
+
+enum class UdpSendOutcome : std::uint8_t {
+    Sent,
+    WouldBlock,
+    NoBufferSpace,
+    Unreachable,
+    Refused,
+    Fatal,
+};
+
+struct UdpSendResult {
+    UdpSendOutcome outcome = UdpSendOutcome::Sent;
+    int error_code = 0;
+};
 
 class NetworkRuntime {
 public:
@@ -28,7 +52,7 @@ public:
 class UdpSocket {
 public:
     struct ReceivedDatagram {
-        Endpoint endpoint;
+        ResolvedUdpEndpoint endpoint;
         std::size_t size = 0;
     };
 
@@ -45,13 +69,13 @@ public:
     void set_recv_buffer_size(int bytes);
     int send_buffer_size() const;
     int recv_buffer_size() const;
-    void send_to(const Endpoint& endpoint, std::span<const std::uint8_t> bytes) const;
+    UdpSendResult send_to(
+        const ResolvedUdpEndpoint& endpoint,
+        std::span<const std::uint8_t> bytes) const noexcept;
     std::optional<ReceivedDatagram> recv_from(std::span<std::uint8_t> buffer, int timeout_ms) const;
     std::optional<ReceivedDatagram> recv_from_for(
         std::span<std::uint8_t> buffer,
         std::uint64_t timeout_us) const;
-    std::optional<std::pair<Endpoint, std::vector<std::uint8_t>>> recv_from(int timeout_ms) const;
-
 private:
 #if defined(_WIN32)
     SOCKET handle_{INVALID_SOCKET};

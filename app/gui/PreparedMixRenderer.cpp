@@ -1,4 +1,5 @@
 #include "PreparedMixRenderer.hpp"
+#include "runtime_limits.hpp"
 
 #include "pcm16_wav.hpp"
 #include "signalsmith-stretch/signalsmith-stretch.h"
@@ -124,8 +125,10 @@ PreparedMixResult PreparedMixRenderer::render(const LooperProject& project, cons
 {
     PreparedMixResult result;
     const qint64 started = QDateTime::currentMSecsSinceEpoch();
-    if (sampleRate <= 0 || sampleRate > 384000) {
-        result.error = QStringLiteral("prepared mix sample rate must be within 1..384000 Hz");
+    if (!jam2::limits::valid_sample_rate(sampleRate)) {
+        result.error = QStringLiteral("prepared mix sample rate must be within %1..%2 Hz")
+                           .arg(jam2::limits::kMinimumSampleRate)
+                           .arg(jam2::limits::kMaximumSampleRate);
         return result;
     }
     const LooperBank& bank = project.banks().at(project.activeBankIndex());

@@ -548,11 +548,14 @@ Phase 12 measured result on the 64-frame fast profile:
 The final physical-device audit also found that adaptive recovery's requested
 playback ratio was being overwritten by the outer runtime loop and that release
 stopped when the target counter reached its minimum rather than when the real
-device ring recovered. The mixer now owns that ratio, uses the existing bounded
-5000-ppm ceiling, and continues until the actual ring is within four packets of
-the target. Matched 120 ms and 250 ms one-shot stalls in both formats recovered
-from roughly 1,500 frames to 394-480 frames, shedding 1,051-1,122 frames with no
-playback-underrun time.
+device ring recovered. The mixer owns that ratio and continues until the actual
+ring is within four packets of the target. The final reconciliation removed
+hidden 5,000-ppm callback/core caps, made the configured numeric control
+authoritative, and set the native profiles to an explicit 20,000 ppm. The
+44.1-kHz physical PCM16 250-ms stall rerun recovered both rings from roughly
+1,500 frames to 416 frames or below, shed 1,117-1,244 frames, retained packet
+and mixer flow, and recorded no playback-underrun time. Headless audio now uses
+the same bounded playback-ratio behavior instead of ignoring the control.
 
 ### Peer JSON
 
@@ -581,7 +584,16 @@ which is at least a 24.76% wire reduction before the removed JSON field overhead
 is counted. The fixed chunk size and derived maximum count also prevent a sender
 from turning one permitted asset into an excessive number of tiny frames.
 
-## Code Organization Review
+## Original Code Organization Review
+
+The size and ownership findings in this section are the pre-split audit
+baseline. The implemented application now has one `app` target, shared
+application/session owners, extracted CLI services, page construction,
+mixer/metronome/track workflow components, a non-widget Track workspace owner,
+an independent control-message router, and an asset-transfer context/service.
+`MainWindow` remains the presentation and user-intent coordinator rather than
+the owner of protocol parsing, asset state machines, project/track resources,
+or boundary validation.
 
 ### Engine entry point
 
@@ -849,7 +861,8 @@ Stable design properties:
   allocation-light.
 - Complete the typed shared application boundary, remove process-compatibility
   paths, and split the engine and GUI monoliths along ownership boundaries.
-- Treat PCM16 network audio, a smaller UDP header, and selected binary peer
-  controls as optional measured experiments rather than core refactor work.
+- Retain the implemented session-wide PCM16/PCM24 choice, compact 36-byte UDP
+  header, and authenticated binary asset chunks as the one current protocol;
+  do not restore the removed wire or base64 compatibility paths.
 
 The largest predictable bandwidth gain is PCM16. The largest predictable packet-processing gain is eliminating packet-rate allocation and endpoint conversion. The change most likely to improve visible timing measurements immediately is replacing the double wait with deadline-aware network scheduling. The single-binary refactor offers the largest maintainability and workflow gain, but should follow stabilization rather than being used as a substitute for it.

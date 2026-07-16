@@ -1,4 +1,5 @@
 #include "network_session.hpp"
+#include "runtime_limits.hpp"
 
 #include <algorithm>
 #include <array>
@@ -20,7 +21,7 @@ NetworkPacketSchedule::NetworkPacketSchedule(
       next_grid_state_us_(start_time_us),
       frames_per_packet_(static_cast<std::uint64_t>(frames_per_packet))
 {
-    if (sample_rate <= 0 || frames_per_packet <= 0 ||
+    if (!limits::valid_sample_rate(sample_rate) || frames_per_packet <= 0 ||
         clock_drift_ppm < -5000 || clock_drift_ppm > 5000) {
         throw std::runtime_error("invalid NetworkSession packet schedule");
     }
@@ -73,6 +74,7 @@ struct NetworkSession::Impl {
         NetworkPeerDescriptor descriptor;
         PeerStreamConfig config;
         std::unique_ptr<PeerStream> stream;
+        NetworkPeerSendStats send;
     };
 
     UdpSocket socket;
@@ -143,7 +145,7 @@ struct NetworkSession::Impl {
     {
         if (contract.protocol_version != protocol::kProtocolVersion ||
             protocol::audio_bytes_per_sample(contract.audio_format) == 0 ||
-            contract.sample_rate <= 0 || contract.frames_per_packet <= 0 ||
+            !limits::valid_sample_rate(contract.sample_rate) || contract.frames_per_packet <= 0 ||
             contract.frames_per_packet > static_cast<int>(protocol::kMaxAudioFramesPerPacket)) {
             throw std::runtime_error("unsupported immutable NetworkSession contract");
         }
@@ -178,22 +180,20 @@ struct NetworkSession::Impl {
         return nullptr;
     }
 
-    PeerEntry* find(const Endpoint& endpoint) noexcept
+    PeerEntry* find(const ResolvedUdpEndpoint& endpoint) noexcept
     {
         for (auto& peer : peers) {
-            if (peer->descriptor.endpoint.host == endpoint.host &&
-                peer->descriptor.endpoint.port == endpoint.port) {
+            if (peer->descriptor.endpoint == endpoint) {
                 return peer.get();
             }
         }
         return nullptr;
     }
 
-    const PeerEntry* find(const Endpoint& endpoint) const noexcept
+    const PeerEntry* find(const ResolvedUdpEndpoint& endpoint) const noexcept
     {
         for (const auto& peer : peers) {
-            if (peer->descriptor.endpoint.host == endpoint.host &&
-                peer->descriptor.endpoint.port == endpoint.port) {
+            if (peer->descriptor.endpoint == endpoint) {
                 return peer.get();
             }
         }
@@ -284,6 +284,49 @@ struct NetworkSession::Impl {
         }
         return std::span<const std::uint8_t>(transmit_packet.data(), packet_size);
     }
+
+    UdpSendOutcome sendPacket(PeerEntry& peer, std::span<const std::uint8_t> packet)
+    {
+        ++peer.send.attempts;
+        const UdpSendResult sent = socket.send_to(peer.descriptor.endpoint, packet);
+        peer.send.last_error_code = sent.error_code;
+        peer.send.last_outcome = sent.outcome;
+        switch (sent.outcome) {
+        case UdpSendOutcome::Sent:
+            ++peer.send.sent_packets;
+            peer.send.sent_bytes += packet.size();
+            peer.send.consecutive_path_errors = 0;
+            return sent.outcome;
+        case UdpSendOutcome::WouldBlock:
+            ++peer.send.would_block_drops;
+            return sent.outcome;
+        case UdpSendOutcome::NoBufferSpace:
+            ++peer.send.no_buffer_drops;
+            return sent.outcome;
+        case UdpSendOutcome::Unreachable:
+            ++peer.send.unreachable_errors;
+            break;
+        case UdpSendOutcome::Refused:
+            ++peer.send.refused_errors;
+            break;
+        case UdpSendOutcome::Fatal:
+            ++peer.send.fatal_errors;
+            throw std::runtime_error(
+                "fatal UDP socket send failure (socket error " +
+                std::to_string(sent.error_code) + ")");
+        }
+
+        ++peer.send.consecutive_path_errors;
+        if (peer.descriptor.endpoint_state == PeerEndpointState::Active &&
+            peer.send.consecutive_path_errors >= 3) {
+            peer.descriptor.endpoint_state = PeerEndpointState::Probing;
+            ++peer.send.path_reprobe_transitions;
+            if (playback != nullptr) {
+                mixer.setPeerActive(peer.descriptor.peer_id.value, false);
+            }
+        }
+        return sent.outcome;
+    }
 };
 
 NetworkSession::NetworkSession(
@@ -366,6 +409,7 @@ NetworkSessionSnapshot NetworkSession::snapshot() const
         NetworkPeerSnapshot value;
         value.descriptor = peer->descriptor;
         value.stream = peer->stream->stats();
+        value.send = peer->send;
         if (const PeerMixerPeerStats* mix = impl_->mixer.peerStats(peer->descriptor.peer_id.value)) {
             value.mix = *mix;
             value.has_mix_stats = true;
@@ -389,19 +433,19 @@ const NetworkPeerDescriptor* NetworkSession::peer(PeerId peer_id) const noexcept
     return entry != nullptr ? &entry->descriptor : nullptr;
 }
 
-PeerId NetworkSession::peerIdForEndpoint(const Endpoint& endpoint) const noexcept
+PeerId NetworkSession::peerIdForEndpoint(const ResolvedUdpEndpoint& endpoint) const noexcept
 {
     const auto* entry = impl_->find(endpoint);
     return entry != nullptr ? entry->descriptor.peer_id : PeerId{};
 }
 
-bool NetworkSession::recognizesEndpoint(const Endpoint& endpoint) const noexcept
+bool NetworkSession::recognizesEndpoint(const ResolvedUdpEndpoint& endpoint) const noexcept
 {
     return impl_->bootstrap_state == SessionBootstrapState::Established &&
         impl_->find(endpoint) != nullptr;
 }
 
-bool NetworkSession::acceptsEndpoint(const Endpoint& endpoint) const noexcept
+bool NetworkSession::acceptsEndpoint(const ResolvedUdpEndpoint& endpoint) const noexcept
 {
     const auto* entry = impl_->find(endpoint);
     return impl_->bootstrap_state == SessionBootstrapState::Established &&
@@ -432,7 +476,7 @@ bool NetworkSession::removePeer(PeerId peer_id) noexcept
 
 bool NetworkSession::updatePeerEndpoint(
     PeerId peer_id,
-    const Endpoint& endpoint,
+    const ResolvedUdpEndpoint& endpoint,
     PeerEndpointState state)
 {
     auto* entry = impl_->find(peer_id);
@@ -463,6 +507,7 @@ bool NetworkSession::updatePeerEndpoint(
     }
     entry->descriptor.endpoint = endpoint;
     entry->descriptor.endpoint_state = state;
+    entry->send.consecutive_path_errors = 0;
     entry->stream = std::make_unique<PeerStream>(config, monotonic_us(), playback);
     if (playback != nullptr) {
         impl_->mixer.setPeerActive(peer_id.value, state == PeerEndpointState::Active);
@@ -477,6 +522,9 @@ bool NetworkSession::setPeerEndpointState(PeerId peer_id, PeerEndpointState stat
         return false;
     }
     entry->descriptor.endpoint_state = state;
+    if (state == PeerEndpointState::Active) {
+        entry->send.consecutive_path_errors = 0;
+    }
     if (impl_->playback != nullptr) {
         impl_->mixer.setPeerActive(peer_id.value, state == PeerEndpointState::Active);
     }
@@ -523,6 +571,12 @@ const PeerMixerPeerStats* NetworkSession::peerMixStats(PeerId peer_id) const noe
     return impl_->mixer.peerStats(peer_id.value);
 }
 
+const NetworkPeerSendStats* NetworkSession::peerSendStats(PeerId peer_id) const noexcept
+{
+    const auto* entry = impl_->find(peer_id);
+    return entry != nullptr ? &entry->send : nullptr;
+}
+
 void NetworkSession::advance(std::uint64_t now_us) noexcept
 {
     for (auto& peer : impl_->peers) {
@@ -552,9 +606,17 @@ NetworkSendResult NetworkSession::sendToActive(
         if (peer->descriptor.endpoint_state != PeerEndpointState::Active) {
             continue;
         }
-        impl_->socket.send_to(peer->descriptor.endpoint, packet);
-        ++result.peer_count;
-        result.total_bytes += packet.size();
+        ++result.attempted_peer_count;
+        const UdpSendOutcome outcome = impl_->sendPacket(*peer, packet);
+        if (outcome == UdpSendOutcome::Sent) {
+            ++result.peer_count;
+            result.total_bytes += packet.size();
+        } else if (outcome == UdpSendOutcome::WouldBlock ||
+                   outcome == UdpSendOutcome::NoBufferSpace) {
+            ++result.transient_drops;
+        } else {
+            ++result.path_errors;
+        }
     }
     return result;
 }
@@ -576,14 +638,15 @@ std::size_t NetworkSession::sendToPeer(
     std::span<const std::uint8_t> payload,
     bool allow_inactive)
 {
-    const auto* peer = impl_->find(peer_id);
+    auto* peer = impl_->find(peer_id);
     if (peer == nullptr ||
         (!allow_inactive && peer->descriptor.endpoint_state != PeerEndpointState::Active)) {
         return 0;
     }
     const auto packet = impl_->encode(type, sequence, timing_value, payload);
-    impl_->socket.send_to(peer->descriptor.endpoint, packet);
-    return packet.size();
+    return impl_->sendPacket(*peer, packet) == UdpSendOutcome::Sent
+        ? packet.size()
+        : 0;
 }
 
 std::optional<NetworkDatagram> NetworkSession::receiveFor(std::uint64_t timeout_us)

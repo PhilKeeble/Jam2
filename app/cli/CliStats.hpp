@@ -168,6 +168,13 @@ struct AudioPacketStats {
     std::uint64_t udp_ping_slot_overwrites = 0;
     std::uint64_t udp_work_budget_yields = 0;
     std::uint64_t udp_receive_batch_max = 0;
+    std::uint64_t udp_send_would_block_drops = 0;
+    std::uint64_t udp_send_no_buffer_drops = 0;
+    std::uint64_t udp_send_unreachable_errors = 0;
+    std::uint64_t udp_send_refused_errors = 0;
+    std::uint64_t udp_send_fatal_errors = 0;
+    std::uint64_t udp_send_path_reprobe_transitions = 0;
+    std::uint64_t udp_send_consecutive_path_errors_max = 0;
     std::uint64_t reorder_pending_high_water = 0;
     std::uint64_t reorder_capacity_drops = 0;
     std::uint64_t jitter_pending_high_water = 0;
@@ -541,7 +548,10 @@ public:
                 "leader_audio_injected_packets,transport_source_frame,transport_requested_target_frame,"
                 "transport_applied_target_frame,transport_action,udp_receive_batch_max,"
                 "network_audio_bytes_per_sample,udp_header_bytes,audio_payload_bytes,audio_packet_bytes,"
-                "send_packet_rate_pps,recv_packet_rate_pps,audio_control_playback_ratio\n";
+                "send_packet_rate_pps,recv_packet_rate_pps,audio_control_playback_ratio,"
+                "udp_send_would_block_drops,udp_send_no_buffer_drops,udp_send_unreachable_errors,"
+                "udp_send_refused_errors,udp_send_fatal_errors,udp_send_path_reprobe_transitions,"
+                "udp_send_consecutive_path_errors_max\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -925,7 +935,14 @@ public:
              << audio_packet_bytes(options.frame_size, options.network_audio_format) << ','
              << send_packet_rate << ','
              << recv_packet_rate << ','
-             << static_cast<double>(audio.playback_ratio_ppm) / 1000000.0;
+             << static_cast<double>(audio.playback_ratio_ppm) / 1000000.0 << ','
+             << stats.udp_send_would_block_drops << ','
+             << stats.udp_send_no_buffer_drops << ','
+             << stats.udp_send_unreachable_errors << ','
+             << stats.udp_send_refused_errors << ','
+             << stats.udp_send_fatal_errors << ','
+             << stats.udp_send_path_reprobe_transitions << ','
+             << stats.udp_send_consecutive_path_errors_max;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -941,7 +958,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(352);
+        std::vector<std::string> fields(359);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1254,6 +1271,13 @@ public:
         set(349, seconds > 0.0 ? static_cast<double>(stats.sent_packets) / seconds : 0.0);
         set(350, seconds > 0.0 ? static_cast<double>(stats.recv_packets) / seconds : 0.0);
         set(351, static_cast<double>(audio.playback_ratio_ppm) / 1000000.0);
+        set(352, stats.udp_send_would_block_drops);
+        set(353, stats.udp_send_no_buffer_drops);
+        set(354, stats.udp_send_unreachable_errors);
+        set(355, stats.udp_send_refused_errors);
+        set(356, stats.udp_send_fatal_errors);
+        set(357, stats.udp_send_path_reprobe_transitions);
+        set(358, stats.udp_send_consecutive_path_errors_max);
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {

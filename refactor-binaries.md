@@ -41,6 +41,12 @@ and session-wide PCM16 or PCM24; and requested Track/Looper chunk bodies use
 bounded authenticated binary control frames. The table above remains only the
 baseline that motivated those changes.
 
+The final source reconciliation also confirms that `ApplicationRuntime` and
+the shared session controller remain the lifecycle owners, `NetworkSession`
+owns the numeric UDP peer registry and per-edge state, and the GUI Track
+workspace owns project/recording/asset resources outside `MainWindow`.
+Ordinary GUI startup still exposes no debug pipe or automation manifest.
+
 ## Benefits of Consolidation
 
 ### Lifecycle and Packaging

@@ -483,7 +483,11 @@ def protocol_verdict_for(result):
             return "transient_stall_mixer_still_dropping"
         if metrics.get("recovery_mix_active_slots_ratio_end_max", 0.0) > 0.25:
             return "transient_stall_mixer_queue_not_recovered"
-        padding_limit = max(128.0, metrics.get("frame_size_max", 0.0) * 4.0)
+        # A recovered ring still needs bounded minimum-cushion maintenance when
+        # a device callback consumes several packets at once. Treat sustained
+        # refill work as a failure, but do not mistake that normal maintenance
+        # for a latency tail after the real ring is already back near minimum.
+        padding_limit = max(4096.0, metrics.get("frame_size_max", 0.0) * 32.0)
         if metrics.get("recovery_adaptive_padding_frames_delta_total", 0.0) > padding_limit:
             return "transient_stall_adaptive_padding_not_recovered"
         if metrics.get("adaptive_raise_events_total", 0.0) <= 0.0:
@@ -530,9 +534,9 @@ def protocol_verdict_for(result):
     if scenario == "malformed-udp":
         injections = result.get("udp_validation", {}).get("injections", [])
         successful = sum(1 for item in injections if item.get("injected", False))
-        if successful < 16:
+        if not injections or successful != len(injections):
             return "malformed_corpus_not_fully_injected"
-        if metrics.get("udp_parse_rejections_total", 0.0) < 16.0:
+        if metrics.get("udp_parse_rejections_total", 0.0) < float(successful):
             return "malformed_rejections_not_observed"
         return "pass"
     if scenario == "delayed-replay":

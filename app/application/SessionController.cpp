@@ -82,11 +82,13 @@ QString keyHex(const std::array<std::uint8_t, 16>& key)
     return QString::fromStdString(jam2::hex_encode(key.data(), key.size()));
 }
 
-quint64 peerIdForToken(const QString& token)
+quint64 requirePeerId(const QString& token)
 {
-    bool ok = false;
-    const quint64 value = token.left(16).toULongLong(&ok, 16);
-    return ok && value != 0 ? value : 1ULL;
+    const auto peerId = jam2::control_protocol::peerIdFromToken(token);
+    if (!peerId) {
+        throw std::runtime_error("peer token must encode a stable non-zero peer id");
+    }
+    return *peerId;
 }
 
 void writeConsoleLine(const QString& line, bool error = false)
@@ -150,11 +152,14 @@ public:
         keyHex_ = keyHex(session_.key);
 
         const QString configuredToken = debugNetwork_.value(QStringLiteral("peer_token")).toString();
-        if (!debugScenario_.isEmpty() &&
-            jam2::control_protocol::decodeHex(configuredToken, 16).size() == 16) {
+        if (!debugScenario_.isEmpty() && !configuredToken.isEmpty()) {
+            if (!jam2::control_protocol::peerIdFromToken(configuredToken).has_value()) {
+                throw std::runtime_error(
+                    "debug scenario peer_token must encode a stable non-zero peer id");
+            }
             localToken_ = configuredToken.toLower();
         } else {
-            localToken_ = jam2::control_protocol::encodeHex(jam2::control_protocol::randomNonce());
+            localToken_ = jam2::control_protocol::randomPeerToken();
         }
 
         runtime_.onStartup = [this](const Jam2RuntimeStartup& startup) {
@@ -1044,7 +1049,7 @@ private:
         for (auto it = peers_.cbegin(); it != peers_.cend(); ++it) {
             if (it.key() != localToken_ && !it.value().isEmpty()) {
                 const QString endpoint = observer.value(it.key()).toString(it.value());
-                result << QStringLiteral("%1@%2").arg(peerIdForToken(it.key())).arg(endpoint);
+                result << QStringLiteral("%1@%2").arg(requirePeerId(it.key())).arg(endpoint);
             }
         }
         return result;
@@ -1078,7 +1083,8 @@ private:
         if (runtime_.isNetworkRunning() || networkStarted_) {
             return;
         }
-        const quint64 coordinatorId = peerIdForToken(coordinatorToken_.isEmpty() ? localToken_ : coordinatorToken_);
+        const quint64 coordinatorId = requirePeerId(
+            coordinatorToken_.isEmpty() ? localToken_ : coordinatorToken_);
         const QStringList initialPeerSpecs = peerSpecsExcludingSelf();
         runtimeOptions_.bind = jam2::parse_bind_endpoint(bind.toStdString());
         runtimeOptions_.session_id = session_.session_id;
@@ -1086,7 +1092,7 @@ private:
         runtimeOptions_.bootstrap_role = creator_
             ? jam2::SessionBootstrapRole::Creator
             : jam2::SessionBootstrapRole::Joiner;
-        runtimeOptions_.local_peer_id = peerIdForToken(localToken_);
+        runtimeOptions_.local_peer_id = requirePeerId(localToken_);
         runtimeOptions_.bootstrap_coordinator_peer_id = coordinatorId;
         runtimeOptions_.arm_stream_on_first_peer = true;
         applyPeerSpecs(initialPeerSpecs);
@@ -1107,8 +1113,11 @@ private:
         options.bootstrap_role = snapshot.role == SharedSessionController::Role::Creator
             ? jam2::SessionBootstrapRole::Creator
             : jam2::SessionBootstrapRole::Joiner;
-        options.local_peer_id = peerIdForToken(snapshot.localToken);
-        options.bootstrap_coordinator_peer_id = peerIdForToken(snapshot.coordinatorToken);
+        if (snapshot.localPeerId == 0 || snapshot.coordinatorPeerId == 0) {
+            throw std::runtime_error("session membership is missing stable peer identities");
+        }
+        options.local_peer_id = snapshot.localPeerId;
+        options.bootstrap_coordinator_peer_id = snapshot.coordinatorPeerId;
         options.sample_rate = snapshot.contract.sampleRate;
         options.frame_size = snapshot.contract.frameSize;
         const auto audioFormat = jam2::protocol::parse_audio_format(
@@ -1202,7 +1211,7 @@ private:
         (void)message;
         hadAuthenticatedPeer_ = true;
         writeConsoleLine(QStringLiteral("Coordinator membership accepted peer %1; remote peers=%2")
-            .arg(QString::number(peerIdForToken(token)))
+            .arg(QString::number(requirePeerId(token)))
             .arg(std::max(0, static_cast<int>(peers_.size()) - 1)));
         emitStartup(QStringLiteral("connected"));
     }
@@ -1377,9 +1386,9 @@ private:
             {QStringLiteral("automation_command_queue_high_water"), static_cast<qint64>(commandQueueHighWater)},
             {QStringLiteral("automation_command_queue_drops"), static_cast<qint64>(commandQueueDrops)},
             {QStringLiteral("remote_peer_count"), maxRemotePeerCount_},
-            {QStringLiteral("local_peer_id"), localToken_.isEmpty()
+            {QStringLiteral("local_peer_id"), controlSnapshot.localPeerId == 0
                 ? QJsonValue(QJsonValue::Null)
-                : QJsonValue(QString::number(peerIdForToken(localToken_)))},
+                : QJsonValue(QString::number(controlSnapshot.localPeerId))},
             {QStringLiteral("events"), automationTrace_},
             {QStringLiteral("event_trace_drops"), static_cast<qint64>(automationTraceDrops_)},
             {QStringLiteral("heartbeat_interval_ms"), controlSnapshot.heartbeatIntervalMs},

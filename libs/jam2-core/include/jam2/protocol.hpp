@@ -63,13 +63,6 @@ struct ParseResult {
     explicit operator bool() const { return error == ParseError::None; }
 };
 
-enum class SequenceResult {
-    InOrder,
-    Duplicate,
-    OutOfOrder,
-    Late,
-};
-
 // RFC 1982-style serial arithmetic. Comparisons are defined for distances
 // smaller than half the uint32 sequence space; the exact half-range is treated
 // as unordered/invalid by both helpers.
@@ -96,18 +89,6 @@ struct SequenceStats {
     std::uint64_t duplicate = 0;
     std::uint64_t out_of_order = 0;
     std::uint64_t late = 0;
-};
-
-class SequenceTracker {
-public:
-    SequenceResult observe(std::uint32_t sequence);
-    const SequenceStats& stats() const { return stats_; }
-
-private:
-    bool initialized_ = false;
-    std::uint32_t highest_ = 0;
-    std::uint64_t recent_window_ = 0;
-    SequenceStats stats_{};
 };
 
 enum class ReplayResult {

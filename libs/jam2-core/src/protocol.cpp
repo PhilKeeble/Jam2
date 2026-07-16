@@ -415,57 +415,6 @@ bool unpack_audio_into(
     return false;
 }
 
-SequenceResult SequenceTracker::observe(std::uint32_t sequence)
-{
-    if (!initialized_) {
-        initialized_ = true;
-        highest_ = sequence;
-        recent_window_ = 1;
-        return SequenceResult::InOrder;
-    }
-
-    if (sequence == highest_) {
-        ++stats_.duplicate;
-        return SequenceResult::Duplicate;
-    }
-
-    if (sequence_after(sequence, highest_)) {
-        const std::uint32_t gap = sequence_forward_distance(sequence, highest_);
-        if (gap > 1) {
-            const std::uint64_t missing = gap - 1;
-            stats_.lost += missing;
-            ++stats_.loss_events;
-            if (missing > stats_.loss_max_gap) {
-                stats_.loss_max_gap = missing;
-            }
-        }
-        recent_window_ = gap >= 64 ? 1 : ((recent_window_ << gap) | 1U);
-        highest_ = sequence;
-        return SequenceResult::InOrder;
-    }
-
-    if (!sequence_before(sequence, highest_)) {
-        ++stats_.late;
-        return SequenceResult::Late;
-    }
-
-    const std::uint32_t delta = sequence_forward_distance(highest_, sequence);
-    if (delta >= 64) {
-        ++stats_.late;
-        return SequenceResult::Late;
-    }
-
-    const std::uint64_t mask = 1ULL << delta;
-    if ((recent_window_ & mask) != 0) {
-        ++stats_.duplicate;
-        return SequenceResult::Duplicate;
-    }
-
-    recent_window_ |= mask;
-    ++stats_.out_of_order;
-    return SequenceResult::OutOfOrder;
-}
-
 ReplayResult ReplayWindow::observe(std::uint32_t sequence)
 {
     if (!initialized_) {

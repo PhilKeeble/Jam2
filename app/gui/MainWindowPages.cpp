@@ -5,6 +5,7 @@
 #include "GuiPresentation.hpp"
 #include "SessionController.hpp"
 #include "TrackWidgets.hpp"
+#include "ContentLimits.hpp"
 
 #include "tuning_profile.hpp"
 
@@ -59,6 +60,11 @@ void MainWindowPages::build(MainWindow& w)
     w.engineModeLabel_->setMinimumWidth(72);
     w.sessionTopologyLabel_ = new QLabel(QStringLiteral("Remote Peers 0"), &w);
     w.sessionTopologyLabel_->setObjectName(QStringLiteral("StatusPill"));
+    w.localEngineButton_ = new QPushButton(QStringLiteral("Start Local Engine"), &w);
+    QObject::connect(w.localEngineButton_, &QPushButton::clicked, &w, [&w] {
+        w.showLocalPerformSetup();
+    });
+    header->addWidget(w.localEngineButton_);
     header->addWidget(w.engineModeLabel_);
     header->addWidget(w.connectionLabel_);
     header->addWidget(w.sessionTopologyLabel_);
@@ -261,7 +267,9 @@ QWidget* MainWindowPages::buildSessionPage(MainWindow& w)
     w.inputChannelsEdit_ = new QLineEdit(QStringLiteral("1"), page);
     w.outputChannelsEdit_ = new QLineEdit(QStringLiteral("1,2"), page);
     w.sampleRateSpin_ = new QSpinBox(page);
-    w.sampleRateSpin_->setRange(8000, 384000);
+    w.sampleRateSpin_->setRange(
+        jam2::application::limits::kMinimumSampleRate,
+        jam2::application::limits::kMaximumSampleRate);
     w.sampleRateSpin_->setValue(44100);
     w.bufferSizeSpin_ = new QSpinBox(page);
     w.bufferSizeSpin_->setRange(16, 4096);

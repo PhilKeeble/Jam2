@@ -617,7 +617,7 @@ void pop_resampled_playback(DuplexContext& context, std::span<std::int32_t> outp
     }
 
     const int ratio_ppm = context.control->playback_ratio_ppm.load(std::memory_order_relaxed);
-    const double ratio = static_cast<double>(std::clamp(ratio_ppm, 995000, 1005000)) / 1000000.0;
+    const double ratio = static_cast<double>(std::clamp(ratio_ppm, 500000, 2000000)) / 1000000.0;
 
     if (ratio_ppm == 1000000 && !context.resample_has_current && !context.resample_has_next) {
         context.resample_has_current = false;

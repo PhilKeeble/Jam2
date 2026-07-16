@@ -1,4 +1,5 @@
 #include "pcm16_wav.hpp"
+#include "runtime_limits.hpp"
 
 #include <array>
 #include <fstream>
@@ -126,7 +127,7 @@ InspectResult inspect_pcm16_file(const std::filesystem::path& path, std::uint64_
                 if (result.info.channels == 0U || result.info.channels > 8U) {
                     return failure("WAV channel count is outside the supported range 1..8");
                 }
-                if (result.info.sample_rate < 8000U || result.info.sample_rate > 384000U) {
+                if (!limits::valid_sample_rate(static_cast<int>(result.info.sample_rate))) {
                     return failure("WAV sample rate is outside the supported range");
                 }
                 const std::uint32_t expected_align = static_cast<std::uint32_t>(result.info.channels) * 2U;

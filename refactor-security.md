@@ -17,6 +17,14 @@ threat and design context, not as current implementation status or a separate
 phase/gate system. Current status and remaining work live only in
 [refactor-plan.md](refactor-plan.md).
 
+The final implementation reconciliation confirms caller-owned UDP buffers,
+numeric endpoint ownership, authenticated endpoint proof, bounded per-edge
+probing, and classified send outcomes. Would-block/no-buffer pressure is
+counted as a drop, repeated unreachable/refused errors reprobe only that edge,
+and only a fatal socket-wide error ends the runtime. The corresponding raw
+counters are retained in native CSV/stat output. The old permissive metronome
+payload decoder and fallback endpoint-derived peer identities are removed.
+
 ## Governing Constraints
 
 The security work must preserve the repository's product rules:

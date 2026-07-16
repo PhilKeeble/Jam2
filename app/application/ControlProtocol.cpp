@@ -101,6 +101,16 @@ QByteArray randomNonce()
     return nonce;
 }
 
+QString randomPeerToken()
+{
+    for (;;) {
+        const QString token = encodeHex(randomNonce());
+        if (peerIdFromToken(token).has_value()) {
+            return token;
+        }
+    }
+}
+
 QByteArray decodeHex(const QString& value, qsizetype expectedBytes)
 {
     const QByteArray encoded = value.toLatin1();
@@ -122,6 +132,21 @@ QByteArray decodeHex(const QString& value, qsizetype expectedBytes)
 QString encodeHex(const QByteArray& value)
 {
     return QString::fromLatin1(value.toHex());
+}
+
+std::optional<quint64> peerIdFromToken(const QString& token)
+{
+    const QByteArray decoded = decodeHex(token, 16);
+    if (decoded.size() != 16) {
+        return std::nullopt;
+    }
+
+    quint64 peerId = 0;
+    for (qsizetype index = 0; index < 8; ++index) {
+        peerId = (peerId << 8U) |
+            static_cast<quint64>(static_cast<unsigned char>(decoded.at(index)));
+    }
+    return peerId == 0 ? std::nullopt : std::optional<quint64>(peerId);
 }
 
 QByteArray makeTranscript(

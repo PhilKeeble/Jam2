@@ -402,7 +402,7 @@ void ControlServer::handleHandshake(Peer* peer, const QJsonObject& message)
     const QByteArray clientProof = decodeHex(message.value(QStringLiteral("proof")).toString(), 16);
     QString token = message.value(QStringLiteral("peer_token")).toString();
     const QString udpEndpoint = message.value(QStringLiteral("udp_endpoint")).toString();
-    const bool tokenValid = token.isEmpty() || decodeHex(token, 16).size() == 16;
+    const bool tokenValid = token.isEmpty() || peerIdFromToken(token).has_value();
     if (type != QStringLiteral("hello.proof") ||
         message.value(QStringLiteral("version")).toInt() != kControlProtocolVersion ||
         session != sessionHex_ || clientNonce.size() != 16 || clientProof.size() != 16 ||
@@ -415,7 +415,7 @@ void ControlServer::handleHandshake(Peer* peer, const QJsonObject& message)
         return;
     }
     if (token.isEmpty()) {
-        token = encodeHex(randomNonce());
+        token = randomPeerToken();
     }
     for (const Peer* existing : peers_) {
         if (existing != peer && existing && existing->authenticated && existing->token == token) {

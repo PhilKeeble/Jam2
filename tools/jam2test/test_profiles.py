@@ -18,16 +18,23 @@ class ProfileTests(unittest.TestCase):
         capabilities = NativeCapabilities.__new__(NativeCapabilities)
         capabilities.runtime_fields = {
             "frame_size": {"type": "integer", "minimum": 32, "maximum": 256},
+            "sample_rate": {"type": "integer", "minimum": 8000, "maximum": 384000},
             "metronome_mode": {"type": "string", "choices": ["shared-grid", "leader-audio"]},
             "os_priority": {"type": "string", "choices": ["off", "high", "realtime"]},
         }
         capabilities.validate_sparse_overrides({
-            "frame_size": 128, "metronome_mode": "shared-grid", "os_priority": "off",
+            "frame_size": 128, "sample_rate": 8000,
+            "metronome_mode": "shared-grid", "os_priority": "off",
         })
+        capabilities.validate_sparse_overrides({"sample_rate": 384000})
         with self.assertRaises(ValueError):
             capabilities.validate_sparse_overrides({"frame_size": 512})
         with self.assertRaises(ValueError):
             capabilities.validate_sparse_overrides({"metronome_mode": "unknown"})
+        with self.assertRaises(ValueError):
+            capabilities.validate_sparse_overrides({"sample_rate": 7999})
+        with self.assertRaises(ValueError):
+            capabilities.validate_sparse_overrides({"sample_rate": 384001})
 
 
 if __name__ == "__main__":

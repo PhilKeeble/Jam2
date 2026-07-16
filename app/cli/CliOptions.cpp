@@ -1,4 +1,5 @@
 #include "CliOptions.hpp"
+#include "runtime_limits.hpp"
 
 #include "common.hpp"
 #include "tuning_profile.hpp"
@@ -552,8 +553,11 @@ Options parse_options(int argc, char** argv, int start)
             options.os_priority = parse_os_priority(require_value(argc, argv, i, arg));
         } else if (arg == "--sample-rate") {
             options.sample_rate = std::stoi(std::string(require_value(argc, argv, i, arg)));
-            if (options.sample_rate <= 0) {
-                throw std::runtime_error("--sample-rate must be positive");
+            if (!jam2::limits::valid_sample_rate(options.sample_rate)) {
+                throw std::runtime_error(
+                    "--sample-rate must be from " +
+                    std::to_string(jam2::limits::kMinimumSampleRate) + " through " +
+                    std::to_string(jam2::limits::kMaximumSampleRate));
             }
         } else if (arg == "--socket-send-buffer") {
             options.socket_send_buffer = std::stoi(std::string(require_value(argc, argv, i, arg)));

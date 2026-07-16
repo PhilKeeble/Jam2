@@ -1,5 +1,6 @@
 #include "ControlMessageValidation.hpp"
 #include "ContentLimits.hpp"
+#include "ControlProtocol.hpp"
 #include "protocol.hpp"
 
 #include <QJsonArray>
@@ -331,16 +332,20 @@ bool jam2::application::validateControlMessage(
             reason = QStringLiteral("network membership page is invalid");
             return false;
         }
-        static const QRegularExpression tokenExpression(QStringLiteral("^[0-9a-f]{32}$"));
-        if (!tokenExpression.match(
-                message.value(QStringLiteral("coordinator_token")).toString()).hasMatch()) {
+        if (!jam2::control_protocol::peerIdFromToken(
+                message.value(QStringLiteral("coordinator_token")).toString()).has_value()) {
             reason = QStringLiteral("mesh coordinator token is invalid");
             return false;
         }
         for (const QJsonValue& peerValue : peersValue.toArray()) {
             const QJsonObject peer = peerValue.toObject();
+            const auto peerId = jam2::control_protocol::peerIdFromToken(
+                peer.value(QStringLiteral("token")).toString());
+            bool encodedIdOk = false;
+            const quint64 encodedId = peer.value(QStringLiteral("peer_id"))
+                .toString().toULongLong(&encodedIdOk);
             if (!peerValue.isObject() ||
-                !tokenExpression.match(peer.value(QStringLiteral("token")).toString()).hasMatch() ||
+                !peerId || !encodedIdOk || encodedId != *peerId ||
                 !isBoundedString(peer.value(QStringLiteral("endpoint")), 255)) {
                 reason = QStringLiteral("mesh peer entry is invalid");
                 return false;
@@ -349,7 +354,6 @@ bool jam2::application::validateControlMessage(
         return true;
     }
     if (type == QStringLiteral("session.contract")) {
-        static const QRegularExpression tokenExpression(QStringLiteral("^[0-9a-f]{32}$"));
         return isBoundedInteger(
                    message.value(QStringLiteral("protocol_version")),
                    jam2::protocol::kProtocolVersion,
@@ -360,7 +364,8 @@ bool jam2::application::validateControlMessage(
             isBoundedInteger(message.value(QStringLiteral("sample_rate")),
                 limits::kMinimumSampleRate, limits::kMaximumSampleRate) &&
             isBoundedInteger(message.value(QStringLiteral("frame_size")), 1, 8192) &&
-            tokenExpression.match(message.value(QStringLiteral("coordinator_token")).toString()).hasMatch()
+            jam2::control_protocol::peerIdFromToken(
+                message.value(QStringLiteral("coordinator_token")).toString()).has_value()
             ? true : (reason = QStringLiteral("session contract is invalid"), false);
     }
     if (type == QStringLiteral("session.heartbeat") ||

@@ -13,6 +13,7 @@
 #include "SharedTrackController.hpp"
 #include "SharedSessionController.hpp"
 #include "TrackRecordingWorkflow.hpp"
+#include "TrackWorkspaceController.hpp"
 
 #include "metronome.hpp"
 
@@ -58,16 +59,12 @@ class WaveformWidget;
 class LooperLaneStackWidget;
 class LevelMeterWidget;
 
-QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs);
-
 class MainWindow : public QWidget {
 public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
 
 private:
-    friend class AssetTransferService;
-    friend class GuiControlMessageRouter;
     friend class MainWindowPages;
     bool eventFilter(QObject* watched, QEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
@@ -91,7 +88,6 @@ private:
     void refreshControlConnection();
     void handleMeshPeerAuthenticated(const QString& token, const QJsonObject& message);
     QStringList meshPeerEndpointsExcludingSelf() const;
-    quint64 meshPeerIdForToken(const QString& token) const;
     QString meshBindEndpoint() const;
     QString localMeshEndpoint(bool createSession) const;
     QString meshPeerToken();
@@ -225,15 +221,16 @@ private:
     ApplicationRuntime jam2_;
     GuiLoopbackRecorder loopbackRecorder_;
     SharedSessionController sessionController_;
-    SharedTrackController trackController_;
+    TrackWorkspaceController trackWorkspace_;
+    SharedTrackController& trackController_;
     MixerStatsViewModel mixerStatsViewModel_;
-    LooperProject looperProject_;
-    AssetTransferService assetTransfer_;
+    LooperProject& looperProject_;
+    AssetTransferService& assetTransfer_;
     MetronomeTransportController metronomeTransport_;
-    TrackRecordingWorkflow trackRecordingWorkflow_;
-    BeatGridModel chordModel_;
-    BeatGridModel beatModel_;
-    BeatGridModel lyricModel_;
+    TrackRecordingWorkflow& trackRecordingWorkflow_;
+    BeatGridModel& chordModel_;
+    BeatGridModel& beatModel_;
+    BeatGridModel& lyricModel_;
 
     QLineEdit* bindHostEdit_ = nullptr;
     QSpinBox* portSpin_ = nullptr;
@@ -289,6 +286,7 @@ private:
     QSpinBox* adaptiveReleaseSpin_ = nullptr;
     QPushButton* startButton_ = nullptr;
     QPushButton* joinButton_ = nullptr;
+    QPushButton* localEngineButton_ = nullptr;
     QPushButton* stopButton_ = nullptr;
     QPushButton* refreshControlButton_ = nullptr;
     QLabel* connectionLabel_ = nullptr;
@@ -409,62 +407,51 @@ private:
     std::uint64_t sessionId_ = 0;
     std::array<std::uint8_t, 16> sessionKey_{};
     int selectedLooperLane_ = -1;
-    ProjectPersistenceCoordinator projectPersistence_;
-    PreparedMixResult preparedMix_;
-    QThreadPool fileWorkerPool_;
-    bool preparedMixWorkerRunning_ = false;
-    bool preparedMixRerunPending_ = false;
-    bool playPreparedMixWhenReady_ = false;
-    int pendingPreparedTrackReadyRevision_ = 0;
-    quint64 pendingSharedTrackRevision_ = 0;
-    bool pendingSharedTrackHostReady_ = true;
-    QSet<QString> pendingSharedTrackReadyTokens_;
-    bool publishStoppedTrackStateWhenApplied_ = false;
-    std::uint64_t preparedMixRequests_ = 0;
-    std::uint64_t preparedMixCoalesced_ = 0;
-    std::uint64_t preparedMixFailures_ = 0;
-    int fileWorkerTasksActive_ = 0;
-    int fileWorkerTasksHighWater_ = 0;
-    std::uint64_t fileWorkerTasksCompleted_ = 0;
-    std::uint64_t fileWorkerTasksRejected_ = 0;
-    bool trackWaveformWorkerRunning_ = false;
-    std::uint64_t trackWaveformRevision_ = 0;
-    struct LooperWaveformPreview {
-        std::vector<float> peaks;
-        qint64 sourceFrames = 0;
-        bool valid = false;
-    };
-    QMap<QString, LooperWaveformPreview> looperWaveformCache_;
-    bool looperWaveformWorkerRunning_ = false;
-    bool wavCompatibilityAuditRunning_ = false;
-    int pendingWavCompatibilityAuditRate_ = 0;
-    QSet<QString> reportedIncompatibleWavs_;
-    struct PendingTrackContribution {
-        QString sourcePeerToken;
-        int bankIndex = 0;
-        QString targetLaneId;
-        QString assetHash;
-        QString name;
-        int sampleRate = 0;
-    };
-    QMap<QString, PendingTrackContribution> pendingTrackContributions_;
-    QSet<QString> appliedTrackContributionIds_;
-    QMap<QString, QJsonObject> localTrackOffers_;
-    QMap<QString, QString> trackOfferAssetPaths_;
-    QMap<QString, QString> pendingTrackAssetSources_;
-    QSet<QString> validatedTrackAssetHashes_;
-    QJsonObject pendingSongSet_;
-    QStringList pendingLooperAssetHashes_;
-    int pendingSongRevision_ = 0;
-    bool pendingSongTrackRestart_ = false;
-    QString pendingSongSourcePeerToken_;
-    bool pendingSongNeedsAuthoritativePublish_ = false;
-    std::uint64_t songAssetCheckRevision_ = 0;
-    QJsonObject deferredSongSetMessage_;
-    QString deferredSongSetSourcePeerToken_;
+    ProjectPersistenceCoordinator& projectPersistence_;
+    PreparedMixResult& preparedMix_;
+    QThreadPool& fileWorkerPool_;
+    bool& preparedMixWorkerRunning_;
+    bool& preparedMixRerunPending_;
+    bool& playPreparedMixWhenReady_;
+    int& pendingPreparedTrackReadyRevision_;
+    quint64& pendingSharedTrackRevision_;
+    bool& pendingSharedTrackHostReady_;
+    QSet<QString>& pendingSharedTrackReadyTokens_;
+    bool& publishStoppedTrackStateWhenApplied_;
+    std::uint64_t& preparedMixRequests_;
+    std::uint64_t& preparedMixCoalesced_;
+    std::uint64_t& preparedMixFailures_;
+    int& fileWorkerTasksActive_;
+    int& fileWorkerTasksHighWater_;
+    std::uint64_t& fileWorkerTasksCompleted_;
+    std::uint64_t& fileWorkerTasksRejected_;
+    bool& trackWaveformWorkerRunning_;
+    std::uint64_t& trackWaveformRevision_;
+    using LooperWaveformPreview = TrackWorkspaceController::LooperWaveformPreview;
+    QMap<QString, LooperWaveformPreview>& looperWaveformCache_;
+    bool& looperWaveformWorkerRunning_;
+    bool& wavCompatibilityAuditRunning_;
+    int& pendingWavCompatibilityAuditRate_;
+    QSet<QString>& reportedIncompatibleWavs_;
+    using PendingTrackContribution = TrackWorkspaceController::PendingTrackContribution;
+    QMap<QString, PendingTrackContribution>& pendingTrackContributions_;
+    QSet<QString>& appliedTrackContributionIds_;
+    QMap<QString, QJsonObject>& localTrackOffers_;
+    QMap<QString, QString>& trackOfferAssetPaths_;
+    QMap<QString, QString>& pendingTrackAssetSources_;
+    QSet<QString>& validatedTrackAssetHashes_;
+    QJsonObject& pendingSongSet_;
+    QStringList& pendingLooperAssetHashes_;
+    int& pendingSongRevision_;
+    bool& pendingSongTrackRestart_;
+    QString& pendingSongSourcePeerToken_;
+    bool& pendingSongNeedsAuthoritativePublish_;
+    std::uint64_t& songAssetCheckRevision_;
+    QJsonObject& deferredSongSetMessage_;
+    QString& deferredSongSetSourcePeerToken_;
     QTimer songAssetCheckRetryTimer_;
-    int looperArrangementRevision_ = 0;
-    int lastAppliedHostArrangementRevision_ = 0;
+    int& looperArrangementRevision_;
+    int& lastAppliedHostArrangementRevision_;
     QTimer trackTimelineTimer_;
     QTimer playbackGridTimer_;
     bool shuttingDown_ = false;
@@ -473,6 +460,8 @@ private:
     bool jamStartupCreating_ = false;
     QString pendingJamRuntimeError_;
     QString lastJamFailureDialog_;
+    QString queuedJamFailureDetail_;
+    bool jamFailureDialogQueued_ = false;
     QString activePublicEndpoint_;
     QString meshPeerToken_;
     QString lastLoggedSessionSummary_;

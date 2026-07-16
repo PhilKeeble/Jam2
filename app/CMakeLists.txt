@@ -40,6 +40,8 @@ add_executable(jam2 MACOSX_BUNDLE
     application/ApplicationEntrypoint.hpp
     application/ApplicationRuntime.cpp
     application/ApplicationRuntime.hpp
+    application/BoundaryValidation.cpp
+    application/BoundaryValidation.hpp
     application/AutomationChannel.cpp
     application/AutomationChannel.hpp
     application/AssetChunkProtocol.cpp
@@ -107,6 +109,10 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/TrackWidgets.hpp
     gui/TrackRecordingWorkflow.cpp
     gui/TrackRecordingWorkflow.hpp
+    gui/TrackWorkspaceController.cpp
+    gui/TrackWorkspaceController.hpp
+    gui/TrackWorkspaceSupport.cpp
+    gui/TrackWorkspaceSupport.hpp
     main.cpp
 )
 

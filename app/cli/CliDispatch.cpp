@@ -32,7 +32,7 @@ int run(int argc, char** argv)
         }
         const auto devices = jam2::audio::list_devices();
         if (devices.empty()) {
-            std::cout << "No audio devices found for this MVP backend.\n";
+            std::cout << "No audio devices found for this platform backend.\n";
             return 0;
         }
         for (const auto& device : devices) {

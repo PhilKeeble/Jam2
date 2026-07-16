@@ -21,6 +21,13 @@ They explain which mature behavior had to be preserved and are not the current
 public command set or implementation status. Status and phase order live only
 in [refactor-plan.md](refactor-plan.md).
 
+The final implementation reconciliation confirms one role-independent
+`NetworkSession` data plane keyed by stable peer IDs and pre-resolved numeric
+UDP endpoints. Creator/joiner remains bootstrap metadata; endpoint route
+failures are isolated to the affected edge and return it to bounded probing
+rather than terminating the whole runtime. A fatal socket-wide failure remains
+an explicit runtime error.
+
 ## Executive Assessment
 
 The proposed consolidation is a strong target and fits Jam2 better than the current four-mode history. It would simplify lifecycle, testing, state ownership, peer scaling, and the single-executable refactor.

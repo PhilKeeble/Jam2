@@ -74,6 +74,8 @@ public:
         Lifecycle lifecycle = Lifecycle::Inactive;
         QString localToken;
         QString coordinatorToken;
+        quint64 localPeerId = 0;
+        quint64 coordinatorPeerId = 0;
         QString gridAuthorityToken;
         QString arrangementAuthorityToken;
         quint64 membershipRevision = 0;
@@ -195,7 +197,6 @@ private:
         QMap<int, QJsonObject> pages;
     };
 
-    static quint64 peerIdForToken(const QString& token);
     void handleServerEvent(const jam2::control_protocol::TransportEvent& event);
     void handleClientEvent(const jam2::control_protocol::TransportEvent& event);
     void handleAuthenticatedPeer(const QString& token, const QJsonObject& message);

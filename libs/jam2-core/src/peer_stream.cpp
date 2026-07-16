@@ -1,4 +1,5 @@
 #include "peer_stream.hpp"
+#include "runtime_limits.hpp"
 
 #include <algorithm>
 #include <array>
@@ -136,7 +137,7 @@ struct PeerStream::Impl {
           start_time_us(start),
           adaptive_target_frames(requested.adaptive_playback_target_frames)
     {
-        if (config.sample_rate <= 0 || config.frames_per_packet <= 0 ||
+        if (!limits::valid_sample_rate(config.sample_rate) || config.frames_per_packet <= 0 ||
             config.frames_per_packet > static_cast<int>(protocol::kMaxAudioFramesPerPacket)) {
             throw std::runtime_error("invalid PeerStream sample rate or frames-per-packet contract");
         }
@@ -147,6 +148,10 @@ struct PeerStream::Impl {
             (config.adaptive_playback_min_frames > config.adaptive_playback_target_frames ||
              config.adaptive_playback_target_frames > config.adaptive_playback_max_frames)) {
             throw std::runtime_error("PeerStream adaptive playback bounds are inconsistent");
+        }
+        if (config.adaptive_playback_release_ppm < 0 ||
+            config.adaptive_playback_release_ppm > 1000000) {
+            throw std::runtime_error("PeerStream adaptive playback release is outside 0..1000000 ppm");
         }
 
         packet_interval_us = static_cast<std::uint64_t>(config.frames_per_packet) * 1000000ULL /
@@ -315,9 +320,7 @@ struct PeerStream::Impl {
                     const std::uint64_t elapsed_us = adaptive_last_update_us != 0 && packet.receive_time > adaptive_last_update_us
                         ? packet.receive_time - adaptive_last_update_us
                         : 0;
-                    const int effective_release_ppm = std::min(
-                        config.adaptive_playback_release_ppm,
-                        5000);
+                    const int effective_release_ppm = config.adaptive_playback_release_ppm;
                     adaptive_release_accumulator_frames +=
                         static_cast<double>(config.sample_rate) *
                         static_cast<double>(effective_release_ppm) *

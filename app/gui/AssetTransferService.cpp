@@ -3,7 +3,6 @@
 #include "AssetChunkProtocol.hpp"
 #include "ContentLimits.hpp"
 #include "ControlProtocol.hpp"
-#include "MainWindow.hpp"
 
 #include "pcm16_wav.hpp"
 
@@ -76,14 +75,14 @@ struct AssetTransferService::IncomingWorkerState {
     std::unique_ptr<QCryptographicHash> hasher;
 };
 
-AssetTransferService::AssetTransferService(MainWindow& window)
-    : window_(window)
+AssetTransferService::AssetTransferService(AssetTransferContext& context)
+    : context_(context)
 {
     outgoingLooperAssetTimer_.setInterval(5);
     QObject::connect(&outgoingLooperAssetTimer_, &QTimer::timeout, [&] { continueSend(); });
     incomingLooperAssetTimer_.setSingleShot(true);
     QObject::connect(&incomingLooperAssetTimer_, &QTimer::timeout, [&] {
-        window_.appendLog(QStringLiteral("looper asset receive progress timeout"));
+        context_.appendAssetLog(QStringLiteral("looper asset receive progress timeout"));
         resetIncoming();
     });
 }
@@ -92,18 +91,18 @@ AssetTransferService::~AssetTransferService() = default;
 
 void AssetTransferService::handleRequest(const QJsonObject& message, const QString& sourcePeerToken)
 {
-    if (!window_.looperProject_.trackSyncEnabled()) {
+    if (!context_.trackSyncEnabled()) {
         return;
     }
     const QJsonArray hashes = message.value(QStringLiteral("hashes")).toArray();
     if (hashes.isEmpty() || hashes.size() > kMaxLooperAssetRequests) {
-        window_.appendLog(QStringLiteral("rejected looper asset request with invalid hash count"));
+        context_.appendAssetLog(QStringLiteral("rejected looper asset request with invalid hash count"));
         return;
     }
     for (const QJsonValue& value : hashes) {
         const QString hash = value.toString().toLower();
         if (!isSha256Hex(hash)) {
-            window_.appendLog(QStringLiteral("rejected looper asset request with invalid hash"));
+            context_.appendAssetLog(QStringLiteral("rejected looper asset request with invalid hash"));
             return;
         }
         queueSend(hash, sourcePeerToken);
@@ -112,7 +111,7 @@ void AssetTransferService::handleRequest(const QJsonObject& message, const QStri
 
 void AssetTransferService::queueSend(const QString& hash, const QString& targetPeerToken)
 {
-    if (!window_.looperProject_.trackSyncEnabled()) {
+    if (!context_.trackSyncEnabled()) {
         return;
     }
     const QPair<QString, QString> request{hash, targetPeerToken};
@@ -122,7 +121,7 @@ void AssetTransferService::queueSend(const QString& hash, const QString& targetP
         return;
     }
     if (outgoingLooperAssetQueue_.size() >= kMaxLooperAssetRequests) {
-        window_.appendLog(QStringLiteral("looper asset send queue is full"));
+        context_.appendAssetLog(QStringLiteral("looper asset send queue is full"));
         return;
     }
     outgoingLooperAssetQueue_.append(request);
@@ -134,7 +133,7 @@ void AssetTransferService::queueSend(const QString& hash, const QString& targetP
 
 void AssetTransferService::continueSend()
 {
-    if (!window_.looperProject_.trackSyncEnabled()) {
+    if (!context_.trackSyncEnabled()) {
         cancel();
         return;
     }
@@ -153,32 +152,18 @@ void AssetTransferService::continueSend()
             return;
         }
 
-        QString path = window_.trackOfferAssetPaths_.value(hash);
-        for (const LooperBank& bank : window_.looperProject_.banks()) {
-            if (!path.isEmpty()) {
-                break;
-            }
-            for (const LooperLane& lane : bank.lanes) {
-                if (lane.assetHash == hash) {
-                    path = window_.looperAssetAbsolutePath(lane);
-                    break;
-                }
-            }
-            if (!path.isEmpty()) {
-                break;
-            }
-        }
+        const QString path = context_.assetPathForSend(hash);
         struct ValidationResult {
             qint64 bytes = 0;
             QString error;
         };
         auto validation = std::make_shared<ValidationResult>();
-        const int expectedSampleRate = window_.sessionController_.snapshot().contract.sampleRate;
+        const int expectedSampleRate = context_.sessionSampleRate();
         outgoingLooperAssetValidationPending_ = true;
         outgoingLooperAssetPendingHash_ = hash;
         outgoingLooperAssetPendingTargetToken_ = targetPeerToken;
         const quint64 generation = outgoingLooperAssetGeneration_;
-        const bool started = window_.startFileWorkerTask(
+        const bool started = context_.startAssetFileTask(
             [path, hash, expectedSampleRate, validation] {
                 const QFileInfo workerInfo(path);
                 if (path.isEmpty() || !workerInfo.isFile() || workerInfo.size() <= 0 ||
@@ -208,7 +193,7 @@ void AssetTransferService::continueSend()
                 outgoingLooperAssetPendingHash_.clear();
                 outgoingLooperAssetPendingTargetToken_.clear();
                 if (!validation->error.isEmpty()) {
-                    window_.appendLog(QStringLiteral("looper asset validation failed hash=%1: %2")
+                    context_.appendAssetLog(QStringLiteral("looper asset validation failed hash=%1: %2")
                         .arg(hash, validation->error));
                     continueSend();
                     return;
@@ -240,16 +225,16 @@ void AssetTransferService::continueSend()
         return;
     }
 
-    if (!window_.canQueueControlTo(outgoingLooperAssetTargetToken_, kLooperAssetFrameQueueEstimate)) {
+    if (!context_.canQueueAssetControl(outgoingLooperAssetTargetToken_, kLooperAssetFrameQueueEstimate)) {
         if (outgoingLooperAssetProgress_.isValid() &&
             outgoingLooperAssetProgress_.elapsed() > kLooperAssetProgressDeadlineMs) {
-            window_.appendLog(QStringLiteral("looper asset send progress timeout: ") + outgoingLooperAssetHash_);
+            context_.appendAssetLog(QStringLiteral("looper asset send progress timeout: ") + outgoingLooperAssetHash_);
             resetOutgoing();
         }
         return;
     }
     if (outgoingLooperAssetNextChunk_ < 0) {
-        if (!window_.sendControlTo(outgoingLooperAssetTargetToken_, QJsonObject{
+        if (!context_.sendAssetControl(outgoingLooperAssetTargetToken_, QJsonObject{
                 {QStringLiteral("type"), QStringLiteral("looper.asset.start")},
                 {QStringLiteral("sha256"), outgoingLooperAssetHash_},
                 {QStringLiteral("file_bytes"), static_cast<double>(outgoingLooperAssetBytes_)},
@@ -272,7 +257,7 @@ void AssetTransferService::continueSend()
             outgoingLooperAssetPreparedChunk_,
         });
         if (chunk.isEmpty() ||
-            !window_.sendBinaryControlTo(outgoingLooperAssetTargetToken_, chunk)) {
+            !context_.sendAssetBinary(outgoingLooperAssetTargetToken_, chunk)) {
             resetOutgoing();
             return;
         }
@@ -293,7 +278,7 @@ void AssetTransferService::continueSend()
         auto error = std::make_shared<QString>();
         outgoingLooperAssetReadPending_ = true;
         const quint64 generation = outgoingLooperAssetGeneration_;
-        const bool started = window_.startFileWorkerTask(
+        const bool started = context_.startAssetFileTask(
             [path, offset, bytes, error] {
                 QFile file(path);
                 if (!file.open(QIODevice::ReadOnly) || !file.seek(offset)) {
@@ -311,7 +296,7 @@ void AssetTransferService::continueSend()
                 }
                 outgoingLooperAssetReadPending_ = false;
                 if (!error->isEmpty()) {
-                    window_.appendLog(QStringLiteral("failed while reading looper asset for sync: ") +
+                    context_.appendAssetLog(QStringLiteral("failed while reading looper asset for sync: ") +
                         *error);
                     resetOutgoing();
                     return;
@@ -324,7 +309,7 @@ void AssetTransferService::continueSend()
                     return;
                 }
                 outgoingLooperAssetReadPending_ = false;
-                window_.appendLog(QStringLiteral("asset read worker failed: ") + error);
+                context_.appendAssetLog(QStringLiteral("asset read worker failed: ") + error);
                 resetOutgoing();
             });
         if (!started) {
@@ -333,7 +318,7 @@ void AssetTransferService::continueSend()
         return;
     }
 
-    if (!window_.sendControlTo(outgoingLooperAssetTargetToken_, QJsonObject{
+    if (!context_.sendAssetControl(outgoingLooperAssetTargetToken_, QJsonObject{
             {QStringLiteral("type"), QStringLiteral("looper.asset.done")},
             {QStringLiteral("sha256"), outgoingLooperAssetHash_},
             {QStringLiteral("chunks"), outgoingLooperAssetNextChunk_},
@@ -352,7 +337,7 @@ void AssetTransferService::continueSend()
     const qint64 authenticatedWireBytes = binaryBodyBytes +
         static_cast<qint64>(outgoingLooperAssetNextChunk_) *
             (jam2::control_protocol::kAuthenticatedHeaderBytes + 4);
-    window_.appendLog(QStringLiteral(
+    context_.appendAssetLog(QStringLiteral(
         "sent looper asset: raw_bytes=%1 chunks=%2 binary_body_bytes=%3 "
         "authenticated_chunk_wire_bytes=%4 replaced_text_data_characters=%5 hash=%6")
         .arg(outgoingLooperAssetBytes_)
@@ -436,30 +421,28 @@ void AssetTransferService::resetIncoming()
     incomingLooperAssetDonePending_ = false;
     incomingLooperAssetDoneChunks_ = 0;
     if (interruptedState && !workerPending && !interruptedState->temporaryPath.isEmpty()) {
-        (void)window_.startFileWorkerTask(
+        (void)context_.startAssetFileTask(
             [interruptedState] { QFile::remove(interruptedState->temporaryPath); },
             [] {},
             [](const QString&) {});
     }
-    if (!interruptedHash.isEmpty() &&
-        window_.pendingTrackAssetSources_.remove(interruptedHash) > 0) {
-        window_.pendingLooperAssetHashes_.removeAll(interruptedHash);
+    if (!interruptedHash.isEmpty()) {
+        context_.abandonIncomingAsset(interruptedHash);
     }
 }
 
 void AssetTransferService::receiveStart(const QJsonObject& message, const QString& sourcePeerToken)
 {
     const QString hash = message.value(QStringLiteral("sha256")).toString().toLower();
-    const QString expectedSource = window_.pendingTrackAssetSources_.value(hash);
     const double declaredBytes = message.value(QStringLiteral("file_bytes")).toDouble(-1.0);
     const int chunkSize = message.value(QStringLiteral("chunk_size")).toInt(-1);
     QString sequenceError;
-    if (incomingWorkerState_ || !isSha256Hex(hash) || !window_.pendingLooperAssetHashes_.contains(hash) ||
-        (!expectedSource.isEmpty() && expectedSource != sourcePeerToken) ||
+    if (incomingWorkerState_ || !isSha256Hex(hash) ||
+        !context_.incomingAssetExpected(hash, sourcePeerToken) ||
         !std::isfinite(declaredBytes) || std::floor(declaredBytes) != declaredBytes ||
         declaredBytes < 44.0 || declaredBytes > static_cast<double>(kMaxLooperAssetBytes) ||
         chunkSize <= 0 || chunkSize > kLooperAssetChunkBytes) {
-        window_.appendLog(QStringLiteral("rejected unsolicited or invalid looper asset start"));
+        context_.appendAssetLog(QStringLiteral("rejected unsolicited or invalid looper asset start"));
         return;
     }
     if (!incomingSequence_.begin(
@@ -468,11 +451,11 @@ void AssetTransferService::receiveStart(const QJsonObject& message, const QStrin
             static_cast<qint64>(declaredBytes),
             chunkSize,
             sequenceError)) {
-        window_.appendLog(QStringLiteral("rejected looper asset start: ") + sequenceError);
+        context_.appendAssetLog(QStringLiteral("rejected looper asset start: ") + sequenceError);
         return;
     }
 
-    const QString output = window_.looperAssetPathForHash(hash);
+    const QString output = context_.incomingAssetPath(hash);
     auto state = std::make_shared<IncomingWorkerState>();
     state->temporaryPath = output + QStringLiteral(".partial.") +
         QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -480,12 +463,12 @@ void AssetTransferService::receiveStart(const QJsonObject& message, const QStrin
     state->expectedHash = hash;
     state->expectedBytes = static_cast<qint64>(declaredBytes);
     state->chunkSize = chunkSize;
-    state->expectedSampleRate = window_.sessionController_.snapshot().contract.sampleRate;
+    state->expectedSampleRate = context_.sessionSampleRate();
     incomingWorkerState_ = std::move(state);
     incomingLooperAssetHash_ = hash;
     incomingLooperAssetBytesExpected_ = static_cast<qint64>(declaredBytes);
     incomingLooperAssetTimer_.start(kLooperAssetProgressDeadlineMs);
-    window_.appendLog(QStringLiteral("receiving looper asset: %1 bytes hash=%2")
+    context_.appendAssetLog(QStringLiteral("receiving looper asset: %1 bytes hash=%2")
         .arg(incomingLooperAssetBytesExpected_)
         .arg(incomingLooperAssetHash_));
 }
@@ -495,13 +478,13 @@ void AssetTransferService::receiveChunk(const QByteArray& payload, const QString
     jam2::application::asset_chunk::Chunk chunk;
     QString error;
     if (!jam2::application::asset_chunk::decode(payload, chunk, error)) {
-        window_.appendLog(QStringLiteral("looper asset chunk rejected: ") + error);
+        context_.appendAssetLog(QStringLiteral("looper asset chunk rejected: ") + error);
         resetIncoming();
         return;
     }
     if (!incomingWorkerState_ || incomingLooperAssetQueue_.size() >= kMaxIncomingAssetQueuedChunks ||
         !incomingSequence_.accept(chunk, sourcePeerToken, error)) {
-        window_.appendLog(QStringLiteral("looper asset chunk rejected: ") + error);
+        context_.appendAssetLog(QStringLiteral("looper asset chunk rejected: ") + error);
         resetIncoming();
         return;
     }
@@ -517,7 +500,7 @@ void AssetTransferService::receiveDone(const QJsonObject& message, const QString
     QString error;
     if (!incomingWorkerState_ ||
         !incomingSequence_.finish(expectedHash, sourcePeerToken, chunks, error)) {
-        window_.appendLog(QStringLiteral("received looper asset failed sequence verification: ") + error);
+        context_.appendAssetLog(QStringLiteral("received looper asset failed sequence verification: ") + error);
         resetIncoming();
         return;
     }
@@ -539,7 +522,7 @@ void AssetTransferService::scheduleIncomingWrite()
     const quint64 generation = incomingLooperAssetGeneration_;
     auto error = std::make_shared<QString>();
     incomingLooperAssetWritePending_ = true;
-    const bool started = window_.startFileWorkerTask(
+    const bool started = context_.startAssetFileTask(
         [state, chunk, error] {
             const QByteArray& decoded = chunk.second;
             if (decoded.isEmpty() || decoded.size() > state->chunkSize ||
@@ -568,13 +551,13 @@ void AssetTransferService::scheduleIncomingWrite()
         [this, state, generation, error] {
             if (generation != incomingLooperAssetGeneration_ ||
                 state != incomingWorkerState_) {
-                (void)window_.startFileWorkerTask(
+                (void)context_.startAssetFileTask(
                     [state] { QFile::remove(state->temporaryPath); }, [] {}, [](const QString&) {});
                 return;
             }
             incomingLooperAssetWritePending_ = false;
             if (!error->isEmpty()) {
-                window_.appendLog(QStringLiteral("looper asset worker rejected chunk: ") + *error);
+                context_.appendAssetLog(QStringLiteral("looper asset worker rejected chunk: ") + *error);
                 resetIncoming();
                 return;
             }
@@ -591,13 +574,13 @@ void AssetTransferService::scheduleIncomingWrite()
                 return;
             }
             incomingLooperAssetWritePending_ = false;
-            window_.appendLog(QStringLiteral("looper asset write worker failed: ") + errorText);
+            context_.appendAssetLog(QStringLiteral("looper asset write worker failed: ") + errorText);
             resetIncoming();
         });
     if (!started) {
         incomingLooperAssetWritePending_ = false;
         incomingLooperAssetQueue_.prepend(chunk);
-        QTimer::singleShot(100, &window_, [this] { scheduleIncomingWrite(); });
+        QTimer::singleShot(100, context_.dispatchContext(), [this] { scheduleIncomingWrite(); });
     }
 }
 
@@ -613,7 +596,7 @@ void AssetTransferService::finalizeIncoming()
     auto error = std::make_shared<QString>();
     incomingLooperAssetWritePending_ = true;
     incomingLooperAssetTimer_.stop();
-    const bool started = window_.startFileWorkerTask(
+    const bool started = context_.startAssetFileTask(
         [state, doneChunks, error] {
             if (doneChunks < 1 || state->receivedBytes != state->expectedBytes || !state->hasher ||
                 QString::fromLatin1(state->hasher->result().toHex()) != state->expectedHash) {
@@ -661,24 +644,15 @@ void AssetTransferService::finalizeIncoming()
             }
             incomingLooperAssetWritePending_ = false;
             if (!error->isEmpty()) {
-                window_.appendLog(QStringLiteral("received looper asset validation failed: ") + *error);
+                context_.appendAssetLog(QStringLiteral("received looper asset validation failed: ") + *error);
                 resetIncoming();
                 return;
             }
             const QString output = state->outputPath;
             const QString expectedHash = state->expectedHash;
             state->temporaryPath.clear();
-            window_.registerTransientTrackWav(output);
-            window_.looperWaveformCache_.remove(output);
-            window_.appendLog(QStringLiteral("received looper asset: ") + output);
-            window_.pendingLooperAssetHashes_.removeAll(expectedHash);
-            if (window_.pendingTrackAssetSources_.remove(expectedHash) > 0) {
-                window_.validatedTrackAssetHashes_.insert(expectedHash);
-            }
             resetIncoming();
-            window_.applyPendingTrackContributions();
-            window_.requestNextPendingTrackAsset();
-            window_.applyPendingSongIfAssetsReady();
+            context_.acceptIncomingAsset(expectedHash, output);
         },
         [this, state, generation](const QString& errorText) {
             if (generation != incomingLooperAssetGeneration_ ||
@@ -686,12 +660,12 @@ void AssetTransferService::finalizeIncoming()
                 return;
             }
             incomingLooperAssetWritePending_ = false;
-            window_.appendLog(QStringLiteral("looper asset finalize worker failed: ") + errorText);
+            context_.appendAssetLog(QStringLiteral("looper asset finalize worker failed: ") + errorText);
             resetIncoming();
         });
     if (!started) {
         incomingLooperAssetWritePending_ = false;
         incomingLooperAssetTimer_.start(kLooperAssetProgressDeadlineMs);
-        QTimer::singleShot(100, &window_, [this] { finalizeIncoming(); });
+        QTimer::singleShot(100, context_.dispatchContext(), [this] { finalizeIncoming(); });
     }
 }

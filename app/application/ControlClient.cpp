@@ -93,10 +93,10 @@ void ControlClient::connectToHost(
     failureReportedForAttempt_ = false;
     sessionHex_ = sessionHex.toLower();
     masterKey_ = decodeHex(keyHex, 16);
-    meshPeerToken_ = meshPeerToken.isEmpty() ? encodeHex(randomNonce()) : meshPeerToken.toLower();
+    meshPeerToken_ = meshPeerToken.isEmpty() ? randomPeerToken() : meshPeerToken.toLower();
     meshUdpEndpoint_ = meshUdpEndpoint;
     if (decodeHex(sessionHex_, 8).size() != 8 || masterKey_.size() != 16 ||
-        decodeHex(meshPeerToken_, 16).size() != 16 || meshUdpEndpoint_.size() > 255) {
+        !peerIdFromToken(meshPeerToken_).has_value() || meshUdpEndpoint_.size() > 255) {
         reject(
             QStringLiteral("TCP control session, key, token, or endpoint is invalid"),
             TransportFailure::InvalidConfiguration,

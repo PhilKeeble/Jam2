@@ -513,7 +513,6 @@ std::uint64_t read_u64_le(std::span<const std::uint8_t> payload, std::size_t off
 }
 
 enum class GridMessageKind : std::uint8_t {
-    LegacyState = 0,
     Proposal = 1,
     Assignment = 2,
     AuthorityState = 3,
@@ -558,15 +557,14 @@ struct MetronomePayload {
     std::uint64_t revision_or_request = 0;
     std::uint64_t epoch_sample_time = 0;
     jam2::metronome::PatternSnapshot pattern;
-    bool has_pattern = false;
-    GridMessageKind kind = GridMessageKind::LegacyState;
+    GridMessageKind kind = GridMessageKind::Proposal;
     std::uint8_t mode = 0;
     jam2::GridRunState run_state = jam2::GridRunState::Stopped;
 };
 
 MetronomePayload decode_metronome_payload(std::span<const std::uint8_t> payload)
 {
-    if (payload.size() != 12 && payload.size() != 20 && payload.size() != 56) {
+    if (payload.size() != 56) {
         throw std::runtime_error("metronome payload size mismatch");
     }
     const int bpm = static_cast<int>(payload[0]) |
@@ -574,43 +572,34 @@ MetronomePayload decode_metronome_payload(std::span<const std::uint8_t> payload)
         (static_cast<int>(payload[2]) << 16) |
         (static_cast<int>(payload[3]) << 24);
     const std::uint64_t revision_or_request = read_u64_le(payload, 4);
-    std::uint64_t epoch = 0;
-    if (payload.size() == 20) {
-        epoch = read_u64_le(payload, 12);
-    }
     MetronomePayload decoded;
     decoded.bpm = bpm;
     decoded.revision_or_request = revision_or_request;
-    decoded.epoch_sample_time = epoch;
-    if (payload.size() == 56) {
-        decoded.epoch_sample_time = read_u64_le(payload, 12);
-        decoded.pattern = jam2::metronome::sanitize({
-            std::abs(bpm),
-            static_cast<int>(payload[21]),
-            static_cast<int>(payload[22]),
-            static_cast<int>(payload[23]),
-            read_u64_le(payload, 24),
-            read_u64_le(payload, 32),
-            read_u64_le(payload, 40),
-            read_u64_le(payload, 48),
-        });
-        const std::uint8_t control = payload[20];
-        decoded.has_pattern = control == 1 || (control & kGridMessageMarker) != 0;
-        if ((control & kGridMessageMarker) != 0) {
-            decoded.kind = static_cast<GridMessageKind>(control & 0x03U);
-            decoded.mode = static_cast<std::uint8_t>((control >> 2U) & 0x03U);
-            decoded.run_state = static_cast<jam2::GridRunState>((control >> 4U) & 0x03U);
-            if (decoded.kind == GridMessageKind::LegacyState || decoded.mode > 2 ||
-                static_cast<std::uint8_t>(decoded.run_state) >
-                    static_cast<std::uint8_t>(jam2::GridRunState::AuthorityMissing)) {
-                throw std::runtime_error("invalid grid authority message");
-            }
-        } else {
-            decoded.run_state = bpm > 0
-
-                ? jam2::GridRunState::Running
-                : jam2::GridRunState::Stopped;
-        }
+    decoded.epoch_sample_time = read_u64_le(payload, 12);
+    decoded.pattern = jam2::metronome::sanitize({
+        std::abs(bpm),
+        static_cast<int>(payload[21]),
+        static_cast<int>(payload[22]),
+        static_cast<int>(payload[23]),
+        read_u64_le(payload, 24),
+        read_u64_le(payload, 32),
+        read_u64_le(payload, 40),
+        read_u64_le(payload, 48),
+    });
+    const std::uint8_t control = payload[20];
+    if ((control & kGridMessageMarker) == 0) {
+        throw std::runtime_error("grid authority message marker is missing");
+    }
+    decoded.kind = static_cast<GridMessageKind>(control & 0x03U);
+    decoded.mode = static_cast<std::uint8_t>((control >> 2U) & 0x03U);
+    decoded.run_state = static_cast<jam2::GridRunState>((control >> 4U) & 0x03U);
+    const auto kind = static_cast<std::uint8_t>(decoded.kind);
+    if (kind < static_cast<std::uint8_t>(GridMessageKind::Proposal) ||
+        kind > static_cast<std::uint8_t>(GridMessageKind::AuthorityState) ||
+        decoded.mode > 2 ||
+        static_cast<std::uint8_t>(decoded.run_state) >
+            static_cast<std::uint8_t>(jam2::GridRunState::AuthorityMissing)) {
+        throw std::runtime_error("invalid grid authority message");
     }
     return decoded;
 }
@@ -1012,22 +1001,6 @@ jam2::NetworkSessionContract make_network_session_contract(const Options& option
     };
 }
 
-jam2::PeerId compatibility_peer_id(const jam2::Endpoint& endpoint) noexcept
-{
-    constexpr std::uint64_t offset_basis = 14695981039346656037ULL;
-    constexpr std::uint64_t prime = 1099511628211ULL;
-    std::uint64_t value = offset_basis;
-    for (const unsigned char byte : endpoint.host) {
-        value = (value ^ static_cast<std::uint64_t>(byte)) * prime;
-    }
-    value = (value ^ 0xffULL) * prime;
-    value = (value ^ static_cast<std::uint64_t>(endpoint.port & 0xffU)) * prime;
-    value = (value ^ static_cast<std::uint64_t>((endpoint.port >> 8U) & 0xffU)) * prime;
-    return jam2::PeerId{value == 0 ? 1ULL : value};
-}
-
-
-
 template <typename T>
 struct EngineObserver {
     T* value = nullptr;
@@ -1171,8 +1144,9 @@ void detach_network_capture(OptionalAudioStream& audio) noexcept
 int drain_pending_udp(jam2::UdpSocket& socket)
 {
     int drained = 0;
+    std::array<std::uint8_t, jam2::protocol::kMaxDatagramSize> buffer{};
     for (;;) {
-        const auto received = socket.recv_from(0);
+        const auto received = socket.recv_from(buffer, 0);
         if (!received) {
             break;
         }
@@ -1578,8 +1552,22 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     if (!options.mesh_peers_configured) {
         throw std::runtime_error("network session requires typed coordinator membership state");
     }
-    for (auto& peer : options.mesh_peers) {
-        peer = jam2::resolve_udp_endpoint(peer);
+    if (!options.local_peer_id || *options.local_peer_id == 0) {
+        throw std::runtime_error("network session requires a nonzero typed local peer ID");
+    }
+    if (!options.bootstrap_coordinator_peer_id || *options.bootstrap_coordinator_peer_id == 0) {
+        throw std::runtime_error("network session requires a nonzero typed bootstrap coordinator peer ID");
+    }
+    if (options.mesh_peer_ids.size() != options.mesh_peers.size() ||
+        std::any_of(options.mesh_peer_ids.begin(), options.mesh_peer_ids.end(), [](std::uint64_t id) {
+            return id == 0;
+        })) {
+        throw std::runtime_error("every mesh endpoint requires a nonzero typed peer ID");
+    }
+    std::vector<jam2::ResolvedUdpEndpoint> resolved_mesh_peers;
+    resolved_mesh_peers.reserve(options.mesh_peers.size());
+    for (const auto& peer : options.mesh_peers) {
+        resolved_mesh_peers.push_back(jam2::resolve_udp_endpoint(peer));
     }
 
     jam2::NetworkRuntime network;
@@ -1751,14 +1739,6 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     std::cout << "Embedded network controls ready\n";
     commands.recording.start(audio.engine.get(), options.record_jam_folder);
 
-    enum class EndpointProofState {
-        Candidate,
-        Probing,
-        Active,
-        Failed,
-    };
-
-
     struct ProbeChallenge {
         std::uint32_t sequence = 0;
         std::uint64_t send_time_us = 0;
@@ -1766,9 +1746,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     };
 
     struct MeshPeerState {
-        jam2::Endpoint endpoint;
         jam2::PeerId peer_id;
-        EndpointProofState endpoint_proof = EndpointProofState::Candidate;
         std::array<ProbeChallenge, 8> probe_challenges{};
         std::uint32_t proof_attempts = 0;
         std::uint64_t proof_deadline_us = 0;
@@ -1790,58 +1768,50 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         std::uint64_t last_transport_revision = 0;
     };
 
-    auto endpoint_key = [](const jam2::Endpoint& endpoint) {
-        return endpoint.host + ":" + std::to_string(endpoint.port);
-    };
-
-    auto endpoint_proof_name = [](EndpointProofState state) -> const char* {
+    auto endpoint_proof_name = [](jam2::PeerEndpointState state) -> const char* {
         switch (state) {
-        case EndpointProofState::Candidate:
+        case jam2::PeerEndpointState::Candidate:
             return "candidate";
-        case EndpointProofState::Probing:
+        case jam2::PeerEndpointState::Probing:
             return "probing";
-        case EndpointProofState::Active:
+        case jam2::PeerEndpointState::Active:
             return "active";
-        case EndpointProofState::Failed:
+        case jam2::PeerEndpointState::Failed:
             return "failed";
         }
         return "unknown";
     };
 
-    std::map<std::string, MeshPeerState> peers;
+    std::map<std::uint64_t, MeshPeerState> peers;
     for (std::size_t peer_index = 0; peer_index < options.mesh_peers.size(); ++peer_index) {
-        const auto& peer = options.mesh_peers[peer_index];
-        const std::uint64_t configured_id = peer_index < options.mesh_peer_ids.size()
-            ? options.mesh_peer_ids[peer_index]
-            : 0ULL;
+        const std::uint64_t configured_id = options.mesh_peer_ids[peer_index];
         const auto inserted = peers.emplace(
-            endpoint_key(peer),
-            MeshPeerState{peer, configured_id != 0 ? jam2::PeerId{configured_id} : compatibility_peer_id(peer)});
+            configured_id,
+            MeshPeerState{jam2::PeerId{configured_id}});
         if (!inserted.second) {
-            throw std::runtime_error("mesh peer list contains a duplicate endpoint");
+            throw std::runtime_error("mesh peer list contains a duplicate peer ID");
         }
     }
 
-    const jam2::PeerId local_peer_id = options.local_peer_id
-        ? jam2::PeerId{*options.local_peer_id}
-        : compatibility_peer_id(local);
+    const jam2::PeerId local_peer_id{*options.local_peer_id};
     std::vector<jam2::NetworkPeerDescriptor> peer_descriptors;
     peer_descriptors.reserve(peers.size());
-    for (const auto& entry : peers) {
-        const auto& peer = entry.second;
-        if (peer.peer_id == local_peer_id) {
+    for (std::size_t peer_index = 0; peer_index < resolved_mesh_peers.size(); ++peer_index) {
+        const auto peer_id = jam2::PeerId{options.mesh_peer_ids[peer_index]};
+        const auto endpoint = resolved_mesh_peers[peer_index];
+        if (peer_id == local_peer_id) {
             throw std::runtime_error("mesh peer identity collides with the local endpoint");
         }
         const bool duplicate_id = std::any_of(
             peer_descriptors.begin(),
             peer_descriptors.end(),
-            [&](const auto& descriptor) { return descriptor.peer_id == peer.peer_id; });
+            [&](const auto& descriptor) { return descriptor.peer_id == peer_id; });
         if (duplicate_id) {
-            throw std::runtime_error("mesh endpoint hash collision; use a different local port");
+            throw std::runtime_error("mesh peer list contains a duplicate peer ID");
         }
         peer_descriptors.push_back({
-            peer.peer_id,
-            peer.endpoint,
+            peer_id,
+            endpoint,
             jam2::PeerEndpointState::Candidate,
         });
     }
@@ -1864,15 +1834,14 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         audio.engine ? &mesh_playback : nullptr,
         options.headless_clock_drift_ppm);
     auto& packet_schedule = network_session.schedule();
-    std::uint64_t bootstrap_coordinator_peer_id = options.bootstrap_coordinator_peer_id.value_or(0);
-    if (bootstrap_coordinator_peer_id == 0) {
-        bootstrap_coordinator_peer_id = local_peer_id.value;
-        for (const auto& descriptor : peer_descriptors) {
-            bootstrap_coordinator_peer_id = std::min(
-                bootstrap_coordinator_peer_id,
-                descriptor.peer_id.value);
-        }
-    } else if (bootstrap_coordinator_peer_id != local_peer_id.value &&
+    auto peer_endpoint_state = [&](jam2::PeerId peer_id) {
+        const auto* descriptor = network_session.peer(peer_id);
+        return descriptor != nullptr
+            ? descriptor->endpoint_state
+            : jam2::PeerEndpointState::Failed;
+    };
+    const std::uint64_t bootstrap_coordinator_peer_id = *options.bootstrap_coordinator_peer_id;
+    if (bootstrap_coordinator_peer_id != local_peer_id.value &&
                std::none_of(peer_descriptors.begin(), peer_descriptors.end(), [&](const auto& descriptor) {
                    return descriptor.peer_id.value == bootstrap_coordinator_peer_id;
                })) {
@@ -2195,6 +2164,17 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             stats.sent_pings += peer.sent_pings;
             stats.sent_pongs += peer.sent_pongs;
             stats.recv_pongs += peer.recv_pongs;
+            if (const auto* send = network_session.peerSendStats(peer.peer_id)) {
+                stats.udp_send_would_block_drops += send->would_block_drops;
+                stats.udp_send_no_buffer_drops += send->no_buffer_drops;
+                stats.udp_send_unreachable_errors += send->unreachable_errors;
+                stats.udp_send_refused_errors += send->refused_errors;
+                stats.udp_send_fatal_errors += send->fatal_errors;
+                stats.udp_send_path_reprobe_transitions += send->path_reprobe_transitions;
+                stats.udp_send_consecutive_path_errors_max = std::max<std::uint64_t>(
+                    stats.udp_send_consecutive_path_errors_max,
+                    send->consecutive_path_errors);
+            }
             add_peer_stream_stats(stats, network_session.peerStream(peer.peer_id).stats());
         }
         const auto pattern = metronome_pattern_from_runtime(commands.state);
@@ -2287,15 +2267,26 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 const auto& peer = entry.second;
                 const auto& peer_stats = network_session.peerStream(peer.peer_id).stats();
                 const auto* mix_stats = network_session.peerMixStats(peer.peer_id);
-                std::cout << "mesh_peer endpoint=" << jam2::endpoint_to_string(peer.endpoint)
+                const auto* descriptor = network_session.peer(peer.peer_id);
+                const auto* send_stats = network_session.peerSendStats(peer.peer_id);
+                std::cout << "mesh_peer endpoint="
+                          << (descriptor != nullptr
+                                  ? jam2::endpoint_to_string(jam2::format_udp_endpoint(descriptor->endpoint))
+                                  : std::string("removed"))
                           << " peer_id=" << peer.peer_id.value
-                          << " endpoint_proof_state=" << endpoint_proof_name(peer.endpoint_proof)
+                          << " endpoint_proof_state=" << endpoint_proof_name(peer_endpoint_state(peer.peer_id))
                           << " endpoint_proof_attempts=" << peer.proof_attempts
                           << " endpoint_proof_successes=" << peer.proof_successes
                           << " endpoint_proof_failures=" << peer.proof_failures
                           << " endpoint_unverified_drops=" << peer.proof_unverified_drops
                           << " endpoint_unmatched_pongs=" << peer.proof_unmatched_pongs
                           << " endpoint_challenge_overwrites=" << peer.proof_challenge_overwrites
+                          << " udp_send_would_block=" << (send_stats != nullptr ? send_stats->would_block_drops : 0ULL)
+                          << " udp_send_no_buffer=" << (send_stats != nullptr ? send_stats->no_buffer_drops : 0ULL)
+                          << " udp_send_unreachable=" << (send_stats != nullptr ? send_stats->unreachable_errors : 0ULL)
+                          << " udp_send_refused=" << (send_stats != nullptr ? send_stats->refused_errors : 0ULL)
+                          << " udp_send_reprobes=" << (send_stats != nullptr ? send_stats->path_reprobe_transitions : 0ULL)
+                          << " udp_send_last_error=" << (send_stats != nullptr ? send_stats->last_error_code : 0)
                           << " sent_packets=" << peer.sent_packets
                           << " recv_packets=" << peer.recv_packets
                           << " ignored_packets=" << peer.ignored_packets
@@ -2322,9 +2313,9 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             return;
         }
         try {
-        std::map<std::uint64_t, jam2::Endpoint> desired;
+        std::map<std::uint64_t, jam2::ResolvedUdpEndpoint> desired;
         for (const Jam2RuntimePeer& peer : *update) {
-            const jam2::Endpoint endpoint = jam2::resolve_udp_endpoint(peer.endpoint);
+            const jam2::ResolvedUdpEndpoint endpoint = jam2::resolve_udp_endpoint(peer.endpoint);
             const std::uint64_t peer_id = peer.peer_id;
             if (peer_id == local_peer_id.value || !desired.emplace(peer_id, endpoint).second) {
                 throw std::runtime_error("embedded peer update contains a duplicate/local peer identity");
@@ -2334,7 +2325,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         std::size_t removed = 0;
         std::size_t endpoint_updates = 0;
         for (auto it = peers.begin(); it != peers.end();) {
-            const std::uint64_t peer_id = it->second.peer_id.value;
+            const std::uint64_t peer_id = it->first;
             const auto wanted = desired.find(peer_id);
             if (wanted == desired.end()) {
                 const auto& retired = it->second;
@@ -2348,6 +2339,17 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 retired_peer_stats.sent_pings += retired.sent_pings;
                 retired_peer_stats.sent_pongs += retired.sent_pongs;
                 retired_peer_stats.recv_pongs += retired.recv_pongs;
+                if (const auto* send = network_session.peerSendStats(retired.peer_id)) {
+                    retired_peer_stats.udp_send_would_block_drops += send->would_block_drops;
+                    retired_peer_stats.udp_send_no_buffer_drops += send->no_buffer_drops;
+                    retired_peer_stats.udp_send_unreachable_errors += send->unreachable_errors;
+                    retired_peer_stats.udp_send_refused_errors += send->refused_errors;
+                    retired_peer_stats.udp_send_fatal_errors += send->fatal_errors;
+                    retired_peer_stats.udp_send_path_reprobe_transitions += send->path_reprobe_transitions;
+                    retired_peer_stats.udp_send_consecutive_path_errors_max = std::max<std::uint64_t>(
+                        retired_peer_stats.udp_send_consecutive_path_errors_max,
+                        send->consecutive_path_errors);
+                }
                 add_peer_stream_stats(
 
                     retired_peer_stats,
@@ -2367,28 +2369,22 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 ++removed;
                 continue;
             }
-            if (it->second.endpoint.host != wanted->second.host ||
-                it->second.endpoint.port != wanted->second.port) {
+            const auto* descriptor = network_session.peer(it->second.peer_id);
+            if (descriptor == nullptr) {
+                throw std::runtime_error("embedded peer registry lost its NetworkSession owner");
+            }
+            if (descriptor->endpoint != wanted->second) {
                 if (!network_session.updatePeerEndpoint(
                         it->second.peer_id,
                         wanted->second,
                         jam2::PeerEndpointState::Candidate)) {
                     throw std::runtime_error("embedded peer endpoint update was rejected");
                 }
-                auto node = peers.extract(it++);
-                node.key() = endpoint_key(wanted->second);
-                node.mapped().endpoint = wanted->second;
-                node.mapped().endpoint_proof = EndpointProofState::Candidate;
-                node.mapped().probe_challenges = {};
-                node.mapped().proof_attempts = 0;
-                node.mapped().proof_deadline_us = 0;
-                node.mapped().next_probe_us = 0;
-                if (!peers.insert(std::move(node)).inserted) {
-                    throw std::runtime_error("embedded peer endpoint update collided with another endpoint");
-
-                }
+                it->second.probe_challenges = {};
+                it->second.proof_attempts = 0;
+                it->second.proof_deadline_us = 0;
+                it->second.next_probe_us = 0;
                 ++endpoint_updates;
-                continue;
             }
             ++it;
         }
@@ -2404,10 +2400,10 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 throw std::runtime_error("embedded peer add was rejected");
             }
             if (!peers.emplace(
-                    endpoint_key(endpoint),
-                    MeshPeerState{endpoint, jam2::PeerId{peer_id}}).second) {
+                    peer_id,
+                    MeshPeerState{jam2::PeerId{peer_id}}).second) {
                 (void)network_session.removePeer(jam2::PeerId{peer_id});
-                throw std::runtime_error("embedded peer add collided with another endpoint");
+                throw std::runtime_error("embedded peer add collided with another peer ID");
             }
             ++added;
         }
@@ -2621,11 +2617,14 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 payload);
             for (auto& entry : peers) {
                 auto& peer = entry.second;
-                if (peer.endpoint_proof != EndpointProofState::Active) {
+                if (peer_endpoint_state(peer.peer_id) != jam2::PeerEndpointState::Active) {
                     continue;
                 }
-                ++peer.sent_packets;
-                peer.sent_bytes += send_result.packet_size;
+                const auto* send_stats = network_session.peerSendStats(peer.peer_id);
+                if (send_stats != nullptr && send_stats->last_outcome == jam2::UdpSendOutcome::Sent) {
+                    ++peer.sent_packets;
+                    peer.sent_bytes += send_result.packet_size;
+                }
             }
             packet_schedule.commitAudioPacket();
             ++sends_this_loop;
@@ -2634,33 +2633,34 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         if (now >= packet_schedule.nextPingUs() && now < send_deadline) {
             for (auto& entry : peers) {
                 auto& peer = entry.second;
-                if (peer.endpoint_proof == EndpointProofState::Probing &&
+                auto endpoint_state = peer_endpoint_state(peer.peer_id);
+                if (endpoint_state == jam2::PeerEndpointState::Probing &&
                     peer.proof_attempts >= 8 &&
                     now >= peer.proof_deadline_us) {
-                    peer.endpoint_proof = EndpointProofState::Failed;
                     network_session.setPeerEndpointState(peer.peer_id, jam2::PeerEndpointState::Failed);
+                    endpoint_state = jam2::PeerEndpointState::Failed;
                     ++peer.proof_failures;
                     peer.next_probe_us = now + 5000000ULL;
                 }
-                if (peer.endpoint_proof == EndpointProofState::Failed) {
+                if (endpoint_state == jam2::PeerEndpointState::Failed) {
                     if (now < peer.next_probe_us) {
                         continue;
                     }
-                    peer.endpoint_proof = EndpointProofState::Candidate;
                     network_session.setPeerEndpointState(peer.peer_id, jam2::PeerEndpointState::Candidate);
+                    endpoint_state = jam2::PeerEndpointState::Candidate;
                     peer.proof_attempts = 0;
                     peer.proof_deadline_us = 0;
                     for (ProbeChallenge& challenge : peer.probe_challenges) {
                         challenge.used = false;
                     }
                 }
-                if (peer.endpoint_proof != EndpointProofState::Active) {
+                if (endpoint_state != jam2::PeerEndpointState::Active) {
                     if (peer.proof_attempts >= 8 || now < peer.next_probe_us) {
                         continue;
 
                     }
-                    peer.endpoint_proof = EndpointProofState::Probing;
                     network_session.setPeerEndpointState(peer.peer_id, jam2::PeerEndpointState::Probing);
+                    endpoint_state = jam2::PeerEndpointState::Probing;
 
                     peer.next_probe_us = now + 250000ULL;
                 }
@@ -2671,21 +2671,22 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     ++peer.proof_challenge_overwrites;
                 }
                 challenge = ProbeChallenge{ping_sequence, now, true};
-                if (peer.endpoint_proof == EndpointProofState::Probing) {
+                if (endpoint_state == jam2::PeerEndpointState::Probing) {
                     ++peer.proof_attempts;
                     if (peer.proof_attempts == 8) {
 
                         peer.proof_deadline_us = now + 1000000ULL;
                     }
                 }
-                network_session.sendToPeer(
+                if (network_session.sendToPeer(
                     peer.peer_id,
                     jam2::protocol::PacketType::Ping,
                     ping_sequence,
                     now,
                     {},
-                    true);
-                ++peer.sent_pings;
+                    true) != 0) {
+                    ++peer.sent_pings;
+                }
             }
             packet_schedule.commitPing();
         }
@@ -2840,7 +2841,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             received_any = true;
             const auto& from = received->endpoint;
             const std::span<const std::uint8_t> bytes = received->bytes;
-            auto peer_it = peers.find(endpoint_key(from));
+            const jam2::PeerId source_peer_id = network_session.peerIdForEndpoint(from);
+            auto peer_it = peers.find(source_peer_id.value);
             if (peer_it == peers.end()) {
                 continue;
             }
@@ -2855,7 +2857,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 const auto& header = parsed.header;
                 if (header.type != jam2::protocol::PacketType::Ping &&
                     header.type != jam2::protocol::PacketType::Pong &&
-                    (peer.endpoint_proof != EndpointProofState::Active ||
+                    (peer_endpoint_state(peer.peer_id) != jam2::PeerEndpointState::Active ||
                      !network_session.acceptsEndpoint(from))) {
                     ++peer.proof_unverified_drops;
                     ++peer.ignored_packets;
@@ -2886,14 +2888,15 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         ++peer.ignored_packets;
                         continue;
                     }
-                    network_session.sendToPeer(
+                    if (network_session.sendToPeer(
                         peer.peer_id,
                         jam2::protocol::PacketType::Pong,
                         header.sequence,
                         header.timing_value,
                         {},
-                        true);
-                    ++peer.sent_pongs;
+                        true) != 0) {
+                        ++peer.sent_pongs;
+                    }
                 } else if (header.type == jam2::protocol::PacketType::Pong) {
                     ProbeChallenge& challenge =
                         peer.probe_challenges[header.sequence % peer.probe_challenges.size()];
@@ -2910,11 +2913,16 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         network_session.peerStream(peer.peer_id).observeRtt(
                             receive_time - challenge.send_time_us);
                     }
-                    if (peer.endpoint_proof != EndpointProofState::Active) {
-                        peer.endpoint_proof = EndpointProofState::Active;
+                    if (peer_endpoint_state(peer.peer_id) != jam2::PeerEndpointState::Active) {
                         network_session.setPeerEndpointState(
                             peer.peer_id,
                             jam2::PeerEndpointState::Active);
+                        peer.proof_attempts = 0;
+                        peer.proof_deadline_us = 0;
+                        peer.next_probe_us = 0;
+                        for (ProbeChallenge& pending : peer.probe_challenges) {
+                            pending.used = false;
+                        }
                         ++peer.proof_successes;
                     }
                     ++peer.recv_pongs;
@@ -2931,8 +2939,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         header.payload_length);
                     const MetronomePayload metronome = decode_metronome_payload(payload);
                     const int remote_abs_bpm = std::abs(metronome.bpm);
-                    if (remote_abs_bpm <= 0 || remote_abs_bpm > 400 ||
-                        metronome.kind == GridMessageKind::LegacyState) {
+                    if (remote_abs_bpm <= 0 || remote_abs_bpm > 400) {
                         ++peer.ignored_packets;
                         continue;
                     }
@@ -2941,9 +2948,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                             last_local_grid_request_sequence) {
                             return;
                         }
-                        if (metronome.has_pattern) {
-                            store_metronome_pattern(commands.state, metronome.pattern);
-                        }
+                        store_metronome_pattern(commands.state, metronome.pattern);
                         commands.state.bpm.store(remote_abs_bpm, std::memory_order_relaxed);
                         commands.state.metronome.store(
                             metronome.run_state == jam2::GridRunState::Running,

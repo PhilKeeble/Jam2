@@ -2,10 +2,12 @@
 
 #include <QtGlobal>
 
+#include "runtime_limits.hpp"
+
 namespace jam2::application::limits {
 
-inline constexpr int kMinimumSampleRate = 8000;
-inline constexpr int kMaximumSampleRate = 384000;
+inline constexpr int kMinimumSampleRate = jam2::limits::kMinimumSampleRate;
+inline constexpr int kMaximumSampleRate = jam2::limits::kMaximumSampleRate;
 
 inline constexpr int kMaximumSongSections = 64;
 inline constexpr int kMinimumBeatsPerSection = 4;

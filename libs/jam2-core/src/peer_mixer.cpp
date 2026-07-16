@@ -1,4 +1,5 @@
 #include "peer_mixer.hpp"
+#include "runtime_limits.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -215,7 +216,7 @@ struct PeerMixer::Impl {
                   static_cast<std::size_t>(requested.frames_per_block))),
           adaptive_target_frames(requested.adaptive_target_frames)
     {
-        if (config.sample_rate <= 0 || config.frames_per_block <= 0 ||
+        if (!limits::valid_sample_rate(config.sample_rate) || config.frames_per_block <= 0 ||
             config.max_blocks_per_advance == 0) {
             throw std::runtime_error("invalid PeerMixer configuration");
         }
@@ -223,6 +224,9 @@ struct PeerMixer::Impl {
             (config.adaptive_min_frames > config.adaptive_target_frames ||
              config.adaptive_target_frames > config.adaptive_max_frames)) {
             throw std::runtime_error("PeerMixer adaptive playback bounds are inconsistent");
+        }
+        if (config.adaptive_release_ppm < 0 || config.adaptive_release_ppm > 1000000) {
+            throw std::runtime_error("PeerMixer adaptive playback release is outside 0..1000000 ppm");
         }
         const std::uint64_t numerator =
             static_cast<std::uint64_t>(config.frames_per_block) * 1000000ULL;
@@ -372,7 +376,7 @@ struct PeerMixer::Impl {
             // Release ppm describes a temporary playback-rate offset. Accumulate
             // fractions across the frequent network-thread updates instead of
             // truncating every sub-frame update to zero.
-            const int effective_release_ppm = std::min(config.adaptive_release_ppm, 5000);
+            const int effective_release_ppm = config.adaptive_release_ppm;
             adaptive_release_accumulator_frames +=
                 static_cast<double>(config.sample_rate) *
                 static_cast<double>(effective_release_ppm) *
@@ -390,7 +394,7 @@ struct PeerMixer::Impl {
             }
         }
         if (output != nullptr) {
-            const int effective_release_ppm = std::min(config.adaptive_release_ppm, 5000);
+            const int effective_release_ppm = config.adaptive_release_ppm;
             const std::uint64_t actual_depth = output->depthFrames();
             const std::uint64_t release_tolerance =
                 static_cast<std::uint64_t>(config.frames_per_block) * 4ULL;

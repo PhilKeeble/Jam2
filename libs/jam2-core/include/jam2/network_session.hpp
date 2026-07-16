@@ -48,14 +48,30 @@ enum class PeerEndpointState : std::uint8_t {
 
 struct NetworkPeerDescriptor {
     PeerId peer_id;
-    Endpoint endpoint;
+    ResolvedUdpEndpoint endpoint;
     PeerEndpointState endpoint_state = PeerEndpointState::Active;
+};
+
+struct NetworkPeerSendStats {
+    std::uint64_t attempts = 0;
+    std::uint64_t sent_packets = 0;
+    std::uint64_t sent_bytes = 0;
+    std::uint64_t would_block_drops = 0;
+    std::uint64_t no_buffer_drops = 0;
+    std::uint64_t unreachable_errors = 0;
+    std::uint64_t refused_errors = 0;
+    std::uint64_t fatal_errors = 0;
+    std::uint64_t path_reprobe_transitions = 0;
+    std::uint32_t consecutive_path_errors = 0;
+    int last_error_code = 0;
+    UdpSendOutcome last_outcome = UdpSendOutcome::Sent;
 };
 
 struct NetworkPeerSnapshot {
     NetworkPeerDescriptor descriptor;
     PeerStreamStats stream;
     PeerMixerPeerStats mix;
+    NetworkPeerSendStats send;
     bool has_mix_stats = false;
 };
 
@@ -104,14 +120,17 @@ private:
 };
 
 struct NetworkDatagram {
-    Endpoint endpoint;
+    ResolvedUdpEndpoint endpoint;
     std::span<const std::uint8_t> bytes;
 };
 
 struct NetworkSendResult {
     std::size_t packet_size = 0;
+    std::size_t attempted_peer_count = 0;
     std::size_t peer_count = 0;
     std::size_t total_bytes = 0;
+    std::size_t transient_drops = 0;
+    std::size_t path_errors = 0;
 };
 
 // Owns one UDP session, one packet schedule, and one mature PeerStream per
@@ -158,15 +177,15 @@ public:
     NetworkSessionSnapshot snapshot() const;
     const NetworkPeerDescriptor& remotePeer() const;
     const NetworkPeerDescriptor* peer(PeerId peer_id) const noexcept;
-    PeerId peerIdForEndpoint(const Endpoint& endpoint) const noexcept;
-    bool recognizesEndpoint(const Endpoint& endpoint) const noexcept;
-    bool acceptsEndpoint(const Endpoint& endpoint) const noexcept;
+    PeerId peerIdForEndpoint(const ResolvedUdpEndpoint& endpoint) const noexcept;
+    bool recognizesEndpoint(const ResolvedUdpEndpoint& endpoint) const noexcept;
+    bool acceptsEndpoint(const ResolvedUdpEndpoint& endpoint) const noexcept;
 
     bool addPeer(const NetworkPeerDescriptor& peer, const PeerStreamConfig& config);
     bool removePeer(PeerId peer_id) noexcept;
     bool updatePeerEndpoint(
         PeerId peer_id,
-        const Endpoint& endpoint,
+        const ResolvedUdpEndpoint& endpoint,
         PeerEndpointState state = PeerEndpointState::Candidate);
     bool setPeerEndpointState(PeerId peer_id, PeerEndpointState state) noexcept;
     bool setPeerGain(PeerId peer_id, int gain_ppm) noexcept;
@@ -180,6 +199,7 @@ public:
     const PeerStream& peerStream(PeerId peer_id) const;
     const PeerMixerStats& mixStats() const noexcept;
     const PeerMixerPeerStats* peerMixStats(PeerId peer_id) const noexcept;
+    const NetworkPeerSendStats* peerSendStats(PeerId peer_id) const noexcept;
 
     void advance(std::uint64_t now_us) noexcept;
     void finish(std::uint64_t now_us) noexcept;

@@ -4,6 +4,8 @@
 #include <QJsonObject>
 #include <QString>
 
+#include <optional>
+
 namespace jam2::control_protocol {
 
 constexpr qsizetype kMaxJsonBytes = 64 * 1024;
@@ -84,8 +86,10 @@ struct TransportEvent {
 };
 
 QByteArray randomNonce();
+QString randomPeerToken();
 QByteArray decodeHex(const QString& value, qsizetype expectedBytes);
 QString encodeHex(const QByteArray& value);
+std::optional<quint64> peerIdFromToken(const QString& token);
 QByteArray makeTranscript(
     const QString& sessionHex,
     const QByteArray& serverNonce,
