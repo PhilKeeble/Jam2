@@ -48,18 +48,20 @@ void applyDarkTheme(QApplication& app)
         QGroupBox::title {
             subcontrol-origin: margin; left: 8px; padding: 0 4px; color: #9fb1c1;
         }
-        QLineEdit, QSpinBox, QComboBox, QTextEdit, QPlainTextEdit, QTableWidget {
+        QLineEdit, QAbstractSpinBox, QComboBox, QTextEdit, QPlainTextEdit, QTableWidget {
             background: #0c1116; border: 1px solid #344250; border-radius: 4px;
             color: #e5edf5; selection-background-color: #2563eb; padding: 4px;
         }
         QComboBox::drop-down { border: 0; width: 22px; }
-        QPushButton {
+        QPushButton, QToolButton {
             background: #22303c; border: 1px solid #3b4b5b; border-radius: 5px;
             padding: 6px 10px; color: #edf2f7;
         }
-        QPushButton:hover { background: #2c3c49; }
-        QPushButton:pressed { background: #1d4ed8; }
-        QPushButton:disabled, QSlider:disabled, QLineEdit:disabled {
+        QPushButton:hover, QToolButton:hover { background: #2c3c49; }
+        QPushButton:pressed, QToolButton:pressed { background: #1d4ed8; }
+        QToolButton#SettingsButton { padding: 0; }
+        QPushButton:disabled, QToolButton:disabled, QSlider:disabled,
+        QLineEdit:disabled, QAbstractSpinBox:disabled, QComboBox:disabled {
             color: #6b7785; background: #151a20; border-color: #27313a;
         }
         QTabWidget::pane {

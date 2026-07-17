@@ -49,6 +49,12 @@ public:
         int sampleRate = 0;
     };
 
+    enum class IncomingAssetWorkflow {
+        None,
+        TrackContribution,
+        Arrangement,
+    };
+
     explicit TrackWorkspaceController(ApplicationRuntime& runtime, QObject* parent = nullptr);
     ~TrackWorkspaceController() override;
 
@@ -118,6 +124,9 @@ public:
     QMap<QString, QString> trackOfferAssetPaths;
     QMap<QString, QString> pendingTrackAssetSources;
     QSet<QString> validatedTrackAssetHashes;
+    IncomingAssetWorkflow incomingAssetWorkflow = IncomingAssetWorkflow::None;
+    QString incomingAssetHash;
+    QString incomingAssetSourcePeerToken;
     QJsonObject pendingSongSet;
     QStringList pendingLooperAssetHashes;
     int pendingSongRevision = 0;

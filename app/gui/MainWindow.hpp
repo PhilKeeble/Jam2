@@ -136,7 +136,7 @@ private:
     void refreshLooperLanes();
     void addLooperWavs();
     void loadWavIntoLooperLane();
-    void shareLocalTracks();
+    void shareLocalTracks(bool includeLocalOnly = false);
     void addEmptyLooperLane();
     void removeSelectedLooperLane();
     void renameSelectedLooperLane();
@@ -190,7 +190,7 @@ private:
     void updateMetronomeCompensationVisibility();
     void publishLocalTrackOffer(int bankIndex, const QString& targetLaneId, const LooperLane& lane);
     void handleTrackOffer(const QJsonObject& message, const QString& sourcePeerToken);
-    void requestNextPendingTrackAsset();
+    void requestNextPendingAsset();
     void applyPendingTrackContributions();
     bool sendControlTo(const QString& targetPeerToken, const QJsonObject& message);
     bool sendBinaryControlTo(const QString& targetPeerToken, const QByteArray& payload);
@@ -473,6 +473,10 @@ private:
     QMap<QString, QString>& trackOfferAssetPaths_;
     QMap<QString, QString>& pendingTrackAssetSources_;
     QSet<QString>& validatedTrackAssetHashes_;
+    using IncomingAssetWorkflow = TrackWorkspaceController::IncomingAssetWorkflow;
+    IncomingAssetWorkflow& incomingAssetWorkflow_;
+    QString& incomingAssetHash_;
+    QString& incomingAssetSourcePeerToken_;
     QJsonObject& pendingSongSet_;
     QStringList& pendingLooperAssetHashes_;
     int& pendingSongRevision_;

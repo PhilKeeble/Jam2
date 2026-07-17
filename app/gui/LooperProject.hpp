@@ -23,6 +23,7 @@ struct LooperLane {
     QString referenceSourceSignature;
     double referenceBpm = 0.0;
     bool referenceStale = false;
+    bool localOnly = false;
 };
 
 struct LooperBank {

@@ -22,6 +22,8 @@ consider preferences for number of beats in default views, track view controls e
 
 tap tempo
 
+count in metronome needs to be different sound than normal so they know its counting in
+
 ## Bugs
 
 recording tracks might be going to 48k even though i chose 44.1k, look into it and test 
@@ -41,3 +43,20 @@ starting internal loopback recording: C:/Users/Phil/Documents/GitHub/Jam2/releas
 recorded lane WAV not importable: Sample-rate mismatch: this jam uses 44100 Hz but the WAV is 48000 Hz. The WAV was not loaded; convert it or use a 44100 Hz source.
 ```
 
+mac compilation warning 
+```
+[40/42] Building CXX object app/CMakeFiles/jam2.dir/gui/MainWindow.cpp.o
+/Users/philkeeble/Documents/Jam2/app/gui/MainWindow.cpp:2208:21: warning: implicit capture of 'this' with a capture default of '=' is deprecated [-Wdeprecated-this-capture]
+ 2208 |                     preferences_.networkAudio, networkAudio);
+      |                     ^
+/Users/philkeeble/Documents/Jam2/app/gui/MainWindow.cpp:2205:10: note: add an explicit capture of 'this' to capture '*this' by reference
+ 2205 |         [=, splitInitialized = preferences_.splitNetworkAudioByRole](bool checked) mutable {
+      |          ^
+      |           , this
+1 warning generated.
+```
+
+mac settings icon is like a white square
+
+mac settings drift smoothin box has a weid outline on create and join, the log folder is very squished so you cant see the path
+mac settgins recording one is squished on path, all settings are center lined and not taking up full width, trigger thresholds have that weird outline

@@ -32,12 +32,14 @@
 #include "tuning_profile.hpp"
 
 #include <QByteArray>
+#include <QCryptographicHash>
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QObject>
 #include <QTemporaryFile>
 #include <QThreadPool>
 #include <QUuid>
@@ -48,9 +50,100 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <limits>
+#include <utility>
 
 namespace {
+
+class AssetTransferValidationContext final : public QObject, public AssetTransferContext {
+public:
+    explicit AssetTransferValidationContext(QString folder)
+        : folder_(std::move(folder))
+    {
+    }
+
+    QObject* dispatchContext() noexcept override { return this; }
+    bool trackSyncEnabled() const noexcept override { return true; }
+    int sessionSampleRate() const noexcept override { return 48000; }
+    QString assetPathForSend(const QString&) const override { return {}; }
+    QString incomingAssetPath(const QString& hash) const override
+    {
+        return QDir(folder_).absoluteFilePath(hash + QStringLiteral(".wav"));
+    }
+    bool incomingAssetExpected(
+        const QString& hash,
+        const QString& sourcePeerToken) const override
+    {
+        return active && hash == expectedHash && sourcePeerToken == expectedSource;
+    }
+    void abandonIncomingAsset(const QString&) override
+    {
+        ++abandoned;
+        active = false;
+    }
+    void acceptIncomingAsset(const QString& hash, const QString& path) override
+    {
+        ++accepted;
+        acceptedHash = hash;
+        acceptedPath = path;
+        active = false;
+    }
+    void appendAssetLog(const QString&) override {}
+    bool startAssetFileTask(
+        std::function<void()> work,
+        std::function<void()> complete,
+        std::function<void(const QString&)>) override
+    {
+        work();
+        complete();
+        return true;
+    }
+    bool canQueueAssetControl(const QString&, qint64) const override { return true; }
+    bool sendAssetControl(const QString&, const QJsonObject&) override { return true; }
+    bool sendAssetBinary(const QString&, const QByteArray&) override { return true; }
+
+    bool active = true;
+    QString expectedHash;
+    QString expectedSource = QStringLiteral("peer-a");
+    int abandoned = 0;
+    int accepted = 0;
+    QString acceptedHash;
+    QString acceptedPath;
+
+private:
+    QString folder_;
+};
+
+template <typename T>
+void appendLittleEndian(QByteArray& bytes, T value)
+{
+    const T encoded = qToLittleEndian(value);
+    bytes.append(
+        reinterpret_cast<const char*>(&encoded),
+        static_cast<qsizetype>(sizeof(encoded)));
+}
+
+QByteArray minimalPcm16Wav()
+{
+    constexpr quint32 dataBytes = 4;
+    QByteArray bytes;
+    bytes.append("RIFF", 4);
+    appendLittleEndian<quint32>(bytes, 36 + dataBytes);
+    bytes.append("WAVEfmt ", 8);
+    appendLittleEndian<quint32>(bytes, 16);
+    appendLittleEndian<quint16>(bytes, 1);
+    appendLittleEndian<quint16>(bytes, 1);
+    appendLittleEndian<quint32>(bytes, 48000);
+    appendLittleEndian<quint32>(bytes, 96000);
+    appendLittleEndian<quint16>(bytes, 2);
+    appendLittleEndian<quint16>(bytes, 16);
+    bytes.append("data", 4);
+    appendLittleEndian<quint32>(bytes, dataBytes);
+    appendLittleEndian<qint16>(bytes, 0);
+    appendLittleEndian<qint16>(bytes, 1);
+    return bytes;
+}
 
 std::filesystem::path nativeFilePath(const QString& path)
 {
@@ -179,6 +272,43 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         cases.append(result);
         allOk = allOk && ok;
     };
+    {
+        const QString folder = QDir(QDir::tempPath()).absoluteFilePath(
+            QStringLiteral("jam2-asset-validation-") +
+            QUuid::createUuid().toString(QUuid::WithoutBraces));
+        const bool folderReady = QDir().mkpath(folder);
+        AssetTransferValidationContext context(folder);
+        const QByteArray wav = minimalPcm16Wav();
+        context.expectedHash = QString::fromLatin1(
+            QCryptographicHash::hash(wav, QCryptographicHash::Sha256).toHex());
+        {
+            AssetTransferService transfer(context);
+            transfer.receiveStart(QJsonObject{
+                {QStringLiteral("sha256"), context.expectedHash},
+                {QStringLiteral("file_bytes"), wav.size()},
+                {QStringLiteral("chunk_size"),
+                    jam2::application::limits::kMaximumAssetChunkBytes},
+            }, context.expectedSource);
+            transfer.receiveChunk(jam2::application::asset_chunk::encode({
+                context.expectedHash, 0, 0, wav,
+            }), context.expectedSource);
+            transfer.receiveDone(QJsonObject{
+                {QStringLiteral("sha256"), context.expectedHash},
+                {QStringLiteral("chunks"), 1},
+            }, context.expectedSource);
+            transfer.resetIncoming();
+        }
+        QFile acceptedFile(context.acceptedPath);
+        const bool acceptedFileReady =
+            acceptedFile.open(QIODevice::ReadOnly) &&
+            QCryptographicHash::hash(
+                acceptedFile.readAll(), QCryptographicHash::Sha256).toHex() ==
+                context.expectedHash.toLatin1();
+        record(QStringLiteral("asset-transfer.success-clears-without-abandon"),
+            folderReady && context.accepted == 1 && context.abandoned == 0 &&
+            context.acceptedHash == context.expectedHash && acceptedFileReady);
+        (void)QDir(folder).removeRecursively();
+    }
 
     using namespace jam2::control_protocol;
     const QByteArray directionKey(32, 'k');
@@ -851,6 +981,40 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             merged.banks().at(0).lanes.size() == 1 &&
             merged.banks().at(0).lanes.at(0).sampleRate == 44100 &&
             syncBanks.at(0).toObject().value(QStringLiteral("lanes")).toArray().isEmpty());
+    }
+    {
+        LooperProject project;
+        LooperLane reference;
+        reference.id = QStringLiteral("local-reference");
+        reference.assetPath = QStringLiteral("C:/fixtures/practice-chords.wav");
+        reference.assetHash = QString(64, QLatin1Char('d'));
+        reference.name = QStringLiteral("Practice Chords");
+        reference.sampleRate = 48000;
+        reference.referenceKind = QStringLiteral("chords");
+        reference.localOnly = true;
+        const bool appended = project.appendLane(0, std::move(reference));
+        const QJsonObject saved = project.toJson();
+        const QJsonObject synced = project.toJson(true);
+        LooperProject loaded;
+        const bool roundTripped = loaded.loadJson(saved);
+        QJsonObject incoming = BeatGridModel{}.toJson();
+        incoming.insert(QStringLiteral("looper"), LooperProject{}.toJson());
+        const int preserved = mergeQuarantinedLocalLanes(incoming, project, 48000);
+        LooperProject merged;
+        const bool mergedLoaded =
+            merged.loadJson(incoming.value(QStringLiteral("looper")).toObject());
+        const QJsonArray savedLanes = saved.value(QStringLiteral("banks")).toArray()
+            .at(0).toObject().value(QStringLiteral("lanes")).toArray();
+        const QJsonArray syncedLanes = synced.value(QStringLiteral("banks")).toArray()
+            .at(0).toObject().value(QStringLiteral("lanes")).toArray();
+        record(QStringLiteral("practice-reference.local-only-roundtrip-and-sync-exclusion"),
+            appended && roundTripped && savedLanes.size() == 1 &&
+            savedLanes.at(0).toObject().value(QStringLiteral("local_only")).toBool() &&
+            loaded.banks().at(0).lanes.size() == 1 &&
+            loaded.banks().at(0).lanes.at(0).localOnly &&
+            syncedLanes.isEmpty() && preserved == 1 && mergedLoaded &&
+            merged.banks().at(0).lanes.size() == 1 &&
+            merged.banks().at(0).lanes.at(0).localOnly);
     }
     QJsonObject invalidNestedSong = collaborativeSong;
     QJsonObject invalidNestedModel = collaborativeSongModel;

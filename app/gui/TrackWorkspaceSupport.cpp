@@ -121,16 +121,20 @@ int mergeQuarantinedLocalLanes(
     const LooperProject& localProject,
     int expectedSampleRate)
 {
-    if (expectedSampleRate <= 0) return 0;
     LooperProject received;
     const QJsonObject receivedLooper = song.value(QStringLiteral("looper")).toObject();
     if (receivedLooper.isEmpty() || !received.loadJson(receivedLooper)) return 0;
     int preserved = 0;
     for (int bankIndex = 0;
          bankIndex < localProject.banks().size() && bankIndex < received.banks().size();
-         ++bankIndex) {
+        ++bankIndex) {
         for (const LooperLane& local : localProject.banks().at(bankIndex).lanes) {
-            if (local.assetPath.trimmed().isEmpty() || local.sampleRate == expectedSampleRate) continue;
+            const bool incompatible =
+                expectedSampleRate > 0 && local.sampleRate != expectedSampleRate;
+            if (local.assetPath.trimmed().isEmpty() ||
+                (!local.localOnly && !incompatible)) {
+                continue;
+            }
             const bool alreadyPresent = std::any_of(
                 received.banks().at(bankIndex).lanes.cbegin(),
                 received.banks().at(bankIndex).lanes.cend(),
@@ -146,7 +150,7 @@ int mergeQuarantinedLocalLanes(
                     return !quarantined.id.isEmpty() && candidate.id == quarantined.id;
                 });
             if (idCollision) quarantined.id.clear();
-            quarantined.sampleRateCompatible = false;
+            if (incompatible) quarantined.sampleRateCompatible = false;
             if (received.appendLane(bankIndex, std::move(quarantined))) ++preserved;
         }
     }

@@ -64,6 +64,7 @@ void upsert(
     lane.referenceSourceSignature = signature;
     lane.referenceBpm = settings.bpm;
     lane.referenceStale = false;
+    lane.localOnly = true;
     if (index >= 0) lanes[index] = std::move(lane);
     else lanes.push_back(std::move(lane));
 }

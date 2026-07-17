@@ -57,6 +57,7 @@ private:
     struct IncomingWorkerState;
     void scheduleIncomingWrite();
     void finalizeIncoming();
+    void clearIncoming(bool abandonExpected);
     void resetOutgoing();
 
     AssetTransferContext& context_;

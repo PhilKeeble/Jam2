@@ -155,17 +155,24 @@ bool TrackWorkspaceController::incomingAssetExpected(
     const QString& hash,
     const QString& sourcePeerToken) const
 {
-    if (!pendingLooperAssetHashes.contains(hash)) {
-        return false;
-    }
-    const QString expectedSource = pendingTrackAssetSources.value(hash);
-    return expectedSource.isEmpty() || expectedSource == sourcePeerToken;
+    return incomingAssetWorkflow != IncomingAssetWorkflow::None &&
+        incomingAssetHash == hash &&
+        incomingAssetSourcePeerToken == sourcePeerToken;
 }
 
 void TrackWorkspaceController::abandonIncomingAsset(const QString& hash)
 {
-    if (pendingTrackAssetSources.remove(hash) > 0) {
-        pendingLooperAssetHashes.removeAll(hash);
+    pendingTrackAssetSources.remove(hash);
+    if (incomingAssetHash == hash) {
+        appendAssetLog(QStringLiteral("cancelled incoming looper asset: workflow=%1 hash=%2 source=%3")
+            .arg(incomingAssetWorkflow == IncomingAssetWorkflow::TrackContribution
+                    ? QStringLiteral("track-share")
+                    : QStringLiteral("arrangement"),
+                hash,
+                incomingAssetSourcePeerToken));
+        incomingAssetWorkflow = IncomingAssetWorkflow::None;
+        incomingAssetHash.clear();
+        incomingAssetSourcePeerToken.clear();
     }
 }
 
@@ -174,10 +181,17 @@ void TrackWorkspaceController::acceptIncomingAsset(const QString& hash, const QS
     persistence.registerTransientWav(path);
     looperWaveformCache.remove(path);
     pendingLooperAssetHashes.removeAll(hash);
-    if (pendingTrackAssetSources.remove(hash) > 0) {
-        validatedTrackAssetHashes.insert(hash);
-    }
-    appendAssetLog(QStringLiteral("received looper asset: ") + path);
+    pendingTrackAssetSources.remove(hash);
+    validatedTrackAssetHashes.insert(hash);
+    const QString workflow = incomingAssetWorkflow == IncomingAssetWorkflow::TrackContribution
+        ? QStringLiteral("track-share")
+        : QStringLiteral("arrangement");
+    const QString source = incomingAssetSourcePeerToken;
+    incomingAssetWorkflow = IncomingAssetWorkflow::None;
+    incomingAssetHash.clear();
+    incomingAssetSourcePeerToken.clear();
+    appendAssetLog(QStringLiteral("accepted incoming looper asset: workflow=%1 hash=%2 source=%3 path=%4")
+        .arg(workflow, hash, source, path));
     if (callbacks_.incomingAssetAccepted) {
         callbacks_.incomingAssetAccepted();
     }

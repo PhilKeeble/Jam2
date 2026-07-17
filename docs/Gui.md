@@ -113,6 +113,15 @@ The Track tab can:
 
 Perform prepared-cache playback uses the engine's ASIO/CoreAudio output path. Prepared caches must match the active engine sample rate; offline resampling is deferred.
 
+Generated practice reference WAVs remain local after rendering, even during an
+active jam. They are saved with the local project and omitted from arrangement
+sync until **Share Tracks** is clicked. Share Tracks promotes those lanes and
+publishes them through the same content-hash transfer used for other WAVs.
+When a peer already has a valid WAV with the requested hash, Jam2 reuses it
+instead of transferring another copy. Missing WAVs are requested one at a time;
+the next request starts only after the receiver has validated and committed the
+previous file.
+
 A newly selected WAV with a different sample rate is rejected before it changes
 the track, looper bank, prepared mix, or current playback, and the dialog shows
 both expected and actual rates. If an existing local lane is incompatible with

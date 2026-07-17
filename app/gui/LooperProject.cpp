@@ -160,17 +160,21 @@ QJsonObject LooperProject::toJson(bool syncCompatibleOnly) const
     for (const LooperBank& bank : banks_) {
         QJsonArray lanes;
         for (const LooperLane& lane : bank.lanes) {
-            if (syncCompatibleOnly && !lane.sampleRateCompatible) {
+            if (syncCompatibleOnly && (!lane.sampleRateCompatible || lane.localOnly)) {
                 continue;
             }
-            lanes.append(QJsonObject{{"id", lane.id}, {"asset_path", lane.assetPath}, {"asset_hash", lane.assetHash},
+            QJsonObject laneObject{{"id", lane.id}, {"asset_path", lane.assetPath}, {"asset_hash", lane.assetHash},
                 {"name", lane.name}, {"sample_rate", lane.sampleRate},
                 {"start_frame", QString::number(lane.startFrame)}, {"stop_frame", QString::number(lane.stopFrame)},
                 {"loop_start_frame", QString::number(lane.loopStartFrame)}, {"loop_end_frame", QString::number(lane.loopEndFrame)},
                 {"gain_db", lane.gainDb}, {"muted", lane.muted}, {"solo", lane.solo}, {"loop_enabled", lane.loopEnabled},
                 {"reference_kind", lane.referenceKind}, {"reference_source_signature", lane.referenceSourceSignature},
                 {"reference_bpm", lane.referenceBpm},
-                {"reference_stale", lane.referenceStale}});
+                {"reference_stale", lane.referenceStale}};
+            if (!syncCompatibleOnly) {
+                laneObject.insert(QStringLiteral("local_only"), lane.localOnly);
+            }
+            lanes.append(std::move(laneObject));
         }
         banks.append(QJsonObject{{"id", bank.id}, {"lanes", lanes}});
     }
@@ -217,7 +221,7 @@ bool LooperProject::loadJson(const QJsonObject& object)
             }
             for (const QString& key : {
                     QStringLiteral("muted"), QStringLiteral("solo"), QStringLiteral("loop_enabled"),
-                    QStringLiteral("reference_stale")}) {
+                    QStringLiteral("reference_stale"), QStringLiteral("local_only")}) {
                 const QJsonValue flag = laneObject.value(key);
                 if (!flag.isUndefined() && !flag.isBool()) {
                     return false;
@@ -258,6 +262,7 @@ bool LooperProject::loadJson(const QJsonObject& object)
             lane.referenceSourceSignature = laneObject.value(QStringLiteral("reference_source_signature")).toString();
             lane.referenceBpm = laneObject.value(QStringLiteral("reference_bpm")).toDouble();
             lane.referenceStale = laneObject.value(QStringLiteral("reference_stale")).toBool();
+            lane.localOnly = laneObject.value(QStringLiteral("local_only")).toBool();
             if (lane.id.size() > kMaxIdCharacters || lane.name.size() > kMaxNameCharacters ||
                 lane.assetPath.size() > kMaxPathCharacters || !validAssetHash(lane.assetHash) ||
                 lane.referenceKind.size() > 16 || !validAssetHash(lane.referenceSourceSignature) ||

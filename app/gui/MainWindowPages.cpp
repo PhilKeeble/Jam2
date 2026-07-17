@@ -19,8 +19,13 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPixmap>
+#include <QPolygonF>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
@@ -37,6 +42,36 @@
 
 #include <cmath>
 #include <limits>
+
+namespace {
+
+QIcon settingsIcon()
+{
+    constexpr int size = 32;
+    constexpr int teeth = 12;
+    constexpr double pi = 3.14159265358979323846;
+    QPixmap pixmap(size, size);
+    pixmap.fill(Qt::transparent);
+    QPainterPath path;
+    QPolygonF outline;
+    for (int point = 0; point < teeth * 2; ++point) {
+        const double angle = (static_cast<double>(point) * pi / teeth) - (pi / 2.0);
+        const double radius = point % 2 == 0 ? 13.0 : 10.0;
+        outline.append(QPointF(
+            size / 2.0 + std::cos(angle) * radius,
+            size / 2.0 + std::sin(angle) * radius));
+    }
+    path.setFillRule(Qt::OddEvenFill);
+    path.addPolygon(outline);
+    path.closeSubpath();
+    path.addEllipse(QPointF(size / 2.0, size / 2.0), 4.0, 4.0);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.fillPath(path, QColor(QStringLiteral("#d7dde4")));
+    return QIcon(pixmap);
+}
+
+} // namespace
 
 void MainWindowPages::build(MainWindow& w)
 {
@@ -67,7 +102,10 @@ void MainWindowPages::build(MainWindow& w)
     });
     header->addWidget(w.localEngineButton_);
     auto* settingsButton = new QToolButton(&w);
-    settingsButton->setText(QString(QChar(0x2699)));
+    settingsButton->setObjectName(QStringLiteral("SettingsButton"));
+    settingsButton->setIcon(settingsIcon());
+    settingsButton->setIconSize(QSize(18, 18));
+    settingsButton->setFixedSize(34, 34);
     settingsButton->setToolTip(QStringLiteral("Audio and jam defaults"));
     settingsButton->setAccessibleName(QStringLiteral("Settings"));
     QObject::connect(settingsButton, &QToolButton::clicked, &w, [&w] {
@@ -922,7 +960,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         }
     });
     QObject::connect(w.loadWavButton_, &QPushButton::clicked, &w, [&w] { w.loadWavIntoLooperLane(); });
-    QObject::connect(w.shareTracksButton_, &QPushButton::clicked, &w, [&w] { w.shareLocalTracks(); });
+    QObject::connect(w.shareTracksButton_, &QPushButton::clicked, &w, [&w] { w.shareLocalTracks(true); });
     QObject::connect(w.startArmedLaneRecordingButton_, &QPushButton::clicked, &w, [&w] { w.startArmedLooperLaneRecording(); });
     w.looperStack_->onSelected = [&w](int lane) { w.selectedLooperLane_ = lane; };
     w.looperStack_->onAddLane = [&w] { w.addEmptyLooperLane(); };

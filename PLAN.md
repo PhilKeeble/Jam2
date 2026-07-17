@@ -13,6 +13,8 @@ Investigate why GUI WASAPI loopback recordings can be quieter than the audio hea
 - If channel averaging is confirmed, add an explicit, inspectable loopback channel selection or downmix rule rather than automatic normalization.
 - Keep the saved format PCM16 during this investigation so bit depth and channel routing remain separate variables.
 
+From mac looks like that it is stero recording going to mono, if input channel is 1,2 on focusrite then mono reording will be very quickm need to look into that.
+
 ## Linux Audio Backend (never implement this without explicit approval)
 
 Consider Linux support after the Windows ASIO and macOS CoreAudio paths are stable. Linux should be treated as another host-native low-latency backend, not as a Docker or container target.

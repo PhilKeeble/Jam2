@@ -733,6 +733,9 @@ MainWindow::MainWindow(QWidget* parent)
     , trackOfferAssetPaths_(trackWorkspace_.trackOfferAssetPaths)
     , pendingTrackAssetSources_(trackWorkspace_.pendingTrackAssetSources)
     , validatedTrackAssetHashes_(trackWorkspace_.validatedTrackAssetHashes)
+    , incomingAssetWorkflow_(trackWorkspace_.incomingAssetWorkflow)
+    , incomingAssetHash_(trackWorkspace_.incomingAssetHash)
+    , incomingAssetSourcePeerToken_(trackWorkspace_.incomingAssetSourcePeerToken)
     , pendingSongSet_(trackWorkspace_.pendingSongSet)
     , pendingLooperAssetHashes_(trackWorkspace_.pendingLooperAssetHashes)
     , pendingSongRevision_(trackWorkspace_.pendingSongRevision)
@@ -757,8 +760,8 @@ MainWindow::MainWindow(QWidget* parent)
         },
         [this] {
             applyPendingTrackContributions();
-            requestNextPendingTrackAsset();
             applyPendingSongIfAssetsReady();
+            requestNextPendingAsset();
         },
     });
     installJam2Style();
@@ -1377,6 +1380,9 @@ void MainWindow::startJam(bool createSession)
     trackOfferAssetPaths_.clear();
     pendingTrackAssetSources_.clear();
     validatedTrackAssetHashes_.clear();
+    incomingAssetWorkflow_ = IncomingAssetWorkflow::None;
+    incomingAssetHash_.clear();
+    incomingAssetSourcePeerToken_.clear();
     prepareNetworkRuntimePresentation(createSession);
     try {
         if (createSession) {
@@ -2078,6 +2084,8 @@ void MainWindow::showSettingsDialog()
         auto* spin = new QSpinBox(&dialog);
         spin->setRange(minimum, maximum);
         spin->setValue(value);
+        spin->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        spin->setAttribute(Qt::WA_MacShowFocusRect, false);
         return spin;
     };
     auto makeDoubleSpin = [&dialog](double value, double minimum, double maximum, int decimals) {
@@ -2085,6 +2093,8 @@ void MainWindow::showSettingsDialog()
         spin->setRange(minimum, maximum);
         spin->setDecimals(decimals);
         spin->setValue(value);
+        spin->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        spin->setAttribute(Qt::WA_MacShowFocusRect, false);
         return spin;
     };
     auto makePriority = [&dialog](const QString& value) {
@@ -2098,6 +2108,8 @@ void MainWindow::showSettingsDialog()
     auto makeScrollTab = [&dialog](QWidget* content) {
         auto* scroll = new QScrollArea(&dialog);
         scroll->setWidgetResizable(true);
+        scroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        content->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
         scroll->setWidget(content);
         return scroll;
     };
@@ -2202,7 +2214,7 @@ void MainWindow::showSettingsDialog()
         joinJamAudio.box->setVisible(split);
     };
     QObject::connect(splitNetworkAudio, &QCheckBox::toggled, &dialog,
-        [=, splitInitialized = preferences_.splitNetworkAudioByRole](bool checked) mutable {
+        [=, this, splitInitialized = preferences_.splitNetworkAudioByRole](bool checked) mutable {
             if (checked && !splitInitialized) {
                 const AudioDevicePreference shared = audioFromEditors(
                     preferences_.networkAudio, networkAudio);
@@ -2553,6 +2565,18 @@ void MainWindow::showSettingsDialog()
     auto* outer = new QVBoxLayout(&dialog);
     outer->addWidget(tabs, 1);
     outer->addWidget(buttons);
+    for (QFormLayout* form : dialog.findChildren<QFormLayout*>()) {
+        form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+        form->setFormAlignment(Qt::AlignLeft | Qt::AlignTop);
+        form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    }
+    for (QWidget* editor : dialog.findChildren<QWidget*>()) {
+        if (qobject_cast<QAbstractSpinBox*>(editor) ||
+            qobject_cast<QLineEdit*>(editor) ||
+            qobject_cast<QComboBox*>(editor)) {
+            editor->setAttribute(Qt::WA_MacShowFocusRect, false);
+        }
+    }
 
     if (dialog.exec() != QDialog::Accepted) return;
 
@@ -2716,6 +2740,9 @@ void MainWindow::stopJam(bool returnToLocal)
     pendingSongSourcePeerToken_.clear();
     pendingSongNeedsAuthoritativePublish_ = false;
     pendingLooperAssetHashes_.clear();
+    incomingAssetWorkflow_ = IncomingAssetWorkflow::None;
+    incomingAssetHash_.clear();
+    incomingAssetSourcePeerToken_.clear();
     deferredSongSetMessage_ = {};
     deferredSongSetSourcePeerToken_.clear();
     songAssetCheckRetryTimer_.stop();
@@ -5965,11 +5992,28 @@ void MainWindow::publishLocalTrackOffer(
         .arg(lane.name, lane.assetHash));
 }
 
-void MainWindow::shareLocalTracks()
+void MainWindow::shareLocalTracks(bool includeLocalOnly)
 {
     if (!looperProject_.trackSyncEnabled() || !jam2_.isRunning()) {
         appendLog(QStringLiteral("Share Tracks requires an active jam with Sync track controls enabled"));
         return;
+    }
+    int promoted = 0;
+    if (includeLocalOnly) {
+        for (LooperBank& bank : looperProject_.banks()) {
+            for (LooperLane& lane : bank.lanes) {
+                if (lane.localOnly) {
+                    lane.localOnly = false;
+                    ++promoted;
+                }
+            }
+        }
+    }
+    if (promoted > 0) {
+        refreshLooperLanes();
+        appendLog(QStringLiteral(
+            "Share Tracks promoted %1 local-only practice reference lane(s)")
+            .arg(promoted));
     }
     if (sessionController_.isServer()) {
         sendControl(QJsonObject{
@@ -5986,7 +6030,7 @@ void MainWindow::shareLocalTracks()
     for (int bankIndex = 0; bankIndex < looperProject_.banks().size(); ++bankIndex) {
         const LooperBank& bank = looperProject_.banks().at(bankIndex);
         for (const LooperLane& lane : bank.lanes) {
-            if (!lane.sampleRateCompatible || lane.sampleRate <= 0 ||
+            if (lane.localOnly || !lane.sampleRateCompatible || lane.sampleRate <= 0 ||
                 !isSha256Hex(lane.assetHash) || lane.assetPath.isEmpty()) {
                 continue;
             }
@@ -6039,38 +6083,77 @@ void MainWindow::handleTrackOffer(const QJsonObject& message, const QString& sou
     if (validatedTrackAssetHashes_.contains(hash)) {
         applyPendingTrackContributions();
     } else {
-        requestNextPendingTrackAsset();
+        requestNextPendingAsset();
     }
 }
 
-void MainWindow::requestNextPendingTrackAsset()
+void MainWindow::requestNextPendingAsset()
 {
-    if (!sessionController_.isServer() || !pendingTrackAssetSources_.isEmpty()) {
+    if (incomingAssetWorkflow_ != IncomingAssetWorkflow::None) {
         return;
     }
-    for (const PendingTrackContribution& contribution : pendingTrackContributions_) {
-        if (validatedTrackAssetHashes_.contains(contribution.assetHash)) {
-            continue;
+    QString hash;
+    QString source;
+    IncomingAssetWorkflow workflow = IncomingAssetWorkflow::None;
+    if (sessionController_.isServer()) {
+        for (const PendingTrackContribution& contribution : pendingTrackContributions_) {
+            if (!validatedTrackAssetHashes_.contains(contribution.assetHash)) {
+                hash = contribution.assetHash;
+                source = contribution.sourcePeerToken;
+                workflow = IncomingAssetWorkflow::TrackContribution;
+                break;
+            }
         }
-        if (!pendingLooperAssetHashes_.contains(contribution.assetHash)) {
-            pendingLooperAssetHashes_.append(contribution.assetHash);
-        }
-        pendingTrackAssetSources_.insert(
-            contribution.assetHash,
-            contribution.sourcePeerToken);
-        QJsonArray hashes;
-        hashes.append(contribution.assetHash);
-        if (!sendControlTo(contribution.sourcePeerToken, QJsonObject{
-                {QStringLiteral("type"), QStringLiteral("looper.asset.request")},
-                {QStringLiteral("hashes"), hashes},
-            })) {
-            pendingTrackAssetSources_.remove(contribution.assetHash);
-            pendingLooperAssetHashes_.removeAll(contribution.assetHash);
-            appendLog(QStringLiteral("could not request offered track asset from peer ") +
-                contribution.sourcePeerToken.left(8));
-        }
+    }
+    if (workflow == IncomingAssetWorkflow::None &&
+        !pendingSongSet_.isEmpty() && !pendingLooperAssetHashes_.isEmpty()) {
+        hash = pendingLooperAssetHashes_.constFirst();
+        source = pendingSongSourcePeerToken_;
+        workflow = IncomingAssetWorkflow::Arrangement;
+    }
+    if (workflow == IncomingAssetWorkflow::None || !isSha256Hex(hash)) {
         return;
     }
+
+    incomingAssetWorkflow_ = workflow;
+    incomingAssetHash_ = hash;
+    incomingAssetSourcePeerToken_ = source;
+    if (workflow == IncomingAssetWorkflow::TrackContribution) {
+        pendingTrackAssetSources_.insert(hash, source);
+    }
+    QJsonArray hashes;
+    hashes.append(hash);
+    const QJsonObject request{
+        {QStringLiteral("type"), QStringLiteral("looper.asset.request")},
+        {QStringLiteral("arrangement_revision"), pendingSongRevision_},
+        {QStringLiteral("hashes"), hashes},
+    };
+    const bool sent = source.isEmpty() || sendControlTo(source, request);
+    if (source.isEmpty()) {
+        sendControl(request);
+    }
+    if (!sent) {
+        pendingTrackAssetSources_.remove(hash);
+        incomingAssetWorkflow_ = IncomingAssetWorkflow::None;
+        incomingAssetHash_.clear();
+        incomingAssetSourcePeerToken_.clear();
+        appendLog(QStringLiteral(
+            "could not request looper asset: workflow=%1 hash=%2 source=%3")
+            .arg(workflow == IncomingAssetWorkflow::TrackContribution
+                    ? QStringLiteral("track-share")
+                    : QStringLiteral("arrangement"),
+                hash,
+                source.left(8)));
+        return;
+    }
+    appendLog(QStringLiteral(
+        "requested looper asset: workflow=%1 hash=%2 source=%3 revision=%4")
+        .arg(workflow == IncomingAssetWorkflow::TrackContribution
+                ? QStringLiteral("track-share")
+                : QStringLiteral("arrangement"),
+            hash,
+            source.left(8))
+        .arg(pendingSongRevision_));
 }
 
 void MainWindow::applyPendingTrackContributions()
@@ -6087,7 +6170,16 @@ void MainWindow::applyPendingTrackContributions()
             contribution.bankIndex < 0 || contribution.bankIndex >= looperProject_.banks().size()) {
             continue;
         }
-        const QString assetPath = looperAssetPathForHash(contribution.assetHash);
+        QString assetPath = looperAssetPathForHash(contribution.assetHash);
+        for (const LooperBank& bank : looperProject_.banks()) {
+            for (const LooperLane& candidate : bank.lanes) {
+                if (candidate.assetHash == contribution.assetHash &&
+                    QFileInfo::exists(looperAssetAbsolutePath(candidate))) {
+                    assetPath = candidate.assetPath;
+                    break;
+                }
+            }
+        }
         auto& lanes = looperProject_.banks()[contribution.bankIndex].lanes;
         int targetIndex = -1;
         for (int index = 0; index < lanes.size(); ++index) {
@@ -6106,7 +6198,24 @@ void MainWindow::applyPendingTrackContributions()
         const bool targetReservedForLocalRecording =
             trackRecordingWorkflow_.laneArmedAt(contribution.bankIndex, targetIndex);
         bool applied = false;
-        if ((targetIndex >= 0 && lanes.at(targetIndex).assetHash == contribution.assetHash) ||
+        int matchingHashIndex = -1;
+        for (int index = 0; index < lanes.size(); ++index) {
+            if (lanes.at(index).assetHash == contribution.assetHash) {
+                matchingHashIndex = index;
+                break;
+            }
+        }
+        if (matchingHashIndex >= 0) {
+            if (lanes[matchingHashIndex].localOnly) {
+                lanes[matchingHashIndex].localOnly = false;
+                arrangementChanged = true;
+            }
+            appendLog(QStringLiteral(
+                "reused matching local track for peer contribution: hash=%1 bank=%2")
+                .arg(contribution.assetHash)
+                .arg(contribution.bankIndex + 1));
+            applied = true;
+        } else if ((targetIndex >= 0 && lanes.at(targetIndex).assetHash == contribution.assetHash) ||
             (existingContributionIndex >= 0 &&
              lanes.at(existingContributionIndex).assetHash == contribution.assetHash)) {
             applied = true;
@@ -6117,6 +6226,7 @@ void MainWindow::applyPendingTrackContributions()
             lane.assetHash = contribution.assetHash;
             lane.sampleRate = contribution.sampleRate;
             lane.sampleRateCompatible = true;
+            lane.localOnly = false;
             if (!contribution.name.trimmed().isEmpty() &&
                 (lane.name.trimmed().isEmpty() || isDefaultEmptyTrackName(lane.name))) {
                 lane.name = contribution.name;
@@ -6137,6 +6247,7 @@ void MainWindow::applyPendingTrackContributions()
                 ? QStringLiteral("Peer track") : contribution.name;
             lane.sampleRate = contribution.sampleRate;
             lane.sampleRateCompatible = true;
+            lane.localOnly = false;
             if (looperProject_.appendLane(contribution.bankIndex, std::move(lane))) {
                 arrangementChanged = true;
                 applied = true;
@@ -6165,7 +6276,7 @@ void MainWindow::applyPendingTrackContributions()
             sendSongSnapshot();
         }
     }
-    requestNextPendingTrackAsset();
+    requestNextPendingAsset();
 }
 
 bool MainWindow::canQueueControlTo(const QString& targetPeerToken, qint64 estimatedBytes) const
@@ -6244,6 +6355,17 @@ void MainWindow::handleSongSet(
         appendLog(QStringLiteral("ignored stale host arrangement revision %1").arg(revision));
         return;
     }
+    QMap<QString, QString> localAssetCandidates;
+    for (const LooperBank& bank : looperProject_.banks()) {
+        for (const LooperLane& lane : bank.lanes) {
+            const QString hash = lane.assetHash.toLower();
+            const QString path = looperAssetAbsolutePath(lane);
+            if (isSha256Hex(hash) && QFileInfo::exists(path) &&
+                !localAssetCandidates.contains(hash)) {
+                localAssetCandidates.insert(hash, path);
+            }
+        }
+    }
     const QJsonObject normalizedSong =
         normalizeLooperAssetPaths(message.value(QStringLiteral("song")).toObject());
     QStringList referencedHashes;
@@ -6267,34 +6389,51 @@ void MainWindow::handleSongSet(
     const QString assetFolder = QDir(projectPersistence_.workspaceFolder()).absoluteFilePath(QStringLiteral("wavs"));
     const std::uint64_t checkRevision = ++songAssetCheckRevision_;
     auto missing = std::make_shared<QStringList>();
+    auto resolvedPaths = std::make_shared<QMap<QString, QString>>();
     auto assetFailure = std::make_shared<QString>();
     const int expectedSampleRate = sessionController_.snapshot().contract.sampleRate;
     const bool started = startFileWorkerTask(
-        [referencedHashes, assetFolder, expectedSampleRate, missing, assetFailure] {
+        [referencedHashes, assetFolder, localAssetCandidates, expectedSampleRate,
+         missing, resolvedPaths, assetFailure] {
             for (const QString& hash : referencedHashes) {
                 if (!isSha256Hex(hash)) {
                     missing->append(hash);
                     continue;
                 }
-                const QString path = QDir(assetFolder).absoluteFilePath(hash + QStringLiteral(".wav"));
-                const jam2::wav::InspectResult inspected = jam2::wav::inspect_pcm16_file(
-                    nativeFilePath(path), static_cast<std::uint64_t>(kMaxLooperAssetBytes));
-                if (!QFileInfo::exists(path) || !inspected || sha256FileHex(path) != hash) {
+                const QString canonicalPath =
+                    QDir(assetFolder).absoluteFilePath(hash + QStringLiteral(".wav"));
+                QStringList candidates{canonicalPath};
+                const QString localPath = localAssetCandidates.value(hash);
+                if (!localPath.isEmpty() && localPath != canonicalPath) {
+                    candidates.append(localPath);
+                }
+                bool found = false;
+                for (const QString& path : candidates) {
+                    if (!QFileInfo::exists(path)) continue;
+                    const jam2::wav::InspectResult inspected = jam2::wav::inspect_pcm16_file(
+                        nativeFilePath(path), static_cast<std::uint64_t>(kMaxLooperAssetBytes));
+                    if (!inspected || sha256FileHex(path) != hash) continue;
+                    if (expectedSampleRate > 0 &&
+                        inspected.info.sample_rate !=
+                            static_cast<std::uint32_t>(expectedSampleRate)) {
+                        *assetFailure = QStringLiteral(
+                            "WAV asset %1 has sample rate %2 Hz; expected %3 Hz")
+                            .arg(hash.left(12))
+                            .arg(inspected.info.sample_rate)
+                            .arg(expectedSampleRate);
+                        return;
+                    }
+                    resolvedPaths->insert(hash, path);
+                    found = true;
+                    break;
+                }
+                if (!found) {
                     missing->append(hash);
-                } else if (expectedSampleRate > 0 &&
-                           inspected.info.sample_rate !=
-                               static_cast<std::uint32_t>(expectedSampleRate)) {
-                    *assetFailure = QStringLiteral(
-                        "WAV asset %1 has sample rate %2 Hz; expected %3 Hz")
-                        .arg(hash.left(12))
-                        .arg(inspected.info.sample_rate)
-                        .arg(expectedSampleRate);
-                    return;
                 }
             }
         },
         [this, song, revision, restartTrack, hostAuthoritative, fromPeerProposal,
-         sourcePeerToken, checkRevision, missing, assetFailure] {
+         sourcePeerToken, checkRevision, missing, resolvedPaths, assetFailure] {
             if (checkRevision != songAssetCheckRevision_) {
                 return;
             }
@@ -6302,8 +6441,41 @@ void MainWindow::handleSongSet(
                 appendLog(QStringLiteral("rejected arrangement asset: ") + *assetFailure);
                 return;
             }
+            QJsonObject resolvedSong = song;
+            QJsonObject resolvedLooper = resolvedSong.value(QStringLiteral("looper")).toObject();
+            QJsonArray resolvedBanks = resolvedLooper.value(QStringLiteral("banks")).toArray();
+            for (int bankIndex = 0; bankIndex < resolvedBanks.size(); ++bankIndex) {
+                QJsonObject bank = resolvedBanks.at(bankIndex).toObject();
+                QJsonArray lanes = bank.value(QStringLiteral("lanes")).toArray();
+                for (int laneIndex = 0; laneIndex < lanes.size(); ++laneIndex) {
+                    QJsonObject lane = lanes.at(laneIndex).toObject();
+                    const QString hash =
+                        lane.value(QStringLiteral("asset_hash")).toString().toLower();
+                    if (resolvedPaths->contains(hash)) {
+                        lane.insert(QStringLiteral("asset_path"), resolvedPaths->value(hash));
+                        lanes.replace(laneIndex, lane);
+                    }
+                }
+                bank.insert(QStringLiteral("lanes"), lanes);
+                resolvedBanks.replace(bankIndex, bank);
+            }
+            resolvedLooper.insert(QStringLiteral("banks"), resolvedBanks);
+            resolvedSong.insert(QStringLiteral("looper"), resolvedLooper);
+            for (auto it = resolvedPaths->cbegin(); it != resolvedPaths->cend(); ++it) {
+                validatedTrackAssetHashes_.insert(it.key());
+                if (it.value() != looperAssetPathForHash(it.key())) {
+                    appendLog(QStringLiteral(
+                        "reused existing local looper asset: hash=%1 path=%2")
+                        .arg(it.key(), it.value()));
+                }
+            }
+            if (incomingAssetWorkflow_ == IncomingAssetWorkflow::Arrangement &&
+                (incomingAssetSourcePeerToken_ != sourcePeerToken ||
+                 !missing->contains(incomingAssetHash_))) {
+                assetTransfer_.resetIncoming();
+            }
             if (!missing->isEmpty()) {
-                pendingSongSet_ = song;
+                pendingSongSet_ = resolvedSong;
                 pendingSongRevision_ = revision;
                 pendingSongTrackRestart_ = restartTrack;
                 pendingSongSourcePeerToken_ = sourcePeerToken;
@@ -6315,21 +6487,7 @@ void MainWindow::handleSongSet(
                 appendLog(QStringLiteral("requesting %1 looper asset(s) for arrangement revision %2")
                     .arg(missing->size())
                     .arg(revision));
-                QJsonArray hashes;
-                for (const QString& hash : *missing) {
-
-                    hashes.append(hash);
-                }
-                const QJsonObject request{
-                    {QStringLiteral("type"), QStringLiteral("looper.asset.request")},
-                    {QStringLiteral("arrangement_revision"), revision},
-                    {QStringLiteral("hashes"), hashes},
-                };
-                if (fromPeerProposal) {
-                    (void)sendControlTo(sourcePeerToken, request);
-                } else {
-                    sendControl(request);
-                }
+                requestNextPendingAsset();
                 return;
             }
             projectPersistence_.useWorkspaceAsProjectFolderIfUnset();
@@ -6339,7 +6497,7 @@ void MainWindow::handleSongSet(
             pendingSongSourcePeerToken_.clear();
             pendingSongNeedsAuthoritativePublish_ = false;
             pendingLooperAssetHashes_.clear();
-            if (loadSongJson(song)) {
+            if (loadSongJson(resolvedSong)) {
                 if (hostAuthoritative) {
                     lastAppliedHostArrangementRevision_ = revision;
                 }
@@ -6519,7 +6677,7 @@ QJsonObject MainWindow::preserveQuarantinedLocalLanes(QJsonObject song)
         song, looperProject_, expectedSampleRate);
     if (preserved > 0) {
         appendLog(QStringLiteral(
-            "preserved %1 incompatible local WAV lane(s) as quarantined during arrangement sync")
+            "preserved %1 local-only or incompatible WAV lane(s) during arrangement sync")
             .arg(preserved));
     }
     return song;
@@ -7538,12 +7696,8 @@ void MainWindow::generatePracticeReferenceWavs()
             discardPreparedMix(true);
             refreshLooperLanes();
             regeneratePreparedMix();
-            if (looperProject_.trackSyncEnabled() && jam2_.isNetworkRunning()) {
-                shareLocalTracks();
-            } else {
-                sendSongSnapshot();
-            }
-            appendLog(QStringLiteral("practice reference WAVs rendered into the active track bank"));
+            appendLog(QStringLiteral(
+                "practice reference WAVs rendered locally; use Share Tracks to publish them"));
         });
     if (!started) {
         QMessageBox::warning(this, QStringLiteral("Generate Reference WAVs"),

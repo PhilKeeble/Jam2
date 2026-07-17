@@ -407,6 +407,11 @@ void AssetTransferService::resetOutgoing()
 
 void AssetTransferService::resetIncoming()
 {
+    clearIncoming(true);
+}
+
+void AssetTransferService::clearIncoming(bool abandonExpected)
+{
     const QString interruptedHash = incomingLooperAssetHash_;
     const auto interruptedState = incomingWorkerState_;
     const bool workerPending = incomingLooperAssetWritePending_;
@@ -426,7 +431,7 @@ void AssetTransferService::resetIncoming()
             [] {},
             [](const QString&) {});
     }
-    if (!interruptedHash.isEmpty()) {
+    if (abandonExpected && !interruptedHash.isEmpty()) {
         context_.abandonIncomingAsset(interruptedHash);
     }
 }
@@ -651,7 +656,7 @@ void AssetTransferService::finalizeIncoming()
             const QString output = state->outputPath;
             const QString expectedHash = state->expectedHash;
             state->temporaryPath.clear();
-            resetIncoming();
+            clearIncoming(false);
             context_.acceptIncomingAsset(expectedHash, output);
         },
         [this, state, generation](const QString& errorText) {
