@@ -104,8 +104,7 @@ void MainWindowPages::build(MainWindow& w)
 
     w.tabs_ = new QTabWidget(&w);
     w.tabs_->addTab(buildSongPage(w), QStringLiteral("Chord View"));
-    w.beatGrid_ = new BeatGridWidget(&w.beatModel_, QStringLiteral("beat"), &w);
-    w.tabs_->addTab(w.beatGrid_, QStringLiteral("Beat View"));
+    w.tabs_->addTab(buildBeatPage(w), QStringLiteral("Beat View"));
     w.lyricGrid_ = new BeatGridWidget(&w.lyricModel_, QStringLiteral("lyric"), &w);
     w.tabs_->addTab(w.lyricGrid_, QStringLiteral("Lyrics"));
     w.tabs_->addTab(buildTrackPage(w), QStringLiteral("Track"));
@@ -133,6 +132,7 @@ void MainWindowPages::build(MainWindow& w)
             {QStringLiteral("lane"), lane},
             {QStringLiteral("text"), text},
         });
+        w.refreshLooperLanes();
     };
     w.beatGrid_->onBeatDivisionChanged = [&w](int section, int beat, int division, int revision) {
         w.sendControl(QJsonObject{
@@ -142,6 +142,7 @@ void MainWindowPages::build(MainWindow& w)
             {QStringLiteral("beat"), beat},
             {QStringLiteral("division"), division},
         });
+        w.refreshLooperLanes();
     };
     w.lyricGrid_->onLyricsEdited = [&w](const QString& text, int revision) {
         w.sendControl(QJsonObject{
@@ -151,6 +152,7 @@ void MainWindowPages::build(MainWindow& w)
         });
     };
     w.beatGrid_->onStructureChanged = [&w] {
+        w.refreshLooperLanes();
         w.sendSongSnapshot();
     };
     w.lyricGrid_->onStructureChanged = [&w] {
@@ -416,8 +418,14 @@ QWidget* MainWindowPages::buildSongPage(MainWindow& w)
     auto* page = new QWidget(&w);
     w.chordGrid_ = new BeatGridWidget(&w.chordModel_, QStringLiteral("chord"), page);
 
+    auto* generate = new QPushButton(QStringLiteral("Generate…"), page);
+    auto* reference = new QPushButton(QStringLiteral("Generate Reference WAVs…"), page);
     auto* top = new QHBoxLayout();
+    top->addWidget(generate);
+    top->addWidget(reference);
     top->addStretch(1);
+    QObject::connect(generate, &QPushButton::clicked, &w, [&w] { w.generatePracticeIdea(); });
+    QObject::connect(reference, &QPushButton::clicked, &w, [&w] { w.generatePracticeReferenceWavs(); });
 
     auto* layout = new QVBoxLayout(page);
     layout->addLayout(top);
@@ -432,6 +440,7 @@ QWidget* MainWindowPages::buildSongPage(MainWindow& w)
             {QStringLiteral("beat"), beat},
             {QStringLiteral("text"), text},
         });
+        w.refreshLooperLanes();
     };
     w.chordGrid_->onGridResized = [&w](int section, int beats, int revision) {
         w.sendControl(QJsonObject{
@@ -443,9 +452,28 @@ QWidget* MainWindowPages::buildSongPage(MainWindow& w)
         });
     };
     w.chordGrid_->onStructureChanged = [&w] {
+        w.refreshLooperLanes();
         w.sendSongSnapshot();
     };
 
+    return page;
+}
+
+QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
+{
+    auto* page = new QWidget(&w);
+    w.beatGrid_ = new BeatGridWidget(&w.beatModel_, QStringLiteral("beat"), page);
+    auto* generate = new QPushButton(QStringLiteral("Generate…"), page);
+    auto* reference = new QPushButton(QStringLiteral("Generate Reference WAVs…"), page);
+    auto* top = new QHBoxLayout();
+    top->addWidget(generate);
+    top->addWidget(reference);
+    top->addStretch(1);
+    auto* layout = new QVBoxLayout(page);
+    layout->addLayout(top);
+    layout->addWidget(w.beatGrid_, 1);
+    QObject::connect(generate, &QPushButton::clicked, &w, [&w] { w.generatePracticeIdea(); });
+    QObject::connect(reference, &QPushButton::clicked, &w, [&w] { w.generatePracticeReferenceWavs(); });
     return page;
 }
 
@@ -503,6 +531,8 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     applyMutedEditorStyle(w.focusFrequencySpin_);
     w.trackSyncCheck_ = new QCheckBox(QStringLiteral("Sync track controls"), page);
     w.trackSyncCheck_->setChecked(w.looperProject_.trackSyncEnabled());
+    w.trackMetronomeSyncCheck_ = new QCheckBox(QStringLiteral("Sync metronome"), page);
+    w.trackMetronomeSyncCheck_->setChecked(w.trackController_.model().syncMetronome);
     auto* gridLockBox = new QCheckBox(QStringLiteral("Lock to grid"), page);
     gridLockBox->setChecked(w.looperProject_.gridLockEnabled());
     w.captureOutputEdit_ = new QLineEdit(page);
@@ -587,7 +617,6 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     w.clearLoopButton_ = new QPushButton(QStringLiteral("Clear Loop"), page);
     w.loopEnabledCheck_ = new QCheckBox(QStringLiteral("Loop whole track"), page);
     w.loopEnabledCheck_->setChecked(w.trackController_.model().loopEnabled);
-    w.trackController_.model().trackGainDb = 0.0;
     w.stopCaptureButton_ = new QPushButton(QStringLiteral("Stop Recording"), page);
     w.stopCaptureButton_->setEnabled(false);
     w.loadWavButton_ = new QPushButton(QStringLiteral("Load WAV"), page);
@@ -642,6 +671,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     loopOptionsLayout->addWidget(gridLockBox, 0, 0);
     loopOptionsLayout->addWidget(w.trackSyncCheck_, 0, 1);
     loopOptionsLayout->addWidget(w.loopEnabledCheck_, 1, 0);
+    loopOptionsLayout->addWidget(w.trackMetronomeSyncCheck_, 1, 1);
     loopOptionsLayout->setColumnStretch(0, 1);
     loopOptionsLayout->setColumnStretch(1, 1);
 
@@ -860,6 +890,9 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         w.updateTrackControls();
         w.updateTrackPlaybackPresentation();
     });
+    QObject::connect(w.trackMetronomeSyncCheck_, &QCheckBox::toggled, &w, [&w](bool checked) {
+        w.trackController_.model().syncMetronome = checked;
+    });
     QObject::connect(gridLockBox, &QCheckBox::toggled, &w, [&w](bool checked) {
         w.looperProject_.setGridLockEnabled(checked);
         w.refreshLooperLanes();
@@ -1070,6 +1103,7 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     });
     QObject::connect(w.metronomeBpmSpin_, qOverload<int>(&QSpinBox::valueChanged), &w, [&w] {
         w.updateTrackMetronomeInterval();
+        w.refreshLooperLanes();
     });
     QObject::connect(w.metronomeModeBox_, &QComboBox::currentTextChanged, &w, [&w] {
         w.updateMetronomeCompensationVisibility();
@@ -1184,7 +1218,7 @@ QWidget* MainWindowPages::buildMixPage(MainWindow& w)
 
     w.trackLevelSlider_ = new QSlider(Qt::Horizontal, page);
     w.trackLevelSlider_->setRange(-60, 12);
-    w.trackLevelSlider_->setValue(0);
+    w.trackLevelSlider_->setValue(qRound(w.trackController_.model().trackGainDb));
     applyJamSliderStyle(w.trackLevelSlider_);
     w.trackLevelSlider_->setMinimumWidth(220);
     w.trackLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);

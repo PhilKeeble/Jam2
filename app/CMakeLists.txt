@@ -99,10 +99,20 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/MetronomeTransportController.hpp
     gui/MixerStatsViewModel.cpp
     gui/MixerStatsViewModel.hpp
+    gui/MusicTheory.cpp
+    gui/MusicTheory.hpp
     gui/PlaybackGrid.cpp
     gui/PlaybackGrid.hpp
     gui/PreparedMixRenderer.cpp
     gui/PreparedMixRenderer.hpp
+    gui/PracticeIdeaDialogs.cpp
+    gui/PracticeIdeaDialogs.hpp
+    gui/PracticeIdeaController.cpp
+    gui/PracticeIdeaController.hpp
+    gui/PracticeIdeaGenerator.cpp
+    gui/PracticeIdeaGenerator.hpp
+    gui/PracticeReferenceRenderer.cpp
+    gui/PracticeReferenceRenderer.hpp
     gui/ProjectPersistenceCoordinator.cpp
     gui/ProjectPersistenceCoordinator.hpp
     gui/SharedTrackController.cpp

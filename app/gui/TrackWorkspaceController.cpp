@@ -31,6 +31,18 @@ void TrackWorkspaceController::setCallbacks(Callbacks callbacks)
     callbacks_ = std::move(callbacks);
 }
 
+void TrackWorkspaceController::cancelPendingTrackPlayback() noexcept
+{
+    playPreparedMixWhenReady = false;
+    pendingPreparedTrackReadyRevision = 0;
+    pendingSharedTrackRevision = 0;
+    pendingSharedTrackHostReady = true;
+    pendingSharedTrackReadyTokens.clear();
+    publishStoppedTrackStateWhenApplied = false;
+    pendingSongTrackRestart = false;
+    trackController.requestPlayback(false);
+}
+
 bool TrackWorkspaceController::startFileTask(
     std::function<void()> work,
     std::function<void()> complete,

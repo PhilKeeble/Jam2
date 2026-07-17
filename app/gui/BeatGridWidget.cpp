@@ -1,4 +1,5 @@
 #include "BeatGridWidget.hpp"
+#include "MusicTheory.hpp"
 
 #include <QAction>
 #include <QAbstractItemView>
@@ -11,11 +12,13 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QSignalBlocker>
 #include <QStyledItemDelegate>
 #include <QTableWidgetItem>
 #include <QVBoxLayout>
 
+#include <cmath>
 #include <limits>
 
 namespace {
@@ -23,6 +26,9 @@ namespace {
 constexpr int kBeatCellKindRole = Qt::UserRole + 1;
 constexpr int kBeatDivisionRole = Qt::UserRole + 2;
 constexpr int kBeatHitTextRole = Qt::UserRole + 3;
+constexpr int kBeatActiveStepRole = Qt::UserRole + 4;
+constexpr int kSectionHeaderRole = Qt::UserRole + 5;
+constexpr int kSectionSelectedRole = Qt::UserRole + 6;
 
 enum class BeatCellKind {
     None = 0,
@@ -38,12 +44,14 @@ public:
         setMinimumHeight(28);
     }
 
-    void setCurrentBeatColumn(int column)
+    void setCurrentBeatColumn(int column, double phase = 0.0)
     {
-        if (currentBeatColumn_ == column) {
+        const double boundedPhase = qBound(0.0, phase, 0.999999);
+        if (currentBeatColumn_ == column && qFuzzyCompare(currentBeatPhase_, boundedPhase)) {
             return;
         }
         currentBeatColumn_ = column;
+        currentBeatPhase_ = boundedPhase;
         viewport()->update();
     }
 
@@ -57,12 +65,15 @@ protected:
         painter->save();
         painter->setPen(Qt::NoPen);
         painter->setBrush(QColor(102, 198, 166));
-        painter->drawEllipse(QPoint(rect.center().x(), rect.top() + 6), 4, 4);
+        const int x = rect.left() + qBound(
+            0, static_cast<int>(std::lround(currentBeatPhase_ * rect.width())), rect.width() - 1);
+        painter->drawEllipse(QPoint(x, rect.top() + 6), 4, 4);
         painter->restore();
     }
 
 private:
     int currentBeatColumn_ = -1;
+    double currentBeatPhase_ = 0.0;
 };
 
 QString sectionTitle(const SongSection& section)
@@ -77,7 +88,11 @@ QString normalizedHitText(const QString& text, int division)
     const QString trimmed = text.trimmed();
     for (int i = 0; i < division; ++i) {
         const QChar value = i < trimmed.size() ? trimmed[i] : QChar('.');
-        out.append(value == QChar('x') || value == QChar('X') || value == QChar('1') ? QChar('x') : QChar('.'));
+        const QChar lower = value.toLower();
+        out.append(lower == QLatin1Char('a') ? QLatin1Char('a')
+            : lower == QLatin1Char('g') ? QLatin1Char('g')
+            : lower == QLatin1Char('x') || value == QLatin1Char('1') ? QLatin1Char('x')
+            : QLatin1Char('.'));
     }
     return out;
 }
@@ -94,7 +109,7 @@ QString withHitState(const QString& text, int division, int index, bool checked)
 bool hitChecked(const QString& text, int division, int index)
 {
     const QString out = normalizedHitText(text, division);
-    return index >= 0 && index < out.size() && out[index] == QChar('x');
+    return index >= 0 && index < out.size() && out[index] != QLatin1Char('.');
 }
 
 int visualSlotCount(int division)
@@ -130,16 +145,26 @@ public:
 
     void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
     {
+        QStyleOptionViewItem neutralOption(option);
+        neutralOption.state &= ~QStyle::State_Selected;
         const auto kind = static_cast<BeatCellKind>(index.data(kBeatCellKindRole).toInt());
         if (kind == BeatCellKind::Hit) {
-            paintHitCell(painter, option, index);
+            paintHitCell(painter, neutralOption, index);
             return;
         }
         if (kind == BeatCellKind::Division) {
-            paintDivisionCell(painter, option, index);
+            paintDivisionCell(painter, neutralOption, index);
             return;
         }
-        QStyledItemDelegate::paint(painter, option, index);
+        QStyledItemDelegate::paint(painter, neutralOption, index);
+        if (index.data(kSectionHeaderRole).toBool() &&
+            index.data(kSectionSelectedRole).toBool()) {
+            painter->save();
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(QColor(102, 198, 166));
+            painter->drawEllipse(QPoint(option.rect.left() + 9, option.rect.top() + 9), 4, 4);
+            painter->restore();
+        }
     }
 
 private:
@@ -150,6 +175,8 @@ private:
         painter->fillRect(option.rect, option.state & QStyle::State_Selected ? QColor(48, 82, 112) : QColor(27, 31, 34));
         const int division = index.data(kBeatDivisionRole).toInt();
         const QString text = index.data(kBeatHitTextRole).toString();
+        const QVariant activeStepValue = index.data(kBeatActiveStepRole);
+        const int activeStep = activeStepValue.isValid() ? activeStepValue.toInt() : -1;
         const QVector<int> activeSlots = activeVisualSlots(division);
         const int slotCount = visualSlotCount(division);
         const int slotWidth = qMax(1, rect.width() / qMax(1, slotCount));
@@ -163,10 +190,14 @@ private:
                 painter->fillRect(box.adjusted(2, 2, -2, -2), QColor(42, 47, 51));
                 continue;
             }
-            const bool checked = hitChecked(text, division, step);
-            painter->setPen(checked ? QColor(102, 198, 166) : QColor(82, 97, 108));
-            painter->setBrush(checked ? QColor(102, 198, 166) : QColor(31, 36, 40));
-            painter->drawRect(box);
+            const QChar state = normalizedHitText(text, division).at(step);
+            const bool checked = state != QLatin1Char('.');
+            const QColor color = state == QLatin1Char('a') ? QColor(245, 185, 72)
+                : state == QLatin1Char('g') ? QColor(92, 132, 124) : QColor(102, 198, 166);
+            painter->setPen(QPen(checked ? color : QColor(82, 97, 108), step == activeStep ? 3 : 1));
+            painter->setBrush(checked ? QBrush(color) : QBrush(QColor(31, 36, 40)));
+            if (state == QLatin1Char('g')) painter->drawEllipse(box);
+            else painter->drawRect(box);
         }
         painter->restore();
     }
@@ -222,8 +253,9 @@ BeatGridWidget::BeatGridWidget(BeatGridModel* model, const QString& lane, QWidge
     lyricsEdit_ = new QPlainTextEdit(this);
 
     table_->setAlternatingRowColors(false);
-    table_->setSelectionMode(QAbstractItemView::SingleSelection);
+    table_->setSelectionMode(QAbstractItemView::NoSelection);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table_->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
     beatHeader_ = new GridHeaderView(Qt::Horizontal, table_);
     table_->setHorizontalHeader(beatHeader_);
     beatHeader_->setSectionResizeMode(QHeaderView::Stretch);
@@ -329,18 +361,30 @@ BeatGridWidget::BeatGridWidget(BeatGridModel* model, const QString& lane, QWidge
         const Mode currentMode = mode();
         const QString text = table_->item(row, column) ? table_->item(row, column)->text() : QString();
         if (currentMode == Mode::Chord) {
-            if (row < 0 || row >= model_->sections().size()) {
+            const int section = sectionForRow(row);
+            const int chordLane = laneForRow(row);
+            if (section < 0 || chordLane < 0) {
                 return;
             }
-            selectSection(row);
+            selectSection(section);
             if (column == 0) {
-                model_->renameSection(row, model_->section(row).label, text);
+                if (chordLane != 0) {
+                    return;
+                }
+                model_->renameSection(section, model_->section(section).label, text);
                 emitStructureChanged();
                 return;
             }
-            model_->setCell(row, QStringLiteral("chord"), column - 1, text);
+            if (chordLane == 1) {
+                return;
+            }
+            const QString lane = chordLane == 2 ? QStringLiteral("target") : QStringLiteral("chord");
+            model_->setCell(section, lane, column - 1, text);
             if (onCellEdited) {
-                onCellEdited(row, QStringLiteral("chord"), column - 1, text, model_->revision());
+                onCellEdited(section, lane, column - 1, text, model_->revision());
+            }
+            if (chordLane == 0) {
+                rebuildChordTable();
             }
             return;
         }
@@ -351,10 +395,10 @@ BeatGridWidget::BeatGridWidget(BeatGridModel* model, const QString& lane, QWidge
                 return;
             }
             selectSection(section);
+            const auto kind = table_->item(row, column)
+                ? static_cast<BeatCellKind>(table_->item(row, column)->data(kBeatCellKindRole).toInt())
+                : BeatCellKind::None;
             if (lane < 0) {
-                const auto kind = table_->item(row, column)
-                    ? static_cast<BeatCellKind>(table_->item(row, column)->data(kBeatCellKindRole).toInt())
-                    : BeatCellKind::None;
                 if (kind == BeatCellKind::Division) {
                     const int division = table_->item(row, column)->data(kBeatDivisionRole).toInt();
                     model_->setBeatDivision(section, column, division);
@@ -368,6 +412,13 @@ BeatGridWidget::BeatGridWidget(BeatGridModel* model, const QString& lane, QWidge
                     model_->renameSection(section, model_->section(section).label, text);
                     emitStructureChanged();
                 }
+                return;
+            }
+            // Hit cells are intentionally non-editable. Mouse input is handled
+            // by eventFilter, while playback highlighting updates custom item
+            // roles. Treating those role changes as text edits would replace
+            // the stored pattern with the item's empty display text.
+            if (kind == BeatCellKind::Hit) {
                 return;
             }
             model_->setBeatHit(section, column, lane, text);
@@ -405,6 +456,26 @@ BeatGridModel& BeatGridWidget::model()
     return *model_;
 }
 
+void BeatGridWidget::focusGeneratedSection(const QString& kind)
+{
+    for (int index = 0; index < model_->sections().size(); ++index) {
+        if (model_->section(index).generatedKind == kind) {
+            selectedSection_ = index;
+            refresh();
+            const int row = mode() == Mode::Chord
+                ? index * 3
+                : mode() == Mode::Beat
+                    ? index * (BeatGridModel::beatLaneNames().size() + 2)
+                    : 0;
+            if (QTableWidgetItem* item = table_->item(row, 0)) {
+                table_->scrollToItem(item, QAbstractItemView::PositionAtTop);
+            }
+            return;
+        }
+    }
+    refresh();
+}
+
 bool BeatGridWidget::eventFilter(QObject* watched, QEvent* event)
 {
     if (event->type() == QEvent::Wheel) {
@@ -412,7 +483,7 @@ bool BeatGridWidget::eventFilter(QObject* watched, QEvent* event)
     }
     if (watched == table_->viewport() && mode() == Mode::Beat && event->type() == QEvent::MouseButtonPress) {
         auto* mouse = static_cast<QMouseEvent*>(event);
-        if (mouse->button() != Qt::LeftButton) {
+        if (mouse->button() != Qt::LeftButton && mouse->button() != Qt::RightButton) {
             return QWidget::eventFilter(watched, event);
         }
         const QModelIndex index = table_->indexAt(mouse->pos());
@@ -473,7 +544,28 @@ bool BeatGridWidget::eventFilter(QObject* watched, QEvent* event)
         }
 
         const QString current = model_->section(section).beatPatterns[beat].lanes[lane];
-        const QString updated = withHitState(current, division, step, !hitChecked(current, division, step));
+        QString updated;
+        if (mouse->button() == Qt::RightButton) {
+            QMenu menu(this);
+            struct Choice {
+                const char* label;
+                QChar state;
+            };
+            for (const Choice& choice : {
+                    Choice{"Empty", QLatin1Char('.')}, Choice{"Normal", QLatin1Char('x')},
+                    Choice{"Accent", QLatin1Char('a')}, Choice{"Ghost", QLatin1Char('g')}}) {
+                QAction* action = menu.addAction(QString::fromLatin1(choice.label));
+                action->setData(QString(choice.state));
+            }
+            QAction* selected = menu.exec(table_->viewport()->mapToGlobal(mouse->pos()));
+            if (!selected) {
+                return true;
+            }
+            updated = normalizedHitText(current, division);
+            updated[step] = selected->data().toString().at(0);
+        } else {
+            updated = withHitState(current, division, step, !hitChecked(current, division, step));
+        }
         model_->setBeatHit(section, beat, lane, updated);
         {
             QSignalBlocker tableBlocker(table_);
@@ -499,15 +591,18 @@ void BeatGridWidget::refresh()
     updateActionButtons();
     const quint64 beat = gridBeat_;
     const int subdivision = gridSubdivision_;
+    const double beatPhase = gridBeatPhase_;
     const bool running = gridRunning_;
     gridBeat_ = (std::numeric_limits<quint64>::max)();
-    setGridPosition(beat, subdivision, running);
+    setGridPosition(beat, subdivision, running, beatPhase);
 }
 
-void BeatGridWidget::setGridPosition(quint64 absoluteBeat, int subdivision, bool running)
+void BeatGridWidget::setGridPosition(quint64 absoluteBeat, int subdivision, bool running, double beatPhase)
 {
+    const bool wasRunning = gridRunning_;
     gridBeat_ = absoluteBeat;
     gridSubdivision_ = subdivision;
+    gridBeatPhase_ = qBound(0.0, beatPhase, 0.999999);
     gridRunning_ = running;
     if (table_ == nullptr) {
         return;
@@ -516,6 +611,19 @@ void BeatGridWidget::setGridPosition(quint64 absoluteBeat, int subdivision, bool
     if (header == nullptr || !running) {
         if (header != nullptr) {
             header->setCurrentBeatColumn(-1);
+        }
+        if (mode() == Mode::Beat && wasRunning) {
+            const QSignalBlocker tableBlocker(table_);
+            for (int row = 0; row < table_->rowCount(); ++row) {
+                for (int column = 0; column < table_->columnCount(); ++column) {
+                    if (QTableWidgetItem* item = table_->item(row, column)) {
+                        if (item->data(kBeatActiveStepRole).toInt() != -1) {
+                            item->setData(kBeatActiveStepRole, -1);
+                        }
+                    }
+                }
+            }
+            table_->viewport()->update();
         }
         return;
     }
@@ -529,7 +637,46 @@ void BeatGridWidget::setGridPosition(quint64 absoluteBeat, int subdivision, bool
     }
     const int sectionBeat = static_cast<int>(absoluteBeat % static_cast<quint64>(beatsInSection));
     const int beatColumn = mode() == Mode::Chord ? sectionBeat + 1 : sectionBeat;
-    header->setCurrentBeatColumn(beatColumn >= 0 && beatColumn < table_->columnCount() ? beatColumn : -1);
+    header->setCurrentBeatColumn(
+        beatColumn >= 0 && beatColumn < table_->columnCount() ? beatColumn : -1,
+        gridBeatPhase_);
+    const int markerRow = mode() == Mode::Chord
+        ? activeSection * 3
+        : mode() == Mode::Beat
+            ? activeSection * (BeatGridModel::beatLaneNames().size() + 2) + 1
+            : 0;
+    if (table_->item(markerRow, beatColumn) != nullptr) {
+        QScrollBar* horizontal = table_->horizontalScrollBar();
+        if (horizontal != nullptr && horizontal->maximum() > 0) {
+            const int viewportMidpoint = table_->viewport()->width() / 2;
+            const int markerPosition = table_->columnViewportPosition(beatColumn) +
+                static_cast<int>(std::lround(gridBeatPhase_ * table_->columnWidth(beatColumn)));
+            if (markerPosition >= viewportMidpoint || markerPosition < 0) {
+                horizontal->setValue(qBound(
+                    horizontal->minimum(),
+                    horizontal->value() + markerPosition - viewportMidpoint,
+                    horizontal->maximum()));
+            }
+        }
+    }
+    if (mode() == Mode::Beat) {
+        const QSignalBlocker tableBlocker(table_);
+        for (int row = 0; row < table_->rowCount(); ++row) {
+            for (int column = 0; column < table_->columnCount(); ++column) {
+                QTableWidgetItem* item = table_->item(row, column);
+                if (!item || static_cast<BeatCellKind>(item->data(kBeatCellKindRole).toInt()) != BeatCellKind::Hit) {
+                    continue;
+                }
+                const int division = item->data(kBeatDivisionRole).toInt();
+                const int activeStep = column == beatColumn
+                    ? qBound(0, static_cast<int>(gridBeatPhase_ * division), division - 1) : -1;
+                if (item->data(kBeatActiveStepRole).toInt() != activeStep) {
+                    item->setData(kBeatActiveStepRole, activeStep);
+                }
+            }
+        }
+        table_->viewport()->update();
+    }
 }
 
 void BeatGridWidget::applyRemoteCell(int section, const QString& lane, int beat, const QString& text)
@@ -633,10 +780,12 @@ void BeatGridWidget::rebuildChordTable()
     table_->setColumnCount(0);
     table_->clear();
     table_->clearSpans();
-    table_->verticalHeader()->setVisible(false);
-    table_->setRowCount(model_->sections().size());
-    rowToSection_.fill(-1, model_->sections().size());
-    rowToLane_.fill(-1, model_->sections().size());
+    table_->verticalHeader()->setVisible(true);
+    const int rowsPerSection = 3;
+    const int rowCount = model_->sections().size() * rowsPerSection;
+    table_->setRowCount(rowCount);
+    rowToSection_.fill(-1, rowCount);
+    rowToLane_.fill(-1, rowCount);
     int maxBeats = 4;
     for (const SongSection& section : model_->sections()) {
         maxBeats = qMax(maxBeats, section.beats);
@@ -647,30 +796,60 @@ void BeatGridWidget::rebuildChordTable()
         headers << QStringLiteral("%1").arg(beat + 1);
     }
     table_->setHorizontalHeaderLabels(headers);
+    table_->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
+    table_->horizontalHeader()->setDefaultSectionSize(132);
     table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-    for (int row = 0; row < model_->sections().size(); ++row) {
-        const SongSection& section = model_->section(row);
-        rowToSection_[row] = row;
-        table_->setItem(row, 0, new QTableWidgetItem(sectionTitle(section)));
-        table_->setRowHeight(row, 40);
-        for (int beat = 0; beat < maxBeats; ++beat) {
-            auto* item = new QTableWidgetItem(beat < section.beats ? section.chords[beat] : QString());
-            if (beat >= section.beats) {
-                Qt::ItemFlags flags = item->flags();
-                flags &= ~Qt::ItemIsEditable;
-                flags &= ~Qt::ItemIsEnabled;
-                item->setFlags(flags);
-                item->setBackground(QBrush(QColor(34, 36, 38)));
+    QStringList rowLabels;
+    for (int sectionIndex = 0; sectionIndex < model_->sections().size(); ++sectionIndex) {
+        const SongSection& section = model_->section(sectionIndex);
+        const int firstRow = sectionIndex * rowsPerSection;
+        QVector<QString> derivedNotes(section.beats);
+        QString activeChord;
+        for (int beat = 0; beat < section.beats; ++beat) {
+            const QString chord = section.chords[beat].trimmed();
+            if (chord == QStringLiteral("-")) activeChord.clear();
+            else if (!chord.isEmpty()) activeChord = chord;
+            derivedNotes[beat] = jam2::practice::chordToneNames(activeChord);
+        }
+        rowLabels << QStringLiteral("Chords") << QStringLiteral("Notes") << QStringLiteral("Melody");
+        for (int lane = 0; lane < rowsPerSection; ++lane) {
+            const int row = firstRow + lane;
+            rowToSection_[row] = sectionIndex;
+            rowToLane_[row] = lane;
+            table_->setRowHeight(row, lane == 0 ? 40 : 34);
+            if (lane == 0) {
+                auto* header = new QTableWidgetItem(sectionTitle(section));
+                header->setData(kSectionHeaderRole, true);
+                header->setData(kSectionSelectedRole, selectedSection_ == sectionIndex);
+                table_->setItem(row, 0, header);
+                table_->setSpan(row, 0, rowsPerSection, 1);
             }
-            table_->setItem(row, beat + 1, item);
+            for (int beat = 0; beat < maxBeats; ++beat) {
+                QString text;
+                if (beat < section.beats) {
+                    text = lane == 0 ? section.chords[beat]
+                        : lane == 1 ? derivedNotes[beat]
+                        : section.targets[beat];
+                }
+                auto* item = new QTableWidgetItem(text);
+                if (beat >= section.beats || lane == 1) {
+                    Qt::ItemFlags flags = item->flags();
+                    flags &= ~Qt::ItemIsEditable;
+                    if (beat >= section.beats) flags &= ~Qt::ItemIsEnabled;
+                    item->setFlags(flags);
+                    item->setBackground(QBrush(beat >= section.beats ? QColor(34, 36, 38) : QColor(30, 39, 41)));
+                }
+                if (lane == 0) item->setToolTip(QStringLiteral("Blank sustains the previous chord; - is silence."));
+                if (lane == 2) {
+                    item->setToolTip(
+                        QStringLiteral("Generated melody note with octave; blank sustains and - rests."));
+                }
+                table_->setItem(row, beat + 1, item);
+            }
         }
     }
-    if (selectedSection_ >= 0 && selectedSection_ < model_->sections().size()) {
-        table_->selectRow(selectedSection_);
-    } else {
-        table_->clearSelection();
-        table_->setCurrentItem(nullptr);
-    }
+    table_->setVerticalHeaderLabels(rowLabels);
+    table_->clearSelection();
     table_->setUpdatesEnabled(true);
     updating_ = false;
 }
@@ -731,7 +910,9 @@ void BeatGridWidget::rebuildBeatTable()
         headerFlags |= Qt::ItemIsSelectable;
         headerFlags |= Qt::ItemIsEditable;
         header->setFlags(headerFlags);
-        header->setBackground(QBrush(selectedSection_ == sectionIndex ? QColor(48, 82, 112) : QColor(34, 38, 42)));
+        header->setData(kSectionHeaderRole, true);
+        header->setData(kSectionSelectedRole, selectedSection_ == sectionIndex);
+        header->setBackground(QBrush(QColor(34, 38, 42)));
         table_->setItem(row, 0, header);
         if (maxBeats > 1) {
             table_->setSpan(row, 0, 1, maxBeats);
@@ -793,17 +974,7 @@ void BeatGridWidget::rebuildBeatTable()
             ++row;
         }
     }
-    if (selectedSection_ >= 0 && selectedSection_ < model_->sections().size()) {
-        for (int candidate = 0; candidate < rowToSection_.size(); ++candidate) {
-            if (rowToSection_[candidate] == selectedSection_) {
-                table_->selectRow(candidate);
-                break;
-            }
-        }
-    } else {
-        table_->clearSelection();
-        table_->setCurrentItem(nullptr);
-    }
+    table_->clearSelection();
     table_->setUpdatesEnabled(true);
     updating_ = false;
 }
@@ -903,22 +1074,29 @@ void BeatGridWidget::selectSection(int section)
 {
     if (section < 0 || section >= model_->sections().size()) {
         selectedSection_ = -1;
-        if (!updating_) {
-            table_->clearSelection();
-            table_->setCurrentItem(nullptr);
-        }
     } else {
         selectedSection_ = section;
-        if (!updating_) {
-            for (int row = 0; row < rowToSection_.size(); ++row) {
-                if (rowToSection_[row] == section) {
-                    table_->selectRow(row);
-                    break;
-                }
-            }
+    }
+    updateSectionSelectionMarkers();
+    updateActionButtons();
+}
+
+void BeatGridWidget::updateSectionSelectionMarkers()
+{
+    if (updating_) {
+        return;
+    }
+    const QSignalBlocker tableBlocker(table_);
+    for (int row = 0; row < table_->rowCount(); ++row) {
+        QTableWidgetItem* item = table_->item(row, 0);
+        if (item && item->data(kSectionHeaderRole).toBool()) {
+            item->setData(
+                kSectionSelectedRole,
+                sectionForRow(row) == selectedSection_);
         }
     }
-    updateActionButtons();
+    table_->clearSelection();
+    table_->viewport()->update();
 }
 
 void BeatGridWidget::updateActionButtons()

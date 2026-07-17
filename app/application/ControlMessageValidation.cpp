@@ -74,7 +74,8 @@ bool validateTextArray(
 
 bool validateBeatGrid(const QJsonObject& grid, QString& reason)
 {
-    if (grid.value(QStringLiteral("format")).toString() != QStringLiteral("jam2.song.v1") ||
+    const QString format = grid.value(QStringLiteral("format")).toString();
+    if ((format != QStringLiteral("jam2.song.v1") && format != QStringLiteral("jam2.song.v2")) ||
         !isOptionalBoundedString(grid, QStringLiteral("title"), limits::kMaximumTitleCharacters) ||
         !isOptionalBoundedString(grid, QStringLiteral("lyrics_text"), limits::kMaximumLyricsCharacters) ||
         !grid.value(QStringLiteral("sections")).isArray()) {
@@ -95,14 +96,23 @@ bool validateBeatGrid(const QJsonObject& grid, QString& reason)
         }
         const QJsonObject section = sectionValue.toObject();
         const QJsonValue beatsValue = section.value(QStringLiteral("beats"));
+        const QJsonValue generatedBars = section.value(QStringLiteral("generated_bars"));
         const int beats = beatsValue.isUndefined() ? 8 : beatsValue.toInt(-1);
         if (!isOptionalBoundedString(section, QStringLiteral("label"), limits::kMaximumCellCharacters) ||
             !isOptionalBoundedString(section, QStringLiteral("name"), limits::kMaximumCellCharacters) ||
+            !isOptionalBoundedString(section, QStringLiteral("id"), limits::kMaximumCellCharacters) ||
+            !isOptionalBoundedString(section, QStringLiteral("generated_kind"), limits::kMaximumCellCharacters) ||
+            !isOptionalBoundedString(section, QStringLiteral("generated_key"), limits::kMaximumCellCharacters) ||
+            !isOptionalBoundedString(section, QStringLiteral("generated_style"), limits::kMaximumCellCharacters) ||
+            !isOptionalBoundedString(section, QStringLiteral("generated_character"), limits::kMaximumCellCharacters) ||
             (!beatsValue.isUndefined() && !isBoundedInteger(
                 beatsValue, limits::kMinimumBeatsPerSection, limits::kMaximumBeatsPerSection)) ||
+            (!generatedBars.isUndefined() && !isBoundedInteger(
+                generatedBars, 0, limits::kMaximumBeatsPerSection)) ||
             beats < limits::kMinimumBeatsPerSection ||
             beats > limits::kMaximumBeatsPerSection ||
             !validateTextArray(section, QStringLiteral("chords"), beats, reason) ||
+            !validateTextArray(section, QStringLiteral("targets"), beats, reason) ||
             !validateTextArray(section, QStringLiteral("beat_notes"), beats, reason) ||
             !validateTextArray(section, QStringLiteral("lyrics"), beats, reason)) {
             if (reason.isEmpty()) {
@@ -211,20 +221,26 @@ bool validateRemoteLooper(const QJsonObject& looper, QString& reason)
                 !isOptionalBoundedString(lane, QStringLiteral("asset_hash"), 64) ||
                 !isOptionalBoundedString(
                     lane, QStringLiteral("name"), limits::kMaximumLooperNameCharacters) ||
+                !isOptionalBoundedString(lane, QStringLiteral("reference_kind"), 16) ||
+                !isOptionalBoundedString(lane, QStringLiteral("reference_source_signature"), 64) ||
                 !isOptionalBoolean(lane, QStringLiteral("muted")) ||
                 !isOptionalBoolean(lane, QStringLiteral("solo")) ||
+                !isOptionalBoolean(lane, QStringLiteral("reference_stale")) ||
                 !isOptionalBoolean(lane, QStringLiteral("loop_enabled"))) {
                 reason = QStringLiteral("song looper lane fields are invalid");
                 return false;
             }
             const QString hash = lane.value(QStringLiteral("asset_hash")).toString();
+            const QString referenceSignature = lane.value(QStringLiteral("reference_source_signature")).toString();
             const QJsonValue sampleRate = lane.value(QStringLiteral("sample_rate"));
             const QJsonValue gain = lane.value(QStringLiteral("gain_db"));
+            const QJsonValue referenceBpm = lane.value(QStringLiteral("reference_bpm"));
             qint64 startFrame = 0;
             qint64 stopFrame = -1;
             qint64 loopStartFrame = -1;
             qint64 loopEndFrame = -1;
             if ((!hash.isEmpty() && !isSha256Hex(hash)) ||
+                (!referenceSignature.isEmpty() && !isSha256Hex(referenceSignature)) ||
                 (!sampleRate.isUndefined() &&
                  !isBoundedInteger(sampleRate, 0, limits::kMaximumSampleRate)) ||
                 (!hash.isEmpty() && !isBoundedInteger(
@@ -232,6 +248,9 @@ bool validateRemoteLooper(const QJsonObject& looper, QString& reason)
                 (!gain.isUndefined() &&
                  (!gain.isDouble() || !std::isfinite(gain.toDouble()) ||
                   gain.toDouble() < -120.0 || gain.toDouble() > 24.0)) ||
+                (!referenceBpm.isUndefined() &&
+                 (!referenceBpm.isDouble() || !std::isfinite(referenceBpm.toDouble()) ||
+                  referenceBpm.toDouble() < 0.0 || referenceBpm.toDouble() > 400.0)) ||
                 !readJsonFrame(lane.value(QStringLiteral("start_frame")), 0, startFrame) ||
                 !readJsonFrame(lane.value(QStringLiteral("stop_frame")), -1, stopFrame) ||
                 !readJsonFrame(lane.value(QStringLiteral("loop_start_frame")), -1, loopStartFrame) ||
@@ -415,7 +434,8 @@ bool jam2::application::validateControlMessage(
         const QString lane = message.value(QStringLiteral("lane")).toString();
         return isBoundedInteger(message.value(QStringLiteral("section")), 0, 63) &&
             isBoundedInteger(message.value(QStringLiteral("beat")), 0, 511) &&
-            (lane == QStringLiteral("chord") || lane == QStringLiteral("beat") ||
+            (lane == QStringLiteral("chord") || lane == QStringLiteral("target") ||
+             lane == QStringLiteral("beat") ||
              lane == QStringLiteral("lyric")) &&
             isBoundedString(message.value(QStringLiteral("text")), 4096)
             ? true : (reason = QStringLiteral("beat cell update is invalid"), false);

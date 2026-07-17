@@ -26,7 +26,7 @@ void GuiControlMessageRouter::dispatch(
     } else if (type == QStringLiteral("beat.set")) {
         const QString lane = message.value(QStringLiteral("lane")).toString();
         BeatGridModel* model = handlers.beatModel;
-        if (lane == QStringLiteral("chord")) {
+        if (lane == QStringLiteral("chord") || lane == QStringLiteral("target")) {
             model = handlers.chordModel;
         } else if (lane == QStringLiteral("lyric")) {
             model = handlers.lyricModel;

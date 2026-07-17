@@ -12,13 +12,20 @@ struct BeatPattern {
 };
 
 struct SongSection {
+    QString id;
     QString label = QStringLiteral("A");
     QString name = QStringLiteral("Verse");
-    int beats = 8;
+    int beats = 32;
     QVector<QString> chords;
+    QVector<QString> targets;
     QVector<QString> beatNotes;
     QVector<QString> lyrics;
     QVector<BeatPattern> beatPatterns;
+    QString generatedKind;
+    QString generatedKey;
+    QString generatedStyle;
+    QString generatedCharacter;
+    int generatedBars = 0;
 };
 
 class BeatGridModel {
@@ -31,6 +38,7 @@ public:
     const QVector<SongSection>& sections() const;
     SongSection& section(int index);
     const SongSection& section(int index) const;
+    bool hasOnlyPristineSection() const;
 
     void setCell(int section, const QString& lane, int beat, const QString& text);
     void setBeatDivision(int section, int beat, int division);
@@ -44,6 +52,7 @@ public:
     void deleteSection(int index);
     void renameSection(int index, const QString& label, const QString& name);
     void moveSection(int from, int to);
+    int replaceGeneratedSection(const QString& kind, SongSection section);
     void reset();
     QJsonObject toJson() const;
     bool loadJson(const QJsonObject& object);
@@ -53,6 +62,7 @@ public:
     static QString beatDivisionLabel(int division);
 
 private:
+    static QString sectionId(const QString& value = {});
     static int normalizedDivision(int division);
     static void normalize(SongSection& section);
 

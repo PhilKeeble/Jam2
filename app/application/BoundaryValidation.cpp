@@ -11,10 +11,17 @@
 #include "ProjectPersistenceCoordinator.hpp"
 #include "SharedTrackController.hpp"
 #include "TrackWidgets.hpp"
+#include "TrackWorkspaceController.hpp"
 #include "TrackWorkspaceSupport.hpp"
 #include "TrackRecordingWorkflow.hpp"
 #include "PlaybackGrid.hpp"
 #include "MetronomeTransportController.hpp"
+#include "MusicTheory.hpp"
+#include "PracticeIdeaGenerator.hpp"
+#include "PracticeIdeaController.hpp"
+#include "PracticeReferenceRenderer.hpp"
+#include "PreparedMixRenderer.hpp"
+#include "SharedTrackModel.hpp"
 
 #include "common.hpp"
 #include "engine.hpp"
@@ -32,6 +39,9 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTemporaryFile>
+#include <QThreadPool>
+#include <QUuid>
+#include <QtEndian>
 #include <QtGlobal>
 
 #include <algorithm>
@@ -49,6 +59,23 @@ std::filesystem::path nativeFilePath(const QString& path)
 #else
     return std::filesystem::path(path.toUtf8().constData());
 #endif
+}
+
+bool pcm16WavHasSignal(const QString& path, const jam2::wav::Pcm16Info& info)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly) ||
+        !file.seek(static_cast<qint64>(info.data_offset))) {
+        return false;
+    }
+    const QByteArray pcm = file.read(static_cast<qint64>(
+        qMin<std::uint64_t>(info.data_bytes, 1024ULL * 1024ULL)));
+    for (qsizetype offset = 0; offset + 1 < pcm.size(); offset += 2) {
+        const qint16 sample = qFromLittleEndian<qint16>(
+            reinterpret_cast<const uchar*>(pcm.constData() + offset));
+        if (std::abs(static_cast<int>(sample)) > 32) return true;
+    }
+    return false;
 }
 
 struct LooperLaneLocation {
@@ -484,6 +511,321 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         jam2::application::validateControlMessage(collaborativeSong, modelError),
         modelError);
     {
+        const SharedTrackModel defaults;
+        record(QStringLiteral("track.defaults-to-minus-ten-db-and-metronome-sync"),
+            defaults.trackGainDb == -10.0 && defaults.syncMetronome);
+    }
+    {
+        BeatGridModel model;
+        jam2::practice::ChordIdeaRequest request;
+        request.key = 4;
+        request.style = static_cast<int>(jam2::practice::ChordStyle::ModernMetal);
+        request.character = QStringLiteral("Chugging");
+        request.bars = 2;
+        request.beatsPerBar = 4;
+        const SongSection first = jam2::practice::generateChordIdeaForTest(request, 17);
+        const int firstIndex = model.replaceGeneratedSection(QStringLiteral("chord"), first);
+        const QString firstId = model.section(firstIndex).id;
+        const SongSection second = jam2::practice::generateChordIdeaForTest(request, 23);
+        const int secondIndex = model.replaceGeneratedSection(QStringLiteral("chord"), second);
+        record(QStringLiteral("practice.generation-replaces-pristine-eight-bar-placeholder"),
+            firstIndex == 0 && firstIndex == secondIndex &&
+            model.sections().size() == 1 &&
+            model.section(secondIndex).id == firstId &&
+            model.section(secondIndex).generatedKind == QStringLiteral("chord"));
+        BeatGridModel manualModel;
+        manualModel.setCell(0, QStringLiteral("chord"), 0, QStringLiteral("C"));
+        const int appendedIndex = manualModel.replaceGeneratedSection(QStringLiteral("chord"), first);
+        record(QStringLiteral("practice.generation-preserves-manual-section"),
+            appendedIndex == 1 && manualModel.sections().size() == 2 &&
+            manualModel.section(0).generatedKind.isEmpty() &&
+            manualModel.section(0).chords.value(0) == QStringLiteral("C"));
+        bool melodyValid = true;
+        bool chordChangesUseChordTones = true;
+        int previousMelody = -1;
+        int maximumMelodyLeap = 0;
+        for (int beatIndex = 0; beatIndex < model.section(secondIndex).beats; ++beatIndex) {
+            const QString melody = model.section(secondIndex).targets.value(beatIndex).trimmed();
+            if (melody.isEmpty() || melody == QStringLiteral("-")) continue;
+            const std::optional<int> midi = jam2::practice::parseMidiNote(melody);
+            melodyValid = melodyValid && midi.has_value();
+            if (!midi) continue;
+            if (previousMelody >= 0) {
+                maximumMelodyLeap = qMax(maximumMelodyLeap, std::abs(*midi - previousMelody));
+            }
+            previousMelody = *midi;
+            const QString chordSymbol = model.section(secondIndex).chords.value(beatIndex).trimmed();
+            if (!chordSymbol.isEmpty() && chordSymbol != QStringLiteral("-")) {
+                const jam2::practice::ParsedChord parsed = jam2::practice::parseChord(chordSymbol);
+                const int relative = ((*midi % 12) - parsed.root + 12) % 12;
+                chordChangesUseChordTones = chordChangesUseChordTones &&
+                    parsed.intervals.contains(relative);
+            }
+        }
+        record(QStringLiteral("practice.melody-and-chord-symbols-are-coherent"),
+            model.section(secondIndex).targets.size() == model.section(secondIndex).beats &&
+            std::any_of(model.section(secondIndex).targets.cbegin(), model.section(secondIndex).targets.cend(),
+                [](const QString& value) { return !value.isEmpty(); }) &&
+            std::all_of(model.section(secondIndex).targets.cbegin(), model.section(secondIndex).targets.cend(),
+                [](const QString& value) { return !value.trimmed().isEmpty(); }) &&
+            melodyValid && chordChangesUseChordTones && maximumMelodyLeap <= 6 &&
+            std::all_of(model.section(secondIndex).chords.cbegin(), model.section(secondIndex).chords.cend(),
+                [](const QString& chord) {
+                    return chord.isEmpty() || jam2::practice::parseChord(chord).valid;
+                }));
+        jam2::practice::ChordIdeaRequest constrainedRandom;
+        constrainedRandom.character = QStringLiteral("Phrygian");
+        constrainedRandom.bars = 1;
+        constrainedRandom.beatsPerBar = 4;
+        const SongSection modalMetal =
+            jam2::practice::generateChordIdeaForTest(constrainedRandom, 41);
+        record(QStringLiteral("practice.random-style-honors-selected-character"),
+            modalMetal.generatedStyle == QStringLiteral("Modern Metal") &&
+            modalMetal.generatedCharacter == QStringLiteral("Phrygian"));
+        const jam2::practice::GeneratedPracticeIdea coupled =
+            jam2::practice::generateCoupledPracticeIdeaForTest(request, 29);
+        record(QStringLiteral("practice.coupled-generation-matches-style-length-and-click"),
+            coupled.chordSection.beats == coupled.beatSection.beats &&
+            coupled.beatSection.generatedStyle == QStringLiteral("Modern Metal") &&
+            coupled.bpm >= 110 && coupled.bpm <= 180 &&
+            coupled.clickDivision == 4 &&
+            coupled.clickEnabled.size() == request.beatsPerBar * coupled.clickDivision &&
+            coupled.clickAccents.size() == coupled.clickEnabled.size());
+
+        QJsonObject v1 = model.toJson();
+        v1[QStringLiteral("format")] = QStringLiteral("jam2.song.v1");
+        BeatGridModel migrated;
+        record(QStringLiteral("practice.song-v1-migrates-to-v2"),
+            migrated.loadJson(v1) &&
+            migrated.toJson().value(QStringLiteral("format")).toString() == QStringLiteral("jam2.song.v2"));
+    }
+    {
+        jam2::practice::BeatIdeaRequest request;
+        request.style = static_cast<int>(jam2::practice::BeatStyle::ModernMetal);
+        request.character = QStringLiteral("Chugging");
+        request.bars = 32;
+        request.beatsPerBar = 4;
+        const SongSection beat = jam2::practice::generateBeatIdeaForTest(request, 5);
+        const int guitar = BeatGridModel::beatLaneNames().indexOf(QStringLiteral("Guitar"));
+        const int bass = BeatGridModel::beatLaneNames().indexOf(QStringLiteral("Bass"));
+        record(QStringLiteral("practice.metal-beat-includes-related-visual-lanes"),
+            beat.beatPatterns.size() == beat.beats && guitar >= 0 && bass >= 0 &&
+            std::any_of(beat.beatPatterns.cbegin(), beat.beatPatterns.cend(),
+                [guitar, bass](const BeatPattern& pattern) {
+                    return pattern.lanes.value(guitar).contains(QLatin1Char('x')) &&
+                        pattern.lanes.value(bass).contains(QLatin1Char('x'));
+                }));
+        const int tom = BeatGridModel::beatLaneNames().indexOf(QStringLiteral("Tom"));
+        const int fillBeats = static_cast<int>(std::count_if(
+            beat.beatPatterns.cbegin(), beat.beatPatterns.cend(),
+            [tom](const BeatPattern& pattern) {
+                return tom >= 0 && !pattern.lanes.value(tom).trimmed().isEmpty();
+            }));
+        record(QStringLiteral("practice.long-beat-fills-are-phrase-aware-and-sparse"),
+            fillBeats > 0 && fillBeats <= beat.generatedBars / 2 &&
+            !beat.beatPatterns.constLast().lanes.value(tom).trimmed().isEmpty());
+        record(QStringLiteral("track.timeline-labels-every-beat"),
+            jam2::gui::trackTimelineBeatNumber(0) == 1 &&
+            jam2::gui::trackTimelineBeatNumber(15) == 16);
+    }
+    {
+        jam2::practice::ChordIdeaRequest request;
+        request.key = 0;
+        request.style = static_cast<int>(jam2::practice::ChordStyle::FunctionalPop);
+        request.character = QStringLiteral("Bright");
+        request.bars = 32;
+        request.beatsPerBar = 4;
+        BeatGridModel chordModel;
+        BeatGridModel beatModel;
+        const std::optional<jam2::practice::GeneratedPracticeIdea> idea =
+            jam2::practice::PracticeIdeaController::generateCoupled(
+                chordModel, beatModel, request);
+        BeatGridModel serializedChordModel;
+        BeatGridModel serializedBeatModel;
+        const bool modelRoundTrip = idea &&
+            serializedChordModel.loadJson(chordModel.toJson()) &&
+            serializedBeatModel.loadJson(beatModel.toJson());
+        const std::optional<SongSection> chord =
+            jam2::practice::PracticeIdeaController::generatedSection(
+                serializedChordModel, QStringLiteral("chord"));
+        const std::optional<SongSection> beat =
+            jam2::practice::PracticeIdeaController::generatedSection(
+                serializedBeatModel, QStringLiteral("beat"));
+        jam2::practice::ReferenceRenderSettings settings;
+        settings.sampleRate = 8000;
+        settings.bpm = idea ? idea->bpm : 120.0;
+        settings.renderMelody = true;
+        const qint64 expectedFrames = idea ? static_cast<qint64>(std::ceil(
+            static_cast<double>(idea->chordSection.beats) * 60.0 /
+            static_cast<double>(idea->bpm) * settings.sampleRate)) : 0;
+        const QString workspace = QDir::current().absoluteFilePath(
+            QStringLiteral("build/practice-reference-test-") +
+            QUuid::createUuid().toString(QUuid::WithoutBraces));
+        const bool workspaceReady = QDir().mkpath(workspace);
+        const jam2::practice::ReferenceRenderResult rendered =
+            jam2::practice::renderPracticeReferences(
+                chord ? &*chord : nullptr, beat ? &*beat : nullptr, settings, workspace);
+        const jam2::wav::InspectResult chordWav = rendered.chords.path.isEmpty()
+            ? jam2::wav::InspectResult{} : jam2::wav::inspect_pcm16_file(
+                nativeFilePath(rendered.chords.path), 4ULL * 1024ULL * 1024ULL);
+        const jam2::wav::InspectResult drumWav = rendered.drums.path.isEmpty()
+            ? jam2::wav::InspectResult{} : jam2::wav::inspect_pcm16_file(
+                nativeFilePath(rendered.drums.path), 4ULL * 1024ULL * 1024ULL);
+        const jam2::wav::InspectResult melodyWav = rendered.melody.path.isEmpty()
+            ? jam2::wav::InspectResult{} : jam2::wav::inspect_pcm16_file(
+                nativeFilePath(rendered.melody.path), 4ULL * 1024ULL * 1024ULL);
+        LooperProject preparedProject;
+        QString applyError;
+        const bool referencesApplied =
+            jam2::practice::PracticeIdeaController::applyReferences(
+                preparedProject, 0, settings, rendered, applyError);
+        const QString preparedPath = PreparedMixRenderer::outputPath(workspace, 0, 1);
+        const QString nextPreparedPath = PreparedMixRenderer::outputPath(workspace, 0, 2);
+        const PreparedMixResult prepared = referencesApplied
+            ? PreparedMixRenderer::render(
+                preparedProject, workspace, settings.sampleRate, preparedPath, SharedTrackModel{})
+            : PreparedMixResult{};
+        record(QStringLiteral("practice.coupled-32-bar-references-use-exact-view-length"),
+            modelRoundTrip && chord && beat && workspaceReady && rendered.error.isEmpty() &&
+            chord->generatedBars == 32 && beat->generatedBars == 32 &&
+            chord->beats == 128 && beat->beats == 128 &&
+            rendered.chords.frames == expectedFrames &&
+            rendered.chords.frames == rendered.drums.frames &&
+            rendered.chords.frames == rendered.melody.frames &&
+            chordWav && drumWav && melodyWav &&
+            chordWav.info.sample_rate == 8000 && drumWav.info.sample_rate == 8000 &&
+            melodyWav.info.sample_rate == 8000 &&
+            chordWav.info.channels == 1 && drumWav.info.channels == 1 &&
+            melodyWav.info.channels == 1 &&
+            pcm16WavHasSignal(rendered.chords.path, chordWav.info) &&
+            pcm16WavHasSignal(rendered.drums.path, drumWav.info) &&
+            pcm16WavHasSignal(rendered.melody.path, melodyWav.info),
+            rendered.error);
+        record(QStringLiteral("practice.replacement-prepared-mix-has-new-path-and-full-duration"),
+            referencesApplied && applyError.isEmpty() &&
+            prepared.error.isEmpty() &&
+            prepared.path == preparedPath &&
+            preparedPath != nextPreparedPath &&
+            QDir::cleanPath(preparedPath).startsWith(QDir::cleanPath(workspace)) &&
+            prepared.frames == expectedFrames,
+            prepared.error.isEmpty() ? applyError : prepared.error);
+        (void)QDir(workspace).removeRecursively();
+    }
+    {
+        LooperProject project;
+        LooperLane lane;
+        lane.name = QStringLiteral("Practice Chords");
+        lane.referenceKind = QStringLiteral("chord");
+        lane.referenceSourceSignature = QString(64, QLatin1Char('a'));
+        lane.referenceBpm = 137.0;
+        lane.referenceStale = true;
+        const bool appended = project.appendLane(0, lane);
+        LooperProject loaded;
+        const bool loadedOk = loaded.loadJson(project.toJson());
+        record(QStringLiteral("practice.reference-metadata-roundtrip"),
+            appended && loadedOk && loaded.banks().at(0).lanes.at(0).referenceKind == QStringLiteral("chord") &&
+            loaded.banks().at(0).lanes.at(0).referenceBpm == 137.0 &&
+            loaded.banks().at(0).lanes.at(0).referenceStale);
+    }
+    {
+        LooperProject project;
+        for (int index = 0; index < 2; ++index) {
+            LooperLane lane;
+            lane.name = QStringLiteral("Old Practice Chords");
+            lane.referenceKind = QStringLiteral("chord");
+            lane.referenceSourceSignature = QString(64, QLatin1Char('b'));
+            (void)project.appendLane(0, lane);
+        }
+        jam2::practice::ReferenceRenderSettings settings;
+        settings.renderChords = true;
+        settings.renderDrums = false;
+        settings.renderMelody = true;
+        jam2::practice::ReferenceRenderResult result;
+        // Metadata-only fixture paths: applyReferences does not access files.
+        result.chords = {
+            QStringLiteral("test-fixtures/reference.wav"), QString(64, QLatin1Char('c')), 48000};
+        result.melody = {
+            QStringLiteral("test-fixtures/melody.wav"), QString(64, QLatin1Char('e')), 48000};
+        result.sourceSignature = QString(64, QLatin1Char('d'));
+        QString applyError;
+        const bool applied = jam2::practice::PracticeIdeaController::applyReferences(
+            project, 0, settings, result, applyError);
+        const int managedCount = static_cast<int>(std::count_if(
+            project.banks().at(0).lanes.cbegin(), project.banks().at(0).lanes.cend(),
+            [](const LooperLane& lane) { return lane.referenceKind == QStringLiteral("chord"); }));
+        const int melodyCount = static_cast<int>(std::count_if(
+            project.banks().at(0).lanes.cbegin(), project.banks().at(0).lanes.cend(),
+            [](const LooperLane& lane) { return lane.referenceKind == QStringLiteral("melody"); }));
+        record(QStringLiteral("practice.reference-apply-manages-chord-and-melody-lanes"),
+            applied && applyError.isEmpty() && managedCount == 1 &&
+            melodyCount == 1 &&
+            std::any_of(project.banks().at(0).lanes.cbegin(), project.banks().at(0).lanes.cend(),
+                [&result](const LooperLane& lane) {
+                    return lane.referenceKind == QStringLiteral("melody") &&
+                        lane.assetHash == result.melody.sha256;
+                }),
+            applyError);
+    }
+    {
+        LooperProject project;
+        LooperLane generatedLane;
+        generatedLane.name = QStringLiteral("Practice Drums");
+        generatedLane.referenceKind = QStringLiteral("drum");
+        LooperLane manualLane;
+        manualLane.name = QStringLiteral("Manual take");
+        const bool generatedApplied = project.appendLane(0, generatedLane);
+        const bool manualApplied = project.appendLane(0, manualLane);
+
+        jam2::practice::PracticeIdeaController::clearReferences(project);
+
+        record(QStringLiteral("practice.new-idea-clears-only-generated-reference-lanes"),
+            generatedApplied && manualApplied &&
+            project.banks().at(0).lanes.size() == 1 &&
+            project.banks().at(0).lanes.front().referenceKind.isEmpty() &&
+            project.banks().at(0).lanes.front().name == QStringLiteral("Manual take"));
+    }
+    {
+        const QString root = QDir::current().absoluteFilePath(
+            QStringLiteral("build/project-persistence-test-") +
+            QUuid::createUuid().toString(QUuid::WithoutBraces));
+        const QString workspace = QDir(root).absoluteFilePath(QStringLiteral("staging"));
+        const QString transientPath =
+            QDir(workspace).absoluteFilePath(QStringLiteral("wavs/generated.wav"));
+        const QString obsoletePath =
+            QDir(workspace).absoluteFilePath(QStringLiteral("wavs/obsolete.wav"));
+        const QString savedPath =
+            QDir(root).absoluteFilePath(QStringLiteral("project/wavs/generated.wav"));
+        const bool foldersReady =
+            QDir().mkpath(QFileInfo(transientPath).absolutePath()) &&
+            QDir().mkpath(QFileInfo(savedPath).absolutePath());
+        auto writeFixture = [](const QString& path) {
+            QFile file(path);
+            return file.open(QIODevice::WriteOnly) &&
+                file.write("fixture", 7) == 7;
+        };
+        const bool filesReady = foldersReady &&
+            writeFixture(transientPath) && writeFixture(obsoletePath) &&
+            writeFixture(savedPath);
+        ProjectPersistenceCoordinator persistence;
+        persistence.initializeWorkspace(workspace);
+        persistence.registerTransientWav(transientPath);
+        persistence.registerTransientWav(obsoletePath);
+        const bool obsoleteDiscarded = persistence.discardTransientWav(obsoletePath);
+        persistence.acceptSavedProject(
+            QDir(root).absoluteFilePath(QStringLiteral("project/song.jam2song")),
+            QByteArrayLiteral("snapshot"),
+            QSet<QString>{savedPath});
+        QThreadPool cleanupPool;
+        cleanupPool.setMaxThreadCount(1);
+        persistence.scheduleTransientCleanup(cleanupPool);
+        cleanupPool.waitForDone();
+        record(QStringLiteral("project.temporary-wavs-cleaned-and-saved-copy-retained"),
+            filesReady && obsoleteDiscarded &&
+            !QFileInfo::exists(obsoletePath) &&
+            !QFileInfo::exists(transientPath) && QFileInfo::exists(savedPath));
+        (void)QDir(root).removeRecursively();
+    }
+    {
         LooperProject local;
         LooperLane incompatible;
         incompatible.id = QStringLiteral("local-wrong-rate");
@@ -717,6 +1059,30 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             SharedTrackController::PlaybackPhase::Stopped;
         record(QStringLiteral("track-playback.typed-state-through-asset-ready-transport"),
             waitingAssets && waitingTransport && playing && stopPending && stopped);
+    }
+    {
+        ApplicationRuntime runtime;
+        TrackWorkspaceController workspace(runtime);
+        workspace.playPreparedMixWhenReady = true;
+        workspace.pendingPreparedTrackReadyRevision = 12;
+        workspace.pendingSharedTrackRevision = 12;
+        workspace.pendingSharedTrackHostReady = false;
+        workspace.pendingSharedTrackReadyTokens.insert(QStringLiteral("peer"));
+        workspace.publishStoppedTrackStateWhenApplied = true;
+        workspace.pendingSongTrackRestart = true;
+        workspace.trackController.requestPlayback(true, 12);
+
+        workspace.cancelPendingTrackPlayback();
+
+        record(QStringLiteral("practice.generate-cancels-track-playback-and-restarts"),
+            !workspace.playPreparedMixWhenReady &&
+            workspace.pendingPreparedTrackReadyRevision == 0 &&
+            workspace.pendingSharedTrackRevision == 0 &&
+            workspace.pendingSharedTrackHostReady &&
+            workspace.pendingSharedTrackReadyTokens.isEmpty() &&
+            !workspace.publishStoppedTrackStateWhenApplied &&
+            !workspace.pendingSongTrackRestart &&
+            !workspace.trackController.playback().requestedPlaying);
     }
     {
         Jam2RuntimeHost requestIds;

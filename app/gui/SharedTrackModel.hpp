@@ -16,11 +16,12 @@ struct SharedTrackModel {
     QString key = QStringLiteral("Unknown");
     double speed = 1.0;
     int pitchCents = 0;
-    double trackGainDb = 0.0;
+    double trackGainDb = -10.0;
     bool loopEnabled = true;
     double loopStartSeconds = -1.0;
     double loopEndSeconds = -1.0;
     bool syncControls = true;
+    bool syncMetronome = true;
     bool focusEnabled = false;
     QString focusPreset = QStringLiteral("custom");
     double focusFrequencyHz = 120.0;

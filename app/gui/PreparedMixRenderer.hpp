@@ -5,6 +5,8 @@
 
 #include <QString>
 
+#include <cstdint>
+
 struct PreparedMixResult {
     QString path;
     qint64 frames = 0;
@@ -18,6 +20,11 @@ struct PreparedMixResult {
 
 class PreparedMixRenderer {
 public:
+    static QString outputPath(
+        const QString& workspaceFolder,
+        int bankIndex,
+        std::uint64_t generation);
+
     // PCM16 WAV only. Rendering is caller-thread/offline work and never runs
     // in an audio callback.
     static PreparedMixResult render(

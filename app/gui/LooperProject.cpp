@@ -90,7 +90,9 @@ bool LooperProject::appendLane(int bankIndex, LooperLane lane)
 {
     if (bankIndex < 0 || bankIndex >= banks_.size() || banks_[bankIndex].lanes.size() >= kMaxLanesPerBank ||
         lane.id.size() > kMaxIdCharacters || lane.name.size() > kMaxNameCharacters ||
-        lane.assetPath.size() > kMaxPathCharacters || !validAssetHash(lane.assetHash)) {
+        lane.assetPath.size() > kMaxPathCharacters || !validAssetHash(lane.assetHash) ||
+        lane.referenceKind.size() > 16 || !validAssetHash(lane.referenceSourceSignature) ||
+        !std::isfinite(lane.referenceBpm) || lane.referenceBpm < 0.0 || lane.referenceBpm > 400.0) {
         return false;
     }
     lane.id = laneId(lane.id);
@@ -165,7 +167,10 @@ QJsonObject LooperProject::toJson(bool syncCompatibleOnly) const
                 {"name", lane.name}, {"sample_rate", lane.sampleRate},
                 {"start_frame", QString::number(lane.startFrame)}, {"stop_frame", QString::number(lane.stopFrame)},
                 {"loop_start_frame", QString::number(lane.loopStartFrame)}, {"loop_end_frame", QString::number(lane.loopEndFrame)},
-                {"gain_db", lane.gainDb}, {"muted", lane.muted}, {"solo", lane.solo}, {"loop_enabled", lane.loopEnabled}});
+                {"gain_db", lane.gainDb}, {"muted", lane.muted}, {"solo", lane.solo}, {"loop_enabled", lane.loopEnabled},
+                {"reference_kind", lane.referenceKind}, {"reference_source_signature", lane.referenceSourceSignature},
+                {"reference_bpm", lane.referenceBpm},
+                {"reference_stale", lane.referenceStale}});
         }
         banks.append(QJsonObject{{"id", bank.id}, {"lanes", lanes}});
     }
@@ -196,7 +201,8 @@ bool LooperProject::loadJson(const QJsonObject& object)
             const QJsonObject laneObject = value.toObject();
             for (const QString& key : {
                     QStringLiteral("id"), QStringLiteral("asset_path"),
-                    QStringLiteral("asset_hash"), QStringLiteral("name")}) {
+                    QStringLiteral("asset_hash"), QStringLiteral("name"),
+                    QStringLiteral("reference_kind"), QStringLiteral("reference_source_signature")}) {
                 const QJsonValue text = laneObject.value(key);
                 if (!text.isUndefined() && !text.isString()) {
                     return false;
@@ -210,7 +216,8 @@ bool LooperProject::loadJson(const QJsonObject& object)
                 }
             }
             for (const QString& key : {
-                    QStringLiteral("muted"), QStringLiteral("solo"), QStringLiteral("loop_enabled")}) {
+                    QStringLiteral("muted"), QStringLiteral("solo"), QStringLiteral("loop_enabled"),
+                    QStringLiteral("reference_stale")}) {
                 const QJsonValue flag = laneObject.value(key);
                 if (!flag.isUndefined() && !flag.isBool()) {
                     return false;
@@ -218,6 +225,12 @@ bool LooperProject::loadJson(const QJsonObject& object)
             }
             const QJsonValue gain = laneObject.value(QStringLiteral("gain_db"));
             if (!gain.isUndefined() && (!gain.isDouble() || !std::isfinite(gain.toDouble()))) {
+                return false;
+            }
+            const QJsonValue referenceBpm = laneObject.value(QStringLiteral("reference_bpm"));
+            if (!referenceBpm.isUndefined() &&
+                (!referenceBpm.isDouble() || !std::isfinite(referenceBpm.toDouble()) ||
+                 referenceBpm.toDouble() < 0.0 || referenceBpm.toDouble() > 400.0)) {
                 return false;
             }
             const QJsonValue sampleRate = laneObject.value(QStringLiteral("sample_rate"));
@@ -241,9 +254,15 @@ bool LooperProject::loadJson(const QJsonObject& object)
             lane.muted = laneObject.value(QStringLiteral("muted")).toBool();
             lane.solo = laneObject.value(QStringLiteral("solo")).toBool();
             lane.loopEnabled = laneObject.value(QStringLiteral("loop_enabled")).toBool();
+            lane.referenceKind = laneObject.value(QStringLiteral("reference_kind")).toString();
+            lane.referenceSourceSignature = laneObject.value(QStringLiteral("reference_source_signature")).toString();
+            lane.referenceBpm = laneObject.value(QStringLiteral("reference_bpm")).toDouble();
+            lane.referenceStale = laneObject.value(QStringLiteral("reference_stale")).toBool();
             if (lane.id.size() > kMaxIdCharacters || lane.name.size() > kMaxNameCharacters ||
                 lane.assetPath.size() > kMaxPathCharacters || !validAssetHash(lane.assetHash) ||
+                lane.referenceKind.size() > 16 || !validAssetHash(lane.referenceSourceSignature) ||
                 !std::isfinite(lane.gainDb) || lane.gainDb < -120.0 || lane.gainDb > 24.0 ||
+                !std::isfinite(lane.referenceBpm) || lane.referenceBpm < 0.0 || lane.referenceBpm > 400.0 ||
                 lane.startFrame < 0 ||
                 (lane.stopFrame >= 0 && lane.stopFrame < lane.startFrame) ||
                 (lane.loopStartFrame >= 0 && lane.loopEndFrame >= 0 && lane.loopEndFrame <= lane.loopStartFrame)) {

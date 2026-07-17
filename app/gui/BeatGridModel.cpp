@@ -4,7 +4,9 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QUuid>
 
+#include <algorithm>
 #include <cmath>
 
 namespace {
@@ -69,6 +71,31 @@ const SongSection& BeatGridModel::section(int index) const
     return sections_[index];
 }
 
+bool BeatGridModel::hasOnlyPristineSection() const
+{
+    if (sections_.size() != 1) {
+        return false;
+    }
+    const SongSection& section = sections_.front();
+    if (!section.generatedKind.isEmpty() || section.label != QStringLiteral("A") ||
+        section.name != QStringLiteral("Verse") || section.beats != 32) {
+        return false;
+    }
+    const auto allEmpty = [](const QVector<QString>& values) {
+        return std::all_of(values.cbegin(), values.cend(),
+            [](const QString& value) { return value.trimmed().isEmpty(); });
+    };
+    if (!allEmpty(section.chords) || !allEmpty(section.targets) ||
+        !allEmpty(section.beatNotes) || !allEmpty(section.lyrics)) {
+        return false;
+    }
+    return std::all_of(section.beatPatterns.cbegin(), section.beatPatterns.cend(),
+        [](const BeatPattern& pattern) {
+            return std::all_of(pattern.lanes.cbegin(), pattern.lanes.cend(),
+                [](const QString& lane) { return lane.trimmed().isEmpty(); });
+        });
+}
+
 void BeatGridModel::setCell(int sectionIndex, const QString& lane, int beat, const QString& text)
 {
     if (sectionIndex < 0 || sectionIndex >= sections_.size() || beat < 0) {
@@ -81,6 +108,8 @@ void BeatGridModel::setCell(int sectionIndex, const QString& lane, int beat, con
     }
     if (lane == QStringLiteral("chord")) {
         section.chords[beat] = text.left(kMaxCellCharacters);
+    } else if (lane == QStringLiteral("target")) {
+        section.targets[beat] = text.left(kMaxCellCharacters);
     } else if (lane == QStringLiteral("beat")) {
         section.beatNotes[beat] = text.left(kMaxCellCharacters);
     } else if (lane == QStringLiteral("lyric")) {
@@ -159,7 +188,7 @@ void BeatGridModel::addSection(int beats)
     SongSection section;
     section.label = QString(QChar(static_cast<ushort>('A' + (sections_.size() % 26))));
     section.name = QStringLiteral("Section");
-    section.beats = beats > 0 ? beats : (sections_.isEmpty() ? 8 : sections_.back().beats);
+    section.beats = beats > 0 ? beats : (sections_.isEmpty() ? 32 : sections_.back().beats);
     normalize(section);
     sections_.push_back(section);
     ++revision_;
@@ -171,6 +200,12 @@ void BeatGridModel::duplicateSection(int index)
         return;
     }
     SongSection copy = sections_[index];
+    copy.id = sectionId();
+    copy.generatedKind.clear();
+    copy.generatedKey.clear();
+    copy.generatedStyle.clear();
+    copy.generatedCharacter.clear();
+    copy.generatedBars = 0;
     copy.label += QStringLiteral(" copy");
     sections_.insert(index + 1, copy);
     ++revision_;
@@ -204,6 +239,36 @@ void BeatGridModel::moveSection(int from, int to)
     ++revision_;
 }
 
+int BeatGridModel::replaceGeneratedSection(const QString& kind, SongSection section)
+{
+    const QString normalizedKind = kind.trimmed().left(kMaxCellCharacters);
+    if (normalizedKind.isEmpty()) {
+        return -1;
+    }
+    section.generatedKind = normalizedKind;
+    normalize(section);
+    for (int index = 0; index < sections_.size(); ++index) {
+        if (sections_[index].generatedKind == normalizedKind) {
+            section.id = sections_[index].id;
+            sections_[index] = std::move(section);
+            ++revision_;
+            return index;
+        }
+    }
+    if (hasOnlyPristineSection()) {
+        section.id = sections_.front().id;
+        sections_.front() = std::move(section);
+        ++revision_;
+        return 0;
+    }
+    if (sections_.size() >= kMaxSections) {
+        return -1;
+    }
+    sections_.push_back(std::move(section));
+    ++revision_;
+    return sections_.size() - 1;
+}
+
 void BeatGridModel::reset()
 {
     title_ = QStringLiteral("Untitled Jam");
@@ -220,11 +285,15 @@ QJsonObject BeatGridModel::toJson() const
     QJsonArray sections;
     for (const SongSection& section : sections_) {
         QJsonArray chords;
+        QJsonArray targets;
         QJsonArray beatNotes;
         QJsonArray lyrics;
         QJsonArray beatPatterns;
         for (const QString& value : section.chords) {
             chords.append(value);
+        }
+        for (const QString& value : section.targets) {
+            targets.append(value);
         }
         for (const QString& value : section.beatNotes) {
             beatNotes.append(value);
@@ -243,17 +312,24 @@ QJsonObject BeatGridModel::toJson() const
             });
         }
         sections.append(QJsonObject{
+            {QStringLiteral("id"), section.id},
             {QStringLiteral("label"), section.label},
             {QStringLiteral("name"), section.name},
             {QStringLiteral("beats"), section.beats},
             {QStringLiteral("chords"), chords},
+            {QStringLiteral("targets"), targets},
             {QStringLiteral("beat_notes"), beatNotes},
             {QStringLiteral("lyrics"), lyrics},
             {QStringLiteral("beat_patterns"), beatPatterns},
+            {QStringLiteral("generated_kind"), section.generatedKind},
+            {QStringLiteral("generated_key"), section.generatedKey},
+            {QStringLiteral("generated_style"), section.generatedStyle},
+            {QStringLiteral("generated_character"), section.generatedCharacter},
+            {QStringLiteral("generated_bars"), section.generatedBars},
         });
     }
     return QJsonObject{
-        {QStringLiteral("format"), QStringLiteral("jam2.song.v1")},
+        {QStringLiteral("format"), QStringLiteral("jam2.song.v2")},
         {QStringLiteral("title"), title_},
         {QStringLiteral("lyrics_text"), lyricsText_},
         {QStringLiteral("sections"), sections},
@@ -262,7 +338,8 @@ QJsonObject BeatGridModel::toJson() const
 
 bool BeatGridModel::loadJson(const QJsonObject& object)
 {
-    if (object.value(QStringLiteral("format")).toString() != QStringLiteral("jam2.song.v1")) {
+    const QString format = object.value(QStringLiteral("format")).toString();
+    if (format != QStringLiteral("jam2.song.v1") && format != QStringLiteral("jam2.song.v2")) {
         return false;
     }
     if (!object.value(QStringLiteral("sections")).isArray() ||
@@ -282,41 +359,64 @@ bool BeatGridModel::loadJson(const QJsonObject& object)
             return false;
         }
         const QJsonObject item = value.toObject();
-        if ((!item.value(QStringLiteral("label")).isUndefined() && !item.value(QStringLiteral("label")).isString()) ||
+        if ((!item.value(QStringLiteral("id")).isUndefined() && !item.value(QStringLiteral("id")).isString()) ||
+            (!item.value(QStringLiteral("label")).isUndefined() && !item.value(QStringLiteral("label")).isString()) ||
             (!item.value(QStringLiteral("name")).isUndefined() && !item.value(QStringLiteral("name")).isString()) ||
-            (!item.value(QStringLiteral("beats")).isUndefined() && !item.value(QStringLiteral("beats")).isDouble())) {
+            (!item.value(QStringLiteral("generated_kind")).isUndefined() && !item.value(QStringLiteral("generated_kind")).isString()) ||
+            (!item.value(QStringLiteral("generated_key")).isUndefined() && !item.value(QStringLiteral("generated_key")).isString()) ||
+            (!item.value(QStringLiteral("generated_style")).isUndefined() && !item.value(QStringLiteral("generated_style")).isString()) ||
+            (!item.value(QStringLiteral("generated_character")).isUndefined() && !item.value(QStringLiteral("generated_character")).isString()) ||
+            (!item.value(QStringLiteral("beats")).isUndefined() && !item.value(QStringLiteral("beats")).isDouble()) ||
+            (!item.value(QStringLiteral("generated_bars")).isUndefined() && !item.value(QStringLiteral("generated_bars")).isDouble())) {
             return false;
         }
         SongSection section;
+        section.id = sectionId(item.value(QStringLiteral("id")).toString());
         section.label = item.value(QStringLiteral("label")).toString(QStringLiteral("A"));
         section.name = item.value(QStringLiteral("name")).toString(QStringLiteral("Section"));
         section.beats = item.value(QStringLiteral("beats")).toInt(8);
+        section.generatedKind = item.value(QStringLiteral("generated_kind")).toString();
+        section.generatedKey = item.value(QStringLiteral("generated_key")).toString();
+        section.generatedStyle = item.value(QStringLiteral("generated_style")).toString();
+        section.generatedCharacter = item.value(QStringLiteral("generated_character")).toString();
+        section.generatedBars = item.value(QStringLiteral("generated_bars")).toInt();
         const double beatsValue = item.value(QStringLiteral("beats")).toDouble(8.0);
+        const double generatedBarsValue = item.value(QStringLiteral("generated_bars")).toDouble(0.0);
         if (!std::isfinite(beatsValue) || std::floor(beatsValue) != beatsValue ||
+            !std::isfinite(generatedBarsValue) || std::floor(generatedBarsValue) != generatedBarsValue ||
             section.label.size() > kMaxCellCharacters || section.name.size() > kMaxCellCharacters ||
+            section.id.size() > kMaxCellCharacters || section.generatedKind.size() > kMaxCellCharacters ||
+            section.generatedKey.size() > kMaxCellCharacters || section.generatedStyle.size() > kMaxCellCharacters ||
+            section.generatedCharacter.size() > kMaxCellCharacters ||
+            section.generatedBars < 0 || section.generatedBars > kMaxBeatsPerSection ||
             section.beats < kMinBeatsPerSection || section.beats > kMaxBeatsPerSection) {
             return false;
         }
         normalize(section);
 
         const QJsonArray chords = item.value(QStringLiteral("chords")).toArray();
+        const QJsonArray targets = item.value(QStringLiteral("targets")).toArray();
         const QJsonArray beatNotes = item.value(QStringLiteral("beat_notes")).toArray();
         const QJsonArray lyrics = item.value(QStringLiteral("lyrics")).toArray();
         const QJsonArray beatPatterns = item.value(QStringLiteral("beat_patterns")).toArray();
         for (const QString& key : {
-                QStringLiteral("chords"), QStringLiteral("beat_notes"),
+                QStringLiteral("chords"), QStringLiteral("targets"), QStringLiteral("beat_notes"),
                 QStringLiteral("lyrics"), QStringLiteral("beat_patterns")}) {
             const QJsonValue array = item.value(key);
             if (!array.isUndefined() && !array.isArray()) {
                 return false;
             }
         }
-        if (!validTextArray(chords, section.beats) || !validTextArray(beatNotes, section.beats) ||
+        if (!validTextArray(chords, section.beats) || !validTextArray(targets, section.beats) ||
+            !validTextArray(beatNotes, section.beats) ||
             !validTextArray(lyrics, section.beats) || beatPatterns.size() > section.beats) {
             return false;
         }
         for (int i = 0; i < section.beats && i < chords.size(); ++i) {
             section.chords[i] = chords[i].toString();
+        }
+        for (int i = 0; i < section.beats && i < targets.size(); ++i) {
+            section.targets[i] = targets[i].toString();
         }
         for (int i = 0; i < section.beats && i < beatNotes.size(); ++i) {
             section.beatNotes[i] = beatNotes[i].toString();
@@ -425,8 +525,10 @@ int BeatGridModel::normalizedDivision(int division)
 
 void BeatGridModel::normalize(SongSection& section)
 {
+    section.id = sectionId(section.id);
     section.beats = qBound(kMinBeatsPerSection, section.beats, kMaxBeatsPerSection);
     section.chords.resize(section.beats);
+    section.targets.resize(section.beats);
     section.beatNotes.resize(section.beats);
     section.lyrics.resize(section.beats);
     section.beatPatterns.resize(section.beats);
@@ -435,4 +537,11 @@ void BeatGridModel::normalize(SongSection& section)
         pattern.division = normalizedDivision(pattern.division);
         pattern.lanes.resize(laneCount);
     }
+}
+
+QString BeatGridModel::sectionId(const QString& value)
+{
+    return value.trimmed().isEmpty()
+        ? QUuid::createUuid().toString(QUuid::WithoutBraces)
+        : value.left(kMaxCellCharacters);
 }

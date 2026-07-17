@@ -105,6 +105,32 @@ void ProjectPersistenceCoordinator::registerTransientWav(const QString& path)
     }
 }
 
+bool ProjectPersistenceCoordinator::ownsTransientWav(const QString& path) const
+{
+    const QString canonical = canonicalFilePath(path);
+    return transientWavs_.contains(canonical) ||
+        deferredCleanupWavs_.contains(canonical);
+}
+
+bool ProjectPersistenceCoordinator::discardTransientWav(const QString& path)
+{
+    const QString canonical = canonicalFilePath(path);
+    if (!transientWavs_.contains(canonical) &&
+        !deferredCleanupWavs_.contains(canonical)) {
+        return false;
+    }
+    const QFileInfo info(canonical);
+    if (info.exists() &&
+        (!info.isFile() ||
+         info.suffix().compare(QStringLiteral("wav"), Qt::CaseInsensitive) != 0 ||
+         !QFile::remove(canonical))) {
+        return false;
+    }
+    transientWavs_.remove(canonical);
+    deferredCleanupWavs_.remove(canonical);
+    return true;
+}
+
 bool ProjectPersistenceCoordinator::hasExistingTransientWavs() const
 {
     for (const QString& path : transientWavs_) {
@@ -132,6 +158,7 @@ void ProjectPersistenceCoordinator::scheduleTransientCleanup(QThreadPool& worker
         }
         QDir workspace(workspacePath);
         workspace.rmdir(QStringLiteral("wavs"));
+        workspace.rmdir(QStringLiteral("prepared_mixes"));
         QDir parent = workspace;
         if (parent.cdUp()) {
             parent.rmdir(workspace.dirName());

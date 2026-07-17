@@ -121,6 +121,17 @@ std::vector<float> processTrack(std::vector<float> input, int sampleRate, const 
 }
 }
 
+QString PreparedMixRenderer::outputPath(
+    const QString& workspaceFolder,
+    int bankIndex,
+    std::uint64_t generation)
+{
+    return QDir(workspaceFolder).absoluteFilePath(
+        QStringLiteral("prepared_mixes/active-bank-%1-generation-%2.wav")
+            .arg(qMax(0, bankIndex))
+            .arg(generation));
+}
+
 PreparedMixResult PreparedMixRenderer::render(const LooperProject& project, const QString& projectFolder, int sampleRate, const QString& outputPath, const SharedTrackModel& track)
 {
     PreparedMixResult result;

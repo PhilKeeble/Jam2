@@ -19,6 +19,10 @@ struct LooperLane {
     bool muted = false;
     bool solo = false;
     bool loopEnabled = false;
+    QString referenceKind;
+    QString referenceSourceSignature;
+    double referenceBpm = 0.0;
+    bool referenceStale = false;
 };
 
 struct LooperBank {

@@ -20,7 +20,8 @@ public:
 
     BeatGridModel& model();
     void refresh();
-    void setGridPosition(quint64 absoluteBeat, int subdivision, bool running);
+    void focusGeneratedSection(const QString& kind);
+    void setGridPosition(quint64 absoluteBeat, int subdivision, bool running, double beatPhase = 0.0);
     void applyRemoteCell(int section, const QString& lane, int beat, const QString& text);
 
     std::function<void(int, const QString&, int, const QString&, int)> onCellEdited;
@@ -54,6 +55,7 @@ private:
     int sectionForRow(int row) const;
     int laneForRow(int row) const;
     void selectSection(int section);
+    void updateSectionSelectionMarkers();
     void updateActionButtons();
     void emitStructureChanged();
 
@@ -76,6 +78,7 @@ private:
     int selectedSection_ = -1;
     quint64 gridBeat_ = 0;
     int gridSubdivision_ = 0;
+    double gridBeatPhase_ = 0.0;
     bool gridRunning_ = false;
     bool updating_ = false;
 };

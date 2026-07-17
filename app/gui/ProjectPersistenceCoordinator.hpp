@@ -28,6 +28,8 @@ public:
     bool hasUnsavedChanges(const QByteArray& currentSnapshot) const noexcept;
 
     void registerTransientWav(const QString& path);
+    bool ownsTransientWav(const QString& path) const;
+    bool discardTransientWav(const QString& path);
     bool hasExistingTransientWavs() const;
     void scheduleTransientCleanup(QThreadPool& workerPool);
 

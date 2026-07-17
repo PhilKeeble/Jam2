@@ -24,6 +24,11 @@
 
 namespace jam2::gui {
 
+inline int trackTimelineBeatNumber(int zeroBasedBeat) noexcept
+{
+    return qMax(0, zeroBasedBeat) + 1;
+}
+
 inline qint64 looperTimelineViewFrames(
     int markerSampleRate,
     qint64 arrangementEndFrame,
@@ -111,17 +116,18 @@ protected:
 
         if (durationMs_ > 0 && bpm_ > 0.0) {
             const double beatMs = 60000.0 / bpm_;
-            const int beats = static_cast<int>(std::floor(static_cast<double>(durationMs_) / beatMs));
-            for (int beat = 0; beat <= beats + 1; ++beat) {
+            const int beats = qMax(
+                1, static_cast<int>(std::ceil(static_cast<double>(durationMs_) / beatMs)));
+            for (int beat = 0; beat < beats; ++beat) {
                 const qint64 beatPosition = static_cast<qint64>(std::llround(beat * beatMs));
                 const int x = xForMs(beatPosition);
                 const bool bar = beat % beatsPerBar_ == 0;
                 painter.setPen(bar ? QColor(76, 86, 96) : QColor(42, 48, 54));
                 painter.drawLine(x, 0, x, height());
-                if (bar) {
-                    painter.setPen(QColor(150, 158, 166));
-                    painter.drawText(x + 4, 18, QString::number(beat + 1));
-                }
+                painter.setPen(bar ? QColor(168, 176, 184) : QColor(126, 134, 142));
+                painter.drawText(
+                    x + 4, 18,
+                    QString::number(jam2::gui::trackTimelineBeatNumber(beat)));
             }
             if (gridRunning_) {
                 const qint64 beatPosition = durationMs_ > 0 ? gridPositionMs_ % durationMs_ : 0;
@@ -618,16 +624,21 @@ private:
         if (bpm_ > 0.0) {
             const QRect area = QRect(kHeaderWidth, 0, width() - kHeaderWidth, kToolbarHeight);
             const double beatFrames = static_cast<double>(markerSampleRate()) * 60.0 / bpm_;
-            for (int beat = 0; beat < 128; ++beat) {
+            const int beatCount = qBound(
+                1,
+                static_cast<int>(std::ceil(static_cast<double>(viewFrames()) / beatFrames)),
+                2048);
+            for (int beat = 0; beat < beatCount; ++beat) {
                 const int x = xForFrame(static_cast<qint64>(std::llround(beat * beatFrames)));
                 if (x >= area.right()) break;
                 painter.setPen(beat % beatsPerBar_ == 0 ? QColor(90, 100, 110) : QColor(56, 62, 68));
                 const int gridBottom = kToolbarHeight + visualLaneCount() * kLaneHeight - 1;
                 painter.drawLine(x, 0, x, gridBottom);
-                if (beat % beatsPerBar_ == 0) {
-                    painter.setPen(QColor(168, 176, 184));
-                    painter.drawText(x + 4, 20, QString::number(beat / beatsPerBar_ + 1));
-                }
+                painter.setPen(beat % beatsPerBar_ == 0
+                    ? QColor(168, 176, 184) : QColor(126, 134, 142));
+                painter.drawText(
+                    x + 4, 20,
+                    QString::number(jam2::gui::trackTimelineBeatNumber(beat)));
             }
         }
     }

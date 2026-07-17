@@ -53,6 +53,7 @@ public:
     ~TrackWorkspaceController() override;
 
     void setCallbacks(Callbacks callbacks);
+    void cancelPendingTrackPlayback() noexcept;
     bool startFileTask(
         std::function<void()> work,
         std::function<void()> complete,

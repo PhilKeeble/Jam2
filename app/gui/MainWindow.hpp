@@ -60,6 +60,10 @@ class WaveformWidget;
 class LooperLaneStackWidget;
 class LevelMeterWidget;
 
+namespace jam2::practice {
+struct ChordIdeaRequest;
+}
+
 class MainWindow : public QWidget {
 public:
     explicit MainWindow(QWidget* parent = nullptr);
@@ -209,9 +213,19 @@ private:
     QByteArray currentProjectSnapshot() const;
     bool hasUnsavedProjectChanges() const;
     void registerTransientTrackWav(const QString& path);
+    bool looperAssetPathIsReferenced(const QString& path) const;
+    void discardObsoleteReferenceWavs(const QSet<QString>& paths);
+    void retryObsoleteReferenceWavs();
+    void discardPreparedMix(bool replacementExpected);
+    void clearPracticeReferenceWavs();
     void cleanupTransientTrackWavs();
     void refreshSongViews();
     void refreshSongView(const QString& lane);
+    void generatePracticeIdea();
+    bool applyPracticeIdea(const jam2::practice::ChordIdeaRequest& request);
+    void stopTrackForPracticeIdeaGeneration();
+    void ensureInitialPracticeIdea();
+    void generatePracticeReferenceWavs();
     void updatePlaybackGrid();
     void updateRecordingCountdown(const PlaybackGrid::Position& position);
     void updateRecordingLatencyDisplay();
@@ -353,6 +367,7 @@ private:
     QPushButton* clearLoopButton_ = nullptr;
     QCheckBox* loopEnabledCheck_ = nullptr;
     QCheckBox* trackSyncCheck_ = nullptr;
+    QCheckBox* trackMetronomeSyncCheck_ = nullptr;
     QSlider* trackLevelSlider_ = nullptr;
     QLabel* trackLevelDbLabel_ = nullptr;
     QSlider* mixTrackLevelSlider_ = nullptr;
@@ -443,6 +458,8 @@ private:
     std::uint64_t& trackWaveformRevision_;
     using LooperWaveformPreview = TrackWorkspaceController::LooperWaveformPreview;
     QMap<QString, LooperWaveformPreview>& looperWaveformCache_;
+    QSet<QString> obsoletePreparedMixPaths_;
+    QSet<QString> pendingObsoleteReferencePaths_;
     bool& looperWaveformWorkerRunning_;
     bool& wavCompatibilityAuditRunning_;
     int& pendingWavCompatibilityAuditRate_;
@@ -487,6 +504,7 @@ private:
     QSet<QString> localMeshPeerTokens_;
     QMap<QString, QString> meshPeerEndpoints_;
     std::uint64_t engineCommandCookie_ = 0;
+    std::uint64_t practiceIdeaRevision_ = 0;
     QVector<bool> metronomeEnabledSteps_;
     QVector<bool> metronomeAccents_;
 };
