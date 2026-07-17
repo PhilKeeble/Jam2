@@ -44,6 +44,16 @@ QVector<int> qualityIntervals(QString suffix)
     if (suffix == QStringLiteral("dim7")) return {0, 3, 6, 9};
     if (suffix == QStringLiteral("add9")) return {0, 4, 7, 14};
     if (suffix == QStringLiteral("madd9")) return {0, 3, 7, 14};
+    if (suffix == QStringLiteral("9")) return {0, 4, 7, 10, 14};
+    if (suffix == QStringLiteral("13")) return {0, 4, 7, 10, 14, 21};
+    if (suffix == QStringLiteral("7b9")) return {0, 4, 7, 10, 13};
+    if (suffix == QStringLiteral("7#9")) return {0, 4, 7, 10, 15};
+    if (suffix == QStringLiteral("maj9")) return {0, 4, 7, 11, 14};
+    if (suffix == QStringLiteral("m9")) return {0, 3, 7, 10, 14};
+    if (suffix == QStringLiteral("alt")) return {0, 4, 10, 13, 18, 20};
+    if (suffix == QStringLiteral("#11")) return {0, 4, 7, 18};
+    if (suffix == QStringLiteral("maj7#11")) return {0, 4, 7, 11, 18};
+    if (suffix == QStringLiteral("maj9#11")) return {0, 4, 7, 11, 14, 18};
     return {};
 }
 
@@ -58,18 +68,34 @@ ParsedChord parseChord(const QString& symbol)
         chord.valid = true;
         return chord;
     }
-    if (text.isEmpty() || text.size() > 16 || text.at(0) < QLatin1Char('A') || text.at(0) > QLatin1Char('G')) {
+    if (text.isEmpty() || text.size() > 20 ||
+        text.at(0) < QLatin1Char('A') || text.at(0) > QLatin1Char('G')) {
+        return {};
+    }
+    const int slash = text.indexOf(QLatin1Char('/'));
+    if (slash == 0 || (slash >= 0 && slash != text.lastIndexOf(QLatin1Char('/')))) {
+        return {};
+    }
+    const QString chordText = slash >= 0 ? text.left(slash) : text;
+    const QString bassText = slash >= 0 ? text.mid(slash + 1) : QString();
+    if (slash >= 0 &&
+        (bassText.isEmpty() || bassText.size() > 2 ||
+         bassText.at(0) < QLatin1Char('A') || bassText.at(0) > QLatin1Char('G'))) {
         return {};
     }
     int rootLength = 1;
-    if (text.size() > 1 && (text.at(1) == QLatin1Char('#') || text.at(1) == QLatin1Char('b'))) {
+    if (chordText.size() > 1 &&
+        (chordText.at(1) == QLatin1Char('#') || chordText.at(1) == QLatin1Char('b')) &&
+        chordText.mid(1).compare(QStringLiteral("#11"), Qt::CaseInsensitive) != 0) {
         rootLength = 2;
     }
     ParsedChord chord;
-    chord.root = pitchClass(text.left(rootLength));
-    chord.suffix = text.mid(rootLength);
+    chord.root = pitchClass(chordText.left(rootLength));
+    chord.bass = slash >= 0 ? pitchClass(bassText) : -1;
+    chord.suffix = chordText.mid(rootLength);
     chord.intervals = qualityIntervals(chord.suffix);
-    chord.valid = chord.root >= 0 && !chord.intervals.isEmpty();
+    chord.valid = chord.root >= 0 && (slash < 0 || chord.bass >= 0) &&
+        !chord.intervals.isEmpty();
     return chord;
 }
 
@@ -99,8 +125,12 @@ QString chordToneNames(const QString& symbol)
         return {};
     }
     QStringList names;
+    if (chord.bass >= 0) {
+        names.push_back(noteName(chord.bass, symbol.contains(QLatin1Char('b'))));
+    }
     for (int interval : chord.intervals) {
-        names.push_back(noteName(chord.root + interval, symbol.contains(QLatin1Char('b'))));
+        const QString name = noteName(chord.root + interval, symbol.contains(QLatin1Char('b')));
+        if (!names.contains(name)) names.push_back(name);
     }
     return names.join(QStringLiteral(" "));
 }

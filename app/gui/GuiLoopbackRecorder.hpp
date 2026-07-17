@@ -4,12 +4,25 @@
 #include <QStringList>
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
+#include <span>
 #include <thread>
+#include <vector>
+
+namespace jam2::gui {
+
+std::vector<std::int16_t> resample_pcm16_mono(
+    std::span<const std::int16_t> input,
+    int sourceSampleRate,
+    int targetSampleRate);
+
+}
 
 struct GuiLoopbackOptions {
     QString source = QStringLiteral("default");
     QString outputPath;
+    int targetSampleRate = 0;
     int durationMs = 0;
     bool trigger = false;
     double triggerThresholdDb = -45.0;
@@ -23,7 +36,11 @@ struct GuiLoopbackOptions {
 
 class GuiLoopbackRecorder {
 public:
-    using FinishedCallback = std::function<void(bool ok, const QString& outputPath, const QString& error)>;
+    using FinishedCallback = std::function<void(
+        bool ok,
+        const QString& outputPath,
+        const QString& error,
+        const QString& diagnostics)>;
 
     GuiLoopbackRecorder();
     ~GuiLoopbackRecorder();

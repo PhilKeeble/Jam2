@@ -10,12 +10,19 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 
-double click_tone(std::uint64_t offset, double sample_rate, bool accent)
+double click_tone(
+    std::uint64_t offset,
+    double sample_rate,
+    bool accent,
+    ClickVoice voice)
 {
     if (sample_rate <= 0.0) {
         return 0.0;
     }
-    const double duration_seconds = accent ? 0.008 : 0.0065;
+    const bool count_in = voice == ClickVoice::CountIn;
+    const double duration_seconds = count_in
+        ? (accent ? 0.014 : 0.012)
+        : (accent ? 0.008 : 0.0065);
     const auto duration = static_cast<std::uint64_t>(std::max(1.0, std::round(sample_rate * duration_seconds)));
     if (offset >= duration) {
         return 0.0;
@@ -31,10 +38,15 @@ double click_tone(std::uint64_t offset, double sample_rate, bool accent)
     const double release = remaining < static_cast<std::uint64_t>(release_frames)
         ? 0.5 - 0.5 * std::cos(kPi * static_cast<double>(remaining) / release_frames)
         : 1.0;
-    const double decay = std::exp(-t * 360.0);
-    const double frequency = accent ? 1320.0 : 880.0;
+    const double decay = std::exp(-t * (count_in ? 180.0 : 360.0));
+    const double frequency = count_in
+        ? (accent ? 760.0 : 560.0)
+        : (accent ? 1320.0 : 880.0);
     const double phase = 2.0 * kPi * frequency * t;
-    return std::sin(phase) * attack * decay * release;
+    const double tone = count_in
+        ? 0.78 * std::sin(phase) + 0.22 * std::sin(phase * 2.0)
+        : std::sin(phase);
+    return tone * attack * decay * release;
 }
 
 } // namespace
@@ -158,10 +170,15 @@ AuthorityClockMapping map_authority_clock(
     return {0, static_cast<std::int64_t>(offset), true};
 }
 
-double render_sample(const PatternSnapshot& input, std::uint64_t grid_sample, double sample_rate, double level)
+double render_sample(
+    const PatternSnapshot& input,
+    std::uint64_t grid_sample,
+    double sample_rate,
+    double level,
+    ClickVoice voice)
 {
     const std::uint64_t interval = step_interval_samples(sample_rate, input.bpm, input.division);
-    return render_sample(input, grid_sample, interval, sample_rate, level);
+    return render_sample(input, grid_sample, interval, sample_rate, level, voice);
 }
 
 double render_sample(
@@ -169,7 +186,8 @@ double render_sample(
     std::uint64_t grid_sample,
     std::uint64_t step_interval,
     double sample_rate,
-    double level)
+    double level,
+    ClickVoice voice)
 {
     if (pattern.step_count <= 0) {
         return 0.0;
@@ -186,7 +204,10 @@ double render_sample(
     }
     const bool accent = mask_enabled(pattern.accent_mask_low, pattern.accent_mask_high, pattern_step);
     const double click_level = std::clamp(level, 0.0, 1.0) * (accent ? 1.25 : 0.78);
-    return std::clamp(click_tone(step_offset, sample_rate, accent) * click_level, -1.0, 1.0);
+    return std::clamp(
+        click_tone(step_offset, sample_rate, accent, voice) * click_level,
+        -1.0,
+        1.0);
 }
 
 std::int32_t mix_i32(std::int32_t sample, double normalized_click)

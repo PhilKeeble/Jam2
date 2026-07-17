@@ -577,6 +577,7 @@ struct CoreAudioDuplexContext {
     OutputRecorder* recorder = nullptr;
     TrackTakeRecorder* track_take_recorder = nullptr;
     std::vector<std::int32_t> capture_scratch;
+    std::vector<double> input_peak_scratch;
     std::vector<std::int32_t> playback_scratch;
     std::vector<std::int32_t> recorder_my_input_scratch;
     std::vector<std::int32_t> recorder_their_input_scratch;
@@ -909,10 +910,17 @@ void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t
     });
     const std::uint64_t step_interval =
         jam2::metronome::step_interval_samples(context.sample_rate, pattern.bpm, pattern.division);
+    const bool count_in_active =
+        context.control->recording_count_in_active.load(std::memory_order_acquire);
+    const std::uint64_t count_in_start =
+        context.control->recording_count_in_start_frame.load(std::memory_order_relaxed);
+    const std::uint64_t count_in_target =
+        context.control->recording_count_in_target_frame.load(std::memory_order_relaxed);
 
     for (std::size_t i = 0; i < output.size(); ++i) {
-        std::uint64_t render_sample_counter =
+        const std::uint64_t raw_sample_counter =
             context.engine_frame_counter + static_cast<std::uint64_t>(i);
+        std::uint64_t render_sample_counter = raw_sample_counter;
         if (render_offset_frames < 0) {
             const std::uint64_t offset = static_cast<std::uint64_t>(-render_offset_frames);
             render_sample_counter = render_sample_counter > offset ? render_sample_counter - offset : 0ULL;
@@ -923,8 +931,17 @@ void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t
         const std::uint64_t position =
             before_epoch ? 0ULL : (epoch_valid ? render_sample_counter - epoch : render_sample_counter);
         if (!before_epoch) {
-            const double rendered =
-                jam2::metronome::render_sample(pattern, position, step_interval, context.sample_rate, level);
+            const double rendered = jam2::metronome::render_sample(
+                pattern,
+                position,
+                step_interval,
+                context.sample_rate,
+                level,
+                count_in_active &&
+                        raw_sample_counter >= count_in_start &&
+                        raw_sample_counter < count_in_target
+                    ? jam2::metronome::ClickVoice::CountIn
+                    : jam2::metronome::ClickVoice::Normal);
             if (metronome_stem.size() == output.size()) {
                 metronome_stem[i] = jam2::metronome::mix_i32(0, rendered);
             }
@@ -983,14 +1000,53 @@ OSStatus duplex_io_proc(
             std::copy(generated.begin(), generated.end(), context->recorder_my_input_scratch.begin());
         }
     } else if (input_frames > 0) {
+        std::fill(
+            context->input_peak_scratch.begin(),
+            context->input_peak_scratch.end(),
+            0.0);
+        for (std::size_t selected = 0;
+             selected < context->channels.input.size();
+             ++selected) {
+            double peak = 0.0;
+            const int channel = context->channels.input[selected];
+            for (std::size_t frame = 0; frame < input_frames; ++frame) {
+                peak = std::max(
+                    peak,
+                    std::abs(static_cast<double>(
+                        read_float_channel(
+                            input,
+                            frame,
+                            static_cast<UInt32>(channel)))));
+            }
+            context->input_peak_scratch[selected] = peak;
+        }
+        const double loudestPeak = context->input_peak_scratch.empty()
+            ? 0.0
+            : *std::max_element(
+                context->input_peak_scratch.cbegin(),
+                context->input_peak_scratch.cend());
+        const std::size_t activeChannels = mono_downmix_active_channels(
+            std::span<const double>(
+                context->input_peak_scratch.data(),
+                context->input_peak_scratch.size()));
         for (std::size_t frame = 0; frame < input_frames; ++frame) {
             float sum = 0.0F;
-            for (int channel : context->channels.input) {
-                sum += read_float_channel(input, frame, static_cast<UInt32>(channel));
+            for (std::size_t selected = 0;
+                 selected < context->channels.input.size();
+                 ++selected) {
+                if (!mono_downmix_channel_active(
+                        context->input_peak_scratch[selected],
+                        loudestPeak)) {
+                    continue;
+                }
+                sum += read_float_channel(
+                    input,
+                    frame,
+                    static_cast<UInt32>(context->channels.input[selected]));
             }
-            const float mixed = context->channels.input.empty() ?
+            const float mixed = activeChannels == 0 ?
                 0.0F :
-                sum / static_cast<float>(context->channels.input.size());
+                sum / static_cast<float>(activeChannels);
             context->capture_scratch[frame] = float_to_i32(mixed);
         }
         if (network_capture_enabled) {
@@ -1153,6 +1209,7 @@ public:
         context_.recorder = recorder;
         context_.track_take_recorder = track_take_recorder;
         context_.capture_scratch.resize(static_cast<std::size_t>(buffer_size));
+        context_.input_peak_scratch.resize(channels.input.size());
         context_.playback_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.recorder_my_input_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.recorder_their_input_scratch.resize(static_cast<std::size_t>(buffer_size));

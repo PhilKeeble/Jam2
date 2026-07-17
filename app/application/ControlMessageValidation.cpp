@@ -75,7 +75,9 @@ bool validateTextArray(
 bool validateBeatGrid(const QJsonObject& grid, QString& reason)
 {
     const QString format = grid.value(QStringLiteral("format")).toString();
-    if ((format != QStringLiteral("jam2.song.v1") && format != QStringLiteral("jam2.song.v2")) ||
+    if ((format != QStringLiteral("jam2.song.v1") &&
+         format != QStringLiteral("jam2.song.v2") &&
+         format != QStringLiteral("jam2.song.v3")) ||
         !isOptionalBoundedString(grid, QStringLiteral("title"), limits::kMaximumTitleCharacters) ||
         !isOptionalBoundedString(grid, QStringLiteral("lyrics_text"), limits::kMaximumLyricsCharacters) ||
         !grid.value(QStringLiteral("sections")).isArray()) {
@@ -89,6 +91,9 @@ bool validateBeatGrid(const QJsonObject& grid, QString& reason)
         return false;
     }
     static const QList<int> allowedDivisions{1, 2, 3, 4, 6, 8};
+    const int maximumBeatLanes = format == QStringLiteral("jam2.song.v3")
+        ? limits::kMaximumBeatLanes
+        : limits::kMaximumLegacyBeatLanes;
     for (const QJsonValue& sectionValue : sections) {
         if (!sectionValue.isObject()) {
             reason = QStringLiteral("song grid section is not an object");
@@ -97,6 +102,10 @@ bool validateBeatGrid(const QJsonObject& grid, QString& reason)
         const QJsonObject section = sectionValue.toObject();
         const QJsonValue beatsValue = section.value(QStringLiteral("beats"));
         const QJsonValue generatedBars = section.value(QStringLiteral("generated_bars"));
+        const QJsonValue harmonicComplexity =
+            section.value(QStringLiteral("generated_harmonic_complexity"));
+        const QJsonValue rhythmicComplexity =
+            section.value(QStringLiteral("generated_rhythmic_complexity"));
         const int beats = beatsValue.isUndefined() ? 8 : beatsValue.toInt(-1);
         if (!isOptionalBoundedString(section, QStringLiteral("label"), limits::kMaximumCellCharacters) ||
             !isOptionalBoundedString(section, QStringLiteral("name"), limits::kMaximumCellCharacters) ||
@@ -109,6 +118,10 @@ bool validateBeatGrid(const QJsonObject& grid, QString& reason)
                 beatsValue, limits::kMinimumBeatsPerSection, limits::kMaximumBeatsPerSection)) ||
             (!generatedBars.isUndefined() && !isBoundedInteger(
                 generatedBars, 0, limits::kMaximumBeatsPerSection)) ||
+            (!harmonicComplexity.isUndefined() && !isBoundedInteger(
+                harmonicComplexity, 0, 8)) ||
+            (!rhythmicComplexity.isUndefined() && !isBoundedInteger(
+                rhythmicComplexity, 0, 8)) ||
             beats < limits::kMinimumBeatsPerSection ||
             beats > limits::kMaximumBeatsPerSection ||
             !validateTextArray(section, QStringLiteral("chords"), beats, reason) ||
@@ -143,7 +156,7 @@ bool validateBeatGrid(const QJsonObject& grid, QString& reason)
                 return false;
             }
             if (!validateTextArray(
-                    pattern, QStringLiteral("lanes"), limits::kMaximumBeatLanes, reason)) {
+                    pattern, QStringLiteral("lanes"), maximumBeatLanes, reason)) {
                 return false;
             }
         }
@@ -450,7 +463,10 @@ bool jam2::application::validateControlMessage(
     if (type == QStringLiteral("beat.hit")) {
         return isBoundedInteger(message.value(QStringLiteral("section")), 0, 63) &&
             isBoundedInteger(message.value(QStringLiteral("beat")), 0, 511) &&
-            isBoundedInteger(message.value(QStringLiteral("lane")), 0, 10) &&
+            isBoundedInteger(
+                message.value(QStringLiteral("lane")),
+                0,
+                limits::kMaximumBeatLanes - 1) &&
             isBoundedString(message.value(QStringLiteral("text")), 4096)
             ? true : (reason = QStringLiteral("beat hit is invalid"), false);
     }

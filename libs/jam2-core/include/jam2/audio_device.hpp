@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -17,6 +18,33 @@
 #include "track_take_recorder.hpp"
 
 namespace jam2::audio {
+
+// Selected channels whose block peak is more than 30 dB below the loudest
+// selected channel are treated as inactive for that block. Active channels
+// are averaged, preserving a mono source present on only one selected input
+// without adding gain to genuinely active stereo material.
+inline constexpr double kMonoDownmixRelativeActivity = 0.03162277660168379;
+
+inline bool mono_downmix_channel_active(double peak, double loudestPeak) noexcept
+{
+    return loudestPeak > 0.0 &&
+        peak >= loudestPeak * kMonoDownmixRelativeActivity;
+}
+
+inline std::size_t mono_downmix_active_channels(std::span<const double> peaks) noexcept
+{
+    double loudest = 0.0;
+    for (double peak : peaks) {
+        loudest = std::max(loudest, std::abs(peak));
+    }
+    std::size_t active = 0;
+    for (double peak : peaks) {
+        if (mono_downmix_channel_active(std::abs(peak), loudest)) {
+            ++active;
+        }
+    }
+    return active;
+}
 
 class PlaybackRatioSmoother final {
 public:
@@ -128,6 +156,9 @@ struct StreamControl {
     std::atomic<std::uint64_t> metronome_epoch_sample_time{0};
     std::atomic<bool> metronome_epoch_valid{false};
     std::atomic<std::int64_t> metronome_render_offset_frames{0};
+    std::atomic<bool> recording_count_in_active{false};
+    std::atomic<std::uint64_t> recording_count_in_start_frame{0};
+    std::atomic<std::uint64_t> recording_count_in_target_frame{0};
     std::atomic<std::uint64_t> engine_frame_counter{0};
     // The callback is the capture-ring producer and the only side allowed to
     // reset it. A network attachment publishes a generation; the callback

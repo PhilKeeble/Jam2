@@ -248,9 +248,17 @@ void mix_metronome_output(
         sample_rate,
         pattern.bpm,
         pattern.division);
+    const bool count_in_active =
+        control.recording_count_in_active.load(std::memory_order_acquire);
+    const std::uint64_t count_in_start =
+        control.recording_count_in_start_frame.load(std::memory_order_relaxed);
+    const std::uint64_t count_in_target =
+        control.recording_count_in_target_frame.load(std::memory_order_relaxed);
 
     for (std::size_t index = 0; index < output.size(); ++index) {
-        std::uint64_t frame = callback_frame + static_cast<std::uint64_t>(index);
+        const std::uint64_t raw_frame =
+            callback_frame + static_cast<std::uint64_t>(index);
+        std::uint64_t frame = raw_frame;
         if (render_offset < 0) {
             const std::uint64_t magnitude = static_cast<std::uint64_t>(-(render_offset + 1)) + 1ULL;
             frame = frame > magnitude ? frame - magnitude : 0ULL;
@@ -266,7 +274,12 @@ void mix_metronome_output(
             position,
             interval,
             sample_rate,
-            level);
+            level,
+            count_in_active &&
+                    raw_frame >= count_in_start &&
+                    raw_frame < count_in_target
+                ? metronome::ClickVoice::CountIn
+                : metronome::ClickVoice::Normal);
         if (stem.size() == output.size()) {
             stem[index] = metronome::mix_i32(0, rendered);
         }
@@ -733,7 +746,8 @@ struct Engine::Impl {
         std::uint64_t requested_frame,
         std::uint64_t applied_frame,
         std::uint64_t value,
-        std::string_view message = {}) noexcept
+        std::string_view message = {},
+        int sample_rate = 0) noexcept
     {
         EngineEvent event;
         event.type = type;
@@ -742,6 +756,7 @@ struct Engine::Impl {
         event.requested_frame = requested_frame;
         event.applied_frame = applied_frame;
         event.value = value;
+        event.sample_rate = sample_rate;
         event.ok = ok;
         if (!set_bounded_text(event.text, message)) {
             (void)set_bounded_text(event.text, "engine event text exceeded fixed capacity");
@@ -853,6 +868,17 @@ struct Engine::Impl {
                 error = "transport countdown begins after its target frame";
                 return false;
             }
+            control->recording_count_in_active.store(false, std::memory_order_release);
+            control->recording_count_in_start_frame.store(
+                command.transport_countdown_start_frame,
+                std::memory_order_relaxed);
+            control->recording_count_in_target_frame.store(
+                command.transport_target_frame,
+                std::memory_order_relaxed);
+            control->recording_count_in_active.store(
+                command.transport_action == EngineTransportAction::RecordStart &&
+                    command.transport_countdown_start_frame < command.transport_target_frame,
+                std::memory_order_release);
             transport_target_frame.store(command.transport_target_frame, std::memory_order_relaxed);
             transport_musical_frame.store(command.transport_musical_frame, std::memory_order_relaxed);
             transport_countdown_start_frame.store(
@@ -866,6 +892,7 @@ struct Engine::Impl {
         }
         case EngineCommandType::CancelTransport:
             prepared_source->cancelScheduled();
+            control->recording_count_in_active.store(false, std::memory_order_release);
             transport_pending.store(false, std::memory_order_release);
             transport_action.store(EngineTransportAction::None, std::memory_order_relaxed);
             transport_cookie.store(0, std::memory_order_relaxed);
@@ -1031,6 +1058,7 @@ struct Engine::Impl {
             return;
         }
         transport_pending.store(false, std::memory_order_release);
+        control->recording_count_in_active.store(false, std::memory_order_release);
         const auto action = transport_action.load(std::memory_order_relaxed);
         if (action == EngineTransportAction::TrackRestart || action == EngineTransportAction::RecordStart) {
             control->metronome_epoch_sample_time.store(
@@ -1090,7 +1118,8 @@ struct Engine::Impl {
                             completion.stop_frame,
                             frame,
                             completion.frames_written,
-                            completion.ok ? std::string_view{} : std::string_view(completion.error));
+                            completion.ok ? std::string_view{} : std::string_view(completion.error),
+                            completion.sample_rate);
                     }
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));

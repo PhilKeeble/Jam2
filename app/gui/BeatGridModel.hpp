@@ -26,6 +26,8 @@ struct SongSection {
     QString generatedStyle;
     QString generatedCharacter;
     int generatedBars = 0;
+    int generatedHarmonicComplexity = 0;
+    int generatedRhythmicComplexity = 0;
 };
 
 class BeatGridModel {

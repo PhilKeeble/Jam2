@@ -1709,8 +1709,10 @@ void MainWindow::handleEngineEvent(const jam2::EngineEvent& event)
         }
         if (loadWavButton_) loadWavButton_->setEnabled(true);
         appendLog(completion.ok
-            ? QStringLiteral("track take stopped: take_id=%1 wav=%2 frames=%3")
-                .arg(completion.takeId, completion.wavPath).arg(completion.frames)
+            ? QStringLiteral("track take stopped: take_id=%1 wav=%2 frames=%3 sample_rate=%4")
+                .arg(completion.takeId, completion.wavPath)
+                .arg(completion.frames)
+                .arg(completion.sampleRate)
             : QStringLiteral("track take error: take_id=%1 reason=%2")
                 .arg(completion.takeId, completion.error));
     }
@@ -1753,6 +1755,8 @@ void MainWindow::showStartJamDialog()
         return;
     }
 
+    const int sampleRateBeforeDialog =
+        sampleRateSpin_ ? sampleRateSpin_->value() : 48000;
     applyCreateDefaultsToControls();
     refreshDevices();
     selectPreferredDevice(deviceBox_, availableDevices_, preferences_.createAudio());
@@ -1909,6 +1913,8 @@ void MainWindow::showStartJamDialog()
         bufferSizeSpin_->setValue(bufferSize->currentData().toInt());
         connectionLabel_->setText(QStringLiteral("Starting listener"));
         startJam(true);
+    } else if (sampleRateSpin_) {
+        sampleRateSpin_->setValue(sampleRateBeforeDialog);
     }
 }
 
@@ -3787,9 +3793,7 @@ void MainWindow::refreshLooperLanes()
     QVector<LooperLaneStackWidget::LaneView> views;
     QStringList missingWaveforms;
     const double currentBpm = currentMetronomePattern().bpm;
-    const int currentSampleRate = sessionController_.snapshot().contract.sampleRate > 0
-        ? sessionController_.snapshot().contract.sampleRate
-        : (sampleRateSpin_ ? sampleRateSpin_->value() : 48000);
+    const int currentSampleRate = activeTrackSampleRate();
     const SongSection* generatedChord = nullptr;
     const SongSection* generatedBeat = nullptr;
     for (const SongSection& section : chordModel_.sections()) {
@@ -3968,7 +3972,7 @@ void MainWindow::addLooperWavs()
         return;
     }
     const QString stagingFolder = projectPersistence_.workspaceFolder();
-    const int expectedSampleRate = sampleRateSpin_ ? sampleRateSpin_->value() : 48000;
+    const int expectedSampleRate = activeTrackSampleRate();
     auto results = std::make_shared<std::vector<StagedPcm16Asset>>();
     results->reserve(static_cast<std::size_t>(paths.size()));
     (void)startFileWorkerTask(
@@ -4082,7 +4086,7 @@ void MainWindow::loadWavIntoLooperLane()
         ? bank.lanes.at(selectedLaneIndex).id
         : QString{};
     const QString stagingFolder = projectPersistence_.workspaceFolder();
-    const int expectedSampleRate = sampleRateSpin_ ? sampleRateSpin_->value() : 48000;
+    const int expectedSampleRate = activeTrackSampleRate();
     auto result = std::make_shared<StagedPcm16Asset>();
     (void)startFileWorkerTask(
         [sourcePath, stagingFolder, expectedSampleRate, result] {
@@ -4431,10 +4435,8 @@ void MainWindow::startArmedLooperLaneRecording()
         const bool keepMetronome = captureKeepMetronomeCheck_ && captureKeepMetronomeCheck_->isChecked();
         const PlaybackGrid::Position initialGridPosition =
             metronomeTransport_.grid().position();
-        const bool startingFreshGrid =
-            engineInput && countInMetronome && !initialGridPosition.running;
 
-        if (startingFreshGrid) {
+        if (countInMetronome && !initialGridPosition.running) {
             startTrackMetronome();
         }
         const int bars = qMax(1, captureCountInBarsSpin_ ? captureCountInBarsSpin_->value() : 1);
@@ -4450,9 +4452,7 @@ void MainWindow::startArmedLooperLaneRecording()
             if (!initialGridPosition.running) {
                 trackRecordingWorkflow_.waitForCountIn(
                     bars,
-                    countInMetronome && !keepMetronome,
-                    startingFreshGrid,
-                    initialGridPosition.epochFrame);
+                    countInMetronome && !keepMetronome);
                 if (recordingCountdownLabel_) {
                     recordingCountdownLabel_->setText(QStringLiteral("WAITING FOR NEXT BAR..."));
                     recordingCountdownLabel_->show();
@@ -4495,7 +4495,15 @@ void MainWindow::importLastCaptureToArmedLane()
         .lanes.at(trackRecordingWorkflow_.armedLane()).id;
     const QString sourcePath = trackRecordingWorkflow_.lastCapturePath();
     const QString stagingFolder = projectPersistence_.workspaceFolder();
-    const int expectedSampleRate = sampleRateSpin_ ? sampleRateSpin_->value() : 48000;
+    const int expectedSampleRate = activeTrackSampleRate();
+    const int recordedSampleRate = trackRecordingWorkflow_.lastCaptureSampleRate();
+    if (recordedSampleRate > 0 && recordedSampleRate != expectedSampleRate) {
+        appendLog(QStringLiteral(
+            "recorded lane WAV not importable: recording used %1 Hz but the active engine/session uses %2 Hz")
+            .arg(recordedSampleRate)
+            .arg(expectedSampleRate));
+        return;
+    }
     auto result = std::make_shared<StagedPcm16Asset>();
     (void)startFileWorkerTask(
         [sourcePath, stagingFolder, expectedSampleRate, result] {
@@ -4829,7 +4837,7 @@ void MainWindow::regeneratePreparedMix()
         return;
     }
 
-    const int sampleRate = sampleRateSpin_ != nullptr ? sampleRateSpin_->value() : 48000;
+    const int sampleRate = activeTrackSampleRate();
     const std::uint64_t generation = preparedMixRequests_;
     const QString cachePath = PreparedMixRenderer::outputPath(
         projectPersistence_.workspaceFolder(),
@@ -5151,7 +5159,7 @@ void MainWindow::loadTrackMetadata()
                 QMessageBox::warning(this, QStringLiteral("Jam2 Track"), *error);
                 return;
             }
-            const int expectedSampleRate = sampleRateSpin_ ? sampleRateSpin_->value() : 48000;
+            const int expectedSampleRate = activeTrackSampleRate();
             if (metadata->sampleRate != expectedSampleRate) {
                 QMessageBox::warning(
                     this,
@@ -5241,6 +5249,14 @@ void MainWindow::startInputCapture(std::uint64_t targetFrame, int countInBars)
         QMessageBox::warning(this, QStringLiteral("Jam2 Track Recording"), QStringLiteral("Input lane recording requires Perform mode so the engine can record the active ASIO input."));
         return;
     }
+    int recordingSampleRate = 0;
+    QString rateError;
+    if (!recordingTargetSampleRate(recordingSampleRate, rateError)) {
+        appendLog(QStringLiteral("could not start input take: ") + rateError);
+        QMessageBox::warning(
+            this, QStringLiteral("Jam2 Track Recording"), rateError);
+        return;
+    }
     QString output = captureOutputEdit_->text().trimmed();
     if (isAutoCapturePath(output)) {
 
@@ -5251,6 +5267,7 @@ void MainWindow::startInputCapture(std::uint64_t targetFrame, int countInBars)
     if (!trackRecordingWorkflow_.startInputTake(
             output,
             !QFileInfo::exists(output),
+            recordingSampleRate,
             targetFrame,
             countInBars >= 0 ? std::optional<int>(countInBars) : std::nullopt,
             metronomeTransport_.grid().position(),
@@ -5264,11 +5281,13 @@ void MainWindow::startInputCapture(std::uint64_t targetFrame, int countInBars)
         recordingCountdownLabel_->show();
     }
     const QString startText = countInBars >= 0
-        ? QStringLiteral("Recording: armed input take, engine_quantized_count_in_bars=%1 latency_compensation_frames=%2 output=%3")
+        ? QStringLiteral("Recording: armed input take, sample_rate=%1 engine_quantized_count_in_bars=%2 latency_compensation_frames=%3 output=%4")
+            .arg(recordingSampleRate)
             .arg(countInBars)
             .arg(trackRecordingWorkflow_.appliedLatencyFrames())
             .arg(output)
-        : QStringLiteral("Recording: armed input take, start_frame=%1 latency_compensation_frames=%2 output=%3")
+        : QStringLiteral("Recording: armed input take, sample_rate=%1 start_frame=%2 latency_compensation_frames=%3 output=%4")
+            .arg(recordingSampleRate)
             .arg(targetFrame)
             .arg(trackRecordingWorkflow_.appliedLatencyFrames())
             .arg(output);
@@ -5295,12 +5314,21 @@ void MainWindow::startLoopbackCapture()
     if (loopbackRecorder_.isRunning()) {
         return;
     }
+    int recordingSampleRate = 0;
+    QString rateError;
+    if (!recordingTargetSampleRate(recordingSampleRate, rateError)) {
+        appendLog(QStringLiteral("loopback recording failed to start: ") + rateError);
+        QMessageBox::warning(
+            this, QStringLiteral("Jam2 Loopback Recording"), rateError);
+        return;
+    }
     QString output = captureOutputEdit_->text().trimmed();
     if (isAutoCapturePath(output)) {
         output = timestampedCapturePath(QStringLiteral("loopback"));
         captureOutputEdit_->setText(output);
     }
-    trackRecordingWorkflow_.beginLoopbackCapture(output, !QFileInfo::exists(output));
+    trackRecordingWorkflow_.beginLoopbackCapture(
+        output, !QFileInfo::exists(output), recordingSampleRate);
     QString source = loopbackSourceBox_->currentData().toString();
     if (source.isEmpty()) {
         source = loopbackSourceBox_->currentText().trimmed();
@@ -5312,6 +5340,7 @@ void MainWindow::startLoopbackCapture()
     GuiLoopbackOptions options;
     options.source = source;
     options.outputPath = output;
+    options.targetSampleRate = recordingSampleRate;
     options.durationMs = (!captureManualStopCheck_ || !captureManualStopCheck_->isChecked()) ? captureDurationSpin_->value() * 1000 : 0;
     options.trigger = captureTriggerCheck_ && captureTriggerCheck_->isChecked();
     options.triggerThresholdDb = triggerThresholdSpin_ ? triggerThresholdSpin_->value() : -45.0;
@@ -5323,11 +5352,21 @@ void MainWindow::startLoopbackCapture()
     options.trimTrailingSilence = trimTrailingCheck_ && trimTrailingCheck_->isChecked();
 
     QString error;
-    appendLog(QStringLiteral("starting internal loopback recording: %1").arg(output));
-    if (!loopbackRecorder_.start(options, [this](bool ok, const QString& outputPath, const QString& errorText) {
-            QMetaObject::invokeMethod(this, [this, ok, outputPath, errorText] {
+    appendLog(QStringLiteral(
+        "starting internal loopback recording: target_sample_rate=%1 output=%2")
+        .arg(recordingSampleRate)
+        .arg(output));
+    if (!loopbackRecorder_.start(options, [this](
+            bool ok,
+            const QString& outputPath,
+            const QString& errorText,
+            const QString& diagnostics) {
+            QMetaObject::invokeMethod(this, [this, ok, outputPath, errorText, diagnostics] {
                 if (stopCaptureButton_) stopCaptureButton_->setEnabled(false);
                 const QString transientPath = trackRecordingWorkflow_.finishLoopbackCapture(outputPath);
+                if (!diagnostics.isEmpty()) {
+                    appendLog(diagnostics);
+                }
                 if (!ok) {
                     if (!transientPath.isEmpty() && QFileInfo::exists(transientPath)) {
                         registerTransientTrackWav(transientPath);
@@ -5640,6 +5679,19 @@ void MainWindow::stopTrackMetronome()
     }
     if (stopTrackMetronomeButton_) {
         stopTrackMetronomeButton_->setEnabled(false);
+    }
+}
+
+void MainWindow::tapTrackMetronomeTempo()
+{
+    if (!metronomeBpmSpin_) {
+        return;
+    }
+    if (!tapTempoClock_.isValid()) {
+        tapTempoClock_.start();
+    }
+    if (const std::optional<int> bpm = tapTempoTracker_.tap(tapTempoClock_.elapsed())) {
+        metronomeBpmSpin_->setValue(*bpm);
     }
 }
 
@@ -6692,6 +6744,50 @@ QString MainWindow::looperAssetPathForHash(const QString& hash) const
         QStringLiteral("wavs/") + hash + QStringLiteral(".wav"));
 }
 
+int MainWindow::activeTrackSampleRate() const
+{
+    const SharedSessionController::Snapshot session =
+        sessionController_.snapshot();
+    const jam2::EngineSnapshot engine = jam2_.engineSnapshot();
+    return jam2::gui::resolve_active_sample_rate(
+        session.contract.sampleRate,
+        engine.sample_rate,
+        sampleRateSpin_ ? sampleRateSpin_->value() : 48000);
+}
+
+bool MainWindow::recordingTargetSampleRate(
+    int& sampleRate,
+    QString& error) const
+{
+    const SharedSessionController::Snapshot session =
+        sessionController_.snapshot();
+    const jam2::EngineSnapshot engine = jam2_.engineSnapshot();
+    sampleRate = jam2::gui::resolve_active_sample_rate(
+        session.contract.sampleRate,
+        engine.sample_rate,
+        sampleRateSpin_ ? sampleRateSpin_->value() : 48000);
+    if (session.contract.sampleRate > 0 &&
+        !jam2::gui::sample_rate_matches_engine(
+            session.contract.sampleRate, engine.sample_rate)) {
+        error = engine.sample_rate > 0.0
+            ? QStringLiteral(
+                "The session requires %1 Hz but the active engine is %2 Hz. "
+                "Recording was not started.")
+                .arg(session.contract.sampleRate)
+                .arg(engine.sample_rate, 0, 'f', 0)
+            : QStringLiteral(
+                "The %1 Hz session engine is not active yet. Recording was not started.")
+                .arg(session.contract.sampleRate);
+        return false;
+    }
+    if (sampleRate <= 0) {
+        error = QStringLiteral(
+            "No valid recording sample rate is available.");
+        return false;
+    }
+    return true;
+}
+
 Jam2RuntimeOptions MainWindow::runtimeOptions() const
 {
     Jam2RuntimeOptions options;
@@ -6976,9 +7072,7 @@ bool MainWindow::loadSongJson(const QJsonObject& object)
     chordModel_ = loadedChord;
     beatModel_ = loadedBeat;
     lyricModel_ = loadedLyric;
-    const int expectedSampleRate = sessionController_.snapshot().contract.sampleRate > 0
-        ? sessionController_.snapshot().contract.sampleRate
-        : (sampleRateSpin_ ? sampleRateSpin_->value() : 48000);
+    const int expectedSampleRate = activeTrackSampleRate();
     bool needsCompatibilityAudit = false;
     for (LooperBank& bank : loadedLooper.banks()) {
         for (LooperLane& lane : bank.lanes) {
@@ -7626,9 +7720,7 @@ void MainWindow::generatePracticeReferenceWavs()
             return jam2::practice::parseMidiNote(note).has_value();
         });
     defaults.bpm = pattern.bpm;
-    defaults.sampleRate = sessionController_.snapshot().contract.sampleRate > 0
-        ? sessionController_.snapshot().contract.sampleRate
-        : (sampleRateSpin_ ? sampleRateSpin_->value() : 48000);
+    defaults.sampleRate = activeTrackSampleRate();
     const auto settings = jam2::practice::askForReferenceRender(
         this, defaults, chordSection ? chordSection->beats : 0,
         beatSection ? beatSection->beats : 0,

@@ -230,6 +230,7 @@ struct DuplexContext {
     OutputRecorder* recorder = nullptr;
     TrackTakeRecorder* track_take_recorder = nullptr;
     std::vector<std::int32_t> capture_scratch;
+    std::vector<double> input_peak_scratch;
     std::vector<std::int32_t> playback_scratch;
     std::vector<std::int32_t> recorder_my_input_scratch;
     std::vector<std::int32_t> recorder_their_input_scratch;
@@ -388,10 +389,17 @@ void mix_metronome_click(DuplexContext& context, std::span<std::int32_t> output,
     });
     const std::uint64_t step_interval =
         jam2::metronome::step_interval_samples(context.sample_rate, pattern.bpm, pattern.division);
+    const bool count_in_active =
+        context.control->recording_count_in_active.load(std::memory_order_acquire);
+    const std::uint64_t count_in_start =
+        context.control->recording_count_in_start_frame.load(std::memory_order_relaxed);
+    const std::uint64_t count_in_target =
+        context.control->recording_count_in_target_frame.load(std::memory_order_relaxed);
 
     for (std::size_t i = 0; i < output.size(); ++i) {
-        std::uint64_t render_sample_counter =
+        const std::uint64_t raw_sample_counter =
             context.engine_frame_counter + static_cast<std::uint64_t>(i);
+        std::uint64_t render_sample_counter = raw_sample_counter;
         if (render_offset_frames < 0) {
             const std::uint64_t offset = static_cast<std::uint64_t>(-render_offset_frames);
             render_sample_counter = render_sample_counter > offset ? render_sample_counter - offset : 0ULL;
@@ -402,8 +410,17 @@ void mix_metronome_click(DuplexContext& context, std::span<std::int32_t> output,
         const std::uint64_t position =
             before_epoch ? 0ULL : (epoch_valid ? render_sample_counter - epoch : render_sample_counter);
         if (!before_epoch) {
-            const double rendered =
-                jam2::metronome::render_sample(pattern, position, step_interval, context.sample_rate, level);
+            const double rendered = jam2::metronome::render_sample(
+                pattern,
+                position,
+                step_interval,
+                context.sample_rate,
+                level,
+                count_in_active &&
+                        raw_sample_counter >= count_in_start &&
+                        raw_sample_counter < count_in_target
+                    ? jam2::metronome::ClickVoice::CountIn
+                    : jam2::metronome::ClickVoice::Normal);
             if (metronome_stem.size() == output.size()) {
                 metronome_stem[i] = jam2::metronome::mix_i32(0, rendered);
             }
@@ -687,19 +704,55 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
                 context->capture->push(captured_input);
             }
         } else {
+            std::fill(
+                context->input_peak_scratch.begin(),
+                context->input_peak_scratch.end(),
+                0.0);
+            for (std::size_t channel = 0; channel < context->inputs.size(); ++channel) {
+                ASIOBufferInfo* input_info = context->inputs[channel];
+                if (input_info == nullptr ||
+                    input_info->buffers[double_buffer_index] == nullptr) {
+                    continue;
+                }
+                const auto* input = static_cast<const std::int32_t*>(
+                    input_info->buffers[double_buffer_index]);
+                double peak = 0.0;
+                for (long frame = 0; frame < context->buffer_size; ++frame) {
+                    peak = (std::max)(
+                        peak,
+                        std::abs(static_cast<double>(input[frame]) / 2147483648.0));
+                }
+                context->input_peak_scratch[channel] = peak;
+            }
+            const double loudestPeak = context->input_peak_scratch.empty()
+                ? 0.0
+                : *std::max_element(
+                    context->input_peak_scratch.cbegin(),
+                    context->input_peak_scratch.cend());
+            const std::size_t activeChannels = mono_downmix_active_channels(
+                std::span<const double>(
+                    context->input_peak_scratch.data(),
+                    context->input_peak_scratch.size()));
             for (long i = 0; i < context->buffer_size; ++i) {
                 std::int64_t sum = 0;
-                int mixed_channels = 0;
-                for (ASIOBufferInfo* input_info : context->inputs) {
+                for (std::size_t channel = 0; channel < context->inputs.size(); ++channel) {
+                    ASIOBufferInfo* input_info = context->inputs[channel];
                     if (input_info == nullptr || input_info->buffers[double_buffer_index] == nullptr) {
+                        continue;
+                    }
+                    if (!mono_downmix_channel_active(
+                            context->input_peak_scratch[channel],
+                            loudestPeak)) {
                         continue;
                     }
                     const auto* input = static_cast<const std::int32_t*>(input_info->buffers[double_buffer_index]);
                     sum += input[i];
-                    ++mixed_channels;
                 }
                 context->capture_scratch[static_cast<std::size_t>(i)] =
-                    mixed_channels > 0 ? static_cast<std::int32_t>(sum / mixed_channels) : 0;
+                    activeChannels > 0
+                    ? static_cast<std::int32_t>(
+                        sum / static_cast<std::int64_t>(activeChannels))
+                    : 0;
             }
             captured_input = std::span<const std::int32_t>(
                 context->capture_scratch.data(),
@@ -882,6 +935,7 @@ public:
         context_.recorder = recorder;
         context_.track_take_recorder = track_take_recorder;
         context_.capture_scratch.resize(static_cast<std::size_t>(buffer_size));
+        context_.input_peak_scratch.resize(input_count);
         context_.playback_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.recorder_my_input_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.recorder_their_input_scratch.resize(static_cast<std::size_t>(buffer_size));

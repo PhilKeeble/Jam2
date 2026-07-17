@@ -179,6 +179,7 @@ private:
     void updateTrackTimeline();
     void startTrackMetronome();
     void stopTrackMetronome();
+    void tapTrackMetronomeTempo();
     void updateTrackMetronomeInterval();
     void rebuildMetronomePattern(bool resetToDivisionDefault = false);
     jam2::metronome::PatternSnapshot currentMetronomePattern() const;
@@ -238,6 +239,8 @@ private:
     Jam2RuntimeOptions runtimeOptions() const;
     Jam2RuntimeOptions networkRuntimeOptions(
         const SharedSessionController::Snapshot& snapshot) const;
+    int activeTrackSampleRate() const;
+    bool recordingTargetSampleRate(int& sampleRate, QString& error) const;
     void applyTuningProfileName(const QString& name);
     QString sessionHex() const;
     QString keyHex() const;
@@ -357,6 +360,7 @@ private:
     QSlider* localMetronomeLevelSlider_ = nullptr;
     QPushButton* startTrackMetronomeButton_ = nullptr;
     QPushButton* stopTrackMetronomeButton_ = nullptr;
+    QPushButton* tapTrackMetronomeButton_ = nullptr;
     QCheckBox* metronomeMarkerReferenceCheck_ = nullptr;
     QLabel* trackMetronomeLabel_ = nullptr;
     QTableWidget* metronomePatternTable_ = nullptr;
@@ -435,6 +439,8 @@ private:
 
     std::uint64_t sessionId_ = 0;
     std::array<std::uint8_t, 16> sessionKey_{};
+    TapTempoTracker tapTempoTracker_;
+    QElapsedTimer tapTempoClock_;
     int selectedLooperLane_ = -1;
     ProjectPersistenceCoordinator& projectPersistence_;
     PreparedMixResult& preparedMix_;

@@ -165,6 +165,7 @@ struct EngineEvent {
     std::uint64_t requested_frame = 0;
     std::uint64_t applied_frame = 0;
     std::uint64_t value = 0;
+    int sample_rate = 0;
     bool ok = true;
     std::array<char, kEngineEventTextBytes> text{};
 };

@@ -84,6 +84,11 @@ QVector<int> voicedNotes(const ParsedChord& chord, ChordVoicing voicing, double 
             while (previousCenter - note > 6.0) note += 12;
         }
     }
+    if (chord.bass >= 0) {
+        int bass = 36 + chord.bass;
+        while (bass >= 48) bass -= 12;
+        notes.prepend(bass);
+    }
     return notes;
 }
 
@@ -278,8 +283,7 @@ std::optional<DrumEvent::Instrument> drumInstrument(const QString& name)
     if (name == QStringLiteral("Closed HH")) return DrumEvent::Instrument::ClosedHat;
     if (name == QStringLiteral("Open HH")) return DrumEvent::Instrument::OpenHat;
     if (name == QStringLiteral("Tom")) return DrumEvent::Instrument::Tom;
-    if (name == QStringLiteral("Crash") || name == QStringLiteral("Splash") ||
-        name == QStringLiteral("Cymbal")) return DrumEvent::Instrument::Crash;
+    if (name == QStringLiteral("Crash")) return DrumEvent::Instrument::Crash;
     return std::nullopt;
 }
 

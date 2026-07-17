@@ -5,7 +5,22 @@
 
 #include "engine.hpp"
 
+#include <array>
 #include <cstdint>
+#include <optional>
+
+class TapTempoTracker {
+public:
+    std::optional<int> tap(std::int64_t elapsedMs) noexcept;
+    void reset() noexcept;
+
+private:
+    static constexpr std::size_t kIntervalCapacity = 4;
+    std::array<std::int64_t, kIntervalCapacity> intervals_ms_{};
+    std::int64_t last_tap_ms_ = 0;
+    std::size_t interval_count_ = 0;
+    bool has_last_tap_ = false;
+};
 
 class MetronomeTransportController {
 public:

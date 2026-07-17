@@ -83,13 +83,33 @@ std::uint64_t jam2::gui::recording_count_in_bar_beat(
 
 bool jam2::gui::recording_grid_ready_for_count_in(
     bool metronomeEnabled,
-    bool epochValid,
-    std::uint64_t epochFrame,
-    bool requireFreshEpoch,
-    std::uint64_t priorEpochFrame) noexcept
+    bool epochValid) noexcept
 {
-    return metronomeEnabled && epochValid &&
-        (!requireFreshEpoch || epochFrame != priorEpochFrame);
+    return metronomeEnabled && epochValid;
+}
+
+int jam2::gui::resolve_active_sample_rate(
+    int sessionSampleRate,
+    double engineSampleRate,
+    int configuredSampleRate) noexcept
+{
+    if (sessionSampleRate > 0) {
+        return sessionSampleRate;
+    }
+    if (std::isfinite(engineSampleRate) && engineSampleRate > 0.0 &&
+        engineSampleRate <= static_cast<double>((std::numeric_limits<int>::max)())) {
+        return static_cast<int>(std::lround(engineSampleRate));
+    }
+    return configuredSampleRate > 0 ? configuredSampleRate : 48000;
+}
+
+bool jam2::gui::sample_rate_matches_engine(
+    int expectedSampleRate,
+    double engineSampleRate) noexcept
+{
+    return expectedSampleRate > 0 && std::isfinite(engineSampleRate) &&
+        engineSampleRate > 0.0 &&
+        std::abs(engineSampleRate - static_cast<double>(expectedSampleRate)) <= 1.0;
 }
 
 TrackRecordingWorkflow::TrackRecordingWorkflow(ApplicationRuntime& runtime) noexcept
@@ -256,14 +276,9 @@ std::optional<int> TrackRecordingWorkflow::takeReadyPendingCountIn(
 {
     if (pending_count_in_bars_ > 0 && jam2::gui::recording_grid_ready_for_count_in(
             snapshot.metronome_enabled,
-            snapshot.metronome_epoch_valid,
-            snapshot.metronome_epoch_frame,
-            pending_count_in_requires_fresh_epoch_,
-            pending_count_in_prior_epoch_frame_)) {
+            snapshot.metronome_epoch_valid)) {
         const int bars = pending_count_in_bars_;
         pending_count_in_bars_ = 0;
-        pending_count_in_requires_fresh_epoch_ = false;
-        pending_count_in_prior_epoch_frame_ = 0;
         return bars;
     }
     return std::nullopt;
@@ -374,6 +389,7 @@ bool TrackRecordingWorkflow::startTrackTakeQuantized(
 bool TrackRecordingWorkflow::startInputTake(
     const QString& outputPath,
     bool transientOutput,
+    int expectedSampleRate,
     std::uint64_t targetFrame,
     std::optional<int> countInBars,
     const PlaybackGrid::Position& position,
@@ -382,6 +398,15 @@ bool TrackRecordingWorkflow::startInputTake(
 {
     if (input_take_active_) {
         error = QStringLiteral("an input take is already active");
+        return false;
+    }
+    const jam2::EngineSnapshot engine = runtime_.engineSnapshot();
+    if (!jam2::gui::sample_rate_matches_engine(
+            expectedSampleRate, engine.sample_rate)) {
+        error = QStringLiteral(
+            "recording target is %1 Hz but the active engine is %2 Hz")
+            .arg(expectedSampleRate)
+            .arg(engine.sample_rate, 0, 'f', 0);
         return false;
     }
     const QString takeId = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -399,6 +424,8 @@ bool TrackRecordingWorkflow::startInputTake(
         return false;
     }
     active_take_id_ = takeId;
+    active_take_sample_rate_ = expectedSampleRate;
+    last_capture_sample_rate_ = expectedSampleRate;
     input_take_active_ = true;
     last_capture_path_ = outputPath;
     pending_transient_capture_path_ = transientOutput ? outputPath : QString{};
@@ -428,10 +455,17 @@ TrackRecordingWorkflow::TrackTakeCompletion TrackRecordingWorkflow::consumeTrack
     completion.takeId = active_take_id_;
     completion.wavPath = pending_transient_capture_path_;
     completion.frames = event.value;
+    completion.sampleRate = event.sample_rate > 0
+        ? event.sample_rate
+        : active_take_sample_rate_;
+    if (completion.sampleRate > 0) {
+        last_capture_sample_rate_ = completion.sampleRate;
+    }
     const std::string_view text = jam2::engine_event_text(event);
     completion.error = QString::fromUtf8(text.data(), static_cast<qsizetype>(text.size()));
     input_take_active_ = false;
     active_take_id_.clear();
+    active_take_sample_rate_ = 0;
     clearRecordingSchedule();
     if (event.ok && !completion.wavPath.isEmpty()) {
         last_capture_path_ = QDir::fromNativeSeparators(completion.wavPath);
@@ -442,16 +476,9 @@ TrackRecordingWorkflow::TrackTakeCompletion TrackRecordingWorkflow::consumeTrack
 
 void TrackRecordingWorkflow::waitForCountIn(
     int bars,
-    bool stopMetronomeAtStart,
-    bool requireFreshEpoch,
-    std::uint64_t priorEpochFrame) noexcept
+    bool stopMetronomeAtStart) noexcept
 {
     pending_count_in_bars_ = qMax(0, bars);
-    pending_count_in_requires_fresh_epoch_ =
-        pending_count_in_bars_ > 0 && requireFreshEpoch;
-    pending_count_in_prior_epoch_frame_ = pending_count_in_requires_fresh_epoch_
-        ? priorEpochFrame
-        : 0;
     stop_metronome_at_recording_start_ = stopMetronomeAtStart;
 }
 
@@ -460,8 +487,6 @@ void TrackRecordingWorkflow::clearRecordingSchedule() noexcept
     recording_countdown_start_frame_ = 0;
     recording_start_frame_ = 0;
     pending_count_in_bars_ = 0;
-    pending_count_in_requires_fresh_epoch_ = false;
-    pending_count_in_prior_epoch_frame_ = 0;
     stop_metronome_at_recording_start_ = false;
 }
 
@@ -493,9 +518,11 @@ TrackRecordingWorkflow::CountdownPresentation TrackRecordingWorkflow::countdown(
 
 void TrackRecordingWorkflow::beginLoopbackCapture(
     const QString& outputPath,
-    bool transientOutput)
+    bool transientOutput,
+    int sampleRate)
 {
     last_capture_path_ = outputPath;
+    last_capture_sample_rate_ = sampleRate;
     pending_transient_capture_path_ = transientOutput ? outputPath : QString{};
 }
 
@@ -583,6 +610,7 @@ void TrackRecordingWorkflow::clearJamRecordingState() noexcept
 void TrackRecordingWorkflow::clearProjectCapture() noexcept
 {
     last_capture_path_.clear();
+    last_capture_sample_rate_ = 0;
     pending_transient_capture_path_.clear();
     disarmLane();
 }

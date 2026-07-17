@@ -96,6 +96,24 @@ The song grid lets both players share simple song structure:
 The GUI control plane uses authenticated TCP connections to the creator for
 ordering and distribution. It is not a room server and does not relay audio.
 
+## Generated Practice Ideas
+
+The Chord and Beat pages share one coupled practice-idea generator. Key, style,
+character, length, and **Complexity 1–8** are selected in the Generate dialog.
+Level 4 is the default. The chosen style continues to control the musical form,
+vocabulary, groove family, BPM range, and click feel; complexity independently
+changes harmonic movement, melody vocabulary, syncopation, subdivisions, and
+fills. Raising complexity therefore produces more advanced pop, blues, modal,
+jazz, or metal material without changing the selected style or automatically
+raising the tempo.
+
+The generated chord and beat section names show separate `H` and `R` levels.
+The first UI sets both to the selected complexity value, while the saved
+metadata keeps them separate for inspection and future independent controls.
+Level 8 uses one coherent advanced harmonic scheme per idea rather than mixing
+every available chromatic technique. Irregular rhythmic complexity uses the
+current metronome meter and never changes it automatically.
+
 ## Track And Looper
 
 The Track tab can:
@@ -147,6 +165,23 @@ instead exposes its preferred source, duration/stop behavior, trigger,
 threshold, hold, pre-roll, tail, and trim controls; it has no Perform Input
 count-in, metronome, latency, or ASIO controls. Arm-dialog changes apply to that
 take only and do not overwrite the saved defaults.
+
+Input and loopback recordings use an active-channel mono fold-down. For each
+capture block, selected channels more than 30 dB below the loudest selected
+channel are treated as inactive, and the remaining channels are averaged. A
+mono source on either channel therefore retains its level when channels 1-2
+are selected, while genuinely active stereo material retains averaging
+headroom. Input mix mode is recorded in diagnostics, and loopback completion
+logs the endpoint format, channel mask, active-channel range, and recorded peak.
+
+Recordings always target the active jam contract rate, or the running local
+engine rate outside a jam. Perform Input writes at that engine rate. System
+Loopback may be supplied by Windows at a different shared-mode endpoint rate;
+Jam2 applies offline band-limited resampling before writing the WAV, so a
+48 kHz Windows endpoint still produces a 44.1 kHz WAV for a 44.1 kHz engine.
+The completion log reports both rates, frame counts, and the conversion ratio.
+If a jam contract and its engine rate ever disagree, recording is refused
+instead of creating a WAV that the active project cannot load.
 
 The Arm dialog identifies its target by stable bank and lane IDs. If a synchronized arrangement update removes that lane or switches the active bank while the dialog is open, arming is cancelled with a warning instead of using stale lane storage.
 

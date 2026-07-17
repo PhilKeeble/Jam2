@@ -22,10 +22,16 @@ std::uint64_t recording_count_in_bar_beat(
 
 bool recording_grid_ready_for_count_in(
     bool metronomeEnabled,
-    bool epochValid,
-    std::uint64_t epochFrame,
-    bool requireFreshEpoch,
-    std::uint64_t priorEpochFrame) noexcept;
+    bool epochValid) noexcept;
+
+int resolve_active_sample_rate(
+    int sessionSampleRate,
+    double engineSampleRate,
+    int configuredSampleRate) noexcept;
+
+bool sample_rate_matches_engine(
+    int expectedSampleRate,
+    double engineSampleRate) noexcept;
 
 }
 
@@ -56,6 +62,7 @@ public:
         QString wavPath;
         QString error;
         std::uint64_t frames = 0;
+        int sampleRate = 0;
     };
 
     explicit TrackRecordingWorkflow(ApplicationRuntime& runtime) noexcept;
@@ -86,6 +93,7 @@ public:
     bool startInputTake(
         const QString& outputPath,
         bool transientOutput,
+        int expectedSampleRate,
         std::uint64_t targetFrame,
         std::optional<int> countInBars,
         const PlaybackGrid::Position& position,
@@ -96,13 +104,14 @@ public:
 
     void waitForCountIn(
         int bars,
-        bool stopMetronomeAtStart,
-        bool requireFreshEpoch = false,
-        std::uint64_t priorEpochFrame = 0) noexcept;
+        bool stopMetronomeAtStart) noexcept;
     void clearRecordingSchedule() noexcept;
     CountdownPresentation countdown(const PlaybackGrid::Position& position) noexcept;
 
-    void beginLoopbackCapture(const QString& outputPath, bool transientOutput);
+    void beginLoopbackCapture(
+        const QString& outputPath,
+        bool transientOutput,
+        int sampleRate);
     QString finishLoopbackCapture(const QString& outputPath);
     QString abandonPendingCapture();
 
@@ -125,6 +134,7 @@ public:
     const QString& lastCapturePath() const noexcept { return last_capture_path_; }
     void setLastCapturePath(const QString& path) { last_capture_path_ = path; }
     void clearLastCapturePath() { last_capture_path_.clear(); }
+    int lastCaptureSampleRate() const noexcept { return last_capture_sample_rate_; }
     const QString& pendingTransientCapturePath() const noexcept { return pending_transient_capture_path_; }
     bool inputTakeActive() const noexcept { return input_take_active_; }
     bool preparedPlaying() const noexcept { return prepared_playing_; }
@@ -152,6 +162,8 @@ private:
     QString last_capture_path_;
     QString pending_transient_capture_path_;
     QString active_take_id_;
+    int active_take_sample_rate_ = 0;
+    int last_capture_sample_rate_ = 0;
     bool input_take_active_ = false;
 
     int armed_bank_ = -1;
@@ -164,8 +176,6 @@ private:
     int prepared_sample_rate_ = 48000;
 
     int pending_count_in_bars_ = 0;
-    bool pending_count_in_requires_fresh_epoch_ = false;
-    std::uint64_t pending_count_in_prior_epoch_frame_ = 0;
     bool stop_metronome_at_recording_start_ = false;
     std::uint64_t recording_countdown_start_frame_ = 0;
     std::uint64_t recording_start_frame_ = 0;

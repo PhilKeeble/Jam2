@@ -1,6 +1,51 @@
 #include "MetronomeTransportController.hpp"
 
+#include <algorithm>
 #include <cmath>
+
+std::optional<int> TapTempoTracker::tap(std::int64_t elapsedMs) noexcept
+{
+    if (!has_last_tap_) {
+        last_tap_ms_ = elapsedMs;
+        has_last_tap_ = true;
+        return std::nullopt;
+    }
+
+    const std::int64_t interval = elapsedMs - last_tap_ms_;
+    last_tap_ms_ = elapsedMs;
+    constexpr std::int64_t kFastestIntervalMs = 150;
+    constexpr std::int64_t kSequenceResetIntervalMs = 2000;
+    if (interval < kFastestIntervalMs || interval > kSequenceResetIntervalMs) {
+        interval_count_ = 0;
+        return std::nullopt;
+    }
+
+    if (interval_count_ < kIntervalCapacity) {
+        intervals_ms_[interval_count_++] = interval;
+    } else {
+        for (std::size_t index = 1; index < kIntervalCapacity; ++index) {
+            intervals_ms_[index - 1] = intervals_ms_[index];
+        }
+        intervals_ms_.back() = interval;
+    }
+
+    std::array<std::int64_t, kIntervalCapacity> sorted = intervals_ms_;
+    std::sort(sorted.begin(), sorted.begin() + interval_count_);
+    const std::int64_t median = interval_count_ % 2 == 0
+        ? (sorted[interval_count_ / 2 - 1] + sorted[interval_count_ / 2]) / 2
+        : sorted[interval_count_ / 2];
+    return std::clamp(
+        static_cast<int>(std::lround(60000.0 / static_cast<double>(median))),
+        1,
+        400);
+}
+
+void TapTempoTracker::reset() noexcept
+{
+    last_tap_ms_ = 0;
+    interval_count_ = 0;
+    has_last_tap_ = false;
+}
 
 MetronomeTransportController::MetronomeTransportController(
     ApplicationRuntime& runtime) noexcept

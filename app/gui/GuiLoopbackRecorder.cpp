@@ -1,5 +1,7 @@
 #include "GuiLoopbackRecorder.hpp"
 
+#include "audio_device.hpp"
+
 #include <QDir>
 #include <QFileInfo>
 
@@ -172,6 +174,13 @@ public:
         return samples_;
     }
 
+    double peakDbfs() const noexcept
+    {
+        return peak_ > 0.0
+            ? 20.0 * std::log10(peak_)
+            : -std::numeric_limits<double>::infinity();
+    }
+
 private:
     const GuiLoopbackOptions& options_;
     int sampleRate_ = 48000;
@@ -307,6 +316,118 @@ double readSample(const BYTE* frame, WORD bitsPerSample, WORD formatTag, const G
 
 } // namespace
 
+std::vector<std::int16_t> jam2::gui::resample_pcm16_mono(
+    std::span<const std::int16_t> input,
+    int sourceSampleRate,
+    int targetSampleRate)
+{
+    if (sourceSampleRate <= 0 || targetSampleRate <= 0) {
+        throw std::invalid_argument("sample rates must be positive");
+    }
+    if (input.empty()) {
+        return {};
+    }
+    if (sourceSampleRate == targetSampleRate) {
+        return {input.begin(), input.end()};
+    }
+
+    const long double exactOutputFrames =
+        static_cast<long double>(input.size()) *
+        static_cast<long double>(targetSampleRate) /
+        static_cast<long double>(sourceSampleRate);
+    const long double maximumOutputFrames = std::min(
+        static_cast<long double>((std::numeric_limits<std::size_t>::max)()),
+        static_cast<long double>((std::numeric_limits<long long>::max)()));
+    if (!std::isfinite(exactOutputFrames) ||
+        exactOutputFrames > maximumOutputFrames) {
+        throw std::length_error("resampled loopback recording is too large");
+    }
+    const std::size_t outputFrames = std::max<std::size_t>(
+        1,
+        static_cast<std::size_t>(std::llround(exactOutputFrames)));
+    std::vector<std::int16_t> output(outputFrames);
+
+    constexpr int kHalfTaps = 16;
+    constexpr int kTapCount = kHalfTaps * 2;
+    constexpr int kPhaseCount = 1024;
+    constexpr double kPi = 3.1415926535897932384626433832795;
+    const double sourcePerTarget =
+        static_cast<double>(sourceSampleRate) /
+        static_cast<double>(targetSampleRate);
+    const double cutoff = 0.94 * std::min(
+        1.0,
+        static_cast<double>(targetSampleRate) /
+            static_cast<double>(sourceSampleRate));
+    std::vector<double> kernels(
+        static_cast<std::size_t>(kPhaseCount) * kTapCount);
+    for (int phase = 0; phase < kPhaseCount; ++phase) {
+        const double fractionalPosition =
+            static_cast<double>(phase) /
+            static_cast<double>(kPhaseCount);
+        for (int tapIndex = 0; tapIndex < kTapCount; ++tapIndex) {
+            const int tap = tapIndex - kHalfTaps + 1;
+            const double distance =
+                fractionalPosition - static_cast<double>(tap);
+            const double normalizedDistance =
+                std::abs(distance) / static_cast<double>(kHalfTaps);
+            double weight = 0.0;
+            if (normalizedDistance < 1.0) {
+                const double sincArgument = cutoff * distance;
+                const double sinc = std::abs(sincArgument) < 1.0e-12
+                    ? 1.0
+                    : std::sin(kPi * sincArgument) /
+                        (kPi * sincArgument);
+                const double window =
+                    0.5 * (1.0 + std::cos(kPi * normalizedDistance));
+                weight = cutoff * sinc * window;
+            }
+            kernels[
+                static_cast<std::size_t>(phase) * kTapCount +
+                static_cast<std::size_t>(tapIndex)] = weight;
+        }
+    }
+
+    for (std::size_t outputIndex = 0;
+         outputIndex < outputFrames;
+         ++outputIndex) {
+        const double sourcePosition =
+            static_cast<double>(outputIndex) * sourcePerTarget;
+        auto centre = static_cast<std::int64_t>(
+            std::floor(sourcePosition));
+        const double fractionalPosition =
+            sourcePosition - static_cast<double>(centre);
+        int phase = static_cast<int>(std::llround(
+            fractionalPosition * static_cast<double>(kPhaseCount)));
+        if (phase >= kPhaseCount) {
+            phase = 0;
+            ++centre;
+        }
+        double weightedSample = 0.0;
+        double weightSum = 0.0;
+        for (int tapIndex = 0; tapIndex < kTapCount; ++tapIndex) {
+            const int tap = tapIndex - kHalfTaps + 1;
+            const std::int64_t sourceIndex = centre + tap;
+            if (sourceIndex < 0 ||
+                sourceIndex >= static_cast<std::int64_t>(input.size())) {
+                continue;
+            }
+            const double weight = kernels[
+                static_cast<std::size_t>(phase) * kTapCount +
+                static_cast<std::size_t>(tapIndex)];
+            weightedSample +=
+                static_cast<double>(input[static_cast<std::size_t>(sourceIndex)]) *
+                weight;
+            weightSum += weight;
+        }
+        const double sample = std::abs(weightSum) > 1.0e-12
+            ? weightedSample / weightSum
+            : 0.0;
+        output[outputIndex] = static_cast<std::int16_t>(std::lrint(
+            std::clamp(sample, -32768.0, 32767.0)));
+    }
+    return output;
+}
+
 GuiLoopbackRecorder::GuiLoopbackRecorder() = default;
 
 GuiLoopbackRecorder::~GuiLoopbackRecorder()
@@ -330,6 +451,10 @@ bool GuiLoopbackRecorder::start(const GuiLoopbackOptions& options, FinishedCallb
     }
     if (options.outputPath.trimmed().isEmpty()) {
         if (error) *error = QStringLiteral("loopback output path is required");
+        return false;
+    }
+    if (options.targetSampleRate <= 0) {
+        if (error) *error = QStringLiteral("loopback target sample rate must be positive");
         return false;
     }
     if (thread_.joinable()) {
@@ -379,6 +504,7 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
 {
     bool ok = false;
     QString error;
+    QString diagnostics;
     try {
 #if defined(_WIN32)
         ComApartment apartment;
@@ -399,6 +525,13 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
         const int sampleRate = static_cast<int>(mixFormat->nSamplesPerSec);
         const WORD channels = mixFormat->nChannels;
         const WORD bitsPerSample = mixFormat->wBitsPerSample;
+        const WORD validBitsPerSample = extensible != nullptr
+            ? extensible->Samples.wValidBitsPerSample
+            : bitsPerSample;
+        const DWORD channelMask = extensible != nullptr
+            ? extensible->dwChannelMask
+            : 0;
+        const QString selectedEndpoint = endpointName(device.Get());
         const std::uint64_t targetFrames = options.durationMs > 0
             ? static_cast<std::uint64_t>((static_cast<std::int64_t>(sampleRate) * options.durationMs) / 1000)
             : std::numeric_limits<std::uint64_t>::max();
@@ -418,6 +551,10 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
 
         checkHr(audioClient->Start(), "failed to start WASAPI loopback capture");
         std::uint64_t written = 0;
+        std::uint64_t signalPackets = 0;
+        std::size_t minimumActiveChannels = channels;
+        std::size_t maximumActiveChannels = 0;
+        std::vector<double> channelPeaks(channels, 0.0);
         TakeAccumulator capture(options, sampleRate);
         while (written < targetFrames && !stopRequested_.load(std::memory_order_acquire)) {
             UINT32 packetFrames = 0;
@@ -431,14 +568,50 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
             DWORD flags = 0;
             checkHr(captureClient->GetBuffer(&data, &framesAvailable, &flags, nullptr, nullptr), "failed to get WASAPI capture buffer");
             const UINT32 framesToWrite = static_cast<UINT32>(std::min<std::uint64_t>(framesAvailable, targetFrames - written));
+            std::fill(channelPeaks.begin(), channelPeaks.end(), 0.0);
+            double loudestPeak = 0.0;
+            if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) == 0) {
+                for (UINT32 frame = 0; frame < framesToWrite; ++frame) {
+                    const BYTE* frameData =
+                        data + static_cast<std::size_t>(frame) * mixFormat->nBlockAlign;
+                    for (WORD channel = 0; channel < channels; ++channel) {
+                        const double peak = std::abs(readSample(
+                            frameData,
+                            bitsPerSample,
+                            mixFormat->wFormatTag,
+                            subFormat,
+                            channel));
+                        channelPeaks[channel] = std::max(channelPeaks[channel], peak);
+                        loudestPeak = std::max(loudestPeak, peak);
+                    }
+                }
+            }
+            const std::size_t activeChannels =
+                jam2::audio::mono_downmix_active_channels(
+                    std::span<const double>(
+                        channelPeaks.data(),
+                        channelPeaks.size()));
+            if (loudestPeak > 0.0) {
+                ++signalPackets;
+                minimumActiveChannels =
+                    std::min(minimumActiveChannels, activeChannels);
+                maximumActiveChannels =
+                    std::max(maximumActiveChannels, activeChannels);
+            }
             for (UINT32 frame = 0; frame < framesToWrite; ++frame) {
                 double mono = 0.0;
-                if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) == 0) {
+                if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) == 0 &&
+                    activeChannels > 0) {
                     const BYTE* frameData = data + static_cast<std::size_t>(frame) * mixFormat->nBlockAlign;
                     for (WORD channel = 0; channel < channels; ++channel) {
+                        if (!jam2::audio::mono_downmix_channel_active(
+                                channelPeaks[channel],
+                                loudestPeak)) {
+                            continue;
+                        }
                         mono += readSample(frameData, bitsPerSample, mixFormat->wFormatTag, subFormat, channel);
                     }
-                    mono /= static_cast<double>(std::max<WORD>(channels, 1));
+                    mono /= static_cast<double>(activeChannels);
                 }
                 capture.push(doubleToI16(mono));
             }
@@ -446,7 +619,45 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
             checkHr(captureClient->ReleaseBuffer(framesAvailable), "failed to release WASAPI capture buffer");
         }
         checkHr(audioClient->Stop(), "failed to stop WASAPI loopback capture");
-        writeWav(options.outputPath, sampleRate, capture.finish());
+        std::vector<std::int16_t> sourceSamples = capture.finish();
+        std::vector<std::int16_t> outputSamples =
+            jam2::gui::resample_pcm16_mono(
+                sourceSamples,
+                sampleRate,
+                options.targetSampleRate);
+        diagnostics = QStringLiteral(
+            "loopback capture endpoint=\"%1\" channels=%2 channel_mask=0x%3 "
+            "source_sample_rate=%4 target_sample_rate=%5 resampled=%6 "
+            "resample_ratio=%7 source_frames=%8 output_frames=%9 "
+            "bits=%10 valid_bits=%11 fold_down=active-average-30dB "
+            "signal_packets=%12 active_channels_min=%13 active_channels_max=%14 "
+            "recorded_peak_dbfs=%15")
+            .arg(selectedEndpoint)
+            .arg(channels)
+            .arg(QString::number(channelMask, 16))
+            .arg(sampleRate)
+            .arg(options.targetSampleRate)
+            .arg(sampleRate == options.targetSampleRate
+                ? QStringLiteral("no")
+                : QStringLiteral("yes"))
+            .arg(
+                static_cast<double>(options.targetSampleRate) /
+                    static_cast<double>(sampleRate),
+                0,
+                'f',
+                8)
+            .arg(static_cast<qulonglong>(sourceSamples.size()))
+            .arg(static_cast<qulonglong>(outputSamples.size()))
+            .arg(bitsPerSample)
+            .arg(validBitsPerSample)
+            .arg(signalPackets)
+            .arg(signalPackets > 0 ? minimumActiveChannels : 0)
+            .arg(maximumActiveChannels)
+            .arg(capture.peakDbfs(), 0, 'f', 2);
+        writeWav(
+            options.outputPath,
+            options.targetSampleRate,
+            outputSamples);
         ok = true;
 #else
         throw std::runtime_error("internal loopback recording is currently implemented on Windows only");
@@ -456,6 +667,6 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
     }
     running_.store(false, std::memory_order_release);
     if (finished) {
-        finished(ok, options.outputPath, error);
+        finished(ok, options.outputPath, error, diagnostics);
     }
 }

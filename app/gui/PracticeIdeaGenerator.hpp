@@ -31,6 +31,8 @@ struct ChordIdeaRequest {
     QString character;
     int bars = 0;
     int beatsPerBar = 4;
+    int harmonicComplexity = 4;
+    int rhythmicComplexity = 4;
 };
 
 struct BeatIdeaRequest {
@@ -38,6 +40,7 @@ struct BeatIdeaRequest {
     QString character;
     int bars = 0;
     int beatsPerBar = 4;
+    int rhythmicComplexity = 4;
 };
 
 struct GeneratedPracticeIdea {

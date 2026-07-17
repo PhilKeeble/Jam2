@@ -33,6 +33,28 @@ QComboBox* barsCombo(QWidget* parent)
     return combo;
 }
 
+QComboBox* complexityCombo(QWidget* parent)
+{
+    auto* combo = new QComboBox(parent);
+    const QStringList names{
+        QStringLiteral("Grounded"),
+        QStringLiteral("Diatonic"),
+        QStringLiteral("Colour"),
+        QStringLiteral("Borrowed"),
+        QStringLiteral("Tonicised"),
+        QStringLiteral("Modulating"),
+        QStringLiteral("Chromatic"),
+        QStringLiteral("Expert"),
+    };
+    for (int level = 1; level <= names.size(); ++level) {
+        combo->addItem(QStringLiteral("%1 — %2").arg(level).arg(names.at(level - 1)), level);
+    }
+    combo->setCurrentIndex(3);
+    combo->setToolTip(QStringLiteral(
+        "Changes harmonic and rhythmic difficulty without changing style, tempo, or meter."));
+    return combo;
+}
+
 void refreshCharacterCombo(QComboBox* character, int style, bool chord)
 {
     character->clear();
@@ -63,6 +85,7 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(QWidget* parent, int beatsPer
     QComboBox* style = randomCombo(chordStyleNames(), &dialog);
     QComboBox* character = new QComboBox(&dialog);
     QComboBox* bars = barsCombo(&dialog);
+    QComboBox* complexity = complexityCombo(&dialog);
     refreshCharacterCombo(character, -1, true);
     QObject::connect(style, qOverload<int>(&QComboBox::currentIndexChanged), &dialog,
         [style, character](int) { refreshCharacterCombo(character, style->currentData().toInt(), true); });
@@ -70,13 +93,16 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(QWidget* parent, int beatsPer
     form->addRow(QStringLiteral("Style"), style);
     form->addRow(QStringLiteral("Character"), character);
     form->addRow(QStringLiteral("Bars"), bars);
+    form->addRow(QStringLiteral("Complexity"), complexity);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
     buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Generate"));
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     auto* layout = new QVBoxLayout(&dialog);
     auto* description = new QLabel(
-        QStringLiteral("Creates matching chord and drum sections, plus a style-appropriate BPM and click pattern."),
+        QStringLiteral(
+            "Creates matching chord and drum sections. Style sets the musical language and BPM range; "
+            "complexity independently changes the harmony, melody, and beat difficulty."),
         &dialog);
     description->setWordWrap(true);
     layout->addWidget(description);
@@ -89,6 +115,8 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(QWidget* parent, int beatsPer
     request.character = character->currentData().toString();
     request.bars = bars->currentData().toInt();
     request.beatsPerBar = beatsPerBar;
+    request.harmonicComplexity = complexity->currentData().toInt();
+    request.rhythmicComplexity = complexity->currentData().toInt();
     return request;
 }
 

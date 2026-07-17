@@ -23,6 +23,11 @@ struct AuthorityClockMapping {
     bool valid = false;
 };
 
+enum class ClickVoice {
+    Normal,
+    CountIn,
+};
+
 int clamp_bpm(int bpm);
 int clamp_beats_per_bar(int beats);
 int clamp_division(int division);
@@ -37,13 +42,19 @@ AuthorityClockMapping map_authority_clock(
     std::uint64_t authority_epoch_sample_time,
     std::uint64_t projected_authority_sample_time,
     std::uint64_t local_sample_time);
-double render_sample(const PatternSnapshot& pattern, std::uint64_t grid_sample, double sample_rate, double level);
+double render_sample(
+    const PatternSnapshot& pattern,
+    std::uint64_t grid_sample,
+    double sample_rate,
+    double level,
+    ClickVoice voice = ClickVoice::Normal);
 double render_sample(
     const PatternSnapshot& pattern,
     std::uint64_t grid_sample,
     std::uint64_t step_interval,
     double sample_rate,
-    double level);
+    double level,
+    ClickVoice voice = ClickVoice::Normal);
 std::int32_t mix_i32(std::int32_t sample, double normalized_click);
 std::int32_t mix_pcm24(std::int32_t sample, double normalized_click);
 

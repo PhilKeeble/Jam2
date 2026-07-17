@@ -1077,6 +1077,9 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     w.trackMetronomeLabel_ = new QLabel(QStringLiteral("Local metronome stopped"), page);
     w.startTrackMetronomeButton_ = new QPushButton(QStringLiteral("Start"), page);
     w.stopTrackMetronomeButton_ = new QPushButton(QStringLiteral("Stop"), page);
+    w.tapTrackMetronomeButton_ = new QPushButton(QStringLiteral("Tap Tempo"), page);
+    w.tapTrackMetronomeButton_->setToolTip(
+        QStringLiteral("Tap at least twice; pause for two seconds to begin a new tempo"));
     w.stopTrackMetronomeButton_->setEnabled(false);
     w.metronomeMarkerReferenceCheck_ = new QCheckBox(QStringLiteral("Show marker reference"), page);
     w.metronomeMarkerReferenceCheck_->setChecked(true);
@@ -1127,6 +1130,7 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     auto* buttons = new QHBoxLayout();
     buttons->addWidget(w.startTrackMetronomeButton_);
     buttons->addWidget(w.stopTrackMetronomeButton_);
+    buttons->addWidget(w.tapTrackMetronomeButton_);
     buttons->addStretch(1);
 
     auto* layout = new QVBoxLayout(page);
@@ -1136,6 +1140,7 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
 
     QObject::connect(w.startTrackMetronomeButton_, &QPushButton::clicked, &w, [&w] { w.startTrackMetronome(); });
     QObject::connect(w.stopTrackMetronomeButton_, &QPushButton::clicked, &w, [&w] { w.stopTrackMetronome(); });
+    QObject::connect(w.tapTrackMetronomeButton_, &QPushButton::clicked, &w, [&w] { w.tapTrackMetronomeTempo(); });
     QObject::connect(w.metronomeMarkerReferenceCheck_, &QCheckBox::toggled, &w, [&w] {
         w.updatePlaybackGrid();
     });
