@@ -108,13 +108,36 @@ struct RecordingPreference {
 };
 
 struct UserPreferences {
-    static constexpr int kSchemaVersion = 2;
+    static constexpr int kSchemaVersion = 3;
     AudioDevicePreference localAudio;
     AudioDevicePreference networkAudio;
+    bool splitNetworkAudioByRole = false;
+    AudioDevicePreference createJamAudio;
+    AudioDevicePreference joinJamAudio;
     CreatePreference create;
     JoinPreference join;
     LoggingPreference logging;
     RecordingPreference recording;
+
+    const AudioDevicePreference& createAudio() const noexcept
+    {
+        return splitNetworkAudioByRole ? createJamAudio : networkAudio;
+    }
+
+    const AudioDevicePreference& joinAudio() const noexcept
+    {
+        return splitNetworkAudioByRole ? joinJamAudio : networkAudio;
+    }
+
+    AudioDevicePreference& createAudio() noexcept
+    {
+        return splitNetworkAudioByRole ? createJamAudio : networkAudio;
+    }
+
+    AudioDevicePreference& joinAudio() noexcept
+    {
+        return splitNetworkAudioByRole ? joinJamAudio : networkAudio;
+    }
 };
 
 class UserPreferencesStore final {

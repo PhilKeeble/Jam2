@@ -1741,7 +1741,7 @@ void MainWindow::showStartJamDialog()
 
     applyCreateDefaultsToControls();
     refreshDevices();
-    selectPreferredDevice(deviceBox_, availableDevices_, preferences_.networkAudio);
+    selectPreferredDevice(deviceBox_, availableDevices_, preferences_.createAudio());
 
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Start Jam"));
@@ -1908,7 +1908,7 @@ void MainWindow::showJoinJamDialog()
 
     applyJoinDefaultsToControls();
     refreshDevices();
-    selectPreferredDevice(deviceBox_, availableDevices_, preferences_.networkAudio);
+    selectPreferredDevice(deviceBox_, availableDevices_, preferences_.joinAudio());
 
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Join Jam"));
@@ -2129,23 +2129,82 @@ void MainWindow::showSettingsDialog()
     auto* localBox = new QGroupBox(QStringLiteral("Local Audio"), &dialog);
     localBox->setLayout(localForm);
 
-    auto* networkDevice = makeDeviceCombo(preferences_.networkAudio);
-    auto* networkInput = new QLineEdit(preferences_.networkAudio.inputChannels, &dialog);
-    auto* networkOutput = new QLineEdit(preferences_.networkAudio.outputChannels, &dialog);
-    auto* networkTest = new QPushButton(QStringLiteral("Test Device"), &dialog);
-    auto* networkForm = new QFormLayout();
-    networkForm->addRow(QStringLiteral("Device"), networkDevice);
-    networkForm->addRow(QStringLiteral("Input channels"), networkInput);
-    networkForm->addRow(QStringLiteral("Output channels"), networkOutput);
-    networkForm->addRow(QString(), networkTest);
-    auto* networkBox = new QGroupBox(QStringLiteral("Network Audio"), &dialog);
-    networkBox->setLayout(networkForm);
+    struct NetworkAudioEditors {
+        QComboBox* device = nullptr;
+        QLineEdit* input = nullptr;
+        QLineEdit* output = nullptr;
+        QPushButton* test = nullptr;
+        QGroupBox* box = nullptr;
+    };
+    auto makeNetworkAudioEditors = [&](const QString& title, const AudioDevicePreference& preference) {
+        NetworkAudioEditors editors;
+        editors.device = makeDeviceCombo(preference);
+        editors.input = new QLineEdit(preference.inputChannels, &dialog);
+        editors.output = new QLineEdit(preference.outputChannels, &dialog);
+        editors.test = new QPushButton(QStringLiteral("Test Device"), &dialog);
+        auto* form = new QFormLayout();
+        form->addRow(QStringLiteral("Device"), editors.device);
+        form->addRow(QStringLiteral("Input channels"), editors.input);
+        form->addRow(QStringLiteral("Output channels"), editors.output);
+        form->addRow(QString(), editors.test);
+        editors.box = new QGroupBox(title, &dialog);
+        editors.box->setLayout(form);
+        return editors;
+    };
+    const NetworkAudioEditors networkAudio = makeNetworkAudioEditors(
+        QStringLiteral("Network Audio"), preferences_.networkAudio);
+    const NetworkAudioEditors createJamAudio = makeNetworkAudioEditors(
+        QStringLiteral("Create Jam Audio"), preferences_.createJamAudio);
+    const NetworkAudioEditors joinJamAudio = makeNetworkAudioEditors(
+        QStringLiteral("Join Jam Audio"), preferences_.joinJamAudio);
+    auto* splitNetworkAudio = new QCheckBox(
+        QStringLiteral("Use different audio devices and channels for Create and Join"), &dialog);
+    splitNetworkAudio->setChecked(preferences_.splitNetworkAudioByRole);
 
     auto* audioContent = new QWidget(&dialog);
     auto* audioLayout = new QVBoxLayout(audioContent);
     audioLayout->addWidget(localBox);
-    audioLayout->addWidget(networkBox);
+    audioLayout->addWidget(splitNetworkAudio);
+    audioLayout->addWidget(networkAudio.box);
+    audioLayout->addWidget(createJamAudio.box);
+    audioLayout->addWidget(joinJamAudio.box);
     audioLayout->addStretch(1);
+    auto audioFromEditors = [this](
+        const AudioDevicePreference& original,
+        const NetworkAudioEditors& editors)
+    {
+        AudioDevicePreference value = original;
+        value.inputChannels = editors.input->text().trimmed();
+        value.outputChannels = editors.output->text().trimmed();
+        storeSelectedDevice(value, editors.device, availableDevices_);
+        return value;
+    };
+    auto applyAudioToEditors = [this](
+        const AudioDevicePreference& value,
+        const NetworkAudioEditors& editors)
+    {
+        selectPreferredDevice(editors.device, availableDevices_, value);
+        editors.input->setText(value.inputChannels);
+        editors.output->setText(value.outputChannels);
+    };
+    auto updateNetworkAudioVisibility = [=] {
+        const bool split = splitNetworkAudio->isChecked();
+        networkAudio.box->setVisible(!split);
+        createJamAudio.box->setVisible(split);
+        joinJamAudio.box->setVisible(split);
+    };
+    QObject::connect(splitNetworkAudio, &QCheckBox::toggled, &dialog,
+        [=, splitInitialized = preferences_.splitNetworkAudioByRole](bool checked) mutable {
+            if (checked && !splitInitialized) {
+                const AudioDevicePreference shared = audioFromEditors(
+                    preferences_.networkAudio, networkAudio);
+                applyAudioToEditors(shared, createJamAudio);
+                applyAudioToEditors(shared, joinJamAudio);
+                splitInitialized = true;
+            }
+            updateNetworkAudioVisibility();
+        });
+    updateNetworkAudioVisibility();
 
     auto* createBind = new QLineEdit(preferences_.create.bindHost, &dialog);
     auto* createPort = makeSpin(preferences_.create.port, 1, 65535);
@@ -2229,7 +2288,9 @@ void MainWindow::showSettingsDialog()
         }
         e.profile->setCurrentIndex(qMax(0, e.profile->findData(p.profile)));
         e.buffer = fixedBufferSizeCombo(&dialog, p.bufferSize);
-        e.frame = makeSpin(p.frameSize, 32, 256);
+        if (creator) {
+            e.frame = makeSpin(p.frameSize, 32, 256);
+        }
         e.prefill = makeSpin(p.prefillFrames, 0, 1048576);
         e.playbackMax = makeSpin(p.playbackMaxFrames, 0, 1048576);
         e.captureRing = makeSpin(p.captureRingFrames, 1, 1048576);
@@ -2250,7 +2311,9 @@ void MainWindow::showSettingsDialog()
         e.adaptiveRamp = makeSpin(p.adaptiveRatioRampMs, 0, 60000);
         form->addRow(QStringLiteral("Profile"), e.profile);
         form->addRow(QStringLiteral("Local device buffer"), e.buffer);
-        if (creator) form->addRow(QStringLiteral("Session frame size"), e.frame);
+        if (e.frame != nullptr) {
+            form->addRow(QStringLiteral("Session frame size"), e.frame);
+        }
         form->addRow(QStringLiteral("Playback prefill frames"), e.prefill);
         form->addRow(QStringLiteral("Playback max frames"), e.playbackMax);
         form->addRow(QStringLiteral("Capture ring frames"), e.captureRing);
@@ -2444,7 +2507,10 @@ void MainWindow::showSettingsDialog()
 
     if (networkActive) {
         localBox->setEnabled(false);
-        networkBox->setEnabled(false);
+        splitNetworkAudio->setEnabled(false);
+        networkAudio.box->setEnabled(false);
+        createJamAudio.box->setEnabled(false);
+        joinJamAudio.box->setEnabled(false);
     }
 
     auto* notice = new QLabel(
@@ -2468,9 +2534,14 @@ void MainWindow::showSettingsDialog()
     QObject::connect(localTest, &QPushButton::clicked, this, [this, localDevice, localTest, &dialog] {
         testDeviceSelection(localDevice, localTest, &dialog);
     });
-    QObject::connect(networkTest, &QPushButton::clicked, this, [this, networkDevice, networkTest, &dialog] {
-        testDeviceSelection(networkDevice, networkTest, &dialog);
-    });
+    auto connectDeviceTest = [this, &dialog](const NetworkAudioEditors& editors) {
+        QObject::connect(editors.test, &QPushButton::clicked, this, [this, editors, &dialog] {
+            testDeviceSelection(editors.device, editors.test, &dialog);
+        });
+    };
+    connectDeviceTest(networkAudio);
+    connectDeviceTest(createJamAudio);
+    connectDeviceTest(joinJamAudio);
     auto* outer = new QVBoxLayout(&dialog);
     outer->addWidget(tabs, 1);
     outer->addWidget(buttons);
@@ -2483,9 +2554,15 @@ void MainWindow::showSettingsDialog()
     updated.localAudio.inputChannels = localInput->text().trimmed();
     updated.localAudio.outputChannels = localOutput->text().trimmed();
     storeSelectedDevice(updated.localAudio, localDevice, availableDevices_);
-    updated.networkAudio.inputChannels = networkInput->text().trimmed();
-    updated.networkAudio.outputChannels = networkOutput->text().trimmed();
-    storeSelectedDevice(updated.networkAudio, networkDevice, availableDevices_);
+    updated.splitNetworkAudioByRole = splitNetworkAudio->isChecked();
+    updated.networkAudio = audioFromEditors(updated.networkAudio, networkAudio);
+    if (updated.splitNetworkAudioByRole) {
+        updated.createJamAudio = audioFromEditors(updated.createJamAudio, createJamAudio);
+        updated.joinJamAudio = audioFromEditors(updated.joinJamAudio, joinJamAudio);
+    } else {
+        updated.createJamAudio = updated.networkAudio;
+        updated.joinJamAudio = updated.networkAudio;
+    }
     updated.create.bindHost = createBind->text().trimmed(); updated.create.port = createPort->value();
     updated.create.noStun = createManualEndpoint->isChecked(); updated.create.publicHost = createPublicHost->text().trimmed();
     updated.create.stunServer = createStun->text().trimmed(); updated.create.stunTimeoutMs = createStunTimeout->value();
@@ -3157,8 +3234,8 @@ void MainWindow::applyCreateDefaultsToControls()
     socketRecvBufferSpin_->setValue(p.socketRecvBuffer);
     const int format = networkAudioFormatBox_->findData(p.audioFormat);
     if (format >= 0) networkAudioFormatBox_->setCurrentIndex(format);
-    inputChannelsEdit_->setText(preferences_.networkAudio.inputChannels);
-    outputChannelsEdit_->setText(preferences_.networkAudio.outputChannels);
+    inputChannelsEdit_->setText(preferences_.createAudio().inputChannels);
+    outputChannelsEdit_->setText(preferences_.createAudio().outputChannels);
     updateConnectionControlState();
 }
 
@@ -3195,8 +3272,8 @@ void MainWindow::applyJoinDefaultsToControls()
     waitMsSpin_->setValue(p.runtime.waitMs);
     streamMsSpin_->setValue(p.runtime.streamMs);
     streamLingerMsSpin_->setValue(p.runtime.streamLingerMs);
-    inputChannelsEdit_->setText(preferences_.networkAudio.inputChannels);
-    outputChannelsEdit_->setText(preferences_.networkAudio.outputChannels);
+    inputChannelsEdit_->setText(preferences_.joinAudio().inputChannels);
+    outputChannelsEdit_->setText(preferences_.joinAudio().outputChannels);
 }
 
 void MainWindow::applyPreferencesToControls()
@@ -3239,8 +3316,9 @@ void MainWindow::saveCreateDefaults()
     p.runtime.diagnostics = statsCheck_->isChecked(); p.runtime.diagnosticsWarmupMs = statsWarmupMsSpin_->value();
     p.runtime.logStatsFolder = logStatsEdit_->text().trimmed(); p.runtime.osPriority = osPriorityBox_->currentData().toString();
     p.runtime.waitMs = waitMsSpin_->value(); p.runtime.streamMs = streamMsSpin_->value(); p.runtime.streamLingerMs = streamLingerMsSpin_->value();
-    preferences_.networkAudio.inputChannels = inputChannelsEdit_->text().trimmed();
-    preferences_.networkAudio.outputChannels = outputChannelsEdit_->text().trimmed();
+    AudioDevicePreference& audio = preferences_.createAudio();
+    audio.inputChannels = inputChannelsEdit_->text().trimmed();
+    audio.outputChannels = outputChannelsEdit_->text().trimmed();
     preferences_.logging.folder = p.runtime.logStatsFolder;
     preferences_.join.runtime.logStatsFolder = preferences_.logging.folder;
     bool deviceOk = false;
@@ -3249,10 +3327,10 @@ void MainWindow::saveCreateDefaults()
         const auto device = std::find_if(availableDevices_.begin(), availableDevices_.end(),
             [deviceId](const auto& item) { return item.id == deviceId; });
         if (device != availableDevices_.end()) {
-            preferences_.networkAudio.backend = QString::fromStdString(device->backend);
-            preferences_.networkAudio.stableId = QString::fromStdString(
+            audio.backend = QString::fromStdString(device->backend);
+            audio.stableId = QString::fromStdString(
                 device->clsid.empty() ? device->name : device->clsid);
-            preferences_.networkAudio.name = QString::fromStdString(device->name);
+            audio.name = QString::fromStdString(device->name);
         }
     }
     UserPreferencesStore::save(preferences_);
@@ -3275,8 +3353,9 @@ void MainWindow::saveJoinDefaults()
     p.runtime.diagnostics = statsCheck_->isChecked(); p.runtime.diagnosticsWarmupMs = statsWarmupMsSpin_->value();
     p.runtime.logStatsFolder = logStatsEdit_->text().trimmed(); p.runtime.osPriority = osPriorityBox_->currentData().toString();
     p.runtime.waitMs = waitMsSpin_->value(); p.runtime.streamMs = streamMsSpin_->value(); p.runtime.streamLingerMs = streamLingerMsSpin_->value();
-    preferences_.networkAudio.inputChannels = inputChannelsEdit_->text().trimmed();
-    preferences_.networkAudio.outputChannels = outputChannelsEdit_->text().trimmed();
+    AudioDevicePreference& audio = preferences_.joinAudio();
+    audio.inputChannels = inputChannelsEdit_->text().trimmed();
+    audio.outputChannels = outputChannelsEdit_->text().trimmed();
     preferences_.logging.folder = p.runtime.logStatsFolder;
     preferences_.create.runtime.logStatsFolder = preferences_.logging.folder;
     bool deviceOk = false;
@@ -3285,10 +3364,10 @@ void MainWindow::saveJoinDefaults()
         const auto device = std::find_if(availableDevices_.begin(), availableDevices_.end(),
             [deviceId](const auto& item) { return item.id == deviceId; });
         if (device != availableDevices_.end()) {
-            preferences_.networkAudio.backend = QString::fromStdString(device->backend);
-            preferences_.networkAudio.stableId = QString::fromStdString(
+            audio.backend = QString::fromStdString(device->backend);
+            audio.stableId = QString::fromStdString(
                 device->clsid.empty() ? device->name : device->clsid);
-            preferences_.networkAudio.name = QString::fromStdString(device->name);
+            audio.name = QString::fromStdString(device->name);
         }
     }
     UserPreferencesStore::save(preferences_);

@@ -24,4 +24,3 @@ consider preferences for number of beats in default views, track view controls e
 
 recording tracks might be going to 48k even though i chose 44.1k, look into it and test 
 
-settings has a box in the top left for a value that needs to be sorted

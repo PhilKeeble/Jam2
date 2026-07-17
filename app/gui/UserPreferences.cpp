@@ -177,7 +177,23 @@ UserPreferences UserPreferencesStore::load()
         return out;
     }
     settings.beginGroup(QStringLiteral("local_audio")); loadAudio(settings, out.localAudio); settings.endGroup();
-    settings.beginGroup(QStringLiteral("network_audio")); loadAudio(settings, out.networkAudio); settings.endGroup();
+    settings.beginGroup(QStringLiteral("network_audio"));
+    loadAudio(settings, out.networkAudio);
+    if (schemaVersion >= 3) {
+        out.splitNetworkAudioByRole = settings.value(
+            QStringLiteral("split_by_role"), out.splitNetworkAudioByRole).toBool();
+    }
+    settings.endGroup();
+    out.createJamAudio = out.networkAudio;
+    out.joinJamAudio = out.networkAudio;
+    if (schemaVersion >= 3) {
+        settings.beginGroup(QStringLiteral("create_jam_audio"));
+        loadAudio(settings, out.createJamAudio);
+        settings.endGroup();
+        settings.beginGroup(QStringLiteral("join_jam_audio"));
+        loadAudio(settings, out.joinJamAudio);
+        settings.endGroup();
+    }
     settings.beginGroup(QStringLiteral("create"));
     out.create.bindHost = settings.value(QStringLiteral("bind_host"), out.create.bindHost).toString();
     out.create.port = settings.value(QStringLiteral("port"), out.create.port).toInt();
@@ -230,7 +246,12 @@ void UserPreferencesStore::save(const UserPreferences& p)
     settings.clear();
     settings.setValue(QStringLiteral("schema_version"), UserPreferences::kSchemaVersion);
     settings.beginGroup(QStringLiteral("local_audio")); saveAudio(settings, p.localAudio); settings.endGroup();
-    settings.beginGroup(QStringLiteral("network_audio")); saveAudio(settings, p.networkAudio); settings.endGroup();
+    settings.beginGroup(QStringLiteral("network_audio"));
+    saveAudio(settings, p.networkAudio);
+    settings.setValue(QStringLiteral("split_by_role"), p.splitNetworkAudioByRole);
+    settings.endGroup();
+    settings.beginGroup(QStringLiteral("create_jam_audio")); saveAudio(settings, p.createJamAudio); settings.endGroup();
+    settings.beginGroup(QStringLiteral("join_jam_audio")); saveAudio(settings, p.joinJamAudio); settings.endGroup();
     settings.beginGroup(QStringLiteral("create"));
     settings.setValue(QStringLiteral("bind_host"), p.create.bindHost);
     settings.setValue(QStringLiteral("port"), p.create.port);

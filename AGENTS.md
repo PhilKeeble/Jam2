@@ -34,6 +34,10 @@ These rules apply to all implementation work in this repository.
 - Do not allocate, log, throw exceptions, acquire locks, or perform blocking operations inside real-time audio callbacks.
 - Keep hot paths simple and predictable.
 
+## Qt GUI Rules
+
+- Do not create a visible child widget for a dialog or page and then conditionally omit it from every layout. An unlaid-out child is still shown by Qt at its default position, commonly leaving an orphaned control in the top-left corner. Create optional controls only in the branch that lays them out, or place them in an owned container and explicitly manage that container's visibility.
+
 ## Efficiency Rules
 
 - Prefer simple choices and fewer external libraries.

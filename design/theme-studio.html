@@ -1,0 +1,1190 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jam2 Theme Studio</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --studio-bg: #090d11;
+      --studio-panel: #111820;
+      --studio-border: #26323d;
+      --studio-text: #e8eef4;
+      --studio-muted: #8fa0af;
+      --studio-accent: #66c6a6;
+
+      --window-bg: #101418;
+      --panel-bg: #111820;
+      --panel-raised: #17202a;
+      --editor-bg: #0c1116;
+      --border: #2a3540;
+      --border-strong: #52616c;
+      --text: #d7dde4;
+      --text-strong: #f1f5f9;
+      --text-muted: #8a97a1;
+      --accent: #66c6a6;
+      --accent-soft: #1b3b33;
+      --selection: #305270;
+      --button-bg: #22303c;
+      --button-hover: #2c3c49;
+      --clip-bg: #243e5c;
+      --waveform: #84cdb4;
+      --grid-bar: #5a646e;
+      --grid-beat: #383e44;
+      --playhead: #e84040;
+      --record: #be4646;
+      --success: #5ebc84;
+      --warning: #e69737;
+      --danger: #df4a4a;
+      --meter-bg: #1c2024;
+      --meter-safe: #5ebc84;
+      --meter-warn: #e69737;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 70% -20%, rgba(102,198,166,.09), transparent 42rem),
+        var(--studio-bg);
+      color: var(--studio-text);
+      font-family: Inter, "Segoe UI", system-ui, sans-serif;
+      font-size: 14px;
+    }
+    button, input, select { font: inherit; }
+    button { color: inherit; }
+
+    .studio-header {
+      min-height: 72px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 14px 22px;
+      border-bottom: 1px solid var(--studio-border);
+      background: rgba(12,17,22,.88);
+      backdrop-filter: blur(16px);
+      position: sticky;
+      top: 0;
+      z-index: 20;
+    }
+    .studio-title { display: flex; align-items: center; gap: 13px; }
+    .mark {
+      display: grid;
+      place-items: center;
+      width: 42px;
+      height: 42px;
+      border: 1px solid #3b6f60;
+      border-radius: 10px;
+      background: #14251f;
+      color: var(--studio-accent);
+      font-weight: 800;
+      letter-spacing: -.05em;
+    }
+    h1 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
+    .subtitle { margin-top: 2px; color: var(--studio-muted); font-size: 12px; }
+    .header-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .studio-button {
+      border: 1px solid var(--studio-border);
+      border-radius: 7px;
+      background: var(--studio-panel);
+      color: var(--studio-text);
+      padding: 8px 11px;
+      cursor: pointer;
+    }
+    .studio-button:hover { border-color: #465564; background: #17212a; }
+    .studio-button.primary { border-color: #3d7967; background: #18372e; color: #dff8ef; }
+    .studio-button:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 2px solid var(--studio-accent);
+      outline-offset: 2px;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: 320px minmax(720px, 1fr);
+      min-height: calc(100vh - 72px);
+    }
+    .controls {
+      border-right: 1px solid var(--studio-border);
+      background: #0c1218;
+      padding: 18px;
+      overflow: auto;
+      max-height: calc(100vh - 72px);
+      position: sticky;
+      top: 72px;
+    }
+    .controls h2, .preview-toolbar h2 {
+      margin: 0 0 8px;
+      font-size: 13px;
+      font-weight: 700;
+      color: #eff5fa;
+    }
+    .hint { color: var(--studio-muted); font-size: 12px; line-height: 1.5; }
+    .presets {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin: 13px 0 20px;
+    }
+    .preset {
+      min-height: 68px;
+      text-align: left;
+      border: 1px solid var(--studio-border);
+      border-radius: 8px;
+      padding: 9px;
+      background: #111820;
+      cursor: pointer;
+    }
+    .preset:hover, .preset.active { border-color: var(--studio-accent); }
+    .preset.active { box-shadow: inset 0 0 0 1px var(--studio-accent); }
+    .swatches { display: flex; height: 22px; margin-bottom: 8px; overflow: hidden; border-radius: 4px; }
+    .swatches i { flex: 1; }
+    .preset-name { color: #e6edf3; font-size: 12px; font-weight: 650; }
+
+    .token-group {
+      margin: 0 0 14px;
+      border: 1px solid var(--studio-border);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--studio-panel);
+    }
+    .token-group summary {
+      padding: 10px 11px;
+      cursor: pointer;
+      font-weight: 650;
+      font-size: 12px;
+      color: #dbe4eb;
+      list-style: none;
+    }
+    .token-group summary::-webkit-details-marker { display: none; }
+    .token-group summary::after { content: "＋"; float: right; color: var(--studio-muted); }
+    .token-group[open] summary::after { content: "−"; }
+    .token-list { border-top: 1px solid var(--studio-border); padding: 6px; }
+    .token-row {
+      display: grid;
+      grid-template-columns: 31px 1fr 82px;
+      align-items: center;
+      gap: 8px;
+      padding: 6px;
+      border-radius: 6px;
+    }
+    .token-row.selected { background: #1d2933; box-shadow: inset 2px 0 var(--studio-accent); }
+    .token-row label { font-size: 12px; color: #cbd5de; cursor: pointer; }
+    .token-row input[type=color] {
+      width: 29px;
+      height: 29px;
+      border: 1px solid #43515e;
+      border-radius: 5px;
+      background: transparent;
+      padding: 2px;
+      cursor: pointer;
+    }
+    .token-row input[type=text] {
+      min-width: 0;
+      width: 100%;
+      padding: 5px 6px;
+      border: 1px solid #34414c;
+      border-radius: 5px;
+      background: #0a0f14;
+      color: #dce5ec;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 11px;
+    }
+    .selected-token {
+      min-height: 42px;
+      margin: 0 0 14px;
+      padding: 9px 10px;
+      border: 1px dashed #344553;
+      border-radius: 7px;
+      color: var(--studio-muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .preview-zone { min-width: 0; padding: 18px 22px 36px; overflow: auto; }
+    .preview-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      gap: 16px;
+      max-width: 1440px;
+      margin: 0 auto 13px;
+    }
+    .preview-switcher {
+      display: flex;
+      gap: 4px;
+      padding: 3px;
+      border: 1px solid var(--studio-border);
+      border-radius: 8px;
+      background: #0c1218;
+    }
+    .preview-switcher button {
+      border: 0;
+      border-radius: 5px;
+      background: transparent;
+      color: var(--studio-muted);
+      padding: 7px 11px;
+      cursor: pointer;
+    }
+    .preview-switcher button.active { background: #1d2a34; color: #f2f6f9; }
+    .preview-shell {
+      max-width: 1440px;
+      margin: 0 auto;
+      border: 1px solid #27323b;
+      border-radius: 12px;
+      padding: 9px;
+      background: #070a0d;
+      box-shadow: 0 22px 80px rgba(0,0,0,.4);
+    }
+
+    /* Jam2 preview */
+    .app {
+      --radius: 5px;
+      min-height: 750px;
+      overflow: hidden;
+      border-radius: 7px;
+      background: var(--window-bg);
+      color: var(--text);
+      font-family: "Segoe UI", system-ui, sans-serif;
+      font-size: 13px;
+      transition: background-color .12s, color .12s;
+    }
+    .app * { transition: background-color .12s, border-color .12s, color .12s, stroke .12s, fill .12s; }
+    .app-header, .songbar, .app-footer {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .app-header { min-height: 56px; background: var(--window-bg); }
+    .app-logo { color: var(--text-strong); font-size: 21px; font-weight: 750; margin-right: 4px; }
+    .pill {
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 5px 8px;
+      background: var(--panel-raised);
+      color: var(--text);
+      white-space: nowrap;
+    }
+    .pill.live { color: var(--success); }
+    .app-spacer { flex: 1; }
+    .qt-button, .qt-input, .qt-select {
+      min-height: 30px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      color: var(--text-strong);
+      background: var(--button-bg);
+      padding: 5px 10px;
+    }
+    .qt-button { cursor: pointer; }
+    .qt-button:hover { background: var(--button-hover); }
+    .qt-button.accent { border-color: var(--accent); background: var(--accent-soft); }
+    .qt-button.danger { border-color: var(--danger); color: var(--danger); background: var(--panel-bg); }
+    .qt-input, .qt-select { background: var(--editor-bg); color: var(--text); }
+    .qt-input { flex: 1; min-width: 100px; }
+    .gear { width: 32px; padding: 0; font-size: 17px; }
+    .songbar { background: var(--window-bg); }
+    .songbar label { color: var(--text-muted); }
+    .tabs {
+      display: flex;
+      gap: 2px;
+      padding: 8px 12px 0;
+      background: var(--window-bg);
+    }
+    .tab {
+      border: 1px solid var(--border);
+      border-bottom: 0;
+      border-radius: 5px 5px 0 0;
+      background: var(--panel-raised);
+      color: var(--text-muted);
+      padding: 7px 13px;
+    }
+    .tab.active { background: var(--selection); color: var(--text-strong); }
+    .view {
+      display: none;
+      margin: 0 12px;
+      min-height: 575px;
+      border: 1px solid var(--border);
+      border-radius: 0 6px 6px 6px;
+      background: var(--panel-bg);
+    }
+    .view.active { display: block; }
+    .track-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px;
+      border-bottom: 1px solid var(--border);
+    }
+    .bank-row { display: flex; gap: 5px; }
+    .bank {
+      width: 34px;
+      border: 1px solid var(--border-strong);
+      border-radius: 3px;
+      padding: 4px;
+      text-align: center;
+      color: var(--text-muted);
+      background: var(--panel-raised);
+    }
+    .bank.active { background: var(--selection); color: var(--text-strong); border-color: var(--accent); }
+    .transport {
+      padding: 7px 9px;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border);
+      background: var(--panel-raised);
+    }
+    .looper-grid {
+      position: relative;
+      overflow: hidden;
+      background: var(--editor-bg);
+    }
+    .timeline-head, .lane {
+      display: grid;
+      grid-template-columns: 176px 1fr;
+    }
+    .timeline-head {
+      height: 35px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel-raised);
+    }
+    .lane {
+      min-height: 126px;
+      border-bottom: 1px solid var(--border);
+    }
+    .lane.selected .lane-head { background: var(--selection); }
+    .lane-head {
+      position: relative;
+      padding: 10px 10px 8px 28px;
+      background: var(--panel-bg);
+      border-right: 1px solid var(--border);
+    }
+    .lane-name { color: var(--text-strong); font-weight: 600; margin-bottom: 8px; }
+    .lane-controls { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px; }
+    .mini {
+      border: 1px solid var(--border-strong);
+      border-radius: 2px;
+      background: var(--button-bg);
+      color: var(--text);
+      padding: 3px 5px;
+      font-size: 11px;
+    }
+    .mini.muted { background: color-mix(in srgb, var(--warning) 55%, var(--panel-bg)); }
+    .mini.solo { background: color-mix(in srgb, var(--success) 55%, var(--panel-bg)); }
+    .mini.record { background: var(--record); }
+    .gain {
+      position: absolute;
+      left: 9px;
+      top: 42px;
+      bottom: 12px;
+      width: 10px;
+      border: 1px solid var(--border-strong);
+      background: var(--editor-bg);
+    }
+    .gain::after {
+      content: "";
+      position: absolute;
+      inset: 43% 0 0;
+      background: var(--accent);
+    }
+    .timeline {
+      position: relative;
+      min-width: 0;
+      background-color: var(--editor-bg);
+      background-image:
+        linear-gradient(to right, var(--grid-bar) 1px, transparent 1px),
+        linear-gradient(to right, var(--grid-beat) 1px, transparent 1px);
+      background-size: 25% 100%, 6.25% 100%;
+    }
+    .timeline-labels {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      height: 100%;
+      color: var(--text-muted);
+      font-size: 11px;
+    }
+    .timeline-labels span { padding: 8px 5px; }
+    .clip {
+      position: absolute;
+      top: 14px;
+      bottom: 14px;
+      left: var(--clip-left);
+      width: var(--clip-width);
+      overflow: hidden;
+      border: 1px solid color-mix(in srgb, var(--waveform) 58%, var(--border));
+      background: var(--clip-bg);
+      color: var(--text-strong);
+    }
+    .clip::before, .clip::after {
+      content: "";
+      position: absolute;
+      z-index: 3;
+      top: 0;
+      bottom: 0;
+      width: 6px;
+      background: color-mix(in srgb, var(--waveform) 70%, transparent);
+    }
+    .clip::before { left: 0; }
+    .clip::after { right: 0; }
+    .clip-title { position: absolute; z-index: 4; top: 3px; left: 9px; font-size: 11px; text-shadow: 0 1px 2px #000; }
+    .wave {
+      position: absolute;
+      inset: 20px 0 3px;
+      width: 100%;
+      height: calc(100% - 23px);
+      overflow: visible;
+    }
+    .wave path { fill: none; stroke: var(--waveform); stroke-width: 1.7; vector-effect: non-scaling-stroke; }
+    .wave .fill { fill: color-mix(in srgb, var(--waveform) 16%, transparent); stroke: none; }
+    .playhead {
+      position: absolute;
+      z-index: 7;
+      top: 0;
+      bottom: 0;
+      left: 43%;
+      width: 2px;
+      background: var(--playhead);
+      pointer-events: none;
+    }
+    .playhead::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: -4px;
+      width: 10px;
+      height: 8px;
+      background: var(--playhead);
+      clip-path: polygon(0 0, 100% 0, 50% 100%);
+    }
+    .add-lane {
+      margin: 8px;
+      border: 1px dashed var(--border-strong);
+      border-radius: 4px;
+      padding: 7px;
+      text-align: center;
+      color: var(--text-muted);
+    }
+    .track-bottom {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px;
+      border-top: 1px solid var(--border);
+    }
+    .meter {
+      flex: 1;
+      min-width: 130px;
+      max-width: 260px;
+      height: 15px;
+      border: 1px solid var(--border-strong);
+      background: linear-gradient(to right,
+        var(--meter-bg) 0 50%, color-mix(in srgb, var(--warning) 25%, var(--meter-bg)) 50% 89%,
+        color-mix(in srgb, var(--danger) 25%, var(--meter-bg)) 89% 100%);
+      position: relative;
+    }
+    .meter::after { content: ""; position: absolute; inset: 0 24% 0 0; background: linear-gradient(to right, var(--meter-safe) 0 66%, var(--meter-warn)); }
+
+    .chord-view { padding: 12px; }
+    .section-actions { display: flex; gap: 7px; margin-bottom: 10px; }
+    .chord-table {
+      display: grid;
+      grid-template-columns: 130px repeat(8, minmax(62px, 1fr));
+      border-left: 1px solid var(--border);
+      border-top: 1px solid var(--border);
+    }
+    .chord-cell {
+      min-height: 47px;
+      display: grid;
+      place-items: center;
+      border-right: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      background: var(--editor-bg);
+      color: var(--text);
+    }
+    .chord-cell.header { min-height: 35px; background: var(--panel-raised); color: var(--text-muted); }
+    .chord-cell.section { justify-items: start; padding-left: 10px; background: var(--panel-bg); color: var(--text-strong); font-weight: 650; }
+    .chord-cell.current { background: var(--selection); color: var(--text-strong); box-shadow: inset 0 -2px var(--accent); }
+    .chord-cell.chord { font-size: 17px; font-weight: 650; }
+    .lyrics-card {
+      margin-top: 12px;
+      padding: 14px;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--editor-bg);
+      color: var(--text-muted);
+      line-height: 1.9;
+    }
+    .lyrics-card strong { color: var(--accent); font-weight: 600; }
+
+    .settings-view { padding: 0; }
+    .dialog {
+      width: min(900px, calc(100% - 36px));
+      margin: 30px auto;
+      border: 1px solid var(--border-strong);
+      border-radius: 7px;
+      background: var(--window-bg);
+      box-shadow: 0 18px 55px rgba(0,0,0,.35);
+    }
+    .dialog-title { padding: 12px 14px; color: var(--text-strong); border-bottom: 1px solid var(--border); font-size: 16px; font-weight: 650; }
+    .settings-layout { display: grid; grid-template-columns: 180px 1fr; min-height: 430px; }
+    .settings-nav { padding: 10px; border-right: 1px solid var(--border); background: var(--panel-bg); }
+    .settings-nav div { padding: 9px; border-radius: 4px; color: var(--text-muted); }
+    .settings-nav .active { color: var(--text-strong); background: var(--selection); }
+    .settings-form { padding: 18px; }
+    .settings-form h3 { margin: 0 0 14px; color: var(--text-strong); }
+    .form-grid { display: grid; grid-template-columns: 180px 1fr; gap: 10px 12px; align-items: center; }
+    .form-grid label { color: var(--text-muted); }
+    .settings-note { margin-top: 18px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel-raised); color: var(--text-muted); padding: 10px; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 7px; padding: 10px 14px; border-top: 1px solid var(--border); }
+
+    .app-footer {
+      margin-top: 10px;
+      border-top: 1px solid var(--border);
+      border-bottom: 0;
+      background: var(--window-bg);
+      font-size: 12px;
+    }
+    .diagnosis { margin-left: auto; min-width: 305px; }
+    .diagnosis b { color: var(--warning); }
+
+    [data-token] { cursor: crosshair; }
+    [data-token].token-target {
+      outline: 2px solid var(--studio-accent) !important;
+      outline-offset: 2px;
+    }
+    .toast {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 40;
+      padding: 10px 13px;
+      border: 1px solid #3b6f60;
+      border-radius: 7px;
+      background: #14251f;
+      color: #dcf4eb;
+      opacity: 0;
+      transform: translateY(8px);
+      pointer-events: none;
+      transition: .18s;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+
+    @media (max-width: 1080px) {
+      .workspace { grid-template-columns: 286px minmax(650px, 1fr); }
+      .controls { padding: 14px; }
+    }
+    @media (max-width: 820px) {
+      .studio-header { position: static; align-items: flex-start; }
+      .workspace { display: block; }
+      .controls { position: static; max-height: none; border-right: 0; border-bottom: 1px solid var(--studio-border); }
+      .presets { grid-template-columns: repeat(3, 1fr); }
+      .preview-zone { padding: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="studio-header">
+    <div class="studio-title">
+      <div class="mark">J2</div>
+      <div>
+        <h1>Jam2 Theme Studio</h1>
+        <div class="subtitle">Click any coloured preview element to edit its token</div>
+      </div>
+    </div>
+    <div class="header-actions">
+      <button class="studio-button" id="resetTheme">Reset preset</button>
+      <button class="studio-button" id="saveCustom">Save custom</button>
+      <button class="studio-button" id="copyJson">Copy JSON</button>
+      <button class="studio-button primary" id="copyQss">Copy Qt colours</button>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <aside class="controls">
+      <h2>Palette presets</h2>
+      <div class="hint">Choose a direction, then tune every colour independently. Your custom palette is stored in this browser.</div>
+      <div class="presets" id="presets"></div>
+
+      <h2>Selected element</h2>
+      <div class="selected-token" id="selectedToken">Nothing selected yet. Click a preview surface, waveform, grid line, status, or control.</div>
+
+      <h2>Colour tokens</h2>
+      <div id="tokenGroups"></div>
+    </aside>
+
+    <section class="preview-zone">
+      <div class="preview-toolbar">
+        <div>
+          <h2>Live application preview</h2>
+          <div class="hint">Representative Jam2 states—not a replacement GUI implementation.</div>
+        </div>
+        <div class="preview-switcher" aria-label="Preview view">
+          <button class="active" data-view-button="track">Track / Looper</button>
+          <button data-view-button="chord">Chord View</button>
+          <button data-view-button="settings">Settings</button>
+        </div>
+      </div>
+
+      <div class="preview-shell">
+        <div class="app" id="appPreview" data-token="windowBg">
+          <div class="app-header" data-token="windowBg">
+            <div class="app-logo" data-token="textStrong">Jam2</div>
+            <div class="pill live" data-token="success">● Local engine running</div>
+            <div class="pill" data-token="panelRaised">Local</div>
+            <div class="app-spacer"></div>
+            <button class="qt-button accent" data-token="accent">Start Jam</button>
+            <button class="qt-button" data-token="buttonBg">Join Jam</button>
+            <button class="qt-button gear" data-token="borderStrong" aria-label="Settings">⚙</button>
+          </div>
+
+          <div class="songbar" data-token="windowBg">
+            <label data-token="textMuted">Song</label>
+            <div class="qt-input" data-token="editorBg">Midnight Signal</div>
+            <button class="qt-button" data-token="buttonBg">New Song</button>
+            <button class="qt-button" data-token="buttonBg">Open</button>
+            <button class="qt-button" data-token="buttonBg">Save</button>
+          </div>
+
+          <div class="tabs" data-token="windowBg">
+            <div class="tab" data-token="panelRaised">Chord View</div>
+            <div class="tab" data-token="panelRaised">Beat View</div>
+            <div class="tab" data-token="panelRaised">Lyrics</div>
+            <div class="tab active" data-token="selection">Track</div>
+            <div class="tab" data-token="panelRaised">Metronome</div>
+            <div class="tab" data-token="panelRaised">Mix</div>
+          </div>
+
+          <section class="view active" data-view="track" data-token="panelBg">
+            <div class="track-toolbar" data-token="panelBg">
+              <strong data-token="textStrong">Track: Midnight Signal</strong>
+              <div class="app-spacer"></div>
+              <span data-token="textMuted">Bank</span>
+              <div class="bank-row">
+                <div class="bank active" data-token="selection">A</div>
+                <div class="bank" data-token="panelRaised">B</div>
+                <div class="bank" data-token="panelRaised">C</div>
+                <div class="bank" data-token="panelRaised">D</div>
+              </div>
+              <button class="qt-button accent" data-token="accent">▶ Play Track</button>
+              <button class="qt-button" data-token="buttonBg">■ Stop</button>
+              <button class="qt-button" data-token="buttonBg">Share Tracks</button>
+            </div>
+            <div class="transport" data-token="panelRaised">120 BPM · 4/4 · Grid lock on · Position 2.3</div>
+
+            <div class="looper-grid" data-token="editorBg">
+              <div class="timeline-head">
+                <div data-token="panelRaised"></div>
+                <div class="timeline" data-token="gridBar">
+                  <div class="timeline-labels"><span>1</span><span>2</span><span>3</span><span>4</span></div>
+                </div>
+              </div>
+
+              <div class="lane selected">
+                <div class="lane-head" data-token="selection">
+                  <div class="gain" data-token="accent"></div>
+                  <div class="lane-name" data-token="textStrong">Rhythm Guitar</div>
+                  <div class="lane-controls">
+                    <button class="mini" data-token="buttonBg">Mute</button>
+                    <button class="mini solo" data-token="success">Solo</button>
+                    <button class="mini" data-token="buttonBg">Record</button>
+                    <button class="mini" data-token="borderStrong">Rename</button>
+                  </div>
+                </div>
+                <div class="timeline" data-token="gridBeat">
+                  <div class="clip" style="--clip-left: 1.5%; --clip-width: 73%" data-token="clipBg">
+                    <span class="clip-title" data-token="textStrong">Rhythm Guitar</span>
+                    <svg class="wave" data-token="waveform" viewBox="0 0 800 100" preserveAspectRatio="none" aria-label="Rhythm guitar waveform">
+                      <path class="fill" d="M0 50 L0 48 7 31 14 60 21 22 28 68 35 36 42 52 49 12 56 73 63 41 70 55 77 28 84 66 91 43 98 51 105 18 112 75 119 35 126 64 133 29 140 58 147 44 154 7 161 82 168 38 175 61 182 25 189 69 196 42 203 54 210 15 217 77 224 34 231 65 238 24 245 63 252 40 259 53 266 20 273 72 280 31 287 67 294 27 301 60 308 46 315 14 322 78 329 36 336 62 343 22 350 70 357 39 364 56 371 16 378 76 385 33 392 64 399 26 406 61 413 43 420 11 427 81 434 37 441 59 448 23 455 68 462 41 469 55 476 18 483 74 490 32 497 66 504 28 511 62 518 45 525 9 532 79 539 35 546 60 553 25 560 71 567 40 574 57 581 17 588 77 595 34 602 63 609 24 616 67 623 42 630 13 637 80 644 36 651 61 658 27 665 69 672 39 679 54 686 19 693 75 700 33 707 65 714 23 721 64 728 44 735 10 742 78 749 37 756 59 763 26 770 70 777 41 784 55 791 30 800 50 L800 50 Z"/>
+                      <path d="M0 50 L7 31 14 60 21 22 28 68 35 36 42 52 49 12 56 73 63 41 70 55 77 28 84 66 91 43 98 51 105 18 112 75 119 35 126 64 133 29 140 58 147 44 154 7 161 82 168 38 175 61 182 25 189 69 196 42 203 54 210 15 217 77 224 34 231 65 238 24 245 63 252 40 259 53 266 20 273 72 280 31 287 67 294 27 301 60 308 46 315 14 322 78 329 36 336 62 343 22 350 70 357 39 364 56 371 16 378 76 385 33 392 64 399 26 406 61 413 43 420 11 427 81 434 37 441 59 448 23 455 68 462 41 469 55 476 18 483 74 490 32 497 66 504 28 511 62 518 45 525 9 532 79 539 35 546 60 553 25 560 71 567 40 574 57 581 17 588 77 595 34 602 63 609 24 616 67 623 42 630 13 637 80 644 36 651 61 658 27 665 69 672 39 679 54 686 19 693 75 700 33 707 65 714 23 721 64 728 44 735 10 742 78 749 37 756 59 763 26 770 70 777 41 784 55 791 30 800 50"/>
+                    </svg>
+                  </div>
+                  <div class="playhead" data-token="playhead"></div>
+                </div>
+              </div>
+
+              <div class="lane">
+                <div class="lane-head" data-token="panelBg">
+                  <div class="gain" data-token="accent"></div>
+                  <div class="lane-name" data-token="textStrong">Bass DI</div>
+                  <div class="lane-controls">
+                    <button class="mini" data-token="buttonBg">Mute</button>
+                    <button class="mini" data-token="buttonBg">Solo</button>
+                    <button class="mini record" data-token="record">Record</button>
+                    <button class="mini" data-token="borderStrong">Rename</button>
+                  </div>
+                </div>
+                <div class="timeline" data-token="gridBeat">
+                  <div class="clip" style="--clip-left: 13%; --clip-width: 81%" data-token="clipBg">
+                    <span class="clip-title" data-token="textStrong">Bass DI · armed</span>
+                    <svg class="wave" data-token="waveform" viewBox="0 0 800 100" preserveAspectRatio="none" aria-label="Bass waveform">
+                      <path class="fill" d="M0 50 Q20 16 40 50 T80 50 T120 50 T160 50 T200 50 T240 50 T280 50 T320 50 T360 50 T400 50 T440 50 T480 50 T520 50 T560 50 T600 50 T640 50 T680 50 T720 50 T760 50 T800 50 L800 50 Z"/>
+                      <path d="M0 50 Q20 16 40 50 T80 50 T120 50 T160 50 T200 50 T240 50 T280 50 T320 50 T360 50 T400 50 T440 50 T480 50 T520 50 T560 50 T600 50 T640 50 T680 50 T720 50 T760 50 T800 50"/>
+                      <path d="M0 50 Q20 84 40 50 T80 50 T120 50 T160 50 T200 50 T240 50 T280 50 T320 50 T360 50 T400 50 T440 50 T480 50 T520 50 T560 50 T600 50 T640 50 T680 50 T720 50 T760 50 T800 50"/>
+                    </svg>
+                  </div>
+                </div>
+              </div>
+
+              <div class="lane">
+                <div class="lane-head" data-token="panelBg">
+                  <div class="gain" data-token="accent"></div>
+                  <div class="lane-name" data-token="textStrong">Guide Vocal</div>
+                  <div class="lane-controls">
+                    <button class="mini muted" data-token="warning">Muted</button>
+                    <button class="mini" data-token="buttonBg">Solo</button>
+                    <button class="mini" data-token="buttonBg">Record</button>
+                    <button class="mini" data-token="borderStrong">Rename</button>
+                  </div>
+                </div>
+                <div class="timeline" data-token="gridBeat">
+                  <div class="clip" style="--clip-left: 3%; --clip-width: 52%" data-token="clipBg">
+                    <span class="clip-title" data-token="textStrong">Guide Vocal</span>
+                    <svg class="wave" data-token="waveform" viewBox="0 0 800 100" preserveAspectRatio="none" aria-label="Vocal waveform">
+                      <path d="M0 50 C30 48 38 20 68 50 S105 82 140 50 188 26 226 50 270 76 315 50 360 18 398 50 445 86 485 50 530 32 570 50 620 72 660 50 708 24 750 50 782 60 800 50"/>
+                      <path d="M0 50 C30 52 38 80 68 50 S105 18 140 50 188 74 226 50 270 24 315 50 360 82 398 50 445 14 485 50 530 68 570 50 620 28 660 50 708 76 750 50 782 40 800 50"/>
+                    </svg>
+                  </div>
+                </div>
+              </div>
+              <div class="add-lane" data-token="borderStrong">＋ Add empty lane or WAV</div>
+            </div>
+
+            <div class="track-bottom" data-token="panelBg">
+              <button class="qt-button accent" data-token="accent">Arm selected lane</button>
+              <button class="qt-button" data-token="buttonBg">Add WAVs</button>
+              <span data-token="textMuted">Track meter</span>
+              <div class="meter" data-token="meterSafe"></div>
+              <span data-token="textStrong">−8.4 dB</span>
+            </div>
+          </section>
+
+          <section class="view chord-view" data-view="chord" data-token="panelBg">
+            <div class="section-actions">
+              <button class="qt-button accent" data-token="accent">Add Section</button>
+              <button class="qt-button" data-token="buttonBg">Duplicate</button>
+              <button class="qt-button danger" data-token="danger">Delete</button>
+              <button class="qt-button" data-token="buttonBg">+4 Beats</button>
+              <button class="qt-button" data-token="buttonBg">−4 Beats</button>
+            </div>
+            <div class="chord-table">
+              <div class="chord-cell header" data-token="panelRaised">Section</div>
+              <div class="chord-cell header" data-token="panelRaised">1</div><div class="chord-cell header" data-token="panelRaised">2</div>
+              <div class="chord-cell header" data-token="panelRaised">3</div><div class="chord-cell header" data-token="panelRaised">4</div>
+              <div class="chord-cell header" data-token="panelRaised">5</div><div class="chord-cell header" data-token="panelRaised">6</div>
+              <div class="chord-cell header" data-token="panelRaised">7</div><div class="chord-cell header" data-token="panelRaised">8</div>
+
+              <div class="chord-cell section" data-token="panelBg">Verse 1</div>
+              <div class="chord-cell chord" data-token="editorBg">Em7</div><div class="chord-cell chord" data-token="editorBg">Cmaj7</div>
+              <div class="chord-cell chord current" data-token="selection">G</div><div class="chord-cell chord" data-token="editorBg">D/F♯</div>
+              <div class="chord-cell chord" data-token="editorBg">Em7</div><div class="chord-cell chord" data-token="editorBg">Cmaj7</div>
+              <div class="chord-cell chord" data-token="editorBg">G</div><div class="chord-cell chord" data-token="editorBg">D</div>
+
+              <div class="chord-cell section" data-token="panelBg">Chorus</div>
+              <div class="chord-cell chord" data-token="editorBg">C</div><div class="chord-cell chord" data-token="editorBg">G/B</div>
+              <div class="chord-cell chord" data-token="editorBg">Am7</div><div class="chord-cell chord" data-token="editorBg">D</div>
+              <div class="chord-cell chord" data-token="editorBg">C</div><div class="chord-cell chord" data-token="editorBg">G</div>
+              <div class="chord-cell chord" data-token="editorBg">D</div><div class="chord-cell chord" data-token="editorBg">D</div>
+
+              <div class="chord-cell section" data-token="panelBg">Bridge</div>
+              <div class="chord-cell chord" data-token="editorBg">Am</div><div class="chord-cell chord" data-token="editorBg">Em/G</div>
+              <div class="chord-cell chord" data-token="editorBg">C</div><div class="chord-cell chord" data-token="editorBg">D</div>
+              <div class="chord-cell chord" data-token="editorBg">Am</div><div class="chord-cell chord" data-token="editorBg">C</div>
+              <div class="chord-cell chord" data-token="editorBg">D</div><div class="chord-cell chord" data-token="editorBg">D</div>
+            </div>
+            <div class="lyrics-card" data-token="editorBg">
+              <strong data-token="accent">Verse 1</strong><br>
+              Streetlights breathe against the rain<br>
+              We count the distance in the <strong data-token="accent">sound</strong><br><br>
+              <span data-token="textMuted">The active beat remains clear without making every cell compete for attention.</span>
+            </div>
+          </section>
+
+          <section class="view settings-view" data-view="settings" data-token="panelBg">
+            <div class="dialog" data-token="windowBg">
+              <div class="dialog-title" data-token="textStrong">Settings</div>
+              <div class="settings-layout">
+                <div class="settings-nav" data-token="panelBg">
+                  <div>Audio</div>
+                  <div>Create Connection</div>
+                  <div>Create Defaults</div>
+                  <div>Join Defaults</div>
+                  <div class="active" data-token="selection">Logs</div>
+                  <div>Recording</div>
+                </div>
+                <div class="settings-form" data-token="windowBg">
+                  <h3 data-token="textStrong">Logs</h3>
+                  <div class="form-grid">
+                    <label data-token="textMuted">Log folder</label>
+                    <div style="display:flex;gap:7px">
+                      <div class="qt-input" data-token="editorBg">C:\Jam2\release\logs</div>
+                      <button class="qt-button" data-token="buttonBg">Browse…</button>
+                    </div>
+                    <label data-token="textMuted">Connection diagnostics</label>
+                    <div><span style="color:var(--accent)">☑</span> Enabled by default</div>
+                    <label data-token="textMuted">Stats warmup</label>
+                    <div class="qt-input" data-token="editorBg">3000 ms</div>
+                  </div>
+                  <div class="settings-note" data-token="panelRaised">
+                    GUI event logs and network statistics CSV files use this folder. Human-readable diagnostics update every two seconds.
+                  </div>
+                  <h3 style="margin-top:24px" data-token="textStrong">State examples</h3>
+                  <div style="display:flex;gap:8px;flex-wrap:wrap">
+                    <span class="pill live" data-token="success">Connected</span>
+                    <span class="pill" style="color:var(--warning)" data-token="warning">Jitter rising</span>
+                    <span class="pill" style="color:var(--danger)" data-token="danger">Device unavailable</span>
+                    <button class="qt-button" disabled style="opacity:.48" data-token="textMuted">Disabled control</button>
+                  </div>
+                </div>
+              </div>
+              <div class="dialog-actions">
+                <button class="qt-button" data-token="buttonBg">Cancel</button>
+                <button class="qt-button accent" data-token="accent">Save</button>
+              </div>
+            </div>
+          </section>
+
+          <footer class="app-footer" data-token="windowBg">
+            <span class="pill" data-token="panelRaised">RTT Peer 2: 27.4 ms</span>
+            <span class="pill" data-token="panelRaised">Jitter: 1.8 ms</span>
+            <span class="pill" data-token="panelRaised">Loss: 0.0%</span>
+            <span class="pill" data-token="panelRaised">Underruns: 0</span>
+            <span class="pill diagnosis" data-token="panelRaised"><b data-token="warning">Diagnosis:</b> Connection is stable</span>
+          </footer>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const tokenGroups = [
+      {
+        name: "Surfaces",
+        tokens: [
+          ["windowBg", "Window background"],
+          ["panelBg", "Panel / lane background"],
+          ["panelRaised", "Raised surface / tab"],
+          ["editorBg", "Editor / timeline background"],
+          ["buttonBg", "Button background"],
+          ["buttonHover", "Button hover"]
+        ]
+      },
+      {
+        name: "Structure and text",
+        tokens: [
+          ["border", "Normal border"],
+          ["borderStrong", "Strong / control border"],
+          ["text", "Primary text"],
+          ["textStrong", "Strong text"],
+          ["textMuted", "Muted text"],
+          ["selection", "Selected row / tab"]
+        ]
+      },
+      {
+        name: "Music and transport",
+        tokens: [
+          ["accent", "Primary accent"],
+          ["accentSoft", "Accent surface"],
+          ["clipBg", "Audio clip background"],
+          ["waveform", "Waveform"],
+          ["gridBar", "Bar grid line"],
+          ["gridBeat", "Beat grid line"],
+          ["playhead", "Playhead"],
+          ["record", "Record state"]
+        ]
+      },
+      {
+        name: "Status and meters",
+        tokens: [
+          ["success", "Success / connected"],
+          ["warning", "Warning / muted"],
+          ["danger", "Error / destructive"],
+          ["meterBg", "Meter background"],
+          ["meterSafe", "Meter safe range"],
+          ["meterWarn", "Meter warning range"]
+        ]
+      }
+    ];
+
+    const presets = {
+      "Jam2 Current": {
+        windowBg:"#101418", panelBg:"#111820", panelRaised:"#17202a", editorBg:"#0c1116",
+        border:"#2a3540", borderStrong:"#52616c", text:"#d7dde4", textStrong:"#f1f5f9",
+        textMuted:"#8a97a1", accent:"#66c6a6", accentSoft:"#1b3b33", selection:"#305270",
+        buttonBg:"#22303c", buttonHover:"#2c3c49", clipBg:"#243e5c", waveform:"#84cdb4",
+        gridBar:"#5a646e", gridBeat:"#383e44", playhead:"#e84040", record:"#be4646",
+        success:"#5ebc84", warning:"#e69737", danger:"#df4a4a", meterBg:"#1c2024",
+        meterSafe:"#5ebc84", meterWarn:"#e69737"
+      },
+      "Graphite Teal": {
+        windowBg:"#111315", panelBg:"#181b1e", panelRaised:"#20252a", editorBg:"#0c0f11",
+        border:"#343b40", borderStrong:"#536169", text:"#d5dcdf", textStrong:"#f4f8f8",
+        textMuted:"#87949a", accent:"#4fd1b2", accentSoft:"#153b33", selection:"#284842",
+        buttonBg:"#263036", buttonHover:"#303e45", clipBg:"#1f4548", waveform:"#66e0c0",
+        gridBar:"#556166", gridBeat:"#30383c", playhead:"#ff6b6b", record:"#d94f5c",
+        success:"#5bd39a", warning:"#e0ad58", danger:"#ef646f", meterBg:"#161b1d",
+        meterSafe:"#52c98e", meterWarn:"#e1a84e"
+      },
+      "Warm Studio": {
+        windowBg:"#191714", panelBg:"#211e1a", panelRaised:"#2b2721", editorBg:"#100f0d",
+        border:"#403a31", borderStrong:"#685e4e", text:"#ddd5c8", textStrong:"#fff7e8",
+        textMuted:"#a39887", accent:"#e2a85b", accentSoft:"#49341d", selection:"#59462f",
+        buttonBg:"#393128", buttonHover:"#493e31", clipBg:"#4d3527", waveform:"#f0bd75",
+        gridBar:"#706351", gridBeat:"#403930", playhead:"#e85d4f", record:"#bf493e",
+        success:"#81b36f", warning:"#e2a85b", danger:"#dd6253", meterBg:"#211d18",
+        meterSafe:"#76ad67", meterWarn:"#dca24f"
+      },
+      "Midnight Cyan": {
+        windowBg:"#09111b", panelBg:"#0e1925", panelRaised:"#142333", editorBg:"#060c13",
+        border:"#22384b", borderStrong:"#3a5870", text:"#cbd9e5", textStrong:"#f0f8ff",
+        textMuted:"#7890a4", accent:"#4cc9f0", accentSoft:"#103747", selection:"#174d66",
+        buttonBg:"#173248", buttonHover:"#20435e", clipBg:"#153d5c", waveform:"#63dcff",
+        gridBar:"#41667c", gridBeat:"#213c4d", playhead:"#ff5576", record:"#cf3659",
+        success:"#48d6a4", warning:"#f4b860", danger:"#ff5d73", meterBg:"#0c1721",
+        meterSafe:"#43c99a", meterWarn:"#f2aa52"
+      },
+      "Odysseus Coral": {
+        windowBg:"#282c34", panelBg:"#111111", panelRaised:"#1e2228", editorBg:"#1e2228",
+        border:"#355a66", borderStrong:"#477684", text:"#9cdef2", textStrong:"#9cdef2",
+        textMuted:"#6b8a94", accent:"#e06c75", accentSoft:"#4a2d34", selection:"#603840",
+        buttonBg:"#3b2930", buttonHover:"#53323a", clipBg:"#422b35", waveform:"#f0989e",
+        gridBar:"#355a66", gridBeat:"#273a41", playhead:"#f0989e", record:"#e06c75",
+        success:"#50fa7b", warning:"#f0ad4e", danger:"#e06c75", meterBg:"#1e2228",
+        meterSafe:"#50fa7b", meterWarn:"#f0ad4e"
+      },
+      "Plum Signal": {
+        windowBg:"#16121b", panelBg:"#201827", panelRaised:"#2b2034", editorBg:"#0e0a12",
+        border:"#42324c", borderStrong:"#665271", text:"#ded3e5", textStrong:"#fff6ff",
+        textMuted:"#9a87a5", accent:"#c996ff", accentSoft:"#3a2350", selection:"#503866",
+        buttonBg:"#392945", buttonHover:"#4a3559", clipBg:"#49305f", waveform:"#dfb3ff",
+        gridBar:"#6a5576", gridBeat:"#3d3145", playhead:"#ff607d", record:"#d54764",
+        success:"#70d6a0", warning:"#f0b866", danger:"#f15b72", meterBg:"#1c1422",
+        meterSafe:"#66ca94", meterWarn:"#e6ae5e"
+      },
+      "Light Console": {
+        windowBg:"#e8edf0", panelBg:"#f4f6f7", panelRaised:"#dce3e7", editorBg:"#ffffff",
+        border:"#bcc8ce", borderStrong:"#8799a3", text:"#26343b", textStrong:"#101a1f",
+        textMuted:"#61727b", accent:"#087f6a", accentSoft:"#cce7df", selection:"#b9d8e2",
+        buttonBg:"#d5dfe4", buttonHover:"#c6d3d9", clipBg:"#b9d6dd", waveform:"#087f6a",
+        gridBar:"#91a2aa", gridBeat:"#d3dce0", playhead:"#cf334e", record:"#bd3249",
+        success:"#167a52", warning:"#a46609", danger:"#bf2f42", meterBg:"#d5dde0",
+        meterSafe:"#2b996b", meterWarn:"#c27b18"
+      },
+      "High Contrast": {
+        windowBg:"#050607", panelBg:"#0d0f10", panelRaised:"#171a1c", editorBg:"#000000",
+        border:"#596269", borderStrong:"#89959c", text:"#e4e9ec", textStrong:"#ffffff",
+        textMuted:"#a4afb5", accent:"#58f0c1", accentSoft:"#123e32", selection:"#255f72",
+        buttonBg:"#22282c", buttonHover:"#30383d", clipBg:"#163f54", waveform:"#72ffd2",
+        gridBar:"#839099", gridBeat:"#424a4f", playhead:"#ff405f", record:"#ec3654",
+        success:"#5ff0a0", warning:"#ffc24f", danger:"#ff4b65", meterBg:"#121516",
+        meterSafe:"#54e394", meterWarn:"#ffb83e"
+      }
+    };
+
+    const tokenDescriptions = Object.fromEntries(tokenGroups.flatMap(group => group.tokens));
+    const allTokens = tokenGroups.flatMap(group => group.tokens.map(token => token[0]));
+    const root = document.documentElement;
+    const presetContainer = document.getElementById("presets");
+    const tokenContainer = document.getElementById("tokenGroups");
+    const selectedToken = document.getElementById("selectedToken");
+    const toast = document.getElementById("toast");
+    let activePreset = "Jam2 Current";
+    let currentTheme = { ...presets[activePreset] };
+    let selectedKey = "";
+
+    function cssName(key) {
+      return "--" + key.replace(/[A-Z]/g, letter => "-" + letter.toLowerCase());
+    }
+
+    function validHex(value) {
+      return /^#[0-9a-f]{6}$/i.test(value.trim());
+    }
+
+    function applyTheme(theme, markDirty = false) {
+      currentTheme = { ...theme };
+      for (const key of allTokens) {
+        root.style.setProperty(cssName(key), currentTheme[key]);
+        const color = document.querySelector(`[data-color-key="${key}"]`);
+        const text = document.querySelector(`[data-text-key="${key}"]`);
+        if (color) color.value = currentTheme[key];
+        if (text) text.value = currentTheme[key].toUpperCase();
+      }
+      if (markDirty) {
+        document.querySelectorAll(".preset").forEach(item => item.classList.remove("active"));
+      } else {
+        document.querySelectorAll(".preset").forEach(item => {
+          item.classList.toggle("active", item.dataset.preset === activePreset);
+        });
+      }
+    }
+
+    function renderPresets() {
+      presetContainer.innerHTML = "";
+      for (const [name, theme] of Object.entries(presets)) {
+        const button = document.createElement("button");
+        button.className = "preset";
+        button.dataset.preset = name;
+        button.innerHTML = `
+          <span class="swatches">
+            <i style="background:${theme.windowBg}"></i>
+            <i style="background:${theme.panelRaised}"></i>
+            <i style="background:${theme.accent}"></i>
+            <i style="background:${theme.waveform}"></i>
+            <i style="background:${theme.record}"></i>
+          </span>
+          <span class="preset-name">${name}</span>`;
+        button.addEventListener("click", () => {
+          activePreset = name;
+          applyTheme(presets[name]);
+          notify(`${name} applied`);
+        });
+        presetContainer.appendChild(button);
+      }
+      const saved = localStorage.getItem("jam2-theme-studio-custom");
+      if (saved && !presets["My Custom"]) {
+        try {
+          const custom = JSON.parse(saved);
+          if (allTokens.every(key => validHex(custom[key] || ""))) {
+            presets["My Custom"] = custom;
+            renderPresets();
+          }
+        } catch (_) {}
+      }
+    }
+
+    function renderTokenControls() {
+      tokenContainer.innerHTML = "";
+      tokenGroups.forEach((group, groupIndex) => {
+        const details = document.createElement("details");
+        details.className = "token-group";
+        details.open = groupIndex < 2;
+        details.innerHTML = `<summary>${group.name}</summary><div class="token-list"></div>`;
+        const list = details.querySelector(".token-list");
+        for (const [key, label] of group.tokens) {
+          const row = document.createElement("div");
+          row.className = "token-row";
+          row.dataset.rowKey = key;
+          row.innerHTML = `
+            <input type="color" aria-label="${label}" data-color-key="${key}">
+            <label>${label}</label>
+            <input type="text" maxlength="7" spellcheck="false" aria-label="${label} hex value" data-text-key="${key}">`;
+          const color = row.querySelector("[type=color]");
+          const text = row.querySelector("[type=text]");
+          const update = value => {
+            if (!validHex(value)) return;
+            currentTheme[key] = value.toLowerCase();
+            root.style.setProperty(cssName(key), currentTheme[key]);
+            color.value = currentTheme[key];
+            text.value = currentTheme[key].toUpperCase();
+            document.querySelectorAll(".preset").forEach(item => item.classList.remove("active"));
+          };
+          color.addEventListener("input", event => update(event.target.value));
+          text.addEventListener("input", event => {
+            if (validHex(event.target.value)) update(event.target.value);
+          });
+          text.addEventListener("blur", () => { text.value = currentTheme[key].toUpperCase(); });
+          row.addEventListener("click", () => selectToken(key));
+          list.appendChild(row);
+        }
+        tokenContainer.appendChild(details);
+      });
+    }
+
+    function selectToken(key, target) {
+      if (!tokenDescriptions[key]) return;
+      selectedKey = key;
+      document.querySelectorAll(".token-row").forEach(row => row.classList.toggle("selected", row.dataset.rowKey === key));
+      document.querySelectorAll(".token-target").forEach(node => node.classList.remove("token-target"));
+      if (target) {
+        target.classList.add("token-target");
+        setTimeout(() => target.classList.remove("token-target"), 1200);
+      }
+      const row = document.querySelector(`[data-row-key="${key}"]`);
+      if (row) {
+        row.closest("details").open = true;
+        row.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+      selectedToken.innerHTML = `<strong style="color:#e8eef4">${tokenDescriptions[key]}</strong><br><code>${cssName(key)}</code> · ${currentTheme[key].toUpperCase()}`;
+    }
+
+    document.getElementById("appPreview").addEventListener("click", event => {
+      const target = event.target.closest("[data-token]");
+      if (!target) return;
+      selectToken(target.dataset.token, target);
+    });
+
+    document.querySelectorAll("[data-view-button]").forEach(button => {
+      button.addEventListener("click", () => {
+        const view = button.dataset.viewButton;
+        document.querySelectorAll("[data-view-button]").forEach(item => item.classList.toggle("active", item === button));
+        document.querySelectorAll(".view").forEach(item => item.classList.toggle("active", item.dataset.view === view));
+        document.querySelectorAll(".tabs .tab").forEach(tab => {
+          const matching = tab.textContent.trim().toLowerCase().startsWith(view === "chord" ? "chord" : view);
+          tab.classList.toggle("active", matching);
+          if (matching) tab.dataset.token = "selection";
+        });
+      });
+    });
+
+    document.getElementById("resetTheme").addEventListener("click", () => {
+      if (activePreset === "My Custom" && presets["My Custom"]) {
+        applyTheme(presets["My Custom"]);
+      } else {
+        applyTheme(presets[activePreset] || presets["Jam2 Current"]);
+      }
+      notify("Palette reset");
+    });
+
+    document.getElementById("saveCustom").addEventListener("click", () => {
+      presets["My Custom"] = { ...currentTheme };
+      localStorage.setItem("jam2-theme-studio-custom", JSON.stringify(currentTheme));
+      activePreset = "My Custom";
+      renderPresets();
+      applyTheme(currentTheme);
+      notify("Custom palette saved in this browser");
+    });
+
+    document.getElementById("copyJson").addEventListener("click", async () => {
+      await copyText(JSON.stringify({ name: activePreset, colors: currentTheme }, null, 2));
+      notify("Palette JSON copied");
+    });
+
+    document.getElementById("copyQss").addEventListener("click", async () => {
+      const lines = [
+        "/* Jam2 Theme Studio export */",
+        ...allTokens.map(key => `${key}: ${currentTheme[key]};`)
+      ];
+      await copyText(lines.join("\n"));
+      notify("Qt colour map copied");
+    });
+
+    async function copyText(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (_) {
+        const area = document.createElement("textarea");
+        area.value = text;
+        document.body.appendChild(area);
+        area.select();
+        document.execCommand("copy");
+        area.remove();
+      }
+    }
+
+    let toastTimer = 0;
+    function notify(message) {
+      clearTimeout(toastTimer);
+      toast.textContent = message;
+      toast.classList.add("show");
+      toastTimer = setTimeout(() => toast.classList.remove("show"), 1800);
+    }
+
+    renderTokenControls();
+    renderPresets();
+    applyTheme(currentTheme);
+  </script>
+</body>
+</html>

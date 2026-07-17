@@ -51,10 +51,15 @@ These controls submit fixed-shape typed commands directly to the in-process engi
 ## Settings And Device Tests
 
 The cog in the header opens persistent Audio, Create Connection, Create
-Defaults, Join Defaults, Logs, and Recording settings. Create and Join keep
-separate local tuning profiles; the creator still owns session-wide values such
-as session sample rate, frame size, and audio quality. Discovery and public
-endpoint defaults apply only when creating a jam.
+Defaults, Join Defaults, Logs, and Recording settings. Audio keeps Local Audio
+separate from Network Audio. Network Audio uses one shared device and channel
+mapping by default; enable **Use different audio devices and channels for
+Create and Join** to reveal independent Create Jam Audio and Join Jam Audio
+settings. Existing shared preferences populate both roles when this split is
+first enabled. Create and Join also keep separate local tuning profiles; the
+creator still owns session-wide values such as session sample rate, frame size,
+and audio quality. Discovery and public endpoint defaults apply only when
+creating a jam.
 
 Local, Start, and Join setup use fixed 44100/48000 sample-rate and
 32/64/128/256 buffer-size choices. **Test Device** reports the device's current
