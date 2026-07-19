@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from .profiles import (
-    AGGRESSIVE_LOCAL_PROFILE,
-    SAFE_LOCAL_PROFILE,
+    FAST_PROFILE,
+    MODERATE_PROFILE,
+    SAFE_PROFILE,
     Jam2Profile,
-    adaptive_off_profile,
     jitter_buffer_profile,
     latency_matched_prefill_profile,
     variant,
-    wifi_frame_size_profile,
 )
 
 
-DEFAULT_SIGNALS = ("silence", "tone-440", "pulse-1s")
-METRONOME_SIGNALS = ("metronome-only",)
+CATALOG_VERSION = 1
+CASE_STREAM_MS = 30_000
+SUITES = ("core", "full")
 
 
 @dataclass(frozen=True)
@@ -23,12 +23,16 @@ class BenchmarkCase:
     case_id: str
     profile: Jam2Profile
     signal: str
+    category: str
+    purpose: str
+    comparator: str = "control-fast-tone-pcm24"
     coordinator_signal: str = ""
     agent_signal: str = ""
-    repeats: int = 1
-    stream_ms: int = 30000
+    stream_ms: int = CASE_STREAM_MS
     expect_metronome: bool = False
     network_audio_format: str = "pcm24"
+    interpretation: str = "network-and-audio"
+    repeats: int = 1
 
     def __post_init__(self):
         if not self.coordinator_signal:
@@ -38,260 +42,205 @@ class BenchmarkCase:
 
     def metadata(self):
         return {
+            "catalog_version": CATALOG_VERSION,
             "case_id": self.case_id,
+            "category": self.category,
+            "purpose": self.purpose,
+            "comparator": self.comparator,
             "signal": self.signal,
             "coordinator_signal": self.coordinator_signal,
             "agent_signal": self.agent_signal,
-            "repeats": self.repeats,
+            "primary_runs": 1,
             "stream_ms": self.stream_ms,
             "expect_metronome": self.expect_metronome,
             "network_audio_format": self.network_audio_format,
+            "interpretation": self.interpretation,
             "profile": self.profile.metadata(),
         }
 
 
-def static_profiles():
-    safe = SAFE_LOCAL_PROFILE
-    aggressive = AGGRESSIVE_LOCAL_PROFILE
+def _case(
+    case_id: str,
+    profile: Jam2Profile,
+    signal: str,
+    category: str,
+    purpose: str,
+    **changes,
+) -> BenchmarkCase:
+    return BenchmarkCase(
+        case_id=case_id,
+        profile=profile,
+        signal=signal,
+        category=category,
+        purpose=purpose,
+        **changes,
+    )
+
+
+def _core_cases() -> list[BenchmarkCase]:
+    prefill_on = latency_matched_prefill_profile(
+        FAST_PROFILE, total_frames=768, adaptive=True)
+    shared_grid = variant(
+        MODERATE_PROFILE, "metronome_shared_grid",
+        metronome=True, bpm=120, metronome_level=0.20,
+        metronome_mode="shared-grid")
     return [
-        safe,
-        aggressive,
-        adaptive_off_profile(aggressive),
-        variant(safe, "sample_time_off", sample_time_playout=False),
-        variant(safe, "playout_1024", playback_prefill_frames=1024, playback_max_frames=2048,
-                adaptive_playback_target_frames=1024, adaptive_playback_min_frames=1024,
-                adaptive_playback_max_frames=2048, playout_delay_frames=1024),
-        variant(safe, "playout_3072", playback_prefill_frames=3072, playback_ring_frames=8192,
-                playback_max_frames=6144, adaptive_playback_target_frames=3072,
-                adaptive_playback_min_frames=3072, adaptive_playback_max_frames=6144,
-                playout_delay_frames=3072),
-        latency_matched_prefill_profile(aggressive, total_frames=768, adaptive=True),
-        jitter_buffer_profile(aggressive, jitter_frames=512, playback_tail_frames=256, adaptive=True),
-        latency_matched_prefill_profile(aggressive, total_frames=768, adaptive=False),
-        jitter_buffer_profile(aggressive, jitter_frames=512, playback_tail_frames=256, adaptive=False),
-        variant(
-            jitter_buffer_profile(aggressive, jitter_frames=1024, playback_tail_frames=256, adaptive=True),
-            "max_3072",
-            jitter_buffer_max_frames=3072),
-        variant(
-            jitter_buffer_profile(aggressive, jitter_frames=2048, playback_tail_frames=256, adaptive=True),
-            "max_3072",
-            jitter_buffer_max_frames=3072),
-        variant(
-            jitter_buffer_profile(aggressive, jitter_frames=2048, playback_tail_frames=256, adaptive=True),
-            "max_4096",
-            jitter_buffer_max_frames=4096),
-        variant(
-            jitter_buffer_profile(aggressive, jitter_frames=2048, playback_tail_frames=256, adaptive=False),
-            "max_4096",
-            jitter_buffer_max_frames=4096),
-        latency_matched_prefill_profile(aggressive, total_frames=2304, adaptive=True),
-        latency_matched_prefill_profile(aggressive, total_frames=2304, adaptive=False),
-        variant(safe, "drift_off", drift_correction=False),
-        variant(safe, "drift_tight", drift_deadband_ppm=5, drift_smoothing=0.05),
-        variant(safe, "socket_large", socket_send_buffer=1048576, socket_recv_buffer=1048576),
+        _case(
+            "control-fast-tone-pcm24", FAST_PROFILE, "tone-440", "control",
+            "Fast bidirectional PCM24 control used by tuning comparisons.",
+            comparator="control-fast-tone-pcm24"),
+        _case(
+            "signal-fast-pulse-pcm24", FAST_PROFILE, "pulse-1s", "signal",
+            "Transient continuity, dropout, missing-audio, and timing reference."),
+        _case(
+            "profile-moderate-tone-pcm24", MODERATE_PROFILE, "tone-440", "profile",
+            "Integrated Moderate latency and resilience tradeoff."),
+        _case(
+            "profile-safe-tone-pcm24", SAFE_PROFILE, "tone-440", "profile",
+            "Integrated Safe latency and resilience tradeoff."),
+        _case(
+            "adaptive-fast-off-tone-pcm24",
+            variant(FAST_PROFILE, "adaptive_off", adaptive_playback_cushion=False),
+            "tone-440", "adaptive-buffering",
+            "Isolates the contribution of adaptive playback cushioning."),
+        _case(
+            "buffer-fast-prefill-only-768-adaptive-on-tone-pcm24",
+            prefill_on, "tone-440", "buffering",
+            "Latency-matched prefill-only strategy versus Fast jitter buffering."),
+        _case(
+            "frame-fast-128-tone-pcm24",
+            variant(FAST_PROFILE, "frame_128", frame_size=128),
+            "tone-440", "packet-sizing",
+            "128-frame packet interval, bitrate, CPU, and loss sensitivity."),
+        _case(
+            "format-fast-tone-pcm16", FAST_PROFILE, "tone-440", "wire-format",
+            "Matched PCM16 versus PCM24 bandwidth, CPU, and audio measurements.",
+            network_audio_format="pcm16"),
+        _case(
+            "metronome-moderate-shared-grid-pcm24", shared_grid,
+            "metronome-only", "metronome",
+            "Shared-grid alignment and transport reference.",
+            comparator="metronome-moderate-shared-grid-pcm24",
+            expect_metronome=True),
     ]
 
 
-def wifi_diagnostic_profiles():
-    aggressive = AGGRESSIVE_LOCAL_PROFILE
-    best_aggressive_jitter = variant(
-        jitter_buffer_profile(aggressive, jitter_frames=2048, playback_tail_frames=256, adaptive=True),
-        "max_3072",
-        jitter_buffer_max_frames=3072)
-    return {
-        "best_aggressive_jitter": best_aggressive_jitter,
-        "best_aggressive_jitter_sample_time_off": variant(
-            best_aggressive_jitter,
-            "sample_time_off",
-            sample_time_playout=False),
-        "safe_sample_time_off": variant(
-            SAFE_LOCAL_PROFILE,
-            "sample_time_off",
-            sample_time_playout=False),
-        "safe_socket_large": variant(
-            SAFE_LOCAL_PROFILE,
-            "socket_large",
-            socket_send_buffer=1048576,
-            socket_recv_buffer=1048576),
-        "wifi_frame_128": wifi_frame_size_profile(
-            frame_size=128,
-            jitter_frames=2048,
-            playback_tail_frames=512,
-            jitter_max_frames=4096),
-        "wifi_frame_256": wifi_frame_size_profile(
-            frame_size=256,
-            jitter_frames=2048,
-            playback_tail_frames=1024,
-            jitter_max_frames=6144),
-        "wifi_audio_128_frame_256": wifi_frame_size_profile(
-            audio_buffer_size=128,
-            frame_size=256,
-            jitter_frames=2048,
-            playback_tail_frames=1024,
-            jitter_max_frames=6144),
-        "wifi_frame_256_socket_large": variant(
-            wifi_frame_size_profile(
-                frame_size=256,
-                jitter_frames=2048,
-                playback_tail_frames=1024,
-                jitter_max_frames=6144),
-            "socket_large",
-            socket_send_buffer=1048576,
-            socket_recv_buffer=1048576),
-        "wifi_prefill_3072": latency_matched_prefill_profile(
-            SAFE_LOCAL_PROFILE,
-            total_frames=3072,
-            adaptive=True),
-    }
+def _full_additions() -> list[BenchmarkCase]:
+    prefill_off = latency_matched_prefill_profile(
+        FAST_PROFILE, total_frames=768, adaptive=False)
+    jitter_large = jitter_buffer_profile(
+        FAST_PROFILE, jitter_frames=2048,
+        playback_tail_frames=256, adaptive=True)
+    leader_audio = variant(
+        MODERATE_PROFILE, "metronome_leader_audio",
+        metronome=True, bpm=120, metronome_level=0.20,
+        metronome_mode="leader-audio")
+    listener = variant(
+        MODERATE_PROFILE, "metronome_listener_compensated",
+        metronome=True, bpm=120, metronome_level=0.20,
+        metronome_mode="listener-compensated")
+    return [
+        _case(
+            "signal-fast-silence-pcm24", FAST_PROFILE, "silence", "signal",
+            "Unexpected signal, noise, clipping, and recording integrity."),
+        _case(
+            "direction-coordinator-to-agent-tone-pcm24", FAST_PROFILE,
+            "tone-coordinator-to-agent", "direction",
+            "Coordinator-to-agent audio integrity and asymmetric behavior.",
+            coordinator_signal="tone-440", agent_signal="silence"),
+        _case(
+            "direction-agent-to-coordinator-tone-pcm24", FAST_PROFILE,
+            "tone-agent-to-coordinator", "direction",
+            "Agent-to-coordinator audio integrity and asymmetric behavior.",
+            coordinator_signal="silence", agent_signal="tone-440"),
+        _case(
+            "frame-fast-32-tone-pcm24",
+            variant(FAST_PROFILE, "frame_32", frame_size=32),
+            "tone-440", "packet-sizing",
+            "32-frame packet latency versus packet-rate, CPU, and loss cost."),
+        _case(
+            "frame-fast-256-tone-pcm24",
+            variant(FAST_PROFILE, "frame_256", frame_size=256),
+            "tone-440", "packet-sizing",
+            "256-frame packet efficiency versus packetization latency."),
+        _case(
+            "callback-fast-64-frame-64-tone-pcm24",
+            variant(FAST_PROFILE, "callback_64", audio_buffer_size=64),
+            "tone-440", "callback-sizing",
+            "64-frame device or synthetic callback against Fast's 32 frames.",
+            interpretation="synthetic-callback-or-physical-device"),
+        _case(
+            "callback-fast-128-frame-64-tone-pcm24",
+            variant(FAST_PROFILE, "callback_128", audio_buffer_size=128),
+            "tone-440", "callback-sizing",
+            "128-frame device or synthetic callback against Fast's 32 frames.",
+            interpretation="synthetic-callback-or-physical-device"),
+        _case(
+            "buffer-fast-prefill-only-768-adaptive-off-tone-pcm24",
+            prefill_off, "tone-440", "buffering",
+            "Adaptive-on versus fixed latency-matched prefill-only buffering.",
+            comparator="buffer-fast-prefill-only-768-adaptive-on-tone-pcm24"),
+        _case(
+            "buffer-fast-jitter-2048-tail-256-adaptive-on-tone-pcm24",
+            jitter_large, "tone-440", "buffering",
+            "Larger jitter absorption while retaining Fast packet sizing."),
+        _case(
+            "sample-time-fast-off-tone-pcm24",
+            variant(FAST_PROFILE, "sample_time_off", sample_time_playout=False),
+            "tone-440", "sample-time",
+            "Sample-time playout contribution to delay accuracy and late handling."),
+        _case(
+            "drift-correction-fast-off-tone-pcm24",
+            variant(FAST_PROFILE, "drift_off", drift_correction=False),
+            "tone-440", "drift",
+            "Drift correction contribution; physical-device evidence is preferred.",
+            interpretation="physical-preferred"),
+        _case(
+            "socket-buffer-fast-1m-tone-pcm24",
+            variant(
+                FAST_PROFILE, "socket_1m",
+                socket_send_buffer=1_048_576,
+                socket_recv_buffer=1_048_576),
+            "tone-440", "socket-buffering",
+            "Large socket buffers versus default packet loss and work budgeting."),
+        _case(
+            "os-priority-fast-off-tone-pcm24",
+            variant(FAST_PROFILE, "os_priority_off", os_priority="off"),
+            "tone-440", "scheduling",
+            "Scheduling without Jam2 priority elevation.",
+            interpretation="synthetic-scheduler-or-physical-device"),
+        _case(
+            "os-priority-fast-realtime-tone-pcm24",
+            variant(FAST_PROFILE, "os_priority_realtime", os_priority="realtime"),
+            "tone-440", "scheduling",
+            "Realtime scheduling request versus the default high priority.",
+            interpretation="synthetic-scheduler-or-physical-device"),
+        _case(
+            "metronome-moderate-leader-audio-pcm24", leader_audio,
+            "metronome-only", "metronome",
+            "Leader-audio source selection, delivery, and click integrity.",
+            comparator="metronome-moderate-shared-grid-pcm24",
+            expect_metronome=True),
+        _case(
+            "metronome-moderate-listener-compensated-pcm24", listener,
+            "metronome-only", "metronome",
+            "Listener compensation target, convergence, and alignment.",
+            comparator="metronome-moderate-shared-grid-pcm24",
+            expect_metronome=True),
+    ]
 
 
-def wifi_diagnostic_cases(selected_signals, stream_ms=30000, repeats=1):
-    signals = set(selected_signals)
-    profiles = wifi_diagnostic_profiles()
-    cases = []
-
-    if "tone-440" in signals:
-        cases.append(BenchmarkCase(
-            case_id=f"{profiles['best_aggressive_jitter'].name}_repeat5_tone-440",
-            profile=profiles["best_aggressive_jitter"],
-            signal="tone-440",
-            stream_ms=stream_ms,
-            repeats=5))
-        cases.append(BenchmarkCase(
-            case_id=f"{profiles['best_aggressive_jitter'].name}_long120s_tone-440",
-            profile=profiles["best_aggressive_jitter"],
-            signal="tone-440",
-            stream_ms=120000,
-            repeats=repeats))
-        cases.append(BenchmarkCase(
-            case_id=f"{profiles['safe_sample_time_off'].name}_repeat5_tone-440",
-            profile=profiles["safe_sample_time_off"],
-            signal="tone-440",
-            stream_ms=stream_ms,
-            repeats=5))
-        cases.append(BenchmarkCase(
-            case_id=f"{profiles['safe_socket_large'].name}_repeat3_tone-440",
-            profile=profiles["safe_socket_large"],
-            signal="tone-440",
-            stream_ms=stream_ms,
-            repeats=3))
-        for key in ("best_aggressive_jitter", "safe_sample_time_off"):
-            profile = profiles[key]
-            cases.append(BenchmarkCase(
-                case_id=f"{profile.name}_tone-server-to-client",
-                profile=profile,
-                signal="tone-server-to-client",
-                coordinator_signal="tone-440",
-                agent_signal="silence",
-                stream_ms=stream_ms,
-                repeats=repeats))
-            cases.append(BenchmarkCase(
-                case_id=f"{profile.name}_tone-client-to-server",
-                profile=profile,
-                signal="tone-client-to-server",
-                coordinator_signal="silence",
-                agent_signal="tone-440",
-                stream_ms=stream_ms,
-                repeats=repeats))
-
-    if "silence" in signals:
-        cases.append(BenchmarkCase(
-            case_id=f"{profiles['best_aggressive_jitter'].name}_repeat5_silence",
-            profile=profiles["best_aggressive_jitter"],
-            signal="silence",
-            stream_ms=stream_ms,
-            repeats=5))
-
-    for key in ("best_aggressive_jitter_sample_time_off", "wifi_frame_128", "wifi_frame_256",
-                "wifi_audio_128_frame_256", "wifi_frame_256_socket_large", "wifi_prefill_3072"):
-        profile = profiles[key]
-        for signal in selected_signals:
-            if signal in DEFAULT_SIGNALS:
-                cases.append(BenchmarkCase(
-                    case_id=f"{profile.name}_{signal}",
-                    profile=profile,
-                    signal=signal,
-                    stream_ms=stream_ms,
-                    repeats=repeats))
-
+def benchmark_cases(suite: str = "core") -> list[BenchmarkCase]:
+    if suite not in SUITES:
+        raise ValueError("benchmark suite must be core or full")
+    cases = _core_cases()
+    if suite == "full":
+        cases.extend(_full_additions())
     return cases
 
 
-def metronome_profiles():
-    base = variant(SAFE_LOCAL_PROFILE, "metro", metronome=True, bpm=120, metronome_level=0.20)
-    return [
-        variant(base, "shared_grid", metronome_mode="shared-grid"),
-        variant(base, "leader_audio", metronome_mode="leader-audio"),
-        variant(base, "listener_compensated", metronome_mode="listener-compensated"),
-    ]
-
-
-def benchmark_cases(signals=None, include_metronome=True, stream_ms=30000, repeats=1,
-                    audio_formats=("pcm24",)):
-    selected_signals = tuple(signals) if signals else DEFAULT_SIGNALS
-    cases = []
-    profiles = static_profiles()
-    for profile in profiles:
-        for signal in selected_signals:
-            cases.append(BenchmarkCase(
-                case_id=f"{profile.name}_{signal}",
-                profile=profile,
-                signal=signal,
-                repeats=repeats,
-                stream_ms=stream_ms))
-    directional_profiles = profiles[:2]
-    if "tone-440" in selected_signals:
-        for profile in directional_profiles:
-            cases.append(BenchmarkCase(
-                case_id=f"{profile.name}_tone-server-to-client",
-                profile=profile,
-                signal="tone-server-to-client",
-                coordinator_signal="tone-440",
-                agent_signal="silence",
-                repeats=repeats,
-                stream_ms=stream_ms))
-            cases.append(BenchmarkCase(
-                case_id=f"{profile.name}_tone-client-to-server",
-                profile=profile,
-                signal="tone-client-to-server",
-                coordinator_signal="silence",
-                agent_signal="tone-440",
-                repeats=repeats,
-                stream_ms=stream_ms))
-    if include_metronome:
-        for profile in metronome_profiles():
-            for signal in METRONOME_SIGNALS:
-                cases.append(BenchmarkCase(
-                    case_id=f"{profile.name}_{signal}",
-                    profile=profile,
-                    signal=signal,
-                    repeats=repeats,
-                    stream_ms=stream_ms,
-                    expect_metronome=True))
-    cases.extend(wifi_diagnostic_cases(selected_signals, stream_ms=stream_ms, repeats=repeats))
-    if "tone-440" in selected_signals:
-        for os_priority in ("off", "high", "realtime"):
-            cases.append(BenchmarkCase(
-                case_id=f"fast_os_priority_{os_priority}_tone-440",
-                profile=variant(AGGRESSIVE_LOCAL_PROFILE, f"os_priority_{os_priority}",
-                                os_priority=os_priority),
-                signal="tone-440",
-                repeats=repeats,
-                stream_ms=stream_ms))
-    formats = tuple(audio_formats)
-    if not formats or not set(formats) <= {"pcm16", "pcm24"}:
-        raise ValueError("benchmark audio formats must be pcm16 and/or pcm24")
-    if formats == ("pcm24",):
-        return cases
-    return [
-        replace(case, case_id=f"{case.case_id}__{audio_format}", network_audio_format=audio_format)
-        for case in cases for audio_format in formats
-    ]
-
-
-def case_by_id(case_id, cases=None):
-    for case in cases or benchmark_cases():
-        if case.case_id == case_id:
-            return case
-    return None
+def case_by_id(case_id: str, suite: str = "full") -> BenchmarkCase | None:
+    return next(
+        (case for case in benchmark_cases(suite) if case.case_id == case_id),
+        None,
+    )

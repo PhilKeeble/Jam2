@@ -494,6 +494,7 @@ class BenchmarkControlClient:
             message = {
                 "type": "artifact.upload",
                 **run_identity(identity),
+                "artifact_index": int(identity.get("artifact_index", 0) or 0),
                 "machine_id": identity.get("machine_id", ""),
                 "size": size,
                 "sha256": _sha256_file(zip_path),

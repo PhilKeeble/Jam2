@@ -14,25 +14,42 @@ class ArtifactTests(unittest.TestCase):
             parent = Path(directory)
             tools = parent / "repo" / "tools"
             tools.mkdir(parents=True)
-            first = allocate_invocation("validate", tools, parent, "a")
-            second = allocate_invocation("validate", tools, parent, "a")
-            stress = allocate_invocation("stress", tools, parent, "a")
+            first = allocate_invocation("validate", tools)
+            second = allocate_invocation("validate", tools)
+            stress = allocate_invocation("stress", tools)
             self.assertNotEqual(first.root, second.root)
             self.assertEqual(first.family_root.parent, stress.family_root.parent)
             self.assertNotEqual(first.family_root, stress.family_root)
+            self.assertRegex(first.invocation_id, r"^\d{8}T\d{4}Z(?:_\d+)?$")
+
+    def test_custom_output_is_the_exact_timestamp_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            tools = parent / "repo" / "tools"
+            tools.mkdir(parents=True)
+            output = parent / "artifacts" / "localhost_headless_coord"
+            invocation = allocate_invocation(
+                "benchmark", tools, output, "coordinator")
+            self.assertEqual(invocation.family_root, output.resolve())
+            self.assertEqual(invocation.root.parent, output.resolve())
+            self.assertNotIn("benchmark_logs", invocation.root.parts)
 
     def test_clean_removes_only_selected_family(self):
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory)
             tools = parent / "repo" / "tools"
             tools.mkdir(parents=True)
-            validation = allocate_invocation("validate", tools, parent, "keep")
-            stress = allocate_invocation("stress", tools, parent, "old")
+            validation_output = parent / "validation"
+            stress_output = parent / "stress"
+            validation = allocate_invocation(
+                "validate", tools, validation_output, "keep")
+            stress = allocate_invocation("stress", tools, stress_output, "old")
             marker = validation.root / "marker"
             marker.write_text("keep")
-            replacement = allocate_invocation("stress", tools, parent, "new", clean=True)
+            replacement = allocate_invocation(
+                "stress", tools, stress_output, "new", clean=True)
             self.assertTrue(marker.exists())
-            self.assertFalse(stress.root.exists())
+            self.assertEqual(stress.root, replacement.root)
             self.assertTrue(replacement.root.exists())
 
     def test_validate_clean_removes_selected_validate_root_only(self):
@@ -40,16 +57,20 @@ class ArtifactTests(unittest.TestCase):
             parent = Path(directory)
             tools = parent / "repo" / "tools"
             tools.mkdir(parents=True)
-            validation = allocate_invocation("validate", tools, parent, "old")
-            stress = allocate_invocation("stress", tools, parent, "keep")
+            validation_output = parent / "validation"
+            stress_output = parent / "stress"
+            validation = allocate_invocation(
+                "validate", tools, validation_output, "old")
+            stress = allocate_invocation(
+                "stress", tools, stress_output, "keep")
             validation_marker = validation.root / "old-evidence"
             stress_marker = stress.root / "retained-evidence"
             validation_marker.write_text("old")
             stress_marker.write_text("keep")
             replacement = allocate_invocation(
-                "validate", tools, parent, "new", clean=True)
-            self.assertFalse(validation.root.exists())
+                "validate", tools, validation_output, "new", clean=True)
             self.assertFalse(validation_marker.exists())
+            self.assertEqual(validation.root, replacement.root)
             self.assertTrue(stress_marker.exists())
             self.assertTrue(replacement.root.exists())
 
@@ -60,21 +81,20 @@ class ArtifactTests(unittest.TestCase):
             tools.mkdir(parents=True)
             invocation = allocate_invocation("benchmark", tools, parent, "coordinator")
             attempt = benchmark_attempt_path(
-                invocation, "0123456789ab", "machine-a", "fast_silence",
-                "run-001", "abcdef012345",
+                invocation, "0123456789ab", "coordinator", "fast_silence",
+                "1", "abcdef012345",
             )
             self.assertTrue(attempt.is_dir())
             self.assertEqual(
                 attempt.relative_to(invocation.root).as_posix(),
-                "suites/0123456789ab/machines/machine-a/cases/fast_silence/"
-                "runs/run-001/attempts/abcdef012345",
+                "fast_silence/1",
             )
 
     def test_long_identity_components_are_stably_shortened(self):
-        value = "machine-with-a-name-that-would-overflow-a-deep-windows-path"
+        value = "case-with-a-readable-name-" + ("x" * 80)
         first = normalized_path_id(value)
         self.assertEqual(first, normalized_path_id(value))
-        self.assertLessEqual(len(first), 24)
+        self.assertLessEqual(len(first), 64)
         self.assertNotEqual(first, normalized_path_id(value + "-other"))
 
     def test_native_attempt_paths_have_a_global_length_bound(self):

@@ -32,56 +32,60 @@ void detachConsoleForGui() noexcept
 }
 #endif
 
-void applyDarkTheme(QApplication& app)
+void applyCustomTheme(QApplication& app)
 {
     app.setStyleSheet(R"(
-        QWidget { background: #101418; color: #d7dde4; font-size: 10pt; }
-        QLabel#AppTitle { color: #f1f5f9; font-size: 17pt; font-weight: 700; }
+        QWidget { background: #050607; color: #e4e9ec; font-size: 10pt; }
+        QLabel#AppTitle { color: #ffffff; font-size: 17pt; font-weight: 700; }
         QLabel#StatusPill {
-            color: #cbd5e1; background: #1b242d; border: 1px solid #2f3b46;
+            color: #e4e9ec; background: #171a1c; border: 1px solid #596269;
             border-radius: 4px; padding: 5px 8px;
         }
         QGroupBox {
-            border: 1px solid #2a3540; border-radius: 6px; margin-top: 14px;
-            padding: 8px; background: #151b21;
+            border: 1px solid #596269; border-radius: 6px; margin-top: 14px;
+            padding: 8px; background: #0d0f10;
         }
         QGroupBox::title {
-            subcontrol-origin: margin; left: 8px; padding: 0 4px; color: #9fb1c1;
+            subcontrol-origin: margin; left: 8px; padding: 0 4px; color: #a4afb5;
         }
         QLineEdit, QAbstractSpinBox, QComboBox, QTextEdit, QPlainTextEdit, QTableWidget {
-            background: #0c1116; border: 1px solid #344250; border-radius: 4px;
-            color: #e5edf5; selection-background-color: #2563eb; padding: 4px;
+            background: #000000; border: 1px solid #89959c; border-radius: 4px;
+            color: #e4e9ec; selection-background-color: #255f72; padding: 4px;
         }
         QComboBox::drop-down { border: 0; width: 22px; }
         QPushButton, QToolButton {
-            background: #22303c; border: 1px solid #3b4b5b; border-radius: 5px;
-            padding: 6px 10px; color: #edf2f7;
+            background: #22282c; border: 1px solid #89959c; border-radius: 5px;
+            padding: 6px 10px; color: #ffffff;
         }
-        QPushButton:hover, QToolButton:hover { background: #2c3c49; }
-        QPushButton:pressed, QToolButton:pressed { background: #1d4ed8; }
+        QPushButton:hover, QToolButton:hover { background: #30383d; }
+        QPushButton:pressed, QToolButton:pressed {
+            background: #123e32; border-color: #419f81;
+        }
         QToolButton#SettingsButton { padding: 0; }
         QPushButton:disabled, QToolButton:disabled, QSlider:disabled,
         QLineEdit:disabled, QAbstractSpinBox:disabled, QComboBox:disabled {
-            color: #6b7785; background: #151a20; border-color: #27313a;
+            color: #a4afb5; background: #171a1c; border-color: #596269;
         }
         QTabWidget::pane {
-            border: 1px solid #2a3540; border-radius: 6px; background: #111820;
+            border: 1px solid #596269; border-radius: 6px; background: #0d0f10;
         }
         QTabBar::tab {
-            background: #17202a; border: 1px solid #2a3540; padding: 7px 12px;
+            background: #171a1c; border: 1px solid #596269; padding: 7px 12px;
             margin-right: 2px;
         }
-        QTabBar::tab:selected { background: #243241; color: #ffffff; }
+        QTabBar::tab:selected {
+            background: #255f72; color: #ffffff; border-color: #419f81;
+        }
         QHeaderView::section {
-            background: #17202a; color: #d7dde4; border: 1px solid #2a3540;
+            background: #171a1c; color: #e4e9ec; border: 1px solid #596269;
             padding: 4px;
         }
         QTableWidget::item { padding: 8px; }
         QSlider::groove:horizontal {
-            height: 6px; background: #27313a; border-radius: 3px;
+            height: 6px; background: #121516; border-radius: 3px;
         }
         QSlider::handle:horizontal {
-            background: #60a5fa; width: 14px; margin: -5px 0; border-radius: 7px;
+            background: #419f81; width: 14px; margin: -5px 0; border-radius: 7px;
         }
     )");
 }
@@ -125,7 +129,7 @@ int jam2ApplicationMain(int argc, char* argv[])
 #endif
     QApplication app(argc, argv);
     setApplicationIdentity();
-    applyDarkTheme(app);
+    applyCustomTheme(app);
 
     MainWindow window;
     window.resize(1920, 1080);

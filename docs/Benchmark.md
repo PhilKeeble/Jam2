@@ -1,171 +1,347 @@
-# Jam2 Benchmarks
+# Jam2 Two-Peer Benchmarks
 
-Use `benchmark` for repeatable two-machine measurements over the real direct
-Jam2 network path. Python coordinates cases and moves artifacts after each run;
-it never relays Jam2 audio.
+`benchmark` measures the normal direct Jam2 path between two peers. The peers
+may run on separate machines or as two processes on one machine. Python
+coordinates the run and transfers artifacts after each case; it never relays
+audio. The benchmark has two fixed, versioned suites:
 
-Run all commands from the repository root. The default executable is
-`release\jam2.exe`; use `--jam2 PATH` to select another build.
+- `core`: nine cases covering the main profile and protocol decisions.
+- `full`: the core cases plus sixteen focused diagnostic cases.
 
-## Before Running
+The coordinator always runs the Fast PCM24 control first. Every primary case
+runs once for 30 seconds. If its RTT, jitter, or loss is materially different
+from the control, the coordinator runs one labelled confirmation. It retains
+both measurements and never selects the better result.
 
-- Build Jam2 and confirm each audio device supports the requested sample rate
-  with `jam2 test-device <id> --sample-rate <hz>`.
-- Give the machines distinct `--machine-id` values. IDs may contain letters,
-  numbers, dots, underscores, and hyphens.
-- On the coordinator, allow TCP `49000` for Python benchmark control and both
-  TCP and UDP `49001` for the normal Jam2 create/join path. The ports are
-  independently configurable.
-- Leave `--output` unset for the normal
-  `tools/benchmark_logs/<invocation-id>` location. Native attempt paths are
-  checked before the suite starts; provide a shorter output parent only if
-  Windows explicitly reports that the repository path exceeds its path budget.
-- Start the coordinator first, then the agent.
+Run commands from the repository root. They use `release\jam2.exe` by default;
+use `--jam2 PATH` to select another build.
 
-`--network-profile auto|wired|wifi|unknown` records metadata only. It never
-changes native tuning.
+## Requirements
 
-## Short Two-Machine Run
+Both peers need:
 
-This is the short workflow used to prove negotiation, normal create/join,
-recording, manifests, upload acknowledgement, result correlation, and final
-`all_done` without running the comprehensive matrix.
+- the same compatible Jam2 build and benchmark catalog;
+- Python 3;
+- distinct `--machine-id` values;
+- the same `--sample-rate` value;
+- either `--headless-audio` or one machine-local `--audio-device ID`.
 
-Coordinator, using LAN address `192.168.1.50` and audio device `5`:
+The coordinator needs TCP `49000` for benchmark control and TCP/UDP `49001`
+for Jam2 create/join. The agent needs outbound access to those ports. Start the
+coordinator first and then the agent.
 
-```powershell
-python tools\jam2_test.py benchmark coordinator --machine-id studio-a --audio-device 5 --sample-rate 44100 --profile fast --case fast_tone-440 --case fast_pulse-1s --signals tone-440,pulse-1s --network-audio-format both --stream-ms 5000 --repeats 1 --control 0.0.0.0:49000 --audio-bind 0.0.0.0:49001 --public-audio-host 192.168.1.50 --initial-agent-timeout-s 120 --case-timeout-s 45 --upload-timeout-s 120 --case-retry-limit 1 --finish-grace-s 30 --clean
-```
+Use `--network-profile wired`, `wifi`, or `unknown` to label the connection.
+This is recorded metadata and never changes Jam2 tuning.
 
-Agent, using audio device `16`:
+### Physical audio
+
+List device IDs and test the selected device before benchmarking:
 
 ```powershell
-python tools\jam2_test.py benchmark agent --machine-id studio-b --audio-device 16 --sample-rate 44100 --network-audio-format both --coordinator 192.168.1.50:49000 --connect-timeout-s 120 --case-timeout-s 45 --clean
+.\release\jam2.exe list-devices
+.\release\jam2.exe test-device 5
 ```
 
-Do not use `--delete-after-upload` when the purpose of the run requires logs on
-both machines. That option removes an agent attempt only after the coordinator
-has acknowledged its validated upload.
+`test-device` checks 44100/48000 Hz and 32/64/128/256-frame buffers. A physical
+core run needs the requested sample rate plus 32- and 64-frame callbacks. A
+physical full run also uses a 128-frame callback. Device IDs are local and may
+differ between the machines.
 
-Use `--headless-audio` instead of `--audio-device` when testing only the
-orchestration and network workflow. Headless runs do not claim device, driver,
-hardware-clock, or callback coverage.
+The benchmark injects deterministic test signals while still using the real
+device callback. It measures the driver, device clock, callback timing, xruns,
+and their interaction with the network path. It does not measure analog
+round-trip latency.
 
-## Cases And Matrices
+### Headless audio
 
-List the cases produced by the current native profiles and retained matrix:
+A prebuilt Jam2 executable can run headlessly without an installed ASIO driver
+or audio device:
 
 ```powershell
-python tools\jam2_test.py benchmark coordinator --machine-id catalog --list-cases
+--headless-audio
 ```
 
-The listing records each case ID, native base profile, sparse override object,
-signal, and repeat count. Select cases by repeating `--case`. The coordinator
-owns the case plan offered to the agent.
+The synthetic callback uses each case's requested audio-buffer size. It is not
+fixed at 256 frames. Headless runs exercise packetization, UDP, jitter and
+playback buffers, prefill, adaptive buffering, resampling, mixing, metronome,
+recording, and stats. They do not claim ASIO-driver, physical clock, hardware
+latency, or device-xrun coverage. Building Jam2 on Windows still requires the
+ASIO SDK.
 
-Useful selection controls:
+Results are classified as `headless-headless`, `physical-physical`, or `mixed`.
+Do not pool these coverage classes when comparing callback, drift, scheduling,
+or xrun behavior.
 
-- `--profile fast|moderate|safe|all` filters by native base profile. The default
-  is `all`.
-- `--signals silence,tone-440,pulse-1s` selects a comma-separated signal subset.
-- `--no-metronome-cases` removes metronome-only cases.
-- `--stream-ms N` sets each selected case duration.
-- `--repeats N` preserves each repeat as a separate run identity.
-- `--case NAME` selects an exact catalog case and may be repeated.
-- `--network-audio-format pcm16|pcm24|both` selects the offered session wire
-  format. `both` expands every selected base case into a correlated PCM16 and
-  PCM24 pair with identical profile, signal, duration, and repeat identity.
+## Running Core and Full
 
-The comprehensive workflow is intentionally retained. Omitting `--case` with
-`--profile all` exercises the broad profile, sparse tuning, directional tone,
-metronome, Wi-Fi diagnostic, and OS-priority matrices. It can take a long time,
-especially with multiple repeats, and is not the routine smoke test.
+Replace the example addresses and device IDs with values for the two machines.
+The suite name must match on both commands.
 
-## Coordinator And Agent Behavior
+### Core with headless audio
 
-Every offered attempt has a coordinator-issued invocation ID, suite ID, case
-ID, run index, and attempt ID. The agent accepts only the current bounded offer,
-runs the normal `network.join` operation, packages its attempt, and streams it
-over the benchmark TCP control connection. The coordinator validates the
-envelope and peer result identity before extracting it.
+Coordinator at `192.168.1.50`:
 
-If a case does not complete, `--case-retry-limit` bounds coordinator retries.
-Reconnects and repeated offers retain their identity, while stale attempts and
-uploads are rejected. `--initial-agent-timeout-s`, `--case-timeout-s`,
-`--upload-timeout-s`, `--connect-timeout-s`, and `--finish-grace-s` bound the
-relevant waits.
+```powershell
+python tools\jam2_test.py benchmark coordinator core --machine-id studio-a --sample-rate 48000 --headless-audio --network-profile wifi --public-audio-host 192.168.1.50
+```
 
-## Artifacts
+Agent:
 
-Without `--output`, artifacts are placed below:
+```powershell
+python tools\jam2_test.py benchmark agent core --machine-id studio-b --sample-rate 48000 --headless-audio --network-profile wifi --coordinator 192.168.1.50:49000
+```
+
+### Localhost headless baseline
+
+Run these in two terminals. This keeps separate local peer roots while the
+coordinator also receives the agent files needed for a self-contained result:
+
+Coordinator:
+
+```powershell
+python tools\jam2_test.py benchmark coordinator core --machine-id coord --sample-rate 48000 --headless-audio --network-profile unknown --public-audio-host 127.0.0.1 --output artifacts\localhost_headless_coord
+```
+
+Agent:
+
+```powershell
+python tools\jam2_test.py benchmark agent core --machine-id agent --sample-rate 48000 --headless-audio --network-profile unknown --coordinator 127.0.0.1:49000 --output artifacts\localhost_headless_agent
+```
+
+When both peers run on one machine, give them different custom output roots as
+shown. They intentionally share the coordinator-issued timestamp, so one
+common root would collide.
+
+### Core with physical devices
+
+Coordinator:
+
+```powershell
+python tools\jam2_test.py benchmark coordinator core --machine-id studio-a --sample-rate 44100 --audio-device 5 --network-profile wired --public-audio-host 192.168.1.50
+```
+
+Agent:
+
+```powershell
+python tools\jam2_test.py benchmark agent core --machine-id studio-b --sample-rate 44100 --audio-device 16 --network-profile wired --coordinator 192.168.1.50:49000
+```
+
+### Full
+
+Use the same commands with `full` in place of `core`. Full uses the same first
+nine cases as core with identical settings.
+
+### Mixed coverage
+
+One machine may use `--audio-device` while the other uses `--headless-audio`.
+This is useful for diagnosing one physical endpoint, but the result is labelled
+`mixed` and is not equivalent to either a two-device or two-headless run.
+
+Use `--control`, `--audio-bind`, and `--output` only when the default ports or
+artifact location are unsuitable. Without `--output`, `--clean` removes the
+default `tools\benchmark_logs` contents. With `--output PATH`, it clears that
+exact custom artifact root before allocating the invocation.
+
+List the exact catalog without starting a run:
+
+```powershell
+python tools\jam2_test.py benchmark list core
+python tools\jam2_test.py benchmark list full
+```
+
+## Cases
+
+All cases record their purpose, comparator, base native profile, sparse
+overrides, signal direction, wire format, and interpretation.
+
+### Core cases
+
+| Case | What it tests |
+|---|---|
+| `control-fast-tone-pcm24` | Fast bidirectional PCM24 control for all main tuning comparisons. |
+| `signal-fast-pulse-pcm24` | Transient continuity, missing frames, dropouts, pops, and timing. |
+| `profile-moderate-tone-pcm24` | Complete Moderate profile latency/resilience tradeoff. |
+| `profile-safe-tone-pcm24` | Complete Safe profile latency/resilience tradeoff. |
+| `adaptive-fast-off-tone-pcm24` | Fast with adaptive playback cushioning disabled. |
+| `buffer-fast-prefill-only-768-adaptive-on-tone-pcm24` | Latency-matched prefill-only buffering against Fast's jitter-buffer strategy. |
+| `frame-fast-128-tone-pcm24` | 128-frame packet interval, bitrate, CPU, and loss sensitivity against Fast's 64 frames. |
+| `format-fast-tone-pcm16` | Matched PCM16 against the PCM24 control. |
+| `metronome-moderate-shared-grid-pcm24` | Shared-grid mapping, click timing, and transport baseline. |
+
+### Additional full cases
+
+| Case | What it tests |
+|---|---|
+| `signal-fast-silence-pcm24` | Unexpected signal, noise, clipping, and recording integrity. |
+| `direction-coordinator-to-agent-tone-pcm24` | Coordinator-to-agent audio and route asymmetry. |
+| `direction-agent-to-coordinator-tone-pcm24` | Agent-to-coordinator audio and route asymmetry. |
+| `frame-fast-32-tone-pcm24` | Lower packetization latency against higher packet rate and CPU. |
+| `frame-fast-256-tone-pcm24` | Lower packet rate against higher packetization latency. |
+| `callback-fast-64-frame-64-tone-pcm24` | 64-frame physical or synthetic callback against Fast's 32 frames. |
+| `callback-fast-128-frame-64-tone-pcm24` | 128-frame physical or synthetic callback against Fast's 32 frames. |
+| `buffer-fast-prefill-only-768-adaptive-off-tone-pcm24` | Fixed versus adaptive latency-matched prefill. |
+| `buffer-fast-jitter-2048-tail-256-adaptive-on-tone-pcm24` | Larger jitter absorption without changing Fast packet sizing. |
+| `sample-time-fast-off-tone-pcm24` | Sample-time playout effects on delay error and late handling. |
+| `drift-correction-fast-off-tone-pcm24` | Drift correction effects; physical-device evidence is most useful. |
+| `socket-buffer-fast-1m-tone-pcm24` | 1 MiB socket buffers against default loss and receive work. |
+| `os-priority-fast-off-tone-pcm24` | Jam2 without process/thread priority elevation. |
+| `os-priority-fast-realtime-tone-pcm24` | Realtime scheduling request against the default high priority. |
+| `metronome-moderate-leader-audio-pcm24` | Leader selection, injected click delivery, and click integrity. |
+| `metronome-moderate-listener-compensated-pcm24` | Compensation target, convergence, clamping, and alignment. |
+
+## Outlier Confirmations
+
+The first control supplies the network reference. A completed primary case gets
+one immediate `outlier-confirmation` when the absolute difference exceeds:
+
+- RTT average: the greater of 10 ms or 50% of control;
+- jitter average: the greater of 5 ms or 100% of control;
+- loss: the greater of 0.5 percentage points or the control loss.
+
+Confirmations cannot trigger further confirmations. Failed process attempts are
+separate bounded infrastructure retries. The original result, confirmation,
+thresholds, measurements, and reasons all remain in the dataset.
+
+## Results and WAV Retention
+
+The coordinator output is:
 
 ```text
 tools/benchmark_logs/<invocation-id>/
 ```
 
-If path preflight requires an explicit `--output PATH`, the family folder is
-still included beneath that parent:
+`<invocation-id>` is the UTC minute in `YYYYMMDDTHHMMZ` form. If another
+invocation already exists for that minute, `_1`, `_2`, and so on avoid the
+collision. A custom output is used directly:
 
 ```text
-PATH/benchmark_logs/<invocation-id>/
+PATH/<YYYYMMDDTHHMMZ>/
 ```
 
-The normalized attempt tree is:
+Benchmark executions use:
 
 ```text
-suites/<suite-id>/machines/<machine-id>/cases/<case-id>/
-  runs/run-<number>/attempts/<attempt-id>/
+<case-id>/<execution-number>/
+  scenario.json
+  peer-result.json
+  stats.csv
+  agent_scenario.json
+  agent_peer-result.json
+  agent_stats.csv
+  benchmark-result.json
 ```
 
-The coordinator retains its own machine subtree and the validated uploaded
-agent subtree. The agent retains its local subtree unless
-`--delete-after-upload` was explicitly used. Named files include:
+Important root files are:
 
-- root `invocation-manifest.json` and role-specific `coordinator.log` or
-  `agent.log`;
-- root `transfer.log` with upload lifecycle events;
-- per-attempt `scenario.json`, `native-manifest.json`, `peer-result.json`,
-  `jam2.stdout.log`, and `jam2.stderr.log`;
-- per-attempt `csv/*.csv` and `recording/*.wav` plus `recording.json`;
-- coordinator-side `correlated-result.json`.
-- coordinator-side `format-comparison.json` and `format-comparison.csv` when
-  `--network-audio-format both` is selected.
+- `invocation-manifest.json`: invocation state, identities, catalog, hashes,
+  build/profile information, and case outcomes;
+- `analysis.json` and `analysis.csv`: complete normalized results and one
+  aggregate row per attempt;
+- `peer-analysis.csv`: per-machine metrics and effective configuration;
+- `comparisons.json` and `comparisons.csv`: raw numeric deltas against each
+  case's declared comparator;
+- `format-comparison.json` and `.csv`: matched PCM16/PCM24 measurements.
 
-The invocation manifest records bounded artifact paths, byte counts, and
-SHA-256 hashes. A successful short run has `state: "passed"`, `return_code: 0`,
-and `all_done_acknowledged: true` on both machines. Each coordinator result
-must have `verdict: "complete"`, `agent_artifacts_received: true`, and two
-distinct peer/machine records.
+Each execution keeps coordinator and uploaded agent data together. Coordinator
+filenames are unchanged; each uploaded filename receives an `agent_` prefix.
+Machine IDs, suite identity, attempt UUID, run kind, and network labels stay in
+the structured JSON/CSV data rather than lengthening directory names. The
+numeric execution folder is `1` for the primary attempt and increases for a
+retry or objective outlier confirmation.
 
-Every format-specific case also verifies the exact negotiated format, packet
-size, bidirectional packet/byte flow, and non-silent remote recording. The
-paired comparison retains packet/header/payload bytes, bitrate, CPU, callback
-timing, jitter/RTT/loss/drop/underrun/drift/mix data, and WAV peak/RMS/pop/
-clipping measurements without assigning a subjective score.
+After every WAV is parsed successfully, the tooling deletes the WAVs and keeps
+their byte counts and SHA-256 hashes plus structured measurements: frames,
+duration, peak, RMS, noise floor, tone frequency, clipping spans, bounded pop
+locations/severity, bounded dropout spans, pulses, and metronome timing.
+Clipping, pops, dropouts, or a missing expected tone are findings, not analyzer
+failures, so those WAVs are also deleted after their findings are recorded.
+WAVs remain only when required audio or metadata was missing, malformed, or
+unreadable.
 
-`--clean` removes only the selected output parent's entire `benchmark_logs`
-family before allocating a new invocation. It does not clean validation,
-stress, or connectivity artifacts.
+The agent uploads a validated attempt to the coordinator. Its local copy remains
+unless `--delete-after-upload` is used.
 
-## Offline Analysis
+## Offline Analysis and Packaging
 
-Analyze a coordinator invocation containing `correlated-result.json` files:
+Analyze one invocation or a directory containing several:
 
 ```powershell
 python tools\jam2_test.py benchmark analyze tools\benchmark_logs\<invocation-id>
 ```
 
-Do not add `--clean` when the analysis source is inside the default
-`tools/benchmark_logs` family: family cleanup would also remove that source.
+This writes a new analysis invocation. Do not combine `--clean` with a source
+inside the same default `benchmark_logs` family.
 
-The analyzer creates another isolated benchmark invocation containing
-`analysis.json`, `analysis.csv`, `format-comparison.json`,
-`format-comparison.csv`, and its own invocation manifest.
-`analysis.json` preserves the complete case- and repeat-level correlated
-results, while `analysis.csv` is the compact identity/verdict index. The
-analyzer does not produce a subjective playability score or silently choose a
-profile.
+Create a compact local submission:
 
-For controlled local impairment and feature recovery, use
-[Stress Tests](StressTests.md). For the deterministic post-build baseline, use
-[Validation](Validation.md).
+```powershell
+python tools\jam2_test.py benchmark package tools\benchmark_logs\<invocation-id>
+```
+
+Use `--output C:\path\result.zip` to select the archive path. Packaging never
+uploads data. The ZIP contains normalized JSON/CSV, comparator deltas, raw stats
+CSVs, build/protocol/configuration metadata, and a hashed submission manifest.
+It excludes invite URLs, session keys, absolute paths, and process/control logs.
+Only WAVs from incomplete analyses are included.
+
+## Comparing Runs Over Time
+
+Compare data only when the following are known:
+
+- benchmark catalog version and exact case ID;
+- Jam2 build hash and control/UDP protocol versions;
+- complete effective configuration, not just the profile name;
+- sample rate and negotiated frame/format contract;
+- coverage class and device/backend identity;
+- machine IDs and network profile;
+- primary versus confirmation status.
+
+Keep the same two machines, devices, sample rate, placement, and network path
+when measuring network change over time. Record a new run after Jam2, driver,
+operating-system, router, interface, or physical placement changes. Cross-build
+data remains useful for protocol development, but it is not a like-for-like
+network trend unless effective settings and protocol versions also match.
+
+## Reading the Measurements
+
+Start by checking that the control completed, both peers have CSV and complete
+audio analysis, negotiated settings match, and any outlier confirmation agrees
+with its primary. Then compare hard measurements:
+
+- **Profiles:** prefer the least-buffered profile that does not introduce
+  missing/late frames, underrun time, playback drops, jitter-buffer drops,
+  capacity drops, or audio discontinuities. Account for its playback depth and
+  device-buffer latency.
+- **Adaptive buffering:** compare Fast control with `adaptive-fast-off`.
+  Raise/burst events show whether adaptation was needed; target and recovery
+  fields show its added depth and whether it released afterward.
+- **Prefill and jitter buffering:** compare missing/late frames and underruns
+  against playback depth. Prefill-only and jitter-buffer cases have similar
+  intended buffering but react differently to bursty arrival.
+- **Frame size:** smaller frames reduce packetization time but increase packets,
+  header bitrate, CPU, and exposure to packet loss. Larger frames do the
+  opposite.
+- **Callback size:** on physical coverage, compare active buffer time, callback
+  interval/gaps, xruns, CPU, and underruns. Headless callback cases measure only
+  the synthetic scheduler and Jam2 algorithms.
+- **Drift correction:** physical runs should show raw drift, resampler ratio,
+  active/clamped percentage, and whether buffer depth remains bounded.
+  Zero-drift headless results are not evidence that correction is unnecessary.
+- **Sample-time playout:** inspect playout-delay error, stale/future rejects,
+  late frames, drops, and depth stability.
+- **Wire format:** PCM16 should reduce payload, bitrate, and possibly CPU.
+  Compare its audio measurements with PCM24 rather than assuming the bandwidth
+  saving is free.
+- **Scheduling and sockets:** verify the requested scheduling mode was active,
+  then compare callback gaps, work-budget yields, loss, and drops. A request
+  that the operating system did not grant is not a valid comparison.
+- **Metronome:** inspect authority identity, mapped epoch, beat delta,
+  compensation target/offset, convergence, stale/clamp events, and structured
+  click analysis.
+
+The tooling deliberately does not produce a subjective playability score or
+choose a profile. The result should support a decision with measured latency,
+loss, buffering, callback, drift, and audio-integrity costs visible.
+
+For controlled local impairment use [Stress Tests](StressTests.md). For the
+deterministic post-build baseline use [Validation](Validation.md).

@@ -28,7 +28,7 @@ python tools\jam2_test.py validate all --clean
 
 The resulting root is `tools/validate_logs/<invocation-id>`, not `tools`
 itself. With `--output PATH`, it is
-`PATH/validate_logs/<invocation-id>`.
+`PATH/<invocation-id>`.
 
 ## Selections
 
@@ -118,6 +118,10 @@ Without `--output`, each invocation is created under:
 tools/validate_logs/<invocation-id>/
 ```
 
+The invocation ID is a UTC minute timestamp such as `20260718T1610Z`, with a
+small numeric suffix only when that minute already exists. A custom
+`--output PATH` creates the timestamp directly beneath `PATH`.
+
 Key files include:
 
 - `invocation-manifest.json`: selection, case states, return code, omissions,
@@ -128,9 +132,9 @@ Key files include:
 - per-case stdout, stderr, scenarios, native manifests, CSV, events, and
   process results where applicable.
 
-`--clean` removes only the selected parent's complete `validate_logs` family
-before creating the new unique invocation. Stress, benchmark, and connectivity
-roots are never removed by validation cleanup.
+Without a custom output, `--clean` removes only `tools/validate_logs` before
+creating the new invocation. With `--output PATH`, it clears that exact custom
+root. Use a distinct custom root for each retained artifact family.
 
 ## Console Output
 

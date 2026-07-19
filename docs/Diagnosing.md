@@ -54,4 +54,16 @@ collection and CSV path.
 
 For clean post-build checks use [Validation](Validation.md). For controlled
 impairment and recovery use [Stress Tests](StressTests.md), and for real
-two-machine measurements use [Benchmark](Benchmark.md).
+two-peer measurements use [Benchmark](Benchmark.md).
+
+Bounded native parser fuzzing uses the same compact artifact convention:
+
+```powershell
+python tools\jam2_test.py fuzz all
+```
+
+Its default root is `tools/fuzz_logs/<YYYYMMDDTHHMMZ>`. With
+`--output PATH`, it is `PATH/<YYYYMMDDTHHMMZ>`. Retained failures are direct
+children named `<target>-<index>-<digest>`; there is no redundant `failures`
+directory. As with the other tool families, a small numeric timestamp suffix is
+used only for a same-minute collision.

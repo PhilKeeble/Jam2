@@ -153,11 +153,18 @@ def format_comparison_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
     for result in results:
         if result.get("verdict") not in ("complete", "pass", "expected_impairment"):
             continue
+        if result.get("run_kind") not in (None, "", "primary"):
+            continue
         case_id = str(result.get("case_id") or result.get("scenario") or "")
         if case_id.endswith("__pcm16"):
             base, audio_format = case_id[:-7], "pcm16"
         elif case_id.endswith("__pcm24"):
             base, audio_format = case_id[:-7], "pcm24"
+        elif result.get("case", {}).get("category") == "wire-format":
+            base = result["case"].get("comparator", case_id)
+            audio_format = result["case"].get("network_audio_format", "")
+        elif case_id == "control-fast-tone-pcm24":
+            base, audio_format = case_id, "pcm24"
         else:
             continue
         grouped[(base, int(result.get("run_index", 0) or 0))][audio_format] = result

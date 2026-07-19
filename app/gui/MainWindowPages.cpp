@@ -3,6 +3,7 @@
 #include "MainWindow.hpp"
 
 #include "GuiPresentation.hpp"
+#include "GuiTheme.hpp"
 #include "SessionController.hpp"
 #include "TrackWidgets.hpp"
 #include "ContentLimits.hpp"
@@ -67,7 +68,7 @@ QIcon settingsIcon()
     path.addEllipse(QPointF(size / 2.0, size / 2.0), 4.0, 4.0);
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing);
-    painter.fillPath(path, QColor(QStringLiteral("#d7dde4")));
+    painter.fillPath(path, jam2::gui::theme::text);
     return QIcon(pixmap);
 }
 
@@ -525,7 +526,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     w.recordingCountdownLabel_->setAlignment(Qt::AlignCenter);
     w.recordingCountdownLabel_->setMinimumHeight(72);
     w.recordingCountdownLabel_->setStyleSheet(QStringLiteral(
-        "QLabel { background: #171b1e; border: 1px solid #66c6a6; color: #f2f5f4; font-size: 34px; font-weight: 700; }"));
+        "QLabel { background: #171a1c; border: 1px solid #419f81; color: #ffffff; font-size: 34px; font-weight: 700; }"));
     w.recordingCountdownLabel_->hide();
 
     w.trackWaveform_ = nullptr;
@@ -1093,8 +1094,8 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     w.metronomePatternTable_->setMinimumHeight(110);
     w.metronomePatternTable_->setStyleSheet(QStringLiteral(
         "QTableWidget::item { padding: 3px 6px; }"
-        "QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid #52616c; background: #1f2428; }"
-        "QCheckBox::indicator:checked { border: 1px solid #66c6a6; background: #66c6a6; }"));
+        "QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid #89959c; background: #000000; }"
+        "QCheckBox::indicator:checked { border: 1px solid #419f81; background: #419f81; }"));
 
     auto makeControlPair = [page](const QString& label, QWidget* editor) {
         auto* pair = new QWidget(page);

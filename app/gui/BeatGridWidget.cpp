@@ -1,4 +1,5 @@
 #include "BeatGridWidget.hpp"
+#include "GuiTheme.hpp"
 #include "MusicTheory.hpp"
 
 #include <QAction>
@@ -22,6 +23,8 @@
 #include <limits>
 
 namespace {
+
+namespace theme = jam2::gui::theme;
 
 constexpr int kBeatCellKindRole = Qt::UserRole + 1;
 constexpr int kBeatDivisionRole = Qt::UserRole + 2;
@@ -64,7 +67,7 @@ protected:
         }
         painter->save();
         painter->setPen(Qt::NoPen);
-        painter->setBrush(QColor(102, 198, 166));
+        painter->setBrush(theme::accent);
         const int x = rect.left() + qBound(
             0, static_cast<int>(std::lround(currentBeatPhase_ * rect.width())), rect.width() - 1);
         painter->drawEllipse(QPoint(x, rect.top() + 6), 4, 4);
@@ -161,7 +164,7 @@ public:
             index.data(kSectionSelectedRole).toBool()) {
             painter->save();
             painter->setPen(Qt::NoPen);
-            painter->setBrush(QColor(102, 198, 166));
+            painter->setBrush(theme::accent);
             painter->drawEllipse(QPoint(option.rect.left() + 9, option.rect.top() + 9), 4, 4);
             painter->restore();
         }
@@ -172,7 +175,7 @@ private:
     {
         painter->save();
         const QRect rect = option.rect.adjusted(4, 4, -4, -4);
-        painter->fillRect(option.rect, option.state & QStyle::State_Selected ? QColor(48, 82, 112) : QColor(27, 31, 34));
+        painter->fillRect(option.rect, option.state & QStyle::State_Selected ? theme::selection : theme::panelRaised);
         const int division = index.data(kBeatDivisionRole).toInt();
         const QString text = index.data(kBeatHitTextRole).toString();
         const QVariant activeStepValue = index.data(kBeatActiveStepRole);
@@ -187,15 +190,15 @@ private:
             const int y = rect.top() + (rect.height() - boxSize) / 2;
             const QRect box(x, y, boxSize, boxSize);
             if (step < 0) {
-                painter->fillRect(box.adjusted(2, 2, -2, -2), QColor(42, 47, 51));
+                painter->fillRect(box.adjusted(2, 2, -2, -2), theme::buttonHover);
                 continue;
             }
             const QChar state = normalizedHitText(text, division).at(step);
             const bool checked = state != QLatin1Char('.');
-            const QColor color = state == QLatin1Char('a') ? QColor(245, 185, 72)
-                : state == QLatin1Char('g') ? QColor(92, 132, 124) : QColor(102, 198, 166);
-            painter->setPen(QPen(checked ? color : QColor(82, 97, 108), step == activeStep ? 3 : 1));
-            painter->setBrush(checked ? QBrush(color) : QBrush(QColor(31, 36, 40)));
+            const QColor color = state == QLatin1Char('a') ? theme::warning
+                : state == QLatin1Char('g') ? theme::success : theme::accent;
+            painter->setPen(QPen(checked ? color : theme::borderStrong, step == activeStep ? 3 : 1));
+            painter->setBrush(checked ? QBrush(color) : QBrush(theme::buttonBg));
             if (state == QLatin1Char('g')) painter->drawEllipse(box);
             else painter->drawRect(box);
         }
@@ -205,17 +208,17 @@ private:
     void paintDivisionCell(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const
     {
         painter->save();
-        painter->fillRect(option.rect, option.state & QStyle::State_Selected ? QColor(48, 82, 112) : QColor(27, 31, 34));
+        painter->fillRect(option.rect, option.state & QStyle::State_Selected ? theme::selection : theme::panelRaised);
         const QRect box = option.rect.adjusted(8, 6, -8, -6);
-        painter->setPen(QColor(82, 97, 108));
-        painter->setBrush(QColor(31, 36, 40));
+        painter->setPen(theme::borderStrong);
+        painter->setBrush(theme::buttonBg);
         painter->drawRect(box);
-        painter->setPen(QColor(220, 224, 226));
+        painter->setPen(theme::text);
         painter->drawText(box.adjusted(8, 0, -20, 0), Qt::AlignVCenter | Qt::AlignLeft, index.data(Qt::DisplayRole).toString());
         const int midY = box.center().y();
         const int right = box.right() - 10;
         QPoint points[3] = {QPoint(right - 4, midY - 2), QPoint(right + 4, midY - 2), QPoint(right, midY + 3)};
-        painter->setBrush(QColor(150, 158, 166));
+        painter->setBrush(theme::textMuted);
         painter->setPen(Qt::NoPen);
         painter->drawPolygon(points, 3);
         painter->restore();
@@ -837,7 +840,7 @@ void BeatGridWidget::rebuildChordTable()
                     flags &= ~Qt::ItemIsEditable;
                     if (beat >= section.beats) flags &= ~Qt::ItemIsEnabled;
                     item->setFlags(flags);
-                    item->setBackground(QBrush(beat >= section.beats ? QColor(34, 36, 38) : QColor(30, 39, 41)));
+                    item->setBackground(QBrush(beat >= section.beats ? theme::panelRaised : theme::accentSoft));
                 }
                 if (lane == 0) item->setToolTip(QStringLiteral("Blank sustains the previous chord; - is silence."));
                 if (lane == 2) {
@@ -912,7 +915,7 @@ void BeatGridWidget::rebuildBeatTable()
         header->setFlags(headerFlags);
         header->setData(kSectionHeaderRole, true);
         header->setData(kSectionSelectedRole, selectedSection_ == sectionIndex);
-        header->setBackground(QBrush(QColor(34, 38, 42)));
+        header->setBackground(QBrush(theme::panelRaised));
         table_->setItem(row, 0, header);
         if (maxBeats > 1) {
             table_->setSpan(row, 0, 1, maxBeats);
@@ -931,7 +934,7 @@ void BeatGridWidget::rebuildBeatTable()
                 flags &= ~Qt::ItemIsEditable;
                 flags &= ~Qt::ItemIsEnabled;
                 item->setFlags(flags);
-                item->setBackground(QBrush(QColor(34, 36, 38)));
+                item->setBackground(QBrush(theme::panelRaised));
                 table_->setItem(divisionRow, beat, item);
                 continue;
             }
@@ -958,7 +961,7 @@ void BeatGridWidget::rebuildBeatTable()
                     flags &= ~Qt::ItemIsEditable;
                     flags &= ~Qt::ItemIsEnabled;
                     item->setFlags(flags);
-                    item->setBackground(QBrush(QColor(34, 36, 38)));
+                    item->setBackground(QBrush(theme::panelRaised));
                     table_->setItem(laneRow, beat, item);
                     continue;
                 }

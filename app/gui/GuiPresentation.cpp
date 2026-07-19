@@ -1,4 +1,5 @@
 #include "GuiPresentation.hpp"
+#include "GuiTheme.hpp"
 
 #include <QCheckBox>
 #include <QApplication>
@@ -24,6 +25,8 @@
 
 namespace {
 
+namespace theme = jam2::gui::theme;
+
 class Jam2Style final : public QProxyStyle {
 public:
     using QProxyStyle::QProxyStyle;
@@ -45,13 +48,10 @@ public:
         const bool hovered = (option->state & State_MouseOver) != 0;
         const bool focused = (option->state & State_HasFocus) != 0;
         const QColor border = enabled
-            ? (hovered || focused ? QColor(QStringLiteral("#66c6a6"))
-                                 : QColor(QStringLiteral("#8a97a1")))
-            : QColor(QStringLiteral("#4d565d"));
-        const QColor fill = checked ? QColor(QStringLiteral("#1b3b33"))
-                                    : QColor(QStringLiteral("#101214"));
-        const QColor tick = enabled ? QColor(QStringLiteral("#f2f5f7"))
-                                    : QColor(QStringLiteral("#7a858c"));
+            ? (hovered || focused ? theme::accent : theme::textMuted)
+            : theme::border;
+        const QColor fill = checked ? theme::accentSoft : theme::editorBg;
+        const QColor tick = enabled ? theme::textStrong : theme::textMuted;
 
         painter->save();
         painter->setRenderHint(QPainter::Antialiasing, true);
@@ -184,10 +184,10 @@ bool isCustomFocusPreset(const QString& key)
 QString trackValueEditorStyle()
 {
     return QStringLiteral(
-        "QAbstractSpinBox { border: 1px solid #52616c; background: #101214; color: #f2f5f7; padding: 2px 28px 2px 6px; }"
-        "QComboBox, QLineEdit { border: 1px solid #52616c; background: #101214; color: #f2f5f7; padding: 2px 6px; }"
-        "QAbstractSpinBox:focus, QComboBox:focus, QLineEdit:focus { border: 1px solid #66c6a6; }"
-        "QAbstractSpinBox:disabled, QComboBox:disabled, QLineEdit:disabled { border: 1px solid #343c42; background: #171a1d; color: #6f7a82; }");
+        "QAbstractSpinBox { border: 1px solid #89959c; background: #000000; color: #ffffff; padding: 2px 28px 2px 6px; }"
+        "QComboBox, QLineEdit { border: 1px solid #89959c; background: #000000; color: #ffffff; padding: 2px 6px; }"
+        "QAbstractSpinBox:focus, QComboBox:focus, QLineEdit:focus { border: 1px solid #419f81; }"
+        "QAbstractSpinBox:disabled, QComboBox:disabled, QLineEdit:disabled { border: 1px solid #596269; background: #171a1c; color: #a4afb5; }");
 }
 
 void applyMutedEditorStyle(QWidget* widget)
@@ -222,14 +222,14 @@ void updateCaptureDurationControl(QCheckBox* manualStopCheck, QSpinBox* duration
 QString jamSliderStyle()
 {
     return QStringLiteral(
-        "QSlider::groove:horizontal { height: 6px; background: #2a3035; border: 1px solid #3d464d; }"
-        "QSlider::sub-page:horizontal { background: #66c6a6; border: 1px solid #66c6a6; }"
-        "QSlider::add-page:horizontal { background: #1b1f23; border: 1px solid #3d464d; }"
-        "QSlider::handle:horizontal { width: 16px; height: 16px; margin: -6px 0; background: #f2f5f7; border: 1px solid #66c6a6; }"
-        "QSlider::groove:horizontal:disabled { background: #2e3235; border: 1px solid #454b50; }"
-        "QSlider::sub-page:horizontal:disabled { background: #5e666c; border: 1px solid #5e666c; }"
-        "QSlider::add-page:horizontal:disabled { background: #25282b; border: 1px solid #454b50; }"
-        "QSlider::handle:horizontal:disabled { background: #8a9298; border: 1px solid #6b7379; }");
+        "QSlider::groove:horizontal { height: 6px; background: #121516; border: 1px solid #596269; }"
+        "QSlider::sub-page:horizontal { background: #419f81; border: 1px solid #419f81; }"
+        "QSlider::add-page:horizontal { background: #000000; border: 1px solid #596269; }"
+        "QSlider::handle:horizontal { width: 16px; height: 16px; margin: -6px 0; background: #ffffff; border: 1px solid #419f81; }"
+        "QSlider::groove:horizontal:disabled { background: #171a1c; border: 1px solid #596269; }"
+        "QSlider::sub-page:horizontal:disabled { background: #596269; border: 1px solid #596269; }"
+        "QSlider::add-page:horizontal:disabled { background: #0d0f10; border: 1px solid #596269; }"
+        "QSlider::handle:horizontal:disabled { background: #a4afb5; border: 1px solid #596269; }");
 }
 
 void applyJamSliderStyle(QSlider* slider)

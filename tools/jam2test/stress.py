@@ -479,7 +479,7 @@ def run(args: Any, repo: Path, invocation: InvocationArtifacts,
         results = []
         for index, (planned_id, case_id, selected) in enumerate(plan):
             if case_id not in catalog: raise ValueError(f"unknown stress scenario: {case_id}")
-            case_root = invocation.root / "cases" / normalized_path_id(planned_id)
+            case_root = invocation.root / normalized_path_id(planned_id)
             case_root.mkdir(parents=True)
             result = _run_case(args.jam2, planned_id, selected, args, case_root, args.seed + index)
             results.append(result)

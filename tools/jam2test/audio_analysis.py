@@ -8,6 +8,7 @@ from pathlib import Path
 
 STEMS = ("mix", "my-input", "their-input", "inputs-mix", "metronome")
 INT16_FULL_SCALE = 32768.0
+MAX_RETAINED_EVENTS = 256
 
 
 def read_wav_mono(path):
@@ -45,30 +46,55 @@ def basic_stats(samples):
             "pop_events": 0,
             "dropout_runs": 0,
             "noise_floor_p95": 0.0,
+            "pop_event_frames": [],
+            "pop_event_frames_omitted": 0,
+            "pop_max_delta": 0.0,
+            "dropout_spans": [],
+            "dropout_spans_omitted": 0,
+            "dropout_total_frames": 0,
+            "dropout_max_frames": 0,
+            "clipped_spans": [],
+            "clipped_spans_omitted": 0,
         }
     peak = max(abs(sample) for sample in samples)
     rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples))
     clipped = sum(1 for sample in samples if abs(sample) >= 0.999)
     diffs = [abs(samples[i] - samples[i - 1]) for i in range(1, len(samples))]
-    pop_events = sum(1 for diff in diffs if diff >= 0.45)
-    dropout_runs = 0
-    run = 0
-    for sample in samples:
-        if abs(sample) < 0.0001:
-            run += 1
-        else:
-            if run >= 2048:
-                dropout_runs += 1
-            run = 0
-    if run >= 2048:
-        dropout_runs += 1
+    pop_frames = [index for index, diff in enumerate(diffs, start=1) if diff >= 0.45]
+
+    def spans(predicate, minimum=1):
+        found = []
+        start = None
+        for index, sample in enumerate(samples):
+            if predicate(sample):
+                if start is None:
+                    start = index
+            elif start is not None:
+                if index - start >= minimum:
+                    found.append({"start_frame": start, "frames": index - start})
+                start = None
+        if start is not None and len(samples) - start >= minimum:
+            found.append({"start_frame": start, "frames": len(samples) - start})
+        return found
+
+    dropout_spans = spans(lambda sample: abs(sample) < 0.0001, minimum=2048)
+    clipped_spans = spans(lambda sample: abs(sample) >= 0.999)
     return {
         "frames": len(samples),
         "peak": peak,
         "rms": rms,
         "clipped_frames": clipped,
-        "pop_events": pop_events,
-        "dropout_runs": dropout_runs,
+        "pop_events": len(pop_frames),
+        "pop_event_frames": pop_frames[:MAX_RETAINED_EVENTS],
+        "pop_event_frames_omitted": max(0, len(pop_frames) - MAX_RETAINED_EVENTS),
+        "pop_max_delta": max(diffs, default=0.0),
+        "dropout_runs": len(dropout_spans),
+        "dropout_spans": dropout_spans[:MAX_RETAINED_EVENTS],
+        "dropout_spans_omitted": max(0, len(dropout_spans) - MAX_RETAINED_EVENTS),
+        "dropout_total_frames": sum(item["frames"] for item in dropout_spans),
+        "dropout_max_frames": max((item["frames"] for item in dropout_spans), default=0),
+        "clipped_spans": clipped_spans[:MAX_RETAINED_EVENTS],
+        "clipped_spans_omitted": max(0, len(clipped_spans) - MAX_RETAINED_EVENTS),
         "noise_floor_p95": _percentile([abs(sample) for sample in samples], 0.95),
     }
 
@@ -305,30 +331,48 @@ def analyze_recording_dir(
     local_signal = local_signal or signal
     remote_signal = remote_signal or signal
     mix_signal = "tone-440" if "tone-440" in (local_signal, remote_signal) else signal
-    result = {"recording_dir": str(recording_dir), "ok": True, "tags": [], "stems": {}}
+    result = {
+        "recording_dir": "recording",
+        "analysis_complete": True,
+        "ok": True,
+        "tags": [],
+        "stems": {},
+    }
     sidecar_path = recording_dir / "recording.json"
     if sidecar_path.exists():
         try:
             result["sidecar"] = json.loads(sidecar_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             result["tags"].append("recording_sidecar_invalid")
+            result["analysis_complete"] = False
     else:
         result["tags"].append("recording_sidecar_missing")
+        result["analysis_complete"] = False
     lengths = []
     for stem in STEMS:
         path = recording_dir / f"{stem}.wav"
         if not path.exists():
             result["stems"][stem] = {"exists": False}
             result["tags"].append(f"{stem}_missing")
+            result["analysis_complete"] = False
             continue
         try:
             wav = read_wav_mono(path)
         except Exception as error:
             result["stems"][stem] = {"exists": False, "error": str(error)}
             result["tags"].append(f"{stem}_invalid")
+            result["analysis_complete"] = False
             continue
         stats = basic_stats(wav["samples"])
-        stats.update({"exists": True, "sample_rate": wav["sample_rate"], "path": wav["path"]})
+        stats.update({
+            "exists": True,
+            "sample_rate": wav["sample_rate"],
+            "duration_ms": (
+                stats["frames"] * 1000.0 / wav["sample_rate"]
+                if wav["sample_rate"] > 0 else 0.0),
+            "path": path.name,
+            "source_bytes": path.stat().st_size,
+        })
         expected_signal = _signal_for_stem(stem, local_signal, remote_signal, mix_signal)
         if expected_signal == "tone-440" and stem in ("my-input", "their-input", "mix", "inputs-mix"):
             stats["tone"] = estimate_tone(wav["samples"], wav["sample_rate"], 440.0)

@@ -1,0 +1,2217 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jam2 - Performance Orbit UI Concept</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --black: #050708;
+      --shell: #0b1011;
+      --panel: #101719;
+      --metal: #172023;
+      --edge: #354247;
+      --edge-soft: #222d30;
+      --ink: #e9e6dc;
+      --muted: #899497;
+      --dim: #556266;
+      --amber: #e8a44a;
+      --amber-hi: #ffd68e;
+      --cyan: #66d4cf;
+      --cyan-hi: #b8fff8;
+      --red: #df6b61;
+      --green: #70d49d;
+      --violet: #a092da;
+      --blue: #6ba9df;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; }
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #030405;
+      color: var(--ink);
+      font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+      font-size: 13px;
+    }
+    button { color: inherit; font: inherit; }
+    button:focus-visible {
+      outline: 2px solid var(--cyan);
+      outline-offset: 3px;
+    }
+
+    .app {
+      position: relative;
+      display: grid;
+      grid-template-rows: 62px minmax(0, 1fr) 108px;
+      width: 100vw;
+      height: 100vh;
+      min-width: 1050px;
+      min-height: 700px;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 50% 42%, rgba(69, 132, 132, .1), transparent 34rem),
+        linear-gradient(135deg, rgba(255,255,255,.015), transparent 35%),
+        var(--black);
+    }
+
+    .topbar {
+      position: relative;
+      z-index: 30;
+      display: grid;
+      grid-template-columns: 280px 1fr 280px;
+      align-items: center;
+      padding: 0 18px;
+      border-bottom: 1px solid #303a3d;
+      background: linear-gradient(180deg, #121719, #0a0e0f);
+      box-shadow: 0 8px 24px rgba(0,0,0,.3);
+    }
+    .brand-row, .session-state { display: flex; align-items: center; gap: 11px; }
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 48px;
+      height: 48px;
+      overflow: hidden;
+      border: 1px solid #38464a;
+      border-radius: 9px;
+      background:
+        radial-gradient(circle at 50% 45%, rgba(149,21,39,.19), transparent 62%),
+        #080d0f;
+      box-shadow: inset 0 0 18px rgba(0,0,0,.62), 0 0 16px rgba(220,23,48,.1);
+    }
+    .brand-mark svg { width: 46px; height: 46px; }
+    .brand-copy strong { display: block; font: 700 14px "Bahnschrift", sans-serif; letter-spacing: .04em; }
+    .micro {
+      color: #647074;
+      font: 7px "Bahnschrift", sans-serif;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+    }
+    .project {
+      justify-self: center;
+      text-align: center;
+    }
+    .project strong { display: block; font: 400 15px Georgia, serif; }
+    .project span { display: block; margin-top: 4px; }
+    .session-state { justify-self: end; }
+    .online-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 10px var(--green);
+    }
+    .head-button {
+      min-width: 66px;
+      padding: 8px 11px;
+      border: 1px solid #354246;
+      border-radius: 3px;
+      background: #12191b;
+      color: #b8c0bf;
+      font: 8px "Bahnschrift", sans-serif;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+
+    .stage {
+      position: relative;
+      min-height: 0;
+      overflow: hidden;
+      background:
+        linear-gradient(90deg, transparent 49.9%, rgba(116,138,140,.07) 50%, transparent 50.1%),
+        linear-gradient(0deg, transparent 49.9%, rgba(116,138,140,.045) 50%, transparent 50.1%),
+        repeating-radial-gradient(circle at 50% 44%, transparent 0 62px, rgba(109,135,137,.035) 63px 64px),
+        radial-gradient(circle at 50% 44%, rgba(20,46,49,.22), transparent 35%),
+        #040708;
+    }
+    .star-canvas,
+    .nebula-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+    .star-canvas { z-index: 0; opacity: .78; }
+    .nebula-canvas { z-index: 1; opacity: .82; }
+    .stage::before {
+      content: "";
+      position: absolute;
+      z-index: 2;
+      inset: 0;
+      pointer-events: none;
+      opacity: .28;
+      background-image:
+        linear-gradient(115deg, transparent 0 49.7%, rgba(255,255,255,.025) 50%, transparent 50.3%),
+        repeating-linear-gradient(90deg, rgba(255,255,255,.012) 0 1px, transparent 1px 5px);
+      mix-blend-mode: screen;
+    }
+    .stage::after {
+      content: "";
+      position: absolute;
+      z-index: 3;
+      inset: 0;
+      pointer-events: none;
+      background: linear-gradient(180deg, rgba(2,4,5,.08), transparent 18% 76%, rgba(2,4,5,.16));
+    }
+    .screw {
+      position: absolute;
+      z-index: 8;
+      width: 9px;
+      height: 9px;
+      border: 1px solid #4d5b5f;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 30%, #6c797c, #172022 60%);
+      box-shadow: 0 1px 2px #000;
+    }
+    .screw::after { content: ""; position: absolute; top: 3px; left: 1px; width: 5px; height: 1px; background: #1b2224; transform: rotate(-30deg); }
+    .screw.tl { top: 10px; left: 10px; }
+    .screw.tr { top: 10px; right: 10px; }
+    .screw.bl { bottom: 10px; left: 10px; }
+    .screw.br { right: 10px; bottom: 10px; }
+
+    .stage-title {
+      position: absolute;
+      z-index: 6;
+      top: 22px;
+      left: 28px;
+    }
+    .stage-title h1 {
+      margin: 4px 0 0;
+      font: 400 29px Georgia, serif;
+      letter-spacing: -.035em;
+    }
+    .stage-title h1 span { color: var(--amber-hi); }
+
+    .technical {
+      position: absolute;
+      z-index: 8;
+      top: 20px;
+      right: 28px;
+      display: flex;
+      gap: 6px;
+    }
+    .stat {
+      min-width: 66px;
+      padding: 7px 9px;
+      border: 1px solid rgba(96,116,121,.42);
+      border-radius: 3px;
+      background: rgba(7,11,12,.72);
+      backdrop-filter: blur(6px);
+    }
+    .stat strong { display: block; font: 11px "Bahnschrift", monospace; }
+    .stat span { color: var(--dim); font: 7px "Bahnschrift", sans-serif; letter-spacing: .12em; text-transform: uppercase; }
+
+    .data-scrim {
+      position: fixed;
+      z-index: 38;
+      inset: 62px 0 108px;
+      display: none;
+      background: rgba(0,0,0,.28);
+      backdrop-filter: blur(2px);
+    }
+    .data-scrim.open { display: block; }
+    .data-drawer {
+      position: fixed;
+      z-index: 40;
+      top: 62px;
+      right: 0;
+      bottom: 108px;
+      display: grid;
+      grid-template-rows: 58px minmax(0, 1fr);
+      width: 460px;
+      max-width: calc(100vw - 80px);
+      border-left: 1px solid #526267;
+      background: rgba(8,12,13,.985);
+      box-shadow: -26px 0 70px rgba(0,0,0,.58);
+      transform: translateX(105%);
+      transition: transform .22s ease-out;
+    }
+    .data-drawer.open { transform: translateX(0); }
+    .data-drawer-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 16px;
+      border-bottom: 1px solid #334044;
+      background: #101719;
+    }
+    .data-drawer-head div { margin-right: auto; }
+    .data-drawer-head strong { display: block; font: 14px Georgia, serif; }
+    .data-drawer-head span { display: block; margin-top: 3px; }
+    .data-close {
+      width: 30px;
+      height: 30px;
+      border: 1px solid #38464a;
+      border-radius: 3px;
+      background: #0b1112;
+      color: #9ba5a4;
+      cursor: pointer;
+    }
+    .data-scroll { min-height: 0; overflow-y: auto; padding: 16px; scrollbar-color: #4a585b #101617; }
+    .diagnostic-section + .diagnostic-section { margin-top: 22px; }
+    .diagnostic-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 9px;
+      color: #9ba6a6;
+      font: 8px "Bahnschrift", sans-serif;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+    .diagnostic-title span { color: #5f6b6e; font: 7px "Bahnschrift", monospace; letter-spacing: 0; }
+    .metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+    .metric-card {
+      min-height: 62px;
+      padding: 10px;
+      border: 1px solid #303d40;
+      background: #0d1415;
+    }
+    .metric-card strong { display: block; color: #d4d8d3; font: 13px "Bahnschrift", monospace; }
+    .metric-card span { display: block; margin-top: 5px; color: #606d70; font: 7px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .metric-card em { display: block; margin-top: 4px; color: #768285; font: normal 7px "Bahnschrift", monospace; }
+    .peer-diagnostics {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1px solid #303d40;
+      background: #0c1213;
+      font: 8px "Bahnschrift", monospace;
+    }
+    .peer-diagnostics th, .peer-diagnostics td { padding: 8px 7px; border-bottom: 1px solid #273235; text-align: right; }
+    .peer-diagnostics th { color: #5e6b6e; font: 7px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .peer-diagnostics th:first-child, .peer-diagnostics td:first-child { text-align: left; }
+    .peer-diagnostics td:first-child { color: #b4bcba; }
+    .diagnostic-note {
+      margin: 9px 0 0;
+      color: #707d7f;
+      font: 8px/1.5 "Bahnschrift", sans-serif;
+    }
+    .troubleshooter details {
+      border: 1px solid #303d40;
+      border-bottom: 0;
+      background: #0d1314;
+    }
+    .troubleshooter details:last-child { border-bottom: 1px solid #303d40; }
+    .troubleshooter summary {
+      padding: 11px 12px;
+      color: #b2bab8;
+      font: 9px "Bahnschrift", sans-serif;
+      cursor: pointer;
+    }
+    .troubleshooter ol {
+      margin: 0;
+      padding: 0 18px 13px 34px;
+      color: #788587;
+      font: 8px/1.55 "Bahnschrift", sans-serif;
+    }
+    .troubleshooter li + li { margin-top: 5px; }
+    .diagnostic-actions { display: flex; gap: 6px; margin-top: 12px; }
+
+    .demo-controls {
+      position: absolute;
+      z-index: 10;
+      top: 24px;
+      left: 50%;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 6px;
+      border: 1px solid rgba(76,92,96,.56);
+      border-radius: 4px;
+      background: rgba(7,11,12,.8);
+      transform: translateX(-50%);
+      backdrop-filter: blur(8px);
+    }
+    .demo-group { display: flex; align-items: center; gap: 2px; }
+    .demo-label { padding: 0 5px; color: #606c6f; font: 7px "Bahnschrift", sans-serif; letter-spacing: .12em; text-transform: uppercase; }
+    .demo-group button {
+      min-width: 25px;
+      height: 23px;
+      padding: 0 7px;
+      border: 1px solid transparent;
+      border-radius: 2px;
+      background: transparent;
+      color: #727e80;
+      font: 8px "Bahnschrift", sans-serif;
+      cursor: pointer;
+    }
+    .demo-group button:hover { color: var(--ink); }
+    .demo-group button.active {
+      border-color: #745b36;
+      color: var(--amber-hi);
+      background: rgba(232,164,74,.12);
+      box-shadow: inset 0 -1px var(--amber);
+    }
+    .demo-group button.event-preview {
+      min-width: 56px;
+      color: #9f91bd;
+    }
+    .demo-group button.event-preview:hover {
+      border-color: #655a7d;
+      color: #d8c9ff;
+      background: rgba(160,146,218,.1);
+    }
+    .demo-separator { width: 1px; height: 17px; background: #354144; }
+
+    .performance-orbit {
+      position: absolute;
+      z-index: 4;
+      top: 47%;
+      left: 50%;
+      width: 640px;
+      height: 520px;
+      transform: translate(-50%, -50%);
+    }
+    .scope-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+    .scope-ring { fill: none; stroke: #263438; }
+    .scope-ring.major { stroke: #506064; stroke-width: 1; }
+    .scope-ring.glow { stroke: rgba(102,212,207,.18); stroke-width: 18; filter: blur(8px); }
+    .activity-spoke { stroke-linecap: round; transition: stroke .14s, opacity .14s; }
+    .source-node { cursor: pointer; transition: r .12s, opacity .12s; }
+    .source-node.selected { stroke: #fff; stroke-width: 1.5; }
+    .orbit-tick { stroke: #39474a; stroke-width: 1; }
+
+    .chord-lens {
+      position: absolute;
+      top: 116px;
+      left: 221px;
+      display: grid;
+      place-items: center;
+      width: 198px;
+      height: 198px;
+      border: 1px solid #5b6b6e;
+      border-radius: 50%;
+      background:
+        radial-gradient(circle at 48% 42%, rgba(102,212,207,.16), transparent 36%),
+        radial-gradient(circle, #152023 0 45%, #080c0d 72%);
+      box-shadow:
+        inset 0 0 0 8px rgba(47,59,62,.46),
+        inset 0 0 48px rgba(102,212,207,.08),
+        0 0 55px rgba(0,0,0,.62);
+    }
+    .chord-lens::before {
+      content: "";
+      position: absolute;
+      inset: -12px;
+      border: 1px solid rgba(89,107,111,.4);
+      border-radius: 50%;
+      background: conic-gradient(var(--amber) var(--song-progress), transparent 0);
+      mask: radial-gradient(transparent 66%, #000 67% 71%, transparent 72%);
+      -webkit-mask: radial-gradient(transparent 66%, #000 67% 71%, transparent 72%);
+      filter: drop-shadow(0 0 5px rgba(232,164,74,.45));
+    }
+    .lens-copy { position: relative; z-index: 2; text-align: center; }
+    .section-label { color: var(--cyan); font: 7px "Bahnschrift", sans-serif; letter-spacing: .17em; text-transform: uppercase; }
+    .current-chord {
+      margin: 1px 0 -2px;
+      color: var(--cyan-hi);
+      font: 400 67px Georgia, serif;
+      line-height: 1;
+      text-shadow: 0 0 20px rgba(102,212,207,.25);
+    }
+    .bar-position { color: #aeb8b7; font: 8px "Bahnschrift", monospace; letter-spacing: .08em; }
+    .bar-position span { color: var(--amber-hi); }
+    .beat-dots { display: flex; justify-content: center; gap: 5px; margin-top: 10px; }
+    .beat-dots i {
+      width: 6px;
+      height: 6px;
+      border: 1px solid #5c696c;
+      border-radius: 50%;
+      background: #111719;
+    }
+    .beat-dots i.active { border-color: var(--amber-hi); background: var(--amber-hi); box-shadow: 0 0 10px var(--amber); }
+
+    .chord-runway {
+      position: absolute;
+      z-index: 6;
+      top: 336px;
+      left: 87px;
+      display: grid;
+      grid-template-columns: 112px repeat(3, 88px);
+      gap: 6px;
+      width: 466px;
+    }
+    .chord-cell {
+      position: relative;
+      min-height: 55px;
+      padding: 9px 11px;
+      border: 1px solid rgba(76,91,95,.62);
+      border-radius: 3px;
+      background: rgba(8,12,13,.82);
+      box-shadow: 0 8px 20px rgba(0,0,0,.25);
+      backdrop-filter: blur(7px);
+    }
+    .chord-cell.current { border-color: #806239; background: linear-gradient(135deg, rgba(232,164,74,.16), rgba(9,13,14,.9)); }
+    .chord-cell small { display: block; color: #667376; font: 7px "Bahnschrift", sans-serif; letter-spacing: .13em; text-transform: uppercase; }
+    .chord-cell strong { display: block; margin-top: 2px; font: 400 22px Georgia, serif; }
+    .chord-cell.current strong { color: var(--amber-hi); }
+    .chord-cell .arrival { position: absolute; top: 10px; right: 9px; color: #6c787a; font: 7px "Bahnschrift", monospace; }
+
+    .source-readout {
+      position: absolute;
+      top: 405px;
+      left: 157px;
+      width: 326px;
+      color: #6a7779;
+      text-align: center;
+      font: 7px "Bahnschrift", sans-serif;
+      letter-spacing: .13em;
+      text-transform: uppercase;
+    }
+    .source-readout strong { color: #aeb9b8; font-weight: 400; }
+
+    .preview-stack {
+      position: absolute;
+      z-index: 7;
+      bottom: 17px;
+      left: 50%;
+      display: grid;
+      grid-template-columns: minmax(440px, 1.4fr) minmax(300px, 1fr);
+      gap: 8px;
+      width: min(860px, calc(100% - 440px));
+      transform: translateX(-50%);
+      align-items: end;
+    }
+    .preview {
+      position: relative;
+      min-width: 0;
+      height: 104px;
+      padding: 10px 12px;
+      border: 1px solid rgba(70,85,89,.72);
+      border-radius: 4px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.025), transparent 30%),
+        rgba(11,16,17,.88);
+      box-shadow: 0 12px 30px rgba(0,0,0,.32);
+      backdrop-filter: blur(9px);
+      cursor: pointer;
+    }
+    .preview.beat-preview { height: 178px; }
+    .preview:hover { border-color: #627276; }
+    .preview-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; }
+    .preview-title { color: #829093; font: 7px "Bahnschrift", sans-serif; letter-spacing: .16em; text-transform: uppercase; }
+    .preview-open { color: #748083; font: 7px "Bahnschrift", sans-serif; letter-spacing: .08em; text-transform: uppercase; }
+    .beat-grid {
+      display: grid;
+      grid-template-columns: 42px repeat(16, 1fr);
+      gap: 2px;
+      align-items: center;
+    }
+    .beat-name { color: #778487; font: 7px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .step {
+      position: relative;
+      height: 13px;
+      border: 1px solid #2f3b3e;
+      border-radius: 2px;
+      background: #11181a;
+    }
+    .step.hit::after {
+      content: "";
+      position: absolute;
+      inset: 3px;
+      border-radius: 1px;
+      background: #6c7a7c;
+    }
+    .step.accent::after { background: var(--amber); box-shadow: 0 0 6px rgba(232,164,74,.42); }
+    .step.playhead { border-color: var(--cyan); background: rgba(102,212,207,.13); box-shadow: 0 0 8px rgba(102,212,207,.15); }
+    .lyrics-lines { display: grid; gap: 10px; }
+    .lyrics-line {
+      align-items: center;
+      min-width: 0;
+    }
+    .lyrics-copy {
+      min-width: 0;
+      overflow: hidden;
+      color: #d8d6cf;
+      font: 400 17px Georgia, serif;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .lyrics-line + .lyrics-line .lyrics-copy { color: #677376; }
+
+    .peer-rail {
+      position: absolute;
+      z-index: 8;
+      bottom: 17px;
+      left: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      width: 105px;
+    }
+    .peer-pill {
+      position: relative;
+      display: grid;
+      grid-template-columns: 7px 1fr;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+      height: 25px;
+      padding: 0 8px;
+      overflow: hidden;
+      border: 1px solid #2d393c;
+      border-radius: 3px;
+      background: rgba(9,13,14,.75);
+      color: #8c9696;
+      font: 7px "Bahnschrift", sans-serif;
+      cursor: pointer;
+    }
+    .peer-pill::after {
+      content: "";
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      width: var(--activity);
+      height: 2px;
+      background: var(--source);
+      box-shadow: 0 0 var(--glow) var(--source);
+      transition: width .1s;
+    }
+    .peer-pill.selected { border-color: var(--source); color: #e7e9e4; }
+    .peer-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--source); opacity: var(--opacity); }
+    .peer-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
+    .detail {
+      position: absolute;
+      z-index: 22;
+      right: 50%;
+      bottom: 14px;
+      display: none;
+      width: calc(100% - 32px);
+      height: calc(100% - 28px);
+      overflow: hidden;
+      border: 1px solid #536166;
+      border-radius: 6px;
+      background: rgba(8,12,13,.97);
+      box-shadow: 0 30px 90px #000;
+      transform: translateX(50%);
+      backdrop-filter: blur(14px);
+    }
+    .detail.open { display: grid; grid-template-rows: 56px minmax(0, 1fr); }
+    .detail-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 13px;
+      border-bottom: 1px solid #313d40;
+      background: #111719;
+    }
+    .detail-head .micro { margin-right: auto; }
+    .detail-tab, .detail-close {
+      height: 27px;
+      padding: 0 11px;
+      border: 1px solid #344145;
+      border-radius: 3px;
+      background: #0c1112;
+      color: #798588;
+      font: 8px "Bahnschrift", sans-serif;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+    .detail-tab.active { border-color: #78603c; color: var(--amber-hi); background: rgba(232,164,74,.1); }
+    .detail-close { margin-left: 7px; color: #aab2b1; }
+    .detail-body { position: relative; min-height: 0; overflow: hidden; }
+    .detail-layer { display: none; width: 100%; height: 100%; overflow: hidden; scrollbar-color: #4a585b #101617; }
+    .detail-layer.active { display: grid; grid-template-rows: 56px minmax(0, 1fr); }
+    .chord-detail {
+      display: grid;
+      grid-template-columns: repeat(12, 112px);
+      gap: 6px;
+      min-width: 1400px;
+      height: 100%;
+      padding: 18px;
+    }
+    .bar-card {
+      position: relative;
+      padding: 15px 12px;
+      border: 1px solid #354145;
+      border-radius: 3px;
+      background: #111719;
+    }
+    .bar-card.active { border-color: var(--amber); background: rgba(232,164,74,.09); box-shadow: inset 0 2px var(--amber); }
+    .bar-card small { color: #596669; font: 7px "Bahnschrift", monospace; }
+    .bar-card strong { display: block; margin-top: 42px; font: 400 25px Georgia, serif; }
+    .bar-card.active strong { color: var(--amber-hi); }
+    .full-beat-grid {
+      display: grid;
+      grid-template-columns: 112px repeat(32, 38px);
+      grid-template-rows: repeat(10, 48px);
+      align-items: stretch;
+      min-width: 1370px;
+      padding: 26px;
+    }
+    .full-beat-label, .full-step {
+      display: grid;
+      place-items: center;
+      border-right: 1px solid #283336;
+      border-bottom: 1px solid #313d40;
+    }
+    .full-beat-label { justify-items: start; padding-left: 12px; color: #95a09f; font: 8px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .full-step { position: relative; color: #4f5c5f; font: 7px "Bahnschrift", monospace; }
+    .full-step.hit::after { content: ""; width: 9px; height: 9px; border-radius: 50%; background: #778386; }
+    .full-step.accent::after { background: var(--amber); box-shadow: 0 0 8px rgba(232,164,74,.5); }
+    .full-step.playhead { background: rgba(102,212,207,.08); box-shadow: inset 2px 0 var(--cyan); }
+    .lyrics-detail {
+      display: grid;
+      grid-template-columns: repeat(8, 210px);
+      min-width: 1680px;
+      height: 100%;
+      padding: 18px;
+    }
+    .phrase {
+      position: relative;
+      padding: 32px 16px 15px;
+      border: 1px solid #303b3e;
+      border-right: 0;
+      background: #101617;
+      font: 400 16px/1.45 Georgia, serif;
+    }
+    .phrase:last-child { border-right: 1px solid #303b3e; }
+    .phrase small { position: absolute; top: 11px; left: 15px; color: #637073; font: 7px "Bahnschrift", monospace; }
+    .phrase.active { background: rgba(102,212,207,.09); box-shadow: inset 2px 0 var(--cyan); }
+
+    .transport {
+      position: relative;
+      z-index: 30;
+      display: grid;
+      grid-template-columns: minmax(340px, 1fr) auto minmax(340px, 1fr);
+      align-items: center;
+      gap: 18px;
+      padding: 8px 18px;
+      border-top: 1px solid #354044;
+      background: linear-gradient(180deg, #111719, #0a0e0f);
+      box-shadow: 0 -8px 24px rgba(0,0,0,.3);
+    }
+    .selected-peer {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+    .selected-peer-copy { width: 112px; }
+    .selected-peer-copy strong { display: block; overflow: hidden; font: 13px Georgia, serif; white-space: nowrap; text-overflow: ellipsis; }
+    .selected-peer-copy span { color: #657174; font: 7px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .mini-meter { width: 150px; height: 5px; border: 1px solid #354246; background: #090d0e; }
+    .mini-meter i { display: block; width: var(--level); height: 100%; background: linear-gradient(90deg, var(--green), var(--amber), var(--red)); transition: width .1s; }
+    .volume {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: #879194;
+      font: 8px "Bahnschrift", monospace;
+    }
+    .volume input { width: 78px; accent-color: var(--amber); }
+
+    .playback { display: flex; align-items: center; gap: 10px; }
+    .round-button {
+      display: grid;
+      place-items: center;
+      width: 38px;
+      height: 38px;
+      border: 1px solid #4e5b5f;
+      border-radius: 50%;
+      background: radial-gradient(circle at 42% 35%, #344044, #111719 68%);
+      box-shadow: 0 3px 9px #000;
+      cursor: pointer;
+    }
+    .round-button.play {
+      width: 50px;
+      height: 50px;
+      border-color: #76572e;
+      color: #15100a;
+      background: radial-gradient(circle at 38% 30%, #ffd384, #e39b40 58%, #754721);
+    }
+    .tempo {
+      min-width: 93px;
+      padding: 8px 12px;
+      border: 1px solid #364246;
+      border-radius: 3px;
+      background: #080c0d;
+      text-align: center;
+    }
+    .tempo strong { color: var(--amber-hi); font: 13px "Bahnschrift", monospace; }
+    .tempo span { display: block; color: #5e6b6e; font: 7px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .position {
+      justify-self: end;
+      display: flex;
+      align-items: center;
+      gap: 17px;
+    }
+    .position-copy { text-align: right; }
+    .position-copy strong { display: block; color: var(--cyan-hi); font: 12px "Bahnschrift", monospace; }
+    .position-copy span { color: #5f6c6f; font: 7px "Bahnschrift", sans-serif; letter-spacing: .12em; text-transform: uppercase; }
+    .metro { display: flex; align-items: center; gap: 8px; color: #758184; font: 8px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .metro i { width: 8px; height: 8px; border-radius: 50%; background: var(--amber-hi); box-shadow: 0 0 11px var(--amber); }
+
+    .looper-launch {
+      position: absolute;
+      z-index: 8;
+      right: 24px;
+      bottom: 17px;
+      width: 210px;
+      height: 104px;
+      padding: 10px 11px;
+      border: 1px solid rgba(70,85,89,.72);
+      border-radius: 4px;
+      background: linear-gradient(180deg, rgba(255,255,255,.025), transparent 30%), rgba(11,16,17,.9);
+      box-shadow: 0 12px 30px rgba(0,0,0,.32);
+      cursor: pointer;
+    }
+    .looper-launch:hover { border-color: #627276; }
+    .looper-launch .preview-head { margin-bottom: 6px; }
+    .dock-wave {
+      position: relative;
+      height: 32px;
+      overflow: hidden;
+      border: 1px solid #314044;
+      border-radius: 2px;
+      background: #081012;
+    }
+    .dock-wave::before {
+      content: "";
+      position: absolute;
+      inset: 4px 5px;
+      background:
+        linear-gradient(90deg, transparent 0 48%, rgba(102,212,207,.75) 49% 51%, transparent 52%),
+        repeating-linear-gradient(90deg, rgba(102,212,207,.44) 0 2px, transparent 2px 5px);
+      clip-path: polygon(0 44%, 5% 25%, 10% 65%, 15% 20%, 20% 72%, 25% 33%, 30% 58%, 35% 18%, 40% 77%, 45% 40%, 50% 66%, 55% 24%, 60% 73%, 65% 34%, 70% 62%, 75% 19%, 80% 68%, 85% 31%, 90% 59%, 95% 27%, 100% 48%, 100% 52%, 0 52%);
+    }
+    .dock-mix { display: grid; grid-template-columns: 1fr 52px; align-items: center; gap: 8px; margin-top: 7px; }
+    .dock-mix input { width: 100%; accent-color: var(--cyan); }
+    .dock-mix span { color: #94a09f; font: 8px "Bahnschrift", monospace; text-align: right; }
+
+    .editor-tools {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: max-content;
+      padding: 11px 16px;
+      border-bottom: 1px solid #303b3e;
+      background: #0d1314;
+    }
+    .editor-tools .micro { margin-right: 4px; }
+    .editor-button, .editor-select, .editor-field {
+      height: 29px;
+      padding: 0 10px;
+      border: 1px solid #354246;
+      border-radius: 3px;
+      background: #111719;
+      color: #a5afae;
+      font: 8px "Bahnschrift", sans-serif;
+    }
+    .editor-button { cursor: pointer; text-transform: uppercase; }
+    .editor-button:hover, .editor-button.active { border-color: #77603b; color: var(--amber-hi); background: rgba(232,164,74,.09); }
+    .editor-button.danger:hover { border-color: #80504b; color: #ffaaa2; background: rgba(223,107,97,.1); }
+    .editor-field { width: 68px; color: var(--amber-hi); font-family: "Bahnschrift", monospace; }
+    .editor-select { min-width: 92px; }
+    .tool-spacer { flex: 1; }
+    .editor-check { display: flex; align-items: center; gap: 6px; color: #829093; font: 8px "Bahnschrift", sans-serif; white-space: nowrap; }
+    .editor-check input { accent-color: var(--cyan); }
+    .editor-scroll { min-height: 0; overflow: auto; }
+
+    .song-editor-grid {
+      display: grid;
+      grid-template-columns: 112px repeat(12, 124px);
+      grid-template-rows: repeat(3, 96px);
+      min-width: 1620px;
+      padding: 28px;
+    }
+    .song-row-label, .song-cell {
+      display: flex;
+      align-items: center;
+      border-right: 1px solid #2d393c;
+      border-bottom: 1px solid #354145;
+    }
+    .song-row-label {
+      padding-left: 12px;
+      color: #95a09f;
+      background: #151c1e;
+      font: 8px "Bahnschrift", sans-serif;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .song-cell {
+      position: relative;
+      padding: 18px 11px 8px;
+      background: #101617;
+      color: #d7d5ce;
+      font: 16px Georgia, serif;
+      outline: none;
+    }
+    .song-cell::before {
+      content: attr(data-position);
+      position: absolute;
+      top: 7px;
+      left: 10px;
+      color: #586568;
+      font: 7px "Bahnschrift", monospace;
+    }
+    .song-cell.current { background: rgba(232,164,74,.1); box-shadow: inset 2px 0 var(--amber); }
+    .song-cell.notes { color: #82aaa8; background: rgba(102,212,207,.045); font: 10px "Bahnschrift", sans-serif; }
+    .song-cell.melody { color: #b6a8e3; }
+    .song-cell[contenteditable="true"]:focus { background: rgba(102,212,207,.1); box-shadow: inset 0 0 0 1px var(--cyan); }
+
+    .full-beat-grid {
+      grid-template-columns: 112px repeat(32, minmax(32px, 1fr));
+      grid-template-rows: repeat(10, 48px);
+      min-width: 1220px;
+      width: 100%;
+      padding: 24px 28px 32px;
+    }
+    .full-step.division { color: #7f8c8f; background: #12191b; cursor: pointer; }
+    .full-step.hit { cursor: pointer; }
+    .full-step.section { grid-column: span 32; justify-content: start; padding-left: 12px; color: var(--amber-hi); background: #151c1e; }
+
+    .lyrics-workspace {
+      display: grid;
+      grid-template-columns: minmax(330px, .8fr) minmax(620px, 1.4fr);
+      gap: 12px;
+      min-width: 980px;
+      height: 100%;
+      padding: 14px;
+    }
+    .lyrics-editor {
+      width: 100%;
+      height: 100%;
+      resize: none;
+      padding: 14px;
+      border: 1px solid #344145;
+      border-radius: 3px;
+      background: #0c1213;
+      color: #d8d6cf;
+      font: 15px/1.55 Georgia, serif;
+      outline: none;
+    }
+    .lyrics-editor:focus { border-color: var(--cyan); }
+    .lyrics-detail { padding: 0; min-width: 0; overflow-x: auto; }
+
+    .metronome-workspace {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 12px;
+      min-width: 840px;
+      height: 100%;
+      padding: 14px;
+    }
+    .metro-controls {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(120px, 1fr));
+      gap: 8px;
+    }
+    .control-field {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border: 1px solid #303c3f;
+      background: #101617;
+      color: #7d898c;
+      font: 8px "Bahnschrift", sans-serif;
+      text-transform: uppercase;
+    }
+    .control-field input[type="number"], .control-field select {
+      width: 80px;
+      height: 27px;
+      border: 1px solid #3b484c;
+      background: #080d0e;
+      color: var(--amber-hi);
+      text-align: center;
+    }
+    .control-field input[type="range"] { width: 100px; accent-color: var(--amber); }
+    .metro-pattern {
+      display: grid;
+      grid-template-columns: 92px repeat(16, 1fr);
+      grid-template-rows: repeat(2, 52px);
+      border-top: 1px solid #364246;
+      border-left: 1px solid #364246;
+    }
+    .pattern-label, .pattern-cell {
+      display: grid;
+      place-items: center;
+      border-right: 1px solid #364246;
+      border-bottom: 1px solid #364246;
+    }
+    .pattern-label { justify-items: start; padding-left: 12px; color: #8d999a; font: 8px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .pattern-cell { cursor: pointer; }
+    .pattern-cell i { width: 14px; height: 14px; border: 1px solid #526065; background: #090d0e; }
+    .pattern-cell.active i { border-color: var(--cyan); background: var(--cyan); box-shadow: 0 0 8px rgba(102,212,207,.45); }
+    .pattern-cell.accent.active i { border-color: var(--amber); background: var(--amber); box-shadow: 0 0 8px rgba(232,164,74,.5); }
+
+    .looper-workspace {
+      display: grid;
+      gap: 9px;
+      min-width: 1080px;
+      padding: 20px 28px 30px;
+    }
+    .looper-ruler { display: grid; grid-template-columns: 220px repeat(8, 1fr); height: 32px; color: #647174; font: 7px "Bahnschrift", monospace; }
+    .looper-ruler span { padding: 6px 5px; border-left: 1px solid #2d393c; }
+    .loop-lane {
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      min-height: 100px;
+      border: 1px solid #303c3f;
+      background: #0d1314;
+    }
+    .loop-lane.selected { border-color: #5b7074; }
+    .loop-lane-head { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 13px; border-right: 1px solid #303c3f; }
+    .loop-lane-head strong { font: 12px Georgia, serif; }
+    .lane-buttons { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; }
+    .lane-buttons button { padding: 3px 6px; border: 1px solid #364246; background: #111719; color: #7f8b8d; font: 7px "Bahnschrift", sans-serif; cursor: pointer; }
+    .lane-buttons button.active { border-color: #745b36; color: var(--amber-hi); background: rgba(232,164,74,.1); }
+    .lane-gain { width: 46px; accent-color: var(--cyan); }
+    .lane-wave {
+      position: relative;
+      overflow: hidden;
+      background:
+        repeating-linear-gradient(90deg, transparent 0 calc(12.5% - 1px), rgba(80,96,100,.23) calc(12.5% - 1px) 12.5%),
+        #081012;
+    }
+    .lane-clip {
+      position: absolute;
+      top: 10px;
+      bottom: 10px;
+      left: var(--start);
+      width: var(--width);
+      border: 1px solid rgba(102,212,207,.6);
+      border-left: 5px solid var(--cyan);
+      border-right: 5px solid var(--cyan);
+      background:
+        repeating-linear-gradient(90deg, rgba(102,212,207,.46) 0 2px, transparent 2px 5px),
+        rgba(33,86,86,.28);
+      clip-path: polygon(0 44%, 4% 18%, 8% 70%, 12% 27%, 16% 78%, 20% 36%, 24% 62%, 28% 13%, 32% 72%, 36% 32%, 40% 67%, 44% 20%, 48% 77%, 52% 35%, 56% 64%, 60% 16%, 64% 73%, 68% 26%, 72% 69%, 76% 18%, 80% 74%, 84% 29%, 88% 66%, 92% 23%, 96% 70%, 100% 44%, 100% 56%, 0 56%);
+    }
+    .lane-playhead { position: absolute; top: 0; bottom: 0; left: var(--playhead); width: 2px; background: var(--amber-hi); box-shadow: 0 0 8px var(--amber); }
+
+    .local-strip, .remote-strip {
+      display: grid;
+      grid-template-columns: 104px 1fr;
+      align-content: center;
+      gap: 5px 10px;
+      min-width: 0;
+    }
+    .remote-strip { justify-self: end; width: min(100%, 420px); }
+    .strip-title { grid-row: span 3; align-self: center; min-width: 0; }
+    .strip-title span { display: block; color: #657174; font: 7px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .strip-title strong { display: block; overflow: hidden; margin-top: 2px; font: 13px Georgia, serif; white-space: nowrap; text-overflow: ellipsis; }
+    .mix-row { display: grid; grid-template-columns: 56px minmax(70px, 1fr) 52px; align-items: center; gap: 7px; min-width: 0; }
+    .mix-row label { color: #7c888a; font: 7px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .mix-row input[type="range"] { width: 100%; min-width: 60px; accent-color: var(--amber); }
+    .mix-row output { color: #a2acab; font: 8px "Bahnschrift", monospace; text-align: right; }
+    .channel-meter { height: 5px; border: 1px solid #354246; background: #090d0e; }
+    .channel-meter i { display: block; width: var(--level); height: 100%; background: linear-gradient(90deg, var(--green), var(--amber), var(--red)); transition: width .1s; }
+    .monitor-choice { display: flex; align-items: center; gap: 5px; }
+    .monitor-choice input { accent-color: var(--cyan); }
+    .monitor-choice span { color: #7c888a; font: 7px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .metro {
+      padding: 7px 9px;
+      border: 1px solid #344145;
+      border-radius: 3px;
+      background: #0b1011;
+      cursor: pointer;
+    }
+
+    @media (max-width: 1260px) {
+      .technical .stat:nth-child(n+3) { display: none; }
+      .preview-stack { width: calc(100% - 440px); grid-template-columns: 1.35fr 1fr; }
+      .demo-controls { top: 65px; }
+      .performance-orbit { top: 45%; transform: translate(-50%, -50%) scale(.9); }
+      .stage-title h1 { font-size: 25px; }
+      .transport { grid-template-columns: minmax(310px,1fr) auto minmax(310px,1fr); gap: 10px; padding-inline: 12px; }
+      .local-strip, .remote-strip { grid-template-columns: 84px 1fr; }
+      .looper-launch { right: 12px; width: 200px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand-row">
+        <div class="brand-mark" aria-label="Jam2 jam jar logo">
+          <svg viewBox="0 0 1254 1254" role="img" aria-hidden="true">
+            <defs>
+              <filter id="removeLogoWhite" color-interpolation-filters="sRGB">
+                <feColorMatrix type="matrix" values="
+                  1  0  0  0  0
+                  0  1  0  0  0
+                  0  0  1  0  0
+                 -1 -1 -1  0  2.86"/>
+              </filter>
+            </defs>
+            <image href="../icon.png" width="1254" height="1254" filter="url(#removeLogoWhite)"/>
+          </svg>
+        </div>
+        <div class="brand-copy"><strong>JAM2</strong><span class="micro">Direct session instrument</span></div>
+      </div>
+      <div class="project"><strong>Midnight Signal</strong><span class="micro">Performance view / revision 28</span></div>
+      <div class="session-state"><i class="online-dot"></i><span class="micro" id="peerStatus">2 players / direct</span><button class="head-button" id="dataButton" aria-expanded="false">Data</button></div>
+    </header>
+
+    <div class="data-scrim" id="dataScrim"></div>
+    <aside class="data-drawer" id="dataDrawer" aria-label="Session data and troubleshooting" aria-hidden="true">
+      <header class="data-drawer-head">
+        <div><strong>Session data</strong><span class="micro">Live measurements / local receive path</span></div>
+        <button class="data-close" id="dataClose" aria-label="Close session data">&times;</button>
+      </header>
+      <div class="data-scroll">
+        <section class="diagnostic-section">
+          <div class="diagnostic-title">Audio path <span>updated 10 Hz</span></div>
+          <div class="metric-grid">
+            <div class="metric-card"><strong>48 kHz</strong><span>Sample rate</span><em>128-frame callback</em></div>
+            <div class="metric-card"><strong>2.67 ms</strong><span>Callback period</span><em>0 xruns</em></div>
+            <div class="metric-card"><strong>3.0 ms</strong><span>Receive buffer</span><em>144 frames</em></div>
+            <div class="metric-card"><strong>+12 ppm</strong><span>Remote drift</span><em>ratio 1.000012</em></div>
+            <div class="metric-card"><strong>768 kb/s</strong><span>Audio bitrate</span><em>stereo PCM</em></div>
+            <div class="metric-card"><strong>1 / 4</strong><span>Packet queue</span><em>0 overruns</em></div>
+          </div>
+        </section>
+
+        <section class="diagnostic-section">
+          <div class="diagnostic-title">Direct peers <span>raw network measurements</span></div>
+          <table class="peer-diagnostics">
+            <thead><tr><th>Peer</th><th>RTT</th><th>Jitter</th><th>Loss</th><th>Late</th></tr></thead>
+            <tbody id="diagnosticPeers"></tbody>
+          </table>
+          <p class="diagnostic-note">Measurements are shown directly. Jam2 does not combine these into a playability or connection-quality score.</p>
+        </section>
+
+        <section class="diagnostic-section">
+          <div class="diagnostic-title">Counters <span>since joining</span></div>
+          <div class="metric-grid">
+            <div class="metric-card"><strong>0</strong><span>Underruns</span><em>audio callback</em></div>
+            <div class="metric-card"><strong>0</strong><span>Overruns</span><em>receive queue</em></div>
+            <div class="metric-card"><strong>0</strong><span>Late packets</span><em>outside buffer</em></div>
+            <div class="metric-card"><strong>374,816</strong><span>Packets received</span><em>375 pps</em></div>
+            <div class="metric-card"><strong>27.4 ms</strong><span>Peer RTT</span><em>26.9 min / 29.8 max</em></div>
+            <div class="metric-card"><strong>1.8 ms</strong><span>Jitter</span><em>0.7 min / 3.1 max</em></div>
+          </div>
+          <div class="diagnostic-actions">
+            <button class="editor-button">Capture CSV</button>
+            <button class="editor-button">Reset counters</button>
+          </div>
+        </section>
+
+        <section class="diagnostic-section troubleshooter">
+          <div class="diagnostic-title">If you hear… <span>manual troubleshooting reference</span></div>
+          <details open>
+            <summary>Clicks, pops, or short drop-outs</summary>
+            <ol>
+              <li>Check callback xruns and late-packet counters while the artifact occurs.</li>
+              <li>If xruns rise, increase the local audio-device buffer one step.</li>
+              <li>If late packets rise, increase the receive buffer in small numeric steps and compare the added latency.</li>
+              <li>If loss rises, test a wired connection and stop competing network transfers.</li>
+            </ol>
+          </details>
+          <details>
+            <summary>Pitch wobble or a slowly drifting feel</summary>
+            <ol>
+              <li>Watch drift ppm and resampler ratio for the affected peer.</li>
+              <li>Confirm both devices remain at the selected sample rate.</li>
+              <li>Capture the stats CSV and compare drift during the audible event.</li>
+            </ol>
+          </details>
+          <details>
+            <summary>Stable audio that feels too delayed</summary>
+            <ol>
+              <li>Separate network RTT from the local callback and receive-buffer periods.</li>
+              <li>Reduce the receive buffer one numeric step only if late packets remain at zero.</li>
+              <li>Use a wired path and the lowest stable ASIO device buffer.</li>
+            </ol>
+          </details>
+          <details>
+            <summary>One person is too loud, quiet, or distorted</summary>
+            <ol>
+              <li>Select that peer and watch their receive meter rather than the combined visual.</li>
+              <li>For clipping at source, ask them to reduce input gain; receive volume cannot restore clipped peaks.</li>
+              <li>For mix balance only, adjust that peer’s local volume control.</li>
+            </ol>
+          </details>
+          <details>
+            <summary>Rhythmic pulsing or repeated gaps</summary>
+            <ol>
+              <li>Compare the gap timing with packet loss, queue depth, and callback xruns.</li>
+              <li>Check for Wi-Fi power saving or periodic background transfers.</li>
+              <li>Record a short stats capture before changing one buffer setting at a time.</li>
+            </ol>
+          </details>
+        </section>
+      </div>
+    </aside>
+
+    <main class="stage">
+      <canvas class="star-canvas" id="starCanvas" aria-hidden="true"></canvas>
+      <canvas class="nebula-canvas" id="nebulaCanvas" aria-hidden="true"></canvas>
+      <i class="screw tl"></i><i class="screw tr"></i><i class="screw bl"></i><i class="screw br"></i>
+      <div class="stage-title"><div class="micro">Live session / performance</div><h1>Chorus <span>03</span></h1></div>
+
+      <div class="technical">
+        <div class="stat"><strong>27.4 ms</strong><span>Peer RTT</span></div>
+        <div class="stat"><strong>1.8 ms</strong><span>Jitter</span></div>
+        <div class="stat"><strong>0.0%</strong><span>Loss</span></div>
+        <div class="stat"><strong>0 / 0</strong><span>Xruns</span></div>
+      </div>
+
+      <div class="demo-controls" aria-label="Visualizer simulation controls">
+        <div class="demo-group" id="peerControls">
+          <span class="demo-label">People</span>
+          <button class="active" data-peers="2">2</button><button data-peers="3">3</button><button data-peers="4">4</button><button data-peers="6">6</button><button data-peers="10">10</button>
+        </div>
+        <i class="demo-separator"></i>
+        <div class="demo-group" id="activityControls">
+          <span class="demo-label">Activity</span>
+          <button data-mode="sparse">Sparse</button><button class="active" data-mode="balanced">Balanced</button><button data-mode="busy">Busy</button><button data-mode="staggered">Staggered</button>
+        </div>
+        <i class="demo-separator"></i>
+        <div class="demo-group"><button class="event-preview" id="previewEvent">Preview nova</button></div>
+      </div>
+
+      <section class="performance-orbit" aria-label="Combined audio activity and song position">
+        <svg class="scope-svg" viewBox="0 0 640 520" role="img" aria-label="Live combined audio activity history">
+          <circle class="scope-ring glow" cx="320" cy="215" r="164"></circle>
+          <circle class="scope-ring major" cx="320" cy="215" r="167"></circle>
+          <circle class="scope-ring" cx="320" cy="215" r="144"></circle>
+          <circle class="scope-ring" cx="320" cy="215" r="113"></circle>
+          <g id="orbitTicks"></g>
+          <g id="activityHistory"></g>
+          <g id="sourceNodes"></g>
+        </svg>
+
+        <button class="chord-lens" id="chordLens" data-open="chords" style="--song-progress: 5%">
+          <span class="lens-copy">
+            <span class="section-label">Current chord</span>
+            <strong class="current-chord" id="currentChord">F</strong>
+            <span class="bar-position">BAR <span id="barPosition">17</span> / 32</span>
+            <span class="beat-dots" id="beatDots"><i class="active"></i><i></i><i></i><i></i></span>
+          </span>
+        </button>
+
+        <div class="chord-runway" id="chordRunway" data-open="chords" role="button" tabindex="0" aria-label="Open chord view">
+          <div class="chord-cell current"><small>Now</small><strong>F</strong><span class="arrival">17.1</span></div>
+          <div class="chord-cell"><small>Next</small><strong>C/E</strong><span class="arrival">18.1</span></div>
+          <div class="chord-cell"><small>Then</small><strong>Am</strong><span class="arrival">19.1</span></div>
+          <div class="chord-cell"><small>Then</small><strong>G</strong><span class="arrival">20.1</span></div>
+        </div>
+        <div class="source-readout"><strong id="combinedReadout">2 sources / -8.2 dB</strong> &nbsp; combined history / 30 Hz / 0.65x cache</div>
+      </section>
+
+      <div class="peer-rail" id="peerRail" aria-label="Session participants"></div>
+
+      <div class="preview-stack">
+        <section class="preview beat-preview" data-open="beats" tabindex="0" aria-label="Open full beat view">
+          <div class="preview-head"><span class="preview-title">Beat preview / next bar</span><span class="preview-open">Open grid &#8599;</span></div>
+          <div class="beat-grid" id="beatPreview"></div>
+        </section>
+        <section class="preview" data-open="lyrics" tabindex="0" aria-label="Open upcoming lyrics">
+          <div class="preview-head"><span class="preview-title">Lyrics / current and upcoming</span><span class="preview-open">Open lyrics &#8599;</span></div>
+          <div class="lyrics-lines">
+            <div class="lyrics-line"><div class="lyrics-copy" id="lyricPreview">Send the midnight signal</div></div>
+            <div class="lyrics-line"><div class="lyrics-copy" id="nextLyricPreview">let it travel through the noise</div></div>
+          </div>
+        </section>
+      </div>
+
+      <section class="looper-launch" data-open="looper" tabindex="0" aria-label="Open looper and backing tracks">
+        <div class="preview-head"><span class="preview-title">Backing tracks / bank A</span><span class="preview-open">Open looper &#8599;</span></div>
+        <div class="dock-wave"></div>
+        <div class="dock-mix"><input type="range" min="-60" max="12" value="-8" data-stop-open aria-label="Backing-track level"><span>-8.0 dB</span></div>
+      </section>
+
+      <section class="detail" id="detailPanel" aria-label="Expanded song information">
+        <header class="detail-head">
+          <span class="micro">Song position / bar 17 of 32</span>
+          <button class="detail-tab active" data-detail="chords">Chords</button>
+          <button class="detail-tab" data-detail="beats">Beats</button>
+          <button class="detail-tab" data-detail="lyrics">Lyrics</button>
+          <button class="detail-tab" data-detail="metronome">Metronome</button>
+          <button class="detail-tab" data-detail="looper">Looper</button>
+          <button class="detail-close" id="closeDetail">Close</button>
+        </header>
+        <div class="detail-body">
+          <div class="detail-layer active" data-layer="chords">
+            <div class="editor-tools">
+              <span class="micro">Chord grid</span>
+              <button class="editor-button" data-editor-action="add-section">Add section</button>
+              <button class="editor-button" data-editor-action="duplicate-section">Duplicate</button>
+              <button class="editor-button danger" data-editor-action="delete-section">Delete</button>
+              <button class="editor-button" data-editor-action="expand-grid">+4 beats</button>
+              <button class="editor-button" data-editor-action="shrink-grid">-4 beats</button>
+              <button class="editor-button" data-editor-action="generate-chords">Generate</button>
+              <button class="editor-button" data-editor-action="reference">Reference WAVs</button>
+              <span class="tool-spacer"></span>
+              <label class="editor-check"><input type="checkbox" checked> Chord notes</label>
+              <label class="editor-check"><input type="checkbox" checked> Target melody</label>
+            </div>
+            <div class="editor-scroll"><div class="song-editor-grid" id="chordDetail"></div></div>
+          </div>
+          <div class="detail-layer" data-layer="beats">
+            <div class="editor-tools">
+              <span class="micro">Beat grid / Chorus 03</span>
+              <button class="editor-button" data-editor-action="add-section">Add section</button>
+              <button class="editor-button" data-editor-action="duplicate-section">Duplicate</button>
+              <button class="editor-button danger" data-editor-action="delete-section">Delete</button>
+              <button class="editor-button" data-editor-action="expand-grid">+4 beats</button>
+              <button class="editor-button" data-editor-action="shrink-grid">-4 beats</button>
+              <button class="editor-button" data-editor-action="generate-beats">Generate</button>
+              <button class="editor-button" data-editor-action="reference">Reference WAVs</button>
+            </div>
+            <div class="editor-scroll"><div class="full-beat-grid" id="fullBeatGrid"></div></div>
+          </div>
+          <div class="detail-layer" data-layer="lyrics">
+            <div class="editor-tools">
+              <span class="micro">Shared lyrics</span>
+              <button class="editor-button" data-editor-action="insert-section">Insert section</button>
+              <button class="editor-button" data-editor-action="generate-lyrics">Generate</button>
+              <button class="editor-button" data-editor-action="clear-lyrics">Clear</button>
+              <span class="tool-spacer"></span>
+              <label class="editor-check"><input type="checkbox" checked> Follow current line</label>
+            </div>
+            <div class="editor-scroll">
+              <div class="lyrics-workspace">
+                <textarea class="lyrics-editor" id="lyricsEditor" aria-label="Shared lyrics editor">[Chorus]
+Send the midnight signal
+let it travel through the noise
+Every beat is simple
+when it carries every voice
+
+[Bridge]
+Hold the line between us
+keep the rhythm moving on</textarea>
+                <div class="lyrics-detail" id="lyricsDetail"></div>
+              </div>
+            </div>
+          </div>
+          <div class="detail-layer" data-layer="metronome">
+            <div class="editor-tools">
+              <span class="micro">Local metronome</span>
+              <button class="editor-button active" id="metroStart">Enabled</button>
+              <button class="editor-button" id="metroTap">Tap tempo</button>
+              <span class="tool-spacer"></span>
+              <label class="editor-check"><input type="checkbox" id="markerReference" checked> Show marker reference</label>
+            </div>
+            <div class="editor-scroll">
+              <div class="metronome-workspace">
+                <div class="metro-controls">
+                  <label class="control-field">BPM <input type="number" id="metroBpm" min="1" max="400" value="118"></label>
+                  <label class="control-field">Beats <input type="number" id="metroBeats" min="1" max="16" value="4"></label>
+                  <label class="control-field">Division <select id="metroDivision"><option>Quarter</option><option>Eighth</option><option>Triplet</option><option>16th</option><option>32nd</option></select></label>
+                  <label class="control-field">Mode <select><option>shared-grid</option><option>leader-audio</option><option>listener-compensated</option></select></label>
+                  <label class="control-field">Level <input type="range" min="-60" max="12" value="-10"></label>
+                </div>
+                <div class="metro-pattern" id="metroPattern"></div>
+              </div>
+            </div>
+          </div>
+          <div class="detail-layer" data-layer="looper">
+            <div class="editor-tools">
+              <span class="micro">Looper / backing tracks</span>
+              <button class="editor-button" data-looper-action="play">Play</button>
+              <button class="editor-button" data-looper-action="stop">Stop</button>
+              <button class="editor-button" data-looper-action="loop-start">Loop start</button>
+              <button class="editor-button" data-looper-action="loop-end">Loop end</button>
+              <button class="editor-button" data-looper-action="clear-loop">Clear loop</button>
+              <button class="editor-button" data-looper-action="record">Record</button>
+              <button class="editor-button" data-looper-action="add-track">Add track</button>
+              <button class="editor-button" data-looper-action="add-wav">Add WAV</button>
+              <button class="editor-button" data-looper-action="share">Share tracks</button>
+              <span class="tool-spacer"></span>
+              <button class="editor-button active" data-bank="A">A</button><button class="editor-button" data-bank="B">B</button><button class="editor-button" data-bank="C">C</button><button class="editor-button" data-bank="D">D</button>
+            </div>
+            <div class="editor-scroll"><div class="looper-workspace" id="looperWorkspace"></div></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="transport">
+      <div class="local-strip">
+        <div class="strip-title"><span>Local input</span><strong>Phil / Guitar</strong></div>
+        <div class="mix-row"><label>Input</label><div class="channel-meter"><i id="localInputMeter" style="--level:42%"></i></div><output id="localInputDb">-14.2 dB</output></div>
+        <div class="mix-row"><label>Send</label><input type="range" min="-60" max="12" value="0" aria-label="Local send volume"><output>0.0 dB</output></div>
+        <div class="mix-row"><label class="monitor-choice"><input type="checkbox" id="monitorEnabled"> <span>Monitor</span></label><input type="range" min="-60" max="12" value="-18" aria-label="Monitor volume"><output>-18 dB</output></div>
+      </div>
+      <div class="playback">
+        <button class="round-button" id="stopButton" aria-label="Stop">&#9632;</button>
+        <button class="round-button play" id="playButton" aria-label="Pause">&#8545;</button>
+        <div class="tempo"><strong id="tempoReadout">118</strong><span>BPM / 4-4</span></div>
+        <div class="position-copy"><strong id="transportPosition">17.01.000</strong><span>Bar / beat / tick</span></div>
+        <button class="metro" data-open="metronome"><span>Metronome</span><i id="metroLamp"></i></button>
+      </div>
+      <div class="remote-strip">
+        <div class="strip-title"><span>Selected peer</span><strong id="selectedPeer">Alex M.</strong></div>
+        <div class="mix-row"><label>Receive</label><div class="channel-meter"><i id="selectedMeter" style="--level:36%"></i></div><output id="selectedDb">-11.3 dB</output></div>
+        <div class="mix-row"><label>Volume</label><input type="range" min="-60" max="12" value="0" aria-label="Selected peer volume"><output>0.0 dB</output></div>
+        <div class="mix-row"><label>Choice</label><div><button class="editor-button" data-peer-choice="solo">Solo</button> <button class="editor-button" data-peer-choice="mute">Mute</button></div><output>Direct</output></div>
+      </div>
+    </footer>
+  </div>
+
+  <script>
+    const sources = [
+      { name: "Phil / local", color: "#e8a44a" },
+      { name: "Alex M.", color: "#66d4cf" },
+      { name: "Maya K.", color: "#a092da" },
+      { name: "Sam N.", color: "#df6b61" },
+      { name: "Jordan L.", color: "#70d49d" },
+      { name: "Rui S.", color: "#c7aa58" },
+      { name: "Nina T.", color: "#cf7ca1" },
+      { name: "Owen B.", color: "#6ba9df" },
+      { name: "Leah P.", color: "#bd7b5b" },
+      { name: "Kai R.", color: "#73c5a6" }
+    ];
+    const chordSequence = ["F", "C/E", "Am", "G", "Dm7", "Am/C", "Bb", "C"];
+    const lyricLines = [
+      "Send the midnight signal",
+      "let it travel through the noise",
+      "Every beat is simple",
+      "when it carries every voice",
+      "Hold the line between us",
+      "keep the rhythm moving on",
+      "Leave the final chord there",
+      "until the signal is gone"
+    ];
+    const beatRows = [
+      { name: "Kick", hits: [0, 4, 8, 11, 12], accents: [0, 8] },
+      { name: "Snare", hits: [4, 12], accents: [4, 12] },
+      { name: "Closed HH", hits: [0, 2, 4, 6, 8, 10, 12, 14], accents: [0, 8] },
+      { name: "Open HH", hits: [7, 15], accents: [15] },
+      { name: "Crash", hits: [0], accents: [0] },
+      { name: "Tom", hits: [10, 11, 14], accents: [14] },
+      { name: "Guitar", hits: [0, 3, 6, 8, 11, 14], accents: [0, 8] },
+      { name: "Melody", hits: [0, 4, 6, 10, 12], accents: [0, 12] }
+    ];
+    let detailChords = ["F", "C/E", "Am", "G", "F", "C/E", "Am", "G", "Dm7", "Am/C", "Bb", "C"];
+    let detailMelody = ["A4", "", "E4", "G4", "A4", "G4", "E4", "", "F4", "E4", "D4", "C4"];
+    let beatSectionCount = 1;
+    const looperLanes = [
+      { name: "Backing guitar", start: "0%", width: "68%", gain: -8 },
+      { name: "Ambient layer", start: "25%", width: "54%", gain: -14 },
+      { name: "Vocal idea", start: "49%", width: "34%", gain: -10 }
+    ];
+
+    let peerCount = 2;
+    let activityMode = "balanced";
+    let selectedSource = 1;
+    let activityClock = 0;
+    let playing = true;
+    let metronomeEnabled = true;
+    let step = 0;
+    let songBar = 17;
+    let visualEnergy = .18;
+    let nebulaEnvelope = .16;
+    let nebulaPlayTime = 0;
+    let nebulaLastFrame = performance.now();
+    let sourceLevels = Array(10).fill(.1);
+    const history = Array.from({ length: 72 }, (_, index) => ({
+      level: .18 + .16 * Math.abs(Math.sin(index * .27)),
+      color: sources[index % 2].color
+    }));
+
+    const starCanvas = document.getElementById("starCanvas");
+    const starContext = starCanvas.getContext("2d");
+    const nebulaCanvas = document.getElementById("nebulaCanvas");
+    const nebulaContext = nebulaCanvas.getContext("2d");
+    const nebulaRenderScale = .65;
+    const nebulaFrameInterval = 1000 / 30;
+    let nebulaWidth = 1;
+    let nebulaHeight = 1;
+    let nebulaDpr = 1;
+    let nebulaLastPaint = 0;
+    let nextCosmicEvent = 22000 + Math.random() * 26000;
+    let cosmicEvents = [];
+
+    function seededRandom(seed) {
+      let value = seed;
+      return () => {
+        value = Math.sin(value * 12.9898 + 78.233) * 43758.5453;
+        return value - Math.floor(value);
+      };
+    }
+
+    function createCloudSprite(palette, seed) {
+      const size = 560;
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d");
+      const random = seededRandom(seed);
+      canvas.width = size;
+      canvas.height = size;
+      context.globalCompositeOperation = "screen";
+
+      for (let index = 0; index < 38; index += 1) {
+        const x = size * (.16 + random() * .68);
+        const y = size * (.17 + random() * .66);
+        const radius = 52 + random() * 150;
+        const color = palette[index % palette.length];
+        const opacity = .035 + random() * .095;
+        const gradient = context.createRadialGradient(x, y, 0, x, y, radius);
+        gradient.addColorStop(0, `rgba(${color}, ${opacity})`);
+        gradient.addColorStop(.28, `rgba(${color}, ${opacity * .72})`);
+        gradient.addColorStop(.7, `rgba(${color}, ${opacity * .2})`);
+        gradient.addColorStop(1, `rgba(${color}, 0)`);
+        context.fillStyle = gradient;
+        context.fillRect(x - radius, y - radius, radius * 2, radius * 2);
+      }
+
+      context.globalCompositeOperation = "destination-out";
+      for (let index = 0; index < 8; index += 1) {
+        const x = size * (.18 + random() * .64);
+        const y = size * (.2 + random() * .6);
+        const radius = 35 + random() * 100;
+        const gradient = context.createRadialGradient(x, y, 0, x, y, radius);
+        gradient.addColorStop(0, `rgba(0,0,0,${.08 + random() * .14})`);
+        gradient.addColorStop(1, "rgba(0,0,0,0)");
+        context.fillStyle = gradient;
+        context.fillRect(x - radius, y - radius, radius * 2, radius * 2);
+      }
+
+      context.globalCompositeOperation = "screen";
+      context.lineCap = "round";
+      for (let index = 0; index < 7; index += 1) {
+        const color = palette[index % palette.length];
+        context.beginPath();
+        context.moveTo(size * (.12 + random() * .16), size * (.22 + random() * .55));
+        context.bezierCurveTo(
+          size * (.32 + random() * .18), size * (.08 + random() * .78),
+          size * (.58 + random() * .13), size * (.1 + random() * .78),
+          size * (.75 + random() * .14), size * (.2 + random() * .58)
+        );
+        context.strokeStyle = `rgba(${color},${.025 + random() * .035})`;
+        context.lineWidth = 6 + random() * 18;
+        context.stroke();
+      }
+      return canvas;
+    }
+
+    const cloudLayers = [
+      { sprite: createCloudSprite(["42,190,196", "87,94,209", "120,53,180"], 2.1), x: .28, y: .43, size: .78, stretch: 1.45, opacity: .8, drift: .000012, warp: .052 },
+      { sprite: createCloudSprite(["211,49,151", "128,65,205", "234,113,77"], 4.7), x: .68, y: .44, size: .73, stretch: 1.55, opacity: .7, drift: -.00001, warp: -.044 },
+      { sprite: createCloudSprite(["34,173,190", "69,111,211", "215,61,179"], 8.4), x: .52, y: .25, size: .56, stretch: 1.7, opacity: .58, drift: .000016, warp: .06 },
+      { sprite: createCloudSprite(["222,104,63", "179,57,158", "70,151,195"], 12.6), x: .5, y: .72, size: .68, stretch: 1.85, opacity: .5, drift: -.000008, warp: -.035 }
+    ];
+
+    function createColourVariant(sprite, hue, saturation) {
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d");
+      canvas.width = sprite.width;
+      canvas.height = sprite.height;
+      context.filter = `hue-rotate(${hue}deg) saturate(${saturation})`;
+      context.drawImage(sprite, 0, 0);
+      context.filter = "none";
+      return canvas;
+    }
+
+    const cloudColourStates = [
+      { hue: -6, saturation: 1 },
+      { hue: 10, saturation: 1.08 },
+      { hue: 32, saturation: 1.17 }
+    ];
+    cloudLayers.forEach(layer => {
+      layer.variants = cloudColourStates.map(state => createColourVariant(layer.sprite, state.hue, state.saturation));
+      delete layer.sprite;
+    });
+
+    const starRandom = seededRandom(23.8);
+    const starField = Array.from({ length: 190 }, (_, index) => ({
+      x: starRandom(),
+      y: starRandom(),
+      radius: index % 37 === 0 ? 1.15 : .25 + starRandom() * .7,
+      phase: starRandom() * Math.PI * 2,
+      speed: .00025 + starRandom() * .0007,
+      warmth: starRandom()
+    }));
+
+    function drawCachedStarField() {
+      starContext.setTransform(nebulaDpr, 0, 0, nebulaDpr, 0, 0);
+      starContext.clearRect(0, 0, nebulaWidth, nebulaHeight);
+      starField.forEach(star => {
+        const brightness = .35 + .28 * (.5 + .5 * Math.sin(star.phase));
+        starContext.fillStyle = star.warmth > .8
+          ? `rgba(255,211,158,${brightness})`
+          : `rgba(183,224,232,${brightness})`;
+        starContext.beginPath();
+        starContext.arc(
+          star.x * nebulaWidth,
+          star.y * nebulaHeight,
+          Math.max(.25, star.radius * nebulaRenderScale),
+          0,
+          Math.PI * 2
+        );
+        starContext.fill();
+      });
+    }
+
+    function resizeNebula() {
+      const bounds = nebulaCanvas.getBoundingClientRect();
+      nebulaWidth = Math.max(1, Math.round(bounds.width * nebulaRenderScale));
+      nebulaHeight = Math.max(1, Math.round(bounds.height * nebulaRenderScale));
+      nebulaDpr = Math.min(window.devicePixelRatio || 1, 1.25);
+      starCanvas.width = Math.round(nebulaWidth * nebulaDpr);
+      starCanvas.height = Math.round(nebulaHeight * nebulaDpr);
+      nebulaCanvas.width = Math.round(nebulaWidth * nebulaDpr);
+      nebulaCanvas.height = Math.round(nebulaHeight * nebulaDpr);
+      drawCachedStarField();
+    }
+
+    function spawnCosmicEvent(type = Math.random() < .78 ? "star" : "nova", preview = false) {
+      let x = .06 + Math.random() * .88;
+      let y = .06 + Math.random() * .76;
+      if (preview) {
+        x = .78;
+        y = .24;
+      }
+      cosmicEvents.push({
+        type,
+        x,
+        y,
+        born: performance.now(),
+        duration: type === "nova" ? 5200 : 3000,
+        hue: 185 + Math.random() * 95
+      });
+    }
+
+    function drawCosmicEvent(event, now) {
+      const progress = (now - event.born) / event.duration;
+      if (progress < 0 || progress > 1) return;
+      const x = event.x * nebulaWidth;
+      const y = event.y * nebulaHeight;
+      const arrival = Math.min(1, progress * 9);
+      const fade = Math.pow(1 - progress, 1.6);
+      const intensity = arrival * fade;
+      const radius = (event.type === "nova" ? 5 + progress * 34 : 3 + progress * 7) * nebulaRenderScale;
+
+      nebulaContext.save();
+      nebulaContext.globalCompositeOperation = "screen";
+      const glow = nebulaContext.createRadialGradient(x, y, 0, x, y, radius * 3.5);
+      glow.addColorStop(0, `hsla(${event.hue}, 95%, 92%, ${intensity * .72})`);
+      glow.addColorStop(.12, `hsla(${event.hue}, 90%, 70%, ${intensity * .34})`);
+      glow.addColorStop(1, `hsla(${event.hue}, 80%, 55%, 0)`);
+      nebulaContext.fillStyle = glow;
+      nebulaContext.fillRect(x - radius * 3.5, y - radius * 3.5, radius * 7, radius * 7);
+
+      nebulaContext.translate(x, y);
+      nebulaContext.rotate(progress * .24);
+      nebulaContext.strokeStyle = `hsla(${event.hue}, 90%, 86%, ${intensity * .42})`;
+      nebulaContext.lineWidth = .65;
+      nebulaContext.beginPath();
+      nebulaContext.moveTo(-radius * 4.2, 0);
+      nebulaContext.lineTo(radius * 4.2, 0);
+      nebulaContext.moveTo(0, -radius * 2.8);
+      nebulaContext.lineTo(0, radius * 2.8);
+      nebulaContext.stroke();
+
+      if (event.type === "nova") {
+        nebulaContext.strokeStyle = `hsla(${event.hue + 35}, 92%, 72%, ${intensity * .22})`;
+        nebulaContext.lineWidth = 1;
+        nebulaContext.beginPath();
+        nebulaContext.arc(0, 0, radius * 1.55, 0, Math.PI * 2);
+        nebulaContext.stroke();
+      }
+      nebulaContext.restore();
+    }
+
+    function renderNebula(now) {
+      requestAnimationFrame(renderNebula);
+      if (now - nebulaLastPaint < nebulaFrameInterval) return;
+      nebulaLastPaint = now;
+
+      const elapsed = Math.max(0, now - nebulaLastFrame);
+      const frameTime = Math.min(50, elapsed);
+      nebulaLastFrame = now;
+      if (playing) nebulaPlayTime += elapsed;
+      const envelopeTime = visualEnergy > nebulaEnvelope ? 430 : 1650;
+      const envelopeAmount = 1 - Math.exp(-frameTime / envelopeTime);
+      nebulaEnvelope += (visualEnergy - nebulaEnvelope) * envelopeAmount;
+
+      nebulaContext.setTransform(nebulaDpr, 0, 0, nebulaDpr, 0, 0);
+      nebulaContext.clearRect(0, 0, nebulaWidth, nebulaHeight);
+
+      const fieldSize = Math.max(nebulaWidth, nebulaHeight);
+      const fieldCentreX = nebulaWidth * .5;
+      const fieldCentreY = nebulaHeight * .44;
+      const slowBreath = Math.sin(now * .00028) * .004;
+      const expansionEnergy = Math.pow(Math.max(0, Math.min(1, nebulaEnvelope)), 1.15);
+      const fieldExpansion = .94 + expansionEnergy * .32 + slowBreath;
+      const positionExpansion = .965 + expansionEnergy * .18;
+      const colourPosition = Math.max(0, Math.min(
+        cloudColourStates.length - 1,
+        expansionEnergy * (cloudColourStates.length - 1) + Math.sin(now * .00009) * .1
+      ));
+      const lowerColour = Math.floor(colourPosition);
+      const upperColour = Math.min(cloudColourStates.length - 1, lowerColour + 1);
+      const colourBlend = colourPosition - lowerColour;
+      cloudLayers.forEach((layer, index) => {
+        const driftX = Math.sin(now * layer.drift * 1.7 + index) * 8;
+        const driftY = Math.cos(now * layer.drift * 1.2 + index * 1.4) * 5;
+        const layerX = fieldCentreX + (layer.x - .5) * nebulaWidth * positionExpansion;
+        const layerY = fieldCentreY + (layer.y - .44) * nebulaHeight * positionExpansion;
+        const radialX = (layer.x - .5) * expansionEnergy * 42;
+        const radialY = (layer.y - .44) * expansionEnergy * 31;
+        const diameter = fieldSize * layer.size;
+        nebulaContext.save();
+        nebulaContext.globalCompositeOperation = "screen";
+        nebulaContext.translate(layerX + driftX + radialX, layerY + driftY + radialY);
+        nebulaContext.rotate(now * layer.drift + expansionEnergy * layer.warp);
+        nebulaContext.scale(layer.stretch * fieldExpansion * (1 + expansionEnergy * .018), fieldExpansion * (1 - expansionEnergy * .01));
+        const layerAlpha = layer.opacity * (.79 + expansionEnergy * .26);
+        nebulaContext.globalAlpha = layerAlpha * (1 - colourBlend);
+        nebulaContext.drawImage(layer.variants[lowerColour], -diameter / 2, -diameter / 2, diameter, diameter);
+        if (upperColour !== lowerColour && colourBlend > .001) {
+          nebulaContext.globalAlpha = layerAlpha * colourBlend;
+          nebulaContext.drawImage(layer.variants[upperColour], -diameter / 2, -diameter / 2, diameter, diameter);
+        }
+        nebulaContext.restore();
+      });
+
+      cosmicEvents.forEach(event => drawCosmicEvent(event, now));
+      cosmicEvents = cosmicEvents.filter(event => now - event.born < event.duration);
+      if (playing && nebulaPlayTime >= nextCosmicEvent) {
+        spawnCosmicEvent();
+        nextCosmicEvent = nebulaPlayTime + 60000 + Math.random() * 120000;
+      }
+    }
+
+    const svgNS = "http://www.w3.org/2000/svg";
+    const ticksGroup = document.getElementById("orbitTicks");
+    const historyGroup = document.getElementById("activityHistory");
+    const nodesGroup = document.getElementById("sourceNodes");
+    const peerRail = document.getElementById("peerRail");
+    const historyLines = [];
+    const sourceNodes = [];
+
+    for (let index = 0; index < 72; index += 1) {
+      const angle = (-90 + index * 5) * Math.PI / 180;
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+      const tick = document.createElementNS(svgNS, "line");
+      const inner = index % 4 === 0 ? 169 : 171;
+      tick.setAttribute("x1", 320 + cos * inner);
+      tick.setAttribute("y1", 215 + sin * inner);
+      tick.setAttribute("x2", 320 + cos * (index % 4 === 0 ? 176 : 174));
+      tick.setAttribute("y2", 215 + sin * (index % 4 === 0 ? 176 : 174));
+      tick.setAttribute("class", "orbit-tick");
+      ticksGroup.appendChild(tick);
+
+      const line = document.createElementNS(svgNS, "line");
+      line.setAttribute("class", "activity-spoke");
+      line.dataset.cos = cos;
+      line.dataset.sin = sin;
+      historyGroup.appendChild(line);
+      historyLines.push(line);
+    }
+
+    function activityTarget(index, time) {
+      const phase = time * (1.35 + index * .08) + index * 1.71;
+      const pulse = Math.pow(Math.max(0, Math.sin(phase)), 3);
+      const texture = .5 + .5 * Math.sin(time * 3.4 + index * 2.2);
+      if (activityMode === "sparse") return .025 + pulse * (index % 3 === 0 ? .68 : .2);
+      if (activityMode === "busy") return .33 + .5 * pulse + .12 * texture;
+      if (activityMode === "staggered") return .05 + ((Math.floor(time * 1.25) % peerCount) === index ? .82 : .12 * texture);
+      return .1 + .43 * pulse + .16 * texture;
+    }
+
+    function selectSource(index) {
+      if (index === 0 && peerCount > 1) return;
+      selectedSource = Math.min(index, peerCount - 1);
+      document.getElementById("selectedPeer").textContent = sources[selectedSource].name;
+      document.querySelectorAll(".peer-pill").forEach((pill, pillIndex) => pill.classList.toggle("selected", pillIndex === selectedSource));
+      sourceNodes.forEach((node, nodeIndex) => node.classList.toggle("selected", nodeIndex === selectedSource));
+    }
+
+    function rebuildSources() {
+      nodesGroup.innerHTML = "";
+      peerRail.innerHTML = "";
+      sourceNodes.length = 0;
+      for (let index = 0; index < peerCount; index += 1) {
+        const angle = (-90 + index * 360 / peerCount) * Math.PI / 180;
+        const node = document.createElementNS(svgNS, "circle");
+        node.setAttribute("cx", 320 + Math.cos(angle) * 132);
+        node.setAttribute("cy", 215 + Math.sin(angle) * 132);
+        node.setAttribute("r", 4);
+        node.setAttribute("fill", sources[index].color);
+        node.setAttribute("class", "source-node");
+        node.addEventListener("click", () => selectSource(index));
+        nodesGroup.appendChild(node);
+        sourceNodes.push(node);
+
+        const pill = document.createElement("button");
+        pill.className = "peer-pill";
+        pill.style.setProperty("--source", sources[index].color);
+        pill.innerHTML = `<i class="peer-dot"></i><span class="peer-name">${sources[index].name}</span>`;
+        pill.addEventListener("click", () => selectSource(index));
+        peerRail.appendChild(pill);
+      }
+      if (selectedSource >= peerCount || selectedSource === 0) selectedSource = Math.min(1, peerCount - 1);
+      selectSource(selectedSource);
+      document.getElementById("peerStatus").textContent = `${peerCount} players / direct`;
+      document.querySelectorAll("[data-peers]").forEach(button => button.classList.toggle("active", Number(button.dataset.peers) === peerCount));
+      buildDiagnosticPeers();
+    }
+
+    function buildDiagnosticPeers() {
+      const target = document.getElementById("diagnosticPeers");
+      target.innerHTML = "";
+      for (let index = 1; index < peerCount; index += 1) {
+        const row = document.createElement("tr");
+        const rtt = 24.8 + index * 2.6;
+        const jitter = .7 + index * .55;
+        const loss = index > 5 ? .1 : 0;
+        const late = index > 7 ? 1 : 0;
+        row.innerHTML = `<td>${sources[index].name}</td><td>${rtt.toFixed(1)} ms</td><td>${jitter.toFixed(1)} ms</td><td>${loss.toFixed(1)}%</td><td>${late}</td>`;
+        target.appendChild(row);
+      }
+    }
+
+    function renderActivity() {
+      activityClock += .1;
+      let combined = 0;
+      let dominant = 0;
+      for (let index = 0; index < peerCount; index += 1) {
+        const target = activityTarget(index, activityClock);
+        const speed = target > sourceLevels[index] ? .45 : .14;
+        sourceLevels[index] += (target - sourceLevels[index]) * speed;
+        if (sourceLevels[index] > combined) {
+          combined = sourceLevels[index];
+          dominant = index;
+        }
+      }
+      visualEnergy += (combined - visualEnergy) * .22;
+      history.shift();
+      history.push({ level: combined, color: sources[dominant].color });
+      historyLines.forEach((line, index) => {
+        const sample = history[index];
+        const cos = Number(line.dataset.cos);
+        const sin = Number(line.dataset.sin);
+        const inner = 178;
+        const outer = inner + 4 + sample.level * 34;
+        line.setAttribute("x1", 320 + cos * inner);
+        line.setAttribute("y1", 215 + sin * inner);
+        line.setAttribute("x2", 320 + cos * outer);
+        line.setAttribute("y2", 215 + sin * outer);
+        line.setAttribute("stroke", sample.color);
+        line.setAttribute("stroke-width", 1.1 + sample.level * 2.2);
+        line.setAttribute("opacity", .18 + sample.level * .76);
+      });
+      sourceNodes.forEach((node, index) => {
+        const level = sourceLevels[index];
+        node.setAttribute("r", 3 + level * 6);
+        node.setAttribute("opacity", .3 + level * .7);
+      });
+      document.querySelectorAll(".peer-pill").forEach((pill, index) => {
+        const level = sourceLevels[index];
+        pill.style.setProperty("--activity", `${Math.round(level * 100)}%`);
+        pill.style.setProperty("--opacity", .3 + level * .7);
+        pill.style.setProperty("--glow", `${Math.round(level * 8)}px`);
+      });
+      const combinedDb = Math.max(-60, 20 * Math.log10(Math.max(.001, combined)));
+      document.getElementById("combinedReadout").textContent = `${peerCount} sources / ${combinedDb.toFixed(1)} dB`;
+      const selectedLevel = sourceLevels[selectedSource] || 0;
+      const localLevel = sourceLevels[0] || 0;
+      const selectedDb = Math.max(-60, 20 * Math.log10(Math.max(.001, selectedLevel)));
+      const localDb = Math.max(-60, 20 * Math.log10(Math.max(.001, localLevel)));
+      document.getElementById("selectedMeter").style.setProperty("--level", `${Math.round(selectedLevel * 100)}%`);
+      document.getElementById("selectedDb").textContent = `${selectedDb.toFixed(1)} dB`;
+      document.getElementById("localInputMeter").style.setProperty("--level", `${Math.round(localLevel * 100)}%`);
+      document.getElementById("localInputDb").textContent = `${localDb.toFixed(1)} dB`;
+    }
+
+    function buildBeatPreview() {
+      const target = document.getElementById("beatPreview");
+      target.innerHTML = "";
+      beatRows.forEach(row => {
+        const label = document.createElement("span");
+        label.className = "beat-name";
+        label.textContent = row.name;
+        target.appendChild(label);
+        for (let index = 0; index < 16; index += 1) {
+          const cell = document.createElement("i");
+          cell.className = `step${row.hits.includes(index) ? " hit" : ""}${row.accents.includes(index) ? " accent" : ""}`;
+          cell.dataset.previewStep = index;
+          target.appendChild(cell);
+        }
+      });
+    }
+
+    function chordTones(chord) {
+      const tones = {
+        "F": "F A C", "C/E": "C E G", "Am": "A C E", "G": "G B D",
+        "Dm7": "D F A C", "Am/C": "A C E", "Bb": "Bb D F", "C": "C E G",
+        "Em": "E G B", "D": "D F# A"
+      };
+      return tones[chord.trim()] || "—";
+    }
+
+    function buildChordEditor() {
+      const target = document.getElementById("chordDetail");
+      target.innerHTML = "";
+      target.style.gridTemplateColumns = `112px repeat(${detailChords.length}, 124px)`;
+      target.style.minWidth = `${140 + detailChords.length * 124}px`;
+      const rows = [
+        { name: "Chords", values: detailChords, className: "", editable: true },
+        { name: "Notes", values: detailChords.map(chordTones), className: " notes", editable: false },
+        { name: "Melody", values: detailMelody, className: " melody", editable: true }
+      ];
+      rows.forEach((row, rowIndex) => {
+        const label = document.createElement("div");
+        label.className = "song-row-label";
+        label.textContent = row.name;
+        target.appendChild(label);
+        row.values.forEach((value, index) => {
+          const cell = document.createElement("div");
+          cell.className = `song-cell${row.className}${index === 0 ? " current" : ""}`;
+          cell.dataset.position = `${17 + index}.1`;
+          cell.textContent = value || "";
+          if (row.editable) {
+            cell.contentEditable = "true";
+            cell.addEventListener("blur", () => {
+              if (rowIndex === 0) {
+                detailChords[index] = cell.textContent.trim();
+                buildChordEditor();
+              } else {
+                detailMelody[index] = cell.textContent.trim();
+              }
+            });
+          }
+          target.appendChild(cell);
+        });
+      });
+    }
+
+    function buildFullBeatGrid() {
+      const target = document.getElementById("fullBeatGrid");
+      target.innerHTML = "";
+      target.style.gridTemplateRows = `repeat(${beatSectionCount * (beatRows.length + 2)}, 48px)`;
+      for (let sectionIndex = 0; sectionIndex < beatSectionCount; sectionIndex += 1) {
+        const sectionLabel = document.createElement("div");
+        sectionLabel.className = "full-beat-label";
+        sectionLabel.textContent = "Section";
+        target.appendChild(sectionLabel);
+        const section = document.createElement("div");
+        section.className = "full-step section";
+        section.contentEditable = "true";
+        section.textContent = sectionIndex === 0 ? "03 / Chorus" : `${String(4 + sectionIndex).padStart(2, "0")} / New section`;
+        target.appendChild(section);
+
+        const divisionLabel = document.createElement("div");
+        divisionLabel.className = "full-beat-label";
+        divisionLabel.textContent = "Division";
+        target.appendChild(divisionLabel);
+        for (let index = 0; index < 32; index += 1) {
+          const cell = document.createElement("div");
+          cell.className = "full-step division";
+          cell.textContent = index % 4 === 0 ? "1/4" : "1/16";
+          cell.addEventListener("click", () => {
+            cell.textContent = cell.textContent === "1/16" ? "1/8" : cell.textContent === "1/8" ? "Triplet" : "1/16";
+          });
+          target.appendChild(cell);
+        }
+
+        beatRows.forEach(row => {
+          const label = document.createElement("div");
+          label.className = "full-beat-label";
+          label.textContent = row.name;
+          target.appendChild(label);
+          for (let index = 0; index < 32; index += 1) {
+            const patternIndex = index % 16;
+            const cell = document.createElement("div");
+            cell.className = `full-step${row.hits.includes(patternIndex) ? " hit" : ""}${row.accents.includes(patternIndex) ? " accent" : ""}`;
+            cell.dataset.fullStep = index;
+            cell.addEventListener("click", () => cell.classList.toggle("hit"));
+            target.appendChild(cell);
+          }
+        });
+      }
+    }
+
+    function buildLyricsPreview() {
+      const lyricTarget = document.getElementById("lyricsDetail");
+      lyricTarget.innerHTML = "";
+      const phrases = [
+        "Send the midnight signal", "let it travel through the noise", "Every beat is simple", "when it carries every voice",
+        "Hold the line between us", "keep the rhythm moving on", "Leave the final chord there", "until the signal is gone"
+      ];
+      phrases.forEach((phrase, index) => {
+        const cell = document.createElement("div");
+        cell.className = `phrase${index === 0 ? " active" : ""}`;
+        cell.contentEditable = "true";
+        cell.innerHTML = `<small>${17 + Math.floor(index / 2)}.${index % 2 ? 3 : 1}</small>${phrase}`;
+        lyricTarget.appendChild(cell);
+      });
+    }
+
+    function buildMetronomePattern() {
+      const target = document.getElementById("metroPattern");
+      target.innerHTML = "";
+      ["Play", "Accent"].forEach((name, row) => {
+        const label = document.createElement("div");
+        label.className = "pattern-label";
+        label.textContent = name;
+        target.appendChild(label);
+        for (let index = 0; index < 16; index += 1) {
+          const cell = document.createElement("div");
+          cell.className = `pattern-cell${row === 1 ? " accent" : ""}${row === 0 && index % 4 === 0 || row === 1 && index === 0 ? " active" : ""}`;
+          cell.innerHTML = "<i></i>";
+          cell.addEventListener("click", () => cell.classList.toggle("active"));
+          target.appendChild(cell);
+        }
+      });
+    }
+
+    function buildLooperWorkspace() {
+      const target = document.getElementById("looperWorkspace");
+      target.innerHTML = "";
+      const ruler = document.createElement("div");
+      ruler.className = "looper-ruler";
+      ruler.innerHTML = `<strong>Bank A / grid locked</strong>${Array.from({ length: 8 }, (_, index) => `<span>${index + 1}</span>`).join("")}`;
+      target.appendChild(ruler);
+      looperLanes.forEach((lane, index) => {
+        const row = document.createElement("div");
+        row.className = `loop-lane${index === 0 ? " selected" : ""}`;
+        row.innerHTML = `
+          <div class="loop-lane-head">
+            <strong>${lane.name}</strong><input class="lane-gain" type="range" min="-60" max="12" value="${lane.gain}" title="Lane gain">
+            <div class="lane-buttons"><button>Mute</button><button>Solo</button><button>Record</button><button>Rename</button><button>Remove</button></div>
+          </div>
+          <div class="lane-wave"><i class="lane-clip" style="--start:${lane.start};--width:${lane.width}"></i><i class="lane-playhead" style="--playhead:38%"></i></div>`;
+        row.querySelectorAll(".lane-buttons button").forEach(button => button.addEventListener("click", () => button.classList.toggle("active")));
+        target.appendChild(row);
+      });
+    }
+
+    function buildDetailViews() {
+      buildChordEditor();
+      buildFullBeatGrid();
+      buildLyricsPreview();
+      buildMetronomePattern();
+      buildLooperWorkspace();
+    }
+
+    function updateSongPosition() {
+      const beat = Math.floor(step / 4) + 1;
+      const chordIndex = (songBar - 17) % chordSequence.length;
+      const sequence = Array.from({ length: 4 }, (_, index) => chordSequence[(chordIndex + index) % chordSequence.length]);
+      document.getElementById("currentChord").textContent = sequence[0];
+      document.getElementById("barPosition").textContent = songBar;
+      document.getElementById("transportPosition").textContent = `${String(songBar).padStart(2, "0")}.${String(beat).padStart(2, "0")}.${String((step % 4) * 240).padStart(3, "0")}`;
+      document.getElementById("chordLens").style.setProperty("--song-progress", `${((songBar - 17) * 16 + step + 1) / (16 * 16) * 100}%`);
+      document.querySelectorAll("#beatDots i").forEach((dot, index) => dot.classList.toggle("active", index === beat - 1));
+      document.querySelectorAll("[data-preview-step]").forEach(cell => cell.classList.toggle("playhead", Number(cell.dataset.previewStep) === step));
+      document.querySelectorAll("[data-full-step]").forEach(cell => cell.classList.toggle("playhead", Number(cell.dataset.fullStep) % 16 === step));
+      document.getElementById("metroLamp").style.opacity = metronomeEnabled ? (step % 4 === 0 ? "1" : ".25") : ".08";
+
+      const labels = ["Now", "Next", "Then", "Then"];
+      document.querySelectorAll(".chord-cell").forEach((cell, index) => {
+        cell.querySelector("small").textContent = labels[index];
+        cell.querySelector("strong").textContent = sequence[index];
+        cell.querySelector(".arrival").textContent = `${songBar + index}.1`;
+      });
+      const lyricIndex = Math.floor((songBar - 17) % lyricLines.length);
+      document.getElementById("lyricPreview").textContent = lyricLines[lyricIndex];
+      document.getElementById("nextLyricPreview").textContent = lyricLines[(lyricIndex + 1) % lyricLines.length];
+      document.querySelectorAll(".lane-playhead").forEach(marker => marker.style.setProperty("--playhead", `${(step / 16) * 100}%`));
+    }
+
+    function openDetail(layer) {
+      document.getElementById("detailPanel").classList.add("open");
+      document.querySelectorAll(".detail-tab").forEach(button => button.classList.toggle("active", button.dataset.detail === layer));
+      document.querySelectorAll(".detail-layer").forEach(view => view.classList.toggle("active", view.dataset.layer === layer));
+    }
+
+    document.querySelectorAll("[data-peers]").forEach(button => {
+      button.addEventListener("click", () => {
+        peerCount = Number(button.dataset.peers);
+        rebuildSources();
+      });
+    });
+    document.querySelectorAll("[data-mode]").forEach(button => {
+      button.addEventListener("click", () => {
+        activityMode = button.dataset.mode;
+        document.querySelectorAll("[data-mode]").forEach(candidate => candidate.classList.toggle("active", candidate === button));
+      });
+    });
+    document.getElementById("previewEvent").addEventListener("click", () => spawnCosmicEvent("nova", true));
+    const dataDrawer = document.getElementById("dataDrawer");
+    const dataScrim = document.getElementById("dataScrim");
+    const dataButton = document.getElementById("dataButton");
+    function setDataDrawer(open) {
+      dataDrawer.classList.toggle("open", open);
+      dataScrim.classList.toggle("open", open);
+      dataDrawer.setAttribute("aria-hidden", String(!open));
+      dataButton.setAttribute("aria-expanded", String(open));
+    }
+    dataButton.addEventListener("click", () => setDataDrawer(!dataDrawer.classList.contains("open")));
+    document.getElementById("dataClose").addEventListener("click", () => setDataDrawer(false));
+    dataScrim.addEventListener("click", () => setDataDrawer(false));
+    document.querySelectorAll("[data-stop-open]").forEach(control => {
+      control.addEventListener("click", event => event.stopPropagation());
+      control.addEventListener("input", event => {
+        event.stopPropagation();
+        const readout = control.nextElementSibling;
+        if (readout) readout.textContent = `${Number(control.value).toFixed(1)} dB`;
+      });
+    });
+    document.querySelectorAll("[data-open]").forEach(element => {
+      element.addEventListener("click", () => openDetail(element.dataset.open));
+      element.addEventListener("keydown", event => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          openDetail(element.dataset.open);
+        }
+      });
+    });
+    document.querySelectorAll(".detail-tab").forEach(button => button.addEventListener("click", () => openDetail(button.dataset.detail)));
+    document.getElementById("closeDetail").addEventListener("click", () => document.getElementById("detailPanel").classList.remove("open"));
+
+    document.querySelectorAll(".mix-row input[type='range']").forEach(slider => {
+      slider.addEventListener("input", () => {
+        const output = slider.parentElement.querySelector("output");
+        if (output) output.textContent = `${Number(slider.value).toFixed(1)} dB`;
+      });
+    });
+    document.querySelectorAll("[data-peer-choice]").forEach(button => {
+      button.addEventListener("click", () => button.classList.toggle("active"));
+    });
+
+    document.querySelectorAll("[data-editor-action]").forEach(button => {
+      button.addEventListener("click", () => {
+        const action = button.dataset.editorAction;
+        const editorLayer = button.closest(".detail-layer")?.dataset.layer;
+        if (action === "add-section") {
+          if (editorLayer === "beats") {
+            beatSectionCount += 1;
+            buildFullBeatGrid();
+          } else {
+            detailChords.push("F", "C", "Am", "G");
+            detailMelody.push("", "", "", "");
+            buildChordEditor();
+          }
+        } else if (action === "duplicate-section") {
+          if (editorLayer === "beats") {
+            beatSectionCount += 1;
+            buildFullBeatGrid();
+          } else {
+            detailChords.push(...detailChords.slice(-4));
+            detailMelody.push(...detailMelody.slice(-4));
+            buildChordEditor();
+          }
+        } else if (action === "delete-section") {
+          if (editorLayer === "beats" && beatSectionCount > 1) {
+            beatSectionCount -= 1;
+            buildFullBeatGrid();
+          } else if (editorLayer !== "beats" && detailChords.length > 4) {
+            detailChords.splice(-4);
+            detailMelody.splice(-4);
+            buildChordEditor();
+          }
+        } else if (action === "expand-grid") {
+          detailChords.push("", "", "", "");
+          detailMelody.push("", "", "", "");
+          buildChordEditor();
+        } else if (action === "shrink-grid" && detailChords.length > 4) {
+          detailChords.splice(-4);
+          detailMelody.splice(-4);
+          buildChordEditor();
+        } else if (action === "generate-chords") {
+          const pool = ["F", "C/E", "Am", "G", "Dm7", "Bb", "C", "Em"];
+          detailChords = detailChords.map((_, index) => pool[(index * 3 + Math.floor(Math.random() * pool.length)) % pool.length]);
+          detailMelody = detailChords.map(chord => chordTones(chord).split(" ")[0] + "4");
+          buildChordEditor();
+        } else if (action === "generate-beats") {
+          beatRows.forEach((row, rowIndex) => {
+            row.hits = Array.from({ length: 16 }, (_, index) => index).filter(index => Math.random() < (.24 + rowIndex * .08));
+          });
+          buildBeatPreview();
+          buildFullBeatGrid();
+        } else if (action === "insert-section") {
+          document.getElementById("lyricsEditor").value += "\n\n[New section]\n";
+        } else if (action === "generate-lyrics") {
+          document.getElementById("lyricsEditor").value += "\nFollow the line into the morning\nleave a space before the change";
+        } else if (action === "clear-lyrics") {
+          document.getElementById("lyricsEditor").value = "";
+        }
+        button.classList.add("active");
+        window.setTimeout(() => button.classList.remove("active"), 420);
+      });
+    });
+
+    let lastTempoTap = 0;
+    document.getElementById("metroStart").addEventListener("click", event => {
+      metronomeEnabled = !metronomeEnabled;
+      event.currentTarget.classList.toggle("active", metronomeEnabled);
+      event.currentTarget.textContent = metronomeEnabled ? "Enabled" : "Disabled";
+      updateSongPosition();
+    });
+    document.getElementById("metroTap").addEventListener("click", () => {
+      const now = performance.now();
+      if (lastTempoTap > 0 && now - lastTempoTap < 2000) {
+        const bpm = Math.max(1, Math.min(400, Math.round(60000 / (now - lastTempoTap))));
+        document.getElementById("metroBpm").value = bpm;
+        document.getElementById("tempoReadout").textContent = bpm;
+      }
+      lastTempoTap = now;
+    });
+    document.getElementById("metroBpm").addEventListener("input", event => {
+      document.getElementById("tempoReadout").textContent = event.currentTarget.value;
+    });
+    document.querySelectorAll("[data-bank]").forEach(button => {
+      button.addEventListener("click", () => {
+        document.querySelectorAll("[data-bank]").forEach(candidate => candidate.classList.toggle("active", candidate === button));
+        document.querySelector(".looper-launch .preview-title").textContent = `Backing tracks / bank ${button.dataset.bank}`;
+      });
+    });
+    document.querySelectorAll("[data-looper-action]").forEach(button => {
+      button.addEventListener("click", () => {
+        if (button.dataset.looperAction === "add-track" || button.dataset.looperAction === "add-wav") {
+          looperLanes.push({ name: button.dataset.looperAction === "add-wav" ? "Imported WAV" : `Empty track ${looperLanes.length + 1}`, start: "0%", width: "42%", gain: -12 });
+          buildLooperWorkspace();
+        }
+        button.classList.toggle("active");
+      });
+    });
+    document.getElementById("playButton").addEventListener("click", event => {
+      playing = !playing;
+      event.currentTarget.textContent = playing ? "Ⅱ" : "▶";
+      event.currentTarget.setAttribute("aria-label", playing ? "Pause" : "Play");
+    });
+    document.getElementById("stopButton").addEventListener("click", () => {
+      playing = false;
+      step = 0;
+      songBar = 17;
+      document.getElementById("playButton").textContent = "▶";
+      updateSongPosition();
+    });
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape") {
+        document.getElementById("detailPanel").classList.remove("open");
+        setDataDrawer(false);
+      }
+    });
+
+    buildBeatPreview();
+    buildDetailViews();
+    rebuildSources();
+    updateSongPosition();
+    renderActivity();
+    resizeNebula();
+    window.addEventListener("resize", resizeNebula);
+    requestAnimationFrame(renderNebula);
+    setInterval(renderActivity, 100);
+    setInterval(() => {
+      if (!playing) return;
+      step = (step + 1) % 16;
+      if (step === 0) songBar = songBar >= 32 ? 17 : songBar + 1;
+      updateSongPosition();
+    }, 125);
+
+    const params = new URLSearchParams(location.search);
+    if (params.get("peers")) document.querySelector(`[data-peers="${params.get("peers")}"]`)?.click();
+    if (params.get("activity")) document.querySelector(`[data-mode="${params.get("activity")}"]`)?.click();
+    if (["chords", "beats", "lyrics", "metronome", "looper"].includes(params.get("panel"))) openDetail(params.get("panel"));
+    if (params.get("data") === "1") setDataDrawer(true);
+    if (params.get("event") === "nova" || params.get("event") === "star") spawnCosmicEvent(params.get("event"), true);
+  </script>
+</body>
+</html>

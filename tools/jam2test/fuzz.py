@@ -218,7 +218,7 @@ def run(args: Any, repo: Path, invocation: InvocationArtifacts,
                 cases.append(case)
                 if signature and len(failures) < MAX_RETAINED_FAILURES:
                     failure_id = normalized_path_id(f"{target}-{index}-{digest[:12]}")
-                    failure_root = invocation.root / "failures" / failure_id
+                    failure_root = invocation.root / failure_id
                     failure_root.mkdir(parents=True)
                     original_path = failure_root / "input.bin"; original_path.write_bytes(data)
                     minimized, attempts = _minimize(

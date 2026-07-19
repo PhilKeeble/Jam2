@@ -196,10 +196,10 @@ Default artifacts are isolated below:
 tools/stress_logs/<invocation-id>/
 ```
 
-An explicit `--output PATH` creates
-`PATH/stress_logs/<invocation-id>`. `--clean` removes only that parent's entire
-`stress_logs` family before the new invocation; other command families are
-untouched.
+An explicit `--output PATH` creates `PATH/<invocation-id>`. The invocation ID
+is a UTC minute timestamp, with a numeric suffix only for a same-minute
+collision. Without a custom output, `--clean` clears only
+`tools/stress_logs`; with one, it clears the exact custom root.
 
 Important files are:
 
@@ -208,9 +208,9 @@ Important files are:
 - `results.csv`: flattened comparison data across selected cases;
 - `format-comparison.json` and `format-comparison.csv`: paired raw/delta/
   percentage measurements when `--network-audio-format both` is selected;
-- `cases/<case>/result.json`: scenario verdict, raw proxy counters, technical
+- `<case>/result.json`: scenario verdict, raw proxy counters, technical
   measurements, and failures/observations;
-- `cases/<case>/peer-N/`: scenario, native manifest, stdout/stderr, CSV, and any
+- `<case>/peer-N/`: scenario, native manifest, stdout/stderr, CSV, and any
   recorded WAV artifacts for each peer.
 
 Two-peer results normally separate `protocol_verdict`, `duration_verdict`, and

@@ -104,11 +104,12 @@ Defaults are isolated below:
 tools/connectivity_logs/<invocation-id>/
 ```
 
-An explicit output parent creates
-`PATH/connectivity_logs/<invocation-id>`. Each run contains
+An explicit `--output PATH` creates `PATH/<invocation-id>` directly. The
+invocation ID is a UTC minute timestamp, with a numeric suffix only for a
+same-minute collision. Each run contains
 `invocation-manifest.json` and `result.json`; direct runs also contain
-`token.txt`. `--clean` removes only the selected parent's complete
-`connectivity_logs` family.
+`token.txt`. Without a custom output, `--clean` clears only
+`tools/connectivity_logs`; with one, it clears the exact custom root.
 
 Exit code `0` means STUN mapping succeeded, a direct probe passed, or a token
 was generated and is awaiting its peer. Exit code `1` means the requested

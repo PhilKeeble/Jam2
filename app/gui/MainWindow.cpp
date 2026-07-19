@@ -3776,8 +3776,8 @@ void MainWindow::refreshLooperLanes()
         if (looperBankButtons_[i]) {
             looperBankButtons_[i]->setChecked(i == looperProject_.activeBankIndex());
             looperBankButtons_[i]->setStyleSheet(i == looperProject_.activeBankIndex()
-                ? QStringLiteral("QPushButton { background: #4a7496; color: #e6eef4; border: 1px solid #6e8fa8; padding: 4px; }")
-                : QStringLiteral("QPushButton { background: #272d33; color: #aab2ba; border: 1px solid #4a525a; padding: 4px; }"));
+                ? QStringLiteral("QPushButton { background: #255f72; color: #ffffff; border: 1px solid #419f81; padding: 4px; }")
+                : QStringLiteral("QPushButton { background: #171a1c; color: #a4afb5; border: 1px solid #596269; padding: 4px; }"));
         }
     }
     if (looperStack_ == nullptr) {

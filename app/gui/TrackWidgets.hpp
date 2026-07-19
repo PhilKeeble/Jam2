@@ -1,5 +1,6 @@
 #pragma once
 
+#include "GuiTheme.hpp"
 #include "LooperProject.hpp"
 
 #include <QColor>
@@ -43,6 +44,8 @@ inline qint64 looperTimelineViewFrames(
 }
 
 } // namespace jam2::gui
+
+namespace theme = jam2::gui::theme;
 
 class WaveformWidget : public QWidget {
 public:
@@ -111,7 +114,7 @@ protected:
     void paintEvent(QPaintEvent*) override
     {
         QPainter painter(this);
-        painter.fillRect(rect(), QColor(18, 20, 22));
+        painter.fillRect(rect(), theme::editorBg);
         painter.setRenderHint(QPainter::Antialiasing, false);
 
         if (durationMs_ > 0 && bpm_ > 0.0) {
@@ -122,9 +125,9 @@ protected:
                 const qint64 beatPosition = static_cast<qint64>(std::llround(beat * beatMs));
                 const int x = xForMs(beatPosition);
                 const bool bar = beat % beatsPerBar_ == 0;
-                painter.setPen(bar ? QColor(76, 86, 96) : QColor(42, 48, 54));
+                painter.setPen(bar ? theme::gridBar : theme::gridBeat);
                 painter.drawLine(x, 0, x, height());
-                painter.setPen(bar ? QColor(168, 176, 184) : QColor(126, 134, 142));
+                painter.setPen(bar ? theme::text : theme::textMuted);
                 painter.drawText(
                     x + 4, 18,
                     QString::number(jam2::gui::trackTimelineBeatNumber(beat)));
@@ -132,14 +135,14 @@ protected:
             if (gridRunning_) {
                 const qint64 beatPosition = durationMs_ > 0 ? gridPositionMs_ % durationMs_ : 0;
                 painter.setPen(Qt::NoPen);
-                painter.setBrush(QColor(102, 198, 166));
+                painter.setBrush(theme::accent);
                 painter.drawEllipse(QPoint(xForMs(beatPosition), 7), 4, 4);
             }
         }
 
-        painter.setPen(QColor(58, 64, 70));
+        painter.setPen(theme::border);
         painter.drawLine(0, height() / 2, width(), height() / 2);
-        painter.setPen(QColor(102, 198, 166));
+        painter.setPen(theme::waveform);
         if (!peaks_.empty()) {
             for (int x = 0; x < width(); ++x) {
                 const int index = qBound(0, x * static_cast<int>(peaks_.size()) / qMax(1, width()), static_cast<int>(peaks_.size()) - 1);
@@ -147,21 +150,23 @@ protected:
                 painter.drawLine(x, height() / 2 - half, x, height() / 2 + half);
             }
         }
-        painter.setPen(QColor(220, 224, 226));
+        painter.setPen(theme::text);
         painter.drawText(rect().adjusted(12, 8, -12, -8), Qt::AlignLeft | Qt::AlignTop, label_);
 
-        drawLoopMarker(painter, loopStartMs_, QColor(82, 170, 255), QStringLiteral("Loop Start"));
-        drawLoopMarker(painter, loopEndMs_, QColor(255, 184, 82), QStringLiteral("Loop End"));
+        drawLoopMarker(painter, loopStartMs_, theme::success, QStringLiteral("Loop Start"));
+        drawLoopMarker(painter, loopEndMs_, theme::warning, QStringLiteral("Loop End"));
 
         if (loopStartMs_ >= 0 && loopEndMs_ > loopStartMs_) {
             const int startX = xForMs(loopStartMs_);
             const int endX = xForMs(loopEndMs_);
-            painter.fillRect(QRect(QPoint(startX, 0), QPoint(endX, height())).normalized(), QColor(86, 132, 210, 28));
+            painter.fillRect(
+                QRect(QPoint(startX, 0), QPoint(endX, height())).normalized(),
+                theme::withAlpha(theme::selection, 72));
         }
 
         if (durationMs_ > 0) {
             const int playheadX = xForMs(playheadMs_);
-            painter.setPen(QPen(QColor(255, 92, 92), 2));
+            painter.setPen(QPen(theme::playhead, 2));
             painter.drawLine(playheadX, 0, playheadX, height());
         }
     }
@@ -328,7 +333,7 @@ protected:
     void paintEvent(QPaintEvent*) override
     {
         QPainter painter(this);
-        painter.fillRect(rect(), QColor(15, 17, 19));
+        painter.fillRect(rect(), theme::editorBg);
         painter.setRenderHint(QPainter::Antialiasing, false);
 
         drawToolbar(painter);
@@ -341,10 +346,10 @@ protected:
         drawOverlays(painter);
 
         const QRect plus = plusRect();
-        painter.fillRect(plus, QColor(28, 32, 36));
-        painter.setPen(QColor(86, 94, 102));
+        painter.fillRect(plus, theme::buttonBg);
+        painter.setPen(theme::borderStrong);
         painter.drawRect(plus.adjusted(0, 0, -1, -1));
-        painter.setPen(QColor(220, 224, 226));
+        painter.setPen(theme::text);
         painter.drawText(plus.adjusted(0, 0, 0, 0), Qt::AlignCenter, QStringLiteral("+"));
     }
 
@@ -618,8 +623,8 @@ private:
 
     void drawToolbar(QPainter& painter)
     {
-        painter.fillRect(QRect(0, 0, width(), kToolbarHeight), QColor(25, 29, 33));
-        painter.setPen(QColor(72, 80, 88));
+        painter.fillRect(QRect(0, 0, width(), kToolbarHeight), theme::panelRaised);
+        painter.setPen(theme::border);
         painter.drawLine(0, kToolbarHeight - 1, width(), kToolbarHeight - 1);
         if (bpm_ > 0.0) {
             const QRect area = QRect(kHeaderWidth, 0, width() - kHeaderWidth, kToolbarHeight);
@@ -631,11 +636,11 @@ private:
             for (int beat = 0; beat < beatCount; ++beat) {
                 const int x = xForFrame(static_cast<qint64>(std::llround(beat * beatFrames)));
                 if (x >= area.right()) break;
-                painter.setPen(beat % beatsPerBar_ == 0 ? QColor(90, 100, 110) : QColor(56, 62, 68));
+                painter.setPen(beat % beatsPerBar_ == 0 ? theme::gridBar : theme::gridBeat);
                 const int gridBottom = kToolbarHeight + visualLaneCount() * kLaneHeight - 1;
                 painter.drawLine(x, 0, x, gridBottom);
                 painter.setPen(beat % beatsPerBar_ == 0
-                    ? QColor(168, 176, 184) : QColor(126, 134, 142));
+                    ? theme::text : theme::textMuted);
                 painter.drawText(
                     x + 4, 20,
                     QString::number(jam2::gui::trackTimelineBeatNumber(beat)));
@@ -660,10 +665,10 @@ private:
             painter.drawLine(x, top, x, bottom);
         };
         if (loopStartMs_ >= 0) {
-            drawMarker(loopStartMs_, QColor(86, 210, 124), 2);
+            drawMarker(loopStartMs_, theme::success, 2);
         }
         if (loopEndMs_ >= 0) {
-            drawMarker(loopEndMs_, QColor(86, 210, 124), 2);
+            drawMarker(loopEndMs_, theme::success, 2);
         }
         if (gridRunning_) {
             const qint64 frames = viewFrames();
@@ -671,13 +676,13 @@ private:
                 ? (gridPositionMs_ * static_cast<qint64>(rate) / 1000) % frames
                 : 0;
             const int x = xForFrame(currentBeatFrame);
-            painter.setPen(QPen(QColor(102, 198, 166, 150), 1));
+            painter.setPen(QPen(theme::withAlpha(theme::accent, 150), 1));
             painter.drawLine(x, top, x, bottom);
             painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor(102, 198, 166));
+            painter.setBrush(theme::accent);
             painter.drawEllipse(QPoint(x, kToolbarHeight - 8), 4, 4);
         }
-        drawMarker(playheadMs_, QColor(232, 64, 64), 2);
+        drawMarker(playheadMs_, theme::playhead, 2);
     }
 
     void drawLane(QPainter& painter, int row)
@@ -686,9 +691,9 @@ private:
         const LooperLane lane = realLane ? lanes_[row].lane : LooperLane{QString(), QString(), QString(), QStringLiteral("Empty Track 1")};
         const QRect rowRect = laneRect(row);
         const bool selected = row == selectedLane_;
-        painter.fillRect(rowRect.adjusted(0, 0, 0, -1), selected ? QColor(38, 45, 52) : QColor(31, 36, 41));
-        painter.fillRect(rowRect.adjusted(kHeaderWidth, 0, 0, -1), QColor(18, 20, 22));
-        painter.setPen(QColor(52, 60, 68));
+        painter.fillRect(rowRect.adjusted(0, 0, 0, -1), selected ? theme::selection : theme::panelBg);
+        painter.fillRect(rowRect.adjusted(kHeaderWidth, 0, 0, -1), theme::editorBg);
+        painter.setPen(theme::border);
         painter.drawLine(0, rowRect.bottom(), width(), rowRect.bottom());
         painter.drawLine(kHeaderWidth, rowRect.top(), kHeaderWidth, rowRect.bottom());
 
@@ -725,42 +730,42 @@ private:
     void drawLaneHeader(QPainter& painter, int row, const LooperLane& lane, bool realLane)
     {
         const QRect r = laneRect(row);
-        painter.setPen(QColor(210, 216, 222));
+        painter.setPen(theme::textStrong);
         painter.drawText(
             QRect(28, r.top() + 8, kHeaderWidth - 92, 22),
             Qt::AlignLeft | Qt::AlignVCenter,
             lane.name.isEmpty() ? QStringLiteral("Empty Track %1").arg(row + 1) : lane.name);
 
-        drawButton(painter, controlRect(row, QStringLiteral("mute")), QStringLiteral("Mute"), realLane && lane.muted ? QColor(188, 150, 72) : QColor(50, 56, 62));
-        drawButton(painter, controlRect(row, QStringLiteral("solo")), QStringLiteral("Solo"), realLane && lane.solo ? QColor(84, 148, 112) : QColor(50, 56, 62));
-        drawButton(painter, controlRect(row, QStringLiteral("arm")), QStringLiteral("Record"), row == armedLane_ ? QColor(190, 70, 70) : QColor(50, 56, 62));
-        drawIconButton(painter, controlRect(row, QStringLiteral("rename")), QStringLiteral("pencil"), QColor(42, 48, 54));
-        drawButton(painter, controlRect(row, QStringLiteral("remove")), QStringLiteral("X"), QColor(78, 38, 38));
+        drawButton(painter, controlRect(row, QStringLiteral("mute")), QStringLiteral("Mute"), realLane && lane.muted ? theme::warning : theme::buttonBg);
+        drawButton(painter, controlRect(row, QStringLiteral("solo")), QStringLiteral("Solo"), realLane && lane.solo ? theme::success : theme::buttonBg);
+        drawButton(painter, controlRect(row, QStringLiteral("arm")), QStringLiteral("Record"), row == armedLane_ ? theme::record : theme::buttonBg);
+        drawIconButton(painter, controlRect(row, QStringLiteral("rename")), QStringLiteral("pencil"), theme::buttonBg);
+        drawButton(painter, controlRect(row, QStringLiteral("remove")), QStringLiteral("X"), theme::withAlpha(theme::danger, 96));
 
         const QRect slider = gainRect(row);
-        painter.fillRect(slider, QColor(18, 20, 22));
-        painter.setPen(QColor(76, 86, 96));
+        painter.fillRect(slider, theme::meterBg);
+        painter.setPen(theme::border);
         painter.drawRect(slider.adjusted(0, 0, -1, -1));
         const double t = qBound(0.0, (lane.gainDb + 60.0) / 72.0, 1.0);
         const int y = slider.bottom() - static_cast<int>(std::llround(t * slider.height()));
-        painter.fillRect(QRect(slider.left(), y, slider.width(), slider.bottom() - y + 1), QColor(102, 198, 166));
+        painter.fillRect(QRect(slider.left(), y, slider.width(), slider.bottom() - y + 1), theme::accent);
     }
 
     void drawButton(QPainter& painter, const QRect& rect, const QString& text, const QColor& fill)
     {
         painter.fillRect(rect, fill);
-        painter.setPen(QColor(94, 104, 114));
+        painter.setPen(theme::borderStrong);
         painter.drawRect(rect.adjusted(0, 0, -1, -1));
-        painter.setPen(QColor(230, 234, 236));
+        painter.setPen(theme::textStrong);
         painter.drawText(rect, Qt::AlignCenter, text);
     }
 
     void drawIconButton(QPainter& painter, const QRect& rect, const QString& icon, const QColor& fill)
     {
         painter.fillRect(rect, fill);
-        painter.setPen(QColor(94, 104, 114));
+        painter.setPen(theme::borderStrong);
         painter.drawRect(rect.adjusted(0, 0, -1, -1));
-        painter.setPen(QPen(QColor(230, 234, 236), 2));
+        painter.setPen(QPen(theme::textStrong, 2));
         if (icon == QStringLiteral("pencil")) {
             painter.drawLine(rect.left() + 5, rect.bottom() - 5, rect.right() - 5, rect.top() + 5);
             painter.drawLine(rect.left() + 4, rect.bottom() - 4, rect.left() + 7, rect.bottom() - 3);
@@ -770,16 +775,16 @@ private:
     void drawLaneWaveform(QPainter& painter, int row, bool realLane)
     {
         const QRect area = laneTimelineRect(row).adjusted(0, 12, -1, -12);
-        painter.setPen(QColor(44, 50, 56));
+        painter.setPen(theme::gridBeat);
         painter.drawLine(area.left(), area.center().y(), area.right(), area.center().y());
         if (!realLane || row >= lanes_.size() || lanes_[row].sourceFrames <= 0 || lanes_[row].peaks.empty()) {
-            painter.setPen(QColor(90, 98, 106));
+            painter.setPen(theme::border);
             painter.drawLine(area.left(), area.center().y(), area.right(), area.center().y());
             return;
         }
         const QRect clip = clipRect(row);
-        painter.fillRect(clip, QColor(36, 62, 92));
-        painter.setPen(QColor(132, 205, 180));
+        painter.fillRect(clip, theme::clipBg);
+        painter.setPen(theme::waveform);
         const auto& peaks = lanes_[row].peaks;
         const qint64 firstSourceFrame = sourceStart(row);
         const qint64 croppedFrames = visibleFrames(row);
@@ -795,9 +800,9 @@ private:
             const int half = qMax(2, static_cast<int>(peaks[index] * (clip.height() / 2 - 4)));
             painter.drawLine(x, clip.center().y() - half, x, clip.center().y() + half);
         }
-        painter.fillRect(QRect(clip.left(), clip.top(), 6, clip.height()), QColor(115, 190, 255, 150));
-        painter.fillRect(QRect(clip.right() - 5, clip.top(), 6, clip.height()), QColor(115, 190, 255, 150));
-        painter.setPen(QColor(190, 218, 255));
+        painter.fillRect(QRect(clip.left(), clip.top(), 6, clip.height()), theme::withAlpha(theme::accent, 180));
+        painter.fillRect(QRect(clip.right() - 5, clip.top(), 6, clip.height()), theme::withAlpha(theme::accent, 180));
+        painter.setPen(theme::textStrong);
         painter.drawText(clip.adjusted(6, 2, -6, -2), Qt::AlignLeft | Qt::AlignTop, lanes_[row].lane.name);
     }
 
@@ -930,23 +935,23 @@ protected:
         painter.setRenderHint(QPainter::Antialiasing, false);
         const QRect bar = rect().adjusted(0, 2, 0, -2);
         const bool active = isEnabled();
-        painter.fillRect(bar, active ? QColor(28, 32, 36) : QColor(34, 36, 38));
+        painter.fillRect(bar, active ? theme::meterBg : theme::panelRaised);
         const int safeEnd = bar.left() + static_cast<int>(bar.width() * 0.50);
         const int warnEnd = bar.left() + static_cast<int>(bar.width() * 0.89);
         painter.fillRect(QRect(QPoint(safeEnd, bar.top()), QPoint(warnEnd, bar.bottom())),
-            active ? QColor(72, 56, 24) : QColor(45, 42, 38));
+            active ? theme::withAlpha(theme::warning, 64) : theme::panelBg);
         painter.fillRect(QRect(QPoint(warnEnd, bar.top()), QPoint(bar.right(), bar.bottom())),
-            active ? QColor(76, 30, 30) : QColor(46, 38, 38));
+            active ? theme::withAlpha(theme::danger, 64) : theme::panelBg);
 
         const int fillWidth = qBound(0, static_cast<int>(std::llround(level_ * static_cast<double>(bar.width()))), bar.width());
-        QColor fill = active ? QColor(94, 188, 132) : QColor(82, 88, 92);
+        QColor fill = active ? theme::meterSafe : theme::textMuted;
         if (active && level_ >= 0.891) {
-            fill = QColor(224, 74, 74);
+            fill = theme::danger;
         } else if (active && level_ >= 0.501) {
-            fill = QColor(230, 151, 55);
+            fill = theme::meterWarn;
         }
         painter.fillRect(QRect(bar.left(), bar.top(), fillWidth, bar.height()), fill);
-        painter.setPen(active ? QColor(86, 94, 102) : QColor(58, 62, 66));
+        painter.setPen(active ? theme::border : theme::gridBeat);
         painter.drawRect(bar.adjusted(0, 0, -1, -1));
     }
 
