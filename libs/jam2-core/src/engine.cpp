@@ -448,13 +448,11 @@ private:
                     clamp_i32(static_cast<double>(capture_scratch_[index]) * monitor_level));
             }
             output_scratch_[index] = sample;
-            if (sample == (std::numeric_limits<std::int32_t>::min)() ||
-                sample == (std::numeric_limits<std::int32_t>::max)()) {
-                control_.output_clipped_samples.fetch_add(1, std::memory_order_relaxed);
-            }
         }
+        int prepared_track_peak = 0;
         if (control_.prepared_source != nullptr && !output_scratch_.empty()) {
-            control_.prepared_source->mix(output_scratch_.data(), output_scratch_.size(), callback_frame);
+            prepared_track_peak = control_.prepared_source->mix(
+                output_scratch_.data(), output_scratch_.size(), callback_frame);
             control_.prepared_source_frame.store(control_.prepared_source->sourceFrame(), std::memory_order_relaxed);
             control_.prepared_source_scheduled_start_frame.store(
                 control_.prepared_source->scheduledStartFrame(),
@@ -464,6 +462,8 @@ private:
                 std::memory_order_relaxed);
             control_.prepared_source_underruns.store(control_.prepared_source->underruns(), std::memory_order_relaxed);
         }
+        update_peak(control_.prepared_track_peak_ppm, prepared_track_peak);
+        update_peak(control_.gui_prepared_track_peak_ppm, prepared_track_peak);
         mix_metronome_output(
             control_,
             callback_frame,
@@ -473,6 +473,16 @@ private:
         const int metronome_peak = peak_ppm(metronome_scratch_);
         update_peak(control_.metronome_peak_ppm, metronome_peak);
         update_peak(control_.gui_metronome_peak_ppm, metronome_peak);
+        const double output_level = static_cast<double>(
+            clamp_gain(control_.output_level_ppm.load(std::memory_order_relaxed))) /
+            1000000.0;
+        for (std::int32_t& sample : output_scratch_) {
+            sample = clamp_i32(static_cast<double>(sample) * output_level);
+            if (sample == (std::numeric_limits<std::int32_t>::min)() ||
+                sample == (std::numeric_limits<std::int32_t>::max)()) {
+                control_.output_clipped_samples.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
         if (track_take_recorder_ != nullptr) {
             track_take_recorder_->record(callback_frame, capture_scratch_);
         }
@@ -821,6 +831,9 @@ struct Engine::Impl {
             return true;
         case EngineCommandType::SetSendLevel:
             control->send_level_ppm.store(clamp_gain(command.value), std::memory_order_relaxed);
+            return true;
+        case EngineCommandType::SetOutputLevel:
+            control->output_level_ppm.store(clamp_gain(command.value), std::memory_order_relaxed);
             return true;
         case EngineCommandType::SetLocalMonitorEnabled:
             control->local_monitor_enabled.store(command.enabled, std::memory_order_relaxed);
@@ -1236,6 +1249,7 @@ void Engine::start(const EngineConfig& requested)
         control.metronome_level_ppm.store(clamp_gain(impl_->config.metronome_level_ppm), std::memory_order_relaxed);
         control.remote_level_ppm.store(clamp_gain(impl_->config.remote_level_ppm), std::memory_order_relaxed);
         control.send_level_ppm.store(clamp_gain(impl_->config.send_level_ppm), std::memory_order_relaxed);
+        control.output_level_ppm.store(clamp_gain(impl_->config.output_level_ppm), std::memory_order_relaxed);
         control.local_monitor_enabled.store(impl_->config.local_monitor_enabled, std::memory_order_relaxed);
         control.local_monitor_level_ppm.store(clamp_gain(impl_->config.local_monitor_level_ppm), std::memory_order_relaxed);
         control.playback_ratio_ppm.store(1000000, std::memory_order_relaxed);
@@ -1417,6 +1431,7 @@ EngineSnapshot Engine::snapshot() const noexcept
     result.metronome_level_ppm = control.metronome_level_ppm.load(std::memory_order_relaxed);
     result.remote_level_ppm = control.remote_level_ppm.load(std::memory_order_relaxed);
     result.send_level_ppm = control.send_level_ppm.load(std::memory_order_relaxed);
+    result.output_level_ppm = control.output_level_ppm.load(std::memory_order_relaxed);
     result.local_monitor_enabled = control.local_monitor_enabled.load(std::memory_order_relaxed);
     result.local_monitor_level_ppm = control.local_monitor_level_ppm.load(std::memory_order_relaxed);
     result.playback_ratio_ppm = control.playback_ratio_ppm.load(std::memory_order_relaxed);
@@ -1440,6 +1455,8 @@ EngineSnapshot Engine::snapshot() const noexcept
     result.send_peak_ppm = control.send_peak_ppm.load(std::memory_order_relaxed);
     result.monitor_peak_ppm = control.monitor_peak_ppm.load(std::memory_order_relaxed);
     result.remote_peak_ppm = control.remote_peak_ppm.load(std::memory_order_relaxed);
+    result.prepared_track_peak_ppm =
+        control.prepared_track_peak_ppm.load(std::memory_order_relaxed);
     result.metronome_peak_ppm = control.metronome_peak_ppm.load(std::memory_order_relaxed);
     result.output_peak_ppm = control.output_peak_ppm.load(std::memory_order_relaxed);
     result.output_clipped_samples = control.output_clipped_samples.load(std::memory_order_relaxed);
@@ -1517,6 +1534,8 @@ EngineGuiPeakSnapshot Engine::consumeGuiPeaks() noexcept
     result.input_peak_ppm = control.gui_input_peak_ppm.exchange(0, std::memory_order_acq_rel);
     result.monitor_peak_ppm = control.gui_monitor_peak_ppm.exchange(0, std::memory_order_acq_rel);
     result.remote_peak_ppm = control.gui_remote_peak_ppm.exchange(0, std::memory_order_acq_rel);
+    result.prepared_track_peak_ppm =
+        control.gui_prepared_track_peak_ppm.exchange(0, std::memory_order_acq_rel);
     result.metronome_peak_ppm = control.gui_metronome_peak_ppm.exchange(0, std::memory_order_acq_rel);
     result.output_peak_ppm = control.gui_output_peak_ppm.exchange(0, std::memory_order_acq_rel);
     return result;

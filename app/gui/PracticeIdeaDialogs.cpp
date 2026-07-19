@@ -29,7 +29,7 @@ QComboBox* barsCombo(QWidget* parent)
 {
     auto* combo = new QComboBox(parent);
     combo->addItem(QStringLiteral("Random"), 0);
-    for (int bars : {1, 2, 4, 8, 12, 16, 32}) combo->addItem(QString::number(bars), bars);
+    for (int bars : {4, 8, 12, 16}) combo->addItem(QString::number(bars), bars);
     return combo;
 }
 

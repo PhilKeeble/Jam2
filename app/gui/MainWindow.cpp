@@ -54,6 +54,7 @@
 #include <QList>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QMouseEvent>
 #include <QNetworkInterface>
 #include <QIODevice>
 #include <QProgressDialog>
@@ -68,7 +69,9 @@
 #include <QSizePolicy>
 #include <QSplitter>
 #include <QScrollArea>
+#include <QStackedWidget>
 #include <QStringList>
+#include <QStyle>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTemporaryFile>
@@ -101,6 +104,14 @@ constexpr int kMaxLooperAssetRequests = jam2::application::limits::kMaximumAsset
 constexpr int kMaxLooperTrackContributions = 512;
 constexpr int kFirewallGuidanceDisconnectThreshold = 3;
 constexpr int kFirewallGuidanceWindowMs = 10000;
+
+bool isManagedPracticeReference(const LooperLane& lane)
+{
+    return !lane.referenceKind.isEmpty() ||
+        lane.name == QStringLiteral("Practice Chords") ||
+        lane.name == QStringLiteral("Practice Drums") ||
+        lane.name == QStringLiteral("Practice Melody");
+}
 
 QComboBox* fixedSampleRateCombo(QWidget* parent, int value)
 {
@@ -659,6 +670,18 @@ bool isWheelValueEditor(QObject* object)
     return false;
 }
 
+bool isComboBoxPopupObject(QObject* object)
+{
+    for (QObject* current = object; current != nullptr; current = current->parent()) {
+        const QString className = QString::fromLatin1(current->metaObject()->className());
+        if (className.contains(QStringLiteral("QComboBoxListView")) ||
+            className.contains(QStringLiteral("QComboBoxPrivateContainer"))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 QScrollArea* parentScrollArea(QObject* object)
 {
     auto* widget = qobject_cast<QWidget*>(object);
@@ -699,9 +722,9 @@ MainWindow::MainWindow(QWidget* parent)
     , assetTransfer_(trackWorkspace_.assetTransfer)
     , metronomeTransport_(jam2_)
     , trackRecordingWorkflow_(trackWorkspace_.recordingWorkflow)
-    , chordModel_(trackWorkspace_.chordModel)
-    , beatModel_(trackWorkspace_.beatModel)
-    , lyricModel_(trackWorkspace_.lyricModel)
+    , chordModel_(trackWorkspace_.songModel)
+    , beatModel_(trackWorkspace_.songModel)
+    , lyricModel_(trackWorkspace_.songModel)
     , projectPersistence_(trackWorkspace_.persistence)
     , preparedMix_(trackWorkspace_.preparedMix)
     , fileWorkerPool_(trackWorkspace_.fileWorkers)
@@ -1005,7 +1028,18 @@ void MainWindow::closeEvent(QCloseEvent* event)
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event)
 {
+    if (watched == connectionLabel_ &&
+        event->type() == QEvent::MouseButtonRelease) {
+        auto* mouse = static_cast<QMouseEvent*>(event);
+        if (mouse->button() == Qt::LeftButton && controlRefreshAvailable_) {
+            refreshControlConnection();
+            return true;
+        }
+    }
     if (event->type() == QEvent::Wheel && isWheelValueEditor(watched)) {
+        if (isComboBoxPopupObject(watched)) {
+            return false;
+        }
         if (auto* scrollArea = parentScrollArea(watched)) {
             scrollAreaByWheel(*scrollArea, *static_cast<QWheelEvent*>(event));
             return true;
@@ -1031,6 +1065,7 @@ void MainWindow::updateMixControls()
 
 {
     const bool jamActive = jam2_.isRunning();
+    const bool networkActive = jam2_.isNetworkRunning();
     auto setModeEnabled = [](QWidget* widget, bool enabled) {
         if (widget != nullptr) {
             widget->setEnabled(enabled);
@@ -1055,6 +1090,25 @@ void MainWindow::updateMixControls()
     setModeEnabled(mixOutputMeterRow_, jamActive);
     setModeEnabled(mixRemotePeersSection_, true);
     setModeEnabled(mixRemotePeerRow_, true);
+    const bool peerSelected = networkActive && selectedPeerId_ != 0;
+    if (performanceLocalControls_) {
+        performanceLocalControls_->setVisible(!peerSelected);
+    }
+    if (performancePeerControls_) {
+        performancePeerControls_->setVisible(peerSelected);
+    }
+    if (performanceMasterOutputControls_) {
+        performanceMasterOutputControls_->setVisible(true);
+    }
+    if (performanceLeftTitle_) {
+        performanceLeftTitle_->setText(peerSelected
+            ? QStringLiteral("PEER %1 · RECEIVE VOLUME")
+                .arg(peerOrdinals_.value(selectedPeerId_, 0))
+            : QStringLiteral("YOU / LOCAL INPUT"));
+    }
+    if (performanceRightTitle_) {
+        performanceRightTitle_->setText(QStringLiteral("MASTER OUTPUT"));
+    }
     if (!jamActive) {
         mixerStatsViewModel_.reset();
         if (mixInputMeter_) {
@@ -1094,6 +1148,10 @@ void MainWindow::updateMixControls()
     if (mixMonitorLevelSlider_ && mixMonitorLevelLabel_) {
         mixMonitorLevelLabel_->setText(dbText(static_cast<double>(mixMonitorLevelSlider_->value())));
     }
+    if (masterOutputLevelSlider_ && masterOutputLevelLabel_) {
+        masterOutputLevelLabel_->setText(
+            dbText(static_cast<double>(masterOutputLevelSlider_->value())));
+    }
 }
 
 void MainWindow::setMixRemotePeerVisible(bool visible)
@@ -1105,31 +1163,8 @@ void MainWindow::setMixRemotePeerVisible(bool visible)
 
 void MainWindow::updateMixRemotePeers()
 {
-    const SharedSessionController::Role role = sessionController_.snapshot().role;
-    const bool networkSession = role == SharedSessionController::Role::Creator ||
-        role == SharedSessionController::Role::Joiner;
-    QStringList peers;
-    if (networkSession) {
-        peers = meshPeerEndpointsExcludingSelf();
-    }
-
-    if (mixRemotePeerListLayout_) {
-        while (QLayoutItem* item = mixRemotePeerListLayout_->takeAt(0)) {
-            delete item->widget();
-            delete item;
-        }
-        for (int index = 0; index < peers.size(); ++index) {
-            auto* label = new QLabel(
-                networkSession
-                    ? QStringLiteral("Peer %1 - %2").arg(index + 1).arg(peers.at(index))
-                    : peers.at(index),
-                mixRemotePeerRow_);
-            label->setTextInteractionFlags(Qt::TextSelectableByMouse);
-            mixRemotePeerListLayout_->addWidget(label);
-        }
-    }
-
-    const bool visible = !peers.isEmpty();
+    updatePerformancePeers();
+    const bool visible = !operationalPeers_.isEmpty();
     if (mixRemotePeerRow_) {
         mixRemotePeerRow_->setVisible(visible);
         mixRemotePeerRow_->setEnabled(true);
@@ -1245,8 +1280,24 @@ void MainWindow::showLocalPerformSetup()
     refreshDevices();
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Start Local Engine"));
+    dialog.setObjectName(QStringLiteral("LocalEngineDialog"));
+    dialog.setModal(true);
+    dialog.setWindowModality(Qt::WindowModal);
+    dialog.setSizeGripEnabled(false);
+    dialog.setWindowFlag(Qt::WindowMaximizeButtonHint, false);
     auto* form = new QFormLayout(&dialog);
+    form->setSizeConstraint(QLayout::SetFixedSize);
+    form->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
+    form->setFormAlignment(Qt::AlignHCenter | Qt::AlignTop);
+    form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    form->setContentsMargins(22, 20, 22, 18);
+    form->setHorizontalSpacing(18);
+    form->setVerticalSpacing(12);
     auto* device = new QComboBox(&dialog);
+    device->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    device->setMinimumContentsLength(42);
+    device->setMinimumWidth(420);
+    device->setMaximumWidth(520);
     for (int index = 0; deviceBox_ && index < deviceBox_->count(); ++index) {
         device->addItem(deviceBox_->itemText(index), deviceBox_->itemData(index));
     }
@@ -1265,6 +1316,8 @@ void MainWindow::showLocalPerformSetup()
     auto* bufferSize = fixedBufferSizeCombo(&dialog, preferences_.localAudio.bufferSize);
     auto* inputChannels = new QLineEdit(preferences_.localAudio.inputChannels, &dialog);
     auto* outputChannels = new QLineEdit(preferences_.localAudio.outputChannels, &dialog);
+    inputChannels->setMinimumWidth(320);
+    outputChannels->setMinimumWidth(320);
     auto* testDevice = new QPushButton(QStringLiteral("Test Device"), &dialog);
     auto* saveDefaults = new QCheckBox(QStringLiteral("Save as Local defaults"), &dialog);
     form->addRow(QStringLiteral("Low-latency device"), device);
@@ -1282,6 +1335,18 @@ void MainWindow::showLocalPerformSetup()
     QObject::connect(testDevice, &QPushButton::clicked, this, [this, device, testDevice, &dialog] {
         testDeviceSelection(device, testDevice, &dialog);
     });
+    dialog.adjustSize();
+    const auto centerDialog = [this, &dialog] {
+        const QPoint center = frameGeometry().center();
+        const QSize dialogFrame = dialog.frameGeometry().size();
+        dialog.move(
+            center.x() - dialogFrame.width() / 2,
+            center.y() - dialogFrame.height() / 2);
+    };
+    dialog.show();
+    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    centerDialog();
+    QTimer::singleShot(50, &dialog, centerDialog);
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }
@@ -1486,6 +1551,7 @@ void MainWindow::showJamFailure(const QString& detail)
 
 void MainWindow::launchLocalRuntime(Jam2RuntimeOptions options)
 {
+    controlRefreshAvailable_ = false;
     if (sessionTopologyLabel_) {
         sessionTopologyLabel_->setText(QStringLiteral("Remote Peers 0"));
         sessionTopologyLabel_->setToolTip(QString{});
@@ -1514,6 +1580,7 @@ void MainWindow::launchLocalRuntime(Jam2RuntimeOptions options)
 
 void MainWindow::prepareNetworkRuntimePresentation(bool createSession)
 {
+    controlRefreshAvailable_ = false;
     if (createSession) {
         metronomeTransport_.setLocalState(false, false);
     }
@@ -1675,11 +1742,20 @@ void MainWindow::handleEngineSnapshot(const jam2::EngineSnapshot& snapshot)
         sendSongSnapshot(false);
     }
 
+    const jam2::EngineGuiPeakSnapshot peaks = jam2_.consumeGuiPeaks();
+    if (performanceHome_) {
+        performanceHome_->setAudioPeaks(peaks);
+    }
     updateMixMeters(mixerStatsViewModel_.consume(
-        jam2_.consumeGuiPeaks(),
+        peaks,
         static_cast<double>(snapshot.send_level_ppm) / 1000000.0,
         snapshot.output_clipped_samples));
-
+    if (diagnosticSampleRateValue_) {
+        diagnosticSampleRateValue_->setText(
+            snapshot.sample_rate > 0.0
+                ? QStringLiteral("%1 Hz").arg(snapshot.sample_rate, 0, 'f', 0)
+                : QStringLiteral("-"));
+    }
     updatePlaybackGrid();
 }
 
@@ -1721,7 +1797,17 @@ void MainWindow::handleEngineEvent(const jam2::EngineEvent& event)
 
 void MainWindow::handleNetworkSnapshot(const Jam2NetworkOperationalSnapshot& snapshot)
 {
+    operationalPeers_ = QVector<Jam2OperationalPeer>(
+        snapshot.peers.cbegin(), snapshot.peers.cend());
     for (const Jam2OperationalPeer& peer : snapshot.peers) {
+        if (!peerOrdinals_.contains(peer.peer_id)) {
+            peerOrdinals_.insert(peer.peer_id, nextPeerOrdinal_++);
+        }
+        if (!desiredPeerGainDb_.contains(peer.peer_id)) {
+            desiredPeerGainDb_.insert(peer.peer_id, peer.gain_db);
+        } else if (std::abs(desiredPeerGainDb_.value(peer.peer_id) - peer.gain_db) > 0.05) {
+            (void)jam2_.setPeerGainDb(peer.peer_id, desiredPeerGainDb_.value(peer.peer_id));
+        }
         const SharedSessionController::EdgeState edge =
             peer.endpoint_state == jam2::PeerEndpointState::Active
                 ? SharedSessionController::EdgeState::Active
@@ -1740,10 +1826,12 @@ void MainWindow::handleNetworkSnapshot(const Jam2NetworkOperationalSnapshot& sna
             proof,
             peer.receiving_audio ? QStringLiteral("receiving") : QStringLiteral("waiting"));
     }
+    updatePerformancePeers();
 }
 
 void MainWindow::handleConnectionDiagnostics(const ConnectionDiagnosticsSnapshot& snapshot)
 {
+    lastDiagnostics_ = snapshot;
     updateStatsDisplay(&snapshot);
 }
 
@@ -2712,6 +2800,15 @@ void MainWindow::stopJam(bool returnToLocal)
 {
     const bool shouldReturnToLocal = returnToLocal && !shuttingDown_;
     jamStartupPending_ = false;
+    controlRefreshAvailable_ = false;
+    if (connectionLabel_) {
+        connectionLabel_->setProperty("issue", false);
+        connectionLabel_->setCursor(Qt::ArrowCursor);
+        connectionLabel_->setToolTip(QString{});
+        connectionLabel_->style()->unpolish(connectionLabel_);
+        connectionLabel_->style()->polish(connectionLabel_);
+    }
+    lastDiagnostics_.reset();
     updateStatsDisplay(nullptr);
     assetTransfer_.cancel();
     sessionController_.close();
@@ -2734,6 +2831,13 @@ void MainWindow::stopJam(bool returnToLocal)
         sessionTopologyLabel_->setToolTip(QString{});
     }
     localMeshPeerTokens_.clear();
+    operationalPeers_.clear();
+    peerOrdinals_.clear();
+    desiredPeerGainDb_.clear();
+    selectedPeerId_ = 0;
+    nextPeerOrdinal_ = 1;
+    peerMembershipSignature_.clear();
+    updatePerformancePeers();
 
     meshPeerEndpoints_.clear();
     lastLoggedSessionSummary_.clear();
@@ -2867,12 +2971,389 @@ void MainWindow::appendLog(const QString& line)
 void MainWindow::updateStatsDisplay(const ConnectionDiagnosticsSnapshot* stats)
 {
     const MixerStatsLabels labels = mixerStatsViewModel_.present(stats);
-    latencyLabel_->setText(labels.latency);
-    latencyLabel_->setToolTip(labels.latencyTooltip);
-    jitterLabel_->setText(labels.jitter);
-    lossLabel_->setText(labels.loss);
-    underrunLabel_->setText(labels.underrun);
+    if (latencyLabel_) {
+        latencyLabel_->setText(labels.latency);
+        latencyLabel_->setToolTip(labels.latencyTooltip);
+    }
+    if (jitterLabel_) jitterLabel_->setText(labels.jitter);
+    if (lossLabel_) lossLabel_->setText(labels.loss);
+    if (underrunLabel_) underrunLabel_->setText(labels.underrun);
     diagnosisLabel_->setText(labels.diagnosis);
+    if (performanceHome_) {
+        QString rtt = QStringLiteral("-");
+        if (stats != nullptr) {
+            const auto measured = std::find_if(
+                stats->peers.cbegin(),
+                stats->peers.cend(),
+                [](const Jam2PeerDiagnostics& peer) { return peer.has_rtt; });
+            if (measured != stats->peers.cend()) {
+                rtt = QStringLiteral("%1 ms").arg(measured->rtt_ms, 0, 'f', 1);
+            }
+        }
+        performanceHome_->setTechnicalSummary(
+            rtt,
+            stats != nullptr
+                ? QStringLiteral("%1 ms").arg(stats->jitter_average_ms, 0, 'f', 1)
+                : QStringLiteral("-"),
+            stats != nullptr
+                ? QStringLiteral("%1%").arg(stats->packet_loss_percent, 0, 'f', 2)
+                : QStringLiteral("-"),
+            stats != nullptr
+                ? QString::number(stats->callback_gap_over_2x)
+                : QStringLiteral("-"));
+    }
+    if (diagnosticPacketsValue_) {
+        diagnosticPacketsValue_->setText(
+            stats != nullptr
+                ? QString::number(static_cast<qulonglong>(stats->received_packets))
+                : QStringLiteral("0"));
+    }
+    if (diagnosticLateValue_) {
+        diagnosticLateValue_->setText(
+            stats != nullptr
+                ? QString::number(
+                    static_cast<qulonglong>(stats->reordered_or_late_packets))
+                : QStringLiteral("0"));
+    }
+    if (diagnosticLossEventsValue_) {
+        diagnosticLossEventsValue_->setText(
+            stats != nullptr
+                ? QString::number(static_cast<qulonglong>(stats->loss_events))
+                : QStringLiteral("0"));
+    }
+    if (diagnosticBurstGapsValue_) {
+        diagnosticBurstGapsValue_->setText(
+            stats != nullptr
+                ? QString::number(static_cast<qulonglong>(stats->packet_gap_over_4x))
+                : QStringLiteral("0"));
+    }
+    if (diagnosticDriftValue_) {
+        const Jam2PeerDiagnostics* strongest = nullptr;
+        if (stats != nullptr) {
+            for (const Jam2PeerDiagnostics& peer : stats->peers) {
+                if (peer.drift_valid &&
+                    (strongest == nullptr ||
+                     std::abs(peer.drift_ppm) > std::abs(strongest->drift_ppm))) {
+                    strongest = &peer;
+                }
+            }
+        }
+        diagnosticDriftValue_->setText(strongest != nullptr
+            ? QStringLiteral("%1%2 ppm")
+                .arg(strongest->drift_ppm >= 0.0 ? QStringLiteral("+") : QString{})
+                .arg(strongest->drift_ppm, 0, 'f', 1)
+            : stats != nullptr && !stats->peers.empty()
+                ? QStringLiteral("MEASURING")
+                : QStringLiteral("-"));
+    }
+    if (diagnosticMissingAudioValue_) {
+        diagnosticMissingAudioValue_->setText(stats != nullptr
+            ? QStringLiteral("%1 fr").arg(
+                static_cast<qulonglong>(stats->missing_audio_frames))
+            : QStringLiteral("0 fr"));
+    }
+    if (diagnosticOutputUnderrunsValue_) {
+        diagnosticOutputUnderrunsValue_->setText(stats != nullptr
+            ? QStringLiteral("%1 · %2 ms")
+                .arg(static_cast<qulonglong>(stats->output_underrun_events))
+                .arg(stats->output_underrun_ms, 0, 'f', 1)
+            : QStringLiteral("0"));
+    }
+    if (diagnosticPeerTable_) {
+        diagnosticPeerTable_->setRowCount(
+            stats != nullptr ? static_cast<int>(stats->peers.size()) : 0);
+        if (stats != nullptr) {
+            for (int row = 0; row < static_cast<int>(stats->peers.size()); ++row) {
+                const Jam2PeerDiagnostics& peer = stats->peers.at(
+                    static_cast<std::size_t>(row));
+                const int ordinal = peerOrdinals_.value(peer.peer_id, row + 1);
+                const QStringList values{
+                    QStringLiteral("Peer %1").arg(ordinal),
+                    peer.has_rtt
+                        ? QStringLiteral("%1 ms").arg(peer.rtt_ms, 0, 'f', 1)
+                        : QStringLiteral("-"),
+                    QStringLiteral("%1 ms").arg(peer.jitter_average_ms, 0, 'f', 1),
+                    QStringLiteral("%1%").arg(peer.packet_loss_percent, 0, 'f', 2),
+                    QString::number(
+                        static_cast<qulonglong>(peer.reordered_or_late_packets)),
+                    peer.drift_valid
+                        ? QStringLiteral("%1%2")
+                            .arg(peer.drift_ppm >= 0.0 ? QStringLiteral("+") : QString{})
+                            .arg(peer.drift_ppm, 0, 'f', 1)
+                        : QStringLiteral("-")};
+                for (int column = 0; column < values.size(); ++column) {
+                    diagnosticPeerTable_->setItem(
+                        row,
+                        column,
+                        new QTableWidgetItem(values.at(column)));
+                }
+            }
+        }
+    }
+    if (diagnosisEvidenceLabel_) {
+        if (stats == nullptr) {
+            diagnosisEvidenceLabel_->setText(
+                QStringLiteral("Waiting for live connection measurements."));
+        } else {
+            QStringList findings;
+            if (stats->output_underrun_events > 0) {
+                findings << QStringLiteral(
+                    "<b>Output underruns:</b> %1 events / %2 ms. "
+                    "Increase local prefill or buffer.")
+                    .arg(stats->output_underrun_events)
+                    .arg(stats->output_underrun_ms, 0, 'f', 1);
+            }
+            if (stats->packet_loss_percent >= 0.5) {
+                findings << QStringLiteral(
+                    "<b>Packet loss:</b> %1%. Try wired networking or a larger frame size.")
+                    .arg(stats->packet_loss_percent, 0, 'f', 2);
+            }
+            const double burstPercent = stats->packet_gap_samples > 0
+                ? static_cast<double>(stats->packet_gap_over_4x) * 100.0 /
+                    static_cast<double>(stats->packet_gap_samples)
+                : 0.0;
+            const double latePercent = stats->received_packets > 0
+                ? static_cast<double>(stats->reordered_or_late_packets) * 100.0 /
+                    static_cast<double>(stats->received_packets)
+                : 0.0;
+            if (burstPercent >= 0.5 || latePercent >= 0.25) {
+                findings << QStringLiteral(
+                    "<b>Jitter/reordering pressure:</b> burst %1%, late %2%. "
+                    "Increase local playout or prefill.")
+                    .arg(burstPercent, 0, 'f', 2)
+                    .arg(latePercent, 0, 'f', 2);
+            }
+            if (stats->callback_gap_over_2x > 0) {
+                findings << QStringLiteral(
+                    "<b>Audio callback gaps:</b> %1. Try a larger device buffer.")
+                    .arg(stats->callback_gap_over_2x);
+            }
+            if (stats->drift_clamped_samples > 0 || stats->drift_abs_ppm_max >= 200.0) {
+                findings << QStringLiteral(
+                    "<b>Clock drift pressure:</b> peak %1 ppm, clamped samples %2. "
+                    "Increase local buffering.")
+                    .arg(stats->drift_abs_ppm_max, 0, 'f', 1)
+                    .arg(stats->drift_clamped_samples);
+            }
+            for (const Jam2PeerDiagnostics& peer : stats->peers) {
+                if (peer.has_rtt && peer.rtt_ms >= 100.0) {
+                    findings << QStringLiteral(
+                        "<b>High peer RTT:</b> %1 ms. Physical distance is limiting latency.")
+                        .arg(peer.rtt_ms, 0, 'f', 1);
+                    break;
+                }
+            }
+            diagnosisEvidenceLabel_->setText(
+                findings.isEmpty()
+                    ? QStringLiteral(
+                        "<b>No active issue detected.</b> Live loss, jitter, callback and "
+                        "drift thresholds are currently below the diagnosis rules.")
+                    : findings.join(QStringLiteral("<br><br>")));
+        }
+    }
+}
+
+void MainWindow::openWorkspace(const QString& page)
+{
+    if (!workspaceStack_ || !performanceStageStack_) {
+        return;
+    }
+    if (page == QStringLiteral("performance")) {
+        if (detailIdentityPanel_) {
+            detailIdentityPanel_->setVisible(false);
+        }
+        performanceStageStack_->setCurrentIndex(0);
+        return;
+    }
+    const auto found = workspacePages_.constFind(page);
+    if (found != workspacePages_.cend()) {
+        const bool looperOpen = page == QStringLiteral("looper");
+        if (detailIdentityPanel_) {
+            detailIdentityPanel_->setVisible(looperOpen);
+        }
+        if (looperOpen && detailPositionLabel_) {
+            detailPositionLabel_->setText(QStringLiteral("Bank %1").arg(
+                QChar(QLatin1Char('A' + looperProject_.activeBankIndex()))));
+        }
+        workspaceStack_->setCurrentIndex(found.value());
+        performanceStageStack_->setCurrentIndex(1);
+        const QList<QPushButton*> buttons =
+            findChildren<QPushButton*>(QStringLiteral("DetailTab"));
+        for (QPushButton* button : buttons) {
+            const bool active = button->property("workspaceKey").toString() == page;
+            if (button->property("active").toBool() != active) {
+                button->setProperty("active", active);
+                button->style()->unpolish(button);
+                button->style()->polish(button);
+            }
+        }
+    }
+}
+
+void MainWindow::toggleDataDrawer()
+{
+    if (dataOverlay_) {
+        dataOverlay_->setVisible(!dataOverlay_->isVisible());
+        if (dataOverlay_->isVisible()) {
+            dataOverlay_->raise();
+            updateStatsDisplay(lastDiagnostics_ ? &*lastDiagnostics_ : nullptr);
+        }
+    }
+}
+
+void MainWindow::selectPerformancePeer(std::uint64_t peerId)
+{
+    const auto found = std::find_if(
+        operationalPeers_.cbegin(),
+        operationalPeers_.cend(),
+        [peerId](const Jam2OperationalPeer& peer) { return peer.peer_id == peerId; });
+    if (found == operationalPeers_.cend()) {
+        selectedPeerId_ = 0;
+        if (performanceHome_) performanceHome_->setSelectedPeer(0);
+        if (selectedPeerNameLabel_) selectedPeerNameLabel_->setText(QStringLiteral("Volume"));
+        if (selectedPeerGainSlider_) selectedPeerGainSlider_->setEnabled(false);
+        if (selectedPeerGainLabel_) selectedPeerGainLabel_->setText(QStringLiteral("- dB"));
+        updateMixControls();
+        return;
+    }
+    selectedPeerId_ = peerId;
+    if (performanceHome_) {
+        performanceHome_->setSelectedPeer(peerId);
+    }
+    const int ordinal = peerOrdinals_.value(peerId, 0);
+    const double gainDb = desiredPeerGainDb_.value(peerId, found->gain_db);
+    if (selectedPeerNameLabel_) {
+        selectedPeerNameLabel_->setText(QStringLiteral("Volume"));
+    }
+    if (selectedPeerGainSlider_) {
+        const QSignalBlocker blocker(selectedPeerGainSlider_);
+        selectedPeerGainSlider_->setValue(qBound(-60, qRound(gainDb), 12));
+        selectedPeerGainSlider_->setEnabled(true);
+    }
+    if (selectedPeerGainLabel_) {
+        selectedPeerGainLabel_->setText(dbText(gainDb));
+    }
+    updateMixControls();
+}
+
+void MainWindow::applySelectedPeerGain(int db)
+{
+    if (selectedPeerId_ == 0) {
+        return;
+    }
+    const double gainDb = static_cast<double>(qBound(-60, db, 12));
+    desiredPeerGainDb_[selectedPeerId_] = gainDb;
+    if (selectedPeerGainLabel_) {
+        selectedPeerGainLabel_->setText(dbText(gainDb));
+    }
+    if (QLabel* value = peerGainValueLabels_.value(selectedPeerId_, nullptr)) {
+        value->setText(dbText(gainDb));
+    }
+    if (QSlider* slider = peerGainSliders_.value(selectedPeerId_, nullptr);
+        slider != nullptr && slider->value() != db) {
+        const QSignalBlocker blocker(slider);
+        slider->setValue(db);
+    }
+    if (!jam2_.setPeerGainDb(selectedPeerId_, gainDb)) {
+        appendLog(QStringLiteral("peer gain update unavailable for Peer %1")
+            .arg(peerOrdinals_.value(selectedPeerId_, 0)));
+    }
+    updatePerformancePeers();
+}
+
+void MainWindow::updatePerformancePeers()
+{
+    std::sort(
+        operationalPeers_.begin(),
+        operationalPeers_.end(),
+        [this](const Jam2OperationalPeer& left, const Jam2OperationalPeer& right) {
+            return peerOrdinals_.value(left.peer_id) < peerOrdinals_.value(right.peer_id);
+        });
+
+    QVector<PerformancePeerPresentation> presentation;
+    QStringList membership;
+    presentation.reserve(operationalPeers_.size());
+    membership.reserve(operationalPeers_.size());
+    for (const Jam2OperationalPeer& peer : std::as_const(operationalPeers_)) {
+        const int ordinal = peerOrdinals_.value(peer.peer_id);
+        const double gainDb = desiredPeerGainDb_.value(peer.peer_id, peer.gain_db);
+        presentation.push_back({
+            peer.peer_id,
+            QStringLiteral("Peer %1").arg(ordinal),
+            peer.receiving_audio,
+            gainDb,
+            peer.peer_id == selectedPeerId_});
+        membership.push_back(QString::number(peer.peer_id));
+    }
+    if (performanceHome_) {
+        performanceHome_->setPeers(presentation);
+    }
+
+    const QString signature = membership.join(QLatin1Char(','));
+    if (signature != peerMembershipSignature_ && peerGainListLayout_) {
+        peerMembershipSignature_ = signature;
+        peerGainSliders_.clear();
+        peerGainValueLabels_.clear();
+        while (QLayoutItem* item = peerGainListLayout_->takeAt(0)) {
+            if (QWidget* widget = item->widget()) {
+                widget->deleteLater();
+            }
+            delete item;
+        }
+        for (const PerformancePeerPresentation& peer : std::as_const(presentation)) {
+            auto* row = new QWidget(peerGainListContent_);
+            auto* layout = new QHBoxLayout(row);
+            layout->setContentsMargins(0, 3, 0, 3);
+            auto* name = new QPushButton(peer.label, row);
+            name->setFlat(true);
+            name->setMinimumWidth(92);
+            name->setToolTip(peer.receiving
+                ? QStringLiteral("Receiving audio")
+                : QStringLiteral("Connected; waiting for audio"));
+            QObject::connect(name, &QPushButton::clicked, this, [this, id = peer.peerId] {
+                selectPerformancePeer(id);
+            });
+            auto* slider = new QSlider(Qt::Horizontal, row);
+            slider->setRange(-60, 12);
+            slider->setValue(qRound(peer.gainDb));
+            applyJamSliderStyle(slider);
+            auto* value = new QLabel(dbText(peer.gainDb), row);
+            value->setMinimumWidth(68);
+            QObject::connect(slider, &QSlider::valueChanged, this,
+                [this, id = peer.peerId, value](int db) {
+                    desiredPeerGainDb_[id] = static_cast<double>(db);
+                    value->setText(dbText(static_cast<double>(db)));
+                    (void)jam2_.setPeerGainDb(id, static_cast<double>(db));
+                    if (selectedPeerId_ == id) {
+                        selectPerformancePeer(id);
+                    }
+                    updatePerformancePeers();
+                });
+            layout->addWidget(name);
+            layout->addWidget(slider, 1);
+            layout->addWidget(value);
+            peerGainSliders_.insert(peer.peerId, slider);
+            peerGainValueLabels_.insert(peer.peerId, value);
+            peerGainListLayout_->addWidget(row);
+        }
+        peerGainListLayout_->addStretch(1);
+    }
+
+    if (peerGainScroll_) {
+        const int shownRows = qMin(10, operationalPeers_.size());
+        peerGainScroll_->setVerticalScrollBarPolicy(
+            operationalPeers_.size() > 10 ? Qt::ScrollBarAsNeeded : Qt::ScrollBarAlwaysOff);
+        peerGainScroll_->setFixedHeight(qMax(52, shownRows * 48 + 8));
+    }
+
+    const bool selectedStillPresent = std::any_of(
+        operationalPeers_.cbegin(),
+        operationalPeers_.cend(),
+        [this](const Jam2OperationalPeer& peer) { return peer.peer_id == selectedPeerId_; });
+    if (selectedPeerId_ != 0 && !selectedStillPresent) {
+        selectedPeerId_ = 0;
+    }
+    selectPerformancePeer(selectedPeerId_);
 }
 
 void MainWindow::updateMixMeters(const MixerMeterLevels& levels)
@@ -2880,7 +3361,19 @@ void MainWindow::updateMixMeters(const MixerMeterLevels& levels)
     if (mixInputMeter_) mixInputMeter_->setLevel(levels.input);
     if (mixSendMeter_) mixSendMeter_->setLevel(levels.send);
     if (mixMonitorMeter_) mixMonitorMeter_->setLevel(levels.monitor);
-    if (mixRemotePeerMeter_) mixRemotePeerMeter_->setLevel(levels.remote);
+    if (mixRemotePeerMeter_) {
+        const auto selected = std::find_if(
+            operationalPeers_.cbegin(),
+            operationalPeers_.cend(),
+            [this](const Jam2OperationalPeer& peer) {
+                return peer.peer_id == selectedPeerId_;
+            });
+        mixRemotePeerMeter_->setLevel(
+            selected != operationalPeers_.cend()
+                ? static_cast<double>(selected->peak_ppm) / 1000000.0
+                : levels.remote);
+    }
+    if (mixTrackMeter_) mixTrackMeter_->setLevel(levels.track);
     if (mixMetronomeMeter_) mixMetronomeMeter_->setLevel(levels.metronome);
     if (mixOutputMeter_) mixOutputMeter_->setLevel(levels.output);
     if (mixOutputClipLabel_) {
@@ -2959,9 +3452,10 @@ void MainWindow::applySessionSnapshot(const SharedSessionController::Snapshot& s
             : snapshot.contract.audioFormat == QStringLiteral("pcm24-mono")
                 ? QStringLiteral("24-bit PCM") : QStringLiteral("unknown PCM");
         sessionTopologyLabel_->setText(
-            QStringLiteral("Remote Peers %1 · %2").arg(validRemotePeers).arg(quality));
+            QStringLiteral("Remote Peers %1").arg(validRemotePeers));
         sessionTopologyLabel_->setToolTip(
-            QStringLiteral("Authenticated TCP peers with an active UDP connection"));
+            QStringLiteral("%1 · authenticated TCP peers with an active UDP connection")
+                .arg(quality));
     }
     updateMixRemotePeers();
     updateTrackControls();
@@ -2977,6 +3471,7 @@ void MainWindow::handleControlEvent(
     switch (event.type) {
     case TransportEventType::Listening:
         displayState = QStringLiteral("Waiting for peers");
+        controlRefreshAvailable_ = false;
         break;
     case TransportEventType::Connecting:
     case TransportEventType::Connected:
@@ -2986,30 +3481,46 @@ void MainWindow::handleControlEvent(
         break;
     case TransportEventType::Authenticated:
         displayState = QStringLiteral("TCP peer authenticated");
+        controlRefreshAvailable_ = false;
         break;
     case TransportEventType::Disconnected:
         displayState = serverSide ? QStringLiteral("Waiting for peers") : QStringLiteral("Reconnecting");
+        controlRefreshAvailable_ = !serverSide;
         break;
     case TransportEventType::AlreadyConnected:
         displayState = QStringLiteral("TCP peer authenticated");
+        controlRefreshAvailable_ = false;
         break;
     case TransportEventType::RefreshRequested:
         displayState = QStringLiteral("Refreshing");
+        controlRefreshAvailable_ = false;
         break;
     case TransportEventType::ReconnectScheduled:
     case TransportEventType::ReconnectAttempt:
-        displayState = QStringLiteral("Reconnecting");
+        displayState = QStringLiteral("TCP issue");
+        controlRefreshAvailable_ = true;
         break;
     case TransportEventType::SessionEnded:
         displayState = QStringLiteral("Local");
+        controlRefreshAvailable_ = false;
         break;
     case TransportEventType::Failure:
+        controlRefreshAvailable_ = true;
         if (event.retryable) {
-            displayState = QStringLiteral("Reconnecting");
+            displayState = QStringLiteral("TCP issue");
         }
         break;
     }
     connectionLabel_->setText(displayState);
+    connectionLabel_->setProperty("issue", controlRefreshAvailable_);
+    connectionLabel_->setCursor(
+        controlRefreshAvailable_ ? Qt::PointingHandCursor : Qt::ArrowCursor);
+    connectionLabel_->setToolTip(controlRefreshAvailable_
+        ? QStringLiteral("%1\n\nClick to refresh the TCP control connection.")
+            .arg(event.detail)
+        : event.detail);
+    connectionLabel_->style()->unpolish(connectionLabel_);
+    connectionLabel_->style()->polish(connectionLabel_);
     appendLog(QStringLiteral("control: ") + event.detail);
     if (event.type == TransportEventType::Disconnected ||
         event.type == TransportEventType::Failure) {
@@ -3148,12 +3659,31 @@ void MainWindow::refreshControlConnection()
 {
     if (sessionController_.isServer() && sessionController_.hasPeer()) {
         appendLog(QStringLiteral("TCP control already connected"));
+        controlRefreshAvailable_ = false;
+        connectionLabel_->setText(QStringLiteral("TCP peer authenticated"));
+        connectionLabel_->setProperty("issue", false);
+        connectionLabel_->setCursor(Qt::ArrowCursor);
+        connectionLabel_->style()->unpolish(connectionLabel_);
+        connectionLabel_->style()->polish(connectionLabel_);
         return;
     }
     if (!sessionController_.isServer() && sessionController_.isConnected()) {
         appendLog(QStringLiteral("TCP control already connected"));
+        controlRefreshAvailable_ = false;
+        connectionLabel_->setText(QStringLiteral("TCP peer authenticated"));
+        connectionLabel_->setProperty("issue", false);
+        connectionLabel_->setCursor(Qt::ArrowCursor);
+        connectionLabel_->style()->unpolish(connectionLabel_);
+        connectionLabel_->style()->polish(connectionLabel_);
         return;
     }
+    controlRefreshAvailable_ = false;
+    connectionLabel_->setText(QStringLiteral("Refreshing"));
+    connectionLabel_->setProperty("issue", false);
+    connectionLabel_->setCursor(Qt::ArrowCursor);
+    connectionLabel_->setToolTip(QStringLiteral("Refreshing the TCP control connection"));
+    connectionLabel_->style()->unpolish(connectionLabel_);
+    connectionLabel_->style()->polish(connectionLabel_);
     appendLog(QStringLiteral("refreshing TCP control"));
     sessionController_.setReconnectEnabled(true);
     sessionController_.refresh();
@@ -3595,8 +4125,14 @@ void MainWindow::updateRuntimeControls()
     }
     const double metronomeLevel = gainFromDb(static_cast<double>(metronomeLevelSlider_ ? metronomeLevelSlider_->value() : -10));
     const double remoteLevel = gainFromDb(static_cast<double>(remoteLevelSlider_ ? remoteLevelSlider_->value() : 0));
+    const double outputLevel = gainFromDb(static_cast<double>(
+        masterOutputLevelSlider_ ? masterOutputLevelSlider_->value() : 0));
     submitEngineGain(jam2::EngineCommandType::SetMetronomeLevel, metronomeLevel, QStringLiteral("metronome level"));
     submitEngineGain(jam2::EngineCommandType::SetRemoteLevel, remoteLevel, QStringLiteral("remote level"));
+    submitEngineGain(
+        jam2::EngineCommandType::SetOutputLevel,
+        outputLevel,
+        QStringLiteral("master output level"));
     const double sendLevel = gainFromDb(static_cast<double>(mixSendLevelSlider_ ? mixSendLevelSlider_->value() : 0));
     const double monitorLevel = gainFromDb(static_cast<double>(mixMonitorLevelSlider_ ? mixMonitorLevelSlider_->value() : -18));
     submitEngineGain(jam2::EngineCommandType::SetSendLevel, sendLevel, QStringLiteral("send level"));
@@ -3776,8 +4312,8 @@ void MainWindow::refreshLooperLanes()
         if (looperBankButtons_[i]) {
             looperBankButtons_[i]->setChecked(i == looperProject_.activeBankIndex());
             looperBankButtons_[i]->setStyleSheet(i == looperProject_.activeBankIndex()
-                ? QStringLiteral("QPushButton { background: #255f72; color: #ffffff; border: 1px solid #419f81; padding: 4px; }")
-                : QStringLiteral("QPushButton { background: #171a1c; color: #a4afb5; border: 1px solid #596269; padding: 4px; }"));
+                ? QStringLiteral("QPushButton { background: #502d5d; color: #fff8ea; border: 1px solid #e8a44a; padding: 4px; }")
+                : QStringLiteral("QPushButton { background: #12141f; color: #c4bacb; border: 1px solid #55465f; padding: 4px; }"));
         }
     }
     if (looperStack_ == nullptr) {
@@ -3839,12 +4375,33 @@ void MainWindow::refreshLooperLanes()
     if (markerRate <= 0) {
         markerRate = 48000;
     }
+    const int sectionBeats =
+        chordModel_.sections().isEmpty()
+        ? qMax(1, currentMetronomePattern().beats_per_bar)
+        : qMax(1, chordModel_.section(0).beats);
+    const qint64 sectionFrames = static_cast<qint64>(std::llround(
+        static_cast<double>(markerRate) * 60.0 /
+        qMax(1.0, metronomeTransport_.grid().bpm()) *
+        static_cast<double>(sectionBeats)));
+    qint64 preparedFrames = 0;
+    if (preparedMix_.frames > 0 && preparedMix_.sampleRate > 0) {
+        preparedFrames = static_cast<qint64>(std::llround(
+            static_cast<double>(preparedMix_.frames) *
+            static_cast<double>(markerRate) /
+            static_cast<double>(preparedMix_.sampleRate)));
+    }
+    const qint64 trackFrames = static_cast<qint64>(std::llround(
+        static_cast<double>(qMax(0, trackController_.model().durationMs)) *
+        static_cast<double>(markerRate) / 1000.0));
+    const qint64 minimumViewFrames =
+        qMax<qint64>(1, qMax(sectionFrames, qMax(preparedFrames, trackFrames)));
     looperStack_->setLanes(
         std::move(views),
         selectedLooperLane_,
         looperProject_.activeBankIndex(),
         armedLane,
         markerRate,
+        minimumViewFrames,
         metronomeTransport_.grid().bpm(),
         looperProject_.gridLockEnabled());
 
@@ -5120,13 +5677,22 @@ void MainWindow::updateTrackControls()
 
 void MainWindow::updateTrackPlaybackPresentation()
 {
-    if (!trackNameLabel_) {
-        return;
+    if (trackNameLabel_) {
+        trackNameLabel_->setText(QStringLiteral("Track: %1 | %2")
+            .arg(
+                trackController_.model().fileName,
+                trackController_.playbackStatusText(looperProject_.trackSyncEnabled())));
     }
-    trackNameLabel_->setText(QStringLiteral("Track: %1 | %2")
-        .arg(
-            trackController_.model().fileName,
-            trackController_.playbackStatusText(looperProject_.trackSyncEnabled())));
+    if (performanceTrackToggle_) {
+        const bool playing = trackRecordingWorkflow_.preparedPlaying();
+        performanceTrackToggle_->setText(
+            playing ? QStringLiteral("■") : QStringLiteral("▶"));
+        performanceTrackToggle_->setProperty("active", playing);
+        performanceTrackToggle_->style()->unpolish(performanceTrackToggle_);
+        performanceTrackToggle_->style()->polish(performanceTrackToggle_);
+        performanceTrackToggle_->setEnabled(
+            trackController_.model().sampleRateCompatible && jam2_.isRunning());
+    }
 }
 
 void MainWindow::loadTrackMetadata()
@@ -5426,6 +5992,9 @@ void MainWindow::loadTrackWaveform()
         if (trackWaveform_) {
             trackWaveform_->clear();
         }
+        if (performanceHome_) {
+            performanceHome_->setTrackWaveform({}, false);
+        }
         return;
     }
     if (trackWaveformWorkerRunning_) {
@@ -5447,9 +6016,12 @@ void MainWindow::loadTrackWaveform()
                 return;
             }
             if (trackWaveform_) {
-                trackWaveform_->setPeaks(std::move(*peaks), *valid);
+                trackWaveform_->setPeaks(*peaks, *valid);
                 trackWaveform_->setDurationMs(trackController_.model().durationMs);
                 trackWaveform_->setBpm(trackController_.model().acceptedBpm);
+            }
+            if (performanceHome_) {
+                performanceHome_->setTrackWaveform(std::move(*peaks), *valid);
             }
         },
         [this, revision](const QString&) {
@@ -5600,9 +6172,6 @@ void MainWindow::updateTrackTimeline()
             model.loopStartSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopStartSeconds * 1000.0)) : -1,
             model.loopEndSeconds >= 0.0 ? static_cast<qint64>(std::llround(model.loopEndSeconds * 1000.0)) : -1);
     }
-    if (mixTrackMeter_) {
-        mixTrackMeter_->setLevel(0.0);
-    }
     if (!jam2_.isRunning() && mixMetronomeMeter_) {
         mixMetronomeMeter_->setLevel(0.0);
     }
@@ -5656,7 +6225,9 @@ void MainWindow::startTrackMetronome()
 
 void MainWindow::stopTrackMetronome()
 {
-    const bool jamMetronomeWasRunning = jam2_.isRunning() && metronomeTransport_.localRunning();
+    const bool jamMetronomeWasRunning = jam2_.isRunning() &&
+        (metronomeTransport_.localRunning() ||
+         metronomeTransport_.grid().position().running);
     metronomeTransport_.setLocalState(false, false);
     if (jamMetronomeWasRunning) {
         submitEngineToggle(
@@ -6006,6 +6577,7 @@ void MainWindow::publishLocalTrackOffer(
     if (!looperProject_.trackSyncEnabled() || !jam2_.isRunning() ||
         sessionController_.snapshot().role != SharedSessionController::Role::Joiner ||
         bankIndex < 0 || bankIndex >= looperProject_.banks().size() || targetLaneId.isEmpty() ||
+        isManagedPracticeReference(lane) ||
         !lane.sampleRateCompatible || lane.sampleRate <= 0 ||
         !isSha256Hex(lane.assetHash) || lane.assetPath.isEmpty()) {
         return;
@@ -6082,7 +6654,8 @@ void MainWindow::shareLocalTracks(bool includeLocalOnly)
     for (int bankIndex = 0; bankIndex < looperProject_.banks().size(); ++bankIndex) {
         const LooperBank& bank = looperProject_.banks().at(bankIndex);
         for (const LooperLane& lane : bank.lanes) {
-            if (lane.localOnly || !lane.sampleRateCompatible || lane.sampleRate <= 0 ||
+            if (lane.localOnly || isManagedPracticeReference(lane) ||
+                !lane.sampleRateCompatible || lane.sampleRate <= 0 ||
                 !isSha256Hex(lane.assetHash) || lane.assetPath.isEmpty()) {
                 continue;
             }
@@ -6847,6 +7420,8 @@ Jam2RuntimeOptions MainWindow::runtimeOptions() const
     options.metronome_compensation_slew_ms_per_sec = metronomeCompensationSlewSpin_ ? metronomeCompensationSlewSpin_->value() : 40.0;
     options.remote_level = gainFromDb(static_cast<double>(remoteLevelSlider_ ? remoteLevelSlider_->value() : 0));
     options.send_level = gainFromDb(static_cast<double>(mixSendLevelSlider_ ? mixSendLevelSlider_->value() : 0));
+    options.output_level = gainFromDb(static_cast<double>(
+        masterOutputLevelSlider_ ? masterOutputLevelSlider_->value() : 0));
     options.local_monitor = mixMonitorCheck_ && mixMonitorCheck_->isChecked();
     options.local_monitor_level = gainFromDb(static_cast<double>(mixMonitorLevelSlider_ ? mixMonitorLevelSlider_->value() : -18));
     options.sample_time_playout = sampleTimePlayoutCheck_->isChecked();
@@ -7029,36 +7604,15 @@ void MainWindow::loadTrackJson(const QJsonObject& object)
 QJsonObject MainWindow::songToJson(bool syncCompatibleOnly) const
 {
     QJsonObject root = chordModel_.toJson();
-    root.insert(QStringLiteral("independent_views"), true);
-    root.insert(QStringLiteral("beat_view"), beatModel_.toJson());
-    root.insert(QStringLiteral("lyric_view"), lyricModel_.toJson());
     root.insert(QStringLiteral("looper"), looperProject_.toJson(syncCompatibleOnly));
     return root;
 }
 
 bool MainWindow::loadSongJson(const QJsonObject& object)
 {
-    BeatGridModel loadedChord;
-    BeatGridModel loadedBeat;
-    BeatGridModel loadedLyric;
+    BeatGridModel loadedSong;
     LooperProject loadedLooper = looperProject_;
-    if (!loadedChord.loadJson(object)) {
-        return false;
-    }
-    const QJsonObject beatObject = object.value(QStringLiteral("beat_view")).toObject();
-    if (!beatObject.isEmpty()) {
-        if (!loadedBeat.loadJson(beatObject)) {
-            return false;
-        }
-    } else if (!loadedBeat.loadJson(object)) {
-        return false;
-    }
-    const QJsonObject lyricObject = object.value(QStringLiteral("lyric_view")).toObject();
-    if (!lyricObject.isEmpty()) {
-        if (!loadedLyric.loadJson(lyricObject)) {
-            return false;
-        }
-    } else if (!loadedLyric.loadJson(object)) {
+    if (!loadedSong.loadJson(object)) {
         return false;
     }
 
@@ -7066,12 +7620,7 @@ bool MainWindow::loadSongJson(const QJsonObject& object)
     if (!looperObject.isEmpty() && !loadedLooper.loadJson(looperObject)) {
         return false;
     }
-    const QString title = loadedChord.title();
-    loadedBeat.setTitle(title);
-    loadedLyric.setTitle(title);
-    chordModel_ = loadedChord;
-    beatModel_ = loadedBeat;
-    lyricModel_ = loadedLyric;
+    chordModel_ = loadedSong;
     const int expectedSampleRate = activeTrackSampleRate();
     bool needsCompatibilityAudit = false;
     for (LooperBank& bank : loadedLooper.banks()) {
@@ -7108,18 +7657,98 @@ void MainWindow::updatePlaybackGrid()
         metronomeMarkerReferenceCheck_->isChecked();
     const bool markerRunning =
         position.running && position.engineAnchored && showMarkerReference;
-    const double beatPhase = position.secondsPerBeat > 0.0
+    const int beatsPerBar = currentMetronomePattern().beats_per_bar;
+    double beatPhase = position.secondsPerBeat > 0.0
         ? std::fmod(qMax(0.0, position.secondsFromEpoch), position.secondsPerBeat) / position.secondsPerBeat
         : 0.0;
+    quint64 visualAbsoluteBeat = position.absoluteBeat;
+    bool visualRunning = position.running && position.engineAnchored;
+    // Chord, beat, lyric and performance markers follow the shared metronome
+    // whenever it is running. A prepared track is only a presentation fallback
+    // when there is no live grid; letting it override the grid can freeze every
+    // musical marker at a clamped or pending track position.
+    if (!visualRunning &&
+        trackRecordingWorkflow_.preparedPlaying() &&
+        trackController_.model().durationMs > 0) {
+        const double bpm = qMax(1.0, trackController_.model().acceptedBpm);
+        const double trackBeat =
+            static_cast<double>(qMax<qint64>(0, currentAudibleTrackPositionMs())) * bpm / 60000.0;
+        visualAbsoluteBeat = static_cast<quint64>(std::floor(trackBeat));
+        beatPhase = trackBeat - std::floor(trackBeat);
+        visualRunning = true;
+    }
+    const bool editorMarkerRunning = visualRunning && showMarkerReference;
+    const auto firstSectionBeatCount = [](const BeatGridModel& model) {
+        return model.sections().isEmpty()
+            ? quint64{1}
+            : static_cast<quint64>(qMax(1, model.section(0).beats));
+    };
+    const quint64 performanceSectionBeats = firstSectionBeatCount(chordModel_);
+    const quint64 performanceSectionBeat =
+        visualAbsoluteBeat % performanceSectionBeats;
     updateRecordingCountdown(position);
     if (chordGrid_) {
-        chordGrid_->setGridPosition(position.absoluteBeat, position.subdivision, markerRunning, beatPhase);
+        chordGrid_->setBeatsPerBar(beatsPerBar);
+        chordGrid_->setGridPosition(
+            visualAbsoluteBeat % firstSectionBeatCount(chordModel_),
+            position.subdivision,
+            editorMarkerRunning,
+            beatPhase);
     }
     if (beatGrid_) {
-        beatGrid_->setGridPosition(position.absoluteBeat, position.subdivision, markerRunning, beatPhase);
+        beatGrid_->setBeatsPerBar(beatsPerBar);
+        beatGrid_->setGridPosition(
+            visualAbsoluteBeat % firstSectionBeatCount(beatModel_),
+            position.subdivision,
+            editorMarkerRunning,
+            beatPhase);
     }
     if (lyricGrid_) {
-        lyricGrid_->setGridPosition(position.absoluteBeat, position.subdivision, markerRunning, beatPhase);
+        lyricGrid_->setBeatsPerBar(beatsPerBar);
+        lyricGrid_->setGridPosition(
+            visualAbsoluteBeat % firstSectionBeatCount(lyricModel_),
+            position.subdivision,
+            editorMarkerRunning,
+            beatPhase);
+    }
+    if (performanceHome_) {
+        performanceHome_->setTiming(
+            performanceSectionBeat,
+            position.subdivision,
+            beatsPerBar,
+            beatPhase,
+            visualRunning);
+        performanceHome_->setTrackGainDb(trackController_.model().trackGainDb);
+        if (rendererStatsLabel_) {
+            rendererStatsLabel_->setText(performanceHome_->rendererStatsText());
+        }
+    }
+    if (performancePositionLabel_) {
+        const quint64 bar =
+            performanceSectionBeat / static_cast<quint64>(qMax(1, beatsPerBar)) + 1;
+        const quint64 beat =
+            performanceSectionBeat % static_cast<quint64>(qMax(1, beatsPerBar)) + 1;
+        performancePositionLabel_->setText(
+            QStringLiteral("%1.%2\nBAR / BEAT")
+                .arg(bar)
+                .arg(beat, 2, 10, QLatin1Char('0')));
+        if (detailPositionLabel_ && detailIdentityPanel_ &&
+            detailIdentityPanel_->isVisible()) {
+            detailPositionLabel_->setText(QStringLiteral("Bank %1").arg(
+                QChar(QLatin1Char('A' + looperProject_.activeBankIndex()))));
+        }
+    }
+    if (performanceTempoButton_) {
+        const auto pattern = currentMetronomePattern();
+        performanceTempoButton_->setText(QStringLiteral("%1 BPM").arg(pattern.bpm));
+    }
+    if (performanceMetronomeToggle_) {
+        const bool enabled = position.running && position.engineAnchored;
+        performanceMetronomeToggle_->setText(
+            enabled ? QStringLiteral("METRONOME ON") : QStringLiteral("METRONOME OFF"));
+        performanceMetronomeToggle_->setProperty("active", enabled);
+        performanceMetronomeToggle_->style()->unpolish(performanceMetronomeToggle_);
+        performanceMetronomeToggle_->style()->polish(performanceMetronomeToggle_);
     }
     if (gridPositionLabel_) {
         if (position.running) {
@@ -7150,20 +7779,25 @@ void MainWindow::updatePlaybackGrid()
     }
     if (trackWaveform_) {
         trackWaveform_->setBpm(metronomeTransport_.grid().bpm());
-        const qint64 gridPositionMs = static_cast<qint64>(std::llround(
-            qMax(0.0, position.secondsFromEpoch) * 1000.0));
+        const bool trackPlaying = trackRecordingWorkflow_.preparedPlaying();
+        const qint64 gridPositionMs = trackPlaying
+            ? qMax<qint64>(0, currentAudibleTrackPositionMs())
+            : static_cast<qint64>(std::llround(
+                qMax(0.0, position.secondsFromEpoch) * 1000.0));
         trackWaveform_->setGridPosition(
             gridPositionMs,
-            markerRunning,
+            showMarkerReference && (markerRunning || trackPlaying),
             currentMetronomePattern().beats_per_bar);
     }
     if (looperStack_) {
-
-        const qint64 gridPositionMs = static_cast<qint64>(std::llround(
-            qMax(0.0, position.secondsFromEpoch) * 1000.0));
+        const bool trackPlaying = trackRecordingWorkflow_.preparedPlaying();
+        const qint64 gridPositionMs = trackPlaying
+            ? qMax<qint64>(0, currentAudibleTrackPositionMs())
+            : static_cast<qint64>(std::llround(
+                qMax(0.0, position.secondsFromEpoch) * 1000.0));
         looperStack_->setGridPosition(
             gridPositionMs,
-            markerRunning,
+            showMarkerReference && (markerRunning || trackPlaying),
             metronomeTransport_.grid().bpm(),
             currentMetronomePattern().beats_per_bar);
     }
@@ -7273,8 +7907,6 @@ void MainWindow::runGridLockedEngineAction(
 void MainWindow::newSong()
 {
     chordModel_.reset();
-    beatModel_.reset();
-    lyricModel_.reset();
     stopTrackMetronome();
     trackController_ = SharedTrackController{};
     looperProject_ = LooperProject{};
@@ -7325,8 +7957,6 @@ void MainWindow::openSong()
 bool MainWindow::saveSong()
 {
     chordModel_.setTitle(songTitleEdit_->text());
-    beatModel_.setTitle(songTitleEdit_->text());
-    lyricModel_.setTitle(songTitleEdit_->text());
     QString path = projectPersistence_.projectFilePath();
     if (path.isEmpty()) {
         path = QFileDialog::getSaveFileName(
@@ -7486,7 +8116,7 @@ void MainWindow::clearPracticeReferenceWavs()
     bool hadReferences = false;
     for (const LooperBank& bank : looperProject_.banks()) {
         for (const LooperLane& lane : bank.lanes) {
-            if (lane.referenceKind.isEmpty()) {
+            if (!isManagedPracticeReference(lane)) {
                 continue;
             }
             hadReferences = true;
@@ -7601,19 +8231,8 @@ void MainWindow::refreshSongViews()
 
 void MainWindow::refreshSongView(const QString& lane)
 {
-    if (lane == QStringLiteral("chord") || lane == QStringLiteral("target")) {
-        if (chordGrid_) {
-            chordGrid_->refresh();
-        }
-    } else if (lane == QStringLiteral("lyric")) {
-        if (lyricGrid_) {
-            lyricGrid_->refresh();
-        }
-    } else {
-        if (beatGrid_) {
-            beatGrid_->refresh();
-        }
-    }
+    (void)lane;
+    refreshSongViews();
     refreshLooperLanes();
 }
 
@@ -7770,7 +8389,8 @@ void MainWindow::generatePracticeReferenceWavs()
             const int bankIndex = looperProject_.activeBankIndex();
             QSet<QString> previousReferencePaths;
             for (const LooperLane& lane : looperProject_.banks().at(bankIndex).lanes) {
-                if (!lane.referenceKind.isEmpty() && !lane.assetPath.trimmed().isEmpty()) {
+                if (isManagedPracticeReference(lane) &&
+                    !lane.assetPath.trimmed().isEmpty()) {
                     previousReferencePaths.insert(looperAssetAbsolutePath(lane));
                 }
             }

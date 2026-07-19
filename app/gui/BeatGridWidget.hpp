@@ -4,7 +4,6 @@
 
 #include <QComboBox>
 #include <QLineEdit>
-#include <QPlainTextEdit>
 #include <QTableWidget>
 #include <QWidget>
 
@@ -21,13 +20,13 @@ public:
     BeatGridModel& model();
     void refresh();
     void focusGeneratedSection(const QString& kind);
+    void setBeatsPerBar(int beatsPerBar);
     void setGridPosition(quint64 absoluteBeat, int subdivision, bool running, double beatPhase = 0.0);
     void applyRemoteCell(int section, const QString& lane, int beat, const QString& text);
 
     std::function<void(int, const QString&, int, const QString&, int)> onCellEdited;
     std::function<void(int, int, int, const QString&, int)> onBeatHitEdited;
     std::function<void(int, int, int, int)> onBeatDivisionChanged;
-    std::function<void(const QString&, int)> onLyricsEdited;
     std::function<void(int, int, int)> onGridResized;
     std::function<void()> onStructureChanged;
 
@@ -68,7 +67,6 @@ private:
     QLineEdit* nameEdit_ = nullptr;
     QTableWidget* table_ = nullptr;
     QHeaderView* beatHeader_ = nullptr;
-    QPlainTextEdit* lyricsEdit_ = nullptr;
     QPushButton* duplicateButton_ = nullptr;
     QPushButton* deleteButton_ = nullptr;
     QPushButton* expandButton_ = nullptr;
@@ -80,5 +78,6 @@ private:
     int gridSubdivision_ = 0;
     double gridBeatPhase_ = 0.0;
     bool gridRunning_ = false;
+    int beatsPerBar_ = 4;
     bool updating_ = false;
 };

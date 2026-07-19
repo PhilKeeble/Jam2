@@ -28,7 +28,7 @@ public:
     bool enqueue(const Command& command);
     bool enqueueBatch(std::span<const Command> commands);
     void cancelScheduled() noexcept;
-    void mix(std::int32_t* output, std::size_t frames, std::uint64_t callbackFrame) noexcept;
+    int mix(std::int32_t* output, std::size_t frames, std::uint64_t callbackFrame) noexcept;
     std::uint64_t sourceFrame() const noexcept { return sourceFrame_.load(std::memory_order_relaxed); }
     std::uint64_t underruns() const noexcept { return underruns_.load(std::memory_order_relaxed); }
     std::uint64_t scheduledStartFrame() const noexcept { return scheduledStartFrame_.load(std::memory_order_relaxed); }

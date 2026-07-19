@@ -4,32 +4,36 @@
 
 namespace jam2::gui::theme {
 
-inline constexpr QColor windowBg{5, 6, 7};
-inline constexpr QColor panelBg{13, 15, 16};
-inline constexpr QColor panelRaised{23, 26, 28};
-inline constexpr QColor editorBg{0, 0, 0};
-inline constexpr QColor border{89, 98, 105};
-inline constexpr QColor borderStrong{137, 149, 156};
-inline constexpr QColor text{228, 233, 236};
-inline constexpr QColor textStrong{255, 255, 255};
-inline constexpr QColor textMuted{164, 175, 181};
-inline constexpr QColor accent{65, 159, 129};
-inline constexpr QColor accentSoft{18, 62, 50};
-inline constexpr QColor selection{37, 95, 114};
-inline constexpr QColor buttonBg{34, 40, 44};
-inline constexpr QColor buttonHover{48, 56, 61};
-inline constexpr QColor clipBg{22, 63, 84};
-inline constexpr QColor waveform{240, 152, 158};
-inline constexpr QColor gridBar{131, 144, 153};
-inline constexpr QColor gridBeat{66, 74, 79};
-inline constexpr QColor playhead{255, 64, 95};
-inline constexpr QColor record{168, 107, 111};
-inline constexpr QColor success{83, 193, 132};
-inline constexpr QColor warning{255, 194, 79};
-inline constexpr QColor danger{240, 152, 158};
-inline constexpr QColor meterBg{18, 21, 22};
-inline constexpr QColor meterSafe{84, 227, 148};
-inline constexpr QColor meterWarn{255, 184, 62};
+inline constexpr QColor windowBg{5, 8, 9};
+inline constexpr QColor panelBg{11, 16, 17};
+inline constexpr QColor panelRaised{16, 23, 25};
+inline constexpr QColor editorBg{7, 11, 12};
+inline constexpr QColor border{53, 66, 71};
+inline constexpr QColor borderStrong{92, 110, 114};
+inline constexpr QColor text{233, 230, 220};
+inline constexpr QColor textStrong{255, 252, 244};
+inline constexpr QColor textMuted{156, 169, 171};
+inline constexpr QColor accent{102, 212, 207};
+inline constexpr QColor accentSoft{25, 48, 49};
+inline constexpr QColor nebulaBlue{86, 164, 244};
+inline constexpr QColor nebulaPurple{164, 111, 218};
+inline constexpr QColor nebulaCoral{255, 125, 134};
+inline constexpr QColor nebulaRed{201, 47, 88};
+inline constexpr QColor selection{91, 57, 77};
+inline constexpr QColor buttonBg{18, 27, 29};
+inline constexpr QColor buttonHover{28, 40, 43};
+inline constexpr QColor clipBg{38, 25, 39};
+inline constexpr QColor waveform{255, 125, 134};
+inline constexpr QColor gridBar{232, 164, 74};
+inline constexpr QColor gridBeat{77, 93, 97};
+inline constexpr QColor playhead{232, 164, 74};
+inline constexpr QColor record{225, 73, 117};
+inline constexpr QColor success{73, 213, 181};
+inline constexpr QColor warning{230, 174, 82};
+inline constexpr QColor danger{240, 104, 136};
+inline constexpr QColor meterBg{7, 11, 12};
+inline constexpr QColor meterSafe{102, 212, 207};
+inline constexpr QColor meterWarn{232, 164, 74};
 
 inline QColor withAlpha(QColor color, int alpha)
 {

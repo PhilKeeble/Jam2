@@ -67,7 +67,7 @@ protected:
         }
         painter->save();
         painter->setPen(Qt::NoPen);
-        painter->setBrush(theme::accent);
+        painter->setBrush(theme::playhead);
         const int x = rect.left() + qBound(
             0, static_cast<int>(std::lround(currentBeatPhase_ * rect.width())), rect.width() - 1);
         painter->drawEllipse(QPoint(x, rect.top() + 6), 4, 4);
@@ -164,7 +164,7 @@ public:
             index.data(kSectionSelectedRole).toBool()) {
             painter->save();
             painter->setPen(Qt::NoPen);
-            painter->setBrush(theme::accent);
+            painter->setBrush(theme::playhead);
             painter->drawEllipse(QPoint(option.rect.left() + 9, option.rect.top() + 9), 4, 4);
             painter->restore();
         }
@@ -195,8 +195,9 @@ private:
             }
             const QChar state = normalizedHitText(text, division).at(step);
             const bool checked = state != QLatin1Char('.');
-            const QColor color = state == QLatin1Char('a') ? theme::warning
-                : state == QLatin1Char('g') ? theme::success : theme::accent;
+            const QColor color = state == QLatin1Char('a') ? theme::nebulaBlue
+                : state == QLatin1Char('g') ? theme::nebulaPurple
+                : QColor(232, 92, 101);
             painter->setPen(QPen(checked ? color : theme::borderStrong, step == activeStep ? 3 : 1));
             painter->setBrush(checked ? QBrush(color) : QBrush(theme::buttonBg));
             if (state == QLatin1Char('g')) painter->drawEllipse(box);
@@ -253,7 +254,6 @@ BeatGridWidget::BeatGridWidget(BeatGridModel* model, const QString& lane, QWidge
     labelEdit_ = new QLineEdit(this);
     nameEdit_ = new QLineEdit(this);
     table_ = new QTableWidget(this);
-    lyricsEdit_ = new QPlainTextEdit(this);
 
     table_->setAlternatingRowColors(false);
     table_->setSelectionMode(QAbstractItemView::NoSelection);
@@ -289,21 +289,13 @@ BeatGridWidget::BeatGridWidget(BeatGridModel* model, const QString& lane, QWidge
     auto* layout = new QVBoxLayout(this);
     layout->addLayout(top);
     layout->addWidget(table_, 1);
-    layout->addWidget(lyricsEdit_, 1);
 
     const Mode currentMode = mode();
-    const bool lyricsMode = currentMode == Mode::Lyrics;
     const bool chordMode = currentMode == Mode::Chord;
     sectionBox_->setVisible(currentMode == Mode::Legacy);
     labelEdit_->setVisible(currentMode == Mode::Legacy);
     nameEdit_->setVisible(currentMode == Mode::Legacy);
-    table_->setVisible(!lyricsMode);
-    lyricsEdit_->setVisible(lyricsMode);
-    addButton->setVisible(!lyricsMode);
-    duplicateButton_->setVisible(!lyricsMode);
-    deleteButton_->setVisible(!lyricsMode);
-    expandButton_->setVisible(!lyricsMode);
-    shrinkButton_->setVisible(!lyricsMode);
+    table_->setVisible(true);
     if (chordMode) {
         sectionBox_->setVisible(false);
         nameEdit_->setVisible(false);
@@ -430,6 +422,32 @@ BeatGridWidget::BeatGridWidget(BeatGridModel* model, const QString& lane, QWidge
             }
             return;
         }
+        if (currentMode == Mode::Lyrics) {
+            const int section = sectionForRow(row);
+            if (section < 0 || section >= model_->sections().size()) {
+                return;
+            }
+            selectSection(section);
+            if (column == 0) {
+                model_->renameSection(
+                    section,
+                    model_->section(section).label,
+                    text);
+                emitStructureChanged();
+                return;
+            }
+            const int beat = column - 1;
+            model_->setCell(section, QStringLiteral("lyric"), beat, text);
+            if (onCellEdited) {
+                onCellEdited(
+                    section,
+                    QStringLiteral("lyric"),
+                    beat,
+                    text,
+                    model_->revision());
+            }
+            return;
+        }
         const int section = selectedSectionIndex();
         const QString lane = currentLane();
         model_->setCell(section, lane, column, text);
@@ -440,17 +458,6 @@ BeatGridWidget::BeatGridWidget(BeatGridModel* model, const QString& lane, QWidge
     QObject::connect(table_, &QTableWidget::cellClicked, this, [this](int row, int) {
         selectSection(sectionForRow(row));
     });
-    QObject::connect(lyricsEdit_, &QPlainTextEdit::textChanged, this, [this] {
-        if (updating_ || mode() != Mode::Lyrics) {
-            return;
-        }
-        const QString text = lyricsEdit_->toPlainText();
-        model_->setLyricsText(text);
-        if (onLyricsEdited) {
-            onLyricsEdited(text, model_->revision());
-        }
-    });
-
     refresh();
 }
 
@@ -462,7 +469,10 @@ BeatGridModel& BeatGridWidget::model()
 void BeatGridWidget::focusGeneratedSection(const QString& kind)
 {
     for (int index = 0; index < model_->sections().size(); ++index) {
-        if (model_->section(index).generatedKind == kind) {
+        const QString generatedKind = model_->section(index).generatedKind;
+        if (generatedKind == kind ||
+            (generatedKind == QStringLiteral("practice") &&
+             (kind == QStringLiteral("chord") || kind == QStringLiteral("beat")))) {
             selectedSection_ = index;
             refresh();
             const int row = mode() == Mode::Chord
@@ -483,6 +493,73 @@ bool BeatGridWidget::eventFilter(QObject* watched, QEvent* event)
 {
     if (event->type() == QEvent::Wheel) {
         return false;
+    }
+    if (watched == table_->viewport() &&
+        mode() == Mode::Chord &&
+        event->type() == QEvent::MouseButtonPress) {
+        auto* mouse = static_cast<QMouseEvent*>(event);
+        if (mouse->button() != Qt::RightButton) {
+            return QWidget::eventFilter(watched, event);
+        }
+        const QModelIndex index = table_->indexAt(mouse->pos());
+        if (!index.isValid() || index.column() <= 0 ||
+            laneForRow(index.row()) != 0) {
+            return QWidget::eventFilter(watched, event);
+        }
+        const int section = sectionForRow(index.row());
+        const int beat = index.column() - 1;
+        if (section < 0 || section >= model_->sections().size() ||
+            beat < 0 || beat >= model_->section(section).beats) {
+            return true;
+        }
+
+        QMenu menu(this);
+        QAction* sustain = menu.addAction(QStringLiteral("Sustain previous (blank)"));
+        sustain->setData(QString());
+        QAction* rest = menu.addAction(QStringLiteral("Rest (-)"));
+        rest->setData(QStringLiteral("-"));
+        menu.addSeparator();
+        const QStringList roots{
+            QStringLiteral("C"), QStringLiteral("C#"), QStringLiteral("Db"),
+            QStringLiteral("D"), QStringLiteral("Eb"), QStringLiteral("E"),
+            QStringLiteral("F"), QStringLiteral("F#"), QStringLiteral("Gb"),
+            QStringLiteral("G"), QStringLiteral("Ab"), QStringLiteral("A"),
+            QStringLiteral("Bb"), QStringLiteral("B")};
+        const QStringList suffixes{
+            QString(), QStringLiteral("m"), QStringLiteral("5"),
+            QStringLiteral("sus2"), QStringLiteral("sus4"), QStringLiteral("dim"),
+            QStringLiteral("aug"), QStringLiteral("6"), QStringLiteral("m6"),
+            QStringLiteral("7"), QStringLiteral("maj7"), QStringLiteral("m7"),
+            QStringLiteral("m7b5"), QStringLiteral("dim7"), QStringLiteral("add9"),
+            QStringLiteral("madd9"), QStringLiteral("9"), QStringLiteral("maj9"),
+            QStringLiteral("m9"), QStringLiteral("13"), QStringLiteral("7b9"),
+            QStringLiteral("7#9"), QStringLiteral("alt"), QStringLiteral("#11"),
+            QStringLiteral("maj7#11"), QStringLiteral("maj9#11")};
+        for (const QString& root : roots) {
+            QMenu* rootMenu = menu.addMenu(root);
+            for (const QString& suffix : suffixes) {
+                const QString symbol = root + suffix;
+                QAction* action = rootMenu->addAction(symbol);
+                action->setData(symbol);
+            }
+        }
+        QAction* selected = menu.exec(table_->viewport()->mapToGlobal(mouse->pos()));
+        if (!selected) {
+            return true;
+        }
+        const QString symbol = selected->data().toString();
+        model_->setCell(section, QStringLiteral("chord"), beat, symbol);
+        if (onCellEdited) {
+            onCellEdited(
+                section,
+                QStringLiteral("chord"),
+                beat,
+                symbol,
+                model_->revision());
+        }
+        rebuildChordTable();
+        selectSection(section);
+        return true;
     }
     if (watched == table_->viewport() && mode() == Mode::Beat && event->type() == QEvent::MouseButtonPress) {
         auto* mouse = static_cast<QMouseEvent*>(event);
@@ -600,6 +677,16 @@ void BeatGridWidget::refresh()
     setGridPosition(beat, subdivision, running, beatPhase);
 }
 
+void BeatGridWidget::setBeatsPerBar(int beatsPerBar)
+{
+    const int bounded = qMax(1, beatsPerBar);
+    if (beatsPerBar_ == bounded) {
+        return;
+    }
+    beatsPerBar_ = bounded;
+    refresh();
+}
+
 void BeatGridWidget::setGridPosition(quint64 absoluteBeat, int subdivision, bool running, double beatPhase)
 {
     const bool wasRunning = gridRunning_;
@@ -630,16 +717,30 @@ void BeatGridWidget::setGridPosition(quint64 absoluteBeat, int subdivision, bool
         }
         return;
     }
-    const int activeSection = selectedSection_ >= 0 && selectedSection_ < model_->sections().size()
-        ? selectedSection_ : 0;
-    const int beatsInSection = activeSection < model_->sections().size()
-        ? model_->section(activeSection).beats : 0;
-    if (beatsInSection <= 0) {
+    quint64 totalBeats = 0;
+    for (const SongSection& section : model_->sections()) {
+        totalBeats += static_cast<quint64>(qMax(0, section.beats));
+    }
+    if (totalBeats == 0) {
         header->setCurrentBeatColumn(-1);
         return;
     }
-    const int sectionBeat = static_cast<int>(absoluteBeat % static_cast<quint64>(beatsInSection));
-    const int beatColumn = mode() == Mode::Chord ? sectionBeat + 1 : sectionBeat;
+    quint64 songBeat = absoluteBeat % totalBeats;
+    int activeSection = 0;
+    int sectionBeat = 0;
+    for (int index = 0; index < model_->sections().size(); ++index) {
+        const int beats = qMax(0, model_->section(index).beats);
+        if (songBeat < static_cast<quint64>(beats)) {
+            activeSection = index;
+            sectionBeat = static_cast<int>(songBeat);
+            break;
+        }
+        songBeat -= static_cast<quint64>(beats);
+    }
+    const int beatColumn =
+        mode() == Mode::Chord || mode() == Mode::Lyrics
+        ? sectionBeat + 1
+        : sectionBeat;
     header->setCurrentBeatColumn(
         beatColumn >= 0 && beatColumn < table_->columnCount() ? beatColumn : -1,
         gridBeatPhase_);
@@ -647,7 +748,7 @@ void BeatGridWidget::setGridPosition(quint64 absoluteBeat, int subdivision, bool
         ? activeSection * 3
         : mode() == Mode::Beat
             ? activeSection * (BeatGridModel::beatLaneNames().size() + 2) + 1
-            : 0;
+            : mode() == Mode::Lyrics ? activeSection : 0;
     if (table_->item(markerRow, beatColumn) != nullptr) {
         QScrollBar* horizontal = table_->horizontalScrollBar();
         if (horizontal != nullptr && horizontal->maximum() > 0) {
@@ -796,12 +897,18 @@ void BeatGridWidget::rebuildChordTable()
     table_->setColumnCount(maxBeats + 1);
     QStringList headers{QStringLiteral("Section")};
     for (int beat = 0; beat < maxBeats; ++beat) {
-        headers << QStringLiteral("%1").arg(beat + 1);
+        headers << QStringLiteral("%1.%2")
+            .arg(beat / beatsPerBar_ + 1)
+            .arg(beat % beatsPerBar_ + 1);
     }
     table_->setHorizontalHeaderLabels(headers);
     table_->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
     table_->horizontalHeader()->setDefaultSectionSize(132);
     table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    for (int column = 1; column < table_->columnCount(); ++column) {
+        table_->horizontalHeader()->setSectionResizeMode(column, QHeaderView::Fixed);
+        table_->horizontalHeader()->resizeSection(column, 132);
+    }
     QStringList rowLabels;
     for (int sectionIndex = 0; sectionIndex < model_->sections().size(); ++sectionIndex) {
         const SongSection& section = model_->section(sectionIndex);
@@ -819,9 +926,13 @@ void BeatGridWidget::rebuildChordTable()
             const int row = firstRow + lane;
             rowToSection_[row] = sectionIndex;
             rowToLane_[row] = lane;
-            table_->setRowHeight(row, lane == 0 ? 40 : 34);
+            table_->setRowHeight(row, lane == 0 ? 58 : 44);
             if (lane == 0) {
                 auto* header = new QTableWidgetItem(sectionTitle(section));
+                QFont headerFont(QStringLiteral("Georgia"));
+                headerFont.setPointSizeF(13.0);
+                header->setFont(headerFont);
+                header->setForeground(QBrush(theme::textStrong));
                 header->setData(kSectionHeaderRole, true);
                 header->setData(kSectionSelectedRole, selectedSection_ == sectionIndex);
                 table_->setItem(row, 0, header);
@@ -835,6 +946,22 @@ void BeatGridWidget::rebuildChordTable()
                         : section.targets[beat];
                 }
                 auto* item = new QTableWidgetItem(text);
+                if (lane == 0) {
+                    QFont chordFont(QStringLiteral("Georgia"));
+                    chordFont.setPointSizeF(17.0);
+                    item->setFont(chordFont);
+                    item->setForeground(QBrush(QColor(142, 237, 228)));
+                } else if (lane == 1) {
+                    QFont noteFont(QStringLiteral("Bahnschrift"));
+                    noteFont.setPointSizeF(10.0);
+                    item->setFont(noteFont);
+                    item->setForeground(QBrush(theme::textMuted));
+                } else {
+                    QFont melodyFont(QStringLiteral("Georgia"));
+                    melodyFont.setPointSizeF(13.0);
+                    item->setFont(melodyFont);
+                    item->setForeground(QBrush(QColor(193, 167, 232)));
+                }
                 if (beat >= section.beats || lane == 1) {
                     Qt::ItemFlags flags = item->flags();
                     flags &= ~Qt::ItemIsEditable;
@@ -889,9 +1016,15 @@ void BeatGridWidget::rebuildBeatTable()
 
     QStringList headers;
     for (int beat = 0; beat < maxBeats; ++beat) {
-        headers << QStringLiteral("%1").arg(beat + 1);
+        headers << QStringLiteral("%1.%2")
+            .arg(beat / beatsPerBar_ + 1)
+            .arg(beat % beatsPerBar_ + 1);
     }
     table_->setHorizontalHeaderLabels(headers);
+    for (int column = 0; column < table_->columnCount(); ++column) {
+        table_->horizontalHeader()->setSectionResizeMode(column, QHeaderView::Fixed);
+        table_->horizontalHeader()->resizeSection(column, 156);
+    }
 
     QStringList rowLabels;
     rowLabels.reserve(rowCount);
@@ -985,8 +1118,63 @@ void BeatGridWidget::rebuildBeatTable()
 void BeatGridWidget::rebuildLyricsBox()
 {
     updating_ = true;
-    QSignalBlocker blocker(lyricsEdit_);
-    lyricsEdit_->setPlainText(model_->lyricsText());
+    QSignalBlocker tableBlocker(table_);
+    table_->setUpdatesEnabled(false);
+    table_->setRowCount(0);
+    table_->setColumnCount(0);
+    table_->clear();
+    table_->clearSpans();
+    table_->verticalHeader()->setVisible(false);
+    int maxBeats = 4;
+    for (const SongSection& section : model_->sections()) {
+        maxBeats = qMax(maxBeats, section.beats);
+    }
+    table_->setRowCount(model_->sections().size());
+    table_->setColumnCount(maxBeats + 1);
+    rowToSection_.fill(-1, model_->sections().size());
+    rowToLane_.fill(-1, model_->sections().size());
+    QStringList headers{QStringLiteral("Section")};
+    for (int beat = 0; beat < maxBeats; ++beat) {
+        headers << QStringLiteral("%1.%2")
+            .arg(beat / beatsPerBar_ + 1)
+            .arg(beat % beatsPerBar_ + 1);
+    }
+    table_->setHorizontalHeaderLabels(headers);
+    table_->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
+    table_->horizontalHeader()->setDefaultSectionSize(190);
+    table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    for (int column = 1; column < table_->columnCount(); ++column) {
+        table_->horizontalHeader()->setSectionResizeMode(column, QHeaderView::Fixed);
+        table_->horizontalHeader()->resizeSection(column, 190);
+    }
+    for (int sectionIndex = 0; sectionIndex < model_->sections().size(); ++sectionIndex) {
+        const SongSection& section = model_->section(sectionIndex);
+        rowToSection_[sectionIndex] = sectionIndex;
+        auto* name = new QTableWidgetItem(sectionTitle(section));
+        name->setData(kSectionHeaderRole, true);
+        name->setData(kSectionSelectedRole, selectedSection_ == sectionIndex);
+        table_->setItem(sectionIndex, 0, name);
+        table_->setRowHeight(sectionIndex, 58);
+        for (int beat = 0; beat < maxBeats; ++beat) {
+            auto* item = new QTableWidgetItem(
+                beat < section.beats ? section.lyrics[beat] : QString{});
+            item->setToolTip(
+                beat < section.beats
+                ? QStringLiteral("Lyric cue beginning at %1.%2")
+                    .arg(beat / beatsPerBar_ + 1)
+                    .arg(beat % beatsPerBar_ + 1)
+                : QString{});
+            if (beat >= section.beats) {
+                Qt::ItemFlags flags = item->flags();
+                flags &= ~Qt::ItemIsEditable;
+                flags &= ~Qt::ItemIsEnabled;
+                item->setFlags(flags);
+                item->setBackground(QBrush(theme::panelRaised));
+            }
+            table_->setItem(sectionIndex, beat + 1, item);
+        }
+    }
+    table_->setUpdatesEnabled(true);
     updating_ = false;
 }
 
@@ -995,7 +1183,7 @@ void BeatGridWidget::expandCurrent()
     if (model_->sections().isEmpty()) {
         return;
     }
-    if (mode() == Mode::Chord || mode() == Mode::Beat) {
+    if (mode() == Mode::Chord || mode() == Mode::Beat || mode() == Mode::Lyrics) {
         int beats = 4;
         for (const SongSection& section : model_->sections()) {
             beats = qMax(beats, section.beats);
@@ -1023,7 +1211,7 @@ void BeatGridWidget::shrinkCurrent()
     if (model_->sections().isEmpty()) {
         return;
     }
-    if (mode() == Mode::Chord || mode() == Mode::Beat) {
+    if (mode() == Mode::Chord || mode() == Mode::Beat || mode() == Mode::Lyrics) {
         int beats = 4;
         for (const SongSection& section : model_->sections()) {
             beats = qMax(beats, section.beats);
@@ -1051,7 +1239,7 @@ int BeatGridWidget::selectedSectionIndex() const
     if (model_->sections().isEmpty()) {
         return -1;
     }
-    if (mode() == Mode::Chord || mode() == Mode::Beat) {
+    if (mode() == Mode::Chord || mode() == Mode::Beat || mode() == Mode::Lyrics) {
         return selectedSection_ >= 0 && selectedSection_ < model_->sections().size() ? selectedSection_ : -1;
     }
     return qBound(0, sectionBox_->currentIndex(), model_->sections().size() - 1);
@@ -1107,7 +1295,7 @@ void BeatGridWidget::updateActionButtons()
     const bool selected = mode() == Mode::Legacy
         ? sectionBox_->currentIndex() >= 0 && sectionBox_->currentIndex() < model_->sections().size()
         : selectedSection_ >= 0 && selectedSection_ < model_->sections().size();
-    const bool canUseSection = mode() != Mode::Lyrics && selected;
+    const bool canUseSection = selected;
     if (duplicateButton_) {
         duplicateButton_->setEnabled(canUseSection);
     }

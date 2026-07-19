@@ -58,11 +58,12 @@ void PreparedTrackSource::cancelScheduled() noexcept
     generation_.fetch_add(1, std::memory_order_acq_rel);
 }
 
-void PreparedTrackSource::mix(
+int PreparedTrackSource::mix(
     std::int32_t* output,
     std::size_t frames,
     std::uint64_t callbackFrame) noexcept
 {
+    std::uint32_t peak = 0;
     std::size_t cursor = 0;
     while (cursor < frames) {
         const std::uint64_t currentFrame = callbackFrame + static_cast<std::uint64_t>(cursor);
@@ -155,8 +156,17 @@ void PreparedTrackSource::mix(
                     }
                 }
                 const std::int64_t sample = static_cast<std::int64_t>(slot.samples[sourcePos_++]) << 16;
+                const std::int64_t scaled = sample * levelPpm_ / 1000000;
+                const std::uint64_t magnitude = scaled < 0
+                    ? static_cast<std::uint64_t>(-(scaled + 1)) + 1ULL
+                    : static_cast<std::uint64_t>(scaled);
+                peak = static_cast<std::uint32_t>(std::max<std::uint64_t>(
+                    peak,
+                    std::min<std::uint64_t>(
+                        magnitude,
+                        static_cast<std::uint64_t>((std::numeric_limits<std::int32_t>::max)()))));
                 const std::int64_t mixed = std::clamp<std::int64_t>(
-                    static_cast<std::int64_t>(output[index]) + sample * levelPpm_ / 1000000,
+                    static_cast<std::int64_t>(output[index]) + scaled,
                     (std::numeric_limits<std::int32_t>::min)(),
                     (std::numeric_limits<std::int32_t>::max)());
                 output[index] = static_cast<std::int32_t>(mixed);
@@ -166,5 +176,8 @@ void PreparedTrackSource::mix(
     }
     playingAtomic_.store(playing_, std::memory_order_relaxed);
     sourceFrame_.store(sourcePos_, std::memory_order_relaxed);
+    return static_cast<int>(
+        static_cast<std::uint64_t>(peak) * 1000000ULL /
+        static_cast<std::uint64_t>((std::numeric_limits<std::int32_t>::max)()));
 }
 }

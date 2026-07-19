@@ -107,9 +107,7 @@ SharedSessionController::SessionContract contract()
 QJsonObject minimalValidSong()
 {
     return QJsonObject{
-        {QStringLiteral("format"), QStringLiteral("jam2.song.v1")},
         {QStringLiteral("title"), QStringLiteral("Lifecycle Fixture")},
-        {QStringLiteral("lyrics_text"), QString()},
         {QStringLiteral("sections"), QJsonArray{QJsonObject{
             {QStringLiteral("label"), QStringLiteral("A")},
             {QStringLiteral("name"), QStringLiteral("Section")},

@@ -27,6 +27,7 @@ struct PeerMixerPeerStats {
     bool contributing = false;
     bool muted = false;
     int gain_ppm = 1000000;
+    int recent_peak_ppm = 0;
     std::uint64_t queue_capacity_frames = 0;
     std::uint64_t queue_depth_frames = 0;
     std::uint64_t queue_high_water_frames = 0;

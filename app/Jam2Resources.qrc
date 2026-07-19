@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/jam2/assets">
+        <file alias="logo-nebula.png">../assets/logo-nebula.png</file>
+        <file alias="banner.png">../assets/banner.png</file>
+    </qresource>
+</RCC>

@@ -4,14 +4,33 @@
 
 #include <QUuid>
 
+#include <algorithm>
+
 namespace jam2::practice {
 namespace {
+
+QString managedReferenceKind(const LooperLane& lane)
+{
+    if (!lane.referenceKind.isEmpty()) {
+        return lane.referenceKind;
+    }
+    if (lane.name == QStringLiteral("Practice Chords")) {
+        return QStringLiteral("chord");
+    }
+    if (lane.name == QStringLiteral("Practice Drums")) {
+        return QStringLiteral("drum");
+    }
+    if (lane.name == QStringLiteral("Practice Melody")) {
+        return QStringLiteral("melody");
+    }
+    return {};
+}
 
 void removeDuplicateManagedLanes(QVector<LooperLane>& lanes, const QString& kind)
 {
     bool found = false;
     for (int index = 0; index < lanes.size();) {
-        if (lanes[index].referenceKind != kind) {
+        if (managedReferenceKind(lanes[index]) != kind) {
             ++index;
             continue;
         }
@@ -27,7 +46,7 @@ void removeDuplicateManagedLanes(QVector<LooperLane>& lanes, const QString& kind
 bool hasManagedLane(const QVector<LooperLane>& lanes, const QString& kind)
 {
     for (const LooperLane& lane : lanes) {
-        if (lane.referenceKind == kind) return true;
+        if (managedReferenceKind(lane) == kind) return true;
     }
     return false;
 }
@@ -42,7 +61,7 @@ void upsert(
 {
     int index = -1;
     for (int candidate = 0; candidate < lanes.size(); ++candidate) {
-        if (lanes[candidate].referenceKind == kind) {
+        if (managedReferenceKind(lanes[candidate]) == kind) {
             index = candidate;
             break;
         }
@@ -77,6 +96,18 @@ std::optional<GeneratedPracticeIdea> PracticeIdeaController::generateCoupled(
     const ChordIdeaRequest& request)
 {
     GeneratedPracticeIdea idea = generateCoupledPracticeIdea(request);
+    if (&chordModel == &beatModel) {
+        SongSection combined = idea.chordSection;
+        combined.beats = std::max(idea.chordSection.beats, idea.beatSection.beats);
+        combined.beatNotes = idea.beatSection.beatNotes;
+        combined.beatPatterns = idea.beatSection.beatPatterns;
+        BeatGridModel next = chordModel;
+        if (next.replaceGeneratedSection(QStringLiteral("practice"), std::move(combined)) < 0) {
+            return std::nullopt;
+        }
+        chordModel = std::move(next);
+        return idea;
+    }
     BeatGridModel nextChord = chordModel;
     BeatGridModel nextBeat = beatModel;
     if (nextChord.replaceGeneratedSection(QStringLiteral("chord"), idea.chordSection) < 0 ||
@@ -93,7 +124,11 @@ std::optional<SongSection> PracticeIdeaController::generatedSection(
     const QString& kind)
 {
     for (const SongSection& section : model.sections()) {
-        if (section.generatedKind == kind) return section;
+        if (section.generatedKind == kind ||
+            (section.generatedKind == QStringLiteral("practice") &&
+             (kind == QStringLiteral("chord") || kind == QStringLiteral("beat")))) {
+            return section;
+        }
     }
     return std::nullopt;
 }
@@ -102,7 +137,7 @@ void PracticeIdeaController::clearReferences(LooperProject& project)
 {
     for (LooperBank& bank : project.banks()) {
         for (int index = bank.lanes.size() - 1; index >= 0; --index) {
-            if (!bank.lanes[index].referenceKind.isEmpty()) {
+            if (!managedReferenceKind(bank.lanes[index]).isEmpty()) {
                 bank.lanes.removeAt(index);
             }
         }

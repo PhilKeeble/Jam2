@@ -137,6 +137,7 @@ struct RuntimeState {
     std::atomic<int> metronome_level_ppm{1000000};
     std::atomic<int> remote_level_ppm{1000000};
     std::atomic<int> send_level_ppm{1000000};
+    std::atomic<int> output_level_ppm{1000000};
     std::atomic<bool> local_monitor{false};
     std::atomic<int> local_monitor_level_ppm{250000};
     std::atomic<int> metronome_mode{0};
@@ -311,6 +312,7 @@ void sync_engine_control(
     sync_value(jam2::EngineCommandType::SetMetronomeLevel, runtime.metronome_level_ppm.load(std::memory_order_relaxed), mirror.snapshot.metronome_level_ppm);
     sync_value(jam2::EngineCommandType::SetRemoteLevel, runtime.remote_level_ppm.load(std::memory_order_relaxed), mirror.snapshot.remote_level_ppm);
     sync_value(jam2::EngineCommandType::SetSendLevel, runtime.send_level_ppm.load(std::memory_order_relaxed), mirror.snapshot.send_level_ppm);
+    sync_value(jam2::EngineCommandType::SetOutputLevel, runtime.output_level_ppm.load(std::memory_order_relaxed), mirror.snapshot.output_level_ppm);
 
     sync_value(jam2::EngineCommandType::SetLocalMonitorLevel, runtime.local_monitor_level_ppm.load(std::memory_order_relaxed), mirror.snapshot.local_monitor_level_ppm);
     const bool monitor = runtime.local_monitor.load(std::memory_order_relaxed);
@@ -1065,6 +1067,7 @@ jam2::EngineConfig make_engine_config_impl(const Options& options, bool leader_a
     config.metronome_level_ppm = ppm_from_gain(options.metronome_level);
     config.remote_level_ppm = ppm_from_gain(options.remote_level);
     config.send_level_ppm = ppm_from_gain(options.send_level);
+    config.output_level_ppm = ppm_from_gain(options.output_level);
     config.local_monitor_enabled = options.local_monitor;
     config.local_monitor_level_ppm = ppm_from_gain(options.local_monitor_level);
     config.metronome_mode = static_cast<jam2::EngineMetronomeMode>(metronome_mode_id(options.metronome_mode));
@@ -1176,6 +1179,7 @@ struct CommandThread {
         state.metronome_level_ppm.store(ppm_from_gain(options.metronome_level), std::memory_order_relaxed);
         state.remote_level_ppm.store(ppm_from_gain(options.remote_level), std::memory_order_relaxed);
         state.send_level_ppm.store(ppm_from_gain(options.send_level), std::memory_order_relaxed);
+        state.output_level_ppm.store(ppm_from_gain(options.output_level), std::memory_order_relaxed);
         state.local_monitor.store(options.local_monitor, std::memory_order_relaxed);
         state.local_monitor_level_ppm.store(ppm_from_gain(options.local_monitor_level), std::memory_order_relaxed);
         state.metronome_mode.store(metronome_mode_id(options.metronome_mode), std::memory_order_relaxed);
@@ -1499,7 +1503,15 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     CommandThread commands(options, false);
     EngineControlMirror engine_control_mirror;
     hold_shared_grid_at_start(commands.state, audio.engine.get());
+    jam2::NetworkSession* network_session_control = nullptr;
     auto apply_runtime_host_commands = [&] {
+        if (network_session_control != nullptr) {
+            for (const Jam2PeerGainUpdate& update : runtime_host.takePeerGains()) {
+                (void)network_session_control->setPeerGain(
+                    jam2::PeerId{update.peer_id},
+                    update.gain_ppm);
+            }
+        }
         std::size_t processed = 0;
         while (processed < Jam2RuntimeHost::kCommandCapacity) {
             const auto next = runtime_host.takeCommand(
@@ -1541,6 +1553,9 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 break;
             case jam2::EngineCommandType::SetSendLevel:
                 commands.state.send_level_ppm.store(command.value, std::memory_order_relaxed);
+                break;
+            case jam2::EngineCommandType::SetOutputLevel:
+                commands.state.output_level_ppm.store(command.value, std::memory_order_relaxed);
                 break;
             case jam2::EngineCommandType::SetLocalMonitorEnabled:
                 commands.state.local_monitor.store(command.enabled, std::memory_order_relaxed);
@@ -1698,6 +1713,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         peer_stream_config,
         audio.engine ? &mesh_playback : nullptr,
         options.headless_clock_drift_ppm);
+    network_session_control = &network_session;
     auto& packet_schedule = network_session.schedule();
     auto peer_endpoint_state = [&](jam2::PeerId peer_id) {
         const auto* descriptor = network_session.peer(peer_id);
@@ -2217,11 +2233,21 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             if (descriptor == nullptr) {
                 continue;
             }
+            const auto* mix_stats = network_session.peerMixStats(peer.peer_id);
+            const int gain_ppm = mix_stats != nullptr ? mix_stats->gain_ppm : 1000000;
+            const double gain_db = gain_ppm <= 0
+                ? -60.0
+                : std::clamp(
+                    20.0 * std::log10(static_cast<double>(gain_ppm) / 1000000.0),
+                    -60.0,
+                    12.0);
             snapshot.peers.push_back({
                 peer.peer_id.value,
                 jam2::format_udp_endpoint(descriptor->endpoint),
                 descriptor->endpoint_state,
                 network_session.peerStream(peer.peer_id).stats().expected_remote_sample_time > 0,
+                gain_db,
+                mix_stats != nullptr ? mix_stats->recent_peak_ppm : 0,
             });
         }
         runtime_host.network_snapshot(snapshot);
@@ -2247,29 +2273,45 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             DiagnosticsBaseline& previous = diagnostics_baselines[peer.peer_id.value];
             const std::uint64_t rtt_sum = counter_delta(stats.rtt_sum_us, previous.rtt_sum_us);
             const std::uint64_t rtt_samples = counter_delta(stats.rtt_samples, previous.rtt_samples);
+            const std::uint64_t peer_jitter_sum =
+                counter_delta(stats.jitter_sum_us, previous.jitter_sum_us);
+            const std::uint64_t peer_jitter_samples =
+                counter_delta(stats.jitter_samples, previous.jitter_samples);
+            const std::uint64_t peer_lost =
+                counter_delta(stats.sequence.lost, previous.lost_packets);
+            const std::uint64_t peer_received =
+                counter_delta(peer.recv_packets, previous.received_packets);
+            const std::uint64_t peer_reordered_or_late = counter_delta(
+                stats.sequence.out_of_order + stats.sequence.late + stats.reordered_lost,
+                previous.reordered_or_late);
+            const std::uint64_t peer_expected = peer_received + peer_lost;
             snapshot.peers.push_back({
                 peer.peer_id.value,
                 rtt_samples > 0 ? static_cast<double>(rtt_sum) /
                     static_cast<double>(rtt_samples) / 1000.0 : 0.0,
                 rtt_samples > 0,
+                peer_jitter_samples > 0
+                    ? static_cast<double>(peer_jitter_sum) /
+                        static_cast<double>(peer_jitter_samples) / 1000.0
+                    : 0.0,
+                peer_expected > 0
+                    ? static_cast<double>(peer_lost) * 100.0 /
+                        static_cast<double>(peer_expected)
+                    : 0.0,
+                peer_reordered_or_late,
+                stats.drift_ppm,
+                stats.drift_valid,
             });
-            const std::uint64_t peer_jitter_sum =
-                counter_delta(stats.jitter_sum_us, previous.jitter_sum_us);
-            const std::uint64_t peer_jitter_samples =
-                counter_delta(stats.jitter_samples, previous.jitter_samples);
             jitter_sum_us += peer_jitter_sum;
             jitter_samples += peer_jitter_samples;
             snapshot.jitter_max_ms = std::max(
                 snapshot.jitter_max_ms,
                 static_cast<double>(stats.jitter_max_us) / 1000.0);
-            const std::uint64_t peer_lost = counter_delta(stats.sequence.lost, previous.lost_packets);
             lost_packets += peer_lost;
-            snapshot.received_packets += counter_delta(peer.recv_packets, previous.received_packets);
+            snapshot.received_packets += peer_received;
             snapshot.loss_events += counter_delta(stats.sequence.loss_events, previous.loss_events);
             snapshot.loss_max_gap = std::max(snapshot.loss_max_gap, stats.sequence.loss_max_gap);
-            snapshot.reordered_or_late_packets += counter_delta(
-                stats.sequence.out_of_order + stats.sequence.late + stats.reordered_lost,
-                previous.reordered_or_late);
+            snapshot.reordered_or_late_packets += peer_reordered_or_late;
             snapshot.missing_audio_frames += counter_delta(
                 stats.missing_audio_frames_inserted, previous.missing_audio_frames);
             snapshot.late_audio_frames += counter_delta(

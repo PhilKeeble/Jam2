@@ -48,9 +48,11 @@ public:
         const bool hovered = (option->state & State_MouseOver) != 0;
         const bool focused = (option->state & State_HasFocus) != 0;
         const QColor border = enabled
-            ? (hovered || focused ? theme::accent : theme::textMuted)
+            ? (hovered || focused ? theme::playhead : theme::textMuted)
             : theme::border;
-        const QColor fill = checked ? theme::accentSoft : theme::editorBg;
+        const QColor fill = checked
+            ? theme::withAlpha(theme::playhead, 95)
+            : theme::editorBg;
         const QColor tick = enabled ? theme::textStrong : theme::textMuted;
 
         painter->save();
@@ -186,8 +188,8 @@ QString trackValueEditorStyle()
     return QStringLiteral(
         "QAbstractSpinBox { border: 1px solid #89959c; background: #000000; color: #ffffff; padding: 2px 28px 2px 6px; }"
         "QComboBox, QLineEdit { border: 1px solid #89959c; background: #000000; color: #ffffff; padding: 2px 6px; }"
-        "QAbstractSpinBox:focus, QComboBox:focus, QLineEdit:focus { border: 1px solid #419f81; }"
-        "QAbstractSpinBox:disabled, QComboBox:disabled, QLineEdit:disabled { border: 1px solid #596269; background: #171a1c; color: #a4afb5; }");
+        "QAbstractSpinBox:focus, QComboBox:focus, QLineEdit:focus { border: 1px solid #e8a44a; }"
+        "QAbstractSpinBox:disabled, QComboBox:disabled, QLineEdit:disabled { border: 1px solid #535270; background: #161727; color: #aaa5ba; }");
 }
 
 void applyMutedEditorStyle(QWidget* widget)
@@ -222,14 +224,14 @@ void updateCaptureDurationControl(QCheckBox* manualStopCheck, QSpinBox* duration
 QString jamSliderStyle()
 {
     return QStringLiteral(
-        "QSlider::groove:horizontal { height: 6px; background: #121516; border: 1px solid #596269; }"
-        "QSlider::sub-page:horizontal { background: #419f81; border: 1px solid #419f81; }"
-        "QSlider::add-page:horizontal { background: #000000; border: 1px solid #596269; }"
-        "QSlider::handle:horizontal { width: 16px; height: 16px; margin: -6px 0; background: #ffffff; border: 1px solid #419f81; }"
-        "QSlider::groove:horizontal:disabled { background: #171a1c; border: 1px solid #596269; }"
-        "QSlider::sub-page:horizontal:disabled { background: #596269; border: 1px solid #596269; }"
-        "QSlider::add-page:horizontal:disabled { background: #0d0f10; border: 1px solid #596269; }"
-        "QSlider::handle:horizontal:disabled { background: #a4afb5; border: 1px solid #596269; }");
+        "QSlider::groove:horizontal { height: 6px; background: #172023; border: 1px solid #354247; border-radius: 3px; }"
+        "QSlider::sub-page:horizontal { background: #e8a44a; border: 1px solid #e8a44a; border-radius: 3px; }"
+        "QSlider::add-page:horizontal { background: #090d0e; border: 1px solid #354247; border-radius: 3px; }"
+        "QSlider::handle:horizontal { width: 17px; height: 17px; margin: -6px 0; background: #e8a44a; border: 1px solid #ffd68e; border-radius: 8px; }"
+        "QSlider::groove:horizontal:disabled { background: #101719; border: 1px solid #354247; }"
+        "QSlider::sub-page:horizontal:disabled { background: #59676a; border: 1px solid #59676a; }"
+        "QSlider::add-page:horizontal:disabled { background: #0b1011; border: 1px solid #354247; }"
+        "QSlider::handle:horizontal:disabled { background: #657275; border: 1px solid #354247; }");
 }
 
 void applyJamSliderStyle(QSlider* slider)

@@ -45,8 +45,6 @@ public:
     void setCell(int section, const QString& lane, int beat, const QString& text);
     void setBeatDivision(int section, int beat, int division);
     void setBeatHit(int section, int beat, int lane, const QString& text);
-    QString lyricsText() const;
-    void setLyricsText(const QString& text);
     void resizeSection(int section, int beats);
     void resizeAllSections(int beats);
     void addSection(int beats = -1);
@@ -69,7 +67,6 @@ private:
     static void normalize(SongSection& section);
 
     QString title_ = QStringLiteral("Untitled Jam");
-    QString lyricsText_;
     int revision_ = 0;
     QVector<SongSection> sections_;
 };

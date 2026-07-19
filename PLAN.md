@@ -2,6 +2,25 @@
 
 This file tracks future work that is not already implemented. User-facing documentation lives in `docs/`, with only `README.md` and this plan kept at the repository root. Completed refactor history, evidence, and supporting reviews live in [refactor-plan.md](refactor-plan.md) and its linked refactor documents.
 
+## Tuner
+
+Add aubio for live audio tuning (guitar / bass / singing etc), allow them to see note in real time in performance mode of their input and then open up to see a more in depth tuner view helping them get in position
+
+## Essentia
+
+Consider essentia for things like beat detection.
+
+Workflow consideration:
+- I start on the looper view and I record some free form idea 
+- BPM follows the idea that I just put in 
+- Generate can follow the style and mood and chords and key of what i just played to then populate ideas around it 
+
+Could also be used for having a section and then generate a B section from it that follows on nicely, still having complexity for the different ideas it might introduce, but help with A and B sections 
+
+## Arrangement
+
+Some way to move forward and back through sections or with time, so that the performance mode can follow and looper banks can be tied to sections, allowing 4 sections in one song 
+
 ## Linux Audio Backend (never implement this without explicit approval)
 
 Consider Linux support after the Windows ASIO and macOS CoreAudio paths are stable. Linux should be treated as another host-native low-latency backend, not as a Docker or container target.

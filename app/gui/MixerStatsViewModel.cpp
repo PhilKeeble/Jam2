@@ -95,6 +95,7 @@ MixerMeterLevels MixerStatsViewModel::consume(
     levels_.send = decay(levels_.send, std::min(1.0, normalized(peaks.input_peak_ppm) * sendGain));
     levels_.monitor = decay(levels_.monitor, normalized(peaks.monitor_peak_ppm));
     levels_.remote = decay(levels_.remote, normalized(peaks.remote_peak_ppm));
+    levels_.track = decay(levels_.track, normalized(peaks.prepared_track_peak_ppm));
     levels_.metronome = decay(levels_.metronome, normalized(peaks.metronome_peak_ppm));
     levels_.output = decay(levels_.output, normalized(peaks.output_peak_ppm));
     levels_.outputClippedSamples = outputClippedSamples;

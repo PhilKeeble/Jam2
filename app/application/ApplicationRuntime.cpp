@@ -2,7 +2,9 @@
 
 #include <QMetaObject>
 
+#include <algorithm>
 #include <exception>
+#include <cmath>
 #include <utility>
 
 ApplicationRuntime::ApplicationRuntime(QObject* parent)
@@ -155,6 +157,18 @@ bool ApplicationRuntime::submit(const jam2::EngineCommand& command) noexcept
 bool ApplicationRuntime::updatePeers(const std::vector<Jam2RuntimePeer>& peers)
 {
     return isNetworkRunning() && host_.submitPeerUpdate(peers);
+}
+
+bool ApplicationRuntime::setPeerGainDb(std::uint64_t peerId, double gainDb) noexcept
+{
+    if (!isNetworkRunning() || peerId == 0 || !std::isfinite(gainDb) ||
+        gainDb < -60.0 || gainDb > 12.0) {
+        return false;
+    }
+    const double gain = gainDb <= -60.0 ? 0.0 : std::pow(10.0, gainDb / 20.0);
+    const int gainPpm = static_cast<int>(std::lround(
+        std::clamp(gain, 0.0, 4.0) * 1000000.0));
+    return host_.submitPeerGain(peerId, gainPpm);
 }
 
 void ApplicationRuntime::setTrackSyncEnabled(bool enabled) noexcept

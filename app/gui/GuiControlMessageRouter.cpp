@@ -63,10 +63,6 @@ void GuiControlMessageRouter::dispatch(
             message.value(QStringLiteral("beat")).toInt(),
             message.value(QStringLiteral("division")).toInt(4));
         if (handlers.refreshSongView) handlers.refreshSongView(QStringLiteral("beat"));
-    } else if (type == QStringLiteral("lyrics.set")) {
-        if (handlers.lyricModel == nullptr) return;
-        handlers.lyricModel->setLyricsText(message.value(QStringLiteral("text")).toString());
-        if (handlers.refreshSongView) handlers.refreshSongView(QStringLiteral("lyric"));
     } else if (type == QStringLiteral("song.set")) {
         if (handlers.songSet) handlers.songSet(message, sourcePeerToken);
     } else if (type == QStringLiteral("track.ready")) {

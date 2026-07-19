@@ -4,6 +4,7 @@
 #include "LooperProject.hpp"
 
 #include <QColor>
+#include <QFontMetrics>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
@@ -32,12 +33,13 @@ inline int trackTimelineBeatNumber(int zeroBasedBeat) noexcept
 
 inline qint64 looperTimelineViewFrames(
     int markerSampleRate,
+    qint64 minimumViewFrames,
     qint64 arrangementEndFrame,
     qint64 loopStartMs,
     qint64 loopEndMs) noexcept
 {
     const qint64 rate = qMax(1, markerSampleRate);
-    qint64 frames = rate * 8;
+    qint64 frames = qMax<qint64>(1, minimumViewFrames);
     if (loopStartMs >= 0) frames = qMax(frames, loopStartMs * rate / 1000);
     if (loopEndMs >= 0) frames = qMax(frames, loopEndMs * rate / 1000);
     return qMax<qint64>(1, qMax(frames, arrangementEndFrame));
@@ -130,12 +132,14 @@ protected:
                 painter.setPen(bar ? theme::text : theme::textMuted);
                 painter.drawText(
                     x + 4, 18,
-                    QString::number(jam2::gui::trackTimelineBeatNumber(beat)));
+                    QStringLiteral("%1.%2")
+                        .arg(beat / beatsPerBar_ + 1)
+                        .arg(beat % beatsPerBar_ + 1));
             }
             if (gridRunning_) {
                 const qint64 beatPosition = durationMs_ > 0 ? gridPositionMs_ % durationMs_ : 0;
                 painter.setPen(Qt::NoPen);
-                painter.setBrush(theme::accent);
+                painter.setBrush(theme::playhead);
                 painter.drawEllipse(QPoint(xForMs(beatPosition), 7), 4, 4);
             }
         }
@@ -280,6 +284,7 @@ public:
         int activeBank,
         int armedLane,
         int sampleRate,
+        qint64 minimumViewFrames,
         double bpm,
         bool gridLockEnabled)
     {
@@ -300,6 +305,7 @@ public:
         activeBank_ = qBound(0, activeBank, 3);
         armedLane_ = armedLane;
         markerSampleRate_ = sampleRate > 0 ? sampleRate : 48000;
+        minimumViewFrames_ = qMax<qint64>(1, minimumViewFrames);
         bpm_ = qBound(1.0, bpm, 400.0);
         gridLockEnabled_ = gridLockEnabled;
         if (!preserveActiveDrag) {
@@ -346,11 +352,14 @@ protected:
         drawOverlays(painter);
 
         const QRect plus = plusRect();
-        painter.fillRect(plus, theme::buttonBg);
-        painter.setPen(theme::borderStrong);
+        painter.save();
+        painter.fillRect(plus, theme::panelBg);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(theme::playhead, 1));
         painter.drawRect(plus.adjusted(0, 0, -1, -1));
-        painter.setPen(theme::text);
+        painter.setPen(theme::playhead);
         painter.drawText(plus.adjusted(0, 0, 0, 0), Qt::AlignCenter, QStringLiteral("+"));
+        painter.restore();
     }
 
     void mousePressEvent(QMouseEvent* event) override
@@ -377,6 +386,8 @@ protected:
             if (onAddLane) onAddLane();
             if (control == QStringLiteral("arm") && onArm) {
                 onArm(laneIndex);
+            } else if (control == QStringLiteral("rename") && onRename) {
+                onRename(laneIndex);
             }
             event->accept();
             return;
@@ -408,7 +419,7 @@ protected:
             return;
         }
         if (control == QStringLiteral("gain")) {
-            beginGainDrag(laneIndex, pos.y());
+            beginGainDrag(laneIndex, pos.x());
             event->accept();
             return;
         }
@@ -440,7 +451,11 @@ protected:
         const QPoint pos = event->position().toPoint();
         if (dragMode_ == DragMode::Gain && dragLane_ >= 0 && dragLane_ < lanes_.size()) {
             const QRect slider = gainRect(dragLane_);
-            const double t = 1.0 - qBound(0.0, static_cast<double>(pos.y() - slider.top()) / qMax(1, slider.height()), 1.0);
+            const double t = qBound(
+                0.0,
+                static_cast<double>(pos.x() - slider.left()) /
+                    qMax(1, slider.width()),
+                1.0);
             pendingGainDb_ = -60.0 + t * 72.0;
             lanes_[dragLane_].lane.gainDb = pendingGainDb_;
             update();
@@ -483,7 +498,7 @@ private:
 
     static constexpr int kToolbarHeight = 34;
     static constexpr int kLaneHeight = 112;
-    static constexpr int kHeaderWidth = 176;
+    static constexpr int kHeaderWidth = 248;
     static constexpr int kPlusHeight = 34;
 
     int visualLaneCount() const
@@ -555,6 +570,7 @@ private:
         }
         return jam2::gui::looperTimelineViewFrames(
             markerSampleRate(),
+            minimumViewFrames_,
             arrangementEndFrame,
             loopStartMs_,
             loopEndMs_);
@@ -643,7 +659,9 @@ private:
                     ? theme::text : theme::textMuted);
                 painter.drawText(
                     x + 4, 20,
-                    QString::number(jam2::gui::trackTimelineBeatNumber(beat)));
+                    QStringLiteral("%1.%2")
+                        .arg(beat / beatsPerBar_ + 1)
+                        .arg(beat % beatsPerBar_ + 1));
             }
         }
     }
@@ -676,10 +694,10 @@ private:
                 ? (gridPositionMs_ * static_cast<qint64>(rate) / 1000) % frames
                 : 0;
             const int x = xForFrame(currentBeatFrame);
-            painter.setPen(QPen(theme::withAlpha(theme::accent, 150), 1));
+            painter.setPen(QPen(theme::withAlpha(theme::playhead, 170), 1));
             painter.drawLine(x, top, x, bottom);
             painter.setPen(Qt::NoPen);
-            painter.setBrush(theme::accent);
+            painter.setBrush(theme::playhead);
             painter.drawEllipse(QPoint(x, kToolbarHeight - 8), 4, 4);
         }
         drawMarker(playheadMs_, theme::playhead, 2);
@@ -691,31 +709,44 @@ private:
         const LooperLane lane = realLane ? lanes_[row].lane : LooperLane{QString(), QString(), QString(), QStringLiteral("Empty Track 1")};
         const QRect rowRect = laneRect(row);
         const bool selected = row == selectedLane_;
-        painter.fillRect(rowRect.adjusted(0, 0, 0, -1), selected ? theme::selection : theme::panelBg);
+        const bool armed = row == armedLane_;
+        painter.fillRect(
+            rowRect.adjusted(0, 0, 0, -1),
+            selected ? QColor(45, 26, 52) : theme::panelBg);
         painter.fillRect(rowRect.adjusted(kHeaderWidth, 0, 0, -1), theme::editorBg);
+        if (selected) {
+            painter.fillRect(
+                QRect(rowRect.left(), rowRect.top(), 3, rowRect.height() - 1),
+                theme::playhead);
+        }
         painter.setPen(theme::border);
         painter.drawLine(0, rowRect.bottom(), width(), rowRect.bottom());
         painter.drawLine(kHeaderWidth, rowRect.top(), kHeaderWidth, rowRect.bottom());
 
         drawLaneHeader(painter, row, lane, realLane);
         drawLaneWaveform(painter, row, realLane);
+        if (armed) {
+            painter.setBrush(Qt::NoBrush);
+            painter.setPen(QPen(theme::playhead, 2));
+            painter.drawRect(rowRect.adjusted(1, 1, -2, -2));
+        }
     }
 
     QRect controlRect(int row, const QString& control) const
     {
         const QRect lane = laneRect(row);
-        if (control == QStringLiteral("mute")) return QRect(30, lane.top() + 36, 70, 20);
-        if (control == QStringLiteral("solo")) return QRect(30, lane.top() + 59, 70, 20);
-        if (control == QStringLiteral("arm")) return QRect(30, lane.top() + 82, 70, 20);
-        if (control == QStringLiteral("rename")) return QRect(kHeaderWidth - 58, lane.top() + 9, 20, 20);
-        if (control == QStringLiteral("remove")) return QRect(kHeaderWidth - 30, lane.top() + 9, 20, 20);
+        if (control == QStringLiteral("mute")) return QRect(28, lane.top() + 49, 34, 30);
+        if (control == QStringLiteral("solo")) return QRect(70, lane.top() + 49, 34, 30);
+        if (control == QStringLiteral("arm")) return QRect(116, lane.top() + 49, 34, 30);
+        if (control == QStringLiteral("rename")) return QRect(28, lane.top() + 7, kHeaderWidth - 68, 34);
+        if (control == QStringLiteral("remove")) return QRect(kHeaderWidth - 34, lane.top() + 9, 22, 22);
         return {};
     }
 
     QRect gainRect(int row) const
     {
         const QRect lane = laneRect(row);
-        return QRect(8, lane.top() + 42, 12, lane.height() - 54);
+        return QRect(84, lane.top() + 89, kHeaderWidth - 102, 12);
     }
 
     QString controlAt(int row, const QPoint& pos) const
@@ -723,46 +754,87 @@ private:
         for (const QString& control : {QStringLiteral("mute"), QStringLiteral("solo"), QStringLiteral("arm"), QStringLiteral("rename"), QStringLiteral("remove")}) {
             if (controlRect(row, control).contains(pos)) return control;
         }
-        if (gainRect(row).adjusted(-6, -2, 6, 2).contains(pos)) return QStringLiteral("gain");
+        if (gainRect(row).adjusted(-4, -8, 4, 8).contains(pos)) return QStringLiteral("gain");
         return {};
     }
 
     void drawLaneHeader(QPainter& painter, int row, const LooperLane& lane, bool realLane)
     {
-        const QRect r = laneRect(row);
+        const QRect name = controlRect(row, QStringLiteral("rename"));
+        QFont laneNameFont = painter.font();
+        laneNameFont.setPointSizeF(qMax(10.5, laneNameFont.pointSizeF()));
+        laneNameFont.setWeight(QFont::DemiBold);
+        painter.setFont(laneNameFont);
         painter.setPen(theme::textStrong);
         painter.drawText(
-            QRect(28, r.top() + 8, kHeaderWidth - 92, 22),
+            name,
             Qt::AlignLeft | Qt::AlignVCenter,
-            lane.name.isEmpty() ? QStringLiteral("Empty Track %1").arg(row + 1) : lane.name);
+            QFontMetrics(laneNameFont).elidedText(
+                lane.name.isEmpty() ? QStringLiteral("Empty Track %1").arg(row + 1) : lane.name,
+                Qt::ElideRight,
+                name.width()));
 
-        drawButton(painter, controlRect(row, QStringLiteral("mute")), QStringLiteral("Mute"), realLane && lane.muted ? theme::warning : theme::buttonBg);
-        drawButton(painter, controlRect(row, QStringLiteral("solo")), QStringLiteral("Solo"), realLane && lane.solo ? theme::success : theme::buttonBg);
-        drawButton(painter, controlRect(row, QStringLiteral("arm")), QStringLiteral("Record"), row == armedLane_ ? theme::record : theme::buttonBg);
-        drawIconButton(painter, controlRect(row, QStringLiteral("rename")), QStringLiteral("pencil"), theme::buttonBg);
-        drawButton(painter, controlRect(row, QStringLiteral("remove")), QStringLiteral("X"), theme::withAlpha(theme::danger, 96));
+        drawButton(
+            painter,
+            controlRect(row, QStringLiteral("mute")),
+            QStringLiteral("M"),
+            realLane && lane.muted ? theme::warning : theme::buttonBg);
+        drawButton(
+            painter,
+            controlRect(row, QStringLiteral("solo")),
+            QStringLiteral("S"),
+            realLane && lane.solo ? theme::success : theme::buttonBg);
+
+        const QRect arm = controlRect(row, QStringLiteral("arm"));
+        painter.setBrush(theme::buttonBg);
+        painter.setPen(QPen(row == armedLane_ ? theme::playhead : theme::borderStrong, row == armedLane_ ? 2 : 1));
+        painter.drawRect(arm.adjusted(0, 0, -1, -1));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(theme::record);
+        painter.drawEllipse(arm.center(), 7, 7);
+
+        const QRect remove = controlRect(row, QStringLiteral("remove"));
+        painter.setPen(QPen(theme::danger, 2));
+        painter.drawLine(remove.left() + 5, remove.top() + 5, remove.right() - 5, remove.bottom() - 5);
+        painter.drawLine(remove.right() - 5, remove.top() + 5, remove.left() + 5, remove.bottom() - 5);
 
         const QRect slider = gainRect(row);
+        painter.save();
         painter.fillRect(slider, theme::meterBg);
-        painter.setPen(theme::border);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(theme::playhead, 1));
         painter.drawRect(slider.adjusted(0, 0, -1, -1));
         const double t = qBound(0.0, (lane.gainDb + 60.0) / 72.0, 1.0);
-        const int y = slider.bottom() - static_cast<int>(std::llround(t * slider.height()));
-        painter.fillRect(QRect(slider.left(), y, slider.width(), slider.bottom() - y + 1), theme::accent);
+        const int x = slider.left() +
+            static_cast<int>(std::llround(t * qMax(1, slider.width() - 1)));
+        painter.setBrush(theme::playhead);
+        painter.setPen(QPen(QColor(255, 214, 142), 1));
+        painter.drawEllipse(QPoint(x, slider.center().y()), 5, 5);
+        painter.setPen(theme::textMuted);
+        painter.drawText(
+            QRect(28, laneRect(row).top() + 82, 50, 24),
+            Qt::AlignLeft | Qt::AlignVCenter,
+            QStringLiteral("Volume"));
+        painter.restore();
     }
 
     void drawButton(QPainter& painter, const QRect& rect, const QString& text, const QColor& fill)
     {
+        painter.save();
         painter.fillRect(rect, fill);
+        painter.setBrush(Qt::NoBrush);
         painter.setPen(theme::borderStrong);
         painter.drawRect(rect.adjusted(0, 0, -1, -1));
         painter.setPen(theme::textStrong);
         painter.drawText(rect, Qt::AlignCenter, text);
+        painter.restore();
     }
 
     void drawIconButton(QPainter& painter, const QRect& rect, const QString& icon, const QColor& fill)
     {
+        painter.save();
         painter.fillRect(rect, fill);
+        painter.setBrush(Qt::NoBrush);
         painter.setPen(theme::borderStrong);
         painter.drawRect(rect.adjusted(0, 0, -1, -1));
         painter.setPen(QPen(theme::textStrong, 2));
@@ -770,6 +842,7 @@ private:
             painter.drawLine(rect.left() + 5, rect.bottom() - 5, rect.right() - 5, rect.top() + 5);
             painter.drawLine(rect.left() + 4, rect.bottom() - 4, rect.left() + 7, rect.bottom() - 3);
         }
+        painter.restore();
     }
 
     void drawLaneWaveform(QPainter& painter, int row, bool realLane)
@@ -783,8 +856,13 @@ private:
             return;
         }
         const QRect clip = clipRect(row);
-        painter.fillRect(clip, theme::clipBg);
-        painter.setPen(theme::waveform);
+        painter.fillRect(clip, QColor(35, 21, 45));
+        const QVector<QColor> waveformColors{
+            theme::accent,
+            theme::nebulaPurple,
+            theme::nebulaCoral,
+            theme::nebulaRed};
+        painter.setPen(waveformColors.at(row % waveformColors.size()));
         const auto& peaks = lanes_[row].peaks;
         const qint64 firstSourceFrame = sourceStart(row);
         const qint64 croppedFrames = visibleFrames(row);
@@ -800,8 +878,12 @@ private:
             const int half = qMax(2, static_cast<int>(peaks[index] * (clip.height() / 2 - 4)));
             painter.drawLine(x, clip.center().y() - half, x, clip.center().y() + half);
         }
-        painter.fillRect(QRect(clip.left(), clip.top(), 6, clip.height()), theme::withAlpha(theme::accent, 180));
-        painter.fillRect(QRect(clip.right() - 5, clip.top(), 6, clip.height()), theme::withAlpha(theme::accent, 180));
+        painter.fillRect(
+            QRect(clip.left(), clip.top(), 6, clip.height()),
+            theme::withAlpha(theme::accent, 190));
+        painter.fillRect(
+            QRect(clip.right() - 5, clip.top(), 6, clip.height()),
+            theme::withAlpha(theme::nebulaCoral, 190));
         painter.setPen(theme::textStrong);
         painter.drawText(clip.adjusted(6, 2, -6, -2), Qt::AlignLeft | Qt::AlignTop, lanes_[row].lane.name);
     }
@@ -819,11 +901,20 @@ private:
         update();
     }
 
-    void beginGainDrag(int lane, int)
+    void beginGainDrag(int lane, int x)
     {
         dragMode_ = DragMode::Gain;
         dragLane_ = lane;
-        pendingGainDb_ = lanes_.value(lane).lane.gainDb;
+        const QRect slider = gainRect(lane);
+        const double t = qBound(
+            0.0,
+            static_cast<double>(x - slider.left()) / qMax(1, slider.width()),
+            1.0);
+        pendingGainDb_ = -60.0 + t * 72.0;
+        if (lane >= 0 && lane < lanes_.size()) {
+            lanes_[lane].lane.gainDb = pendingGainDb_;
+        }
+        update();
     }
 
     void beginTimelineDrag(int lane, double x, DragMode mode)
@@ -884,6 +975,7 @@ private:
     qint64 loopStartMs_ = -1;
     qint64 loopEndMs_ = -1;
     int markerSampleRate_ = 48000;
+    qint64 minimumViewFrames_ = 1;
     DragMode dragMode_ = DragMode::None;
     int dragLane_ = -1;
     double dragStartX_ = 0.0;

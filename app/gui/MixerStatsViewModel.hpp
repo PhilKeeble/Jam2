@@ -21,6 +21,7 @@ struct MixerMeterLevels {
     double send = 0.0;
     double monitor = 0.0;
     double remote = 0.0;
+    double track = 0.0;
     double metronome = 0.0;
     double output = 0.0;
     std::uint64_t outputClippedSamples = 0;

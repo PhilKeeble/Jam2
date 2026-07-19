@@ -30,6 +30,8 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QStackedLayout>
+#include <QStackedWidget>
 #include <QSizePolicy>
 #include <QSlider>
 #include <QSpinBox>
@@ -40,7 +42,6 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWidget>
-
 #include <cmath>
 #include <limits>
 
@@ -72,32 +73,98 @@ QIcon settingsIcon()
     return QIcon(pixmap);
 }
 
+class AnimatedBrandIcon final : public QWidget {
+public:
+    explicit AnimatedBrandIcon(QWidget* parent)
+        : QWidget(parent),
+          logo_(QStringLiteral(":/jam2/assets/logo-nebula.png"))
+    {
+        setFixedSize(82, 82);
+        setAccessibleName(QStringLiteral("Jam2gether"));
+        animation_.setInterval(50);
+        QObject::connect(&animation_, &QTimer::timeout, this, [this] {
+            phase_ += 0.045;
+            if (phase_ >= 6.283185307179586) {
+                phase_ -= 6.283185307179586;
+            }
+            update();
+        });
+        animation_.start();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        painter.fillRect(rect(), QColor(5, 8, 9));
+        if (logo_.isNull()) {
+            painter.setPen(QColor(226, 172, 83));
+            painter.drawText(rect(), Qt::AlignCenter, QStringLiteral("J2"));
+            return;
+        }
+
+        const qreal pulse = (std::sin(phase_) + 1.0) * 0.5;
+        const qreal scale = 0.986 + pulse * 0.014;
+        const QSizeF targetSize(width() * scale, height() * scale);
+        const QRectF target(
+            (width() - targetSize.width()) * 0.5,
+            (height() - targetSize.height()) * 0.5,
+            targetSize.width(),
+            targetSize.height());
+        painter.setOpacity(0.94 + pulse * 0.06);
+        painter.drawPixmap(target, logo_, logo_.rect());
+    }
+
+private:
+    QPixmap logo_;
+    QTimer animation_;
+    qreal phase_ = 0.0;
+};
+
 } // namespace
 
 void MainWindowPages::build(MainWindow& w)
 {
-    w.setWindowTitle(QStringLiteral("Jam2"));
+    w.setWindowTitle(QStringLiteral("Jam2gether"));
+    w.setWindowIcon(QIcon(QStringLiteral(":/jam2/assets/logo-nebula.png")));
     w.setMinimumSize(1280, 720);
 
-    w.titleLabel_ = new QLabel(QStringLiteral("Jam2"), &w);
-    w.titleLabel_->setObjectName(QStringLiteral("AppTitle"));
+    auto* brandMark = new AnimatedBrandIcon(&w);
     w.connectionLabel_ = new QLabel(QStringLiteral("Idle"), &w);
     w.connectionLabel_->setObjectName(QStringLiteral("StatusPill"));
-    w.jitterLabel_ = new QLabel(QStringLiteral("Jitter -"), &w);
-    w.jitterLabel_->setObjectName(QStringLiteral("StatusPill"));
-    w.lossLabel_ = new QLabel(QStringLiteral("Loss -"), &w);
-    w.lossLabel_->setObjectName(QStringLiteral("StatusPill"));
 
     auto* header = new QHBoxLayout();
-    header->addWidget(w.titleLabel_);
-    header->addStretch(1);
+    header->setSpacing(10);
+    header->addWidget(brandMark);
+    w.songTitleEdit_ = new QLineEdit(w.chordModel_.title(), &w);
+    w.songTitleEdit_->setObjectName(QStringLiteral("SongTitle"));
+    w.songTitleEdit_->setMinimumWidth(240);
+    w.songTitleEdit_->setMaximumWidth(520);
+    header->addSpacing(20);
+    header->addWidget(w.songTitleEdit_, 1);
+    auto* newSongButton = new QPushButton(QStringLiteral("New Song"), &w);
+    auto* openSongButton = new QPushButton(QStringLiteral("Open"), &w);
+    auto* saveSongButton = new QPushButton(QStringLiteral("Save"), &w);
+    for (QPushButton* button : {newSongButton, openSongButton, saveSongButton}) {
+        button->setObjectName(QStringLiteral("DetailTool"));
+        button->setFixedHeight(32);
+        header->addWidget(button);
+    }
     w.engineModeLabel_ = new QLabel(QStringLiteral("Local"), &w);
     w.engineModeLabel_->setObjectName(QStringLiteral("StatusPill"));
     w.engineModeLabel_->setAlignment(Qt::AlignCenter);
-    w.engineModeLabel_->setMinimumWidth(72);
+    w.engineModeLabel_->setFixedSize(72, 32);
     w.sessionTopologyLabel_ = new QLabel(QStringLiteral("Remote Peers 0"), &w);
     w.sessionTopologyLabel_->setObjectName(QStringLiteral("StatusPill"));
-    w.localEngineButton_ = new QPushButton(QStringLiteral("Start Local Engine"), &w);
+    w.sessionTopologyLabel_->setFixedSize(116, 32);
+    w.connectionLabel_->setFixedHeight(32);
+    w.connectionLabel_->setMinimumWidth(76);
+    w.connectionLabel_->setMaximumWidth(130);
+    w.localEngineButton_ = new QPushButton(QStringLiteral("Audio setup"), &w);
+    w.localEngineButton_->setFixedHeight(32);
+    w.localEngineButton_->setMaximumWidth(108);
     QObject::connect(w.localEngineButton_, &QPushButton::clicked, &w, [&w] {
         w.showLocalPerformSetup();
     });
@@ -117,22 +184,8 @@ void MainWindowPages::build(MainWindow& w)
     header->addWidget(w.connectionLabel_);
     header->addWidget(w.sessionTopologyLabel_);
 
-    w.songTitleEdit_ = new QLineEdit(w.chordModel_.title(), &w);
-    w.songTitleEdit_->setMinimumWidth(300);
-    auto* newSongButton = new QPushButton(QStringLiteral("New Song"), &w);
-    auto* openSongButton = new QPushButton(QStringLiteral("Open"), &w);
-    auto* saveSongButton = new QPushButton(QStringLiteral("Save"), &w);
-    auto* library = new QHBoxLayout();
-    library->addWidget(new QLabel(QStringLiteral("Song"), &w));
-    library->addWidget(w.songTitleEdit_, 1);
-    library->addWidget(newSongButton);
-    library->addWidget(openSongButton);
-    library->addWidget(saveSongButton);
-
     QObject::connect(w.songTitleEdit_, &QLineEdit::editingFinished, &w, [&w] {
         w.chordModel_.setTitle(w.songTitleEdit_->text());
-        w.beatModel_.setTitle(w.songTitleEdit_->text());
-        w.lyricModel_.setTitle(w.songTitleEdit_->text());
         w.sendSongSnapshot();
     });
     QObject::connect(newSongButton, &QPushButton::clicked, &w, [&w] { w.newSong(); });
@@ -140,15 +193,12 @@ void MainWindowPages::build(MainWindow& w)
     QObject::connect(saveSongButton, &QPushButton::clicked, &w, [&w] { w.saveSong(); });
 
     QWidget* sessionPage = buildSessionPage(w);
-
-    w.tabs_ = new QTabWidget(&w);
-    w.tabs_->addTab(buildSongPage(w), QStringLiteral("Chord View"));
-    w.tabs_->addTab(buildBeatPage(w), QStringLiteral("Beat View"));
+    QWidget* chordPage = buildSongPage(w);
+    QWidget* beatPage = buildBeatPage(w);
     w.lyricGrid_ = new BeatGridWidget(&w.lyricModel_, QStringLiteral("lyric"), &w);
-    w.tabs_->addTab(w.lyricGrid_, QStringLiteral("Lyrics"));
-    w.tabs_->addTab(buildTrackPage(w), QStringLiteral("Track"));
-    w.tabs_->addTab(buildMetronomePage(w), QStringLiteral("Metronome"));
-    w.tabs_->addTab(buildMixPage(w), QStringLiteral("Mix"));
+    QWidget* trackPage = buildTrackPage(w);
+    QWidget* metronomePage = buildMetronomePage(w);
+    QWidget* mixPage = buildMixPage(w);
 
     auto sendCellEdit = [&w](int section, const QString& lane, int beat, const QString& text, int revision) {
         w.sendControl(QJsonObject{
@@ -183,18 +233,15 @@ void MainWindowPages::build(MainWindow& w)
         });
         w.refreshLooperLanes();
     };
-    w.lyricGrid_->onLyricsEdited = [&w](const QString& text, int revision) {
-        w.sendControl(QJsonObject{
-            {QStringLiteral("type"), QStringLiteral("lyrics.set")},
-            {QStringLiteral("revision"), revision},
-            {QStringLiteral("text"), text},
-        });
-    };
     w.beatGrid_->onStructureChanged = [&w] {
+        if (w.chordGrid_) w.chordGrid_->refresh();
+        if (w.lyricGrid_) w.lyricGrid_->refresh();
         w.refreshLooperLanes();
         w.sendSongSnapshot();
     };
     w.lyricGrid_->onStructureChanged = [&w] {
+        if (w.chordGrid_) w.chordGrid_->refresh();
+        if (w.beatGrid_) w.beatGrid_->refresh();
         w.sendSongSnapshot();
     };
     w.beatGrid_->onGridResized = [&w](int section, int beats, int revision) {
@@ -208,36 +255,452 @@ void MainWindowPages::build(MainWindow& w)
     };
     w.lyricGrid_->onGridResized = w.beatGrid_->onGridResized;
 
-    w.latencyLabel_ = new QLabel(QStringLiteral("RTT -"), &w);
-    w.latencyLabel_->setObjectName(QStringLiteral("StatusPill"));
-    w.underrunLabel_ = new QLabel(QStringLiteral("Underruns -"), &w);
-    w.underrunLabel_->setObjectName(QStringLiteral("StatusPill"));
     w.diagnosisLabel_ = new QLabel(QStringLiteral("Diagnosis -"), &w);
     w.diagnosisLabel_->setObjectName(QStringLiteral("StatusPill"));
     w.diagnosisLabel_->setMinimumWidth(260);
     w.diagnosisLabel_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    auto* footer = new QHBoxLayout();
-    footer->addWidget(w.latencyLabel_);
-    footer->addWidget(w.jitterLabel_);
-    footer->addWidget(w.lossLabel_);
-    footer->addWidget(w.underrunLabel_);
-    footer->addStretch(1);
-    footer->addWidget(w.diagnosisLabel_);
+    w.diagnosisEvidenceLabel_ = new QLabel(
+        QStringLiteral("Live diagnosis waits for connection diagnostics."), &w);
+    w.diagnosisEvidenceLabel_->setWordWrap(true);
+    w.diagnosisEvidenceLabel_->setObjectName(QStringLiteral("DiagnosisDetail"));
+    w.performanceHome_ = new PerformanceHomeWidget(&w);
+    w.performanceHome_->setSongModel(&w.chordModel_);
+    w.performanceHome_->onOpenDetail = [&w](const QString& page) {
+        w.openWorkspace(page);
+    };
+    w.performanceHome_->onPeerSelected = [&w](std::uint64_t peerId) {
+        w.selectPerformancePeer(peerId);
+    };
+    w.performanceHome_->setTrackGainDb(w.trackController_.model().trackGainDb);
+    w.performanceHome_->onTrackGainChanged = [&w](double gainDb) {
+        if (w.trackLevelSlider_) {
+            w.trackLevelSlider_->setValue(qRound(gainDb));
+        }
+    };
+    w.performanceHome_->onGenerateIdea = [&w] {
+        w.generatePracticeIdea();
+    };
+    w.performanceHome_->onGenerateWav = [&w] {
+        w.generatePracticeReferenceWavs();
+    };
 
-    auto* layout = new QVBoxLayout(&w);
-    layout->setContentsMargins(12, 10, 12, 10);
-    layout->setSpacing(8);
-    layout->addLayout(header);
-    layout->addLayout(library);
-    layout->addWidget(sessionPage);
-    layout->addWidget(w.tabs_, 1);
+    w.workspaceStack_ = new QStackedWidget(&w);
+    const auto addWorkspace = [&w](const QString& key, QWidget* page) {
+        w.workspacePages_.insert(key, w.workspaceStack_->addWidget(page));
+    };
+    addWorkspace(QStringLiteral("chords"), chordPage);
+    addWorkspace(QStringLiteral("beats"), beatPage);
+    addWorkspace(QStringLiteral("lyrics"), w.lyricGrid_);
+    addWorkspace(QStringLiteral("metronome"), metronomePage);
+    addWorkspace(QStringLiteral("looper"), trackPage);
+    sessionPage->hide();
+    mixPage->hide();
 
-    w.logEdit_ = new QPlainTextEdit(&w);
+    auto* detailPanel = new QFrame(&w);
+    detailPanel->setObjectName(QStringLiteral("DetailPanel"));
+    auto* detailLayout = new QVBoxLayout(detailPanel);
+    detailLayout->setContentsMargins(12, 10, 12, 12);
+    detailLayout->setSpacing(8);
+    auto* detailHeader = new QHBoxLayout();
+    w.detailIdentityPanel_ = new QWidget(detailPanel);
+    auto* detailIdentity = new QVBoxLayout(w.detailIdentityPanel_);
+    detailIdentity->setContentsMargins(0, 0, 0, 0);
+    detailIdentity->setSpacing(0);
+    w.detailPositionLabel_ = new QLabel(QStringLiteral("Bank A"), w.detailIdentityPanel_);
+    w.detailPositionLabel_->setObjectName(QStringLiteral("DetailPosition"));
+    detailIdentity->addWidget(w.detailPositionLabel_);
+    detailHeader->addWidget(w.detailIdentityPanel_);
+    w.detailIdentityPanel_->setVisible(false);
+    detailHeader->addStretch(1);
+    const QList<QPair<QString, QString>> destinations{
+        {QStringLiteral("Chords"), QStringLiteral("chords")},
+        {QStringLiteral("Beats"), QStringLiteral("beats")},
+        {QStringLiteral("Lyrics"), QStringLiteral("lyrics")},
+        {QStringLiteral("Metronome"), QStringLiteral("metronome")},
+        {QStringLiteral("Looper"), QStringLiteral("looper")},
+    };
+    for (const auto& destination : destinations) {
+        auto* button = new QPushButton(destination.first, detailPanel);
+        button->setObjectName(QStringLiteral("DetailTab"));
+        button->setProperty("workspaceKey", destination.second);
+        QObject::connect(button, &QPushButton::clicked, &w, [&w, key = destination.second] {
+            w.openWorkspace(key);
+        });
+        detailHeader->addWidget(button);
+    }
+    auto* closeDetailButton = new QPushButton(QStringLiteral("Close"), detailPanel);
+    closeDetailButton->setObjectName(QStringLiteral("CloseDetailButton"));
+    QObject::connect(closeDetailButton, &QPushButton::clicked, &w, [&w] {
+        w.openWorkspace(QStringLiteral("performance"));
+    });
+    detailHeader->addWidget(closeDetailButton);
+    detailLayout->addLayout(detailHeader);
+    detailLayout->addWidget(w.workspaceStack_, 1);
+
+    w.performanceStageStack_ = new QStackedWidget(&w);
+    w.performanceStageStack_->addWidget(w.performanceHome_);
+    w.performanceStageStack_->addWidget(detailPanel);
+    w.performanceStageStack_->setCurrentIndex(0);
+
+    auto* sessionActions = new QHBoxLayout();
+    sessionActions->setSpacing(6);
+    auto* startJamButton = new QPushButton(QStringLiteral("Start Jam"), &w);
+    auto* joinJamButton = new QPushButton(QStringLiteral("Join"), &w);
+    auto* leaveJamButton = new QPushButton(QStringLiteral("Leave"), &w);
+    startJamButton->setObjectName(QStringLiteral("SessionAction"));
+    joinJamButton->setObjectName(QStringLiteral("SessionAction"));
+    leaveJamButton->setObjectName(QStringLiteral("SessionAction"));
+    QObject::connect(startJamButton, &QPushButton::clicked, &w, [&w] {
+        w.showStartJamDialog();
+    });
+    QObject::connect(joinJamButton, &QPushButton::clicked, &w, [&w] {
+        w.showJoinJamDialog();
+    });
+    QObject::connect(leaveJamButton, &QPushButton::clicked, &w, [&w] {
+        w.stopJam(true);
+    });
+    sessionActions->addWidget(startJamButton);
+    sessionActions->addWidget(joinJamButton);
+    sessionActions->addWidget(leaveJamButton);
+    auto* dataButton = new QPushButton(QStringLiteral("Data"), &w);
+    dataButton->setObjectName(QStringLiteral("DataButton"));
+    QObject::connect(dataButton, &QPushButton::clicked, &w, [&w] {
+        w.toggleDataDrawer();
+    });
+    sessionActions->addWidget(dataButton);
+    header->addLayout(sessionActions);
+
+    w.dataOverlay_ = new QWidget(&w);
+    w.dataOverlay_->setObjectName(QStringLiteral("DataOverlay"));
+    auto* overlayLayout = new QHBoxLayout(w.dataOverlay_);
+    overlayLayout->setContentsMargins(0, 0, 0, 0);
+    overlayLayout->addStretch(1);
+    w.dataDrawer_ = new QFrame(w.dataOverlay_);
+    w.dataDrawer_->setObjectName(QStringLiteral("DataDrawer"));
+    w.dataDrawer_->setFixedWidth(580);
+    auto* dataContent = new QWidget(w.dataDrawer_);
+    auto* dataLayout = new QVBoxLayout(dataContent);
+    dataLayout->setContentsMargins(18, 16, 18, 20);
+    dataLayout->setSpacing(12);
+    auto* dataHeader = new QHBoxLayout();
+    auto* dataHeading = new QVBoxLayout();
+    auto* dataTitle = new QLabel(QStringLiteral("Session data"), dataContent);
+    dataTitle->setObjectName(QStringLiteral("DrawerTitle"));
+    auto* dataSubtitle = new QLabel(
+        QStringLiteral("LIVE AUDIO PATH / RAW MEASUREMENTS"), dataContent);
+    dataSubtitle->setObjectName(QStringLiteral("MicroHeading"));
+    dataHeading->addWidget(dataTitle);
+    dataHeading->addWidget(dataSubtitle);
+    dataHeader->addLayout(dataHeading);
+    dataHeader->addStretch(1);
+    auto* closeData = new QPushButton(QStringLiteral("Close"), dataContent);
+    closeData->setObjectName(QStringLiteral("CloseDetailButton"));
+    QObject::connect(closeData, &QPushButton::clicked, &w, [&w] {
+        w.toggleDataDrawer();
+    });
+    dataHeader->addWidget(closeData);
+    dataLayout->addLayout(dataHeader);
+
+    auto* audioPathTitle = new QLabel(QStringLiteral("AUDIO PATH"), dataContent);
+    audioPathTitle->setObjectName(QStringLiteral("DrawerSection"));
+    dataLayout->addWidget(audioPathTitle);
+    auto* metricGrid = new QGridLayout();
+    metricGrid->setSpacing(7);
+    const auto metricCard = [dataContent](
+                                const QString& label,
+                                QLabel*& value,
+                                const QString& initial) {
+        auto* card = new QFrame(dataContent);
+        card->setObjectName(QStringLiteral("MetricCard"));
+        auto* layout = new QVBoxLayout(card);
+        layout->setContentsMargins(10, 7, 10, 8);
+        layout->setSpacing(1);
+        value = new QLabel(initial, card);
+        value->setObjectName(QStringLiteral("MetricValue"));
+        auto* caption = new QLabel(label, card);
+        caption->setObjectName(QStringLiteral("MetricCaption"));
+        layout->addWidget(value);
+        layout->addWidget(caption);
+        return card;
+    };
+    metricGrid->addWidget(metricCard(
+        QStringLiteral("SAMPLE RATE"), w.diagnosticSampleRateValue_, QStringLiteral("-")), 0, 0);
+    metricGrid->addWidget(metricCard(
+        QStringLiteral("DRIFT"), w.diagnosticDriftValue_, QStringLiteral("-")), 0, 1);
+    metricGrid->addWidget(metricCard(
+        QStringLiteral("MISSING AUDIO"), w.diagnosticMissingAudioValue_, QStringLiteral("0 fr")), 0, 2);
+    metricGrid->addWidget(metricCard(
+        QStringLiteral("OUTPUT UNDERRUNS"), w.diagnosticOutputUnderrunsValue_, QStringLiteral("0")), 0, 3);
+    metricGrid->addWidget(metricCard(
+        QStringLiteral("PACKETS"), w.diagnosticPacketsValue_, QStringLiteral("0")), 1, 0);
+    metricGrid->addWidget(metricCard(
+        QStringLiteral("LATE / REORDERED"), w.diagnosticLateValue_, QStringLiteral("0")), 1, 1);
+    metricGrid->addWidget(metricCard(
+        QStringLiteral("LOSS EVENTS"), w.diagnosticLossEventsValue_, QStringLiteral("0")), 1, 2);
+    metricGrid->addWidget(metricCard(
+        QStringLiteral("PACKET BURSTS"), w.diagnosticBurstGapsValue_, QStringLiteral("0")), 1, 3);
+    dataLayout->addLayout(metricGrid);
+    dataLayout->addWidget(w.diagnosisLabel_);
+    dataLayout->addWidget(w.diagnosisEvidenceLabel_);
+
+    auto* peerTitle = new QLabel(QStringLiteral("DIRECT PEERS"), dataContent);
+    peerTitle->setObjectName(QStringLiteral("DrawerSection"));
+    dataLayout->addWidget(peerTitle);
+    w.diagnosticPeerTable_ = new QTableWidget(0, 6, dataContent);
+    w.diagnosticPeerTable_->setHorizontalHeaderLabels({
+        QStringLiteral("Peer"),
+        QStringLiteral("RTT"),
+        QStringLiteral("Jitter"),
+        QStringLiteral("Loss"),
+        QStringLiteral("Late"),
+        QStringLiteral("Drift")});
+    w.diagnosticPeerTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    w.diagnosticPeerTable_->setSelectionMode(QAbstractItemView::NoSelection);
+    w.diagnosticPeerTable_->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    w.diagnosticPeerTable_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    w.diagnosticPeerTable_->verticalHeader()->hide();
+    w.diagnosticPeerTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    w.diagnosticPeerTable_->setMinimumHeight(140);
+    w.diagnosticPeerTable_->setMaximumHeight(280);
+    dataLayout->addWidget(w.diagnosticPeerTable_);
+
+    auto* guideTitle = new QLabel(QStringLiteral("IF YOU HEAR THIS ARTIFACT"), dataContent);
+    guideTitle->setObjectName(QStringLiteral("DrawerSection"));
+    dataLayout->addWidget(guideTitle);
+    const auto addGuide = [dataContent, dataLayout](
+                              const QString& title,
+                              const QString& body) {
+        auto* container = new QFrame(dataContent);
+        container->setObjectName(QStringLiteral("GuideSection"));
+        auto* sectionLayout = new QVBoxLayout(container);
+        sectionLayout->setContentsMargins(0, 0, 0, 0);
+        sectionLayout->setSpacing(0);
+        auto* toggle = new QToolButton(container);
+        toggle->setObjectName(QStringLiteral("GuideToggle"));
+        toggle->setText(title);
+        toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        toggle->setArrowType(Qt::RightArrow);
+        toggle->setCheckable(true);
+        auto* copy = new QLabel(body, container);
+        copy->setObjectName(QStringLiteral("ArtifactGuide"));
+        copy->setWordWrap(true);
+        copy->setContentsMargins(13, 9, 13, 11);
+        copy->hide();
+        QObject::connect(toggle, &QToolButton::toggled, container, [toggle, copy](bool open) {
+            toggle->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
+            copy->setVisible(open);
+        });
+        sectionLayout->addWidget(toggle);
+        sectionLayout->addWidget(copy);
+        dataLayout->addWidget(container);
+    };
+    addGuide(
+        QStringLiteral("Clicks, pops or drop-outs"),
+        QStringLiteral(
+            "Watch callback gaps, output underruns, packet loss and late packets. "
+            "If callback gaps rise, increase the audio-device buffer. If network "
+            "loss or late packets rise, test a wired path or cautiously increase prefill."));
+    addGuide(
+        QStringLiteral("Pitch wobble or drifting"),
+        QStringLiteral(
+            "Watch drift ppm, resampler ratio and drift-clamped samples. Change "
+            "drift limits only when those measurements show sustained clock pressure."));
+    addGuide(
+        QStringLiteral("Stable audio, but too delayed"),
+        QStringLiteral(
+            "Compare peer RTT with the configured playout and device-buffer values "
+            "in Settings or the CSV log. Physical network RTT cannot be removed by "
+            "reducing a local buffer."));
+    addGuide(
+        QStringLiteral("One person is loud, quiet or distorted"),
+        QStringLiteral(
+            "Select that person in the performance rail and change their dB gain. "
+            "Use input and output peak meters to separate source clipping from mix level."));
+    addGuide(
+        QStringLiteral("Rhythmic pulsing or repeated gaps"),
+        QStringLiteral(
+            "Compare packet-gap bursts with callback cadence and buffer depth. A "
+            "regular callback issue points to the device path; network bursts point "
+            "to the connection path."));
+    auto* logTitle = new QToolButton(dataContent);
+    logTitle->setObjectName(QStringLiteral("GuideToggle"));
+    logTitle->setText(QStringLiteral("Technical log"));
+    logTitle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    logTitle->setArrowType(Qt::RightArrow);
+    logTitle->setCheckable(true);
+    dataLayout->addWidget(logTitle);
+    w.logEdit_ = new QPlainTextEdit(dataContent);
     w.logEdit_->setReadOnly(true);
     w.logEdit_->setMaximumBlockCount(2000);
-    w.logEdit_->setMaximumHeight(150);
-    layout->addWidget(w.logEdit_);
-    layout->addLayout(footer);
+    w.logEdit_->setMinimumHeight(220);
+    w.logEdit_->hide();
+    QObject::connect(logTitle, &QToolButton::toggled, dataContent, [logTitle, &w](bool open) {
+        logTitle->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
+        w.logEdit_->setVisible(open);
+    });
+    dataLayout->addWidget(w.logEdit_, 1);
+    auto* dataScroll = new QScrollArea(w.dataDrawer_);
+    dataScroll->setWidgetResizable(true);
+    dataScroll->setFrameShape(QFrame::NoFrame);
+    dataScroll->setWidget(dataContent);
+    auto* drawerLayout = new QVBoxLayout(w.dataDrawer_);
+    drawerLayout->setContentsMargins(0, 0, 0, 0);
+    drawerLayout->addWidget(dataScroll);
+    overlayLayout->addWidget(w.dataDrawer_);
+    w.dataOverlay_->hide();
+
+    auto* central = new QWidget(&w);
+    auto* centralLayout = new QStackedLayout(central);
+    centralLayout->setContentsMargins(0, 0, 0, 0);
+    centralLayout->setStackingMode(QStackedLayout::StackAll);
+    centralLayout->addWidget(w.performanceStageStack_);
+    centralLayout->addWidget(w.dataOverlay_);
+
+    auto* transport = new QFrame(&w);
+    transport->setObjectName(QStringLiteral("PerformanceTransport"));
+    auto* transportLayout = new QHBoxLayout(transport);
+    transportLayout->setContentsMargins(12, 8, 12, 8);
+    transportLayout->setSpacing(18);
+
+    auto* localStrip = new QWidget(transport);
+    auto* localLayout = new QVBoxLayout(localStrip);
+    localLayout->setContentsMargins(0, 0, 0, 0);
+    w.performanceLeftTitle_ = new QLabel(QStringLiteral("YOU / LOCAL INPUT"), localStrip);
+    w.performanceLeftTitle_->setObjectName(QStringLiteral("StripTitle"));
+    localLayout->addWidget(w.performanceLeftTitle_);
+    w.performanceLocalControls_ = new QWidget(localStrip);
+    auto* selfControlsLayout = new QVBoxLayout(w.performanceLocalControls_);
+    selfControlsLayout->setContentsMargins(0, 0, 0, 0);
+    selfControlsLayout->setSpacing(4);
+    selfControlsLayout->addWidget(w.mixInputMeterRow_);
+    selfControlsLayout->addWidget(w.mixSendRow_);
+    auto* monitorRow = new QHBoxLayout();
+    monitorRow->addWidget(w.mixMonitorEnableRow_);
+    monitorRow->addWidget(w.mixMonitorRow_, 1);
+    selfControlsLayout->addLayout(monitorRow);
+    localLayout->addWidget(w.performanceLocalControls_);
+
+    w.performancePeerControls_ = new QWidget(localStrip);
+    auto* peerControlsLayout = new QVBoxLayout(w.performancePeerControls_);
+    peerControlsLayout->setContentsMargins(0, 0, 0, 0);
+    peerControlsLayout->setSpacing(5);
+    auto* aggregateRow = new QHBoxLayout();
+    aggregateRow->addWidget(new QLabel(QStringLiteral("Peer activity"), w.performancePeerControls_));
+    aggregateRow->addWidget(w.mixRemotePeerMeter_, 1);
+    peerControlsLayout->addLayout(aggregateRow);
+    auto* selectedRow = new QHBoxLayout();
+    w.selectedPeerNameLabel_ = new QLabel(QStringLiteral("Volume"), w.performancePeerControls_);
+    w.selectedPeerNameLabel_->setMinimumWidth(72);
+    w.selectedPeerGainSlider_ = new QSlider(Qt::Horizontal, w.performancePeerControls_);
+    w.selectedPeerGainSlider_->setRange(-60, 12);
+    w.selectedPeerGainSlider_->setValue(0);
+    w.selectedPeerGainSlider_->setEnabled(false);
+    w.selectedPeerGainSlider_->setMinimumWidth(240);
+    applyJamSliderStyle(w.selectedPeerGainSlider_);
+    w.selectedPeerGainLabel_ = new QLabel(QStringLiteral("+0.0 dB"), w.performancePeerControls_);
+    QObject::connect(w.selectedPeerGainSlider_, &QSlider::valueChanged, &w, [&w](int value) {
+        w.applySelectedPeerGain(value);
+    });
+    selectedRow->addWidget(w.selectedPeerNameLabel_);
+    selectedRow->addWidget(w.selectedPeerGainSlider_, 1);
+    selectedRow->addWidget(w.selectedPeerGainLabel_);
+    peerControlsLayout->addLayout(selectedRow);
+    localLayout->addWidget(w.performancePeerControls_);
+    transportLayout->addWidget(localStrip, 1);
+
+    auto* playback = new QWidget(transport);
+    auto* playbackLayout = new QHBoxLayout(playback);
+    playbackLayout->setContentsMargins(0, 0, 0, 0);
+    playbackLayout->setSpacing(8);
+    w.performanceTrackToggle_ = new QPushButton(QStringLiteral("▶"), playback);
+    w.performanceTrackToggle_->setObjectName(QStringLiteral("MainTransportButton"));
+    w.performanceTrackToggle_->setFixedSize(64, 64);
+    QObject::connect(w.performanceTrackToggle_, &QPushButton::clicked, &w, [&w] {
+        if (w.trackRecordingWorkflow_.preparedPlaying()) {
+            w.runGridLockedEngineAction(
+                QStringLiteral("track.stop"),
+                [&w](std::uint64_t targetFrame) { w.stopTrack(targetFrame); });
+        } else {
+            w.playTrack();
+        }
+    });
+    playbackLayout->addWidget(w.performanceTrackToggle_);
+
+    auto* tempoCard = new QFrame(playback);
+    tempoCard->setObjectName(QStringLiteral("TempoCard"));
+    auto* tempoLayout = new QVBoxLayout(tempoCard);
+    tempoLayout->setContentsMargins(10, 5, 10, 5);
+    tempoLayout->setSpacing(2);
+    auto* tempoTop = new QHBoxLayout();
+    tempoTop->setContentsMargins(0, 0, 0, 0);
+    tempoTop->setSpacing(6);
+    w.performanceMetronomeToggle_ = new QPushButton(QStringLiteral("METRONOME OFF"), tempoCard);
+    w.performanceMetronomeToggle_->setObjectName(QStringLiteral("MetronomeToggle"));
+    QObject::connect(w.performanceMetronomeToggle_, &QPushButton::clicked, &w, [&w] {
+        if (w.metronomeTransport_.grid().position().running) {
+            w.stopTrackMetronome();
+        } else {
+            w.startTrackMetronome();
+        }
+    });
+    tempoTop->addWidget(w.performanceMetronomeToggle_);
+    w.performanceTempoButton_ = new QPushButton(QStringLiteral("120 BPM"), tempoCard);
+    w.performanceTempoButton_->setObjectName(QStringLiteral("TempoButton"));
+    QObject::connect(w.performanceTempoButton_, &QPushButton::clicked, &w, [&w] {
+        w.openWorkspace(QStringLiteral("metronome"));
+    });
+    tempoTop->addWidget(w.performanceTempoButton_);
+    tempoLayout->addLayout(tempoTop);
+    auto* clickLevel = new QHBoxLayout();
+    clickLevel->setContentsMargins(4, 0, 4, 0);
+    clickLevel->setSpacing(6);
+    auto* clickLevelLabel = new QLabel(QStringLiteral("CLICK"), tempoCard);
+    clickLevelLabel->setObjectName(QStringLiteral("StripTitle"));
+    clickLevel->addWidget(clickLevelLabel);
+    w.metronomeLevelSlider_->setMinimumWidth(120);
+    clickLevel->addWidget(w.metronomeLevelSlider_, 1);
+    clickLevel->addWidget(w.mixMetronomeLevelLabel_);
+    tempoLayout->addLayout(clickLevel);
+    playbackLayout->addWidget(tempoCard);
+    w.performancePositionLabel_ = new QLabel(
+        QStringLiteral("1.01\nBAR / BEAT"), playback);
+    w.performancePositionLabel_->setObjectName(QStringLiteral("PerformancePosition"));
+    playbackLayout->addWidget(w.performancePositionLabel_);
+    transportLayout->addWidget(playback);
+
+    auto* remoteStrip = new QWidget(transport);
+    auto* remoteLayout = new QVBoxLayout(remoteStrip);
+    remoteLayout->setContentsMargins(0, 0, 0, 0);
+    w.performanceRightTitle_ =
+        new QLabel(QStringLiteral("MASTER OUTPUT"), remoteStrip);
+    w.performanceRightTitle_->setObjectName(QStringLiteral("StripTitle"));
+    remoteLayout->addWidget(w.performanceRightTitle_);
+    w.performanceMasterOutputControls_ = new QWidget(remoteStrip);
+    auto* outputControlsLayout =
+        new QVBoxLayout(w.performanceMasterOutputControls_);
+    outputControlsLayout->setContentsMargins(0, 0, 0, 0);
+    outputControlsLayout->setSpacing(5);
+    outputControlsLayout->addWidget(w.mixOutputMeterRow_);
+    auto* outputLevelRow = new QHBoxLayout();
+    outputLevelRow->addWidget(new QLabel(QStringLiteral("Output"), remoteStrip));
+    outputLevelRow->addWidget(w.masterOutputLevelSlider_, 1);
+    outputLevelRow->addWidget(w.masterOutputLevelLabel_);
+    outputControlsLayout->addLayout(outputLevelRow);
+    remoteLayout->addWidget(w.performanceMasterOutputControls_);
+    transportLayout->addWidget(remoteStrip, 1);
+    transport->setMaximumHeight(164);
+
+    if (w.playTrackButton_) w.playTrackButton_->hide();
+    if (w.stopTrackButton_) w.stopTrackButton_->hide();
+
+    auto* layout = new QVBoxLayout(&w);
+    layout->setContentsMargins(12, 8, 12, 10);
+    layout->setSpacing(7);
+    layout->addLayout(header);
+    layout->addWidget(central, 1);
+    layout->addWidget(transport);
+    w.updateMixControls();
+    w.openWorkspace(QStringLiteral("performance"));
 
     QTimer::singleShot(0, &w, [&w] {
         w.refreshDevices();
@@ -491,6 +954,8 @@ QWidget* MainWindowPages::buildSongPage(MainWindow& w)
         });
     };
     w.chordGrid_->onStructureChanged = [&w] {
+        if (w.beatGrid_) w.beatGrid_->refresh();
+        if (w.lyricGrid_) w.lyricGrid_->refresh();
         w.refreshLooperLanes();
         w.sendSongSnapshot();
     };
@@ -519,14 +984,11 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
 QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
 {
     auto* page = new QWidget(&w);
-    w.trackNameLabel_ = new QLabel(QStringLiteral("Track: No track loaded"), page);
-    w.gridPositionLabel_ = new QLabel(QStringLiteral("Grid: stopped"), page);
-    w.gridScheduleLabel_ = new QLabel(QStringLiteral("Grid lock: idle"), page);
     w.recordingCountdownLabel_ = new QLabel(page);
     w.recordingCountdownLabel_->setAlignment(Qt::AlignCenter);
     w.recordingCountdownLabel_->setMinimumHeight(72);
     w.recordingCountdownLabel_->setStyleSheet(QStringLiteral(
-        "QLabel { background: #171a1c; border: 1px solid #419f81; color: #ffffff; font-size: 34px; font-weight: 700; }"));
+        "QLabel { background: #161727; border: 1px solid #e6ae52; color: #ffffff; font-size: 34px; font-weight: 700; }"));
     w.recordingCountdownLabel_->hide();
 
     w.trackWaveform_ = nullptr;
@@ -716,9 +1178,6 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
 
     auto* form = new QFormLayout();
     form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-    form->addRow(w.trackNameLabel_);
-    form->addRow(w.gridPositionLabel_);
-    form->addRow(w.gridScheduleLabel_);
     form->addRow(QStringLiteral("Speed"), speedControl);
     form->addRow(QStringLiteral("Pitch"), pitchControl);
     form->addRow(QStringLiteral("Focus frequency"), focusControl);
@@ -1094,8 +1553,8 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     w.metronomePatternTable_->setMinimumHeight(110);
     w.metronomePatternTable_->setStyleSheet(QStringLiteral(
         "QTableWidget::item { padding: 3px 6px; }"
-        "QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid #89959c; background: #000000; }"
-        "QCheckBox::indicator:checked { border: 1px solid #419f81; background: #419f81; }"));
+        "QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid #8980a6; background: #070811; }"
+        "QCheckBox::indicator:checked { border: 1px solid #e8a44a; background: #e8a44a; }"));
 
     auto makeControlPair = [page](const QString& label, QWidget* editor) {
         auto* pair = new QWidget(page);
@@ -1287,6 +1746,15 @@ QWidget* MainWindowPages::buildMixPage(MainWindow& w)
     w.mixRemotePeerSlider_ = w.remoteLevelSlider_;
     w.mixRemotePeerLevelLabel_ = makeValueLabel(QStringLiteral("+0.0 dB"));
 
+    w.masterOutputLevelSlider_ = new QSlider(Qt::Horizontal, page);
+    w.masterOutputLevelSlider_->setRange(-60, 12);
+    w.masterOutputLevelSlider_->setValue(0);
+    applyJamSliderStyle(w.masterOutputLevelSlider_);
+    w.masterOutputLevelSlider_->setMinimumWidth(240);
+    w.masterOutputLevelSlider_->setSizePolicy(
+        QSizePolicy::Expanding, QSizePolicy::Fixed);
+    w.masterOutputLevelLabel_ = makeValueLabel(QStringLiteral("+0.0 dB"));
+
     w.mixTrackLevelSlider_ = w.trackLevelSlider_;
     w.mixTrackLevelLabel_ = w.trackLevelDbLabel_;
 
@@ -1342,10 +1810,18 @@ QWidget* MainWindowPages::buildMixPage(MainWindow& w)
     remoteLayout->addWidget(makeRow(QStringLiteral("Remote mix"), w.remoteLevelSlider_, w.mixRemotePeerLevelLabel_));
     remoteLayout->addWidget(makeMeterRow(QStringLiteral("Remote meter"), w.mixRemotePeerMeter_));
     auto* peerList = new QWidget(w.mixRemotePeerRow_);
+    w.peerGainListContent_ = peerList;
     w.mixRemotePeerListLayout_ = new QVBoxLayout(peerList);
-    w.mixRemotePeerListLayout_->setContentsMargins(120, 0, 0, 0);
+    w.peerGainListLayout_ = w.mixRemotePeerListLayout_;
+    w.mixRemotePeerListLayout_->setContentsMargins(0, 0, 0, 0);
     w.mixRemotePeerListLayout_->setSpacing(4);
-    remoteLayout->addWidget(peerList);
+    w.peerGainScroll_ = new QScrollArea(w.mixRemotePeerRow_);
+    w.peerGainScroll_->setWidgetResizable(true);
+    w.peerGainScroll_->setFrameShape(QFrame::NoFrame);
+    w.peerGainScroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    w.peerGainScroll_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    w.peerGainScroll_->setWidget(peerList);
+    remoteLayout->addWidget(w.peerGainScroll_);
     layout->addWidget(w.mixRemotePeerRow_);
     layout->addStretch(1);
 
@@ -1401,6 +1877,21 @@ QWidget* MainWindowPages::buildMixPage(MainWindow& w)
         }
         w.updateRuntimeControls();
     });
+    QObject::connect(
+        w.masterOutputLevelSlider_,
+        &QSlider::valueChanged,
+        &w,
+        [&w](int value) {
+            if (w.masterOutputLevelLabel_) {
+                w.masterOutputLevelLabel_->setText(dbText(static_cast<double>(value)));
+            }
+            if (w.jam2_.isRunning()) {
+                w.submitEngineGain(
+                    jam2::EngineCommandType::SetOutputLevel,
+                    gainFromDb(static_cast<double>(value)),
+                    QStringLiteral("master output level"));
+            }
+        });
     QObject::connect(w.jamRecordingButton_, &QPushButton::clicked, &w, [&w] {
         if (w.trackRecordingWorkflow_.jamRecordingActive()) {
             w.stopJamRecording();

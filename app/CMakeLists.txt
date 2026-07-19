@@ -18,6 +18,7 @@ if(NOT Qt6_FOUND)
 endif()
 
 set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
 
 set(JAM2_GUI_WINDOWS_ICON "${CMAKE_CURRENT_SOURCE_DIR}/platform/assets/jam2.ico")
 set(JAM2_GUI_MACOS_ICON "${CMAKE_CURRENT_SOURCE_DIR}/platform/assets/jam2.icns")
@@ -29,11 +30,16 @@ if(WIN32)
         "${CMAKE_CURRENT_BINARY_DIR}/Jam2.rc"
         @ONLY
     )
+    set_source_files_properties(
+        "${CMAKE_CURRENT_BINARY_DIR}/Jam2.rc"
+        PROPERTIES OBJECT_DEPENDS "${JAM2_GUI_WINDOWS_ICON}"
+    )
 endif()
 
 # The unified Windows binary uses the console subsystem so shells wait for
 # command-line invocations. The no-argument GUI path detaches immediately.
 add_executable(jam2 MACOSX_BUNDLE
+    Jam2Resources.qrc
     gui/AssetTransferService.cpp
     gui/AssetTransferService.hpp
     application/ApplicationEntrypoint.cpp
@@ -99,6 +105,8 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/MetronomeTransportController.hpp
     gui/MixerStatsViewModel.cpp
     gui/MixerStatsViewModel.hpp
+    gui/PerformanceWidgets.cpp
+    gui/PerformanceWidgets.hpp
     gui/MusicTheory.cpp
     gui/MusicTheory.hpp
     gui/PlaybackGrid.cpp
@@ -132,7 +140,14 @@ add_executable(jam2 MACOSX_BUNDLE
 
 if(WIN32)
     set_target_properties(jam2 PROPERTIES WIN32_EXECUTABLE FALSE)
-    target_sources(jam2 PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/Jam2.rc")
+    target_sources(jam2 PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/Jam2.rc"
+        "${JAM2_GUI_WINDOWS_ICON}"
+    )
+    set_source_files_properties(
+        "${JAM2_GUI_WINDOWS_ICON}"
+        PROPERTIES HEADER_FILE_ONLY TRUE
+    )
 endif()
 
 if(APPLE)
@@ -214,6 +229,7 @@ if(WIN32)
             "${JAM2_RELEASE_DIR}/libGLESv2.dll"
             "${JAM2_RELEASE_DIR}/opengl32sw.dll"
             "${JAM2_RELEASE_DIR}/vc_redist.x64.exe"
+            "${JAM2_RELEASE_DIR}/icon.png"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "$<TARGET_FILE:Qt6::Core>"
             "$<TARGET_FILE:Qt6::Gui>"

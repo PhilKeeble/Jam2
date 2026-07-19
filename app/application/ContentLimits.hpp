@@ -16,7 +16,6 @@ inline constexpr int kMaximumBeatLanes = 7;
 inline constexpr int kMaximumLegacyBeatLanes = 11;
 inline constexpr int kMaximumCellCharacters = 4096;
 inline constexpr int kMaximumTitleCharacters = 512;
-inline constexpr int kMaximumLyricsCharacters = 1024 * 1024;
 
 inline constexpr int kLooperBankCount = 4;
 inline constexpr int kMaximumLooperLanesPerBank = 128;

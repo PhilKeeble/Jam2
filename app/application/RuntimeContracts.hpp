@@ -16,6 +16,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 enum class Jam2MetronomeMode {
@@ -81,6 +82,7 @@ struct Jam2RuntimeOptions {
     double metronome_compensation_slew_ms_per_sec = 40.0;
     double remote_level = 1.0;
     double send_level = 1.0;
+    double output_level = 1.0;
     bool local_monitor = false;
     double local_monitor_level = 0.25;
     bool sample_time_playout = true;
@@ -129,6 +131,8 @@ struct Jam2OperationalPeer {
     jam2::Endpoint endpoint;
     jam2::PeerEndpointState endpoint_state = jam2::PeerEndpointState::Candidate;
     bool receiving_audio = false;
+    double gain_db = 0.0;
+    int peak_ppm = 0;
 };
 
 struct Jam2NetworkOperationalSnapshot {
@@ -143,6 +147,11 @@ struct Jam2PeerDiagnostics {
     std::uint64_t peer_id = 0;
     double rtt_ms = 0.0;
     bool has_rtt = false;
+    double jitter_average_ms = 0.0;
+    double packet_loss_percent = 0.0;
+    std::uint64_t reordered_or_late_packets = 0;
+    double drift_ppm = 0.0;
+    bool drift_valid = false;
 };
 
 struct ConnectionDiagnosticsSnapshot {
@@ -181,6 +190,11 @@ struct Jam2RuntimePeer {
     }
 };
 
+struct Jam2PeerGainUpdate {
+    std::uint64_t peer_id = 0;
+    int gain_ppm = 1000000;
+};
+
 struct Jam2RuntimeHost {
     static constexpr std::size_t kCommandCapacity = 128;
 
@@ -198,7 +212,9 @@ struct Jam2RuntimeHost {
 
     bool submitCommand(const jam2::EngineCommand& command) noexcept;
     bool submitPeerUpdate(const std::vector<Jam2RuntimePeer>& peers);
+    bool submitPeerGain(std::uint64_t peer_id, int gain_ppm) noexcept;
     std::optional<std::vector<Jam2RuntimePeer>> takePeerUpdate();
+    std::vector<Jam2PeerGainUpdate> takePeerGains();
     std::optional<jam2::EngineCommand> takeCommand(std::uint64_t current_frame);
     std::uint64_t nextGridRequestId() noexcept;
     std::uint64_t nextTransportEventId() noexcept;
@@ -209,6 +225,8 @@ private:
     std::optional<std::vector<Jam2RuntimePeer>> peer_update_;
     std::mutex command_mutex_;
     std::deque<jam2::EngineCommand> commands_;
+    std::mutex peer_gain_mutex_;
+    std::unordered_map<std::uint64_t, int> peer_gains_;
     // The same authenticated peer identity survives Leave/Join while the
     // application stays open. Keep proposal identities monotonic across those
     // network-worker lifetimes so a coordinator cannot mistake a new request

@@ -14,8 +14,10 @@
       --edge: #354247;
       --edge-soft: #222d30;
       --ink: #e9e6dc;
-      --muted: #899497;
-      --dim: #556266;
+      --muted: #aeb9ba;
+      --dim: #829093;
+      --secondary: #9ca9ab;
+      --secondary-dim: #899799;
       --amber: #e8a44a;
       --amber-hi: #ffd68e;
       --cyan: #66d4cf;
@@ -24,6 +26,10 @@
       --green: #70d49d;
       --violet: #a092da;
       --blue: #6ba9df;
+      --nebula-cyan: #70ead7;
+      --nebula-purple: #b08be4;
+      --nebula-coral: #ff7d86;
+      --nebula-red: #c92f58;
     }
 
     * { box-sizing: border-box; }
@@ -83,7 +89,20 @@
       box-shadow: inset 0 0 18px rgba(0,0,0,.62), 0 0 16px rgba(220,23,48,.1);
     }
     .brand-mark svg { width: 46px; height: 46px; }
-    .brand-copy strong { display: block; font: 700 14px "Bahnschrift", sans-serif; letter-spacing: .04em; }
+    .brand-copy strong {
+      display: block;
+      color: var(--amber-hi);
+      font: 400 21px Georgia, "Times New Roman", serif;
+      letter-spacing: -.025em;
+      text-shadow: 0 0 14px rgba(232,164,74,.22);
+    }
+    .brand-copy strong span {
+      color: transparent;
+      background: linear-gradient(130deg, var(--nebula-cyan), var(--nebula-purple) 48%, var(--nebula-coral));
+      background-clip: text;
+      -webkit-background-clip: text;
+      filter: drop-shadow(0 0 7px rgba(176,139,228,.28));
+    }
     .micro {
       color: #647074;
       font: 7px "Bahnschrift", sans-serif;
@@ -186,6 +205,27 @@
       letter-spacing: -.035em;
     }
     .stage-title h1 span { color: var(--amber-hi); }
+    .stage-lyrics {
+      position: absolute;
+      z-index: 8;
+      top: 91px;
+      left: 28px;
+      width: min(380px, calc(100% - 56px));
+      padding: 12px 14px;
+      border-left: 2px solid var(--nebula-purple);
+      background: linear-gradient(90deg, rgba(12,17,18,.82), rgba(12,17,18,.42), transparent);
+      cursor: pointer;
+    }
+    .stage-lyrics[hidden] { display: none; }
+    .stage-lyrics .lyrics-lines { gap: 7px; }
+    .stage-lyrics .lyrics-copy {
+      font-size: 18px;
+      text-shadow: 0 2px 8px rgba(0,0,0,.55);
+    }
+    .stage-lyrics .lyrics-line + .lyrics-line .lyrics-copy {
+      color: #b5c0c1;
+      font-size: 16px;
+    }
 
     .technical {
       position: absolute;
@@ -405,16 +445,26 @@
       -webkit-mask: radial-gradient(transparent 66%, #000 67% 71%, transparent 72%);
       filter: drop-shadow(0 0 5px rgba(232,164,74,.45));
     }
-    .lens-copy { position: relative; z-index: 2; text-align: center; }
+    .lens-copy {
+      position: relative;
+      z-index: 2;
+      display: grid;
+      justify-items: center;
+      text-align: center;
+    }
     .section-label { color: var(--cyan); font: 7px "Bahnschrift", sans-serif; letter-spacing: .17em; text-transform: uppercase; }
     .current-chord {
+      display: block;
       margin: 1px 0 -2px;
-      color: var(--cyan-hi);
+      color: transparent;
       font: 400 67px Georgia, serif;
       line-height: 1;
-      text-shadow: 0 0 20px rgba(102,212,207,.25);
+      background: linear-gradient(125deg, var(--nebula-cyan) 10%, var(--nebula-purple) 48%, var(--nebula-coral) 76%, var(--nebula-red));
+      background-clip: text;
+      -webkit-background-clip: text;
+      filter: drop-shadow(0 0 12px rgba(176,139,228,.22));
     }
-    .bar-position { color: #aeb8b7; font: 8px "Bahnschrift", monospace; letter-spacing: .08em; }
+    .bar-position { display: block; color: #aeb8b7; font: 8px "Bahnschrift", monospace; letter-spacing: .08em; }
     .bar-position span { color: var(--amber-hi); }
     .beat-dots { display: flex; justify-content: center; gap: 5px; margin-top: 10px; }
     .beat-dots i {
@@ -446,10 +496,15 @@
       box-shadow: 0 8px 20px rgba(0,0,0,.25);
       backdrop-filter: blur(7px);
     }
-    .chord-cell.current { border-color: #806239; background: linear-gradient(135deg, rgba(232,164,74,.16), rgba(9,13,14,.9)); }
+    .chord-cell.current { border-color: #8c667f; background: linear-gradient(135deg, rgba(201,47,88,.14), rgba(112,234,215,.055), rgba(9,13,14,.9)); }
     .chord-cell small { display: block; color: #667376; font: 7px "Bahnschrift", sans-serif; letter-spacing: .13em; text-transform: uppercase; }
     .chord-cell strong { display: block; margin-top: 2px; font: 400 22px Georgia, serif; }
-    .chord-cell.current strong { color: var(--amber-hi); }
+    .chord-cell.current strong {
+      color: transparent;
+      background: linear-gradient(120deg, var(--nebula-cyan), var(--nebula-purple) 52%, var(--nebula-coral));
+      background-clip: text;
+      -webkit-background-clip: text;
+    }
     .chord-cell .arrival { position: absolute; top: 10px; right: 9px; color: #6c787a; font: 7px "Bahnschrift", monospace; }
 
     .source-readout {
@@ -469,11 +524,11 @@
       position: absolute;
       z-index: 7;
       bottom: 17px;
-      left: 50%;
+      left: calc(50% - 40px);
       display: grid;
-      grid-template-columns: minmax(440px, 1.4fr) minmax(300px, 1fr);
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 8px;
-      width: min(860px, calc(100% - 440px));
+      width: min(960px, calc(100% - 390px));
       transform: translateX(-50%);
       align-items: end;
     }
@@ -492,15 +547,34 @@
       cursor: pointer;
     }
     .preview.beat-preview { height: 178px; }
+    .preview.upcoming-beat-preview {
+      border-color: rgba(176,139,228,.48);
+      background:
+        linear-gradient(145deg, rgba(112,234,215,.035), rgba(176,139,228,.065) 48%, rgba(201,47,88,.055)),
+        rgba(11,16,17,.91);
+    }
     .preview:hover { border-color: #627276; }
     .preview-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; }
     .preview-title { color: #829093; font: 7px "Bahnschrift", sans-serif; letter-spacing: .16em; text-transform: uppercase; }
     .preview-open { color: #748083; font: 7px "Bahnschrift", sans-serif; letter-spacing: .08em; text-transform: uppercase; }
     .beat-grid {
       display: grid;
-      grid-template-columns: 42px repeat(16, 1fr);
+      grid-template-columns: 62px repeat(16, 1fr);
       gap: 2px;
       align-items: center;
+    }
+    .beat-bar-caption {
+      grid-column: span 16;
+      padding: 0 6px 4px;
+      border-bottom: 1px solid #3a474a;
+      color: #c4cdcc;
+      font: 9px "Bahnschrift", sans-serif;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .beat-bar-caption.upcoming {
+      border-bottom-color: #4e3d51;
+      color: #b8a9c2;
     }
     .beat-name { color: #778487; font: 7px "Bahnschrift", sans-serif; text-transform: uppercase; }
     .step {
@@ -515,10 +589,20 @@
       position: absolute;
       inset: 3px;
       border-radius: 1px;
-      background: #6c7a7c;
+      background: var(--cyan);
+      box-shadow: 0 0 5px rgba(102,212,207,.26);
     }
     .step.accent::after { background: var(--amber); box-shadow: 0 0 6px rgba(232,164,74,.42); }
+    .step.ghost::after {
+      background: var(--green);
+      border-radius: 50%;
+      box-shadow: 0 0 5px rgba(112,212,157,.34);
+      transform: scale(.78);
+    }
     .step.playhead { border-color: var(--cyan); background: rgba(102,212,207,.13); box-shadow: 0 0 8px rgba(102,212,207,.15); }
+    .step.upcoming { border-color: #3a3540; background: #13171a; }
+    .step.upcoming::after { opacity: .76; }
+    .step.next-bar { border-left: 2px solid var(--nebula-purple); }
     .lyrics-lines { display: grid; gap: 10px; }
     .lyrics-line {
       align-items: center;
@@ -653,8 +737,9 @@
     }
     .full-beat-label { justify-items: start; padding-left: 12px; color: #95a09f; font: 8px "Bahnschrift", sans-serif; text-transform: uppercase; }
     .full-step { position: relative; color: #4f5c5f; font: 7px "Bahnschrift", monospace; }
-    .full-step.hit::after { content: ""; width: 9px; height: 9px; border-radius: 50%; background: #778386; }
-    .full-step.accent::after { background: var(--amber); box-shadow: 0 0 8px rgba(232,164,74,.5); }
+    .full-step.hit::after { content: ""; width: 9px; height: 9px; border-radius: 1px; background: var(--cyan); box-shadow: 0 0 6px rgba(102,212,207,.3); }
+    .full-step.accent::after { border-radius: 1px; background: var(--amber); box-shadow: 0 0 8px rgba(232,164,74,.5); }
+    .full-step.ghost::after { border-radius: 50%; background: var(--green); box-shadow: 0 0 7px rgba(112,212,157,.38); transform: scale(.78); }
     .full-step.playhead { background: rgba(102,212,207,.08); box-shadow: inset 2px 0 var(--cyan); }
     .lyrics-detail {
       display: grid;
@@ -727,15 +812,29 @@
       background: radial-gradient(circle at 38% 30%, #ffd384, #e39b40 58%, #754721);
     }
     .tempo {
-      min-width: 93px;
-      padding: 8px 12px;
+      display: grid;
+      grid-template-columns: auto auto;
+      align-items: center;
+      gap: 12px;
+      min-width: 166px;
+      padding: 7px 12px;
       border: 1px solid #364246;
       border-radius: 3px;
       background: #080c0d;
       text-align: center;
+      cursor: pointer;
     }
     .tempo strong { color: var(--amber-hi); font: 13px "Bahnschrift", monospace; }
     .tempo span { display: block; color: #5e6b6e; font: 7px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .tempo-main { padding-right: 11px; border-right: 1px solid #354246; }
+    .tempo .tempo-metro {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: #b5c0c1;
+      letter-spacing: .06em;
+    }
+    .tempo-metro i { width: 8px; height: 8px; border-radius: 50%; background: var(--amber-hi); box-shadow: 0 0 11px var(--amber); }
     .position {
       justify-self: end;
       display: flex;
@@ -777,8 +876,8 @@
       position: absolute;
       inset: 4px 5px;
       background:
-        linear-gradient(90deg, transparent 0 48%, rgba(102,212,207,.75) 49% 51%, transparent 52%),
-        repeating-linear-gradient(90deg, rgba(102,212,207,.44) 0 2px, transparent 2px 5px);
+        repeating-linear-gradient(90deg, rgba(255,255,255,.3) 0 2px, transparent 2px 5px),
+        linear-gradient(90deg, var(--nebula-cyan), var(--nebula-purple) 43%, var(--nebula-coral) 72%, var(--nebula-red));
       clip-path: polygon(0 44%, 5% 25%, 10% 65%, 15% 20%, 20% 72%, 25% 33%, 30% 58%, 35% 18%, 40% 77%, 45% 40%, 50% 66%, 55% 24%, 60% 73%, 65% 34%, 70% 62%, 75% 19%, 80% 68%, 85% 31%, 90% 59%, 95% 27%, 100% 48%, 100% 52%, 0 52%);
     }
     .dock-mix { display: grid; grid-template-columns: 1fr 52px; align-items: center; gap: 8px; margin-top: 7px; }
@@ -816,10 +915,72 @@
 
     .song-editor-grid {
       display: grid;
-      grid-template-columns: 112px repeat(12, 124px);
-      grid-template-rows: repeat(3, 96px);
-      min-width: 1620px;
+      align-content: start;
+      gap: 30px;
+      min-width: 100%;
+      width: max-content;
       padding: 28px;
+    }
+    .chord-section {
+      display: grid;
+      grid-template-rows: 46px repeat(3, 96px);
+      min-width: max-content;
+      border: 1px solid #354145;
+      background: #0c1213;
+    }
+    .chord-section.selected { border-color: #725b71; box-shadow: 0 0 0 1px rgba(176,139,228,.12); }
+    .chord-section-title {
+      display: grid;
+      align-content: center;
+      padding: 0 12px;
+      border-right: 1px solid #354145;
+      border-bottom: 1px solid #354145;
+      background: #151c1e;
+      color: #d5dcda;
+      font: 10px "Bahnschrift", sans-serif;
+      cursor: pointer;
+    }
+    .chord-section-title small { margin-top: 3px; color: var(--secondary); font-size: 9px; text-transform: uppercase; }
+    .chord-section-track {
+      position: relative;
+      border-bottom: 1px solid #354145;
+      background:
+        repeating-linear-gradient(90deg, transparent 0 123px, rgba(89,105,109,.22) 123px 124px),
+        #101617;
+    }
+    .chord-ruler-label {
+      position: absolute;
+      top: 7px;
+      color: var(--secondary);
+      font: 9px "Bahnschrift", monospace;
+      transform: translateX(-50%);
+      pointer-events: none;
+    }
+    .chord-position-marker {
+      position: absolute;
+      z-index: 3;
+      top: 27px;
+      left: var(--marker);
+      display: none;
+      width: 11px;
+      height: 11px;
+      border: 2px solid #ffe0a0;
+      border-radius: 50%;
+      background: var(--amber);
+      transform: translateX(-50%);
+      box-shadow: 0 0 5px #ffe0a0, 0 0 13px rgba(232,164,74,.55);
+      pointer-events: none;
+    }
+    .chord-position-marker.visible { display: block; }
+    .chord-position-marker::after {
+      content: "";
+      position: absolute;
+      top: 9px;
+      left: 50%;
+      width: 1px;
+      height: 8px;
+      background: linear-gradient(var(--amber), transparent);
+      box-shadow: 0 0 6px rgba(232,164,74,.26);
     }
     .song-row-label, .song-cell {
       display: flex;
@@ -851,9 +1012,9 @@
       color: #586568;
       font: 7px "Bahnschrift", monospace;
     }
-    .song-cell.current { background: rgba(232,164,74,.1); box-shadow: inset 2px 0 var(--amber); }
+    .song-cell.current { background: linear-gradient(135deg, rgba(201,47,88,.12), rgba(112,234,215,.04)); box-shadow: inset 3px 0 var(--nebula-coral); }
     .song-cell.notes { color: #82aaa8; background: rgba(102,212,207,.045); font: 10px "Bahnschrift", sans-serif; }
-    .song-cell.melody { color: #b6a8e3; }
+    .song-cell.melody { color: #c4a8ec; }
     .song-cell[contenteditable="true"]:focus { background: rgba(102,212,207,.1); box-shadow: inset 0 0 0 1px var(--cyan); }
 
     .full-beat-grid {
@@ -865,7 +1026,48 @@
     }
     .full-step.division { color: #7f8c8f; background: #12191b; cursor: pointer; }
     .full-step.hit { cursor: pointer; }
-    .full-step.section { grid-column: span 32; justify-content: start; padding-left: 12px; color: var(--amber-hi); background: #151c1e; }
+    .full-step.section { grid-column: span 32; display: block; padding: 0; color: var(--amber-hi); background: #151c1e; }
+    .beat-section-track { position: relative; }
+    .beat-ruler-label {
+      position: absolute;
+      top: 7px;
+      left: var(--position);
+      color: var(--secondary);
+      font: 9px "Bahnschrift", monospace;
+      transform: translateX(-50%);
+      pointer-events: none;
+    }
+    .beat-position-marker,
+    .track-position-marker {
+      position: absolute;
+      z-index: 4;
+      left: var(--marker);
+      width: 11px;
+      height: 11px;
+      border: 2px solid #ffe0a0;
+      border-radius: 50%;
+      background: var(--amber);
+      transform: translateX(-50%);
+      box-shadow: 0 0 5px #ffe0a0, 0 0 13px rgba(232,164,74,.55);
+      pointer-events: none;
+    }
+    .beat-position-marker { top: 28px; display: none; }
+    .beat-position-marker.visible { display: block; }
+    .beat-position-marker::after,
+    .track-position-marker::after {
+      content: "";
+      position: absolute;
+      top: 9px;
+      left: 50%;
+      width: 1px;
+      height: 8px;
+      background: linear-gradient(var(--amber), transparent);
+    }
+    .beat-state-legend { display: flex; align-items: center; gap: 13px; color: var(--secondary); font-size: 10px; }
+    .beat-state-legend span { display: flex; align-items: center; gap: 6px; }
+    .beat-state-legend i { width: 10px; height: 10px; border-radius: 1px; background: var(--cyan); box-shadow: 0 0 5px rgba(102,212,207,.28); }
+    .beat-state-legend .accent { background: var(--amber); box-shadow: 0 0 5px rgba(232,164,74,.32); }
+    .beat-state-legend .ghost { border-radius: 50%; background: var(--green); box-shadow: 0 0 5px rgba(112,212,157,.34); transform: scale(.78); }
 
     .lyrics-workspace {
       display: grid;
@@ -949,8 +1151,23 @@
       min-width: 1080px;
       padding: 20px 28px 30px;
     }
-    .looper-ruler { display: grid; grid-template-columns: 220px repeat(8, 1fr); height: 32px; color: #647174; font: 7px "Bahnschrift", monospace; }
-    .looper-ruler span { padding: 6px 5px; border-left: 1px solid #2d393c; }
+    .looper-ruler { position: relative; height: 42px; overflow: visible; color: #647174; font: 9px "Bahnschrift", monospace; }
+    .looper-ruler strong { position: absolute; top: 6px; left: 0; width: 220px; }
+    .looper-ruler-scale {
+      position: absolute;
+      inset: 0 0 0 220px;
+      display: grid;
+      grid-template-columns: repeat(32, minmax(0, 1fr));
+    }
+    .looper-ruler-scale span {
+      padding: 6px 3px;
+      border-left: 1px solid rgba(45,57,60,.45);
+      color: var(--secondary);
+      font: 9px "Bahnschrift", monospace;
+      white-space: nowrap;
+    }
+    .looper-ruler-scale span:nth-child(4n + 1) { border-left-color: #566367; }
+    .looper-ruler .track-position-marker { top: 27px; }
     .loop-lane {
       display: grid;
       grid-template-columns: 220px 1fr;
@@ -958,10 +1175,15 @@
       border: 1px solid #303c3f;
       background: #0d1314;
     }
-    .loop-lane.selected { border-color: #5b7074; }
+    .loop-lane.selected { border-color: #896780; box-shadow: inset 0 1px rgba(112,234,215,.2); }
     .loop-lane-head { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 13px; border-right: 1px solid #303c3f; }
     .loop-lane-head strong { font: 12px Georgia, serif; }
-    .lane-buttons { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; }
+    .lane-buttons {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 4px;
+    }
     .lane-buttons button { padding: 3px 6px; border: 1px solid #364246; background: #111719; color: #7f8b8d; font: 7px "Bahnschrift", sans-serif; cursor: pointer; }
     .lane-buttons button.active { border-color: #745b36; color: var(--amber-hi); background: rgba(232,164,74,.1); }
     .lane-gain { width: 46px; accent-color: var(--cyan); }
@@ -978,12 +1200,12 @@
       bottom: 10px;
       left: var(--start);
       width: var(--width);
-      border: 1px solid rgba(102,212,207,.6);
-      border-left: 5px solid var(--cyan);
-      border-right: 5px solid var(--cyan);
+      border: 1px solid rgba(176,139,228,.62);
+      border-left: 5px solid var(--nebula-cyan);
+      border-right: 5px solid var(--nebula-red);
       background:
-        repeating-linear-gradient(90deg, rgba(102,212,207,.46) 0 2px, transparent 2px 5px),
-        rgba(33,86,86,.28);
+        repeating-linear-gradient(90deg, rgba(255,255,255,.3) 0 2px, transparent 2px 5px),
+        linear-gradient(90deg, rgba(112,234,215,.8), rgba(176,139,228,.78) 43%, rgba(255,125,134,.78) 73%, rgba(201,47,88,.76));
       clip-path: polygon(0 44%, 4% 18%, 8% 70%, 12% 27%, 16% 78%, 20% 36%, 24% 62%, 28% 13%, 32% 72%, 36% 32%, 40% 67%, 44% 20%, 48% 77%, 52% 35%, 56% 64%, 60% 16%, 64% 73%, 68% 26%, 72% 69%, 76% 18%, 80% 74%, 84% 29%, 88% 66%, 92% 23%, 96% 70%, 100% 44%, 100% 56%, 0 56%);
     }
     .lane-playhead { position: absolute; top: 0; bottom: 0; left: var(--playhead); width: 2px; background: var(--amber-hi); box-shadow: 0 0 8px var(--amber); }
@@ -995,7 +1217,7 @@
       gap: 5px 10px;
       min-width: 0;
     }
-    .remote-strip { justify-self: end; width: min(100%, 420px); }
+    .remote-strip { justify-self: stretch; width: 100%; }
     .strip-title { grid-row: span 3; align-self: center; min-width: 0; }
     .strip-title span { display: block; color: #657174; font: 7px "Bahnschrift", sans-serif; text-transform: uppercase; }
     .strip-title strong { display: block; overflow: hidden; margin-top: 2px; font: 13px Georgia, serif; white-space: nowrap; text-overflow: ellipsis; }
@@ -1016,15 +1238,227 @@
       cursor: pointer;
     }
 
+    /* Legibility pass: retain the compact hierarchy without sub-8px interface text. */
+    .micro,
+    .stat span,
+    .diagnostic-title span,
+    .metric-card span,
+    .metric-card em,
+    .peer-diagnostics th,
+    .demo-label,
+    .section-label,
+    .chord-cell small,
+    .chord-cell .arrival,
+    .source-readout,
+    .preview-title,
+    .preview-open,
+    .beat-name,
+    .bar-card small,
+    .full-step,
+    .phrase small,
+    .selected-peer-copy span,
+    .tempo span,
+    .position-copy span,
+    .looper-ruler,
+    .strip-title span,
+    .mix-row label,
+    .monitor-choice span {
+      font-size: 9px;
+    }
+    .head-button,
+    .diagnostic-title,
+    .peer-diagnostics,
+    .diagnostic-note,
+    .demo-group button,
+    .bar-position,
+    .peer-pill,
+    .detail-tab,
+    .detail-close,
+    .full-beat-label,
+    .volume,
+    .metro,
+    .dock-mix span,
+    .editor-button,
+    .editor-select,
+    .editor-field,
+    .editor-check,
+    .song-row-label,
+    .control-field,
+    .pattern-label,
+    .mix-row output {
+      font-size: 10px;
+    }
+    .troubleshooter summary { font-size: 11px; }
+    .troubleshooter ol { font-size: 10px; }
+    .stat strong,
+    .song-cell.notes { font-size: 12px; }
+    .position-copy strong { font-size: 14px; }
+    .loop-lane-head strong { font-size: 14px; }
+    .lane-buttons button { min-height: 24px; font-size: 9px; }
+
+    /* Cool silver-grey secondary text with enough contrast over the dark shell. */
+    .micro,
+    .stat span,
+    .diagnostic-title span,
+    .metric-card span,
+    .peer-diagnostics th,
+    .demo-label,
+    .chord-cell small,
+    .chord-cell .arrival,
+    .source-readout,
+    .preview-title,
+    .preview-open,
+    .beat-name,
+    .bar-card small,
+    .full-step,
+    .phrase small,
+    .selected-peer-copy span,
+    .tempo span,
+    .position-copy span,
+    .looper-ruler,
+    .strip-title span,
+    .mix-row label,
+    .monitor-choice span {
+      color: var(--secondary);
+    }
+    .metric-card em,
+    .diagnostic-note,
+    .troubleshooter ol {
+      color: var(--secondary-dim);
+    }
+    .lyrics-line + .lyrics-line .lyrics-copy,
+    .song-cell::before,
+    .full-step.division,
+    .control-field,
+    .pattern-label {
+      color: var(--secondary);
+    }
+    .song-cell::before { font-size: 9px; }
+    .head-button,
+    .demo-group button,
+    .peer-pill,
+    .detail-tab,
+    .detail-close,
+    .volume,
+    .metro,
+    .editor-button,
+    .editor-select,
+    .editor-check,
+    .lane-buttons button {
+      color: #aab5b6;
+    }
+
+    /* The diagnostics drawer is a reading surface, so it uses a larger scale than the performance chrome. */
+    .data-drawer {
+      width: 580px;
+      color: #e7ebe7;
+    }
+    .data-drawer-head { padding: 0 20px; }
+    .data-drawer-head strong { font-size: 18px; }
+    .data-drawer-head .micro {
+      margin-top: 4px;
+      color: #b5c0c1;
+      font-size: 10px;
+    }
+    .data-scroll { padding: 20px; }
+    .diagnostic-section + .diagnostic-section { margin-top: 28px; }
+    .data-drawer .diagnostic-title {
+      margin-bottom: 11px;
+      color: #d2d9d8;
+      font-size: 11px;
+    }
+    .data-drawer .diagnostic-title span {
+      color: #aab6b7;
+      font-size: 10px;
+    }
+    .data-drawer .metric-grid { gap: 8px; }
+    .data-drawer .metric-card {
+      min-height: 76px;
+      padding: 12px;
+      border-color: #3c4b4f;
+      background: #0e1617;
+    }
+    .data-drawer .metric-card strong {
+      color: #eef1ed;
+      font-size: 15px;
+    }
+    .data-drawer .metric-card span {
+      margin-top: 7px;
+      color: #b5c0c1;
+      font-size: 10px;
+    }
+    .data-drawer .metric-card em {
+      margin-top: 5px;
+      color: #a6b2b3;
+      font-size: 10px;
+    }
+    .data-drawer .peer-diagnostics {
+      border-color: #3c4b4f;
+      font-size: 11px;
+    }
+    .data-drawer .peer-diagnostics th,
+    .data-drawer .peer-diagnostics td {
+      padding: 11px 9px;
+      border-bottom-color: #344144;
+    }
+    .data-drawer .peer-diagnostics th {
+      color: #aab6b7;
+      font-size: 10px;
+    }
+    .data-drawer .peer-diagnostics td { color: #d8dedd; }
+    .data-drawer .diagnostic-note {
+      margin-top: 12px;
+      color: #b5bfc0;
+      font-size: 11px;
+      line-height: 1.6;
+    }
+    .data-drawer .troubleshooter details { border-color: #3c4b4f; }
+    .data-drawer .troubleshooter summary {
+      padding: 14px;
+      color: #dde3e1;
+      font-size: 13px;
+    }
+    .data-drawer .troubleshooter ol {
+      padding: 0 22px 17px 40px;
+      color: #bdc7c7;
+      font-size: 12px;
+      line-height: 1.65;
+    }
+    .data-drawer .troubleshooter li + li { margin-top: 8px; }
+    .data-drawer .diagnostic-actions { margin-top: 14px; }
+    .data-drawer .editor-button {
+      min-height: 34px;
+      padding-inline: 13px;
+      color: #c6cecd;
+      font-size: 11px;
+    }
+
     @media (max-width: 1260px) {
       .technical .stat:nth-child(n+3) { display: none; }
-      .preview-stack { width: calc(100% - 440px); grid-template-columns: 1.35fr 1fr; }
+      .preview-stack { left: calc(50% - 40px); width: calc(100% - 390px); grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .demo-controls { top: 65px; }
       .performance-orbit { top: 45%; transform: translate(-50%, -50%) scale(.9); }
       .stage-title h1 { font-size: 25px; }
       .transport { grid-template-columns: minmax(310px,1fr) auto minmax(310px,1fr); gap: 10px; padding-inline: 12px; }
       .local-strip, .remote-strip { grid-template-columns: 84px 1fr; }
       .looper-launch { right: 12px; width: 200px; }
+    }
+    @media (min-height: 960px) {
+      .preview.beat-preview {
+        height: clamp(178px, calc(35vh - 158px), 320px);
+      }
+      .beat-grid {
+        height: calc(100% - 25px);
+        grid-template-rows: repeat(7, minmax(0, 1fr));
+      }
+      .beat-name { align-self: center; }
+      .step {
+        width: min(100%, clamp(17px, 2vh, 30px));
+        height: auto;
+        aspect-ratio: 1;
+        justify-self: center;
+      }
+      .step.hit::after { inset: 20%; }
     }
   </style>
 </head>
@@ -1046,9 +1480,9 @@
             <image href="../icon.png" width="1254" height="1254" filter="url(#removeLogoWhite)"/>
           </svg>
         </div>
-        <div class="brand-copy"><strong>JAM2</strong><span class="micro">Direct session instrument</span></div>
+        <div class="brand-copy"><strong>Jam<span>2</span>gether</strong></div>
       </div>
-      <div class="project"><strong>Midnight Signal</strong><span class="micro">Performance view / revision 28</span></div>
+      <div class="project"><strong>Midnight Signal</strong></div>
       <div class="session-state"><i class="online-dot"></i><span class="micro" id="peerStatus">2 players / direct</span><button class="head-button" id="dataButton" aria-expanded="false">Data</button></div>
     </header>
 
@@ -1148,6 +1582,12 @@
       <canvas class="nebula-canvas" id="nebulaCanvas" aria-hidden="true"></canvas>
       <i class="screw tl"></i><i class="screw tr"></i><i class="screw bl"></i><i class="screw br"></i>
       <div class="stage-title"><div class="micro">Live session / performance</div><h1>Chorus <span>03</span></h1></div>
+      <section class="stage-lyrics" id="stageLyrics" data-open="lyrics" tabindex="0" aria-label="Open shared lyrics">
+        <div class="lyrics-lines">
+          <div class="lyrics-line"><div class="lyrics-copy" id="lyricPreview">Send the midnight signal</div></div>
+          <div class="lyrics-line"><div class="lyrics-copy" id="nextLyricPreview">let it travel through the noise</div></div>
+        </div>
+      </section>
 
       <div class="technical">
         <div class="stat"><strong>27.4 ms</strong><span>Peer RTT</span></div>
@@ -1203,15 +1643,12 @@
 
       <div class="preview-stack">
         <section class="preview beat-preview" data-open="beats" tabindex="0" aria-label="Open full beat view">
-          <div class="preview-head"><span class="preview-title">Beat preview / next bar</span><span class="preview-open">Open grid &#8599;</span></div>
-          <div class="beat-grid" id="beatPreview"></div>
+          <div class="preview-head"><span class="preview-title" id="currentBeatTitle">Current beat · bar 17</span><span class="preview-open">Open grid &#8599;</span></div>
+          <div class="beat-grid" id="currentBeatPreview"></div>
         </section>
-        <section class="preview" data-open="lyrics" tabindex="0" aria-label="Open upcoming lyrics">
-          <div class="preview-head"><span class="preview-title">Lyrics / current and upcoming</span><span class="preview-open">Open lyrics &#8599;</span></div>
-          <div class="lyrics-lines">
-            <div class="lyrics-line"><div class="lyrics-copy" id="lyricPreview">Send the midnight signal</div></div>
-            <div class="lyrics-line"><div class="lyrics-copy" id="nextLyricPreview">let it travel through the noise</div></div>
-          </div>
+        <section class="preview beat-preview upcoming-beat-preview" data-open="beats" tabindex="0" aria-label="Open full beat view at the next bar">
+          <div class="preview-head"><span class="preview-title" id="nextBeatTitle">Next beat · bar 18</span><span class="preview-open">Open grid &#8599;</span></div>
+          <div class="beat-grid" id="nextBeatPreview"></div>
         </section>
       </div>
 
@@ -1258,6 +1695,8 @@
               <button class="editor-button" data-editor-action="shrink-grid">-4 beats</button>
               <button class="editor-button" data-editor-action="generate-beats">Generate</button>
               <button class="editor-button" data-editor-action="reference">Reference WAVs</button>
+              <span class="tool-spacer"></span>
+              <span class="beat-state-legend"><span><i></i>Normal</span><span><i class="accent"></i>Accent</span><span><i class="ghost"></i>Ghost</span></span>
             </div>
             <div class="editor-scroll"><div class="full-beat-grid" id="fullBeatGrid"></div></div>
           </div>
@@ -1337,9 +1776,11 @@ keep the rhythm moving on</textarea>
       <div class="playback">
         <button class="round-button" id="stopButton" aria-label="Stop">&#9632;</button>
         <button class="round-button play" id="playButton" aria-label="Pause">&#8545;</button>
-        <div class="tempo"><strong id="tempoReadout">118</strong><span>BPM / 4-4</span></div>
+        <button class="tempo" data-open="metronome" aria-label="Open metronome controls">
+          <span class="tempo-main"><strong id="tempoReadout">118</strong><span>BPM / 4-4</span></span>
+          <span class="tempo-metro"><i id="metroLamp"></i>Metronome</span>
+        </button>
         <div class="position-copy"><strong id="transportPosition">17.01.000</strong><span>Bar / beat / tick</span></div>
-        <button class="metro" data-open="metronome"><span>Metronome</span><i id="metroLamp"></i></button>
       </div>
       <div class="remote-strip">
         <div class="strip-title"><span>Selected peer</span><strong id="selectedPeer">Alex M.</strong></div>
@@ -1364,28 +1805,28 @@ keep the rhythm moving on</textarea>
       { name: "Kai R.", color: "#73c5a6" }
     ];
     const chordSequence = ["F", "C/E", "Am", "G", "Dm7", "Am/C", "Bb", "C"];
-    const lyricLines = [
-      "Send the midnight signal",
-      "let it travel through the noise",
-      "Every beat is simple",
-      "when it carries every voice",
-      "Hold the line between us",
-      "keep the rhythm moving on",
-      "Leave the final chord there",
-      "until the signal is gone"
-    ];
+    function sharedLyricLines() {
+      return document.getElementById("lyricsEditor").value
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(line => line && !line.startsWith("["));
+    }
     const beatRows = [
-      { name: "Kick", hits: [0, 4, 8, 11, 12], accents: [0, 8] },
-      { name: "Snare", hits: [4, 12], accents: [4, 12] },
-      { name: "Closed HH", hits: [0, 2, 4, 6, 8, 10, 12, 14], accents: [0, 8] },
-      { name: "Open HH", hits: [7, 15], accents: [15] },
-      { name: "Crash", hits: [0], accents: [0] },
-      { name: "Tom", hits: [10, 11, 14], accents: [14] },
-      { name: "Guitar", hits: [0, 3, 6, 8, 11, 14], accents: [0, 8] },
-      { name: "Melody", hits: [0, 4, 6, 10, 12], accents: [0, 12] }
+      { name: "Guitar", hits: [0, 3, 6, 8, 11, 14], accents: [0, 8], ghosts: [6, 14], nextHits: [0, 4, 7, 10, 12, 15], nextAccents: [0, 12], nextGhosts: [7, 15] },
+      { name: "Tom", hits: [10, 11, 14], accents: [14], ghosts: [10, 11], nextHits: [11, 13, 14, 15], nextAccents: [15], nextGhosts: [11, 13] },
+      { name: "Crash", hits: [0], accents: [0], ghosts: [], nextHits: [], nextAccents: [], nextGhosts: [] },
+      { name: "Open HH", hits: [7, 15], accents: [15], ghosts: [7], nextHits: [6, 15], nextAccents: [15], nextGhosts: [6] },
+      { name: "Closed HH", hits: [0, 2, 4, 6, 8, 10, 12, 14], accents: [0, 8], ghosts: [6, 14], nextHits: [0, 2, 4, 6, 8, 10, 12, 13, 14, 15], nextAccents: [0, 8, 14], nextGhosts: [13, 15] },
+      { name: "Snare", hits: [4, 12], accents: [4, 12], ghosts: [], nextHits: [4, 10, 12], nextAccents: [4, 12], nextGhosts: [10] },
+      { name: "Kick", hits: [0, 4, 8, 11, 12], accents: [0, 8], ghosts: [11], nextHits: [0, 3, 7, 8, 12, 14], nextAccents: [0, 8], nextGhosts: [3, 14] }
     ];
-    let detailChords = ["F", "C/E", "Am", "G", "F", "C/E", "Am", "G", "Dm7", "Am/C", "Bb", "C"];
-    let detailMelody = ["A4", "", "E4", "G4", "A4", "G4", "E4", "", "F4", "E4", "D4", "C4"];
+    let chordSections = [{
+      label: "A",
+      name: "Chorus 03",
+      chords: ["F", "C/E", "Am", "G", "F", "C/E", "Am", "G", "Dm7", "Am/C", "Bb", "C"],
+      melody: ["A4", "", "E4", "G4", "A4", "G4", "E4", "", "F4", "E4", "D4", "C4"]
+    }];
+    let selectedChordSection = 0;
     let beatSectionCount = 1;
     const looperLanes = [
       { name: "Backing guitar", start: "0%", width: "68%", gain: -8 },
@@ -1818,20 +2259,38 @@ keep the rhythm moving on</textarea>
       document.getElementById("localInputDb").textContent = `${localDb.toFixed(1)} dB`;
     }
 
+    function beatPatternForBar(row, bar, state = "hits") {
+      const relativeBar = ((bar - 17) % 16 + 16) % 16;
+      const useUpcomingBase = relativeBar % 2 === 1;
+      const stateKey = state === "accents" ? "Accents" : state === "ghosts" ? "Ghosts" : "Hits";
+      const source = useUpcomingBase ? row[`next${stateKey}`] : row[stateKey.toLowerCase()];
+      const shift = Math.floor(relativeBar / 2) % 4;
+      return source.map(index => (index + shift) % 16);
+    }
+
     function buildBeatPreview() {
-      const target = document.getElementById("beatPreview");
-      target.innerHTML = "";
-      beatRows.forEach(row => {
-        const label = document.createElement("span");
-        label.className = "beat-name";
-        label.textContent = row.name;
-        target.appendChild(label);
-        for (let index = 0; index < 16; index += 1) {
-          const cell = document.createElement("i");
-          cell.className = `step${row.hits.includes(index) ? " hit" : ""}${row.accents.includes(index) ? " accent" : ""}`;
-          cell.dataset.previewStep = index;
-          target.appendChild(cell);
-        }
+      const followingBar = songBar >= 32 ? 17 : songBar + 1;
+      const previews = [
+        { target: document.getElementById("currentBeatPreview"), bar: songBar, upcoming: false },
+        { target: document.getElementById("nextBeatPreview"), bar: followingBar, upcoming: true }
+      ];
+      previews.forEach(preview => {
+        preview.target.innerHTML = "";
+        beatRows.forEach(row => {
+          const label = document.createElement("span");
+          label.className = "beat-name";
+          label.textContent = row.name;
+          preview.target.appendChild(label);
+          const hits = beatPatternForBar(row, preview.bar);
+          const accents = beatPatternForBar(row, preview.bar, "accents");
+          const ghosts = beatPatternForBar(row, preview.bar, "ghosts");
+          for (let index = 0; index < 16; index += 1) {
+            const cell = document.createElement("i");
+            cell.className = `step${preview.upcoming ? " upcoming" : ""}${hits.includes(index) ? " hit" : ""}${accents.includes(index) ? " accent" : ""}${ghosts.includes(index) ? " ghost" : ""}`;
+            if (!preview.upcoming) cell.dataset.previewStep = index;
+            preview.target.appendChild(cell);
+          }
+        });
       });
     }
 
@@ -1844,40 +2303,102 @@ keep the rhythm moving on</textarea>
       return tones[chord.trim()] || "—";
     }
 
+    function chordSectionStartBar(sectionIndex) {
+      return 17 + chordSections.slice(0, sectionIndex).reduce((total, section) => total + section.chords.length, 0);
+    }
+
+    function updateChordMarker() {
+      const beat = Math.floor(step / 4) + 1;
+      document.querySelectorAll(".chord-section").forEach(sectionElement => {
+        const startBar = Number(sectionElement.dataset.startBar);
+        const length = Number(sectionElement.dataset.length);
+        const active = songBar >= startBar && songBar < startBar + length;
+        const marker = sectionElement.querySelector(".chord-position-marker");
+        marker.classList.toggle("visible", active);
+        if (active) {
+          const rawPosition = (songBar - startBar + (step + .5) / 16) * 124;
+          marker.style.left = `${rawPosition}px`;
+          marker.setAttribute("aria-label", `Bar ${songBar}, beat ${beat}`);
+        }
+      });
+      const positionLabel = document.querySelector(".detail-head .micro");
+      if (positionLabel) positionLabel.textContent = `Song position / bar ${songBar} · beat ${beat}`;
+    }
+
     function buildChordEditor() {
       const target = document.getElementById("chordDetail");
       target.innerHTML = "";
-      target.style.gridTemplateColumns = `112px repeat(${detailChords.length}, 124px)`;
-      target.style.minWidth = `${140 + detailChords.length * 124}px`;
-      const rows = [
-        { name: "Chords", values: detailChords, className: "", editable: true },
-        { name: "Notes", values: detailChords.map(chordTones), className: " notes", editable: false },
-        { name: "Melody", values: detailMelody, className: " melody", editable: true }
-      ];
-      rows.forEach((row, rowIndex) => {
-        const label = document.createElement("div");
-        label.className = "song-row-label";
-        label.textContent = row.name;
-        target.appendChild(label);
-        row.values.forEach((value, index) => {
-          const cell = document.createElement("div");
-          cell.className = `song-cell${row.className}${index === 0 ? " current" : ""}`;
-          cell.dataset.position = `${17 + index}.1`;
-          cell.textContent = value || "";
-          if (row.editable) {
-            cell.contentEditable = "true";
-            cell.addEventListener("blur", () => {
-              if (rowIndex === 0) {
-                detailChords[index] = cell.textContent.trim();
-                buildChordEditor();
-              } else {
-                detailMelody[index] = cell.textContent.trim();
-              }
-            });
-          }
-          target.appendChild(cell);
+      chordSections.forEach((section, sectionIndex) => {
+        const startBar = chordSectionStartBar(sectionIndex);
+        const sectionElement = document.createElement("section");
+        sectionElement.className = `chord-section${sectionIndex === selectedChordSection ? " selected" : ""}`;
+        sectionElement.dataset.startBar = startBar;
+        sectionElement.dataset.length = section.chords.length;
+        sectionElement.style.gridTemplateColumns = `112px repeat(${section.chords.length}, 124px)`;
+
+        const title = document.createElement("div");
+        title.className = "chord-section-title";
+        const titleStrong = document.createElement("strong");
+        titleStrong.textContent = `${section.label} / ${section.name}`;
+        const titleSmall = document.createElement("small");
+        titleSmall.textContent = `${section.chords.length} bars`;
+        title.append(titleStrong, titleSmall);
+        title.addEventListener("click", () => {
+          selectedChordSection = sectionIndex;
+          buildChordEditor();
         });
+        sectionElement.appendChild(title);
+
+        const track = document.createElement("div");
+        track.className = "chord-section-track";
+        track.style.gridColumn = `span ${section.chords.length}`;
+        for (let barIndex = 0; barIndex < section.chords.length; barIndex += 1) {
+          for (let beatIndex = 0; beatIndex < 4; beatIndex += 1) {
+            const rulerLabel = document.createElement("span");
+            rulerLabel.className = "chord-ruler-label";
+            rulerLabel.style.left = `${barIndex * 124 + (beatIndex + .5) * 31}px`;
+            rulerLabel.textContent = `${startBar + barIndex}.${beatIndex + 1}`;
+            track.appendChild(rulerLabel);
+          }
+        }
+        const marker = document.createElement("div");
+        marker.className = "chord-position-marker";
+        track.appendChild(marker);
+        sectionElement.appendChild(track);
+
+        const rows = [
+          { name: "Chords", values: section.chords, className: "", editable: true },
+          { name: "Notes", values: section.chords.map(chordTones), className: " notes", editable: false },
+          { name: "Melody", values: section.melody, className: " melody", editable: true }
+        ];
+        rows.forEach((row, rowIndex) => {
+          const label = document.createElement("div");
+          label.className = "song-row-label";
+          label.textContent = row.name;
+          sectionElement.appendChild(label);
+          row.values.forEach((value, index) => {
+            const cell = document.createElement("div");
+            cell.className = `song-cell${row.className}`;
+            cell.dataset.bar = startBar + index;
+            cell.dataset.position = `${startBar + index}.1`;
+            cell.textContent = value || "";
+            if (row.editable) {
+              cell.contentEditable = "true";
+              cell.addEventListener("blur", () => {
+                if (rowIndex === 0) {
+                  section.chords[index] = cell.textContent.trim();
+                  buildChordEditor();
+                } else {
+                  section.melody[index] = cell.textContent.trim();
+                }
+              });
+            }
+            sectionElement.appendChild(cell);
+          });
+        });
+        target.appendChild(sectionElement);
       });
+      updateChordMarker();
     }
 
     function buildFullBeatGrid() {
@@ -1887,12 +2408,22 @@ keep the rhythm moving on</textarea>
       for (let sectionIndex = 0; sectionIndex < beatSectionCount; sectionIndex += 1) {
         const sectionLabel = document.createElement("div");
         sectionLabel.className = "full-beat-label";
-        sectionLabel.textContent = "Section";
+        sectionLabel.textContent = sectionIndex === 0 ? "03 / Chorus" : `${String(4 + sectionIndex).padStart(2, "0")} / New`;
+        sectionLabel.contentEditable = "true";
         target.appendChild(sectionLabel);
         const section = document.createElement("div");
-        section.className = "full-step section";
-        section.contentEditable = "true";
-        section.textContent = sectionIndex === 0 ? "03 / Chorus" : `${String(4 + sectionIndex).padStart(2, "0")} / New section`;
+        section.className = "full-step section beat-section-track";
+        section.dataset.beatSection = sectionIndex;
+        for (let beatIndex = 0; beatIndex < 8; beatIndex += 1) {
+          const rulerLabel = document.createElement("span");
+          rulerLabel.className = "beat-ruler-label";
+          rulerLabel.style.setProperty("--position", `${((beatIndex * 4 + 2) / 32) * 100}%`);
+          rulerLabel.textContent = `${Math.floor(beatIndex / 4) + 1}.${beatIndex % 4 + 1}`;
+          section.appendChild(rulerLabel);
+        }
+        const beatMarker = document.createElement("span");
+        beatMarker.className = "beat-position-marker";
+        section.appendChild(beatMarker);
         target.appendChild(section);
 
         const divisionLabel = document.createElement("div");
@@ -1916,10 +2447,31 @@ keep the rhythm moving on</textarea>
           target.appendChild(label);
           for (let index = 0; index < 32; index += 1) {
             const patternIndex = index % 16;
+            const upcoming = index >= 16;
+            const hits = upcoming ? row.nextHits : row.hits;
+            const accents = upcoming ? row.nextAccents : row.accents;
+            const ghosts = upcoming ? row.nextGhosts : row.ghosts;
             const cell = document.createElement("div");
-            cell.className = `full-step${row.hits.includes(patternIndex) ? " hit" : ""}${row.accents.includes(patternIndex) ? " accent" : ""}`;
+            cell.className = `full-step${hits.includes(patternIndex) ? " hit" : ""}${accents.includes(patternIndex) ? " accent" : ""}${ghosts.includes(patternIndex) ? " ghost" : ""}`;
             cell.dataset.fullStep = index;
-            cell.addEventListener("click", () => cell.classList.toggle("hit"));
+            cell.addEventListener("click", () => {
+              const checked = cell.classList.contains("hit") || cell.classList.contains("accent") || cell.classList.contains("ghost");
+              cell.classList.remove("hit", "accent", "ghost");
+              if (!checked) cell.classList.add("hit");
+            });
+            cell.addEventListener("contextmenu", event => {
+              event.preventDefault();
+              if (cell.classList.contains("hit") && !cell.classList.contains("accent") && !cell.classList.contains("ghost")) {
+                cell.classList.add("accent");
+              } else if (cell.classList.contains("accent")) {
+                cell.classList.remove("accent");
+                cell.classList.add("ghost");
+              } else if (cell.classList.contains("ghost")) {
+                cell.classList.remove("hit", "ghost");
+              } else {
+                cell.classList.add("hit");
+              }
+            });
             target.appendChild(cell);
           }
         });
@@ -1965,7 +2517,17 @@ keep the rhythm moving on</textarea>
       target.innerHTML = "";
       const ruler = document.createElement("div");
       ruler.className = "looper-ruler";
-      ruler.innerHTML = `<strong>Bank A / grid locked</strong>${Array.from({ length: 8 }, (_, index) => `<span>${index + 1}</span>`).join("")}`;
+      ruler.innerHTML = "<strong>Bank A / grid locked</strong>";
+      const rulerScale = document.createElement("div");
+      rulerScale.className = "looper-ruler-scale";
+      rulerScale.innerHTML = Array.from({ length: 32 }, (_, index) =>
+        `<span>${Math.floor(index / 4) + 1}.${index % 4 + 1}</span>`
+      ).join("");
+      ruler.appendChild(rulerScale);
+      const trackMarker = document.createElement("i");
+      trackMarker.className = "track-position-marker";
+      trackMarker.id = "trackPositionMarker";
+      ruler.appendChild(trackMarker);
       target.appendChild(ruler);
       looperLanes.forEach((lane, index) => {
         const row = document.createElement("div");
@@ -1996,10 +2558,22 @@ keep the rhythm moving on</textarea>
       document.getElementById("currentChord").textContent = sequence[0];
       document.getElementById("barPosition").textContent = songBar;
       document.getElementById("transportPosition").textContent = `${String(songBar).padStart(2, "0")}.${String(beat).padStart(2, "0")}.${String((step % 4) * 240).padStart(3, "0")}`;
+      document.getElementById("currentBeatTitle").textContent = `Current beat · ${songBar}.${beat}`;
+      document.getElementById("nextBeatTitle").textContent = `Next beat · ${songBar >= 32 ? 17 : songBar + 1}.1`;
       document.getElementById("chordLens").style.setProperty("--song-progress", `${((songBar - 17) * 16 + step + 1) / (16 * 16) * 100}%`);
       document.querySelectorAll("#beatDots i").forEach((dot, index) => dot.classList.toggle("active", index === beat - 1));
       document.querySelectorAll("[data-preview-step]").forEach(cell => cell.classList.toggle("playhead", Number(cell.dataset.previewStep) === step));
-      document.querySelectorAll("[data-full-step]").forEach(cell => cell.classList.toggle("playhead", Number(cell.dataset.fullStep) % 16 === step));
+      const activeFullStep = ((songBar - 17) % 2) * 16 + step;
+      document.querySelectorAll("[data-full-step]").forEach(cell => cell.classList.toggle("playhead", Number(cell.dataset.fullStep) === activeFullStep));
+      const activeBeatSection = Math.floor((songBar - 17) / 2) % Math.max(1, beatSectionCount);
+      document.querySelectorAll(".beat-position-marker").forEach((marker, index) => {
+        const active = index === activeBeatSection;
+        marker.classList.toggle("visible", active);
+        if (active) {
+          marker.style.setProperty("--marker", `${((activeFullStep + .5) / 32) * 100}%`);
+          marker.setAttribute("aria-label", `Bar ${songBar}, beat ${beat}`);
+        }
+      });
       document.getElementById("metroLamp").style.opacity = metronomeEnabled ? (step % 4 === 0 ? "1" : ".25") : ".08";
 
       const labels = ["Now", "Next", "Then", "Then"];
@@ -2008,10 +2582,23 @@ keep the rhythm moving on</textarea>
         cell.querySelector("strong").textContent = sequence[index];
         cell.querySelector(".arrival").textContent = `${songBar + index}.1`;
       });
-      const lyricIndex = Math.floor((songBar - 17) % lyricLines.length);
-      document.getElementById("lyricPreview").textContent = lyricLines[lyricIndex];
-      document.getElementById("nextLyricPreview").textContent = lyricLines[(lyricIndex + 1) % lyricLines.length];
-      document.querySelectorAll(".lane-playhead").forEach(marker => marker.style.setProperty("--playhead", `${(step / 16) * 100}%`));
+      const lyrics = sharedLyricLines();
+      const stageLyrics = document.getElementById("stageLyrics");
+      stageLyrics.hidden = lyrics.length === 0;
+      if (lyrics.length) {
+        const lyricIndex = Math.floor((songBar - 17) % lyrics.length);
+        document.getElementById("lyricPreview").textContent = lyrics[lyricIndex];
+        document.getElementById("nextLyricPreview").textContent = lyrics.length > 1 ? lyrics[(lyricIndex + 1) % lyrics.length] : "";
+      }
+      updateChordMarker();
+      const looperBar = (songBar - 17) % 8;
+      const looperProgress = (looperBar + step / 16) / 8;
+      const trackMarker = document.getElementById("trackPositionMarker");
+      if (trackMarker) {
+        trackMarker.style.setProperty("--marker", `calc(220px + ${looperProgress * 100}% - ${looperProgress * 220}px)`);
+        trackMarker.setAttribute("aria-label", `Bar ${songBar}, beat ${beat}`);
+      }
+      document.querySelectorAll(".lane-playhead").forEach(marker => marker.style.setProperty("--playhead", `${looperProgress * 100}%`));
     }
 
     function openDetail(layer) {
@@ -2084,8 +2671,14 @@ keep the rhythm moving on</textarea>
             beatSectionCount += 1;
             buildFullBeatGrid();
           } else {
-            detailChords.push("F", "C", "Am", "G");
-            detailMelody.push("", "", "", "");
+            const sourceLength = chordSections[selectedChordSection].chords.length;
+            chordSections.push({
+              label: String.fromCharCode(65 + chordSections.length),
+              name: "Section",
+              chords: Array(sourceLength).fill(""),
+              melody: Array(sourceLength).fill("")
+            });
+            selectedChordSection = chordSections.length - 1;
             buildChordEditor();
           }
         } else if (action === "duplicate-section") {
@@ -2093,35 +2686,45 @@ keep the rhythm moving on</textarea>
             beatSectionCount += 1;
             buildFullBeatGrid();
           } else {
-            detailChords.push(...detailChords.slice(-4));
-            detailMelody.push(...detailMelody.slice(-4));
+            const source = chordSections[selectedChordSection];
+            chordSections.splice(selectedChordSection + 1, 0, {
+              label: `${source.label} copy`,
+              name: source.name,
+              chords: [...source.chords],
+              melody: [...source.melody]
+            });
+            selectedChordSection += 1;
             buildChordEditor();
           }
         } else if (action === "delete-section") {
           if (editorLayer === "beats" && beatSectionCount > 1) {
             beatSectionCount -= 1;
             buildFullBeatGrid();
-          } else if (editorLayer !== "beats" && detailChords.length > 4) {
-            detailChords.splice(-4);
-            detailMelody.splice(-4);
+          } else if (editorLayer !== "beats" && chordSections.length > 1) {
+            chordSections.splice(selectedChordSection, 1);
+            selectedChordSection = Math.min(selectedChordSection, chordSections.length - 1);
             buildChordEditor();
           }
-        } else if (action === "expand-grid") {
-          detailChords.push("", "", "", "");
-          detailMelody.push("", "", "", "");
+        } else if (action === "expand-grid" && editorLayer !== "beats") {
+          chordSections[selectedChordSection].chords.push("", "", "", "");
+          chordSections[selectedChordSection].melody.push("", "", "", "");
           buildChordEditor();
-        } else if (action === "shrink-grid" && detailChords.length > 4) {
-          detailChords.splice(-4);
-          detailMelody.splice(-4);
+        } else if (action === "shrink-grid" && editorLayer !== "beats" && chordSections[selectedChordSection].chords.length > 4) {
+          chordSections[selectedChordSection].chords.splice(-4);
+          chordSections[selectedChordSection].melody.splice(-4);
           buildChordEditor();
         } else if (action === "generate-chords") {
           const pool = ["F", "C/E", "Am", "G", "Dm7", "Bb", "C", "Em"];
-          detailChords = detailChords.map((_, index) => pool[(index * 3 + Math.floor(Math.random() * pool.length)) % pool.length]);
-          detailMelody = detailChords.map(chord => chordTones(chord).split(" ")[0] + "4");
+          const section = chordSections[selectedChordSection];
+          section.chords = section.chords.map((_, index) => pool[(index * 3 + Math.floor(Math.random() * pool.length)) % pool.length]);
+          section.melody = section.chords.map(chord => chordTones(chord).split(" ")[0] + "4");
           buildChordEditor();
         } else if (action === "generate-beats") {
           beatRows.forEach((row, rowIndex) => {
             row.hits = Array.from({ length: 16 }, (_, index) => index).filter(index => Math.random() < (.24 + rowIndex * .08));
+            row.nextHits = Array.from({ length: 16 }, (_, index) => index).filter(index => Math.random() < (.22 + rowIndex * .075));
+            row.ghosts = row.hits.filter(() => Math.random() < .2);
+            row.nextGhosts = row.nextHits.filter(() => Math.random() < .2);
           });
           buildBeatPreview();
           buildFullBeatGrid();
@@ -2132,6 +2735,7 @@ keep the rhythm moving on</textarea>
         } else if (action === "clear-lyrics") {
           document.getElementById("lyricsEditor").value = "";
         }
+        if (["insert-section", "generate-lyrics", "clear-lyrics"].includes(action)) updateSongPosition();
         button.classList.add("active");
         window.setTimeout(() => button.classList.remove("active"), 420);
       });
@@ -2156,6 +2760,7 @@ keep the rhythm moving on</textarea>
     document.getElementById("metroBpm").addEventListener("input", event => {
       document.getElementById("tempoReadout").textContent = event.currentTarget.value;
     });
+    document.getElementById("lyricsEditor").addEventListener("input", updateSongPosition);
     document.querySelectorAll("[data-bank]").forEach(button => {
       button.addEventListener("click", () => {
         document.querySelectorAll("[data-bank]").forEach(candidate => candidate.classList.toggle("active", candidate === button));
@@ -2202,13 +2807,23 @@ keep the rhythm moving on</textarea>
     setInterval(() => {
       if (!playing) return;
       step = (step + 1) % 16;
-      if (step === 0) songBar = songBar >= 32 ? 17 : songBar + 1;
+      if (step === 0) {
+        songBar = songBar >= 32 ? 17 : songBar + 1;
+        buildBeatPreview();
+      }
       updateSongPosition();
     }, 125);
 
     const params = new URLSearchParams(location.search);
     if (params.get("peers")) document.querySelector(`[data-peers="${params.get("peers")}"]`)?.click();
     if (params.get("activity")) document.querySelector(`[data-mode="${params.get("activity")}"]`)?.click();
+    if (params.get("lyrics") === "none") {
+      document.getElementById("lyricsEditor").value = "";
+      updateSongPosition();
+    }
+    if (params.get("sections") === "2") {
+      document.querySelector('[data-layer="chords"] [data-editor-action="add-section"]')?.click();
+    }
     if (["chords", "beats", "lyrics", "metronome", "looper"].includes(params.get("panel"))) openDetail(params.get("panel"));
     if (params.get("data") === "1") setDataDrawer(true);
     if (params.get("event") === "nova" || params.get("event") === "star") spawnCosmicEvent(params.get("event"), true);

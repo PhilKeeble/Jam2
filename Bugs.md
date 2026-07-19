@@ -18,6 +18,10 @@ consider preferences for number of beats in default views, track view controls e
 
 test benchmark, validate, stress and get logs for localhost and mac 
 
+Lets check the music theory and make pieces more musical
+
+Consider having banks tied to sections  
+
 ## Bugs
 
 

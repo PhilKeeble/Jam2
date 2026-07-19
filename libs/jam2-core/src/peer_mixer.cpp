@@ -58,6 +58,7 @@ struct PeerMixer::Impl {
             next_output_phase = 0.0;
             stats.contributing = false;
             stats.queue_depth_frames = 0;
+            stats.recent_peak_ppm = 0;
         }
 
         bool enqueue(std::int32_t sample) noexcept
@@ -481,10 +482,24 @@ struct PeerMixer::Impl {
                 peer->noteMissingFrames(missing);
             }
             const int gain = peer->stats.muted ? 0 : peer->stats.gain_ppm;
+            std::uint64_t block_peak = 0;
             for (std::size_t frame = 0; frame < available; ++frame) {
                 const std::int64_t sample = peer->pop();
-                accumulator[frame] += sample * static_cast<std::int64_t>(gain) / 1000000LL;
+                const std::int64_t contribution =
+                    sample * static_cast<std::int64_t>(gain) / 1000000LL;
+                accumulator[frame] += contribution;
+                const std::uint64_t magnitude = contribution < 0
+                    ? static_cast<std::uint64_t>(-contribution)
+                    : static_cast<std::uint64_t>(contribution);
+                block_peak = std::max(block_peak, magnitude);
             }
+            const int block_peak_ppm = static_cast<int>(std::min<std::uint64_t>(
+                1000000ULL,
+                block_peak * 1000000ULL /
+                    static_cast<std::uint64_t>((std::numeric_limits<std::int32_t>::max)())));
+            peer->stats.recent_peak_ppm = std::max(
+                block_peak_ppm,
+                peer->stats.recent_peak_ppm * 127 / 128);
         }
         for (std::size_t frame = 0; frame < mixed_output.size(); ++frame) {
             if (accumulator[frame] < (std::numeric_limits<std::int32_t>::min)() ||

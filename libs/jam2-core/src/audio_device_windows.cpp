@@ -502,6 +502,23 @@ void apply_remote_level(DuplexContext& context, std::span<std::int32_t> output)
     }
 }
 
+void apply_output_level(DuplexContext& context, std::span<std::int32_t> output)
+{
+    if (context.control == nullptr) {
+        return;
+    }
+    const int level_ppm =
+        context.control->output_level_ppm.load(std::memory_order_relaxed);
+    if (level_ppm == 1000000) {
+        return;
+    }
+    const double level =
+        static_cast<double>(std::clamp(level_ppm, 0, 4000000)) / 1000000.0;
+    for (std::int32_t& sample : output) {
+        sample = scale_i32_sample(sample, level);
+    }
+}
+
 std::int32_t mix_i32_samples(std::int32_t a, std::int32_t b);
 
 void mix_local_monitor(DuplexContext& context, std::span<std::int32_t> output, std::span<const std::int32_t> input)
@@ -541,9 +558,14 @@ void mix_local_monitor(DuplexContext& context, std::span<std::int32_t> output, s
 void mix_prepared_source(DuplexContext& context, std::span<std::int32_t> output, std::uint64_t frame)
 {
     if (context.control == nullptr || context.control->prepared_source == nullptr || output.empty()) {
+        if (context.control != nullptr) {
+            context.control->prepared_track_peak_ppm.store(0, std::memory_order_relaxed);
+        }
         return;
     }
-    context.control->prepared_source->mix(output.data(), output.size(), frame);
+    const int peak = context.control->prepared_source->mix(output.data(), output.size(), frame);
+    context.control->prepared_track_peak_ppm.store(peak, std::memory_order_relaxed);
+    update_interval_peak(context.control->gui_prepared_track_peak_ppm, peak);
     context.control->prepared_source_frame.store(
         context.control->prepared_source->sourceFrame(),
         std::memory_order_relaxed);
@@ -835,6 +857,7 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
             std::span<std::int32_t>(
                 context->recorder_metronome_scratch.data(),
                 std::min<std::size_t>(context->recorder_metronome_scratch.size(), playback.size())));
+        apply_output_level(*context, playback);
         if (context->control != nullptr) {
             observe_peak(
                 context->control->metronome_peak_ppm,

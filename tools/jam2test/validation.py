@@ -534,10 +534,9 @@ def _run_real_process_control_hardening(
         {
             "type": "song.set", "arrangement_revision": 1,
             "song": {
-                "format": "jam2.song.v1", "title": "wrong-rate asset",
-                "lyrics_text": "", "sections": [valid_section],
+                "title": "wrong-rate asset", "sections": [valid_section],
                 "looper": {
-                    "format": "jam2.looper.v1", "active_bank": 0,
+                    "active_bank": 0,
                     "grid_lock": True, "banks": mismatched_banks,
                 },
             },
@@ -545,8 +544,7 @@ def _run_real_process_control_hardening(
         {
             "type": "song.set", "arrangement_revision": 1,
             "song": {
-                "format": "jam2.song.v1", "title": "hostile nested model",
-                "lyrics_text": "", "sections": [{
+                "title": "hostile nested model", "sections": [{
                     "label": "A", "name": "Verse", "beats": 513,
                     "chords": [], "beat_notes": [], "lyrics": [],
                     "beat_patterns": [],

@@ -40,11 +40,33 @@ bool Jam2RuntimeHost::submitPeerUpdate(const std::vector<Jam2RuntimePeer>& peers
     return true;
 }
 
+bool Jam2RuntimeHost::submitPeerGain(std::uint64_t peer_id, int gain_ppm) noexcept
+{
+    if (peer_id == 0 || gain_ppm < 0 || gain_ppm > 4000000) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(peer_gain_mutex_);
+    peer_gains_[peer_id] = gain_ppm;
+    return true;
+}
+
 std::optional<std::vector<Jam2RuntimePeer>> Jam2RuntimeHost::takePeerUpdate()
 {
     std::lock_guard<std::mutex> lock(peer_mutex_);
     auto result = std::move(peer_update_);
     peer_update_.reset();
+    return result;
+}
+
+std::vector<Jam2PeerGainUpdate> Jam2RuntimeHost::takePeerGains()
+{
+    std::lock_guard<std::mutex> lock(peer_gain_mutex_);
+    std::vector<Jam2PeerGainUpdate> result;
+    result.reserve(peer_gains_.size());
+    for (const auto& [peer_id, gain_ppm] : peer_gains_) {
+        result.push_back({peer_id, gain_ppm});
+    }
+    peer_gains_.clear();
     return result;
 }
 
@@ -110,5 +132,9 @@ void Jam2RuntimeHost::reset() noexcept
     {
         std::lock_guard<std::mutex> lock(command_mutex_);
         commands_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(peer_gain_mutex_);
+        peer_gains_.clear();
     }
 }

@@ -8,6 +8,7 @@
 #include "MixerStatsViewModel.hpp"
 #include "MetronomeTransportController.hpp"
 #include "PlaybackGrid.hpp"
+#include "PerformanceWidgets.hpp"
 #include "PreparedMixRenderer.hpp"
 #include "ProjectPersistenceCoordinator.hpp"
 #include "SharedTrackController.hpp"
@@ -54,6 +55,9 @@ class QTemporaryFile;
 class QEvent;
 class QCloseEvent;
 class QGroupBox;
+class QFrame;
+class QScrollArea;
+class QStackedWidget;
 class QTableWidget;
 class QVBoxLayout;
 class WaveformWidget;
@@ -85,6 +89,11 @@ private:
     void refreshDevices();
     void appendLog(const QString& line);
     void updateStatsDisplay(const ConnectionDiagnosticsSnapshot* stats);
+    void openWorkspace(const QString& page);
+    void toggleDataDrawer();
+    void updatePerformancePeers();
+    void selectPerformancePeer(std::uint64_t peerId);
+    void applySelectedPeerGain(int db);
     void updateMixMeters(const MixerMeterLevels& levels);
     void sendControl(const QJsonObject& message);
     void handleControlEvent(
@@ -302,6 +311,7 @@ private:
     QComboBox* metronomeModeBox_ = nullptr;
     QSlider* metronomeLevelSlider_ = nullptr;
     QSlider* remoteLevelSlider_ = nullptr;
+    QSlider* masterOutputLevelSlider_ = nullptr;
     QCheckBox* sampleTimePlayoutCheck_ = nullptr;
     QSpinBox* playoutDelaySpin_ = nullptr;
     QSpinBox* jitterBufferSpin_ = nullptr;
@@ -330,13 +340,14 @@ private:
     QLabel* underrunLabel_ = nullptr;
     QLabel* latencyLabel_ = nullptr;
     QLabel* diagnosisLabel_ = nullptr;
+    QLabel* diagnosisEvidenceLabel_ = nullptr;
+    QLabel* rendererStatsLabel_ = nullptr;
     QLabel* trackNameLabel_ = nullptr;
     QLabel* gridPositionLabel_ = nullptr;
     QLabel* gridScheduleLabel_ = nullptr;
     QLabel* recordingCountdownLabel_ = nullptr;
     LooperLaneStackWidget* looperStack_ = nullptr;
     WaveformWidget* trackWaveform_ = nullptr;
-    QLabel* titleLabel_ = nullptr;
     QLineEdit* songTitleEdit_ = nullptr;
     QLineEdit* captureOutputEdit_ = nullptr;
     QComboBox* loopbackSourceBox_ = nullptr;
@@ -406,6 +417,7 @@ private:
     QLabel* mixMetronomeLevelLabel_ = nullptr;
     LevelMeterWidget* mixMetronomeMeter_ = nullptr;
     LevelMeterWidget* mixOutputMeter_ = nullptr;
+    QLabel* masterOutputLevelLabel_ = nullptr;
     QWidget* mixRemotePeerRow_ = nullptr;
     QVBoxLayout* mixRemotePeerListLayout_ = nullptr;
     QSlider* mixRemotePeerSlider_ = nullptr;
@@ -436,6 +448,38 @@ private:
     BeatGridWidget* beatGrid_ = nullptr;
     BeatGridWidget* lyricGrid_ = nullptr;
     QTabWidget* tabs_ = nullptr;
+    QStackedWidget* performanceStageStack_ = nullptr;
+    QStackedWidget* workspaceStack_ = nullptr;
+    QMap<QString, int> workspacePages_;
+    PerformanceHomeWidget* performanceHome_ = nullptr;
+    QWidget* dataOverlay_ = nullptr;
+    QFrame* dataDrawer_ = nullptr;
+    QPushButton* performanceTrackToggle_ = nullptr;
+    QPushButton* performanceMetronomeToggle_ = nullptr;
+    QPushButton* performanceTempoButton_ = nullptr;
+    QLabel* performancePositionLabel_ = nullptr;
+    QLabel* detailPositionLabel_ = nullptr;
+    QSlider* selectedPeerGainSlider_ = nullptr;
+    QLabel* selectedPeerNameLabel_ = nullptr;
+    QLabel* selectedPeerGainLabel_ = nullptr;
+    QLabel* performanceLeftTitle_ = nullptr;
+    QLabel* performanceRightTitle_ = nullptr;
+    QWidget* performanceLocalControls_ = nullptr;
+    QWidget* performancePeerControls_ = nullptr;
+    QWidget* performanceMasterOutputControls_ = nullptr;
+    QWidget* detailIdentityPanel_ = nullptr;
+    QWidget* peerGainListContent_ = nullptr;
+    QVBoxLayout* peerGainListLayout_ = nullptr;
+    QScrollArea* peerGainScroll_ = nullptr;
+    QLabel* diagnosticSampleRateValue_ = nullptr;
+    QLabel* diagnosticDriftValue_ = nullptr;
+    QLabel* diagnosticMissingAudioValue_ = nullptr;
+    QLabel* diagnosticOutputUnderrunsValue_ = nullptr;
+    QLabel* diagnosticPacketsValue_ = nullptr;
+    QLabel* diagnosticLateValue_ = nullptr;
+    QLabel* diagnosticLossEventsValue_ = nullptr;
+    QLabel* diagnosticBurstGapsValue_ = nullptr;
+    QTableWidget* diagnosticPeerTable_ = nullptr;
 
     std::uint64_t sessionId_ = 0;
     std::array<std::uint8_t, 16> sessionKey_{};
@@ -508,9 +552,19 @@ private:
     QElapsedTimer preAuthenticationDisconnectWindow_;
     int preAuthenticationDisconnectCount_ = 0;
     bool firewallGuidanceShown_ = false;
+    bool controlRefreshAvailable_ = false;
     QString activePublicEndpoint_;
     QString meshPeerToken_;
     QString lastLoggedSessionSummary_;
+    QVector<Jam2OperationalPeer> operationalPeers_;
+    QMap<std::uint64_t, int> peerOrdinals_;
+    QMap<std::uint64_t, double> desiredPeerGainDb_;
+    QMap<std::uint64_t, QSlider*> peerGainSliders_;
+    QMap<std::uint64_t, QLabel*> peerGainValueLabels_;
+    QString peerMembershipSignature_;
+    std::uint64_t selectedPeerId_ = 0;
+    int nextPeerOrdinal_ = 1;
+    std::optional<ConnectionDiagnosticsSnapshot> lastDiagnostics_;
     QSet<QString> localMeshPeerTokens_;
     QMap<QString, QString> meshPeerEndpoints_;
     std::uint64_t engineCommandCookie_ = 0;

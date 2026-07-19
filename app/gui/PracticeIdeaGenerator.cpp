@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <random>
 
 namespace jam2::practice {
@@ -28,13 +29,13 @@ int resolveIndex(int requested, int count, Rng& rng)
 
 int resolveBars(int requested, int style, bool beat, Rng& rng)
 {
-    if (requested > 0) return requested;
-    QVector<int> choices{2, 4, 8};
+    if (requested > 0) return std::clamp(requested, 4, 16);
+    QVector<int> choices{4, 8, 16};
     if ((!beat && style == static_cast<int>(ChordStyle::BluesForm)) ||
         (beat && style == static_cast<int>(BeatStyle::BluesShuffle))) {
-        choices = {4, 8, 12};
+        choices = {4, 8, 12, 16};
     } else if (!beat && style == static_cast<int>(ChordStyle::JazzTurnaround)) {
-        choices = {4, 8};
+        choices = {4, 8, 16};
     }
     return choose(choices, rng);
 }
@@ -155,12 +156,26 @@ QVector<int> scaleIntervals(ScaleKind scale)
 ScaleKind scaleForCharacter(int style, bool minor, const QString& character)
 {
     if (style == static_cast<int>(ChordStyle::BluesForm)) return ScaleKind::Blues;
+    if (style == static_cast<int>(ChordStyle::ModalVamp)) {
+        if (character == QStringLiteral("Open")) return ScaleKind::Mixolydian;
+        if (character == QStringLiteral("Floating")) return ScaleKind::Lydian;
+        if (character == QStringLiteral("Dark")) return ScaleKind::NaturalMinor;
+    }
+    if (style == static_cast<int>(ChordStyle::ModernMetal)) {
+        if (character == QStringLiteral("Chugging") ||
+            character == QStringLiteral("Brooding") ||
+            character == QStringLiteral("Aeolian")) {
+            return ScaleKind::NaturalMinor;
+        }
+        if (character == QStringLiteral("Dissonant")) return ScaleKind::Locrian;
+    }
     if (character == QStringLiteral("Dorian")) return ScaleKind::Dorian;
     if (character == QStringLiteral("Phrygian")) return ScaleKind::Phrygian;
     if (character == QStringLiteral("Lydian")) return ScaleKind::Lydian;
     if (character == QStringLiteral("Mixolydian")) return ScaleKind::Mixolydian;
     if (character == QStringLiteral("Locrian")) return ScaleKind::Locrian;
     if (character == QStringLiteral("Ionian")) return ScaleKind::Major;
+    if (character == QStringLiteral("Aeolian")) return ScaleKind::NaturalMinor;
     return minor ? ScaleKind::NaturalMinor : ScaleKind::Major;
 }
 
@@ -248,231 +263,379 @@ HarmonicPlan buildHarmonicPlan(
             key, homeScale, function, tension);
     };
 
+    const int halfBar = qMax(1, beatsPerBar / 2);
+    const int totalBeats = bars * beatsPerBar;
+    const int finalBar = bars - 1;
+
     if (style == static_cast<int>(ChordStyle::FunctionalPop)) {
-        if (complexity == 8) {
-            const bool thirds = std::uniform_int_distribution<int>(0, 1)(rng) == 0;
-            const QVector<int> roots = thirds
-                ? QVector<int>{0, 4, 8, 0}
-                : QVector<int>{0, 2, 5, 3};
-            for (int bar = 0; bar < bars; ++bar) {
-                const int offset = bar == bars - 1 ? 0 : roots.at(bar % roots.size());
-                add(barBeat(bar), key + offset,
-                    thirds ? QStringLiteral("maj9") : QStringLiteral("maj9#11"),
-                    key + offset, thirds ? ScaleKind::Major : ScaleKind::Lydian,
-                    bar == bars - 1 ? HarmonicFunction::Tonic : HarmonicFunction::Colour, 8);
+        const bool alternate = std::uniform_int_distribution<int>(0, 1)(rng) == 1;
+        const QVector<int> grounded{0, 3, 4, 0};
+        const QVector<int> bright = alternate
+            ? QVector<int>{0, 4, 5, 3}
+            : QVector<int>{0, 5, 3, 4};
+        for (int bar = 0; bar < bars; ++bar) {
+            const int slot = bar % 4;
+            int degree = complexity == 1 ? grounded.at(slot) : bright.at(slot);
+            if (bar == finalBar) degree = 0;
+            const HarmonicFunction function =
+                degree == 0 || degree == 5 ? HarmonicFunction::Tonic :
+                degree == 4 ? HarmonicFunction::Dominant :
+                HarmonicFunction::Predominant;
+            QString chord;
+            if (minor && degree == 4) {
+                chord = chordSymbol(key + 7, complexity >= 3
+                    ? QStringLiteral("7") : QString(), flats);
+            } else {
+                chord = diatonicChord(key, degree, minor, complexity >= 3, flats);
             }
-        } else if (complexity == 7) {
-            const QVector<int> roots{0, 8, 9, 1};
-            for (int bar = 0; bar < bars; ++bar) {
-                const int offset = bar == bars - 1 ? 0 : roots.at(bar % roots.size());
-                add(barBeat(bar), key + offset, QStringLiteral("maj9"),
-                    key + offset, ScaleKind::Major,
-                    bar == bars - 1 ? HarmonicFunction::Tonic : HarmonicFunction::Colour, 7);
+            if (complexity >= 4 && degree == 0 && slot == 0) {
+                chord = chordSymbol(key, minor
+                    ? QStringLiteral("madd9") : QStringLiteral("add9"), flats);
             }
-        } else {
-            const QVector<int> grounded{0, 3, 4, 0};
-            const QVector<int> diatonic{0, 5, 1, 4};
-            const QVector<int>& degrees = complexity == 1 ? grounded : diatonic;
-            for (int bar = 0; bar < bars; ++bar) {
-                const int degree = bar == bars - 1 ? 0 : degrees.at(bar % degrees.size());
-                addDegree(barBeat(bar), degree, complexity >= 3,
-                    degree == 0 || degree == 5 ? HarmonicFunction::Tonic :
-                    degree == 4 ? HarmonicFunction::Dominant : HarmonicFunction::Predominant,
-                    qMin(complexity, 3));
-                if (complexity >= 3 && bar % 3 == 1) {
-                    HarmonicEvent& event = plan.events.back();
-                    const ParsedChord parsed = parseChord(event.chord);
-                    if (parsed.valid && parsed.intervals.size() >= 3) {
-                        event.chord = invertedChord(event.chord, parsed.intervals.at(1), flats);
-                    }
+            if (complexity >= 3 && slot == 1) {
+                const ParsedChord parsed = parseChord(chord);
+                if (parsed.valid && parsed.intervals.size() >= 3) {
+                    chord = invertedChord(chord, parsed.intervals.at(1), flats);
                 }
             }
-            if (complexity >= 4 && bars >= 4) {
-                add(barBeat(qMax(1, bars - 2)), key + 5, QStringLiteral("m6"),
-                    key, homeScale, HarmonicFunction::Colour, 4);
-            }
-            if (complexity >= 5 && bars >= 4) {
-                setHarmonicEvent(plan, qMax(1, beatsPerBar / 2),
-                    chordSymbol(key + 4, QStringLiteral("7"), flats),
-                    key + 9, ScaleKind::NaturalMinor, HarmonicFunction::Dominant, 5);
-                setHarmonicEvent(plan, barBeat(1),
-                    chordSymbol(key + 9, QStringLiteral("m7"), flats),
-                    key + 9, ScaleKind::NaturalMinor, HarmonicFunction::Tonic, 4);
-            }
-            if (complexity >= 6 && bars >= 8) {
-                const int excursion = bars / 2;
-                add(barBeat(excursion), key + 7, QStringLiteral("maj9"),
-                    key + 7, ScaleKind::Major, HarmonicFunction::Tonic, 6);
-                add(barBeat(excursion + 1), key + 2, QStringLiteral("9"),
-                    key + 7, ScaleKind::Mixolydian, HarmonicFunction::Dominant, 6);
-                add(barBeat(qMin(bars - 2, excursion + 2)), key + 7, QStringLiteral("13"),
-                    key, homeScale, HarmonicFunction::Dominant, 6);
-            }
+            setHarmonicEvent(plan, barBeat(bar), chord, key, homeScale,
+                function, qMin(complexity, 4));
         }
-    } else if (style == static_cast<int>(ChordStyle::BluesForm)) {
-        const QVector<int> form{0,0,0,0, 5,5,0,0, 7,5,0,7};
-        for (int bar = 0; bar < bars; ++bar) {
-            const int offset = bar == bars - 1 ? 0 : form.at(bar % form.size());
-            QString suffix;
-            if (complexity >= 6) suffix = offset == 7 ? QStringLiteral("13") : QStringLiteral("9");
-            else if (complexity >= 3) suffix = QStringLiteral("7");
-            add(barBeat(bar), key + offset, suffix, key, ScaleKind::Blues,
-                offset == 0 ? HarmonicFunction::Tonic :
-                offset == 7 ? HarmonicFunction::Dominant : HarmonicFunction::Predominant,
-                qMin(complexity, 6));
-        }
-        if (complexity >= 4 && bars >= 4) {
-            add(barBeat(1), key + 5, QStringLiteral("7"),
-                key, ScaleKind::Blues, HarmonicFunction::Predominant, 4);
+        if (complexity == 4 && !minor && bars >= 4) {
+            add(barBeat(qMax(1, finalBar - 1)), key + 5,
+                complexity >= 6 ? QStringLiteral("m6") : QStringLiteral("m"),
+                key, homeScale, HarmonicFunction::Predominant, 4);
         }
         if (complexity >= 5 && bars >= 4) {
-            const int finalBar = bars - 1;
-            add(barBeat(finalBar) - qMax(1, beatsPerBar / 2), key + 2, QStringLiteral("dim7"),
-                key, ScaleKind::Diminished, HarmonicFunction::Passing, 5);
+            const int targetDegree = minor ? 2 : 5;
+            const int targetRoot = diatonicPitch(key, targetDegree, minor);
+            add(qMax(1, barBeat(1) - halfBar), targetRoot + 7,
+                complexity >= 7 ? QStringLiteral("7b9") : QStringLiteral("7"),
+                targetRoot, ScaleKind::Altered, HarmonicFunction::Dominant, 5);
+            setHarmonicEvent(plan, barBeat(1),
+                diatonicChord(key, targetDegree, minor, true, flats),
+                targetRoot, minor ? ScaleKind::NaturalMinor : ScaleKind::Major,
+                HarmonicFunction::Tonic, 4);
+        }
+        if (complexity == 6 && bars >= 4) {
+            const int targetBar = qMin(finalBar - 1, 2);
+            if (targetBar >= 1) {
+                const int targetRoot = diatonicPitch(key, 1, minor);
+                add(qMax(1, barBeat(targetBar) - 1), targetRoot - 1,
+                    QStringLiteral("dim7"), targetRoot, ScaleKind::Diminished,
+                    HarmonicFunction::Passing, 6);
+                setHarmonicEvent(plan, barBeat(targetBar),
+                    diatonicChord(key, 1, minor, true, flats),
+                    key, homeScale, HarmonicFunction::Predominant, 4);
+            }
+        }
+        if (complexity >= 8 && bars >= 8) {
+            const int excursion = bars / 2;
+            if (excursion >= 2 && excursion + 2 < bars) {
+                const int target = minor ? key + 3 : key + 7;
+                add(barBeat(excursion - 1), target + 2, QStringLiteral("m7"),
+                    target, ScaleKind::Dorian, HarmonicFunction::Predominant, 6);
+                add(barBeat(excursion - 1) + halfBar, target + 7,
+                    QStringLiteral("7b9"), target, ScaleKind::Altered,
+                    HarmonicFunction::Dominant, 8);
+                add(barBeat(excursion), target, QStringLiteral("maj9"),
+                    target, ScaleKind::Major, HarmonicFunction::Tonic, 6);
+                add(barBeat(excursion + 1), key + 2,
+                    minor ? QStringLiteral("m7b5") : QStringLiteral("m9"),
+                    key, minor ? ScaleKind::Locrian : ScaleKind::Dorian,
+                    HarmonicFunction::Predominant, 6);
+                add(barBeat(excursion + 1) + halfBar, key + 7,
+                    QStringLiteral("7b9"), key, ScaleKind::Altered,
+                    HarmonicFunction::Dominant, 8);
+                add(barBeat(excursion + 2), key,
+                    minor ? QStringLiteral("m9") : QStringLiteral("maj9"),
+                    key, homeScale, HarmonicFunction::Tonic, 5);
+            }
+        }
+        if (complexity == 7 && bars >= 4) {
+            add(qMax(1, barBeat(finalBar) - 1), key + 1,
+                complexity >= 8 ? QStringLiteral("7#9") : QStringLiteral("7"),
+                key, ScaleKind::Altered, HarmonicFunction::Dominant, 7);
+            add(barBeat(finalBar), key,
+                complexity >= 8
+                    ? (minor ? QStringLiteral("m9") : QStringLiteral("maj9"))
+                    : (minor ? QStringLiteral("m") : QString()),
+                key, homeScale, HarmonicFunction::Tonic, 3);
+        }
+    } else if (style == static_cast<int>(ChordStyle::BluesForm)) {
+        QVector<int> form;
+        if (bars <= 4) {
+            form = {0, 5, 0, 0};
+        } else if (bars <= 8) {
+            form = {0, 0, 5, 5, 0, 0, 7, 0};
+        } else if (bars >= 16) {
+            form = {0, 0, 0, 0, 5, 5, 0, 0, 7, 5, 0, 0, 2, 7, 0, 0};
+        } else {
+            form = {0, 0, 0, 0, 5, 5, 0, 0, 7, 5, 0, 7};
+        }
+        for (int bar = 0; bar < bars; ++bar) {
+            const int offset = bar == finalBar ? 0 : form.at(bar % form.size());
+            QString suffix;
+            if (complexity >= 3) {
+                suffix = offset == 7 && complexity >= 6
+                    ? QStringLiteral("13") : QStringLiteral("9");
+            } else if (complexity >= 2) {
+                suffix = QStringLiteral("7");
+            }
+            add(barBeat(bar), key + offset, suffix, key, ScaleKind::Blues,
+                offset == 0 ? HarmonicFunction::Tonic :
+                offset == 7 ? HarmonicFunction::Dominant :
+                HarmonicFunction::Predominant,
+                qMin(complexity, 6));
+        }
+        if (complexity == 4 && bars >= 4) {
+            add(qMax(1, barBeat(finalBar) - 1), key + 7, QStringLiteral("7"),
+                key, ScaleKind::Mixolydian, HarmonicFunction::Dominant, 4);
             add(barBeat(finalBar), key, QStringLiteral("9"),
                 key, ScaleKind::Blues, HarmonicFunction::Tonic, 3);
         }
+        if (complexity >= 5) {
+            const int firstFour = form.indexOf(5);
+            if (firstFour > 0 && firstFour < bars) {
+                add(barBeat(firstFour - 1), key + 2, QStringLiteral("m7"),
+                    key + 5, ScaleKind::Dorian, HarmonicFunction::Predominant, 5);
+                add(barBeat(firstFour - 1) + halfBar, key, QStringLiteral("9"),
+                    key + 5, ScaleKind::Mixolydian, HarmonicFunction::Dominant, 5);
+                add(barBeat(firstFour), key + 5, QStringLiteral("9"),
+                    key, ScaleKind::Blues, HarmonicFunction::Predominant, 4);
+            }
+        }
+        if (complexity == 6 && bars >= 4) {
+            const int setupBar = qMax(0, finalBar - 1);
+            add(barBeat(setupBar), key + 1, QStringLiteral("dim7"),
+                key + 2, ScaleKind::Diminished, HarmonicFunction::Passing, 6);
+            add(barBeat(setupBar) + halfBar, key + 2, QStringLiteral("m7"),
+                key, ScaleKind::Dorian, HarmonicFunction::Predominant, 5);
+        }
         if (complexity == 7 && bars >= 4) {
-            add(barBeat(bars - 1) - 1, key + 1, QStringLiteral("9"),
+            add(qMax(1, barBeat(finalBar) - 1), key + 1, QStringLiteral("9"),
                 key, ScaleKind::Altered, HarmonicFunction::Dominant, 7);
-        } else if (complexity == 8 && bars >= 4) {
+        }
+        if (complexity >= 8 && bars >= 4) {
             const QVector<int> roots{4, 9, 2, 7};
+            const QVector<int> targets{9, 2, 7, 0};
             const QVector<QString> suffixes{
                 QStringLiteral("7#9"), QStringLiteral("7b9"),
                 QStringLiteral("13"), QStringLiteral("alt")};
-            const int totalBeats = bars * beatsPerBar;
-            const int start = qMax(0, barBeat(bars - 2));
-            const int spacing = qMax(1, (totalBeats - start - 1) / roots.size());
+            const int start = qMax(0, barBeat(qMax(0, finalBar - 2)));
+            const int end = barBeat(finalBar);
+            const int spacing = qMax(1, (end - start) / roots.size());
             for (int index = 0; index < roots.size(); ++index) {
                 add(start + index * spacing, key + roots.at(index), suffixes.at(index),
-                    key, index == roots.size() - 1 ? ScaleKind::Altered : ScaleKind::Blues,
+                    key + targets.at(index), ScaleKind::Altered,
                     HarmonicFunction::Dominant, 8);
             }
-            add(totalBeats - 1, key, QStringLiteral("9"),
+            add(barBeat(finalBar), key, QStringLiteral("9"),
                 key, ScaleKind::Blues, HarmonicFunction::Tonic, 4);
         }
     } else if (style == static_cast<int>(ChordStyle::ModalVamp)) {
-        if (complexity == 8) {
-            const QVector<int> roots{0, 2, 5, 3};
-            for (int bar = 0; bar < bars; ++bar) {
-                const int offset = bar == bars - 1 ? 0 : roots.at(bar % roots.size());
-                add(barBeat(bar), key + offset, QStringLiteral("maj9#11"),
-                    key + offset, ScaleKind::Lydian,
-                    bar == bars - 1 ? HarmonicFunction::Pedal : HarmonicFunction::Colour, 8);
-            }
-        } else if (complexity == 7) {
-            const QVector<int> roots{0, 1, 0, 6};
-            for (int bar = 0; bar < bars; ++bar) {
-                const int offset = bar == bars - 1 ? 0 : roots.at(bar % roots.size());
-                add(barBeat(bar), key + offset, QStringLiteral("m9"),
-                    key + offset, ScaleKind::Dorian,
-                    offset == 0 ? HarmonicFunction::Pedal : HarmonicFunction::Colour, 7);
-            }
-        } else {
-            QVector<int> degrees = complexity == 1
-                ? QVector<int>{0, 3}
-                : QVector<int>{0, 5, 3, 6};
-            for (int bar = 0; bar < bars; ++bar) {
-                const int degree = bar == bars - 1 ? 0 : degrees.at(bar % degrees.size());
-                QString chord = diatonicChord(key, degree, minor, complexity >= 3, flats);
-                if (complexity >= 3 && degree == 0) {
-                    chord = chordSymbol(key, minor ? QStringLiteral("madd9") : QStringLiteral("add9"), flats);
-                }
-                setHarmonicEvent(plan, barBeat(bar), chord, key, homeScale,
-                    degree == 0 ? HarmonicFunction::Pedal : HarmonicFunction::Colour,
-                    qMin(complexity, 4));
-            }
-            if (complexity >= 4 && bars >= 4) {
-                add(barBeat(bars / 2), key + (minor ? 5 : 10),
-                    minor ? QString() : QStringLiteral("maj7"),
-                    key, homeScale, HarmonicFunction::Colour, 4);
-            }
-            if (complexity >= 5 && bars >= 4) {
-                add(barBeat(bars - 2), key + 2, QStringLiteral("m9"),
-                    key + 2, ScaleKind::Dorian, HarmonicFunction::Pedal, 5);
-            }
-            if (complexity >= 6 && bars >= 8) {
-                add(barBeat(bars / 2), key + 5, QStringLiteral("maj9#11"),
-                    key + 5, ScaleKind::Lydian, HarmonicFunction::Pedal, 6);
-                add(barBeat(bars / 2 + 1), key + 7, QStringLiteral("sus4"),
-                    key + 5, ScaleKind::Mixolydian, HarmonicFunction::Colour, 6);
-            }
+        const bool modalMinor =
+            homeScale == ScaleKind::NaturalMinor || homeScale == ScaleKind::Dorian ||
+            homeScale == ScaleKind::Phrygian || homeScale == ScaleKind::Locrian;
+        QVector<int> offsets;
+        if (homeScale == ScaleKind::Mixolydian) offsets = {0, 10, 5, 0};
+        else if (homeScale == ScaleKind::Lydian) offsets = {0, 2, 7, 0};
+        else if (modalMinor) offsets = {0, 5, 10, 0};
+        else offsets = {0, 5, 7, 0};
+        if (std::uniform_int_distribution<int>(0, 1)(rng) == 1) {
+            std::swap(offsets[1], offsets[2]);
         }
+        for (int bar = 0; bar < bars; ++bar) {
+            const int slot = bar % 4;
+            const int offset = bar == finalBar ? 0 : offsets.at(slot);
+            QString suffix;
+            if (offset == 0) {
+                suffix = modalMinor
+                    ? (complexity >= 3 ? QStringLiteral("madd9") : QStringLiteral("m"))
+                    : (complexity >= 3 ? QStringLiteral("add9") : QString());
+            } else if (homeScale == ScaleKind::NaturalMinor && offset == 5) {
+                suffix = complexity >= 3 ? QStringLiteral("m7") : QStringLiteral("m");
+            } else if (complexity >= 3) {
+                suffix = homeScale == ScaleKind::Lydian
+                    ? QStringLiteral("maj7") : QStringLiteral("sus2");
+            }
+            QString chord = chordSymbol(key + offset, suffix, flats);
+            if (complexity >= 4 && offset != 0) {
+                chord += QLatin1Char('/') + noteName(key, flats);
+            }
+            setHarmonicEvent(plan, barBeat(bar), chord, key, homeScale,
+                offset == 0 ? HarmonicFunction::Pedal : HarmonicFunction::Colour,
+                qMin(complexity, 5));
+        }
+        if (complexity == 5 && bars >= 4) {
+            const int returnBar = qMax(1, finalBar - 1);
+            add(barBeat(returnBar) + halfBar, key + 7, QStringLiteral("sus4"),
+                key, homeScale, HarmonicFunction::Colour, 5);
+        }
+        if (complexity == 6 && bars >= 4) {
+            const int colourBar = qBound(1, bars / 2, finalBar - 1);
+            const int colourRoot = key +
+                (homeScale == ScaleKind::Lydian ? 6 :
+                 homeScale == ScaleKind::Mixolydian ? 10 : 3);
+            add(barBeat(colourBar) + halfBar, colourRoot,
+                modalMinor ? QStringLiteral("m9") : QStringLiteral("maj7#11"),
+                key, homeScale, HarmonicFunction::Colour, 6);
+        }
+        if (complexity == 7 && bars >= 4) {
+            add(qMax(1, barBeat(finalBar) - 1), key + 1,
+                modalMinor ? QStringLiteral("m9") : QStringLiteral("maj7#11"),
+                key, homeScale, HarmonicFunction::Colour, 7);
+        }
+        if (complexity >= 8 && bars >= 4) {
+            const int colourBar = qMax(1, bars / 2 - 1);
+            const int colourBeat = qMin(totalBeats - 2, barBeat(colourBar) + halfBar);
+            add(colourBeat, key + 2,
+                modalMinor ? QStringLiteral("m9") : QStringLiteral("maj9#11"),
+                key, homeScale, HarmonicFunction::Colour, 8);
+            add(colourBeat + 1, key,
+                modalMinor ? QStringLiteral("m9") : QStringLiteral("maj9#11"),
+                key, homeScale, HarmonicFunction::Pedal, 5);
+        }
+        add(barBeat(finalBar), key,
+            complexity >= 7
+                ? (modalMinor ? QStringLiteral("m9") : QStringLiteral("maj9#11"))
+                : (modalMinor ? QStringLiteral("m") : QString()),
+            key, homeScale, HarmonicFunction::Pedal, 3);
     } else if (style == static_cast<int>(ChordStyle::JazzTurnaround)) {
-        if (complexity == 8) {
-            const bool thirds = std::uniform_int_distribution<int>(0, 1)(rng) == 0;
-            for (int bar = 0; bar < bars; ++bar) {
-                const int offset = bar == bars - 1 ? 0 :
-                    (thirds ? QVector<int>{0, 4, 8, 0}.at(bar % 4)
-                            : QVector<int>{1, 6, 11, 4}.at(bar % 4));
-                add(barBeat(bar), key + offset,
-                    bar == bars - 1 ? QStringLiteral("maj9") : QStringLiteral("alt"),
-                    key + offset, bar == bars - 1 ? ScaleKind::Major : ScaleKind::Altered,
-                    bar == bars - 1 ? HarmonicFunction::Tonic : HarmonicFunction::Dominant, 8);
-                if (bar != bars - 1 && beatsPerBar >= 2) {
-                    add(barBeat(bar) + beatsPerBar / 2, key + offset + 5, QStringLiteral("m9"),
-                        key + offset, ScaleKind::Dorian, HarmonicFunction::Predominant, 8);
-                }
+        const QVector<int> pattern = complexity == 1
+            ? QVector<int>{0, 3, 4, 0}
+            : QVector<int>{1, 4, 0, 5};
+        for (int bar = 0; bar < bars; ++bar) {
+            const int degree = bar == finalBar ? 0 : pattern.at(bar % pattern.size());
+            QString chord;
+            if (complexity <= 1) {
+                chord = diatonicChord(key, degree, false, false, flats);
+            } else if (complexity == 2) {
+                chord = diatonicChord(key, degree, false, true, flats);
+            } else {
+                const int root = diatonicPitch(key, degree, false);
+                const QString suffix =
+                    degree == 1 ? QStringLiteral("m9") :
+                    degree == 4 ? (complexity >= 6 &&
+                        character == QStringLiteral("Tense")
+                            ? QStringLiteral("alt") : QStringLiteral("13")) :
+                    degree == 0 ? QStringLiteral("maj9") : QStringLiteral("m7");
+                chord = chordSymbol(root, suffix, flats);
             }
-        } else {
-            const QVector<int> pattern = complexity == 1
-                ? QVector<int>{0, 3, 4, 0}
-                : QVector<int>{1, 4, 0, 5};
-            for (int bar = 0; bar < bars; ++bar) {
-                const int degree = bar == bars - 1 ? 0 : pattern.at(bar % pattern.size());
-                addDegree(barBeat(bar), degree, complexity >= 3,
-                    degree == 4 ? HarmonicFunction::Dominant :
-                    degree == 0 || degree == 5 ? HarmonicFunction::Tonic : HarmonicFunction::Predominant,
-                    qMin(complexity, 4));
+            setHarmonicEvent(plan, barBeat(bar), chord, key, ScaleKind::Major,
+                degree == 4 ? HarmonicFunction::Dominant :
+                degree == 0 || degree == 5 ? HarmonicFunction::Tonic :
+                HarmonicFunction::Predominant,
+                qMin(complexity, 5));
+        }
+        if (complexity == 4 && bars >= 4) {
+            const int setupBar = qMax(0, finalBar - 1);
+            add(barBeat(setupBar), key + 2, QStringLiteral("m7"),
+                key, ScaleKind::Dorian, HarmonicFunction::Predominant, 4);
+            add(barBeat(setupBar) + halfBar, key + 7, QStringLiteral("9"),
+                key, ScaleKind::Mixolydian, HarmonicFunction::Dominant, 4);
+            add(barBeat(finalBar), key, QStringLiteral("maj7"),
+                key, ScaleKind::Major, HarmonicFunction::Tonic, 3);
+        }
+        if (complexity == 5 && bars >= 4) {
+            const int targetBar = bars >= 8 ? 4 : 2;
+            add(barBeat(targetBar - 1), key + 4, QStringLiteral("m7b5"),
+                key + 2, ScaleKind::Locrian, HarmonicFunction::Predominant, 5);
+            add(barBeat(targetBar - 1) + halfBar, key + 9, QStringLiteral("7b9"),
+                key + 2, ScaleKind::Altered, HarmonicFunction::Dominant, 6);
+            add(barBeat(targetBar), key + 2, QStringLiteral("m9"),
+                key, ScaleKind::Dorian, HarmonicFunction::Predominant, 4);
+        }
+        if (complexity == 6 && bars >= 4) {
+            add(barBeat(finalBar), key + 1, QStringLiteral("9"),
+                key, ScaleKind::Altered, HarmonicFunction::Dominant, 6);
+            add(barBeat(finalBar) + halfBar, key, QStringLiteral("maj9"),
+                key, ScaleKind::Major, HarmonicFunction::Tonic, 3);
+        }
+        if (complexity == 7 && bars >= 4) {
+            const int setupBar = qMax(0, finalBar - 1);
+            add(barBeat(setupBar), key + 5, QStringLiteral("m9"),
+                key, ScaleKind::Dorian, HarmonicFunction::Predominant, 6);
+            add(barBeat(setupBar) + halfBar, key + 10, QStringLiteral("13"),
+                key, ScaleKind::Mixolydian, HarmonicFunction::Dominant, 7);
+            add(barBeat(finalBar), key, QStringLiteral("maj9"),
+                key, ScaleKind::Major, HarmonicFunction::Tonic, 4);
+        }
+        if (complexity >= 8 && bars >= 8) {
+            const int excursion = qBound(1, bars / 2 - 1, finalBar - 2);
+            add(barBeat(excursion), key + 5, QStringLiteral("m9"),
+                key + 3, ScaleKind::Dorian, HarmonicFunction::Predominant, 7);
+            add(barBeat(excursion) + halfBar, key + 10,
+                character == QStringLiteral("Tense")
+                    ? QStringLiteral("alt") : QStringLiteral("13"),
+                key + 3, ScaleKind::Altered, HarmonicFunction::Dominant, 8);
+            add(barBeat(excursion + 1), key + 3, QStringLiteral("maj9"),
+                key + 3, ScaleKind::Major, HarmonicFunction::Tonic, 6);
+            add(barBeat(excursion + 2), key + 2, QStringLiteral("m9"),
+                key, ScaleKind::Dorian, HarmonicFunction::Predominant, 6);
+            add(barBeat(excursion + 2) + halfBar, key + 7, QStringLiteral("alt"),
+                key, ScaleKind::Altered, HarmonicFunction::Dominant, 8);
+            if (excursion + 3 < bars) {
+                add(barBeat(excursion + 3), key, QStringLiteral("maj9"),
+                    key, ScaleKind::Major, HarmonicFunction::Tonic, 4);
             }
-            if (complexity >= 4 && bars >= 4) {
-                add(barBeat(bars - 2), key + 10, QStringLiteral("9"),
-                    key, ScaleKind::Mixolydian, HarmonicFunction::Dominant, 4);
-            }
-            if (complexity >= 5 && bars >= 4 && beatsPerBar >= 2) {
-                add(barBeat(1), key + 4, QStringLiteral("m7b5"),
-                    key + 2, ScaleKind::Locrian, HarmonicFunction::Predominant, 5);
-                add(barBeat(1) + beatsPerBar / 2, key + 9, QStringLiteral("7b9"),
-                    key + 2, ScaleKind::Altered, HarmonicFunction::Dominant, 5);
-            }
-            if (complexity >= 6 && bars >= 8) {
-                add(barBeat(bars / 2), key + 7, QStringLiteral("maj9"),
-                    key + 7, ScaleKind::Major, HarmonicFunction::Tonic, 6);
-                add(barBeat(bars / 2 + 1), key + 2, QStringLiteral("13"),
-                    key + 7, ScaleKind::Mixolydian, HarmonicFunction::Dominant, 6);
-            }
-            if (complexity == 7 && bars >= 4) {
-                add(barBeat(bars - 1) - 1, key + 1, QStringLiteral("7#9"),
-                    key, ScaleKind::Altered, HarmonicFunction::Dominant, 7);
-            }
+        } else if (complexity >= 8) {
+            add(barBeat(1), key + 4, QStringLiteral("7#9"),
+                key + 9, ScaleKind::Altered, HarmonicFunction::Dominant, 8);
+            add(barBeat(2), key + 9, QStringLiteral("m9"),
+                key, ScaleKind::Dorian, HarmonicFunction::Tonic, 6);
+            add(barBeat(finalBar), key + 1, QStringLiteral("9"),
+                key, ScaleKind::Altered, HarmonicFunction::Dominant, 8);
+            add(barBeat(finalBar) + halfBar, key, QStringLiteral("maj9"),
+                key, ScaleKind::Major, HarmonicFunction::Tonic, 4);
         }
     } else {
-        const int eventLength = complexity <= 2 ? beatsPerBar :
-            (complexity <= 5 ? qMax(1, beatsPerBar / 2) : qMax(1, beatsPerBar / 4));
-        QVector<int> riff;
-        if (complexity <= 1) riff = {0, 5, 7, 0};
-        else if (complexity <= 3) riff = {0, 1, 6, 0};
-        else if (complexity <= 5) riff = {0, 3, 1, 6};
-        else if (complexity == 6) riff = {0, 5, 8, 7};
-        else if (complexity == 7) riff = {0, 4, 8, 1};
-        else riff = std::uniform_int_distribution<int>(0, 1)(rng) == 0
-            ? QVector<int>{0, 4, 8, 6}
-            : QVector<int>{0, 2, 4, 6, 8, 10};
+        const QVector<int> mode = scaleIntervals(homeScale);
+        const int fourth = mode.value(qMin(3, mode.size() - 1), 5);
+        const int fifth = mode.value(qMin(4, mode.size() - 1), 7);
+        const QVector<int> riff = complexity <= 1
+            ? QVector<int>{0, fourth, fifth, 0}
+            : complexity <= 3
+                ? QVector<int>{0, mode.value(1, 1), fifth, mode.value(2, 3)}
+                : QVector<int>{0, mode.value(2, 3), mode.value(1, 1),
+                    mode.value(qMin(5, mode.size() - 1), 8)};
+        const int eventLength = complexity <= 2
+            ? beatsPerBar : complexity <= 5 ? halfBar : 1;
+        const bool minorMode =
+            homeScale == ScaleKind::NaturalMinor || homeScale == ScaleKind::Dorian ||
+            homeScale == ScaleKind::Phrygian || homeScale == ScaleKind::Locrian;
         int event = 0;
-        for (int beat = 0; beat < bars * beatsPerBar; beat += eventLength, ++event) {
-            const int offset = beat + eventLength >= bars * beatsPerBar
+        for (int beat = 0; beat < totalBeats; beat += eventLength, ++event) {
+            const bool phraseEnd = (beat + eventLength) % (beatsPerBar * 4) == 0;
+            const int offset = beat + eventLength >= totalBeats || phraseEnd
                 ? 0 : riff.at(event % riff.size());
-            QString suffix = complexity <= 2 ? QStringLiteral("5") :
-                complexity == 3 ? (event % 3 == 0 ? QStringLiteral("sus2") : QStringLiteral("5")) :
-                complexity <= 5 ? (event % 4 == 1 ? QStringLiteral("madd9") : QStringLiteral("5")) :
-                complexity == 6 ? QStringLiteral("m9") :
-                complexity == 7 ? QStringLiteral("7#9") : QStringLiteral("#11");
-            ScaleKind eventScale = complexity == 8
-                ? (riff.size() == 6 ? ScaleKind::WholeTone : ScaleKind::Diminished)
-                : homeScale;
-            add(beat, key + offset, suffix, complexity >= 6 ? key + offset : key,
-                eventScale, offset == 0 ? HarmonicFunction::Pedal : HarmonicFunction::Colour,
+            QString suffix = QStringLiteral("5");
+            if (complexity >= 3 && event % 4 == 1) suffix = QStringLiteral("sus2");
+            if (complexity >= 4 && offset == 0 && event % 4 == 0) {
+                suffix = minorMode ? QStringLiteral("madd9") : QStringLiteral("add9");
+            }
+            if (complexity >= 6 && offset == 0 && event % 8 == 0) {
+                suffix = minorMode ? QStringLiteral("m9") : QStringLiteral("maj9");
+            }
+            if (complexity >= 7 && offset == fifth && event % 8 == 4) {
+                suffix = QStringLiteral("7#9");
+            }
+            add(beat, key + offset, suffix, key, homeScale,
+                offset == 0 ? HarmonicFunction::Pedal : HarmonicFunction::Colour,
                 complexity);
+        }
+        if (complexity >= 7 && totalBeats >= 4) {
+            add(totalBeats - 2, key + 1, QStringLiteral("5"),
+                key, homeScale, HarmonicFunction::Passing, 7);
+        }
+        if (complexity >= 8 && totalBeats >= 4) {
+            add(totalBeats - 3, key + 6, QStringLiteral("7#9"),
+                key, ScaleKind::Diminished, HarmonicFunction::Colour, 8);
+        }
+        if (complexity >= 6) {
+            add(totalBeats - 1, key,
+                minorMode ? QStringLiteral("m9") : QStringLiteral("maj9"),
+                key, homeScale, HarmonicFunction::Pedal, 3);
         }
     }
 
@@ -497,12 +660,86 @@ void generateMelody(
     int style,
     const QString& character,
     int complexity,
+    int beatsPerBar,
     bool flats,
     Rng& rng)
 {
     ParsedChord activeChord;
     int activeEvent = -1;
     int previousMidi = -1;
+    const int safeBeatsPerBar = qMax(1, beatsPerBar);
+
+    auto pitchClasses = [](const ParsedChord& chord) {
+        QVector<int> values;
+        for (const int interval : chord.intervals) {
+            const int pitch = ((chord.root + interval) % 12 + 12) % 12;
+            if (!values.contains(pitch)) values.push_back(pitch);
+        }
+        return values;
+    };
+    auto circularDistance = [](int left, int right) {
+        const int distance = std::abs(left - right) % 12;
+        return qMin(distance, 12 - distance);
+    };
+    auto nearestCandidate = [&](const QVector<int>& candidates, int preferredPitch) {
+        int best = ((preferredPitch % 12) + 12) % 12;
+        int bestScore = std::numeric_limits<int>::max();
+        for (const int candidateValue : candidates) {
+            const int candidate = ((candidateValue % 12) + 12) % 12;
+            const int midi = nearestMidiForPitchClass(candidate, previousMidi);
+            const int leap = previousMidi >= 0 ? std::abs(midi - previousMidi) : 0;
+            const int score = circularDistance(candidate, preferredPitch) * 12 + leap;
+            if (score < bestScore) {
+                best = candidate;
+                bestScore = score;
+            }
+        }
+        return best;
+    };
+    auto guideTones = [&](const ParsedChord& chord, HarmonicFunction function) {
+        QVector<int> guides;
+        auto appendInterval = [&](int desired) {
+            for (const int interval : chord.intervals) {
+                if (((interval % 12) + 12) % 12 == desired) {
+                    const int pitch = (chord.root + interval) % 12;
+                    if (!guides.contains(pitch)) guides.push_back(pitch);
+                }
+            }
+        };
+        if (function == HarmonicFunction::Dominant) {
+            appendInterval(4);
+            appendInterval(10);
+        } else if (function == HarmonicFunction::Predominant) {
+            appendInterval(3);
+            appendInterval(4);
+            appendInterval(10);
+        } else if (function == HarmonicFunction::Tonic ||
+                   function == HarmonicFunction::Pedal) {
+            appendInterval(0);
+            appendInterval(3);
+            appendInterval(4);
+        } else {
+            appendInterval(3);
+            appendInterval(4);
+            appendInterval(7);
+        }
+        if (guides.isEmpty()) guides = pitchClasses(chord);
+        return guides;
+    };
+
+    QVector<int> contour;
+    switch (static_cast<ChordStyle>(style)) {
+    case ChordStyle::FunctionalPop: contour = {0, 2, 4, 2}; break;
+    case ChordStyle::BluesForm: contour = {0, 2, 3, 4}; break;
+    case ChordStyle::ModalVamp: contour = {0, 1, 3, 2}; break;
+    case ChordStyle::JazzTurnaround: contour = {2, 4, 6, 4}; break;
+    case ChordStyle::ModernMetal: contour = {0, 1, 0, 2}; break;
+    }
+    if (contour.isEmpty()) contour = {0, 2, 4, 2};
+    if (std::uniform_int_distribution<int>(0, 1)(rng) == 1) {
+        std::reverse(contour.begin() + 1, contour.end());
+    }
+
     for (int beat = 0; beat < section.beats; ++beat) {
         while (activeEvent + 1 < plan.events.size() &&
                plan.events.at(activeEvent + 1).beat <= beat) {
@@ -521,71 +758,95 @@ void generateMelody(
         }
 
         int pitchClass = activeChord.root;
-        if (chordChange) {
-            QVector<int> guideIntervals;
-            if (complexity <= 2) {
-                for (int interval : activeChord.intervals) {
-                    const int simple = ((interval % 12) + 12) % 12;
-                    if (simple == 0 || simple == 3 || simple == 4 || simple == 7) {
-                        guideIntervals.push_back(interval);
-                    }
-                }
-            } else if (activeChord.intervals.size() >= 4) {
-                guideIntervals = {activeChord.intervals.at(1), activeChord.intervals.at(3)};
-            } else if (activeChord.intervals.size() >= 3) {
-                guideIntervals = {activeChord.intervals.at(1), activeChord.intervals.at(2)};
-            }
-            if (guideIntervals.isEmpty()) guideIntervals = activeChord.intervals;
-            int bestMidi = -1;
-            for (int interval : guideIntervals) {
-                const int candidatePitch = (activeChord.root + interval) % 12;
-                const int candidateMidi = nearestMidiForPitchClass(candidatePitch, previousMidi);
-                if (bestMidi < 0 || previousMidi < 0 ||
-                    std::abs(candidateMidi - previousMidi) < std::abs(bestMidi - previousMidi)) {
-                    pitchClass = candidatePitch;
-                    bestMidi = candidateMidi;
-                }
-            }
-        } else {
-            const int restChance = character.contains(QStringLiteral("Sparse"), Qt::CaseInsensitive) ||
-                    character.contains(QStringLiteral("Spacious"), Qt::CaseInsensitive)
-                ? 20 : (style == static_cast<int>(ChordStyle::JazzTurnaround) ? 5 : 9);
-            const int roll = std::uniform_int_distribution<int>(0, 99)(rng);
-            if (roll < restChance) {
+        const int bar = beat / safeBeatsPerBar;
+        const int withinBar = beat % safeBeatsPerBar;
+        const bool sparse = character.contains(QStringLiteral("Sparse"), Qt::CaseInsensitive) ||
+            character.contains(QStringLiteral("Spacious"), Qt::CaseInsensitive) ||
+            character.contains(QStringLiteral("Laid Back"), Qt::CaseInsensitive);
+        const bool phraseBoundary = withinBar == safeBeatsPerBar - 1 &&
+            ((bar + 1) % 4 == 0 || beat == section.beats - 1);
+        if (!chordChange) {
+            if ((sparse && withinBar == safeBeatsPerBar - 1 && bar % 2 == 1) ||
+                (phraseBoundary && complexity >= 3 && bar != section.generatedBars - 1)) {
                 section.targets[beat] = QStringLiteral("-");
                 continue;
             }
+            if ((complexity <= 2 && withinBar % 2 == 1) ||
+                (complexity <= 4 && withinBar == safeBeatsPerBar - 1 && bar % 2 == 0)) {
+                section.targets[beat] = QString{};
+                continue;
+            }
+        }
+
+        if (chordChange) {
+            const QVector<int> guides = guideTones(activeChord, event.function);
+            const int preferred = previousMidi >= 0
+                ? previousMidi % 12
+                : event.function == HarmonicFunction::Dominant
+                    ? activeChord.root + 4
+                    : activeChord.root;
+            pitchClass = nearestCandidate(guides, preferred);
+        } else {
             const HarmonicEvent* nextEvent =
                 activeEvent + 1 < plan.events.size() ? &plan.events.at(activeEvent + 1) : nullptr;
-            if (complexity >= 5 && nextEvent && nextEvent->beat == beat + 1) {
+            if (nextEvent && nextEvent->beat == beat + 1) {
                 const ParsedChord nextChord = parseChord(nextEvent->chord);
-                const int targetInterval = nextChord.intervals.size() >= 4
-                    ? nextChord.intervals.at(3)
-                    : nextChord.intervals.value(1, 0);
-                const int target = (nextChord.root + targetInterval) % 12;
-                pitchClass = (target +
-                    (std::uniform_int_distribution<int>(0, 1)(rng) ? 1 : 11)) % 12;
-            } else if (roll < restChance + 14 && previousMidi >= 0) {
-                pitchClass = previousMidi % 12;
-            } else {
-                QVector<int> chordVocabulary = activeChord.intervals;
-                if (complexity <= 2) {
-                    chordVocabulary.erase(
-                        std::remove_if(chordVocabulary.begin(), chordVocabulary.end(),
-                            [](int interval) {
-                                const int value = ((interval % 12) + 12) % 12;
-                                return value != 0 && value != 3 && value != 4 && value != 7;
-                            }),
-                        chordVocabulary.end());
-                    if (chordVocabulary.isEmpty()) chordVocabulary = activeChord.intervals;
+                const QVector<int> targets = guideTones(nextChord, nextEvent->function);
+                const int target = nearestCandidate(
+                    targets,
+                    previousMidi >= 0 ? previousMidi % 12 : nextChord.root);
+                const QVector<int> currentTones = pitchClasses(activeChord);
+                int resolvingTone = -1;
+                int resolvingScore = std::numeric_limits<int>::max();
+                for (const int current : currentTones) {
+                    const int distance = circularDistance(current, target);
+                    const int midi = nearestMidiForPitchClass(current, previousMidi);
+                    const int leap = previousMidi >= 0 ? std::abs(midi - previousMidi) : 0;
+                    const int score = distance * 12 + leap;
+                    if (score < resolvingScore) {
+                        resolvingTone = current;
+                        resolvingScore = score;
+                    }
                 }
-                const int chordToneChance = complexity <= 2 ? 84 :
-                    complexity <= 4 ? 70 : complexity <= 6 ? 64 : 58;
-                if (std::uniform_int_distribution<int>(0, 99)(rng) < chordToneChance) {
-                    pitchClass = (activeChord.root + choose(chordVocabulary, rng)) % 12;
+                if (event.function == HarmonicFunction::Dominant ||
+                    event.function == HarmonicFunction::Passing ||
+                    complexity <= 4) {
+                    pitchClass = resolvingTone >= 0 ? resolvingTone : target;
                 } else {
                     const QVector<int> scale = scaleIntervals(event.scale);
-                    pitchClass = (event.localTonic + choose(scale, rng)) % 12;
+                    QVector<int> approaches;
+                    for (const int interval : scale) {
+                        const int candidate = (event.localTonic + interval) % 12;
+                        if (circularDistance(candidate, target) <= 2) {
+                            approaches.push_back(candidate);
+                        }
+                    }
+                    if (complexity >= 7) {
+                        approaches.push_back((target + 1) % 12);
+                        approaches.push_back((target + 11) % 12);
+                    }
+                    pitchClass = approaches.isEmpty()
+                        ? target : nearestCandidate(approaches, target);
+                }
+            } else {
+                const QVector<int> scale = scaleIntervals(event.scale);
+                int contourPosition = withinBar % contour.size();
+                if ((bar / 4) % 2 == 1 && complexity >= 3) {
+                    contourPosition = (contourPosition + 1) % contour.size();
+                }
+                const int scaleIndex =
+                    ((contour.at(contourPosition) % scale.size()) + scale.size()) % scale.size();
+                const int motifPitch = (event.localTonic + scale.at(scaleIndex)) % 12;
+                const bool strongBeat = withinBar == 0 ||
+                    (safeBeatsPerBar >= 4 && withinBar == safeBeatsPerBar / 2);
+                if (strongBeat || complexity <= 2) {
+                    pitchClass = nearestCandidate(pitchClasses(activeChord), motifPitch);
+                } else {
+                    pitchClass = motifPitch;
+                    if (complexity <= 4 &&
+                        circularDistance(pitchClass, activeChord.root) > 4) {
+                        pitchClass = nearestCandidate(pitchClasses(activeChord), motifPitch);
+                    }
                 }
             }
         }
@@ -632,9 +893,8 @@ SongSection chordIdea(ChordIdeaRequest request, Rng& rng)
 
     SongSection section;
     section.label = QStringLiteral("Generated");
-    section.name = QStringLiteral("Generated — %1 / %2 / %3 / H%4 R%5 / %6 bars")
-        .arg(noteName(key, flats), styleName, character)
-        .arg(harmonicComplexity).arg(rhythmicComplexity).arg(bars);
+    section.name = QStringLiteral("Key - %1 · %2 · %3")
+        .arg(noteName(key, flats), styleName, character);
     section.beats = bars * beatsPerBar;
     section.generatedKind = QStringLiteral("chord");
     section.generatedKey = noteName(key, flats);
@@ -652,7 +912,15 @@ SongSection chordIdea(ChordIdeaRequest request, Rng& rng)
     const HarmonicPlan plan = buildHarmonicPlan(
         key, style, character, bars, beatsPerBar, harmonicComplexity, minor, flats, rng);
     applyHarmonicPlan(section, plan);
-    generateMelody(section, plan, style, character, harmonicComplexity, flats, rng);
+    generateMelody(
+        section,
+        plan,
+        style,
+        character,
+        harmonicComplexity,
+        beatsPerBar,
+        flats,
+        rng);
     return section;
 }
 
@@ -674,8 +942,7 @@ SongSection beatIdea(BeatIdeaRequest request, Rng& rng, const SongSection* chord
     const int complexity = std::clamp(request.rhythmicComplexity, 1, 8);
     SongSection section;
     section.label = QStringLiteral("Generated");
-    section.name = QStringLiteral("Generated — %1 / %2 / R%3 / %4 bars")
-        .arg(styleName, character).arg(complexity).arg(bars);
+    section.name = QStringLiteral("%1 · %2").arg(styleName, character);
     section.beats = bars * beatsPerBar;
     section.generatedKind = QStringLiteral("beat");
     section.generatedStyle = styleName;
@@ -857,7 +1124,6 @@ GeneratedPracticeIdea coupledIdea(ChordIdeaRequest request, std::uint32_t seed)
     }
     result.bpm = std::uniform_int_distribution<int>(
         minimumBpm / 2, maximumBpm / 2)(tempoRng) * 2;
-    result.chordSection.name += QStringLiteral(" / %1 BPM").arg(result.bpm);
     result.beatSection.name += QStringLiteral(" / %1 BPM").arg(result.bpm);
     const int beatsPerBar = std::clamp(request.beatsPerBar, 1, 16);
     const int steps = beatsPerBar * result.clickDivision;

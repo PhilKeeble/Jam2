@@ -178,7 +178,7 @@ QJsonObject LooperProject::toJson(bool syncCompatibleOnly) const
         }
         banks.append(QJsonObject{{"id", bank.id}, {"lanes", lanes}});
     }
-    return QJsonObject{{"format", QStringLiteral("jam2.looper.v1")}, {"active_bank", activeBankIndex_}, {"grid_lock", gridLockEnabled_},
+    return QJsonObject{{"active_bank", activeBankIndex_}, {"grid_lock", gridLockEnabled_},
         {"banks", banks}};
 }
 

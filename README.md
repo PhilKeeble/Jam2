@@ -1,4 +1,4 @@
-![Jam2](logo.png)
+![Jam2gether](assets/banner.png)
 
 # Jam2
 

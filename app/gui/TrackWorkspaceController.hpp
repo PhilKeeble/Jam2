@@ -88,9 +88,7 @@ public:
     SharedTrackController trackController;
     LooperProject looperProject;
     TrackRecordingWorkflow recordingWorkflow;
-    BeatGridModel chordModel;
-    BeatGridModel beatModel;
-    BeatGridModel lyricModel;
+    BeatGridModel songModel;
     ProjectPersistenceCoordinator persistence;
     PreparedMixResult preparedMix;
     QThreadPool fileWorkers;

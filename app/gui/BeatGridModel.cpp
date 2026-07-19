@@ -17,24 +17,6 @@ constexpr int kMaxBeatsPerSection = jam2::application::limits::kMaximumBeatsPerS
 constexpr int kMaxSections = jam2::application::limits::kMaximumSongSections;
 constexpr int kMaxCellCharacters = jam2::application::limits::kMaximumCellCharacters;
 constexpr int kMaxTitleCharacters = jam2::application::limits::kMaximumTitleCharacters;
-constexpr int kMaxLyricsCharacters = jam2::application::limits::kMaximumLyricsCharacters;
-
-QStringList legacyBeatLaneNames()
-{
-    return QStringList{
-        QStringLiteral("Kick"),
-        QStringLiteral("Snare"),
-        QStringLiteral("Closed HH"),
-        QStringLiteral("Open HH"),
-        QStringLiteral("Crash"),
-        QStringLiteral("Splash"),
-        QStringLiteral("Cymbal"),
-        QStringLiteral("Tom"),
-        QStringLiteral("Special"),
-        QStringLiteral("Guitar"),
-        QStringLiteral("Bass"),
-    };
-}
 
 bool validTextArray(const QJsonArray& values, int maximumCount)
 {
@@ -165,17 +147,6 @@ void BeatGridModel::setBeatHit(int sectionIndex, int beat, int lane, const QStri
     ++revision_;
 }
 
-QString BeatGridModel::lyricsText() const
-{
-    return lyricsText_;
-}
-
-void BeatGridModel::setLyricsText(const QString& text)
-{
-    lyricsText_ = text.left(kMaxLyricsCharacters);
-    ++revision_;
-}
-
 void BeatGridModel::resizeSection(int sectionIndex, int beats)
 {
     if (sectionIndex < 0 || sectionIndex >= sections_.size()) {
@@ -289,7 +260,6 @@ int BeatGridModel::replaceGeneratedSection(const QString& kind, SongSection sect
 void BeatGridModel::reset()
 {
     title_ = QStringLiteral("Untitled Jam");
-    lyricsText_.clear();
     sections_.clear();
     SongSection section;
     normalize(section);
@@ -348,36 +318,22 @@ QJsonObject BeatGridModel::toJson() const
         });
     }
     return QJsonObject{
-        {QStringLiteral("format"), QStringLiteral("jam2.song.v3")},
         {QStringLiteral("title"), title_},
-        {QStringLiteral("lyrics_text"), lyricsText_},
         {QStringLiteral("sections"), sections},
     };
 }
 
 bool BeatGridModel::loadJson(const QJsonObject& object)
 {
-    const QString format = object.value(QStringLiteral("format")).toString();
-    if (format != QStringLiteral("jam2.song.v1") &&
-        format != QStringLiteral("jam2.song.v2") &&
-        format != QStringLiteral("jam2.song.v3")) {
-        return false;
-    }
     const QStringList currentBeatLanes = beatLaneNames();
-    const QStringList serializedBeatLanes =
-        format == QStringLiteral("jam2.song.v3")
-        ? currentBeatLanes
-        : legacyBeatLaneNames();
     if (!object.value(QStringLiteral("sections")).isArray() ||
-        (!object.value(QStringLiteral("title")).isUndefined() && !object.value(QStringLiteral("title")).isString()) ||
-        (!object.value(QStringLiteral("lyrics_text")).isUndefined() && !object.value(QStringLiteral("lyrics_text")).isString())) {
+        (!object.value(QStringLiteral("title")).isUndefined() && !object.value(QStringLiteral("title")).isString())) {
         return false;
     }
     QVector<SongSection> loaded;
     const QJsonArray sections = object.value(QStringLiteral("sections")).toArray();
     if (sections.isEmpty() || sections.size() > kMaxSections ||
-        object.value(QStringLiteral("title")).toString().size() > kMaxTitleCharacters ||
-        object.value(QStringLiteral("lyrics_text")).toString().size() > kMaxLyricsCharacters) {
+        object.value(QStringLiteral("title")).toString().size() > kMaxTitleCharacters) {
         return false;
     }
     for (const QJsonValue& value : sections) {
@@ -485,18 +441,14 @@ bool BeatGridModel::loadJson(const QJsonObject& object)
             }
             section.beatPatterns[i].division = normalizedDivision(pattern.value(QStringLiteral("division")).toInt(kDefaultBeatDivision));
             const QJsonArray lanes = pattern.value(QStringLiteral("lanes")).toArray();
-            if (!validTextArray(lanes, serializedBeatLanes.size())) {
+            if (!validTextArray(lanes, currentBeatLanes.size())) {
                 return false;
             }
             for (int serializedLane = 0;
-                serializedLane < serializedBeatLanes.size() && serializedLane < lanes.size();
+                serializedLane < currentBeatLanes.size() && serializedLane < lanes.size();
                  ++serializedLane) {
-                const int currentLane =
-                    currentBeatLanes.indexOf(serializedBeatLanes.at(serializedLane));
-                if (currentLane >= 0) {
-                    section.beatPatterns[i].lanes[currentLane] =
-                        lanes[serializedLane].toString();
-                }
+                section.beatPatterns[i].lanes[serializedLane] =
+                    lanes[serializedLane].toString();
             }
         }
         loaded.push_back(section);
@@ -505,18 +457,6 @@ bool BeatGridModel::loadJson(const QJsonObject& object)
         return false;
     }
     title_ = object.value(QStringLiteral("title")).toString(QStringLiteral("Untitled Jam"));
-    lyricsText_ = object.value(QStringLiteral("lyrics_text")).toString();
-    if (lyricsText_.isEmpty()) {
-        QStringList legacyLyrics;
-        for (const SongSection& section : loaded) {
-            for (const QString& value : section.lyrics) {
-                if (!value.trimmed().isEmpty()) {
-                    legacyLyrics << value;
-                }
-            }
-        }
-        lyricsText_ = legacyLyrics.join(QStringLiteral("\n"));
-    }
     sections_ = loaded;
     ++revision_;
     return true;

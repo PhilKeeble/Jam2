@@ -81,6 +81,7 @@ struct EngineConfig {
     int metronome_level_ppm = 1000000;
     int remote_level_ppm = 1000000;
     int send_level_ppm = 1000000;
+    int output_level_ppm = 1000000;
     bool local_monitor_enabled = false;
     int local_monitor_level_ppm = 250000;
     EngineMetronomeMode metronome_mode = EngineMetronomeMode::SharedGrid;
@@ -97,6 +98,7 @@ enum class EngineCommandType : std::uint8_t {
     SetMetronomeLevel,
     SetRemoteLevel,
     SetSendLevel,
+    SetOutputLevel,
     SetLocalMonitorEnabled,
     SetLocalMonitorLevel,
     SetPlaybackRatio,
@@ -233,6 +235,7 @@ struct EngineSnapshot {
     int metronome_level_ppm = 0;
     int remote_level_ppm = 0;
     int send_level_ppm = 0;
+    int output_level_ppm = 0;
     bool local_monitor_enabled = false;
     int local_monitor_level_ppm = 0;
     int playback_ratio_ppm = 1000000;
@@ -253,6 +256,7 @@ struct EngineSnapshot {
     int send_peak_ppm = 0;
     int monitor_peak_ppm = 0;
     int remote_peak_ppm = 0;
+    int prepared_track_peak_ppm = 0;
     int metronome_peak_ppm = 0;
     int output_peak_ppm = 0;
     std::uint64_t output_clipped_samples = 0;
@@ -285,6 +289,7 @@ struct EngineGuiPeakSnapshot {
     int input_peak_ppm = 0;
     int monitor_peak_ppm = 0;
     int remote_peak_ppm = 0;
+    int prepared_track_peak_ppm = 0;
     int metronome_peak_ppm = 0;
     int output_peak_ppm = 0;
 };

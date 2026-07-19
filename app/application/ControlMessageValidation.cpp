@@ -74,12 +74,7 @@ bool validateTextArray(
 
 bool validateBeatGrid(const QJsonObject& grid, QString& reason)
 {
-    const QString format = grid.value(QStringLiteral("format")).toString();
-    if ((format != QStringLiteral("jam2.song.v1") &&
-         format != QStringLiteral("jam2.song.v2") &&
-         format != QStringLiteral("jam2.song.v3")) ||
-        !isOptionalBoundedString(grid, QStringLiteral("title"), limits::kMaximumTitleCharacters) ||
-        !isOptionalBoundedString(grid, QStringLiteral("lyrics_text"), limits::kMaximumLyricsCharacters) ||
+    if (!isOptionalBoundedString(grid, QStringLiteral("title"), limits::kMaximumTitleCharacters) ||
         !grid.value(QStringLiteral("sections")).isArray()) {
         reason = QStringLiteral("song grid header is invalid");
         return false;
@@ -91,9 +86,7 @@ bool validateBeatGrid(const QJsonObject& grid, QString& reason)
         return false;
     }
     static const QList<int> allowedDivisions{1, 2, 3, 4, 6, 8};
-    const int maximumBeatLanes = format == QStringLiteral("jam2.song.v3")
-        ? limits::kMaximumBeatLanes
-        : limits::kMaximumLegacyBeatLanes;
+    const int maximumBeatLanes = limits::kMaximumBeatLanes;
     for (const QJsonValue& sectionValue : sections) {
         if (!sectionValue.isObject()) {
             reason = QStringLiteral("song grid section is not an object");
@@ -190,10 +183,8 @@ bool readJsonFrame(const QJsonValue& value, qint64 fallback, qint64& result)
 
 bool validateRemoteLooper(const QJsonObject& looper, QString& reason)
 {
-    const QJsonValue format = looper.value(QStringLiteral("format"));
     const QJsonValue activeBank = looper.value(QStringLiteral("active_bank"));
-    if ((!format.isUndefined() && format.toString() != QStringLiteral("jam2.looper.v1")) ||
-        (!activeBank.isUndefined() &&
+    if ((!activeBank.isUndefined() &&
          !isBoundedInteger(activeBank, 0, limits::kLooperBankCount - 1)) ||
         !isOptionalBoolean(looper, QStringLiteral("grid_lock")) ||
         !looper.value(QStringLiteral("banks")).isArray()) {
@@ -283,24 +274,6 @@ bool validateRemoteSong(const QJsonObject& song, QString& reason)
     if (!validateBeatGrid(song, reason)) {
         return false;
     }
-    const QJsonValue independentViews = song.value(QStringLiteral("independent_views"));
-    if (!independentViews.isUndefined() && !independentViews.isBool()) {
-        reason = QStringLiteral("song independent-view flag is invalid");
-        return false;
-    }
-    for (const QString& key : {QStringLiteral("beat_view"), QStringLiteral("lyric_view")}) {
-        const QJsonValue viewValue = song.value(key);
-        if (viewValue.isUndefined()) {
-            continue;
-        }
-        if (!viewValue.isObject()) {
-            reason = QStringLiteral("song independent grid is not an object");
-            return false;
-        }
-        if (!viewValue.toObject().isEmpty() && !validateBeatGrid(viewValue.toObject(), reason)) {
-            return false;
-        }
-    }
     const QJsonValue looperValue = song.value(QStringLiteral("looper"));
     if (looperValue.isUndefined()) {
         return true;
@@ -331,8 +304,7 @@ bool jam2::application::isGridControlMessageType(const QString& type) noexcept
         type == QStringLiteral("beat.set") ||
         type == QStringLiteral("beat.hit") ||
         type == QStringLiteral("beat.division") ||
-        type == QStringLiteral("grid.resize") ||
-        type == QStringLiteral("lyrics.set");
+        type == QStringLiteral("grid.resize");
 }
 
 bool jam2::application::isArrangementControlMessageType(const QString& type) noexcept
@@ -476,10 +448,6 @@ bool jam2::application::validateControlMessage(
             isBoundedInteger(message.value(QStringLiteral("beat")), 0, 511) &&
             QList<int>{1, 2, 3, 4, 6, 8}.contains(division)
             ? true : (reason = QStringLiteral("beat division is invalid"), false);
-    }
-    if (type == QStringLiteral("lyrics.set")) {
-        return isBoundedString(message.value(QStringLiteral("text")), 64 * 1024)
-            ? true : (reason = QStringLiteral("lyrics update is invalid"), false);
     }
     if (type == QStringLiteral("song.set")) {
         const QJsonValue songValue = message.value(QStringLiteral("song"));
