@@ -407,6 +407,46 @@ void PerformanceHomeWidget::advanceAnimation()
     update();
 }
 
+void PerformanceHomeWidget::paintNebulaFields(
+    QPainter& painter,
+    double seconds,
+    double participantComplexity)
+{
+    const QRectF viewport(rect());
+    const double overscanX = width() * 0.18;
+    const double overscanY = height() * 0.18;
+    const QRectF field = viewport.adjusted(
+        -overscanX, -overscanY, overscanX, overscanY);
+    const double motion = 0.30 + envelope_ * 0.70;
+    const QPointF primaryOffset(
+        std::sin(seconds * (0.19 + participantComplexity * 0.15)) *
+            width() * 0.035 * motion,
+        std::cos(seconds * (0.15 + participantComplexity * 0.12)) *
+            height() * 0.028 * motion);
+    const QPointF counterOffset(
+        std::cos(seconds * (0.13 + participantComplexity * 0.11)) *
+            width() * 0.045 * motion,
+        std::sin(seconds * (0.17 + participantComplexity * 0.13)) *
+            height() * 0.035 * motion);
+
+    painter.save();
+    painter.setClipRect(viewport);
+    painter.setOpacity(0.62 + envelope_ * 0.16);
+    painter.drawImage(field.translated(primaryOffset), nebulaCache_);
+
+    if (envelope_ > 0.015) {
+        painter.setOpacity(qMin(
+            0.22,
+            envelope_ * (0.10 + participantComplexity * 0.12)));
+        painter.drawImage(
+            field.adjusted(-overscanX * 0.22, -overscanY * 0.18,
+                           overscanX * 0.22, overscanY * 0.18)
+                .translated(counterOffset),
+            nebulaCache_);
+    }
+    painter.restore();
+}
+
 void PerformanceHomeWidget::paintHtmlStage()
 {
     QElapsedTimer paintClock;
@@ -430,31 +470,7 @@ void PerformanceHomeWidget::paintHtmlStage()
     const double seconds = static_cast<double>(animationClock_.elapsed()) / 1000.0;
     const double participantComplexity =
         qBound(0.0, static_cast<double>(peers_.size()) / 8.0, 1.0);
-    const double scale = 0.80 + std::pow(envelope_, 0.65) * 0.64;
-    const QSizeF scaled(width() * scale, height() * scale);
-    const double flowAmount =
-        envelope_ * (0.25 + participantComplexity * 0.75);
-    const QPointF flowOffset(
-        std::sin(seconds * (0.34 + participantComplexity * 0.32)) *
-            width() * 0.025 * flowAmount,
-        std::cos(seconds * (0.27 + participantComplexity * 0.24)) *
-            height() * 0.018 * flowAmount);
-    const QRectF nebulaRect(
-        (width() - scaled.width()) / 2.0 + flowOffset.x(),
-        (height() - scaled.height()) / 2.0 + flowOffset.y(),
-        scaled.width(),
-        scaled.height());
-    painter.setOpacity(0.68 + envelope_ * 0.30);
-    painter.drawImage(nebulaRect, nebulaCache_);
-    if (participantComplexity > 0.30 && envelope_ > 0.05) {
-        const QPointF secondaryOffset(
-            -flowOffset.x() * 1.7,
-            flowOffset.y() * 1.4);
-        painter.setOpacity(
-            qMin(0.14, (participantComplexity - 0.30) * envelope_ * 0.20));
-        painter.drawImage(nebulaRect.translated(secondaryOffset), nebulaCache_);
-    }
-    painter.setOpacity(1.0);
+    paintNebulaFields(painter, seconds, participantComplexity);
 
     if (novaStartMs_ >= 0) {
         const double age =
@@ -977,31 +993,7 @@ void PerformanceHomeWidget::paintEvent(QPaintEvent*)
     const double seconds = static_cast<double>(animationClock_.elapsed()) / 1000.0;
     const double participantComplexity =
         qBound(0.0, static_cast<double>(peers_.size()) / 8.0, 1.0);
-    const double scale = 0.80 + std::pow(envelope_, 0.65) * 0.64;
-    const QSizeF scaled(width() * scale, height() * scale);
-    const double flowAmount =
-        envelope_ * (0.25 + participantComplexity * 0.75);
-    const QPointF flowOffset(
-        std::sin(seconds * (0.34 + participantComplexity * 0.32)) *
-            width() * 0.025 * flowAmount,
-        std::cos(seconds * (0.27 + participantComplexity * 0.24)) *
-            height() * 0.018 * flowAmount);
-    const QRectF nebulaRect(
-        (width() - scaled.width()) / 2.0 + flowOffset.x(),
-        (height() - scaled.height()) / 2.0 + flowOffset.y(),
-        scaled.width(),
-        scaled.height());
-    painter.setOpacity(0.68 + envelope_ * 0.30);
-    painter.drawImage(nebulaRect, nebulaCache_);
-    if (participantComplexity > 0.30 && envelope_ > 0.05) {
-        const QPointF secondaryOffset(
-            -flowOffset.x() * 1.7,
-            flowOffset.y() * 1.4);
-        painter.setOpacity(
-            qMin(0.14, (participantComplexity - 0.30) * envelope_ * 0.20));
-        painter.drawImage(nebulaRect.translated(secondaryOffset), nebulaCache_);
-    }
-    painter.setOpacity(1.0);
+    paintNebulaFields(painter, seconds, participantComplexity);
 
     if (novaStartMs_ >= 0) {
         const double age =

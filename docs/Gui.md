@@ -166,13 +166,24 @@ threshold, hold, pre-roll, tail, and trim controls; it has no Perform Input
 count-in, metronome, latency, or ASIO controls. Arm-dialog changes apply to that
 take only and do not overwrite the saved defaults.
 
-Input and loopback recordings use an active-channel mono fold-down. For each
-capture block, selected channels more than 30 dB below the loudest selected
-channel are treated as inactive, and the remaining channels are averaged. A
-mono source on either channel therefore retains its level when channels 1-2
-are selected, while genuinely active stereo material retains averaging
-headroom. Input mix mode is recorded in diagnostics, and loopback completion
-logs the endpoint format, channel mask, active-channel range, and recorded peak.
+Perform Input uses the engine's smoothed weighted mono fold-down. Each selected
+channel learns its own peak-noise floor only while closed, so microphone or
+interface noise is not promoted when another channel's note decays. Activity
+has hysteresis and each channel weight is ramped per sample with a 4 ms attack
+and 45 ms release, so a quiet or noisy selected input cannot switch the
+averaging divisor at callback boundaries. A single sounding channel retains
+unity gain even when four inputs are selected; multiple sounding channels form
+a bounded weighted average. CSV diagnostics record the effective channel
+weight, normalization gain, transition count, maximum block gain change, and
+the first four channel weights and learned noise floors.
+
+All popup dialogs use a shared compact-window policy. Custom dialogs, messages,
+progress windows, and the non-native Open, Save, and folder pickers are capped
+below the available desktop size, restored if the window manager tries to
+maximize them, and centred over the Jam2 window.
+
+System Loopback recording uses its own block active-channel fold-down and logs
+the endpoint format, channel mask, active-channel range, and recorded peak.
 
 Recordings always target the active jam contract rate, or the running local
 engine rate outside a jam. Perform Input writes at that engine rate. System

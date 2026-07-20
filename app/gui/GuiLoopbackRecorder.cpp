@@ -587,7 +587,7 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
                 }
             }
             const std::size_t activeChannels =
-                jam2::audio::mono_downmix_active_channels(
+                jam2::audio::block_downmix_active_channels(
                     std::span<const double>(
                         channelPeaks.data(),
                         channelPeaks.size()));
@@ -604,7 +604,7 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
                     activeChannels > 0) {
                     const BYTE* frameData = data + static_cast<std::size_t>(frame) * mixFormat->nBlockAlign;
                     for (WORD channel = 0; channel < channels; ++channel) {
-                        if (!jam2::audio::mono_downmix_channel_active(
+                        if (!jam2::audio::block_downmix_channel_active(
                                 channelPeaks[channel],
                                 loudestPeak)) {
                             continue;

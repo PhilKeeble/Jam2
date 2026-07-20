@@ -83,6 +83,10 @@ private:
     int peerVisibleCapacity() const;
     void rebuildBackground();
     void advanceAnimation();
+    void paintNebulaFields(
+        QPainter& painter,
+        double seconds,
+        double participantComplexity);
     void paintHtmlStage();
     void paintBeatPreview(
         QPainter& painter,

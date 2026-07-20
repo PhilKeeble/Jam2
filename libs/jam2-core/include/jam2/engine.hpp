@@ -222,6 +222,16 @@ struct EnginePitchSnapshot {
     audio::RingStats ring;
 };
 
+struct EngineInputDownmixSnapshot {
+    int selected_channels = 1;
+    int effective_weight_ppm = 1000000;
+    int normalization_gain_ppm = 1000000;
+    std::uint64_t transition_count = 0;
+    int max_gain_change_per_block_ppm = 0;
+    std::array<int, 4> channel_weight_ppm{1000000, 0, 0, 0};
+    std::array<int, 4> channel_noise_floor_ppm{251, 251, 251, 251};
+};
+
 struct EngineSnapshot {
     EngineLifecycle lifecycle = EngineLifecycle::Stopped;
     EngineAudioBackend backend = EngineAudioBackend::Device;
@@ -282,6 +292,7 @@ struct EngineSnapshot {
     int metronome_peak_ppm = 0;
     int output_peak_ppm = 0;
     std::uint64_t output_clipped_samples = 0;
+    EngineInputDownmixSnapshot input_downmix;
     EnginePitchSnapshot pitch;
     std::uint64_t prepared_source_frame = 0;
     std::uint64_t prepared_source_scheduled_start_frame = 0;

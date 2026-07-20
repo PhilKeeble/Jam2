@@ -1,4 +1,5 @@
 #include "DebugAutomation.hpp"
+#include "GuiPresentation.hpp"
 #include "MainWindow.hpp"
 #include "SessionController.hpp"
 #include "CliEntrypoint.hpp"
@@ -112,7 +113,7 @@ void applyCustomTheme(QApplication& app)
             color: #fff8f2; background: #c92f58; border-color: #ff7d86;
         }
         QFrame#TempoCard {
-            background: #0b1011; border: 1px solid #526368; border-radius: 4px;
+            background: #050809; border: 1px solid #526368; border-radius: 4px;
         }
         QPushButton#MetronomeToggle, QPushButton#TempoButton {
             background: transparent; border: 0; border-radius: 0;
@@ -133,7 +134,7 @@ void applyCustomTheme(QApplication& app)
             font-weight: 600; padding: 0 8px;
         }
         QFrame#PerformanceTransport {
-            background: #0b1011; border: 1px solid #354247; border-radius: 4px;
+            background: #050809; border: 1px solid #354247; border-radius: 4px;
         }
         QLabel#StripTitle {
             color: #9ca9ab; font-family: Bahnschrift; font-size: 8.5pt;
@@ -246,6 +247,7 @@ int jam2ApplicationMain(int argc, char* argv[])
     setApplicationIdentity();
     app.setWindowIcon(QIcon(QStringLiteral(":/jam2/assets/logo-nebula.png")));
     applyCustomTheme(app);
+    installCompactDialogPolicy(app);
 
     MainWindow window;
     window.resize(1920, 1080);

@@ -232,6 +232,7 @@ struct DuplexContext {
     TrackTakeRecorder* track_take_recorder = nullptr;
     std::vector<std::int32_t> capture_scratch;
     std::vector<double> input_peak_scratch;
+    SmoothedMonoDownmix input_downmix;
     std::vector<std::int32_t> playback_scratch;
     std::vector<std::int32_t> recorder_my_input_scratch;
     std::vector<std::int32_t> recorder_their_input_scratch;
@@ -754,35 +755,31 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
                 }
                 context->input_peak_scratch[channel] = peak;
             }
-            const double loudestPeak = context->input_peak_scratch.empty()
-                ? 0.0
-                : *std::max_element(
-                    context->input_peak_scratch.cbegin(),
-                    context->input_peak_scratch.cend());
-            const std::size_t activeChannels = mono_downmix_active_channels(
+            context->input_downmix.beginBlock(
                 std::span<const double>(
                     context->input_peak_scratch.data(),
                     context->input_peak_scratch.size()));
+            if (context->control != nullptr) {
+                publish_downmix_diagnostics(
+                    *context->control, context->input_downmix);
+            }
             for (long i = 0; i < context->buffer_size; ++i) {
-                std::int64_t sum = 0;
+                double sum = 0.0;
                 for (std::size_t channel = 0; channel < context->inputs.size(); ++channel) {
                     ASIOBufferInfo* input_info = context->inputs[channel];
                     if (input_info == nullptr || input_info->buffers[double_buffer_index] == nullptr) {
                         continue;
                     }
-                    if (!mono_downmix_channel_active(
-                            context->input_peak_scratch[channel],
-                            loudestPeak)) {
-                        continue;
-                    }
                     const auto* input = static_cast<const std::int32_t*>(input_info->buffers[double_buffer_index]);
-                    sum += input[i];
+                    sum += static_cast<double>(input[i]) *
+                        context->input_downmix.weightAt(
+                            channel, static_cast<std::size_t>(i));
                 }
+                const double mixed = sum * context->input_downmix.normalizationAt(
+                    static_cast<std::size_t>(i));
                 context->capture_scratch[static_cast<std::size_t>(i)] =
-                    activeChannels > 0
-                    ? static_cast<std::int32_t>(
-                        sum / static_cast<std::int64_t>(activeChannels))
-                    : 0;
+                    static_cast<std::int32_t>(std::clamp(
+                        mixed, -2147483648.0, 2147483647.0));
             }
             captured_input = std::span<const std::int32_t>(
                 context->capture_scratch.data(),
@@ -972,6 +969,9 @@ public:
         context_.track_take_recorder = track_take_recorder;
         context_.capture_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.input_peak_scratch.resize(input_count);
+        context_.input_downmix.configure(input_count, sample_rate, static_cast<std::size_t>(buffer_size));
+        control.input_downmix_selected_channels.store(
+            static_cast<int>(input_count), std::memory_order_relaxed);
         context_.playback_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.recorder_my_input_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.recorder_their_input_scratch.resize(static_cast<std::size_t>(buffer_size));

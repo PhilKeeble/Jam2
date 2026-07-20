@@ -440,6 +440,7 @@ public:
         int playback_ratio_ppm = 1000000;
         int playback_ratio_applied_ppm = 1000000;
         bool playback_ratio_ramping = false;
+        jam2::EngineInputDownmixSnapshot input_downmix;
         jam2::EnginePitchSnapshot pitch;
     };
 
@@ -565,7 +566,13 @@ public:
                 "tuner_enabled,tuner_valid,tuner_frequency_hz,tuner_cents,tuner_confidence,"
                 "tuner_analyzed_windows,tuner_rejected_windows,tuner_processing_avg_us,"
                 "tuner_processing_max_us,tuner_ring_capacity_frames,tuner_ring_depth_frames,"
-                "tuner_ring_overruns\n";
+                "tuner_ring_overruns,input_downmix_selected_channels,"
+                "input_downmix_effective_weight,input_downmix_normalization_gain,"
+                "input_downmix_transitions,input_downmix_max_gain_change_per_block,"
+                "input_downmix_channel_1_weight,input_downmix_channel_2_weight,"
+                "input_downmix_channel_3_weight,input_downmix_channel_4_weight,"
+                "input_downmix_channel_1_noise_floor,input_downmix_channel_2_noise_floor,"
+                "input_downmix_channel_3_noise_floor,input_downmix_channel_4_noise_floor\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -981,7 +988,20 @@ public:
              << audio.pitch.processing_time_max_us << ','
              << audio.pitch.ring_capacity_frames << ','
              << audio.pitch.ring_depth_frames << ','
-             << audio.pitch.ring.overruns;
+             << audio.pitch.ring.overruns << ','
+             << audio.input_downmix.selected_channels << ','
+             << static_cast<double>(audio.input_downmix.effective_weight_ppm) / 1000000.0 << ','
+             << static_cast<double>(audio.input_downmix.normalization_gain_ppm) / 1000000.0 << ','
+             << audio.input_downmix.transition_count << ','
+             << static_cast<double>(audio.input_downmix.max_gain_change_per_block_ppm) / 1000000.0 << ','
+             << static_cast<double>(audio.input_downmix.channel_weight_ppm[0]) / 1000000.0 << ','
+             << static_cast<double>(audio.input_downmix.channel_weight_ppm[1]) / 1000000.0 << ','
+             << static_cast<double>(audio.input_downmix.channel_weight_ppm[2]) / 1000000.0 << ','
+             << static_cast<double>(audio.input_downmix.channel_weight_ppm[3]) / 1000000.0 << ','
+             << static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[0]) / 1000000.0 << ','
+             << static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[1]) / 1000000.0 << ','
+             << static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[2]) / 1000000.0 << ','
+             << static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[3]) / 1000000.0;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -997,7 +1017,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(379);
+        std::vector<std::string> fields(392);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1342,6 +1362,19 @@ public:
         set(376, audio.pitch.ring_capacity_frames);
         set(377, audio.pitch.ring_depth_frames);
         set(378, audio.pitch.ring.overruns);
+        set(379, audio.input_downmix.selected_channels);
+        set(380, static_cast<double>(audio.input_downmix.effective_weight_ppm) / 1000000.0);
+        set(381, static_cast<double>(audio.input_downmix.normalization_gain_ppm) / 1000000.0);
+        set(382, audio.input_downmix.transition_count);
+        set(383, static_cast<double>(audio.input_downmix.max_gain_change_per_block_ppm) / 1000000.0);
+        set(384, static_cast<double>(audio.input_downmix.channel_weight_ppm[0]) / 1000000.0);
+        set(385, static_cast<double>(audio.input_downmix.channel_weight_ppm[1]) / 1000000.0);
+        set(386, static_cast<double>(audio.input_downmix.channel_weight_ppm[2]) / 1000000.0);
+        set(387, static_cast<double>(audio.input_downmix.channel_weight_ppm[3]) / 1000000.0);
+        set(388, static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[0]) / 1000000.0);
+        set(389, static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[1]) / 1000000.0);
+        set(390, static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[2]) / 1000000.0);
+        set(391, static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[3]) / 1000000.0);
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {

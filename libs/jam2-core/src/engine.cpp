@@ -1503,6 +1503,26 @@ EngineSnapshot Engine::snapshot() const noexcept
     result.metronome_peak_ppm = control.metronome_peak_ppm.load(std::memory_order_relaxed);
     result.output_peak_ppm = control.output_peak_ppm.load(std::memory_order_relaxed);
     result.output_clipped_samples = control.output_clipped_samples.load(std::memory_order_relaxed);
+    result.input_downmix.selected_channels =
+        control.input_downmix_selected_channels.load(std::memory_order_relaxed);
+    result.input_downmix.effective_weight_ppm =
+        control.input_downmix_effective_weight_ppm.load(std::memory_order_relaxed);
+    result.input_downmix.normalization_gain_ppm =
+        control.input_downmix_normalization_gain_ppm.load(std::memory_order_relaxed);
+    result.input_downmix.transition_count =
+        control.input_downmix_transition_count.load(std::memory_order_relaxed);
+    result.input_downmix.max_gain_change_per_block_ppm =
+        control.input_downmix_max_gain_change_per_block_ppm.load(std::memory_order_relaxed);
+    for (std::size_t channel = 0;
+         channel < result.input_downmix.channel_weight_ppm.size();
+         ++channel) {
+        result.input_downmix.channel_weight_ppm[channel] =
+            control.input_downmix_channel_weight_ppm[channel].load(
+                std::memory_order_relaxed);
+        result.input_downmix.channel_noise_floor_ppm[channel] =
+            control.input_downmix_channel_noise_floor_ppm[channel].load(
+                std::memory_order_relaxed);
+    }
     if (impl_->pitch_analyzer != nullptr) {
         result.pitch = impl_->pitch_analyzer->snapshot();
     }

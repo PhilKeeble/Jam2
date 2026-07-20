@@ -22,6 +22,14 @@ Lets check the music theory and make pieces more musical
 
 Consider having banks tied to sections  
 
+make monitor volume 0 by defualt
+
+make chords not get generated on local jam by default
+
+alter chord structure to be more musical
+
+consider adding continual section generation for b section suggestions
+
 ## Bugs
 
 

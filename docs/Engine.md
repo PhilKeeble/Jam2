@@ -63,7 +63,7 @@ receive/playout tuning remain local to each machine.
 | `--audio-buffer-size` | Sets the host audio callback size in frames. |
 | `--headless-clock-drift-ppm` | Test-only synthetic device clock offset (`-5000..5000` ppm); requires headless audio. |
 | `--frame-size` | Sets audio frames per UDP packet. |
-| `--input-channels` | Selects one or more input channels mixed to mono. Multiple channels use a per-callback active-channel average: channels more than 30 dB below the loudest selected channel are omitted, so a source present on only one selected channel is not attenuated. |
+| `--input-channels` | Selects one or more input channels mixed to mono. Multiple channels use independent adaptive peak-noise floors (+14 dB open / +8 dB close hysteresis) and sample-ramped activity weights with a 4 ms attack and 45 ms release. The normalized weighted average preserves one sounding channel at unity gain without block-boundary switching or multi-channel clipping. |
 | `--output-channels` | Selects one or more output channels for duplicated mono playback. |
 | `--playback-prefill-frames` | Initial playback cushion before audio output begins. |
 | `--playback-ring-frames` | Playback ring capacity. |

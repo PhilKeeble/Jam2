@@ -276,32 +276,101 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         allOk = allOk && ok;
     };
     {
-        const auto fold = [](const std::array<double, 2>& samples) {
-            const std::array<double, 2> peaks{
-                std::abs(samples[0]),
-                std::abs(samples[1]),
-            };
-            const double loudest = std::max(peaks[0], peaks[1]);
-            const std::size_t active = jam2::audio::mono_downmix_active_channels(
-                std::span<const double>(peaks.data(), peaks.size()));
-            if (active == 0) return 0.0;
-            double sum = 0.0;
-            for (std::size_t channel = 0; channel < samples.size(); ++channel) {
-                if (jam2::audio::mono_downmix_channel_active(
-                        peaks[channel],
-                        loudest)) {
-                    sum += samples[channel];
+        jam2::audio::SmoothedMonoDownmix downmix;
+        downmix.configure(2, 48000.0, 64);
+        const auto render = [&downmix](
+                                const std::array<double, 2>& peaks,
+                                const std::array<double, 2>& samples) {
+            downmix.beginBlock(peaks);
+            std::array<double, 64> output{};
+            for (std::size_t frame = 0; frame < output.size(); ++frame) {
+                double sum = 0.0;
+                for (std::size_t channel = 0; channel < samples.size(); ++channel) {
+                    sum += samples[channel] * downmix.weightAt(channel, frame);
                 }
+                output[frame] = sum * downmix.normalizationAt(frame);
             }
-            return sum / static_cast<double>(active);
+            return output;
         };
-        record(QStringLiteral("audio.active-channel-mono-fold-down-levels"),
-            std::abs(fold({0.5, 0.0}) - 0.5) < 1e-12 &&
-            std::abs(fold({0.0, 0.5}) - 0.5) < 1e-12 &&
-            std::abs(fold({0.5, 0.5}) - 0.5) < 1e-12 &&
-            std::abs(fold({0.5, -0.5})) < 1e-12 &&
-            std::abs(fold({0.5, 0.01}) - 0.5) < 1e-12 &&
-            std::abs(fold({0.5, 0.4}) - 0.45) < 1e-12);
+        std::array<double, 64> stable{};
+        for (int block = 0; block < 200; ++block) {
+            stable = render({0.5, 0.0}, {0.5, 0.0});
+        }
+        const double beforeJoin = stable.back();
+        const std::array<double, 64> joining = render({0.5, 0.02}, {0.5, 0.02});
+        double largestStep = std::abs(joining.front() - beforeJoin);
+        for (std::size_t frame = 1; frame < joining.size(); ++frame) {
+            largestStep = std::max(
+                largestStep, std::abs(joining[frame] - joining[frame - 1U]));
+        }
+        for (int block = 0; block < 800; ++block) {
+            stable = render({0.5, 0.0}, {0.5, 0.0});
+        }
+        record(QStringLiteral("audio.smoothed-downmix-no-binary-channel-step"),
+            largestStep < 0.005 &&
+            std::abs(stable.back() - 0.5) < 0.001 &&
+            downmix.channelWeight(0) > 0.999 &&
+            downmix.channelWeight(1) < 0.001 &&
+            downmix.transitionCount() >= 3);
+    }
+    {
+        jam2::audio::SmoothedMonoDownmix downmix;
+        downmix.configure(2, 48000.0, 64);
+        for (int block = 0; block < 1500; ++block) {
+            downmix.beginBlock({std::array<double, 2>{0.35, 0.0005}});
+        }
+        const bool fastAttackAndLearnedFloor =
+            downmix.channelWeight(0) > 0.99 &&
+            downmix.channelWeight(1) < 0.001 &&
+            downmix.channelNoiseFloor(1) > 0.00045;
+        for (int block = 0; block < 700; ++block) {
+            const double decayingNote = 0.35 * std::exp(-static_cast<double>(block) / 18.0);
+            downmix.beginBlock({std::array<double, 2>{decayingNote, 0.0005}});
+        }
+        record(QStringLiteral("audio.downmix-per-channel-noise-floor-does-not-return-on-note-decay"),
+            fastAttackAndLearnedFloor &&
+            downmix.channelWeight(0) < 0.001 &&
+            downmix.channelWeight(1) < 0.001 &&
+            downmix.channelNoiseFloor(1) > 0.00045);
+    }
+    {
+        jam2::audio::SmoothedMonoDownmix downmix;
+        downmix.configure(4, 48000.0, 64);
+        const auto render = [&downmix](
+                                const std::array<double, 4>& peaks,
+                                const std::array<double, 4>& samples) {
+            downmix.beginBlock(peaks);
+            double maximum = 0.0;
+            double last = 0.0;
+            for (std::size_t frame = 0; frame < 64; ++frame) {
+                double sum = 0.0;
+                for (std::size_t channel = 0; channel < samples.size(); ++channel) {
+                    sum += samples[channel] * downmix.weightAt(channel, frame);
+                }
+                last = sum * downmix.normalizationAt(frame);
+                maximum = std::max(maximum, std::abs(last));
+            }
+            return std::pair<double, double>{last, maximum};
+        };
+        std::pair<double, double> allActive{};
+        for (int block = 0; block < 300; ++block) {
+            allActive = render(
+                {0.8, 0.8, 0.8, 0.8},
+                {0.8, 0.8, 0.8, 0.8});
+        }
+        std::pair<double, double> oneActive{};
+        for (int block = 0; block < 1000; ++block) {
+            oneActive = render(
+                {0.8, 0.0, 0.0, 0.0},
+                {0.8, 0.0, 0.0, 0.0});
+        }
+        record(QStringLiteral("audio.smoothed-downmix-four-channel-level-and-headroom"),
+            std::abs(allActive.first - 0.8) < 0.001 &&
+            allActive.second <= 0.800001 &&
+            std::abs(oneActive.first - 0.8) < 0.001 &&
+            oneActive.second <= 0.800001 &&
+            std::abs(downmix.effectiveWeight() - 1.0) < 0.001 &&
+            std::abs(downmix.normalizationGain() - 1.0) < 0.001);
     }
     record(QStringLiteral("recording-rate.authority-precedence"),
         jam2::gui::resolve_active_sample_rate(44100, 48000.0, 48000) == 44100 &&

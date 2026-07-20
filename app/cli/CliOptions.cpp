@@ -429,7 +429,7 @@ std::string mono_mix_mode_text(std::size_t channel_count)
     return std::to_string(channel_count) +
         (channel_count <= 1
             ? "-to-mono-direct"
-            : "-to-mono-active-average-30dB");
+            : "-to-mono-smoothed-weighted-average");
 }
 
 std::string_view os_priority_text(OsPriorityMode mode)

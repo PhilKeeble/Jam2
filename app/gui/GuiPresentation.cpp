@@ -9,18 +9,25 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QEvent>
+#include <QFileDialog>
+#include <QGuiApplication>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPointer>
 #include <QProxyStyle>
 #include <QPushButton>
+#include <QScreen>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStyleOption>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <algorithm>
 #include <cmath>
 
 namespace {
@@ -72,6 +79,71 @@ public:
     }
 };
 
+class CompactDialogEventFilter final : public QObject {
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        auto* dialog = qobject_cast<QDialog*>(watched);
+        if (dialog == nullptr ||
+            (event->type() != QEvent::Show && event->type() != QEvent::WindowStateChange)) {
+            return QObject::eventFilter(watched, event);
+        }
+
+        QPointer<QDialog> guarded(dialog);
+        QTimer::singleShot(0, dialog, [guarded] {
+            if (guarded == nullptr) {
+                return;
+            }
+
+            QDialog& current = *guarded;
+            QScreen* screen = current.screen();
+            if (screen == nullptr) {
+                screen = QGuiApplication::primaryScreen();
+            }
+            if (screen == nullptr) {
+                return;
+            }
+
+            const QRect available = screen->availableGeometry();
+            const QSize maximum(
+                std::min(900, std::max(320, available.width() - 96)),
+                std::min(720, std::max(240, available.height() - 96)));
+            const bool wasExpanded = current.isMaximized() || current.isFullScreen() ||
+                current.width() > maximum.width() || current.height() > maximum.height();
+
+            if (current.isMaximized() || current.isFullScreen()) {
+                current.setWindowState(current.windowState() &
+                    ~(Qt::WindowMaximized | Qt::WindowFullScreen));
+            }
+            current.setMaximumSize(maximum);
+
+            QSize target = current.size().boundedTo(maximum);
+            if (wasExpanded) {
+                target = qobject_cast<QFileDialog*>(&current) != nullptr
+                    ? QSize(800, 560).boundedTo(maximum)
+                    : QSize(780, 600).boundedTo(maximum);
+            }
+            target = target.expandedTo(current.minimumSizeHint().boundedTo(maximum));
+            current.resize(target);
+
+            const QPoint centre = current.parentWidget() != nullptr
+                ? current.parentWidget()->window()->frameGeometry().center()
+                : available.center();
+            QRect frame(QPoint(0, 0), current.frameGeometry().size());
+            frame.moveCenter(centre);
+            if (!available.contains(frame)) {
+                frame.moveLeft(std::clamp(frame.left(), available.left(), available.right() - frame.width() + 1));
+                frame.moveTop(std::clamp(frame.top(), available.top(), available.bottom() - frame.height() + 1));
+            }
+            current.move(frame.topLeft());
+        });
+        return QObject::eventFilter(watched, event);
+    }
+};
+
 }
 
 void installJam2Style()
@@ -81,6 +153,12 @@ void installJam2Style()
         QApplication::setStyle(new Jam2Style(QApplication::style()));
         installed = true;
     }
+}
+
+void installCompactDialogPolicy(QApplication& app)
+{
+    auto* filter = new CompactDialogEventFilter(&app);
+    app.installEventFilter(filter);
 }
 
 void showJamReadyInviteDialog(QWidget* parent, const QString& inviteUrl)

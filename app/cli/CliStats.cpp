@@ -576,6 +576,7 @@ CsvStatsLog::AudioSnapshot make_audio_snapshot(
     snapshot.playback_ratio_ppm = engine_snapshot.playback_ratio_ppm;
     snapshot.playback_ratio_applied_ppm = engine_snapshot.playback_ratio_applied_ppm;
     snapshot.playback_ratio_ramping = engine_snapshot.playback_ratio_ramping;
+    snapshot.input_downmix = engine_snapshot.input_downmix;
     snapshot.pitch = engine_snapshot.pitch;
     return snapshot;
 }
@@ -706,6 +707,19 @@ void print_periodic_stream_stats(
               << " metronome_peak=" << audio.metronome_peak
               << " output_peak=" << audio.output_peak
               << " output_clipped_samples=" << audio.output_clipped_samples
+              << " input_downmix_selected_channels=" << audio.input_downmix.selected_channels
+              << " input_downmix_effective_weight="
+              << static_cast<double>(audio.input_downmix.effective_weight_ppm) / 1000000.0
+              << " input_downmix_normalization_gain="
+              << static_cast<double>(audio.input_downmix.normalization_gain_ppm) / 1000000.0
+              << " input_downmix_transitions=" << audio.input_downmix.transition_count
+              << " input_downmix_max_gain_change_per_block="
+              << static_cast<double>(audio.input_downmix.max_gain_change_per_block_ppm) / 1000000.0
+              << " input_downmix_channel_noise_floors="
+              << static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[0]) / 1000000.0 << ','
+              << static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[1]) / 1000000.0 << ','
+              << static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[2]) / 1000000.0 << ','
+              << static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[3]) / 1000000.0
               << " os_priority_requested=" << os_priority_text(stats.os_scheduling.requested)
               << " os_cpu_count=" << stats.os_scheduling.cpu_count
               << " os_process_priority_active=" << stats.os_scheduling.process_priority

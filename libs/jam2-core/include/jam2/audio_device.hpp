@@ -19,19 +19,187 @@
 
 namespace jam2::audio {
 
-// Selected channels whose block peak is more than 30 dB below the loudest
-// selected channel are treated as inactive for that block. Active channels
-// are averaged, preserving a mono source present on only one selected input
-// without adding gain to genuinely active stereo material.
-inline constexpr double kMonoDownmixRelativeActivity = 0.03162277660168379;
+// A binary active-channel decision at each audio block creates a discontinuity
+// whenever the divisor changes. This stateful mixer instead gives each selected
+// input its own slowly adapting noise floor and ramps channel weights sample by
+// sample. Its normalized weighted average preserves unity gain for one sounding
+// channel and cannot exceed the selected input sample range.
+class SmoothedMonoDownmix final {
+public:
+    // These relative constants remain the policy for the offline block downmix.
+    static constexpr double kRelativeOpen = 0.03162277660168379; // -30 dB
+    static constexpr double kRelativeClose = 0.01584893192461114; // -36 dB
+    static constexpr double kAbsoluteOpen = 0.000251188643150958; // -72 dBFS
+    static constexpr double kAbsoluteClose = 0.000125892541179417; // -78 dBFS
+    static constexpr double kInitialNoiseFloor = 0.000251188643150958; // -72 dBFS peak
+    static constexpr double kMinimumNoiseFloor = 0.000015848931924611; // -96 dBFS peak
+    static constexpr double kMaximumNoiseFloor = 0.003981071705534969; // -48 dBFS peak
+    static constexpr double kNoiseOpenRatio = 5.011872336272722; // +14 dB
+    static constexpr double kNoiseCloseRatio = 2.51188643150958; // +8 dB
+    static constexpr double kWeightAttackSeconds = 0.004;
+    static constexpr double kWeightReleaseSeconds = 0.045;
+    static constexpr double kEnvelopeReleaseSeconds = 0.035;
+    static constexpr double kNoiseFloorRiseSeconds = 0.750;
+    static constexpr double kNoiseFloorFallSeconds = 3.000;
 
-inline bool mono_downmix_channel_active(double peak, double loudestPeak) noexcept
+    void configure(std::size_t channels, double sampleRate, std::size_t blockFrames)
+    {
+        const double safeRate = sampleRate > 1.0 ? sampleRate : 48000.0;
+        blockFrames_ = std::max<std::size_t>(blockFrames, 1U);
+        const double blockSeconds = static_cast<double>(blockFrames_) / safeRate;
+        weightAttack_ = 1.0 - std::exp(-blockSeconds / kWeightAttackSeconds);
+        weightRelease_ = 1.0 - std::exp(-blockSeconds / kWeightReleaseSeconds);
+        envelopeRelease_ = 1.0 - std::exp(-blockSeconds / kEnvelopeReleaseSeconds);
+        noiseFloorRise_ = 1.0 - std::exp(-blockSeconds / kNoiseFloorRiseSeconds);
+        noiseFloorFall_ = 1.0 - std::exp(-blockSeconds / kNoiseFloorFallSeconds);
+        envelopes_.assign(channels, 0.0);
+        noiseFloors_.assign(channels, kInitialNoiseFloor);
+        weights_.assign(channels, 0.0);
+        blockStarts_.assign(channels, 0.0);
+        blockSteps_.assign(channels, 0.0);
+        active_.assign(channels, 0U);
+        blockStartWeightSum_ = 0.0;
+        blockWeightStepSum_ = 0.0;
+        effectiveWeight_ = 0.0;
+        normalizationGain_ = 1.0;
+        transitionCount_ = 0;
+        maxGainChangePerBlock_ = 0.0;
+    }
+
+    void beginBlock(std::span<const double> peaks) noexcept
+    {
+        if (peaks.size() != weights_.size() || weights_.empty()) {
+            return;
+        }
+        for (std::size_t channel = 0; channel < peaks.size(); ++channel) {
+            const double peak = std::isfinite(peaks[channel]) ?
+                std::abs(peaks[channel]) : 0.0;
+            double& envelope = envelopes_[channel];
+            envelope = peak >= envelope ?
+                peak : envelope + (peak - envelope) * envelopeRelease_;
+        }
+
+        blockStartWeightSum_ = 0.0;
+        double endWeightSum = 0.0;
+        blockWeightStepSum_ = 0.0;
+        for (std::size_t channel = 0; channel < weights_.size(); ++channel) {
+            const bool wasActive = active_[channel] != 0U;
+            const double envelope = envelopes_[channel];
+            const double noiseFloor = noiseFloors_[channel];
+            const double openThreshold = std::max(
+                kAbsoluteOpen, noiseFloor * kNoiseOpenRatio);
+            const double closeThreshold = std::max(
+                kAbsoluteClose, noiseFloor * kNoiseCloseRatio);
+            const bool active = wasActive ?
+                envelope >= closeThreshold :
+                envelope >= openThreshold;
+            if (active != wasActive) {
+                active_[channel] = active ? 1U : 0U;
+                ++transitionCount_;
+            }
+
+            // A sounding channel never teaches the estimator that a held note
+            // is its noise floor. Closed channels track persistent interface or
+            // microphone noise without coupling their decision to louder inputs.
+            if (!active) {
+                const double peak = std::isfinite(peaks[channel]) ?
+                    std::abs(peaks[channel]) : 0.0;
+                const double targetFloor = std::clamp(
+                    peak, kMinimumNoiseFloor, kMaximumNoiseFloor);
+                const double coefficient = targetFloor > noiseFloor ?
+                    noiseFloorRise_ : noiseFloorFall_;
+                noiseFloors_[channel] = std::clamp(
+                    noiseFloor + (targetFloor - noiseFloor) * coefficient,
+                    kMinimumNoiseFloor,
+                    kMaximumNoiseFloor);
+            }
+
+            const double start = weights_[channel];
+            const double target = active ? 1.0 : 0.0;
+            const double coefficient = target > start ? weightAttack_ : weightRelease_;
+            const double end = std::clamp(
+                start + (target - start) * coefficient, 0.0, 1.0);
+            blockStarts_[channel] = start;
+            blockSteps_[channel] = (end - start) / static_cast<double>(blockFrames_);
+            weights_[channel] = end;
+            blockStartWeightSum_ += start;
+            endWeightSum += end;
+            blockWeightStepSum_ += blockSteps_[channel];
+        }
+
+        const double startGain = 1.0 / std::max(1.0, blockStartWeightSum_);
+        normalizationGain_ = 1.0 / std::max(1.0, endWeightSum);
+        maxGainChangePerBlock_ = std::max(
+            maxGainChangePerBlock_, std::abs(normalizationGain_ - startGain));
+        effectiveWeight_ = endWeightSum;
+    }
+
+    double weightAt(std::size_t channel, std::size_t frame) const noexcept
+    {
+        if (channel >= blockStarts_.size()) {
+            return 0.0;
+        }
+        const double offset = static_cast<double>(
+            std::min(frame + 1U, blockFrames_));
+        return std::clamp(
+            blockStarts_[channel] + blockSteps_[channel] * offset,
+            0.0,
+            1.0);
+    }
+
+    double normalizationAt(std::size_t frame) const noexcept
+    {
+        const double offset = static_cast<double>(
+            std::min(frame + 1U, blockFrames_));
+        const double weightSum = blockStartWeightSum_ + blockWeightStepSum_ * offset;
+        return 1.0 / std::max(1.0, weightSum);
+    }
+
+    std::size_t channelCount() const noexcept { return weights_.size(); }
+    double effectiveWeight() const noexcept { return effectiveWeight_; }
+    double normalizationGain() const noexcept { return normalizationGain_; }
+    std::uint64_t transitionCount() const noexcept { return transitionCount_; }
+    double maxGainChangePerBlock() const noexcept { return maxGainChangePerBlock_; }
+    double channelWeight(std::size_t channel) const noexcept
+    {
+        return channel < weights_.size() ? weights_[channel] : 0.0;
+    }
+    double channelNoiseFloor(std::size_t channel) const noexcept
+    {
+        return channel < noiseFloors_.size() ? noiseFloors_[channel] : 0.0;
+    }
+
+private:
+    std::vector<double> envelopes_;
+    std::vector<double> noiseFloors_;
+    std::vector<double> weights_;
+    std::vector<double> blockStarts_;
+    std::vector<double> blockSteps_;
+    std::vector<std::uint8_t> active_;
+    std::size_t blockFrames_ = 1;
+    double weightAttack_ = 1.0;
+    double weightRelease_ = 1.0;
+    double envelopeRelease_ = 1.0;
+    double noiseFloorRise_ = 1.0;
+    double noiseFloorFall_ = 1.0;
+    double blockStartWeightSum_ = 0.0;
+    double blockWeightStepSum_ = 0.0;
+    double effectiveWeight_ = 0.0;
+    double normalizationGain_ = 1.0;
+    std::uint64_t transitionCount_ = 0;
+    double maxGainChangePerBlock_ = 0.0;
+};
+
+// Offline system-loopback capture retains its existing block fold-down. The
+// real-time device input path must use SmoothedMonoDownmix instead.
+inline bool block_downmix_channel_active(double peak, double loudestPeak) noexcept
 {
     return loudestPeak > 0.0 &&
-        peak >= loudestPeak * kMonoDownmixRelativeActivity;
+        peak >= loudestPeak * SmoothedMonoDownmix::kRelativeOpen;
 }
 
-inline std::size_t mono_downmix_active_channels(std::span<const double> peaks) noexcept
+inline std::size_t block_downmix_active_channels(
+    std::span<const double> peaks) noexcept
 {
     double loudest = 0.0;
     for (double peak : peaks) {
@@ -39,7 +207,7 @@ inline std::size_t mono_downmix_active_channels(std::span<const double> peaks) n
     }
     std::size_t active = 0;
     for (double peak : peaks) {
-        if (mono_downmix_channel_active(std::abs(peak), loudest)) {
+        if (block_downmix_channel_active(std::abs(peak), loudest)) {
             ++active;
         }
     }
@@ -195,6 +363,23 @@ struct StreamControl {
     std::atomic<int> gui_metronome_peak_ppm{0};
     std::atomic<int> gui_output_peak_ppm{0};
     std::atomic<std::uint64_t> output_clipped_samples{0};
+    std::atomic<int> input_downmix_selected_channels{1};
+    std::atomic<int> input_downmix_effective_weight_ppm{1000000};
+    std::atomic<int> input_downmix_normalization_gain_ppm{1000000};
+    std::atomic<std::uint64_t> input_downmix_transition_count{0};
+    std::atomic<int> input_downmix_max_gain_change_per_block_ppm{0};
+    std::array<std::atomic<int>, 4> input_downmix_channel_weight_ppm{
+        std::atomic<int>{1000000},
+        std::atomic<int>{0},
+        std::atomic<int>{0},
+        std::atomic<int>{0},
+    };
+    std::array<std::atomic<int>, 4> input_downmix_channel_noise_floor_ppm{
+        std::atomic<int>{251},
+        std::atomic<int>{251},
+        std::atomic<int>{251},
+        std::atomic<int>{251},
+    };
     PreparedTrackSource* prepared_source = nullptr;
     std::atomic<std::uint64_t> prepared_source_frame{0};
     std::atomic<std::uint64_t> prepared_source_scheduled_start_frame{0};
@@ -202,6 +387,40 @@ struct StreamControl {
     std::atomic<std::uint64_t> prepared_source_underruns{0};
     std::atomic<std::uint64_t> prepared_source_busy_events{0};
 };
+
+inline int downmix_unit_to_ppm(double value) noexcept
+{
+    return std::clamp(
+        static_cast<int>(std::llround(value * 1000000.0)),
+        0,
+        4000000);
+}
+
+inline void publish_downmix_diagnostics(
+    StreamControl& control,
+    const SmoothedMonoDownmix& downmix) noexcept
+{
+    control.input_downmix_selected_channels.store(
+        static_cast<int>(downmix.channelCount()), std::memory_order_relaxed);
+    control.input_downmix_effective_weight_ppm.store(
+        downmix_unit_to_ppm(downmix.effectiveWeight()), std::memory_order_relaxed);
+    control.input_downmix_normalization_gain_ppm.store(
+        downmix_unit_to_ppm(downmix.normalizationGain()), std::memory_order_relaxed);
+    control.input_downmix_transition_count.store(
+        downmix.transitionCount(), std::memory_order_relaxed);
+    control.input_downmix_max_gain_change_per_block_ppm.store(
+        downmix_unit_to_ppm(downmix.maxGainChangePerBlock()), std::memory_order_relaxed);
+    for (std::size_t channel = 0;
+         channel < control.input_downmix_channel_weight_ppm.size();
+         ++channel) {
+        control.input_downmix_channel_weight_ppm[channel].store(
+            downmix_unit_to_ppm(downmix.channelWeight(channel)),
+            std::memory_order_relaxed);
+        control.input_downmix_channel_noise_floor_ppm[channel].store(
+            downmix_unit_to_ppm(downmix.channelNoiseFloor(channel)),
+            std::memory_order_relaxed);
+    }
+}
 
 enum class InputChannels {
     Mono = 1,

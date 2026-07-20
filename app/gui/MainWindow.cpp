@@ -2201,7 +2201,7 @@ void MainWindow::showSettingsDialog()
 
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Settings"));
-    dialog.resize(860, 700);
+    dialog.resize(800, 640);
 
     auto makeSpin = [&dialog](int value, int minimum, int maximum) {
         auto* spin = new QSpinBox(&dialog);
@@ -2563,7 +2563,11 @@ void MainWindow::showSettingsDialog()
         &dialog);
     logNote->setWordWrap(true); logForm->addRow(QString(), logNote);
     QObject::connect(browseLogs, &QPushButton::clicked, &dialog, [&dialog, logFolder] {
-        const QString folder = QFileDialog::getExistingDirectory(&dialog, QStringLiteral("Log Folder"), logFolder->text());
+        const QString folder = QFileDialog::getExistingDirectory(
+            &dialog,
+            QStringLiteral("Log Folder"),
+            logFolder->text(),
+            QFileDialog::ShowDirsOnly | QFileDialog::DontUseNativeDialog);
         if (!folder.isEmpty()) logFolder->setText(QDir::toNativeSeparators(folder));
     });
 
@@ -2582,7 +2586,11 @@ void MainWindow::showSettingsDialog()
         auto* row = new QWidget(&dialog); auto* layout = new QHBoxLayout(row);
         layout->setContentsMargins(0, 0, 0, 0); layout->addWidget(edit, 1); layout->addWidget(browse);
         QObject::connect(browse, &QPushButton::clicked, &dialog, [&dialog, edit] {
-            const QString folder = QFileDialog::getExistingDirectory(&dialog, QStringLiteral("Recording Folder"), edit->text());
+            const QString folder = QFileDialog::getExistingDirectory(
+                &dialog,
+                QStringLiteral("Recording Folder"),
+                edit->text(),
+                QFileDialog::ShowDirsOnly | QFileDialog::DontUseNativeDialog);
             if (!folder.isEmpty()) edit->setText(QDir::toNativeSeparators(folder));
         });
         return std::pair<QLineEdit*, QWidget*>{edit, row};
@@ -4540,7 +4548,12 @@ void MainWindow::applyLooperLaneGain(int laneIndex, double gainDb)
 void MainWindow::addLooperWavs()
 {
     QStringList paths = QFileDialog::getOpenFileNames(
-        this, QStringLiteral("Add WAV lanes"), QString(), QStringLiteral("WAV files (*.wav *.WAV)"));
+        this,
+        QStringLiteral("Add WAV lanes"),
+        QString(),
+        QStringLiteral("WAV files (*.wav *.WAV)"),
+        nullptr,
+        QFileDialog::DontUseNativeDialog);
     if (paths.isEmpty()) {
         return;
     }
@@ -4654,7 +4667,9 @@ void MainWindow::loadWavIntoLooperLane()
             this,
             QStringLiteral("Load WAV"),
             QString(),
-            QStringLiteral("WAV files (*.wav *.WAV)"));
+            QStringLiteral("WAV files (*.wav *.WAV)"),
+            nullptr,
+            QFileDialog::DontUseNativeDialog);
         if (!path.isEmpty()) {
             pathEdit->setText(QDir::toNativeSeparators(path));
             buttons->button(QDialogButtonBox::Ok)->setEnabled(true);
