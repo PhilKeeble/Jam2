@@ -16,6 +16,7 @@
 
 #include "common.hpp"
 #include "pcm16_wav.hpp"
+#include "pitch_analyzer.hpp"
 
 namespace jam2 {
 
@@ -166,6 +167,10 @@ std::int32_t render_test_input(
         const double phase = std::fmod(static_cast<double>(frame) * 440.0 / sample_rate, 1.0);
         return clamp_i32(std::sin(phase * 2.0 * kPi) * level * 2147483647.0);
     }
+    if (mode == static_cast<int>(EngineTestInput::ToneBassB0)) {
+        const double phase = std::fmod(static_cast<double>(frame) * 30.867706 / sample_rate, 1.0);
+        return clamp_i32(std::sin(phase * 2.0 * kPi) * level * 2147483647.0);
+    }
     if (mode == static_cast<int>(EngineTestInput::Pulse1s)) {
         const std::uint64_t period = static_cast<std::uint64_t>(std::max(1.0, sample_rate));
         const std::uint64_t width = std::max<std::uint64_t>(1, period / 100U);
@@ -296,6 +301,7 @@ public:
         audio::InputChannels input_channels,
         audio::ChannelSelection channels,
         audio::MonoRingBuffer& capture_ring,
+        audio::MonoRingBuffer& pitch_ring,
         audio::MonoRingBuffer& playback_ring,
         std::size_t playback_prefill_frames,
         audio::StreamControl& control,
@@ -305,6 +311,7 @@ public:
         , buffer_size_(buffer_size > 0 ? buffer_size : 128)
         , clock_rate_(sample_rate * (1.0 + static_cast<double>(clock_drift_ppm) / 1000000.0))
         , capture_ring_(capture_ring)
+        , pitch_ring_(pitch_ring)
         , playback_ring_(playback_ring)
         , playback_prefill_frames_(playback_prefill_frames)
         , control_(control)
@@ -402,6 +409,7 @@ private:
         if (audio::prepare_network_capture_callback(control_, capture_ring_, callback_frame)) {
             capture_ring_.push(capture_scratch_);
         }
+        audio::push_pitch_analysis_callback(control_, pitch_ring_, capture_scratch_);
         const int peak = peak_ppm(capture_scratch_);
         update_peak(control_.input_peak_ppm, peak);
         update_peak(control_.gui_input_peak_ppm, peak);
@@ -576,6 +584,7 @@ private:
     long buffer_size_ = 128;
     double clock_rate_ = 48000.0;
     audio::MonoRingBuffer& capture_ring_;
+    audio::MonoRingBuffer& pitch_ring_;
     audio::MonoRingBuffer& playback_ring_;
     std::size_t playback_prefill_frames_ = 0;
     audio::StreamControl& control_;
@@ -725,6 +734,8 @@ struct Engine::Impl {
     std::unique_ptr<audio::TrackTakeRecorder> track_take_recorder;
     std::unique_ptr<audio::PreparedTrackSource> prepared_source;
     std::unique_ptr<audio::MonoRingBuffer> capture_ring;
+    std::unique_ptr<audio::MonoRingBuffer> pitch_ring;
+    std::unique_ptr<PitchAnalyzer> pitch_analyzer;
     std::unique_ptr<audio::MonoRingBuffer> playback_ring;
     std::unique_ptr<audio::DeviceStream> stream;
     audio::StreamInfo stream_info;
@@ -840,6 +851,22 @@ struct Engine::Impl {
             return true;
         case EngineCommandType::SetLocalMonitorLevel:
             control->local_monitor_level_ppm.store(clamp_gain(command.value), std::memory_order_relaxed);
+            return true;
+        case EngineCommandType::SetPitchAnalysisEnabled:
+            if (pitch_analyzer == nullptr) {
+                error = "pitch analyzer is unavailable";
+                return false;
+            }
+            if (command.enabled) {
+                if (!pitch_analyzer->start(error)) {
+                    control->pitch_analysis_enabled.store(false, std::memory_order_release);
+                    return false;
+                }
+                control->pitch_analysis_enabled.store(true, std::memory_order_release);
+            } else {
+                control->pitch_analysis_enabled.store(false, std::memory_order_release);
+                pitch_analyzer->stop();
+            }
             return true;
         case EngineCommandType::SetPlaybackRatio:
             control->playback_ratio_ppm.store(clamp_ratio(command.value), std::memory_order_relaxed);
@@ -1180,7 +1207,7 @@ void Engine::start(const EngineConfig& requested)
     if (requested.metronome_mode > EngineMetronomeMode::ListenerCompensated) {
         throw std::runtime_error("engine metronome mode is invalid");
     }
-    if (requested.test_input > EngineTestInput::MetronomePulse) {
+    if (requested.test_input > EngineTestInput::ToneBassB0) {
         throw std::runtime_error("engine test-input mode is invalid");
     }
     if (requested.audio_buffer_frames < 0) {
@@ -1229,8 +1256,11 @@ void Engine::start(const EngineConfig& requested)
         impl_->prepared_source = std::make_unique<audio::PreparedTrackSource>(
             impl_->config.prepared_track_max_frames);
         impl_->capture_ring = std::make_unique<audio::MonoRingBuffer>(impl_->config.capture_ring_frames);
+        impl_->pitch_ring = std::make_unique<audio::MonoRingBuffer>(16384);
         impl_->playback_ring = std::make_unique<audio::MonoRingBuffer>(impl_->config.playback_ring_frames);
         impl_->capture_ring->set_diagnostics_enabled(impl_->config.diagnostics_enabled);
+        impl_->pitch_ring->set_diagnostics_enabled(true);
+        impl_->pitch_ring->set_depth_bucket_thresholds(static_cast<double>(impl_->config.sample_rate));
         impl_->playback_ring->set_diagnostics_enabled(impl_->config.diagnostics_enabled);
         impl_->playback_ring->set_depth_bucket_thresholds(static_cast<double>(impl_->config.sample_rate));
 
@@ -1276,6 +1306,11 @@ void Engine::start(const EngineConfig& requested)
         control.network_capture_epoch_frame.store(0, std::memory_order_relaxed);
         control.network_playback_enabled.store(false, std::memory_order_relaxed);
         control.network_playback_enabled_applied.store(false, std::memory_order_relaxed);
+        control.pitch_analysis_enabled.store(false, std::memory_order_relaxed);
+        impl_->pitch_analyzer = std::make_unique<PitchAnalyzer>(
+            *impl_->pitch_ring,
+            impl_->config.sample_rate,
+            control.engine_frame_counter);
 
         const long buffer_frames = impl_->config.audio_buffer_frames > 0
             ? impl_->config.audio_buffer_frames
@@ -1288,6 +1323,7 @@ void Engine::start(const EngineConfig& requested)
                 impl_->config.input_channels,
                 impl_->config.channels,
                 *impl_->capture_ring,
+                *impl_->pitch_ring,
                 *impl_->playback_ring,
                 impl_->config.playback_prefill_frames,
                 control,
@@ -1301,6 +1337,7 @@ void Engine::start(const EngineConfig& requested)
                 impl_->config.input_channels,
                 impl_->config.channels,
                 *impl_->capture_ring,
+                *impl_->pitch_ring,
                 *impl_->playback_ring,
                 impl_->config.playback_prefill_frames,
                 control,
@@ -1320,7 +1357,9 @@ void Engine::start(const EngineConfig& requested)
         impl_->set_lifecycle(EngineLifecycle::Local);
     } catch (...) {
         impl_->stream.reset();
+        impl_->pitch_analyzer.reset();
         impl_->playback_ring.reset();
+        impl_->pitch_ring.reset();
         impl_->capture_ring.reset();
         impl_->prepared_source.reset();
         impl_->track_take_recorder.reset();
@@ -1352,8 +1391,12 @@ void Engine::join() noexcept
     if (impl_->control != nullptr) {
         impl_->control->network_capture_requested_enabled.store(false, std::memory_order_release);
         impl_->control->network_playback_enabled.store(false, std::memory_order_release);
+        impl_->control->pitch_analysis_enabled.store(false, std::memory_order_release);
     }
     impl_->stream.reset();
+    if (impl_->pitch_analyzer != nullptr) {
+        impl_->pitch_analyzer->stop();
+    }
     if (impl_->recorder != nullptr && impl_->recorder->stats().active) {
         std::string ignored;
         (void)impl_->recorder->stop(ignored);
@@ -1460,6 +1503,16 @@ EngineSnapshot Engine::snapshot() const noexcept
     result.metronome_peak_ppm = control.metronome_peak_ppm.load(std::memory_order_relaxed);
     result.output_peak_ppm = control.output_peak_ppm.load(std::memory_order_relaxed);
     result.output_clipped_samples = control.output_clipped_samples.load(std::memory_order_relaxed);
+    if (impl_->pitch_analyzer != nullptr) {
+        result.pitch = impl_->pitch_analyzer->snapshot();
+    }
+    result.pitch.callback_tap_enabled =
+        control.pitch_analysis_enabled.load(std::memory_order_acquire);
+    if (impl_->pitch_ring != nullptr) {
+        result.pitch.ring_capacity_frames = impl_->pitch_ring->capacity();
+        result.pitch.ring_depth_frames = impl_->pitch_ring->available_read();
+        result.pitch.ring = impl_->pitch_ring->stats();
+    }
     result.prepared_source_frame = control.prepared_source_frame.load(std::memory_order_relaxed);
     result.prepared_source_scheduled_start_frame =
         control.prepared_source_scheduled_start_frame.load(std::memory_order_relaxed);

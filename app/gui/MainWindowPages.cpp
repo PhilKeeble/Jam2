@@ -283,6 +283,9 @@ void MainWindowPages::build(MainWindow& w)
     w.performanceHome_->onGenerateWav = [&w] {
         w.generatePracticeReferenceWavs();
     };
+    w.performanceHome_->onTunerEnabledChanged = [&w](bool enabled) {
+        w.setTunerEnabled(enabled);
+    };
 
     w.workspaceStack_ = new QStackedWidget(&w);
     const auto addWorkspace = [&w](const QString& key, QWidget* page) {

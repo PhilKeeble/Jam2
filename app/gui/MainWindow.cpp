@@ -1625,6 +1625,22 @@ bool MainWindow::submitEngineCommand(jam2::EngineCommand command, const QString&
     return false;
 }
 
+void MainWindow::setTunerEnabled(bool enabled)
+{
+    tunerRequestedEnabled_ = enabled;
+    jam2::EngineCommand command;
+    command.type = jam2::EngineCommandType::SetPitchAnalysisEnabled;
+    command.enabled = enabled;
+    command.cookie = ++engineCommandCookie_;
+    if (jam2_.submit(command)) {
+        tunerCommandCookie_ = command.cookie;
+        return;
+    }
+    tunerRequestedEnabled_ = false;
+    tunerCommandCookie_ = 0;
+    appendLog(QStringLiteral("engine command queue unavailable: tuner"));
+}
+
 void MainWindow::submitEngineGain(
     jam2::EngineCommandType type,
     double gain,
@@ -1745,6 +1761,13 @@ void MainWindow::handleEngineSnapshot(const jam2::EngineSnapshot& snapshot)
     const jam2::EngineGuiPeakSnapshot peaks = jam2_.consumeGuiPeaks();
     if (performanceHome_) {
         performanceHome_->setAudioPeaks(peaks);
+        performanceHome_->setTunerSnapshot(snapshot.pitch);
+    }
+    if (snapshot.lifecycle != jam2::EngineLifecycle::Local) {
+        tunerCommandCookie_ = 0;
+    } else if (tunerRequestedEnabled_ != snapshot.pitch.enabled &&
+               tunerCommandCookie_ == 0) {
+        setTunerEnabled(tunerRequestedEnabled_);
     }
     updateMixMeters(mixerStatsViewModel_.consume(
         peaks,
@@ -1761,6 +1784,12 @@ void MainWindow::handleEngineSnapshot(const jam2::EngineSnapshot& snapshot)
 
 void MainWindow::handleEngineEvent(const jam2::EngineEvent& event)
 {
+    if (tunerCommandCookie_ != 0 && event.cookie == tunerCommandCookie_) {
+        tunerCommandCookie_ = 0;
+        if (!event.ok) {
+            tunerRequestedEnabled_ = jam2_.engineSnapshot().pitch.enabled;
+        }
+    }
     const QString text = QString::fromUtf8(
         jam2::engine_event_text(event).data(),
         static_cast<qsizetype>(jam2::engine_event_text(event).size()));

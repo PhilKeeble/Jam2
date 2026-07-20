@@ -17,6 +17,7 @@
 #include <vector>
 
 class QPainter;
+class QKeyEvent;
 
 struct PerformancePeerPresentation {
     std::uint64_t peerId = 0;
@@ -38,6 +39,7 @@ public:
         double beatPhase,
         bool running);
     void setAudioPeaks(const jam2::EngineGuiPeakSnapshot& peaks);
+    void setTunerSnapshot(const jam2::EnginePitchSnapshot& snapshot);
     void setPeers(QVector<PerformancePeerPresentation> peers);
     void setSelectedPeer(std::uint64_t peerId);
     void setTrackGainDb(double gainDb);
@@ -54,6 +56,7 @@ public:
     std::function<void(double)> onTrackGainChanged;
     std::function<void()> onGenerateIdea;
     std::function<void()> onGenerateWav;
+    std::function<void(bool)> onTunerEnabledChanged;
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -62,6 +65,7 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
 
 private:
     struct SongPosition {
@@ -89,6 +93,8 @@ private:
     void paintPeerRail(QPainter& painter, const QRect& bounds);
     void paintVerticalPeerRail(QPainter& painter, const QRect& bounds);
     void paintLooperLaunch(QPainter& painter, const QRect& bounds);
+    void paintTuner(QPainter& painter, const QRect& bounds, bool expanded);
+    QString tunerNoteText() const;
     void applyTrackSliderPosition(int x);
 
     const BeatGridModel* model_ = nullptr;
@@ -104,6 +110,10 @@ private:
     QVector<PerformancePeerPresentation> peers_;
     std::uint64_t selectedPeerId_ = 0;
     double trackGainDb_ = 0.0;
+    jam2::EnginePitchSnapshot tuner_;
+    double displayedTunerCents_ = 0.0;
+    double tunerOrbOpacity_ = 0.0;
+    bool tunerExpanded_ = false;
     std::vector<float> trackWaveformPeaks_;
     bool trackWaveformValid_ = false;
     QString rtt_ = QStringLiteral("-");
@@ -133,6 +143,12 @@ private:
     QRect nextBeatHitRect_;
     QRect peerRailRect_;
     QRect looperHitRect_;
+    QRect tunerHitRect_;
+    QRect tunerEnableHitRect_;
+    QRect tunerOffHitRect_;
+    QRect tunerOverlayRect_;
+    QRect tunerOverlayCloseHitRect_;
+    QRect tunerOverlayOffHitRect_;
     QRect trackSliderRect_;
     QVector<QPair<QRect, std::uint64_t>> peerHitRects_;
 };

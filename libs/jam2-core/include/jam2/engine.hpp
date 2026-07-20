@@ -40,6 +40,7 @@ enum class EngineTestInput : std::uint8_t {
     Tone440,
     Pulse1s,
     MetronomePulse,
+    ToneBassB0,
 };
 
 enum class EngineTransportAction : std::uint8_t {
@@ -101,6 +102,7 @@ enum class EngineCommandType : std::uint8_t {
     SetOutputLevel,
     SetLocalMonitorEnabled,
     SetLocalMonitorLevel,
+    SetPitchAnalysisEnabled,
     SetPlaybackRatio,
     SetMetronomeMode,
     SetLeaderAudioLocalClick,
@@ -200,6 +202,26 @@ struct EngineTrackTakeSnapshot {
     std::size_t queue_capacity_frames = 0;
 };
 
+struct EnginePitchSnapshot {
+    bool enabled = false;
+    bool callback_tap_enabled = false;
+    bool valid = false;
+    double frequency_hz = 0.0;
+    double cents = 0.0;
+    double confidence = 0.0;
+    int midi_note = -1;
+    std::uint64_t last_valid_engine_frame = 0;
+    std::uint64_t last_valid_monotonic_us = 0;
+    std::uint64_t analyzed_windows = 0;
+    std::uint64_t input_hops = 0;
+    std::uint64_t rejected_windows = 0;
+    std::uint64_t processing_time_sum_us = 0;
+    std::uint64_t processing_time_max_us = 0;
+    std::size_t ring_capacity_frames = 0;
+    std::size_t ring_depth_frames = 0;
+    audio::RingStats ring;
+};
+
 struct EngineSnapshot {
     EngineLifecycle lifecycle = EngineLifecycle::Stopped;
     EngineAudioBackend backend = EngineAudioBackend::Device;
@@ -260,6 +282,7 @@ struct EngineSnapshot {
     int metronome_peak_ppm = 0;
     int output_peak_ppm = 0;
     std::uint64_t output_clipped_samples = 0;
+    EnginePitchSnapshot pitch;
     std::uint64_t prepared_source_frame = 0;
     std::uint64_t prepared_source_scheduled_start_frame = 0;
     std::uint64_t prepared_source_actual_start_frame = 0;

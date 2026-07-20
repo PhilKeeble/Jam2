@@ -225,6 +225,7 @@ struct DuplexContext {
     long buffer_size = 0;
     InputChannels input_channels = InputChannels::Mono;
     MonoRingBuffer* capture = nullptr;
+    MonoRingBuffer* pitch = nullptr;
     MonoRingBuffer* playback = nullptr;
     StreamControl* control = nullptr;
     OutputRecorder* recorder = nullptr;
@@ -610,6 +611,10 @@ std::int32_t render_test_input_sample(int mode, std::uint64_t sample_time, doubl
         const double phase = std::fmod(static_cast<double>(sample_time) * 440.0 / sample_rate, 1.0);
         return static_cast<std::int32_t>(std::sin(phase * 2.0 * kPi) * level * 2147483647.0);
     }
+    if (mode == 5) {
+        const double phase = std::fmod(static_cast<double>(sample_time) * 30.867706 / sample_rate, 1.0);
+        return static_cast<std::int32_t>(std::sin(phase * 2.0 * kPi) * level * 2147483647.0);
+    }
     if (mode == 3) {
         const std::uint64_t period = static_cast<std::uint64_t>(sample_rate > 1.0 ? sample_rate : 1.0);
         const std::uint64_t width = std::max<std::uint64_t>(1, period / 100);
@@ -710,6 +715,9 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
         if (network_capture_enabled) {
             context->capture->push(std::span<const std::int32_t>(generated.data(), generated.size()));
         }
+        if (context->control != nullptr && context->pitch != nullptr) {
+            push_pitch_analysis_callback(*context->control, *context->pitch, generated);
+        }
         if (context->recorder_my_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
             std::copy(generated.begin(), generated.end(), context->recorder_my_input_scratch.begin());
         }
@@ -782,6 +790,9 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
             if (network_capture_enabled) {
                 context->capture->push(captured_input);
             }
+        }
+        if (context->control != nullptr && context->pitch != nullptr) {
+            push_pitch_analysis_callback(*context->control, *context->pitch, captured_input);
         }
         if (context->control != nullptr) {
             observe_peak(context->control->input_peak_ppm, captured_input);
@@ -926,6 +937,7 @@ public:
         ChannelSelection channels,
         int output_channel_count,
         MonoRingBuffer& capture_ring,
+        MonoRingBuffer& pitch_ring,
         MonoRingBuffer& playback_ring,
         std::size_t playback_prefill_frames,
         StreamControl& control,
@@ -953,6 +965,7 @@ public:
         context_.buffer_size = buffer_size;
         context_.input_channels = input_channels;
         context_.capture = &capture_ring;
+        context_.pitch = &pitch_ring;
         context_.playback = &playback_ring;
         context_.control = &control;
         context_.recorder = recorder;
@@ -1265,6 +1278,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     InputChannels requested_input_channels,
     ChannelSelection channels,
     MonoRingBuffer& capture_ring,
+    MonoRingBuffer& pitch_ring,
     MonoRingBuffer& playback_ring,
     std::size_t playback_prefill_frames,
     StreamControl& control,
@@ -1404,6 +1418,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
         channels,
         selected_output_channels,
         capture_ring,
+        pitch_ring,
         playback_ring,
         playback_prefill_frames,
         control,

@@ -128,6 +128,7 @@ private:
     void restartPreparedTrackQuantized();
     void handleEngineSnapshot(const jam2::EngineSnapshot& snapshot);
     void handleEngineEvent(const jam2::EngineEvent& event);
+    void setTunerEnabled(bool enabled);
     void handleNetworkSnapshot(const Jam2NetworkOperationalSnapshot& snapshot);
     void handleConnectionDiagnostics(const ConnectionDiagnosticsSnapshot& snapshot);
     void updateRuntimeControls();
@@ -568,6 +569,8 @@ private:
     QSet<QString> localMeshPeerTokens_;
     QMap<QString, QString> meshPeerEndpoints_;
     std::uint64_t engineCommandCookie_ = 0;
+    std::uint64_t tunerCommandCookie_ = 0;
+    bool tunerRequestedEnabled_ = false;
     std::uint64_t practiceIdeaRevision_ = 0;
     QVector<bool> metronomeEnabledSteps_;
     QVector<bool> metronomeAccents_;

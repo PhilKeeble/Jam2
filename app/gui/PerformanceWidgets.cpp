@@ -4,6 +4,7 @@
 #include "GuiTheme.hpp"
 
 #include <QFontMetricsF>
+#include <QKeyEvent>
 #include <QLinearGradient>
 #include <QMouseEvent>
 #include <QPainter>
@@ -14,6 +15,7 @@
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace {
@@ -126,6 +128,15 @@ void PerformanceHomeWidget::setAudioPeaks(const jam2::EngineGuiPeakSnapshot& pea
         1.0);
 }
 
+void PerformanceHomeWidget::setTunerSnapshot(const jam2::EnginePitchSnapshot& snapshot)
+{
+    tuner_ = snapshot;
+    if (!tuner_.enabled) {
+        tunerExpanded_ = false;
+    }
+    update();
+}
+
 void PerformanceHomeWidget::setPeers(QVector<PerformancePeerPresentation> peers)
 {
     peers_ = std::move(peers);
@@ -175,7 +186,24 @@ void PerformanceHomeWidget::setTechnicalSummary(
 
 QString PerformanceHomeWidget::rendererStatsText() const
 {
-    return rendererStats_;
+    if (!tuner_.enabled) {
+        return rendererStats_ + QStringLiteral(" | tuner off");
+    }
+    const double averageUs = tuner_.analyzed_windows > 0
+        ? static_cast<double>(tuner_.processing_time_sum_us) /
+            static_cast<double>(tuner_.analyzed_windows)
+        : 0.0;
+    return rendererStats_ + QStringLiteral(
+        " | tuner tap %1 hops %2 windows %3 rejected %4 avg %5 us max %6 us ring %7/%8 overruns %9")
+        .arg(tuner_.callback_tap_enabled ? QStringLiteral("on") : QStringLiteral("off"))
+        .arg(static_cast<qulonglong>(tuner_.input_hops))
+        .arg(static_cast<qulonglong>(tuner_.analyzed_windows))
+        .arg(static_cast<qulonglong>(tuner_.rejected_windows))
+        .arg(averageUs, 0, 'f', 1)
+        .arg(static_cast<qulonglong>(tuner_.processing_time_max_us))
+        .arg(tuner_.ring_depth_frames)
+        .arg(tuner_.ring_capacity_frames)
+        .arg(static_cast<qulonglong>(tuner_.ring.overruns));
 }
 
 PerformanceHomeWidget::SongPosition PerformanceHomeWidget::songPosition(
@@ -353,6 +381,13 @@ void PerformanceHomeWidget::advanceAnimation()
     const double timeConstant = targetEnergy_ > envelope_ ? 0.045 : 0.78;
     const double coefficient = 1.0 - std::exp(-delta / timeConstant);
     envelope_ += (targetEnergy_ - envelope_) * coefficient;
+    if (tuner_.valid) {
+        displayedTunerCents_ +=
+            (qBound(-50.0, tuner_.cents, 50.0) - displayedTunerCents_) * 0.28;
+        tunerOrbOpacity_ += (1.0 - tunerOrbOpacity_) * 0.32;
+    } else {
+        tunerOrbOpacity_ *= 0.78;
+    }
     if (history_.isEmpty()) {
         history_.fill(0.0, 72);
     }
@@ -807,6 +842,22 @@ void PerformanceHomeWidget::paintHtmlStage()
         height() - margin - qMin(118, previewHeight),
         looperWidth,
         qMin(118, previewHeight));
+    if (tuner_.enabled) {
+        tunerHitRect_ = QRect(
+            looperHitRect_.left(),
+            looperHitRect_.top() - 10 - looperHitRect_.height(),
+            looperHitRect_.width(),
+            looperHitRect_.height());
+        tunerEnableHitRect_ = {};
+    } else {
+        tunerHitRect_ = {};
+        const int enableWidth = qMin(150, looperHitRect_.width());
+        tunerEnableHitRect_ = QRect(
+            looperHitRect_.right() - enableWidth + 1,
+            looperHitRect_.top() - 34,
+            enableWidth,
+            24);
+    }
     const quint64 currentBarStart =
         position.totalBeats > 0
         ? position.songBeat -
@@ -822,6 +873,23 @@ void PerformanceHomeWidget::paintHtmlStage()
             : 0,
         false);
     paintLooperLaunch(painter, looperHitRect_);
+    if (tuner_.enabled) {
+        paintTuner(painter, tunerHitRect_, false);
+    } else {
+        tunerOffHitRect_ = {};
+        painter.setPen(QPen(QColor(100, 121, 125, 205), 1));
+        painter.setBrush(QColor(7, 11, 12, 225));
+        painter.drawRoundedRect(tunerEnableHitRect_, 12, 12);
+        QFont enableFont(QStringLiteral("Bahnschrift"));
+        enableFont.setPointSizeF(7.5);
+        enableFont.setLetterSpacing(QFont::AbsoluteSpacing, 0.7);
+        painter.setFont(enableFont);
+        painter.setPen(QColor(184, 255, 248));
+        painter.drawText(
+            tunerEnableHitRect_,
+            Qt::AlignCenter,
+            QStringLiteral("TUNER \u00b7 ENABLE"));
+    }
 
     painter.setPen(QPen(QColor(77, 91, 95), 1));
     painter.setBrush(QColor(23, 32, 35));
@@ -831,6 +899,32 @@ void PerformanceHomeWidget::paintHtmlStage()
     for (const QPoint& screw : screws) {
         painter.drawEllipse(screw, 4, 4);
         painter.drawLine(screw + QPoint(-2, 1), screw + QPoint(2, -1));
+    }
+
+    if (tunerExpanded_ && tuner_.enabled) {
+        painter.fillRect(rect(), QColor(1, 3, 5, 150));
+        QSize overlaySize = currentBeatHitRect_.size();
+        overlaySize.setWidth(qBound(360, overlaySize.width(), width() - 96));
+        overlaySize.setHeight(qBound(210, overlaySize.height(), height() - 96));
+        tunerOverlayRect_ = QRect(QPoint(0, 0), overlaySize);
+        tunerOverlayRect_.moveCenter(rect().center());
+        paintTuner(painter, tunerOverlayRect_, true);
+        tunerOverlayCloseHitRect_ = QRect(
+            tunerOverlayRect_.right() - 34,
+            tunerOverlayRect_.top() + 10,
+            24,
+            24);
+        painter.setPen(QPen(QColor(164, 181, 184), 1.5));
+        painter.drawLine(
+            tunerOverlayCloseHitRect_.topLeft() + QPoint(7, 7),
+            tunerOverlayCloseHitRect_.bottomRight() - QPoint(6, 6));
+        painter.drawLine(
+            tunerOverlayCloseHitRect_.topRight() + QPoint(-7, 7),
+            tunerOverlayCloseHitRect_.bottomLeft() + QPoint(6, -6));
+    } else {
+        tunerOverlayRect_ = {};
+        tunerOverlayCloseHitRect_ = {};
+        tunerOverlayOffHitRect_ = {};
     }
 
     const qint64 elapsed = paintClock.nsecsElapsed();
@@ -1549,6 +1643,148 @@ void PerformanceHomeWidget::paintLooperLaunch(QPainter& painter, const QRect& bo
         dbText(trackGainDb_));
 }
 
+QString PerformanceHomeWidget::tunerNoteText() const
+{
+    if (!tuner_.valid || tuner_.midi_note < 0 || tuner_.midi_note > 127) {
+        return QString(QChar(0x2014));
+    }
+    static const std::array<const char*, 12> names{
+        "C", "C#", "D", "D#", "E", "F",
+        "F#", "G", "G#", "A", "A#", "B",
+    };
+    const int pitchClass = tuner_.midi_note % 12;
+    const int octave = tuner_.midi_note / 12 - 1;
+    return QStringLiteral("%1%2")
+        .arg(QString::fromLatin1(names[static_cast<std::size_t>(pitchClass)]))
+        .arg(octave);
+}
+
+void PerformanceHomeWidget::paintTuner(
+    QPainter& painter,
+    const QRect& bounds,
+    bool expanded)
+{
+    painter.save();
+    painter.setPen(QPen(QColor(78, 94, 98, 210), 1));
+    QLinearGradient panel(bounds.topLeft(), bounds.bottomRight());
+    panel.setColorAt(0.0, QColor(6, 10, 13, 245));
+    panel.setColorAt(0.55, QColor(11, 12, 22, 242));
+    panel.setColorAt(1.0, QColor(17, 8, 25, 242));
+    painter.setBrush(panel);
+    painter.drawRoundedRect(bounds, expanded ? 10 : 4, expanded ? 10 : 4);
+    painter.fillRect(
+        QRect(bounds.left(), bounds.top(), expanded ? 4 : 3, bounds.height()),
+        QColor(119, 83, 190));
+
+    QRect& offRect = expanded ? tunerOverlayOffHitRect_ : tunerOffHitRect_;
+    offRect = expanded
+        ? QRect(bounds.left() + 14, bounds.top() + 12, 25, 25)
+        : QRect(bounds.right() - 29, bounds.top() + 7, 21, 21);
+    const QPointF powerCenter = offRect.center();
+    const double powerRadius = expanded ? 7.0 : 5.5;
+    painter.setPen(QPen(QColor(145, 164, 168), expanded ? 1.7 : 1.3));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawArc(
+        QRectF(
+            powerCenter.x() - powerRadius,
+            powerCenter.y() - powerRadius,
+            powerRadius * 2.0,
+            powerRadius * 2.0),
+        45 * 16,
+        270 * 16);
+    painter.drawLine(
+        QPointF(powerCenter.x(), powerCenter.y() - powerRadius - 2.0),
+        QPointF(powerCenter.x(), powerCenter.y() + 1.0));
+
+    QFont noteFont(QStringLiteral("Bahnschrift"));
+    noteFont.setWeight(QFont::DemiBold);
+    noteFont.setPointSizeF(expanded ? 52.0 : 27.0);
+    noteFont.setLetterSpacing(QFont::AbsoluteSpacing, expanded ? 1.5 : 0.7);
+    painter.setFont(noteFont);
+    painter.setPen(tuner_.valid ? QColor(232, 237, 234) : QColor(91, 104, 107));
+    const QRect noteRect = expanded
+        ? bounds.adjusted(44, 24, -44, -bounds.height() / 2)
+        : bounds.adjusted(12, 7, -12, -bounds.height() / 2);
+    painter.drawText(noteRect, Qt::AlignHCenter | Qt::AlignVCenter, tunerNoteText());
+
+    const int railMargin = expanded ? 42 : 18;
+    const int railY = expanded
+        ? bounds.top() + qRound(bounds.height() * 0.72)
+        : bounds.bottom() - 27;
+    const int railLeft = bounds.left() + railMargin;
+    const int railRight = bounds.right() - railMargin;
+    const int railCenter = (railLeft + railRight) / 2;
+    const int railWidth = qMax(1, railRight - railLeft);
+
+    QLinearGradient railGradient(railLeft, railY, railRight, railY);
+    railGradient.setColorAt(0.0, QColor(119, 83, 190, tuner_.valid ? 180 : 70));
+    railGradient.setColorAt(0.48, QColor(61, 187, 190, tuner_.valid ? 210 : 80));
+    railGradient.setColorAt(0.52, QColor(61, 187, 190, tuner_.valid ? 210 : 80));
+    railGradient.setColorAt(1.0, QColor(190, 52, 91, tuner_.valid ? 180 : 70));
+    painter.setPen(QPen(QBrush(railGradient), expanded ? 3.0 : 2.0,
+        Qt::SolidLine, Qt::RoundCap));
+    painter.drawLine(railLeft, railY, railRight, railY);
+
+    painter.setPen(QPen(QColor(110, 132, 136, tuner_.valid ? 105 : 45), 1));
+    const int tickHeight = expanded ? 7 : 4;
+    for (int tick = -4; tick <= 4; ++tick) {
+        if (tick == 0) {
+            continue;
+        }
+        const int x = railCenter + tick * railWidth / 10;
+        painter.drawLine(x, railY - tickHeight, x, railY + tickHeight);
+    }
+
+    const bool inTune = tuner_.valid && std::abs(tuner_.cents) <= 5.0;
+    if (inTune) {
+        QRadialGradient lockGlow(QPointF(railCenter, railY), expanded ? 42.0 : 25.0);
+        lockGlow.setColorAt(0.0, QColor(255, 222, 145, 185));
+        lockGlow.setColorAt(0.30, QColor(226, 172, 83, 85));
+        lockGlow.setColorAt(1.0, QColor(226, 172, 83, 0));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(lockGlow);
+        const int radius = expanded ? 42 : 25;
+        painter.drawEllipse(QPointF(railCenter, railY), radius, radius);
+    }
+
+    painter.setPen(QPen(
+        inTune ? QColor(255, 222, 145) : QColor(174, 218, 214),
+        expanded ? 2.4 : 1.7));
+    painter.setBrush(QColor(5, 9, 12, 235));
+    const int targetRadius = expanded ? 9 : 6;
+    painter.drawEllipse(QPointF(railCenter, railY), targetRadius, targetRadius);
+
+    if (tunerOrbOpacity_ > 0.02) {
+        painter.setOpacity(qBound(0.0, tunerOrbOpacity_, 1.0));
+        const double normalized =
+            qBound(-50.0, displayedTunerCents_, 50.0) / 100.0 + 0.5;
+        const double orbX = static_cast<double>(railLeft) +
+            normalized * static_cast<double>(railWidth);
+        const QColor orbCore =
+            inTune ? QColor(255, 220, 139) : QColor(151, 119, 227);
+        painter.setPen(QPen(
+            QColor(orbCore.red(), orbCore.green(), orbCore.blue(), 80),
+            expanded ? 4.0 : 2.5,
+            Qt::SolidLine,
+            Qt::RoundCap));
+        painter.drawLine(QPointF(railCenter, railY), QPointF(orbX, railY));
+        QRadialGradient orb(QPointF(orbX, railY), expanded ? 18.0 : 11.0);
+        orb.setColorAt(0.0, QColor(255, 251, 235));
+        orb.setColorAt(0.20, orbCore);
+        orb.setColorAt(
+            0.58,
+            QColor(orbCore.red(), orbCore.green(), orbCore.blue(), 110));
+        orb.setColorAt(
+            1.0,
+            QColor(orbCore.red(), orbCore.green(), orbCore.blue(), 0));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(orb);
+        const int orbRadius = expanded ? 18 : 11;
+        painter.drawEllipse(QPointF(orbX, railY), orbRadius, orbRadius);
+    }
+    painter.restore();
+}
+
 void PerformanceHomeWidget::paintPeerRail(QPainter& painter, const QRect& bounds)
 {
     painter.setPen(QColor(188, 179, 198));
@@ -1614,6 +1850,33 @@ void PerformanceHomeWidget::mousePressEvent(QMouseEvent* event)
         return;
     }
     const QPoint point = event->position().toPoint();
+    if (tunerExpanded_) {
+        if (tunerOverlayCloseHitRect_.contains(point) ||
+            !tunerOverlayRect_.contains(point)) {
+            tunerExpanded_ = false;
+            update();
+            return;
+        }
+        if (tunerOverlayOffHitRect_.contains(point)) {
+            tunerExpanded_ = false;
+            if (onTunerEnabledChanged) onTunerEnabledChanged(false);
+            return;
+        }
+        return;
+    }
+    if (tunerEnableHitRect_.contains(point)) {
+        if (onTunerEnabledChanged) onTunerEnabledChanged(true);
+        return;
+    }
+    if (tunerOffHitRect_.contains(point)) {
+        if (onTunerEnabledChanged) onTunerEnabledChanged(false);
+        return;
+    }
+    if (tunerHitRect_.contains(point)) {
+        tunerExpanded_ = true;
+        update();
+        return;
+    }
     if (generateIdeaHitRect_.contains(point)) {
         if (onGenerateIdea) onGenerateIdea();
         return;
@@ -1724,4 +1987,15 @@ void PerformanceHomeWidget::wheelEvent(QWheelEvent* event)
         maximumOffset);
     event->accept();
     update();
+}
+
+void PerformanceHomeWidget::keyPressEvent(QKeyEvent* event)
+{
+    if (tunerExpanded_ && event->key() == Qt::Key_Escape) {
+        tunerExpanded_ = false;
+        update();
+        event->accept();
+        return;
+    }
+    QWidget::keyPressEvent(event);
 }

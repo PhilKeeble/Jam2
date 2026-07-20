@@ -1886,6 +1886,12 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         bool reattachReady = false;
         bool reattachFullBlock = false;
         bool reattachPartialBlock = false;
+        bool pitchDetected = false;
+        bool pitchDisabled = false;
+        bool pitchStoppedProcessing = false;
+        jam2::EnginePitchSnapshot lastPitch;
+        long lastPitchCallbacks = 0;
+        std::uint64_t lastPitchEngineFrame = 0;
         QString captureError;
         jam2::Engine engine;
         bool engineStarted = false;
@@ -1900,6 +1906,12 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             config.test_input = jam2::EngineTestInput::Tone440;
             engine.start(config);
             engineStarted = true;
+            jam2::EngineCommand enablePitch;
+            enablePitch.type = jam2::EngineCommandType::SetPitchAnalysisEnabled;
+            enablePitch.enabled = true;
+            if (!engine.submit(enablePitch)) {
+                throw std::runtime_error("pitch-analysis enable command queue unavailable");
+            }
 
             const auto exerciseAttachment = [&](jam2::NetworkCaptureAttachment attachment,
                                                 bool& ready,
@@ -1915,13 +1927,20 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                     return;
                 }
                 std::array<std::int32_t, 64> packet{};
-                const std::uint64_t exerciseDeadline = jam2::monotonic_us() + 100000ULL;
+                const std::uint64_t exerciseDeadline = jam2::monotonic_us() + 250000ULL;
                 while (jam2::monotonic_us() < exerciseDeadline) {
                     const jam2::CapturedAudioBlock captured = engine.popNetworkCapture(attachment, packet);
                     if (captured.frames == packet.size()) {
                         fullBlock = true;
                     } else if (captured.frames != 0) {
                         partialBlock = true;
+                    }
+                    const jam2::EnginePitchSnapshot pitch = engine.snapshot().pitch;
+                    if (pitch.enabled &&
+                        pitch.valid &&
+                        pitch.midi_note == 69 &&
+                        std::abs(pitch.cents) <= 5.0) {
+                        pitchDetected = true;
                     }
                     std::this_thread::sleep_for(std::chrono::microseconds(50));
                 }
@@ -1938,6 +1957,41 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             attachment = engine.attachNetworkCapture();
             exerciseAttachment(attachment, reattachReady, reattachFullBlock, reattachPartialBlock);
             engine.detachNetworkCapture(attachment);
+            const std::uint64_t pitchDeadline = jam2::monotonic_us() + 2000000ULL;
+            while (jam2::monotonic_us() < pitchDeadline) {
+                const jam2::EngineSnapshot snapshot = engine.snapshot();
+                lastPitch = snapshot.pitch;
+                lastPitchCallbacks = snapshot.callbacks;
+                lastPitchEngineFrame = snapshot.engine_frame;
+                if (snapshot.pitch.enabled &&
+                    snapshot.pitch.valid &&
+                    snapshot.pitch.midi_note == 69 &&
+                    std::abs(snapshot.pitch.cents) <= 5.0) {
+                    pitchDetected = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            jam2::EngineCommand disablePitch;
+            disablePitch.type = jam2::EngineCommandType::SetPitchAnalysisEnabled;
+            disablePitch.enabled = false;
+            if (!engine.submit(disablePitch)) {
+                throw std::runtime_error("pitch-analysis disable command queue unavailable");
+            }
+            const std::uint64_t disableDeadline = jam2::monotonic_us() + 1000000ULL;
+            std::uint64_t stoppedWindows = 0;
+            while (jam2::monotonic_us() < disableDeadline) {
+                const jam2::EngineSnapshot snapshot = engine.snapshot();
+                if (!snapshot.pitch.enabled) {
+                    pitchDisabled = true;
+                    stoppedWindows = snapshot.pitch.analyzed_windows;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+            pitchStoppedProcessing = pitchDisabled &&
+                engine.snapshot().pitch.analyzed_windows == stoppedWindows;
         } catch (const std::exception& exception) {
             captureError = QString::fromUtf8(exception.what());
         }
@@ -1951,6 +2005,88 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         record(QStringLiteral("engine-capture.exact-64-from-32-reattach"),
             captureError.isEmpty() && reattachReady && reattachFullBlock && !reattachPartialBlock,
             captureError);
+        record(QStringLiteral("engine-pitch.detects-local-tone-440-with-network-capture"),
+            captureError.isEmpty() && pitchDetected,
+            captureError.isEmpty() && !pitchDetected
+                ? QStringLiteral(
+                    "enabled=%1 tap=%2 valid=%3 hz=%4 cents=%5 confidence=%6 hops=%7 analyzed=%8 rejected=%9 depth=%10 overruns=%11 callbacks=%12 engine_frame=%13")
+                    .arg(lastPitch.enabled)
+                    .arg(lastPitch.callback_tap_enabled)
+                    .arg(lastPitch.valid)
+                    .arg(lastPitch.frequency_hz, 0, 'f', 3)
+                    .arg(lastPitch.cents, 0, 'f', 3)
+                    .arg(lastPitch.confidence, 0, 'f', 3)
+                    .arg(static_cast<qulonglong>(lastPitch.input_hops))
+                    .arg(static_cast<qulonglong>(lastPitch.analyzed_windows))
+                    .arg(static_cast<qulonglong>(lastPitch.rejected_windows))
+                    .arg(lastPitch.ring_depth_frames)
+                    .arg(static_cast<qulonglong>(lastPitch.ring.overruns))
+                    .arg(lastPitchCallbacks)
+                    .arg(static_cast<qulonglong>(lastPitchEngineFrame))
+                : captureError);
+        record(QStringLiteral("engine-pitch.stops-processing-when-disabled"),
+            captureError.isEmpty() && pitchDisabled && pitchStoppedProcessing,
+            captureError);
+    }
+    {
+        bool bassPitchDetected = false;
+        jam2::EnginePitchSnapshot lastPitch;
+        QString pitchError;
+        jam2::Engine engine;
+        bool engineStarted = false;
+        try {
+            jam2::EngineConfig config;
+            config.backend = jam2::EngineAudioBackend::Headless;
+            config.sample_rate = 44100;
+            config.audio_buffer_frames = 256;
+            config.test_input = jam2::EngineTestInput::ToneBassB0;
+            engine.start(config);
+            engineStarted = true;
+
+            jam2::EngineCommand enablePitch;
+            enablePitch.type = jam2::EngineCommandType::SetPitchAnalysisEnabled;
+            enablePitch.enabled = true;
+            if (!engine.submit(enablePitch)) {
+                throw std::runtime_error("bass pitch-analysis enable command queue unavailable");
+            }
+
+            const std::uint64_t deadline = jam2::monotonic_us() + 3000000ULL;
+            while (jam2::monotonic_us() < deadline) {
+                lastPitch = engine.snapshot().pitch;
+                if (lastPitch.enabled &&
+                    lastPitch.valid &&
+                    lastPitch.midi_note == 23 &&
+                    std::abs(lastPitch.cents) <= 5.0) {
+                    bassPitchDetected = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        } catch (const std::exception& exception) {
+            pitchError = QString::fromUtf8(exception.what());
+        }
+        if (engineStarted) {
+            engine.requestStop();
+            engine.join();
+        }
+        record(QStringLiteral("engine-pitch.detects-five-string-bass-low-b"),
+            pitchError.isEmpty() && bassPitchDetected,
+            pitchError.isEmpty() && !bassPitchDetected
+                ? QStringLiteral(
+                    "enabled=%1 tap=%2 valid=%3 midi=%4 hz=%5 cents=%6 confidence=%7 hops=%8 analyzed=%9 rejected=%10 depth=%11 overruns=%12")
+                    .arg(lastPitch.enabled)
+                    .arg(lastPitch.callback_tap_enabled)
+                    .arg(lastPitch.valid)
+                    .arg(lastPitch.midi_note)
+                    .arg(lastPitch.frequency_hz, 0, 'f', 3)
+                    .arg(lastPitch.cents, 0, 'f', 3)
+                    .arg(lastPitch.confidence, 0, 'f', 3)
+                    .arg(static_cast<qulonglong>(lastPitch.input_hops))
+                    .arg(static_cast<qulonglong>(lastPitch.analyzed_windows))
+                    .arg(static_cast<qulonglong>(lastPitch.rejected_windows))
+                    .arg(lastPitch.ring_depth_frames)
+                    .arg(static_cast<qulonglong>(lastPitch.ring.overruns))
+                : pitchError);
     }
     {
         bool muted = false;

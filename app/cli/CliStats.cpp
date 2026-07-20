@@ -576,6 +576,7 @@ CsvStatsLog::AudioSnapshot make_audio_snapshot(
     snapshot.playback_ratio_ppm = engine_snapshot.playback_ratio_ppm;
     snapshot.playback_ratio_applied_ppm = engine_snapshot.playback_ratio_applied_ppm;
     snapshot.playback_ratio_ramping = engine_snapshot.playback_ratio_ramping;
+    snapshot.pitch = engine_snapshot.pitch;
     return snapshot;
 }
 

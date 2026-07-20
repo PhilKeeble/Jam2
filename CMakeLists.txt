@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.24)
 project(Jam2
     VERSION 0.1.0
     DESCRIPTION "Low-latency direct UDP music collaboration tool"
-    LANGUAGES CXX
+    LANGUAGES C CXX
 )
 
 if(CMAKE_CONFIGURATION_TYPES)
@@ -23,11 +23,25 @@ function(jam2_create_release_dirs target)
     add_custom_command(TARGET ${target} POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E make_directory
             "${JAM2_RELEASE_DIR}"
+            "${JAM2_RELEASE_DIR}/licenses"
             "${JAM2_RELEASE_DIR}/logs"
             "${JAM2_RELEASE_DIR}/captures"
             "${JAM2_RELEASE_DIR}/jam_recordings"
             "${JAM2_RELEASE_DIR}/songs"
             "${JAM2_RELEASE_DIR}/received_tracks"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/LICENSE"
+            "${CMAKE_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+            "${JAM2_RELEASE_DIR}"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/libs/third_party/aubio/COPYING"
+            "${JAM2_RELEASE_DIR}/licenses/aubio-COPYING"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/libs/third_party/signalsmith-stretch/LICENSE.txt"
+            "${JAM2_RELEASE_DIR}/licenses/signalsmith-stretch-LICENSE.txt"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/libs/third_party/signalsmith-linear/LICENSE.txt"
+            "${JAM2_RELEASE_DIR}/licenses/signalsmith-linear-LICENSE.txt"
         VERBATIM
     )
 endfunction()

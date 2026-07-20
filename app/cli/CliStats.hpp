@@ -440,6 +440,7 @@ public:
         int playback_ratio_ppm = 1000000;
         int playback_ratio_applied_ppm = 1000000;
         bool playback_ratio_ramping = false;
+        jam2::EnginePitchSnapshot pitch;
     };
 
     CsvStatsLog(const std::filesystem::path& folder, Context context)
@@ -560,7 +561,11 @@ public:
                 "audio_applied_playback_ratio,audio_playback_ratio_ramping,"
                 "metronome_compensation_base_frames,metronome_compensation_base_ms,"
                 "metronome_compensation_average_latency_frames,metronome_compensation_average_latency_ms,"
-                "metronome_compensation_peer_count\n";
+                "metronome_compensation_peer_count,"
+                "tuner_enabled,tuner_valid,tuner_frequency_hz,tuner_cents,tuner_confidence,"
+                "tuner_analyzed_windows,tuner_rejected_windows,tuner_processing_avg_us,"
+                "tuner_processing_max_us,tuner_ring_capacity_frames,tuner_ring_depth_frames,"
+                "tuner_ring_overruns\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -961,7 +966,22 @@ public:
              << frames_to_ms(
                     static_cast<std::size_t>(stats.metronome_compensation_average_latency_frames),
                     active_sample_rate) << ','
-             << stats.metronome_compensation_peer_count;
+             << stats.metronome_compensation_peer_count << ','
+             << (audio.pitch.enabled ? "yes" : "no") << ','
+             << (audio.pitch.valid ? "yes" : "no") << ','
+             << audio.pitch.frequency_hz << ','
+             << audio.pitch.cents << ','
+             << audio.pitch.confidence << ','
+             << audio.pitch.analyzed_windows << ','
+             << audio.pitch.rejected_windows << ','
+             << (audio.pitch.analyzed_windows > 0
+                    ? static_cast<double>(audio.pitch.processing_time_sum_us) /
+                        static_cast<double>(audio.pitch.analyzed_windows)
+                    : 0.0) << ','
+             << audio.pitch.processing_time_max_us << ','
+             << audio.pitch.ring_capacity_frames << ','
+             << audio.pitch.ring_depth_frames << ','
+             << audio.pitch.ring.overruns;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -977,7 +997,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(367);
+        std::vector<std::string> fields(379);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1307,6 +1327,21 @@ public:
             static_cast<std::size_t>(stats.metronome_compensation_average_latency_frames),
             options.sample_rate));
         set(366, stats.metronome_compensation_peer_count);
+        fields[367] = audio.pitch.enabled ? "yes" : "no";
+        fields[368] = audio.pitch.valid ? "yes" : "no";
+        set(369, audio.pitch.frequency_hz);
+        set(370, audio.pitch.cents);
+        set(371, audio.pitch.confidence);
+        set(372, audio.pitch.analyzed_windows);
+        set(373, audio.pitch.rejected_windows);
+        set(374, audio.pitch.analyzed_windows > 0
+            ? static_cast<double>(audio.pitch.processing_time_sum_us) /
+                static_cast<double>(audio.pitch.analyzed_windows)
+            : 0.0);
+        set(375, audio.pitch.processing_time_max_us);
+        set(376, audio.pitch.ring_capacity_frames);
+        set(377, audio.pitch.ring_depth_frames);
+        set(378, audio.pitch.ring.overruns);
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {

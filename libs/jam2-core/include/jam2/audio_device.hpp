@@ -173,6 +173,7 @@ struct StreamControl {
     std::atomic<std::uint64_t> network_capture_stale_frames_discarded{0};
     std::atomic<bool> network_playback_enabled{false};
     std::atomic<bool> network_playback_enabled_applied{false};
+    std::atomic<bool> pitch_analysis_enabled{false};
     std::atomic<std::uint32_t> input_latency_frames{0};
     std::atomic<std::uint32_t> output_latency_frames{0};
     std::atomic<std::int64_t> recording_latency_adjustment_frames{0};
@@ -257,6 +258,7 @@ std::unique_ptr<DeviceStream> start_duplex_stream(
     InputChannels input_channels,
     ChannelSelection channels,
     MonoRingBuffer& capture_ring,
+    MonoRingBuffer& pitch_ring,
     MonoRingBuffer& playback_ring,
     std::size_t playback_prefill_frames,
     StreamControl& control,
@@ -269,5 +271,15 @@ bool prepare_network_capture_callback(
     StreamControl& control,
     MonoRingBuffer& capture_ring,
     std::uint64_t callback_frame) noexcept;
+
+inline void push_pitch_analysis_callback(
+    StreamControl& control,
+    MonoRingBuffer& pitch_ring,
+    std::span<const std::int32_t> input) noexcept
+{
+    if (control.pitch_analysis_enabled.load(std::memory_order_acquire)) {
+        (void)pitch_ring.push(input);
+    }
+}
 
 } // namespace jam2::audio
