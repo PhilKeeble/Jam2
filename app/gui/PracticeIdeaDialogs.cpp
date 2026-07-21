@@ -8,6 +8,7 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QVBoxLayout>
 
@@ -30,6 +31,7 @@ QComboBox* barsCombo(QWidget* parent)
     auto* combo = new QComboBox(parent);
     combo->addItem(QStringLiteral("Random"), 0);
     for (int bars : {4, 8, 12, 16}) combo->addItem(QString::number(bars), bars);
+    combo->setCurrentIndex(combo->findData(16));
     return combo;
 }
 
@@ -37,41 +39,31 @@ QComboBox* complexityCombo(QWidget* parent)
 {
     auto* combo = new QComboBox(parent);
     const QStringList names{
-        QStringLiteral("Grounded"),
-        QStringLiteral("Diatonic"),
-        QStringLiteral("Colour"),
-        QStringLiteral("Borrowed"),
-        QStringLiteral("Tonicised"),
-        QStringLiteral("Modulating"),
-        QStringLiteral("Chromatic"),
-        QStringLiteral("Expert"),
+        QStringLiteral("Diatonic / modal baseline"),
+        QStringLiteral("Inversions, suspensions, neighbours"),
+        QStringLiteral("Modal interchange"),
+        QStringLiteral("Secondary dominants"),
+        QStringLiteral("Chromatic passing movement"),
+        QStringLiteral("Tonicisation and backdoor motion"),
+        QStringLiteral("Substitutions and chromatic mediants"),
+        QStringLiteral("Temporary modulation"),
     };
     for (int level = 1; level <= names.size(); ++level) {
         combo->addItem(QStringLiteral("%1 — %2").arg(level).arg(names.at(level - 1)), level);
     }
-    combo->setCurrentIndex(3);
+    combo->setCurrentIndex(1);
     combo->setToolTip(QStringLiteral(
-        "Changes harmonic and rhythmic difficulty without changing style, tempo, or meter."));
+        "Unlocks a broader theory palette and subtle groove variation; it does not simply make chords denser or drums busier."));
     return combo;
 }
 
-void refreshCharacterCombo(QComboBox* character, int style, bool chord)
+void refreshCharacterCombo(QComboBox* character)
 {
     character->clear();
     character->addItem(QStringLiteral("Random"), QString());
-    QStringList values;
-    if (style < 0) {
-        const int styleCount = chord ? chordStyleNames().size() : beatStyleNames().size();
-        for (int candidate = 0; candidate < styleCount; ++candidate) {
-            const QStringList candidates = chord ? chordCharacters(candidate) : beatCharacters(candidate);
-            for (const QString& value : candidates) {
-                if (!values.contains(value)) values.push_back(value);
-            }
-        }
-    } else {
-        values = chord ? chordCharacters(style) : beatCharacters(style);
-    }
-    for (const QString& value : values) character->addItem(value, value);
+    const QStringList names = characterNames();
+    const QStringList ids = characterIds();
+    for (int index = 0; index < names.size(); ++index) character->addItem(names.at(index), ids.at(index));
 }
 
 } // namespace
@@ -86,9 +78,7 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(QWidget* parent, int beatsPer
     QComboBox* character = new QComboBox(&dialog);
     QComboBox* bars = barsCombo(&dialog);
     QComboBox* complexity = complexityCombo(&dialog);
-    refreshCharacterCombo(character, -1, true);
-    QObject::connect(style, qOverload<int>(&QComboBox::currentIndexChanged), &dialog,
-        [style, character](int) { refreshCharacterCombo(character, style->currentData().toInt(), true); });
+    refreshCharacterCombo(character);
     form->addRow(QStringLiteral("Key"), key);
     form->addRow(QStringLiteral("Style"), style);
     form->addRow(QStringLiteral("Character"), character);
@@ -111,8 +101,9 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(QWidget* parent, int beatsPer
     if (dialog.exec() != QDialog::Accepted) return std::nullopt;
     ChordIdeaRequest request;
     request.key = key->currentData().toInt();
-    request.style = style->currentData().toInt();
-    request.character = character->currentData().toString();
+    const int styleIndex = style->currentData().toInt();
+    request.styleId = styleIndex >= 0 ? styleIds().value(styleIndex) : QString();
+    request.characterId = character->currentData().toString();
     request.bars = bars->currentData().toInt();
     request.beatsPerBar = beatsPerBar;
     request.harmonicComplexity = complexity->currentData().toInt();
@@ -139,10 +130,11 @@ std::optional<ReferenceRenderSettings> askForReferenceRender(
     melody->setChecked(defaults.renderMelody && melodyBeats > 0);
     melody->setEnabled(melodyBeats > 0);
     auto* voicing = new QComboBox(&dialog);
+    voicing->addItem(QStringLiteral("Style default"), static_cast<int>(ChordVoicing::StyleDefault));
     voicing->addItem(QStringLiteral("Close"), static_cast<int>(ChordVoicing::Close));
     voicing->addItem(QStringLiteral("Spread"), static_cast<int>(ChordVoicing::Spread));
     voicing->addItem(QStringLiteral("Voice-led"), static_cast<int>(ChordVoicing::VoiceLed));
-    voicing->setCurrentIndex(static_cast<int>(defaults.voicing));
+    voicing->setCurrentIndex(voicing->findData(static_cast<int>(defaults.voicing)));
     int commonBeats = 0;
     for (int beats : {chordBeats, beatBeats, melodyBeats}) {
         if (beats <= 0) continue;
@@ -202,6 +194,23 @@ std::optional<ReferenceRenderSettings> askForReferenceRender(
     defaults.attackMs = attack->value();
     defaults.releaseMs = release->value();
     return defaults;
+}
+
+void showIdeaDetails(QWidget* parent, const GenerationRecipe& recipe, bool contentChanged)
+{
+    QDialog dialog(parent);
+    dialog.setWindowTitle(QStringLiteral("Idea Details"));
+    dialog.resize(760, 660);
+    auto* text = new QPlainTextEdit(&dialog);
+    text->setReadOnly(true);
+    text->setPlainText(generationRecipeDetails(recipe, contentChanged));
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->addWidget(text, 1);
+    layout->addWidget(buttons);
+    dialog.exec();
 }
 
 } // namespace jam2::practice

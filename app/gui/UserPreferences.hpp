@@ -77,7 +77,7 @@ struct LoggingPreference {
 struct InputRecordingPreference {
     QString outputFolder;
     bool recordUntilStopped = true;
-    int durationSeconds = 30;
+    int durationBars = 8;
     bool countIn = true;
     int countInBars = 1;
     bool countInMetronome = true;
@@ -90,7 +90,7 @@ struct LoopbackRecordingPreference {
     QString sourceId = QStringLiteral("default");
     QString sourceName = QStringLiteral("[default] System mix");
     bool recordUntilStopped = true;
-    int durationSeconds = 30;
+    int durationBars = 8;
     bool trigger = false;
     double triggerThresholdDb = -45.0;
     int triggerHoldMs = 50;

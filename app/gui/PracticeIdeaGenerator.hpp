@@ -8,39 +8,22 @@
 
 namespace jam2::practice {
 
-enum class ChordStyle {
-    FunctionalPop,
-    BluesForm,
-    ModalVamp,
-    JazzTurnaround,
-    ModernMetal,
-};
-
-enum class BeatStyle {
-    StraightRock,
-    HalfTime,
-    Funk,
-    FourOnTheFloor,
-    BluesShuffle,
-    ModernMetal,
-};
-
 struct ChordIdeaRequest {
     int key = -1;
-    int style = -1;
-    QString character;
-    int bars = 0;
+    QString styleId;
+    QString characterId;
+    int bars = 16;
     int beatsPerBar = 4;
-    int harmonicComplexity = 4;
-    int rhythmicComplexity = 4;
+    int harmonicComplexity = 2;
+    int rhythmicComplexity = 2;
 };
 
 struct BeatIdeaRequest {
-    int style = -1;
-    QString character;
-    int bars = 0;
+    QString styleId;
+    QString characterId;
+    int bars = 16;
     int beatsPerBar = 4;
-    int rhythmicComplexity = 4;
+    int rhythmicComplexity = 2;
 };
 
 struct GeneratedPracticeIdea {
@@ -50,13 +33,20 @@ struct GeneratedPracticeIdea {
     int clickDivision = 1;
     QVector<bool> clickEnabled;
     QVector<bool> clickAccents;
+    GenerationRecipe recipe;
 };
 
 QStringList chordStyleNames();
 QStringList beatStyleNames();
-QStringList chordCharacters(int style);
-QStringList beatCharacters(int style);
+QStringList styleIds();
+QStringList grooveFamilyIds(const QString& styleId);
+QStringList grooveFamilyNames(const QString& styleId);
+QStringList characterNames();
+QStringList characterIds();
+QString styleNameForId(const QString& id);
 QStringList keyNames();
+QString generatedChordFingerprint(const SongSection& section);
+QString generatedBeatFingerprint(const SongSection& section);
 
 GeneratedPracticeIdea generateCoupledPracticeIdea(const ChordIdeaRequest& request);
 

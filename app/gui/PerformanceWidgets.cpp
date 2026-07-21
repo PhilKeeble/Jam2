@@ -1244,15 +1244,14 @@ void PerformanceHomeWidget::paintBeatPreview(
         Qt::AlignLeft | Qt::AlignTop,
         current ? QStringLiteral("CURRENT BAR") : QStringLiteral("NEXT BAR"));
     const int headerHeight = 35;
-    const int laneCount = 6;
-    const QStringList laneNames{
-        QStringLiteral("Tom"),
-        QStringLiteral("Crash"),
-        QStringLiteral("Open HH"),
-        QStringLiteral("Closed HH"),
-        QStringLiteral("Snare"),
-        QStringLiteral("Kick"),
-    };
+    const QStringList laneNames = BeatGridModel::beatVisualLaneNames();
+    const QStringList storedLaneNames = BeatGridModel::beatLaneNames();
+    const int laneCount = laneNames.size();
+    QVector<int> laneIndices;
+    laneIndices.reserve(laneCount);
+    for (const QString& laneName : laneNames) {
+        laneIndices.push_back(storedLaneNames.indexOf(laneName));
+    }
     QFont laneFont = font();
     laneFont.setPointSizeF(qMax(8.0, font().pointSizeF() - 1.0));
     const QFontMetricsF laneMetrics(laneFont);
@@ -1313,7 +1312,6 @@ void PerformanceHomeWidget::paintBeatPreview(
                 legendLabels.at(item));
         }
     }
-    const QVector<int> laneIndices{5, 4, 3, 2, 1, 0};
     painter.setFont(laneFont);
     for (int lane = 0; lane < laneCount; ++lane) {
         painter.setPen(QColor(190, 181, 198));
@@ -1352,6 +1350,7 @@ void PerformanceHomeWidget::paintBeatPreview(
         }
         const int division = qMax(1, pattern->division);
         for (int lane = 0; lane < laneCount; ++lane) {
+            if (laneIndices.at(lane) < 0) continue;
             const QString hits = normalizedHits(
                 pattern->lanes.value(laneIndices.at(lane)),
                 division);

@@ -9,6 +9,7 @@ class QWidget;
 namespace jam2::practice {
 
 enum class ChordVoicing {
+    StyleDefault,
     Close,
     Spread,
     VoiceLed,
@@ -18,7 +19,7 @@ struct ReferenceRenderSettings {
     bool renderChords = true;
     bool renderDrums = true;
     bool renderMelody = false;
-    ChordVoicing voicing = ChordVoicing::VoiceLed;
+    ChordVoicing voicing = ChordVoicing::StyleDefault;
     int sampleRate = 48000;
     double bpm = 120.0;
     double chordLevel = 0.32;
@@ -35,5 +36,6 @@ std::optional<ReferenceRenderSettings> askForReferenceRender(
     int chordBeats,
     int beatBeats,
     int melodyBeats);
+void showIdeaDetails(QWidget* parent, const GenerationRecipe& recipe, bool contentChanged);
 
 } // namespace jam2::practice

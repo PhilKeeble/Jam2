@@ -23,7 +23,9 @@ struct GuiLoopbackOptions {
     QString source = QStringLiteral("default");
     QString outputPath;
     int targetSampleRate = 0;
-    int durationMs = 0;
+    int durationBars = 0;
+    double bpm = 120.0;
+    int beatsPerBar = 4;
     bool trigger = false;
     double triggerThresholdDb = -45.0;
     int triggerHoldMs = 50;

@@ -95,6 +95,8 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/GuiControlMessageRouter.hpp
     gui/GuiPresentation.cpp
     gui/GuiPresentation.hpp
+    gui/GenerationRecipe.cpp
+    gui/GenerationRecipe.hpp
     gui/LooperProject.cpp
     gui/LooperProject.hpp
     gui/MainWindow.cpp

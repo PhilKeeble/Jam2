@@ -63,6 +63,22 @@ void GuiControlMessageRouter::dispatch(
             message.value(QStringLiteral("beat")).toInt(),
             message.value(QStringLiteral("division")).toInt(4));
         if (handlers.refreshSongView) handlers.refreshSongView(QStringLiteral("beat"));
+    } else if (type == QStringLiteral("music.division")) {
+        if (handlers.chordModel == nullptr) return;
+        handlers.chordModel->setMusicalDivision(
+            message.value(QStringLiteral("section")).toInt(),
+            message.value(QStringLiteral("beat")).toInt(),
+            message.value(QStringLiteral("division")).toInt(1));
+        if (handlers.refreshSongView) handlers.refreshSongView(QStringLiteral("chord"));
+    } else if (type == QStringLiteral("music.step")) {
+        if (handlers.chordModel == nullptr) return;
+        handlers.chordModel->setMusicalStep(
+            message.value(QStringLiteral("section")).toInt(),
+            message.value(QStringLiteral("beat")).toInt(),
+            message.value(QStringLiteral("step")).toInt(),
+            message.value(QStringLiteral("lane")).toString(),
+            message.value(QStringLiteral("text")).toString());
+        if (handlers.refreshSongView) handlers.refreshSongView(QStringLiteral("chord"));
     } else if (type == QStringLiteral("song.set")) {
         if (handlers.songSet) handlers.songSet(message, sourcePeerToken);
     } else if (type == QStringLiteral("track.ready")) {

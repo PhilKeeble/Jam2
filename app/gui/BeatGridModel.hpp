@@ -1,5 +1,7 @@
 #pragma once
 
+#include "GenerationRecipe.hpp"
+
 #include <QJsonObject>
 #include <QList>
 #include <QString>
@@ -9,6 +11,24 @@
 struct BeatPattern {
     int division = 4;
     QVector<QString> lanes;
+};
+
+enum class MusicalStepState {
+    Rest = 0,
+    Hold = 1,
+    Onset = 2,
+};
+
+struct MusicalStep {
+    MusicalStepState state = MusicalStepState::Rest;
+    QString value;
+    int velocity = 88;
+};
+
+struct MusicalBeatPattern {
+    int division = 1;
+    QVector<MusicalStep> chords;
+    QVector<MusicalStep> melody;
 };
 
 struct SongSection {
@@ -21,13 +41,9 @@ struct SongSection {
     QVector<QString> beatNotes;
     QVector<QString> lyrics;
     QVector<BeatPattern> beatPatterns;
+    QVector<MusicalBeatPattern> musicalPatterns;
     QString generatedKind;
-    QString generatedKey;
-    QString generatedStyle;
-    QString generatedCharacter;
-    int generatedBars = 0;
-    int generatedHarmonicComplexity = 0;
-    int generatedRhythmicComplexity = 0;
+    jam2::practice::GenerationRecipe generatedRecipe;
 };
 
 class BeatGridModel {
@@ -45,6 +61,8 @@ public:
     void setCell(int section, const QString& lane, int beat, const QString& text);
     void setBeatDivision(int section, int beat, int division);
     void setBeatHit(int section, int beat, int lane, const QString& text);
+    void setMusicalDivision(int section, int beat, int division);
+    void setMusicalStep(int section, int beat, int step, const QString& lane, const QString& text);
     void resizeSection(int section, int beats);
     void resizeAllSections(int beats);
     void addSection(int beats = -1);
@@ -58,12 +76,16 @@ public:
     bool loadJson(const QJsonObject& object);
 
     static QStringList beatLaneNames();
+    static QStringList beatVisualLaneNames();
     static QList<int> beatDivisionValues();
     static QString beatDivisionLabel(int division);
+    static QList<int> musicalDivisionValues();
+    static QString musicalDivisionLabel(int division);
 
 private:
     static QString sectionId(const QString& value = {});
     static int normalizedDivision(int division);
+    static int normalizedMusicalDivision(int division);
     static void normalize(SongSection& section);
 
     QString title_ = QStringLiteral("Untitled Jam");

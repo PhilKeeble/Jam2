@@ -105,7 +105,7 @@ void loadInputRecording(QSettings& s, InputRecordingPreference& v)
 {
     v.outputFolder = s.value(QStringLiteral("output_folder"), v.outputFolder).toString();
     v.recordUntilStopped = s.value(QStringLiteral("record_until_stopped"), v.recordUntilStopped).toBool();
-    v.durationSeconds = s.value(QStringLiteral("duration_seconds"), v.durationSeconds).toInt();
+    v.durationBars = s.value(QStringLiteral("duration_bars"), v.durationBars).toInt();
     v.countIn = s.value(QStringLiteral("count_in"), v.countIn).toBool();
     v.countInBars = s.value(QStringLiteral("count_in_bars"), v.countInBars).toInt();
     v.countInMetronome = s.value(QStringLiteral("count_in_metronome"), v.countInMetronome).toBool();
@@ -118,7 +118,7 @@ void saveInputRecording(QSettings& s, const InputRecordingPreference& v)
 {
     s.setValue(QStringLiteral("output_folder"), v.outputFolder);
     s.setValue(QStringLiteral("record_until_stopped"), v.recordUntilStopped);
-    s.setValue(QStringLiteral("duration_seconds"), v.durationSeconds);
+    s.setValue(QStringLiteral("duration_bars"), v.durationBars);
     s.setValue(QStringLiteral("count_in"), v.countIn);
     s.setValue(QStringLiteral("count_in_bars"), v.countInBars);
     s.setValue(QStringLiteral("count_in_metronome"), v.countInMetronome);
@@ -132,7 +132,7 @@ void loadLoopbackRecording(QSettings& s, LoopbackRecordingPreference& v)
     v.sourceId = s.value(QStringLiteral("source_id"), v.sourceId).toString();
     v.sourceName = s.value(QStringLiteral("source_name"), v.sourceName).toString();
     v.recordUntilStopped = s.value(QStringLiteral("record_until_stopped"), v.recordUntilStopped).toBool();
-    v.durationSeconds = s.value(QStringLiteral("duration_seconds"), v.durationSeconds).toInt();
+    v.durationBars = s.value(QStringLiteral("duration_bars"), v.durationBars).toInt();
     v.trigger = s.value(QStringLiteral("trigger"), v.trigger).toBool();
     v.triggerThresholdDb = s.value(QStringLiteral("trigger_threshold_db"), v.triggerThresholdDb).toDouble();
     v.triggerHoldMs = s.value(QStringLiteral("trigger_hold_ms"), v.triggerHoldMs).toInt();
@@ -149,7 +149,7 @@ void saveLoopbackRecording(QSettings& s, const LoopbackRecordingPreference& v)
     s.setValue(QStringLiteral("source_id"), v.sourceId);
     s.setValue(QStringLiteral("source_name"), v.sourceName);
     s.setValue(QStringLiteral("record_until_stopped"), v.recordUntilStopped);
-    s.setValue(QStringLiteral("duration_seconds"), v.durationSeconds);
+    s.setValue(QStringLiteral("duration_bars"), v.durationBars);
     s.setValue(QStringLiteral("trigger"), v.trigger);
     s.setValue(QStringLiteral("trigger_threshold_db"), v.triggerThresholdDb);
     s.setValue(QStringLiteral("trigger_hold_ms"), v.triggerHoldMs);

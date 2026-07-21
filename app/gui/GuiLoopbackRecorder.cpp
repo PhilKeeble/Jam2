@@ -1,5 +1,7 @@
 #include "GuiLoopbackRecorder.hpp"
 
+#include "RecordingTiming.hpp"
+
 #include "audio_device.hpp"
 
 #include <QDir>
@@ -97,9 +99,13 @@ std::int16_t doubleToI16(double value)
 
 class TakeAccumulator {
 public:
-    TakeAccumulator(const GuiLoopbackOptions& options, int sampleRate)
+    TakeAccumulator(
+        const GuiLoopbackOptions& options,
+        int sampleRate,
+        std::uint64_t targetRecordedFrames)
         : options_(options),
           sampleRate_(std::max(1, sampleRate)),
+          targetRecordedFrames_(targetRecordedFrames),
           triggerThreshold_(ampFromDb(options.triggerThresholdDb)),
           tailThreshold_(ampFromDb(options.tailSilenceDb)),
           triggerHoldFrames_(static_cast<std::uint64_t>(std::max(0, options.triggerHoldMs)) * sampleRate_ / 1000),
@@ -137,7 +143,16 @@ public:
             triggerFired_ = true;
         }
         samples_.push_back(sample);
+        ++recordedFrames_;
     }
+
+    bool reachedDuration() const noexcept
+    {
+        return recordedFrames_ >= targetRecordedFrames_;
+    }
+
+    std::uint64_t rawFrames() const noexcept { return rawFrames_; }
+    std::uint64_t recordedFrames() const noexcept { return recordedFrames_; }
 
     std::vector<std::int16_t> finish()
     {
@@ -184,6 +199,8 @@ public:
 private:
     const GuiLoopbackOptions& options_;
     int sampleRate_ = 48000;
+    std::uint64_t targetRecordedFrames_ = (std::numeric_limits<std::uint64_t>::max)();
+    std::uint64_t recordedFrames_ = 0;
     double triggerThreshold_ = 0.0;
     double tailThreshold_ = 0.0;
     std::uint64_t triggerHoldFrames_ = 0;
@@ -457,6 +474,16 @@ bool GuiLoopbackRecorder::start(const GuiLoopbackOptions& options, FinishedCallb
         if (error) *error = QStringLiteral("loopback target sample rate must be positive");
         return false;
     }
+    if (options.durationBars < 0 ||
+        (options.durationBars > 0 &&
+            jam2::gui::recording_frames_for_bars(
+                options.durationBars,
+                options.beatsPerBar,
+                options.bpm,
+                options.targetSampleRate) == 0)) {
+        if (error) *error = QStringLiteral("loopback bar duration requires positive bars, BPM, meter, and sample rate");
+        return false;
+    }
     if (thread_.joinable()) {
         thread_.join();
     }
@@ -532,9 +559,14 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
             ? extensible->dwChannelMask
             : 0;
         const QString selectedEndpoint = endpointName(device.Get());
-        const std::uint64_t targetFrames = options.durationMs > 0
-            ? static_cast<std::uint64_t>((static_cast<std::int64_t>(sampleRate) * options.durationMs) / 1000)
-            : std::numeric_limits<std::uint64_t>::max();
+        const std::uint64_t barFrames = jam2::gui::recording_frames_for_bars(
+            options.durationBars,
+            options.beatsPerBar,
+            options.bpm,
+            sampleRate);
+        const std::uint64_t targetRecordedFrames = barFrames > 0
+            ? barFrames
+            : (std::numeric_limits<std::uint64_t>::max)();
 
         checkHr(audioClient->Initialize(
                     AUDCLNT_SHAREMODE_SHARED,
@@ -550,13 +582,12 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
             "failed to get WASAPI capture client");
 
         checkHr(audioClient->Start(), "failed to start WASAPI loopback capture");
-        std::uint64_t written = 0;
         std::uint64_t signalPackets = 0;
         std::size_t minimumActiveChannels = channels;
         std::size_t maximumActiveChannels = 0;
         std::vector<double> channelPeaks(channels, 0.0);
-        TakeAccumulator capture(options, sampleRate);
-        while (written < targetFrames && !stopRequested_.load(std::memory_order_acquire)) {
+        TakeAccumulator capture(options, sampleRate, targetRecordedFrames);
+        while (!capture.reachedDuration() && !stopRequested_.load(std::memory_order_acquire)) {
             UINT32 packetFrames = 0;
             checkHr(captureClient->GetNextPacketSize(&packetFrames), "failed to read WASAPI packet size");
             if (packetFrames == 0) {
@@ -567,7 +598,7 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
             UINT32 framesAvailable = 0;
             DWORD flags = 0;
             checkHr(captureClient->GetBuffer(&data, &framesAvailable, &flags, nullptr, nullptr), "failed to get WASAPI capture buffer");
-            const UINT32 framesToWrite = static_cast<UINT32>(std::min<std::uint64_t>(framesAvailable, targetFrames - written));
+            const UINT32 framesToWrite = framesAvailable;
             std::fill(channelPeaks.begin(), channelPeaks.end(), 0.0);
             double loudestPeak = 0.0;
             if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) == 0) {
@@ -598,7 +629,7 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
                 maximumActiveChannels =
                     std::max(maximumActiveChannels, activeChannels);
             }
-            for (UINT32 frame = 0; frame < framesToWrite; ++frame) {
+            for (UINT32 frame = 0; frame < framesToWrite && !capture.reachedDuration(); ++frame) {
                 double mono = 0.0;
                 if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) == 0 &&
                     activeChannels > 0) {
@@ -615,7 +646,6 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
                 }
                 capture.push(doubleToI16(mono));
             }
-            written += framesToWrite;
             checkHr(captureClient->ReleaseBuffer(framesAvailable), "failed to release WASAPI capture buffer");
         }
         checkHr(audioClient->Stop(), "failed to stop WASAPI loopback capture");
@@ -631,7 +661,8 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
             "resample_ratio=%7 source_frames=%8 output_frames=%9 "
             "bits=%10 valid_bits=%11 fold_down=active-average-30dB "
             "signal_packets=%12 active_channels_min=%13 active_channels_max=%14 "
-            "recorded_peak_dbfs=%15")
+            "duration_bars=%15 duration_target_frames=%16 trigger=%17 "
+            "capture_frames=%18 duration_counted_frames=%19 recorded_peak_dbfs=%20")
             .arg(selectedEndpoint)
             .arg(channels)
             .arg(QString::number(channelMask, 16))
@@ -653,6 +684,11 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
             .arg(signalPackets)
             .arg(signalPackets > 0 ? minimumActiveChannels : 0)
             .arg(maximumActiveChannels)
+            .arg(options.durationBars)
+            .arg(barFrames)
+            .arg(options.trigger ? QStringLiteral("yes") : QStringLiteral("no"))
+            .arg(capture.rawFrames())
+            .arg(capture.recordedFrames())
             .arg(capture.peakDbfs(), 0, 'f', 2);
         writeWav(
             options.outputPath,

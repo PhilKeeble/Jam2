@@ -31,3 +31,4 @@ void updateCaptureDurationControl(
     QLabel* durationLabel);
 QString dbText(double db);
 double gainFromDb(double db);
+QString metronomeStepLabel(int step, int division);

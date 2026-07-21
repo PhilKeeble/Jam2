@@ -27,6 +27,8 @@ public:
     std::function<void(int, const QString&, int, const QString&, int)> onCellEdited;
     std::function<void(int, int, int, const QString&, int)> onBeatHitEdited;
     std::function<void(int, int, int, int)> onBeatDivisionChanged;
+    std::function<void(int, int, int, int)> onMusicalDivisionChanged;
+    std::function<void(int, int, int, const QString&, const QString&, int)> onMusicalStepEdited;
     std::function<void(int, int, int)> onGridResized;
     std::function<void()> onStructureChanged;
 

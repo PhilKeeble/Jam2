@@ -6,6 +6,7 @@
 #include "GuiControlMessageRouter.hpp"
 #include "MusicTheory.hpp"
 #include "PracticeIdeaDialogs.hpp"
+#include "RecordingTiming.hpp"
 #include "PracticeIdeaController.hpp"
 #include "PracticeReferenceRenderer.hpp"
 
@@ -2598,7 +2599,7 @@ void MainWindow::showSettingsDialog()
     const auto inputFolderRow = makeFolderRow(preferences_.recording.input.outputFolder);
     auto* inputUntilStopped = new QCheckBox(QStringLiteral("Record until stopped"), &dialog);
     inputUntilStopped->setChecked(preferences_.recording.input.recordUntilStopped);
-    auto* inputDuration = makeSpin(preferences_.recording.input.durationSeconds, 1, 600);
+    auto* inputDuration = makeSpin(preferences_.recording.input.durationBars, 1, 128);
     auto* inputCountIn = new QCheckBox(QStringLiteral("Count-in"), &dialog); inputCountIn->setChecked(preferences_.recording.input.countIn);
     auto* inputCountBars = makeSpin(preferences_.recording.input.countInBars, 1, 8);
     auto* inputCountMetro = new QCheckBox(QStringLiteral("Metronome during count-in"), &dialog); inputCountMetro->setChecked(preferences_.recording.input.countInMetronome);
@@ -2606,7 +2607,7 @@ void MainWindow::showSettingsDialog()
     auto* inputLatency = makeSpin(preferences_.recording.input.latencyAdjustmentFrames, -8192, 8192);
     auto* inputForm = new QFormLayout();
     inputForm->addRow(QStringLiteral("Output folder"), inputFolderRow.second);
-    inputForm->addRow(QString(), inputUntilStopped); inputForm->addRow(QStringLiteral("Duration seconds"), inputDuration);
+    inputForm->addRow(QString(), inputUntilStopped); inputForm->addRow(QStringLiteral("Duration bars"), inputDuration);
     inputForm->addRow(QString(), inputCountIn); inputForm->addRow(QStringLiteral("Count-in bars"), inputCountBars);
     inputForm->addRow(QString(), inputCountMetro); inputForm->addRow(QString(), inputKeepMetro);
     inputForm->addRow(QStringLiteral("Manual latency adjustment frames"), inputLatency);
@@ -2635,7 +2636,7 @@ void MainWindow::showSettingsDialog()
     loopSourceLayout->setContentsMargins(0, 0, 0, 0); loopSourceLayout->addWidget(loopSource, 1); loopSourceLayout->addWidget(refreshLoopSources);
     QObject::connect(refreshLoopSources, &QPushButton::clicked, &dialog, [=, this] { refreshLoopbackSources(); populateLoopSources(); });
     auto* loopUntilStopped = new QCheckBox(QStringLiteral("Record until stopped"), &dialog); loopUntilStopped->setChecked(preferences_.recording.loopback.recordUntilStopped);
-    auto* loopDuration = makeSpin(preferences_.recording.loopback.durationSeconds, 1, 600);
+    auto* loopDuration = makeSpin(preferences_.recording.loopback.durationBars, 1, 128);
     auto* loopTrigger = new QCheckBox(QStringLiteral("Trigger on signal"), &dialog); loopTrigger->setChecked(preferences_.recording.loopback.trigger);
     auto* loopTriggerThreshold = makeDoubleSpin(preferences_.recording.loopback.triggerThresholdDb, -120.0, 0.0, 1);
     auto* loopTriggerHold = makeSpin(preferences_.recording.loopback.triggerHoldMs, 1, 5000);
@@ -2646,7 +2647,7 @@ void MainWindow::showSettingsDialog()
     auto* loopTrimTrailing = new QCheckBox(QStringLiteral("Trim trailing silence"), &dialog); loopTrimTrailing->setChecked(preferences_.recording.loopback.trimTrailing);
     auto* loopForm = new QFormLayout();
     loopForm->addRow(QStringLiteral("Output folder"), loopFolderRow.second); loopForm->addRow(QStringLiteral("Loopback source"), loopSourceRow);
-    loopForm->addRow(QString(), loopUntilStopped); loopForm->addRow(QStringLiteral("Duration seconds"), loopDuration);
+    loopForm->addRow(QString(), loopUntilStopped); loopForm->addRow(QStringLiteral("Duration bars"), loopDuration);
     loopForm->addRow(QString(), loopTrigger); loopForm->addRow(QStringLiteral("Trigger threshold dB"), loopTriggerThreshold);
     loopForm->addRow(QStringLiteral("Trigger hold ms"), loopTriggerHold); loopForm->addRow(QStringLiteral("Pre-roll ms"), loopPreRoll);
     loopForm->addRow(QStringLiteral("Tail threshold dB"), loopTailThreshold); loopForm->addRow(QStringLiteral("Tail silence ms"), loopTailSilence);
@@ -2767,7 +2768,7 @@ void MainWindow::showSettingsDialog()
         updated.recording.input.outputFolder = appReleaseFolderPath(QStringLiteral("captures"));
     }
     updated.recording.input.recordUntilStopped = inputUntilStopped->isChecked();
-    updated.recording.input.durationSeconds = inputDuration->value();
+    updated.recording.input.durationBars = inputDuration->value();
     updated.recording.input.countIn = inputCountIn->isChecked(); updated.recording.input.countInBars = inputCountBars->value();
     updated.recording.input.countInMetronome = inputCountMetro->isChecked(); updated.recording.input.keepMetronome = inputKeepMetro->isChecked();
     updated.recording.input.latencyAdjustmentFrames = inputLatency->value();
@@ -2779,7 +2780,7 @@ void MainWindow::showSettingsDialog()
         ? loopSource->currentText().trimmed() : loopSource->currentData().toString();
     updated.recording.loopback.sourceName = loopSource->currentText().trimmed();
     updated.recording.loopback.recordUntilStopped = loopUntilStopped->isChecked();
-    updated.recording.loopback.durationSeconds = loopDuration->value(); updated.recording.loopback.trigger = loopTrigger->isChecked();
+    updated.recording.loopback.durationBars = loopDuration->value(); updated.recording.loopback.trigger = loopTrigger->isChecked();
     updated.recording.loopback.triggerThresholdDb = loopTriggerThreshold->value(); updated.recording.loopback.triggerHoldMs = loopTriggerHold->value();
     updated.recording.loopback.preRollMs = loopPreRoll->value(); updated.recording.loopback.tailThresholdDb = loopTailThreshold->value();
     updated.recording.loopback.tailSilenceMs = loopTailSilence->value(); updated.recording.loopback.trimLeading = loopTrimLeading->isChecked();
@@ -4171,7 +4172,7 @@ void MainWindow::updateRuntimeControls()
         outputLevel,
         QStringLiteral("master output level"));
     const double sendLevel = gainFromDb(static_cast<double>(mixSendLevelSlider_ ? mixSendLevelSlider_->value() : 0));
-    const double monitorLevel = gainFromDb(static_cast<double>(mixMonitorLevelSlider_ ? mixMonitorLevelSlider_->value() : -18));
+    const double monitorLevel = gainFromDb(static_cast<double>(mixMonitorLevelSlider_ ? mixMonitorLevelSlider_->value() : 0));
     submitEngineGain(jam2::EngineCommandType::SetSendLevel, sendLevel, QStringLiteral("send level"));
     submitEngineToggle(
         jam2::EngineCommandType::SetLocalMonitorEnabled,
@@ -4895,7 +4896,7 @@ bool MainWindow::armSelectedLooperLaneRecording()
         if (mode == QStringLiteral("input")) {
             inputOutput = captureOutputEdit_->text().trimmed();
             inputDraft.recordUntilStopped = captureManualStopCheck_->isChecked();
-            inputDraft.durationSeconds = captureDurationSpin_->value();
+            inputDraft.durationBars = captureDurationSpin_->value();
             inputDraft.countIn = captureCountInCheck_->isChecked();
             inputDraft.countInBars = captureCountInBarsSpin_->value();
             inputDraft.countInMetronome = captureCountInMetronomeCheck_->isChecked();
@@ -4908,7 +4909,7 @@ bool MainWindow::armSelectedLooperLaneRecording()
                 : loopbackSourceBox_->currentData().toString();
             loopbackDraft.sourceName = loopbackSourceBox_->currentText().trimmed();
             loopbackDraft.recordUntilStopped = captureManualStopCheck_->isChecked();
-            loopbackDraft.durationSeconds = captureDurationSpin_->value();
+            loopbackDraft.durationBars = captureDurationSpin_->value();
             loopbackDraft.trigger = captureTriggerCheck_->isChecked();
             loopbackDraft.triggerThresholdDb = triggerThresholdSpin_->value();
             loopbackDraft.triggerHoldMs = triggerHoldSpin_->value();
@@ -4923,7 +4924,7 @@ bool MainWindow::armSelectedLooperLaneRecording()
         if (mode == QStringLiteral("input")) {
             captureOutputEdit_->setText(inputOutput);
             captureManualStopCheck_->setChecked(inputDraft.recordUntilStopped);
-            captureDurationSpin_->setValue(inputDraft.durationSeconds);
+            captureDurationSpin_->setValue(inputDraft.durationBars);
             captureCountInCheck_->setChecked(inputDraft.countIn);
             captureCountInBarsSpin_->setValue(inputDraft.countInBars);
             captureCountInMetronomeCheck_->setChecked(inputDraft.countInMetronome);
@@ -4933,7 +4934,7 @@ bool MainWindow::armSelectedLooperLaneRecording()
             captureOutputEdit_->setText(loopbackOutput);
             selectLoopbackSource(loopbackDraft.sourceId, loopbackDraft.sourceName);
             captureManualStopCheck_->setChecked(loopbackDraft.recordUntilStopped);
-            captureDurationSpin_->setValue(loopbackDraft.durationSeconds);
+            captureDurationSpin_->setValue(loopbackDraft.durationBars);
             captureTriggerCheck_->setChecked(loopbackDraft.trigger);
             triggerThresholdSpin_->setValue(loopbackDraft.triggerThresholdDb);
             triggerHoldSpin_->setValue(loopbackDraft.triggerHoldMs);
@@ -5874,14 +5875,24 @@ void MainWindow::startInputCapture(std::uint64_t targetFrame, int countInBars)
         captureOutputEdit_->setText(output);
     }
     QString workflowError;
+    const int durationBars = (!captureManualStopCheck_ || !captureManualStopCheck_->isChecked())
+        ? captureDurationSpin_->value()
+        : 0;
+    const auto pattern = currentMetronomePattern();
+    const std::uint64_t durationFrames = jam2::gui::recording_frames_for_bars(
+        durationBars,
+        pattern.beats_per_bar,
+        pattern.bpm,
+        recordingSampleRate);
     if (!trackRecordingWorkflow_.startInputTake(
             output,
             !QFileInfo::exists(output),
             recordingSampleRate,
             targetFrame,
+            durationFrames,
             countInBars >= 0 ? std::optional<int>(countInBars) : std::nullopt,
             metronomeTransport_.grid().position(),
-            currentMetronomePattern().beats_per_bar,
+            pattern.beats_per_bar,
             workflowError)) {
         appendLog(QStringLiteral("could not start input take: ") + workflowError);
         return;
@@ -5890,7 +5901,10 @@ void MainWindow::startInputCapture(std::uint64_t targetFrame, int countInBars)
         recordingCountdownLabel_->setText(QStringLiteral("WAITING FOR NEXT BAR..."));
         recordingCountdownLabel_->show();
     }
-    const QString startText = countInBars >= 0
+    const QString limitText = durationBars > 0
+        ? QStringLiteral(" duration_bars=%1 duration_frames=%2").arg(durationBars).arg(durationFrames)
+        : QStringLiteral(" duration_bars=manual");
+    const QString startText = (countInBars >= 0
         ? QStringLiteral("Recording: armed input take, sample_rate=%1 engine_quantized_count_in_bars=%2 latency_compensation_frames=%3 output=%4")
             .arg(recordingSampleRate)
             .arg(countInBars)
@@ -5900,23 +5914,13 @@ void MainWindow::startInputCapture(std::uint64_t targetFrame, int countInBars)
             .arg(recordingSampleRate)
             .arg(targetFrame)
             .arg(trackRecordingWorkflow_.appliedLatencyFrames())
-            .arg(output);
+            .arg(output)) + limitText;
     if (gridScheduleLabel_) {
         gridScheduleLabel_->setText(startText);
     }
     appendLog(startText);
     if (stopCaptureButton_) stopCaptureButton_->setEnabled(true);
     if (loadWavButton_) loadWavButton_->setEnabled(false);
-    if (countInBars < 0 && (!captureManualStopCheck_ || !captureManualStopCheck_->isChecked())) {
-        QTimer::singleShot(captureDurationSpin_->value() * 1000, this, [this] {
-            if (trackRecordingWorkflow_.inputTakeActive()) {
-                runGridLockedEngineAction(
-                    QStringLiteral("record.stop"),
-                    [this](std::uint64_t stopFrame) { stopInputCapture(stopFrame); },
-                    true);
-            }
-        });
-    }
 }
 
 void MainWindow::startLoopbackCapture()
@@ -5951,7 +5955,12 @@ void MainWindow::startLoopbackCapture()
     options.source = source;
     options.outputPath = output;
     options.targetSampleRate = recordingSampleRate;
-    options.durationMs = (!captureManualStopCheck_ || !captureManualStopCheck_->isChecked()) ? captureDurationSpin_->value() * 1000 : 0;
+    options.durationBars = (!captureManualStopCheck_ || !captureManualStopCheck_->isChecked())
+        ? captureDurationSpin_->value()
+        : 0;
+    const auto pattern = currentMetronomePattern();
+    options.bpm = pattern.bpm;
+    options.beatsPerBar = pattern.beats_per_bar;
     options.trigger = captureTriggerCheck_ && captureTriggerCheck_->isChecked();
     options.triggerThresholdDb = triggerThresholdSpin_ ? triggerThresholdSpin_->value() : -45.0;
     options.triggerHoldMs = triggerHoldSpin_ ? triggerHoldSpin_->value() : 50;
@@ -5963,8 +5972,12 @@ void MainWindow::startLoopbackCapture()
 
     QString error;
     appendLog(QStringLiteral(
-        "starting internal loopback recording: target_sample_rate=%1 output=%2")
+        "starting internal loopback recording: target_sample_rate=%1 duration_bars=%2 bpm=%3 beats_per_bar=%4 trigger=%5 output=%6")
         .arg(recordingSampleRate)
+        .arg(options.durationBars > 0 ? QString::number(options.durationBars) : QStringLiteral("manual"))
+        .arg(options.bpm, 0, 'f', 3)
+        .arg(options.beatsPerBar)
+        .arg(options.trigger ? QStringLiteral("yes") : QStringLiteral("no"))
         .arg(output));
     if (!loopbackRecorder_.start(options, [this](
             bool ok,
@@ -6338,7 +6351,7 @@ void MainWindow::rebuildMetronomePattern(bool resetToDivisionDefault)
             : true;
         metronomeAccents_[i] = !resetToDivisionDefault && i < previous.size()
             ? previous[i]
-            : (division <= 1 ? i == 0 : i % division == 0);
+            : i == 0;
     }
 
     metronomePatternTable_->clear();
@@ -6347,7 +6360,7 @@ void MainWindow::rebuildMetronomePattern(bool resetToDivisionDefault)
     QStringList headers;
     headers.reserve(steps);
     for (int step = 0; step < steps; ++step) {
-        headers << QStringLiteral("%1").arg(step + 1);
+        headers << metronomeStepLabel(step, division);
         auto* playCell = new QWidget(metronomePatternTable_);
         auto* playLayout = new QHBoxLayout(playCell);
         playLayout->setContentsMargins(0, 0, 0, 0);
@@ -6401,7 +6414,7 @@ jam2::metronome::PatternSnapshot MainWindow::currentMetronomePattern() const
         const bool play = step < metronomeEnabledSteps_.size() ? metronomeEnabledSteps_[step] : true;
         const bool accent = step < metronomeAccents_.size()
             ? metronomeAccents_[step]
-            : (pattern.division <= 1 ? step == 0 : step % pattern.division == 0);
+            : step == 0;
         jam2::metronome::set_mask_enabled(pattern.play_mask_low, pattern.play_mask_high, step, play);
         jam2::metronome::set_mask_enabled(pattern.accent_mask_low, pattern.accent_mask_high, step, accent);
     }
@@ -7467,7 +7480,7 @@ Jam2RuntimeOptions MainWindow::runtimeOptions() const
     options.output_level = gainFromDb(static_cast<double>(
         masterOutputLevelSlider_ ? masterOutputLevelSlider_->value() : 0));
     options.local_monitor = mixMonitorCheck_ && mixMonitorCheck_->isChecked();
-    options.local_monitor_level = gainFromDb(static_cast<double>(mixMonitorLevelSlider_ ? mixMonitorLevelSlider_->value() : -18));
+    options.local_monitor_level = gainFromDb(static_cast<double>(mixMonitorLevelSlider_ ? mixMonitorLevelSlider_->value() : 0));
     options.sample_time_playout = sampleTimePlayoutCheck_->isChecked();
     options.playout_delay_frames = static_cast<std::size_t>(playoutDelaySpin_->value());
     options.jitter_buffer_frames = static_cast<std::size_t>(jitterBufferSpin_->value());
@@ -8452,6 +8465,7 @@ void MainWindow::generatePracticeReferenceWavs()
             discardPreparedMix(true);
             refreshLooperLanes();
             regeneratePreparedMix();
+            if (!state->result.diagnostics.isEmpty()) appendLog(state->result.diagnostics);
             appendLog(QStringLiteral(
                 "practice reference WAVs rendered locally; use Share Tracks to publish them"));
         });
@@ -8459,6 +8473,25 @@ void MainWindow::generatePracticeReferenceWavs()
         QMessageBox::warning(this, QStringLiteral("Generate Reference WAVs"),
             QStringLiteral("The reference render worker is currently busy."));
     }
+}
+
+void MainWindow::showPracticeIdeaDetails()
+{
+    const std::optional<SongSection> chord =
+        jam2::practice::PracticeIdeaController::generatedSection(chordModel_, QStringLiteral("chord"));
+    const std::optional<SongSection> beat =
+        jam2::practice::PracticeIdeaController::generatedSection(beatModel_, QStringLiteral("beat"));
+    const SongSection* source = chord ? &*chord : (beat ? &*beat : nullptr);
+    if (!source || !source->generatedRecipe.isValid()) {
+        QMessageBox::information(this, QStringLiteral("Idea Details"),
+            QStringLiteral("Generate an idea first."));
+        return;
+    }
+    const jam2::practice::GenerationRecipe& recipe = source->generatedRecipe;
+    const bool changed =
+        (chord && jam2::practice::generatedChordFingerprint(*chord) != recipe.chordFingerprint) ||
+        (beat && jam2::practice::generatedBeatFingerprint(*beat) != recipe.beatFingerprint);
+    jam2::practice::showIdeaDetails(this, recipe, changed);
 }
 
 QString MainWindow::sessionHex() const

@@ -295,16 +295,30 @@ bool TrackRecordingWorkflow::armTrackTake(const QString& id, const QString& outp
     return submit(command);
 }
 
-bool TrackRecordingWorkflow::startTrackTake(std::uint64_t targetFrame) noexcept
+bool TrackRecordingWorkflow::startTrackTake(
+    std::uint64_t targetFrame,
+    std::uint64_t durationFrames) noexcept
 {
     jam2::EngineCommand command;
     command.type = jam2::EngineCommandType::StartTrackTake;
     command.frame = targetFrame;
+    if (!submit(command)) {
+        return false;
+    }
+    if (durationFrames == 0) {
+        return true;
+    }
+    if (targetFrame > (std::numeric_limits<std::uint64_t>::max)() - durationFrames) {
+        return false;
+    }
+    command.type = jam2::EngineCommandType::StopTrackTake;
+    command.frame = targetFrame + durationFrames;
     return submit(command);
 }
 
 bool TrackRecordingWorkflow::startTrackTakeQuantized(
     int countInBars,
+    std::uint64_t durationFrames,
     const PlaybackGrid::Position& position,
     int beatsPerBar,
     QString& error) noexcept
@@ -364,11 +378,8 @@ bool TrackRecordingWorkflow::startTrackTakeQuantized(
         error = QStringLiteral("engine command queue unavailable while scheduling track playback for recording");
         return false;
     }
-    jam2::EngineCommand start;
-    start.type = jam2::EngineCommandType::StartTrackTake;
-    start.frame = target;
-    if (!submit(start)) {
-        error = QStringLiteral("engine command queue unavailable while scheduling the recording take");
+    if (!startTrackTake(target, durationFrames)) {
+        error = QStringLiteral("engine command queue unavailable while scheduling the recording take or its bar limit");
         return false;
     }
     jam2::EngineCommand transport;
@@ -391,6 +402,7 @@ bool TrackRecordingWorkflow::startInputTake(
     bool transientOutput,
     int expectedSampleRate,
     std::uint64_t targetFrame,
+    std::uint64_t durationFrames,
     std::optional<int> countInBars,
     const PlaybackGrid::Position& position,
     int beatsPerBar,
@@ -415,8 +427,8 @@ bool TrackRecordingWorkflow::startInputTake(
         return false;
     }
     const bool started = countInBars
-        ? startTrackTakeQuantized(*countInBars, position, beatsPerBar, error)
-        : startTrackTake(targetFrame);
+        ? startTrackTakeQuantized(*countInBars, durationFrames, position, beatsPerBar, error)
+        : startTrackTake(targetFrame, durationFrames);
     if (!started) {
         if (error.isEmpty()) {
             error = QStringLiteral("engine command queue unavailable while starting the recording take");
@@ -429,6 +441,9 @@ bool TrackRecordingWorkflow::startInputTake(
     input_take_active_ = true;
     last_capture_path_ = outputPath;
     pending_transient_capture_path_ = transientOutput ? outputPath : QString{};
+    if (!countInBars) {
+        recording_start_frame_ = targetFrame;
+    }
     return true;
 }
 

@@ -26,9 +26,12 @@
 
 namespace jam2::gui {
 
-inline int trackTimelineBeatNumber(int zeroBasedBeat) noexcept
+inline int trackTimelineBarNumber(int zeroBasedBeat, int beatsPerBar) noexcept
 {
-    return qMax(0, zeroBasedBeat) + 1;
+    if (zeroBasedBeat < 0 || beatsPerBar <= 0 || zeroBasedBeat % beatsPerBar != 0) {
+        return 0;
+    }
+    return zeroBasedBeat / beatsPerBar + 1;
 }
 
 inline qint64 looperTimelineViewFrames(
@@ -652,16 +655,14 @@ private:
             for (int beat = 0; beat < beatCount; ++beat) {
                 const int x = xForFrame(static_cast<qint64>(std::llround(beat * beatFrames)));
                 if (x >= area.right()) break;
-                painter.setPen(beat % beatsPerBar_ == 0 ? theme::gridBar : theme::gridBeat);
+                const int barNumber = jam2::gui::trackTimelineBarNumber(beat, beatsPerBar_);
+                painter.setPen(barNumber > 0 ? theme::gridBar : theme::gridBeat);
                 const int gridBottom = kToolbarHeight + visualLaneCount() * kLaneHeight - 1;
                 painter.drawLine(x, 0, x, gridBottom);
-                painter.setPen(beat % beatsPerBar_ == 0
-                    ? theme::text : theme::textMuted);
-                painter.drawText(
-                    x + 4, 20,
-                    QStringLiteral("%1.%2")
-                        .arg(beat / beatsPerBar_ + 1)
-                        .arg(beat % beatsPerBar_ + 1));
+                if (barNumber > 0) {
+                    painter.setPen(theme::text);
+                    painter.drawText(x + 4, 20, QString::number(barNumber));
+                }
             }
         }
     }

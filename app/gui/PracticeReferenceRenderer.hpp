@@ -11,6 +11,8 @@ struct ReferenceWav {
     QString path;
     QString sha256;
     qint64 frames = 0;
+    float peak = 0.0f;
+    int eventCount = 0;
 };
 
 struct ReferenceRenderResult {
@@ -18,6 +20,7 @@ struct ReferenceRenderResult {
     ReferenceWav drums;
     ReferenceWav melody;
     QString sourceSignature;
+    QString diagnostics;
     QString error;
 };
 

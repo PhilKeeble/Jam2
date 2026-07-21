@@ -95,6 +95,7 @@ public:
         bool transientOutput,
         int expectedSampleRate,
         std::uint64_t targetFrame,
+        std::uint64_t durationFrames,
         std::optional<int> countInBars,
         const PlaybackGrid::Position& position,
         int beatsPerBar,
@@ -149,9 +150,12 @@ public:
 private:
     bool submit(jam2::EngineCommand command) noexcept;
     bool armTrackTake(const QString& id, const QString& output) noexcept;
-    bool startTrackTake(std::uint64_t targetFrame) noexcept;
+    bool startTrackTake(
+        std::uint64_t targetFrame,
+        std::uint64_t durationFrames) noexcept;
     bool startTrackTakeQuantized(
         int countInBars,
+        std::uint64_t durationFrames,
         const PlaybackGrid::Position& position,
         int beatsPerBar,
         QString& error) noexcept;

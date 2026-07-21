@@ -333,3 +333,14 @@ double gainFromDb(double db)
     }
     return std::pow(10.0, db / 20.0);
 }
+
+QString metronomeStepLabel(int step, int division)
+{
+    const int safeDivision = qMax(1, division);
+    const int safeStep = qMax(0, step);
+    const int beat = safeStep / safeDivision + 1;
+    const int subdivision = safeDivision == 2
+        ? (safeStep % safeDivision) * 2 + 1
+        : safeStep % safeDivision + 1;
+    return QStringLiteral("%1.%2").arg(beat).arg(subdivision);
+}

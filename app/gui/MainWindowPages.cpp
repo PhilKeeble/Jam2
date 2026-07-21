@@ -925,12 +925,15 @@ QWidget* MainWindowPages::buildSongPage(MainWindow& w)
 
     auto* generate = new QPushButton(QStringLiteral("Generate…"), page);
     auto* reference = new QPushButton(QStringLiteral("Generate Reference WAVs…"), page);
+    auto* details = new QPushButton(QStringLiteral("Idea Details…"), page);
     auto* top = new QHBoxLayout();
     top->addWidget(generate);
     top->addWidget(reference);
+    top->addWidget(details);
     top->addStretch(1);
     QObject::connect(generate, &QPushButton::clicked, &w, [&w] { w.generatePracticeIdea(); });
     QObject::connect(reference, &QPushButton::clicked, &w, [&w] { w.generatePracticeReferenceWavs(); });
+    QObject::connect(details, &QPushButton::clicked, &w, [&w] { w.showPracticeIdeaDetails(); });
 
     auto* layout = new QVBoxLayout(page);
     layout->addLayout(top);
@@ -943,6 +946,29 @@ QWidget* MainWindowPages::buildSongPage(MainWindow& w)
             {QStringLiteral("section"), section},
             {QStringLiteral("lane"), lane},
             {QStringLiteral("beat"), beat},
+            {QStringLiteral("text"), text},
+        });
+        w.refreshLooperLanes();
+    };
+    w.chordGrid_->onMusicalDivisionChanged = [&w](int section, int beat, int division, int revision) {
+        w.sendControl(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("music.division")},
+            {QStringLiteral("revision"), revision},
+            {QStringLiteral("section"), section},
+            {QStringLiteral("beat"), beat},
+            {QStringLiteral("division"), division},
+        });
+        w.refreshLooperLanes();
+    };
+    w.chordGrid_->onMusicalStepEdited = [&w](
+        int section, int beat, int step, const QString& lane, const QString& text, int revision) {
+        w.sendControl(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("music.step")},
+            {QStringLiteral("revision"), revision},
+            {QStringLiteral("section"), section},
+            {QStringLiteral("beat"), beat},
+            {QStringLiteral("step"), step},
+            {QStringLiteral("lane"), lane},
             {QStringLiteral("text"), text},
         });
         w.refreshLooperLanes();
@@ -972,15 +998,18 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
     w.beatGrid_ = new BeatGridWidget(&w.beatModel_, QStringLiteral("beat"), page);
     auto* generate = new QPushButton(QStringLiteral("Generate…"), page);
     auto* reference = new QPushButton(QStringLiteral("Generate Reference WAVs…"), page);
+    auto* details = new QPushButton(QStringLiteral("Idea Details…"), page);
     auto* top = new QHBoxLayout();
     top->addWidget(generate);
     top->addWidget(reference);
+    top->addWidget(details);
     top->addStretch(1);
     auto* layout = new QVBoxLayout(page);
     layout->addLayout(top);
     layout->addWidget(w.beatGrid_, 1);
     QObject::connect(generate, &QPushButton::clicked, &w, [&w] { w.generatePracticeIdea(); });
     QObject::connect(reference, &QPushButton::clicked, &w, [&w] { w.generatePracticeReferenceWavs(); });
+    QObject::connect(details, &QPushButton::clicked, &w, [&w] { w.showPracticeIdeaDetails(); });
     return page;
 }
 
@@ -1070,9 +1099,9 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     w.recordingLatencyAdjustmentSpin_->setMinimumWidth(132);
     applyMutedEditorStyle(w.recordingLatencyAdjustmentSpin_);
     w.captureDurationSpin_ = new QSpinBox(page);
-    w.captureDurationSpin_->setRange(1, 600);
-    w.captureDurationSpin_->setValue(30);
-    w.captureDurationSpin_->setSuffix(QStringLiteral(" s"));
+    w.captureDurationSpin_->setRange(1, 128);
+    w.captureDurationSpin_->setValue(8);
+    w.captureDurationSpin_->setSuffix(QStringLiteral(" bars"));
     w.captureDurationSpin_->setEnabled(false);
     w.captureDurationSpin_->setMinimumWidth(120);
     applyMutedEditorStyle(w.captureDurationSpin_);
@@ -1488,8 +1517,8 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     w.metronomeDivisionBox_ = new QComboBox(page);
     w.metronomeDivisionBox_->addItem(QStringLiteral("Quarter"), 1);
     w.metronomeDivisionBox_->addItem(QStringLiteral("Eighth"), 2);
-    w.metronomeDivisionBox_->addItem(QStringLiteral("Triplet"), 3);
     w.metronomeDivisionBox_->addItem(QStringLiteral("16th"), 4);
+    w.metronomeDivisionBox_->addItem(QStringLiteral("Triplet"), 3);
     w.metronomeDivisionBox_->addItem(QStringLiteral("6th"), 6);
     w.metronomeDivisionBox_->addItem(QStringLiteral("32nd"), 8);
     w.metronomeDivisionBox_->setCurrentIndex(w.metronomeDivisionBox_->findData(1));
@@ -1715,12 +1744,12 @@ QWidget* MainWindowPages::buildMixPage(MainWindow& w)
     w.mixMonitorCheck_->setChecked(false);
     w.mixMonitorLevelSlider_ = new QSlider(Qt::Horizontal, page);
     w.mixMonitorLevelSlider_->setRange(-60, 12);
-    w.mixMonitorLevelSlider_->setValue(-18);
+    w.mixMonitorLevelSlider_->setValue(0);
     applyJamSliderStyle(w.mixMonitorLevelSlider_);
     w.mixMonitorLevelSlider_->setMinimumWidth(220);
     w.mixMonitorLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
-    w.mixMonitorLevelLabel_ = makeValueLabel(QStringLiteral("-18.0 dB"));
+    w.mixMonitorLevelLabel_ = makeValueLabel(QStringLiteral("+0.0 dB"));
 
     w.trackLevelSlider_ = new QSlider(Qt::Horizontal, page);
     w.trackLevelSlider_->setRange(-60, 12);

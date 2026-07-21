@@ -237,6 +237,7 @@ private:
     void stopTrackForPracticeIdeaGeneration();
     void ensureInitialPracticeIdea();
     void generatePracticeReferenceWavs();
+    void showPracticeIdeaDetails();
     void updatePlaybackGrid();
     void updateRecordingCountdown(const PlaybackGrid::Position& position);
     void updateRecordingLatencyDisplay();

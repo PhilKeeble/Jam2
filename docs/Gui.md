@@ -70,7 +70,8 @@ Audio hardware controls are disabled while a jam is active.
 
 The Logs tab selects one folder for GUI event logs and network stats CSV files.
 Recording defaults are independent for Perform Input and System Loopback, with
-separate output folders and a preferred recording mode.
+separate output folders and a preferred recording mode. Finite recording limits
+are entered as bars and use the current BPM and beats-per-bar setting.
 
 ## Stats
 
@@ -100,19 +101,92 @@ ordering and distribution. It is not a room server and does not relay audio.
 
 The Chord and Beat pages share one coupled practice-idea generator. Key, style,
 character, length, and **Complexity 1–8** are selected in the Generate dialog.
-Level 4 is the default. The chosen style continues to control the musical form,
-vocabulary, groove family, BPM range, and click feel; complexity independently
-changes harmonic movement, melody vocabulary, syncopation, subdivisions, and
-fills. Raising complexity therefore produces more advanced pop, blues, modal,
-jazz, or metal material without changing the selected style or automatically
-raising the tempo.
+Level 2 and 16 bars are the defaults. The styles are Pop, Indie, Rock, Jazz,
+Modal Vamp, Blues, Anime / J-Pop, Country, EDM, R&B / Soul, Funk, and
+Hip-Hop / Trap. Each style has six grounding progression families, five
+automatically selected drum-groove families, a tempo range, and a procedural
+sound palette. The 60 groove families include distinct straight, half-time,
+shuffle, dance, syncopated, Ride-led, train-beat, and breakbeat foundations.
+Bright,
+Dark, Dreamy, Romantic, Peaceful, Intense, Nostalgic, and Cinematic characters
+change audible harmony, motif, tempo, groove, and synth parameters rather than
+acting as descriptive labels.
 
-The generated chord and beat section names show separate `H` and `R` levels.
-The first UI sets both to the selected complexity value, while the saved
-metadata keeps them separate for inspection and future independent controls.
-Level 8 uses one coherent advanced harmonic scheme per idea rather than mixing
-every available chromatic technique. Irregular rhythmic complexity uses the
-current metronome meter and never changes it automatically.
+Complexity is a cumulative theory palette: a selected level can use any choice
+from that level or a lower one. It unlocks choices without simply adding chord
+tones or making every drum part busier. Its palette progresses through diatonic/modal movement,
+inversions and suspensions, modal interchange, secondary dominants, chromatic
+passing movement, tonicisation and backdoor motion, substitutions, and temporary
+modulation. An unlocked advanced technique is permitted rather than required;
+theory decisions and added passing events are bounded.
+
+Drum complexity uses two probability bands rather than locking ordinary drummer
+techniques to individual levels. Levels 1-4 can all use kick alternatives,
+ghosts, cymbal articulation, pickups, and phrase-end fills; their occurrence
+chances rise gradually with the selected level. Levels 5-8 additionally unlock
+advanced syncopation and subdivision cells. Triplet, sixteenth, hat-roll, and
+three-over-two cells span multiple beats and repeat or answer within a phrase;
+the generator never replaces one isolated random beat. Each family begins with
+an authored two-bar A/A' pocket and retains protected kick/backbeat anchors.
+Overall hit growth remains bounded to 35% over the core groove.
+
+Chord and melody events share an editable per-beat subdivision named exactly
+like the drum grid: Quarter, Eighth, 16th, or Triplet. This timing is independent
+of the drum division. Pop and modal ideas generally sustain their harmony;
+funk, jazz, blues, rock, country, EDM, and related styles can use characteristic
+sub-beat comping. In the Chord page, `~` holds the previous event and `-` rests.
+The detailed Chord page sizes each beat column for its widest subdivided chord,
+chord-tone, or melody entry, permits manual column resizing, and scrolls
+horizontally instead of forcing theory information into the performance view.
+
+Melodies are planned against the sounding chord and groove. Sixteen
+seed-deterministic candidates are compared for strong-beat chord fit, defining
+notes on borrowed/dominant/diminished harmony, singable range, mostly stepwise
+motion, repetition, phrase arc, cadence, and drum-accent alignment. Weak beats
+may use intentional passing, neighbour, approach, enclosure, extension, modal,
+or local-scale tones from any unlocked complexity level, with preference given
+to clear resolutions. Melodies use a seed-specific three-to-five-note contour cell. A 16-bar idea loosely
+uses a return-and-contrast form, but varies among forms such as A–A′–B–A″,
+A–B–A′–A″, A–A′–B–B′, and A–B–C–A′. Repetition can sequence, rotate, answer,
+truncate, change gaps, or alter the cadence, so the same form is not stamped
+onto every idea. Generated names begin with tonic and mode, for example
+`F Lydian — Modal Vamp — Dreamy`.
+
+Both Chord and Beat pages expose **Generate…**, **Generate Reference WAVs…**,
+and **Idea Details…**. Idea Details shows the decimal and hexadecimal seed,
+generator version, musical choices, base Roman-numeral progression, final
+chords, plain-language theory operations and resolutions, motif treatment,
+groove changes, phrase summaries, note-by-note chord roles and melodic roles,
+and procedural patches. Groove details include the chosen family, actual kick,
+ghost, cymbal, fill, and advanced-cell counts, plus swing percentage, snare
+offset, timing variation, and velocity variation. It warns when the current
+grid no longer matches the stored generated content. Generated v1, v2, and v3 metadata is not
+migrated; manual songs remain valid.
+
+Reference WAVs are rendered offline with bounded procedural synthesis. Timed
+chord and melody events retain their sub-beat attacks, rests, gates, and melody
+velocities. Melody patches use warm sine/triangle-based oscillators with a
+per-note attack/decay/sustain/release shape, sample-rate-aware filtering, and
+subtle delayed vibrato rather than exposed saw or pulse waves. Style
+default voicing retains essential root, third, seventh, and characteristic
+colour tones in at most four upper voices plus an optional slash bass. The
+renderer applies the generated groove's deterministic swing, snare placement,
+timing variation, and velocity variation while leaving the visible pattern
+quantised. It logs those values alongside selected patch IDs, maximum chord
+voices, event counts, elapsed render time, and output peak. The canonical beat-lane order places the rendered
+Ride between Open HH and Crash. Both the detailed Beat page and compact
+performance grid show every lane in the same order, with Ride directly between
+Crash and Open HH. Its procedural sound balances metallic bell partials with a
+restrained noise wash, keeping the bell near the wash level rather than
+dominating it.
+
+Generating an idea applies its BPM and bar length but resets the metronome to a
+steady quarter-note pulse with only the first beat of the bar accented. Drum
+subdivisions, including triplets, are heard against that backbone rather than
+being copied into the click pattern. The user can change the metronome division,
+play mask, and accents afterward. Pattern headings use beat/subdivision labels:
+Quarter shows `1.1 2.1 3.1 4.1`, Eighth shows `1.1 1.3 2.1 2.3`,
+16th shows `1.1 1.2 1.3 1.4`, and Triplet shows `1.1 1.2 1.3` per beat.
 
 ## Track And Looper
 
@@ -124,6 +198,7 @@ The Track tab can:
   by the persistent engine through typed in-process commands; loopback takes
   are recorded by the GUI.
 - Use a stacked lane editor with inline mute, solo, record-arm, gain, rename, remove, drag, and edge-crop controls.
+- Read bar numbers at the top of the lane timeline while retaining a vertical grid line and snap point for every beat.
 - Render the active bank to a prepared mono PCM16 cache.
 - In Perform mode, load that prepared cache into the engine and control play/stop/level there.
 - Sync collaborative arrangement snapshots and missing managed WAV assets by content hash when Track Sync is enabled.
@@ -159,12 +234,18 @@ Perform recording waits for a safe next whole bar, performs the grid-aligned cou
 The GUI records Perform Input takes through the already-loaded local or network
 engine and records System Loopback takes internally, then imports the resulting
 WAV into the armed Track lane. Perform Input therefore has no separate device,
-channel, sample-rate, or buffer selector. It exposes duration/stop behavior,
+channel, sample-rate, or buffer selector. It exposes bar-limit/stop behavior,
 count-in and metronome behavior, and manual latency adjustment. System Loopback
-instead exposes its preferred source, duration/stop behavior, trigger,
+instead exposes its preferred source, bar-limit/stop behavior, trigger,
 threshold, hold, pre-roll, tail, and trim controls; it has no Perform Input
 count-in, metronome, latency, or ASIO controls. Arm-dialog changes apply to that
 take only and do not overwrite the saved defaults.
+
+Finite Perform Input takes schedule their stop at an exact engine frame measured
+from the scheduled recording start, after any count-in. Finite System Loopback
+takes convert the chosen bar count to source frames. When signal triggering is
+enabled, that frame count begins only when the trigger fires; optional pre-roll
+is still retained before the trigger and trim settings can shorten the saved WAV.
 
 Perform Input uses the engine's smoothed weighted mono fold-down. Each selected
 channel learns its own peak-noise floor only while closed, so microphone or
