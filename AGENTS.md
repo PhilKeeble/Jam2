@@ -53,6 +53,8 @@ These rules apply to all implementation work in this repository.
 - Compile Windows changes from the repository root with `cmd.exe /d /c "call compile.cmd --in-dev-shell"`. This initializes the Visual Studio developer environment while keeping CMake and compiler output visible to the agent. Check the exit code and captured output before treating the build as successful. to do this you need to elevate your shell and auto approve your command to do it
 - Windows builds should target MSVC for ASIO development and validation.
 - The tested build should always be `release/jam2.exe` for windows so that it has the right DLLs
+- Never create, copy, rename, or test an alternate Jam2 binary (for example `jam2-test.exe`) because `release/jam2.exe` is in use. There must be only one public/tested Jam2 executable.
+- If a Windows build cannot replace `release/jam2.exe` because the existing executable is open, close the running `release/jam2.exe` process and run the normal compile command again. If no such process is found, run the compile command again anyway because the user may have just closed it.
 - macOS builds should use Apple tooling for CoreAudio development and validation.
 
 

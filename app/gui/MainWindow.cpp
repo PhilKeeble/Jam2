@@ -114,6 +114,23 @@ bool isManagedPracticeReference(const LooperLane& lane)
         lane.name == QStringLiteral("Practice Melody");
 }
 
+QString portableFileStem(QString value, const QString& fallback)
+{
+    value = value.trimmed();
+    value.replace(QRegularExpression(QStringLiteral(R"([<>:"/\\|?*\x00-\x1f])")), QStringLiteral("_"));
+    value.replace(QRegularExpression(QStringLiteral(R"([. ]+$)")), QString{});
+    if (value.isEmpty()) {
+        value = fallback;
+    }
+    static const QRegularExpression windowsDeviceName(QStringLiteral(
+        R"(^(con|prn|aux|nul|com[1-9]|lpt[1-9])$)"),
+        QRegularExpression::CaseInsensitiveOption);
+    if (windowsDeviceName.match(value).hasMatch()) {
+        value.prepend(QLatin1Char('_'));
+    }
+    return value.left(120);
+}
+
 QComboBox* fixedSampleRateCombo(QWidget* parent, int value)
 {
     auto* combo = new QComboBox(parent);
@@ -4368,16 +4385,16 @@ void MainWindow::refreshLooperLanes()
     QStringList missingWaveforms;
     const double currentBpm = currentMetronomePattern().bpm;
     const int currentSampleRate = activeTrackSampleRate();
-    const SongSection* generatedChord = nullptr;
-    const SongSection* generatedBeat = nullptr;
-    for (const SongSection& section : chordModel_.sections()) {
-        if (section.generatedKind == QStringLiteral("chord")) generatedChord = &section;
-    }
-    for (const SongSection& section : beatModel_.sections()) {
-        if (section.generatedKind == QStringLiteral("beat")) generatedBeat = &section;
-    }
+    const std::optional<SongSection> generatedChord =
+        jam2::practice::PracticeIdeaController::generatedSection(
+            chordModel_, QStringLiteral("chord"));
+    const std::optional<SongSection> generatedBeat =
+        jam2::practice::PracticeIdeaController::generatedSection(
+            beatModel_, QStringLiteral("beat"));
     const QString currentIdeaSignature =
-        jam2::practice::practiceIdeaSignature(generatedChord, generatedBeat);
+        jam2::practice::practiceIdeaSignature(
+            generatedChord ? &*generatedChord : nullptr,
+            generatedBeat ? &*generatedBeat : nullptr);
     views.reserve(bank.lanes.size());
     for (const LooperLane& lane : bank.lanes) {
         LooperLaneStackWidget::LaneView view;
@@ -5371,6 +5388,8 @@ bool MainWindow::materializeLooperAssets(const QString& projectFolder)
                 result->error = QStringLiteral("Could not create the project's wavs folder.");
                 return;
             }
+            QMap<QString, QString> relativePathByHash;
+            QSet<QString> usedFileNames;
             for (LooperBank& bank : result->project.banks()) {
                 for (LooperLane& lane : bank.lanes) {
                     if (lane.assetPath.trimmed().isEmpty()) {
@@ -5383,17 +5402,45 @@ bool MainWindow::materializeLooperAssets(const QString& projectFolder)
                         result->error = QStringLiteral("A lane WAV is missing or has an invalid hash: %1").arg(lane.name);
                         return;
                     }
-                    const StagedPcm16Asset materialized = stagePcm16Asset(source, result->projectFolder);
-                    if (!materialized.error.isEmpty()) {
-                        result->error = QStringLiteral("Could not materialize WAV %1: %2")
-                            .arg(lane.name, materialized.error);
-                        return;
-                    }
-                    if (materialized.sha256 != lane.assetHash) {
+                    const WavMetadata metadata = readWavMetadata(source);
+                    if (metadata.sha256 != lane.assetHash) {
                         result->error = QStringLiteral("A lane WAV does not match its content hash: %1").arg(lane.name);
                         return;
                     }
-                    lane.assetPath = QStringLiteral("wavs/") + lane.assetHash + QStringLiteral(".wav");
+                    QString relativePath = relativePathByHash.value(lane.assetHash);
+                    if (relativePath.isEmpty()) {
+                        const QString base = portableFileStem(lane.name, QStringLiteral("Track"));
+                        QString fileName = base + QStringLiteral(".wav");
+                        int suffix = 2;
+                        while (usedFileNames.contains(fileName.toLower())) {
+                            fileName = QStringLiteral("%1-%2.wav").arg(base).arg(suffix++);
+                        }
+                        usedFileNames.insert(fileName.toLower());
+                        relativePath = QStringLiteral("wavs/") + fileName;
+                        const QString destination = folder.absoluteFilePath(relativePath);
+                        if (QDir::cleanPath(source) != QDir::cleanPath(destination)) {
+                            QFile input(source);
+                            QSaveFile output(destination);
+                            if (!input.open(QIODevice::ReadOnly) || !output.open(QIODevice::WriteOnly)) {
+                                result->error = QStringLiteral("Could not open WAV %1 for saving.").arg(lane.name);
+                                return;
+                            }
+                            while (!input.atEnd()) {
+                                const QByteArray block = input.read(1024 * 1024);
+                                if ((block.isEmpty() && input.error() != QFileDevice::NoError) ||
+                                    output.write(block) != block.size()) {
+                                    result->error = QStringLiteral("Could not copy WAV %1 while saving.").arg(lane.name);
+                                    return;
+                                }
+                            }
+                            if (!output.commit()) {
+                                result->error = QStringLiteral("Could not atomically save WAV %1.").arg(lane.name);
+                                return;
+                            }
+                        }
+                        relativePathByHash.insert(lane.assetHash, relativePath);
+                    }
+                    lane.assetPath = relativePath;
                 }
             }
         },
@@ -6634,7 +6681,6 @@ void MainWindow::publishLocalTrackOffer(
     if (!looperProject_.trackSyncEnabled() || !jam2_.isRunning() ||
         sessionController_.snapshot().role != SharedSessionController::Role::Joiner ||
         bankIndex < 0 || bankIndex >= looperProject_.banks().size() || targetLaneId.isEmpty() ||
-        isManagedPracticeReference(lane) ||
         !lane.sampleRateCompatible || lane.sampleRate <= 0 ||
         !isSha256Hex(lane.assetHash) || lane.assetPath.isEmpty()) {
         return;
@@ -6666,9 +6712,13 @@ void MainWindow::publishLocalTrackOffer(
         {QStringLiteral("name"), lane.name.left(512)},
         {QStringLiteral("sample_rate"), lane.sampleRate},
     };
-    localTrackOffers_.insert(contributionId, offer);
     trackOfferAssetPaths_.insert(lane.assetHash, lane.assetPath);
-    sendControl(offer);
+    if (!sessionController_.send(offer)) {
+        appendLog(QStringLiteral("could not queue local track offer; it will be retried on the next share: %1")
+            .arg(lane.name));
+        return;
+    }
+    localTrackOffers_.insert(contributionId, offer);
     appendLog(QStringLiteral("offered local track for additive Track Sync: %1 hash=%2")
         .arg(lane.name, lane.assetHash));
 }
@@ -6711,7 +6761,7 @@ void MainWindow::shareLocalTracks(bool includeLocalOnly)
     for (int bankIndex = 0; bankIndex < looperProject_.banks().size(); ++bankIndex) {
         const LooperBank& bank = looperProject_.banks().at(bankIndex);
         for (const LooperLane& lane : bank.lanes) {
-            if (lane.localOnly || isManagedPracticeReference(lane) ||
+            if (lane.localOnly ||
                 !lane.sampleRateCompatible || lane.sampleRate <= 0 ||
                 !isSha256Hex(lane.assetHash) || lane.assetPath.isEmpty()) {
                 continue;
@@ -8014,19 +8064,14 @@ void MainWindow::openSong()
 bool MainWindow::saveSong()
 {
     chordModel_.setTitle(songTitleEdit_->text());
-    QString path = projectPersistence_.projectFilePath();
-    if (path.isEmpty()) {
-        path = QFileDialog::getSaveFileName(
-            this,
-            QStringLiteral("Save Jam2 Song"),
-            appReleaseFilePath(QStringLiteral("songs"), chordModel_.title() + QStringLiteral(".jam2song")),
-            QStringLiteral("Jam2 song (*.jam2song);;JSON files (*.json);;All files (*)"),
-            nullptr,
-            QFileDialog::DontUseNativeDialog);
-    }
-    if (path.isEmpty()) {
+    const QString songName = portableFileStem(chordModel_.title(), QStringLiteral("Untitled Song"));
+    const QString songFolder = appReleaseFolderPath(QStringLiteral("songs/") + songName);
+    if (!QDir().mkpath(songFolder)) {
+        QMessageBox::warning(this, QStringLiteral("Jam2"),
+            QStringLiteral("Could not create the song folder: %1").arg(songFolder));
         return false;
     }
+    const QString path = QDir(songFolder).absoluteFilePath(songName + QStringLiteral(".jam2song"));
     const QFileInfo songInfo(path);
     if (!materializeLooperAssets(songInfo.absolutePath())) {
         return false;

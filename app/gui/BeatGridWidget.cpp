@@ -812,25 +812,9 @@ void BeatGridWidget::setGridPosition(quint64 absoluteBeat, int subdivision, bool
     header->setCurrentBeatColumn(
         beatColumn >= 0 && beatColumn < table_->columnCount() ? beatColumn : -1,
         gridBeatPhase_);
-    const int markerRow = mode() == Mode::Chord
-        ? activeSection * 4
-        : mode() == Mode::Beat
-            ? activeSection * (BeatGridModel::beatLaneNames().size() + 2) + 1
-            : mode() == Mode::Lyrics ? activeSection : 0;
-    if (table_->item(markerRow, beatColumn) != nullptr) {
-        QScrollBar* horizontal = table_->horizontalScrollBar();
-        if (horizontal != nullptr && horizontal->maximum() > 0) {
-            const int viewportMidpoint = table_->viewport()->width() / 2;
-            const int markerPosition = table_->columnViewportPosition(beatColumn) +
-                static_cast<int>(std::lround(gridBeatPhase_ * table_->columnWidth(beatColumn)));
-            if (markerPosition >= viewportMidpoint || markerPosition < 0) {
-                horizontal->setValue(qBound(
-                    horizontal->minimum(),
-                    horizontal->value() + markerPosition - viewportMidpoint,
-                    horizontal->maximum()));
-            }
-        }
-    }
+    // Chord and beat pages are editors. Keep painting the live marker, but
+    // leave their viewport entirely under manual control. The performance
+    // page is the transport-following view.
     if (mode() == Mode::Beat || mode() == Mode::Chord) {
         const QSignalBlocker tableBlocker(table_);
         for (int row = 0; row < table_->rowCount(); ++row) {
@@ -948,6 +932,8 @@ void BeatGridWidget::rebuildTable()
 
 void BeatGridWidget::rebuildChordTable()
 {
+    const int horizontalScroll = table_->horizontalScrollBar()->value();
+    const int verticalScroll = table_->verticalScrollBar()->value();
     updating_ = true;
     QSignalBlocker tableBlocker(table_);
     table_->setUpdatesEnabled(false);
@@ -1105,11 +1091,15 @@ void BeatGridWidget::rebuildChordTable()
     table_->setVerticalHeaderLabels(rowLabels);
     table_->clearSelection();
     table_->setUpdatesEnabled(true);
+    table_->horizontalScrollBar()->setValue(horizontalScroll);
+    table_->verticalScrollBar()->setValue(verticalScroll);
     updating_ = false;
 }
 
 void BeatGridWidget::rebuildBeatTable()
 {
+    const int horizontalScroll = table_->horizontalScrollBar()->value();
+    const int verticalScroll = table_->verticalScrollBar()->value();
     const QStringList lanes = BeatGridModel::beatLaneNames();
     const QStringList visualLanes = BeatGridModel::beatVisualLaneNames();
     QVector<int> visualLaneIndices;
@@ -1238,6 +1228,8 @@ void BeatGridWidget::rebuildBeatTable()
     }
     table_->clearSelection();
     table_->setUpdatesEnabled(true);
+    table_->horizontalScrollBar()->setValue(horizontalScroll);
+    table_->verticalScrollBar()->setValue(verticalScroll);
     updating_ = false;
 }
 

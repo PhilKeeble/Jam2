@@ -2,10 +2,6 @@
 
 This file tracks future work that is not already implemented. User-facing documentation lives in `docs/`, with only `README.md` and this plan kept at the repository root. Completed refactor history, evidence, and supporting reviews live in [refactor-plan.md](refactor-plan.md) and its linked refactor documents.
 
-## Tuner
-
-Add aubio for live audio tuning (guitar / bass / singing etc), allow them to see note in real time in performance mode of their input and then open up to see a more in depth tuner view helping them get in position
-
 ## Essentia
 
 Consider essentia for things like beat detection.
