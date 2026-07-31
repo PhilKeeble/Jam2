@@ -129,12 +129,16 @@ struct RuntimeState {
     std::atomic<int> bpm{120};
     std::atomic<int> metronome_beats_per_bar{4};
     std::atomic<int> metronome_division{1};
+    std::atomic<int> metronome_beat_unit{4};
+    std::atomic<int> metronome_tempo_pulse_units{1};
     std::atomic<int> metronome_step_count{4};
     std::atomic<std::uint64_t> metronome_play_mask_low{0x0fULL};
     std::atomic<std::uint64_t> metronome_play_mask_high{0};
     std::atomic<std::uint64_t> metronome_accent_mask_low{0x01ULL};
     std::atomic<std::uint64_t> metronome_accent_mask_high{0};
     std::atomic<int> metronome_level_ppm{1000000};
+    std::atomic<int> metronome_sound{
+        static_cast<int>(jam2::metronome::ClickSound::Classic)};
     std::atomic<int> remote_level_ppm{1000000};
     std::atomic<int> send_level_ppm{1000000};
     std::atomic<int> output_level_ppm{1000000};
@@ -226,6 +230,8 @@ jam2::metronome::PatternSnapshot metronome_pattern_from_runtime(const RuntimeSta
         runtime.metronome_play_mask_high.load(std::memory_order_relaxed),
         runtime.metronome_accent_mask_low.load(std::memory_order_relaxed),
         runtime.metronome_accent_mask_high.load(std::memory_order_relaxed),
+        runtime.metronome_beat_unit.load(std::memory_order_relaxed),
+        runtime.metronome_tempo_pulse_units.load(std::memory_order_relaxed),
     });
 }
 
@@ -240,7 +246,9 @@ bool same_metronome_pattern(
         left.play_mask_low == right.play_mask_low &&
         left.play_mask_high == right.play_mask_high &&
         left.accent_mask_low == right.accent_mask_low &&
-        left.accent_mask_high == right.accent_mask_high;
+        left.accent_mask_high == right.accent_mask_high &&
+        left.beat_unit == right.beat_unit &&
+        left.tempo_pulse_units == right.tempo_pulse_units;
 }
 
 void store_metronome_pattern(RuntimeState& runtime, const jam2::metronome::PatternSnapshot& pattern)
@@ -249,6 +257,9 @@ void store_metronome_pattern(RuntimeState& runtime, const jam2::metronome::Patte
     runtime.bpm.store(sanitized.bpm, std::memory_order_relaxed);
     runtime.metronome_beats_per_bar.store(sanitized.beats_per_bar, std::memory_order_relaxed);
     runtime.metronome_division.store(sanitized.division, std::memory_order_relaxed);
+    runtime.metronome_beat_unit.store(sanitized.beat_unit, std::memory_order_relaxed);
+    runtime.metronome_tempo_pulse_units.store(
+        sanitized.tempo_pulse_units, std::memory_order_relaxed);
     runtime.metronome_step_count.store(sanitized.step_count, std::memory_order_relaxed);
     runtime.metronome_play_mask_low.store(sanitized.play_mask_low, std::memory_order_relaxed);
     runtime.metronome_play_mask_high.store(sanitized.play_mask_high, std::memory_order_relaxed);
@@ -300,7 +311,9 @@ void sync_engine_control(
     if (pattern.bpm != previous.bpm || pattern.beats_per_bar != previous.beats_per_bar ||
         pattern.division != previous.division || pattern.play_mask_low != previous.play_mask_low ||
         pattern.play_mask_high != previous.play_mask_high || pattern.accent_mask_low != previous.accent_mask_low ||
-        pattern.accent_mask_high != previous.accent_mask_high) {
+        pattern.accent_mask_high != previous.accent_mask_high ||
+        pattern.beat_unit != previous.beat_unit ||
+        pattern.tempo_pulse_units != previous.tempo_pulse_units) {
         jam2::EngineCommand command; command.type = jam2::EngineCommandType::SetMetronomePattern; command.pattern = pattern;
         if (submit(command)) mirror.snapshot.metronome_pattern = pattern;
     }
@@ -310,6 +323,16 @@ void sync_engine_control(
         if (submit(command)) cached = value;
     };
     sync_value(jam2::EngineCommandType::SetMetronomeLevel, runtime.metronome_level_ppm.load(std::memory_order_relaxed), mirror.snapshot.metronome_level_ppm);
+    const auto metronome_sound = jam2::metronome::sanitize_click_sound(
+        runtime.metronome_sound.load(std::memory_order_relaxed));
+    if (mirror.snapshot.metronome_sound != metronome_sound) {
+        jam2::EngineCommand command;
+        command.type = jam2::EngineCommandType::SetMetronomeSound;
+        command.value = static_cast<int>(metronome_sound);
+        if (submit(command)) {
+            mirror.snapshot.metronome_sound = metronome_sound;
+        }
+    }
     sync_value(jam2::EngineCommandType::SetRemoteLevel, runtime.remote_level_ppm.load(std::memory_order_relaxed), mirror.snapshot.remote_level_ppm);
     sync_value(jam2::EngineCommandType::SetSendLevel, runtime.send_level_ppm.load(std::memory_order_relaxed), mirror.snapshot.send_level_ppm);
     sync_value(jam2::EngineCommandType::SetOutputLevel, runtime.output_level_ppm.load(std::memory_order_relaxed), mirror.snapshot.output_level_ppm);
@@ -421,8 +444,10 @@ QuantizedSchedule next_bar_schedule(
 {
     const auto pattern = metronome_pattern_from_runtime(state);
     const std::uint64_t step_frames = jam2::metronome::step_interval_samples(
-
-        static_cast<double>(std::max(1, sample_rate)), pattern.bpm, pattern.division);
+        static_cast<double>(std::max(1, sample_rate)),
+        pattern.bpm,
+        pattern.division,
+        pattern.tempo_pulse_units);
     const std::uint64_t bar_frames = std::max<std::uint64_t>(
         1,
         step_frames * static_cast<std::uint64_t>(pattern.division) *
@@ -544,10 +569,13 @@ std::array<std::uint8_t, 56> encode_metronome_payload(
         kGridMessageMarker |
         (static_cast<std::uint8_t>(kind) & 0x03U) |
         ((mode & 0x03U) << 2U) |
-        ((static_cast<std::uint8_t>(run_state) & 0x03U) << 4U));
+        ((static_cast<std::uint8_t>(run_state) & 0x03U) << 4U) |
+        (pattern.tempo_pulse_units == 3 ? 0x40U : 0x00U));
     payload[21] = static_cast<std::uint8_t>(pattern.beats_per_bar);
     payload[22] = static_cast<std::uint8_t>(pattern.division);
-    payload[23] = static_cast<std::uint8_t>(pattern.step_count);
+    // step_count is derived from beats and division. Reuse its former byte for
+    // the written beat unit while retaining the fixed-size grid payload.
+    payload[23] = static_cast<std::uint8_t>(pattern.beat_unit);
     write_u64_le(std::span<std::uint8_t>(payload), 24, pattern.play_mask_low);
     write_u64_le(std::span<std::uint8_t>(payload), 32, pattern.play_mask_high);
     write_u64_le(std::span<std::uint8_t>(payload), 40, pattern.accent_mask_low);
@@ -579,17 +607,19 @@ MetronomePayload decode_metronome_payload(std::span<const std::uint8_t> payload)
     decoded.bpm = bpm;
     decoded.revision_or_request = revision_or_request;
     decoded.epoch_sample_time = read_u64_le(payload, 12);
+    const std::uint8_t control = payload[20];
     decoded.pattern = jam2::metronome::sanitize({
         std::abs(bpm),
         static_cast<int>(payload[21]),
         static_cast<int>(payload[22]),
-        static_cast<int>(payload[23]),
+        0,
         read_u64_le(payload, 24),
         read_u64_le(payload, 32),
         read_u64_le(payload, 40),
         read_u64_le(payload, 48),
+        static_cast<int>(payload[23]),
+        (control & 0x40U) != 0 ? 3 : 1,
     });
-    const std::uint8_t control = payload[20];
     if ((control & kGridMessageMarker) == 0) {
         throw std::runtime_error("grid authority message marker is missing");
     }
@@ -922,12 +952,14 @@ void mix_leader_click_into_packet(
     int sample_rate,
     double level,
     std::uint64_t epoch_sample_time,
-    jam2::metronome::PatternSnapshot pattern)
+    jam2::metronome::PatternSnapshot pattern,
+    jam2::metronome::ClickSound sound)
 {
     if (sample_rate <= 0 || samples.empty()) return;
     pattern = jam2::metronome::sanitize(pattern);
     const std::uint64_t step_interval = jam2::metronome::step_interval_samples(
-        static_cast<double>(sample_rate), pattern.bpm, pattern.division);
+        static_cast<double>(sample_rate), pattern.bpm, pattern.division,
+        pattern.tempo_pulse_units);
     for (std::size_t i = 0; i < samples.size(); ++i) {
         const std::uint64_t absolute_sample = packet_sample_time + static_cast<std::uint64_t>(i);
         if (absolute_sample < epoch_sample_time) continue;
@@ -935,7 +967,13 @@ void mix_leader_click_into_packet(
         samples[i] = jam2::metronome::mix_pcm24(
             samples[i],
             jam2::metronome::render_sample(
-                pattern, grid_sample, step_interval, static_cast<double>(sample_rate), level));
+                pattern,
+                grid_sample,
+                step_interval,
+                static_cast<double>(sample_rate),
+                level,
+                jam2::metronome::ClickVoice::Normal,
+                sound));
     }
 }
 
@@ -1065,6 +1103,7 @@ jam2::EngineConfig make_engine_config_impl(const Options& options, bool leader_a
     config.metronome_enabled = options.metronome;
     config.metronome_pattern = jam2::metronome::sanitize({options.bpm, 4, 1, 4, 0x0fULL, 0, 0x01ULL, 0});
     config.metronome_level_ppm = ppm_from_gain(options.metronome_level);
+    config.metronome_sound = options.metronome_sound;
     config.remote_level_ppm = ppm_from_gain(options.remote_level);
     config.send_level_ppm = ppm_from_gain(options.send_level);
     config.output_level_ppm = ppm_from_gain(options.output_level);
@@ -1171,12 +1210,17 @@ struct CommandThread {
         state.bpm.store(options.bpm, std::memory_order_relaxed);
         state.metronome_beats_per_bar.store(4, std::memory_order_relaxed);
         state.metronome_division.store(1, std::memory_order_relaxed);
+        state.metronome_beat_unit.store(4, std::memory_order_relaxed);
+        state.metronome_tempo_pulse_units.store(1, std::memory_order_relaxed);
         state.metronome_step_count.store(4, std::memory_order_relaxed);
         state.metronome_play_mask_low.store(0x0fULL, std::memory_order_relaxed);
         state.metronome_play_mask_high.store(0, std::memory_order_relaxed);
         state.metronome_accent_mask_low.store(0x01ULL, std::memory_order_relaxed);
         state.metronome_accent_mask_high.store(0, std::memory_order_relaxed);
         state.metronome_level_ppm.store(ppm_from_gain(options.metronome_level), std::memory_order_relaxed);
+        state.metronome_sound.store(
+            static_cast<int>(options.metronome_sound),
+            std::memory_order_relaxed);
         state.remote_level_ppm.store(ppm_from_gain(options.remote_level), std::memory_order_relaxed);
         state.send_level_ppm.store(ppm_from_gain(options.send_level), std::memory_order_relaxed);
         state.output_level_ppm.store(ppm_from_gain(options.output_level), std::memory_order_relaxed);
@@ -1547,6 +1591,11 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             }
             case jam2::EngineCommandType::SetMetronomeLevel:
                 commands.state.metronome_level_ppm.store(command.value, std::memory_order_relaxed);
+                break;
+            case jam2::EngineCommandType::SetMetronomeSound:
+                commands.state.metronome_sound.store(
+                    static_cast<int>(jam2::metronome::sanitize_click_sound(command.value)),
+                    std::memory_order_relaxed);
                 break;
             case jam2::EngineCommandType::SetRemoteLevel:
                 commands.state.remote_level_ppm.store(command.value, std::memory_order_relaxed);
@@ -2088,7 +2137,10 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         }
         const auto pattern = metronome_pattern_from_runtime(commands.state);
         const std::uint64_t beat_frames = jam2::metronome::step_interval_samples(
-            static_cast<double>(options.sample_rate), pattern.bpm, pattern.division) *
+            static_cast<double>(options.sample_rate),
+            pattern.bpm,
+            pattern.division,
+            pattern.tempo_pulse_units) *
             static_cast<std::uint64_t>(std::max(1, pattern.division));
         const bool epoch_valid = commands.state.metronome_epoch_valid.load(std::memory_order_relaxed);
         const std::uint64_t mapped_epoch =
@@ -2158,6 +2210,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                       << " bpm=" << commands.state.bpm.load(std::memory_order_relaxed)
                       << " metronome_beats_per_bar=" << commands.state.metronome_beats_per_bar.load(std::memory_order_relaxed)
                       << " metronome_division=" << commands.state.metronome_division.load(std::memory_order_relaxed)
+                      << " metronome_beat_unit=" << commands.state.metronome_beat_unit.load(std::memory_order_relaxed)
+                      << " metronome_tempo_pulse_units=" << commands.state.metronome_tempo_pulse_units.load(std::memory_order_relaxed)
                       << " metronome_epoch_sample_frame=" << commands.state.metronome_epoch_sample_time.load(std::memory_order_relaxed)
                       << " engine_frame=" << engine_snapshot.engine_frame
                       << " metronome_render_offset_frames=" << commands.state.metronome_render_offset_frames.load(std::memory_order_relaxed)
@@ -2551,7 +2605,10 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 const auto pattern = metronome_pattern_from_runtime(commands.state);
                 const std::int64_t interval = static_cast<std::int64_t>(
                     jam2::metronome::step_interval_samples(
-                        static_cast<double>(options.sample_rate), pattern.bpm, pattern.division));
+                        static_cast<double>(options.sample_rate),
+                        pattern.bpm,
+                        pattern.division,
+                        pattern.tempo_pulse_units));
                 if (interval > 0) {
                     const std::int64_t current_offset =
                         commands.state.metronome_render_offset_frames.load(std::memory_order_relaxed);
@@ -2696,7 +2753,9 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         options.sample_rate,
                         gain_from_ppm(commands.state.metronome_level_ppm.load(std::memory_order_relaxed)),
                         commands.state.metronome_epoch_sample_time.load(std::memory_order_relaxed),
-                        metronome_pattern_from_runtime(commands.state));
+                        metronome_pattern_from_runtime(commands.state),
+                        jam2::metronome::sanitize_click_sound(
+                            commands.state.metronome_sound.load(std::memory_order_relaxed)));
                     mesh_leader_audio_source_peer_id = local_peer_id.value;
                     ++mesh_leader_audio_injected_packets;
                 }
@@ -2716,7 +2775,9 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     options.sample_rate,
                     gain_from_ppm(commands.state.metronome_level_ppm.load(std::memory_order_relaxed)),
                     commands.state.metronome_epoch_sample_time.load(std::memory_order_relaxed),
-                    metronome_pattern_from_runtime(commands.state));
+                    metronome_pattern_from_runtime(commands.state),
+                    jam2::metronome::sanitize_click_sound(
+                        commands.state.metronome_sound.load(std::memory_order_relaxed)));
                 mesh_leader_audio_source_peer_id = local_peer_id.value;
                 ++mesh_leader_audio_injected_packets;
                 (void)jam2::protocol::pack_audio_into(
@@ -3178,7 +3239,10 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                                 commands.state.metronome_epoch_valid.load(std::memory_order_relaxed)) {
                                 const auto pattern = metronome_pattern_from_runtime(commands.state);
                                 const std::uint64_t step_frames = jam2::metronome::step_interval_samples(
-                                    static_cast<double>(options.sample_rate), pattern.bpm, pattern.division);
+                                    static_cast<double>(options.sample_rate),
+                                    pattern.bpm,
+                                    pattern.division,
+                                    pattern.tempo_pulse_units);
                                 const std::uint64_t bar_frames = step_frames *
                                     static_cast<std::uint64_t>(pattern.step_count);
                                 if (bar_frames > 0) {

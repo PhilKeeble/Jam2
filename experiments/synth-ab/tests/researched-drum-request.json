@@ -1,0 +1,80 @@
+{
+  "schema": "jam2-instrument-patch-v1",
+  "profileId": "hiphop_trap",
+  "role": "drums",
+  "audition": "velocity-ladder",
+  "drumPiece": "kick",
+  "kit": {
+    "candidateId": "gliding-sub-808-descendant",
+    "pieces": {
+      "kick": {
+        "source": "daisy-synthetic-kick",
+        "secondSource": "daisy-modal",
+        "blend": 0.14,
+        "frequencyHz": 43.65,
+        "tone": 0.22,
+        "decay": 0.88,
+        "colour": 0.045,
+        "fmAmount": 0.72,
+        "level": 0.58,
+        "transient": {
+          "type": "click",
+          "level": 0.12,
+          "tone": 0.4,
+          "decaySeconds": 0.012
+        },
+        "texture": {
+          "type": "off",
+          "level": 0,
+          "tone": 0.5,
+          "decaySeconds": 0.18,
+          "density": 0.5
+        },
+        "colourStage": {
+          "voiceDrive": 1.08,
+          "sampleRateHz": 48000,
+          "bitDepth": 24,
+          "reconstructionLowpassHz": 20000,
+          "dynamicFilterAmount": 0
+        },
+        "roomSend": 0.02,
+        "relationship": {
+          "chokeGroup": "",
+          "chokeSeconds": 0.012
+        },
+        "velocity": {
+          "ghost": {"minimum": 13, "maximum": 39},
+          "normal": {"minimum": 48, "maximum": 104},
+          "accent": {"minimum": 100, "maximum": 127},
+          "excitationCurve": 0.7,
+          "outputCurve": 1.2,
+          "brightnessAmount": 0.1,
+          "decayAmount": 0.12,
+          "driveAmount": 0.14
+        },
+        "synthLayer": {
+          "source": "sine-fundamental",
+          "midiNote": 29,
+          "level": 0.18,
+          "gateSeconds": 0.42,
+          "attackSeconds": 0.001,
+          "decaySeconds": 0.6,
+          "sustain": 0.01,
+          "releaseSeconds": 0.38,
+          "noiseMix": 0,
+          "filterCutoffHz": 1400
+        }
+      }
+    },
+    "bus": {
+      "drive": 1.2,
+      "lowpassHz": 15800,
+      "compressorThreshold": 0.2,
+      "compressorRatio": 1.55,
+      "compressorReleaseMs": 48,
+      "roomMix": 0.025,
+      "roomSizeMs": 18,
+      "roomDamping": 0.58
+    }
+  }
+}

@@ -17,6 +17,38 @@ if(NOT Qt6_FOUND)
     )
 endif()
 
+set(JAM2_DAISYSP_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/../experiments/synth-ab/.deps/DaisySP")
+if(NOT EXISTS "${JAM2_DAISYSP_ROOT}/Source/daisysp.h")
+    message(FATAL_ERROR
+        "The accepted Jam2 drum engine requires the pinned DaisySP checkout. "
+        "Run experiments/synth-ab/fetch-deps.cmd, then configure again.")
+endif()
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/PrepareDaisySPDrums.cmake")
+jam2_prepare_daisysp_synthbassdrum(
+    "${JAM2_DAISYSP_ROOT}"
+    JAM2_DAISYSP_SYNTHBASSDRUM_SOURCE)
+
+add_library(jam2_daisysp_drums STATIC
+    "${JAM2_DAISYSP_ROOT}/Source/Control/adsr.cpp"
+    "${JAM2_DAISYSP_ROOT}/Source/Drums/analogbassdrum.cpp"
+    "${JAM2_DAISYSP_ROOT}/Source/Drums/analogsnaredrum.cpp"
+    "${JAM2_DAISYSP_ROOT}/Source/Drums/hihat.cpp"
+    "${JAM2_DAISYSP_SYNTHBASSDRUM_SOURCE}"
+    "${JAM2_DAISYSP_ROOT}/Source/Drums/synthsnaredrum.cpp"
+    "${JAM2_DAISYSP_ROOT}/Source/Filters/svf.cpp"
+    "${JAM2_DAISYSP_ROOT}/Source/Synthesis/oscillator.cpp"
+)
+target_include_directories(jam2_daisysp_drums PUBLIC
+    "${JAM2_DAISYSP_ROOT}/Source"
+    "${JAM2_DAISYSP_ROOT}/Source/Utility"
+)
+target_compile_definitions(jam2_daisysp_drums PRIVATE _USE_MATH_DEFINES)
+if(MSVC)
+    target_compile_options(jam2_daisysp_drums PRIVATE /W0)
+endif()
+
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
@@ -63,6 +95,8 @@ add_executable(jam2 MACOSX_BUNDLE
     application/DebugActionValidation.hpp
     application/DebugAutomation.cpp
     application/DebugAutomation.hpp
+    application/MusicCorpusDiagnostic.cpp
+    application/MusicCorpusDiagnostic.hpp
     application/NativeTcpTransport.cpp
     application/NativeTcpTransport.hpp
     application/RuntimeHost.cpp
@@ -123,11 +157,16 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/PracticeIdeaGenerator.hpp
     gui/PracticeReferenceRenderer.cpp
     gui/PracticeReferenceRenderer.hpp
+    gui/ResearchDrumKit.cpp
+    gui/ResearchDrumKit.hpp
+    gui/ResearchDrumEngine.cpp
     gui/ProjectPersistenceCoordinator.cpp
     gui/ProjectPersistenceCoordinator.hpp
     gui/SharedTrackController.cpp
     gui/SharedTrackController.hpp
     gui/SharedTrackModel.hpp
+    gui/StyleProfileCatalog.cpp
+    gui/StyleProfileCatalog.hpp
     gui/TrackWidgets.hpp
     gui/TrackRecordingWorkflow.cpp
     gui/TrackRecordingWorkflow.hpp
@@ -185,6 +224,7 @@ target_include_directories(jam2 PRIVATE
 
 target_link_libraries(jam2 PRIVATE
     jam2_core
+    jam2_daisysp_drums
     Qt6::Network
     Qt6::Widgets
 )

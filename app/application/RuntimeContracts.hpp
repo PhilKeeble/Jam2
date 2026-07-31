@@ -75,6 +75,8 @@ struct Jam2RuntimeOptions {
     bool metronome = false;
     int bpm = 120;
     double metronome_level = 1.0;
+    jam2::metronome::ClickSound metronome_sound =
+        jam2::metronome::ClickSound::Classic;
     Jam2MetronomeMode metronome_mode = Jam2MetronomeMode::SharedGrid;
     double metronome_compensation_max_ms = 250.0;
     double metronome_compensation_smoothing_ms = 750.0;

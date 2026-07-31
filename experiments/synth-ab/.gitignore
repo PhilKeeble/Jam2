@@ -1,0 +1,12 @@
+.deps/
+.research-cache/
+build/
+site/audio/
+site/lab-renders/
+site/manifest.js
+site/showcase-manifest.js
+site/sound-design-manifest.js
+site/seed-audit.json
+site/full-form-corpus.json
+site/full-form-audit-report.json
+tools/__pycache__/

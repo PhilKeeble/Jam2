@@ -1,0 +1,1415 @@
+{
+    "artifact_inventory_truncated": true,
+    "artifact_limits": {
+        "max_files": 256,
+        "max_total_bytes": 1073741824
+    },
+    "artifacts": [
+        {
+            "bytes": 16609,
+            "path": "app.js",
+            "sha256": "73bad481d5469680274c64398404a95c62b101bb30b353cdd75fce93e091997d"
+        },
+        {
+            "bytes": 1344044,
+            "path": "audio/daisy-showcase/01-variable-shape.wav",
+            "sha256": "da320d2c8cbab02750cad77ca8f262eaa67a948c3bc134f9936649756b1bbd98"
+        },
+        {
+            "bytes": 1344044,
+            "path": "audio/daisy-showcase/02-pulse-width.wav",
+            "sha256": "7e35e4b729479bde4ec9773afee63cd175df5ee2efe1e228e926ddee9631a210"
+        },
+        {
+            "bytes": 1344044,
+            "path": "audio/daisy-showcase/03-hard-sync.wav",
+            "sha256": "4e59908f65f08ac19758d1da8e4ad6b038a01d4c9f9185abcb2c1addfbd96b8b"
+        },
+        {
+            "bytes": 1536044,
+            "path": "audio/daisy-showcase/04-fm-spectrum.wav",
+            "sha256": "b76cd354b3f085714bcba70231be51a42dac893103fde3f068c06d2ab1e3a5e7"
+        },
+        {
+            "bytes": 1536044,
+            "path": "audio/daisy-showcase/05-additive-harmonics.wav",
+            "sha256": "b5656a063c505bc54a348264074119d0726ec71cc48e4bdeafeea909e20160a2"
+        },
+        {
+            "bytes": 1344044,
+            "path": "audio/daisy-showcase/06-wavefolding.wav",
+            "sha256": "5c3c50dda912ca141e950231c8e2e733deea1969619fb708e3886e075e20323a"
+        },
+        {
+            "bytes": 1536044,
+            "path": "audio/daisy-showcase/07-ladder-filter.wav",
+            "sha256": "4ae585490bac3bce27b253e10386da732b104c9a4d491dd18ef92bfeced77b92"
+        },
+        {
+            "bytes": 1536044,
+            "path": "audio/daisy-showcase/08-state-variable-filter.wav",
+            "sha256": "b7efef02de2fa9222f916c04d214c490b642f1f517d2a24d33a3968bb07d603e"
+        },
+        {
+            "bytes": 1612844,
+            "path": "audio/daisy-showcase/analog-poly-designed.wav",
+            "sha256": "c15866b25fc16dd7c2d8e86f0025f03942bed435d63d20942a0e26e837a85e85"
+        },
+        {
+            "bytes": 1612844,
+            "path": "audio/daisy-showcase/analog-poly-source.wav",
+            "sha256": "a7f6d0a72dd9de80dda9ab1943d64a0c44da3b3d56e396c14203bc0d9ad7fd2a"
+        },
+        {
+            "bytes": 1958444,
+            "path": "audio/daisy-showcase/evolving-pad-designed.wav",
+            "sha256": "a2708bc738e409fc0e4882435a0eae9f113ff99aadcc5273d822cc18ccd269a0"
+        },
+        {
+            "bytes": 1958444,
+            "path": "audio/daisy-showcase/evolving-pad-source.wav",
+            "sha256": "e19e26884719277b36a97117c4ab55b375d3801a1a7d98586bad055abf41f1b6"
+        },
+        {
+            "bytes": 1612844,
+            "path": "audio/daisy-showcase/fm-keys-designed.wav",
+            "sha256": "874a530c205ae237fae2e4efe080b0cb734e1dc4d2daf153b5ce88ef3585d6b9"
+        },
+        {
+            "bytes": 1612844,
+            "path": "audio/daisy-showcase/fm-keys-source.wav",
+            "sha256": "1f06848318ecd7556af8ec3f0c26f00110ba081e2fc7e44656706774ee377886"
+        },
+        {
+            "bytes": 1612844,
+            "path": "audio/daisy-showcase/physical-pluck-designed.wav",
+            "sha256": "16cafff611b551f6f714feb5fc6b3c62acbf71293975bca5b304b846fb1eaa16"
+        },
+        {
+            "bytes": 1612844,
+            "path": "audio/daisy-showcase/physical-pluck-source.wav",
+            "sha256": "523fe78fa935ccb992d1502abe81d8db0a46ef325dc215ef89fdb0d47ffd14fb"
+        },
+        {
+            "bytes": 1612844,
+            "path": "audio/daisy-showcase/sub-bass-designed.wav",
+            "sha256": "6b4fb7784e5e80e94eb5139a781a64c1407eeef39d7e71f317b6118c37d6791d"
+        },
+        {
+            "bytes": 1612844,
+            "path": "audio/daisy-showcase/sub-bass-source.wav",
+            "sha256": "33fd88b28e2b9e84a346122ffa5995254ede42a1eb1c5f71be62ae27c7f77c98"
+        },
+        {
+            "bytes": 1612844,
+            "path": "audio/daisy-showcase/sync-lead-designed.wav",
+            "sha256": "2073d86a8a9c481a9d3d75674fda96a6ca7c2edae248cfad550da7cf1b7370ee"
+        },
+        {
+            "bytes": 1612844,
+            "path": "audio/daisy-showcase/sync-lead-source.wav",
+            "sha256": "83f086284745fd136578769efc3e051f0a06c82da5ecb5f057c0f2e5bba5e7f4"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/blues_dominant/bass-daisy.wav",
+            "sha256": "1755192354a9c55f0fb21cbfd099d806d0646a21fc5f4e95a26d2ebd92b3a841"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/blues_dominant/bass-hybrid.wav",
+            "sha256": "ca8aeebfa9b7fd4a6929bf76d50e85597d808bfd59c2b5522824a90d36d5ba70"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/blues_dominant/bass-jam2.wav",
+            "sha256": "ce4a5b765f5d7b1f1b7ad14682d20cd4eae8e598605779cfd91d9e18ff273b54"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/blues_dominant/chords-daisy.wav",
+            "sha256": "82aaed9bb29bc96fc1faa182afa90824142c441297576c998d7dac6f8b5fa05e"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/blues_dominant/chords-hybrid.wav",
+            "sha256": "fad373268c170b249a0dfa0fd614bfddb3d81e58050ff14eefc2ee3e7b1ede4f"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/blues_dominant/chords-jam2.wav",
+            "sha256": "1a8923116a8b27676d159cb1338a213532939df668879255659a3f90a6fa9fd0"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/blues_dominant/drums-daisy.wav",
+            "sha256": "ada5f1be82c45e6ab617242162a60de762b000459538abc46defe0606df370d1"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/blues_dominant/drums-hybrid.wav",
+            "sha256": "9a127a3cc72a3e77d977c37b33bc7a0bf549676e2c4436d33c78f272159714e4"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/blues_dominant/drums-jam2.wav",
+            "sha256": "92e23162b1bc57835f2549cdc066a518dc7abf6ef3cb61bebfb584a4273ffa2c"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/blues_dominant/melody-daisy.wav",
+            "sha256": "96643ca6802da6bf843084c9e224a058a4e9ebd059aae014a5c507205a2b497a"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/blues_dominant/melody-hybrid.wav",
+            "sha256": "4230c15c121c73e832d04a8571e3ae1a9050a3e04fefeb3b3c89cd20a8da13f7"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/blues_dominant/melody-jam2.wav",
+            "sha256": "0e36baa2bb4a00d297bc7fbecad3c0d74b5a651e292bd36450aad1466dff3438"
+        },
+        {
+            "bytes": 869478,
+            "path": "audio/designs/blues_minor/bass-daisy.wav",
+            "sha256": "e9482da0ef1f8e949473dc2d4caebaeabb6f27de1ca925374b5069fbd654c03c"
+        },
+        {
+            "bytes": 869478,
+            "path": "audio/designs/blues_minor/bass-hybrid.wav",
+            "sha256": "9828b57d85b48fd2d1663f16665d9bb204aac8cf9c7f3d4f95d8db7ccc77ba6c"
+        },
+        {
+            "bytes": 869478,
+            "path": "audio/designs/blues_minor/bass-jam2.wav",
+            "sha256": "f042f90878c2a0f42be2b81ca19acf4aea46adebb08bb1f8848d05c33fa33778"
+        },
+        {
+            "bytes": 869478,
+            "path": "audio/designs/blues_minor/chords-daisy.wav",
+            "sha256": "e7e3c834e0ac7f80ba3dae9e4c210b004a4b6f295663111121c8d498bdcf7269"
+        },
+        {
+            "bytes": 869478,
+            "path": "audio/designs/blues_minor/chords-hybrid.wav",
+            "sha256": "52eba9c6d73edcec01aa7536a9afa41205f872d7949aa60922d542d928849fbe"
+        },
+        {
+            "bytes": 869478,
+            "path": "audio/designs/blues_minor/chords-jam2.wav",
+            "sha256": "2bfdeaa74269c23cf2e0c93f47be57b2821a22b01cc4556a230972b1746ab3e3"
+        },
+        {
+            "bytes": 869478,
+            "path": "audio/designs/blues_minor/drums-daisy.wav",
+            "sha256": "38179775d044bb91801208ce42b1ca95ae8f42ee61175ef1604775fbd42c229e"
+        },
+        {
+            "bytes": 869478,
+            "path": "audio/designs/blues_minor/drums-hybrid.wav",
+            "sha256": "e1cdde803ea9a3286eda9849eeeecc8076a8091bbd8df2d3cf9fbc55e9d709cf"
+        },
+        {
+            "bytes": 869478,
+            "path": "audio/designs/blues_minor/drums-jam2.wav",
+            "sha256": "2df0759c5b1f7399327ddcc04765ac648819ff87b525c6db1af5fbd957759f21"
+        },
+        {
+            "bytes": 869478,
+            "path": "audio/designs/blues_minor/melody-daisy.wav",
+            "sha256": "d232e4cc9852566464a79e9c3b07f0df7382b9f50a22776b9328777526c20e89"
+        },
+        {
+            "bytes": 869478,
+            "path": "audio/designs/blues_minor/melody-hybrid.wav",
+            "sha256": "ef27cd35bf744f5cd674e4e201d5d1010e65371b32b94db352dcf1c53cd805cf"
+        },
+        {
+            "bytes": 869478,
+            "path": "audio/designs/blues_minor/melody-jam2.wav",
+            "sha256": "79ee9c74c657379ab949f49fde2591021d05f1c3a6b98241742b5961e88c4006"
+        },
+        {
+            "bytes": 404256,
+            "path": "audio/designs/bossa_songbook/bass-daisy.wav",
+            "sha256": "13df41ab3e5a8811c62405df2e3f12791c883d3deaabacfc52540c215ab9d85a"
+        },
+        {
+            "bytes": 404256,
+            "path": "audio/designs/bossa_songbook/bass-hybrid.wav",
+            "sha256": "14a154ead017e40ec9679e01f81b0bd5f9e1f45dad90546a29877a5f5c6973b9"
+        },
+        {
+            "bytes": 404256,
+            "path": "audio/designs/bossa_songbook/bass-jam2.wav",
+            "sha256": "48bf1bcad6fcc0b9b8e32e151d05fcb19f3b3850151668f464639b0fa55d37d9"
+        },
+        {
+            "bytes": 404256,
+            "path": "audio/designs/bossa_songbook/chords-daisy.wav",
+            "sha256": "88097b00dfdd5173bbd7520cfebfa88841ba774466767809b2b263d46e44240a"
+        },
+        {
+            "bytes": 404256,
+            "path": "audio/designs/bossa_songbook/chords-hybrid.wav",
+            "sha256": "f63d202201fbbf8b11e194a210e553461b473caad31255da2013e8afbd308f01"
+        },
+        {
+            "bytes": 404256,
+            "path": "audio/designs/bossa_songbook/chords-jam2.wav",
+            "sha256": "14d06d778dae70112816b29ce4fbd9f231715f860784587882b1ae00b88c8561"
+        },
+        {
+            "bytes": 404256,
+            "path": "audio/designs/bossa_songbook/drums-daisy.wav",
+            "sha256": "c897ebca0a4d8dc89d04785e05865bb9b1be40ae12067abf1fc6b752e990a6e6"
+        },
+        {
+            "bytes": 404256,
+            "path": "audio/designs/bossa_songbook/drums-hybrid.wav",
+            "sha256": "48e9600bd058f5902fc89a6be406f797a74ac15d09961f909432871bc3c74072"
+        },
+        {
+            "bytes": 404256,
+            "path": "audio/designs/bossa_songbook/drums-jam2.wav",
+            "sha256": "6e6f5109c58fada74fd0044dcf7eb1da19f9d37280ff4bcc5c7ef5df87ef8668"
+        },
+        {
+            "bytes": 404256,
+            "path": "audio/designs/bossa_songbook/melody-daisy.wav",
+            "sha256": "2eacac71f43e2841967ae395ae14f36b2eef4b2df74fbbc37e42f23f4cd3f8da"
+        },
+        {
+            "bytes": 404256,
+            "path": "audio/designs/bossa_songbook/melody-hybrid.wav",
+            "sha256": "1e910f5102d5e8c64f2596adbd26b606c6f3c5b1c44b106cf1c47e86f1ce5e7e"
+        },
+        {
+            "bytes": 404256,
+            "path": "audio/designs/bossa_songbook/melody-jam2.wav",
+            "sha256": "ce4dc9045bb7174119535c0c2b7a32702f1d245ea2e109ee6fb9838997501ad1"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/country_contemporary/bass-daisy.wav",
+            "sha256": "35690c3ded0def851ef2b97524e4d21a3100e7d9e33b6bce049eaf5894d07206"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/country_contemporary/bass-hybrid.wav",
+            "sha256": "c096689a086494e72de7039881cca87ba2e55426d9b4b5b83e3abb58fffb4216"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/country_contemporary/bass-jam2.wav",
+            "sha256": "2c63b3a5c1ff328f37bbf1d971c30ef0fb642f9b23bdf8fdce0e52a8151dcbf3"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/country_contemporary/chords-daisy.wav",
+            "sha256": "813866093a71a86fc9e15f2204eef3ea914b7abe1381ea46ae7ade1bfa283292"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/country_contemporary/chords-hybrid.wav",
+            "sha256": "7cd800d3c62f04aadfe143765c0966682fca0d8b87dd8aa3ba430263e9ac7560"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/country_contemporary/chords-jam2.wav",
+            "sha256": "505494547fef120457a58fe8eb1cb68926271ab7c6ea502d9fab5a5815020212"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/country_contemporary/drums-daisy.wav",
+            "sha256": "0e378aae633c46864fbeb978f85a6e803482c7f1419f092ea60ce0957f71ac9b"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/country_contemporary/drums-hybrid.wav",
+            "sha256": "89da87c0d877212e6422ff310e460bfdf90bfd798ef0a276e4166a726c05b024"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/country_contemporary/drums-jam2.wav",
+            "sha256": "844fdbc8a9840b69b4b5f3e9158a6c3e8bacfaaf4a86bfdf5eda8f42d3a5ea97"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/country_contemporary/melody-daisy.wav",
+            "sha256": "017f07dd922b701dbdfc1ff48a1b4c8fb28a41c68c4544f47096270657c6a5aa"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/country_contemporary/melody-hybrid.wav",
+            "sha256": "e8c7880c588b412149eee7557878f8667f47d8b9c9cd97fada9080180bea43ed"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/country_contemporary/melody-jam2.wav",
+            "sha256": "75bb15cb86165e30588e738743bf5f7019aa817c52d0647282902f4fd9c18b06"
+        },
+        {
+            "bytes": 755454,
+            "path": "audio/designs/country_honky_tonk/bass-daisy.wav",
+            "sha256": "4aff96212686ecbb916d4f25bdf95c69a5f37c92351cb410e6a6c0681272944e"
+        },
+        {
+            "bytes": 755454,
+            "path": "audio/designs/country_honky_tonk/bass-hybrid.wav",
+            "sha256": "312c37c2dc383b29f0de9ad8e98959d861d811dd1514ffac26322cba89dc6f67"
+        },
+        {
+            "bytes": 755454,
+            "path": "audio/designs/country_honky_tonk/bass-jam2.wav",
+            "sha256": "9418f710d90acd2be033234def0e8fe460fa795b6d5731f5504fa5525d2427fe"
+        },
+        {
+            "bytes": 755454,
+            "path": "audio/designs/country_honky_tonk/chords-daisy.wav",
+            "sha256": "8c2b284498d5a5c3b7d8fb65bea2cbc505aabb7781a3b12bcd831898c402f33c"
+        },
+        {
+            "bytes": 755454,
+            "path": "audio/designs/country_honky_tonk/chords-hybrid.wav",
+            "sha256": "1faf5958646dec9d44bd6a90d44d4fcbd1d8ffd1ba3c0efcaaf79afc41dbf254"
+        },
+        {
+            "bytes": 755454,
+            "path": "audio/designs/country_honky_tonk/chords-jam2.wav",
+            "sha256": "b756a48126e3ccadb42e86ff56d114e4c5547861155fbd886e625ee6d375e57b"
+        },
+        {
+            "bytes": 755454,
+            "path": "audio/designs/country_honky_tonk/drums-daisy.wav",
+            "sha256": "9cc2c7552305b634788b7cae2b52a69828f69595c9c07982649c798c5596f00d"
+        },
+        {
+            "bytes": 755454,
+            "path": "audio/designs/country_honky_tonk/drums-hybrid.wav",
+            "sha256": "5752df24726d816693ce31da76b7e7c8e5dac0e97258a2f323b20c80543c6893"
+        },
+        {
+            "bytes": 755454,
+            "path": "audio/designs/country_honky_tonk/drums-jam2.wav",
+            "sha256": "fcb39c36ea6e47fd407a341e2992e691a9e4fcb042bce6ad1b9c4fa3be52e499"
+        },
+        {
+            "bytes": 755454,
+            "path": "audio/designs/country_honky_tonk/melody-daisy.wav",
+            "sha256": "aeba589a232cc95b3c25040ed3afa4b2d1bcd84c0ac8fec6e09abdc3670ec4b5"
+        },
+        {
+            "bytes": 755454,
+            "path": "audio/designs/country_honky_tonk/melody-hybrid.wav",
+            "sha256": "004e132649ed07facf49211132ba8f59867f72381e63fd61ae71ed577f9181c4"
+        },
+        {
+            "bytes": 755454,
+            "path": "audio/designs/country_honky_tonk/melody-jam2.wav",
+            "sha256": "b156fcbcb4cfcc2ba6466d018812551d7f0e6783a01ba50bf59c16159e45b99a"
+        },
+        {
+            "bytes": 822902,
+            "path": "audio/designs/electronic_breakbeat/bass-daisy.wav",
+            "sha256": "3df00821a025b0d626496af1a73c6df97eb2242f7043036e20f861652709047f"
+        },
+        {
+            "bytes": 822902,
+            "path": "audio/designs/electronic_breakbeat/bass-hybrid.wav",
+            "sha256": "8fefc0f8324a443a80e4e7618aad97fc39b1018bfb977df257b4301c9fc9f27c"
+        },
+        {
+            "bytes": 822902,
+            "path": "audio/designs/electronic_breakbeat/bass-jam2.wav",
+            "sha256": "b32c8daf3ee6715b6c52e24c383c5104d740c01090e3d70869eaace608a89e38"
+        },
+        {
+            "bytes": 822902,
+            "path": "audio/designs/electronic_breakbeat/chords-daisy.wav",
+            "sha256": "a143a439c0a2961553de4be120b83f0a93b66065266703714065639f03cf68cb"
+        },
+        {
+            "bytes": 822902,
+            "path": "audio/designs/electronic_breakbeat/chords-hybrid.wav",
+            "sha256": "4b45ab584d3e8ce4e2aa44703a65f4ab02efd1af893b83a5c0e15809e6812c89"
+        },
+        {
+            "bytes": 822902,
+            "path": "audio/designs/electronic_breakbeat/chords-jam2.wav",
+            "sha256": "479ed5b876499101c104269a45c11dc595108e6b6a07ff295b9a216965be6cad"
+        },
+        {
+            "bytes": 822902,
+            "path": "audio/designs/electronic_breakbeat/drums-daisy.wav",
+            "sha256": "7dd062ba1de7ca9f4de7ee1beff169288e9ea95b76fc61e99d31a0687d4a6778"
+        },
+        {
+            "bytes": 822902,
+            "path": "audio/designs/electronic_breakbeat/drums-hybrid.wav",
+            "sha256": "4a2b722ae079b6d9b2bf6e8af3501be42fec7b9cc38e28756663400dadc4d863"
+        },
+        {
+            "bytes": 822902,
+            "path": "audio/designs/electronic_breakbeat/drums-jam2.wav",
+            "sha256": "41c798421a35a3c4132fa9cdf21d34cd09f46b730ffaadb365cc95c38327ee7d"
+        },
+        {
+            "bytes": 822902,
+            "path": "audio/designs/electronic_breakbeat/melody-daisy.wav",
+            "sha256": "8780b861ee35dbbfa3f2a2ae905815c5fa539262a8f58cf7b562b3d1a141253c"
+        },
+        {
+            "bytes": 822902,
+            "path": "audio/designs/electronic_breakbeat/melody-hybrid.wav",
+            "sha256": "eeba0480cc4a7e32c4ea96bc42b901c8550a5e59e9c79ca5f82a49a8ff505772"
+        },
+        {
+            "bytes": 822902,
+            "path": "audio/designs/electronic_breakbeat/melody-jam2.wav",
+            "sha256": "1c922315d308ec2022f93b6dffcec8b2fbf10ba69e3ad140244a982e146dfa0a"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/electronic_house/bass-daisy.wav",
+            "sha256": "7a041b658a09660d419ee1a6cb762d213f927b517bb02d62ef967d4f3d0ca0dc"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/electronic_house/bass-hybrid.wav",
+            "sha256": "d9c48a63a00193802b14e9d1b53b4932e2d3e41b83b9f259e0d221334cf5fb1a"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/electronic_house/bass-jam2.wav",
+            "sha256": "74859c759838e868c5349b54126780088174a763d1e3c56845148fd5ebb8a751"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/electronic_house/chords-daisy.wav",
+            "sha256": "ed5bc328808806951e40f189f1fdde5fe595cb627fe6bacca0d3bb23fc96ee31"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/electronic_house/chords-hybrid.wav",
+            "sha256": "2496568c4512b0bed552a55db16297b39c9a9f9579b9b2993cda00168a315e7e"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/electronic_house/chords-jam2.wav",
+            "sha256": "d3194325e49f5e82c99f928e308e67f65d7e7eaa87594851b3798039425d3da8"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/electronic_house/drums-daisy.wav",
+            "sha256": "7a07c75499d8d0796064c366521335099318dc239f819011d73ceeec7b4da49a"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/electronic_house/drums-hybrid.wav",
+            "sha256": "464af873fa8193fcbd74f427f27615f21d97afe18b78db8d84765b2bd26c63bf"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/electronic_house/drums-jam2.wav",
+            "sha256": "8e91f088b142385d883bfe6e2e2937e013da1a6ac94ef6c6fb04d5516885adae"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/electronic_house/melody-daisy.wav",
+            "sha256": "b3fe74081e2afa1a9ef9e75489ab496a95358ca995d06687fbaf78d082fabeb2"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/electronic_house/melody-hybrid.wav",
+            "sha256": "70dfc3edc39c3886bda59cf2c96541c9ea2b3bbddee02c85062474f981db4224"
+        },
+        {
+            "bytes": 698226,
+            "path": "audio/designs/electronic_house/melody-jam2.wav",
+            "sha256": "03b0aaa33cad1f0b3100cf99c1ef10ad77bb86dcb916497ca0a740ec7fbc5dcb"
+        },
+        {
+            "bytes": 731474,
+            "path": "audio/designs/electronic_techno/bass-daisy.wav",
+            "sha256": "f2aff0462ef3fd89165d693b6b876476a17835a3a1dd8fd998d7f20085a986aa"
+        },
+        {
+            "bytes": 731474,
+            "path": "audio/designs/electronic_techno/bass-hybrid.wav",
+            "sha256": "6ba07d4c8a8e4e94dfd2d069ebc4dcb6b9cba176bd4512af99ccacaeac0375a3"
+        },
+        {
+            "bytes": 731474,
+            "path": "audio/designs/electronic_techno/bass-jam2.wav",
+            "sha256": "f78ce73946b0022e14fdd308ab902fee782d0a13cc42362f8c7bbfbe4e244089"
+        },
+        {
+            "bytes": 731474,
+            "path": "audio/designs/electronic_techno/chords-daisy.wav",
+            "sha256": "c0c6ca157294da05c321c6c36f2c9b88a3006960d353409c43fdc377602552f0"
+        },
+        {
+            "bytes": 731474,
+            "path": "audio/designs/electronic_techno/chords-hybrid.wav",
+            "sha256": "ec2be39115d5a332565c076f11bf2d92fa9c4a9d4fe692c1b57f7e1d203041ce"
+        },
+        {
+            "bytes": 731474,
+            "path": "audio/designs/electronic_techno/chords-jam2.wav",
+            "sha256": "47cf66ac649ba5c18b267de5fd74e71ac37c6f940ac4c79fa84324921c420a93"
+        },
+        {
+            "bytes": 731474,
+            "path": "audio/designs/electronic_techno/drums-daisy.wav",
+            "sha256": "f4e52c82a36aac70fd7e8b0b746156d8ee03c6a3df4d8b0da7f4efd8eea2ebf7"
+        },
+        {
+            "bytes": 731474,
+            "path": "audio/designs/electronic_techno/drums-hybrid.wav",
+            "sha256": "1c05fa35eb859de411d96a4895a0ddbd18fb381aeb22c347c76a3f06bf8f6f6b"
+        },
+        {
+            "bytes": 731474,
+            "path": "audio/designs/electronic_techno/drums-jam2.wav",
+            "sha256": "3f471accf05eb07d8c8b95b95baa1af47d2c58a2b8cd2697f4b153e96069d9ac"
+        },
+        {
+            "bytes": 731474,
+            "path": "audio/designs/electronic_techno/melody-daisy.wav",
+            "sha256": "25036853f55605429141ee49a96821c4f6d8f05bab2010d4b9be16c1ab8e4b14"
+        },
+        {
+            "bytes": 731474,
+            "path": "audio/designs/electronic_techno/melody-hybrid.wav",
+            "sha256": "ca3b59d80b725afd44b5268228cc68ecaef1e9eb0ea3580e11c847e033e0a347"
+        },
+        {
+            "bytes": 731474,
+            "path": "audio/designs/electronic_techno/melody-jam2.wav",
+            "sha256": "853afbf1ce8fa5da143b5cda621c20f1f1bedba2743b32953e2f3940e9836b88"
+        },
+        {
+            "bytes": 731474,
+            "path": "audio/designs/electronic_techno/support-daisy.wav",
+            "sha256": "60b5475807821f622b49931dbda06cf156cb5a8a992e8f3adb91d8e0d6568c98"
+        },
+        {
+            "bytes": 731474,
+            "path": "audio/designs/electronic_techno/support-hybrid.wav",
+            "sha256": "71cd61f33e40931ecb158717ccdca66069d87b034322f9bd9b24cc4a314ea00d"
+        },
+        {
+            "bytes": 731474,
+            "path": "audio/designs/electronic_techno/support-jam2.wav",
+            "sha256": "b89298202828862da66cb32ea0db0dca45d4364f7a650d206c2a8ed454ebccac"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/funk_static_pocket/bass-daisy.wav",
+            "sha256": "66217a771d4a79ff3b7c109d990fc568ea2945a8f28ae5bb9e7cbd6acad9a4bd"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/funk_static_pocket/bass-hybrid.wav",
+            "sha256": "45d3b59e0e06f269c92017d9ed89e75d8b1b99ef1f102a7c228fdc2d79358230"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/funk_static_pocket/bass-jam2.wav",
+            "sha256": "70d9778c7618d849067ac053a6f91d86141b40afe712acd9cf6969d965e2c416"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/funk_static_pocket/chords-daisy.wav",
+            "sha256": "6eb7570abdc45e07fbb6594cb8dce5183f73e4af116b2595047a9fadacbfc4d8"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/funk_static_pocket/chords-hybrid.wav",
+            "sha256": "0a1b99e3a12a8ca4bf715371fb12dd5aaba134ea92ef003c19ad7febc352124a"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/funk_static_pocket/chords-jam2.wav",
+            "sha256": "199a91e21fb2018f61efbb330277d4bc7ab7212a80ba7de3fdc94a4ce4ba92e2"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/funk_static_pocket/drums-daisy.wav",
+            "sha256": "9306845179076ade49896246d1b69a6010094cf371dbb96878d7afdbb3adcbdf"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/funk_static_pocket/drums-hybrid.wav",
+            "sha256": "b421c9b8b9bb1183d937138e64b52e73f29f2ded40b6b0f3ca9e860813aa4317"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/funk_static_pocket/drums-jam2.wav",
+            "sha256": "d114ea7245c3f9706442cbf72e5938a844710f39e998caa2dc89306f7cbefd6c"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/funk_static_pocket/melody-daisy.wav",
+            "sha256": "42850d97faca88d0c39513d90ac008261ef37010f9d507b417690e37d128de0e"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/funk_static_pocket/melody-hybrid.wav",
+            "sha256": "6cf9033e3cfe48057d5e6ee11cec4fa6df73e839e181abeb0b4cd4c9a76c788a"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/funk_static_pocket/melody-jam2.wav",
+            "sha256": "87f2c6d9cbb756e9d4f5ccdac668303b39ef0ed00fefcedd21f62c64f566e45e"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/funk_static_pocket/support-daisy.wav",
+            "sha256": "1175a26643403bff23118beb5dbc8297b1bab570b25cedac4885daa18d978bb7"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/funk_static_pocket/support-hybrid.wav",
+            "sha256": "be1d709a92437652feefab9c7029c936c53ba9a7902640b681172b36c14ad934"
+        },
+        {
+            "bytes": 853378,
+            "path": "audio/designs/funk_static_pocket/support-jam2.wav",
+            "sha256": "24ce3a2b32d0e03ffa7bed72fb2823e1df37027a8459dbf8c14373ec87b8d89f"
+        },
+        {
+            "bytes": 1047318,
+            "path": "audio/designs/hiphop_boom_bap/bass-daisy.wav",
+            "sha256": "f6a8be5191d120232010e33bcddf8f2e82f139057a626952e5ef0d2f40465ec6"
+        },
+        {
+            "bytes": 1047318,
+            "path": "audio/designs/hiphop_boom_bap/bass-hybrid.wav",
+            "sha256": "f298eaed74415eec18cf723d6436ff0870555fa6addc4064bb8b783ff4425aee"
+        },
+        {
+            "bytes": 1047318,
+            "path": "audio/designs/hiphop_boom_bap/bass-jam2.wav",
+            "sha256": "c531537161d6cf4f929675d322ad19bcab18bfbfbe3bce3cb0b5ac5eaf68cd99"
+        },
+        {
+            "bytes": 1047318,
+            "path": "audio/designs/hiphop_boom_bap/chords-daisy.wav",
+            "sha256": "b945842e3c99e762b743e6b3ce1ad9043451bf28e9a20a080b98b5c97fbc4793"
+        },
+        {
+            "bytes": 1047318,
+            "path": "audio/designs/hiphop_boom_bap/chords-hybrid.wav",
+            "sha256": "89a6dd0f2958c2874efb29435dcc351a2318bf90d9beb3f5f1b7c9ee757c738c"
+        },
+        {
+            "bytes": 1047318,
+            "path": "audio/designs/hiphop_boom_bap/chords-jam2.wav",
+            "sha256": "5fa33a769c104167654ae55b1a8b44bc6bf231551c9375ddb350b190190e1dee"
+        },
+        {
+            "bytes": 1047318,
+            "path": "audio/designs/hiphop_boom_bap/drums-daisy.wav",
+            "sha256": "75974c194bfa9f65ce0321d05835fece1b31e6a36300c60cdaae9c7d8511c8fd"
+        },
+        {
+            "bytes": 1047318,
+            "path": "audio/designs/hiphop_boom_bap/drums-hybrid.wav",
+            "sha256": "88f11901288c9a96dca4a5b48e7eb6329e7f9dd58a1fdf0c6551c59a047da59d"
+        },
+        {
+            "bytes": 1047318,
+            "path": "audio/designs/hiphop_boom_bap/drums-jam2.wav",
+            "sha256": "f3612024edaeb8f299b3a1ab8ecdfbba9ee9e7cae10a143204c5df8ebbdb85ed"
+        },
+        {
+            "bytes": 1047318,
+            "path": "audio/designs/hiphop_boom_bap/melody-daisy.wav",
+            "sha256": "c398e5a462eec8d2aee329bd54ef62c9ee4f17df59cd0891a44484c4e8cbce0b"
+        },
+        {
+            "bytes": 1047318,
+            "path": "audio/designs/hiphop_boom_bap/melody-hybrid.wav",
+            "sha256": "1007069166838748853c02387e4cde97ea75d1876ddeb937ec1d4f29db91e3b0"
+        },
+        {
+            "bytes": 1047318,
+            "path": "audio/designs/hiphop_boom_bap/melody-jam2.wav",
+            "sha256": "9e7bf43892cae559fa8b6816e761b70bb77bcbe3a47b36b25a33222b4f94900f"
+        },
+        {
+            "bytes": 1152044,
+            "path": "audio/designs/hiphop_trap/bass-daisy.wav",
+            "sha256": "03b51b3b79faef8d288a3fac1e8bad4591aac8da51ec1e2694bea20f609b81a2"
+        },
+        {
+            "bytes": 1152044,
+            "path": "audio/designs/hiphop_trap/bass-hybrid.wav",
+            "sha256": "a5b8ae3040531b2c95a4d6c2627eb37d8ebc6c0b1a8f81388fe3746eddbc3dd2"
+        },
+        {
+            "bytes": 1152044,
+            "path": "audio/designs/hiphop_trap/bass-jam2.wav",
+            "sha256": "89c3d6e71ec9f988622600136df7aac53054359e3fb9b3078ef60b44ac76c97b"
+        },
+        {
+            "bytes": 1152044,
+            "path": "audio/designs/hiphop_trap/chords-daisy.wav",
+            "sha256": "42e63b8a7f0bb67d89d104d9b3ef2b15b500d9d1e9a12d95c819e73fff675cd1"
+        },
+        {
+            "bytes": 1152044,
+            "path": "audio/designs/hiphop_trap/chords-hybrid.wav",
+            "sha256": "c9c40f1e0f0205eb402323819488ec6f23a3f28799a3fe4a8adfc06056633063"
+        },
+        {
+            "bytes": 1152044,
+            "path": "audio/designs/hiphop_trap/chords-jam2.wav",
+            "sha256": "124ff568c662c0d990b5b94ac79b4aadd2bfaf520392d0f99fef8afc2015fd21"
+        },
+        {
+            "bytes": 1152044,
+            "path": "audio/designs/hiphop_trap/drums-daisy.wav",
+            "sha256": "e1f8c5499640373d254a439ece74d0be02131f4e90ca20a9ed0603ae3ff56357"
+        },
+        {
+            "bytes": 1152044,
+            "path": "audio/designs/hiphop_trap/drums-hybrid.wav",
+            "sha256": "ea5116b270587865c37f03819ab3cb79d8faf3bde6e5350c6c620548e2b63179"
+        },
+        {
+            "bytes": 1152044,
+            "path": "audio/designs/hiphop_trap/drums-jam2.wav",
+            "sha256": "600ee9c2174e62d29a5fdb700db220c327032bdc10c334df82430eee0198a840"
+        },
+        {
+            "bytes": 1152044,
+            "path": "audio/designs/hiphop_trap/melody-daisy.wav",
+            "sha256": "5896972fc46cfe22a3f5e3598b875ad90fd0f6d3e2aa9e4c9ec63e1a56e5ef09"
+        },
+        {
+            "bytes": 1152044,
+            "path": "audio/designs/hiphop_trap/melody-hybrid.wav",
+            "sha256": "59ab7ae42ba1db2d0802c23d98d5d29f582b78dc3481895b7125f89d7c4061c0"
+        },
+        {
+            "bytes": 1152044,
+            "path": "audio/designs/hiphop_trap/melody-jam2.wav",
+            "sha256": "684e3fea9ffecfb59cc0de39caccc5e78b75f12b7a7afc11e3f70ea4e87ac4f2"
+        },
+        {
+            "bytes": 341378,
+            "path": "audio/designs/jazz_bebop/bass-daisy.wav",
+            "sha256": "4322901f1da04c667068f534f5b844d72402f5468729bbd8032fea33e59b0b4e"
+        },
+        {
+            "bytes": 341378,
+            "path": "audio/designs/jazz_bebop/bass-hybrid.wav",
+            "sha256": "68489fc3151c1448f7e791b293385894a01b1b31896e0df667a6d1c052a707f8"
+        },
+        {
+            "bytes": 341378,
+            "path": "audio/designs/jazz_bebop/bass-jam2.wav",
+            "sha256": "d63de0c2de83b5acdcc49415c6c4764285be9e5e6a250869ddbcc6cbf315896d"
+        },
+        {
+            "bytes": 341378,
+            "path": "audio/designs/jazz_bebop/chords-daisy.wav",
+            "sha256": "de492e21ad51e81fce4e992cb58c0883b802d5e987b39c5ac1a4fb410e366b9c"
+        },
+        {
+            "bytes": 341378,
+            "path": "audio/designs/jazz_bebop/chords-hybrid.wav",
+            "sha256": "a460d0a971fcef2fda9e89aefb6f04dd4a94d3d27efbdee60b3a6d3991a955b7"
+        },
+        {
+            "bytes": 341378,
+            "path": "audio/designs/jazz_bebop/chords-jam2.wav",
+            "sha256": "cac670b54f806f260cb151d83e31cc6a7e836d902f4ad5e96ccc235bf7a92b8c"
+        },
+        {
+            "bytes": 341378,
+            "path": "audio/designs/jazz_bebop/drums-daisy.wav",
+            "sha256": "75a9704c385fb9ca7c3286dc2b668f50af8b4c6fbe5b5439d7c01b44fc49f73a"
+        },
+        {
+            "bytes": 341378,
+            "path": "audio/designs/jazz_bebop/drums-hybrid.wav",
+            "sha256": "54fc789d20a9cac6ec9e43ab00f98dd0a76572a712a8c4560a938f5b900dd03e"
+        },
+        {
+            "bytes": 341378,
+            "path": "audio/designs/jazz_bebop/drums-jam2.wav",
+            "sha256": "60c1239ce33e53305703b6cd192f60ee9094f977ae015b1d77df974ed3d11fef"
+        },
+        {
+            "bytes": 341378,
+            "path": "audio/designs/jazz_bebop/melody-daisy.wav",
+            "sha256": "662238b90da96b3cdf3d156b34d993ad8414bef3b198c0979044a38f44d6aa17"
+        },
+        {
+            "bytes": 341378,
+            "path": "audio/designs/jazz_bebop/melody-hybrid.wav",
+            "sha256": "d88e8289045001e33291dc2ad3ee093d28d6eeab1d21471ff7e90f8f7412aa27"
+        },
+        {
+            "bytes": 341378,
+            "path": "audio/designs/jazz_bebop/melody-jam2.wav",
+            "sha256": "dc98421549a90b7ad3334458242300a63c4dbec3487ddd796038757692648139"
+        },
+        {
+            "bytes": 1033892,
+            "path": "audio/designs/jazz_fusion/bass-daisy.wav",
+            "sha256": "017403a5770e51e5ec467df60be784313458a8551ed1977f478272b4d6b5bab9"
+        },
+        {
+            "bytes": 1033892,
+            "path": "audio/designs/jazz_fusion/bass-hybrid.wav",
+            "sha256": "eb2ff31453605032385984cbf5576909851bf42f0e8404b87a80afee9d2719af"
+        },
+        {
+            "bytes": 1033892,
+            "path": "audio/designs/jazz_fusion/bass-jam2.wav",
+            "sha256": "d6322aaadf90c80d8a17cf25af3809089e81b84991a8c447de403e8ca4848520"
+        },
+        {
+            "bytes": 1033892,
+            "path": "audio/designs/jazz_fusion/chords-daisy.wav",
+            "sha256": "4f9bafe3fc2f7cd8810466698cbde2738ae457005d0dc608bc69bb4fffb2f47f"
+        },
+        {
+            "bytes": 1033892,
+            "path": "audio/designs/jazz_fusion/chords-hybrid.wav",
+            "sha256": "8a3d54824da2afe361e19ea9547f13ae427a61baef4116bb922e5d838ee1a09d"
+        },
+        {
+            "bytes": 1033892,
+            "path": "audio/designs/jazz_fusion/chords-jam2.wav",
+            "sha256": "9865eab845b684114559dc803d3006b836a1cf9abd100072b7281b5aeccb9b0e"
+        },
+        {
+            "bytes": 1033892,
+            "path": "audio/designs/jazz_fusion/drums-daisy.wav",
+            "sha256": "98cd9e0b0b9f18d30748335396c48e21269b93e43769f9eff49b15b51138fc9b"
+        },
+        {
+            "bytes": 1033892,
+            "path": "audio/designs/jazz_fusion/drums-hybrid.wav",
+            "sha256": "eb53032c3ec5528beb0d2bd84b71da8105081835b027cc1fe689e3a8665b4779"
+        },
+        {
+            "bytes": 1033892,
+            "path": "audio/designs/jazz_fusion/drums-jam2.wav",
+            "sha256": "e782cf4ea82c09786ade1986c784f14c41f0536380c7ad5ecd98b463a0441995"
+        },
+        {
+            "bytes": 1033892,
+            "path": "audio/designs/jazz_fusion/melody-daisy.wav",
+            "sha256": "7028007726cf68c37f35ef561686aac1e765e42c811ed9144a19778a3b073758"
+        },
+        {
+            "bytes": 1033892,
+            "path": "audio/designs/jazz_fusion/melody-hybrid.wav",
+            "sha256": "a8670576571dfd3b25355479d88d6697f0e2b3a4394e75dd606c3a2483162a5e"
+        },
+        {
+            "bytes": 1033892,
+            "path": "audio/designs/jazz_fusion/melody-jam2.wav",
+            "sha256": "1a1b81e90ad7cc73eaa97134b4ecc1f73fe0222d6e6babb182655e128defefb3"
+        },
+        {
+            "bytes": 1123948,
+            "path": "audio/designs/jazz_swing_standards/bass-daisy.wav",
+            "sha256": "911dbca10b8a211418e294df14240a585cc0fba68ab4c517bc4d6d2ad548693b"
+        },
+        {
+            "bytes": 1123948,
+            "path": "audio/designs/jazz_swing_standards/bass-hybrid.wav",
+            "sha256": "2fe1c69c385a3da62062c30ef43597e95cdc2b0d99e29d647fdd388c58d3c85a"
+        },
+        {
+            "bytes": 1123948,
+            "path": "audio/designs/jazz_swing_standards/bass-jam2.wav",
+            "sha256": "4cf9270fcb321fb718a34b295df947706aa7be08e1d37e28ce40b862ff064f94"
+        },
+        {
+            "bytes": 1123948,
+            "path": "audio/designs/jazz_swing_standards/chords-daisy.wav",
+            "sha256": "1e8f3862b6b62f4dd92e07b1d6f217749f3b4b400cd9adf74458034187e76e9e"
+        },
+        {
+            "bytes": 1123948,
+            "path": "audio/designs/jazz_swing_standards/chords-hybrid.wav",
+            "sha256": "152698f75c1a91438eafe9c3ba62c9ff5e7c95bd409a5186ed364237ab3298c5"
+        },
+        {
+            "bytes": 1123948,
+            "path": "audio/designs/jazz_swing_standards/chords-jam2.wav",
+            "sha256": "7b3c195fe01b1eaa735cf03256127571e9705ad33ac529b6a8e2a5eb91f85590"
+        },
+        {
+            "bytes": 1123948,
+            "path": "audio/designs/jazz_swing_standards/drums-daisy.wav",
+            "sha256": "db21240ec5236f83f80d09b6efab10aa9611707daa2f589a2e3ed9d01062677f"
+        },
+        {
+            "bytes": 1123948,
+            "path": "audio/designs/jazz_swing_standards/drums-hybrid.wav",
+            "sha256": "10d6fe2e2f2f5bc8f3734bdacc8ed3f7521f86c82016daaa01369c0857483148"
+        },
+        {
+            "bytes": 1123948,
+            "path": "audio/designs/jazz_swing_standards/drums-jam2.wav",
+            "sha256": "efc380829d6877e5a2c16359f9aec5c4551559c55371f0443136a566b0db210d"
+        },
+        {
+            "bytes": 1123948,
+            "path": "audio/designs/jazz_swing_standards/melody-daisy.wav",
+            "sha256": "e364ec14ce08e9beafa1475066ed6e248adce63f759b938b5bf22ca88c7e1ab7"
+        },
+        {
+            "bytes": 1123948,
+            "path": "audio/designs/jazz_swing_standards/melody-hybrid.wav",
+            "sha256": "efbd25687ed16c93c0811b78fb93d93ea052f30acd27521cb7eb25821a52499a"
+        },
+        {
+            "bytes": 1123948,
+            "path": "audio/designs/jazz_swing_standards/melody-jam2.wav",
+            "sha256": "8ff2fee7c356a9a336b4fe781572d3660622494c96757fe5c28e9fddd110d012"
+        },
+        {
+            "bytes": 535858,
+            "path": "audio/designs/jpop_anisong_rock/bass-daisy.wav",
+            "sha256": "66490d1cfa611a91eb86fd112d2ff04a0e0cad225d4dd1d73761ad13b54ced85"
+        },
+        {
+            "bytes": 535858,
+            "path": "audio/designs/jpop_anisong_rock/bass-hybrid.wav",
+            "sha256": "7fdafaaba17882119b18e0c54870f774702ce039596a9c816ec49097aca61223"
+        },
+        {
+            "bytes": 535858,
+            "path": "audio/designs/jpop_anisong_rock/bass-jam2.wav",
+            "sha256": "b5fff9d82e3889a49330375b48cfda30181c49be17f53d14b0f6e6e534c602d2"
+        },
+        {
+            "bytes": 535858,
+            "path": "audio/designs/jpop_anisong_rock/chords-daisy.wav",
+            "sha256": "0b7bb68304de2435e7346bfef5dc2aadb12cb9693533167fbeaee3c5ee431dde"
+        },
+        {
+            "bytes": 535858,
+            "path": "audio/designs/jpop_anisong_rock/chords-hybrid.wav",
+            "sha256": "d958b9cb7706f74e41a46264b62e5f35461a63ee817893700126c1a5f0d331c7"
+        },
+        {
+            "bytes": 535858,
+            "path": "audio/designs/jpop_anisong_rock/chords-jam2.wav",
+            "sha256": "7482139a2596c77a9a5d3ea228827b15ff80026074664916ab1bbb66c5eb4d36"
+        },
+        {
+            "bytes": 535858,
+            "path": "audio/designs/jpop_anisong_rock/drums-daisy.wav",
+            "sha256": "9487f0fd6fde43f013360966f8c8d5f477dfc77b371e4a8f2b4a1336133c98f4"
+        },
+        {
+            "bytes": 535858,
+            "path": "audio/designs/jpop_anisong_rock/drums-hybrid.wav",
+            "sha256": "0c5c0267f09a772ad5791c6e5820d36b2b76bd78fd14135c929e45dd31388ddf"
+        },
+        {
+            "bytes": 535858,
+            "path": "audio/designs/jpop_anisong_rock/drums-jam2.wav",
+            "sha256": "469c7d999c72189977df0856befe91f1278d019813268d671883699e63d7c7e0"
+        },
+        {
+            "bytes": 535858,
+            "path": "audio/designs/jpop_anisong_rock/melody-daisy.wav",
+            "sha256": "36a5acb247ba7d8a61628dbfae658599d495d7a46afc5e41c5a78b2bac94970b"
+        },
+        {
+            "bytes": 535858,
+            "path": "audio/designs/jpop_anisong_rock/melody-hybrid.wav",
+            "sha256": "218c07ee27def6a5c640b0dbe1f7d59c6171ed1087f0b47c1da9a74872299c28"
+        },
+        {
+            "bytes": 535858,
+            "path": "audio/designs/jpop_anisong_rock/melody-jam2.wav",
+            "sha256": "339db110fa69feb4bcf94ec3c6301113a3b56fbd1cc4a69e7ed1e6c466b9c78c"
+        },
+        {
+            "bytes": 535858,
+            "path": "audio/designs/jpop_anisong_rock/support-daisy.wav",
+            "sha256": "77ff5b29d5075e30d5f1a493c1b7c3a494c6ff8738d9063b5fb4daeed1ca8f5c"
+        },
+        {
+            "bytes": 535858,
+            "path": "audio/designs/jpop_anisong_rock/support-hybrid.wav",
+            "sha256": "0bddac5f5230ec9b9d35cd37e0ced04d33ed1f9ade34704acd974ac1d5582cb2"
+        },
+        {
+            "bytes": 535858,
+            "path": "audio/designs/jpop_anisong_rock/support-jam2.wav",
+            "sha256": "4a5c805994cf80730d7a3d4587154da03472fa9b44f99743cb4f3dc1a6f5040d"
+        },
+        {
+            "bytes": 687806,
+            "path": "audio/designs/jpop_idol_dance/bass-daisy.wav",
+            "sha256": "e1855746195df5bca6fbd379810994410f544c3b2092066264f6daafab6d619f"
+        },
+        {
+            "bytes": 687806,
+            "path": "audio/designs/jpop_idol_dance/bass-hybrid.wav",
+            "sha256": "5926113260afcbc2cd420e307ae8173a6f5e3809bf38b461eba7c8f4e0393ec3"
+        },
+        {
+            "bytes": 687806,
+            "path": "audio/designs/jpop_idol_dance/bass-jam2.wav",
+            "sha256": "9de9e4e761f708ef5985413893ef0346e8119567c6f1487a7a29dd842a4c7d9a"
+        },
+        {
+            "bytes": 687806,
+            "path": "audio/designs/jpop_idol_dance/chords-daisy.wav",
+            "sha256": "39c839aa913ec8842bc5ff5ddfcf3a15c820ef8a7306510dcfb32ee20d38bced"
+        },
+        {
+            "bytes": 687806,
+            "path": "audio/designs/jpop_idol_dance/chords-hybrid.wav",
+            "sha256": "480255b7b08350f5a945e7ef2b940d5f26d4a80644fdb2f6225767c21b2b1050"
+        },
+        {
+            "bytes": 687806,
+            "path": "audio/designs/jpop_idol_dance/chords-jam2.wav",
+            "sha256": "589315f22ee1c87b6a002caeadec3130770ce54d6dc22afb919affc8664fa6e6"
+        },
+        {
+            "bytes": 687806,
+            "path": "audio/designs/jpop_idol_dance/drums-daisy.wav",
+            "sha256": "4d54855bb419c9d2fff6a331e68488888406bec148bdfccebadd174e6b77e080"
+        },
+        {
+            "bytes": 687806,
+            "path": "audio/designs/jpop_idol_dance/drums-hybrid.wav",
+            "sha256": "ddbe07c81be1d60a498abcf857c5e85b5d70196a785866bcd5825892f5fb97f7"
+        },
+        {
+            "bytes": 687806,
+            "path": "audio/designs/jpop_idol_dance/drums-jam2.wav",
+            "sha256": "ffea3fdd656f8fb5d36072f99e44950f27bf719474e175650982815877321948"
+        },
+        {
+            "bytes": 687806,
+            "path": "audio/designs/jpop_idol_dance/melody-daisy.wav",
+            "sha256": "017447cce53317ab0b9ef6af8ad428e4b1d89d1d8aa35d70a0a7e4e8acd6c7a2"
+        },
+        {
+            "bytes": 687806,
+            "path": "audio/designs/jpop_idol_dance/melody-hybrid.wav",
+            "sha256": "272be36ed293c2c947acc87e0cbc643fd24e13717fd6aa2432a00454b0747741"
+        },
+        {
+            "bytes": 687806,
+            "path": "audio/designs/jpop_idol_dance/melody-jam2.wav",
+            "sha256": "cbbc3d8af901a9f56f3adb78075d479f849694b7d1b2245abbb3644b04fbdf43"
+        },
+        {
+            "bytes": 687806,
+            "path": "audio/designs/jpop_idol_dance/support-daisy.wav",
+            "sha256": "ba342c200178b2e4ff313d55a5c00506c1919136845a88baee0a44cb3274ebfd"
+        },
+        {
+            "bytes": 687806,
+            "path": "audio/designs/jpop_idol_dance/support-hybrid.wav",
+            "sha256": "1310a8bf5323a978e6e07502015fad4c59f1b049fab08acf63791ce2cdbc443c"
+        },
+        {
+            "bytes": 687806,
+            "path": "audio/designs/jpop_idol_dance/support-jam2.wav",
+            "sha256": "f1e8029cd96eec757bc55db845a16673aa5e16d5730103eb2754c6a91a35d397"
+        },
+        {
+            "bytes": 667872,
+            "path": "audio/designs/metal_modern_progressive/bass-daisy.wav",
+            "sha256": "9eb43554dad254450657ccedb3bf71f4a41147d98d633e4184c08f4a373bab7e"
+        },
+        {
+            "bytes": 667872,
+            "path": "audio/designs/metal_modern_progressive/bass-hybrid.wav",
+            "sha256": "052aaeeb2cbe05fbf9b10ec1268c6e6961c5e0bc527df0ba340bdd1aa2d3f9d0"
+        },
+        {
+            "bytes": 667872,
+            "path": "audio/designs/metal_modern_progressive/bass-jam2.wav",
+            "sha256": "c77cc6ffe80b715e4a373ec3ad8eeb80cf75bec9ba292006467955ce84243c3f"
+        },
+        {
+            "bytes": 667872,
+            "path": "audio/designs/metal_modern_progressive/chords-daisy.wav",
+            "sha256": "ecd66a1edf1aaa703cbb0343d523c8d2a7f95a3eb75617e7a66513e070f6db72"
+        },
+        {
+            "bytes": 667872,
+            "path": "audio/designs/metal_modern_progressive/chords-hybrid.wav",
+            "sha256": "01a7e51dab5e1cc7b8625f596cd8cf4906319fcf2a730a003844b226cb642730"
+        },
+        {
+            "bytes": 667872,
+            "path": "audio/designs/metal_modern_progressive/chords-jam2.wav",
+            "sha256": "cb68b1de4be86c8534896a6b9893341dc97fd0693b6d7d87f13de60166f3eefc"
+        },
+        {
+            "bytes": 667872,
+            "path": "audio/designs/metal_modern_progressive/drums-daisy.wav",
+            "sha256": "6a96462e0309a74c1101a755c6e927cc33cc12b36f0dc4372ed67991e597616c"
+        },
+        {
+            "bytes": 667872,
+            "path": "audio/designs/metal_modern_progressive/drums-hybrid.wav",
+            "sha256": "e96eacccc0772a228724859c78223f29ed516a2b0363df5b236cd3fb24687dfa"
+        },
+        {
+            "bytes": 667872,
+            "path": "audio/designs/metal_modern_progressive/drums-jam2.wav",
+            "sha256": "2809b542435ecad861da46d2009dee691f26770298c382498774a6482d0362bd"
+        },
+        {
+            "bytes": 667872,
+            "path": "audio/designs/metal_modern_progressive/melody-daisy.wav",
+            "sha256": "95a016f562d6548d480e38aa85de2a8e7215c20c87413585cacbab86fb9ba7a3"
+        },
+        {
+            "bytes": 667872,
+            "path": "audio/designs/metal_modern_progressive/melody-hybrid.wav",
+            "sha256": "4f4d7047076eca451b1ce2b2b4ae385f8e39609f0e3646d7035b7e73d8363955"
+        },
+        {
+            "bytes": 667872,
+            "path": "audio/designs/metal_modern_progressive/melody-jam2.wav",
+            "sha256": "86d154204c7011456c3c934d92cb5b096a38be24a573731747ff658834f99de2"
+        },
+        {
+            "bytes": 785500,
+            "path": "audio/designs/modal_atmospheric/bass-daisy.wav",
+            "sha256": "40c8ea246c10ba1b9a889d4e67ef5cd0c7f314506bf24e4a845ef0d80ca31794"
+        },
+        {
+            "bytes": 785500,
+            "path": "audio/designs/modal_atmospheric/bass-hybrid.wav",
+            "sha256": "02e5c653069dbd44b78bc91d97f82069fd6a3fd6549ba045de6e887adfe07c31"
+        },
+        {
+            "bytes": 785500,
+            "path": "audio/designs/modal_atmospheric/bass-jam2.wav",
+            "sha256": "bc565f828aa2ebff9df009b00f084030eed9fd3fc1d9f192270c86372a8d1a9f"
+        },
+        {
+            "bytes": 785500,
+            "path": "audio/designs/modal_atmospheric/chords-daisy.wav",
+            "sha256": "3161544a13e91a4b8f91153f4645949aac979ad4d31f595b77f4c6cc07e5ab23"
+        },
+        {
+            "bytes": 785500,
+            "path": "audio/designs/modal_atmospheric/chords-hybrid.wav",
+            "sha256": "2d0f7d247543b6211ba30bab4bbd7a73d3188e8fcab7130ea0e60dad831eea33"
+        },
+        {
+            "bytes": 785500,
+            "path": "audio/designs/modal_atmospheric/chords-jam2.wav",
+            "sha256": "1bf7d36393b47b8b1da103b2475eac64e47c6534760d4ccea2a817de6b68a581"
+        },
+        {
+            "bytes": 785500,
+            "path": "audio/designs/modal_atmospheric/drums-daisy.wav",
+            "sha256": "2f3886ac99779a67b07499e2367394eacc95b9c0d6fe4c59338760f909db9b04"
+        },
+        {
+            "bytes": 785500,
+            "path": "audio/designs/modal_atmospheric/drums-hybrid.wav",
+            "sha256": "e0c14af432ba86f114daa8d5d0a736da1d38d9b00f80ab1bba4f033053b7da4b"
+        },
+        {
+            "bytes": 785500,
+            "path": "audio/designs/modal_atmospheric/drums-jam2.wav",
+            "sha256": "c19df137e6c0b8548df7315cd471897905638ac2bf14c31c96d67fa1738fe3eb"
+        },
+        {
+            "bytes": 785500,
+            "path": "audio/designs/modal_atmospheric/melody-daisy.wav",
+            "sha256": "a9d86e35fc66c0d54dcda5f54022e8ad2e2ba84e0a38161ed0eee2c3bede5dc5"
+        },
+        {
+            "bytes": 785500,
+            "path": "audio/designs/modal_atmospheric/melody-hybrid.wav",
+            "sha256": "a0728f0b85ab5074aff0ff992de100158c1d0abc65d662a317c3248580e43773"
+        },
+        {
+            "bytes": 785500,
+            "path": "audio/designs/modal_atmospheric/melody-jam2.wav",
+            "sha256": "0211fe07ff0386e0d8f05ab481c241d43ae5db54ca623697f56164bc48e9b30c"
+        },
+        {
+            "bytes": 785500,
+            "path": "audio/designs/modal_atmospheric/support-daisy.wav",
+            "sha256": "8e435a92ffd0aaf269e7d8103fc2cfd7fe7c483a57c5f83bfbf5b86c5cbcdf7b"
+        },
+        {
+            "bytes": 785500,
+            "path": "audio/designs/modal_atmospheric/support-hybrid.wav",
+            "sha256": "1226b75bd08d3ccfb9ca2f0dc22d11e3fecc276a8566c505c782dce566d693c9"
+        },
+        {
+            "bytes": 785500,
+            "path": "audio/designs/modal_atmospheric/support-jam2.wav",
+            "sha256": "796d9deb281198ed1613dad6c15c12f53fd3131790e50eab70cf55c2530e1ab7"
+        },
+        {
+            "bytes": 921644,
+            "path": "audio/designs/modal_groove/bass-daisy.wav",
+            "sha256": "7a2b9cfe057529d686fbfa1550bda2934ca96889ef9f35e1216c1f418cfe636e"
+        },
+        {
+            "bytes": 921644,
+            "path": "audio/designs/modal_groove/bass-hybrid.wav",
+            "sha256": "f2a4eeec2319b853e753e7b0577f8421590bc34f66b41b6508d8ac8d8ecddde7"
+        },
+        {
+            "bytes": 921644,
+            "path": "audio/designs/modal_groove/bass-jam2.wav",
+            "sha256": "001b941acb09d0682924f1b9382a9e0f2eb797050fcbbdd012e8977867da06a3"
+        },
+        {
+            "bytes": 921644,
+            "path": "audio/designs/modal_groove/chords-daisy.wav",
+            "sha256": "8541fb336b441538b22e2bc40b5e1e57b0a51e456af79d6e1f65aca8c754af8d"
+        }
+    ],
+    "automation_format": "jam2-automation",
+    "automation_limits": {
+        "commands_per_turn": 8,
+        "incomplete_frame_timeout_ms": 5000,
+        "max_actions": 128,
+        "max_frame_bytes": 65536,
+        "max_scenario_bytes": 262144,
+        "max_string_bytes": 4096,
+        "queue_capacity": 128
+    },
+    "build": {
+        "bytes": 9028608,
+        "compiled_date": "Jul 29 2026",
+        "compiled_time": "19:31:10",
+        "executable": "C:/Users/Phil/Documents/GitHub/Jam2/release/jam2.exe",
+        "modified_utc": "2026-07-29T19:39:31.912Z",
+        "qt_runtime_version": "6.10.3",
+        "sha256": "fc121168d9c03b47533ef4425001ac7b4a133a40ded78f35b537876addbde330"
+    },
+    "description_format": "jam2-debug-description",
+    "effective_configuration": {
+        "adaptive_playback_cushion": true,
+        "adaptive_playback_max_frames": 1536,
+        "adaptive_playback_min_frames": 256,
+        "adaptive_playback_ratio_ramp_ms": 250,
+        "adaptive_playback_release_ppm": 5000,
+        "adaptive_playback_target_frames": 256,
+        "audio_buffer_size": 32,
+        "audio_device": null,
+        "bind": "0.0.0.0:49000",
+        "bpm": 120,
+        "capture_ring_frames": 4096,
+        "channel_selection": "input=1 output=1,2",
+        "drift_correction": true,
+        "drift_deadband_ppm": 25,
+        "drift_max_correction_ppm": 500,
+        "drift_smoothing": 0.02,
+        "frame_size": 64,
+        "headless_audio": false,
+        "headless_clock_drift_ppm": 0,
+        "input_mix": "1-to-mono-direct",
+        "jitter_buffer_frames": 512,
+        "jitter_buffer_max_frames": 1024,
+        "local_monitor": false,
+        "local_monitor_level": 0.25,
+        "local_profile": "fast",
+        "log_stats_root": "C:/Users/Phil/Documents/GitHub/Jam2/experiments/synth-ab/site/csv",
+        "max_peers": 0,
+        "metronome": false,
+        "metronome_compensation_deadband_ms": 1,
+        "metronome_compensation_max_ms": 250,
+        "metronome_compensation_slew_ms_per_sec": 40,
+        "metronome_compensation_smoothing_ms": 750,
+        "metronome_level": 1,
+        "metronome_mode": "shared-grid",
+        "network_audio_format": "pcm24-mono",
+        "no_stun": false,
+        "os_priority": "high",
+        "playback_max_frames": 1536,
+        "playback_prefill_frames": 256,
+        "playback_ring_frames": 4096,
+        "playout_delay_frames": 256,
+        "profile": "fast",
+        "public_endpoint": null,
+        "remote_level": 1,
+        "sample_rate": 48000,
+        "sample_time_playout": true,
+        "send_level": 1,
+        "session_profile": "fast",
+        "socket_recv_buffer": null,
+        "socket_send_buffer": null,
+        "stats": true,
+        "stats_interval_ms": 0,
+        "stats_warmup_ms": 3000,
+        "stream_linger_ms": 100,
+        "stream_ms": 0,
+        "stun": "stun.l.google.com:19302",
+        "stun_retries": 3,
+        "stun_timeout_ms": 1000,
+        "test_input": "off",
+        "wait_ms": 0
+    },
+    "finished_utc": "2026-07-29T19:41:18.014Z",
+    "lifecycle": {
+        "end_reason": "completed",
+        "return_code": 0,
+        "state": "finished"
+    },
+    "local_peer_id": null,
+    "ok": true,
+    "operation": "validate.music-full-form-corpus",
+    "platform": {
+        "build_cpu_architecture": "x86_64",
+        "current_cpu_architecture": "x86_64",
+        "kernel_type": "winnt",
+        "kernel_version": "10.0.26200",
+        "pretty_product_name": "Windows 11 Version 25H2",
+        "product_type": "windows",
+        "product_version": "11"
+    },
+    "protocols": {
+        "automation": "jam2-automation",
+        "control_version": 2,
+        "description": "jam2-debug-description",
+        "scenario": "jam2-debug-scenario",
+        "udp_version": 2
+    },
+    "reactive": false,
+    "result": {
+        "audio_mixes": 74,
+        "corpus": "C:/Users/Phil/Documents/GitHub/Jam2/experiments/synth-ab/site/full-form-corpus.json",
+        "event": "music_full_form_corpus_result",
+        "ok": true,
+        "process_cpu_percent_one_core": 96.26771350463973,
+        "process_cpu_time_ms": 97109.375,
+        "profiles": 27,
+        "samples": 888,
+        "wall_elapsed_ms": 100874.2926
+    },
+    "return_code": 0,
+    "run_id": "music-full-form-corpus",
+    "scenario_format": "jam2-debug-scenario",
+    "scenario_path": "C:/Users/Phil/Documents/GitHub/Jam2/experiments/synth-ab/tools/full-form-corpus-scenario.json",
+    "scenario_sha256": "2b9af5049a735fe38c779c31d37c27ad75291bd7583e2aea17e1b5fbd49ed3e2",
+    "schema": "jam2-debug-manifest",
+    "started_utc": "2026-07-29T19:39:36.017Z"
+}

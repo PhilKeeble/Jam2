@@ -1,0 +1,14 @@
+{
+  "schema": "jam2-debug-scenario",
+  "run_id": "music-generation-audit-corpus",
+  "operation": "validate.music-full-form-corpus",
+  "profile": "fast",
+  "artifacts": {
+    "root": "../../artifacts/music-research/baseline"
+  },
+  "corpus": {
+    "render_audio": false,
+    "matched_complexity_seeds": true,
+    "samples_per_cell": 6
+  }
+}

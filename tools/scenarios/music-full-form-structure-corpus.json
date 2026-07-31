@@ -1,0 +1,12 @@
+{
+  "schema": "jam2-debug-scenario",
+  "run_id": "music-full-form-structure-corpus",
+  "operation": "validate.music-full-form-corpus",
+  "profile": "fast",
+  "artifacts": {
+    "root": "../../artifacts/drum-research/jam2-structure-corpus"
+  },
+  "corpus": {
+    "render_audio": false
+  }
+}

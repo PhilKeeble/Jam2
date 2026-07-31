@@ -13,6 +13,7 @@
         "lifecycle.local-network-local",
         "validate.boundaries",
         "validate.controller-lifecycle",
+        "validate.music-full-form-corpus",
         "network.create",
         "network.join"
       ]
@@ -163,6 +164,17 @@
       "properties": {
         "reactive": {"type": "boolean"},
         "controller_loss": {"enum": ["stop", "continue"]}
+      }
+    },
+    "corpus": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "render_audio": {"type": "boolean"},
+        "matched_complexity_seeds": {"type": "boolean"},
+        "samples_per_cell": {"type": "integer", "minimum": 2, "maximum": 16},
+        "style_id": {"type": "string", "maxLength": 128},
+        "profile_id": {"type": "string", "maxLength": 128}
       }
     },
     "fixtures": {

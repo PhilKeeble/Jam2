@@ -176,6 +176,12 @@ UserPreferences UserPreferencesStore::load()
     if (schemaVersion < 1 || schemaVersion > UserPreferences::kSchemaVersion) {
         return out;
     }
+    settings.beginGroup(QStringLiteral("metronome"));
+    out.metronomeSound = qBound(
+        0,
+        settings.value(QStringLiteral("sound"), out.metronomeSound).toInt(),
+        3);
+    settings.endGroup();
     settings.beginGroup(QStringLiteral("local_audio")); loadAudio(settings, out.localAudio); settings.endGroup();
     settings.beginGroup(QStringLiteral("network_audio"));
     loadAudio(settings, out.networkAudio);
@@ -245,6 +251,9 @@ void UserPreferencesStore::save(const UserPreferences& p)
     QSettings settings(filePath(), QSettings::IniFormat);
     settings.clear();
     settings.setValue(QStringLiteral("schema_version"), UserPreferences::kSchemaVersion);
+    settings.beginGroup(QStringLiteral("metronome"));
+    settings.setValue(QStringLiteral("sound"), qBound(0, p.metronomeSound, 3));
+    settings.endGroup();
     settings.beginGroup(QStringLiteral("local_audio")); saveAudio(settings, p.localAudio); settings.endGroup();
     settings.beginGroup(QStringLiteral("network_audio"));
     saveAudio(settings, p.networkAudio);

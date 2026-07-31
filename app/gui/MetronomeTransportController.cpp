@@ -63,7 +63,11 @@ MetronomeTransportController::SnapshotUpdate MetronomeTransportController::consu
         : snapshot.engine_frame > static_cast<std::uint64_t>(-offset)
             ? snapshot.engine_frame - static_cast<std::uint64_t>(-offset)
             : 0ULL;
-    grid_.setPattern(pattern.bpm, pattern.beats_per_bar, pattern.division);
+    grid_.setPattern(
+        pattern.bpm,
+        pattern.beats_per_bar,
+        pattern.division,
+        pattern.tempo_pulse_units);
     grid_.updateEngine(
         snapshot.engine_frame,
         musical,

@@ -1,0 +1,34 @@
+{
+  "schema": "jam2-instrument-patch-v1",
+  "profileId": "jazz_swing_standards",
+  "role": "drums",
+  "audition": "piece",
+  "drumPiece": "ride",
+  "kit": {
+    "pieces": {
+      "ride": {
+        "source": "jam2-native",
+        "secondSource": "daisy-metal",
+        "blend": 0.5,
+        "frequencyHz": 2200,
+        "tone": 0.5,
+        "decay": 0.82,
+        "colour": 0.4,
+        "fmAmount": 0.3,
+        "level": 0.32,
+        "synthLayer": {
+          "source": "fm2",
+          "midiNote": 76,
+          "level": 0.2,
+          "gateSeconds": 0.08,
+          "attackSeconds": 0.001,
+          "decaySeconds": 0.06,
+          "sustain": 0.01,
+          "releaseSeconds": 0.08,
+          "noiseMix": 0.12,
+          "filterCutoffHz": 6800
+        }
+      }
+    }
+  }
+}

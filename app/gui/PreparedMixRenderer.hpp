@@ -14,6 +14,10 @@ struct PreparedMixResult {
     qint64 fileBytes = 0;
     int sampleRate = 0;
     int durationMs = 0;
+    double masterPreGain = 0.72;
+    float preMasterPeak = 0.0f;
+    float outputPeak = 0.0f;
+    qint64 overUnitySamples = 0;
     QString sha256;
     QString error;
 };

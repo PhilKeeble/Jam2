@@ -194,6 +194,7 @@ private:
     void rebuildMetronomePattern(bool resetToDivisionDefault = false);
     jam2::metronome::PatternSnapshot currentMetronomePattern() const;
     void sendMetronomeModeToJam();
+    void sendMetronomeSoundToJam();
     void sendMetronomePatternToJam();
     void sendMetronomeSettingsToPeer();
     void applyRemoteMetronomeSettings(const QJsonObject& message);
@@ -228,11 +229,12 @@ private:
     void discardObsoleteReferenceWavs(const QSet<QString>& paths);
     void retryObsoleteReferenceWavs();
     void discardPreparedMix(bool replacementExpected);
-    void clearPracticeReferenceWavs();
+    bool clearPracticeReferenceWavs(bool rebuildRemainingTracks = false);
     void cleanupTransientTrackWavs();
     void refreshSongViews();
     void refreshSongView(const QString& lane);
     void generatePracticeIdea();
+    void clearPracticeIdea();
     bool applyPracticeIdea(const jam2::practice::ChordIdeaRequest& request);
     void stopTrackForPracticeIdeaGeneration();
     void ensureInitialPracticeIdea();
@@ -311,6 +313,7 @@ private:
     QCheckBox* noStunCheck_ = nullptr;
     QSpinBox* bpmSpin_ = nullptr;
     QComboBox* metronomeModeBox_ = nullptr;
+    QComboBox* metronomeSoundBox_ = nullptr;
     QSlider* metronomeLevelSlider_ = nullptr;
     QSlider* remoteLevelSlider_ = nullptr;
     QSlider* masterOutputLevelSlider_ = nullptr;
@@ -369,6 +372,8 @@ private:
     QSlider* trackPitchSlider_ = nullptr;
     QSpinBox* metronomeBpmSpin_ = nullptr;
     QSpinBox* metronomeBeatsSpin_ = nullptr;
+    QComboBox* metronomeBeatUnitBox_ = nullptr;
+    QComboBox* metronomeTempoPulseBox_ = nullptr;
     QComboBox* metronomeDivisionBox_ = nullptr;
     QSlider* localMetronomeLevelSlider_ = nullptr;
     QPushButton* startTrackMetronomeButton_ = nullptr;
@@ -488,6 +493,7 @@ private:
     TapTempoTracker tapTempoTracker_;
     QElapsedTimer tapTempoClock_;
     int selectedLooperLane_ = -1;
+    bool referenceWavGenerationRunning_ = false;
     ProjectPersistenceCoordinator& projectPersistence_;
     PreparedMixResult& preparedMix_;
     QThreadPool& fileWorkerPool_;

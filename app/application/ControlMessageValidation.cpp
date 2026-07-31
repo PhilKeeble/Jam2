@@ -84,6 +84,9 @@ bool validateMusicalSteps(const QJsonValue& value, int division)
              state != QStringLiteral("onset")) ||
             !isBoundedString(step.value(QStringLiteral("value")), limits::kMaximumCellCharacters) ||
             !isBoundedInteger(step.value(QStringLiteral("velocity")), 1, 127)) return false;
+        const QJsonValue articulation = step.value(QStringLiteral("articulation"));
+        if (!articulation.isUndefined() &&
+            !isBoundedString(articulation, 96)) return false;
     }
     return true;
 }
@@ -135,7 +138,7 @@ bool validateBeatGrid(const QJsonObject& grid, QString& reason)
             jam2::practice::GenerationRecipe recipe;
             if (!generatedRecipe.isObject() ||
                 !jam2::practice::generationRecipeFromJson(generatedRecipe.toObject(), recipe)) {
-                reason = QStringLiteral("generated song section does not contain a valid v4 recipe");
+                reason = QStringLiteral("generated song section does not contain a valid generation recipe");
                 return false;
             }
         }
@@ -182,7 +185,11 @@ bool validateBeatGrid(const QJsonObject& grid, QString& reason)
             if (!isBoundedInteger(pattern.value(QStringLiteral("division")), 1, 4) ||
                 !QList<int>{1, 2, 4, 3}.contains(division) ||
                 !validateMusicalSteps(pattern.value(QStringLiteral("chords")), division) ||
-                !validateMusicalSteps(pattern.value(QStringLiteral("melody")), division)) {
+                !validateMusicalSteps(pattern.value(QStringLiteral("melody")), division) ||
+                (!pattern.value(QStringLiteral("bass")).isUndefined() &&
+                 !validateMusicalSteps(pattern.value(QStringLiteral("bass")), division)) ||
+                (!pattern.value(QStringLiteral("support")).isUndefined() &&
+                 !validateMusicalSteps(pattern.value(QStringLiteral("support")), division))) {
                 reason = QStringLiteral("song musical pattern is invalid");
                 return false;
             }
@@ -438,8 +445,19 @@ bool jam2::application::validateControlMessage(
             !isBoundedString(message.value(QStringLiteral("mode")), 32) ||
             !isBoundedInteger(message.value(QStringLiteral("bpm")), 1, 400) ||
             !isBoundedInteger(message.value(QStringLiteral("beats")), 1, 16) ||
-            !isBoundedInteger(message.value(QStringLiteral("division")), 1, 16)) {
+            !isBoundedInteger(message.value(QStringLiteral("division")), 1, 16) ||
+            !isBoundedInteger(message.value(QStringLiteral("beat_unit")), 2, 16) ||
+            !isBoundedInteger(message.value(QStringLiteral("tempo_pulse_units")), 1, 3)) {
             reason = QStringLiteral("metronome settings are invalid");
+            return false;
+        }
+        const int beatUnit = message.value(QStringLiteral("beat_unit")).toInt(0);
+        const int pulseUnits =
+            message.value(QStringLiteral("tempo_pulse_units")).toInt(0);
+        if ((beatUnit != 2 && beatUnit != 4 &&
+             beatUnit != 8 && beatUnit != 16) ||
+            (pulseUnits != 1 && pulseUnits != 3)) {
+            reason = QStringLiteral("metronome beat or tempo-pulse unit is invalid");
             return false;
         }
         static const QRegularExpression maskExpression(QStringLiteral("^[0-9a-fA-F]{1,16}$"));
@@ -497,7 +515,8 @@ bool jam2::application::validateControlMessage(
         return isBoundedInteger(message.value(QStringLiteral("section")), 0, 63) &&
             isBoundedInteger(message.value(QStringLiteral("beat")), 0, 511) &&
             isBoundedInteger(message.value(QStringLiteral("step")), 0, 3) &&
-            (lane == QStringLiteral("chord") || lane == QStringLiteral("melody")) &&
+            (lane == QStringLiteral("chord") || lane == QStringLiteral("melody") ||
+             lane == QStringLiteral("bass") || lane == QStringLiteral("support")) &&
             isBoundedString(message.value(QStringLiteral("text")), 4096)
             ? true : (reason = QStringLiteral("musical step is invalid"), false);
     }

@@ -87,11 +87,16 @@ public:
         update();
     }
 
-    void setGridPosition(qint64 positionMs, bool running, int beatsPerBar)
+    void setGridPosition(
+        qint64 positionMs,
+        bool running,
+        int beatsPerBar,
+        int tempoPulseUnits)
     {
         gridPositionMs_ = qMax<qint64>(0, positionMs);
         gridRunning_ = running;
         beatsPerBar_ = qMax(1, beatsPerBar);
+        tempoPulseUnits_ = tempoPulseUnits == 3 ? 3 : 1;
         update();
     }
 
@@ -123,7 +128,7 @@ protected:
         painter.setRenderHint(QPainter::Antialiasing, false);
 
         if (durationMs_ > 0 && bpm_ > 0.0) {
-            const double beatMs = 60000.0 / bpm_;
+            const double beatMs = 60000.0 / bpm_ / tempoPulseUnits_;
             const int beats = qMax(
                 1, static_cast<int>(std::ceil(static_cast<double>(durationMs_) / beatMs)));
             for (int beat = 0; beat < beats; ++beat) {
@@ -248,6 +253,7 @@ private:
     double bpm_ = 120.0;
     qint64 gridPositionMs_ = 0;
     int beatsPerBar_ = 4;
+    int tempoPulseUnits_ = 1;
     bool gridRunning_ = false;
 };
 
@@ -289,6 +295,7 @@ public:
         int sampleRate,
         qint64 minimumViewFrames,
         double bpm,
+        int tempoPulseUnits,
         bool gridLockEnabled)
     {
         const bool preserveActiveDrag = dragMode_ != DragMode::None &&
@@ -310,6 +317,7 @@ public:
         markerSampleRate_ = sampleRate > 0 ? sampleRate : 48000;
         minimumViewFrames_ = qMax<qint64>(1, minimumViewFrames);
         bpm_ = qBound(1.0, bpm, 400.0);
+        tempoPulseUnits_ = tempoPulseUnits == 3 ? 3 : 1;
         gridLockEnabled_ = gridLockEnabled;
         if (!preserveActiveDrag) {
             dragMode_ = DragMode::None;
@@ -321,12 +329,18 @@ public:
         update();
     }
 
-    void setGridPosition(qint64 positionMs, bool running, double bpm, int beatsPerBar)
+    void setGridPosition(
+        qint64 positionMs,
+        bool running,
+        double bpm,
+        int beatsPerBar,
+        int tempoPulseUnits)
     {
         gridPositionMs_ = qMax<qint64>(0, positionMs);
         gridRunning_ = running;
         bpm_ = qBound(1.0, bpm, 400.0);
         beatsPerBar_ = qMax(1, beatsPerBar);
+        tempoPulseUnits_ = tempoPulseUnits == 3 ? 3 : 1;
         update();
     }
 
@@ -617,7 +631,10 @@ private:
         }
         const int rate = timelineDragActive() ? dragMarkerSampleRate_ : markerSampleRate();
         const double bpm = timelineDragActive() ? dragBpm_ : bpm_;
-        const double beatFrames = static_cast<double>(rate) * 60.0 / bpm;
+        const int tempoPulseUnits = timelineDragActive()
+            ? dragTempoPulseUnits_ : tempoPulseUnits_;
+        const double beatFrames =
+            static_cast<double>(rate) * 60.0 / bpm / tempoPulseUnits;
         const qint64 beat = static_cast<qint64>(std::llround(static_cast<double>(frame) / beatFrames));
         return qMax<qint64>(0, static_cast<qint64>(std::llround(static_cast<double>(beat) * beatFrames)));
     }
@@ -647,7 +664,9 @@ private:
         painter.drawLine(0, kToolbarHeight - 1, width(), kToolbarHeight - 1);
         if (bpm_ > 0.0) {
             const QRect area = QRect(kHeaderWidth, 0, width() - kHeaderWidth, kToolbarHeight);
-            const double beatFrames = static_cast<double>(markerSampleRate()) * 60.0 / bpm_;
+            const double beatFrames =
+                static_cast<double>(markerSampleRate()) * 60.0 / bpm_ /
+                tempoPulseUnits_;
             const int beatCount = qBound(
                 1,
                 static_cast<int>(std::ceil(static_cast<double>(viewFrames()) / beatFrames)),
@@ -927,6 +946,7 @@ private:
         dragTimelineRect_ = timelineRect();
         dragMarkerSampleRate_ = markerSampleRate();
         dragBpm_ = bpm_;
+        dragTempoPulseUnits_ = tempoPulseUnits_;
         dragGridLockEnabled_ = gridLockEnabled_;
         dragMode_ = mode;
         dragLane_ = lane;
@@ -971,6 +991,7 @@ private:
     bool gridLockEnabled_ = true;
     qint64 gridPositionMs_ = 0;
     int beatsPerBar_ = 4;
+    int tempoPulseUnits_ = 1;
     bool gridRunning_ = false;
     qint64 playheadMs_ = -1;
     qint64 loopStartMs_ = -1;
@@ -987,6 +1008,7 @@ private:
     QRect dragTimelineRect_;
     int dragMarkerSampleRate_ = 48000;
     double dragBpm_ = 120.0;
+    int dragTempoPulseUnits_ = 1;
     bool dragGridLockEnabled_ = true;
     double pendingGainDb_ = 0.0;
 };

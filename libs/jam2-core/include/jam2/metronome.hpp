@@ -15,6 +15,8 @@ struct PatternSnapshot {
     std::uint64_t play_mask_high = 0;
     std::uint64_t accent_mask_low = 0x01ULL;
     std::uint64_t accent_mask_high = 0;
+    int beat_unit = 4;
+    int tempo_pulse_units = 1;
 };
 
 struct AuthorityClockMapping {
@@ -28,16 +30,30 @@ enum class ClickVoice {
     CountIn,
 };
 
+enum class ClickSound : std::uint8_t {
+    Classic = 0,
+    Woodblock = 1,
+    RimClick = 2,
+    DigitalTick = 3,
+};
+
 int clamp_bpm(int bpm);
 int clamp_beats_per_bar(int beats);
 int clamp_division(int division);
+int clamp_beat_unit(int beat_unit);
+int clamp_tempo_pulse_units(int units);
+ClickSound sanitize_click_sound(int sound);
 int pattern_step_count(int beats_per_bar, int division);
 PatternSnapshot sanitize(PatternSnapshot pattern);
 
 bool mask_enabled(std::uint64_t low, std::uint64_t high, int step);
 void set_mask_enabled(std::uint64_t& low, std::uint64_t& high, int step, bool enabled);
 
-std::uint64_t step_interval_samples(double sample_rate, int bpm, int division);
+std::uint64_t step_interval_samples(
+    double sample_rate,
+    int bpm,
+    int division,
+    int tempo_pulse_units = 1);
 AuthorityClockMapping map_authority_clock(
     std::uint64_t authority_epoch_sample_time,
     std::uint64_t projected_authority_sample_time,
@@ -47,14 +63,16 @@ double render_sample(
     std::uint64_t grid_sample,
     double sample_rate,
     double level,
-    ClickVoice voice = ClickVoice::Normal);
+    ClickVoice voice,
+    ClickSound sound);
 double render_sample(
     const PatternSnapshot& pattern,
     std::uint64_t grid_sample,
     std::uint64_t step_interval,
     double sample_rate,
     double level,
-    ClickVoice voice = ClickVoice::Normal);
+    ClickVoice voice,
+    ClickSound sound);
 std::int32_t mix_i32(std::int32_t sample, double normalized_click);
 std::int32_t mix_pcm24(std::int32_t sample, double normalized_click);
 

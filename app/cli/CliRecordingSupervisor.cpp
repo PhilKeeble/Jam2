@@ -128,6 +128,8 @@ void CliRecordingSupervisor::write_sidecar(
         << "  \"metronome_epoch_valid\": " << (context.metronome_epoch_valid ? "true" : "false") << ",\n"
         << "  \"metronome_beats_per_bar\": " << pattern.beats_per_bar << ",\n"
         << "  \"metronome_division\": " << pattern.division << ",\n"
+        << "  \"metronome_beat_unit\": " << pattern.beat_unit << ",\n"
+        << "  \"metronome_tempo_pulse_units\": " << pattern.tempo_pulse_units << ",\n"
         << "  \"metronome_step_count\": " << pattern.step_count << ",\n"
         << "  \"metronome_play_mask_low\": " << pattern.play_mask_low << ",\n"
         << "  \"metronome_play_mask_high\": " << pattern.play_mask_high << ",\n"
@@ -155,4 +157,3 @@ bool restart_prepared_source(
 }
 
 } // namespace jam2::cli
-

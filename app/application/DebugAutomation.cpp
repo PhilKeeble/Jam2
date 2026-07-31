@@ -13,6 +13,7 @@
 #include "ControlMessageValidation.hpp"
 #include "ControllerLifecycleValidation.hpp"
 #include "DebugActionValidation.hpp"
+#include "MusicCorpusDiagnostic.hpp"
 #include "SessionController.hpp"
 #include "CliEntrypoint.hpp"
 #include "CliOptions.hpp"
@@ -435,6 +436,7 @@ QJsonObject descriptionJson()
             QStringLiteral("lifecycle.local-network-local"),
             QStringLiteral("validate.boundaries"),
             QStringLiteral("validate.controller-lifecycle"),
+            QStringLiteral("validate.music-full-form-corpus"),
             QStringLiteral("network.create"),
             QStringLiteral("network.join")}},
         {QStringLiteral("actions"), QJsonArray{
@@ -603,7 +605,8 @@ ParsedScenario parseScenario(const QString& path, const QJsonObject& source, con
         QStringLiteral("schema"), QStringLiteral("run_id"), QStringLiteral("operation"),
         QStringLiteral("profile"), QStringLiteral("runtime"), QStringLiteral("network"),
         QStringLiteral("artifacts"), QStringLiteral("actions"),
-        QStringLiteral("automation"), QStringLiteral("fixtures")};
+        QStringLiteral("automation"), QStringLiteral("corpus"),
+        QStringLiteral("fixtures")};
     for (auto it = source.begin(); it != source.end(); ++it) {
         if (!allowed.contains(it.key())) {
             throw std::runtime_error("debug scenario contains an unknown top-level field");
@@ -614,6 +617,7 @@ ParsedScenario parseScenario(const QString& path, const QJsonObject& source, con
              std::pair{QStringLiteral("network"), QJsonValue::Object},
              std::pair{QStringLiteral("artifacts"), QJsonValue::Object},
              std::pair{QStringLiteral("automation"), QJsonValue::Object},
+             std::pair{QStringLiteral("corpus"), QJsonValue::Object},
              std::pair{QStringLiteral("actions"), QJsonValue::Array},
              std::pair{QStringLiteral("fixtures"), QJsonValue::Array}}) {
         if (source.contains(field.first) && source.value(field.first).type() != field.second) {
@@ -644,6 +648,27 @@ ParsedScenario parseScenario(const QString& path, const QJsonObject& source, con
     for (auto it = artifacts.begin(); it != artifacts.end(); ++it) {
         if (it.key() != QStringLiteral("root")) {
             throw std::runtime_error("debug scenario artifacts contains an unknown field");
+        }
+    }
+    const QJsonObject corpus =
+        source.value(QStringLiteral("corpus")).toObject();
+    for (auto it = corpus.begin(); it != corpus.end(); ++it) {
+        const bool valid =
+            (it.key() == QStringLiteral("render_audio") &&
+             it.value().isBool()) ||
+            (it.key() == QStringLiteral("matched_complexity_seeds") &&
+             it.value().isBool()) ||
+            (it.key() == QStringLiteral("samples_per_cell") &&
+             it.value().isDouble() &&
+             it.value().toInt() >= 2 &&
+             it.value().toInt() <= 16) ||
+            ((it.key() == QStringLiteral("style_id") ||
+              it.key() == QStringLiteral("profile_id")) &&
+             it.value().isString() &&
+             it.value().toString().size() <= 128);
+        if (!valid) {
+            throw std::runtime_error(
+                "debug scenario corpus contains an unknown or invalid field");
         }
     }
     result.artifactRoot = canonicalArtifactRoot(path, artifacts);
@@ -1130,6 +1155,29 @@ int runFocusedOperation(const ParsedScenario& scenario, QJsonObject& result)
         result = jam2RunControllerLifecycleValidation(
             network.value(QStringLiteral("heartbeat_interval_ms")).toInt(20),
             network.value(QStringLiteral("heartbeat_miss_limit")).toInt(3));
+        return result.value(QStringLiteral("ok")).toBool(false) ? 0 : 3;
+    }
+    if (scenario.operation ==
+        QStringLiteral("validate.music-full-form-corpus")) {
+        const QJsonObject corpus = scenario.source
+            .value(QStringLiteral("corpus"))
+            .toObject();
+        Jam2MusicCorpusOptions options;
+        options.includeAudio =
+            corpus.value(QStringLiteral("render_audio")).toBool(true);
+        options.matchedComplexitySeeds =
+            corpus.value(QStringLiteral("matched_complexity_seeds"))
+                .toBool(false);
+        options.samplesPerCell =
+            corpus.value(QStringLiteral("samples_per_cell")).toInt(4);
+        options.styleId =
+            corpus.value(QStringLiteral("style_id")).toString();
+        options.profileId =
+            corpus.value(QStringLiteral("profile_id")).toString();
+        result = jam2WriteFullFormMusicCorpus(
+            scenario.artifactRoot,
+            scenario.runId,
+            options);
         return result.value(QStringLiteral("ok")).toBool(false) ? 0 : 3;
     }
     return -1;

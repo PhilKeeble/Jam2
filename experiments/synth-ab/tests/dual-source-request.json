@@ -1,0 +1,14 @@
+{
+  "schema": "jam2-instrument-patch-v1",
+  "profileId": "pop_loop",
+  "role": "chords",
+  "audition": "profile",
+  "rootMidi": 48,
+  "patch": {
+    "source": "jam2-native",
+    "secondSource": "fm2",
+    "sourceBlend": 0.4,
+    "secondSourceTranspose": 0,
+    "secondSourceDetuneCents": 0
+  }
+}

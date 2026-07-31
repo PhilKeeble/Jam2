@@ -1,0 +1,9 @@
+{
+  "schema": "jam2-debug-scenario",
+  "run_id": "music-full-form-corpus",
+  "operation": "validate.music-full-form-corpus",
+  "profile": "fast",
+  "artifacts": {
+    "root": "../site"
+  }
+}

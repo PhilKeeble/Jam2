@@ -2,6 +2,7 @@
 
 #include <QHash>
 
+#include <array>
 #include <cmath>
 
 namespace jam2::practice {
@@ -57,6 +58,73 @@ QVector<int> qualityIntervals(QString suffix)
     return {};
 }
 
+QVector<int> qualityDegrees(QString suffix)
+{
+    suffix = suffix.trimmed().toLower();
+    if (suffix.isEmpty() || suffix == QStringLiteral("maj") ||
+        suffix == QStringLiteral("m") || suffix == QStringLiteral("min") ||
+        suffix == QStringLiteral("dim") || suffix == QStringLiteral("aug") ||
+        suffix == QStringLiteral("+")) {
+        return {1, 3, 5};
+    }
+    if (suffix == QStringLiteral("5") || suffix == QStringLiteral("power"))
+        return {1, 5};
+    if (suffix == QStringLiteral("sus2")) return {1, 2, 5};
+    if (suffix == QStringLiteral("sus4") || suffix == QStringLiteral("sus"))
+        return {1, 4, 5};
+    if (suffix == QStringLiteral("6") || suffix == QStringLiteral("m6"))
+        return {1, 3, 5, 6};
+    if (suffix == QStringLiteral("7") || suffix == QStringLiteral("dom7") ||
+        suffix == QStringLiteral("maj7") || suffix == QStringLiteral("ma7") ||
+        suffix == QStringLiteral("m7") || suffix == QStringLiteral("min7") ||
+        suffix == QStringLiteral("m7b5") || suffix == QStringLiteral("dim7")) {
+        return {1, 3, 5, 7};
+    }
+    if (suffix == QStringLiteral("add9") ||
+        suffix == QStringLiteral("madd9")) {
+        return {1, 3, 5, 9};
+    }
+    if (suffix == QStringLiteral("9") || suffix == QStringLiteral("maj9") ||
+        suffix == QStringLiteral("m9")) {
+        return {1, 3, 5, 7, 9};
+    }
+    if (suffix == QStringLiteral("13"))
+        return {1, 3, 5, 7, 9, 13};
+    if (suffix == QStringLiteral("7b9") ||
+        suffix == QStringLiteral("7#9")) {
+        return {1, 3, 5, 7, 9};
+    }
+    if (suffix == QStringLiteral("alt"))
+        return {1, 3, 7, 9, 11, 13};
+    if (suffix == QStringLiteral("#11"))
+        return {1, 3, 5, 11};
+    if (suffix == QStringLiteral("maj7#11"))
+        return {1, 3, 5, 7, 11};
+    if (suffix == QStringLiteral("maj9#11"))
+        return {1, 3, 5, 7, 9, 11};
+    return {};
+}
+
+QString diatonicNoteName(int pitchClassValue, QChar letter)
+{
+    static const QString letters = QStringLiteral("CDEFGAB");
+    static constexpr std::array<int, 7> naturalPitchClasses{
+        0, 2, 4, 5, 7, 9, 11};
+    const int letterIndex = letters.indexOf(letter);
+    if (letterIndex < 0) return {};
+    const int normalized = ((pitchClassValue % 12) + 12) % 12;
+    int accidental = normalized - naturalPitchClasses.at(letterIndex);
+    if (accidental > 6) accidental -= 12;
+    if (accidental < -6) accidental += 12;
+    if (std::abs(accidental) > 2) return {};
+    QString result(letter);
+    if (accidental < 0)
+        result += QString(-accidental, QLatin1Char('b'));
+    else if (accidental > 0)
+        result += QString(accidental, QLatin1Char('#'));
+    return result;
+}
+
 } // namespace
 
 ParsedChord parseChord(const QString& symbol)
@@ -92,6 +160,8 @@ ParsedChord parseChord(const QString& symbol)
     ParsedChord chord;
     chord.root = pitchClass(chordText.left(rootLength));
     chord.bass = slash >= 0 ? pitchClass(bassText) : -1;
+    chord.rootName = chordText.left(rootLength);
+    chord.bassName = bassText;
     chord.suffix = chordText.mid(rootLength);
     chord.intervals = qualityIntervals(chord.suffix);
     chord.valid = chord.root >= 0 && (slash < 0 || chord.bass >= 0) &&
@@ -126,10 +196,22 @@ QString chordToneNames(const QString& symbol)
     }
     QStringList names;
     if (chord.bass >= 0) {
-        names.push_back(noteName(chord.bass, symbol.contains(QLatin1Char('b'))));
+        names.push_back(chord.bassName);
     }
-    for (int interval : chord.intervals) {
-        const QString name = noteName(chord.root + interval, symbol.contains(QLatin1Char('b')));
+    const QVector<int> degrees = qualityDegrees(chord.suffix);
+    static const QString letters = QStringLiteral("CDEFGAB");
+    const int rootLetter = letters.indexOf(chord.rootName.front());
+    for (int index = 0; index < chord.intervals.size(); ++index) {
+        const int degree = degrees.value(index, 1);
+        const QChar letter = letters.at(
+            (rootLetter + degree - 1) % letters.size());
+        QString name = diatonicNoteName(
+            chord.root + chord.intervals.at(index), letter);
+        if (name.isEmpty()) {
+            name = noteName(
+                chord.root + chord.intervals.at(index),
+                chord.rootName.contains(QLatin1Char('b')));
+        }
         if (!names.contains(name)) names.push_back(name);
     }
     return names.join(QStringLiteral(" "));

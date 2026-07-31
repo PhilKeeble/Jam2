@@ -11,6 +11,8 @@ namespace jam2::practice {
 struct ParsedChord {
     int root = 0;
     int bass = -1;
+    QString rootName;
+    QString bassName;
     QString suffix;
     QVector<int> intervals;
     bool rest = false;

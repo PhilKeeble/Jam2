@@ -26,6 +26,7 @@ struct GuiLoopbackOptions {
     int durationBars = 0;
     double bpm = 120.0;
     int beatsPerBar = 4;
+    int tempoPulseUnits = 1;
     bool trigger = false;
     double triggerThresholdDb = -45.0;
     int triggerHoldMs = 50;

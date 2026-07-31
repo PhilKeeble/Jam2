@@ -4,11 +4,16 @@
 
 #include <cmath>
 
-void PlaybackGrid::setPattern(double bpm, int beatsPerBar, int division)
+void PlaybackGrid::setPattern(
+    double bpm,
+    int beatsPerBar,
+    int division,
+    int tempoPulseUnits)
 {
     bpm_ = qBound(1.0, bpm, 400.0);
     beatsPerBar_ = qBound(1, beatsPerBar, 16);
     division_ = qMax(1, division);
+    tempoPulseUnits_ = tempoPulseUnits == 3 ? 3 : 1;
 }
 
 void PlaybackGrid::scheduleEpoch(
@@ -104,9 +109,10 @@ PlaybackGrid::Position PlaybackGrid::position() const
         return result;
     }
 
-    const double steps = seconds * bpm_ * division_ / 60.0;
-    result.secondsPerBeat = 60.0 / bpm_;
+    result.secondsPerBeat =
+        60.0 / bpm_ / static_cast<double>(tempoPulseUnits_);
     result.secondsPerStep = result.secondsPerBeat / static_cast<double>(division_);
+    const double steps = seconds / result.secondsPerStep;
     result.absoluteStep = static_cast<std::uint64_t>(std::floor(qMax(0.0, steps)));
     result.absoluteBeat = result.absoluteStep / static_cast<std::uint64_t>(division_);
     result.beat = static_cast<int>((result.absoluteBeat) %

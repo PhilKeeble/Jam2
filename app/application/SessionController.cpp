@@ -800,7 +800,10 @@ private:
         const auto pattern = jam2::metronome::sanitize(snapshot.metronome_pattern);
         const int sampleRate = std::max(1, static_cast<int>(std::llround(snapshot.sample_rate)));
         const std::uint64_t stepFrames = jam2::metronome::step_interval_samples(
-            static_cast<double>(sampleRate), pattern.bpm, pattern.division);
+            static_cast<double>(sampleRate),
+            pattern.bpm,
+            pattern.division,
+            pattern.tempo_pulse_units);
         const std::uint64_t barFrames = std::max<std::uint64_t>(
             1,
             stepFrames * static_cast<std::uint64_t>(pattern.division) *
@@ -873,6 +876,8 @@ private:
             {QStringLiteral("metronome_epoch_valid"), snapshot.metronome_epoch_valid},
             {QStringLiteral("metronome_beats_per_bar"), pattern.beats_per_bar},
             {QStringLiteral("metronome_division"), pattern.division},
+            {QStringLiteral("metronome_beat_unit"), pattern.beat_unit},
+            {QStringLiteral("metronome_tempo_pulse_units"), pattern.tempo_pulse_units},
             {QStringLiteral("metronome_step_count"), pattern.step_count},
             {QStringLiteral("metronome_play_mask_low"), static_cast<qint64>(pattern.play_mask_low)},
             {QStringLiteral("metronome_play_mask_high"), static_cast<qint64>(pattern.play_mask_high)},

@@ -42,6 +42,9 @@ function(jam2_create_release_dirs target)
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${CMAKE_SOURCE_DIR}/libs/third_party/signalsmith-linear/LICENSE.txt"
             "${JAM2_RELEASE_DIR}/licenses/signalsmith-linear-LICENSE.txt"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/docs/third_party/DaisySP-LICENSE.txt"
+            "${JAM2_RELEASE_DIR}/licenses/DaisySP-LICENSE.txt"
         VERBATIM
     )
 endfunction()

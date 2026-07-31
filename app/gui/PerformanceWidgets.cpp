@@ -171,6 +171,15 @@ void PerformanceHomeWidget::setTrackWaveform(std::vector<float> peaks, bool vali
     update();
 }
 
+void PerformanceHomeWidget::setWavGenerationActive(bool active)
+{
+    if (wavGenerationActive_ == active) {
+        return;
+    }
+    wavGenerationActive_ = active;
+    update();
+}
+
 void PerformanceHomeWidget::setTechnicalSummary(
     const QString& rtt,
     const QString& jitter,
@@ -1400,10 +1409,16 @@ void PerformanceHomeWidget::paintGenerationActions(
     constexpr int height = 31;
     constexpr int gap = 8;
     constexpr int wavWidth = 116;
+    constexpr int clearWidth = 96;
     constexpr int ideaWidth = 164;
     generateWavHitRect_ = QRect(right - wavWidth, top, wavWidth, height);
+    clearIdeaHitRect_ = QRect(
+        generateWavHitRect_.left() - gap - clearWidth,
+        top,
+        clearWidth,
+        height);
     generateIdeaHitRect_ = QRect(
-        generateWavHitRect_.left() - gap - ideaWidth,
+        clearIdeaHitRect_.left() - gap - ideaWidth,
         top,
         ideaWidth,
         height);
@@ -1434,10 +1449,41 @@ void PerformanceHomeWidget::paintGenerationActions(
         gold(),
         QColor(35, 27, 20, 232));
     drawAction(
+        clearIdeaHitRect_,
+        QStringLiteral("CLEAR IDEA"),
+        QColor(204, 107, 112),
+        QColor(37, 19, 24, 232));
+    drawAction(
         generateWavHitRect_,
         QStringLiteral("GENERATE WAV"),
         QColor(176, 139, 228),
         QColor(27, 20, 37, 232));
+
+    if (wavGenerationActive_) {
+        constexpr int statusWidth = 164;
+        constexpr int statusHeight = 56;
+        const QRect statusRect(
+            right - statusWidth,
+            generateWavHitRect_.bottom() + gap,
+            statusWidth,
+            statusHeight);
+        painter.setPen(QPen(QColor(176, 139, 228, 210), 1));
+        painter.setBrush(QColor(12, 10, 19, 238));
+        painter.drawRoundedRect(statusRect, 8, 8);
+        painter.fillRect(
+            QRect(statusRect.left(), statusRect.top() + 8, 3, statusRect.height() - 16),
+            QColor(176, 139, 228));
+
+        QFont statusFont(QStringLiteral("Bahnschrift"));
+        statusFont.setPointSizeF(10.5);
+        statusFont.setWeight(QFont::DemiBold);
+        painter.setFont(statusFont);
+        painter.setPen(QColor(235, 225, 243));
+        painter.drawText(
+            statusRect.adjusted(13, 1, -9, -1),
+            Qt::AlignCenter,
+            QStringLiteral("Generating..."));
+    }
 }
 
 void PerformanceHomeWidget::paintVerticalPeerRail(
@@ -1870,6 +1916,10 @@ void PerformanceHomeWidget::mousePressEvent(QMouseEvent* event)
     }
     if (generateIdeaHitRect_.contains(point)) {
         if (onGenerateIdea) onGenerateIdea();
+        return;
+    }
+    if (clearIdeaHitRect_.contains(point)) {
+        if (onClearIdea) onClearIdea();
         return;
     }
     if (generateWavHitRect_.contains(point)) {

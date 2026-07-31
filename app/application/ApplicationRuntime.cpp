@@ -62,6 +62,10 @@ bool ApplicationRuntime::ensureEngine(
             command.type = jam2::EngineCommandType::SetLeaderAudioLocalClick;
             command.enabled = leaderAudioLocalClick;
             (void)engine_->submit(command);
+            command = {};
+            command.type = jam2::EngineCommandType::SetMetronomeSound;
+            command.value = static_cast<int>(options.metronome_sound);
+            (void)engine_->submit(command);
             return true;
         }
         stopNetwork();

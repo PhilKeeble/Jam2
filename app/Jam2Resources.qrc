@@ -3,4 +3,7 @@
         <file alias="logo-nebula.png">../assets/logo-nebula.png</file>
         <file alias="banner.png">../assets/banner.png</file>
     </qresource>
+    <qresource prefix="/jam2/drums">
+        <file alias="researched-kits.json">gui/researched-drum-kits.json</file>
+    </qresource>
 </RCC>

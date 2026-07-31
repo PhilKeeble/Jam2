@@ -10,7 +10,45 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 
-double click_tone(
+double deterministic_noise(std::uint64_t offset, std::uint32_t salt)
+{
+    std::uint32_t value = static_cast<std::uint32_t>(offset) + salt;
+    value ^= value >> 16;
+    value *= 0x7feb352dU;
+    value ^= value >> 15;
+    value *= 0x846ca68bU;
+    value ^= value >> 16;
+    return static_cast<double>(value) /
+        static_cast<double>((std::numeric_limits<std::uint32_t>::max)()) * 2.0 - 1.0;
+}
+
+double shaped_click(
+    std::uint64_t offset,
+    double sample_rate,
+    double duration_seconds,
+    double release_seconds,
+    double decay_rate,
+    double signal)
+{
+    const auto duration = static_cast<std::uint64_t>(
+        std::max(1.0, std::round(sample_rate * duration_seconds)));
+    if (offset >= duration) {
+        return 0.0;
+    }
+    const double attack_frames = std::max(1.0, std::round(sample_rate * 0.00025));
+    const double release_frames = std::max(1.0, std::round(sample_rate * release_seconds));
+    const double attack = offset < static_cast<std::uint64_t>(attack_frames)
+        ? 0.5 - 0.5 * std::cos(kPi * static_cast<double>(offset) / attack_frames)
+        : 1.0;
+    const std::uint64_t remaining = duration - offset - 1;
+    const double release = remaining < static_cast<std::uint64_t>(release_frames)
+        ? 0.5 - 0.5 * std::cos(kPi * static_cast<double>(remaining) / release_frames)
+        : 1.0;
+    const double seconds = static_cast<double>(offset) / sample_rate;
+    return signal * attack * std::exp(-seconds * decay_rate) * release;
+}
+
+double classic_click_tone(
     std::uint64_t offset,
     double sample_rate,
     bool accent,
@@ -49,6 +87,79 @@ double click_tone(
     return tone * attack * decay * release;
 }
 
+double click_tone(
+    std::uint64_t offset,
+    double sample_rate,
+    bool accent,
+    ClickVoice voice,
+    ClickSound sound)
+{
+    if (sample_rate <= 0.0) {
+        return 0.0;
+    }
+    if (sound == ClickSound::Classic) {
+        return classic_click_tone(offset, sample_rate, accent, voice);
+    }
+
+    const bool count_in = voice == ClickVoice::CountIn;
+    const double seconds = static_cast<double>(offset) / sample_rate;
+
+    if (sound == ClickSound::Woodblock) {
+        const double frequency = count_in
+            ? (accent ? 920.0 : 690.0)
+            : (accent ? 1780.0 : 1220.0);
+        const double phase = 2.0 * kPi * frequency * seconds;
+        const double tone =
+            0.72 * std::sin(phase) +
+            0.20 * std::sin(phase * 1.58 + 0.35) +
+            0.08 * deterministic_noise(offset, 0x36a9U);
+        return shaped_click(
+            offset,
+            sample_rate,
+            count_in ? (accent ? 0.042 : 0.036) : (accent ? 0.030 : 0.025),
+            0.003,
+            count_in ? 82.0 : 118.0,
+            tone);
+    }
+
+    if (sound == ClickSound::RimClick) {
+        const double frequency = count_in
+            ? (accent ? 1750.0 : 1350.0)
+            : (accent ? 3100.0 : 2350.0);
+        const double phase = 2.0 * kPi * frequency * seconds;
+        const double noise =
+            deterministic_noise(offset, 0x91e1U) -
+            0.55 * deterministic_noise(offset > 0 ? offset - 1 : 0, 0x91e1U);
+        const double tone =
+            0.58 * noise +
+            0.30 * std::sin(phase) +
+            0.12 * std::sin(phase * 2.17);
+        return shaped_click(
+            offset,
+            sample_rate,
+            count_in ? 0.020 : (accent ? 0.014 : 0.011),
+            0.0018,
+            count_in ? 190.0 : 285.0,
+            tone);
+    }
+
+    const double frequency = count_in
+        ? (accent ? 2450.0 : 1950.0)
+        : (accent ? 4300.0 : 3400.0);
+    const double phase = 2.0 * kPi * frequency * seconds;
+    const double tone =
+        0.62 * std::sin(phase) +
+        0.27 * std::sin(phase * 2.0) +
+        0.11 * std::sin(phase * 3.0);
+    return shaped_click(
+        offset,
+        sample_rate,
+        count_in ? 0.012 : (accent ? 0.007 : 0.0055),
+        0.001,
+        count_in ? 250.0 : 420.0,
+        tone);
+}
+
 } // namespace
 
 int clamp_bpm(int bpm)
@@ -76,6 +187,32 @@ int clamp_division(int division)
     }
 }
 
+int clamp_beat_unit(int beat_unit)
+{
+    switch (beat_unit) {
+    case 2:
+    case 4:
+    case 8:
+    case 16:
+        return beat_unit;
+    default:
+        return 4;
+    }
+}
+
+int clamp_tempo_pulse_units(int units)
+{
+    return units == 3 ? 3 : 1;
+}
+
+ClickSound sanitize_click_sound(int sound)
+{
+    return static_cast<ClickSound>(std::clamp(
+        sound,
+        static_cast<int>(ClickSound::Classic),
+        static_cast<int>(ClickSound::DigitalTick)));
+}
+
 int pattern_step_count(int beats_per_bar, int division)
 {
     const int beats = clamp_beats_per_bar(beats_per_bar);
@@ -88,6 +225,9 @@ PatternSnapshot sanitize(PatternSnapshot pattern)
     pattern.bpm = clamp_bpm(pattern.bpm);
     pattern.beats_per_bar = clamp_beats_per_bar(pattern.beats_per_bar);
     pattern.division = clamp_division(pattern.division);
+    pattern.beat_unit = clamp_beat_unit(pattern.beat_unit);
+    pattern.tempo_pulse_units =
+        clamp_tempo_pulse_units(pattern.tempo_pulse_units);
     pattern.step_count = pattern_step_count(pattern.beats_per_bar, pattern.division);
     if (pattern.step_count < 64) {
         const std::uint64_t valid = (1ULL << pattern.step_count) - 1ULL;
@@ -133,13 +273,19 @@ void set_mask_enabled(std::uint64_t& low, std::uint64_t& high, int step, bool en
     }
 }
 
-std::uint64_t step_interval_samples(double sample_rate, int bpm, int division)
+std::uint64_t step_interval_samples(
+    double sample_rate,
+    int bpm,
+    int division,
+    int tempo_pulse_units)
 {
     if (sample_rate <= 0.0) {
         return 0;
     }
     const double interval = (60.0 * sample_rate) /
-        static_cast<double>(clamp_bpm(bpm) * clamp_division(division));
+        static_cast<double>(
+            clamp_bpm(bpm) * clamp_division(division) *
+            clamp_tempo_pulse_units(tempo_pulse_units));
     return static_cast<std::uint64_t>(std::max(1.0, std::round(interval)));
 }
 
@@ -175,10 +321,12 @@ double render_sample(
     std::uint64_t grid_sample,
     double sample_rate,
     double level,
-    ClickVoice voice)
+    ClickVoice voice,
+    ClickSound sound)
 {
-    const std::uint64_t interval = step_interval_samples(sample_rate, input.bpm, input.division);
-    return render_sample(input, grid_sample, interval, sample_rate, level, voice);
+    const std::uint64_t interval = step_interval_samples(
+        sample_rate, input.bpm, input.division, input.tempo_pulse_units);
+    return render_sample(input, grid_sample, interval, sample_rate, level, voice, sound);
 }
 
 double render_sample(
@@ -187,7 +335,8 @@ double render_sample(
     std::uint64_t step_interval,
     double sample_rate,
     double level,
-    ClickVoice voice)
+    ClickVoice voice,
+    ClickSound sound)
 {
     if (pattern.step_count <= 0) {
         return 0.0;
@@ -205,7 +354,7 @@ double render_sample(
     const bool accent = mask_enabled(pattern.accent_mask_low, pattern.accent_mask_high, pattern_step);
     const double click_level = std::clamp(level, 0.0, 1.0) * (accent ? 1.25 : 0.78);
     return std::clamp(
-        click_tone(step_offset, sample_rate, accent, voice) * click_level,
+        click_tone(step_offset, sample_rate, accent, voice, sound) * click_level,
         -1.0,
         1.0);
 }

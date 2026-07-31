@@ -25,7 +25,7 @@ public:
         int sampleRate = 0;
     };
 
-    void setPattern(double bpm, int beatsPerBar, int division);
+    void setPattern(double bpm, int beatsPerBar, int division, int tempoPulseUnits);
     void updateEngine(
         std::uint64_t rawFrame,
         std::uint64_t musicalFrame,
@@ -42,6 +42,7 @@ private:
     double bpm_ = 120.0;
     int beatsPerBar_ = 4;
     int division_ = 1;
+    int tempoPulseUnits_ = 1;
     bool engineRunning_ = false;
     bool engineValid_ = false;
     std::uint64_t engineFrame_ = 0;

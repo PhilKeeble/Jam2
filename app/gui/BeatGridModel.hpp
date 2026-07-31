@@ -23,12 +23,15 @@ struct MusicalStep {
     MusicalStepState state = MusicalStepState::Rest;
     QString value;
     int velocity = 88;
+    QString articulation;
 };
 
 struct MusicalBeatPattern {
     int division = 1;
     QVector<MusicalStep> chords;
     QVector<MusicalStep> melody;
+    QVector<MusicalStep> bass;
+    QVector<MusicalStep> support;
 };
 
 struct SongSection {
@@ -71,10 +74,12 @@ public:
     void renameSection(int index, const QString& label, const QString& name);
     void moveSection(int from, int to);
     int replaceGeneratedSection(const QString& kind, SongSection section);
+    void clearContent();
     void reset();
     QJsonObject toJson() const;
     bool loadJson(const QJsonObject& object);
 
+    static int beatLaneSchemaVersion();
     static QStringList beatLaneNames();
     static QStringList beatVisualLaneNames();
     static QList<int> beatDivisionValues();

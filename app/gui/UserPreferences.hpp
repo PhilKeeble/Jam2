@@ -118,6 +118,7 @@ struct UserPreferences {
     JoinPreference join;
     LoggingPreference logging;
     RecordingPreference recording;
+    int metronomeSound = 0;
 
     const AudioDevicePreference& createAudio() const noexcept
     {

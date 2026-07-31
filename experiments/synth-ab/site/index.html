@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jam2 Sound Design Workbench</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <p class="eyebrow">Jam2 experiment</p>
+        <h1>Sound Design Workbench</h1>
+        <p>Research-led Jam2, DaisySP and hybrid sound candidates.</p>
+      </div>
+      <div class="view-switcher" aria-label="Workbench view">
+        <button id="show-style-workbench" class="active">Style scenes</button>
+        <button id="show-instrument-lab">Instrument + Kit Lab</button>
+      </div>
+      <nav id="style-nav" aria-label="Styles"></nav>
+      <div class="sidebar-footer">
+        <a href="showcase.html">DaisySP capability lab →</a>
+        <p>Preferences and notes stay in this browser.</p>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <div id="status" class="status">Render the experiment with <code>build.cmd</code> first.</div>
+      <div id="workbench" hidden>
+        <header class="workspace-header">
+          <div>
+            <p class="eyebrow" id="style-label"></p>
+            <h2 id="profile-title"></h2>
+            <p class="profile-meta" id="profile-meta"></p>
+          </div>
+          <div class="transport" aria-label="Scene transport">
+            <label class="global-engine-control">
+              <span>All roles</span>
+              <select id="global-engine" aria-label="Use one synthesis engine for every role">
+                <option value="mixed" disabled>Mixed per-role choices</option>
+                <option value="jam2">Jam2</option>
+                <option value="daisy">Daisy</option>
+                <option value="hybrid">Hybrid</option>
+              </select>
+            </label>
+            <button id="play-scene" class="primary">▶ Play selected scene</button>
+            <button id="stop-scene">■ Stop</button>
+            <label class="loop-control"><input id="loop-scene" type="checkbox" checked> Loop</label>
+          </div>
+        </header>
+
+        <div id="profile-tabs" class="profile-tabs" role="tablist"></div>
+
+        <section class="brief-panel">
+          <div>
+            <p class="eyebrow">Research sound target</p>
+            <p id="sound-brief" class="sound-brief"></p>
+          </div>
+          <div>
+            <p class="eyebrow">Honest boundary</p>
+            <p id="sound-limits"></p>
+          </div>
+        </section>
+
+        <section class="workflow-note">
+          <strong>Working method</strong>
+          <span>Use “All roles” for a whole-scene engine comparison, or choose sources per role for a custom blend. Live controls are optional audition processing; their defaults leave tone, drive, and space neutral.</span>
+        </section>
+
+        <div id="roles" class="roles"></div>
+
+        <section class="notes-panel">
+          <div>
+            <p class="eyebrow">Refinement record</p>
+            <h3>Listening notes for this profile</h3>
+            <p>Record what works, what feels wrong, and the next change to try. Notes save automatically on this device.</p>
+          </div>
+          <textarea id="profile-notes" rows="7" placeholder="For example: keep the Daisy bass attack, reduce its upper grit, and try the Jam2 body underneath…"></textarea>
+          <div class="notes-actions">
+            <span id="save-status">Saved locally</span>
+            <button id="reset-profile">Reset this profile’s choices</button>
+          </div>
+        </section>
+      </div>
+
+      <div id="instrument-lab" hidden>
+        <header class="lab-header">
+          <div>
+            <p class="eyebrow">Native DaisySP patch designer</p>
+            <h2>Instrument + Drum Kit Lab</h2>
+            <p>Design every researched profile role with native Jam2 and Daisy sources, then audition it alone or inside its style scene.</p>
+          </div>
+          <div class="lab-service" id="lab-service">Checking native renderer…</div>
+        </header>
+
+        <section class="lab-setup panel">
+          <label>
+            <span>Profile context</span>
+            <select id="lab-profile"></select>
+          </label>
+          <label>
+            <span>Instrument role</span>
+            <select id="lab-role"></select>
+          </label>
+          <label>
+            <span>Musical test</span>
+            <select id="lab-audition">
+              <option value="note">Single note</option>
+              <option value="velocity">Register + velocity</option>
+              <option value="chord">Two polyphonic chords</option>
+              <option value="profile" selected>Generated style phrase</option>
+            </select>
+          </label>
+          <label>
+            <span>Root note</span>
+            <select id="lab-root"></select>
+          </label>
+        </section>
+
+        <section class="lab-transport panel">
+          <div>
+            <button id="lab-render" class="primary">Render &amp; play</button>
+            <button id="lab-play" disabled>▶ Replay</button>
+            <button id="lab-mix-jam2" disabled hidden>▶ Edited drums + Jam2 backing</button>
+            <button id="lab-jam2-drums" disabled hidden>▶ Jam2 drums only</button>
+            <button id="lab-mix-jam2-reference" disabled hidden>▶ Jam2 drums + Jam2 backing</button>
+            <button id="lab-mix" disabled>▶ Designed style mix</button>
+            <button id="lab-stop">■ Stop</button>
+          </div>
+          <label class="loop-control"><input id="lab-auto-render" type="checkbox"> Render after changes</label>
+          <span id="lab-render-status">No custom render yet.</span>
+        </section>
+
+        <section class="lab-target panel">
+          <div>
+            <p class="eyebrow">Research target</p>
+            <p id="lab-sound-target"></p>
+          </div>
+          <div>
+            <p class="eyebrow">Current starting design</p>
+            <p id="lab-design-name"></p>
+          </div>
+        </section>
+
+        <section class="panel" data-pitched-only>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Guided character</p>
+              <h3>Change what you hear, not equations</h3>
+            </div>
+            <button id="lab-reset-macros">Reset macros</button>
+          </div>
+          <div id="lab-macros" class="macro-grid"></div>
+          <div class="mutation-row">
+            <span>Explore from this patch:</span>
+            <button data-mutate="source">Different source</button>
+            <button data-mutate="timbre">Timbre variation</button>
+            <button data-mutate="envelope">Envelope variation</button>
+            <button data-mutate="motion">Movement variation</button>
+          </div>
+        </section>
+
+        <section class="panel" data-pitched-only>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Signal architecture</p>
+              <h3>Source layers and filter</h3>
+            </div>
+            <button id="lab-reset-patch">Restore researched patch</button>
+          </div>
+          <div class="architecture-grid">
+            <label>
+              <span>Source A</span>
+              <select id="lab-source"></select>
+            </label>
+            <label>
+              <span>Source B</span>
+              <select id="lab-source-b"></select>
+            </label>
+            <label>
+              <span>Blend toward B</span>
+              <input id="lab-source-blend" type="range" min="0" max="1" step="0.01" value="0">
+              <output id="lab-source-blend-value">Off</output>
+            </label>
+            <label>
+              <span>Source B transpose</span>
+              <input id="lab-source-transpose" type="number" min="-24" max="24" step="1" value="0">
+            </label>
+            <label>
+              <span>Source B fine tune (cents)</span>
+              <input id="lab-source-detune" type="number" min="-100" max="100" step="0.5" value="0">
+            </label>
+            <label>
+              <span>Filter path</span>
+              <select id="lab-filter"></select>
+            </label>
+          </div>
+          <div id="lab-parameter-groups"></div>
+        </section>
+
+        <section id="drum-kit-lab" class="panel" hidden>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Per-piece architecture</p>
+              <h3>Drum Kit Lab</h3>
+              <p>Load a coherent researched kit, then inspect or replace its independently modelled body, transient, texture, colour and velocity response.</p>
+            </div>
+            <div class="drum-candidate-actions">
+              <label>
+                <span>Complete researched kit</span>
+                <select id="lab-drum-kit-candidate"></select>
+              </label>
+              <button id="lab-reset-kit">Restore researched kit</button>
+            </div>
+          </div>
+          <div id="lab-drum-pieces" class="drum-piece-tabs"></div>
+          <div class="drum-piece-candidate-row">
+            <label>
+              <span>Selected-piece candidate</span>
+              <select id="lab-drum-piece-candidate"></select>
+            </label>
+            <p id="lab-drum-candidate-description" class="control-note"></p>
+          </div>
+          <div class="architecture-grid drum-architecture">
+            <label>
+              <span>Source A</span>
+              <select id="lab-drum-source"></select>
+            </label>
+            <label>
+              <span>Source B</span>
+              <select id="lab-drum-source-b"></select>
+            </label>
+            <label>
+              <span>Blend toward B</span>
+              <input id="lab-drum-blend" type="range" min="0" max="1" step="0.01" value="0">
+              <output id="lab-drum-blend-value">Off</output>
+            </label>
+          </div>
+          <div id="lab-drum-parameters" class="parameter-grid"></div>
+          <div class="parameter-group">
+            <h4>Excitation, texture and colour</h4>
+            <p class="control-note">Transient and texture are separately enveloped. Low-rate and bit-depth controls describe explicit early-digital replay colour; 48 kHz / 24-bit is clean.</p>
+            <div class="architecture-grid drum-architecture">
+              <label>
+                <span>Transient type</span>
+                <select id="lab-drum-transient"></select>
+              </label>
+              <label>
+                <span>Texture type</span>
+                <select id="lab-drum-texture"></select>
+              </label>
+            </div>
+            <div id="lab-drum-component-parameters" class="parameter-grid"></div>
+          </div>
+          <div class="parameter-group">
+            <h4>Deterministic velocity response</h4>
+            <p class="control-note">Ghost, normal and accent bands independently drive model excitation and output gain. Realised values are repeatable and reported by the renderer.</p>
+            <div id="lab-drum-velocity-parameters" class="parameter-grid"></div>
+          </div>
+          <div class="parameter-group">
+            <h4>Synth character layer</h4>
+            <p class="control-note">This additive layer is triggered with the selected drum and joins Source A/B before the complete-kit bus.</p>
+            <div class="architecture-grid drum-architecture">
+              <label>
+                <span>Synth source</span>
+                <select id="lab-drum-synth-source">
+                  <option value="off">Off</option>
+                  <option value="variable-shape">Variable-shape oscillator</option>
+                  <option value="variable-saw">Variable-saw oscillator</option>
+                  <option value="fm2">Two-operator FM</option>
+                  <option value="string-physical-model">Physical string</option>
+                  <option value="additive-harmonic">Additive harmonic</option>
+                  <option value="sine-fundamental">Sine fundamental</option>
+                  <option value="phase-reset-formant">Phase-reset formant</option>
+                  <option value="vosim-formant">VOSIM formant</option>
+                  <option value="z-oscillator">Z oscillator</option>
+                </select>
+              </label>
+            </div>
+            <div id="lab-drum-synth-parameters" class="parameter-grid"></div>
+          </div>
+          <div class="parameter-group">
+            <h4>Complete kit bus</h4>
+            <div id="lab-drum-bus-parameters" class="parameter-grid"></div>
+          </div>
+        </section>
+
+        <section class="panel snapshot-panel">
+          <div>
+            <p class="eyebrow">Listening memory</p>
+            <h3>Patch snapshots</h3>
+            <p>Keep promising points before exploring further.</p>
+          </div>
+          <div>
+            <div id="lab-snapshots" class="snapshot-grid"></div>
+            <button id="lab-save-review" class="primary">Save preset for Jam2 review</button>
+            <span id="lab-save-review-status"></span>
+          </div>
+        </section>
+
+        <section class="panel lab-notes-panel">
+          <div>
+            <p class="eyebrow">Refinement notes</p>
+            <h3>Describe only what feels wrong</h3>
+            <div id="lab-reactions" class="reaction-row"></div>
+          </div>
+          <textarea id="lab-notes" rows="6" placeholder="For example: the attack feels convincing, but the held chord becomes buzzy and narrow…"></textarea>
+        </section>
+
+        <details class="panel lab-raw-json">
+          <summary>Raw sound-design JSON</summary>
+          <button id="lab-copy-json">Copy JSON</button>
+          <pre id="lab-json"></pre>
+        </details>
+      </div>
+    </main>
+  </div>
+
+  <script src="sound-design-manifest.js"></script>
+  <script src="app.js"></script>
+  <script src="instrument-lab.js?v=reggae-native-drum-gain-pass-11"></script>
+</body>
+</html>

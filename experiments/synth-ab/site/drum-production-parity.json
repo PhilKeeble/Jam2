@@ -1,0 +1,2727 @@
+{
+    "ok": true,
+    "profiles": [
+        {
+            "candidateId": "hybrid-section-lift",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.010600019003106557
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 3.471504896879196e-06,
+                    "normalizedRmsError": 2.011144572848606e-05,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.00625245634358573
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.0007118291503709525
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.0031488693088308557
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.010206950104006723
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.012854077770675657
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.011950901397669692
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.0014778567343377512
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0013726956473861488
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.0024679892243850603
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.0008151695098244924
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.0009014385622050816
+                }
+            ],
+            "profileId": "pop_loop"
+        },
+        {
+            "candidateId": "hybrid-section-lift",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.014528581172914206
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 2.323766238987446e-06,
+                    "normalizedRmsError": 1.865775082898907e-05,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.004931575858689762
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.0006081032996681047
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.0023607269072193435
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.009438830253171859
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.009639057278098552
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.0149171364814339
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.002820120183218838
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0009418269969995539
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.0028334798012123134
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.0007714827101363596
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.0009014385622050816
+                }
+            ],
+            "profileId": "pop_sectional"
+        },
+        {
+            "candidateId": "dry-riff-room",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.014192365415305217
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 4.3120235204696655e-06,
+                    "normalizedRmsError": 1.4757073572474718e-05,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.011044972115639144
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.00046335536866946934
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.0006802757401158566
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.011542213363734653
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.012520567257181928
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.011263294729031184
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.0023222784080110396
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.001852357646337799
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.0024965015814058704
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.0007545446242447035
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.0013800186149811053
+                }
+            ],
+            "profileId": "rock_riff_modal"
+        },
+        {
+            "candidateId": "crunch-room",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.015487813947132414
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.010893444159304273
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.0005710681466089616
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.0009244549149106095
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.011917412946654351
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.013596809230078735
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.013278029885471209
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.002011806944646997
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0015289897538302082
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.0027126140537033433
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.0007600672466918834
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.0010716275382442666
+                }
+            ],
+            "profileId": "rock_shuffle_blues"
+        },
+        {
+            "candidateId": "raw-concrete-room",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.014373307189132737
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.010875042707698526
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.00042193095268094655
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.0006501592966018759
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.00997502781487204
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.012281691246624715
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.012265629838793552
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.003118477437691705
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0014693681542900653
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.0026110775559202585
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.00041966399654133884
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.0007093887977635261
+                }
+            ],
+            "profileId": "rock_punk_garage"
+        },
+        {
+            "candidateId": "simmons-colour",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.00819933162553352
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 7.902272045612335e-07,
+                    "normalizedRmsError": 1.6976748847949448e-05,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.002247188895004975
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.00042889419703537584
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.00022817806046522603
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.006044396998635245
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.007991963990607507
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.00818223894642919
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.0018191344962240152
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0005352486829919266
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.00155708541326888
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.00040598525060731765
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.005573800261983587
+                }
+            ],
+            "profileId": "jazz_swing_standards"
+        },
+        {
+            "candidateId": "simmons-colour",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.007261467263548389
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 1.4156103134155273e-06,
+                    "normalizedRmsError": 1.9785472737427394e-05,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.0026844694487607157
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.00037098782684013437
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.00021519905066490617
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.006040004692892789
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.006521414767033554
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.006368078049879428
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.0015626010890606261
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0010138397734900492
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.0014034939376412754
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.0002713202367691871
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.005916530920886066
+                }
+            ],
+            "profileId": "jazz_bebop"
+        },
+        {
+            "candidateId": "simmons-colour",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.005942775220111821
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 1.446693204343319e-06,
+                    "normalizedRmsError": 2.7525031170174553e-05,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.002562694284601578
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.0005138329963131539
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.0003857667321937974
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.00546691795633185
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.005707660430590376
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.006171338684273383
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.0014948521955185665
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0012012413681416736
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.0011168036704387353
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.0004233686959927673
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.004369149257896757
+                }
+            ],
+            "profileId": "jazz_fusion"
+        },
+        {
+            "candidateId": "resonant-hand-kit",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.015774563917223178
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 1.732492819428444e-06,
+                    "normalizedRmsError": 1.6445447084689483e-05,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.0053804006868577925
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.0005090921911158901
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.0006702421725913509
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.012984165832438959
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.011348778602100052
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.015423871252080562
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.001373756029176205
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0008514009209119956
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.0024694413971665537
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.000517010860101917
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.007232298311121135
+                }
+            ],
+            "profileId": "modal_groove"
+        },
+        {
+            "candidateId": "air-and-skin-objects",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.01799247125105358
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 1.2349337339401245e-06,
+                    "normalizedRmsError": 9.278128214875328e-06,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.006821394493323254
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.0003282111698489692
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.0013259282404386179
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.011736675499816418
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.01608529728483668
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.017428335153434473
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.0010901593667401325
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0013852291721119497
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.003591665643974462
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.0006393591558254455
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.010472470574973757
+                }
+            ],
+            "profileId": "modal_atmospheric"
+        },
+        {
+            "candidateId": "vintage-rhythm-box",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.005934242277429566
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 2.0791776478290558e-06,
+                    "normalizedRmsError": 1.8806564139706103e-05,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.004746249478467733
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.0005241954551204751
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.00020610602964087394
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.004289971387090089
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.0055943818022839405
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.008758246195272087
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.0008631927174708364
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.00073134326952484
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.0027284900993132695
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.00020824574935496184
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.0009608650652030143
+                }
+            ],
+            "profileId": "blues_dominant"
+        },
+        {
+            "candidateId": "smoky-brush-kit",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.004009800726152519
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.0031235184226044415
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.000296676529704437
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.0003051688258086169
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.002680845645049642
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.006465074453743525
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.0036107075163862305
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.0006775592143097211
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0004864282720581028
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.0022942271720340127
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.00020932786940900625
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.0018177190985786686
+                }
+            ],
+            "profileId": "blues_minor"
+        },
+        {
+            "candidateId": "bright-live-anime-kit",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.019534704398789078
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 2.5669578462839127e-06,
+                    "normalizedRmsError": 1.557415176126051e-05,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.007318177519890651
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.0006613903603756555
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.0007961213135011381
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.011413035102192078
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.013603989135632983
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.014695971586386726
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.0015985715725336887
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.000979643375028539
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.0022551148879806763
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.000524656837649765
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.0012409328023394338
+                }
+            ],
+            "profileId": "jpop_anisong_rock"
+        },
+        {
+            "candidateId": "glossy-pcm-circuit",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.011722719360493327
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.0053061977513329
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.0008325212204607535
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.00026114649278283344
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.00756377562324796
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.008747656370435565
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.008722789189255275
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.0013783219515684706
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0009340542224164322
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.0025919209837489466
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.0007882326650428958
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.0012788653509242388
+                }
+            ],
+            "profileId": "jpop_idol_dance"
+        },
+        {
+            "candidateId": "dry-train-kit",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.00162871640122144
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 1.596752554178238e-06,
+                    "normalizedRmsError": 1.673432930962493e-05,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.0038140745784974307
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.00040572493485236375
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.00020723422761533951
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.004999313784017877
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.008657347606243837
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.01163499653002344
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.001850546833472033
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0008190675741750921
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.002211133526452206
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.0005107051731166515
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.0015588481037392265
+                }
+            ],
+            "profileId": "country_honky_tonk"
+        },
+        {
+            "candidateId": "arena-country-hybrid",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.012094975683981619
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.005612083223587394
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.0008258039242535038
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.0005050799039875302
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.010781663467816012
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.009297877210660856
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.010754813618196708
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.0033051856408840724
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.001544603607441913
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.0027813799654576666
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.0008993217796398164
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.0008194400464415305
+                }
+            ],
+            "profileId": "country_contemporary"
+        },
+        {
+            "candidateId": "warm-909-descendant",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.015741346364072668
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.008090490259829124
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.0004800065424226003
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.0003740059630557912
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.01349920877031903
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.013628884626521665
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.016684354711957724
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.0036466912076316966
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0014892824913774576
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.0038240518837733247
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.0009307265748306981
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.003756502467439098
+                }
+            ],
+            "profileId": "electronic_house"
+        },
+        {
+            "candidateId": "hypnotic-low-pulse",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.012761415943987114
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 4.6568457037210464e-06,
+                    "normalizedRmsError": 2.5605085027947014e-05,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.007808532335366404
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.0007446560308608354
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.0003034580966479731
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.012298545562626524
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.011038243934319542
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.01721877757964499
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.002951661373218681
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0015261310412857877
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.0031828488700474554
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.00041102247582280584
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.002677884874501129
+                }
+            ],
+            "profileId": "electronic_techno"
+        },
+        {
+            "candidateId": "chopped-12-bit-break",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.012682798696657598
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.0050108247280376194
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.0005226696497336344
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.0003613445613168758
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.012476994525778197
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.008910540831196773
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.01440244647344128
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.002585026788577394
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.001592580854951686
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.002818921661845944
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.0004065122796324763
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.00576234713703399
+                }
+            ],
+            "profileId": "electronic_breakbeat"
+        },
+        {
+            "candidateId": "damped-studio-pocket",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.012660610989985907
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.005852689640371794
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.0003544135756512969
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.00023248011480180575
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.006934107393443182
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.0071837396846848416
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.007912237719862571
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.0009956241897211711
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0007836388806371639
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.002458996302923711
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.0003666153263907673
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.005459613517686287
+                }
+            ],
+            "profileId": "soul_classic_motown"
+        },
+        {
+            "candidateId": "damped-studio-pocket",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.011426432408624062
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 4.690396599471569e-05,
+                    "normalizedRmsError": 0.00012950781344427497,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.0038583653406029468
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.0003713831726550184
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.00025562800486687837
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.006461946263461953
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.009248854233330508
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.00935472758450849
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.0011550533271573902
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0012186330075435016
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.0022169973980314273
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.0002820206889039742
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.005510587171148285
+                }
+            ],
+            "profileId": "rnb_contemporary_neosoul"
+        },
+        {
+            "candidateId": "dry-ghost-pocket",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.012484999676356827
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 2.825632691383362e-06,
+                    "normalizedRmsError": 2.2331986614420946e-05,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.004629329784443413
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.0004323039759437383
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.0002874096530758072
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.006225542796461232
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.00553898076270457
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.006193588501034592
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.0009579728656110233
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0009835908213437984
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.002249587802274572
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.00032984912129206597
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.0037499473757507187
+                }
+            ],
+            "profileId": "funk_static_pocket"
+        },
+        {
+            "candidateId": "filtered-12-bit-pocket",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.008642997314084995
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.004486600239558758
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.0007021904360084316
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.00030008521768988344
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.007895665960358945
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.0076218605195452985
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.00987796363648564
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.0029655623631646387
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0011085960619604846
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.0023355179798983374
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.0006356655244481949
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.005297848433367539
+                }
+            ],
+            "profileId": "hiphop_boom_bap"
+        },
+        {
+            "candidateId": "punchy-drill-sub",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.020899584603778897
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.007520405212025706
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.0006545725125322027
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.0007032992391908283
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.00913846214839145
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.015148562102648712
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.01643788278845796
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.0032493057144649513
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0025677028478986274
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.003398398765300994
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.0008545395346929007
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.0008987934507925609
+                }
+            ],
+            "profileId": "hiphop_trap"
+        },
+        {
+            "candidateId": "jam2-roots-warm-crash",
+            "pieces": [
+                {
+                    "comparable": false,
+                    "piece": "kick",
+                    "reason": "Jam2-native lane"
+                },
+                {
+                    "comparable": false,
+                    "piece": "snare",
+                    "reason": "Jam2-native lane"
+                },
+                {
+                    "comparable": false,
+                    "piece": "closed-hat",
+                    "reason": "Jam2-native lane"
+                },
+                {
+                    "comparable": false,
+                    "piece": "open-hat",
+                    "reason": "Jam2-native lane"
+                },
+                {
+                    "comparable": false,
+                    "piece": "high-tom",
+                    "reason": "Jam2-native lane"
+                },
+                {
+                    "comparable": false,
+                    "piece": "mid-tom",
+                    "reason": "Jam2-native lane"
+                },
+                {
+                    "comparable": false,
+                    "piece": "floor-tom",
+                    "reason": "Jam2-native lane"
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.0012722674767567984
+                },
+                {
+                    "comparable": false,
+                    "piece": "ride",
+                    "reason": "Jam2-native lane"
+                },
+                {
+                    "comparable": false,
+                    "piece": "cross-stick",
+                    "reason": "Jam2-native lane"
+                },
+                {
+                    "comparable": false,
+                    "piece": "shaker",
+                    "reason": "Jam2-native lane"
+                },
+                {
+                    "comparable": false,
+                    "piece": "hand-percussion",
+                    "reason": "Jam2-native lane"
+                }
+            ],
+            "profileId": "reggae_roots"
+        },
+        {
+            "candidateId": "soft-cr-latin",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.0037560407424972173
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 9.502982720732689e-07,
+                    "normalizedRmsError": 1.9478023006129247e-05,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.0019585984298401593
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.00044040511853959513
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.00011766146087743172
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.0037604695660864544
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.004423219191929029
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.0032365452659518746
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.000931905435754388
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0006221561999267689
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.00150131715332215
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.00016440916795186776
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.0005863467424386409
+                }
+            ],
+            "profileId": "bossa_songbook"
+        },
+        {
+            "candidateId": "organic-heavy-room",
+            "pieces": [
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "kick",
+                    "referenceRms": 0.018685212946284082
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "snare",
+                    "referenceRms": 0.015656789452915085
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "closed-hat",
+                    "referenceRms": 0.0006624664778749699
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "open-hat",
+                    "referenceRms": 0.0009351142551125971
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "high-tom",
+                    "referenceRms": 0.01266994825629891
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "mid-tom",
+                    "referenceRms": 0.01953688492455586
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "floor-tom",
+                    "referenceRms": 0.019993780156566627
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "crash",
+                    "referenceRms": 0.0033863270093780354
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "ride",
+                    "referenceRms": 0.0026367556450365807
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "cross-stick",
+                    "referenceRms": 0.0034544924436807445
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "shaker",
+                    "referenceRms": 0.0009745827903042378
+                },
+                {
+                    "comparable": true,
+                    "maximumAbsoluteError": 0,
+                    "normalizedRmsError": 0,
+                    "passed": true,
+                    "piece": "hand-percussion",
+                    "referenceRms": 0.0011019632691207564
+                }
+            ],
+            "profileId": "metal_modern_progressive"
+        }
+    ],
+    "schema": "jam2-drum-production-parity-v1"
+}

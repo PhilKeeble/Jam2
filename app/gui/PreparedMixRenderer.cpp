@@ -22,6 +22,8 @@
 #include <vector>
 
 namespace {
+constexpr double kPreparedMixMasterPreGain = 0.72;
+
 void put16(QByteArray& b, quint16 v) { b.append(char(v)); b.append(char(v >> 8)); }
 void put32(QByteArray& b, quint32 v) { b.append(char(v)); b.append(char(v >> 8)); b.append(char(v >> 16)); b.append(char(v >> 24)); }
 QString absoluteAsset(const QString& folder, const QString& path) { return QFileInfo(path).isAbsolute() ? path : QDir(folder).absoluteFilePath(path); }
@@ -300,11 +302,25 @@ PreparedMixResult PreparedMixRenderer::render(const LooperProject& project, cons
     std::vector<float> processed(static_cast<std::size_t>(length), 0.0f);
     for (qint64 i = 0; i < length; ++i) {
         processed[static_cast<std::size_t>(i)] =
-            static_cast<float>(qBound<qint32>(-32768, mix[static_cast<std::size_t>(i)], 32767) / 32768.0);
+            static_cast<float>(
+                mix[static_cast<std::size_t>(i)] / 32768.0);
     }
     processed = processTrack(std::move(processed), sampleRate, track, result.error);
     if (!result.error.isEmpty()) {
         return result;
+    }
+    result.masterPreGain = kPreparedMixMasterPreGain;
+    for (float& sample : processed) {
+        result.preMasterPeak =
+            qMax(result.preMasterPeak, std::abs(sample));
+        const double driven =
+            kPreparedMixMasterPreGain * sample;
+        if (std::abs(driven) > 1.0) {
+            ++result.overUnitySamples;
+        }
+        sample = static_cast<float>(std::tanh(driven));
+        result.outputPeak =
+            qMax(result.outputPeak, std::abs(sample));
     }
     length = static_cast<qint64>(processed.size());
     const std::uint64_t dataBytes = static_cast<std::uint64_t>(length) * 2ULL;

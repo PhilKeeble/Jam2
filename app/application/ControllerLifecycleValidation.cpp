@@ -521,6 +521,8 @@ QJsonObject jam2RunControllerLifecycleValidation(
             {QStringLiteral("mode"), QStringLiteral("shared-grid")},
             {QStringLiteral("beats"), 4},
             {QStringLiteral("division"), 4},
+            {QStringLiteral("beat_unit"), 4},
+            {QStringLiteral("tempo_pulse_units"), 1},
             {QStringLiteral("play_mask_low"), QStringLiteral("ffff")},
             {QStringLiteral("play_mask_high"), QStringLiteral("0")},
             {QStringLiteral("accent_mask_low"), QStringLiteral("1111")},

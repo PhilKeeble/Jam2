@@ -1,0 +1,15 @@
+{
+  "schema": "jam2-debug-scenario",
+  "run_id": "music-generation-modal-jam-corpus",
+  "operation": "validate.music-full-form-corpus",
+  "profile": "fast",
+  "artifacts": {
+    "root": "../../artifacts/music-research/modal-jam-iteration-1"
+  },
+  "corpus": {
+    "render_audio": false,
+    "matched_complexity_seeds": true,
+    "samples_per_cell": 12,
+    "style_id": "modal-jam"
+  }
+}

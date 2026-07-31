@@ -203,14 +203,25 @@ std::int32_t render_metronome_test_input(
         control.metronome_play_mask_high.load(std::memory_order_relaxed),
         control.metronome_accent_mask_low.load(std::memory_order_relaxed),
         control.metronome_accent_mask_high.load(std::memory_order_relaxed),
+        control.metronome_beat_unit.load(std::memory_order_relaxed),
+        control.metronome_tempo_pulse_units.load(std::memory_order_relaxed),
     });
     const std::uint64_t interval = metronome::step_interval_samples(
         sample_rate,
         pattern.bpm,
-        pattern.division);
+        pattern.division,
+        pattern.tempo_pulse_units);
     return metronome::mix_i32(
         0,
-        metronome::render_sample(pattern, frame - epoch, interval, sample_rate, level));
+        metronome::render_sample(
+            pattern,
+            frame - epoch,
+            interval,
+            sample_rate,
+            level,
+            metronome::ClickVoice::Normal,
+            metronome::sanitize_click_sound(
+                control.metronome_sound.load(std::memory_order_relaxed))));
 }
 
 void mix_metronome_output(
@@ -248,13 +259,18 @@ void mix_metronome_output(
         control.metronome_play_mask_high.load(std::memory_order_relaxed),
         control.metronome_accent_mask_low.load(std::memory_order_relaxed),
         control.metronome_accent_mask_high.load(std::memory_order_relaxed),
+        control.metronome_beat_unit.load(std::memory_order_relaxed),
+        control.metronome_tempo_pulse_units.load(std::memory_order_relaxed),
     });
     const std::uint64_t interval = metronome::step_interval_samples(
         sample_rate,
         pattern.bpm,
-        pattern.division);
+        pattern.division,
+        pattern.tempo_pulse_units);
     const bool count_in_active =
         control.recording_count_in_active.load(std::memory_order_acquire);
+    const auto click_sound = metronome::sanitize_click_sound(
+        control.metronome_sound.load(std::memory_order_relaxed));
     const std::uint64_t count_in_start =
         control.recording_count_in_start_frame.load(std::memory_order_relaxed);
     const std::uint64_t count_in_target =
@@ -284,7 +300,8 @@ void mix_metronome_output(
                     raw_frame >= count_in_start &&
                     raw_frame < count_in_target
                 ? metronome::ClickVoice::CountIn
-                : metronome::ClickVoice::Normal);
+                : metronome::ClickVoice::Normal,
+            click_sound);
         if (stem.size() == output.size()) {
             stem[index] = metronome::mix_i32(0, rendered);
         }
@@ -827,6 +844,9 @@ struct Engine::Impl {
             control->metronome_bpm.store(pattern.bpm, std::memory_order_relaxed);
             control->metronome_beats_per_bar.store(pattern.beats_per_bar, std::memory_order_relaxed);
             control->metronome_division.store(pattern.division, std::memory_order_relaxed);
+            control->metronome_beat_unit.store(pattern.beat_unit, std::memory_order_relaxed);
+            control->metronome_tempo_pulse_units.store(
+                pattern.tempo_pulse_units, std::memory_order_relaxed);
             control->metronome_step_count.store(pattern.step_count, std::memory_order_relaxed);
             control->metronome_play_mask_low.store(pattern.play_mask_low, std::memory_order_relaxed);
             control->metronome_play_mask_high.store(pattern.play_mask_high, std::memory_order_relaxed);
@@ -836,6 +856,11 @@ struct Engine::Impl {
         }
         case EngineCommandType::SetMetronomeLevel:
             control->metronome_level_ppm.store(clamp_gain(command.value), std::memory_order_relaxed);
+            return true;
+        case EngineCommandType::SetMetronomeSound:
+            control->metronome_sound.store(
+                static_cast<int>(metronome::sanitize_click_sound(command.value)),
+                std::memory_order_relaxed);
             return true;
         case EngineCommandType::SetRemoteLevel:
             control->remote_level_ppm.store(clamp_gain(command.value), std::memory_order_relaxed);
@@ -1243,6 +1268,8 @@ void Engine::start(const EngineConfig& requested)
     impl_->lifecycle.store(EngineLifecycle::Starting, std::memory_order_release);
     impl_->config = requested;
     impl_->config.metronome_pattern = metronome::sanitize(requested.metronome_pattern);
+    impl_->config.metronome_sound = metronome::sanitize_click_sound(
+        static_cast<int>(requested.metronome_sound));
     if (impl_->config.prepared_track_max_frames == 0) {
         impl_->config.prepared_track_max_frames = maximum_prepared_track_frames;
     }
@@ -1271,12 +1298,18 @@ void Engine::start(const EngineConfig& requested)
         control.metronome_bpm.store(pattern.bpm, std::memory_order_relaxed);
         control.metronome_beats_per_bar.store(pattern.beats_per_bar, std::memory_order_relaxed);
         control.metronome_division.store(pattern.division, std::memory_order_relaxed);
+        control.metronome_beat_unit.store(pattern.beat_unit, std::memory_order_relaxed);
+        control.metronome_tempo_pulse_units.store(
+            pattern.tempo_pulse_units, std::memory_order_relaxed);
         control.metronome_step_count.store(pattern.step_count, std::memory_order_relaxed);
         control.metronome_play_mask_low.store(pattern.play_mask_low, std::memory_order_relaxed);
         control.metronome_play_mask_high.store(pattern.play_mask_high, std::memory_order_relaxed);
         control.metronome_accent_mask_low.store(pattern.accent_mask_low, std::memory_order_relaxed);
         control.metronome_accent_mask_high.store(pattern.accent_mask_high, std::memory_order_relaxed);
         control.metronome_level_ppm.store(clamp_gain(impl_->config.metronome_level_ppm), std::memory_order_relaxed);
+        control.metronome_sound.store(
+            static_cast<int>(impl_->config.metronome_sound),
+            std::memory_order_relaxed);
         control.remote_level_ppm.store(clamp_gain(impl_->config.remote_level_ppm), std::memory_order_relaxed);
         control.send_level_ppm.store(clamp_gain(impl_->config.send_level_ppm), std::memory_order_relaxed);
         control.output_level_ppm.store(clamp_gain(impl_->config.output_level_ppm), std::memory_order_relaxed);
@@ -1470,8 +1503,12 @@ EngineSnapshot Engine::snapshot() const noexcept
         control.metronome_play_mask_high.load(std::memory_order_relaxed),
         control.metronome_accent_mask_low.load(std::memory_order_relaxed),
         control.metronome_accent_mask_high.load(std::memory_order_relaxed),
+        control.metronome_beat_unit.load(std::memory_order_relaxed),
+        control.metronome_tempo_pulse_units.load(std::memory_order_relaxed),
     });
     result.metronome_level_ppm = control.metronome_level_ppm.load(std::memory_order_relaxed);
+    result.metronome_sound = metronome::sanitize_click_sound(
+        control.metronome_sound.load(std::memory_order_relaxed));
     result.remote_level_ppm = control.remote_level_ppm.load(std::memory_order_relaxed);
     result.send_level_ppm = control.send_level_ppm.load(std::memory_order_relaxed);
     result.output_level_ppm = control.output_level_ppm.load(std::memory_order_relaxed);

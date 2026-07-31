@@ -80,6 +80,7 @@ struct EngineConfig {
     bool metronome_enabled = false;
     metronome::PatternSnapshot metronome_pattern{};
     int metronome_level_ppm = 1000000;
+    metronome::ClickSound metronome_sound = metronome::ClickSound::Classic;
     int remote_level_ppm = 1000000;
     int send_level_ppm = 1000000;
     int output_level_ppm = 1000000;
@@ -97,6 +98,7 @@ enum class EngineCommandType : std::uint8_t {
     SetMetronomeEnabled,
     SetMetronomePattern,
     SetMetronomeLevel,
+    SetMetronomeSound,
     SetRemoteLevel,
     SetSendLevel,
     SetOutputLevel,
@@ -265,6 +267,7 @@ struct EngineSnapshot {
     EngineMetronomeMode metronome_mode = EngineMetronomeMode::SharedGrid;
     bool leader_audio_local_click = false;
     int metronome_level_ppm = 0;
+    metronome::ClickSound metronome_sound = metronome::ClickSound::Classic;
     int remote_level_ppm = 0;
     int send_level_ppm = 0;
     int output_level_ppm = 0;

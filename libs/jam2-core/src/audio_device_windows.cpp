@@ -388,11 +388,17 @@ void mix_metronome_click(DuplexContext& context, std::span<std::int32_t> output,
         context.control->metronome_play_mask_high.load(std::memory_order_relaxed),
         context.control->metronome_accent_mask_low.load(std::memory_order_relaxed),
         context.control->metronome_accent_mask_high.load(std::memory_order_relaxed),
+        context.control->metronome_beat_unit.load(std::memory_order_relaxed),
+        context.control->metronome_tempo_pulse_units.load(std::memory_order_relaxed),
     });
     const std::uint64_t step_interval =
-        jam2::metronome::step_interval_samples(context.sample_rate, pattern.bpm, pattern.division);
+        jam2::metronome::step_interval_samples(
+            context.sample_rate, pattern.bpm, pattern.division,
+            pattern.tempo_pulse_units);
     const bool count_in_active =
         context.control->recording_count_in_active.load(std::memory_order_acquire);
+    const auto click_sound = jam2::metronome::sanitize_click_sound(
+        context.control->metronome_sound.load(std::memory_order_relaxed));
     const std::uint64_t count_in_start =
         context.control->recording_count_in_start_frame.load(std::memory_order_relaxed);
     const std::uint64_t count_in_target =
@@ -422,7 +428,8 @@ void mix_metronome_click(DuplexContext& context, std::span<std::int32_t> output,
                         raw_sample_counter >= count_in_start &&
                         raw_sample_counter < count_in_target
                     ? jam2::metronome::ClickVoice::CountIn
-                    : jam2::metronome::ClickVoice::Normal);
+                    : jam2::metronome::ClickVoice::Normal,
+                click_sound);
             if (metronome_stem.size() == output.size()) {
                 metronome_stem[i] = jam2::metronome::mix_i32(0, rendered);
             }
@@ -650,15 +657,22 @@ std::int32_t render_metronome_test_input_sample(
         control.metronome_play_mask_high.load(std::memory_order_relaxed),
         control.metronome_accent_mask_low.load(std::memory_order_relaxed),
         control.metronome_accent_mask_high.load(std::memory_order_relaxed),
+        control.metronome_beat_unit.load(std::memory_order_relaxed),
+        control.metronome_tempo_pulse_units.load(std::memory_order_relaxed),
     });
     const std::uint64_t step_interval =
-        jam2::metronome::step_interval_samples(sample_rate, pattern.bpm, pattern.division);
+        jam2::metronome::step_interval_samples(
+            sample_rate, pattern.bpm, pattern.division,
+            pattern.tempo_pulse_units);
     const double rendered = jam2::metronome::render_sample(
         pattern,
         sample_time - epoch,
         step_interval,
         sample_rate,
-        level);
+        level,
+        jam2::metronome::ClickVoice::Normal,
+        jam2::metronome::sanitize_click_sound(
+            control.metronome_sound.load(std::memory_order_relaxed)));
     return jam2::metronome::mix_i32(0, rendered);
 }
 

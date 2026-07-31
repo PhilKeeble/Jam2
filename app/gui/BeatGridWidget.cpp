@@ -35,6 +35,7 @@ constexpr int kBeatActiveStepRole = Qt::UserRole + 4;
 constexpr int kSectionHeaderRole = Qt::UserRole + 5;
 constexpr int kSectionSelectedRole = Qt::UserRole + 6;
 constexpr int kMusicalStepsRole = Qt::UserRole + 7;
+constexpr int kSectionBankRole = Qt::UserRole + 8;
 
 enum class BeatCellKind {
     None = 0,
@@ -93,6 +94,25 @@ private:
 QString sectionTitle(const SongSection& section)
 {
     return section.name.trimmed().isEmpty() ? QStringLiteral("Section") : section.name.trimmed();
+}
+
+QString sectionBankLabel(int sectionIndex)
+{
+    if (sectionIndex >= 0 && sectionIndex < 4) {
+        return QStringLiteral("BANK %1")
+            .arg(QChar(static_cast<ushort>('A' + sectionIndex)));
+    }
+    return QStringLiteral("NO BANK");
+}
+
+QString sectionBankToolTip(int sectionIndex)
+{
+    if (sectionIndex >= 0 && sectionIndex < 4) {
+        return QStringLiteral("Generate WAV maps this section to looper Bank %1.")
+            .arg(QChar(static_cast<ushort>('A' + sectionIndex)));
+    }
+    return QStringLiteral(
+        "Only the first four sections currently map to looper Banks A-D.");
 }
 
 QString normalizedHitText(const QString& text, int division)
@@ -175,12 +195,34 @@ public:
             return;
         }
         QStyledItemDelegate::paint(painter, neutralOption, index);
-        if (index.data(kSectionHeaderRole).toBool() &&
-            index.data(kSectionSelectedRole).toBool()) {
+        if (!index.data(kSectionHeaderRole).toBool()) {
+            return;
+        }
+        if (index.data(kSectionSelectedRole).toBool()) {
             painter->save();
             painter->setPen(Qt::NoPen);
             painter->setBrush(theme::playhead);
             painter->drawEllipse(QPoint(option.rect.left() + 9, option.rect.top() + 9), 4, 4);
+            painter->restore();
+        }
+        const QString bank = index.data(kSectionBankRole).toString();
+        if (!bank.isEmpty()) {
+            painter->save();
+            QFont badgeFont = painter->font();
+            badgeFont.setBold(true);
+            badgeFont.setPointSizeF(qMax(8.0, badgeFont.pointSizeF() - 1.0));
+            painter->setFont(badgeFont);
+            const int badgeWidth = painter->fontMetrics().horizontalAdvance(bank) + 16;
+            const QRect badge(
+                option.rect.right() - badgeWidth - 8,
+                option.rect.top() + 8,
+                badgeWidth,
+                22);
+            const bool mapped = bank != QStringLiteral("NO BANK");
+            painter->setPen(mapped ? theme::nebulaBlue : theme::textMuted);
+            painter->setBrush(mapped ? theme::selection : theme::panelRaised);
+            painter->drawRoundedRect(badge, 6, 6);
+            painter->drawText(badge, Qt::AlignCenter, bank);
             painter->restore();
         }
     }
@@ -299,11 +341,17 @@ BeatGridWidget::BeatGridWidget(BeatGridModel* model, const QString& lane, QWidge
     table_->setSelectionMode(QAbstractItemView::NoSelection);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+    // Do not inherit the native table-grid color. In particular, the macOS
+    // style can choose a grid color that nearly disappears against Jam2's
+    // dark editor background.
+    table_->setShowGrid(true);
+    table_->setGridStyle(Qt::SolidLine);
     beatHeader_ = new GridHeaderView(Qt::Horizontal, table_);
     table_->setHorizontalHeader(beatHeader_);
     beatHeader_->setSectionResizeMode(QHeaderView::Stretch);
     table_->verticalHeader()->setVisible(true);
     table_->setStyleSheet(QStringLiteral(
+        "QTableWidget { gridline-color: #708287; }"
         "QTableWidget::item { padding: 3px 6px; }"
         "QTableWidget QLineEdit { padding: 1px 4px; min-height: 24px; }"));
     table_->setItemDelegate(new BeatGridDelegate(table_));
@@ -502,14 +550,16 @@ void BeatGridWidget::focusGeneratedSection(const QString& kind)
         const QString generatedKind = model_->section(index).generatedKind;
         if (generatedKind == kind ||
             (generatedKind == QStringLiteral("practice") &&
-             (kind == QStringLiteral("chord") || kind == QStringLiteral("beat")))) {
+             (kind == QStringLiteral("chord") ||
+              kind == QStringLiteral("beat") ||
+              kind == QStringLiteral("lyric")))) {
             selectedSection_ = index;
             refresh();
             const int row = mode() == Mode::Chord
-                ? index * 4
+                ? index * 6
                 : mode() == Mode::Beat
                     ? index * (BeatGridModel::beatLaneNames().size() + 2)
-                    : 0;
+                    : mode() == Mode::Lyrics ? index : 0;
             if (QTableWidgetItem* item = table_->item(row, 0)) {
                 table_->scrollToItem(item, QAbstractItemView::PositionAtTop);
             }
@@ -563,7 +613,7 @@ bool BeatGridWidget::eventFilter(QObject* watched, QEvent* event)
             selectSection(section);
             return true;
         }
-        if (rowLane != 1 && rowLane != 3) return true;
+        if (rowLane != 1 && rowLane != 3 && rowLane != 4 && rowLane != 5) return true;
 
         const MusicalBeatPattern& pattern = model_->section(section).musicalPatterns[beat];
         const QRect cell = table_->visualRect(index);
@@ -571,7 +621,9 @@ bool BeatGridWidget::eventFilter(QObject* watched, QEvent* event)
             0,
             (mouse->pos().x() - cell.left()) * pattern.division / qMax(1, cell.width()),
             pattern.division - 1);
-        const QVector<MusicalStep>& steps = rowLane == 1 ? pattern.chords : pattern.melody;
+        const QVector<MusicalStep>& steps = rowLane == 1 ? pattern.chords
+            : rowLane == 3 ? pattern.melody
+            : rowLane == 4 ? pattern.bass : pattern.support;
         QString updated;
         bool accepted = false;
 
@@ -583,11 +635,12 @@ bool BeatGridWidget::eventFilter(QObject* watched, QEvent* event)
             rest->setData(QStringLiteral("-"));
             menu.addSeparator();
             const QStringList roots{
-                QStringLiteral("C"), QStringLiteral("C#"), QStringLiteral("Db"),
-                QStringLiteral("D"), QStringLiteral("Eb"), QStringLiteral("E"),
-                QStringLiteral("F"), QStringLiteral("F#"), QStringLiteral("Gb"),
-                QStringLiteral("G"), QStringLiteral("Ab"), QStringLiteral("A"),
-                QStringLiteral("Bb"), QStringLiteral("B")};
+                QStringLiteral("A"), QStringLiteral("A#"),
+                QStringLiteral("B"), QStringLiteral("C"),
+                QStringLiteral("C#"), QStringLiteral("D"),
+                QStringLiteral("D#"), QStringLiteral("E"),
+                QStringLiteral("F"), QStringLiteral("F#"),
+                QStringLiteral("G"), QStringLiteral("G#")};
             const QStringList suffixes{
                 QString(), QStringLiteral("m"), QStringLiteral("5"),
                 QStringLiteral("sus2"), QStringLiteral("sus4"), QStringLiteral("dim"),
@@ -613,14 +666,19 @@ bool BeatGridWidget::eventFilter(QObject* watched, QEvent* event)
         } else {
             updated = QInputDialog::getText(
                 this,
-                rowLane == 1 ? QStringLiteral("Edit chord step") : QStringLiteral("Edit melody step"),
+                rowLane == 1 ? QStringLiteral("Edit chord step")
+                    : rowLane == 3 ? QStringLiteral("Edit melody step")
+                    : rowLane == 4 ? QStringLiteral("Edit bass step")
+                    : QStringLiteral("Edit supporting-line step"),
                 QStringLiteral("Value (~ holds, - rests):"),
                 QLineEdit::Normal,
                 musicalStepText(steps[step]),
                 &accepted).trimmed();
         }
         if (!accepted) return true;
-        const QString lane = rowLane == 1 ? QStringLiteral("chord") : QStringLiteral("melody");
+        const QString lane = rowLane == 1 ? QStringLiteral("chord")
+            : rowLane == 3 ? QStringLiteral("melody")
+            : rowLane == 4 ? QStringLiteral("bass") : QStringLiteral("support");
         model_->setMusicalStep(section, beat, step, lane, updated);
         if (onMusicalStepEdited) {
             onMusicalStepEdited(section, beat, step, lane, updated, model_->revision());
@@ -942,7 +1000,7 @@ void BeatGridWidget::rebuildChordTable()
     table_->clear();
     table_->clearSpans();
     table_->verticalHeader()->setVisible(true);
-    const int rowsPerSection = 4;
+    const int rowsPerSection = 6;
     const int rowCount = model_->sections().size() * rowsPerSection;
     table_->setRowCount(rowCount);
     rowToSection_.fill(-1, rowCount);
@@ -975,6 +1033,8 @@ void BeatGridWidget::rebuildChordTable()
         QVector<QStringList> chordSteps(section.beats);
         QVector<QStringList> derivedNotes(section.beats);
         QVector<QStringList> melodySteps(section.beats);
+        QVector<QStringList> bassSteps(section.beats);
+        QVector<QStringList> supportSteps(section.beats);
         QString activeChord;
         for (int beat = 0; beat < section.beats; ++beat) {
             const MusicalBeatPattern& pattern = section.musicalPatterns[beat];
@@ -987,10 +1047,13 @@ void BeatGridWidget::rebuildChordTable()
                     activeChord.isEmpty() ? QStringLiteral("-")
                                           : jam2::practice::chordToneNames(activeChord));
                 melodySteps[beat].push_back(musicalStepText(pattern.melody[step]));
+                bassSteps[beat].push_back(musicalStepText(pattern.bass[step]));
+                supportSteps[beat].push_back(musicalStepText(pattern.support[step]));
             }
         }
         rowLabels << QStringLiteral("Subdivision") << QStringLiteral("Chords")
-                  << QStringLiteral("Chord Tones") << QStringLiteral("Melody");
+                  << QStringLiteral("Chord Tones") << QStringLiteral("Melody")
+                  << QStringLiteral("Bass") << QStringLiteral("Supporting Line");
         for (int lane = 0; lane < rowsPerSection; ++lane) {
             const int row = firstRow + lane;
             rowToSection_[row] = sectionIndex;
@@ -1004,6 +1067,10 @@ void BeatGridWidget::rebuildChordTable()
                 header->setForeground(QBrush(theme::textStrong));
                 header->setData(kSectionHeaderRole, true);
                 header->setData(kSectionSelectedRole, selectedSection_ == sectionIndex);
+                header->setData(kSectionBankRole, sectionBankLabel(sectionIndex));
+                header->setToolTip(sectionBankToolTip(sectionIndex));
+                header->setSizeHint(QSize(160, 42));
+                header->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
                 table_->setItem(row, 0, header);
                 table_->setSpan(row, 0, rowsPerSection, 1);
             }
@@ -1015,11 +1082,14 @@ void BeatGridWidget::rebuildChordTable()
                     item->setData(kBeatCellKindRole, static_cast<int>(BeatCellKind::Division));
                     item->setData(kBeatDivisionRole, division);
                     item->setToolTip(QStringLiteral(
-                        "Chord and melody share this division. Drum division remains independent."));
+                        "Chords, melody, bass, and supporting line share this division. "
+                        "Drum division remains independent."));
                 } else if (beat < section.beats) {
                     const int division = section.musicalPatterns[beat].division;
                     const QStringList values = lane == 1 ? chordSteps[beat]
-                        : lane == 2 ? derivedNotes[beat] : melodySteps[beat];
+                        : lane == 2 ? derivedNotes[beat]
+                        : lane == 3 ? melodySteps[beat]
+                        : lane == 4 ? bassSteps[beat] : supportSteps[beat];
                     item->setData(kBeatCellKindRole, static_cast<int>(BeatCellKind::MusicalSteps));
                     item->setData(kBeatDivisionRole, division);
                     item->setData(kMusicalStepsRole, values);
@@ -1040,6 +1110,17 @@ void BeatGridWidget::rebuildChordTable()
                     melodyFont.setPointSizeF(11.0);
                     item->setFont(melodyFont);
                     item->setForeground(QBrush(QColor(193, 167, 232)));
+                } else if (lane == 4) {
+                    QFont bassFont(QStringLiteral("Georgia"));
+                    bassFont.setPointSizeF(11.0);
+                    bassFont.setBold(true);
+                    item->setFont(bassFont);
+                    item->setForeground(QBrush(QColor(238, 177, 94)));
+                } else if (lane == 5) {
+                    QFont supportFont(QStringLiteral("Georgia"));
+                    supportFont.setPointSizeF(10.5);
+                    item->setFont(supportFont);
+                    item->setForeground(QBrush(QColor(126, 195, 238)));
                 }
                 Qt::ItemFlags flags = item->flags();
                 flags &= ~Qt::ItemIsEditable;
@@ -1060,6 +1141,36 @@ void BeatGridWidget::rebuildChordTable()
                             if (event.tick >= startTick && event.tick < endTick) {
                                 tooltip += QStringLiteral("\n%1: %2; %3")
                                     .arg(event.note, event.chordRole, event.melodicRole);
+                            }
+                        }
+                    }
+                    item->setToolTip(tooltip);
+                }
+                if (lane == 4) {
+                    QString tooltip = QStringLiteral(
+                        "Dedicated bass line. Click a subcell to type a note with octave; ~ holds and - rests.");
+                    if (!section.generatedKind.isEmpty()) {
+                        const int startTick = beat * 12;
+                        const int endTick = startTick + 12;
+                        for (const auto& event : section.generatedRecipe.bassEvents) {
+                            if (event.tick >= startTick && event.tick < endTick) {
+                                tooltip += QStringLiteral("\n%1: %2")
+                                    .arg(event.note, event.relationship);
+                            }
+                        }
+                    }
+                    item->setToolTip(tooltip);
+                }
+                if (lane == 5) {
+                    QString tooltip = QStringLiteral(
+                        "Role-aware harmony, countermelody, call-and-response, pad, drone, riff, or hook support.");
+                    if (!section.generatedKind.isEmpty()) {
+                        const int startTick = beat * 12;
+                        const int endTick = startTick + 12;
+                        for (const auto& event : section.generatedRecipe.supportingEvents) {
+                            if (event.tick >= startTick && event.tick < endTick) {
+                                tooltip += QStringLiteral("\n%1 (%2): %3")
+                                    .arg(event.note, event.role, event.relationship);
                             }
                         }
                     }
@@ -1145,13 +1256,19 @@ void BeatGridWidget::rebuildBeatTable()
     QStringList rowLabels;
     rowLabels.reserve(rowCount);
     for (int sectionIndex = 0; sectionIndex < model_->sections().size(); ++sectionIndex) {
-        rowLabels << QString();
+        rowLabels << sectionBankLabel(sectionIndex);
         rowLabels << QStringLiteral("Division");
         for (int lane : visualLaneIndices) {
             rowLabels << lanes[lane];
         }
     }
     table_->setVerticalHeaderLabels(rowLabels);
+    for (int sectionIndex = 0; sectionIndex < model_->sections().size(); ++sectionIndex) {
+        if (QTableWidgetItem* bankHeader =
+                table_->verticalHeaderItem(sectionIndex * rowsPerSection)) {
+            bankHeader->setToolTip(sectionBankToolTip(sectionIndex));
+        }
+    }
 
     int row = 0;
     for (int sectionIndex = 0; sectionIndex < model_->sections().size(); ++sectionIndex) {
@@ -1271,8 +1388,12 @@ void BeatGridWidget::rebuildLyricsBox()
         auto* name = new QTableWidgetItem(sectionTitle(section));
         name->setData(kSectionHeaderRole, true);
         name->setData(kSectionSelectedRole, selectedSection_ == sectionIndex);
+        name->setData(kSectionBankRole, sectionBankLabel(sectionIndex));
+        name->setToolTip(sectionBankToolTip(sectionIndex));
+        name->setSizeHint(QSize(180, 78));
+        name->setTextAlignment(Qt::AlignLeft | Qt::AlignBottom);
         table_->setItem(sectionIndex, 0, name);
-        table_->setRowHeight(sectionIndex, 58);
+        table_->setRowHeight(sectionIndex, 78);
         for (int beat = 0; beat < maxBeats; ++beat) {
             auto* item = new QTableWidgetItem(
                 beat < section.beats ? section.lyrics[beat] : QString{});

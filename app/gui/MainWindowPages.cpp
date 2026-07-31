@@ -280,6 +280,9 @@ void MainWindowPages::build(MainWindow& w)
     w.performanceHome_->onGenerateIdea = [&w] {
         w.generatePracticeIdea();
     };
+    w.performanceHome_->onClearIdea = [&w] {
+        w.clearPracticeIdea();
+    };
     w.performanceHome_->onGenerateWav = [&w] {
         w.generatePracticeReferenceWavs();
     };
@@ -1513,6 +1516,25 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     w.metronomeBeatsSpin_->setValue(4);
     applyMutedEditorStyle(w.metronomeBeatsSpin_);
 
+    w.metronomeBeatUnitBox_ = new QComboBox(page);
+    w.metronomeBeatUnitBox_->addItem(QStringLiteral("/2"), 2);
+    w.metronomeBeatUnitBox_->addItem(QStringLiteral("/4"), 4);
+    w.metronomeBeatUnitBox_->addItem(QStringLiteral("/8"), 8);
+    w.metronomeBeatUnitBox_->addItem(QStringLiteral("/16"), 16);
+    w.metronomeBeatUnitBox_->setCurrentIndex(w.metronomeBeatUnitBox_->findData(4));
+    w.metronomeBeatUnitBox_->setToolTip(
+        QStringLiteral("The note value counted by each beat (the denominator in the time signature)"));
+    applyMutedEditorStyle(w.metronomeBeatUnitBox_);
+
+    w.metronomeTempoPulseBox_ = new QComboBox(page);
+    w.metronomeTempoPulseBox_->addItem(QStringLiteral("1 written unit"), 1);
+    w.metronomeTempoPulseBox_->addItem(
+        QStringLiteral("3 written units (compound)"), 3);
+    w.metronomeTempoPulseBox_->setToolTip(
+        QStringLiteral(
+            "How many written beat units one BPM pulse spans; use 3 for dotted-quarter pulse in 6/8, 9/8, or 12/8"));
+    w.metronomeTempoPulseBox_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    applyMutedEditorStyle(w.metronomeTempoPulseBox_);
 
     w.metronomeDivisionBox_ = new QComboBox(page);
     w.metronomeDivisionBox_->addItem(QStringLiteral("Quarter"), 1);
@@ -1524,6 +1546,24 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     w.metronomeDivisionBox_->setCurrentIndex(w.metronomeDivisionBox_->findData(1));
     w.metronomeDivisionBox_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
     applyMutedEditorStyle(w.metronomeDivisionBox_);
+
+    w.metronomeSoundBox_ = new QComboBox(page);
+    w.metronomeSoundBox_->addItem(
+        QStringLiteral("Classic"),
+        static_cast<int>(jam2::metronome::ClickSound::Classic));
+    w.metronomeSoundBox_->addItem(
+        QStringLiteral("Woodblock"),
+        static_cast<int>(jam2::metronome::ClickSound::Woodblock));
+    w.metronomeSoundBox_->addItem(
+        QStringLiteral("Rim Click"),
+        static_cast<int>(jam2::metronome::ClickSound::RimClick));
+    w.metronomeSoundBox_->addItem(
+        QStringLiteral("Digital Tick"),
+        static_cast<int>(jam2::metronome::ClickSound::DigitalTick));
+    w.metronomeSoundBox_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    w.metronomeSoundBox_->setToolTip(
+        QStringLiteral("Choose the local click character; leader-audio sends the leader's chosen sound"));
+    applyMutedEditorStyle(w.metronomeSoundBox_);
 
     w.metronomeModeBox_ = new QComboBox(page);
     w.metronomeModeBox_->addItems({
@@ -1603,19 +1643,24 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     controls->setVerticalSpacing(10);
     controls->addWidget(makeControlPair(QStringLiteral("BPM"), w.metronomeBpmSpin_), 0, 0);
     controls->addWidget(makeControlPair(QStringLiteral("Beats"), w.metronomeBeatsSpin_), 0, 1);
-    controls->addWidget(makeControlPair(QStringLiteral("Division"), w.metronomeDivisionBox_), 0, 2);
+    controls->addWidget(makeControlPair(QStringLiteral("Beat unit"), w.metronomeBeatUnitBox_), 0, 2);
+    controls->addWidget(makeControlPair(QStringLiteral("Tempo pulse"), w.metronomeTempoPulseBox_), 0, 3);
+    controls->addWidget(makeControlPair(QStringLiteral("Division"), w.metronomeDivisionBox_), 0, 4);
     auto* modeRow = new QWidget(page);
     auto* modeLayout = new QHBoxLayout(modeRow);
     modeLayout->setContentsMargins(0, 0, 0, 0);
     modeLayout->setSpacing(6);
     modeLayout->addWidget(new QLabel(QStringLiteral("Mode"), modeRow));
     modeLayout->addWidget(w.metronomeModeBox_, 0, Qt::AlignLeft);
+    modeLayout->addSpacing(8);
+    modeLayout->addWidget(new QLabel(QStringLiteral("Sound"), modeRow));
+    modeLayout->addWidget(w.metronomeSoundBox_, 0, Qt::AlignLeft);
     modeLayout->addWidget(w.metronomeCompensationButton_, 0, Qt::AlignLeft);
     modeLayout->addStretch(1);
-    controls->addWidget(modeRow, 0, 3);
-    controls->addWidget(new QLabel(QStringLiteral("Pattern"), page), 1, 0);
-    controls->addWidget(w.trackMetronomeLabel_, 1, 1);
-    controls->addWidget(w.metronomeMarkerReferenceCheck_, 1, 2, 1, 2);
+    controls->addWidget(modeRow, 1, 0, 1, 5);
+    controls->addWidget(new QLabel(QStringLiteral("Pattern"), page), 2, 0);
+    controls->addWidget(w.trackMetronomeLabel_, 2, 1);
+    controls->addWidget(w.metronomeMarkerReferenceCheck_, 2, 2, 1, 3);
     controls->setColumnStretch(1, 1);
     controls->setColumnStretch(3, 1);
 
@@ -1645,12 +1690,26 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
         w.sendMetronomeModeToJam();
         w.sendMetronomeSettingsToPeer();
     });
+    QObject::connect(w.metronomeSoundBox_, qOverload<int>(&QComboBox::currentIndexChanged), &w, [&w] {
+        w.preferences_.metronomeSound = w.metronomeSoundBox_->currentData().toInt();
+        UserPreferencesStore::save(w.preferences_);
+        w.sendMetronomeSoundToJam();
+    });
     QObject::connect(w.metronomeCompensationButton_, &QPushButton::clicked, &w, [&w] {
         w.showMetronomeCompensationDialog();
     });
     QObject::connect(w.metronomeBeatsSpin_, qOverload<int>(&QSpinBox::valueChanged), &w, [&w] {
         w.rebuildMetronomePattern();
         w.updateTrackMetronomeInterval();
+    });
+    QObject::connect(w.metronomeBeatUnitBox_, qOverload<int>(&QComboBox::currentIndexChanged), &w, [&w] {
+        w.updateTrackMetronomeInterval();
+        w.sendMetronomePatternToJam();
+        w.sendMetronomeSettingsToPeer();
+    });
+    QObject::connect(w.metronomeTempoPulseBox_, qOverload<int>(&QComboBox::currentIndexChanged), &w, [&w] {
+        w.updateTrackMetronomeInterval();
+        w.refreshLooperLanes();
     });
     QObject::connect(w.metronomeDivisionBox_, qOverload<int>(&QComboBox::currentIndexChanged), &w, [&w] {
         w.rebuildMetronomePattern(true);

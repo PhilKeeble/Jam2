@@ -480,7 +480,8 @@ bool GuiLoopbackRecorder::start(const GuiLoopbackOptions& options, FinishedCallb
                 options.durationBars,
                 options.beatsPerBar,
                 options.bpm,
-                options.targetSampleRate) == 0)) {
+                options.targetSampleRate,
+                options.tempoPulseUnits) == 0)) {
         if (error) *error = QStringLiteral("loopback bar duration requires positive bars, BPM, meter, and sample rate");
         return false;
     }
@@ -563,7 +564,8 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
             options.durationBars,
             options.beatsPerBar,
             options.bpm,
-            sampleRate);
+            sampleRate,
+            options.tempoPulseUnits);
         const std::uint64_t targetRecordedFrames = barFrames > 0
             ? barFrames
             : (std::numeric_limits<std::uint64_t>::max)();

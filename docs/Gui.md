@@ -99,28 +99,20 @@ ordering and distribution. It is not a room server and does not relay audio.
 
 ## Generated Practice Ideas
 
-The Chord and Beat pages share one coupled practice-idea generator. Key, style,
-character, length, and **Complexity 1–8** are selected in the Generate dialog.
-Level 2 and 16 bars are the defaults. The styles are Pop, Indie, Rock, Jazz,
-Modal Vamp, Blues, Anime / J-Pop, Country, EDM, R&B / Soul, Funk, and
-Hip-Hop / Trap. Each style has six grounding progression families, five
-automatically selected drum-groove families, a tempo range, and a procedural
-sound palette. The 60 groove families include distinct straight, half-time,
-shuffle, dance, syncopated, Ride-led, train-beat, and breakbeat foundations.
-Bright,
-Dark, Dreamy, Romantic, Peaceful, Intense, Nostalgic, and Cinematic characters
-change audible harmony, motif, tempo, groove, and synth parameters rather than
-acting as descriptive labels.
+The Chord and Beat pages share one coupled practice-idea generator. The Generate
+dialog selects key, style, internal profile, profile-native form, meter,
+compatible scale/mode override, optional production family, and
+**Complexity 1–8**. Auto choices use the profile catalog; there is no global
+length whitelist or Character control.
 
-Complexity is a cumulative theory palette: a selected level can use any choice
-from that level or a lower one. It unlocks choices without simply adding chord
-tones or making every drum part busier. Its palette progresses through diatonic/modal movement,
-inversions and suspensions, modal interchange, secondary dominants, chromatic
-passing movement, tonicisation and backdoor motion, substitutions, and temporary
-modulation. An unlocked advanced technique is permitted rather than required;
-theory decisions and added passing events are bounded.
+Complexity is a shared cumulative curriculum whose concrete realization is
+profile-dependent. It progresses through core grammar, voicing and connection,
+directed colour, rhythmic development, expanded tonal or riff vocabulary,
+independent dialogue and form, large-scale tonal or metric tools, and integrated
+use. A level unlocks compatible tools without forcing them or applying a Jazz
+substitution vocabulary to static/modal profiles.
 
-Drum complexity uses two probability bands rather than locking ordinary drummer
+Drum complexity uses probability bands rather than locking ordinary drummer
 techniques to individual levels. Levels 1-4 can all use kick alternatives,
 ghosts, cymbal articulation, pickups, and phrase-end fills; their occurrence
 chances rise gradually with the selected level. Levels 5-8 additionally unlock
@@ -130,61 +122,55 @@ the generator never replaces one isolated random beat. Each family begins with
 an authored two-bar A/A' pocket and retains protected kick/backbeat anchors.
 Overall hit growth remains bounded to 35% over the core groove.
 
-Chord and melody events share an editable per-beat subdivision named exactly
-like the drum grid: Quarter, Eighth, 16th, or Triplet. This timing is independent
-of the drum division. Pop and modal ideas generally sustain their harmony;
-funk, jazz, blues, rock, country, EDM, and related styles can use characteristic
-sub-beat comping. In the Chord page, `~` holds the previous event and `-` rests.
-The detailed Chord page sizes each beat column for its widest subdivided chord,
-chord-tone, or melody entry, permits manual column resizing, and scrolls
-horizontally instead of forcing theory information into the performance view.
+Chord, melody, bass, and supporting-line events share an editable per-beat
+subdivision named like the drum grid: Quarter, Eighth, 16th, or Triplet. Their
+timing remains independent of the drum division. In the Chord page, `~` holds
+the previous event and `-` rests. The six rows are Subdivision, Chords, Chord
+Tones, Melody, Bass, and Supporting Line.
 
-Melodies are planned against the sounding chord and groove. Sixteen
-seed-deterministic candidates are compared for strong-beat chord fit, defining
-notes on borrowed/dominant/diminished harmony, singable range, mostly stepwise
-motion, repetition, phrase arc, cadence, and drum-accent alignment. Weak beats
-may use intentional passing, neighbour, approach, enclosure, extension, modal,
-or local-scale tones from any unlocked complexity level, with preference given
-to clear resolutions. Melodies use a seed-specific three-to-five-note contour cell. A 16-bar idea loosely
-uses a return-and-contrast form, but varies among forms such as A–A′–B–A″,
-A–B–A′–A″, A–A′–B–B′, and A–B–C–A′. Repetition can sequence, rotate, answer,
-truncate, change gaps, or alter the cadence, so the same form is not stamped
-onto every idea. Generated names begin with tonic and mode, for example
-`F Lydian — Modal Vamp — Dreamy`.
+Generate uses 13 researched public styles and 26 compact internal profiles.
+The selected profile controls compatible scale/mode choices, native form,
+meter, progression and groove families, bass grammar, supporting roles, and
+sound targets. Lo-Fi and Synthwave are compatible production families rather
+than duplicate styles. Modern Progressive Metalcore is available separately as
+an experimental sound-design profile.
 
-Both Chord and Beat pages expose **Generate…**, **Generate Reference WAVs…**,
-and **Idea Details…**. Idea Details shows the decimal and hexadecimal seed,
-generator version, musical choices, base Roman-numeral progression, final
-chords, plain-language theory operations and resolutions, motif treatment,
-groove changes, phrase summaries, note-by-note chord roles and melodic roles,
-and procedural patches. Groove details include the chosen family, actual kick,
-ghost, cymbal, fill, and advanced-cell counts, plus swing percentage, snare
-offset, timing variation, and velocity variation. It warns when the current
-grid no longer matches the stored generated content. Generated v1, v2, and v3 metadata is not
-migrated; manual songs remain valid.
+There is no global Mood or Character generator. A seed-derived,
+profile-compatible variation plan changes bounded density, register,
+articulation, brightness, space, and timing axes while preserving the selected
+style grammar. The shared eight-level complexity ladder unlocks musical tools;
+an unlocked tool is not forced into every generation.
+Melodies are chord-aware vocal-like instrumental phrases where the profile is
+vocal-centred. Bass and support remain independent editable parts rather than
+slash-chord or melody metadata.
 
-Reference WAVs are rendered offline with bounded procedural synthesis. Timed
-chord and melody events retain their sub-beat attacks, rests, gates, and melody
-velocities. Melody patches use warm sine/triangle-based oscillators with a
-per-note attack/decay/sustain/release shape, sample-rate-aware filtering, and
-subtle delayed vibrato rather than exposed saw or pulse waves. Style
-default voicing retains essential root, third, seventh, and characteristic
-colour tones in at most four upper voices plus an optional slash bass. The
-renderer applies the generated groove's deterministic swing, snare placement,
-timing variation, and velocity variation while leaving the visible pattern
-quantised. It logs those values alongside selected patch IDs, maximum chord
-voices, event counts, elapsed render time, and output peak. The canonical beat-lane order places the rendered
-Ride between Open HH and Crash. Both the detailed Beat page and compact
-performance grid show every lane in the same order, with Ride directly between
-Crash and Open HH. Its procedural sound balances metallic bell partials with a
-restrained noise wash, keeping the bell near the wash level rather than
-dominating it.
+Both Chord and Beat pages expose **Generate...**, **Generate Reference WAVs...**,
+and **Idea Details...**. Idea Details opens in a practical teaching view that
+explains the style, form, groove, part relationships, complexity choices, and
+ways to try the idea in a jam. **Detailed Analysis** switches to the complete
+seed, recipe, native-form sections, theory decisions, role events,
+articulations, per-lane timing, automation, and numeric synthesis parameters.
+It warns when the current grid differs from the stored generated result.
+Generated recipes use the research-based version-6 schema exclusively. Earlier
+generated recipe versions are rejected; there is no Mood/Character migration or
+fallback generation path. Manual songs without generated metadata remain valid.
 
-Generating an idea applies its BPM and bar length but resets the metronome to a
-steady quarter-note pulse with only the first beat of the bar accented. Drum
-subdivisions, including triplets, are heard against that backbone rather than
-being copied into the click pattern. The user can change the metronome division,
-play mask, and accents afterward. Pattern headings use beat/subdivision labels:
+Reference WAVs can render five separate layers: chords, drums, melody, bass,
+and supporting line. Rendering uses the recipe's deterministic synthesis,
+articulation, per-lane timing, automation, meter denominator, and style kit.
+The Beat grid adds dedicated Cross-stick / Rim, Shaker, and Hand Percussion
+lanes to Kick, Snare, Closed/Open HH, Ride, Crash, and Tom. This lets Bossa and
+Reggae expose characteristic percussion relationships instead of hiding them
+behind a generic kit label. Render diagnostics report profile and patch IDs,
+event counts, timing values, elapsed time, and output peak.
+
+Generating an idea applies its researched BPM, explicit meter numerator and
+denominator, tempo pulse, subdivision click, and accent grouping. Compound
+meters use a dotted-quarter tempo pulse spanning three written eighths; simple
+and odd meters use one written unit per tempo pulse. The user can change the
+written beat unit, tempo pulse, metronome division, play mask, and accents
+afterward.
+Pattern headings use beat/subdivision labels:
 Quarter shows `1.1 2.1 3.1 4.1`, Eighth shows `1.1 1.3 2.1 2.3`,
 16th shows `1.1 1.2 1.3 1.4`, and Triplet shows `1.1 1.2 1.3` per beat.
 

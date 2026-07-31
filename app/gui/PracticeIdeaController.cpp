@@ -23,6 +23,12 @@ QString managedReferenceKind(const LooperLane& lane)
     if (lane.name == QStringLiteral("Practice Melody")) {
         return QStringLiteral("melody");
     }
+    if (lane.name == QStringLiteral("Practice Bass")) {
+        return QStringLiteral("bass");
+    }
+    if (lane.name == QStringLiteral("Practice Support")) {
+        return QStringLiteral("support");
+    }
     return {};
 }
 
@@ -68,7 +74,16 @@ void upsert(
     }
     LooperLane lane;
     if (index >= 0) lane = lanes[index];
-    else lane.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    else {
+        lane.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        if (kind == QStringLiteral("drum")) {
+            // The researched stem already carries the accepted internal
+            // drum-bus balance.  Give a newly generated drum lane the
+            // additional playback presence requested for the Jam2 mix,
+            // without driving the synthesis/bus harder or clipping the WAV.
+            lane.gainDb = kGeneratedDrumLaneGainDb;
+        }
+    }
     lane.name = name;
     lane.assetPath = wav.path;
     lane.assetHash = wav.sha256;
@@ -133,6 +148,55 @@ std::optional<SongSection> PracticeIdeaController::generatedSection(
     return std::nullopt;
 }
 
+ReferenceLayerAvailability PracticeIdeaController::referenceLayers(
+    const SongSection& section)
+{
+    ReferenceLayerAvailability result;
+    const auto hasOnset = [](const QVector<MusicalStep>& steps) {
+        return std::any_of(steps.cbegin(), steps.cend(), [](const MusicalStep& step) {
+            return step.state == MusicalStepState::Onset &&
+                !step.value.trimmed().isEmpty();
+        });
+    };
+    result.chords = std::any_of(
+        section.chords.cbegin(),
+        section.chords.cend(),
+        [](const QString& value) {
+            const QString text = value.trimmed();
+            return !text.isEmpty() && text != QStringLiteral("-");
+        });
+    result.melody = std::any_of(
+        section.targets.cbegin(),
+        section.targets.cend(),
+        [](const QString& value) {
+            const QString text = value.trimmed();
+            return !text.isEmpty() && text != QStringLiteral("-");
+        });
+    for (const MusicalBeatPattern& pattern : section.musicalPatterns) {
+        result.chords = result.chords || hasOnset(pattern.chords);
+        result.melody = result.melody || hasOnset(pattern.melody);
+        result.bass = result.bass || hasOnset(pattern.bass);
+        result.support = result.support || hasOnset(pattern.support);
+    }
+    for (const BeatPattern& pattern : section.beatPatterns) {
+        for (const QString& lane : pattern.lanes) {
+            if (std::any_of(lane.cbegin(), lane.cend(), [](QChar state) {
+                    const QChar normalized = state.toLower();
+                    return normalized == QLatin1Char('x') ||
+                        normalized == QLatin1Char('a') ||
+                        normalized == QLatin1Char('g');
+                })) {
+                result.drums = true;
+                break;
+            }
+        }
+        if (result.drums) {
+            break;
+        }
+    }
+    return result;
+}
+
 void PracticeIdeaController::clearReferences(LooperProject& project)
 {
     for (LooperBank& bank : project.banks()) {
@@ -149,12 +213,15 @@ bool PracticeIdeaController::applyReferences(
     int bankIndex,
     const ReferenceRenderSettings& settings,
     const ReferenceRenderResult& result,
-    QString& error)
+    QString& error,
+    const QString& lanePrefix)
 {
     if (bankIndex < 0 || bankIndex >= project.banks().size() || !result.error.isEmpty() ||
         (settings.renderChords && (result.chords.path.isEmpty() || result.chords.sha256.isEmpty())) ||
         (settings.renderDrums && (result.drums.path.isEmpty() || result.drums.sha256.isEmpty())) ||
-        (settings.renderMelody && (result.melody.path.isEmpty() || result.melody.sha256.isEmpty()))) {
+        (settings.renderMelody && (result.melody.path.isEmpty() || result.melody.sha256.isEmpty())) ||
+        (settings.renderBass && (result.bass.path.isEmpty() || result.bass.sha256.isEmpty())) ||
+        (settings.renderSupport && (result.support.path.isEmpty() || result.support.sha256.isEmpty()))) {
         error = result.error.isEmpty()
             ? QStringLiteral("The rendered reference assets are incomplete.") : result.error;
         return false;
@@ -163,25 +230,40 @@ bool PracticeIdeaController::applyReferences(
     removeDuplicateManagedLanes(lanes, QStringLiteral("chord"));
     removeDuplicateManagedLanes(lanes, QStringLiteral("drum"));
     removeDuplicateManagedLanes(lanes, QStringLiteral("melody"));
+    removeDuplicateManagedLanes(lanes, QStringLiteral("bass"));
+    removeDuplicateManagedLanes(lanes, QStringLiteral("support"));
     const int newLaneCount =
         (settings.renderChords && !hasManagedLane(lanes, QStringLiteral("chord")) ? 1 : 0) +
         (settings.renderDrums && !hasManagedLane(lanes, QStringLiteral("drum")) ? 1 : 0) +
-        (settings.renderMelody && !hasManagedLane(lanes, QStringLiteral("melody")) ? 1 : 0);
+        (settings.renderMelody && !hasManagedLane(lanes, QStringLiteral("melody")) ? 1 : 0) +
+        (settings.renderBass && !hasManagedLane(lanes, QStringLiteral("bass")) ? 1 : 0) +
+        (settings.renderSupport && !hasManagedLane(lanes, QStringLiteral("support")) ? 1 : 0);
     if (lanes.size() + newLaneCount > jam2::application::limits::kMaximumLooperLanesPerBank) {
-        error = QStringLiteral("The active bank has no room for the reference lanes.");
+        error = QStringLiteral("The destination bank has no room for the reference lanes.");
         return false;
     }
+    const QString prefix = lanePrefix.trimmed().isEmpty()
+        ? QStringLiteral("Practice")
+        : lanePrefix.trimmed();
     if (settings.renderChords) {
-        upsert(lanes, QStringLiteral("chord"), QStringLiteral("Practice Chords"),
+        upsert(lanes, QStringLiteral("chord"), prefix + QStringLiteral(" Chords"),
             result.chords, settings, result.sourceSignature);
     }
     if (settings.renderDrums) {
-        upsert(lanes, QStringLiteral("drum"), QStringLiteral("Practice Drums"),
+        upsert(lanes, QStringLiteral("drum"), prefix + QStringLiteral(" Drums"),
             result.drums, settings, result.sourceSignature);
     }
     if (settings.renderMelody) {
-        upsert(lanes, QStringLiteral("melody"), QStringLiteral("Practice Melody"),
+        upsert(lanes, QStringLiteral("melody"), prefix + QStringLiteral(" Melody"),
             result.melody, settings, result.sourceSignature);
+    }
+    if (settings.renderBass) {
+        upsert(lanes, QStringLiteral("bass"), prefix + QStringLiteral(" Bass"),
+            result.bass, settings, result.sourceSignature);
+    }
+    if (settings.renderSupport) {
+        upsert(lanes, QStringLiteral("support"), prefix + QStringLiteral(" Support"),
+            result.support, settings, result.sourceSignature);
     }
     project.banks()[bankIndex].lanes = std::move(lanes);
     return true;

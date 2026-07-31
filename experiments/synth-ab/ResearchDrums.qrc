@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/jam2/drums">
+        <file alias="researched-kits.json">../../app/gui/researched-drum-kits.json</file>
+    </qresource>
+</RCC>

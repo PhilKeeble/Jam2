@@ -1,0 +1,515 @@
+{
+    "artifact_inventory_truncated": false,
+    "artifact_limits": {
+        "max_files": 256,
+        "max_total_bytes": 1073741824
+    },
+    "artifacts": [
+        {
+            "bytes": 3291474,
+            "path": "audio/full-form-corpus/blues_dominant__blues-12__c4__s1.wav",
+            "sha256": "45efc6350dae04c5a3e9f685f421e590a90f82d7d75146bbc8832e791e26bf2a"
+        },
+        {
+            "bytes": 4388616,
+            "path": "audio/full-form-corpus/blues_dominant__blues-16__c4__s1.wav",
+            "sha256": "848947e937e41b33f60b0f9a263629a7117edc206edbdbdf0616865efab4b568"
+        },
+        {
+            "bytes": 1706712,
+            "path": "audio/full-form-corpus/blues_dominant__blues-8__c4__s1.wav",
+            "sha256": "eeec37802b9cd79f8498781568a53cdcb6f1b1ac5a395cc97f08020035a15093"
+        },
+        {
+            "bytes": 2821270,
+            "path": "audio/full-form-corpus/blues_minor__minor-blues-12-8__c4__s1.wav",
+            "sha256": "afec331307bbebd7931ee7dd50966eca423b162c6da1a02a84f44a15a4dece22"
+        },
+        {
+            "bytes": 2425308,
+            "path": "audio/full-form-corpus/blues_minor__minor-blues-12__c4__s1.wav",
+            "sha256": "b5d4e543ee0ebb09ec5b2c750aa75adadfdb3688248b047a81b9f285578de02e"
+        },
+        {
+            "bytes": 3761678,
+            "path": "audio/full-form-corpus/blues_minor__minor-blues-16__c4__s1.wav",
+            "sha256": "0d4fc3a4a7115262bdefc1244787ffe6898c7e18e689fd90de9a99b6bf8fcf33"
+        },
+        {
+            "bytes": 1524750,
+            "path": "audio/full-form-corpus/bossa_songbook__bossa-18__c4__s1.wav",
+            "sha256": "a69d6027e12c22ae89dbc30f82d4ae8026431b108dc8e8d13681bad12000ba03"
+        },
+        {
+            "bytes": 2880044,
+            "path": "audio/full-form-corpus/bossa_songbook__bossa-aaba-32__c4__s1.wav",
+            "sha256": "078e273b375f0227145182fa113c23a2f87f65ca989e2456680f1f7f1b99cc41"
+        },
+        {
+            "bytes": 3021684,
+            "path": "audio/full-form-corpus/bossa_songbook__bossa-abac-32__c4__s1.wav",
+            "sha256": "38fe6218a6a5054428438c91da4a005c36fb62041f59c2437ed666551ac02da9"
+        },
+        {
+            "bytes": 4286556,
+            "path": "audio/full-form-corpus/country_contemporary__country-pop-16__c4__s1.wav",
+            "sha256": "9f872a7dca43cc6ef5f8ae3add4d47636624a8b47f1b5db29be033e409d60efd"
+        },
+        {
+            "bytes": 4126612,
+            "path": "audio/full-form-corpus/country_contemporary__country-pop-24__c4__s1.wav",
+            "sha256": "9ce02da03c8ffaeb5687f8e7a38a3cc170de33c8cd6e1dd09532a110358c4347"
+        },
+        {
+            "bytes": 2094590,
+            "path": "audio/full-form-corpus/country_contemporary__country-pop-6-8__c4__s1.wav",
+            "sha256": "6c8b7f91374e227e8cb7dc79b3fd7f901d45675ba97daff7c3f71788cccbffe1"
+        },
+        {
+            "bytes": 1191770,
+            "path": "audio/full-form-corpus/country_honky_tonk__country-12__c4__s1.wav",
+            "sha256": "666844623d50ab32d7e8a3d19bc1f7d05333db0b99490c93025c865789209f00"
+        },
+        {
+            "bytes": 2393812,
+            "path": "audio/full-form-corpus/country_honky_tonk__country-16__c4__s1.wav",
+            "sha256": "4c62e14d2814599c698b459ee7d74ea562bba9807665f50396769c82b058d4e1"
+        },
+        {
+            "bytes": 2920608,
+            "path": "audio/full-form-corpus/country_honky_tonk__country-waltz-24__c4__s1.wav",
+            "sha256": "beb7ce0e5662022c59c2b6b5e092674673d9b2373766b47aaf797e42f7e472b5"
+        },
+        {
+            "bytes": 3686444,
+            "path": "audio/full-form-corpus/electronic_breakbeat__breakbeat-16__c4__s1.wav",
+            "sha256": "6f9609bec55de00c43df9d4d3c942c1c817667dc16a59d66b2117ddb34c83dce"
+        },
+        {
+            "bytes": 4388616,
+            "path": "audio/full-form-corpus/electronic_breakbeat__breakbeat-24__c4__s1.wav",
+            "sha256": "660652cde1a65827ac24454ead7b07a01dcbb7d314f7968a6717ecfc96bb6f4a"
+        },
+        {
+            "bytes": 2925760,
+            "path": "audio/full-form-corpus/electronic_house__house-16__c4__s1.wav",
+            "sha256": "a190c8cf44ede4371f467106ee5860e81602d5f20446f8023d5e37a30b8cee8f"
+        },
+        {
+            "bytes": 5760044,
+            "path": "audio/full-form-corpus/electronic_house__house-32__c4__s1.wav",
+            "sha256": "fcb51b65d196d3cdcd5af418519d64b0568f85fc545d060b54dc8f28cc968b14"
+        },
+        {
+            "bytes": 2596102,
+            "path": "audio/full-form-corpus/electronic_techno__techno-16__c4__s1.wav",
+            "sha256": "eff2db30fac8eb89bf38c396fb32e5615525f7d5212b6951b11f6bf519b21943"
+        },
+        {
+            "bytes": 5851474,
+            "path": "audio/full-form-corpus/electronic_techno__techno-32__c4__s1.wav",
+            "sha256": "692632f568ad637ed5b6fba92159b403af3abefa5e829d69ecb163806b345040"
+        },
+        {
+            "bytes": 3272772,
+            "path": "audio/full-form-corpus/electronic_techno__techno-odd-15__c4__s1.wav",
+            "sha256": "8215dfb73420d19c27ee249219deedb644356d1e87ce141f522fe3e9421eb43b"
+        },
+        {
+            "bytes": 3840044,
+            "path": "audio/full-form-corpus/funk_static_pocket__funk-16__c4__s1.wav",
+            "sha256": "6b19e2144ef13a088635078b56c785a41fd44ade890b5c0b8d869fcd650f1f25"
+        },
+        {
+            "bytes": 2048044,
+            "path": "audio/full-form-corpus/funk_static_pocket__funk-8__c4__s1.wav",
+            "sha256": "ccbda3e86fe3a597fecfe79136305cd82cc017d14755597dce8bcd0b4171ebd5"
+        },
+        {
+            "bytes": 3291474,
+            "path": "audio/full-form-corpus/hiphop_boom_bap__boombap-12__c4__s1.wav",
+            "sha256": "4639d03029bad2b759a8209e18ed663a66b53e05d7f7ef39c1f575a056f90652"
+        },
+        {
+            "bytes": 4388616,
+            "path": "audio/full-form-corpus/hiphop_boom_bap__boombap-16__c4__s1.wav",
+            "sha256": "f98f9b8b36b0fd1b32927ba9ecfad18c0362a17610029c9177729762745f696c"
+        },
+        {
+            "bytes": 4695698,
+            "path": "audio/full-form-corpus/hiphop_boom_bap__boombap-odd-15__c4__s1.wav",
+            "sha256": "165b5a53e25fe4290cd6522f818174c9832e20fc4244b1ce9763365ef2bbccee"
+        },
+        {
+            "bytes": 5120044,
+            "path": "audio/full-form-corpus/hiphop_trap__trap-16__c4__s1.wav",
+            "sha256": "925ac4c083bd6f0de6e1c804ecccc47c62935f5985bb0f3037cf604f079da230"
+        },
+        {
+            "bytes": 7680044,
+            "path": "audio/full-form-corpus/hiphop_trap__trap-24__c4__s1.wav",
+            "sha256": "36aa71e42c0ad320dce8b85f9d0dadc9dd9342b714ce8f59b7d5c4e2da2903f3"
+        },
+        {
+            "bytes": 2351066,
+            "path": "audio/full-form-corpus/jazz_bebop__bebop-20__c4__s1.wav",
+            "sha256": "242f2386628f31032871df5294c499ff997eed7707d953aaf8898cb70ee979d4"
+        },
+        {
+            "bytes": 3840044,
+            "path": "audio/full-form-corpus/jazz_bebop__bebop-32__c4__s1.wav",
+            "sha256": "cca93a0db07d9b432e82cd36306baf1af1c9e9ab72846c50278d5ac27875b26e"
+        },
+        {
+            "bytes": 1001784,
+            "path": "audio/full-form-corpus/jazz_bebop__bebop-blues-12__c4__s1.wav",
+            "sha256": "da36ff2c8595f2b75ae3095223675ed65d5478f46bc2271e9cd2adc375eb566d"
+        },
+        {
+            "bytes": 2482804,
+            "path": "audio/full-form-corpus/jazz_fusion__fusion-10__c4__s1.wav",
+            "sha256": "4def23ed2bedd70ec8b8a7ca46c87eba0b1c79791057f9abf26af1dc3442453d"
+        },
+        {
+            "bytes": 4342198,
+            "path": "audio/full-form-corpus/jazz_fusion__fusion-14__c4__s1.wav",
+            "sha256": "52a6583aecc328dd731d1d91c6c1ca6ec709df3e31d6ed989743324eadf79f6c"
+        },
+        {
+            "bytes": 2925760,
+            "path": "audio/full-form-corpus/jazz_fusion__fusion-16__c4__s1.wav",
+            "sha256": "f0f166103c951ae0de23f6cc84306a865396feb22c7ad5e96518b425af3ddfce"
+        },
+        {
+            "bytes": 7523310,
+            "path": "audio/full-form-corpus/jazz_swing_standards__jazz-aaba-32__c4__s1.wav",
+            "sha256": "3905b690c89e247796fd5266675434ee31429d6acf5cb5595f5ae4a9589244f2"
+        },
+        {
+            "bytes": 3351318,
+            "path": "audio/full-form-corpus/jazz_swing_standards__jazz-abac-32__c4__s1.wav",
+            "sha256": "4097169b1dff3bdc1efcac4fac32a7c3fcbb4b56fdb0fb6377b4450991e53965"
+        },
+        {
+            "bytes": 2094590,
+            "path": "audio/full-form-corpus/jazz_swing_standards__jazz-blues-12__c4__s1.wav",
+            "sha256": "e9b696077dc418dad85a3a9da4d0be9c951c401884f9854193e53e31e7fb3604"
+        },
+        {
+            "bytes": 2329932,
+            "path": "audio/full-form-corpus/jazz_swing_standards__jazz-waltz-24__c4__s1.wav",
+            "sha256": "ba8bbd936c0e7963d815ddf524bcbe448db447a84337f89687f20c260fa3f4a3"
+        },
+        {
+            "bytes": 1312450,
+            "path": "audio/full-form-corpus/jpop_anisong_rock__jpop-rock-18__c4__s1.wav",
+            "sha256": "54514bc1209f404f213f3d671b8ab1e16853129177561338ee6c9ef4b00fa3c8"
+        },
+        {
+            "bytes": 5120044,
+            "path": "audio/full-form-corpus/jpop_anisong_rock__jpop-rock-24__c4__s1.wav",
+            "sha256": "3cd467282a05ad349a993b15413b86b50bac70a772b3dc429f8a8d3ba4315383"
+        },
+        {
+            "bytes": 5120044,
+            "path": "audio/full-form-corpus/jpop_anisong_rock__jpop-rock-32__c4__s1.wav",
+            "sha256": "ed5d31a8a8c0a1fe345f568fd366391bfa7cb944ece3c6d0656f9b830e585f01"
+        },
+        {
+            "bytes": 2275600,
+            "path": "audio/full-form-corpus/jpop_idol_dance__jpop-idol-16__c4__s1.wav",
+            "sha256": "0a29bd5080aeb53192b31fabe27e68e6078c6452798a76c564e77a5f3f6f2d30"
+        },
+        {
+            "bytes": 3177976,
+            "path": "audio/full-form-corpus/jpop_idol_dance__jpop-idol-24__c4__s1.wav",
+            "sha256": "d80fb76dbcd989fc44a7f6d8dad380b7353d824c8289bc916ccf8110ec977f19"
+        },
+        {
+            "bytes": 2592044,
+            "path": "audio/full-form-corpus/metal_modern_progressive__metal-contrast-18__c4__s1.wav",
+            "sha256": "722de4bca097fff439ede2d9f669b1b877567bd19daeb1d366062bea62ddc587"
+        },
+        {
+            "bytes": 1974902,
+            "path": "audio/full-form-corpus/metal_modern_progressive__metal-riff-12__c4__s1.wav",
+            "sha256": "309455921e9b5dcbc152502a313b10111610ba62e157daa2582ae4935684bb76"
+        },
+        {
+            "bytes": 2528826,
+            "path": "audio/full-form-corpus/modal_atmospheric__modal-atmospheric-12__c4__s1.wav",
+            "sha256": "6f8863de3ac9703370d9cad89cc2ea04a5a0344952787f94c31a6de294b2ccd2"
+        },
+        {
+            "bytes": 5120044,
+            "path": "audio/full-form-corpus/modal_atmospheric__modal-atmospheric-16__c4__s1.wav",
+            "sha256": "13188df9ddbc4a8b23cfa15fc4de377da86b573cae062b531071afc9e05a8cdd"
+        },
+        {
+            "bytes": 5760044,
+            "path": "audio/full-form-corpus/modal_atmospheric__modal-atmospheric-20__c4__s1.wav",
+            "sha256": "4b6d8b99293224626a6a7d9f3d4146dd7ae1791f59937d6f2601d1d20eafdef5"
+        },
+        {
+            "bytes": 3063874,
+            "path": "audio/full-form-corpus/modal_groove__modal-groove-10__c4__s1.wav",
+            "sha256": "653408459cda5e22830c07ad24982706157eb4624c607874605ce6fe08f75ff2"
+        },
+        {
+            "bytes": 4096044,
+            "path": "audio/full-form-corpus/modal_groove__modal-groove-16__c4__s1.wav",
+            "sha256": "fc965afa4d0cc7189477d4ebd1e3db5b4f4b30863d2e24fedfe7285becdc4e80"
+        },
+        {
+            "bytes": 2143300,
+            "path": "audio/full-form-corpus/modal_groove__modal-groove-8__c4__s1.wav",
+            "sha256": "66dc86a846f037dc39c4b88ae95e1f9121af49fb94013da61c1fd8d39d37f7a5"
+        },
+        {
+            "bytes": 4726198,
+            "path": "audio/full-form-corpus/pop_loop__pop-loop-16__c4__s1.wav",
+            "sha256": "7c0b576fb27f1f0157c805644673430e3e6316b3a11ea95d5b7202a0da9de7f3"
+        },
+        {
+            "bytes": 903574,
+            "path": "audio/full-form-corpus/pop_loop__pop-loop-6-8__c4__s1.wav",
+            "sha256": "a6b8464251f4f0fe9332c6b3d421e705158bfc791c14410e3611df283aa89be9"
+        },
+        {
+            "bytes": 1645760,
+            "path": "audio/full-form-corpus/pop_loop__pop-loop-8__c4__s1.wav",
+            "sha256": "827db36d2b2e060e9f802f39f0becc0e48bb755eb80b9aa871e5044d8451e315"
+        },
+        {
+            "bytes": 5529644,
+            "path": "audio/full-form-corpus/pop_sectional__pop-sectional-12-8__c4__s1.wav",
+            "sha256": "a7d07629ad2b359c80841beec12b063c9fdb934b175548e3162ba8919c2b4d94"
+        },
+        {
+            "bytes": 5421222,
+            "path": "audio/full-form-corpus/pop_sectional__pop-sectional-24__c4__s1.wav",
+            "sha256": "dccaa626cafb285147423fd6005eadde9979e195664a40d0476c59002983c311"
+        },
+        {
+            "bytes": 6248180,
+            "path": "audio/full-form-corpus/pop_sectional__pop-sectional-32__c4__s1.wav",
+            "sha256": "3df2093201ef8296ab00dae68874cdebdac096bd7fa91fa00f03fa507f54516b"
+        },
+        {
+            "bytes": 4388616,
+            "path": "audio/full-form-corpus/reggae_roots__reggae-16__c4__s1.wav",
+            "sha256": "90914027991ac5e86c85456e3d24690bd4ed7602d4161a6efdf4eac57224988c"
+        },
+        {
+            "bytes": 7680044,
+            "path": "audio/full-form-corpus/reggae_roots__reggae-24__c4__s1.wav",
+            "sha256": "7ee614fc6301f03ab38bf9d72e90e0585f159208885664d60b8447b208417763"
+        },
+        {
+            "bytes": 4608044,
+            "path": "audio/full-form-corpus/rnb_contemporary_neosoul__rnb-12-8__c4__s1.wav",
+            "sha256": "e5ca7a2621bb643b204c450bf0788c2c5eb12975ba34b20003d8f6e6278c30b4"
+        },
+        {
+            "bytes": 2710634,
+            "path": "audio/full-form-corpus/rnb_contemporary_neosoul__rnb-12__c4__s1.wav",
+            "sha256": "9994c91331f710dcbc02821364565b2c9a5e9a23121f75227b90f12d92764060"
+        },
+        {
+            "bytes": 4608044,
+            "path": "audio/full-form-corpus/rnb_contemporary_neosoul__rnb-16__c4__s1.wav",
+            "sha256": "dbef92cabf02c132f50fede3c84f776e1e4be21496903584752bbedf937ccfed"
+        },
+        {
+            "bytes": 1519166,
+            "path": "audio/full-form-corpus/rock_punk_garage__punk-12__c4__s1.wav",
+            "sha256": "bb166773a1133c09969ad4e278e102e4bc54c345afd790dc7a0cbe69115f82a3"
+        },
+        {
+            "bytes": 2194330,
+            "path": "audio/full-form-corpus/rock_punk_garage__punk-16__c4__s1.wav",
+            "sha256": "8aee80a33748742035063047f64662da9943420e24ea068990ce6b58bf1bfcda"
+        },
+        {
+            "bytes": 980470,
+            "path": "audio/full-form-corpus/rock_punk_garage__punk-8__c4__s1.wav",
+            "sha256": "badb01d587493595fc9e8006ac4badddd10cd697a8be03b51283f59ce8bed7f8"
+        },
+        {
+            "bytes": 2880044,
+            "path": "audio/full-form-corpus/rock_riff_modal__rock-riff-10__c4__s1.wav",
+            "sha256": "1549147af0b297821a7a08fb8d80854a356f4263d1046d2fe0a428704e283ed5"
+        },
+        {
+            "bytes": 3291474,
+            "path": "audio/full-form-corpus/rock_riff_modal__rock-riff-12__c4__s1.wav",
+            "sha256": "bb5d167ffa209eab9edbf3734e1fec7963b91830fdeb2630fdfa491f1e509ae8"
+        },
+        {
+            "bytes": 4007002,
+            "path": "audio/full-form-corpus/rock_riff_modal__rock-riff-16__c4__s1.wav",
+            "sha256": "d78aa4b2dceb5a57ac3d360922b24f1a1d3f28a971884b6e0e4c5627eaee7fd3"
+        },
+        {
+            "bytes": 2513500,
+            "path": "audio/full-form-corpus/rock_shuffle_blues__rock-blues-12-8__c4__s1.wav",
+            "sha256": "c4d6b08670c8fa0c3f0bd9933d7bd5a9acdafb2467be9fbda1a979d1f71ec4ed"
+        },
+        {
+            "bytes": 1728044,
+            "path": "audio/full-form-corpus/rock_shuffle_blues__rock-blues-12__c4__s1.wav",
+            "sha256": "d3ab243fc6bccc3ff27d381580396b476945efe77c5f8efca27af28abed48893"
+        },
+        {
+            "bytes": 3761678,
+            "path": "audio/full-form-corpus/soul_classic_motown__soul-12-8__c4__s1.wav",
+            "sha256": "cfee38fbafeedec8406ed27f473609cee50191083fc68333400bf82b24d61fe8"
+        },
+        {
+            "bytes": 4007002,
+            "path": "audio/full-form-corpus/soul_classic_motown__soul-16__c4__s1.wav",
+            "sha256": "320985d3363e76e856c0e6cfbadf40d5c51ce5aac66b26ab22b8c13c3e070b39"
+        },
+        {
+            "bytes": 5882598,
+            "path": "audio/full-form-corpus/soul_classic_motown__soul-24__c4__s1.wav",
+            "sha256": "8f24e62811de94c435aa8bb1101e70a534aa2821da0ac920d8b19c8829574d65"
+        },
+        {
+            "bytes": 1601866,
+            "path": "full-form-audit-report.json",
+            "sha256": "29716d54fa1b3f0f3649eabddf823d44da706ee7482f075e3ea165166c40b78a"
+        },
+        {
+            "bytes": 74296665,
+            "path": "full-form-corpus.json",
+            "sha256": "affc94fb21a9fd5d04d403aadd30fb20294f6b977aba7d039d3b3e5cb9d5ecac"
+        }
+    ],
+    "automation_format": "jam2-automation",
+    "automation_limits": {
+        "commands_per_turn": 8,
+        "incomplete_frame_timeout_ms": 5000,
+        "max_actions": 128,
+        "max_frame_bytes": 65536,
+        "max_scenario_bytes": 262144,
+        "max_string_bytes": 4096,
+        "queue_capacity": 128
+    },
+    "build": {
+        "bytes": 9028608,
+        "compiled_date": "Jul 29 2026",
+        "compiled_time": "19:31:10",
+        "executable": "C:/Users/Phil/Documents/GitHub/Jam2/release/jam2.exe",
+        "modified_utc": "2026-07-29T19:39:31.912Z",
+        "qt_runtime_version": "6.10.3",
+        "sha256": "fc121168d9c03b47533ef4425001ac7b4a133a40ded78f35b537876addbde330"
+    },
+    "description_format": "jam2-debug-description",
+    "effective_configuration": {
+        "adaptive_playback_cushion": true,
+        "adaptive_playback_max_frames": 1536,
+        "adaptive_playback_min_frames": 256,
+        "adaptive_playback_ratio_ramp_ms": 250,
+        "adaptive_playback_release_ppm": 5000,
+        "adaptive_playback_target_frames": 256,
+        "audio_buffer_size": 32,
+        "audio_device": null,
+        "bind": "0.0.0.0:49000",
+        "bpm": 120,
+        "capture_ring_frames": 4096,
+        "channel_selection": "input=1 output=1,2",
+        "drift_correction": true,
+        "drift_deadband_ppm": 25,
+        "drift_max_correction_ppm": 500,
+        "drift_smoothing": 0.02,
+        "frame_size": 64,
+        "headless_audio": false,
+        "headless_clock_drift_ppm": 0,
+        "input_mix": "1-to-mono-direct",
+        "jitter_buffer_frames": 512,
+        "jitter_buffer_max_frames": 1024,
+        "local_monitor": false,
+        "local_monitor_level": 0.25,
+        "local_profile": "fast",
+        "log_stats_root": "C:/Users/Phil/Documents/GitHub/Jam2/experiments/synth-ab/site/review-pass-2/csv",
+        "max_peers": 0,
+        "metronome": false,
+        "metronome_compensation_deadband_ms": 1,
+        "metronome_compensation_max_ms": 250,
+        "metronome_compensation_slew_ms_per_sec": 40,
+        "metronome_compensation_smoothing_ms": 750,
+        "metronome_level": 1,
+        "metronome_mode": "shared-grid",
+        "network_audio_format": "pcm24-mono",
+        "no_stun": false,
+        "os_priority": "high",
+        "playback_max_frames": 1536,
+        "playback_prefill_frames": 256,
+        "playback_ring_frames": 4096,
+        "playout_delay_frames": 256,
+        "profile": "fast",
+        "public_endpoint": null,
+        "remote_level": 1,
+        "sample_rate": 48000,
+        "sample_time_playout": true,
+        "send_level": 1,
+        "session_profile": "fast",
+        "socket_recv_buffer": null,
+        "socket_send_buffer": null,
+        "stats": true,
+        "stats_interval_ms": 0,
+        "stats_warmup_ms": 3000,
+        "stream_linger_ms": 100,
+        "stream_ms": 0,
+        "stun": "stun.l.google.com:19302",
+        "stun_retries": 3,
+        "stun_timeout_ms": 1000,
+        "test_input": "off",
+        "wait_ms": 0
+    },
+    "finished_utc": "2026-07-29T19:43:27.346Z",
+    "lifecycle": {
+        "end_reason": "completed",
+        "return_code": 0,
+        "state": "finished"
+    },
+    "local_peer_id": null,
+    "ok": true,
+    "operation": "validate.music-full-form-corpus",
+    "platform": {
+        "build_cpu_architecture": "x86_64",
+        "current_cpu_architecture": "x86_64",
+        "kernel_type": "winnt",
+        "kernel_version": "10.0.26200",
+        "pretty_product_name": "Windows 11 Version 25H2",
+        "product_type": "windows",
+        "product_version": "11"
+    },
+    "protocols": {
+        "automation": "jam2-automation",
+        "control_version": 2,
+        "description": "jam2-debug-description",
+        "scenario": "jam2-debug-scenario",
+        "udp_version": 2
+    },
+    "reactive": false,
+    "result": {
+        "audio_mixes": 74,
+        "corpus": "C:/Users/Phil/Documents/GitHub/Jam2/experiments/synth-ab/site/review-pass-2/full-form-corpus.json",
+        "event": "music_full_form_corpus_result",
+        "ok": true,
+        "process_cpu_percent_one_core": 96.69707617190062,
+        "process_cpu_time_ms": 98062.5,
+        "profiles": 27,
+        "samples": 888,
+        "wall_elapsed_ms": 101412.0632
+    },
+    "return_code": 0,
+    "run_id": "music-full-form-corpus-pass-2",
+    "scenario_format": "jam2-debug-scenario",
+    "scenario_path": "C:/Users/Phil/Documents/GitHub/Jam2/experiments/synth-ab/tools/full-form-corpus-pass-2-scenario.json",
+    "scenario_sha256": "186c35e39dac153a9d13078b7788de564c9935e24d135a6315471f400c52f83d",
+    "schema": "jam2-debug-manifest",
+    "started_utc": "2026-07-29T19:41:44.221Z"
+}

@@ -24,7 +24,22 @@ metro level +0.05
 bpm 140
 ```
 
-The GUI exposes the same controls in its runtime/metronome area.
+The GUI exposes the same controls in its runtime/metronome area. It also has
+explicit written beat-unit (`/2`, `/4`, `/8`, or `/16`), tempo-pulse, beats per
+bar, and click-division controls. Generated ideas set them from their researched
+meter.
+
+The written beat unit describes notation and grid positions. Tempo pulse says
+how many written units one displayed BPM pulse spans. Simple and odd meters use
+one; compound 6/8, 9/8, and 12/8 use three eighth-note units per dotted-quarter
+pulse. At 120 BPM, a written eighth in compound meter therefore lasts one third
+of a 120 BPM pulse. The click is enabled at researched group starts by default,
+so 12/8 clicks four dotted-quarter pulses rather than all twelve eighths.
+
+Both fields are persisted and authenticated in peer settings and are applied by
+the audio clock, GUI playback grid, waveform/looper markers, quantized recording
+schedules, and bar-duration calculations. The notation denominator never
+silently rescales a profile's researched BPM range.
 
 ## Modes
 

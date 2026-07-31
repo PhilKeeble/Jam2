@@ -305,12 +305,16 @@ struct StreamControl {
     std::atomic<int> metronome_bpm{120};
     std::atomic<int> metronome_beats_per_bar{4};
     std::atomic<int> metronome_division{1};
+    std::atomic<int> metronome_beat_unit{4};
+    std::atomic<int> metronome_tempo_pulse_units{1};
     std::atomic<int> metronome_step_count{4};
     std::atomic<std::uint64_t> metronome_play_mask_low{0x0fULL};
     std::atomic<std::uint64_t> metronome_play_mask_high{0};
     std::atomic<std::uint64_t> metronome_accent_mask_low{0x01ULL};
     std::atomic<std::uint64_t> metronome_accent_mask_high{0};
     std::atomic<int> metronome_level_ppm{200000};
+    std::atomic<int> metronome_sound{
+        static_cast<int>(metronome::ClickSound::Classic)};
     std::atomic<int> remote_level_ppm{1000000};
     std::atomic<bool> local_monitor_enabled{false};
     std::atomic<int> local_monitor_level_ppm{250000};

@@ -44,6 +44,7 @@ public:
     void setSelectedPeer(std::uint64_t peerId);
     void setTrackGainDb(double gainDb);
     void setTrackWaveform(std::vector<float> peaks, bool valid);
+    void setWavGenerationActive(bool active);
     void setTechnicalSummary(
         const QString& rtt,
         const QString& jitter,
@@ -55,6 +56,7 @@ public:
     std::function<void(std::uint64_t)> onPeerSelected;
     std::function<void(double)> onTrackGainChanged;
     std::function<void()> onGenerateIdea;
+    std::function<void()> onClearIdea;
     std::function<void()> onGenerateWav;
     std::function<void(bool)> onTunerEnabledChanged;
 
@@ -120,6 +122,7 @@ private:
     bool tunerExpanded_ = false;
     std::vector<float> trackWaveformPeaks_;
     bool trackWaveformValid_ = false;
+    bool wavGenerationActive_ = false;
     QString rtt_ = QStringLiteral("-");
     QString jitter_ = QStringLiteral("-");
     QString loss_ = QStringLiteral("-");
@@ -142,6 +145,7 @@ private:
     QRect chordRunwayRect_;
     QRect lyricsHitRect_;
     QRect generateIdeaHitRect_;
+    QRect clearIdeaHitRect_;
     QRect generateWavHitRect_;
     QRect currentBeatHitRect_;
     QRect nextBeatHitRect_;

@@ -3916,6 +3916,11 @@ void MainWindow::applyPreferencesToControls()
         preferences_.recording.loopback.outputFolder = appReleaseFolderPath(QStringLiteral("captures"));
     }
     applyCreateDefaultsToControls();
+    if (metronomeSoundBox_) {
+        const QSignalBlocker blocker(metronomeSoundBox_);
+        const int index = metronomeSoundBox_->findData(preferences_.metronomeSound);
+        metronomeSoundBox_->setCurrentIndex(index >= 0 ? index : 0);
+    }
     joinProfileName_ = preferences_.join.tuning.profile;
 }
 
@@ -4434,9 +4439,12 @@ void MainWindow::refreshLooperLanes()
         chordModel_.sections().isEmpty()
         ? qMax(1, currentMetronomePattern().beats_per_bar)
         : qMax(1, chordModel_.section(0).beats);
+    const int tempoPulseUnits =
+        currentMetronomePattern().tempo_pulse_units;
     const qint64 sectionFrames = static_cast<qint64>(std::llround(
         static_cast<double>(markerRate) * 60.0 /
         qMax(1.0, metronomeTransport_.grid().bpm()) *
+        (1.0 / static_cast<double>(tempoPulseUnits)) *
         static_cast<double>(sectionBeats)));
     qint64 preparedFrames = 0;
     if (preparedMix_.frames > 0 && preparedMix_.sampleRate > 0) {
@@ -4458,6 +4466,7 @@ void MainWindow::refreshLooperLanes()
         markerRate,
         minimumViewFrames,
         metronomeTransport_.grid().bpm(),
+        tempoPulseUnits,
         looperProject_.gridLockEnabled());
 
     if (missingWaveforms.isEmpty() || looperWaveformWorkerRunning_) {
@@ -5588,9 +5597,13 @@ void MainWindow::applyPreparedMixResult(PreparedMixResult result)
             }
         }
         obsoletePreparedMixPaths_.clear();
-        appendLog(QStringLiteral("prepared mix: %1 frames in %2 ms worker_requests=%3 worker_coalesced=%4 worker_failures=%5")
+        appendLog(QStringLiteral("prepared mix: %1 frames in %2 ms pre_master_peak=%3 output_peak=%4 master_pre_gain=%5 over_unity_samples=%6 worker_requests=%7 worker_coalesced=%8 worker_failures=%9")
             .arg(preparedMix_.frames)
             .arg(preparedMix_.renderMs)
+            .arg(preparedMix_.preMasterPeak, 0, 'f', 4)
+            .arg(preparedMix_.outputPeak, 0, 'f', 4)
+            .arg(preparedMix_.masterPreGain, 0, 'f', 3)
+            .arg(preparedMix_.overUnitySamples)
             .arg(preparedMixRequests_)
             .arg(preparedMixCoalesced_)
             .arg(preparedMixFailures_));
@@ -5930,7 +5943,8 @@ void MainWindow::startInputCapture(std::uint64_t targetFrame, int countInBars)
         durationBars,
         pattern.beats_per_bar,
         pattern.bpm,
-        recordingSampleRate);
+        recordingSampleRate,
+        pattern.tempo_pulse_units);
     if (!trackRecordingWorkflow_.startInputTake(
             output,
             !QFileInfo::exists(output),
@@ -6008,6 +6022,7 @@ void MainWindow::startLoopbackCapture()
     const auto pattern = currentMetronomePattern();
     options.bpm = pattern.bpm;
     options.beatsPerBar = pattern.beats_per_bar;
+    options.tempoPulseUnits = pattern.tempo_pulse_units;
     options.trigger = captureTriggerCheck_ && captureTriggerCheck_->isChecked();
     options.triggerThresholdDb = triggerThresholdSpin_ ? triggerThresholdSpin_->value() : -45.0;
     options.triggerHoldMs = triggerHoldSpin_ ? triggerHoldSpin_->value() : 50;
@@ -6019,11 +6034,12 @@ void MainWindow::startLoopbackCapture()
 
     QString error;
     appendLog(QStringLiteral(
-        "starting internal loopback recording: target_sample_rate=%1 duration_bars=%2 bpm=%3 beats_per_bar=%4 trigger=%5 output=%6")
+        "starting internal loopback recording: target_sample_rate=%1 duration_bars=%2 bpm=%3 meter=%4/%5 trigger=%6 output=%7")
         .arg(recordingSampleRate)
         .arg(options.durationBars > 0 ? QString::number(options.durationBars) : QStringLiteral("manual"))
         .arg(options.bpm, 0, 'f', 3)
         .arg(options.beatsPerBar)
+        .arg(pattern.beat_unit)
         .arg(options.trigger ? QStringLiteral("yes") : QStringLiteral("no"))
         .arg(output));
     if (!loopbackRecorder_.start(options, [this](
@@ -6451,6 +6467,9 @@ jam2::metronome::PatternSnapshot MainWindow::currentMetronomePattern() const
     jam2::metronome::PatternSnapshot pattern;
     pattern.bpm = metronomeBpmSpin_ ? metronomeBpmSpin_->value() : 120;
     pattern.beats_per_bar = metronomeBeatsSpin_ ? metronomeBeatsSpin_->value() : 4;
+    pattern.beat_unit = metronomeBeatUnitBox_ ? metronomeBeatUnitBox_->currentData().toInt() : 4;
+    pattern.tempo_pulse_units = metronomeTempoPulseBox_
+        ? metronomeTempoPulseBox_->currentData().toInt() : 1;
     pattern.division = metronomeDivisionBox_ ? metronomeDivisionBox_->currentData().toInt() : 1;
     pattern.step_count = jam2::metronome::pattern_step_count(pattern.beats_per_bar, pattern.division);
     pattern.play_mask_low = 0;
@@ -6480,6 +6499,20 @@ void MainWindow::sendMetronomeModeToJam()
         metronomeModeBox_->currentText() == QStringLiteral("listener-compensated") ? 2 : 0;
     if (!metronomeTransport_.submit(command)) {
         appendLog(QStringLiteral("engine command rejected: metronome mode"));
+    }
+}
+
+void MainWindow::sendMetronomeSoundToJam()
+{
+    if (!jam2_.isRunning() || !metronomeSoundBox_) {
+        return;
+    }
+    jam2::EngineCommand command;
+    command.type = jam2::EngineCommandType::SetMetronomeSound;
+    command.value = static_cast<int>(jam2::metronome::sanitize_click_sound(
+        metronomeSoundBox_->currentData().toInt()));
+    if (!jam2_.submit(command)) {
+        appendLog(QStringLiteral("engine command rejected: metronome sound"));
     }
 }
 
@@ -6572,6 +6605,8 @@ void MainWindow::sendMetronomeSettingsToPeer()
         {QStringLiteral("mode"), metronomeModeBox_ ? metronomeModeBox_->currentText() : QStringLiteral("shared-grid")},
         {QStringLiteral("bpm"), pattern.bpm},
         {QStringLiteral("beats"), pattern.beats_per_bar},
+        {QStringLiteral("beat_unit"), pattern.beat_unit},
+        {QStringLiteral("tempo_pulse_units"), pattern.tempo_pulse_units},
         {QStringLiteral("division"), pattern.division},
         {QStringLiteral("play_mask_low"), QString::number(static_cast<qulonglong>(pattern.play_mask_low), 16)},
         {QStringLiteral("play_mask_high"), QString::number(static_cast<qulonglong>(pattern.play_mask_high), 16)},
@@ -6598,6 +6633,13 @@ void MainWindow::applyRemoteMetronomeSettings(const QJsonObject& message)
         : QStringLiteral("shared-grid"));
     const int bpm = qBound(1, message.value(QStringLiteral("bpm")).toInt(metronomeBpmSpin_ ? metronomeBpmSpin_->value() : 120), 400);
     const int beats = qBound(1, message.value(QStringLiteral("beats")).toInt(metronomeBeatsSpin_ ? metronomeBeatsSpin_->value() : 4), 16);
+    const int beatUnit = jam2::metronome::clamp_beat_unit(
+        message.value(QStringLiteral("beat_unit")).toInt(
+            metronomeBeatUnitBox_ ? metronomeBeatUnitBox_->currentData().toInt() : 4));
+    const int tempoPulseUnits = jam2::metronome::clamp_tempo_pulse_units(
+        message.value(QStringLiteral("tempo_pulse_units")).toInt(
+            metronomeTempoPulseBox_
+                ? metronomeTempoPulseBox_->currentData().toInt() : 1));
     const int division = qMax(1, message.value(QStringLiteral("division")).toInt(metronomeDivisionBox_ ? metronomeDivisionBox_->currentData().toInt() : 1));
     const std::uint64_t playLow = parseMask(message, QStringLiteral("play_mask_low"));
     const std::uint64_t playHigh = parseMask(message, QStringLiteral("play_mask_high"));
@@ -6617,6 +6659,18 @@ void MainWindow::applyRemoteMetronomeSettings(const QJsonObject& message)
         const QSignalBlocker blocker(metronomeBeatsSpin_);
         metronomeBeatsSpin_->setValue(beats);
     }
+    if (metronomeBeatUnitBox_) {
+        const QSignalBlocker blocker(metronomeBeatUnitBox_);
+        const int index = metronomeBeatUnitBox_->findData(beatUnit);
+        if (index >= 0) {
+            metronomeBeatUnitBox_->setCurrentIndex(index);
+        }
+    }
+    if (metronomeTempoPulseBox_) {
+        const QSignalBlocker blocker(metronomeTempoPulseBox_);
+        const int index = metronomeTempoPulseBox_->findData(tempoPulseUnits);
+        if (index >= 0) metronomeTempoPulseBox_->setCurrentIndex(index);
+    }
     if (metronomeDivisionBox_) {
         const QSignalBlocker blocker(metronomeDivisionBox_);
         const int index = metronomeDivisionBox_->findData(division);
@@ -6635,6 +6689,8 @@ void MainWindow::applyRemoteMetronomeSettings(const QJsonObject& message)
     jam2::metronome::PatternSnapshot pattern;
     pattern.bpm = bpm;
     pattern.beats_per_bar = beats;
+    pattern.beat_unit = beatUnit;
+    pattern.tempo_pulse_units = tempoPulseUnits;
     pattern.division = division;
     pattern.step_count = jam2::metronome::pattern_step_count(beats, division);
     pattern.play_mask_low = playLow;
@@ -7515,6 +7571,8 @@ Jam2RuntimeOptions MainWindow::runtimeOptions() const
     options.metronome = false;
     options.bpm = metronomeBpmSpin_ ? metronomeBpmSpin_->value() : bpmSpin_->value();
     options.metronome_level = gainFromDb(static_cast<double>(metronomeLevelSlider_ ? metronomeLevelSlider_->value() : -10));
+    options.metronome_sound = jam2::metronome::sanitize_click_sound(
+        metronomeSoundBox_ ? metronomeSoundBox_->currentData().toInt() : 0);
     const QString metronomeMode = metronomeModeBox_->currentText();
     options.metronome_mode = metronomeMode == QStringLiteral("leader-audio")
         ? Jam2MetronomeMode::LeaderAudio
@@ -7641,6 +7699,8 @@ QJsonObject MainWindow::trackToJson() const
         {QStringLiteral("lowpass_hz"), model.lowpassHz},
         {QStringLiteral("metronome_bpm"), metronomeBpmSpin_ ? metronomeBpmSpin_->value() : 120},
         {QStringLiteral("metronome_beats"), metronomeBeatsSpin_ ? metronomeBeatsSpin_->value() : 4},
+        {QStringLiteral("metronome_beat_unit"), metronomeBeatUnitBox_ ? metronomeBeatUnitBox_->currentData().toInt() : 4},
+        {QStringLiteral("metronome_tempo_pulse_units"), metronomeTempoPulseBox_ ? metronomeTempoPulseBox_->currentData().toInt() : 1},
         {QStringLiteral("metronome_division"), metronomeDivisionBox_ ? metronomeDivisionBox_->currentData().toInt() : 1},
         {QStringLiteral("metronome_click_enabled"), clickEnabled},
         {QStringLiteral("metronome_click_accents"), clickAccents},
@@ -7680,13 +7740,25 @@ void MainWindow::loadTrackJson(const QJsonObject& object)
     const int savedBpm = qBound(1,
         object.value(QStringLiteral("metronome_bpm")).toInt(static_cast<int>(std::lround(model.acceptedBpm))), 400);
     const int savedBeats = qBound(1, object.value(QStringLiteral("metronome_beats")).toInt(4), 16);
+    const int savedBeatUnit = jam2::metronome::clamp_beat_unit(
+        object.value(QStringLiteral("metronome_beat_unit")).toInt(4));
+    const int savedTempoPulseUnits = jam2::metronome::clamp_tempo_pulse_units(
+        object.value(QStringLiteral("metronome_tempo_pulse_units")).toInt(1));
     const int savedDivision = object.value(QStringLiteral("metronome_division")).toInt(1);
     {
         const QSignalBlocker bpmBlocker(metronomeBpmSpin_);
         const QSignalBlocker beatsBlocker(metronomeBeatsSpin_);
+        const QSignalBlocker beatUnitBlocker(metronomeBeatUnitBox_);
+        const QSignalBlocker tempoPulseBlocker(metronomeTempoPulseBox_);
         const QSignalBlocker divisionBlocker(metronomeDivisionBox_);
         metronomeBpmSpin_->setValue(savedBpm);
         metronomeBeatsSpin_->setValue(savedBeats);
+        const int beatUnitIndex = metronomeBeatUnitBox_->findData(savedBeatUnit);
+        metronomeBeatUnitBox_->setCurrentIndex(beatUnitIndex >= 0 ? beatUnitIndex : 1);
+        const int pulseIndex =
+            metronomeTempoPulseBox_->findData(savedTempoPulseUnits);
+        metronomeTempoPulseBox_->setCurrentIndex(
+            pulseIndex >= 0 ? pulseIndex : 0);
         const int divisionIndex = metronomeDivisionBox_->findData(savedDivision);
         metronomeDivisionBox_->setCurrentIndex(divisionIndex >= 0 ? divisionIndex : 0);
     }
@@ -7756,7 +7828,11 @@ void MainWindow::updatePlaybackGrid()
     const bool jamGrid = jam2_.isRunning();
     if (!jamGrid) {
         const auto pattern = currentMetronomePattern();
-        metronomeTransport_.grid().setPattern(pattern.bpm, pattern.beats_per_bar, pattern.division);
+        metronomeTransport_.grid().setPattern(
+            pattern.bpm,
+            pattern.beats_per_bar,
+            pattern.division,
+            pattern.tempo_pulse_units);
         metronomeTransport_.grid().clearEngine();
     }
     const PlaybackGrid::Position position = metronomeTransport_.grid().position();
@@ -7778,8 +7854,12 @@ void MainWindow::updatePlaybackGrid()
         trackRecordingWorkflow_.preparedPlaying() &&
         trackController_.model().durationMs > 0) {
         const double bpm = qMax(1.0, trackController_.model().acceptedBpm);
+        const int tempoPulseUnits =
+            currentMetronomePattern().tempo_pulse_units;
         const double trackBeat =
-            static_cast<double>(qMax<qint64>(0, currentAudibleTrackPositionMs())) * bpm / 60000.0;
+            static_cast<double>(qMax<qint64>(
+                0, currentAudibleTrackPositionMs())) *
+            bpm * tempoPulseUnits / 60000.0;
         visualAbsoluteBeat = static_cast<quint64>(std::floor(trackBeat));
         beatPhase = trackBeat - std::floor(trackBeat);
         visualRunning = true;
@@ -7894,7 +7974,8 @@ void MainWindow::updatePlaybackGrid()
         trackWaveform_->setGridPosition(
             gridPositionMs,
             showMarkerReference && (markerRunning || trackPlaying),
-            currentMetronomePattern().beats_per_bar);
+            currentMetronomePattern().beats_per_bar,
+            currentMetronomePattern().tempo_pulse_units);
     }
     if (looperStack_) {
         const bool trackPlaying = trackRecordingWorkflow_.preparedPlaying();
@@ -7906,7 +7987,8 @@ void MainWindow::updatePlaybackGrid()
             gridPositionMs,
             showMarkerReference && (markerRunning || trackPlaying),
             metronomeTransport_.grid().bpm(),
-            currentMetronomePattern().beats_per_bar);
+            currentMetronomePattern().beats_per_bar,
+            currentMetronomePattern().tempo_pulse_units);
     }
 }
 
@@ -8202,7 +8284,7 @@ void MainWindow::discardPreparedMix(bool replacementExpected)
     preparedMix_ = {};
     auto& track = trackController_.model();
     track.fileName = replacementExpected
-        ? QStringLiteral("Preparing generated references")
+        ? QStringLiteral("Preparing backing tracks")
         : QStringLiteral("No generated reference WAVs");
     track.filePath.clear();
     track.fileBytes = 0;
@@ -8212,7 +8294,7 @@ void MainWindow::discardPreparedMix(bool replacementExpected)
     updateTrackControls();
 }
 
-void MainWindow::clearPracticeReferenceWavs()
+bool MainWindow::clearPracticeReferenceWavs(bool rebuildRemainingTracks)
 {
     QSet<QString> referencePaths;
     bool hadReferences = false;
@@ -8228,14 +8310,22 @@ void MainWindow::clearPracticeReferenceWavs()
         }
     }
     if (!hadReferences) {
-        return;
+        return false;
     }
     jam2::practice::PracticeIdeaController::clearReferences(looperProject_);
     discardObsoleteReferenceWavs(referencePaths);
     if (preparedMixWorkerRunning_) {
         preparedMixRerunPending_ = true;
     }
-    discardPreparedMix(false);
+    const bool hasRemainingActiveTracks =
+        !looperProject_.banks().at(looperProject_.activeBankIndex()).lanes.isEmpty();
+    if (rebuildRemainingTracks && hasRemainingActiveTracks) {
+        discardPreparedMix(true);
+        regeneratePreparedMix();
+    } else {
+        discardPreparedMix(false);
+    }
+    return true;
 }
 
 void MainWindow::cleanupTransientTrackWavs()
@@ -8351,6 +8441,23 @@ void MainWindow::generatePracticeIdea()
     }
 }
 
+void MainWindow::clearPracticeIdea()
+{
+    ++practiceIdeaRevision_;
+    stopTrackForPracticeIdeaGeneration();
+    chordModel_.clearContent();
+    const bool removedReferences = clearPracticeReferenceWavs(true);
+    refreshSongViews();
+    refreshLooperLanes();
+    if (performanceHome_) {
+        performanceHome_->update();
+    }
+    sendSongSnapshot(false);
+    appendLog(removedReferences
+        ? QStringLiteral("cleared idea and generated reference tracks; custom tracks retained")
+        : QStringLiteral("cleared idea; custom tracks retained"));
+}
+
 bool MainWindow::applyPracticeIdea(const jam2::practice::ChordIdeaRequest& request)
 {
     const auto idea = jam2::practice::PracticeIdeaController::generateCoupled(
@@ -8364,9 +8471,16 @@ bool MainWindow::applyPracticeIdea(const jam2::practice::ChordIdeaRequest& reque
     {
         const QSignalBlocker bpmBlocker(metronomeBpmSpin_);
         const QSignalBlocker beatsBlocker(metronomeBeatsSpin_);
+        const QSignalBlocker beatUnitBlocker(metronomeBeatUnitBox_);
+        const QSignalBlocker tempoPulseBlocker(metronomeTempoPulseBox_);
         const QSignalBlocker divisionBlocker(metronomeDivisionBox_);
         metronomeBpmSpin_->setValue(idea->bpm);
-        metronomeBeatsSpin_->setValue(request.beatsPerBar);
+        metronomeBeatsSpin_->setValue(idea->meterNumerator);
+        const int beatUnitIndex = metronomeBeatUnitBox_->findData(idea->meterDenominator);
+        if (beatUnitIndex >= 0) metronomeBeatUnitBox_->setCurrentIndex(beatUnitIndex);
+        const int pulseIndex =
+            metronomeTempoPulseBox_->findData(idea->tempoPulseUnits);
+        if (pulseIndex >= 0) metronomeTempoPulseBox_->setCurrentIndex(pulseIndex);
         const int divisionIndex = metronomeDivisionBox_->findData(idea->clickDivision);
         if (divisionIndex >= 0) metronomeDivisionBox_->setCurrentIndex(divisionIndex);
     }
@@ -8377,6 +8491,7 @@ bool MainWindow::applyPracticeIdea(const jam2::practice::ChordIdeaRequest& reque
     updateTrackMetronomeInterval();
     if (chordGrid_) chordGrid_->focusGeneratedSection(QStringLiteral("chord"));
     if (beatGrid_) beatGrid_->focusGeneratedSection(QStringLiteral("beat"));
+    if (lyricGrid_) lyricGrid_->focusGeneratedSection(QStringLiteral("lyric"));
     refreshLooperLanes();
     sendSongSnapshot(false);
     return true;
@@ -8422,98 +8537,259 @@ void MainWindow::ensureInitialPracticeIdea()
 
 void MainWindow::generatePracticeReferenceWavs()
 {
-    std::optional<SongSection> chordSection =
-        jam2::practice::PracticeIdeaController::generatedSection(chordModel_, QStringLiteral("chord"));
-    std::optional<SongSection> beatSection =
-        jam2::practice::PracticeIdeaController::generatedSection(beatModel_, QStringLiteral("beat"));
-    if (!chordSection && !beatSection) {
-        QMessageBox::information(this, QStringLiteral("Generate Reference WAVs"),
-            QStringLiteral("Generate a chord or beat idea first."));
+    if (referenceWavGenerationRunning_) {
+        appendLog(QStringLiteral("reference WAV generation is already running"));
         return;
     }
+
+    const int bankCount = looperProject_.banks().size();
+    const int sectionCount = qMin(chordModel_.sections().size(), bankCount);
+    if (sectionCount <= 0) {
+        QMessageBox::information(this, QStringLiteral("Generate Reference WAVs"),
+            QStringLiteral("Add a song section first."));
+        return;
+    }
+    if (chordModel_.sections().size() > bankCount) {
+        QMessageBox::information(this, QStringLiteral("Generate Reference WAVs"),
+            QStringLiteral(
+                "The first four sections map to Banks A-D. Later sections are marked "
+                "NO BANK and will not be rendered yet."));
+    }
+
+    QVector<jam2::practice::ReferenceLayerAvailability> availableLayers;
+    availableLayers.reserve(sectionCount);
+    bool anyChords = false;
+    bool anyDrums = false;
+    bool anyMelody = false;
+    bool anyBass = false;
+    bool anySupport = false;
+    int maxBeats = 0;
+    for (int index = 0; index < sectionCount; ++index) {
+        const SongSection& section = chordModel_.section(index);
+        const auto available =
+            jam2::practice::PracticeIdeaController::referenceLayers(section);
+        availableLayers.push_back(available);
+        anyChords = anyChords || available.chords;
+        anyDrums = anyDrums || available.drums;
+        anyMelody = anyMelody || available.melody;
+        anyBass = anyBass || available.bass;
+        anySupport = anySupport || available.support;
+        maxBeats = qMax(maxBeats, section.beats);
+    }
+    if (!anyChords && !anyDrums && !anyMelody && !anyBass && !anySupport) {
+        QMessageBox::information(this, QStringLiteral("Generate Reference WAVs"),
+            QStringLiteral("Add chords, beat hits, melody, bass, or supporting-line notes to the first four sections."));
+        return;
+    }
+
     const auto pattern = currentMetronomePattern();
     jam2::practice::ReferenceRenderSettings defaults;
-    defaults.renderChords = chordSection.has_value();
-    defaults.renderDrums = beatSection.has_value();
-    defaults.renderMelody = chordSection && std::any_of(
-        chordSection->targets.cbegin(), chordSection->targets.cend(),
-        [](const QString& note) {
-            return jam2::practice::parseMidiNote(note).has_value();
-        });
+    defaults.renderChords = anyChords;
+    defaults.renderDrums = anyDrums;
+    defaults.renderMelody = anyMelody;
+    defaults.renderBass = anyBass;
+    defaults.renderSupport = anySupport;
     defaults.bpm = pattern.bpm;
     defaults.sampleRate = activeTrackSampleRate();
+    defaults.tempoPulseUnits = pattern.tempo_pulse_units;
+    if (!chordModel_.sections().isEmpty() &&
+        chordModel_.section(0).generatedRecipe.isValid()) {
+        defaults.meterNumerator =
+            chordModel_.section(0).generatedRecipe.meterNumerator;
+        defaults.meterDenominator =
+            chordModel_.section(0).generatedRecipe.meterDenominator;
+        defaults.tempoPulseUnits =
+            chordModel_.section(0).generatedRecipe.tempoPulseUnits;
+    }
     const auto settings = jam2::practice::askForReferenceRender(
-        this, defaults, chordSection ? chordSection->beats : 0,
-        beatSection ? beatSection->beats : 0,
-        defaults.renderMelody && chordSection ? chordSection->beats : 0);
+        this, defaults,
+        anyChords ? maxBeats : 0,
+        anyDrums ? maxBeats : 0,
+        anyMelody ? maxBeats : 0,
+        anyBass ? maxBeats : 0,
+        anySupport ? maxBeats : 0,
+        sectionCount);
     if (!settings) {
         return;
     }
 
-    struct RenderState {
-        std::optional<SongSection> chord;
-        std::optional<SongSection> beat;
+    struct SectionRender {
+        int bankIndex = 0;
+        QString bankId;
+        SongSection section;
         jam2::practice::ReferenceRenderSettings settings;
         jam2::practice::ReferenceRenderResult result;
+    };
+    struct RenderState {
+        QVector<SectionRender> sections;
+        QString error;
         std::uint64_t ideaRevision = 0;
+        int songRevision = 0;
     };
     auto state = std::make_shared<RenderState>();
-    state->chord = std::move(chordSection);
-    state->beat = std::move(beatSection);
-    state->settings = *settings;
+    state->sections.reserve(sectionCount);
+    for (int index = 0; index < sectionCount; ++index) {
+        SectionRender render;
+        render.bankIndex = index;
+        render.bankId = looperProject_.banks().at(index).id;
+        if (render.bankId.trimmed().isEmpty()) {
+            render.bankId = QString(QChar(static_cast<ushort>('A' + index)));
+        }
+        render.section = chordModel_.section(index);
+        render.settings = *settings;
+        render.settings.renderChords =
+            settings->renderChords && availableLayers[index].chords;
+        render.settings.renderDrums =
+            settings->renderDrums && availableLayers[index].drums;
+        render.settings.renderMelody =
+            settings->renderMelody && availableLayers[index].melody;
+        render.settings.renderBass =
+            settings->renderBass && availableLayers[index].bass;
+        render.settings.renderSupport =
+            settings->renderSupport && availableLayers[index].support;
+        state->sections.push_back(std::move(render));
+    }
     state->ideaRevision = practiceIdeaRevision_;
+    state->songRevision = chordModel_.revision();
     const QString workspace = projectPersistence_.workspaceFolder();
     const bool started = startFileWorkerTask(
         [state, workspace] {
-            state->result = jam2::practice::renderPracticeReferences(
-                state->chord ? &*state->chord : nullptr,
-                state->beat ? &*state->beat : nullptr,
-                state->settings,
-                workspace);
-        },
-        [this, state] {
-            const auto discardRenderedResult = [&state] {
-                if (!state->result.chords.path.isEmpty()) QFile::remove(state->result.chords.path);
-                if (!state->result.drums.path.isEmpty()) QFile::remove(state->result.drums.path);
-                if (!state->result.melody.path.isEmpty()) QFile::remove(state->result.melody.path);
-            };
-            if (state->ideaRevision != practiceIdeaRevision_) {
-                discardRenderedResult();
-                appendLog(QStringLiteral(
-                    "discarded reference WAV render superseded by a new practice idea"));
-                return;
-            }
-            if (!state->result.error.isEmpty()) {
-                discardRenderedResult();
-                QMessageBox::warning(this, QStringLiteral("Generate Reference WAVs"), state->result.error);
-                return;
-            }
-            const int bankIndex = looperProject_.activeBankIndex();
-            QSet<QString> previousReferencePaths;
-            for (const LooperLane& lane : looperProject_.banks().at(bankIndex).lanes) {
-                if (isManagedPracticeReference(lane) &&
-                    !lane.assetPath.trimmed().isEmpty()) {
-                    previousReferencePaths.insert(looperAssetAbsolutePath(lane));
+            for (SectionRender& render : state->sections) {
+                if (!render.settings.renderChords &&
+                    !render.settings.renderDrums &&
+                    !render.settings.renderMelody &&
+                    !render.settings.renderBass &&
+                    !render.settings.renderSupport) {
+                    continue;
+                }
+                render.result = jam2::practice::renderPracticeReferences(
+                    render.settings.renderChords || render.settings.renderMelody ||
+                        render.settings.renderBass || render.settings.renderSupport
+                        ? &render.section : nullptr,
+                    render.settings.renderDrums ? &render.section : nullptr,
+                    render.settings,
+                    workspace);
+                if (!render.result.error.isEmpty()) {
+                    state->error = QStringLiteral("Section %1 / Bank %2: %3")
+                        .arg(render.bankIndex + 1)
+                        .arg(render.bankId, render.result.error);
+                    break;
                 }
             }
-            QString applyError;
-            if (!jam2::practice::PracticeIdeaController::applyReferences(
-                    looperProject_, bankIndex, state->settings, state->result, applyError)) {
-                discardRenderedResult();
-                QMessageBox::warning(this, QStringLiteral("Generate Reference WAVs"), applyError);
+        },
+        [this, state] {
+            referenceWavGenerationRunning_ = false;
+            if (performanceHome_) {
+                performanceHome_->setWavGenerationActive(false);
+            }
+            const auto discardRenderedResults = [&state] {
+                for (const SectionRender& render : state->sections) {
+                    if (!render.result.chords.path.isEmpty()) QFile::remove(render.result.chords.path);
+                    if (!render.result.drums.path.isEmpty()) QFile::remove(render.result.drums.path);
+                    if (!render.result.melody.path.isEmpty()) QFile::remove(render.result.melody.path);
+                    if (!render.result.bass.path.isEmpty()) QFile::remove(render.result.bass.path);
+                    if (!render.result.support.path.isEmpty()) QFile::remove(render.result.support.path);
+                }
+            };
+            if (state->ideaRevision != practiceIdeaRevision_ ||
+                state->songRevision != chordModel_.revision()) {
+                discardRenderedResults();
+                appendLog(QStringLiteral(
+                    "discarded reference WAV render superseded by a song edit"));
                 return;
             }
-            if (state->settings.renderChords) registerTransientTrackWav(state->result.chords.path);
-            if (state->settings.renderDrums) registerTransientTrackWav(state->result.drums.path);
-            if (state->settings.renderMelody) registerTransientTrackWav(state->result.melody.path);
+            if (!state->error.isEmpty()) {
+                discardRenderedResults();
+                QMessageBox::warning(this, QStringLiteral("Generate Reference WAVs"), state->error);
+                return;
+            }
+
+            QSet<QString> previousReferencePaths;
+            for (const LooperBank& bank : looperProject_.banks()) {
+                for (const LooperLane& lane : bank.lanes) {
+                    if (isManagedPracticeReference(lane) &&
+                        !lane.assetPath.trimmed().isEmpty()) {
+                        previousReferencePaths.insert(looperAssetAbsolutePath(lane));
+                    }
+                }
+            }
+
+            LooperProject stagedProject = looperProject_;
+            jam2::practice::PracticeIdeaController::clearReferences(stagedProject);
+            for (const SectionRender& render : state->sections) {
+                if (!render.settings.renderChords &&
+                    !render.settings.renderDrums &&
+                    !render.settings.renderMelody &&
+                    !render.settings.renderBass &&
+                    !render.settings.renderSupport) {
+                    continue;
+                }
+                QString applyError;
+                if (!jam2::practice::PracticeIdeaController::applyReferences(
+                        stagedProject,
+                        render.bankIndex,
+                        render.settings,
+                        render.result,
+                        applyError,
+                        QStringLiteral("Section %1").arg(render.bankId))) {
+                    discardRenderedResults();
+                    QMessageBox::warning(
+                        this,
+                        QStringLiteral("Generate Reference WAVs"),
+                        QStringLiteral("Section %1 / Bank %2: %3")
+                            .arg(render.bankIndex + 1)
+                            .arg(render.bankId, applyError));
+                    return;
+                }
+            }
+            looperProject_ = std::move(stagedProject);
+            for (const SectionRender& render : state->sections) {
+                if (render.settings.renderChords) {
+                    registerTransientTrackWav(render.result.chords.path);
+                }
+                if (render.settings.renderDrums) {
+                    registerTransientTrackWav(render.result.drums.path);
+                }
+                if (render.settings.renderMelody) {
+                    registerTransientTrackWav(render.result.melody.path);
+                }
+                if (render.settings.renderBass) {
+                    registerTransientTrackWav(render.result.bass.path);
+                }
+                if (render.settings.renderSupport) {
+                    registerTransientTrackWav(render.result.support.path);
+                }
+                if (!render.result.diagnostics.isEmpty()) {
+                    appendLog(QStringLiteral("Bank %1: %2")
+                        .arg(render.bankId, render.result.diagnostics));
+                }
+            }
             discardObsoleteReferenceWavs(previousReferencePaths);
             discardPreparedMix(true);
             refreshLooperLanes();
             regeneratePreparedMix();
-            if (!state->result.diagnostics.isEmpty()) appendLog(state->result.diagnostics);
             appendLog(QStringLiteral(
-                "practice reference WAVs rendered locally; use Share Tracks to publish them"));
+                "%1 song section(s) rendered locally into Banks A-%2; "
+                "use Share Tracks to publish them")
+                .arg(state->sections.size())
+                .arg(state->sections.constLast().bankId));
+        },
+        [this](const QString& error) {
+            referenceWavGenerationRunning_ = false;
+            if (performanceHome_) {
+                performanceHome_->setWavGenerationActive(false);
+            }
+            QMessageBox::warning(
+                this,
+                QStringLiteral("Generate Reference WAVs"),
+                QStringLiteral("Reference WAV generation failed: %1").arg(error));
         });
+    if (started) {
+        referenceWavGenerationRunning_ = true;
+        if (performanceHome_) {
+            performanceHome_->setWavGenerationActive(true);
+        }
+    }
     if (!started) {
         QMessageBox::warning(this, QStringLiteral("Generate Reference WAVs"),
             QStringLiteral("The reference render worker is currently busy."));
