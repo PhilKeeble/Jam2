@@ -144,8 +144,8 @@ could depend on heap contents. Exactly one synthetic-layer kick failed per
 parity run, but the affected profile moved between Blues Minor and Boom-Bap.
 `cmake/PrepareDaisySPDrums.cmake` now produces a build-local corrected
 translation unit for both production and the Lab, verifies the exact pinned
-source anchor, and leaves `.deps/DaisySP` untouched. This correction must be
-included in the resumed rebuild before parity is accepted.
+source anchor, and leaves the vendored DaisySP source untouched. This
+correction must be included in the resumed rebuild before parity is accepted.
 
 ### Work that remained at that checkpoint
 

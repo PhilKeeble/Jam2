@@ -1,6 +1,13 @@
 #include "ResearchDrumKit.hpp"
 
-#include "daisysp.h"
+#include "Control/adsr.h"
+#include "Drums/analogbassdrum.h"
+#include "Drums/analogsnaredrum.h"
+#include "Drums/hihat.h"
+#include "Drums/synthbassdrum.h"
+#include "Drums/synthsnaredrum.h"
+#include "Filters/svf.h"
+#include "Synthesis/oscillator.h"
 
 #include <algorithm>
 #include <array>

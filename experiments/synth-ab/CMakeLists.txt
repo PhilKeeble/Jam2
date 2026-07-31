@@ -8,10 +8,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_AUTORCC ON)
 
 set(JAM2_ROOT "${CMAKE_CURRENT_LIST_DIR}/../..")
-set(DAISYSP_ROOT "${CMAKE_CURRENT_LIST_DIR}/.deps/DaisySP")
+set(DAISYSP_ROOT "${JAM2_ROOT}/libs/third_party/DaisySP")
 
-if(NOT EXISTS "${DAISYSP_ROOT}/Source/daisysp.h")
-    message(FATAL_ERROR "DaisySP is missing. Run fetch-deps.cmd first.")
+if(NOT EXISTS "${DAISYSP_ROOT}/Source/Drums/synthbassdrum.cpp")
+    message(FATAL_ERROR
+        "The vendored DaisySP sources are missing from "
+        "libs/third_party/DaisySP.")
 endif()
 
 find_package(Qt6 REQUIRED COMPONENTS Core)

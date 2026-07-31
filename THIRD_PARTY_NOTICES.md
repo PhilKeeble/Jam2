@@ -36,12 +36,12 @@ Jam2 compiles the ADSR, analogue/synthetic kick and snare, hi-hat, state
 variable filter, and oscillator sources from pinned DaisySP commit
 `599511b740f8f3a9b8db72a0642aa45b8a23c3a3`. DaisySP and the credited
 components are licensed under the MIT License. See
-`docs/third_party/DaisySP-LICENSE.txt`.
+`libs/third_party/DaisySP/LICENSE`.
 
 Jam2 generates a build-local copy of DaisySP's `synthbassdrum.cpp` with two
 missing transient-envelope state initializers added to
 `SyntheticBassDrum::Init`. This narrow deterministic-state correction does not
 change the model or its parameter behaviour; it prevents the first transient
-sample from reading indeterminate state. The pinned checkout remains
+sample from reading indeterminate state. The pinned vendored source remains
 unmodified, and configuration fails if the reviewed upstream source anchor no
 longer matches.

@@ -12,9 +12,10 @@ function(jam2_prepare_daisysp_synthbassdrum daisysp_root output_variable)
     # then reads transient_env_lp_ on its first triggered sample, making an
     # otherwise deterministic offline drum render depend on heap contents.
     #
-    # Keep the pinned checkout untouched and generate one narrowly corrected
-    # translation unit. The exact anchor makes a future upstream change fail
-    # configuration instead of applying this correction to unknown code.
+    # Keep the pinned vendored source untouched and generate one narrowly
+    # corrected translation unit. The exact anchor makes a future source
+    # update fail configuration instead of applying this correction to
+    # unknown code.
     file(READ "${source}" contents)
     string(REPLACE "\r\n" "\n" contents "${contents}")
     set(anchor
@@ -45,7 +46,7 @@ function(jam2_prepare_daisysp_synthbassdrum daisysp_root output_variable)
         "${output_directory}/synthbassdrum.cpp")
     file(MAKE_DIRECTORY "${output_directory}")
     file(WRITE "${output}"
-        "// Generated from pinned DaisySP with Jam2's reviewed state-init fix.\n"
+        "// Generated from vendored DaisySP with Jam2's reviewed state-init fix.\n"
         "${contents}")
     set_property(
         DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${source}")

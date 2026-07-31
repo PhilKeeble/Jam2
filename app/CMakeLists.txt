@@ -18,11 +18,12 @@ if(NOT Qt6_FOUND)
 endif()
 
 set(JAM2_DAISYSP_ROOT
-    "${CMAKE_CURRENT_SOURCE_DIR}/../experiments/synth-ab/.deps/DaisySP")
-if(NOT EXISTS "${JAM2_DAISYSP_ROOT}/Source/daisysp.h")
+    "${CMAKE_CURRENT_SOURCE_DIR}/../libs/third_party/DaisySP")
+if(NOT EXISTS "${JAM2_DAISYSP_ROOT}/Source/Drums/synthbassdrum.cpp")
     message(FATAL_ERROR
-        "The accepted Jam2 drum engine requires the pinned DaisySP checkout. "
-        "Run experiments/synth-ab/fetch-deps.cmd, then configure again.")
+        "The vendored DaisySP drum sources are missing from "
+        "libs/third_party/DaisySP. Restore the repository checkout, then "
+        "configure again.")
 endif()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/PrepareDaisySPDrums.cmake")

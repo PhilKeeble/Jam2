@@ -9593,7 +9593,7 @@ void copyDaisyLicence(const QDir& site)
     const QString source =
         QDir(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath())
             .absoluteFilePath(
-                QStringLiteral("../.deps/DaisySP/LICENSE"));
+                QStringLiteral("../../../libs/third_party/DaisySP/LICENSE"));
     const QString folder =
         site.absoluteFilePath(QStringLiteral("licenses"));
     QDir().mkpath(folder);

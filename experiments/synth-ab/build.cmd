@@ -3,9 +3,6 @@ setlocal EnableExtensions
 set "HERE=%~dp0"
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 
-if not exist "%HERE%.deps\DaisySP\.git" call "%HERE%fetch-deps.cmd"
-if errorlevel 1 exit /b 1
-
 if not exist "%VSWHERE%" (
     echo Visual Studio vswhere.exe was not found.
     exit /b 1
