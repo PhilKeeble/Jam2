@@ -157,6 +157,7 @@ void ControlClient::close()
     transcript_.clear();
     receiveKey_.clear();
     sendKey_.clear();
+    largeJsonReceiver_.reset();
     handshakeState_ = HandshakeState::WaitingForChallenge;
     const NativeTcpConnection::Pointer connection = std::move(connection_);
     if (connection) {
@@ -169,12 +170,28 @@ bool ControlClient::send(const QJsonObject& message)
     if (!isConnected()) {
         return false;
     }
-    const QByteArray frame = encodeAuthenticated(message, sendKey_, sendSequence_);
-    if (!frame.isEmpty() && writeFrame(frame)) {
-        ++sendSequence_;
-        return true;
+    const AuthenticatedJsonFrames encoded =
+        encodeAuthenticatedJsonFrames(message, sendKey_, sendSequence_);
+    qint64 wireBytes = 0;
+    for (const QByteArray& frame : encoded.frames) {
+        wireBytes += frame.size();
     }
-    return false;
+    if (encoded.frames.isEmpty() || !canQueue(wireBytes)) {
+        ++stats_.outputHighWaterRejects;
+        return false;
+    }
+    for (const QByteArray& frame : encoded.frames) {
+        if (!writeFrame(frame)) {
+            return false;
+        }
+        ++sendSequence_;
+    }
+    if (encoded.chunked) {
+        ++stats_.largeJsonMessagesSent;
+        stats_.largeJsonRawBytesSent += static_cast<quint64>(encoded.rawBytes);
+        stats_.largeJsonCompressedBytesSent += static_cast<quint64>(encoded.compressedBytes);
+    }
+    return true;
 }
 
 bool ControlClient::sendBinary(const QByteArray& payload)
@@ -267,8 +284,33 @@ void ControlClient::readConnection(
             }
             ++receiveSequence_;
             if (payload.type == AuthenticatedPayloadType::Json) {
+                if (largeJsonReceiver_.active()) {
+                    ++stats_.sequenceOrTagRejects;
+                    reject(
+                        QStringLiteral("TCP control large JSON transfer was interleaved"),
+                        TransportFailure::AuthenticatedFrameRejected,
+                        true);
+                    return;
+                }
                 if (onMessage) {
                     onMessage(payload.message);
+                }
+            } else if (payload.type == AuthenticatedPayloadType::LargeJsonChunk) {
+                QJsonObject completed;
+                bool ready = false;
+                if (!largeJsonReceiver_.accept(payload.binary, completed, ready, error)) {
+                    ++stats_.sequenceOrTagRejects;
+                    reject(
+                        QStringLiteral("TCP control large JSON transfer rejected: ") + error,
+                        TransportFailure::AuthenticatedFrameRejected,
+                        true);
+                    return;
+                }
+                if (ready) {
+                    ++stats_.largeJsonMessagesReceived;
+                    if (onMessage) {
+                        onMessage(completed);
+                    }
                 }
             } else if (onBinaryMessage) {
                 onBinaryMessage(payload.binary);

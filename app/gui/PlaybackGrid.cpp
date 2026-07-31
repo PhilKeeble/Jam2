@@ -16,22 +16,6 @@ void PlaybackGrid::setPattern(
     tempoPulseUnits_ = tempoPulseUnits == 3 ? 3 : 1;
 }
 
-void PlaybackGrid::scheduleEpoch(
-    std::uint64_t targetRawFrame,
-    std::uint64_t targetMusicalFrame,
-    std::uint64_t revision)
-{
-    // Engine transport snapshots retain their last completed action. Consume
-    // each revision once so a later authority/remap epoch cannot be replaced
-    // by replaying that stale snapshot on every GUI refresh.
-    if (revision == 0 || revision <= pendingEpochRevision_) {
-        return;
-    }
-    pendingEpochRawFrame_ = targetRawFrame;
-    pendingEpochMusicalFrame_ = targetMusicalFrame;
-    pendingEpochRevision_ = revision;
-}
-
 void PlaybackGrid::updateEngine(
     std::uint64_t rawFrame,
     std::uint64_t musicalFrame,
@@ -40,22 +24,6 @@ void PlaybackGrid::updateEngine(
     int sampleRate,
     bool running)
 {
-    const bool engineClockRestarted = engineFrame_ > 0 && rawFrame < engineFrame_;
-    if (engineClockRestarted) {
-        pendingEpochRawFrame_ = 0;
-        pendingEpochMusicalFrame_ = 0;
-        pendingEpochRevision_ = 0;
-    }
-    const bool freshRunningEpoch = running &&
-        (!engineRunning_ || epochFrame != engineEpochFrame_);
-    if (freshRunningEpoch) {
-        // Track/record transport may temporarily define a song-relative UI
-        // epoch. A fresh metronome start or remapped shared-grid epoch supersedes
-        // it; retaining the old override makes one peer resume from its prior
-        // bar while the new authority starts at 1.1.
-        pendingEpochRawFrame_ = 0;
-        pendingEpochMusicalFrame_ = 0;
-    }
     engineFrame_ = rawFrame;
     engineMusicalFrame_ = musicalFrame;
     engineEpochFrame_ = epochFrame;
@@ -70,12 +38,6 @@ void PlaybackGrid::clearEngine()
 {
     engineValid_ = false;
     engineRunning_ = false;
-    pendingEpochRawFrame_ = 0;
-    pendingEpochMusicalFrame_ = 0;
-    // ApplicationRuntime intentionally keeps the engine clock alive across
-    // Leave/Rejoin. Retain the consumed transport revision so its persistent
-    // snapshot cannot become a new GUI event after reattachment. A genuine
-    // engine-frame restart resets it in updateEngine().
 }
 
 PlaybackGrid::Position PlaybackGrid::position() const
@@ -91,10 +53,7 @@ PlaybackGrid::Position PlaybackGrid::position() const
             rawFrame += elapsedFrames;
             musicalFrame += elapsedFrames;
         }
-        std::uint64_t epochFrame = engineEpochFrame_;
-        if (pendingEpochRawFrame_ > 0 && rawFrame >= pendingEpochRawFrame_) {
-            epochFrame = pendingEpochMusicalFrame_;
-        }
+        const std::uint64_t epochFrame = engineEpochFrame_;
         result.engineAnchored = true;
         result.epochFrame = epochFrame;
         result.rawCurrentFrame = rawFrame;

@@ -18,4 +18,19 @@ consider a way to export a rendered wav of a song / idea (do this after arrangem
 
 look into weirdness with sharing generated tracks with each other
 
-can we just add a small box below the generate wav button about the size of the tuner widget that only comes up when its generating and it just says "Generating...", since generations take a bit of time now so it would be good to just know that it is doing that whilst still using the application
+Look into weirdness with metronome epoch and sharing tracks and generating ideas, defintiely bugs there when working with other people 
+
+Record jam button is missing now that we dont have the mix view
+
+Allow generation to force BPM / Meter , maybe allow a random style but forced bpm and meter and it can just make a groove for you
+
+maybe some bugs related to leader / joiner, sometimes generated jam didnt move across, wehn shareing multiple tracks it ended up losing 2 on the person that shared etc
+
+recording jam could be a new option on a track perhaps to record the mix direct into there and play it back
+
+genertate wav - chagne bpm - genrate again - out of time
+
+### Sound references
+
+https://www.youtube.com/watch?v=miTyMfxxWCo - 1:30 - heavy synth sounds 
+

@@ -44,6 +44,8 @@ public:
     void setSelectedPeer(std::uint64_t peerId);
     void setTrackGainDb(double gainDb);
     void setTrackWaveform(std::vector<float> peaks, bool valid);
+    void setTrackBpmMismatch(bool mismatched, double backingBpm, double sessionBpm);
+    void setTrackTransferStatus(const QString& status);
     void setWavGenerationActive(bool active);
     void setTechnicalSummary(
         const QString& rtt,
@@ -122,6 +124,10 @@ private:
     bool tunerExpanded_ = false;
     std::vector<float> trackWaveformPeaks_;
     bool trackWaveformValid_ = false;
+    bool trackBpmMismatch_ = false;
+    double backingBpm_ = 0.0;
+    double sessionBpm_ = 0.0;
+    QString trackTransferStatus_;
     bool wavGenerationActive_ = false;
     QString rtt_ = QStringLiteral("-");
     QString jitter_ = QStringLiteral("-");

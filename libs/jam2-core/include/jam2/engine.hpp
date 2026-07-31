@@ -280,6 +280,9 @@ struct EngineSnapshot {
     std::uint64_t metronome_epoch_frame = 0;
     bool metronome_epoch_valid = false;
     std::int64_t metronome_render_offset_frames = 0;
+    std::uint64_t metronome_pattern_origin_frame = 0;
+    bool metronome_pattern_origin_valid = false;
+    std::uint64_t metronome_pattern_source_start_seen = 0;
     std::uint64_t transport_revision = 0;
     EngineTransportAction transport_action = EngineTransportAction::None;
     std::uint64_t transport_target_frame = 0;

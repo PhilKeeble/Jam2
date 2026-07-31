@@ -375,6 +375,7 @@ const QVector<ProfileDefinition>& allProfiles()
             {"4-4"}, {
                 form("funk-8", "Eight-bar pocket", 8, "4-4", 2, "Four two-bar interlock variations."),
                 form("funk-16", "Sixteen-bar activation arc", 16, "4-4", 4, "Pocket, activation, break, and return."),
+                form("funk-minor-10", "Ten-bar minor pocket exchange", 10, "4-4", 2, "Four-bar call, four-bar exchange, and two-bar stop-time return."),
             }),
 
         profile("hiphop_boom_bap", "hiphop-trap", "Boom-Bap", "hiphop-trap", 70, 108,
@@ -399,6 +400,7 @@ const QVector<ProfileDefinition>& allProfiles()
             {"riff", "hook_double", "pad"}, "sparse vocal-like or bell cell with rests and register answers",
             "trap-dark-keys", "trap-bell-lead", "trap-808-bass", "trap-texture", "trap-808",
             {"4-4"}, {
+                form("trap-12", "Twelve-bar Trap activation arc", 12, "4-4", 4, "Core, roll/808 approach, and negative-space return."),
                 form("trap-16", "Sixteen-bar Trap phrase", 16, "4-4", 4, "Four loop passes with 808 and hat activation."),
                 form("trap-24", "Trap beat-switch arc", 24, "4-4", 8, "Core, activation, and contrasting beat-switch section."),
             }),
@@ -412,6 +414,7 @@ const QVector<ProfileDefinition>& allProfiles()
             {"support_comping", "countermelody", "call_response"}, "short vocal-like call over a bass-led riddim",
             "reggae-organ", "reggae-vocal-like", "reggae-round-bass", "reggae-skank", "reggae-kit",
             {"4-4"}, {
+                form("reggae-steppers-12", "Twelve-bar steppers activation", 12, "4-4", 4, "Core steppers riddim, skank subtraction, response, and return."),
                 form("reggae-16", "Sixteen-bar riddim arc", 16, "4-4", 4, "Bass/skank statement, answer, dropout, and return."),
                 form("reggae-24", "Twenty-four-bar Roots arc", 24, "4-4", 8, "Three eight-bar states of one riddim."),
             }),
@@ -427,7 +430,7 @@ const QVector<ProfileDefinition>& allProfiles()
             {"2-4", "4-4"}, {
                 form("bossa-aaba-32", "Thirty-two-bar Bossa AABA", 32, "2-4", 8, "Original eight-bar A phrase, bridge, and return."),
                 form("bossa-abac-32", "Thirty-two-bar Bossa ABAC", 32, "2-4", 8, "Related A phrases alternate with two contrasting endings."),
-                form("bossa-18", "Asymmetric eighteen-bar Bossa", 18, "2-4", 6, "Three six-bar songbook phrases."),
+                form("bossa-18", "Asymmetric eighteen-bar Bossa", 18, "2-4", 5, "A 5+5+4+4 songbook arc with related calls, a contrasting turn, and a soft tag."),
             }),
 
         profile("metal_modern_progressive", "metal-experimental", "Modern Progressive Metalcore", "metal", 65, 180,
@@ -440,7 +443,7 @@ const QVector<ProfileDefinition>& allProfiles()
             "metal-driven-double", "metal-clean-lead", "metal-split-bass", "metal-ambient-layer", "metal-modern-kit",
             {"4-4", "5-8", "7-8", "9-8"}, {
                 form("metal-riff-12", "Twelve-bar heavy module", 12, "4-4", 4, "Heavy statement, varied answer, and breakdown return."),
-                form("metal-contrast-18", "Heavy / clean contrast", 18, "9-8", 3, "Six three-bar modules alternating heavy and clean roles."),
+                form("metal-contrast-18", "Heavy / clean contrast", 18, "9-8", 6, "A 6+8+4 heavy, clean-augmentation, and compressed-return arc."),
             }, {}, true),
     };
     return values;

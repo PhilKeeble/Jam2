@@ -21,8 +21,6 @@ void GuiControlMessageRouter::dispatch(
             QStringLiteral("Session error"));
         if (handlers.log) handlers.log(QStringLiteral("peer session error: ") + text);
         if (handlers.warning) handlers.warning(text);
-    } else if (type == QStringLiteral("metronome.settings")) {
-        if (handlers.metronomeSettings) handlers.metronomeSettings(message);
     } else if (type == QStringLiteral("beat.set")) {
         const QString lane = message.value(QStringLiteral("lane")).toString();
         BeatGridModel* model = handlers.beatModel;
@@ -85,12 +83,18 @@ void GuiControlMessageRouter::dispatch(
         if (handlers.trackReady) handlers.trackReady(message, sourcePeerToken);
     } else if (type == QStringLiteral("looper.track.share.request")) {
         if (sourcePeerToken.isEmpty()) {
-            if (handlers.shareLocalTracks) handlers.shareLocalTracks();
+            if (handlers.shareLocalTracks) handlers.shareLocalTracks(message);
         } else {
             if (handlers.log) handlers.log(QStringLiteral("rejected Share Tracks request from a joiner"));
         }
-    } else if (type == QStringLiteral("looper.recording.offer")) {
-        if (handlers.trackOffer) handlers.trackOffer(message, sourcePeerToken);
+    } else if (type == QStringLiteral("looper.track.batch.offer")) {
+        if (handlers.trackBatchOffer) handlers.trackBatchOffer(message, sourcePeerToken);
+    } else if (type == QStringLiteral("looper.track.batch.complete")) {
+        if (sourcePeerToken.isEmpty()) {
+            if (handlers.trackBatchComplete) handlers.trackBatchComplete(message);
+        } else if (handlers.log) {
+            handlers.log(QStringLiteral("rejected track batch completion from a joiner"));
+        }
     } else if (type == QStringLiteral("looper.asset.request")) {
         if (handlers.assetTransfer) handlers.assetTransfer->handleRequest(message, sourcePeerToken);
     } else if (type == QStringLiteral("looper.asset.start")) {

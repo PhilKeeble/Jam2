@@ -33,7 +33,6 @@ public:
         std::int64_t renderOffsetFrames,
         int sampleRate,
         bool running);
-    void scheduleEpoch(std::uint64_t targetRawFrame, std::uint64_t targetMusicalFrame, std::uint64_t revision);
     void clearEngine();
     Position position() const;
     double bpm() const;
@@ -51,7 +50,4 @@ private:
     std::int64_t engineRenderOffsetFrames_ = 0;
     int engineSampleRate_ = 0;
     QElapsedTimer engineReportTime_;
-    std::uint64_t pendingEpochRawFrame_ = 0;
-    std::uint64_t pendingEpochMusicalFrame_ = 0;
-    std::uint64_t pendingEpochRevision_ = 0;
 };

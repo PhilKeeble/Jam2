@@ -1,14 +1,15 @@
 {
   "schema": "jam2-debug-scenario",
-  "run_id": "music-generation-audit-corpus",
+  "run_id": "music-generation-metal-corpus",
   "operation": "validate.music-full-form-corpus",
   "profile": "fast",
   "artifacts": {
-    "root": "../../artifacts/music-research/final-all-styles-iteration-2"
+    "root": "../../artifacts/music-research/metal-iteration-4"
   },
   "corpus": {
     "render_audio": false,
     "matched_complexity_seeds": true,
-    "samples_per_cell": 6
+    "samples_per_cell": 12,
+    "style_id": "metal-experimental"
   }
 }

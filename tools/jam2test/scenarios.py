@@ -265,15 +265,16 @@ def scenario_catalog(base_profile=FAST_PROFILE):
             "commands": [
                 {"at_s": 3.0, "side": "client", "line": "bpm 126"},
             ],
-            "expect": "a client grid change should be coordinator-ordered and make that client authority for the new shared-grid revision",
+            "expect": "a client BPM change should be coordinator-ordered while the existing grid publisher establishes the required replacement epoch",
         },
         "grid-authority-client-leader-audio": {
             "profile": base_profile,
             "impairment": ProxyImpairment.both(DirectionImpairment(jitter_ms=20.0)),
             "commands": [
                 {"at_s": 3.0, "side": "client", "line": "metro mode leader-audio"},
+                {"at_s": 4.0, "side": "client", "line": "metro on"},
             ],
-            "expect": "a client leader-audio revision should inject click packets from exactly the assigned client authority",
+            "expect": "an explicit client leader-audio start should select that client as the sole click source without resetting the epoch",
         },
         "grid-authority-client-listener-compensated": {
             "profile": base_profile,
@@ -281,7 +282,7 @@ def scenario_catalog(base_profile=FAST_PROFILE):
             "commands": [
                 {"at_s": 3.0, "side": "client", "line": "metro mode listener-compensated"},
             ],
-            "expect": "listener compensation should follow the client authority stream after an ordered authority transfer",
+            "expect": "listener compensation should change mode without transferring grid authority or resetting the epoch",
         },
         "grid-authority-concurrent": {
             "profile": base_profile,
@@ -290,7 +291,7 @@ def scenario_catalog(base_profile=FAST_PROFILE):
                 {"at_s": 3.0, "side": "server", "line": "bpm 124"},
                 {"at_s": 3.0, "side": "client", "line": "bpm 126"},
             ],
-            "expect": "near-concurrent grid proposals should resolve to one monotonic revision and one authority on both peers",
+            "expect": "near-concurrent BPM proposals should resolve to one monotonic revision while retaining one authority on both peers",
         },
         "grid-stop-restart-shared-grid": {
             "profile": base_profile,
@@ -301,7 +302,7 @@ def scenario_catalog(base_profile=FAST_PROFILE):
                 {"at_s": 7.0, "side": "client", "line": "metro off"},
                 {"at_s": 9.0, "side": "client", "line": "metro on"},
             ],
-            "expect": "each stop/start should order a fresh shared-grid revision and both peers should align to the final starter epoch",
+            "expect": "shared-grid click stop/start should remain local on both peers without creating a grid revision or changing the epoch",
         },
         "grid-noop-running-controls": {
             "profile": base_profile,
@@ -321,10 +322,11 @@ def scenario_catalog(base_profile=FAST_PROFILE):
             "impairment": ProxyImpairment.both(DirectionImpairment()),
             "commands": [
                 {"at_s": 2.0, "side": "client", "line": "metro mode leader-audio"},
-                {"at_s": 4.0, "side": "client", "line": "quit"},
+                {"at_s": 3.0, "side": "client", "line": "metro on"},
+                {"at_s": 5.0, "side": "client", "line": "quit"},
             ],
             "expected_early_client_exit": True,
-            "expect": "after the only remote authority leaves, the creator should automatically retain the running session on a fresh local grid revision",
+            "expect": "after the selected remote leader leaves, the creator should retain the same mapped epoch, stop leader audio, and order a publisher-recovery revision",
         },
         "transport-grid-authority": {
             "profile": base_profile,
@@ -334,7 +336,7 @@ def scenario_catalog(base_profile=FAST_PROFILE):
                 {"at_s": 3.0, "side": "client", "line": "bpm 126"},
                 {"at_s": 6.0, "side": "server", "line": "track restart"},
             ],
-            "expect": "creator arrangement authority should publish a source-identified transport event associated with the client-owned grid revision",
+            "expect": "creator arrangement authority should publish a source-identified transport event associated with the creator-owned replacement BPM epoch",
         },
         "transport-track-actions": {
             "profile": base_profile,

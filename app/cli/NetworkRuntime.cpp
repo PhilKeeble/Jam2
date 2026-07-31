@@ -126,6 +126,9 @@ struct RuntimeState {
     std::atomic<bool> print_stats{false};
     std::atomic<bool> print_status{false};
     std::atomic<bool> metronome{false};
+    // The local renderer preference survives temporary leader-audio mode,
+    // whose effective on/off state is shared by the selected source.
+    std::atomic<bool> local_click_enabled{false};
     std::atomic<int> bpm{120};
     std::atomic<int> metronome_beats_per_bar{4};
     std::atomic<int> metronome_division{1};
@@ -146,15 +149,15 @@ struct RuntimeState {
     std::atomic<int> local_monitor_level_ppm{250000};
     std::atomic<int> metronome_mode{0};
     std::atomic<bool> leader_audio_local_click{false};
-    std::atomic<bool> metronome_local_authority{false};
     std::atomic<std::uint64_t> metronome_epoch_sample_time{0};
     std::atomic<bool> metronome_epoch_valid{false};
     std::atomic<std::int64_t> metronome_render_offset_frames{0};
     std::atomic<std::uint64_t> metronome_revision{0};
-    std::atomic<std::uint64_t> metronome_epoch_revision{0};
     // Changed only by local controls. Network-applied grid state deliberately
     // does not touch this counter, preventing authority update feedback loops.
     std::atomic<std::uint64_t> grid_request_sequence{0};
+    std::atomic<bool> grid_request_reset_epoch{false};
+    std::atomic<bool> leader_audio_source_request{false};
     std::atomic<std::uint64_t> transport_revision{0};
     std::atomic<std::uint64_t> transport_network_revision{0};
     std::atomic<std::uint64_t> transport_network_target_raw_frame{0};
@@ -166,8 +169,17 @@ struct RuntimeState {
     std::atomic<bool> transport_pending{false};
 };
 
-void request_grid_revision(RuntimeState& state) noexcept
+void request_grid_revision(
+    RuntimeState& state,
+    bool reset_epoch = false,
+    bool claim_leader_audio_source = false) noexcept
 {
+    if (reset_epoch) {
+        state.grid_request_reset_epoch.store(true, std::memory_order_relaxed);
+    }
+    if (claim_leader_audio_source) {
+        state.leader_audio_source_request.store(true, std::memory_order_relaxed);
+    }
     state.metronome_revision.fetch_add(1, std::memory_order_relaxed);
     state.grid_request_sequence.fetch_add(1, std::memory_order_release);
 }
@@ -378,19 +390,6 @@ std::uint64_t current_engine_frame(const jam2::Engine* engine)
     return engine != nullptr ? engine->snapshot().engine_frame : 0ULL;
 }
 
-void begin_metronome_epoch(
-    RuntimeState& state,
-    const jam2::Engine* engine,
-    int sample_rate)
-{
-    const std::uint64_t lead_frames = static_cast<std::uint64_t>(std::max(1, sample_rate)) / 5ULL;
-    state.metronome_render_offset_frames.store(0, std::memory_order_relaxed);
-    state.metronome_epoch_sample_time.store(
-        current_engine_frame(engine) + lead_frames,
-        std::memory_order_relaxed);
-    state.metronome_epoch_valid.store(true, std::memory_order_relaxed);
-}
-
 void hold_shared_grid_at_start(
     RuntimeState& state,
     jam2::Engine* engine)
@@ -399,11 +398,13 @@ void hold_shared_grid_at_start(
         metronome_mode_id(MetronomeMode::SharedGrid)) {
         return;
     }
-    state.metronome_epoch_sample_time.store(0, std::memory_order_relaxed);
-    state.metronome_epoch_valid.store(false, std::memory_order_relaxed);
+    state.metronome_epoch_sample_time.store(
+        current_engine_frame(engine), std::memory_order_relaxed);
+    state.metronome_epoch_valid.store(true, std::memory_order_relaxed);
     state.metronome_render_offset_frames.store(0, std::memory_order_relaxed);
     if (engine != nullptr) {
-        jam2::EngineCommand epoch; epoch.type = jam2::EngineCommandType::SetMetronomeEpoch; epoch.frame = 0; epoch.enabled = false;
+        jam2::EngineCommand epoch; epoch.type = jam2::EngineCommandType::SetMetronomeEpoch;
+        epoch.frame = current_engine_frame(engine); epoch.enabled = true;
         jam2::EngineCommand offset; offset.type = jam2::EngineCommandType::SetMetronomeRenderOffset; offset.signed_value = 0;
         (void)engine->submit(epoch);
         (void)engine->submit(offset);
@@ -504,14 +505,8 @@ void commit_due_transport(RuntimeState& state, const jam2::Engine* engine)
     }
     state.transport_pending.store(false, std::memory_order_release);
     const int action = state.transport_action.load(std::memory_order_relaxed);
-    if (action == static_cast<int>(jam2::EngineTransportAction::TrackRestart) ||
-        action == static_cast<int>(jam2::EngineTransportAction::RecordStart)) {
-        state.metronome_epoch_sample_time.store(
-            state.transport_target_musical_frame.load(std::memory_order_relaxed),
-            std::memory_order_relaxed);
-        state.metronome_epoch_valid.store(true, std::memory_order_relaxed);
-        state.metronome_revision.fetch_add(1, std::memory_order_relaxed);
-    }
+    // Track and recording transport establish their own source-relative 1.1.
+    // They never replace the continuously advancing session grid epoch.
 }
 
 bool parse_frame_or_now(std::string_view text, const jam2::Engine* engine, std::uint64_t& out)
@@ -555,7 +550,8 @@ std::array<std::uint8_t, 56> encode_metronome_payload(
     jam2::metronome::PatternSnapshot pattern,
     GridMessageKind kind,
     std::uint8_t mode,
-    jam2::GridRunState run_state)
+    jam2::GridRunState run_state,
+    bool reset_epoch = false)
 {
     pattern = jam2::metronome::sanitize(pattern);
     std::array<std::uint8_t, 56> payload{};
@@ -569,7 +565,8 @@ std::array<std::uint8_t, 56> encode_metronome_payload(
         kGridMessageMarker |
         (static_cast<std::uint8_t>(kind) & 0x03U) |
         ((mode & 0x03U) << 2U) |
-        ((static_cast<std::uint8_t>(run_state) & 0x03U) << 4U) |
+        (run_state == jam2::GridRunState::Running ? 0x10U : 0x00U) |
+        (reset_epoch ? 0x20U : 0x00U) |
         (pattern.tempo_pulse_units == 3 ? 0x40U : 0x00U));
     payload[21] = static_cast<std::uint8_t>(pattern.beats_per_bar);
     payload[22] = static_cast<std::uint8_t>(pattern.division);
@@ -591,6 +588,7 @@ struct MetronomePayload {
     GridMessageKind kind = GridMessageKind::Proposal;
     std::uint8_t mode = 0;
     jam2::GridRunState run_state = jam2::GridRunState::Stopped;
+    bool reset_epoch = false;
 };
 
 MetronomePayload decode_metronome_payload(std::span<const std::uint8_t> payload)
@@ -625,12 +623,13 @@ MetronomePayload decode_metronome_payload(std::span<const std::uint8_t> payload)
     }
     decoded.kind = static_cast<GridMessageKind>(control & 0x03U);
     decoded.mode = static_cast<std::uint8_t>((control >> 2U) & 0x03U);
-    decoded.run_state = static_cast<jam2::GridRunState>((control >> 4U) & 0x03U);
+    decoded.run_state = (control & 0x10U) != 0
+        ? jam2::GridRunState::Running
+        : jam2::GridRunState::Stopped;
+    decoded.reset_epoch = (control & 0x20U) != 0;
     const auto kind = static_cast<std::uint8_t>(decoded.kind);
     if (kind > static_cast<std::uint8_t>(GridMessageKind::AuthorityState) ||
-        decoded.mode > 2 ||
-        static_cast<std::uint8_t>(decoded.run_state) >
-            static_cast<std::uint8_t>(jam2::GridRunState::AuthorityMissing)) {
+        decoded.mode > 2) {
         throw std::runtime_error("invalid grid authority message");
     }
     return decoded;
@@ -1207,6 +1206,7 @@ struct CommandThread {
         bool leader_audio_local_click)
     {
         state.metronome.store(options.metronome, std::memory_order_relaxed);
+        state.local_click_enabled.store(options.metronome, std::memory_order_relaxed);
         state.bpm.store(options.bpm, std::memory_order_relaxed);
         state.metronome_beats_per_bar.store(4, std::memory_order_relaxed);
         state.metronome_division.store(1, std::memory_order_relaxed);
@@ -1228,7 +1228,6 @@ struct CommandThread {
         state.local_monitor_level_ppm.store(ppm_from_gain(options.local_monitor_level), std::memory_order_relaxed);
         state.metronome_mode.store(metronome_mode_id(options.metronome_mode), std::memory_order_relaxed);
         state.leader_audio_local_click.store(leader_audio_local_click, std::memory_order_relaxed);
-        state.metronome_local_authority.store(leader_audio_local_click, std::memory_order_relaxed);
         state.metronome_epoch_sample_time.store(0, std::memory_order_relaxed);
         state.metronome_epoch_valid.store(true, std::memory_order_relaxed);
         state.metronome_render_offset_frames.store(0, std::memory_order_relaxed);
@@ -1566,12 +1565,22 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             const jam2::EngineCommand& command = *next;
             switch (command.type) {
             case jam2::EngineCommandType::SetMetronomeEnabled: {
-                const bool previous = commands.state.metronome.exchange(command.enabled, std::memory_order_relaxed);
+                const bool leader_audio =
+                    commands.state.metronome_mode.load(std::memory_order_relaxed) ==
+                    metronome_mode_id(MetronomeMode::LeaderAudio);
+                if (!leader_audio) {
+                    commands.state.local_click_enabled.store(
+                        command.enabled, std::memory_order_relaxed);
+                }
+                const bool previous = commands.state.metronome.exchange(
+                    command.enabled, std::memory_order_relaxed);
                 if (previous != command.enabled) {
-                    if (command.enabled) {
-                        begin_metronome_epoch(commands.state, audio.engine.get(), recording_sample_rate);
+                    if (leader_audio) {
+                        request_grid_revision(
+                            commands.state,
+                            false,
+                            command.enabled);
                     }
-                    request_grid_revision(commands.state);
                 }
                 break;
             }
@@ -1580,11 +1589,15 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 const auto next = jam2::metronome::sanitize(command.pattern);
                 if (!same_metronome_pattern(previous, next)) {
                     store_metronome_pattern(commands.state, next);
-                    request_grid_revision(commands.state);
-                    if (previous.bpm != next.bpm ||
+                    const bool timing_changed = previous.bpm != next.bpm ||
                         previous.beats_per_bar != next.beats_per_bar ||
-                        previous.division != next.division) {
-                        commands.state.metronome_epoch_revision.fetch_add(1, std::memory_order_relaxed);
+                        previous.beat_unit != next.beat_unit ||
+                        previous.tempo_pulse_units != next.tempo_pulse_units ||
+                        previous.division != next.division;
+                    const bool reset_epoch = previous.bpm != next.bpm ||
+                        previous.tempo_pulse_units != next.tempo_pulse_units;
+                    if (timing_changed) {
+                        request_grid_revision(commands.state, reset_epoch, false);
                     }
                 }
                 break;
@@ -1617,16 +1630,16 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 const int previous = commands.state.metronome_mode.exchange(
                     next, std::memory_order_relaxed);
                 if (previous != next) {
-                    commands.state.metronome_render_offset_frames.store(0, std::memory_order_relaxed);
-                    commands.state.metronome_epoch_revision.fetch_add(1, std::memory_order_relaxed);
-                    request_grid_revision(commands.state);
+                    commands.state.metronome.store(
+                        next == metronome_mode_id(MetronomeMode::LeaderAudio)
+                            ? false
+                            : commands.state.local_click_enabled.load(
+                                  std::memory_order_relaxed),
+                        std::memory_order_relaxed);
+                    request_grid_revision(commands.state, false, false);
                 }
                 break;
             }
-            case jam2::EngineCommandType::SetLeaderAudioLocalClick:
-                commands.state.leader_audio_local_click.store(command.enabled, std::memory_order_relaxed);
-                commands.state.metronome_local_authority.store(command.enabled, std::memory_order_relaxed);
-                break;
             case jam2::EngineCommandType::SetMetronomeEpoch:
                 commands.state.metronome_epoch_sample_time.store(command.frame, std::memory_order_relaxed);
                 commands.state.metronome_epoch_valid.store(command.enabled, std::memory_order_relaxed);
@@ -1866,9 +1879,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     std::uint64_t mesh_grid_last_update_us = 0;
 
     auto grid_run_state_from_runtime = [&]() {
-        return commands.state.metronome.load(std::memory_order_relaxed)
-            ? jam2::GridRunState::Running
-            : jam2::GridRunState::Stopped;
+        return jam2::GridRunState::Running;
     };
     auto choose_safe_local_epoch = [&]() {
         std::uint64_t max_rtt_us = 0;
@@ -1883,19 +1894,23 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             rtt_frames + static_cast<std::uint64_t>(options.sample_rate) / 5ULL,
             static_cast<std::uint64_t>(options.sample_rate) / 10ULL,
             static_cast<std::uint64_t>(options.sample_rate) / 2ULL);
-        // Every explicit local start/revision gets a fresh bounded epoch. Do
-        // not quantize from an earlier membership's epoch: a past epoch can
-        // otherwise defer the requested start by almost a full later bar.
+        // Only a timing-rate reset (BPM or tempo-pulse) reaches this path.
+        // Use bounded lead time so all peers can stop dependants and map the
+        // replacement epoch before it begins.
         return current_engine_frame(audio.engine.get()) + lead_frames;
     };
-    auto apply_authority_role = [&]() {
+    auto apply_grid_publisher_role = [&]() {
         const auto& grid = authority.grid();
         const bool local_authority = authority.localIsGridAuthority();
-        commands.state.metronome_local_authority.store(local_authority, std::memory_order_relaxed);
+        const bool leader_audio_active =
+            grid.mode == metronome_mode_id(MetronomeMode::LeaderAudio) &&
+            commands.state.metronome.load(std::memory_order_relaxed);
         commands.state.leader_audio_local_click.store(
-            local_authority && grid.run_state == jam2::GridRunState::Running &&
-                grid.mode == metronome_mode_id(MetronomeMode::LeaderAudio),
+            local_authority && leader_audio_active,
             std::memory_order_relaxed);
+        mesh_leader_audio_source_peer_id = leader_audio_active
+            ? grid.authority_peer_id
+            : 0;
     };
     auto activate_local_grid = [&]() {
         const std::uint64_t packet_frame = current_engine_frame(audio.engine.get());
@@ -1904,9 +1919,6 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             return false;
         }
         const auto& grid = authority.grid();
-        commands.state.metronome.store(
-            grid.run_state == jam2::GridRunState::Running,
-            std::memory_order_relaxed);
         commands.state.metronome_mode.store(grid.mode, std::memory_order_relaxed);
         commands.state.metronome_epoch_sample_time.store(epoch, std::memory_order_relaxed);
         commands.state.metronome_epoch_valid.store(true, std::memory_order_relaxed);
@@ -1914,61 +1926,96 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         mesh_grid_base_offset_frames = 0;
         commands.state.metronome_revision.store(grid.revision, std::memory_order_relaxed);
         mesh_grid_target_valid = false;
-        apply_authority_role();
+        apply_grid_publisher_role();
         return true;
     };
-    auto clear_departed_authority_state = [&]() {
-        commands.state.metronome_epoch_sample_time.store(0, std::memory_order_relaxed);
-        commands.state.metronome_epoch_valid.store(false, std::memory_order_relaxed);
-        commands.state.metronome_render_offset_frames.store(0, std::memory_order_relaxed);
-        commands.state.metronome_local_authority.store(false, std::memory_order_relaxed);
-        commands.state.leader_audio_local_click.store(false, std::memory_order_relaxed);
-        pending_local_grid_proposal.reset();
-        mesh_grid_base_offset_frames = 0;
-        mesh_grid_target_offset_frames = 0;
+    auto hard_stop_grid_dependents = [&]() {
+        if (audio.engine != nullptr) {
+            jam2::EngineCommand stop;
+            stop.type = jam2::EngineCommandType::PreparedStop;
+            stop.frame = current_engine_frame(audio.engine.get());
+            (void)audio.engine->submit(stop);
+            jam2::EngineCommand cancelTake;
+            cancelTake.type = jam2::EngineCommandType::CancelTrackTake;
+            (void)audio.engine->submit(cancelTake);
+        }
+        std::lock_guard<std::mutex> lock(commands.state.transport_mutex);
+        commands.state.transport_pending.store(false, std::memory_order_release);
+        commands.state.transport_network_revision.store(0, std::memory_order_relaxed);
+        commands.state.transport_network_action.store(0, std::memory_order_relaxed);
+    };
+    auto apply_ordered_grid = [&](bool reset_epoch) {
+        if (reset_epoch) {
+            hard_stop_grid_dependents();
+            // An ordered epoch reset is a barrier.  A non-authority must not
+            // keep rendering against its previous locally-mapped epoch while
+            // it waits for the authority's first state packet.  The authority
+            // immediately activates a fresh epoch below; listeners remain
+            // invalid until align_to_authority_clock() maps that packet.
+            commands.state.metronome_epoch_sample_time.store(
+                0, std::memory_order_relaxed);
+            commands.state.metronome_epoch_valid.store(
+                false, std::memory_order_relaxed);
+            commands.state.metronome_render_offset_frames.store(
+                0, std::memory_order_relaxed);
+            mesh_grid_base_offset_frames = 0;
+        }
+        commands.state.metronome_revision.store(
+            authority.grid().revision, std::memory_order_relaxed);
         mesh_grid_target_valid = false;
+        if (authority.localIsGridAuthority()) {
+            if (authority.grid().authority_epoch_frame == 0 ||
+                !commands.state.metronome_epoch_valid.load(std::memory_order_relaxed)) {
+                (void)activate_local_grid();
+            } else {
+                commands.state.metronome_mode.store(
+                    authority.grid().mode, std::memory_order_relaxed);
+                apply_grid_publisher_role();
+            }
+        } else {
+            apply_grid_publisher_role();
+        }
+    };
+    auto clear_departed_grid_publisher = [&]() {
+        // Keep the locally mapped epoch alive while authority is reassigned.
+        // The shared clock and its already-scheduled transports do not stop
+        // merely because its publisher left.  Leader audio does stop, rather
+        // than silently selecting a different peer's click.
+        if (commands.state.metronome_mode.load(std::memory_order_relaxed) ==
+            metronome_mode_id(MetronomeMode::LeaderAudio)) {
+            commands.state.metronome.store(false, std::memory_order_relaxed);
+        }
+        commands.state.leader_audio_local_click.store(false, std::memory_order_relaxed);
+        mesh_leader_audio_source_peer_id = 0;
+        pending_local_grid_proposal.reset();
         mesh_grid_last_update_us = 0;
         mesh_compensation_average_latency_frames = 0;
         mesh_compensation_peer_count = 0;
         mesh_compensation_was_clamped = false;
-        {
-            std::lock_guard<std::mutex> lock(commands.state.transport_mutex);
-            commands.state.transport_pending.store(false, std::memory_order_release);
-            commands.state.transport_network_revision.store(0, std::memory_order_relaxed);
-            commands.state.transport_network_target_raw_frame.store(0, std::memory_order_relaxed);
-            commands.state.transport_network_action.store(0, std::memory_order_relaxed);
-        }
-        mesh_transport_source_peer_id = 0;
-        mesh_transport_event_counter = 0;
-        mesh_transport_grid_revision = 0;
-        mesh_transport_action = jam2::EngineTransportAction::None;
-        mesh_transport_source_frame = 0;
-        mesh_transport_requested_target_frame = 0;
-        mesh_transport_applied_target_frame = 0;
-        if (audio.engine != nullptr) {
-            jam2::EngineCommand cancel;
-            cancel.type = jam2::EngineCommandType::CancelTransport;
-            (void)audio.engine->submit(cancel);
-        }
     };
-    auto restore_running_grid_after_departure = [&] (
-        bool was_running,
+    auto reassign_grid_publisher_after_departure = [&] (
         std::uint64_t departed_peer_id) {
-        if (!was_running) {
-            return;
-        }
         const jam2::GridProposal proposal{
             local_peer_id.value,
             runtime_host.nextGridRequestId(),
             jam2::GridRunState::Running,
             static_cast<std::uint8_t>(
                 commands.state.metronome_mode.load(std::memory_order_relaxed)),
-            0,
+            false,
+            false,
         };
         if (authority.localIsBootstrapCoordinator()) {
-            if (authority.orderGridProposal(proposal)) {
+            if (const auto ordered = authority.orderGridProposal(proposal)) {
                 pending_local_grid_proposal.reset();
-                (void)activate_local_grid();
+                const bool mappedEpochValid = commands.state.metronome_epoch_valid.load(
+                    std::memory_order_relaxed);
+                if (authority.localIsGridAuthority() && mappedEpochValid) {
+                    (void)authority.activateLocalGrid(
+                        commands.state.metronome_epoch_sample_time.load(
+                            std::memory_order_relaxed),
+                        current_engine_frame(audio.engine.get()));
+                }
+                apply_ordered_grid(!mappedEpochValid);
                 next_grid_assignment_send_us = 0;
                 return;
             }
@@ -1977,7 +2024,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             next_grid_proposal_send_us = 0;
             return;
         }
-        commands.state.metronome.store(false, std::memory_order_relaxed);
+        apply_grid_publisher_role();
     };
     auto align_to_authority_clock = [&](const MetronomePayload& metronome,
                                         std::uint64_t authority_packet_frame,
@@ -2016,7 +2063,6 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     commands.state.metronome_epoch_sample_time.store(0, std::memory_order_relaxed);
     commands.state.metronome_epoch_valid.store(false, std::memory_order_relaxed);
 
-    commands.state.metronome_local_authority.store(false, std::memory_order_relaxed);
     commands.state.leader_audio_local_click.store(false, std::memory_order_relaxed);
     if (authority.localIsBootstrapCoordinator()) {
         if (authority.orderGridProposal({
@@ -2025,7 +2071,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 grid_run_state_from_runtime(),
                 static_cast<std::uint8_t>(
                     commands.state.metronome_mode.load(std::memory_order_relaxed)),
-                0,
+                false,
+                false,
             })) {
             (void)activate_local_grid();
         }
@@ -2481,12 +2528,10 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     network_session.peerStream(retired.peer_id).stats());
                 const bool departed_grid_authority =
                     peer_id == authority.grid().authority_peer_id;
-                const bool grid_was_running = departed_grid_authority &&
-                    authority.grid().run_state == jam2::GridRunState::Running;
                 (void)authority.markPeerInactive(peer_id);
                 if (departed_grid_authority) {
-                    clear_departed_authority_state();
-                    restore_running_grid_after_departure(grid_was_running, peer_id);
+                    clear_departed_grid_publisher();
+                    reassign_grid_publisher_after_departure(peer_id);
                 }
                 (void)network_session.removePeer(it->second.peer_id);
 
@@ -2572,26 +2617,31 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             commands.state.grid_request_sequence.load(std::memory_order_acquire);
         if (local_grid_request_sequence != last_local_grid_request_sequence) {
             last_local_grid_request_sequence = local_grid_request_sequence;
+            const bool claim_leader_audio_source =
+                commands.state.leader_audio_source_request.exchange(false, std::memory_order_acq_rel);
+            const bool reset_epoch =
+                commands.state.grid_request_reset_epoch.exchange(false, std::memory_order_acq_rel);
             jam2::GridProposal proposal{
                 local_peer_id.value,
                 runtime_host.nextGridRequestId(),
                 grid_run_state_from_runtime(),
                 static_cast<std::uint8_t>(
                     commands.state.metronome_mode.load(std::memory_order_relaxed)),
-                commands.state.metronome_epoch_sample_time.load(std::memory_order_relaxed),
+                reset_epoch,
+                claim_leader_audio_source,
             };
             if (authority.localIsBootstrapCoordinator()) {
-                if (authority.orderGridProposal(proposal)) {
+                if (const auto ordered = authority.orderGridProposal(proposal)) {
                     pending_local_grid_proposal.reset();
-                    (void)activate_local_grid();
+                    apply_ordered_grid(reset_epoch);
                     next_grid_assignment_send_us = 0;
                 }
             } else {
                 pending_local_grid_proposal = proposal;
                 next_grid_proposal_send_us = 0;
-                commands.state.metronome_epoch_valid.store(false, std::memory_order_relaxed);
-                commands.state.metronome_local_authority.store(false, std::memory_order_relaxed);
-                commands.state.leader_audio_local_click.store(false, std::memory_order_relaxed);
+                // Keep rendering the committed grid while the coordinator
+                // orders this proposal. Only an explicit rate reset replaces
+                // the epoch; a leader-audio source handoff keeps its phase.
             }
         }
         const int grid_mode = commands.state.metronome_mode.load(std::memory_order_relaxed);
@@ -2874,23 +2924,26 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                                          std::uint64_t revision_or_request,
                                          std::uint64_t epoch,
                                          std::uint8_t mode,
-
-                                         jam2::GridRunState run_state) {
+                                         jam2::GridRunState run_state,
+                                         bool reset_epoch = false) {
                 return encode_metronome_payload(
-                    run_state == jam2::GridRunState::Running ? bpm : -bpm,
+                    commands.state.metronome.load(std::memory_order_relaxed) ? bpm : -bpm,
                     revision_or_request,
                     epoch,
                     pattern,
                     kind,
                     mode,
-                    run_state);
+                    run_state,
+                    reset_epoch);
             };
             if (pending_local_grid_proposal && now >= next_grid_proposal_send_us) {
                 const auto& proposal = *pending_local_grid_proposal;
                 const auto payload = make_grid_payload(
                     GridMessageKind::Proposal,
                     proposal.request_id,
-                    proposal.proposed_epoch_frame,
+                    static_cast<std::uint64_t>(
+                        (proposal.reset_epoch ? 0x01U : 0x00U) |
+                        (proposal.claim_leader_audio_source ? 0x02U : 0x00U)),
                     proposal.mode,
                     proposal.run_state);
                 network_session.sendToPeer(
@@ -2910,7 +2963,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     grid.revision,
                     grid.authority_epoch_frame,
                     grid.mode,
-                    grid.run_state);
+                    grid.run_state,
+                    grid.epoch_reset);
                 network_session.sendToActive(
                     jam2::protocol::PacketType::MetronomeState,
                     packet_schedule.takeControlSequence(),
@@ -3138,14 +3192,28 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     }
                     auto store_grid_settings = [&] {
                         if (commands.state.grid_request_sequence.load(std::memory_order_acquire) !=
-                            last_local_grid_request_sequence) {
+                                last_local_grid_request_sequence ||
+                            pending_local_grid_proposal.has_value()) {
                             return;
                         }
-                        store_metronome_pattern(commands.state, metronome.pattern);
+                        auto shared_pattern = metronome.pattern;
+                        const auto local_pattern = metronome_pattern_from_runtime(commands.state);
+                        shared_pattern.play_mask_low = local_pattern.play_mask_low;
+                        shared_pattern.play_mask_high = local_pattern.play_mask_high;
+                        shared_pattern.accent_mask_low = local_pattern.accent_mask_low;
+                        shared_pattern.accent_mask_high = local_pattern.accent_mask_high;
+                        store_metronome_pattern(commands.state, shared_pattern);
                         commands.state.bpm.store(remote_abs_bpm, std::memory_order_relaxed);
-                        commands.state.metronome.store(
-                            metronome.run_state == jam2::GridRunState::Running,
-                            std::memory_order_relaxed);
+                        if (metronome.mode == metronome_mode_id(MetronomeMode::LeaderAudio)) {
+                            commands.state.metronome.store(
+                                metronome.bpm > 0,
+                                std::memory_order_relaxed);
+                        } else {
+                            commands.state.metronome.store(
+                                commands.state.local_click_enabled.load(
+                                    std::memory_order_relaxed),
+                                std::memory_order_relaxed);
+                        }
                         commands.state.metronome_mode.store(metronome.mode, std::memory_order_relaxed);
                     };
                     if (metronome.kind == GridMessageKind::PeerPhase) {
@@ -3163,22 +3231,27 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         peer.listener_phase_received_us = jam2::monotonic_us();
                     } else if (metronome.kind == GridMessageKind::Proposal) {
 
+                        if (metronome.epoch_sample_time > 0x03U) {
+                            ++peer.ignored_packets;
+                            continue;
+                        }
+                        const bool resetEpoch =
+                            (metronome.epoch_sample_time & 0x01U) != 0;
+                        const bool claimLeaderAudioSource =
+                            (metronome.epoch_sample_time & 0x02U) != 0;
+
                         const auto ordered = authority.orderGridProposal({
                             peer.peer_id.value,
 
                             metronome.revision_or_request,
                             metronome.run_state,
                             metronome.mode,
-                            metronome.epoch_sample_time,
+                            resetEpoch,
+                            claimLeaderAudioSource,
                         });
                         if (ordered) {
                             store_grid_settings();
-                            commands.state.metronome_revision.store(
-                                ordered->revision,
-                                std::memory_order_relaxed);
-                            commands.state.metronome_epoch_valid.store(false, std::memory_order_relaxed);
-                            mesh_grid_target_valid = false;
-                            apply_authority_role();
+                            apply_ordered_grid(ordered->epoch_reset);
                             next_grid_assignment_send_us = 0;
 
                         }
@@ -3190,24 +3263,15 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                             metronome.mode,
                             metronome.epoch_sample_time,
                             0,
+                            metronome.reset_epoch,
                         };
                         const auto result = authority.acceptGridAssignment(
                             peer.peer_id.value,
                             assignment);
                         if (result == jam2::AuthorityUpdateResult::Accepted) {
-                            store_grid_settings();
-                            commands.state.metronome_revision.store(
-                                assignment.revision,
-                                std::memory_order_relaxed);
                             pending_local_grid_proposal.reset();
-                            mesh_grid_target_valid = false;
-                            if (authority.localIsGridAuthority()) {
-                                (void)activate_local_grid();
-                            } else {
-                                commands.state.metronome_epoch_valid.store(false, std::memory_order_relaxed);
-
-                                apply_authority_role();
-                            }
+                            store_grid_settings();
+                            apply_ordered_grid(assignment.epoch_reset);
                         }
                     } else if (metronome.kind == GridMessageKind::AuthorityState) {
                         const jam2::GridAuthorityState remote_state{
@@ -3217,6 +3281,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                             metronome.mode,
                             metronome.epoch_sample_time,
                             header.timing_value,
+                            false,
                         };
                         const auto result = authority.acceptGridAuthorityState(
                             peer.peer_id.value,
@@ -3271,7 +3336,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                                     mesh_grid_target_valid = true;
                                 }
                             }
-                            apply_authority_role();
+                            apply_grid_publisher_role();
                         }
                     }
                 } else if (header.type == jam2::protocol::PacketType::TransportState) {
@@ -3369,14 +3434,10 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         header.sequence);
                     const bool departed_grid_authority =
                         peer.peer_id.value == authority.grid().authority_peer_id;
-                    const bool grid_was_running = departed_grid_authority &&
-                        authority.grid().run_state == jam2::GridRunState::Running;
                     (void)authority.markPeerInactive(peer.peer_id.value);
                     if (departed_grid_authority && !timed_stream_audio_detached) {
-                        clear_departed_authority_state();
-                        restore_running_grid_after_departure(
-                            grid_was_running,
-                            peer.peer_id.value);
+                        clear_departed_grid_publisher();
+                        reassign_grid_publisher_after_departure(peer.peer_id.value);
                     }
                     ++peer.ignored_packets;
                 } else {

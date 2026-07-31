@@ -1,6 +1,9 @@
 # Metronome
 
-Jam2 includes a shared metronome for timing experiments and practical playing. The metronome is generated locally; the UDP audio stream does not carry a mixed metronome track.
+Jam2 includes a shared metronome for timing experiments and practical playing.
+Shared-grid and listener-compensated clicks are generated locally. In
+leader-audio mode, exactly one selected peer injects its click into its normal
+UDP audio stream and the other peers suppress their local renderer.
 
 ## Controls
 
@@ -36,9 +39,10 @@ pulse. At 120 BPM, a written eighth in compound meter therefore lasts one third
 of a 120 BPM pulse. The click is enabled at researched group starts by default,
 so 12/8 clicks four dotted-quarter pulses rather than all twelve eighths.
 
-Both fields are persisted and authenticated in peer settings and are applied by
-the audio clock, GUI playback grid, waveform/looper markers, quantized recording
-schedules, and bar-duration calculations. The notation denominator never
+Both timing fields are applied through the authenticated UDP grid authority and
+used by the audio clock, scheduling grid, quantized recording schedules, and
+bar-duration calculations. Click enablement, selected click hits, accents,
+sound, and level remain local renderer settings. The notation denominator never
 silently rescales a profile's researched BPM range.
 
 ## Modes
@@ -58,9 +62,25 @@ adjusts only its own click toward that group average; the shared grid and audio
 remain otherwise unchanged. CSV stats expose the base, target, applied offset,
 averaged latency, contributing-peer count, clamp events, and stale events.
 
-Every fresh Start after Stop creates a new ordered grid revision and epoch, so both connected peers begin again at `1.1`. A late or rejoining peer does not restart that running grid: it maps the authority's original epoch and elapsed frame position onto its local engine, then joins the current absolute bar and beat. Repeating an unchanged On, BPM, pattern, or mode control also leaves the current revision and authority epoch intact. If the current grid authority leaves while the metronome is running, the surviving coordinator immediately orders a fresh running epoch instead of leaving a stopped clock with an On control. Authenticated TCP metronome messages update the remote GUI presentation; the native UDP authority state alone applies the run state, mode, pattern, and mapped epoch to the remote engine so it cannot create a competing local proposal.
+The UDP grid is created with the session and keeps running independently of the
+audible click and backing-track transport. In shared-grid and
+listener-compensated modes, click On/Off and pattern accents are local only. In
+leader-audio mode, starting the click transfers grid authority to the starter
+so that only that peer injects click audio, but it retains the existing epoch
+and musical phase. Otherwise authority remains with the bootstrap coordinator.
+A BPM or tempo-pulse change is an explicit hard reset because it changes the
+duration of the timing unit: pending/playing backing and recording transport
+stop and a fresh ordered epoch is established. Meter, written-unit, division,
+mode, click enablement, hit selection, and accents do not reset the epoch. A
+late or rejoining peer maps the current epoch onto its local engine without
+restarting it. TCP carries no competing metronome epoch or settings model.
 
-Grid-aligned lane recording keeps the current running position while it waits for the next safe whole-bar boundary, performs the configured count-in on that grid, and then publishes one Track Sync `RecordStart` target. It does not submit a duplicate Start or reset to `1.1` when recording is armed. At the take boundary every Track-Sync-enabled peer resets its visible/track epoch to `1.1`, restarts any prepared tracks, and the recording peer begins capture. A peer with Track Sync disabled neither publishes nor applies that coordinated reset.
+Grid-aligned lane recording waits for the next safe beat of the existing epoch,
+then performs the configured number of count-in bars. The backing source,
+recording take, and track-relative GUI markers all start together after that
+count-in, with source frame zero displayed as `1.1`. This presentation origin
+does not alter the continuous UDP epoch. With the backing stopped, the song
+markers remain still even though the scheduling clock continues.
 
 ## Tuning Notes
 

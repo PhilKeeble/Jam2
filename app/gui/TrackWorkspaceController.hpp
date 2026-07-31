@@ -42,6 +42,9 @@ public:
 
     struct PendingTrackContribution {
         QString sourcePeerToken;
+        QString batchId;
+        int batchSize = 0;
+        QString contributionId;
         int bankIndex = 0;
         QString targetLaneId;
         QString assetHash;
@@ -120,6 +123,9 @@ public:
     QSet<QString> appliedTrackContributionIds;
     QMap<QString, QJsonObject> localTrackOffers;
     QMap<QString, QString> trackOfferAssetPaths;
+    QString outgoingTrackShareBatchId;
+    QJsonObject heldTrackShareSongSet;
+    QString heldTrackShareSongSourcePeerToken;
     QMap<QString, QString> pendingTrackAssetSources;
     QSet<QString> validatedTrackAssetHashes;
     IncomingAssetWorkflow incomingAssetWorkflow = IncomingAssetWorkflow::None;
@@ -128,6 +134,7 @@ public:
     QJsonObject pendingSongSet;
     QStringList pendingLooperAssetHashes;
     int pendingSongRevision = 0;
+    quint64 pendingSongBaseRevision = 0;
     bool pendingSongTrackRestart = false;
     QString pendingSongSourcePeerToken;
     bool pendingSongNeedsAuthoritativePublish = false;

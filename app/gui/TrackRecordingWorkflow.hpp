@@ -13,16 +13,22 @@
 
 namespace jam2::gui {
 
-std::uint64_t recording_count_in_bar_beat(
+std::uint64_t recording_count_in_start_beat(
     std::uint64_t absoluteBeat,
-    int beatsPerBar,
     std::uint64_t rawCurrentFrame,
-    std::uint64_t nextBarRawFrame,
+    std::uint64_t nextBeatRawFrame,
     int sampleRate) noexcept;
 
-bool recording_grid_ready_for_count_in(
-    bool metronomeEnabled,
-    bool epochValid) noexcept;
+bool recording_grid_ready_for_count_in(bool epochValid) noexcept;
+
+std::uint64_t global_transport_elapsed_frames(
+    bool playing,
+    bool engineAnchored,
+    std::uint64_t rawCurrentFrame,
+    std::uint64_t actualStartFrame) noexcept;
+
+std::uint64_t next_safe_grid_beat_raw_frame(
+    const PlaybackGrid::Position& position) noexcept;
 
 int resolve_active_sample_rate(
     int sessionSampleRate,
@@ -44,7 +50,7 @@ public:
 
     enum class CountdownPhase {
         Hidden,
-        WaitingForBar,
+        WaitingForBeat,
         Counting,
         Recording,
     };
@@ -74,7 +80,6 @@ public:
         std::uint64_t endFrame = 0) noexcept;
     bool restartPrepared(
         const PlaybackGrid::Position& position,
-        int beatsPerBar,
         bool publishTransport) noexcept;
     bool stopPrepared(
         std::uint64_t targetFrame,
@@ -82,6 +87,9 @@ public:
         bool publishTransport) noexcept;
     void noteManualPreparedSeek(qint64 sourceFrame, qint64 engineFrame) noexcept;
     qint64 currentAudiblePositionMs(
+        const PlaybackGrid::Position& enginePosition,
+        qint64 durationMs) const noexcept;
+    qint64 currentTransportPositionMs(
         const PlaybackGrid::Position& enginePosition,
         qint64 durationMs) const noexcept;
 
@@ -139,6 +147,10 @@ public:
     const QString& pendingTransientCapturePath() const noexcept { return pending_transient_capture_path_; }
     bool inputTakeActive() const noexcept { return input_take_active_; }
     bool preparedPlaying() const noexcept { return prepared_playing_; }
+    std::uint64_t preparedActualStartFrame() const noexcept {
+        return prepared_actual_start_frame_;
+    }
+    std::uint64_t recordingStartFrame() const noexcept { return recording_start_frame_; }
     int preparedSampleRate() const noexcept { return prepared_sample_rate_; }
     std::uint64_t appliedLatencyFrames() const noexcept { return applied_latency_frames_; }
     std::uint32_t inputLatencyFrames() const noexcept { return input_latency_frames_; }
@@ -176,6 +188,7 @@ private:
 
     qint64 prepared_source_frame_ = 0;
     qint64 prepared_engine_frame_ = 0;
+    std::uint64_t prepared_actual_start_frame_ = 0;
     bool prepared_playing_ = false;
     int prepared_sample_rate_ = 48000;
 

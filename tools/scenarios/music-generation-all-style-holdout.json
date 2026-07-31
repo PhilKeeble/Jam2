@@ -1,14 +1,14 @@
 {
   "schema": "jam2-debug-scenario",
-  "run_id": "music-generation-audit-corpus",
+  "run_id": "music-generation-all-style-holdout",
   "operation": "validate.music-full-form-corpus",
   "profile": "fast",
   "artifacts": {
-    "root": "../../artifacts/music-research/final-all-styles-iteration-2"
+    "root": "../../artifacts/music-research/final-all-styles-holdout-1"
   },
   "corpus": {
     "render_audio": false,
     "matched_complexity_seeds": true,
-    "samples_per_cell": 6
+    "samples_per_cell": 8
   }
 }

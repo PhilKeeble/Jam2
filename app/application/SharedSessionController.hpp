@@ -76,11 +76,11 @@ public:
         QString coordinatorToken;
         quint64 localPeerId = 0;
         quint64 coordinatorPeerId = 0;
-        QString gridAuthorityToken;
+        QString editorAuthorityToken;
         QString arrangementAuthorityToken;
         quint64 membershipRevision = 0;
         quint64 contractRevision = 0;
-        quint64 gridRevision = 0;
+        quint64 editorRevision = 0;
         quint64 arrangementRevision = 0;
         int sessionPeerLimit = 0;
         int reconnectAttempts = 0;
@@ -190,9 +190,9 @@ private:
         quint64 revision = 0;
         int pageCount = 0;
         QString coordinatorToken;
-        QString gridAuthorityToken;
+        QString editorAuthorityToken;
         QString arrangementAuthorityToken;
-        quint64 gridRevision = 0;
+        quint64 editorRevision = 0;
         quint64 arrangementRevision = 0;
         QMap<int, QJsonObject> pages;
     };
@@ -236,11 +236,11 @@ private:
     QMap<QString, Peer> peers_;
     MembershipAssembly membershipAssembly_;
     QString coordinatorToken_;
-    QString gridAuthorityToken_;
+    QString editorAuthorityToken_;
     QString arrangementAuthorityToken_;
     quint64 membershipRevision_ = 0;
     quint64 contractRevision_ = 0;
-    quint64 gridRevision_ = 0;
+    quint64 editorRevision_ = 0;
     quint64 arrangementRevision_ = 0;
     bool contractReady_ = false;
     SessionContract contract_;
@@ -253,7 +253,7 @@ private:
         jam2::control_protocol::TransportFailure::None;
     QString failureDetail_;
     bool failureRetryable_ = false;
-    QJsonObject gridState_;
+    QJsonObject editorState_;
     QJsonObject arrangementState_;
     int heartbeatIntervalMs_ = kDefaultHeartbeatIntervalMs;
     int heartbeatMissLimit_ = kDefaultHeartbeatMissLimit;

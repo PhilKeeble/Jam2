@@ -24,6 +24,10 @@ public:
         quint64 connectionAttempts = 0;
         quint64 completedConnections = 0;
         quint64 disconnectedConnections = 0;
+        quint64 largeJsonMessagesSent = 0;
+        quint64 largeJsonMessagesReceived = 0;
+        quint64 largeJsonRawBytesSent = 0;
+        quint64 largeJsonCompressedBytesSent = 0;
     };
 
     explicit ControlClient(QObject* parent = nullptr);
@@ -84,6 +88,7 @@ private:
     QByteArray transcript_;
     QByteArray receiveKey_;
     QByteArray sendKey_;
+    jam2::control_protocol::LargeJsonReceiver largeJsonReceiver_;
     QString sessionHex_;
     QString meshPeerToken_;
     QString meshUdpEndpoint_;

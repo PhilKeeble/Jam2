@@ -565,6 +565,10 @@ CsvStatsLog::AudioSnapshot make_audio_snapshot(
     snapshot.prepared_source_frame = engine_snapshot.prepared_source_frame;
     snapshot.prepared_source_scheduled_start_frame = engine_snapshot.prepared_source_scheduled_start_frame;
     snapshot.prepared_source_actual_start_frame = engine_snapshot.prepared_source_actual_start_frame;
+    snapshot.metronome_pattern_origin_frame = engine_snapshot.metronome_pattern_origin_frame;
+    snapshot.metronome_pattern_origin_valid = engine_snapshot.metronome_pattern_origin_valid;
+    snapshot.metronome_pattern_source_start_frame =
+        engine_snapshot.metronome_pattern_source_start_seen;
     snapshot.prepared_source_underruns = engine_snapshot.prepared_source_underruns;
     snapshot.prepared_source_busy_events = engine_snapshot.prepared_source_busy_events;
     snapshot.network_capture_enabled = engine_snapshot.network_capture_enabled;

@@ -52,7 +52,8 @@ std::optional<GridAuthorityState> SessionAuthority::orderGridProposal(
 {
     if (!localIsBootstrapCoordinator() || proposal.requester_peer_id == 0 ||
         proposal.request_id == 0 || proposal.mode > 2 ||
-        proposal.run_state == GridRunState::AuthorityMissing ||
+        (proposal.claim_leader_audio_source && proposal.mode != 1) ||
+        proposal.run_state != GridRunState::Running ||
         grid_.revision == (std::numeric_limits<std::uint64_t>::max)()) {
         ++stats_.grid_proposals_rejected;
         return std::nullopt;
@@ -72,12 +73,29 @@ std::optional<GridAuthorityState> SessionAuthority::orderGridProposal(
         return std::nullopt;
     }
     found->last_request_id = proposal.request_id;
+    const bool first_grid = grid_.revision == 0;
+    const bool reset_epoch = proposal.reset_epoch;
+    const bool claim_leader_audio = proposal.claim_leader_audio_source;
+    const std::uint64_t previous_authority = grid_.authority_peer_id;
+    const std::uint64_t previous_epoch = grid_.authority_epoch_frame;
+    const std::uint64_t previous_packet = grid_.authority_packet_frame;
     grid_.revision += 1;
-    grid_.authority_peer_id = proposal.requester_peer_id;
-    grid_.run_state = proposal.run_state;
+    if (first_grid) {
+        grid_.authority_peer_id = bootstrap_coordinator_peer_id_;
+    } else if (claim_leader_audio) {
+        grid_.authority_peer_id = proposal.requester_peer_id;
+    } else if (grid_.run_state != GridRunState::AuthorityMissing) {
+        grid_.authority_peer_id = previous_authority != 0
+            ? previous_authority
+            : bootstrap_coordinator_peer_id_;
+    } else {
+        grid_.authority_peer_id = bootstrap_coordinator_peer_id_;
+    }
+    grid_.run_state = GridRunState::Running;
     grid_.mode = proposal.mode;
-    grid_.authority_epoch_frame = proposal.proposed_epoch_frame;
-    grid_.authority_packet_frame = 0;
+    grid_.authority_epoch_frame = reset_epoch ? 0 : previous_epoch;
+    grid_.authority_packet_frame = reset_epoch ? 0 : previous_packet;
+    grid_.epoch_reset = reset_epoch;
     ++stats_.grid_proposals_accepted;
     ++stats_.grid_assignments_accepted;
     return grid_;
@@ -92,7 +110,7 @@ AuthorityUpdateResult SessionAuthority::acceptGridAssignment(
         return AuthorityUpdateResult::UnauthorizedSource;
     }
     if (assignment.revision == 0 || assignment.authority_peer_id == 0 ||
-        assignment.mode > 2) {
+        assignment.mode > 2 || assignment.run_state != GridRunState::Running) {
         ++stats_.grid_assignments_rejected;
         return AuthorityUpdateResult::Invalid;
     }
@@ -107,20 +125,8 @@ AuthorityUpdateResult SessionAuthority::acceptGridAssignment(
             ++stats_.grid_assignments_duplicate;
             return AuthorityUpdateResult::Duplicate;
         }
-        if (assignment.authority_peer_id == grid_.authority_peer_id &&
-            assignment.mode == grid_.mode &&
-            assignment.run_state == GridRunState::AuthorityMissing) {
-            grid_.run_state = GridRunState::AuthorityMissing;
-            ++stats_.grid_assignments_accepted;
-            ++stats_.grid_authority_missing_events;
-            return AuthorityUpdateResult::Accepted;
-        }
         ++stats_.grid_assignments_rejected;
         return AuthorityUpdateResult::StaleRevision;
-    }
-    if (assignment.run_state == GridRunState::AuthorityMissing) {
-        ++stats_.grid_assignments_rejected;
-        return AuthorityUpdateResult::Invalid;
     }
     grid_ = assignment;
     ++stats_.grid_assignments_accepted;
@@ -142,7 +148,7 @@ AuthorityUpdateResult SessionAuthority::acceptGridAuthorityState(
         ++stats_.grid_authority_states_rejected;
         return AuthorityUpdateResult::UnauthorizedSource;
     }
-    if (state.mode > 2 || state.run_state == GridRunState::AuthorityMissing) {
+    if (state.mode > 2 || state.run_state != GridRunState::Running) {
         ++stats_.grid_authority_states_rejected;
         return AuthorityUpdateResult::Invalid;
     }

@@ -197,9 +197,11 @@ active jam. They are saved with the local project and omitted from arrangement
 sync until **Share Tracks** is clicked. Share Tracks promotes those lanes and
 publishes them through the same content-hash transfer used for other WAVs.
 When a peer already has a valid WAV with the requested hash, Jam2 reuses it
-instead of transferring another copy. Missing WAVs are requested one at a time;
-the next request starts only after the receiver has validated and committed the
-previous file.
+instead of transferring another copy. Share Tracks sends one bounded batch
+manifest, requests missing WAVs one at a time, stages the complete additive
+union, and publishes one authoritative arrangement only after every advertised
+asset is validated. The sender holds incoming arrangement UI changes until the
+batch completion message while audio and the UDP scheduling grid continue.
 
 A newly selected WAV with a different sample rate is rejected before it changes
 the track, looper bank, prepared mix, or current playback, and the dialog shows
@@ -209,11 +211,22 @@ Track Sync until it is unloaded or replaced.
 
 Any authenticated peer may originate shared arrangement edits or prepared-track Play, Stop, Restart, or Record Start while Track Sync is enabled. The creator validates each full-snapshot arrangement proposal, assigns the next ordered revision, and rebroadcasts it; this sequencing role does not make the creator the sole editor. Disabling Track Sync keeps that peer's controls local, prevents it from proposing shared edits or track actions, and makes it disregard incoming ones. The setting is peer-local and is not loaded from project or shared-arrangement snapshots. Source event IDs persist across a leave/rejoin of the network worker so replay protection does not discard the first actions after reconnection.
 
-Loading or recording a WAV while Track Sync is enabled automatically offers that local lane to the jam. Existing asset-backed lanes are also offered when a peer joins or re-enables Sync. Offers use stable contribution IDs and content hashes: a matching empty lane may be filled, while a conflicting occupied lane is preserved and the offered lane is appended. The creator requests the other peer's tracks before publishing its snapshot, so peers that built separate track sets with Sync off converge to the additive union regardless of which side re-enables Sync first. **Share Tracks** retries this reconciliation explicitly; it never replaces a different existing lane.
+Loading or recording a WAV while Track Sync is enabled automatically reconciles
+that local set with the jam. Offers use stable contribution IDs and content
+hashes: a matching empty lane may be filled, while a conflicting occupied lane
+is preserved and the offered lane is appended. **Share Tracks** retries the
+atomic additive reconciliation explicitly; it never publishes intermediate
+one-track snapshots or replaces a different existing lane.
 
 Lane recording is local. The first version records one clip per lane, stages the recorded WAV, inserts it at timeline frame 0, and lets the user adjust the lane region afterward. The selected lane region can be moved by dragging the clip body and cropped by dragging either edge; numeric frame controls remain available for exact edits.
 
-Perform recording waits for a safe next whole bar, performs the grid-aligned count-in, and starts on a shared Track Sync boundary. On that boundary all opted-in peers return to `1.1` and restart prepared tracks, keeping their markers and backing tracks aligned with the take. A manual Stop finishes at the next whole bar so the imported take remains bar-aligned. The waveform and Looper position markers follow the continuous engine transport and the configured beats per bar.
+Perform recording waits for the next safe beat of the continuous epoch, performs
+the requested count-in bars, and then starts the prepared backing, recording,
+and track-relative song markers together at `1.1`. The UDP epoch is not reset.
+A manual Stop finishes at the next whole bar so the imported take remains
+bar-aligned. Song markers advance only while the global prepared backing (or
+the recording started with it) is playing; the scheduling grid continues
+silently underneath.
 
 ## Track Recording From The GUI
 

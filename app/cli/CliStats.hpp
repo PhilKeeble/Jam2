@@ -428,6 +428,9 @@ public:
         std::uint64_t prepared_source_scheduled_start_frame = 0;
 
         std::uint64_t prepared_source_actual_start_frame = 0;
+        std::uint64_t metronome_pattern_origin_frame = 0;
+        bool metronome_pattern_origin_valid = false;
+        std::uint64_t metronome_pattern_source_start_frame = 0;
         std::uint64_t prepared_source_underruns = 0;
         std::uint64_t prepared_source_busy_events = 0;
         bool network_capture_enabled = false;
@@ -572,7 +575,9 @@ public:
                 "input_downmix_channel_1_weight,input_downmix_channel_2_weight,"
                 "input_downmix_channel_3_weight,input_downmix_channel_4_weight,"
                 "input_downmix_channel_1_noise_floor,input_downmix_channel_2_noise_floor,"
-                "input_downmix_channel_3_noise_floor,input_downmix_channel_4_noise_floor\n";
+                "input_downmix_channel_3_noise_floor,input_downmix_channel_4_noise_floor,"
+                "metronome_pattern_origin_frame,metronome_pattern_origin_valid,"
+                "metronome_pattern_source_start_frame\n";
     }
 
     explicit operator bool() const { return out_.is_open(); }
@@ -1001,7 +1006,10 @@ public:
              << static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[0]) / 1000000.0 << ','
              << static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[1]) / 1000000.0 << ','
              << static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[2]) / 1000000.0 << ','
-             << static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[3]) / 1000000.0;
+             << static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[3]) / 1000000.0 << ','
+             << audio.metronome_pattern_origin_frame << ','
+             << (audio.metronome_pattern_origin_valid ? "yes" : "no") << ','
+             << audio.metronome_pattern_source_start_frame;
         out_ << '\n';
         if (row_type == "final") {
             out_.flush();
@@ -1017,7 +1025,7 @@ public:
         if (!out_) {
             return;
         }
-        std::vector<std::string> fields(392);
+        std::vector<std::string> fields(395);
         auto set = [&](std::size_t index, auto value) {
             std::ostringstream text;
             text << value;
@@ -1375,6 +1383,9 @@ public:
         set(389, static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[1]) / 1000000.0);
         set(390, static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[2]) / 1000000.0);
         set(391, static_cast<double>(audio.input_downmix.channel_noise_floor_ppm[3]) / 1000000.0);
+        set(392, audio.metronome_pattern_origin_frame);
+        fields[393] = audio.metronome_pattern_origin_valid ? "yes" : "no";
+        set(394, audio.metronome_pattern_source_start_frame);
 
         for (std::size_t i = 0; i < fields.size(); ++i) {
             if (i != 0) {

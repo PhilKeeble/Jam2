@@ -55,37 +55,85 @@ int remainingCountInBeats(
 
 }
 
-std::uint64_t jam2::gui::recording_count_in_bar_beat(
+std::uint64_t jam2::gui::recording_count_in_start_beat(
     std::uint64_t absoluteBeat,
-    int beatsPerBar,
     std::uint64_t rawCurrentFrame,
-    std::uint64_t nextBarRawFrame,
+    std::uint64_t nextBeatRawFrame,
     int sampleRate) noexcept
 {
-    const std::uint64_t beats = static_cast<std::uint64_t>(qMax(1, beatsPerBar));
-    if (absoluteBeat > (std::numeric_limits<std::uint64_t>::max)() - beats) {
+    if (absoluteBeat == (std::numeric_limits<std::uint64_t>::max)()) {
         return (std::numeric_limits<std::uint64_t>::max)();
     }
-    std::uint64_t nextBarBeat = (absoluteBeat / beats + 1ULL) * beats;
+    const std::uint64_t nextBeat = absoluteBeat + 1ULL;
     const std::uint64_t minimumLeadFrames =
         static_cast<std::uint64_t>(qMax(1, sampleRate) / 5);
     const std::uint64_t minimumCountdownRawFrame =
         rawCurrentFrame > (std::numeric_limits<std::uint64_t>::max)() - minimumLeadFrames
         ? (std::numeric_limits<std::uint64_t>::max)()
         : rawCurrentFrame + minimumLeadFrames;
-    if (nextBarRawFrame < minimumCountdownRawFrame) {
-        return nextBarBeat > (std::numeric_limits<std::uint64_t>::max)() - beats
+    if (nextBeatRawFrame < minimumCountdownRawFrame) {
+        return nextBeat == (std::numeric_limits<std::uint64_t>::max)()
             ? (std::numeric_limits<std::uint64_t>::max)()
-            : nextBarBeat + beats;
+            : nextBeat + 1ULL;
     }
-    return nextBarBeat;
+    return nextBeat;
 }
 
-bool jam2::gui::recording_grid_ready_for_count_in(
-    bool metronomeEnabled,
-    bool epochValid) noexcept
+bool jam2::gui::recording_grid_ready_for_count_in(bool epochValid) noexcept
 {
-    return metronomeEnabled && epochValid;
+    return epochValid;
+}
+
+std::uint64_t jam2::gui::global_transport_elapsed_frames(
+    bool playing,
+    bool engineAnchored,
+    std::uint64_t rawCurrentFrame,
+    std::uint64_t actualStartFrame) noexcept
+{
+    if (!playing || !engineAnchored || rawCurrentFrame < actualStartFrame) {
+        return 0;
+    }
+    return rawCurrentFrame - actualStartFrame;
+}
+
+std::uint64_t jam2::gui::next_safe_grid_beat_raw_frame(
+    const PlaybackGrid::Position& position) noexcept
+{
+    if (!position.engineAnchored || position.sampleRate <= 0) {
+        return 0;
+    }
+    const std::uint64_t leadFrames =
+        static_cast<std::uint64_t>(position.sampleRate / 5);
+    const std::uint64_t minimumLead = position.rawCurrentFrame >
+        (std::numeric_limits<std::uint64_t>::max)() - leadFrames
+        ? (std::numeric_limits<std::uint64_t>::max)()
+        : position.rawCurrentFrame + leadFrames;
+    if (!position.running || position.secondsPerBeat <= 0.0 ||
+        position.absoluteBeat == (std::numeric_limits<std::uint64_t>::max)()) {
+        return minimumLead;
+    }
+    const auto targetForBeat = [&position](std::uint64_t beat) {
+        const long double offset = static_cast<long double>(beat) *
+            static_cast<long double>(position.secondsPerBeat) *
+            static_cast<long double>(position.sampleRate);
+        const long double maximumOffset = std::min(
+            static_cast<long double>(
+                (std::numeric_limits<std::uint64_t>::max)() - position.epochFrame),
+            static_cast<long double>((std::numeric_limits<long long>::max)()));
+        if (!std::isfinite(offset) || offset < 0.0L || offset > maximumOffset) {
+            return (std::numeric_limits<std::uint64_t>::max)();
+        }
+        return rawFrameFromMusicalFrame(
+            position.epochFrame + static_cast<std::uint64_t>(std::llround(offset)),
+            position.renderOffsetFrames);
+    };
+    std::uint64_t beat = position.absoluteBeat + 1ULL;
+    std::uint64_t target = targetForBeat(beat);
+    if (target < minimumLead &&
+        beat != (std::numeric_limits<std::uint64_t>::max)()) {
+        target = targetForBeat(beat + 1ULL);
+    }
+    return target;
 }
 
 int jam2::gui::resolve_active_sample_rate(
@@ -150,33 +198,9 @@ bool TrackRecordingWorkflow::setPreparedLoop(
 
 bool TrackRecordingWorkflow::restartPrepared(
     const PlaybackGrid::Position& position,
-    int beatsPerBar,
     bool publishTransport) noexcept
 {
-    std::uint64_t target = 0;
-    const auto quantizedTarget = [&position, beatsPerBar](int extraBars) {
-        if (!position.engineAnchored || position.sampleRate <= 0) {
-            return 0ULL;
-        }
-        const auto beats = static_cast<std::uint64_t>(qMax(1, beatsPerBar));
-        const std::uint64_t nextBarBeat =
-            ((position.absoluteBeat / beats) + 1ULL + static_cast<std::uint64_t>(qMax(0, extraBars))) * beats;
-        const auto musical = position.epochFrame + static_cast<std::uint64_t>(std::llround(
-            static_cast<double>(nextBarBeat) * position.secondsPerBeat * position.sampleRate));
-        return rawFrameFromMusicalFrame(musical, position.renderOffsetFrames);
-    };
-    if (position.running) {
-        target = quantizedTarget(0);
-    }
-    const std::uint64_t minimumLead = position.engineAnchored && position.sampleRate > 0
-        ? position.rawCurrentFrame + static_cast<std::uint64_t>(position.sampleRate / 5)
-        : 0;
-    if (position.running && target > 0 && target < minimumLead) {
-        target = quantizedTarget(1);
-    }
-    if (target == 0 && position.engineAnchored && position.sampleRate > 0) {
-        target = minimumLead;
-    }
+    const std::uint64_t target = jam2::gui::next_safe_grid_beat_raw_frame(position);
     if (target == 0) {
         return false;
     }
@@ -251,6 +275,34 @@ qint64 TrackRecordingWorkflow::currentAudiblePositionMs(
     return qBound<qint64>(0, sourceFrame * 1000 / prepared_sample_rate_, durationMs);
 }
 
+qint64 TrackRecordingWorkflow::currentTransportPositionMs(
+    const PlaybackGrid::Position& enginePosition,
+    qint64 durationMs) const noexcept
+{
+    if (durationMs > 0) {
+        return currentAudiblePositionMs(enginePosition, durationMs);
+    }
+    if (enginePosition.sampleRate <= 0) {
+        return 0;
+    }
+    const std::uint64_t elapsedFrames = jam2::gui::global_transport_elapsed_frames(
+        prepared_playing_,
+        enginePosition.engineAnchored,
+        enginePosition.rawCurrentFrame,
+        prepared_actual_start_frame_);
+    const std::uint64_t sampleRate = static_cast<std::uint64_t>(enginePosition.sampleRate);
+    const std::uint64_t wholeSeconds = elapsedFrames / sampleRate;
+    const std::uint64_t remainingFrames = elapsedFrames % sampleRate;
+    const std::uint64_t maximumMs = static_cast<std::uint64_t>(
+        (std::numeric_limits<qint64>::max)());
+    if (wholeSeconds > maximumMs / 1000ULL) {
+        return (std::numeric_limits<qint64>::max)();
+    }
+    const std::uint64_t elapsedMs = wholeSeconds * 1000ULL +
+        remainingFrames * 1000ULL / sampleRate;
+    return static_cast<qint64>(elapsedMs);
+}
+
 void TrackRecordingWorkflow::consumeSnapshot(
     const jam2::EngineSnapshot& snapshot,
     const MetronomeTransportController::SnapshotUpdate& transportUpdate) noexcept
@@ -261,6 +313,7 @@ void TrackRecordingWorkflow::consumeSnapshot(
     latency_sample_rate_ = qMax(1, static_cast<int>(std::lround(snapshot.sample_rate)));
     prepared_engine_frame_ = static_cast<qint64>(snapshot.engine_frame);
     prepared_source_frame_ = static_cast<qint64>(snapshot.prepared_source_frame);
+    prepared_actual_start_frame_ = snapshot.prepared_source_actual_start_frame;
     prepared_playing_ = snapshot.prepared_source_playing;
     if (snapshot.sample_rate > 0.0) {
         prepared_sample_rate_ = static_cast<int>(std::lround(snapshot.sample_rate));
@@ -275,7 +328,6 @@ std::optional<int> TrackRecordingWorkflow::takeReadyPendingCountIn(
     const jam2::EngineSnapshot& snapshot) noexcept
 {
     if (pending_count_in_bars_ > 0 && jam2::gui::recording_grid_ready_for_count_in(
-            snapshot.metronome_enabled,
             snapshot.metronome_epoch_valid)) {
         const int bars = pending_count_in_bars_;
         pending_count_in_bars_ = 0;
@@ -328,30 +380,29 @@ bool TrackRecordingWorkflow::startTrackTakeQuantized(
         return false;
     }
     const auto beats = static_cast<std::uint64_t>(qMax(1, beatsPerBar));
-    std::uint64_t nextBarBeat = (position.absoluteBeat / beats + 1ULL) * beats;
+    std::uint64_t nextBeat = position.absoluteBeat + 1ULL;
     const std::uint64_t beatFrames = static_cast<std::uint64_t>(std::llround(
         position.secondsPerBeat * static_cast<double>(position.sampleRate)));
-    if (beatFrames == 0 || nextBarBeat >
+    if (beatFrames == 0 || nextBeat >
         ((std::numeric_limits<std::uint64_t>::max)() - position.epochFrame) / beatFrames) {
         error = QStringLiteral("recording count-in target exceeds the engine clock range");
         return false;
     }
-    std::uint64_t countdownMusicalFrame = position.epochFrame + nextBarBeat * beatFrames;
-    const std::uint64_t safeNextBarBeat = jam2::gui::recording_count_in_bar_beat(
+    std::uint64_t countdownMusicalFrame = position.epochFrame + nextBeat * beatFrames;
+    const std::uint64_t safeNextBeat = jam2::gui::recording_count_in_start_beat(
         position.absoluteBeat,
-        beatsPerBar,
         position.rawCurrentFrame,
         rawFrameFromMusicalFrame(countdownMusicalFrame, position.renderOffsetFrames),
         position.sampleRate);
-    if (safeNextBarBeat != nextBarBeat) {
-        if (safeNextBarBeat == (std::numeric_limits<std::uint64_t>::max)() ||
-            safeNextBarBeat >
+    if (safeNextBeat != nextBeat) {
+        if (safeNextBeat == (std::numeric_limits<std::uint64_t>::max)() ||
+            safeNextBeat >
                 ((std::numeric_limits<std::uint64_t>::max)() - position.epochFrame) / beatFrames) {
             error = QStringLiteral("recording count-in target exceeds the engine clock range");
             return false;
         }
-        nextBarBeat = safeNextBarBeat;
-        countdownMusicalFrame = position.epochFrame + nextBarBeat * beatFrames;
+        nextBeat = safeNextBeat;
+        countdownMusicalFrame = position.epochFrame + nextBeat * beatFrames;
     }
     const std::uint64_t countInBeats = static_cast<std::uint64_t>(qMax(0, countInBars)) * beats;
     if (countInBeats >
@@ -513,7 +564,7 @@ TrackRecordingWorkflow::CountdownPresentation TrackRecordingWorkflow::countdown(
         return presentation;
     }
     if (position.rawCurrentFrame < recording_countdown_start_frame_) {
-        presentation.phase = CountdownPhase::WaitingForBar;
+        presentation.phase = CountdownPhase::WaitingForBeat;
         return presentation;
     }
     if (position.rawCurrentFrame < recording_start_frame_) {

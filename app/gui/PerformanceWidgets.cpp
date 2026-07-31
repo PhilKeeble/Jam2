@@ -171,6 +171,30 @@ void PerformanceHomeWidget::setTrackWaveform(std::vector<float> peaks, bool vali
     update();
 }
 
+void PerformanceHomeWidget::setTrackBpmMismatch(
+    bool mismatched,
+    double backingBpm,
+    double sessionBpm)
+{
+    if (trackBpmMismatch_ == mismatched && qFuzzyCompare(backingBpm_, backingBpm) &&
+        qFuzzyCompare(sessionBpm_, sessionBpm)) {
+        return;
+    }
+    trackBpmMismatch_ = mismatched;
+    backingBpm_ = backingBpm;
+    sessionBpm_ = sessionBpm;
+    update();
+}
+
+void PerformanceHomeWidget::setTrackTransferStatus(const QString& status)
+{
+    if (trackTransferStatus_ == status) {
+        return;
+    }
+    trackTransferStatus_ = status;
+    update();
+}
+
 void PerformanceHomeWidget::setWavGenerationActive(bool active)
 {
     if (wavGenerationActive_ == active) {
@@ -1620,7 +1644,40 @@ void PerformanceHomeWidget::paintLooperLaunch(QPainter& painter, const QRect& bo
         Qt::AlignRight | Qt::AlignTop,
         QStringLiteral("BANK A"));
 
-    const QRect wave = bounds.adjusted(12, 29, -12, -39);
+    int noticeTop = 25;
+    if (!trackTransferStatus_.isEmpty()) {
+        const QRect transfer(
+            bounds.left() + 12,
+            bounds.top() + noticeTop,
+            qMax(80, bounds.width() - 24),
+            22);
+        painter.setPen(QPen(QColor(102, 212, 207), 1));
+        painter.setBrush(QColor(13, 53, 54, 232));
+        painter.drawRoundedRect(transfer, 3, 3);
+        painter.setPen(QColor(190, 244, 240));
+        painter.drawText(transfer, Qt::AlignCenter, trackTransferStatus_);
+        noticeTop += 26;
+    }
+    if (trackBpmMismatch_) {
+        const QRect warning(
+            bounds.left() + 12,
+            bounds.top() + noticeTop,
+            qMax(80, bounds.width() - 24),
+            22);
+        painter.setPen(QPen(QColor(255, 170, 76), 1));
+        painter.setBrush(QColor(72, 34, 18, 232));
+        painter.drawRoundedRect(warning, 3, 3);
+        painter.setPen(QColor(255, 220, 160));
+        painter.drawText(
+            warning,
+            Qt::AlignCenter,
+            QStringLiteral("BPM OUT OF SYNC  ·  BACKING %1  /  SESSION %2")
+                .arg(backingBpm_, 0, 'f', 0)
+                .arg(sessionBpm_, 0, 'f', 0));
+        noticeTop += 26;
+    }
+
+    const QRect wave = bounds.adjusted(12, noticeTop + 4, -12, -39);
     painter.setPen(QPen(QColor(54, 68, 72), 1));
     painter.drawLine(wave.left(), wave.center().y(), wave.right(), wave.center().y());
     QLinearGradient waveformGradient(wave.left(), 0, wave.right(), 0);

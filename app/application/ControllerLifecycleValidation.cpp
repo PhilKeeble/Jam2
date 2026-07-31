@@ -464,8 +464,8 @@ QJsonObject jam2RunControllerLifecycleValidation(
     }, 1000);
     const auto afterInvalid = creator.snapshot();
     check(QStringLiteral("controller.invalid-peer-message-cannot-mutate-authority"),
-        invalidRejected && afterInvalid.gridRevision == beforeRejected.gridRevision &&
-            afterInvalid.gridAuthorityToken == beforeRejected.gridAuthorityToken);
+        invalidRejected && afterInvalid.editorRevision == beforeRejected.editorRevision &&
+            afterInvalid.editorAuthorityToken == beforeRejected.editorAuthorityToken);
 
     const QJsonObject unauthorizedMembership{
         {QStringLiteral("type"), QStringLiteral("session.membership")},
@@ -496,46 +496,46 @@ QJsonObject jam2RunControllerLifecycleValidation(
     };
     bool collaborativeProposalDelivered = false;
     if (joined) {
+        QJsonObject largeSong = minimalValidSong();
+        // Exercise the real authenticated TCP client/server path with the
+        // same payload shape that previously made generated ideas disappear
+        // above the ordinary 64 KiB frame bound.
+        largeSong.insert(
+            QStringLiteral("generated_recipe_blob"),
+            QString(140 * 1024, QLatin1Char('x')));
         const bool sent = joiner.send(QJsonObject{
             {QStringLiteral("type"), QStringLiteral("song.set")},
             {QStringLiteral("arrangement_revision"), 0},
             {QStringLiteral("host_authoritative"), false},
             {QStringLiteral("track_playing"), false},
-            {QStringLiteral("song"), minimalValidSong()},
+            {QStringLiteral("song"), largeSong},
         });
         collaborativeProposalDelivered = sent && pumpUntil([&] {
             return proposalSourceToken == joiner.snapshot().localToken &&
-                !receivedProposal.value(QStringLiteral("host_authoritative")).toBool(true);
-        }, 1000);
+                !receivedProposal.value(QStringLiteral("host_authoritative")).toBool(true) &&
+                receivedProposal.value(QStringLiteral("song")).toObject() == largeSong;
+        }, 2000);
     }
-    check(QStringLiteral("controller.peer-arrangement-proposal-delivered"),
+    check(QStringLiteral("controller.large-peer-arrangement-proposal-delivered-atomically"),
         collaborativeProposalDelivered);
 
     bool nonCoordinatorAuthority = false;
     if (joined) {
         const bool sent = joiner.send(QJsonObject{
-            {QStringLiteral("type"), QStringLiteral("metronome.settings")},
-            {QStringLiteral("bpm"), 126},
-            {QStringLiteral("running"), true},
-            {QStringLiteral("leader"), true},
-            {QStringLiteral("mode"), QStringLiteral("shared-grid")},
-            {QStringLiteral("beats"), 4},
-            {QStringLiteral("division"), 4},
-            {QStringLiteral("beat_unit"), 4},
-            {QStringLiteral("tempo_pulse_units"), 1},
-            {QStringLiteral("play_mask_low"), QStringLiteral("ffff")},
-            {QStringLiteral("play_mask_high"), QStringLiteral("0")},
-            {QStringLiteral("accent_mask_low"), QStringLiteral("1111")},
-            {QStringLiteral("accent_mask_high"), QStringLiteral("0")},
+            {QStringLiteral("type"), QStringLiteral("beat.set")},
+            {QStringLiteral("section"), 0},
+            {QStringLiteral("beat"), 0},
+            {QStringLiteral("lane"), QStringLiteral("chord")},
+            {QStringLiteral("text"), QStringLiteral("Cmaj7")},
         });
         nonCoordinatorAuthority = sent && pumpUntil([&] {
-            return creator.snapshot().gridRevision == 1 &&
-                creator.snapshot().gridAuthorityToken == joiner.snapshot().localToken &&
-                joiner.snapshot().gridRevision == 1 &&
-                joiner.snapshot().gridAuthorityToken == joiner.snapshot().localToken;
+            return creator.snapshot().editorRevision == 1 &&
+                creator.snapshot().editorAuthorityToken == joiner.snapshot().localToken &&
+                joiner.snapshot().editorRevision == 1 &&
+                joiner.snapshot().editorAuthorityToken == joiner.snapshot().localToken;
         }, 1000);
     }
-    check(QStringLiteral("controller.non-coordinator-grid-authority"), nonCoordinatorAuthority);
+    check(QStringLiteral("controller.non-coordinator-editor-authority"), nonCoordinatorAuthority);
 
     SharedSessionController lateJoiner;
     bool lateJoinReady = false;
@@ -550,8 +550,8 @@ QJsonObject jam2RunControllerLifecycleValidation(
             const auto snapshot = lateJoiner.snapshot();
             return snapshot.lifecycle == SharedSessionController::Lifecycle::Active &&
                 snapshot.totalPeerCount == 3 && snapshot.remotePeerCount == 2 &&
-                snapshot.gridRevision == 1 &&
-                snapshot.gridAuthorityToken == joiner.snapshot().localToken &&
+                snapshot.editorRevision == 1 &&
+                snapshot.editorAuthorityToken == joiner.snapshot().localToken &&
                 snapshot.arrangementAuthorityToken == creator.snapshot().localToken;
         }, 2000);
     }
@@ -605,7 +605,7 @@ QJsonObject jam2RunControllerLifecycleValidation(
     const auto finalJoiner = joiner.snapshot();
     check(QStringLiteral("controller.final-authoritative-snapshot"),
         finalJoiner.coordinatorToken == creator.snapshot().localToken &&
-            finalJoiner.gridAuthorityToken.isEmpty() && finalJoiner.gridRevision >= 2 &&
+            finalJoiner.editorAuthorityToken.isEmpty() && finalJoiner.editorRevision >= 2 &&
             finalJoiner.arrangementAuthorityToken == creator.snapshot().localToken &&
             finalJoiner.contractReady && finalJoiner.membershipReady &&
             finalJoiner.failure == TransportFailure::None);

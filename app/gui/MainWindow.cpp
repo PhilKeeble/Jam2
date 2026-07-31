@@ -885,7 +885,6 @@ MainWindow::MainWindow(QWidget* parent)
             // collaborative from either peer.
             sendMetronomeModeToJam();
             sendMetronomePatternToJam();
-            sendMetronomeSettingsToPeer();
             if (looperProject_.trackSyncEnabled()) {
                 sendSongSnapshot();
             }
@@ -916,7 +915,6 @@ MainWindow::MainWindow(QWidget* parent)
             [this](const QString& text) {
                 QMessageBox::warning(this, QStringLiteral("Jam2"), text);
             },
-            [this](const QJsonObject& value) { applyRemoteMetronomeSettings(value); },
             &chordModel_,
             &beatModel_,
             &lyricModel_,
@@ -927,10 +925,14 @@ MainWindow::MainWindow(QWidget* parent)
             [this](const QJsonObject& value, const QString& source) {
                 handleTrackReady(value, source);
             },
-            [this] { shareLocalTracks(); },
-            [this](const QJsonObject& value, const QString& source) {
-                handleTrackOffer(value, source);
+            [this](const QJsonObject& request) {
+                publishLocalTrackBatch(
+                    request.value(QStringLiteral("batch_id")).toString());
             },
+            [this](const QJsonObject& value, const QString& source) {
+                handleTrackBatchOffer(value, source);
+            },
+            [this](const QJsonObject& value) { handleTrackBatchComplete(value); },
             &assetTransfer_,
         }, message, sourcePeerToken);
     };
@@ -1461,6 +1463,9 @@ void MainWindow::startJam(bool createSession)
     appliedTrackContributionIds_.clear();
     localTrackOffers_.clear();
     trackOfferAssetPaths_.clear();
+    trackWorkspace_.outgoingTrackShareBatchId.clear();
+    trackWorkspace_.heldTrackShareSongSet = {};
+    trackWorkspace_.heldTrackShareSongSourcePeerToken.clear();
     pendingTrackAssetSources_.clear();
     validatedTrackAssetHashes_.clear();
     incomingAssetWorkflow_ = IncomingAssetWorkflow::None;
@@ -1600,7 +1605,7 @@ void MainWindow::prepareNetworkRuntimePresentation(bool createSession)
 {
     controlRefreshAvailable_ = false;
     if (createSession) {
-        metronomeTransport_.setLocalState(false, false);
+        metronomeTransport_.setLocalState(false);
     }
     metronomeTransport_.clearEngine();
     if (createSession && trackMetronomeLabel_) {
@@ -1721,22 +1726,6 @@ void MainWindow::setPreparedTrackLoop(bool enabled, std::uint64_t startFrame, st
     }
 }
 
-std::uint64_t MainWindow::quantizedEngineTarget(int countInBars) const
-{
-    const PlaybackGrid::Position position = metronomeTransport_.grid().position();
-    if (!position.engineAnchored || position.sampleRate <= 0) {
-        return 0;
-    }
-    const int beatsPerBar = qMax(1, currentMetronomePattern().beats_per_bar);
-    const std::uint64_t nextBarBeat =
-        ((position.absoluteBeat / static_cast<std::uint64_t>(beatsPerBar)) +
-         1ULL + static_cast<std::uint64_t>(qMax(0, countInBars))) *
-        static_cast<std::uint64_t>(beatsPerBar);
-    const std::uint64_t musical = position.epochFrame + static_cast<std::uint64_t>(std::llround(
-        static_cast<double>(nextBarBeat) * position.secondsPerBeat * static_cast<double>(position.sampleRate)));
-    return rawFrameFromMusicalFrame(musical, position.renderOffsetFrames);
-}
-
 void MainWindow::restartPreparedTrackQuantized()
 {
     if (trackController_.model().syncMetronome) {
@@ -1745,7 +1734,6 @@ void MainWindow::restartPreparedTrackQuantized()
     const PlaybackGrid::Position position = metronomeTransport_.grid().position();
     if (!trackRecordingWorkflow_.restartPrepared(
             position,
-            currentMetronomePattern().beats_per_bar,
             looperProject_.trackSyncEnabled())) {
         appendLog(QStringLiteral("engine command queue unavailable: prepared track restart"));
     }
@@ -1755,6 +1743,7 @@ void MainWindow::handleEngineSnapshot(const jam2::EngineSnapshot& snapshot)
 {
     const MetronomeTransportController::SnapshotUpdate transportUpdate =
         metronomeTransport_.consume(snapshot);
+    updateMetronomePresentationFromEngine(snapshot);
     trackRecordingWorkflow_.consumeSnapshot(snapshot, transportUpdate);
     if (trackController_.observeEnginePlaying(trackRecordingWorkflow_.preparedPlaying())) {
         updateTrackPlaybackPresentation();
@@ -2873,10 +2862,6 @@ void MainWindow::stopJam(bool returnToLocal)
     // already changed back to the stopped state.
     if (jam2_.isRunning()) {
         submitEngineToggle(
-            jam2::EngineCommandType::SetLeaderAudioLocalClick,
-            false,
-            QStringLiteral("leave metronome leader"));
-        submitEngineToggle(
             jam2::EngineCommandType::SetMetronomeEnabled,
             false,
             QStringLiteral("leave metronome enabled"));
@@ -2901,6 +2886,7 @@ void MainWindow::stopJam(bool returnToLocal)
     pendingPreparedTrackReadyRevision_ = 0;
     pendingSongSet_ = {};
     pendingSongRevision_ = 0;
+    trackWorkspace_.pendingSongBaseRevision = 0;
     pendingSongTrackRestart_ = false;
     pendingSongSourcePeerToken_.clear();
     pendingSongNeedsAuthoritativePublish_ = false;
@@ -2917,7 +2903,7 @@ void MainWindow::stopJam(bool returnToLocal)
     publishStoppedTrackStateWhenApplied_ = false;
     trackRecordingWorkflow_.clearSessionSchedule();
     if (recordingCountdownLabel_) recordingCountdownLabel_->hide();
-    metronomeTransport_.setLocalState(false, false);
+    metronomeTransport_.setLocalState(false);
     if (trackMetronomeLabel_) {
         trackMetronomeLabel_->setText(QStringLiteral("Local metronome stopped"));
     }
@@ -3462,13 +3448,13 @@ void MainWindow::applySessionSnapshot(const SharedSessionController::Snapshot& s
     if (snapshot.membershipRevision > 0) {
         const QString summary = QStringLiteral(
             "session snapshot membership_revision=%1 total_peers=%2 remote_peers=%3 "
-            "coordinator=%4 grid_authority=%5 grid_revision=%6 "
+            "coordinator=%4 editor_authority=%5 editor_revision=%6 "
             "arrangement_authority=%7 arrangement_revision=%8")
             .arg(snapshot.membershipRevision)
             .arg(snapshot.totalPeerCount)
             .arg(snapshot.remotePeerCount)
-            .arg(snapshot.coordinatorToken.left(8), snapshot.gridAuthorityToken.left(8))
-            .arg(snapshot.gridRevision)
+            .arg(snapshot.coordinatorToken.left(8), snapshot.editorAuthorityToken.left(8))
+            .arg(snapshot.editorRevision)
             .arg(snapshot.arrangementAuthorityToken.left(8))
             .arg(snapshot.arrangementRevision);
         QString diagnosticKey = summary;
@@ -3600,7 +3586,8 @@ void MainWindow::handleControlEvent(
                 "session_cap_rejects=%4 auth_rejects=%5 auth_timeouts=%6 frame_rejects=%7 "
                 "frame_timeouts=%8 tag_or_sequence_rejects=%9 output_rejects=%10 input_high_water=%11 output_high_water=%12 "
                 "active_connections=%13 active_connection_high_water=%14 disconnected_connections=%15 "
-                "pre_authentication_disconnects=%16")
+                "pre_authentication_disconnects=%16 large_json_sent=%17 large_json_received=%18 "
+                "large_json_raw_bytes_sent=%19 large_json_compressed_bytes_sent=%20")
                 .arg(stats.acceptedConnections)
                 .arg(stats.pendingCapRejects)
                 .arg(stats.authenticationRateLimitRejects)
@@ -3617,13 +3604,19 @@ void MainWindow::handleControlEvent(
                 .arg(stats.activeConnections)
                 .arg(stats.activeConnectionHighWater)
                 .arg(stats.disconnectedConnections)
-                .arg(stats.preAuthenticationDisconnects));
+                .arg(stats.preAuthenticationDisconnects)
+                .arg(stats.largeJsonMessagesSent)
+                .arg(stats.largeJsonMessagesReceived)
+                .arg(stats.largeJsonRawBytesSent)
+                .arg(stats.largeJsonCompressedBytesSent));
         } else {
             const ControlClient::Stats stats = sessionController_.clientStats();
             appendLog(QStringLiteral(
                 "control_stats side=client auth_rejects=%1 auth_timeouts=%2 frame_rejects=%3 frame_timeouts=%4 "
                 "tag_or_sequence_rejects=%5 output_rejects=%6 input_high_water=%7 output_high_water=%8 "
-                "connection_attempts=%9 completed_connections=%10 disconnected_connections=%11")
+                "connection_attempts=%9 completed_connections=%10 disconnected_connections=%11 "
+                "large_json_sent=%12 large_json_received=%13 large_json_raw_bytes_sent=%14 "
+                "large_json_compressed_bytes_sent=%15")
                 .arg(stats.authenticationRejects)
                 .arg(stats.authenticationTimeouts)
                 .arg(stats.frameRejects)
@@ -3635,7 +3628,11 @@ void MainWindow::handleControlEvent(
                 .arg(stats.maxQueuedOutputBytes)
                 .arg(stats.connectionAttempts)
                 .arg(stats.completedConnections)
-                .arg(stats.disconnectedConnections));
+                .arg(stats.disconnectedConnections)
+                .arg(stats.largeJsonMessagesSent)
+                .arg(stats.largeJsonMessagesReceived)
+                .arg(stats.largeJsonRawBytesSent)
+                .arg(stats.largeJsonCompressedBytesSent));
         }
     }
     if (serverSide && event.type == TransportEventType::Failure &&
@@ -4368,6 +4365,24 @@ void MainWindow::auditWavCompatibilityForSession(int expectedSampleRate, bool sh
 
 void MainWindow::refreshLooperLanes()
 {
+    const double currentBpm = currentMetronomePattern().bpm;
+    double mismatchedBackingBpm = 0.0;
+    for (const LooperBank& candidateBank : looperProject_.banks()) {
+        for (const LooperLane& lane : candidateBank.lanes) {
+            if (!lane.referenceKind.isEmpty() && lane.referenceBpm > 0.0 &&
+                std::abs(lane.referenceBpm - currentBpm) > 0.01) {
+                mismatchedBackingBpm = lane.referenceBpm;
+                break;
+            }
+        }
+        if (mismatchedBackingBpm > 0.0) break;
+    }
+    if (performanceHome_) {
+        performanceHome_->setTrackBpmMismatch(
+            mismatchedBackingBpm > 0.0,
+            mismatchedBackingBpm,
+            currentBpm);
+    }
     for (int i = 0; i < static_cast<int>(looperBankButtons_.size()); ++i) {
         if (looperBankButtons_[i]) {
             looperBankButtons_[i]->setChecked(i == looperProject_.activeBankIndex());
@@ -4388,7 +4403,6 @@ void MainWindow::refreshLooperLanes()
 
     QVector<LooperLaneStackWidget::LaneView> views;
     QStringList missingWaveforms;
-    const double currentBpm = currentMetronomePattern().bpm;
     const int currentSampleRate = activeTrackSampleRate();
     const std::optional<SongSection> generatedChord =
         jam2::practice::PracticeIdeaController::generatedSection(
@@ -5061,10 +5075,9 @@ void MainWindow::startArmedLooperLaneRecording()
     if (engineInput && captureCountInCheck_ && captureCountInCheck_->isChecked()) {
         const bool countInMetronome = captureCountInMetronomeCheck_ && captureCountInMetronomeCheck_->isChecked();
         const bool keepMetronome = captureKeepMetronomeCheck_ && captureKeepMetronomeCheck_->isChecked();
-        const PlaybackGrid::Position initialGridPosition =
-            metronomeTransport_.grid().position();
-
-        if (countInMetronome && !initialGridPosition.running) {
+        const bool startedCountInClick = countInMetronome &&
+            !metronomeTransport_.localRunning();
+        if (startedCountInClick) {
             startTrackMetronome();
         }
         const int bars = qMax(1, captureCountInBarsSpin_ ? captureCountInBarsSpin_->value() : 1);
@@ -5076,23 +5089,14 @@ void MainWindow::startArmedLooperLaneRecording()
         }
         appendLog(countInText);
         if (engineInput) {
-            trackRecordingWorkflow_.waitForCountIn(0, countInMetronome && !keepMetronome);
-            if (!initialGridPosition.running) {
-                trackRecordingWorkflow_.waitForCountIn(
-                    bars,
-                    countInMetronome && !keepMetronome);
-                if (recordingCountdownLabel_) {
-                    recordingCountdownLabel_->setText(QStringLiteral("WAITING FOR NEXT BAR..."));
-                    recordingCountdownLabel_->show();
-                }
-            } else {
-                startInputCapture(0, bars);
-            }
+            trackRecordingWorkflow_.waitForCountIn(
+                0,
+                startedCountInClick && !keepMetronome);
+            startInputCapture(0, bars);
         } else {
             startLoopbackCapture();
         }
     } else {
-        trackRecordingWorkflow_.waitForCountIn(0, false);
         if (engineInput) {
             startInputCapture(0, 0);
         } else {
@@ -5590,7 +5594,29 @@ void MainWindow::applyPreparedMixResult(PreparedMixResult result)
         track.sha256 = preparedMix_.sha256;
         updateTrackControls();
         loadTrackWaveform();
-        loadPreparedMixIntoEngine();
+        bool attachToRunningTransport =
+            playPreparedMixWhenReady_ && trackRecordingWorkflow_.preparedPlaying();
+        std::uint64_t attachTargetFrame = 0;
+        std::uint64_t attachSourceFrame = 0;
+        if (attachToRunningTransport) {
+            const PlaybackGrid::Position position = metronomeTransport_.grid().position();
+            attachTargetFrame = jam2::gui::next_safe_grid_beat_raw_frame(position);
+            const std::uint64_t songStart =
+                trackRecordingWorkflow_.preparedActualStartFrame();
+            if (attachTargetFrame == 0 || preparedMix_.frames <= 0) {
+                attachToRunningTransport = false;
+            } else {
+                const std::uint64_t elapsed = attachTargetFrame >= songStart
+                    ? attachTargetFrame - songStart
+                    : 0ULL;
+                attachSourceFrame = elapsed %
+                    static_cast<std::uint64_t>(preparedMix_.frames);
+            }
+        }
+        loadPreparedMixIntoEngine(
+            attachTargetFrame,
+            attachSourceFrame,
+            attachToRunningTransport);
         for (const QString& obsoletePath : std::as_const(obsoletePreparedMixPaths_)) {
             if (obsoletePath != preparedMix_.path) {
                 (void)projectPersistence_.discardTransientWav(obsoletePath);
@@ -5631,9 +5657,17 @@ void MainWindow::applyPreparedMixResult(PreparedMixResult result)
                 .arg(revision));
         } else if (playPreparedMixWhenReady_) {
             playPreparedMixWhenReady_ = false;
-            restartPreparedTrackQuantized();
-            if (gridScheduleLabel_) {
-                gridScheduleLabel_->setText(QStringLiteral("Track restart: waiting for engine bar schedule"));
+            if (attachToRunningTransport) {
+                if (gridScheduleLabel_) {
+                    gridScheduleLabel_->setText(
+                        QStringLiteral("Generated track: joining running transport on next beat"));
+                }
+            } else {
+                restartPreparedTrackQuantized();
+                if (gridScheduleLabel_) {
+                    gridScheduleLabel_->setText(
+                        QStringLiteral("Track restart: waiting for engine beat schedule"));
+                }
             }
         }
     } catch (const std::exception& error) {
@@ -5646,15 +5680,26 @@ void MainWindow::applyPreparedMixResult(PreparedMixResult result)
     }
 }
 
-void MainWindow::loadPreparedMixIntoEngine()
+void MainWindow::loadPreparedMixIntoEngine(
+    std::uint64_t targetFrame,
+    std::uint64_t sourceFrame,
+    bool alignToRunningTransport)
 {
     if (!jam2_.isRunning() || preparedMix_.path.isEmpty() || !preparedMix_.error.isEmpty()) {
         return;
     }
-    submitEngineText(
-        jam2::EngineCommandType::LoadPreparedTrack,
-        QDir::toNativeSeparators(preparedMix_.path),
-        QStringLiteral("load prepared track"));
+    jam2::EngineCommand load;
+    load.type = jam2::EngineCommandType::LoadPreparedTrack;
+    load.frame = alignToRunningTransport ? targetFrame : 0ULL;
+    load.frame_end = alignToRunningTransport ? sourceFrame : 0ULL;
+    load.enabled = alignToRunningTransport;
+    if (!jam2::engine_command_set_text(
+            load,
+            QDir::toNativeSeparators(preparedMix_.path).toStdString())) {
+        appendLog(QStringLiteral("engine command text is too long: load prepared track"));
+        return;
+    }
+    (void)submitEngineCommand(load, QStringLiteral("load prepared track"));
     const auto& model = trackController_.model();
     if (model.loopEnabled) {
         const qint64 loopStartFrame = model.loopStartSeconds >= 0.0
@@ -5959,7 +6004,7 @@ void MainWindow::startInputCapture(std::uint64_t targetFrame, int countInBars)
         return;
     }
     if (countInBars >= 0 && recordingCountdownLabel_) {
-        recordingCountdownLabel_->setText(QStringLiteral("WAITING FOR NEXT BAR..."));
+        recordingCountdownLabel_->setText(QStringLiteral("WAITING FOR NEXT BEAT..."));
         recordingCountdownLabel_->show();
     }
     const QString limitText = durationBars > 0
@@ -6300,11 +6345,11 @@ void MainWindow::updateTrackTimeline()
 void MainWindow::startTrackMetronome()
 {
     if (jam2_.isRunning()) {
-        if (metronomeTransport_.grid().position().running) {
+        if (metronomeTransport_.localRunning()) {
             // Record count-in and duplicate UI activation must not create a
             // second grid proposal while the shared clock is already running.
             if (trackMetronomeLabel_) {
-                trackMetronomeLabel_->setText(QStringLiteral("Jam metronome running"));
+                trackMetronomeLabel_->setText(QStringLiteral("Jam click enabled"));
             }
             if (startTrackMetronomeButton_) {
                 startTrackMetronomeButton_->setEnabled(false);
@@ -6314,19 +6359,14 @@ void MainWindow::startTrackMetronome()
             }
             return;
         }
-        metronomeTransport_.setLocalState(true, true);
+        metronomeTransport_.setLocalState(true);
         updateRuntimeControls();
-        submitEngineToggle(
-            jam2::EngineCommandType::SetLeaderAudioLocalClick,
-            true,
-            QStringLiteral("metronome leader"));
         submitEngineToggle(
             jam2::EngineCommandType::SetMetronomeEnabled,
             true,
             QStringLiteral("metronome enabled"));
-        sendMetronomeSettingsToPeer();
         if (trackMetronomeLabel_) {
-            trackMetronomeLabel_->setText(QStringLiteral("Jam metronome running"));
+            trackMetronomeLabel_->setText(QStringLiteral("Jam click enabled"));
         }
         if (startTrackMetronomeButton_) {
             startTrackMetronomeButton_->setEnabled(false);
@@ -6346,24 +6386,18 @@ void MainWindow::startTrackMetronome()
 void MainWindow::stopTrackMetronome()
 {
     const bool jamMetronomeWasRunning = jam2_.isRunning() &&
-        (metronomeTransport_.localRunning() ||
-         metronomeTransport_.grid().position().running);
-    metronomeTransport_.setLocalState(false, false);
+        metronomeTransport_.localRunning();
+    metronomeTransport_.setLocalState(false);
     if (jamMetronomeWasRunning) {
-        submitEngineToggle(
-            jam2::EngineCommandType::SetLeaderAudioLocalClick,
-            false,
-            QStringLiteral("metronome leader"));
         submitEngineToggle(
             jam2::EngineCommandType::SetMetronomeEnabled,
             false,
             QStringLiteral("metronome enabled"));
-        sendMetronomeSettingsToPeer();
     }
     if (trackMetronomeLabel_) {
         trackMetronomeLabel_->setText(jam2_.isRunning()
-            ? QStringLiteral("Jam metronome stopped")
-            : QStringLiteral("Local metronome stopped"));
+            ? QStringLiteral("Jam click disabled")
+            : QStringLiteral("Local click disabled"));
     }
     if (startTrackMetronomeButton_) {
         startTrackMetronomeButton_->setEnabled(true);
@@ -6392,7 +6426,6 @@ void MainWindow::updateTrackMetronomeInterval()
         bpmSpin_->setValue(metronomeBpmSpin_->value());
     }
     sendMetronomePatternToJam();
-    sendMetronomeSettingsToPeer();
 }
 
 void MainWindow::rebuildMetronomePattern(bool resetToDivisionDefault)
@@ -6434,7 +6467,6 @@ void MainWindow::rebuildMetronomePattern(bool resetToDivisionDefault)
             if (step >= 0 && step < metronomeEnabledSteps_.size()) {
                 metronomeEnabledSteps_[step] = checked;
                 sendMetronomePatternToJam();
-                sendMetronomeSettingsToPeer();
             }
         });
         playLayout->addWidget(playCheck);
@@ -6450,7 +6482,6 @@ void MainWindow::rebuildMetronomePattern(bool resetToDivisionDefault)
             if (step >= 0 && step < metronomeAccents_.size()) {
                 metronomeAccents_[step] = checked;
                 sendMetronomePatternToJam();
-                sendMetronomeSettingsToPeer();
             }
         });
         accentLayout->addWidget(accentCheck);
@@ -6459,7 +6490,6 @@ void MainWindow::rebuildMetronomePattern(bool resetToDivisionDefault)
     metronomePatternTable_->setHorizontalHeaderLabels(headers);
     metronomePatternTable_->setVerticalHeaderLabels(QStringList{QStringLiteral("Play"), QStringLiteral("Accent")});
     sendMetronomePatternToJam();
-    sendMetronomeSettingsToPeer();
 }
 
 jam2::metronome::PatternSnapshot MainWindow::currentMetronomePattern() const
@@ -6592,88 +6622,54 @@ void MainWindow::sendMetronomePatternToJam()
     }
 }
 
-void MainWindow::sendMetronomeSettingsToPeer()
+void MainWindow::updateMetronomePresentationFromEngine(
+    const jam2::EngineSnapshot& snapshot)
 {
-    if (metronomeTransport_.applyingRemoteSettings() || !jam2_.isRunning()) {
-        return;
-    }
-    const jam2::metronome::PatternSnapshot pattern = currentMetronomePattern();
-    sendControl(QJsonObject{
-        {QStringLiteral("type"), QStringLiteral("metronome.settings")},
-        {QStringLiteral("running"), metronomeTransport_.localRunning()},
-        {QStringLiteral("leader"), metronomeTransport_.localLeader()},
-        {QStringLiteral("mode"), metronomeModeBox_ ? metronomeModeBox_->currentText() : QStringLiteral("shared-grid")},
-        {QStringLiteral("bpm"), pattern.bpm},
-        {QStringLiteral("beats"), pattern.beats_per_bar},
-        {QStringLiteral("beat_unit"), pattern.beat_unit},
-        {QStringLiteral("tempo_pulse_units"), pattern.tempo_pulse_units},
-        {QStringLiteral("division"), pattern.division},
-        {QStringLiteral("play_mask_low"), QString::number(static_cast<qulonglong>(pattern.play_mask_low), 16)},
-        {QStringLiteral("play_mask_high"), QString::number(static_cast<qulonglong>(pattern.play_mask_high), 16)},
-        {QStringLiteral("accent_mask_low"), QString::number(static_cast<qulonglong>(pattern.accent_mask_low), 16)},
-        {QStringLiteral("accent_mask_high"), QString::number(static_cast<qulonglong>(pattern.accent_mask_high), 16)},
-    });
-}
-
-void MainWindow::applyRemoteMetronomeSettings(const QJsonObject& message)
-{
-    auto parseMask = [](const QJsonObject& object, const QString& key) {
-        bool ok = false;
-        const QString text = object.value(key).toString();
-        const qulonglong value = text.toULongLong(&ok, 16);
-        return ok ? static_cast<std::uint64_t>(value) : 0ULL;
-    };
-
-
-
-    const bool running = message.value(QStringLiteral("running")).toBool(metronomeTransport_.localRunning());
-    const bool remoteLeader = message.value(QStringLiteral("leader")).toBool(running);
-    const QString mode = message.value(QStringLiteral("mode")).toString(metronomeModeBox_
-        ? metronomeModeBox_->currentText()
-        : QStringLiteral("shared-grid"));
-    const int bpm = qBound(1, message.value(QStringLiteral("bpm")).toInt(metronomeBpmSpin_ ? metronomeBpmSpin_->value() : 120), 400);
-    const int beats = qBound(1, message.value(QStringLiteral("beats")).toInt(metronomeBeatsSpin_ ? metronomeBeatsSpin_->value() : 4), 16);
-    const int beatUnit = jam2::metronome::clamp_beat_unit(
-        message.value(QStringLiteral("beat_unit")).toInt(
-            metronomeBeatUnitBox_ ? metronomeBeatUnitBox_->currentData().toInt() : 4));
-    const int tempoPulseUnits = jam2::metronome::clamp_tempo_pulse_units(
-        message.value(QStringLiteral("tempo_pulse_units")).toInt(
-            metronomeTempoPulseBox_
-                ? metronomeTempoPulseBox_->currentData().toInt() : 1));
-    const int division = qMax(1, message.value(QStringLiteral("division")).toInt(metronomeDivisionBox_ ? metronomeDivisionBox_->currentData().toInt() : 1));
-    const std::uint64_t playLow = parseMask(message, QStringLiteral("play_mask_low"));
-    const std::uint64_t playHigh = parseMask(message, QStringLiteral("play_mask_high"));
-    const std::uint64_t accentLow = parseMask(message, QStringLiteral("accent_mask_low"));
-    const std::uint64_t accentHigh = parseMask(message, QStringLiteral("accent_mask_high"));
-
+    const jam2::metronome::PatternSnapshot pattern =
+        jam2::metronome::sanitize(snapshot.metronome_pattern);
+    const QString mode = snapshot.metronome_mode == jam2::EngineMetronomeMode::LeaderAudio
+        ? QStringLiteral("leader-audio")
+        : snapshot.metronome_mode == jam2::EngineMetronomeMode::ListenerCompensated
+            ? QStringLiteral("listener-compensated")
+            : QStringLiteral("shared-grid");
+    const jam2::metronome::PatternSnapshot shown = currentMetronomePattern();
+    const bool patternChanged = pattern.bpm != shown.bpm ||
+        pattern.beats_per_bar != shown.beats_per_bar ||
+        pattern.beat_unit != shown.beat_unit ||
+        pattern.tempo_pulse_units != shown.tempo_pulse_units ||
+        pattern.division != shown.division ||
+        pattern.play_mask_low != shown.play_mask_low ||
+        pattern.play_mask_high != shown.play_mask_high ||
+        pattern.accent_mask_low != shown.accent_mask_low ||
+        pattern.accent_mask_high != shown.accent_mask_high;
     metronomeTransport_.setApplyingRemoteSettings(true);
-    if (metronomeBpmSpin_) {
+    if (patternChanged && metronomeBpmSpin_) {
         const QSignalBlocker blocker(metronomeBpmSpin_);
-        metronomeBpmSpin_->setValue(bpm);
+        metronomeBpmSpin_->setValue(pattern.bpm);
     }
-    if (bpmSpin_) {
+    if (patternChanged && bpmSpin_) {
         const QSignalBlocker blocker(bpmSpin_);
-        bpmSpin_->setValue(bpm);
+        bpmSpin_->setValue(pattern.bpm);
     }
-    if (metronomeBeatsSpin_) {
+    if (patternChanged && metronomeBeatsSpin_) {
         const QSignalBlocker blocker(metronomeBeatsSpin_);
-        metronomeBeatsSpin_->setValue(beats);
+        metronomeBeatsSpin_->setValue(pattern.beats_per_bar);
     }
-    if (metronomeBeatUnitBox_) {
+    if (patternChanged && metronomeBeatUnitBox_) {
         const QSignalBlocker blocker(metronomeBeatUnitBox_);
-        const int index = metronomeBeatUnitBox_->findData(beatUnit);
+        const int index = metronomeBeatUnitBox_->findData(pattern.beat_unit);
         if (index >= 0) {
             metronomeBeatUnitBox_->setCurrentIndex(index);
         }
     }
-    if (metronomeTempoPulseBox_) {
+    if (patternChanged && metronomeTempoPulseBox_) {
         const QSignalBlocker blocker(metronomeTempoPulseBox_);
-        const int index = metronomeTempoPulseBox_->findData(tempoPulseUnits);
+        const int index = metronomeTempoPulseBox_->findData(pattern.tempo_pulse_units);
         if (index >= 0) metronomeTempoPulseBox_->setCurrentIndex(index);
     }
-    if (metronomeDivisionBox_) {
+    if (patternChanged && metronomeDivisionBox_) {
         const QSignalBlocker blocker(metronomeDivisionBox_);
-        const int index = metronomeDivisionBox_->findData(division);
+        const int index = metronomeDivisionBox_->findData(pattern.division);
         if (index >= 0) {
             metronomeDivisionBox_->setCurrentIndex(index);
         }
@@ -6686,97 +6682,109 @@ void MainWindow::applyRemoteMetronomeSettings(const QJsonObject& message)
         }
     }
 
-    jam2::metronome::PatternSnapshot pattern;
-    pattern.bpm = bpm;
-    pattern.beats_per_bar = beats;
-    pattern.beat_unit = beatUnit;
-    pattern.tempo_pulse_units = tempoPulseUnits;
-    pattern.division = division;
-    pattern.step_count = jam2::metronome::pattern_step_count(beats, division);
-    pattern.play_mask_low = playLow;
-    pattern.play_mask_high = playHigh;
-    pattern.accent_mask_low = accentLow;
-    pattern.accent_mask_high = accentHigh;
-    pattern = jam2::metronome::sanitize(pattern);
-
-    metronomeEnabledSteps_.resize(pattern.step_count);
-    metronomeAccents_.resize(pattern.step_count);
-    for (int step = 0; step < pattern.step_count; ++step) {
-        metronomeEnabledSteps_[step] = jam2::metronome::mask_enabled(pattern.play_mask_low, pattern.play_mask_high, step);
-        metronomeAccents_[step] = jam2::metronome::mask_enabled(pattern.accent_mask_low, pattern.accent_mask_high, step);
+    if (patternChanged) {
+        metronomeEnabledSteps_.resize(pattern.step_count);
+        metronomeAccents_.resize(pattern.step_count);
+        for (int step = 0; step < pattern.step_count; ++step) {
+            metronomeEnabledSteps_[step] = jam2::metronome::mask_enabled(
+                pattern.play_mask_low, pattern.play_mask_high, step);
+            metronomeAccents_[step] = jam2::metronome::mask_enabled(
+                pattern.accent_mask_low, pattern.accent_mask_high, step);
+        }
+        rebuildMetronomePattern(false);
+        refreshLooperLanes();
     }
-    rebuildMetronomePattern();
-    bool localLeader = metronomeTransport_.localLeader();
-    if (!running || remoteLeader) {
-        localLeader = false;
-    }
-    metronomeTransport_.setLocalState(running, localLeader);
+    metronomeTransport_.setLocalState(snapshot.metronome_enabled);
     metronomeTransport_.setApplyingRemoteSettings(false);
-    // This authenticated TCP message updates presentation only. The native UDP
-    // authority state applies the run state, pattern, mode, mapped epoch, and
-    // local authority role to the engine. Re-submitting them here would create
-    // a competing local grid proposal and can replace the starter's fresh epoch.
     if (trackMetronomeLabel_) {
-        trackMetronomeLabel_->setText(running
-            ? QStringLiteral("Jam metronome running")
-            : QStringLiteral("Jam metronome stopped"));
+        trackMetronomeLabel_->setText(snapshot.metronome_enabled
+            ? QStringLiteral("Jam click enabled")
+            : QStringLiteral("Jam click disabled"));
     }
     if (startTrackMetronomeButton_) {
-        startTrackMetronomeButton_->setEnabled(!running);
+        startTrackMetronomeButton_->setEnabled(!snapshot.metronome_enabled);
     }
     if (stopTrackMetronomeButton_) {
-        stopTrackMetronomeButton_->setEnabled(running);
+        stopTrackMetronomeButton_->setEnabled(snapshot.metronome_enabled);
     }
 }
 
-void MainWindow::publishLocalTrackOffer(
-    int bankIndex,
-    const QString& targetLaneId,
-    const LooperLane& lane)
+void MainWindow::publishLocalTrackBatch(const QString& requestedBatchId)
 {
     if (!looperProject_.trackSyncEnabled() || !jam2_.isRunning() ||
-        sessionController_.snapshot().role != SharedSessionController::Role::Joiner ||
-        bankIndex < 0 || bankIndex >= looperProject_.banks().size() || targetLaneId.isEmpty() ||
-        !lane.sampleRateCompatible || lane.sampleRate <= 0 ||
-        !isSha256Hex(lane.assetHash) || lane.assetPath.isEmpty()) {
+        sessionController_.snapshot().role != SharedSessionController::Role::Joiner) {
         return;
     }
-    QByteArray contributionIdentity = QCryptographicHash::hash(
-        QStringLiteral("%1:%2:%3")
-            .arg(bankIndex)
-            .arg(targetLaneId, lane.assetHash)
-            .toUtf8(),
-        QCryptographicHash::Sha256).left(16);
-    const QString contributionId = QUuid::fromRfc4122(contributionIdentity)
-        .toString(QUuid::WithoutBraces).toLower();
-    if (!localTrackOffers_.contains(contributionId) &&
-        localTrackOffers_.size() >= kMaxLooperTrackContributions) {
-        appendLog(QStringLiteral("Track Sync contribution limit reached; track not offered: ") + lane.name);
-        return;
-    }
-    while (!trackOfferAssetPaths_.contains(lane.assetHash) &&
-           trackOfferAssetPaths_.size() >= kMaxLooperTrackContributions) {
-        trackOfferAssetPaths_.erase(trackOfferAssetPaths_.begin());
+    const QString batchId = requestedBatchId.isEmpty()
+        ? QUuid::createUuid().toString(QUuid::WithoutBraces).toLower()
+        : requestedBatchId.toLower();
+    QJsonArray tracks;
+    for (int bankIndex = 0; bankIndex < looperProject_.banks().size(); ++bankIndex) {
+        const LooperBank& bank = looperProject_.banks().at(bankIndex);
+        for (const LooperLane& lane : bank.lanes) {
+            if (lane.localOnly || !lane.sampleRateCompatible || lane.sampleRate <= 0 ||
+                !isSha256Hex(lane.assetHash) || lane.assetPath.isEmpty() ||
+                tracks.size() >= kMaxLooperTrackContributions) {
+                continue;
+            }
+            const QByteArray contributionIdentity = QCryptographicHash::hash(
+                QStringLiteral("%1:%2:%3")
+                    .arg(bankIndex)
+                    .arg(lane.id, lane.assetHash)
+                    .toUtf8(),
+                QCryptographicHash::Sha256).left(16);
+            const QString contributionId = QUuid::fromRfc4122(contributionIdentity)
+                .toString(QUuid::WithoutBraces).toLower();
+            while (!trackOfferAssetPaths_.contains(lane.assetHash) &&
+                   trackOfferAssetPaths_.size() >= kMaxLooperTrackContributions) {
+                trackOfferAssetPaths_.erase(trackOfferAssetPaths_.begin());
+            }
+            const QJsonObject track{
+                {QStringLiteral("recording_id"), contributionId},
+                {QStringLiteral("bank"), bankIndex},
+                {QStringLiteral("target_lane_id"), lane.id},
+                {QStringLiteral("sha256"), lane.assetHash},
+                {QStringLiteral("name"), lane.name.left(512)},
+                {QStringLiteral("sample_rate"), lane.sampleRate},
+            };
+            tracks.append(track);
+            trackOfferAssetPaths_.insert(lane.assetHash, lane.assetPath);
+            localTrackOffers_.insert(contributionId, track);
+        }
     }
     const QJsonObject offer{
-        {QStringLiteral("type"), QStringLiteral("looper.recording.offer")},
-        {QStringLiteral("recording_id"), contributionId},
-
-        {QStringLiteral("bank"), bankIndex},
-        {QStringLiteral("target_lane_id"), targetLaneId},
-        {QStringLiteral("sha256"), lane.assetHash},
-        {QStringLiteral("name"), lane.name.left(512)},
-        {QStringLiteral("sample_rate"), lane.sampleRate},
+        {QStringLiteral("type"), QStringLiteral("looper.track.batch.offer")},
+        {QStringLiteral("batch_id"), batchId},
+        {QStringLiteral("tracks"), tracks},
     };
-    trackOfferAssetPaths_.insert(lane.assetHash, lane.assetPath);
     if (!sessionController_.send(offer)) {
-        appendLog(QStringLiteral("could not queue local track offer; it will be retried on the next share: %1")
-            .arg(lane.name));
+        appendLog(QStringLiteral("could not queue atomic Track Sync batch %1")
+            .arg(batchId.left(8)));
+        if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
         return;
     }
-    localTrackOffers_.insert(contributionId, offer);
-    appendLog(QStringLiteral("offered local track for additive Track Sync: %1 hash=%2")
-        .arg(lane.name, lane.assetHash));
+    trackWorkspace_.outgoingTrackShareBatchId = batchId;
+    QTimer::singleShot(30000, this, [this, batchId] {
+        if (trackWorkspace_.outgoingTrackShareBatchId != batchId) {
+            return;
+        }
+        trackWorkspace_.outgoingTrackShareBatchId.clear();
+        if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
+        appendLog(QStringLiteral(
+            "Track Sync batch %1 timed out; released held arrangement updates")
+            .arg(batchId.left(8)));
+        const QJsonObject held = trackWorkspace_.heldTrackShareSongSet;
+        const QString source = trackWorkspace_.heldTrackShareSongSourcePeerToken;
+        trackWorkspace_.heldTrackShareSongSet = {};
+        trackWorkspace_.heldTrackShareSongSourcePeerToken.clear();
+        if (!held.isEmpty()) handleSongSet(held, source);
+    });
+    if (performanceHome_) {
+        performanceHome_->setTrackTransferStatus(
+            QStringLiteral("SHARING TRACKS\u2026  0 / %1").arg(tracks.size()));
+    }
+    appendLog(QStringLiteral("offered atomic Track Sync batch %1 with %2 track(s)")
+        .arg(batchId.left(8)).arg(tracks.size()));
 }
 
 void MainWindow::shareLocalTracks(bool includeLocalOnly)
@@ -6803,75 +6811,121 @@ void MainWindow::shareLocalTracks(bool includeLocalOnly)
             .arg(promoted));
     }
     if (sessionController_.isServer()) {
+        if (sessionController_.snapshot().remotePeerCount <= 0) {
+            appendLog(QStringLiteral("Share Tracks requires at least one connected peer"));
+            if (performanceHome_) {
+                performanceHome_->setTrackTransferStatus(QString{});
+            }
+            return;
+        }
+        const QString batchId = QUuid::createUuid()
+            .toString(QUuid::WithoutBraces).toLower();
         sendControl(QJsonObject{
             {QStringLiteral("type"), QStringLiteral("looper.track.share.request")},
+            {QStringLiteral("batch_id"), batchId},
         });
-        sendSongSnapshot();
-        appendLog(QStringLiteral("shared creator tracks and requested additive peer contributions"));
+        if (performanceHome_) {
+            performanceHome_->setTrackTransferStatus(
+                QStringLiteral("RECEIVING TRACKS\u2026"));
+        }
+        appendLog(QStringLiteral(
+            "requested atomic peer track batch %1; authoritative arrangement is held until complete")
+            .arg(batchId.left(8)));
         return;
     }
     if (sessionController_.snapshot().role != SharedSessionController::Role::Joiner) {
         return;
     }
-    int offered = 0;
-    for (int bankIndex = 0; bankIndex < looperProject_.banks().size(); ++bankIndex) {
-        const LooperBank& bank = looperProject_.banks().at(bankIndex);
-        for (const LooperLane& lane : bank.lanes) {
-            if (lane.localOnly ||
-                !lane.sampleRateCompatible || lane.sampleRate <= 0 ||
-                !isSha256Hex(lane.assetHash) || lane.assetPath.isEmpty()) {
-                continue;
-            }
-            publishLocalTrackOffer(bankIndex, lane.id, lane);
-            ++offered;
-        }
-    }
-    appendLog(QStringLiteral("Share Tracks offered %1 local asset-backed track(s) additively")
-        .arg(offered));
+    publishLocalTrackBatch({});
 }
 
-void MainWindow::handleTrackOffer(const QJsonObject& message, const QString& sourcePeerToken)
+void MainWindow::handleTrackBatchOffer(
+    const QJsonObject& message,
+    const QString& sourcePeerToken)
 {
     if (!sessionController_.isServer() || sourcePeerToken.isEmpty()) {
         appendLog(QStringLiteral("rejected track offer from a non-joiner control path"));
         return;
     }
-    const QString contributionId = message.value(QStringLiteral("recording_id")).toString().toLower();
-    if (appliedTrackContributionIds_.contains(contributionId)) {
+    const QString batchId = message.value(QStringLiteral("batch_id")).toString().toLower();
+    const QJsonArray tracks = message.value(QStringLiteral("tracks")).toArray();
+    if (tracks.isEmpty()) {
+        sendSongSnapshot();
+        sendControlTo(sourcePeerToken, QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("looper.track.batch.complete")},
+            {QStringLiteral("batch_id"), batchId},
+            {QStringLiteral("tracks"), 0},
+        });
+        if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
         return;
     }
-    const QString hash = message.value(QStringLiteral("sha256")).toString().toLower();
-    if (!pendingTrackContributions_.contains(contributionId)) {
-        if (pendingTrackContributions_.size() >= kMaxLooperTrackContributions) {
-            appendLog(QStringLiteral("track contribution queue is full"));
-            return;
-        }
-        pendingTrackContributions_.insert(contributionId, PendingTrackContribution{
-            sourcePeerToken,
-            message.value(QStringLiteral("bank")).toInt(),
-            message.value(QStringLiteral("target_lane_id")).toString(),
-            hash,
-            message.value(QStringLiteral("name")).toString(),
-            message.value(QStringLiteral("sample_rate")).toInt(),
-        });
+    if (pendingTrackContributions_.size() + tracks.size() > kMaxLooperTrackContributions) {
+        appendLog(QStringLiteral("track contribution queue is full"));
+        return;
     }
-    if (!validatedTrackAssetHashes_.contains(hash)) {
-        for (const LooperBank& bank : looperProject_.banks()) {
-            for (const LooperLane& lane : bank.lanes) {
-                if (lane.assetHash == hash && QFileInfo::exists(looperAssetAbsolutePath(lane))) {
-                    validatedTrackAssetHashes_.insert(hash);
+    for (const QJsonValue& trackValue : tracks) {
+        const QJsonObject track = trackValue.toObject();
+        const QString contributionId =
+            track.value(QStringLiteral("recording_id")).toString().toLower();
+        const QString contributionKey = sourcePeerToken + QLatin1Char(':') +
+            batchId + QLatin1Char(':') + contributionId;
+        if (pendingTrackContributions_.contains(contributionKey)) {
+            continue;
+        }
+        const QString hash = track.value(QStringLiteral("sha256")).toString().toLower();
+        pendingTrackContributions_.insert(contributionKey, PendingTrackContribution{
+            sourcePeerToken,
+            batchId,
+            static_cast<int>(tracks.size()),
+            contributionId,
+            track.value(QStringLiteral("bank")).toInt(),
+            track.value(QStringLiteral("target_lane_id")).toString(),
+            hash,
+            track.value(QStringLiteral("name")).toString(),
+            track.value(QStringLiteral("sample_rate")).toInt(),
+        });
+        if (!validatedTrackAssetHashes_.contains(hash)) {
+            for (const LooperBank& bank : looperProject_.banks()) {
+                for (const LooperLane& lane : bank.lanes) {
+                    if (lane.assetHash == hash && QFileInfo::exists(looperAssetAbsolutePath(lane))) {
+                        validatedTrackAssetHashes_.insert(hash);
+                        break;
+                    }
+                }
+                if (validatedTrackAssetHashes_.contains(hash)) {
                     break;
                 }
             }
-            if (validatedTrackAssetHashes_.contains(hash)) {
-                break;
-            }
         }
     }
-    if (validatedTrackAssetHashes_.contains(hash)) {
-        applyPendingTrackContributions();
-    } else {
-        requestNextPendingAsset();
+    if (performanceHome_) {
+        performanceHome_->setTrackTransferStatus(
+            QStringLiteral("RECEIVING TRACKS\u2026  0 / %1").arg(tracks.size()));
+    }
+    applyPendingTrackContributions();
+    requestNextPendingAsset();
+}
+
+void MainWindow::handleTrackBatchComplete(const QJsonObject& message)
+{
+    const QString batchId = message.value(QStringLiteral("batch_id")).toString().toLower();
+    if (!trackWorkspace_.outgoingTrackShareBatchId.isEmpty() &&
+        trackWorkspace_.outgoingTrackShareBatchId != batchId) {
+        appendLog(QStringLiteral("ignored stale Track Sync batch completion %1")
+            .arg(batchId.left(8)));
+        return;
+    }
+    trackWorkspace_.outgoingTrackShareBatchId.clear();
+    if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
+    appendLog(QStringLiteral("Track Sync batch %1 completed with %2 track(s)")
+        .arg(message.value(QStringLiteral("batch_id")).toString().left(8))
+        .arg(message.value(QStringLiteral("tracks")).toInt()));
+    const QJsonObject held = trackWorkspace_.heldTrackShareSongSet;
+    const QString source = trackWorkspace_.heldTrackShareSongSourcePeerToken;
+    trackWorkspace_.heldTrackShareSongSet = {};
+    trackWorkspace_.heldTrackShareSongSourcePeerToken.clear();
+    if (!held.isEmpty()) {
+        handleSongSet(held, source);
     }
 }
 
@@ -6946,20 +7000,49 @@ void MainWindow::requestNextPendingAsset()
 
 void MainWindow::applyPendingTrackContributions()
 {
-    if (!sessionController_.isServer()) {
+    if (!sessionController_.isServer() || pendingTrackContributions_.isEmpty()) {
         return;
     }
+    const PendingTrackContribution first = pendingTrackContributions_.constBegin().value();
+    const QString batchId = first.batchId;
+    const QString sourcePeerToken = first.sourcePeerToken;
+    const int expected = first.batchSize;
+    int received = 0;
+    int ready = 0;
+    for (const PendingTrackContribution& contribution : pendingTrackContributions_) {
+        if (contribution.batchId != batchId ||
+            contribution.sourcePeerToken != sourcePeerToken) {
+            continue;
+        }
+        ++received;
+        if (validatedTrackAssetHashes_.contains(contribution.assetHash)) {
+            ++ready;
+        }
+    }
+    if (performanceHome_) {
+        performanceHome_->setTrackTransferStatus(
+            QStringLiteral("RECEIVING TRACKS\u2026  %1 / %2").arg(ready).arg(expected));
+    }
+    if (expected <= 0 || received != expected || ready != expected) {
+        requestNextPendingAsset();
+        return;
+    }
+    LooperProject stagedProject = looperProject_;
     QStringList completedIds;
     bool arrangementChanged = false;
     for (auto it = pendingTrackContributions_.constBegin();
          it != pendingTrackContributions_.constEnd(); ++it) {
         const PendingTrackContribution& contribution = it.value();
+        if (contribution.batchId != batchId ||
+            contribution.sourcePeerToken != sourcePeerToken) {
+            continue;
+        }
         if (!validatedTrackAssetHashes_.contains(contribution.assetHash) ||
-            contribution.bankIndex < 0 || contribution.bankIndex >= looperProject_.banks().size()) {
+            contribution.bankIndex < 0 || contribution.bankIndex >= stagedProject.banks().size()) {
             continue;
         }
         QString assetPath = looperAssetPathForHash(contribution.assetHash);
-        for (const LooperBank& bank : looperProject_.banks()) {
+        for (const LooperBank& bank : stagedProject.banks()) {
             for (const LooperLane& candidate : bank.lanes) {
                 if (candidate.assetHash == contribution.assetHash &&
                     QFileInfo::exists(looperAssetAbsolutePath(candidate))) {
@@ -6968,7 +7051,7 @@ void MainWindow::applyPendingTrackContributions()
                 }
             }
         }
-        auto& lanes = looperProject_.banks()[contribution.bankIndex].lanes;
+        auto& lanes = stagedProject.banks()[contribution.bankIndex].lanes;
         int targetIndex = -1;
         for (int index = 0; index < lanes.size(); ++index) {
             if (lanes.at(index).id == contribution.targetLaneId) {
@@ -6978,7 +7061,7 @@ void MainWindow::applyPendingTrackContributions()
         }
         int existingContributionIndex = -1;
         for (int index = 0; index < lanes.size(); ++index) {
-            if (lanes.at(index).id == it.key()) {
+            if (lanes.at(index).id == contribution.contributionId) {
                 existingContributionIndex = index;
                 break;
             }
@@ -7028,7 +7111,8 @@ void MainWindow::applyPendingTrackContributions()
             applied = true;
         } else {
             LooperLane lane;
-            lane.id = targetIndex < 0 ? contribution.targetLaneId : it.key();
+            lane.id = targetIndex < 0
+                ? contribution.targetLaneId : contribution.contributionId;
             lane.assetPath = assetPath;
             lane.assetHash = contribution.assetHash;
             lane.name = contribution.name.trimmed().isEmpty()
@@ -7036,7 +7120,7 @@ void MainWindow::applyPendingTrackContributions()
             lane.sampleRate = contribution.sampleRate;
             lane.sampleRateCompatible = true;
             lane.localOnly = false;
-            if (looperProject_.appendLane(contribution.bankIndex, std::move(lane))) {
+            if (stagedProject.appendLane(contribution.bankIndex, std::move(lane))) {
                 arrangementChanged = true;
                 applied = true;
             } else {
@@ -7050,6 +7134,16 @@ void MainWindow::applyPendingTrackContributions()
                 .arg(contribution.name, contribution.assetHash));
         }
     }
+    if (completedIds.size() != expected) {
+        appendLog(QStringLiteral(
+            "Track Sync batch %1 could not be applied atomically; arrangement was unchanged")
+            .arg(batchId.left(8)));
+        if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
+        return;
+    }
+    if (arrangementChanged) {
+        looperProject_ = std::move(stagedProject);
+    }
     for (const QString& contributionId : completedIds) {
         pendingTrackContributions_.remove(contributionId);
         appliedTrackContributionIds_.insert(contributionId);
@@ -7060,10 +7154,16 @@ void MainWindow::applyPendingTrackContributions()
     if (arrangementChanged) {
         refreshLooperLanes();
         regeneratePreparedMix();
-        if (looperProject_.trackSyncEnabled() && jam2_.isRunning()) {
-            sendSongSnapshot();
-        }
     }
+    if (looperProject_.trackSyncEnabled() && jam2_.isRunning()) {
+        sendSongSnapshot();
+    }
+    sendControlTo(sourcePeerToken, QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("looper.track.batch.complete")},
+        {QStringLiteral("batch_id"), batchId},
+        {QStringLiteral("tracks"), expected},
+    });
+    if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
     requestNextPendingAsset();
 }
 
@@ -7102,6 +7202,10 @@ void MainWindow::handleSongSet(
         message.value(QStringLiteral("host_authoritative")).toBool(false);
     const bool fromPeerProposal = sessionController_.isServer() &&
         !sourcePeerToken.isEmpty() && !hostAuthoritative;
+    const quint64 proposalBaseRevision = fromPeerProposal
+        ? static_cast<quint64>(message.value(
+            QStringLiteral("base_arrangement_revision")).toInteger(-1))
+        : 0;
     if (sessionController_.isServer() && !sourcePeerToken.isEmpty() &&
         hostAuthoritative) {
         appendLog(QStringLiteral("rejected peer attempt to mark an arrangement proposal authoritative"));
@@ -7110,6 +7214,34 @@ void MainWindow::handleSongSet(
     if (!hostAuthoritative && !fromPeerProposal) {
         appendLog(QStringLiteral("rejected arrangement outside the collaborative proposal or creator snapshot path"));
         return;
+    }
+    if (hostAuthoritative &&
+        !trackWorkspace_.outgoingTrackShareBatchId.isEmpty()) {
+        const int incomingRevision = message.value(
+            QStringLiteral("arrangement_revision")).toInt();
+        const int heldRevision = trackWorkspace_.heldTrackShareSongSet.value(
+            QStringLiteral("arrangement_revision")).toInt(-1);
+        if (incomingRevision > heldRevision) {
+            trackWorkspace_.heldTrackShareSongSet = message;
+            trackWorkspace_.heldTrackShareSongSourcePeerToken = sourcePeerToken;
+        }
+        appendLog(QStringLiteral(
+            "held arrangement revision %1 until outgoing Track Sync batch %2 completes")
+            .arg(incomingRevision)
+            .arg(trackWorkspace_.outgoingTrackShareBatchId.left(8)));
+        return;
+    }
+    if (fromPeerProposal) {
+        const quint64 currentRevision = sessionController_.snapshot().arrangementRevision;
+        if (proposalBaseRevision != currentRevision) {
+            appendLog(QStringLiteral(
+                "rejected stale collaborative arrangement from peer %1: base=%2 current=%3")
+                .arg(sourcePeerToken.left(8))
+                .arg(proposalBaseRevision)
+                .arg(currentRevision));
+            sendSongSnapshot();
+            return;
+        }
     }
     if (!looperProject_.trackSyncEnabled()) {
         appendLog(fromPeerProposal
@@ -7221,12 +7353,22 @@ void MainWindow::handleSongSet(
             }
         },
         [this, song, revision, restartTrack, hostAuthoritative, fromPeerProposal,
+         proposalBaseRevision,
          sourcePeerToken, checkRevision, missing, resolvedPaths, assetFailure] {
             if (checkRevision != songAssetCheckRevision_) {
                 return;
             }
             if (!assetFailure->isEmpty()) {
                 appendLog(QStringLiteral("rejected arrangement asset: ") + *assetFailure);
+                return;
+            }
+            if (fromPeerProposal && proposalBaseRevision !=
+                sessionController_.snapshot().arrangementRevision) {
+                appendLog(QStringLiteral(
+                    "discarded collaborative arrangement superseded during asset validation: base=%1 current=%2")
+                    .arg(proposalBaseRevision)
+                    .arg(sessionController_.snapshot().arrangementRevision));
+                sendSongSnapshot();
                 return;
             }
             QJsonObject resolvedSong = song;
@@ -7265,6 +7407,7 @@ void MainWindow::handleSongSet(
             if (!missing->isEmpty()) {
                 pendingSongSet_ = resolvedSong;
                 pendingSongRevision_ = revision;
+                trackWorkspace_.pendingSongBaseRevision = proposalBaseRevision;
                 pendingSongTrackRestart_ = restartTrack;
                 pendingSongSourcePeerToken_ = sourcePeerToken;
                 pendingSongNeedsAuthoritativePublish_ = fromPeerProposal;
@@ -7281,6 +7424,7 @@ void MainWindow::handleSongSet(
             projectPersistence_.useWorkspaceAsProjectFolderIfUnset();
             pendingSongSet_ = QJsonObject{};
             pendingSongRevision_ = 0;
+            trackWorkspace_.pendingSongBaseRevision = 0;
             pendingSongTrackRestart_ = false;
             pendingSongSourcePeerToken_.clear();
             pendingSongNeedsAuthoritativePublish_ = false;
@@ -7397,15 +7541,26 @@ void MainWindow::applyPendingSongIfAssetsReady()
     }
     const QJsonObject song = pendingSongSet_;
     const int revision = pendingSongRevision_;
+    const quint64 baseRevision = trackWorkspace_.pendingSongBaseRevision;
     const bool restartTrack = pendingSongTrackRestart_;
     const QString sourcePeerToken = pendingSongSourcePeerToken_;
     const bool publishAuthoritative = pendingSongNeedsAuthoritativePublish_;
     pendingSongSet_ = QJsonObject{};
     pendingSongRevision_ = 0;
+    trackWorkspace_.pendingSongBaseRevision = 0;
     pendingSongTrackRestart_ = false;
     pendingSongSourcePeerToken_.clear();
     pendingSongNeedsAuthoritativePublish_ = false;
     projectPersistence_.useWorkspaceAsProjectFolderIfUnset();
+    if (publishAuthoritative && baseRevision !=
+        sessionController_.snapshot().arrangementRevision) {
+        appendLog(QStringLiteral(
+            "discarded collaborative arrangement superseded during asset transfer: base=%1 current=%2")
+            .arg(baseRevision)
+            .arg(sessionController_.snapshot().arrangementRevision));
+        sendSongSnapshot();
+        return;
+    }
     if (loadSongJson(song)) {
         if (!publishAuthoritative) {
             lastAppliedHostArrangementRevision_ = qMax(
@@ -7838,29 +7993,53 @@ void MainWindow::updatePlaybackGrid()
     const PlaybackGrid::Position position = metronomeTransport_.grid().position();
     const bool showMarkerReference = metronomeMarkerReferenceCheck_ == nullptr ||
         metronomeMarkerReferenceCheck_->isChecked();
-    const bool markerRunning =
-        position.running && position.engineAnchored && showMarkerReference;
     const int beatsPerBar = currentMetronomePattern().beats_per_bar;
-    double beatPhase = position.secondsPerBeat > 0.0
-        ? std::fmod(qMax(0.0, position.secondsFromEpoch), position.secondsPerBeat) / position.secondsPerBeat
-        : 0.0;
-    quint64 visualAbsoluteBeat = position.absoluteBeat;
-    bool visualRunning = position.running && position.engineAnchored;
-    // Chord, beat, lyric and performance markers follow the shared metronome
-    // whenever it is running. A prepared track is only a presentation fallback
-    // when there is no live grid; letting it override the grid can freeze every
-    // musical marker at a clamped or pending track position.
-    if (!visualRunning &&
-        trackRecordingWorkflow_.preparedPlaying() &&
-        trackController_.model().durationMs > 0) {
-        const double bpm = qMax(1.0, trackController_.model().acceptedBpm);
-        const int tempoPulseUnits =
-            currentMetronomePattern().tempo_pulse_units;
-        const double trackBeat =
-            static_cast<double>(qMax<qint64>(
-                0, currentAudibleTrackPositionMs())) *
-            bpm * tempoPulseUnits / 60000.0;
+    const double backingBpm = qMax(1.0, trackController_.model().acceptedBpm);
+    const int tempoPulseUnits = currentMetronomePattern().tempo_pulse_units;
+    const int visualDivision = qMax(1, currentMetronomePattern().division);
+    const qint64 transportPositionMs =
+        trackRecordingWorkflow_.currentTransportPositionMs(
+            position, trackController_.model().durationMs);
+    const double stoppedTrackBeat =
+        static_cast<double>(qMax<qint64>(0, transportPositionMs)) *
+        backingBpm * tempoPulseUnits / 60000.0;
+    quint64 visualAbsoluteBeat = static_cast<quint64>(std::floor(stoppedTrackBeat));
+    int visualSubdivision =
+        static_cast<int>(std::floor(stoppedTrackBeat * visualDivision)) % visualDivision;
+    double beatPhase = stoppedTrackBeat - std::floor(stoppedTrackBeat);
+    bool visualRunning = false;
+    // The UDP epoch remains continuous. Song/track markers use a separate
+    // relative origin so source frame zero can be shown as 1.1 without ever
+    // replacing that session epoch.
+    const std::uint64_t recordingStart =
+        trackRecordingWorkflow_.recordingStartFrame();
+    if (trackRecordingWorkflow_.inputTakeActive() && recordingStart > 0 &&
+        position.rawCurrentFrame < recordingStart) {
+        visualAbsoluteBeat = 0;
+        visualSubdivision = 0;
+        beatPhase = 0.0;
+        visualRunning = false;
+    } else if (trackRecordingWorkflow_.inputTakeActive() && recordingStart > 0 &&
+               position.rawCurrentFrame >= recordingStart &&
+               position.sampleRate > 0 && position.secondsPerBeat > 0.0) {
+        const double trackBeat = static_cast<double>(
+            position.rawCurrentFrame - recordingStart) /
+            (position.secondsPerBeat * static_cast<double>(position.sampleRate));
         visualAbsoluteBeat = static_cast<quint64>(std::floor(trackBeat));
+        visualSubdivision =
+            static_cast<int>(std::floor(trackBeat * visualDivision)) % visualDivision;
+        beatPhase = trackBeat - std::floor(trackBeat);
+        visualRunning = true;
+    } else if (trackRecordingWorkflow_.preparedPlaying()) {
+        const double transportBpm = trackController_.model().durationMs > 0
+            ? backingBpm
+            : qMax(1.0, metronomeTransport_.grid().bpm());
+        const double trackBeat =
+            static_cast<double>(qMax<qint64>(0, transportPositionMs)) *
+            transportBpm * tempoPulseUnits / 60000.0;
+        visualAbsoluteBeat = static_cast<quint64>(std::floor(trackBeat));
+        visualSubdivision =
+            static_cast<int>(std::floor(trackBeat * visualDivision)) % visualDivision;
         beatPhase = trackBeat - std::floor(trackBeat);
         visualRunning = true;
     }
@@ -7878,7 +8057,7 @@ void MainWindow::updatePlaybackGrid()
         chordGrid_->setBeatsPerBar(beatsPerBar);
         chordGrid_->setGridPosition(
             visualAbsoluteBeat % firstSectionBeatCount(chordModel_),
-            position.subdivision,
+            visualSubdivision,
             editorMarkerRunning,
             beatPhase);
     }
@@ -7886,7 +8065,7 @@ void MainWindow::updatePlaybackGrid()
         beatGrid_->setBeatsPerBar(beatsPerBar);
         beatGrid_->setGridPosition(
             visualAbsoluteBeat % firstSectionBeatCount(beatModel_),
-            position.subdivision,
+            visualSubdivision,
             editorMarkerRunning,
             beatPhase);
     }
@@ -7894,14 +8073,14 @@ void MainWindow::updatePlaybackGrid()
         lyricGrid_->setBeatsPerBar(beatsPerBar);
         lyricGrid_->setGridPosition(
             visualAbsoluteBeat % firstSectionBeatCount(lyricModel_),
-            position.subdivision,
+            visualSubdivision,
             editorMarkerRunning,
             beatPhase);
     }
     if (performanceHome_) {
         performanceHome_->setTiming(
             performanceSectionBeat,
-            position.subdivision,
+            visualSubdivision,
             beatsPerBar,
             beatPhase,
             visualRunning);
@@ -7930,7 +8109,7 @@ void MainWindow::updatePlaybackGrid()
         performanceTempoButton_->setText(QStringLiteral("%1 BPM").arg(pattern.bpm));
     }
     if (performanceMetronomeToggle_) {
-        const bool enabled = position.running && position.engineAnchored;
+        const bool enabled = metronomeTransport_.localRunning();
         performanceMetronomeToggle_->setText(
             enabled ? QStringLiteral("METRONOME ON") : QStringLiteral("METRONOME OFF"));
         performanceMetronomeToggle_->setProperty("active", enabled);
@@ -7967,25 +8146,19 @@ void MainWindow::updatePlaybackGrid()
     if (trackWaveform_) {
         trackWaveform_->setBpm(metronomeTransport_.grid().bpm());
         const bool trackPlaying = trackRecordingWorkflow_.preparedPlaying();
-        const qint64 gridPositionMs = trackPlaying
-            ? qMax<qint64>(0, currentAudibleTrackPositionMs())
-            : static_cast<qint64>(std::llround(
-                qMax(0.0, position.secondsFromEpoch) * 1000.0));
+        const qint64 gridPositionMs = qMax<qint64>(0, transportPositionMs);
         trackWaveform_->setGridPosition(
             gridPositionMs,
-            showMarkerReference && (markerRunning || trackPlaying),
+            showMarkerReference && trackPlaying,
             currentMetronomePattern().beats_per_bar,
             currentMetronomePattern().tempo_pulse_units);
     }
     if (looperStack_) {
         const bool trackPlaying = trackRecordingWorkflow_.preparedPlaying();
-        const qint64 gridPositionMs = trackPlaying
-            ? qMax<qint64>(0, currentAudibleTrackPositionMs())
-            : static_cast<qint64>(std::llround(
-                qMax(0.0, position.secondsFromEpoch) * 1000.0));
+        const qint64 gridPositionMs = qMax<qint64>(0, transportPositionMs);
         looperStack_->setGridPosition(
             gridPositionMs,
-            showMarkerReference && (markerRunning || trackPlaying),
+            showMarkerReference && trackPlaying,
             metronomeTransport_.grid().bpm(),
             currentMetronomePattern().beats_per_bar,
             currentMetronomePattern().tempo_pulse_units);
@@ -8003,8 +8176,8 @@ void MainWindow::updateRecordingCountdown(const PlaybackGrid::Position& position
         recordingCountdownLabel_->hide();
         return;
     }
-    if (countdown.phase == TrackRecordingWorkflow::CountdownPhase::WaitingForBar) {
-        recordingCountdownLabel_->setText(QStringLiteral("WAITING FOR NEXT BAR..."));
+    if (countdown.phase == TrackRecordingWorkflow::CountdownPhase::WaitingForBeat) {
+        recordingCountdownLabel_->setText(QStringLiteral("WAITING FOR NEXT BEAT..."));
         recordingCountdownLabel_->show();
         return;
     }
@@ -8258,16 +8431,8 @@ void MainWindow::retryObsoleteReferenceWavs()
 
 void MainWindow::discardPreparedMix(bool replacementExpected)
 {
-    const bool resumePlayback = replacementExpected && (
-        trackController_.playback().requestedPlaying ||
-        trackRecordingWorkflow_.preparedPlaying());
-    if (resumePlayback && jam2_.isRunning() &&
-        !trackRecordingWorkflow_.stopPrepared(
-            0,
-            metronomeTransport_.grid().position().currentFrame,
-            false)) {
-        appendLog(QStringLiteral("engine command queue unavailable: stop obsolete prepared mix"));
-    }
+    const bool resumePlayback = replacementExpected &&
+        trackController_.playback().requestedPlaying;
     if (replacementExpected) {
         trackController_.prepareMix(0, resumePlayback);
     } else {
@@ -8349,18 +8514,39 @@ void MainWindow::sendSongSnapshot(std::optional<bool> trackPlayingOverride)
         before.role != SharedSessionController::Role::Joiner) {
         return;
     }
-    const int revision = ++looperArrangementRevision_;
+    const int revision = looperArrangementRevision_ + 1;
     if (!sessionController_.isServer()) {
-        (void)sessionController_.send(QJsonObject{
+        const QJsonObject proposal{
             {QStringLiteral("type"), QStringLiteral("song.set")},
             {QStringLiteral("revision"), revision},
             {QStringLiteral("arrangement_revision"), 0},
+            {QStringLiteral("base_arrangement_revision"),
+                static_cast<qint64>(before.arrangementRevision)},
             {QStringLiteral("host_authoritative"), false},
             {QStringLiteral("track_playing"), trackPlayingOverride.value_or(
                 trackRecordingWorkflow_.preparedPlaying())},
             {QStringLiteral("song"), songToJson(true)},
-        });
-        appendLog(QStringLiteral("submitted collaborative arrangement edit"));
+        };
+        const qsizetype bytes = QJsonDocument(proposal).toJson(QJsonDocument::Compact).size();
+        if (bytes > jam2::control_protocol::kMaxLargeJsonBytes) {
+            appendLog(QStringLiteral(
+                "collaborative arrangement exceeds the authenticated JSON limit: bytes=%1 limit=%2")
+                .arg(bytes)
+                .arg(jam2::control_protocol::kMaxLargeJsonBytes));
+            return;
+        }
+        if (!sessionController_.send(proposal)) {
+            appendLog(QStringLiteral(
+                "could not queue collaborative arrangement edit: bytes=%1 base_revision=%2")
+                .arg(bytes)
+                .arg(before.arrangementRevision));
+            return;
+        }
+        looperArrangementRevision_ = revision;
+        appendLog(QStringLiteral(
+            "submitted collaborative arrangement edit: bytes=%1 base_revision=%2")
+            .arg(bytes)
+            .arg(before.arrangementRevision));
         return;
     }
     const bool trackPlaying = trackPlayingOverride.value_or(
@@ -8384,14 +8570,27 @@ void MainWindow::sendSongSnapshot(std::optional<bool> trackPlayingOverride)
         pendingSharedTrackReadyTokens_.clear();
     }
 
-    (void)sessionController_.send(QJsonObject{
+    const QJsonObject authoritative{
         {QStringLiteral("type"), QStringLiteral("song.set")},
         {QStringLiteral("revision"), revision},
         {QStringLiteral("arrangement_revision"), revision},
         {QStringLiteral("host_authoritative"), true},
         {QStringLiteral("track_playing"), trackPlaying},
         {QStringLiteral("song"), songToJson(true)},
-    });
+    };
+    const qsizetype bytes = QJsonDocument(authoritative)
+        .toJson(QJsonDocument::Compact).size();
+    if (bytes > jam2::control_protocol::kMaxLargeJsonBytes) {
+        pendingSharedTrackRevision_ = 0;
+        pendingSharedTrackHostReady_ = true;
+        pendingSharedTrackReadyTokens_.clear();
+        appendLog(QStringLiteral(
+            "authoritative arrangement exceeds the authenticated JSON limit: bytes=%1 limit=%2")
+            .arg(bytes)
+            .arg(jam2::control_protocol::kMaxLargeJsonBytes));
+        return;
+    }
+    (void)sessionController_.send(authoritative);
     const SharedSessionController::Snapshot after = sessionController_.snapshot();
     if (coordinateTrackRestart && after.arrangementRevision != expectedArrangementRevision) {
         pendingSharedTrackRevision_ = 0;
@@ -8400,6 +8599,7 @@ void MainWindow::sendSongSnapshot(std::optional<bool> trackPlayingOverride)
         appendLog(QStringLiteral("could not publish shared track arrangement revision"));
         return;
     }
+    looperArrangementRevision_ = revision;
     trackController_.requestPlayback(trackPlaying, after.arrangementRevision);
     updateTrackPlaybackPresentation();
     maybeScheduleSharedTrackRestart();
@@ -8500,9 +8700,6 @@ bool MainWindow::applyPracticeIdea(const jam2::practice::ChordIdeaRequest& reque
 void MainWindow::stopTrackForPracticeIdeaGeneration()
 {
     trackWorkspace_.cancelPendingTrackPlayback();
-    if (trackController_.model().syncMetronome) {
-        stopTrackMetronome();
-    }
     if (jam2_.isRunning()) {
         jam2::EngineCommand cancelTransport;
         cancelTransport.type = jam2::EngineCommandType::CancelTransport;
@@ -8516,6 +8713,9 @@ void MainWindow::stopTrackForPracticeIdeaGeneration()
             appendLog(QStringLiteral(
                 "engine command queue unavailable: stop track before practice idea generation"));
         }
+    }
+    if (trackController_.model().syncMetronome) {
+        stopTrackMetronome();
     }
     updateTrackPlaybackPresentation();
     updateTrackTimeline();

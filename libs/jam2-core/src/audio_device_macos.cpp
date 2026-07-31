@@ -970,10 +970,14 @@ void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t
         } else {
             render_sample_counter += static_cast<std::uint64_t>(render_offset_frames);
         }
-        const bool before_epoch = epoch_valid && render_sample_counter < epoch;
-        const std::uint64_t position =
-            before_epoch ? 0ULL : (epoch_valid ? render_sample_counter - epoch : render_sample_counter);
-        if (!before_epoch) {
+        std::uint64_t position = 0;
+        if (jam2::audio::metronome_pattern_position(
+                *context.control,
+                raw_sample_counter,
+                render_sample_counter,
+                epoch_valid,
+                epoch,
+                position)) {
             const double rendered = jam2::metronome::render_sample(
                 pattern,
                 position,

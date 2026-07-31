@@ -74,13 +74,10 @@ MetronomeTransportController::SnapshotUpdate MetronomeTransportController::consu
         snapshot.metronome_epoch_frame,
         offset,
         static_cast<int>(std::lround(snapshot.sample_rate)),
-        snapshot.metronome_enabled && snapshot.metronome_epoch_valid);
+        snapshot.metronome_epoch_valid);
 
     SnapshotUpdate update;
     const std::uint64_t revision = snapshot.transport_revision;
-    if (transportActionResetsGridEpoch(snapshot.transport_action) && revision > 0) {
-        grid_.scheduleEpoch(snapshot.transport_target_frame, snapshot.transport_musical_frame, revision);
-    }
     if (snapshot.transport_action == jam2::EngineTransportAction::RecordStart &&
         revision > recording_schedule_revision_) {
         recording_schedule_revision_ = revision;
@@ -102,10 +99,9 @@ void MetronomeTransportController::clearEngine() noexcept
     recording_schedule_revision_ = 0;
 }
 
-void MetronomeTransportController::setLocalState(bool running, bool leader) noexcept
+void MetronomeTransportController::setLocalState(bool running) noexcept
 {
     local_running_ = running;
-    local_leader_ = running && leader;
 }
 
 void MetronomeTransportController::setApplyingRemoteSettings(bool applying) noexcept
@@ -117,11 +113,4 @@ bool MetronomeTransportController::allowsLocalGridMutation(
     bool applyingRemoteSettings) noexcept
 {
     return !applyingRemoteSettings;
-}
-
-bool MetronomeTransportController::transportActionResetsGridEpoch(
-    jam2::EngineTransportAction action) noexcept
-{
-    return action == jam2::EngineTransportAction::TrackRestart ||
-        action == jam2::EngineTransportAction::RecordStart;
 }

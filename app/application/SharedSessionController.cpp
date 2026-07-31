@@ -26,9 +26,9 @@ namespace {
 constexpr int kMembershipEntriesPerPage = 64;
 constexpr double kMaxExactJsonInteger = 9007199254740991.0;
 
-bool isGridAction(const QString& type)
+bool isEditorAction(const QString& type)
 {
-    return jam2::application::isGridControlMessageType(type);
+    return jam2::application::isEditorControlMessageType(type);
 }
 
 bool isArrangementAction(const QString& type)
@@ -110,8 +110,14 @@ bool matchesContractSampleRate(const QJsonObject& message, int expectedSampleRat
         return true;
     }
     const QString type = message.value(QStringLiteral("type")).toString();
-    if (type == QStringLiteral("looper.recording.offer")) {
-        return message.value(QStringLiteral("sample_rate")).toInt() == expectedSampleRate;
+    if (type == QStringLiteral("looper.track.batch.offer")) {
+        for (const QJsonValue& track : message.value(QStringLiteral("tracks")).toArray()) {
+            if (track.toObject().value(QStringLiteral("sample_rate")).toInt() !=
+                expectedSampleRate) {
+                return false;
+            }
+        }
+        return true;
     }
     if (type != QStringLiteral("song.set")) {
         return true;
@@ -202,18 +208,18 @@ SharedSessionController::SharedSessionController(QObject* parent)
             return;
         }
         QJsonObject routed = message;
-        if (isGridAction(type) && role_ == Role::Creator) {
-            if (gridRevision_ == std::numeric_limits<quint64>::max()) {
+        if (isEditorAction(type) && role_ == Role::Creator) {
+            if (editorRevision_ == std::numeric_limits<quint64>::max()) {
                 server_.sendTo(token, QJsonObject{
                     {QStringLiteral("type"), QStringLiteral("session.error")},
-                    {QStringLiteral("message"), QStringLiteral("Grid revision exhausted")},
+                    {QStringLiteral("message"), QStringLiteral("Editor revision exhausted")},
                 });
                 return;
             }
-            routed[QStringLiteral("revision")] = static_cast<qint64>(++gridRevision_);
+            routed[QStringLiteral("revision")] = static_cast<qint64>(++editorRevision_);
             routed[QStringLiteral("authority_token")] = token;
-            gridAuthorityToken_ = token;
-            gridState_ = routed;
+            editorAuthorityToken_ = token;
+            editorState_ = routed;
             server_.send(routed);
             publishSnapshot();
         }
@@ -314,7 +320,7 @@ bool SharedSessionController::startCreator(const CreatorConfig& config)
             detail}, false);
         return false;
     }
-    gridAuthorityToken_ = config.localToken;
+    editorAuthorityToken_ = config.localToken;
     arrangementAuthorityToken_ = config.localToken;
     Peer local;
     local.endpoint = config.localEndpoint;
@@ -418,11 +424,11 @@ void SharedSessionController::reset(bool stopRuntime)
     peers_.clear();
     membershipAssembly_ = {};
     coordinatorToken_.clear();
-    gridAuthorityToken_.clear();
+    editorAuthorityToken_.clear();
     arrangementAuthorityToken_.clear();
     membershipRevision_ = 0;
     contractRevision_ = 0;
-    gridRevision_ = 0;
+    editorRevision_ = 0;
     arrangementRevision_ = 0;
     contractReady_ = false;
     contract_ = {};
@@ -432,7 +438,7 @@ void SharedSessionController::reset(bool stopRuntime)
     failure_ = TransportFailure::None;
     failureDetail_.clear();
     failureRetryable_ = false;
-    gridState_ = {};
+    editorState_ = {};
     arrangementState_ = {};
     heartbeatIntervalMs_ = kDefaultHeartbeatIntervalMs;
     heartbeatMissLimit_ = kDefaultHeartbeatMissLimit;
@@ -569,14 +575,14 @@ bool SharedSessionController::send(const QJsonObject& message)
     if (role_ == Role::Creator) {
         QJsonObject routed = message;
         const QString type = routed.value(QStringLiteral("type")).toString();
-        if (isGridAction(type)) {
-            if (gridRevision_ == std::numeric_limits<quint64>::max()) {
+        if (isEditorAction(type)) {
+            if (editorRevision_ == std::numeric_limits<quint64>::max()) {
                 return false;
             }
-            routed[QStringLiteral("revision")] = static_cast<qint64>(++gridRevision_);
+            routed[QStringLiteral("revision")] = static_cast<qint64>(++editorRevision_);
             routed[QStringLiteral("authority_token")] = creator_.localToken;
-            gridAuthorityToken_ = creator_.localToken;
-            gridState_ = routed;
+            editorAuthorityToken_ = creator_.localToken;
+            editorState_ = routed;
             publishSnapshot();
         } else if (isArrangementAction(type)) {
             if (arrangementRevision_ == std::numeric_limits<quint64>::max()) {
@@ -665,11 +671,11 @@ SharedSessionController::Snapshot SharedSessionController::snapshot() const
         coordinator != peers_.cend()) {
         result.coordinatorPeerId = coordinator->peerId;
     }
-    result.gridAuthorityToken = gridAuthorityToken_;
+    result.editorAuthorityToken = editorAuthorityToken_;
     result.arrangementAuthorityToken = arrangementAuthorityToken_;
     result.membershipRevision = membershipRevision_;
     result.contractRevision = contractRevision_;
-    result.gridRevision = gridRevision_;
+    result.editorRevision = editorRevision_;
     result.arrangementRevision = arrangementRevision_;
     result.sessionPeerLimit = role_ == Role::Creator ? creator_.sessionPeerLimit : 0;
     result.reconnectAttempts = reconnectAttempts_;
@@ -827,8 +833,8 @@ void SharedSessionController::handleAuthenticatedPeer(
         server_.sendTo(token, contractMessage());
     }
     broadcastMembership();
-    if (!gridState_.isEmpty()) {
-        server_.sendTo(token, gridState_);
+    if (!editorState_.isEmpty()) {
+        server_.sendTo(token, editorState_);
     }
     if (!arrangementState_.isEmpty()) {
         server_.sendTo(token, arrangementState_);
@@ -842,11 +848,11 @@ void SharedSessionController::handleAuthenticatedPeer(
 void SharedSessionController::handleDisconnectedPeer(const QString& token)
 {
     if (role_ == Role::Creator && peers_.remove(token) > 0) {
-        if (gridAuthorityToken_ == token) {
-            gridAuthorityToken_.clear();
-            gridState_ = {};
-            if (gridRevision_ != std::numeric_limits<quint64>::max()) {
-                ++gridRevision_;
+        if (editorAuthorityToken_ == token) {
+            editorAuthorityToken_.clear();
+            editorState_ = {};
+            if (editorRevision_ != std::numeric_limits<quint64>::max()) {
+                ++editorRevision_;
             }
         }
         broadcastMembership();
@@ -943,7 +949,7 @@ void SharedSessionController::handleClientMessage(const QJsonObject& message)
         }
         return;
     }
-    if ((isGridAction(type) || isArrangementAction(type)) &&
+    if ((isEditorAction(type) || isArrangementAction(type)) &&
         !acceptAuthorityUpdate(message)) {
         publishTransportEvent(TransportEvent{
             TransportEventType::Failure,
@@ -1009,16 +1015,16 @@ bool SharedSessionController::acceptAuthorityUpdate(const QJsonObject& message)
     if (!validToken(authority) || !peers_.contains(authority)) {
         return false;
     }
-    if (isGridAction(type)) {
+    if (isEditorAction(type)) {
         quint64 revision = 0;
         if (!parseRevision(message.value(QStringLiteral("revision")), revision, false) ||
-            revision < gridRevision_ ||
-            (revision == gridRevision_ && authority != gridAuthorityToken_)) {
+            revision < editorRevision_ ||
+            (revision == editorRevision_ && authority != editorAuthorityToken_)) {
             return false;
         }
-        if (revision > gridRevision_) {
-            gridAuthorityToken_ = authority;
-            gridRevision_ = revision;
+        if (revision > editorRevision_) {
+            editorAuthorityToken_ = authority;
+            editorRevision_ = revision;
             publishSnapshot();
         }
         return true;
@@ -1060,18 +1066,18 @@ bool SharedSessionController::acceptMembershipPage(const QJsonObject& message)
         return false;
     }
     quint64 revision = 0;
-    quint64 gridRevision = 0;
+    quint64 editorRevision = 0;
     quint64 arrangementRevision = 0;
     const int pageIndex = message.value(QStringLiteral("page_index")).toInt(-1);
     const int pageCount = message.value(QStringLiteral("page_count")).toInt(-1);
     const QString coordinator = message.value(QStringLiteral("coordinator_token")).toString();
-    const QString gridAuthority =
-        message.value(QStringLiteral("grid_authority_token")).toString();
+    const QString editorAuthority =
+        message.value(QStringLiteral("editor_authority_token")).toString();
     const QString arrangementAuthority =
         message.value(QStringLiteral("arrangement_authority_token")).toString();
     const QJsonArray entries = message.value(QStringLiteral("peers")).toArray();
     if (!parseRevision(message.value(QStringLiteral("revision")), revision, false) ||
-        !parseRevision(message.value(QStringLiteral("grid_revision")), gridRevision, true) ||
+        !parseRevision(message.value(QStringLiteral("editor_revision")), editorRevision, true) ||
         !parseRevision(
             message.value(QStringLiteral("arrangement_revision")), arrangementRevision, true) ||
         !message.value(QStringLiteral("page_index")).isDouble() ||
@@ -1079,7 +1085,8 @@ bool SharedSessionController::acceptMembershipPage(const QJsonObject& message)
         !message.value(QStringLiteral("peers")).isArray() ||
         pageIndex < 0 || pageCount <= 0 ||
         pageIndex >= pageCount || entries.size() > kMembershipEntriesPerPage ||
-        !validToken(coordinator) || (!gridAuthority.isEmpty() && !validToken(gridAuthority)) ||
+        !validToken(coordinator) ||
+        (!editorAuthority.isEmpty() && !validToken(editorAuthority)) ||
         !validToken(arrangementAuthority)) {
         return false;
     }
@@ -1091,16 +1098,16 @@ bool SharedSessionController::acceptMembershipPage(const QJsonObject& message)
         membershipAssembly_.revision = revision;
         membershipAssembly_.pageCount = pageCount;
         membershipAssembly_.coordinatorToken = coordinator;
-        membershipAssembly_.gridAuthorityToken = gridAuthority;
+        membershipAssembly_.editorAuthorityToken = editorAuthority;
         membershipAssembly_.arrangementAuthorityToken = arrangementAuthority;
-        membershipAssembly_.gridRevision = gridRevision;
+        membershipAssembly_.editorRevision = editorRevision;
         membershipAssembly_.arrangementRevision = arrangementRevision;
     }
     if (membershipAssembly_.pageCount != pageCount ||
         membershipAssembly_.coordinatorToken != coordinator ||
-        membershipAssembly_.gridAuthorityToken != gridAuthority ||
+        membershipAssembly_.editorAuthorityToken != editorAuthority ||
         membershipAssembly_.arrangementAuthorityToken != arrangementAuthority ||
-        membershipAssembly_.gridRevision != gridRevision ||
+        membershipAssembly_.editorRevision != editorRevision ||
         membershipAssembly_.arrangementRevision != arrangementRevision) {
         membershipAssembly_ = {};
         return false;
@@ -1152,11 +1159,11 @@ bool SharedSessionController::acceptMembershipPage(const QJsonObject& message)
     }
     if (!next.contains(joiner_.localToken) || !next.contains(coordinator) ||
         coordinator == joiner_.localToken || coordinator != coordinatorToken_ ||
-        (!gridAuthority.isEmpty() && !next.contains(gridAuthority)) ||
+        (!editorAuthority.isEmpty() && !next.contains(editorAuthority)) ||
         !next.contains(arrangementAuthority) || arrangementAuthority != coordinator ||
-        gridRevision < gridRevision_ || arrangementRevision < arrangementRevision_ ||
-        (membershipRevision_ > 0 && gridRevision == gridRevision_ &&
-         gridAuthorityToken_ != gridAuthority) ||
+        editorRevision < editorRevision_ || arrangementRevision < arrangementRevision_ ||
+        (membershipRevision_ > 0 && editorRevision == editorRevision_ &&
+         editorAuthorityToken_ != editorAuthority) ||
         (membershipRevision_ > 0 && arrangementRevision == arrangementRevision_ &&
          arrangementAuthorityToken_ != arrangementAuthority)) {
         membershipAssembly_ = {};
@@ -1164,9 +1171,9 @@ bool SharedSessionController::acceptMembershipPage(const QJsonObject& message)
     }
     peers_ = std::move(next);
     coordinatorToken_ = coordinator;
-    gridAuthorityToken_ = gridAuthority;
+    editorAuthorityToken_ = editorAuthority;
     arrangementAuthorityToken_ = arrangementAuthority;
-    gridRevision_ = gridRevision;
+    editorRevision_ = editorRevision;
     arrangementRevision_ = arrangementRevision;
     membershipRevision_ = revision;
     membershipAssembly_ = {};
@@ -1212,9 +1219,9 @@ QJsonObject SharedSessionController::membershipPageFor(
         {QStringLiteral("page_index"), pageIndex},
         {QStringLiteral("page_count"), pageCount},
         {QStringLiteral("coordinator_token"), coordinatorToken_},
-        {QStringLiteral("grid_authority_token"), gridAuthorityToken_},
+        {QStringLiteral("editor_authority_token"), editorAuthorityToken_},
         {QStringLiteral("arrangement_authority_token"), arrangementAuthorityToken_},
-        {QStringLiteral("grid_revision"), static_cast<qint64>(gridRevision_)},
+        {QStringLiteral("editor_revision"), static_cast<qint64>(editorRevision_)},
         {QStringLiteral("arrangement_revision"), static_cast<qint64>(arrangementRevision_)},
         {QStringLiteral("peers"), entries},
     };

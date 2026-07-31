@@ -700,9 +700,14 @@ def protocol_verdict_for(result):
             return base
         server = result.get("metrics", {}).get("server", {})
         client = result.get("metrics", {}).get("client", {})
-        if (server.get("grid_authority_peer_id") != client.get("local_peer_id") or
-                client.get("grid_authority_peer_id") != client.get("local_peer_id")):
-            return "client_not_grid_authority"
+        expected_authority = (client.get("local_peer_id")
+                              if expected == "leader-audio"
+                              else server.get("local_peer_id"))
+        if (server.get("grid_authority_peer_id") != expected_authority or
+                client.get("grid_authority_peer_id") != expected_authority):
+            return ("client_not_leader_audio_source"
+                    if expected == "leader-audio"
+                    else "ordinary_grid_edit_changed_authority")
         if min(server.get("grid_revision", 0), client.get("grid_revision", 0)) < 2:
             return "client_authority_revision_not_applied"
         if client.get("grid_proposals_sent", 0.0) <= 0.0:
@@ -722,7 +727,8 @@ def protocol_verdict_for(result):
             return "concurrent_grid_revisions_not_ordered"
         if (not combined.get("grid_revision_consensus", False) or
                 not combined.get("grid_authority_consensus", False) or
-                server.get("grid_authority_peer_id") != client.get("grid_authority_peer_id")):
+                server.get("grid_authority_peer_id") != server.get("local_peer_id") or
+                client.get("grid_authority_peer_id") != server.get("local_peer_id")):
             return "concurrent_grid_authority_conflict"
         return "pass"
     if scenario == "grid-stop-restart-shared-grid":
@@ -732,17 +738,17 @@ def protocol_verdict_for(result):
         metrics_set = result.get("metrics", {})
         server = metrics_set.get("server", {})
         client = metrics_set.get("client", {})
-        if min(server.get("grid_revision_before_shutdown", 0),
-               client.get("grid_revision_before_shutdown", 0)) < 5:
-            return "stop_restart_grid_revisions_missing"
-        if (server.get("grid_authority_peer_id_before_shutdown") != client.get("local_peer_id") or
-                client.get("grid_authority_peer_id_before_shutdown") != client.get("local_peer_id")):
-            return "final_starter_not_grid_authority"
+        if (server.get("grid_revision_before_shutdown") != 1 or
+                client.get("grid_revision_before_shutdown") != 1):
+            return "local_click_toggle_created_grid_revision"
+        if (server.get("grid_authority_peer_id_before_shutdown") != server.get("local_peer_id") or
+                client.get("grid_authority_peer_id_before_shutdown") != server.get("local_peer_id")):
+            return "local_click_toggle_changed_grid_authority"
         if min(server.get("grid_run_state_before_shutdown", 0),
                client.get("grid_run_state_before_shutdown", 0)) != 1:
             return "stop_restart_grid_not_running"
-        if metrics_set.get("combined", {}).get("grid_proposals_sent_total", 0) < 4:
-            return "stop_restart_grid_proposals_missing"
+        if metrics_set.get("combined", {}).get("grid_proposals_sent_total", 0) != 0:
+            return "local_click_toggle_sent_grid_proposal"
         return "pass"
     if scenario == "grid-noop-running-controls":
         base = metronome_verdict(result, "shared-grid")
@@ -766,7 +772,7 @@ def protocol_verdict_for(result):
         if server.get("network_peer_count", -1) != 0:
             return "departed_peer_still_in_membership"
         if server.get("grid_authority_peer_id") != server.get("local_peer_id"):
-            return "creator_did_not_take_fresh_grid_authority"
+            return "creator_did_not_recover_grid_publisher"
         if server.get("grid_revision", 0) < 3:
             return "post_departure_grid_revision_not_ordered"
         if (client.get("grid_authority_peer_id") != client.get("local_peer_id") or
@@ -775,7 +781,7 @@ def protocol_verdict_for(result):
             return "post_departure_authority_transition_not_observed"
         if server.get("grid_authority_epoch_frame", 0) <= 0 or \
                 server.get("grid_mapped_epoch_frame", 0) <= 0:
-            return "post_departure_fresh_epoch_missing"
+            return "post_departure_continuous_epoch_missing"
         if server.get("grid_run_state_before_shutdown", 0) != 1:
             return "post_departure_grid_not_running"
         if server.get("transport_source_peer_id", 0) != 0 or \
@@ -786,8 +792,9 @@ def protocol_verdict_for(result):
         metric_set = result.get("metrics", {})
         server = metric_set.get("server", {})
         client = metric_set.get("client", {})
-        if server.get("grid_authority_peer_id") != client.get("local_peer_id"):
-            return "transport_grid_authority_not_client"
+        if (server.get("grid_authority_peer_id") != server.get("local_peer_id") or
+                client.get("grid_authority_peer_id") != server.get("local_peer_id")):
+            return "transport_grid_authority_not_creator"
         if (server.get("arrangement_authority_peer_id") != server.get("local_peer_id") or
                 client.get("arrangement_authority_peer_id") != server.get("local_peer_id")):
             return "transport_arrangement_authority_invalid"

@@ -8,6 +8,7 @@
 #include <QJsonValue>
 #include <QList>
 #include <QRegularExpression>
+#include <QSet>
 #include <QStringList>
 
 #include <cmath>
@@ -20,6 +21,13 @@ namespace limits = jam2::application::limits;
 bool isSha256Hex(const QString& value)
 {
     static const QRegularExpression expression(QStringLiteral("^[0-9a-f]{64}$"));
+    return expression.match(value).hasMatch();
+}
+
+bool isUuid(const QString& value)
+{
+    static const QRegularExpression expression(QStringLiteral(
+        "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"));
     return expression.match(value).hasMatch();
 }
 
@@ -36,6 +44,18 @@ bool isBoundedInteger(const QJsonValue& value, qint64 minimum, qint64 maximum)
 bool isBoundedString(const QJsonValue& value, qsizetype maximum)
 {
     return value.isString() && value.toString().size() <= maximum;
+}
+
+bool isValidTrackOffer(const QJsonObject& track)
+{
+    const QString targetLaneId = track.value(QStringLiteral("target_lane_id")).toString();
+    const QString hash = track.value(QStringLiteral("sha256")).toString().toLower();
+    return isUuid(track.value(QStringLiteral("recording_id")).toString()) &&
+        isBoundedInteger(track.value(QStringLiteral("bank")), 0, 3) &&
+        !targetLaneId.isEmpty() && targetLaneId.size() <= 80 &&
+        isSha256Hex(hash) && isBoundedString(track.value(QStringLiteral("name")), 512) &&
+        isBoundedInteger(track.value(QStringLiteral("sample_rate")),
+            limits::kMinimumSampleRate, limits::kMaximumSampleRate);
 }
 
 bool isOptionalBoundedString(const QJsonObject& object, const QString& key, qsizetype maximum)
@@ -333,16 +353,16 @@ bool jam2::application::isTrackSyncControlMessageType(const QString& type) noexc
     return type == QStringLiteral("song.set") ||
         type == QStringLiteral("track.ready") ||
         type == QStringLiteral("looper.track.share.request") ||
-        type == QStringLiteral("looper.recording.offer") ||
+        type == QStringLiteral("looper.track.batch.offer") ||
+        type == QStringLiteral("looper.track.batch.complete") ||
         type == QStringLiteral("looper.asset.request") ||
         type == QStringLiteral("looper.asset.start") ||
         type == QStringLiteral("looper.asset.done");
 }
 
-bool jam2::application::isGridControlMessageType(const QString& type) noexcept
+bool jam2::application::isEditorControlMessageType(const QString& type) noexcept
 {
-    return type == QStringLiteral("metronome.settings") ||
-        type == QStringLiteral("beat.set") ||
+    return type == QStringLiteral("beat.set") ||
         type == QStringLiteral("beat.hit") ||
         type == QStringLiteral("beat.division") ||
         type == QStringLiteral("music.step") ||
@@ -436,39 +456,6 @@ bool jam2::application::validateControlMessage(
         return isBoundedString(message.value(QStringLiteral("message")), 4096)
             ? true : (reason = QStringLiteral("session error text is invalid"), false);
     }
-    if (type == QStringLiteral("metronome.settings")) {
-        static const QStringList maskKeys{
-            QStringLiteral("play_mask_low"), QStringLiteral("play_mask_high"),
-            QStringLiteral("accent_mask_low"), QStringLiteral("accent_mask_high")};
-        if (!message.value(QStringLiteral("running")).isBool() ||
-            !message.value(QStringLiteral("leader")).isBool() ||
-            !isBoundedString(message.value(QStringLiteral("mode")), 32) ||
-            !isBoundedInteger(message.value(QStringLiteral("bpm")), 1, 400) ||
-            !isBoundedInteger(message.value(QStringLiteral("beats")), 1, 16) ||
-            !isBoundedInteger(message.value(QStringLiteral("division")), 1, 16) ||
-            !isBoundedInteger(message.value(QStringLiteral("beat_unit")), 2, 16) ||
-            !isBoundedInteger(message.value(QStringLiteral("tempo_pulse_units")), 1, 3)) {
-            reason = QStringLiteral("metronome settings are invalid");
-            return false;
-        }
-        const int beatUnit = message.value(QStringLiteral("beat_unit")).toInt(0);
-        const int pulseUnits =
-            message.value(QStringLiteral("tempo_pulse_units")).toInt(0);
-        if ((beatUnit != 2 && beatUnit != 4 &&
-             beatUnit != 8 && beatUnit != 16) ||
-            (pulseUnits != 1 && pulseUnits != 3)) {
-            reason = QStringLiteral("metronome beat or tempo-pulse unit is invalid");
-            return false;
-        }
-        static const QRegularExpression maskExpression(QStringLiteral("^[0-9a-fA-F]{1,16}$"));
-        for (const QString& key : maskKeys) {
-            if (!maskExpression.match(message.value(key).toString()).hasMatch()) {
-                reason = QStringLiteral("metronome mask is invalid");
-                return false;
-            }
-        }
-        return true;
-    }
     if (type == QStringLiteral("beat.set")) {
         const QString lane = message.value(QStringLiteral("lane")).toString();
         return isBoundedInteger(message.value(QStringLiteral("section")), 0, 63) &&
@@ -529,6 +516,11 @@ bool jam2::application::validateControlMessage(
                 (std::numeric_limits<int>::max)()) ||
             (!message.value(QStringLiteral("host_authoritative")).isUndefined() &&
              !message.value(QStringLiteral("host_authoritative")).isBool()) ||
+            (!message.value(QStringLiteral("base_arrangement_revision")).isUndefined() &&
+             !isBoundedInteger(
+                 message.value(QStringLiteral("base_arrangement_revision")),
+                 0,
+                 (std::numeric_limits<int>::max)())) ||
             (!message.value(QStringLiteral("track_playing")).isUndefined() &&
              !message.value(QStringLiteral("track_playing")).isBool())) {
             reason = QStringLiteral("song snapshot or revision is invalid");
@@ -544,21 +536,37 @@ bool jam2::application::validateControlMessage(
             ? true : (reason = QStringLiteral("track readiness revision is invalid"), false);
     }
     if (type == QStringLiteral("looper.track.share.request")) {
+        return isUuid(message.value(QStringLiteral("batch_id")).toString())
+            ? true : (reason = QStringLiteral("track share batch id is invalid"), false);
+    }
+    if (type == QStringLiteral("looper.track.batch.offer")) {
+        const QJsonValue tracksValue = message.value(QStringLiteral("tracks"));
+        const QJsonArray tracks = tracksValue.toArray();
+        if (!isUuid(message.value(QStringLiteral("batch_id")).toString()) ||
+            !tracksValue.isArray() ||
+            tracks.size() > limits::kLooperBankCount * limits::kMaximumLooperLanesPerBank) {
+            reason = QStringLiteral("track batch manifest is invalid");
+            return false;
+        }
+        QSet<QString> recordingIds;
+        for (const QJsonValue& track : tracks) {
+            const QJsonObject entry = track.toObject();
+            const QString recordingId =
+                entry.value(QStringLiteral("recording_id")).toString().toLower();
+            if (!track.isObject() || !isValidTrackOffer(entry) ||
+                recordingIds.contains(recordingId)) {
+                reason = QStringLiteral("track batch entry is invalid");
+                return false;
+            }
+            recordingIds.insert(recordingId);
+        }
         return true;
     }
-    if (type == QStringLiteral("looper.recording.offer")) {
-        static const QRegularExpression recordingIdExpression(QStringLiteral(
-            "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"));
-        const QString recordingId = message.value(QStringLiteral("recording_id")).toString();
-        const QString targetLaneId = message.value(QStringLiteral("target_lane_id")).toString();
-        const QString hash = message.value(QStringLiteral("sha256")).toString().toLower();
-        return recordingIdExpression.match(recordingId).hasMatch() &&
-            isBoundedInteger(message.value(QStringLiteral("bank")), 0, 3) &&
-            !targetLaneId.isEmpty() && targetLaneId.size() <= 80 &&
-            isSha256Hex(hash) && isBoundedString(message.value(QStringLiteral("name")), 512) &&
-            isBoundedInteger(message.value(QStringLiteral("sample_rate")),
-                limits::kMinimumSampleRate, limits::kMaximumSampleRate)
-            ? true : (reason = QStringLiteral("recording offer is invalid"), false);
+    if (type == QStringLiteral("looper.track.batch.complete")) {
+        return isUuid(message.value(QStringLiteral("batch_id")).toString()) &&
+            isBoundedInteger(message.value(QStringLiteral("tracks")), 0,
+                limits::kLooperBankCount * limits::kMaximumLooperLanesPerBank)
+            ? true : (reason = QStringLiteral("track batch completion is invalid"), false);
     }
     if (type == QStringLiteral("looper.asset.request")) {
         const QJsonValue arrangementRevision =
@@ -616,9 +624,11 @@ jam2::application::ControlMessageDecision jam2::application::evaluateControlMess
         type == QStringLiteral("session.membership") ||
         type == QStringLiteral("session.heartbeat") ||
         type == QStringLiteral("session.end") ||
-        type == QStringLiteral("looper.track.share.request");
+        type == QStringLiteral("looper.track.share.request") ||
+        type == QStringLiteral("looper.track.batch.complete");
     const bool peerOnly = type == QStringLiteral("session.heartbeat.ack") ||
-        type == QStringLiteral("session.endpoint.update");
+        type == QStringLiteral("session.endpoint.update") ||
+        type == QStringLiteral("looper.track.batch.offer");
     const bool internalOnly = type == QStringLiteral("debug.lifecycle.disconnect");
 
     const bool authorized = internalOnly

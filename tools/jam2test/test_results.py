@@ -467,11 +467,13 @@ class NormalVerdictTests(unittest.TestCase):
     def test_concurrent_grid_edits_require_two_ordered_assignments_not_startup_revision(self):
         result = normal_result("grid-authority-concurrent")
         result["metrics"]["server"].update({
+            "local_peer_id": 1,
             "grid_mode": 0,
             "grid_revision": 2,
             "grid_authority_peer_id": 1,
         })
         result["metrics"]["client"].update({
+            "local_peer_id": 2,
             "grid_mode": 0,
             "grid_revision": 2,
             "grid_authority_peer_id": 1,

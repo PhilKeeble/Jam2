@@ -643,7 +643,7 @@ void MainWindowPages::build(MainWindow& w)
     w.performanceMetronomeToggle_ = new QPushButton(QStringLiteral("METRONOME OFF"), tempoCard);
     w.performanceMetronomeToggle_->setObjectName(QStringLiteral("MetronomeToggle"));
     QObject::connect(w.performanceMetronomeToggle_, &QPushButton::clicked, &w, [&w] {
-        if (w.metronomeTransport_.grid().position().running) {
+        if (w.metronomeTransport_.localRunning()) {
             w.stopTrackMetronome();
         } else {
             w.startTrackMetronome();
@@ -1399,6 +1399,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
             w.songAssetCheckRetryTimer_.stop();
             w.pendingSongSet_ = {};
             w.pendingSongRevision_ = 0;
+            w.trackWorkspace_.pendingSongBaseRevision = 0;
             w.pendingSongTrackRestart_ = false;
             w.pendingSongSourcePeerToken_.clear();
             w.pendingSongNeedsAuthoritativePublish_ = false;
@@ -1408,6 +1409,12 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
             w.assetTransfer_.cancel();
             w.pendingTrackContributions_.clear();
             w.pendingTrackAssetSources_.clear();
+            w.trackWorkspace_.outgoingTrackShareBatchId.clear();
+            w.trackWorkspace_.heldTrackShareSongSet = {};
+            w.trackWorkspace_.heldTrackShareSongSourcePeerToken.clear();
+            if (w.performanceHome_) {
+                w.performanceHome_->setTrackTransferStatus(QString{});
+            }
             w.trackController_.requestPlayback(
                 w.trackRecordingWorkflow_.preparedPlaying());
             w.trackController_.observeEnginePlaying(
@@ -1688,7 +1695,6 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     QObject::connect(w.metronomeModeBox_, &QComboBox::currentTextChanged, &w, [&w] {
         w.updateMetronomeCompensationVisibility();
         w.sendMetronomeModeToJam();
-        w.sendMetronomeSettingsToPeer();
     });
     QObject::connect(w.metronomeSoundBox_, qOverload<int>(&QComboBox::currentIndexChanged), &w, [&w] {
         w.preferences_.metronomeSound = w.metronomeSoundBox_->currentData().toInt();
@@ -1705,7 +1711,6 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     QObject::connect(w.metronomeBeatUnitBox_, qOverload<int>(&QComboBox::currentIndexChanged), &w, [&w] {
         w.updateTrackMetronomeInterval();
         w.sendMetronomePatternToJam();
-        w.sendMetronomeSettingsToPeer();
     });
     QObject::connect(w.metronomeTempoPulseBox_, qOverload<int>(&QComboBox::currentIndexChanged), &w, [&w] {
         w.updateTrackMetronomeInterval();

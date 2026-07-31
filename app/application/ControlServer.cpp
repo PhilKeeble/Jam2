@@ -122,9 +122,27 @@ void ControlServer::send(const QJsonObject& message)
     const QList<PeerHandle> peers = peers_;
     for (const PeerHandle& peer : peers) {
         if (peer && peer->connection && peer->authenticated) {
-            const QByteArray frame = encodeAuthenticated(message, peer->sendKey, peer->sendSequence);
-            if (!frame.isEmpty() && writeFrame(peer, frame)) {
+            const AuthenticatedJsonFrames encoded =
+                encodeAuthenticatedJsonFrames(message, peer->sendKey, peer->sendSequence);
+            qint64 wireBytes = 0;
+            for (const QByteArray& frame : encoded.frames) wireBytes += frame.size();
+            if (encoded.frames.isEmpty() ||
+                peer->connection->bytesToWrite() > kOutputHighWaterBytes - wireBytes) {
+                ++stats_.outputHighWaterRejects;
+                continue;
+            }
+            bool sent = true;
+            for (const QByteArray& frame : encoded.frames) {
+                if (!writeFrame(peer, frame)) {
+                    sent = false;
+                    break;
+                }
                 ++peer->sendSequence;
+            }
+            if (sent && encoded.chunked) {
+                ++stats_.largeJsonMessagesSent;
+                stats_.largeJsonRawBytesSent += static_cast<quint64>(encoded.rawBytes);
+                stats_.largeJsonCompressedBytesSent += static_cast<quint64>(encoded.compressedBytes);
             }
         }
     }
@@ -136,11 +154,29 @@ bool ControlServer::sendTo(const QString& token, const QJsonObject& message, boo
         if (!peer || !peer->authenticated || peer->token != token) {
             continue;
         }
-        const QByteArray frame = encodeAuthenticated(message, peer->sendKey, peer->sendSequence);
-        if (frame.isEmpty() || !writeFrame(peer, frame, closeAfterWrite)) {
+        const AuthenticatedJsonFrames encoded =
+            encodeAuthenticatedJsonFrames(message, peer->sendKey, peer->sendSequence);
+        qint64 wireBytes = 0;
+        for (const QByteArray& frame : encoded.frames) wireBytes += frame.size();
+        if (encoded.frames.isEmpty() ||
+            peer->connection->bytesToWrite() > kOutputHighWaterBytes - wireBytes) {
+            ++stats_.outputHighWaterRejects;
             return false;
         }
-        ++peer->sendSequence;
+        for (qsizetype index = 0; index < encoded.frames.size(); ++index) {
+            if (!writeFrame(
+                    peer,
+                    encoded.frames.at(index),
+                    closeAfterWrite && index + 1 == encoded.frames.size())) {
+                return false;
+            }
+            ++peer->sendSequence;
+        }
+        if (encoded.chunked) {
+            ++stats_.largeJsonMessagesSent;
+            stats_.largeJsonRawBytesSent += static_cast<quint64>(encoded.rawBytes);
+            stats_.largeJsonCompressedBytesSent += static_cast<quint64>(encoded.compressedBytes);
+        }
         return true;
     }
     return false;
@@ -464,8 +500,35 @@ void ControlServer::readPeer(const PeerHandle& peer)
             }
             ++peer->receiveSequence;
             if (payload.type == AuthenticatedPayloadType::Json) {
+                if (peer->largeJsonReceiver.active()) {
+                    ++stats_.sequenceOrTagRejects;
+                    rejectPeer(
+                        peer,
+                        QStringLiteral("TCP control large JSON transfer was interleaved"),
+                        TransportFailure::AuthenticatedFrameRejected,
+                        true);
+                    return;
+                }
                 if (onMessage) {
                     onMessage(peer->token, payload.message);
+                }
+            } else if (payload.type == AuthenticatedPayloadType::LargeJsonChunk) {
+                QJsonObject completed;
+                bool ready = false;
+                if (!peer->largeJsonReceiver.accept(payload.binary, completed, ready, error)) {
+                    ++stats_.sequenceOrTagRejects;
+                    rejectPeer(
+                        peer,
+                        QStringLiteral("TCP control large JSON transfer rejected: ") + error,
+                        TransportFailure::AuthenticatedFrameRejected,
+                        true);
+                    return;
+                }
+                if (ready) {
+                    ++stats_.largeJsonMessagesReceived;
+                    if (onMessage) {
+                        onMessage(peer->token, completed);
+                    }
                 }
             } else if (onBinaryMessage) {
                 onBinaryMessage(peer->token, payload.binary);

@@ -32,6 +32,10 @@ public:
         quint64 activeConnectionHighWater = 0;
         quint64 disconnectedConnections = 0;
         quint64 preAuthenticationDisconnects = 0;
+        quint64 largeJsonMessagesSent = 0;
+        quint64 largeJsonMessagesReceived = 0;
+        quint64 largeJsonRawBytesSent = 0;
+        quint64 largeJsonCompressedBytesSent = 0;
     };
 
     explicit ControlServer(QObject* parent = nullptr);
@@ -69,6 +73,7 @@ private:
         bool readScheduled = false;
         quint64 receiveSequence = 1;
         quint64 sendSequence = 1;
+        jam2::control_protocol::LargeJsonReceiver largeJsonReceiver;
         QString token;
     };
 

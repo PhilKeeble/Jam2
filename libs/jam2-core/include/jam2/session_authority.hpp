@@ -19,6 +19,7 @@ struct GridAuthorityState {
     std::uint8_t mode = 0;
     std::uint64_t authority_epoch_frame = 0;
     std::uint64_t authority_packet_frame = 0;
+    bool epoch_reset = false;
 };
 
 struct GridProposal {
@@ -26,7 +27,8 @@ struct GridProposal {
     std::uint64_t request_id = 0;
     GridRunState run_state = GridRunState::Stopped;
     std::uint8_t mode = 0;
-    std::uint64_t proposed_epoch_frame = 0;
+    bool reset_epoch = false;
+    bool claim_leader_audio_source = false;
 };
 
 enum class AuthorityUpdateResult : std::uint8_t {

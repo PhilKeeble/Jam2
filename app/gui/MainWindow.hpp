@@ -124,7 +124,6 @@ private:
     void submitEngineText(jam2::EngineCommandType type, const QString& text, const QString& context);
     void seekPreparedTrack(std::uint64_t sourceFrame, std::uint64_t targetFrame);
     void setPreparedTrackLoop(bool enabled, std::uint64_t startFrame = 0, std::uint64_t endFrame = 0);
-    std::uint64_t quantizedEngineTarget(int countInBars) const;
     void restartPreparedTrackQuantized();
     void handleEngineSnapshot(const jam2::EngineSnapshot& snapshot);
     void handleEngineEvent(const jam2::EngineEvent& event);
@@ -167,7 +166,10 @@ private:
         std::function<void()> work,
         std::function<void()> complete,
         std::function<void(const QString&)> failed = {});
-    void loadPreparedMixIntoEngine();
+    void loadPreparedMixIntoEngine(
+        std::uint64_t targetFrame = 0,
+        std::uint64_t sourceFrame = 0,
+        bool alignToRunningTransport = false);
     void sendPreparedTrackLevel();
     void syncLooperArrangement();
     QString looperAssetAbsolutePath(const LooperLane& lane) const;
@@ -196,12 +198,12 @@ private:
     void sendMetronomeModeToJam();
     void sendMetronomeSoundToJam();
     void sendMetronomePatternToJam();
-    void sendMetronomeSettingsToPeer();
-    void applyRemoteMetronomeSettings(const QJsonObject& message);
+    void updateMetronomePresentationFromEngine(const jam2::EngineSnapshot& snapshot);
     void showMetronomeCompensationDialog();
     void updateMetronomeCompensationVisibility();
-    void publishLocalTrackOffer(int bankIndex, const QString& targetLaneId, const LooperLane& lane);
-    void handleTrackOffer(const QJsonObject& message, const QString& sourcePeerToken);
+    void publishLocalTrackBatch(const QString& batchId);
+    void handleTrackBatchOffer(const QJsonObject& message, const QString& sourcePeerToken);
+    void handleTrackBatchComplete(const QJsonObject& message);
     void requestNextPendingAsset();
     void applyPendingTrackContributions();
     bool sendControlTo(const QString& targetPeerToken, const QJsonObject& message);

@@ -286,10 +286,11 @@ void mix_metronome_output(
         } else {
             frame += static_cast<std::uint64_t>(render_offset);
         }
-        if (epoch_valid && frame < epoch) {
+        std::uint64_t position = 0;
+        if (!audio::metronome_pattern_position(
+                control, raw_frame, frame, epoch_valid, epoch, position)) {
             continue;
         }
-        const std::uint64_t position = epoch_valid ? frame - epoch : frame;
         const double rendered = metronome::render_sample(
             pattern,
             position,
@@ -646,7 +647,9 @@ PreparedLoadResult load_prepared_track(
     const std::filesystem::path& path,
     int sample_rate,
     std::size_t maximum_frames,
-    std::uint64_t target_frame)
+    std::uint64_t target_frame,
+    std::uint64_t requested_source_frame,
+    bool source_frame_explicit)
 {
     const wav::InspectResult inspected = wav::inspect_pcm16_file(path);
     if (!inspected) {
@@ -703,14 +706,18 @@ PreparedLoadResult load_prepared_track(
         source.abandonLoadingSlot(slot);
         return {false, 0, "prepared track load failed: source slot publish failed"};
     }
-    const std::uint64_t replacement = source.playing()
-        ? std::min(source.sourceFrame(), inspected.info.frames)
-        : 0ULL;
+    const std::uint64_t replacement = source_frame_explicit
+        ? (inspected.info.frames > 0
+            ? requested_source_frame % inspected.info.frames
+            : 0ULL)
+        : (source.playing()
+            ? std::min(source.sourceFrame(), inspected.info.frames)
+            : 0ULL);
     const std::array<audio::PreparedTrackSource::Command, 2> commands{{
         {
             audio::PreparedTrackSource::CommandType::Swap,
             static_cast<std::uint32_t>(slot),
-            0,
+            target_frame,
             replacement,
             0,
             1000000,
@@ -905,6 +912,7 @@ struct Engine::Impl {
         case EngineCommandType::SetMetronomeEpoch:
             control->metronome_epoch_sample_time.store(command.frame, std::memory_order_relaxed);
             control->metronome_epoch_valid.store(command.enabled, std::memory_order_relaxed);
+            audio::reset_metronome_pattern_origin(*control);
             return true;
         case EngineCommandType::SetMetronomeRenderOffset:
             control->metronome_render_offset_frames.store(command.signed_value, std::memory_order_relaxed);
@@ -969,7 +977,9 @@ struct Engine::Impl {
                 std::filesystem::path(std::string(bounded_text(command.text))),
                 config.sample_rate,
                 config.prepared_track_max_frames,
-                applied_frame);
+                command.frame,
+                command.frame_end,
+                command.enabled);
             if (!result.ok) {
                 error = result.error;
                 return false;
@@ -1124,13 +1134,6 @@ struct Engine::Impl {
         }
         transport_pending.store(false, std::memory_order_release);
         control->recording_count_in_active.store(false, std::memory_order_release);
-        const auto action = transport_action.load(std::memory_order_relaxed);
-        if (action == EngineTransportAction::TrackRestart || action == EngineTransportAction::RecordStart) {
-            control->metronome_epoch_sample_time.store(
-                transport_musical_frame.load(std::memory_order_relaxed),
-                std::memory_order_relaxed);
-            control->metronome_epoch_valid.store(true, std::memory_order_relaxed);
-        }
         const std::uint64_t revision = transport_revision.load(std::memory_order_relaxed);
         transport_commit_count.fetch_add(1, std::memory_order_relaxed);
         push_event(
@@ -1523,6 +1526,12 @@ EngineSnapshot Engine::snapshot() const noexcept
     result.metronome_epoch_frame = control.metronome_epoch_sample_time.load(std::memory_order_relaxed);
     result.metronome_epoch_valid = control.metronome_epoch_valid.load(std::memory_order_relaxed);
     result.metronome_render_offset_frames = control.metronome_render_offset_frames.load(std::memory_order_relaxed);
+    result.metronome_pattern_origin_frame =
+        control.metronome_pattern_origin_frame.load(std::memory_order_relaxed);
+    result.metronome_pattern_origin_valid =
+        control.metronome_pattern_origin_valid.load(std::memory_order_relaxed);
+    result.metronome_pattern_source_start_seen =
+        control.metronome_pattern_source_start_seen.load(std::memory_order_relaxed);
     result.transport_pending = impl_->transport_pending.load(std::memory_order_acquire);
     result.transport_revision = impl_->transport_revision.load(std::memory_order_relaxed);
     result.transport_action = impl_->transport_action.load(std::memory_order_relaxed);

@@ -95,7 +95,11 @@ int PreparedTrackSource::mix(
                 active_ = static_cast<int>(command.slot);
                 slots_[active_].state.store(SlotState::Active, std::memory_order_release);
                 sourcePos_ = command.sourceFrame;
-                actualStartFrame_.store(currentFrame, std::memory_order_relaxed);
+                if (playing_ && command.targetFrame > 0 && currentFrame > command.targetFrame &&
+                    slots_[active_].frames > 0) {
+                    sourcePos_ = (sourcePos_ + currentFrame - command.targetFrame) %
+                        slots_[active_].frames;
+                }
             } else if (command.type == CommandType::Play) {
                 scheduledStartFrame_.store(command.targetFrame, std::memory_order_relaxed);
                 playing_ = true;
