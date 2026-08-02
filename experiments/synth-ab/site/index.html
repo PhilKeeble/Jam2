@@ -15,13 +15,14 @@
         <p>Research-led Jam2, DaisySP and hybrid sound candidates.</p>
       </div>
       <div class="view-switcher" aria-label="Workbench view">
-        <button id="show-style-workbench" class="active">Style scenes</button>
-        <button id="show-instrument-lab">Instrument + Kit Lab</button>
+        <button id="show-base-instruments" class="active">Base instruments</button>
+        <button id="show-base-drums">Base drums</button>
+        <button id="show-instrument-lab">Style mixer</button>
       </div>
       <nav id="style-nav" aria-label="Styles"></nav>
       <div class="sidebar-footer">
         <a href="showcase.html">DaisySP capability lab →</a>
-        <p>Preferences and notes stay in this browser.</p>
+        <p>Named sounds and arrangements stay in this browser.</p>
       </div>
     </aside>
 
@@ -87,23 +88,23 @@
       <div id="instrument-lab" hidden>
         <header class="lab-header">
           <div>
-            <p class="eyebrow">Native DaisySP patch designer</p>
-            <h2>Instrument + Drum Kit Lab</h2>
-            <p>Design every researched profile role with native Jam2 and Daisy sources, then audition it alone or inside its style scene.</p>
+            <p class="eyebrow" id="lab-header-eyebrow">Fixed-pattern sound designer</p>
+            <h2 id="lab-header-title">Style Mixer</h2>
+            <p id="lab-header-description">Assign reusable base sounds to one style, then make only the changes needed for that mix.</p>
           </div>
           <div class="lab-service" id="lab-service">Checking native renderer…</div>
         </header>
 
         <section class="lab-setup panel">
-          <label>
-            <span>Profile context</span>
+          <label id="lab-profile-field">
+            <span id="lab-profile-label">Profile context</span>
             <select id="lab-profile"></select>
           </label>
-          <label>
-            <span>Instrument role</span>
+          <label id="lab-role-field">
+            <span id="lab-role-label">Instrument role</span>
             <select id="lab-role"></select>
           </label>
-          <label>
+          <label id="lab-audition-field">
             <span>Musical test</span>
             <select id="lab-audition">
               <option value="note">Single note</option>
@@ -112,7 +113,7 @@
               <option value="profile" selected>Generated style phrase</option>
             </select>
           </label>
-          <label>
+          <label id="lab-root-field">
             <span>Root note</span>
             <select id="lab-root"></select>
           </label>
@@ -128,11 +129,11 @@
             <button id="lab-mix" disabled>▶ Designed style mix</button>
             <button id="lab-stop">■ Stop</button>
           </div>
-          <label class="loop-control"><input id="lab-auto-render" type="checkbox"> Render after changes</label>
+          <label id="lab-auto-render-label" class="loop-control"><input id="lab-auto-render" type="checkbox"> Render after changes</label>
           <span id="lab-render-status">No custom render yet.</span>
         </section>
 
-        <section class="lab-target panel">
+        <section id="lab-target-panel" class="lab-target panel">
           <div>
             <p class="eyebrow">Research target</p>
             <p id="lab-sound-target"></p>
@@ -143,11 +144,97 @@
           </div>
         </section>
 
+        <section id="lab-lineup-panel" class="panel current-lineup-panel">
+          <div>
+            <p class="eyebrow">Pattern stays fixed</p>
+            <h3>Current Instrument Lineup</h3>
+            <p>Choose each role independently. Click a role to edit it; Designed style mix uses the lineup shown here over the current profile pattern.</p>
+          </div>
+          <div id="lab-current-lineup" class="current-lineup"></div>
+        </section>
+
+        <section id="style-assignment-lab" class="panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Arrangement only</p>
+              <h3 id="lab-arrangement-heading">Sound for this role</h3>
+              <p id="lab-arrangement-description">Choose a sound. The style treatment is applied automatically and there are no synthesis controls on this page.</p>
+            </div>
+          </div>
+          <div class="base-template-toolbar style-assignment-toolbar">
+            <label>
+              <span>Base sound</span>
+              <select id="lab-style-base"></select>
+            </label>
+            <label hidden>
+              <span>Style treatment (pattern is unchanged)</span>
+              <select id="lab-style-treatment"></select>
+            </label>
+            <div hidden>
+              <span>What the treatment changes</span>
+              <p id="lab-style-treatment-description"></p>
+            </div>
+            <button id="lab-assign-base" class="primary" hidden>Apply base to this role</button>
+          </div>
+          <div id="lab-style-drum-pieces" class="style-drum-piece-grid" hidden></div>
+          <p id="lab-style-assignment-status" class="control-note"></p>
+        </section>
+
+        <section id="base-palette-lab" class="panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Instrument library</p>
+              <h3>Choose a sound to edit</h3>
+              <p>Start from a factory sound or one of your saved sounds. Every saved instrument can be placed in any Style Mixer role.</p>
+            </div>
+          </div>
+          <label class="base-choice-field">
+            <span>Instrument sound</span>
+            <select id="lab-base-instrument-choice"></select>
+          </label>
+          <div id="lab-base-instruments" hidden></div>
+          <p id="lab-base-palette-status" class="control-note"></p>
+        </section>
+
+        <section id="base-kit-lab" class="panel" hidden>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Drum sound library</p>
+              <h3>Kit family and piece options</h3>
+              <p>Choose Acoustic, Electronic or Latin, then edit one piece. Save as many named kick, snare, hat or percussion options as you need.</p>
+            </div>
+          </div>
+          <div class="base-drum-choice-grid">
+            <label><span>Kit family</span><select id="lab-base-kit-choice"></select></label>
+            <label><span>Piece</span><select id="lab-base-drum-piece-choice"></select></label>
+            <label><span>Saved option</span><select id="lab-base-drum-option"></select></label>
+          </div>
+          <div id="lab-base-kits" hidden></div>
+          <p id="lab-base-kit-status" class="control-note"></p>
+        </section>
+
+        <section id="base-save-panel" class="panel base-save-panel" hidden>
+          <div>
+            <p class="eyebrow">Explicit library storage</p>
+            <h3 id="lab-base-save-title">Save this base sound</h3>
+            <p>Edits are drafts until you save. Saving creates a named library option in this browser and never changes an existing Style Mixer arrangement.</p>
+          </div>
+          <div class="base-save-actions">
+            <label class="base-name-field"><span>Sound name</span><input id="lab-base-name" type="text" maxlength="60" placeholder="My sound"></label>
+            <button id="lab-save-base" class="primary">Save as new sound</button>
+            <button id="lab-update-base" hidden>Update selected sound</button>
+            <button id="lab-load-saved-base">Revert current edits</button>
+            <button id="lab-load-factory-base">Load factory starting point</button>
+            <span id="lab-base-save-status">No unsaved changes yet.</span>
+          </div>
+        </section>
+
         <section class="panel" data-pitched-only>
           <div class="section-heading">
             <div>
               <p class="eyebrow">Guided character</p>
-              <h3>Change what you hear, not equations</h3>
+              <h3>Wide-range character exploration</h3>
+              <p class="control-note">These are intentionally dramatic, bipolar macros. The extremes sweep oscillator, FM, harmonic, formant, physical-string, filter, envelope, nonlinear, modulation and space parameters while remaining inside native renderer limits.</p>
             </div>
             <button id="lab-reset-macros">Reset macros</button>
           </div>
@@ -167,7 +254,7 @@
               <p class="eyebrow">Signal architecture</p>
               <h3>Source layers and filter</h3>
             </div>
-            <button id="lab-reset-patch">Restore researched patch</button>
+            <button id="lab-reset-patch">Restore style starting patch</button>
           </div>
           <div class="architecture-grid">
             <label>
@@ -203,10 +290,10 @@
           <div class="section-heading">
             <div>
               <p class="eyebrow">Per-piece architecture</p>
-              <h3>Drum Kit Lab</h3>
-              <p>Load a coherent researched kit, then inspect or replace its independently modelled body, transient, texture, colour and velocity response.</p>
+              <h3 id="lab-drum-kit-heading">Drum Kit Lab</h3>
+              <p id="lab-drum-kit-description">Mix this style's assigned kit by replacing pieces and adjusting body, transient, texture, colour, velocity response and bus settings.</p>
             </div>
-            <div class="drum-candidate-actions">
+            <div id="lab-drum-candidate-actions" class="drum-candidate-actions">
               <label>
                 <span>Complete researched kit</span>
                 <select id="lab-drum-kit-candidate"></select>
@@ -215,7 +302,7 @@
             </div>
           </div>
           <div id="lab-drum-pieces" class="drum-piece-tabs"></div>
-          <div class="drum-piece-candidate-row">
+          <div id="lab-drum-piece-candidate-row" class="drum-piece-candidate-row">
             <label>
               <span>Selected-piece candidate</span>
               <select id="lab-drum-piece-candidate"></select>
@@ -280,35 +367,37 @@
             </div>
             <div id="lab-drum-synth-parameters" class="parameter-grid"></div>
           </div>
-          <div class="parameter-group">
+          <div id="lab-drum-bus-group" class="parameter-group">
             <h4>Complete kit bus</h4>
             <div id="lab-drum-bus-parameters" class="parameter-grid"></div>
           </div>
         </section>
 
-        <section class="panel snapshot-panel">
+        <section id="lab-snapshot-panel" class="panel snapshot-panel">
           <div>
-            <p class="eyebrow">Listening memory</p>
-            <h3>Patch snapshots</h3>
-            <p>Keep promising points before exploring further.</p>
+            <p class="eyebrow">Browser-only A/B memory</p>
+            <h3>Complete style-role snapshots</h3>
+            <p>Each slot stores the entire current patch or complete kit for this profile and role in browser storage only. It does not alter a base sound or write a review preset.</p>
           </div>
           <div>
             <div id="lab-snapshots" class="snapshot-grid"></div>
-            <button id="lab-save-review" class="primary">Save preset for Jam2 review</button>
+            <p class="save-boundary-note"><strong>Separate file handoff:</strong> this writes the current style-role design to <code>presets/workbench-presets.json</code>.</p>
+            <button id="lab-save-review" class="primary">Write current style preset for review</button>
             <span id="lab-save-review-status"></span>
           </div>
         </section>
 
-        <section class="panel lab-notes-panel">
+        <section id="lab-notes-panel" class="panel lab-notes-panel">
           <div>
-            <p class="eyebrow">Refinement notes</p>
-            <h3>Describe only what feels wrong</h3>
+            <p class="eyebrow">Auto-saved browser notes</p>
+            <h3>Style-role refinement notes</h3>
+            <p class="control-note">These notes save automatically for the current profile and role. They do not save the sound itself.</p>
             <div id="lab-reactions" class="reaction-row"></div>
           </div>
           <textarea id="lab-notes" rows="6" placeholder="For example: the attack feels convincing, but the held chord becomes buzzy and narrow…"></textarea>
         </section>
 
-        <details class="panel lab-raw-json">
+        <details id="lab-raw-json" class="panel lab-raw-json">
           <summary>Raw sound-design JSON</summary>
           <button id="lab-copy-json">Copy JSON</button>
           <pre id="lab-json"></pre>
@@ -318,7 +407,7 @@
   </div>
 
   <script src="sound-design-manifest.js"></script>
-  <script src="app.js"></script>
-  <script src="instrument-lab.js?v=reggae-native-drum-gain-pass-11"></script>
+  <script src="sound-template-library.js?v=base-palette-1"></script>
+  <script src="instrument-lab.js?v=base-palette-1"></script>
 </body>
 </html>

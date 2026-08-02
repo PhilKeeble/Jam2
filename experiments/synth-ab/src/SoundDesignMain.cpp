@@ -686,6 +686,7 @@ struct PatchDesign {
     float noiseMix = 0.0f;
     float transientMix = 0.0f;
     float transientSeconds = 0.025f;
+    float glideSeconds = 0.0f;
     float vibratoCents = 0.0f;
     float vibratoRate = 5.1f;
     float vibratoDelay = 0.14f;
@@ -1671,6 +1672,7 @@ struct ActiveVoice {
     qint64 startFrame = 0;
     qint64 endFrame = 1;
     float frequency = 440.0f;
+    float glideFromFrequency = 440.0f;
     float velocity = 0.8f;
     PatchDesign patch;
 
@@ -1694,13 +1696,20 @@ struct ActiveVoice {
     daisysp::Svf tone;
     daisysp::Wavefolder folder;
 
-    void begin(const NoteEvent& event, const PatchDesign& design)
+    void begin(
+        const NoteEvent& event,
+        const PatchDesign& design,
+        float previousFrequency = 0.0f)
     {
         active = true;
         trigger = true;
         startFrame = event.start;
         endFrame = event.end;
         frequency = static_cast<float>(midiFrequency(event.midi));
+        glideFromFrequency = design.glideSeconds > 0.0f &&
+                previousFrequency > 0.0f
+            ? previousFrequency
+            : frequency;
         velocity = event.velocity / 127.0f;
         patch = design;
 
@@ -1898,6 +1907,14 @@ struct ActiveVoice {
         const float mod = modulation.Process(gate);
         const float age =
             static_cast<float>(frame - startFrame) / kSampleRate;
+        const float glideProgress = patch.glideSeconds > 0.0f
+            ? std::clamp(age / patch.glideSeconds, 0.0f, 1.0f)
+            : 1.0f;
+        const float glideCurve = glideProgress * glideProgress *
+            (3.0f - 2.0f * glideProgress);
+        const float baseFrequency = glideFromFrequency * std::pow(
+            frequency / std::max(1.0f, glideFromFrequency),
+            glideCurve);
         const float pitchMod = age > patch.vibratoDelay &&
                 patch.vibratoCents > 0.0f
             ? (std::pow(
@@ -1934,12 +1951,12 @@ struct ActiveVoice {
         case SourceKind::Shape:
             setFreeRunningFrequency(
                 oscillatorA,
-                frequency * (1.0f + pitchMod));
+                baseFrequency * (1.0f + pitchMod));
             value = oscillatorA.Process();
             if (patch.oscillator2Mix > 0.0f) {
                 setFreeRunningFrequency(
                     oscillatorB,
-                    frequency *
+                    baseFrequency *
                         std::pow(
                             2.0f,
                             patch.detuneCents / 1200.0f) *
@@ -1947,15 +1964,16 @@ struct ActiveVoice {
                 value = (1.0f - patch.oscillator2Mix) * value +
                     patch.oscillator2Mix * oscillatorB.Process();
             }
+            sub.SetFreq(baseFrequency * 0.5f);
             value += patch.subMix * sub.Process();
             break;
         case SourceKind::VariableSaw:
             sawA.SetFreq(
-                frequency * (1.0f + pitchMod));
+                baseFrequency * (1.0f + pitchMod));
             value = sawA.Process();
             if (patch.oscillator2Mix > 0.0f) {
                 sawB.SetFreq(
-                    frequency *
+                    baseFrequency *
                     std::pow(
                         2.0f,
                         patch.detuneCents / 1200.0f) *
@@ -1963,20 +1981,22 @@ struct ActiveVoice {
                 value = (1.0f - patch.oscillator2Mix) * value +
                     patch.oscillator2Mix * sawB.Process();
             }
+            sub.SetFreq(baseFrequency * 0.5f);
             value += patch.subMix * sub.Process();
             break;
         case SourceKind::Fm:
-            fm.SetFrequency(frequency * (1.0f + pitchMod));
+            fm.SetFrequency(baseFrequency * (1.0f + pitchMod));
             fm.SetIndex(
                 0.18f +
                 patch.fmIndex * (0.22f + 0.78f * mod) *
                     (0.72f + 0.40f * velocity));
+            sub.SetFreq(baseFrequency * 0.5f);
             value = fm.Process() + patch.subMix * sub.Process();
             break;
         case SourceKind::String: {
-            stringA.SetFreq(frequency * (1.0f + pitchMod));
+            stringA.SetFreq(baseFrequency * (1.0f + pitchMod));
             stringB.SetFreq(
-                frequency *
+                baseFrequency *
                 std::pow(
                     2.0f,
                     std::max(2.0f, patch.detuneCents) / 1200.0f) *
@@ -1990,14 +2010,14 @@ struct ActiveVoice {
                         std::tanh(patch.voiceDrive * right);
             }
             body.SetFreq(
-                std::clamp(frequency * 2.1f, 140.0f, 3900.0f));
+                std::clamp(baseFrequency * 2.1f, 140.0f, 3900.0f));
             body.Process(value);
             value = 0.82f * value + 0.18f * body.Band();
             trigger = false;
             break;
         }
         case SourceKind::Harmonic:
-            harmonic.SetFreq(frequency * (1.0f + pitchMod));
+            harmonic.SetFreq(baseFrequency * (1.0f + pitchMod));
             value = harmonic.Process();
             if (patch.oscillator2Mix > 0.0f) {
                 value += 0.24f * patch.oscillator2Mix *
@@ -2005,41 +2025,41 @@ struct ActiveVoice {
             }
             break;
         case SourceKind::Sine:
-            sub.SetFreq(frequency * (1.0f + pitchMod));
-            setFreeRunningFrequency(oscillatorA, frequency * 2.0f);
+            sub.SetFreq(baseFrequency * (1.0f + pitchMod));
+            setFreeRunningFrequency(oscillatorA, baseFrequency * 2.0f);
             value = sub.Process() +
                 patch.subMix * 0.35f * oscillatorA.Process();
             break;
         case SourceKind::Formant:
             formant.SetCarrierFreq(
-                frequency * (1.0f + pitchMod));
+                baseFrequency * (1.0f + pitchMod));
             formant.SetFormantFreq(
                 (patch.formantHz > 0.0f
                     ? patch.formantHz
-                    : frequency * patch.formantRatio) *
+                    : baseFrequency * patch.formantRatio) *
                 (1.0f + 0.08f * mod));
             value = formant.Process();
             break;
         case SourceKind::Vosim:
             vosim.SetFreq(
-                frequency * (1.0f + pitchMod));
+                baseFrequency * (1.0f + pitchMod));
             vosim.SetForm1Freq(
                 (patch.formantHz > 0.0f
                     ? patch.formantHz
-                    : frequency * patch.formantRatio) *
+                    : baseFrequency * patch.formantRatio) *
                 (1.0f + 0.05f * mod));
             vosim.SetForm2Freq(
                 (patch.formantHz2 > 0.0f
                     ? patch.formantHz2
-                    : frequency * patch.formantRatio2) *
+                    : baseFrequency * patch.formantRatio2) *
                 (1.0f - 0.035f * mod));
             value = vosim.Process();
             break;
         case SourceKind::Z:
             z.SetFreq(
-                frequency * (1.0f + pitchMod));
+                baseFrequency * (1.0f + pitchMod));
             z.SetFormantFreq(
-                frequency * patch.formantRatio *
+                baseFrequency * patch.formantRatio *
                 (1.0f + 0.11f * mod));
             value = z.Process();
             break;
@@ -2055,7 +2075,7 @@ struct ActiveVoice {
         }
         if (patch.wavefold > 1.0f) value = folder.Process(value);
         const float keyTrack =
-            std::clamp(frequency * 0.72f, 40.0f, 2300.0f);
+            std::clamp(baseFrequency * 0.72f, 40.0f, 2300.0f);
         const float cutoff = std::clamp(
             patch.filterCutoff + keyTrack +
                 patch.filterEnvelope * mod *
@@ -2156,6 +2176,7 @@ std::vector<float> renderDaisyRole(
     std::vector<float> output(frames, 0.0f);
     std::array<ActiveVoice, 32> voices;
     std::size_t next = 0;
+    float previousFrequency = 0.0f;
     for (std::size_t frame = 0; frame < frames; ++frame) {
         while (next < roleEvents.size() &&
                roleEvents[next].start <= static_cast<qint64>(frame)) {
@@ -2174,7 +2195,9 @@ std::vector<float> renderDaisyRole(
                         return left.startFrame < right.startFrame;
                     });
             }
-            voice->begin(roleEvents[next], patch);
+            voice->begin(roleEvents[next], patch, previousFrequency);
+            previousFrequency = static_cast<float>(
+                midiFrequency(roleEvents[next].midi));
             ++next;
         }
         float value = 0.0f;
@@ -8408,6 +8431,7 @@ QJsonObject patchParameters(const PatchDesign& patch)
         {QStringLiteral("noiseMix"), patch.noiseMix},
         {QStringLiteral("transientMix"), patch.transientMix},
         {QStringLiteral("transientSeconds"), patch.transientSeconds},
+        {QStringLiteral("glideSeconds"), patch.glideSeconds},
         {QStringLiteral("vibratoCents"), patch.vibratoCents},
         {QStringLiteral("vibratoRateHz"), patch.vibratoRate},
         {QStringLiteral("vibratoDelaySeconds"), patch.vibratoDelay},
@@ -8616,6 +8640,9 @@ PatchDesign patchFromJson(
     patch.transientSeconds = boundedPatchNumber(
         values, QStringLiteral("transientSeconds"),
         patch.transientSeconds, 0.001f, 0.25f);
+    patch.glideSeconds = boundedPatchNumber(
+        values, QStringLiteral("glideSeconds"),
+        patch.glideSeconds, 0.0f, 1.5f);
     patch.vibratoCents = boundedPatchNumber(
         values, QStringLiteral("vibratoCents"),
         patch.vibratoCents, 0.0f, 100.0f);
@@ -8700,6 +8727,20 @@ std::vector<NoteEvent> laboratoryEvents(
             events.push_back(event(2.05, 1.25, rootMidi + interval, 82));
         }
         frames = static_cast<std::size_t>(4.5 * kSampleRate);
+    } else if (audition == QStringLiteral("arpeggio")) {
+        const std::array<int, 8> first{0, 4, 7, 11, 12, 7, 4, 7};
+        const std::array<int, 8> second{5, 9, 12, 16, 17, 12, 9, 12};
+        double start = 0.20;
+        for (int interval : first) {
+            events.push_back(event(start, 0.19, rootMidi + interval, 84));
+            start += 0.205;
+        }
+        start += 0.18;
+        for (int interval : second) {
+            events.push_back(event(start, 0.19, rootMidi + interval, 80));
+            start += 0.205;
+        }
+        frames = static_cast<std::size_t>(4.2 * kSampleRate);
     } else if (audition == QStringLiteral("profile")) {
         ChordIdeaRequest request;
         request.styleId = profile.styleId;

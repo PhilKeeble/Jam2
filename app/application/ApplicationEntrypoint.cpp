@@ -90,8 +90,12 @@ void applyCustomTheme(QApplication& app)
             color: #9ca9ab; font-family: Bahnschrift; font-size: 8.5pt;
             letter-spacing: 1px;
         }
-        QLabel#DetailPosition {
-            color: #e9e6dc; font-family: Georgia; font-size: 16pt;
+        QLineEdit#DetailPosition {
+            color: #e9e6dc; background: transparent; border: 1px solid transparent;
+            border-radius: 3px; font-family: Georgia; font-size: 16pt; padding: 2px 6px;
+        }
+        QLineEdit#DetailPosition[editing="true"] {
+            background: #11191a; border-color: #66d4cf; selection-background-color: #315f60;
         }
         QPushButton#DetailTab {
             background: transparent; color: #9ca9ab; border: 0;

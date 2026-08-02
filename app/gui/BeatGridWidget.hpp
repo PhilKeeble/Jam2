@@ -2,20 +2,18 @@
 
 #include "BeatGridModel.hpp"
 
-#include <QComboBox>
-#include <QLineEdit>
-#include <QTableWidget>
 #include <QWidget>
 
 #include <functional>
 
 class QPushButton;
-class QHeaderView;
 class QLabel;
+class QComboBox;
+class QScrollArea;
+class QVBoxLayout;
 
 class BeatGridWidget : public QWidget {
 public:
-    explicit BeatGridWidget(QWidget* parent = nullptr);
     BeatGridWidget(BeatGridModel* model, const QString& lane, QWidget* parent = nullptr);
 
     BeatGridModel& model();
@@ -43,30 +41,23 @@ public:
     std::function<void()> onStructureChanged;
     std::function<void(int)> onSelectedSectionChanged;
 
-protected:
-    bool eventFilter(QObject* watched, QEvent* event) override;
-
 private:
     enum class Mode {
         Chord,
         Beat,
         Lyrics,
-        Legacy,
     };
 
     Mode mode() const;
-    QString currentLane() const;
-    void rebuildSectionList();
-    void rebuildTable();
-    void rebuildChordTable();
-    void rebuildBeatTable();
-    void rebuildLyricsBox();
+    void rebuildChordReference();
+    void rebuildAuthoringView();
+    void rebuildChordCards();
+    void rebuildBeatSequencer();
+    void rebuildLyricRows();
+    QWidget* buildAuthoringOverview(bool chords);
+    void selectFocusedChordBar(int bar, int chordBeat = -1);
     void expandCurrent();
     void shrinkCurrent();
-    int sectionForRow(int row) const;
-    int laneForRow(int row) const;
-    void selectSection(int section);
-    void updateSectionSelectionMarkers();
     void updateActionButtons();
     void updateUpcomingPreview();
     void emitStructureChanged();
@@ -74,20 +65,26 @@ private:
     BeatGridModel ownedModel_;
     BeatGridModel* model_ = nullptr;
     QString fixedLane_;
-    QComboBox* sectionBox_ = nullptr;
-    QComboBox* laneBox_ = nullptr;
-    QLineEdit* labelEdit_ = nullptr;
-    QLineEdit* nameEdit_ = nullptr;
-    QTableWidget* table_ = nullptr;
+    QScrollArea* authoringScroll_ = nullptr;
+    QWidget* authoringContent_ = nullptr;
+    QVBoxLayout* authoringLayout_ = nullptr;
+    QWidget* chordReferenceCanvas_ = nullptr;
+    QComboBox* guitarStringCountBox_ = nullptr;
+    QComboBox* guitarTuningBox_ = nullptr;
     QLabel* upcomingPreview_ = nullptr;
-    QHeaderView* beatHeader_ = nullptr;
     QPushButton* duplicateButton_ = nullptr;
     QPushButton* deleteButton_ = nullptr;
     QPushButton* expandButton_ = nullptr;
     QPushButton* shrinkButton_ = nullptr;
-    QVector<int> rowToSection_;
-    QVector<int> rowToLane_;
     int selectedSection_ = -1;
+    int selectedBar_ = 0;
+    int selectedChordBeat_ = 0;
+    int authoringLiveBar_ = -1;
+    int authoringLiveBeat_ = -1;
+    int guitarStringCount_ = 6;
+    bool guitarDropTuning_ = false;
+    bool chordReferenceVisible_ = true;
+    bool musicalLinesVisible_ = true;
     quint64 gridBeat_ = 0;
     int gridSubdivision_ = 0;
     double gridBeatPhase_ = 0.0;
@@ -99,5 +96,4 @@ private:
     int upcomingTargetBeatsPerBar_ = 4;
     bool upcomingArrangementActive_ = false;
     bool upcomingArrangementArmed_ = false;
-    bool updating_ = false;
 };

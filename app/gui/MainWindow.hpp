@@ -422,7 +422,7 @@ private:
     QSlider* trackSpeedSlider_ = nullptr;
     QSlider* trackPitchSlider_ = nullptr;
     QSpinBox* metronomeBpmSpin_ = nullptr;
-    QSpinBox* metronomeBeatsSpin_ = nullptr;
+    QComboBox* metronomeBeatsSpin_ = nullptr;
     QComboBox* metronomeBeatUnitBox_ = nullptr;
     QComboBox* metronomeTempoPulseBox_ = nullptr;
     QComboBox* metronomeDivisionBox_ = nullptr;
@@ -431,7 +431,6 @@ private:
     QPushButton* stopTrackMetronomeButton_ = nullptr;
     QPushButton* tapTrackMetronomeButton_ = nullptr;
     QCheckBox* metronomeMarkerReferenceCheck_ = nullptr;
-    QLabel* trackMetronomeLabel_ = nullptr;
     QTableWidget* metronomePatternTable_ = nullptr;
     QPushButton* playTrackButton_ = nullptr;
     QPushButton* stopTrackButton_ = nullptr;
@@ -516,7 +515,7 @@ private:
     QPushButton* performanceMetronomeToggle_ = nullptr;
     QPushButton* performanceTempoButton_ = nullptr;
     QLabel* performancePositionLabel_ = nullptr;
-    QLabel* detailPositionLabel_ = nullptr;
+    QLineEdit* detailPositionLabel_ = nullptr;
     QSlider* selectedPeerGainSlider_ = nullptr;
     QLabel* selectedPeerNameLabel_ = nullptr;
     QLabel* selectedPeerGainLabel_ = nullptr;

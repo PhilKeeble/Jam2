@@ -23,6 +23,9 @@
 #include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
+#include <QFocusEvent>
+#include <QKeyEvent>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
@@ -121,6 +124,83 @@ private:
     QPixmap logo_;
     QTimer animation_;
     qreal phase_ = 0.0;
+};
+
+class DetailSectionEdit final : public QLineEdit {
+public:
+    explicit DetailSectionEdit(QWidget* parent)
+        : QLineEdit(parent)
+    {
+        setReadOnly(true);
+        setFocusPolicy(Qt::NoFocus);
+        setFrame(false);
+        setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        setMinimumWidth(460);
+        setMaximumWidth(760);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        setToolTip(QStringLiteral("Double-click to rename this section"));
+    }
+
+    std::function<void(const QString&)> onCommitted;
+
+protected:
+    void mouseDoubleClickEvent(QMouseEvent* event) override
+    {
+        if (property("sectionEditable").toBool()) {
+            original_ = text();
+            setFocusPolicy(Qt::StrongFocus);
+            setReadOnly(false);
+            setFocus(Qt::MouseFocusReason);
+            setProperty("editing", true);
+            style()->unpolish(this);
+            style()->polish(this);
+            selectAll();
+            event->accept();
+            return;
+        }
+        QLineEdit::mouseDoubleClickEvent(event);
+    }
+
+    void keyPressEvent(QKeyEvent* event) override
+    {
+        if (!isReadOnly() && event->key() == Qt::Key_Escape) {
+            setText(original_);
+            finishEditing(false);
+            event->accept();
+            return;
+        }
+        if (!isReadOnly() && (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)) {
+            finishEditing(true);
+            event->accept();
+            return;
+        }
+        QLineEdit::keyPressEvent(event);
+    }
+
+    void focusOutEvent(QFocusEvent* event) override
+    {
+        if (!isReadOnly()) finishEditing(true);
+        QLineEdit::focusOutEvent(event);
+    }
+
+private:
+    void finishEditing(bool commit)
+    {
+        QString value = text().trimmed();
+        if (value.isEmpty()) value = original_;
+        setText(value);
+        setCursorPosition(0);
+        setReadOnly(true);
+        deselect();
+        setFocusPolicy(Qt::NoFocus);
+        clearFocus();
+        setProperty("editing", false);
+        style()->unpolish(this);
+        style()->polish(this);
+        if (commit && value != original_ && onCommitted) onCommitted(value);
+    }
+
+    QString original_;
 };
 
 } // namespace
@@ -329,8 +409,21 @@ void MainWindowPages::build(MainWindow& w)
     auto* detailIdentity = new QVBoxLayout(w.detailIdentityPanel_);
     detailIdentity->setContentsMargins(0, 0, 0, 0);
     detailIdentity->setSpacing(0);
-    w.detailPositionLabel_ = new QLabel(QStringLiteral("Bank A"), w.detailIdentityPanel_);
+    auto* detailSectionEdit = new DetailSectionEdit(w.detailIdentityPanel_);
+    w.detailPositionLabel_ = detailSectionEdit;
+    w.detailPositionLabel_->setText(QStringLiteral("Section A"));
+    w.detailPositionLabel_->setCursorPosition(0);
     w.detailPositionLabel_->setObjectName(QStringLiteral("DetailPosition"));
+    detailSectionEdit->onCommitted = [&w](const QString& name) {
+        const int bank = w.viewedBankIndex_;
+        if (bank < 0 || bank >= w.chordModel_.sections().size()) return;
+        w.chordModel_.renameSection(bank, w.chordModel_.section(bank).label, name);
+        if (w.chordGrid_) w.chordGrid_->refresh();
+        if (w.beatGrid_) w.beatGrid_->refresh();
+        if (w.lyricGrid_) w.lyricGrid_->refresh();
+        w.refreshLooperLanes();
+        w.sendSongSnapshot();
+    };
     detailIdentity->addWidget(w.detailPositionLabel_);
     detailHeader->addWidget(w.detailIdentityPanel_);
     w.detailIdentityPanel_->setVisible(false);
@@ -1579,25 +1672,28 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     w.metronomeBpmSpin_->setValue(qBound(1, static_cast<int>(std::lround(w.trackController_.model().acceptedBpm)), 400));
     applyMutedEditorStyle(w.metronomeBpmSpin_);
 
-    w.metronomeBeatsSpin_ = new QSpinBox(page);
-    w.metronomeBeatsSpin_->setRange(1, 16);
-    w.metronomeBeatsSpin_->setValue(4);
+    w.metronomeBeatsSpin_ = new QComboBox(page);
+    for (int beats = 1; beats <= 16; ++beats)
+        w.metronomeBeatsSpin_->addItem(QString::number(beats), beats);
+    w.metronomeBeatsSpin_->setCurrentIndex(w.metronomeBeatsSpin_->findData(4));
+    w.metronomeBeatsSpin_->setFixedWidth(54);
     applyMutedEditorStyle(w.metronomeBeatsSpin_);
 
     w.metronomeBeatUnitBox_ = new QComboBox(page);
-    w.metronomeBeatUnitBox_->addItem(QStringLiteral("/2"), 2);
-    w.metronomeBeatUnitBox_->addItem(QStringLiteral("/4"), 4);
-    w.metronomeBeatUnitBox_->addItem(QStringLiteral("/8"), 8);
-    w.metronomeBeatUnitBox_->addItem(QStringLiteral("/16"), 16);
+    w.metronomeBeatUnitBox_->addItem(QStringLiteral("2"), 2);
+    w.metronomeBeatUnitBox_->addItem(QStringLiteral("4"), 4);
+    w.metronomeBeatUnitBox_->addItem(QStringLiteral("8"), 8);
+    w.metronomeBeatUnitBox_->addItem(QStringLiteral("16"), 16);
     w.metronomeBeatUnitBox_->setCurrentIndex(w.metronomeBeatUnitBox_->findData(4));
+    w.metronomeBeatUnitBox_->setFixedWidth(54);
     w.metronomeBeatUnitBox_->setToolTip(
         QStringLiteral("The note value counted by each beat (the denominator in the time signature)"));
     applyMutedEditorStyle(w.metronomeBeatUnitBox_);
 
     w.metronomeTempoPulseBox_ = new QComboBox(page);
-    w.metronomeTempoPulseBox_->addItem(QStringLiteral("1 written unit"), 1);
+    w.metronomeTempoPulseBox_->addItem(QStringLiteral("Each beat"), 1);
     w.metronomeTempoPulseBox_->addItem(
-        QStringLiteral("3 written units (compound)"), 3);
+        QStringLiteral("Dotted beat (compound)"), 3);
     w.metronomeTempoPulseBox_->setToolTip(
         QStringLiteral(
             "How many written beat units one BPM pulse spans; use 3 for dotted-quarter pulse in 6/8, 9/8, or 12/8"));
@@ -1674,14 +1770,13 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     w.metronomeCompensationDeadbandSpin_->hide();
     w.metronomeCompensationSlewSpin_->hide();
 
-    w.trackMetronomeLabel_ = new QLabel(QStringLiteral("Local metronome stopped"), page);
     w.startTrackMetronomeButton_ = new QPushButton(QStringLiteral("Start"), page);
     w.stopTrackMetronomeButton_ = new QPushButton(QStringLiteral("Stop"), page);
     w.tapTrackMetronomeButton_ = new QPushButton(QStringLiteral("Tap Tempo"), page);
     w.tapTrackMetronomeButton_->setToolTip(
         QStringLiteral("Tap at least twice; pause for two seconds to begin a new tempo"));
     w.stopTrackMetronomeButton_->setEnabled(false);
-    w.metronomeMarkerReferenceCheck_ = new QCheckBox(QStringLiteral("Show marker reference"), page);
+    w.metronomeMarkerReferenceCheck_ = new QCheckBox(QStringLiteral("Show Current Bar on Views"), page);
     w.metronomeMarkerReferenceCheck_->setChecked(true);
 
     w.metronomePatternTable_ = new QTableWidget(page);
@@ -1710,10 +1805,18 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     controls->setHorizontalSpacing(24);
     controls->setVerticalSpacing(10);
     controls->addWidget(makeControlPair(QStringLiteral("BPM"), w.metronomeBpmSpin_), 0, 0);
-    controls->addWidget(makeControlPair(QStringLiteral("Beats"), w.metronomeBeatsSpin_), 0, 1);
-    controls->addWidget(makeControlPair(QStringLiteral("Beat unit"), w.metronomeBeatUnitBox_), 0, 2);
-    controls->addWidget(makeControlPair(QStringLiteral("Tempo pulse"), w.metronomeTempoPulseBox_), 0, 3);
-    controls->addWidget(makeControlPair(QStringLiteral("Division"), w.metronomeDivisionBox_), 0, 4);
+    auto* meter = new QWidget(page);
+    auto* meterLayout = new QHBoxLayout(meter);
+    meterLayout->setContentsMargins(0, 0, 0, 0);
+    meterLayout->setSpacing(6);
+    meterLayout->addWidget(new QLabel(QStringLiteral("Meter"), meter));
+    meterLayout->addWidget(w.metronomeBeatsSpin_);
+    meterLayout->addWidget(new QLabel(QStringLiteral("/"), meter));
+    meterLayout->addWidget(w.metronomeBeatUnitBox_);
+    meterLayout->addStretch(1);
+    controls->addWidget(meter, 0, 1);
+    controls->addWidget(makeControlPair(QStringLiteral("Tempo counts"), w.metronomeTempoPulseBox_), 0, 2);
+    controls->addWidget(makeControlPair(QStringLiteral("Division"), w.metronomeDivisionBox_), 0, 3);
     auto* modeRow = new QWidget(page);
     auto* modeLayout = new QHBoxLayout(modeRow);
     modeLayout->setContentsMargins(0, 0, 0, 0);
@@ -1724,13 +1827,11 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     modeLayout->addWidget(new QLabel(QStringLiteral("Sound"), modeRow));
     modeLayout->addWidget(w.metronomeSoundBox_, 0, Qt::AlignLeft);
     modeLayout->addWidget(w.metronomeCompensationButton_, 0, Qt::AlignLeft);
+    modeLayout->addSpacing(12);
+    modeLayout->addWidget(w.metronomeMarkerReferenceCheck_, 0, Qt::AlignLeft);
     modeLayout->addStretch(1);
-    controls->addWidget(modeRow, 1, 0, 1, 5);
-    controls->addWidget(new QLabel(QStringLiteral("Pattern"), page), 2, 0);
-    controls->addWidget(w.trackMetronomeLabel_, 2, 1);
-    controls->addWidget(w.metronomeMarkerReferenceCheck_, 2, 2, 1, 3);
-    controls->setColumnStretch(1, 1);
-    controls->setColumnStretch(3, 1);
+    controls->addWidget(modeRow, 1, 0, 1, 4);
+    for (int column = 0; column < 4; ++column) controls->setColumnStretch(column, 1);
 
     auto* buttons = new QHBoxLayout();
     buttons->addWidget(w.startTrackMetronomeButton_);
@@ -1765,7 +1866,7 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     QObject::connect(w.metronomeCompensationButton_, &QPushButton::clicked, &w, [&w] {
         w.showMetronomeCompensationDialog();
     });
-    QObject::connect(w.metronomeBeatsSpin_, qOverload<int>(&QSpinBox::valueChanged), &w, [&w] {
+    QObject::connect(w.metronomeBeatsSpin_, qOverload<int>(&QComboBox::currentIndexChanged), &w, [&w] {
         w.rebuildMetronomePattern();
         w.updateTrackMetronomeInterval();
     });

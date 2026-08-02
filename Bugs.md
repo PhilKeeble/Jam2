@@ -12,9 +12,7 @@ test benchmark, validate, stress and get logs for localhost and mac
 
 Look into what makes the generation of the wavs take a while and see if we can make that more efficient 
 
-Maybe chord view should show the user how to play the chord as a reference? 
-Maybe chord view could be made easier to work with so its quicker ow that we are tied to banks 
-
+Settings needs to include preference for views with all tickboxes and options etc configured if they want to customise and things like auto generate jam on start, locking in BPM / meter for startup etc
 
 ## Bugs
 

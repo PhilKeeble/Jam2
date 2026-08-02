@@ -1,6 +1,14 @@
 (() => {
   const manifest = window.JAM2_SOUND_DESIGN_MANIFEST;
   if (!manifest) return;
+  const pageStatus = document.querySelector("#status");
+  if (window.location.protocol === "file:") {
+    pageStatus.classList.add("error");
+    pageStatus.innerHTML = "<strong>Run open-workbench.cmd.</strong> The sound editor needs its local renderer.";
+    return;
+  }
+  pageStatus?.remove();
+  const templateLibrary = window.JAM2_BASE_SOUND_LIBRARY;
 
   const storageKey = "jam2-instrument-lab-v1";
   const pitchedRoles = new Set(["chords", "melody", "bass", "support"]);
@@ -174,6 +182,7 @@
     {group: "Character", key: "voiceDrive", label: "Voice drive", min: .5, max: 10, step: .01},
     {group: "Character", key: "busDrive", label: "Bus drive", min: .5, max: 10, step: .01},
     {group: "Character", key: "cabinet", label: "Cabinet colour", min: 0, max: 1, step: .01},
+    {group: "Movement", key: "glideSeconds", label: "Pitch glide", min: 0, max: 1.5, step: .005, unit: " s"},
     {group: "Movement", key: "vibratoCents", label: "Vibrato depth", min: 0, max: 100, step: .25, unit: " ct"},
     {group: "Movement", key: "vibratoRateHz", label: "Vibrato rate", min: .05, max: 15, step: .05, unit: " Hz"},
     {group: "Movement", key: "vibratoDelaySeconds", label: "Vibrato delay", min: 0, max: 3, step: .01, unit: " s"},
@@ -188,13 +197,13 @@
   const parameterMap = new Map(parameters.map(parameter => [parameter.key, parameter]));
 
   const macroDefinitions = [
-    ["hardness", "Soft ↔ hard attack"],
-    ["brightness", "Dark ↔ bright"],
-    ["body", "Thin ↔ full body"],
-    ["grit", "Clean ↔ gritty"],
-    ["movement", "Stable ↔ animated"],
-    ["length", "Short ↔ sustained"],
-    ["space", "Dry ↔ spacious"],
+    ["hardness", "Blooming ↔ percussive impact"],
+    ["brightness", "Muted ↔ brilliant / spectral"],
+    ["body", "Narrow / light ↔ layered / massive"],
+    ["grit", "Pure ↔ folded / driven / noisy"],
+    ["movement", "Still ↔ glide / vibrato / tremolo"],
+    ["length", "Clipped ↔ evolving sustain"],
+    ["space", "Bone dry ↔ wide chorus / delay"],
   ];
 
   const lab = document.querySelector("#instrument-lab");
@@ -231,6 +240,16 @@
   let drumPiece = "kick";
   let drumKitCandidate = "";
   let lastRenderDiagnostics = null;
+  let baseInstrumentId = "";
+  let baseKitId = "";
+  let treatmentId = "neutral";
+  let selectedInstrumentVariantId = "";
+  let selectedDrumVariantId = "";
+  let labMode = "instruments";
+
+  function isBaseMode() {
+    return labMode === "instruments" || labMode === "drums";
+  }
 
   populateStaticControls();
   bindEvents();
@@ -303,12 +322,23 @@
       button.addEventListener("click", () => appendReaction(reaction));
       reactionRoot.append(button);
     }
+    const treatmentSelect = document.querySelector("#lab-style-treatment");
+    if (templateLibrary && treatmentSelect) {
+      treatmentSelect.add(new Option("Neutral / base sound", "neutral"));
+      for (const style of manifest.styles) {
+        if (!templateLibrary.treatments[style.id]) continue;
+        treatmentSelect.add(new Option(style.name, style.id));
+      }
+    }
     renderSnapshots();
   }
 
   function bindEvents() {
-    document.querySelector("#show-style-workbench").addEventListener("click", () => showView(false));
-    document.querySelector("#show-instrument-lab").addEventListener("click", () => showView(true));
+    document.querySelector("#show-base-instruments").addEventListener(
+      "click", () => showView("instruments"));
+    document.querySelector("#show-base-drums").addEventListener(
+      "click", () => showView("drums"));
+    document.querySelector("#show-instrument-lab").addEventListener("click", () => showView("mix"));
     profileSelect.addEventListener("change", () => loadProfile(profileSelect.value));
     roleSelect.addEventListener("change", () => loadRole(roleSelect.value));
     sourceSelect.addEventListener("change", () => {
@@ -411,6 +441,21 @@
       scheduleRender();
     });
     document.querySelector("#lab-drum-piece-candidate").addEventListener("change", event => {
+      if (event.target.value.startsWith("base:")) {
+        const baseId = event.target.value.slice("base:".length);
+        const resolved = kitTemplatePatch(baseId, role);
+        if (!resolved) return;
+        patch.pieces[drumPiece] = clone(resolved.pieces[drumPiece]);
+        markDrumCustom();
+        if (labMode === "mix") {
+          baseKitId = "";
+          stateForCurrent().baseKitId = "";
+        }
+        persist();
+        renderDrumControls();
+        scheduleRender();
+        return;
+      }
       const candidate = role.kitCandidates?.find(
         item => item.id === event.target.value);
       if (!candidate) return;
@@ -469,15 +514,67 @@
       await navigator.clipboard.writeText(JSON.stringify(soundDesignRecord(), null, 2));
       document.querySelector("#lab-save-review-status").textContent = "Copied JSON.";
     });
+    document.querySelector("#lab-style-treatment")?.addEventListener("change", event => {
+      treatmentId = event.target.value;
+      stateForCurrent().treatmentId = treatmentId;
+      persist();
+      renderBasePalette();
+      document.querySelector("#lab-style-assignment-status").textContent =
+        "Treatment selected. Apply the base sound to update this style-role patch; the pattern remains unchanged.";
+    });
+    document.querySelector("#lab-assign-base")?.addEventListener(
+      "click", applySelectedStyleBase);
+    document.querySelector("#lab-save-base")?.addEventListener(
+      "click", saveCurrentBase);
+    document.querySelector("#lab-load-saved-base")?.addEventListener(
+      "click", loadSavedBase);
+    document.querySelector("#lab-load-factory-base")?.addEventListener(
+      "click", loadFactoryBase);
+    document.querySelector("#lab-update-base")?.addEventListener(
+      "click", updateCurrentBase);
+    document.querySelector("#lab-base-instrument-choice")?.addEventListener(
+      "change", event => applyInstrumentTemplate(event.target.value));
+    document.querySelector("#lab-base-kit-choice")?.addEventListener(
+      "change", event => applyKitTemplate(event.target.value));
+    document.querySelector("#lab-base-drum-piece-choice")?.addEventListener(
+      "change", event => selectBaseDrumPiece(event.target.value));
+    document.querySelector("#lab-base-drum-option")?.addEventListener(
+      "change", event => loadDrumVariant(event.target.value));
+    document.querySelector("#lab-style-base")?.addEventListener(
+      "change", applySelectedStyleBase);
   }
 
-  function showView(showLab) {
+  function showView(view) {
     stopAll();
-    lab.hidden = !showLab;
-    workbench.hidden = showLab;
-    document.body.classList.toggle("lab-mode", showLab);
-    document.querySelector("#show-instrument-lab").classList.toggle("active", showLab);
-    document.querySelector("#show-style-workbench").classList.toggle("active", !showLab);
+    const nextMode = ["instruments", "drums", "mix"].includes(view)
+      ? view : "instruments";
+    const modeChanged = labMode !== nextMode;
+    labMode = nextMode;
+    lab.hidden = false;
+    workbench.hidden = true;
+    document.body.classList.add("lab-mode");
+    document.body.classList.toggle("base-sound-mode", isBaseMode());
+    document.body.classList.toggle("instrument-sound-mode", labMode === "instruments");
+    document.body.classList.toggle("drum-sound-mode", labMode === "drums");
+    document.body.classList.toggle("style-mix-mode", labMode === "mix");
+    document.querySelector("#show-base-instruments").classList.toggle(
+      "active", labMode === "instruments");
+    document.querySelector("#show-base-drums").classList.toggle(
+      "active", labMode === "drums");
+    document.querySelector("#show-instrument-lab").classList.toggle(
+      "active", labMode === "mix");
+    if (modeChanged) {
+      const wantedRole = labMode === "drums"
+        ? "drums"
+        : labMode === "instruments"
+          ? (saved.baseEditor?.instrumentRoleId ||
+              (role?.id !== "drums" ? role?.id : "chords"))
+          : (saved.roleByProfile?.[profile.id] ||
+              (role?.id !== "drums" ? role?.id : "chords"));
+      loadRole(wantedRole);
+    } else {
+      renderAllPatchControls();
+    }
   }
 
   async function checkService() {
@@ -509,7 +606,13 @@
       saved.roleByProfile[selected] = requestedRole;
     }
     loadProfile(selected);
-    if (query.get("view") === "lab") showView(true);
+    if (query.get("view") === "lab" || query.get("view") === "mix") {
+      showView("mix");
+    } else if (query.get("view") === "drums") {
+      showView("drums");
+    } else {
+      showView("instruments");
+    }
   }
 
   function loadProfile(profileId) {
@@ -520,59 +623,136 @@
     for (const candidate of profile.roles.filter(item => labRoles.has(item.id))) {
       roleSelect.add(new Option(candidate.name, candidate.id));
     }
-    const wanted = saved.roleByProfile?.[profile.id];
+    const wanted = labMode === "instruments"
+      ? saved.baseEditor?.instrumentRoleId
+      : labMode === "drums"
+        ? "drums"
+        : saved.roleByProfile?.[profile.id];
     const available = [...roleSelect.options].some(option => option.value === wanted);
     loadRole(available ? wanted : roleSelect.options[0].value);
     document.querySelector("#lab-sound-target").textContent = profile.soundBrief;
-    persist();
+    persist(false);
   }
 
   function loadRole(roleId) {
-    role = profile.roles.find(item => item.id === roleId && labRoles.has(item.id))
-      || profile.roles.find(item => labRoles.has(item.id));
-    saved.roleByProfile ||= {};
-    saved.roleByProfile[profile.id] = role.id;
+    const requestedRole = labMode === "drums" ? "drums" : roleId;
+    role = profile.roles.find(
+      item => item.id === requestedRole && labRoles.has(item.id));
+    if (!role || (labMode === "instruments" && role.id === "drums")) {
+      role = profile.roles.find(
+        item => labRoles.has(item.id) && item.id !== "drums") ||
+        profile.roles.find(item => labRoles.has(item.id));
+    }
     roleSelect.value = role.id;
     const state = stateForCurrent();
-    researchedPatch = role.id === "drums"
-      ? normalizeKit(role.parameters)
-      : normalizePatch(role.parameters);
-    patch = role.id === "drums"
-      ? normalizeKit(researchedPatch)
-      : normalizePatch(state.patch || researchedPatch);
-    drumKitCandidate = role.id === "drums"
-      ? (role.kitCandidates?.find(candidate => candidate.recommended)?.id ||
-          role.kitCandidates?.[0]?.id || "")
-      : "";
+    if (isBaseMode()) {
+      saved.baseEditor ||= {selectionByRole: {}};
+      saved.baseEditor.selectionByRole ||= {};
+      treatmentId = "neutral";
+      if (labMode === "drums") {
+        saved.baseEditor.drumPiece ||= "kick";
+        drumPiece = saved.baseEditor.drumPiece;
+        baseKitId = saved.baseEditor.kitId ||
+          saved.baseEditor.selectionByRole.drums ||
+          templateLibrary.drumKits[0].id;
+        baseInstrumentId = "";
+        researchedPatch = factoryKitTemplatePatch(baseKitId);
+        patch = kitBasePatch(baseKitId);
+        selectedDrumVariantId = `factory:${baseKitId}:${drumPiece}`;
+        drumKitCandidate = "custom";
+      } else {
+        saved.baseEditor.instrumentRoleId = role.id;
+        const wanted = saved.baseEditor.instrumentId ||
+          saved.baseEditor.selectionByRole[role.id];
+        baseInstrumentId = instrumentChoiceExists(wanted)
+          ? wanted : templateLibrary.instruments[0]?.id;
+        selectedInstrumentVariantId = baseInstrumentId.startsWith("custom:")
+          ? baseInstrumentId : "";
+        baseKitId = "";
+        researchedPatch = factoryInstrumentTemplatePatch(
+          instrumentOriginTemplateId(baseInstrumentId));
+        patch = instrumentBasePatch(baseInstrumentId);
+        drumKitCandidate = "";
+      }
+    } else {
+      saved.roleByProfile ||= {};
+      saved.roleByProfile[profile.id] = role.id;
+      researchedPatch = role.id === "drums"
+        ? normalizeKit(role.parameters)
+        : normalizePatch(role.parameters);
+      patch = role.id === "drums"
+        ? normalizeKit(state.patch || researchedPatch, researchedPatch)
+        : normalizePatch(state.patch || researchedPatch);
+      drumKitCandidate = role.id === "drums"
+        ? (role.kitCandidates?.find(candidate => candidate.recommended)?.id ||
+            role.kitCandidates?.[0]?.id || "")
+        : "";
+      treatmentId = templateLibrary?.treatments[state.treatmentId]
+        ? state.treatmentId
+        : (templateLibrary?.treatments[profile.styleId] ? profile.styleId : "neutral");
+      baseInstrumentId = state.baseInstrumentId || "";
+      baseKitId = state.baseKitId || "";
+      if (role.id !== "drums" && instrumentChoiceExists(baseInstrumentId)) {
+        patch = instrumentTemplatePatch(baseInstrumentId, role, profile.styleId);
+      } else if (role.id === "drums" && baseKitId) {
+        patch = kitTemplatePatch(baseKitId, role, profile.styleId);
+        for (const [pieceId, choiceId] of Object.entries(
+          state.drumPieceOptions || {})) {
+          const custom = drumVariant(choiceId);
+          if (custom) {
+            patch.pieces[pieceId] = clone(custom.patch);
+          } else if (choiceId.startsWith("factory:")) {
+            const [, kitId] = choiceId.split(":");
+            patch.pieces[pieceId] = clone(kitBasePatch(kitId).pieces[pieceId]);
+          }
+        }
+      }
+    }
     macroBase = clone(patch);
     resetMacroValues();
     rootSelect.value = String(role.id === "bass" ? 40 : role.id === "chords" ? 48 : 60);
-    document.querySelector("#lab-design-name").textContent =
-      `${role.designName} · ${role.targetPatchId}`;
-    document.querySelector("#lab-notes").value = state.notes || "";
+    document.querySelector("#lab-design-name").textContent = isBaseMode()
+      ? baseDisplayName()
+      : `${role.designName} · ${role.targetPatchId}`;
+    document.querySelector("#lab-notes").value =
+      isBaseMode() ? "" : (state.notes || "");
     currentUrl = "";
     lastRenderDiagnostics = null;
     replayButton.disabled = true;
     const drumRole = role.id === "drums";
-    jam2BackingButton.hidden = !drumRole;
-    jam2DrumsButton.hidden = !drumRole;
-    jam2ReferenceButton.hidden = !drumRole;
+    jam2BackingButton.hidden = true;
+    jam2DrumsButton.hidden = true;
+    jam2ReferenceButton.hidden = true;
     setMixButtonsDisabled(false);
-    renderStatus.textContent = "No custom render yet.";
+    renderStatus.textContent = labMode === "mix"
+      ? "Choose the lineup, then play the designed style mix."
+      : "No custom render yet.";
     configureAuditions();
     renderAllPatchControls();
-    renderSnapshots();
-    persist();
+    persist(false);
+    if (isBaseMode()) {
+      setBaseSaveStatus(true,
+        `Editing ${baseDisplayName()}. Changes are drafts until explicitly saved as a named sound.`);
+    }
   }
 
   function renderAllPatchControls() {
     const drums = role?.id === "drums";
+    configureLabModeUi(drums);
     for (const section of document.querySelectorAll("[data-pitched-only]")) {
-      section.hidden = drums;
+      section.hidden = labMode !== "instruments";
     }
-    document.querySelector("#drum-kit-lab").hidden = !drums;
-    rootSelect.closest("label").hidden = drums;
-    if (drums) {
+    document.querySelector("#drum-kit-lab").hidden = labMode !== "drums";
+    document.querySelector("#base-palette-lab").hidden =
+      labMode !== "instruments";
+    document.querySelector("#base-kit-lab").hidden =
+      labMode !== "drums";
+    renderBasePalette();
+    if (labMode === "mix") {
+      updateRawJson();
+      return;
+    }
+    if (labMode === "drums") {
       renderDrumControls();
       updateRawJson();
       return;
@@ -586,6 +766,630 @@
     renderParameterGroups();
     updateBlendLabels();
     updateRawJson();
+  }
+
+  function renderBasePalette() {
+    if (!templateLibrary || !profile || !role) return;
+    if (labMode === "mix") {
+      renderCurrentLineup();
+      renderStyleAssignment();
+      return;
+    }
+    if (labMode === "drums") {
+      renderBaseKits();
+      return;
+    }
+    renderInstrumentChoices();
+  }
+
+  function configureLabModeUi(drums) {
+    const instrumentMode = labMode === "instruments";
+    const drumMode = labMode === "drums";
+    const mixMode = labMode === "mix";
+    document.querySelector("#lab-header-eyebrow").textContent = mixMode
+      ? "Arrangement only" : "Sound creation";
+    document.querySelector("#lab-header-title").textContent = instrumentMode
+      ? "Base Instruments" : drumMode ? "Base Drums" : "Style Mixer";
+    document.querySelector("#lab-header-description").textContent = instrumentMode
+      ? "Create and save named instrument sounds. These sounds are available to every role in Style Mixer."
+      : drumMode
+        ? "Create named alternatives for individual pieces inside the Acoustic, Electronic and Latin kit families."
+        : "Choose which saved sounds play each role over the selected style pattern. Sound design controls stay on the two base pages.";
+    document.querySelector("#lab-profile-field").hidden = false;
+    document.querySelector("#lab-profile-label").textContent = mixMode
+      ? "Style profile"
+      : "Audition profile for generated pattern";
+    document.querySelector("#lab-role-field").hidden = !instrumentMode;
+    document.querySelector("#lab-role-label").textContent = "Audition register";
+    for (const option of roleSelect.options) {
+      option.hidden = instrumentMode && option.value === "drums";
+    }
+    document.querySelector("#lab-audition-field").hidden = mixMode;
+    document.querySelector("#lab-root-field").hidden = !instrumentMode;
+    document.querySelector("#lab-target-panel").hidden = true;
+    document.querySelector("#lab-lineup-panel").hidden = !mixMode;
+    document.querySelector("#style-assignment-lab").hidden = !mixMode;
+    document.querySelector("#base-save-panel").hidden = mixMode;
+    document.querySelector("#lab-snapshot-panel").hidden = true;
+    document.querySelector("#lab-notes-panel").hidden = true;
+    document.querySelector("#lab-raw-json").hidden = true;
+    renderButton.hidden = mixMode;
+    replayButton.hidden = mixMode;
+    mixButton.hidden = !mixMode;
+    document.querySelector("#lab-auto-render-label").hidden = mixMode;
+    document.querySelector("#lab-drum-candidate-actions").hidden = true;
+    document.querySelector("#lab-drum-pieces").hidden = true;
+    document.querySelector("#lab-drum-piece-candidate-row").hidden = true;
+    document.querySelector("#lab-drum-bus-group").hidden = true;
+    document.querySelector("#lab-drum-kit-heading").textContent =
+      `Edit ${drumPieceLabel(drumPiece)}`;
+    document.querySelector("#lab-drum-kit-description").textContent =
+      "Only this selected piece is being edited. Switch kit family, piece or saved option above when you want a different target.";
+    document.querySelector("#lab-base-save-title").textContent = drumMode
+      ? `Save ${drumPieceLabel(drumPiece)} option in ${baseDisplayName()}`
+      : `Save an instrument based on ${baseDisplayName()}`;
+    document.querySelector("#lab-update-base").hidden = drumMode
+      ? !drumVariant(selectedDrumVariantId)
+      : !instrumentVariant(selectedInstrumentVariantId);
+  }
+
+  function renderStyleAssignment() {
+    treatmentId = profile.styleId;
+    const baseSelect = document.querySelector("#lab-style-base");
+    baseSelect.replaceChildren();
+    baseSelect.add(new Option("Original researched sound", ""));
+    const choices = role.id === "drums"
+      ? templateLibrary.drumKits
+      : [
+          ...instrumentVariants().map(item => ({
+            id: item.id,
+            name: item.name,
+            custom: true,
+          })),
+          ...templateLibrary.instruments,
+        ];
+    for (const choice of choices) {
+      baseSelect.add(new Option(
+        `${choice.name}${choice.custom ? " · my sound" : role.id === "drums" ? " · kit family" : " · factory"}`,
+        choice.id));
+    }
+    const currentId = role.id === "drums" ? baseKitId : baseInstrumentId;
+    baseSelect.value = choices.some(item => item.id === currentId)
+      ? currentId : "";
+    document.querySelector("#lab-arrangement-heading").textContent =
+      role.id === "drums" ? "Kit and piece arrangement" : `Sound for ${role.name}`;
+    document.querySelector("#lab-arrangement-description").textContent =
+      role.id === "drums"
+        ? "Choose a kit family, then optionally replace any individual piece with a factory or saved Base Drums option."
+        : "Choose any factory or saved Base Instrument sound. Instrument labels do not restrict which role can use it.";
+    document.querySelector("#lab-style-drum-pieces").hidden =
+      role.id !== "drums" || !baseKitId;
+    if (role.id === "drums" && baseKitId) renderStyleDrumPieces();
+  }
+
+  function baseDisplayName() {
+    if (role?.id === "drums") {
+      return templateLibrary.drumKits.find(item => item.id === baseKitId)?.name ||
+        "Base kit";
+    }
+    return instrumentChoiceName(baseInstrumentId);
+  }
+
+  function renderCurrentLineup() {
+    const root = document.querySelector("#lab-current-lineup");
+    if (!root) return;
+    root.replaceChildren();
+    for (const targetRole of profile.roles.filter(item => labRoles.has(item.id))) {
+      const state = saved.patches?.[`${profile.id}/${targetRole.id}`] || {};
+      let choice = targetRole.designName || "Researched default";
+      if (targetRole.id === "drums" && state.baseKitId) {
+        choice = templateLibrary.drumKits.find(
+          item => item.id === state.baseKitId)?.name || state.baseKitId;
+      } else if (targetRole.id !== "drums" && state.baseInstrumentId) {
+        choice = instrumentChoiceName(state.baseInstrumentId);
+      } else if (state.patch) {
+        choice = "Original researched sound";
+      }
+      const button = document.createElement("button");
+      button.className = `lineup-role${targetRole.id === role.id ? " active" : ""}`;
+      button.innerHTML = `<strong>${targetRole.name}</strong><span>${choice}</span>`;
+      button.title = `${targetRole.name}: ${choice}`;
+      button.addEventListener("click", () => loadRole(targetRole.id));
+      root.append(button);
+    }
+  }
+
+  function renderBaseKits() {
+    const kitSelect = document.querySelector("#lab-base-kit-choice");
+    const pieceSelect = document.querySelector("#lab-base-drum-piece-choice");
+    kitSelect.replaceChildren();
+    pieceSelect.replaceChildren();
+    for (const kit of templateLibrary.drumKits) {
+      kitSelect.add(new Option(kit.name, kit.id));
+    }
+    for (const [id, name] of drumPieces) pieceSelect.add(new Option(name, id));
+    kitSelect.value = baseKitId;
+    pieceSelect.value = drumPiece;
+    renderBaseDrumOptions();
+  }
+
+  function renderInstrumentChoices() {
+    const select = document.querySelector("#lab-base-instrument-choice");
+    select.replaceChildren();
+    for (const variant of instrumentVariants()) {
+      select.add(new Option(`${variant.name} · my sound`, variant.id));
+    }
+    for (const template of templateLibrary.instruments) {
+      select.add(new Option(`${template.name} · ${template.family}`, template.id));
+    }
+    select.value = baseInstrumentId;
+    const selected = instrumentVariant(baseInstrumentId);
+    document.querySelector("#lab-base-name").value = selected?.name ||
+      `${instrumentChoiceName(baseInstrumentId)} variation`;
+    selectedInstrumentVariantId = selected?.id || "";
+  }
+
+  function drumPieceLabel(pieceId) {
+    return drumPieces.find(([id]) => id === pieceId)?.[1] || pieceId;
+  }
+
+  function renderBaseDrumOptions() {
+    const select = document.querySelector("#lab-base-drum-option");
+    select.replaceChildren();
+    const kitName = templateLibrary.drumKits.find(
+      item => item.id === baseKitId)?.name || baseKitId;
+    const factoryId = `factory:${baseKitId}:${drumPiece}`;
+    select.add(new Option(`${kitName} ${drumPieceLabel(drumPiece)} · factory`, factoryId));
+    for (const variant of drumVariants().filter(
+      item => item.kitId === baseKitId && item.pieceId === drumPiece)) {
+      select.add(new Option(`${variant.name} · my sound`, variant.id));
+    }
+    if (![...select.options].some(option => option.value === selectedDrumVariantId)) {
+      selectedDrumVariantId = factoryId;
+    }
+    select.value = selectedDrumVariantId;
+    const selected = drumVariant(selectedDrumVariantId);
+    document.querySelector("#lab-base-name").value = selected?.name ||
+      `${kitName} ${drumPieceLabel(drumPiece)} variation`;
+  }
+
+  function selectBaseDrumPiece(pieceId) {
+    if (labMode !== "drums") return;
+    drumPiece = drumPieces.some(([id]) => id === pieceId) ? pieceId : "kick";
+    saved.baseEditor.drumPiece = drumPiece;
+    patch = kitBasePatch(baseKitId);
+    researchedPatch = factoryKitTemplatePatch(baseKitId);
+    selectedDrumVariantId = `factory:${baseKitId}:${drumPiece}`;
+    persist(false);
+    renderAllPatchControls();
+    setBaseSaveStatus(true,
+      `Editing the factory ${baseDisplayName()} ${drumPieceLabel(drumPiece)}. Changes are an unsaved draft.`);
+  }
+
+  function loadDrumVariant(choiceId) {
+    if (labMode !== "drums") return;
+    const custom = drumVariant(choiceId);
+    if (custom && custom.pieceId === drumPiece) {
+      patch.pieces[drumPiece] = clone(custom.patch);
+      selectedDrumVariantId = custom.id;
+    } else {
+      patch.pieces[drumPiece] = clone(
+        kitBasePatch(baseKitId).pieces[drumPiece]);
+      selectedDrumVariantId = `factory:${baseKitId}:${drumPiece}`;
+    }
+    persist(false);
+    renderAllPatchControls();
+    setBaseSaveStatus(true, custom
+      ? `Loaded ${custom.name}. Edits remain drafts until Update or Save as new sound.`
+      : `Loaded the factory ${baseDisplayName()} ${drumPieceLabel(drumPiece)}.`);
+  }
+
+  function renderStyleDrumPieces() {
+    const root = document.querySelector("#lab-style-drum-pieces");
+    root.replaceChildren();
+    const state = stateForCurrent();
+    state.drumPieceOptions ||= {};
+    const selectedKitId = baseKitId || templateLibrary.drumKits[0].id;
+    for (const [pieceId, pieceName] of drumPieces) {
+      const label = document.createElement("label");
+      label.innerHTML = `<span>${pieceName}</span><select></select>`;
+      const select = label.querySelector("select");
+      select.add(new Option("Use selected kit", ""));
+      for (const kit of templateLibrary.drumKits) {
+        select.add(new Option(`${kit.name} ${pieceName} · factory`,
+          `factory:${kit.id}:${pieceId}`));
+      }
+      for (const variant of drumVariants().filter(
+        item => item.pieceId === pieceId)) {
+        select.add(new Option(`${variant.name} · my sound`, variant.id));
+      }
+      select.value = state.drumPieceOptions[pieceId] || "";
+      select.addEventListener("change", event =>
+        applyStyleDrumPiece(pieceId, event.target.value, selectedKitId));
+      root.append(label);
+    }
+  }
+
+  function applyStyleDrumPiece(pieceId, choiceId, selectedKitId) {
+    if (labMode !== "mix" || role.id !== "drums") return;
+    const state = stateForCurrent();
+    state.drumPieceOptions ||= {};
+    if (choiceId) state.drumPieceOptions[pieceId] = choiceId;
+    else delete state.drumPieceOptions[pieceId];
+    const custom = drumVariant(choiceId);
+    if (custom) {
+      patch.pieces[pieceId] = clone(custom.patch);
+    } else if (choiceId.startsWith("factory:")) {
+      const [, kitId] = choiceId.split(":");
+      patch.pieces[pieceId] = clone(kitBasePatch(kitId).pieces[pieceId]);
+    } else {
+      patch.pieces[pieceId] = clone(
+        kitTemplatePatch(selectedKitId, role, profile.styleId).pieces[pieceId]);
+    }
+    markDrumCustom();
+    persist(false);
+    renderCurrentLineup();
+    document.querySelector("#lab-style-assignment-status").textContent =
+      `${drumPieceLabel(pieceId)} assignment updated. The style pattern and saved base sounds were not changed.`;
+  }
+
+  function selectedTreatment(id = treatmentId) {
+    return templateLibrary.treatments[id] ||
+      templateLibrary.treatments.neutral;
+  }
+
+  function instrumentVariants() {
+    saved.instrumentVariants ||= [];
+    return saved.instrumentVariants;
+  }
+
+  function drumVariants() {
+    saved.drumVariants ||= [];
+    return saved.drumVariants;
+  }
+
+  function createVariantId(prefix) {
+    return `${prefix}:${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function instrumentVariant(choiceId) {
+    return instrumentVariants().find(item => item.id === choiceId);
+  }
+
+  function instrumentChoiceExists(choiceId) {
+    return Boolean(instrumentVariant(choiceId) ||
+      templateLibrary.instruments.some(item => item.id === choiceId));
+  }
+
+  function instrumentOriginTemplateId(choiceId) {
+    return instrumentVariant(choiceId)?.originTemplateId || choiceId;
+  }
+
+  function instrumentChoiceName(choiceId) {
+    return instrumentVariant(choiceId)?.name ||
+      templateLibrary.instruments.find(item => item.id === choiceId)?.name ||
+      "Instrument sound";
+  }
+
+  function drumVariant(choiceId) {
+    return drumVariants().find(item => item.id === choiceId);
+  }
+
+  function factoryInstrumentTemplatePatch(templateId) {
+    const template = templateLibrary.instruments.find(item => item.id === templateId);
+    if (!template) return null;
+    return normalizePatch(deepMerge(
+      templateLibrary.instrumentDefaults,
+      template.patch || {}));
+  }
+
+  function instrumentBasePatch(templateId) {
+    const custom = instrumentVariant(templateId);
+    if (custom) return normalizePatch(custom.patch);
+    const savedBase = saved.baseTemplates?.instruments?.[templateId];
+    return savedBase
+      ? normalizePatch(savedBase)
+      : factoryInstrumentTemplatePatch(templateId);
+  }
+
+  function instrumentTemplatePatch(
+      templateId,
+      targetRole,
+      appliedTreatmentId = treatmentId) {
+    const template = templateLibrary.instruments.find(item => item.id === templateId);
+    const custom = instrumentVariant(templateId);
+    if (!template && !custom) return null;
+    const treatment = selectedTreatment(appliedTreatmentId);
+    let values = instrumentBasePatch(templateId);
+    values = deepMerge(values, treatment.common || {});
+    values = deepMerge(values, treatment.roles?.[targetRole.id] || {});
+    if (appliedTreatmentId === profile.styleId) {
+      values = deepMerge(
+        values,
+        templateLibrary.profileTreatments[profile.id]?.instruments?.[targetRole.id] || {});
+    }
+    return normalizePatch(values);
+  }
+
+  function factoryKitTemplatePatch(templateId) {
+    const template = templateLibrary.drumKits.find(item => item.id === templateId);
+    if (!template) return null;
+    const pieces = {};
+    for (const [id] of drumPieces) {
+      pieces[id] = deepMerge(
+        templateLibrary.drumPieceDefaults,
+        template.pieces?.[id] || {});
+    }
+    let values = {
+      candidateId: `base-${template.id}`,
+      candidateName: template.name,
+      recommended: false,
+      description: template.description,
+      researchFamily: `shared-base-${template.id}`,
+      sourceReferences: [
+        "DaisySP synthesis primitives",
+        "Workbench shared base palette v1",
+      ],
+      bus: clone(template.bus),
+      pieces,
+    };
+    return normalizeKit(values, values);
+  }
+
+  function kitBasePatch(templateId) {
+    const savedBase = saved.baseTemplates?.kits?.[templateId];
+    return savedBase
+      ? normalizeKit(savedBase, savedBase)
+      : factoryKitTemplatePatch(templateId);
+  }
+
+  function kitTemplatePatch(
+      templateId,
+      targetRole,
+      appliedTreatmentId = treatmentId) {
+    const template = templateLibrary.drumKits.find(item => item.id === templateId);
+    if (!template) return null;
+    let values = kitBasePatch(templateId);
+    const treatment = selectedTreatment(appliedTreatmentId);
+    values.candidateId = `base-${template.id}-${appliedTreatmentId}`;
+    values.candidateName = `${template.name} / ${treatment.name}`;
+    const styleTreatment = templateLibrary.drumTreatments[appliedTreatmentId] || {};
+    values = deepMerge(values, {
+      bus: styleTreatment.bus || {},
+      pieces: styleTreatment.pieces || {},
+    });
+    if (appliedTreatmentId === profile.styleId) {
+      const specific = templateLibrary.profileTreatments[profile.id]?.drums || {};
+      values = deepMerge(values, {
+        bus: specific.bus || {},
+        pieces: specific.pieces || {},
+      });
+    }
+    return normalizeKit(values, values);
+  }
+
+  function applyInstrumentTemplate(templateId) {
+    const next = labMode === "instruments"
+      ? instrumentBasePatch(templateId)
+      : instrumentTemplatePatch(templateId, role, profile.styleId);
+    if (!next) return;
+    patch = next;
+    baseInstrumentId = templateId;
+    if (labMode === "instruments") {
+      saved.baseEditor.instrumentId = templateId;
+      selectedInstrumentVariantId = templateId.startsWith("custom:")
+        ? templateId : "";
+      researchedPatch = factoryInstrumentTemplatePatch(
+        instrumentOriginTemplateId(templateId));
+    } else {
+      const state = stateForCurrent();
+      state.baseInstrumentId = templateId;
+      state.treatmentId = profile.styleId;
+    }
+    rebaseMacros();
+    persist(false);
+    renderAllPatchControls();
+    const template = templateLibrary.instruments.find(item => item.id === templateId);
+    document.querySelector("#lab-base-palette-status").textContent =
+      labMode === "instruments"
+        ? `Editing ${instrumentChoiceName(templateId)}. Changes are a draft until saved below.`
+        : "";
+    if (labMode === "instruments") {
+      document.querySelector("#lab-base-name").value =
+        instrumentVariant(templateId)?.name || `${template?.name || "Instrument"} variation`;
+      setBaseSaveStatus(true,
+        `Loaded ${instrumentChoiceName(templateId)}. Edit freely, then save as a new sound or update the selected saved sound.`);
+    }
+    scheduleRender();
+  }
+
+  function applyKitTemplate(templateId) {
+    const next = labMode === "drums"
+      ? kitBasePatch(templateId)
+      : kitTemplatePatch(templateId, role, profile.styleId);
+    if (!next) return;
+    patch = next;
+    baseKitId = templateId;
+    drumKitCandidate = "custom";
+    if (labMode === "drums") {
+      saved.baseEditor.kitId = templateId;
+      selectedDrumVariantId = `factory:${templateId}:${drumPiece}`;
+      researchedPatch = factoryKitTemplatePatch(templateId);
+    } else {
+      const state = stateForCurrent();
+      state.baseKitId = templateId;
+      state.treatmentId = profile.styleId;
+      state.drumPieceOptions = {};
+    }
+    persist(false);
+    renderAllPatchControls();
+    const template = templateLibrary.drumKits.find(item => item.id === templateId);
+    document.querySelector("#lab-base-kit-status").textContent =
+      labMode === "drums"
+        ? `Editing ${template.name} / ${drumPieceLabel(drumPiece)}. Save the piece as a named option below.`
+        : "";
+    if (labMode === "drums") {
+      document.querySelector("#lab-base-name").value =
+        `${template.name} ${drumPieceLabel(drumPiece)} variation`;
+      setBaseSaveStatus(true,
+        `Loaded the ${template.name} starting point for ${drumPieceLabel(drumPiece)}.`);
+    }
+    scheduleRender();
+  }
+
+  function applySelectedStyleBase() {
+    if (labMode !== "mix") return;
+    const templateId = document.querySelector("#lab-style-base").value;
+    treatmentId = profile.styleId;
+    if (!templateId) {
+      patch = clone(researchedPatch);
+      const state = stateForCurrent();
+      state.patch = clone(patch);
+      state.baseInstrumentId = "";
+      state.baseKitId = "";
+      state.drumPieceOptions = {};
+      baseInstrumentId = "";
+      baseKitId = "";
+      persist(false);
+      renderAllPatchControls();
+      document.querySelector("#lab-style-assignment-status").textContent =
+        `Restored ${role.name}'s original researched sound. The pattern did not change.`;
+      return;
+    }
+    if (role.id === "drums") {
+      applyKitTemplate(templateId);
+    } else {
+      applyInstrumentTemplate(templateId);
+    }
+    document.querySelector("#lab-style-assignment-status").textContent =
+      `${baseDisplayName()} is assigned to ${role.name}. ${profile.name}'s pattern did not change.`;
+  }
+
+  function saveCurrentBase() {
+    if (!isBaseMode()) return;
+    const requestedName = document.querySelector("#lab-base-name").value.trim();
+    if (labMode === "drums") {
+      const name = requestedName || `${baseDisplayName()} ${drumPieceLabel(drumPiece)}`;
+      const variant = {
+        id: createVariantId("drum"),
+        name,
+        kitId: baseKitId,
+        pieceId: drumPiece,
+        patch: clone(patch.pieces[drumPiece]),
+      };
+      drumVariants().push(variant);
+      selectedDrumVariantId = variant.id;
+    } else {
+      const name = requestedName || `${baseDisplayName()} variation`;
+      const variant = {
+        id: createVariantId("custom"),
+        name,
+        originTemplateId: instrumentOriginTemplateId(baseInstrumentId),
+        patch: clone(patch),
+      };
+      instrumentVariants().push(variant);
+      baseInstrumentId = variant.id;
+      selectedInstrumentVariantId = variant.id;
+      saved.baseEditor.instrumentId = variant.id;
+    }
+    localStorage.setItem(storageKey, JSON.stringify(saved));
+    setBaseSaveStatus(true,
+      `Saved ${requestedName || baseDisplayName()} as a new browser-library sound. Existing arrangements were not changed.`);
+    renderBasePalette();
+    renderAllPatchControls();
+    updateRawJson();
+  }
+
+  function updateCurrentBase() {
+    if (!isBaseMode()) return;
+    const name = document.querySelector("#lab-base-name").value.trim();
+    if (labMode === "drums") {
+      const variant = drumVariant(selectedDrumVariantId);
+      if (!variant) return;
+      variant.name = name || variant.name;
+      variant.patch = clone(patch.pieces[drumPiece]);
+    } else {
+      const variant = instrumentVariant(selectedInstrumentVariantId);
+      if (!variant) return;
+      variant.name = name || variant.name;
+      variant.patch = clone(patch);
+    }
+    localStorage.setItem(storageKey, JSON.stringify(saved));
+    renderAllPatchControls();
+    setBaseSaveStatus(true, "Updated the selected browser-library sound. Style Mixer arrangements that reference it will use the updated sound when loaded or played.");
+  }
+
+  function loadSavedBase() {
+    if (labMode === "drums") loadDrumVariant(selectedDrumVariantId);
+    else if (labMode === "instruments") applyInstrumentTemplate(baseInstrumentId);
+  }
+
+  function loadFactoryBase() {
+    if (!isBaseMode()) return;
+    if (labMode === "drums") {
+      const factory = factoryKitTemplatePatch(baseKitId);
+      patch.pieces[drumPiece] = clone(factory.pieces[drumPiece]);
+      selectedDrumVariantId = `factory:${baseKitId}:${drumPiece}`;
+    } else {
+      patch = factoryInstrumentTemplatePatch(
+        instrumentOriginTemplateId(baseInstrumentId));
+    }
+    rebaseMacros();
+    renderAllPatchControls();
+    setBaseSaveStatus(false,
+      "Loaded the factory starting point as an unsaved draft.");
+    updateRawJson();
+  }
+
+  function setBaseSaveStatus(savedClean, message = "") {
+    const status = document.querySelector("#lab-base-save-status");
+    if (!status) return;
+    status.textContent = message || (savedClean
+      ? `${baseDisplayName()} matches its saved browser copy.`
+      : `Unsaved edits to ${baseDisplayName()}.`);
+    status.classList.toggle("unsaved", !savedClean);
+  }
+
+  function applyRecommendedPalette() {
+    if (!templateLibrary || !profile) return;
+    const treatment = selectedTreatment();
+    for (const targetRole of profile.roles.filter(item => labRoles.has(item.id))) {
+      const key = `${profile.id}/${targetRole.id}`;
+      saved.patches ||= {};
+      saved.patches[key] ||= {};
+      if (targetRole.id === "drums") {
+        const kitId = templateLibrary.drumTreatments[treatmentId]?.kitId ||
+          treatment.palette?.drums || "acoustic";
+        saved.patches[key].patch = kitTemplatePatch(kitId, targetRole);
+        saved.patches[key].baseKitId = kitId;
+      } else {
+        const templateId = treatment.palette?.[targetRole.id];
+        const next = instrumentTemplatePatch(templateId, targetRole);
+        if (!next) continue;
+        saved.patches[key].patch = next;
+        saved.patches[key].baseInstrumentId = templateId;
+      }
+      saved.patches[key].treatmentId = treatmentId;
+    }
+    localStorage.setItem(storageKey, JSON.stringify(saved));
+    const status = document.querySelector("#lab-style-assignment-status");
+    if (status) {
+      status.textContent = `Applied the ${treatment.name} shared palette to every available role. Use Designed style mix to hear it together.`;
+    }
+    loadRole(role.id);
+    scheduleRender();
+  }
+
+  function deepMerge(base, override) {
+    const result = clone(base || {});
+    for (const [key, value] of Object.entries(override || {})) {
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        result[key] = deepMerge(result[key] || {}, value);
+      } else {
+        result[key] = value;
+      }
+    }
+    return result;
   }
 
   function renderParameterGroups() {
@@ -644,49 +1448,100 @@
 
   function applyMacros() {
     patch = clone(macroBase);
+    const positive = value => Math.max(0, value);
+    const suppress = (value, amount, exponent = 2) => amount < 0
+      ? value * Math.pow(1 + amount, exponent)
+      : value;
+
     const hardness = macroValues.hardness;
-    patch.attackSeconds *= Math.pow(2, -3 * hardness);
-    patch.transientMix += Math.max(0, hardness) * .14;
-    patch.stringDamping += Math.max(0, hardness) * .18;
+    patch.attackSeconds *= Math.pow(2, -6 * hardness);
+    patch.decaySeconds *= Math.pow(2, -1.4 * hardness);
+    patch.transientMix = suppress(patch.transientMix, hardness) +
+      positive(hardness) * .76;
+    patch.transientSeconds *= Math.pow(2, -2.6 * hardness);
+    patch.filterEnvelopeHz += hardness * 6800;
+    patch.stringDamping += hardness * .46;
 
     const brightness = macroValues.brightness;
-    patch.filterCutoffHz *= Math.pow(2, 2.2 * brightness);
-    patch.stringBrightness += .34 * brightness;
-    patch.spectralShape += .25 * brightness;
+    patch.filterCutoffHz *= Math.pow(2, 4.5 * brightness);
+    patch.resonance += positive(brightness) * .3;
+    patch.shape += .58 * brightness;
+    patch.width += .28 * brightness;
+    patch.stringBrightness += .78 * brightness;
+    patch.spectralShape += .72 * brightness;
+    patch.fmIndex = brightness < 0
+      ? patch.fmIndex * Math.pow(2, 3.5 * brightness)
+      : patch.fmIndex + brightness * 10;
+    patch.fmRatio *= Math.pow(2, 1.5 * brightness);
+    patch.harmonicFamily = Math.round(
+      patch.harmonicFamily + brightness * 4);
+    patch.formantRatio *= Math.pow(2, 2 * brightness);
+    patch.formantRatio2 *= Math.pow(2, 1.6 * brightness);
+    if (patch.fixedFormantHz > 0) {
+      patch.fixedFormantHz *= Math.pow(2, 2.5 * brightness);
+    }
+    if (patch.fixedFormant2Hz > 0) {
+      patch.fixedFormant2Hz *= Math.pow(2, 2.2 * brightness);
+    }
 
     const body = macroValues.body;
-    patch.subMix += .35 * body;
-    patch.oscillator2Mix += .18 * body;
-    patch.filterCutoffHz *= Math.pow(2, -.35 * body);
+    patch.subMix = suppress(patch.subMix, body) + positive(body) * .82;
+    patch.oscillator2Mix = suppress(patch.oscillator2Mix, body) +
+      positive(body) * .58;
+    patch.stringDouble = suppress(patch.stringDouble, body) +
+      positive(body) * .84;
+    patch.detuneCents = body < 0
+      ? patch.detuneCents * Math.pow(1 + body, 2)
+      : patch.detuneCents + body * 15;
+    patch.filterCutoffHz *= Math.pow(2, -1.2 * body);
+    patch.cabinet += positive(body) * .4;
 
     const grit = macroValues.grit;
-    patch.voiceDrive *= Math.pow(2, 1.8 * grit);
-    patch.busDrive *= Math.pow(2, 1.25 * grit);
-    patch.filterDrive *= Math.pow(2, 1.1 * grit);
-    patch.wavefold += Math.max(0, grit) * 2.2;
+    patch.voiceDrive *= Math.pow(2, 3.4 * grit);
+    patch.busDrive *= Math.pow(2, 2.8 * grit);
+    patch.filterDrive *= Math.pow(2, 2.6 * grit);
+    patch.wavefold = suppress(patch.wavefold, grit) + positive(grit) * 6.5;
+    patch.noiseMix = suppress(patch.noiseMix, grit) + positive(grit) * .48;
+    patch.cabinet = suppress(patch.cabinet, grit) + positive(grit) * .72;
+    patch.fmIndex += positive(grit) * 5;
+    patch.resonance += positive(grit) * .16;
 
     const movement = macroValues.movement;
-    patch.vibratoCents += Math.max(0, movement) * 13;
-    patch.tremoloDepth += Math.max(0, movement) * .22;
-    patch.chorusMix += Math.max(0, movement) * .25;
-    if (movement < 0) {
-      patch.vibratoCents *= 1 + movement;
-      patch.tremoloDepth *= 1 + movement;
-      patch.chorusMix *= 1 + movement;
-    }
+    patch.glideSeconds = suppress(patch.glideSeconds, movement) +
+      positive(movement) * .62;
+    patch.vibratoCents = suppress(patch.vibratoCents, movement, 3) +
+      positive(movement) * 58;
+    patch.vibratoRateHz += positive(movement) * 3.8;
+    patch.vibratoDelaySeconds = movement > 0
+      ? patch.vibratoDelaySeconds * (1 - movement)
+      : patch.vibratoDelaySeconds;
+    patch.tremoloDepth = suppress(patch.tremoloDepth, movement, 3) +
+      positive(movement) * .74;
+    patch.tremoloRateHz += positive(movement) * 7;
+    patch.chorusMix = suppress(patch.chorusMix, movement, 3) +
+      positive(movement) * .58;
+    patch.chorusDepth = suppress(patch.chorusDepth, movement, 3) +
+      positive(movement) * .75;
+    patch.chorusRateHz += positive(movement) * 1.2;
+    patch.spectralMode += positive(movement) * .72;
 
     const length = macroValues.length;
-    patch.decaySeconds *= Math.pow(2, 2 * length);
-    patch.releaseSeconds *= Math.pow(2, 2.5 * length);
-    patch.sustain += .22 * length;
+    patch.decaySeconds *= Math.pow(2, 4 * length);
+    patch.releaseSeconds *= Math.pow(2, 5 * length);
+    patch.sustain += .68 * length;
+    patch.stringDamping -= .56 * length;
+    patch.transientSeconds *= Math.pow(2, 1.6 * length);
+    patch.delaySeconds *= Math.pow(2, 1.4 * length);
 
     const space = macroValues.space;
-    patch.delayMix += Math.max(0, space) * .34;
-    patch.chorusMix += Math.max(0, space) * .16;
-    if (space < 0) {
-      patch.delayMix *= 1 + space;
-      patch.chorusMix *= 1 + space;
-    }
+    patch.delayMix = suppress(patch.delayMix, space, 3) +
+      positive(space) * .68;
+    patch.delaySeconds *= Math.pow(2, 1.7 * space);
+    patch.chorusMix = suppress(patch.chorusMix, space, 3) +
+      positive(space) * .52;
+    patch.chorusDepth = suppress(patch.chorusDepth, space, 3) +
+      positive(space) * .82;
+    patch.chorusRateHz *= Math.pow(2, -.8 * space);
     for (const parameter of parameters) {
       patch[parameter.key] = clampValue(parameter, patch[parameter.key]);
     }
@@ -703,7 +1558,7 @@
       const keys = kind === "envelope"
         ? ["attackSeconds", "decaySeconds", "sustain", "releaseSeconds", "transientMix"]
         : kind === "motion"
-          ? ["vibratoCents", "vibratoRateHz", "tremoloDepth", "tremoloRateHz", "chorusMix", "chorusDepth"]
+          ? ["glideSeconds", "vibratoCents", "vibratoRateHz", "tremoloDepth", "tremoloRateHz", "chorusMix", "chorusDepth"]
           : ["shape", "width", "fmRatio", "fmIndex", "spectralShape", "stringBrightness", "filterCutoffHz", "resonance", "voiceDrive"];
       for (const key of keys) {
         const definition = parameterMap.get(key);
@@ -788,7 +1643,25 @@
 
   function activeMixRequest(candidateRole) {
     const key = `${profile.id}/${candidateRole.id}`;
-    const active = saved.patches?.[key]?.patch;
+    const state = saved.patches?.[key] || {};
+    let active = state.patch;
+    if (candidateRole.id === "drums" && state.baseKitId) {
+      active = kitTemplatePatch(state.baseKitId, candidateRole, profile.styleId);
+      for (const [pieceId, choiceId] of Object.entries(
+        state.drumPieceOptions || {})) {
+        const custom = drumVariant(choiceId);
+        if (custom) {
+          active.pieces[pieceId] = clone(custom.patch);
+        } else if (choiceId.startsWith("factory:")) {
+          const [, kitId] = choiceId.split(":");
+          active.pieces[pieceId] = clone(kitBasePatch(kitId).pieces[pieceId]);
+        }
+      }
+    } else if (candidateRole.id !== "drums" &&
+               instrumentChoiceExists(state.baseInstrumentId)) {
+      active = instrumentTemplatePatch(
+        state.baseInstrumentId, candidateRole, profile.styleId);
+    }
     const request = {
       schema: "jam2-instrument-patch-v1",
       profileId: profile.id,
@@ -972,7 +1845,7 @@
   }
 
   function scheduleRender() {
-    persist();
+    persist(false);
     if (!document.querySelector("#lab-auto-render").checked) return;
     clearTimeout(autoRenderTimer);
     autoRenderTimer = setTimeout(renderAndPlay, 650);
@@ -991,23 +1864,31 @@
         <strong>${slot}</strong>
         <span>${state.snapshots[slot]
           ? (role.id === "drums"
-              ? "Complete kit"
-              : sourceLabel(state.snapshots[slot].source))
-          : "Researched default"}</span>
-        <button data-save>Save</button>
-        <button data-load>Load</button>
+              ? "Saved complete kit"
+              : `Saved complete patch · ${sourceLabel(state.snapshots[slot].source)}`)
+          : "Empty · loads style start"}</span>
+        <div class="snapshot-actions">
+          <button data-save>Save whole ${role.id === "drums" ? "kit" : "patch"}</button>
+          <button data-load>${state.snapshots[slot] ? "Load saved" : "Load style start"}</button>
+          ${state.snapshots[slot] ? "<button data-clear>Clear slot</button>" : ""}
+        </div>
       `;
       wrapper.querySelector("[data-save]").addEventListener("click", () => {
         state.snapshots[slot] = clone(patch);
-        persist();
+        persist(false);
         renderSnapshots();
       });
       wrapper.querySelector("[data-load]").addEventListener("click", () => {
         patch = clone(state.snapshots[slot] || researchedPatch);
         rebaseMacros();
-        persist();
+        persist(false);
         renderAllPatchControls();
         scheduleRender();
+      });
+      wrapper.querySelector("[data-clear]")?.addEventListener("click", () => {
+        delete state.snapshots[slot];
+        persist(false);
+        renderSnapshots();
       });
       root.append(wrapper);
     }
@@ -1029,8 +1910,11 @@
     return saved.patches[key];
   }
 
-  function persist() {
-    if (profile && role && patch) stateForCurrent().patch = clone(patch);
+  function persist(markBaseDirty = true) {
+    if (profile && role && patch && labMode === "mix") {
+      stateForCurrent().patch = clone(patch);
+    }
+    if (isBaseMode() && markBaseDirty) setBaseSaveStatus(false);
     localStorage.setItem(storageKey, JSON.stringify(saved));
     updateRawJson();
   }
@@ -1247,6 +2131,7 @@
       auditionSelect.add(new Option("Single note", "note"));
       auditionSelect.add(new Option("Register + velocity", "velocity"));
       auditionSelect.add(new Option("Two polyphonic chords", "chord"));
+      auditionSelect.add(new Option("Arpeggiated chord sequence", "arpeggio"));
       auditionSelect.add(new Option("Generated style phrase", "profile"));
       auditionSelect.value = "profile";
       enforceJam2Audition();
@@ -1340,25 +2225,38 @@
     const pieceSelect =
       document.querySelector("#lab-drum-piece-candidate");
     pieceSelect.replaceChildren();
+    for (const base of templateLibrary?.drumKits || []) {
+      pieceSelect.add(new Option(
+        `Base ${base.name} / ${drumPieces.find(([id]) => id === drumPiece)?.[1]}`,
+        `base:${base.id}`));
+    }
     for (const candidate of role.kitCandidates || []) {
       pieceSelect.add(new Option(
         `${candidate.recommended ? "Feedback focus - " : ""}${candidate.name} / ${drumPieces.find(([id]) => id === drumPiece)?.[1]}`,
         candidate.id));
     }
     pieceSelect.add(new Option("Custom", "custom"));
+    const matchingBase = (templateLibrary?.drumKits || []).find(base => {
+      const candidateKit = kitTemplatePatch(base.id, role);
+      return JSON.stringify(candidateKit.pieces[drumPiece]) ===
+        JSON.stringify(piece);
+    });
     const matchingPiece = (role.kitCandidates || []).find(candidate => {
       const candidateKit = normalizeKit(
         candidate.parameters, role.parameters);
       return JSON.stringify(candidateKit.pieces[drumPiece]) ===
         JSON.stringify(piece);
     });
-    pieceSelect.value = matchingPiece?.id || "custom";
+    pieceSelect.value = matchingBase
+      ? `base:${matchingBase.id}` : (matchingPiece?.id || "custom");
+    const describedBase = (templateLibrary?.drumKits || []).find(
+      candidate => `base:${candidate.id}` === pieceSelect.value);
     const described = (role.kitCandidates || []).find(
       candidate => candidate.id ===
         (drumKitCandidate === "custom"
           ? pieceSelect.value : drumKitCandidate));
     const candidateDescription =
-      described?.description || patch.description ||
+      describedBase?.description || described?.description || patch.description ||
       "Manual component combination.";
     document.querySelector("#lab-drum-candidate-description").textContent =
       `${piece.intendedIdentity || "Unspecified piece identity"} — ${candidateDescription}`;
@@ -1531,6 +2429,24 @@
   }
 
   function soundDesignRecord(includeFullDiagnostics = true) {
+    if (isBaseMode()) {
+      const drumMode = labMode === "drums";
+      const savedInBrowser = drumMode
+        ? Boolean(drumVariant(selectedDrumVariantId))
+        : Boolean(instrumentVariant(baseInstrumentId));
+      return {
+        schema: "jam2-base-sound-patch-v1",
+        kind: drumMode ? "drum-piece" : "instrument",
+        baseId: drumMode ? selectedDrumVariantId : baseInstrumentId,
+        baseName: baseDisplayName(),
+        kitId: drumMode ? baseKitId : null,
+        pieceId: drumMode ? drumPiece : null,
+        savedInBrowser,
+        storageBoundary: "Draft until explicitly saved or updated in the browser sound library.",
+        updatedAt: new Date().toISOString(),
+        patch: clone(drumMode ? patch.pieces[drumPiece] : patch),
+      };
+    }
     const diagnostics = role.id === "drums"
       ? (includeFullDiagnostics
           ? lastRenderDiagnostics
@@ -1557,6 +2473,12 @@
       notes: stateForCurrent().notes || "",
       updatedAt: new Date().toISOString(),
       renderDiagnostics: diagnostics,
+      baseTemplate: {
+        librarySchema: templateLibrary?.schema || null,
+        instrumentId: role.id === "drums" ? null : (baseInstrumentId || null),
+        kitId: role.id === "drums" ? (baseKitId || null) : null,
+        treatmentId,
+      },
       [role.id === "drums" ? "kit" : "patch"]: clone(patch),
     };
   }

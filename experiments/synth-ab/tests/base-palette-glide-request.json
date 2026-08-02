@@ -1,0 +1,16 @@
+{
+  "schema": "jam2-instrument-patch-v1",
+  "profileId": "hiphop_trap",
+  "role": "bass",
+  "audition": "arpeggio",
+  "rootMidi": 36,
+  "patch": {
+    "source": "variable-shape",
+    "secondSource": "sine-fundamental",
+    "sourceBlend": 0.2,
+    "glideSeconds": 0.14,
+    "filterCutoffHz": 470,
+    "filterEnvelopeHz": 1700,
+    "voiceDrive": 1.3
+  }
+}

@@ -1963,9 +1963,6 @@ void MainWindow::prepareNetworkRuntimePresentation(bool createSession)
         metronomeTransport_.setLocalState(false);
     }
     metronomeTransport_.clearEngine();
-    if (createSession && trackMetronomeLabel_) {
-        trackMetronomeLabel_->setText(QStringLiteral("Jam metronome stopped"));
-    }
     if (createSession && startTrackMetronomeButton_) {
         startTrackMetronomeButton_->setEnabled(true);
     }
@@ -3282,9 +3279,6 @@ void MainWindow::stopJam(bool returnToLocal)
     trackRecordingWorkflow_.clearSessionSchedule();
     if (recordingCountdownLabel_) recordingCountdownLabel_->hide();
     metronomeTransport_.setLocalState(false);
-    if (trackMetronomeLabel_) {
-        trackMetronomeLabel_->setText(QStringLiteral("Local metronome stopped"));
-    }
     if (startTrackMetronomeButton_) {
         startTrackMetronomeButton_->setEnabled(true);
     }
@@ -3587,11 +3581,40 @@ void MainWindow::openWorkspace(const QString& page)
     const auto found = workspacePages_.constFind(page);
     if (found != workspacePages_.cend()) {
         const bool looperOpen = page == QStringLiteral("looper");
+        const bool sectionEditorOpen = page == QStringLiteral("chords") ||
+            page == QStringLiteral("beats") || page == QStringLiteral("lyrics");
         if (detailIdentityPanel_) {
-            detailIdentityPanel_->setVisible(looperOpen);
+            detailIdentityPanel_->setVisible(looperOpen || sectionEditorOpen);
         }
-        if (looperOpen && detailPositionLabel_) {
-            refreshBankPresentation();
+        if (detailPositionLabel_) {
+            detailPositionLabel_->setReadOnly(true);
+            detailPositionLabel_->setFocusPolicy(Qt::NoFocus);
+            detailPositionLabel_->deselect();
+            detailPositionLabel_->setProperty("editing", false);
+            detailPositionLabel_->setProperty("sectionEditable", sectionEditorOpen);
+            detailPositionLabel_->setToolTip(sectionEditorOpen
+                ? QStringLiteral("Double-click to rename this section") : QString());
+            detailPositionLabel_->style()->unpolish(detailPositionLabel_);
+            detailPositionLabel_->style()->polish(detailPositionLabel_);
+            if (sectionEditorOpen && viewedBankIndex_ >= 0 &&
+                viewedBankIndex_ < chordModel_.sections().size()) {
+                const QString name = chordModel_.section(viewedBankIndex_).name.trimmed();
+                detailPositionLabel_->setText(name.isEmpty()
+                    ? QStringLiteral("Section %1").arg(
+                        QChar(QLatin1Char('A').unicode() + viewedBankIndex_))
+                    : name);
+                detailPositionLabel_->setCursorPosition(0);
+                detailPositionLabel_->deselect();
+            } else if (looperOpen) {
+                refreshBankPresentation();
+            }
+        }
+        if (page == QStringLiteral("chords") && chordGrid_) {
+            chordGrid_->refresh();
+        } else if (page == QStringLiteral("beats") && beatGrid_) {
+            beatGrid_->refresh();
+        } else if (page == QStringLiteral("lyrics") && lyricGrid_) {
+            lyricGrid_->refresh();
         }
         workspaceStack_->setCurrentIndex(found.value());
         performanceStageStack_->setCurrentIndex(1);
@@ -4772,20 +4795,22 @@ void MainWindow::refreshBankPresentation()
                 : QStringLiteral("QPushButton { background:#12141f;color:#c4bacb;border:1px solid #55465f;padding:4px; }"));
     }
     if (detailPositionLabel_) {
-        QStringList state{
-            QStringLiteral("Viewing Bank %1").arg(
-                QChar(QLatin1Char('A').unicode() + viewedBankIndex_)),
-        };
-        state << (viewedBankIndex_ == live
-            ? QStringLiteral("LIVE")
-            : QStringLiteral("Live Bank %1").arg(
-                QChar(QLatin1Char('A').unicode() + live)));
-        if (pendingBankIndex_ >= 0) {
-            state << QStringLiteral("NEXT Bank %1").arg(
-                QChar(QLatin1Char('A').unicode() + pendingBankIndex_));
+        const int currentWorkspace = workspaceStack_ ? workspaceStack_->currentIndex() : -1;
+        const bool sectionNamedWorkspace = currentWorkspace == workspacePages_.value(QStringLiteral("chords"), -2) ||
+            currentWorkspace == workspacePages_.value(QStringLiteral("beats"), -3) ||
+            currentWorkspace == workspacePages_.value(QStringLiteral("lyrics"), -4) ||
+            currentWorkspace == workspacePages_.value(QStringLiteral("looper"), -5);
+        if (sectionNamedWorkspace && viewedBankIndex_ >= 0 && viewedBankIndex_ < chordModel_.sections().size()) {
+            if (detailPositionLabel_->isReadOnly()) {
+                const QString name = chordModel_.section(viewedBankIndex_).name.trimmed();
+                detailPositionLabel_->setText(name.isEmpty()
+                    ? QStringLiteral("Section %1").arg(
+                        QChar(QLatin1Char('A').unicode() + viewedBankIndex_))
+                    : name);
+                detailPositionLabel_->setCursorPosition(0);
+                detailPositionLabel_->deselect();
+            }
         }
-        if (!looperProject_.trackSyncEnabled()) state << QStringLiteral("LOCAL");
-        detailPositionLabel_->setText(state.join(QStringLiteral("  |  ")));
     }
     if (arrangementButton_) {
         arrangementButton_->setText(arrangementRunning_
@@ -7814,9 +7839,6 @@ void MainWindow::startTrackMetronome()
         if (metronomeTransport_.localRunning()) {
             // Record count-in and duplicate UI activation must not create a
             // second grid proposal while the shared clock is already running.
-            if (trackMetronomeLabel_) {
-                trackMetronomeLabel_->setText(QStringLiteral("Jam click enabled"));
-            }
             if (startTrackMetronomeButton_) {
                 startTrackMetronomeButton_->setEnabled(false);
             }
@@ -7831,9 +7853,6 @@ void MainWindow::startTrackMetronome()
             jam2::EngineCommandType::SetMetronomeEnabled,
             true,
             QStringLiteral("metronome enabled"));
-        if (trackMetronomeLabel_) {
-            trackMetronomeLabel_->setText(QStringLiteral("Jam click enabled"));
-        }
         if (startTrackMetronomeButton_) {
             startTrackMetronomeButton_->setEnabled(false);
         }
@@ -7843,9 +7862,6 @@ void MainWindow::startTrackMetronome()
         return;
     }
 
-    if (trackMetronomeLabel_) {
-        trackMetronomeLabel_->setText(QStringLiteral("Start local engine for metronome"));
-    }
     QMessageBox::warning(this, QStringLiteral("Jam2 Metronome"), QStringLiteral("Start the local engine before using the track metronome."));
 }
 
@@ -7859,11 +7875,6 @@ void MainWindow::stopTrackMetronome()
             jam2::EngineCommandType::SetMetronomeEnabled,
             false,
             QStringLiteral("metronome enabled"));
-    }
-    if (trackMetronomeLabel_) {
-        trackMetronomeLabel_->setText(jam2_.isRunning()
-            ? QStringLiteral("Jam click disabled")
-            : QStringLiteral("Local click disabled"));
     }
     if (startTrackMetronomeButton_) {
         startTrackMetronomeButton_->setEnabled(true);
@@ -7899,7 +7910,7 @@ void MainWindow::rebuildMetronomePattern(bool resetToDivisionDefault)
     if (!metronomePatternTable_) {
         return;
     }
-    const int beats = metronomeBeatsSpin_ ? metronomeBeatsSpin_->value() : 4;
+    const int beats = metronomeBeatsSpin_ ? metronomeBeatsSpin_->currentData().toInt() : 4;
     const int division = metronomeDivisionBox_ ? metronomeDivisionBox_->currentData().toInt() : 1;
     const int steps = qMax(1, beats * qMax(1, division));
     QVector<bool> previousEnabled = metronomeEnabledSteps_;
@@ -7962,7 +7973,7 @@ jam2::metronome::PatternSnapshot MainWindow::currentMetronomePattern() const
 {
     jam2::metronome::PatternSnapshot pattern;
     pattern.bpm = metronomeBpmSpin_ ? metronomeBpmSpin_->value() : 80;
-    pattern.beats_per_bar = metronomeBeatsSpin_ ? metronomeBeatsSpin_->value() : 4;
+    pattern.beats_per_bar = metronomeBeatsSpin_ ? metronomeBeatsSpin_->currentData().toInt() : 4;
     pattern.beat_unit = metronomeBeatUnitBox_ ? metronomeBeatUnitBox_->currentData().toInt() : 4;
     pattern.tempo_pulse_units = metronomeTempoPulseBox_
         ? metronomeTempoPulseBox_->currentData().toInt() : 1;
@@ -8030,7 +8041,8 @@ void MainWindow::applyMetronomePatternForBank(int bankIndex, bool transmit)
         const QSignalBlocker tempoPulseBlocker(metronomeTempoPulseBox_);
         const QSignalBlocker divisionBlocker(metronomeDivisionBox_);
         metronomeBpmSpin_->setValue(pattern.bpm);
-        metronomeBeatsSpin_->setValue(pattern.beats_per_bar);
+        const int beatsIndex = metronomeBeatsSpin_->findData(pattern.beats_per_bar);
+        if (beatsIndex >= 0) metronomeBeatsSpin_->setCurrentIndex(beatsIndex);
         const int beatUnitIndex = metronomeBeatUnitBox_->findData(pattern.beat_unit);
         if (beatUnitIndex >= 0) metronomeBeatUnitBox_->setCurrentIndex(beatUnitIndex);
         const int pulseIndex = metronomeTempoPulseBox_->findData(pattern.tempo_pulse_units);
@@ -8274,7 +8286,8 @@ void MainWindow::updateMetronomePresentationFromEngine(
     }
     if (patternChanged && metronomeBeatsSpin_) {
         const QSignalBlocker blocker(metronomeBeatsSpin_);
-        metronomeBeatsSpin_->setValue(pattern.beats_per_bar);
+        const int beatsIndex = metronomeBeatsSpin_->findData(pattern.beats_per_bar);
+        if (beatsIndex >= 0) metronomeBeatsSpin_->setCurrentIndex(beatsIndex);
     }
     if (patternChanged && metronomeBeatUnitBox_) {
         const QSignalBlocker blocker(metronomeBeatUnitBox_);
@@ -8317,11 +8330,6 @@ void MainWindow::updateMetronomePresentationFromEngine(
     }
     metronomeTransport_.setLocalState(snapshot.metronome_enabled);
     metronomeTransport_.setApplyingRemoteSettings(false);
-    if (trackMetronomeLabel_) {
-        trackMetronomeLabel_->setText(snapshot.metronome_enabled
-            ? QStringLiteral("Jam click enabled")
-            : QStringLiteral("Jam click disabled"));
-    }
     if (startTrackMetronomeButton_) {
         startTrackMetronomeButton_->setEnabled(!snapshot.metronome_enabled);
     }
@@ -9391,7 +9399,7 @@ QJsonObject MainWindow::trackToJson() const
         {QStringLiteral("highpass_hz"), model.highpassHz},
         {QStringLiteral("lowpass_hz"), model.lowpassHz},
         {QStringLiteral("metronome_bpm"), metronomeBpmSpin_ ? metronomeBpmSpin_->value() : 80},
-        {QStringLiteral("metronome_beats"), metronomeBeatsSpin_ ? metronomeBeatsSpin_->value() : 4},
+        {QStringLiteral("metronome_beats"), metronomeBeatsSpin_ ? metronomeBeatsSpin_->currentData().toInt() : 4},
         {QStringLiteral("metronome_beat_unit"), metronomeBeatUnitBox_ ? metronomeBeatUnitBox_->currentData().toInt() : 4},
         {QStringLiteral("metronome_tempo_pulse_units"), metronomeTempoPulseBox_ ? metronomeTempoPulseBox_->currentData().toInt() : 1},
         {QStringLiteral("metronome_division"), metronomeDivisionBox_ ? metronomeDivisionBox_->currentData().toInt() : 1},
@@ -9449,7 +9457,8 @@ void MainWindow::loadTrackJson(const QJsonObject& object)
         const QSignalBlocker tempoPulseBlocker(metronomeTempoPulseBox_);
         const QSignalBlocker divisionBlocker(metronomeDivisionBox_);
         metronomeBpmSpin_->setValue(savedBpm);
-        metronomeBeatsSpin_->setValue(savedBeats);
+        const int beatsIndex = metronomeBeatsSpin_->findData(savedBeats);
+        metronomeBeatsSpin_->setCurrentIndex(beatsIndex >= 0 ? beatsIndex : 3);
         const int beatUnitIndex = metronomeBeatUnitBox_->findData(savedBeatUnit);
         metronomeBeatUnitBox_->setCurrentIndex(beatUnitIndex >= 0 ? beatUnitIndex : 1);
         const int pulseIndex =
@@ -9761,11 +9770,6 @@ void MainWindow::updatePlaybackGrid()
             QStringLiteral("%1.%2\nBAR / BEAT")
                 .arg(bar)
                 .arg(beat, 2, 10, QLatin1Char('0')));
-        if (detailPositionLabel_ && detailIdentityPanel_ &&
-            detailIdentityPanel_->isVisible()) {
-            detailPositionLabel_->setText(QStringLiteral("Bank %1").arg(
-                QChar(QLatin1Char('A' + looperProject_.activeBankIndex()))));
-        }
     }
     if (performanceTempoButton_) {
         const auto pattern = currentMetronomePattern();

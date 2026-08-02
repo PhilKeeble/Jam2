@@ -56,6 +56,9 @@ public:
     QString title() const;
     void setTitle(const QString& title);
     int revision() const;
+    int guitarStringCount() const;
+    bool guitarDropTuning() const;
+    bool setGuitarReference(int strings, bool dropped);
     const QVector<SongSection>& sections() const;
     SongSection& section(int index);
     const SongSection& section(int index) const;
@@ -97,6 +100,8 @@ private:
     static void normalize(SongSection& section);
 
     QString title_ = QStringLiteral("Untitled Jam");
+    int guitarStringCount_ = 6;
+    bool guitarDropTuning_ = false;
     int revision_ = 0;
     QVector<SongSection> sections_;
 };

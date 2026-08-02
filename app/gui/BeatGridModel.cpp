@@ -218,6 +218,26 @@ int BeatGridModel::revision() const
     return revision_;
 }
 
+int BeatGridModel::guitarStringCount() const
+{
+    return guitarStringCount_;
+}
+
+bool BeatGridModel::guitarDropTuning() const
+{
+    return guitarDropTuning_;
+}
+
+bool BeatGridModel::setGuitarReference(int strings, bool dropped)
+{
+    if (strings != 6 && strings != 7 && strings != 8) return false;
+    if (guitarStringCount_ == strings && guitarDropTuning_ == dropped) return false;
+    guitarStringCount_ = strings;
+    guitarDropTuning_ = dropped;
+    ++revision_;
+    return true;
+}
+
 const QVector<SongSection>& BeatGridModel::sections() const
 {
     return sections_;
@@ -516,6 +536,8 @@ void BeatGridModel::clearContent()
 void BeatGridModel::reset()
 {
     title_ = QStringLiteral("Untitled Jam");
+    guitarStringCount_ = 6;
+    guitarDropTuning_ = false;
     sections_.clear();
     for (int index = 0; index < kMaxSections; ++index) {
         SongSection section = defaultSection(index);
@@ -588,6 +610,8 @@ QJsonObject BeatGridModel::toJson() const
     return QJsonObject{
         {QStringLiteral("beat_lane_schema"), kCurrentBeatLaneSchema},
         {QStringLiteral("title"), title_},
+        {QStringLiteral("guitar_strings"), guitarStringCount_},
+        {QStringLiteral("guitar_drop_tuning"), guitarDropTuning_},
         {QStringLiteral("sections"), sections},
     };
 }
@@ -610,9 +634,15 @@ bool BeatGridModel::loadJson(const QJsonObject& object)
     const int serializedLaneCount =
         serializedBeatLaneCount(beatLaneSchema);
     if (!object.value(QStringLiteral("sections")).isArray() ||
-        (!object.value(QStringLiteral("title")).isUndefined() && !object.value(QStringLiteral("title")).isString())) {
+        (!object.value(QStringLiteral("title")).isUndefined() && !object.value(QStringLiteral("title")).isString()) ||
+        (!object.value(QStringLiteral("guitar_strings")).isUndefined() &&
+            !exactInteger(object.value(QStringLiteral("guitar_strings")), 6, 8)) ||
+        (!object.value(QStringLiteral("guitar_drop_tuning")).isUndefined() &&
+            !object.value(QStringLiteral("guitar_drop_tuning")).isBool())) {
         return false;
     }
+    const int loadedGuitarStrings = object.value(QStringLiteral("guitar_strings")).toInt(6);
+    if (loadedGuitarStrings != 6 && loadedGuitarStrings != 7 && loadedGuitarStrings != 8) return false;
     QVector<SongSection> loaded;
     const QJsonArray sections = object.value(QStringLiteral("sections")).toArray();
     if (sections.isEmpty() || sections.size() > kMaxSections ||
@@ -761,6 +791,8 @@ bool BeatGridModel::loadJson(const QJsonObject& object)
         loaded.push_back(std::move(section));
     }
     title_ = object.value(QStringLiteral("title")).toString(QStringLiteral("Untitled Jam"));
+    guitarStringCount_ = loadedGuitarStrings;
+    guitarDropTuning_ = object.value(QStringLiteral("guitar_drop_tuning")).toBool(false);
     sections_ = loaded;
     ++revision_;
     return true;
