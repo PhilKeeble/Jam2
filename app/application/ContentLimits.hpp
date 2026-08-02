@@ -9,7 +9,7 @@ namespace jam2::application::limits {
 inline constexpr int kMinimumSampleRate = jam2::limits::kMinimumSampleRate;
 inline constexpr int kMaximumSampleRate = jam2::limits::kMaximumSampleRate;
 
-inline constexpr int kMaximumSongSections = 64;
+inline constexpr int kMaximumSongSections = 4;
 inline constexpr int kMinimumBeatsPerSection = 4;
 inline constexpr int kMaximumBeatsPerSection = 512;
 inline constexpr int kMaximumBeatLanes = 12;

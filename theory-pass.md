@@ -1336,3 +1336,134 @@ For each profile:
   `artifacts/music-research/final-all-styles-holdout-1/full-form-corpus.json`,
   `symbolic-audit.json`, and `all-style-review.md`. The reproducible scenario
   is `tools/scenarios/music-generation-all-style-holdout.json`.
+
+### 2026-08-02 - Source-derived continuation pacing and melodic identity
+
+- Replaced Continue Idea's single shared diatonic progression set with
+  profile-specific continuation families derived from the approved research.
+  The catalog now distinguishes loop answers, sectional arrivals, riff
+  answers, guide-tone chains, modal-pedal arcs, Blues calls/turnarounds,
+  J-Pop lifts, Country fill space, electronic subtraction/rebuild, Soul and
+  Neo-Soul vocal/upper-voice movement, Funk breaks, Hip-Hop recuts, Reggae dub
+  space, Bossa contrasting phrases, and Metal riff contrast.
+- Every diatonic continuation remains constrained to the exact source tonic
+  and mode. The style route controls degree order and harmonic pacing but
+  cannot bypass the chord-tone and slash-bass scale check. Non-diatonic Blues
+  collections retain their native Blues form grammar and expressive pitch
+  exceptions rather than being incorrectly forced into Major.
+- Candidate selection now compares the actual source and candidate melodic
+  contours in addition to melody-onset rhythm, chord vocabulary/order and
+  drum pocket. Profile-dependent targets preserve more contour for vocal-hook,
+  riff, sparse R&B, Funk, Reggae and sample-like profiles while allowing more
+  guide-tone freedom for Jazz. The chosen relationship, harmonic pacing ID,
+  melodic operation and measurements remain inspectable in the recipe and
+  diagnostic log.
+- The fixed boundary corpus now exercises 27/27 profiles and reports 18
+  distinct pacing plans and 23 harmonic continuation families. Its mean
+  source-to-B melodic-contour similarity is 53 percent, bass-contour similarity
+  is 69 percent, and rhythmic similarity is 51 percent: related material with
+  bounded contrast, not exact copying.
+  The separate 72-round matrix covers all twelve tonics crossed with Major,
+  Natural Minor, Dorian, Mixolydian, Lydian and Phrygian, checking every target
+  chord tone and slash bass against the source collection.
+- Continuations now analyse the source's actual melody, bass and drummer grid,
+  then choose an explicit musical role: A-prime, chorus, bridge, riff answer or
+  breakdown. The selected role transforms the source motif rather than merely
+  generating another in-key line, retains the production family, patches,
+  drummer kit and groove identity, and applies only bounded role-specific
+  changes to the source pocket. The target remains exactly the same length as
+  its source.
+- Both boundaries are planned: A's ending leads into B's opening, while B's
+  closing harmony and bass point back toward A's opening for looping. Boundary
+  voice-leading, tonal/profile inference confidence, alternative inferred
+  profiles, melody and bass contour similarity, role and pacing remain visible
+  in diagnostics.
+- Manual, metadata-free input now infers tonal centre and mode from all available
+  chord, melody and bass evidence, including chordless sparse material. A
+  32-round deliberately sparse, chromatic and irregular corpus produced 32
+  distinct B harmonies, transformed every source with enough motif evidence,
+  and retained source-specific drum relationships. It also exposed a general
+  Phrygian defect: a power-chord return was imposing a perfect fifth on a scale
+  degree whose fifth is diminished. Power chords are now emitted only where
+  the inferred collection actually contains that perfect fifth.
+- A further 56 generated A-to-B rounds across 14 styles and six modes produced
+  56 distinct B harmonies, 43 progression variants and all five continuation
+  roles. The 27-profile matrix still covers 18 pacing plans and 23 harmonic
+  families; mean measured similarity is 53 percent for melody contour, 66
+  percent for bass contour, 49 percent for onset rhythm and 36 percent for the
+  two-way harmonic boundary measure. The required MSVC release build succeeds
+  and all 197 boundary cases pass against `release/jam2.exe`.
+
+### 2026-08-02 - Continuation pocket, meter-default and harmony-density follow-up
+
+- Manual A-prime drums no longer copy the complete source grid and rely on the
+  final fill for contrast. The continuation retains structural kick/snare
+  anchors but develops alternating phrase bars through kick anticipation,
+  open-hat answers and a restrained ghost-note response. Chorus, bridge and
+  riff-answer roles now have similarly audible body-level operations. The
+  regression deliberately excludes the final bar: the straight-backbeat case
+  has 11 changed body cells at 84 percent onset similarity, four-on-the-floor
+  has 46 at 59 percent, and half-time dense hats has 74 at 56 percent.
+- Continue Idea now retains a generated source's exact form ID as well as its
+  tonic, mode and profile. Longer continuation routes repeat and develop their
+  phrase cell instead of stretching eight choices across a long form and
+  duplicating adjacent chords. Bebop explicitly retains its half-bar change
+  pacing. Harmonic-density retention, including source and B change counts, is
+  exposed in continuation diagnostics.
+- Major Pentatonic metadata is no longer collapsed to Major during source
+  analysis. Pentatonic melody remains in its exact source collection while its
+  harmony uses the containing major or minor key. Dominant and Minor Blues use
+  contrasting native I/IV/V continuation forms rather than a generic diatonic
+  approximation. A new 48-round matrix covers all twelve tonics across major
+  pentatonic, minor pentatonic, dominant Blues and minor Blues; every round
+  retains exact key, mode, profile, form and length, and all 48 B harmonies are
+  distinct.
+- Generate Idea now takes its initial meter from the selected target bank. A
+  genuinely new project still resolves to 4/4, while later generation follows
+  a manually changed or previously generated bank meter unless the user chooses
+  a different meter.
+- The final multi-style corpus has 56 distinct B harmonies and 44 progression
+  variants across 56 rounds. The required MSVC release build succeeds and all
+  198 boundary cases pass against `release/jam2.exe`.
+
+### 2026-08-02 - Continue Idea becomes a contrasting-section generator
+
+- Superseded the earlier A-prime policy after repeated listening showed that
+  retaining A's chord vocabulary and beginning from A's complete drum grid made
+  B sound like a safe edit rather than the next part of a song. Continue Idea
+  now preserves tonic/mode, tempo, meter, profile, production family, kit and
+  section length, but requires a new harmonic route, opening phrase and
+  profile-native drum performance.
+- Candidate selection now measures chord-root vocabulary, full chord-symbol
+  vocabulary, aligned positions across the first four changes, global chord
+  order, drum-onset overlap and harmonic-density retention. In seven-degree
+  modes it preferentially routes through scale degrees A did not use. When A
+  already uses every degree, B changes chord quality and ordering instead of
+  pretending unused roots exist. Thirty-two candidates are compared and a
+  near-copy is rejected rather than merely penalized.
+- B no longer copies A's bass phrase. Its newly generated bass follows the new
+  harmony and groove, with only the final approach aimed toward A's opening.
+  Likewise, A's motif is no longer pasted at B's opening, middle and ending;
+  one transformed callback is retained only at the return boundary. The former
+  A-prime fallback role is now an explicit Contrasting Section role.
+- B drums now start from a newly generated groove in the inferred/exact source
+  profile. Role-specific arrangement can move to another cymbal voice, alter
+  subdivision or kick placement, create a half-time/subtractive region, or
+  strengthen an arrival, while source kit and timing-family continuity remain.
+  Across the generated corpus mean onset overlap is 40 percent. The three
+  manual-pocket regressions measure 27, 34 and 39 percent overlap with 147, 95
+  and 132 changed body-grid cells respectively.
+- Added a direct regression for the reported Bb Mixolydian shape. Sixteen
+  continuations of an authored `Bb-Eb-Bb-F` A phrase produce sixteen distinct B
+  harmonies. Every result remains Bb Mixolydian, uses at most 50 percent of A's
+  chord-root vocabulary, matches at most one of the first four chord positions,
+  and has at most 72 percent drum-onset overlap. `Fm` itself is valid in Bb
+  Mixolydian (`F-Ab-C`); the defect was reusing the surrounding I/IV/v/V root
+  vocabulary, not that chord's mode membership.
+- The final generated-style corpus averages 26 percent chord-root overlap, 92
+  percent chord-order contrast and 40 percent drum overlap. Five manual harmony
+  cases average 6 percent root overlap and 100 percent order contrast. The
+  56-round cross-style corpus still has 56 distinct B harmonies, and the
+  48-round all-key pentatonic/Blues matrix remains fully distinct. The required
+  MSVC release build succeeds and all 199 boundary cases pass against
+  `release/jam2.exe`.

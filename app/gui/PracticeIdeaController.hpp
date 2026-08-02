@@ -26,11 +26,15 @@ public:
         BeatGridModel& chordModel,
         BeatGridModel& beatModel,
         const ChordIdeaRequest& request);
+    static std::optional<GeneratedContinuationIdea> generateContinuation(
+        BeatGridModel& model,
+        const ContinueIdeaRequest& request);
     static std::optional<SongSection> generatedSection(
         const BeatGridModel& model,
         const QString& kind);
     static ReferenceLayerAvailability referenceLayers(const SongSection& section);
     static void clearReferences(LooperProject& project);
+    static void clearReferences(LooperProject& project, int bankIndex);
     static bool applyReferences(
         LooperProject& project,
         int bankIndex,

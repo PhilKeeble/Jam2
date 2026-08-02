@@ -185,8 +185,7 @@ void MainWindowPages::build(MainWindow& w)
     header->addWidget(w.sessionTopologyLabel_);
 
     QObject::connect(w.songTitleEdit_, &QLineEdit::editingFinished, &w, [&w] {
-        w.chordModel_.setTitle(w.songTitleEdit_->text());
-        w.sendSongSnapshot();
+        (void)w.renameCurrentJam(w.songTitleEdit_->text());
     });
     QObject::connect(newSongButton, &QPushButton::clicked, &w, [&w] { w.newSong(); });
     QObject::connect(openSongButton, &QPushButton::clicked, &w, [&w] { w.openSong(); });
@@ -195,10 +194,17 @@ void MainWindowPages::build(MainWindow& w)
     QWidget* sessionPage = buildSessionPage(w);
     QWidget* chordPage = buildSongPage(w);
     QWidget* beatPage = buildBeatPage(w);
-    w.lyricGrid_ = new BeatGridWidget(&w.lyricModel_, QStringLiteral("lyric"), &w);
+    auto* lyricPage = new QWidget(&w);
+    w.lyricGrid_ = new BeatGridWidget(&w.lyricModel_, QStringLiteral("lyric"), lyricPage);
+    auto* lyricTop = new QHBoxLayout();
+    addBankControls(w, lyricPage, lyricTop, false);
+    lyricTop->addStretch(1);
+    auto* lyricLayout = new QVBoxLayout(lyricPage);
+    lyricLayout->addLayout(lyricTop);
+    lyricLayout->addWidget(w.lyricGrid_, 1);
     QWidget* trackPage = buildTrackPage(w);
     QWidget* metronomePage = buildMetronomePage(w);
-    QWidget* mixPage = buildMixPage(w);
+    buildAudioControls(w);
 
     auto sendCellEdit = [&w](int section, const QString& lane, int beat, const QString& text, int revision) {
         w.sendControl(QJsonObject{
@@ -273,12 +279,14 @@ void MainWindowPages::build(MainWindow& w)
     };
     w.performanceHome_->setTrackGainDb(w.trackController_.model().trackGainDb);
     w.performanceHome_->onTrackGainChanged = [&w](double gainDb) {
-        if (w.trackLevelSlider_) {
-            w.trackLevelSlider_->setValue(qRound(gainDb));
-        }
+        w.trackController_.model().trackGainDb = gainDb;
+        if (w.jam2_.isRunning()) w.sendPreparedTrackLevel();
     };
     w.performanceHome_->onGenerateIdea = [&w] {
         w.generatePracticeIdea();
+    };
+    w.performanceHome_->onContinueIdea = [&w] {
+        w.continuePracticeIdea();
     };
     w.performanceHome_->onClearIdea = [&w] {
         w.clearPracticeIdea();
@@ -289,6 +297,16 @@ void MainWindowPages::build(MainWindow& w)
     w.performanceHome_->onTunerEnabledChanged = [&w](bool enabled) {
         w.setTunerEnabled(enabled);
     };
+    w.performanceHome_->onJamRecordingToggle = [&w] {
+        if (w.trackRecordingWorkflow_.jamRecordingActive()) w.stopJamRecording();
+        else w.startJamRecording();
+    };
+    w.performanceHome_->onBankLaunch = [&w](int bank) {
+        w.requestBankLaunch(bank);
+    };
+    w.performanceHome_->onManageArrangement = [&w] {
+        w.showArrangementDialog();
+    };
 
     w.workspaceStack_ = new QStackedWidget(&w);
     const auto addWorkspace = [&w](const QString& key, QWidget* page) {
@@ -296,11 +314,10 @@ void MainWindowPages::build(MainWindow& w)
     };
     addWorkspace(QStringLiteral("chords"), chordPage);
     addWorkspace(QStringLiteral("beats"), beatPage);
-    addWorkspace(QStringLiteral("lyrics"), w.lyricGrid_);
+    addWorkspace(QStringLiteral("lyrics"), lyricPage);
     addWorkspace(QStringLiteral("metronome"), metronomePage);
     addWorkspace(QStringLiteral("looper"), trackPage);
     sessionPage->hide();
-    mixPage->hide();
 
     auto* detailPanel = new QFrame(&w);
     detailPanel->setObjectName(QStringLiteral("DetailPanel"));
@@ -622,7 +639,7 @@ void MainWindowPages::build(MainWindow& w)
     w.performanceTrackToggle_->setObjectName(QStringLiteral("MainTransportButton"));
     w.performanceTrackToggle_->setFixedSize(64, 64);
     QObject::connect(w.performanceTrackToggle_, &QPushButton::clicked, &w, [&w] {
-        if (w.trackRecordingWorkflow_.preparedPlaying()) {
+        if (w.trackRecordingWorkflow_.globalTransportRequestedPlaying()) {
             w.runGridLockedEngineAction(
                 QStringLiteral("track.stop"),
                 [&w](std::uint64_t targetFrame) { w.stopTrack(targetFrame); });
@@ -927,14 +944,18 @@ QWidget* MainWindowPages::buildSongPage(MainWindow& w)
     w.chordGrid_ = new BeatGridWidget(&w.chordModel_, QStringLiteral("chord"), page);
 
     auto* generate = new QPushButton(QStringLiteral("Generate…"), page);
+    auto* continueIdea = new QPushButton(QStringLiteral("Continue Idea…"), page);
     auto* reference = new QPushButton(QStringLiteral("Generate Reference WAVs…"), page);
     auto* details = new QPushButton(QStringLiteral("Idea Details…"), page);
     auto* top = new QHBoxLayout();
     top->addWidget(generate);
+    top->addWidget(continueIdea);
     top->addWidget(reference);
     top->addWidget(details);
+    addBankControls(w, page, top, false);
     top->addStretch(1);
     QObject::connect(generate, &QPushButton::clicked, &w, [&w] { w.generatePracticeIdea(); });
+    QObject::connect(continueIdea, &QPushButton::clicked, &w, [&w] { w.continuePracticeIdea(); });
     QObject::connect(reference, &QPushButton::clicked, &w, [&w] { w.generatePracticeReferenceWavs(); });
     QObject::connect(details, &QPushButton::clicked, &w, [&w] { w.showPracticeIdeaDetails(); });
 
@@ -1000,17 +1021,21 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
     auto* page = new QWidget(&w);
     w.beatGrid_ = new BeatGridWidget(&w.beatModel_, QStringLiteral("beat"), page);
     auto* generate = new QPushButton(QStringLiteral("Generate…"), page);
+    auto* continueIdea = new QPushButton(QStringLiteral("Continue Idea…"), page);
     auto* reference = new QPushButton(QStringLiteral("Generate Reference WAVs…"), page);
     auto* details = new QPushButton(QStringLiteral("Idea Details…"), page);
     auto* top = new QHBoxLayout();
     top->addWidget(generate);
+    top->addWidget(continueIdea);
     top->addWidget(reference);
     top->addWidget(details);
+    addBankControls(w, page, top, false);
     top->addStretch(1);
     auto* layout = new QVBoxLayout(page);
     layout->addLayout(top);
     layout->addWidget(w.beatGrid_, 1);
     QObject::connect(generate, &QPushButton::clicked, &w, [&w] { w.generatePracticeIdea(); });
+    QObject::connect(continueIdea, &QPushButton::clicked, &w, [&w] { w.continuePracticeIdea(); });
     QObject::connect(reference, &QPushButton::clicked, &w, [&w] { w.generatePracticeReferenceWavs(); });
     QObject::connect(details, &QPushButton::clicked, &w, [&w] { w.showPracticeIdeaDetails(); });
     return page;
@@ -1228,6 +1253,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     buttons->addWidget(w.stopCaptureButton_);
     buttons->addWidget(w.loadWavButton_);
     buttons->addWidget(w.shareTracksButton_);
+    buttons->addWidget(new QLabel(QStringLiteral("BANK"), page));
     for (int i = 0; i < 4; ++i) {
         auto* bankButton = new QPushButton(QString(QChar(QLatin1Char(static_cast<char>('A' + i)))), page);
         bankButton->setFixedWidth(34);
@@ -1235,13 +1261,24 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         w.looperBankButtons_[i] = bankButton;
         buttons->addWidget(bankButton);
         QObject::connect(bankButton, &QPushButton::clicked, &w, [&w, i] {
-            w.looperProject_.setActiveBankIndex(i);
-            w.selectedLooperLane_ = -1;
-            w.refreshLooperLanes();
-            w.regeneratePreparedMix();
-            w.syncLooperArrangement();
+            w.selectViewedBank(i);
         });
     }
+    w.launchBankButton_ = new QPushButton(QStringLiteral("Launch Bank"), page);
+    QObject::connect(w.launchBankButton_, &QPushButton::clicked, &w, [&w] {
+        w.requestBankLaunch(w.viewedBankIndex_);
+    });
+    buttons->addWidget(w.launchBankButton_);
+    w.arrangementButton_ = new QPushButton(QStringLiteral("Arrangement..."), page);
+    QObject::connect(w.arrangementButton_, &QPushButton::clicked, &w, [&w] {
+        w.showArrangementDialog();
+    });
+    buttons->addWidget(w.arrangementButton_);
+    auto* exportButton = new QPushButton(QStringLiteral("Export..."), page);
+    QObject::connect(exportButton, &QPushButton::clicked, &w, [&w] {
+        w.exportLooperAudio();
+    });
+    buttons->addWidget(exportButton);
     buttons->addStretch(1);
 
     auto* laneScroll = new QScrollArea(page);
@@ -1390,6 +1427,10 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         w.regeneratePreparedMix();
     });
     QObject::connect(w.trackSyncCheck_, &QCheckBox::toggled, &w, [&w](bool checked) {
+        if (!checked) {
+            w.cancelSharedBankLaunch(
+                true, QStringLiteral("Track Sync was disabled locally"));
+        }
         w.looperProject_.setTrackSyncEnabled(checked);
         w.trackController_.model().syncControls = checked;
         w.jam2_.setTrackSyncEnabled(checked);
@@ -1405,7 +1446,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
             w.pendingSongNeedsAuthoritativePublish_ = false;
             w.pendingLooperAssetHashes_.clear();
             w.deferredSongSetSourcePeerToken_.clear();
-            w.pendingPreparedTrackReadyRevision_ = 0;
+            w.deferredReferenceRenderRequests_.clear();
             w.assetTransfer_.cancel();
             w.pendingTrackContributions_.clear();
             w.pendingTrackAssetSources_.clear();
@@ -1414,16 +1455,14 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
             w.trackWorkspace_.heldTrackShareSongSourcePeerToken.clear();
             if (w.performanceHome_) {
                 w.performanceHome_->setTrackTransferStatus(QString{});
+                if (!w.referenceWavGenerationRunning_) {
+                    w.performanceHome_->setWavGenerationActive(false);
+                }
             }
             w.trackController_.requestPlayback(
-                w.trackRecordingWorkflow_.preparedPlaying());
+                w.trackRecordingWorkflow_.globalTransportRequestedPlaying());
             w.trackController_.observeEnginePlaying(
-                w.trackRecordingWorkflow_.preparedPlaying());
-            if (w.sessionController_.isServer()) {
-                w.pendingSharedTrackRevision_ = 0;
-                w.pendingSharedTrackHostReady_ = true;
-                w.pendingSharedTrackReadyTokens_.clear();
-            }
+                w.trackRecordingWorkflow_.globalTransportPlaying());
         } else if (w.jam2_.isNetworkRunning()) {
             w.shareLocalTracks();
         }
@@ -1471,7 +1510,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     w.looperStack_->onSolo = [&w](int lane) { w.selectedLooperLane_ = lane; w.toggleSelectedLooperLaneSolo(); };
     w.looperStack_->onArm = [&w](int lane) {
         w.selectedLooperLane_ = lane;
-        if (w.trackRecordingWorkflow_.laneArmedAt(w.looperProject_.activeBankIndex(), lane)) {
+        if (w.trackRecordingWorkflow_.laneArmedAt(w.viewedBankIndex_, lane)) {
             w.trackRecordingWorkflow_.disarmLane();
             w.refreshLooperLanes();
             w.appendLog(QStringLiteral("disarmed lane recording"));
@@ -1496,17 +1535,39 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         });
     };
     w.looperStack_->onBankSelected = [&w](int index) {
-        w.looperProject_.setActiveBankIndex(index);
-        w.selectedLooperLane_ = -1;
-        w.refreshLooperLanes();
-        w.regeneratePreparedMix();
-        w.syncLooperArrangement();
+        w.selectViewedBank(index);
     };
     w.refreshLooperLanes();
     w.regeneratePreparedMix();
     w.syncLooperArrangement();
 
     return page;
+}
+
+void MainWindowPages::addBankControls(
+    MainWindow& w,
+    QWidget* owner,
+    QHBoxLayout* layout,
+    bool looper)
+{
+    if (!owner || !layout) return;
+    layout->addSpacing(12);
+    auto* label = new QLabel(QStringLiteral("BANK"), owner);
+    label->setObjectName(QStringLiteral("BankStripLabel"));
+    layout->addWidget(label);
+    for (int bank = 0; bank < 4; ++bank) {
+        auto* button = new QPushButton(
+            QString(QChar(QLatin1Char('A').unicode() + bank)), owner);
+        button->setCheckable(true);
+        button->setFixedWidth(34);
+        button->setProperty("bankIndex", bank);
+        button->setProperty("looperStrip", looper);
+        w.bankViewButtons_.push_back(button);
+        layout->addWidget(button);
+        QObject::connect(button, &QPushButton::clicked, &w, [&w, bank] {
+            w.selectViewedBank(bank);
+        });
+    }
 }
 
 QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
@@ -1726,9 +1787,14 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     return page;
 }
 
-QWidget* MainWindowPages::buildMixPage(MainWindow& w)
+void MainWindowPages::buildAudioControls(MainWindow& w)
 {
+    // Some controls are subsequently reparented into the visible Performance
+    // transport. Keep the remaining implementation-only controls in one
+    // explicitly hidden owned container; this is not a workspace page.
     auto* page = new QWidget(&w);
+    page->setObjectName(QStringLiteral("AudioControlStorage"));
+    page->hide();
     auto* content = new QWidget(page);
     auto* layout = new QVBoxLayout(content);
     layout->setContentsMargins(18, 16, 18, 16);
@@ -1772,26 +1838,7 @@ QWidget* MainWindowPages::buildMixPage(MainWindow& w)
         label->setStyleSheet(QStringLiteral("font-weight: 600; margin-top: 8px;"));
         return label;
     };
-    w.mixJamRecordingRow_ = new QWidget(content);
-    auto* recordingLayout = new QHBoxLayout(w.mixJamRecordingRow_);
-    recordingLayout->setContentsMargins(0, 0, 0, 0);
-    recordingLayout->setSpacing(10);
-    auto* recordingName = new QLabel(QStringLiteral("Jam recording"), w.mixJamRecordingRow_);
-    recordingName->setMinimumWidth(120);
-    w.jamRecordingButton_ = new QPushButton(QStringLiteral("Start Recording Jam"), w.mixJamRecordingRow_);
-    w.jamRecordingLabel_ = new QLabel(QStringLiteral("Stopped"), w.mixJamRecordingRow_);
-    w.jamRecordingLabel_->setFrameShape(QFrame::StyledPanel);
-    w.jamRecordingLabel_->setMinimumWidth(180);
-    recordingLayout->addWidget(recordingName);
-    recordingLayout->addWidget(w.jamRecordingButton_);
-    recordingLayout->addWidget(w.jamRecordingLabel_, 1);
-    layout->addWidget(w.mixJamRecordingRow_);
-
     w.mixInputMeter_ = new LevelMeterWidget(page);
-    w.mixSendMeter_ = new LevelMeterWidget(page);
-    w.mixMonitorMeter_ = new LevelMeterWidget(page);
-    w.mixTrackMeter_ = new LevelMeterWidget(page);
-    w.mixMetronomeMeter_ = new LevelMeterWidget(page);
     w.mixOutputMeter_ = new LevelMeterWidget(page);
     w.mixRemotePeerMeter_ = new LevelMeterWidget(page);
     w.mixOutputClipLabel_ = makeValueLabel(QStringLiteral("clip 0"));
@@ -1815,14 +1862,6 @@ QWidget* MainWindowPages::buildMixPage(MainWindow& w)
 
     w.mixMonitorLevelLabel_ = makeValueLabel(QStringLiteral("+0.0 dB"));
 
-    w.trackLevelSlider_ = new QSlider(Qt::Horizontal, page);
-    w.trackLevelSlider_->setRange(-60, 12);
-    w.trackLevelSlider_->setValue(qRound(w.trackController_.model().trackGainDb));
-    applyJamSliderStyle(w.trackLevelSlider_);
-    w.trackLevelSlider_->setMinimumWidth(220);
-    w.trackLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    w.trackLevelDbLabel_ = makeValueLabel(dbText(w.trackController_.model().trackGainDb));
-
     w.metronomeLevelSlider_ = new QSlider(Qt::Horizontal, page);
     w.metronomeLevelSlider_->setRange(-60, 12);
     w.metronomeLevelSlider_->setValue(-10);
@@ -1833,15 +1872,6 @@ QWidget* MainWindowPages::buildMixPage(MainWindow& w)
     w.mixMetronomeLevelSlider_ = w.metronomeLevelSlider_;
     w.mixMetronomeLevelLabel_ = makeValueLabel(QStringLiteral("-10.0 dB"));
 
-    w.remoteLevelSlider_ = new QSlider(Qt::Horizontal, page);
-    w.remoteLevelSlider_->setRange(-60, 12);
-    w.remoteLevelSlider_->setValue(0);
-    applyJamSliderStyle(w.remoteLevelSlider_);
-    w.remoteLevelSlider_->setMinimumWidth(220);
-    w.remoteLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    w.mixRemotePeerSlider_ = w.remoteLevelSlider_;
-    w.mixRemotePeerLevelLabel_ = makeValueLabel(QStringLiteral("+0.0 dB"));
-
     w.masterOutputLevelSlider_ = new QSlider(Qt::Horizontal, page);
     w.masterOutputLevelSlider_->setRange(-60, 12);
     w.masterOutputLevelSlider_->setValue(0);
@@ -1851,17 +1881,12 @@ QWidget* MainWindowPages::buildMixPage(MainWindow& w)
         QSizePolicy::Expanding, QSizePolicy::Fixed);
     w.masterOutputLevelLabel_ = makeValueLabel(QStringLiteral("+0.0 dB"));
 
-    w.mixTrackLevelSlider_ = w.trackLevelSlider_;
-    w.mixTrackLevelLabel_ = w.trackLevelDbLabel_;
-
     w.mixLocalInputSection_ = makeSectionLabel(QStringLiteral("Local input"));
     w.mixInputMeterRow_ = makeMeterRow(QStringLiteral("Input"), w.mixInputMeter_);
     w.mixSendRow_ = makeRow(QStringLiteral("Send"), w.mixSendLevelSlider_, w.mixSendLevelLabel_);
-    w.mixSendMeterRow_ = makeMeterRow(QStringLiteral("Post-send"), w.mixSendMeter_);
     layout->addWidget(w.mixLocalInputSection_);
     layout->addWidget(w.mixInputMeterRow_);
     layout->addWidget(w.mixSendRow_);
-    layout->addWidget(w.mixSendMeterRow_);
 
     w.mixMonitorEnableRow_ = new QWidget(page);
     auto* monitorEnableLayout = new QHBoxLayout(w.mixMonitorEnableRow_);
@@ -1872,24 +1897,8 @@ QWidget* MainWindowPages::buildMixPage(MainWindow& w)
     monitorEnableLayout->addWidget(monitorName);
     monitorEnableLayout->addWidget(w.mixMonitorCheck_, 1);
     w.mixMonitorRow_ = makeRow(QStringLiteral("Monitor"), w.mixMonitorLevelSlider_, w.mixMonitorLevelLabel_);
-    w.mixMonitorMeterRow_ = makeMeterRow(QStringLiteral("Monitor meter"), w.mixMonitorMeter_);
     layout->addWidget(w.mixMonitorEnableRow_);
     layout->addWidget(w.mixMonitorRow_);
-    layout->addWidget(w.mixMonitorMeterRow_);
-
-    w.mixTrackSection_ = makeSectionLabel(QStringLiteral("Track"));
-    w.mixTrackRow_ = makeRow(QStringLiteral("Track"), w.trackLevelSlider_, w.trackLevelDbLabel_);
-    w.mixTrackMeterRow_ = makeMeterRow(QStringLiteral("Track meter"), w.mixTrackMeter_);
-    layout->addWidget(w.mixTrackSection_);
-    layout->addWidget(w.mixTrackRow_);
-    layout->addWidget(w.mixTrackMeterRow_);
-
-    w.mixMetronomeSection_ = makeSectionLabel(QStringLiteral("Metronome"));
-    w.mixMetronomeRow_ = makeRow(QStringLiteral("Metronome"), w.metronomeLevelSlider_, w.mixMetronomeLevelLabel_);
-    w.mixMetronomeMeterRow_ = makeMeterRow(QStringLiteral("Click meter"), w.mixMetronomeMeter_);
-    layout->addWidget(w.mixMetronomeSection_);
-    layout->addWidget(w.mixMetronomeRow_);
-    layout->addWidget(w.mixMetronomeMeterRow_);
 
     w.mixOutputSection_ = makeSectionLabel(QStringLiteral("Output"));
     w.mixOutputMeterRow_ = makeMeterRow(QStringLiteral("Main output"), w.mixOutputMeter_, w.mixOutputClipLabel_);
@@ -1897,28 +1906,6 @@ QWidget* MainWindowPages::buildMixPage(MainWindow& w)
     layout->addWidget(w.mixOutputSection_);
     layout->addWidget(w.mixOutputMeterRow_);
 
-    w.mixRemotePeersSection_ = makeSectionLabel(QStringLiteral("Remote peers"));
-    layout->addWidget(w.mixRemotePeersSection_);
-    w.mixRemotePeerRow_ = new QWidget(page);
-    auto* remoteLayout = new QVBoxLayout(w.mixRemotePeerRow_);
-    remoteLayout->setContentsMargins(0, 0, 0, 0);
-    remoteLayout->setSpacing(6);
-    remoteLayout->addWidget(makeRow(QStringLiteral("Remote mix"), w.remoteLevelSlider_, w.mixRemotePeerLevelLabel_));
-    remoteLayout->addWidget(makeMeterRow(QStringLiteral("Remote meter"), w.mixRemotePeerMeter_));
-    auto* peerList = new QWidget(w.mixRemotePeerRow_);
-    w.peerGainListContent_ = peerList;
-    w.mixRemotePeerListLayout_ = new QVBoxLayout(peerList);
-    w.peerGainListLayout_ = w.mixRemotePeerListLayout_;
-    w.mixRemotePeerListLayout_->setContentsMargins(0, 0, 0, 0);
-    w.mixRemotePeerListLayout_->setSpacing(4);
-    w.peerGainScroll_ = new QScrollArea(w.mixRemotePeerRow_);
-    w.peerGainScroll_->setWidgetResizable(true);
-    w.peerGainScroll_->setFrameShape(QFrame::NoFrame);
-    w.peerGainScroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    w.peerGainScroll_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    w.peerGainScroll_->setWidget(peerList);
-    remoteLayout->addWidget(w.peerGainScroll_);
-    layout->addWidget(w.mixRemotePeerRow_);
     layout->addStretch(1);
 
     auto* scroll = new QScrollArea(page);
@@ -1930,15 +1917,6 @@ QWidget* MainWindowPages::buildMixPage(MainWindow& w)
     pageLayout->setContentsMargins(0, 0, 0, 0);
     pageLayout->addWidget(scroll, 1);
 
-    QObject::connect(w.trackLevelSlider_, &QSlider::valueChanged, &w, [&w](int value) {
-        w.trackController_.model().trackGainDb = static_cast<double>(value);
-        if (w.trackLevelDbLabel_) {
-            w.trackLevelDbLabel_->setText(dbText(w.trackController_.model().trackGainDb));
-        }
-        if (w.jam2_.isRunning()) {
-            w.sendPreparedTrackLevel();
-        }
-    });
     QObject::connect(w.mixSendLevelSlider_, &QSlider::valueChanged, &w, [&w](int value) {
         if (w.mixSendLevelLabel_) {
             w.mixSendLevelLabel_->setText(dbText(static_cast<double>(value)));
@@ -1967,12 +1945,6 @@ QWidget* MainWindowPages::buildMixPage(MainWindow& w)
                 QStringLiteral("metronome level"));
         }
     });
-    QObject::connect(w.remoteLevelSlider_, &QSlider::valueChanged, &w, [&w](int value) {
-        if (w.mixRemotePeerLevelLabel_) {
-            w.mixRemotePeerLevelLabel_->setText(dbText(static_cast<double>(value)));
-        }
-        w.updateRuntimeControls();
-    });
     QObject::connect(
         w.masterOutputLevelSlider_,
         &QSlider::valueChanged,
@@ -1988,15 +1960,14 @@ QWidget* MainWindowPages::buildMixPage(MainWindow& w)
                     QStringLiteral("master output level"));
             }
         });
-    QObject::connect(w.jamRecordingButton_, &QPushButton::clicked, &w, [&w] {
-        if (w.trackRecordingWorkflow_.jamRecordingActive()) {
-            w.stopJamRecording();
-        } else {
-            w.startJamRecording();
-        }
-    });
     w.updateMixControls();
     w.updateMixRemotePeers();
     w.updateJamRecordingControls();
-    return page;
+    // These controls remain the single owners of audio state used by the
+    // Performance surface and runtime update path. Deleting this storage
+    // container leaves MainWindow's control pointers dangling; the first
+    // session snapshot then dereferences freed Qt widgets and can crash in
+    // Qt6Widgets. It is deliberately not inserted into the workspace stack.
+    page->hide();
+    return;
 }

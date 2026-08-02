@@ -114,6 +114,7 @@ enum class EngineCommandType : std::uint8_t {
     ScheduleTransport,
     CancelTransport,
     LoadPreparedTrack,
+    UnloadPreparedTrack,
     PreparedPlay,
     PreparedStop,
     PreparedSeek,

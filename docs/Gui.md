@@ -144,14 +144,22 @@ Melodies are chord-aware vocal-like instrumental phrases where the profile is
 vocal-centred. Bass and support remain independent editable parts rather than
 slash-chord or melody metadata.
 
-Both Chord and Beat pages expose **Generate...**, **Generate Reference WAVs...**,
+The performance view plus both Chord and Beat pages expose **Continue Idea...**.
+It defaults from the viewed bank to the next empty bank, analyses the source
+harmony, tonal centre, groove anchors, and melodic rhythm, then selects a
+related-but-contrasting continuation while preserving the source bank, tempo,
+meter, and mode. The two-bank dialog can target any other bank. The selected
+relationship and raw chord/groove/melody similarity measurements are retained
+in Idea Details and the diagnostic log.
+
+Both Chord and Beat pages also expose **Generate...**, **Generate Reference WAVs...**,
 and **Idea Details...**. Idea Details opens in a practical teaching view that
 explains the style, form, groove, part relationships, complexity choices, and
 ways to try the idea in a jam. **Detailed Analysis** switches to the complete
 seed, recipe, native-form sections, theory decisions, role events,
 articulations, per-lane timing, automation, and numeric synthesis parameters.
 It warns when the current grid differs from the stored generated result.
-Generated recipes use the research-based version-6 schema exclusively. Earlier
+Generated recipes use the research-based version-7 schema exclusively. Earlier
 generated recipe versions are rejected; there is no Mood/Character migration or
 fallback generation path. Manual songs without generated metadata remain valid.
 
@@ -178,19 +186,35 @@ Quarter shows `1.1 2.1 3.1 4.1`, Eighth shows `1.1 1.3 2.1 2.3`,
 
 The Track tab can:
 
-- Manage four looper banks.
-- Add PCM16 WAV lanes to the active bank.
+- Manage the fixed Banks A-D. Chord, beat, lyric, and looper editors all show
+  one locally selected bank at a time without changing the live bank.
+- Add PCM16 WAV lanes to the selected bank.
 - Add empty lanes and arm a lane for recording. Perform input takes are recorded
   by the persistent engine through typed in-process commands; loopback takes
   are recorded by the GUI.
 - Use a stacked lane editor with inline mute, solo, record-arm, gain, rename, remove, drag, and edge-crop controls.
 - Read bar numbers at the top of the lane timeline while retaining a vertical grid line and snap point for every beat.
-- Render the active bank to a prepared mono PCM16 cache.
+- Render each bank to its own exact-section-length mono PCM16 cache.
 - In Perform mode, load that prepared cache into the engine and control play/stop/level there.
 - Sync collaborative arrangement snapshots and missing managed WAV assets by content hash when Track Sync is enabled.
 - Use **Share Tracks** to explicitly reconcile all asset-backed local lanes with the jam.
 
 Perform prepared-cache playback uses the engine's ASIO/CoreAudio output path. Prepared caches must match the active engine sample rate; offline resampling is deferred.
+
+The Performance bank strip launches a bank. While Global Play is running, a
+shared launch first prepares the target on every participating peer, then the
+creator publishes one absolute beat from the continuous UDP grid. All peers
+start that bank from source `1.1` on the same safe bar without replacing the
+grid epoch; an empty bank switches the shared visual position and contributes
+silence. Track Sync disabled makes bank launches and arrangements local. A peer
+with Track Sync disabled acknowledges but does not join a shared transition, so
+it cannot hold the other peers behind the 30-second preparation deadline.
+
+The Looper Arrangement dialog stores up to 64 Bank/Repeat rows plus an optional
+loop. Save updates the project definition; Start begins at row one, Stop returns
+the dialog to editing, and manual bank launch stops the running arrangement.
+Transitions use section lengths and exact shared-grid boundaries rather than a
+wall-clock timer. Performance shows LIVE, NEXT, and current arrangement state.
 
 Generated practice reference WAVs remain local after rendering, even during an
 active jam. They are saved with the local project and omitted from arrangement
@@ -224,15 +248,21 @@ Perform recording waits for the next safe beat of the continuous epoch, performs
 the requested count-in bars, and then starts the prepared backing, recording,
 and track-relative song markers together at `1.1`. The UDP epoch is not reset.
 A manual Stop finishes at the next whole bar so the imported take remains
-bar-aligned. Song markers advance only while the global prepared backing (or
-the recording started with it) is playing; the scheduling grid continues
-silently underneath.
+bar-aligned. Global Play starts the track-relative song markers on the next
+beat even when no prepared WAV exists. A prepared WAV is optional audio: if it
+becomes available while Global Play is running, it joins on a later beat at the
+corresponding song position without resetting `1.1` or the metronome accent.
+The scheduling grid continues silently underneath while Global Play is stopped.
 
 ## Track Recording From The GUI
 
 The GUI records Perform Input takes through the already-loaded local or network
 engine and records System Loopback takes internally, then imports the resulting
-WAV into the armed Track lane. Perform Input therefore has no separate device,
+WAV into the armed Track lane. **Current Jam** records local input plus received
+peer audio at the local endpoint; backing audio and the local metronome are
+optional and disabled by default. A leader-audio click embedded in received
+peer audio cannot be separated and is identified in the recording dialog.
+Perform Input therefore has no separate device,
 channel, sample-rate, or buffer selector. It exposes bar-limit/stop behavior,
 count-in and metronome behavior, and manual latency adjustment. System Loopback
 instead exposes its preferred source, bar-limit/stop behavior, trigger,
@@ -273,6 +303,15 @@ Jam2 applies offline band-limited resampling before writing the WAV, so a
 The completion log reports both rates, frame counts, and the conversion ratio.
 If a jam contract and its engine rate ever disagree, recording is refused
 instead of creating a WAV that the active project cannot load.
+
+Every new jam receives a two-word display name. Managed paths replace spaces
+with underscores: an unsaved `Purple Orbit` jam writes beneath
+`release/tracks/Purple_Orbit`, with generated, received, imported, recorded,
+prepared, and jam-recording subfolders. Saving moves that workspace to
+`release/songs/Purple_Orbit/Purple_Orbit.jamjar`; JamJar files retain the same
+JSON project representation and use relative paths to their adjacent assets.
+The Performance people rail exposes **Record Jam**, whose default folders are
+`Take-1`, `Take-2`, and so on.
 
 The Arm dialog identifies its target by stable bank and lane IDs. If a synchronized arrangement update removes that lane or switches the active bank while the dialog is open, arming is cancelled with a warning instead of using stale lane storage.
 

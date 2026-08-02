@@ -130,6 +130,8 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/GuiControlMessageRouter.hpp
     gui/GuiPresentation.cpp
     gui/GuiPresentation.hpp
+    gui/JamStorage.cpp
+    gui/JamStorage.hpp
     gui/GenerationRecipe.cpp
     gui/GenerationRecipe.hpp
     gui/LooperProject.cpp

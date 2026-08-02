@@ -33,6 +33,16 @@ QString sha256FileHex(const QString& path)
     return QString::fromLatin1(hash.result().toHex());
 }
 
+bool isManagedPracticeReference(const LooperLane& lane)
+{
+    return !lane.referenceKind.isEmpty() ||
+        lane.name == QStringLiteral("Practice Chords") ||
+        lane.name == QStringLiteral("Practice Drums") ||
+        lane.name == QStringLiteral("Practice Melody") ||
+        lane.name == QStringLiteral("Practice Bass") ||
+        lane.name == QStringLiteral("Practice Support");
+}
+
 } // namespace
 
 WavMetadata readWavMetadata(const QString& path)
@@ -57,7 +67,8 @@ WavMetadata readWavMetadata(const QString& path)
 StagedPcm16Asset stagePcm16Asset(
     const QString& sourcePath,
     const QString& stagingFolder,
-    int expectedSampleRate)
+    int expectedSampleRate,
+    const QString& assetFolder)
 {
     StagedPcm16Asset result;
     const QFileInfo sourceInfo(sourcePath);
@@ -82,8 +93,14 @@ StagedPcm16Asset stagePcm16Asset(
         return result;
     }
     result.sha256 = result.metadata.sha256;
+    const QString managedFolder = QDir(stagingFolder).absoluteFilePath(assetFolder);
+    if (assetFolder == QStringLiteral("recorded") &&
+        QDir::cleanPath(sourceInfo.absolutePath()) == QDir::cleanPath(managedFolder)) {
+        result.stagedPath = result.sourcePath;
+        return result;
+    }
     result.stagedPath = QDir(stagingFolder).absoluteFilePath(
-        QStringLiteral("wavs/") + result.sha256 + QStringLiteral(".wav"));
+        assetFolder + QLatin1Char('/') + result.sha256 + QStringLiteral(".wav"));
     if (!QDir().mkpath(QFileInfo(result.stagedPath).absolutePath())) {
         result.error = QStringLiteral("could not create the WAV staging folder");
         return result;
@@ -132,6 +149,7 @@ int mergeQuarantinedLocalLanes(
             const bool incompatible =
                 expectedSampleRate > 0 && local.sampleRate != expectedSampleRate;
             if (local.assetPath.trimmed().isEmpty() ||
+                isManagedPracticeReference(local) ||
                 (!local.localOnly && !incompatible)) {
                 continue;
             }

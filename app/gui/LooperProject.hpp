@@ -4,6 +4,8 @@
 #include <QString>
 #include <QVector>
 
+#include <cstdint>
+
 struct LooperLane {
     QString id;
     QString assetPath;
@@ -26,9 +28,33 @@ struct LooperLane {
     bool localOnly = false;
 };
 
+struct LooperBankTiming {
+    int bpm = 80;
+    int beatsPerBar = 4;
+    int beatUnit = 4;
+    int tempoPulseUnits = 1;
+    int division = 1;
+    std::uint64_t playMaskLow = 0x0fULL;
+    std::uint64_t playMaskHigh = 0;
+    std::uint64_t accentMaskLow = 0x01ULL;
+    std::uint64_t accentMaskHigh = 0;
+    bool inheritsBankA = false;
+};
+
 struct LooperBank {
     QString id;
     QVector<LooperLane> lanes;
+    LooperBankTiming timing;
+};
+
+struct ArrangementStep {
+    int bankIndex = 0;
+    int repeats = 1;
+};
+
+struct ArrangementDefinition {
+    QVector<ArrangementStep> steps;
+    bool loop = true;
 };
 
 class LooperProject {
@@ -43,6 +69,11 @@ public:
     void setGridLockEnabled(bool enabled);
     bool trackSyncEnabled() const;
     void setTrackSyncEnabled(bool enabled);
+    LooperBankTiming resolvedTiming(int bankIndex) const;
+    bool setTiming(int bankIndex, LooperBankTiming timing);
+    bool hasSerializedTiming() const;
+    const ArrangementDefinition& arrangement() const;
+    bool setArrangement(ArrangementDefinition arrangement);
 
     // These are the only mutations the track UI and sync layer need.  Keeping
     // them here preserves the four-bank invariant and the lane order that is
@@ -60,4 +91,6 @@ private:
     int activeBankIndex_ = 0;
     bool gridLockEnabled_ = true;
     bool trackSyncEnabled_ = true;
+    bool hasSerializedTiming_ = true;
+    ArrangementDefinition arrangement_;
 };

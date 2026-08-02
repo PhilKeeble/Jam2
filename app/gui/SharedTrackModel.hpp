@@ -12,7 +12,7 @@ struct SharedTrackModel {
     int durationMs = 0;
     QString sha256;
     double guessedBpm = 0.0;
-    double acceptedBpm = 120.0;
+    double acceptedBpm = 80.0;
     QString key = QStringLiteral("Unknown");
     double speed = 1.0;
     int pitchCents = 0;

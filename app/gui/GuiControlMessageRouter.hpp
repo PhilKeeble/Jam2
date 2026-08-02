@@ -18,7 +18,6 @@ public:
         BeatGridModel* lyricModel = nullptr;
         std::function<void(const QString&)> refreshSongView;
         std::function<void(const QJsonObject&, const QString&)> songSet;
-        std::function<void(const QJsonObject&, const QString&)> trackReady;
         std::function<void(const QJsonObject&)> shareLocalTracks;
         std::function<void(const QJsonObject&, const QString&)> trackBatchOffer;
         std::function<void(const QJsonObject&)> trackBatchComplete;

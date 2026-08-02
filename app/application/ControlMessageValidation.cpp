@@ -327,6 +327,30 @@ bool validateRemoteLooper(const QJsonObject& looper, QString& reason)
             }
         }
     }
+    const QJsonValue arrangementValue = looper.value(QStringLiteral("arrangement"));
+    if (!arrangementValue.isUndefined()) {
+        if (!arrangementValue.isObject()) {
+            reason = QStringLiteral("song arrangement is not an object");
+            return false;
+        }
+        const QJsonObject arrangement = arrangementValue.toObject();
+        const QJsonArray steps = arrangement.value(QStringLiteral("steps")).toArray();
+        if (!isBoundedInteger(arrangement.value(QStringLiteral("version")), 1, 1) ||
+            !arrangement.value(QStringLiteral("loop")).isBool() ||
+            !arrangement.value(QStringLiteral("steps")).isArray() || steps.size() > 64) {
+            reason = QStringLiteral("song arrangement header is invalid");
+            return false;
+        }
+        for (const QJsonValue& value : steps) {
+            const QJsonObject step = value.toObject();
+            if (!value.isObject() ||
+                !isBoundedInteger(step.value(QStringLiteral("bank")), 0, 3) ||
+                !isBoundedInteger(step.value(QStringLiteral("repeats")), 1, 64)) {
+                reason = QStringLiteral("song arrangement step is invalid");
+                return false;
+            }
+        }
+    }
     return true;
 }
 
@@ -351,13 +375,18 @@ bool validateRemoteSong(const QJsonObject& song, QString& reason)
 bool jam2::application::isTrackSyncControlMessageType(const QString& type) noexcept
 {
     return type == QStringLiteral("song.set") ||
-        type == QStringLiteral("track.ready") ||
+        type == QStringLiteral("practice.references.render") ||
         type == QStringLiteral("looper.track.share.request") ||
         type == QStringLiteral("looper.track.batch.offer") ||
         type == QStringLiteral("looper.track.batch.complete") ||
         type == QStringLiteral("looper.asset.request") ||
         type == QStringLiteral("looper.asset.start") ||
-        type == QStringLiteral("looper.asset.done");
+        type == QStringLiteral("looper.asset.done") ||
+        type == QStringLiteral("bank.request") ||
+        type == QStringLiteral("bank.prepare") ||
+        type == QStringLiteral("bank.ready") ||
+        type == QStringLiteral("bank.cancel") ||
+        type == QStringLiteral("bank.switch");
 }
 
 bool jam2::application::isEditorControlMessageType(const QString& type) noexcept
@@ -372,7 +401,8 @@ bool jam2::application::isEditorControlMessageType(const QString& type) noexcept
 
 bool jam2::application::isArrangementControlMessageType(const QString& type) noexcept
 {
-    return type == QStringLiteral("song.set");
+    return type == QStringLiteral("song.set") ||
+        type == QStringLiteral("bank.switch");
 }
 
 bool jam2::application::validateControlMessage(
@@ -458,7 +488,7 @@ bool jam2::application::validateControlMessage(
     }
     if (type == QStringLiteral("beat.set")) {
         const QString lane = message.value(QStringLiteral("lane")).toString();
-        return isBoundedInteger(message.value(QStringLiteral("section")), 0, 63) &&
+        return isBoundedInteger(message.value(QStringLiteral("section")), 0, 3) &&
             isBoundedInteger(message.value(QStringLiteral("beat")), 0, 511) &&
             (lane == QStringLiteral("chord") || lane == QStringLiteral("target") ||
              lane == QStringLiteral("beat") ||
@@ -469,12 +499,12 @@ bool jam2::application::validateControlMessage(
     if (type == QStringLiteral("grid.resize")) {
         const QString lane = message.value(QStringLiteral("lane")).toString();
         return (lane == QStringLiteral("chord") || lane == QStringLiteral("beat")) &&
-            isBoundedInteger(message.value(QStringLiteral("section")), 0, 63) &&
+            isBoundedInteger(message.value(QStringLiteral("section")), 0, 3) &&
             isBoundedInteger(message.value(QStringLiteral("beats")), 4, 512)
             ? true : (reason = QStringLiteral("grid resize is invalid"), false);
     }
     if (type == QStringLiteral("beat.hit")) {
-        return isBoundedInteger(message.value(QStringLiteral("section")), 0, 63) &&
+        return isBoundedInteger(message.value(QStringLiteral("section")), 0, 3) &&
             isBoundedInteger(message.value(QStringLiteral("beat")), 0, 511) &&
             isBoundedInteger(
                 message.value(QStringLiteral("lane")),
@@ -485,21 +515,21 @@ bool jam2::application::validateControlMessage(
     }
     if (type == QStringLiteral("beat.division")) {
         const int division = message.value(QStringLiteral("division")).toInt(-1);
-        return isBoundedInteger(message.value(QStringLiteral("section")), 0, 63) &&
+        return isBoundedInteger(message.value(QStringLiteral("section")), 0, 3) &&
             isBoundedInteger(message.value(QStringLiteral("beat")), 0, 511) &&
             QList<int>{1, 2, 3, 4, 6, 8}.contains(division)
             ? true : (reason = QStringLiteral("beat division is invalid"), false);
     }
     if (type == QStringLiteral("music.division")) {
         const int division = message.value(QStringLiteral("division")).toInt(-1);
-        return isBoundedInteger(message.value(QStringLiteral("section")), 0, 63) &&
+        return isBoundedInteger(message.value(QStringLiteral("section")), 0, 3) &&
             isBoundedInteger(message.value(QStringLiteral("beat")), 0, 511) &&
             QList<int>{1, 2, 4, 3}.contains(division)
             ? true : (reason = QStringLiteral("musical division is invalid"), false);
     }
     if (type == QStringLiteral("music.step")) {
         const QString lane = message.value(QStringLiteral("lane")).toString();
-        return isBoundedInteger(message.value(QStringLiteral("section")), 0, 63) &&
+        return isBoundedInteger(message.value(QStringLiteral("section")), 0, 3) &&
             isBoundedInteger(message.value(QStringLiteral("beat")), 0, 511) &&
             isBoundedInteger(message.value(QStringLiteral("step")), 0, 3) &&
             (lane == QStringLiteral("chord") || lane == QStringLiteral("melody") ||
@@ -528,12 +558,42 @@ bool jam2::application::validateControlMessage(
         }
         return validateRemoteSong(songValue.toObject(), reason);
     }
-    if (type == QStringLiteral("track.ready")) {
-        return isBoundedInteger(
-            message.value(QStringLiteral("arrangement_revision")),
-            1,
-            (std::numeric_limits<int>::max)())
-            ? true : (reason = QStringLiteral("track readiness revision is invalid"), false);
+    if (type == QStringLiteral("practice.references.render")) {
+        const bool anyPart =
+            message.value(QStringLiteral("render_chords")).toBool(false) ||
+            message.value(QStringLiteral("render_drums")).toBool(false) ||
+            message.value(QStringLiteral("render_melody")).toBool(false) ||
+            message.value(QStringLiteral("render_bass")).toBool(false) ||
+            message.value(QStringLiteral("render_support")).toBool(false);
+        return isUuid(message.value(QStringLiteral("request_id")).toString()) &&
+            isSha256Hex(message.value(QStringLiteral("render_signature"))
+                .toString().toLower()) &&
+            message.value(QStringLiteral("render_chords")).isBool() &&
+            message.value(QStringLiteral("render_drums")).isBool() &&
+            message.value(QStringLiteral("render_melody")).isBool() &&
+            message.value(QStringLiteral("render_bass")).isBool() &&
+            message.value(QStringLiteral("render_support")).isBool() && anyPart
+            ? true : (reason = QStringLiteral("reference render request is invalid"), false);
+    }
+    if (type == QStringLiteral("bank.request")) {
+        return isBoundedInteger(message.value(QStringLiteral("bank")), 0, 3)
+            ? true : (reason = QStringLiteral("bank transition is invalid"), false);
+    }
+    if (type == QStringLiteral("bank.prepare") ||
+        type == QStringLiteral("bank.ready") ||
+        type == QStringLiteral("bank.cancel")) {
+        return isBoundedInteger(message.value(QStringLiteral("bank")), 0, 3) &&
+            isUuid(message.value(QStringLiteral("switch_id")).toString())
+            ? true : (reason = QStringLiteral("bank preparation is invalid"), false);
+    }
+    if (type == QStringLiteral("bank.switch")) {
+        bool targetOk = false;
+        const quint64 targetBeat = message.value(QStringLiteral("target_abs_beat"))
+            .toString().toULongLong(&targetOk);
+        return isBoundedInteger(message.value(QStringLiteral("bank")), 0, 3) &&
+            isUuid(message.value(QStringLiteral("switch_id")).toString()) &&
+            targetOk && targetBeat <= (std::numeric_limits<qint64>::max)()
+            ? true : (reason = QStringLiteral("bank transition is invalid"), false);
     }
     if (type == QStringLiteral("looper.track.share.request")) {
         return isUuid(message.value(QStringLiteral("batch_id")).toString())
@@ -625,10 +685,15 @@ jam2::application::ControlMessageDecision jam2::application::evaluateControlMess
         type == QStringLiteral("session.heartbeat") ||
         type == QStringLiteral("session.end") ||
         type == QStringLiteral("looper.track.share.request") ||
-        type == QStringLiteral("looper.track.batch.complete");
+        type == QStringLiteral("looper.track.batch.complete") ||
+        type == QStringLiteral("bank.prepare") ||
+        type == QStringLiteral("bank.cancel") ||
+        type == QStringLiteral("bank.switch");
     const bool peerOnly = type == QStringLiteral("session.heartbeat.ack") ||
         type == QStringLiteral("session.endpoint.update") ||
-        type == QStringLiteral("looper.track.batch.offer");
+        type == QStringLiteral("looper.track.batch.offer") ||
+        type == QStringLiteral("bank.ready") ||
+        type == QStringLiteral("bank.request");
     const bool internalOnly = type == QStringLiteral("debug.lifecycle.disconnect");
 
     const bool authorized = internalOnly

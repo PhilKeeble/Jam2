@@ -1,5 +1,6 @@
 #include "LooperProject.hpp"
 #include "ContentLimits.hpp"
+#include "metronome.hpp"
 
 #include <QJsonArray>
 #include <QJsonValue>
@@ -69,12 +70,51 @@ bool validJsonFrameValue(const QJsonValue& value)
         number >= static_cast<double>(std::numeric_limits<qint64>::min()) &&
         number <= static_cast<double>(std::numeric_limits<qint64>::max());
 }
+
+std::uint64_t jsonMask(const QJsonObject& object, const char* key, std::uint64_t fallback)
+{
+    const QJsonValue value = object.value(QString::fromLatin1(key));
+    if (!value.isString()) return fallback;
+    bool ok = false;
+    const qulonglong parsed = value.toString().toULongLong(&ok);
+    return ok ? static_cast<std::uint64_t>(parsed) : fallback;
+}
+
+LooperBankTiming sanitizedTiming(LooperBankTiming timing, bool allowInheritance)
+{
+    jam2::metronome::PatternSnapshot pattern;
+    pattern.bpm = timing.bpm;
+    pattern.beats_per_bar = timing.beatsPerBar;
+    pattern.beat_unit = timing.beatUnit;
+    pattern.tempo_pulse_units = timing.tempoPulseUnits;
+    pattern.division = timing.division;
+    pattern.play_mask_low = timing.playMaskLow;
+    pattern.play_mask_high = timing.playMaskHigh;
+    pattern.accent_mask_low = timing.accentMaskLow;
+    pattern.accent_mask_high = timing.accentMaskHigh;
+    pattern = jam2::metronome::sanitize(pattern);
+    timing.bpm = pattern.bpm;
+    timing.beatsPerBar = pattern.beats_per_bar;
+    timing.beatUnit = pattern.beat_unit;
+    timing.tempoPulseUnits = pattern.tempo_pulse_units;
+    timing.division = pattern.division;
+    timing.playMaskLow = pattern.play_mask_low;
+    timing.playMaskHigh = pattern.play_mask_high;
+    timing.accentMaskLow = pattern.accent_mask_low;
+    timing.accentMaskHigh = pattern.accent_mask_high;
+    timing.inheritsBankA = allowInheritance && timing.inheritsBankA;
+    return timing;
+}
 }
 
 LooperProject::LooperProject()
 {
+    int index = 0;
     for (const QChar bank : {QLatin1Char('A'), QLatin1Char('B'), QLatin1Char('C'), QLatin1Char('D')}) {
-        banks_.append(LooperBank{QString(bank), {}});
+        LooperBankTiming timing;
+        timing.inheritsBankA = index > 0;
+        banks_.append(LooperBank{QString(bank), {}, timing});
+        ++index;
     }
 }
 
@@ -86,6 +126,35 @@ bool LooperProject::gridLockEnabled() const { return gridLockEnabled_; }
 void LooperProject::setGridLockEnabled(bool enabled) { gridLockEnabled_ = enabled; }
 bool LooperProject::trackSyncEnabled() const { return trackSyncEnabled_; }
 void LooperProject::setTrackSyncEnabled(bool enabled) { trackSyncEnabled_ = enabled; }
+LooperBankTiming LooperProject::resolvedTiming(int bankIndex) const
+{
+    const int bounded = qBound(0, bankIndex, banks_.size() - 1);
+    if (bounded > 0 && banks_.at(bounded).timing.inheritsBankA) {
+        LooperBankTiming timing = banks_.front().timing;
+        timing.inheritsBankA = true;
+        return timing;
+    }
+    return banks_.at(bounded).timing;
+}
+bool LooperProject::setTiming(int bankIndex, LooperBankTiming timing)
+{
+    if (bankIndex < 0 || bankIndex >= banks_.size()) return false;
+    banks_[bankIndex].timing = sanitizedTiming(std::move(timing), bankIndex > 0);
+    hasSerializedTiming_ = true;
+    return true;
+}
+bool LooperProject::hasSerializedTiming() const { return hasSerializedTiming_; }
+const ArrangementDefinition& LooperProject::arrangement() const { return arrangement_; }
+bool LooperProject::setArrangement(ArrangementDefinition arrangement)
+{
+    if (arrangement.steps.size() > 64) return false;
+    for (const ArrangementStep& step : arrangement.steps) {
+        if (step.bankIndex < 0 || step.bankIndex >= kBankCount ||
+            step.repeats < 1 || step.repeats > 64) return false;
+    }
+    arrangement_ = std::move(arrangement);
+    return true;
+}
 bool LooperProject::appendLane(int bankIndex, LooperLane lane)
 {
     if (bankIndex < 0 || bankIndex >= banks_.size() || banks_[bankIndex].lanes.size() >= kMaxLanesPerBank ||
@@ -176,10 +245,39 @@ QJsonObject LooperProject::toJson(bool syncCompatibleOnly) const
             }
             lanes.append(std::move(laneObject));
         }
-        banks.append(QJsonObject{{"id", bank.id}, {"lanes", lanes}});
+        const LooperBankTiming timing = bank.timing;
+        banks.append(QJsonObject{
+            {"id", bank.id},
+            {"lanes", lanes},
+            {"timing", QJsonObject{
+                {"version", 1},
+                {"inherits_bank_a", timing.inheritsBankA},
+                {"bpm", timing.bpm},
+                {"beats_per_bar", timing.beatsPerBar},
+                {"beat_unit", timing.beatUnit},
+                {"tempo_pulse_units", timing.tempoPulseUnits},
+                {"division", timing.division},
+                {"play_mask_low", QString::number(timing.playMaskLow)},
+                {"play_mask_high", QString::number(timing.playMaskHigh)},
+                {"accent_mask_low", QString::number(timing.accentMaskLow)},
+                {"accent_mask_high", QString::number(timing.accentMaskHigh)},
+            }},
+        });
+    }
+    QJsonArray arrangementSteps;
+    for (const ArrangementStep& step : arrangement_.steps) {
+        arrangementSteps.append(QJsonObject{
+            {QStringLiteral("bank"), step.bankIndex},
+            {QStringLiteral("repeats"), step.repeats},
+        });
     }
     return QJsonObject{{"active_bank", activeBankIndex_}, {"grid_lock", gridLockEnabled_},
-        {"banks", banks}};
+        {"banks", banks},
+        {"arrangement", QJsonObject{
+            {QStringLiteral("version"), 1},
+            {QStringLiteral("loop"), arrangement_.loop},
+            {QStringLiteral("steps"), arrangementSteps},
+        }}};
 }
 
 bool LooperProject::loadJson(const QJsonObject& object)
@@ -187,13 +285,36 @@ bool LooperProject::loadJson(const QJsonObject& object)
     const QJsonArray savedBanks = object.value(QStringLiteral("banks")).toArray();
     if (savedBanks.size() != kBankCount) return false;
     QVector<LooperBank> loaded;
+    bool loadedTiming = true;
     for (int i = 0; i < savedBanks.size(); ++i) {
         const QJsonObject bankObject = savedBanks.at(i).toObject();
         const QString bankId = bankObject.value(QStringLiteral("id")).toString(QString(QChar('A' + i)));
         if (!validBankId(bankId, i)) {
             return false;
         }
-        LooperBank bank{bankId, {}};
+        LooperBankTiming bankTiming;
+        bankTiming.inheritsBankA = i > 0;
+        const QJsonValue timingValue = bankObject.value(QStringLiteral("timing"));
+        if (timingValue.isUndefined()) {
+            loadedTiming = false;
+        } else {
+            if (!timingValue.isObject()) return false;
+            const QJsonObject timing = timingValue.toObject();
+            if (timing.value(QStringLiteral("version")).toInt() != 1) return false;
+            bankTiming.bpm = timing.value(QStringLiteral("bpm")).toInt(120);
+            bankTiming.beatsPerBar = timing.value(QStringLiteral("beats_per_bar")).toInt(4);
+            bankTiming.beatUnit = timing.value(QStringLiteral("beat_unit")).toInt(4);
+            bankTiming.tempoPulseUnits = timing.value(QStringLiteral("tempo_pulse_units")).toInt(1);
+            bankTiming.division = timing.value(QStringLiteral("division")).toInt(1);
+            bankTiming.playMaskLow = jsonMask(timing, "play_mask_low", 0x0fULL);
+            bankTiming.playMaskHigh = jsonMask(timing, "play_mask_high", 0);
+            bankTiming.accentMaskLow = jsonMask(timing, "accent_mask_low", 0x01ULL);
+            bankTiming.accentMaskHigh = jsonMask(timing, "accent_mask_high", 0);
+            bankTiming.inheritsBankA = i > 0 &&
+                timing.value(QStringLiteral("inherits_bank_a")).toBool(false);
+            bankTiming = sanitizedTiming(std::move(bankTiming), i > 0);
+        }
+        LooperBank bank{bankId, {}, bankTiming};
         const QJsonArray savedLanes = bankObject.value(QStringLiteral("lanes")).toArray();
         if (savedLanes.size() > kMaxLanesPerBank) {
             return false;
@@ -277,7 +398,33 @@ bool LooperProject::loadJson(const QJsonObject& object)
         }
         loaded.append(std::move(bank));
     }
+    ArrangementDefinition arrangement;
+    const QJsonValue arrangementValue = object.value(QStringLiteral("arrangement"));
+    if (!arrangementValue.isUndefined()) {
+        if (!arrangementValue.isObject()) return false;
+        const QJsonObject savedArrangement = arrangementValue.toObject();
+        const QJsonValue version = savedArrangement.value(QStringLiteral("version"));
+        const QJsonValue loop = savedArrangement.value(QStringLiteral("loop"));
+        const QJsonValue steps = savedArrangement.value(QStringLiteral("steps"));
+        if (!version.isDouble() || version.toInt() != 1 ||
+            !loop.isBool() || !steps.isArray() || steps.toArray().size() > 64) return false;
+        arrangement.loop = loop.toBool(true);
+        for (const QJsonValue& stepValue : steps.toArray()) {
+            if (!stepValue.isObject()) return false;
+            const QJsonObject step = stepValue.toObject();
+            const QJsonValue bank = step.value(QStringLiteral("bank"));
+            const QJsonValue repeats = step.value(QStringLiteral("repeats"));
+            if (!bank.isDouble() || !repeats.isDouble() ||
+                bank.toDouble() != std::floor(bank.toDouble()) ||
+                repeats.toDouble() != std::floor(repeats.toDouble()) ||
+                bank.toInt() < 0 || bank.toInt() >= kBankCount ||
+                repeats.toInt() < 1 || repeats.toInt() > 64) return false;
+            arrangement.steps.push_back(ArrangementStep{bank.toInt(), repeats.toInt()});
+        }
+    }
     banks_ = std::move(loaded);
+    hasSerializedTiming_ = loadedTiming;
+    arrangement_ = std::move(arrangement);
     setActiveBankIndex(object.value(QStringLiteral("active_bank")).toInt());
     gridLockEnabled_ = object.value(QStringLiteral("grid_lock")).toBool(true);
     return true;

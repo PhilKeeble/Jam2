@@ -26,6 +26,7 @@
 #include "SharedTrackModel.hpp"
 #include "GuiLoopbackRecorder.hpp"
 #include "GuiPresentation.hpp"
+#include "JamStorage.hpp"
 #include "RecordingTiming.hpp"
 
 #include "common.hpp"
@@ -133,9 +134,9 @@ void appendLittleEndian(QByteArray& bytes, T value)
         static_cast<qsizetype>(sizeof(encoded)));
 }
 
-QByteArray minimalPcm16Wav()
+QByteArray pcm16Wav(quint32 frames)
 {
-    constexpr quint32 dataBytes = 4;
+    const quint32 dataBytes = frames * 2;
     QByteArray bytes;
     bytes.append("RIFF", 4);
     appendLittleEndian<quint32>(bytes, 36 + dataBytes);
@@ -149,9 +150,16 @@ QByteArray minimalPcm16Wav()
     appendLittleEndian<quint16>(bytes, 16);
     bytes.append("data", 4);
     appendLittleEndian<quint32>(bytes, dataBytes);
-    appendLittleEndian<qint16>(bytes, 0);
-    appendLittleEndian<qint16>(bytes, 1);
+    for (quint32 frame = 0; frame < frames; ++frame) {
+        appendLittleEndian<qint16>(bytes, static_cast<qint16>(
+            frame % 2 == 0 ? 1000 : -1000));
+    }
     return bytes;
+}
+
+QByteArray minimalPcm16Wav()
+{
+    return pcm16Wav(2);
 }
 
 std::filesystem::path nativeFilePath(const QString& path)
@@ -1063,6 +1071,1305 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             names.contains(QStringLiteral("Bossa Nova")));
         record(QStringLiteral("practice.v7-catalog-grooves-are-profile-routed"),
             grooveCatalogValid && grooveCatalogIds.size() >= 30);
+        {
+            const QStringList everyMeter =
+                jam2::practice::compatibleMeterIds(QString(), QString());
+            bool constrainedGenerationValid = everyMeter.contains(QStringLiteral("4-4"));
+            for (int styleIndex = 0;
+                 styleIndex < ids.size() && constrainedGenerationValid;
+                 ++styleIndex) {
+                const QStringList available = jam2::practice::compatibleMeterIds(
+                    ids.at(styleIndex), QString());
+                constrainedGenerationValid = !available.isEmpty();
+                if (!constrainedGenerationValid) break;
+                jam2::practice::ChordIdeaRequest request;
+                request.styleId = ids.at(styleIndex);
+                request.meterId = available.front();
+                request.bpm = 37;
+                const auto idea = jam2::practice::generateCoupledPracticeIdeaForTest(
+                    request, static_cast<std::uint32_t>(7000 + styleIndex));
+                const auto* selectedProfile =
+                    jam2::practice::findProfile(idea.recipe.profileId, true);
+                constrainedGenerationValid = idea.recipe.isValid() &&
+                    idea.recipe.styleId == request.styleId &&
+                    idea.recipe.meterId == request.meterId &&
+                    idea.recipe.bpm == request.bpm &&
+                    selectedProfile != nullptr &&
+                    selectedProfile->meterIds.contains(request.meterId);
+            }
+            for (int seed = 0; seed < 32 && constrainedGenerationValid; ++seed) {
+                jam2::practice::ChordIdeaRequest request;
+                request.meterId = QStringLiteral("4-4");
+                const auto idea = jam2::practice::generateCoupledPracticeIdeaForTest(
+                    request, static_cast<std::uint32_t>(7100 + seed));
+                const auto* selectedProfile =
+                    jam2::practice::findProfile(idea.recipe.profileId, true);
+                constrainedGenerationValid =
+                    idea.recipe.meterId == request.meterId &&
+                    selectedProfile != nullptr &&
+                    selectedProfile->meterIds.contains(request.meterId);
+            }
+            record(QStringLiteral("practice.meter-and-exact-tempo-constrain-random-generation"),
+                constrainedGenerationValid);
+        }
+        {
+            BeatGridModel model;
+            model.setCell(0, QStringLiteral("chord"), 0, QStringLiteral("Cmaj7"));
+            model.setCell(0, QStringLiteral("target"), 0, QStringLiteral("E4"));
+            model.setBeatHit(0, 0, 0, QStringLiteral("x..."));
+            const QString originalPitched =
+                jam2::practice::generatedChordFingerprint(model.section(0));
+
+            jam2::practice::ChordIdeaRequest drums;
+            drums.styleId = QStringLiteral("pop");
+            drums.meterId = QStringLiteral("4-4");
+            drums.bpm = 120;
+            drums.bars = 8;
+            drums.parts = jam2::practice::PracticeIdeaParts::DrumsOnly;
+            drums.targetSectionIndex = 0;
+            const auto drumsResult =
+                jam2::practice::PracticeIdeaController::generateCoupled(
+                    model, model, drums);
+            const bool drumsPreservedPitched =
+                jam2::practice::generatedChordFingerprint(model.section(0)) ==
+                originalPitched;
+            const QString generatedDrums =
+                jam2::practice::generatedBeatFingerprint(model.section(0));
+
+            jam2::practice::ChordIdeaRequest pitched = drums;
+            pitched.parts = jam2::practice::PracticeIdeaParts::PitchedPartsOnly;
+            const auto pitchedResult =
+                jam2::practice::PracticeIdeaController::generateCoupled(
+                    model, model, pitched);
+            record(QStringLiteral("practice.partial-generation-preserves-unselected-parts"),
+                drumsResult.has_value() && pitchedResult.has_value() &&
+                drumsPreservedPitched &&
+                jam2::practice::generatedChordFingerprint(model.section(0)) !=
+                    originalPitched &&
+                jam2::practice::generatedBeatFingerprint(model.section(0)) ==
+                    generatedDrums &&
+                model.section(0).generatedKind == QStringLiteral("practice") &&
+                model.section(0).beats == 32);
+        }
+        {
+            const auto combinedIdeaSection = [](const jam2::practice::GeneratedPracticeIdea& idea) {
+                SongSection section = idea.chordSection;
+                section.beatNotes = idea.beatSection.beatNotes;
+                section.beatPatterns = idea.beatSection.beatPatterns;
+                return section;
+            };
+            const auto requestFor = [](const SongSection& source) {
+                jam2::practice::ContinueIdeaRequest request;
+                request.sourceSectionIndex = 0;
+                request.targetSectionIndex = 1;
+                request.bpm = source.generatedRecipe.isValid()
+                    ? source.generatedRecipe.bpm : 112;
+                request.meterId = source.generatedRecipe.isValid()
+                    ? source.generatedRecipe.meterId : QStringLiteral("4-4");
+                request.beatsPerBar = source.generatedRecipe.isValid()
+                    ? source.generatedRecipe.meterNumerator : 4;
+                request.beatUnit = source.generatedRecipe.isValid()
+                    ? source.generatedRecipe.meterDenominator : 4;
+                request.tempoPulseUnits = source.generatedRecipe.isValid()
+                    ? source.generatedRecipe.tempoPulseUnits : 1;
+                return request;
+            };
+            const auto modeIntervals = [](QString modeName) {
+                modeName = modeName.toLower();
+                if (modeName.contains(QStringLiteral("dorian")))
+                    return QVector<int>{0,2,3,5,7,9,10};
+                if (modeName.contains(QStringLiteral("mixolydian")))
+                    return QVector<int>{0,2,4,5,7,9,10};
+                if (modeName.contains(QStringLiteral("lydian")))
+                    return QVector<int>{0,2,4,6,7,9,11};
+                if (modeName.contains(QStringLiteral("phrygian")))
+                    return QVector<int>{0,1,3,5,7,8,10};
+                if (modeName.contains(QStringLiteral("minor")) ||
+                    modeName.contains(QStringLiteral("aeolian")))
+                    return QVector<int>{0,2,3,5,7,8,10};
+                if (modeName.contains(QStringLiteral("major")) ||
+                    modeName.contains(QStringLiteral("ionian")))
+                    return QVector<int>{0,2,4,5,7,9,11};
+                return QVector<int>{};
+            };
+            const auto harmonyFitsKey = [&modeIntervals](
+                                            const SongSection& section,
+                                            const QString& tonicName,
+                                            const QString& modeName) {
+                const auto tonic = jam2::practice::parseChord(tonicName);
+                const QVector<int> allowed = modeIntervals(modeName);
+                if (!tonic.valid || allowed.isEmpty()) return true;
+                for (const QString& symbol : section.chords) {
+                    if (symbol.trimmed().isEmpty() || symbol == QStringLiteral("-")) continue;
+                    const auto chord = jam2::practice::parseChord(symbol);
+                    if (!chord.valid || chord.rest) return false;
+                    for (int interval : chord.intervals) {
+                        const int relative = (chord.root + interval - tonic.root) % 12;
+                        if (!allowed.contains((relative + 12) % 12)) return false;
+                    }
+                    if (chord.bass >= 0) {
+                        const int relative = (chord.bass - tonic.root) % 12;
+                        if (!allowed.contains((relative + 12) % 12)) return false;
+                    }
+                }
+                return true;
+            };
+            bool generatedContinuationValid = true;
+            double generatedChordTotal = 0.0;
+            double generatedContrastTotal = 0.0;
+            double generatedDrumTotal = 0.0;
+            double generatedMelodyTotal = 0.0;
+            double generatedContourTotal = 0.0;
+            double generatedBassContourTotal = 0.0;
+            double generatedMinimumChord = 1.0;
+            double generatedMaximumChord = 0.0;
+            QStringList generatedProfiles;
+            QStringList generatedFailures;
+            const QStringList generatedStyles = jam2::practice::styleIds();
+            for (int index = 0; index < generatedStyles.size(); ++index) {
+                jam2::practice::ChordIdeaRequest sourceRequest;
+                sourceRequest.styleId = generatedStyles.at(index);
+                const auto sourceIdea = jam2::practice::generateCoupledPracticeIdeaForTest(
+                    sourceRequest, static_cast<std::uint32_t>(21000 + index));
+                const SongSection source = combinedIdeaSection(sourceIdea);
+                const QString sourceChord =
+                    jam2::practice::generatedChordFingerprint(source);
+                const QString sourceBeat =
+                    jam2::practice::generatedBeatFingerprint(source);
+                const auto continuationRequest = requestFor(source);
+                const auto first = jam2::practice::generateContinuationPracticeIdeaForTest(
+                    source, continuationRequest,
+                    static_cast<std::uint32_t>(22000 + index));
+                const auto second = jam2::practice::generateContinuationPracticeIdeaForTest(
+                    source, continuationRequest,
+                    static_cast<std::uint32_t>(22000 + index));
+                const auto& analysis = first.analysis;
+                const bool caseValid =
+                    sourceChord == jam2::practice::generatedChordFingerprint(source) &&
+                    sourceBeat == jam2::practice::generatedBeatFingerprint(source) &&
+                    first.idea.recipe.isValid() &&
+                    first.idea.recipe.bpm == sourceIdea.recipe.bpm &&
+                    first.idea.recipe.meterId == sourceIdea.recipe.meterId &&
+                    first.idea.recipe.mode == sourceIdea.recipe.mode &&
+                    first.idea.recipe.profileId == sourceIdea.recipe.profileId &&
+                    first.idea.recipe.formId == sourceIdea.recipe.formId &&
+                    harmonyFitsKey(
+                        first.idea.chordSection,
+                        sourceIdea.recipe.tonic,
+                        sourceIdea.recipe.mode) &&
+                    first.idea.chordSection.beats == source.beats &&
+                    first.idea.recipe.tonic == sourceIdea.recipe.tonic &&
+                    first.idea.recipe.variationId == analysis.relationshipId &&
+                    analysis.candidateCount == 32 &&
+                    (sourceIdea.recipe.mode.contains(QStringLiteral("Blues")) ||
+                        analysis.chordVocabularySimilarity <= 0.55 ||
+                        analysis.chordQualityVocabularySimilarity <= 0.55) &&
+                    (sourceIdea.recipe.mode.contains(QStringLiteral("Blues"))
+                        ? analysis.chordOrderContrast > 0.0 &&
+                            analysis.openingChordPositionSimilarity <= 0.75
+                        : analysis.chordOrderContrast >= 0.50 &&
+                            analysis.openingChordPositionSimilarity <= 0.25) &&
+                    analysis.harmonicDensityRetention >= 0.65 &&
+                    analysis.sourceChordEvents > 0 &&
+                    analysis.continuationChordEvents > 0 &&
+                    analysis.drumSimilarity <=
+                        (sourceIdea.recipe.mode.contains(
+                            QStringLiteral("Blues")) ? 0.78 : 0.72) &&
+                    jam2::practice::generatedChordFingerprint(first.idea.chordSection) !=
+                        sourceChord &&
+                    jam2::practice::generatedChordFingerprint(first.idea.chordSection) ==
+                        jam2::practice::generatedChordFingerprint(second.idea.chordSection) &&
+                    jam2::practice::generatedBeatFingerprint(first.idea.beatSection) ==
+                        jam2::practice::generatedBeatFingerprint(second.idea.beatSection);
+                generatedContinuationValid = generatedContinuationValid && caseValid;
+                if (!caseValid) {
+                    generatedFailures << QStringLiteral(
+                        "%1 valid=%2 bpm=%3/%4 meter=%5/%6 mode=%7/%8 beats=%9/%10 tonic=%11/%12 c=%13 o=%14 d=%15 m=%16 density=%17 (%18->%19)")
+                        .arg(generatedStyles.at(index))
+                        .arg(first.idea.recipe.isValid())
+                        .arg(first.idea.recipe.bpm).arg(sourceIdea.recipe.bpm)
+                        .arg(first.idea.recipe.meterId, sourceIdea.recipe.meterId)
+                        .arg(first.idea.recipe.mode, sourceIdea.recipe.mode)
+                        .arg(first.idea.chordSection.beats).arg(source.beats)
+                        .arg(first.idea.recipe.tonic, sourceIdea.recipe.tonic)
+                        .arg(qRound(analysis.chordVocabularySimilarity * 100.0))
+                        .arg(qRound(analysis.chordOrderContrast * 100.0))
+                        .arg(qRound(analysis.drumSimilarity * 100.0))
+                        .arg(qRound(analysis.melodyRhythmSimilarity * 100.0))
+                        .arg(qRound(analysis.harmonicDensityRetention * 100.0))
+                        .arg(analysis.sourceChordEvents)
+                        .arg(analysis.continuationChordEvents);
+                }
+                generatedChordTotal += analysis.chordVocabularySimilarity;
+                generatedContrastTotal += analysis.chordOrderContrast;
+                generatedDrumTotal += analysis.drumSimilarity;
+                generatedMelodyTotal += analysis.melodyRhythmSimilarity;
+                generatedContourTotal += analysis.melodyContourSimilarity;
+                generatedBassContourTotal += analysis.bassContourSimilarity;
+                generatedMinimumChord = qMin(
+                    generatedMinimumChord, analysis.chordVocabularySimilarity);
+                generatedMaximumChord = qMax(
+                    generatedMaximumChord, analysis.chordVocabularySimilarity);
+                generatedProfiles << first.idea.recipe.profileId;
+            }
+            const int generatedCount = qMax(1, generatedStyles.size());
+            record(QStringLiteral("practice.continue-generated-a-corpus-preserves-identity-with-contrast"),
+                generatedContinuationValid,
+                QStringLiteral(
+                    "%1 generated A→B rounds; mean chord=%2%, range=%3-%4%, order contrast=%5%, drums=%6%, melody rhythm=%7%, melody contour=%8%, bass contour=%9%; profiles=%10")
+                    .arg(generatedStyles.size())
+                    .arg(qRound(100.0 * generatedChordTotal / generatedCount))
+                    .arg(qRound(100.0 * generatedMinimumChord))
+                    .arg(qRound(100.0 * generatedMaximumChord))
+                    .arg(qRound(100.0 * generatedContrastTotal / generatedCount))
+                    .arg(qRound(100.0 * generatedDrumTotal / generatedCount))
+                    .arg(qRound(100.0 * generatedMelodyTotal / generatedCount))
+                    .arg(qRound(100.0 * generatedContourTotal / generatedCount))
+                    .arg(qRound(100.0 * generatedBassContourTotal / generatedCount))
+                    .arg(generatedProfiles.join(QLatin1Char(','))) +
+                    (generatedFailures.isEmpty() ? QString() :
+                        QStringLiteral("; failures=%1").arg(
+                            generatedFailures.join(QStringLiteral(" | ")))));
+
+            struct ModeMatrixCase {
+                QString id;
+                QString name;
+            };
+            const QVector<ModeMatrixCase> continuationModes{
+                {QStringLiteral("ionian"), QStringLiteral("Major")},
+                {QStringLiteral("aeolian"), QStringLiteral("Natural Minor")},
+                {QStringLiteral("dorian"), QStringLiteral("Dorian")},
+                {QStringLiteral("mixolydian"), QStringLiteral("Mixolydian")},
+                {QStringLiteral("lydian"), QStringLiteral("Lydian")},
+                {QStringLiteral("phrygian"), QStringLiteral("Phrygian")},
+            };
+            bool keyModeMatrixValid = true;
+            int keyModeMatrixRounds = 0;
+            QStringList keyModeMatrixFailures;
+            for (int key = 0; key < 12; ++key) {
+                for (int modeIndex = 0;
+                     modeIndex < continuationModes.size(); ++modeIndex) {
+                    const ModeMatrixCase& mode = continuationModes.at(modeIndex);
+                    jam2::practice::ChordIdeaRequest sourceRequest;
+                    sourceRequest.key = key;
+                    sourceRequest.styleId = QStringLiteral("modal-jam");
+                    sourceRequest.profileId = QStringLiteral("modal_groove");
+                    sourceRequest.modeId = mode.id;
+                    sourceRequest.allowModeOverride = true;
+                    sourceRequest.meterId = QStringLiteral("4-4");
+                    sourceRequest.allowMeterOverride = true;
+                    sourceRequest.bpm = 88 + ((key * 7 + modeIndex * 5) % 41);
+                    sourceRequest.bars = 8;
+                    const std::uint32_t sourceSeed = static_cast<std::uint32_t>(
+                        24000 + key * 100 + modeIndex);
+                    const auto sourceIdea =
+                        jam2::practice::generateCoupledPracticeIdeaForTest(
+                            sourceRequest, sourceSeed);
+                    const SongSection source = combinedIdeaSection(sourceIdea);
+                    const auto continuation =
+                        jam2::practice::generateContinuationPracticeIdeaForTest(
+                            source, requestFor(source), sourceSeed + 50U);
+                    const auto sourceTonic =
+                        jam2::practice::parseChord(sourceIdea.recipe.tonic);
+                    const auto targetTonic =
+                        jam2::practice::parseChord(continuation.idea.recipe.tonic);
+                    const bool caseValid =
+                        sourceIdea.recipe.isValid() &&
+                        continuation.idea.recipe.isValid() &&
+                        sourceTonic.valid && targetTonic.valid &&
+                        sourceTonic.root == key &&
+                        targetTonic.root == key &&
+                        sourceIdea.recipe.mode == mode.name &&
+                        continuation.idea.recipe.mode == mode.name &&
+                        continuation.analysis.inferredMode == mode.name &&
+                        continuation.idea.recipe.bpm == sourceIdea.recipe.bpm &&
+                        continuation.idea.recipe.meterId == sourceIdea.recipe.meterId &&
+                        continuation.idea.chordSection.beats == source.beats &&
+                        harmonyFitsKey(
+                            continuation.idea.chordSection,
+                            sourceIdea.recipe.tonic,
+                            sourceIdea.recipe.mode) &&
+                        jam2::practice::generatedChordFingerprint(
+                            continuation.idea.chordSection) !=
+                            jam2::practice::generatedChordFingerprint(source) &&
+                        continuation.analysis.chordOrderContrast > 0.0;
+                    keyModeMatrixValid = keyModeMatrixValid && caseValid;
+                    ++keyModeMatrixRounds;
+                    if (!caseValid && keyModeMatrixFailures.size() < 12) {
+                        keyModeMatrixFailures << QStringLiteral(
+                            "%1/%2 src=%3-%4 dst=%5-%6 fit=%7 contrast=%8%")
+                            .arg(key)
+                            .arg(mode.id,
+                                sourceIdea.recipe.tonic,
+                                sourceIdea.recipe.mode,
+                                continuation.idea.recipe.tonic,
+                                continuation.idea.recipe.mode)
+                            .arg(harmonyFitsKey(
+                                continuation.idea.chordSection,
+                                sourceIdea.recipe.tonic,
+                                sourceIdea.recipe.mode))
+                            .arg(qRound(
+                                continuation.analysis.chordOrderContrast * 100.0));
+                    }
+                }
+            }
+            record(QStringLiteral(
+                       "practice.continue-all-keys-and-diatonic-modes-remain-strict"),
+                keyModeMatrixValid,
+                QStringLiteral(
+                    "%1 generated A→B rounds; 12 tonics × 6 modes; every target chord tone and slash bass checked against the source scale")
+                    .arg(keyModeMatrixRounds) +
+                    (keyModeMatrixFailures.isEmpty() ? QString() :
+                        QStringLiteral("; failures=%1").arg(
+                            keyModeMatrixFailures.join(QStringLiteral(" | ")))));
+
+            struct NativeCollectionCase {
+                QString profileId;
+                QString modeId;
+                QString meterId;
+                QString formId;
+                int bars = 8;
+                bool bluesHarmony = false;
+            };
+            const QVector<NativeCollectionCase> nativeCollections{
+                {QStringLiteral("country_contemporary"),
+                    QStringLiteral("major-pentatonic"),
+                    QStringLiteral("4-4"), QString(), 8, false},
+                {QStringLiteral("rock_riff_modal"),
+                    QStringLiteral("minor-pentatonic"),
+                    QStringLiteral("4-4"), QString(), 8, false},
+                {QStringLiteral("blues_dominant"),
+                    QStringLiteral("dominant-blues"),
+                    QStringLiteral("4-4-shuffle"),
+                    QStringLiteral("blues-12"), 12, true},
+                {QStringLiteral("blues_minor"),
+                    QStringLiteral("minor-blues"),
+                    QStringLiteral("4-4"),
+                    QStringLiteral("minor-blues-12"), 12, true},
+            };
+            const auto bluesHarmonyStaysFunctional = [](
+                const SongSection& section, const QString& tonicName) {
+                const auto tonic = jam2::practice::parseChord(tonicName);
+                if (!tonic.valid) return false;
+                const QSet<int> nativeRoots{0, 5, 7};
+                for (const QString& symbol : section.chords) {
+                    if (symbol.trimmed().isEmpty() || symbol == QStringLiteral("-")) {
+                        continue;
+                    }
+                    const auto chord = jam2::practice::parseChord(symbol);
+                    if (!chord.valid || chord.rest ||
+                        !nativeRoots.contains(
+                            (chord.root - tonic.root + 12) % 12)) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            bool nativeCollectionValid = true;
+            int nativeCollectionRounds = 0;
+            QSet<QString> nativeCollectionFingerprints;
+            QStringList nativeCollectionFailures;
+            for (int collectionIndex = 0;
+                 collectionIndex < nativeCollections.size(); ++collectionIndex) {
+                const NativeCollectionCase& item =
+                    nativeCollections.at(collectionIndex);
+                for (int key = 0; key < 12; ++key) {
+                    jam2::practice::ChordIdeaRequest sourceRequest;
+                    sourceRequest.key = key;
+                    sourceRequest.profileId = item.profileId;
+                    sourceRequest.modeId = item.modeId;
+                    sourceRequest.allowModeOverride = true;
+                    sourceRequest.meterId = item.meterId;
+                    sourceRequest.allowMeterOverride = true;
+                    sourceRequest.formId = item.formId;
+                    sourceRequest.bars = item.bars;
+                    sourceRequest.bpm = 82 +
+                        (collectionIndex * 29 + key * 7) % 71;
+                    sourceRequest.harmonicComplexity = 2;
+                    sourceRequest.rhythmicComplexity = 3;
+                    const std::uint32_t seed = static_cast<std::uint32_t>(
+                        45000 + collectionIndex * 1000 + key * 10);
+                    const auto sourceIdea =
+                        jam2::practice::generateCoupledPracticeIdeaForTest(
+                            sourceRequest, seed);
+                    const SongSection source = combinedIdeaSection(sourceIdea);
+                    const auto continuation =
+                        jam2::practice::generateContinuationPracticeIdeaForTest(
+                            source, requestFor(source), seed + 5U);
+                    const bool keySafe = item.bluesHarmony
+                        ? bluesHarmonyStaysFunctional(
+                            continuation.idea.chordSection,
+                            sourceIdea.recipe.tonic)
+                        : harmonyFitsKey(
+                            continuation.idea.chordSection,
+                            sourceIdea.recipe.tonic,
+                            sourceIdea.recipe.mode);
+                    const bool caseValid =
+                        sourceIdea.recipe.isValid() &&
+                        continuation.idea.recipe.isValid() &&
+                        continuation.idea.recipe.tonic ==
+                            sourceIdea.recipe.tonic &&
+                        continuation.idea.recipe.mode ==
+                            sourceIdea.recipe.mode &&
+                        continuation.idea.recipe.profileId ==
+                            sourceIdea.recipe.profileId &&
+                        continuation.idea.recipe.formId ==
+                            sourceIdea.recipe.formId &&
+                        continuation.idea.chordSection.beats == source.beats &&
+                        continuation.analysis.inferredTonalConfidence == 1.0 &&
+                        continuation.analysis.inferredProfileConfidence == 1.0 &&
+                        continuation.analysis.harmonicDensityRetention >= 0.65 &&
+                        continuation.analysis.chordOrderContrast > 0.0 &&
+                        keySafe;
+                    nativeCollectionValid = nativeCollectionValid && caseValid;
+                    ++nativeCollectionRounds;
+                    nativeCollectionFingerprints.insert(
+                        jam2::practice::generatedChordFingerprint(
+                            continuation.idea.chordSection));
+                    if (!caseValid && nativeCollectionFailures.size() < 12) {
+                        nativeCollectionFailures << QStringLiteral(
+                            "%1/%2 key=%3 src=%4-%5/%6 dst=%7-%8/%9 form=%10/%11 density=%12% contrast=%13% safe=%14")
+                            .arg(item.profileId, item.modeId)
+                            .arg(key)
+                            .arg(sourceIdea.recipe.tonic,
+                                sourceIdea.recipe.mode,
+                                sourceIdea.recipe.profileId,
+                                continuation.idea.recipe.tonic,
+                                continuation.idea.recipe.mode,
+                                continuation.idea.recipe.profileId,
+                                sourceIdea.recipe.formId,
+                                continuation.idea.recipe.formId)
+                            .arg(qRound(
+                                continuation.analysis.harmonicDensityRetention *
+                                100.0))
+                            .arg(qRound(
+                                continuation.analysis.chordOrderContrast * 100.0))
+                            .arg(keySafe);
+                    }
+                }
+            }
+            record(QStringLiteral(
+                       "practice.continue-generated-native-collections-preserve-key-form-and-density"),
+                nativeCollectionValid && nativeCollectionRounds == 48 &&
+                    nativeCollectionFingerprints.size() >= 40,
+                QStringLiteral(
+                    "%1 generated A-to-B rounds across major/minor pentatonic and dominant/minor Blues; %2 distinct B harmonies")
+                    .arg(nativeCollectionRounds)
+                    .arg(nativeCollectionFingerprints.size()) +
+                    (nativeCollectionFailures.isEmpty() ? QString() :
+                        QStringLiteral("; failures=%1").arg(
+                            nativeCollectionFailures.join(
+                                QStringLiteral(" | ")))));
+
+            bool mixolydianContrastValid = true;
+            QSet<QString> mixolydianContrastFingerprints;
+            QStringList mixolydianContrastFailures;
+            constexpr int kMixolydianContrastRounds = 16;
+            for (int iteration = 0;
+                 iteration < kMixolydianContrastRounds; ++iteration) {
+                jam2::practice::ChordIdeaRequest sourceRequest;
+                sourceRequest.key = 10; // Bb
+                sourceRequest.profileId = QStringLiteral("pop_loop");
+                sourceRequest.modeId = QStringLiteral("mixolydian");
+                sourceRequest.allowModeOverride = true;
+                sourceRequest.meterId = QStringLiteral("4-4");
+                sourceRequest.allowMeterOverride = true;
+                sourceRequest.bars = 8;
+                const auto sourceIdea =
+                    jam2::practice::generateCoupledPracticeIdeaForTest(
+                        sourceRequest,
+                        static_cast<std::uint32_t>(47000 + iteration));
+                SongSection source = combinedIdeaSection(sourceIdea);
+                source.chords.fill(QString(), source.beats);
+                const QStringList authoredRoute{
+                    QStringLiteral("Bb"), QStringLiteral("Eb"),
+                    QStringLiteral("Bb"), QStringLiteral("F")};
+                for (int bar = 0; bar < source.beats / 4; ++bar) {
+                    source.chords[bar * 4] = authoredRoute.at(
+                        bar % authoredRoute.size());
+                }
+                const auto continuation =
+                    jam2::practice::generateContinuationPracticeIdeaForTest(
+                        source,
+                        requestFor(source),
+                        static_cast<std::uint32_t>(48000 + iteration));
+                const auto& analysis = continuation.analysis;
+                const bool caseValid =
+                    continuation.idea.recipe.isValid() &&
+                    continuation.idea.recipe.tonic == QStringLiteral("Bb") &&
+                    continuation.idea.recipe.mode == QStringLiteral("Mixolydian") &&
+                    continuation.idea.recipe.profileId ==
+                        sourceIdea.recipe.profileId &&
+                    continuation.idea.recipe.formId ==
+                        sourceIdea.recipe.formId &&
+                    continuation.idea.chordSection.beats == source.beats &&
+                    harmonyFitsKey(
+                        continuation.idea.chordSection,
+                        QStringLiteral("Bb"),
+                        QStringLiteral("Mixolydian")) &&
+                    analysis.chordVocabularySimilarity <= 0.50 &&
+                    analysis.chordOrderContrast >= 0.75 &&
+                    analysis.openingChordPositionSimilarity <= 0.25 &&
+                    analysis.drumSimilarity <= 0.72;
+                mixolydianContrastValid =
+                    mixolydianContrastValid && caseValid;
+                mixolydianContrastFingerprints.insert(
+                    jam2::practice::generatedChordFingerprint(
+                        continuation.idea.chordSection));
+                if (!caseValid && mixolydianContrastFailures.size() < 8) {
+                    mixolydianContrastFailures << QStringLiteral(
+                        "%1 chord=%2% order=%3% opening=%4% drums=%5% key=%6-%7")
+                        .arg(iteration)
+                        .arg(qRound(
+                            analysis.chordVocabularySimilarity * 100.0))
+                        .arg(qRound(analysis.chordOrderContrast * 100.0))
+                        .arg(qRound(
+                            analysis.openingChordPositionSimilarity * 100.0))
+                        .arg(qRound(analysis.drumSimilarity * 100.0))
+                        .arg(continuation.idea.recipe.tonic,
+                            continuation.idea.recipe.mode);
+                }
+            }
+            record(QStringLiteral(
+                       "practice.continue-bb-mixolydian-establishes-new-section-identity"),
+                mixolydianContrastValid &&
+                    mixolydianContrastFingerprints.size() >= 12,
+                QStringLiteral(
+                    "%1 continuations of Bb-Eb-Bb-F; %2 distinct B harmonies; every B remains Bb Mixolydian with <=50% chord-root overlap, <=25% aligned opening chords, and <=72% drum overlap")
+                    .arg(kMixolydianContrastRounds)
+                    .arg(mixolydianContrastFingerprints.size()) +
+                    (mixolydianContrastFailures.isEmpty() ? QString() :
+                        QStringLiteral("; failures=%1").arg(
+                            mixolydianContrastFailures.join(
+                                QStringLiteral(" | ")))));
+
+            struct ContinuationProfileCase {
+                QString styleId;
+                QString profileId;
+            };
+            QVector<ContinuationProfileCase> continuationProfiles;
+            for (const QString& styleId : jam2::practice::styleIds()) {
+                for (const QString& profileId :
+                     jam2::practice::profileIds(styleId)) {
+                    continuationProfiles.push_back({styleId, profileId});
+                }
+            }
+            continuationProfiles.push_back({
+                QStringLiteral("metal-experimental"),
+                QStringLiteral("metal_modern_progressive")});
+            bool profileContinuationValid = true;
+            double profileContourTotal = 0.0;
+            double profileBassContourTotal = 0.0;
+            double profileRhythmTotal = 0.0;
+            double profileBoundaryTotal = 0.0;
+            QSet<QString> profilePacingIds;
+            QSet<QString> profileProgressionFamilies;
+            QSet<QString> continuationRoleIds;
+            QStringList profileFailures;
+            for (int index = 0; index < continuationProfiles.size(); ++index) {
+                const ContinuationProfileCase& item = continuationProfiles.at(index);
+                jam2::practice::ChordIdeaRequest sourceRequest;
+                sourceRequest.key = (index * 5) % 12;
+                sourceRequest.styleId = item.styleId;
+                sourceRequest.profileId = item.profileId;
+                sourceRequest.modeId = index % 2 == 0
+                    ? QStringLiteral("ionian") : QStringLiteral("aeolian");
+                sourceRequest.allowModeOverride = true;
+                sourceRequest.meterId = QStringLiteral("4-4");
+                sourceRequest.allowMeterOverride = true;
+                sourceRequest.bpm = 84 + (index * 7) % 72;
+                sourceRequest.bars = 8;
+                const auto sourceIdea =
+                    jam2::practice::generateCoupledPracticeIdeaForTest(
+                        sourceRequest,
+                        static_cast<std::uint32_t>(31000 + index));
+                const SongSection source = combinedIdeaSection(sourceIdea);
+                const auto continuation =
+                    jam2::practice::generateContinuationPracticeIdeaForTest(
+                        source,
+                        requestFor(source),
+                        static_cast<std::uint32_t>(32000 + index));
+                const bool caseValid =
+                    sourceIdea.recipe.isValid() &&
+                    continuation.idea.recipe.isValid() &&
+                    sourceIdea.recipe.profileId == item.profileId &&
+                    continuation.idea.recipe.profileId == item.profileId &&
+                    continuation.idea.recipe.styleId == sourceIdea.recipe.styleId &&
+                    continuation.idea.recipe.tonic == sourceIdea.recipe.tonic &&
+                    continuation.idea.recipe.mode == sourceIdea.recipe.mode &&
+                    continuation.idea.recipe.formId == sourceIdea.recipe.formId &&
+                    continuation.idea.chordSection.beats == source.beats &&
+                    continuation.idea.beatSection.beats == source.beats &&
+                    continuation.idea.recipe.productionFamilyId ==
+                        sourceIdea.recipe.productionFamilyId &&
+                    continuation.idea.recipe.chordPatchId ==
+                        sourceIdea.recipe.chordPatchId &&
+                    continuation.idea.recipe.melodyPatchId ==
+                        sourceIdea.recipe.melodyPatchId &&
+                    continuation.idea.recipe.bassPatchId ==
+                        sourceIdea.recipe.bassPatchId &&
+                    continuation.idea.recipe.supportPatchId ==
+                        sourceIdea.recipe.supportPatchId &&
+                    continuation.idea.recipe.drumPatchId ==
+                        sourceIdea.recipe.drumPatchId &&
+                    continuation.idea.recipe.progressionId.startsWith(
+                        QStringLiteral("continue-")) &&
+                    !continuation.analysis.relationshipId.isEmpty() &&
+                    !continuation.analysis.continuationRoleId.isEmpty() &&
+                    !continuation.analysis.harmonicPacingId.isEmpty() &&
+                    continuation.analysis.inferredProfileConfidence == 1.0 &&
+                    continuation.analysis.inferredTonalConfidence == 1.0 &&
+                    continuation.analysis.candidateCount == 32 &&
+                    (continuation.analysis.chordVocabularySimilarity <= 0.55 ||
+                        continuation.analysis.chordQualityVocabularySimilarity <= 0.55) &&
+                    continuation.analysis.chordOrderContrast >= 0.50 &&
+                    continuation.analysis.openingChordPositionSimilarity <= 0.25 &&
+                    continuation.analysis.drumSimilarity <= 0.72 &&
+                    continuation.analysis.melodyContourSimilarity >= 0.0 &&
+                    continuation.analysis.melodyContourSimilarity <= 1.0 &&
+                    continuation.analysis.bassContourSimilarity >= 0.0 &&
+                    continuation.analysis.bassContourSimilarity <= 1.0 &&
+                    continuation.analysis.boundaryVoiceLeading >= 0.0 &&
+                    continuation.analysis.boundaryVoiceLeading <= 1.0 &&
+                    continuation.analysis.harmonicDensityRetention >= 0.65 &&
+                    continuation.analysis.sourceChordEvents > 0 &&
+                    continuation.analysis.continuationChordEvents > 0 &&
+                    continuation.idea.recipe.motifTransformations.join(
+                        QLatin1Char(' ')).contains(
+                            QStringLiteral("return boundary")) &&
+                    harmonyFitsKey(
+                        continuation.idea.chordSection,
+                        sourceIdea.recipe.tonic,
+                        sourceIdea.recipe.mode);
+                profileContinuationValid = profileContinuationValid && caseValid;
+                profileContourTotal +=
+                    continuation.analysis.melodyContourSimilarity;
+                profileBassContourTotal +=
+                    continuation.analysis.bassContourSimilarity;
+                profileBoundaryTotal +=
+                    continuation.analysis.boundaryVoiceLeading;
+                profileRhythmTotal +=
+                    continuation.analysis.melodyRhythmSimilarity;
+                profilePacingIds.insert(
+                    continuation.analysis.harmonicPacingId);
+                continuationRoleIds.insert(
+                    continuation.analysis.continuationRoleId);
+                const QString progressionId =
+                    continuation.idea.recipe.progressionId;
+                profileProgressionFamilies.insert(
+                    progressionId.left(progressionId.lastIndexOf(QLatin1Char('-'))));
+                if (!caseValid && profileFailures.size() < 12) {
+                    profileFailures << QStringLiteral(
+                        "%1 src=%2/%3 dst=%4/%5 progression=%6 pacing=%7 contour=%8% density=%9% (%10->%11) chord=%12% opening=%13% drums=%14%")
+                        .arg(item.profileId,
+                            sourceIdea.recipe.styleId,
+                            sourceIdea.recipe.profileId,
+                            continuation.idea.recipe.styleId,
+                            continuation.idea.recipe.profileId,
+                            continuation.idea.recipe.progressionId,
+                            continuation.analysis.harmonicPacingId)
+                        .arg(qRound(
+                            continuation.analysis.melodyContourSimilarity * 100.0))
+                        .arg(qRound(
+                            continuation.analysis.harmonicDensityRetention * 100.0))
+                        .arg(continuation.analysis.sourceChordEvents)
+                        .arg(continuation.analysis.continuationChordEvents)
+                        .arg(qRound(
+                            continuation.analysis.chordVocabularySimilarity * 100.0))
+                        .arg(qRound(
+                            continuation.analysis.openingChordPositionSimilarity * 100.0))
+                        .arg(qRound(
+                            continuation.analysis.drumSimilarity * 100.0));
+                }
+            }
+            const int profileContinuationCount =
+                qMax(1, continuationProfiles.size());
+            QStringList measuredRoleIds = continuationRoleIds.values();
+            measuredRoleIds.sort();
+            record(QStringLiteral(
+                       "practice.continue-every-profile-uses-style-pacing-and-melodic-development"),
+                profileContinuationValid &&
+                    continuationProfiles.size() == 27 &&
+                    profilePacingIds.size() >= 16 &&
+                    profileProgressionFamilies.size() >= 16 &&
+                    continuationRoleIds.size() == 5,
+                QStringLiteral(
+                    "%1 profiles; %2 pacing plans; %3 harmonic families; roles=%4; mean melody contour=%5%, bass contour=%6%, rhythm=%7%, boundary=%8%")
+                    .arg(continuationProfiles.size())
+                    .arg(profilePacingIds.size())
+                    .arg(profileProgressionFamilies.size())
+                    .arg(measuredRoleIds.join(QLatin1Char(',')))
+                    .arg(qRound(100.0 * profileContourTotal /
+                        profileContinuationCount))
+                    .arg(qRound(100.0 * profileBassContourTotal /
+                        profileContinuationCount))
+                    .arg(qRound(100.0 * profileRhythmTotal /
+                        profileContinuationCount))
+                    .arg(qRound(100.0 * profileBoundaryTotal /
+                        profileContinuationCount)) +
+                    (profileFailures.isEmpty() ? QString() :
+                        QStringLiteral("; failures=%1").arg(
+                            profileFailures.join(QStringLiteral(" | ")))));
+
+            QStringList iteratedStyles = jam2::practice::styleIds();
+            iteratedStyles << QStringLiteral("metal-experimental");
+            const QStringList iterationModes{
+                QStringLiteral("ionian"), QStringLiteral("aeolian"),
+                QStringLiteral("dorian"), QStringLiteral("mixolydian"),
+                QStringLiteral("lydian"), QStringLiteral("phrygian")};
+            bool multiStyleIterationValid = true;
+            QSet<QString> multiStyleFingerprints;
+            QSet<QString> multiStyleProgressions;
+            QSet<QString> multiStyleRoles;
+            QStringList multiStyleFailures;
+            int multiStyleRounds = 0;
+            for (int styleIndex = 0;
+                 styleIndex < iteratedStyles.size(); ++styleIndex) {
+                for (int iteration = 0; iteration < 4; ++iteration) {
+                    jam2::practice::ChordIdeaRequest sourceRequest;
+                    sourceRequest.styleId = iteratedStyles.at(styleIndex);
+                    if (sourceRequest.styleId == QStringLiteral("metal-experimental")) {
+                        sourceRequest.profileId =
+                            QStringLiteral("metal_modern_progressive");
+                    }
+                    sourceRequest.key = (styleIndex * 7 + iteration * 3) % 12;
+                    sourceRequest.modeId = iterationModes.at(
+                        (styleIndex + iteration) % iterationModes.size());
+                    sourceRequest.allowModeOverride = true;
+                    sourceRequest.meterId = QStringLiteral("4-4");
+                    sourceRequest.allowMeterOverride = true;
+                    sourceRequest.bpm = 76 +
+                        (styleIndex * 13 + iteration * 17) % 105;
+                    sourceRequest.bars = iteration % 2 == 0 ? 8 : 16;
+                    const std::uint32_t seed = static_cast<std::uint32_t>(
+                        40000 + styleIndex * 100 + iteration);
+                    const auto sourceIdea =
+                        jam2::practice::generateCoupledPracticeIdeaForTest(
+                            sourceRequest, seed);
+                    const SongSection source = combinedIdeaSection(sourceIdea);
+                    const auto continuation =
+                        jam2::practice::generateContinuationPracticeIdeaForTest(
+                            source, requestFor(source), seed + 500U);
+                    const bool caseValid =
+                        sourceIdea.recipe.isValid() &&
+                        continuation.idea.recipe.isValid() &&
+                        continuation.idea.recipe.styleId ==
+                            sourceIdea.recipe.styleId &&
+                        continuation.idea.recipe.profileId ==
+                            sourceIdea.recipe.profileId &&
+                        continuation.idea.recipe.tonic == sourceIdea.recipe.tonic &&
+                        continuation.idea.recipe.mode == sourceIdea.recipe.mode &&
+                        continuation.idea.recipe.formId == sourceIdea.recipe.formId &&
+                        continuation.idea.chordSection.beats == source.beats &&
+                        continuation.idea.beatSection.beats == source.beats &&
+                        continuation.idea.recipe.drumPatchId ==
+                            sourceIdea.recipe.drumPatchId &&
+                        !continuation.analysis.continuationRoleId.isEmpty() &&
+                        continuation.analysis.inferredProfileConfidence == 1.0 &&
+                        continuation.analysis.inferredTonalConfidence == 1.0 &&
+                        continuation.analysis.harmonicDensityRetention >= 0.65 &&
+                        (continuation.analysis.chordVocabularySimilarity <= 0.55 ||
+                            continuation.analysis.chordQualityVocabularySimilarity <= 0.55) &&
+                        continuation.analysis.chordOrderContrast >= 0.50 &&
+                        continuation.analysis.openingChordPositionSimilarity <= 0.25 &&
+                        continuation.analysis.drumSimilarity <= 0.72 &&
+                        continuation.idea.recipe.motifTransformations.join(
+                            QLatin1Char(' ')).contains(
+                                QStringLiteral("return boundary")) &&
+                        harmonyFitsKey(
+                            continuation.idea.chordSection,
+                            sourceIdea.recipe.tonic,
+                            sourceIdea.recipe.mode);
+                    multiStyleIterationValid =
+                        multiStyleIterationValid && caseValid;
+                    ++multiStyleRounds;
+                    multiStyleFingerprints.insert(
+                        jam2::practice::generatedChordFingerprint(
+                            continuation.idea.chordSection));
+                    multiStyleProgressions.insert(
+                        continuation.idea.recipe.progressionId);
+                    multiStyleRoles.insert(
+                        continuation.analysis.continuationRoleId);
+                    if (!caseValid && multiStyleFailures.size() < 12) {
+                        multiStyleFailures << QStringLiteral(
+                            "%1/%2 src=%3-%4/%5 dst=%6-%7/%8 role=%9")
+                            .arg(sourceRequest.styleId)
+                            .arg(iteration)
+                            .arg(sourceIdea.recipe.tonic,
+                                sourceIdea.recipe.mode,
+                                sourceIdea.recipe.profileId,
+                                continuation.idea.recipe.tonic,
+                                continuation.idea.recipe.mode,
+                                continuation.idea.recipe.profileId,
+                                continuation.analysis.continuationRoleId);
+                    }
+                }
+            }
+            record(QStringLiteral(
+                       "practice.continue-multiple-rounds-per-style-remain-source-specific"),
+                multiStyleIterationValid &&
+                    iteratedStyles.size() == 14 &&
+                    multiStyleRounds == 56 &&
+                    multiStyleFingerprints.size() >= 52 &&
+                    multiStyleProgressions.size() >= 30 &&
+                    multiStyleRoles.size() == 5,
+                QStringLiteral(
+                    "%1 rounds across %2 styles; %3 distinct B harmonies, %4 progression variants, %5 roles")
+                    .arg(multiStyleRounds)
+                    .arg(iteratedStyles.size())
+                    .arg(multiStyleFingerprints.size())
+                    .arg(multiStyleProgressions.size())
+                    .arg(multiStyleRoles.size()) +
+                    (multiStyleFailures.isEmpty() ? QString() :
+                        QStringLiteral("; failures=%1").arg(
+                            multiStyleFailures.join(QStringLiteral(" | ")))));
+
+            const auto manualSection = [](const QStringList& chords, int beatsPerBar) {
+                SongSection section;
+                section.label = QStringLiteral("A");
+                section.name = QStringLiteral("Manual A");
+                section.beats = beatsPerBar * 8;
+                section.chords.fill(QString(), section.beats);
+                section.targets.fill(QString(), section.beats);
+                section.beatNotes.fill(QString(), section.beats);
+                section.beatPatterns.resize(section.beats);
+                section.musicalPatterns.resize(section.beats);
+                const int chordSpan = qMax(1, section.beats / qMax(1, chords.size()));
+                for (int index = 0; index < chords.size(); ++index) {
+                    section.chords[qMin(section.beats - 1, index * chordSpan)] = chords.at(index);
+                }
+                for (int beat = 0; beat < section.beats; ++beat) {
+                    BeatPattern& drums = section.beatPatterns[beat];
+                    drums.division = 4;
+                    drums.lanes.fill(QStringLiteral("...."), BeatGridModel::beatLaneNames().size());
+                    if (beat % beatsPerBar == 0 || beat % beatsPerBar == 2) drums.lanes[0][0] = QLatin1Char('x');
+                    if (beat % beatsPerBar == 1 || beat % beatsPerBar == 3) drums.lanes[1][0] = QLatin1Char('x');
+                    drums.lanes[2] = QStringLiteral("x.x.");
+                    MusicalBeatPattern& music = section.musicalPatterns[beat];
+                    music.division = 2;
+                    music.chords.fill(MusicalStep{}, 2);
+                    music.melody.fill(MusicalStep{}, 2);
+                    music.bass.fill(MusicalStep{}, 2);
+                    music.support.fill(MusicalStep{}, 2);
+                    if (beat % (beatsPerBar * 2) == 0) {
+                        music.melody[0] = {MusicalStepState::Onset,
+                            beat % (beatsPerBar * 4) == 0
+                                ? QStringLiteral("E4") : QStringLiteral("G4"),
+                            88, QString()};
+                    }
+                }
+                return section;
+            };
+            struct ManualCase {
+                QString name;
+                QStringList chords;
+                QString meterId;
+                int beatsPerBar = 4;
+                int bpm = 112;
+            };
+            const QVector<ManualCase> manualCases{
+                {QStringLiteral("plain-diatonic"),
+                    {QStringLiteral("C"), QStringLiteral("Am"), QStringLiteral("F"), QStringLiteral("G")},
+                    QStringLiteral("4-4"), 4, 108},
+                {QStringLiteral("modal-minor"),
+                    {QStringLiteral("Dm"), QStringLiteral("C"), QStringLiteral("Bb"), QStringLiteral("C")},
+                    QStringLiteral("4-4"), 4, 96},
+                {QStringLiteral("modal-dorian-rnb"),
+                    {QStringLiteral("Am7"), QStringLiteral("D7"), QStringLiteral("Am7"), QStringLiteral("D7")},
+                    QStringLiteral("4-4"), 4, 98},
+                {QStringLiteral("manual-power-riff"),
+                    {QStringLiteral("D5"), QStringLiteral("F5"), QStringLiteral("C5"), QStringLiteral("D5")},
+                    QStringLiteral("4-4"), 4, 132},
+                {QStringLiteral("extended-nonswing"),
+                    {QStringLiteral("Ebmaj9"), QStringLiteral("Cm9"), QStringLiteral("Abmaj7"), QStringLiteral("Bb13")},
+                    QStringLiteral("4-4"), 4, 82},
+            };
+            bool manualContinuationValid = true;
+            double manualChordTotal = 0.0;
+            double manualContrastTotal = 0.0;
+            double manualDrumTotal = 0.0;
+            QStringList manualInferences;
+            for (int index = 0; index < manualCases.size(); ++index) {
+                const ManualCase& item = manualCases.at(index);
+                const SongSection source = manualSection(item.chords, item.beatsPerBar);
+                jam2::practice::ContinueIdeaRequest request;
+                request.sourceSectionIndex = 0;
+                request.targetSectionIndex = 1;
+                request.bpm = item.bpm;
+                request.meterId = item.meterId;
+                request.beatsPerBar = item.beatsPerBar;
+                const QString sourceChord = jam2::practice::generatedChordFingerprint(source);
+                const QString sourceBeat = jam2::practice::generatedBeatFingerprint(source);
+                const auto continuation = jam2::practice::generateContinuationPracticeIdeaForTest(
+                    source, request, static_cast<std::uint32_t>(23000 + index));
+                const auto& analysis = continuation.analysis;
+                bool parseable = true;
+                for (const QString& symbol : continuation.idea.chordSection.chords) {
+                    if (!symbol.trimmed().isEmpty() && symbol != QStringLiteral("-")) {
+                        parseable = parseable && jam2::practice::parseChord(symbol).valid;
+                    }
+                }
+                manualContinuationValid = manualContinuationValid &&
+                    sourceChord == jam2::practice::generatedChordFingerprint(source) &&
+                    sourceBeat == jam2::practice::generatedBeatFingerprint(source) &&
+                    continuation.idea.recipe.isValid() && parseable &&
+                    continuation.idea.recipe.bpm == item.bpm &&
+                    continuation.idea.recipe.meterId == item.meterId &&
+                    continuation.idea.chordSection.beats == source.beats &&
+                    harmonyFitsKey(
+                        continuation.idea.chordSection,
+                        analysis.inferredTonic,
+                        analysis.inferredMode) &&
+                    analysis.chordVocabularySimilarity <= 0.55 &&
+                    analysis.chordOrderContrast >= 0.50 &&
+                    analysis.openingChordPositionSimilarity <= 0.25 &&
+                    analysis.drumSimilarity <= 0.72 &&
+                    !analysis.inferredTonic.isEmpty() &&
+                    !analysis.inferredMode.isEmpty() &&
+                    !analysis.inferredProfileId.isEmpty();
+                manualChordTotal += analysis.chordVocabularySimilarity;
+                manualContrastTotal += analysis.chordOrderContrast;
+                manualDrumTotal += analysis.drumSimilarity;
+                manualInferences << QStringLiteral("%1:%2-%3/%4")
+                    .arg(item.name, analysis.inferredTonic,
+                        analysis.inferredMode, analysis.inferredProfileId);
+            }
+            const int manualCount = qMax(1, manualCases.size());
+            record(QStringLiteral("practice.continue-manual-a-corpus-infers-and-develops-material"),
+                manualContinuationValid,
+                QStringLiteral(
+                    "%1 manual A→B rounds; mean chord=%2%, order contrast=%3%, drums=%4%; inference=%5")
+                    .arg(manualCases.size())
+                    .arg(qRound(100.0 * manualChordTotal / manualCount))
+                    .arg(qRound(100.0 * manualContrastTotal / manualCount))
+                    .arg(qRound(100.0 * manualDrumTotal / manualCount))
+                    .arg(manualInferences.join(QStringLiteral(", "))));
+
+            struct AuthoredGrooveCase {
+                QString name;
+                QString expectedProfile;
+                QStringList chords;
+                int kind = 0;
+            };
+            const QVector<AuthoredGrooveCase> authoredGrooves{
+                {QStringLiteral("straight-backbeat"), QStringLiteral("pop_loop"),
+                    {QStringLiteral("C"), QStringLiteral("Am"), QStringLiteral("F"), QStringLiteral("G")}, 0},
+                {QStringLiteral("four-on-floor"), QStringLiteral("electronic_house"),
+                    {QStringLiteral("C"), QStringLiteral("Am"), QStringLiteral("F"), QStringLiteral("G")}, 1},
+                {QStringLiteral("half-time-dense-hats"), QStringLiteral("hiphop_trap"),
+                    {QStringLiteral("Dm"), QStringLiteral("C"), QStringLiteral("Bb"), QStringLiteral("C")}, 2},
+            };
+            bool authoredGroovesValid = true;
+            QStringList authoredGrooveDetails;
+            const auto bodyDrumGridDifferences = [](
+                const SongSection& source,
+                const SongSection& continuation,
+                int beatsPerBar) {
+                const int comparableBeats = qMax(
+                    0, qMin(source.beats, continuation.beats) -
+                        qMax(1, beatsPerBar));
+                int differences = 0;
+                for (int beat = 0; beat < comparableBeats; ++beat) {
+                    const BeatPattern& left = source.beatPatterns.value(beat);
+                    const BeatPattern& right =
+                        continuation.beatPatterns.value(beat);
+                    const int lanes = qMax(left.lanes.size(), right.lanes.size());
+                    for (int lane = 0; lane < lanes; ++lane) {
+                        const QString leftSteps = left.lanes.value(lane);
+                        const QString rightSteps = right.lanes.value(lane);
+                        const int steps = qMax(
+                            leftSteps.size(), rightSteps.size());
+                        for (int step = 0; step < steps; ++step) {
+                            const QChar leftState = step < leftSteps.size()
+                                ? leftSteps.at(step) : QLatin1Char('.');
+                            const QChar rightState = step < rightSteps.size()
+                                ? rightSteps.at(step) : QLatin1Char('.');
+                            if (leftState != rightState) {
+                                ++differences;
+                            }
+                        }
+                    }
+                }
+                return differences;
+            };
+            for (int index = 0; index < authoredGrooves.size(); ++index) {
+                const AuthoredGrooveCase& item = authoredGrooves.at(index);
+                SongSection source = manualSection(item.chords, 4);
+                for (int beat = 0; beat < source.beats; ++beat) {
+                    BeatPattern& pattern = source.beatPatterns[beat];
+                    pattern.division = 4;
+                    pattern.lanes.fill(
+                        QStringLiteral("...."), BeatGridModel::beatLaneNames().size());
+                    const int beatInBar = beat % 4;
+                    if (item.kind == 1) {
+                        pattern.lanes[0] = QStringLiteral("x...");
+                        if (beatInBar == 1 || beatInBar == 3)
+                            pattern.lanes[1] = QStringLiteral("x...");
+                        pattern.lanes[2] = QStringLiteral("x.x.");
+                    } else if (item.kind == 2) {
+                        if (beatInBar == 0 || beatInBar == 2)
+                            pattern.lanes[0] = beatInBar == 0
+                                ? QStringLiteral("x..x") : QStringLiteral("x.x.");
+                        if (beatInBar == 2)
+                            pattern.lanes[1] = QStringLiteral("x...");
+                        pattern.lanes[2] = QStringLiteral("xxxx");
+                    } else {
+                        if (beatInBar == 0 || beatInBar == 2)
+                            pattern.lanes[0] = QStringLiteral("x...");
+                        if (beatInBar == 1 || beatInBar == 3)
+                            pattern.lanes[1] = QStringLiteral("x...");
+                        pattern.lanes[2] = QStringLiteral("x.x.");
+                    }
+                }
+                jam2::practice::ContinueIdeaRequest request;
+                request.sourceSectionIndex = 0;
+                request.targetSectionIndex = 1;
+                request.bpm = item.kind == 1 ? 124 : item.kind == 2 ? 142 : 108;
+                request.meterId = QStringLiteral("4-4");
+                request.beatsPerBar = 4;
+                const auto continuation =
+                    jam2::practice::generateContinuationPracticeIdeaForTest(
+                        source, request, static_cast<std::uint32_t>(23500 + index));
+                const auto& analysis = continuation.analysis;
+                const int bodyDifferences = bodyDrumGridDifferences(
+                    source, continuation.idea.beatSection, 4);
+                const bool caseValid =
+                    continuation.idea.recipe.isValid() &&
+                    analysis.inferredProfileId == item.expectedProfile &&
+                    analysis.drumSimilarity <= 0.72 &&
+                    bodyDifferences >= 2 &&
+                    analysis.chordOrderContrast > 0.0 &&
+                    harmonyFitsKey(
+                        continuation.idea.chordSection,
+                        analysis.inferredTonic,
+                        analysis.inferredMode);
+                authoredGroovesValid = authoredGroovesValid && caseValid;
+                authoredGrooveDetails << QStringLiteral(
+                    "%1:%2 d=%3% c=%4% body-delta=%5")
+                    .arg(item.name, analysis.inferredProfileId)
+                    .arg(qRound(analysis.drumSimilarity * 100.0))
+                    .arg(qRound(analysis.chordOrderContrast * 100.0))
+                    .arg(bodyDifferences);
+            }
+            record(QStringLiteral(
+                       "practice.continue-manual-drum-feel-keeps-pocket-with-variation"),
+                authoredGroovesValid,
+                authoredGrooveDetails.join(QStringLiteral(", ")));
+
+            const QVector<QStringList> sparseHarmonySets{
+                {QStringLiteral("C5")},
+                {QStringLiteral("Cmaj7"), QStringLiteral("F#maj7")},
+                {QStringLiteral("Em"), QStringLiteral("Bb"), QStringLiteral("C#m")},
+                {QStringLiteral("Dsus2"), QStringLiteral("G5"), QStringLiteral("Bbmaj7")},
+                {QStringLiteral("Abm7"), QStringLiteral("Db7")},
+                {QStringLiteral("E5"), QStringLiteral("F5"), QStringLiteral("D5")},
+                {QStringLiteral("Gmaj7"), QStringLiteral("Bbm7"), QStringLiteral("Dbmaj7"), QStringLiteral("E7")},
+                {},
+            };
+            const QStringList sparseNotes{
+                QStringLiteral("C4"), QStringLiteral("Eb4"), QStringLiteral("F#4"),
+                QStringLiteral("A4"), QStringLiteral("D4"), QStringLiteral("G4"),
+                QStringLiteral("Bb4"), QStringLiteral("E4"), QStringLiteral("C#5")};
+            bool sparseManualValid = true;
+            QSet<QString> sparseFingerprints;
+            QSet<QString> sparseProfiles;
+            QSet<QString> sparseRoles;
+            double sparseTonalConfidenceTotal = 0.0;
+            double sparseProfileConfidenceTotal = 0.0;
+            double sparseMelodyContourTotal = 0.0;
+            int transformedMotifCases = 0;
+            QStringList sparseFailures;
+            constexpr int kSparseManualRounds = 32;
+            for (int index = 0; index < kSparseManualRounds; ++index) {
+                SongSection source;
+                source.label = QStringLiteral("A");
+                source.name = QStringLiteral("Sparse Manual %1").arg(index + 1);
+                const int bars = 4 + (index % 3) * 2;
+                source.beats = bars * 4;
+                source.chords.fill(QString(), source.beats);
+                source.targets.fill(QString(), source.beats);
+                source.beatNotes.fill(QString(), source.beats);
+                source.beatPatterns.resize(source.beats);
+                source.musicalPatterns.resize(source.beats);
+                const QStringList& chords =
+                    sparseHarmonySets.at(index % sparseHarmonySets.size());
+                for (int chord = 0; chord < chords.size(); ++chord) {
+                    const int beat = qMin(source.beats - 1,
+                        chord * qMax(1, source.beats / chords.size()));
+                    source.chords[beat] = chords.at(
+                        (chord + index / sparseHarmonySets.size()) % chords.size());
+                }
+                int sourceMelodyOnsets = 0;
+                for (int beat = 0; beat < source.beats; ++beat) {
+                    BeatPattern& drums = source.beatPatterns[beat];
+                    drums.division = 4;
+                    drums.lanes.fill(
+                        QStringLiteral("...."),
+                        BeatGridModel::beatLaneNames().size());
+                    const int beatInBar = beat % 4;
+                    if ((beat + index) % (3 + index % 3) == 0)
+                        drums.lanes[0][(index + beat) % 2 == 0 ? 0 : 2] = QLatin1Char('x');
+                    if ((beatInBar == 1 || beatInBar == 3) && index % 4 != 0)
+                        drums.lanes[1][0] = QLatin1Char('x');
+                    if (index % 5 != 0 && beat % 2 == 0)
+                        drums.lanes[2] = index % 2 == 0
+                            ? QStringLiteral("x.x.") : QStringLiteral("x...");
+
+                    MusicalBeatPattern& music = source.musicalPatterns[beat];
+                    music.division = 4;
+                    music.chords.fill(MusicalStep{}, 4);
+                    music.melody.fill(MusicalStep{}, 4);
+                    music.bass.fill(MusicalStep{}, 4);
+                    music.support.fill(MusicalStep{}, 4);
+                    const int melodyModulo = 3 + index % 5;
+                    if ((beat * 3 + index) % melodyModulo == 0 &&
+                        sourceMelodyOnsets < 2 + index % 6) {
+                        const int step = (beat + index) % 3;
+                        music.melody[step] = {
+                            MusicalStepState::Onset,
+                            sparseNotes.at((beat + index * 2) % sparseNotes.size()),
+                            72 + (index * 5 + beat) % 30,
+                            QStringLiteral("manual")};
+                        ++sourceMelodyOnsets;
+                    }
+                    if ((beat + index) % (4 + index % 4) == 0) {
+                        QString bassNote = sparseNotes.at(
+                            (index + beat * 2) % sparseNotes.size());
+                        if (!bassNote.isEmpty()) {
+                            bassNote.chop(1);
+                            bassNote += QLatin1Char('2');
+                        }
+                        music.bass[0] = {
+                            MusicalStepState::Onset,
+                            bassNote,
+                            78, QStringLiteral("manual")};
+                    }
+                }
+                const QString sourceChord =
+                    jam2::practice::generatedChordFingerprint(source);
+                const QString sourceBeat =
+                    jam2::practice::generatedBeatFingerprint(source);
+                jam2::practice::ContinueIdeaRequest request;
+                request.sourceSectionIndex = 0;
+                request.targetSectionIndex = 1;
+                request.bpm = 72 + (index * 11) % 91;
+                request.meterId = QStringLiteral("4-4");
+                request.beatsPerBar = 4;
+                const std::uint32_t continuationSeed =
+                    static_cast<std::uint32_t>(36000 + index);
+                const auto continuation =
+                    jam2::practice::generateContinuationPracticeIdeaForTest(
+                        source, request, continuationSeed);
+                const auto repeated =
+                    jam2::practice::generateContinuationPracticeIdeaForTest(
+                        source, request, continuationSeed);
+                const auto& analysis = continuation.analysis;
+                const QString targetChord =
+                    jam2::practice::generatedChordFingerprint(
+                        continuation.idea.chordSection);
+                const bool motifExpected = sourceMelodyOnsets >= 2;
+                const bool motifTransformed =
+                    continuation.idea.recipe.motifTransformations.join(
+                        QLatin1Char(' ')).contains(
+                            QStringLiteral("return boundary"));
+                const bool caseValid =
+                    sourceChord == jam2::practice::generatedChordFingerprint(source) &&
+                    sourceBeat == jam2::practice::generatedBeatFingerprint(source) &&
+                    continuation.idea.recipe.isValid() &&
+                    continuation.idea.chordSection.beats == source.beats &&
+                    continuation.idea.beatSection.beats == source.beats &&
+                    targetChord != sourceChord &&
+                    targetChord == jam2::practice::generatedChordFingerprint(
+                        repeated.idea.chordSection) &&
+                    jam2::practice::generatedBeatFingerprint(
+                        continuation.idea.beatSection) ==
+                        jam2::practice::generatedBeatFingerprint(
+                            repeated.idea.beatSection) &&
+                    !analysis.inferredTonic.isEmpty() &&
+                    !analysis.inferredMode.isEmpty() &&
+                    !analysis.inferredProfileId.isEmpty() &&
+                    analysis.inferredTonalConfidence > 0.0 &&
+                    analysis.inferredTonalConfidence < 1.0 &&
+                    analysis.inferredProfileConfidence > 0.0 &&
+                    analysis.inferredProfileConfidence < 1.0 &&
+                    !analysis.alternativeProfileIds.isEmpty() &&
+                    !analysis.continuationRoleId.isEmpty() &&
+                    analysis.drumSimilarity <= 0.72 &&
+                    (!motifExpected || motifTransformed) &&
+                    harmonyFitsKey(
+                        continuation.idea.chordSection,
+                        analysis.inferredTonic,
+                        analysis.inferredMode);
+                sparseManualValid = sparseManualValid && caseValid;
+                sparseFingerprints.insert(targetChord);
+                sparseProfiles.insert(analysis.inferredProfileId);
+                sparseRoles.insert(analysis.continuationRoleId);
+                sparseTonalConfidenceTotal += analysis.inferredTonalConfidence;
+                sparseProfileConfidenceTotal += analysis.inferredProfileConfidence;
+                sparseMelodyContourTotal += analysis.melodyContourSimilarity;
+                if (motifTransformed) ++transformedMotifCases;
+                if (!caseValid && sparseFailures.size() < 12) {
+                    sparseFailures << QStringLiteral(
+                        "%1 chords=%2 melody=%3 key=%4-%5 tc=%6 pc=%7 profile=%8 role=%9 d=%10 motif=%11")
+                        .arg(index)
+                        .arg(chords.size())
+                        .arg(sourceMelodyOnsets)
+                        .arg(analysis.inferredTonic, analysis.inferredMode)
+                        .arg(qRound(analysis.inferredTonalConfidence * 100.0))
+                        .arg(qRound(analysis.inferredProfileConfidence * 100.0))
+                        .arg(analysis.inferredProfileId,
+                            analysis.continuationRoleId)
+                        .arg(qRound(analysis.drumSimilarity * 100.0))
+                        .arg(motifTransformed);
+                }
+            }
+            record(QStringLiteral(
+                       "practice.continue-random-sparse-chromatic-manual-corpus-responds-to-source"),
+                sparseManualValid &&
+                    sparseFingerprints.size() >= 28 &&
+                    sparseProfiles.size() >= 4 &&
+                    sparseRoles.size() >= 3 &&
+                    transformedMotifCases >= 24,
+                QStringLiteral(
+                    "%1 rounds; %2 distinct B harmonies; profiles=%3 roles=%4 transformed motifs=%5; mean tonal confidence=%6%, profile confidence=%7%, melody contour=%8%")
+                    .arg(kSparseManualRounds)
+                    .arg(sparseFingerprints.size())
+                    .arg(sparseProfiles.size())
+                    .arg(sparseRoles.size())
+                    .arg(transformedMotifCases)
+                    .arg(qRound(100.0 * sparseTonalConfidenceTotal /
+                        kSparseManualRounds))
+                    .arg(qRound(100.0 * sparseProfileConfidenceTotal /
+                        kSparseManualRounds))
+                    .arg(qRound(100.0 * sparseMelodyContourTotal /
+                        kSparseManualRounds)) +
+                    (sparseFailures.isEmpty() ? QString() :
+                        QStringLiteral("; failures=%1").arg(
+                            sparseFailures.join(QStringLiteral(" | ")))));
+
+            BeatGridModel controllerModel;
+            const SongSection controllerSource = manualSection(
+                {QStringLiteral("A"), QStringLiteral("D"), QStringLiteral("E"), QStringLiteral("A")}, 4);
+            (void)controllerModel.replaceSection(0, controllerSource);
+            const QString controllerSourceChord =
+                jam2::practice::generatedChordFingerprint(controllerModel.section(0));
+            jam2::practice::ContinueIdeaRequest controllerRequest;
+            controllerRequest.sourceSectionIndex = 0;
+            controllerRequest.targetSectionIndex = 1;
+            controllerRequest.bpm = 118;
+            controllerRequest.meterId = QStringLiteral("4-4");
+            controllerRequest.beatsPerBar = 4;
+            const auto controllerResult =
+                jam2::practice::PracticeIdeaController::generateContinuation(
+                    controllerModel, controllerRequest);
+            record(QStringLiteral("practice.continue-controller-only-replaces-target-bank"),
+                controllerResult.has_value() &&
+                controllerSourceChord == jam2::practice::generatedChordFingerprint(
+                    controllerModel.section(0)) &&
+                controllerModel.section(1).generatedKind == QStringLiteral("practice") &&
+                controllerModel.section(1).name == QStringLiteral("Continuation of Bank A") &&
+                controllerModel.section(1).generatedRecipe.isValid());
+        }
 
         bool matrixValid = true;
         bool theoryBudgetsValid = true;
@@ -4421,7 +5728,9 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             legacyPatterns[patternIndex] = legacyPattern;
         }
         legacySection[QStringLiteral("beat_patterns")] = legacyPatterns;
-        legacySections[0] = legacySection;
+        // A pre-bank project may contain one section. Loading it must migrate
+        // the v1 percussion lanes and then pad the fixed A-D bank model.
+        legacySections = QJsonArray{legacySection};
         legacyBeatLanes[QStringLiteral("sections")] = legacySections;
         BeatGridModel migratedBeatLanes;
         const bool migratedLegacyBeatLanes =
@@ -4434,6 +5743,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             QStringLiteral(
                 "practice.beat-lane-v1-migrates-generic-tom-and-percussion-by-identity"),
             migrated.size() == 12 &&
+                migratedBeatLanes.sections().size() == 4 &&
                 migrated.value(0) == QStringLiteral("k") &&
                 migrated.value(5) == QStringLiteral("z") &&
                 migrated.value(6).isEmpty() &&
@@ -4442,6 +5752,58 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                 migrated.value(9) == QStringLiteral("x") &&
                 migrated.value(10) == QStringLiteral("h") &&
                 migrated.value(11) == QStringLiteral("p"));
+
+        QJsonObject excessiveSections = BeatGridModel{}.toJson();
+        QJsonArray fiveSections = excessiveSections.value(QStringLiteral("sections")).toArray();
+        fiveSections.append(fiveSections.first());
+        excessiveSections[QStringLiteral("sections")] = fiveSections;
+        BeatGridModel rejectedFiveSections;
+        record(QStringLiteral("practice.fixed-banks-reject-more-than-four-sections"),
+            !rejectedFiveSections.loadJson(excessiveSections));
+
+        LooperProject arrangementProject;
+        const bool acceptedArrangement = arrangementProject.setArrangement(
+            ArrangementDefinition{{ArrangementStep{0, 2}, ArrangementStep{1, 3}}, false});
+        LooperProject arrangementRoundTrip;
+        record(QStringLiteral("looper.arrangement-roundtrip-is-bounded"),
+            acceptedArrangement && arrangementRoundTrip.loadJson(arrangementProject.toJson()) &&
+            arrangementRoundTrip.arrangement().steps.size() == 2 &&
+            arrangementRoundTrip.arrangement().steps.at(1).bankIndex == 1 &&
+            arrangementRoundTrip.arrangement().steps.at(1).repeats == 3 &&
+            !arrangementRoundTrip.arrangement().loop);
+
+        LooperProject timingProject;
+        const LooperBankTiming newProjectA = timingProject.resolvedTiming(0);
+        const LooperBankTiming newProjectB = timingProject.resolvedTiming(1);
+        LooperBankTiming bankA;
+        bankA.bpm = 90;
+        bankA.beatsPerBar = 12;
+        bankA.beatUnit = 8;
+        bankA.tempoPulseUnits = 3;
+        bankA.division = 2;
+        const bool bankASet = timingProject.setTiming(0, bankA);
+        const LooperBankTiming inheritedB = timingProject.resolvedTiming(1);
+        LooperBankTiming bankB = inheritedB;
+        bankB.bpm = 124;
+        bankB.beatsPerBar = 2;
+        bankB.beatUnit = 4;
+        bankB.tempoPulseUnits = 1;
+        bankB.inheritsBankA = false;
+        const bool bankBSet = timingProject.setTiming(1, bankB);
+        bankA.bpm = 96;
+        const bool bankAChanged = timingProject.setTiming(0, bankA);
+        LooperProject timingRoundTrip;
+        const bool timingLoaded = timingRoundTrip.loadJson(timingProject.toJson());
+        record(QStringLiteral("looper.bank-timing-inherits-a-until-overridden"),
+            newProjectA.beatsPerBar == 4 && newProjectA.beatUnit == 4 &&
+            newProjectB.inheritsBankA && newProjectB.beatsPerBar == 4 &&
+            bankASet && inheritedB.inheritsBankA && inheritedB.bpm == 90 &&
+            inheritedB.beatsPerBar == 12 && inheritedB.tempoPulseUnits == 3 &&
+            bankBSet && bankAChanged && timingProject.resolvedTiming(1).bpm == 124 &&
+            timingLoaded && timingRoundTrip.resolvedTiming(0).bpm == 96 &&
+            timingRoundTrip.resolvedTiming(1).bpm == 124 &&
+            !timingRoundTrip.resolvedTiming(1).inheritsBankA &&
+            jam2::gui::trackTimelineBarNumber(180, 12) == 16);
 
         QJsonObject invalidBeatLaneSchema = BeatGridModel{}.toJson();
         invalidBeatLaneSchema[QStringLiteral("beat_lane_schema")] = 3;
@@ -4748,6 +6110,40 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
     }
     {
         BeatGridModel model;
+        const bool neutralDefaults =
+            model.section(0).name == QStringLiteral("Section A") &&
+            model.section(1).name == QStringLiteral("Section B");
+        model.renameSection(0, QStringLiteral("A"), QStringLiteral("Custom Verse"));
+        model.setCell(0, QStringLiteral("chord"), 0, QStringLiteral("Cmaj7"));
+        const bool cleared = model.clearSection(0);
+        record(QStringLiteral("practice.empty-and-cleared-banks-use-neutral-section-names"),
+            neutralDefaults && cleared &&
+            model.section(0).name == QStringLiteral("Section A") &&
+            model.section(1).name == QStringLiteral("Section B"));
+    }
+    {
+        BeatGridModel song;
+        LooperProject project;
+        const LooperBankTiming timing = project.resolvedTiming(0);
+        const LooperBankTiming inherited = project.resolvedTiming(1);
+        const SharedTrackModel track;
+        record(QStringLiteral(
+            "practice.new-project-is-blank-at-80-bpm-4-4-with-quarter-note-clicks"),
+            song.hasOnlyPristineSection() &&
+            project.banks().at(0).lanes.isEmpty() &&
+            project.banks().at(1).lanes.isEmpty() &&
+            track.acceptedBpm == 80.0 &&
+            timing.bpm == 80 && timing.beatsPerBar == 4 &&
+            timing.beatUnit == 4 && timing.tempoPulseUnits == 1 &&
+            timing.division == 1 && timing.playMaskLow == 0x0fULL &&
+            timing.playMaskHigh == 0 && timing.accentMaskLow == 0x01ULL &&
+            timing.accentMaskHigh == 0 &&
+            inherited.inheritsBankA && inherited.bpm == 80 &&
+            inherited.beatsPerBar == 4 && inherited.beatUnit == 4 &&
+            inherited.tempoPulseUnits == 1 && inherited.division == 1);
+    }
+    {
+        BeatGridModel model;
         model.setTitle(QStringLiteral("Keep This Title"));
         model.setCell(0, QStringLiteral("chord"), 0, QStringLiteral("Cmaj7"));
         model.setCell(0, QStringLiteral("target"), 0, QStringLiteral("E4"));
@@ -4761,6 +6157,164 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             model.title() == QStringLiteral("Keep This Title") &&
             model.revision() == previousRevision + 1 &&
             model.hasOnlyPristineSection());
+    }
+    {
+        const QDir tracks(appReleaseFolderPath(QStringLiteral("tracks")));
+        const QDir songs(appReleaseFolderPath(QStringLiteral("songs")));
+        const QStringList tracksBefore = tracks.entryList(
+            QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+        const QStringList songsBefore = songs.entryList(
+            QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+        const QString slug = JamStorage::portableSlug(
+            QStringLiteral("  Purple   Orbit: Live  "));
+        const QString randomName = JamStorage::randomDisplayName();
+        record(QStringLiteral("jam-storage.portable-two-word-names-and-slugs"),
+            slug == QStringLiteral("Purple_Orbit_Live") &&
+            !slug.contains(QLatin1Char(' ')) &&
+            randomName.split(QLatin1Char(' '), Qt::SkipEmptyParts).size() == 2 &&
+            !JamStorage::portableSlug(randomName).contains(QLatin1Char(' ')) &&
+            tracks.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name) ==
+                tracksBefore &&
+            songs.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name) ==
+                songsBefore);
+    }
+    {
+        LooperProject project;
+        const bool emptyBankRejected =
+            !PreparedMixRenderer::hasRenderableSources(project);
+        LooperLane emptyLane;
+        project.appendLane(0, emptyLane);
+        const bool emptyLaneRejected =
+            !PreparedMixRenderer::hasRenderableSources(project);
+        project.banks()[0].lanes[0].assetPath = QStringLiteral("recorded/take.wav");
+        const bool wavLaneAccepted =
+            PreparedMixRenderer::hasRenderableSources(project);
+        project.banks()[0].lanes[0].muted = true;
+        const bool mutedLaneRejected =
+            !PreparedMixRenderer::hasRenderableSources(project);
+        record(QStringLiteral("prepared-mix.empty-bank-does-not-render"),
+            emptyBankRejected && emptyLaneRejected && wavLaneAccepted &&
+            mutedLaneRejected);
+    }
+    {
+        const QString workspace = QDir::current().absoluteFilePath(
+            QStringLiteral("build/prepared-mix-short-bank-test-") +
+            QUuid::createUuid().toString(QUuid::WithoutBraces));
+        const QString sourcePath = QDir(workspace).absoluteFilePath(
+            QStringLiteral("long-lane.wav"));
+        const QString outputPath = QDir(workspace).absoluteFilePath(
+            QStringLiteral("cropped-mix.wav"));
+        const bool folderReady = QDir().mkpath(workspace);
+        QFile sourceFile(sourcePath);
+        const QByteArray sourceWav = pcm16Wav(32);
+        const bool sourceReady = folderReady &&
+            sourceFile.open(QIODevice::WriteOnly) &&
+            sourceFile.write(sourceWav) == sourceWav.size();
+        sourceFile.close();
+
+        LooperProject project;
+        LooperLane lane;
+        lane.name = QStringLiteral("Retained long lane");
+        lane.assetPath = sourcePath;
+        lane.stopFrame = 32;
+        lane.sampleRateCompatible = true;
+        const bool laneReady = project.appendLane(0, lane);
+        const PreparedMixResult rendered = PreparedMixRenderer::render(
+            project,
+            workspace,
+            48000,
+            outputPath,
+            SharedTrackModel{},
+            0,
+            8);
+        const jam2::wav::InspectResult inspected =
+            jam2::wav::inspect_pcm16_file(nativeFilePath(outputPath));
+        record(QStringLiteral("prepared-mix.long-retained-lane-is-cropped-to-short-bank"),
+            sourceReady && laneReady && rendered.error.isEmpty() &&
+            rendered.frames == 8 && inspected && inspected.info.frames == 8);
+        (void)QDir(workspace).removeRecursively();
+    }
+    {
+        const QString workspace = QDir::current().absoluteFilePath(
+            QStringLiteral("build/prepared-mix-sequence-test-") +
+            QUuid::createUuid().toString(QUuid::WithoutBraces));
+        const QString sourcePath = QDir(workspace).absoluteFilePath(
+            QStringLiteral("bank-a.wav"));
+        const QString outputPath = QDir(workspace).absoluteFilePath(
+            QStringLiteral("arrangement.wav"));
+        const bool folderReady = QDir().mkpath(workspace);
+        QFile sourceFile(sourcePath);
+        const QByteArray sourceWav = pcm16Wav(16);
+        const bool sourceReady = folderReady &&
+            sourceFile.open(QIODevice::WriteOnly) &&
+            sourceFile.write(sourceWav) == sourceWav.size();
+        sourceFile.close();
+
+        LooperProject project;
+        LooperLane lane;
+        lane.name = QStringLiteral("Bank A audio");
+        lane.assetPath = sourcePath;
+        lane.stopFrame = 16;
+        lane.sampleRateCompatible = true;
+        const bool laneReady = project.appendLane(0, lane);
+        const PreparedMixResult rendered = PreparedMixRenderer::renderSequence(
+            project,
+            workspace,
+            48000,
+            outputPath,
+            SharedTrackModel{},
+            {
+                {0, 2, 4},
+                {1, 1, 6},
+            });
+        const jam2::wav::InspectResult inspected =
+            jam2::wav::inspect_pcm16_file(nativeFilePath(outputPath));
+        QFile outputFile(outputPath);
+        const bool outputReady = outputFile.open(QIODevice::ReadOnly);
+        const QByteArray outputBytes = outputReady ? outputFile.readAll() : QByteArray{};
+        const QByteArray bankAudio = outputBytes.mid(44, 16);
+        const QByteArray emptyBankAudio = outputBytes.mid(60, 12);
+        const bool bankHasAudio = std::any_of(
+            bankAudio.cbegin(), bankAudio.cend(), [](char value) {
+                return value != 0;
+            });
+        const bool emptyBankSilent = emptyBankAudio == QByteArray(12, '\0');
+        record(QStringLiteral(
+            "prepared-mix.sequence-repeats-banks-and-preserves-empty-section-duration"),
+            sourceReady && laneReady && rendered.error.isEmpty() &&
+            rendered.frames == 14 && inspected && inspected.info.frames == 14 &&
+            bankAudio.size() == 16 && bankHasAudio && emptyBankSilent,
+            QStringLiteral(
+                "source=%1 lane=%2 error=%3 frames=%4 inspect=%5 inspect_frames=%6 bytes=%7 bank_bytes=%8 bank_audio=%9 empty_bytes=%10 empty_silent=%11")
+                .arg(sourceReady).arg(laneReady).arg(rendered.error)
+                .arg(rendered.frames).arg(static_cast<bool>(inspected))
+                .arg(inspected ? inspected.info.frames : 0)
+                .arg(outputBytes.size()).arg(bankAudio.size()).arg(bankHasAudio)
+                .arg(emptyBankAudio.size()).arg(emptyBankSilent));
+        outputFile.close();
+        (void)QDir(workspace).removeRecursively();
+    }
+    {
+        const QString workspace = QDir::current().absoluteFilePath(
+            QStringLiteral("build/empty-transient-workspace-") +
+            QUuid::createUuid().toString(QUuid::WithoutBraces));
+        const QString transientPath =
+            QDir(workspace).absoluteFilePath(QStringLiteral("generated/discard.wav"));
+        const bool folderReady = QDir().mkpath(QFileInfo(transientPath).absolutePath());
+        QFile transientFile(transientPath);
+        const bool fileReady = folderReady && transientFile.open(QIODevice::WriteOnly) &&
+            transientFile.write("fixture", 7) == 7;
+        transientFile.close();
+        ProjectPersistenceCoordinator persistence;
+        persistence.initializeWorkspace(workspace);
+        persistence.registerTransientWav(transientPath);
+        const bool discarded = persistence.discardTransientWav(transientPath);
+        record(QStringLiteral("project.discard-prunes-empty-jam-workspace"),
+            fileReady && discarded && !QFileInfo::exists(transientPath) &&
+            !QFileInfo::exists(workspace));
+        if (QFileInfo::exists(workspace)) {
+            (void)QDir(workspace).removeRecursively();
+        }
     }
     {
         const QString root = QDir::current().absoluteFilePath(
@@ -4790,7 +6344,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         persistence.registerTransientWav(obsoletePath);
         const bool obsoleteDiscarded = persistence.discardTransientWav(obsoletePath);
         persistence.acceptSavedProject(
-            QDir(root).absoluteFilePath(QStringLiteral("project/song.jam2song")),
+            QDir(root).absoluteFilePath(QStringLiteral("project/song.jamjar")),
             QByteArrayLiteral("snapshot"),
             QSet<QString>{savedPath});
         QThreadPool cleanupPool;
@@ -4860,9 +6414,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             savedLanes.at(0).toObject().value(QStringLiteral("local_only")).toBool() &&
             loaded.banks().at(0).lanes.size() == 1 &&
             loaded.banks().at(0).lanes.at(0).localOnly &&
-            syncedLanes.isEmpty() && preserved == 1 && mergedLoaded &&
-            merged.banks().at(0).lanes.size() == 1 &&
-            merged.banks().at(0).lanes.at(0).localOnly);
+            syncedLanes.isEmpty() && preserved == 0 && mergedLoaded &&
+            merged.banks().at(0).lanes.isEmpty());
     }
     QJsonObject invalidNestedSong = collaborativeSong;
     QJsonObject invalidNestedModel = collaborativeSongModel;
@@ -4896,28 +6449,77 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             resolved.bank == 0 && resolved.lane == 0 &&
             replaced.banks().at(resolved.bank).lanes.at(resolved.lane).id == laneId);
     }
-    const QJsonObject validTrackReady{
-        {QStringLiteral("type"), QStringLiteral("track.ready")},
-        {QStringLiteral("arrangement_revision"), 1},
+    const QJsonObject validReferenceRender{
+        {QStringLiteral("type"), QStringLiteral("practice.references.render")},
+        {QStringLiteral("request_id"), QStringLiteral("abcdef01-1234-1234-1234-123456789abc")},
+        {QStringLiteral("render_signature"), QString(64, QLatin1Char('a'))},
+        {QStringLiteral("render_chords"), true},
+        {QStringLiteral("render_drums"), false},
+        {QStringLiteral("render_melody"), false},
+        {QStringLiteral("render_bass"), false},
+        {QStringLiteral("render_support"), false},
     };
     modelError.clear();
-    record(QStringLiteral("track-ready.accept-positive-revision"),
-        jam2::application::validateControlMessage(validTrackReady, modelError), modelError);
-    QJsonObject invalidTrackReady = validTrackReady;
-    invalidTrackReady[QStringLiteral("arrangement_revision")] = 0;
+    record(QStringLiteral("reference-render.accept-complete-request"),
+        jam2::application::validateControlMessage(validReferenceRender, modelError), modelError);
+    QJsonObject invalidReferenceRender = validReferenceRender;
+    invalidReferenceRender[QStringLiteral("render_chords")] = QStringLiteral("yes");
     modelError.clear();
-    record(QStringLiteral("track-ready.reject-zero-revision"),
-        !jam2::application::validateControlMessage(invalidTrackReady, modelError), modelError);
+    record(QStringLiteral("reference-render.reject-non-boolean-part"),
+        !jam2::application::validateControlMessage(invalidReferenceRender, modelError), modelError);
     record(QStringLiteral("track-sync.classifies-all-control-payloads"),
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("song.set")) &&
-        jam2::application::isTrackSyncControlMessageType(QStringLiteral("track.ready")) &&
+        jam2::application::isTrackSyncControlMessageType(QStringLiteral("practice.references.render")) &&
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.track.share.request")) &&
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.track.batch.offer")) &&
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.track.batch.complete")) &&
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.asset.request")) &&
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.asset.start")) &&
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.asset.done")) &&
+        jam2::application::isTrackSyncControlMessageType(QStringLiteral("bank.request")) &&
+        jam2::application::isTrackSyncControlMessageType(QStringLiteral("bank.prepare")) &&
+        jam2::application::isTrackSyncControlMessageType(QStringLiteral("bank.ready")) &&
+        jam2::application::isTrackSyncControlMessageType(QStringLiteral("bank.cancel")) &&
+        jam2::application::isTrackSyncControlMessageType(QStringLiteral("bank.switch")) &&
         !jam2::application::isTrackSyncControlMessageType(QStringLiteral("metronome.settings")));
+    {
+        const QString switchId = QStringLiteral("abcdef01-1234-1234-1234-123456789abc");
+        const QJsonObject prepare{
+            {QStringLiteral("type"), QStringLiteral("bank.prepare")},
+            {QStringLiteral("switch_id"), switchId},
+            {QStringLiteral("bank"), 2},
+        };
+        const QJsonObject ready{
+            {QStringLiteral("type"), QStringLiteral("bank.ready")},
+            {QStringLiteral("switch_id"), switchId},
+            {QStringLiteral("bank"), 2},
+        };
+        const QJsonObject launch{
+            {QStringLiteral("type"), QStringLiteral("bank.switch")},
+            {QStringLiteral("switch_id"), switchId},
+            {QStringLiteral("bank"), 2},
+            {QStringLiteral("target_abs_beat"), QStringLiteral("128")},
+        };
+        QJsonObject invalidLaunch = launch;
+        invalidLaunch.remove(QStringLiteral("target_abs_beat"));
+        modelError.clear();
+        record(QStringLiteral("bank-switch.prepare-ready-and-exact-target-validate"),
+            jam2::application::validateControlMessage(prepare, modelError) &&
+            jam2::application::validateControlMessage(ready, modelError) &&
+            jam2::application::validateControlMessage(launch, modelError) &&
+            !jam2::application::validateControlMessage(invalidLaunch, modelError));
+        const auto prepareFromCoordinator = jam2::application::evaluateControlMessage(
+            prepare, jam2::application::ControlMessageSource::Coordinator);
+        const auto prepareFromPeer = jam2::application::evaluateControlMessage(
+            prepare, jam2::application::ControlMessageSource::AuthenticatedPeer);
+        const auto readyFromPeer = jam2::application::evaluateControlMessage(
+            ready, jam2::application::ControlMessageSource::AuthenticatedPeer);
+        const auto readyFromCoordinator = jam2::application::evaluateControlMessage(
+            ready, jam2::application::ControlMessageSource::Coordinator);
+        record(QStringLiteral("bank-switch.authority-separates-prepare-and-ready"),
+            prepareFromCoordinator.accepted && !prepareFromPeer.accepted &&
+            readyFromPeer.accepted && !readyFromCoordinator.accepted);
+    }
     const QJsonObject validTrack{
         {QStringLiteral("recording_id"), QStringLiteral("12345678-1234-1234-1234-123456789abc")},
         {QStringLiteral("bank"), 0},
@@ -5125,9 +6727,13 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             position.sampleRate = 48000;
             return jam2::gui::next_safe_grid_beat_raw_frame(position) == 72000;
         }());
+    record(QStringLiteral("prepared-track.attach-keeps-gui-on-song-clock-until-applied"),
+        !jam2::gui::prepared_attach_has_applied(72000, 71999, 48000) &&
+        !jam2::gui::prepared_attach_has_applied(72000, 72000, 48000) &&
+        jam2::gui::prepared_attach_has_applied(72000, 72000, 72000));
     {
         jam2::audio::StreamControl control;
-        control.prepared_source_actual_start_frame.store(48000);
+        control.metronome_pattern_scheduled_origin_raw_frame.store(48000);
         std::uint64_t position = 0;
         const bool beforeStart = jam2::audio::metronome_pattern_position(
             control, 47999, 47999, true, 0, position) && position == 47999;
@@ -5143,7 +6749,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         record(QStringLiteral("global-play.metronome-accent-resets-without-epoch-change"),
             beforeStart && atStart && afterStart && countInStartsAccented &&
             control.metronome_pattern_origin_valid.load() &&
-            control.metronome_pattern_origin_frame.load() == 48000);
+            control.metronome_pattern_origin_frame.load() == 48000 &&
+            control.metronome_pattern_scheduled_origin_raw_frame.load() == 0);
     }
     record(QStringLiteral("record-stop.quantizes-to-next-whole-bar"),
         nextGridBoundaryBeat(0, 4, true) == 4 &&
@@ -5179,10 +6786,6 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         ApplicationRuntime runtime;
         TrackWorkspaceController workspace(runtime);
         workspace.playPreparedMixWhenReady = true;
-        workspace.pendingPreparedTrackReadyRevision = 12;
-        workspace.pendingSharedTrackRevision = 12;
-        workspace.pendingSharedTrackHostReady = false;
-        workspace.pendingSharedTrackReadyTokens.insert(QStringLiteral("peer"));
         workspace.publishStoppedTrackStateWhenApplied = true;
         workspace.pendingSongTrackRestart = true;
         workspace.trackController.requestPlayback(true, 12);
@@ -5191,13 +6794,68 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
 
         record(QStringLiteral("practice.generate-cancels-track-playback-and-restarts"),
             !workspace.playPreparedMixWhenReady &&
-            workspace.pendingPreparedTrackReadyRevision == 0 &&
-            workspace.pendingSharedTrackRevision == 0 &&
-            workspace.pendingSharedTrackHostReady &&
-            workspace.pendingSharedTrackReadyTokens.isEmpty() &&
             !workspace.publishStoppedTrackStateWhenApplied &&
             !workspace.pendingSongTrackRestart &&
             !workspace.trackController.playback().requestedPlaying);
+    }
+    {
+        ApplicationRuntime runtime;
+        TrackRecordingWorkflow workflow(runtime);
+        PlaybackGrid::Position position;
+        position.running = true;
+        position.engineAnchored = true;
+        position.rawCurrentFrame = 60000;
+        position.epochFrame = 0;
+        position.absoluteBeat = 2;
+        position.secondsPerBeat = 0.5;
+        position.sampleRate = 48000;
+        // No running engine is required to exercise committed transport
+        // snapshots, so use a remote-style commit below rather than submitting.
+        const bool waitingBeforeCommit =
+            !workflow.globalTransportRequestedPlaying() &&
+            !workflow.globalTransportPlaying();
+        jam2::EngineSnapshot snapshot;
+        snapshot.transport_revision = 1;
+        snapshot.transport_pending = true;
+        snapshot.transport_action = jam2::EngineTransportAction::TrackRestart;
+        snapshot.transport_target_frame = 72000;
+        snapshot.engine_frame = 71000;
+        snapshot.sample_rate = 48000.0;
+        workflow.consumeSnapshot(
+            snapshot, MetronomeTransportController::SnapshotUpdate{});
+        const bool remoteStartArmedBeforeCommit =
+            workflow.globalTransportRequestedPlaying() &&
+            !workflow.globalTransportPlaying();
+        snapshot.engine_frame = 72000;
+        snapshot.transport_pending = false;
+        snapshot.transport_commit_count = 1;
+        workflow.consumeSnapshot(
+            snapshot, MetronomeTransportController::SnapshotUpdate{});
+        PlaybackGrid::Position advanced = position;
+        advanced.rawCurrentFrame = 96000;
+        const bool runningWithoutWav = workflow.globalTransportPlaying() &&
+            workflow.globalTransportStartFrame() == 72000 &&
+            workflow.currentTransportPositionMs(advanced, 0) == 500;
+        snapshot.transport_revision = 2;
+        snapshot.transport_pending = true;
+        snapshot.transport_action = jam2::EngineTransportAction::TrackStop;
+        snapshot.transport_target_frame = 120000;
+        snapshot.engine_frame = 119000;
+        workflow.consumeSnapshot(
+            snapshot, MetronomeTransportController::SnapshotUpdate{});
+        const bool remoteStopArmedBeforeCommit =
+            !workflow.globalTransportRequestedPlaying() &&
+            workflow.globalTransportPlaying();
+        snapshot.engine_frame = 120000;
+        snapshot.transport_pending = false;
+        snapshot.transport_commit_count = 2;
+        workflow.consumeSnapshot(
+            snapshot, MetronomeTransportController::SnapshotUpdate{});
+        record(QStringLiteral("global-play.transport-state-is-independent-of-wav"),
+            waitingBeforeCommit && remoteStartArmedBeforeCommit &&
+            runningWithoutWav && remoteStopArmedBeforeCommit &&
+            !workflow.globalTransportRequestedPlaying() &&
+            !workflow.globalTransportPlaying());
     }
     {
         Jam2RuntimeHost requestIds;
@@ -5252,10 +6910,47 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         }};
         const bool queued = published && source.enqueueBatch(commands);
         std::array<std::int32_t, 4> output{};
-        const int peakPpm = queued ? source.mix(output.data(), output.size(), 0) : 0;
+        std::array<std::int32_t, 4> stem{};
+        const int peakPpm = queued
+            ? source.mix(output.data(), output.size(), 0, stem)
+            : 0;
         record(QStringLiteral("prepared-track.mix-reports-contribution-peak"),
             queued && peakPpm >= 999900 && peakPpm <= 1000000 &&
-            output[0] > 0 && output[1] < 0);
+            output[0] > 0 && output[1] < 0 && output == stem &&
+            static_cast<int>(jam2::audio::TrackTakeSource::CurrentJam) == 1 &&
+            (jam2::audio::kTrackTakeIncludePrepared &
+                jam2::audio::kTrackTakeIncludeMetronome) == 0);
+    }
+    {
+        jam2::audio::PreparedTrackSource source(4);
+        const int slot = source.claimLoadingSlot();
+        std::int16_t* samples = source.loadingData(slot);
+        if (samples != nullptr) {
+            std::fill(samples, samples + 4, static_cast<std::int16_t>(1200));
+        }
+        const bool ready = samples != nullptr && source.publishReady(slot, 4, 48000);
+        const std::array<jam2::audio::PreparedTrackSource::Command, 2> start{{
+            {jam2::audio::PreparedTrackSource::CommandType::Swap,
+             static_cast<std::uint32_t>(qMax(0, slot)), 100, 0, 0, 1000000},
+            {jam2::audio::PreparedTrackSource::CommandType::Play,
+             0, 100, 0, 0, 1000000},
+        }};
+        std::array<std::int32_t, 2> output{};
+        const bool started = ready && source.enqueueBatch(start);
+        if (started) {
+            (void)source.mix(output.data(), output.size(), 100);
+        }
+        const bool cleared = source.enqueue({
+            jam2::audio::PreparedTrackSource::CommandType::Clear,
+            0, 102, 0, 0, 1000000});
+        output.fill(0);
+        if (cleared) {
+            (void)source.mix(output.data(), output.size(), 102);
+        }
+        record(QStringLiteral("prepared-track.clear-unloads-stale-audio"),
+            started && cleared && !source.playing() && source.sourceFrame() == 0 &&
+            source.scheduledStartFrame() == 0 && source.actualStartFrame() == 0 &&
+            output[0] == 0 && output[1] == 0);
     }
     {
         jam2::audio::PreparedTrackSource source(4);
@@ -5307,6 +7002,36 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             started && attached && source.actualStartFrame() == 100 &&
             source.scheduledStartFrame() == 200 && source.sourceFrame() == 3 &&
             output[0] == (static_cast<std::int32_t>(3000) << 16));
+    }
+    {
+        jam2::audio::PreparedTrackSource source(4);
+        const int slot = source.claimLoadingSlot();
+        std::int16_t* samples = source.loadingData(slot);
+        if (samples != nullptr) {
+            samples[0] = 1000;
+            samples[1] = 2000;
+            samples[2] = 3000;
+            samples[3] = 4000;
+        }
+        const bool ready = samples != nullptr &&
+            source.publishReady(slot, 4, 48000);
+        const std::array<jam2::audio::PreparedTrackSource::Command, 3> attach{{
+            {jam2::audio::PreparedTrackSource::CommandType::Swap,
+             static_cast<std::uint32_t>(qMax(0, slot)), 72000, 2, 0, 1000000},
+            {jam2::audio::PreparedTrackSource::CommandType::SetLoop,
+             0, 72000, 0, 4, 1000000},
+            {jam2::audio::PreparedTrackSource::CommandType::Play,
+             0, 72000, 0, 0, 1000000},
+        }};
+        const bool queued = ready && source.enqueueBatch(attach);
+        std::array<std::int32_t, 2> output{};
+        if (queued) {
+            (void)source.mix(output.data(), output.size(), 72000);
+        }
+        record(QStringLiteral("prepared-track.late-attach-starts-stopped-source"),
+            queued && source.playing() && source.actualStartFrame() == 72000 &&
+            output[0] == (static_cast<std::int32_t>(3000) << 16) &&
+            output[1] == (static_cast<std::int32_t>(4000) << 16));
     }
 
     {

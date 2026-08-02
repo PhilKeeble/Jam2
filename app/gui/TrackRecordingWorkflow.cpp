@@ -136,6 +136,15 @@ std::uint64_t jam2::gui::next_safe_grid_beat_raw_frame(
     return target;
 }
 
+bool jam2::gui::prepared_attach_has_applied(
+    std::uint64_t pendingTargetFrame,
+    std::uint64_t engineFrame,
+    std::uint64_t preparedScheduledStartFrame) noexcept
+{
+    return pendingTargetFrame > 0 && engineFrame >= pendingTargetFrame &&
+        preparedScheduledStartFrame == pendingTargetFrame;
+}
+
 int jam2::gui::resolve_active_sample_rate(
     int sessionSampleRate,
     double engineSampleRate,
@@ -197,8 +206,7 @@ bool TrackRecordingWorkflow::setPreparedLoop(
 }
 
 bool TrackRecordingWorkflow::restartPrepared(
-    const PlaybackGrid::Position& position,
-    bool publishTransport) noexcept
+    const PlaybackGrid::Position& position) noexcept
 {
     const std::uint64_t target = jam2::gui::next_safe_grid_beat_raw_frame(position);
     if (target == 0) {
@@ -216,38 +224,100 @@ bool TrackRecordingWorkflow::restartPrepared(
     if (!submit(play)) {
         return false;
     }
-    if (publishTransport) {
-        jam2::EngineCommand transport;
-        transport.type = jam2::EngineCommandType::ScheduleTransport;
-        transport.transport_action = jam2::EngineTransportAction::TrackRestart;
-        transport.transport_target_frame = target;
-        transport.transport_musical_frame = musicalFrameFromRawFrame(
-            target, position.renderOffsetFrames);
-        transport.transport_countdown_start_frame = target;
-        return submit(transport);
+    cancelPreparedAttach();
+    return scheduleGlobalTransportStart(
+        target,
+        musicalFrameFromRawFrame(target, position.renderOffsetFrames));
+}
+
+bool TrackRecordingWorkflow::restartGlobalTransport(
+    const PlaybackGrid::Position& position) noexcept
+{
+    const std::uint64_t target = jam2::gui::next_safe_grid_beat_raw_frame(position);
+    if (target == 0) {
+        return false;
     }
+    return scheduleGlobalTransportStart(
+        target,
+        musicalFrameFromRawFrame(target, position.renderOffsetFrames));
+}
+
+bool TrackRecordingWorkflow::scheduleBankRestart(
+    std::uint64_t targetFrame,
+    std::uint64_t musicalFrame,
+    bool preparedAvailable) noexcept
+{
+    if (targetFrame == 0) return false;
+    jam2::EngineCommand source;
+    source.type = preparedAvailable
+        ? jam2::EngineCommandType::PreparedSeek
+        : jam2::EngineCommandType::PreparedStop;
+    source.frame = targetFrame;
+    source.frame_end = 0;
+    if (!submit(source)) return false;
+    if (preparedAvailable) {
+        jam2::EngineCommand play;
+        play.type = jam2::EngineCommandType::PreparedPlay;
+        play.frame = targetFrame;
+        if (!submit(play)) return false;
+    }
+    cancelPreparedAttach();
+    return scheduleGlobalTransportStart(targetFrame, musicalFrame);
+}
+
+bool TrackRecordingWorkflow::scheduleGlobalTransportStart(
+    std::uint64_t targetFrame,
+    std::uint64_t musicalFrame) noexcept
+{
+    jam2::EngineCommand transport;
+    transport.type = jam2::EngineCommandType::ScheduleTransport;
+    transport.transport_action = jam2::EngineTransportAction::TrackRestart;
+    transport.transport_target_frame = targetFrame;
+    transport.transport_musical_frame = musicalFrame;
+    transport.transport_countdown_start_frame = targetFrame;
+    if (!submit(transport)) {
+        return false;
+    }
+    global_transport_requested_playing_ = true;
+    pending_global_transport_start_frame_ = targetFrame;
+    pending_global_transport_stop_frame_ = 0;
     return true;
 }
 
 bool TrackRecordingWorkflow::stopPrepared(
     std::uint64_t targetFrame,
-    std::uint64_t musicalFrame,
-    bool publishTransport) noexcept
+    std::uint64_t musicalFrame) noexcept
 {
+    // A bank change may already have queued a later seek/play. Invalidate that
+    // generation first so a user Stop cannot be followed by the stale bank
+    // restart after the stop boundary.
+    jam2::EngineCommand cancel;
+    cancel.type = jam2::EngineCommandType::CancelTransport;
+    if (!submit(cancel)) {
+        return false;
+    }
     jam2::EngineCommand stop;
     stop.type = jam2::EngineCommandType::PreparedStop;
     stop.frame = targetFrame;
     if (!submit(stop)) {
         return false;
     }
-    if (publishTransport) {
-        jam2::EngineCommand transport;
-        transport.type = jam2::EngineCommandType::ScheduleTransport;
-        transport.transport_action = jam2::EngineTransportAction::TrackStop;
-        transport.transport_target_frame = targetFrame;
-        transport.transport_musical_frame = musicalFrame;
-        transport.transport_countdown_start_frame = targetFrame;
-        return submit(transport);
+    cancelPreparedAttach();
+    jam2::EngineCommand transport;
+    transport.type = jam2::EngineCommandType::ScheduleTransport;
+    transport.transport_action = jam2::EngineTransportAction::TrackStop;
+    transport.transport_target_frame = targetFrame;
+    transport.transport_musical_frame = musicalFrame;
+    transport.transport_countdown_start_frame = targetFrame;
+    if (!submit(transport)) {
+        return false;
+    }
+    global_transport_requested_playing_ = false;
+    pending_global_transport_start_frame_ = 0;
+    if (targetFrame == 0) {
+        clearGlobalTransport();
+    } else {
+        pending_global_transport_stop_frame_ = targetFrame;
     }
     return true;
 }
@@ -258,6 +328,17 @@ void TrackRecordingWorkflow::noteManualPreparedSeek(
 {
     prepared_source_frame_ = sourceFrame;
     prepared_engine_frame_ = engineFrame;
+}
+
+void TrackRecordingWorkflow::notePreparedAttachScheduled(
+    std::uint64_t targetFrame) noexcept
+{
+    pending_prepared_attach_target_frame_ = targetFrame;
+}
+
+void TrackRecordingWorkflow::cancelPreparedAttach() noexcept
+{
+    pending_prepared_attach_target_frame_ = 0;
 }
 
 qint64 TrackRecordingWorkflow::currentAudiblePositionMs(
@@ -279,17 +360,15 @@ qint64 TrackRecordingWorkflow::currentTransportPositionMs(
     const PlaybackGrid::Position& enginePosition,
     qint64 durationMs) const noexcept
 {
-    if (durationMs > 0) {
-        return currentAudiblePositionMs(enginePosition, durationMs);
-    }
+    (void)durationMs;
     if (enginePosition.sampleRate <= 0) {
         return 0;
     }
     const std::uint64_t elapsedFrames = jam2::gui::global_transport_elapsed_frames(
-        prepared_playing_,
+        global_transport_playing_,
         enginePosition.engineAnchored,
         enginePosition.rawCurrentFrame,
-        prepared_actual_start_frame_);
+        global_transport_start_frame_);
     const std::uint64_t sampleRate = static_cast<std::uint64_t>(enginePosition.sampleRate);
     const std::uint64_t wholeSeconds = elapsedFrames / sampleRate;
     const std::uint64_t remainingFrames = elapsedFrames % sampleRate;
@@ -315,6 +394,53 @@ void TrackRecordingWorkflow::consumeSnapshot(
     prepared_source_frame_ = static_cast<qint64>(snapshot.prepared_source_frame);
     prepared_actual_start_frame_ = snapshot.prepared_source_actual_start_frame;
     prepared_playing_ = snapshot.prepared_source_playing;
+    if (snapshot.transport_revision > observed_transport_revision_) {
+        observed_transport_revision_ = snapshot.transport_revision;
+        if (snapshot.transport_pending &&
+            (snapshot.transport_action == jam2::EngineTransportAction::TrackRestart ||
+             snapshot.transport_action == jam2::EngineTransportAction::TrackPlay)) {
+            global_transport_requested_playing_ = true;
+            pending_global_transport_start_frame_ = snapshot.transport_target_frame;
+            pending_global_transport_stop_frame_ = 0;
+        } else if (snapshot.transport_pending &&
+                   snapshot.transport_action ==
+                       jam2::EngineTransportAction::TrackStop) {
+            global_transport_requested_playing_ = false;
+            pending_global_transport_start_frame_ = 0;
+            pending_global_transport_stop_frame_ = snapshot.transport_target_frame;
+        }
+    }
+    if (snapshot.transport_commit_count > observed_transport_commit_count_) {
+        observed_transport_commit_count_ = snapshot.transport_commit_count;
+        if (snapshot.transport_action == jam2::EngineTransportAction::TrackRestart ||
+            snapshot.transport_action == jam2::EngineTransportAction::TrackPlay ||
+            snapshot.transport_action == jam2::EngineTransportAction::RecordStart) {
+            global_transport_requested_playing_ = true;
+            global_transport_playing_ = true;
+            global_transport_start_frame_ = snapshot.transport_target_frame;
+            pending_global_transport_start_frame_ = 0;
+            pending_global_transport_stop_frame_ = 0;
+        } else if (snapshot.transport_action ==
+                   jam2::EngineTransportAction::TrackStop) {
+            clearGlobalTransport();
+        }
+    }
+    if (pending_global_transport_start_frame_ > 0 &&
+        snapshot.engine_frame >= pending_global_transport_start_frame_) {
+        global_transport_playing_ = true;
+        global_transport_start_frame_ = pending_global_transport_start_frame_;
+        pending_global_transport_start_frame_ = 0;
+    }
+    if (pending_global_transport_stop_frame_ > 0 &&
+        snapshot.engine_frame >= pending_global_transport_stop_frame_) {
+        clearGlobalTransport();
+    }
+    if (jam2::gui::prepared_attach_has_applied(
+            pending_prepared_attach_target_frame_,
+            snapshot.engine_frame,
+            snapshot.prepared_source_scheduled_start_frame)) {
+        pending_prepared_attach_target_frame_ = 0;
+    }
     if (snapshot.sample_rate > 0.0) {
         prepared_sample_rate_ = static_cast<int>(std::lround(snapshot.sample_rate));
     }
@@ -336,7 +462,11 @@ std::optional<int> TrackRecordingWorkflow::takeReadyPendingCountIn(
     return std::nullopt;
 }
 
-bool TrackRecordingWorkflow::armTrackTake(const QString& id, const QString& output) noexcept
+bool TrackRecordingWorkflow::armTrackTake(
+    const QString& id,
+    const QString& output,
+    bool includePrepared,
+    bool includeMetronome) noexcept
 {
     jam2::EngineCommand command;
     command.type = jam2::EngineCommandType::ArmTrackTake;
@@ -344,6 +474,11 @@ bool TrackRecordingWorkflow::armTrackTake(const QString& id, const QString& outp
         !jam2::engine_command_set_text(command, output.toStdString())) {
         return false;
     }
+    command.value = capture_mode_ == CaptureMode::CurrentJam
+        ? static_cast<std::int32_t>(jam2::audio::TrackTakeSource::CurrentJam)
+        : static_cast<std::int32_t>(jam2::audio::TrackTakeSource::Input);
+    if (includePrepared) command.value |= jam2::audio::kTrackTakeIncludePrepared;
+    if (includeMetronome) command.value |= jam2::audio::kTrackTakeIncludeMetronome;
     return submit(command);
 }
 
@@ -457,6 +592,8 @@ bool TrackRecordingWorkflow::startInputTake(
     std::optional<int> countInBars,
     const PlaybackGrid::Position& position,
     int beatsPerBar,
+    bool includePrepared,
+    bool includeMetronome,
     QString& error)
 {
     if (input_take_active_) {
@@ -473,7 +610,11 @@ bool TrackRecordingWorkflow::startInputTake(
         return false;
     }
     const QString takeId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    if (!armTrackTake(takeId, QDir::toNativeSeparators(outputPath))) {
+    if (!armTrackTake(
+            takeId,
+            QDir::toNativeSeparators(outputPath),
+            includePrepared,
+            includeMetronome)) {
         error = QStringLiteral("track take id/output is too long or the engine command queue is unavailable");
         return false;
     }
@@ -608,11 +749,15 @@ QString TrackRecordingWorkflow::abandonPendingCapture()
 void TrackRecordingWorkflow::armLane(
     int bankIndex,
     int laneIndex,
-    CaptureMode mode) noexcept
+    CaptureMode mode,
+    bool includePrepared,
+    bool includeMetronome) noexcept
 {
     armed_bank_ = bankIndex;
     armed_lane_ = laneIndex;
     capture_mode_ = mode;
+    include_prepared_in_take_ = includePrepared;
+    include_metronome_in_take_ = includeMetronome;
 }
 
 void TrackRecordingWorkflow::disarmLane() noexcept
@@ -620,6 +765,8 @@ void TrackRecordingWorkflow::disarmLane() noexcept
     armed_bank_ = -1;
     armed_lane_ = -1;
     capture_mode_ = CaptureMode::Input;
+    include_prepared_in_take_ = false;
+    include_metronome_in_take_ = false;
 }
 
 bool TrackRecordingWorkflow::laneArmed() const noexcept
@@ -678,6 +825,7 @@ void TrackRecordingWorkflow::clearProjectCapture() noexcept
     last_capture_path_.clear();
     last_capture_sample_rate_ = 0;
     pending_transient_capture_path_.clear();
+    cancelPreparedAttach();
     disarmLane();
 }
 
@@ -685,4 +833,17 @@ void TrackRecordingWorkflow::clearSessionSchedule() noexcept
 {
     clearRecordingSchedule();
     clearJamRecordingState();
+    cancelPreparedAttach();
+    clearGlobalTransport();
+    observed_transport_revision_ = 0;
+    observed_transport_commit_count_ = 0;
+}
+
+void TrackRecordingWorkflow::clearGlobalTransport() noexcept
+{
+    global_transport_requested_playing_ = false;
+    global_transport_playing_ = false;
+    global_transport_start_frame_ = 0;
+    pending_global_transport_start_frame_ = 0;
+    pending_global_transport_stop_frame_ = 0;
 }

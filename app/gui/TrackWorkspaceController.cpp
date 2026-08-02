@@ -34,10 +34,6 @@ void TrackWorkspaceController::setCallbacks(Callbacks callbacks)
 void TrackWorkspaceController::cancelPendingTrackPlayback() noexcept
 {
     playPreparedMixWhenReady = false;
-    pendingPreparedTrackReadyRevision = 0;
-    pendingSharedTrackRevision = 0;
-    pendingSharedTrackHostReady = true;
-    pendingSharedTrackReadyTokens.clear();
     publishStoppedTrackStateWhenApplied = false;
     pendingSongTrackRestart = false;
     trackController.requestPlayback(false);
@@ -148,7 +144,7 @@ QString TrackWorkspaceController::assetPathForSend(const QString& hash) const
 QString TrackWorkspaceController::incomingAssetPath(const QString& hash) const
 {
     return QDir(persistence.workspaceFolder()).absoluteFilePath(
-        QStringLiteral("wavs/") + hash + QStringLiteral(".wav"));
+        QStringLiteral("received/") + hash + QStringLiteral(".wav"));
 }
 
 bool TrackWorkspaceController::incomingAssetExpected(

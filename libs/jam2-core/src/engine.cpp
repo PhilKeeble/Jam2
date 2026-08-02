@@ -350,6 +350,7 @@ public:
         output_scratch_.resize(frames, 0);
         inputs_mix_scratch_.resize(frames, 0);
         metronome_scratch_.resize(frames, 0);
+        prepared_scratch_.resize(frames, 0);
         thread_ = std::thread([this] { run(); });
     }
 
@@ -478,7 +479,10 @@ private:
         int prepared_track_peak = 0;
         if (control_.prepared_source != nullptr && !output_scratch_.empty()) {
             prepared_track_peak = control_.prepared_source->mix(
-                output_scratch_.data(), output_scratch_.size(), callback_frame);
+                output_scratch_.data(),
+                output_scratch_.size(),
+                callback_frame,
+                prepared_scratch_);
             control_.prepared_source_frame.store(control_.prepared_source->sourceFrame(), std::memory_order_relaxed);
             control_.prepared_source_scheduled_start_frame.store(
                 control_.prepared_source->scheduledStartFrame(),
@@ -510,7 +514,30 @@ private:
             }
         }
         if (track_take_recorder_ != nullptr) {
-            track_take_recorder_->record(callback_frame, capture_scratch_);
+            const std::int32_t options =
+                control_.track_take_options.load(std::memory_order_relaxed);
+            const auto source = static_cast<audio::TrackTakeSource>(options & 0xff);
+            if (source == audio::TrackTakeSource::CurrentJam) {
+                for (std::size_t index = 0; index < inputs_mix_scratch_.size(); ++index) {
+                    std::int32_t sample = mix_i32(
+                        capture_scratch_[index], playback_scratch_[index]);
+                    if ((options & audio::kTrackTakeIncludePrepared) != 0) {
+                        sample = mix_i32(sample, prepared_scratch_[index]);
+                    }
+                    if ((options & audio::kTrackTakeIncludeMetronome) != 0) {
+                        sample = mix_i32(sample, metronome_scratch_[index]);
+                    }
+                    inputs_mix_scratch_[index] = sample;
+                }
+                track_take_recorder_->record(callback_frame, inputs_mix_scratch_);
+            } else {
+                const std::uint64_t compensation =
+                    control_.recording_latency_compensation_frames.load(
+                        std::memory_order_relaxed);
+                track_take_recorder_->record(
+                    callback_frame > compensation ? callback_frame - compensation : 0ULL,
+                    capture_scratch_);
+            }
         }
         const int output_peak = peak_ppm(output_scratch_);
         update_peak(control_.output_peak_ppm, output_peak);
@@ -614,6 +641,7 @@ private:
     std::vector<std::int32_t> output_scratch_;
     std::vector<std::int32_t> inputs_mix_scratch_;
     std::vector<std::int32_t> metronome_scratch_;
+    std::vector<std::int32_t> prepared_scratch_;
     std::thread thread_;
     std::atomic<bool> stop_{false};
     std::atomic<long> callbacks_{0};
@@ -649,7 +677,7 @@ PreparedLoadResult load_prepared_track(
     std::size_t maximum_frames,
     std::uint64_t target_frame,
     std::uint64_t requested_source_frame,
-    bool source_frame_explicit)
+    bool attach_and_play)
 {
     const wav::InspectResult inspected = wav::inspect_pcm16_file(path);
     if (!inspected) {
@@ -706,14 +734,14 @@ PreparedLoadResult load_prepared_track(
         source.abandonLoadingSlot(slot);
         return {false, 0, "prepared track load failed: source slot publish failed"};
     }
-    const std::uint64_t replacement = source_frame_explicit
+    const std::uint64_t replacement = attach_and_play
         ? (inspected.info.frames > 0
             ? requested_source_frame % inspected.info.frames
             : 0ULL)
         : (source.playing()
             ? std::min(source.sourceFrame(), inspected.info.frames)
             : 0ULL);
-    const std::array<audio::PreparedTrackSource::Command, 2> commands{{
+    const std::array<audio::PreparedTrackSource::Command, 3> commands{{
         {
             audio::PreparedTrackSource::CommandType::Swap,
             static_cast<std::uint32_t>(slot),
@@ -730,8 +758,18 @@ PreparedLoadResult load_prepared_track(
             inspected.info.frames,
             1000000,
         },
+        {
+            audio::PreparedTrackSource::CommandType::Play,
+            0,
+            target_frame,
+            0,
+            0,
+            1000000,
+        },
     }};
-    if (!source.enqueueBatch(commands)) {
+    const std::span<const audio::PreparedTrackSource::Command> commandBatch(
+        commands.data(), attach_and_play ? commands.size() : commands.size() - 1);
+    if (!source.enqueueBatch(commandBatch)) {
         source.abandonReadySlot(slot);
         return {false, 0, "prepared track load failed: command queue full"};
     }
@@ -961,10 +999,19 @@ struct Engine::Impl {
             transport_cookie.store(command.cookie, std::memory_order_relaxed);
             transport_revision.fetch_add(1, std::memory_order_relaxed);
             transport_pending.store(true, std::memory_order_release);
+            if (command.transport_action == EngineTransportAction::TrackRestart ||
+                command.transport_action == EngineTransportAction::TrackPlay ||
+                command.transport_action == EngineTransportAction::RecordStart) {
+                control->metronome_pattern_scheduled_origin_raw_frame.store(
+                    command.transport_target_frame,
+                    std::memory_order_release);
+            }
             return true;
         }
         case EngineCommandType::CancelTransport:
             prepared_source->cancelScheduled();
+            control->metronome_pattern_scheduled_origin_raw_frame.store(
+                0, std::memory_order_release);
             control->recording_count_in_active.store(false, std::memory_order_release);
             transport_pending.store(false, std::memory_order_release);
             transport_action.store(EngineTransportAction::None, std::memory_order_relaxed);
@@ -993,6 +1040,15 @@ struct Engine::Impl {
                 result.frames);
             return true;
         }
+        case EngineCommandType::UnloadPreparedTrack:
+            prepared_source->cancelScheduled();
+            return queue_prepared({
+                audio::PreparedTrackSource::CommandType::Clear,
+                0,
+                command.frame,
+                0,
+                0,
+                1000000});
         case EngineCommandType::PreparedPlay:
             return queue_prepared({audio::PreparedTrackSource::CommandType::Play, 0, command.frame, 0, 0, 1000000});
         case EngineCommandType::PreparedStop:
@@ -1047,6 +1103,7 @@ struct Engine::Impl {
                 error = recorder_error;
                 return false;
             }
+            control->track_take_options.store(command.value, std::memory_order_relaxed);
             return true;
         }
         case EngineCommandType::StartTrackTake: {

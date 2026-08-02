@@ -61,8 +61,10 @@ void PreparedTrackSource::cancelScheduled() noexcept
 int PreparedTrackSource::mix(
     std::int32_t* output,
     std::size_t frames,
-    std::uint64_t callbackFrame) noexcept
+    std::uint64_t callbackFrame,
+    std::span<std::int32_t> stem) noexcept
 {
+    if (stem.size() == frames) std::fill(stem.begin(), stem.end(), 0);
     std::uint32_t peak = 0;
     std::size_t cursor = 0;
     while (cursor < frames) {
@@ -100,10 +102,24 @@ int PreparedTrackSource::mix(
                     sourcePos_ = (sourcePos_ + currentFrame - command.targetFrame) %
                         slots_[active_].frames;
                 }
+            } else if (command.type == CommandType::Clear) {
+                if (active_ >= 0) {
+                    slots_[active_].state.store(
+                        SlotState::Retired, std::memory_order_release);
+                }
+                active_ = -1;
+                playing_ = false;
+                sourcePos_ = 0;
+                loopStart_ = 0;
+                loopEnd_ = 0;
+                scheduledStartFrame_.store(0, std::memory_order_relaxed);
+                actualStartFrame_.store(0, std::memory_order_relaxed);
             } else if (command.type == CommandType::Play) {
                 scheduledStartFrame_.store(command.targetFrame, std::memory_order_relaxed);
-                playing_ = true;
-                actualStartFrame_.store(currentFrame, std::memory_order_relaxed);
+                playing_ = active_ >= 0;
+                actualStartFrame_.store(
+                    playing_ ? currentFrame : 0,
+                    std::memory_order_relaxed);
             } else if (command.type == CommandType::Stop) {
                 playing_ = false;
             } else if (command.type == CommandType::Seek) {
@@ -174,6 +190,12 @@ int PreparedTrackSource::mix(
                     (std::numeric_limits<std::int32_t>::min)(),
                     (std::numeric_limits<std::int32_t>::max)());
                 output[index] = static_cast<std::int32_t>(mixed);
+                if (stem.size() == frames) {
+                    stem[index] = static_cast<std::int32_t>(std::clamp<std::int64_t>(
+                        scaled,
+                        (std::numeric_limits<std::int32_t>::min)(),
+                        (std::numeric_limits<std::int32_t>::max)()));
+                }
             }
         }
         cursor = segmentEnd;

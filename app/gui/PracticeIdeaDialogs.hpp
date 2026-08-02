@@ -36,7 +36,29 @@ struct ReferenceRenderSettings {
     double releaseMs = 100.0;
 };
 
-std::optional<ChordIdeaRequest> askForPracticeIdea(QWidget* parent, int beatsPerBar);
+struct PracticeIdeaDialogDefaults {
+    int bpm = 80;
+    QString meterId;
+    int bars = 8;
+    int targetSectionIndex = 0;
+    QVector<int> bankBpms;
+    QStringList bankMeterIds;
+    QVector<int> bankBars;
+};
+
+struct ContinueIdeaDialogDefaults {
+    int sourceSectionIndex = 0;
+    int targetSectionIndex = 1;
+    QVector<bool> bankHasContent;
+    QStringList bankNames;
+};
+
+std::optional<ChordIdeaRequest> askForPracticeIdea(
+    QWidget* parent,
+    const PracticeIdeaDialogDefaults& defaults);
+std::optional<ContinueIdeaRequest> askForIdeaContinuation(
+    QWidget* parent,
+    const ContinueIdeaDialogDefaults& defaults);
 std::optional<ReferenceRenderSettings> askForReferenceRender(
     QWidget* parent,
     ReferenceRenderSettings defaults,

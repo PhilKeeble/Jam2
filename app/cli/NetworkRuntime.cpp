@@ -3413,12 +3413,39 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                             transport.action == jam2::EngineTransportAction::RecordStart) {
                             scheduled = jam2::cli::restart_prepared_source(audio.engine.get(), schedule.target_raw_frame);
                         } else {
+                            if (transport.action == jam2::EngineTransportAction::TrackStop) {
+                                jam2::EngineCommand cancel;
+                                cancel.type = jam2::EngineCommandType::CancelTransport;
+                                scheduled = audio.engine->submit(cancel);
+                            } else {
+                                scheduled = true;
+                            }
                             jam2::EngineCommand command;
                             command.type = transport.action == jam2::EngineTransportAction::TrackPlay
                                 ? jam2::EngineCommandType::PreparedPlay
                                 : jam2::EngineCommandType::PreparedStop;
                             command.frame = schedule.target_raw_frame;
-                            scheduled = audio.engine->submit(command);
+                            scheduled = scheduled && audio.engine->submit(command);
+                        }
+                        if (scheduled) {
+                            // The source command makes the remote audio obey
+                            // the shared action. Mirror the same schedule into
+                            // the local engine's transport state so GUI clients
+                            // observe pending/committed play and stop state as
+                            // well. This direct engine submission deliberately
+                            // bypasses the runtime command queue, so it cannot
+                            // echo the received action back onto the mesh.
+                            jam2::EngineCommand local_transport;
+                            local_transport.type =
+                                jam2::EngineCommandType::ScheduleTransport;
+                            local_transport.transport_action = transport.action;
+                            local_transport.transport_target_frame =
+                                schedule.target_raw_frame;
+                            local_transport.transport_musical_frame =
+                                schedule.target_musical_frame;
+                            local_transport.transport_countdown_start_frame =
+                                schedule.countdown_start_raw_frame;
+                            scheduled = audio.engine->submit(local_transport);
                         }
                         if (scheduled) {
                             publish_transport_schedule(

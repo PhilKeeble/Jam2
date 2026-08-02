@@ -20,6 +20,14 @@
 
 namespace jam2::audio {
 
+enum class TrackTakeSource : std::uint8_t {
+    Input = 0,
+    CurrentJam = 1,
+};
+
+inline constexpr std::int32_t kTrackTakeIncludePrepared = 1 << 8;
+inline constexpr std::int32_t kTrackTakeIncludeMetronome = 1 << 9;
+
 // A binary active-channel decision at each audio block creates a discontinuity
 // whenever the divisor changes. This stateful mixer instead gives each selected
 // input its own slowly adapting noise floor and ramps channel weights sample by
@@ -327,6 +335,7 @@ struct StreamControl {
     std::atomic<std::uint64_t> playback_ratio_ramp_frames{0};
     std::atomic<int> metronome_mode{0};
     std::atomic<bool> leader_audio_local_click{false};
+    std::atomic<std::int32_t> track_take_options{0};
     std::atomic<std::uint64_t> metronome_epoch_sample_time{0};
     std::atomic<bool> metronome_epoch_valid{false};
     std::atomic<std::int64_t> metronome_render_offset_frames{0};
@@ -334,6 +343,7 @@ struct StreamControl {
     // separate song-relative 1.1 used only for local click-pattern phase.
     std::atomic<std::uint64_t> metronome_pattern_origin_frame{0};
     std::atomic<bool> metronome_pattern_origin_valid{false};
+    std::atomic<std::uint64_t> metronome_pattern_scheduled_origin_raw_frame{0};
     std::atomic<std::uint64_t> metronome_pattern_source_start_seen{0};
     std::atomic<bool> recording_count_in_active{false};
     std::atomic<std::uint64_t> recording_count_in_start_frame{0};
@@ -432,19 +442,18 @@ inline bool metronome_pattern_position(
         return true;
     }
 
-    const std::uint64_t sourceStart =
-        control.prepared_source_actual_start_frame.load(std::memory_order_relaxed);
-    const std::uint64_t sourceStartSeen =
-        control.metronome_pattern_source_start_seen.load(std::memory_order_relaxed);
-    if (sourceStart != sourceStartSeen && rawFrame >= sourceStart) {
+    const std::uint64_t scheduledOrigin =
+        control.metronome_pattern_scheduled_origin_raw_frame.load(
+            std::memory_order_relaxed);
+    if (scheduledOrigin != 0 && rawFrame >= scheduledOrigin) {
         const std::int64_t offset =
             control.metronome_render_offset_frames.load(std::memory_order_relaxed);
         control.metronome_pattern_origin_frame.store(
-            metronome_musical_frame_from_raw(sourceStart, offset),
+            metronome_musical_frame_from_raw(scheduledOrigin, offset),
             std::memory_order_relaxed);
         control.metronome_pattern_origin_valid.store(true, std::memory_order_relaxed);
-        control.metronome_pattern_source_start_seen.store(
-            sourceStart, std::memory_order_relaxed);
+        control.metronome_pattern_scheduled_origin_raw_frame.store(
+            0, std::memory_order_relaxed);
     }
 
     const bool originValid =
@@ -462,6 +471,8 @@ inline bool metronome_pattern_position(
 inline void reset_metronome_pattern_origin(StreamControl& control) noexcept
 {
     control.metronome_pattern_origin_valid.store(false, std::memory_order_relaxed);
+    control.metronome_pattern_scheduled_origin_raw_frame.store(
+        0, std::memory_order_relaxed);
     control.metronome_pattern_source_start_seen.store(
         control.prepared_source_actual_start_frame.load(std::memory_order_relaxed),
         std::memory_order_relaxed);

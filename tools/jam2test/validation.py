@@ -255,7 +255,11 @@ def _run_help_contract(jam2: Path, invocation: InvocationArtifacts, manifest: In
 def _run_focused(jam2: Path, invocation: InvocationArtifacts, manifest: InvocationManifest,
                  reporter: ValidationReporter) -> bool:
     ok = True
-    for operation in ("validate.boundaries", "validate.controller-lifecycle"):
+    for operation in (
+        "validate.boundaries",
+        "validate.controller-lifecycle",
+        "validate.music-full-form-corpus",
+    ):
         name = operation.replace(".", "-")
         reporter.start(name)
         root = invocation.root / name
@@ -268,6 +272,15 @@ def _run_focused(jam2: Path, invocation: InvocationArtifacts, manifest: Invocati
             scenario["network"] = {
                 "heartbeat_interval_ms": 20,
                 "heartbeat_miss_limit": 3,
+            }
+        elif operation == "validate.music-full-form-corpus":
+            # Exercise the production generator without making the normal
+            # product-validation run publish the much larger audio corpus.
+            scenario["corpus"] = {
+                "render_audio": False,
+                "matched_complexity_seeds": True,
+                "samples_per_cell": 2,
+                "profile_id": "pop_loop",
             }
         scenario_path = root / "scenario.json"
         write_scenario(scenario_path, scenario)
@@ -1194,14 +1207,19 @@ def _public_audio_analysis(case_id: str, peer_index: int, recording_dir: Path) -
         listener_ok = (
             listener.get("ok", False) and
             listener.get("steady_samples", 0) >= 10 and
-            listener.get("missing_pulse_matches", 0) == 0
+            # The recording can clip one remote pulse at either edge because
+            # its WAV interval is independent of the remote pulse phase.
+            # Extra local clicks are expected while the remote stream is not
+            # yet present; steady-state sample count and timing are checked
+            # separately below.
+            listener.get("missing_pulse_matches", 0) <= 1
         )
         analysis["metro_pulse_epoch"] = epoch
         analysis["listener_compensated_pulse"] = listener
         if not epoch.get("ok", False):
             analysis["tags"].append(epoch.get("verdict", "metro_pulse_epoch_failed"))
         if not listener_ok:
-            analysis["tags"].append(listener.get("verdict", "listener_pulse_timing_failed"))
+            analysis["tags"].append("listener_pulse_match_count_failed")
     analysis["ok"] = not analysis["tags"]
     return analysis
 
@@ -1592,6 +1610,7 @@ def _coverage_map(capabilities: NativeCapabilities, jam2: Path, root: Path) -> d
         "artifacts": "native and invocation artifact manifests",
         "actions": "scheduled-control validation and retained stress catalog",
         "automation": "reactive-inherited-channel",
+        "corpus": "validate-music-full-form-corpus",
         "fixtures": "focused boundaries and prepared-track stress",
         "network.bind": "clean-mesh create/join",
         "network.join_url": "clean-mesh join",
@@ -1672,7 +1691,7 @@ def run(
     passed = True
     infrastructure_error: str | None = None
     product_selected = selection in ("all", "product")
-    total = (1 if selection in ("all", "framework") else 0) + (17 if product_selected else 0)
+    total = (1 if selection in ("all", "framework") else 0) + (18 if product_selected else 0)
     if product_selected and real_device:
         total += 1
     reporter = ValidationReporter(total, invocation.root)

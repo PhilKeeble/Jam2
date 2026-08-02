@@ -17,7 +17,7 @@ public:
     static constexpr std::size_t kSlots = 4;
     static constexpr std::size_t kCommandCapacity = 64;
     enum class SlotState : std::uint8_t { Free, Loading, Ready, Active, Retired, Reclaiming };
-    enum class CommandType : std::uint8_t { Swap, Play, Stop, Seek, NudgeSource, SetLoop, SetLevel };
+    enum class CommandType : std::uint8_t { Swap, Clear, Play, Stop, Seek, NudgeSource, SetLoop, SetLevel };
     struct Command { CommandType type{}; std::uint32_t slot = 0; std::uint64_t targetFrame = 0; std::uint64_t sourceFrame = 0; std::uint64_t loopEndFrame = 0; std::int32_t levelPpm = 1000000; std::uint64_t generation = 0; };
     explicit PreparedTrackSource(std::size_t maxFrames);
     int claimLoadingSlot();
@@ -28,7 +28,11 @@ public:
     bool enqueue(const Command& command);
     bool enqueueBatch(std::span<const Command> commands);
     void cancelScheduled() noexcept;
-    int mix(std::int32_t* output, std::size_t frames, std::uint64_t callbackFrame) noexcept;
+    int mix(
+        std::int32_t* output,
+        std::size_t frames,
+        std::uint64_t callbackFrame,
+        std::span<std::int32_t> stem = {}) noexcept;
     std::uint64_t sourceFrame() const noexcept { return sourceFrame_.load(std::memory_order_relaxed); }
     std::uint64_t underruns() const noexcept { return underruns_.load(std::memory_order_relaxed); }
     std::uint64_t scheduledStartFrame() const noexcept { return scheduledStartFrame_.load(std::memory_order_relaxed); }

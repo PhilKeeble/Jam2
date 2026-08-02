@@ -19,7 +19,39 @@ constexpr qint64 kMaxSongFileBytes = 4LL * 1024LL * 1024LL;
 void ProjectPersistenceCoordinator::initializeWorkspace(const QString& workspaceFolder)
 {
     workspaceFolder_ = QDir(workspaceFolder).absolutePath();
-    (void)QDir().mkpath(QDir(workspaceFolder_).absoluteFilePath(QStringLiteral("wavs")));
+}
+
+void ProjectPersistenceCoordinator::relocateWorkspace(const QString& workspaceFolder)
+{
+    const QString oldRoot = QDir(workspaceFolder_).absolutePath();
+    const QString newRoot = QDir(workspaceFolder).absolutePath();
+    const auto relocated = [&oldRoot, &newRoot](const QString& path) {
+        const QString absolute = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+        const QString prefix = oldRoot + QLatin1Char('/');
+        return absolute.startsWith(prefix, Qt::CaseInsensitive)
+            ? QDir(newRoot).absoluteFilePath(absolute.mid(prefix.size()))
+            : absolute;
+    };
+    QSet<QString> nextTransient;
+    for (const QString& path : std::as_const(transientWavs_)) {
+        nextTransient.insert(relocated(path));
+    }
+    QSet<QString> nextDeferred;
+    for (const QString& path : std::as_const(deferredCleanupWavs_)) {
+        nextDeferred.insert(relocated(path));
+    }
+    transientWavs_ = std::move(nextTransient);
+    deferredCleanupWavs_ = std::move(nextDeferred);
+    workspaceFolder_ = newRoot;
+    if (projectFolder_.isEmpty() || QDir(projectFolder_).absolutePath() == oldRoot) {
+        projectFolder_ = newRoot;
+    }
+}
+
+void ProjectPersistenceCoordinator::clearTransientTracking() noexcept
+{
+    transientWavs_.clear();
+    deferredCleanupWavs_.clear();
 }
 
 const QString& ProjectPersistenceCoordinator::projectFilePath() const noexcept
@@ -128,6 +160,7 @@ bool ProjectPersistenceCoordinator::discardTransientWav(const QString& path)
     }
     transientWavs_.remove(canonical);
     deferredCleanupWavs_.remove(canonical);
+    pruneEmptyWorkspace(workspaceFolder_);
     return true;
 }
 
@@ -139,6 +172,29 @@ bool ProjectPersistenceCoordinator::hasExistingTransientWavs() const
         }
     }
     return false;
+}
+
+void ProjectPersistenceCoordinator::pruneEmptyWorkspaceDirectories() const
+{
+    pruneEmptyWorkspace(workspaceFolder_);
+}
+
+void ProjectPersistenceCoordinator::pruneEmptyWorkspace(const QString& workspacePath)
+{
+    if (workspacePath.trimmed().isEmpty()) return;
+    QDir workspace(QDir(workspacePath).absolutePath());
+    for (const QString& folder : {
+             QStringLiteral("generated"),
+             QStringLiteral("received"),
+             QStringLiteral("imported"),
+             QStringLiteral("recorded"),
+             QStringLiteral("prepared")}) {
+        (void)workspace.rmdir(folder);
+    }
+    QDir parent = workspace;
+    if (parent.cdUp()) {
+        (void)parent.rmdir(workspace.dirName());
+    }
 }
 
 void ProjectPersistenceCoordinator::scheduleTransientCleanup(QThreadPool& workerPool)
@@ -156,13 +212,7 @@ void ProjectPersistenceCoordinator::scheduleTransientCleanup(QThreadPool& worker
                 (void)QFile::remove(info.absoluteFilePath());
             }
         }
-        QDir workspace(workspacePath);
-        workspace.rmdir(QStringLiteral("wavs"));
-        workspace.rmdir(QStringLiteral("prepared_mixes"));
-        QDir parent = workspace;
-        if (parent.cdUp()) {
-            parent.rmdir(workspace.dirName());
-        }
+        ProjectPersistenceCoordinator::pruneEmptyWorkspace(workspacePath);
     }));
 }
 
@@ -178,7 +228,7 @@ bool ProjectPersistenceCoordinator::readSongJson(
     }
     const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
     if (!document.isObject()) {
-        error = QStringLiteral("Invalid Jam2 song JSON.");
+        error = QStringLiteral("Invalid JamJar JSON.");
         return false;
     }
     root = document.object();

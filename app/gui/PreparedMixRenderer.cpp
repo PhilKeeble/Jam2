@@ -12,6 +12,7 @@
 #include <QFileInfo>
 #include <QIODevice>
 #include <QSaveFile>
+#include <QUuid>
 #include <QtGlobal>
 
 #include <algorithm>
@@ -123,20 +124,48 @@ std::vector<float> processTrack(std::vector<float> input, int sampleRate, const 
 }
 }
 
+bool PreparedMixRenderer::hasRenderableSources(const LooperProject& project)
+{
+    return hasRenderableSources(project, project.activeBankIndex());
+}
+
+bool PreparedMixRenderer::hasRenderableSources(const LooperProject& project, int bankIndex)
+{
+    if (bankIndex < 0 || bankIndex >= project.banks().size()) return false;
+    const LooperBank& bank = project.banks().at(bankIndex);
+    const bool anySolo = std::any_of(
+        bank.lanes.cbegin(), bank.lanes.cend(), [](const LooperLane& lane) {
+            return lane.sampleRateCompatible && lane.solo && !lane.muted;
+        });
+    return std::any_of(
+        bank.lanes.cbegin(), bank.lanes.cend(), [anySolo](const LooperLane& lane) {
+            return lane.sampleRateCompatible && !lane.muted &&
+                (!anySolo || lane.solo) && !lane.assetPath.trimmed().isEmpty();
+        });
+}
+
 QString PreparedMixRenderer::outputPath(
     const QString& workspaceFolder,
     int bankIndex,
     std::uint64_t generation)
 {
     return QDir(workspaceFolder).absoluteFilePath(
-        QStringLiteral("prepared_mixes/active-bank-%1-generation-%2.wav")
+        QStringLiteral("prepared/active-bank-%1-generation-%2.wav")
             .arg(qMax(0, bankIndex))
             .arg(generation));
 }
 
-PreparedMixResult PreparedMixRenderer::render(const LooperProject& project, const QString& projectFolder, int sampleRate, const QString& outputPath, const SharedTrackModel& track)
+PreparedMixResult PreparedMixRenderer::render(
+    const LooperProject& project,
+    const QString& projectFolder,
+    int sampleRate,
+    const QString& outputPath,
+    const SharedTrackModel& track,
+    int bankIndex,
+    qint64 exactOutputFrames)
 {
     PreparedMixResult result;
+    result.bankIndex = bankIndex >= 0 ? bankIndex : project.activeBankIndex();
     const qint64 started = QDateTime::currentMSecsSinceEpoch();
     if (!jam2::limits::valid_sample_rate(sampleRate)) {
         result.error = QStringLiteral("prepared mix sample rate must be within %1..%2 Hz")
@@ -144,7 +173,12 @@ PreparedMixResult PreparedMixRenderer::render(const LooperProject& project, cons
                            .arg(jam2::limits::kMaximumSampleRate);
         return result;
     }
-    const LooperBank& bank = project.banks().at(project.activeBankIndex());
+    if (!hasRenderableSources(project, result.bankIndex)) {
+        result.error = QStringLiteral(
+            "prepared mix requires at least one playable WAV-backed lane");
+        return result;
+    }
+    const LooperBank& bank = project.banks().at(result.bankIndex);
     bool anySolo = false;
     for (const LooperLane& lane : bank.lanes) {
         anySolo = anySolo || (lane.sampleRateCompatible && lane.solo && !lane.muted);
@@ -206,6 +240,14 @@ PreparedMixResult PreparedMixRenderer::render(const LooperProject& project, cons
             }
             outputEnd = lane.startFrame + visibleFrames;
         }
+        // Managed generated references represent musical material, not a
+        // one-shot placement. If an older or externally supplied reference is
+        // shorter than the bank's exact musical duration, repeat it instead of
+        // leaving the remainder of the bank silent.
+        if (exactOutputFrames > 0 && lane.loopEnabled &&
+            !lane.referenceKind.isEmpty() && outputEnd < exactOutputFrames) {
+            outputEnd = exactOutputFrames;
+        }
         if (outputEnd < lane.startFrame || outputEnd > maxFrames) {
             result.error = QStringLiteral("lane stop frame is outside the prepared-mix limit: %1").arg(lane.name);
             return result;
@@ -221,7 +263,11 @@ PreparedMixResult PreparedMixRenderer::render(const LooperProject& project, cons
             outputEnd,
         });
     }
-    length = qMax<qint64>(1, length);
+    if (exactOutputFrames > 0) {
+        length = qBound<qint64>(1, exactOutputFrames, maxFrames);
+    } else {
+        length = qMax<qint64>(1, length);
+    }
     constexpr std::uint64_t maxWorkingBytes = 512ULL * 1024ULL * 1024ULL;
     constexpr std::uint64_t workingBytesPerOutputFrame =
         sizeof(qint32) + 2ULL * sizeof(float);
@@ -280,7 +326,12 @@ PreparedMixResult PreparedMixRenderer::render(const LooperProject& project, cons
         }
 
         const double gain = std::pow(10.0, qBound(-60.0, source.lane.gainDb, 12.0) / 20.0);
-        for (qint64 out = source.outputStart; out < source.outputEnd; ++out) {
+        // An exact musical duration deliberately crops lanes retained from a
+        // longer bank/arrangement. Never let their placement extend beyond
+        // the exact-sized mix buffer.
+        const qint64 mixStart = qBound<qint64>(0, source.outputStart, length);
+        const qint64 mixEnd = qBound<qint64>(mixStart, source.outputEnd, length);
+        for (qint64 out = mixStart; out < mixEnd; ++out) {
             qint64 in = source.sourceStart + (out - source.lane.startFrame);
             if (source.lane.loopEnabled && in >= source.sourceEnd) {
                 in = source.sourceStart + (in - source.sourceStart) % visibleFrames;
@@ -386,6 +437,214 @@ PreparedMixResult PreparedMixRenderer::render(const LooperProject& project, cons
     result.durationMs = sampleRate > 0
         ? static_cast<int>(length * 1000LL / sampleRate)
         : 0;
+    result.sha256 = QString::fromLatin1(hash.result().toHex());
+    result.renderMs = QDateTime::currentMSecsSinceEpoch() - started;
+    return result;
+}
+
+PreparedMixResult PreparedMixRenderer::renderSequence(
+    const LooperProject& project,
+    const QString& projectFolder,
+    int sampleRate,
+    const QString& outputPath,
+    const SharedTrackModel& track,
+    const QVector<PreparedMixSequenceSegment>& segments)
+{
+    PreparedMixResult result;
+    result.bankIndex = -1;
+    result.sampleRate = sampleRate;
+    const qint64 started = QDateTime::currentMSecsSinceEpoch();
+    if (!jam2::limits::valid_sample_rate(sampleRate)) {
+        result.error = QStringLiteral("export sample rate must be within %1..%2 Hz")
+            .arg(jam2::limits::kMinimumSampleRate)
+            .arg(jam2::limits::kMaximumSampleRate);
+        return result;
+    }
+    if (segments.isEmpty() || segments.size() > 64) {
+        result.error = QStringLiteral("export requires between 1 and 64 arrangement rows");
+        return result;
+    }
+
+    constexpr qint64 kMaximumExportSeconds = 60LL * 60LL;
+    const qint64 durationLimitFrames =
+        static_cast<qint64>(sampleRate) * kMaximumExportSeconds;
+    const qint64 riffLimitFrames = static_cast<qint64>(
+        (static_cast<std::uint64_t>(std::numeric_limits<quint32>::max()) - 36ULL) / 2ULL);
+    const qint64 maximumFrames = qMin(durationLimitFrames, riffLimitFrames);
+    qint64 totalFrames = 0;
+    for (const PreparedMixSequenceSegment& segment : segments) {
+        if (segment.bankIndex < 0 || segment.bankIndex >= project.banks().size() ||
+            segment.repeats < 1 || segment.repeats > 64 ||
+            segment.exactOutputFrames <= 0 ||
+            segment.exactOutputFrames > maximumFrames) {
+            result.error = QStringLiteral("export contains an invalid bank, repeat, or duration");
+            return result;
+        }
+        if (segment.exactOutputFrames >
+            (maximumFrames - totalFrames) / segment.repeats) {
+            result.error = QStringLiteral("export exceeds the one-hour WAV duration limit");
+            return result;
+        }
+        totalFrames += segment.exactOutputFrames * segment.repeats;
+    }
+
+    struct TemporaryBankFiles {
+        ~TemporaryBankFiles()
+        {
+            for (const QString& path : paths) {
+                (void)QFile::remove(path);
+            }
+        }
+        QStringList paths;
+    } temporary;
+    const QString temporaryToken =
+        QUuid::createUuid().toString(QUuid::WithoutBraces);
+    std::array<QString, 4> renderedPaths;
+    std::array<bool, 4> renderedBanks{};
+    for (const PreparedMixSequenceSegment& segment : segments) {
+        const int bank = segment.bankIndex;
+        if (renderedBanks[static_cast<std::size_t>(bank)] ||
+            !hasRenderableSources(project, bank)) {
+            continue;
+        }
+        const QString bankPath = QFileInfo(outputPath).dir().absoluteFilePath(
+            QStringLiteral(".jam2-export-%1-bank-%2.wav")
+                .arg(temporaryToken).arg(bank));
+        temporary.paths.append(bankPath);
+        const PreparedMixResult bankResult = render(
+            project,
+            projectFolder,
+            sampleRate,
+            bankPath,
+            track,
+            bank,
+            segment.exactOutputFrames);
+        if (!bankResult.error.isEmpty()) {
+            result.error = QStringLiteral("Bank %1: %2")
+                .arg(QChar(QLatin1Char('A').unicode() + bank), bankResult.error);
+            return result;
+        }
+        renderedBanks[static_cast<std::size_t>(bank)] = true;
+        renderedPaths[static_cast<std::size_t>(bank)] = bankPath;
+        result.preMasterPeak = qMax(result.preMasterPeak, bankResult.preMasterPeak);
+        result.outputPeak = qMax(result.outputPeak, bankResult.outputPeak);
+        result.overUnitySamples += bankResult.overUnitySamples;
+    }
+
+    const std::uint64_t dataBytes = static_cast<std::uint64_t>(totalFrames) * 2ULL;
+    QDir().mkpath(QFileInfo(outputPath).absolutePath());
+    QSaveFile output(outputPath);
+    if (!output.open(QIODevice::WriteOnly)) {
+        result.error = QStringLiteral("cannot open export output");
+        return result;
+    }
+    QByteArray header;
+    header.reserve(44);
+    header.append("RIFF", 4);
+    put32(header, static_cast<quint32>(36ULL + dataBytes));
+    header.append("WAVEfmt ", 8);
+    put32(header, 16);
+    put16(header, 1);
+    put16(header, 1);
+    put32(header, static_cast<quint32>(sampleRate));
+    put32(header, static_cast<quint32>(sampleRate * 2));
+    put16(header, 2);
+    put16(header, 16);
+    header.append("data", 4);
+    put32(header, static_cast<quint32>(dataBytes));
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    hash.addData(header);
+    if (output.write(header) != header.size()) {
+        result.error = QStringLiteral("cannot write export WAV header");
+        return result;
+    }
+
+    constexpr qint64 kCopyBlockBytes = 64LL * 1024LL;
+    const QByteArray silence(static_cast<qsizetype>(kCopyBlockBytes), '\0');
+    const auto writeSilence = [&output, &hash, &silence](qint64 frames) {
+        qint64 bytesRemaining = frames * 2;
+        while (bytesRemaining > 0) {
+            const qint64 count = qMin(bytesRemaining, kCopyBlockBytes);
+            const QByteArrayView block(silence.constData(), count);
+            hash.addData(block);
+            if (output.write(block.data(), block.size()) != block.size()) return false;
+            bytesRemaining -= count;
+        }
+        return true;
+    };
+    const auto writeBank = [
+        &output,
+        &hash,
+        &writeSilence,
+        sampleRate
+    ](const QString& path, qint64 exactFrames, QString& error) {
+        if (path.isEmpty()) {
+            if (!writeSilence(exactFrames)) {
+                error = QStringLiteral("cannot write silent bank audio");
+                return false;
+            }
+            return true;
+        }
+        const jam2::wav::InspectResult inspected =
+            jam2::wav::inspect_pcm16_file(nativeFilePath(path));
+        if (!inspected || inspected.info.channels != 1 ||
+            inspected.info.sample_rate != static_cast<std::uint32_t>(sampleRate)) {
+            error = QStringLiteral("temporary bank render is not compatible mono PCM16");
+            return false;
+        }
+        QFile source(path);
+        if (inspected.info.data_offset >
+                static_cast<std::uint64_t>(std::numeric_limits<qint64>::max()) ||
+            !source.open(QIODevice::ReadOnly) ||
+            !source.seek(static_cast<qint64>(inspected.info.data_offset))) {
+            error = QStringLiteral("cannot read temporary bank render");
+            return false;
+        }
+        const qint64 availableFrames = static_cast<qint64>(qMin<std::uint64_t>(
+            inspected.info.frames,
+            static_cast<std::uint64_t>(std::numeric_limits<qint64>::max())));
+        qint64 bytesRemaining = qMin(exactFrames, availableFrames) * 2;
+        QByteArray block;
+        block.resize(static_cast<qsizetype>(kCopyBlockBytes));
+        while (bytesRemaining > 0) {
+            const qint64 count = qMin(bytesRemaining, kCopyBlockBytes);
+            if (source.read(block.data(), count) != count) {
+                error = QStringLiteral("temporary bank render ended unexpectedly");
+                return false;
+            }
+            const QByteArrayView view(block.constData(), count);
+            hash.addData(view);
+            if (output.write(view.data(), view.size()) != view.size()) {
+                error = QStringLiteral("cannot write bank audio to export");
+                return false;
+            }
+            bytesRemaining -= count;
+        }
+        const qint64 paddingFrames = exactFrames - qMin(exactFrames, availableFrames);
+        if (paddingFrames > 0 && !writeSilence(paddingFrames)) {
+            error = QStringLiteral("cannot pad bank audio to its section boundary");
+            return false;
+        }
+        return true;
+    };
+
+    for (const PreparedMixSequenceSegment& segment : segments) {
+        const QString bankPath = renderedPaths[static_cast<std::size_t>(segment.bankIndex)];
+        for (int repeat = 0; repeat < segment.repeats; ++repeat) {
+            if (!writeBank(bankPath, segment.exactOutputFrames, result.error)) {
+                return result;
+            }
+        }
+    }
+    if (!output.commit()) {
+        result.error = QStringLiteral("cannot atomically commit exported WAV");
+        return result;
+    }
+    result.path = outputPath;
+    result.frames = totalFrames;
+    result.fileBytes = static_cast<qint64>(44ULL + dataBytes);
+    result.durationMs = static_cast<int>(qMin<qint64>(
+        std::numeric_limits<int>::max(), totalFrames * 1000LL / sampleRate));
     result.sha256 = QString::fromLatin1(hash.result().toHex());
     result.renderMs = QDateTime::currentMSecsSinceEpoch() - started;
     return result;

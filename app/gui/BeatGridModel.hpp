@@ -37,7 +37,7 @@ struct MusicalBeatPattern {
 struct SongSection {
     QString id;
     QString label = QStringLiteral("A");
-    QString name = QStringLiteral("Verse");
+    QString name = QStringLiteral("Section A");
     int beats = 32;
     QVector<QString> chords;
     QVector<QString> targets;
@@ -73,6 +73,9 @@ public:
     void deleteSection(int index);
     void renameSection(int index, const QString& label, const QString& name);
     void moveSection(int from, int to);
+    bool replaceSection(int index, SongSection section);
+    bool clearSection(int index);
+    bool copySection(int source, int destination);
     int replaceGeneratedSection(const QString& kind, SongSection section);
     void clearContent();
     void reset();

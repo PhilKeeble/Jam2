@@ -30,6 +30,11 @@ std::uint64_t global_transport_elapsed_frames(
 std::uint64_t next_safe_grid_beat_raw_frame(
     const PlaybackGrid::Position& position) noexcept;
 
+bool prepared_attach_has_applied(
+    std::uint64_t pendingTargetFrame,
+    std::uint64_t engineFrame,
+    std::uint64_t preparedScheduledStartFrame) noexcept;
+
 int resolve_active_sample_rate(
     int sessionSampleRate,
     double engineSampleRate,
@@ -45,6 +50,7 @@ class TrackRecordingWorkflow {
 public:
     enum class CaptureMode {
         Input,
+        CurrentJam,
         Loopback,
     };
 
@@ -78,14 +84,18 @@ public:
         bool enabled,
         std::uint64_t startFrame = 0,
         std::uint64_t endFrame = 0) noexcept;
-    bool restartPrepared(
-        const PlaybackGrid::Position& position,
-        bool publishTransport) noexcept;
-    bool stopPrepared(
+    bool restartPrepared(const PlaybackGrid::Position& position) noexcept;
+    bool restartGlobalTransport(const PlaybackGrid::Position& position) noexcept;
+    bool scheduleBankRestart(
         std::uint64_t targetFrame,
         std::uint64_t musicalFrame,
-        bool publishTransport) noexcept;
+        bool preparedAvailable) noexcept;
+    bool stopPrepared(
+        std::uint64_t targetFrame,
+        std::uint64_t musicalFrame) noexcept;
     void noteManualPreparedSeek(qint64 sourceFrame, qint64 engineFrame) noexcept;
+    void notePreparedAttachScheduled(std::uint64_t targetFrame) noexcept;
+    void cancelPreparedAttach() noexcept;
     qint64 currentAudiblePositionMs(
         const PlaybackGrid::Position& enginePosition,
         qint64 durationMs) const noexcept;
@@ -107,6 +117,8 @@ public:
         std::optional<int> countInBars,
         const PlaybackGrid::Position& position,
         int beatsPerBar,
+        bool includePrepared,
+        bool includeMetronome,
         QString& error);
     bool stopInputTake(std::uint64_t targetFrame) noexcept;
     TrackTakeCompletion consumeTrackTakeEvent(const jam2::EngineEvent& event);
@@ -124,13 +136,20 @@ public:
     QString finishLoopbackCapture(const QString& outputPath);
     QString abandonPendingCapture();
 
-    void armLane(int bankIndex, int laneIndex, CaptureMode mode) noexcept;
+    void armLane(
+        int bankIndex,
+        int laneIndex,
+        CaptureMode mode,
+        bool includePrepared = false,
+        bool includeMetronome = false) noexcept;
     void disarmLane() noexcept;
     bool laneArmed() const noexcept;
     bool laneArmedAt(int bankIndex, int laneIndex) const noexcept;
     int armedBank() const noexcept { return armed_bank_; }
     int armedLane() const noexcept { return armed_lane_; }
     CaptureMode captureMode() const noexcept { return capture_mode_; }
+    bool includePreparedInTake() const noexcept { return include_prepared_in_take_; }
+    bool includeMetronomeInTake() const noexcept { return include_metronome_in_take_; }
 
     bool startJamRecording(const QString& folder);
     bool stopJamRecording() noexcept;
@@ -147,8 +166,20 @@ public:
     const QString& pendingTransientCapturePath() const noexcept { return pending_transient_capture_path_; }
     bool inputTakeActive() const noexcept { return input_take_active_; }
     bool preparedPlaying() const noexcept { return prepared_playing_; }
+    bool globalTransportRequestedPlaying() const noexcept {
+        return global_transport_requested_playing_;
+    }
+    bool globalTransportPlaying() const noexcept {
+        return global_transport_playing_;
+    }
+    std::uint64_t globalTransportStartFrame() const noexcept {
+        return global_transport_start_frame_;
+    }
     std::uint64_t preparedActualStartFrame() const noexcept {
         return prepared_actual_start_frame_;
+    }
+    bool preparedAttachPending() const noexcept {
+        return pending_prepared_attach_target_frame_ != 0;
     }
     std::uint64_t recordingStartFrame() const noexcept { return recording_start_frame_; }
     int preparedSampleRate() const noexcept { return prepared_sample_rate_; }
@@ -160,8 +191,16 @@ public:
     const QString& jamRecordingFolder() const noexcept { return jam_recording_folder_; }
 
 private:
+    bool scheduleGlobalTransportStart(
+        std::uint64_t targetFrame,
+        std::uint64_t musicalFrame) noexcept;
+    void clearGlobalTransport() noexcept;
     bool submit(jam2::EngineCommand command) noexcept;
-    bool armTrackTake(const QString& id, const QString& output) noexcept;
+    bool armTrackTake(
+        const QString& id,
+        const QString& output,
+        bool includePrepared,
+        bool includeMetronome) noexcept;
     bool startTrackTake(
         std::uint64_t targetFrame,
         std::uint64_t durationFrames) noexcept;
@@ -185,12 +224,22 @@ private:
     int armed_bank_ = -1;
     int armed_lane_ = -1;
     CaptureMode capture_mode_ = CaptureMode::Input;
+    bool include_prepared_in_take_ = false;
+    bool include_metronome_in_take_ = false;
 
     qint64 prepared_source_frame_ = 0;
     qint64 prepared_engine_frame_ = 0;
     std::uint64_t prepared_actual_start_frame_ = 0;
+    std::uint64_t pending_prepared_attach_target_frame_ = 0;
     bool prepared_playing_ = false;
     int prepared_sample_rate_ = 48000;
+    std::uint64_t observed_transport_revision_ = 0;
+    std::uint64_t observed_transport_commit_count_ = 0;
+    std::uint64_t global_transport_start_frame_ = 0;
+    std::uint64_t pending_global_transport_start_frame_ = 0;
+    std::uint64_t pending_global_transport_stop_frame_ = 0;
+    bool global_transport_requested_playing_ = false;
+    bool global_transport_playing_ = false;
 
     int pending_count_in_bars_ = 0;
     bool stop_metronome_at_recording_start_ = false;

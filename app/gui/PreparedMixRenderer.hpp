@@ -4,10 +4,12 @@
 #include "SharedTrackModel.hpp"
 
 #include <QString>
+#include <QVector>
 
 #include <cstdint>
 
 struct PreparedMixResult {
+    int bankIndex = 0;
     QString path;
     qint64 frames = 0;
     qint64 renderMs = 0;
@@ -22,8 +24,17 @@ struct PreparedMixResult {
     QString error;
 };
 
+struct PreparedMixSequenceSegment {
+    int bankIndex = 0;
+    int repeats = 1;
+    qint64 exactOutputFrames = 0;
+};
+
 class PreparedMixRenderer {
 public:
+    static bool hasRenderableSources(const LooperProject& project);
+    static bool hasRenderableSources(const LooperProject& project, int bankIndex);
+
     static QString outputPath(
         const QString& workspaceFolder,
         int bankIndex,
@@ -36,5 +47,18 @@ public:
         const QString& projectFolder,
         int sampleRate,
         const QString& outputPath,
-        const SharedTrackModel& track);
+        const SharedTrackModel& track,
+        int bankIndex = -1,
+        qint64 exactOutputFrames = 0);
+
+    // Renders each referenced bank through the same path used by live prepared
+    // playback, then crops or pads it to its musical section boundary before
+    // concatenating the requested repeats into one mono PCM16 WAV.
+    static PreparedMixResult renderSequence(
+        const LooperProject& project,
+        const QString& projectFolder,
+        int sampleRate,
+        const QString& outputPath,
+        const SharedTrackModel& track,
+        const QVector<PreparedMixSequenceSegment>& segments);
 };

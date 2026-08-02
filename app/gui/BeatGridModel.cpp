@@ -20,6 +20,15 @@ constexpr int kMaxSections = jam2::application::limits::kMaximumSongSections;
 constexpr int kMaxCellCharacters = jam2::application::limits::kMaximumCellCharacters;
 constexpr int kMaxTitleCharacters = jam2::application::limits::kMaximumTitleCharacters;
 
+SongSection defaultSection(int index, int beats = 32)
+{
+    SongSection section;
+    section.label = QString(QChar(QLatin1Char('A').unicode() + qBound(0, index, 3)));
+    section.name = QStringLiteral("Section %1").arg(section.label);
+    section.beats = beats;
+    return section;
+}
+
 bool validTextArray(const QJsonArray& values, int maximumCount)
 {
     if (values.size() > maximumCount) {
@@ -226,27 +235,29 @@ const SongSection& BeatGridModel::section(int index) const
 
 bool BeatGridModel::hasOnlyPristineSection() const
 {
-    if (sections_.size() != 1) {
-        return false;
-    }
-    const SongSection& section = sections_.front();
-    if (!section.generatedKind.isEmpty() || section.label != QStringLiteral("A") ||
-        section.name != QStringLiteral("Verse") || section.beats != 32) {
+    if (sections_.size() != kMaxSections) {
         return false;
     }
     const auto allEmpty = [](const QVector<QString>& values) {
         return std::all_of(values.cbegin(), values.cend(),
             [](const QString& value) { return value.trimmed().isEmpty(); });
     };
-    if (!allEmpty(section.chords) || !allEmpty(section.targets) ||
-        !allEmpty(section.beatNotes) || !allEmpty(section.lyrics)) {
-        return false;
+    for (int index = 0; index < sections_.size(); ++index) {
+        const SongSection& section = sections_[index];
+        const SongSection expected = defaultSection(index);
+        if (!section.generatedKind.isEmpty() || section.label != expected.label ||
+            section.name != expected.name || section.beats != 32 ||
+            !allEmpty(section.chords) || !allEmpty(section.targets) ||
+            !allEmpty(section.beatNotes) || !allEmpty(section.lyrics) ||
+            !std::all_of(section.beatPatterns.cbegin(), section.beatPatterns.cend(),
+                [](const BeatPattern& pattern) {
+                    return std::all_of(pattern.lanes.cbegin(), pattern.lanes.cend(),
+                        [](const QString& lane) { return lane.trimmed().isEmpty(); });
+                })) {
+            return false;
+        }
     }
-    return std::all_of(section.beatPatterns.cbegin(), section.beatPatterns.cend(),
-        [](const BeatPattern& pattern) {
-            return std::all_of(pattern.lanes.cbegin(), pattern.lanes.cend(),
-                [](const QString& lane) { return lane.trimmed().isEmpty(); });
-        });
+    return true;
 }
 
 void BeatGridModel::setCell(int sectionIndex, const QString& lane, int beat, const QString& text)
@@ -424,6 +435,43 @@ void BeatGridModel::moveSection(int from, int to)
     ++revision_;
 }
 
+bool BeatGridModel::replaceSection(int index, SongSection section)
+{
+    if (index < 0 || index >= sections_.size()) {
+        return false;
+    }
+    section.id = sections_[index].id;
+    normalize(section);
+    sections_[index] = std::move(section);
+    ++revision_;
+    return true;
+}
+
+bool BeatGridModel::clearSection(int index)
+{
+    if (index < 0 || index >= sections_.size()) return false;
+    const int beats = sections_[index].beats;
+    SongSection cleared = defaultSection(index, beats);
+    cleared.id = sections_[index].id;
+    normalize(cleared);
+    sections_[index] = std::move(cleared);
+    ++revision_;
+    return true;
+}
+
+bool BeatGridModel::copySection(int source, int destination)
+{
+    if (source < 0 || source >= sections_.size() ||
+        destination < 0 || destination >= sections_.size() || source == destination) {
+        return false;
+    }
+    SongSection copy = sections_[source];
+    copy.id = sections_[destination].id;
+    sections_[destination] = std::move(copy);
+    ++revision_;
+    return true;
+}
+
 int BeatGridModel::replaceGeneratedSection(const QString& kind, SongSection section)
 {
     const QString normalizedKind = kind.trimmed().left(kMaxCellCharacters);
@@ -457,9 +505,11 @@ int BeatGridModel::replaceGeneratedSection(const QString& kind, SongSection sect
 void BeatGridModel::clearContent()
 {
     sections_.clear();
-    SongSection section;
-    normalize(section);
-    sections_.push_back(std::move(section));
+    for (int index = 0; index < kMaxSections; ++index) {
+        SongSection section = defaultSection(index);
+        normalize(section);
+        sections_.push_back(std::move(section));
+    }
     ++revision_;
 }
 
@@ -467,9 +517,11 @@ void BeatGridModel::reset()
 {
     title_ = QStringLiteral("Untitled Jam");
     sections_.clear();
-    SongSection section;
-    normalize(section);
-    sections_.push_back(section);
+    for (int index = 0; index < kMaxSections; ++index) {
+        SongSection section = defaultSection(index);
+        normalize(section);
+        sections_.push_back(std::move(section));
+    }
     revision_ = 0;
 }
 
@@ -702,8 +754,11 @@ bool BeatGridModel::loadJson(const QJsonObject& object)
         normalize(section);
         loaded.push_back(section);
     }
-    if (loaded.isEmpty()) {
-        return false;
+    if (loaded.isEmpty()) return false;
+    while (loaded.size() < kMaxSections) {
+        SongSection section = defaultSection(loaded.size(), loaded.front().beats);
+        normalize(section);
+        loaded.push_back(std::move(section));
     }
     title_ = object.value(QStringLiteral("title")).toString(QStringLiteral("Untitled Jam"));
     sections_ = loaded;

@@ -238,6 +238,7 @@ struct DuplexContext {
     std::vector<std::int32_t> recorder_their_input_scratch;
     std::vector<std::int32_t> recorder_inputs_mix_scratch;
     std::vector<std::int32_t> recorder_metronome_scratch;
+    std::vector<std::int32_t> recorder_prepared_scratch;
     std::size_t playback_prefill_frames = 0;
     double sample_rate = 48000.0;
     std::uint64_t test_input_sample_counter = 0;
@@ -568,7 +569,11 @@ void mix_local_monitor(DuplexContext& context, std::span<std::int32_t> output, s
     update_interval_peak(context.control->gui_monitor_peak_ppm, peak_ppm);
 }
 
-void mix_prepared_source(DuplexContext& context, std::span<std::int32_t> output, std::uint64_t frame)
+void mix_prepared_source(
+    DuplexContext& context,
+    std::span<std::int32_t> output,
+    std::uint64_t frame,
+    std::span<std::int32_t> stem)
 {
     if (context.control == nullptr || context.control->prepared_source == nullptr || output.empty()) {
         if (context.control != nullptr) {
@@ -576,7 +581,8 @@ void mix_prepared_source(DuplexContext& context, std::span<std::int32_t> output,
         }
         return;
     }
-    const int peak = context.control->prepared_source->mix(output.data(), output.size(), frame);
+    const int peak = context.control->prepared_source->mix(
+        output.data(), output.size(), frame, stem);
     context.control->prepared_track_peak_ppm.store(peak, std::memory_order_relaxed);
     update_interval_peak(context.control->gui_prepared_track_peak_ppm, peak);
     context.control->prepared_source_frame.store(
@@ -864,19 +870,13 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
                 context->capture_scratch.data(),
                 std::min<std::size_t>(context->capture_scratch.size(), playback.size())));
         const std::uint64_t audio_frame_start = context->engine_frame_counter;
-        if (context->track_take_recorder != nullptr &&
-            context->recorder_my_input_scratch.size() >= playback.size()) {
-            const std::uint64_t compensation = context->control != nullptr
-                ? context->control->recording_latency_compensation_frames.load(std::memory_order_relaxed)
-                : 0ULL;
-            const std::uint64_t capture_frame_start = audio_frame_start > compensation
-                ? audio_frame_start - compensation
-                : 0ULL;
-            context->track_take_recorder->record(
-                capture_frame_start,
-                std::span<const std::int32_t>(context->recorder_my_input_scratch.data(), playback.size()));
-        }
-        mix_prepared_source(*context, playback, audio_frame_start);
+        mix_prepared_source(
+            *context,
+            playback,
+            audio_frame_start,
+            std::span<std::int32_t>(
+                context->recorder_prepared_scratch.data(),
+                std::min<std::size_t>(context->recorder_prepared_scratch.size(), playback.size())));
         mix_metronome_click(
             *context,
             playback,
@@ -896,6 +896,46 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
                     context->recorder_metronome_scratch.data(),
                     std::min<std::size_t>(context->recorder_metronome_scratch.size(), playback.size())));
             observe_output_peak(*context, playback);
+        }
+        if (context->track_take_recorder != nullptr &&
+            context->recorder_my_input_scratch.size() >= playback.size() &&
+            context->recorder_their_input_scratch.size() >= playback.size() &&
+            context->recorder_inputs_mix_scratch.size() >= playback.size()) {
+            const std::int32_t options = context->control != nullptr
+                ? context->control->track_take_options.load(std::memory_order_relaxed)
+                : 0;
+            const auto source = static_cast<TrackTakeSource>(options & 0xff);
+            if (source == TrackTakeSource::CurrentJam) {
+                for (std::size_t index = 0; index < playback.size(); ++index) {
+                    std::int32_t sample = mix_i32_samples(
+                        context->recorder_my_input_scratch[index],
+                        context->recorder_their_input_scratch[index]);
+                    if ((options & kTrackTakeIncludePrepared) != 0 &&
+                        context->recorder_prepared_scratch.size() >= playback.size()) {
+                        sample = mix_i32_samples(sample, context->recorder_prepared_scratch[index]);
+                    }
+                    if ((options & kTrackTakeIncludeMetronome) != 0 &&
+                        context->recorder_metronome_scratch.size() >= playback.size()) {
+                        sample = mix_i32_samples(sample, context->recorder_metronome_scratch[index]);
+                    }
+                    context->recorder_inputs_mix_scratch[index] = sample;
+                }
+                context->track_take_recorder->record(
+                    audio_frame_start,
+                    std::span<const std::int32_t>(
+                        context->recorder_inputs_mix_scratch.data(), playback.size()));
+            } else {
+                const std::uint64_t compensation = context->control != nullptr
+                    ? context->control->recording_latency_compensation_frames.load(std::memory_order_relaxed)
+                    : 0ULL;
+                const std::uint64_t capture_frame_start = audio_frame_start > compensation
+                    ? audio_frame_start - compensation
+                    : 0ULL;
+                context->track_take_recorder->record(
+                    capture_frame_start,
+                    std::span<const std::int32_t>(
+                        context->recorder_my_input_scratch.data(), playback.size()));
+            }
         }
         if (context->recorder != nullptr &&
             context->recorder_inputs_mix_scratch.size() >= playback.size() &&
@@ -995,6 +1035,7 @@ public:
         context_.recorder_their_input_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.recorder_inputs_mix_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.recorder_metronome_scratch.resize(static_cast<std::size_t>(buffer_size));
+        context_.recorder_prepared_scratch.resize(static_cast<std::size_t>(buffer_size));
         context_.playback_prefill_frames = playback_prefill_frames;
         context_.sample_rate = sample_rate;
     }

@@ -10,6 +10,8 @@ class QThreadPool;
 class ProjectPersistenceCoordinator {
 public:
     void initializeWorkspace(const QString& workspaceFolder);
+    void relocateWorkspace(const QString& workspaceFolder);
+    void clearTransientTracking() noexcept;
 
     const QString& projectFilePath() const noexcept;
     const QString& projectFolder() const noexcept;
@@ -31,6 +33,7 @@ public:
     bool ownsTransientWav(const QString& path) const;
     bool discardTransientWav(const QString& path);
     bool hasExistingTransientWavs() const;
+    void pruneEmptyWorkspaceDirectories() const;
     void scheduleTransientCleanup(QThreadPool& workerPool);
 
     static bool readSongJson(const QString& path, QJsonObject& root, QString& error);
@@ -38,6 +41,7 @@ public:
 
 private:
     static QString canonicalFilePath(const QString& path);
+    static void pruneEmptyWorkspace(const QString& workspacePath);
 
     QString projectFolder_;
     QString projectFilePath_;

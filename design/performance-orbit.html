@@ -1092,6 +1092,216 @@
     .lyrics-editor:focus { border-color: var(--cyan); }
     .lyrics-detail { padding: 0; min-width: 0; overflow-x: auto; }
 
+    /* Bank-focused authoring mockups.  The production editor stores beat-level
+       data, but these views deliberately reveal only the part being worked on. */
+    .mock-bank-strip { display: flex; align-items: center; gap: 4px; margin-left: 7px; }
+    .mock-bank-strip span { margin-right: 2px; color: #687578; font: 7px "Bahnschrift", sans-serif; letter-spacing: .12em; }
+    .mock-bank-button { min-width: 30px; padding: 0 8px; }
+    .mock-bank-button.active { border-color: var(--amber); color: var(--amber-hi); background: rgba(232,164,74,.11); }
+    .editor-hint { color: #647174; font: 8px "Bahnschrift", sans-serif; white-space: nowrap; }
+
+    .bank-authoring-view {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      gap: 13px;
+      min-width: 940px;
+      min-height: 100%;
+      padding: 16px 18px 22px;
+    }
+    .bar-overview {
+      display: grid;
+      grid-template-columns: repeat(8, minmax(92px, 1fr));
+      gap: 6px;
+    }
+    .overview-bar {
+      position: relative;
+      min-width: 0;
+      min-height: 52px;
+      padding: 9px 9px 7px;
+      overflow: hidden;
+      border: 1px solid #334044;
+      border-radius: 3px;
+      background: #0d1314;
+      color: #9ca7a6;
+      text-align: left;
+      cursor: pointer;
+    }
+    .overview-bar:hover { border-color: #58686c; background: #121a1c; }
+    .overview-bar.selected { border-color: #8d6b3d; background: rgba(232,164,74,.09); box-shadow: inset 0 -2px var(--amber); }
+    .overview-bar.live { box-shadow: inset 3px 0 var(--cyan); }
+    .overview-bar.selected.live { box-shadow: inset 3px 0 var(--cyan), inset 0 -2px var(--amber); }
+    .overview-number { display: block; color: #647174; font: 7px "Bahnschrift", monospace; }
+    .overview-summary { display: block; margin-top: 7px; overflow: hidden; color: #d6d9d4; font: 12px Georgia, serif; white-space: nowrap; text-overflow: ellipsis; }
+    .overview-empty { color: #4f5c5f; font-style: italic; }
+    .overview-beat-mini { display: grid; grid-template-columns: repeat(16, 1fr); gap: 2px; margin-top: 8px; }
+    .overview-beat-mini i { height: 5px; background: #283336; }
+    .overview-beat-mini i.on { background: var(--cyan); box-shadow: 0 0 4px rgba(102,212,207,.25); }
+
+    .chord-workspace {
+      display: grid;
+      grid-template-columns: minmax(620px, 1fr) 300px;
+      gap: 12px;
+      min-height: 0;
+    }
+    .focus-editor, .learning-panel, .sequencer-panel {
+      border: 1px solid #344145;
+      border-radius: 4px;
+      background: #0c1213;
+    }
+    .focus-editor { align-self: start; padding: 14px; }
+    .focus-heading { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 11px; }
+    .focus-heading strong { color: #d8ddda; font: 14px Georgia, serif; }
+    .focus-heading span { color: #687578; font: 8px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .focused-bars { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 8px; }
+    .focused-bar { border: 1px solid #303c3f; border-radius: 3px; background: #111719; }
+    .focused-bar.selected { border-color: #846438; box-shadow: 0 0 0 1px rgba(232,164,74,.12); }
+    .focused-bar.live { box-shadow: inset 3px 0 var(--cyan); }
+    .focused-bar-head { display: flex; justify-content: space-between; padding: 8px 9px; border-bottom: 1px solid #303c3f; color: #7e8a8c; font: 8px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .chord-beats { display: grid; grid-template-columns: repeat(4, 1fr); }
+    .chord-beat { position: relative; min-width: 0; border-right: 1px solid #2a3538; }
+    .chord-beat:last-child { border-right: 0; }
+    .chord-beat label { position: absolute; z-index: 1; top: 6px; left: 8px; color: #536164; font: 7px "Bahnschrift", monospace; pointer-events: none; }
+    .chord-input {
+      width: 100%;
+      height: 66px;
+      padding: 18px 6px 5px;
+      border: 0;
+      background: transparent;
+      color: var(--cyan-hi);
+      font: 16px Georgia, serif;
+      text-align: center;
+      outline: none;
+    }
+    .chord-input::placeholder { color: #445154; font: italic 9px "Bahnschrift", sans-serif; }
+    .chord-beat.selected { background: rgba(102,212,207,.075); box-shadow: inset 0 -2px var(--cyan); }
+    .chord-beat.rest .chord-input { color: #657174; }
+    .chord-division {
+      width: 100%;
+      height: 21px;
+      border: 0;
+      border-top: 1px solid #2a3538;
+      background: #0d1314;
+      color: #647174;
+      font: 7px "Bahnschrift", sans-serif;
+      cursor: pointer;
+    }
+    .chord-division:hover { color: var(--amber-hi); background: rgba(232,164,74,.07); }
+    .manual-tip { margin-top: 10px; color: #657174; font: 8px "Bahnschrift", sans-serif; }
+    .musical-lines { display: none; margin-top: 12px; border-top: 1px solid #2f3a3d; padding-top: 10px; }
+    .musical-lines.open { display: grid; gap: 7px; }
+    .musical-lines-head { display: flex; align-items: center; gap: 12px; margin-bottom: 2px; color: #657174; font: 8px "Bahnschrift", sans-serif; }
+    .musical-lines-head strong { color: #aab4b2; font-weight: 500; text-transform: uppercase; }
+    .musical-lines-head i { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 5px rgba(112,212,157,.35); }
+    .line-editor-row { display: grid; grid-template-columns: 92px minmax(0, 1fr); align-items: stretch; gap: 8px; }
+    .line-editor-label { display: grid; align-content: center; gap: 3px; padding: 0 8px; border: 1px solid #303c3f; background: #111719; color: #8e9998; font: 8px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .line-editor-label small { color: #536164; font-size: 7px; text-transform: none; }
+    .line-editor-track { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .line-bar { min-width: 0; border: 1px solid #303c3f; background: #0e1415; }
+    .line-bar-head { padding: 4px 6px; border-bottom: 1px solid #2c373a; color: #566467; font: 7px "Bahnschrift", monospace; }
+    .line-bar-beats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .line-beat-steps { display: grid; min-width: 0; border-right: 1px solid #3a4548; }
+    .line-beat-steps:last-child { border-right: 0; }
+    .line-step {
+      min-width: 0;
+      width: 100%;
+      height: 31px;
+      padding: 0 2px;
+      border: 0;
+      border-right: 1px solid #293437;
+      background: #111719;
+      color: #c4a8ec;
+      font: 9px "Bahnschrift", monospace;
+      text-align: center;
+      outline: none;
+    }
+    .line-step:last-child { border-right: 0; }
+    .line-step:focus { position: relative; z-index: 2; background: rgba(102,212,207,.09); box-shadow: inset 0 0 0 1px var(--cyan); }
+    .line-step.edited { color: var(--amber-hi); box-shadow: inset 0 -2px var(--amber); }
+    .line-editor-row[data-line="bass"] .line-step { color: #eeb15e; }
+    .line-editor-row[data-line="support"] .line-step { color: #7ec3ee; }
+    .generated-context { display: grid; gap: 8px; }
+    .generated-context .context-kind { color: #7d898c; font: 8px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .generated-context .context-detail { padding: 9px; border: 1px solid #334044; background: #101617; color: #abb5b3; font: 10px/1.45 "Bahnschrift", sans-serif; }
+    .generated-context .edited-badge { width: max-content; padding: 4px 7px; border: 1px solid #80623b; color: var(--amber-hi); background: rgba(232,164,74,.08); font: 7px "Bahnschrift", sans-serif; text-transform: uppercase; }
+
+    .learning-panel { align-self: start; min-height: 294px; padding: 15px; }
+    .learning-panel h3 { margin: 0; color: var(--amber-hi); font: 30px Georgia, serif; }
+    .chord-tone-copy { min-height: 18px; margin: 4px 0 12px; color: #82aaa8; font: 10px "Bahnschrift", monospace; }
+    .instrument-tabs { display: flex; gap: 5px; margin-bottom: 12px; }
+    .instrument-tabs button { flex: 1; height: 28px; border: 1px solid #344145; background: #101617; color: #738083; font: 8px "Bahnschrift", sans-serif; text-transform: uppercase; cursor: pointer; }
+    .instrument-tabs button.active { border-color: #78603c; color: var(--amber-hi); background: rgba(232,164,74,.09); }
+    .voicing-label { margin-top: 11px; color: #657174; font: 8px "Bahnschrift", sans-serif; }
+    .piano-keys { display: flex; height: 90px; border: 1px solid #3b484b; background: #080c0d; }
+    .piano-key { display: grid; flex: 1; align-items: end; padding-bottom: 7px; border-right: 1px solid #465255; background: #d8d8cf; color: #303637; font: 7px "Bahnschrift", sans-serif; text-align: center; }
+    .piano-key:last-child { border-right: 0; }
+    .piano-key.black { height: 58px; margin: 0 -5px; z-index: 1; background: #192022; color: #889395; }
+    .piano-key.on { background: #e8a44a; color: #17120c; box-shadow: inset 0 -7px #ffd68a; }
+    .piano-key.black.on { background: #66d4cf; box-shadow: inset 0 -6px #b8fff9; }
+    .guitar-shape { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; padding: 10px; border: 1px solid #344145; background: #101617; }
+    .guitar-string { display: grid; place-items: center; height: 60px; border-left: 1px solid #657174; color: var(--amber-hi); font: 13px "Bahnschrift", monospace; }
+
+    .chord-picker {
+      position: fixed;
+      z-index: 100;
+      display: none;
+      width: 318px;
+      padding: 11px;
+      border: 1px solid #80623b;
+      border-radius: 4px;
+      background: #111719;
+      box-shadow: 0 14px 38px rgba(0,0,0,.58);
+    }
+    .chord-picker.open { display: block; }
+    .chord-picker-title { margin: 7px 0 5px; color: #687578; font: 7px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .chord-picker-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; }
+    .chord-picker-grid.quality { grid-template-columns: repeat(4, 1fr); }
+    .chord-picker button { min-height: 28px; border: 1px solid #354246; background: #0c1213; color: #aeb7b5; font: 9px "Bahnschrift", sans-serif; cursor: pointer; }
+    .chord-picker button:hover, .chord-picker button.active { border-color: var(--amber); color: var(--amber-hi); background: rgba(232,164,74,.1); }
+    .chord-picker-actions { display: flex; gap: 4px; margin-top: 8px; }
+    .chord-picker-actions button { flex: 1; }
+
+    .beat-authoring { display: grid; grid-template-rows: auto auto; gap: 13px; align-content: start; }
+    .sequencer-panel { padding: 14px; }
+    .sequencer-grid { display: grid; grid-template-columns: 116px repeat(16, minmax(28px, 1fr)); border-top: 1px solid #334044; border-left: 1px solid #334044; }
+    .sequence-label, .sequence-step, .sequence-count { min-height: 38px; border-right: 1px solid #2c373a; border-bottom: 1px solid #334044; }
+    .sequence-label { display: flex; align-items: center; padding-left: 10px; color: #98a3a2; background: #111719; font: 8px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .sequence-count { display: grid; place-items: center; color: #596669; background: #0d1314; font: 7px "Bahnschrift", monospace; }
+    .sequence-count.beat { color: var(--amber-hi); border-left: 1px solid #6e5735; }
+    .sequence-step { position: relative; display: grid; place-items: center; background: #101617; cursor: pointer; }
+    .sequence-step.beat { border-left: 1px solid #5a4940; }
+    .sequence-step::after { content: ""; width: 11px; height: 11px; border: 1px solid #455255; background: #151c1e; }
+    .sequence-step.hit::after { border-color: var(--cyan); background: var(--cyan); box-shadow: 0 0 7px rgba(102,212,207,.35); }
+    .sequence-step.accent::after { border-color: var(--amber); background: var(--amber); box-shadow: 0 0 8px rgba(232,164,74,.45); }
+    .sequence-step.ghost::after { border-radius: 50%; border-color: var(--green); background: var(--green); transform: scale(.75); }
+    .sequence-step.playhead { background: rgba(102,212,207,.08); }
+    .division-row { display: grid; grid-template-columns: 116px repeat(4, 1fr); margin-bottom: 8px; }
+    .division-row span, .division-row button { height: 27px; border: 1px solid #334044; background: #101617; color: #718083; font: 8px "Bahnschrift", sans-serif; }
+    .division-row span { display: grid; place-items: center start; padding-left: 10px; text-transform: uppercase; }
+    .division-row button { cursor: pointer; }
+    .division-row button:hover { color: var(--amber-hi); border-color: #6f5937; }
+
+    .lyrics-cue-sheet { display: grid; gap: 5px; max-width: 1040px; margin: 0 auto; padding: 16px 18px 36px; }
+    .lyric-cue-row { display: grid; grid-template-columns: 58px minmax(420px, 1fr) 34px; align-items: start; border: 1px solid #303c3f; border-radius: 3px; background: #0d1314; }
+    .lyric-cue-row.selected { border-color: #80623b; background: rgba(232,164,74,.055); }
+    .lyric-cue-row.live { box-shadow: inset 3px 0 var(--cyan); }
+    .lyric-bar-number { padding: 16px 8px; color: #687578; font: 9px "Bahnschrift", monospace; text-align: center; }
+    .lyric-text {
+      width: 100%;
+      min-height: 52px;
+      resize: none;
+      overflow: hidden;
+      padding: 13px 12px;
+      border: 0;
+      border-left: 1px solid #2e393c;
+      background: transparent;
+      color: #ddd9d0;
+      font: 16px/1.45 Georgia, serif;
+      outline: none;
+    }
+    .lyric-text::placeholder { color: #465356; font-style: italic; }
+    .lyric-clear { width: 26px; height: 26px; margin-top: 13px; border: 1px solid #394649; background: #111719; color: #687578; cursor: pointer; }
+    .lyric-clear:hover { border-color: #80504b; color: #ffaaa2; }
+
     .metronome-workspace {
       display: grid;
       grid-template-rows: auto 1fr;
@@ -1625,7 +1835,7 @@
           <span class="lens-copy">
             <span class="section-label">Current chord</span>
             <strong class="current-chord" id="currentChord">F</strong>
-            <span class="bar-position">BAR <span id="barPosition">17</span> / 32</span>
+            <span class="bar-position">BAR <span id="barPosition">1</span> / <span id="barTotal">32</span></span>
             <span class="beat-dots" id="beatDots"><i class="active"></i><i></i><i></i><i></i></span>
           </span>
         </button>
@@ -1671,58 +1881,57 @@
         <div class="detail-body">
           <div class="detail-layer active" data-layer="chords">
             <div class="editor-tools">
-              <span class="micro">Chord grid</span>
-              <button class="editor-button" data-editor-action="add-section">Add section</button>
-              <button class="editor-button" data-editor-action="duplicate-section">Duplicate</button>
-              <button class="editor-button danger" data-editor-action="delete-section">Delete</button>
-              <button class="editor-button" data-editor-action="expand-grid">+4 beats</button>
-              <button class="editor-button" data-editor-action="shrink-grid">-4 beats</button>
-              <button class="editor-button" data-editor-action="generate-chords">Generate</button>
-              <button class="editor-button" data-editor-action="reference">Reference WAVs</button>
+              <span class="micro">Bank harmony · <span data-bank-length>32 bars</span></span>
+              <span class="mock-bank-strip"><span>BANK</span><button class="editor-button mock-bank-button active" data-mock-bank="0">A</button><button class="editor-button mock-bank-button" data-mock-bank="1">B</button><button class="editor-button mock-bank-button" data-mock-bank="2">C</button><button class="editor-button mock-bank-button" data-mock-bank="3">D</button></span>
+              <button class="editor-button" data-add-bars="1">+ Bar</button>
+              <button class="editor-button" data-add-bars="4">+ 4 Bars</button>
+              <button class="editor-button danger" data-remove-bar>Remove Bar</button>
+              <button class="editor-button" id="chordCopyBars">Copy</button>
+              <button class="editor-button" id="chordPasteBars">Paste</button>
+              <button class="editor-button" id="chordDuplicateBars">Duplicate after</button>
+              <button class="editor-button" id="chordMoveLeft">Move ←</button>
+              <button class="editor-button" id="chordMoveRight">Move →</button>
+              <button class="editor-button danger" id="chordClearBar">Clear</button>
               <span class="tool-spacer"></span>
-              <label class="editor-check"><input type="checkbox" checked> Chord notes</label>
-              <label class="editor-check"><input type="checkbox" checked> Target melody</label>
+              <span class="editor-hint">Click a bar to edit · right-click a beat for chords</span>
+              <label class="editor-check"><input type="checkbox" id="showMusicalLines"> Musical lines</label>
             </div>
-            <div class="editor-scroll"><div class="song-editor-grid" id="chordDetail"></div></div>
+            <div class="editor-scroll"><div class="bank-authoring-view" id="chordDetail"></div></div>
           </div>
           <div class="detail-layer" data-layer="beats">
             <div class="editor-tools">
-              <span class="micro">Beat grid / Chorus 03</span>
-              <button class="editor-button" data-editor-action="add-section">Add section</button>
-              <button class="editor-button" data-editor-action="duplicate-section">Duplicate</button>
-              <button class="editor-button danger" data-editor-action="delete-section">Delete</button>
-              <button class="editor-button" data-editor-action="expand-grid">+4 beats</button>
-              <button class="editor-button" data-editor-action="shrink-grid">-4 beats</button>
-              <button class="editor-button" data-editor-action="generate-beats">Generate</button>
-              <button class="editor-button" data-editor-action="reference">Reference WAVs</button>
+              <span class="micro">Bank rhythm · <span data-bank-length>32 bars</span></span>
+              <span class="mock-bank-strip"><span>BANK</span><button class="editor-button mock-bank-button active" data-mock-bank="0">A</button><button class="editor-button mock-bank-button" data-mock-bank="1">B</button><button class="editor-button mock-bank-button" data-mock-bank="2">C</button><button class="editor-button mock-bank-button" data-mock-bank="3">D</button></span>
+              <button class="editor-button" data-add-bars="1">+ Bar</button>
+              <button class="editor-button" data-add-bars="4">+ 4 Bars</button>
+              <button class="editor-button danger" data-remove-bar>Remove Bar</button>
+              <button class="editor-button" id="beatCopyBars">Copy</button>
+              <button class="editor-button" id="beatPasteBars">Paste</button>
+              <button class="editor-button" id="beatDuplicateBars">Duplicate after</button>
+              <button class="editor-button" id="beatMoveLeft">Move ←</button>
+              <button class="editor-button" id="beatMoveRight">Move →</button>
+              <button class="editor-button danger" id="beatClearBar">Clear</button>
               <span class="tool-spacer"></span>
               <span class="beat-state-legend"><span><i></i>Normal</span><span><i class="accent"></i>Accent</span><span><i class="ghost"></i>Ghost</span></span>
             </div>
-            <div class="editor-scroll"><div class="full-beat-grid" id="fullBeatGrid"></div></div>
+            <div class="editor-scroll"><div class="bank-authoring-view beat-authoring" id="fullBeatGrid"></div></div>
           </div>
           <div class="detail-layer" data-layer="lyrics">
             <div class="editor-tools">
-              <span class="micro">Shared lyrics</span>
-              <button class="editor-button" data-editor-action="insert-section">Insert section</button>
-              <button class="editor-button" data-editor-action="generate-lyrics">Generate</button>
-              <button class="editor-button" data-editor-action="clear-lyrics">Clear</button>
+              <span class="micro">Bank lyrics · <span data-bank-length>32 bars</span></span>
+              <span class="mock-bank-strip"><span>BANK</span><button class="editor-button mock-bank-button active" data-mock-bank="0">A</button><button class="editor-button mock-bank-button" data-mock-bank="1">B</button><button class="editor-button mock-bank-button" data-mock-bank="2">C</button><button class="editor-button mock-bank-button" data-mock-bank="3">D</button></span>
+              <button class="editor-button" data-add-bars="1">+ Bar</button>
+              <button class="editor-button" data-add-bars="4">+ 4 Bars</button>
+              <button class="editor-button danger" data-remove-bar>Remove Bar</button>
+              <button class="editor-button" id="lyricMoveUp">Move line ↑</button>
+              <button class="editor-button" id="lyricMoveDown">Move line ↓</button>
+              <button class="editor-button danger" id="lyricClearBar">Clear line</button>
+              <button class="editor-button danger" id="lyricClearAll">Clear bank</button>
               <span class="tool-spacer"></span>
-              <label class="editor-check"><input type="checkbox" checked> Follow current line</label>
+              <span class="editor-hint">Enter advances · Shift+Enter adds a line · multiline paste fills following bars</span>
+              <label class="editor-check"><input type="checkbox" id="followLyrics" checked> Follow current line</label>
             </div>
-            <div class="editor-scroll">
-              <div class="lyrics-workspace">
-                <textarea class="lyrics-editor" id="lyricsEditor" aria-label="Shared lyrics editor">[Chorus]
-Send the midnight signal
-let it travel through the noise
-Every beat is simple
-when it carries every voice
-
-[Bridge]
-Hold the line between us
-keep the rhythm moving on</textarea>
-                <div class="lyrics-detail" id="lyricsDetail"></div>
-              </div>
-            </div>
+            <div class="editor-scroll" id="lyricsScroll"><div class="lyrics-cue-sheet" id="lyricsDetail"></div></div>
           </div>
           <div class="detail-layer" data-layer="metronome">
             <div class="editor-tools">
@@ -1806,28 +2015,116 @@ keep the rhythm moving on</textarea>
     ];
     const chordSequence = ["F", "C/E", "Am", "G", "Dm7", "Am/C", "Bb", "C"];
     function sharedLyricLines() {
-      return document.getElementById("lyricsEditor").value
-        .split(/\r?\n/)
-        .map(line => line.trim())
-        .filter(line => line && !line.startsWith("["));
+      if (!mockBanks?.length) return [];
+      return mockBanks[activeMockBank].lyrics.map(cue => cue.text.trim()).filter(Boolean);
     }
     const beatRows = [
-      { name: "Guitar", hits: [0, 3, 6, 8, 11, 14], accents: [0, 8], ghosts: [6, 14], nextHits: [0, 4, 7, 10, 12, 15], nextAccents: [0, 12], nextGhosts: [7, 15] },
-      { name: "Tom", hits: [10, 11, 14], accents: [14], ghosts: [10, 11], nextHits: [11, 13, 14, 15], nextAccents: [15], nextGhosts: [11, 13] },
-      { name: "Crash", hits: [0], accents: [0], ghosts: [], nextHits: [], nextAccents: [], nextGhosts: [] },
-      { name: "Open HH", hits: [7, 15], accents: [15], ghosts: [7], nextHits: [6, 15], nextAccents: [15], nextGhosts: [6] },
-      { name: "Closed HH", hits: [0, 2, 4, 6, 8, 10, 12, 14], accents: [0, 8], ghosts: [6, 14], nextHits: [0, 2, 4, 6, 8, 10, 12, 13, 14, 15], nextAccents: [0, 8, 14], nextGhosts: [13, 15] },
-      { name: "Snare", hits: [4, 12], accents: [4, 12], ghosts: [], nextHits: [4, 10, 12], nextAccents: [4, 12], nextGhosts: [10] },
-      { name: "Kick", hits: [0, 4, 8, 11, 12], accents: [0, 8], ghosts: [11], nextHits: [0, 3, 7, 8, 12, 14], nextAccents: [0, 8], nextGhosts: [3, 14] }
+      { name: "Crash", hits: [0, 3, 6, 8, 11, 14], accents: [0, 8], ghosts: [6, 14], nextHits: [0, 4, 7, 10, 12, 15], nextAccents: [0, 12], nextGhosts: [7, 15] },
+      { name: "Open HH", hits: [10, 11, 14], accents: [14], ghosts: [10, 11], nextHits: [11, 13, 14, 15], nextAccents: [15], nextGhosts: [11, 13] },
+      { name: "Closed HH", hits: [0], accents: [0], ghosts: [], nextHits: [], nextAccents: [], nextGhosts: [] },
+      { name: "Snare", hits: [7, 15], accents: [15], ghosts: [7], nextHits: [6, 15], nextAccents: [15], nextGhosts: [6] },
+      { name: "Kick", hits: [0, 2, 4, 6, 8, 10, 12, 14], accents: [0, 8], ghosts: [6, 14], nextHits: [0, 2, 4, 6, 8, 10, 12, 13, 14, 15], nextAccents: [0, 8, 14], nextGhosts: [13, 15] },
+      { name: "Tom", hits: [4, 12], accents: [4, 12], ghosts: [], nextHits: [4, 10, 12], nextAccents: [4, 12], nextGhosts: [10] },
+      { name: "Shaker", hits: [0, 4, 8, 11, 12], accents: [0, 8], ghosts: [11], nextHits: [0, 3, 7, 8, 12, 14], nextAccents: [0, 8], nextGhosts: [3, 14] }
     ];
-    let chordSections = [{
-      label: "A",
-      name: "Chorus 03",
-      chords: ["F", "C/E", "Am", "G", "F", "C/E", "Am", "G", "Dm7", "Am/C", "Bb", "C"],
-      melody: ["A4", "", "E4", "G4", "A4", "G4", "E4", "", "F4", "E4", "D4", "C4"]
-    }];
-    let selectedChordSection = 0;
-    let beatSectionCount = 1;
+    const TRACK_BARS = 32;
+    const editorBeatLaneNames = ["Crash", "Open HH", "Closed HH", "Snare", "Kick", "Tom", "Shaker"];
+    const chordBlueprint = [
+      "F", "C/E", "Am", "G", "F", "C/E", "Am", "G",
+      "Dm7", "Am/C", "Bb", "C", "F", "G", "Am", "C",
+      "Bb", "F/A", "Gm7", "C", "Dm7", "Bb", "F", "C/E",
+      "Am", "G", "Dm7", "Bb", "F", "C", "F", "F"
+    ];
+    const lyricBlueprint = [
+      "Send the midnight signal", "Let it travel through the noise", "Every beat is simple", "When it carries every voice",
+      "Hold the line between us", "Keep the rhythm moving on", "Leave a little room to breathe", "Before the next idea is born",
+      "I can hear the room around you", "Like a light across the wire", "We are leaning into silence", "Waiting for the sound to rise",
+      "Take the long way through the chorus", "Let the harmony unfold", "Keep the rhythm underneath it", "Give the final word some room",
+      "", "Start again a little softer", "Move the colour through the changes", "Let the open strings remain",
+      "Now the distance feels much smaller", "Every pulse arrives in time", "There is space enough between us", "For another moving line",
+      "Send the midnight signal", "Let it travel through the noise", "Every beat is simple", "When it carries every voice",
+      "Hold the final chord together", "Let the last reflection fall", "Leave the metronome still counting", "Until we can hear it all"
+    ];
+
+    function generatedLineStep(value, lane, position) {
+      const descriptions = {
+        melody: position % 3 === 0 ? ["Chord tone", "Primary phrase tone"] : ["Passing tone", "Connects the phrase contour"],
+        bass: position % 2 === 0 ? ["Chord root", "Structural bass anchor"] : ["Approach tone", "Connects to the next harmony"],
+        support: position % 4 === 0 ? ["Harmony answer", "Short call-and-response support"] : ["Pad tone", "Leaves space around the melody"]
+      };
+      return { value, generatedValue: value, role: descriptions[lane][0], relationship: descriptions[lane][1], edited: false };
+    }
+
+    function generatedLineBeat(lane, division, bar, beat, bank) {
+      const melodyNotes = ["A4", "C5", "E4", "G4", "F4", "D4", "Bb4", "C5"];
+      const bassNotes = ["F2", "E2", "A2", "G2", "D2", "C3", "Bb2", "C2"];
+      const supportNotes = ["C4", "G3", "E4", "D4", "A3", "F3", "Bb3", "G3"];
+      const notes = lane === "melody" ? melodyNotes : lane === "bass" ? bassNotes : supportNotes;
+      return Array.from({ length: division }, (_, step) => {
+        let value = "~";
+        if (lane === "melody") value = step === 0 ? notes[(bar + beat + bank) % notes.length] : step === division - 1 && division > 2 ? notes[(bar + beat + bank + 1) % notes.length] : "~";
+        if (lane === "bass") value = beat % 2 === 0 && step === 0 ? notes[(bar + bank) % notes.length] : "~";
+        if (lane === "support") value = step === division - 1 && (bar + beat) % 2 === 0 ? notes[(bar + beat + bank) % notes.length] : "-";
+        return generatedLineStep(value, lane, bar * 16 + beat * 4 + step);
+      });
+    }
+
+    function makeChordBar(symbol, index, bank) {
+      const beats = [symbol, "", "", ""];
+      if ((index + bank) % 7 === 6) beats[2] = chordBlueprint[(index + 1 + bank * 2) % chordBlueprint.length];
+      const divisions = Array.from({ length: 4 }, (_, beat) => (index + beat + bank) % 7 === 4 ? 3 : (index + beat) % 5 === 0 ? 1 : 2);
+      return {
+        beats,
+        divisions,
+        lines: {
+          melody: divisions.map((division, beat) => generatedLineBeat("melody", division, index, beat, bank)),
+          bass: divisions.map((division, beat) => generatedLineBeat("bass", division, index, beat, bank)),
+          support: divisions.map((division, beat) => generatedLineBeat("support", division, index, beat, bank))
+        }
+      };
+    }
+
+    function makeBeatBar(index, bank) {
+      const lanes = editorBeatLaneNames.map((_, lane) => Array(16).fill(""));
+      const put = (lane, positions, state = "x") => positions.forEach(position => {
+        lanes[lane][(position + bank + Math.floor(index / 8)) % 16] = state;
+      });
+      if (index % 8 === 0) put(0, [0], "a");
+      put(2, index % 4 === 3 ? [0,2,4,6,8,10,12,13,14,15] : [0,2,4,6,8,10,12,14]);
+      put(3, [4,12], "a");
+      put(4, index % 2 ? [0,3,8,11] : [0,6,8,11,14]);
+      if (index % 4 === 3) put(5, [10,12,14,15], "g");
+      if (index % 3 === 2) put(1, [7,15]);
+      if (bank > 0) put(6, [2,6,10,14], bank % 2 ? "g" : "x");
+      return { lanes, divisions: ["1/16", "1/16", "1/16", "1/16"] };
+    }
+
+    function makeMockBank(index) {
+      const offset = index * 2;
+      return {
+        id: String.fromCharCode(65 + index),
+        name: ["Midnight chorus", "Open bridge", "Quiet verse", "Final lift"][index],
+        chords: Array.from({ length: TRACK_BARS }, (_, bar) =>
+          makeChordBar(index === 2 && bar > 7 ? "" : chordBlueprint[(bar + offset) % chordBlueprint.length], bar, index)),
+        beats: Array.from({ length: TRACK_BARS }, (_, bar) => makeBeatBar(bar, index)),
+        lyrics: Array.from({ length: TRACK_BARS }, (_, bar) => ({
+          text: index === 0 ? lyricBlueprint[bar] : index === 1 && bar < 8 ? lyricBlueprint[bar + 8] : ""
+        }))
+      };
+    }
+
+    const mockBanks = Array.from({ length: 4 }, (_, index) => makeMockBank(index));
+    let activeMockBank = 0;
+    let selectedEditorBar = 0;
+    let rangeAnchorBar = 0;
+    let selectedBarRange = { start: 0, end: 0 };
+    let selectedChordBeat = 0;
+    let selectedLineContext = null;
+    let selectedInstrument = "piano";
+    let showMusicalLines = false;
+    let chordBarClipboard = [];
+    let beatBarClipboard = [];
+    let lastFollowedLyricBar = -1;
     const looperLanes = [
       { name: "Backing guitar", start: "0%", width: "68%", gain: -8 },
       { name: "Ambient layer", start: "25%", width: "54%", gain: -14 },
@@ -1841,7 +2138,7 @@ keep the rhythm moving on</textarea>
     let playing = true;
     let metronomeEnabled = true;
     let step = 0;
-    let songBar = 17;
+    let songBar = 1;
     let visualEnergy = .18;
     let nebulaEnvelope = .16;
     let nebulaPlayTime = 0;
@@ -2260,16 +2557,14 @@ keep the rhythm moving on</textarea>
     }
 
     function beatPatternForBar(row, bar, state = "hits") {
-      const relativeBar = ((bar - 17) % 16 + 16) % 16;
-      const useUpcomingBase = relativeBar % 2 === 1;
-      const stateKey = state === "accents" ? "Accents" : state === "ghosts" ? "Ghosts" : "Hits";
-      const source = useUpcomingBase ? row[`next${stateKey}`] : row[stateKey.toLowerCase()];
-      const shift = Math.floor(relativeBar / 2) % 4;
-      return source.map(index => (index + shift) % 16);
+      const lane = Math.max(0, beatRows.indexOf(row));
+      const pattern = activeBank().beats[(bar - 1 + bankLength()) % bankLength()].lanes[lane];
+      const wanted = state === "accents" ? "a" : state === "ghosts" ? "g" : null;
+      return pattern.map((value, index) => wanted ? value === wanted ? index : -1 : value ? index : -1).filter(index => index >= 0);
     }
 
     function buildBeatPreview() {
-      const followingBar = songBar >= 32 ? 17 : songBar + 1;
+      const followingBar = songBar >= bankLength() ? 1 : songBar + 1;
       const previews = [
         { target: document.getElementById("currentBeatPreview"), bar: songBar, upcoming: false },
         { target: document.getElementById("nextBeatPreview"), bar: followingBar, upcoming: true }
@@ -2494,6 +2789,531 @@ keep the rhythm moving on</textarea>
       });
     }
 
+    /* Functional bank-focused editor prototype.  These later declarations
+       intentionally replace the earlier table mockup builders. */
+    const chordToneMap = {
+      "F": "F A C", "C/E": "C E G", "Am": "A C E", "G": "G B D",
+      "Dm7": "D F A C", "Am/C": "A C E", "Bb": "Bb D F", "C": "C E G",
+      "Em": "E G B", "D": "D F# A", "F/A": "F A C", "Gm7": "G Bb D F",
+      "C7": "C E G Bb", "Cmaj7": "C E G B", "Cm": "C Eb G", "G/B": "G B D"
+    };
+    const guitarShapes = {
+      "C": ["x", "3", "2", "0", "1", "0"], "Cm": ["x", "3", "5", "5", "4", "3"],
+      "F": ["1", "3", "3", "2", "1", "1"], "G": ["3", "2", "0", "0", "0", "3"],
+      "Am": ["x", "0", "2", "2", "1", "0"], "Dm7": ["x", "x", "0", "2", "1", "1"],
+      "Bb": ["x", "1", "3", "3", "3", "1"], "Em": ["0", "2", "2", "0", "0", "0"],
+      "C/E": ["0", "3", "2", "0", "1", "0"], "G/B": ["x", "2", "0", "0", "0", "3"]
+    };
+    const cloneValue = value => JSON.parse(JSON.stringify(value));
+    const activeBank = () => mockBanks[activeMockBank];
+    const bankLength = () => activeBank().chords.length;
+    const blankChordBar = () => ({
+      beats: ["", "", "", ""],
+      divisions: [1, 1, 1, 1],
+      lines: {
+        melody: Array.from({ length: 4 }, () => [generatedLineStep("-", "melody", 0)]),
+        bass: Array.from({ length: 4 }, () => [generatedLineStep("-", "bass", 0)]),
+        support: Array.from({ length: 4 }, () => [generatedLineStep("-", "support", 0)])
+      }
+    });
+    const blankBeatBar = () => ({ lanes: editorBeatLaneNames.map(() => Array(16).fill("")), divisions: ["1/16", "1/16", "1/16", "1/16"] });
+    const blankLyricBar = () => ({ text: "" });
+    const barSelected = bar => bar >= selectedBarRange.start && bar <= selectedBarRange.end;
+
+    function chordTones(chord) {
+      const clean = (chord || "").trim();
+      if (!clean || clean === "-") return "—";
+      if (chordToneMap[clean]) return chordToneMap[clean];
+      const root = clean.match(/^[A-G](?:#|b)?/)?.[0];
+      return root ? `${root} · chord tones` : "—";
+    }
+
+    function selectEditorBar(bar, extend = false) {
+      const bounded = Math.max(0, Math.min(bankLength() - 1, bar));
+      selectedEditorBar = bounded;
+      if (extend) {
+        selectedBarRange = { start: Math.min(rangeAnchorBar, bounded), end: Math.max(rangeAnchorBar, bounded) };
+      } else {
+        rangeAnchorBar = bounded;
+        selectedBarRange = { start: bounded, end: bounded };
+      }
+    }
+
+    function rebuildAuthoringViews() {
+      document.querySelectorAll("[data-bank-length]").forEach(label => label.textContent = `${bankLength()} bar${bankLength() === 1 ? "" : "s"}`);
+      buildChordEditor();
+      buildFullBeatGrid();
+      buildLyricsPreview();
+    }
+
+    function renderBarOverview(target, mode) {
+      target.innerHTML = "";
+      target.className = "bar-overview";
+      for (let bar = 0; bar < bankLength(); ++bar) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `overview-bar${barSelected(bar) ? " selected" : ""}${songBar - 1 === bar ? " live" : ""}`;
+        button.dataset.overviewBar = bar;
+        button.innerHTML = `<span class="overview-number">BAR ${bar + 1}</span>`;
+        if (mode === "chord") {
+          const values = activeBank().chords[bar].beats.filter(Boolean);
+          const summary = document.createElement("span");
+          summary.className = `overview-summary${values.length ? "" : " overview-empty"}`;
+          summary.textContent = values.join(" · ") || "Empty";
+          button.appendChild(summary);
+        } else {
+          const mini = document.createElement("span");
+          mini.className = "overview-beat-mini";
+          const beat = activeBank().beats[bar];
+          for (let index = 0; index < 16; ++index) {
+            const dot = document.createElement("i");
+            dot.classList.toggle("on", [2, 3, 4].some(lane => beat.lanes[lane][index]));
+            mini.appendChild(dot);
+          }
+          button.appendChild(mini);
+        }
+        button.addEventListener("click", event => {
+          selectEditorBar(bar, mode === "beat" && event.shiftKey);
+          if (mode === "chord") selectedLineContext = null;
+          rebuildAuthoringViews();
+        });
+        target.appendChild(button);
+      }
+    }
+
+    function resolvedChordAt(bar, beat) {
+      for (let absolute = bar * 4 + beat; absolute >= 0; --absolute) {
+        const value = activeBank().chords[Math.floor(absolute / 4)].beats[absolute % 4].trim();
+        if (value && value !== "-") return value;
+        if (value === "-") return "—";
+      }
+      return "—";
+    }
+
+    function buildChordInspector(target) {
+      if (!target) return;
+      target.innerHTML = "";
+      if (selectedLineContext) {
+        const { lane, bar, beat, step } = selectedLineContext;
+        const lineStep = activeBank().chords[bar]?.lines[lane]?.[beat]?.[step];
+        if (lineStep) {
+          const heading = document.createElement("h3");
+          heading.textContent = lineStep.value === "~" ? "Hold" : lineStep.value === "-" ? "Rest" : lineStep.value || "Empty";
+          const context = document.createElement("div");
+          context.className = "generated-context";
+          context.innerHTML = `<div class="context-kind">${lane} · bar ${bar + 1}.${beat + 1} · step ${step + 1}</div><div class="context-detail"><strong>${lineStep.role}</strong><br>${lineStep.relationship}<br><br>Generated baseline: ${lineStep.generatedValue || "—"}</div>`;
+          target.append(heading, context);
+          if (lineStep.edited) {
+            const badge = document.createElement("span");
+            badge.className = "edited-badge";
+            badge.textContent = "Manually edited";
+            context.appendChild(badge);
+          }
+          const note = document.createElement("div");
+          note.className = "voicing-label";
+          note.textContent = "Editing changes the musical pattern used by playback and reference WAVs.";
+          target.appendChild(note);
+          return;
+        }
+      }
+      const chord = resolvedChordAt(selectedEditorBar, selectedChordBeat);
+      const heading = document.createElement("h3");
+      heading.textContent = chord;
+      const tones = document.createElement("div");
+      tones.className = "chord-tone-copy";
+      tones.textContent = `Notes · ${chordTones(chord)}`;
+      const tabs = document.createElement("div");
+      tabs.className = "instrument-tabs";
+      ["piano", "guitar"].forEach(instrument => {
+        const button = document.createElement("button");
+        button.textContent = instrument;
+        button.classList.toggle("active", selectedInstrument === instrument);
+        button.addEventListener("click", () => { selectedInstrument = instrument; buildChordEditor(); });
+        tabs.appendChild(button);
+      });
+      target.append(heading, tones, tabs);
+      if (selectedInstrument === "piano") {
+        const names = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
+        const activeNames = chordTones(chord).split(/\s+/);
+        const keys = document.createElement("div");
+        keys.className = "piano-keys";
+        names.forEach(name => {
+          const key = document.createElement("span");
+          key.className = `piano-key${name.includes("#") || name.includes("b") ? " black" : ""}${activeNames.includes(name) ? " on" : ""}`;
+          key.textContent = name;
+          keys.appendChild(key);
+        });
+        target.appendChild(keys);
+      } else {
+        const shape = guitarShapes[chord] || ["·", "·", "·", "·", "·", "·"];
+        const guitar = document.createElement("div");
+        guitar.className = "guitar-shape";
+        shape.forEach((fret, index) => {
+          const string = document.createElement("span");
+          string.className = "guitar-string";
+          string.textContent = fret;
+          string.title = `String ${6 - index}`;
+          guitar.appendChild(string);
+        });
+        target.appendChild(guitar);
+      }
+      const note = document.createElement("div");
+      note.className = "voicing-label";
+      note.textContent = selectedInstrument === "piano" ? "Chord tones across one octave" : "One common guitar shape · x means muted";
+      target.appendChild(note);
+    }
+
+    let chordMenuTarget = null;
+    let chordMenuRoot = "C";
+    function ensureChordPicker() {
+      let picker = document.getElementById("chordPicker");
+      if (picker) return picker;
+      picker = document.createElement("div");
+      picker.id = "chordPicker";
+      picker.className = "chord-picker";
+      picker.innerHTML = `<div class="chord-picker-title">Root</div><div class="chord-picker-grid" data-picker-roots></div><div class="chord-picker-title">Quality</div><div class="chord-picker-grid quality" data-picker-quality></div><div class="chord-picker-actions"><button data-picker-value="">Hold previous</button><button data-picker-value="-">Rest</button><button data-picker-value="C/E">C/E</button><button data-picker-value="G/B">G/B</button></div>`;
+      ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"].forEach(root => {
+        const button = document.createElement("button");
+        button.textContent = root;
+        button.addEventListener("click", () => {
+          chordMenuRoot = root;
+          picker.querySelectorAll("[data-picker-roots] button").forEach(candidate => candidate.classList.toggle("active", candidate === button));
+        });
+        picker.querySelector("[data-picker-roots]").appendChild(button);
+      });
+      [["Major", ""], ["Minor", "m"], ["5", "5"], ["7", "7"], ["maj7", "maj7"], ["m7", "m7"], ["sus2", "sus2"], ["sus4", "sus4"], ["dim", "dim"], ["aug", "aug"], ["add9", "add9"], ["9", "9"]].forEach(([label, suffix]) => {
+        const button = document.createElement("button");
+        button.textContent = label;
+        button.addEventListener("click", () => setPickedChord(chordMenuRoot + suffix));
+        picker.querySelector("[data-picker-quality]").appendChild(button);
+      });
+      picker.querySelectorAll("[data-picker-value]").forEach(button => button.addEventListener("click", () => setPickedChord(button.dataset.pickerValue)));
+      document.body.appendChild(picker);
+      return picker;
+    }
+
+    function setPickedChord(value) {
+      if (!chordMenuTarget) return;
+      activeBank().chords[chordMenuTarget.bar].beats[chordMenuTarget.beat] = value;
+      selectEditorBar(chordMenuTarget.bar);
+      selectedChordBeat = chordMenuTarget.beat;
+      selectedLineContext = null;
+      ensureChordPicker().classList.remove("open");
+      buildChordEditor();
+      updateSongPosition();
+    }
+
+    function openChordPicker(event, bar, beat) {
+      event.preventDefault();
+      chordMenuTarget = { bar, beat };
+      const picker = ensureChordPicker();
+      picker.classList.add("open");
+      picker.style.left = `${Math.max(6, Math.min(event.clientX, window.innerWidth - 330))}px`;
+      picker.style.top = `${Math.max(6, Math.min(event.clientY, window.innerHeight - 300))}px`;
+    }
+
+    function cycleMusicalDivision(bar, beat) {
+      const choices = [1, 2, 3, 4, 6];
+      const chordBar = activeBank().chords[bar];
+      const next = choices[(choices.indexOf(chordBar.divisions[beat]) + 1) % choices.length];
+      ["melody", "bass", "support"].forEach(lane => {
+        const previous = chordBar.lines[lane][beat];
+        chordBar.lines[lane][beat] = Array.from({ length: next }, (_, step) =>
+          previous[step] ? cloneValue(previous[step]) : generatedLineStep("-", lane, bar * 16 + beat * 4 + step));
+      });
+      chordBar.divisions[beat] = next;
+      selectedLineContext = null;
+      buildChordEditor();
+    }
+
+    function buildChordEditor() {
+      const target = document.getElementById("chordDetail");
+      target.innerHTML = "";
+      const overview = document.createElement("div");
+      renderBarOverview(overview, "chord");
+      const workspace = document.createElement("div");
+      workspace.className = "chord-workspace";
+      const focus = document.createElement("section");
+      focus.className = "focus-editor";
+      const groupStart = Math.floor(selectedEditorBar / 4) * 4;
+      const groupEnd = Math.min(bankLength(), groupStart + 4);
+      focus.innerHTML = `<div class="focus-heading"><strong>Bars ${groupStart + 1}–${groupEnd}</strong><span>${activeBank().id} / ${activeBank().name}</span></div>`;
+      const bars = document.createElement("div");
+      bars.className = "focused-bars";
+      for (let bar = groupStart; bar < groupEnd; ++bar) {
+        const barElement = document.createElement("article");
+        barElement.className = `focused-bar${barSelected(bar) ? " selected" : ""}${songBar - 1 === bar ? " live" : ""}`;
+        barElement.innerHTML = `<div class="focused-bar-head"><span>Bar ${bar + 1}</span><span>${bar === selectedEditorBar ? "Selected" : "4/4"}</span></div>`;
+        const beats = document.createElement("div");
+        beats.className = "chord-beats";
+        activeBank().chords[bar].beats.forEach((value, beat) => {
+          const wrapper = document.createElement("div");
+          wrapper.className = `chord-beat${bar === selectedEditorBar && beat === selectedChordBeat ? " selected" : ""}${value === "-" ? " rest" : ""}`;
+          const label = document.createElement("label");
+          label.textContent = beat + 1;
+          const input = document.createElement("input");
+          input.className = "chord-input";
+          input.value = value;
+          input.placeholder = beat === 0 ? "Chord" : "hold";
+          input.dataset.chordBar = bar;
+          input.dataset.chordBeat = beat;
+          input.addEventListener("focus", () => { selectEditorBar(bar); selectedChordBeat = beat; selectedLineContext = null; buildChordInspector(document.querySelector(".learning-panel")); });
+          input.addEventListener("input", () => {
+            activeBank().chords[bar].beats[beat] = input.value.trim();
+            renderBarOverview(target.querySelector(".bar-overview"), "chord");
+            buildChordInspector(document.querySelector(".learning-panel"));
+          });
+          input.addEventListener("contextmenu", event => openChordPicker(event, bar, beat));
+          input.addEventListener("keydown", event => {
+            if (event.key !== "Enter" && event.key !== "Tab") return;
+            event.preventDefault();
+            const delta = event.shiftKey ? -1 : 1;
+            const nextAbsolute = Math.max(0, Math.min(bankLength() * 4 - 1, bar * 4 + beat + delta));
+            selectEditorBar(Math.floor(nextAbsolute / 4));
+            selectedChordBeat = nextAbsolute % 4;
+            buildChordEditor();
+            requestAnimationFrame(() => document.querySelector(`[data-chord-bar="${selectedEditorBar}"][data-chord-beat="${selectedChordBeat}"]`)?.focus());
+          });
+          const division = document.createElement("button");
+          division.type = "button";
+          division.className = "chord-division";
+          division.textContent = `${activeBank().chords[bar].divisions[beat]} step${activeBank().chords[bar].divisions[beat] === 1 ? "" : "s"}`;
+          division.title = "Chords, melody, bass and support share this beat division";
+          division.addEventListener("click", () => cycleMusicalDivision(bar, beat));
+          wrapper.append(label, input, division);
+          beats.appendChild(wrapper);
+        });
+        barElement.appendChild(beats);
+        bars.appendChild(barElement);
+      }
+      focus.appendChild(bars);
+      const tip = document.createElement("div");
+      tip.className = "manual-tip";
+      tip.textContent = "Type directly and press Enter to advance. Empty beats hold the previous chord; use – for a rest. Right-click any beat for the chord picker.";
+      focus.appendChild(tip);
+      const lines = document.createElement("div");
+      lines.className = `musical-lines${showMusicalLines ? " open" : ""}`;
+      const linesHead = document.createElement("div");
+      linesHead.className = "musical-lines-head";
+      linesHead.innerHTML = "<strong>Generated musical lines</strong><i></i><span>Onset note · ~ hold · - rest · click a beat's division to resize every pitched lane</span>";
+      lines.appendChild(linesHead);
+      [["Melody", "melody"], ["Bass", "bass"], ["Supporting line", "support"]].forEach(([label, key]) => {
+        const row = document.createElement("div");
+        row.className = "line-editor-row";
+        row.dataset.line = key;
+        const rowLabel = document.createElement("div");
+        rowLabel.className = "line-editor-label";
+        rowLabel.innerHTML = `${label}<small>generated</small>`;
+        const track = document.createElement("div");
+        track.className = "line-editor-track";
+        for (let bar = groupStart; bar < groupEnd; ++bar) {
+          const lineBar = document.createElement("div");
+          lineBar.className = "line-bar";
+          lineBar.innerHTML = `<div class="line-bar-head">BAR ${bar + 1}</div>`;
+          const lineBeats = document.createElement("div");
+          lineBeats.className = "line-bar-beats";
+          activeBank().chords[bar].lines[key].forEach((steps, beat) => {
+            const beatSteps = document.createElement("div");
+            beatSteps.className = "line-beat-steps";
+            beatSteps.style.gridTemplateColumns = `repeat(${steps.length}, minmax(0, 1fr))`;
+            steps.forEach((lineStep, stepIndex) => {
+              const input = document.createElement("input");
+              input.className = `line-step${lineStep.edited ? " edited" : ""}`;
+              input.value = lineStep.value;
+              input.placeholder = "-";
+              input.dataset.line = key;
+              input.dataset.lineBar = bar;
+              input.dataset.lineBeat = beat;
+              input.dataset.lineStep = stepIndex;
+              input.title = `${lineStep.role}: ${lineStep.relationship}`;
+              input.addEventListener("focus", () => {
+                selectEditorBar(bar);
+                selectedChordBeat = beat;
+                selectedLineContext = { lane: key, bar, beat, step: stepIndex };
+                buildChordInspector(document.querySelector(".learning-panel"));
+              });
+              input.addEventListener("input", () => {
+                lineStep.value = input.value.trim();
+                lineStep.edited = lineStep.value !== lineStep.generatedValue;
+                input.classList.toggle("edited", lineStep.edited);
+                buildChordInspector(document.querySelector(".learning-panel"));
+              });
+              input.addEventListener("keydown", event => {
+                if (event.key !== "Enter" && event.key !== "Tab") return;
+                event.preventDefault();
+                const candidates = [...document.querySelectorAll(`.line-step[data-line="${key}"]`)];
+                const current = candidates.indexOf(input);
+                candidates[Math.max(0, Math.min(candidates.length - 1, current + (event.shiftKey ? -1 : 1)))]?.focus();
+              });
+              beatSteps.appendChild(input);
+            });
+            lineBeats.appendChild(beatSteps);
+          });
+          lineBar.appendChild(lineBeats);
+          track.appendChild(lineBar);
+        }
+        row.append(rowLabel, track);
+        lines.appendChild(row);
+      });
+      focus.appendChild(lines);
+      const inspector = document.createElement("aside");
+      inspector.className = "learning-panel";
+      workspace.append(focus, inspector);
+      target.append(overview, workspace);
+      buildChordInspector(inspector);
+      updateChordMarker();
+    }
+
+    let beatPaintState = null;
+    function setBeatCell(cell, bar, lane, index, state) {
+      activeBank().beats[bar].lanes[lane][index] = state;
+      cell.classList.toggle("hit", state === "x");
+      cell.classList.toggle("accent", state === "a");
+      cell.classList.toggle("ghost", state === "g");
+    }
+
+    function buildFullBeatGrid() {
+      const target = document.getElementById("fullBeatGrid");
+      target.innerHTML = "";
+      const overview = document.createElement("div");
+      renderBarOverview(overview, "beat");
+      const panel = document.createElement("section");
+      panel.className = "sequencer-panel";
+      panel.innerHTML = `<div class="focus-heading"><strong>Bar ${selectedEditorBar + 1}</strong><span>${activeBank().id} / ${activeBank().name} · drag to paint · Shift accent · Alt ghost · right-click cycles</span></div>`;
+      const beatBar = activeBank().beats[selectedEditorBar];
+      const divisions = document.createElement("div");
+      divisions.className = "division-row";
+      const divisionLabel = document.createElement("span");
+      divisionLabel.textContent = "Division";
+      divisions.appendChild(divisionLabel);
+      beatBar.divisions.forEach((value, beat) => {
+        const button = document.createElement("button");
+        button.textContent = `Beat ${beat + 1} · ${value}`;
+        button.addEventListener("click", () => {
+          const choices = ["1/8", "Triplet", "1/16", "1/32"];
+          beatBar.divisions[beat] = choices[(choices.indexOf(beatBar.divisions[beat]) + 1) % choices.length];
+          buildFullBeatGrid();
+        });
+        divisions.appendChild(button);
+      });
+      panel.appendChild(divisions);
+      const grid = document.createElement("div");
+      grid.className = "sequencer-grid";
+      const blank = document.createElement("div");
+      blank.className = "sequence-label";
+      blank.textContent = "Instrument";
+      grid.appendChild(blank);
+      for (let index = 0; index < 16; ++index) {
+        const count = document.createElement("div");
+        count.className = `sequence-count${index % 4 === 0 ? " beat" : ""}`;
+        count.textContent = ["1", "e", "&", "a"][index % 4];
+        grid.appendChild(count);
+      }
+      editorBeatLaneNames.forEach((name, lane) => {
+        const label = document.createElement("div");
+        label.className = "sequence-label";
+        label.textContent = name;
+        grid.appendChild(label);
+        for (let index = 0; index < 16; ++index) {
+          const initialState = beatBar.lanes[lane][index];
+          const cell = document.createElement("div");
+          cell.className = `sequence-step${index % 4 === 0 ? " beat" : ""}${initialState === "x" ? " hit" : initialState === "a" ? " accent" : initialState === "g" ? " ghost" : ""}`;
+          cell.dataset.mockBeatStep = index;
+          cell.addEventListener("mousedown", event => {
+            if (event.button !== 0) return;
+            event.preventDefault();
+            const current = activeBank().beats[selectedEditorBar].lanes[lane][index];
+            beatPaintState = event.shiftKey ? "a" : event.altKey ? "g" : current ? "" : "x";
+            setBeatCell(cell, selectedEditorBar, lane, index, beatPaintState);
+          });
+          cell.addEventListener("mouseenter", event => {
+            if (event.buttons === 1 && beatPaintState !== null) setBeatCell(cell, selectedEditorBar, lane, index, beatPaintState);
+          });
+          cell.addEventListener("contextmenu", event => {
+            event.preventDefault();
+            const current = activeBank().beats[selectedEditorBar].lanes[lane][index];
+            const states = ["", "x", "a", "g"];
+            setBeatCell(cell, selectedEditorBar, lane, index, states[(states.indexOf(current) + 1) % states.length]);
+          });
+          grid.appendChild(cell);
+        }
+      });
+      panel.appendChild(grid);
+      target.append(overview, panel);
+      updateChordMarker();
+    }
+
+    function sizeLyricTextArea(textarea) {
+      textarea.style.height = "auto";
+      textarea.style.height = `${Math.max(52, textarea.scrollHeight)}px`;
+    }
+
+    function buildLyricsPreview() {
+      const target = document.getElementById("lyricsDetail");
+      target.innerHTML = "";
+      activeBank().lyrics.forEach((cue, bar) => {
+        const row = document.createElement("div");
+        row.className = `lyric-cue-row${bar === selectedEditorBar ? " selected" : ""}${songBar - 1 === bar ? " live" : ""}`;
+        row.dataset.lyricBar = bar;
+        const number = document.createElement("div");
+        number.className = "lyric-bar-number";
+        number.textContent = `BAR ${bar + 1}`;
+        const textarea = document.createElement("textarea");
+        textarea.className = "lyric-text";
+        textarea.value = cue.text;
+        textarea.placeholder = "Write a lyric cue for this bar…";
+        textarea.addEventListener("focus", () => {
+          selectEditorBar(bar);
+          document.querySelectorAll(".lyric-cue-row").forEach(candidate => candidate.classList.toggle("selected", Number(candidate.dataset.lyricBar) === bar));
+        });
+        textarea.addEventListener("input", () => { cue.text = textarea.value; sizeLyricTextArea(textarea); updateSongPosition(); });
+        textarea.addEventListener("keydown", event => {
+          if (event.key !== "Enter" || event.shiftKey) return;
+          event.preventDefault();
+          const next = Math.min(bankLength() - 1, bar + 1);
+          selectEditorBar(next);
+          document.querySelector(`[data-lyric-bar="${next}"] .lyric-text`)?.focus();
+        });
+        textarea.addEventListener("paste", event => {
+          const pasted = event.clipboardData?.getData("text/plain") || "";
+          if (!/[\r\n]/.test(pasted)) return;
+          event.preventDefault();
+          const lines = pasted.replace(/\r/g, "").split("\n");
+          lines.slice(0, bankLength() - bar).forEach((line, offset) => activeBank().lyrics[bar + offset].text = line);
+          selectEditorBar(Math.min(bankLength() - 1, bar + lines.length - 1));
+          buildLyricsPreview();
+          updateSongPosition();
+        });
+        const clear = document.createElement("button");
+        clear.className = "lyric-clear";
+        clear.textContent = "×";
+        clear.title = `Clear bar ${bar + 1}`;
+        clear.addEventListener("click", () => { cue.text = ""; textarea.value = ""; sizeLyricTextArea(textarea); updateSongPosition(); });
+        row.append(number, textarea, clear);
+        target.appendChild(row);
+        requestAnimationFrame(() => sizeLyricTextArea(textarea));
+      });
+      updateChordMarker();
+    }
+
+    function updateChordMarker() {
+      const beat = Math.floor(step / 4) + 1;
+      document.querySelectorAll("[data-overview-bar]").forEach(element => element.classList.toggle("live", Number(element.dataset.overviewBar) === songBar - 1));
+      document.querySelectorAll(".focused-bar").forEach((element, index) => {
+        const groupStart = Math.floor(selectedEditorBar / 4) * 4;
+        element.classList.toggle("live", groupStart + index === songBar - 1);
+      });
+      document.querySelectorAll("[data-lyric-bar]").forEach(element => element.classList.toggle("live", Number(element.dataset.lyricBar) === songBar - 1));
+      document.querySelectorAll("[data-mock-beat-step]").forEach(element => element.classList.toggle("playhead", selectedEditorBar === songBar - 1 && Number(element.dataset.mockBeatStep) === step));
+      const lyricsLayer = document.querySelector('[data-layer="lyrics"]');
+      if (songBar !== lastFollowedLyricBar && lyricsLayer?.classList.contains("active") && document.getElementById("followLyrics")?.checked) {
+        document.querySelector(`[data-lyric-bar="${songBar - 1}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+        lastFollowedLyricBar = songBar;
+      }
+      const positionLabel = document.querySelector(".detail-head .micro");
+      if (positionLabel) positionLabel.textContent = `Song position / bar ${songBar} · beat ${beat}`;
+    }
+
     function buildMetronomePattern() {
       const target = document.getElementById("metroPattern");
       target.innerHTML = "";
@@ -2553,27 +3373,18 @@ keep the rhythm moving on</textarea>
 
     function updateSongPosition() {
       const beat = Math.floor(step / 4) + 1;
-      const chordIndex = (songBar - 17) % chordSequence.length;
-      const sequence = Array.from({ length: 4 }, (_, index) => chordSequence[(chordIndex + index) % chordSequence.length]);
+      const currentChord = resolvedChordAt(songBar - 1, beat - 1);
+      const sequence = [currentChord];
+      for (let offset = 1; offset < 4; ++offset) sequence.push(resolvedChordAt((songBar - 1 + offset) % bankLength(), 0));
       document.getElementById("currentChord").textContent = sequence[0];
       document.getElementById("barPosition").textContent = songBar;
+      document.getElementById("barTotal").textContent = bankLength();
       document.getElementById("transportPosition").textContent = `${String(songBar).padStart(2, "0")}.${String(beat).padStart(2, "0")}.${String((step % 4) * 240).padStart(3, "0")}`;
       document.getElementById("currentBeatTitle").textContent = `Current beat · ${songBar}.${beat}`;
-      document.getElementById("nextBeatTitle").textContent = `Next beat · ${songBar >= 32 ? 17 : songBar + 1}.1`;
-      document.getElementById("chordLens").style.setProperty("--song-progress", `${((songBar - 17) * 16 + step + 1) / (16 * 16) * 100}%`);
+      document.getElementById("nextBeatTitle").textContent = `Next beat · ${songBar >= bankLength() ? 1 : songBar + 1}.1`;
+      document.getElementById("chordLens").style.setProperty("--song-progress", `${((songBar - 1) * 16 + step + 1) / (bankLength() * 16) * 100}%`);
       document.querySelectorAll("#beatDots i").forEach((dot, index) => dot.classList.toggle("active", index === beat - 1));
       document.querySelectorAll("[data-preview-step]").forEach(cell => cell.classList.toggle("playhead", Number(cell.dataset.previewStep) === step));
-      const activeFullStep = ((songBar - 17) % 2) * 16 + step;
-      document.querySelectorAll("[data-full-step]").forEach(cell => cell.classList.toggle("playhead", Number(cell.dataset.fullStep) === activeFullStep));
-      const activeBeatSection = Math.floor((songBar - 17) / 2) % Math.max(1, beatSectionCount);
-      document.querySelectorAll(".beat-position-marker").forEach((marker, index) => {
-        const active = index === activeBeatSection;
-        marker.classList.toggle("visible", active);
-        if (active) {
-          marker.style.setProperty("--marker", `${((activeFullStep + .5) / 32) * 100}%`);
-          marker.setAttribute("aria-label", `Bar ${songBar}, beat ${beat}`);
-        }
-      });
       document.getElementById("metroLamp").style.opacity = metronomeEnabled ? (step % 4 === 0 ? "1" : ".25") : ".08";
 
       const labels = ["Now", "Next", "Then", "Then"];
@@ -2582,17 +3393,14 @@ keep the rhythm moving on</textarea>
         cell.querySelector("strong").textContent = sequence[index];
         cell.querySelector(".arrival").textContent = `${songBar + index}.1`;
       });
-      const lyrics = sharedLyricLines();
+      const lyrics = activeBank().lyrics;
       const stageLyrics = document.getElementById("stageLyrics");
-      stageLyrics.hidden = lyrics.length === 0;
-      if (lyrics.length) {
-        const lyricIndex = Math.floor((songBar - 17) % lyrics.length);
-        document.getElementById("lyricPreview").textContent = lyrics[lyricIndex];
-        document.getElementById("nextLyricPreview").textContent = lyrics.length > 1 ? lyrics[(lyricIndex + 1) % lyrics.length] : "";
-      }
+      stageLyrics.hidden = !lyrics.some(cue => cue.text.trim());
+      document.getElementById("lyricPreview").textContent = lyrics[songBar - 1]?.text || "";
+      const nextLyric = Array.from({ length: bankLength() - 1 }, (_, offset) => lyrics[(songBar + offset) % bankLength()].text.trim()).find(Boolean) || "";
+      document.getElementById("nextLyricPreview").textContent = nextLyric;
       updateChordMarker();
-      const looperBar = (songBar - 17) % 8;
-      const looperProgress = (looperBar + step / 16) / 8;
+      const looperProgress = (songBar - 1 + step / 16) / bankLength();
       const trackMarker = document.getElementById("trackPositionMarker");
       if (trackMarker) {
         trackMarker.style.setProperty("--marker", `calc(220px + ${looperProgress * 100}% - ${looperProgress * 220}px)`);
@@ -2603,6 +3411,10 @@ keep the rhythm moving on</textarea>
 
     function openDetail(layer) {
       document.getElementById("detailPanel").classList.add("open");
+      if (layer === "chords" && selectedBarRange.start !== selectedBarRange.end) {
+        selectEditorBar(selectedEditorBar);
+        buildChordEditor();
+      }
       document.querySelectorAll(".detail-tab").forEach(button => button.classList.toggle("active", button.dataset.detail === layer));
       document.querySelectorAll(".detail-layer").forEach(view => view.classList.toggle("active", view.dataset.layer === layer));
     }
@@ -2662,83 +3474,179 @@ keep the rhythm moving on</textarea>
       button.addEventListener("click", () => button.classList.toggle("active"));
     });
 
-    document.querySelectorAll("[data-editor-action]").forEach(button => {
-      button.addEventListener("click", () => {
-        const action = button.dataset.editorAction;
-        const editorLayer = button.closest(".detail-layer")?.dataset.layer;
-        if (action === "add-section") {
-          if (editorLayer === "beats") {
-            beatSectionCount += 1;
-            buildFullBeatGrid();
-          } else {
-            const sourceLength = chordSections[selectedChordSection].chords.length;
-            chordSections.push({
-              label: String.fromCharCode(65 + chordSections.length),
-              name: "Section",
-              chords: Array(sourceLength).fill(""),
-              melody: Array(sourceLength).fill("")
-            });
-            selectedChordSection = chordSections.length - 1;
-            buildChordEditor();
-          }
-        } else if (action === "duplicate-section") {
-          if (editorLayer === "beats") {
-            beatSectionCount += 1;
-            buildFullBeatGrid();
-          } else {
-            const source = chordSections[selectedChordSection];
-            chordSections.splice(selectedChordSection + 1, 0, {
-              label: `${source.label} copy`,
-              name: source.name,
-              chords: [...source.chords],
-              melody: [...source.melody]
-            });
-            selectedChordSection += 1;
-            buildChordEditor();
-          }
-        } else if (action === "delete-section") {
-          if (editorLayer === "beats" && beatSectionCount > 1) {
-            beatSectionCount -= 1;
-            buildFullBeatGrid();
-          } else if (editorLayer !== "beats" && chordSections.length > 1) {
-            chordSections.splice(selectedChordSection, 1);
-            selectedChordSection = Math.min(selectedChordSection, chordSections.length - 1);
-            buildChordEditor();
-          }
-        } else if (action === "expand-grid" && editorLayer !== "beats") {
-          chordSections[selectedChordSection].chords.push("", "", "", "");
-          chordSections[selectedChordSection].melody.push("", "", "", "");
-          buildChordEditor();
-        } else if (action === "shrink-grid" && editorLayer !== "beats" && chordSections[selectedChordSection].chords.length > 4) {
-          chordSections[selectedChordSection].chords.splice(-4);
-          chordSections[selectedChordSection].melody.splice(-4);
-          buildChordEditor();
-        } else if (action === "generate-chords") {
-          const pool = ["F", "C/E", "Am", "G", "Dm7", "Bb", "C", "Em"];
-          const section = chordSections[selectedChordSection];
-          section.chords = section.chords.map((_, index) => pool[(index * 3 + Math.floor(Math.random() * pool.length)) % pool.length]);
-          section.melody = section.chords.map(chord => chordTones(chord).split(" ")[0] + "4");
-          buildChordEditor();
-        } else if (action === "generate-beats") {
-          beatRows.forEach((row, rowIndex) => {
-            row.hits = Array.from({ length: 16 }, (_, index) => index).filter(index => Math.random() < (.24 + rowIndex * .08));
-            row.nextHits = Array.from({ length: 16 }, (_, index) => index).filter(index => Math.random() < (.22 + rowIndex * .075));
-            row.ghosts = row.hits.filter(() => Math.random() < .2);
-            row.nextGhosts = row.nextHits.filter(() => Math.random() < .2);
-          });
-          buildBeatPreview();
-          buildFullBeatGrid();
-        } else if (action === "insert-section") {
-          document.getElementById("lyricsEditor").value += "\n\n[New section]\n";
-        } else if (action === "generate-lyrics") {
-          document.getElementById("lyricsEditor").value += "\nFollow the line into the morning\nleave a space before the change";
-        } else if (action === "clear-lyrics") {
-          document.getElementById("lyricsEditor").value = "";
-        }
-        if (["insert-section", "generate-lyrics", "clear-lyrics"].includes(action)) updateSongPosition();
-        button.classList.add("active");
-        window.setTimeout(() => button.classList.remove("active"), 420);
+    function flashEditorButton(button) {
+      button.classList.add("active");
+      window.setTimeout(() => button.classList.remove("active"), 320);
+    }
+
+    function selectedItems(kind) {
+      return activeBank()[kind].slice(selectedBarRange.start, selectedBarRange.end + 1).map(cloneValue);
+    }
+
+    function pasteItems(kind, items) {
+      if (!items.length) return;
+      while (bankLength() < selectedEditorBar + items.length) {
+        activeBank().chords.push(blankChordBar());
+        activeBank().beats.push(blankBeatBar());
+        activeBank().lyrics.push(blankLyricBar());
+      }
+      items.forEach((item, offset) => {
+        activeBank()[kind][selectedEditorBar + offset] = cloneValue(item);
       });
+      selectedBarRange = {
+        start: selectedEditorBar,
+        end: selectedEditorBar + items.length - 1
+      };
+      rangeAnchorBar = selectedBarRange.start;
+    }
+
+    function duplicateItems(kind) {
+      const items = selectedItems(kind);
+      const insertAt = selectedBarRange.end + 1;
+      const blankChords = items.map(() => blankChordBar());
+      const blankBeats = items.map(() => blankBeatBar());
+      const blankLyrics = items.map(() => blankLyricBar());
+      activeBank().chords.splice(insertAt, 0, ...(kind === "chords" ? items.map(cloneValue) : blankChords));
+      activeBank().beats.splice(insertAt, 0, ...(kind === "beats" ? items.map(cloneValue) : blankBeats));
+      activeBank().lyrics.splice(insertAt, 0, ...blankLyrics);
+      selectEditorBar(insertAt);
+      selectedBarRange.end = insertAt + items.length - 1;
+    }
+
+    function moveSelectedItems(kind, direction) {
+      const start = selectedBarRange.start;
+      const end = selectedBarRange.end;
+      if (direction < 0 && start === 0 || direction > 0 && end === bankLength() - 1) return;
+      const values = activeBank()[kind].splice(start, end - start + 1);
+      const insertAt = direction < 0 ? start - 1 : start + 1;
+      activeBank()[kind].splice(insertAt, 0, ...values);
+      selectedBarRange = { start: start + direction, end: end + direction };
+      selectedEditorBar = Math.max(selectedBarRange.start, Math.min(selectedBarRange.end, selectedEditorBar + direction));
+      rangeAnchorBar = selectedBarRange.start;
+    }
+
+    function clearSelectedBars(kind) {
+      for (let bar = selectedBarRange.start; bar <= selectedBarRange.end; ++bar) {
+        if (kind === "chords") activeBank().chords[bar] = blankChordBar();
+        else activeBank().beats[bar] = blankBeatBar();
+      }
+    }
+
+    function addBankBars(count) {
+      const insertAt = selectedEditorBar + 1;
+      activeBank().chords.splice(insertAt, 0, ...Array.from({ length: count }, blankChordBar));
+      activeBank().beats.splice(insertAt, 0, ...Array.from({ length: count }, blankBeatBar));
+      activeBank().lyrics.splice(insertAt, 0, ...Array.from({ length: count }, blankLyricBar));
+      selectEditorBar(insertAt);
+    }
+
+    function removeBankBar() {
+      if (bankLength() <= 1) return;
+      const bar = selectedEditorBar;
+      const chordBar = activeBank().chords[bar];
+      const lineHasContent = Object.values(chordBar.lines).some(line => line.some(beat => beat.some(lineStep => lineStep.value && lineStep.value !== "-")));
+      const chordHasContent = chordBar.beats.some(value => value.trim()) || lineHasContent;
+      const beatHasContent = activeBank().beats[bar].lanes.some(lane => lane.some(Boolean));
+      const lyricHasContent = activeBank().lyrics[bar].text.trim();
+      if ((chordHasContent || beatHasContent || lyricHasContent) && !window.confirm(`Remove bar ${bar + 1} and its chords, beat and lyric cue?`)) return;
+      activeBank().chords.splice(bar, 1);
+      activeBank().beats.splice(bar, 1);
+      activeBank().lyrics.splice(bar, 1);
+      selectEditorBar(Math.min(bar, bankLength() - 1));
+      songBar = Math.min(songBar, bankLength());
+    }
+
+    function installBarTools(prefix, kind) {
+      document.getElementById(`${prefix}CopyBars`).addEventListener("click", event => {
+        if (kind === "chords") chordBarClipboard = selectedItems(kind);
+        else beatBarClipboard = selectedItems(kind);
+        flashEditorButton(event.currentTarget);
+      });
+      document.getElementById(`${prefix}PasteBars`).addEventListener("click", event => {
+        pasteItems(kind, kind === "chords" ? chordBarClipboard : beatBarClipboard);
+        rebuildAuthoringViews();
+        flashEditorButton(event.currentTarget);
+      });
+      document.getElementById(`${prefix}DuplicateBars`).addEventListener("click", event => {
+        duplicateItems(kind);
+        rebuildAuthoringViews();
+        flashEditorButton(event.currentTarget);
+      });
+      document.getElementById(`${prefix}MoveLeft`).addEventListener("click", () => { moveSelectedItems(kind, -1); rebuildAuthoringViews(); });
+      document.getElementById(`${prefix}MoveRight`).addEventListener("click", () => { moveSelectedItems(kind, 1); rebuildAuthoringViews(); });
+      document.getElementById(`${prefix}ClearBar`).addEventListener("click", () => { clearSelectedBars(kind); rebuildAuthoringViews(); updateSongPosition(); });
+    }
+    installBarTools("chord", "chords");
+    installBarTools("beat", "beats");
+
+    document.querySelectorAll("[data-add-bars]").forEach(button => {
+      button.addEventListener("click", () => {
+        addBankBars(Number(button.dataset.addBars));
+        rebuildAuthoringViews();
+        buildBeatPreview();
+        updateSongPosition();
+      });
+    });
+    document.querySelectorAll("[data-remove-bar]").forEach(button => {
+      button.addEventListener("click", () => {
+        removeBankBar();
+        rebuildAuthoringViews();
+        buildBeatPreview();
+        updateSongPosition();
+      });
+    });
+
+    document.querySelectorAll("[data-mock-bank]").forEach(button => {
+      button.addEventListener("click", () => {
+        activeMockBank = Number(button.dataset.mockBank);
+        songBar = Math.min(songBar, bankLength());
+        selectEditorBar(selectedEditorBar);
+        document.querySelectorAll("[data-mock-bank]").forEach(candidate => candidate.classList.toggle("active", Number(candidate.dataset.mockBank) === activeMockBank));
+        rebuildAuthoringViews();
+        buildBeatPreview();
+        updateSongPosition();
+      });
+    });
+    document.getElementById("showMusicalLines").addEventListener("change", event => {
+      showMusicalLines = event.currentTarget.checked;
+      if (!showMusicalLines) selectedLineContext = null;
+      buildChordEditor();
+    });
+    document.getElementById("lyricMoveUp").addEventListener("click", () => {
+      if (selectedEditorBar <= 0) return;
+      [activeBank().lyrics[selectedEditorBar - 1], activeBank().lyrics[selectedEditorBar]] = [activeBank().lyrics[selectedEditorBar], activeBank().lyrics[selectedEditorBar - 1]];
+      selectEditorBar(selectedEditorBar - 1);
+      buildLyricsPreview();
+      updateSongPosition();
+    });
+    document.getElementById("lyricMoveDown").addEventListener("click", () => {
+      if (selectedEditorBar >= bankLength() - 1) return;
+      [activeBank().lyrics[selectedEditorBar + 1], activeBank().lyrics[selectedEditorBar]] = [activeBank().lyrics[selectedEditorBar], activeBank().lyrics[selectedEditorBar + 1]];
+      selectEditorBar(selectedEditorBar + 1);
+      buildLyricsPreview();
+      updateSongPosition();
+    });
+    document.getElementById("lyricClearBar").addEventListener("click", () => {
+      activeBank().lyrics[selectedEditorBar].text = "";
+      buildLyricsPreview();
+      updateSongPosition();
+    });
+    document.getElementById("lyricClearAll").addEventListener("click", () => {
+      if (!window.confirm(`Clear all lyrics in Bank ${activeBank().id}?`)) return;
+      activeBank().lyrics.forEach(cue => cue.text = "");
+      buildLyricsPreview();
+      updateSongPosition();
+    });
+    window.addEventListener("mouseup", () => {
+      if (beatPaintState === null) return;
+      beatPaintState = null;
+      const overview = document.querySelector("#fullBeatGrid .bar-overview");
+      if (overview) renderBarOverview(overview, "beat");
+      buildBeatPreview();
+    });
+    document.addEventListener("mousedown", event => {
+      const picker = document.getElementById("chordPicker");
+      if (picker?.classList.contains("open") && !picker.contains(event.target) && !event.target.closest(".chord-input")) picker.classList.remove("open");
     });
 
     let lastTempoTap = 0;
@@ -2760,7 +3668,6 @@ keep the rhythm moving on</textarea>
     document.getElementById("metroBpm").addEventListener("input", event => {
       document.getElementById("tempoReadout").textContent = event.currentTarget.value;
     });
-    document.getElementById("lyricsEditor").addEventListener("input", updateSongPosition);
     document.querySelectorAll("[data-bank]").forEach(button => {
       button.addEventListener("click", () => {
         document.querySelectorAll("[data-bank]").forEach(candidate => candidate.classList.toggle("active", candidate === button));
@@ -2784,7 +3691,7 @@ keep the rhythm moving on</textarea>
     document.getElementById("stopButton").addEventListener("click", () => {
       playing = false;
       step = 0;
-      songBar = 17;
+      songBar = 1;
       document.getElementById("playButton").textContent = "▶";
       updateSongPosition();
     });
@@ -2808,7 +3715,7 @@ keep the rhythm moving on</textarea>
       if (!playing) return;
       step = (step + 1) % 16;
       if (step === 0) {
-        songBar = songBar >= 32 ? 17 : songBar + 1;
+        songBar = songBar >= bankLength() ? 1 : songBar + 1;
         buildBeatPreview();
       }
       updateSongPosition();
@@ -2818,11 +3725,17 @@ keep the rhythm moving on</textarea>
     if (params.get("peers")) document.querySelector(`[data-peers="${params.get("peers")}"]`)?.click();
     if (params.get("activity")) document.querySelector(`[data-mode="${params.get("activity")}"]`)?.click();
     if (params.get("lyrics") === "none") {
-      document.getElementById("lyricsEditor").value = "";
+      activeBank().lyrics.forEach(cue => cue.text = "");
+      buildLyricsPreview();
       updateSongPosition();
     }
     if (params.get("sections") === "2") {
       document.querySelector('[data-layer="chords"] [data-editor-action="add-section"]')?.click();
+    }
+    if (params.get("lines") === "1") {
+      document.getElementById("showMusicalLines").checked = true;
+      showMusicalLines = true;
+      buildChordEditor();
     }
     if (["chords", "beats", "lyrics", "metronome", "looper"].includes(params.get("panel"))) openDetail(params.get("panel"));
     if (params.get("data") === "1") setDataDrawer(true);

@@ -303,12 +303,34 @@ const StyleDef& resolvedStyle(const QString& id, Rng& rng)
 const ProfileDefinition& resolvedProfile(const ChordIdeaRequest& request, Rng& rng)
 {
     if (const ProfileDefinition* selected = findProfile(request.profileId, true)) {
-        return *selected;
+        if (request.allowMeterOverride || request.meterId.isEmpty() ||
+            selected->meterIds.contains(request.meterId)) {
+            return *selected;
+        }
     }
     QVector<const ProfileDefinition*> candidates = profilesForStyle(request.styleId);
     if (candidates.isEmpty()) {
         const auto& normal = profileCatalog();
-        return normal.at(std::uniform_int_distribution<int>(0, normal.size() - 1)(rng));
+        for (const ProfileDefinition& profile : normal) candidates.push_back(&profile);
+    }
+    if (!request.allowMeterOverride && !request.meterId.isEmpty()) {
+        QVector<const ProfileDefinition*> compatible;
+        for (const ProfileDefinition* profile : candidates) {
+            if (profile->meterIds.contains(request.meterId)) compatible.push_back(profile);
+        }
+        candidates = compatible;
+    }
+    if (candidates.isEmpty()) {
+        const auto& normal = profileCatalog();
+        for (const ProfileDefinition& profile : normal) {
+            if (request.meterId.isEmpty() || profile.meterIds.contains(request.meterId)) {
+                candidates.push_back(&profile);
+            }
+        }
+    }
+    if (candidates.isEmpty()) {
+        const auto& normal = profileCatalog();
+        for (const ProfileDefinition& profile : normal) candidates.push_back(&profile);
     }
     return *candidates.at(std::uniform_int_distribution<int>(0, candidates.size() - 1)(rng));
 }
@@ -324,7 +346,12 @@ NativeFormDefinition resolvedForm(
     Rng& rng)
 {
     if (const NativeFormDefinition* selected = findNativeForm(profile, request.formId)) {
-        return *selected;
+        NativeFormDefinition result = *selected;
+        if (!request.meterId.isEmpty() &&
+            (request.allowMeterOverride || profile.meterIds.contains(request.meterId))) {
+            result.meterId = request.meterId;
+        }
+        return result;
     }
     if (request.bars >= 4 && request.bars <= 64) {
         for (const NativeFormDefinition& value : profile.forms) {
@@ -344,7 +371,23 @@ NativeFormDefinition resolvedForm(
             "A requested section length using the nearest profile-native phrase relationship.");
         return custom;
     }
-    return profile.forms.at(std::uniform_int_distribution<int>(0, profile.forms.size() - 1)(rng));
+    QVector<const NativeFormDefinition*> compatible;
+    for (const NativeFormDefinition& value : profile.forms) {
+        if (request.meterId.isEmpty() || value.meterId == request.meterId) {
+            compatible.push_back(&value);
+        }
+    }
+    if (!compatible.isEmpty()) {
+        return *compatible.at(
+            std::uniform_int_distribution<int>(0, compatible.size() - 1)(rng));
+    }
+    NativeFormDefinition result = profile.forms.at(
+        std::uniform_int_distribution<int>(0, profile.forms.size() - 1)(rng));
+    if (!request.meterId.isEmpty() &&
+        (request.allowMeterOverride || profile.meterIds.contains(request.meterId))) {
+        result.meterId = request.meterId;
+    }
+    return result;
 }
 
 const MeterDefinition& resolvedMeter(
@@ -353,8 +396,13 @@ const MeterDefinition& resolvedMeter(
     const NativeFormDefinition& form)
 {
     QString id = request.meterId;
-    if (id.isEmpty() || !profile.meterIds.contains(id)) id = form.meterId;
-    if (!profile.meterIds.contains(id)) id = profile.meterIds.value(0, QStringLiteral("4-4"));
+    if (id.isEmpty() ||
+        (!request.allowMeterOverride && !profile.meterIds.contains(id))) {
+        id = form.meterId;
+    }
+    if (!request.allowMeterOverride && !profile.meterIds.contains(id)) {
+        id = profile.meterIds.value(0, QStringLiteral("4-4"));
+    }
     if (const MeterDefinition* meter = findMeter(id)) return *meter;
     return *findMeter(QStringLiteral("4-4"));
 }
@@ -667,6 +715,7 @@ ModeDef resolvedMode(
     const ProfileDefinition& profile,
     const ProgressionDef& progression,
     const QString& requestedModeId,
+    bool allowModeOverride,
     Rng& rng)
 {
     const ModeDef major{QStringLiteral("Major"), {0, 2, 4, 5, 7, 9, 11}, false};
@@ -678,7 +727,7 @@ ModeDef resolvedMode(
     const ModeDef majorPentatonic{
         QStringLiteral("Major Pentatonic"), {0, 2, 4, 7, 9}, false};
     if (!requestedModeId.isEmpty() &&
-        profile.tonalCollections.contains(requestedModeId)) {
+        (allowModeOverride || profile.tonalCollections.contains(requestedModeId))) {
         if (requestedModeId == QStringLiteral("ionian")) return major;
         if (requestedModeId == QStringLiteral("dorian")) return dorian;
         if (requestedModeId == QStringLiteral("mixolydian")) return mixolydian;
@@ -686,6 +735,8 @@ ModeDef resolvedMode(
         if (requestedModeId == QStringLiteral("phrygian")) return phrygian;
         if (requestedModeId == QStringLiteral("dominant-blues"))
             return {QStringLiteral("Dominant Blues"), {0, 3, 4, 5, 6, 7, 10}, false};
+        if (requestedModeId == QStringLiteral("blues"))
+            return {QStringLiteral("Blues"), {0, 3, 4, 5, 7, 9, 10}, false};
         if (requestedModeId == QStringLiteral("minor-blues"))
             return {
                 QStringLiteral("Minor Blues"),
@@ -1135,7 +1186,8 @@ QVector<PlannedEvent> basePlan(
     const ProfileDefinition& profile,
     const ModeDef& mode,
     int key,
-    bool flats)
+    bool flats,
+    bool forceEventPacing = false)
 {
     QVector<PlannedEvent> events;
     for (int sectionIndex = 0;
@@ -1398,7 +1450,7 @@ QVector<PlannedEvent> basePlan(
                     localBar % vocabulary.size());
             }
             if (profile.id == QStringLiteral("jazz_bebop") &&
-                progression.romans.size() < bars &&
+                (progression.romans.size() < bars || forceEventPacing) &&
                 beatsPerBar >= 4) {
                 const int half = beatsPerBar / 2;
                 const int sectionRotation =
@@ -11537,7 +11589,65 @@ void populateSoundAndTiming(
     }
 }
 
-GeneratedPracticeIdea coupledIdea(ChordIdeaRequest request, std::uint32_t seed)
+bool chordFitsMode(
+    const QString& symbol,
+    int key,
+    const ModeDef& mode)
+{
+    const ParsedChord chord = parseChord(symbol);
+    if (!chord.valid || chord.rest) return chord.rest;
+    for (int pitch : chordPitchClasses(chord)) {
+        const int relative = pitchClass(pitch - key);
+        if (std::find(mode.intervals.cbegin(), mode.intervals.cend(), relative) ==
+            mode.intervals.cend()) {
+            return false;
+        }
+    }
+    return chord.bass < 0 ||
+        std::find(
+            mode.intervals.cbegin(),
+            mode.intervals.cend(),
+            pitchClass(chord.bass - key)) != mode.intervals.cend();
+}
+
+bool sectionFitsMode(
+    const SongSection& section,
+    int key,
+    const ModeDef& mode)
+{
+    for (const QString& symbol : section.chords) {
+        if (symbol.trimmed().isEmpty() || symbol == QStringLiteral("-")) continue;
+        if (!chordFitsMode(symbol, key, mode)) return false;
+    }
+    return true;
+}
+
+void enforceModeHarmony(
+    QVector<PlannedEvent>& events,
+    const QVector<PlannedEvent>& baseEvents,
+    int key,
+    const ModeDef& mode)
+{
+    for (PlannedEvent& event : events) {
+        if (chordFitsMode(event.chord, key, mode)) continue;
+        const PlannedEvent* replacement = nullptr;
+        for (const PlannedEvent& base : baseEvents) {
+            if (base.beat > event.beat) break;
+            replacement = &base;
+        }
+        if (replacement != nullptr) {
+            event.roman = replacement->roman;
+            event.chord = replacement->chord;
+        }
+    }
+}
+
+GeneratedPracticeIdea coupledIdea(
+    ChordIdeaRequest request,
+    std::uint32_t seed,
+    const ProgressionDef* progressionOverride = nullptr,
+    const ModeDef* strictHarmonyMode = nullptr,
+    bool strictProgressionByEvent = false)
 {
     Rng rng(seed);
     const ProfileDefinition& profile = resolvedProfile(request, rng);
@@ -11548,14 +11658,15 @@ GeneratedPracticeIdea coupledIdea(ChordIdeaRequest request, std::uint32_t seed)
     const int complexity = std::clamp(
         qMax(request.harmonicComplexity, request.rhythmicComplexity),
         1, 8);
-    const ProgressionDef& progressionDef =
-        chooseProgression(
+    const ProgressionDef& progressionDef = progressionOverride != nullptr
+        ? *progressionOverride
+        : chooseProgression(
             style, profile, form, complexity, request.modeId, rng);
     const int key = request.key >= 0 && request.key < 12 ? request.key : std::uniform_int_distribution<int>(0, 11)(rng);
     const int bars = form.bars;
     const int beatsPerBar = meter.numerator;
     const ModeDef mode = resolvedMode(
-        profile, progressionDef, request.modeId, rng);
+        profile, progressionDef, request.modeId, request.allowModeOverride, rng);
     const bool flats = preferFlats(key, mode);
 
     GenerationRecipe recipe;
@@ -11613,12 +11724,26 @@ GeneratedPracticeIdea coupledIdea(ChordIdeaRequest request, std::uint32_t seed)
     recipe.teachingSummary = profile.teachingSummary;
     recipe.jamGuidance = profile.jamGuidance;
 
-    QVector<PlannedEvent> events = basePlan(
+    QVector<PlannedEvent> baseEvents = basePlan(
         progressionDef, bars, beatsPerBar, recipe.formSections,
-        profile, mode, key, flats);
+        profile, mode, key, flats, strictProgressionByEvent);
+    if (strictHarmonyMode != nullptr && !progressionDef.romans.isEmpty()) {
+        for (int eventIndex = 0; eventIndex < baseEvents.size(); ++eventIndex) {
+            PlannedEvent& event = baseEvents[eventIndex];
+            const int progressionIndex = strictProgressionByEvent
+                ? eventIndex % progressionDef.romans.size()
+                : (event.beat / qMax(1, beatsPerBar)) % progressionDef.romans.size();
+            event.roman = progressionDef.romans.at(progressionIndex);
+            event.chord = realizeRoman(event.roman, key, flats);
+        }
+    }
+    QVector<PlannedEvent> events = baseEvents;
     for (const PlannedEvent& event : events)
         recipe.baseHarmony.push_back({event.beat, event.duration, event.roman, event.chord});
     addTheory(events, recipe, profile, key, mode, flats, rng);
+    if (strictHarmonyMode != nullptr) {
+        enforceModeHarmony(events, baseEvents, key, *strictHarmonyMode);
+    }
 
     SongSection chord;
     chord.label = QStringLiteral("Generated");
@@ -11677,26 +11802,36 @@ GeneratedPracticeIdea coupledIdea(ChordIdeaRequest request, std::uint32_t seed)
         low = qBound(20, profile.minimumBpm, 400);
         high = qBound(low, profile.maximumBpm, 400);
     }
-    // Tempo is part of the core identity of a seeded idea. Keep its random
-    // stream independent from complexity-dependent harmony, melody, and role
-    // decisions so raising complexity develops the same pulse rather than
-    // silently rerolling it.
-    Rng tempoRng(performanceHash(seed, 0, 0, 0xcbbb9d5dU));
-    const int drawA =
-        std::uniform_int_distribution<int>(low, high)(tempoRng);
-    const int drawB =
-        std::uniform_int_distribution<int>(low, high)(tempoRng);
-    const int weighted = (drawA + drawB) / 2;
-    recipe.bpm = qBound(low, ((weighted + 1) / 2) * 2, high);
-    recipe.variationDecisions << QStringLiteral(
-        "%1 BPM was weighted toward the centre of the groove-compatible "
-        "%2-%3 %4-pulse range inside the researched bounds for %5; no meter "
-        "conversion or variation offset was applied.")
-        .arg(recipe.bpm)
-        .arg(low)
-        .arg(high)
-        .arg(recipe.tempoPulseName)
-        .arg(profile.name);
+    if (request.bpm > 0) {
+        recipe.bpm = qBound(20, request.bpm, 400);
+        recipe.variationDecisions << QStringLiteral(
+            "%1 BPM was explicitly requested, overriding the native %2-%3 BPM range for %4.")
+            .arg(recipe.bpm)
+            .arg(profile.minimumBpm)
+            .arg(profile.maximumBpm)
+            .arg(profile.name);
+    } else {
+        // Tempo is part of the core identity of a seeded idea. Keep its random
+        // stream independent from complexity-dependent harmony, melody, and role
+        // decisions so raising complexity develops the same pulse rather than
+        // silently rerolling it.
+        Rng tempoRng(performanceHash(seed, 0, 0, 0xcbbb9d5dU));
+        const int drawA =
+            std::uniform_int_distribution<int>(low, high)(tempoRng);
+        const int drawB =
+            std::uniform_int_distribution<int>(low, high)(tempoRng);
+        const int weighted = (drawA + drawB) / 2;
+        recipe.bpm = qBound(low, ((weighted + 1) / 2) * 2, high);
+        recipe.variationDecisions << QStringLiteral(
+            "%1 BPM was weighted toward the centre of the groove-compatible "
+            "%2-%3 %4-pulse range inside the researched bounds for %5; no meter "
+            "conversion or variation offset was applied.")
+            .arg(recipe.bpm)
+            .arg(low)
+            .arg(high)
+            .arg(recipe.tempoPulseName)
+            .arg(profile.name);
+    }
     recipe.variationDecisions << QStringLiteral(
         "The seed selected only profile-compatible density, register, articulation, brightness, space, and timing axes.");
     populateSoundAndTiming(recipe, profile, variation);
@@ -11734,6 +11869,1957 @@ GeneratedPracticeIdea coupledIdea(ChordIdeaRequest request, std::uint32_t seed)
             ++groupIndex;
         }
     }
+    return result;
+}
+
+struct TimedPitch {
+    int tick = 0;
+    int midi = 60;
+    int velocity = 88;
+};
+
+struct ContinuationSignature {
+    QSet<int> chordRoots;
+    QSet<QString> chordSymbols;
+    QVector<int> chordOrder;
+    QSet<int> drumOnsets;
+    QSet<int> melodyOnsets;
+    QVector<int> melodyMidi;
+    QVector<int> bassMidi;
+    QVector<TimedPitch> melodyPhrase;
+    QVector<TimedPitch> bassPhrase;
+    int chordEventCount = 0;
+    int extendedChordCount = 0;
+    int powerChordCount = 0;
+    int kickEvents = 0;
+    int kickQuarterAnchors = 0;
+    int snareEvents = 0;
+    int snareBackbeatAnchors = 0;
+    int snareHalfTimeAnchors = 0;
+    int hatEvents = 0;
+    int bassEvents = 0;
+    int supportEvents = 0;
+};
+
+struct InferredContinuationSource {
+    int tonic = 0;
+    QString tonicName = QStringLiteral("C");
+    QString modeId = QStringLiteral("ionian");
+    QString modeName = QStringLiteral("Major");
+    double tonalConfidence = 0.0;
+    QString profileId = QStringLiteral("pop_loop");
+    QString profileEvidence;
+    double profileConfidence = 0.0;
+    QStringList alternativeProfiles;
+    int complexity = 2;
+};
+
+QString writtenChordAtBeat(const SongSection& section, int beat)
+{
+    QString active;
+    const int limit = qMin(beat, section.beats - 1);
+    for (int index = 0; index <= limit; ++index) {
+        QString value = section.chords.value(index).trimmed();
+        if (value.isEmpty() && index < section.musicalPatterns.size()) {
+            const MusicalBeatPattern& pattern = section.musicalPatterns.at(index);
+            for (const MusicalStep& step : pattern.chords) {
+                if (step.state == MusicalStepState::Onset && !step.value.trimmed().isEmpty()) {
+                    value = step.value.trimmed();
+                    break;
+                }
+            }
+        }
+        if (value == QStringLiteral("-")) active.clear();
+        else if (!value.isEmpty()) active = value;
+    }
+    return active;
+}
+
+ContinuationSignature continuationSignature(
+    const SongSection& section,
+    int beatsPerBar)
+{
+    ContinuationSignature result;
+    beatsPerBar = qMax(1, beatsPerBar);
+    QString previous;
+    for (int beat = 0; beat < section.beats; ++beat) {
+        const QString symbol = writtenChordAtBeat(section, beat);
+        if (!symbol.isEmpty() && symbol != previous) {
+            const ParsedChord chord = parseChord(symbol);
+            if (chord.valid && !chord.rest) {
+                result.chordRoots.insert(chord.root);
+                result.chordSymbols.insert(symbol.trimmed());
+                result.chordOrder.push_back(chord.root);
+                ++result.chordEventCount;
+                const QString suffix = chord.suffix.toLower();
+                if (suffix.contains(QLatin1Char('7')) ||
+                    suffix.contains(QLatin1Char('9')) ||
+                    suffix.contains(QStringLiteral("11")) ||
+                    suffix.contains(QStringLiteral("13")) ||
+                    suffix.contains(QStringLiteral("maj")) ||
+                    suffix.contains(QStringLiteral("dim"))) {
+                    ++result.extendedChordCount;
+                }
+                if (suffix == QStringLiteral("5") ||
+                    suffix.contains(QStringLiteral("power"))) {
+                    ++result.powerChordCount;
+                }
+            }
+        }
+        previous = symbol;
+
+        if (beat < section.beatPatterns.size()) {
+            const BeatPattern& pattern = section.beatPatterns.at(beat);
+            for (int lane = 0; lane < pattern.lanes.size(); ++lane) {
+                const QString hits = pattern.lanes.at(lane);
+                for (int step = 0; step < hits.size(); ++step) {
+                    const QChar state = hits.at(step).toLower();
+                    if (state != QLatin1Char('x') && state != QLatin1Char('a') &&
+                        state != QLatin1Char('g')) continue;
+                    const int tick = beat * 12 +
+                        (step * 12) / qMax(1, pattern.division);
+                    result.drumOnsets.insert(lane * 100000 + tick);
+                    if (lane == 0) {
+                        ++result.kickEvents;
+                        if (step == 0) ++result.kickQuarterAnchors;
+                    } else if (lane == 1) {
+                        ++result.snareEvents;
+                        if (step == 0) {
+                            const int beatInBar = beat % beatsPerBar;
+                            if ((beatsPerBar == 4 &&
+                                 (beatInBar == 1 || beatInBar == 3)) ||
+                                (beatsPerBar != 4 && beatInBar % 2 == 1)) {
+                                ++result.snareBackbeatAnchors;
+                            }
+                            if (beatInBar == beatsPerBar / 2) {
+                                ++result.snareHalfTimeAnchors;
+                            }
+                        }
+                    } else if (lane == 2 || lane == 3) {
+                        ++result.hatEvents;
+                    }
+                }
+            }
+        }
+        if (beat < section.musicalPatterns.size()) {
+            const MusicalBeatPattern& pattern = section.musicalPatterns.at(beat);
+            for (int step = 0; step < pattern.melody.size(); ++step) {
+                const MusicalStep& melody = pattern.melody.at(step);
+                if (melody.state != MusicalStepState::Onset) continue;
+                const int tick = beat * 12 +
+                    (step * 12) / qMax(1, pattern.division);
+                result.melodyOnsets.insert(tick);
+                const auto midi = parseMidiNote(melody.value);
+                if (midi.has_value()) {
+                    result.melodyMidi.push_back(*midi);
+                    result.melodyPhrase.push_back({
+                        tick, *midi, melody.velocity});
+                }
+            }
+            for (int step = 0; step < pattern.bass.size(); ++step) {
+                const MusicalStep& bass = pattern.bass.at(step);
+                if (bass.state != MusicalStepState::Onset) continue;
+                const auto midi = parseMidiNote(bass.value);
+                if (midi.has_value()) {
+                    const int tick = beat * 12 +
+                        (step * 12) / qMax(1, pattern.division);
+                    result.bassMidi.push_back(*midi);
+                    result.bassPhrase.push_back({tick, *midi, bass.velocity});
+                    ++result.bassEvents;
+                }
+            }
+            for (const MusicalStep& support : pattern.support) {
+                if (support.state == MusicalStepState::Onset) {
+                    ++result.supportEvents;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+template <typename T>
+double setSimilarity(const QSet<T>& left, const QSet<T>& right, double emptyValue)
+{
+    if (left.isEmpty() && right.isEmpty()) return emptyValue;
+    QSet<T> shared = left;
+    shared.intersect(right);
+    QSet<T> combined = left;
+    combined.unite(right);
+    return combined.isEmpty()
+        ? emptyValue
+        : static_cast<double>(shared.size()) / combined.size();
+}
+
+double chordOrderContrast(const QVector<int>& left, const QVector<int>& right)
+{
+    const int count = qMin(left.size(), right.size());
+    if (count == 0) return 0.5;
+    int same = 0;
+    for (int index = 0; index < count; ++index) {
+        if (left.at(index) == right.at(index)) ++same;
+    }
+    return 1.0 - static_cast<double>(same) / count;
+}
+
+double openingChordPositionSimilarity(
+    const QVector<int>& left,
+    const QVector<int>& right,
+    int maximumEvents = 4)
+{
+    const int count = qMin(maximumEvents, qMin(left.size(), right.size()));
+    if (count <= 0) return left.isEmpty() && right.isEmpty() ? 1.0 : 0.0;
+    int same = 0;
+    for (int index = 0; index < count; ++index) {
+        if (left.at(index) == right.at(index)) ++same;
+    }
+    return static_cast<double>(same) / count;
+}
+
+double melodyContourSimilarity(
+    const QVector<int>& left,
+    const QVector<int>& right)
+{
+    if (left.size() < 2 || right.size() < 2) {
+        return left.isEmpty() && right.isEmpty() ? 0.5 : 0.0;
+    }
+    const int comparisons = qMin(left.size(), right.size()) - 1;
+    double score = 0.0;
+    for (int index = 0; index < comparisons; ++index) {
+        const int leftInterval = left.at(index + 1) - left.at(index);
+        const int rightInterval = right.at(index + 1) - right.at(index);
+        if (leftInterval == rightInterval) {
+            score += 1.0;
+        } else if ((leftInterval < 0 && rightInterval < 0) ||
+                   (leftInterval > 0 && rightInterval > 0)) {
+            score += std::abs(std::abs(leftInterval) - std::abs(rightInterval)) <= 2
+                ? 0.75 : 0.5;
+        } else if (leftInterval == 0 || rightInterval == 0) {
+            score += 0.25;
+        }
+    }
+    return score / comparisons;
+}
+
+QString canonicalModeId(QString name)
+{
+    name = name.toLower();
+    if (name.contains(QStringLiteral("dorian"))) return QStringLiteral("dorian");
+    if (name.contains(QStringLiteral("mixolydian"))) return QStringLiteral("mixolydian");
+    if (name.contains(QStringLiteral("lydian"))) return QStringLiteral("lydian");
+    if (name.contains(QStringLiteral("phrygian"))) return QStringLiteral("phrygian");
+    if (name.contains(QStringLiteral("dominant blues"))) return QStringLiteral("dominant-blues");
+    if (name.contains(QStringLiteral("minor blues"))) return QStringLiteral("minor-blues");
+    if (name == QStringLiteral("blues")) return QStringLiteral("blues");
+    if (name.contains(QStringLiteral("pentatonic")) && name.contains(QStringLiteral("minor"))) {
+        return QStringLiteral("minor-pentatonic");
+    }
+    if (name.contains(QStringLiteral("minor")) || name.contains(QStringLiteral("aeolian"))) {
+        return QStringLiteral("aeolian");
+    }
+    if (name.contains(QStringLiteral("pentatonic")) &&
+        name.contains(QStringLiteral("major"))) {
+        return QStringLiteral("major-pentatonic");
+    }
+    return QStringLiteral("ionian");
+}
+
+std::optional<ModeDef> strictContinuationMode(const QString& modeId)
+{
+    if (modeId == QStringLiteral("ionian"))
+        return ModeDef{QStringLiteral("Major"), {0,2,4,5,7,9,11}, false};
+    if (modeId == QStringLiteral("aeolian"))
+        return ModeDef{QStringLiteral("Natural Minor"), {0,2,3,5,7,8,10}, true};
+    if (modeId == QStringLiteral("dorian"))
+        return ModeDef{QStringLiteral("Dorian"), {0,2,3,5,7,9,10}, true};
+    if (modeId == QStringLiteral("mixolydian"))
+        return ModeDef{QStringLiteral("Mixolydian"), {0,2,4,5,7,9,10}, false};
+    if (modeId == QStringLiteral("lydian"))
+        return ModeDef{QStringLiteral("Lydian"), {0,2,4,6,7,9,11}, false};
+    if (modeId == QStringLiteral("phrygian"))
+        return ModeDef{QStringLiteral("Phrygian"), {0,1,3,5,7,8,10}, true};
+    return std::nullopt;
+}
+
+std::optional<ModeDef> continuationPitchCollection(const QString& modeId)
+{
+    if (const std::optional<ModeDef> diatonic = strictContinuationMode(modeId)) {
+        return diatonic;
+    }
+    if (modeId == QStringLiteral("major-pentatonic")) {
+        return ModeDef{
+            QStringLiteral("Major Pentatonic"), {0,2,4,7,9,0,0}, false};
+    }
+    if (modeId == QStringLiteral("minor-pentatonic")) {
+        return ModeDef{
+            QStringLiteral("Minor Pentatonic"), {0,3,5,7,10,0,0}, true};
+    }
+    if (modeId == QStringLiteral("dominant-blues")) {
+        return ModeDef{
+            QStringLiteral("Dominant Blues"), {0,3,4,5,6,7,10}, false};
+    }
+    if (modeId == QStringLiteral("minor-blues")) {
+        return ModeDef{
+            QStringLiteral("Minor Blues"), {0,2,3,5,6,7,10}, true};
+    }
+    if (modeId == QStringLiteral("blues")) {
+        return ModeDef{
+            QStringLiteral("Blues"), {0,3,4,5,7,9,10}, false};
+    }
+    return std::nullopt;
+}
+
+std::optional<ModeDef> continuationHarmonyMode(const QString& modeId)
+{
+    if (const std::optional<ModeDef> diatonic = strictContinuationMode(modeId)) {
+        return diatonic;
+    }
+    // Pentatonic identifies the melodic vocabulary. Its supporting chords
+    // still come from the containing major/minor key, rather than trying to
+    // build malformed tertian chords from five scale degrees.
+    if (modeId == QStringLiteral("major-pentatonic")) {
+        return ModeDef{
+            QStringLiteral("Major"), {0,2,4,5,7,9,11}, false};
+    }
+    if (modeId == QStringLiteral("minor-pentatonic")) {
+        return ModeDef{
+            QStringLiteral("Natural Minor"), {0,2,3,5,7,8,10}, true};
+    }
+    // Blues harmony is deliberately not reduced to one seven-note scale:
+    // native I7/IV7/V7 and minor-Blues turnaround chords define the key.
+    return std::nullopt;
+}
+
+QString diatonicRoman(
+    const ModeDef& mode,
+    int degree,
+    bool seventh,
+    bool power = false)
+{
+    static const std::array<QString, 7> numerals{
+        QStringLiteral("I"), QStringLiteral("II"), QStringLiteral("III"),
+        QStringLiteral("IV"), QStringLiteral("V"), QStringLiteral("VI"),
+        QStringLiteral("VII")};
+    static constexpr std::array<int, 7> majorDegrees{0,2,4,5,7,9,11};
+    degree = qBound(0, degree, 6);
+    const int accidental = mode.intervals.at(degree) - majorDegrees.at(degree);
+    QString token;
+    if (accidental < 0) token += QString(-accidental, QLatin1Char('b'));
+    if (accidental > 0) token += QString(accidental, QLatin1Char('#'));
+    token += numerals.at(degree);
+    const auto stacked = [&mode, degree](int offset) {
+        const int scaleDegree = degree + offset;
+        return mode.intervals.at(scaleDegree % 7) + 12 * (scaleDegree / 7) -
+            mode.intervals.at(degree);
+    };
+    const int third = stacked(2);
+    const int fifth = stacked(4);
+    if (power) {
+        if (fifth == 7) return token + QStringLiteral("5");
+        if (third == 3 && fifth == 6) return token + QStringLiteral("dim");
+        if (third == 4 && fifth == 8) return token + QStringLiteral("aug");
+    }
+    if (!seventh) {
+        if (third == 3 && fifth == 7) return token + QStringLiteral("m");
+        if (third == 3 && fifth == 6) return token + QStringLiteral("dim");
+        if (third == 4 && fifth == 8) return token + QStringLiteral("aug");
+        return token;
+    }
+    const int seventhInterval = stacked(6);
+    if (third == 4 && fifth == 7 && seventhInterval == 11)
+        return token + QStringLiteral("maj7");
+    if (third == 4 && fifth == 7 && seventhInterval == 10)
+        return token + QStringLiteral("7");
+    if (third == 3 && fifth == 7 && seventhInterval == 10)
+        return token + QStringLiteral("m7");
+    if (third == 3 && fifth == 6 && seventhInterval == 10)
+        return token + QStringLiteral("m7b5");
+    if (third == 3 && fifth == 6 && seventhInterval == 9)
+        return token + QStringLiteral("dim7");
+    return diatonicRoman(mode, degree, false, false);
+}
+
+struct ContinuationStylePlan {
+    ProgressionDef progression;
+    QString relationshipId;
+    QString pacingId;
+    QString pacingSummary;
+    QString melodicSummary;
+    double targetChordSimilarity = 0.55;
+    double targetDrumSimilarity = 0.58;
+    double targetMelodyRhythmSimilarity = 0.48;
+    double targetMelodyContourSimilarity = 0.55;
+    double targetBassContourSimilarity = 0.58;
+    bool progressionByEvent = false;
+};
+
+ContinuationStylePlan continuationStylePlan(
+    const QString& profileId,
+    const QString& styleId,
+    const ModeDef& mode,
+    bool useSevenths,
+    bool usePowerChords,
+    int bars,
+    int variant)
+{
+    ContinuationStylePlan result;
+    QString family = QStringLiteral("diatonic-answer");
+    QVector<QVector<int>> routes{
+        {5,3,0,4,1,3,4,4},
+        {3,0,4,5,1,4,0,4},
+        {1,5,3,0,1,3,4,0},
+        {2,5,1,4,0,3,1,4},
+    };
+    result.relationshipId = QStringLiteral("continue_harmonic_lift");
+    result.pacingSummary = QStringLiteral(
+        "Establish a related B identity, develop it through a contrasting middle, reach a later harmonic peak, then point back toward A.");
+    result.melodicSummary = QStringLiteral(
+        "Preserve a recognisable contour and phrase rhythm while changing its ending, register, or chord-tone targets.");
+
+    if (profileId == QStringLiteral("pop_loop")) {
+        family = QStringLiteral("pop-loop-answer");
+        routes = {
+            {5,3,0,4,5,3,1,4}, {3,0,4,5,1,5,3,4},
+            {1,5,3,0,5,3,1,4}, {3,5,0,4,1,3,4,4}};
+        result.relationshipId = QStringLiteral("continue_motif_variation");
+        result.pacingId = QStringLiteral("related-loop-with-changed-turnaround");
+    } else if (profileId == QStringLiteral("pop_sectional")) {
+        family = QStringLiteral("pop-section-lift");
+        routes = {
+            {5,3,0,4,1,3,4,4}, {3,0,4,5,1,4,0,4},
+            {1,5,3,0,1,3,4,0}, {5,1,3,4,1,3,4,4}};
+        result.pacingId = QStringLiteral("b-arrival-and-return-cue");
+        result.targetMelodyContourSimilarity = 0.62;
+        result.melodicSummary = QStringLiteral(
+            "Turn the source vocal-like hook into a higher B-section answer, retain its pickup/rest identity, and change the phrase ending before the return cue.");
+    } else if (profileId == QStringLiteral("rock_riff_modal") ||
+               profileId == QStringLiteral("rock_punk_garage") ||
+               profileId == QStringLiteral("metal_modern_progressive")) {
+        family = profileId == QStringLiteral("metal_modern_progressive")
+            ? QStringLiteral("metal-riff-contrast")
+            : QStringLiteral("rock-riff-answer");
+        routes = {
+            {0,6,3,0,0,2,6,0}, {0,3,6,0,5,3,6,0},
+            {0,2,0,6,3,6,0,0}, {0,5,3,0,2,6,3,0}};
+        result.relationshipId = QStringLiteral("continue_riff_answer");
+        result.pacingId = QStringLiteral("riff-answer-expansion-return");
+        result.targetChordSimilarity = 0.64;
+        result.targetMelodyContourSimilarity = 0.68;
+        result.targetBassContourSimilarity = 0.66;
+        result.melodicSummary = QStringLiteral(
+            "Keep the source riff's attack and interval identity, answer it through accent displacement or structural-root transposition, then restore the tonic pedal for the return.");
+    } else if (profileId == QStringLiteral("rock_shuffle_blues")) {
+        family = QStringLiteral("shuffle-response-turnaround");
+        routes = {
+            {0,3,0,0,3,0,4,0}, {3,3,0,0,3,0,4,4},
+            {0,0,3,0,1,4,0,4}, {0,3,0,4,3,0,4,0}};
+        result.relationshipId = QStringLiteral("continue_native_form_slot");
+        result.pacingId = QStringLiteral("call-response-turnaround");
+        result.targetMelodyContourSimilarity = 0.65;
+        result.melodicSummary = QStringLiteral(
+            "Answer the source call without filling its rests, then strengthen the final turnaround into the next chorus.");
+    } else if (profileId == QStringLiteral("jazz_swing_standards") ||
+               profileId == QStringLiteral("jazz_bebop")) {
+        const bool bebop = profileId == QStringLiteral("jazz_bebop");
+        family = bebop ? QStringLiteral("bebop-guide-tone-chain")
+                       : QStringLiteral("songbook-predominant-answer");
+        routes = {
+            {1,4,0,5,2,5,1,4,0,5,1,4,0,3,1,4},
+            {2,5,1,4,0,5,1,4,5,1,4,0,2,5,1,4},
+            {5,1,4,0,3,6,2,5,1,4,0,5,1,4,0,0},
+            {1,4,0,3,2,5,1,4,0,5,2,5,1,4,0,4}};
+        result.relationshipId = QStringLiteral("continue_native_form_slot");
+        result.pacingId = bebop
+            ? QStringLiteral("half-bar-chain-bridge-return")
+            : QStringLiteral("antecedent-consequent-turnaround");
+        result.progressionByEvent = bebop;
+        result.targetChordSimilarity = 0.48;
+        result.targetMelodyContourSimilarity = 0.46;
+        result.targetBassContourSimilarity = 0.52;
+        result.melodicSummary = QStringLiteral(
+            "Develop the head-like cell through guide-tone-aware sequence and rhythmic displacement, leaving the final phrase aimed at the return.");
+        useSevenths = true;
+    } else if (profileId == QStringLiteral("jazz_fusion")) {
+        family = QStringLiteral("fusion-vamp-answer");
+        routes = {
+            {0,0,3,0,5,3,0,4}, {0,2,0,6,3,0,5,0},
+            {0,5,3,0,2,6,3,0}, {0,0,6,3,5,3,0,0}};
+        result.relationshipId = QStringLiteral("continue_riff_answer");
+        result.pacingId = QStringLiteral("modal-vamp-lyrical-contrast-return");
+        result.targetMelodyContourSimilarity = 0.60;
+        result.targetBassContourSimilarity = 0.66;
+        result.melodicSummary = QStringLiteral(
+            "Fragment or re-orchestrate the source riff, contrast it with a longer answer, and return to the shared vamp centre.");
+    } else if (profileId.startsWith(QStringLiteral("modal_"))) {
+        int colourDegree = 3;
+        if (mode.name == QStringLiteral("Dorian") ||
+            mode.name == QStringLiteral("Natural Minor")) colourDegree = 5;
+        else if (mode.name == QStringLiteral("Mixolydian")) colourDegree = 6;
+        else if (mode.name == QStringLiteral("Lydian")) colourDegree = 3;
+        else if (mode.name == QStringLiteral("Phrygian")) colourDegree = 1;
+        family = QStringLiteral("modal-pedal-arc");
+        routes = {
+            {0,colourDegree,0,3,0,colourDegree,6,0},
+            {0,0,colourDegree,0,3,colourDegree,0,0},
+            {0,6,colourDegree,0,5,colourDegree,3,0},
+            {0,3,0,colourDegree,6,3,colourDegree,0}};
+        result.relationshipId = QStringLiteral("continue_mode_pedal_arc");
+        result.pacingId = QStringLiteral("withhold-reveal-colour-return-to-pedal");
+        result.targetChordSimilarity = 0.70;
+        result.targetMelodyContourSimilarity = 0.58;
+        result.targetBassContourSimilarity = 0.74;
+        result.melodicSummary = QStringLiteral(
+            "Retain the tonic centre, withhold then reveal the mode's characteristic degree, and vary register, space, or rhythmic phase instead of implying a functional cadence.");
+    } else if (profileId.startsWith(QStringLiteral("blues_"))) {
+        family = QStringLiteral("blues-native-response");
+        routes = {
+            {0,3,0,0,3,0,4,0}, {3,3,0,0,3,0,4,4},
+            {0,0,3,0,1,4,0,4}, {0,3,0,4,3,0,4,0}};
+        result.relationshipId = QStringLiteral("continue_native_form_slot");
+        result.pacingId = QStringLiteral("call-response-closing-turnaround");
+        result.targetChordSimilarity = 0.72;
+        result.targetMelodyContourSimilarity = 0.66;
+        result.melodicSummary = QStringLiteral(
+            "Retain the vocal-like call rhythm and its expressive space, answer the current harmony rather than copying pitches, and alter the closing turnaround into the next chorus.");
+        useSevenths = true;
+    } else if (profileId.startsWith(QStringLiteral("jpop_"))) {
+        family = QStringLiteral("jpop-directed-circle-lift");
+        routes = {
+            {3,4,2,5,1,4,0,4}, {5,1,4,0,3,4,2,5},
+            {1,4,0,5,3,4,2,5}, {3,2,5,1,4,0,1,4}};
+        result.pacingId = QStringLiteral("lift-arrival-hook-return-cue");
+        result.targetMelodyContourSimilarity = 0.64;
+        result.melodicSummary = QStringLiteral(
+            "Sequence and reharmonise the opening two-bar hook into a broader B arrival, expand its range, and retain a recognisable pickup rhythm for the return.");
+    } else if (profileId.startsWith(QStringLiteral("country_"))) {
+        family = profileId == QStringLiteral("country_honky_tonk")
+            ? QStringLiteral("country-answer-turnaround")
+            : QStringLiteral("country-sectional-lift");
+        routes = {
+            {0,3,0,4,0,3,1,4}, {3,0,4,0,5,3,1,4},
+            {0,5,3,4,1,3,4,0}, {3,0,1,4,0,5,1,4}};
+        result.pacingId = QStringLiteral("sung-answer-fill-space-turnaround");
+        result.targetMelodyContourSimilarity = 0.66;
+        result.melodicSummary = QStringLiteral(
+            "Reharmonise the source sung-call rhythm, leave phrase-end room for an instrumental fill, and use a directed final turnaround.");
+    } else if (profileId.startsWith(QStringLiteral("electronic_"))) {
+        const bool house = profileId == QStringLiteral("electronic_house");
+        family = house ? QStringLiteral("house-layer-lift")
+            : profileId == QStringLiteral("electronic_techno")
+                ? QStringLiteral("techno-process-arc")
+                : QStringLiteral("breakbeat-recut");
+        routes = house
+            ? QVector<QVector<int>>{{5,3,0,4,5,3,1,4}, {0,4,5,3,1,3,4,4},
+                  {3,0,5,4,1,5,3,4}, {5,1,3,4,0,3,1,4}}
+            : QVector<QVector<int>>{{0,0,3,0,0,6,3,0}, {0,5,0,3,0,6,0,0},
+                  {0,2,0,6,3,0,6,0}, {0,0,5,3,0,2,6,0}};
+        result.relationshipId = QStringLiteral("continue_break_subtract");
+        result.pacingId = QStringLiteral("stable-cell-subtract-peak-rebuild");
+        result.targetChordSimilarity = house ? 0.58 : 0.74;
+        result.targetMelodyContourSimilarity = 0.62;
+        result.targetBassContourSimilarity = 0.64;
+        result.melodicSummary = QStringLiteral(
+            "Retain the short pitch/rhythm cell, recut or phase it through a subtractive middle, then rebuild it without demanding a new song-like lead.");
+    } else if (profileId == QStringLiteral("soul_classic_motown")) {
+        family = QStringLiteral("soul-directed-plagal-answer");
+        routes = {
+            {0,5,1,4,3,1,4,0}, {3,0,1,4,5,3,4,0},
+            {5,3,0,4,1,3,4,0}, {1,5,3,0,1,3,4,0}};
+        result.pacingId = QStringLiteral("vocal-answer-ensemble-lift-plagal-return");
+        result.targetMelodyContourSimilarity = 0.64;
+        result.targetBassContourSimilarity = 0.68;
+        result.melodicSummary = QStringLiteral(
+            "Keep the vocal-call rhythm, change its chord-tone destination, leave a response breath, and let melodic bass/support announce the later lift.");
+        useSevenths = true;
+    } else if (profileId == QStringLiteral("rnb_contemporary_neosoul")) {
+        family = QStringLiteral("rnb-voice-led-answer");
+        routes = {
+            {0,3,1,4,5,3,1,4}, {5,3,0,4,1,5,3,4},
+            {3,2,1,0,5,3,1,4}, {0,5,3,1,4,2,1,4}};
+        result.pacingId = QStringLiteral("sparse-call-upper-voice-lift-return");
+        result.targetChordSimilarity = 0.62;
+        result.targetMelodyRhythmSimilarity = 0.60;
+        result.targetMelodyContourSimilarity = 0.68;
+        result.targetBassContourSimilarity = 0.66;
+        result.melodicSummary = QStringLiteral(
+            "Preserve negative space and the delayed or anticipated call, develop the upper-voice path over independent bass, and change the final answer rather than adding density.");
+        useSevenths = true;
+    } else if (profileId == QStringLiteral("funk_static_pocket")) {
+        family = QStringLiteral("funk-pocket-exchange");
+        routes = {
+            {0,0,3,0,0,6,3,0}, {0,3,0,0,6,3,0,0},
+            {0,0,6,0,3,0,6,0}, {0,3,0,6,0,3,0,0}};
+        result.relationshipId = QStringLiteral("continue_break_subtract");
+        result.pacingId = QStringLiteral("pocket-exchange-break-return-on-one");
+        result.targetChordSimilarity = 0.78;
+        result.targetDrumSimilarity = 0.72;
+        result.targetMelodyContourSimilarity = 0.66;
+        result.targetBassContourSimilarity = 0.70;
+        result.melodicSummary = QStringLiteral(
+            "Answer the short riff by shifting one accent or fragment, preserve ensemble space, subtract at the break, and land the return on the one.");
+        useSevenths = true;
+    } else if (profileId.startsWith(QStringLiteral("hiphop_"))) {
+        const bool trap = profileId == QStringLiteral("hiphop_trap");
+        family = trap ? QStringLiteral("trap-beat-switch-answer")
+                      : QStringLiteral("boom-bap-recut-answer");
+        routes = trap
+            ? QVector<QVector<int>>{{0,5,2,6,0,5,1,6}, {0,2,5,6,0,3,2,6},
+                  {0,6,5,2,0,5,6,0}, {0,5,3,6,2,5,6,0}}
+            : QVector<QVector<int>>{{0,5,3,4,0,5,1,4}, {5,3,0,4,1,5,3,4},
+                  {0,3,5,4,0,1,3,4}, {5,0,3,4,1,3,0,4}};
+        result.relationshipId = QStringLiteral("continue_break_subtract");
+        result.pacingId = QStringLiteral("sample-recut-beat-cut-return");
+        result.targetChordSimilarity = 0.72;
+        result.targetDrumSimilarity = 0.70;
+        result.targetMelodyContourSimilarity = 0.64;
+        result.targetBassContourSimilarity = 0.68;
+        result.melodicSummary = QStringLiteral(
+            "Re-cut the sparse sample-like hook through omission or register shift, retain rap space, and use a bounded beat cut or 808 reinterpretation before the return.");
+    } else if (profileId == QStringLiteral("reggae_roots")) {
+        family = QStringLiteral("reggae-riddim-answer");
+        routes = {
+            {0,3,4,0,5,3,4,0}, {0,4,3,0,5,3,0,4},
+            {3,0,4,0,5,3,4,0}, {0,5,3,4,0,3,4,0}};
+        result.relationshipId = QStringLiteral("continue_textural_lift");
+        result.pacingId = QStringLiteral("riddim-answer-dub-space-return");
+        result.targetChordSimilarity = 0.68;
+        result.targetDrumSimilarity = 0.72;
+        result.targetMelodyContourSimilarity = 0.64;
+        result.targetBassContourSimilarity = 0.74;
+        result.melodicSummary = QStringLiteral(
+            "Answer the spacious lead while preserving the bass motif and skank pocket, create one dub-informed gap, and vary only the pickup into the return.");
+    } else if (profileId == QStringLiteral("bossa_songbook")) {
+        family = QStringLiteral("bossa-contrasting-phrase");
+        routes = {
+            {1,4,0,5,2,5,1,4}, {5,1,4,0,3,2,1,4},
+            {2,5,1,4,0,5,1,4}, {1,4,0,3,2,5,1,4}};
+        result.relationshipId = QStringLiteral("continue_native_form_slot");
+        result.pacingId = QStringLiteral("speech-like-answer-guide-tone-return");
+        result.targetChordSimilarity = 0.56;
+        result.targetMelodyContourSimilarity = 0.60;
+        result.targetBassContourSimilarity = 0.64;
+        result.melodicSummary = QStringLiteral(
+            "Develop the narrow pickup phrase through gentle sequence and guide-tone motion, preserve rests against the comping pattern, and prepare the return without a blanket late offset.");
+        useSevenths = true;
+    }
+
+    if (result.pacingId.isEmpty()) {
+        result.pacingId = QStringLiteral("establish-develop-peak-return-cue");
+    }
+    const QVector<int>& selected = routes.at(variant % routes.size());
+    const int progressionSlots = qMax(
+        1, bars * (result.progressionByEvent ? 2 : 1));
+    result.progression.id = QStringLiteral("continue-%1-%2")
+        .arg(family).arg(variant % routes.size() + 1);
+    result.progression.name = QStringLiteral("%1 (%2)")
+        .arg(family, result.pacingId);
+    for (int slot = 0; slot < progressionSlots; ++slot) {
+        const int selectedIndex = progressionSlots <= 1
+            ? selected.size() - 1
+            : progressionSlots > selected.size()
+                ? slot % selected.size()
+                : qRound(static_cast<double>(slot) * (selected.size() - 1) /
+                    static_cast<double>(progressionSlots - 1));
+        const int degree = selected.at(qBound(0, selectedIndex, selected.size() - 1));
+        QString roman = diatonicRoman(
+            mode, degree, useSevenths, usePowerChords);
+        if (profileId.startsWith(QStringLiteral("modal_")) && degree != 0) {
+            roman += QStringLiteral("/I");
+        }
+        result.progression.romans.push_back(std::move(roman));
+    }
+    return result;
+}
+
+void increaseContinuationHarmonicContrast(
+    ProgressionDef& progression,
+    const ContinuationSignature& source,
+    int key,
+    const ModeDef& mode,
+    bool useSevenths,
+    bool usePowerChords,
+    int variant)
+{
+    if (progression.romans.isEmpty() || source.chordRoots.isEmpty()) return;
+    const QVector<QVector<int>> priorities{
+        {5,1,3,2,6,4,0}, {3,5,1,6,2,4,0},
+        {1,5,2,3,6,4,0}, {2,5,3,1,6,4,0},
+    };
+    const QVector<int>& priority = priorities.at(variant % priorities.size());
+    bool sourceUsesEveryModeRoot = true;
+    for (int interval : mode.intervals) {
+        sourceUsesEveryModeRoot = sourceUsesEveryModeRoot &&
+            source.chordRoots.contains(pitchClass(key + interval));
+    }
+    int previousDegree = -1;
+    for (int index = 0; index < progression.romans.size(); ++index) {
+        QString& roman = progression.romans[index];
+        const int currentDegree = romanDegree(roman);
+        const int currentRoot = pitchClass(key + mode.intervals.at(currentDegree));
+        const bool isReturnCue = index == progression.romans.size() - 1;
+        if ((!source.chordRoots.contains(currentRoot) &&
+             currentDegree != previousDegree) || isReturnCue) {
+            previousDegree = currentDegree;
+            continue;
+        }
+        int replacement = -1;
+        for (int offset = 0; offset < priority.size(); ++offset) {
+            const int candidateDegree = priority.at(
+                (offset + index + variant) % priority.size());
+            const int candidateRoot = pitchClass(
+                key + mode.intervals.at(candidateDegree));
+            if (!source.chordRoots.contains(candidateRoot) &&
+                candidateDegree != previousDegree) {
+                replacement = candidateDegree;
+                break;
+            }
+        }
+        if (replacement < 0) {
+            for (int offset = 0; offset < priority.size(); ++offset) {
+                const int candidateDegree = priority.at(
+                    (offset + index + variant) % priority.size());
+                if (candidateDegree != currentDegree &&
+                    candidateDegree != previousDegree) {
+                    replacement = candidateDegree;
+                    break;
+                }
+            }
+        }
+        if (replacement < 0) continue;
+        const bool seventh = sourceUsesEveryModeRoot
+            ? !useSevenths
+            : useSevenths || roman.contains(QLatin1Char('7'));
+        roman = diatonicRoman(
+            mode, replacement, seventh, usePowerChords);
+        previousDegree = replacement;
+    }
+    progression.id += QStringLiteral("-contrast-%1").arg(variant % 4 + 1);
+}
+
+ProgressionDef nativeBluesContinuationProgression(
+    bool minor,
+    int bars,
+    int variant)
+{
+    const QString tonic = minor ? QStringLiteral("i7") : QStringLiteral("I7");
+    const QString subdominant = minor
+        ? QStringLiteral("iv7") : QStringLiteral("IV7");
+    const QString dominant = minor
+        ? QStringLiteral("v7") : QStringLiteral("V7");
+    const QVector<QVector<QString>> routes{
+        {tonic, subdominant, tonic, tonic,
+         subdominant, subdominant, tonic, tonic,
+         dominant, subdominant, tonic, dominant},
+        {tonic, tonic, subdominant, tonic,
+         subdominant, subdominant, tonic, tonic,
+         dominant, subdominant, tonic, tonic},
+        {tonic, subdominant, tonic, subdominant,
+         subdominant, tonic, tonic, tonic,
+         dominant, subdominant, tonic, dominant},
+        {tonic, tonic, tonic, subdominant,
+         subdominant, tonic, tonic, dominant,
+         subdominant, tonic, dominant, tonic},
+    };
+    const QVector<QString>& route = routes.at(variant % routes.size());
+    ProgressionDef result;
+    result.id = QStringLiteral("continue-native-%1-blues-%2")
+        .arg(minor ? QStringLiteral("minor") : QStringLiteral("dominant"))
+        .arg(variant % routes.size() + 1);
+    result.name = QStringLiteral("Native %1 Blues continuation")
+        .arg(minor ? QStringLiteral("minor") : QStringLiteral("dominant"));
+    for (int bar = 0; bar < qMax(1, bars); ++bar) {
+        if (bars == 8) {
+            static constexpr std::array<int, 8> compact{0,4,3,3,0,8,10,11};
+            result.romans << route.at(compact.at(bar % compact.size()));
+        } else {
+            result.romans << route.at(bar % route.size());
+        }
+    }
+    return result;
+}
+
+struct ContinuationRolePlan {
+    QString id;
+    QString name;
+    QString explanation;
+    int melodyRegisterShift = 0;
+};
+
+ContinuationRolePlan continuationRolePlan(
+    const QString& profileId,
+    const ContinuationSignature& source,
+    int sourceBeats)
+{
+    const double eventDensity = sourceBeats > 0
+        ? static_cast<double>(source.drumOnsets.size() +
+              source.melodyPhrase.size() + source.bassEvents +
+              source.supportEvents) / sourceBeats
+        : 0.0;
+    if (profileId == QStringLiteral("rock_riff_modal") ||
+        profileId == QStringLiteral("rock_punk_garage") ||
+        profileId == QStringLiteral("jazz_fusion") ||
+        profileId == QStringLiteral("metal_modern_progressive")) {
+        return {QStringLiteral("riff_answer"), QStringLiteral("Riff Answer"),
+            QStringLiteral(
+                "The source is riff-led, so B answers its attack and interval identity before returning to the structural centre."),
+            profileId == QStringLiteral("metal_modern_progressive") ? 0 : 2};
+    }
+    if (profileId == QStringLiteral("jazz_swing_standards") ||
+        profileId == QStringLiteral("jazz_bebop") ||
+        profileId == QStringLiteral("bossa_songbook")) {
+        return {QStringLiteral("bridge"), QStringLiteral("Bridge"),
+            QStringLiteral(
+                "The profile supports a contrasting guide-tone phrase whose ending prepares the source theme or chorus."),
+            2};
+    }
+    if ((profileId.startsWith(QStringLiteral("electronic_")) ||
+         profileId.startsWith(QStringLiteral("hiphop_")) ||
+         profileId == QStringLiteral("funk_static_pocket") ||
+         profileId == QStringLiteral("reggae_roots")) &&
+        eventDensity >= 2.0) {
+        return {QStringLiteral("breakdown"), QStringLiteral("Breakdown"),
+            QStringLiteral(
+                "A is already active, so B introduces a newly generated reduced pocket before rebuilding into the return."),
+            -3};
+    }
+    if (profileId == QStringLiteral("pop_sectional") ||
+        profileId.startsWith(QStringLiteral("jpop_")) ||
+        profileId == QStringLiteral("country_contemporary") ||
+        profileId == QStringLiteral("soul_classic_motown") ||
+        profileId == QStringLiteral("rnb_contemporary_neosoul")) {
+        return {QStringLiteral("chorus"), QStringLiteral("Chorus / Lift"),
+            QStringLiteral(
+                "The source profile supports a broader arrival, so B raises the hook, strengthens its entrance, and changes the ending while retaining phrase identity."),
+            5};
+    }
+    return {QStringLiteral("section_change"), QStringLiteral("Contrasting Section"),
+        QStringLiteral(
+            "B keeps the source style and tonal centre but establishes a new harmonic route, drum interpretation, and melodic identity."),
+        0};
+}
+
+int nearestAllowedMidi(
+    const QVector<int>& allowedPitchClasses,
+    int desired,
+    int low,
+    int high)
+{
+    int best = qBound(low, desired, high);
+    int bestDistance = std::numeric_limits<int>::max();
+    for (int midi = low; midi <= high; ++midi) {
+        if (!allowedPitchClasses.contains(pitchClass(midi))) continue;
+        const int distance = std::abs(midi - desired);
+        if (distance < bestDistance) {
+            best = midi;
+            bestDistance = distance;
+        }
+    }
+    return best;
+}
+
+void preserveSourceSoundIdentity(
+    GeneratedPracticeIdea& candidate,
+    const GenerationRecipe& source)
+{
+    if (!source.isValid()) return;
+    GenerationRecipe& target = candidate.recipe;
+    target.productionFamilyId = source.productionFamilyId;
+    target.productionFamilyName = source.productionFamilyName;
+    target.chordPatchId = source.chordPatchId;
+    target.chordPatchName = source.chordPatchName;
+    target.melodyPatchId = source.melodyPatchId;
+    target.melodyPatchName = source.melodyPatchName;
+    target.bassPatchId = source.bassPatchId;
+    target.bassPatchName = source.bassPatchName;
+    target.supportPatchId = source.supportPatchId;
+    target.supportPatchName = source.supportPatchName;
+    target.drumPatchId = source.drumPatchId;
+    target.drumPatchName = source.drumPatchName;
+    target.drumPatchRevision = source.drumPatchRevision;
+    target.drumMixGainDb = source.drumMixGainDb;
+    target.patchModifiers = source.patchModifiers;
+    target.synthVoices = source.synthVoices;
+    target.laneTiming = source.laneTiming;
+    target.variationDecisions << QStringLiteral(
+        "Continuation retained the source production family, core patches, drum kit, voice engines, and lane timing; section contrast comes from musical roles and arrangement rather than an unrelated sound palette.");
+}
+
+QVector<TimedPitch> openingIdentity(
+    const QVector<TimedPitch>& events,
+    int phraseTicks,
+    int maximumEvents)
+{
+    QVector<TimedPitch> result;
+    if (events.isEmpty()) return result;
+    for (const TimedPitch& event : events) {
+        if (event.tick >= phraseTicks && result.size() >= 2) break;
+        result.push_back(event);
+        if (result.size() >= maximumEvents) break;
+    }
+    if (result.isEmpty()) return result;
+    const int firstWindow = (result.front().tick / 12) * 12;
+    for (TimedPitch& event : result) event.tick -= firstWindow;
+    return result;
+}
+
+void clearMusicalLaneWindow(
+    SongSection& section,
+    int startTick,
+    int endTick,
+    const QString& laneName)
+{
+    for (int beat = 0; beat < section.musicalPatterns.size(); ++beat) {
+        MusicalBeatPattern& pattern = section.musicalPatterns[beat];
+        QVector<MusicalStep>* laneSteps = laneName == QStringLiteral("melody")
+            ? &pattern.melody : &pattern.bass;
+        for (int step = 0; step < laneSteps->size(); ++step) {
+            const int tick = beat * 12 + step * 12 / qMax(1, pattern.division);
+            if (tick >= startTick && tick < endTick) {
+                (*laneSteps)[step] = MusicalStep{};
+            }
+        }
+    }
+}
+
+int placeMusicalOnset(
+    SongSection& section,
+    int requestedTick,
+    const QString& laneName,
+    int midi,
+    int velocity,
+    const QString& articulation,
+    bool flats)
+{
+    if (section.musicalPatterns.isEmpty()) return -1;
+    const int totalTicks = section.beats * 12;
+    requestedTick = qBound(0, requestedTick, qMax(0, totalTicks - 1));
+    const int beat = requestedTick / 12;
+    MusicalBeatPattern& pattern = section.musicalPatterns[beat];
+    QVector<MusicalStep>* laneSteps = laneName == QStringLiteral("melody")
+        ? &pattern.melody : &pattern.bass;
+    if (laneSteps->isEmpty()) return -1;
+    const int withinBeat = requestedTick % 12;
+    const int step = qBound(0,
+        qRound(static_cast<double>(withinBeat) * pattern.division / 12.0),
+        pattern.division - 1);
+    const int actualTick = beat * 12 + step * 12 / pattern.division;
+    const QString note = noteName(pitchClass(midi), flats) +
+        QString::number(midi / 12 - 1);
+    (*laneSteps)[step] = {
+        MusicalStepState::Onset, note, velocity, articulation};
+    return actualTick;
+}
+
+void applySourceMelodyTransformation(
+    const ContinuationSignature& source,
+    GeneratedPracticeIdea& candidate,
+    const ContinuationRolePlan& role,
+    int key,
+    const ModeDef& mode,
+    bool strictCollection,
+    bool flats)
+{
+    SongSection& section = candidate.chordSection;
+    GenerationRecipe& recipe = candidate.recipe;
+    const int phraseTicks = qMin(
+        section.beats * 12, qMax(12, recipe.beatsPerBar * 12));
+    const QVector<TimedPitch> motif = openingIdentity(
+        source.melodyPhrase, phraseTicks, 8);
+    if (motif.size() < 2) return;
+    const int totalTicks = section.beats * 12;
+    const int finalStart = qMax(0, totalTicks - phraseTicks);
+    QVector<int> starts{finalStart};
+
+    QVector<QPair<int, int>> written;
+    const int sourceAnchor = motif.front().midi;
+    for (int occurrence = 0; occurrence < starts.size(); ++occurrence) {
+        const int start = starts.at(occurrence);
+        clearMusicalLaneWindow(
+            section, start, qMin(totalTicks, start + phraseTicks),
+            QStringLiteral("melody"));
+        const QString openingChord = writtenChordAtBeat(section, start / 12);
+        const ParsedChord chord = parseChord(openingChord);
+        const int anchorPitchClass = chord.valid ? chord.root : key;
+        QVector<int> sourceCollection = homePitchClasses(key, mode);
+        if (!strictCollection) {
+            for (const TimedPitch& event : motif) {
+                if (!sourceCollection.contains(pitchClass(event.midi))) {
+                    sourceCollection << pitchClass(event.midi);
+                }
+            }
+        }
+        const int anchor = nearestAllowedMidi(
+            sourceCollection, 64 + pitchClass(anchorPitchClass - 4),
+            55, 79) + role.melodyRegisterShift;
+        for (int ordinal = 0; ordinal < motif.size(); ++ordinal) {
+            if (role.id == QStringLiteral("breakdown") && ordinal % 2 == 1) continue;
+            int relative = motif.at(ordinal).midi - sourceAnchor;
+            int localTick = motif.at(ordinal).tick;
+            if (role.id == QStringLiteral("bridge")) {
+                relative = -relative;
+                localTick += ordinal % 2 == 0 ? 0 : 3;
+            } else if (role.id == QStringLiteral("riff_answer")) {
+                localTick += ordinal % 2 == 0 ? 0 : 3;
+            } else if (role.id == QStringLiteral("chorus")) {
+                relative = qRound(relative * 1.2);
+            } else if (role.id == QStringLiteral("section_change") &&
+                       ordinal == motif.size() - 1) {
+                relative += relative >= 0 ? 4 : -4;
+            }
+            const int requestedTick = qMin(
+                totalTicks - 1, start + qMax(0, localTick));
+            const int beat = requestedTick / 12;
+            QVector<int> allowed = sourceCollection;
+            const ParsedChord active = parseChord(writtenChordAtBeat(section, beat));
+            if (requestedTick % (recipe.beatsPerBar * 12) == 0 && active.valid) {
+                const QVector<int> chordTones = chordPitchClasses(active);
+                QVector<int> strictChordTones;
+                for (int pitch : chordTones) {
+                    if (allowed.contains(pitch)) strictChordTones << pitch;
+                }
+                if (!strictChordTones.isEmpty()) allowed = strictChordTones;
+            }
+            const int midi = nearestAllowedMidi(
+                allowed, anchor + relative + (occurrence == 1 ? 2 : 0),
+                52, 84);
+            const int actualTick = placeMusicalOnset(
+                section, requestedTick, QStringLiteral("melody"), midi,
+                qBound(62, motif.at(ordinal).velocity +
+                    (role.id == QStringLiteral("chorus") ? 6 : 0), 118),
+                role.id == QStringLiteral("riff_answer")
+                    ? QStringLiteral("source-riff-answer")
+                    : QStringLiteral("source-motif-development"),
+                flats);
+            if (actualTick >= 0) written.push_back({actualTick, midi});
+        }
+    }
+
+    const auto inTransformedWindow = [&starts, phraseTicks](int tick) {
+        for (int start : starts) {
+            if (tick >= start && tick < start + phraseTicks) return true;
+        }
+        return false;
+    };
+    recipe.melodyEvents.erase(
+        std::remove_if(recipe.melodyEvents.begin(), recipe.melodyEvents.end(),
+            [&inTransformedWindow](const MelodyRecipeEvent& event) {
+                return inTransformedWindow(event.tick);
+            }),
+        recipe.melodyEvents.end());
+    for (const auto& [tick, midi] : written) {
+        recipe.melodyEvents.push_back({
+            tick, 6, midi, 92,
+            noteName(pitchClass(midi), flats) + QString::number(midi / 12 - 1),
+            writtenChordAtBeat(section, tick / 12),
+            QStringLiteral("source-derived"), role.id});
+    }
+    std::sort(recipe.melodyEvents.begin(), recipe.melodyEvents.end(),
+        [](const MelodyRecipeEvent& left, const MelodyRecipeEvent& right) {
+            return left.tick < right.tick;
+        });
+    for (int index = 0; index + 1 < recipe.melodyEvents.size(); ++index) {
+        recipe.melodyEvents[index].durationTicks = qMax(
+            1, qMin(recipe.melodyEvents[index].durationTicks,
+                recipe.melodyEvents[index + 1].tick -
+                    recipe.melodyEvents[index].tick));
+    }
+    section.targets.fill(QString(), section.beats);
+    for (int beat = 0; beat < section.musicalPatterns.size(); ++beat) {
+        const MusicalBeatPattern& pattern = section.musicalPatterns.at(beat);
+        for (const MusicalStep& step : pattern.melody) {
+            if (step.state == MusicalStepState::Onset) {
+                section.targets[beat] = step.value;
+                break;
+            }
+        }
+        if (section.targets.at(beat).isEmpty()) {
+            section.targets[beat] = QStringLiteral("-");
+        }
+    }
+    recipe.motifCell = QStringLiteral("source-derived-%1").arg(role.id);
+    recipe.motifTransformations.prepend(QStringLiteral(
+        "A brief transformed callback to the source motif appears only at B's return boundary; B's opening and main phrase retain their newly generated melodic identity (%1).")
+        .arg(role.name));
+}
+
+void applySourceBassTransformation(
+    const ContinuationSignature& source,
+    const SongSection& sourceSection,
+    GeneratedPracticeIdea& candidate,
+    const ContinuationRolePlan& role,
+    int key,
+    const ModeDef& mode,
+    bool strictCollection,
+    bool flats)
+{
+    (void)source;
+    (void)role;
+    (void)key;
+    (void)mode;
+    (void)strictCollection;
+    SongSection& section = candidate.chordSection;
+    GenerationRecipe& recipe = candidate.recipe;
+    const int totalTicks = section.beats * 12;
+    const ParsedChord returnTarget = parseChord(
+        writtenChordAtBeat(sourceSection, 0));
+    if (returnTarget.valid && section.beats > 0) {
+        const int returnTick = qMax(0, totalTicks - 6);
+        const int returnMidi = nearestAllowedMidi(
+            QVector<int>{returnTarget.root}, 40, 28, 55);
+        const int actualTick = placeMusicalOnset(
+            section, returnTick, QStringLiteral("bass"), returnMidi, 98,
+            QStringLiteral("return-approach"), flats);
+        if (actualTick >= 0) {
+            recipe.bassEvents.erase(
+                std::remove_if(recipe.bassEvents.begin(), recipe.bassEvents.end(),
+                    [actualTick](const RoleRecipeEvent& event) {
+                        return event.tick == actualTick;
+                    }),
+                recipe.bassEvents.end());
+            recipe.bassEvents.push_back({
+                actualTick, 6, returnMidi, 98,
+                noteName(pitchClass(returnMidi), flats) +
+                    QString::number(returnMidi / 12 - 1),
+                QStringLiteral("bass"),
+                QStringLiteral("return-approach"),
+                QStringLiteral("connected")});
+        }
+    }
+    std::sort(recipe.bassEvents.begin(), recipe.bassEvents.end(),
+        [](const RoleRecipeEvent& left, const RoleRecipeEvent& right) {
+            return left.tick < right.tick;
+        });
+    recipe.variationDecisions << QStringLiteral(
+        "B keeps its newly generated bass phrase; only the final approach is aimed back toward A's opening harmony.");
+}
+
+void applySourceGrooveTransformation(
+    const SongSection& source,
+    GeneratedPracticeIdea& candidate,
+    const ContinuationRolePlan& role,
+    std::uint32_t seed)
+{
+    if (candidate.beatSection.beatPatterns.size() !=
+        candidate.beatSection.beats) return;
+    const QStringList laneNames = BeatGridModel::beatLaneNames();
+    const int kick = laneNames.indexOf(QStringLiteral("Kick"));
+    const int snare = laneNames.indexOf(QStringLiteral("Snare"));
+    const int closedHat = laneNames.indexOf(QStringLiteral("Closed HH"));
+    const int openHat = laneNames.indexOf(QStringLiteral("Open HH"));
+    const int crash = laneNames.indexOf(QStringLiteral("Crash"));
+    const int ride = laneNames.indexOf(QStringLiteral("Ride"));
+    const int highTom = laneNames.indexOf(QStringLiteral("High Tom"));
+    const int midTom = laneNames.indexOf(QStringLiteral("Mid Tom"));
+    const int floorTom = laneNames.indexOf(QStringLiteral("Floor Tom"));
+    const int beatsPerBar = qMax(1, candidate.recipe.beatsPerBar);
+    const int rebuildBeat = (candidate.beatSection.beats / 2 / beatsPerBar) *
+        beatsPerBar;
+    const auto isHit = [](QChar state) {
+        state = state.toLower();
+        return state == QLatin1Char('x') || state == QLatin1Char('a') ||
+            state == QLatin1Char('g');
+    };
+    const auto putHit = [](BeatPattern& pattern, int lane, int step, QChar state) {
+        if (lane < 0 || lane >= pattern.lanes.size() || step < 0 ||
+            step >= pattern.division) return;
+        pattern.lanes[lane][step] = state;
+    };
+    const auto moveHit = [&isHit, &putHit](
+        BeatPattern& pattern, int fromLane, int toLane, int step, QChar fallback) {
+        if (fromLane < 0 || fromLane >= pattern.lanes.size() ||
+            toLane < 0 || toLane >= pattern.lanes.size() || step < 0 ||
+            step >= pattern.division) return false;
+        const QChar sourceState = pattern.lanes[fromLane].at(step);
+        if (!isHit(sourceState)) return false;
+        pattern.lanes[fromLane][step] = QLatin1Char('.');
+        putHit(pattern, toLane, step,
+            isHit(sourceState) ? sourceState : fallback);
+        return true;
+    };
+    int sourceClosedHatHits = 0;
+    int sourceRideHits = 0;
+    for (const BeatPattern& pattern : source.beatPatterns) {
+        if (closedHat >= 0 && closedHat < pattern.lanes.size()) {
+            for (QChar state : pattern.lanes.at(closedHat)) {
+                if (isHit(state)) ++sourceClosedHatHits;
+            }
+        }
+        if (ride >= 0 && ride < pattern.lanes.size()) {
+            for (QChar state : pattern.lanes.at(ride)) {
+                if (isHit(state)) ++sourceRideHits;
+            }
+        }
+    }
+    int bodyChanges = 0;
+    for (int beat = 0; beat < candidate.beatSection.beatPatterns.size(); ++beat) {
+        BeatPattern& pattern = candidate.beatSection.beatPatterns[beat];
+        if (pattern.division <= 0) pattern.division = 4;
+        if (pattern.lanes.size() != laneNames.size()) {
+            pattern.lanes.resize(laneNames.size());
+        }
+        for (QString& laneText : pattern.lanes) {
+            if (laneText.size() != pattern.division) {
+                laneText = QString(pattern.division, QLatin1Char('.'));
+            }
+        }
+        const QVector<QString> before = pattern.lanes;
+        const int bar = beat / beatsPerBar;
+        const int beatInBar = beat % beatsPerBar;
+        const int halfStep = qMin(pattern.division - 1,
+            qMax(0, pattern.division / 2));
+        const int lastStep = pattern.division - 1;
+        if (role.id == QStringLiteral("breakdown") && beat < rebuildBeat) {
+            if (closedHat >= 0) pattern.lanes[closedHat].fill(QLatin1Char('.'));
+            if (openHat >= 0) pattern.lanes[openHat].fill(QLatin1Char('.'));
+            if (kick >= 0 && beat % beatsPerBar != 0) {
+                pattern.lanes[kick].fill(QLatin1Char('.'));
+            }
+        } else if (role.id == QStringLiteral("breakdown") &&
+                   beat == rebuildBeat && kick >= 0) {
+            putHit(pattern, kick, 0, QLatin1Char('a'));
+        } else if (role.id == QStringLiteral("bridge")) {
+            // Give alternating bars a genuinely different cymbal voice while
+            // retaining the source rhythm, then displace one kick per bar.
+            if (bar % 2 == 1 && ride >= 0 && closedHat >= 0) {
+                bool movedHat = false;
+                for (int step = 0; step < pattern.division; ++step) {
+                    movedHat = moveHit(
+                        pattern, closedHat, ride, step, QLatin1Char('x')) ||
+                        movedHat;
+                }
+                if (!movedHat && beatInBar % 2 == 0) {
+                    putHit(pattern, ride, 0, QLatin1Char('g'));
+                }
+            }
+            if (kick >= 0 && beatInBar == beatsPerBar / 2 &&
+                pattern.division > 1) {
+                pattern.lanes[kick].fill(QLatin1Char('.'));
+                putHit(pattern, kick, halfStep, QLatin1Char('x'));
+            }
+        } else if (role.id == QStringLiteral("chorus")) {
+            // Preserve the backbeat but create a consistent lift into each
+            // bar with an anticipated kick and a more open cymbal release.
+            if (kick >= 0 && beatInBar == beatsPerBar - 1 &&
+                pattern.division > 1) {
+                putHit(pattern, kick, halfStep,
+                    bar % 2 == 0 ? QLatin1Char('x') : QLatin1Char('a'));
+            }
+            if (beatInBar == beatsPerBar - 1 && closedHat >= 0 &&
+                openHat >= 0) {
+                if (!moveHit(pattern, closedHat, openHat, lastStep,
+                        QLatin1Char('a'))) {
+                    putHit(pattern, openHat, lastStep, QLatin1Char('a'));
+                }
+            }
+            if (kick >= 0 && beatInBar == 0) {
+                putHit(pattern, kick, 0, QLatin1Char('a'));
+            }
+        } else if (role.id == QStringLiteral("riff_answer")) {
+            // Recut the kick across alternate bars and answer it with an open
+            // cymbal; the original structural downbeats remain intact.
+            if (bar % 2 == 1 && kick >= 0 && pattern.division > 1 &&
+                beatInBar == qMax(0, beatsPerBar - 2)) {
+                putHit(pattern, kick, halfStep, QLatin1Char('a'));
+                if (isHit(pattern.lanes[kick].at(0)) && beatInBar != 0) {
+                    pattern.lanes[kick][0] = QLatin1Char('.');
+                }
+            }
+            if (bar % 2 == 1 && beatInBar == beatsPerBar - 1 &&
+                openHat >= 0) {
+                putHit(pattern, openHat, lastStep, QLatin1Char('x'));
+                if (closedHat >= 0) {
+                    pattern.lanes[closedHat][lastStep] = QLatin1Char('.');
+                }
+            }
+        } else if (role.id == QStringLiteral("section_change")) {
+            // Establish a different kit voice from A across alternating bars,
+            // then reinforce that change with a new kick answer. The starting
+            // grid is already a fresh profile-native performance.
+            const int sourceCymbal = sourceRideHits > sourceClosedHatHits
+                ? ride : closedHat;
+            const int targetCymbal = sourceCymbal == ride ? closedHat : ride;
+            if (bar % 2 == 0 && sourceCymbal >= 0 && targetCymbal >= 0) {
+                bool movedCymbal = false;
+                for (int step = 0; step < pattern.division; ++step) {
+                    movedCymbal = moveHit(
+                        pattern, sourceCymbal, targetCymbal, step,
+                        QLatin1Char('x')) || movedCymbal;
+                }
+                if (!movedCymbal && beatInBar % 2 == 0) {
+                    putHit(pattern, targetCymbal, 0, QLatin1Char('g'));
+                }
+            }
+            if (bar % 2 == 1 && beatInBar == beatsPerBar - 1) {
+                if (kick >= 0 && pattern.division > 1) {
+                    const int anticipation = isHit(
+                            pattern.lanes[kick].at(halfStep))
+                        ? lastStep : halfStep;
+                    putHit(pattern, kick, anticipation,
+                        bar % 4 == 1 ? QLatin1Char('x') : QLatin1Char('a'));
+                }
+                if (closedHat >= 0 && openHat >= 0) {
+                    bool movedHat = false;
+                    for (int step = 0; step < pattern.division; ++step) {
+                        if (step < halfStep) continue;
+                        movedHat = moveHit(
+                            pattern, closedHat, openHat, step,
+                            QLatin1Char('g')) || movedHat;
+                    }
+                    if (!movedHat) {
+                        putHit(pattern, openHat, lastStep, QLatin1Char('g'));
+                    }
+                }
+            }
+            if (bar % 4 == 2 && beatInBar == beatsPerBar / 2 &&
+                snare >= 0 && pattern.division > 1) {
+                putHit(pattern, snare, halfStep, QLatin1Char('g'));
+            }
+        }
+        for (int lane = 0; lane < pattern.lanes.size(); ++lane) {
+            const QString prior = before.value(lane);
+            const QString after = pattern.lanes.at(lane);
+            const int steps = qMax(prior.size(), after.size());
+            for (int step = 0; step < steps; ++step) {
+                const QChar priorState = step < prior.size()
+                    ? prior.at(step) : QLatin1Char('.');
+                const QChar afterState = step < after.size()
+                    ? after.at(step) : QLatin1Char('.');
+                if (priorState != afterState) {
+                    ++bodyChanges;
+                }
+            }
+        }
+    }
+    if (!candidate.beatSection.beatPatterns.isEmpty()) {
+        BeatPattern& entrance = candidate.beatSection.beatPatterns[0];
+        if ((role.id == QStringLiteral("chorus") ||
+             role.id == QStringLiteral("riff_answer")) && crash >= 0) {
+            entrance.lanes[crash][0] = QLatin1Char('a');
+        }
+        if (role.id == QStringLiteral("breakdown") && rebuildBeat >= 0 &&
+            rebuildBeat < candidate.beatSection.beatPatterns.size() && crash >= 0) {
+            candidate.beatSection.beatPatterns[rebuildBeat].lanes[crash][0] =
+                QLatin1Char('a');
+        }
+        BeatPattern& ending = candidate.beatSection.beatPatterns.last();
+        if (ending.division >= 4) {
+            if (highTom >= 0) ending.lanes[highTom][ending.division - 3] = QLatin1Char('x');
+            if (midTom >= 0) ending.lanes[midTom][ending.division - 2] = QLatin1Char('x');
+            if (floorTom >= 0) ending.lanes[floorTom][ending.division - 1] = QLatin1Char('a');
+        } else if (openHat >= 0) {
+            ending.lanes[openHat][ending.division - 1] = QLatin1Char('a');
+        }
+    }
+    QSet<int> fillBeats;
+    if (candidate.beatSection.beats > 0) {
+        fillBeats.insert(candidate.beatSection.beats - 1);
+    }
+    populateDrumPerformance(
+        candidate.beatSection, candidate.recipe, seed, fillBeats);
+    candidate.recipe.grooveDecisions << QStringLiteral(
+        "The continuation uses a newly generated profile-native groove, then applies a phrase-level %1 arrangement operation (%2 additional grid changes before the return fill). It retains A's kit and timing family, not A's drum grid or groove ID.")
+        .arg(role.name)
+        .arg(bodyChanges);
+}
+
+void applySourceDerivedContinuation(
+    const SongSection& source,
+    const ContinuationSignature& signature,
+    GeneratedPracticeIdea& candidate,
+    const ContinuationRolePlan& role,
+    int key,
+    const ModeDef& mode,
+    bool strictCollection,
+    std::uint32_t seed)
+{
+    const bool flats = candidate.recipe.tonic.contains(QLatin1Char('b'));
+    preserveSourceSoundIdentity(candidate, source.generatedRecipe);
+    applySourceMelodyTransformation(
+        signature, candidate, role, key, mode, strictCollection, flats);
+    applySourceBassTransformation(
+        signature, source, candidate, role, key, mode, strictCollection, flats);
+    applySourceGrooveTransformation(source, candidate, role, seed);
+    candidate.recipe.chordFingerprint = contentFingerprint(
+        candidate.chordSection, false);
+    candidate.recipe.beatFingerprint = contentFingerprint(
+        candidate.beatSection, true);
+}
+
+double chordToneSimilarity(const QString& leftSymbol, const QString& rightSymbol)
+{
+    const ParsedChord left = parseChord(leftSymbol);
+    const ParsedChord right = parseChord(rightSymbol);
+    if (!left.valid || !right.valid || left.rest || right.rest) return 0.0;
+    QSet<int> leftTones;
+    for (int pitch : chordPitchClasses(left)) leftTones.insert(pitch);
+    QSet<int> rightTones;
+    for (int pitch : chordPitchClasses(right)) rightTones.insert(pitch);
+    return setSimilarity(leftTones, rightTones, 0.0);
+}
+
+double continuationBoundaryVoiceLeading(
+    const SongSection& source,
+    const SongSection& candidate)
+{
+    if (source.beats <= 0 || candidate.beats <= 0) return 0.0;
+    const double entrance = chordToneSimilarity(
+        writtenChordAtBeat(source, source.beats - 1),
+        writtenChordAtBeat(candidate, 0));
+    const double returnPath = chordToneSimilarity(
+        writtenChordAtBeat(candidate, candidate.beats - 1),
+        writtenChordAtBeat(source, 0));
+    return (entrance + returnPath) * 0.5;
+}
+
+InferredContinuationSource inferContinuationSource(
+    const SongSection& source,
+    const ContinueIdeaRequest& request,
+    const ContinuationSignature& signature)
+{
+    InferredContinuationSource result;
+    if (source.generatedRecipe.isValid()) {
+        const GenerationRecipe& recipe = source.generatedRecipe;
+        const ParsedChord tonic = parseChord(recipe.tonic);
+        if (tonic.valid) {
+            result.tonic = tonic.root;
+            result.tonicName = noteName(tonic.root, recipe.tonic.contains(QLatin1Char('b')));
+        }
+        result.modeId = canonicalModeId(recipe.mode);
+        result.modeName = recipe.mode;
+        result.tonalConfidence = 1.0;
+        result.profileId = recipe.profileId;
+        result.profileEvidence = QStringLiteral(
+            "The source carries a valid %1 generation recipe.").arg(recipe.profileName);
+        result.profileConfidence = 1.0;
+        result.complexity = qBound(1, recipe.complexity, 8);
+        return result;
+    }
+
+    struct ModeCandidate {
+        QString id;
+        QString name;
+        QVector<int> intervals;
+        bool minor = false;
+    };
+    const QVector<ModeCandidate> modes{
+        {QStringLiteral("ionian"), QStringLiteral("Major"), {0, 2, 4, 5, 7, 9, 11}, false},
+        {QStringLiteral("aeolian"), QStringLiteral("Natural Minor"), {0, 2, 3, 5, 7, 8, 10}, true},
+        {QStringLiteral("dorian"), QStringLiteral("Dorian"), {0, 2, 3, 5, 7, 9, 10}, true},
+        {QStringLiteral("mixolydian"), QStringLiteral("Mixolydian"), {0, 2, 4, 5, 7, 9, 10}, false},
+        {QStringLiteral("lydian"), QStringLiteral("Lydian"), {0, 2, 4, 6, 7, 9, 11}, false},
+        {QStringLiteral("phrygian"), QStringLiteral("Phrygian"), {0, 1, 3, 5, 7, 8, 10}, true},
+    };
+    bool sourceUsesFlats = false;
+    for (int beat = 0; beat < source.beats; ++beat) {
+        const ParsedChord chord = parseChord(writtenChordAtBeat(source, beat));
+        sourceUsesFlats = sourceUsesFlats ||
+            chord.rootName.contains(QLatin1Char('b')) ||
+            chord.bassName.contains(QLatin1Char('b'));
+    }
+    double bestScore = -std::numeric_limits<double>::infinity();
+    double secondBestScore = -std::numeric_limits<double>::infinity();
+    for (int tonic = 0; tonic < 12; ++tonic) {
+        for (const ModeCandidate& mode : modes) {
+            double score = 0.0;
+            for (int beat = 0; beat < source.beats; ++beat) {
+                const ParsedChord chord = parseChord(writtenChordAtBeat(source, beat));
+                if (!chord.valid || chord.rest) continue;
+                const int relativeRoot = pitchClass(chord.root - tonic);
+                score += mode.intervals.contains(relativeRoot) ? 2.0 : -2.5;
+                for (int interval : chord.intervals) {
+                    const int relativeTone = pitchClass(chord.root + interval - tonic);
+                    score += mode.intervals.contains(relativeTone) ? 0.25 : -0.2;
+                }
+            }
+            for (int midi : signature.melodyMidi) {
+                const int relative = pitchClass(midi - tonic);
+                score += mode.intervals.contains(relative) ? 0.35 : -0.30;
+            }
+            for (int midi : signature.bassMidi) {
+                const int relative = pitchClass(midi - tonic);
+                score += mode.intervals.contains(relative) ? 0.45 : -0.35;
+            }
+            const ParsedChord opening = parseChord(writtenChordAtBeat(source, 0));
+            if (opening.valid && opening.root == tonic) {
+                score += 4.0;
+                const QString suffix = opening.suffix.toLower();
+                const bool openingMinor = suffix.startsWith(QLatin1Char('m')) &&
+                    !suffix.startsWith(QStringLiteral("maj"));
+                score += openingMinor == mode.minor ? 2.0 : -1.0;
+            } else if (!signature.bassMidi.isEmpty() &&
+                       pitchClass(signature.bassMidi.front()) == tonic) {
+                score += 2.0;
+            } else if (!signature.melodyMidi.isEmpty() &&
+                       pitchClass(signature.melodyMidi.front()) == tonic) {
+                score += 1.0;
+            }
+            if (score > bestScore) {
+                secondBestScore = bestScore;
+                bestScore = score;
+                result.tonic = tonic;
+                result.tonicName = noteName(tonic, sourceUsesFlats);
+                result.modeId = mode.id;
+                result.modeName = mode.name;
+            } else if (score > secondBestScore) {
+                secondBestScore = score;
+            }
+        }
+    }
+    const int pitchedEvidence = signature.melodyMidi.size() +
+        signature.bassMidi.size();
+    if (signature.chordEventCount <= 0 && pitchedEvidence <= 0) {
+        result.tonalConfidence = 0.05;
+    } else {
+        const double margin = std::isfinite(secondBestScore)
+            ? qMax(0.0, bestScore - secondBestScore) : 0.0;
+        result.tonalConfidence = qBound(
+            0.15,
+            0.18 + 0.10 * qMin(5, signature.chordEventCount) +
+                0.025 * qMin(8, pitchedEvidence) +
+                0.08 * qMin(4.0, margin),
+            0.95);
+    }
+
+    const double extendedRatio = signature.chordEventCount > 0
+        ? static_cast<double>(signature.extendedChordCount) / signature.chordEventCount : 0.0;
+    const int bars = qMax(1, source.beats / qMax(1, request.beatsPerBar));
+    const double fourOnFloor = source.beats > 0
+        ? static_cast<double>(signature.kickQuarterAnchors) / source.beats : 0.0;
+    const double backbeat = bars > 0
+        ? static_cast<double>(signature.snareBackbeatAnchors) / (bars * 2) : 0.0;
+    const double halfTime = bars > 0
+        ? static_cast<double>(signature.snareHalfTimeAnchors) / bars : 0.0;
+    const double hatsPerBeat = source.beats > 0
+        ? static_cast<double>(signature.hatEvents) / source.beats : 0.0;
+    if (fourOnFloor >= 0.70 && hatsPerBeat >= 1.0) {
+        result.profileId = QStringLiteral("electronic_house");
+        result.profileConfidence = 0.90;
+        result.alternativeProfiles = {
+            QStringLiteral("electronic_techno"), QStringLiteral("pop_loop")};
+        result.profileEvidence = QStringLiteral(
+            "Quarter-note kick coverage and continuous hats imply a four-on-the-floor House pocket.");
+    } else if (halfTime >= 0.70 && hatsPerBeat >= 1.5) {
+        result.profileId = QStringLiteral("hiphop_trap");
+        result.profileConfidence = 0.90;
+        result.alternativeProfiles = {
+            QStringLiteral("hiphop_boom_bap"), QStringLiteral("electronic_breakbeat")};
+        result.profileEvidence = QStringLiteral(
+            "A half-time snare anchor with dense hats implies a Trap-derived pocket.");
+    } else if (halfTime >= 0.70 && backbeat < 0.55) {
+        result.profileId = QStringLiteral("hiphop_boom_bap");
+        result.profileConfidence = 0.82;
+        result.alternativeProfiles = {
+            QStringLiteral("hiphop_trap"), QStringLiteral("funk_static_pocket")};
+        result.profileEvidence = QStringLiteral(
+            "A stable half-time snare with restrained hats implies a laid-back Hip-Hop pocket.");
+    } else if (signature.powerChordCount > 0) {
+        result.profileId = QStringLiteral("rock_riff_modal");
+        result.profileConfidence = 0.86;
+        result.alternativeProfiles = {
+            QStringLiteral("rock_punk_garage"), QStringLiteral("metal_modern_progressive")};
+        result.profileEvidence = QStringLiteral("Power-chord or riff-root symbols imply a riff-led continuation prior.");
+    } else if (extendedRatio >= 0.6 && request.meterId.contains(QStringLiteral("swing"))) {
+        result.profileId = QStringLiteral("jazz_swing_standards");
+        result.profileConfidence = 0.80;
+        result.alternativeProfiles = {
+            QStringLiteral("bossa_songbook"), QStringLiteral("soul_classic_motown")};
+        result.profileEvidence = QStringLiteral("Extended harmony and a swing meter imply a standards-derived prior.");
+    } else if (extendedRatio >= 0.6) {
+        result.profileId = QStringLiteral("soul_classic_motown");
+        result.profileConfidence = 0.72;
+        result.alternativeProfiles = {
+            QStringLiteral("rnb_contemporary_neosoul"), QStringLiteral("jazz_swing_standards")};
+        result.profileEvidence = QStringLiteral("Extended harmony without swing implies a restrained Soul/R&B prior.");
+    } else if (signature.chordRoots.size() <= 2 && signature.chordEventCount <= qMax(4, bars)) {
+        result.profileId = QStringLiteral("modal_groove");
+        result.profileConfidence = 0.68;
+        result.alternativeProfiles = {
+            QStringLiteral("rock_riff_modal"), QStringLiteral("electronic_techno")};
+        result.profileEvidence = QStringLiteral("A small chord vocabulary and slow harmonic rhythm imply a modal-groove prior.");
+    } else {
+        result.profileId = QStringLiteral("pop_loop");
+        result.profileConfidence = 0.45;
+        result.alternativeProfiles = {
+            QStringLiteral("country_contemporary"), QStringLiteral("soul_classic_motown")};
+        result.profileEvidence = QStringLiteral("No named style is forced; a neutral loop grammar supplies bounded arrangement choices.");
+    }
+    const int eventsPerEightBars = bars > 0
+        ? (signature.chordEventCount * 8) / bars : signature.chordEventCount;
+    result.complexity = qBound(1, 1 + eventsPerEightBars / 4 +
+        (signature.extendedChordCount > 0 ? 1 : 0), 6);
+    return result;
+}
+
+SongSection combinedContinuationSection(const GeneratedPracticeIdea& idea)
+{
+    SongSection result = idea.chordSection;
+    result.beatNotes = idea.beatSection.beatNotes;
+    result.beatPatterns = idea.beatSection.beatPatterns;
+    return result;
+}
+
+QString continuationRelationship(const QString& profileId, const QString& styleId)
+{
+    if (profileId.startsWith(QStringLiteral("modal_")) ||
+        styleId == QStringLiteral("electronic") ||
+        styleId == QStringLiteral("hiphop-trap") ||
+        styleId == QStringLiteral("reggae")) {
+        return QStringLiteral("continue_textural_lift");
+    }
+    if (styleId == QStringLiteral("rock") || styleId == QStringLiteral("funk") ||
+        styleId == QStringLiteral("metal") || profileId.contains(QStringLiteral("fusion"))) {
+        return QStringLiteral("continue_riff_answer");
+    }
+    if (styleId == QStringLiteral("blues")) {
+        return QStringLiteral("continue_native_form_slot");
+    }
+    return QStringLiteral("continue_harmonic_lift");
+}
+
+GeneratedContinuationIdea continuationIdea(
+    const SongSection& source,
+    ContinueIdeaRequest request,
+    std::uint32_t seed)
+{
+    request.beatsPerBar = qBound(1, request.beatsPerBar, 32);
+    request.bpm = qBound(20, request.bpm, 400);
+    const ContinuationSignature sourceSignature = continuationSignature(
+        source, request.beatsPerBar);
+    const InferredContinuationSource inferred = inferContinuationSource(
+        source, request, sourceSignature);
+
+    ChordIdeaRequest candidateRequest;
+    candidateRequest.key = inferred.tonic;
+    candidateRequest.profileId = inferred.profileId;
+    if (const ProfileDefinition* profile = findProfile(inferred.profileId, true)) {
+        candidateRequest.styleId = profile->styleId;
+    }
+    candidateRequest.meterId = request.meterId;
+    if (source.generatedRecipe.isValid()) {
+        candidateRequest.productionFamilyId =
+            source.generatedRecipe.productionFamilyId;
+        candidateRequest.formId = source.generatedRecipe.formId;
+    }
+    candidateRequest.allowMeterOverride = true;
+    candidateRequest.allowModeOverride = true;
+    candidateRequest.modeId = inferred.modeId;
+    candidateRequest.bpm = request.bpm;
+    candidateRequest.bars = qMax(
+        1, (source.beats + request.beatsPerBar - 1) / request.beatsPerBar);
+    candidateRequest.beatsPerBar = request.beatsPerBar;
+    candidateRequest.harmonicComplexity = inferred.complexity;
+    candidateRequest.rhythmicComplexity = inferred.complexity;
+    candidateRequest.targetSectionIndex = request.targetSectionIndex;
+
+    constexpr int kCandidateCount = 32;
+    const std::optional<ModeDef> harmonyMode =
+        continuationHarmonyMode(inferred.modeId);
+    const std::optional<ModeDef> pitchCollection =
+        continuationPitchCollection(inferred.modeId);
+    const bool nativeBluesCollection =
+        inferred.modeId == QStringLiteral("dominant-blues") ||
+        inferred.modeId == QStringLiteral("minor-blues") ||
+        inferred.modeId == QStringLiteral("blues");
+    const ModeDef planningMode = harmonyMode.value_or(
+        pitchCollection.value_or(
+        inferred.modeId.contains(QStringLiteral("minor"))
+            ? ModeDef{QStringLiteral("Natural Minor"), {0,2,3,5,7,8,10}, true}
+            : inferred.modeId.contains(QStringLiteral("blues"))
+                ? ModeDef{QStringLiteral("Mixolydian"), {0,2,4,5,7,9,10}, false}
+                : ModeDef{QStringLiteral("Major"), {0,2,4,5,7,9,11}, false}));
+    const ContinuationRolePlan role = continuationRolePlan(
+        inferred.profileId, sourceSignature, source.beats);
+    int returnTargetDegree = -1;
+    const ParsedChord sourceOpeningChord = parseChord(
+        writtenChordAtBeat(source, 0));
+    if (sourceOpeningChord.valid && harmonyMode.has_value()) {
+        const int relative = pitchClass(sourceOpeningChord.root - inferred.tonic);
+        for (int degree = 0; degree < harmonyMode->intervals.size(); ++degree) {
+            if (harmonyMode->intervals.at(degree) == relative) {
+                returnTargetDegree = degree;
+                break;
+            }
+        }
+    }
+    const bool useSevenths = sourceSignature.chordEventCount > 0 &&
+        sourceSignature.extendedChordCount * 2 >= sourceSignature.chordEventCount;
+    const bool usePowerChords = sourceSignature.chordEventCount > 0 &&
+        sourceSignature.powerChordCount * 2 >= sourceSignature.chordEventCount;
+    double bestScore = -std::numeric_limits<double>::infinity();
+    GeneratedPracticeIdea best;
+    ContinuationAnalysis bestAnalysis;
+    ContinuationStylePlan bestStylePlan;
+    for (int index = 0; index < kCandidateCount; ++index) {
+        const std::uint32_t candidateSeed = performanceHash(
+            seed, index, source.beats, 0x9e3779b9U);
+        ContinuationStylePlan stylePlan = continuationStylePlan(
+            inferred.profileId,
+            candidateRequest.styleId,
+            planningMode,
+            useSevenths,
+            usePowerChords,
+            candidateRequest.bars,
+            index);
+        if (nativeBluesCollection) {
+            stylePlan.progression = nativeBluesContinuationProgression(
+                inferred.modeId == QStringLiteral("minor-blues"),
+                candidateRequest.bars,
+                index);
+            stylePlan.progressionByEvent = false;
+        }
+        if (sourceSignature.chordEventCount > candidateRequest.bars) {
+            stylePlan.progressionByEvent = true;
+        }
+        if (returnTargetDegree >= 0 &&
+            !stylePlan.progression.romans.isEmpty() &&
+            !inferred.profileId.startsWith(QStringLiteral("modal_")) &&
+            inferred.profileId != QStringLiteral("funk_static_pocket")) {
+            const bool plannedSeventh =
+                stylePlan.progression.romans.last().contains(QLatin1Char('7'));
+            stylePlan.progression.romans.last() = diatonicRoman(
+                *harmonyMode,
+                (returnTargetDegree + 4) % harmonyMode->intervals.size(),
+                plannedSeventh,
+                usePowerChords);
+        }
+        if (harmonyMode.has_value() && !nativeBluesCollection) {
+            increaseContinuationHarmonicContrast(
+                stylePlan.progression,
+                sourceSignature,
+                inferred.tonic,
+                *harmonyMode,
+                useSevenths,
+                usePowerChords,
+                index);
+        }
+        GeneratedPracticeIdea candidate = coupledIdea(
+            candidateRequest,
+            candidateSeed,
+            (harmonyMode.has_value() || nativeBluesCollection)
+                ? &stylePlan.progression : nullptr,
+            harmonyMode.has_value() ? &*harmonyMode : nullptr,
+            harmonyMode.has_value() && stylePlan.progressionByEvent);
+        applySourceDerivedContinuation(
+            source, sourceSignature, candidate, role,
+            inferred.tonic,
+            pitchCollection.value_or(planningMode),
+            pitchCollection.has_value(), candidateSeed);
+        const SongSection combined = combinedContinuationSection(candidate);
+        if (harmonyMode.has_value() &&
+            !sectionFitsMode(combined, inferred.tonic, *harmonyMode)) {
+            continue;
+        }
+        if (source.generatedRecipe.isValid() &&
+            (candidate.recipe.tonic != source.generatedRecipe.tonic ||
+             candidate.recipe.mode != source.generatedRecipe.mode ||
+             candidate.recipe.profileId != source.generatedRecipe.profileId ||
+             candidate.recipe.formId != source.generatedRecipe.formId)) {
+            continue;
+        }
+        const ContinuationSignature signature = continuationSignature(
+            combined, request.beatsPerBar);
+        const double chordSimilarity = setSimilarity(
+            sourceSignature.chordRoots, signature.chordRoots, 0.0);
+        const double chordQualitySimilarity = setSimilarity(
+            sourceSignature.chordSymbols, signature.chordSymbols, 0.0);
+        const double orderContrast = chordOrderContrast(
+            sourceSignature.chordOrder, signature.chordOrder);
+        const double openingPositionSimilarity =
+            openingChordPositionSimilarity(
+                sourceSignature.chordOrder, signature.chordOrder);
+        const double drumSimilarity = setSimilarity(
+            sourceSignature.drumOnsets, signature.drumOnsets, 0.5);
+        const double melodySimilarity = setSimilarity(
+            sourceSignature.melodyOnsets, signature.melodyOnsets, 0.5);
+        const double contourSimilarity = melodyContourSimilarity(
+            sourceSignature.melodyMidi, signature.melodyMidi);
+        const double bassContourSimilarity = melodyContourSimilarity(
+            sourceSignature.bassMidi, signature.bassMidi);
+        const double boundaryVoiceLeading =
+            continuationBoundaryVoiceLeading(source, combined);
+        const double harmonicDensityRetention =
+            sourceSignature.chordEventCount <= 0
+            ? 1.0
+            : qMin(1.0,
+                static_cast<double>(signature.chordEventCount) /
+                    sourceSignature.chordEventCount);
+        const double targetDrumSimilarity = qMin(
+            0.42, stylePlan.targetDrumSimilarity);
+        const double targetMelodyRhythmSimilarity =
+            stylePlan.targetMelodyRhythmSimilarity;
+        const double targetMelodyContourSimilarity =
+            stylePlan.targetMelodyContourSimilarity;
+        const double targetBassContourSimilarity =
+            stylePlan.targetBassContourSimilarity;
+        int sourceModeRoots = 0;
+        if (harmonyMode.has_value()) {
+            for (int interval : harmonyMode->intervals) {
+                if (sourceSignature.chordRoots.contains(
+                        pitchClass(inferred.tonic + interval))) {
+                    ++sourceModeRoots;
+                }
+            }
+        }
+        const int unusedModeRoots = harmonyMode.has_value()
+            ? qMax(0, 7 - sourceModeRoots) : 0;
+        const double maximumVocabularyOverlap = unusedModeRoots >= 2
+            ? 0.55 : unusedModeRoots == 1 ? 0.75 : 1.0;
+        const bool newGrooveIdentity = sourceSignature.drumOnsets.isEmpty() ||
+            drumSimilarity <= (nativeBluesCollection ? 0.78 : 0.72);
+        const bool newHarmonicIdentity = nativeBluesCollection ||
+            sourceSignature.chordRoots.isEmpty() ||
+            chordSimilarity <= maximumVocabularyOverlap ||
+            (unusedModeRoots <= 1 && chordQualitySimilarity <= 0.55);
+        const bool newOpeningPhrase = sourceSignature.chordOrder.size() < 4 ||
+            signature.chordOrder.size() < 4 || openingPositionSimilarity <= 0.25;
+        const bool hasContrast = sourceSignature.chordOrder.isEmpty() ||
+            orderContrast >= 0.50;
+        const bool bluesOpeningContrast = nativeBluesCollection &&
+            openingPositionSimilarity <= 0.75 &&
+            (orderContrast > 0.0 || chordQualitySimilarity <= 0.75);
+        if (!newGrooveIdentity || !newHarmonicIdentity ||
+            (!newOpeningPhrase && !bluesOpeningContrast) ||
+            (!hasContrast && !bluesOpeningContrast)) {
+            continue;
+        }
+        const bool keepsSourceKit = source.generatedRecipe.isValid() &&
+            !source.generatedRecipe.drumPatchId.isEmpty() &&
+            candidate.recipe.drumPatchId == source.generatedRecipe.drumPatchId;
+        const double score =
+            3.6 * (1.0 - chordSimilarity) +
+            2.0 * (1.0 - chordQualitySimilarity) +
+            2.8 * qBound(0.0, orderContrast, 1.0) +
+            2.4 * (1.0 - openingPositionSimilarity) +
+            2.2 * (1.0 - std::abs(drumSimilarity - targetDrumSimilarity)) +
+            1.3 * (1.0 - std::abs(
+                melodySimilarity - targetMelodyRhythmSimilarity)) +
+            1.8 * (1.0 - std::abs(
+                contourSimilarity - targetMelodyContourSimilarity)) +
+            1.2 * (1.0 - std::abs(
+                bassContourSimilarity - targetBassContourSimilarity)) +
+            1.4 * boundaryVoiceLeading +
+            1.6 * harmonicDensityRetention +
+            (newHarmonicIdentity ? 1.5 : -6.0) +
+            (hasContrast ? 1.0 : -4.0) +
+            (newGrooveIdentity ? 1.2 : -5.0) +
+            (keepsSourceKit ? 0.6 : 0.0) +
+            (candidate.recipe.mode == inferred.modeName ? 0.8 : 0.0);
+        if (score <= bestScore) continue;
+        bestScore = score;
+        best = std::move(candidate);
+        bestStylePlan = stylePlan;
+        bestAnalysis.inferredTonic = inferred.tonicName;
+        bestAnalysis.inferredMode = inferred.modeName;
+        bestAnalysis.inferredTonalConfidence = inferred.tonalConfidence;
+        bestAnalysis.inferredProfileId = inferred.profileId;
+        bestAnalysis.inferredProfileConfidence = inferred.profileConfidence;
+        bestAnalysis.alternativeProfileIds = inferred.alternativeProfiles;
+        bestAnalysis.continuationRoleId = role.id;
+        bestAnalysis.continuationRoleName = role.name;
+        bestAnalysis.relationshipId = stylePlan.relationshipId.isEmpty()
+            ? continuationRelationship(best.recipe.profileId, best.recipe.styleId)
+            : stylePlan.relationshipId;
+        bestAnalysis.chordVocabularySimilarity = chordSimilarity;
+        bestAnalysis.chordQualityVocabularySimilarity =
+            chordQualitySimilarity;
+        bestAnalysis.chordOrderContrast = orderContrast;
+        bestAnalysis.openingChordPositionSimilarity =
+            openingPositionSimilarity;
+        bestAnalysis.drumSimilarity = drumSimilarity;
+        bestAnalysis.melodyRhythmSimilarity = melodySimilarity;
+        bestAnalysis.melodyContourSimilarity = contourSimilarity;
+        bestAnalysis.bassContourSimilarity = bassContourSimilarity;
+        bestAnalysis.boundaryVoiceLeading = boundaryVoiceLeading;
+        bestAnalysis.harmonicDensityRetention = harmonicDensityRetention;
+        bestAnalysis.sourceChordEvents = sourceSignature.chordEventCount;
+        bestAnalysis.continuationChordEvents = signature.chordEventCount;
+        bestAnalysis.harmonicPacingId = stylePlan.pacingId.isEmpty()
+            ? QStringLiteral("native-profile-form")
+            : stylePlan.pacingId;
+        bestAnalysis.candidateCount = kCandidateCount;
+    }
+
+    bestAnalysis.evidence = {
+        QStringLiteral("Inferred %1 %2 from the source harmony.")
+            .arg(inferred.tonicName, inferred.modeName),
+        QStringLiteral("Tonal-centre confidence %1%.")
+            .arg(qRound(inferred.tonalConfidence * 100.0)),
+        inferred.profileEvidence,
+        QStringLiteral("Profile confidence %1%; alternatives: %2.")
+            .arg(qRound(inferred.profileConfidence * 100.0))
+            .arg(inferred.alternativeProfiles.isEmpty()
+                ? QStringLiteral("none (recipe identity is exact)")
+                : inferred.alternativeProfiles.join(QStringLiteral(", "))),
+        QStringLiteral("Selected %1: %2")
+            .arg(role.name, role.explanation),
+        QStringLiteral("Selected 1 of %1 candidates: chord-root vocabulary overlap %2%, chord-symbol vocabulary overlap %3%, chord-order contrast %4%, first-four-position similarity %5%, drum-onset similarity %6%, melody-rhythm similarity %7%, melody-contour similarity %8%, bass-contour similarity %9%, boundary voice-leading %10%, harmonic-density retention %11% (%12 source changes, %13 continuation changes).")
+            .arg(kCandidateCount)
+            .arg(qRound(bestAnalysis.chordVocabularySimilarity * 100.0))
+            .arg(qRound(
+                bestAnalysis.chordQualityVocabularySimilarity * 100.0))
+            .arg(qRound(bestAnalysis.chordOrderContrast * 100.0))
+            .arg(qRound(
+                bestAnalysis.openingChordPositionSimilarity * 100.0))
+            .arg(qRound(bestAnalysis.drumSimilarity * 100.0))
+            .arg(qRound(bestAnalysis.melodyRhythmSimilarity * 100.0))
+            .arg(qRound(bestAnalysis.melodyContourSimilarity * 100.0))
+            .arg(qRound(bestAnalysis.bassContourSimilarity * 100.0))
+            .arg(qRound(bestAnalysis.boundaryVoiceLeading * 100.0))
+            .arg(qRound(bestAnalysis.harmonicDensityRetention * 100.0))
+            .arg(bestAnalysis.sourceChordEvents)
+            .arg(bestAnalysis.continuationChordEvents),
+    };
+    if (!bestStylePlan.pacingId.isEmpty()) {
+        bestAnalysis.evidence << QStringLiteral("%1: %2")
+            .arg(bestStylePlan.pacingId, bestStylePlan.pacingSummary)
+            << bestStylePlan.melodicSummary;
+    }
+    GenerationRecipe& recipe = best.recipe;
+    recipe.variationId = bestAnalysis.relationshipId;
+    recipe.variationSummary = QStringLiteral(
+        "A contrasting B section preserving %1 %2, tempo, meter, profile and production identity while establishing a new harmonic route and style-native groove under the %3 pacing plan.")
+        .arg(inferred.tonicName, inferred.modeName,
+            bestAnalysis.harmonicPacingId);
+    for (int index = bestAnalysis.evidence.size() - 1; index >= 0; --index) {
+        recipe.variationDecisions.prepend(bestAnalysis.evidence.at(index).left(256));
+    }
+    while (recipe.variationDecisions.size() > 16) {
+        recipe.variationDecisions.removeLast();
+    }
+    recipe.continuationStrategies.prepend(QStringLiteral(
+        "%1 was selected by comparing the generated B section directly with the supplied A section.")
+        .arg(bestAnalysis.relationshipId));
+    recipe.continuationStrategies.prepend(QStringLiteral("%1: %2")
+        .arg(role.name, role.explanation));
+    if (!bestStylePlan.pacingId.isEmpty()) {
+        recipe.continuationStrategies.prepend(bestStylePlan.melodicSummary);
+        recipe.continuationStrategies.prepend(QStringLiteral("%1: %2")
+            .arg(bestStylePlan.pacingId, bestStylePlan.pacingSummary));
+        recipe.motifTransformations.prepend(QStringLiteral(
+            "Continuation: %1").arg(bestStylePlan.melodicSummary));
+    }
+    recipe.teachingSummary = (recipe.teachingSummary + QStringLiteral(
+        " The continuation keeps the source tonal centre and timing while establishing a distinct section-level harmony, groove, bass phrase, and melodic opening."))
+        .left(256);
+    recipe.jamGuidance = (recipe.jamGuidance + QStringLiteral(
+        " Treat B as the next part of the song: its new groove and harmonic route drive the jam forward, while its final cue points back toward A."))
+        .left(256);
+
+    const QChar sourceBank(QLatin1Char('A').unicode() +
+        qBound(0, request.sourceSectionIndex, 3));
+    const QChar targetBank(QLatin1Char('A').unicode() +
+        qBound(0, request.targetSectionIndex, 3));
+    const QString name = QStringLiteral("Continuation of Bank %1").arg(sourceBank);
+    for (SongSection* section : {&best.chordSection, &best.beatSection}) {
+        section->label = QString(targetBank);
+        section->name = name;
+        section->generatedKind = QStringLiteral("practice");
+        section->generatedRecipe = recipe;
+    }
+    best.recipe = recipe;
+    GeneratedContinuationIdea result;
+    result.idea = std::move(best);
+    result.analysis = std::move(bestAnalysis);
     return result;
 }
 
@@ -11828,6 +13914,81 @@ QStringList meterNames(const QString& profileId)
     return result;
 }
 
+QStringList compatibleMeterIds(const QString& styleId, const QString& profileId)
+{
+    QStringList supported;
+    if (const ProfileDefinition* selected = findProfile(profileId, true)) {
+        supported = selected->meterIds;
+    } else {
+        QVector<const ProfileDefinition*> profiles = profilesForStyle(styleId);
+        if (profiles.isEmpty()) {
+            const auto& normal = profileCatalog();
+            for (const ProfileDefinition& profile : normal) profiles.push_back(&profile);
+        }
+        for (const ProfileDefinition* profile : profiles) {
+            for (const QString& meterId : profile->meterIds) {
+                if (!supported.contains(meterId)) supported.push_back(meterId);
+            }
+        }
+    }
+
+    QStringList ordered;
+    for (const MeterDefinition& meter : meterCatalog()) {
+        if (supported.contains(meter.id)) ordered.push_back(meter.id);
+    }
+    return ordered;
+}
+
+QStringList compatibleMeterNames(const QString& styleId, const QString& profileId)
+{
+    QStringList result;
+    for (const QString& id : compatibleMeterIds(styleId, profileId)) {
+        if (const MeterDefinition* meter = findMeter(id)) result.push_back(meter->name);
+    }
+    return result;
+}
+
+QVector<int> compatibleBarCounts(
+    const QString& styleId,
+    const QString& profileId,
+    const QString& meterId)
+{
+    QVector<const ProfileDefinition*> profiles;
+    if (const ProfileDefinition* selected = findProfile(profileId, true)) {
+        profiles.push_back(selected);
+    } else {
+        profiles = profilesForStyle(styleId);
+        if (profiles.isEmpty()) {
+            const auto& normal = profileCatalog();
+            for (const ProfileDefinition& profile : normal) profiles.push_back(&profile);
+        }
+    }
+
+    QVector<int> result;
+    for (const ProfileDefinition* profile : profiles) {
+        bool foundMeterForm = false;
+        for (const NativeFormDefinition& form : profile->forms) {
+            if (!meterId.isEmpty() && form.meterId != meterId) continue;
+            foundMeterForm = true;
+            if (!result.contains(form.bars)) result.push_back(form.bars);
+        }
+        if (!meterId.isEmpty() && !foundMeterForm && profile->meterIds.contains(meterId)) {
+            for (const NativeFormDefinition& form : profile->forms) {
+                if (!result.contains(form.bars)) result.push_back(form.bars);
+            }
+        }
+    }
+    if (result.isEmpty() && !meterId.isEmpty()) {
+        for (const ProfileDefinition* profile : profiles) {
+            for (const NativeFormDefinition& form : profile->forms) {
+                if (!result.contains(form.bars)) result.push_back(form.bars);
+            }
+        }
+    }
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
 QStringList productionFamilyIds(const QString& profileId)
 {
     if (const ProfileDefinition* profile = findProfile(profileId, true)) {
@@ -11899,6 +14060,14 @@ GeneratedPracticeIdea generateCoupledPracticeIdea(const ChordIdeaRequest& reques
     return coupledIdea(request, device());
 }
 
+GeneratedContinuationIdea generateContinuationPracticeIdea(
+    const SongSection& source,
+    const ContinueIdeaRequest& request)
+{
+    std::random_device device;
+    return continuationIdea(source, request, device());
+}
+
 SongSection generateChordIdeaForTest(const ChordIdeaRequest& request, std::uint32_t seed)
 {
     return coupledIdea(request, seed).chordSection;
@@ -11912,6 +14081,7 @@ SongSection generateBeatIdeaForTest(const BeatIdeaRequest& request, std::uint32_
     coupled.formId = request.formId;
     coupled.meterId = request.meterId;
     coupled.productionFamilyId = request.productionFamilyId;
+    coupled.bpm = request.bpm;
     coupled.bars = request.bars;
     coupled.beatsPerBar = request.beatsPerBar;
     coupled.harmonicComplexity = request.rhythmicComplexity;
@@ -11922,6 +14092,14 @@ SongSection generateBeatIdeaForTest(const BeatIdeaRequest& request, std::uint32_
 GeneratedPracticeIdea generateCoupledPracticeIdeaForTest(const ChordIdeaRequest& request, std::uint32_t seed)
 {
     return coupledIdea(request, seed);
+}
+
+GeneratedContinuationIdea generateContinuationPracticeIdeaForTest(
+    const SongSection& source,
+    const ContinueIdeaRequest& request,
+    std::uint32_t seed)
+{
+    return continuationIdea(source, request, seed);
 }
 
 } // namespace jam2::practice

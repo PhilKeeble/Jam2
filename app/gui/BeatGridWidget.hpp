@@ -11,6 +11,7 @@
 
 class QPushButton;
 class QHeaderView;
+class QLabel;
 
 class BeatGridWidget : public QWidget {
 public:
@@ -18,10 +19,19 @@ public:
     BeatGridWidget(BeatGridModel* model, const QString& lane, QWidget* parent = nullptr);
 
     BeatGridModel& model();
+    int selectedSectionIndex() const;
+    void setSelectedSectionIndex(int section);
     void refresh();
     void focusGeneratedSection(const QString& kind);
     void setBeatsPerBar(int beatsPerBar);
     void setGridPosition(quint64 absoluteBeat, int subdivision, bool running, double beatPhase = 0.0);
+    void setUpcomingSection(
+        int section,
+        quint64 beatsRemaining,
+        int countdownBeatsPerBar,
+        int targetBeatsPerBar,
+        bool arrangementActive,
+        bool arrangementArmed);
     void applyRemoteCell(int section, const QString& lane, int beat, const QString& text);
 
     std::function<void(int, const QString&, int, const QString&, int)> onCellEdited;
@@ -31,6 +41,7 @@ public:
     std::function<void(int, int, int, const QString&, const QString&, int)> onMusicalStepEdited;
     std::function<void(int, int, int)> onGridResized;
     std::function<void()> onStructureChanged;
+    std::function<void(int)> onSelectedSectionChanged;
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -52,12 +63,12 @@ private:
     void rebuildLyricsBox();
     void expandCurrent();
     void shrinkCurrent();
-    int selectedSectionIndex() const;
     int sectionForRow(int row) const;
     int laneForRow(int row) const;
     void selectSection(int section);
     void updateSectionSelectionMarkers();
     void updateActionButtons();
+    void updateUpcomingPreview();
     void emitStructureChanged();
 
     BeatGridModel ownedModel_;
@@ -68,6 +79,7 @@ private:
     QLineEdit* labelEdit_ = nullptr;
     QLineEdit* nameEdit_ = nullptr;
     QTableWidget* table_ = nullptr;
+    QLabel* upcomingPreview_ = nullptr;
     QHeaderView* beatHeader_ = nullptr;
     QPushButton* duplicateButton_ = nullptr;
     QPushButton* deleteButton_ = nullptr;
@@ -81,5 +93,11 @@ private:
     double gridBeatPhase_ = 0.0;
     bool gridRunning_ = false;
     int beatsPerBar_ = 4;
+    int upcomingSection_ = -1;
+    quint64 upcomingBeatsRemaining_ = 0;
+    int upcomingCountdownBeatsPerBar_ = 4;
+    int upcomingTargetBeatsPerBar_ = 4;
+    bool upcomingArrangementActive_ = false;
+    bool upcomingArrangementArmed_ = false;
     bool updating_ = false;
 };

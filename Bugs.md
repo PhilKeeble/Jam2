@@ -10,27 +10,20 @@ gui/mainwindow keeps getting bloated as default choice, refactor again later to 
 
 test benchmark, validate, stress and get logs for localhost and mac 
 
-consider adding continual section generation for b section suggestions
+Look into what makes the generation of the wavs take a while and see if we can make that more efficient 
 
-consider a way to export a rendered wav of a song / idea (do this after arrangement)
+Maybe chord view should show the user how to play the chord as a reference? 
+Maybe chord view could be made easier to work with so its quicker ow that we are tied to banks 
+
 
 ## Bugs
 
-look into weirdness with sharing generated tracks with each other
-
-Look into weirdness with metronome epoch and sharing tracks and generating ideas, defintiely bugs there when working with other people 
-
-Record jam button is missing now that we dont have the mix view
-
-Allow generation to force BPM / Meter , maybe allow a random style but forced bpm and meter and it can just make a groove for you
-
-maybe some bugs related to leader / joiner, sometimes generated jam didnt move across, wehn shareing multiple tracks it ended up losing 2 on the person that shared etc
-
-recording jam could be a new option on a track perhaps to record the mix direct into there and play it back
-
-genertate wav - chagne bpm - genrate again - out of time
 
 ### Sound references
 
 https://www.youtube.com/watch?v=miTyMfxxWCo - 1:30 - heavy synth sounds 
+
+https://www.youtube.com/watch?v=lFodQSX2i0c - first song for trap, around 8 minutes for another more dancy ekit
+
+https://www.youtube.com/watch?v=VagWXGotYRg - metal synth sounds - 28 mins, infernal decent (first half for sick drums)
 

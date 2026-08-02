@@ -28,7 +28,8 @@ WavMetadata readWavMetadata(const QString& path);
 StagedPcm16Asset stagePcm16Asset(
     const QString& sourcePath,
     const QString& stagingFolder,
-    int expectedSampleRate = 0);
+    int expectedSampleRate = 0,
+    const QString& assetFolder = QStringLiteral("imported"));
 int mergeQuarantinedLocalLanes(
     QJsonObject& song,
     const LooperProject& localProject,

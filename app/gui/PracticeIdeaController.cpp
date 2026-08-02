@@ -57,6 +57,32 @@ bool hasManagedLane(const QVector<LooperLane>& lanes, const QString& kind)
     return false;
 }
 
+int partialTargetIndex(const BeatGridModel& model, int requested)
+{
+    if (requested >= 0 && requested < model.sections().size()) return requested;
+    for (int index = 0; index < model.sections().size(); ++index) {
+        if (!model.section(index).generatedKind.isEmpty()) return index;
+    }
+    return model.sections().isEmpty() ? -1 : 0;
+}
+
+void replacePitchedParts(SongSection& destination, const SongSection& generated)
+{
+    destination.beats = generated.beats;
+    destination.chords = generated.chords;
+    destination.targets = generated.targets;
+    destination.musicalPatterns = generated.musicalPatterns;
+    destination.generatedRecipe = generated.generatedRecipe;
+}
+
+void replaceDrumParts(SongSection& destination, const SongSection& generated)
+{
+    destination.beats = generated.beats;
+    destination.beatNotes = generated.beatNotes;
+    destination.beatPatterns = generated.beatPatterns;
+    destination.generatedRecipe = generated.generatedRecipe;
+}
+
 void upsert(
     QVector<LooperLane>& lanes,
     const QString& kind,
@@ -111,13 +137,44 @@ std::optional<GeneratedPracticeIdea> PracticeIdeaController::generateCoupled(
     const ChordIdeaRequest& request)
 {
     GeneratedPracticeIdea idea = generateCoupledPracticeIdea(request);
+    if (request.parts != PracticeIdeaParts::FullArrangement) {
+        const bool pitched = request.parts == PracticeIdeaParts::PitchedPartsOnly;
+        if (&chordModel == &beatModel) {
+            BeatGridModel next = chordModel;
+            const int target = partialTargetIndex(next, request.targetSectionIndex);
+            if (target < 0) return std::nullopt;
+            SongSection merged = next.section(target);
+            if (pitched) replacePitchedParts(merged, idea.chordSection);
+            else replaceDrumParts(merged, idea.beatSection);
+            merged.generatedKind = QStringLiteral("practice");
+            if (!next.replaceSection(target, std::move(merged))) return std::nullopt;
+            chordModel = std::move(next);
+            return idea;
+        }
+
+        BeatGridModel& destinationModel = pitched ? chordModel : beatModel;
+        BeatGridModel next = destinationModel;
+        const int target = partialTargetIndex(next, request.targetSectionIndex);
+        if (target < 0) return std::nullopt;
+        SongSection merged = next.section(target);
+        if (pitched) replacePitchedParts(merged, idea.chordSection);
+        else replaceDrumParts(merged, idea.beatSection);
+        merged.generatedKind = pitched
+            ? QStringLiteral("chord")
+            : QStringLiteral("beat");
+        if (!next.replaceSection(target, std::move(merged))) return std::nullopt;
+        destinationModel = std::move(next);
+        return idea;
+    }
     if (&chordModel == &beatModel) {
         SongSection combined = idea.chordSection;
         combined.beats = std::max(idea.chordSection.beats, idea.beatSection.beats);
         combined.beatNotes = idea.beatSection.beatNotes;
         combined.beatPatterns = idea.beatSection.beatPatterns;
+        combined.generatedKind = QStringLiteral("practice");
         BeatGridModel next = chordModel;
-        if (next.replaceGeneratedSection(QStringLiteral("practice"), std::move(combined)) < 0) {
+        const int target = partialTargetIndex(next, request.targetSectionIndex);
+        if (target < 0 || !next.replaceSection(target, std::move(combined))) {
             return std::nullopt;
         }
         chordModel = std::move(next);
@@ -125,13 +182,49 @@ std::optional<GeneratedPracticeIdea> PracticeIdeaController::generateCoupled(
     }
     BeatGridModel nextChord = chordModel;
     BeatGridModel nextBeat = beatModel;
-    if (nextChord.replaceGeneratedSection(QStringLiteral("chord"), idea.chordSection) < 0 ||
-        nextBeat.replaceGeneratedSection(QStringLiteral("beat"), idea.beatSection) < 0) {
+    const int chordTarget = partialTargetIndex(nextChord, request.targetSectionIndex);
+    const int beatTarget = partialTargetIndex(nextBeat, request.targetSectionIndex);
+    idea.chordSection.generatedKind = QStringLiteral("chord");
+    idea.beatSection.generatedKind = QStringLiteral("beat");
+    if (chordTarget < 0 || beatTarget < 0 ||
+        !nextChord.replaceSection(chordTarget, idea.chordSection) ||
+        !nextBeat.replaceSection(beatTarget, idea.beatSection)) {
         return std::nullopt;
     }
     chordModel = std::move(nextChord);
     beatModel = std::move(nextBeat);
     return idea;
+}
+
+std::optional<GeneratedContinuationIdea> PracticeIdeaController::generateContinuation(
+    BeatGridModel& model,
+    const ContinueIdeaRequest& request)
+{
+    if (request.sourceSectionIndex < 0 ||
+        request.sourceSectionIndex >= model.sections().size() ||
+        request.targetSectionIndex < 0 ||
+        request.targetSectionIndex >= model.sections().size() ||
+        request.sourceSectionIndex == request.targetSectionIndex) {
+        return std::nullopt;
+    }
+    const SongSection source = model.section(request.sourceSectionIndex);
+    if (!referenceLayers(source).any()) return std::nullopt;
+
+    GeneratedContinuationIdea continuation =
+        generateContinuationPracticeIdea(source, request);
+    SongSection combined = continuation.idea.chordSection;
+    combined.beats = std::max(
+        continuation.idea.chordSection.beats,
+        continuation.idea.beatSection.beats);
+    combined.beatNotes = continuation.idea.beatSection.beatNotes;
+    combined.beatPatterns = continuation.idea.beatSection.beatPatterns;
+    combined.generatedKind = QStringLiteral("practice");
+    BeatGridModel next = model;
+    if (!next.replaceSection(request.targetSectionIndex, std::move(combined))) {
+        return std::nullopt;
+    }
+    model = std::move(next);
+    return continuation;
 }
 
 std::optional<SongSection> PracticeIdeaController::generatedSection(
@@ -205,6 +298,15 @@ void PracticeIdeaController::clearReferences(LooperProject& project)
                 bank.lanes.removeAt(index);
             }
         }
+    }
+}
+
+void PracticeIdeaController::clearReferences(LooperProject& project, int bankIndex)
+{
+    if (bankIndex < 0 || bankIndex >= project.banks().size()) return;
+    QVector<LooperLane>& lanes = project.banks()[bankIndex].lanes;
+    for (int index = lanes.size() - 1; index >= 0; --index) {
+        if (!managedReferenceKind(lanes[index]).isEmpty()) lanes.removeAt(index);
     }
 }
 

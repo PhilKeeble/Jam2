@@ -1705,7 +1705,7 @@ ReferenceRenderResult renderPracticeReferences(
         return result;
     }
     const qint64 frames = static_cast<qint64>(std::ceil(seconds * settings.sampleRate));
-    const QString folder = QDir(workspaceFolder).absoluteFilePath(QStringLiteral("wavs"));
+    const QString folder = QDir(workspaceFolder).absoluteFilePath(QStringLiteral("generated"));
     if (!QDir().mkpath(folder)) {
         result.error = QStringLiteral(
             "Cannot create the reference WAV folder: %1").arg(folder);

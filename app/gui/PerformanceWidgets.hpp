@@ -13,6 +13,7 @@
 #include <QWidget>
 
 #include <cstdint>
+#include <array>
 #include <functional>
 #include <vector>
 
@@ -47,6 +48,15 @@ public:
     void setTrackBpmMismatch(bool mismatched, double backingBpm, double sessionBpm);
     void setTrackTransferStatus(const QString& status);
     void setWavGenerationActive(bool active);
+    void setJamRecordingState(bool enabled, bool active, const QString& takeName);
+    void setBankState(
+        int liveBank,
+        int pendingBank,
+        quint64 beatsUntilSwitch,
+        int pendingBeatsPerBar,
+        bool localOnly,
+        const QString& status);
+    void setArrangementState(bool running, bool armed);
     void setTechnicalSummary(
         const QString& rtt,
         const QString& jitter,
@@ -58,9 +68,13 @@ public:
     std::function<void(std::uint64_t)> onPeerSelected;
     std::function<void(double)> onTrackGainChanged;
     std::function<void()> onGenerateIdea;
+    std::function<void()> onContinueIdea;
     std::function<void()> onClearIdea;
     std::function<void()> onGenerateWav;
     std::function<void(bool)> onTunerEnabledChanged;
+    std::function<void()> onJamRecordingToggle;
+    std::function<void(int)> onBankLaunch;
+    std::function<void()> onManageArrangement;
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -81,6 +95,7 @@ private:
 
     SongPosition songPosition(quint64 absoluteBeat) const;
     SongPosition songPositionFromSongBeat(quint64 songBeat) const;
+    SongPosition songPositionForBankBeat(int bankIndex, quint64 songBeat) const;
     QString chordAt(const SongPosition& position) const;
     QVector<QPair<QString, QString>> upcomingChords(const SongPosition& position) const;
     QPair<QString, QString> lyricLines(const SongPosition& position) const;
@@ -95,17 +110,29 @@ private:
     void paintBeatPreview(
         QPainter& painter,
         const QRect& bounds,
+        int bankIndex,
+        int previewBeatsPerBar,
         quint64 barStart,
         bool current);
     void paintGenerationActions(QPainter& painter, int top, int right);
     void paintPeerRail(QPainter& painter, const QRect& bounds);
     void paintVerticalPeerRail(QPainter& painter, const QRect& bounds);
+    void paintJamRecordingButton(QPainter& painter, const QRect& bounds);
+    void paintBankStrip(QPainter& painter, int left, int top);
     void paintLooperLaunch(QPainter& painter, const QRect& bounds);
     void paintTuner(QPainter& painter, const QRect& bounds, bool expanded);
     QString tunerNoteText() const;
     void applyTrackSliderPosition(int x);
 
     const BeatGridModel* model_ = nullptr;
+    int liveBank_ = 0;
+    int pendingBank_ = -1;
+    quint64 pendingBankBeatsRemaining_ = 0;
+    int pendingBankBeatsPerBar_ = 4;
+    bool bankLocalOnly_ = false;
+    bool arrangementRunning_ = false;
+    bool arrangementArmed_ = false;
+    QString bankTransitionStatus_;
     quint64 absoluteBeat_ = 0;
     int subdivision_ = 0;
     int beatsPerBar_ = 4;
@@ -129,6 +156,9 @@ private:
     double sessionBpm_ = 0.0;
     QString trackTransferStatus_;
     bool wavGenerationActive_ = false;
+    bool jamRecordingEnabled_ = false;
+    bool jamRecordingActive_ = false;
+    QString jamRecordingTake_;
     QString rtt_ = QStringLiteral("-");
     QString jitter_ = QStringLiteral("-");
     QString loss_ = QStringLiteral("-");
@@ -151,11 +181,14 @@ private:
     QRect chordRunwayRect_;
     QRect lyricsHitRect_;
     QRect generateIdeaHitRect_;
+    QRect continueIdeaHitRect_;
     QRect clearIdeaHitRect_;
     QRect generateWavHitRect_;
     QRect currentBeatHitRect_;
     QRect nextBeatHitRect_;
     QRect peerRailRect_;
+    QRect jamRecordingHitRect_;
+    QRect arrangementHitRect_;
     QRect looperHitRect_;
     QRect tunerHitRect_;
     QRect tunerEnableHitRect_;
@@ -165,4 +198,5 @@ private:
     QRect tunerOverlayOffHitRect_;
     QRect trackSliderRect_;
     QVector<QPair<QRect, std::uint64_t>> peerHitRects_;
+    std::array<QRect, 4> bankHitRects_{};
 };

@@ -100,10 +100,6 @@ public:
     bool preparedMixWorkerRunning = false;
     bool preparedMixRerunPending = false;
     bool playPreparedMixWhenReady = false;
-    int pendingPreparedTrackReadyRevision = 0;
-    quint64 pendingSharedTrackRevision = 0;
-    bool pendingSharedTrackHostReady = true;
-    QSet<QString> pendingSharedTrackReadyTokens;
     bool publishStoppedTrackStateWhenApplied = false;
     std::uint64_t preparedMixRequests = 0;
     std::uint64_t preparedMixCoalesced = 0;

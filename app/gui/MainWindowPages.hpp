@@ -2,6 +2,7 @@
 
 class MainWindow;
 class QWidget;
+class QHBoxLayout;
 
 class MainWindowPages final {
 public:
@@ -13,5 +14,10 @@ private:
     static QWidget* buildBeatPage(MainWindow& window);
     static QWidget* buildTrackPage(MainWindow& window);
     static QWidget* buildMetronomePage(MainWindow& window);
-    static QWidget* buildMixPage(MainWindow& window);
+    static void buildAudioControls(MainWindow& window);
+    static void addBankControls(
+        MainWindow& window,
+        QWidget* owner,
+        QHBoxLayout* layout,
+        bool looper);
 };

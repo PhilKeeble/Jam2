@@ -7,9 +7,12 @@
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSignalBlocker>
+#include <QSpinBox>
 #include <QVBoxLayout>
 
 #include <numeric>
@@ -59,12 +62,31 @@ QComboBox* complexityCombo(QWidget* parent)
 
 } // namespace
 
-std::optional<ChordIdeaRequest> askForPracticeIdea(QWidget* parent, int beatsPerBar)
+std::optional<ChordIdeaRequest> askForPracticeIdea(
+    QWidget* parent,
+    const PracticeIdeaDialogDefaults& defaults)
 {
-    (void)beatsPerBar;
     QDialog dialog(parent);
+    PracticeIdeaDialogDefaults selectedDefaults = defaults;
     dialog.setWindowTitle(QStringLiteral("Generate Practice Idea"));
     auto* form = new QFormLayout();
+    auto* targetBank = new QComboBox(&dialog);
+    for (int bank = 0; bank < 4; ++bank) {
+        targetBank->addItem(
+            QStringLiteral("Bank %1").arg(QChar(QLatin1Char('A').unicode() + bank)),
+            bank);
+    }
+    targetBank->setCurrentIndex(qBound(0, defaults.targetSectionIndex, 3));
+    auto* parts = new QComboBox(&dialog);
+    parts->addItem(
+        QStringLiteral("Full arrangement"),
+        static_cast<int>(PracticeIdeaParts::FullArrangement));
+    parts->addItem(
+        QStringLiteral("Chords, Bass & Melody Only"),
+        static_cast<int>(PracticeIdeaParts::PitchedPartsOnly));
+    parts->addItem(
+        QStringLiteral("Drums Only"),
+        static_cast<int>(PracticeIdeaParts::DrumsOnly));
     QComboBox* key = randomCombo(keyNames(), &dialog);
     QComboBox* style = new QComboBox(&dialog);
     style->addItem(QStringLiteral("Random"), QString());
@@ -78,11 +100,29 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(QWidget* parent, int beatsPer
         QStringLiteral("Experimental - Modern Progressive Metalcore"),
         QStringLiteral("metal-experimental"));
     QComboBox* profile = new QComboBox(&dialog);
-    QComboBox* formChoice = new QComboBox(&dialog);
     QComboBox* meter = new QComboBox(&dialog);
-    QComboBox* mode = new QComboBox(&dialog);
-    QComboBox* production = new QComboBox(&dialog);
+    QComboBox* length = new QComboBox(&dialog);
+    auto* exactBpm = new QCheckBox(QStringLiteral("Use exact BPM"), &dialog);
+    auto* bpm = new QSpinBox(&dialog);
+    bpm->setRange(20, 400);
+    bpm->setValue(qBound(20, defaults.bpm, 400));
+    exactBpm->setChecked(false);
+    bpm->setEnabled(false);
+    bpm->setSuffix(QStringLiteral(" BPM"));
+    bpm->setToolTip(QStringLiteral(
+        "Overrides the selected style's normal tempo range."));
+    auto* bpmControls = new QWidget(&dialog);
+    auto* bpmLayout = new QHBoxLayout(bpmControls);
+    bpmLayout->setContentsMargins(0, 0, 0, 0);
+    bpmLayout->addWidget(exactBpm);
+    bpmLayout->addWidget(bpm);
+    bpmLayout->addStretch();
+    QObject::connect(exactBpm, &QCheckBox::toggled, bpm, &QSpinBox::setEnabled);
     QComboBox* complexity = complexityCombo(&dialog);
+    const auto partialGeneration = [parts] {
+        return static_cast<PracticeIdeaParts>(parts->currentData().toInt()) !=
+            PracticeIdeaParts::FullArrangement;
+    };
     const auto refreshProfile = [style, profile] {
         profile->clear();
         profile->addItem(QStringLiteral("Random profile"), QString());
@@ -100,36 +140,79 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(QWidget* parent, int beatsPer
             profile->addItem(names.at(index), ids.value(index));
         }
     };
-    const auto refreshProfileOptions = [profile, formChoice, meter, mode, production] {
+    const auto refreshLength = [style, profile, meter, length, partialGeneration, &selectedDefaults] {
+        const int previousBars = length->currentData().toInt();
+        const QString selectedStyle = style->currentData().toString();
         const QString selectedProfile = profile->currentData().toString();
-        formChoice->clear();
-        formChoice->addItem(QStringLiteral("Random profile-native form"), QString());
-        const QStringList formIds = nativeFormIds(selectedProfile);
-        const QStringList formNames = nativeFormNames(selectedProfile);
-        for (int index = 0; index < formNames.size(); ++index) {
-            formChoice->addItem(formNames.at(index), formIds.value(index));
+        const QVector<int> supportedBars = compatibleBarCounts(
+            selectedStyle,
+            selectedProfile,
+            meter->currentData().toString());
+        const QSignalBlocker blocker(length);
+        length->clear();
+        length->addItem(QStringLiteral("Random compatible length"), 0);
+        for (const int bars : supportedBars) {
+            length->addItem(QStringLiteral("%1 bars").arg(bars), bars);
         }
+        if (partialGeneration() && selectedDefaults.bars > 0) {
+            int currentIndex = length->findData(selectedDefaults.bars);
+            if (currentIndex < 0) {
+                length->addItem(
+                    QStringLiteral("%1 bars (current section)").arg(selectedDefaults.bars),
+                    selectedDefaults.bars);
+                currentIndex = length->count() - 1;
+            } else {
+                length->setItemText(
+                    currentIndex,
+                    QStringLiteral("%1 bars (current section)").arg(selectedDefaults.bars));
+            }
+        }
+        const int preferredBars = previousBars > 0
+            ? previousBars
+            : partialGeneration() ? selectedDefaults.bars : 0;
+        const int preferredIndex = length->findData(preferredBars);
+        length->setCurrentIndex(preferredIndex >= 0 ? preferredIndex : 0);
+    };
+    const auto refreshProfileOptions = [
+        style, profile, meter, refreshLength, partialGeneration, &selectedDefaults] {
+        const QString previousMeter = meter->currentData().toString();
+        const QString selectedStyle = style->currentData().toString();
+        const QString selectedProfile = profile->currentData().toString();
+        const QSignalBlocker blocker(meter);
         meter->clear();
-        meter->addItem(QStringLiteral("Use the form's native meter"), QString());
-        const QStringList supportedMeterIds = meterIds(selectedProfile);
-        const QStringList supportedMeterNames = meterNames(selectedProfile);
+        meter->addItem(QStringLiteral("Random compatible meter (default)"), QString());
+        const QStringList supportedMeterIds =
+            compatibleMeterIds(selectedStyle, selectedProfile);
+        const QStringList supportedMeterNames =
+            compatibleMeterNames(selectedStyle, selectedProfile);
         for (int index = 0; index < supportedMeterNames.size(); ++index) {
             meter->addItem(supportedMeterNames.at(index), supportedMeterIds.value(index));
         }
-        mode->clear();
-        mode->addItem(QStringLiteral("Auto (profile-compatible)"), QString());
-        const QStringList supportedModeIds = modeIds(selectedProfile);
-        const QStringList supportedModeNames = modeNames(selectedProfile);
-        for (int index = 0; index < supportedModeNames.size(); ++index) {
-            mode->addItem(supportedModeNames.at(index), supportedModeIds.value(index));
+        if (!selectedDefaults.meterId.isEmpty()) {
+            int projectIndex = meter->findData(selectedDefaults.meterId);
+            QString projectName = selectedDefaults.meterId;
+            const QStringList allIds = compatibleMeterIds(QString(), QString());
+            const QStringList allNames = compatibleMeterNames(QString(), QString());
+            const int catalogIndex = allIds.indexOf(selectedDefaults.meterId);
+            if (catalogIndex >= 0) projectName = allNames.value(catalogIndex, projectName);
+            if (projectIndex < 0) {
+                meter->addItem(
+                    projectName + QStringLiteral(" (current project)"),
+                    selectedDefaults.meterId);
+                projectIndex = meter->count() - 1;
+            } else {
+                meter->setItemText(
+                    projectIndex,
+                    projectName + QStringLiteral(" (current project)"));
+            }
         }
-        production->clear();
-        production->addItem(QStringLiteral("Profile default"), QString());
-        const QStringList productionIds = productionFamilyIds(selectedProfile);
-        const QStringList productionNames = productionFamilyNames(selectedProfile);
-        for (int index = 0; index < productionNames.size(); ++index) {
-            production->addItem(productionNames.at(index), productionIds.value(index));
-        }
+        // Random remains the default. The target bank's current meter is
+        // labelled above so it remains a one-click explicit choice without
+        // silently constraining every new idea.
+        const QString preferredMeter = previousMeter;
+        const int preferredIndex = meter->findData(preferredMeter);
+        meter->setCurrentIndex(preferredIndex >= 0 ? preferredIndex : 0);
+        refreshLength();
     };
     QObject::connect(style, qOverload<int>(&QComboBox::currentIndexChanged), &dialog,
         [refreshProfile, refreshProfileOptions](int) {
@@ -138,15 +221,38 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(QWidget* parent, int beatsPer
         });
     QObject::connect(profile, qOverload<int>(&QComboBox::currentIndexChanged), &dialog,
         [refreshProfileOptions](int) { refreshProfileOptions(); });
+    QObject::connect(meter, qOverload<int>(&QComboBox::currentIndexChanged), &dialog,
+        [refreshLength](int) { refreshLength(); });
+    QObject::connect(parts, qOverload<int>(&QComboBox::currentIndexChanged), &dialog,
+        [refreshProfileOptions, exactBpm, bpm, &selectedDefaults](int index) {
+            const bool partial = index > 0;
+            if (partial && !exactBpm->isChecked()) {
+                bpm->setValue(qBound(20, selectedDefaults.bpm, 400));
+            }
+            refreshProfileOptions();
+        });
+    QObject::connect(targetBank, qOverload<int>(&QComboBox::currentIndexChanged), &dialog,
+        [targetBank, bpm, exactBpm, refreshProfileOptions, &selectedDefaults, &defaults](int) {
+            const int bank = targetBank->currentData().toInt();
+            selectedDefaults.targetSectionIndex = bank;
+            selectedDefaults.bpm = defaults.bankBpms.value(bank, defaults.bpm);
+            selectedDefaults.meterId = defaults.bankMeterIds.value(bank, defaults.meterId);
+            selectedDefaults.bars = defaults.bankBars.value(bank, defaults.bars);
+            if (!exactBpm->isChecked()) {
+                bpm->setValue(qBound(20, selectedDefaults.bpm, 400));
+            }
+            refreshProfileOptions();
+        });
     refreshProfile();
     refreshProfileOptions();
+    form->addRow(QStringLiteral("Bank"), targetBank);
+    form->addRow(QStringLiteral("Parts"), parts);
     form->addRow(QStringLiteral("Key"), key);
     form->addRow(QStringLiteral("Style"), style);
     form->addRow(QStringLiteral("Profile"), profile);
-    form->addRow(QStringLiteral("Form"), formChoice);
     form->addRow(QStringLiteral("Meter"), meter);
-    form->addRow(QStringLiteral("Scale / mode"), mode);
-    form->addRow(QStringLiteral("Production"), production);
+    form->addRow(QStringLiteral("Length"), length);
+    form->addRow(QStringLiteral("Tempo"), bpmControls);
     form->addRow(QStringLiteral("Complexity"), complexity);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
     buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Generate"));
@@ -155,10 +261,13 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(QWidget* parent, int beatsPer
     auto* layout = new QVBoxLayout(&dialog);
     auto* description = new QLabel(
         QStringLiteral(
-            "Creates matching chord and drum sections. Style sets the musical language and BPM range; "
-            "the profile supplies native form, meter, bass, supporting-line, groove, and sound relationships. "
-            "A seed-derived variation plan shapes energy, density, articulation, and production inside that profile. "
-            "Complexity unlocks musical tools but does not force every tool into the result."),
+            "Creates a full arrangement or replaces only its pitched or drum parts. Generation starts "
+            "with a random compatible meter. The target bank's current meter is marked in the list when you want to keep it explicitly. "
+            "The project tempo remains available as an explicit override. "
+            "Untouched banks inherit Bank A's timing. Partial generation also starts with the current section length. "
+            "Choose a meter while leaving Style random to generate from any style that supports it. "
+            "Form, scale, production, and other relationships are chosen automatically from the compatible profile. "
+            "Complexity unlocks musical tools without forcing every tool into the result."),
         &dialog);
     description->setWordWrap(true);
     layout->addWidget(description);
@@ -169,14 +278,77 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(QWidget* parent, int beatsPer
     request.key = key->currentData().toInt();
     request.styleId = style->currentData().toString();
     request.profileId = profile->currentData().toString();
-    request.formId = formChoice->currentData().toString();
+    request.parts = static_cast<PracticeIdeaParts>(parts->currentData().toInt());
+    request.targetSectionIndex = targetBank->currentData().toInt();
     request.meterId = meter->currentData().toString();
-    request.modeId = mode->currentData().toString();
-    request.productionFamilyId = production->currentData().toString();
-    request.bars = 0;
+    request.allowMeterOverride = !request.meterId.isEmpty() &&
+        !compatibleMeterIds(request.styleId, request.profileId).contains(request.meterId);
+    request.bpm = exactBpm->isChecked()
+        ? bpm->value()
+        : request.parts == PracticeIdeaParts::FullArrangement
+            ? 0
+            : selectedDefaults.bpm;
+    request.bars = length->currentData().toInt();
     request.beatsPerBar = 0;
     request.harmonicComplexity = complexity->currentData().toInt();
     request.rhythmicComplexity = complexity->currentData().toInt();
+    return request;
+}
+
+std::optional<ContinueIdeaRequest> askForIdeaContinuation(
+    QWidget* parent,
+    const ContinueIdeaDialogDefaults& defaults)
+{
+    QDialog dialog(parent);
+    dialog.setWindowTitle(QStringLiteral("Continue Idea"));
+    auto* source = new QComboBox(&dialog);
+    auto* target = new QComboBox(&dialog);
+    for (int bank = 0; bank < 4; ++bank) {
+        const QString bankName = defaults.bankNames.value(bank).trimmed();
+        const QString state = defaults.bankHasContent.value(bank)
+            ? bankName.isEmpty() ? QStringLiteral("has material") : bankName
+            : QStringLiteral("empty");
+        const QString label = QStringLiteral("Bank %1 — %2")
+            .arg(QChar(QLatin1Char('A').unicode() + bank), state);
+        source->addItem(label, bank);
+        target->addItem(label, bank);
+    }
+    source->setCurrentIndex(qBound(0, defaults.sourceSectionIndex, 3));
+    target->setCurrentIndex(qBound(0, defaults.targetSectionIndex, 3));
+
+    auto* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Continue"));
+    const auto updateState = [source, target, buttons, &defaults] {
+        const int sourceBank = source->currentData().toInt();
+        const int targetBank = target->currentData().toInt();
+        buttons->button(QDialogButtonBox::Ok)->setEnabled(
+            sourceBank != targetBank && defaults.bankHasContent.value(sourceBank));
+    };
+    QObject::connect(source, qOverload<int>(&QComboBox::currentIndexChanged),
+        &dialog, [updateState](int) { updateState(); });
+    QObject::connect(target, qOverload<int>(&QComboBox::currentIndexChanged),
+        &dialog, [updateState](int) { updateState(); });
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    updateState();
+
+    auto* description = new QLabel(QStringLiteral(
+        "Analyses the source bank's harmony, timing, groove, and melodic rhythm, then creates a related but contrasting B section. The source bank is never changed."),
+        &dialog);
+    description->setWordWrap(true);
+    auto* form = new QFormLayout();
+    form->addRow(QStringLiteral("Source Bank"), source);
+    form->addRow(QStringLiteral("Target Bank"), target);
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->addWidget(description);
+    layout->addLayout(form);
+    layout->addWidget(buttons);
+    if (dialog.exec() != QDialog::Accepted) return std::nullopt;
+
+    ContinueIdeaRequest request;
+    request.sourceSectionIndex = source->currentData().toInt();
+    request.targetSectionIndex = target->currentData().toInt();
     return request;
 }
 

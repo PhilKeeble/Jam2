@@ -204,6 +204,43 @@ void PerformanceHomeWidget::setWavGenerationActive(bool active)
     update();
 }
 
+void PerformanceHomeWidget::setJamRecordingState(
+    bool enabled,
+    bool active,
+    const QString& takeName)
+{
+    if (jamRecordingEnabled_ == enabled && jamRecordingActive_ == active &&
+        jamRecordingTake_ == takeName) return;
+    jamRecordingEnabled_ = enabled;
+    jamRecordingActive_ = active;
+    jamRecordingTake_ = takeName;
+    update();
+}
+
+void PerformanceHomeWidget::setBankState(
+    int liveBank,
+    int pendingBank,
+    quint64 beatsUntilSwitch,
+    int pendingBeatsPerBar,
+    bool localOnly,
+    const QString& status)
+{
+    liveBank_ = qBound(0, liveBank, 3);
+    pendingBank_ = pendingBank >= 0 && pendingBank < 4 ? pendingBank : -1;
+    pendingBankBeatsRemaining_ = pendingBank_ >= 0 ? beatsUntilSwitch : 0;
+    pendingBankBeatsPerBar_ = qMax(1, pendingBeatsPerBar);
+    bankLocalOnly_ = localOnly;
+    bankTransitionStatus_ = status;
+    update();
+}
+
+void PerformanceHomeWidget::setArrangementState(bool running, bool armed)
+{
+    arrangementRunning_ = running;
+    arrangementArmed_ = armed;
+    update();
+}
+
 void PerformanceHomeWidget::setTechnicalSummary(
     const QString& rtt,
     const QString& jitter,
@@ -244,7 +281,8 @@ PerformanceHomeWidget::SongPosition PerformanceHomeWidget::songPosition(
 {
     const quint64 total =
         model_ != nullptr && !model_->sections().isEmpty()
-        ? static_cast<quint64>(qMax(0, model_->section(0).beats))
+        ? static_cast<quint64>(qMax(0, model_->section(
+            qBound(0, liveBank_, model_->sections().size() - 1)).beats))
         : 0;
     if (total == 0) {
         return {};
@@ -257,18 +295,26 @@ PerformanceHomeWidget::SongPosition PerformanceHomeWidget::songPosition(
 PerformanceHomeWidget::SongPosition PerformanceHomeWidget::songPositionFromSongBeat(
     quint64 songBeat) const
 {
+    return songPositionForBankBeat(liveBank_, songBeat);
+}
+
+PerformanceHomeWidget::SongPosition PerformanceHomeWidget::songPositionForBankBeat(
+    int bankIndex,
+    quint64 songBeat) const
+{
     SongPosition result;
     if (model_ == nullptr || model_->sections().isEmpty()) {
         return result;
     }
     const quint64 total =
-        static_cast<quint64>(qMax(0, model_->section(0).beats));
+        static_cast<quint64>(qMax(0, model_->section(
+            qBound(0, bankIndex, model_->sections().size() - 1)).beats));
     result.totalBeats = total;
     if (total == 0) {
         return result;
     }
     result.songBeat = songBeat % total;
-    result.section = 0;
+    result.section = qBound(0, bankIndex, model_->sections().size() - 1);
     result.sectionBeat = static_cast<int>(result.songBeat);
     return result;
 }
@@ -302,11 +348,21 @@ QVector<QPair<QString, QString>> PerformanceHomeWidget::upcomingChords(
         return result;
     }
     QString previous = chordAt(position);
+    const quint64 pendingBeats = model_ != nullptr && pendingBank_ >= 0
+        ? static_cast<quint64>(qMax(0, model_->section(
+            qBound(0, pendingBank_, model_->sections().size() - 1)).beats))
+        : 0;
+    const quint64 searchBeats = position.totalBeats + pendingBeats;
     for (quint64 distance = 1;
-         distance <= position.totalBeats && result.size() < 3;
+         distance <= searchBeats && result.size() < 3;
          ++distance) {
-        const SongPosition candidate =
-            songPositionFromSongBeat((position.songBeat + distance) % position.totalBeats);
+        const bool afterSwitch = pendingBank_ >= 0 && pendingBankBeatsRemaining_ > 0 &&
+            distance >= pendingBankBeatsRemaining_;
+        const SongPosition candidate = afterSwitch
+            ? songPositionForBankBeat(
+                pendingBank_, distance - pendingBankBeatsRemaining_)
+            : songPositionFromSongBeat(
+                (position.songBeat + distance) % position.totalBeats);
         QString value =
             model_->section(candidate.section).chords.value(candidate.sectionBeat).trimmed();
         if (value.isEmpty()) {
@@ -318,9 +374,11 @@ QVector<QPair<QString, QString>> PerformanceHomeWidget::upcomingChords(
         if (value == previous) {
             continue;
         }
+        const int locationBeatsPerBar = afterSwitch
+            ? pendingBankBeatsPerBar_ : beatsPerBar_;
         const QString location = QStringLiteral("%1.%2")
-            .arg(candidate.songBeat / static_cast<quint64>(beatsPerBar_) + 1)
-            .arg(candidate.songBeat % static_cast<quint64>(beatsPerBar_) + 1);
+            .arg(candidate.songBeat / static_cast<quint64>(locationBeatsPerBar) + 1)
+            .arg(candidate.songBeat % static_cast<quint64>(locationBeatsPerBar) + 1);
         result.push_back({value, location});
         previous = value;
     }
@@ -525,6 +583,8 @@ void PerformanceHomeWidget::paintHtmlStage()
         ? &model_->section(position.section)
         : nullptr;
 
+    paintBankStrip(painter, margin + 3, 14);
+
     QFont micro(QStringLiteral("Bahnschrift"));
     micro.setPointSizeF(8.5);
     micro.setLetterSpacing(QFont::AbsoluteSpacing, 0.9);
@@ -533,14 +593,14 @@ void PerformanceHomeWidget::paintHtmlStage()
     painter.setFont(sectionFont);
     painter.setPen(QColor(233, 230, 220));
     painter.drawText(
-        QRect(margin + 3, 15, width() / 3, 42),
+        QRect(margin + 3, 42, width() / 3, 42),
         Qt::AlignLeft | Qt::AlignVCenter,
         section != nullptr ? sectionName(*section) : QStringLiteral("No song section"));
 
     const QPair<QString, QString> lyrics = lyricLines(position);
     lyricsHitRect_ = QRect(
         margin + 4,
-        62,
+        82,
         qMin(390, width() / 3),
         lyrics.first.isEmpty() && lyrics.second.isEmpty() ? 0 : 76);
     if (lyricsHitRect_.height() > 0) {
@@ -878,6 +938,12 @@ void PerformanceHomeWidget::paintHtmlStage()
         previewTop + previewHeight - railHeight,
         peerWidth,
         railHeight);
+    jamRecordingHitRect_ = QRect(
+        peerRailRect_.left(),
+        peerRailRect_.top() - 35,
+        peerRailRect_.width(),
+        29);
+    paintJamRecordingButton(painter, jamRecordingHitRect_);
     paintVerticalPeerRail(painter, peerRailRect_);
 
     currentBeatHitRect_ = QRect(previewLeft, previewTop, previewWidth, previewHeight);
@@ -912,11 +978,21 @@ void PerformanceHomeWidget::paintHtmlStage()
         ? position.songBeat -
             position.songBeat % static_cast<quint64>(beatsPerBar_)
         : 0;
-    paintBeatPreview(painter, currentBeatHitRect_, currentBarStart, true);
+    const quint64 beatsToNextBar = position.totalBeats > 0
+        ? static_cast<quint64>(beatsPerBar_) -
+            position.songBeat % static_cast<quint64>(beatsPerBar_)
+        : static_cast<quint64>(beatsPerBar_);
+    const bool nextBarUsesPendingBank = pendingBank_ >= 0 &&
+        pendingBankBeatsRemaining_ > 0 &&
+        pendingBankBeatsRemaining_ <= beatsToNextBar;
+    paintBeatPreview(
+        painter, currentBeatHitRect_, liveBank_, beatsPerBar_, currentBarStart, true);
     paintBeatPreview(
         painter,
         nextBeatHitRect_,
-        position.totalBeats > 0
+        nextBarUsesPendingBank ? pendingBank_ : liveBank_,
+        nextBarUsesPendingBank ? pendingBankBeatsPerBar_ : beatsPerBar_,
+        nextBarUsesPendingBank ? 0 : position.totalBeats > 0
             ? (currentBarStart + static_cast<quint64>(beatsPerBar_)) %
                 position.totalBeats
             : 0,
@@ -1048,17 +1124,19 @@ void PerformanceHomeWidget::paintEvent(QPaintEvent*)
         ? &model_->section(position.section)
         : nullptr;
 
+    paintBankStrip(painter, margin, 14);
+
     painter.setPen(QColor(205, 198, 213));
     QFont microFont = font();
     microFont.setPointSizeF(qMax(9.5, font().pointSizeF() - 0.5));
     painter.setFont(microFont);
     painter.drawText(
-        QRect(margin, 18, width() / 3, 24),
+        QRect(margin, 42, width() / 3, 24),
         Qt::AlignLeft | Qt::AlignVCenter,
         section != nullptr ? sectionName(*section) : QStringLiteral("No song section"));
 
     const QPair<QString, QString> lyrics = lyricLines(position);
-    lyricsHitRect_ = QRect(margin, 48, width() / 3, lyrics.first.isEmpty() && lyrics.second.isEmpty() ? 0 : 66);
+    lyricsHitRect_ = QRect(margin, 70, width() / 3, lyrics.first.isEmpty() && lyrics.second.isEmpty() ? 0 : 66);
     if (lyricsHitRect_.height() > 0) {
         painter.setPen(theme::textStrong);
         QFont lyricFont = font();
@@ -1211,7 +1289,13 @@ void PerformanceHomeWidget::paintEvent(QPaintEvent*)
             index < upcoming.size() ? upcoming.at(index).second : QString{});
     }
 
-    peerRailRect_ = QRect(margin, 118, qMin(width() - margin * 2, 1080), 48);
+    jamRecordingHitRect_ = QRect(margin, 118, 132, 48);
+    paintJamRecordingButton(painter, jamRecordingHitRect_);
+    peerRailRect_ = QRect(
+        jamRecordingHitRect_.right() + 8,
+        118,
+        qMax(0, qMin(width() - margin - jamRecordingHitRect_.right() - 8, 1080)),
+        48);
     paintPeerRail(painter, peerRailRect_);
 
     currentBeatHitRect_ = QRect(margin, previewTop, previewWidth, previewHeight);
@@ -1225,11 +1309,21 @@ void PerformanceHomeWidget::paintEvent(QPaintEvent*)
         ? position.songBeat -
             position.songBeat % static_cast<quint64>(beatsPerBar_)
         : 0;
-    paintBeatPreview(painter, currentBeatHitRect_, currentBarStart, true);
+    const quint64 beatsToNextBar = position.totalBeats > 0
+        ? static_cast<quint64>(beatsPerBar_) -
+            position.songBeat % static_cast<quint64>(beatsPerBar_)
+        : static_cast<quint64>(beatsPerBar_);
+    const bool nextBarUsesPendingBank = pendingBank_ >= 0 &&
+        pendingBankBeatsRemaining_ > 0 &&
+        pendingBankBeatsRemaining_ <= beatsToNextBar;
+    paintBeatPreview(
+        painter, currentBeatHitRect_, liveBank_, beatsPerBar_, currentBarStart, true);
     paintBeatPreview(
         painter,
         nextBeatHitRect_,
-        position.totalBeats > 0
+        nextBarUsesPendingBank ? pendingBank_ : liveBank_,
+        nextBarUsesPendingBank ? pendingBankBeatsPerBar_ : beatsPerBar_,
+        nextBarUsesPendingBank ? 0 : position.totalBeats > 0
             ? (currentBarStart + static_cast<quint64>(beatsPerBar_)) %
                 position.totalBeats
             : 0,
@@ -1262,9 +1356,12 @@ void PerformanceHomeWidget::paintEvent(QPaintEvent*)
 void PerformanceHomeWidget::paintBeatPreview(
     QPainter& painter,
     const QRect& bounds,
+    int bankIndex,
+    int previewBeatsPerBar,
     quint64 barStart,
     bool current)
 {
+    previewBeatsPerBar = qMax(1, previewBeatsPerBar);
     painter.setPen(QPen(current ? gold() : QColor(135, 91, 164), 1));
     painter.setBrush(QColor(9, 10, 23, 215));
     painter.drawRoundedRect(bounds, 9, 9);
@@ -1301,7 +1398,7 @@ void PerformanceHomeWidget::paintBeatPreview(
         5,
         qMin(
             laneHeight - 4,
-            grid.width() / qMax(1, beatsPerBar_ * 8) - 3),
+            grid.width() / qMax(1, previewBeatsPerBar * 8) - 3),
         24);
     if (current) {
         QFont legendFont(QStringLiteral("Bahnschrift"));
@@ -1357,11 +1454,11 @@ void PerformanceHomeWidget::paintBeatPreview(
             Qt::AlignRight | Qt::AlignVCenter,
             laneNames.at(lane));
     }
-    for (int beat = 0; beat < beatsPerBar_; ++beat) {
-        const int left = grid.left() + beat * grid.width() / beatsPerBar_;
-        const int right = grid.left() + (beat + 1) * grid.width() / beatsPerBar_;
-        const SongPosition beatPosition = songPositionFromSongBeat(
-            barStart + static_cast<quint64>(beat));
+    for (int beat = 0; beat < previewBeatsPerBar; ++beat) {
+        const int left = grid.left() + beat * grid.width() / previewBeatsPerBar;
+        const int right = grid.left() + (beat + 1) * grid.width() / previewBeatsPerBar;
+        const SongPosition beatPosition = songPositionForBankBeat(
+            bankIndex, barStart + static_cast<quint64>(beat));
         const BeatPattern* pattern = nullptr;
         if (model_ != nullptr && beatPosition.totalBeats > 0) {
             pattern = &model_->section(beatPosition.section)
@@ -1373,7 +1470,7 @@ void PerformanceHomeWidget::paintBeatPreview(
             Qt::AlignCenter,
             QStringLiteral("%1.%2")
                 .arg((barStart + static_cast<quint64>(beat)) /
-                        static_cast<quint64>(beatsPerBar_) +
+                        static_cast<quint64>(previewBeatsPerBar) +
                     1)
                 .arg(beat + 1));
         painter.setPen(QColor(91, 76, 108, 150));
@@ -1434,15 +1531,21 @@ void PerformanceHomeWidget::paintGenerationActions(
     constexpr int gap = 8;
     constexpr int wavWidth = 116;
     constexpr int clearWidth = 96;
-    constexpr int ideaWidth = 164;
+    constexpr int continueWidth = 124;
+    constexpr int ideaWidth = 154;
     generateWavHitRect_ = QRect(right - wavWidth, top, wavWidth, height);
     clearIdeaHitRect_ = QRect(
         generateWavHitRect_.left() - gap - clearWidth,
         top,
         clearWidth,
         height);
+    continueIdeaHitRect_ = QRect(
+        clearIdeaHitRect_.left() - gap - continueWidth,
+        top,
+        continueWidth,
+        height);
     generateIdeaHitRect_ = QRect(
-        clearIdeaHitRect_.left() - gap - ideaWidth,
+        continueIdeaHitRect_.left() - gap - ideaWidth,
         top,
         ideaWidth,
         height);
@@ -1472,6 +1575,11 @@ void PerformanceHomeWidget::paintGenerationActions(
         QStringLiteral("GENERATE NEW IDEA"),
         gold(),
         QColor(35, 27, 20, 232));
+    drawAction(
+        continueIdeaHitRect_,
+        QStringLiteral("CONTINUE IDEA"),
+        QColor(102, 212, 207),
+        QColor(13, 42, 43, 232));
     drawAction(
         clearIdeaHitRect_,
         QStringLiteral("CLEAR IDEA"),
@@ -1620,6 +1728,80 @@ void PerformanceHomeWidget::paintVerticalPeerRail(
     }
 }
 
+void PerformanceHomeWidget::paintJamRecordingButton(
+    QPainter& painter,
+    const QRect& bounds)
+{
+    const QColor accent = jamRecordingActive_
+        ? QColor(230, 92, 88)
+        : QColor(176, 139, 228);
+    painter.setPen(QPen(
+        jamRecordingEnabled_ ? accent : QColor(78, 87, 91),
+        jamRecordingActive_ ? 1.8 : 1.0));
+    painter.setBrush(jamRecordingActive_
+        ? QColor(46, 17, 18, 238)
+        : QColor(8, 11, 13, 225));
+    painter.drawRoundedRect(bounds, 4, 4);
+    painter.setPen(jamRecordingEnabled_ ? QColor(240, 234, 226) : QColor(126, 132, 134));
+    QFont buttonFont(QStringLiteral("Bahnschrift"));
+    buttonFont.setPointSizeF(8.5);
+    buttonFont.setWeight(QFont::DemiBold);
+    painter.setFont(buttonFont);
+    QString label = jamRecordingActive_
+        ? QStringLiteral("STOP RECORDING")
+        : QStringLiteral("RECORD JAM");
+    if (jamRecordingActive_ && bounds.height() >= 40 && !jamRecordingTake_.isEmpty()) {
+        label += QLatin1Char('\n') + jamRecordingTake_;
+    }
+    painter.drawText(bounds.adjusted(6, 2, -6, -2), Qt::AlignCenter, label);
+}
+
+void PerformanceHomeWidget::paintBankStrip(QPainter& painter, int left, int top)
+{
+    QFont font(QStringLiteral("Bahnschrift"));
+    font.setPointSizeF(8.0);
+    font.setWeight(QFont::DemiBold);
+    painter.setFont(font);
+    painter.setPen(QColor(156, 169, 171));
+    painter.drawText(QRect(left, top, 38, 24), Qt::AlignVCenter, QStringLiteral("BANK"));
+    int x = left + 42;
+    for (int bank = 0; bank < 4; ++bank) {
+        const QRect cell(x, top, 28, 24);
+        bankHitRects_[static_cast<std::size_t>(bank)] = cell;
+        const bool live = bank == liveBank_;
+        const bool next = bank == pendingBank_;
+        painter.setPen(QPen(next ? QColor(232, 164, 74)
+            : live ? QColor(102, 212, 207) : QColor(78, 94, 98), 1));
+        painter.setBrush(next ? QColor(67, 42, 21, 230)
+            : live ? QColor(13, 53, 54, 230) : QColor(7, 11, 12, 220));
+        painter.drawRoundedRect(cell, 3, 3);
+        painter.setPen(live || next ? QColor(242, 244, 235) : QColor(156, 169, 171));
+        painter.drawText(cell, Qt::AlignCenter,
+            QString(QChar(QLatin1Char('A').unicode() + bank)));
+        x += 32;
+    }
+    arrangementHitRect_ = QRect(x + 4, top, 82, 24);
+    const bool arrangementActive = arrangementRunning_ || arrangementArmed_;
+    painter.setPen(QPen(arrangementActive
+        ? QColor(176, 139, 228) : QColor(78, 94, 98), 1));
+    painter.setBrush(arrangementActive
+        ? QColor(39, 25, 53, 230) : QColor(7, 11, 12, 220));
+    painter.drawRoundedRect(arrangementHitRect_, 3, 3);
+    painter.setPen(arrangementActive
+        ? QColor(235, 217, 250) : QColor(156, 169, 171));
+    painter.drawText(arrangementHitRect_, Qt::AlignCenter,
+        arrangementArmed_ ? QStringLiteral("ARMED")
+            : arrangementRunning_ ? QStringLiteral("ARR. ON")
+                                  : QStringLiteral("ARRANGE"));
+    x = arrangementHitRect_.right() + 5;
+    const QString status = !bankTransitionStatus_.isEmpty()
+        ? bankTransitionStatus_
+        : bankLocalOnly_ ? QStringLiteral("LOCAL") : QStringLiteral("LIVE %1")
+            .arg(QChar(QLatin1Char('A').unicode() + liveBank_));
+    painter.setPen(pendingBank_ >= 0 ? QColor(255, 202, 126) : QColor(132, 151, 153));
+    painter.drawText(QRect(x + 4, top, 250, 24), Qt::AlignVCenter, status);
+}
+
 void PerformanceHomeWidget::paintLooperLaunch(QPainter& painter, const QRect& bounds)
 {
     painter.setPen(QPen(QColor(78, 94, 98, 195), 1));
@@ -1642,7 +1824,7 @@ void PerformanceHomeWidget::paintLooperLaunch(QPainter& painter, const QRect& bo
     painter.drawText(
         bounds.adjusted(0, 7, -10, 0),
         Qt::AlignRight | Qt::AlignTop,
-        QStringLiteral("BANK A"));
+        QStringLiteral("BANK %1").arg(QChar(QLatin1Char('A').unicode() + liveBank_)));
 
     int noticeTop = 25;
     if (!trackTransferStatus_.isEmpty()) {
@@ -1975,6 +2157,10 @@ void PerformanceHomeWidget::mousePressEvent(QMouseEvent* event)
         if (onGenerateIdea) onGenerateIdea();
         return;
     }
+    if (continueIdeaHitRect_.contains(point)) {
+        if (onContinueIdea) onContinueIdea();
+        return;
+    }
     if (clearIdeaHitRect_.contains(point)) {
         if (onClearIdea) onClearIdea();
         return;
@@ -1982,6 +2168,20 @@ void PerformanceHomeWidget::mousePressEvent(QMouseEvent* event)
     if (generateWavHitRect_.contains(point)) {
         if (onGenerateWav) onGenerateWav();
         return;
+    }
+    if (arrangementHitRect_.contains(point)) {
+        if (onManageArrangement) onManageArrangement();
+        return;
+    }
+    if (jamRecordingHitRect_.contains(point)) {
+        if (jamRecordingEnabled_ && onJamRecordingToggle) onJamRecordingToggle();
+        return;
+    }
+    for (int bank = 0; bank < static_cast<int>(bankHitRects_.size()); ++bank) {
+        if (bankHitRects_[static_cast<std::size_t>(bank)].contains(point)) {
+            if (onBankLaunch) onBankLaunch(bank);
+            return;
+        }
     }
     if (chordHitRect_.contains(point) || chordRunwayRect_.contains(point)) {
         if (onOpenDetail) onOpenDetail(QStringLiteral("chords"));

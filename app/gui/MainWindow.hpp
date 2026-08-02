@@ -4,6 +4,7 @@
 #include "AssetTransferService.hpp"
 #include "BeatGridWidget.hpp"
 #include "GuiLoopbackRecorder.hpp"
+#include "JamStorage.hpp"
 #include "LooperProject.hpp"
 #include "MixerStatsViewModel.hpp"
 #include "MetronomeTransportController.hpp"
@@ -66,6 +67,7 @@ class LevelMeterWidget;
 
 namespace jam2::practice {
 struct ChordIdeaRequest;
+struct ReferenceRenderSettings;
 }
 
 class MainWindow : public QWidget {
@@ -137,12 +139,42 @@ private:
     void startJamRecording();
     void stopJamRecording();
     void updateJamRecordingControls();
+    void showJamRecordingFinished(const QString& folder);
+    void showJamRecordingImportDialog(const QString& folder);
     QString meshInviteUrl() const;
     void showPendingMeshInviteUrl();
     void updateConnectionControlState();
     void updateTrackControls();
     void updateTrackPlaybackPresentation();
     void refreshLooperLanes();
+    void selectViewedBank(int bankIndex);
+    void refreshBankPresentation();
+    void requestBankLaunch(int bankIndex);
+    void launchBank(
+        int bankIndex,
+        bool manualLaunch,
+        std::optional<quint64> targetAbsoluteBeat = std::nullopt);
+    void beginSharedBankLaunch(
+        int bankIndex,
+        std::optional<quint64> targetAbsoluteBeat = std::nullopt);
+    void prepareSharedBankLaunch(int bankIndex, const QString& switchId);
+    void noteSharedBankReady(int bankIndex);
+    void handleSharedBankReady(
+        int bankIndex,
+        const QString& switchId,
+        const QString& sourcePeerToken);
+    void maybeCommitSharedBankLaunch();
+    void cancelSharedBankLaunch(bool broadcast, const QString& reason = {});
+    void schedulePreparedBankLaunch(
+        int bankIndex,
+        std::optional<quint64> targetAbsoluteBeat = std::nullopt);
+    void applyScheduledBankLaunch();
+    void showArrangementDialog();
+    void startArrangement();
+    void stopArrangement();
+    void updateArrangementPlayback(const PlaybackGrid::Position& position);
+    void exportLooperAudio();
+    qint64 bankExactOutputFrames(int bankIndex, int sampleRate) const;
     void addLooperWavs();
     void loadWavIntoLooperLane();
     void shareLocalTracks(bool includeLocalOnly = false);
@@ -160,8 +192,9 @@ private:
     void editSelectedLooperLaneRegion();
     void applySelectedLooperLaneRegion(qint64 startFrame, qint64 sourceStartFrame, qint64 sourceEndFrame);
     void applyLooperLaneGain(int laneIndex, double gainDb);
-    void regeneratePreparedMix();
+    void regeneratePreparedMix(int bankIndex = -1);
     void applyPreparedMixResult(PreparedMixResult result);
+    void adoptPreparedBankCache(int bankIndex);
     bool startFileWorkerTask(
         std::function<void()> work,
         std::function<void()> complete,
@@ -195,6 +228,12 @@ private:
     void updateTrackMetronomeInterval();
     void rebuildMetronomePattern(bool resetToDivisionDefault = false);
     jam2::metronome::PatternSnapshot currentMetronomePattern() const;
+    jam2::metronome::PatternSnapshot bankMetronomePattern(int bankIndex) const;
+    void storeCurrentMetronomePatternForBank(int bankIndex, bool inheritBankA = false);
+    void applyMetronomePatternForBank(int bankIndex, bool transmit = true);
+    void initializeLegacyBankTiming();
+    int sectionBeatsPerBar(int bankIndex) const;
+    bool bankGridTimingDiffers(int bankIndex) const;
     void sendMetronomeModeToJam();
     void sendMetronomeSoundToJam();
     void sendMetronomePatternToJam();
@@ -210,8 +249,6 @@ private:
     bool sendBinaryControlTo(const QString& targetPeerToken, const QByteArray& payload);
     bool canQueueControlTo(const QString& targetPeerToken, qint64 estimatedBytes) const;
     void handleSongSet(const QJsonObject& message, const QString& sourcePeerToken);
-    void handleTrackReady(const QJsonObject& message, const QString& sourcePeerToken);
-    void maybeScheduleSharedTrackRestart();
     void applyPendingSongIfAssetsReady();
     QJsonObject normalizeLooperAssetPaths(QJsonObject song) const;
     QJsonObject preserveQuarantinedLocalLanes(QJsonObject song);
@@ -231,16 +268,28 @@ private:
     void discardObsoleteReferenceWavs(const QSet<QString>& paths);
     void retryObsoleteReferenceWavs();
     void discardPreparedMix(bool replacementExpected);
-    bool clearPracticeReferenceWavs(bool rebuildRemainingTracks = false);
+    bool clearPracticeReferenceWavs(bool rebuildRemainingTracks = false, int bankIndex = -1);
     void cleanupTransientTrackWavs();
+    QString jamAssetFolder(JamStorage::AssetKind kind) const;
+    bool renameCurrentJam(const QString& displayName);
+    void relocateManagedPaths(const QString& oldRoot, const QString& newRoot);
     void refreshSongViews();
     void refreshSongView(const QString& lane);
     void generatePracticeIdea();
+    void continuePracticeIdea();
     void clearPracticeIdea();
     bool applyPracticeIdea(const jam2::practice::ChordIdeaRequest& request);
     void stopTrackForPracticeIdeaGeneration();
-    void ensureInitialPracticeIdea();
     void generatePracticeReferenceWavs();
+    void startPracticeReferenceWavGeneration(
+        const jam2::practice::ReferenceRenderSettings& settings,
+        const QString& requestId);
+    void handlePracticeReferenceRenderRequest(
+        const QJsonObject& message,
+        const QString& sourcePeerToken,
+        bool localRequest = false);
+    QByteArray practiceReferenceRenderSignature() const;
+    void startDeferredPracticeReferenceRenders();
     void showPracticeIdeaDetails();
     void updatePlaybackGrid();
     void updateRecordingCountdown(const PlaybackGrid::Position& position);
@@ -397,7 +446,6 @@ private:
     QSlider* mixTrackLevelSlider_ = nullptr;
     QLabel* mixTrackLevelLabel_ = nullptr;
     LevelMeterWidget* mixTrackMeter_ = nullptr;
-    QWidget* mixJamRecordingRow_ = nullptr;
     QWidget* mixLocalInputSection_ = nullptr;
     QWidget* mixInputMeterRow_ = nullptr;
     QWidget* mixSendRow_ = nullptr;
@@ -433,8 +481,6 @@ private:
     QLabel* mixRemotePeerLevelLabel_ = nullptr;
     LevelMeterWidget* mixRemotePeerMeter_ = nullptr;
     QLabel* mixOutputClipLabel_ = nullptr;
-    QPushButton* jamRecordingButton_ = nullptr;
-    QLabel* jamRecordingLabel_ = nullptr;
     QCheckBox* focusFrequencyCheck_ = nullptr;
     QComboBox* focusPresetBox_ = nullptr;
     QSlider* focusFrequencySlider_ = nullptr;
@@ -444,6 +490,9 @@ private:
     QPushButton* shareTracksButton_ = nullptr;
     QPushButton* startArmedLaneRecordingButton_ = nullptr;
     std::array<QPushButton*, 4> looperBankButtons_{};
+    QVector<QPushButton*> bankViewButtons_;
+    QPushButton* arrangementButton_ = nullptr;
+    QPushButton* launchBankButton_ = nullptr;
     QCheckBox* captureCountInCheck_ = nullptr;
     QCheckBox* captureCountInMetronomeCheck_ = nullptr;
     QCheckBox* captureKeepMetronomeCheck_ = nullptr;
@@ -495,17 +544,33 @@ private:
     TapTempoTracker tapTempoTracker_;
     QElapsedTimer tapTempoClock_;
     int selectedLooperLane_ = -1;
+    int viewedBankIndex_ = 0;
+    int pendingBankIndex_ = -1;
+    quint64 pendingBankAbsoluteBeat_ = 0;
+    QString sharedBankSwitchId_;
+    int sharedBankSwitchIndex_ = -1;
+    quint64 sharedBankTargetAbsoluteBeat_ = 0;
+    bool sharedBankHostReady_ = false;
+    QSet<QString> sharedBankReadyTokens_;
+    std::optional<quint64> pendingBankRequestedTargetBeat_;
+    bool arrangementRunning_ = false;
+    bool arrangementArmed_ = false;
+    bool arrangementResetBankAfterStop_ = false;
+    int arrangementStepIndex_ = 0;
+    int arrangementStepRepeat_ = 0;
+    quint64 arrangementSectionStartBeat_ = 0;
+    std::array<PreparedMixResult, 4> preparedMixByBank_{};
     bool referenceWavGenerationRunning_ = false;
+    QSet<QString> handledReferenceRenderRequests_;
+    QMap<QString, QPair<QJsonObject, QString>> deferredReferenceRenderRequests_;
     ProjectPersistenceCoordinator& projectPersistence_;
     PreparedMixResult& preparedMix_;
     QThreadPool& fileWorkerPool_;
     bool& preparedMixWorkerRunning_;
     bool& preparedMixRerunPending_;
+    int preparedMixRerunBank_ = -1;
+    std::uint64_t preparedMixRevision_ = 0;
     bool& playPreparedMixWhenReady_;
-    int& pendingPreparedTrackReadyRevision_;
-    quint64& pendingSharedTrackRevision_;
-    bool& pendingSharedTrackHostReady_;
-    QSet<QString>& pendingSharedTrackReadyTokens_;
     bool& publishStoppedTrackStateWhenApplied_;
     std::uint64_t& preparedMixRequests_;
     std::uint64_t& preparedMixCoalesced_;
@@ -579,8 +644,10 @@ private:
     QMap<QString, QString> meshPeerEndpoints_;
     std::uint64_t engineCommandCookie_ = 0;
     std::uint64_t tunerCommandCookie_ = 0;
-    bool tunerRequestedEnabled_ = false;
+    bool tunerRequestedEnabled_ = true;
     std::uint64_t practiceIdeaRevision_ = 0;
     QVector<bool> metronomeEnabledSteps_;
     QVector<bool> metronomeAccents_;
+    bool applyingBankTiming_ = false;
+    JamStorage jamStorage_;
 };

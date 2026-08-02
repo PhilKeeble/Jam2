@@ -79,8 +79,6 @@ void GuiControlMessageRouter::dispatch(
         if (handlers.refreshSongView) handlers.refreshSongView(QStringLiteral("chord"));
     } else if (type == QStringLiteral("song.set")) {
         if (handlers.songSet) handlers.songSet(message, sourcePeerToken);
-    } else if (type == QStringLiteral("track.ready")) {
-        if (handlers.trackReady) handlers.trackReady(message, sourcePeerToken);
     } else if (type == QStringLiteral("looper.track.share.request")) {
         if (sourcePeerToken.isEmpty()) {
             if (handlers.shareLocalTracks) handlers.shareLocalTracks(message);
