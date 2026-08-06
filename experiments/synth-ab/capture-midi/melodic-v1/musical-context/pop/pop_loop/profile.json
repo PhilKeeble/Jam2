@@ -1,0 +1,39 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "pop",
+  "styleName": "Pop",
+  "profileId": "pop_loop",
+  "profileName": "Loop-Centred Pop",
+  "seed": "1528705262",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 96.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 96.0,
+  "durationSeconds": 20.0,
+  "tonic": "Ab",
+  "mode": "Major",
+  "formId": "pop-loop-8",
+  "grooveId": "pop-syncopated-kick",
+  "fingerprints": {
+    "beat": "9e4634a4d02c993503be34f905fde13883ad0efeba903097bdfd6d43f66dc6ce",
+    "chord": "45d0470c94e287ae3e8c2f6af56e0d8627b9a0e594ecc0bd038387120f5a1628"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

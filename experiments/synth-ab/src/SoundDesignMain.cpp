@@ -39,9 +39,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMap>
+#include <QProcess>
 #include <QSaveFile>
 #include <QTemporaryDir>
 #include <QTextStream>
+#include <QThread>
 #include <QtEndian>
 
 #include <algorithm>
@@ -74,7 +76,7 @@ using jam2::practice::StyleDefinition;
 constexpr int kSampleRate = 48000;
 constexpr int kTicksPerBeat = 12;
 constexpr double kPi = 3.14159265358979323846;
-constexpr int kAuditionBars = 4;
+constexpr int kAuditionBars = 8;
 constexpr std::array<const char*, 5> kRoleIds{
     "chords", "melody", "bass", "support", "drums"};
 
@@ -93,6 +95,11 @@ struct StemSet {
     std::vector<float> bass;
     std::vector<float> support;
     std::vector<float> drums;
+};
+
+struct StereoAudio {
+    std::vector<float> left;
+    std::vector<float> right;
 };
 
 double midiFrequency(int midi)
@@ -569,6 +576,82 @@ bool writeMonoPcm16(
     return file.commit();
 }
 
+void matchAuditionLevel(
+    StereoAudio& audio,
+    const QString& role)
+{
+    const std::size_t frames = std::min(
+        audio.left.size(), audio.right.size());
+    if (frames == 0) return;
+    const double targetRms =
+        role == QStringLiteral("drums") ? 0.17 :
+        role == QStringLiteral("bass") ? 0.14 :
+        role == QStringLiteral("support") ? 0.09 : 0.12;
+    double sumSquares = 0.0;
+    float peak = 0.0f;
+    for (std::size_t frame = 0; frame < frames; ++frame) {
+        const float left = audio.left[frame];
+        const float right = audio.right[frame];
+        sumSquares += 0.5 * (
+            static_cast<double>(left) * left +
+            static_cast<double>(right) * right);
+        peak = std::max({peak, std::abs(left), std::abs(right)});
+    }
+    const double rms = std::sqrt(
+        sumSquares / std::max<std::size_t>(1, frames));
+    if (rms < 1.0e-7 || peak < 1.0e-7f) return;
+    const float gain = static_cast<float>(std::min({
+        8.0,
+        targetRms / rms,
+        0.88 / peak,
+    }));
+    for (std::size_t frame = 0; frame < frames; ++frame) {
+        audio.left[frame] *= gain;
+        audio.right[frame] *= gain;
+    }
+}
+
+bool writeStereoPcm16(
+    const QString& path,
+    StereoAudio audio,
+    const QString& role)
+{
+    const std::size_t frames = std::min(
+        audio.left.size(), audio.right.size());
+    audio.left.resize(frames);
+    audio.right.resize(frames);
+    matchAuditionLevel(audio, role);
+    QSaveFile file(path);
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    if (!file.open(QIODevice::WriteOnly)) return false;
+    QDataStream stream(&file);
+    stream.setByteOrder(QDataStream::LittleEndian);
+    const quint32 dataBytes = static_cast<quint32>(frames * 4);
+    stream.writeRawData("RIFF", 4);
+    stream << static_cast<quint32>(36 + dataBytes);
+    stream.writeRawData("WAVEfmt ", 8);
+    stream << static_cast<quint32>(16)
+           << static_cast<quint16>(1)
+           << static_cast<quint16>(2)
+           << static_cast<quint32>(kSampleRate)
+           << static_cast<quint32>(kSampleRate * 4)
+           << static_cast<quint16>(4)
+           << static_cast<quint16>(16);
+    stream.writeRawData("data", 4);
+    stream << dataBytes;
+    for (std::size_t frame = 0; frame < frames; ++frame) {
+        stream << static_cast<qint16>(std::lround(
+                      std::clamp(
+                          audio.left[frame], -0.98f, 0.98f) *
+                      32767.0f))
+               << static_cast<qint16>(std::lround(
+                      std::clamp(
+                          audio.right[frame], -0.98f, 0.98f) *
+                      32767.0f));
+    }
+    return file.commit();
+}
+
 bool hasLane(
     const GeneratedPracticeIdea& idea,
     const QString& lane)
@@ -680,12 +763,21 @@ struct PatchDesign {
     float release = 0.35f;
     float filterCutoff = 1800.0f;
     float filterEnvelope = 2600.0f;
+    float filterEnvelopeDecay = 0.0f;
+    float filterEnvelopeSustain = 0.025f;
+    float filterKeyTracking = 0.72f;
+    float filterVelocitySensitivity = 1.0f;
     float resonance = 0.30f;
     float filterDrive = 1.35f;
     float wavefold = 0.0f;
     float noiseMix = 0.0f;
     float transientMix = 0.0f;
     float transientSeconds = 0.025f;
+    float velocitySensitivity = 1.0f;
+    float pitchEnvelopeSemitones = 0.0f;
+    float pitchEnvelopeSeconds = 0.04f;
+    float pitchAttackGain = 0.0f;
+    float pitchAttackSeconds = 0.04f;
     float glideSeconds = 0.0f;
     float vibratoCents = 0.0f;
     float vibratoRate = 5.1f;
@@ -695,11 +787,18 @@ struct PatchDesign {
     float voiceDrive = 1.0f;
     float busDrive = 1.0f;
     float cabinet = 0.0f;
+    float highpassCutoff = 0.0f;
     float chorusMix = 0.0f;
     float chorusDepth = 0.16f;
     float chorusRate = 0.32f;
     float delayMix = 0.0f;
     float delaySeconds = 0.23f;
+    float reverbMix = 0.0f;
+    float reverbSeconds = 1.8f;
+    float reverbDamping = 0.55f;
+    float reverbPreDelay = 0.0f;
+    float stereoSpread = 0.0f;
+    float stereoWidth = 1.0f;
 };
 
 PatchDesign basePatch(const QString& role)
@@ -1674,6 +1773,7 @@ struct ActiveVoice {
     float frequency = 440.0f;
     float glideFromFrequency = 440.0f;
     float velocity = 0.8f;
+    float pianoHammerGain = 0.0f;
     PatchDesign patch;
 
     daisysp::VariableShapeOscillator oscillatorA;
@@ -1712,6 +1812,14 @@ struct ActiveVoice {
             : frequency;
         velocity = event.velocity / 127.0f;
         patch = design;
+        pianoHammerGain =
+            patch.source == SourceKind::Harmonic &&
+                patch.harmonicFamily == 6
+            ? 1.1f * std::clamp(
+                  (static_cast<float>(event.midi) - 60.0f) / 12.0f,
+                  0.0f,
+                  2.0f)
+            : 0.0f;
 
         if (event.articulation.contains(QStringLiteral("short")) ||
             event.articulation.contains(QStringLiteral("muted")) ||
@@ -1837,6 +1945,60 @@ struct ActiveVoice {
             amplitudes[6] = 0.075f;
             amplitudes[9] = 0.040f;
             amplitudes[12] = 0.022f;
+        } else if (patch.harmonicFamily == 6) {
+            // Acoustic-piano partial balance changes substantially by key:
+            // bass strings carry strong upper partials while the treble is
+            // increasingly fundamental-led. Interpolate measured anchor
+            // shapes rather than forcing one static additive spectrum across
+            // the keyboard. Velocity brightens the non-fundamental partials.
+            constexpr std::array<std::array<float, 16>, 5> pianoAnchors{{
+                {{0.24f, 0.21f, 0.095f, 0.09f, 0.065f, 0.055f, 0.10f, 0.04f,
+                  0.03f, 0.12f, 0.020f, 0.014f, 0.010f, 0.0f, 0.0f, 0.0f}},
+                {{0.34f, 0.10f, 0.20f, 0.08f, 0.11f, 0.09f, 0.035f, 0.025f,
+                  0.02f, 0.015f, 0.010f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}},
+                {{0.36f, 0.23f, 0.12f, 0.10f, 0.06f, 0.03f, 0.07f, 0.02f,
+                  0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}},
+                {{0.55f, 0.10f, 0.055f, 0.03f, 0.018f, 0.012f, 0.008f, 0.0f,
+                  0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}},
+                {{0.62f, 0.28f, 0.035f, 0.015f, 0.0f, 0.0f, 0.0f, 0.0f,
+                  0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}},
+            }};
+            const float anchorPosition = std::clamp(
+                (static_cast<float>(event.midi) - 36.0f) / 12.0f,
+                0.0f,
+                4.0f);
+            const int lowerAnchor = std::min(
+                3,
+                static_cast<int>(std::floor(anchorPosition)));
+            const int upperAnchor = std::min(4, lowerAnchor + 1);
+            const float anchorMix = anchorPosition - lowerAnchor;
+            const float brightnessPosition = std::clamp(
+                (velocity - 0.35f) / 0.65f,
+                0.0f,
+                1.0f);
+            float brightness = 0.58f + 0.47f *
+                brightnessPosition * brightnessPosition *
+                (3.0f - 2.0f * brightnessPosition);
+            constexpr std::array<float, 5> pianoBrightnessByKey{
+                1.35f, 1.50f, 1.0f, 1.0f, 1.0f};
+            brightness *=
+                (1.0f - anchorMix) * pianoBrightnessByKey[lowerAnchor] +
+                anchorMix * pianoBrightnessByKey[upperAnchor];
+            float amplitudeSum = 0.0f;
+            for (std::size_t index = 0; index < amplitudes.size(); ++index) {
+                amplitudes[index] =
+                    ((1.0f - anchorMix) *
+                         pianoAnchors[lowerAnchor][index] +
+                     anchorMix * pianoAnchors[upperAnchor][index]) *
+                    (index == 0 ? 1.0f : brightness);
+                amplitudeSum += amplitudes[index];
+            }
+            if (amplitudeSum > 0.95f) {
+                const float scale = 0.95f / amplitudeSum;
+                for (float& partialAmplitude : amplitudes) {
+                    partialAmplitude *= scale;
+                }
+            }
         } else {
             amplitudes[0] = 0.46f;
             amplitudes[1] = 0.16f;
@@ -1873,11 +2035,23 @@ struct ActiveVoice {
         amplitude.SetDecayTime(patch.decay);
         amplitude.SetSustainLevel(
             std::clamp(patch.sustain, 0.01f, 1.0f));
-        amplitude.SetReleaseTime(patch.release);
+        const float pianoReleaseScale =
+            patch.source == SourceKind::Harmonic &&
+                patch.harmonicFamily == 6
+            ? std::clamp(
+                  1.25f -
+                      ((static_cast<float>(event.midi) - 36.0f) / 48.0f) *
+                          0.75f,
+                  0.5f,
+                  1.25f)
+            : 1.0f;
+        amplitude.SetReleaseTime(patch.release * pianoReleaseScale);
         modulation.SetAttackTime(std::min(0.025f, patch.attack));
         modulation.SetDecayTime(
-            std::max(0.04f, std::min(0.85f, patch.decay)));
-        modulation.SetSustainLevel(0.025f);
+            patch.filterEnvelopeDecay > 0.0f
+                ? patch.filterEnvelopeDecay
+                : std::max(0.04f, std::min(0.85f, patch.decay)));
+        modulation.SetSustainLevel(patch.filterEnvelopeSustain);
         modulation.SetReleaseTime(std::min(0.35f, patch.release));
         amplitude.Retrigger(true);
         modulation.Retrigger(true);
@@ -1915,6 +2089,18 @@ struct ActiveVoice {
         const float baseFrequency = glideFromFrequency * std::pow(
             frequency / std::max(1.0f, glideFromFrequency),
             glideCurve);
+        const float pitchEnvelope =
+            patch.pitchEnvelopeSemitones == 0.0f
+                ? 1.0f
+                : std::pow(
+                      2.0f,
+                      patch.pitchEnvelopeSemitones *
+                          std::exp(
+                              -age / std::max(
+                                  0.001f,
+                                  patch.pitchEnvelopeSeconds)) /
+                          12.0f);
+        const float shapedFrequency = baseFrequency * pitchEnvelope;
         const float pitchMod = age > patch.vibratoDelay &&
                 patch.vibratoCents > 0.0f
             ? (std::pow(
@@ -1951,12 +2137,12 @@ struct ActiveVoice {
         case SourceKind::Shape:
             setFreeRunningFrequency(
                 oscillatorA,
-                baseFrequency * (1.0f + pitchMod));
+                shapedFrequency * (1.0f + pitchMod));
             value = oscillatorA.Process();
             if (patch.oscillator2Mix > 0.0f) {
                 setFreeRunningFrequency(
                     oscillatorB,
-                    baseFrequency *
+                    shapedFrequency *
                         std::pow(
                             2.0f,
                             patch.detuneCents / 1200.0f) *
@@ -1964,16 +2150,16 @@ struct ActiveVoice {
                 value = (1.0f - patch.oscillator2Mix) * value +
                     patch.oscillator2Mix * oscillatorB.Process();
             }
-            sub.SetFreq(baseFrequency * 0.5f);
+            sub.SetFreq(shapedFrequency * 0.5f);
             value += patch.subMix * sub.Process();
             break;
         case SourceKind::VariableSaw:
             sawA.SetFreq(
-                baseFrequency * (1.0f + pitchMod));
+                shapedFrequency * (1.0f + pitchMod));
             value = sawA.Process();
             if (patch.oscillator2Mix > 0.0f) {
                 sawB.SetFreq(
-                    baseFrequency *
+                    shapedFrequency *
                     std::pow(
                         2.0f,
                         patch.detuneCents / 1200.0f) *
@@ -1981,22 +2167,22 @@ struct ActiveVoice {
                 value = (1.0f - patch.oscillator2Mix) * value +
                     patch.oscillator2Mix * sawB.Process();
             }
-            sub.SetFreq(baseFrequency * 0.5f);
+            sub.SetFreq(shapedFrequency * 0.5f);
             value += patch.subMix * sub.Process();
             break;
         case SourceKind::Fm:
-            fm.SetFrequency(baseFrequency * (1.0f + pitchMod));
+            fm.SetFrequency(shapedFrequency * (1.0f + pitchMod));
             fm.SetIndex(
                 0.18f +
                 patch.fmIndex * (0.22f + 0.78f * mod) *
                     (0.72f + 0.40f * velocity));
-            sub.SetFreq(baseFrequency * 0.5f);
+            sub.SetFreq(shapedFrequency * 0.5f);
             value = fm.Process() + patch.subMix * sub.Process();
             break;
         case SourceKind::String: {
-            stringA.SetFreq(baseFrequency * (1.0f + pitchMod));
+            stringA.SetFreq(shapedFrequency * (1.0f + pitchMod));
             stringB.SetFreq(
-                baseFrequency *
+                shapedFrequency *
                 std::pow(
                     2.0f,
                     std::max(2.0f, patch.detuneCents) / 1200.0f) *
@@ -2010,14 +2196,14 @@ struct ActiveVoice {
                         std::tanh(patch.voiceDrive * right);
             }
             body.SetFreq(
-                std::clamp(baseFrequency * 2.1f, 140.0f, 3900.0f));
+                std::clamp(shapedFrequency * 2.1f, 140.0f, 3900.0f));
             body.Process(value);
             value = 0.82f * value + 0.18f * body.Band();
             trigger = false;
             break;
         }
         case SourceKind::Harmonic:
-            harmonic.SetFreq(baseFrequency * (1.0f + pitchMod));
+            harmonic.SetFreq(shapedFrequency * (1.0f + pitchMod));
             value = harmonic.Process();
             if (patch.oscillator2Mix > 0.0f) {
                 value += 0.24f * patch.oscillator2Mix *
@@ -2025,41 +2211,41 @@ struct ActiveVoice {
             }
             break;
         case SourceKind::Sine:
-            sub.SetFreq(baseFrequency * (1.0f + pitchMod));
-            setFreeRunningFrequency(oscillatorA, baseFrequency * 2.0f);
+            sub.SetFreq(shapedFrequency * (1.0f + pitchMod));
+            setFreeRunningFrequency(oscillatorA, shapedFrequency * 2.0f);
             value = sub.Process() +
                 patch.subMix * 0.35f * oscillatorA.Process();
             break;
         case SourceKind::Formant:
             formant.SetCarrierFreq(
-                baseFrequency * (1.0f + pitchMod));
+                shapedFrequency * (1.0f + pitchMod));
             formant.SetFormantFreq(
                 (patch.formantHz > 0.0f
                     ? patch.formantHz
-                    : baseFrequency * patch.formantRatio) *
+                    : shapedFrequency * patch.formantRatio) *
                 (1.0f + 0.08f * mod));
             value = formant.Process();
             break;
         case SourceKind::Vosim:
             vosim.SetFreq(
-                baseFrequency * (1.0f + pitchMod));
+                shapedFrequency * (1.0f + pitchMod));
             vosim.SetForm1Freq(
                 (patch.formantHz > 0.0f
                     ? patch.formantHz
-                    : baseFrequency * patch.formantRatio) *
+                    : shapedFrequency * patch.formantRatio) *
                 (1.0f + 0.05f * mod));
             vosim.SetForm2Freq(
                 (patch.formantHz2 > 0.0f
                     ? patch.formantHz2
-                    : baseFrequency * patch.formantRatio2) *
+                    : shapedFrequency * patch.formantRatio2) *
                 (1.0f - 0.035f * mod));
             value = vosim.Process();
             break;
         case SourceKind::Z:
             z.SetFreq(
-                baseFrequency * (1.0f + pitchMod));
+                shapedFrequency * (1.0f + pitchMod));
             z.SetFormantFreq(
-                baseFrequency * patch.formantRatio *
+                shapedFrequency * patch.formantRatio *
                 (1.0f + 0.11f * mod));
             value = z.Process();
             break;
@@ -2074,12 +2260,16 @@ struct ActiveVoice {
                     std::max(0.001f, patch.transientSeconds));
         }
         if (patch.wavefold > 1.0f) value = folder.Process(value);
-        const float keyTrack =
-            std::clamp(baseFrequency * 0.72f, 40.0f, 2300.0f);
+        const float keyTrack = std::clamp(
+            shapedFrequency * patch.filterKeyTracking,
+            0.0f,
+            6000.0f);
+        const float filterVelocity =
+            1.0f + patch.filterVelocitySensitivity *
+                ((0.72f + 0.38f * velocity) - 1.0f);
         const float cutoff = std::clamp(
             patch.filterCutoff + keyTrack +
-                patch.filterEnvelope * mod *
-                    (0.72f + 0.38f * velocity),
+                patch.filterEnvelope * mod * filterVelocity,
             35.0f,
             15500.0f);
         switch (patch.filter) {
@@ -2105,7 +2295,36 @@ struct ActiveVoice {
             value = std::tanh(patch.voiceDrive * value);
         }
         if (!gate && !amplitude.IsRunning()) active = false;
-        return tremolo * amp * velocity * value;
+        float shapedVelocity = velocity;
+        if (patch.source == SourceKind::Harmonic &&
+            patch.harmonicFamily == 6) {
+            const auto smoothMix = [](float position) {
+                const float bounded = std::clamp(position, 0.0f, 1.0f);
+                return bounded * bounded * (3.0f - 2.0f * bounded);
+            };
+            float pianoCurve = 0.57f;
+            if (velocity > 0.87f) {
+                pianoCurve = 0.87f + 0.13f * smoothMix(
+                    (velocity - 0.87f) / 0.13f);
+            } else if (velocity > 0.63f) {
+                pianoCurve = 0.61f + 0.26f * smoothMix(
+                    (velocity - 0.63f) / 0.24f);
+            } else if (velocity > 0.4f) {
+                pianoCurve = 0.57f + 0.04f * smoothMix(
+                    (velocity - 0.4f) / 0.23f);
+            }
+            shapedVelocity *= pianoCurve;
+        }
+        const float velocityGain =
+            (1.0f - patch.velocitySensitivity) +
+            patch.velocitySensitivity * shapedVelocity;
+        const float pitchAttackGain = 1.0f +
+            patch.pitchAttackGain * std::exp(
+                -age / std::max(0.001f, patch.pitchAttackSeconds));
+        const float pianoHammer = 1.0f +
+            pianoHammerGain * std::exp(-age / 0.012f);
+        return tremolo * amp * velocityGain * pitchAttackGain *
+            pianoHammer * value;
     }
 };
 
@@ -2133,6 +2352,11 @@ void applyVoiceBus(
     chorus.SetFeedback(0.08f, 0.05f);
     double low = 0.0;
     double previousLow = 0.0;
+    double highpassLow = 0.0;
+    const double highpassCoefficient = patch.highpassCutoff > 0.0f
+        ? 1.0 - std::exp(
+              -2.0 * kPi * patch.highpassCutoff / kSampleRate)
+        : 0.0;
     for (std::size_t frame = 0; frame < audio.size(); ++frame) {
         double value = std::tanh(patch.busDrive * audio[frame]);
         low += coefficient * (value - low);
@@ -2144,6 +2368,11 @@ void applyVoiceBus(
                 0.12 * patch.cabinet * highPassed;
         } else {
             value = low;
+        }
+        if (highpassCoefficient > 0.0) {
+            highpassLow += highpassCoefficient * (
+                value - highpassLow);
+            value -= highpassLow;
         }
         if (patch.chorusMix > 0.0f) {
             chorus.Process(static_cast<float>(value));
@@ -2160,6 +2389,187 @@ void applyVoiceBus(
         audio[frame] = static_cast<float>(
             value + patch.delayMix * delayed);
     }
+}
+
+StereoAudio applyVoiceBusStereo(
+    const std::vector<float>& input,
+    const PatchDesign& patch)
+{
+    StereoAudio result{
+        std::vector<float>(input.size(), 0.0f),
+        std::vector<float>(input.size(), 0.0f),
+    };
+    if (input.empty()) return result;
+    const double cabinetCutoff =
+        patch.cabinet > 0.0f
+            ? 3300.0 + (1.0 - patch.cabinet) * 4100.0
+            : 15000.0;
+    const double lowpassCoefficient =
+        1.0 - std::exp(-2.0 * kPi * cabinetCutoff / kSampleRate);
+    const double highpassCoefficient = patch.highpassCutoff > 0.0f
+        ? 1.0 - std::exp(
+              -2.0 * kPi * patch.highpassCutoff / kSampleRate)
+        : 0.0;
+    const std::size_t delayLeftFrames = std::max<std::size_t>(
+        1, static_cast<std::size_t>(patch.delaySeconds * kSampleRate));
+    const std::size_t delayRightFrames = std::max<std::size_t>(
+        1, static_cast<std::size_t>(
+            patch.delaySeconds * 1.5f * kSampleRate));
+    std::vector<float> delayLeft(delayLeftFrames, 0.0f);
+    std::vector<float> delayRight(delayRightFrames, 0.0f);
+    daisysp::Chorus chorus;
+    chorus.Init(kSampleRate);
+    chorus.SetLfoDepth(
+        std::clamp(patch.chorusDepth, 0.0f, 1.0f));
+    chorus.SetLfoFreq(
+        std::clamp(patch.chorusRate, 0.02f, 8.0f));
+    chorus.SetDelayMs(11.0f, 17.0f);
+    chorus.SetFeedback(0.08f, 0.05f);
+    double low = 0.0;
+    double previousLow = 0.0;
+    double highpassLow = 0.0;
+    for (std::size_t frame = 0; frame < input.size(); ++frame) {
+        double value = std::tanh(patch.busDrive * input[frame]);
+        low += lowpassCoefficient * (value - low);
+        if (patch.cabinet > 0.0f) {
+            const double highPassed =
+                low - previousLow + 0.985 * input[frame];
+            previousLow = low;
+            value = (1.0 - 0.18 * patch.cabinet) * low +
+                0.12 * patch.cabinet * highPassed;
+        } else {
+            value = low;
+        }
+        if (highpassCoefficient > 0.0) {
+            highpassLow += highpassCoefficient * (
+                value - highpassLow);
+            value -= highpassLow;
+        }
+        double left = value;
+        double right = value;
+        if (patch.chorusMix > 0.0f) {
+            chorus.Process(static_cast<float>(value));
+            left = (1.0 - patch.chorusMix) * value +
+                patch.chorusMix * chorus.GetLeft();
+            right = (1.0 - patch.chorusMix) * value +
+                patch.chorusMix * chorus.GetRight();
+        }
+        if (patch.delayMix > 0.0f) {
+            const std::size_t leftIndex = frame % delayLeft.size();
+            const std::size_t rightIndex = frame % delayRight.size();
+            const double delayedLeft = delayLeft[leftIndex];
+            const double delayedRight = delayRight[rightIndex];
+            const double feedback = 0.16 + 0.34 * patch.delayMix;
+            delayLeft[leftIndex] = static_cast<float>(
+                left + feedback * delayedRight);
+            delayRight[rightIndex] = static_cast<float>(
+                right + feedback * delayedLeft);
+            left += patch.delayMix * delayedLeft;
+            right += patch.delayMix * delayedRight;
+        }
+        result.left[frame] = static_cast<float>(left);
+        result.right[frame] = static_cast<float>(right);
+    }
+
+    if (patch.reverbMix > 0.0f) {
+        constexpr std::array<int, 4> leftLengths{
+            1493, 1601, 1867, 2053};
+        constexpr std::array<int, 4> rightLengths{
+            1559, 1699, 1999, 2131};
+        std::array<std::vector<float>, 4> leftLines;
+        std::array<std::vector<float>, 4> rightLines;
+        std::array<std::size_t, 4> leftIndices{};
+        std::array<std::size_t, 4> rightIndices{};
+        std::array<double, 4> leftDamping{};
+        std::array<double, 4> rightDamping{};
+        std::array<double, 4> leftFeedback{};
+        std::array<double, 4> rightFeedback{};
+        for (std::size_t line = 0; line < leftLines.size(); ++line) {
+            leftLines[line].resize(leftLengths[line], 0.0f);
+            rightLines[line].resize(rightLengths[line], 0.0f);
+            leftFeedback[line] = std::pow(
+                10.0,
+                -3.0 * leftLengths[line] /
+                    (kSampleRate * patch.reverbSeconds));
+            rightFeedback[line] = std::pow(
+                10.0,
+                -3.0 * rightLengths[line] /
+                    (kSampleRate * patch.reverbSeconds));
+        }
+        const std::size_t preDelayFrames = std::max<std::size_t>(
+            1,
+            static_cast<std::size_t>(
+                patch.reverbPreDelay * kSampleRate));
+        std::vector<float> preDelayLeft(preDelayFrames, 0.0f);
+        std::vector<float> preDelayRight(preDelayFrames, 0.0f);
+        const double dampingCoefficient =
+            0.025 + 0.55 * (1.0 - patch.reverbDamping);
+        for (std::size_t frame = 0; frame < input.size(); ++frame) {
+            const std::size_t preIndex = frame % preDelayFrames;
+            const double reverbInputLeft = preDelayLeft[preIndex];
+            const double reverbInputRight = preDelayRight[preIndex];
+            preDelayLeft[preIndex] = result.left[frame];
+            preDelayRight[preIndex] = result.right[frame];
+            double wetLeft = 0.0;
+            double wetRight = 0.0;
+            for (std::size_t line = 0; line < leftLines.size(); ++line) {
+                const double delayedLeft =
+                    leftLines[line][leftIndices[line]];
+                const double delayedRight =
+                    rightLines[line][rightIndices[line]];
+                leftDamping[line] += dampingCoefficient * (
+                    delayedLeft - leftDamping[line]);
+                rightDamping[line] += dampingCoefficient * (
+                    delayedRight - rightDamping[line]);
+                const double polarity = line % 2 == 0 ? 1.0 : -1.0;
+                leftLines[line][leftIndices[line]] = static_cast<float>(
+                    polarity * reverbInputLeft +
+                    leftFeedback[line] * leftDamping[line]);
+                rightLines[line][rightIndices[line]] = static_cast<float>(
+                    -polarity * reverbInputRight +
+                    rightFeedback[line] * rightDamping[line]);
+                leftIndices[line] =
+                    (leftIndices[line] + 1) % leftLines[line].size();
+                rightIndices[line] =
+                    (rightIndices[line] + 1) % rightLines[line].size();
+                wetLeft += delayedLeft;
+                wetRight += delayedRight;
+            }
+            wetLeft *= 0.25;
+            wetRight *= 0.25;
+            result.left[frame] = static_cast<float>(
+                (1.0 - patch.reverbMix) * result.left[frame] +
+                patch.reverbMix * wetLeft);
+            result.right[frame] = static_cast<float>(
+                (1.0 - patch.reverbMix) * result.right[frame] +
+                patch.reverbMix * wetRight);
+        }
+    }
+
+    const std::size_t spreadDelayA = static_cast<std::size_t>(
+        0.0073 * kSampleRate);
+    const std::size_t spreadDelayB = static_cast<std::size_t>(
+        0.0129 * kSampleRate);
+    for (std::size_t frame = 0; frame < input.size(); ++frame) {
+        if (patch.stereoSpread > 0.0f) {
+            const double delayedA = frame >= spreadDelayA
+                ? input[frame - spreadDelayA] : 0.0;
+            const double delayedB = frame >= spreadDelayB
+                ? input[frame - spreadDelayB] : 0.0;
+            const double decorrelatedSide =
+                0.55 * patch.stereoSpread * (delayedA - delayedB);
+            result.left[frame] += static_cast<float>(decorrelatedSide);
+            result.right[frame] -= static_cast<float>(decorrelatedSide);
+        }
+        const double mid = 0.5 * (
+            result.left[frame] + result.right[frame]);
+        const double side = 0.5 * (
+            result.left[frame] - result.right[frame]) *
+            patch.stereoWidth;
+        result.left[frame] = static_cast<float>(mid + side);
+        result.right[frame] = static_cast<float>(mid - side);
+    }
+    return result;
 }
 
 std::vector<float> renderDaisyRole(
@@ -2227,8 +2637,6 @@ enum class DrumKind {
     Crash,
     Ride,
     CrossStick,
-    Shaker,
-    HandPercussion,
 };
 
 bool isTomKind(DrumKind kind)
@@ -2276,10 +2684,6 @@ std::optional<DrumKind> drumKind(const QString& lane)
     if (lane == QStringLiteral("Cross-stick / Rim")) {
         return DrumKind::CrossStick;
     }
-    if (lane == QStringLiteral("Shaker")) return DrumKind::Shaker;
-    if (lane == QStringLiteral("Hand Percussion")) {
-        return DrumKind::HandPercussion;
-    }
     return std::nullopt;
 }
 
@@ -2307,10 +2711,6 @@ std::optional<DrumKind> performanceDrumKind(
     if (laneId == QStringLiteral("ride")) return DrumKind::Ride;
     if (laneId == QStringLiteral("cross_stick")) {
         return DrumKind::CrossStick;
-    }
-    if (laneId == QStringLiteral("shaker")) return DrumKind::Shaker;
-    if (laneId == QStringLiteral("hand_percussion")) {
-        return DrumKind::HandPercussion;
     }
     return std::nullopt;
 }
@@ -2346,12 +2746,6 @@ QString performanceLaneName(const QString& laneId)
     }
     if (laneId == QStringLiteral("cross_stick")) {
         return QStringLiteral("Cross-stick / Rim");
-    }
-    if (laneId == QStringLiteral("shaker")) {
-        return QStringLiteral("Shaker");
-    }
-    if (laneId == QStringLiteral("hand_percussion")) {
-        return QStringLiteral("Hand Percussion");
     }
     return {};
 }
@@ -2591,11 +2985,8 @@ enum class DaisyDrumModel {
     Particle,
     ShellTom,
     RimWood,
-    CollisionShaker,
-    SkinHandDrum,
     HandClap,
     WoodBlock,
-    Tambourine,
     CrashCymbal,
     RideCymbal,
     Crash,
@@ -2651,9 +3042,6 @@ struct ActiveDrum {
     float identityPitchEnvelope = 0.0f;
     float identityPitchDecay = 0.99f;
     float identityPitchSweep = 0.0f;
-    float identityCollisionRate = 0.0f;
-    float identityCollisionEnvelope = 0.0f;
-    float identityCollisionDecay = 0.92f;
     std::array<float, 3> identityBandEnvelope{1.0f, 1.0f, 1.0f};
     std::array<float, 3> identityBandDecay{0.999f, 0.999f, 0.999f};
     qint64 end = 1;
@@ -2788,41 +3176,6 @@ struct ActiveDrum {
             identityNoiseEnvelope *= identityNoiseDecay;
             break;
         }
-        case DaisyDrumModel::CollisionShaker: {
-            const float randomUnit =
-                static_cast<float>(noiseState & 0x00ffffffU) /
-                static_cast<float>(0x01000000U);
-            if (randomUnit <
-                identityCollisionRate / kSampleRate) {
-                identityCollisionEnvelope =
-                    0.55f + 0.45f * std::abs(noise);
-            }
-            identityCollisionEnvelope *= identityCollisionDecay;
-            identityFilterA->Process(
-                noise * identityCollisionEnvelope);
-            identityFilterB->Process(
-                noise * identityCollisionEnvelope);
-            base =
-                (0.58f * identityFilterA->Band() +
-                 0.42f * identityFilterB->High()) *
-                identityNoiseEnvelope;
-            identityNoiseEnvelope *= identityNoiseDecay;
-            break;
-        }
-        case DaisyDrumModel::SkinHandDrum: {
-            const float pitchScale =
-                1.0f + identityPitchSweep * identityPitchEnvelope;
-            identityFilterA->Process(noise);
-            base =
-                processIdentityModes(pitchScale) +
-                0.13f *
-                    (identityFilterA->Band() +
-                     0.20f * identityFilterA->High()) *
-                    identityNoiseEnvelope;
-            identityNoiseEnvelope *= identityNoiseDecay;
-            identityPitchEnvelope *= identityPitchDecay;
-            break;
-        }
         case DaisyDrumModel::HandClap: {
             identityFilterA->Process(noise);
             identityFilterB->Process(noise);
@@ -2866,28 +3219,6 @@ struct ActiveDrum {
             base =
                 processIdentityModes() +
                 0.10f * identityFilterA->High() *
-                    identityNoiseEnvelope;
-            identityNoiseEnvelope *= identityNoiseDecay;
-            break;
-        }
-        case DaisyDrumModel::Tambourine: {
-            const float randomUnit =
-                static_cast<float>(noiseState & 0x00ffffffU) /
-                static_cast<float>(0x01000000U);
-            if (randomUnit <
-                identityCollisionRate / kSampleRate) {
-                identityCollisionEnvelope =
-                    0.45f + 0.55f * std::abs(noise);
-            }
-            identityCollisionEnvelope *= identityCollisionDecay;
-            identityFilterA->Process(
-                noise * identityCollisionEnvelope);
-            identityFilterB->Process(
-                noise * identityCollisionEnvelope);
-            base =
-                0.22f * processIdentityModes() +
-                (0.50f * identityFilterA->Band() +
-                 0.32f * identityFilterB->High()) *
                     identityNoiseEnvelope;
             identityNoiseEnvelope *= identityNoiseDecay;
             break;
@@ -3202,8 +3533,7 @@ ActiveDrum makeDrum(
         voice.gain = hit.outputGain * (soft ? 0.38f : 0.52f);
         finishAt(isTomKind(hit.kind) ? 1.0 : 1.5);
     } else if (hit.kind == DrumKind::Snare ||
-               hit.kind == DrumKind::CrossStick ||
-               hit.kind == DrumKind::HandPercussion) {
+               hit.kind == DrumKind::CrossStick) {
         const bool synthetic =
             (electronic || polishedPop || metal || funk) &&
             hit.kind == DrumKind::Snare;
@@ -3232,25 +3562,20 @@ ActiveDrum makeDrum(
             voice.analogSnare->Init(kSampleRate);
             voice.analogSnare->SetFreq(
                 hit.kind == DrumKind::CrossStick ? 178.0f :
-                hit.kind == DrumKind::HandPercussion ? 205.0f :
                 soft ? 205.0f : 190.0f);
             voice.analogSnare->SetAccent(hit.excitation);
             voice.analogSnare->SetTone(
                 hit.kind == DrumKind::CrossStick ? 0.22f :
-                hit.kind == DrumKind::HandPercussion ? 0.30f :
                 soft ? 0.42f : 0.56f);
             voice.analogSnare->SetDecay(
                 hit.kind == DrumKind::CrossStick ? 0.035f :
-                hit.kind == DrumKind::HandPercussion ? 0.11f :
                 soft ? 0.20f : 0.34f);
             voice.analogSnare->SetSnappy(
                 hit.kind == DrumKind::CrossStick ? 0.18f :
-                hit.kind == DrumKind::HandPercussion ? 0.32f :
                 soft ? 0.50f : 0.72f);
         }
         voice.gain = hit.outputGain *
             (hit.kind == DrumKind::CrossStick ? 0.28f :
-             hit.kind == DrumKind::HandPercussion ? 0.30f :
              soft ? 0.35f : 0.48f);
         finishAt(
             hit.kind == DrumKind::CrossStick ? 0.32 : 1.05);
@@ -3293,20 +3618,14 @@ ActiveDrum makeDrum(
         const bool cymbal =
             hit.kind == DrumKind::Crash ||
             hit.kind == DrumKind::Ride;
-        const bool shaker = hit.kind == DrumKind::Shaker;
         const bool open = hit.kind == DrumKind::OpenHat;
         voice.hat->SetFreq(
             cymbal ? 2200.0f :
-            shaker
-                ? (profile.styleId == QStringLiteral("bossa-nova")
-                    ? 3300.0f : 5200.0f) :
             electronic ? 3900.0f : 3300.0f);
         voice.hat->SetAccent(hit.excitation);
         voice.hat->SetTone(
             hit.kind == DrumKind::Ride ? 0.50f :
             hit.kind == DrumKind::Crash ? 0.64f :
-            shaker && profile.styleId == QStringLiteral("bossa-nova")
-                ? 0.24f :
             soft ? 0.52f : 0.72f);
         voice.hat->SetDecay(
             hit.kind == DrumKind::Crash ? 0.92f :
@@ -3314,19 +3633,12 @@ ActiveDrum makeDrum(
                     style == QStringLiteral("jazz") ? 0.82f :
             hit.kind == DrumKind::Ride ? 0.62f :
             fusion && hit.kind == DrumKind::ClosedHat ? 0.24f :
-            open ? 0.54f :
-            shaker
-                ? (profile.styleId == QStringLiteral("bossa-nova")
-                    ? 0.045f : 0.07f)
-                : 0.16f);
+            open ? 0.54f : 0.16f);
         voice.hat->SetNoisiness(
-            shaker ? 0.96f :
             hit.kind == DrumKind::Ride ? 0.40f :
             soft ? 0.62f : 0.76f);
         voice.gain = hit.outputGain *
-            (shaker && profile.styleId == QStringLiteral("bossa-nova")
-                ? 0.12f :
-             hit.kind == DrumKind::Ride &&
+            (hit.kind == DrumKind::Ride &&
                     style == QStringLiteral("jazz") ? 0.32f :
              fusion ? 0.38f :
              soft ? 0.20f :
@@ -3348,6 +3660,7 @@ struct DrumBusDesign {
     double roomMix = 0.08;
     double roomSizeMs = 31.0;
     double roomDamping = 0.58;
+    double stereoWidth = 0.0;
 };
 
 DrumBusDesign drumBusDesign(const ProfileDefinition& profile)
@@ -3464,6 +3777,9 @@ void applyDrumBus(
 }
 
 struct DrumLabPatch {
+    static constexpr int kMaximumModalBands = 12;
+    static constexpr int kMaximumNoiseBands = 4;
+
     struct VelocityBand {
         int minimum = 40;
         int maximum = 78;
@@ -3493,6 +3809,37 @@ struct DrumLabPatch {
         float filterCutoff = 8000.0f;
     };
 
+    struct DetailBandResponse {
+        float velocityCurve = 1.0f;
+        float ghostGain = 0.55f;
+        float normalGain = 1.0f;
+        float accentGain = 1.25f;
+        float roomSend = 1.0f;
+    };
+
+    struct ModalBand {
+        float frequencyHz = 1000.0f;
+        float level = 0.0f;
+        float decaySeconds = 0.2f;
+        float attackSeconds = 0.001f;
+        float delaySeconds = 0.0f;
+        float highpassHz = 0.0f;
+        float detuneCents = 0.0f;
+        float phaseCycles = -1.0f;
+        DetailBandResponse response;
+    };
+
+    struct NoiseBand {
+        float frequencyHz = 4000.0f;
+        float q = 1.0f;
+        float level = 0.0f;
+        float decaySeconds = 0.15f;
+        float attackSeconds = 0.001f;
+        float delaySeconds = 0.0f;
+        float highpassHz = 0.0f;
+        DetailBandResponse response;
+    };
+
     QString intendedIdentity;
     QString source = QStringLiteral("daisy-profile");
     QString secondSource = QStringLiteral("off");
@@ -3503,6 +3850,8 @@ struct DrumLabPatch {
     float colour = 0.6f;
     float fmAmount = 0.3f;
     float level = 0.45f;
+    float sourceLayerGain = 1.0f;
+    float onsetSofteningSeconds = 0.0f;
     QString transient = QStringLiteral("off");
     float transientLevel = 0.0f;
     float transientTone = 0.5f;
@@ -3522,9 +3871,11 @@ struct DrumLabPatch {
     float chokeSeconds = 0.012f;
     VelocityDesign velocity;
     SynthLayer synth;
+    QVector<ModalBand> modalBands;
+    QVector<NoiseBand> noiseBands;
 };
 
-constexpr std::array<DrumKind, 12> kDrumKinds{
+constexpr std::array<DrumKind, 10> kDrumKinds{
     DrumKind::Kick,
     DrumKind::Snare,
     DrumKind::ClosedHat,
@@ -3535,8 +3886,6 @@ constexpr std::array<DrumKind, 12> kDrumKinds{
     DrumKind::Crash,
     DrumKind::Ride,
     DrumKind::CrossStick,
-    DrumKind::Shaker,
-    DrumKind::HandPercussion,
 };
 
 QString drumKindId(DrumKind kind)
@@ -3552,11 +3901,25 @@ QString drumKindId(DrumKind kind)
     case DrumKind::Crash: return QStringLiteral("crash");
     case DrumKind::Ride: return QStringLiteral("ride");
     case DrumKind::CrossStick: return QStringLiteral("cross-stick");
-    case DrumKind::Shaker: return QStringLiteral("shaker");
-    case DrumKind::HandPercussion:
-        return QStringLiteral("hand-percussion");
     }
     return QStringLiteral("unknown");
+}
+
+int drumKindMidi(DrumKind kind)
+{
+    switch (kind) {
+    case DrumKind::Kick: return 36;
+    case DrumKind::Snare: return 38;
+    case DrumKind::ClosedHat: return 42;
+    case DrumKind::OpenHat: return 46;
+    case DrumKind::HighTom: return 50;
+    case DrumKind::MidTom: return 47;
+    case DrumKind::FloorTom: return 43;
+    case DrumKind::Crash: return 49;
+    case DrumKind::Ride: return 51;
+    case DrumKind::CrossStick: return 37;
+    }
+    return 36;
 }
 
 std::optional<DrumKind> drumKindFromId(const QString& id)
@@ -3584,9 +3947,6 @@ QString laneNameForDrumKind(DrumKind kind)
     case DrumKind::Ride: return QStringLiteral("Ride");
     case DrumKind::CrossStick:
         return QStringLiteral("Cross-stick / Rim");
-    case DrumKind::Shaker: return QStringLiteral("Shaker");
-    case DrumKind::HandPercussion:
-        return QStringLiteral("Hand Percussion");
     }
     return {};
 }
@@ -3710,36 +4070,6 @@ DrumLabPatch defaultDrumLabPatch(
         patch.decay = 0.035f;
         patch.colour = 0.18f;
         patch.level = 0.28f;
-        break;
-    case DrumKind::Shaker:
-        patch.synth.midiNote = 84;
-        patch.synth.gateSeconds = 0.04f;
-        patch.synth.decay = 0.03f;
-        patch.synth.release = 0.04f;
-        patch.frequency =
-            profile.styleId == QStringLiteral("bossa-nova")
-                ? 3300.0f : 5200.0f;
-        patch.tone =
-            profile.styleId == QStringLiteral("bossa-nova")
-                ? 0.24f : 0.52f;
-        patch.decay =
-            profile.styleId == QStringLiteral("bossa-nova")
-                ? 0.045f : 0.07f;
-        patch.colour = 0.96f;
-        patch.level =
-            profile.styleId == QStringLiteral("bossa-nova")
-                ? 0.12f : 0.20f;
-        break;
-    case DrumKind::HandPercussion:
-        patch.synth.midiNote = 67;
-        patch.synth.gateSeconds = 0.07f;
-        patch.synth.decay = 0.05f;
-        patch.synth.release = 0.06f;
-        patch.frequency = 205.0f;
-        patch.tone = 0.30f;
-        patch.decay = 0.11f;
-        patch.colour = 0.32f;
-        patch.level = 0.30f;
         break;
     }
     return patch;
@@ -3886,7 +4216,7 @@ constexpr std::array<ResearchKitRow, 27> kResearchKitRows{{
      {DrumPalette::Break12, DrumPalette::CleanPcm,
       DrumPalette::Lofi}},
     {"soul_classic_motown",
-     {"Damped Studio Pocket", "Tambourine Radio Kit", "Warm Rhythm Box"},
+     {"Damped Studio Pocket", "Dry Radio Kit", "Warm Rhythm Box"},
      {DrumPalette::SoulDamped, DrumPalette::Lofi,
       DrumPalette::RhythmBox}},
     {"rnb_contemporary_neosoul",
@@ -3930,7 +4260,6 @@ struct ProfileKitCharacter {
     float transientScale;
     float roomScale;
     float driveScale;
-    float handPitchScale;
 };
 
 // These are profile-level kit relationships, not random offsets. They keep
@@ -3939,33 +4268,33 @@ struct ProfileKitCharacter {
 // becoming an exact cross-style duplicate.
 constexpr std::array<ProfileKitCharacter, 27>
     kProfileKitCharacters{{
-        {"pop_loop", 1.03f, 1.00f, 1.08f, 1.12f, 1.06f, 1.04f, 1.02f},
-        {"pop_sectional", 1.03f, 1.00f, 1.08f, 1.12f, 1.06f, 1.04f, 1.02f},
-        {"rock_riff_modal", 0.96f, 0.88f, 0.98f, 1.18f, 0.82f, 1.06f, 0.94f},
-        {"rock_shuffle_blues", 0.92f, 1.12f, 0.92f, 0.92f, 1.14f, 1.00f, 0.90f},
-        {"rock_punk_garage", 1.08f, 0.82f, 1.18f, 1.28f, 1.18f, 1.12f, 1.05f},
-        {"jazz_swing_standards", 0.98f, 1.08f, 0.78f, 0.72f, 1.25f, 0.96f, 0.95f},
-        {"jazz_bebop", 1.07f, 0.86f, 0.92f, 1.05f, 0.92f, 0.98f, 1.08f},
-        {"jazz_fusion", 1.05f, 0.80f, 1.15f, 1.15f, 0.78f, 1.07f, 1.10f},
-        {"modal_groove", 0.94f, 1.08f, 0.85f, 0.75f, 1.25f, 0.98f, 0.89f},
-        {"modal_atmospheric", 0.82f, 1.35f, 0.72f, 0.58f, 1.60f, 0.94f, 0.80f},
-        {"blues_dominant", 0.95f, 1.08f, 0.87f, 0.86f, 1.18f, 1.00f, 0.92f},
-        {"blues_minor", 0.88f, 1.18f, 0.78f, 0.75f, 1.28f, 0.98f, 0.86f},
-        {"jpop_anisong_rock", 1.08f, 0.82f, 1.20f, 1.30f, 1.05f, 1.08f, 1.12f},
-        {"jpop_idol_dance", 1.12f, 0.74f, 1.28f, 1.35f, 0.72f, 1.05f, 1.18f},
-        {"country_honky_tonk", 1.02f, 0.82f, 1.06f, 1.10f, 0.78f, 0.98f, 1.00f},
-        {"country_contemporary", 1.02f, 0.96f, 1.13f, 1.15f, 1.18f, 1.03f, 0.98f},
-        {"electronic_house", 0.89f, 0.96f, 1.14f, 1.10f, 0.48f, 1.12f, 1.04f},
-        {"electronic_techno", 0.82f, 0.72f, 0.94f, 1.20f, 0.36f, 1.25f, 0.92f},
-        {"electronic_breakbeat", 0.95f, 0.78f, 0.86f, 1.15f, 0.62f, 1.15f, 0.96f},
-        {"soul_classic_motown", 0.91f, 0.70f, 0.74f, 0.72f, 0.72f, 0.95f, 0.88f},
-        {"rnb_contemporary_neosoul", 0.84f, 0.66f, 0.72f, 0.62f, 0.55f, 0.94f, 0.82f},
-        {"funk_static_pocket", 1.03f, 0.58f, 1.02f, 1.15f, 0.35f, 1.02f, 1.05f},
-        {"hiphop_boom_bap", 0.88f, 0.72f, 0.74f, 0.95f, 0.52f, 1.10f, 0.90f},
-        {"hiphop_trap", 0.76f, 0.92f, 1.16f, 1.18f, 0.28f, 1.18f, 1.10f},
-        {"reggae_roots", 0.86f, 0.88f, 0.72f, 0.58f, 1.12f, 0.96f, 0.84f},
-        {"bossa_songbook", 1.08f, 0.64f, 0.76f, 0.62f, 0.90f, 0.92f, 1.15f},
-        {"metal_modern_progressive", 1.02f, 0.68f, 1.10f, 1.40f, 0.75f, 1.18f, 0.96f},
+        {"pop_loop", 1.03f, 1.00f, 1.08f, 1.12f, 1.06f, 1.04f},
+        {"pop_sectional", 1.03f, 1.00f, 1.08f, 1.12f, 1.06f, 1.04f},
+        {"rock_riff_modal", 0.96f, 0.88f, 0.98f, 1.18f, 0.82f, 1.06f},
+        {"rock_shuffle_blues", 0.92f, 1.12f, 0.92f, 0.92f, 1.14f, 1.00f},
+        {"rock_punk_garage", 1.08f, 0.82f, 1.18f, 1.28f, 1.18f, 1.12f},
+        {"jazz_swing_standards", 0.98f, 1.08f, 0.78f, 0.72f, 1.25f, 0.96f},
+        {"jazz_bebop", 1.07f, 0.86f, 0.92f, 1.05f, 0.92f, 0.98f},
+        {"jazz_fusion", 1.05f, 0.80f, 1.15f, 1.15f, 0.78f, 1.07f},
+        {"modal_groove", 0.94f, 1.08f, 0.85f, 0.75f, 1.25f, 0.98f},
+        {"modal_atmospheric", 0.82f, 1.35f, 0.72f, 0.58f, 1.60f, 0.94f},
+        {"blues_dominant", 0.95f, 1.08f, 0.87f, 0.86f, 1.18f, 1.00f},
+        {"blues_minor", 0.88f, 1.18f, 0.78f, 0.75f, 1.28f, 0.98f},
+        {"jpop_anisong_rock", 1.08f, 0.82f, 1.20f, 1.30f, 1.05f, 1.08f},
+        {"jpop_idol_dance", 1.12f, 0.74f, 1.28f, 1.35f, 0.72f, 1.05f},
+        {"country_honky_tonk", 1.02f, 0.82f, 1.06f, 1.10f, 0.78f, 0.98f},
+        {"country_contemporary", 1.02f, 0.96f, 1.13f, 1.15f, 1.18f, 1.03f},
+        {"electronic_house", 0.89f, 0.96f, 1.14f, 1.10f, 0.48f, 1.12f},
+        {"electronic_techno", 0.82f, 0.72f, 0.94f, 1.20f, 0.36f, 1.25f},
+        {"electronic_breakbeat", 0.95f, 0.78f, 0.86f, 1.15f, 0.62f, 1.15f},
+        {"soul_classic_motown", 0.91f, 0.70f, 0.74f, 0.72f, 0.72f, 0.95f},
+        {"rnb_contemporary_neosoul", 0.84f, 0.66f, 0.72f, 0.62f, 0.55f, 0.94f},
+        {"funk_static_pocket", 1.03f, 0.58f, 1.02f, 1.15f, 0.35f, 1.02f},
+        {"hiphop_boom_bap", 0.88f, 0.72f, 0.74f, 0.95f, 0.52f, 1.10f},
+        {"hiphop_trap", 0.76f, 0.92f, 1.16f, 1.18f, 0.28f, 1.18f},
+        {"reggae_roots", 0.86f, 0.88f, 0.72f, 0.58f, 1.12f, 0.96f},
+        {"bossa_songbook", 1.08f, 0.64f, 0.76f, 0.62f, 0.90f, 0.92f},
+        {"metal_modern_progressive", 1.02f, 0.68f, 1.10f, 1.40f, 0.75f, 1.18f},
     }};
 
 const ProfileKitCharacter& profileKitCharacter(
@@ -4065,7 +4394,7 @@ QString paletteDescription(DrumPalette palette)
             "Acoustic-derived components replayed through explicit 12-bit low-rate colour.");
     case DrumPalette::SoulDamped:
         return QStringLiteral(
-            "Damped studio shells, narrow bandwidth and tambourine-like texture.");
+            "Damped studio shells, narrow bandwidth and short metallic texture.");
     case DrumPalette::NeoSoul:
         return QStringLiteral(
             "Soft deep pocket, dark rim/wire detail and wide microdynamic response.");
@@ -4080,7 +4409,7 @@ QString paletteDescription(DrumPalette palette)
             "Deep non-clicky low drum, dry cross-stick and filtered percussion.");
     case DrumPalette::Bossa:
         return QStringLiteral(
-            "Soft skin, wood, brush and shaker components with minimal compression.");
+            "Soft shells, wood and closed-hat motion with minimal compression.");
     case DrumPalette::MetalLayered:
     case DrumPalette::OrganicHeavy:
         return QStringLiteral(
@@ -4202,7 +4531,7 @@ QString paletteId(DrumPalette palette)
     case DrumPalette::BrushJazz: return QStringLiteral("brush-jazz");
     case DrumPalette::BopJazz: return QStringLiteral("ride-led-bop");
     case DrumPalette::Fusion: return QStringLiteral("hybrid-fusion");
-    case DrumPalette::HandModal: return QStringLiteral("skin-and-wood-hand-percussion");
+    case DrumPalette::HandModal: return QStringLiteral("skin-and-wood-modal-kit");
     case DrumPalette::Atmosphere: return QStringLiteral("air-and-skin-objects");
     case DrumPalette::BluesClub: return QStringLiteral("club-shell-blues");
     case DrumPalette::DarkBlues: return QStringLiteral("dark-shell-blues");
@@ -4219,7 +4548,7 @@ QString paletteId(DrumPalette palette)
     case DrumPalette::Boom12: return QStringLiteral("12-bit-boom-bap");
     case DrumPalette::Trap808: return QStringLiteral("tuned-808-descendant");
     case DrumPalette::ReggaeDub: return QStringLiteral("one-drop-dub");
-    case DrumPalette::Bossa: return QStringLiteral("skin-wood-shaker-bossa");
+    case DrumPalette::Bossa: return QStringLiteral("skin-wood-closed-hat-bossa");
     case DrumPalette::MetalLayered: return QStringLiteral("layered-modern-metal");
     case DrumPalette::ElectronicMetal: return QStringLiteral("electronic-metal-underlay");
     case DrumPalette::OrganicHeavy: return QStringLiteral("organic-heavy-room");
@@ -4612,44 +4941,6 @@ DrumLabPatch candidatePiecePatch(
         patch.transientDecaySeconds = 0.005f;
         patch.roomSend = 0.055f;
         break;
-    case DrumKind::Shaker:
-        patch.intendedIdentity =
-            QStringLiteral("short seed-collision shaker");
-        patch.source = QStringLiteral("jam2-shaker");
-        patch.frequency = 4800.0f;
-        patch.tone = 0.58f;
-        patch.decay = 0.085f;
-        patch.colour = 0.70f;
-        patch.fmAmount = 0.0f;
-        patch.level = 0.18f;
-        patch.transient = QStringLiteral("brush");
-        patch.transientLevel = 0.025f;
-        patch.transientTone = 0.68f;
-        patch.transientDecaySeconds = 0.008f;
-        patch.texture = QStringLiteral("off");
-        patch.textureLevel = 0.0f;
-        patch.roomSend = 0.045f;
-        break;
-    case DrumKind::HandPercussion:
-        patch.intendedIdentity =
-            QStringLiteral("muted conga-style skin hand drum");
-        patch.source = QStringLiteral("jam2-hand-drum");
-        patch.secondSource = QStringLiteral("off");
-        patch.blend = 0.0f;
-        patch.frequency = 215.0f;
-        patch.tone = 0.30f;
-        patch.decay = 0.16f;
-        patch.colour = 0.12f;
-        patch.fmAmount = 0.26f;
-        patch.level = 0.31f;
-        patch.transient = QStringLiteral("soft-beater");
-        patch.transientLevel = 0.075f;
-        patch.transientTone = 0.32f;
-        patch.transientDecaySeconds = 0.008f;
-        patch.texture = QStringLiteral("off");
-        patch.textureLevel = 0.0f;
-        patch.roomSend = 0.075f;
-        break;
     }
 
     const DrumPalette palette = candidate.palette;
@@ -4796,12 +5087,6 @@ DrumLabPatch candidatePiecePatch(
             patch.transientLevel =
                 palette == DrumPalette::BopJazz ? 0.22f : 0.14f;
         }
-        if (palette == DrumPalette::Bossa &&
-            (kind == DrumKind::Shaker ||
-             kind == DrumKind::HandPercussion)) {
-            patch.level *= 1.18f;
-            patch.textureDensity *= 0.72f;
-        }
     }
     if (palette == DrumPalette::Fusion ||
         palette == DrumPalette::Simmons) {
@@ -4848,21 +5133,6 @@ DrumLabPatch candidatePiecePatch(
             palette == DrumPalette::Atmosphere ? 1.75f : 1.10f;
         patch.roomSend *=
             palette == DrumPalette::Atmosphere ? 2.2f : 1.35f;
-        if (kind == DrumKind::HandPercussion) {
-            patch.intendedIdentity =
-                palette == DrumPalette::Atmosphere
-                    ? QStringLiteral(
-                        "soft low hand drum in a long room")
-                    : QStringLiteral(
-                        "open conga-style hand drum");
-            patch.source = QStringLiteral("jam2-hand-drum");
-            patch.frequency =
-                palette == DrumPalette::Atmosphere
-                    ? 172.0f : 238.0f;
-            patch.decay =
-                palette == DrumPalette::Atmosphere
-                    ? 0.22f : 0.17f;
-        }
     }
     if (palette == DrumPalette::House909 ||
         palette == DrumPalette::Techno) {
@@ -5102,20 +5372,6 @@ DrumLabPatch candidatePiecePatch(
                     "bit-crushed rim and wood cross-stick");
             patch.source =
                 QStringLiteral("jam2-cross-stick");
-        } else if (kind == DrumKind::HandPercussion) {
-            patch.intendedIdentity =
-                QStringLiteral(
-                    "hard struck industrial wood block");
-            patch.source =
-                QStringLiteral("jam2-wood-block");
-            patch.frequency = 760.0f;
-            patch.decay = 0.12f;
-        } else if (kind == DrumKind::Shaker) {
-            patch.intendedIdentity =
-                QStringLiteral(
-                    "bit-crushed collision shaker");
-            patch.source =
-                QStringLiteral("jam2-shaker");
         } else if (metal) {
             patch.texture = QStringLiteral("air");
             patch.textureLevel *= 0.58f;
@@ -5159,150 +5415,11 @@ DrumLabPatch candidatePiecePatch(
         patch.transientLevel =
             std::min(patch.transientLevel, 0.08f);
     }
-    if (profile.id == QStringLiteral("soul_classic_motown") &&
-        kind == DrumKind::Shaker) {
-        patch.intendedIdentity =
-            QStringLiteral(
-                "bright Motown-style tambourine shake");
-        patch.source = QStringLiteral("jam2-tambourine");
-        patch.secondSource = QStringLiteral("off");
-        patch.blend = 0.0f;
-        patch.frequency = 4300.0f;
-        patch.tone = 0.58f;
-        patch.decay = 0.18f;
-        patch.colour = 0.72f;
-        patch.texture = QStringLiteral("off");
-        patch.textureLevel = 0.0f;
-        patch.level = 0.20f;
-    }
-
-    if (kind == DrumKind::HandPercussion &&
-        palette != DrumPalette::HandModal &&
-        palette != DrumPalette::Atmosphere &&
-        palette != DrumPalette::Industrial) {
-        switch (palette) {
-        case DrumPalette::SoftCircuit:
-        case DrumPalette::RhythmBox:
-        case DrumPalette::House909:
-        case DrumPalette::Techno:
-        case DrumPalette::ElectronicMetal:
-            patch.intendedIdentity =
-                QStringLiteral(
-                    "short electronic clave and wood block");
-            patch.source = QStringLiteral("jam2-wood-block");
-            patch.frequency = 720.0f;
-            patch.tone = 0.46f;
-            patch.decay = 0.12f;
-            patch.transient = QStringLiteral("click");
-            patch.transientLevel = 0.045f;
-            break;
-        case DrumPalette::CleanPcm:
-        case DrumPalette::HybridPop:
-        case DrumPalette::GlossyDance:
-        case DrumPalette::Trap808:
-            patch.intendedIdentity =
-                QStringLiteral(
-                    "short layered hand clap");
-            patch.source = QStringLiteral("jam2-shaker");
-            patch.frequency = 3900.0f;
-            patch.tone = 0.52f;
-            patch.decay = 0.10f;
-            patch.colour = 0.50f;
-            patch.transient = QStringLiteral("clap");
-            patch.transientLevel = 0.34f;
-            patch.transientTone = 0.58f;
-            patch.transientDecaySeconds = 0.038f;
-            patch.level = 0.26f;
-            break;
-        case DrumPalette::DryRock:
-        case DrumPalette::OpenRock:
-        case DrumPalette::Garage:
-        case DrumPalette::Anisong:
-        case DrumPalette::CountryPolished:
-        case DrumPalette::MetalLayered:
-        case DrumPalette::OrganicHeavy:
-            patch.intendedIdentity =
-                QStringLiteral(
-                    "stick-struck tambourine");
-            patch.source = QStringLiteral("jam2-tambourine");
-            patch.frequency = 4100.0f;
-            patch.tone = 0.55f;
-            patch.decay = 0.19f;
-            patch.colour = 0.64f;
-            patch.transient = QStringLiteral("stick");
-            patch.transientLevel = 0.065f;
-            patch.level = 0.22f;
-            break;
-        case DrumPalette::CountryDry:
-            patch.intendedIdentity =
-                QStringLiteral(
-                    "dry country wood block");
-            patch.source = QStringLiteral("jam2-wood-block");
-            patch.frequency = 690.0f;
-            patch.tone = 0.40f;
-            patch.decay = 0.10f;
-            break;
-        case DrumPalette::BrushJazz:
-        case DrumPalette::BopJazz:
-        case DrumPalette::Fusion:
-        case DrumPalette::BluesClub:
-        case DrumPalette::DarkBlues:
-        case DrumPalette::Bossa:
-        case DrumPalette::SoulDamped:
-        case DrumPalette::NeoSoul:
-        case DrumPalette::FunkDry:
-        case DrumPalette::Boom12:
-        case DrumPalette::Break12:
-        case DrumPalette::ReggaeDub:
-        case DrumPalette::Lofi:
-            patch.intendedIdentity =
-                palette == DrumPalette::Bossa
-                    ? QStringLiteral(
-                        "open high conga-style hand drum")
-                    : palette == DrumPalette::ReggaeDub
-                        ? QStringLiteral(
-                            "muted reggae hand drum")
-                        : QStringLiteral(
-                            "muted conga-style hand drum");
-            patch.source = QStringLiteral("jam2-hand-drum");
-            patch.frequency =
-                palette == DrumPalette::Bossa ? 286.0f :
-                palette == DrumPalette::ReggaeDub ? 188.0f :
-                220.0f;
-            patch.tone =
-                palette == DrumPalette::Bossa ? 0.38f : 0.28f;
-            patch.decay =
-                palette == DrumPalette::Bossa ? 0.13f : 0.16f;
-            break;
-        case DrumPalette::Simmons:
-            patch.intendedIdentity =
-                QStringLiteral(
-                    "short Simmons-style auxiliary tom");
-            patch.source =
-                QStringLiteral("daisy-synthetic-kick");
-            patch.frequency = 176.0f;
-            patch.tone = 0.38f;
-            patch.decay = 0.22f;
-            patch.fmAmount = 0.72f;
-            patch.transient = QStringLiteral("stick");
-            patch.transientLevel = 0.08f;
-            break;
-        case DrumPalette::Industrial:
-        case DrumPalette::HandModal:
-        case DrumPalette::Atmosphere:
-            break;
-        }
-        patch.secondSource = QStringLiteral("off");
-        patch.blend = 0.0f;
-        patch.texture = QStringLiteral("off");
-        patch.textureLevel = 0.0f;
-    }
     if (kind == DrumKind::Kick ||
         isTomKind(kind) ||
         kind == DrumKind::Crash ||
         kind == DrumKind::Ride ||
-        kind == DrumKind::CrossStick ||
-        kind == DrumKind::Shaker) {
+        kind == DrumKind::CrossStick) {
         // Core instrument models own their excitation and tail. Generic
         // palette noise must not reintroduce detached kick clicks, static
         // tom wash, computer-like rims, or sea-noise cymbal tails.
@@ -5337,13 +5454,11 @@ DrumLabPatch candidatePiecePatch(
         patch.decay *= paletteCharacter.shellTailScale;
     } else if (kind == DrumKind::Snare ||
                isTomKind(kind) ||
-               kind == DrumKind::CrossStick ||
-               kind == DrumKind::HandPercussion) {
+               kind == DrumKind::CrossStick) {
         patch.frequency *= paletteCharacter.shellPitchScale;
         patch.decay *= paletteCharacter.shellTailScale;
     }
-    if (metal || kind == DrumKind::Shaker ||
-        patch.source == QStringLiteral("jam2-tambourine")) {
+    if (metal) {
         patch.tone += paletteCharacter.metalToneOffset;
         patch.decay *= paletteCharacter.metalTailScale;
     }
@@ -5358,13 +5473,8 @@ DrumLabPatch candidatePiecePatch(
         isTomKind(kind) ||
         kind == DrumKind::CrossStick) {
         patch.frequency *= character.pitchScale;
-    } else if (kind == DrumKind::HandPercussion) {
-        patch.frequency *=
-            character.pitchScale *
-            character.handPitchScale;
     }
-    if (metal || kind == DrumKind::Shaker ||
-        patch.source == QStringLiteral("jam2-tambourine")) {
+    if (metal) {
         patch.tone +=
             0.34f * (character.metalBrightness - 1.0f);
     }
@@ -5695,23 +5805,6 @@ DrumLabPatch candidatePiecePatch(
             patch.transientLevel = 0.140f;
             patch.velocity.ghost = {26, 50};
             patch.velocity.outputCurve = 0.85f;
-        } else if (kind == DrumKind::HandPercussion) {
-            patch.intendedIdentity =
-                QStringLiteral("short layered Pop hand clap");
-            patch.source = QStringLiteral("jam2-hand-clap");
-            patch.secondSource = QStringLiteral("off");
-            patch.blend = 0.0f;
-            patch.frequency = 2100.0f;
-            patch.tone = 0.48f;
-            patch.decay = 0.12f;
-            patch.colour = 0.42f;
-            patch.fmAmount = 0.0f;
-            patch.level = 0.32f;
-            patch.transient = QStringLiteral("off");
-            patch.transientLevel = 0.0f;
-            patch.texture = QStringLiteral("off");
-            patch.textureLevel = 0.0f;
-            patch.roomSend = 0.075f;
         }
     }
 
@@ -5870,6 +5963,51 @@ QJsonObject drumLabPatchParameters(const DrumLabPatch& patch)
             {QStringLiteral("maximum"), band.maximum},
         };
     };
+    const auto responseValues = [](
+        const DrumLabPatch::DetailBandResponse& response) {
+        return QJsonObject{
+            {QStringLiteral("velocityCurve"), response.velocityCurve},
+            {QStringLiteral("ghostGain"), response.ghostGain},
+            {QStringLiteral("normalGain"), response.normalGain},
+            {QStringLiteral("accentGain"), response.accentGain},
+            {QStringLiteral("roomSend"), response.roomSend},
+        };
+    };
+    QJsonArray modalBands;
+    for (const DrumLabPatch::ModalBand& band : patch.modalBands) {
+        QJsonObject object = responseValues(band.response);
+        object.insert(QStringLiteral("frequencyHz"), band.frequencyHz);
+        object.insert(QStringLiteral("level"), band.level);
+        object.insert(
+            QStringLiteral("decaySeconds"), band.decaySeconds);
+        object.insert(
+            QStringLiteral("attackSeconds"), band.attackSeconds);
+        object.insert(
+            QStringLiteral("delaySeconds"), band.delaySeconds);
+        object.insert(
+            QStringLiteral("highpassHz"), band.highpassHz);
+        object.insert(
+            QStringLiteral("detuneCents"), band.detuneCents);
+        object.insert(
+            QStringLiteral("phaseCycles"), band.phaseCycles);
+        modalBands.append(object);
+    }
+    QJsonArray noiseBands;
+    for (const DrumLabPatch::NoiseBand& band : patch.noiseBands) {
+        QJsonObject object = responseValues(band.response);
+        object.insert(QStringLiteral("frequencyHz"), band.frequencyHz);
+        object.insert(QStringLiteral("q"), band.q);
+        object.insert(QStringLiteral("level"), band.level);
+        object.insert(
+            QStringLiteral("decaySeconds"), band.decaySeconds);
+        object.insert(
+            QStringLiteral("attackSeconds"), band.attackSeconds);
+        object.insert(
+            QStringLiteral("delaySeconds"), band.delaySeconds);
+        object.insert(
+            QStringLiteral("highpassHz"), band.highpassHz);
+        noiseBands.append(object);
+    }
     return {
         {QStringLiteral("intendedIdentity"),
          patch.intendedIdentity},
@@ -5882,6 +6020,10 @@ QJsonObject drumLabPatchParameters(const DrumLabPatch& patch)
         {QStringLiteral("colour"), patch.colour},
         {QStringLiteral("fmAmount"), patch.fmAmount},
         {QStringLiteral("level"), patch.level},
+        {QStringLiteral("sourceLayerGain"),
+         patch.sourceLayerGain},
+        {QStringLiteral("onsetSofteningSeconds"),
+         patch.onsetSofteningSeconds},
         {QStringLiteral("transient"), QJsonObject{
              {QStringLiteral("type"), patch.transient},
              {QStringLiteral("level"), patch.transientLevel},
@@ -5930,6 +6072,8 @@ QJsonObject drumLabPatchParameters(const DrumLabPatch& patch)
              {QStringLiteral("driveAmount"),
               patch.velocity.driveAmount},
          }},
+        {QStringLiteral("modalBands"), modalBands},
+        {QStringLiteral("noiseBands"), noiseBands},
         {QStringLiteral("synthLayer"), QJsonObject{
              {QStringLiteral("source"), patch.synth.source},
              {QStringLiteral("midiNote"), patch.synth.midiNote},
@@ -5979,16 +6123,6 @@ bool candidateSourceSupportsKind(
     case DrumKind::CrossStick:
         return source ==
             QStringLiteral("jam2-cross-stick");
-    case DrumKind::Shaker:
-        return source == QStringLiteral("jam2-shaker") ||
-            source == QStringLiteral("jam2-tambourine");
-    case DrumKind::HandPercussion:
-        return source == QStringLiteral("jam2-hand-drum") ||
-            source == QStringLiteral("jam2-hand-clap") ||
-            source == QStringLiteral("jam2-wood-block") ||
-            source == QStringLiteral("jam2-tambourine") ||
-            source == QStringLiteral("jam2-shaker") ||
-            source == QStringLiteral("daisy-synthetic-kick");
     }
     return false;
 }
@@ -6145,11 +6279,8 @@ bool isSupportedDrumSource(const QString& source)
         source == QStringLiteral("daisy-particle") ||
         source == QStringLiteral("jam2-shell-tom") ||
         source == QStringLiteral("jam2-cross-stick") ||
-        source == QStringLiteral("jam2-shaker") ||
-        source == QStringLiteral("jam2-hand-drum") ||
         source == QStringLiteral("jam2-hand-clap") ||
         source == QStringLiteral("jam2-wood-block") ||
-        source == QStringLiteral("jam2-tambourine") ||
         source == QStringLiteral("jam2-crash-cymbal") ||
         source == QStringLiteral("jam2-ride-cymbal") ||
         source == QStringLiteral("daisy-cymbal");
@@ -6191,6 +6322,40 @@ int boundedPatchInteger(
     int fallback,
     int minimum,
     int maximum);
+
+DrumBusDesign drumBusDesignFromJson(
+    const QJsonObject& values,
+    DrumBusDesign bus)
+{
+    bus.drive = boundedPatchNumber(
+        values, QStringLiteral("drive"),
+        static_cast<float>(bus.drive), 0.5f, 8.0f);
+    bus.cutoffHz = boundedPatchNumber(
+        values, QStringLiteral("lowpassHz"),
+        static_cast<float>(bus.cutoffHz), 200.0f, 20000.0f);
+    bus.compressorThreshold = boundedPatchNumber(
+        values, QStringLiteral("compressorThreshold"),
+        static_cast<float>(bus.compressorThreshold), 0.01f, 1.0f);
+    bus.compressorRatio = boundedPatchNumber(
+        values, QStringLiteral("compressorRatio"),
+        static_cast<float>(bus.compressorRatio), 1.0f, 20.0f);
+    bus.compressorReleaseMs = boundedPatchNumber(
+        values, QStringLiteral("compressorReleaseMs"),
+        static_cast<float>(bus.compressorReleaseMs), 5.0f, 500.0f);
+    bus.roomMix = boundedPatchNumber(
+        values, QStringLiteral("roomMix"),
+        static_cast<float>(bus.roomMix), 0.0f, 0.6f);
+    bus.roomSizeMs = boundedPatchNumber(
+        values, QStringLiteral("roomSizeMs"),
+        static_cast<float>(bus.roomSizeMs), 5.0f, 140.0f);
+    bus.roomDamping = boundedPatchNumber(
+        values, QStringLiteral("roomDamping"),
+        static_cast<float>(bus.roomDamping), 0.0f, 1.0f);
+    bus.stereoWidth = boundedPatchNumber(
+        values, QStringLiteral("stereoWidth"),
+        static_cast<float>(bus.stereoWidth), 0.0f, 1.0f);
+    return bus;
+}
 
 DrumLabPatch drumLabPatchFromJson(
     const QJsonObject& values,
@@ -6234,6 +6399,12 @@ DrumLabPatch drumLabPatchFromJson(
     patch.level = boundedPatchNumber(
         values, QStringLiteral("level"),
         patch.level, 0.0f, 1.5f);
+    patch.sourceLayerGain = boundedPatchNumber(
+        values, QStringLiteral("sourceLayerGain"),
+        patch.sourceLayerGain, 0.0f, 2.0f);
+    patch.onsetSofteningSeconds = boundedPatchNumber(
+        values, QStringLiteral("onsetSofteningSeconds"),
+        patch.onsetSofteningSeconds, 0.0f, 0.1f);
     const QJsonObject transient =
         values.value(QStringLiteral("transient")).toObject();
     const QString transientType =
@@ -6387,6 +6558,125 @@ DrumLabPatch drumLabPatchFromJson(
         patch.synth.filterCutoff = boundedPatchNumber(
             synth, QStringLiteral("filterCutoffHz"),
             patch.synth.filterCutoff, 40.0f, 18000.0f);
+    }
+    const auto readResponse = [](
+        const QJsonObject& object,
+        DrumLabPatch::DetailBandResponse fallback) {
+        fallback.velocityCurve = boundedPatchNumber(
+            object, QStringLiteral("velocityCurve"),
+            fallback.velocityCurve, 0.2f, 3.0f);
+        fallback.ghostGain = boundedPatchNumber(
+            object, QStringLiteral("ghostGain"),
+            fallback.ghostGain, 0.0f, 3.0f);
+        fallback.normalGain = boundedPatchNumber(
+            object, QStringLiteral("normalGain"),
+            fallback.normalGain, 0.0f, 3.0f);
+        fallback.accentGain = boundedPatchNumber(
+            object, QStringLiteral("accentGain"),
+            fallback.accentGain, 0.0f, 3.0f);
+        fallback.roomSend = boundedPatchNumber(
+            object, QStringLiteral("roomSend"),
+            fallback.roomSend, 0.0f, 2.0f);
+        return fallback;
+    };
+    const QJsonValue modalValue =
+        values.value(QStringLiteral("modalBands"));
+    if (!modalValue.isUndefined()) {
+        if (!modalValue.isArray()) {
+            throw std::runtime_error(
+                "Drum modal bands must be an array.");
+        }
+        patch.modalBands.clear();
+        const QJsonArray bands = modalValue.toArray();
+        patch.modalBands.reserve(std::min(
+            static_cast<int>(bands.size()),
+            DrumLabPatch::kMaximumModalBands));
+        for (const QJsonValue value : bands) {
+            if (patch.modalBands.size() >=
+                DrumLabPatch::kMaximumModalBands) {
+                break;
+            }
+            if (!value.isObject()) {
+                throw std::runtime_error(
+                    "Every drum modal band must be an object.");
+            }
+            const QJsonObject object = value.toObject();
+            DrumLabPatch::ModalBand band;
+            band.frequencyHz = boundedPatchNumber(
+                object, QStringLiteral("frequencyHz"),
+                band.frequencyHz, 20.0f, 20000.0f);
+            band.level = boundedPatchNumber(
+                object, QStringLiteral("level"),
+                band.level, 0.0f, 1.0f);
+            band.decaySeconds = boundedPatchNumber(
+                object, QStringLiteral("decaySeconds"),
+                band.decaySeconds, 0.005f, 8.0f);
+            band.attackSeconds = boundedPatchNumber(
+                object, QStringLiteral("attackSeconds"),
+                band.attackSeconds, 0.0001f, 0.25f);
+            band.delaySeconds = boundedPatchNumber(
+                object, QStringLiteral("delaySeconds"),
+                band.delaySeconds, 0.0f, 0.25f);
+            band.highpassHz = boundedPatchNumber(
+                object, QStringLiteral("highpassHz"),
+                band.highpassHz, 0.0f, 20000.0f);
+            band.detuneCents = boundedPatchNumber(
+                object, QStringLiteral("detuneCents"),
+                band.detuneCents, -50.0f, 50.0f);
+            band.phaseCycles = boundedPatchNumber(
+                object, QStringLiteral("phaseCycles"),
+                band.phaseCycles, -1.0f, 1.0f);
+            band.response = readResponse(object, band.response);
+            patch.modalBands.push_back(band);
+        }
+    }
+    const QJsonValue noiseValue =
+        values.value(QStringLiteral("noiseBands"));
+    if (!noiseValue.isUndefined()) {
+        if (!noiseValue.isArray()) {
+            throw std::runtime_error(
+                "Drum noise bands must be an array.");
+        }
+        patch.noiseBands.clear();
+        const QJsonArray bands = noiseValue.toArray();
+        patch.noiseBands.reserve(std::min(
+            static_cast<int>(bands.size()),
+            DrumLabPatch::kMaximumNoiseBands));
+        for (const QJsonValue value : bands) {
+            if (patch.noiseBands.size() >=
+                DrumLabPatch::kMaximumNoiseBands) {
+                break;
+            }
+            if (!value.isObject()) {
+                throw std::runtime_error(
+                    "Every drum noise band must be an object.");
+            }
+            const QJsonObject object = value.toObject();
+            DrumLabPatch::NoiseBand band;
+            band.frequencyHz = boundedPatchNumber(
+                object, QStringLiteral("frequencyHz"),
+                band.frequencyHz, 40.0f, 20000.0f);
+            band.q = boundedPatchNumber(
+                object, QStringLiteral("q"),
+                band.q, 0.1f, 30.0f);
+            band.level = boundedPatchNumber(
+                object, QStringLiteral("level"),
+                band.level, 0.0f, 1.0f);
+            band.decaySeconds = boundedPatchNumber(
+                object, QStringLiteral("decaySeconds"),
+                band.decaySeconds, 0.005f, 8.0f);
+            band.attackSeconds = boundedPatchNumber(
+                object, QStringLiteral("attackSeconds"),
+                band.attackSeconds, 0.0001f, 0.25f);
+            band.delaySeconds = boundedPatchNumber(
+                object, QStringLiteral("delaySeconds"),
+                band.delaySeconds, 0.0f, 0.25f);
+            band.highpassHz = boundedPatchNumber(
+                object, QStringLiteral("highpassHz"),
+                band.highpassHz, 0.0f, 20000.0f);
+            band.response = readResponse(object, band.response);
+            patch.noiseBands.push_back(band);
+        }
     }
     return patch;
 }
@@ -6676,16 +6966,10 @@ ActiveDrum makeConfiguredDaisyDrum(
         voice.model = DaisyDrumModel::ShellTom;
     } else if (source == QStringLiteral("jam2-cross-stick")) {
         voice.model = DaisyDrumModel::RimWood;
-    } else if (source == QStringLiteral("jam2-shaker")) {
-        voice.model = DaisyDrumModel::CollisionShaker;
-    } else if (source == QStringLiteral("jam2-hand-drum")) {
-        voice.model = DaisyDrumModel::SkinHandDrum;
     } else if (source == QStringLiteral("jam2-hand-clap")) {
         voice.model = DaisyDrumModel::HandClap;
     } else if (source == QStringLiteral("jam2-wood-block")) {
         voice.model = DaisyDrumModel::WoodBlock;
-    } else if (source == QStringLiteral("jam2-tambourine")) {
-        voice.model = DaisyDrumModel::Tambourine;
     } else if (source == QStringLiteral("jam2-crash-cymbal")) {
         voice.model = DaisyDrumModel::CrashCymbal;
     } else if (source == QStringLiteral("jam2-ride-cymbal")) {
@@ -6953,63 +7237,6 @@ ActiveDrum makeConfiguredDaisyDrum(
             std::max(1.0f, 0.0045f * kSampleRate));
         break;
     }
-    case DaisyDrumModel::CollisionShaker:
-        initialiseIdentityFilter(
-            voice.identityFilterA,
-            patch.frequency * 0.72f,
-            0.30f);
-        initialiseIdentityFilter(
-            voice.identityFilterB,
-            patch.frequency * 1.24f,
-            0.24f);
-        voice.identityNoiseEnvelope =
-            0.45f + 0.55f * hit.excitation;
-        voice.identityNoiseDecay = std::exp(
-            -6.907755f /
-            std::max(
-                1.0f,
-                (0.025f + 0.48f * patch.decay) *
-                    hit.decayScale * kSampleRate));
-        voice.identityCollisionRate =
-            900.0f + 5200.0f * patch.colour;
-        voice.identityCollisionDecay =
-            0.82f + 0.16f * patch.tone;
-        break;
-    case DaisyDrumModel::SkinHandDrum: {
-        const float skinSeconds =
-            0.045f + 0.72f * patch.decay;
-        setIdentityMode(
-            0, patch.frequency, 0.86f, skinSeconds);
-        setIdentityMode(
-            1, patch.frequency * 1.47f,
-            0.08f + 0.14f * patch.tone,
-            skinSeconds * 0.54f);
-        setIdentityMode(
-            2, patch.frequency * 2.09f,
-            0.03f + 0.08f * patch.tone,
-            skinSeconds * 0.34f);
-        initialiseIdentityFilter(
-            voice.identityFilterA,
-            1100.0f + 4200.0f * patch.tone,
-            0.31f);
-        voice.identityNoiseEnvelope = hit.excitation;
-        voice.identityNoiseDecay = std::exp(
-            -6.907755f /
-            std::max(
-                1.0f,
-                (0.005f + 0.020f * patch.tone) *
-                    kSampleRate));
-        voice.identityPitchEnvelope = hit.excitation;
-        voice.identityPitchSweep =
-            0.025f + 0.12f * patch.fmAmount;
-        voice.identityPitchDecay = std::exp(
-            -6.907755f /
-            std::max(
-                1.0f,
-                (0.010f + 0.025f * patch.decay) *
-                    kSampleRate));
-        break;
-    }
     case DaisyDrumModel::HandClap:
         initialiseIdentityFilter(
             voice.identityFilterA,
@@ -7047,41 +7274,6 @@ ActiveDrum makeConfiguredDaisyDrum(
         voice.identityNoiseDecay = std::exp(
             -6.907755f /
             std::max(1.0f, 0.0035f * kSampleRate));
-        break;
-    }
-    case DaisyDrumModel::Tambourine: {
-        const std::array<float, 5> ratios{
-            0.73f, 1.0f, 1.31f, 1.79f, 2.41f};
-        for (int index = 0;
-             index < static_cast<int>(ratios.size());
-             ++index) {
-            setIdentityMode(
-                index,
-                patch.frequency * ratios[index],
-                0.055f,
-                0.035f + 0.16f * patch.decay *
-                    (1.0f - 0.09f * index));
-        }
-        initialiseIdentityFilter(
-            voice.identityFilterA,
-            patch.frequency * 0.78f,
-            0.26f);
-        initialiseIdentityFilter(
-            voice.identityFilterB,
-            patch.frequency * 1.42f,
-            0.20f);
-        voice.identityNoiseEnvelope =
-            0.42f + 0.58f * hit.excitation;
-        voice.identityNoiseDecay = std::exp(
-            -6.907755f /
-            std::max(
-                1.0f,
-                (0.06f + 0.62f * patch.decay) *
-                    hit.decayScale * kSampleRate));
-        voice.identityCollisionRate =
-            1500.0f + 6200.0f * patch.colour;
-        voice.identityCollisionDecay =
-            0.86f + 0.12f * patch.tone;
         break;
     }
     case DaisyDrumModel::CrashCymbal: {
@@ -7237,17 +7429,8 @@ ActiveDrum makeConfiguredDaisyDrum(
     case DaisyDrumModel::WoodBlock:
         tailSeconds = 0.055f + 0.18f * patch.decay;
         break;
-    case DaisyDrumModel::CollisionShaker:
-        tailSeconds = 0.08f + 0.62f * patch.decay;
-        break;
-    case DaisyDrumModel::SkinHandDrum:
-        tailSeconds = 0.12f + 0.90f * patch.decay;
-        break;
     case DaisyDrumModel::HandClap:
         tailSeconds = 0.12f + 0.82f * patch.decay;
-        break;
-    case DaisyDrumModel::Tambourine:
-        tailSeconds = 0.12f + 0.86f * patch.decay;
         break;
     case DaisyDrumModel::CrashCymbal:
         tailSeconds = 0.85f + 4.4f * patch.decay;
@@ -7467,6 +7650,116 @@ void prepareDrumRepeatedHits(
     }
 }
 
+void prepareDrumReferencePattern(
+    GeneratedPracticeIdea& idea,
+    const QJsonObject& pattern)
+{
+    const int bpm = boundedPatchInteger(
+        pattern,
+        QStringLiteral("bpm"),
+        120,
+        40,
+        240);
+    const int beats = boundedPatchInteger(
+        pattern,
+        QStringLiteral("beats"),
+        32,
+        1,
+        1024);
+    const QJsonArray events =
+        pattern.value(QStringLiteral("events")).toArray();
+    if (events.isEmpty() || events.size() > 4096) {
+        throw std::runtime_error(
+            "Reference drum pattern must contain 1 to 4096 events.");
+    }
+    const QStringList lanes = BeatGridModel::beatLaneNames();
+    const BeatPattern prototype =
+        idea.beatSection.beatPatterns.isEmpty()
+            ? BeatPattern{}
+            : idea.beatSection.beatPatterns.first();
+    idea.bpm = bpm;
+    idea.recipe.bpm = bpm;
+    idea.recipe.swingPercent = 50;
+    idea.recipe.snareOffsetMs = 0;
+    idea.beatSection.beats = beats;
+    idea.beatSection.beatPatterns.resize(beats);
+    for (BeatPattern& beat : idea.beatSection.beatPatterns) {
+        beat = prototype;
+        beat.division = kTicksPerBeat;
+        beat.lanes.resize(lanes.size());
+        for (QString& lane : beat.lanes) {
+            lane = QString(kTicksPerBeat, QLatin1Char('.'));
+        }
+    }
+    idea.recipe.drumEvents.clear();
+    std::array<int, 12> repeatCounts{};
+    for (const QJsonValue value : events) {
+        if (!value.isObject()) {
+            throw std::runtime_error(
+                "Every reference drum event must be an object.");
+        }
+        const QJsonObject event = value.toObject();
+        const QString pieceId =
+            event.value(QStringLiteral("piece")).toString();
+        const std::optional<DrumKind> kind =
+            drumKindFromId(pieceId);
+        if (!kind) {
+            throw std::runtime_error(
+                "Reference drum pattern contains an unknown piece.");
+        }
+        const int tick = boundedPatchInteger(
+            event,
+            QStringLiteral("tick"),
+            -1,
+            0,
+            beats * kTicksPerBeat - 1);
+        const int velocity = boundedPatchInteger(
+            event,
+            QStringLiteral("velocity"),
+            80,
+            1,
+            127);
+        const int laneIndex =
+            lanes.indexOf(laneNameForDrumKind(*kind));
+        if (laneIndex < 0) {
+            throw std::runtime_error(
+                "Reference drum piece has no beat-grid lane.");
+        }
+        const int beatIndex = tick / kTicksPerBeat;
+        const int withinBeat = tick % kTicksPerBeat;
+        const QChar state =
+            velocity <= 40
+                ? QLatin1Char('g')
+                : velocity >= 101
+                    ? QLatin1Char('a')
+                    : QLatin1Char('x');
+        idea.beatSection.beatPatterns[beatIndex]
+            .lanes[laneIndex][withinBeat] = state;
+        jam2::practice::DrumPerformanceEvent performance;
+        performance.tick = tick;
+        performance.laneId = pieceId;
+        performance.laneId.replace(
+            QLatin1Char('-'),
+            QLatin1Char('_'));
+        performance.velocity = velocity;
+        performance.role = QStringLiteral("reference-pattern");
+        performance.repeatGroup =
+            repeatCounts[static_cast<std::size_t>(*kind)]++;
+        idea.recipe.drumEvents.push_back(performance);
+    }
+    std::stable_sort(
+        idea.recipe.drumEvents.begin(),
+        idea.recipe.drumEvents.end(),
+        [](const auto& left, const auto& right) {
+            return left.tick < right.tick;
+        });
+    idea.recipe.beatFingerprint =
+        jam2::practice::generatedBeatFingerprint(
+            idea.beatSection);
+    idea.chordSection.generatedRecipe = idea.recipe;
+    idea.beatSection.generatedRecipe = idea.recipe;
+}
+
 std::vector<float> renderJam2DrumLane(
     const GeneratedPracticeIdea& sourceIdea,
     DrumKind kind,
@@ -7501,6 +7794,527 @@ std::vector<float> renderJam2DrumLane(
     return audio;
 }
 
+float detailStrengthGain(
+    const DrumLabPatch::DetailBandResponse& response,
+    DrumHit::Strength strength)
+{
+    switch (strength) {
+    case DrumHit::Strength::Ghost: return response.ghostGain;
+    case DrumHit::Strength::Normal: return response.normalGain;
+    case DrumHit::Strength::Accent: return response.accentGain;
+    }
+    return response.normalGain;
+}
+
+float detailVelocityGain(
+    const DrumLabPatch::DetailBandResponse& response,
+    const DrumHit& hit)
+{
+    const float velocity = static_cast<float>(hit.midiVelocity) / 127.0f;
+    return std::pow(velocity, response.velocityCurve) *
+        detailStrengthGain(response, hit.strength);
+}
+
+int wrappedPitchClass(int value)
+{
+    const int remainder = value % 12;
+    return remainder < 0 ? remainder + 12 : remainder;
+}
+
+QVector<int> modeAwareDrumTargetIntervals(const QString& modeName)
+{
+    const QString mode = modeName.trimmed().toLower();
+    if (mode == QStringLiteral("major") ||
+        mode == QStringLiteral("ionian") ||
+        mode == QStringLiteral("major pentatonic")) {
+        return {0, 2, 4, 7, 9};
+    }
+    if (mode == QStringLiteral("natural minor") ||
+        mode == QStringLiteral("aeolian") ||
+        mode == QStringLiteral("minor pentatonic")) {
+        return {0, 3, 5, 7, 10};
+    }
+    if (mode == QStringLiteral("dorian")) {
+        return {0, 2, 3, 7, 9};
+    }
+    if (mode == QStringLiteral("mixolydian")) {
+        return {0, 2, 4, 7, 10};
+    }
+    if (mode == QStringLiteral("lydian")) {
+        return {0, 2, 4, 6, 9};
+    }
+    if (mode == QStringLiteral("phrygian")) {
+        return {0, 1, 3, 7, 10};
+    }
+    if (mode == QStringLiteral("dominant blues")) {
+        return {0, 3, 4, 7, 10};
+    }
+    if (mode == QStringLiteral("blues") ||
+        mode == QStringLiteral("minor blues")) {
+        return {0, 3, 5, 7, 10};
+    }
+    return {};
+}
+
+std::array<double, 12> drumHarmonyPitchWeights(
+    const GeneratedPracticeIdea& idea)
+{
+    std::array<double, 12> weights{};
+    ParsedChord currentChord;
+    for (const MusicalBeatPattern& pattern :
+         idea.chordSection.musicalPatterns) {
+        if (pattern.division <= 0 ||
+            pattern.chords.size() != pattern.division) {
+            continue;
+        }
+        const double stepWeight = 1.0 / pattern.division;
+        for (const MusicalStep& step : pattern.chords) {
+            if (step.state == MusicalStepState::Onset) {
+                currentChord =
+                    jam2::practice::parseChord(step.value);
+            } else if (step.state == MusicalStepState::Rest) {
+                currentChord = {};
+            }
+            if (!currentChord.valid || currentChord.rest) continue;
+            weights[static_cast<std::size_t>(currentChord.root)] +=
+                2.2 * stepWeight;
+            for (int interval : currentChord.intervals) {
+                weights[static_cast<std::size_t>(wrappedPitchClass(
+                    currentChord.root + interval))] += stepWeight;
+            }
+            if (currentChord.bass >= 0) {
+                weights[static_cast<std::size_t>(currentChord.bass)] +=
+                    0.6 * stepWeight;
+            }
+        }
+    }
+    for (const auto& event : idea.recipe.melodyEvents) {
+        const double duration = std::clamp(
+            static_cast<double>(event.durationTicks) / kTicksPerBeat,
+            0.0,
+            2.0);
+        weights[static_cast<std::size_t>(
+            wrappedPitchClass(event.midi))] += 0.12 * duration;
+    }
+    for (const auto& event : idea.recipe.bassEvents) {
+        const double duration = std::clamp(
+            static_cast<double>(event.durationTicks) / kTicksPerBeat,
+            0.0,
+            2.0);
+        weights[static_cast<std::size_t>(
+            wrappedPitchClass(event.midi))] += 0.16 * duration;
+    }
+    return weights;
+}
+
+double drumTargetHarmonyScore(
+    int targetPitchClass,
+    const std::array<double, 12>& weights)
+{
+    constexpr std::array<double, 7> relationship{
+        3.0, -3.2, -0.35, 0.75, 0.45, 0.20, -2.2};
+    double score = 0.0;
+    for (int pitchClass = 0; pitchClass < 12; ++pitchClass) {
+        const int forward = wrappedPitchClass(
+            targetPitchClass - pitchClass);
+        const int distance = std::min(forward, 12 - forward);
+        score += weights[static_cast<std::size_t>(pitchClass)] *
+            relationship[static_cast<std::size_t>(distance)];
+    }
+    return score;
+}
+
+struct DrumResonanceTarget {
+    int pitchClass = 0;
+    double frequencyHz = 0.0;
+    double cents = 0.0;
+    double score = -std::numeric_limits<double>::infinity();
+    bool valid = false;
+};
+
+DrumResonanceTarget selectDrumResonanceTarget(
+    double frequencyHz,
+    int tonic,
+    const QVector<int>& targetIntervals,
+    const std::array<double, 12>& harmonyWeights)
+{
+    constexpr double maximumCents = 200.0;
+    if (frequencyHz <= 0.0) return {};
+    const double sourceMidi =
+        69.0 + 12.0 * std::log2(frequencyHz / 440.0);
+    DrumResonanceTarget result;
+    for (int interval : targetIntervals) {
+        const int pitchClass = wrappedPitchClass(tonic + interval);
+        const double targetMidi = pitchClass + 12.0 * std::round(
+            (sourceMidi - pitchClass) / 12.0);
+        const double cents = 100.0 * (targetMidi - sourceMidi);
+        if (std::abs(cents) > maximumCents + 0.001) continue;
+        double preference = interval == 0
+            ? 1.2
+            : interval == 7 ? 0.9 : 0.0;
+        const double score = drumTargetHarmonyScore(
+            pitchClass, harmonyWeights) + preference -
+            0.35 * std::abs(cents) / maximumCents;
+        if (!result.valid || score > result.score + 1.0e-9 ||
+            (std::abs(score - result.score) <= 1.0e-9 &&
+             std::abs(cents) < std::abs(result.cents))) {
+            result.pitchClass = pitchClass;
+            result.frequencyHz =
+                440.0 * std::pow(2.0, (targetMidi - 69.0) / 12.0);
+            result.cents = cents;
+            result.score = score;
+            result.valid = true;
+        }
+    }
+    return result;
+}
+
+bool keyAwareDrumKind(
+    DrumKind kind,
+    bool electronic)
+{
+    return kind == DrumKind::Kick ||
+        kind == DrumKind::HighTom ||
+        kind == DrumKind::MidTom ||
+        kind == DrumKind::FloorTom ||
+        kind == DrumKind::Ride ||
+        (electronic && kind == DrumKind::Snare);
+}
+
+QMap<DrumKind, DrumLabPatch> keyAwareLaboratoryKit(
+    const GeneratedPracticeIdea& idea,
+    const QMap<DrumKind, DrumLabPatch>& sourceKit,
+    const QString& candidateId,
+    QJsonObject* audit)
+{
+    QMap<DrumKind, DrumLabPatch> kit = sourceKit;
+    const bool acoustic = candidateId.contains(
+        QStringLiteral("acoustic"), Qt::CaseInsensitive);
+    const bool electronic = candidateId.contains(
+        QStringLiteral("electronic"), Qt::CaseInsensitive);
+    if (audit) {
+        audit->insert(QStringLiteral("enabled"), false);
+        audit->insert(QStringLiteral("candidateEligible"),
+                      acoustic || electronic);
+    }
+    if (!acoustic && !electronic) return kit;
+
+    const ParsedChord tonicChord =
+        jam2::practice::parseChord(idea.recipe.tonic);
+    const QVector<int> targetIntervals =
+        modeAwareDrumTargetIntervals(idea.recipe.mode);
+    if (!tonicChord.valid || targetIntervals.isEmpty()) {
+        if (audit) {
+            audit->insert(
+                QStringLiteral("reason"),
+                tonicChord.valid
+                    ? QStringLiteral("unsupported generated mode")
+                    : QStringLiteral("generated tonic unavailable"));
+            audit->insert(QStringLiteral("tonic"), idea.recipe.tonic);
+            audit->insert(QStringLiteral("mode"), idea.recipe.mode);
+        }
+        return kit;
+    }
+
+    const auto harmonyWeights = drumHarmonyPitchWeights(idea);
+    QJsonArray targetNotes;
+    for (int interval : targetIntervals) {
+        targetNotes.append(jam2::practice::noteName(
+            wrappedPitchClass(tonicChord.root + interval),
+            idea.recipe.tonic.contains(QLatin1Char('b'))));
+    }
+    QJsonArray pieceAudit;
+    for (DrumKind kind : kDrumKinds) {
+        if (!keyAwareDrumKind(kind, electronic)) continue;
+        auto iterator = kit.find(kind);
+        if (iterator == kit.end()) continue;
+        DrumLabPatch& patch = iterator.value();
+        if (patch.modalBands.isEmpty()) continue;
+
+        qsizetype anchorIndex = 0;
+        double anchorSalience = -1.0;
+        for (qsizetype index = 0;
+             index < patch.modalBands.size();
+             ++index) {
+            const DrumLabPatch::ModalBand& band =
+                patch.modalBands.at(index);
+            const double salience = band.level *
+                std::sqrt(std::max(0.005f, band.decaySeconds));
+            if (salience > anchorSalience) {
+                anchorSalience = salience;
+                anchorIndex = index;
+            }
+        }
+        const double anchorFrequency =
+            patch.modalBands.at(anchorIndex).frequencyHz *
+            std::pow(
+                2.0,
+                patch.modalBands.at(anchorIndex).detuneCents / 1200.0);
+        const DrumResonanceTarget target =
+            selectDrumResonanceTarget(
+                anchorFrequency,
+                tonicChord.root,
+                targetIntervals,
+                harmonyWeights);
+        if (!target.valid) continue;
+
+        const double ratio = std::pow(2.0, target.cents / 1200.0);
+        for (DrumLabPatch::ModalBand& band : patch.modalBands) {
+            band.detuneCents += static_cast<float>(target.cents);
+        }
+        const bool shiftSourceFundamental =
+            kind != DrumKind::Ride &&
+            patch.sourceLayerGain > 0.0001f;
+        if (shiftSourceFundamental) {
+            patch.frequency = static_cast<float>(patch.frequency * ratio);
+        }
+
+        const double largeMove = std::clamp(
+            (std::abs(target.cents) - 100.0) / 100.0,
+            0.0,
+            1.0);
+        const float levelScale =
+            static_cast<float>(1.0 - 0.12 * largeMove);
+        const float decayScale =
+            static_cast<float>(1.0 - 0.10 * largeMove);
+        DrumLabPatch::ModalBand& anchor =
+            patch.modalBands[anchorIndex];
+        anchor.level *= levelScale;
+        anchor.decaySeconds *= decayScale;
+
+        pieceAudit.append(QJsonObject{
+            {QStringLiteral("piece"), drumKindId(kind)},
+            {QStringLiteral("anchorBand"), anchorIndex},
+            {QStringLiteral("originalFrequencyHz"), anchorFrequency},
+            {QStringLiteral("targetFrequencyHz"), target.frequencyHz},
+            {QStringLiteral("targetNote"),
+             jam2::practice::noteName(
+                 target.pitchClass,
+                 idea.recipe.tonic.contains(QLatin1Char('b')))},
+            {QStringLiteral("centsMoved"), target.cents},
+            {QStringLiteral("modalBandsShifted"),
+             patch.modalBands.size()},
+            {QStringLiteral("sourceFundamentalShifted"),
+             shiftSourceFundamental},
+            {QStringLiteral("highQLevelScale"), levelScale},
+            {QStringLiteral("highQDecayScale"), decayScale},
+            {QStringLiteral("harmonyFitScore"), target.score},
+        });
+    }
+    if (audit) {
+        audit->insert(QStringLiteral("enabled"), true);
+        audit->insert(QStringLiteral("tonic"), idea.recipe.tonic);
+        audit->insert(QStringLiteral("mode"), idea.recipe.mode);
+        audit->insert(QStringLiteral("targetCollection"), targetNotes);
+        audit->insert(QStringLiteral("maximumCents"), 200.0);
+        audit->insert(
+            QStringLiteral("policy"),
+            QStringLiteral(
+                "mode-specific stable collection scored against generated harmony; uniform modal-bank shift preserves piece identity"));
+        audit->insert(QStringLiteral("pieces"), pieceAudit);
+    }
+    return kit;
+}
+
+void renderLaboratoryDetailBanks(
+    std::vector<float>& dry,
+    std::vector<float>& room,
+    const QMap<DrumKind, DrumLabPatch>& kit,
+    const std::vector<DrumHit>& hits)
+{
+    constexpr double minusSixtyDb = 6.907755278982137;
+    for (const DrumHit& hit : hits) {
+        const auto patchIterator = kit.constFind(hit.kind);
+        if (patchIterator == kit.cend()) continue;
+        const DrumLabPatch& patch = patchIterator.value();
+        if (patch.modalBands.isEmpty() && patch.noiseBands.isEmpty()) {
+            continue;
+        }
+        for (qsizetype index = 0;
+             index < patch.modalBands.size();
+             ++index) {
+            const DrumLabPatch::ModalBand& band =
+                patch.modalBands.at(index);
+            const double seconds =
+                band.decaySeconds * hit.decayScale;
+            const qint64 startFrame = hit.frame +
+                static_cast<qint64>(std::llround(
+                    band.delaySeconds * kSampleRate));
+            const qint64 count = std::min<qint64>(
+                static_cast<qint64>(dry.size()) - startFrame,
+                std::max<qint64>(
+                    1,
+                    static_cast<qint64>(
+                        std::ceil(seconds * kSampleRate))));
+            if (count <= 0 || band.level <= 0.0f) continue;
+            const double frequency = std::clamp(
+                static_cast<double>(band.frequencyHz) *
+                    std::pow(2.0, band.detuneCents / 1200.0),
+                20.0,
+                0.475 * kSampleRate);
+            const double phaseStep =
+                2.0 * kPi * frequency / kSampleRate;
+            const double initialPhase =
+                band.phaseCycles >= 0.0f
+                    ? 2.0 * kPi * band.phaseCycles
+                    : 0.16 * kPi *
+                        deterministicUnit(
+                            stableSeed(
+                                drumKindId(hit.kind) +
+                                QString::number(hit.frame)),
+                            static_cast<std::uint32_t>(index + 1));
+            const double decayCoefficient =
+                minusSixtyDb / std::max(0.005, seconds);
+            const double attackCoefficient =
+                minusSixtyDb /
+                std::max(
+                    0.0001,
+                    static_cast<double>(band.attackSeconds));
+            const double gain = band.level * patch.level *
+                detailVelocityGain(band.response, hit);
+            const double highpassPole = band.highpassHz > 0.0f
+                ? std::exp(
+                    -2.0 * kPi * band.highpassHz / kSampleRate)
+                : 0.0;
+            double previousInputA = 0.0;
+            double previousOutputA = 0.0;
+            double previousInputB = 0.0;
+            double previousOutputB = 0.0;
+            for (qint64 age = 0; age < count; ++age) {
+                const double time =
+                    static_cast<double>(age) / kSampleRate;
+                const double attack =
+                    1.0 - std::exp(-attackCoefficient * time);
+                const double envelope =
+                    attack * std::exp(-decayCoefficient * time);
+                double sampleValue =
+                    gain * envelope *
+                    std::sin(initialPhase + phaseStep * age);
+                if (band.highpassHz > 0.0f) {
+                    const double first =
+                        sampleValue - previousInputA +
+                        highpassPole * previousOutputA;
+                    previousInputA = sampleValue;
+                    previousOutputA = first;
+                    const double second =
+                        first - previousInputB +
+                        highpassPole * previousOutputB;
+                    previousInputB = first;
+                    previousOutputB = second;
+                    sampleValue = second;
+                }
+                const float sample =
+                    static_cast<float>(sampleValue);
+                const qint64 frame = startFrame + age;
+                dry[static_cast<std::size_t>(frame)] += sample;
+                room[static_cast<std::size_t>(frame)] +=
+                    sample * patch.roomSend * band.response.roomSend;
+            }
+        }
+        for (qsizetype index = 0;
+             index < patch.noiseBands.size();
+             ++index) {
+            const DrumLabPatch::NoiseBand& band =
+                patch.noiseBands.at(index);
+            const double seconds =
+                band.decaySeconds * hit.decayScale;
+            const qint64 startFrame = hit.frame +
+                static_cast<qint64>(std::llround(
+                    band.delaySeconds * kSampleRate));
+            const qint64 count = std::min<qint64>(
+                static_cast<qint64>(dry.size()) - startFrame,
+                std::max<qint64>(
+                    1,
+                    static_cast<qint64>(
+                        std::ceil(seconds * kSampleRate))));
+            if (count <= 0 || band.level <= 0.0f) continue;
+            const double frequency = std::clamp(
+                static_cast<double>(band.frequencyHz),
+                40.0,
+                0.475 * kSampleRate);
+            const double omega =
+                2.0 * kPi * frequency / kSampleRate;
+            const double alpha =
+                std::sin(omega) /
+                (2.0 * std::max(0.1, static_cast<double>(band.q)));
+            const double a0 = 1.0 + alpha;
+            const double b0 = alpha / a0;
+            const double b2 = -alpha / a0;
+            const double a1 = -2.0 * std::cos(omega) / a0;
+            const double a2 = (1.0 - alpha) / a0;
+            double input1 = 0.0;
+            double input2 = 0.0;
+            double output1 = 0.0;
+            double output2 = 0.0;
+            std::uint32_t noiseState =
+                stableSeed(
+                    drumKindId(hit.kind) +
+                    QString::number(hit.frame) +
+                    QString::number(index));
+            const double decayCoefficient =
+                minusSixtyDb / std::max(0.005, seconds);
+            const double attackCoefficient =
+                minusSixtyDb /
+                std::max(
+                    0.0001,
+                    static_cast<double>(band.attackSeconds));
+            const double gain = band.level * patch.level *
+                detailVelocityGain(band.response, hit);
+            const double highpassPole = band.highpassHz > 0.0f
+                ? std::exp(
+                    -2.0 * kPi * band.highpassHz / kSampleRate)
+                : 0.0;
+            double previousInputA = 0.0;
+            double previousOutputA = 0.0;
+            double previousInputB = 0.0;
+            double previousOutputB = 0.0;
+            for (qint64 age = 0; age < count; ++age) {
+                noiseState ^= noiseState << 13;
+                noiseState ^= noiseState >> 17;
+                noiseState ^= noiseState << 5;
+                const double input =
+                    static_cast<double>(noiseState & 0x00ffffffU) /
+                        static_cast<double>(0x007fffffU) -
+                    1.0;
+                const double filtered =
+                    b0 * input + b2 * input2 -
+                    a1 * output1 - a2 * output2;
+                input2 = input1;
+                input1 = input;
+                output2 = output1;
+                output1 = filtered;
+                const double time =
+                    static_cast<double>(age) / kSampleRate;
+                const double attack =
+                    1.0 - std::exp(-attackCoefficient * time);
+                const double envelope =
+                    attack * std::exp(-decayCoefficient * time);
+                double sampleValue =
+                    gain * envelope * filtered;
+                if (band.highpassHz > 0.0f) {
+                    const double first =
+                        sampleValue - previousInputA +
+                        highpassPole * previousOutputA;
+                    previousInputA = sampleValue;
+                    previousOutputA = first;
+                    const double second =
+                        first - previousInputB +
+                        highpassPole * previousOutputB;
+                    previousInputB = first;
+                    previousOutputB = second;
+                    sampleValue = second;
+                }
+                const float sample =
+                    static_cast<float>(sampleValue);
+                const qint64 frame = startFrame + age;
+                dry[static_cast<std::size_t>(frame)] += sample;
+                room[static_cast<std::size_t>(frame)] +=
+                    sample * patch.roomSend * band.response.roomSend;
+            }
+        }
+    }
+}
+
 std::vector<float> renderLaboratoryKit(
     const GeneratedPracticeIdea& idea,
     const ProfileDefinition& profile,
@@ -7509,7 +8323,8 @@ std::vector<float> renderLaboratoryKit(
     std::optional<DrumKind> onlyKind,
     const DrumBusDesign& bus,
     const QString& jam2Workspace,
-    const QString& candidateId)
+    const QString& candidateId,
+    QJsonObject* keyAwareTuningAudit = nullptr)
 {
     // The accepted Daisy drum models use rand() for excitation noise. Keep
     // both Lab auditions and the promoted production renderer deterministic.
@@ -7525,6 +8340,12 @@ std::vector<float> renderLaboratoryKit(
             return hit.kind != *onlyKind;
         });
     }
+    const QMap<DrumKind, DrumLabPatch> renderKit =
+        keyAwareLaboratoryKit(
+            idea,
+            kit,
+            candidateId,
+            keyAwareTuningAudit);
     ResearchDrumKit sharedKit;
     sharedKit.profileId = profile.id;
     sharedKit.id = candidateId;
@@ -7546,7 +8367,7 @@ std::vector<float> renderLaboratoryKit(
         static_cast<float>(bus.roomDamping);
     for (DrumKind kind : kDrumKinds) {
         const DrumLabPatch patch =
-            kit.value(
+            renderKit.value(
                 kind,
                 defaultDrumLabPatch(profile, kind));
         ResearchDrumPiece piece;
@@ -7559,7 +8380,9 @@ std::vector<float> renderLaboratoryKit(
         piece.tone = patch.tone;
         piece.colour = patch.colour;
         piece.fmAmount = patch.fmAmount;
-        piece.level = patch.level;
+        piece.level = patch.level * patch.sourceLayerGain;
+        piece.onsetSofteningSeconds =
+            patch.onsetSofteningSeconds;
         piece.voiceDrive = patch.voiceDrive;
         piece.digitalSampleRateHz =
             patch.digitalSampleRateHz;
@@ -7613,9 +8436,11 @@ std::vector<float> renderLaboratoryKit(
     }
     QVector<ResearchDrumRenderEvent> sharedEvents;
     sharedEvents.reserve(static_cast<qsizetype>(hits.size()));
+    std::vector<DrumHit> realisedHits;
+    realisedHits.reserve(hits.size());
     for (const DrumHit& sourceHit : hits) {
         const DrumLabPatch patch =
-            kit.value(
+            renderKit.value(
                 sourceHit.kind,
                 defaultDrumLabPatch(
                     profile,
@@ -7625,16 +8450,30 @@ std::vector<float> renderLaboratoryKit(
             profile,
             candidateId,
             patch);
+        realisedHits.push_back(hit);
+        const bool acousticRide =
+            hit.kind == DrumKind::Ride &&
+            candidateId.contains(
+                QStringLiteral("acoustic"),
+                Qt::CaseInsensitive);
+        const QString rendererArticulation =
+            acousticRide
+                ? hit.strength == DrumHit::Strength::Accent
+                    ? QStringLiteral("bell")
+                    : hit.strength == DrumHit::Strength::Ghost
+                        ? QStringLiteral("light-tip")
+                        : QStringLiteral("tip")
+                : hit.articulation.isEmpty()
+                    ? hit.strength == DrumHit::Strength::Ghost
+                        ? QStringLiteral("ghost")
+                        : hit.strength == DrumHit::Strength::Accent
+                            ? QStringLiteral("accent")
+                            : QStringLiteral("normal")
+                    : hit.articulation;
         sharedEvents.push_back({
             hit.frame,
             drumKindId(hit.kind),
-            hit.articulation.isEmpty()
-                ? hit.strength == DrumHit::Strength::Ghost
-                    ? QStringLiteral("ghost")
-                    : hit.strength == DrumHit::Strength::Accent
-                        ? QStringLiteral("accent")
-                        : QStringLiteral("normal")
-                : hit.articulation,
+            rendererArticulation,
             hit.midiVelocity,
             hit.repeatIndex,
             stableSeed(
@@ -7665,7 +8504,7 @@ std::vector<float> renderLaboratoryKit(
             continue;
         }
         const DrumLabPatch patch =
-            kit.value(kind, defaultDrumLabPatch(profile, kind));
+            renderKit.value(kind, defaultDrumLabPatch(profile, kind));
         const bool hasSecond =
             patch.secondSource != QStringLiteral("off") &&
             patch.blend > 0.0001f;
@@ -7689,7 +8528,7 @@ std::vector<float> renderLaboratoryKit(
         const DrumLabPatch defaultPatch =
             defaultDrumLabPatch(profile, kind);
         const float levelScale = std::clamp(
-            patch.level /
+            patch.level * patch.sourceLayerGain /
                 std::max(0.05f, defaultPatch.level),
             0.0f,
             2.5f);
@@ -7698,6 +8537,11 @@ std::vector<float> renderLaboratoryKit(
                 jam2Gain * levelScale * native[frame];
         }
     }
+    renderLaboratoryDetailBanks(
+        daisy,
+        roomSend,
+        renderKit,
+        realisedHits);
     QVector<float> sharedOutput(
         daisy.cbegin(),
         daisy.cend());
@@ -7902,7 +8746,16 @@ QJsonArray realisedDrumHitAudit(
             {QStringLiteral("state"),
              drumStrengthId(hit.strength)},
             {QStringLiteral("articulation"),
-             !hit.articulation.isEmpty()
+             hit.kind == DrumKind::Ride &&
+                     candidateId.contains(
+                         QStringLiteral("acoustic"),
+                         Qt::CaseInsensitive)
+                 ? hit.strength == DrumHit::Strength::Accent
+                     ? QStringLiteral("cup")
+                     : hit.strength == DrumHit::Strength::Ghost
+                         ? QStringLiteral("light-tip")
+                         : QStringLiteral("tip")
+                 : !hit.articulation.isEmpty()
                  ? hit.articulation
                  : hit.kind == DrumKind::Ride
                      ? hit.strength == DrumHit::Strength::Accent
@@ -8087,7 +8940,6 @@ QJsonArray auditionLaneEventAudit(
     QJsonArray result;
     const double beatFrames = framesPerBeat(idea);
     for (const NoteEvent& event : extractEvents(idea)) {
-        if (event.role == QStringLiteral("chords")) continue;
         result.append(QJsonObject{
             {QStringLiteral("role"), event.role},
             {QStringLiteral("start_beat"),
@@ -8100,6 +8952,33 @@ QJsonArray auditionLaneEventAudit(
             {QStringLiteral("velocity"), event.velocity},
             {QStringLiteral("articulation"),
              event.articulation},
+        });
+    }
+    return result;
+}
+
+QJsonArray auditionDrumEventAudit(
+    const GeneratedPracticeIdea& idea)
+{
+    QJsonArray result;
+    const double beatFrames = framesPerBeat(idea);
+    const std::size_t frames = static_cast<std::size_t>(
+        std::max<qint64>(
+            1,
+            frameAtTick(
+                idea,
+                idea.beatSection.beats * kTicksPerBeat) +
+                static_cast<qint64>(2.0 * kSampleRate)));
+    for (const DrumHit& hit : extractDrumHits(idea, frames)) {
+        result.append(QJsonObject{
+            {QStringLiteral("piece"), drumKindId(hit.kind)},
+            {QStringLiteral("start_beat"), hit.frame / beatFrames},
+            {QStringLiteral("midi"), drumKindMidi(hit.kind)},
+            {QStringLiteral("velocity"), hit.midiVelocity},
+            {QStringLiteral("state"), drumStrengthId(hit.strength)},
+            {QStringLiteral("articulation"), hit.articulation},
+            {QStringLiteral("fill"), hit.fill},
+            {QStringLiteral("repeat_index"), hit.repeatIndex},
         });
     }
     return result;
@@ -8203,6 +9082,8 @@ QJsonObject seedAuditForProfile(
          auditionLaneEventAudit(auditionIdea)},
         {QStringLiteral("audition_drum_hits"),
          auditionDrumHitAudit(auditionIdea)},
+        {QStringLiteral("audition_drum_events"),
+         auditionDrumEventAudit(auditionIdea)},
     };
 }
 
@@ -8303,7 +9184,7 @@ QString styleSoundBrief(const QString& styleId)
     if (styleId == QStringLiteral("bossa-nova")) {
         return QStringLiteral(
             "Nylon-like physical pluck, soft independent bass, intimate lead "
-            "and restrained cross-stick, brush and shaker colour.");
+            "and restrained cross-stick, brush and closed-hat colour.");
     }
     return QStringLiteral(
         "Low articulated double-string riff, split bass, modern transient kit "
@@ -8425,12 +9306,27 @@ QJsonObject patchParameters(const PatchDesign& patch)
         {QStringLiteral("releaseSeconds"), patch.release},
         {QStringLiteral("filterCutoffHz"), patch.filterCutoff},
         {QStringLiteral("filterEnvelopeHz"), patch.filterEnvelope},
+        {QStringLiteral("filterEnvelopeDecaySeconds"),
+         patch.filterEnvelopeDecay},
+        {QStringLiteral("filterEnvelopeSustain"),
+         patch.filterEnvelopeSustain},
+        {QStringLiteral("filterKeyTracking"), patch.filterKeyTracking},
+        {QStringLiteral("filterVelocitySensitivity"),
+         patch.filterVelocitySensitivity},
         {QStringLiteral("resonance"), patch.resonance},
         {QStringLiteral("filterDrive"), patch.filterDrive},
         {QStringLiteral("wavefold"), patch.wavefold},
         {QStringLiteral("noiseMix"), patch.noiseMix},
         {QStringLiteral("transientMix"), patch.transientMix},
         {QStringLiteral("transientSeconds"), patch.transientSeconds},
+        {QStringLiteral("velocitySensitivity"),
+         patch.velocitySensitivity},
+        {QStringLiteral("pitchEnvelopeSemitones"),
+         patch.pitchEnvelopeSemitones},
+        {QStringLiteral("pitchEnvelopeSeconds"),
+         patch.pitchEnvelopeSeconds},
+        {QStringLiteral("pitchAttackGain"), patch.pitchAttackGain},
+        {QStringLiteral("pitchAttackSeconds"), patch.pitchAttackSeconds},
         {QStringLiteral("glideSeconds"), patch.glideSeconds},
         {QStringLiteral("vibratoCents"), patch.vibratoCents},
         {QStringLiteral("vibratoRateHz"), patch.vibratoRate},
@@ -8440,11 +9336,19 @@ QJsonObject patchParameters(const PatchDesign& patch)
         {QStringLiteral("voiceDrive"), patch.voiceDrive},
         {QStringLiteral("busDrive"), patch.busDrive},
         {QStringLiteral("cabinet"), patch.cabinet},
+        {QStringLiteral("highpassCutoffHz"), patch.highpassCutoff},
         {QStringLiteral("chorusMix"), patch.chorusMix},
         {QStringLiteral("chorusDepth"), patch.chorusDepth},
         {QStringLiteral("chorusRateHz"), patch.chorusRate},
         {QStringLiteral("delayMix"), patch.delayMix},
         {QStringLiteral("delaySeconds"), patch.delaySeconds},
+        {QStringLiteral("reverbMix"), patch.reverbMix},
+        {QStringLiteral("reverbSeconds"), patch.reverbSeconds},
+        {QStringLiteral("reverbDamping"), patch.reverbDamping},
+        {QStringLiteral("reverbPreDelaySeconds"),
+         patch.reverbPreDelay},
+        {QStringLiteral("stereoSpread"), patch.stereoSpread},
+        {QStringLiteral("stereoWidth"), patch.stereoWidth},
     };
 }
 
@@ -8560,7 +9464,7 @@ PatchDesign patchFromJson(
 
     patch.harmonicFamily = boundedPatchInteger(
         values, QStringLiteral("harmonicFamily"),
-        patch.harmonicFamily, 0, 5);
+        patch.harmonicFamily, 0, 6);
     patch.shape = boundedPatchNumber(
         values, QStringLiteral("shape"), patch.shape, 0.0f, 1.0f);
     patch.width = boundedPatchNumber(
@@ -8624,6 +9528,18 @@ PatchDesign patchFromJson(
     patch.filterEnvelope = boundedPatchNumber(
         values, QStringLiteral("filterEnvelopeHz"),
         patch.filterEnvelope, -12000.0f, 12000.0f);
+    patch.filterEnvelopeDecay = boundedPatchNumber(
+        values, QStringLiteral("filterEnvelopeDecaySeconds"),
+        patch.filterEnvelopeDecay, 0.0f, 5.0f);
+    patch.filterEnvelopeSustain = boundedPatchNumber(
+        values, QStringLiteral("filterEnvelopeSustain"),
+        patch.filterEnvelopeSustain, 0.0f, 1.0f);
+    patch.filterKeyTracking = boundedPatchNumber(
+        values, QStringLiteral("filterKeyTracking"),
+        patch.filterKeyTracking, 0.0f, 2.0f);
+    patch.filterVelocitySensitivity = boundedPatchNumber(
+        values, QStringLiteral("filterVelocitySensitivity"),
+        patch.filterVelocitySensitivity, 0.0f, 1.0f);
     patch.resonance = boundedPatchNumber(
         values, QStringLiteral("resonance"),
         patch.resonance, 0.0f, 0.95f);
@@ -8640,6 +9556,21 @@ PatchDesign patchFromJson(
     patch.transientSeconds = boundedPatchNumber(
         values, QStringLiteral("transientSeconds"),
         patch.transientSeconds, 0.001f, 0.25f);
+    patch.velocitySensitivity = boundedPatchNumber(
+        values, QStringLiteral("velocitySensitivity"),
+        patch.velocitySensitivity, 0.0f, 1.0f);
+    patch.pitchEnvelopeSemitones = boundedPatchNumber(
+        values, QStringLiteral("pitchEnvelopeSemitones"),
+        patch.pitchEnvelopeSemitones, -48.0f, 48.0f);
+    patch.pitchEnvelopeSeconds = boundedPatchNumber(
+        values, QStringLiteral("pitchEnvelopeSeconds"),
+        patch.pitchEnvelopeSeconds, 0.001f, 2.0f);
+    patch.pitchAttackGain = boundedPatchNumber(
+        values, QStringLiteral("pitchAttackGain"),
+        patch.pitchAttackGain, 0.0f, 16.0f);
+    patch.pitchAttackSeconds = boundedPatchNumber(
+        values, QStringLiteral("pitchAttackSeconds"),
+        patch.pitchAttackSeconds, 0.001f, 1.0f);
     patch.glideSeconds = boundedPatchNumber(
         values, QStringLiteral("glideSeconds"),
         patch.glideSeconds, 0.0f, 1.5f);
@@ -8666,6 +9597,9 @@ PatchDesign patchFromJson(
         patch.busDrive, 0.5f, 10.0f);
     patch.cabinet = boundedPatchNumber(
         values, QStringLiteral("cabinet"), patch.cabinet, 0.0f, 1.0f);
+    patch.highpassCutoff = boundedPatchNumber(
+        values, QStringLiteral("highpassCutoffHz"),
+        patch.highpassCutoff, 0.0f, 4000.0f);
     patch.chorusMix = boundedPatchNumber(
         values, QStringLiteral("chorusMix"),
         patch.chorusMix, 0.0f, 1.0f);
@@ -8681,6 +9615,24 @@ PatchDesign patchFromJson(
     patch.delaySeconds = boundedPatchNumber(
         values, QStringLiteral("delaySeconds"),
         patch.delaySeconds, 0.03f, 1.5f);
+    patch.reverbMix = boundedPatchNumber(
+        values, QStringLiteral("reverbMix"),
+        patch.reverbMix, 0.0f, 0.85f);
+    patch.reverbSeconds = boundedPatchNumber(
+        values, QStringLiteral("reverbSeconds"),
+        patch.reverbSeconds, 0.1f, 8.0f);
+    patch.reverbDamping = boundedPatchNumber(
+        values, QStringLiteral("reverbDamping"),
+        patch.reverbDamping, 0.0f, 1.0f);
+    patch.reverbPreDelay = boundedPatchNumber(
+        values, QStringLiteral("reverbPreDelaySeconds"),
+        patch.reverbPreDelay, 0.0f, 0.25f);
+    patch.stereoSpread = boundedPatchNumber(
+        values, QStringLiteral("stereoSpread"),
+        patch.stereoSpread, 0.0f, 1.0f);
+    patch.stereoWidth = boundedPatchNumber(
+        values, QStringLiteral("stereoWidth"),
+        patch.stereoWidth, 0.0f, 2.0f);
     patch.name = QStringLiteral("Instrument Lab patch");
     return patch;
 }
@@ -8776,6 +9728,81 @@ std::vector<NoteEvent> laboratoryEvents(
     return events;
 }
 
+std::vector<NoteEvent> laboratoryReferenceEvents(
+    const QJsonObject& request,
+    const QString& role,
+    std::size_t& frames)
+{
+    const QJsonArray values =
+        request.value(QStringLiteral("referenceEvents")).toArray();
+    if (values.isEmpty() || values.size() > 2048) {
+        throw std::runtime_error(
+            "Reference melodic audition requires 1 to 2048 events.");
+    }
+    const float durationSeconds = boundedPatchNumber(
+        request,
+        QStringLiteral("referenceDurationSeconds"),
+        36.0f,
+        0.1f,
+        600.0f);
+    frames = static_cast<std::size_t>(std::llround(
+        durationSeconds * kSampleRate));
+    std::vector<NoteEvent> events;
+    events.reserve(static_cast<std::size_t>(values.size()));
+    for (const QJsonValue& value : values) {
+        if (!value.isObject()) {
+            throw std::runtime_error(
+                "Every reference melodic event must be an object.");
+        }
+        const QJsonObject item = value.toObject();
+        const float startSeconds = boundedPatchNumber(
+            item,
+            QStringLiteral("startSeconds"),
+            -1.0f,
+            0.0f,
+            durationSeconds);
+        const float noteSeconds = boundedPatchNumber(
+            item,
+            QStringLiteral("durationSeconds"),
+            -1.0f,
+            1.0f / kSampleRate,
+            durationSeconds);
+        const int midi = boundedPatchInteger(
+            item, QStringLiteral("midi"), -1, 0, 127);
+        const int velocity = boundedPatchInteger(
+            item, QStringLiteral("velocity"), 88, 1, 127);
+        if (startSeconds < 0.0f || noteSeconds <= 0.0f || midi < 0) {
+            throw std::runtime_error(
+                "Reference melodic event is missing timing or pitch.");
+        }
+        const qint64 startFrame = static_cast<qint64>(std::llround(
+            startSeconds * kSampleRate));
+        const qint64 endFrame = static_cast<qint64>(std::llround(
+            (startSeconds + noteSeconds) * kSampleRate));
+        if (endFrame > static_cast<qint64>(frames)) {
+            throw std::runtime_error(
+                "Reference melodic event exceeds the requested duration.");
+        }
+        events.push_back({
+            startFrame,
+            std::max(startFrame + 1, endFrame),
+            midi,
+            velocity,
+            role,
+            item.value(QStringLiteral("articulation"))
+                .toString()
+                .left(64),
+        });
+    }
+    std::stable_sort(
+        events.begin(),
+        events.end(),
+        [](const NoteEvent& left, const NoteEvent& right) {
+            return left.start < right.start;
+        });
+    return events;
+}
+
 void renderDrumKitRequest(
     const QJsonObject& request,
     const ProfileDefinition& profile,
@@ -8806,33 +9833,10 @@ void renderDrumKitRequest(
         }
         kit.insert(kind, patch);
     }
-    DrumBusDesign bus = drumBusDesign(profile);
     const QJsonObject busObject =
         kitObject.value(QStringLiteral("bus")).toObject();
-    bus.drive = boundedPatchNumber(
-        busObject, QStringLiteral("drive"),
-        static_cast<float>(bus.drive), 0.5f, 8.0f);
-    bus.cutoffHz = boundedPatchNumber(
-        busObject, QStringLiteral("lowpassHz"),
-        static_cast<float>(bus.cutoffHz), 200.0f, 20000.0f);
-    bus.compressorThreshold = boundedPatchNumber(
-        busObject, QStringLiteral("compressorThreshold"),
-        static_cast<float>(bus.compressorThreshold), 0.01f, 1.0f);
-    bus.compressorRatio = boundedPatchNumber(
-        busObject, QStringLiteral("compressorRatio"),
-        static_cast<float>(bus.compressorRatio), 1.0f, 20.0f);
-    bus.compressorReleaseMs = boundedPatchNumber(
-        busObject, QStringLiteral("compressorReleaseMs"),
-        static_cast<float>(bus.compressorReleaseMs), 5.0f, 500.0f);
-    bus.roomMix = boundedPatchNumber(
-        busObject, QStringLiteral("roomMix"),
-        static_cast<float>(bus.roomMix), 0.0f, 0.6f);
-    bus.roomSizeMs = boundedPatchNumber(
-        busObject, QStringLiteral("roomSizeMs"),
-        static_cast<float>(bus.roomSizeMs), 5.0f, 140.0f);
-    bus.roomDamping = boundedPatchNumber(
-        busObject, QStringLiteral("roomDamping"),
-        static_cast<float>(bus.roomDamping), 0.0f, 1.0f);
+    const DrumBusDesign bus = drumBusDesignFromJson(
+        busObject, drumBusDesign(profile));
 
     ChordIdeaRequest ideaRequest;
     ideaRequest.styleId = profile.styleId;
@@ -8898,6 +9902,30 @@ void renderDrumKitRequest(
             injectedAuditionHit =
                 ensureDrumAuditionHit(idea, *onlyKind, frames);
         }
+    } else if (audition == QStringLiteral("reference-pattern")) {
+        const QJsonValue patternValue =
+            request.value(QStringLiteral("referencePattern"));
+        if (!patternValue.isObject()) {
+            throw std::runtime_error(
+                "Reference drum audition requires referencePattern.");
+        }
+        prepareDrumReferencePattern(
+            idea,
+            patternValue.toObject());
+        const float tailSeconds = boundedPatchNumber(
+            patternValue.toObject(),
+            QStringLiteral("tailSeconds"),
+            4.0f,
+            0.5f,
+            8.0f);
+        frames = static_cast<std::size_t>(
+            std::max<qint64>(
+                1,
+                frameAtTick(
+                    idea,
+                    idea.beatSection.beats * kTicksPerBeat) +
+                    static_cast<qint64>(
+                        tailSeconds * kSampleRate)));
     } else if (audition != QStringLiteral("profile")) {
         throw std::runtime_error(
             "Unsupported Drum Kit Lab audition.");
@@ -8919,6 +9947,7 @@ void renderDrumKitRequest(
     }
     const QString nativeWorkspace =
         QFileInfo(outputPath).absolutePath();
+    QJsonObject keyAwareTuningAudit;
     std::vector<float> audio =
         renderLaboratoryKit(
             idea,
@@ -8928,7 +9957,8 @@ void renderDrumKitRequest(
             onlyKind,
             bus,
             nativeWorkspace,
-            candidateId);
+            candidateId,
+            &keyAwareTuningAudit);
     blockSubAudibleDc(audio);
     matchAuditionLevel(audio, QStringLiteral("drums"));
     const QJsonObject metrics = drumAudioMetrics(audio);
@@ -8946,10 +9976,34 @@ void renderDrumKitRequest(
         candidateId,
         kit,
         onlyKind);
-    if (!writeMonoPcm16(
+    bool written = false;
+    if (bus.stereoWidth > 0.0001) {
+        StereoAudio stereo{audio, audio};
+        const std::size_t delayA = static_cast<std::size_t>(
+            0.0056 * kSampleRate);
+        const std::size_t delayB = static_cast<std::size_t>(
+            0.0153 * kSampleRate);
+        for (std::size_t frame = 0; frame < audio.size(); ++frame) {
+            const double first = frame >= delayA
+                ? audio[frame - delayA] : 0.0;
+            const double second = frame >= delayB
+                ? audio[frame - delayB] : 0.0;
+            const float side = static_cast<float>(
+                0.4 * bus.stereoWidth * (first - second));
+            stereo.left[frame] += side;
+            stereo.right[frame] -= side;
+        }
+        written = writeStereoPcm16(
+            outputPath,
+            std::move(stereo),
+            QStringLiteral("drums"));
+    } else {
+        written = writeMonoPcm16(
             outputPath,
             std::move(audio),
-            QStringLiteral("drums"))) {
+            QStringLiteral("drums"));
+    }
+    if (!written) {
         throw std::runtime_error(
             "Drum Kit Lab could not write its WAV.");
     }
@@ -8976,9 +10030,11 @@ void renderDrumKitRequest(
         {QStringLiteral("productionPatternExact"),
          productionPatternExact},
         {QStringLiteral("patternSource"),
-         productionPatternExact
-             ? QStringLiteral("jam2-v7-performance")
-             : QStringLiteral("diagnostic-audition-grid")},
+         audition == QStringLiteral("reference-pattern")
+             ? QStringLiteral("reference-midi-events")
+             : productionPatternExact
+                 ? QStringLiteral("jam2-v7-performance")
+                 : QStringLiteral("diagnostic-audition-grid")},
         {QStringLiteral("patternSeed"),
          QString::number(idea.recipe.seed)},
         {QStringLiteral("patternFormId"),
@@ -8989,6 +10045,7 @@ void renderDrumKitRequest(
         {QStringLiteral("frames"), static_cast<qint64>(frames)},
         {QStringLiteral("sampleRate"), kSampleRate},
         {QStringLiteral("candidateId"), candidateId},
+        {QStringLiteral("keyAwareTuning"), keyAwareTuningAudit},
         {QStringLiteral("metrics"), metrics},
         {QStringLiteral("realisedHits"), hitAudit},
         {QStringLiteral("kit"), kitObject},
@@ -9002,9 +10059,9 @@ void renderInstrumentRequest(
     QFile requestFile(requestPath);
     if (!requestFile.open(QIODevice::ReadOnly) ||
         requestFile.size() <= 0 ||
-        requestFile.size() > 65536) {
+        requestFile.size() > 262144) {
         throw std::runtime_error(
-            "Instrument Lab request is missing or exceeds 64 KiB.");
+            "Instrument Lab request is missing or exceeds 256 KiB.");
     }
     QJsonParseError parseError;
     const QJsonDocument document =
@@ -9057,13 +10114,15 @@ void renderInstrumentRequest(
     std::size_t frames = 0;
     std::optional<GeneratedPracticeIdea> generatedIdea;
     const std::vector<NoteEvent> events =
-        laboratoryEvents(
-            audition,
-            role,
-            rootMidi,
-            *profile,
-            frames,
-            &generatedIdea);
+        audition == QStringLiteral("reference-events")
+            ? laboratoryReferenceEvents(request, role, frames)
+            : laboratoryEvents(
+                  audition,
+                  role,
+                  rootMidi,
+                  *profile,
+                  frames,
+                  &generatedIdea);
     const bool primaryJam2 =
         patch.source == SourceKind::Jam2Native;
     const bool secondaryJam2 =
@@ -9093,6 +10152,7 @@ void renderInstrumentRequest(
     const bool blendSecond =
         patch.secondSourceEnabled &&
         patch.sourceBlend > 0.0001f;
+    const bool allDaisy = !primaryJam2 && !secondaryJam2;
     std::vector<float> audio = primaryJam2
         ? jam2Role()
         : renderDaisyRole(
@@ -9100,7 +10160,9 @@ void renderInstrumentRequest(
               frames,
               role,
               patch,
-              !blendSecond || secondaryJam2);
+              allDaisy
+                  ? false
+                  : (!blendSecond || secondaryJam2));
     audio.resize(frames, 0.0f);
     if (blendSecond) {
         PatchDesign second = patch;
@@ -9124,7 +10186,7 @@ void renderInstrumentRequest(
                   frames,
                   role,
                   second,
-                  primaryJam2);
+                  allDaisy ? false : primaryJam2);
         secondary.resize(frames, 0.0f);
         const float blend =
             std::clamp(patch.sourceBlend, 0.0f, 1.0f);
@@ -9135,12 +10197,13 @@ void renderInstrumentRequest(
                 primaryGain * audio[frame] +
                 secondaryGain * secondary[frame];
         }
-        if (!primaryJam2 && !secondaryJam2) {
-            applyVoiceBus(audio, patch);
-        }
     }
-    blockSubAudibleDc(audio);
-    if (!writeMonoPcm16(outputPath, std::move(audio), role)) {
+    StereoAudio stereo = allDaisy
+        ? applyVoiceBusStereo(audio, patch)
+        : StereoAudio{audio, audio};
+    blockSubAudibleDc(stereo.left);
+    blockSubAudibleDc(stereo.right);
+    if (!writeStereoPcm16(outputPath, std::move(stereo), role)) {
         throw std::runtime_error(
             "Instrument Lab could not write its WAV.");
     }
@@ -9154,6 +10217,7 @@ void renderInstrumentRequest(
         {QStringLiteral("events"), static_cast<int>(events.size())},
         {QStringLiteral("frames"), static_cast<qint64>(frames)},
         {QStringLiteral("sampleRate"), kSampleRate},
+        {QStringLiteral("channels"), 2},
         {QStringLiteral("patch"), patchParameters(patch)},
     }).toJson(QJsonDocument::Compact) << "\n";
 }
@@ -9647,7 +10711,268 @@ void copyDaisyLicence(const QDir& site)
     }
 }
 
-void renderSoundDesignCatalog(const QDir& site)
+struct CatalogRenderOptions {
+    QStringList profileIds;
+    QStringList styleIds;
+    int jobs = 1;
+
+    bool filtered() const
+    {
+        return !profileIds.isEmpty() || !styleIds.isEmpty();
+    }
+};
+
+QMap<QString, QJsonObject> readExistingProfileManifest(const QDir& site)
+{
+    QMap<QString, QJsonObject> result;
+    QFile file(
+        site.absoluteFilePath(
+            QStringLiteral("sound-design-manifest.js")));
+    if (!file.open(QIODevice::ReadOnly)) return result;
+    QByteArray source = file.readAll().trimmed();
+    const qsizetype assignment = source.indexOf('=');
+    if (assignment < 0) return result;
+    source = source.mid(assignment + 1).trimmed();
+    if (source.endsWith(';')) source.chop(1);
+    QJsonParseError parseError;
+    const QJsonDocument document =
+        QJsonDocument::fromJson(source, &parseError);
+    if (parseError.error != QJsonParseError::NoError ||
+        !document.isObject()) {
+        return result;
+    }
+    for (const QJsonValue& value :
+         document.object().value(
+             QStringLiteral("profiles")).toArray()) {
+        const QJsonObject profile = value.toObject();
+        const QString id = profile.value(
+            QStringLiteral("id")).toString();
+        if (!id.isEmpty()) result.insert(id, profile);
+    }
+    return result;
+}
+
+void writeSoundDesignManifest(
+    const QDir& site,
+    const QJsonArray& profiles)
+{
+    const QJsonObject manifest{
+        {QStringLiteral("version"), 1},
+        {QStringLiteral("generatedAt"),
+         QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
+        {QStringLiteral("sampleRate"), kSampleRate},
+        {QStringLiteral("auditionBars"), kAuditionBars},
+        {QStringLiteral("styles"), styleManifest()},
+        {QStringLiteral("profiles"), profiles},
+    };
+    QSaveFile file(
+        site.absoluteFilePath(
+            QStringLiteral("sound-design-manifest.js")));
+    if (!file.open(QIODevice::WriteOnly) ||
+        file.write("window.JAM2_SOUND_DESIGN_MANIFEST = ") < 0 ||
+        file.write(
+            QJsonDocument(manifest).toJson(
+                QJsonDocument::Compact)) < 0 ||
+        file.write(";\n") < 0 ||
+        !file.commit()) {
+        throw std::runtime_error(
+            "Cannot write sound-design-manifest.js.");
+    }
+}
+
+QVector<ProfileDefinition> selectedCatalogProfiles(
+    const CatalogRenderOptions& options)
+{
+    const QVector<ProfileDefinition>& catalog =
+        jam2::practice::profileCatalog(true);
+    QStringList knownProfiles;
+    QStringList knownStyles;
+    for (const ProfileDefinition& profile : catalog) {
+        knownProfiles.append(profile.id);
+        if (!knownStyles.contains(profile.styleId)) {
+            knownStyles.append(profile.styleId);
+        }
+    }
+    for (const QString& id : options.profileIds) {
+        if (!knownProfiles.contains(id)) {
+            throw std::runtime_error(
+                QStringLiteral("Unknown sound-design profile: %1")
+                    .arg(id).toStdString());
+        }
+    }
+    for (const QString& id : options.styleIds) {
+        if (!knownStyles.contains(id)) {
+            throw std::runtime_error(
+                QStringLiteral("Unknown sound-design style: %1")
+                    .arg(id).toStdString());
+        }
+    }
+
+    QVector<ProfileDefinition> selected;
+    for (const ProfileDefinition& profile : catalog) {
+        if (!options.filtered() ||
+            options.profileIds.contains(profile.id) ||
+            options.styleIds.contains(profile.styleId)) {
+            selected.append(profile);
+        }
+    }
+    return selected;
+}
+
+void renderCatalogProfileWorker(
+    const QDir& site,
+    const QString& profileId,
+    const QString& resultPath)
+{
+    const QVector<ProfileDefinition>& catalog =
+        jam2::practice::profileCatalog(true);
+    const auto profile = std::find_if(
+        catalog.cbegin(), catalog.cend(),
+        [&profileId](const ProfileDefinition& candidate) {
+            return candidate.id == profileId;
+        });
+    if (profile == catalog.cend()) {
+        throw std::runtime_error(
+            QStringLiteral("Unknown worker profile: %1")
+                .arg(profileId).toStdString());
+    }
+    QTemporaryDir temporary;
+    if (!temporary.isValid()) {
+        throw std::runtime_error(
+            "Cannot create worker render folder.");
+    }
+    QTextStream console(stdout);
+    const QJsonObject rendered = renderProfile(
+        *profile, site, QDir(temporary.path()), console);
+    QSaveFile result(resultPath);
+    if (!result.open(QIODevice::WriteOnly) ||
+        result.write(
+            QJsonDocument(rendered).toJson(
+                QJsonDocument::Compact)) < 0 ||
+        !result.commit()) {
+        throw std::runtime_error(
+            "Cannot write catalogue worker result.");
+    }
+}
+
+QMap<QString, QJsonObject> renderProfilesInWorkers(
+    const QVector<ProfileDefinition>& profiles,
+    const QDir& site,
+    int jobs,
+    const QDir& resultDirectory,
+    QTextStream& console)
+{
+    struct ActiveRender {
+        std::unique_ptr<QProcess> process;
+        QString profileId;
+        QString resultPath;
+    };
+    QMap<QString, QJsonObject> rendered;
+    std::vector<ActiveRender> active;
+    qsizetype nextProfile = 0;
+    jobs = std::max(
+        1, std::min(jobs, static_cast<int>(profiles.size())));
+    const QString executable =
+        QCoreApplication::applicationFilePath();
+
+    auto stopWorkers = [&active]() {
+        for (ActiveRender& render : active) {
+            if (render.process->state() != QProcess::NotRunning) {
+                render.process->kill();
+                render.process->waitForFinished(5000);
+            }
+        }
+    };
+
+    try {
+        while (nextProfile < profiles.size() || !active.empty()) {
+            while (nextProfile < profiles.size() &&
+                   active.size() < static_cast<std::size_t>(jobs)) {
+                const ProfileDefinition& profile =
+                    profiles.at(nextProfile++);
+                const QString resultPath =
+                    resultDirectory.absoluteFilePath(
+                        profile.id + QStringLiteral(".json"));
+                auto process = std::make_unique<QProcess>();
+                process->setProcessChannelMode(
+                    QProcess::SeparateChannels);
+                process->start(
+                    executable,
+                    QStringList{
+                        site.absolutePath(),
+                        QStringLiteral("--catalog-worker-profile"),
+                        profile.id,
+                        QStringLiteral("--catalog-worker-result"),
+                        resultPath,
+                    });
+                if (!process->waitForStarted(30000)) {
+                    throw std::runtime_error(
+                        QStringLiteral("Could not start render worker for %1: %2")
+                            .arg(profile.id, process->errorString())
+                            .toStdString());
+                }
+                active.push_back({
+                    std::move(process), profile.id, resultPath});
+            }
+
+            bool completed = false;
+            for (auto render = active.begin();
+                 render != active.end();) {
+                render->process->waitForFinished(10);
+                if (render->process->state() != QProcess::NotRunning) {
+                    ++render;
+                    continue;
+                }
+                completed = true;
+                const QByteArray standardOutput =
+                    render->process->readAllStandardOutput();
+                const QByteArray standardError =
+                    render->process->readAllStandardError();
+                if (!standardOutput.isEmpty()) {
+                    console << QString::fromLocal8Bit(standardOutput);
+                }
+                if (render->process->exitStatus() !=
+                        QProcess::NormalExit ||
+                    render->process->exitCode() != 0) {
+                    throw std::runtime_error(
+                        QStringLiteral("Render worker for %1 failed: %2")
+                            .arg(
+                                render->profileId,
+                                QString::fromLocal8Bit(standardError).trimmed())
+                            .toStdString());
+                }
+                QFile result(render->resultPath);
+                QJsonParseError parseError;
+                if (!result.open(QIODevice::ReadOnly)) {
+                    throw std::runtime_error(
+                        QStringLiteral("Worker result missing for %1")
+                            .arg(render->profileId).toStdString());
+                }
+                const QJsonDocument document =
+                    QJsonDocument::fromJson(
+                        result.readAll(), &parseError);
+                if (parseError.error != QJsonParseError::NoError ||
+                    !document.isObject()) {
+                    throw std::runtime_error(
+                        QStringLiteral("Invalid worker result for %1")
+                            .arg(render->profileId).toStdString());
+                }
+                rendered.insert(
+                    render->profileId, document.object());
+                render = active.erase(render);
+            }
+            if (!completed) QThread::msleep(10);
+        }
+    } catch (...) {
+        stopWorkers();
+        throw;
+    }
+    return rendered;
+}
+
+void renderSoundDesignCatalog(
+    const QDir& site,
+    const CatalogRenderOptions& options)
 {
     if (!QDir().mkpath(site.absolutePath()) ||
         !QDir().mkpath(
@@ -9657,8 +10982,14 @@ void renderSoundDesignCatalog(const QDir& site)
     }
     const QString designPath =
         site.absoluteFilePath(QStringLiteral("audio/designs"));
+    const QVector<ProfileDefinition> selected =
+        selectedCatalogProfiles(options);
+    QMap<QString, QJsonObject> profilesById =
+        options.filtered()
+            ? readExistingProfileManifest(site)
+            : QMap<QString, QJsonObject>{};
     QDir designFolder(designPath);
-    if (designFolder.exists() &&
+    if (!options.filtered() && designFolder.exists() &&
         !designFolder.removeRecursively()) {
         throw std::runtime_error(
             "Cannot replace generated design audio.");
@@ -9673,69 +11004,132 @@ void renderSoundDesignCatalog(const QDir& site)
         throw std::runtime_error(
             "Cannot create temporary render folder.");
     }
+    for (const ProfileDefinition& profile : selected) {
+        QDir profileFolder(
+            QDir(designPath).absoluteFilePath(profile.id));
+        if (profileFolder.exists() &&
+            !profileFolder.removeRecursively()) {
+            throw std::runtime_error(
+                QStringLiteral("Cannot replace generated audio for %1")
+                    .arg(profile.id).toStdString());
+        }
+    }
     QTextStream console(stdout);
+    console << "Rendering " << selected.size()
+            << " profile(s) with "
+            << std::min(
+                   options.jobs,
+                   static_cast<int>(selected.size()))
+            << " parallel worker(s)...\n";
+    console.flush();
+    const QMap<QString, QJsonObject> rendered =
+        renderProfilesInWorkers(
+            selected,
+            site,
+            options.jobs,
+            QDir(temporary.path()),
+            console);
+    for (auto profile = rendered.cbegin();
+         profile != rendered.cend(); ++profile) {
+        profilesById.insert(profile.key(), profile.value());
+    }
+
     QJsonArray profiles;
     for (const ProfileDefinition& profile :
          jam2::practice::profileCatalog(true)) {
-        profiles.append(renderProfile(
-            profile,
-            site,
-            QDir(temporary.path()),
-            console));
+        if (profilesById.contains(profile.id)) {
+            profiles.append(profilesById.value(profile.id));
+        }
     }
-    const QJsonObject manifest{
-        {QStringLiteral("version"), 1},
-        {QStringLiteral("generatedAt"),
-         QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
-        {QStringLiteral("sampleRate"), kSampleRate},
-        {QStringLiteral("auditionBars"), kAuditionBars},
-        {QStringLiteral("styles"), styleManifest()},
-        {QStringLiteral("profiles"), profiles},
-    };
-    QFile file(
-        site.absoluteFilePath(
-            QStringLiteral("sound-design-manifest.js")));
-    if (!file.open(
-            QIODevice::WriteOnly | QIODevice::Truncate)) {
-        throw std::runtime_error(
-            "Cannot write sound-design-manifest.js.");
-    }
-    file.write("window.JAM2_SOUND_DESIGN_MANIFEST = ");
-    file.write(
-        QJsonDocument(manifest).toJson(
-            QJsonDocument::Compact));
-    file.write(";\n");
+    writeSoundDesignManifest(site, profiles);
     copyDaisyLicence(site);
-    console << "Rendered " << profiles.size()
+    console << "Rendered " << selected.size()
+            << " profile(s); manifest contains " << profiles.size()
             << " research-profile sound-design scenes to "
             << site.absolutePath() << "\n";
+}
+
+QJsonObject acceptedStyleMixDrumKits()
+{
+    const QString path = QDir(
+        QCoreApplication::applicationDirPath())
+        .absoluteFilePath(QStringLiteral("../presets/style-mixes.json"));
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        throw std::runtime_error(
+            "Could not open accepted Style Mixer snapshots.");
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(
+        file.readAll(), &parseError);
+    const QJsonObject root = document.object();
+    if (parseError.error != QJsonParseError::NoError ||
+        root.value(QStringLiteral("schema")).toString() !=
+            QStringLiteral("jam2-style-mix-handoff-collection-v1") ||
+        !root.value(QStringLiteral("styleMixes")).isObject()) {
+        throw std::runtime_error(
+            "Accepted Style Mixer snapshots are invalid.");
+    }
+    QJsonObject result;
+    const QJsonObject mixes =
+        root.value(QStringLiteral("styleMixes")).toObject();
+    for (auto mix = mixes.constBegin(); mix != mixes.constEnd(); ++mix) {
+        const QJsonArray roles = mix.value().toObject()
+            .value(QStringLiteral("roles")).toArray();
+        for (const QJsonValue& roleValue : roles) {
+            const QJsonObject role = roleValue.toObject();
+            if (role.value(QStringLiteral("role")).toString() !=
+                    QStringLiteral("drums") ||
+                role.value(QStringLiteral("parameterType")).toString() !=
+                    QStringLiteral("drum-kit") ||
+                !role.value(QStringLiteral("parameters")).isObject()) {
+                continue;
+            }
+            result.insert(
+                mix.key(),
+                role.value(QStringLiteral("parameters")).toObject());
+            break;
+        }
+    }
+    return result;
 }
 
 void verifyProductionDrumParity(const QDir& site)
 {
     QJsonArray profilesJson;
     bool allComparablePassed = true;
+    const QJsonObject acceptedKits = acceptedStyleMixDrumKits();
     const QVector<ProfileDefinition>& profiles =
         jam2::practice::profileCatalog(true);
     for (const ProfileDefinition& profile : profiles) {
-        const std::vector<ResearchKitCandidate> candidates =
-            researchKitCandidates(profile);
-        const auto selected = std::find_if(
-            candidates.begin(),
-            candidates.end(),
-            [](const ResearchKitCandidate& candidate) {
-                return candidate.recommended;
-            });
-        const ResearchKitCandidate candidate =
-            selected != candidates.end()
-            ? *selected
-            : candidates.front();
+        const QJsonObject acceptedKit =
+            acceptedKits.value(profile.id).toObject();
+        const QString candidateId = acceptedKit
+            .value(QStringLiteral("candidateId")).toString();
+        if (candidateId.isEmpty() ||
+            !acceptedKit.value(QStringLiteral("pieces")).isObject()) {
+            throw std::runtime_error(
+                QStringLiteral("Accepted drum kit missing for %1.")
+                    .arg(profile.id).toStdString());
+        }
+        const QJsonObject acceptedPieces =
+            acceptedKit.value(QStringLiteral("pieces")).toObject();
         QMap<DrumKind, DrumLabPatch> kit;
         for (DrumKind kind : kDrumKinds) {
-            kit.insert(
-                kind,
-                candidatePiecePatch(profile, candidate, kind));
+            const QJsonObject piece = acceptedPieces
+                .value(drumKindId(kind)).toObject();
+            if (piece.isEmpty()) {
+                throw std::runtime_error(
+                    QStringLiteral("Accepted %1 piece missing for %2.")
+                        .arg(drumKindId(kind), profile.id)
+                        .toStdString());
+            }
+            kit.insert(kind, drumLabPatchFromJson(
+                piece, defaultDrumLabPatch(profile, kind)));
         }
+        const DrumBusDesign acceptedBus = drumBusDesignFromJson(
+            acceptedKit.value(QStringLiteral("bus")).toObject(),
+            drumBusDesign(profile));
         const ResearchDrumKit* productionKit =
             jam2::practice::researchDrumKitForProfile(profile.id);
         QJsonArray piecesJson;
@@ -9797,9 +11191,9 @@ void verifyProductionDrumParity(const QDir& site)
                     frames,
                     kit,
                     kind,
-                    candidateBusDesign(profile, candidate),
+                    acceptedBus,
                     temporary.path(),
-                    candidate.id);
+                    candidateId);
             const std::vector<DrumHit> sourceHits =
                 extractDrumHits(
                     idea,
@@ -9813,7 +11207,7 @@ void verifyProductionDrumParity(const QDir& site)
                 const DrumHit hit = realiseDrumHit(
                     sourceHit,
                     profile,
-                    candidate.id,
+                    candidateId,
                     kit.value(kind));
                 productionEvents.push_back({
                     hit.frame,
@@ -9834,16 +11228,19 @@ void verifyProductionDrumParity(const QDir& site)
                         drumKindId(kind)),
                 });
             }
+            const ResearchDrumKit tunedProductionKit =
+                jam2::practice::keyAwareResearchDrumKit(
+                    *productionKit, idea.chordSection);
             ResearchDrumRenderResult production =
                 jam2::practice::renderResearchDrumVoices(
-                    *productionKit,
+                    tunedProductionKit,
                     productionEvents,
                     static_cast<qint64>(frames),
                     kSampleRate);
             jam2::practice::applyResearchDrumBus(
                 production.dry,
                 production.roomSend,
-                productionKit->bus,
+                tunedProductionKit.bus,
                 kSampleRate);
             double errorSquares = 0.0;
             double referenceSquares = 0.0;
@@ -9893,7 +11290,7 @@ void verifyProductionDrumParity(const QDir& site)
         }
         profilesJson.append(QJsonObject{
             {QStringLiteral("profileId"), profile.id},
-            {QStringLiteral("candidateId"), candidate.id},
+            {QStringLiteral("candidateId"), candidateId},
             {QStringLiteral("pieces"), piecesJson},
         });
     }
@@ -9925,6 +11322,66 @@ void verifyProductionDrumParity(const QDir& site)
     }
 }
 
+QStringList argumentValues(
+    const QStringList& arguments,
+    const QString& option)
+{
+    QStringList values;
+    for (qsizetype index = 2; index < arguments.size(); ++index) {
+        if (arguments.at(index) != option) continue;
+        if (index + 1 >= arguments.size() ||
+            arguments.at(index + 1).startsWith(
+                QStringLiteral("--"))) {
+            throw std::runtime_error(
+                QStringLiteral("%1 requires a value.")
+                    .arg(option).toStdString());
+        }
+        values.append(arguments.at(++index));
+    }
+    return values;
+}
+
+QString singleArgumentValue(
+    const QStringList& arguments,
+    const QString& option)
+{
+    const QStringList values = argumentValues(arguments, option);
+    if (values.size() != 1) {
+        throw std::runtime_error(
+            QStringLiteral("%1 must be supplied exactly once.")
+                .arg(option).toStdString());
+    }
+    return values.first();
+}
+
+CatalogRenderOptions catalogRenderOptions(
+    const QStringList& arguments)
+{
+    CatalogRenderOptions options;
+    options.profileIds = argumentValues(
+        arguments, QStringLiteral("--profile"));
+    options.styleIds = argumentValues(
+        arguments, QStringLiteral("--style"));
+    const QStringList jobValues = argumentValues(
+        arguments, QStringLiteral("--jobs"));
+    if (jobValues.size() > 1) {
+        throw std::runtime_error(
+            "--jobs may only be supplied once.");
+    }
+    const int idealJobs = QThread::idealThreadCount();
+    options.jobs = std::clamp(idealJobs, 1, 8);
+    if (!jobValues.isEmpty()) {
+        bool valid = false;
+        const int requested = jobValues.first().toInt(&valid);
+        if (!valid || requested < 1 || requested > 64) {
+            throw std::runtime_error(
+                "--jobs must be an integer from 1 to 64.");
+        }
+        options.jobs = requested;
+    }
+    return options;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -9951,6 +11408,19 @@ int main(int argc, char** argv)
                 "Cannot create experiment output directory.");
         }
         if (arguments.contains(
+                QStringLiteral("--catalog-worker-profile"))) {
+            renderCatalogProfileWorker(
+                site,
+                singleArgumentValue(
+                    arguments,
+                    QStringLiteral("--catalog-worker-profile")),
+                QFileInfo(singleArgumentValue(
+                    arguments,
+                    QStringLiteral("--catalog-worker-result")))
+                    .absoluteFilePath());
+            return 0;
+        }
+        if (arguments.contains(
                 QStringLiteral("--verify-drum-parity"))) {
             verifyProductionDrumParity(site);
             return 0;
@@ -9968,7 +11438,10 @@ int main(int argc, char** argv)
             writeSeedAudit(site);
             return 0;
         }
-        if (!showcaseOnly) renderSoundDesignCatalog(site);
+        if (!showcaseOnly) {
+            renderSoundDesignCatalog(
+                site, catalogRenderOptions(arguments));
+        }
         if (!catalogOnly) {
             jam2::experiment::renderDaisyShowcase(site);
         }

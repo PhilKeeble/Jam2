@@ -1,0 +1,212 @@
+{
+  "schema": "jam2-drum-reference-capture-v1",
+  "tempoBpm": 120,
+  "ticksPerQuarter": 480,
+  "preRollSeconds": 2.0,
+  "noteLengthSeconds": 0.125,
+  "velocityLadder": [
+    1,
+    8,
+    16,
+    24,
+    32,
+    40,
+    48,
+    56,
+    64,
+    72,
+    80,
+    88,
+    96,
+    104,
+    112,
+    120,
+    127
+  ],
+  "repeatSections": [
+    {
+      "name": "ghost",
+      "velocity": 24,
+      "hitCount": 12
+    },
+    {
+      "name": "soft",
+      "velocity": 48,
+      "hitCount": 12
+    },
+    {
+      "name": "medium",
+      "velocity": 80,
+      "hitCount": 12
+    },
+    {
+      "name": "hard",
+      "velocity": 112,
+      "hitCount": 12
+    }
+  ],
+  "mapCheck": {
+    "file": "00-kit-map-check.mid",
+    "durationSeconds": 8.0,
+    "hitCount": 12,
+    "sha256": "94bfde69a29d4407d35ef5d9f1be56359699af403fe554eb16b7b2a0a8f12432"
+  },
+  "captures": [
+    {
+      "file": "01-kick-gm36.mid",
+      "displayName": "Kick",
+      "midiNote": 36,
+      "abletonNoteName": "C1",
+      "midiChannel": 10,
+      "tailClass": "short",
+      "intervalSeconds": 1.0,
+      "durationSeconds": 67.0,
+      "hitCount": 65,
+      "intendedUse": "Acoustic and electronic",
+      "sha256": "75ee0b8b6d03a17c3d9aafa428563b9203cc88a2cd49805d5b864bbea5536910"
+    },
+    {
+      "file": "02-snare-gm38.mid",
+      "displayName": "Snare",
+      "midiNote": 38,
+      "abletonNoteName": "D1",
+      "midiChannel": 10,
+      "tailClass": "short",
+      "intervalSeconds": 1.0,
+      "durationSeconds": 67.0,
+      "hitCount": 65,
+      "intendedUse": "Acoustic and electronic",
+      "sha256": "80ee2eccd60c3dbfd8e7d753a46ce1d3f2e86a1c24ddb48d36d68697a37b4188"
+    },
+    {
+      "file": "03-closed-hat-gm42.mid",
+      "displayName": "Closed hat",
+      "midiNote": 42,
+      "abletonNoteName": "F#1",
+      "midiChannel": 10,
+      "tailClass": "short",
+      "intervalSeconds": 1.0,
+      "durationSeconds": 67.0,
+      "hitCount": 65,
+      "intendedUse": "Acoustic and electronic",
+      "sha256": "3e89df66d5d150772eee03adbcb22c27a9f4022ae1b9aac9ceca13a7f5a3d9dd"
+    },
+    {
+      "file": "04-high-tom-gm50.mid",
+      "displayName": "High tom",
+      "midiNote": 50,
+      "abletonNoteName": "D2",
+      "midiChannel": 10,
+      "tailClass": "short",
+      "intervalSeconds": 1.0,
+      "durationSeconds": 67.0,
+      "hitCount": 65,
+      "intendedUse": "Acoustic and electronic",
+      "sha256": "4cbbf7883b800941a2d3b033630f86392eac64f765bea3121d2c23df9af43ec3"
+    },
+    {
+      "file": "05-mid-tom-gm47.mid",
+      "displayName": "Mid tom",
+      "midiNote": 47,
+      "abletonNoteName": "B1",
+      "midiChannel": 10,
+      "tailClass": "short",
+      "intervalSeconds": 1.0,
+      "durationSeconds": 67.0,
+      "hitCount": 65,
+      "intendedUse": "Acoustic and electronic",
+      "sha256": "afd1b071751bd72089c8c1c99f4f70ed63f475dbfda701f075a48cee4598e711"
+    },
+    {
+      "file": "06-floor-tom-gm43.mid",
+      "displayName": "Floor tom",
+      "midiNote": 43,
+      "abletonNoteName": "G1",
+      "midiChannel": 10,
+      "tailClass": "short",
+      "intervalSeconds": 1.0,
+      "durationSeconds": 67.0,
+      "hitCount": 65,
+      "intendedUse": "Acoustic and electronic",
+      "sha256": "f5bc92337ae1eed37d4fef20398f66cdec7d85db5ad17da4d1811e5717a1e309"
+    },
+    {
+      "file": "07-cross-stick-gm37.mid",
+      "displayName": "Cross-stick / rim",
+      "midiNote": 37,
+      "abletonNoteName": "C#1",
+      "midiChannel": 10,
+      "tailClass": "short",
+      "intervalSeconds": 1.0,
+      "durationSeconds": 67.0,
+      "hitCount": 65,
+      "intendedUse": "Primarily acoustic",
+      "sha256": "05b8f246e3c04750fdd774918d3e262a60fa4a9f1a567c1b251dcf7252d96ff0"
+    },
+    {
+      "file": "08-clap-gm39.mid",
+      "displayName": "Clap",
+      "midiNote": 39,
+      "abletonNoteName": "D#1",
+      "midiChannel": 10,
+      "tailClass": "short",
+      "intervalSeconds": 1.0,
+      "durationSeconds": 67.0,
+      "hitCount": 65,
+      "intendedUse": "Primarily electronic",
+      "sha256": "d61d0e04c65fabd672525ddb76c7c0c663fd494a5c44da729436e8e301a3a0c9"
+    },
+    {
+      "file": "09-open-hat-gm46.mid",
+      "displayName": "Open hat",
+      "midiNote": 46,
+      "abletonNoteName": "A#1",
+      "midiChannel": 10,
+      "tailClass": "long",
+      "intervalSeconds": 4.0,
+      "durationSeconds": 262.0,
+      "hitCount": 65,
+      "intendedUse": "Acoustic and electronic",
+      "sha256": "59d28a607db21841a87d74f436b0475ed1305fe2bca926e0af9683e7fe4c5dad"
+    },
+    {
+      "file": "10-crash-gm49.mid",
+      "displayName": "Crash",
+      "midiNote": 49,
+      "abletonNoteName": "C#2",
+      "midiChannel": 10,
+      "tailClass": "long",
+      "intervalSeconds": 4.0,
+      "durationSeconds": 262.0,
+      "hitCount": 65,
+      "intendedUse": "Acoustic and electronic",
+      "sha256": "148a3a507d5136bab4c43deb99c8779c2fe78ddcb60b453d9c8935b212414b90"
+    },
+    {
+      "file": "11-ride-tip-gm51.mid",
+      "displayName": "Ride tip",
+      "midiNote": 51,
+      "abletonNoteName": "D#2",
+      "midiChannel": 10,
+      "tailClass": "long",
+      "intervalSeconds": 4.0,
+      "durationSeconds": 262.0,
+      "hitCount": 65,
+      "intendedUse": "Normal and ghost ride hits",
+      "sha256": "63cf0a4bcd5eac03ed324bbaf69c987824f567ad22535db983d874b6a64c081b"
+    },
+    {
+      "file": "12-ride-cup-gm53.mid",
+      "displayName": "Ride cup / bell",
+      "midiNote": 53,
+      "abletonNoteName": "F2",
+      "midiChannel": 10,
+      "tailClass": "long",
+      "intervalSeconds": 4.0,
+      "durationSeconds": 262.0,
+      "hitCount": 65,
+      "intendedUse": "Ride accents",
+      "sha256": "fcd08f91060945dd857532ee2d08d2b67cf7f86f92f1609a22e3f4fc6aca13fc"
+    }
+  ]
+}

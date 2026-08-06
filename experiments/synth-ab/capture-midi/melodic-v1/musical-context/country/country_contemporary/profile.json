@@ -1,0 +1,41 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "country",
+  "styleName": "Country",
+  "profileId": "country_contemporary",
+  "profileName": "Contemporary Country",
+  "seed": "3893610488",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 72.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 72.0,
+  "durationSeconds": 26.666667,
+  "tonic": "Db",
+  "mode": "Major",
+  "formId": "country-pop-16",
+  "grooveId": "country-rock",
+  "fingerprints": {
+    "beat": "6b91a78755126b97b7051a7d0a984f106b20fcfc543716c38367ef20cab04099",
+    "chord": "828b418331c33bc10c46e99fbe6f723c50112956da94ad351c771dbedc8bd360"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "support",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "04-support.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "funk",
+  "styleName": "Funk",
+  "profileId": "funk_static_pocket",
+  "profileName": "Static Pocket Funk",
+  "seed": "3592052940",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 86.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 86.0,
+  "durationSeconds": 22.325581,
+  "tonic": "B",
+  "mode": "Mixolydian",
+  "formId": "funk-8",
+  "grooveId": "funk-sync-pocket",
+  "fingerprints": {
+    "beat": "bb8b4fa835054036cb68f6d82b811b80ba53fb1de767a84ded8b63be69f5ed7e",
+    "chord": "be52dfcc205bd350824f81127f156b721f57f4f78589caadd918b07616219e43"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "support",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "04-support.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

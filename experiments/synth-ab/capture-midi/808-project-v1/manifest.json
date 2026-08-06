@@ -1,0 +1,513 @@
+{
+  "schema": "jam2-als-mapped-pattern-midi-v1",
+  "sourceLiveSet": "DrumSamples.als",
+  "tempoBpm": 120,
+  "midiChannel": 10,
+  "mapping": [
+    {
+      "piece": "kick",
+      "abletonTrack": "Kick",
+      "midiNote": 36,
+      "abletonNoteName": "C1",
+      "capturedWav": "DrumSamples Kick.wav"
+    },
+    {
+      "piece": "cross-stick",
+      "abletonTrack": "cross stick",
+      "midiNote": 37,
+      "abletonNoteName": "C#1",
+      "capturedWav": "DrumSamples cross stick.wav"
+    },
+    {
+      "piece": "snare",
+      "abletonTrack": "Snare",
+      "midiNote": 38,
+      "abletonNoteName": "D1",
+      "capturedWav": "DrumSamples Snare.wav"
+    },
+    {
+      "piece": "clap",
+      "abletonTrack": "percussion - clap",
+      "midiNote": 39,
+      "abletonNoteName": "D#1",
+      "capturedWav": "DrumSamples percussion - clap.wav"
+    },
+    {
+      "piece": "ride",
+      "abletonTrack": "ride",
+      "midiNote": 41,
+      "abletonNoteName": "F1",
+      "capturedWav": "DrumSamples ride.wav"
+    },
+    {
+      "piece": "closed-hat",
+      "abletonTrack": "Closed Hats",
+      "midiNote": 42,
+      "abletonNoteName": "F#1",
+      "capturedWav": "DrumSamples Closed Hats.wav"
+    },
+    {
+      "piece": "floor-tom",
+      "abletonTrack": "Low Tom",
+      "midiNote": 43,
+      "abletonNoteName": "G1",
+      "capturedWav": "DrumSamples Low Tom.wav"
+    },
+    {
+      "piece": "mid-tom",
+      "abletonTrack": "Mid Tom",
+      "midiNote": 45,
+      "abletonNoteName": "A1",
+      "capturedWav": "DrumSamples Mid Tom.wav"
+    },
+    {
+      "piece": "open-hat",
+      "abletonTrack": "Open Hats",
+      "midiNote": 46,
+      "abletonNoteName": "A#1",
+      "capturedWav": "DrumSamples Open Hats.wav"
+    },
+    {
+      "piece": "high-tom",
+      "abletonTrack": "Hi Tom",
+      "midiNote": 47,
+      "abletonNoteName": "B1",
+      "capturedWav": "DrumSamples Hi Tom.wav"
+    },
+    {
+      "piece": "crash",
+      "abletonTrack": "Cymbals",
+      "midiNote": 51,
+      "abletonNoteName": "D#2",
+      "capturedWav": "DrumSamples Cymbals.wav"
+    }
+  ],
+  "rideVelocityUse": {
+    "ghost": "Lower-velocity hits on the single ride sample",
+    "normal": "Normal-velocity hits on the single ride sample",
+    "accent": "Higher-velocity hits on the single ride sample"
+  },
+  "comparisonSuite": {
+    "durationBars": 38,
+    "durationSeconds": 76.0,
+    "silentBarsBetweenPatterns": 2,
+    "patternStarts": [
+      {
+        "pattern": "01-straight-808-pop",
+        "startBar": 1
+      },
+      {
+        "pattern": "02-syncopated-electro",
+        "startBar": 11
+      },
+      {
+        "pattern": "03-ride-groove",
+        "startBar": 21
+      },
+      {
+        "pattern": "04-tom-fill-context",
+        "startBar": 31
+      }
+    ],
+    "files": [
+      {
+        "file": "full-kit.mid",
+        "piece": "full-kit",
+        "hitCount": 687,
+        "sha256": "b66e64f5e35635a8b053b4e85ce833b230cde9ec2aa870c71eb7e6805dff6e27"
+      },
+      {
+        "file": "stems/kick-note-36.mid",
+        "piece": "kick",
+        "hitCount": 99,
+        "sha256": "f2d45c25e9693b6c438d32466fce19e00808a6b7c2d1e80ef4ebf57c835479e0"
+      },
+      {
+        "file": "stems/cross-stick-note-37.mid",
+        "piece": "cross-stick",
+        "hitCount": 18,
+        "sha256": "e5584ed8d0c81c743d1f504bcb49241de79d366315643ece091827169bde7a86"
+      },
+      {
+        "file": "stems/snare-note-38.mid",
+        "piece": "snare",
+        "hitCount": 63,
+        "sha256": "492d9188821d541410288e7fae665c776091e97646410fbcfe24428889ff56c9"
+      },
+      {
+        "file": "stems/clap-note-39.mid",
+        "piece": "clap",
+        "hitCount": 42,
+        "sha256": "94e07ffa4827bd915ba5a0e4b1ec438a92b1ef52b582ef6415f6efc5397b3fa9"
+      },
+      {
+        "file": "stems/ride-note-41.mid",
+        "piece": "ride",
+        "hitCount": 65,
+        "sha256": "68e15a700efb914b2041b92333983192f6b3e1c6d5f33da01baf83cce83931d5"
+      },
+      {
+        "file": "stems/closed-hat-note-42.mid",
+        "piece": "closed-hat",
+        "hitCount": 344,
+        "sha256": "9b7fe461074cae9ecc240e1bb517f84ddd6cbdaa389a691ffade566b6cffc4bd"
+      },
+      {
+        "file": "stems/floor-tom-note-43.mid",
+        "piece": "floor-tom",
+        "hitCount": 9,
+        "sha256": "46e8ebc92491e8ea31806306f6fdf0c67cec47d9dd806de867225c4d95f1db75"
+      },
+      {
+        "file": "stems/mid-tom-note-45.mid",
+        "piece": "mid-tom",
+        "hitCount": 7,
+        "sha256": "1d0e39bcb0d4a11baaf26991d7372dc9e807e2e32e39083b7230c28c842611e0"
+      },
+      {
+        "file": "stems/open-hat-note-46.mid",
+        "piece": "open-hat",
+        "hitCount": 23,
+        "sha256": "aa72b3fcfe81213c1ef1cdacc82674a5f0085d92f80d7f169901745195865ec0"
+      },
+      {
+        "file": "stems/high-tom-note-47.mid",
+        "piece": "high-tom",
+        "hitCount": 9,
+        "sha256": "3b0db9f002c232a7a4ce84ede7150e209a81aef04032db70fef768cfeb7a2d13"
+      },
+      {
+        "file": "stems/crash-note-51.mid",
+        "piece": "crash",
+        "hitCount": 8,
+        "sha256": "8cbd3de7c0819456ffdda89b2e7994e32afc4d03c46bfec6ebe492fdfdd28a17"
+      }
+    ]
+  },
+  "patterns": [
+    {
+      "id": "01-straight-808-pop",
+      "name": "Straight 808 pop",
+      "purpose": "Overall balance, clap/snare layering, hats and a short tom fill",
+      "bars": 8,
+      "durationSeconds": 16.0,
+      "files": [
+        {
+          "file": "full-kit.mid",
+          "piece": "full-kit",
+          "hitCount": 195,
+          "sha256": "b5b64ef70a3325f45cad98f595951efd636b8795dffaf66d4b63655bcc29b04f"
+        },
+        {
+          "file": "stems/kick-note-36.mid",
+          "piece": "kick",
+          "hitCount": 24,
+          "sha256": "447a99c6afa55678f57ea24f91c35ce98928cd237b71880b6272a2a4f053c52e"
+        },
+        {
+          "file": "stems/cross-stick-note-37.mid",
+          "piece": "cross-stick",
+          "hitCount": 2,
+          "sha256": "48cf25cbb5b5a919dc51b8d58a1eec9a51f798afcea9dc5154309d6fa3386897"
+        },
+        {
+          "file": "stems/snare-note-38.mid",
+          "piece": "snare",
+          "hitCount": 16,
+          "sha256": "2ce56402e165c942a67a05635de59da3819f8c1f3b340eced23a4d9bc2f64d94"
+        },
+        {
+          "file": "stems/clap-note-39.mid",
+          "piece": "clap",
+          "hitCount": 16,
+          "sha256": "6643483013ae423f6d8d3c298b5f1bb3337ab8695281a19a628330234c7bbd8f"
+        },
+        {
+          "file": "stems/ride-note-41.mid",
+          "piece": "ride",
+          "hitCount": 0,
+          "sha256": "32906ce0926e5f7bdb9e9d37d46e9bddce237cd1643de694b36cd81bba7a8dd0"
+        },
+        {
+          "file": "stems/closed-hat-note-42.mid",
+          "piece": "closed-hat",
+          "hitCount": 128,
+          "sha256": "516195a7535dcfbe18e6c1d1569ab6643d25c5fd3c0fa745469a0ca7e1009ab4"
+        },
+        {
+          "file": "stems/floor-tom-note-43.mid",
+          "piece": "floor-tom",
+          "hitCount": 1,
+          "sha256": "8f50979b9189779164d27d66e2e6ad023b0756d71be8419500dfcc925f274591"
+        },
+        {
+          "file": "stems/mid-tom-note-45.mid",
+          "piece": "mid-tom",
+          "hitCount": 1,
+          "sha256": "8446a38294818f8682cdc83c637ee25a15b7442f50f2e199755c2da78d9a7426"
+        },
+        {
+          "file": "stems/open-hat-note-46.mid",
+          "piece": "open-hat",
+          "hitCount": 3,
+          "sha256": "452ba64bd3ee74010a50894656243500751d5c48f838f21cb26f100581eb932f"
+        },
+        {
+          "file": "stems/high-tom-note-47.mid",
+          "piece": "high-tom",
+          "hitCount": 2,
+          "sha256": "7690ba3aaf52808f1222cd38848da778df7d0703dd8a5823d8d8f070b669c712"
+        },
+        {
+          "file": "stems/crash-note-51.mid",
+          "piece": "crash",
+          "hitCount": 2,
+          "sha256": "9770e323924e5c2d864b0304714988f27a36f76bd994a940fead831131b14777"
+        }
+      ]
+    },
+    {
+      "id": "02-syncopated-electro",
+      "name": "Syncopated electro",
+      "purpose": "Dense transient layering, sixteenth hats and syncopated kick",
+      "bars": 8,
+      "durationSeconds": 16.0,
+      "files": [
+        {
+          "file": "full-kit.mid",
+          "piece": "full-kit",
+          "hitCount": 213,
+          "sha256": "03cfcbdf6fa734db9cb8a340464ce5ed742acfa6ba19e103e3c454890fdc1293"
+        },
+        {
+          "file": "stems/kick-note-36.mid",
+          "piece": "kick",
+          "hitCount": 32,
+          "sha256": "1f0b9631f88d03e09fe139532d12820aebe6ede3b1a792c66b8f598279e61c81"
+        },
+        {
+          "file": "stems/cross-stick-note-37.mid",
+          "piece": "cross-stick",
+          "hitCount": 8,
+          "sha256": "e80118ee8077757dfe6e9e5e69869bb73fe6887f47996b8e88e38c0be236456e"
+        },
+        {
+          "file": "stems/snare-note-38.mid",
+          "piece": "snare",
+          "hitCount": 24,
+          "sha256": "38415f5bd363e9cb26da3d70b22f430572ea19c686c3cec3d31769e2f25a5d93"
+        },
+        {
+          "file": "stems/clap-note-39.mid",
+          "piece": "clap",
+          "hitCount": 16,
+          "sha256": "cb06fdc1701bdddf38c578046fb3f4c0c69ec234d66feb95ee3a97262f8cafe3"
+        },
+        {
+          "file": "stems/ride-note-41.mid",
+          "piece": "ride",
+          "hitCount": 0,
+          "sha256": "658b3aecaa86c7c3d84b4d42c54a7c76a8ba8335992c121ebd8da3d38e560a95"
+        },
+        {
+          "file": "stems/closed-hat-note-42.mid",
+          "piece": "closed-hat",
+          "hitCount": 112,
+          "sha256": "2fe7406fb16afdfb5000efebaa183cf33f39835eb1f3e2753ba023f4a7709604"
+        },
+        {
+          "file": "stems/floor-tom-note-43.mid",
+          "piece": "floor-tom",
+          "hitCount": 1,
+          "sha256": "08dc7f7cbfa95f719873343ee493cba00b89bd09948803716049c656ac67c762"
+        },
+        {
+          "file": "stems/mid-tom-note-45.mid",
+          "piece": "mid-tom",
+          "hitCount": 1,
+          "sha256": "a601992bf02896bff2c7c696efb0aef3a4aa10bc586ad21f179696366d799f90"
+        },
+        {
+          "file": "stems/open-hat-note-46.mid",
+          "piece": "open-hat",
+          "hitCount": 16,
+          "sha256": "a1d1b981da8e37188e6e7b647cc6d5354eafc5a14bc552dd72db6ee4421b852f"
+        },
+        {
+          "file": "stems/high-tom-note-47.mid",
+          "piece": "high-tom",
+          "hitCount": 1,
+          "sha256": "c48a0299eaafc8083820689cbfd298e11fb65bc674d2c81d191282acf1e73910"
+        },
+        {
+          "file": "stems/crash-note-51.mid",
+          "piece": "crash",
+          "hitCount": 2,
+          "sha256": "52d86c7e48cab7df087dbbf23a35c7289f413fc0d0598ccdd74c147c9dd82ea1"
+        }
+      ]
+    },
+    {
+      "id": "03-ride-groove",
+      "name": "Ride groove",
+      "purpose": "Single-ride ghost, normal and accent response plus accumulated metallic tails",
+      "bars": 8,
+      "durationSeconds": 16.0,
+      "files": [
+        {
+          "file": "full-kit.mid",
+          "piece": "full-kit",
+          "hitCount": 153,
+          "sha256": "597b7a2c436995989551138a4f8a56971c31b0627024d4a137ab640b0952bf9f"
+        },
+        {
+          "file": "stems/kick-note-36.mid",
+          "piece": "kick",
+          "hitCount": 24,
+          "sha256": "b71ecbee83c4bec28ec4b456039421b4248c433494523105fc02a453e63c97a1"
+        },
+        {
+          "file": "stems/cross-stick-note-37.mid",
+          "piece": "cross-stick",
+          "hitCount": 8,
+          "sha256": "3703c01fd3dcac11c78f41aa60ed0db1eb83d6217087eca82ab676c66f80367a"
+        },
+        {
+          "file": "stems/snare-note-38.mid",
+          "piece": "snare",
+          "hitCount": 16,
+          "sha256": "6d05155d67fc703b1d40ad3ff48c855a586715eb5828ab546fb4817e7dc92032"
+        },
+        {
+          "file": "stems/clap-note-39.mid",
+          "piece": "clap",
+          "hitCount": 4,
+          "sha256": "87a6513a5e7f28e5cf6ef21a52c55ad3b6ec743e7715fa3c31db085eee6d90d3"
+        },
+        {
+          "file": "stems/ride-note-41.mid",
+          "piece": "ride",
+          "hitCount": 64,
+          "sha256": "4a29426c8bef882a9e040ac441be6d769bef0710fdbfef68a6b84ebf55bafe9b"
+        },
+        {
+          "file": "stems/closed-hat-note-42.mid",
+          "piece": "closed-hat",
+          "hitCount": 32,
+          "sha256": "010e3fd9c48c7d325c3c026a65bc398635deb396677a432765346431ce89280c"
+        },
+        {
+          "file": "stems/floor-tom-note-43.mid",
+          "piece": "floor-tom",
+          "hitCount": 1,
+          "sha256": "6697e666f0990ba9e4c345492d3a6ff448dd7023f8c004510bcfc68ba84e8e36"
+        },
+        {
+          "file": "stems/mid-tom-note-45.mid",
+          "piece": "mid-tom",
+          "hitCount": 1,
+          "sha256": "69a3fbb3f5fc0a56e4dd7a2eaae150e15f344177884bf1e97a5ac9cd7824013b"
+        },
+        {
+          "file": "stems/open-hat-note-46.mid",
+          "piece": "open-hat",
+          "hitCount": 0,
+          "sha256": "6e76b9b8909a92ef54d668640a22ef802a61c3c28f6be35338e9151112ec2653"
+        },
+        {
+          "file": "stems/high-tom-note-47.mid",
+          "piece": "high-tom",
+          "hitCount": 1,
+          "sha256": "d9f5c6a1dbeaa2757020b83e2842e76f62b6f6daf85ba249c8c2fab8908679b8"
+        },
+        {
+          "file": "stems/crash-note-51.mid",
+          "piece": "crash",
+          "hitCount": 2,
+          "sha256": "8d5e4ff9433c335088d0d1d6218f9de249806ab2f8becfaf1b44925be1692018"
+        }
+      ]
+    },
+    {
+      "id": "04-tom-fill-context",
+      "name": "Tom fill context",
+      "purpose": "Tom level, pitch ordering and tail buildup after six bars of half-time context",
+      "bars": 8,
+      "durationSeconds": 16.0,
+      "files": [
+        {
+          "file": "full-kit.mid",
+          "piece": "full-kit",
+          "hitCount": 126,
+          "sha256": "1c0827dd6e44c4fa007dc561c7f10c9d57f46a822dfec9a6fe9671250e2967a8"
+        },
+        {
+          "file": "stems/kick-note-36.mid",
+          "piece": "kick",
+          "hitCount": 19,
+          "sha256": "a9d8ad63e1269f5ff9f468b0382543cfd4ece6a3fe0b70f9585a6dc806e20784"
+        },
+        {
+          "file": "stems/cross-stick-note-37.mid",
+          "piece": "cross-stick",
+          "hitCount": 0,
+          "sha256": "048de520f628722db95ee6f0dfb1d62de7f5f01973294606518ea4360f72d57f"
+        },
+        {
+          "file": "stems/snare-note-38.mid",
+          "piece": "snare",
+          "hitCount": 7,
+          "sha256": "cb34f6c2f15dabd2bffd36b3c6ca34f603228cb1ccf09850de5d64525df6a4cb"
+        },
+        {
+          "file": "stems/clap-note-39.mid",
+          "piece": "clap",
+          "hitCount": 6,
+          "sha256": "918c3db19a45ab6ef68a8cb3cc14d14edcd5f7783a415a1494b6c6fc8e535473"
+        },
+        {
+          "file": "stems/ride-note-41.mid",
+          "piece": "ride",
+          "hitCount": 1,
+          "sha256": "3d02a6304b3ae3411213b10c4263c4d97fb8103101e5b9b9ba9702a9bd661b97"
+        },
+        {
+          "file": "stems/closed-hat-note-42.mid",
+          "piece": "closed-hat",
+          "hitCount": 72,
+          "sha256": "6114c7bc5144844e733af958c2dffd2034a0140e26db8eedf8759a6b2feab8f0"
+        },
+        {
+          "file": "stems/floor-tom-note-43.mid",
+          "piece": "floor-tom",
+          "hitCount": 6,
+          "sha256": "2a32ebe0021f2a40e239d35f3ceeb02e888a9d402e53b9f120d28df02071c1f2"
+        },
+        {
+          "file": "stems/mid-tom-note-45.mid",
+          "piece": "mid-tom",
+          "hitCount": 4,
+          "sha256": "cfb6f6eef26b5ca98c0de6682cdb8e017aa8752de788ffd901928ed029a486a0"
+        },
+        {
+          "file": "stems/open-hat-note-46.mid",
+          "piece": "open-hat",
+          "hitCount": 4,
+          "sha256": "77ed4c0f8e8bf8ae2adbe15e29044518126a723f47fe05d1e83c3c1ea6edf435"
+        },
+        {
+          "file": "stems/high-tom-note-47.mid",
+          "piece": "high-tom",
+          "hitCount": 5,
+          "sha256": "3405439c27b3c11e737092c863b6d956418a68641cad8b1599bec7d37b86e53d"
+        },
+        {
+          "file": "stems/crash-note-51.mid",
+          "piece": "crash",
+          "hitCount": 2,
+          "sha256": "7260583fbdb607494886214fcba44a02dfaec341113206bdc0856d7701af9513"
+        }
+      ]
+    }
+  ]
+}

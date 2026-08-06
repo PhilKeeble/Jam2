@@ -1,6 +1,14 @@
 (() => {
   const manifest = window.JAM2_SOUND_DESIGN_MANIFEST;
   if (!manifest) return;
+  const droneProfiles = new Set([
+    "electronic_techno", "modal_atmospheric", "modal_groove",
+  ]);
+  for (const profile of manifest.profiles) {
+    if (droneProfiles.has(profile.id)) {
+      profile.roles = profile.roles.filter(item => item.id !== "support");
+    }
+  }
   const pageStatus = document.querySelector("#status");
   if (window.location.protocol === "file:") {
     pageStatus.classList.add("error");
@@ -9,8 +17,24 @@
   }
   pageStatus?.remove();
   const templateLibrary = window.JAM2_BASE_SOUND_LIBRARY;
+  const electronicDrumProfiles = new Set([
+    "electronic_breakbeat", "electronic_house", "electronic_techno",
+    "hiphop_boom_bap", "hiphop_trap", "jpop_anisong_rock",
+    "jpop_idol_dance", "metal_modern_progressive",
+    "rnb_contemporary_neosoul", "soul_classic_motown",
+  ]);
+  const styleDrumKitId = profileId =>
+    electronicDrumProfiles.has(profileId) ? "electronic" : "acoustic";
+  const canonicalDrumKitId = (kitId, profileId) => {
+    if (kitId === "ableton-rock32") return "acoustic";
+    if (kitId === "ableton-808") return "electronic";
+    return kitId === "acoustic" || kitId === "electronic"
+      ? kitId : styleDrumKitId(profileId);
+  };
 
   const storageKey = "jam2-instrument-lab-v1";
+  const jam2StyleChoiceId = "__jam2-native-style__";
+  const jam2MixSource = "jam2-native";
   const pitchedRoles = new Set(["chords", "melody", "bass", "support"]);
   const labRoles = new Set([...pitchedRoles, "drums"]);
   const sourceOptions = [
@@ -30,10 +54,8 @@
     ["open-hat", "Open hat"], ["high-tom", "High tom"],
     ["mid-tom", "Mid tom"], ["floor-tom", "Floor tom"],
     ["crash", "Crash"], ["ride", "Ride"], ["cross-stick", "Cross-stick"],
-    ["shaker", "Shaker"], ["hand-percussion", "Hand percussion"],
   ];
   const drumSourceOptions = [
-    ["jam2-native", "Jam2 native"],
     ["daisy-profile", "Daisy researched profile model"],
     ["daisy-analog-kick", "Daisy analog kick"],
     ["daisy-synthetic-kick", "Daisy synthetic kick"],
@@ -47,11 +69,8 @@
     ["daisy-cymbal", "Daisy noise + metal cymbal"],
     ["jam2-shell-tom", "Jam2 damped shell tom"],
     ["jam2-cross-stick", "Jam2 wood/rim cross-stick"],
-    ["jam2-shaker", "Jam2 collision shaker"],
-    ["jam2-hand-drum", "Jam2 skin hand drum"],
     ["jam2-hand-clap", "Jam2 multi-burst hand clap"],
     ["jam2-wood-block", "Jam2 wood block"],
-    ["jam2-tambourine", "Jam2 tambourine"],
     ["jam2-crash-cymbal", "Jam2 diffuse crash cymbal"],
     ["jam2-ride-cymbal", "Jam2 stick-defined ride cymbal"],
   ];
@@ -83,6 +102,26 @@
     drums: 1.16,
     support: .68,
   };
+  const profileMixRoleGains = {
+    pop_loop: {bass: .73, chords: .755, melody: .428, support: .403, drums: .787},
+    pop_sectional: {bass: .73, chords: .755, melody: .428, support: .403, drums: .787},
+  };
+  function defaultMixGainForRole(roleId) {
+    return profileMixRoleGains[profile?.id]?.[roleId] ??
+      mixRoleGains[roleId] ?? mixRoleGains.default;
+  }
+  function mixTrimDbForRole(roleId) {
+    const value = Number(saved.patches?.[`${profile?.id}/${roleId}`]?.mixTrimDb ?? 0);
+    return Math.max(-36, Math.min(12, Number.isFinite(value) ? value : 0));
+  }
+  function mixGainForRole(roleId) {
+    return defaultMixGainForRole(roleId) *
+      Math.pow(10, mixTrimDbForRole(roleId) / 20);
+  }
+  function formatMixTrimDb(value) {
+    const rounded = Number(value).toFixed(1);
+    return `${value > 0 ? "+" : ""}${rounded} dB`;
+  }
   const drumParameters = [
     {key: "frequencyHz", label: "Pitch / centre frequency", min: 20, max: 12000, step: 1, unit: " Hz"},
     {key: "tone", label: "Tone", min: 0, max: 1, step: .01},
@@ -90,6 +129,8 @@
     {key: "colour", label: "Noise / snap / metal colour", min: 0, max: 1, step: .01},
     {key: "fmAmount", label: "Pitch / FM sweep", min: 0, max: 1, step: .01},
     {key: "level", label: "Piece level", min: 0, max: 1.5, step: .01},
+    {key: "sourceLayerGain", label: "Source / model layer level", min: 0, max: 2, step: .01},
+    {key: "onsetSofteningSeconds", label: "Onset softening", min: 0, max: .1, step: .001, unit: " s"},
   ];
   const drumSynthParameters = [
     {key: "midiNote", label: "Pitch (MIDI note)", min: 24, max: 96, step: 1},
@@ -140,6 +181,7 @@
     {key: "roomMix", label: "Shared room return", min: 0, max: .6, step: .005},
     {key: "roomSizeMs", label: "Room size", min: 5, max: 140, step: 1, unit: " ms"},
     {key: "roomDamping", label: "Room damping", min: 0, max: 1, step: .01},
+    {key: "stereoWidth", label: "Stereo room width", min: 0, max: 1, step: .01},
   ];
   const filterOptions = [
     ["ladder-lowpass", "Ladder low-pass"],
@@ -156,7 +198,7 @@
     {group: "Oscillator", key: "subMix", label: "Sub fundamental", min: 0, max: 1, step: .01, sources: ["variable-shape", "variable-saw", "fm2"]},
     {group: "FM", key: "fmRatio", label: "FM ratio", min: .125, max: 16, step: .125, sources: ["fm2"]},
     {group: "FM", key: "fmIndex", label: "FM index", min: 0, max: 16, step: .05, sources: ["fm2"]},
-    {group: "Harmonics", key: "harmonicFamily", label: "Harmonic family", min: 0, max: 5, step: 1, sources: ["additive-harmonic"]},
+    {group: "Harmonics", key: "harmonicFamily", label: "Harmonic family", min: 0, max: 6, step: 1, sources: ["additive-harmonic"]},
     {group: "Formants", key: "formantRatio", label: "Formant ratio 1", min: .25, max: 16, step: .05, sources: ["phase-reset-formant", "vosim-formant", "z-oscillator"]},
     {group: "Formants", key: "formantRatio2", label: "Formant ratio 2", min: .25, max: 16, step: .05, sources: ["vosim-formant"]},
     {group: "Formants", key: "fixedFormantHz", label: "Fixed formant 1", min: 0, max: 12000, step: 25, unit: " Hz", sources: ["phase-reset-formant", "vosim-formant"]},
@@ -171,8 +213,14 @@
     {group: "Amplitude", key: "decaySeconds", label: "Decay", min: .005, max: 5, step: .005, unit: " s"},
     {group: "Amplitude", key: "sustain", label: "Sustain", min: .01, max: 1, step: .01},
     {group: "Amplitude", key: "releaseSeconds", label: "Release", min: .005, max: 8, step: .005, unit: " s"},
+    {group: "Amplitude", key: "velocitySensitivity", label: "Velocity to level", min: 0, max: 1, step: .01},
     {group: "Filter", key: "filterCutoffHz", label: "Cutoff", min: 40, max: 18000, step: 10, unit: " Hz"},
+    {group: "Filter", key: "highpassCutoffHz", label: "High-pass cutoff", min: 0, max: 4000, step: 5, unit: " Hz"},
     {group: "Filter", key: "filterEnvelopeHz", label: "Envelope depth", min: -12000, max: 12000, step: 10, unit: " Hz"},
+    {group: "Filter", key: "filterEnvelopeDecaySeconds", label: "Envelope decay (0 = amp)", min: 0, max: 5, step: .005, unit: " s"},
+    {group: "Filter", key: "filterEnvelopeSustain", label: "Envelope sustain", min: 0, max: 1, step: .005},
+    {group: "Filter", key: "filterKeyTracking", label: "Key tracking", min: 0, max: 2, step: .01},
+    {group: "Filter", key: "filterVelocitySensitivity", label: "Velocity to filter", min: 0, max: 1, step: .01},
     {group: "Filter", key: "resonance", label: "Resonance", min: 0, max: .95, step: .01},
     {group: "Filter", key: "filterDrive", label: "Filter drive", min: .5, max: 8, step: .01},
     {group: "Character", key: "wavefold", label: "Wavefold", min: 0, max: 8, step: .01},
@@ -183,6 +231,10 @@
     {group: "Character", key: "busDrive", label: "Bus drive", min: .5, max: 10, step: .01},
     {group: "Character", key: "cabinet", label: "Cabinet colour", min: 0, max: 1, step: .01},
     {group: "Movement", key: "glideSeconds", label: "Pitch glide", min: 0, max: 1.5, step: .005, unit: " s"},
+    {group: "Movement", key: "pitchEnvelopeSemitones", label: "Pitch-envelope depth", min: -48, max: 48, step: .25, unit: " st"},
+    {group: "Movement", key: "pitchEnvelopeSeconds", label: "Pitch-envelope decay", min: .001, max: 2, step: .001, unit: " s"},
+    {group: "Movement", key: "pitchAttackGain", label: "Pitched attack emphasis", min: 0, max: 16, step: .05},
+    {group: "Movement", key: "pitchAttackSeconds", label: "Pitched attack decay", min: .001, max: 1, step: .001, unit: " s"},
     {group: "Movement", key: "vibratoCents", label: "Vibrato depth", min: 0, max: 100, step: .25, unit: " ct"},
     {group: "Movement", key: "vibratoRateHz", label: "Vibrato rate", min: .05, max: 15, step: .05, unit: " Hz"},
     {group: "Movement", key: "vibratoDelaySeconds", label: "Vibrato delay", min: 0, max: 3, step: .01, unit: " s"},
@@ -193,6 +245,12 @@
     {group: "Space", key: "chorusRateHz", label: "Chorus rate", min: .02, max: 8, step: .02, unit: " Hz"},
     {group: "Space", key: "delayMix", label: "Delay mix", min: 0, max: .75, step: .01},
     {group: "Space", key: "delaySeconds", label: "Delay time", min: .03, max: 1.5, step: .01, unit: " s"},
+    {group: "Space", key: "reverbMix", label: "Reverb mix", min: 0, max: .85, step: .01},
+    {group: "Space", key: "reverbSeconds", label: "Reverb decay", min: .1, max: 8, step: .05, unit: " s"},
+    {group: "Space", key: "reverbDamping", label: "Reverb damping", min: 0, max: 1, step: .01},
+    {group: "Space", key: "reverbPreDelaySeconds", label: "Reverb pre-delay", min: 0, max: .25, step: .001, unit: " s"},
+    {group: "Space", key: "stereoSpread", label: "Stereo decorrelation", min: 0, max: 1, step: .01},
+    {group: "Space", key: "stereoWidth", label: "Stereo width", min: 0, max: 2, step: .01},
   ];
   const parameterMap = new Map(parameters.map(parameter => [parameter.key, parameter]));
 
@@ -510,6 +568,8 @@
       scheduleRender();
     });
     document.querySelector("#lab-save-review").addEventListener("click", saveForReview);
+    document.querySelector("#lab-save-style-mix")?.addEventListener(
+      "click", saveCompleteStyleMix);
     document.querySelector("#lab-copy-json").addEventListener("click", async () => {
       await navigator.clipboard.writeText(JSON.stringify(soundDesignRecord(), null, 2));
       document.querySelector("#lab-save-review-status").textContent = "Copied JSON.";
@@ -583,6 +643,17 @@
       const response = await fetch("/api/status", {cache: "no-store"});
       const result = await response.json();
       if (!response.ok || !result.ok) throw new Error("Native renderer unavailable");
+      const styleMixReady = result.capabilities?.includes("style-mix-save");
+      const saveButton = document.querySelector("#lab-save-style-mix");
+      if (saveButton) saveButton.disabled = !styleMixReady;
+      if (!styleMixReady) {
+        const saveStatus = document.querySelector("#lab-save-style-mix-status");
+        if (saveStatus) {
+          saveStatus.textContent =
+            "Older workbench server detected. Close it and reopen open-workbench.cmd to enable project saving.";
+          saveStatus.classList.add("error");
+        }
+      }
       label.textContent = `Native renderer ready · ${manifest.sampleRate / 1000} kHz WAV`;
       label.classList.add("ready");
     } catch (error) {
@@ -618,6 +689,8 @@
   function loadProfile(profileId) {
     profile = manifest.profiles.find(item => item.id === profileId) || manifest.profiles[0];
     saved.profileId = profile.id;
+    const styleSaveStatus = document.querySelector("#lab-save-style-mix-status");
+    if (styleSaveStatus) styleSaveStatus.textContent = "";
     profileSelect.value = profile.id;
     roleSelect.replaceChildren();
     for (const candidate of profile.roles.filter(item => labRoles.has(item.id))) {
@@ -645,6 +718,11 @@
     }
     roleSelect.value = role.id;
     const state = stateForCurrent();
+    if (!isBaseMode() && role.id === "drums") {
+      state.mixSource = "";
+      state.baseKitId = canonicalDrumKitId(state.baseKitId, profile.id);
+      state.drumPieceOptions = {};
+    }
     if (isBaseMode()) {
       saved.baseEditor ||= {selectionByRole: {}};
       saved.baseEditor.selectionByRole ||= {};
@@ -652,9 +730,10 @@
       if (labMode === "drums") {
         saved.baseEditor.drumPiece ||= "kick";
         drumPiece = saved.baseEditor.drumPiece;
-        baseKitId = saved.baseEditor.kitId ||
-          saved.baseEditor.selectionByRole.drums ||
-          templateLibrary.drumKits[0].id;
+        baseKitId = canonicalDrumKitId(
+          saved.baseEditor.kitId || saved.baseEditor.selectionByRole.drums,
+          profile.id);
+        saved.baseEditor.kitId = baseKitId;
         baseInstrumentId = "";
         researchedPatch = factoryKitTemplatePatch(baseKitId);
         patch = kitBasePatch(baseKitId);
@@ -692,7 +771,11 @@
         : (templateLibrary?.treatments[profile.styleId] ? profile.styleId : "neutral");
       baseInstrumentId = state.baseInstrumentId || "";
       baseKitId = state.baseKitId || "";
-      if (role.id !== "drums" && instrumentChoiceExists(baseInstrumentId)) {
+      if (state.mixSource === jam2MixSource) {
+        patch = clone(researchedPatch);
+        baseInstrumentId = "";
+        baseKitId = "";
+      } else if (role.id !== "drums" && instrumentChoiceExists(baseInstrumentId)) {
         patch = instrumentTemplatePatch(baseInstrumentId, role, profile.styleId);
       } else if (role.id === "drums" && baseKitId) {
         patch = kitTemplatePatch(baseKitId, role, profile.styleId);
@@ -793,7 +876,7 @@
     document.querySelector("#lab-header-description").textContent = instrumentMode
       ? "Create and save named instrument sounds. These sounds are available to every role in Style Mixer."
       : drumMode
-        ? "Create named alternatives for individual pieces inside the Acoustic, Electronic and Latin kit families."
+        ? "Create named alternatives for individual pieces inside the Acoustic and Electronic kits."
         : "Choose which saved sounds play each role over the selected style pattern. Sound design controls stay on the two base pages.";
     document.querySelector("#lab-profile-field").hidden = false;
     document.querySelector("#lab-profile-label").textContent = mixMode
@@ -808,6 +891,7 @@
     document.querySelector("#lab-root-field").hidden = !instrumentMode;
     document.querySelector("#lab-target-panel").hidden = true;
     document.querySelector("#lab-lineup-panel").hidden = !mixMode;
+    document.querySelector("#lab-style-save-panel").hidden = !mixMode;
     document.querySelector("#style-assignment-lab").hidden = !mixMode;
     document.querySelector("#base-save-panel").hidden = mixMode;
     document.querySelector("#lab-snapshot-panel").hidden = true;
@@ -837,7 +921,14 @@
     treatmentId = profile.styleId;
     const baseSelect = document.querySelector("#lab-style-base");
     baseSelect.replaceChildren();
-    baseSelect.add(new Option("Original researched sound", ""));
+    if (role.id !== "drums") {
+      baseSelect.add(new Option("Original researched sound", ""));
+    }
+    if (role.id !== "drums" && jam2ReferenceAvailable(role)) {
+      baseSelect.add(new Option(
+        "Current Jam2 native style sound",
+        jam2StyleChoiceId));
+    }
     const choices = role.id === "drums"
       ? templateLibrary.drumKits
       : [
@@ -853,18 +944,22 @@
         `${choice.name}${choice.custom ? " · my sound" : role.id === "drums" ? " · kit family" : " · factory"}`,
         choice.id));
     }
-    const currentId = role.id === "drums" ? baseKitId : baseInstrumentId;
-    baseSelect.value = choices.some(item => item.id === currentId)
+    const state = stateForCurrent();
+    const currentId = state.mixSource === jam2MixSource
+      ? jam2StyleChoiceId
+      : role.id === "drums" ? baseKitId : baseInstrumentId;
+    baseSelect.value = currentId === jam2StyleChoiceId ||
+      choices.some(item => item.id === currentId)
       ? currentId : "";
     document.querySelector("#lab-arrangement-heading").textContent =
-      role.id === "drums" ? "Kit and piece arrangement" : `Sound for ${role.name}`;
+      role.id === "drums" ? "Drum kit" : `Sound for ${role.name}`;
     document.querySelector("#lab-arrangement-description").textContent =
-      role.id === "drums"
-        ? "Choose a kit family, then optionally replace any individual piece with a factory or saved Base Drums option."
+      state.mixSource === jam2MixSource
+        ? "Uses the exact current Jam2 reference stem for this role and profile; other roles remain independently selectable."
+        : role.id === "drums"
+        ? "Choose Acoustic or Electronic. The current style EQ and drum treatment are applied automatically."
         : "Choose any factory or saved Base Instrument sound. Instrument labels do not restrict which role can use it.";
-    document.querySelector("#lab-style-drum-pieces").hidden =
-      role.id !== "drums" || !baseKitId;
-    if (role.id === "drums" && baseKitId) renderStyleDrumPieces();
+    document.querySelector("#lab-style-drum-pieces").hidden = true;
   }
 
   function baseDisplayName() {
@@ -882,7 +977,9 @@
     for (const targetRole of profile.roles.filter(item => labRoles.has(item.id))) {
       const state = saved.patches?.[`${profile.id}/${targetRole.id}`] || {};
       let choice = targetRole.designName || "Researched default";
-      if (targetRole.id === "drums" && state.baseKitId) {
+      if (state.mixSource === jam2MixSource) {
+        choice = "Current Jam2 native";
+      } else if (targetRole.id === "drums" && state.baseKitId) {
         choice = templateLibrary.drumKits.find(
           item => item.id === state.baseKitId)?.name || state.baseKitId;
       } else if (targetRole.id !== "drums" && state.baseInstrumentId) {
@@ -890,12 +987,43 @@
       } else if (state.patch) {
         choice = "Original researched sound";
       }
+      const card = document.createElement("div");
+      card.className = "lineup-role-card";
       const button = document.createElement("button");
       button.className = `lineup-role${targetRole.id === role.id ? " active" : ""}`;
       button.innerHTML = `<strong>${targetRole.name}</strong><span>${choice}</span>`;
       button.title = `${targetRole.name}: ${choice}`;
       button.addEventListener("click", () => loadRole(targetRole.id));
-      root.append(button);
+      const volume = document.createElement("label");
+      volume.className = "lineup-volume";
+      const trimDb = mixTrimDbForRole(targetRole.id);
+      volume.innerHTML = `
+        <span>Volume <output>${formatMixTrimDb(trimDb)}</output></span>
+        <input type="range" min="-36" max="12" step="0.5" value="${trimDb}"
+          aria-label="${targetRole.name} volume">
+      `;
+      const input = volume.querySelector("input");
+      input.addEventListener("input", () => {
+        const value = Number(input.value);
+        saved.patches ||= {};
+        const key = `${profile.id}/${targetRole.id}`;
+        saved.patches[key] ||= {};
+        saved.patches[key].mixTrimDb = value;
+        volume.querySelector("output").textContent = formatMixTrimDb(value);
+        persist(false);
+        updatePlayingMixGain(targetRole.id);
+      });
+      card.append(button, volume);
+      root.append(card);
+    }
+  }
+
+  function updatePlayingMixGain(roleId) {
+    if (!audioContext) return;
+    for (const item of mixSources) {
+      if (item.roleId !== roleId) continue;
+      item.gain.gain.setTargetAtTime(
+        mixGainForRole(roleId), audioContext.currentTime, .015);
     }
   }
 
@@ -1099,14 +1227,18 @@
     const template = templateLibrary.instruments.find(item => item.id === templateId);
     const custom = instrumentVariant(templateId);
     if (!template && !custom) return null;
-    const treatment = selectedTreatment(appliedTreatmentId);
     let values = instrumentBasePatch(templateId);
-    values = deepMerge(values, treatment.common || {});
-    values = deepMerge(values, treatment.roles?.[targetRole.id] || {});
-    if (appliedTreatmentId === profile.styleId) {
-      values = deepMerge(
-        values,
-        templateLibrary.profileTreatments[profile.id]?.instruments?.[targetRole.id] || {});
+    const originTemplate = templateLibrary.instruments.find(
+      item => item.id === (custom?.originTemplateId || templateId));
+    if (!originTemplate?.styleReady) {
+      const treatment = selectedTreatment(appliedTreatmentId);
+      values = deepMerge(values, treatment.common || {});
+      values = deepMerge(values, treatment.roles?.[targetRole.id] || {});
+      if (appliedTreatmentId === profile.styleId) {
+        values = deepMerge(
+          values,
+          templateLibrary.profileTreatments[profile.id]?.instruments?.[targetRole.id] || {});
+      }
     }
     return normalizePatch(values);
   }
@@ -1125,8 +1257,8 @@
       candidateName: template.name,
       recommended: false,
       description: template.description,
-      researchFamily: `shared-base-${template.id}`,
-      sourceReferences: [
+      researchFamily: template.researchFamily || `shared-base-${template.id}`,
+      sourceReferences: template.sourceReferences || [
         "DaisySP synthesis primitives",
         "Workbench shared base palette v1",
       ],
@@ -1141,6 +1273,44 @@
     return savedBase
       ? normalizeKit(savedBase, savedBase)
       : factoryKitTemplatePatch(templateId);
+  }
+
+  function applyStyleRideDamping(values, styleId) {
+    if (!values?.pieces?.ride || !["jazz", "modal-jam"].includes(styleId)) {
+      return values;
+    }
+    const ride = values.pieces.ride;
+    ride.level = Math.min(Number(ride.level ?? .34),
+      styleId === "jazz" ? .27 : .25);
+    ride.decay = Math.min(Number(ride.decay ?? .9), .72);
+    ride.onsetSofteningSeconds = Math.max(
+      Number(ride.onsetSofteningSeconds || 0), .022);
+    ride.colourStage ||= {};
+    ride.colourStage.reconstructionLowpassHz = Math.min(
+      Number(ride.colourStage.reconstructionLowpassHz || 20000), 6500);
+    ride.transient ||= {};
+    ride.transient.level = Number(ride.transient.level || 0) * .55;
+    ride.transient.tone = Number(ride.transient.tone ?? .5) * .75;
+    ride.texture ||= {};
+    ride.texture.level = Number(ride.texture.level || 0) * .75;
+    ride.texture.tone = Number(ride.texture.tone ?? .5) * .8;
+    ride.texture.decaySeconds = Math.min(
+      Number(ride.texture.decaySeconds || 0), 1.45);
+    for (const band of ride.modalBands || []) {
+      band.decaySeconds = Number(band.decaySeconds || 0) * .82;
+      if (Number(band.frequencyHz || 0) >= 4000) {
+        band.level = Number(band.level || 0) * .58;
+      }
+      band.accentGain = Math.min(
+        Number(band.accentGain ?? 1), Number(band.normalGain ?? 1) * 1.05);
+    }
+    for (const band of ride.noiseBands || []) {
+      if (Number(band.frequencyHz || 0) >= 4000) {
+        band.level = Number(band.level || 0) * .68;
+      }
+      band.accentGain = Math.min(Number(band.accentGain ?? 1), 1.1);
+    }
+    return values;
   }
 
   function kitTemplatePatch(
@@ -1158,6 +1328,11 @@
       bus: styleTreatment.bus || {},
       pieces: styleTreatment.pieces || {},
     });
+    const kitSpecific = styleTreatment.kits?.[templateId] || {};
+    values = deepMerge(values, {
+      bus: kitSpecific.bus || {},
+      pieces: kitSpecific.pieces || {},
+    });
     if (appliedTreatmentId === profile.styleId) {
       const specific = templateLibrary.profileTreatments[profile.id]?.drums || {};
       values = deepMerge(values, {
@@ -1165,7 +1340,8 @@
         pieces: specific.pieces || {},
       });
     }
-    return normalizeKit(values, values);
+    return normalizeKit(
+      applyStyleRideDamping(values, appliedTreatmentId), values);
   }
 
   function applyInstrumentTemplate(templateId) {
@@ -1183,6 +1359,7 @@
         instrumentOriginTemplateId(templateId));
     } else {
       const state = stateForCurrent();
+      state.mixSource = "";
       state.baseInstrumentId = templateId;
       state.treatmentId = profile.styleId;
     }
@@ -1217,6 +1394,7 @@
       researchedPatch = factoryKitTemplatePatch(templateId);
     } else {
       const state = stateForCurrent();
+      state.mixSource = "";
       state.baseKitId = templateId;
       state.treatmentId = profile.styleId;
       state.drumPieceOptions = {};
@@ -1241,9 +1419,26 @@
     if (labMode !== "mix") return;
     const templateId = document.querySelector("#lab-style-base").value;
     treatmentId = profile.styleId;
+    if (templateId === jam2StyleChoiceId) {
+      const state = stateForCurrent();
+      state.mixSource = jam2MixSource;
+      state.patch = clone(researchedPatch);
+      state.baseInstrumentId = "";
+      state.baseKitId = "";
+      state.drumPieceOptions = {};
+      baseInstrumentId = "";
+      baseKitId = "";
+      patch = clone(researchedPatch);
+      persist(false);
+      renderAllPatchControls();
+      document.querySelector("#lab-style-assignment-status").textContent =
+        `Current Jam2 native is assigned to ${role.name}. Other roles are unchanged.`;
+      return;
+    }
     if (!templateId) {
       patch = clone(researchedPatch);
       const state = stateForCurrent();
+      state.mixSource = "";
       state.patch = clone(patch);
       state.baseInstrumentId = "";
       state.baseKitId = "";
@@ -1357,6 +1552,7 @@
       const key = `${profile.id}/${targetRole.id}`;
       saved.patches ||= {};
       saved.patches[key] ||= {};
+      saved.patches[key].mixSource = "";
       if (targetRole.id === "drums") {
         const kitId = templateLibrary.drumTreatments[treatmentId]?.kitId ||
           treatment.palette?.drums || "acoustic";
@@ -1532,6 +1728,7 @@
     patch.stringDamping -= .56 * length;
     patch.transientSeconds *= Math.pow(2, 1.6 * length);
     patch.delaySeconds *= Math.pow(2, 1.4 * length);
+    patch.reverbSeconds *= Math.pow(2, 2.2 * length);
 
     const space = macroValues.space;
     patch.delayMix = suppress(patch.delayMix, space, 3) +
@@ -1542,6 +1739,10 @@
     patch.chorusDepth = suppress(patch.chorusDepth, space, 3) +
       positive(space) * .82;
     patch.chorusRateHz *= Math.pow(2, -.8 * space);
+    patch.reverbMix = suppress(patch.reverbMix, space, 3) +
+      positive(space) * .68;
+    patch.reverbSeconds *= Math.pow(2, 1.8 * space);
+    patch.stereoWidth += positive(space) * .72;
     for (const parameter of parameters) {
       patch[parameter.key] = clampValue(parameter, patch[parameter.key]);
     }
@@ -1682,6 +1883,192 @@
     return request;
   }
 
+  function drumLayerState(piece) {
+    const sourceLayerGain = Number(piece.sourceLayerGain ?? 1);
+    return {
+      sourceA: piece.source !== "off" && sourceLayerGain > 0,
+      sourceB: piece.secondSource !== "off" && Number(piece.blend || 0) > 0,
+      transient: piece.transient?.type !== "off" &&
+        Number(piece.transient?.level || 0) > 0,
+      texture: piece.texture?.type !== "off" &&
+        Number(piece.texture?.level || 0) > 0,
+      synthCharacter: piece.synthLayer?.source !== "off" &&
+        Number(piece.synthLayer?.level || 0) > 0,
+      modalBands: (piece.modalBands || []).filter(
+        band => Number(band.level || 0) > 0).length,
+      noiseBands: (piece.noiseBands || []).filter(
+        band => Number(band.level || 0) > 0).length,
+    };
+  }
+
+  function pitchedLayerState(active) {
+    return {
+      sourceA: active.source !== "off",
+      sourceB: active.secondSource !== "off" &&
+        Number(active.sourceBlend || 0) > 0,
+      noise: Number(active.noiseMix || 0) > 0,
+      transient: Number(active.transientMix || 0) > 0,
+      chorus: Number(active.chorusMix || 0) > 0,
+      delay: Number(active.delayMix || 0) > 0,
+      reverb: Number(active.reverbMix || 0) > 0,
+    };
+  }
+
+  function drumPieceSelectionRecord(state, pieceId, piece) {
+    const choiceId = state.drumPieceOptions?.[pieceId] || "";
+    const layers = drumLayerState(piece);
+    const enabled = Number(piece.level || 0) > 0 && Boolean(
+      layers.sourceA || layers.sourceB || layers.transient || layers.texture ||
+      layers.synthCharacter || layers.modalBands || layers.noiseBands);
+    const custom = drumVariant(choiceId);
+    if (custom) {
+      return {choiceId, enabled, source: "saved-base-drum", name: custom.name};
+    }
+    if (choiceId.startsWith("factory:")) {
+      const [, kitId] = choiceId.split(":");
+      const kitName = templateLibrary.drumKits.find(
+        item => item.id === kitId)?.name || kitId;
+      return {
+        choiceId,
+        enabled,
+        source: "factory-piece",
+        kitId,
+        name: `${kitName} ${drumPieceLabel(pieceId)}`,
+      };
+    }
+    const kitName = templateLibrary.drumKits.find(
+      item => item.id === state.baseKitId)?.name ||
+      state.baseKitId || "Original researched kit";
+    return {
+      choiceId: "",
+      enabled,
+      source: "selected-kit",
+      kitId: state.baseKitId || null,
+      name: `${kitName} ${drumPieceLabel(pieceId)}`,
+    };
+  }
+
+  function completeStyleRoleRecord(candidateRole) {
+    const key = `${profile.id}/${candidateRole.id}`;
+    const state = saved.patches?.[key] || {};
+    if (state.mixSource === jam2MixSource) {
+      const candidate = candidateRole.candidates?.find(item => item.id === "jam2");
+      return {
+        role: candidateRole.id,
+        roleName: candidateRole.name,
+        enabled: true,
+        source: "jam2-native",
+        parameterType: "jam2-native",
+        selection: {
+          candidateId: candidate?.id || "jam2",
+          name: candidate?.name || "Current Jam2 native",
+          model: candidate?.model || null,
+          referencePath: candidate?.path || null,
+        },
+        parameters: null,
+      };
+    }
+    const request = activeMixRequest(candidateRole);
+    if (candidateRole.id === "drums") {
+      const kit = clone(request.kit);
+      return {
+        role: candidateRole.id,
+        roleName: candidateRole.name,
+        enabled: true,
+        source: "designed",
+        parameterType: "drum-kit",
+        selection: {
+          baseKitId: state.baseKitId || null,
+          baseKitName: templateLibrary.drumKits.find(
+            item => item.id === state.baseKitId)?.name || null,
+          treatmentId: state.treatmentId || profile.styleId,
+          pieces: Object.fromEntries(drumPieces.map(([pieceId]) => [
+            pieceId, drumPieceSelectionRecord(state, pieceId, kit.pieces[pieceId]),
+          ])),
+        },
+        enabledLayers: Object.fromEntries(drumPieces.map(([pieceId]) => [
+          pieceId, drumLayerState(kit.pieces[pieceId]),
+        ])),
+        parameters: kit,
+      };
+    }
+    const active = clone(request.patch);
+    return {
+      role: candidateRole.id,
+      roleName: candidateRole.name,
+      enabled: true,
+      source: "designed",
+      parameterType: "instrument-patch",
+      selection: {
+        baseInstrumentId: state.baseInstrumentId || null,
+        baseInstrumentName: state.baseInstrumentId
+          ? instrumentChoiceName(state.baseInstrumentId) : null,
+        treatmentId: state.treatmentId || profile.styleId,
+      },
+      enabledLayers: pitchedLayerState(active),
+      parameters: active,
+    };
+  }
+
+  function completeStyleMixRecord() {
+    persist(false);
+    const roles = profile.roles
+      .filter(candidateRole => labRoles.has(candidateRole.id))
+      .map(completeStyleRoleRecord);
+    return {
+      schema: "jam2-style-mix-handoff-v1",
+      librarySchema: templateLibrary?.schema || null,
+      profileId: profile.id,
+      profileName: profile.name,
+      styleId: profile.styleId,
+      soundBrief: profile.soundBrief,
+      performance: {
+        bpm: profile.bpm,
+        meter: profile.meter,
+        bars: profile.bars,
+        patternSource: "current-profile-generated-performance",
+      },
+      mix: {
+        masterGain: .42,
+        roles: Object.fromEntries(roles.map(item => [item.role, {
+          enabled: item.enabled,
+          gain: mixGainForRole(item.role),
+          baseGain: defaultMixGainForRole(item.role),
+          trimDb: mixTrimDbForRole(item.role),
+        }])),
+      },
+      roles,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  async function saveCompleteStyleMix() {
+    const status = document.querySelector("#lab-save-style-mix-status");
+    status.classList.remove("error");
+    status.textContent = "Saving complete resolved style mixâ€¦";
+    try {
+      const record = completeStyleMixRecord();
+      const response = await fetch("/api/style-mix", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(record),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok) {
+        if (response.status === 404 && result.error === "Unknown endpoint.") {
+          throw new Error(
+            "The running workbench server is an older version. Close its server window and reopen open-workbench.cmd, then save again.");
+        }
+        throw new Error(result.error || "Style mix save failed.");
+      }
+      status.textContent =
+        `Saved exact ${profile.name} snapshot to ${result.absolutePath || result.path}.`;
+    } catch (error) {
+      status.textContent = error.message;
+      status.classList.add("error");
+    }
+  }
+
   async function playInMix() {
     if (!profile || !role) return;
     stopAll();
@@ -1690,9 +2077,17 @@
     renderStatus.textContent = "Loading sample-aligned style mix…";
     try {
       persist();
+      const nativeRoleCount = profile.roles.filter(candidateRole =>
+        saved.patches?.[`${profile.id}/${candidateRole.id}`]?.mixSource ===
+          jam2MixSource).length;
       renderStatus.textContent =
-        `Rendering ${profile.roles.length} currently active profile roles…`;
+        `Preparing ${profile.roles.length - nativeRoleCount} rendered and ${nativeRoleCount} current Jam2 native roles…`;
       const entries = await Promise.all(profile.roles.map(async candidateRole => {
+        const state = saved.patches?.[
+          `${profile.id}/${candidateRole.id}`] || {};
+        if (state.mixSource === jam2MixSource) {
+          return jam2Entry(candidateRole);
+        }
         const request = activeMixRequest(candidateRole);
         const response = await fetch("/api/render", {
           method: "POST",
@@ -1711,7 +2106,7 @@
       }));
       await playAlignedEntries(entries);
       renderStatus.textContent =
-        "Playing every role from its currently active sample-aligned patch.";
+        "Playing the selected sample-aligned lineup; Jam2 native roles use their exact current reference stems.";
     } catch (error) {
       renderStatus.textContent = `Mix playback failed: ${error.message}`;
       renderStatus.classList.add("error");
@@ -1730,6 +2125,11 @@
       role: candidateRole,
       url: `${candidate.path}?v=${encodeURIComponent(manifest.generatedAt)}`,
     };
+  }
+
+  function jam2ReferenceAvailable(candidateRole) {
+    return Boolean(candidateRole?.candidates?.some(
+      candidate => candidate.id === "jam2" && candidate.path));
   }
 
   async function renderActiveDrumsEntry() {
@@ -1816,12 +2216,12 @@
     mixSources = buffers.map((buffer, index) => {
       const source = audioContext.createBufferSource();
       const gain = audioContext.createGain();
-      gain.gain.value =
-        mixRoleGains[entries[index].role.id] ?? mixRoleGains.default;
+      const roleId = entries[index].role.id;
+      gain.gain.value = mixGainForRole(roleId);
       source.buffer = buffer;
       source.connect(gain).connect(master);
       source.start(start);
-      return source;
+      return {source, gain, roleId};
     });
   }
 
@@ -1838,8 +2238,8 @@
       soloAudio.currentTime = 0;
       soloAudio = null;
     }
-    for (const source of mixSources) {
-      try { source.stop(); } catch {}
+    for (const item of mixSources) {
+      try { item.source.stop(); } catch {}
     }
     mixSources = [];
   }
@@ -1951,6 +2351,7 @@
       roomMix: .08,
       roomSizeMs: 31,
       roomDamping: .58,
+      stereoWidth: 0,
     };
     for (const parameter of drumBusParameters) {
       next.bus[parameter.key] = clamp(
@@ -1986,6 +2387,15 @@
         colour: clamp(candidate.colour ?? defaults.colour ?? .6, 0, 1),
         fmAmount: clamp(candidate.fmAmount ?? defaults.fmAmount ?? .3, 0, 1),
         level: clamp(candidate.level ?? defaults.level ?? .45, 0, 1.5),
+        sourceLayerGain: clamp(
+          candidate.sourceLayerGain ?? defaults.sourceLayerGain ?? 1,
+          0,
+          2),
+        onsetSofteningSeconds: clamp(
+          candidate.onsetSofteningSeconds ??
+            defaults.onsetSofteningSeconds ?? 0,
+          0,
+          .1),
         transient: normalizeDrumObject(
           candidate.transient,
           defaults.transient,
@@ -2018,6 +2428,14 @@
         velocity: normalizeDrumVelocity(
           candidate.velocity,
           defaults.velocity),
+        modalBands: normalizeDrumDetailBands(
+          candidate.modalBands,
+          defaults.modalBands,
+          "modal"),
+        noiseBands: normalizeDrumDetailBands(
+          candidate.noiseBands,
+          defaults.noiseBands,
+          "noise"),
         synthLayer: normalizeDrumSynthLayer(
           candidate.synthLayer || {},
           defaults.synthLayer || {}),
@@ -2110,6 +2528,38 @@
       }
     }
     return next;
+  }
+
+  function normalizeDrumDetailBands(source, defaults, kind) {
+    const maximum = kind === "modal" ? 12 : 4;
+    const bands = Array.isArray(source)
+      ? source : (Array.isArray(defaults) ? defaults : []);
+    return bands.slice(0, maximum).map(item => {
+      const band = item && typeof item === "object" ? item : {};
+      const next = {
+        frequencyHz: clamp(
+          band.frequencyHz ?? (kind === "modal" ? 1000 : 4000),
+          kind === "modal" ? 20 : 40,
+          20000),
+        level: clamp(band.level ?? 0, 0, 1),
+        decaySeconds: clamp(band.decaySeconds ?? .2, .005, 8),
+        attackSeconds: clamp(band.attackSeconds ?? .001, .0001, .25),
+        delaySeconds: clamp(band.delaySeconds ?? 0, 0, .25),
+        highpassHz: clamp(band.highpassHz ?? 0, 0, 20000),
+        velocityCurve: clamp(band.velocityCurve ?? 1, .2, 3),
+        ghostGain: clamp(band.ghostGain ?? .55, 0, 3),
+        normalGain: clamp(band.normalGain ?? 1, 0, 3),
+        accentGain: clamp(band.accentGain ?? 1.25, 0, 3),
+        roomSend: clamp(band.roomSend ?? 1, 0, 2),
+      };
+      if (kind === "modal") {
+        next.detuneCents = clamp(band.detuneCents ?? 0, -50, 50);
+        next.phaseCycles = clamp(band.phaseCycles ?? -1, -1, 1);
+      } else {
+        next.q = clamp(band.q ?? 1, .1, 30);
+      }
+      return next;
+    });
   }
 
   function currentDrumPatch() {
@@ -2258,8 +2708,10 @@
     const candidateDescription =
       describedBase?.description || described?.description || patch.description ||
       "Manual component combination.";
+    const detailSummary =
+      `${piece.modalBands.length} modal / ${piece.noiseBands.length} noise bands`;
     document.querySelector("#lab-drum-candidate-description").textContent =
-      `${piece.intendedIdentity || "Unspecified piece identity"} — ${candidateDescription}`;
+      `${piece.intendedIdentity || "Unspecified piece identity"} — ${candidateDescription} — ${detailSummary}`;
     document.querySelector("#lab-drum-source").value = piece.source;
     document.querySelector("#lab-drum-source-b").value = piece.secondSource;
     document.querySelector("#lab-drum-blend").value = String(piece.blend);
@@ -2514,10 +2966,28 @@
       Number(source.secondSourceDetuneCents || 0)));
     next.filterArchitecture = filterOptions.some(([id]) => id === source.filterArchitecture)
       ? source.filterArchitecture : "ladder-lowpass";
+    const defaults = {
+      delaySeconds: .23,
+      wavefold: 0,
+      velocitySensitivity: 1,
+      pitchEnvelopeSemitones: 0,
+      pitchEnvelopeSeconds: .04,
+      pitchAttackGain: 0,
+      pitchAttackSeconds: .04,
+      filterEnvelopeDecaySeconds: 0,
+      filterEnvelopeSustain: .025,
+      filterKeyTracking: .72,
+      filterVelocitySensitivity: 1,
+      highpassCutoffHz: 0,
+      reverbMix: 0,
+      reverbSeconds: 1.8,
+      reverbDamping: .55,
+      reverbPreDelaySeconds: 0,
+      stereoSpread: 0,
+      stereoWidth: 1,
+    };
     for (const parameter of parameters) {
-      const fallback = parameter.key === "delaySeconds" ? .23
-        : parameter.key === "wavefold" ? 0
-        : parameter.min;
+      const fallback = defaults[parameter.key] ?? parameter.min;
       next[parameter.key] = clampValue(parameter, Number(source[parameter.key] ?? fallback));
     }
     return next;

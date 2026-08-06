@@ -1,0 +1,41 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "modal-jam",
+  "styleName": "Modal Jam",
+  "profileId": "modal_groove",
+  "profileName": "Modal Groove",
+  "seed": "2105641928",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 100.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 100.0,
+  "durationSeconds": 19.2,
+  "tonic": "C#",
+  "mode": "Dorian",
+  "formId": "modal-groove-8",
+  "grooveId": "modal-ride-led",
+  "fingerprints": {
+    "beat": "e7997d7db5935d09b2eb0886c14c68b36da3bfb130c620ffa592ac40515ce552",
+    "chord": "6ceb54a7b7bac1ca8b00bea8689e7939827ac44e240285711fb7507af7b24b75"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "support",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "04-support.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

@@ -24,6 +24,7 @@ struct MusicalStep {
     QString value;
     int velocity = 88;
     QString articulation;
+    QString voicing;
 };
 
 struct MusicalBeatPattern {
@@ -45,6 +46,7 @@ struct SongSection {
     QVector<QString> lyrics;
     QVector<BeatPattern> beatPatterns;
     QVector<MusicalBeatPattern> musicalPatterns;
+    QString drumKitId = QStringLiteral("acoustic");
     QString generatedKind;
     jam2::practice::GenerationRecipe generatedRecipe;
 };
@@ -75,6 +77,7 @@ public:
     void duplicateSection(int index);
     void deleteSection(int index);
     void renameSection(int index, const QString& label, const QString& name);
+    bool setDrumKit(int index, const QString& drumKitId);
     void moveSection(int from, int to);
     bool replaceSection(int index, SongSection section);
     bool clearSection(int index);

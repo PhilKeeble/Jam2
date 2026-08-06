@@ -21,7 +21,6 @@ struct SharedTrackModel {
     double loopStartSeconds = -1.0;
     double loopEndSeconds = -1.0;
     bool syncControls = true;
-    bool syncMetronome = true;
     bool focusEnabled = false;
     QString focusPreset = QStringLiteral("custom");
     double focusFrequencyHz = 120.0;

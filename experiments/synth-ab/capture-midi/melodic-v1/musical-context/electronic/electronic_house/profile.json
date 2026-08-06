@@ -1,0 +1,39 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "electronic",
+  "styleName": "Electronic",
+  "profileId": "electronic_house",
+  "profileName": "House",
+  "seed": "3653133489",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 124.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 124.0,
+  "durationSeconds": 15.483871,
+  "tonic": "Eb",
+  "mode": "Major",
+  "formId": "house-16",
+  "grooveId": "edm-disco-house",
+  "fingerprints": {
+    "beat": "b3a480df40686fa96756443d421b9cc6eaffd319893daef4f2c7fc4155d0338c",
+    "chord": "f33c3d2e0018850836a78fe752163f1b19c30d937cc3d16c61184795505a37a2"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

@@ -23,8 +23,6 @@ DRUM_PIECES = (
     "crash",
     "ride",
     "cross-stick",
-    "shaker",
-    "hand-percussion",
 )
 
 HARD_SMACK_SNARE_PROFILES = {
@@ -121,28 +119,6 @@ PIECE_SOURCE_CONTRACTS = {
     "crash": {"jam2-crash-cymbal"},
     "ride": {"jam2-ride-cymbal"},
     "cross-stick": {"jam2-cross-stick"},
-    "shaker": {
-        "jam2-shaker",
-        "jam2-tambourine",
-    },
-    "hand-percussion": {
-        "jam2-hand-drum",
-        "jam2-hand-clap",
-        "jam2-wood-block",
-        "jam2-tambourine",
-        "jam2-shaker",
-        "daisy-synthetic-kick",
-    },
-}
-
-HAND_IDENTITY_TERMS = {
-    "clap",
-    "conga",
-    "hand drum",
-    "tambourine",
-    "wood block",
-    "clave",
-    "auxiliary tom",
 }
 
 
@@ -330,17 +306,6 @@ def validate_manifest(manifest: dict) -> list[dict]:
                         "candidateId": candidate_id,
                         "piece": piece_name,
                         "kind": "missing-intended-identity",
-                    })
-                if piece_name == "hand-percussion" and not any(
-                    term in identity.lower()
-                    for term in HAND_IDENTITY_TERMS
-                ):
-                    findings.append({
-                        "profileId": profile_id,
-                        "candidateId": candidate_id,
-                        "piece": piece_name,
-                        "kind": "ambiguous-hand-percussion-identity",
-                        "identity": identity,
                     })
                 if (
                     piece_name == "snare" and
@@ -944,20 +909,6 @@ def identity_metric_findings(piece: str, result: dict) -> list[str]:
         if low_mid < 0.28:
             findings.append(
                 f"cross-stick-lacks-wood-band:{low_mid:.3f}"
-            )
-    elif piece == "shaker":
-        if high_mid + air < 0.48:
-            findings.append(
-                f"shaker-lacks-collision-energy:{high_mid + air:.3f}"
-            )
-        if sub + bass > 0.12:
-            findings.append(
-                f"shaker-excess-low-energy:{sub + bass:.3f}"
-            )
-    elif piece == "hand-percussion":
-        if decay_40 < 0 or decay_40 > 1200:
-            findings.append(
-                f"hand-percussion-decay40:{decay_40:.1f}"
             )
     return findings
 

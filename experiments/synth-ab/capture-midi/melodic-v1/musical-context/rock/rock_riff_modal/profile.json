@@ -1,0 +1,39 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "rock",
+  "styleName": "Rock",
+  "profileId": "rock_riff_modal",
+  "profileName": "Riff / Modal Rock",
+  "seed": "3253374663",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 90.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 90.0,
+  "durationSeconds": 21.333333,
+  "tonic": "F#",
+  "mode": "Mixolydian",
+  "formId": "rock-riff-12",
+  "grooveId": "rock-driving-eighth",
+  "fingerprints": {
+    "beat": "5875f8b2f2d0e1781d6a99040a1732a8907993ff97bd03bca81bbf47688426ef",
+    "chord": "731073ee94e35a6e18bdc276cf46541d4b3041c625c3a9f3e40da8e8cb4833f2"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

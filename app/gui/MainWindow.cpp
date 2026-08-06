@@ -2080,9 +2080,6 @@ void MainWindow::setPreparedTrackLoop(bool enabled, std::uint64_t startFrame, st
 
 void MainWindow::restartPreparedTrackQuantized()
 {
-    if (trackController_.model().syncMetronome) {
-        startTrackMetronome();
-    }
     const PlaybackGrid::Position position = metronomeTransport_.grid().position();
     if (!trackRecordingWorkflow_.restartPrepared(position)) {
         appendLog(QStringLiteral("engine command queue unavailable: prepared track restart"));
@@ -4773,6 +4770,12 @@ void MainWindow::selectViewedBank(int bankIndex)
     if (chordGrid_) chordGrid_->setSelectedSectionIndex(viewedBankIndex_);
     if (beatGrid_) beatGrid_->setSelectedSectionIndex(viewedBankIndex_);
     if (lyricGrid_) lyricGrid_->setSelectedSectionIndex(viewedBankIndex_);
+    if (drumKitBox_ && viewedBankIndex_ < beatModel_.sections().size()) {
+        const QSignalBlocker blocker(drumKitBox_);
+        const int index = drumKitBox_->findData(
+            beatModel_.section(viewedBankIndex_).drumKitId);
+        drumKitBox_->setCurrentIndex(index >= 0 ? index : 0);
+    }
     refreshLooperLanes();
 }
 
@@ -7260,10 +7263,6 @@ void MainWindow::updateTrackControls()
         const QSignalBlocker blocker(trackSyncCheck_);
         trackSyncCheck_->setChecked(looperProject_.trackSyncEnabled());
     }
-    if (trackMetronomeSyncCheck_) {
-        const QSignalBlocker blocker(trackMetronomeSyncCheck_);
-        trackMetronomeSyncCheck_->setChecked(model.syncMetronome);
-    }
     const bool trackCompatible = trackController_.model().sampleRateCompatible;
     if (playTrackButton_) {
         playTrackButton_->setEnabled(trackCompatible);
@@ -7695,9 +7694,6 @@ void MainWindow::playTrack()
         if (!preparedMix_.path.isEmpty()) {
             discardPreparedMix(false);
         }
-        if (trackController_.model().syncMetronome) {
-            startTrackMetronome();
-        }
         if (!trackRecordingWorkflow_.restartGlobalTransport(
                 metronomeTransport_.grid().position())) {
             trackController_.requestPlayback(false);
@@ -7716,9 +7712,6 @@ void MainWindow::playTrack()
     if (preparedMixWorkerRunning_ || preparedMix_.path.isEmpty() || !preparedMix_.error.isEmpty()) {
         playPreparedMixWhenReady_ = true;
         regeneratePreparedMix(activeBank);
-        if (trackController_.model().syncMetronome) {
-            startTrackMetronome();
-        }
         if (!trackRecordingWorkflow_.restartGlobalTransport(
                 metronomeTransport_.grid().position())) {
             playPreparedMixWhenReady_ = false;
@@ -7753,9 +7746,6 @@ void MainWindow::stopTrack(std::uint64_t targetFrame)
             metronomeTransport_.grid().position().currentFrame)) {
         appendLog(QStringLiteral("engine command queue unavailable: stop prepared track"));
         return;
-    }
-    if (trackController_.model().syncMetronome) {
-        stopTrackMetronome();
     }
     trackController_.requestPlayback(false);
     updateTrackPlaybackPresentation();
@@ -9387,7 +9377,6 @@ QJsonObject MainWindow::trackToJson() const
 
         {QStringLiteral("pitch_cents"), model.pitchCents},
         {QStringLiteral("track_gain_db"), model.trackGainDb},
-        {QStringLiteral("sync_metronome"), model.syncMetronome},
         {QStringLiteral("loop_enabled"), model.loopEnabled},
         {QStringLiteral("loop_start_seconds"), model.loopStartSeconds},
         {QStringLiteral("loop_end_seconds"), model.loopEndSeconds},
@@ -9430,7 +9419,6 @@ void MainWindow::loadTrackJson(const QJsonObject& object)
     model.speed = object.value(QStringLiteral("speed")).toDouble(model.speed);
     model.pitchCents = object.value(QStringLiteral("pitch_cents")).toInt(model.pitchCents);
     model.trackGainDb = object.value(QStringLiteral("track_gain_db")).toDouble(model.trackGainDb);
-    model.syncMetronome = object.value(QStringLiteral("sync_metronome")).toBool(model.syncMetronome);
     model.loopEnabled = object.value(QStringLiteral("loop_enabled")).toBool(model.loopEnabled);
     model.loopStartSeconds = object.value(QStringLiteral("loop_start_seconds")).toDouble(model.loopStartSeconds);
     model.loopEndSeconds = object.value(QStringLiteral("loop_end_seconds")).toDouble(model.loopEndSeconds);
@@ -10677,9 +10665,6 @@ void MainWindow::stopTrackForPracticeIdeaGeneration()
             appendLog(QStringLiteral(
                 "engine command queue unavailable: stop track before practice idea generation"));
         }
-    }
-    if (trackController_.model().syncMetronome) {
-        stopTrackMetronome();
     }
     updateTrackPlaybackPresentation();
     updateTrackTimeline();

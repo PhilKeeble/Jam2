@@ -1,0 +1,3134 @@
+{
+  "schema": "jam2-profile-context-pack-v1",
+  "generator": "experiments/synth-ab/tools/generate_profile_context_midi.py",
+  "performanceSource": "the same deterministic eight-bar native profile audition used by the Synth A/B web app",
+  "ppq": 480,
+  "styles": [
+    {
+      "id": "pop",
+      "name": "Pop",
+      "profiles": [
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "pop",
+          "styleName": "Pop",
+          "profileId": "pop_loop",
+          "profileName": "Loop-Centred Pop",
+          "seed": "1528705262",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 96.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 96.0,
+          "durationSeconds": 20.0,
+          "tonic": "Ab",
+          "mode": "Major",
+          "formId": "pop-loop-8",
+          "grooveId": "pop-syncopated-kick",
+          "fingerprints": {
+            "beat": "9e4634a4d02c993503be34f905fde13883ad0efeba903097bdfd6d43f66dc6ce",
+            "chord": "45d0470c94e287ae3e8c2f6af56e0d8627b9a0e594ecc0bd038387120f5a1628"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "pop/pop_loop/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 20.0,
+              "noteOnCount": 48,
+              "noteRange": {
+                "minimum": 49,
+                "maximum": 63
+              },
+              "sha256": "03631a3954107bcd1586003a84b15ca09647653db742d5423fa5a8e62ef975c9"
+            },
+            {
+              "file": "pop/pop_loop/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 20.0,
+              "noteOnCount": 26,
+              "noteRange": {
+                "minimum": 63,
+                "maximum": 80
+              },
+              "sha256": "83c80d062214aa20d04e7a0c543d7a75c8e2ecf2f0830c433386e0c26209c645"
+            },
+            {
+              "file": "pop/pop_loop/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 20.0,
+              "noteOnCount": 46,
+              "noteRange": {
+                "minimum": 32,
+                "maximum": 44
+              },
+              "sha256": "bc8ef0b9da7b85e8dd691c95bed0616dbf78fd2c96a69d03eadacb2ab81357e7"
+            },
+            {
+              "file": "pop/pop_loop/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 20.0,
+              "noteOnCount": 109,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 50
+              },
+              "sha256": "2ad089085f58876e954b00a8d267c7d17310ce520b4faa64de676292c9042092"
+            },
+            {
+              "file": "pop/pop_loop/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 20.0,
+              "noteOnCount": 229,
+              "noteRange": {
+                "minimum": 32,
+                "maximum": 80
+              },
+              "sha256": "95ad9b9da96b88356978c5c0cb21c27feaf59259d51d12a7cea48b5a84a1ad4f"
+            }
+          ]
+        },
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "pop",
+          "styleName": "Pop",
+          "profileId": "pop_sectional",
+          "profileName": "Sectional Pop",
+          "seed": "1511909652",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 94.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 94.0,
+          "durationSeconds": 20.425532,
+          "tonic": "F",
+          "mode": "Major",
+          "formId": "pop-sectional-24",
+          "grooveId": "pop-straight-eighth",
+          "fingerprints": {
+            "beat": "6c2ab70fa0dbf8aca9b0994fcce3d7c6a1cfca9f4ca5789a16774fae80763e68",
+            "chord": "922ca0de28955b0a7c64300230072132e7828c991a8f6849bba87150ec4569ce"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "pop/pop_sectional/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 20.425532,
+              "noteOnCount": 72,
+              "noteRange": {
+                "minimum": 48,
+                "maximum": 65
+              },
+              "sha256": "d5af1a8c8aaf1422ece95df90ce1c6eb016ac5b68bb97a4cff2567dae7d9a40b"
+            },
+            {
+              "file": "pop/pop_sectional/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 20.425532,
+              "noteOnCount": 24,
+              "noteRange": {
+                "minimum": 65,
+                "maximum": 81
+              },
+              "sha256": "a0c4ed27ad2b79d95fd89556e8d8caee42b33cee065ea3aa0f253f8c4e8a19f0"
+            },
+            {
+              "file": "pop/pop_sectional/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 20.425532,
+              "noteOnCount": 60,
+              "noteRange": {
+                "minimum": 29,
+                "maximum": 41
+              },
+              "sha256": "e152e4ce14f82a48ae6dcdaec64bce5ffe853180fa1e11d84d5e35c885d8966d"
+            },
+            {
+              "file": "pop/pop_sectional/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 20.425532,
+              "noteOnCount": 80,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 50
+              },
+              "sha256": "c12b5d81b6cec1e54a2ccfe18374272a76c12a2fb4d33e154f4a452dc72c83cd"
+            },
+            {
+              "file": "pop/pop_sectional/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 20.425532,
+              "noteOnCount": 236,
+              "noteRange": {
+                "minimum": 29,
+                "maximum": 81
+              },
+              "sha256": "cd0b45b9e7f9bc46f11d52ab1b45fbb2e270b4d22c9ae0a3786cdfa74c852efe"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rock",
+      "name": "Rock",
+      "profiles": [
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "rock",
+          "styleName": "Rock",
+          "profileId": "rock_riff_modal",
+          "profileName": "Riff / Modal Rock",
+          "seed": "3253374663",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 90.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 90.0,
+          "durationSeconds": 21.333333,
+          "tonic": "F#",
+          "mode": "Mixolydian",
+          "formId": "rock-riff-12",
+          "grooveId": "rock-driving-eighth",
+          "fingerprints": {
+            "beat": "5875f8b2f2d0e1781d6a99040a1732a8907993ff97bd03bca81bbf47688426ef",
+            "chord": "731073ee94e35a6e18bdc276cf46541d4b3041c625c3a9f3e40da8e8cb4833f2"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "rock/rock_riff_modal/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.333333,
+              "noteOnCount": 49,
+              "noteRange": {
+                "minimum": 39,
+                "maximum": 66
+              },
+              "sha256": "84e1bd22953bd84fe9dda27d30d7dc8b9fcd3e4195d06eccc434e5694f38dae2"
+            },
+            {
+              "file": "rock/rock_riff_modal/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.333333,
+              "noteOnCount": 23,
+              "noteRange": {
+                "minimum": 61,
+                "maximum": 80
+              },
+              "sha256": "4968a3899a34054cfe9cd12e03deef5768ef7ad374eb2461e0cc4912cd3795e0"
+            },
+            {
+              "file": "rock/rock_riff_modal/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.333333,
+              "noteOnCount": 32,
+              "noteRange": {
+                "minimum": 30,
+                "maximum": 42
+              },
+              "sha256": "99576ca74a0816784769349cdddbc16e31bda71d7ec5b74f3d23a1da8126fb56"
+            },
+            {
+              "file": "rock/rock_riff_modal/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.333333,
+              "noteOnCount": 81,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 50
+              },
+              "sha256": "89e2ae416bb87a3280a75c481fe905fe173a94aa6cbfc2ce06f3081902350bd3"
+            },
+            {
+              "file": "rock/rock_riff_modal/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 21.333333,
+              "noteOnCount": 185,
+              "noteRange": {
+                "minimum": 30,
+                "maximum": 80
+              },
+              "sha256": "ae9891a39da3c8ec56c0f1916329dba024b8f4e221b46e50d79a528053d907ad"
+            }
+          ]
+        },
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "rock",
+          "styleName": "Rock",
+          "profileId": "rock_shuffle_blues",
+          "profileName": "Shuffle / Blues Rock",
+          "seed": "1505954517",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 88.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 88.0,
+          "durationSeconds": 21.818182,
+          "tonic": "C#",
+          "mode": "Blues",
+          "formId": "rock-blues-12",
+          "grooveId": "blues-texas-shuffle",
+          "fingerprints": {
+            "beat": "181e415c180d2735ecd950a49b7cddb06542b80c2019831ea85b5a5a3905ccc2",
+            "chord": "560dcd1b9fc666e7bec558d0674faec210cda972ce2dedf14f938ba7a58fda04"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "rock/rock_shuffle_blues/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.818182,
+              "noteOnCount": 42,
+              "noteRange": {
+                "minimum": 46,
+                "maximum": 64
+              },
+              "sha256": "46b574711fe2c71546e42e6b7077a26f0c72f5cdf26388436dcca7558028dcef"
+            },
+            {
+              "file": "rock/rock_shuffle_blues/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.818182,
+              "noteOnCount": 19,
+              "noteRange": {
+                "minimum": 68,
+                "maximum": 80
+              },
+              "sha256": "b75e36e0c75b5d7c9715cc766ea38dd1c226ae1825bcb599b5f0f887f747bbdb"
+            },
+            {
+              "file": "rock/rock_shuffle_blues/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.818182,
+              "noteOnCount": 32,
+              "noteRange": {
+                "minimum": 30,
+                "maximum": 42
+              },
+              "sha256": "f965d07bcb1a8c968bae5a298e6611374ee413d360052ef07859d8069166af81"
+            },
+            {
+              "file": "rock/rock_shuffle_blues/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.818182,
+              "noteOnCount": 83,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 50
+              },
+              "sha256": "d706a79c626c7e77b2079de63a6d18f82ba44626e6cc4605b528d80a72d5ceea"
+            },
+            {
+              "file": "rock/rock_shuffle_blues/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 21.818182,
+              "noteOnCount": 176,
+              "noteRange": {
+                "minimum": 30,
+                "maximum": 80
+              },
+              "sha256": "ac71c3c531841a0bd8adf0d47466cabe5d808209da0a0303b55dce95b950cfcf"
+            }
+          ]
+        },
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "rock",
+          "styleName": "Rock",
+          "profileId": "rock_punk_garage",
+          "profileName": "Punk / Garage Rock",
+          "seed": "3611987298",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 168.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 168.0,
+          "durationSeconds": 11.428571,
+          "tonic": "F",
+          "mode": "Major",
+          "formId": "punk-8",
+          "grooveId": "rock-alt-sync",
+          "fingerprints": {
+            "beat": "4fd28f35e24a528a684e460304c513be4ce7770bde8aa1ca4f73eec581162faa",
+            "chord": "25d9b278db622c69bb21838bf4bd8448bdfa50e7cdc3ce6e0a78fd4121d7abca"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "rock/rock_punk_garage/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 11.428571,
+              "noteOnCount": 145,
+              "noteRange": {
+                "minimum": 38,
+                "maximum": 65
+              },
+              "sha256": "26df7ae7cf6e2ab8b8d3bbd5f20db8d6029b076a2bbef72b3e22f39bcbcbfa91"
+            },
+            {
+              "file": "rock/rock_punk_garage/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 11.428571,
+              "noteOnCount": 31,
+              "noteRange": {
+                "minimum": 57,
+                "maximum": 77
+              },
+              "sha256": "c67dc54f8e206301f2239f4297c280922f411f04051cd3635fa5227580f73b5f"
+            },
+            {
+              "file": "rock/rock_punk_garage/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 11.428571,
+              "noteOnCount": 64,
+              "noteRange": {
+                "minimum": 29,
+                "maximum": 41
+              },
+              "sha256": "811eb5b13ca5ded41153b992049caba13aba8a8938dd1ab7d5de396b6e76299e"
+            },
+            {
+              "file": "rock/rock_punk_garage/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 11.428571,
+              "noteOnCount": 132,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 49
+              },
+              "sha256": "1b103c2fb86b7f2e6e3377320de9844a02e0843927ad071ba85841a03af5c571"
+            },
+            {
+              "file": "rock/rock_punk_garage/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 11.428571,
+              "noteOnCount": 372,
+              "noteRange": {
+                "minimum": 29,
+                "maximum": 77
+              },
+              "sha256": "5aa59c2fc102e85823740fbc48ed5e82fb8608e844ab83b717492eae9999e4d0"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "jazz",
+      "name": "Jazz",
+      "profiles": [
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "jazz",
+          "styleName": "Jazz",
+          "profileId": "jazz_swing_standards",
+          "profileName": "Swing / Standards",
+          "seed": "2046077045",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 86.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 86.0,
+          "durationSeconds": 22.325581,
+          "tonic": "Db",
+          "mode": "Major",
+          "formId": "jazz-aaba-32",
+          "grooveId": "jazz-brush-ballad",
+          "fingerprints": {
+            "beat": "eec8f03a30ecf7b2fc95778168d04608dc10e897a6168a2514fdad61268b1088",
+            "chord": "7ed4509addff09bf5a3a90c28d763a2d494afb85bc77f45f8ce74597d7d3fc50"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "jazz/jazz_swing_standards/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.325581,
+              "noteOnCount": 24,
+              "noteRange": {
+                "minimum": 48,
+                "maximum": 65
+              },
+              "sha256": "7fe8e8f26b36c242413e142acef09b03de54b34f0971442feab1d151972f7741"
+            },
+            {
+              "file": "jazz/jazz_swing_standards/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.325581,
+              "noteOnCount": 14,
+              "noteRange": {
+                "minimum": 61,
+                "maximum": 80
+              },
+              "sha256": "ab0db3c51e4eb5a20d582489de98fca55f9a7e8807d41c6389c47ff07e651820"
+            },
+            {
+              "file": "jazz/jazz_swing_standards/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.325581,
+              "noteOnCount": 24,
+              "noteRange": {
+                "minimum": 29,
+                "maximum": 39
+              },
+              "sha256": "a3d62d32198e66b78605cf43f7d3bf836902cfcdd92040d302530b5d22600c6d"
+            },
+            {
+              "file": "jazz/jazz_swing_standards/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.325581,
+              "noteOnCount": 103,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 51
+              },
+              "sha256": "d940c933a757d23d0adbea1f9599ec1e2839208b379b3fd92f0dedac65630566"
+            },
+            {
+              "file": "jazz/jazz_swing_standards/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 22.325581,
+              "noteOnCount": 165,
+              "noteRange": {
+                "minimum": 29,
+                "maximum": 80
+              },
+              "sha256": "7b1cf1fe968909f1ad30db913e4d3bc3477f53be4e105ce74bde9c6e22aed558"
+            }
+          ]
+        },
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "jazz",
+          "styleName": "Jazz",
+          "profileId": "jazz_bebop",
+          "profileName": "Bebop",
+          "seed": "1170008260",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 222.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 222.0,
+          "durationSeconds": 8.648649,
+          "tonic": "G",
+          "mode": "Natural Minor",
+          "formId": "bebop-32",
+          "grooveId": "jazz-uptempo-ride",
+          "fingerprints": {
+            "beat": "54aafe3a8bd3ea098e900151058dd42b8a17632ae300eed18b75f636147908c4",
+            "chord": "6d51a1c143660745ca0b1822e74d35bd43ec7dfe6a49f5ddffeac4d3db527f9b"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "jazz/jazz_bebop/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 8.648649,
+              "noteOnCount": 96,
+              "noteRange": {
+                "minimum": 48,
+                "maximum": 63
+              },
+              "sha256": "bd0bf94915f8ad9f781467cbdbd564770b92285e240c39ecfa8ad2a6dd151203"
+            },
+            {
+              "file": "jazz/jazz_bebop/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 8.648649,
+              "noteOnCount": 44,
+              "noteRange": {
+                "minimum": 57,
+                "maximum": 81
+              },
+              "sha256": "c5d153e9099ad2724e0613e8c69806c45af381aee67c5ed26f7f651098f7ca93"
+            },
+            {
+              "file": "jazz/jazz_bebop/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 8.648649,
+              "noteOnCount": 32,
+              "noteRange": {
+                "minimum": 45,
+                "maximum": 55
+              },
+              "sha256": "957df1e7a42c0990ae9e022591780fa370807ff341cba279cf5585f7ef1ad395"
+            },
+            {
+              "file": "jazz/jazz_bebop/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 8.648649,
+              "noteOnCount": 123,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 51
+              },
+              "sha256": "8df3fdf13ee6071d6616947173c68c663416829db9ca0dd974da4b80633c308a"
+            },
+            {
+              "file": "jazz/jazz_bebop/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 8.648649,
+              "noteOnCount": 295,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 81
+              },
+              "sha256": "5aa628ce2ae9b6611eff498fabf4fd05dcc9893c75465f5993a245f422e08412"
+            }
+          ]
+        },
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "jazz",
+          "styleName": "Jazz",
+          "profileId": "jazz_fusion",
+          "profileName": "Jazz Fusion",
+          "seed": "2539728600",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "7/8",
+          "sourcePulseBpm": 150.0,
+          "sourcePulseBeatUnit": 8,
+          "dawQuarterNoteBpm": 75.0,
+          "durationSeconds": 22.4,
+          "tonic": "C#",
+          "mode": "Natural Minor",
+          "formId": "fusion-14",
+          "grooveId": "jazz-fusion-half-time",
+          "fingerprints": {
+            "beat": "df318c3a4e9e526ac5a0caa584371c78e7c3c3291363bee6fd2af4379e031c07",
+            "chord": "82a1f80fbb67f3081cff69d4af14f7ee7b5735c7842f1069c879c5b3cfbdb35d"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "jazz/jazz_fusion/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.4,
+              "noteOnCount": 48,
+              "noteRange": {
+                "minimum": 47,
+                "maximum": 64
+              },
+              "sha256": "71605f1deb928879222b55789210ee7a222a20586fa908005df57ddb10634a5d"
+            },
+            {
+              "file": "jazz/jazz_fusion/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.4,
+              "noteOnCount": 51,
+              "noteRange": {
+                "minimum": 64,
+                "maximum": 81
+              },
+              "sha256": "d5ba1950c2f9037611bd022db7ac2d7183c4801e0e141504186e7919297f6a76"
+            },
+            {
+              "file": "jazz/jazz_fusion/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.4,
+              "noteOnCount": 44,
+              "noteRange": {
+                "minimum": 28,
+                "maximum": 44
+              },
+              "sha256": "ba7494f02111f148b2fc09165332937d007573b3287e662782fb273fe05c9c63"
+            },
+            {
+              "file": "jazz/jazz_fusion/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.4,
+              "noteOnCount": 201,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 51
+              },
+              "sha256": "fefeaaf4876a0cb88bce57d9711248d3d693329696cd800f1ce25e90a842ea21"
+            },
+            {
+              "file": "jazz/jazz_fusion/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 22.4,
+              "noteOnCount": 344,
+              "noteRange": {
+                "minimum": 28,
+                "maximum": 81
+              },
+              "sha256": "b1c2071468210463dc24c043c6b4bc6def9a16f6341a475a7111dacbc641aefd"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "modal-jam",
+      "name": "Modal Jam",
+      "profiles": [
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "modal-jam",
+          "styleName": "Modal Jam",
+          "profileId": "modal_groove",
+          "profileName": "Modal Groove",
+          "seed": "2105641928",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 100.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 100.0,
+          "durationSeconds": 19.2,
+          "tonic": "C#",
+          "mode": "Dorian",
+          "formId": "modal-groove-8",
+          "grooveId": "modal-ride-led",
+          "fingerprints": {
+            "beat": "e7997d7db5935d09b2eb0886c14c68b36da3bfb130c620ffa592ac40515ce552",
+            "chord": "6ceb54a7b7bac1ca8b00bea8689e7939827ac44e240285711fb7507af7b24b75"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "support",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "04-support.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "modal-jam/modal_groove/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 19.2,
+              "noteOnCount": 42,
+              "noteRange": {
+                "minimum": 37,
+                "maximum": 58
+              },
+              "sha256": "1194aa5a341a250f1ec618b988f948ecc8172c1b4a81389388e7c496e4c7b4a1"
+            },
+            {
+              "file": "modal-jam/modal_groove/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 19.2,
+              "noteOnCount": 25,
+              "noteRange": {
+                "minimum": 58,
+                "maximum": 78
+              },
+              "sha256": "df5026f077f234e15eb6baba9be9f3e13dfa3d41a64c0dc8f8c771b154543d3b"
+            },
+            {
+              "file": "modal-jam/modal_groove/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 19.2,
+              "noteOnCount": 16,
+              "noteRange": {
+                "minimum": 32,
+                "maximum": 37
+              },
+              "sha256": "f531e8cec91ed3af8a7e1e80d18811d5db8ce71b136cbe58aa9a7e36440500bf"
+            },
+            {
+              "file": "modal-jam/modal_groove/04-support.mid",
+              "role": "support",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 19.2,
+              "noteOnCount": 1,
+              "noteRange": {
+                "minimum": 49,
+                "maximum": 49
+              },
+              "sha256": "6fc29e98f9f8be98e17efa1a4117947aaf127463a3236b4443f5f09a26d3f4b3"
+            },
+            {
+              "file": "modal-jam/modal_groove/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 19.2,
+              "noteOnCount": 93,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 54
+              },
+              "sha256": "45b715a539f0a640c0734007950ad0ed640cee370e58ec0d3f51d5520176a776"
+            },
+            {
+              "file": "modal-jam/modal_groove/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 19.2,
+              "noteOnCount": 177,
+              "noteRange": {
+                "minimum": 32,
+                "maximum": 78
+              },
+              "sha256": "911c6a6cf7eb37dbd230daacfd1ab588971371779360098fb4f0b697640ac09f"
+            }
+          ]
+        },
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "modal-jam",
+          "styleName": "Modal Jam",
+          "profileId": "modal_atmospheric",
+          "profileName": "Atmospheric Modal",
+          "seed": "1527951245",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "3/4",
+          "sourcePulseBpm": 64.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 64.0,
+          "durationSeconds": 22.5,
+          "tonic": "D",
+          "mode": "Natural Minor",
+          "formId": "modal-atmospheric-12",
+          "grooveId": "modal-ride-led",
+          "fingerprints": {
+            "beat": "6d82e5f5ed7365edb3d2c040288e32a4ba29737422faf4ffd6e16256e7711ae8",
+            "chord": "1bd005ff254e0d1cee86e890f4edc804c83fdd94f02c1aa148dc2679f1ca1ad6"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "support",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "04-support.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "modal-jam/modal_atmospheric/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.5,
+              "noteOnCount": 36,
+              "noteRange": {
+                "minimum": 38,
+                "maximum": 62
+              },
+              "sha256": "3e7ce173d028f79e5633165ca6f0b879a6ef0f313fcb805ec19d1172e63085bf"
+            },
+            {
+              "file": "modal-jam/modal_atmospheric/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.5,
+              "noteOnCount": 11,
+              "noteRange": {
+                "minimum": 65,
+                "maximum": 77
+              },
+              "sha256": "b837be3befda6309b701fb07199d2bed79d986fc05cb2b3e7044fbf20ca2bbdf"
+            },
+            {
+              "file": "modal-jam/modal_atmospheric/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.5,
+              "noteOnCount": 2,
+              "noteRange": {
+                "minimum": 38,
+                "maximum": 38
+              },
+              "sha256": "d12eaf31056f1275ad28d3d97d8d8aa72cd272b5e3b034aad0252a4b784a5036"
+            },
+            {
+              "file": "modal-jam/modal_atmospheric/04-support.mid",
+              "role": "support",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.5,
+              "noteOnCount": 1,
+              "noteRange": {
+                "minimum": 50,
+                "maximum": 50
+              },
+              "sha256": "0a2d29eb544c90360e30f1a990805d1bfd5fdaac9cf8ad9b4e43ac0cac9fe0a3"
+            },
+            {
+              "file": "modal-jam/modal_atmospheric/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.5,
+              "noteOnCount": 69,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 54
+              },
+              "sha256": "23f9d400e452804fb1fab36375a6db89b9d701d30ffd720a6442f119d71aa919"
+            },
+            {
+              "file": "modal-jam/modal_atmospheric/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 22.5,
+              "noteOnCount": 119,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 77
+              },
+              "sha256": "3be8b7364432a435b48713dae67293b1688e2c417a3bc36a1c358b26212d1068"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "blues",
+      "name": "Blues",
+      "profiles": [
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "blues",
+          "styleName": "Blues",
+          "profileId": "blues_dominant",
+          "profileName": "Dominant / Major Blues",
+          "seed": "2223768394",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 148.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 148.0,
+          "durationSeconds": 12.972973,
+          "tonic": "F",
+          "mode": "Dominant Blues",
+          "formId": "blues-12",
+          "grooveId": "blues-half-time",
+          "fingerprints": {
+            "beat": "46269ef63c3c0d2ae9c94d8fb7936bfad70572f224bd3a892554aa7d7ddd3cd9",
+            "chord": "5c2c656ea8a64c5bced758ee3da531039845d152f26bb7d7d4a954ebe22f11f3"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "blues/blues_dominant/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 12.972973,
+              "noteOnCount": 81,
+              "noteRange": {
+                "minimum": 53,
+                "maximum": 68
+              },
+              "sha256": "4515db017f395c336c5131a356bcfcc8203f3b4e3617b3f6804114329ce7a9c9"
+            },
+            {
+              "file": "blues/blues_dominant/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 12.972973,
+              "noteOnCount": 35,
+              "noteRange": {
+                "minimum": 63,
+                "maximum": 81
+              },
+              "sha256": "73d72cfda4dba097ed1111c7ad15892ebd81a5410774069840f2c89f0a92ca46"
+            },
+            {
+              "file": "blues/blues_dominant/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 12.972973,
+              "noteOnCount": 32,
+              "noteRange": {
+                "minimum": 29,
+                "maximum": 41
+              },
+              "sha256": "16017c2fb9c2293ba7827d56ea1f13880561f98a93ff441609c5b0f7a9dee06b"
+            },
+            {
+              "file": "blues/blues_dominant/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 12.972973,
+              "noteOnCount": 98,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 51
+              },
+              "sha256": "3071f311a7f65bd92859a9856397c50fbeb53465a89288baad5b3af464c15f09"
+            },
+            {
+              "file": "blues/blues_dominant/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 12.972973,
+              "noteOnCount": 246,
+              "noteRange": {
+                "minimum": 29,
+                "maximum": 81
+              },
+              "sha256": "c2d050235ce0346ed95d08c6b96f75973793fe2d9cce89c0092d6951f2971c04"
+            }
+          ]
+        },
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "blues",
+          "styleName": "Blues",
+          "profileId": "blues_minor",
+          "profileName": "Minor Blues",
+          "seed": "3927100429",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 108.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 108.0,
+          "durationSeconds": 17.777778,
+          "tonic": "C",
+          "mode": "Dorian",
+          "formId": "minor-blues-12",
+          "grooveId": "blues-straight-eighth",
+          "fingerprints": {
+            "beat": "4bcc5b35a7a493890d3af120d34bccef3140c8d904bcc695da0e92e3e9b1e56d",
+            "chord": "baa908f8821b07c65249792756482d849fc9364723c2edf4d5617c47b2c644e6"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "blues/blues_minor/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 17.777778,
+              "noteOnCount": 78,
+              "noteRange": {
+                "minimum": 48,
+                "maximum": 63
+              },
+              "sha256": "00e540b59ce35b71cf01f75a52bb564b90b180a859136a52c1afba945a39d873"
+            },
+            {
+              "file": "blues/blues_minor/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 17.777778,
+              "noteOnCount": 36,
+              "noteRange": {
+                "minimum": 70,
+                "maximum": 81
+              },
+              "sha256": "34326ef480293fcae545ea8e6360b08cc2077be77f629c3f008b8c89f333ae3f"
+            },
+            {
+              "file": "blues/blues_minor/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 17.777778,
+              "noteOnCount": 32,
+              "noteRange": {
+                "minimum": 29,
+                "maximum": 41
+              },
+              "sha256": "a272563f18c8425302d7482ea584bbbd72335224731553fbf06eeb713af437a5"
+            },
+            {
+              "file": "blues/blues_minor/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 17.777778,
+              "noteOnCount": 100,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 51
+              },
+              "sha256": "2ac5c0c0562e782beb89cbc970292b2e0eacb51971ae3a65d063a3e50f801298"
+            },
+            {
+              "file": "blues/blues_minor/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 17.777778,
+              "noteOnCount": 246,
+              "noteRange": {
+                "minimum": 29,
+                "maximum": 81
+              },
+              "sha256": "16bb08018893bf0618c59e88628860693d26c2204da2928b30cb5867e40032b7"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "jpop-anisong",
+      "name": "J-Pop / Anisong",
+      "profiles": [
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "jpop-anisong",
+          "styleName": "J-Pop / Anisong",
+          "profileId": "jpop_anisong_rock",
+          "profileName": "Anisong Rock",
+          "seed": "4075346349",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 176.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 176.0,
+          "durationSeconds": 10.909091,
+          "tonic": "F#",
+          "mode": "Major",
+          "formId": "jpop-rock-24",
+          "grooveId": "anime-syncopated-kick",
+          "fingerprints": {
+            "beat": "a81d4771a108e43178cc3496e951c1d36c1cf71377fd7997f306026e9213731f",
+            "chord": "7ce96637582c7fbc07bac7705d35433aa2c0e04cae0aa7b991af629ab1b1b307"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "jpop-anisong/jpop_anisong_rock/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 10.909091,
+              "noteOnCount": 81,
+              "noteRange": {
+                "minimum": 41,
+                "maximum": 66
+              },
+              "sha256": "18885fad821f86a2811cd872b217f6539226f45c12bba864f2eab52908afb954"
+            },
+            {
+              "file": "jpop-anisong/jpop_anisong_rock/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 10.909091,
+              "noteOnCount": 28,
+              "noteRange": {
+                "minimum": 66,
+                "maximum": 80
+              },
+              "sha256": "3be92485a3e45ff2054b4803973ffc9355eb7be081103eadaa4afb23ab42768b"
+            },
+            {
+              "file": "jpop-anisong/jpop_anisong_rock/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 10.909091,
+              "noteOnCount": 52,
+              "noteRange": {
+                "minimum": 29,
+                "maximum": 51
+              },
+              "sha256": "68f8495a99530213a4fe1ed17b32d056213c4a0e4059841ed34efbfda60fccdd"
+            },
+            {
+              "file": "jpop-anisong/jpop_anisong_rock/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 10.909091,
+              "noteOnCount": 86,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 51
+              },
+              "sha256": "2807b33b446bf3744ce04efdf69d0be4deb4afc337bfd6b261b0a5c709df5032"
+            },
+            {
+              "file": "jpop-anisong/jpop_anisong_rock/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 10.909091,
+              "noteOnCount": 247,
+              "noteRange": {
+                "minimum": 29,
+                "maximum": 80
+              },
+              "sha256": "35086176f452cd792b0fe97cd50d34a5d8b8236a8407a75396dd617ff8c02f17"
+            }
+          ]
+        },
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "jpop-anisong",
+          "styleName": "J-Pop / Anisong",
+          "profileId": "jpop_idol_dance",
+          "profileName": "Idol / Dance J-Pop",
+          "seed": "1257713078",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 124.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 124.0,
+          "durationSeconds": 15.483871,
+          "tonic": "B",
+          "mode": "Natural Minor",
+          "formId": "jpop-idol-16",
+          "grooveId": "anime-syncopated-kick",
+          "fingerprints": {
+            "beat": "23db337c8dc63bb8bf29f9b417e1b3f211d41fbb38905977fdb92e75413ca90b",
+            "chord": "1ef9c7eeb6be2fc9bc194a5c0459df08d3acc112dd30d64a3e2ba87d152ad080"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "support",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "04-support.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "jpop-anisong/jpop_idol_dance/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 15.483871,
+              "noteOnCount": 72,
+              "noteRange": {
+                "minimum": 50,
+                "maximum": 66
+              },
+              "sha256": "cf4c1e2d876b4b101ff1ddbdaf50047d34e730ffe5f816e5066acd4533409ae3"
+            },
+            {
+              "file": "jpop-anisong/jpop_idol_dance/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 15.483871,
+              "noteOnCount": 30,
+              "noteRange": {
+                "minimum": 59,
+                "maximum": 81
+              },
+              "sha256": "a55c502a3bb14a445e8812ccda88ecd27df489accb3b9abd28bea7d7e76dfe2d"
+            },
+            {
+              "file": "jpop-anisong/jpop_idol_dance/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 15.483871,
+              "noteOnCount": 46,
+              "noteRange": {
+                "minimum": 28,
+                "maximum": 43
+              },
+              "sha256": "bed071f2562150b0b8de898280e1547284479e486378feb12b2e8fb670ecf8a4"
+            },
+            {
+              "file": "jpop-anisong/jpop_idol_dance/04-support.mid",
+              "role": "support",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 15.483871,
+              "noteOnCount": 2,
+              "noteRange": {
+                "minimum": 61,
+                "maximum": 61
+              },
+              "sha256": "5df5a3e264f1537c1b0afcdcb30392def046b7e333d1b201feff44caa17ece87"
+            },
+            {
+              "file": "jpop-anisong/jpop_idol_dance/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 15.483871,
+              "noteOnCount": 94,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 49
+              },
+              "sha256": "fe689cbe711317cbb0bd0e1e6291b611d7fcd8b69e68aa43789b3133dc63ef51"
+            },
+            {
+              "file": "jpop-anisong/jpop_idol_dance/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 15.483871,
+              "noteOnCount": 244,
+              "noteRange": {
+                "minimum": 28,
+                "maximum": 81
+              },
+              "sha256": "5a420a2b1cf768fb0812b3de6c346ce6b75689af83e81d6ec7d14805c14c5369"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "country",
+      "name": "Country",
+      "profiles": [
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "country",
+          "styleName": "Country",
+          "profileId": "country_honky_tonk",
+          "profileName": "Honky-Tonk / Two-Step",
+          "seed": "890400855",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 122.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 122.0,
+          "durationSeconds": 15.737705,
+          "tonic": "Eb",
+          "mode": "Major",
+          "formId": "country-16",
+          "grooveId": "country-boom-chick",
+          "fingerprints": {
+            "beat": "33605a233ae1e8eed11284eb7077f5f64c2260578cb714342c7e850e7dba3780",
+            "chord": "3b19b80c03d7302b39c670d0a96d3de47a4b34b99b128cb314709518c049f43a"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "support",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "04-support.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "country/country_honky_tonk/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 15.737705,
+              "noteOnCount": 48,
+              "noteRange": {
+                "minimum": 48,
+                "maximum": 65
+              },
+              "sha256": "47bdf736b14528ab254e4ab10dfbf59f52468c26556e89cbf8d2541a9d4f7bb9"
+            },
+            {
+              "file": "country/country_honky_tonk/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 15.737705,
+              "noteOnCount": 26,
+              "noteRange": {
+                "minimum": 63,
+                "maximum": 80
+              },
+              "sha256": "6ea6142ddb311e7dfae75c3b407f9d301914dd20f29399e0f9e2f1a35b697bea"
+            },
+            {
+              "file": "country/country_honky_tonk/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 15.737705,
+              "noteOnCount": 22,
+              "noteRange": {
+                "minimum": 29,
+                "maximum": 39
+              },
+              "sha256": "94bc39cae2af7f255a3c4cc369a506bac9bb1da3521806c46e9a0da367da0aa4"
+            },
+            {
+              "file": "country/country_honky_tonk/04-support.mid",
+              "role": "support",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 15.737705,
+              "noteOnCount": 2,
+              "noteRange": {
+                "minimum": 62,
+                "maximum": 63
+              },
+              "sha256": "54d8168e5ccd25afc7e8d4afa74875f5be26396dd41105fa58dcb874139fc618"
+            },
+            {
+              "file": "country/country_honky_tonk/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 15.737705,
+              "noteOnCount": 72,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 50
+              },
+              "sha256": "bac3e85c4374f4a316f3cd2fad7006b9b0a5392ed12c9e38fc6a83bcfc6e55fd"
+            },
+            {
+              "file": "country/country_honky_tonk/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 15.737705,
+              "noteOnCount": 170,
+              "noteRange": {
+                "minimum": 29,
+                "maximum": 80
+              },
+              "sha256": "d2e05fef365f48c00919ce66af6b1d5041f2974607ac7d614e23631c9ff041d7"
+            }
+          ]
+        },
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "country",
+          "styleName": "Country",
+          "profileId": "country_contemporary",
+          "profileName": "Contemporary Country",
+          "seed": "3893610488",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 72.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 72.0,
+          "durationSeconds": 26.666667,
+          "tonic": "Db",
+          "mode": "Major",
+          "formId": "country-pop-16",
+          "grooveId": "country-rock",
+          "fingerprints": {
+            "beat": "6b91a78755126b97b7051a7d0a984f106b20fcfc543716c38367ef20cab04099",
+            "chord": "828b418331c33bc10c46e99fbe6f723c50112956da94ad351c771dbedc8bd360"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "support",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "04-support.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "country/country_contemporary/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 26.666667,
+              "noteOnCount": 95,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 68
+              },
+              "sha256": "f07a62c6d0c5ce71247d854f12f41f947fa1dd9f1ab63c977b2a4db517618515"
+            },
+            {
+              "file": "country/country_contemporary/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 26.666667,
+              "noteOnCount": 28,
+              "noteRange": {
+                "minimum": 65,
+                "maximum": 80
+              },
+              "sha256": "1cfca9bdf3ac3cad7381a430445295d28bd1ffe70b8af7a0dfbdb0e6a4bf5d86"
+            },
+            {
+              "file": "country/country_contemporary/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 26.666667,
+              "noteOnCount": 23,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 44
+              },
+              "sha256": "b088d436b558636c12e0625b90c67825f77bbb9b4934c4012bde67a24621a83e"
+            },
+            {
+              "file": "country/country_contemporary/04-support.mid",
+              "role": "support",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 26.666667,
+              "noteOnCount": 1,
+              "noteRange": {
+                "minimum": 63,
+                "maximum": 63
+              },
+              "sha256": "10023d0f12df510b986eb6d826dde425dfc75e4c82ec0f4d70220df5553f35a0"
+            },
+            {
+              "file": "country/country_contemporary/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 26.666667,
+              "noteOnCount": 100,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 51
+              },
+              "sha256": "6a26bcfc1526fa12dddba88cebf592953715cf0eb6a86c620ff0318ad0fbf32d"
+            },
+            {
+              "file": "country/country_contemporary/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 26.666667,
+              "noteOnCount": 247,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 80
+              },
+              "sha256": "81de7c2bc64847f439782217ebc6fec18ef15724249e44ee7ae662a309667755"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "electronic",
+      "name": "Electronic",
+      "profiles": [
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "electronic",
+          "styleName": "Electronic",
+          "profileId": "electronic_house",
+          "profileName": "House",
+          "seed": "3653133489",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 124.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 124.0,
+          "durationSeconds": 15.483871,
+          "tonic": "Eb",
+          "mode": "Major",
+          "formId": "house-16",
+          "grooveId": "edm-disco-house",
+          "fingerprints": {
+            "beat": "b3a480df40686fa96756443d421b9cc6eaffd319893daef4f2c7fc4155d0338c",
+            "chord": "f33c3d2e0018850836a78fe752163f1b19c30d937cc3d16c61184795505a37a2"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "electronic/electronic_house/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 15.483871,
+              "noteOnCount": 72,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 62
+              },
+              "sha256": "32fe5557322dfa4c99b4fb9b6e3358369f3af0a8f0bbbb5e8dd53350e2fe78e4"
+            },
+            {
+              "file": "electronic/electronic_house/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 15.483871,
+              "noteOnCount": 16,
+              "noteRange": {
+                "minimum": 58,
+                "maximum": 75
+              },
+              "sha256": "95ec4a8e6b25e2c296e1177aa805bdc6728a1f8bfaff9b3e8dac0be2cc70d35b"
+            },
+            {
+              "file": "electronic/electronic_house/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 15.483871,
+              "noteOnCount": 16,
+              "noteRange": {
+                "minimum": 32,
+                "maximum": 39
+              },
+              "sha256": "30622362a038c124821885fb0085a539515bc4b762213e0bdd6b0377b92fe2a5"
+            },
+            {
+              "file": "electronic/electronic_house/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 15.483871,
+              "noteOnCount": 168,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 51
+              },
+              "sha256": "9b7ff16da08512a56f4c58a0eb72e88bd94de34c74ddf1cdb6d66f650a3aac27"
+            },
+            {
+              "file": "electronic/electronic_house/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 15.483871,
+              "noteOnCount": 272,
+              "noteRange": {
+                "minimum": 32,
+                "maximum": 75
+              },
+              "sha256": "3a0c43556665de5b103c94b13f6a3bc4eb0e421ff4a2fd0d89301055531ddded"
+            }
+          ]
+        },
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "electronic",
+          "styleName": "Electronic",
+          "profileId": "electronic_techno",
+          "profileName": "Techno",
+          "seed": "562274874",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 132.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 132.0,
+          "durationSeconds": 14.545455,
+          "tonic": "Bb",
+          "mode": "Natural Minor",
+          "formId": "techno-16",
+          "grooveId": "edm-techno",
+          "fingerprints": {
+            "beat": "b535648ce17c1bcc55082b6caa16e898492e6334344fe47bffca776550666f66",
+            "chord": "1861ae43b8e0a0793c09a2b3a326bbfd39cf7159048f4b5fb1ca9cd80a3ffd7d"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "support",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "04-support.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "electronic/electronic_techno/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 14.545455,
+              "noteOnCount": 53,
+              "noteRange": {
+                "minimum": 46,
+                "maximum": 61
+              },
+              "sha256": "1704012794b85c3ef3733737eaaa78b26f70fe1df9aac4c41b6682229d419d88"
+            },
+            {
+              "file": "electronic/electronic_techno/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 14.545455,
+              "noteOnCount": 17,
+              "noteRange": {
+                "minimum": 66,
+                "maximum": 70
+              },
+              "sha256": "9f62c34249d7bb20ddc794dcf949d75e518a6c96c0915657f661d04487fd7867"
+            },
+            {
+              "file": "electronic/electronic_techno/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 14.545455,
+              "noteOnCount": 32,
+              "noteRange": {
+                "minimum": 41,
+                "maximum": 46
+              },
+              "sha256": "5ab58d747f6a34d154370473ce60b9f84cc63bb6c217f439b0669b3b23092157"
+            },
+            {
+              "file": "electronic/electronic_techno/04-support.mid",
+              "role": "support",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 14.545455,
+              "noteOnCount": 3,
+              "noteRange": {
+                "minimum": 58,
+                "maximum": 58
+              },
+              "sha256": "1623afa2b25044d43b1c97745b045690610a6bd2f195629997775cf0898079b0"
+            },
+            {
+              "file": "electronic/electronic_techno/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 14.545455,
+              "noteOnCount": 118,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 49
+              },
+              "sha256": "f7e9f5859861fba323bca20803a1f279d257c02ec757e0f45320f1eac7a1f03e"
+            },
+            {
+              "file": "electronic/electronic_techno/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 14.545455,
+              "noteOnCount": 223,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 70
+              },
+              "sha256": "f4c28f930d06bfdd4f2c73bd83b077a38b0a25a5a337fd6bb646a853cc453e5c"
+            }
+          ]
+        },
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "electronic",
+          "styleName": "Electronic",
+          "profileId": "electronic_breakbeat",
+          "profileName": "Breakbeat",
+          "seed": "976860934",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 144.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 144.0,
+          "durationSeconds": 13.333333,
+          "tonic": "F",
+          "mode": "Natural Minor",
+          "formId": "breakbeat-16",
+          "grooveId": "edm-breakbeat",
+          "fingerprints": {
+            "beat": "a249bdcd50c21dfae62bbf70b6fe81f1707c96ae198f35a5ce2f19d160d64dc0",
+            "chord": "5e246467cefd20fe56e2756ff7201dd510f72f565ddbe0927e4867d9efce041e"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "electronic/electronic_breakbeat/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 13.333333,
+              "noteOnCount": 66,
+              "noteRange": {
+                "minimum": 41,
+                "maximum": 56
+              },
+              "sha256": "abd864153b305ed2179ee129a681a515907a6de976a1380a8428d9240b5e0188"
+            },
+            {
+              "file": "electronic/electronic_breakbeat/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 13.333333,
+              "noteOnCount": 6,
+              "noteRange": {
+                "minimum": 65,
+                "maximum": 70
+              },
+              "sha256": "8e526340135eedc6a71f796bf0d70897855f0e3161914117b3c320da4129b8f5"
+            },
+            {
+              "file": "electronic/electronic_breakbeat/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 13.333333,
+              "noteOnCount": 32,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 41
+              },
+              "sha256": "9db92b7639b44008e8fa18f37b8bd748a28e74f5f245ca27ea7dad296bb5d146"
+            },
+            {
+              "file": "electronic/electronic_breakbeat/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 13.333333,
+              "noteOnCount": 86,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 49
+              },
+              "sha256": "98283558d341fc8b537412193530932c69fe06bb24c332e60cdcdf8f54e0853a"
+            },
+            {
+              "file": "electronic/electronic_breakbeat/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 13.333333,
+              "noteOnCount": 190,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 70
+              },
+              "sha256": "775b9075ecd35c29c60d8f6dcbc35c96e1e0e12629eebfe0d108fca28c76f6f6"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rnb-soul",
+      "name": "R&B / Soul",
+      "profiles": [
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "rnb-soul",
+          "styleName": "R&B / Soul",
+          "profileId": "soul_classic_motown",
+          "profileName": "Classic / Motown Soul",
+          "seed": "1564103319",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 84.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 84.0,
+          "durationSeconds": 22.857143,
+          "tonic": "D",
+          "mode": "Major",
+          "formId": "soul-16",
+          "grooveId": "rnb-motown",
+          "fingerprints": {
+            "beat": "32049620fb9cf754f164954c5b5eee7b4448d27f900a892121ee353e80e37b77",
+            "chord": "df459ce20ea5e82849bfbd06672063810943a7369c4dcffaff49aa4ad424e497"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "support",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "04-support.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "rnb-soul/soul_classic_motown/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.857143,
+              "noteOnCount": 54,
+              "noteRange": {
+                "minimum": 49,
+                "maximum": 62
+              },
+              "sha256": "d223b5777d7051a73b68533cff4d035d4d1700a3754b2e6fb6b8044b007b1711"
+            },
+            {
+              "file": "rnb-soul/soul_classic_motown/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.857143,
+              "noteOnCount": 21,
+              "noteRange": {
+                "minimum": 59,
+                "maximum": 81
+              },
+              "sha256": "cfbf8afde9d4463cfe846a3b9f30871f06402e3b1d7873acb34263c4a30f32fa"
+            },
+            {
+              "file": "rnb-soul/soul_classic_motown/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.857143,
+              "noteOnCount": 32,
+              "noteRange": {
+                "minimum": 38,
+                "maximum": 50
+              },
+              "sha256": "c006c6d91953b6f8d1d947371a90beca67a15347128db04341c7a8d176991005"
+            },
+            {
+              "file": "rnb-soul/soul_classic_motown/04-support.mid",
+              "role": "support",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.857143,
+              "noteOnCount": 2,
+              "noteRange": {
+                "minimum": 62,
+                "maximum": 74
+              },
+              "sha256": "d768eebf4693bb849a5cc6281c0672d8125a28edc7f84006f2c39a30e7242aaa"
+            },
+            {
+              "file": "rnb-soul/soul_classic_motown/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.857143,
+              "noteOnCount": 105,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 50
+              },
+              "sha256": "48ab9770b904429fbd198a2f08aea7a98707783e38121a1ce9442800d6edb733"
+            },
+            {
+              "file": "rnb-soul/soul_classic_motown/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 22.857143,
+              "noteOnCount": 214,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 81
+              },
+              "sha256": "51a80d5f4c63300500e732441242ffccc0598ff35966b3516c45b71d45bd7381"
+            }
+          ]
+        },
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "rnb-soul",
+          "styleName": "R&B / Soul",
+          "profileId": "rnb_contemporary_neosoul",
+          "profileName": "Contemporary R&B / Neo-Soul",
+          "seed": "2996586782",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 88.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 88.0,
+          "durationSeconds": 21.818182,
+          "tonic": "Eb",
+          "mode": "Major",
+          "formId": "rnb-12",
+          "grooveId": "rnb-half-ballad",
+          "fingerprints": {
+            "beat": "4d994b5c4efb331b6002cc8d6b590ca209d46cb36b6a9cf237fca294b9e4194b",
+            "chord": "5660ab72a353bcc8ea7398a48208710caf8973ae759d68fe4173df59b34159a0"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "support",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "04-support.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "rnb-soul/rnb_contemporary_neosoul/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.818182,
+              "noteOnCount": 84,
+              "noteRange": {
+                "minimum": 46,
+                "maximum": 65
+              },
+              "sha256": "c8947b190ce4097510c6d0d005247c1d2589888197de2a73ae3740473dc14cec"
+            },
+            {
+              "file": "rnb-soul/rnb_contemporary_neosoul/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.818182,
+              "noteOnCount": 18,
+              "noteRange": {
+                "minimum": 62,
+                "maximum": 80
+              },
+              "sha256": "9e89f66fe432744db91c6190c50912b5dfcf962b411aa210480579f0aa7413e2"
+            },
+            {
+              "file": "rnb-soul/rnb_contemporary_neosoul/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.818182,
+              "noteOnCount": 11,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 51
+              },
+              "sha256": "ffe17871d104b442b56b96e5479f450b0a4a27e4df61655e64cbd55549c41aa9"
+            },
+            {
+              "file": "rnb-soul/rnb_contemporary_neosoul/04-support.mid",
+              "role": "support",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.818182,
+              "noteOnCount": 2,
+              "noteRange": {
+                "minimum": 67,
+                "maximum": 67
+              },
+              "sha256": "1b88fd7377cd1cfd8c347ba054106968d2e643465e0ed3759f60c9cd1a3ab6b1"
+            },
+            {
+              "file": "rnb-soul/rnb_contemporary_neosoul/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.818182,
+              "noteOnCount": 78,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 50
+              },
+              "sha256": "0c18fed2de77f94fd5fd94d512721adcf19e2e184af4f3f9e102639fd629a51f"
+            },
+            {
+              "file": "rnb-soul/rnb_contemporary_neosoul/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 21.818182,
+              "noteOnCount": 193,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 80
+              },
+              "sha256": "ceca4b574df70c7314d2a5fc9b740fda6d1f1cfa291a2c87aa5660e5e5de526c"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "funk",
+      "name": "Funk",
+      "profiles": [
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "funk",
+          "styleName": "Funk",
+          "profileId": "funk_static_pocket",
+          "profileName": "Static Pocket Funk",
+          "seed": "3592052940",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 86.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 86.0,
+          "durationSeconds": 22.325581,
+          "tonic": "B",
+          "mode": "Mixolydian",
+          "formId": "funk-8",
+          "grooveId": "funk-sync-pocket",
+          "fingerprints": {
+            "beat": "bb8b4fa835054036cb68f6d82b811b80ba53fb1de767a84ded8b63be69f5ed7e",
+            "chord": "be52dfcc205bd350824f81127f156b721f57f4f78589caadd918b07616219e43"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "support",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "04-support.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "funk/funk_static_pocket/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.325581,
+              "noteOnCount": 54,
+              "noteRange": {
+                "minimum": 59,
+                "maximum": 69
+              },
+              "sha256": "7350e5d2103b51cce7abe02382f494a821edbf9560e066b3b789c48eb2887ce4"
+            },
+            {
+              "file": "funk/funk_static_pocket/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.325581,
+              "noteOnCount": 19,
+              "noteRange": {
+                "minimum": 63,
+                "maximum": 81
+              },
+              "sha256": "2aea2e5de807057ea25aa7e27411b86d13d367d0c02dd925f42214bdaa4422f9"
+            },
+            {
+              "file": "funk/funk_static_pocket/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.325581,
+              "noteOnCount": 30,
+              "noteRange": {
+                "minimum": 30,
+                "maximum": 35
+              },
+              "sha256": "dfa152073572f04c07c7c1afad25b9c2cd598a34532e5c7a1a75c63cc04876d9"
+            },
+            {
+              "file": "funk/funk_static_pocket/04-support.mid",
+              "role": "support",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.325581,
+              "noteOnCount": 4,
+              "noteRange": {
+                "minimum": 63,
+                "maximum": 66
+              },
+              "sha256": "16eff7cd9ad2b0798df6f91777dd32090081589716af5e071c1b6e7b030b2d87"
+            },
+            {
+              "file": "funk/funk_static_pocket/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 22.325581,
+              "noteOnCount": 133,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 49
+              },
+              "sha256": "ba50ec8de68313f9f445d54e506c09e90bce3c4f60b2aad49bf46161aa245080"
+            },
+            {
+              "file": "funk/funk_static_pocket/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 22.325581,
+              "noteOnCount": 240,
+              "noteRange": {
+                "minimum": 30,
+                "maximum": 81
+              },
+              "sha256": "375532088f8618612e3373402e98e72045e058b8ba36725ec6178c4a0ce240e7"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "hiphop-trap",
+      "name": "Hip-Hop / Trap",
+      "profiles": [
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "hiphop-trap",
+          "styleName": "Hip-Hop / Trap",
+          "profileId": "hiphop_boom_bap",
+          "profileName": "Boom-Bap",
+          "seed": "1084759472",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 90.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 90.0,
+          "durationSeconds": 21.333333,
+          "tonic": "Ab",
+          "mode": "Major",
+          "formId": "boombap-16",
+          "grooveId": "hiphop-boom-bap",
+          "fingerprints": {
+            "beat": "ed65ff164c691207628c5cfe66b1c6dc77cb682325112dcb4ef89aaa9ce5a532",
+            "chord": "1bcb8a1d45a6644fa27d8017b97f160cb95f7c6e7b3ef487993ef4eb5f0ffe8f"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "hiphop-trap/hiphop_boom_bap/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.333333,
+              "noteOnCount": 135,
+              "noteRange": {
+                "minimum": 48,
+                "maximum": 67
+              },
+              "sha256": "7b16b1657216078a8134322ffe64754d9b09a590623cd69e273c2abab2a48c15"
+            },
+            {
+              "file": "hiphop-trap/hiphop_boom_bap/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.333333,
+              "noteOnCount": 17,
+              "noteRange": {
+                "minimum": 67,
+                "maximum": 81
+              },
+              "sha256": "a2fda9b4b4afd2a875510fa3b0c1a435351fe758f0ecc9dc1ab347ea2bae8523"
+            },
+            {
+              "file": "hiphop-trap/hiphop_boom_bap/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.333333,
+              "noteOnCount": 14,
+              "noteRange": {
+                "minimum": 29,
+                "maximum": 44
+              },
+              "sha256": "f44ed417cf8270766c8448fa63feeadd03e4540871b616325fb7c0f920e67a7d"
+            },
+            {
+              "file": "hiphop-trap/hiphop_boom_bap/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.333333,
+              "noteOnCount": 141,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 49
+              },
+              "sha256": "0f9d0ed6e5c5b033edc9be47d582f6b66fca4ae1eafac4e19f01a071c24d73f6"
+            },
+            {
+              "file": "hiphop-trap/hiphop_boom_bap/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 21.333333,
+              "noteOnCount": 307,
+              "noteRange": {
+                "minimum": 29,
+                "maximum": 81
+              },
+              "sha256": "33893d4726543916f9c9e40bfb8956459522172a531cf3aa0930704f9b8947d6"
+            }
+          ]
+        },
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "hiphop-trap",
+          "styleName": "Hip-Hop / Trap",
+          "profileId": "hiphop_trap",
+          "profileName": "Trap",
+          "seed": "1204219440",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 76.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 76.0,
+          "durationSeconds": 25.263158,
+          "tonic": "D",
+          "mode": "Natural Minor",
+          "formId": "trap-12",
+          "grooveId": "trap-rolling",
+          "fingerprints": {
+            "beat": "6eb3f10737de0e17e00e8a5aee40ed98bc76c1c33bdb5a2e222a50324232400e",
+            "chord": "16377ff87509e19b24dd6056d0e94397cc291f75454a0d17c0294965d5275503"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "support",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "04-support.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "hiphop-trap/hiphop_trap/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 25.263158,
+              "noteOnCount": 96,
+              "noteRange": {
+                "minimum": 50,
+                "maximum": 57
+              },
+              "sha256": "0d912af610fd58d2afb90ce71d60c342a5b64d0dc0c429c339c3d1f34011cd57"
+            },
+            {
+              "file": "hiphop-trap/hiphop_trap/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 25.263158,
+              "noteOnCount": 9,
+              "noteRange": {
+                "minimum": 57,
+                "maximum": 77
+              },
+              "sha256": "17b9c4a58f34efa16c81c65bdad7c6b5150aa6f0bf48b292aa445f9bef2039e7"
+            },
+            {
+              "file": "hiphop-trap/hiphop_trap/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 25.263158,
+              "noteOnCount": 11,
+              "noteRange": {
+                "minimum": 37,
+                "maximum": 38
+              },
+              "sha256": "2192a85b58486b51407b201e61120ad7a95763f7600b225507f6e6cba8880784"
+            },
+            {
+              "file": "hiphop-trap/hiphop_trap/04-support.mid",
+              "role": "support",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 25.263158,
+              "noteOnCount": 1,
+              "noteRange": {
+                "minimum": 74,
+                "maximum": 74
+              },
+              "sha256": "3b1e6c689b494dafaad5f64c5e25e8cb1d4d7ced2eec811feb7cf1f269193383"
+            },
+            {
+              "file": "hiphop-trap/hiphop_trap/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 25.263158,
+              "noteOnCount": 168,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 49
+              },
+              "sha256": "f613ac762416322047c8322fb18e7eba499e00644653b87ff175aabf7f72a886"
+            },
+            {
+              "file": "hiphop-trap/hiphop_trap/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 25.263158,
+              "noteOnCount": 285,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 77
+              },
+              "sha256": "ee8d3d2c03fec60f9d2cc2f1f37ce73b8a06080dbe2f974b7e878eac8972b089"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "reggae",
+      "name": "Reggae",
+      "profiles": [
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "reggae",
+          "styleName": "Reggae",
+          "profileId": "reggae_roots",
+          "profileName": "Roots Reggae",
+          "seed": "1259078807",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 90.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 90.0,
+          "durationSeconds": 21.333333,
+          "tonic": "G",
+          "mode": "Natural Minor",
+          "formId": "reggae-steppers-12",
+          "grooveId": "reggae-steppers",
+          "fingerprints": {
+            "beat": "cf5712da4de7f7b0012455bb37a125e438563697daff363210be2ddca75bbae9",
+            "chord": "c9fb85549b7ee5ba686f8c7079bad23b3bda9b9ccd88c95a55a985b531e6dcdc"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "support",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "04-support.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "reggae/reggae_roots/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.333333,
+              "noteOnCount": 51,
+              "noteRange": {
+                "minimum": 51,
+                "maximum": 62
+              },
+              "sha256": "7fe72c45731af243a3fddb5d95837cf77ebcbe13eebf95d4555c9d45b1ef1f3f"
+            },
+            {
+              "file": "reggae/reggae_roots/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.333333,
+              "noteOnCount": 10,
+              "noteRange": {
+                "minimum": 62,
+                "maximum": 75
+              },
+              "sha256": "3d5083af3f0a13516f4c378de82b39eceda4248dbe38a24990b4c47d03a1b2e6"
+            },
+            {
+              "file": "reggae/reggae_roots/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.333333,
+              "noteOnCount": 18,
+              "noteRange": {
+                "minimum": 29,
+                "maximum": 45
+              },
+              "sha256": "dbdb51f231dd98d7a43344895e0b8cbfb776eac10e538f051c8e2df9f371dbb3"
+            },
+            {
+              "file": "reggae/reggae_roots/04-support.mid",
+              "role": "support",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.333333,
+              "noteOnCount": 16,
+              "noteRange": {
+                "minimum": 58,
+                "maximum": 60
+              },
+              "sha256": "4f39ac1d9ae514262100c44af07f9d312a7e3fd8eca5519ceef3e443d3f28b1b"
+            },
+            {
+              "file": "reggae/reggae_roots/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 21.333333,
+              "noteOnCount": 84,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 54
+              },
+              "sha256": "045cade782265b0bdfeeb5fec017f1f48252b75639f4f6b98ee74803a19616c5"
+            },
+            {
+              "file": "reggae/reggae_roots/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 21.333333,
+              "noteOnCount": 179,
+              "noteRange": {
+                "minimum": 29,
+                "maximum": 75
+              },
+              "sha256": "45417f9992a161b9978511b5ce49c785d257f85cd3d88f2938c97dcc157a8be2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bossa-nova",
+      "name": "Bossa Nova",
+      "profiles": [
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "bossa-nova",
+          "styleName": "Bossa Nova",
+          "profileId": "bossa_songbook",
+          "profileName": "Bossa Nova Songbook",
+          "seed": "1754303273",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "2/4",
+          "sourcePulseBpm": 132.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 132.0,
+          "durationSeconds": 7.272727,
+          "tonic": "D",
+          "mode": "Major",
+          "formId": "bossa-aaba-32",
+          "grooveId": "bossa-core",
+          "fingerprints": {
+            "beat": "366ea3b540a8556f1e714791dd1076d917e56b3f1cc39cb05b2429144b3c64ed",
+            "chord": "c18adecc8e2c2191756d0cacbdb27856217a17b34263a196435e040e678faf63"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "bossa-nova/bossa_songbook/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 7.272727,
+              "noteOnCount": 24,
+              "noteRange": {
+                "minimum": 49,
+                "maximum": 66
+              },
+              "sha256": "7be15d460d5637685517013409dca5467e781595c510f2b967a068ad3f971dde"
+            },
+            {
+              "file": "bossa-nova/bossa_songbook/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 7.272727,
+              "noteOnCount": 10,
+              "noteRange": {
+                "minimum": 67,
+                "maximum": 76
+              },
+              "sha256": "ece3dcc21b770b56432a5eeea146adb19e0e9eafc51f0aa79d9033babcdf83f4"
+            },
+            {
+              "file": "bossa-nova/bossa_songbook/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 7.272727,
+              "noteOnCount": 16,
+              "noteRange": {
+                "minimum": 28,
+                "maximum": 40
+              },
+              "sha256": "02b258f273752573e40b7e861d8e21e58e02e6f0fd9c4a152c273822fca5b62d"
+            },
+            {
+              "file": "bossa-nova/bossa_songbook/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 7.272727,
+              "noteOnCount": 74,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 82
+              },
+              "sha256": "ab3953e719ada958795fb0a82aa5ca0a1b1b5ab1767ecf24cadb29520f52938e"
+            },
+            {
+              "file": "bossa-nova/bossa_songbook/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 7.272727,
+              "noteOnCount": 124,
+              "noteRange": {
+                "minimum": 28,
+                "maximum": 82
+              },
+              "sha256": "0e6e615c2a5d0af8bbedceac04f052f2fdd495e6c8c469aa24ccf393208feb54"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "metal-experimental",
+      "name": "Modern Metal / Experimental",
+      "profiles": [
+        {
+          "schema": "jam2-profile-context-v1",
+          "styleId": "metal-experimental",
+          "styleName": "Modern Metal / Experimental",
+          "profileId": "metal_modern_progressive",
+          "profileName": "Modern Progressive Metalcore",
+          "seed": "2941769567",
+          "generatorVersion": 7,
+          "complexity": 4,
+          "bars": 8,
+          "timeSignature": "4/4",
+          "sourcePulseBpm": 94.0,
+          "sourcePulseBeatUnit": 4,
+          "dawQuarterNoteBpm": 94.0,
+          "durationSeconds": 20.425532,
+          "tonic": "A",
+          "mode": "Phrygian",
+          "formId": "metal-riff-12",
+          "grooveId": "metal-grouped",
+          "fingerprints": {
+            "beat": "3c77d81aae25390c4eab2ca4464b0f890d1bbde0a78641cad55e2b26ee9164d4",
+            "chord": "a0ac2d8a81a49d158e54bbb910e3f505f0e32717fc76d76f47eaa27b29808147"
+          },
+          "roles": [
+            "chords",
+            "melody",
+            "bass",
+            "support",
+            "drums"
+          ],
+          "diagnosticFallbackRoles": [],
+          "source": "experiments/synth-ab/site/seed-audit.json",
+          "files": [
+            "01-chords.mid",
+            "02-melody.mid",
+            "03-bass.mid",
+            "04-support.mid",
+            "05-drums.mid",
+            "06-full-arrangement.mid"
+          ],
+          "artifacts": [
+            {
+              "file": "metal-experimental/metal_modern_progressive/01-chords.mid",
+              "role": "chords",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 20.425532,
+              "noteOnCount": 123,
+              "noteRange": {
+                "minimum": 53,
+                "maximum": 65
+              },
+              "sha256": "2f52b7fac49f60b97afff6885fc32bb52821eaa6f4a1f814b16688311f754531"
+            },
+            {
+              "file": "metal-experimental/metal_modern_progressive/02-melody.mid",
+              "role": "melody",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 20.425532,
+              "noteOnCount": 8,
+              "noteRange": {
+                "minimum": 69,
+                "maximum": 74
+              },
+              "sha256": "f09ae1d45b780e5844d216441acc1d12aa71013d29d31d63a345c232d3574922"
+            },
+            {
+              "file": "metal-experimental/metal_modern_progressive/03-bass.mid",
+              "role": "bass",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 20.425532,
+              "noteOnCount": 50,
+              "noteRange": {
+                "minimum": 41,
+                "maximum": 46
+              },
+              "sha256": "a91f645c0f88b23c6d75385a00fe9d0ac812d028ade161c55d7f05f417d1cbb6"
+            },
+            {
+              "file": "metal-experimental/metal_modern_progressive/04-support.mid",
+              "role": "support",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 20.425532,
+              "noteOnCount": 1,
+              "noteRange": {
+                "minimum": 48,
+                "maximum": 48
+              },
+              "sha256": "2e7e33bf4c0cc86d24b86f25ecf1365337e369894c3e225ced4834780b60741e"
+            },
+            {
+              "file": "metal-experimental/metal_modern_progressive/05-drums.mid",
+              "role": "drums",
+              "midiFormat": 0,
+              "ppq": 480,
+              "durationSeconds": 20.425532,
+              "noteOnCount": 155,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 49
+              },
+              "sha256": "838bad5ccdd0a1bda5786ca6138767f5760749bbf2125197ea2081ef70ff3ac4"
+            },
+            {
+              "file": "metal-experimental/metal_modern_progressive/06-full-arrangement.mid",
+              "role": "full-arrangement",
+              "midiFormat": 1,
+              "ppq": 480,
+              "durationSeconds": 20.425532,
+              "noteOnCount": 337,
+              "noteRange": {
+                "minimum": 36,
+                "maximum": 74
+              },
+              "sha256": "4d5ca6ebcd2a504585877d1a7c135c9c9c012290d6fa137b4d5d0be4c18a759a"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

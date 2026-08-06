@@ -1,0 +1,39 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "rock",
+  "styleName": "Rock",
+  "profileId": "rock_punk_garage",
+  "profileName": "Punk / Garage Rock",
+  "seed": "3611987298",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 168.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 168.0,
+  "durationSeconds": 11.428571,
+  "tonic": "F",
+  "mode": "Major",
+  "formId": "punk-8",
+  "grooveId": "rock-alt-sync",
+  "fingerprints": {
+    "beat": "4fd28f35e24a528a684e460304c513be4ce7770bde8aa1ca4f73eec581162faa",
+    "chord": "25d9b278db622c69bb21838bf4bd8448bdfa50e7cdc3ce6e0a78fd4121d7abca"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

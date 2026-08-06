@@ -2,6 +2,11 @@
 
 This file tracks future work that is not already implemented. User-facing documentation lives in `docs/`, with only `README.md` and this plan kept at the repository root. 
 
+## Sound Design
+
+Add sounds in with good mixes 
+Work on the chord generation to make it more rhythmically interesting, like the midi codex generated for me for the initial melodic references that used stuttered chords after held chords etc 
+
 ## Linux Audio Backend (never implement this without explicit approval)
 
 Consider Linux support after the Windows ASIO and macOS CoreAudio paths are stable. Linux should be treated as another host-native low-latency backend, not as a Docker or container target.

@@ -166,7 +166,7 @@ fallback generation path. Manual songs without generated metadata remain valid.
 Reference WAVs can render five separate layers: chords, drums, melody, bass,
 and supporting line. Rendering uses the recipe's deterministic synthesis,
 articulation, per-lane timing, automation, meter denominator, and style kit.
-The Beat grid adds dedicated Cross-stick / Rim, Shaker, and Hand Percussion
+The Beat grid adds dedicated Cross-stick / Rim
 lanes to Kick, Snare, Closed/Open HH, Ride, Crash, and Tom. This lets Bossa and
 Reggae expose characteristic percussion relationships instead of hiding them
 behind a generic kit label. Render diagnostics report profile and patch IDs,

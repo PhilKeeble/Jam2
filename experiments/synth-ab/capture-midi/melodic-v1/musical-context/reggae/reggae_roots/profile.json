@@ -1,0 +1,41 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "reggae",
+  "styleName": "Reggae",
+  "profileId": "reggae_roots",
+  "profileName": "Roots Reggae",
+  "seed": "1259078807",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 90.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 90.0,
+  "durationSeconds": 21.333333,
+  "tonic": "G",
+  "mode": "Natural Minor",
+  "formId": "reggae-steppers-12",
+  "grooveId": "reggae-steppers",
+  "fingerprints": {
+    "beat": "cf5712da4de7f7b0012455bb37a125e438563697daff363210be2ddca75bbae9",
+    "chord": "c9fb85549b7ee5ba686f8c7079bad23b3bda9b9ccd88c95a55a985b531e6dcdc"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "support",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "04-support.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

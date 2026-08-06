@@ -25,6 +25,25 @@ namespace {
 constexpr float kPiF = 3.14159265358979323846f;
 constexpr double kPi = 3.14159265358979323846;
 
+double deterministicUnit(std::uint32_t seed, std::uint32_t salt)
+{
+    std::uint32_t value = seed ^ salt;
+    value ^= value >> 16;
+    value *= 2246822519U;
+    value ^= value >> 13;
+    return static_cast<double>(value) / 2147483647.5 - 1.0;
+}
+
+std::uint32_t stableSeed(const QString& text)
+{
+    std::uint32_t value = 2166136261U;
+    for (const QChar character : text) {
+        value ^= character.unicode();
+        value *= 16777619U;
+    }
+    return value ^ 0x4a326b1dU;
+}
+
 enum class Model {
     AnalogKick,
     SyntheticKick,
@@ -35,11 +54,8 @@ enum class Model {
     RingHat,
     ShellTom,
     RimWood,
-    CollisionShaker,
-    SkinHandDrum,
     HandClap,
     WoodBlock,
-    Tambourine,
     CrashCymbal,
     RideCymbal,
 };
@@ -88,6 +104,7 @@ struct RealisedHit {
 Strength strengthFor(const ResearchDrumRenderEvent& event)
 {
     if (event.articulation.contains(QStringLiteral("ghost")) ||
+        event.articulation == QStringLiteral("light-tip") ||
         event.articulation == QStringLiteral("edge")) {
         return Strength::Ghost;
     }
@@ -191,15 +208,13 @@ struct Voice {
     float identityPitchEnvelope = 0.0f;
     float identityPitchDecay = 0.99f;
     float identityPitchSweep = 0.0f;
-    float identityCollisionRate = 0.0f;
-    float identityCollisionEnvelope = 0.0f;
-    float identityCollisionDecay = 0.92f;
     std::array<float, 3> identityBandEnvelope{1.0f, 1.0f, 1.0f};
     std::array<float, 3> identityBandDecay{0.999f, 0.999f, 0.999f};
     qint64 endFrame = 1;
     int fadeStartAge = std::numeric_limits<int>::max();
     int endAge = std::numeric_limits<int>::max();
     float gain = 0.3f;
+    int onsetSofteningSamples = 0;
     std::uint32_t noiseState = 0x91e10da5U;
     Transient transient = Transient::Off;
     Texture texture = Texture::Off;
@@ -311,40 +326,6 @@ struct Voice {
                     identityNoiseEnvelope;
             identityNoiseEnvelope *= identityNoiseDecay;
             break;
-        case Model::CollisionShaker: {
-            const float randomUnit =
-                static_cast<float>(noiseState & 0x00ffffffU) /
-                static_cast<float>(0x01000000U);
-            if (randomUnit < identityCollisionRate / sampleRate) {
-                identityCollisionEnvelope =
-                    0.55f + 0.45f * std::abs(noise);
-            }
-            identityCollisionEnvelope *= identityCollisionDecay;
-            identityFilterA->Process(
-                noise * identityCollisionEnvelope);
-            identityFilterB->Process(
-                noise * identityCollisionEnvelope);
-            base =
-                (0.58f * identityFilterA->Band() +
-                 0.42f * identityFilterB->High()) *
-                identityNoiseEnvelope;
-            identityNoiseEnvelope *= identityNoiseDecay;
-            break;
-        }
-        case Model::SkinHandDrum: {
-            const float pitchScale =
-                1.0f + identityPitchSweep * identityPitchEnvelope;
-            identityFilterA->Process(noise);
-            base =
-                processIdentityModes(pitchScale) +
-                0.13f *
-                    (identityFilterA->Band() +
-                     0.20f * identityFilterA->High()) *
-                    identityNoiseEnvelope;
-            identityNoiseEnvelope *= identityNoiseDecay;
-            identityPitchEnvelope *= identityPitchDecay;
-            break;
-        }
         case Model::HandClap: {
             identityFilterA->Process(noise);
             identityFilterB->Process(noise);
@@ -391,27 +372,6 @@ struct Voice {
                     identityNoiseEnvelope;
             identityNoiseEnvelope *= identityNoiseDecay;
             break;
-        case Model::Tambourine: {
-            const float randomUnit =
-                static_cast<float>(noiseState & 0x00ffffffU) /
-                static_cast<float>(0x01000000U);
-            if (randomUnit < identityCollisionRate / sampleRate) {
-                identityCollisionEnvelope =
-                    0.45f + 0.55f * std::abs(noise);
-            }
-            identityCollisionEnvelope *= identityCollisionDecay;
-            identityFilterA->Process(
-                noise * identityCollisionEnvelope);
-            identityFilterB->Process(
-                noise * identityCollisionEnvelope);
-            base =
-                0.22f * processIdentityModes() +
-                (0.50f * identityFilterA->Band() +
-                 0.32f * identityFilterB->High()) *
-                    identityNoiseEnvelope;
-            identityNoiseEnvelope *= identityNoiseDecay;
-            break;
-        }
         case Model::CrashCymbal:
             identityFilterA->Process(noise);
             identityFilterB->Process(noise);
@@ -584,7 +544,15 @@ struct Voice {
             textureEnvelope *= textureDecay;
         }
 
-        float value = base + transientValue + textureValue;
+        const float onsetGain = onsetSofteningSamples > 0
+            ? std::clamp(
+                  static_cast<float>(age + 1) /
+                      onsetSofteningSamples,
+                  0.0f,
+                  1.0f)
+            : 1.0f;
+        float value =
+            (base + transientValue + textureValue) * onsetGain;
         value = std::tanh(drive * value) /
             std::max(1.0f, 0.82f * drive);
         digitalPhase += digitalRate;
@@ -791,20 +759,11 @@ std::optional<Model> modelForSource(const QString& source)
     if (source == QStringLiteral("jam2-cross-stick")) {
         return Model::RimWood;
     }
-    if (source == QStringLiteral("jam2-shaker")) {
-        return Model::CollisionShaker;
-    }
-    if (source == QStringLiteral("jam2-hand-drum")) {
-        return Model::SkinHandDrum;
-    }
     if (source == QStringLiteral("jam2-hand-clap")) {
         return Model::HandClap;
     }
     if (source == QStringLiteral("jam2-wood-block")) {
         return Model::WoodBlock;
-    }
-    if (source == QStringLiteral("jam2-tambourine")) {
-        return Model::Tambourine;
     }
     if (source == QStringLiteral("jam2-crash-cymbal")) {
         return Model::CrashCymbal;
@@ -1002,65 +961,6 @@ Voice makeVoice(
             std::max(1.0f, 0.0045f * voice.sampleRate));
         break;
     }
-    case Model::CollisionShaker:
-        initialiseFilter(
-            voice.identityFilterA,
-            piece.frequencyHz * 0.72f,
-            0.30f,
-            voice.sampleRate);
-        initialiseFilter(
-            voice.identityFilterB,
-            piece.frequencyHz * 1.24f,
-            0.24f,
-            voice.sampleRate);
-        voice.identityNoiseEnvelope =
-            0.45f + 0.55f * hit.excitation;
-        voice.identityNoiseDecay = std::exp(
-            -6.907755f /
-            std::max(
-                1.0f,
-                (0.025f + 0.48f * piece.decay) *
-                    hit.decayScale * voice.sampleRate));
-        voice.identityCollisionRate =
-            900.0f + 5200.0f * piece.colour;
-        voice.identityCollisionDecay =
-            0.82f + 0.16f * piece.tone;
-        break;
-    case Model::SkinHandDrum: {
-        const float skinSeconds =
-            0.045f + 0.72f * piece.decay;
-        setMode(voice, hit, 0, piece.frequencyHz, 0.86f, skinSeconds);
-        setMode(
-            voice, hit, 1, piece.frequencyHz * 1.47f,
-            0.08f + 0.14f * piece.tone,
-            skinSeconds * 0.54f);
-        setMode(
-            voice, hit, 2, piece.frequencyHz * 2.09f,
-            0.03f + 0.08f * piece.tone,
-            skinSeconds * 0.34f);
-        initialiseFilter(
-            voice.identityFilterA,
-            1100.0f + 4200.0f * piece.tone,
-            0.31f,
-            voice.sampleRate);
-        voice.identityNoiseEnvelope = hit.excitation;
-        voice.identityNoiseDecay = std::exp(
-            -6.907755f /
-            std::max(
-                1.0f,
-                (0.005f + 0.020f * piece.tone) *
-                    voice.sampleRate));
-        voice.identityPitchEnvelope = hit.excitation;
-        voice.identityPitchSweep =
-            0.025f + 0.12f * piece.fmAmount;
-        voice.identityPitchDecay = std::exp(
-            -6.907755f /
-            std::max(
-                1.0f,
-                (0.010f + 0.025f * piece.decay) *
-                    voice.sampleRate));
-        break;
-    }
     case Model::HandClap:
         initialiseFilter(
             voice.identityFilterA,
@@ -1099,45 +999,6 @@ Voice makeVoice(
         voice.identityNoiseDecay = std::exp(
             -6.907755f /
             std::max(1.0f, 0.0035f * voice.sampleRate));
-        break;
-    }
-    case Model::Tambourine: {
-        const std::array<float, 5> ratios{
-            0.73f, 1.0f, 1.31f, 1.79f, 2.41f};
-        for (int index = 0;
-             index < static_cast<int>(ratios.size());
-             ++index) {
-            setMode(
-                voice,
-                hit,
-                index,
-                piece.frequencyHz * ratios[index],
-                0.055f,
-                0.035f + 0.16f * piece.decay *
-                    (1.0f - 0.09f * index));
-        }
-        initialiseFilter(
-            voice.identityFilterA,
-            piece.frequencyHz * 0.78f,
-            0.26f,
-            voice.sampleRate);
-        initialiseFilter(
-            voice.identityFilterB,
-            piece.frequencyHz * 1.42f,
-            0.20f,
-            voice.sampleRate);
-        voice.identityNoiseEnvelope =
-            0.42f + 0.58f * hit.excitation;
-        voice.identityNoiseDecay = std::exp(
-            -6.907755f /
-            std::max(
-                1.0f,
-                (0.06f + 0.62f * piece.decay) *
-                    hit.decayScale * voice.sampleRate));
-        voice.identityCollisionRate =
-            1500.0f + 6200.0f * piece.colour;
-        voice.identityCollisionDecay =
-            0.86f + 0.12f * piece.tone;
         break;
     }
     case Model::CrashCymbal: {
@@ -1284,8 +1145,14 @@ Voice makeVoice(
     }
 
     configureComponents(voice, piece, hit);
-    voice.gain =
-        hit.outputGain * piece.level * layerGain;
+    voice.gain = hit.outputGain * piece.level *
+        piece.sourceLayerGain * layerGain;
+    voice.onsetSofteningSamples = static_cast<int>(
+        std::clamp(
+            piece.onsetSofteningSeconds,
+            0.0f,
+            0.1f) *
+        voice.sampleRate);
     float tailSeconds = 0.22f + 3.0f * piece.decay;
     switch (voice.model) {
     case Model::AnalogSnare:
@@ -1300,17 +1167,8 @@ Voice makeVoice(
     case Model::WoodBlock:
         tailSeconds = 0.055f + 0.18f * piece.decay;
         break;
-    case Model::CollisionShaker:
-        tailSeconds = 0.08f + 0.62f * piece.decay;
-        break;
-    case Model::SkinHandDrum:
-        tailSeconds = 0.12f + 0.90f * piece.decay;
-        break;
     case Model::HandClap:
         tailSeconds = 0.12f + 0.82f * piece.decay;
-        break;
-    case Model::Tambourine:
-        tailSeconds = 0.12f + 0.86f * piece.decay;
         break;
     case Model::CrashCymbal:
         tailSeconds = 0.85f + 4.4f * piece.decay;
@@ -1431,6 +1289,189 @@ struct SubVoice {
     }
 };
 
+float detailStrengthGain(
+    const ResearchDrumDetailResponse& response,
+    Strength strength)
+{
+    switch (strength) {
+    case Strength::Ghost: return response.ghostGain;
+    case Strength::Normal: return response.normalGain;
+    case Strength::Accent: return response.accentGain;
+    }
+    return response.normalGain;
+}
+
+float detailVelocityGain(
+    const ResearchDrumDetailResponse& response,
+    const RealisedHit& hit)
+{
+    const float velocity = static_cast<float>(hit.velocity) / 127.0f;
+    return std::pow(velocity, response.velocityCurve) *
+        detailStrengthGain(response, hit.strength);
+}
+
+struct DetailHit {
+    RealisedHit hit;
+    const ResearchDrumPiece* piece = nullptr;
+};
+
+void renderDetailBanks(
+    QVector<float>& dry,
+    QVector<float>& room,
+    const std::vector<DetailHit>& hits,
+    int sampleRate)
+{
+    constexpr double minusSixtyDb = 6.907755278982137;
+    for (const DetailHit& item : hits) {
+        if (!item.piece) continue;
+        const ResearchDrumPiece& piece = *item.piece;
+        const RealisedHit& hit = item.hit;
+        for (qsizetype index = 0; index < piece.modalBands.size(); ++index) {
+            const ResearchDrumModalBand& band = piece.modalBands.at(index);
+            const double seconds = band.decaySeconds * hit.decayScale;
+            const qint64 startFrame = hit.frame +
+                static_cast<qint64>(std::llround(
+                    band.delaySeconds * sampleRate));
+            if (startFrame < 0 || startFrame >= dry.size()) continue;
+            const qint64 count = std::min<qint64>(
+                static_cast<qint64>(dry.size()) - startFrame,
+                std::max<qint64>(1, static_cast<qint64>(
+                    std::ceil(seconds * sampleRate))));
+            if (count <= 0 || band.level <= 0.0f) continue;
+            const double frequency = std::clamp(
+                static_cast<double>(band.frequencyHz) *
+                    std::pow(2.0, band.detuneCents / 1200.0),
+                20.0,
+                0.475 * sampleRate);
+            const double phaseStep = 2.0 * kPi * frequency / sampleRate;
+            const double initialPhase = band.phaseCycles >= 0.0f
+                ? 2.0 * kPi * band.phaseCycles
+                : 0.16 * kPi * deterministicUnit(
+                    stableSeed(hit.laneId + QString::number(hit.frame)),
+                    static_cast<std::uint32_t>(index + 1));
+            const double decayCoefficient =
+                minusSixtyDb / std::max(0.005, seconds);
+            const double attackCoefficient = minusSixtyDb /
+                std::max(0.0001, static_cast<double>(band.attackSeconds));
+            const double gain = band.level * piece.level *
+                detailVelocityGain(band.response, hit);
+            const double highpassPole = band.highpassHz > 0.0f
+                ? std::exp(-2.0 * kPi * band.highpassHz / sampleRate)
+                : 0.0;
+            double previousInputA = 0.0;
+            double previousOutputA = 0.0;
+            double previousInputB = 0.0;
+            double previousOutputB = 0.0;
+            for (qint64 age = 0; age < count; ++age) {
+                const double time = static_cast<double>(age) / sampleRate;
+                const double attack =
+                    1.0 - std::exp(-attackCoefficient * time);
+                const double envelope =
+                    attack * std::exp(-decayCoefficient * time);
+                double sampleValue = gain * envelope *
+                    std::sin(initialPhase + phaseStep * age);
+                if (band.highpassHz > 0.0f) {
+                    const double first = sampleValue - previousInputA +
+                        highpassPole * previousOutputA;
+                    previousInputA = sampleValue;
+                    previousOutputA = first;
+                    const double second = first - previousInputB +
+                        highpassPole * previousOutputB;
+                    previousInputB = first;
+                    previousOutputB = second;
+                    sampleValue = second;
+                }
+                const qsizetype frame = static_cast<qsizetype>(startFrame + age);
+                const float sample = static_cast<float>(sampleValue);
+                dry[frame] += sample;
+                room[frame] += sample * piece.roomSend *
+                    band.response.roomSend;
+            }
+        }
+        for (qsizetype index = 0; index < piece.noiseBands.size(); ++index) {
+            const ResearchDrumNoiseBand& band = piece.noiseBands.at(index);
+            const double seconds = band.decaySeconds * hit.decayScale;
+            const qint64 startFrame = hit.frame +
+                static_cast<qint64>(std::llround(
+                    band.delaySeconds * sampleRate));
+            if (startFrame < 0 || startFrame >= dry.size()) continue;
+            const qint64 count = std::min<qint64>(
+                static_cast<qint64>(dry.size()) - startFrame,
+                std::max<qint64>(1, static_cast<qint64>(
+                    std::ceil(seconds * sampleRate))));
+            if (count <= 0 || band.level <= 0.0f) continue;
+            const double frequency = std::clamp(
+                static_cast<double>(band.frequencyHz),
+                40.0,
+                0.475 * sampleRate);
+            const double omega = 2.0 * kPi * frequency / sampleRate;
+            const double alpha = std::sin(omega) /
+                (2.0 * std::max(0.1, static_cast<double>(band.q)));
+            const double a0 = 1.0 + alpha;
+            const double b0 = alpha / a0;
+            const double b2 = -alpha / a0;
+            const double a1 = -2.0 * std::cos(omega) / a0;
+            const double a2 = (1.0 - alpha) / a0;
+            double input1 = 0.0;
+            double input2 = 0.0;
+            double output1 = 0.0;
+            double output2 = 0.0;
+            std::uint32_t noiseState = stableSeed(
+                hit.laneId + QString::number(hit.frame) +
+                QString::number(index));
+            const double decayCoefficient =
+                minusSixtyDb / std::max(0.005, seconds);
+            const double attackCoefficient = minusSixtyDb /
+                std::max(0.0001, static_cast<double>(band.attackSeconds));
+            const double gain = band.level * piece.level *
+                detailVelocityGain(band.response, hit);
+            const double highpassPole = band.highpassHz > 0.0f
+                ? std::exp(-2.0 * kPi * band.highpassHz / sampleRate)
+                : 0.0;
+            double previousInputA = 0.0;
+            double previousOutputA = 0.0;
+            double previousInputB = 0.0;
+            double previousOutputB = 0.0;
+            for (qint64 age = 0; age < count; ++age) {
+                noiseState ^= noiseState << 13;
+                noiseState ^= noiseState >> 17;
+                noiseState ^= noiseState << 5;
+                const double input =
+                    static_cast<double>(noiseState & 0x00ffffffU) /
+                        static_cast<double>(0x007fffffU) - 1.0;
+                const double filtered = b0 * input + b2 * input2 -
+                    a1 * output1 - a2 * output2;
+                input2 = input1;
+                input1 = input;
+                output2 = output1;
+                output1 = filtered;
+                const double time = static_cast<double>(age) / sampleRate;
+                const double attack =
+                    1.0 - std::exp(-attackCoefficient * time);
+                const double envelope =
+                    attack * std::exp(-decayCoefficient * time);
+                double sampleValue = gain * envelope * filtered;
+                if (band.highpassHz > 0.0f) {
+                    const double first = sampleValue - previousInputA +
+                        highpassPole * previousOutputA;
+                    previousInputA = sampleValue;
+                    previousOutputA = first;
+                    const double second = first - previousInputB +
+                        highpassPole * previousOutputB;
+                    previousInputB = first;
+                    previousOutputB = second;
+                    sampleValue = second;
+                }
+                const qsizetype frame = static_cast<qsizetype>(startFrame + age);
+                const float sample = static_cast<float>(sampleValue);
+                dry[frame] += sample;
+                room[frame] += sample * piece.roomSend *
+                    band.response.roomSend;
+            }
+        }
+    }
+}
+
 } // namespace
 
 ResearchDrumRenderResult renderResearchDrumVoices(
@@ -1481,6 +1522,17 @@ ResearchDrumRenderResult renderResearchDrumVoices(
             return left.event.frame < right.event.frame;
         });
 
+    std::vector<DetailHit> detailHits;
+    detailHits.reserve(pending.size());
+    for (const Pending& item : pending) {
+        ResearchDrumRenderEvent event = item.event;
+        event.repeatIndex = item.repeatIndex;
+        detailHits.push_back({
+            realise(event, *item.piece),
+            item.piece,
+        });
+    }
+
     std::vector<Voice> active;
     std::array<SubVoice, 32> synthVoices;
     std::size_t next = 0;
@@ -1516,22 +1568,17 @@ ResearchDrumRenderResult renderResearchDrumVoices(
                 hasSecond
                 ? std::sqrt(item.piece->blend)
                 : 0.0f;
-            if (item.piece->source !=
-                    QStringLiteral("jam2-native")) {
-                Voice voice = makeVoice(
-                    *item.piece,
-                    hit,
-                    item.piece->source,
-                    firstGain,
-                    totalFrames,
-                    sampleRate);
-                if (voice.endFrame > frame) {
-                    active.push_back(std::move(voice));
-                }
+            Voice voice = makeVoice(
+                *item.piece,
+                hit,
+                item.piece->source,
+                firstGain,
+                totalFrames,
+                sampleRate);
+            if (voice.endFrame > frame) {
+                active.push_back(std::move(voice));
             }
-            if (hasSecond &&
-                item.piece->secondSource !=
-                    QStringLiteral("jam2-native")) {
+            if (hasSecond) {
                 Voice voice = makeVoice(
                     *item.piece,
                     hit,
@@ -1603,6 +1650,11 @@ ResearchDrumRenderResult renderResearchDrumVoices(
                 }),
             active.end());
     }
+    renderDetailBanks(
+        result.dry,
+        result.roomSend,
+        detailHits,
+        sampleRate);
     return result;
 }
 

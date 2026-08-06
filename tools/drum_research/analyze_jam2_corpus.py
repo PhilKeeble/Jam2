@@ -38,8 +38,6 @@ LANE_IDS = {
     "Mid Tom": "mid_tom",
     "Floor Tom": "floor_tom",
     "Cross-stick / Rim": "cross_stick",
-    "Shaker": "shaker",
-    "Hand Percussion": "hand_percussion",
 }
 
 

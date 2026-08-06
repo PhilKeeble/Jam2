@@ -1,0 +1,39 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "rock",
+  "styleName": "Rock",
+  "profileId": "rock_shuffle_blues",
+  "profileName": "Shuffle / Blues Rock",
+  "seed": "1505954517",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 88.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 88.0,
+  "durationSeconds": 21.818182,
+  "tonic": "C#",
+  "mode": "Blues",
+  "formId": "rock-blues-12",
+  "grooveId": "blues-texas-shuffle",
+  "fingerprints": {
+    "beat": "181e415c180d2735ecd950a49b7cddb06542b80c2019831ea85b5a5a3905ccc2",
+    "chord": "560dcd1b9fc666e7bec558d0674faec210cda972ce2dedf14f938ba7a58fda04"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

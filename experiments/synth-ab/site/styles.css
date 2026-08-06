@@ -126,10 +126,15 @@ button.primary:hover { background: #317751; }
 .current-lineup-panel { display: grid; grid-template-columns: minmax(220px, .55fr) 1.45fr; gap: 18px; align-items: center; }
 .current-lineup-panel p:last-child { margin: 0; color: var(--muted); font-size: .72rem; line-height: 1.45; }
 .current-lineup { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 7px; }
+.lineup-role-card { display: grid; gap: 5px; min-width: 0; }
 .lineup-role { display: grid; gap: 3px; min-width: 0; padding: 9px 10px; text-align: left; }
 .lineup-role.active { border-color: var(--accent); background: #24382e; }
 .lineup-role strong { font-size: .68rem; }
 .lineup-role span { overflow: hidden; color: var(--muted); font-size: .62rem; text-overflow: ellipsis; white-space: nowrap; }
+.lineup-volume { display: grid; gap: 3px; padding: 0 4px 5px; }
+.lineup-volume span { display: flex; justify-content: space-between; color: var(--muted); font-size: .58rem; }
+.lineup-volume output { color: var(--text); font-variant-numeric: tabular-nums; }
+.lineup-volume input { width: 100%; min-width: 0; }
 .base-template-toolbar { display: grid; grid-template-columns: minmax(220px, .45fr) 1.55fr; gap: 18px; margin-bottom: 16px; padding: 13px; border: 1px solid #34423a; border-radius: 10px; background: #151c18; }
 .base-template-toolbar label { display: grid; gap: 7px; color: var(--muted); font-size: .7rem; font-weight: 700; }
 .base-template-toolbar select { width: 100%; padding: 9px 10px; border: 1px solid #45564d; border-radius: 8px; outline: none; background: #101613; color: var(--accent-strong); }

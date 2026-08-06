@@ -19,9 +19,14 @@
 #include <QtEndian>
 
 #include <algorithm>
+#include <atomic>
+#include <array>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <numeric>
+#include <thread>
+#include <vector>
 
 namespace jam2::practice {
 namespace {
@@ -37,19 +42,15 @@ struct DrumEvent {
     enum class Instrument {
         Kick, Snare, ClosedHat, OpenHat, HighTom, MidTom, FloorTom,
         Crash, Ride,
-        CrossStick, Shaker, HandPercussion
+        CrossStick
     };
     qint64 frame = 0;
     Instrument instrument = Instrument::Kick;
     double level = 0.7;
     std::uint32_t noiseSeed = 1;
-    int kit = 0;
     int velocity = 96;
     QString articulation;
     QString laneId;
-    ResearchDrumPiece researchedPiece;
-    bool useResearchedPiece = false;
-    qint64 chokeAge = std::numeric_limits<qint64>::max();
 };
 
 enum class Wave { Sine, Triangle, Saw, Pulse, Fm };
@@ -378,23 +379,35 @@ QVector<int> voicedNotes(const ParsedChord& chord, ChordVoicing voicing, double 
         notes.push_back(note);
     }
     if (voicing == ChordVoicing::VoiceLed) {
-        const double center =
-            std::accumulate(notes.cbegin(), notes.cend(), 0.0) / notes.size();
         const double targetCenter =
             previousCenter > 0.0 ? previousCenter : 56.0;
-        int octaveShift = 0;
+        QVector<int> ordered = notes;
+        std::sort(ordered.begin(), ordered.end());
+        QVector<int> bestNotes = ordered;
         double bestDistance = std::numeric_limits<double>::max();
-        for (int candidate = -24; candidate <= 24; candidate += 12) {
-            const double candidateCenter = center + candidate;
-            if (candidateCenter < 50.0 || candidateCenter > 62.0) continue;
-            const double distance =
-                std::abs(candidateCenter - targetCenter);
-            if (distance < bestDistance) {
+        for (int inversion = 0; inversion < ordered.size(); ++inversion) {
+            QVector<int> candidateNotes = ordered;
+            for (int voice = 0; voice < inversion; ++voice) {
+                candidateNotes[voice] += 12;
+            }
+            std::sort(candidateNotes.begin(), candidateNotes.end());
+            const double center = std::accumulate(
+                candidateNotes.cbegin(), candidateNotes.cend(), 0.0) /
+                candidateNotes.size();
+            for (int shift = -24; shift <= 24; shift += 12) {
+                const double candidateCenter = center + shift;
+                if (candidateCenter < 50.0 || candidateCenter > 62.0) {
+                    continue;
+                }
+                const double distance =
+                    std::abs(candidateCenter - targetCenter);
+                if (distance >= bestDistance) continue;
                 bestDistance = distance;
-                octaveShift = candidate;
+                bestNotes = candidateNotes;
+                for (int& note : bestNotes) note += shift;
             }
         }
-        for (int& note : notes) note += octaveShift;
+        notes = std::move(bestNotes);
     }
     if (chord.bass >= 0 && voicing != ChordVoicing::VoiceLed) {
         int bass = 36 + chord.bass;
@@ -413,11 +426,9 @@ QVector<int> voicedNotes(const ParsedChord& chord, ChordVoicing voicing, double 
     return notes;
 }
 
-bool resolvedChordVoicings(
+ChordVoicing styleDefaultVoicing(
     const SongSection& section,
-    ChordVoicing voicing,
-    QVector<QVector<int>>& out,
-    QString& error)
+    ChordVoicing voicing)
 {
     if (voicing == ChordVoicing::StyleDefault) {
         const QString style = section.generatedRecipe.styleId;
@@ -434,48 +445,165 @@ bool resolvedChordVoicings(
                     style == QStringLiteral("electronic")
                 ? ChordVoicing::Spread : ChordVoicing::Close;
     }
-    out.resize(section.beats * kTicksPerBeat);
-    QVector<int> current;
+    return voicing;
+}
+
+ChordVoicing stepVoicing(
+    const QString& name,
+    ChordVoicing fallback)
+{
+    if (name == QStringLiteral("close")) return ChordVoicing::Close;
+    if (name == QStringLiteral("spread")) return ChordVoicing::Spread;
+    if (name == QStringLiteral("voice-led") ||
+        name == QStringLiteral("inverted")) {
+        return ChordVoicing::VoiceLed;
+    }
+    return fallback;
+}
+
+struct ResolvedChordEvent {
+    int tick = 0;
+    int durationTicks = 1;
+    QVector<int> notes;
+    int velocity = 88;
+    QString articulation;
+    QString voicing;
+};
+
+bool resolvedChordEvents(
+    const SongSection& section,
+    ChordVoicing requestedVoicing,
+    QVector<ResolvedChordEvent>& out,
+    QString& error)
+{
+    const ChordVoicing fallbackVoicing =
+        styleDefaultVoicing(section, requestedVoicing);
     double previousCenter = 0.0;
+    int active = -1;
+    const auto closeAt = [&out, &active](int tick) {
+        if (active >= 0) {
+            out[active].durationTicks = qMax(
+                1, tick - out[active].tick);
+            active = -1;
+        }
+    };
     for (int beat = 0; beat < section.beats; ++beat) {
         const bool timed = beat < section.musicalPatterns.size() &&
             section.musicalPatterns[beat].division > 0 &&
             section.musicalPatterns[beat].chords.size() == section.musicalPatterns[beat].division;
         const int division = timed ? section.musicalPatterns[beat].division : 1;
-        for (int tick = 0; tick < kTicksPerBeat; ++tick) {
-            if (tick % (kTicksPerBeat / division) == 0) {
-                const int stepIndex = tick * division / kTicksPerBeat;
-                MusicalStep step;
-                if (timed) step = section.musicalPatterns[beat].chords[stepIndex];
-                else {
-                    const QString legacy = section.chords.value(beat).trimmed();
-                    step.state = legacy.isEmpty() ? MusicalStepState::Hold
-                        : legacy == QStringLiteral("-") ? MusicalStepState::Rest
-                                                        : MusicalStepState::Onset;
-                    step.value = legacy;
-                }
-                if (step.state == MusicalStepState::Rest) {
-                    current.clear();
-                } else if (step.state == MusicalStepState::Onset) {
-                    const ParsedChord parsed = parseChord(step.value);
-                    if (!parsed.valid) {
-                        error = QStringLiteral("Unsupported chord symbol at beat %1, step %2: %3")
-                            .arg(beat + 1).arg(stepIndex + 1).arg(step.value);
-                        return false;
-                    }
-                    if (parsed.rest) current.clear();
-                    else {
-                        current = voicedNotes(parsed, voicing, previousCenter);
-                        double total = 0.0;
-                        for (int note : current) total += note;
-                        previousCenter = current.isEmpty() ? previousCenter : total / current.size();
-                    }
-                }
+        for (int stepIndex = 0; stepIndex < division; ++stepIndex) {
+            const int tick = beat * kTicksPerBeat +
+                stepIndex * kTicksPerBeat / division;
+            MusicalStep step;
+            if (timed) step = section.musicalPatterns[beat].chords[stepIndex];
+            else {
+                const QString legacy = section.chords.value(beat).trimmed();
+                step.state = legacy.isEmpty() ? MusicalStepState::Hold
+                    : legacy == QStringLiteral("-") ? MusicalStepState::Rest
+                                                    : MusicalStepState::Onset;
+                step.value = legacy;
             }
-            out[beat * kTicksPerBeat + tick] = current;
+            if (step.state == MusicalStepState::Rest) {
+                closeAt(tick);
+                continue;
+            }
+            if (step.state != MusicalStepState::Onset) continue;
+            closeAt(tick);
+            const ParsedChord parsed = parseChord(step.value);
+            if (!parsed.valid) {
+                error = QStringLiteral("Unsupported chord symbol at beat %1, step %2: %3")
+                    .arg(beat + 1).arg(stepIndex + 1).arg(step.value);
+                return false;
+            }
+            if (parsed.rest) continue;
+            const ChordVoicing voicing = stepVoicing(
+                step.voicing, fallbackVoicing);
+            QVector<int> notes = voicedNotes(
+                parsed, voicing, previousCenter);
+            double total = 0.0;
+            for (int note : notes) total += note;
+            if (!notes.isEmpty()) {
+                previousCenter = total / notes.size();
+            }
+            out.push_back({
+                tick,
+                1,
+                std::move(notes),
+                qBound(1, step.velocity, 127),
+                step.articulation,
+                step.voicing,
+            });
+            active = out.size() - 1;
+        }
+    }
+    closeAt(section.beats * kTicksPerBeat);
+    return true;
+}
+
+bool resolvedChordVoicings(
+    const SongSection& section,
+    ChordVoicing voicing,
+    QVector<QVector<int>>& out,
+    QString& error)
+{
+    QVector<ResolvedChordEvent> events;
+    if (!resolvedChordEvents(section, voicing, events, error)) return false;
+    out.fill(QVector<int>{}, section.beats * kTicksPerBeat);
+    for (const ResolvedChordEvent& event : events) {
+        const int end = qMin(out.size(), event.tick + event.durationTicks);
+        for (int tick = event.tick; tick < end; ++tick) {
+            out[tick] = event.notes;
         }
     }
     return true;
+}
+
+double chordGateRatio(const QString& articulation)
+{
+    const QString value = articulation.toLower();
+    if (value.contains(QStringLiteral("choke")) ||
+        value.contains(QStringLiteral("palm-muted"))) return 0.30;
+    if (value.contains(QStringLiteral("staccato")) ||
+        value.contains(QStringLiteral("short-muted")) ||
+        value.contains(QStringLiteral("short-accented"))) return 0.42;
+    if (value.contains(QStringLiteral("short")) ||
+        value.contains(QStringLiteral("stab")) ||
+        value.contains(QStringLiteral("chop")) ||
+        value.contains(QStringLiteral("recut")) ||
+        value.contains(QStringLiteral("pulse")) ||
+        value.contains(QStringLiteral("detached"))) return 0.60;
+    if (value.contains(QStringLiteral("driven"))) return 0.78;
+    return 1.0;
+}
+
+double chordAttackScale(const QString& articulation)
+{
+    const QString value = articulation.toLower();
+    if (value.contains(QStringLiteral("soft")) ||
+        value.contains(QStringLiteral("pad"))) return 1.45;
+    if (value.contains(QStringLiteral("accent")) ||
+        value.contains(QStringLiteral("stab")) ||
+        value.contains(QStringLiteral("chop")) ||
+        value.contains(QStringLiteral("muted"))) return 0.55;
+    return 1.0;
+}
+
+double chordReleaseScale(const QString& articulation)
+{
+    const QString value = articulation.toLower();
+    if (value.contains(QStringLiteral("choke")) ||
+        value.contains(QStringLiteral("muted")) ||
+        value.contains(QStringLiteral("staccato"))) return 0.28;
+    if (value.contains(QStringLiteral("short")) ||
+        value.contains(QStringLiteral("stab")) ||
+        value.contains(QStringLiteral("chop")) ||
+        value.contains(QStringLiteral("detached"))) return 0.48;
+    if (value.contains(QStringLiteral("sustain")) ||
+        value.contains(QStringLiteral("open")) ||
+        value.contains(QStringLiteral("pad")) ||
+        value.contains(QStringLiteral("connected"))) return 1.35;
+    return 1.0;
 }
 
 ReferenceWav renderChords(
@@ -486,8 +614,9 @@ ReferenceWav renderChords(
     const QString& path,
     QString& error)
 {
-    QVector<QVector<int>> voicings;
-    if (!resolvedChordVoicings(section, settings.voicing, voicings, error)) return {};
+    QVector<ResolvedChordEvent> baseEvents;
+    if (!resolvedChordEvents(
+            section, settings.voicing, baseEvents, error)) return {};
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) {
         error = QStringLiteral("Cannot create chord reference WAV.");
@@ -499,8 +628,62 @@ ReferenceWav renderChords(
         laneTimingRecipe(section, QStringLiteral("comping"));
     const double filterAmount = filterCoefficient(patch, settings.sampleRate);
     const double framesPerBeat = framesPerMusicalBeat(section, settings);
-    const qint64 attackFrames = static_cast<qint64>(settings.attackMs * settings.sampleRate / 1000.0);
-    const qint64 releaseFrames = static_cast<qint64>(settings.releaseMs * settings.sampleRate / 1000.0);
+    double generatedAttackMs = 8.0;
+    double generatedReleaseMs = 100.0;
+    for (const SynthVoiceRecipe& voice : section.generatedRecipe.synthVoices) {
+        if (voice.roleId != QStringLiteral("chords")) continue;
+        generatedAttackMs = voice.attackMs;
+        generatedReleaseMs = voice.releaseMs;
+        break;
+    }
+    const double baseAttackMs = generatedAttackMs * settings.attackMs / 8.0;
+    const double baseReleaseMs = generatedReleaseMs * settings.releaseMs / 100.0;
+    struct RenderEvent {
+        qint64 frame = 0;
+        qint64 durationFrames = 1;
+        QVector<int> notes;
+        int velocity = 88;
+        QString articulation;
+        qint64 absoluteTick = 0;
+    };
+    QVector<RenderEvent> events;
+    const qint64 cycleTicks = qMax<qint64>(
+        1, section.beats * kTicksPerBeat);
+    const double framesPerTick = framesPerBeat / kTicksPerBeat;
+    for (qint64 cycleStart = 0;
+         cycleStart < commonBeats * kTicksPerBeat;
+         cycleStart += cycleTicks) {
+        for (const ResolvedChordEvent& event : baseEvents) {
+            const qint64 absoluteTick = cycleStart + event.tick;
+            if (absoluteTick >= commonBeats * kTicksPerBeat) break;
+            double frame = absoluteTick * framesPerTick;
+            if (compTiming) {
+                frame += compTiming->offsetMs * settings.sampleRate / 1000.0;
+                frame += deterministicUnit(
+                    section.generatedRecipe.seed,
+                    static_cast<std::uint32_t>(
+                        absoluteTick * 193 + 0x4a31U)) *
+                    compTiming->varianceMs * settings.sampleRate / 1000.0;
+            }
+            const int maximumTicks = static_cast<int>(
+                commonBeats * kTicksPerBeat - absoluteTick);
+            const int logicalTicks = qMax(
+                1, qMin(event.durationTicks, maximumTicks));
+            const int gateTicks = qMax(
+                1,
+                static_cast<int>(std::lround(
+                    logicalTicks * chordGateRatio(event.articulation))));
+            events.push_back({
+                qMax<qint64>(0, static_cast<qint64>(std::llround(frame))),
+                qMax<qint64>(1, static_cast<qint64>(
+                    std::llround(gateTicks * framesPerTick))),
+                event.notes,
+                event.velocity,
+                event.articulation,
+                absoluteTick,
+            });
+        }
+    }
     double filtered = 0.0;
     QVector<float> delay(qMax(1, static_cast<int>(settings.sampleRate * 0.125)), 0.0f);
     float renderedPeak = 0.0f;
@@ -508,59 +691,68 @@ ReferenceWav renderChords(
     for (qint64 first = 0; first < totalFrames; first += kBlockFrames) {
         const int count = static_cast<int>(qMin<qint64>(kBlockFrames, totalFrames - first));
         QVector<float> block(count, 0.0f);
-        for (int offset = 0; offset < count; ++offset) {
+        for (const RenderEvent& event : events) {
+            if (event.frame >= first + count) break;
+            if (event.frame + event.durationFrames <= first) continue;
+            const qint64 begin = qMax(first, event.frame);
+            const qint64 end = qMin(
+                first + count, event.frame + event.durationFrames);
+            const qint64 attackFrames = qMax<qint64>(
+                1,
+                static_cast<qint64>(
+                    baseAttackMs * chordAttackScale(event.articulation) *
+                    settings.sampleRate / 1000.0));
+            const qint64 releaseFrames = qMax<qint64>(
+                1,
+                qMin<qint64>(
+                    event.durationFrames / 2,
+                    static_cast<qint64>(
+                        baseReleaseMs * chordReleaseScale(event.articulation) *
+                        settings.sampleRate / 1000.0)));
+            for (qint64 frame = begin; frame < end; ++frame) {
+                const qint64 age = frame - event.frame;
+                const qint64 remaining =
+                    event.frame + event.durationFrames - frame;
+                double envelope = qMin(
+                    1.0, static_cast<double>(age) / attackFrames);
+                if (remaining < releaseFrames) {
+                    envelope *= static_cast<double>(remaining) /
+                        releaseFrames;
+                }
+                double value = 0.0;
+                const double seconds =
+                    static_cast<double>(age) / settings.sampleRate;
+                for (int note : event.notes) {
+                    value += patchTone(
+                        patch, midiFrequency(note), seconds, seconds);
+                }
+                if (!event.notes.isEmpty()) value /= event.notes.size();
+                block[static_cast<int>(frame - first)] +=
+                    static_cast<float>(
+                        settings.chordLevel *
+                        (event.velocity / 127.0) * envelope * value);
+            }
+        }
+        for (int offset = 0; offset < block.size(); ++offset) {
             const qint64 frame = first + offset;
-            const qint64 roughTick = qMin(commonBeats * kTicksPerBeat - 1,
-                static_cast<qint64>(frame * kTicksPerBeat / framesPerBeat));
-            double timingShift = 0.0;
-            if (compTiming) {
-                timingShift = compTiming->offsetMs * settings.sampleRate / 1000.0;
-                timingShift += deterministicUnit(
-                    section.generatedRecipe.seed,
-                    static_cast<std::uint32_t>(roughTick * 193 + 0x4a31U)) *
-                    compTiming->varianceMs * settings.sampleRate / 1000.0;
-            }
-            const qint64 musicalFrame = qBound<qint64>(
-                0,
-                static_cast<qint64>(std::llround(frame - timingShift)),
-                totalFrames - 1);
-            const qint64 absoluteTick = qMin(commonBeats * kTicksPerBeat - 1,
-                static_cast<qint64>(musicalFrame * kTicksPerBeat / framesPerBeat));
-            const int tick = static_cast<int>(absoluteTick % (section.beats * kTicksPerBeat));
-            const QVector<int>& notes = voicings.at(tick);
-            if (notes.isEmpty()) continue;
-            const qint64 tickStart = static_cast<qint64>(absoluteTick * framesPerBeat / kTicksPerBeat);
-            const qint64 tickEnd = static_cast<qint64>((absoluteTick + 1) * framesPerBeat / kTicksPerBeat);
-            const QVector<int>& previous = voicings.at((tick - 1 + voicings.size()) % voicings.size());
-            const QVector<int>& next = voicings.at((tick + 1) % voicings.size());
-            double envelope = 1.0;
-            if (notes != previous && attackFrames > 0) {
-                envelope = qMin(envelope, static_cast<double>(musicalFrame - tickStart) / attackFrames);
-            }
-            if (notes != next && releaseFrames > 0) {
-                envelope = qMin(envelope, static_cast<double>(tickEnd - musicalFrame) / releaseFrames);
-            }
-            double value = 0.0;
-            const double seconds = static_cast<double>(frame) / settings.sampleRate;
-            const double noteAge = static_cast<double>(frame - tickStart) / settings.sampleRate;
-            for (int note : notes) {
-                value += patchTone(patch, midiFrequency(note), seconds, noteAge);
-            }
-            value = settings.chordLevel * envelope * value / notes.size();
+            const qint64 absoluteTick = qMin(
+                commonBeats * kTicksPerBeat - 1,
+                static_cast<qint64>(
+                    frame / qMax(1.0, framesPerTick)));
             const double automatedCutoff = automationValue(
-                section,
-                QStringLiteral("chords.cutoff_hz"),
-                absoluteTick,
-                -1.0);
+                section, QStringLiteral("chords.cutoff_hz"),
+                absoluteTick, -1.0);
             const double currentFilterAmount = automatedCutoff > 0.0
                 ? filterCoefficientHz(automatedCutoff, settings.sampleRate)
                 : filterAmount;
-            filtered += currentFilterAmount * (value - filtered);
+            filtered += currentFilterAmount *
+                (block[offset] - filtered);
             const int delayIndex = static_cast<int>(frame % delay.size());
-            const double effected = filtered + patch.delayMix * delay.at(delayIndex);
+            const float effected = static_cast<float>(
+                filtered + patch.delayMix * delay.at(delayIndex));
             delay[delayIndex] = static_cast<float>(filtered);
-            block[offset] = static_cast<float>(effected);
-            renderedPeak = qMax(renderedPeak, std::abs(block[offset]));
+            block[offset] = effected;
+            renderedPeak = qMax(renderedPeak, std::abs(effected));
         }
         for (float sample : block) {
             renderedEnergy +=
@@ -575,19 +767,12 @@ ReferenceWav renderChords(
         error = QStringLiteral("Cannot finalize chord reference WAV.");
         return {};
     }
-    int eventCount = 0;
-    for (const MusicalBeatPattern& pattern : section.musicalPatterns) {
-        for (const MusicalStep& step : pattern.chords)
-            if (step.state == MusicalStepState::Onset) ++eventCount;
-    }
-    if (section.musicalPatterns.isEmpty())
-        for (const QString& chord : section.chords) if (!chord.trimmed().isEmpty()) ++eventCount;
     return {
         path,
         fileHash(path),
         totalFrames,
         renderedPeak,
-        eventCount,
+        static_cast<int>(events.size()),
         static_cast<float>(
             std::sqrt(renderedEnergy / qMax<qint64>(1, totalFrames))),
     };
@@ -941,8 +1126,6 @@ std::optional<DrumEvent::Instrument> drumInstrument(const QString& name)
     if (name == QStringLiteral("Crash")) return DrumEvent::Instrument::Crash;
     if (name == QStringLiteral("Ride")) return DrumEvent::Instrument::Ride;
     if (name == QStringLiteral("Cross-stick / Rim")) return DrumEvent::Instrument::CrossStick;
-    if (name == QStringLiteral("Shaker")) return DrumEvent::Instrument::Shaker;
-    if (name == QStringLiteral("Hand Percussion")) return DrumEvent::Instrument::HandPercussion;
     return std::nullopt;
 }
 
@@ -979,12 +1162,6 @@ std::optional<DrumEvent::Instrument> drumInstrumentId(
     if (id == QStringLiteral("cross_stick")) {
         return DrumEvent::Instrument::CrossStick;
     }
-    if (id == QStringLiteral("shaker")) {
-        return DrumEvent::Instrument::Shaker;
-    }
-    if (id == QStringLiteral("hand_percussion")) {
-        return DrumEvent::Instrument::HandPercussion;
-    }
     return std::nullopt;
 }
 
@@ -997,15 +1174,194 @@ double deterministicUnit(std::uint32_t seed, std::uint32_t salt)
     return static_cast<double>(value) / 2147483647.5 - 1.0;
 }
 
+int wrappedPitchClass(int value)
+{
+    const int remainder = value % 12;
+    return remainder < 0 ? remainder + 12 : remainder;
+}
+
+QVector<int> modeAwareDrumTargetIntervals(const QString& modeName)
+{
+    const QString mode = modeName.trimmed().toLower();
+    if (mode == QStringLiteral("major") || mode == QStringLiteral("ionian") ||
+        mode == QStringLiteral("major pentatonic")) {
+        return {0, 2, 4, 7, 9};
+    }
+    if (mode == QStringLiteral("natural minor") || mode == QStringLiteral("aeolian") ||
+        mode == QStringLiteral("minor pentatonic")) {
+        return {0, 3, 5, 7, 10};
+    }
+    if (mode == QStringLiteral("dorian")) return {0, 2, 3, 7, 9};
+    if (mode == QStringLiteral("mixolydian")) return {0, 2, 4, 7, 10};
+    if (mode == QStringLiteral("lydian")) return {0, 2, 4, 6, 9};
+    if (mode == QStringLiteral("phrygian")) return {0, 1, 3, 7, 10};
+    if (mode == QStringLiteral("dominant blues")) return {0, 3, 4, 7, 10};
+    if (mode == QStringLiteral("blues") || mode == QStringLiteral("minor blues")) {
+        return {0, 3, 5, 7, 10};
+    }
+    return {};
+}
+
+std::array<double, 12> drumHarmonyPitchWeights(const SongSection& section)
+{
+    std::array<double, 12> weights{};
+    ParsedChord currentChord;
+    for (const MusicalBeatPattern& pattern : section.musicalPatterns) {
+        if (pattern.division <= 0 ||
+            pattern.chords.size() != pattern.division) {
+            continue;
+        }
+        const double stepWeight = 1.0 / pattern.division;
+        for (const MusicalStep& step : pattern.chords) {
+            if (step.state == MusicalStepState::Onset) {
+                currentChord = parseChord(step.value);
+            } else if (step.state == MusicalStepState::Rest) {
+                currentChord = {};
+            }
+            if (!currentChord.valid || currentChord.rest) continue;
+            weights[static_cast<std::size_t>(currentChord.root)] +=
+                2.2 * stepWeight;
+            for (int interval : currentChord.intervals) {
+                weights[static_cast<std::size_t>(wrappedPitchClass(
+                    currentChord.root + interval))] += stepWeight;
+            }
+            if (currentChord.bass >= 0) {
+                weights[static_cast<std::size_t>(currentChord.bass)] +=
+                    0.6 * stepWeight;
+            }
+        }
+    }
+    for (const MelodyRecipeEvent& event :
+         section.generatedRecipe.melodyEvents) {
+        const double duration = std::clamp(
+            static_cast<double>(event.durationTicks) / kTicksPerBeat, 0.0, 2.0);
+        weights[static_cast<std::size_t>(wrappedPitchClass(event.midi))] +=
+            0.12 * duration;
+    }
+    for (const RoleRecipeEvent& event :
+         section.generatedRecipe.bassEvents) {
+        const double duration = std::clamp(
+            static_cast<double>(event.durationTicks) / kTicksPerBeat, 0.0, 2.0);
+        weights[static_cast<std::size_t>(wrappedPitchClass(event.midi))] +=
+            0.16 * duration;
+    }
+    return weights;
+}
+
+double drumTargetHarmonyScore(
+    int targetPitchClass,
+    const std::array<double, 12>& weights)
+{
+    constexpr std::array<double, 7> relationship{
+        3.0, -3.2, -0.35, 0.75, 0.45, 0.20, -2.2};
+    double score = 0.0;
+    for (int pitchClass = 0; pitchClass < 12; ++pitchClass) {
+        const int forward = wrappedPitchClass(targetPitchClass - pitchClass);
+        const int distance = std::min(forward, 12 - forward);
+        score += weights[static_cast<std::size_t>(pitchClass)] *
+            relationship[static_cast<std::size_t>(distance)];
+    }
+    return score;
+}
+
+std::optional<double> drumResonanceShiftCents(
+    double frequencyHz,
+    int tonic,
+    const QVector<int>& targetIntervals,
+    const std::array<double, 12>& harmonyWeights)
+{
+    constexpr double maximumCents = 200.0;
+    if (frequencyHz <= 0.0) return std::nullopt;
+    const double sourceMidi = 69.0 + 12.0 * std::log2(frequencyHz / 440.0);
+    double bestCents = 0.0;
+    double bestScore = -std::numeric_limits<double>::infinity();
+    bool found = false;
+    for (int interval : targetIntervals) {
+        const int pitchClass = wrappedPitchClass(tonic + interval);
+        const double targetMidi = pitchClass + 12.0 * std::round(
+            (sourceMidi - pitchClass) / 12.0);
+        const double cents = 100.0 * (targetMidi - sourceMidi);
+        if (std::abs(cents) > maximumCents + 0.001) continue;
+        const double preference = interval == 0 ? 1.2 : interval == 7 ? 0.9 : 0.0;
+        const double score = drumTargetHarmonyScore(pitchClass, harmonyWeights) +
+            preference - 0.35 * std::abs(cents) / maximumCents;
+        if (!found || score > bestScore + 1.0e-9 ||
+            (std::abs(score - bestScore) <= 1.0e-9 &&
+             std::abs(cents) < std::abs(bestCents))) {
+            bestCents = cents;
+            bestScore = score;
+            found = true;
+        }
+    }
+    return found ? std::optional<double>(bestCents) : std::nullopt;
+}
+
+ResearchDrumKit keyAwareDrumKit(
+    const ResearchDrumKit& source,
+    const SongSection& section)
+{
+    ResearchDrumKit kit = source;
+    const GenerationRecipe& recipe = section.generatedRecipe;
+    const ParsedChord tonic = parseChord(recipe.tonic);
+    const QVector<int> targets = modeAwareDrumTargetIntervals(recipe.mode);
+    if (!tonic.valid || targets.isEmpty()) return kit;
+    const auto weights = drumHarmonyPitchWeights(section);
+    const QStringList eligible = source.baseKitId == QStringLiteral("electronic")
+        ? QStringList{QStringLiteral("kick"), QStringLiteral("snare"),
+              QStringLiteral("high-tom"), QStringLiteral("mid-tom"),
+              QStringLiteral("floor-tom"), QStringLiteral("ride")}
+        : QStringList{QStringLiteral("kick"), QStringLiteral("high-tom"),
+              QStringLiteral("mid-tom"), QStringLiteral("floor-tom"),
+              QStringLiteral("ride")};
+    for (const QString& pieceId : eligible) {
+        auto found = kit.pieces.find(pieceId);
+        if (found == kit.pieces.end() || found->modalBands.isEmpty()) continue;
+        ResearchDrumPiece& piece = found.value();
+        const auto anchor = std::max_element(
+            piece.modalBands.cbegin(), piece.modalBands.cend(),
+            [](const ResearchDrumModalBand& left, const ResearchDrumModalBand& right) {
+                return left.level * std::sqrt(qMax(0.005f, left.decaySeconds)) <
+                    right.level * std::sqrt(qMax(0.005f, right.decaySeconds));
+            });
+        const qsizetype anchorIndex = std::distance(
+            piece.modalBands.cbegin(), anchor);
+        const double anchorFrequency = anchor->frequencyHz *
+            std::pow(2.0, anchor->detuneCents / 1200.0);
+        const std::optional<double> cents = drumResonanceShiftCents(
+            anchorFrequency, tonic.root, targets, weights);
+        if (!cents) continue;
+        const float ratio = static_cast<float>(std::pow(2.0, *cents / 1200.0));
+        for (ResearchDrumModalBand& band : piece.modalBands) {
+            band.detuneCents += static_cast<float>(*cents);
+        }
+        if (pieceId != QStringLiteral("ride") &&
+            piece.sourceLayerGain > 0.0001f) {
+            piece.frequencyHz *= ratio;
+        }
+        const double largeMove = std::clamp(
+            (std::abs(*cents) - 100.0) / 100.0, 0.0, 1.0);
+        ResearchDrumModalBand& movedAnchor =
+            piece.modalBands[anchorIndex];
+        movedAnchor.level *= static_cast<float>(1.0 - 0.12 * largeMove);
+        movedAnchor.decaySeconds *= static_cast<float>(
+            1.0 - 0.10 * largeMove);
+    }
+    return kit;
+}
+
 QVector<DrumEvent> drumEvents(
     const SongSection& section,
     const ReferenceRenderSettings& settings,
-    qint64 commonBeats)
+    qint64 commonBeats,
+    const ResearchDrumKit& drumKit)
 {
     QVector<DrumEvent> events;
     const double framesPerBeat = framesPerMusicalBeat(section, settings);
     const QStringList lanes = BeatGridModel::beatLaneNames();
-    const GenerationRecipe* feel = section.generatedRecipe.isValid()
+    const GenerationRecipe* feel = section.generatedRecipe.isValid() &&
+        !section.generatedRecipe.drumEvents.isEmpty() &&
+        generatedBeatFingerprint(section) ==
+            section.generatedRecipe.beatFingerprint
         ? &section.generatedRecipe : nullptr;
     const int swingPercent = feel ? feel->swingPercent : 50;
     const int snareOffsetMs = feel ? feel->snareOffsetMs : 0;
@@ -1017,24 +1373,12 @@ QVector<DrumEvent> drumEvents(
     const int velocityVariationPercent = feel ? feel->velocityVariationPercent : 0;
     const qint64 maximumFrame = qMax<qint64>(0,
         static_cast<qint64>(std::ceil(commonBeats * framesPerBeat)) - 1);
-    int kit = 0;
-    const QString kitId = section.generatedRecipe.drumPatchId;
-    if (kitId.contains(QStringLiteral("808"))) kit = 3;
-    else if (kitId.contains(QStringLiteral("bossa")) || kitId.contains(QStringLiteral("percussion"))) kit = 4;
-    else if (kitId.contains(QStringLiteral("reggae"))) kit = 5;
-    else if (kitId.contains(QStringLiteral("metal"))) kit = 6;
-    else if (kitId.contains(QStringLiteral("electronic")) || kitId.contains(QStringLiteral("punch"))) kit = 2;
-    else if (kitId.contains(QStringLiteral("brush")) || kitId.contains(QStringLiteral("pocket"))) kit = 1;
-    const bool usePerformance =
-        feel && !feel->drumEvents.isEmpty() &&
-        generatedBeatFingerprint(section) == feel->beatFingerprint;
+    const bool usePerformance = feel;
     if (usePerformance) {
         const qint64 cycleTicks =
             qMax<qint64>(1, section.beats * kTicksPerBeat);
         const double generatedGain =
             std::pow(10.0, feel->drumMixGainDb / 20.0);
-        const ResearchDrumKit* researchedKit =
-            researchDrumKitById(feel->drumPatchId);
         for (qint64 cycleStart = 0;
              cycleStart < commonBeats * kTicksPerBeat;
              cycleStart += cycleTicks) {
@@ -1088,28 +1432,10 @@ QVector<DrumEvent> drumEvents(
                     maximumFrame);
                 event.level =
                     settings.drumLevel * generatedGain;
-                event.kit = kit;
                 event.velocity = performed.velocity;
                 event.articulation = performed.articulation;
                 event.laneId = performed.laneId;
-                if (researchedKit) {
-                    if (const ResearchDrumPiece* piece =
-                            researchDrumPiece(
-                                *researchedKit,
-                                performed.laneId)) {
-                        // Reggae's accepted construction deliberately keeps
-                        // native Jam2 pieces and replaces only the crash.
-                        if (piece->source !=
-                            QStringLiteral("jam2-native")) {
-                            event.researchedPiece = *piece;
-                            event.useResearchedPiece = true;
-                        }
-                    }
-                }
-                if (!event.useResearchedPiece) {
-                    event.level *=
-                        performed.velocity / 127.0;
-                }
+                if (!researchDrumPiece(drumKit, performed.laneId)) continue;
                 events.push_back(std::move(event));
             }
         }
@@ -1119,30 +1445,6 @@ QVector<DrumEvent> drumEvents(
             [](const DrumEvent& a, const DrumEvent& b) {
                 return a.frame < b.frame;
             });
-        int openHat = -1;
-        for (int eventIndex = 0;
-             eventIndex < events.size();
-             ++eventIndex) {
-            DrumEvent& event = events[eventIndex];
-            if (event.laneId == QStringLiteral("open_hat")) {
-                openHat = eventIndex;
-            } else if (
-                event.laneId == QStringLiteral("closed_hat") &&
-                openHat >= 0) {
-                DrumEvent& opened = events[openHat];
-                const double chokeSeconds =
-                    opened.useResearchedPiece
-                    ? opened.researchedPiece.chokeSeconds
-                    : 0.012;
-                opened.chokeAge = qMax<qint64>(
-                    0,
-                    event.frame - opened.frame +
-                        static_cast<qint64>(
-                            chokeSeconds *
-                            settings.sampleRate));
-                openHat = -1;
-            }
-        }
         return events;
     }
     for (qint64 absoluteBeat = 0; absoluteBeat < commonBeats; ++absoluteBeat) {
@@ -1180,160 +1482,23 @@ QVector<DrumEvent> drumEvents(
                 const double velocityScale = 1.0 +
                     deterministicUnit(event.noiseSeed, 0x7f4a7c15U) * velocityVariationPercent / 100.0;
                 event.level = stateLevel(state) * settings.drumLevel * velocityScale;
-                event.kit = kit;
+                event.laneId = BeatGridModel::beatLaneNames()
+                    .value(lane).toLower();
+                event.laneId.replace(QStringLiteral("closed hh"), QStringLiteral("closed_hat"));
+                event.laneId.replace(QStringLiteral("open hh"), QStringLiteral("open_hat"));
+                event.laneId.replace(QStringLiteral("high tom"), QStringLiteral("high_tom"));
+                event.laneId.replace(QStringLiteral("mid tom"), QStringLiteral("mid_tom"));
+                event.laneId.replace(QStringLiteral("floor tom"), QStringLiteral("floor_tom"));
+                event.laneId.replace(QStringLiteral("cross-stick / rim"), QStringLiteral("cross_stick"));
+                event.velocity = state == QLatin1Char('g') ? 38 :
+                    state == QLatin1Char('a') ? 122 : 91;
+                if (!researchDrumPiece(drumKit, event.laneId)) continue;
                 events.push_back(event);
             }
         }
     }
     std::sort(events.begin(), events.end(), [](const DrumEvent& a, const DrumEvent& b) { return a.frame < b.frame; });
     return events;
-}
-
-double noiseAt(std::uint32_t seed, qint64 index)
-{
-    std::uint32_t value = seed ^ static_cast<std::uint32_t>(index * 747796405ULL);
-    value ^= value >> 16;
-    value *= 2246822519U;
-    value ^= value >> 13;
-    return static_cast<double>(value) / 2147483648.0 - 1.0;
-}
-
-double drumSample(const DrumEvent& event, qint64 age, int sampleRate)
-{
-    if (age >= event.chokeAge) return 0.0;
-    if (event.useResearchedPiece) {
-        if (static_cast<double>(age) / sampleRate >
-            researchDrumTailSeconds(
-                event.researchedPiece,
-                event.articulation)) {
-            return 0.0;
-        }
-        return researchDrumSample(
-            event.researchedPiece,
-            event.laneId,
-            event.articulation,
-            event.velocity,
-            event.noiseSeed,
-            age,
-            sampleRate);
-    }
-    const double t = static_cast<double>(age) / sampleRate;
-    switch (event.instrument) {
-    case DrumEvent::Instrument::Kick:
-        return std::sin(2.0 * kPi * ((event.kit == 3 ? 48.0 :
-            event.kit == 6 ? 78.0 : event.kit == 4 ? 54.0 :
-            event.kit == 2 ? 68.0 : 62.0) -
-            (event.kit == 6 ? 38.0 : 24.0) * qMin(1.0, t * 8.0)) * t) *
-            std::exp(-t * (event.kit == 3 ? 4.5 : event.kit == 4 ? 18.0 :
-                event.kit == 6 ? 20.0 : 11.0));
-    case DrumEvent::Instrument::Snare:
-        if (event.kit == 4) {
-            return (0.28 * noiseAt(event.noiseSeed, age) +
-                0.42 * std::sin(2.0 * kPi * 430.0 * t)) * std::exp(-t * 34.0);
-        }
-        if (event.kit == 5) {
-            return (0.24 * noiseAt(event.noiseSeed, age) +
-                0.58 * std::sin(2.0 * kPi * 760.0 * t)) * std::exp(-t * 29.0);
-        }
-        return ((event.kit == 1 ? 0.52 : event.kit == 6 ? 0.88 : 0.78) *
-            noiseAt(event.noiseSeed, age) +
-            (event.kit == 2 ? 0.34 : event.kit == 6 ? 0.42 : 0.22) *
-            std::sin(2.0 * kPi * (event.kit == 2 ? 220.0 :
-                event.kit == 6 ? 205.0 : 180.0) * t)) *
-            std::exp(-t * (event.kit == 1 ? 25.0 : event.kit == 6 ? 24.0 : 18.0));
-    case DrumEvent::Instrument::ClosedHat:
-        return noiseAt(event.noiseSeed, age) * ((age & 1) ? 1.0 : -0.6) * std::exp(-t * 55.0);
-    case DrumEvent::Instrument::OpenHat:
-        return noiseAt(event.noiseSeed, age) * ((age & 1) ? 1.0 : -0.6) * std::exp(-t * 10.0);
-    case DrumEvent::Instrument::HighTom:
-    case DrumEvent::Instrument::MidTom:
-    case DrumEvent::Instrument::FloorTom: {
-        const double frequency =
-            event.instrument == DrumEvent::Instrument::HighTom ? 168.0 :
-            event.instrument == DrumEvent::Instrument::FloorTom ? 82.0 :
-            118.0;
-        const double damping =
-            event.instrument == DrumEvent::Instrument::HighTom ? 12.0 :
-            event.instrument == DrumEvent::Instrument::FloorTom ? 7.5 :
-            9.5;
-        return std::sin(2.0 * kPi * frequency * t) *
-            std::exp(-t * damping);
-    }
-    case DrumEvent::Instrument::Crash:
-        return noiseAt(event.noiseSeed, age) * ((age & 1) ? 1.0 : -0.4) * std::exp(-t * 3.5);
-    case DrumEvent::Instrument::Ride: {
-        const double metal =
-            0.035 * std::sin(2.0 * kPi * 1433.0 * t) +
-            0.024 * std::sin(2.0 * kPi * 2179.0 * t) +
-            0.016 * std::sin(2.0 * kPi * 3313.0 * t);
-        const double wash = 0.30 * noiseAt(event.noiseSeed, age) *
-            ((age & 1) ? 1.0 : -0.35);
-        return wash * std::exp(-t * 8.5) +
-            metal * std::exp(-t * 18.0);
-    }
-    case DrumEvent::Instrument::CrossStick:
-        return (0.46 * std::sin(2.0 * kPi *
-                    (event.kit == 5 ? 620.0 :
-                     event.kit == 4 ? 480.0 : 680.0) * t) +
-            0.30 * noiseAt(event.noiseSeed, age)) * std::exp(-t * 62.0);
-    case DrumEvent::Instrument::Shaker:
-        return noiseAt(event.noiseSeed, age) * ((age & 1) ? 0.8 : -0.55) *
-            std::exp(-t * (event.kit == 4 ? 72.0 : 60.0));
-    case DrumEvent::Instrument::HandPercussion:
-        return (0.45 * std::sin(2.0 * kPi * 235.0 * t) +
-            0.28 * noiseAt(event.noiseSeed, age)) * std::exp(-t * 24.0);
-    }
-    return 0.0;
-}
-
-qint64 drumTailFrames(const DrumEvent& event, int sampleRate)
-{
-    double seconds = 1.0;
-    if (event.useResearchedPiece) {
-        seconds = researchDrumTailSeconds(
-            event.researchedPiece,
-            event.articulation);
-    } else {
-        switch (event.instrument) {
-        case DrumEvent::Instrument::Kick:
-            seconds = event.kit == 3 ? 2.5 : 1.0;
-            break;
-        case DrumEvent::Instrument::Snare:
-            seconds = 1.2;
-            break;
-        case DrumEvent::Instrument::ClosedHat:
-            seconds = 0.35;
-            break;
-        case DrumEvent::Instrument::OpenHat:
-            seconds = 1.5;
-            break;
-        case DrumEvent::Instrument::HighTom:
-        case DrumEvent::Instrument::MidTom:
-        case DrumEvent::Instrument::FloorTom:
-            seconds = 1.8;
-            break;
-        case DrumEvent::Instrument::Crash:
-            seconds = 5.0;
-            break;
-        case DrumEvent::Instrument::Ride:
-            seconds = 4.0;
-            break;
-        case DrumEvent::Instrument::CrossStick:
-            seconds = 0.45;
-            break;
-        case DrumEvent::Instrument::Shaker:
-            seconds = 0.4;
-            break;
-        case DrumEvent::Instrument::HandPercussion:
-            seconds = 1.2;
-            break;
-        }
-    }
-    const qint64 naturalTail = qMax<qint64>(
-        1,
-        static_cast<qint64>(
-            std::ceil(seconds * sampleRate)));
-    return qMin(naturalTail, event.chokeAge);
 }
 
 ReferenceWav renderDrums(
@@ -1344,20 +1509,29 @@ ReferenceWav renderDrums(
     const QString& path,
     QString& error)
 {
-    const QVector<DrumEvent> events = drumEvents(section, settings, commonBeats);
+    const bool generatedPerformance =
+        section.generatedRecipe.isValid() &&
+        !section.generatedRecipe.drumEvents.isEmpty() &&
+        generatedBeatFingerprint(section) ==
+            section.generatedRecipe.beatFingerprint;
+    const ResearchDrumKit* selectedKit = generatedPerformance
+        ? researchDrumKitById(section.generatedRecipe.drumPatchId)
+        : researchDrumKitForBase(section.drumKitId);
+    if (!selectedKit) {
+        error = generatedPerformance
+            ? QStringLiteral("The generated style has no Acoustic or Electronic drum kit mapping.")
+            : QStringLiteral("The selected drum kit is unavailable.");
+        return {};
+    }
+    const ResearchDrumKit tunedKit = generatedPerformance
+        ? keyAwareDrumKit(*selectedKit, section)
+        : *selectedKit;
+    const QVector<DrumEvent> events = drumEvents(
+        section, settings, commonBeats, tunedKit);
     if (events.isEmpty()) {
         error = QStringLiteral("The generated beat contains no renderable drum hits.");
         return {};
     }
-    const ResearchDrumKit* researchedKit =
-        section.generatedRecipe.isValid()
-        ? researchDrumKitById(
-              section.generatedRecipe.drumPatchId)
-        : nullptr;
-    const ResearchDrumBus bus =
-        researchedKit
-        ? researchedKit->bus
-        : ResearchDrumBus{};
 
     QVector<float> rendered(
         static_cast<qsizetype>(totalFrames),
@@ -1366,98 +1540,38 @@ ReferenceWav renderDrums(
         static_cast<qsizetype>(totalFrames),
         0.0f);
     QVector<ResearchDrumRenderEvent> researchEvents;
-    if (researchedKit) {
-        researchEvents.reserve(events.size());
-        for (const DrumEvent& event : events) {
-            if (!event.useResearchedPiece) continue;
-            researchEvents.push_back({
-                event.frame,
-                event.laneId,
-                event.articulation,
-                event.velocity,
-                0,
-                event.noiseSeed,
-            });
-        }
-        const ResearchDrumRenderResult research =
-            renderResearchDrumVoices(
-                *researchedKit,
-                researchEvents,
-                totalFrames,
-                settings.sampleRate);
-        const double researchScale =
-            std::find_if(
-                events.cbegin(),
-                events.cend(),
-                [](const DrumEvent& event) {
-                    return event.useResearchedPiece;
-                }) != events.cend()
-            ? std::find_if(
-                  events.cbegin(),
-                  events.cend(),
-                  [](const DrumEvent& event) {
-                      return event.useResearchedPiece;
-                  })->level
-            : 1.0;
-        for (qsizetype frame = 0;
-             frame < rendered.size() &&
-             frame < research.dry.size();
-             ++frame) {
-            rendered[frame] += static_cast<float>(
-                researchScale * research.dry.at(frame));
-            if (frame < research.roomSend.size()) {
-                researchRoomSend[frame] += static_cast<float>(
-                    researchScale *
-                    research.roomSend.at(frame));
-            }
-        }
-    }
-
-    // Accepted Jam2-native pieces (currently the Reggae construction) are
-    // deliberately retained and enter the same exact Drum Kit Lab bus.
+    researchEvents.reserve(events.size());
     for (const DrumEvent& event : events) {
-        if (event.useResearchedPiece) continue;
-        const qint64 tailFrames =
-            drumTailFrames(event, settings.sampleRate);
-        const qint64 begin = qMax<qint64>(0, event.frame);
-        const qint64 end = qMin(
-            totalFrames,
-            event.frame + tailFrames);
-        for (qint64 frame = begin; frame < end; ++frame) {
-            const qint64 age = frame - event.frame;
-            double chokeGain = 1.0;
-            if (event.chokeAge !=
-                std::numeric_limits<qint64>::max()) {
-                const qint64 fadeFrames =
-                    qMax<qint64>(
-                        1,
-                        static_cast<qint64>(
-                            settings.sampleRate * 0.010));
-                if (age > event.chokeAge - fadeFrames) {
-                    chokeGain = std::clamp(
-                        static_cast<double>(
-                            event.chokeAge - age) /
-                            fadeFrames,
-                        0.0,
-                        1.0);
-                }
-            }
-            rendered[static_cast<qsizetype>(frame)] +=
-                static_cast<float>(
-                    event.level * chokeGain *
-                    drumSample(
-                        event,
-                        age,
-                        settings.sampleRate));
+        researchEvents.push_back({
+            event.frame,
+            event.laneId,
+            event.articulation,
+            event.velocity,
+            0,
+            event.noiseSeed,
+        });
+    }
+    const ResearchDrumRenderResult research = renderResearchDrumVoices(
+        tunedKit, researchEvents, totalFrames, settings.sampleRate);
+    const double generatedGain = generatedPerformance
+        ? std::pow(10.0, section.generatedRecipe.drumMixGainDb / 20.0)
+        : 1.0;
+    const double researchScale = settings.drumLevel * generatedGain;
+    for (qsizetype frame = 0;
+         frame < rendered.size() && frame < research.dry.size(); ++frame) {
+        rendered[frame] = static_cast<float>(
+            researchScale * research.dry.at(frame));
+        if (frame < research.roomSend.size()) {
+            researchRoomSend[frame] = static_cast<float>(
+                researchScale * research.roomSend.at(frame));
         }
     }
     applyResearchDrumBus(
         rendered,
         researchRoomSend,
-        bus,
+        tunedKit.bus,
         settings.sampleRate);
-    const bool generated =
-        section.generatedRecipe.isValid();
+    const bool generated = generatedPerformance;
     const DrumMakeupMetrics makeup =
         applyGeneratedDrumMakeup(rendered, generated);
 
@@ -1530,19 +1644,24 @@ QJsonObject sectionSignature(const SongSection* section)
         QJsonArray supportSteps;
         for (const MusicalStep& step : pattern.chords) {
             chordSteps.append(QJsonObject{{QStringLiteral("state"), static_cast<int>(step.state)},
-                {QStringLiteral("value"), step.value}, {QStringLiteral("velocity"), step.velocity}});
+                {QStringLiteral("value"), step.value}, {QStringLiteral("velocity"), step.velocity},
+                {QStringLiteral("articulation"), step.articulation},
+                {QStringLiteral("voicing"), step.voicing}});
         }
         for (const MusicalStep& step : pattern.melody) {
             melodySteps.append(QJsonObject{{QStringLiteral("state"), static_cast<int>(step.state)},
-                {QStringLiteral("value"), step.value}, {QStringLiteral("velocity"), step.velocity}});
+                {QStringLiteral("value"), step.value}, {QStringLiteral("velocity"), step.velocity},
+                {QStringLiteral("articulation"), step.articulation}});
         }
         for (const MusicalStep& step : pattern.bass) {
             bassSteps.append(QJsonObject{{QStringLiteral("state"), static_cast<int>(step.state)},
-                {QStringLiteral("value"), step.value}, {QStringLiteral("velocity"), step.velocity}});
+                {QStringLiteral("value"), step.value}, {QStringLiteral("velocity"), step.velocity},
+                {QStringLiteral("articulation"), step.articulation}});
         }
         for (const MusicalStep& step : pattern.support) {
             supportSteps.append(QJsonObject{{QStringLiteral("state"), static_cast<int>(step.state)},
-                {QStringLiteral("value"), step.value}, {QStringLiteral("velocity"), step.velocity}});
+                {QStringLiteral("value"), step.value}, {QStringLiteral("velocity"), step.velocity},
+                {QStringLiteral("articulation"), step.articulation}});
         }
         musicalPatterns.append(QJsonObject{{QStringLiteral("division"), pattern.division},
             {QStringLiteral("chords"), chordSteps}, {QStringLiteral("melody"), melodySteps},
@@ -1556,6 +1675,13 @@ QJsonObject sectionSignature(const SongSection* section)
 }
 
 } // namespace
+
+ResearchDrumKit keyAwareResearchDrumKit(
+    const ResearchDrumKit& source,
+    const SongSection& section)
+{
+    return keyAwareDrumKit(source, section);
+}
 
 QJsonArray practiceChordVoicingDiagnostics(
     const SongSection& chordSection,
@@ -1612,6 +1738,7 @@ QJsonArray practiceChordVoicingDiagnostics(
                 {QStringLiteral("midi"), midiJson},
                 {QStringLiteral("close_root_seventh"), closeRootSeventh},
                 {QStringLiteral("articulation"), step.articulation},
+                {QStringLiteral("voicing"), step.voicing},
             });
         }
     }
@@ -1718,26 +1845,112 @@ ReferenceRenderResult renderPracticeReferences(
     const QString bassPath = QDir(folder).absoluteFilePath(QStringLiteral("practice-bass-%1.wav").arg(token));
     const QString supportPath = QDir(folder).absoluteFilePath(QStringLiteral("practice-support-%1.wav").arg(token));
     result.sourceSignature = practiceIdeaSignature(chordSection, beatSection);
+    enum class Stem { Chords, Drums, Melody, Bass, Support };
+    struct StemTask {
+        Stem stem = Stem::Chords;
+        std::function<ReferenceWav(QString&)> render;
+    };
+    struct StemOutcome {
+        ReferenceWav wav;
+        QString error;
+        qint64 elapsedMs = 0;
+    };
+    std::vector<StemTask> tasks;
+    tasks.reserve(5);
     if (settings.renderChords) {
-        result.chords = renderChords(*chordSection, settings, commonBeats, frames, chordPath, result.error);
+        tasks.push_back({Stem::Chords, [=](QString& error) {
+            return renderChords(
+                *chordSection, settings, commonBeats, frames, chordPath, error);
+        }});
     }
-    if (result.error.isEmpty() && settings.renderDrums) {
-        result.drums = renderDrums(*beatSection, settings, commonBeats, frames, drumPath, result.error);
+    if (settings.renderDrums) {
+        tasks.push_back({Stem::Drums, [=](QString& error) {
+            return renderDrums(
+                *beatSection, settings, commonBeats, frames, drumPath, error);
+        }});
     }
-    if (result.error.isEmpty() && settings.renderMelody) {
-        result.melody =
-            renderNoteLane(*chordSection, settings, commonBeats, frames,
-                QStringLiteral("melody"), settings.melodyLevel, melodyPath, result.error);
+    if (settings.renderMelody) {
+        tasks.push_back({Stem::Melody, [=](QString& error) {
+            return renderNoteLane(
+                *chordSection, settings, commonBeats, frames,
+                QStringLiteral("melody"), settings.melodyLevel, melodyPath, error);
+        }});
     }
-    if (result.error.isEmpty() && settings.renderBass) {
-        result.bass =
-            renderNoteLane(*chordSection, settings, commonBeats, frames,
-                QStringLiteral("bass"), settings.bassLevel, bassPath, result.error);
+    if (settings.renderBass) {
+        tasks.push_back({Stem::Bass, [=](QString& error) {
+            return renderNoteLane(
+                *chordSection, settings, commonBeats, frames,
+                QStringLiteral("bass"), settings.bassLevel, bassPath, error);
+        }});
     }
-    if (result.error.isEmpty() && settings.renderSupport) {
-        result.support =
-            renderNoteLane(*chordSection, settings, commonBeats, frames,
-                QStringLiteral("support"), settings.supportLevel, supportPath, result.error);
+    if (settings.renderSupport) {
+        tasks.push_back({Stem::Support, [=](QString& error) {
+            return renderNoteLane(
+                *chordSection, settings, commonBeats, frames,
+                QStringLiteral("support"), settings.supportLevel, supportPath, error);
+        }});
+    }
+
+    std::vector<StemOutcome> outcomes(tasks.size());
+    std::atomic_size_t nextTask{0};
+    const unsigned reportedThreads = std::thread::hardware_concurrency();
+    const std::size_t workerLimit = reportedThreads > 0
+        ? std::min<std::size_t>(reportedThreads, 5)
+        : 1;
+    const std::size_t requestedWorkers =
+        std::max<std::size_t>(1, std::min(tasks.size(), workerLimit));
+    const auto runTasks = [&] {
+        for (;;) {
+            const std::size_t index = nextTask.fetch_add(
+                1, std::memory_order_relaxed);
+            if (index >= tasks.size()) return;
+            QElapsedTimer stemElapsed;
+            stemElapsed.start();
+            try {
+                outcomes[index].wav =
+                    tasks[index].render(outcomes[index].error);
+            } catch (const std::exception& exception) {
+                outcomes[index].error = QStringLiteral(
+                    "Reference stem renderer failed: %1")
+                    .arg(QString::fromUtf8(exception.what()));
+            } catch (...) {
+                outcomes[index].error = QStringLiteral(
+                    "Reference stem renderer failed with an unknown error.");
+            }
+            outcomes[index].elapsedMs = stemElapsed.elapsed();
+        }
+    };
+    std::vector<std::thread> workers;
+    workers.reserve(requestedWorkers > 0 ? requestedWorkers - 1 : 0);
+    for (std::size_t index = 1; index < requestedWorkers; ++index) {
+        try {
+            workers.emplace_back(runTasks);
+        } catch (...) {
+            break;
+        }
+    }
+    const std::size_t renderWorkerCount = workers.size() + 1;
+    runTasks();
+    for (std::thread& worker : workers) {
+        if (worker.joinable()) worker.join();
+    }
+
+    std::array<qint64, 5> stemElapsedMs{-1, -1, -1, -1, -1};
+    for (std::size_t index = 0; index < tasks.size(); ++index) {
+        const StemTask& task = tasks[index];
+        const StemOutcome& outcome = outcomes[index];
+        stemElapsedMs[static_cast<std::size_t>(task.stem)] =
+            outcome.elapsedMs;
+        if (result.error.isEmpty() && !outcome.error.isEmpty()) {
+            result.error = outcome.error;
+        }
+        switch (task.stem) {
+        case Stem::Chords: result.chords = outcome.wav; break;
+        case Stem::Drums: result.drums = outcome.wav; break;
+        case Stem::Melody: result.melody = outcome.wav; break;
+        case Stem::Bass: result.bass = outcome.wav; break;
+        case Stem::Support: result.support = outcome.wav; break;
+        }
     }
     if (!result.error.isEmpty() || (settings.renderChords && result.chords.sha256.isEmpty()) ||
         (settings.renderDrums && result.drums.sha256.isEmpty()) ||
@@ -1754,6 +1967,17 @@ ReferenceRenderResult renderPracticeReferences(
         const GenerationRecipe* recipe = chordSection && chordSection->generatedRecipe.isValid()
             ? &chordSection->generatedRecipe
             : beatSection && beatSection->generatedRecipe.isValid() ? &beatSection->generatedRecipe : nullptr;
+        QString resolvedDrumPatch = QStringLiteral("none");
+        if (beatSection) {
+            const bool generatedPerformance =
+                beatSection->generatedRecipe.isValid() &&
+                !beatSection->generatedRecipe.drumEvents.isEmpty() &&
+                generatedBeatFingerprint(*beatSection) ==
+                    beatSection->generatedRecipe.beatFingerprint;
+            resolvedDrumPatch = generatedPerformance
+                ? beatSection->generatedRecipe.drumPatchId
+                : QStringLiteral("base:") + beatSection->drumKitId;
+        }
         const float peak = qMax(
             qMax(result.chords.peak, result.drums.peak),
             qMax(result.melody.peak, qMax(result.bass.peak, result.support.peak)));
@@ -1770,13 +1994,15 @@ ReferenceRenderResult renderPracticeReferences(
             "reference render: chord_patch=%1 melody_patch=%2 bass_patch=%3 support_patch=%4 drum_patch=%5 "
             "profile=%6 groove=%7 swing_percent=%8 snare_offset_ms=%9 timing_variation_ms=%10 "
             "velocity_variation_percent=%11 max_chord_voices=%12 chord_events=%13 "
-            "melody_events=%14 bass_events=%15 support_events=%16 drum_events=%17 elapsed_ms=%18 peak=%19 drum_rms=%20 "
-            "drum_pre_makeup_peak=%21 drum_makeup_db=%22 drum_limited_samples=%23")
+            "melody_events=%14 bass_events=%15 support_events=%16 drum_events=%17 "
+            "render_workers=%18 reported_threads=%19 chord_ms=%20 drum_ms=%21 melody_ms=%22 "
+            "bass_ms=%23 support_ms=%24 elapsed_ms=%25 peak=%26 drum_rms=%27 "
+            "drum_pre_makeup_peak=%28 drum_makeup_db=%29 drum_limited_samples=%30")
             .arg(recipe ? recipe->chordPatchId : QStringLiteral("manual"),
                  recipe ? recipe->melodyPatchId : QStringLiteral("manual"),
                  recipe ? recipe->bassPatchId : QStringLiteral("manual"),
                  recipe ? recipe->supportPatchId : QStringLiteral("manual"),
-                 recipe ? recipe->drumPatchId : QStringLiteral("manual"),
+                 resolvedDrumPatch,
                  recipe ? recipe->profileId : QStringLiteral("manual"),
                  recipe ? recipe->grooveId : QStringLiteral("manual"))
             .arg(recipe ? recipe->swingPercent : 50)
@@ -1786,6 +2012,12 @@ ReferenceRenderResult renderPracticeReferences(
             .arg(maximumChordVoices).arg(result.chords.eventCount)
             .arg(result.melody.eventCount).arg(result.bass.eventCount)
             .arg(result.support.eventCount).arg(result.drums.eventCount)
+            .arg(renderWorkerCount).arg(reportedThreads)
+            .arg(stemElapsedMs[static_cast<std::size_t>(Stem::Chords)])
+            .arg(stemElapsedMs[static_cast<std::size_t>(Stem::Drums)])
+            .arg(stemElapsedMs[static_cast<std::size_t>(Stem::Melody)])
+            .arg(stemElapsedMs[static_cast<std::size_t>(Stem::Bass)])
+            .arg(stemElapsedMs[static_cast<std::size_t>(Stem::Support)])
             .arg(elapsed.elapsed()).arg(peak, 0, 'f', 4)
             .arg(result.drums.rms, 0, 'f', 5)
             .arg(result.drums.preMakeupPeak, 0, 'f', 4)

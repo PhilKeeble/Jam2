@@ -1,0 +1,39 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "jazz",
+  "styleName": "Jazz",
+  "profileId": "jazz_fusion",
+  "profileName": "Jazz Fusion",
+  "seed": "2539728600",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "7/8",
+  "sourcePulseBpm": 150.0,
+  "sourcePulseBeatUnit": 8,
+  "dawQuarterNoteBpm": 75.0,
+  "durationSeconds": 22.4,
+  "tonic": "C#",
+  "mode": "Natural Minor",
+  "formId": "fusion-14",
+  "grooveId": "jazz-fusion-half-time",
+  "fingerprints": {
+    "beat": "df318c3a4e9e526ac5a0caa584371c78e7c3c3291363bee6fd2af4379e031c07",
+    "chord": "82a1f80fbb67f3081cff69d4af14f7ee7b5735c7842f1069c879c5b3cfbdb35d"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

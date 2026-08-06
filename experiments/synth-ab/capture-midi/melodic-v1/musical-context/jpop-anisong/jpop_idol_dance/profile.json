@@ -1,0 +1,41 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "jpop-anisong",
+  "styleName": "J-Pop / Anisong",
+  "profileId": "jpop_idol_dance",
+  "profileName": "Idol / Dance J-Pop",
+  "seed": "1257713078",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 124.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 124.0,
+  "durationSeconds": 15.483871,
+  "tonic": "B",
+  "mode": "Natural Minor",
+  "formId": "jpop-idol-16",
+  "grooveId": "anime-syncopated-kick",
+  "fingerprints": {
+    "beat": "23db337c8dc63bb8bf29f9b417e1b3f211d41fbb38905977fdb92e75413ca90b",
+    "chord": "1ef9c7eeb6be2fc9bc194a5c0459df08d3acc112dd30d64a3e2ba87d152ad080"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "support",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "04-support.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

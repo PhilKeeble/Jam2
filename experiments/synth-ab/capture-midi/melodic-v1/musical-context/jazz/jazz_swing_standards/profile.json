@@ -1,0 +1,39 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "jazz",
+  "styleName": "Jazz",
+  "profileId": "jazz_swing_standards",
+  "profileName": "Swing / Standards",
+  "seed": "2046077045",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 86.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 86.0,
+  "durationSeconds": 22.325581,
+  "tonic": "Db",
+  "mode": "Major",
+  "formId": "jazz-aaba-32",
+  "grooveId": "jazz-brush-ballad",
+  "fingerprints": {
+    "beat": "eec8f03a30ecf7b2fc95778168d04608dc10e897a6168a2514fdad61268b1088",
+    "chord": "7ed4509addff09bf5a3a90c28d763a2d494afb85bc77f45f8ce74597d7d3fc50"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

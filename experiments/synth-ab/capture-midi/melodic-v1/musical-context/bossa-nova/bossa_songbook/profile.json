@@ -1,0 +1,39 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "bossa-nova",
+  "styleName": "Bossa Nova",
+  "profileId": "bossa_songbook",
+  "profileName": "Bossa Nova Songbook",
+  "seed": "1754303273",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "2/4",
+  "sourcePulseBpm": 132.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 132.0,
+  "durationSeconds": 7.272727,
+  "tonic": "D",
+  "mode": "Major",
+  "formId": "bossa-aaba-32",
+  "grooveId": "bossa-core",
+  "fingerprints": {
+    "beat": "366ea3b540a8556f1e714791dd1076d917e56b3f1cc39cb05b2429144b3c64ed",
+    "chord": "c18adecc8e2c2191756d0cacbdb27856217a17b34263a196435e040e678faf63"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

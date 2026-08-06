@@ -1124,6 +1124,13 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
     top->addWidget(details);
     addBankControls(w, page, top, false);
     top->addStretch(1);
+    auto* drumKitLabel = new QLabel(QStringLiteral("Drum Kit"), page);
+    w.drumKitBox_ = new QComboBox(page);
+    w.drumKitBox_->addItem(QStringLiteral("Acoustic"), QStringLiteral("acoustic"));
+    w.drumKitBox_->addItem(QStringLiteral("Electronic"), QStringLiteral("electronic"));
+    w.drumKitBox_->setCurrentIndex(0);
+    top->addWidget(drumKitLabel);
+    top->addWidget(w.drumKitBox_);
     auto* layout = new QVBoxLayout(page);
     layout->addLayout(top);
     layout->addWidget(w.beatGrid_, 1);
@@ -1131,6 +1138,16 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
     QObject::connect(continueIdea, &QPushButton::clicked, &w, [&w] { w.continuePracticeIdea(); });
     QObject::connect(reference, &QPushButton::clicked, &w, [&w] { w.generatePracticeReferenceWavs(); });
     QObject::connect(details, &QPushButton::clicked, &w, [&w] { w.showPracticeIdeaDetails(); });
+    QObject::connect(w.drumKitBox_, &QComboBox::currentIndexChanged, &w, [&w](int index) {
+        if (index < 0 || !w.drumKitBox_) return;
+        if (w.beatModel_.setDrumKit(
+                w.viewedBankIndex_,
+                w.drumKitBox_->itemData(index).toString())) {
+            if (w.beatGrid_) w.beatGrid_->refresh();
+            w.regeneratePreparedMix();
+            w.sendSongSnapshot();
+        }
+    });
     return page;
 }
 
@@ -1185,8 +1202,6 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     applyMutedEditorStyle(w.focusFrequencySpin_);
     w.trackSyncCheck_ = new QCheckBox(QStringLiteral("Sync track controls"), page);
     w.trackSyncCheck_->setChecked(w.looperProject_.trackSyncEnabled());
-    w.trackMetronomeSyncCheck_ = new QCheckBox(QStringLiteral("Sync metronome"), page);
-    w.trackMetronomeSyncCheck_->setChecked(w.trackController_.model().syncMetronome);
     auto* gridLockBox = new QCheckBox(QStringLiteral("Lock to grid"), page);
     gridLockBox->setChecked(w.looperProject_.gridLockEnabled());
     w.captureOutputEdit_ = new QLineEdit(page);
@@ -1325,7 +1340,6 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     loopOptionsLayout->addWidget(gridLockBox, 0, 0);
     loopOptionsLayout->addWidget(w.trackSyncCheck_, 0, 1);
     loopOptionsLayout->addWidget(w.loopEnabledCheck_, 1, 0);
-    loopOptionsLayout->addWidget(w.trackMetronomeSyncCheck_, 1, 1);
     loopOptionsLayout->setColumnStretch(0, 1);
     loopOptionsLayout->setColumnStretch(1, 1);
 
@@ -1561,9 +1575,6 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         }
         w.updateTrackControls();
         w.updateTrackPlaybackPresentation();
-    });
-    QObject::connect(w.trackMetronomeSyncCheck_, &QCheckBox::toggled, &w, [&w](bool checked) {
-        w.trackController_.model().syncMetronome = checked;
     });
     QObject::connect(gridLockBox, &QCheckBox::toggled, &w, [&w](bool checked) {
         w.looperProject_.setGridLockEnabled(checked);

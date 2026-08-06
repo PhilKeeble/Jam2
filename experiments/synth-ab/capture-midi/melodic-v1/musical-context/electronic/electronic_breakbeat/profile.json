@@ -1,0 +1,39 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "electronic",
+  "styleName": "Electronic",
+  "profileId": "electronic_breakbeat",
+  "profileName": "Breakbeat",
+  "seed": "976860934",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 144.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 144.0,
+  "durationSeconds": 13.333333,
+  "tonic": "F",
+  "mode": "Natural Minor",
+  "formId": "breakbeat-16",
+  "grooveId": "edm-breakbeat",
+  "fingerprints": {
+    "beat": "a249bdcd50c21dfae62bbf70b6fe81f1707c96ae198f35a5ce2f19d160d64dc0",
+    "chord": "5e246467cefd20fe56e2756ff7201dd510f72f565ddbe0927e4867d9efce041e"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

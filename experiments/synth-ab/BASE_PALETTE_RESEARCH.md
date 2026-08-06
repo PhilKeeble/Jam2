@@ -41,7 +41,7 @@ kick/snare replacements. No audio is copied or sampled.
 The base palette separates source identity from treatment:
 
 1. Choose an independent base for chords, melody, bass and support.
-2. Choose Acoustic, Electronic or Latin drums.
+2. Choose Acoustic, AbletonRock32, Ableton808, Electronic or Latin drums.
 3. Optionally apply a style treatment. It changes filtering, envelope, drive,
    motion, space, kit bus settings and a small number of defining drum pieces;
    it never changes the selected musical pattern.
@@ -51,3 +51,24 @@ The base palette separates source identity from treatment:
 
 Each base advertises its intended frequency slot. These are design boundaries,
 not automatic mix recommendations or subjective scores.
+
+AbletonRock32 is the capture-matched exception to the broad reusable bases. It
+uses the experiment's bounded per-piece modal/noise banks (12 resonators and
+four filtered-noise bands maximum), omits synth character layers, and uses
+shell-only tom bodies with explicit head strikes. Muted metal pieces use the
+bounded onset-softening control; its zero default
+keeps every existing shared kit unchanged. The capture-matched configurations
+remain local to `experiments/synth-ab`. The lab also exposes a bounded
+source/model layer level independent of piece level. AbletonRock32 uses it to
+mute the clap-prone open-hat model and explicit transient while retaining the
+smooth modal/noise tail. Its tom detail banks reduce the long fixed fundamental
+while retaining the two short head-impact noise bands. Long diffuse tom noise
+tails are deliberately omitted so the model strike and revised tone stay clear.
+
+Ableton808 applies the same capture-matched isolation to the supplied 808 Core
+Kit. It is a fifth, independent base rather than a change to the shared
+Electronic Kit. Its voices use deterministic phase and delay where the attack
+time is part of the identity, high-passed short resonators for the rim, explicit
+per-band velocity curves, and a dry compressor fitted from the complete
+four-pattern suite. Its ride remains one voice whose ghost, normal and accent
+behaviour comes only from velocity.

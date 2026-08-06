@@ -1,0 +1,39 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "hiphop-trap",
+  "styleName": "Hip-Hop / Trap",
+  "profileId": "hiphop_boom_bap",
+  "profileName": "Boom-Bap",
+  "seed": "1084759472",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 90.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 90.0,
+  "durationSeconds": 21.333333,
+  "tonic": "Ab",
+  "mode": "Major",
+  "formId": "boombap-16",
+  "grooveId": "hiphop-boom-bap",
+  "fingerprints": {
+    "beat": "ed65ff164c691207628c5cfe66b1c6dc77cb682325112dcb4ef89aaa9ce5a532",
+    "chord": "1bcb8a1d45a6644fa27d8017b97f160cb95f7c6e7b3ef487993ef4eb5f0ffe8f"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

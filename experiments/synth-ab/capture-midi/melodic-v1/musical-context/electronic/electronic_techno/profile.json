@@ -1,0 +1,41 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "electronic",
+  "styleName": "Electronic",
+  "profileId": "electronic_techno",
+  "profileName": "Techno",
+  "seed": "562274874",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 132.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 132.0,
+  "durationSeconds": 14.545455,
+  "tonic": "Bb",
+  "mode": "Natural Minor",
+  "formId": "techno-16",
+  "grooveId": "edm-techno",
+  "fingerprints": {
+    "beat": "b535648ce17c1bcc55082b6caa16e898492e6334344fe47bffca776550666f66",
+    "chord": "1861ae43b8e0a0793c09a2b3a326bbfd39cf7159048f4b5fb1ca9cd80a3ffd7d"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "support",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "04-support.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

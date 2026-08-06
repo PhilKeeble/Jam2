@@ -1,0 +1,41 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "hiphop-trap",
+  "styleName": "Hip-Hop / Trap",
+  "profileId": "hiphop_trap",
+  "profileName": "Trap",
+  "seed": "1204219440",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 76.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 76.0,
+  "durationSeconds": 25.263158,
+  "tonic": "D",
+  "mode": "Natural Minor",
+  "formId": "trap-12",
+  "grooveId": "trap-rolling",
+  "fingerprints": {
+    "beat": "6eb3f10737de0e17e00e8a5aee40ed98bc76c1c33bdb5a2e222a50324232400e",
+    "chord": "16377ff87509e19b24dd6056d0e94397cc291f75454a0d17c0294965d5275503"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "support",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "04-support.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

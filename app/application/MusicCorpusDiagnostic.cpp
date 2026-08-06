@@ -2,6 +2,7 @@
 
 #include "BeatGridModel.hpp"
 #include "GenerationRecipe.hpp"
+#include "MusicTheory.hpp"
 #include "PracticeIdeaController.hpp"
 #include "PracticeIdeaGenerator.hpp"
 #include "PracticeReferenceRenderer.hpp"
@@ -16,6 +17,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QSaveFile>
+#include <QSet>
 #include <QTextStream>
 #include <QtEndian>
 
@@ -110,6 +112,138 @@ QJsonArray drumHits(const jam2::practice::GeneratedPracticeIdea& idea)
     return result;
 }
 
+QJsonObject performanceArticulationMetrics(
+    const jam2::practice::GeneratedPracticeIdea& idea,
+    const QJsonArray& resolvedVoicings)
+{
+    QSet<int> chordTicks;
+    QSet<int> melodyTicks;
+    QSet<int> bassTicks;
+    QSet<int> drumTicks;
+    QSet<int> drumAccentTicks;
+    QSet<int> kickTicks;
+    QJsonObject articulations;
+    QJsonObject voicingStates;
+    int minimumChordVelocity = 128;
+    int maximumChordVelocity = 0;
+    int bassRestrikes = 0;
+    for (int beat = 0;
+         beat < idea.chordSection.musicalPatterns.size();
+         ++beat) {
+        const MusicalBeatPattern& pattern =
+            idea.chordSection.musicalPatterns.at(beat);
+        for (int step = 0; step < pattern.division; ++step) {
+            const int tick = beat * kTicksPerBeat +
+                step * kTicksPerBeat / pattern.division;
+            const MusicalStep& chord = pattern.chords.at(step);
+            const MusicalStep& melody = pattern.melody.at(step);
+            const MusicalStep& bass = pattern.bass.at(step);
+            if (chord.state == MusicalStepState::Onset) {
+                chordTicks.insert(tick);
+                minimumChordVelocity = std::min(
+                    minimumChordVelocity, chord.velocity);
+                maximumChordVelocity = std::max(
+                    maximumChordVelocity, chord.velocity);
+                const QString articulation = chord.articulation.isEmpty()
+                    ? QStringLiteral("unspecified")
+                    : chord.articulation;
+                articulations[articulation] =
+                    articulations.value(articulation).toInt() + 1;
+                const QString voicing = chord.voicing.isEmpty()
+                    ? QStringLiteral("style-default")
+                    : chord.voicing;
+                voicingStates[voicing] =
+                    voicingStates.value(voicing).toInt() + 1;
+            }
+            if (melody.state == MusicalStepState::Onset) {
+                melodyTicks.insert(tick);
+            }
+            if (bass.state == MusicalStepState::Onset) {
+                bassTicks.insert(tick);
+                if (bass.articulation.contains(
+                        QStringLiteral("restrike")) ||
+                    bass.articulation.contains(
+                        QStringLiteral("drive"))) {
+                    ++bassRestrikes;
+                }
+            }
+        }
+    }
+    const QStringList drumLanes = BeatGridModel::beatLaneNames();
+    const int kickLane = drumLanes.indexOf(QStringLiteral("Kick"));
+    for (int beat = 0;
+         beat < idea.beatSection.beatPatterns.size();
+         ++beat) {
+        const BeatPattern& pattern =
+            idea.beatSection.beatPatterns.at(beat);
+        for (int lane = 0; lane < pattern.lanes.size(); ++lane) {
+            for (int step = 0;
+                 step < pattern.lanes.at(lane).size();
+                 ++step) {
+                const QChar state = pattern.lanes.at(lane).at(step);
+                if (state == QLatin1Char('.')) continue;
+                const int tick = beat * kTicksPerBeat +
+                    step * kTicksPerBeat / pattern.division;
+                drumTicks.insert(tick);
+                if (state.toLower() == QLatin1Char('a')) {
+                    drumAccentTicks.insert(tick);
+                }
+                if (lane == kickLane) kickTicks.insert(tick);
+            }
+        }
+    }
+    const auto overlapCount = [](const QSet<int>& left, const QSet<int>& right) {
+        int result = 0;
+        for (int tick : left) if (right.contains(tick)) ++result;
+        return result;
+    };
+    int invalidChordSymbols = 0;
+    int nonChordVoicingPitches = 0;
+    for (const QJsonValue& value : resolvedVoicings) {
+        const QJsonObject event = value.toObject();
+        const auto parsed = jam2::practice::parseChord(
+            event.value(QStringLiteral("symbol")).toString());
+        if (!parsed.valid || parsed.rest) {
+            ++invalidChordSymbols;
+            continue;
+        }
+        QSet<int> allowed;
+        for (int interval : parsed.intervals) {
+            allowed.insert((parsed.root + interval) % 12);
+        }
+        if (parsed.bass >= 0) allowed.insert(parsed.bass);
+        for (const QJsonValue& midi :
+             event.value(QStringLiteral("midi")).toArray()) {
+            if (!allowed.contains(midi.toInt() % 12)) {
+                ++nonChordVoicingPitches;
+            }
+        }
+    }
+    return {
+        {QStringLiteral("chord_attacks"), chordTicks.size()},
+        {QStringLiteral("melody_attacks"), melodyTicks.size()},
+        {QStringLiteral("bass_attacks"), bassTicks.size()},
+        {QStringLiteral("bass_restrikes"), bassRestrikes},
+        {QStringLiteral("drum_onset_positions"), drumTicks.size()},
+        {QStringLiteral("chord_velocity_min"),
+         minimumChordVelocity == 128 ? 0 : minimumChordVelocity},
+        {QStringLiteral("chord_velocity_max"), maximumChordVelocity},
+        {QStringLiteral("chord_melody_coincidences"),
+         overlapCount(chordTicks, melodyTicks)},
+        {QStringLiteral("chord_drum_locks"),
+         overlapCount(chordTicks, drumTicks)},
+        {QStringLiteral("bass_kick_locks"),
+         overlapCount(bassTicks, kickTicks)},
+        {QStringLiteral("melody_drum_accents"),
+         overlapCount(melodyTicks, drumAccentTicks)},
+        {QStringLiteral("articulations"), articulations},
+        {QStringLiteral("voicing_states"), voicingStates},
+        {QStringLiteral("invalid_chord_symbols"), invalidChordSymbols},
+        {QStringLiteral("non_chord_voicing_pitches"),
+         nonChordVoicingPitches},
+    };
+}
+
 std::vector<float> readMonoPcm16(const QString& path)
 {
     const auto inspected = jam2::wav::inspect_pcm16_file(
@@ -200,12 +334,35 @@ CorpusAudioRender renderFullMix(
     const QString& sampleId,
     const QDir& artifacts)
 {
+    const auto hasLaneOnset = [](const SongSection& section,
+                                 const QString& laneId) {
+        for (const MusicalBeatPattern& pattern : section.musicalPatterns) {
+            const QVector<MusicalStep>& lane =
+                laneId == QStringLiteral("bass") ? pattern.bass
+                : laneId == QStringLiteral("support") ? pattern.support
+                : pattern.melody;
+            if (std::any_of(
+                    lane.cbegin(), lane.cend(),
+                    [](const MusicalStep& step) {
+                        return step.state == MusicalStepState::Onset;
+                    })) {
+                return true;
+            }
+        }
+        return false;
+    };
     jam2::practice::ReferenceRenderSettings settings;
     settings.renderChords = true;
     settings.renderDrums = true;
-    settings.renderMelody = !idea.recipe.melodyEvents.isEmpty();
-    settings.renderBass = !idea.recipe.bassEvents.isEmpty();
-    settings.renderSupport = !idea.recipe.supportingEvents.isEmpty();
+    // Optional recipe roles may legitimately have no visible performance
+    // events in a particular generated form. Ask the renderer for the lanes
+    // that actually contain onsets, which is the source it renders.
+    settings.renderMelody = hasLaneOnset(
+        idea.chordSection, QStringLiteral("melody"));
+    settings.renderBass = hasLaneOnset(
+        idea.chordSection, QStringLiteral("bass"));
+    settings.renderSupport = hasLaneOnset(
+        idea.chordSection, QStringLiteral("support"));
     settings.voicing = jam2::practice::ChordVoicing::StyleDefault;
     settings.sampleRate = kSampleRate;
     settings.bpm = idea.bpm;
@@ -384,6 +541,8 @@ QJsonObject corpusSample(
         {QStringLiteral("recipe"),
          jam2::practice::generationRecipeToJson(idea.recipe)},
         {QStringLiteral("chord_voicings"), voicings},
+        {QStringLiteral("performance_articulation"),
+         performanceArticulationMetrics(idea, voicings)},
         {QStringLiteral("lane_events"), roleEvents(idea.recipe)},
         {QStringLiteral("drum_hits"), drumHits(idea)},
     };

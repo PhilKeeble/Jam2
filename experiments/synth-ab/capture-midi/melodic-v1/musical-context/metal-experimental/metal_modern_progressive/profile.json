@@ -1,0 +1,41 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "metal-experimental",
+  "styleName": "Modern Metal / Experimental",
+  "profileId": "metal_modern_progressive",
+  "profileName": "Modern Progressive Metalcore",
+  "seed": "2941769567",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 94.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 94.0,
+  "durationSeconds": 20.425532,
+  "tonic": "A",
+  "mode": "Phrygian",
+  "formId": "metal-riff-12",
+  "grooveId": "metal-grouped",
+  "fingerprints": {
+    "beat": "3c77d81aae25390c4eab2ca4464b0f890d1bbde0a78641cad55e2b26ee9164d4",
+    "chord": "a0ac2d8a81a49d158e54bbb910e3f505f0e32717fc76d76f47eaa27b29808147"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "support",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "04-support.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

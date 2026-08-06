@@ -1,0 +1,39 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "pop",
+  "styleName": "Pop",
+  "profileId": "pop_sectional",
+  "profileName": "Sectional Pop",
+  "seed": "1511909652",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 94.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 94.0,
+  "durationSeconds": 20.425532,
+  "tonic": "F",
+  "mode": "Major",
+  "formId": "pop-sectional-24",
+  "grooveId": "pop-straight-eighth",
+  "fingerprints": {
+    "beat": "6c2ab70fa0dbf8aca9b0994fcce3d7c6a1cfca9f4ca5789a16774fae80763e68",
+    "chord": "922ca0de28955b0a7c64300230072132e7828c991a8f6849bba87150ec4569ce"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

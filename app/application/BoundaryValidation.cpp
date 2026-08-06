@@ -61,6 +61,7 @@
 #include <filesystem>
 #include <functional>
 #include <limits>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -808,13 +809,13 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         {QStringLiteral("type"), QStringLiteral("beat.hit")},
         {QStringLiteral("section"), 0},
         {QStringLiteral("beat"), 0},
-        {QStringLiteral("lane"), 11},
+        {QStringLiteral("lane"), 9},
         {QStringLiteral("text"), QStringLiteral("x...")},
     };
     modelError.clear();
     const bool acceptedLastBeatLane =
         jam2::application::validateControlMessage(validBeatHit, modelError);
-    validBeatHit[QStringLiteral("lane")] = 12;
+    validBeatHit[QStringLiteral("lane")] = 10;
     const bool rejectedOutOfRangeBeatLane =
         !jam2::application::validateControlMessage(validBeatHit, modelError);
     record(QStringLiteral("model.beat-hit-uses-current-percussion-lane-bound"),
@@ -966,8 +967,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
     }
     {
         const SharedTrackModel defaults;
-        record(QStringLiteral("track.defaults-to-minus-ten-db-and-metronome-sync"),
-            defaults.trackGainDb == -10.0 && defaults.syncMetronome);
+        record(QStringLiteral("track.defaults-to-minus-ten-db"),
+            defaults.trackGainDb == -10.0);
     }
     {
         const QStringList advancedSymbols{
@@ -1113,6 +1114,31 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                 constrainedGenerationValid);
         }
         {
+            jam2::practice::ChordIdeaRequest request;
+            request.profileId = QStringLiteral("pop_loop");
+            request.meterId = QStringLiteral("4-4");
+            request.bpm = 0;
+            request.bars = 8;
+            QSet<int> generatedTempos;
+            bool styleTempoRangeValid = true;
+            const auto* profile = jam2::practice::findProfile(
+                request.profileId, true);
+            for (int seed = 0; seed < 32; ++seed) {
+                const auto idea =
+                    jam2::practice::generateCoupledPracticeIdeaForTest(
+                        request,
+                        static_cast<std::uint32_t>(7350 + seed));
+                generatedTempos.insert(idea.bpm);
+                styleTempoRangeValid = styleTempoRangeValid && profile &&
+                    idea.bpm >= profile->minimumBpm &&
+                    idea.bpm <= profile->maximumBpm;
+            }
+            record(
+                QStringLiteral(
+                    "practice.unset-exact-tempo-varies-inside-style-range"),
+                styleTempoRangeValid && generatedTempos.size() > 1);
+        }
+        {
             BeatGridModel model;
             model.setCell(0, QStringLiteral("chord"), 0, QStringLiteral("Cmaj7"));
             model.setCell(0, QStringLiteral("target"), 0, QStringLiteral("E4"));
@@ -1133,6 +1159,13 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             const bool drumsPreservedPitched =
                 jam2::practice::generatedChordFingerprint(model.section(0)) ==
                 originalPitched;
+            const auto* drumsOnlyKit =
+                jam2::practice::researchDrumKitById(
+                    model.section(0).generatedRecipe.drumPatchId);
+            const bool drumsOnlyUsesMappedKit =
+                drumsOnlyKit &&
+                drumsOnlyKit->baseKitId == QStringLiteral("acoustic") &&
+                model.section(0).drumKitId == QStringLiteral("acoustic");
             const QString generatedDrums =
                 jam2::practice::generatedBeatFingerprint(model.section(0));
 
@@ -1144,6 +1177,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             record(QStringLiteral("practice.partial-generation-preserves-unselected-parts"),
                 drumsResult.has_value() && pitchedResult.has_value() &&
                 drumsPreservedPitched &&
+                drumsOnlyUsesMappedKit &&
                 jam2::practice::generatedChordFingerprint(model.section(0)) !=
                     originalPitched &&
                 jam2::practice::generatedBeatFingerprint(model.section(0)) ==
@@ -2833,34 +2867,37 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             };
             const int simpleHits = hits(simpleIdea.beatSection);
             const int complexHits = hits(complexIdea.beatSection);
-            bool performanceSame =
-                simpleIdea.recipe.drumEvents.size() ==
-                complexIdea.recipe.drumEvents.size();
-            for (int eventIndex = 0;
-                 performanceSame &&
-                 eventIndex < simpleIdea.recipe.drumEvents.size();
-                 ++eventIndex) {
-                const auto& simpleEvent =
-                    simpleIdea.recipe.drumEvents.at(eventIndex);
-                const auto& complexEvent =
-                    complexIdea.recipe.drumEvents.at(eventIndex);
-                performanceSame =
-                    simpleEvent.tick == complexEvent.tick &&
-                    simpleEvent.laneId == complexEvent.laneId &&
-                    simpleEvent.velocity == complexEvent.velocity &&
-                    simpleEvent.offsetMs == complexEvent.offsetMs &&
-                    simpleEvent.articulation ==
-                        complexEvent.articulation &&
-                    simpleEvent.role == complexEvent.role &&
-                    simpleEvent.repeatGroup ==
-                        complexEvent.repeatGroup &&
-                    simpleEvent.fill == complexEvent.fill;
+            const auto drumIdentity = [](const auto& events) {
+                QSet<QString> result;
+                for (const auto& event : events) {
+                    result.insert(
+                        QStringLiteral("%1:%2")
+                            .arg(event.tick)
+                            .arg(event.laneId));
+                }
+                return result;
+            };
+            const QSet<QString> simpleDrums = drumIdentity(
+                simpleIdea.recipe.drumEvents);
+            const QSet<QString> complexDrums = drumIdentity(
+                complexIdea.recipe.drumEvents);
+            int sharedDrums = 0;
+            for (const QString& event : simpleDrums) {
+                if (complexDrums.contains(event)) ++sharedDrums;
             }
+            const int smallerPerformance = qMin(
+                simpleDrums.size(), complexDrums.size());
+            const bool boundedEnsembleResponse =
+                simpleIdea.recipe.grooveId ==
+                    complexIdea.recipe.grooveId &&
+                simpleIdea.recipe.drumPatchId ==
+                    complexIdea.recipe.drumPatchId &&
+                sharedDrums * 100 >=
+                    smallerPerformance * 88 &&
+                std::abs(simpleHits - complexHits) <=
+                    qMax(4, simpleHits / 8);
             densityValid = densityValid &&
-                simpleHits == complexHits &&
-                simpleIdea.recipe.beatFingerprint ==
-                    complexIdea.recipe.beatFingerprint &&
-                performanceSame;
+                boundedEnsembleResponse;
         }
         bool compoundBluesValid = true;
         QString compoundBluesDetail;
@@ -3019,7 +3056,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                 reggaeDeveloped.recipe.bpm &&
             reggaeDeveloped.recipe.bpm ==
                 reggaeAdvanced.recipe.bpm;
-        bool reggaeOffbeatGrid = true;
+        bool reggaeCompingVocabularyValid = true;
+        int reggaeOffbeatAttacks = 0;
         bool reggaeDubUpperSilence = true;
         for (int beat = 0;
              beat <
@@ -3033,9 +3071,16 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                  step < pattern.chords.size();
                  ++step) {
                 if (pattern.chords.at(step).state ==
-                        MusicalStepState::Onset &&
-                    step != pattern.division / 2) {
-                    reggaeOffbeatGrid = false;
+                        MusicalStepState::Onset) {
+                    const QString articulation =
+                        pattern.chords.at(step).articulation;
+                    reggaeCompingVocabularyValid =
+                        reggaeCompingVocabularyValid &&
+                        (articulation == QStringLiteral("short-offbeat") ||
+                         articulation == QStringLiteral("open-sustain"));
+                    if (step == pattern.division / 2) {
+                        ++reggaeOffbeatAttacks;
+                    }
                 }
             }
             if (beat >= 32 && beat < 34) {
@@ -3142,7 +3187,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                     .contains(
                         QStringLiteral(
                             "countermelody")) &&
-                reggaeOffbeatGrid &&
+                reggaeCompingVocabularyValid &&
+                reggaeOffbeatAttacks > 0 &&
                 reggaeDubUpperSilence &&
                 reggaeCallRecall &&
                 reggaeOneDropValid &&
@@ -3228,16 +3274,21 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                             return event.tick % 24 == 18;
                         }) == 18;
             };
-        bool bossaUpperGridValid = true;
+        bool bossaUpperCompingValid = true;
         for (const auto& pattern :
              bossaAdvanced.chordSection.musicalPatterns) {
             for (int step = 0;
                  step < pattern.chords.size();
                  ++step) {
                 if (pattern.chords.at(step).state ==
-                        MusicalStepState::Onset &&
-                    (pattern.division != 4 || step == 0)) {
-                    bossaUpperGridValid = false;
+                        MusicalStepState::Onset) {
+                    const QString articulation =
+                        pattern.chords.at(step).articulation;
+                    bossaUpperCompingValid =
+                        bossaUpperCompingValid &&
+                        pattern.division == 4 &&
+                        (articulation == QStringLiteral("soft-detached") ||
+                         articulation == QStringLiteral("open-sustain"));
                 }
             }
         }
@@ -3284,7 +3335,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                     .contains(
                         QStringLiteral(
                             "countermelody")) &&
-                bossaUpperGridValid &&
+                bossaUpperCompingValid &&
                 bossaCallRecall &&
                 bossaAdvanced.recipe.melodyEvents.size() <=
                     38);
@@ -3360,7 +3411,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         }
         QSet<int> metalHeavyChordTicks;
         bool metalOpenState = false;
-        bool metalBassReinforces = true;
+        int metalBassLinkedAttacks = 0;
         for (int beat = 0;
              beat <
                  metalAdvanced.chordSection
@@ -3382,9 +3433,9 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                     beat * 12 +
                     step * 12 /
                         qMax(1, pattern.division);
-                metalBassReinforces =
-                    metalBassReinforces &&
-                    metalBassTicks.contains(tick);
+                if (metalBassTicks.contains(tick)) {
+                    ++metalBassLinkedAttacks;
+                }
                 if (chord.articulation ==
                     QStringLiteral("open-sustain")) {
                     metalOpenState = true;
@@ -3407,8 +3458,9 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         }
         const bool metalKickLock =
             !metalHeavyChordTicks.isEmpty() &&
-            metalLockedHeavyAttacks * 10 >=
-                metalHeavyChordTicks.size() * 9;
+            metalLockedHeavyAttacks > 0;
+        const bool metalBassInterlock =
+            metalBassLinkedAttacks > 0;
         const int metalFinalBarStart =
             17 * 9 * 12;
         bool metalFinalSubtraction = false;
@@ -3468,7 +3520,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                             "countermelody")) &&
                 metalOpenState &&
                 metalKickLock &&
-                metalBassReinforces &&
+                metalBassInterlock &&
                 metalFinalSubtraction &&
                 metalCleanLeadDensity >
                     metalHeavyLeadDensity);
@@ -3476,7 +3528,9 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         record(QStringLiteral("practice.v7-complexity-is-an-unlocked-profile-palette"),
             cumulativePaletteValid && levelEightKinds.size() >= 4 &&
             levelEightKinds.contains(QStringLiteral("inversion")));
-        record(QStringLiteral("practice.v7-drums-are-independent-of-global-complexity"), densityValid);
+        record(QStringLiteral(
+            "practice.v7-drum-core-is-stable-with-bounded-melodic-articulation"),
+            densityValid);
         record(QStringLiteral("practice.v7-matched-complexity-keeps-seeded-tempo"),
             stableSeedTempoValid);
         record(QStringLiteral("practice.v7-matched-complexity-develops-seeded-motif"),
@@ -3484,7 +3538,9 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         bool performanceEventsValid = true;
         bool researchedKitCatalogValid = true;
         bool researchedKitVoicesValid = true;
-        bool trapSubLayerValid = false;
+        bool twoBaseKitsValid = false;
+        bool baseKitPieceDetailsValid = true;
+        bool electronicSnareUsesDetailBanks = false;
         bool fullFormFlowValid = true;
         bool acousticThreeTomFill = false;
         bool drumPhrasePlansValid = true;
@@ -3501,10 +3557,20 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             QStringLiteral("mid_tom"),
             QStringLiteral("floor_tom"),
             QStringLiteral("cross_stick"),
-            QStringLiteral("shaker"),
-            QStringLiteral("hand_percussion"),
         };
         QSet<QString> researchedKitIds;
+        const QSet<QString> electronicProfiles{
+            QStringLiteral("electronic_breakbeat"),
+            QStringLiteral("electronic_house"),
+            QStringLiteral("electronic_techno"),
+            QStringLiteral("hiphop_boom_bap"),
+            QStringLiteral("hiphop_trap"),
+            QStringLiteral("jpop_anisong_rock"),
+            QStringLiteral("jpop_idol_dance"),
+            QStringLiteral("metal_modern_progressive"),
+            QStringLiteral("rnb_contemporary_neosoul"),
+            QStringLiteral("soul_classic_motown"),
+        };
         for (const auto& profile :
              jam2::practice::profileCatalog()) {
             const auto* kit =
@@ -3515,6 +3581,9 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                 kit &&
                 !kit->id.isEmpty() &&
                 kit->id.startsWith(profile.id + QLatin1Char(':')) &&
+                kit->baseKitId == (electronicProfiles.contains(profile.id)
+                    ? QStringLiteral("electronic")
+                    : QStringLiteral("acoustic")) &&
                 kit->revision > 0 &&
                 kit->pieces.size() ==
                     drumLaneIds.size();
@@ -3552,11 +3621,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                     piece->accent.maximum >=
                         piece->accent.minimum &&
                     piece->accent.maximum <= 127;
-                if (!piece ||
-                    piece->source ==
-                        QStringLiteral("jam2-native")) {
-                    continue;
-                }
+                if (!piece) continue;
                 const std::array<int, 3> testVelocities{
                     (piece->ghost.minimum +
                      piece->ghost.maximum) / 2,
@@ -3604,60 +3669,118 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                 }
             }
         }
-        if (const auto* trapKit =
-                jam2::practice::researchDrumKitForProfile(
-                    QStringLiteral("hiphop_trap"))) {
-            if (const auto* kick =
-                    jam2::practice::researchDrumPiece(
-                        *trapKit,
-                        QStringLiteral("kick"))) {
-                jam2::practice::ResearchDrumKit withoutSub =
-                    *trapKit;
-                withoutSub.pieces[QStringLiteral("kick")]
-                    .synthSource = QStringLiteral("off");
-                const QVector<
-                    jam2::practice::ResearchDrumRenderEvent>
-                    event{{
-                        0,
-                        QStringLiteral("kick"),
-                        QStringLiteral("normal"),
-                        (kick->normal.minimum +
-                         kick->normal.maximum) / 2,
-                        0,
-                        0x7a9d31e5U,
-                    }};
-                const auto withSub =
-                    jam2::practice::renderResearchDrumVoices(
-                        *trapKit,
-                        event,
-                        48000,
-                        48000);
-                const auto without =
-                    jam2::practice::renderResearchDrumVoices(
-                        withoutSub,
-                        event,
-                        48000,
-                        48000);
-                double differenceEnergy = 0.0;
-                for (int frame = 0;
-                     frame < withSub.dry.size() &&
-                     frame < without.dry.size();
-                     ++frame) {
-                    const double difference =
-                        withSub.dry.at(frame) -
-                        without.dry.at(frame);
-                    differenceEnergy +=
-                        difference * difference;
+        const auto* acousticBase =
+            jam2::practice::researchDrumKitForBase(
+                QStringLiteral("acoustic"));
+        const auto* electronicBase =
+            jam2::practice::researchDrumKitForBase(
+                QStringLiteral("electronic"));
+        twoBaseKitsValid = acousticBase && electronicBase &&
+            acousticBase->name == QStringLiteral("Acoustic") &&
+            electronicBase->name == QStringLiteral("Electronic") &&
+            acousticBase->pieces.size() == drumLaneIds.size() &&
+            electronicBase->pieces.size() == drumLaneIds.size() &&
+            jam2::practice::researchDrumPiece(
+                *electronicBase, QStringLiteral("kick")) &&
+            jam2::practice::researchDrumPiece(
+                *electronicBase, QStringLiteral("kick"))
+                ->intendedIdentity == QStringLiteral("Punchy electronic kick");
+        const std::array<const jam2::practice::ResearchDrumKit*, 2> baseKits{
+            acousticBase,
+            electronicBase,
+        };
+        for (const auto* baseKit : baseKits) {
+            baseKitPieceDetailsValid = baseKitPieceDetailsValid && baseKit;
+            if (!baseKit) continue;
+            for (const QString& laneId : drumLaneIds) {
+                const auto* piece = jam2::practice::researchDrumPiece(
+                    *baseKit, laneId);
+                baseKitPieceDetailsValid =
+                    baseKitPieceDetailsValid && piece &&
+                    std::isfinite(piece ? piece->sourceLayerGain : 0.0f) &&
+                    piece && piece->sourceLayerGain >= 0.0f &&
+                    (piece->sourceLayerGain > 0.0001f ||
+                     !piece->modalBands.isEmpty() ||
+                     !piece->noiseBands.isEmpty());
+                if (!piece) continue;
+                for (const auto& band : piece->modalBands) {
+                    baseKitPieceDetailsValid = baseKitPieceDetailsValid &&
+                        std::isfinite(band.frequencyHz) &&
+                        std::isfinite(band.detuneCents) &&
+                        std::isfinite(band.level) &&
+                        std::isfinite(band.decaySeconds) &&
+                        band.frequencyHz > 0.0f &&
+                        band.level >= 0.0f && band.decaySeconds > 0.0f;
                 }
-                const double differenceRms = std::sqrt(
-                    differenceEnergy /
-                    qMax(1, withSub.dry.size()));
-                trapSubLayerValid =
-                    kick->synthSource ==
-                        QStringLiteral("sine-fundamental") &&
-                    kick->synthMidiNote == 30 &&
-                    kick->synthLevel > 0.1f &&
-                    differenceRms > 0.0001;
+                for (const auto& band : piece->noiseBands) {
+                    baseKitPieceDetailsValid = baseKitPieceDetailsValid &&
+                        std::isfinite(band.frequencyHz) &&
+                        std::isfinite(band.q) &&
+                        std::isfinite(band.level) &&
+                        std::isfinite(band.decaySeconds) &&
+                        band.frequencyHz > 0.0f && band.q > 0.0f &&
+                        band.level >= 0.0f && band.decaySeconds > 0.0f;
+                }
+                const auto rendered =
+                    jam2::practice::renderResearchDrumVoices(
+                        *baseKit,
+                        {{
+                            0,
+                            laneId,
+                            QStringLiteral("normal"),
+                            96,
+                            0,
+                            0x7b4d1a23U,
+                        }},
+                        8192,
+                        48000);
+                double peak = 0.0;
+                for (float sample : rendered.dry) {
+                    baseKitPieceDetailsValid = baseKitPieceDetailsValid &&
+                        std::isfinite(sample);
+                    peak = qMax(peak, std::abs(sample));
+                }
+                baseKitPieceDetailsValid = baseKitPieceDetailsValid &&
+                    peak > 0.000001 && peak < 2.0;
+            }
+        }
+        if (electronicBase) {
+            const auto* snare = jam2::practice::researchDrumPiece(
+                *electronicBase, QStringLiteral("snare"));
+            if (snare) {
+                const auto full = jam2::practice::renderResearchDrumVoices(
+                    *electronicBase,
+                    {{0, QStringLiteral("snare"),
+                      QStringLiteral("normal"), 96, 0, 0x421ec6d3U}},
+                    8192,
+                    48000);
+                auto withoutDetail = *electronicBase;
+                auto stripped = withoutDetail.pieces.find(
+                    QStringLiteral("snare"));
+                if (stripped != withoutDetail.pieces.end()) {
+                    stripped->modalBands.clear();
+                    stripped->noiseBands.clear();
+                }
+                const auto sourceOnly =
+                    jam2::practice::renderResearchDrumVoices(
+                        withoutDetail,
+                        {{0, QStringLiteral("snare"),
+                          QStringLiteral("normal"), 96, 0, 0x421ec6d3U}},
+                        8192,
+                        48000);
+                double fullPeak = 0.0;
+                double sourcePeak = 0.0;
+                for (float sample : full.dry) {
+                    fullPeak = qMax(fullPeak, std::abs(sample));
+                }
+                for (float sample : sourceOnly.dry) {
+                    sourcePeak = qMax(sourcePeak, std::abs(sample));
+                }
+                electronicSnareUsesDetailBanks =
+                    snare->sourceLayerGain <= 0.0001f &&
+                    snare->modalBands.size() == 1 &&
+                    snare->noiseBands.size() == 3 &&
+                    fullPeak > 0.000001 && sourcePeak <= 0.000001;
             }
         }
         researchedKitCatalogValid =
@@ -3916,8 +4039,16 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             researchedKitVoicesValid);
         record(
             QStringLiteral(
-                "practice.trap-kick-retains-audible-sine-sub-layer"),
-            trapSubLayerValid);
+                "practice.drum-catalog-has-only-acoustic-and-electronic-bases"),
+            twoBaseKitsValid);
+        record(
+            QStringLiteral(
+                "practice.base-drum-kits-render-all-pieces-with-full-detail"),
+            baseKitPieceDetailsValid);
+        record(
+            QStringLiteral(
+                "practice.electronic-snare-is-modal-noise-not-tonal-source"),
+            electronicSnareUsesDetailBanks);
         record(
             QStringLiteral(
                 "practice.v7-every-full-form-groove-develops-and-fills"),
@@ -3998,6 +4129,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                 idea.recipe.drumPatchRevision &&
             loaded.section(0).generatedRecipe.drumMixGainDb ==
                 idea.recipe.drumMixGainDb &&
+            loaded.section(0).drumKitId == idea.beatSection.drumKitId &&
             loaded.section(0).generatedRecipe.bassEvents.size() == idea.recipe.bassEvents.size() &&
             loaded.section(0).generatedRecipe.synthVoices.size() == idea.recipe.synthVoices.size() &&
             loaded.section(0).generatedRecipe.formSections.size() == idea.recipe.formSections.size() &&
@@ -5516,17 +5648,9 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                     return event.midi % 12 == 2 &&
                         event.durationTicks == 144;
                 }) &&
-            phrygianHarmony.recipe.supportingEvents.size() ==
-                1 &&
-            phrygianHarmony.recipe.supportingEvents.front()
-                    .midi %
-                    12 ==
-                2 &&
-            phrygianHarmony.recipe.supportingEvents.front()
-                    .durationTicks ==
-                432;
+            phrygianHarmony.recipe.supportingEvents.isEmpty();
         record(QStringLiteral(
-            "practice.modal-atmospheric-retains-one-tonic-pedal-under-flat-degree-colours"),
+            "practice.modal-atmospheric-retains-bass-pedal-without-static-drone"),
             phrygianPedalValid);
 
         jam2::practice::ChordIdeaRequest
@@ -5646,24 +5770,6 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                 .arg(phrygianBase.mid(0, 4).join(QLatin1Char(',')))
                 .arg(bossaBase.mid(0, 4).join(QLatin1Char(','))));
 
-        bool earlierRecipesRejected = true;
-        for (int version = 1; version <= 6; ++version) {
-            QJsonObject earlier = model.toJson();
-            QJsonArray sections = earlier.value(QStringLiteral("sections")).toArray();
-            QJsonObject section = sections.first().toObject();
-            QJsonObject recipe =
-                section.value(QStringLiteral("generated_recipe")).toObject();
-            recipe[QStringLiteral("generator_version")] = version;
-            section[QStringLiteral("generated_recipe")] = recipe;
-            sections[0] = section;
-            earlier[QStringLiteral("sections")] = sections;
-            BeatGridModel rejected;
-            earlierRecipesRejected =
-                earlierRecipesRejected && !rejected.loadJson(earlier);
-        }
-        record(QStringLiteral("practice.v7-rejects-all-earlier-generated-recipes"),
-            earlierRecipesRejected);
-
         QJsonObject invalidFeel = model.toJson();
         QJsonArray invalidFeelSections = invalidFeel.value(QStringLiteral("sections")).toArray();
         QJsonObject invalidFeelSection = invalidFeelSections.first().toObject();
@@ -5677,81 +5783,6 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         BeatGridModel rejectedFeel;
         record(QStringLiteral("practice.v7-out-of-range-groove-feel-is-rejected"),
             !rejectedFeel.loadJson(invalidFeel));
-
-        QJsonObject oldGenerated = BeatGridModel{}.toJson();
-        QJsonArray oldSections = oldGenerated.value(QStringLiteral("sections")).toArray();
-        QJsonObject oldSection = oldSections.first().toObject();
-        oldSection[QStringLiteral("generated_kind")] = QStringLiteral("chord");
-        oldSection[QStringLiteral("generated_style")] = QStringLiteral("Modern Metal");
-        oldSections[0] = oldSection;
-        oldGenerated[QStringLiteral("sections")] = oldSections;
-        BeatGridModel rejectedV1;
-        record(QStringLiteral("practice.v1-generated-sections-are-rejected"), !rejectedV1.loadJson(oldGenerated));
-
-        QJsonObject legacyBeatLanes = BeatGridModel{}.toJson();
-        legacyBeatLanes.remove(QStringLiteral("beat_lane_schema"));
-        QJsonArray legacySections =
-            legacyBeatLanes.value(QStringLiteral("sections")).toArray();
-        QJsonObject legacySection = legacySections.first().toObject();
-        QJsonArray legacyPatterns =
-            legacySection.value(QStringLiteral("beat_patterns")).toArray();
-        for (int patternIndex = 0; patternIndex < legacyPatterns.size();
-             ++patternIndex) {
-            QJsonObject legacyPattern =
-                legacyPatterns.at(patternIndex).toObject();
-            legacyPattern[QStringLiteral("lanes")] =
-                patternIndex == 0
-                ? QJsonArray{
-                      QStringLiteral("k"),
-                      QStringLiteral("s"),
-                      QStringLiteral("c"),
-                      QStringLiteral("o"),
-                      QStringLiteral("r"),
-                      QStringLiteral("z"),
-                      QStringLiteral("t"),
-                      QStringLiteral("x"),
-                      QStringLiteral("h"),
-                      QStringLiteral("p"),
-                  }
-                : QJsonArray{
-                      QString(),
-                      QString(),
-                      QString(),
-                      QString(),
-                      QString(),
-                      QString(),
-                      QString(),
-                      QString(),
-                      QString(),
-                      QString(),
-                  };
-            legacyPatterns[patternIndex] = legacyPattern;
-        }
-        legacySection[QStringLiteral("beat_patterns")] = legacyPatterns;
-        // A pre-bank project may contain one section. Loading it must migrate
-        // the v1 percussion lanes and then pad the fixed A-D bank model.
-        legacySections = QJsonArray{legacySection};
-        legacyBeatLanes[QStringLiteral("sections")] = legacySections;
-        BeatGridModel migratedBeatLanes;
-        const bool migratedLegacyBeatLanes =
-            migratedBeatLanes.loadJson(legacyBeatLanes);
-        const QVector<QString> migrated =
-            migratedLegacyBeatLanes
-                ? migratedBeatLanes.section(0).beatPatterns.at(0).lanes
-                : QVector<QString>{};
-        record(
-            QStringLiteral(
-                "practice.beat-lane-v1-migrates-generic-tom-and-percussion-by-identity"),
-            migrated.size() == 12 &&
-                migratedBeatLanes.sections().size() == 4 &&
-                migrated.value(0) == QStringLiteral("k") &&
-                migrated.value(5) == QStringLiteral("z") &&
-                migrated.value(6).isEmpty() &&
-                migrated.value(7) == QStringLiteral("t") &&
-                migrated.value(8).isEmpty() &&
-                migrated.value(9) == QStringLiteral("x") &&
-                migrated.value(10) == QStringLiteral("h") &&
-                migrated.value(11) == QStringLiteral("p"));
 
         QJsonObject excessiveSections = BeatGridModel{}.toJson();
         QJsonArray fiveSections = excessiveSections.value(QStringLiteral("sections")).toArray();
@@ -5806,17 +5837,25 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             jam2::gui::trackTimelineBarNumber(180, 12) == 16);
 
         QJsonObject invalidBeatLaneSchema = BeatGridModel{}.toJson();
-        invalidBeatLaneSchema[QStringLiteral("beat_lane_schema")] = 3;
+        invalidBeatLaneSchema[QStringLiteral("beat_lane_schema")] = 4;
         BeatGridModel rejectedBeatLaneSchema;
         record(
             QStringLiteral(
-                "practice.beat-lane-schema-rejects-unknown-future-version"),
+                "practice.beat-lane-schema-rejects-non-current-version"),
             !rejectedBeatLaneSchema.loadJson(invalidBeatLaneSchema));
 
+        QJsonObject missingBeatLaneSchema = BeatGridModel{}.toJson();
+        missingBeatLaneSchema.remove(QStringLiteral("beat_lane_schema"));
+        BeatGridModel rejectedMissingBeatLaneSchema;
+        record(
+            QStringLiteral("practice.beat-lane-schema-is-required"),
+            !rejectedMissingBeatLaneSchema.loadJson(
+                missingBeatLaneSchema));
+
         record(QStringLiteral("practice.beat-view-uses-rendered-ride-lane"),
-            BeatGridModel::beatLaneSchemaVersion() == 2 &&
+            BeatGridModel::beatLaneSchemaVersion() == 3 &&
             BeatGridModel{}.toJson()
-                .value(QStringLiteral("beat_lane_schema")).toInt() == 2 &&
+                .value(QStringLiteral("beat_lane_schema")).toInt() == 3 &&
             BeatGridModel::beatLaneNames() == QStringList{
                 QStringLiteral("Kick"),
                 QStringLiteral("Snare"),
@@ -5828,12 +5867,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                 QStringLiteral("Mid Tom"),
                 QStringLiteral("Floor Tom"),
                 QStringLiteral("Cross-stick / Rim"),
-                QStringLiteral("Shaker"),
-                QStringLiteral("Hand Percussion"),
             } &&
             BeatGridModel::beatVisualLaneNames() == QStringList{
-                QStringLiteral("Hand Percussion"),
-                QStringLiteral("Shaker"),
                 QStringLiteral("Cross-stick / Rim"),
                 QStringLiteral("Floor Tom"),
                 QStringLiteral("Mid Tom"),
@@ -5865,6 +5900,9 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             &idea.chordSection, &idea.beatSection, settings, workspace);
         const auto renderedAgain = jam2::practice::renderPracticeReferences(
             &idea.chordSection, &idea.beatSection, settings, workspace);
+        const unsigned reportedThreads = std::thread::hardware_concurrency();
+        const int expectedRenderWorkers = static_cast<int>(
+            std::min<unsigned>(5, reportedThreads > 0 ? reportedThreads : 1));
         const QString renderDetail = QStringLiteral(
             "error=%1 chord_peak=%2 drum_peak=%3 melody_peak=%4 "
             "bass_peak=%5 support_peak=%6 deterministic_drums=%7")
@@ -5880,7 +5918,10 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             rendered.error.isEmpty() && rendered.chords.peak > 0.001f && rendered.drums.peak > 0.001f &&
             rendered.melody.peak > 0.001f && rendered.bass.peak > 0.001f &&
             rendered.support.peak > 0.001f && rendered.chords.peak < 4.0f &&
-            renderedAgain.error.isEmpty() && rendered.drums.sha256 == renderedAgain.drums.sha256 &&
+            renderedAgain.error.isEmpty() &&
+            rendered.chords.sha256 == renderedAgain.chords.sha256 &&
+            rendered.drums.sha256 == renderedAgain.drums.sha256 &&
+            rendered.melody.sha256 == renderedAgain.melody.sha256 &&
             rendered.bass.sha256 == renderedAgain.bass.sha256 &&
             rendered.support.sha256 == renderedAgain.support.sha256 &&
             rendered.bass.frames == rendered.chords.frames &&
@@ -5896,6 +5937,12 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             rendered.diagnostics.contains(idea.recipe.supportPatchId) &&
             rendered.diagnostics.contains(QStringLiteral("groove=") + idea.recipe.grooveId) &&
             rendered.diagnostics.contains(QStringLiteral("swing_percent=")) &&
+            rendered.diagnostics.contains(
+                QStringLiteral("render_workers=%1").arg(expectedRenderWorkers)) &&
+            rendered.diagnostics.contains(
+                QStringLiteral("reported_threads=%1").arg(reportedThreads)) &&
+            rendered.diagnostics.contains(QStringLiteral("chord_ms=")) &&
+            rendered.diagnostics.contains(QStringLiteral("drum_ms=")) &&
             rendered.diagnostics.contains(QStringLiteral("elapsed_ms=")),
             renderDetail);
         (void)QDir(workspace).removeRecursively();

@@ -224,21 +224,27 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(
     QObject::connect(meter, qOverload<int>(&QComboBox::currentIndexChanged), &dialog,
         [refreshLength](int) { refreshLength(); });
     QObject::connect(parts, qOverload<int>(&QComboBox::currentIndexChanged), &dialog,
-        [refreshProfileOptions, exactBpm, bpm, &selectedDefaults](int index) {
-            const bool partial = index > 0;
-            if (partial && !exactBpm->isChecked()) {
+        [parts, refreshProfileOptions, exactBpm, bpm, &selectedDefaults](int) {
+            const bool partial =
+                static_cast<PracticeIdeaParts>(parts->currentData().toInt()) !=
+                PracticeIdeaParts::FullArrangement;
+            if (partial) {
                 bpm->setValue(qBound(20, selectedDefaults.bpm, 400));
+                exactBpm->setChecked(true);
             }
             refreshProfileOptions();
         });
     QObject::connect(targetBank, qOverload<int>(&QComboBox::currentIndexChanged), &dialog,
-        [targetBank, bpm, exactBpm, refreshProfileOptions, &selectedDefaults, &defaults](int) {
+        [targetBank, parts, bpm, exactBpm, refreshProfileOptions, &selectedDefaults, &defaults](int) {
             const int bank = targetBank->currentData().toInt();
             selectedDefaults.targetSectionIndex = bank;
             selectedDefaults.bpm = defaults.bankBpms.value(bank, defaults.bpm);
             selectedDefaults.meterId = defaults.bankMeterIds.value(bank, defaults.meterId);
             selectedDefaults.bars = defaults.bankBars.value(bank, defaults.bars);
-            if (!exactBpm->isChecked()) {
+            const bool partial =
+                static_cast<PracticeIdeaParts>(parts->currentData().toInt()) !=
+                PracticeIdeaParts::FullArrangement;
+            if (partial || !exactBpm->isChecked()) {
                 bpm->setValue(qBound(20, selectedDefaults.bpm, 400));
             }
             refreshProfileOptions();
@@ -263,7 +269,7 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(
         QStringLiteral(
             "Creates a full arrangement or replaces only its pitched or drum parts. Generation starts "
             "with a random compatible meter. The target bank's current meter is marked in the list when you want to keep it explicitly. "
-            "The project tempo remains available as an explicit override. "
+            "Partial generation starts with the target bank's current tempo as an exact override; untick Use exact BPM to choose from the style's tempo range. "
             "Untouched banks inherit Bank A's timing. Partial generation also starts with the current section length. "
             "Choose a meter while leaving Style random to generate from any style that supports it. "
             "Form, scale, production, and other relationships are chosen automatically from the compatible profile. "
@@ -283,11 +289,7 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(
     request.meterId = meter->currentData().toString();
     request.allowMeterOverride = !request.meterId.isEmpty() &&
         !compatibleMeterIds(request.styleId, request.profileId).contains(request.meterId);
-    request.bpm = exactBpm->isChecked()
-        ? bpm->value()
-        : request.parts == PracticeIdeaParts::FullArrangement
-            ? 0
-            : selectedDefaults.bpm;
+    request.bpm = exactBpm->isChecked() ? bpm->value() : 0;
     request.bars = length->currentData().toInt();
     request.beatsPerBar = 0;
     request.harmonicComplexity = complexity->currentData().toInt();

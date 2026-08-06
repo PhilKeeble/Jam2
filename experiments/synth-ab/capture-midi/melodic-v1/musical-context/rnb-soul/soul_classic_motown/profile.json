@@ -1,0 +1,41 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "rnb-soul",
+  "styleName": "R&B / Soul",
+  "profileId": "soul_classic_motown",
+  "profileName": "Classic / Motown Soul",
+  "seed": "1564103319",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 84.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 84.0,
+  "durationSeconds": 22.857143,
+  "tonic": "D",
+  "mode": "Major",
+  "formId": "soul-16",
+  "grooveId": "rnb-motown",
+  "fingerprints": {
+    "beat": "32049620fb9cf754f164954c5b5eee7b4448d27f900a892121ee353e80e37b77",
+    "chord": "df459ce20ea5e82849bfbd06672063810943a7369c4dcffaff49aa4ad424e497"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "support",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "04-support.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

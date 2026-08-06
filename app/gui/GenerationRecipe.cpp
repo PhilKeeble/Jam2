@@ -132,8 +132,6 @@ bool validDrumEvents(
         QStringLiteral("mid_tom"),
         QStringLiteral("floor_tom"),
         QStringLiteral("cross_stick"),
-        QStringLiteral("shaker"),
-        QStringLiteral("hand_percussion"),
     };
     if (events.isEmpty() || events.size() > kMaximumDrumEvents) return false;
     int previousTick = -1;

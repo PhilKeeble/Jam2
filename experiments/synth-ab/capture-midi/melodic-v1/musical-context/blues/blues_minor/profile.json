@@ -1,0 +1,39 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "blues",
+  "styleName": "Blues",
+  "profileId": "blues_minor",
+  "profileName": "Minor Blues",
+  "seed": "3927100429",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 108.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 108.0,
+  "durationSeconds": 17.777778,
+  "tonic": "C",
+  "mode": "Dorian",
+  "formId": "minor-blues-12",
+  "grooveId": "blues-straight-eighth",
+  "fingerprints": {
+    "beat": "4bcc5b35a7a493890d3af120d34bccef3140c8d904bcc695da0e92e3e9b1e56d",
+    "chord": "baa908f8821b07c65249792756482d849fc9364723c2edf4d5617c47b2c644e6"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

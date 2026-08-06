@@ -135,10 +135,15 @@ bool validateBeatGrid(const QJsonObject& grid, QString& reason)
         const QJsonValue beatsValue = section.value(QStringLiteral("beats"));
         const QString generatedKind = section.value(QStringLiteral("generated_kind")).toString();
         const QJsonValue generatedRecipe = section.value(QStringLiteral("generated_recipe"));
+        const QJsonValue drumKit = section.value(QStringLiteral("drum_kit"));
         const int beats = beatsValue.isUndefined() ? 8 : beatsValue.toInt(-1);
         if (!isOptionalBoundedString(section, QStringLiteral("label"), limits::kMaximumCellCharacters) ||
             !isOptionalBoundedString(section, QStringLiteral("name"), limits::kMaximumCellCharacters) ||
             !isOptionalBoundedString(section, QStringLiteral("id"), limits::kMaximumCellCharacters) ||
+            (!drumKit.isUndefined() &&
+             (!drumKit.isString() ||
+              (drumKit.toString() != QStringLiteral("acoustic") &&
+               drumKit.toString() != QStringLiteral("electronic")))) ||
             !isOptionalBoundedString(section, QStringLiteral("generated_kind"), limits::kMaximumCellCharacters) ||
             (!beatsValue.isUndefined() && !isBoundedInteger(
                 beatsValue, limits::kMinimumBeatsPerSection, limits::kMaximumBeatsPerSection)) ||

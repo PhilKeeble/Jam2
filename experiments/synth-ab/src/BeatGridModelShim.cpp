@@ -16,7 +16,5 @@ QStringList BeatGridModel::beatLaneNames()
         QStringLiteral("Mid Tom"),
         QStringLiteral("Floor Tom"),
         QStringLiteral("Cross-stick / Rim"),
-        QStringLiteral("Shaker"),
-        QStringLiteral("Hand Percussion"),
     };
 }

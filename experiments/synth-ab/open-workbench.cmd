@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions
 set "HERE=%~dp0"
-set "PORT=48726"
+set "PORT=48727"
 
 if not exist "%HERE%build\jam2_sound_lab.exe" (
     echo The native sound renderer has not been built.

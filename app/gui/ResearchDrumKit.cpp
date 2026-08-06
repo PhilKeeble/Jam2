@@ -1,6 +1,7 @@
 #include "ResearchDrumKit.hpp"
 
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 
@@ -49,6 +50,23 @@ ResearchDrumVelocityBand velocityBand(
     };
 }
 
+ResearchDrumDetailResponse detailResponse(
+    const QJsonObject& object)
+{
+    ResearchDrumDetailResponse response;
+    response.velocityCurve = number(
+        object, "velocityCurve", response.velocityCurve);
+    response.ghostGain = number(
+        object, "ghostGain", response.ghostGain);
+    response.normalGain = number(
+        object, "normalGain", response.normalGain);
+    response.accentGain = number(
+        object, "accentGain", response.accentGain);
+    response.roomSend = number(
+        object, "roomSend", response.roomSend);
+    return response;
+}
+
 ResearchDrumPiece parsePiece(const QJsonObject& object)
 {
     ResearchDrumPiece piece;
@@ -66,8 +84,47 @@ ResearchDrumPiece parsePiece(const QJsonObject& object)
     piece.fmAmount =
         number(object, "fmAmount", piece.fmAmount);
     piece.level = number(object, "level", piece.level);
+    piece.onsetSofteningSeconds = number(
+        object, "onsetSofteningSeconds", piece.onsetSofteningSeconds);
+    piece.sourceLayerGain = number(
+        object, "sourceLayerGain", piece.sourceLayerGain);
     piece.roomSend =
         number(object, "roomSend", piece.roomSend);
+    const QJsonArray modalBands =
+        object.value(QStringLiteral("modalBands")).toArray();
+    piece.modalBands.reserve(modalBands.size());
+    for (const QJsonValue& value : modalBands) {
+        if (!value.isObject()) continue;
+        const QJsonObject band = value.toObject();
+        piece.modalBands.push_back({
+            number(band, "frequencyHz", 0.0f),
+            number(band, "detuneCents", 0.0f),
+            number(band, "level", 0.0f),
+            number(band, "decaySeconds", 0.0f),
+            number(band, "attackSeconds", 0.001f),
+            number(band, "delaySeconds", 0.0f),
+            number(band, "highpassHz", 0.0f),
+            number(band, "phaseCycles", -1.0f),
+            detailResponse(band),
+        });
+    }
+    const QJsonArray noiseBands =
+        object.value(QStringLiteral("noiseBands")).toArray();
+    piece.noiseBands.reserve(noiseBands.size());
+    for (const QJsonValue& value : noiseBands) {
+        if (!value.isObject()) continue;
+        const QJsonObject band = value.toObject();
+        piece.noiseBands.push_back({
+            number(band, "frequencyHz", 4000.0f),
+            number(band, "q", 1.0f),
+            number(band, "level", 0.0f),
+            number(band, "decaySeconds", 0.15f),
+            number(band, "attackSeconds", 0.001f),
+            number(band, "delaySeconds", 0.0f),
+            number(band, "highpassHz", 0.0f),
+            detailResponse(band),
+        });
+    }
     const QJsonObject colourStage =
         object.value(QStringLiteral("colourStage")).toObject();
     piece.voiceDrive =
@@ -184,18 +241,19 @@ QHash<QString, ResearchDrumKit> loadKits()
     const int revision =
         root.value(QStringLiteral("revision")).toInt(1);
     QHash<QString, ResearchDrumKit> kits;
-    const QJsonObject profiles =
-        root.value(QStringLiteral("profiles")).toObject();
-    for (auto profile = profiles.begin();
-         profile != profiles.end();
-         ++profile) {
-        const QJsonObject object = profile.value().toObject();
+    const auto loadCollection =
+        [&kits, revision](const QJsonObject& collection, bool profiles) {
+      for (auto entry = collection.begin();
+           entry != collection.end(); ++entry) {
+        const QJsonObject object = entry.value().toObject();
         ResearchDrumKit kit;
-        kit.profileId = profile.key();
+        kit.profileId = profiles ? entry.key() : QString{};
+        kit.baseKitId = text(object, "base_kit_id", entry.key());
+        kit.treatmentId = text(object, "treatment_id");
         const QString candidateId =
             object.value(QStringLiteral("kit_id")).toString();
         kit.id = QStringLiteral("%1:%2:r%3")
-            .arg(kit.profileId, candidateId)
+            .arg(profiles ? kit.profileId : QStringLiteral("base"), candidateId)
             .arg(revision);
         kit.name =
             object.value(QStringLiteral("kit_name")).toString();
@@ -236,11 +294,20 @@ QHash<QString, ResearchDrumKit> loadKits()
                 piece.key(),
                 parsePiece(piece.value().toObject()));
         }
-        if (!candidateId.isEmpty() &&
-            kit.pieces.size() == 12) {
-            kits.insert(kit.profileId, std::move(kit));
+        if (!candidateId.isEmpty() && kit.pieces.size() == 10 &&
+            (kit.baseKitId == QStringLiteral("acoustic") ||
+             kit.baseKitId == QStringLiteral("electronic"))) {
+            kits.insert(
+                (profiles ? QStringLiteral("profile:") : QStringLiteral("base:")) +
+                    entry.key(),
+                std::move(kit));
         }
-    }
+      }
+    };
+    loadCollection(
+        root.value(QStringLiteral("base_kits")).toObject(), false);
+    loadCollection(
+        root.value(QStringLiteral("profiles")).toObject(), true);
     return kits;
 }
 
@@ -392,19 +459,6 @@ double sourceSample(
         return 0.62 * wooden +
             0.30 * brightNoise * envelope(t, 0.007);
     }
-    if (source.contains(QStringLiteral("shaker"))) {
-        const double collision =
-            ((static_cast<std::uint32_t>(
-                  seed + age * 1664525ULL) &
-                 63U) <
-                static_cast<std::uint32_t>(
-                    4 + 30 * piece.colour))
-            ? 1.0
-            : 0.24;
-        return collision *
-            (0.72 * brightNoise + 0.18 * noise) *
-            envelope(t, 0.025 + 0.48 * decay, 0.92);
-    }
     if (source.contains(QStringLiteral("hand-clap"))) {
         const auto burst = [t](double start, double width) {
             const double local = t - start;
@@ -420,29 +474,6 @@ double sourceSample(
         return (0.78 * brightNoise + 0.22 * noise) *
             (bursts +
              0.24 * envelope(t, 0.05 + 0.62 * decay));
-    }
-    if (source.contains(QStringLiteral("tambourine"))) {
-        const double metal =
-            inharmonic(
-                frequency,
-                t,
-                {0.73, 1.0, 1.31, 1.79, 2.41},
-                0.74) *
-            envelope(t, 0.035 + 0.24 * decay);
-        return 0.22 * metal +
-            0.68 * brightNoise *
-                envelope(t, 0.06 + 0.62 * decay);
-    }
-    if (source.contains(QStringLiteral("hand-drum"))) {
-        const double skin =
-            inharmonic(
-                frequency,
-                t,
-                {1.0, 1.47, 2.09},
-                0.32) *
-            envelope(t, 0.045 + 0.72 * decay);
-        return 0.86 * skin +
-            0.13 * noise * envelope(t, 0.016);
     }
     if (source.contains(QStringLiteral("crash-cymbal"))) {
         const double metal =
@@ -494,9 +525,6 @@ double sourceSample(
                 0.66);
         return (0.34 * metal + 0.54 * brightNoise) *
             envelope(t, 0.025 + 0.82 * decay, 1.15);
-    }
-    if (source == QStringLiteral("jam2-native")) {
-        return 0.0;
     }
     // A safe skin/noise fallback for any future dedicated source.
     return (0.58 *
@@ -612,7 +640,16 @@ QString pieceKeyForLane(const QString& laneId)
 const ResearchDrumKit* researchDrumKitForProfile(
     const QString& profileId)
 {
-    const auto found = kits().constFind(profileId);
+    const auto found = kits().constFind(
+        QStringLiteral("profile:") + profileId);
+    return found == kits().cend() ? nullptr : &found.value();
+}
+
+const ResearchDrumKit* researchDrumKitForBase(
+    const QString& baseKitId)
+{
+    const auto found = kits().constFind(
+        QStringLiteral("base:") + baseKitId);
     return found == kits().cend() ? nullptr : &found.value();
 }
 
@@ -640,7 +677,6 @@ bool researchDrumSourceSupportsLane(
     const QString& laneId,
     const QString& source)
 {
-    if (source == QStringLiteral("jam2-native")) return true;
     if (source.isEmpty() || source == QStringLiteral("off")) {
         return false;
     }
@@ -651,7 +687,8 @@ bool researchDrumSourceSupportsLane(
     if (laneId == QStringLiteral("snare")) {
         return source == QStringLiteral("jam2-shell-snare") ||
             source == QStringLiteral("daisy-analog-snare") ||
-            source == QStringLiteral("daisy-synthetic-snare");
+            source == QStringLiteral("daisy-synthetic-snare") ||
+            source == QStringLiteral("jam2-hand-clap");
     }
     if (laneId == QStringLiteral("closed_hat") ||
         laneId == QStringLiteral("open_hat")) {
@@ -666,22 +703,12 @@ bool researchDrumSourceSupportsLane(
         return source == QStringLiteral("jam2-crash-cymbal");
     }
     if (laneId == QStringLiteral("ride")) {
-        return source == QStringLiteral("jam2-ride-cymbal");
+        return source == QStringLiteral("jam2-ride-cymbal") ||
+            source == QStringLiteral("jam2-wood-block");
     }
     if (laneId == QStringLiteral("cross_stick")) {
-        return source == QStringLiteral("jam2-cross-stick");
-    }
-    if (laneId == QStringLiteral("shaker")) {
-        return source == QStringLiteral("jam2-shaker") ||
-            source == QStringLiteral("jam2-tambourine");
-    }
-    if (laneId == QStringLiteral("hand_percussion")) {
-        return source == QStringLiteral("jam2-hand-drum") ||
-            source == QStringLiteral("jam2-hand-clap") ||
-            source == QStringLiteral("jam2-wood-block") ||
-            source == QStringLiteral("jam2-tambourine") ||
-            source == QStringLiteral("jam2-shaker") ||
-            source == QStringLiteral("daisy-synthetic-kick");
+        return source == QStringLiteral("jam2-cross-stick") ||
+            source == QStringLiteral("jam2-wood-block");
     }
     return false;
 }
@@ -709,13 +736,11 @@ double researchDrumTailSeconds(
         piece.source.contains(QStringLiteral("metal"))) {
         tail = 0.08 + 1.8 * piece.decay;
     } else if (
-        piece.source.contains(QStringLiteral("shaker")) ||
         piece.source.contains(QStringLiteral("cross-stick")) ||
         piece.source.contains(QStringLiteral("wood-block"))) {
         tail = 0.06 + 0.62 * piece.decay;
     } else if (
-        piece.source.contains(QStringLiteral("shell-tom")) ||
-        piece.source.contains(QStringLiteral("hand-drum"))) {
+        piece.source.contains(QStringLiteral("shell-tom"))) {
         tail = 0.16 + 1.10 * piece.decay;
     }
     tail = std::max(

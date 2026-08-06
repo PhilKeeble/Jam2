@@ -1,0 +1,454 @@
+{
+  "version": "melodic-v1",
+  "generator": "experiments/synth-ab/tools/generate_melodic_capture_midi.py",
+  "tempoBpm": 120,
+  "timeSignature": "4/4",
+  "ppq": 480,
+  "captureRange": {
+    "minimum": 28,
+    "maximum": 84,
+    "scientific": "E1-C6",
+    "ableton": "E0-C5"
+  },
+  "observedJam2CorpusRanges": {
+    "bass": {
+      "minimum": 28,
+      "maximum": 55
+    },
+    "chords": {
+      "minimum": 36,
+      "maximum": 72
+    },
+    "melody": {
+      "minimum": 54,
+      "maximum": 81
+    },
+    "support": {
+      "minimum": 48,
+      "maximum": 77
+    }
+  },
+  "velocitySteps": [
+    20,
+    50,
+    80,
+    110,
+    127
+  ],
+  "context": {
+    "key": "A minor / C major",
+    "bars": 16,
+    "durationSeconds": 32.0,
+    "roleChannels": {
+      "chords": 1,
+      "melody": 2,
+      "bass": 3,
+      "support": 4,
+      "drums": 10
+    },
+    "drumMap": "General MIDI"
+  },
+  "files": [
+    {
+      "file": "replication/00-full-spectrum.mid",
+      "category": "replication-complete",
+      "purpose": "All seven melodic replication tests in one render, separated by four seconds",
+      "midiFormat": 0,
+      "trackCount": 1,
+      "trackNames": [
+        "Jam2 complete melodic capture v1"
+      ],
+      "durationSeconds": 574.875,
+      "noteOnCount": 299,
+      "noteRange": {
+        "minimum": 28,
+        "maximum": 84,
+        "scientific": "E1-C6",
+        "ableton": "E0-C5"
+      },
+      "velocityRange": {
+        "minimum": 20,
+        "maximum": 127
+      },
+      "midiChannels": [
+        1
+      ],
+      "controlChangeCount": 22,
+      "channelPressureCount": 9,
+      "sha256": "2ecd4ae267c63647efee404c6c7dce324a4acc454718b43772d80a21bd517d87"
+    },
+    {
+      "file": "replication/01-chromatic-range.mid",
+      "category": "replication-module",
+      "purpose": "Every semitone MIDI 28-84 at velocity 80; one-beat notes with release space",
+      "midiFormat": 0,
+      "trackCount": 1,
+      "trackNames": [
+        "Jam2 chromatic range v1"
+      ],
+      "durationSeconds": 118.0,
+      "noteOnCount": 57,
+      "noteRange": {
+        "minimum": 28,
+        "maximum": 84,
+        "scientific": "E1-C6",
+        "ableton": "E0-C5"
+      },
+      "velocityRange": {
+        "minimum": 80,
+        "maximum": 80
+      },
+      "midiChannels": [
+        1
+      ],
+      "controlChangeCount": 0,
+      "channelPressureCount": 0,
+      "sha256": "b0f20313e4d3af1aa5f02131b2aaea6195e3bab03f3a8445cbc542a283c4dd4d"
+    },
+    {
+      "file": "replication/02-velocity-response.mid",
+      "category": "replication-module",
+      "purpose": "Four repeats of five velocities at representative low, middle, and high notes",
+      "midiFormat": 0,
+      "trackCount": 1,
+      "trackNames": [
+        "Jam2 velocity response v1"
+      ],
+      "durationSeconds": 130.0,
+      "noteOnCount": 60,
+      "noteRange": {
+        "minimum": 36,
+        "maximum": 81,
+        "scientific": "C2-A5",
+        "ableton": "C1-A4"
+      },
+      "velocityRange": {
+        "minimum": 20,
+        "maximum": 127
+      },
+      "midiChannels": [
+        1
+      ],
+      "controlChangeCount": 0,
+      "channelPressureCount": 0,
+      "sha256": "17a812b829f29ef71ec5ca89be9f7d38ffc6ecf3a219613217936ca1b333dce7"
+    },
+    {
+      "file": "replication/03-duration-release.mid",
+      "category": "replication-module",
+      "purpose": "125 ms, one-second, and four-second notes in three registers with four-second tails",
+      "midiFormat": 0,
+      "trackCount": 1,
+      "trackNames": [
+        "Jam2 duration and release v1"
+      ],
+      "durationSeconds": 59.375,
+      "noteOnCount": 9,
+      "noteRange": {
+        "minimum": 36,
+        "maximum": 81,
+        "scientific": "C2-A5",
+        "ableton": "C1-A4"
+      },
+      "velocityRange": {
+        "minimum": 80,
+        "maximum": 80
+      },
+      "midiChannels": [
+        1
+      ],
+      "controlChangeCount": 0,
+      "channelPressureCount": 0,
+      "sha256": "99a88197239710d0aa54b202f6576f7165f8ab0666da10cf9141291e2b63d148"
+    },
+    {
+      "file": "replication/04-repeated-notes.mid",
+      "category": "replication-module",
+      "purpose": "Sixteenth, eighth, and quarter-note retriggers expose phase reset and voice stealing",
+      "midiFormat": 0,
+      "trackCount": 1,
+      "trackNames": [
+        "Jam2 repeated notes v1"
+      ],
+      "durationSeconds": 28.0,
+      "noteOnCount": 48,
+      "noteRange": {
+        "minimum": 60,
+        "maximum": 60,
+        "scientific": "C4-C4",
+        "ableton": "C3-C3"
+      },
+      "velocityRange": {
+        "minimum": 72,
+        "maximum": 88
+      },
+      "midiChannels": [
+        1
+      ],
+      "controlChangeCount": 0,
+      "channelPressureCount": 0,
+      "sha256": "f8cbd5e24cb934422de7d56153bb4d57c017bf010f72a8c659d5cb015240aef7"
+    },
+    {
+      "file": "replication/05-polyphony-chords.mid",
+      "category": "replication-module",
+      "purpose": "Intervals, triads, sevenths, inversions, and open voicings across the playable range",
+      "midiFormat": 0,
+      "trackCount": 1,
+      "trackNames": [
+        "Jam2 polyphony and chords v1"
+      ],
+      "durationSeconds": 136.0,
+      "noteOnCount": 82,
+      "noteRange": {
+        "minimum": 36,
+        "maximum": 84,
+        "scientific": "C2-C6",
+        "ableton": "C1-C5"
+      },
+      "velocityRange": {
+        "minimum": 80,
+        "maximum": 80
+      },
+      "midiChannels": [
+        1
+      ],
+      "controlChangeCount": 0,
+      "channelPressureCount": 0,
+      "sha256": "191b58c51f53049a844935010c188bb24a95862c7a7ec22c481173c60d6df504"
+    },
+    {
+      "file": "replication/06-legato-glide.mid",
+      "category": "replication-module",
+      "purpose": "Detached and overlapping scales plus wide overlapping leaps for mono and glide patches",
+      "midiFormat": 0,
+      "trackCount": 1,
+      "trackNames": [
+        "Jam2 legato and glide v1"
+      ],
+      "durationSeconds": 31.5,
+      "noteOnCount": 37,
+      "noteRange": {
+        "minimum": 48,
+        "maximum": 79,
+        "scientific": "C3-G5",
+        "ableton": "C2-G4"
+      },
+      "velocityRange": {
+        "minimum": 82,
+        "maximum": 88
+      },
+      "midiChannels": [
+        1
+      ],
+      "controlChangeCount": 0,
+      "channelPressureCount": 0,
+      "sha256": "79b7a8a7de23a84262b8db3b5525e68c4a85bf3f6fcf648999b53bd676eceb2d"
+    },
+    {
+      "file": "replication/07-optional-expression.mid",
+      "category": "replication-module",
+      "purpose": "Optional CC1, channel aftertouch, CC11, and sustain-pedal tests; controller state is reset",
+      "midiFormat": 0,
+      "trackCount": 1,
+      "trackNames": [
+        "Jam2 optional expression controls v1"
+      ],
+      "durationSeconds": 44.0,
+      "noteOnCount": 6,
+      "noteRange": {
+        "minimum": 60,
+        "maximum": 67,
+        "scientific": "C4-G4",
+        "ableton": "C3-G3"
+      },
+      "velocityRange": {
+        "minimum": 80,
+        "maximum": 88
+      },
+      "midiChannels": [
+        1
+      ],
+      "controlChangeCount": 22,
+      "channelPressureCount": 9,
+      "sha256": "eaf7ff62d7c6db04e973c6f093aad7ff0df58b21c5641dd4b2be344f406e9716"
+    },
+    {
+      "file": "musical-context/01-chords.mid",
+      "category": "musical-context-stem",
+      "purpose": "Sustains, stabs, inversions, and open voicings",
+      "midiFormat": 0,
+      "trackCount": 1,
+      "trackNames": [
+        "Jam2 context - chords"
+      ],
+      "durationSeconds": 32.0,
+      "noteOnCount": 100,
+      "noteRange": {
+        "minimum": 41,
+        "maximum": 69,
+        "scientific": "F2-A4",
+        "ableton": "F1-A3"
+      },
+      "velocityRange": {
+        "minimum": 68,
+        "maximum": 88
+      },
+      "midiChannels": [
+        1
+      ],
+      "controlChangeCount": 0,
+      "channelPressureCount": 0,
+      "sha256": "e1b727727d4dba146952e1f606748c6aa7d2d6160daae48d1e933ed018c90a93"
+    },
+    {
+      "file": "musical-context/02-melody.mid",
+      "category": "musical-context-stem",
+      "purpose": "Hook, answers, register lift, and velocity contour",
+      "midiFormat": 0,
+      "trackCount": 1,
+      "trackNames": [
+        "Jam2 context - melody"
+      ],
+      "durationSeconds": 32.0,
+      "noteOnCount": 76,
+      "noteRange": {
+        "minimum": 64,
+        "maximum": 81,
+        "scientific": "E4-A5",
+        "ableton": "E3-A4"
+      },
+      "velocityRange": {
+        "minimum": 72,
+        "maximum": 106
+      },
+      "midiChannels": [
+        2
+      ],
+      "controlChangeCount": 0,
+      "channelPressureCount": 0,
+      "sha256": "7bb52b44c5d37ea184e4f5b291cf664c03ace4961bf2fea0463d91c79fb75dc1"
+    },
+    {
+      "file": "musical-context/03-bass.mid",
+      "category": "musical-context-stem",
+      "purpose": "Roots, fifths, repeated eighths, and approach notes",
+      "midiFormat": 0,
+      "trackCount": 1,
+      "trackNames": [
+        "Jam2 context - bass"
+      ],
+      "durationSeconds": 32.0,
+      "noteOnCount": 92,
+      "noteRange": {
+        "minimum": 40,
+        "maximum": 55,
+        "scientific": "E2-G3",
+        "ableton": "E1-G2"
+      },
+      "velocityRange": {
+        "minimum": 74,
+        "maximum": 98
+      },
+      "midiChannels": [
+        3
+      ],
+      "controlChangeCount": 0,
+      "channelPressureCount": 0,
+      "sha256": "ce5121edeb62ec4815ab0a290eeb84be11d0834b68d12870747cf770cbf733ad"
+    },
+    {
+      "file": "musical-context/04-support.mid",
+      "category": "musical-context-stem",
+      "purpose": "Quiet answers, offbeat arpeggios, and chord-tone layers",
+      "midiFormat": 0,
+      "trackCount": 1,
+      "trackNames": [
+        "Jam2 context - support"
+      ],
+      "durationSeconds": 32.0,
+      "noteOnCount": 56,
+      "noteRange": {
+        "minimum": 53,
+        "maximum": 69,
+        "scientific": "F3-A4",
+        "ableton": "F2-A3"
+      },
+      "velocityRange": {
+        "minimum": 58,
+        "maximum": 73
+      },
+      "midiChannels": [
+        4
+      ],
+      "controlChangeCount": 0,
+      "channelPressureCount": 0,
+      "sha256": "18a4d4ced79c0af4175d9f7753182f33dc233a1f0af4033dd4bdfd45411a47a8"
+    },
+    {
+      "file": "musical-context/05-drums.mid",
+      "category": "musical-context-stem",
+      "purpose": "GM kick, snare, hats, crash, and closing tom fill",
+      "midiFormat": 0,
+      "trackCount": 1,
+      "trackNames": [
+        "Jam2 context - drums"
+      ],
+      "durationSeconds": 32.0,
+      "noteOnCount": 245,
+      "noteRange": {
+        "minimum": 36,
+        "maximum": 50,
+        "scientific": "C2-D3",
+        "ableton": "C1-D2"
+      },
+      "velocityRange": {
+        "minimum": 38,
+        "maximum": 112
+      },
+      "midiChannels": [
+        10
+      ],
+      "controlChangeCount": 0,
+      "channelPressureCount": 0,
+      "sha256": "53521e1a48620b47ee893dd17d0bf3140fb28892f75829f7736c7219aaa7cc49"
+    },
+    {
+      "file": "musical-context/06-full-arrangement.mid",
+      "category": "musical-context-full",
+      "purpose": "The five aligned role tracks in one type-1 MIDI file",
+      "midiFormat": 1,
+      "trackCount": 6,
+      "trackNames": [
+        "Jam2 full melodic context v1",
+        "Jam2 context - chords",
+        "Jam2 context - melody",
+        "Jam2 context - bass",
+        "Jam2 context - support",
+        "Jam2 context - drums"
+      ],
+      "durationSeconds": 32.0,
+      "noteOnCount": 569,
+      "noteRange": {
+        "minimum": 36,
+        "maximum": 81,
+        "scientific": "C2-A5",
+        "ableton": "C1-A4"
+      },
+      "velocityRange": {
+        "minimum": 38,
+        "maximum": 112
+      },
+      "midiChannels": [
+        1,
+        2,
+        3,
+        4,
+        10
+      ],
+      "controlChangeCount": 0,
+      "channelPressureCount": 0,
+      "sha256": "2fc1640290b1264329e2f531137b564c276b0862bd64a31283a3b5f745d25a8c"
+    }
+  ]
+}

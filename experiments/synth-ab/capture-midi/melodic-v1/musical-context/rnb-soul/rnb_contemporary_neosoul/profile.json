@@ -1,0 +1,41 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "rnb-soul",
+  "styleName": "R&B / Soul",
+  "profileId": "rnb_contemporary_neosoul",
+  "profileName": "Contemporary R&B / Neo-Soul",
+  "seed": "2996586782",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 88.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 88.0,
+  "durationSeconds": 21.818182,
+  "tonic": "Eb",
+  "mode": "Major",
+  "formId": "rnb-12",
+  "grooveId": "rnb-half-ballad",
+  "fingerprints": {
+    "beat": "4d994b5c4efb331b6002cc8d6b590ca209d46cb36b6a9cf237fca294b9e4194b",
+    "chord": "5660ab72a353bcc8ea7398a48208710caf8973ae759d68fe4173df59b34159a0"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "support",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "04-support.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

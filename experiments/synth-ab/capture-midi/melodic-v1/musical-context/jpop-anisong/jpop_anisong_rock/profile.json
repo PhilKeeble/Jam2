@@ -1,0 +1,39 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "jpop-anisong",
+  "styleName": "J-Pop / Anisong",
+  "profileId": "jpop_anisong_rock",
+  "profileName": "Anisong Rock",
+  "seed": "4075346349",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 176.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 176.0,
+  "durationSeconds": 10.909091,
+  "tonic": "F#",
+  "mode": "Major",
+  "formId": "jpop-rock-24",
+  "grooveId": "anime-syncopated-kick",
+  "fingerprints": {
+    "beat": "a81d4771a108e43178cc3496e951c1d36c1cf71377fd7997f306026e9213731f",
+    "chord": "7ce96637582c7fbc07bac7705d35433aa2c0e04cae0aa7b991af629ab1b1b307"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

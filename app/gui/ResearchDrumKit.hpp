@@ -13,6 +13,37 @@ struct ResearchDrumVelocityBand {
     int maximum = 127;
 };
 
+struct ResearchDrumDetailResponse {
+    float velocityCurve = 0.8f;
+    float ghostGain = 0.55f;
+    float normalGain = 1.0f;
+    float accentGain = 1.25f;
+    float roomSend = 1.0f;
+};
+
+struct ResearchDrumModalBand {
+    float frequencyHz = 0.0f;
+    float detuneCents = 0.0f;
+    float level = 0.0f;
+    float decaySeconds = 0.0f;
+    float attackSeconds = 0.001f;
+    float delaySeconds = 0.0f;
+    float highpassHz = 0.0f;
+    float phaseCycles = -1.0f;
+    ResearchDrumDetailResponse response;
+};
+
+struct ResearchDrumNoiseBand {
+    float frequencyHz = 4000.0f;
+    float q = 1.0f;
+    float level = 0.0f;
+    float decaySeconds = 0.15f;
+    float attackSeconds = 0.001f;
+    float delaySeconds = 0.0f;
+    float highpassHz = 0.0f;
+    ResearchDrumDetailResponse response;
+};
+
 struct ResearchDrumPiece {
     QString intendedIdentity;
     QString source;
@@ -24,6 +55,10 @@ struct ResearchDrumPiece {
     float colour = 0.5f;
     float fmAmount = 0.0f;
     float level = 0.5f;
+    float onsetSofteningSeconds = 0.0f;
+    float sourceLayerGain = 1.0f;
+    QVector<ResearchDrumModalBand> modalBands;
+    QVector<ResearchDrumNoiseBand> noiseBands;
     float voiceDrive = 1.0f;
     float digitalSampleRateHz = 48000.0f;
     int digitalBitDepth = 24;
@@ -74,6 +109,8 @@ struct ResearchDrumBus {
 
 struct ResearchDrumKit {
     QString profileId;
+    QString baseKitId;
+    QString treatmentId;
     QString id;
     QString name;
     QString researchFamily;
@@ -98,6 +135,8 @@ struct ResearchDrumRenderResult {
 
 const ResearchDrumKit* researchDrumKitForProfile(
     const QString& profileId);
+const ResearchDrumKit* researchDrumKitForBase(
+    const QString& baseKitId);
 const ResearchDrumKit* researchDrumKitById(const QString& kitId);
 const ResearchDrumPiece* researchDrumPiece(
     const ResearchDrumKit& kit,

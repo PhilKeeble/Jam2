@@ -1,6 +1,7 @@
 .deps/
 .research-cache/
 build/
+artifacts/
 site/audio/
 site/lab-renders/
 site/manifest.js

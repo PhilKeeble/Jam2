@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Jam2 Sound Design Workbench</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=lineup-volume-1">
 </head>
 <body>
   <div class="app-shell">
@@ -148,9 +148,21 @@
           <div>
             <p class="eyebrow">Pattern stays fixed</p>
             <h3>Current Instrument Lineup</h3>
-            <p>Choose each role independently. Click a role to edit it; Designed style mix uses the lineup shown here over the current profile pattern.</p>
+            <p>Choose each role independently, including its exact current Jam2 native style sound. Click a role to edit it, then balance its volume here. Volume changes are heard live during mix playback and saved in the complete Jam2 style snapshot.</p>
           </div>
           <div id="lab-current-lineup" class="current-lineup"></div>
+        </section>
+
+        <section id="lab-style-save-panel" class="panel" hidden>
+          <div>
+            <p class="eyebrow">Project handoff</p>
+            <h3>Save this complete style mix for Jam2</h3>
+            <p>The mixer already remembers changes in this browser. This button writes every resolved sound, drum-piece choice, native-Jam2 selection and final role volume to <code>experiments/synth-ab/presets/style-mixes.json</code>, ready to review and bake into Jam2.</p>
+          </div>
+          <div>
+            <button id="lab-save-style-mix" class="primary">Save complete style mix</button>
+            <span id="lab-save-style-mix-status"></span>
+          </div>
         </section>
 
         <section id="style-assignment-lab" class="panel">
@@ -201,7 +213,7 @@
             <div>
               <p class="eyebrow">Drum sound library</p>
               <h3>Kit family and piece options</h3>
-              <p>Choose Acoustic, Electronic or Latin, then edit one piece. Save as many named kick, snare, hat or percussion options as you need.</p>
+              <p>Choose Acoustic or Electronic, then edit one piece. Save as many named kick, snare, hat or percussion options as you need.</p>
             </div>
           </div>
           <div class="base-drum-choice-grid">
@@ -407,7 +419,7 @@
   </div>
 
   <script src="sound-design-manifest.js"></script>
-  <script src="sound-template-library.js?v=base-palette-1"></script>
-  <script src="instrument-lab.js?v=base-palette-1"></script>
+  <script src="sound-template-library.js?v=lineup-volume-1"></script>
+  <script src="instrument-lab.js?v=lineup-volume-1"></script>
 </body>
 </html>

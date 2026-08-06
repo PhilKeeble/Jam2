@@ -12,8 +12,7 @@
 namespace {
 
 constexpr int kDefaultBeatDivision = 4;
-constexpr int kLegacyBeatLaneSchema = 1;
-constexpr int kCurrentBeatLaneSchema = 2;
+constexpr int kCurrentBeatLaneSchema = 3;
 constexpr int kMinBeatsPerSection = jam2::application::limits::kMinimumBeatsPerSection;
 constexpr int kMaxBeatsPerSection = jam2::application::limits::kMaximumBeatsPerSection;
 constexpr int kMaxSections = jam2::application::limits::kMaximumSongSections;
@@ -48,25 +47,6 @@ bool exactInteger(const QJsonValue& value, int minimum, int maximum)
     const double raw = value.toDouble();
     return std::isfinite(raw) && raw == std::floor(raw) &&
         raw >= minimum && raw <= maximum;
-}
-
-int serializedBeatLaneCount(int schema)
-{
-    return schema == kLegacyBeatLaneSchema ? 10 : 12;
-}
-
-int currentLaneForSerializedLane(int schema, int lane)
-{
-    if (schema != kLegacyBeatLaneSchema) return lane;
-    // Legacy v1 used one generic Tom at index 6. The three later percussion
-    // lanes must move by identity rather than being copied positionally.
-    switch (lane) {
-    case 6: return 7;  // Tom -> Mid Tom
-    case 7: return 9;  // Cross-stick / Rim
-    case 8: return 10; // Shaker
-    case 9: return 11; // Hand Percussion
-    default: return lane;
-    }
 }
 
 QString musicalStateName(MusicalStepState state)
@@ -137,6 +117,7 @@ QJsonArray musicalStepsToJson(const QVector<MusicalStep>& steps)
             {QStringLiteral("value"), step.value},
             {QStringLiteral("velocity"), step.velocity},
             {QStringLiteral("articulation"), step.articulation},
+            {QStringLiteral("voicing"), step.voicing},
         });
     }
     return result;
@@ -165,6 +146,10 @@ bool musicalStepsFromJson(const QJsonValue& value, int division, QVector<Musical
         if (!articulation.isUndefined() &&
             (!articulation.isString() || articulation.toString().size() > 96)) return false;
         step.articulation = articulation.toString();
+        const QJsonValue voicing = object.value(QStringLiteral("voicing"));
+        if (!voicing.isUndefined() &&
+            (!voicing.isString() || voicing.toString().size() > 32)) return false;
+        step.voicing = voicing.toString();
         result.push_back(std::move(step));
     }
     output = std::move(result);
@@ -446,6 +431,19 @@ void BeatGridModel::renameSection(int index, const QString& label, const QString
     ++revision_;
 }
 
+bool BeatGridModel::setDrumKit(int index, const QString& drumKitId)
+{
+    if (index < 0 || index >= sections_.size() ||
+        (drumKitId != QStringLiteral("acoustic") &&
+         drumKitId != QStringLiteral("electronic"))) {
+        return false;
+    }
+    if (sections_[index].drumKitId == drumKitId) return true;
+    sections_[index].drumKitId = drumKitId;
+    ++revision_;
+    return true;
+}
+
 void BeatGridModel::moveSection(int from, int to)
 {
     if (from < 0 || from >= sections_.size() || to < 0 || to >= sections_.size() || from == to) {
@@ -471,8 +469,10 @@ bool BeatGridModel::clearSection(int index)
 {
     if (index < 0 || index >= sections_.size()) return false;
     const int beats = sections_[index].beats;
+    const QString drumKitId = sections_[index].drumKitId;
     SongSection cleared = defaultSection(index, beats);
     cleared.id = sections_[index].id;
+    cleared.drumKitId = drumKitId;
     normalize(cleared);
     sections_[index] = std::move(cleared);
     ++revision_;
@@ -599,6 +599,7 @@ QJsonObject BeatGridModel::toJson() const
             {QStringLiteral("lyrics"), lyrics},
             {QStringLiteral("beat_patterns"), beatPatterns},
             {QStringLiteral("musical_patterns"), musicalPatterns},
+            {QStringLiteral("drum_kit"), section.drumKitId},
             {QStringLiteral("generated_kind"), section.generatedKind},
         };
         if (!section.generatedKind.isEmpty()) {
@@ -619,20 +620,14 @@ QJsonObject BeatGridModel::toJson() const
 bool BeatGridModel::loadJson(const QJsonObject& object)
 {
     const QStringList currentBeatLanes = beatLaneNames();
-    const QJsonValue schemaValue =
-        object.value(QStringLiteral("beat_lane_schema"));
-    if (!schemaValue.isUndefined() &&
-        !exactInteger(
+    const QJsonValue schemaValue = object.value(
+        QStringLiteral("beat_lane_schema"));
+    if (!exactInteger(
             schemaValue,
-            kLegacyBeatLaneSchema,
+            kCurrentBeatLaneSchema,
             kCurrentBeatLaneSchema)) {
         return false;
     }
-    const int beatLaneSchema = schemaValue.isUndefined()
-        ? kLegacyBeatLaneSchema
-        : schemaValue.toInt();
-    const int serializedLaneCount =
-        serializedBeatLaneCount(beatLaneSchema);
     if (!object.value(QStringLiteral("sections")).isArray() ||
         (!object.value(QStringLiteral("title")).isUndefined() && !object.value(QStringLiteral("title")).isString()) ||
         (!object.value(QStringLiteral("guitar_strings")).isUndefined() &&
@@ -657,6 +652,7 @@ bool BeatGridModel::loadJson(const QJsonObject& object)
         if ((!item.value(QStringLiteral("id")).isUndefined() && !item.value(QStringLiteral("id")).isString()) ||
             (!item.value(QStringLiteral("label")).isUndefined() && !item.value(QStringLiteral("label")).isString()) ||
             (!item.value(QStringLiteral("name")).isUndefined() && !item.value(QStringLiteral("name")).isString()) ||
+            (!item.value(QStringLiteral("drum_kit")).isUndefined() && !item.value(QStringLiteral("drum_kit")).isString()) ||
             (!item.value(QStringLiteral("generated_kind")).isUndefined() && !item.value(QStringLiteral("generated_kind")).isString()) ||
             (!item.value(QStringLiteral("beats")).isUndefined() && !item.value(QStringLiteral("beats")).isDouble()) ||
             (!item.value(QStringLiteral("generated_recipe")).isUndefined() &&
@@ -668,6 +664,12 @@ bool BeatGridModel::loadJson(const QJsonObject& object)
         section.label = item.value(QStringLiteral("label")).toString(QStringLiteral("A"));
         section.name = item.value(QStringLiteral("name")).toString(QStringLiteral("Section"));
         section.beats = item.value(QStringLiteral("beats")).toInt(8);
+        section.drumKitId = item.value(QStringLiteral("drum_kit")).toString(
+            QStringLiteral("acoustic"));
+        if (section.drumKitId != QStringLiteral("acoustic") &&
+            section.drumKitId != QStringLiteral("electronic")) {
+            return false;
+        }
         section.generatedKind = item.value(QStringLiteral("generated_kind")).toString();
         if (!section.generatedKind.isEmpty() &&
             (!item.value(QStringLiteral("generated_recipe")).isObject() ||
@@ -734,20 +736,12 @@ bool BeatGridModel::loadJson(const QJsonObject& object)
             }
             section.beatPatterns[i].division = normalizedDivision(pattern.value(QStringLiteral("division")).toInt(kDefaultBeatDivision));
             const QJsonArray lanes = pattern.value(QStringLiteral("lanes")).toArray();
-            if (!validTextArray(lanes, serializedLaneCount)) {
+            if (!validTextArray(lanes, currentBeatLanes.size())) {
                 return false;
             }
-            for (int serializedLane = 0; serializedLane < lanes.size();
-                 ++serializedLane) {
-                const int currentLane =
-                    currentLaneForSerializedLane(
-                        beatLaneSchema, serializedLane);
-                if (currentLane < 0 ||
-                    currentLane >= currentBeatLanes.size()) {
-                    return false;
-                }
-                section.beatPatterns[i].lanes[currentLane] =
-                    lanes[serializedLane].toString();
+            for (int lane = 0; lane < lanes.size(); ++lane) {
+                section.beatPatterns[i].lanes[lane] =
+                    lanes[lane].toString();
             }
         }
         if (!musicalPatterns.isEmpty()) {
@@ -816,8 +810,6 @@ QStringList BeatGridModel::beatLaneNames()
         QStringLiteral("Mid Tom"),
         QStringLiteral("Floor Tom"),
         QStringLiteral("Cross-stick / Rim"),
-        QStringLiteral("Shaker"),
-        QStringLiteral("Hand Percussion"),
     };
 }
 
@@ -876,6 +868,10 @@ void BeatGridModel::normalize(SongSection& section)
 {
     const bool deriveMusicalPatterns = section.musicalPatterns.isEmpty();
     section.id = sectionId(section.id);
+    if (section.drumKitId != QStringLiteral("acoustic") &&
+        section.drumKitId != QStringLiteral("electronic")) {
+        section.drumKitId = QStringLiteral("acoustic");
+    }
     section.beats = qBound(kMinBeatsPerSection, section.beats, kMaxBeatsPerSection);
     section.chords.resize(section.beats);
     section.targets.resize(section.beats);

@@ -1,0 +1,41 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "modal-jam",
+  "styleName": "Modal Jam",
+  "profileId": "modal_atmospheric",
+  "profileName": "Atmospheric Modal",
+  "seed": "1527951245",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "3/4",
+  "sourcePulseBpm": 64.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 64.0,
+  "durationSeconds": 22.5,
+  "tonic": "D",
+  "mode": "Natural Minor",
+  "formId": "modal-atmospheric-12",
+  "grooveId": "modal-ride-led",
+  "fingerprints": {
+    "beat": "6d82e5f5ed7365edb3d2c040288e32a4ba29737422faf4ffd6e16256e7711ae8",
+    "chord": "1bd005ff254e0d1cee86e890f4edc804c83fdd94f02c1aa148dc2679f1ca1ad6"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "support",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "04-support.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "jazz",
+  "styleName": "Jazz",
+  "profileId": "jazz_bebop",
+  "profileName": "Bebop",
+  "seed": "1170008260",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 222.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 222.0,
+  "durationSeconds": 8.648649,
+  "tonic": "G",
+  "mode": "Natural Minor",
+  "formId": "bebop-32",
+  "grooveId": "jazz-uptempo-ride",
+  "fingerprints": {
+    "beat": "54aafe3a8bd3ea098e900151058dd42b8a17632ae300eed18b75f636147908c4",
+    "chord": "6d51a1c143660745ca0b1822e74d35bd43ec7dfe6a49f5ddffeac4d3db527f9b"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

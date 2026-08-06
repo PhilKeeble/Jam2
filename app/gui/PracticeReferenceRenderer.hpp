@@ -2,6 +2,7 @@
 
 #include "BeatGridModel.hpp"
 #include "PracticeIdeaDialogs.hpp"
+#include "ResearchDrumKit.hpp"
 
 #include <QJsonArray>
 #include <QString>
@@ -50,5 +51,9 @@ QJsonArray practiceChordVoicingDiagnostics(
     const SongSection& chordSection,
     ChordVoicing voicing,
     QString& error);
+
+ResearchDrumKit keyAwareResearchDrumKit(
+    const ResearchDrumKit& source,
+    const SongSection& section);
 
 } // namespace jam2::practice

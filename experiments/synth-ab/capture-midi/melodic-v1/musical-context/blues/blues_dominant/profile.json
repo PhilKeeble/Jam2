@@ -1,0 +1,39 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "blues",
+  "styleName": "Blues",
+  "profileId": "blues_dominant",
+  "profileName": "Dominant / Major Blues",
+  "seed": "2223768394",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 148.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 148.0,
+  "durationSeconds": 12.972973,
+  "tonic": "F",
+  "mode": "Dominant Blues",
+  "formId": "blues-12",
+  "grooveId": "blues-half-time",
+  "fingerprints": {
+    "beat": "46269ef63c3c0d2ae9c94d8fb7936bfad70572f224bd3a892554aa7d7ddd3cd9",
+    "chord": "5c2c656ea8a64c5bced758ee3da531039845d152f26bb7d7d4a954ebe22f11f3"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}

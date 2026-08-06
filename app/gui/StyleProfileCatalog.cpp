@@ -194,11 +194,11 @@ const QVector<ProfileDefinition>& allProfiles()
 
         profile("modal_groove", "modal-jam", "Modal Groove", "modal-vamp", 60, 140,
             "A tonic pedal and characteristic modal degree stay clear while rhythm, register, and interaction create development.",
-            "Drone the tonic, emphasise the mode's characteristic note, and vary the groove without accidentally creating a functional V–I cadence.",
+            "Anchor the tonic, emphasise the mode's characteristic note, and vary the groove without accidentally creating a functional V–I cadence.",
             {"dorian", "mixolydian", "aeolian", "phrygian"}, {"modal_pedal_colour"},
             {"modal_pocket", "modal_odd"},
             "Pedal bass establishes the centre, then uses characteristic modal neighbours and rhythmic answers.",
-            {"riff", "support_comping", "countermelody", "drone"}, "short modal cell with rhythmic mutation",
+            {"riff", "support_comping", "countermelody"}, "short modal cell with rhythmic mutation",
             "modal-pluck", "modal-air-lead", "modal-pedal-bass", "modal-pad", "modal-spacious",
             {"4-4", "5-4", "7-8"}, {
                 form("modal-groove-8", "Eight-bar modal vamp", 8, "4-4", 4, "Two statements of one vamp with a register or rhythmic answer."),
@@ -211,7 +211,7 @@ const QVector<ProfileDefinition>& allProfiles()
             {"lydian", "dorian", "aeolian", "phrygian"}, {"modal_pedal_colour"},
             {"ambient_pulse", "ambient_free_pulse"},
             "Long pedal tones use sparse octave, fifth, and characteristic-degree movement.",
-            {"drone", "pad", "countermelody"}, "slow contour whose shape changes with the selected mode",
+            {"pad", "countermelody"}, "slow contour whose shape changes with the selected mode",
             "modal-ambient-pad", "modal-air-lead", "modal-sub-bass", "modal-texture", "modal-spacious",
             {"4-4", "3-4", "6-8", "5-4"}, {
                 form("modal-atmospheric-12", "Twelve-bar evolving pedal", 12, "3-4", 4, "Three broad phrases with a controlled colour change."),
@@ -317,7 +317,7 @@ const QVector<ProfileDefinition>& allProfiles()
             {"unpitched", "dorian", "phrygian", "aeolian", "chromatic-cell"}, {"electronic_layer_process"},
             {"techno_pulse", "techno_polymetric"},
             "A one-centre sub pulse or short ostinato reinforces the process and may use a cycle length different from the bar.",
-            {"riff", "drone", "pad"}, "short pitch or rhythm cell with phase and timbre mutation",
+            {"riff", "pad"}, "short pitch or rhythm cell with phase and timbre mutation",
             "techno-stab", "techno-sequence", "techno-sub-bass", "techno-texture", "techno-kit",
             {"4-4", "5-4", "7-8"}, {
                 form("techno-16", "Sixteen-bar process", 16, "4-4", 4, "Four stages of accumulation and subtraction."),

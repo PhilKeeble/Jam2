@@ -439,7 +439,6 @@ private:
     QPushButton* clearLoopButton_ = nullptr;
     QCheckBox* loopEnabledCheck_ = nullptr;
     QCheckBox* trackSyncCheck_ = nullptr;
-    QCheckBox* trackMetronomeSyncCheck_ = nullptr;
     QSlider* trackLevelSlider_ = nullptr;
     QLabel* trackLevelDbLabel_ = nullptr;
     QSlider* mixTrackLevelSlider_ = nullptr;
@@ -503,6 +502,7 @@ private:
     QString guiLogPath_;
     BeatGridWidget* chordGrid_ = nullptr;
     BeatGridWidget* beatGrid_ = nullptr;
+    QComboBox* drumKitBox_ = nullptr;
     BeatGridWidget* lyricGrid_ = nullptr;
     QTabWidget* tabs_ = nullptr;
     QStackedWidget* performanceStageStack_ = nullptr;

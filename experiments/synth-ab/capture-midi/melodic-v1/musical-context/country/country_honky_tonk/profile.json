@@ -1,0 +1,41 @@
+{
+  "schema": "jam2-profile-context-v1",
+  "styleId": "country",
+  "styleName": "Country",
+  "profileId": "country_honky_tonk",
+  "profileName": "Honky-Tonk / Two-Step",
+  "seed": "890400855",
+  "generatorVersion": 7,
+  "complexity": 4,
+  "bars": 8,
+  "timeSignature": "4/4",
+  "sourcePulseBpm": 122.0,
+  "sourcePulseBeatUnit": 4,
+  "dawQuarterNoteBpm": 122.0,
+  "durationSeconds": 15.737705,
+  "tonic": "Eb",
+  "mode": "Major",
+  "formId": "country-16",
+  "grooveId": "country-boom-chick",
+  "fingerprints": {
+    "beat": "33605a233ae1e8eed11284eb7077f5f64c2260578cb714342c7e850e7dba3780",
+    "chord": "3b19b80c03d7302b39c670d0a96d3de47a4b34b99b128cb314709518c049f43a"
+  },
+  "roles": [
+    "chords",
+    "melody",
+    "bass",
+    "support",
+    "drums"
+  ],
+  "diagnosticFallbackRoles": [],
+  "source": "experiments/synth-ab/site/seed-audit.json",
+  "files": [
+    "01-chords.mid",
+    "02-melody.mid",
+    "03-bass.mid",
+    "04-support.mid",
+    "05-drums.mid",
+    "06-full-arrangement.mid"
+  ]
+}
