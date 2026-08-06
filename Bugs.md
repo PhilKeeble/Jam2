@@ -25,3 +25,4 @@ https://www.youtube.com/watch?v=lFodQSX2i0c - first song for trap, around 8 minu
 
 https://www.youtube.com/watch?v=VagWXGotYRg - metal synth sounds - 28 mins, infernal decent (first half for sick drums)
 
+https://www.youtube.com/watch?v=_ertZZTaN3k - 4 mins in - trap

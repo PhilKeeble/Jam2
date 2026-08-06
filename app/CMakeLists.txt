@@ -46,6 +46,7 @@ target_include_directories(jam2_daisysp_drums PUBLIC
     "${JAM2_DAISYSP_ROOT}/Source/Utility"
 )
 target_compile_definitions(jam2_daisysp_drums PRIVATE _USE_MATH_DEFINES)
+target_compile_features(jam2_daisysp_drums PRIVATE cxx_std_20)
 if(MSVC)
     target_compile_options(jam2_daisysp_drums PRIVATE /W0)
 endif()

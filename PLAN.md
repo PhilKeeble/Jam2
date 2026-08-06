@@ -7,6 +7,11 @@ This file tracks future work that is not already implemented. User-facing docume
 Add sounds in with good mixes 
 Work on the chord generation to make it more rhythmically interesting, like the midi codex generated for me for the initial melodic references that used stuttered chords after held chords etc 
 
+## Release
+
+Link DLLs on windows so its one bin
+Make docker compose that will build on windows / mac / linux, ship back into folder like Jam2gether-Windows etc and then have just the clean binary in there with the docker compose handling getting those base into jam2 in dist/ or something
+
 ## Linux Audio Backend (never implement this without explicit approval)
 
 Consider Linux support after the Windows ASIO and macOS CoreAudio paths are stable. Linux should be treated as another host-native low-latency backend, not as a Docker or container target.
