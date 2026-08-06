@@ -559,7 +559,7 @@ PreparedMixResult PreparedMixRenderer::renderSequence(
         return result;
     }
 
-    constexpr qint64 kCopyBlockBytes = 64LL * 1024LL;
+    static constexpr qint64 kCopyBlockBytes = 64LL * 1024LL;
     const QByteArray silence(static_cast<qsizetype>(kCopyBlockBytes), '\0');
     const auto writeSilence = [&output, &hash, &silence](qint64 frames) {
         qint64 bytesRemaining = frames * 2;
