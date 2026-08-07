@@ -82,7 +82,8 @@ void ControlClient::connectToHost(
     const QString& sessionHex,
     const QString& keyHex,
     const QString& meshPeerToken,
-    const QString& meshUdpEndpoint)
+    const QString& meshUdpEndpoint,
+    Channel channel)
 {
     close();
     manualClose_ = false;
@@ -91,6 +92,7 @@ void ControlClient::connectToHost(
     masterKey_ = decodeHex(keyHex, 16);
     meshPeerToken_ = meshPeerToken.isEmpty() ? randomPeerToken() : meshPeerToken.toLower();
     meshUdpEndpoint_ = meshUdpEndpoint;
+    channel_ = channel;
     if (decodeHex(sessionHex_, 8).size() != 8 || masterKey_.size() != 16 ||
         !peerIdFromToken(meshPeerToken_).has_value() || meshUdpEndpoint_.size() > 255) {
         reject(
@@ -209,8 +211,11 @@ bool ControlClient::sendBinary(const QByteArray& payload)
 
 bool ControlClient::canQueue(qint64 additionalBytes) const
 {
-    return isConnected() && additionalBytes >= 0 && additionalBytes <= kOutputHighWaterBytes &&
-        connection_->bytesToWrite() <= kOutputHighWaterBytes - additionalBytes;
+    const qint64 queueBound = std::min(
+        kOutputHighWaterBytes,
+        jam2::application::kNativeTcpQueueHighWaterBytes);
+    return isConnected() && additionalBytes >= 0 && additionalBytes <= queueBound &&
+        connection_->bytesToWrite() <= queueBound - additionalBytes;
 }
 
 bool ControlClient::isConnected() const
@@ -395,10 +400,15 @@ void ControlClient::handleHandshake(const QJsonObject& message)
             return;
         }
         clientNonce_ = randomNonce();
+        const QString channel = channel_ == Channel::Asset
+            ? QStringLiteral("asset") : QStringLiteral("control");
         transcript_ = makeTranscript(
-            sessionHex_, serverNonce_, clientNonce_, meshPeerToken_, meshUdpEndpoint_);
+            sessionHex_, serverNonce_, clientNonce_, meshPeerToken_, meshUdpEndpoint_, channel);
+        const QByteArray clientProofDomain = channel_ == Channel::Asset
+            ? QByteArrayLiteral("jam2-asset-client-proof")
+            : QByteArrayLiteral("jam2-control-client-proof");
         const QByteArray proof = keyedValue(
-            masterKey_, QByteArrayLiteral("jam2-control-client-proof"), transcript_).left(16);
+            masterKey_, clientProofDomain, transcript_).left(16);
         const QByteArray response = encodeHandshake(QJsonObject{
             {QStringLiteral("type"), QStringLiteral("hello.proof")},
             {QStringLiteral("version"), kControlProtocolVersion},
@@ -406,6 +416,7 @@ void ControlClient::handleHandshake(const QJsonObject& message)
             {QStringLiteral("client_nonce"), encodeHex(clientNonce_)},
             {QStringLiteral("peer_token"), meshPeerToken_},
             {QStringLiteral("udp_endpoint"), meshUdpEndpoint_},
+            {QStringLiteral("channel"), channel},
             {QStringLiteral("proof"), encodeHex(proof)},
         });
         if (!writeFrame(response)) {
@@ -422,7 +433,9 @@ void ControlClient::handleHandshake(const QJsonObject& message)
     if (handshakeState_ != HandshakeState::WaitingForServerProof ||
         type != QStringLiteral("hello.ok") ||
         message.value(QStringLiteral("version")).toInt() != kControlProtocolVersion ||
-        message.value(QStringLiteral("peer_token")).toString() != meshPeerToken_) {
+        message.value(QStringLiteral("peer_token")).toString() != meshPeerToken_ ||
+        message.value(QStringLiteral("channel")).toString(QStringLiteral("control")) !=
+            (channel_ == Channel::Asset ? QStringLiteral("asset") : QStringLiteral("control"))) {
         ++stats_.authenticationRejects;
         reject(
             QStringLiteral("TCP control server proof state is invalid"),
@@ -431,8 +444,11 @@ void ControlClient::handleHandshake(const QJsonObject& message)
         return;
     }
     const QByteArray receivedProof = decodeHex(message.value(QStringLiteral("proof")).toString(), 16);
+    const QByteArray serverProofDomain = channel_ == Channel::Asset
+        ? QByteArrayLiteral("jam2-asset-server-proof")
+        : QByteArrayLiteral("jam2-control-server-proof");
     const QByteArray expectedProof = keyedValue(
-        masterKey_, QByteArrayLiteral("jam2-control-server-proof"), transcript_).left(16);
+        masterKey_, serverProofDomain, transcript_).left(16);
     if (!constantTimeEqual(receivedProof, expectedProof)) {
         ++stats_.authenticationRejects;
         reject(
@@ -442,8 +458,16 @@ void ControlClient::handleHandshake(const QJsonObject& message)
         return;
     }
 
-    receiveKey_ = keyedValue(masterKey_, QByteArrayLiteral("jam2-control-s2c"), transcript_);
-    sendKey_ = keyedValue(masterKey_, QByteArrayLiteral("jam2-control-c2s"), transcript_);
+    receiveKey_ = keyedValue(
+        masterKey_,
+        channel_ == Channel::Asset ? QByteArrayLiteral("jam2-asset-s2c")
+                                   : QByteArrayLiteral("jam2-control-s2c"),
+        transcript_);
+    sendKey_ = keyedValue(
+        masterKey_,
+        channel_ == Channel::Asset ? QByteArrayLiteral("jam2-asset-c2s")
+                                   : QByteArrayLiteral("jam2-control-c2s"),
+        transcript_);
     handshakeState_ = HandshakeState::Authenticated;
     authenticationTimer_.stop();
     publishEvent(TransportEvent{
@@ -462,13 +486,13 @@ bool ControlClient::writeFrame(const QByteArray& frame)
     }
     const qint64 queued = connection->bytesToWrite();
     stats_.maxQueuedOutputBytes = std::max<quint64>(stats_.maxQueuedOutputBytes, queued);
-    if (queued + frame.size() > kOutputHighWaterBytes) {
+    const qint64 queueBound = std::min(
+        kOutputHighWaterBytes,
+        jam2::application::kNativeTcpQueueHighWaterBytes);
+    if (queued + frame.size() > queueBound) {
         ++stats_.outputHighWaterRejects;
-        reject(
-            QStringLiteral("TCP control output high-water exceeded"),
-            TransportFailure::OutputHighWater,
-            true,
-            true);
+        // Queue saturation is temporary backpressure.  It must never tear
+        // down either the control session or the independent asset channel.
         return false;
     }
     if (!connection->write(frame)) {

@@ -812,13 +812,24 @@ MainWindow::MainWindow(QWidget* parent)
 {
     trackWorkspace_.setCallbacks({
         [this] { return sessionController_.snapshot().contract.sampleRate; },
-        [this](const QString& message) { appendLog(message); },
-        [this](const QString& token, qint64 bytes) { return canQueueControlTo(token, bytes); },
+        [this](const QString& message) {
+            appendLog(message);
+            const QString lower = message.toLower();
+            if (performanceHome_ &&
+                (lower.contains(QStringLiteral("failed")) ||
+                 lower.contains(QStringLiteral("timeout")) ||
+                 lower.contains(QStringLiteral("could not")) ||
+                 lower.contains(QStringLiteral("cancelled")))) {
+                performanceHome_->setTrackTransferStatus(
+                    QStringLiteral("TRACK SHARE ERROR — see Data / Logs"));
+            }
+        },
+        [this](const QString& token, qint64 bytes) { return canQueueAssetTo(token, bytes); },
         [this](const QString& token, const QJsonObject& message) {
-            return sendControlTo(token, message);
+            return sendAssetControlTo(token, message);
         },
         [this](const QString& token, const QByteArray& payload) {
-            return sendBinaryControlTo(token, payload);
+            return sendAssetBinaryTo(token, payload);
         },
         [this] {
             applyPendingTrackContributions();
@@ -1029,10 +1040,27 @@ MainWindow::MainWindow(QWidget* parent)
             &assetTransfer_,
         }, message, sourcePeerToken);
     };
-    sessionController_.onBinaryMessage = [this](
+    sessionController_.onAssetMessage = [this](
+        const QString& sourcePeerToken,
+        const QJsonObject& message) {
+        const QString type = message.value(QStringLiteral("type")).toString();
+        if (type == QStringLiteral("looper.asset.start")) {
+            assetTransfer_.receiveStart(message, sourcePeerToken);
+        } else if (type == QStringLiteral("looper.asset.ack")) {
+            assetTransfer_.receiveAck(message, sourcePeerToken);
+        } else if (type == QStringLiteral("looper.asset.done")) {
+            assetTransfer_.receiveDone(message, sourcePeerToken);
+        } else {
+            appendLog(QStringLiteral("rejected unexpected TCP asset control message"));
+        }
+    };
+    sessionController_.onAssetBinaryMessage = [this](
         const QString& sourcePeerToken,
         const QByteArray& payload) {
         assetTransfer_.receiveChunk(payload, sourcePeerToken);
+    };
+    sessionController_.onAssetDisconnected = [this](const QString& sourcePeerToken) {
+        assetTransfer_.peerDisconnected(sourcePeerToken);
     };
     sessionController_.onPeerAuthenticated = [this](const QString& token, const QJsonObject& message) {
         handleMeshPeerAuthenticated(token, message);
@@ -3016,20 +3044,14 @@ void MainWindow::showSettingsDialog()
     QObject::connect(refreshLoopSources, &QPushButton::clicked, &dialog, [=, this] { refreshLoopbackSources(); populateLoopSources(); });
     auto* loopUntilStopped = new QCheckBox(QStringLiteral("Record until stopped"), &dialog); loopUntilStopped->setChecked(preferences_.recording.loopback.recordUntilStopped);
     auto* loopDuration = makeSpin(preferences_.recording.loopback.durationBars, 1, 128);
-    auto* loopTrigger = new QCheckBox(QStringLiteral("Trigger on signal"), &dialog); loopTrigger->setChecked(preferences_.recording.loopback.trigger);
-    auto* loopTriggerThreshold = makeDoubleSpin(preferences_.recording.loopback.triggerThresholdDb, -120.0, 0.0, 1);
-    auto* loopTriggerHold = makeSpin(preferences_.recording.loopback.triggerHoldMs, 1, 5000);
-    auto* loopPreRoll = makeSpin(preferences_.recording.loopback.preRollMs, 0, 10000);
-    auto* loopTailThreshold = makeDoubleSpin(preferences_.recording.loopback.tailThresholdDb, -120.0, 0.0, 1);
+    auto* loopSilenceThreshold = makeDoubleSpin(preferences_.recording.loopback.silenceThresholdDb, -120.0, 0.0, 1);
     auto* loopTailSilence = makeSpin(preferences_.recording.loopback.tailSilenceMs, 0, 30000);
     auto* loopTrimLeading = new QCheckBox(QStringLiteral("Trim leading silence"), &dialog); loopTrimLeading->setChecked(preferences_.recording.loopback.trimLeading);
     auto* loopTrimTrailing = new QCheckBox(QStringLiteral("Trim trailing silence"), &dialog); loopTrimTrailing->setChecked(preferences_.recording.loopback.trimTrailing);
     auto* loopForm = new QFormLayout();
     loopForm->addRow(QStringLiteral("Output folder"), loopFolderRow.second); loopForm->addRow(QStringLiteral("Loopback source"), loopSourceRow);
     loopForm->addRow(QString(), loopUntilStopped); loopForm->addRow(QStringLiteral("Duration bars"), loopDuration);
-    loopForm->addRow(QString(), loopTrigger); loopForm->addRow(QStringLiteral("Trigger threshold dB"), loopTriggerThreshold);
-    loopForm->addRow(QStringLiteral("Trigger hold ms"), loopTriggerHold); loopForm->addRow(QStringLiteral("Pre-roll ms"), loopPreRoll);
-    loopForm->addRow(QStringLiteral("Tail threshold dB"), loopTailThreshold); loopForm->addRow(QStringLiteral("Tail silence ms"), loopTailSilence);
+    loopForm->addRow(QStringLiteral("Silence threshold dB"), loopSilenceThreshold); loopForm->addRow(QStringLiteral("Tail silence ms"), loopTailSilence);
     loopForm->addRow(QString(), loopTrimLeading); loopForm->addRow(QString(), loopTrimTrailing);
     auto* loopBox = new QGroupBox(QStringLiteral("Loopback Recording"), &dialog); loopBox->setLayout(loopForm);
     recordingLayout->addWidget(loopBox); recordingLayout->addStretch(1);
@@ -3159,9 +3181,8 @@ void MainWindow::showSettingsDialog()
         ? loopSource->currentText().trimmed() : loopSource->currentData().toString();
     updated.recording.loopback.sourceName = loopSource->currentText().trimmed();
     updated.recording.loopback.recordUntilStopped = loopUntilStopped->isChecked();
-    updated.recording.loopback.durationBars = loopDuration->value(); updated.recording.loopback.trigger = loopTrigger->isChecked();
-    updated.recording.loopback.triggerThresholdDb = loopTriggerThreshold->value(); updated.recording.loopback.triggerHoldMs = loopTriggerHold->value();
-    updated.recording.loopback.preRollMs = loopPreRoll->value(); updated.recording.loopback.tailThresholdDb = loopTailThreshold->value();
+    updated.recording.loopback.durationBars = loopDuration->value();
+    updated.recording.loopback.silenceThresholdDb = loopSilenceThreshold->value();
     updated.recording.loopback.tailSilenceMs = loopTailSilence->value(); updated.recording.loopback.trimLeading = loopTrimLeading->isChecked();
     updated.recording.loopback.trimTrailing = loopTrimTrailing->isChecked();
 
@@ -3904,6 +3925,50 @@ void MainWindow::handleControlEvent(
 {
 
     using jam2::control_protocol::TransportEventType;
+    if (event.assetChannel) {
+        appendLog(QStringLiteral("asset_tcp: ") + event.detail);
+        if (event.type == TransportEventType::Disconnected ||
+            event.type == TransportEventType::Failure) {
+            if (serverSide) {
+                const ControlServer::Stats stats = sessionController_.serverStats();
+                appendLog(QStringLiteral(
+                    "asset_tcp_stats side=server accepted=%1 active=%2 active_high_water=%3 disconnected=%4")
+                    .arg(stats.assetAcceptedConnections)
+                    .arg(stats.assetActiveConnections)
+                    .arg(stats.assetConnectionHighWater)
+                    .arg(stats.assetDisconnectedConnections));
+            } else {
+                const ControlClient::Stats stats = sessionController_.assetClientStats();
+                appendLog(QStringLiteral(
+                    "asset_tcp_stats side=client attempts=%1 completed=%2 disconnected=%3 "
+                    "input_high_water=%4 output_high_water=%5 output_rejects=%6")
+                    .arg(stats.connectionAttempts)
+                    .arg(stats.completedConnections)
+                    .arg(stats.disconnectedConnections)
+                    .arg(stats.maxBufferedInputBytes)
+                    .arg(stats.maxQueuedOutputBytes)
+                    .arg(stats.outputHighWaterRejects));
+            }
+            if (performanceHome_) {
+                performanceHome_->setTrackTransferStatus(
+                    QStringLiteral("TRACK SHARE ERROR — asset connection retrying"));
+            }
+        }
+        return;
+    }
+    if (serverSide && !event.authenticated &&
+        (event.type == TransportEventType::ChallengeSent ||
+         event.type == TransportEventType::Failure ||
+         event.type == TransportEventType::Disconnected)) {
+        appendLog(QStringLiteral("pending_tcp: ") + event.detail);
+        if (event.type == TransportEventType::Failure &&
+            event.failure == jam2::control_protocol::TransportFailure::PreAuthenticationDisconnect) {
+            notePreAuthenticationDisconnect();
+        }
+        // Pending authentication traffic has not joined the session and must
+        // not change the established control-session presentation.
+        return;
+    }
     QString displayState = event.detail;
     switch (event.type) {
     case TransportEventType::Listening:
@@ -4560,6 +4625,7 @@ void MainWindow::sendControl(const QJsonObject& message)
     const QString type = message.value(QStringLiteral("type")).toString();
     if (type != QStringLiteral("bank.ready") &&
         jam2::application::isTrackSyncControlMessageType(type) &&
+        !jam2::application::isManualTrackShareControlMessageType(type) &&
         !looperProject_.trackSyncEnabled()) {
         appendLog(QStringLiteral("suppressed local track sync while sync is disabled"));
         return;
@@ -5882,7 +5948,6 @@ void MainWindow::applyLooperLaneGain(int laneIndex, double gainDb)
     bank.lanes[laneIndex].gainDb = qBound(-60.0, gainDb, 12.0);
     refreshLooperLanes();
     regeneratePreparedMix();
-    syncLooperArrangement();
 }
 
 void MainWindow::addLooperWavs()
@@ -6124,7 +6189,13 @@ bool MainWindow::armSelectedLooperLaneRecording()
     dialog.resize(760, 560);
     auto* content = new QWidget(&dialog);
     content->setMinimumWidth(700);
+    content->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
     auto* form = new QFormLayout(content);
+    form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    form->setRowWrapPolicy(QFormLayout::DontWrapRows);
+    form->setFormAlignment(Qt::AlignTop);
+    form->setLabelAlignment(Qt::AlignLeft | Qt::AlignTop);
+    form->setVerticalSpacing(10);
 
     auto* modeBox = new QComboBox(content);
     modeBox->addItem(QStringLiteral("Input"), QStringLiteral("input"));
@@ -6135,8 +6206,8 @@ bool MainWindow::armSelectedLooperLaneRecording()
 
     const QList<QWidget*> widgets{
         captureOutputEdit_, loopbackSourceBox_, captureManualStopCheck_, captureDurationSpin_,
-        captureCountInCheck_, captureCountInMetronomeCheck_, captureKeepMetronomeCheck_, captureCountInBarsSpin_, captureTriggerCheck_, triggerThresholdSpin_,
-        triggerHoldSpin_, preRollSpin_, tailThresholdSpin_, tailSilenceSpin_, trimLeadingCheck_,
+        captureCountInCheck_, captureCountInMetronomeCheck_, captureKeepMetronomeCheck_, captureCountInBarsSpin_,
+        silenceThresholdSpin_, tailSilenceSpin_, trimLeadingCheck_,
         trimTrailingCheck_, recordingLatencyLabel_, recordingLatencyAdjustmentSpin_,
     };
     for (QWidget* widget : widgets) {
@@ -6196,12 +6267,25 @@ bool MainWindow::armSelectedLooperLaneRecording()
     metronomeLayout->addStretch(1);
 
     auto* latencyRow = new QWidget(content);
+    latencyRow->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
     auto* latencyLayout = new QHBoxLayout(latencyRow);
     latencyLayout->setContentsMargins(0, 0, 0, 0);
+    latencyLayout->setAlignment(Qt::AlignTop);
+    const int detailLineHeight = content->fontMetrics().lineSpacing();
+    recordingLatencyLabel_->setSizePolicy(
+        QSizePolicy::Expanding, QSizePolicy::Minimum);
+    recordingLatencyLabel_->setMinimumHeight(qMax(48, detailLineHeight * 3));
+    recordingLatencyLabel_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     latencyLayout->addWidget(recordingLatencyLabel_, 1);
-    latencyLayout->addWidget(recordingLatencyAdjustmentSpin_);
+    latencyLayout->addWidget(recordingLatencyAdjustmentSpin_, 0, Qt::AlignTop);
+    latencyRow->setMinimumHeight(qMax(
+        recordingLatencyLabel_->minimumHeight(),
+        recordingLatencyAdjustmentSpin_->sizeHint().height()));
     auto* engineStatus = new QLabel(content);
     engineStatus->setWordWrap(true);
+    engineStatus->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    engineStatus->setMinimumHeight(qMax(36, detailLineHeight * 2));
+    engineStatus->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     engineStatus->setText(jam2_.isRunning()
         ? QStringLiteral("Records the input of the currently loaded engine.")
         : QStringLiteral("Start Perform or a jam before recording engine input."));
@@ -6220,11 +6304,7 @@ bool MainWindow::armSelectedLooperLaneRecording()
     form->addRow(QStringLiteral("Current Jam mix"), includeBackingCheck);
     form->addRow(QString{}, includeMetronomeCheck);
     form->addRow(QString{}, leaderAudioWarning);
-    form->addRow(captureTriggerCheck_);
-    form->addRow(QStringLiteral("Trigger threshold"), triggerThresholdSpin_);
-    form->addRow(QStringLiteral("Trigger hold"), triggerHoldSpin_);
-    form->addRow(QStringLiteral("Pre-roll"), preRollSpin_);
-    form->addRow(QStringLiteral("Tail threshold"), tailThresholdSpin_);
+    form->addRow(QStringLiteral("Silence threshold"), silenceThresholdSpin_);
     form->addRow(QStringLiteral("Tail silence"), tailSilenceSpin_);
     form->addRow(trimLeadingCheck_);
     form->addRow(trimTrailingCheck_);
@@ -6275,11 +6355,7 @@ bool MainWindow::armSelectedLooperLaneRecording()
             loopbackDraft.sourceName = loopbackSourceBox_->currentText().trimmed();
             loopbackDraft.recordUntilStopped = captureManualStopCheck_->isChecked();
             loopbackDraft.durationBars = captureDurationSpin_->value();
-            loopbackDraft.trigger = captureTriggerCheck_->isChecked();
-            loopbackDraft.triggerThresholdDb = triggerThresholdSpin_->value();
-            loopbackDraft.triggerHoldMs = triggerHoldSpin_->value();
-            loopbackDraft.preRollMs = preRollSpin_->value();
-            loopbackDraft.tailThresholdDb = tailThresholdSpin_->value();
+            loopbackDraft.silenceThresholdDb = silenceThresholdSpin_->value();
             loopbackDraft.tailSilenceMs = tailSilenceSpin_->value();
             loopbackDraft.trimLeading = trimLeadingCheck_->isChecked();
             loopbackDraft.trimTrailing = trimTrailingCheck_->isChecked();
@@ -6301,11 +6377,7 @@ bool MainWindow::armSelectedLooperLaneRecording()
             selectLoopbackSource(loopbackDraft.sourceId, loopbackDraft.sourceName);
             captureManualStopCheck_->setChecked(loopbackDraft.recordUntilStopped);
             captureDurationSpin_->setValue(loopbackDraft.durationBars);
-            captureTriggerCheck_->setChecked(loopbackDraft.trigger);
-            triggerThresholdSpin_->setValue(loopbackDraft.triggerThresholdDb);
-            triggerHoldSpin_->setValue(loopbackDraft.triggerHoldMs);
-            preRollSpin_->setValue(loopbackDraft.preRollMs);
-            tailThresholdSpin_->setValue(loopbackDraft.tailThresholdDb);
+            silenceThresholdSpin_->setValue(loopbackDraft.silenceThresholdDb);
             tailSilenceSpin_->setValue(loopbackDraft.tailSilenceMs);
             trimLeadingCheck_->setChecked(loopbackDraft.trimLeading);
             trimTrailingCheck_->setChecked(loopbackDraft.trimTrailing);
@@ -6331,11 +6403,7 @@ bool MainWindow::armSelectedLooperLaneRecording()
         setRowVisible(countInRow, engineMode);
         setRowVisible(metronomeRow, engineMode);
         setRowVisible(sourceRow, !engineMode);
-        setRowVisible(captureTriggerCheck_, !engineMode);
-        setRowVisible(triggerThresholdSpin_, !engineMode);
-        setRowVisible(triggerHoldSpin_, !engineMode);
-        setRowVisible(preRollSpin_, !engineMode);
-        setRowVisible(tailThresholdSpin_, !engineMode);
+        setRowVisible(silenceThresholdSpin_, !engineMode);
         setRowVisible(tailSilenceSpin_, !engineMode);
         setRowVisible(trimLeadingCheck_, !engineMode);
         setRowVisible(trimTrailingCheck_, !engineMode);
@@ -6632,8 +6700,6 @@ void MainWindow::toggleSelectedLooperLaneMute()
     lane.muted = !lane.muted;
     refreshLooperLanes();
     regeneratePreparedMix();
-
-    syncLooperArrangement();
 }
 
 void MainWindow::toggleSelectedLooperLaneSolo()
@@ -6644,7 +6710,6 @@ void MainWindow::toggleSelectedLooperLaneSolo()
     lane.solo = !lane.solo;
     refreshLooperLanes();
     regeneratePreparedMix();
-    syncLooperArrangement();
 }
 
 void MainWindow::setSelectedLooperLaneGain()
@@ -6657,7 +6722,6 @@ void MainWindow::setSelectedLooperLaneGain()
     lane.gainDb = gain;
     refreshLooperLanes();
     regeneratePreparedMix();
-    syncLooperArrangement();
 }
 
 void MainWindow::editSelectedLooperLaneRegion()
@@ -7531,24 +7595,22 @@ void MainWindow::startLoopbackCapture()
     options.bpm = pattern.bpm;
     options.beatsPerBar = pattern.beats_per_bar;
     options.tempoPulseUnits = pattern.tempo_pulse_units;
-    options.trigger = captureTriggerCheck_ && captureTriggerCheck_->isChecked();
-    options.triggerThresholdDb = triggerThresholdSpin_ ? triggerThresholdSpin_->value() : -45.0;
-    options.triggerHoldMs = triggerHoldSpin_ ? triggerHoldSpin_->value() : 50;
-    options.preRollMs = preRollSpin_ ? preRollSpin_->value() : 250;
-    options.tailSilenceDb = tailThresholdSpin_ ? tailThresholdSpin_->value() : -50.0;
+    options.silenceThresholdDb = silenceThresholdSpin_ ? silenceThresholdSpin_->value() : -50.0;
     options.tailSilenceMs = tailSilenceSpin_ ? tailSilenceSpin_->value() : 1000;
     options.trimLeadingSilence = trimLeadingCheck_ && trimLeadingCheck_->isChecked();
     options.trimTrailingSilence = trimTrailingCheck_ && trimTrailingCheck_->isChecked();
 
     QString error;
     appendLog(QStringLiteral(
-        "starting internal loopback recording: target_sample_rate=%1 duration_bars=%2 bpm=%3 meter=%4/%5 trigger=%6 output=%7")
+        "starting internal loopback recording: target_sample_rate=%1 duration_bars=%2 bpm=%3 meter=%4/%5 silence_threshold_db=%6 trim_leading=%7 trim_trailing=%8 output=%9")
         .arg(recordingSampleRate)
         .arg(options.durationBars > 0 ? QString::number(options.durationBars) : QStringLiteral("manual"))
         .arg(options.bpm, 0, 'f', 3)
         .arg(options.beatsPerBar)
         .arg(pattern.beat_unit)
-        .arg(options.trigger ? QStringLiteral("yes") : QStringLiteral("no"))
+        .arg(options.silenceThresholdDb, 0, 'f', 1)
+        .arg(options.trimLeadingSilence ? QStringLiteral("yes") : QStringLiteral("no"))
+        .arg(options.trimTrailingSilence ? QStringLiteral("yes") : QStringLiteral("no"))
         .arg(output));
     if (!loopbackRecorder_.start(options, [this](
             bool ok,
@@ -8330,8 +8392,10 @@ void MainWindow::updateMetronomePresentationFromEngine(
 
 void MainWindow::publishLocalTrackBatch(const QString& requestedBatchId)
 {
-    if (!looperProject_.trackSyncEnabled() || !jam2_.isRunning() ||
-        sessionController_.snapshot().role != SharedSessionController::Role::Joiner) {
+    const SharedSessionController::Snapshot session = sessionController_.snapshot();
+    if (!jam2_.isRunning() ||
+        (session.role != SharedSessionController::Role::Creator &&
+         session.role != SharedSessionController::Role::Joiner)) {
         return;
     }
     const QString batchId = requestedBatchId.isEmpty()
@@ -8408,8 +8472,8 @@ void MainWindow::publishLocalTrackBatch(const QString& requestedBatchId)
 
 void MainWindow::shareLocalTracks(bool includeLocalOnly)
 {
-    if (!looperProject_.trackSyncEnabled() || !jam2_.isRunning()) {
-        appendLog(QStringLiteral("Share Tracks requires an active jam with Sync track controls enabled"));
+    if (!jam2_.isRunning()) {
+        appendLog(QStringLiteral("Share Tracks requires an active jam"));
         return;
     }
     int promoted = 0;
@@ -8429,47 +8493,42 @@ void MainWindow::shareLocalTracks(bool includeLocalOnly)
             "Share Tracks promoted %1 local-only practice reference lane(s)")
             .arg(promoted));
     }
-    if (sessionController_.isServer()) {
-        if (sessionController_.snapshot().remotePeerCount <= 0) {
-            appendLog(QStringLiteral("Share Tracks requires at least one connected peer"));
-            if (performanceHome_) {
-                performanceHome_->setTrackTransferStatus(QString{});
-            }
-            return;
-        }
-        const QString batchId = QUuid::createUuid()
-            .toString(QUuid::WithoutBraces).toLower();
-        sendControl(QJsonObject{
-            {QStringLiteral("type"), QStringLiteral("looper.track.share.request")},
-            {QStringLiteral("batch_id"), batchId},
-        });
-        if (performanceHome_) {
-            performanceHome_->setTrackTransferStatus(
-                QStringLiteral("RECEIVING TRACKS\u2026"));
-        }
-        appendLog(QStringLiteral(
-            "requested atomic peer track batch %1; authoritative arrangement is held until complete")
-            .arg(batchId.left(8)));
+    const SharedSessionController::Snapshot session = sessionController_.snapshot();
+    if (session.remotePeerCount <= 0) {
+        appendLog(QStringLiteral("Share Tracks requires at least one connected peer"));
+        if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
         return;
     }
-    if (sessionController_.snapshot().role != SharedSessionController::Role::Joiner) {
+    if (session.role != SharedSessionController::Role::Creator &&
+        session.role != SharedSessionController::Role::Joiner) {
         return;
     }
+    const QString requestedBatchId = QUuid::createUuid()
+        .toString(QUuid::WithoutBraces).toLower();
+    sendControl(QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("looper.track.share.request")},
+        {QStringLiteral("batch_id"), requestedBatchId},
+    });
     publishLocalTrackBatch({});
+    appendLog(QStringLiteral(
+        "started non-destructive two-way track share; peer_batch=%1")
+        .arg(requestedBatchId.left(8)));
 }
 
 void MainWindow::handleTrackBatchOffer(
     const QJsonObject& message,
     const QString& sourcePeerToken)
 {
-    if (!sessionController_.isServer() || sourcePeerToken.isEmpty()) {
-        appendLog(QStringLiteral("rejected track offer from a non-joiner control path"));
+    const bool validPath = sessionController_.isServer()
+        ? !sourcePeerToken.isEmpty()
+        : sourcePeerToken.isEmpty();
+    if (!validPath) {
+        appendLog(QStringLiteral("rejected track offer from an invalid control path"));
         return;
     }
     const QString batchId = message.value(QStringLiteral("batch_id")).toString().toLower();
     const QJsonArray tracks = message.value(QStringLiteral("tracks")).toArray();
     if (tracks.isEmpty()) {
-        sendSongSnapshot();
         sendControlTo(sourcePeerToken, QJsonObject{
             {QStringLiteral("type"), QStringLiteral("looper.track.batch.complete")},
             {QStringLiteral("batch_id"), batchId},
@@ -8556,14 +8615,12 @@ void MainWindow::requestNextPendingAsset()
     QString hash;
     QString source;
     IncomingAssetWorkflow workflow = IncomingAssetWorkflow::None;
-    if (sessionController_.isServer()) {
-        for (const PendingTrackContribution& contribution : pendingTrackContributions_) {
-            if (!validatedTrackAssetHashes_.contains(contribution.assetHash)) {
-                hash = contribution.assetHash;
-                source = contribution.sourcePeerToken;
-                workflow = IncomingAssetWorkflow::TrackContribution;
-                break;
-            }
+    for (const PendingTrackContribution& contribution : pendingTrackContributions_) {
+        if (!validatedTrackAssetHashes_.contains(contribution.assetHash)) {
+            hash = contribution.assetHash;
+            source = contribution.sourcePeerToken;
+            workflow = IncomingAssetWorkflow::TrackContribution;
+            break;
         }
     }
     if (workflow == IncomingAssetWorkflow::None &&
@@ -8619,7 +8676,7 @@ void MainWindow::requestNextPendingAsset()
 
 void MainWindow::applyPendingTrackContributions()
 {
-    if (!sessionController_.isServer() || pendingTrackContributions_.isEmpty()) {
+    if (pendingTrackContributions_.isEmpty()) {
         return;
     }
     const PendingTrackContribution first = pendingTrackContributions_.constBegin().value();
@@ -8774,9 +8831,6 @@ void MainWindow::applyPendingTrackContributions()
         refreshLooperLanes();
         regeneratePreparedMix();
     }
-    if (looperProject_.trackSyncEnabled() && jam2_.isRunning()) {
-        sendSongSnapshot();
-    }
     sendControlTo(sourcePeerToken, QJsonObject{
         {QStringLiteral("type"), QStringLiteral("looper.track.batch.complete")},
         {QStringLiteral("batch_id"), batchId},
@@ -8786,31 +8840,38 @@ void MainWindow::applyPendingTrackContributions()
     requestNextPendingAsset();
 }
 
-bool MainWindow::canQueueControlTo(const QString& targetPeerToken, qint64 estimatedBytes) const
+bool MainWindow::canQueueAssetTo(
+    const QString& targetPeerToken,
+    qint64 estimatedBytes) const
 {
-    return sessionController_.canQueueTo(targetPeerToken, estimatedBytes);
+    return sessionController_.canQueueAssetTo(targetPeerToken, estimatedBytes);
+}
+
+bool MainWindow::sendAssetControlTo(
+    const QString& targetPeerToken,
+    const QJsonObject& message)
+{
+    return sessionController_.sendAssetTo(targetPeerToken, message);
+}
+
+bool MainWindow::sendAssetBinaryTo(
+    const QString& targetPeerToken,
+    const QByteArray& payload)
+{
+    return sessionController_.sendAssetBinaryTo(targetPeerToken, payload);
 }
 
 bool MainWindow::sendControlTo(const QString& targetPeerToken, const QJsonObject& message)
 {
     if (jam2::application::isTrackSyncControlMessageType(
             message.value(QStringLiteral("type")).toString()) &&
+        !jam2::application::isManualTrackShareControlMessageType(
+            message.value(QStringLiteral("type")).toString()) &&
         !looperProject_.trackSyncEnabled()) {
         appendLog(QStringLiteral("suppressed local track sync while sync is disabled"));
         return false;
     }
     return sessionController_.sendTo(targetPeerToken, message);
-}
-
-bool MainWindow::sendBinaryControlTo(
-    const QString& targetPeerToken,
-    const QByteArray& payload)
-{
-    if (!looperProject_.trackSyncEnabled()) {
-        appendLog(QStringLiteral("suppressed local asset sync while sync is disabled"));
-        return false;
-    }
-    return sessionController_.sendBinaryTo(targetPeerToken, payload);
 }
 
 void MainWindow::handleSongSet(
@@ -9152,11 +9213,13 @@ QJsonObject MainWindow::normalizeLooperAssetPaths(QJsonObject song) const
 QJsonObject MainWindow::preserveQuarantinedLocalLanes(QJsonObject song)
 {
     const int expectedSampleRate = sessionController_.snapshot().contract.sampleRate;
-    const int preserved = mergeQuarantinedLocalLanes(
+    const int merged = mergeSynchronizedLooperLanes(song, looperProject_);
+    const int quarantined = mergeQuarantinedLocalLanes(
         song, looperProject_, expectedSampleRate);
+    const int preserved = merged + quarantined;
     if (preserved > 0) {
         appendLog(QStringLiteral(
-            "preserved %1 local-only or incompatible WAV lane(s) during arrangement sync")
+            "preserved %1 local WAV lane(s) during non-destructive arrangement merge")
             .arg(preserved));
     }
     return song;

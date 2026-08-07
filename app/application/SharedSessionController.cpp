@@ -141,7 +141,7 @@ bool matchesContractSampleRate(const QJsonObject& message, int expectedSampleRat
 }
 
 SharedSessionController::SharedSessionController(QObject* parent)
-    : QObject(parent), server_(this), client_(this)
+    : QObject(parent), server_(this), client_(this), assetClient_(this)
 {
     reconnectTimer_.setSingleShot(true);
     QObject::connect(&reconnectTimer_, &QTimer::timeout, this, [this] {
@@ -156,6 +156,14 @@ SharedSessionController::SharedSessionController(QObject* parent)
             QStringLiteral("TCP control reconnect attempt"),
             true}, false);
         connectJoiner();
+    });
+    assetReconnectTimer_.setSingleShot(true);
+    assetReconnectTimer_.setInterval(1000);
+    QObject::connect(&assetReconnectTimer_, &QTimer::timeout, this, [this] {
+        if (!closing_ && role_ == Role::Joiner && client_.isConnected() &&
+            !assetClient_.isConnected()) {
+            connectAssetJoiner();
+        }
     });
     heartbeatTimer_.setSingleShot(false);
     QObject::connect(&heartbeatTimer_, &QTimer::timeout, this, [this] {
@@ -232,15 +240,41 @@ SharedSessionController::SharedSessionController(QObject* parent)
             onBinaryMessage(token, payload);
         }
     };
+    server_.onAssetMessage = [this](const QString& token, const QJsonObject& message) {
+        if (onAssetMessage) {
+            onAssetMessage(token, message);
+        }
+    };
+    server_.onAssetBinaryMessage = [this](const QString& token, const QByteArray& payload) {
+        if (onAssetBinaryMessage) {
+            onAssetBinaryMessage(token, payload);
+        }
+    };
     server_.onAuthenticated = [this](const QString& token, const QJsonObject& message) {
         handleAuthenticatedPeer(token, message);
     };
     server_.onDisconnected = [this](const QString& token) { handleDisconnectedPeer(token); };
+    server_.onAssetDisconnected = [this](const QString& token) {
+        if (onAssetDisconnected) onAssetDisconnected(token);
+    };
     client_.onEvent = [this](const TransportEvent& event) { handleClientEvent(event); };
     client_.onMessage = [this](const QJsonObject& message) { handleClientMessage(message); };
     client_.onBinaryMessage = [this](const QByteArray& payload) {
         if (onBinaryMessage) {
             onBinaryMessage(QString{}, payload);
+        }
+    };
+    assetClient_.onEvent = [this](const TransportEvent& event) {
+        handleAssetClientEvent(event);
+    };
+    assetClient_.onMessage = [this](const QJsonObject& message) {
+        if (onAssetMessage) {
+            onAssetMessage(QString{}, message);
+        }
+    };
+    assetClient_.onBinaryMessage = [this](const QByteArray& payload) {
+        if (onAssetBinaryMessage) {
+            onAssetBinaryMessage(QString{}, payload);
         }
     };
 }
@@ -410,10 +444,12 @@ void SharedSessionController::reset(bool stopRuntime)
     runtimePeers_.clear();
     reconnectEnabled_ = false;
     reconnectTimer_.stop();
+    assetReconnectTimer_.stop();
     heartbeatTimer_.stop();
     heartbeatDeadlineTimer_.stop();
     server_.close();
     client_.close();
+    assetClient_.close();
     if (stopRuntime && runtime_ != nullptr && runtime_->isNetworkRunning()) {
         runtime_->stopNetwork();
     }
@@ -641,6 +677,33 @@ bool SharedSessionController::canQueueTo(const QString& token, qint64 additional
         : role_ == Role::Joiner && token.isEmpty() && client_.canQueue(additionalBytes);
 }
 
+bool SharedSessionController::sendAssetTo(
+    const QString& token,
+    const QJsonObject& message)
+{
+    return role_ == Role::Creator
+        ? server_.sendAssetTo(token, message)
+        : role_ == Role::Joiner && token.isEmpty() && assetClient_.send(message);
+}
+
+bool SharedSessionController::sendAssetBinaryTo(
+    const QString& token,
+    const QByteArray& payload)
+{
+    return role_ == Role::Creator
+        ? server_.sendAssetBinaryTo(token, payload)
+        : role_ == Role::Joiner && token.isEmpty() && assetClient_.sendBinary(payload);
+}
+
+bool SharedSessionController::canQueueAssetTo(
+    const QString& token,
+    qint64 additionalBytes) const
+{
+    return role_ == Role::Creator
+        ? server_.canQueueAssetTo(token, additionalBytes)
+        : role_ == Role::Joiner && token.isEmpty() && assetClient_.canQueue(additionalBytes);
+}
+
 bool SharedSessionController::hasPeer() const
 {
     return role_ == Role::Creator ? server_.hasPeer() : client_.isConnected();
@@ -715,6 +778,10 @@ SharedSessionController::Snapshot SharedSessionController::snapshot() const
 
 void SharedSessionController::handleServerEvent(const TransportEvent& event)
 {
+    if (event.assetChannel) {
+        publishTransportEvent(event, true);
+        return;
+    }
     if (event.type == TransportEventType::Authenticated) {
         failure_ = TransportFailure::None;
         failureDetail_.clear();
@@ -754,7 +821,10 @@ void SharedSessionController::handleClientEvent(const TransportEvent& event)
         failureDetail_.clear();
         failureRetryable_ = false;
         setLifecycle(Lifecycle::Authenticated);
+        connectAssetJoiner();
     } else if (event.type == TransportEventType::Disconnected && !closing_) {
+        assetReconnectTimer_.stop();
+        assetClient_.close();
         scheduleReconnect();
     } else if (event.type == TransportEventType::Failure) {
         if (event.retryable) {
@@ -773,6 +843,25 @@ void SharedSessionController::handleClientEvent(const TransportEvent& event)
         if (lifecycle_ != Lifecycle::Reconnecting) {
             setLifecycle(Lifecycle::Connecting);
         }
+    }
+    publishTransportEvent(event, false);
+}
+
+void SharedSessionController::handleAssetClientEvent(const TransportEvent& incoming)
+{
+    TransportEvent event = incoming;
+    event.assetChannel = true;
+    if ((event.type == TransportEventType::Disconnected ||
+         event.type == TransportEventType::Failure) &&
+        !closing_ && role_ == Role::Joiner && client_.isConnected()) {
+        if (event.type == TransportEventType::Disconnected && onAssetDisconnected) {
+            onAssetDisconnected(QString{});
+        }
+        if (!assetReconnectTimer_.isActive()) {
+            assetReconnectTimer_.start();
+        }
+    } else if (event.type == TransportEventType::Authenticated) {
+        assetReconnectTimer_.stop();
     }
     publishTransportEvent(event, false);
 }
@@ -1291,6 +1380,22 @@ void SharedSessionController::connectJoiner()
         joiner_.keyHex,
         joiner_.localToken,
         joiner_.localEndpoint);
+}
+
+void SharedSessionController::connectAssetJoiner()
+{
+    if (role_ != Role::Joiner || closing_ || !client_.isConnected() ||
+        assetClient_.isConnected()) {
+        return;
+    }
+    assetClient_.connectToHost(
+        joiner_.host,
+        joiner_.port,
+        joiner_.sessionHex,
+        joiner_.keyHex,
+        joiner_.localToken,
+        QString{},
+        ControlClient::Channel::Asset);
 }
 
 void SharedSessionController::sendHeartbeat(const QString& targetToken)

@@ -70,7 +70,6 @@ public:
     void waitForWorkers();
 
     QObject* dispatchContext() noexcept override;
-    bool trackSyncEnabled() const noexcept override;
     int sessionSampleRate() const noexcept override;
     QString assetPathForSend(const QString& hash) const override;
     QString incomingAssetPath(const QString& hash) const override;

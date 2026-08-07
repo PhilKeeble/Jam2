@@ -265,16 +265,16 @@ peer audio cannot be separated and is identified in the recording dialog.
 Perform Input therefore has no separate device,
 channel, sample-rate, or buffer selector. It exposes bar-limit/stop behavior,
 count-in and metronome behavior, and manual latency adjustment. System Loopback
-instead exposes its preferred source, bar-limit/stop behavior, trigger,
-threshold, hold, pre-roll, tail, and trim controls; it has no Perform Input
+instead exposes its preferred source, bar-limit/stop behavior, a shared silence
+threshold, tail duration, and leading/trailing trim controls; it has no Perform Input
 count-in, metronome, latency, or ASIO controls. Arm-dialog changes apply to that
 take only and do not overwrite the saved defaults.
 
 Finite Perform Input takes schedule their stop at an exact engine frame measured
 from the scheduled recording start, after any count-in. Finite System Loopback
-takes convert the chosen bar count to source frames. When signal triggering is
-enabled, that frame count begins only when the trigger fires; optional pre-roll
-is still retained before the trigger and trim settings can shorten the saved WAV.
+takes convert the chosen bar count to source frames and begin capturing immediately.
+The trim settings are applied after capture and can shorten the saved WAV without
+changing the recording start or its duration limit.
 
 Perform Input uses the engine's smoothed weighted mono fold-down. Each selected
 channel learns its own peak-noise floor only while closed, so microphone or

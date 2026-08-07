@@ -16,6 +16,19 @@ Settings needs to include preference for views with all tickboxes and options et
 
 ## Bugs
 
+sync track controls preventing idea sharing other than wav as well - maybe this is fine? maybe split the control into more granular piece? Sync toggle on all views? sync tracks/wavs, sync global start/stop, sync chord view, sync beat view, sync lyric view
+
+Maybe call Banks Sections instead?
+
+Import midi files for songs? 
+
+generate wav menu - hide advanced away until they choose to see it, allow voicing to select drum kit in another drop down, so voicing for chords, drum kit for drums, free up top right of drum view for sync toggle?
+
+Maybe another button next to join jam for reconnect that just cycles the connection quickly with the same curent settings for easy jam reboots?
+
+Maybe make the metronome pattern view nicer to fit the rest of the app? 
+
+maybe preset bank of drum grooves seletable on the beat view so its not random? 
 
 ### Sound references
 

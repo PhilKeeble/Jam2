@@ -15,7 +15,7 @@ constexpr qsizetype kMaxLargeJsonBytes = 4 * 1024 * 1024;
 constexpr qsizetype kLargeJsonChunkBytes = 32 * 1024;
 constexpr qsizetype kLargeJsonChunkHeaderBytes = 64;
 constexpr qsizetype kAuthenticatedHeaderBytes = 28;
-constexpr int kControlProtocolVersion = 2;
+constexpr int kControlProtocolVersion = 3;
 constexpr qint64 kOutputHighWaterBytes = 5 * 1024 * 1024;
 constexpr int kAuthenticationDeadlineMs = 5000;
 constexpr int kIncompleteFrameDeadlineMs = 5000;
@@ -115,6 +115,7 @@ struct TransportEvent {
     QString detail;
     bool retryable = false;
     bool authenticated = false;
+    bool assetChannel = false;
 };
 
 QByteArray randomNonce();
@@ -127,7 +128,8 @@ QByteArray makeTranscript(
     const QByteArray& serverNonce,
     const QByteArray& clientNonce,
     const QString& peerToken,
-    const QString& udpEndpoint);
+    const QString& udpEndpoint,
+    const QString& channel = QStringLiteral("control"));
 QByteArray keyedValue(const QByteArray& masterKey, const QByteArray& domain, const QByteArray& transcript);
 bool constantTimeEqual(const QByteArray& left, const QByteArray& right);
 

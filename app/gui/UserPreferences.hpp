@@ -91,11 +91,7 @@ struct LoopbackRecordingPreference {
     QString sourceName = QStringLiteral("[default] System mix");
     bool recordUntilStopped = true;
     int durationBars = 8;
-    bool trigger = false;
-    double triggerThresholdDb = -45.0;
-    int triggerHoldMs = 50;
-    int preRollMs = 250;
-    double tailThresholdDb = -50.0;
+    double silenceThresholdDb = -50.0;
     int tailSilenceMs = 1000;
     bool trimLeading = true;
     bool trimTrailing = true;

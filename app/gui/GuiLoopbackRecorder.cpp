@@ -104,44 +104,17 @@ public:
         int sampleRate,
         std::uint64_t targetRecordedFrames)
         : options_(options),
-          sampleRate_(std::max(1, sampleRate)),
           targetRecordedFrames_(targetRecordedFrames),
-          triggerThreshold_(ampFromDb(options.triggerThresholdDb)),
-          tailThreshold_(ampFromDb(options.tailSilenceDb)),
-          triggerHoldFrames_(static_cast<std::uint64_t>(std::max(0, options.triggerHoldMs)) * sampleRate_ / 1000),
-          preRollFrames_(static_cast<std::uint64_t>(std::max(0, options.preRollMs)) * sampleRate_ / 1000),
-          tailSilenceFrames_(static_cast<std::uint64_t>(std::max(0, options.tailSilenceMs)) * sampleRate_ / 1000)
-    {
-        preRoll_.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(preRollFrames_, sampleRate_ * 30ULL)));
-    }
+          tailSilenceFrames_(
+              static_cast<std::uint64_t>(std::max(0, options.tailSilenceMs)) *
+              static_cast<std::uint64_t>(std::max(1, sampleRate)) / 1000)
+    {}
 
     void push(std::int16_t sample)
     {
         ++rawFrames_;
         const double amp = std::abs(static_cast<double>(sample)) / 32768.0;
         peak_ = std::max(peak_, amp);
-        if (options_.trigger && !triggerFired_) {
-            if (preRollFrames_ > 0) {
-                if (preRoll_.size() >= preRollFrames_) {
-                    preRoll_.erase(preRoll_.begin());
-                }
-                preRoll_.push_back(sample);
-            }
-            if (amp >= triggerThreshold_) {
-                ++triggerHoldCount_;
-            } else {
-                triggerHoldCount_ = 0;
-            }
-            if (triggerHoldCount_ >= std::max<std::uint64_t>(triggerHoldFrames_, 1)) {
-                triggerFired_ = true;
-                samples_.insert(samples_.end(), preRoll_.begin(), preRoll_.end());
-                preRoll_.clear();
-            } else {
-                return;
-            }
-        } else {
-            triggerFired_ = true;
-        }
         samples_.push_back(sample);
         ++recordedFrames_;
     }
@@ -156,36 +129,12 @@ public:
 
     std::vector<std::int16_t> finish()
     {
-        if (!triggerFired_) {
-            samples_.clear();
-            return samples_;
-        }
-        std::size_t first = 0;
-        std::size_t last = samples_.size();
-        if (options_.trimLeadingSilence) {
-            while (first < last && std::abs(static_cast<double>(samples_[first])) / 32768.0 < triggerThreshold_) {
-                ++first;
-            }
-        }
-        if (options_.trimTrailingSilence) {
-            std::uint64_t quiet = 0;
-            while (last > first) {
-                const double amp = std::abs(static_cast<double>(samples_[last - 1])) / 32768.0;
-                if (amp < tailThreshold_) {
-                    ++quiet;
-                    --last;
-                    continue;
-                }
-                break;
-            }
-            if (quiet < tailSilenceFrames_) {
-                last = samples_.size();
-            }
-        }
-        if (first > 0 || last < samples_.size()) {
-            samples_ = std::vector<std::int16_t>(samples_.begin() + static_cast<std::ptrdiff_t>(first),
-                samples_.begin() + static_cast<std::ptrdiff_t>(last));
-        }
+        samples_ = jam2::gui::trim_loopback_silence_pcm16(
+            std::move(samples_),
+            options_.silenceThresholdDb,
+            tailSilenceFrames_,
+            options_.trimLeadingSilence,
+            options_.trimTrailingSilence);
         return samples_;
     }
 
@@ -198,19 +147,11 @@ public:
 
 private:
     const GuiLoopbackOptions& options_;
-    int sampleRate_ = 48000;
     std::uint64_t targetRecordedFrames_ = (std::numeric_limits<std::uint64_t>::max)();
     std::uint64_t recordedFrames_ = 0;
-    double triggerThreshold_ = 0.0;
-    double tailThreshold_ = 0.0;
-    std::uint64_t triggerHoldFrames_ = 0;
-    std::uint64_t preRollFrames_ = 0;
     std::uint64_t tailSilenceFrames_ = 0;
-    std::uint64_t triggerHoldCount_ = 0;
     std::uint64_t rawFrames_ = 0;
     double peak_ = 0.0;
-    bool triggerFired_ = false;
-    std::vector<std::int16_t> preRoll_;
     std::vector<std::int16_t> samples_;
 };
 
@@ -332,6 +273,44 @@ double readSample(const BYTE* frame, WORD bitsPerSample, WORD formatTag, const G
 #endif
 
 } // namespace
+
+std::vector<std::int16_t> jam2::gui::trim_loopback_silence_pcm16(
+    std::vector<std::int16_t> input,
+    double silenceThresholdDb,
+    std::uint64_t trailingSilenceFrames,
+    bool trimLeading,
+    bool trimTrailing)
+{
+    std::size_t first = 0;
+    std::size_t last = input.size();
+    const double silenceThreshold = ampFromDb(silenceThresholdDb);
+    if (trimLeading) {
+        while (first < last &&
+               std::abs(static_cast<double>(input[first])) / 32768.0 < silenceThreshold) {
+            ++first;
+        }
+    }
+    if (trimTrailing) {
+        std::uint64_t quietFrames = 0;
+        while (last > first &&
+               std::abs(static_cast<double>(input[last - 1])) / 32768.0 < silenceThreshold) {
+            ++quietFrames;
+            --last;
+        }
+        if (quietFrames < trailingSilenceFrames) {
+            last = input.size();
+        }
+    }
+    if (last < input.size()) {
+        input.resize(last);
+    }
+    if (first > 0) {
+        input.erase(
+            input.begin(),
+            input.begin() + static_cast<std::ptrdiff_t>(first));
+    }
+    return input;
+}
 
 std::vector<std::int16_t> jam2::gui::resample_pcm16_mono(
     std::span<const std::int16_t> input,
@@ -663,8 +642,9 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
             "resample_ratio=%7 source_frames=%8 output_frames=%9 "
             "bits=%10 valid_bits=%11 fold_down=active-average-30dB "
             "signal_packets=%12 active_channels_min=%13 active_channels_max=%14 "
-            "duration_bars=%15 duration_target_frames=%16 trigger=%17 "
-            "capture_frames=%18 duration_counted_frames=%19 recorded_peak_dbfs=%20")
+            "duration_bars=%15 duration_target_frames=%16 capture_frames=%17 "
+            "duration_counted_frames=%18 silence_threshold_db=%19 "
+            "trim_leading=%20 trim_trailing=%21 recorded_peak_dbfs=%22")
             .arg(selectedEndpoint)
             .arg(channels)
             .arg(QString::number(channelMask, 16))
@@ -688,9 +668,11 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
             .arg(maximumActiveChannels)
             .arg(options.durationBars)
             .arg(barFrames)
-            .arg(options.trigger ? QStringLiteral("yes") : QStringLiteral("no"))
             .arg(capture.rawFrames())
             .arg(capture.recordedFrames())
+            .arg(options.silenceThresholdDb, 0, 'f', 1)
+            .arg(options.trimLeadingSilence ? QStringLiteral("yes") : QStringLiteral("no"))
+            .arg(options.trimTrailingSilence ? QStringLiteral("yes") : QStringLiteral("no"))
             .arg(capture.peakDbfs(), 0, 'f', 2);
         writeWav(
             options.outputPath,

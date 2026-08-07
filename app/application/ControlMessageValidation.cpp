@@ -394,6 +394,14 @@ bool jam2::application::isTrackSyncControlMessageType(const QString& type) noexc
         type == QStringLiteral("bank.switch");
 }
 
+bool jam2::application::isManualTrackShareControlMessageType(const QString& type) noexcept
+{
+    return type == QStringLiteral("looper.track.share.request") ||
+        type == QStringLiteral("looper.track.batch.offer") ||
+        type == QStringLiteral("looper.track.batch.complete") ||
+        type == QStringLiteral("looper.asset.request");
+}
+
 bool jam2::application::isEditorControlMessageType(const QString& type) noexcept
 {
     return type == QStringLiteral("beat.set") ||
@@ -689,14 +697,11 @@ jam2::application::ControlMessageDecision jam2::application::evaluateControlMess
         type == QStringLiteral("session.membership") ||
         type == QStringLiteral("session.heartbeat") ||
         type == QStringLiteral("session.end") ||
-        type == QStringLiteral("looper.track.share.request") ||
-        type == QStringLiteral("looper.track.batch.complete") ||
         type == QStringLiteral("bank.prepare") ||
         type == QStringLiteral("bank.cancel") ||
         type == QStringLiteral("bank.switch");
     const bool peerOnly = type == QStringLiteral("session.heartbeat.ack") ||
         type == QStringLiteral("session.endpoint.update") ||
-        type == QStringLiteral("looper.track.batch.offer") ||
         type == QStringLiteral("bank.ready") ||
         type == QStringLiteral("bank.request");
     const bool internalOnly = type == QStringLiteral("debug.lifecycle.disconnect");

@@ -42,7 +42,6 @@ constexpr NativeHandle kInvalidHandle = std::numeric_limits<NativeHandle>::max()
 constexpr int kIoTimeoutMs = 250;
 constexpr int kIoPollMs = 10;
 constexpr int kConnectTimeoutMs = 10000;
-constexpr qint64 kTransportQueueHighWaterBytes = 256 * 1024;
 constexpr int kIoOperationsPerTurn = 8;
 
 #if defined(_WIN32)
@@ -359,7 +358,7 @@ public:
 
     bool queueWrite(const QByteArray& bytes, bool closeAfterWrite)
     {
-        if (bytes.isEmpty() || bytes.size() > kTransportQueueHighWaterBytes ||
+        if (bytes.isEmpty() || bytes.size() > kNativeTcpQueueHighWaterBytes ||
             !connected.load()) {
             return false;
         }
@@ -368,7 +367,7 @@ public:
             return false;
         }
         const qint64 queued = queuedBytes.load();
-        if (queued < 0 || queued > kTransportQueueHighWaterBytes - bytes.size()) {
+        if (queued < 0 || queued > kNativeTcpQueueHighWaterBytes - bytes.size()) {
             return false;
         }
         queuedBytes.store(queued + bytes.size());
@@ -486,7 +485,7 @@ public:
             }
             const qint64 priorPending = pendingReadBytes->fetch_add(received);
             if (priorPending < 0 ||
-                priorPending > kTransportQueueHighWaterBytes - received) {
+                priorPending > kNativeTcpQueueHighWaterBytes - received) {
                 pendingReadBytes->fetch_sub(received);
                 error = QStringLiteral("TCP input delivery high-water exceeded");
                 return false;

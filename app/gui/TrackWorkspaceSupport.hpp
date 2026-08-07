@@ -30,6 +30,9 @@ StagedPcm16Asset stagePcm16Asset(
     const QString& stagingFolder,
     int expectedSampleRate = 0,
     const QString& assetFolder = QStringLiteral("imported"));
+int mergeSynchronizedLooperLanes(
+    QJsonObject& song,
+    const LooperProject& localProject);
 int mergeQuarantinedLocalLanes(
     QJsonObject& song,
     const LooperProject& localProject,

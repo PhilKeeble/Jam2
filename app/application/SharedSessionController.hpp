@@ -159,6 +159,9 @@ public:
     bool sendTo(const QString& token, const QJsonObject& message, bool closeAfterWrite = false);
     bool sendBinaryTo(const QString& token, const QByteArray& payload);
     bool canQueueTo(const QString& token, qint64 additionalBytes) const;
+    bool sendAssetTo(const QString& token, const QJsonObject& message);
+    bool sendAssetBinaryTo(const QString& token, const QByteArray& payload);
+    bool canQueueAssetTo(const QString& token, qint64 additionalBytes) const;
     bool hasPeer() const;
     bool isConnected() const;
     bool isServer() const noexcept { return role_ == Role::Creator; }
@@ -166,11 +169,15 @@ public:
     Snapshot snapshot() const;
     ControlServer::Stats serverStats() const { return server_.stats(); }
     ControlClient::Stats clientStats() const { return client_.stats(); }
+    ControlClient::Stats assetClientStats() const { return assetClient_.stats(); }
 
     std::function<void(const jam2::control_protocol::TransportEvent&, bool)> onTransportEvent;
     std::function<void(const Snapshot&)> onSnapshot;
     std::function<void(const QString&, const QJsonObject&)> onMessage;
     std::function<void(const QString&, const QByteArray&)> onBinaryMessage;
+    std::function<void(const QString&, const QJsonObject&)> onAssetMessage;
+    std::function<void(const QString&, const QByteArray&)> onAssetBinaryMessage;
+    std::function<void(const QString&)> onAssetDisconnected;
     std::function<void(const QString&, const QJsonObject&)> onPeerAuthenticated;
     std::function<void(const QString&)> onPeerDisconnected;
     std::function<void(const SessionContract&)> onContract;
@@ -199,6 +206,7 @@ private:
 
     void handleServerEvent(const jam2::control_protocol::TransportEvent& event);
     void handleClientEvent(const jam2::control_protocol::TransportEvent& event);
+    void handleAssetClientEvent(const jam2::control_protocol::TransportEvent& event);
     void handleAuthenticatedPeer(const QString& token, const QJsonObject& message);
     void handleDisconnectedPeer(const QString& token);
     void handleClientMessage(const QJsonObject& message);
@@ -214,6 +222,7 @@ private:
     void broadcastMembership();
     void scheduleReconnect();
     void connectJoiner();
+    void connectAssetJoiner();
     void sendHeartbeat(const QString& targetToken = {});
     void checkHeartbeatDeadline();
     void expireCoordinatorHeartbeat();
@@ -271,8 +280,10 @@ private:
     bool runtimeAttachedForSession_ = false;
     bool reconcilingRuntime_ = false;
     QTimer reconnectTimer_;
+    QTimer assetReconnectTimer_;
     QTimer heartbeatTimer_;
     QTimer heartbeatDeadlineTimer_;
     ControlServer server_;
     ControlClient client_;
+    ControlClient assetClient_;
 };

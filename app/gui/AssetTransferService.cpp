@@ -27,7 +27,8 @@ constexpr int kLooperAssetChunkBytes = jam2::application::limits::kMaximumAssetC
 constexpr int kMaxLooperAssetRequests = jam2::application::limits::kMaximumAssetRequests;
 constexpr qint64 kLooperAssetFrameQueueEstimate = 32 * 1024;
 constexpr int kLooperAssetProgressDeadlineMs = 10000;
-constexpr int kMaxIncomingAssetQueuedChunks = 8;
+constexpr int kAssetChunkWindow = 4;
+constexpr int kMaxIncomingAssetQueuedChunks = kAssetChunkWindow;
 
 bool isSha256Hex(const QString& value)
 {
@@ -91,9 +92,6 @@ AssetTransferService::~AssetTransferService() = default;
 
 void AssetTransferService::handleRequest(const QJsonObject& message, const QString& sourcePeerToken)
 {
-    if (!context_.trackSyncEnabled()) {
-        return;
-    }
     const QJsonArray hashes = message.value(QStringLiteral("hashes")).toArray();
     if (hashes.isEmpty() || hashes.size() > kMaxLooperAssetRequests) {
         context_.appendAssetLog(QStringLiteral("rejected looper asset request with invalid hash count"));
@@ -111,9 +109,6 @@ void AssetTransferService::handleRequest(const QJsonObject& message, const QStri
 
 void AssetTransferService::queueSend(const QString& hash, const QString& targetPeerToken)
 {
-    if (!context_.trackSyncEnabled()) {
-        return;
-    }
     const QPair<QString, QString> request{hash, targetPeerToken};
     if ((outgoingLooperAssetHash_ == hash && outgoingLooperAssetTargetToken_ == targetPeerToken) ||
         (outgoingLooperAssetPendingHash_ == hash && outgoingLooperAssetPendingTargetToken_ == targetPeerToken) ||
@@ -133,10 +128,6 @@ void AssetTransferService::queueSend(const QString& hash, const QString& targetP
 
 void AssetTransferService::continueSend()
 {
-    if (!context_.trackSyncEnabled()) {
-        cancel();
-        return;
-    }
     if (outgoingLooperAssetHash_.isEmpty()) {
         if (outgoingLooperAssetValidationPending_) {
             return;
@@ -204,6 +195,7 @@ void AssetTransferService::continueSend()
                 outgoingLooperAssetBytes_ = validation->bytes;
                 outgoingLooperAssetOffset_ = 0;
                 outgoingLooperAssetNextChunk_ = -1;
+                outgoingLooperAssetAckedChunks_ = 0;
                 outgoingLooperAssetProgress_.start();
                 continueSend();
             },
@@ -225,12 +217,13 @@ void AssetTransferService::continueSend()
         return;
     }
 
+    if (outgoingLooperAssetProgress_.isValid() &&
+        outgoingLooperAssetProgress_.elapsed() > kLooperAssetProgressDeadlineMs) {
+        context_.appendAssetLog(QStringLiteral("looper asset send progress timeout: ") + outgoingLooperAssetHash_);
+        resetOutgoing();
+        return;
+    }
     if (!context_.canQueueAssetControl(outgoingLooperAssetTargetToken_, kLooperAssetFrameQueueEstimate)) {
-        if (outgoingLooperAssetProgress_.isValid() &&
-            outgoingLooperAssetProgress_.elapsed() > kLooperAssetProgressDeadlineMs) {
-            context_.appendAssetLog(QStringLiteral("looper asset send progress timeout: ") + outgoingLooperAssetHash_);
-            resetOutgoing();
-        }
         return;
     }
     if (outgoingLooperAssetNextChunk_ < 0) {
@@ -249,6 +242,10 @@ void AssetTransferService::continueSend()
     }
 
     if (!outgoingLooperAssetPreparedChunk_.isEmpty()) {
+        if (outgoingLooperAssetNextChunk_ - outgoingLooperAssetAckedChunks_ >=
+            kAssetChunkWindow) {
+            return;
+        }
         const qint64 preparedBytes = outgoingLooperAssetPreparedChunk_.size();
         const QByteArray chunk = jam2::application::asset_chunk::encode({
             outgoingLooperAssetHash_,
@@ -269,6 +266,10 @@ void AssetTransferService::continueSend()
     }
 
     if (outgoingLooperAssetOffset_ < outgoingLooperAssetBytes_) {
+        if (outgoingLooperAssetNextChunk_ - outgoingLooperAssetAckedChunks_ >=
+            kAssetChunkWindow) {
+            return;
+        }
         if (outgoingLooperAssetReadPending_) {
             return;
         }
@@ -318,6 +319,9 @@ void AssetTransferService::continueSend()
         return;
     }
 
+    if (outgoingLooperAssetAckedChunks_ != outgoingLooperAssetNextChunk_) {
+        return;
+    }
     if (!context_.sendAssetControl(outgoingLooperAssetTargetToken_, QJsonObject{
             {QStringLiteral("type"), QStringLiteral("looper.asset.done")},
             {QStringLiteral("sha256"), outgoingLooperAssetHash_},
@@ -339,12 +343,14 @@ void AssetTransferService::continueSend()
             (jam2::control_protocol::kAuthenticatedHeaderBytes + 4);
     context_.appendAssetLog(QStringLiteral(
         "sent looper asset: raw_bytes=%1 chunks=%2 binary_body_bytes=%3 "
-        "authenticated_chunk_wire_bytes=%4 replaced_text_data_characters=%5 hash=%6")
+        "authenticated_chunk_wire_bytes=%4 replaced_text_data_characters=%5 "
+        "window_chunks=%6 hash=%7")
         .arg(outgoingLooperAssetBytes_)
         .arg(outgoingLooperAssetNextChunk_)
         .arg(binaryBodyBytes)
         .arg(authenticatedWireBytes)
         .arg(replacedEncodedDataCharacters)
+        .arg(kAssetChunkWindow)
         .arg(outgoingLooperAssetHash_));
     resetOutgoing();
 }
@@ -363,9 +369,6 @@ void AssetTransferService::cancel()
 
 void AssetTransferService::peerDisconnected(const QString& peerToken)
 {
-    if (peerToken.isEmpty()) {
-        return;
-    }
     for (qsizetype index = outgoingLooperAssetQueue_.size(); index-- > 0;) {
         if (outgoingLooperAssetQueue_[index].second == peerToken) {
             outgoingLooperAssetQueue_.removeAt(index);
@@ -400,6 +403,7 @@ void AssetTransferService::resetOutgoing()
     outgoingLooperAssetBytes_ = 0;
     outgoingLooperAssetOffset_ = 0;
     outgoingLooperAssetNextChunk_ = 0;
+    outgoingLooperAssetAckedChunks_ = 0;
     outgoingLooperAssetReadPending_ = false;
     outgoingLooperAssetPreparedChunk_.clear();
     outgoingLooperAssetProgress_.invalidate();
@@ -420,6 +424,7 @@ void AssetTransferService::clearIncoming(bool abandonExpected)
     incomingSequence_.reset();
     incomingWorkerState_.reset();
     incomingLooperAssetHash_.clear();
+    incomingLooperAssetSourceToken_.clear();
     incomingLooperAssetBytesExpected_ = 0;
     incomingLooperAssetQueue_.clear();
     incomingLooperAssetWritePending_ = false;
@@ -471,11 +476,35 @@ void AssetTransferService::receiveStart(const QJsonObject& message, const QStrin
     state->expectedSampleRate = context_.sessionSampleRate();
     incomingWorkerState_ = std::move(state);
     incomingLooperAssetHash_ = hash;
+    incomingLooperAssetSourceToken_ = sourcePeerToken;
     incomingLooperAssetBytesExpected_ = static_cast<qint64>(declaredBytes);
     incomingLooperAssetTimer_.start(kLooperAssetProgressDeadlineMs);
-    context_.appendAssetLog(QStringLiteral("receiving looper asset: %1 bytes hash=%2")
+    context_.appendAssetLog(QStringLiteral(
+        "receiving looper asset: bytes=%1 hash=%2 chunk_bytes=%3 window_chunks=%4")
         .arg(incomingLooperAssetBytesExpected_)
-        .arg(incomingLooperAssetHash_));
+        .arg(incomingLooperAssetHash_)
+        .arg(chunkSize)
+        .arg(kAssetChunkWindow));
+}
+
+void AssetTransferService::receiveAck(
+    const QJsonObject& message,
+    const QString& sourcePeerToken)
+{
+    const QString hash = message.value(QStringLiteral("sha256")).toString().toLower();
+    const int chunks = message.value(QStringLiteral("chunks")).toInt(-1);
+    if (outgoingLooperAssetHash_.isEmpty() ||
+        hash != outgoingLooperAssetHash_ ||
+        sourcePeerToken != outgoingLooperAssetTargetToken_ ||
+        chunks < outgoingLooperAssetAckedChunks_ ||
+        chunks > outgoingLooperAssetNextChunk_) {
+        context_.appendAssetLog(QStringLiteral("rejected invalid looper asset acknowledgement"));
+        return;
+    }
+    if (chunks == outgoingLooperAssetAckedChunks_) return;
+    outgoingLooperAssetAckedChunks_ = chunks;
+    outgoingLooperAssetProgress_.restart();
+    continueSend();
 }
 
 void AssetTransferService::receiveChunk(const QByteArray& payload, const QString& sourcePeerToken)
@@ -553,7 +582,7 @@ void AssetTransferService::scheduleIncomingWrite()
             state->hasher->addData(decoded);
             state->receivedBytes += decoded.size();
         },
-        [this, state, generation, error] {
+        [this, state, chunk, generation, error] {
             if (generation != incomingLooperAssetGeneration_ ||
                 state != incomingWorkerState_) {
                 (void)context_.startAssetFileTask(
@@ -567,6 +596,16 @@ void AssetTransferService::scheduleIncomingWrite()
                 return;
             }
             incomingLooperAssetTimer_.start(kLooperAssetProgressDeadlineMs);
+            if (!context_.sendAssetControl(incomingLooperAssetSourceToken_, QJsonObject{
+                    {QStringLiteral("type"), QStringLiteral("looper.asset.ack")},
+                    {QStringLiteral("sha256"), incomingLooperAssetHash_},
+                    {QStringLiteral("chunks"), chunk.first + 1},
+                })) {
+                context_.appendAssetLog(QStringLiteral(
+                    "could not queue looper asset acknowledgement; transfer cancelled"));
+                resetIncoming();
+                return;
+            }
             if (!incomingLooperAssetQueue_.isEmpty()) {
                 scheduleIncomingWrite();
             } else if (incomingLooperAssetDonePending_) {

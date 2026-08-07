@@ -110,11 +110,6 @@ void TrackWorkspaceController::waitForWorkers()
 }
 
 QObject* TrackWorkspaceController::dispatchContext() noexcept { return this; }
-bool TrackWorkspaceController::trackSyncEnabled() const noexcept
-{
-    return looperProject.trackSyncEnabled();
-}
-
 int TrackWorkspaceController::sessionSampleRate() const noexcept
 {
     return callbacks_.sessionSampleRate ? callbacks_.sessionSampleRate() : 0;

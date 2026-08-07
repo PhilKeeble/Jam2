@@ -12,6 +12,7 @@ void GuiControlMessageRouter::dispatch(
     const QString type = message.value(QStringLiteral("type")).toString();
     if (type != QStringLiteral("song.set") &&
         jam2::application::isTrackSyncControlMessageType(type) &&
+        !jam2::application::isManualTrackShareControlMessageType(type) &&
         handlers.trackSyncEnabled && !handlers.trackSyncEnabled()) {
         if (handlers.log) handlers.log(QStringLiteral("ignored remote track sync while local sync is disabled"));
         return;
@@ -80,19 +81,11 @@ void GuiControlMessageRouter::dispatch(
     } else if (type == QStringLiteral("song.set")) {
         if (handlers.songSet) handlers.songSet(message, sourcePeerToken);
     } else if (type == QStringLiteral("looper.track.share.request")) {
-        if (sourcePeerToken.isEmpty()) {
-            if (handlers.shareLocalTracks) handlers.shareLocalTracks(message);
-        } else {
-            if (handlers.log) handlers.log(QStringLiteral("rejected Share Tracks request from a joiner"));
-        }
+        if (handlers.shareLocalTracks) handlers.shareLocalTracks(message);
     } else if (type == QStringLiteral("looper.track.batch.offer")) {
         if (handlers.trackBatchOffer) handlers.trackBatchOffer(message, sourcePeerToken);
     } else if (type == QStringLiteral("looper.track.batch.complete")) {
-        if (sourcePeerToken.isEmpty()) {
-            if (handlers.trackBatchComplete) handlers.trackBatchComplete(message);
-        } else if (handlers.log) {
-            handlers.log(QStringLiteral("rejected track batch completion from a joiner"));
-        }
+        if (handlers.trackBatchComplete) handlers.trackBatchComplete(message);
     } else if (type == QStringLiteral("looper.asset.request")) {
         if (handlers.assetTransfer) handlers.assetTransfer->handleRequest(message, sourcePeerToken);
     } else if (type == QStringLiteral("looper.asset.start")) {

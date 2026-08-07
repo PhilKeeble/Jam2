@@ -133,6 +133,75 @@ StagedPcm16Asset stagePcm16Asset(
     return result;
 }
 
+int mergeSynchronizedLooperLanes(
+    QJsonObject& song,
+    const LooperProject& localProject)
+{
+    LooperProject received;
+    const QJsonObject receivedLooper = song.value(QStringLiteral("looper")).toObject();
+    if (receivedLooper.isEmpty() || !received.loadJson(receivedLooper)) return 0;
+
+    int preserved = 0;
+    for (int bankIndex = 0;
+         bankIndex < localProject.banks().size() && bankIndex < received.banks().size();
+         ++bankIndex) {
+        const QVector<LooperLane> remoteLanes = received.banks().at(bankIndex).lanes;
+        auto& mergedLanes = received.banks()[bankIndex].lanes;
+        mergedLanes = localProject.banks().at(bankIndex).lanes;
+
+        for (LooperLane remote : remoteLanes) {
+            auto match = std::find_if(
+                mergedLanes.begin(), mergedLanes.end(),
+                [&remote](const LooperLane& local) {
+                    if (!remote.assetHash.isEmpty() &&
+                        local.assetHash == remote.assetHash) {
+                        return true;
+                    }
+                    if (remote.id.isEmpty() || local.id != remote.id) return false;
+                    return local.assetHash == remote.assetHash ||
+                        (local.assetHash.isEmpty() && local.assetPath.trimmed().isEmpty());
+                });
+            if (match != mergedLanes.end()) {
+                const double gainDb = match->gainDb;
+                const bool muted = match->muted;
+                const bool solo = match->solo;
+                const bool localOnly = match->localOnly;
+                const QString localPath = match->assetPath;
+                *match = std::move(remote);
+                match->gainDb = gainDb;
+                match->muted = muted;
+                match->solo = solo;
+                match->localOnly = localOnly;
+                if (!localPath.trimmed().isEmpty() && !match->assetHash.isEmpty()) {
+                    match->assetPath = localPath;
+                }
+                continue;
+            }
+
+            const bool idCollision = std::any_of(
+                mergedLanes.cbegin(), mergedLanes.cend(),
+                [&remote](const LooperLane& local) {
+                    return !remote.id.isEmpty() && local.id == remote.id;
+                });
+            if (idCollision) remote.id.clear();
+            (void)received.appendLane(bankIndex, std::move(remote));
+        }
+
+        for (const LooperLane& local : localProject.banks().at(bankIndex).lanes) {
+            const bool representedRemotely = std::any_of(
+                remoteLanes.cbegin(), remoteLanes.cend(),
+                [&local](const LooperLane& remote) {
+                    return (!local.assetHash.isEmpty() && remote.assetHash == local.assetHash) ||
+                        (!local.id.isEmpty() && remote.id == local.id &&
+                         remote.assetHash == local.assetHash);
+                });
+            if (!representedRemotely) ++preserved;
+        }
+    }
+    song.insert(QStringLiteral("looper"), received.toJson());
+    return preserved;
+}
+
 int mergeQuarantinedLocalLanes(
     QJsonObject& song,
     const LooperProject& localProject,

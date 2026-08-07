@@ -229,18 +229,21 @@ QJsonObject LooperProject::toJson(bool syncCompatibleOnly) const
     for (const LooperBank& bank : banks_) {
         QJsonArray lanes;
         for (const LooperLane& lane : bank.lanes) {
-            if (syncCompatibleOnly && (!lane.sampleRateCompatible || lane.localOnly)) {
+            if (syncCompatibleOnly && !lane.sampleRateCompatible) {
                 continue;
             }
             QJsonObject laneObject{{"id", lane.id}, {"asset_path", lane.assetPath}, {"asset_hash", lane.assetHash},
                 {"name", lane.name}, {"sample_rate", lane.sampleRate},
                 {"start_frame", QString::number(lane.startFrame)}, {"stop_frame", QString::number(lane.stopFrame)},
                 {"loop_start_frame", QString::number(lane.loopStartFrame)}, {"loop_end_frame", QString::number(lane.loopEndFrame)},
-                {"gain_db", lane.gainDb}, {"muted", lane.muted}, {"solo", lane.solo}, {"loop_enabled", lane.loopEnabled},
+                {"loop_enabled", lane.loopEnabled},
                 {"reference_kind", lane.referenceKind}, {"reference_source_signature", lane.referenceSourceSignature},
                 {"reference_bpm", lane.referenceBpm},
                 {"reference_stale", lane.referenceStale}};
             if (!syncCompatibleOnly) {
+                laneObject.insert(QStringLiteral("gain_db"), lane.gainDb);
+                laneObject.insert(QStringLiteral("muted"), lane.muted);
+                laneObject.insert(QStringLiteral("solo"), lane.solo);
                 laneObject.insert(QStringLiteral("local_only"), lane.localOnly);
             }
             lanes.append(std::move(laneObject));

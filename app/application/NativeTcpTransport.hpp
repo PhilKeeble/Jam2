@@ -10,6 +10,11 @@
 
 namespace jam2::application {
 
+// NativeTcpConnection owns a bounded non-real-time I/O queue.  Higher layers
+// must use the same bound so queue saturation is treated as backpressure, not
+// as a socket failure.
+inline constexpr qint64 kNativeTcpQueueHighWaterBytes = 256 * 1024;
+
 struct NativeTcpError {
     enum class Code {
         None,

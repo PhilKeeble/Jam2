@@ -36,6 +36,10 @@ public:
         quint64 largeJsonMessagesReceived = 0;
         quint64 largeJsonRawBytesSent = 0;
         quint64 largeJsonCompressedBytesSent = 0;
+        quint64 assetAcceptedConnections = 0;
+        quint64 assetActiveConnections = 0;
+        quint64 assetConnectionHighWater = 0;
+        quint64 assetDisconnectedConnections = 0;
     };
 
     explicit ControlServer(QObject* parent = nullptr);
@@ -46,16 +50,22 @@ public:
     void send(const QJsonObject& message);
     bool sendTo(const QString& token, const QJsonObject& message, bool closeAfterWrite = false);
     bool sendBinaryTo(const QString& token, const QByteArray& payload);
+    bool sendAssetTo(const QString& token, const QJsonObject& message);
+    bool sendAssetBinaryTo(const QString& token, const QByteArray& payload);
     bool rejectAuthenticatedPeer(const QString& token, const QString& reason);
     bool canQueueTo(const QString& token, qint64 additionalBytes) const;
+    bool canQueueAssetTo(const QString& token, qint64 additionalBytes) const;
     bool hasPeer() const;
     QString errorString() const;
     Stats stats() const { return stats_; }
 
     std::function<void(const QString&, const QJsonObject&)> onMessage;
     std::function<void(const QString&, const QByteArray&)> onBinaryMessage;
+    std::function<void(const QString&, const QJsonObject&)> onAssetMessage;
+    std::function<void(const QString&, const QByteArray&)> onAssetBinaryMessage;
     std::function<void(const QString&, const QJsonObject&)> onAuthenticated;
     std::function<void(const QString&)> onDisconnected;
+    std::function<void(const QString&)> onAssetDisconnected;
     std::function<void(const jam2::control_protocol::TransportEvent&)> onEvent;
 
 private:
@@ -69,6 +79,7 @@ private:
         QByteArray receiveKey;
         QByteArray sendKey;
         bool authenticated = false;
+        bool assetChannel = false;
         bool receivedAnyInput = false;
         bool readScheduled = false;
         quint64 receiveSequence = 1;
@@ -96,6 +107,7 @@ private:
     PeerHandle findPeer(
         const jam2::application::NativeTcpConnection::Pointer& connection) const;
     int authenticatedPeerCount() const;
+    PeerHandle findAuthenticatedPeer(const QString& token, bool assetChannel) const;
     int pendingPeerCount() const;
     void noteAuthenticationReject();
     bool authenticationWorkAvailable();

@@ -401,25 +401,37 @@ QJsonObject jam2RunControllerLifecycleValidation(
     QByteArray creatorBinary;
     QByteArray joinerBinary;
     QString binarySource;
-    creator.onBinaryMessage = [&](const QString& source, const QByteArray& payload) {
+    creator.onAssetBinaryMessage = [&](const QString& source, const QByteArray& payload) {
         binarySource = source;
         creatorBinary = payload;
     };
-    joiner.onBinaryMessage = [&](const QString&, const QByteArray& payload) {
+    joiner.onAssetBinaryMessage = [&](const QString&, const QByteArray& payload) {
         joinerBinary = payload;
     };
-    const bool joinerBinarySent = joined && !binaryAsset.isEmpty() &&
-        joiner.sendBinaryTo(QString{}, binaryAsset);
+    const bool assetChannelReady = joined && pumpUntil([&] {
+        return joiner.canQueueAssetTo(QString{}, 1024) &&
+            creator.serverStats().assetActiveConnections > 0;
+    }, 1000);
+    check(QStringLiteral("controller.dedicated-asset-channel-authenticated"),
+        assetChannelReady);
+    const bool joinerBinarySent = assetChannelReady && !binaryAsset.isEmpty() &&
+        joiner.sendAssetBinaryTo(QString{}, binaryAsset);
+    check(QStringLiteral("controller.dedicated-asset-channel-upload-queued"),
+        joinerBinarySent);
     const bool creatorBinaryReceived = joinerBinarySent && pumpUntil([&] {
         return creatorBinary == binaryAsset && binarySource == joiner.snapshot().localToken;
     }, 1000);
+    check(QStringLiteral("controller.dedicated-asset-channel-upload"),
+        creatorBinaryReceived);
     const bool creatorBinarySent = creatorBinaryReceived &&
-        creator.sendBinaryTo(joiner.snapshot().localToken, binaryAsset);
+        creator.sendAssetBinaryTo(joiner.snapshot().localToken, binaryAsset);
+    check(QStringLiteral("controller.dedicated-asset-channel-download-queued"),
+        creatorBinarySent);
     const bool joinerBinaryReceived = creatorBinarySent && pumpUntil([&] {
         return joinerBinary == binaryAsset;
     }, 1000);
-    check(QStringLiteral("controller.authenticated-binary-asset-bidirectional"),
-        creatorBinaryReceived && joinerBinaryReceived);
+    check(QStringLiteral("controller.dedicated-asset-channel-download"),
+        joinerBinaryReceived);
 
     bool endpointMigrated = false;
     if (joined) {

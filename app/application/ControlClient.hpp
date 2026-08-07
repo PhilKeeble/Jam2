@@ -10,6 +10,11 @@
 
 class ControlClient : public QObject {
 public:
+    enum class Channel {
+        Control,
+        Asset,
+    };
+
     struct Stats {
         quint64 authenticationRejects = 0;
         quint64 authenticationTimeouts = 0;
@@ -39,7 +44,8 @@ public:
         const QString& sessionHex,
         const QString& keyHex,
         const QString& meshPeerToken = QString(),
-        const QString& meshUdpEndpoint = QString());
+        const QString& meshUdpEndpoint = QString(),
+        Channel channel = Channel::Control);
     void close();
     bool send(const QJsonObject& message);
     bool sendBinary(const QByteArray& payload);
@@ -92,6 +98,7 @@ private:
     QString sessionHex_;
     QString meshPeerToken_;
     QString meshUdpEndpoint_;
+    Channel channel_ = Channel::Control;
     HandshakeState handshakeState_ = HandshakeState::WaitingForChallenge;
     quint64 receiveSequence_ = 1;
     quint64 sendSequence_ = 1;

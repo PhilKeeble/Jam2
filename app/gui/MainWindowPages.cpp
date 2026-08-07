@@ -1241,38 +1241,17 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     w.captureDurationSpin_->setEnabled(false);
     w.captureDurationSpin_->setMinimumWidth(120);
     applyMutedEditorStyle(w.captureDurationSpin_);
-    w.captureTriggerCheck_ = new QCheckBox(QStringLiteral("Trigger on signal"), page);
     w.trimLeadingCheck_ = new QCheckBox(QStringLiteral("Trim leading silence"), page);
     w.trimTrailingCheck_ = new QCheckBox(QStringLiteral("Trim trailing silence"), page);
     w.trimLeadingCheck_->setChecked(true);
     w.trimTrailingCheck_->setChecked(true);
-    w.triggerThresholdSpin_ = new QDoubleSpinBox(page);
-
-    w.triggerThresholdSpin_->setRange(-120.0, 0.0);
-    w.triggerThresholdSpin_->setDecimals(1);
-    w.triggerThresholdSpin_->setValue(-45.0);
-    w.triggerThresholdSpin_->setSuffix(QStringLiteral(" dB"));
-    w.triggerThresholdSpin_->setMinimumWidth(120);
-    applyMutedEditorStyle(w.triggerThresholdSpin_);
-    w.tailThresholdSpin_ = new QDoubleSpinBox(page);
-    w.tailThresholdSpin_->setRange(-120.0, 0.0);
-    w.tailThresholdSpin_->setDecimals(1);
-    w.tailThresholdSpin_->setValue(-50.0);
-    w.tailThresholdSpin_->setSuffix(QStringLiteral(" dB"));
-    w.tailThresholdSpin_->setMinimumWidth(120);
-    applyMutedEditorStyle(w.tailThresholdSpin_);
-    w.preRollSpin_ = new QSpinBox(page);
-    w.preRollSpin_->setRange(0, 10000);
-    w.preRollSpin_->setValue(250);
-    w.preRollSpin_->setSuffix(QStringLiteral(" ms"));
-    w.preRollSpin_->setMinimumWidth(120);
-    applyMutedEditorStyle(w.preRollSpin_);
-    w.triggerHoldSpin_ = new QSpinBox(page);
-    w.triggerHoldSpin_->setRange(1, 5000);
-    w.triggerHoldSpin_->setValue(50);
-    w.triggerHoldSpin_->setSuffix(QStringLiteral(" ms"));
-    w.triggerHoldSpin_->setMinimumWidth(120);
-    applyMutedEditorStyle(w.triggerHoldSpin_);
+    w.silenceThresholdSpin_ = new QDoubleSpinBox(page);
+    w.silenceThresholdSpin_->setRange(-120.0, 0.0);
+    w.silenceThresholdSpin_->setDecimals(1);
+    w.silenceThresholdSpin_->setValue(-50.0);
+    w.silenceThresholdSpin_->setSuffix(QStringLiteral(" dB"));
+    w.silenceThresholdSpin_->setMinimumWidth(120);
+    applyMutedEditorStyle(w.silenceThresholdSpin_);
     w.tailSilenceSpin_ = new QSpinBox(page);
     w.tailSilenceSpin_->setRange(0, 30000);
     w.tailSilenceSpin_->setValue(1000);
@@ -1297,8 +1276,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         w.captureOutputEdit_, w.loopbackSourceBox_, w.captureDurationSpin_,
         w.captureManualStopCheck_, w.captureCountInCheck_, w.captureCountInMetronomeCheck_, w.captureKeepMetronomeCheck_, w.captureCountInBarsSpin_,
         w.recordingLatencyLabel_, w.recordingLatencyAdjustmentSpin_,
-        w.captureTriggerCheck_, w.trimLeadingCheck_, w.trimTrailingCheck_, w.triggerThresholdSpin_,
-        w.tailThresholdSpin_, w.preRollSpin_, w.triggerHoldSpin_, w.tailSilenceSpin_,
+        w.trimLeadingCheck_, w.trimTrailingCheck_, w.silenceThresholdSpin_, w.tailSilenceSpin_,
     };
     for (QWidget* widget : captureDialogWidgets) {
         widget->hide();

@@ -246,8 +246,9 @@ private:
     void requestNextPendingAsset();
     void applyPendingTrackContributions();
     bool sendControlTo(const QString& targetPeerToken, const QJsonObject& message);
-    bool sendBinaryControlTo(const QString& targetPeerToken, const QByteArray& payload);
-    bool canQueueControlTo(const QString& targetPeerToken, qint64 estimatedBytes) const;
+    bool sendAssetControlTo(const QString& targetPeerToken, const QJsonObject& message);
+    bool sendAssetBinaryTo(const QString& targetPeerToken, const QByteArray& payload);
+    bool canQueueAssetTo(const QString& targetPeerToken, qint64 estimatedBytes) const;
     void handleSongSet(const QJsonObject& message, const QString& sourcePeerToken);
     void applyPendingSongIfAssetsReady();
     QJsonObject normalizeLooperAssetPaths(QJsonObject song) const;
@@ -409,13 +410,9 @@ private:
     QComboBox* loopbackSourceBox_ = nullptr;
     QCheckBox* captureManualStopCheck_ = nullptr;
     QSpinBox* captureDurationSpin_ = nullptr;
-    QCheckBox* captureTriggerCheck_ = nullptr;
     QCheckBox* trimLeadingCheck_ = nullptr;
     QCheckBox* trimTrailingCheck_ = nullptr;
-    QDoubleSpinBox* triggerThresholdSpin_ = nullptr;
-    QDoubleSpinBox* tailThresholdSpin_ = nullptr;
-    QSpinBox* preRollSpin_ = nullptr;
-    QSpinBox* triggerHoldSpin_ = nullptr;
+    QDoubleSpinBox* silenceThresholdSpin_ = nullptr;
     QSpinBox* tailSilenceSpin_ = nullptr;
     QDoubleSpinBox* trackSpeedSpin_ = nullptr;
     QSpinBox* trackPitchSpin_ = nullptr;

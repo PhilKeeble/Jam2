@@ -75,7 +75,6 @@ public:
     }
 
     QObject* dispatchContext() noexcept override { return this; }
-    bool trackSyncEnabled() const noexcept override { return true; }
     int sessionSampleRate() const noexcept override { return 48000; }
     QString assetPathForSend(const QString&) const override { return {}; }
     QString incomingAssetPath(const QString& hash) const override
@@ -111,7 +110,16 @@ public:
         return true;
     }
     bool canQueueAssetControl(const QString&, qint64) const override { return true; }
-    bool sendAssetControl(const QString&, const QJsonObject&) override { return true; }
+    bool sendAssetControl(const QString& token, const QJsonObject& message) override
+    {
+        if (message.value(QStringLiteral("type")).toString() ==
+            QStringLiteral("looper.asset.ack")) {
+            ++acknowledgements;
+            lastAcknowledgedChunks = message.value(QStringLiteral("chunks")).toInt(-1);
+            lastAcknowledgementToken = token;
+        }
+        return true;
+    }
     bool sendAssetBinary(const QString&, const QByteArray&) override { return true; }
 
     bool active = true;
@@ -119,6 +127,9 @@ public:
     QString expectedSource = QStringLiteral("peer-a");
     int abandoned = 0;
     int accepted = 0;
+    int acknowledgements = 0;
+    int lastAcknowledgedChunks = -1;
+    QString lastAcknowledgementToken;
     QString acceptedHash;
     QString acceptedPath;
 
@@ -479,6 +490,20 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             : (std::numeric_limits<double>::infinity)();
         record(QStringLiteral("loopback-resample.downsample-anti-alias"),
             filteredRms < 1200.0);
+        const std::vector<std::int16_t> takeWithSilence{
+            0, 100, 1000, 2000, 100, 0, 0};
+        const std::vector<std::int16_t> trimmed =
+            jam2::gui::trim_loopback_silence_pcm16(
+                takeWithSilence, -40.0, 2, true, true);
+        const std::vector<std::int16_t> shortTail{0, 1000, 0};
+        const std::vector<std::int16_t> shortTailTrimmed =
+            jam2::gui::trim_loopback_silence_pcm16(
+                shortTail, -40.0, 2, true, true);
+        record(QStringLiteral("loopback-recording.trim-independent-of-trigger"),
+            trimmed == std::vector<std::int16_t>({1000, 2000}) &&
+            shortTailTrimmed == std::vector<std::int16_t>({1000, 0}) &&
+            jam2::gui::trim_loopback_silence_pcm16(
+                takeWithSilence, -40.0, 2, false, false) == takeWithSilence);
         record(QStringLiteral("recording.bar-duration-is-frame-exact"),
             jam2::gui::recording_frames_for_bars(8, 4, 120.0, 48000) == 768000 &&
             jam2::gui::recording_frames_for_bars(3, 3, 90.0, 44100) == 264600 &&
@@ -519,7 +544,9 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                 context.expectedHash.toLatin1();
         record(QStringLiteral("asset-transfer.success-clears-without-abandon"),
             folderReady && context.accepted == 1 && context.abandoned == 0 &&
-            context.acceptedHash == context.expectedHash && acceptedFileReady);
+            context.acceptedHash == context.expectedHash && acceptedFileReady &&
+            context.acknowledgements == 1 && context.lastAcknowledgedChunks == 1 &&
+            context.lastAcknowledgementToken == context.expectedSource);
         (void)QDir(folder).removeRecursively();
     }
 
@@ -6448,7 +6475,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         const bool roundTripped = loaded.loadJson(saved);
         QJsonObject incoming = BeatGridModel{}.toJson();
         incoming.insert(QStringLiteral("looper"), LooperProject{}.toJson());
-        const int preserved = mergeQuarantinedLocalLanes(incoming, project, 48000);
+        const int preserved = mergeSynchronizedLooperLanes(incoming, project);
         LooperProject merged;
         const bool mergedLoaded =
             merged.loadJson(incoming.value(QStringLiteral("looper")).toObject());
@@ -6456,13 +6483,65 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             .at(0).toObject().value(QStringLiteral("lanes")).toArray();
         const QJsonArray syncedLanes = synced.value(QStringLiteral("banks")).toArray()
             .at(0).toObject().value(QStringLiteral("lanes")).toArray();
-        record(QStringLiteral("practice-reference.local-only-roundtrip-and-sync-exclusion"),
+        const QJsonObject syncedLane = syncedLanes.isEmpty()
+            ? QJsonObject{} : syncedLanes.at(0).toObject();
+        record(QStringLiteral("practice-reference.metadata-syncs-without-local-mix-state"),
             appended && roundTripped && savedLanes.size() == 1 &&
             savedLanes.at(0).toObject().value(QStringLiteral("local_only")).toBool() &&
             loaded.banks().at(0).lanes.size() == 1 &&
             loaded.banks().at(0).lanes.at(0).localOnly &&
-            syncedLanes.isEmpty() && preserved == 0 && mergedLoaded &&
-            merged.banks().at(0).lanes.isEmpty());
+            syncedLanes.size() == 1 && !syncedLane.contains(QStringLiteral("local_only")) &&
+            !syncedLane.contains(QStringLiteral("gain_db")) &&
+            !syncedLane.contains(QStringLiteral("muted")) &&
+            !syncedLane.contains(QStringLiteral("solo")) &&
+            preserved == 1 && mergedLoaded &&
+            merged.banks().at(0).lanes.size() == 1);
+    }
+    {
+        LooperProject local;
+        LooperLane localLane;
+        localLane.id = QStringLiteral("shared-lane-id");
+        localLane.assetPath = QStringLiteral("C:/fixtures/local.wav");
+        localLane.assetHash = QString(64, QLatin1Char('a'));
+        localLane.name = QStringLiteral("Local work");
+        localLane.sampleRate = 48000;
+        localLane.gainDb = -12.0;
+        localLane.muted = true;
+        const bool localReady = local.appendLane(0, localLane);
+
+        LooperProject remote;
+        LooperLane remoteLane;
+        remoteLane.id = localLane.id;
+        remoteLane.assetPath = QStringLiteral("C:/fixtures/remote.wav");
+        remoteLane.assetHash = QString(64, QLatin1Char('b'));
+        remoteLane.name = QStringLiteral("Remote work");
+        remoteLane.sampleRate = 48000;
+        const bool remoteReady = remote.appendLane(0, remoteLane);
+        QJsonObject incoming = BeatGridModel{}.toJson();
+        incoming.insert(QStringLiteral("looper"), remote.toJson(true));
+        const int preserved = mergeSynchronizedLooperLanes(incoming, local);
+        LooperProject merged;
+        const bool loaded = merged.loadJson(
+            incoming.value(QStringLiteral("looper")).toObject());
+        bool keptLocal = false;
+        bool addedRemote = false;
+        QString localId;
+        QString remoteId;
+        if (loaded) {
+            for (const LooperLane& lane : merged.banks().at(0).lanes) {
+                if (lane.assetHash == localLane.assetHash) {
+                    keptLocal = lane.muted && std::abs(lane.gainDb + 12.0) < 0.001;
+                    localId = lane.id;
+                } else if (lane.assetHash == remoteLane.assetHash) {
+                    addedRemote = true;
+                    remoteId = lane.id;
+                }
+            }
+        }
+        record(QStringLiteral("track-sync.same-id-different-assets-merge-non-destructively"),
+            localReady && remoteReady && preserved == 1 && loaded &&
+            merged.banks().at(0).lanes.size() == 2 && keptLocal && addedRemote &&
+            !localId.isEmpty() && !remoteId.isEmpty() && localId != remoteId);
     }
     QJsonObject invalidNestedSong = collaborativeSong;
     QJsonObject invalidNestedModel = collaborativeSongModel;
@@ -6529,6 +6608,15 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("bank.cancel")) &&
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("bank.switch")) &&
         !jam2::application::isTrackSyncControlMessageType(QStringLiteral("metronome.settings")));
+    record(QStringLiteral("track-sync.manual-share-bypasses-automatic-sync-gate"),
+        jam2::application::isManualTrackShareControlMessageType(
+            QStringLiteral("looper.track.batch.offer")) &&
+        jam2::application::isManualTrackShareControlMessageType(
+            QStringLiteral("looper.track.batch.complete")) &&
+        jam2::application::isManualTrackShareControlMessageType(
+            QStringLiteral("looper.asset.request")) &&
+        !jam2::application::isManualTrackShareControlMessageType(
+            QStringLiteral("song.set")));
     {
         const QString switchId = QStringLiteral("abcdef01-1234-1234-1234-123456789abc");
         const QJsonObject prepare{
@@ -6584,6 +6672,13 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
     record(QStringLiteral("track-share.accepts-bounded-additive-offer"),
         jam2::application::validateControlMessage(validTrackOffer, modelError),
         modelError);
+    record(QStringLiteral("track-share.offer-authorized-in-both-directions"),
+        jam2::application::evaluateControlMessage(
+            validTrackOffer,
+            jam2::application::ControlMessageSource::LocalCreator).accepted &&
+        jam2::application::evaluateControlMessage(
+            validTrackOffer,
+            jam2::application::ControlMessageSource::AuthenticatedPeer).accepted);
     {
         LooperProject additive;
         LooperLane creatorLane;

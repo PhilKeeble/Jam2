@@ -154,7 +154,8 @@ QByteArray makeTranscript(
     const QByteArray& serverNonce,
     const QByteArray& clientNonce,
     const QString& peerToken,
-    const QString& udpEndpoint)
+    const QString& udpEndpoint,
+    const QString& channel)
 {
     QByteArray transcript("jam2-control-v2", 15);
     appendField(transcript, sessionHex.toLower().toLatin1());
@@ -162,6 +163,7 @@ QByteArray makeTranscript(
     appendField(transcript, clientNonce);
     appendField(transcript, peerToken.toUtf8());
     appendField(transcript, udpEndpoint.toUtf8());
+    appendField(transcript, channel.toUtf8());
     return transcript;
 }
 
@@ -307,7 +309,7 @@ TakeFrameResult takeFrame(QByteArray& buffer, QByteArray& body, QString& error)
 bool decodeHandshake(const QByteArray& body, QJsonObject& message, QString& error)
 {
     if (body.size() > kMaxJsonBytes) {
-        error = QStringLiteral("handshake JSON exceeds the v2 bound");
+        error = QStringLiteral("handshake JSON exceeds its bound");
         return false;
     }
     QJsonParseError parseError;

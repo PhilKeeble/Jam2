@@ -19,7 +19,6 @@ class AssetTransferContext {
 public:
     virtual ~AssetTransferContext() = default;
     virtual QObject* dispatchContext() noexcept = 0;
-    virtual bool trackSyncEnabled() const noexcept = 0;
     virtual int sessionSampleRate() const noexcept = 0;
     virtual QString assetPathForSend(const QString& hash) const = 0;
     virtual QString incomingAssetPath(const QString& hash) const = 0;
@@ -50,6 +49,7 @@ public:
     void peerDisconnected(const QString& peerToken);
     void resetIncoming();
     void receiveStart(const QJsonObject& message, const QString& sourcePeerToken);
+    void receiveAck(const QJsonObject& message, const QString& sourcePeerToken);
     void receiveChunk(const QByteArray& payload, const QString& sourcePeerToken);
     void receiveDone(const QJsonObject& message, const QString& sourcePeerToken);
 
@@ -65,6 +65,7 @@ private:
     std::shared_ptr<IncomingWorkerState> incomingWorkerState_;
     jam2::application::asset_chunk::ReceiveSequence incomingSequence_;
     QString incomingLooperAssetHash_;
+    QString incomingLooperAssetSourceToken_;
     qint64 incomingLooperAssetBytesExpected_ = 0;
     QList<QPair<int, QByteArray>> incomingLooperAssetQueue_;
     bool incomingLooperAssetWritePending_ = false;
@@ -83,6 +84,7 @@ private:
     qint64 outgoingLooperAssetBytes_ = 0;
     qint64 outgoingLooperAssetOffset_ = 0;
     int outgoingLooperAssetNextChunk_ = 0;
+    int outgoingLooperAssetAckedChunks_ = 0;
     bool outgoingLooperAssetReadPending_ = false;
     QByteArray outgoingLooperAssetPreparedChunk_;
     QElapsedTimer outgoingLooperAssetProgress_;

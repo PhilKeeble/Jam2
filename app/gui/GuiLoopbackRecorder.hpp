@@ -17,6 +17,13 @@ std::vector<std::int16_t> resample_pcm16_mono(
     int sourceSampleRate,
     int targetSampleRate);
 
+std::vector<std::int16_t> trim_loopback_silence_pcm16(
+    std::vector<std::int16_t> input,
+    double silenceThresholdDb,
+    std::uint64_t trailingSilenceFrames,
+    bool trimLeading,
+    bool trimTrailing);
+
 }
 
 struct GuiLoopbackOptions {
@@ -27,11 +34,7 @@ struct GuiLoopbackOptions {
     double bpm = 120.0;
     int beatsPerBar = 4;
     int tempoPulseUnits = 1;
-    bool trigger = false;
-    double triggerThresholdDb = -45.0;
-    int triggerHoldMs = 50;
-    int preRollMs = 250;
-    double tailSilenceDb = -50.0;
+    double silenceThresholdDb = -50.0;
     int tailSilenceMs = 1000;
     bool trimLeadingSilence = true;
     bool trimTrailingSilence = true;
