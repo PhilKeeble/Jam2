@@ -427,8 +427,11 @@ private:
     QPushButton* startTrackMetronomeButton_ = nullptr;
     QPushButton* stopTrackMetronomeButton_ = nullptr;
     QPushButton* tapTrackMetronomeButton_ = nullptr;
-    QCheckBox* metronomeMarkerReferenceCheck_ = nullptr;
-    QTableWidget* metronomePatternTable_ = nullptr;
+    MetronomeNebulaWidget* metronomeNebula_ = nullptr;
+    MetronomePatternWidget* metronomePatternWidget_ = nullptr;
+    QLabel* metronomeMeterReadout_ = nullptr;
+    QLabel* metronomeIntervalReadout_ = nullptr;
+    QLabel* metronomeModeDescription_ = nullptr;
     QPushButton* playTrackButton_ = nullptr;
     QPushButton* stopTrackButton_ = nullptr;
     QPushButton* loopStartButton_ = nullptr;

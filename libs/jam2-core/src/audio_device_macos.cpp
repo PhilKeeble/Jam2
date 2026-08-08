@@ -928,10 +928,17 @@ void mix_metronome_click(CoreAudioDuplexContext& context, std::span<std::int32_t
         std::fill(metronome_stem.begin(), metronome_stem.end(), 0);
     }
     const bool enabled = context.control->metronome_enabled.load(std::memory_order_relaxed);
+    const bool transport_gated =
+        context.control->metronome_transport_gated.load(std::memory_order_relaxed);
     const bool local_click_suppressed =
         context.control->metronome_mode.load(std::memory_order_relaxed) == 1 &&
         !context.control->leader_audio_local_click.load(std::memory_order_relaxed);
-    if (!enabled || local_click_suppressed) {
+    if (!metronome_output_allowed(
+            enabled,
+            local_click_suppressed,
+            transport_gated,
+            context.control->transport_playback_active.load(std::memory_order_relaxed),
+            context.control->recording_count_in_active.load(std::memory_order_relaxed))) {
         return;
     }
 

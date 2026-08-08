@@ -237,9 +237,15 @@ void mix_metronome_output(
     const bool local_click_suppressed =
         control.metronome_mode.load(std::memory_order_relaxed) == 1 &&
         !control.leader_audio_local_click.load(std::memory_order_relaxed);
-    if (sample_rate <= 0.0 ||
-        !control.metronome_enabled.load(std::memory_order_relaxed) ||
-        local_click_suppressed) {
+    const bool transport_gated =
+        control.metronome_transport_gated.load(std::memory_order_relaxed);
+    const bool output_allowed = audio::metronome_output_allowed(
+        control.metronome_enabled.load(std::memory_order_relaxed),
+        local_click_suppressed,
+        transport_gated,
+        control.transport_playback_active.load(std::memory_order_relaxed),
+        control.recording_count_in_active.load(std::memory_order_relaxed));
+    if (sample_rate <= 0.0 || !output_allowed) {
         return;
     }
 
@@ -884,6 +890,10 @@ struct Engine::Impl {
         case EngineCommandType::SetMetronomeEnabled:
             control->metronome_enabled.store(command.enabled, std::memory_order_relaxed);
             return true;
+        case EngineCommandType::SetMetronomeTransportGated:
+            control->metronome_transport_gated.store(
+                command.enabled, std::memory_order_relaxed);
+            return true;
         case EngineCommandType::SetMetronomePattern: {
             const auto pattern = metronome::sanitize(command.pattern);
             control->metronome_bpm.store(pattern.bpm, std::memory_order_relaxed);
@@ -1191,6 +1201,16 @@ struct Engine::Impl {
         }
         transport_pending.store(false, std::memory_order_release);
         control->recording_count_in_active.store(false, std::memory_order_release);
+        const EngineTransportAction action =
+            transport_action.load(std::memory_order_relaxed);
+        if (action == EngineTransportAction::TrackRestart ||
+            action == EngineTransportAction::TrackPlay ||
+            action == EngineTransportAction::RecordStart) {
+            control->transport_playback_active.store(true, std::memory_order_release);
+        } else if (action == EngineTransportAction::TrackStop ||
+                   action == EngineTransportAction::RecordStop) {
+            control->transport_playback_active.store(false, std::memory_order_release);
+        }
         const std::uint64_t revision = transport_revision.load(std::memory_order_relaxed);
         transport_commit_count.fetch_add(1, std::memory_order_relaxed);
         push_event(
@@ -1355,6 +1375,10 @@ void Engine::start(const EngineConfig& requested)
         const auto pattern = impl_->config.metronome_pattern;
         control.prepared_source = impl_->prepared_source.get();
         control.metronome_enabled.store(impl_->config.metronome_enabled, std::memory_order_relaxed);
+        control.metronome_transport_gated.store(
+            impl_->config.metronome_transport_gated,
+            std::memory_order_relaxed);
+        control.transport_playback_active.store(false, std::memory_order_relaxed);
         control.metronome_bpm.store(pattern.bpm, std::memory_order_relaxed);
         control.metronome_beats_per_bar.store(pattern.beats_per_bar, std::memory_order_relaxed);
         control.metronome_division.store(pattern.division, std::memory_order_relaxed);
@@ -1550,6 +1574,10 @@ EngineSnapshot Engine::snapshot() const noexcept
     result.network_capture_detach_count = impl_->capture_detach_count.load(std::memory_order_relaxed);
     result.network_playback_enabled = control.network_playback_enabled.load(std::memory_order_relaxed);
     result.metronome_enabled = control.metronome_enabled.load(std::memory_order_relaxed);
+    result.metronome_transport_gated =
+        control.metronome_transport_gated.load(std::memory_order_relaxed);
+    result.transport_playback_active =
+        control.transport_playback_active.load(std::memory_order_relaxed);
     result.metronome_mode = static_cast<EngineMetronomeMode>(
         std::clamp(control.metronome_mode.load(std::memory_order_relaxed), 0, 2));
     result.leader_audio_local_click =

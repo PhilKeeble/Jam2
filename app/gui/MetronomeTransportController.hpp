@@ -53,6 +53,6 @@ private:
     ApplicationRuntime& runtime_;
     PlaybackGrid grid_;
     std::uint64_t recording_schedule_revision_ = 0;
-    bool local_running_ = false;
+    bool local_running_ = true;
     bool applying_remote_settings_ = false;
 };

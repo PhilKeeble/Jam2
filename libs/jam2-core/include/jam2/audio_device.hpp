@@ -20,6 +20,17 @@
 
 namespace jam2::audio {
 
+inline constexpr bool metronome_output_allowed(
+    bool enabled,
+    bool localClickSuppressed,
+    bool transportGated,
+    bool transportPlaybackActive,
+    bool recordingCountInActive) noexcept
+{
+    return enabled && !localClickSuppressed &&
+        (!transportGated || transportPlaybackActive || recordingCountInActive);
+}
+
 enum class TrackTakeSource : std::uint8_t {
     Input = 0,
     CurrentJam = 1,
@@ -311,6 +322,8 @@ struct MetronomeConfig {
 
 struct StreamControl {
     std::atomic<bool> metronome_enabled{false};
+    std::atomic<bool> metronome_transport_gated{false};
+    std::atomic<bool> transport_playback_active{false};
     std::atomic<int> metronome_bpm{120};
     std::atomic<int> metronome_beats_per_bar{4};
     std::atomic<int> metronome_division{1};

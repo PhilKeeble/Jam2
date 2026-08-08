@@ -1987,9 +1987,6 @@ void MainWindow::launchLocalRuntime(Jam2RuntimeOptions options)
 void MainWindow::prepareNetworkRuntimePresentation(bool createSession)
 {
     controlRefreshAvailable_ = false;
-    if (createSession) {
-        metronomeTransport_.setLocalState(false);
-    }
     metronomeTransport_.clearEngine();
     if (createSession && startTrackMetronomeButton_) {
         startTrackMetronomeButton_->setEnabled(true);
@@ -4640,6 +4637,10 @@ void MainWindow::updateRuntimeControls()
     // solo performer can record input and backing/arrangement playback as soon
     // as the local engine is ready.
     updateJamRecordingControls();
+    submitEngineToggle(
+        jam2::EngineCommandType::SetMetronomeTransportGated,
+        true,
+        QStringLiteral("metronome global transport gate"));
     if (localEngineButton_) {
         localEngineButton_->setEnabled(!jam2_.isRunning() && !jam2_.isNetworkRunning());
     }
@@ -7953,7 +7954,7 @@ void MainWindow::updateTrackMetronomeInterval()
 
 void MainWindow::rebuildMetronomePattern(bool resetToDivisionDefault)
 {
-    if (!metronomePatternTable_) {
+    if (!metronomePatternWidget_) {
         return;
     }
     const int beats = metronomeBeatsSpin_ ? metronomeBeatsSpin_->currentData().toInt() : 4;
@@ -7973,45 +7974,29 @@ void MainWindow::rebuildMetronomePattern(bool resetToDivisionDefault)
             : i == 0;
     }
 
-    metronomePatternTable_->clear();
-    metronomePatternTable_->setRowCount(2);
-    metronomePatternTable_->setColumnCount(steps);
-    QStringList headers;
-    headers.reserve(steps);
-    for (int step = 0; step < steps; ++step) {
-        headers << metronomeStepLabel(step, division);
-        auto* playCell = new QWidget(metronomePatternTable_);
-        auto* playLayout = new QHBoxLayout(playCell);
-        playLayout->setContentsMargins(0, 0, 0, 0);
-        playLayout->setAlignment(Qt::AlignCenter);
-        auto* playCheck = new QCheckBox(playCell);
-        playCheck->setChecked(metronomeEnabledSteps_[step]);
-        QObject::connect(playCheck, &QCheckBox::toggled, this, [this, step](bool checked) {
-            if (step >= 0 && step < metronomeEnabledSteps_.size()) {
-                metronomeEnabledSteps_[step] = checked;
-                sendMetronomePatternToJam();
-            }
-        });
-        playLayout->addWidget(playCheck);
-        metronomePatternTable_->setCellWidget(0, step, playCell);
+    const int tempoPulseUnits = metronomeTempoPulseBox_
+        ? qMax(1, metronomeTempoPulseBox_->currentData().toInt()) : 1;
+    metronomePatternWidget_->setPattern(
+        beats,
+        division,
+        tempoPulseUnits,
+        metronomeEnabledSteps_,
+        metronomeAccents_);
 
-        auto* accentCell = new QWidget(metronomePatternTable_);
-        auto* accentLayout = new QHBoxLayout(accentCell);
-        accentLayout->setContentsMargins(0, 0, 0, 0);
-        accentLayout->setAlignment(Qt::AlignCenter);
-        auto* accentCheck = new QCheckBox(accentCell);
-        accentCheck->setChecked(metronomeAccents_[step]);
-        QObject::connect(accentCheck, &QCheckBox::toggled, this, [this, step](bool checked) {
-            if (step >= 0 && step < metronomeAccents_.size()) {
-                metronomeAccents_[step] = checked;
-                sendMetronomePatternToJam();
-            }
-        });
-        accentLayout->addWidget(accentCheck);
-        metronomePatternTable_->setCellWidget(1, step, accentCell);
+    const int bpm = metronomeBpmSpin_ ? qMax(1, metronomeBpmSpin_->value()) : 80;
+    const int beatUnit = metronomeBeatUnitBox_
+        ? qMax(1, metronomeBeatUnitBox_->currentData().toInt()) : 4;
+    const double intervalMs = 60000.0 /
+        (static_cast<double>(bpm) * tempoPulseUnits * division);
+    if (metronomeMeterReadout_) {
+        metronomeMeterReadout_->setText(
+            QStringLiteral("%1 / %2").arg(beats).arg(beatUnit));
     }
-    metronomePatternTable_->setHorizontalHeaderLabels(headers);
-    metronomePatternTable_->setVerticalHeaderLabels(QStringList{QStringLiteral("Play"), QStringLiteral("Accent")});
+    if (metronomeIntervalReadout_) {
+        metronomeIntervalReadout_->setText(
+            QStringLiteral("%1 ms").arg(intervalMs, 0, 'f', 1));
+    }
+    if (metronomeNebula_) metronomeNebula_->setBpm(bpm);
     sendMetronomePatternToJam();
 }
 
@@ -8261,8 +8246,17 @@ void MainWindow::updateMetronomeCompensationVisibility()
     if (!metronomeCompensationButton_ || !metronomeModeBox_) {
         return;
     }
+    const QString mode = metronomeModeBox_->currentText();
     metronomeCompensationButton_->setVisible(
-        metronomeModeBox_->currentText() == QStringLiteral("listener-compensated"));
+        mode == QStringLiteral("listener-compensated"));
+    if (metronomeModeDescription_) {
+        metronomeModeDescription_->setText(
+            mode == QStringLiteral("leader-audio")
+                ? QStringLiteral("The leader's rendered click audio is shared with every listener.")
+                : mode == QStringLiteral("listener-compensated")
+                    ? QStringLiteral("Each listener offsets the shared click using measured network timing.")
+                    : QStringLiteral("Everyone renders the same shared timing grid locally."));
+    }
 }
 
 void MainWindow::sendMetronomePatternToJam()
@@ -8376,6 +8370,7 @@ void MainWindow::updateMetronomePresentationFromEngine(
     }
     metronomeTransport_.setLocalState(snapshot.metronome_enabled);
     metronomeTransport_.setApplyingRemoteSettings(false);
+    updateMetronomeCompensationVisibility();
     if (startTrackMetronomeButton_) {
         startTrackMetronomeButton_->setEnabled(!snapshot.metronome_enabled);
     }
@@ -9316,7 +9311,8 @@ Jam2RuntimeOptions MainWindow::runtimeOptions() const
     options.drift_smoothing = driftSmoothingSpin_->value();
     options.drift_deadband_ppm = driftDeadbandSpin_->value();
     options.drift_max_correction_ppm = driftMaxCorrectionSpin_->value();
-    options.metronome = false;
+    options.metronome = metronomeTransport_.localRunning();
+    options.metronome_transport_gated = true;
     options.bpm = metronomeBpmSpin_ ? metronomeBpmSpin_->value() : bpmSpin_->value();
     options.metronome_level = gainFromDb(static_cast<double>(metronomeLevelSlider_ ? metronomeLevelSlider_->value() : -10));
     options.metronome_sound = jam2::metronome::sanitize_click_sound(
@@ -9618,8 +9614,6 @@ void MainWindow::updatePlaybackGrid()
     }
     const PlaybackGrid::Position position = metronomeTransport_.grid().position();
     updateArrangementPlayback(position);
-    const bool showMarkerReference = metronomeMarkerReferenceCheck_ == nullptr ||
-        metronomeMarkerReferenceCheck_->isChecked();
     const int beatsPerBar = livePattern.beats_per_bar;
     const double backingBpm = qMax(1.0, trackController_.model().acceptedBpm);
     const int tempoPulseUnits = livePattern.tempo_pulse_units;
@@ -9670,7 +9664,70 @@ void MainWindow::updatePlaybackGrid()
         beatPhase = trackBeat - std::floor(trackBeat);
         visualRunning = true;
     }
-    const bool editorMarkerRunning = visualRunning && showMarkerReference;
+    const int patternStepCount = qMax(
+        1, livePattern.beats_per_bar * visualDivision);
+    const bool metronomeVisualRunning = visualRunning;
+    const int metronomeVisualStep = visualRunning
+        ? static_cast<int>((
+            (visualAbsoluteBeat % static_cast<std::uint64_t>(qMax(1, beatsPerBar))) *
+                static_cast<std::uint64_t>(visualDivision) +
+            static_cast<std::uint64_t>(visualSubdivision)) %
+            static_cast<std::uint64_t>(patternStepCount))
+        : static_cast<int>(
+            position.absoluteStep % static_cast<std::uint64_t>(patternStepCount));
+    double metronomePulsePhase = visualRunning
+        ? std::fmod(beatPhase * visualDivision, 1.0)
+        : position.secondsPerStep > 0.0
+            ? std::fmod(position.secondsFromEpoch / position.secondsPerStep, 1.0)
+            : 0.0;
+    if (metronomePulsePhase < 0.0) metronomePulsePhase += 1.0;
+    const bool currentStepEnabled = jam2::metronome::mask_enabled(
+        livePattern.play_mask_low,
+        livePattern.play_mask_high,
+        metronomeVisualStep);
+    const bool currentStepAccent = currentStepEnabled && jam2::metronome::mask_enabled(
+        livePattern.accent_mask_low,
+        livePattern.accent_mask_high,
+        metronomeVisualStep);
+    const int currentPulseState = currentStepAccent ? 2 : currentStepEnabled ? 1 : 0;
+    const int subdivisionWithinBeat = visualRunning
+        ? visualSubdivision
+        : static_cast<int>(position.absoluteStep % static_cast<std::uint64_t>(visualDivision));
+    const int primaryStep =
+        (metronomeVisualStep - subdivisionWithinBeat + patternStepCount) % patternStepCount;
+    const bool primaryStepEnabled = jam2::metronome::mask_enabled(
+        livePattern.play_mask_low,
+        livePattern.play_mask_high,
+        primaryStep);
+    const bool primaryStepAccent = primaryStepEnabled && jam2::metronome::mask_enabled(
+        livePattern.accent_mask_low,
+        livePattern.accent_mask_high,
+        primaryStep);
+    const int primaryPulseState =
+        primaryStepAccent ? 2 : primaryStepEnabled ? 1 : 0;
+    const double metronomeBeatPhase = visualRunning
+        ? beatPhase
+        : (static_cast<double>(subdivisionWithinBeat) + metronomePulsePhase) /
+            static_cast<double>(visualDivision);
+    const double metronomeStepsPerSecond =
+        static_cast<double>(qMax(1, livePattern.bpm)) *
+        static_cast<double>(qMax(1, tempoPulseUnits)) *
+        static_cast<double>(visualDivision) / 60.0;
+    if (metronomePatternWidget_) {
+        metronomePatternWidget_->setCurrentStep(
+            metronomeVisualStep,
+            metronomeVisualRunning);
+    }
+    if (metronomeNebula_) {
+        metronomeNebula_->setPulseState(
+            currentPulseState,
+            metronomePulsePhase,
+            primaryPulseState,
+            metronomeBeatPhase,
+            metronomeStepsPerSecond,
+            metronomeVisualRunning);
+    }
+    const bool editorMarkerRunning = visualRunning;
     const auto sectionBeatCount = [](const BeatGridModel& model, int section) {
         return model.sections().isEmpty()
             ? quint64{1}
@@ -9862,7 +9919,7 @@ void MainWindow::updatePlaybackGrid()
         const qint64 gridPositionMs = qMax<qint64>(0, transportPositionMs);
         trackWaveform_->setGridPosition(
             gridPositionMs,
-            showMarkerReference && trackPlaying,
+            trackPlaying,
             currentMetronomePattern().beats_per_bar,
             currentMetronomePattern().tempo_pulse_units);
     }
@@ -9873,7 +9930,7 @@ void MainWindow::updatePlaybackGrid()
         const auto viewedPattern = bankMetronomePattern(viewedBankIndex_);
         looperStack_->setGridPosition(
             gridPositionMs,
-            showMarkerReference && trackPlaying && viewedBankIndex_ == liveBank,
+            trackPlaying && viewedBankIndex_ == liveBank,
             viewedPattern.bpm,
             viewedPattern.beats_per_bar,
             viewedPattern.tempo_pulse_units);

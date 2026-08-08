@@ -1100,6 +1100,7 @@ jam2::EngineConfig make_engine_config_impl(const Options& options, bool leader_a
     config.playback_ratio_ramp_ms = options.adaptive_playback_ratio_ramp_ms;
     config.diagnostics_enabled = diagnostics_enabled;
     config.metronome_enabled = options.metronome;
+    config.metronome_transport_gated = options.metronome_transport_gated;
     config.metronome_pattern = jam2::metronome::sanitize({options.bpm, 4, 1, 4, 0x0fULL, 0, 0x01ULL, 0});
     config.metronome_level_ppm = ppm_from_gain(options.metronome_level);
     config.metronome_sound = options.metronome_sound;
@@ -1564,6 +1565,11 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             }
             const jam2::EngineCommand& command = *next;
             switch (command.type) {
+            case jam2::EngineCommandType::SetMetronomeTransportGated:
+                if (audio.engine != nullptr) {
+                    (void)audio.engine->submit(command);
+                }
+                break;
             case jam2::EngineCommandType::SetMetronomeEnabled: {
                 const bool leader_audio =
                     commands.state.metronome_mode.load(std::memory_order_relaxed) ==

@@ -30,6 +30,7 @@
 #include "RecordingTiming.hpp"
 
 #include "common.hpp"
+#include "audio_device.hpp"
 #include "engine.hpp"
 #include "metronome.hpp"
 #include "pcm16_wav.hpp"
@@ -408,6 +409,13 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         jam2::gui::sample_rate_matches_engine(44100, 44100.75) &&
         !jam2::gui::sample_rate_matches_engine(44100, 48000.0) &&
         !jam2::gui::sample_rate_matches_engine(44100, 0.0));
+    record(QStringLiteral("metronome.transport-gates-audible-click-only"),
+        !jam2::audio::metronome_output_allowed(true, false, true, false, false) &&
+        jam2::audio::metronome_output_allowed(true, false, true, true, false) &&
+        jam2::audio::metronome_output_allowed(true, false, true, false, true) &&
+        jam2::audio::metronome_output_allowed(true, false, false, false, false) &&
+        !jam2::audio::metronome_output_allowed(false, false, true, true, false) &&
+        !jam2::audio::metronome_output_allowed(true, true, true, true, false));
     {
         jam2::EngineConfig active;
         active.sample_rate = 48000;
@@ -419,6 +427,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
     {
         Jam2RuntimeOptions options;
         options.output_level = 0.25;
+        options.metronome_transport_gated = true;
         const jam2::EngineConfig configured =
             jam2_make_engine_config(options, true);
         jam2::EngineConfig changedLevel = configured;
@@ -426,6 +435,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         record(QStringLiteral("master-output.runtime-level-is-dynamic"),
             configured.output_level_ppm == 250000 &&
             !jam2_engine_restart_required(configured, changedLevel));
+        record(QStringLiteral("metronome.transport-gate-applies-before-engine-start"),
+            configured.metronome_transport_gated);
     }
     {
         constexpr int sourceRate = 48000;

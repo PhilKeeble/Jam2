@@ -30,6 +30,12 @@ Maybe make the metronome pattern view nicer to fit the rest of the app?
 
 maybe preset bank of drum grooves seletable on the beat view so its not random? 
 
+record input can only take 1 input, make it able to take whatever input is coming in?
+
+Audio setup button only clickable when no interface is on in local mode. Local and Starting Perform boxes are a bit redundant 
+
+weird behaviour with metronome on, global playback and accent positions. Can move accent to wrong place by stopping global playback and moves the metronome current beat also out of sync 
+
 ### Sound references
 
 https://www.youtube.com/watch?v=miTyMfxxWCo - 1:30 - heavy synth sounds 

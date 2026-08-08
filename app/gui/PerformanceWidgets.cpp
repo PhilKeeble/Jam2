@@ -69,6 +69,514 @@ QString normalizedHits(const QString& text, int division)
 
 } // namespace
 
+MetronomeNebulaWidget::MetronomeNebulaWidget(QWidget* parent)
+    : QWidget(parent)
+{
+    setMinimumSize(300, 88);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    setAttribute(Qt::WA_TransparentForMouseEvents);
+    setAccessibleName(QStringLiteral("Tempo nebula"));
+    animationClock_.start();
+    animationTimer_.setInterval(33);
+    QObject::connect(&animationTimer_, &QTimer::timeout, this, [this] { update(); });
+}
+
+void MetronomeNebulaWidget::setBpm(int bpm)
+{
+    bpm_ = qBound(1, bpm, 400);
+    if (isVisible()) update();
+}
+
+void MetronomeNebulaWidget::setPulseState(
+    int state,
+    double phase,
+    int beatState,
+    double beatPhase,
+    double stepsPerSecond,
+    bool active)
+{
+    const int boundedState = qBound(0, state, 2);
+    const double boundedPhase = qBound(0.0, phase, 1.0);
+    const int boundedBeatState = qBound(0, beatState, 2);
+    const double boundedBeatPhase = qBound(0.0, beatPhase, 1.0);
+    const double boundedRate = qBound(0.0, stepsPerSecond, 64.0);
+    if (pulseState_ == boundedState &&
+        beatPulseState_ == boundedBeatState &&
+        qAbs(pulsePhase_ - boundedPhase) < 0.002 &&
+        qAbs(beatPulsePhase_ - boundedBeatPhase) < 0.002 &&
+        qAbs(stepsPerSecond_ - boundedRate) < 0.01 && active_ == active) return;
+    pulseState_ = boundedState;
+    pulsePhase_ = boundedPhase;
+    beatPulseState_ = boundedBeatState;
+    beatPulsePhase_ = boundedBeatPhase;
+    stepsPerSecond_ = boundedRate;
+    active_ = active;
+    if (isVisible()) update();
+}
+
+void MetronomeNebulaWidget::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    lastPaintMs_ = animationClock_.elapsed();
+    animationTimer_.start();
+    update();
+}
+
+void MetronomeNebulaWidget::hideEvent(QHideEvent* event)
+{
+    animationTimer_.stop();
+    QWidget::hideEvent(event);
+}
+
+void MetronomeNebulaWidget::paintEvent(QPaintEvent*)
+{
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+    const qint64 nowMs = animationClock_.elapsed();
+    const double seconds = static_cast<double>(nowMs) / 1000.0;
+    const double delta = lastPaintMs_ > 0
+        ? qBound(0.001, static_cast<double>(nowMs - lastPaintMs_) / 1000.0, 0.1)
+        : 1.0 / 30.0;
+    lastPaintMs_ = nowMs;
+    const double morphSpeed = qBound(0.48, static_cast<double>(bpm_) / 150.0, 1.8);
+    const double rapidSteps = qBound(0.0, (stepsPerSecond_ - 4.0) / 8.0, 1.0);
+    double targetStrength = active_
+        ? pulseState_ == 2 ? 1.0 : pulseState_ == 1 ? 0.66 : 0.20
+        : 0.20;
+    if (active_ && pulseState_ == 1) targetStrength *= 1.0 - rapidSteps * 0.45;
+    if (active_ && pulseState_ == 2) targetStrength *= 1.0 - rapidSteps * 0.10;
+    const double stateCoefficient = 1.0 - std::exp(-delta / 0.065);
+    stateEnvelope_ += (targetStrength - stateEnvelope_) * stateCoefficient;
+
+    // The pulse is zero at both step boundaries, so changing between muted,
+    // click, and accent cannot create a brightness jump. It grows into a clear
+    // swell, then releases as its travelling wave moves away from the core.
+    const double rhythm = active_
+        ? std::sin(pulsePhase_ * 3.14159265358979323846)
+        : 0.18;
+    const double targetPulse = stateEnvelope_ * qMax(0.0, rhythm);
+    const double pulseCoefficient = 1.0 - std::exp(-delta / 0.042);
+    pulseEnvelope_ += (targetPulse - pulseEnvelope_) * pulseCoefficient;
+    const double pulse = pulseEnvelope_;
+    const double stepWaveLife = active_ ? qMax(0.0, rhythm) : 0.0;
+    const double beatWaveLife = active_
+        ? qMax(0.0, std::sin(beatPulsePhase_ * 3.14159265358979323846)) : 0.0;
+    const double stepWaveDistance = pulsePhase_ * width() * 0.54;
+    const double beatWaveDistance = beatPulsePhase_ * width() * 0.54;
+    const double waveWidth = qMax(26.0, width() * 0.035);
+    const QColor pulseColour = pulseState_ == 2
+        ? theme::gridBar
+        : pulseState_ == 1 ? theme::accent : theme::nebulaPurple;
+    const QColor beatPulseColour = beatPulseState_ == 2
+        ? theme::gridBar
+        : beatPulseState_ == 1 ? theme::accent : theme::nebulaPurple;
+    const double beatStrength = beatPulseState_ == 2
+        ? 1.0 : beatPulseState_ == 1 ? 0.66 : 0.16;
+    const double subdivisionTail = pulseState_ == 2 ? 0.24 : pulseState_ == 1 ? 0.045 : 0.015;
+    const double stepWaveScale = targetStrength *
+        ((1.0 - rapidSteps) + rapidSteps * subdivisionTail);
+    const double beatWaveScale = rapidSteps * beatStrength;
+    const QPointF centre(width() * 0.56, height() * 0.52);
+
+    painter.fillRect(rect(), QColor(4, 6, 12));
+
+    painter.save();
+    painter.setPen(Qt::NoPen);
+    for (int star = 0; star < 34; ++star) {
+        const double x = std::fmod(star * 0.61803398875 + 0.07, 1.0) * width();
+        const double y = std::fmod(star * 0.41421356237 + 0.13, 1.0) * height();
+        const int alpha = 18 + (star % 5) * 6;
+        painter.setBrush(QColor(213, 222, 232, alpha));
+        painter.drawEllipse(QPointF(x, y), star % 11 == 0 ? 1.0 : 0.55,
+                            star % 11 == 0 ? 1.0 : 0.55);
+    }
+    painter.restore();
+
+    painter.save();
+    painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    for (int layer = 0; layer < 6; ++layer) {
+        const double wave = std::sin(
+            seconds * morphSpeed * (0.25 + layer * 0.031) + layer * 1.17);
+        const double drift = std::cos(
+            seconds * morphSpeed * (0.19 + layer * 0.027) + layer * 0.91);
+        const double cloudPulse = 1.0 + pulse * (0.018 + layer * 0.002);
+        const double cloudWidth = width() * (0.42 + layer * 0.07) * cloudPulse;
+        const double cloudHeight = height() * (0.72 + layer * 0.08) * cloudPulse;
+        const QPointF cloudCentre(
+            centre.x() + wave * width() * 0.13,
+            centre.y() + drift * height() * 0.17);
+        const QColor colour = layer % 3 == 0
+            ? nebulaCyan()
+            : layer % 3 == 1 ? nebulaPurple() : theme::nebulaCoral;
+        QRadialGradient gradient(QPointF(0.0, 0.0), cloudHeight * 0.52);
+        gradient.setColorAt(0.0, theme::withAlpha(colour, 32 + layer * 3));
+        gradient.setColorAt(0.44, theme::withAlpha(colour, 12 + layer));
+        gradient.setColorAt(1.0, Qt::transparent);
+        painter.save();
+        painter.translate(cloudCentre);
+        painter.scale(cloudWidth / cloudHeight, 1.0);
+        painter.setBrush(gradient);
+        painter.setPen(Qt::NoPen);
+        painter.drawEllipse(QPointF(0.0, 0.0), cloudHeight * 0.52, cloudHeight * 0.52);
+        painter.restore();
+    }
+
+    painter.setCompositionMode(QPainter::CompositionMode_Screen);
+    for (int filament = 0; filament < 4; ++filament) {
+        const double direction = filament % 2 == 0 ? 1.0 : -1.0;
+        const double shift = std::sin(
+            seconds * morphSpeed * (0.34 + filament * 0.055) + filament * 1.31);
+        const double counterShift = std::cos(
+            seconds * morphSpeed * (0.25 + filament * 0.045) + filament * 0.77);
+        const double baseY = centre.y() + (filament - 1.5) * height() * 0.12;
+        const auto filamentY = [&](double x) {
+            const double normalizedX = x / qMax(1.0, static_cast<double>(width()));
+            const double flowingCurve =
+                std::sin(normalizedX * 5.4 + shift * 0.75 + filament * 0.82) *
+                    height() * (0.095 + filament * 0.008) +
+                std::cos(normalizedX * 2.7 + counterShift + filament * 0.44) *
+                    height() * 0.055;
+            const double distanceFromCore = qAbs(x - centre.x());
+            const double stepDistanceFromFront = distanceFromCore - stepWaveDistance;
+            const double beatDistanceFromFront = distanceFromCore - beatWaveDistance;
+            const double stepWave = std::exp(
+                -(stepDistanceFromFront * stepDistanceFromFront) /
+                (2.0 * waveWidth * waveWidth));
+            const double beatWave = std::exp(
+                -(beatDistanceFromFront * beatDistanceFromFront) /
+                (2.0 * waveWidth * waveWidth));
+            const double resonance = qMin(
+                1.15,
+                stepWave * stepWaveLife * stepWaveScale +
+                    beatWave * beatWaveLife * beatWaveScale);
+            const double taperDistance = qMax(1.0, width() * 0.34);
+            const double centreTaper = 0.12 + 0.88 * std::exp(
+                -(distanceFromCore * distanceFromCore) /
+                (taperDistance * taperDistance));
+            return baseY + flowingCurve + direction * resonance *
+                height() * 0.105 * centreTaper;
+        };
+        QPainterPath filamentPath;
+        constexpr int kFilamentSegments = 48;
+        std::array<QPointF, kFilamentSegments + 1> filamentPoints;
+        for (int segment = 0; segment <= kFilamentSegments; ++segment) {
+            const double x = -20.0 +
+                (width() + 40.0) * segment / kFilamentSegments;
+            const QPointF point(x, filamentY(x));
+            filamentPoints[segment] = point;
+            if (segment == 0) filamentPath.moveTo(point);
+            else filamentPath.lineTo(point);
+        }
+        const QColor lineColour = filament % 2 == 0
+            ? theme::accent
+            : theme::nebulaPurple.lighter(120);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(
+            theme::withAlpha(lineColour, 10),
+            3.2 + pulse * 0.8 * (1.0 - rapidSteps * 0.85),
+            Qt::SolidLine,
+            Qt::RoundCap));
+        painter.drawPath(filamentPath);
+        painter.setPen(QPen(
+            theme::withAlpha(lineColour, 52),
+            0.75,
+            Qt::SolidLine,
+            Qt::RoundCap));
+        painter.drawPath(filamentPath);
+
+        if (active_ && (stepWaveLife > 0.01 || beatWaveLife > 0.01)) {
+            const double stepStateAlpha = pulseState_ == 2 ? 76.0 : pulseState_ == 1 ? 48.0 : 14.0;
+            const double beatStateAlpha = beatPulseState_ == 2 ? 76.0 : beatPulseState_ == 1 ? 48.0 : 14.0;
+            const double taperDistance = qMax(1.0, width() * 0.34);
+            for (int segment = 1; segment <= kFilamentSegments; ++segment) {
+                const QPointF midpoint =
+                    (filamentPoints[segment - 1] + filamentPoints[segment]) * 0.5;
+                const double distanceFromCore = qAbs(midpoint.x() - centre.x());
+                const double stepDistanceFromFront = distanceFromCore - stepWaveDistance;
+                const double beatDistanceFromFront = distanceFromCore - beatWaveDistance;
+                const double stepWaveBand = std::exp(
+                    -(stepDistanceFromFront * stepDistanceFromFront) /
+                    (2.0 * waveWidth * waveWidth));
+                const double beatWaveBand = std::exp(
+                    -(beatDistanceFromFront * beatDistanceFromFront) /
+                    (2.0 * waveWidth * waveWidth));
+                const double centreTaper = 0.10 + 0.90 * std::exp(
+                    -(distanceFromCore * distanceFromCore) /
+                    (taperDistance * taperDistance));
+                const int beatAlpha = static_cast<int>(
+                    beatStateAlpha * beatWaveLife * beatWaveBand *
+                    beatWaveScale * centreTaper);
+                if (beatAlpha > 1) {
+                    painter.setPen(QPen(
+                        theme::withAlpha(beatPulseColour, beatAlpha),
+                        0.9 + beatWaveScale * 0.55 * centreTaper,
+                        Qt::SolidLine,
+                        Qt::RoundCap));
+                    painter.drawLine(filamentPoints[segment - 1], filamentPoints[segment]);
+                }
+                const int stepAlpha = static_cast<int>(
+                    stepStateAlpha * stepWaveLife * stepWaveBand *
+                    stepWaveScale * centreTaper);
+                if (stepAlpha > 1) {
+                    painter.setPen(QPen(
+                        theme::withAlpha(pulseColour, stepAlpha),
+                        0.9 + stepWaveScale * 0.55 * centreTaper,
+                        Qt::SolidLine,
+                        Qt::RoundCap));
+                    painter.drawLine(filamentPoints[segment - 1], filamentPoints[segment]);
+                }
+            }
+        }
+    }
+
+    if (active_ && (stepWaveLife > 0.01 || beatWaveLife > 0.01)) {
+        painter.setBrush(Qt::NoBrush);
+        const auto drawEchoes = [&](double phase, double scale, int state, QColor colour) {
+            if (scale <= 0.005) return;
+            for (int echo = 0; echo < 2; ++echo) {
+                const double echoProgress = qMax(0.0, phase - echo * 0.13);
+                if (echoProgress <= 0.0) continue;
+                const double echoLife = qMax(
+                    0.0, std::sin(echoProgress * 3.14159265358979323846));
+                const double radiusX = 16.0 + echoProgress * width() * 0.52;
+                const double radiusY = 8.0 + echoProgress * height() * 0.24;
+                const double stateAlpha = state == 2 ? 58.0 : state == 1 ? 36.0 : 9.0;
+                const double echoTaperDistance = qMax(1.0, width() * 0.34);
+                const double echoTaper = std::exp(
+                    -(radiusX * radiusX) /
+                    (echoTaperDistance * echoTaperDistance));
+                painter.setPen(QPen(
+                    theme::withAlpha(
+                        colour,
+                        static_cast<int>(stateAlpha * echoLife * echoTaper * scale)),
+                    0.8 + scale * 0.45,
+                    Qt::SolidLine,
+                    Qt::RoundCap));
+                painter.drawEllipse(centre, radiusX, radiusY);
+            }
+        };
+        drawEchoes(beatPulsePhase_, beatWaveScale, beatPulseState_, beatPulseColour);
+        drawEchoes(pulsePhase_, stepWaveScale, pulseState_, pulseColour);
+    }
+
+    painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    const double glowRadius = 20.0 + pulse * 14.0;
+    QRadialGradient coreGlow(centre, glowRadius);
+    coreGlow.setColorAt(0.0, theme::withAlpha(theme::gridBar, 38));
+    coreGlow.setColorAt(0.28, theme::withAlpha(theme::gridBar, 20));
+    coreGlow.setColorAt(0.58, theme::withAlpha(theme::nebulaPurple, 11));
+    coreGlow.setColorAt(1.0, Qt::transparent);
+    painter.setBrush(coreGlow);
+    painter.setPen(Qt::NoPen);
+    painter.drawEllipse(centre, glowRadius, glowRadius);
+
+    const double coreRadius = 7.5 + pulse * 4.2;
+    QRadialGradient coreMist(centre, coreRadius * 1.65);
+    coreMist.setColorAt(0.0, theme::withAlpha(theme::gridBar, 42));
+    coreMist.setColorAt(0.38, theme::withAlpha(theme::nebulaCoral, 24));
+    coreMist.setColorAt(0.72, theme::withAlpha(theme::nebulaPurple, 15));
+    coreMist.setColorAt(1.0, Qt::transparent);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(coreMist);
+    painter.drawEllipse(centre, coreRadius * 1.65, coreRadius * 1.65);
+
+    painter.setBrush(Qt::NoBrush);
+    const std::array<QColor, 3> coreLineColours{
+        theme::withAlpha(theme::gridBar, 150),
+        theme::withAlpha(theme::nebulaCoral, 94),
+        theme::withAlpha(theme::nebulaPurple, 112)};
+    constexpr int kCoreSegments = 48;
+    for (int ring = 0; ring < 3; ++ring) {
+        QPainterPath coreLine;
+        for (int segment = 0; segment <= kCoreSegments; ++segment) {
+            const double angle = static_cast<double>(segment) / kCoreSegments *
+                6.283185307179586;
+            const double baseRadius = coreRadius * (0.58 + ring * 0.20);
+            const double texture = std::sin(
+                angle * (2.0 + ring) + seconds * (0.58 + ring * 0.16) + ring * 1.37) *
+                coreRadius * (0.035 + ring * 0.012);
+            const double radius = baseRadius + texture;
+            const QPointF point(
+                centre.x() + std::cos(angle) * radius,
+                centre.y() + std::sin(angle) * radius);
+            if (segment == 0) coreLine.moveTo(point);
+            else coreLine.lineTo(point);
+        }
+        painter.setPen(QPen(
+            coreLineColours[ring],
+            ring == 0 ? 1.05 : 0.8,
+            Qt::SolidLine,
+            Qt::RoundCap,
+            Qt::RoundJoin));
+        painter.drawPath(coreLine);
+    }
+
+    QRadialGradient coreSeed(centre, 3.2 + pulse * 0.8);
+    coreSeed.setColorAt(0.0, theme::withAlpha(theme::gridBar, 96));
+    coreSeed.setColorAt(0.38, theme::withAlpha(theme::gridBar, 42));
+    coreSeed.setColorAt(1.0, Qt::transparent);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(coreSeed);
+    painter.drawEllipse(centre, 3.2 + pulse * 0.8, 3.2 + pulse * 0.8);
+    painter.restore();
+}
+
+MetronomePatternWidget::MetronomePatternWidget(QWidget* parent)
+    : QWidget(parent)
+{
+    setMinimumHeight(154);
+    setMouseTracking(true);
+    setAccessibleName(QStringLiteral("Repeating metronome pattern"));
+}
+
+void MetronomePatternWidget::setPattern(
+    int beats,
+    int division,
+    int tempoPulseUnits,
+    const QVector<bool>& enabled,
+    const QVector<bool>& accents)
+{
+    beats_ = qMax(1, beats);
+    division_ = qMax(1, division);
+    tempoPulseUnits_ = qMax(1, tempoPulseUnits);
+    const int steps = beats_ * division_;
+    enabled_ = enabled.mid(0, steps);
+    accents_ = accents.mid(0, steps);
+    enabled_.resize(steps);
+    accents_.resize(steps);
+    setMinimumWidth(beats_ * 128 + 24);
+    updateGeometry();
+    update();
+}
+
+void MetronomePatternWidget::setCurrentStep(int step, bool active)
+{
+    const int bounded = active && !enabled_.isEmpty()
+        ? qBound(0, step, enabled_.size() - 1)
+        : -1;
+    if (currentStep_ == bounded && active_ == active) return;
+    currentStep_ = bounded;
+    active_ = active;
+    update();
+}
+
+QSize MetronomePatternWidget::sizeHint() const
+{
+    return QSize(qMax(720, beats_ * 128 + 24), 154);
+}
+
+void MetronomePatternWidget::paintEvent(QPaintEvent*)
+{
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+    const QRect content = rect().adjusted(12, 8, -12, -8);
+    const double beatWidth = static_cast<double>(content.width()) / beats_;
+    const double stepWidth = beatWidth / division_;
+    const int headerHeight = 30;
+
+    QFont beatFont = font();
+    beatFont.setFamily(QStringLiteral("Bahnschrift"));
+    beatFont.setPointSizeF(qMax(9.0, beatFont.pointSizeF() - 0.5));
+    QFont stepFont = beatFont;
+    stepFont.setPointSizeF(qMax(8.5, beatFont.pointSizeF() - 0.5));
+
+    for (int beat = 0; beat < beats_; ++beat) {
+        const QRectF beatRect(
+            content.left() + beat * beatWidth,
+            content.top(),
+            beatWidth,
+            content.height());
+        painter.setPen(QPen(theme::border, 1.0));
+        painter.setBrush(theme::editorBg);
+        painter.drawRect(beatRect.adjusted(0.5, 0.5, -0.5, -0.5));
+        if (beat % tempoPulseUnits_ == 0) {
+            painter.fillRect(
+                QRectF(beatRect.left(), beatRect.top(), 3.0, beatRect.height()),
+                theme::nebulaPurple);
+        }
+        painter.setFont(beatFont);
+        painter.setPen(theme::textMuted);
+        painter.drawText(
+            beatRect.adjusted(10, 0, -8, -beatRect.height() + headerHeight),
+            Qt::AlignLeft | Qt::AlignVCenter,
+            QStringLiteral("BEAT %1").arg(beat + 1));
+        painter.setPen(QPen(theme::border, 1.0));
+        painter.drawLine(
+            QPointF(beatRect.left(), beatRect.top() + headerHeight),
+            QPointF(beatRect.right(), beatRect.top() + headerHeight));
+
+        for (int division = 0; division < division_; ++division) {
+            const int step = beat * division_ + division;
+            const QRectF stepRect(
+                beatRect.left() + division * stepWidth,
+                beatRect.top() + headerHeight,
+                stepWidth,
+                beatRect.height() - headerHeight);
+            const bool live = active_ && step == currentStep_;
+            if (live) {
+                painter.fillRect(stepRect, theme::withAlpha(theme::accent, 48));
+            }
+            if (division > 0) {
+                painter.setPen(QPen(theme::withAlpha(theme::border, 150), 1.0));
+                painter.drawLine(stepRect.topLeft(), stepRect.bottomLeft());
+            }
+
+            const bool enabled = step < enabled_.size() && enabled_.at(step);
+            const bool accent = enabled && step < accents_.size() && accents_.at(step);
+            const QPointF centre(stepRect.center().x(), stepRect.center().y() - 3.0);
+            painter.setPen(Qt::NoPen);
+            if (accent) {
+                painter.save();
+                painter.translate(centre);
+                painter.rotate(45.0);
+                painter.setBrush(theme::gridBar);
+                painter.drawRect(QRectF(-8.0, -8.0, 16.0, 16.0));
+                painter.restore();
+            } else if (enabled) {
+                painter.setBrush(theme::accent);
+                painter.drawEllipse(centre, 7.0, 7.0);
+            } else {
+                painter.setBrush(theme::editorBg);
+                painter.setPen(QPen(theme::gridBeat, 1.0));
+                painter.drawEllipse(centre, 5.0, 5.0);
+            }
+            painter.setFont(stepFont);
+            painter.setPen(live ? theme::accent.lighter(130) : theme::textMuted);
+            painter.drawText(
+                stepRect.adjusted(2, 0, -2, -5),
+                Qt::AlignHCenter | Qt::AlignBottom,
+                QStringLiteral("%1.%2").arg(beat + 1).arg(division + 1));
+        }
+    }
+}
+
+int MetronomePatternWidget::stepAt(const QPoint& point) const
+{
+    const QRect content = rect().adjusted(12, 8, -12, -8);
+    if (!content.contains(point) || point.y() < content.top() + 30) return -1;
+    const int steps = beats_ * division_;
+    if (steps <= 0 || content.width() <= 0) return -1;
+    return qBound(0, (point.x() - content.left()) * steps / content.width(), steps - 1);
+}
+
+void MetronomePatternWidget::mousePressEvent(QMouseEvent* event)
+{
+    if (event->button() != Qt::LeftButton) {
+        QWidget::mousePressEvent(event);
+        return;
+    }
+    const int step = stepAt(event->position().toPoint());
+    if (step < 0 || step >= enabled_.size() || step >= accents_.size()) return;
+    const bool enabled = enabled_.at(step);
+    const bool accent = enabled && accents_.at(step);
+    const bool nextEnabled = !enabled || !accent;
+    const bool nextAccent = enabled && !accent;
+    enabled_[step] = nextEnabled;
+    accents_[step] = nextAccent;
+    update();
+    if (onStepChanged) onStepChanged(step, nextEnabled, nextAccent);
+}
+
 PerformanceHomeWidget::PerformanceHomeWidget(QWidget* parent)
     : QWidget(parent)
 {

@@ -73,6 +73,7 @@ struct Jam2RuntimeOptions {
     int drift_deadband_ppm = 25;
     int drift_max_correction_ppm = 500;
     bool metronome = false;
+    bool metronome_transport_gated = false;
     int bpm = 120;
     double metronome_level = 1.0;
     jam2::metronome::ClickSound metronome_sound =

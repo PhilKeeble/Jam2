@@ -78,6 +78,7 @@ struct EngineConfig {
     int playback_ratio_ramp_ms = 250;
     bool diagnostics_enabled = false;
     bool metronome_enabled = false;
+    bool metronome_transport_gated = false;
     metronome::PatternSnapshot metronome_pattern{};
     int metronome_level_ppm = 1000000;
     metronome::ClickSound metronome_sound = metronome::ClickSound::Classic;
@@ -96,6 +97,7 @@ struct EngineConfig {
 enum class EngineCommandType : std::uint8_t {
     Stop,
     SetMetronomeEnabled,
+    SetMetronomeTransportGated,
     SetMetronomePattern,
     SetMetronomeLevel,
     SetMetronomeSound,
@@ -264,6 +266,8 @@ struct EngineSnapshot {
     std::uint64_t network_capture_detach_count = 0;
     bool network_playback_enabled = false;
     bool metronome_enabled = false;
+    bool metronome_transport_gated = false;
+    bool transport_playback_active = false;
     metronome::PatternSnapshot metronome_pattern{};
     EngineMetronomeMode metronome_mode = EngineMetronomeMode::SharedGrid;
     bool leader_audio_local_click = false;

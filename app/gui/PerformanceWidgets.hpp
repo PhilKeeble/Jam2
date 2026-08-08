@@ -20,6 +20,70 @@
 class QPainter;
 class QKeyEvent;
 
+class MetronomeNebulaWidget final : public QWidget {
+public:
+    explicit MetronomeNebulaWidget(QWidget* parent = nullptr);
+
+    void setBpm(int bpm);
+    void setPulseState(
+        int state,
+        double phase,
+        int beatState,
+        double beatPhase,
+        double stepsPerSecond,
+        bool active);
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
+    void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
+
+private:
+    QTimer animationTimer_;
+    QElapsedTimer animationClock_;
+    int bpm_ = 120;
+    int pulseState_ = 0;
+    int beatPulseState_ = 0;
+    double pulsePhase_ = 0.0;
+    double beatPulsePhase_ = 0.0;
+    double stepsPerSecond_ = 2.0;
+    double stateEnvelope_ = 0.22;
+    double pulseEnvelope_ = 0.0;
+    qint64 lastPaintMs_ = 0;
+    bool active_ = false;
+};
+
+class MetronomePatternWidget final : public QWidget {
+public:
+    explicit MetronomePatternWidget(QWidget* parent = nullptr);
+
+    void setPattern(
+        int beats,
+        int division,
+        int tempoPulseUnits,
+        const QVector<bool>& enabled,
+        const QVector<bool>& accents);
+    void setCurrentStep(int step, bool active);
+
+    std::function<void(int step, bool enabled, bool accent)> onStepChanged;
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    QSize sizeHint() const override;
+
+private:
+    int stepAt(const QPoint& point) const;
+
+    int beats_ = 4;
+    int division_ = 1;
+    int tempoPulseUnits_ = 1;
+    int currentStep_ = -1;
+    bool active_ = false;
+    QVector<bool> enabled_;
+    QVector<bool> accents_;
+};
+
 struct PerformancePeerPresentation {
     std::uint64_t peerId = 0;
     QString label;

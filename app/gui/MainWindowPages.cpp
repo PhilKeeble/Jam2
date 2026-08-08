@@ -24,6 +24,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QFocusEvent>
+#include <QFont>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
@@ -124,6 +125,35 @@ private:
     QPixmap logo_;
     QTimer animation_;
     qreal phase_ = 0.0;
+};
+
+class DoubleClickBpmSpin final : public QSpinBox {
+public:
+    explicit DoubleClickBpmSpin(QWidget* parent)
+        : QSpinBox(parent)
+    {
+        setButtonSymbols(QAbstractSpinBox::NoButtons);
+        setAlignment(Qt::AlignCenter);
+        setKeyboardTracking(false);
+        lineEdit()->setReadOnly(true);
+        lineEdit()->installEventFilter(this);
+        QObject::connect(this, &QAbstractSpinBox::editingFinished, this, [this] {
+            lineEdit()->setReadOnly(true);
+            lineEdit()->deselect();
+        });
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (watched == lineEdit() && event->type() == QEvent::MouseButtonDblClick) {
+            lineEdit()->setReadOnly(false);
+            lineEdit()->setFocus(Qt::MouseFocusReason);
+            lineEdit()->selectAll();
+            return true;
+        }
+        return QSpinBox::eventFilter(watched, event);
+    }
 };
 
 class DetailSectionEdit final : public QLineEdit {
@@ -750,8 +780,11 @@ void MainWindowPages::build(MainWindow& w)
     auto* tempoTop = new QHBoxLayout();
     tempoTop->setContentsMargins(0, 0, 0, 0);
     tempoTop->setSpacing(6);
-    w.performanceMetronomeToggle_ = new QPushButton(QStringLiteral("METRONOME OFF"), tempoCard);
+    w.performanceMetronomeToggle_ = new QPushButton(QStringLiteral("METRONOME ON"), tempoCard);
+    w.performanceMetronomeToggle_->setProperty("active", true);
     w.performanceMetronomeToggle_->setObjectName(QStringLiteral("MetronomeToggle"));
+    w.performanceMetronomeToggle_->setToolTip(QStringLiteral(
+        "Choose whether the click is heard while global playback is running"));
     QObject::connect(w.performanceMetronomeToggle_, &QPushButton::clicked, &w, [&w] {
         if (w.metronomeTransport_.localRunning()) {
             w.stopTrackMetronome();
@@ -1639,10 +1672,11 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
 {
     auto* page = new QWidget(&w);
 
-    w.metronomeBpmSpin_ = new QSpinBox(page);
+    w.metronomeBpmSpin_ = new DoubleClickBpmSpin(page);
     w.metronomeBpmSpin_->setRange(1, 400);
     w.metronomeBpmSpin_->setValue(qBound(1, static_cast<int>(std::lround(w.trackController_.model().acceptedBpm)), 400));
-    applyMutedEditorStyle(w.metronomeBpmSpin_);
+    w.metronomeBpmSpin_->setToolTip(
+        QStringLiteral("Use −/+ or double-click the BPM value to type a tempo"));
 
     w.metronomeBeatsSpin_ = new QComboBox(page);
     for (int beats = 1; beats <= 16; ++beats)
@@ -1742,87 +1776,189 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     w.metronomeCompensationDeadbandSpin_->hide();
     w.metronomeCompensationSlewSpin_->hide();
 
-    w.startTrackMetronomeButton_ = new QPushButton(QStringLiteral("Start"), page);
-    w.stopTrackMetronomeButton_ = new QPushButton(QStringLiteral("Stop"), page);
     w.tapTrackMetronomeButton_ = new QPushButton(QStringLiteral("Tap Tempo"), page);
     w.tapTrackMetronomeButton_->setToolTip(
         QStringLiteral("Tap at least twice; pause for two seconds to begin a new tempo"));
-    w.stopTrackMetronomeButton_->setEnabled(false);
-    w.metronomeMarkerReferenceCheck_ = new QCheckBox(QStringLiteral("Show Current Bar on Views"), page);
-    w.metronomeMarkerReferenceCheck_->setChecked(true);
+    w.metronomeBpmSpin_->setObjectName(QStringLiteral("MetronomeBpm"));
+    QFont bpmFont = w.songTitleEdit_ ? w.songTitleEdit_->font() : page->font();
+    bpmFont.setPointSizeF(30.0);
+    bpmFont.setFeature(QFont::Tag("lnum"), 1);
+    bpmFont.setFeature(QFont::Tag("tnum"), 1);
+    w.metronomeBpmSpin_->setFont(bpmFont);
+    w.tapTrackMetronomeButton_->setObjectName(QStringLiteral("MetronomeTap"));
 
-    w.metronomePatternTable_ = new QTableWidget(page);
-    w.metronomePatternTable_->setRowCount(2);
-    w.metronomePatternTable_->verticalHeader()->setVisible(true);
-    w.metronomePatternTable_->setVerticalHeaderLabels(QStringList{QStringLiteral("Play"), QStringLiteral("Accent")});
-    w.metronomePatternTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    w.metronomePatternTable_->setSelectionMode(QAbstractItemView::NoSelection);
-    w.metronomePatternTable_->setMinimumHeight(110);
-    w.metronomePatternTable_->setStyleSheet(QStringLiteral(
-        "QTableWidget::item { padding: 3px 6px; }"
-        "QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid #8980a6; background: #070811; }"
-        "QCheckBox::indicator:checked { border: 1px solid #e8a44a; background: #e8a44a; }"));
+    auto* content = new QWidget(page);
+    auto* contentLayout = new QVBoxLayout(content);
+    contentLayout->setContentsMargins(14, 12, 14, 18);
+    contentLayout->setSpacing(12);
 
-    auto makeControlPair = [page](const QString& label, QWidget* editor) {
-        auto* pair = new QWidget(page);
-        auto* pairLayout = new QHBoxLayout(pair);
-        pairLayout->setContentsMargins(0, 0, 0, 0);
-        pairLayout->setSpacing(6);
-        pairLayout->addWidget(new QLabel(label, pair));
-        pairLayout->addWidget(editor, 0, Qt::AlignLeft);
-        pairLayout->addStretch(1);
-        return pair;
-    };
-    auto* controls = new QGridLayout();
-    controls->setHorizontalSpacing(24);
-    controls->setVerticalSpacing(10);
-    controls->addWidget(makeControlPair(QStringLiteral("BPM"), w.metronomeBpmSpin_), 0, 0);
-    auto* meter = new QWidget(page);
-    auto* meterLayout = new QHBoxLayout(meter);
-    meterLayout->setContentsMargins(0, 0, 0, 0);
-    meterLayout->setSpacing(6);
-    meterLayout->addWidget(new QLabel(QStringLiteral("Meter"), meter));
-    meterLayout->addWidget(w.metronomeBeatsSpin_);
-    meterLayout->addWidget(new QLabel(QStringLiteral("/"), meter));
-    meterLayout->addWidget(w.metronomeBeatUnitBox_);
-    meterLayout->addStretch(1);
-    controls->addWidget(meter, 0, 1);
-    controls->addWidget(makeControlPair(QStringLiteral("Tempo counts"), w.metronomeTempoPulseBox_), 0, 2);
-    controls->addWidget(makeControlPair(QStringLiteral("Division"), w.metronomeDivisionBox_), 0, 3);
-    auto* modeRow = new QWidget(page);
-    auto* modeLayout = new QHBoxLayout(modeRow);
-    modeLayout->setContentsMargins(0, 0, 0, 0);
-    modeLayout->setSpacing(6);
-    modeLayout->addWidget(new QLabel(QStringLiteral("Mode"), modeRow));
-    modeLayout->addWidget(w.metronomeModeBox_, 0, Qt::AlignLeft);
-    modeLayout->addSpacing(8);
-    modeLayout->addWidget(new QLabel(QStringLiteral("Sound"), modeRow));
-    modeLayout->addWidget(w.metronomeSoundBox_, 0, Qt::AlignLeft);
-    modeLayout->addWidget(w.metronomeCompensationButton_, 0, Qt::AlignLeft);
-    modeLayout->addSpacing(12);
-    modeLayout->addWidget(w.metronomeMarkerReferenceCheck_, 0, Qt::AlignLeft);
-    modeLayout->addStretch(1);
-    controls->addWidget(modeRow, 1, 0, 1, 4);
-    for (int column = 0; column < 4; ++column) controls->setColumnStretch(column, 1);
+    auto* tempoCard = new QGroupBox(QStringLiteral("Tempo"), content);
+    tempoCard->setObjectName(QStringLiteral("MetronomeTempoCard"));
+    tempoCard->setMinimumHeight(126);
+    auto* tempoStack = new QGridLayout(tempoCard);
+    tempoStack->setContentsMargins(1, 1, 1, 1);
+    w.metronomeNebula_ = new MetronomeNebulaWidget(tempoCard);
+    w.metronomeNebula_->setBpm(w.metronomeBpmSpin_->value());
+    tempoStack->addWidget(w.metronomeNebula_, 0, 0);
 
-    auto* buttons = new QHBoxLayout();
-    buttons->addWidget(w.startTrackMetronomeButton_);
-    buttons->addWidget(w.stopTrackMetronomeButton_);
-    buttons->addWidget(w.tapTrackMetronomeButton_);
-    buttons->addStretch(1);
+    auto* tempoControls = new QWidget(tempoCard);
+    tempoControls->setObjectName(QStringLiteral("MetronomeTempoControls"));
+    auto* tempoLayout = new QHBoxLayout(tempoControls);
+    tempoLayout->setContentsMargins(18, 12, 18, 12);
+    tempoLayout->setSpacing(18);
+    w.tapTrackMetronomeButton_->setFixedSize(150, 42);
+    tempoLayout->addWidget(w.tapTrackMetronomeButton_, 0, Qt::AlignVCenter);
 
+    auto* bpmPanel = new QWidget(tempoCard);
+    bpmPanel->setObjectName(QStringLiteral("MetronomeTempoPanel"));
+    bpmPanel->setMinimumWidth(250);
+    bpmPanel->setFixedHeight(42);
+    auto* bpmLayout = new QVBoxLayout(bpmPanel);
+    bpmLayout->setContentsMargins(0, 0, 0, 0);
+    bpmLayout->setSpacing(0);
+    auto* bpmControl = new QHBoxLayout();
+    bpmControl->setContentsMargins(0, 0, 0, 0);
+    bpmControl->setSpacing(8);
+    auto* decreaseBpm = new QPushButton(QStringLiteral("−"), bpmPanel);
+    auto* increaseBpm = new QPushButton(QStringLiteral("+"), bpmPanel);
+    for (QPushButton* button : {decreaseBpm, increaseBpm}) {
+        button->setObjectName(QStringLiteral("MetronomeBpmAdjust"));
+        button->setFixedSize(40, 40);
+        button->setToolTip(w.metronomeBpmSpin_->toolTip());
+    }
+    w.metronomeBpmSpin_->setFixedWidth(136);
+    bpmControl->addWidget(decreaseBpm);
+    bpmControl->addWidget(w.metronomeBpmSpin_);
+    bpmControl->addWidget(increaseBpm);
+    bpmLayout->addLayout(bpmControl);
+    tempoLayout->addWidget(bpmPanel);
+
+    tempoLayout->addStretch(1);
+
+    auto* tempoFacts = new QWidget(tempoCard);
+    tempoFacts->setObjectName(QStringLiteral("MetronomeTempoPanel"));
+    tempoFacts->setMinimumWidth(230);
+    auto* factsLayout = new QGridLayout(tempoFacts);
+    factsLayout->setContentsMargins(14, 0, 0, 0);
+    factsLayout->setHorizontalSpacing(20);
+    auto* meterCaption = new QLabel(QStringLiteral("METER"), tempoFacts);
+    meterCaption->setObjectName(QStringLiteral("MicroHeading"));
+    auto* intervalCaption = new QLabel(QStringLiteral("STEP INTERVAL"), tempoFacts);
+    intervalCaption->setObjectName(QStringLiteral("MicroHeading"));
+    w.metronomeMeterReadout_ = new QLabel(QStringLiteral("4 / 4"), tempoFacts);
+    w.metronomeIntervalReadout_ = new QLabel(QStringLiteral("500.0 ms"), tempoFacts);
+    w.metronomeMeterReadout_->setObjectName(QStringLiteral("MetronomeFact"));
+    w.metronomeIntervalReadout_->setObjectName(QStringLiteral("MetronomeFact"));
+    factsLayout->addWidget(meterCaption, 0, 0);
+    factsLayout->addWidget(intervalCaption, 0, 1);
+    factsLayout->addWidget(w.metronomeMeterReadout_, 1, 0);
+    factsLayout->addWidget(w.metronomeIntervalReadout_, 1, 1);
+    factsLayout->setRowStretch(2, 1);
+    tempoLayout->addWidget(tempoFacts);
+    tempoStack->addWidget(tempoControls, 0, 0);
+    contentLayout->addWidget(tempoCard);
+
+    auto* patternCard = new QFrame(content);
+    patternCard->setObjectName(QStringLiteral("MetronomeCard"));
+    auto* patternLayout = new QVBoxLayout(patternCard);
+    patternLayout->setContentsMargins(0, 0, 0, 8);
+    patternLayout->setSpacing(0);
+    auto* patternHeader = new QWidget(patternCard);
+    patternHeader->setObjectName(QStringLiteral("MetronomeCardHeader"));
+    auto* patternHeaderLayout = new QHBoxLayout(patternHeader);
+    patternHeaderLayout->setContentsMargins(14, 9, 14, 9);
+    auto* repeatingLabel = new QLabel(QStringLiteral("REPEATING PATTERN"), patternHeader);
+    repeatingLabel->setObjectName(QStringLiteral("MicroHeading"));
+    patternHeaderLayout->addWidget(repeatingLabel);
+    patternHeaderLayout->addStretch(1);
+    patternLayout->addWidget(patternHeader);
+
+    w.metronomePatternWidget_ = new MetronomePatternWidget(patternCard);
+    auto* patternScroll = new QScrollArea(patternCard);
+    patternScroll->setWidgetResizable(true);
+    patternScroll->setFrameShape(QFrame::NoFrame);
+    patternScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    patternScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    patternScroll->setMinimumHeight(172);
+    patternScroll->setWidget(w.metronomePatternWidget_);
+    patternLayout->addWidget(patternScroll);
+    auto* legend = new QLabel(patternCard);
+    legend->setText(QStringLiteral(
+        "<span style='color:#e8a44a'>◆</span> <span style='color:#f5f2e9'>Accent</span>"
+        "&nbsp;&nbsp;&nbsp;&nbsp; <span style='color:#66d4cf'>●</span> <span style='color:#f5f2e9'>Click</span>"
+        "&nbsp;&nbsp;&nbsp;&nbsp; <span style='color:#68777a'>○</span> <span style='color:#f5f2e9'>Muted</span>"
+        "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span style='color:#f5f2e9'>Click a beat to cycle its state</span>"));
+    legend->setTextFormat(Qt::RichText);
+    legend->setObjectName(QStringLiteral("MetronomeLegend"));
+    legend->setContentsMargins(14, 5, 14, 3);
+    patternLayout->addWidget(legend);
+    contentLayout->addWidget(patternCard);
+
+    auto* settings = new QHBoxLayout();
+    settings->setSpacing(10);
+    auto* timingCard = new QGroupBox(QStringLiteral("Timing"), content);
+    auto* timingForm = new QFormLayout(timingCard);
+    timingForm->setHorizontalSpacing(18);
+    timingForm->setVerticalSpacing(9);
+    auto* meterEditor = new QWidget(timingCard);
+    auto* meterEditorLayout = new QHBoxLayout(meterEditor);
+    meterEditorLayout->setContentsMargins(0, 0, 0, 0);
+    meterEditorLayout->setSpacing(6);
+    meterEditorLayout->addWidget(w.metronomeBeatsSpin_);
+    meterEditorLayout->addWidget(new QLabel(QStringLiteral("/"), meterEditor));
+    meterEditorLayout->addWidget(w.metronomeBeatUnitBox_);
+    meterEditor->setFixedWidth(138);
+    timingForm->addRow(QStringLiteral("Meter"), meterEditor);
+    timingForm->addRow(QStringLiteral("Tempo counts"), w.metronomeTempoPulseBox_);
+    timingForm->addRow(QStringLiteral("Division"), w.metronomeDivisionBox_);
+    settings->addWidget(timingCard, 1);
+
+    auto* clickCard = new QGroupBox(QStringLiteral("Click"), content);
+    auto* clickForm = new QFormLayout(clickCard);
+    clickForm->setHorizontalSpacing(18);
+    clickForm->setVerticalSpacing(9);
+    clickForm->addRow(QStringLiteral("Sound"), w.metronomeSoundBox_);
+    settings->addWidget(clickCard, 1);
+
+    auto* syncCard = new QGroupBox(QStringLiteral("Sync"), content);
+    auto* syncForm = new QFormLayout(syncCard);
+    syncForm->setHorizontalSpacing(18);
+    syncForm->setVerticalSpacing(9);
+    syncForm->addRow(QStringLiteral("Mode"), w.metronomeModeBox_);
+    w.metronomeModeDescription_ = new QLabel(syncCard);
+    w.metronomeModeDescription_->setObjectName(QStringLiteral("MetronomeModeDescription"));
+    w.metronomeModeDescription_->setWordWrap(true);
+    syncForm->addRow(w.metronomeModeDescription_);
+    syncForm->addRow(w.metronomeCompensationButton_);
+    settings->addWidget(syncCard, 1);
+    contentLayout->addLayout(settings);
+    contentLayout->addStretch(1);
+
+    auto* scroll = new QScrollArea(page);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setWidget(content);
     auto* layout = new QVBoxLayout(page);
-    layout->addLayout(controls);
-    layout->addLayout(buttons);
-    layout->addWidget(w.metronomePatternTable_, 1);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->addWidget(scroll);
 
-    QObject::connect(w.startTrackMetronomeButton_, &QPushButton::clicked, &w, [&w] { w.startTrackMetronome(); });
-    QObject::connect(w.stopTrackMetronomeButton_, &QPushButton::clicked, &w, [&w] { w.stopTrackMetronome(); });
     QObject::connect(w.tapTrackMetronomeButton_, &QPushButton::clicked, &w, [&w] { w.tapTrackMetronomeTempo(); });
-    QObject::connect(w.metronomeMarkerReferenceCheck_, &QCheckBox::toggled, &w, [&w] {
-        w.updatePlaybackGrid();
+    QObject::connect(decreaseBpm, &QPushButton::clicked, w.metronomeBpmSpin_, [&w] {
+        w.metronomeBpmSpin_->setValue(w.metronomeBpmSpin_->value() - 1);
     });
+    QObject::connect(increaseBpm, &QPushButton::clicked, w.metronomeBpmSpin_, [&w] {
+        w.metronomeBpmSpin_->setValue(w.metronomeBpmSpin_->value() + 1);
+    });
+    w.metronomePatternWidget_->onStepChanged = [&w](int step, bool enabled, bool accent) {
+        if (step < 0 || step >= w.metronomeEnabledSteps_.size() ||
+            step >= w.metronomeAccents_.size()) return;
+        w.metronomeEnabledSteps_[step] = enabled;
+        w.metronomeAccents_[step] = accent;
+        w.rebuildMetronomePattern(false);
+    };
     QObject::connect(w.metronomeBpmSpin_, qOverload<int>(&QSpinBox::valueChanged), &w, [&w] {
+        if (w.metronomeNebula_) w.metronomeNebula_->setBpm(w.metronomeBpmSpin_->value());
+        w.rebuildMetronomePattern(false);
         w.updateTrackMetronomeInterval();
         w.refreshLooperLanes();
     });
@@ -1843,10 +1979,11 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
         w.updateTrackMetronomeInterval();
     });
     QObject::connect(w.metronomeBeatUnitBox_, qOverload<int>(&QComboBox::currentIndexChanged), &w, [&w] {
+        w.rebuildMetronomePattern(false);
         w.updateTrackMetronomeInterval();
-        w.sendMetronomePatternToJam();
     });
     QObject::connect(w.metronomeTempoPulseBox_, qOverload<int>(&QComboBox::currentIndexChanged), &w, [&w] {
+        w.rebuildMetronomePattern(false);
         w.updateTrackMetronomeInterval();
         w.refreshLooperLanes();
     });

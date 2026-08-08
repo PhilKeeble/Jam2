@@ -41,9 +41,12 @@ void applyCustomTheme(QApplication& app)
             background: #050809; color: #e9e6dc;
             font-family: "Segoe UI Variable", "Segoe UI"; font-size: 10.5pt;
         }
+        QLineEdit#SongTitle, QSpinBox#MetronomeBpm {
+            font-family: Georgia;
+        }
         QLineEdit#SongTitle {
             color: #e9e6dc; background: transparent; border: 0;
-            font-family: Georgia; font-size: 16pt; padding: 3px 8px;
+            font-size: 16pt; padding: 3px 8px;
         }
         QLabel#StatusPill {
             color: #c6d0d0; background: #101719; border: 1px solid #354247;
@@ -118,6 +121,49 @@ void applyCustomTheme(QApplication& app)
         }
         QFrame#TempoCard {
             background: #050809; border: 1px solid #526368; border-radius: 4px;
+        }
+        QGroupBox#MetronomeTempoCard {
+            background: #04060c; border-color: #526368;
+        }
+        QWidget#MetronomeTempoControls, QWidget#MetronomeTempoPanel {
+            background: transparent;
+        }
+        QWidget#MetronomeTempoControls QLabel {
+            background: transparent;
+        }
+        QFrame#MetronomeCard {
+            background: #0b1011; border: 1px solid #354247; border-radius: 4px;
+        }
+        QWidget#MetronomeCardHeader {
+            background: #101719; border-bottom: 1px solid #354247;
+        }
+        QSpinBox#MetronomeBpm {
+            color: #ffd68e; background: transparent; border: 0;
+            font-size: 30pt; padding: 0;
+        }
+        QPushButton#MetronomeTap {
+            color: #f5f2e9; font-family: Bahnschrift; font-size: 11pt;
+            padding: 9px 12px; text-align: center;
+        }
+        QPushButton#MetronomeBpmAdjust {
+            color: #d7dedb; background: #070b0c; border: 1px solid #526368;
+            font-family: Bahnschrift; font-size: 17pt; padding: 0;
+        }
+        QPushButton#MetronomeBpmAdjust:hover {
+            color: #ffd68e; border-color: #e8a44a;
+        }
+        QLabel#MetronomeFact {
+            color: #f0ede4; font-family: Bahnschrift; font-size: 11pt;
+            font-weight: 600;
+        }
+        QLabel#MetronomeSecondary {
+            color: #9ca9ab; font-family: Bahnschrift; font-size: 9pt;
+        }
+        QLabel#MetronomeLegend {
+            color: #f5f2e9; font-family: Bahnschrift; font-size: 10pt;
+        }
+        QLabel#MetronomeModeDescription {
+            color: #f0ede4; font-size: 10pt; padding-top: 5px;
         }
         QPushButton#MetronomeToggle, QPushButton#TempoButton {
             background: transparent; border: 0; border-radius: 0;
