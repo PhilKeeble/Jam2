@@ -499,7 +499,6 @@ private:
     QString guiLogPath_;
     BeatGridWidget* chordGrid_ = nullptr;
     BeatGridWidget* beatGrid_ = nullptr;
-    QComboBox* drumKitBox_ = nullptr;
     BeatGridWidget* lyricGrid_ = nullptr;
     QTabWidget* tabs_ = nullptr;
     QStackedWidget* performanceStageStack_ = nullptr;

@@ -1763,8 +1763,8 @@ void PerformanceHomeWidget::paintBankStrip(QPainter& painter, int left, int top)
     font.setWeight(QFont::DemiBold);
     painter.setFont(font);
     painter.setPen(QColor(156, 169, 171));
-    painter.drawText(QRect(left, top, 38, 24), Qt::AlignVCenter, QStringLiteral("BANK"));
-    int x = left + 42;
+    painter.drawText(QRect(left, top, 56, 24), Qt::AlignVCenter, QStringLiteral("SECTION"));
+    int x = left + 60;
     for (int bank = 0; bank < 4; ++bank) {
         const QRect cell(x, top, 28, 24);
         bankHitRects_[static_cast<std::size_t>(bank)] = cell;
@@ -1824,7 +1824,7 @@ void PerformanceHomeWidget::paintLooperLaunch(QPainter& painter, const QRect& bo
     painter.drawText(
         bounds.adjusted(0, 7, -10, 0),
         Qt::AlignRight | Qt::AlignTop,
-        QStringLiteral("BANK %1").arg(QChar(QLatin1Char('A').unicode() + liveBank_)));
+        QStringLiteral("SECTION %1").arg(QChar(QLatin1Char('A').unicode() + liveBank_)));
 
     int noticeTop = 25;
     if (!trackTransferStatus_.isEmpty()) {
@@ -1891,7 +1891,7 @@ void PerformanceHomeWidget::paintLooperLaunch(QPainter& painter, const QRect& bo
         painter.drawText(
             wave,
             Qt::AlignCenter,
-            QStringLiteral("NO CACHED BANK WAVEFORM"));
+            QStringLiteral("NO CACHED SECTION WAVEFORM"));
     }
 
     trackSliderRect_ = QRect(

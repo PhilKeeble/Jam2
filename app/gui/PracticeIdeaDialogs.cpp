@@ -4,9 +4,7 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
-#include <QDoubleSpinBox>
 #include <QFormLayout>
-#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPlainTextEdit>
@@ -73,7 +71,7 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(
     auto* targetBank = new QComboBox(&dialog);
     for (int bank = 0; bank < 4; ++bank) {
         targetBank->addItem(
-            QStringLiteral("Bank %1").arg(QChar(QLatin1Char('A').unicode() + bank)),
+            QStringLiteral("Section %1").arg(QChar(QLatin1Char('A').unicode() + bank)),
             bank);
     }
     targetBank->setCurrentIndex(qBound(0, defaults.targetSectionIndex, 3));
@@ -251,7 +249,7 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(
         });
     refreshProfile();
     refreshProfileOptions();
-    form->addRow(QStringLiteral("Bank"), targetBank);
+    form->addRow(QStringLiteral("Section"), targetBank);
     form->addRow(QStringLiteral("Parts"), parts);
     form->addRow(QStringLiteral("Key"), key);
     form->addRow(QStringLiteral("Style"), style);
@@ -268,9 +266,9 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(
     auto* description = new QLabel(
         QStringLiteral(
             "Creates a full arrangement or replaces only its pitched or drum parts. Generation starts "
-            "with a random compatible meter. The target bank's current meter is marked in the list when you want to keep it explicitly. "
-            "Partial generation starts with the target bank's current tempo as an exact override; untick Use exact BPM to choose from the style's tempo range. "
-            "Untouched banks inherit Bank A's timing. Partial generation also starts with the current section length. "
+            "with a random compatible meter. The target section's current meter is marked in the list when you want to keep it explicitly. "
+            "Partial generation starts with the target section's current tempo as an exact override; untick Use exact BPM to choose from the style's tempo range. "
+            "Untouched sections inherit Section A's timing. Partial generation also starts with the current section length. "
             "Choose a meter while leaving Style random to generate from any style that supports it. "
             "Form, scale, production, and other relationships are chosen automatically from the compatible profile. "
             "Complexity unlocks musical tools without forcing every tool into the result."),
@@ -310,7 +308,7 @@ std::optional<ContinueIdeaRequest> askForIdeaContinuation(
         const QString state = defaults.bankHasContent.value(bank)
             ? bankName.isEmpty() ? QStringLiteral("has material") : bankName
             : QStringLiteral("empty");
-        const QString label = QStringLiteral("Bank %1 — %2")
+        const QString label = QStringLiteral("Section %1 — %2")
             .arg(QChar(QLatin1Char('A').unicode() + bank), state);
         source->addItem(label, bank);
         target->addItem(label, bank);
@@ -336,12 +334,12 @@ std::optional<ContinueIdeaRequest> askForIdeaContinuation(
     updateState();
 
     auto* description = new QLabel(QStringLiteral(
-        "Analyses the source bank's harmony, timing, groove, and melodic rhythm, then creates a related but contrasting B section. The source bank is never changed."),
+        "Analyses the source section's harmony, timing, groove, and melodic rhythm, then creates a related but contrasting section. The source section is never changed."),
         &dialog);
     description->setWordWrap(true);
     auto* form = new QFormLayout();
-    form->addRow(QStringLiteral("Source Bank"), source);
-    form->addRow(QStringLiteral("Target Bank"), target);
+    form->addRow(QStringLiteral("Source Section"), source);
+    form->addRow(QStringLiteral("Target Section"), target);
     auto* layout = new QVBoxLayout(&dialog);
     layout->addWidget(description);
     layout->addLayout(form);
@@ -387,6 +385,18 @@ std::optional<ReferenceRenderSettings> askForReferenceRender(
     voicing->addItem(QStringLiteral("Spread"), static_cast<int>(ChordVoicing::Spread));
     voicing->addItem(QStringLiteral("Voice-led"), static_cast<int>(ChordVoicing::VoiceLed));
     voicing->setCurrentIndex(voicing->findData(static_cast<int>(defaults.voicing)));
+    auto* drumKit = new QComboBox(&dialog);
+    drumKit->addItem(
+        QStringLiteral("Style default"),
+        static_cast<int>(ReferenceDrumKit::StyleDefault));
+    drumKit->addItem(
+        QStringLiteral("Acoustic Kit"),
+        static_cast<int>(ReferenceDrumKit::Acoustic));
+    drumKit->addItem(
+        QStringLiteral("Electronic Kit"),
+        static_cast<int>(ReferenceDrumKit::Electronic));
+    drumKit->setCurrentIndex(
+        drumKit->findData(static_cast<int>(defaults.drumKit)));
     int commonBeats = 0;
     for (int beats : {chordBeats, beatBeats, melodyBeats, bassBeats, supportBeats}) {
         if (beats <= 0) continue;
@@ -399,7 +409,7 @@ std::optional<ReferenceRenderSettings> askForReferenceRender(
     const qint64 frames = static_cast<qint64>(std::ceil(seconds * defaults.sampleRate));
     auto* summary = new QLabel(
         sectionCount > 1
-            ? QStringLiteral("%1 sections -> Banks A-%2 | %3 BPM | %4 Hz")
+            ? QStringLiteral("%1 sections -> Sections A-%2 | %3 BPM | %4 Hz")
                 .arg(sectionCount)
                 .arg(QChar(static_cast<ushort>('A' + qBound(1, sectionCount, 4) - 1)))
                 .arg(defaults.bpm, 0, 'f', 1)
@@ -408,31 +418,6 @@ std::optional<ReferenceRenderSettings> askForReferenceRender(
                 .arg(defaults.bpm, 0, 'f', 1).arg(defaults.sampleRate).arg(commonBeats)
                 .arg(seconds, 0, 'f', 2).arg(frames),
         &dialog);
-    auto* advanced = new QGroupBox(QStringLiteral("Advanced"), &dialog);
-    advanced->setCheckable(true);
-    advanced->setChecked(false);
-    auto* advancedForm = new QFormLayout(advanced);
-    auto makeSpin = [advanced](double value, double minimum, double maximum, int decimals) {
-        auto* spin = new QDoubleSpinBox(advanced);
-        spin->setRange(minimum, maximum);
-        spin->setDecimals(decimals);
-        spin->setValue(value);
-        return spin;
-    };
-    QDoubleSpinBox* chordLevel = makeSpin(defaults.chordLevel, 0.01, 1.0, 2);
-    QDoubleSpinBox* drumLevel = makeSpin(defaults.drumLevel, 0.01, 1.0, 2);
-    QDoubleSpinBox* melodyLevel = makeSpin(defaults.melodyLevel, 0.01, 1.0, 2);
-    QDoubleSpinBox* bassLevel = makeSpin(defaults.bassLevel, 0.01, 1.0, 2);
-    QDoubleSpinBox* supportLevel = makeSpin(defaults.supportLevel, 0.01, 1.0, 2);
-    QDoubleSpinBox* attack = makeSpin(defaults.attackMs, 0.0, 100.0, 1);
-    QDoubleSpinBox* release = makeSpin(defaults.releaseMs, 5.0, 1000.0, 1);
-    advancedForm->addRow(QStringLiteral("Chord level"), chordLevel);
-    advancedForm->addRow(QStringLiteral("Drum level"), drumLevel);
-    advancedForm->addRow(QStringLiteral("Melody level"), melodyLevel);
-    advancedForm->addRow(QStringLiteral("Bass level"), bassLevel);
-    advancedForm->addRow(QStringLiteral("Support level"), supportLevel);
-    advancedForm->addRow(QStringLiteral("Attack (ms)"), attack);
-    advancedForm->addRow(QStringLiteral("Release (ms)"), release);
     auto* form = new QFormLayout();
     form->addRow(QStringLiteral("Layers"), chords);
     form->addRow(QString(), drums);
@@ -440,6 +425,7 @@ std::optional<ReferenceRenderSettings> askForReferenceRender(
     form->addRow(QString(), bass);
     form->addRow(QString(), support);
     form->addRow(QStringLiteral("Voicing"), voicing);
+    form->addRow(QStringLiteral("Drum Kit"), drumKit);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
     buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Render"));
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
@@ -447,7 +433,6 @@ std::optional<ReferenceRenderSettings> askForReferenceRender(
     auto* layout = new QVBoxLayout(&dialog);
     layout->addWidget(summary);
     layout->addLayout(form);
-    layout->addWidget(advanced);
     layout->addWidget(buttons);
     if (dialog.exec() != QDialog::Accepted ||
         (!chords->isChecked() && !drums->isChecked() && !melody->isChecked() &&
@@ -460,13 +445,8 @@ std::optional<ReferenceRenderSettings> askForReferenceRender(
     defaults.renderBass = bass->isChecked();
     defaults.renderSupport = support->isChecked();
     defaults.voicing = static_cast<ChordVoicing>(voicing->currentData().toInt());
-    defaults.chordLevel = chordLevel->value();
-    defaults.drumLevel = drumLevel->value();
-    defaults.melodyLevel = melodyLevel->value();
-    defaults.bassLevel = bassLevel->value();
-    defaults.supportLevel = supportLevel->value();
-    defaults.attackMs = attack->value();
-    defaults.releaseMs = release->value();
+    defaults.drumKit = static_cast<ReferenceDrumKit>(
+        drumKit->currentData().toInt());
     return defaults;
 }
 

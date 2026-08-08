@@ -477,7 +477,7 @@ PreparedMixResult PreparedMixRenderer::renderSequence(
             segment.repeats < 1 || segment.repeats > 64 ||
             segment.exactOutputFrames <= 0 ||
             segment.exactOutputFrames > maximumFrames) {
-            result.error = QStringLiteral("export contains an invalid bank, repeat, or duration");
+            result.error = QStringLiteral("export contains an invalid section, repeat, or duration");
             return result;
         }
         if (segment.exactOutputFrames >
@@ -520,7 +520,7 @@ PreparedMixResult PreparedMixRenderer::renderSequence(
             bank,
             segment.exactOutputFrames);
         if (!bankResult.error.isEmpty()) {
-            result.error = QStringLiteral("Bank %1: %2")
+            result.error = QStringLiteral("Section %1: %2")
                 .arg(QChar(QLatin1Char('A').unicode() + bank), bankResult.error);
             return result;
         }
@@ -580,7 +580,7 @@ PreparedMixResult PreparedMixRenderer::renderSequence(
     ](const QString& path, qint64 exactFrames, QString& error) {
         if (path.isEmpty()) {
             if (!writeSilence(exactFrames)) {
-                error = QStringLiteral("cannot write silent bank audio");
+                error = QStringLiteral("cannot write silent section audio");
                 return false;
             }
             return true;
@@ -589,7 +589,7 @@ PreparedMixResult PreparedMixRenderer::renderSequence(
             jam2::wav::inspect_pcm16_file(nativeFilePath(path));
         if (!inspected || inspected.info.channels != 1 ||
             inspected.info.sample_rate != static_cast<std::uint32_t>(sampleRate)) {
-            error = QStringLiteral("temporary bank render is not compatible mono PCM16");
+            error = QStringLiteral("temporary section render is not compatible mono PCM16");
             return false;
         }
         QFile source(path);
@@ -597,7 +597,7 @@ PreparedMixResult PreparedMixRenderer::renderSequence(
                 static_cast<std::uint64_t>(std::numeric_limits<qint64>::max()) ||
             !source.open(QIODevice::ReadOnly) ||
             !source.seek(static_cast<qint64>(inspected.info.data_offset))) {
-            error = QStringLiteral("cannot read temporary bank render");
+            error = QStringLiteral("cannot read temporary section render");
             return false;
         }
         const qint64 availableFrames = static_cast<qint64>(qMin<std::uint64_t>(
@@ -609,20 +609,20 @@ PreparedMixResult PreparedMixRenderer::renderSequence(
         while (bytesRemaining > 0) {
             const qint64 count = qMin(bytesRemaining, kCopyBlockBytes);
             if (source.read(block.data(), count) != count) {
-                error = QStringLiteral("temporary bank render ended unexpectedly");
+                error = QStringLiteral("temporary section render ended unexpectedly");
                 return false;
             }
             const QByteArrayView view(block.constData(), count);
             hash.addData(view);
             if (output.write(view.data(), view.size()) != view.size()) {
-                error = QStringLiteral("cannot write bank audio to export");
+                error = QStringLiteral("cannot write section audio to export");
                 return false;
             }
             bytesRemaining -= count;
         }
         const qint64 paddingFrames = exactFrames - qMin(exactFrames, availableFrames);
         if (paddingFrames > 0 && !writeSilence(paddingFrames)) {
-            error = QStringLiteral("cannot pad bank audio to its section boundary");
+            error = QStringLiteral("cannot pad section audio to its boundary");
             return false;
         }
         return true;

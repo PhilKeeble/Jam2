@@ -2428,7 +2428,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                 controllerSourceChord == jam2::practice::generatedChordFingerprint(
                     controllerModel.section(0)) &&
                 controllerModel.section(1).generatedKind == QStringLiteral("practice") &&
-                controllerModel.section(1).name == QStringLiteral("Continuation of Bank A") &&
+                controllerModel.section(1).name == QStringLiteral("Continuation of Section A") &&
                 controllerModel.section(1).generatedRecipe.isValid());
         }
 
@@ -6043,6 +6043,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         settings.renderChords = true;
         settings.renderDrums = true;
         settings.renderMelody = true;
+        settings.drumKit =
+            jam2::practice::ReferenceDrumKit::Electronic;
         const QString workspace = QDir::current().absoluteFilePath(
             QStringLiteral("build/manual-reference-test-") +
             QUuid::createUuid().toString(QUuid::WithoutBraces));
@@ -6065,6 +6067,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             rendered.chords.eventCount > 0 &&
             rendered.drums.eventCount > 0 &&
             rendered.melody.eventCount > 0 &&
+            rendered.diagnostics.contains(
+                QStringLiteral("drum_patch=base:electronic")) &&
             chordWav && drumWav && melodyWav &&
             pcm16WavHasSignal(rendered.chords.path, chordWav.info) &&
             pcm16WavHasSignal(rendered.drums.path, drumWav.info) &&
@@ -6584,6 +6588,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         {QStringLiteral("render_melody"), false},
         {QStringLiteral("render_bass"), false},
         {QStringLiteral("render_support"), false},
+        {QStringLiteral("chord_voicing"), 0},
+        {QStringLiteral("drum_kit"), 0},
     };
     modelError.clear();
     record(QStringLiteral("reference-render.accept-complete-request"),

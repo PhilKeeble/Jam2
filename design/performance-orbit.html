@@ -702,6 +702,7 @@
     .detail-body { position: relative; min-height: 0; overflow: hidden; }
     .detail-layer { display: none; width: 100%; height: 100%; overflow: hidden; scrollbar-color: #4a585b #101617; }
     .detail-layer.active { display: grid; grid-template-rows: 56px minmax(0, 1fr); }
+    .detail-layer[data-layer="metronome"].active { grid-template-rows: minmax(0, 1fr); }
     .chord-detail {
       display: grid;
       grid-template-columns: repeat(12, 112px);
@@ -1304,57 +1305,313 @@
 
     .metronome-workspace {
       display: grid;
-      grid-template-rows: auto 1fr;
+      gap: 14px;
+      align-content: start;
+      min-width: 980px;
+      min-height: 100%;
+      padding: 18px 22px 32px;
+    }
+    .metro-hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
       gap: 12px;
-      min-width: 840px;
-      height: 100%;
-      padding: 14px;
     }
-    .metro-controls {
-      display: grid;
-      grid-template-columns: repeat(5, minmax(120px, 1fr));
-      gap: 8px;
-    }
-    .control-field {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 10px;
+    .metro-tempo-card,
+    .metro-pattern-panel,
+    .metro-setting-card {
       border: 1px solid #303c3f;
-      background: #101617;
-      color: #7d898c;
+      border-radius: 4px;
+      background: linear-gradient(145deg, #11191a, #0c1213);
+      box-shadow: inset 0 1px rgba(255,255,255,.018);
+    }
+    .metro-tempo-card {
+      position: relative;
+      display: grid;
+      grid-template-columns: 96px 210px minmax(300px, 1fr) 220px;
+      align-items: center;
+      gap: 18px;
+      min-height: 126px;
+      padding: 16px 18px;
+      overflow: hidden;
+    }
+    .metro-card-kicker,
+    .metro-panel-title span,
+    .metro-setting-card h3 {
+      color: #788689;
       font: 8px "Bahnschrift", sans-serif;
+      letter-spacing: .11em;
       text-transform: uppercase;
     }
-    .control-field input[type="number"], .control-field select {
-      width: 80px;
-      height: 27px;
-      border: 1px solid #3b484c;
-      background: #080d0e;
+    .metro-tempo-head {
+      position: relative;
+      z-index: 3;
+      display: flex;
+      align-self: stretch;
+      flex-direction: column;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+      padding-right: 17px;
+      border-right: 1px solid #2d383b;
+    }
+    .metro-tap-button {
+      height: 23px;
+      padding: 0 8px;
+      border-color: #3a484b;
+      background: rgba(8,13,14,.72);
+      color: #8e9b9d;
+      font-size: 7px;
+      letter-spacing: .08em;
+    }
+    .metro-tap-button:hover { border-color: #80643d; color: var(--amber-hi); }
+    .metro-bpm-control {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: 30px 1fr 30px;
+      align-items: center;
+      gap: 5px;
+      margin-top: 0;
+    }
+    .metro-bpm-control button {
+      height: 32px;
+      border: 1px solid #3a484b;
+      border-radius: 3px;
+      background: #0a1011;
+      color: #9dabad;
+      cursor: pointer;
+    }
+    .metro-bpm-control button:hover { border-color: #80643d; color: var(--amber-hi); }
+    .metro-bpm-control input {
+      width: 100%;
+      padding: 0;
+      border: 0;
+      outline: 0;
+      background: transparent;
       color: var(--amber-hi);
+      font: 400 52px/1 Georgia, serif;
       text-align: center;
+      text-shadow: 0 0 20px rgba(232,164,74,.16);
     }
-    .control-field input[type="range"] { width: 100px; accent-color: var(--amber); }
-    .metro-pattern {
-      display: grid;
-      grid-template-columns: 92px repeat(16, 1fr);
-      grid-template-rows: repeat(2, 52px);
-      border-top: 1px solid #364246;
-      border-left: 1px solid #364246;
+    .metro-bpm-control input::-webkit-inner-spin-button { appearance: none; }
+    .metro-bpm-unit { display: block; margin-top: -4px; color: #657275; font: 8px "Bahnschrift", sans-serif; letter-spacing: .12em; text-align: center; }
+    .metro-card-kicker,
+    .metro-bpm-control,
+    .metro-bpm-unit,
+    .metro-tempo-facts { position: relative; z-index: 2; }
+    .tempo-nebula {
+      --metro-pulse-duration: 508ms;
+      --metro-morph-duration: 2034ms;
+      --metro-morph-alt-duration: 2542ms;
+      --metro-orbit-duration: 4068ms;
+      --metro-orbit-alt-duration: 2929ms;
+      --metro-flash-duration: 300ms;
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      height: 92px;
+      overflow: hidden;
+      border-radius: 50%;
+      opacity: .92;
+      filter: saturate(.88);
+      pointer-events: none;
+      transition: opacity .24s ease, filter .24s ease;
     }
-    .pattern-label, .pattern-cell {
+    .tempo-nebula::before {
+      content: "";
+      position: absolute;
+      inset: 12% 5%;
+      border-radius: 50%;
+      background: radial-gradient(ellipse at center, rgba(232,164,74,.05), rgba(102,212,207,.025) 38%, transparent 72%);
+      box-shadow: inset 0 0 22px rgba(102,212,207,.035);
+    }
+    .tempo-nebula.disabled { opacity: .25; filter: saturate(.18); }
+    .tempo-nebula.disabled .tempo-nebula-cloud,
+    .tempo-nebula.disabled .tempo-nebula-orbit,
+    .tempo-nebula.disabled .tempo-nebula-core { animation-play-state: paused; }
+    .tempo-nebula-cloud {
+      position: absolute;
+      mix-blend-mode: screen;
+      filter: blur(9px);
+      will-change: transform, border-radius;
+    }
+    .tempo-nebula-cloud.cloud-a {
+      top: 24%;
+      left: 14%;
+      width: 54%;
+      height: 50%;
+      background: radial-gradient(ellipse at 64% 46%, rgba(102,212,207,.35), rgba(70,129,136,.12) 46%, transparent 72%);
+      animation: tempo-nebula-morph-a var(--metro-morph-duration) ease-in-out infinite alternate;
+    }
+    .tempo-nebula-cloud.cloud-b {
+      top: 17%;
+      right: 11%;
+      width: 48%;
+      height: 61%;
+      background: radial-gradient(ellipse at 37% 54%, rgba(137,111,205,.32), rgba(96,75,151,.1) 47%, transparent 73%);
+      animation: tempo-nebula-morph-b var(--metro-morph-alt-duration) ease-in-out infinite alternate-reverse;
+    }
+    .tempo-nebula-orbit {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 78px;
+      height: 78px;
+      border: 1px solid rgba(102,212,207,.14);
+      border-radius: 50%;
+      animation: tempo-nebula-orbit var(--metro-orbit-duration) linear infinite;
+      will-change: transform;
+    }
+    .tempo-nebula-orbit.orbit-b {
+      width: 54px;
+      height: 54px;
+      border-color: rgba(137,111,205,.13);
+      animation-duration: var(--metro-orbit-alt-duration);
+      animation-direction: reverse;
+    }
+    .tempo-nebula-orbit::after {
+      content: "";
+      position: absolute;
+      top: -2px;
+      left: 50%;
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: var(--cyan-hi);
+      box-shadow: 0 0 8px var(--cyan), 0 0 16px rgba(102,212,207,.42);
+    }
+    .tempo-nebula-orbit.orbit-b::after {
+      top: auto;
+      right: 9%;
+      bottom: 3px;
+      left: auto;
+      width: 3px;
+      height: 3px;
+      background: #b19de8;
+      box-shadow: 0 0 8px #896fcd, 0 0 14px rgba(137,111,205,.42);
+    }
+    .tempo-nebula-core {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 9px;
+      height: 9px;
+      border: 1px solid #f3c178;
+      border-radius: 50%;
+      background: #e8a44a;
+      box-shadow: 0 0 8px rgba(232,164,74,.9), 0 0 23px rgba(232,164,74,.38), 0 0 42px rgba(232,164,74,.12);
+      transform: translate(-50%, -50%);
+      animation: tempo-nebula-breathe var(--metro-pulse-duration) ease-in-out infinite;
+      will-change: transform, box-shadow;
+    }
+    .tempo-nebula.beat .tempo-nebula-core { animation: tempo-nebula-beat var(--metro-flash-duration) ease-out; }
+    @keyframes tempo-nebula-morph-a {
+      0% { border-radius: 64% 36% 55% 45% / 46% 61% 39% 54%; transform: translate(-8%, 5%) rotate(-8deg) scale(.86, .95); }
+      100% { border-radius: 38% 62% 36% 64% / 59% 40% 60% 41%; transform: translate(25%, -6%) rotate(13deg) scale(1.12, .82); }
+    }
+    @keyframes tempo-nebula-morph-b {
+      0% { border-radius: 42% 58% 65% 35% / 62% 43% 57% 38%; transform: translate(10%, -4%) rotate(9deg) scale(.9, 1.08); }
+      100% { border-radius: 68% 32% 44% 56% / 38% 59% 41% 62%; transform: translate(-27%, 7%) rotate(-16deg) scale(1.15, .82); }
+    }
+    @keyframes tempo-nebula-orbit {
+      from { transform: translate(-50%, -50%) rotate(0deg); }
+      to { transform: translate(-50%, -50%) rotate(360deg); }
+    }
+    @keyframes tempo-nebula-breathe {
+      0%, 100% { transform: translate(-50%, -50%) scale(.82); opacity: .68; }
+      18% { transform: translate(-50%, -50%) scale(1.14); opacity: 1; }
+      48% { transform: translate(-50%, -50%) scale(.94); opacity: .82; }
+    }
+    @keyframes tempo-nebula-beat {
+      0% { transform: translate(-50%, -50%) scale(.72); box-shadow: 0 0 5px rgba(232,164,74,.65), 0 0 14px rgba(232,164,74,.2); }
+      42% { transform: translate(-50%, -50%) scale(1.55); box-shadow: 0 0 12px rgba(232,164,74,1), 0 0 34px rgba(232,164,74,.62), 0 0 56px rgba(232,164,74,.22); }
+      100% { transform: translate(-50%, -50%) scale(1); box-shadow: 0 0 8px rgba(232,164,74,.9), 0 0 23px rgba(232,164,74,.38); }
+    }
+    .metro-tempo-facts {
       display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin-top: 0;
+      padding-left: 18px;
+      border-left: 1px solid #2d383b;
+    }
+    .metro-tempo-facts span { padding-top: 8px; border-top: 1px solid #2d383b; color: #657376; font: 8px "Bahnschrift", sans-serif; }
+    .metro-tempo-facts strong { display: block; margin-top: 3px; color: #c6cfcc; font: 10px "Bahnschrift", sans-serif; font-weight: 500; }
+    .metro-pattern-panel { min-width: 0; overflow: hidden; }
+    .metro-panel-title {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      min-height: 48px;
+      padding: 0 14px;
+      border-bottom: 1px solid #2d393c;
+    }
+    .metro-panel-title strong { color: #d8dbd4; font: 400 15px Georgia, serif; }
+    .metro-panel-title > div { display: grid; gap: 3px; }
+    .metro-panel-title > div > span,
+    .metro-panel-title > div > strong { display: block; }
+    .metro-pattern-stats { margin-left: auto; color: #899698; font: 9px "Bahnschrift", monospace; }
+    .metro-pattern-scroll { min-height: 154px; overflow-x: auto; scrollbar-color: #4a585b #101617; }
+    .metro-beat-grid {
+      display: grid;
+      grid-template-columns: repeat(var(--beats), minmax(112px, 1fr));
+      min-width: calc(var(--beats) * 112px);
+      min-height: 154px;
+      padding: 12px;
+    }
+    .metro-beat-card {
+      position: relative;
+      display: grid;
+      grid-template-rows: 33px 1fr;
+      min-width: 0;
+      border: 1px solid #303c3f;
+      border-right: 0;
+      background: #0c1213;
+    }
+    .metro-beat-card:last-child { border-right: 1px solid #303c3f; }
+    .metro-beat-card.pulse-start { box-shadow: inset 2px 0 var(--violet); }
+    .metro-beat-card.live { background: rgba(102,212,207,.065); }
+    .metro-beat-head { display: flex; align-items: center; gap: 7px; padding: 0 9px; border-bottom: 1px solid #293437; color: #7c898b; font: 8px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .metro-beat-head em { margin-left: auto; color: #71678f; font: 7px "Bahnschrift", sans-serif; font-style: normal; }
+    .metro-step-row { display: grid; grid-template-columns: repeat(var(--division), minmax(22px, 1fr)); align-items: stretch; }
+    .metro-step {
+      position: relative;
+      display: grid;
+      grid-template-rows: 1fr 22px;
       place-items: center;
-      border-right: 1px solid #364246;
-      border-bottom: 1px solid #364246;
+      min-width: 0;
+      padding: 12px 2px 5px;
+      border: 0;
+      border-right: 1px solid #263134;
+      background: transparent;
+      color: #586568;
+      font: 7px "Bahnschrift", monospace;
+      cursor: pointer;
     }
-    .pattern-label { justify-items: start; padding-left: 12px; color: #8d999a; font: 8px "Bahnschrift", sans-serif; text-transform: uppercase; }
-    .pattern-cell { cursor: pointer; }
-    .pattern-cell i { width: 14px; height: 14px; border: 1px solid #526065; background: #090d0e; }
-    .pattern-cell.active i { border-color: var(--cyan); background: var(--cyan); box-shadow: 0 0 8px rgba(102,212,207,.45); }
-    .pattern-cell.accent.active i { border-color: var(--amber); background: var(--amber); box-shadow: 0 0 8px rgba(232,164,74,.5); }
-
+    .metro-step:last-child { border-right: 0; }
+    .metro-step i { width: 9px; height: 9px; border: 1px solid #465357; border-radius: 50%; background: #101719; transition: transform .08s, box-shadow .08s; }
+    .metro-step.normal i { width: 14px; height: 14px; border-color: var(--cyan); background: var(--cyan); box-shadow: 0 0 8px rgba(102,212,207,.28); }
+    .metro-step.accent i { width: 18px; height: 18px; border-color: var(--amber); border-radius: 2px; background: var(--amber); box-shadow: 0 0 10px rgba(232,164,74,.42); transform: rotate(45deg) scale(.72); }
+    .metro-step.live { background: linear-gradient(180deg, rgba(102,212,207,.13), rgba(102,212,207,.025)); box-shadow: inset 2px 0 var(--cyan); color: var(--cyan-hi); }
+    .metro-step.live i { transform: scale(1.22); }
+    .metro-step.accent.live i { transform: rotate(45deg) scale(.9); }
+    .metro-legend { display: flex; align-items: center; gap: 14px; padding: 0 14px 12px; color: #718083; font: 8px "Bahnschrift", sans-serif; }
+    .metro-legend span { display: flex; align-items: center; gap: 5px; }
+    .metro-legend i { width: 8px; height: 8px; border: 1px solid #465357; border-radius: 50%; }
+    .metro-legend .normal { border-color: var(--cyan); background: var(--cyan); }
+    .metro-legend .accent { border-color: var(--amber); border-radius: 1px; background: var(--amber); transform: rotate(45deg) scale(.75); }
+    .metro-legend-note { margin-left: auto; color: #5f6c6f; }
+    .metro-settings { display: grid; grid-template-columns: repeat(3, minmax(260px, 1fr)); gap: 10px; }
+    .metro-setting-card { padding: 14px; }
+    .metro-setting-card h3 { margin: 0 0 12px; font-weight: 500; }
+    .metro-field-row { display: grid; grid-template-columns: 1fr minmax(112px, auto); align-items: center; min-height: 38px; border-top: 1px solid #2a3538; color: #8c999b; font: 9px "Bahnschrift", sans-serif; }
+    .metro-field-row:first-of-type { border-top: 0; }
+    .metro-field-row select,
+    .metro-field-row input[type="number"] { height: 27px; min-width: 112px; border: 1px solid #3a484b; border-radius: 2px; background: #080d0e; color: #d9d9d1; text-align: center; }
+    .metro-field-row input[type="range"] { width: 132px; accent-color: var(--amber); }
+    .metro-field-row output { color: var(--amber-hi); font: 10px "Bahnschrift", monospace; }
+    .metro-mode-data { display: grid; grid-template-columns: 1fr auto; gap: 7px 12px; margin-top: 8px; padding: 10px; border: 1px solid #283438; background: #0a1011; color: #738184; font: 8px "Bahnschrift", monospace; }
+    .metro-mode-data strong { color: #aab6b5; font-weight: 500; text-align: right; }
     .looper-workspace {
       display: grid;
       gap: 9px;
@@ -1862,8 +2119,8 @@
         </section>
       </div>
 
-      <section class="looper-launch" data-open="looper" tabindex="0" aria-label="Open looper and backing tracks">
-        <div class="preview-head"><span class="preview-title">Backing tracks / bank A</span><span class="preview-open">Open looper &#8599;</span></div>
+      <section class="looper-launch" data-open="looper" tabindex="0" aria-label="Open Track view and backing tracks">
+        <div class="preview-head"><span class="preview-title">Backing tracks / Section A</span><span class="preview-open">Open Track &#8599;</span></div>
         <div class="dock-wave"></div>
         <div class="dock-mix"><input type="range" min="-60" max="12" value="-8" data-stop-open aria-label="Backing-track level"><span>-8.0 dB</span></div>
       </section>
@@ -1875,14 +2132,14 @@
           <button class="detail-tab" data-detail="beats">Beats</button>
           <button class="detail-tab" data-detail="lyrics">Lyrics</button>
           <button class="detail-tab" data-detail="metronome">Metronome</button>
-          <button class="detail-tab" data-detail="looper">Looper</button>
+          <button class="detail-tab" data-detail="looper">Track</button>
           <button class="detail-close" id="closeDetail">Close</button>
         </header>
         <div class="detail-body">
           <div class="detail-layer active" data-layer="chords">
             <div class="editor-tools">
-              <span class="micro">Bank harmony · <span data-bank-length>32 bars</span></span>
-              <span class="mock-bank-strip"><span>BANK</span><button class="editor-button mock-bank-button active" data-mock-bank="0">A</button><button class="editor-button mock-bank-button" data-mock-bank="1">B</button><button class="editor-button mock-bank-button" data-mock-bank="2">C</button><button class="editor-button mock-bank-button" data-mock-bank="3">D</button></span>
+              <span class="micro">Section harmony · <span data-bank-length>32 bars</span></span>
+              <span class="mock-bank-strip"><span>SECTION</span><button class="editor-button mock-bank-button active" data-mock-bank="0">A</button><button class="editor-button mock-bank-button" data-mock-bank="1">B</button><button class="editor-button mock-bank-button" data-mock-bank="2">C</button><button class="editor-button mock-bank-button" data-mock-bank="3">D</button></span>
               <button class="editor-button" data-add-bars="1">+ Bar</button>
               <button class="editor-button" data-add-bars="4">+ 4 Bars</button>
               <button class="editor-button danger" data-remove-bar>Remove Bar</button>
@@ -1900,8 +2157,8 @@
           </div>
           <div class="detail-layer" data-layer="beats">
             <div class="editor-tools">
-              <span class="micro">Bank rhythm · <span data-bank-length>32 bars</span></span>
-              <span class="mock-bank-strip"><span>BANK</span><button class="editor-button mock-bank-button active" data-mock-bank="0">A</button><button class="editor-button mock-bank-button" data-mock-bank="1">B</button><button class="editor-button mock-bank-button" data-mock-bank="2">C</button><button class="editor-button mock-bank-button" data-mock-bank="3">D</button></span>
+              <span class="micro">Section rhythm · <span data-bank-length>32 bars</span></span>
+              <span class="mock-bank-strip"><span>SECTION</span><button class="editor-button mock-bank-button active" data-mock-bank="0">A</button><button class="editor-button mock-bank-button" data-mock-bank="1">B</button><button class="editor-button mock-bank-button" data-mock-bank="2">C</button><button class="editor-button mock-bank-button" data-mock-bank="3">D</button></span>
               <button class="editor-button" data-add-bars="1">+ Bar</button>
               <button class="editor-button" data-add-bars="4">+ 4 Bars</button>
               <button class="editor-button danger" data-remove-bar>Remove Bar</button>
@@ -1918,15 +2175,15 @@
           </div>
           <div class="detail-layer" data-layer="lyrics">
             <div class="editor-tools">
-              <span class="micro">Bank lyrics · <span data-bank-length>32 bars</span></span>
-              <span class="mock-bank-strip"><span>BANK</span><button class="editor-button mock-bank-button active" data-mock-bank="0">A</button><button class="editor-button mock-bank-button" data-mock-bank="1">B</button><button class="editor-button mock-bank-button" data-mock-bank="2">C</button><button class="editor-button mock-bank-button" data-mock-bank="3">D</button></span>
+              <span class="micro">Section lyrics · <span data-bank-length>32 bars</span></span>
+              <span class="mock-bank-strip"><span>SECTION</span><button class="editor-button mock-bank-button active" data-mock-bank="0">A</button><button class="editor-button mock-bank-button" data-mock-bank="1">B</button><button class="editor-button mock-bank-button" data-mock-bank="2">C</button><button class="editor-button mock-bank-button" data-mock-bank="3">D</button></span>
               <button class="editor-button" data-add-bars="1">+ Bar</button>
               <button class="editor-button" data-add-bars="4">+ 4 Bars</button>
               <button class="editor-button danger" data-remove-bar>Remove Bar</button>
               <button class="editor-button" id="lyricMoveUp">Move line ↑</button>
               <button class="editor-button" id="lyricMoveDown">Move line ↓</button>
               <button class="editor-button danger" id="lyricClearBar">Clear line</button>
-              <button class="editor-button danger" id="lyricClearAll">Clear bank</button>
+              <button class="editor-button danger" id="lyricClearAll">Clear section</button>
               <span class="tool-spacer"></span>
               <span class="editor-hint">Enter advances · Shift+Enter adds a line · multiline paste fills following bars</span>
               <label class="editor-check"><input type="checkbox" id="followLyrics" checked> Follow current line</label>
@@ -1934,29 +2191,73 @@
             <div class="editor-scroll" id="lyricsScroll"><div class="lyrics-cue-sheet" id="lyricsDetail"></div></div>
           </div>
           <div class="detail-layer" data-layer="metronome">
-            <div class="editor-tools">
-              <span class="micro">Local metronome</span>
-              <button class="editor-button active" id="metroStart">Enabled</button>
-              <button class="editor-button" id="metroTap">Tap tempo</button>
-              <span class="tool-spacer"></span>
-              <label class="editor-check"><input type="checkbox" id="markerReference" checked> Show marker reference</label>
-            </div>
             <div class="editor-scroll">
               <div class="metronome-workspace">
-                <div class="metro-controls">
-                  <label class="control-field">BPM <input type="number" id="metroBpm" min="1" max="400" value="118"></label>
-                  <label class="control-field">Beats <input type="number" id="metroBeats" min="1" max="16" value="4"></label>
-                  <label class="control-field">Division <select id="metroDivision"><option>Quarter</option><option>Eighth</option><option>Triplet</option><option>16th</option><option>32nd</option></select></label>
-                  <label class="control-field">Mode <select><option>shared-grid</option><option>leader-audio</option><option>listener-compensated</option></select></label>
-                  <label class="control-field">Level <input type="range" min="-60" max="12" value="-10"></label>
+                <div class="metro-hero">
+                  <section class="metro-tempo-card">
+                    <header class="metro-tempo-head">
+                      <span class="metro-card-kicker">Tempo</span>
+                      <button class="editor-button metro-tap-button" id="metroTap" type="button">Tap tempo</button>
+                    </header>
+                    <div>
+                      <div class="metro-bpm-control">
+                        <button type="button" data-bpm-delta="-1" aria-label="Decrease BPM">−</button>
+                        <input type="number" id="metroBpm" min="1" max="400" value="118" aria-label="BPM">
+                        <button type="button" data-bpm-delta="1" aria-label="Increase BPM">+</button>
+                      </div>
+                      <span class="metro-bpm-unit">BEATS PER MINUTE</span>
+                    </div>
+                    <div class="tempo-nebula" id="tempoNebula" aria-hidden="true">
+                      <i class="tempo-nebula-cloud cloud-a"></i>
+                      <i class="tempo-nebula-cloud cloud-b"></i>
+                      <i class="tempo-nebula-orbit orbit-a"></i>
+                      <i class="tempo-nebula-orbit orbit-b"></i>
+                      <i class="tempo-nebula-core"></i>
+                    </div>
+                    <div class="metro-tempo-facts">
+                      <span>Meter<strong id="metroMeterReadout">4 / 4</strong></span>
+                      <span>Step interval<strong id="metroIntervalReadout">127.1 ms</strong></span>
+                    </div>
+                  </section>
+                  <section class="metro-pattern-panel">
+                    <header class="metro-panel-title">
+                      <div><span>Repeating pattern</span><strong id="metroPatternTitle">One bar · 4 quarter-note beats</strong></div>
+                      <output class="metro-pattern-stats" id="metroPatternStats">4 steps · 4 clicks · 1 accent</output>
+                    </header>
+                    <div class="metro-pattern-scroll"><div class="metro-beat-grid" id="metroPattern"></div></div>
+                    <div class="metro-legend">
+                      <span><i class="accent"></i>Accent</span><span><i class="normal"></i>Click</span><span><i></i>Muted</span>
+                      <span class="metro-legend-note">Click a pulse to cycle its state</span>
+                    </div>
+                  </section>
                 </div>
-                <div class="metro-pattern" id="metroPattern"></div>
+                <div class="metro-settings">
+                  <section class="metro-setting-card">
+                    <h3>Timing</h3>
+                    <label class="metro-field-row">Meter beats <input type="number" id="metroBeats" min="1" max="16" value="4"></label>
+                    <label class="metro-field-row">Written beat unit <select id="metroBeatUnit"><option value="2">/2</option><option value="4" selected>/4</option><option value="8">/8</option><option value="16">/16</option></select></label>
+                    <label class="metro-field-row">Tempo counts <select id="metroTempoPulse"><option value="1">Each beat</option><option value="3">Dotted beat (compound)</option></select></label>
+                    <label class="metro-field-row">Division <select id="metroDivision"><option value="1">Quarter</option><option value="2">Eighth</option><option value="3">Triplet</option><option value="4">16th</option><option value="6">6th</option><option value="8">32nd</option></select></label>
+                  </section>
+                  <section class="metro-setting-card">
+                    <h3>Click</h3>
+                    <label class="metro-field-row">Sound <select id="metroSound"><option>Classic</option><option>Woodblock</option><option>Rim Click</option><option>Digital Tick</option></select></label>
+                    <label class="metro-field-row">Local level <input type="range" id="metroLevel" min="-60" max="12" value="-10"></label>
+                    <div class="metro-field-row"><span>Level value</span><output id="metroLevelReadout">−10.0 dB</output></div>
+                    <div class="metro-field-row"><span>Audible source</span><output id="metroSourceReadout">Local renderer</output></div>
+                  </section>
+                  <section class="metro-setting-card">
+                    <h3>Sync</h3>
+                    <label class="metro-field-row">Mode <select id="metroMode"><option value="shared-grid">shared-grid</option><option value="leader-audio">leader-audio</option><option value="listener-compensated">listener-compensated</option></select></label>
+                    <div class="metro-mode-data" id="metroModeData"></div>
+                  </section>
+                </div>
               </div>
             </div>
           </div>
           <div class="detail-layer" data-layer="looper">
             <div class="editor-tools">
-              <span class="micro">Looper / backing tracks</span>
+              <span class="micro">Track / backing tracks</span>
               <button class="editor-button" data-looper-action="play">Play</button>
               <button class="editor-button" data-looper-action="stop">Stop</button>
               <button class="editor-button" data-looper-action="loop-start">Loop start</button>
@@ -1967,7 +2268,7 @@
               <button class="editor-button" data-looper-action="add-wav">Add WAV</button>
               <button class="editor-button" data-looper-action="share">Share tracks</button>
               <span class="tool-spacer"></span>
-              <button class="editor-button active" data-bank="A">A</button><button class="editor-button" data-bank="B">B</button><button class="editor-button" data-bank="C">C</button><button class="editor-button" data-bank="D">D</button>
+              <span class="micro">SECTION</span><button class="editor-button active" data-bank="A">A</button><button class="editor-button" data-bank="B">B</button><button class="editor-button" data-bank="C">C</button><button class="editor-button" data-bank="D">D</button>
             </div>
             <div class="editor-scroll"><div class="looper-workspace" id="looperWorkspace"></div></div>
           </div>
@@ -2136,7 +2437,10 @@
     let selectedSource = 1;
     let activityClock = 0;
     let playing = true;
-    let metronomeEnabled = true;
+    let metronomePattern = [];
+    let metronomeCursor = 0;
+    let metronomeTimer = 0;
+    let metronomeNebulaPulseTimer = 0;
     let step = 0;
     let songBar = 1;
     let visualEnergy = .18;
@@ -3314,22 +3618,140 @@
       if (positionLabel) positionLabel.textContent = `Song position / bar ${songBar} · beat ${beat}`;
     }
 
+    function metronomeConfig() {
+      const bpm = Math.max(1, Math.min(400, Number(document.getElementById("metroBpm")?.value) || 118));
+      const beats = Math.max(1, Math.min(16, Number(document.getElementById("metroBeats")?.value) || 4));
+      const beatUnit = Number(document.getElementById("metroBeatUnit")?.value) || 4;
+      const tempoPulse = Number(document.getElementById("metroTempoPulse")?.value) || 1;
+      const division = Number(document.getElementById("metroDivision")?.value) || 1;
+      return { bpm, beats, beatUnit, tempoPulse, division, steps: beats * division };
+    }
+
+    function ensureMetronomePattern(steps) {
+      const previous = metronomePattern.slice();
+      metronomePattern = Array.from({ length: steps }, (_, index) =>
+        index < previous.length ? previous[index] : index === 0 ? 2 : 1
+      );
+      if (metronomePattern.length && !metronomePattern.some(state => state === 2)) metronomePattern[0] = 2;
+      metronomeCursor %= Math.max(1, steps);
+    }
+
+    function updateMetronomeModeData() {
+      const mode = document.getElementById("metroMode")?.value || "shared-grid";
+      const data = document.getElementById("metroModeData");
+      const source = document.getElementById("metroSourceReadout");
+      const rows = mode === "leader-audio"
+        ? [["Authority", "Phil / creator"], ["Click source", "Leader UDP audio"], ["Local offset", "0.0 ms"]]
+        : mode === "listener-compensated"
+          ? [["Authority", "Phil / creator"], ["Phase paths", `${Math.max(1, peerCount - 1)} active`], ["Applied offset", "+18.4 ms"]]
+          : [["Authority", "Phil / creator"], ["Mapped epoch", "4821"], ["Applied offset", "0.0 ms"]];
+      data.innerHTML = rows.map(([label, value]) => `<span>${label}</span><strong>${value}</strong>`).join("");
+      source.textContent = mode === "leader-audio" ? "Leader audio" : "Local renderer";
+    }
+
+    function updateMetronomeReadouts() {
+      const config = metronomeConfig();
+      const denominatorNames = { 2: "half-note", 4: "quarter-note", 8: "eighth-note", 16: "16th-note" };
+      const interval = 60000 / config.bpm / config.tempoPulse / config.division;
+      document.getElementById("metroMeterReadout").textContent = `${config.beats} / ${config.beatUnit}`;
+      document.getElementById("metroIntervalReadout").textContent = `${interval.toFixed(1)} ms`;
+      document.getElementById("metroPatternTitle").textContent = `One bar · ${config.beats} ${denominatorNames[config.beatUnit]} beat${config.beats === 1 ? "" : "s"}`;
+      document.getElementById("tempoReadout").textContent = config.bpm;
+      const level = Number(document.getElementById("metroLevel")?.value || -10);
+      document.getElementById("metroLevelReadout").textContent = `${level < 0 ? "−" : "+"}${Math.abs(level).toFixed(1)} dB`;
+      const pulseDuration = 60000 / config.bpm;
+      const nebula = document.getElementById("tempoNebula");
+      nebula.style.setProperty("--metro-pulse-duration", `${pulseDuration}ms`);
+      nebula.style.setProperty("--metro-morph-duration", `${pulseDuration * 4}ms`);
+      nebula.style.setProperty("--metro-morph-alt-duration", `${pulseDuration * 5}ms`);
+      nebula.style.setProperty("--metro-orbit-duration", `${pulseDuration * 8}ms`);
+      nebula.style.setProperty("--metro-orbit-alt-duration", `${pulseDuration * 5.75}ms`);
+      nebula.style.setProperty("--metro-flash-duration", `${Math.min(300, pulseDuration * .6)}ms`);
+      updateMetronomeModeData();
+    }
+
+    function updateMetronomeCursor() {
+      document.querySelectorAll("[data-metro-step]").forEach(node => {
+        const live = playing && Number(node.dataset.metroStep) === metronomeCursor;
+        node.classList.toggle("live", live);
+        node.closest(".metro-beat-card")?.classList.toggle(
+          "live",
+          playing && Math.floor(metronomeCursor / metronomeConfig().division) === Number(node.closest(".metro-beat-card")?.dataset.metroBeat)
+        );
+      });
+      document.getElementById("metroLamp").style.opacity = playing
+        ? metronomePattern[metronomeCursor] === 2 ? "1" : metronomePattern[metronomeCursor] === 1 ? ".58" : ".16"
+        : ".08";
+      const nebula = document.getElementById("tempoNebula");
+      nebula.classList.toggle("disabled", !playing);
+      if (!playing) {
+        window.clearTimeout(metronomeNebulaPulseTimer);
+        nebula.classList.remove("beat");
+      }
+      if (playing && metronomeCursor % (metronomeConfig().tempoPulse * metronomeConfig().division) === 0) {
+        window.clearTimeout(metronomeNebulaPulseTimer);
+        nebula.classList.remove("beat");
+        void nebula.offsetWidth;
+        nebula.classList.add("beat");
+        metronomeNebulaPulseTimer = window.setTimeout(
+          () => nebula.classList.remove("beat"),
+          Math.min(300, 60000 / metronomeConfig().bpm * .6) + 16
+        );
+      }
+    }
+
+    function scheduleMetronomeTick() {
+      window.clearTimeout(metronomeTimer);
+      const tick = () => {
+        const config = metronomeConfig();
+        if (playing) {
+          metronomeCursor = (metronomeCursor + 1) % Math.max(1, config.steps);
+          updateMetronomeCursor();
+        }
+        metronomeTimer = window.setTimeout(tick, Math.max(24, 60000 / config.bpm / config.tempoPulse / config.division));
+      };
+      const config = metronomeConfig();
+      metronomeTimer = window.setTimeout(tick, Math.max(24, 60000 / config.bpm / config.tempoPulse / config.division));
+    }
+
     function buildMetronomePattern() {
+      const config = metronomeConfig();
+      ensureMetronomePattern(config.steps);
       const target = document.getElementById("metroPattern");
       target.innerHTML = "";
-      ["Play", "Accent"].forEach((name, row) => {
-        const label = document.createElement("div");
-        label.className = "pattern-label";
-        label.textContent = name;
-        target.appendChild(label);
-        for (let index = 0; index < 16; index += 1) {
-          const cell = document.createElement("div");
-          cell.className = `pattern-cell${row === 1 ? " accent" : ""}${row === 0 && index % 4 === 0 || row === 1 && index === 0 ? " active" : ""}`;
-          cell.innerHTML = "<i></i>";
-          cell.addEventListener("click", () => cell.classList.toggle("active"));
-          target.appendChild(cell);
+      target.style.setProperty("--beats", config.beats);
+      for (let beat = 0; beat < config.beats; ++beat) {
+        const card = document.createElement("section");
+        card.className = `metro-beat-card${beat % config.tempoPulse === 0 ? " pulse-start" : ""}`;
+        card.dataset.metroBeat = beat;
+        const heading = document.createElement("header");
+        heading.className = "metro-beat-head";
+        heading.innerHTML = `<span>Beat ${beat + 1}</span>${beat % config.tempoPulse === 0 ? "<em>pulse</em>" : ""}`;
+        const row = document.createElement("div");
+        row.className = "metro-step-row";
+        row.style.setProperty("--division", config.division);
+        for (let division = 0; division < config.division; ++division) {
+          const index = beat * config.division + division;
+          const button = document.createElement("button");
+          button.type = "button";
+          button.dataset.metroStep = index;
+          button.className = `metro-step ${metronomePattern[index] === 2 ? "accent" : metronomePattern[index] === 1 ? "normal" : "muted"}`;
+          button.title = `${beat + 1}.${division + 1} · ${metronomePattern[index] === 2 ? "Accent" : metronomePattern[index] === 1 ? "Click" : "Muted"}`;
+          button.innerHTML = `<i></i><span>${beat + 1}.${division + 1}</span>`;
+          button.addEventListener("click", () => {
+            metronomePattern[index] = (metronomePattern[index] + 1) % 3;
+            buildMetronomePattern();
+          });
+          row.appendChild(button);
         }
-      });
+        card.append(heading, row);
+        target.appendChild(card);
+      }
+      const clicks = metronomePattern.filter(Boolean).length;
+      const accents = metronomePattern.filter(state => state === 2).length;
+      document.getElementById("metroPatternStats").textContent = `${config.steps} steps · ${clicks} clicks · ${accents} accent${accents === 1 ? "" : "s"}`;
+      updateMetronomeReadouts();
+      updateMetronomeCursor();
     }
 
     function buildLooperWorkspace() {
@@ -3337,7 +3759,7 @@
       target.innerHTML = "";
       const ruler = document.createElement("div");
       ruler.className = "looper-ruler";
-      ruler.innerHTML = "<strong>Bank A / grid locked</strong>";
+      ruler.innerHTML = "<strong>Section A / grid locked</strong>";
       const rulerScale = document.createElement("div");
       rulerScale.className = "looper-ruler-scale";
       rulerScale.innerHTML = Array.from({ length: 32 }, (_, index) =>
@@ -3385,8 +3807,6 @@
       document.getElementById("chordLens").style.setProperty("--song-progress", `${((songBar - 1) * 16 + step + 1) / (bankLength() * 16) * 100}%`);
       document.querySelectorAll("#beatDots i").forEach((dot, index) => dot.classList.toggle("active", index === beat - 1));
       document.querySelectorAll("[data-preview-step]").forEach(cell => cell.classList.toggle("playhead", Number(cell.dataset.previewStep) === step));
-      document.getElementById("metroLamp").style.opacity = metronomeEnabled ? (step % 4 === 0 ? "1" : ".25") : ".08";
-
       const labels = ["Now", "Next", "Then", "Then"];
       document.querySelectorAll(".chord-cell").forEach((cell, index) => {
         cell.querySelector("small").textContent = labels[index];
@@ -3632,7 +4052,7 @@
       updateSongPosition();
     });
     document.getElementById("lyricClearAll").addEventListener("click", () => {
-      if (!window.confirm(`Clear all lyrics in Bank ${activeBank().id}?`)) return;
+      if (!window.confirm(`Clear all lyrics in Section ${activeBank().id}?`)) return;
       activeBank().lyrics.forEach(cue => cue.text = "");
       buildLyricsPreview();
       updateSongPosition();
@@ -3650,28 +4070,45 @@
     });
 
     let lastTempoTap = 0;
-    document.getElementById("metroStart").addEventListener("click", event => {
-      metronomeEnabled = !metronomeEnabled;
-      event.currentTarget.classList.toggle("active", metronomeEnabled);
-      event.currentTarget.textContent = metronomeEnabled ? "Enabled" : "Disabled";
-      updateSongPosition();
-    });
     document.getElementById("metroTap").addEventListener("click", () => {
       const now = performance.now();
       if (lastTempoTap > 0 && now - lastTempoTap < 2000) {
         const bpm = Math.max(1, Math.min(400, Math.round(60000 / (now - lastTempoTap))));
         document.getElementById("metroBpm").value = bpm;
-        document.getElementById("tempoReadout").textContent = bpm;
+        updateMetronomeReadouts();
+        scheduleMetronomeTick();
       }
       lastTempoTap = now;
     });
     document.getElementById("metroBpm").addEventListener("input", event => {
-      document.getElementById("tempoReadout").textContent = event.currentTarget.value;
+      event.currentTarget.value = Math.max(1, Math.min(400, Number(event.currentTarget.value) || 1));
+      updateMetronomeReadouts();
+      scheduleMetronomeTick();
     });
+    document.querySelectorAll("[data-bpm-delta]").forEach(button => {
+      button.addEventListener("click", () => {
+        const input = document.getElementById("metroBpm");
+        input.value = Math.max(1, Math.min(400, Number(input.value) + Number(button.dataset.bpmDelta)));
+        input.dispatchEvent(new Event("input"));
+      });
+    });
+    document.getElementById("metroBeats").addEventListener("input", event => {
+      event.currentTarget.value = Math.max(1, Math.min(16, Number(event.currentTarget.value) || 1));
+      buildMetronomePattern();
+    });
+    ["metroBeatUnit", "metroTempoPulse", "metroDivision"].forEach(id => {
+      document.getElementById(id).addEventListener("change", () => {
+        buildMetronomePattern();
+        scheduleMetronomeTick();
+      });
+    });
+    document.getElementById("metroSound").addEventListener("change", updateMetronomeReadouts);
+    document.getElementById("metroLevel").addEventListener("input", updateMetronomeReadouts);
+    document.getElementById("metroMode").addEventListener("change", updateMetronomeReadouts);
     document.querySelectorAll("[data-bank]").forEach(button => {
       button.addEventListener("click", () => {
         document.querySelectorAll("[data-bank]").forEach(candidate => candidate.classList.toggle("active", candidate === button));
-        document.querySelector(".looper-launch .preview-title").textContent = `Backing tracks / bank ${button.dataset.bank}`;
+        document.querySelector(".looper-launch .preview-title").textContent = `Backing tracks / Section ${button.dataset.bank}`;
       });
     });
     document.querySelectorAll("[data-looper-action]").forEach(button => {
@@ -3687,6 +4124,7 @@
       playing = !playing;
       event.currentTarget.textContent = playing ? "Ⅱ" : "▶";
       event.currentTarget.setAttribute("aria-label", playing ? "Pause" : "Play");
+      updateMetronomeCursor();
     });
     document.getElementById("stopButton").addEventListener("click", () => {
       playing = false;
@@ -3694,6 +4132,7 @@
       songBar = 1;
       document.getElementById("playButton").textContent = "▶";
       updateSongPosition();
+      updateMetronomeCursor();
     });
     document.addEventListener("keydown", event => {
       if (event.key === "Escape") {
@@ -3706,6 +4145,7 @@
     buildDetailViews();
     rebuildSources();
     updateSongPosition();
+    scheduleMetronomeTick();
     renderActivity();
     resizeNebula();
     window.addEventListener("resize", resizeNebula);
@@ -3736,6 +4176,40 @@
       document.getElementById("showMusicalLines").checked = true;
       showMusicalLines = true;
       buildChordEditor();
+    }
+    const requestedBars = Math.max(1, Math.min(64, Number(params.get("bars")) || bankLength()));
+    while (bankLength() < requestedBars) {
+      activeBank().chords.push(blankChordBar());
+      activeBank().beats.push(blankBeatBar());
+      activeBank().lyrics.push(blankLyricBar());
+    }
+    while (bankLength() > requestedBars) {
+      activeBank().chords.pop();
+      activeBank().beats.pop();
+      activeBank().lyrics.pop();
+    }
+    if (params.has("bars")) rebuildAuthoringViews();
+    if (params.has("bpm")) document.getElementById("metroBpm").value = Math.max(1, Math.min(400, Number(params.get("bpm")) || 118));
+    if (params.has("meter")) {
+      const [beats, unit] = params.get("meter").split("/").map(Number);
+      if (beats >= 1 && beats <= 16) document.getElementById("metroBeats").value = beats;
+      if ([2, 4, 8, 16].includes(unit)) document.getElementById("metroBeatUnit").value = unit;
+    }
+    if (params.has("division") && [1, 2, 3, 4, 6, 8].includes(Number(params.get("division")))) {
+      document.getElementById("metroDivision").value = Number(params.get("division"));
+    }
+    if (params.has("pulse") && [1, 3].includes(Number(params.get("pulse")))) {
+      document.getElementById("metroTempoPulse").value = Number(params.get("pulse"));
+    }
+    if (["shared-grid", "leader-audio", "listener-compensated"].includes(params.get("metroMode"))) {
+      document.getElementById("metroMode").value = params.get("metroMode");
+    }
+    if (["Classic", "Woodblock", "Rim Click", "Digital Tick"].includes(params.get("sound"))) {
+      document.getElementById("metroSound").value = params.get("sound");
+    }
+    if (["bpm", "meter", "division", "pulse", "metroMode", "sound"].some(name => params.has(name))) {
+      buildMetronomePattern();
+      scheduleMetronomeTick();
     }
     if (["chords", "beats", "lyrics", "metronome", "looper"].includes(params.get("panel"))) openDetail(params.get("panel"));
     if (params.get("data") === "1") setDataDrawer(true);

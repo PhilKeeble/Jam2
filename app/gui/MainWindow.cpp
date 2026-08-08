@@ -1399,7 +1399,7 @@ void MainWindow::showJamRecordingFinished(const QString& folder)
     message.setTextInteractionFlags(
         Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
     QPushButton* importButton = message.addButton(
-        QStringLiteral("Import to Bank"), QMessageBox::ActionRole);
+        QStringLiteral("Import to Section"), QMessageBox::ActionRole);
     QPushButton* closeButton = message.addButton(QMessageBox::Close);
     message.setDefaultButton(closeButton);
     message.exec();
@@ -1470,7 +1470,7 @@ void MainWindow::showJamRecordingImportDialog(const QString& folder)
                 .arg(QChar(QLatin1Char('A').unicode() + bank));
         }
         bankBox->addItem(
-            QStringLiteral("Bank %1 — %2")
+            QStringLiteral("Section %1 — %2")
                 .arg(QChar(QLatin1Char('A').unicode() + bank), sectionName),
             bank);
     }
@@ -1497,7 +1497,7 @@ void MainWindow::showJamRecordingImportDialog(const QString& folder)
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, &dialog);
     QPushButton* importButton = buttons->addButton(
-        QStringLiteral("Import to Bank"), QDialogButtonBox::AcceptRole);
+        QStringLiteral("Import to Section"), QDialogButtonBox::AcceptRole);
     form->addRow(buttons);
 
     const auto updateAvailability = [this, bankBox, availability, importButton, &choices] {
@@ -1512,9 +1512,9 @@ void MainWindow::showJamRecordingImportDialog(const QString& folder)
             0, jam2::application::limits::kMaximumLooperLanesPerBank - used);
         importButton->setEnabled(selected > 0 && selected <= remaining);
         availability->setText(selected > remaining
-            ? QStringLiteral("This bank has space for %1 more track(s); select fewer recording tracks.")
+            ? QStringLiteral("This section has space for %1 more track(s); select fewer recording tracks.")
                 .arg(remaining)
-            : QStringLiteral("Each selected WAV will be added as a separate looper track. %1 slot(s) available.")
+            : QStringLiteral("Each selected WAV will be added as a separate track. %1 slot(s) available.")
                 .arg(remaining));
         availability->setStyleSheet(selected > remaining
             ? QStringLiteral("color:#d46b6b;") : QString{});
@@ -1592,7 +1592,7 @@ void MainWindow::showJamRecordingImportDialog(const QString& folder)
                 lane.sampleRate = result.asset.metadata.sampleRate;
                 lane.sampleRateCompatible = true;
                 if (!looperProject_.appendLane(bankIndex, std::move(lane))) {
-                    failures.append(QStringLiteral("%1: no looper track slot was available")
+            failures.append(QStringLiteral("%1: no track slot was available")
                         .arg(result.laneName));
                     continue;
                 }
@@ -4836,12 +4836,6 @@ void MainWindow::selectViewedBank(int bankIndex)
     if (chordGrid_) chordGrid_->setSelectedSectionIndex(viewedBankIndex_);
     if (beatGrid_) beatGrid_->setSelectedSectionIndex(viewedBankIndex_);
     if (lyricGrid_) lyricGrid_->setSelectedSectionIndex(viewedBankIndex_);
-    if (drumKitBox_ && viewedBankIndex_ < beatModel_.sections().size()) {
-        const QSignalBlocker blocker(drumKitBox_);
-        const int index = drumKitBox_->findData(
-            beatModel_.section(viewedBankIndex_).drumKitId);
-        drumKitBox_->setCurrentIndex(index >= 0 ? index : 0);
-    }
     refreshLooperLanes();
 }
 
@@ -4855,7 +4849,7 @@ void MainWindow::refreshBankPresentation()
         QString suffix;
         if (bank == live) suffix = QStringLiteral("  LIVE");
         if (bank == pendingBankIndex_) suffix = QStringLiteral("  NEXT");
-        button->setToolTip(QStringLiteral("Bank %1%2")
+        button->setToolTip(QStringLiteral("Section %1%2")
             .arg(QChar(QLatin1Char('A').unicode() + bank), suffix));
         button->setStyleSheet(bank == viewedBankIndex_
             ? QStringLiteral("QPushButton { background:#502d5d;color:#fff8ea;border:1px solid #e8a44a;padding:4px; }")
@@ -5158,7 +5152,7 @@ void MainWindow::schedulePreparedBankLaunch(
     if (hasSources) {
         preparedMix_ = cached;
         auto& track = trackController_.model();
-        track.fileName = QStringLiteral("Prepared Bank %1")
+        track.fileName = QStringLiteral("Prepared Section %1")
             .arg(QChar(QLatin1Char('A').unicode() + bankIndex));
         track.filePath = cached.path;
         track.fileBytes = cached.fileBytes;
@@ -5337,16 +5331,16 @@ void MainWindow::exportLooperAudio()
     };
 
     QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("Export Looper Audio"));
+    dialog.setWindowTitle(QStringLiteral("Export Track Audio"));
     dialog.setMinimumWidth(480);
     auto* form = new QFormLayout(&dialog);
     auto* scopeBox = new QComboBox(&dialog);
     scopeBox->addItem(
-        QStringLiteral("Current Bank %1")
+        QStringLiteral("Current Section %1")
             .arg(QChar(QLatin1Char('A').unicode() + viewedBankIndex_)),
         static_cast<int>(Scope::CurrentBank));
     scopeBox->addItem(
-        QStringLiteral("All Banks (separate WAVs)"),
+        QStringLiteral("All Sections (separate WAVs)"),
         static_cast<int>(Scope::AllBanks));
     scopeBox->addItem(
         QStringLiteral("Arrangement (one WAV)"),
@@ -5359,10 +5353,10 @@ void MainWindow::exportLooperAudio()
         const Scope scope = static_cast<Scope>(scopeBox->currentData().toInt());
         if (scope == Scope::CurrentBank) {
             explanation->setText(QStringLiteral(
-                "Render the viewed bank exactly as it sounds in the looper, sized to that bank's section."));
+                "Render the viewed section exactly as it sounds in the Track view."));
         } else if (scope == Scope::AllBanks) {
             explanation->setText(QStringLiteral(
-                "Render Banks A–D into four separate WAV files. Empty banks are exported as correctly timed silence."));
+                "Render Sections A–D into four separate WAV files. Empty sections are exported as correctly timed silence."));
         } else {
             explanation->setText(looperProject_.arrangement().steps.isEmpty()
                 ? QStringLiteral("The arrangement has no rows. Configure it before exporting.")
@@ -5400,11 +5394,11 @@ void MainWindow::exportLooperAudio()
     QStringList outputPaths;
     if (scope == Scope::CurrentBank) {
         const QString suggested = QDir(defaultFolder).absoluteFilePath(
-            QStringLiteral("%1_Bank_%2.wav")
+            QStringLiteral("%1_Section_%2.wav")
                 .arg(slug, QChar(QLatin1Char('A').unicode() + viewedBankIndex_)));
         QString path = QFileDialog::getSaveFileName(
             this,
-            QStringLiteral("Export Current Bank"),
+            QStringLiteral("Export Current Section"),
             suggested,
             QStringLiteral("WAV files (*.wav)"),
             nullptr,
@@ -5417,13 +5411,13 @@ void MainWindow::exportLooperAudio()
     } else if (scope == Scope::AllBanks) {
         const QString folder = QFileDialog::getExistingDirectory(
             this,
-            QStringLiteral("Export All Banks"),
+            QStringLiteral("Export All Sections"),
             defaultFolder,
             QFileDialog::ShowDirsOnly | QFileDialog::DontUseNativeDialog);
         if (folder.isEmpty()) return;
         for (int bank = 0; bank < looperProject_.banks().size(); ++bank) {
             outputPaths.append(QDir(folder).absoluteFilePath(
-                QStringLiteral("%1_Bank_%2.wav")
+                QStringLiteral("%1_Section_%2.wav")
                     .arg(slug, QChar(QLatin1Char('A').unicode() + bank))));
         }
         QStringList existing;
@@ -5432,7 +5426,7 @@ void MainWindow::exportLooperAudio()
         }
         if (!existing.isEmpty() && QMessageBox::question(
                 this,
-                QStringLiteral("Replace Bank Exports"),
+                QStringLiteral("Replace Section Exports"),
                 QStringLiteral("These files already exist and will be replaced:\n\n%1")
                     .arg(existing.join(QStringLiteral("\n"))),
                 QMessageBox::Yes | QMessageBox::Cancel,
@@ -5513,7 +5507,7 @@ void MainWindow::exportLooperAudio()
                         track,
                         {{bank, 1, exactFrames.at(bank)}});
                     if (!rendered.error.isEmpty()) {
-                        result->error = QStringLiteral("Bank %1: %2")
+                        result->error = QStringLiteral("Section %1: %2")
                             .arg(QChar(QLatin1Char('A').unicode() + bank), rendered.error);
                         return;
                     }
@@ -5553,7 +5547,7 @@ void MainWindow::exportLooperAudio()
     if (!started) {
         QMessageBox::warning(
             this,
-            QStringLiteral("Export Looper Audio"),
+            QStringLiteral("Export Track Audio"),
             QStringLiteral("The bounded file worker is busy; try Export again."));
         return;
     }
@@ -5561,8 +5555,8 @@ void MainWindow::exportLooperAudio()
         scope == Scope::Arrangement
             ? QStringLiteral("Exporting arrangement...")
             : scope == Scope::AllBanks
-                ? QStringLiteral("Exporting all banks...")
-                : QStringLiteral("Exporting current bank..."),
+                ? QStringLiteral("Exporting all sections...")
+                : QStringLiteral("Exporting current section..."),
         QString{},
         0,
         0,
@@ -5574,7 +5568,7 @@ void MainWindow::exportLooperAudio()
     progress.close();
     if (!result->error.isEmpty()) {
         QMessageBox::warning(
-            this, QStringLiteral("Export Looper Audio"), result->error);
+            this, QStringLiteral("Export Track Audio"), result->error);
         return;
     }
 
@@ -5586,7 +5580,7 @@ void MainWindow::exportLooperAudio()
     complete.setWindowTitle(QStringLiteral("Export Complete"));
     complete.setText(result->paths.size() == 1
         ? QStringLiteral("The WAV was exported successfully.")
-        : QStringLiteral("%1 bank WAVs were exported successfully.")
+        : QStringLiteral("%1 section WAVs were exported successfully.")
             .arg(result->paths.size()));
     complete.setInformativeText(result->paths.size() == 1
         ? QDir::toNativeSeparators(result->paths.front())
@@ -5604,7 +5598,7 @@ void MainWindow::showArrangementDialog()
     dialog.setWindowTitle(QStringLiteral("Arrangement"));
     auto* table = new QTableWidget(&dialog);
     table->setColumnCount(2);
-    table->setHorizontalHeaderLabels({QStringLiteral("Bank"), QStringLiteral("Repeats")});
+    table->setHorizontalHeaderLabels({QStringLiteral("Section"), QStringLiteral("Repeats")});
     table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     constexpr int kArrangementRowHeight = 42;
     constexpr int kArrangementEditorHeight = 32;
@@ -5634,7 +5628,7 @@ void MainWindow::showArrangementDialog()
         table->setRowHeight(row, kArrangementRowHeight);
         auto* bank = new QComboBox(table);
         for (int index = 0; index < 4; ++index) {
-            bank->addItem(QStringLiteral("Bank %1")
+            bank->addItem(QStringLiteral("Section %1")
                 .arg(QChar(QLatin1Char('A').unicode() + index)), index);
         }
         bank->setCurrentIndex(qBound(0, step.bankIndex, 3));
@@ -5700,7 +5694,7 @@ void MainWindow::showArrangementDialog()
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     auto* layout = new QVBoxLayout(&dialog);
     layout->addWidget(new QLabel(
-        QStringLiteral("Each repeat plays the selected bank for one complete section loop."), &dialog));
+        QStringLiteral("Each repeat plays the selected section for one complete loop."), &dialog));
     layout->addWidget(table, 1);
     layout->addLayout(rowButtons);
     layout->addWidget(buttons);
@@ -6642,7 +6636,7 @@ void MainWindow::removeSelectedLooperLane()
         }
     }
     QMessageBox dialog(QMessageBox::Question, QStringLiteral("Remove lane"),
-        QStringLiteral("Remove '%1' from this bank?").arg(lane.name), QMessageBox::Cancel, this);
+        QStringLiteral("Remove '%1' from this section?").arg(lane.name), QMessageBox::Cancel, this);
     QPushButton* removeOnly = dialog.addButton(QStringLiteral("Remove lane only"), QMessageBox::AcceptRole);
     QPushButton* deleteAsset = dialog.addButton(QStringLiteral("Delete WAV from disk"), QMessageBox::DestructiveRole);
     const bool hasWav = assetInfo.exists() && assetInfo.isFile() &&
@@ -7063,7 +7057,7 @@ void MainWindow::applyPreparedMixResult(PreparedMixResult result)
     registerTransientTrackWav(preparedMix_.path);
     try {
         auto& track = trackController_.model();
-        track.fileName = QStringLiteral("Prepared Bank %1").arg(looperProject_.banks().at(looperProject_.activeBankIndex()).id);
+        track.fileName = QStringLiteral("Prepared Section %1").arg(looperProject_.banks().at(looperProject_.activeBankIndex()).id);
         track.filePath = preparedMix_.path;
         track.fileBytes = preparedMix_.fileBytes;
         track.sampleRate = preparedMix_.sampleRate;
@@ -7175,7 +7169,7 @@ void MainWindow::adoptPreparedBankCache(int bankIndex)
 
     preparedMix_ = cached;
     auto& track = trackController_.model();
-    track.fileName = QStringLiteral("Prepared Bank %1")
+    track.fileName = QStringLiteral("Prepared Section %1")
         .arg(QChar(QLatin1Char('A').unicode() + bankIndex));
     track.filePath = cached.path;
     track.fileBytes = cached.fileBytes;
@@ -10551,7 +10545,7 @@ void MainWindow::continuePracticeIdea()
             chordModel_, *request);
     if (!continuation) {
         QMessageBox::warning(this, QStringLiteral("Continue Idea"),
-            QStringLiteral("The source bank needs musical material and the target bank must be different."));
+            QStringLiteral("The source section needs musical material and the target section must be different."));
         return;
     }
 
@@ -10574,7 +10568,7 @@ void MainWindow::continuePracticeIdea()
     sendSongSnapshot(affectsLiveBank ? std::optional<bool>(false) : std::nullopt);
     const auto& analysis = continuation->analysis;
     appendLog(QStringLiteral(
-        "continued Bank %1 into Bank %2 as %3 using %4/%5; key confidence=%6%, profile=%7 (%8%); chord-root overlap=%9%, chord-symbol overlap=%10%, order contrast=%11%, first-four-position similarity=%12%, drums=%13%, melody rhythm=%14%, melody contour=%15%, bass contour=%16%, boundary=%17%, harmonic density=%18% (%19->%20 changes)")
+        "continued Section %1 into Section %2 as %3 using %4/%5; key confidence=%6%, profile=%7 (%8%); chord-root overlap=%9%, chord-symbol overlap=%10%, order contrast=%11%, first-four-position similarity=%12%, drums=%13%, melody rhythm=%14%, melody contour=%15%, bass contour=%16%, boundary=%17%, harmonic density=%18% (%19->%20 changes)")
         .arg(QChar(QLatin1Char('A').unicode() + request->sourceSectionIndex))
         .arg(QChar(QLatin1Char('A').unicode() + targetBank))
         .arg(analysis.continuationRoleName)
@@ -10603,14 +10597,14 @@ void MainWindow::clearPracticeIdea()
     QMessageBox prompt(this);
     prompt.setIcon(QMessageBox::Question);
     prompt.setWindowTitle(QStringLiteral("Clear Idea"));
-    prompt.setText(QStringLiteral("Clear Bank %1 only, or clear ideas from every bank?")
+    prompt.setText(QStringLiteral("Clear Section %1 only, or clear ideas from every section?")
         .arg(QChar(QLatin1Char('A').unicode() + viewedBank)));
     prompt.setInformativeText(QStringLiteral(
-        "Generated reference WAVs will also be removed. Custom looper tracks are retained."));
+        "Generated reference WAVs will also be removed. Custom tracks are retained."));
     QPushButton* currentBankButton = prompt.addButton(
-        QStringLiteral("Current Bank"), QMessageBox::AcceptRole);
+        QStringLiteral("Current Section"), QMessageBox::AcceptRole);
     QPushButton* allBanksButton = prompt.addButton(
-        QStringLiteral("All Banks"), QMessageBox::DestructiveRole);
+        QStringLiteral("All Sections"), QMessageBox::DestructiveRole);
     prompt.addButton(QMessageBox::Cancel);
     prompt.setDefaultButton(currentBankButton);
     prompt.exec();
@@ -10653,8 +10647,8 @@ void MainWindow::clearPracticeIdea()
     }
     sendSongSnapshot();
     const QString scope = clearAllBanks
-        ? QStringLiteral("all banks")
-        : QStringLiteral("Bank %1").arg(
+        ? QStringLiteral("all sections")
+        : QStringLiteral("Section %1").arg(
             QChar(QLatin1Char('A').unicode() + viewedBank));
     appendLog(removedReferences
         ? QStringLiteral("cleared idea and generated reference tracks from %1; custom tracks retained").arg(scope)
@@ -10750,8 +10744,7 @@ void MainWindow::generatePracticeReferenceWavs()
     if (chordModel_.sections().size() > bankCount) {
         QMessageBox::information(this, QStringLiteral("Generate Reference WAVs"),
             QStringLiteral(
-                "The first four sections map to Banks A-D. Later sections are marked "
-                "NO BANK and will not be rendered yet."));
+                "Only Sections A-D can be rendered. Later sections will not be rendered yet."));
     }
 
     QVector<jam2::practice::ReferenceLayerAvailability> availableLayers;
@@ -10822,6 +10815,8 @@ void MainWindow::generatePracticeReferenceWavs()
         {QStringLiteral("render_melody"), settings->renderMelody},
         {QStringLiteral("render_bass"), settings->renderBass},
         {QStringLiteral("render_support"), settings->renderSupport},
+        {QStringLiteral("chord_voicing"), static_cast<int>(settings->voicing)},
+        {QStringLiteral("drum_kit"), static_cast<int>(settings->drumKit)},
     };
     const SharedSessionController::Snapshot session = sessionController_.snapshot();
     if (looperProject_.trackSyncEnabled() && session.remotePeerCount > 0) {
@@ -10902,6 +10897,10 @@ void MainWindow::handlePracticeReferenceRenderRequest(
     settings.renderMelody = message.value(QStringLiteral("render_melody")).toBool();
     settings.renderBass = message.value(QStringLiteral("render_bass")).toBool();
     settings.renderSupport = message.value(QStringLiteral("render_support")).toBool();
+    settings.voicing = static_cast<jam2::practice::ChordVoicing>(
+        message.value(QStringLiteral("chord_voicing")).toInt());
+    settings.drumKit = static_cast<jam2::practice::ReferenceDrumKit>(
+        message.value(QStringLiteral("drum_kit")).toInt());
     settings.sampleRate = activeTrackSampleRate();
     startPracticeReferenceWavGeneration(settings, requestId);
 }
@@ -11000,7 +10999,7 @@ void MainWindow::startPracticeReferenceWavGeneration(
                     render.settings,
                     workspace);
                 if (!render.result.error.isEmpty()) {
-                    state->error = QStringLiteral("Section %1 / Bank %2: %3")
+                    state->error = QStringLiteral("Section %1 (%2): %3")
                         .arg(render.bankIndex + 1)
                         .arg(render.bankId, render.result.error);
                     break;
@@ -11066,7 +11065,7 @@ void MainWindow::startPracticeReferenceWavGeneration(
                     QMessageBox::warning(
                         this,
                         QStringLiteral("Generate Reference WAVs"),
-                        QStringLiteral("Section %1 / Bank %2: %3")
+                        QStringLiteral("Section %1 (%2): %3")
                             .arg(render.bankIndex + 1)
                             .arg(render.bankId, applyError));
                     return;
@@ -11090,7 +11089,7 @@ void MainWindow::startPracticeReferenceWavGeneration(
                     registerTransientTrackWav(render.result.support.path);
                 }
                 if (!render.result.diagnostics.isEmpty()) {
-                    appendLog(QStringLiteral("Bank %1: %2")
+                    appendLog(QStringLiteral("Section %1: %2")
                         .arg(render.bankId, render.result.diagnostics));
                 }
             }
@@ -11100,7 +11099,7 @@ void MainWindow::startPracticeReferenceWavGeneration(
             refreshLooperLanes();
             regeneratePreparedMix(looperProject_.activeBankIndex());
             appendLog(QStringLiteral(
-                "%1 song section(s) rendered into local Banks A-%2 for shared request %3")
+                "%1 song section(s) rendered into local Sections A-%2 for shared request %3")
                 .arg(state->sections.size())
                 .arg(state->sections.constLast().bankId)
                 .arg(requestId.left(8)));

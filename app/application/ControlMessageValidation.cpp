@@ -586,6 +586,10 @@ bool jam2::application::validateControlMessage(
             message.value(QStringLiteral("render_melody")).isBool() &&
             message.value(QStringLiteral("render_bass")).isBool() &&
             message.value(QStringLiteral("render_support")).isBool() && anyPart
+            && isBoundedInteger(
+                message.value(QStringLiteral("chord_voicing")), 0, 3)
+            && isBoundedInteger(
+                message.value(QStringLiteral("drum_kit")), 0, 2)
             ? true : (reason = QStringLiteral("reference render request is invalid"), false);
     }
     if (type == QStringLiteral("bank.request")) {

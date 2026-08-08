@@ -341,7 +341,7 @@ bool PracticeIdeaController::applyReferences(
         (settings.renderBass && !hasManagedLane(lanes, QStringLiteral("bass")) ? 1 : 0) +
         (settings.renderSupport && !hasManagedLane(lanes, QStringLiteral("support")) ? 1 : 0);
     if (lanes.size() + newLaneCount > jam2::application::limits::kMaximumLooperLanesPerBank) {
-        error = QStringLiteral("The destination bank has no room for the reference lanes.");
+        error = QStringLiteral("The destination section has no room for the reference lanes.");
         return false;
     }
     const QString prefix = lanePrefix.trimmed().isEmpty()

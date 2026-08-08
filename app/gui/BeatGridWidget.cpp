@@ -538,8 +538,8 @@ BeatGridWidget::BeatGridWidget(BeatGridModel* model, const QString& lane, QWidge
         "border-radius: 4px; padding: 7px 10px; }"));
     upcomingPreview_->hide();
 
-    duplicateButton_ = new QPushButton(QStringLiteral("Copy Bank..."), this);
-    deleteButton_ = new QPushButton(QStringLiteral("Clear Bank"), this);
+    duplicateButton_ = new QPushButton(QStringLiteral("Copy Section..."), this);
+    deleteButton_ = new QPushButton(QStringLiteral("Clear Section"), this);
     expandButton_ = new QPushButton(QStringLiteral("+1 Bar"), this);
     shrinkButton_ = new QPushButton(QStringLiteral("-1 Bar"), this);
 
@@ -559,12 +559,12 @@ BeatGridWidget::BeatGridWidget(BeatGridModel* model, const QString& lane, QWidge
         QStringList destinations;
         for (int bank = 0; bank < model_->sections().size(); ++bank) {
             if (bank != selected) destinations.push_back(
-                QStringLiteral("Bank %1").arg(QChar(QLatin1Char('A').unicode() + bank)));
+                QStringLiteral("Section %1").arg(QChar(QLatin1Char('A').unicode() + bank)));
         }
         bool accepted = false;
         const QString chosen = QInputDialog::getItem(
             this,
-            QStringLiteral("Copy Bank"),
+            QStringLiteral("Copy Section"),
             QStringLiteral("Replace the musical content in:"),
             destinations,
             0,
@@ -581,8 +581,8 @@ BeatGridWidget::BeatGridWidget(BeatGridModel* model, const QString& lane, QWidge
         if (selected < 0) return;
         if (QMessageBox::question(
                 this,
-                QStringLiteral("Clear Bank"),
-                QStringLiteral("Clear the musical and generated content in Bank %1? Custom looper tracks are kept.")
+                QStringLiteral("Clear Section"),
+                QStringLiteral("Clear the musical and generated content in Section %1? Custom tracks are kept.")
                     .arg(QChar(QLatin1Char('A').unicode() + selected))) != QMessageBox::Yes) return;
         if (!model_->clearSection(selected)) return;
         refresh();
@@ -696,7 +696,7 @@ void BeatGridWidget::updateUpcomingPreview()
                 .arg(beats).arg(beats == 1 ? QString{} : QStringLiteral("S"));
         }
     }
-    const QString heading = QStringLiteral("UP NEXT · BANK %1 · %2 · %3")
+    const QString heading = QStringLiteral("UP NEXT · SECTION %1 · %2 · %3")
         .arg(QChar(QLatin1Char('A').unicode() + upcomingSection_))
         .arg(sectionTitle(section).toUpper(), when);
     const int previewBeats = qMin(

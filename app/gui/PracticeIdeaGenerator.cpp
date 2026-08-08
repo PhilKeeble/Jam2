@@ -15049,7 +15049,7 @@ GeneratedContinuationIdea continuationIdea(
         qBound(0, request.sourceSectionIndex, 3));
     const QChar targetBank(QLatin1Char('A').unicode() +
         qBound(0, request.targetSectionIndex, 3));
-    const QString name = QStringLiteral("Continuation of Bank %1").arg(sourceBank);
+    const QString name = QStringLiteral("Continuation of Section %1").arg(sourceBank);
     for (SongSection* section : {&best.chordSection, &best.beatSection}) {
         section->label = QString(targetBank);
         section->name = name;

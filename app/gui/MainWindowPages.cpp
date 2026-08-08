@@ -433,7 +433,7 @@ void MainWindowPages::build(MainWindow& w)
         {QStringLiteral("Beats"), QStringLiteral("beats")},
         {QStringLiteral("Lyrics"), QStringLiteral("lyrics")},
         {QStringLiteral("Metronome"), QStringLiteral("metronome")},
-        {QStringLiteral("Looper"), QStringLiteral("looper")},
+        {QStringLiteral("Track"), QStringLiteral("looper")},
     };
     for (const auto& destination : destinations) {
         auto* button = new QPushButton(destination.first, detailPanel);
@@ -1124,13 +1124,6 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
     top->addWidget(details);
     addBankControls(w, page, top, false);
     top->addStretch(1);
-    auto* drumKitLabel = new QLabel(QStringLiteral("Drum Kit"), page);
-    w.drumKitBox_ = new QComboBox(page);
-    w.drumKitBox_->addItem(QStringLiteral("Acoustic"), QStringLiteral("acoustic"));
-    w.drumKitBox_->addItem(QStringLiteral("Electronic"), QStringLiteral("electronic"));
-    w.drumKitBox_->setCurrentIndex(0);
-    top->addWidget(drumKitLabel);
-    top->addWidget(w.drumKitBox_);
     auto* layout = new QVBoxLayout(page);
     layout->addLayout(top);
     layout->addWidget(w.beatGrid_, 1);
@@ -1138,16 +1131,6 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
     QObject::connect(continueIdea, &QPushButton::clicked, &w, [&w] { w.continuePracticeIdea(); });
     QObject::connect(reference, &QPushButton::clicked, &w, [&w] { w.generatePracticeReferenceWavs(); });
     QObject::connect(details, &QPushButton::clicked, &w, [&w] { w.showPracticeIdeaDetails(); });
-    QObject::connect(w.drumKitBox_, &QComboBox::currentIndexChanged, &w, [&w](int index) {
-        if (index < 0 || !w.drumKitBox_) return;
-        if (w.beatModel_.setDrumKit(
-                w.viewedBankIndex_,
-                w.drumKitBox_->itemData(index).toString())) {
-            if (w.beatGrid_) w.beatGrid_->refresh();
-            w.regeneratePreparedMix();
-            w.sendSongSnapshot();
-        }
-    });
     return page;
 }
 
@@ -1338,7 +1321,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     buttons->addWidget(w.stopCaptureButton_);
     buttons->addWidget(w.loadWavButton_);
     buttons->addWidget(w.shareTracksButton_);
-    buttons->addWidget(new QLabel(QStringLiteral("BANK"), page));
+    buttons->addWidget(new QLabel(QStringLiteral("SECTION"), page));
     for (int i = 0; i < 4; ++i) {
         auto* bankButton = new QPushButton(QString(QChar(QLatin1Char(static_cast<char>('A' + i)))), page);
         bankButton->setFixedWidth(34);
@@ -1349,7 +1332,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
             w.selectViewedBank(i);
         });
     }
-    w.launchBankButton_ = new QPushButton(QStringLiteral("Launch Bank"), page);
+    w.launchBankButton_ = new QPushButton(QStringLiteral("Launch Section"), page);
     QObject::connect(w.launchBankButton_, &QPushButton::clicked, &w, [&w] {
         w.requestBankLaunch(w.viewedBankIndex_);
     });
@@ -1634,7 +1617,7 @@ void MainWindowPages::addBankControls(
 {
     if (!owner || !layout) return;
     layout->addSpacing(12);
-    auto* label = new QLabel(QStringLiteral("BANK"), owner);
+    auto* label = new QLabel(QStringLiteral("SECTION"), owner);
     label->setObjectName(QStringLiteral("BankStripLabel"));
     layout->addWidget(label);
     for (int bank = 0; bank < 4; ++bank) {

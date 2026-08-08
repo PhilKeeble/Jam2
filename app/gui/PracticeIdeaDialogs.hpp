@@ -15,6 +15,12 @@ enum class ChordVoicing {
     VoiceLed,
 };
 
+enum class ReferenceDrumKit {
+    StyleDefault,
+    Acoustic,
+    Electronic,
+};
+
 struct ReferenceRenderSettings {
     bool renderChords = true;
     bool renderDrums = true;
@@ -22,6 +28,7 @@ struct ReferenceRenderSettings {
     bool renderBass = false;
     bool renderSupport = false;
     ChordVoicing voicing = ChordVoicing::StyleDefault;
+    ReferenceDrumKit drumKit = ReferenceDrumKit::StyleDefault;
     int sampleRate = 48000;
     double bpm = 120.0;
     int meterNumerator = 4;

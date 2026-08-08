@@ -1514,16 +1514,22 @@ ReferenceWav renderDrums(
         !section.generatedRecipe.drumEvents.isEmpty() &&
         generatedBeatFingerprint(section) ==
             section.generatedRecipe.beatFingerprint;
-    const ResearchDrumKit* selectedKit = generatedPerformance
+    const bool useStyleKit =
+        settings.drumKit == ReferenceDrumKit::StyleDefault &&
+        generatedPerformance &&
+        researchDrumKitById(section.generatedRecipe.drumPatchId);
+    const QString baseKitId =
+        settings.drumKit == ReferenceDrumKit::Electronic
+        ? QStringLiteral("electronic")
+        : QStringLiteral("acoustic");
+    const ResearchDrumKit* selectedKit = useStyleKit
         ? researchDrumKitById(section.generatedRecipe.drumPatchId)
-        : researchDrumKitForBase(section.drumKitId);
+        : researchDrumKitForBase(baseKitId);
     if (!selectedKit) {
-        error = generatedPerformance
-            ? QStringLiteral("The generated style has no Acoustic or Electronic drum kit mapping.")
-            : QStringLiteral("The selected drum kit is unavailable.");
+        error = QStringLiteral("The selected drum kit is unavailable.");
         return {};
     }
-    const ResearchDrumKit tunedKit = generatedPerformance
+    const ResearchDrumKit tunedKit = useStyleKit
         ? keyAwareDrumKit(*selectedKit, section)
         : *selectedKit;
     const QVector<DrumEvent> events = drumEvents(
@@ -1763,6 +1769,7 @@ QString practiceReferenceSignature(
         {QStringLiteral("tempo_pulse_units"), settings.tempoPulseUnits},
         {QStringLiteral("rate"), settings.sampleRate},
         {QStringLiteral("voicing"), static_cast<int>(settings.voicing)},
+        {QStringLiteral("drum_kit"), static_cast<int>(settings.drumKit)},
         {QStringLiteral("chord_level"), settings.chordLevel},
         {QStringLiteral("drum_level"), settings.drumLevel},
         {QStringLiteral("melody_level"), settings.melodyLevel},
@@ -1974,9 +1981,15 @@ ReferenceRenderResult renderPracticeReferences(
                 !beatSection->generatedRecipe.drumEvents.isEmpty() &&
                 generatedBeatFingerprint(*beatSection) ==
                     beatSection->generatedRecipe.beatFingerprint;
-            resolvedDrumPatch = generatedPerformance
+            const bool useStyleKit =
+                settings.drumKit == ReferenceDrumKit::StyleDefault &&
+                generatedPerformance &&
+                researchDrumKitById(beatSection->generatedRecipe.drumPatchId);
+            resolvedDrumPatch = useStyleKit
                 ? beatSection->generatedRecipe.drumPatchId
-                : QStringLiteral("base:") + beatSection->drumKitId;
+                : settings.drumKit == ReferenceDrumKit::Electronic
+                    ? QStringLiteral("base:electronic")
+                    : QStringLiteral("base:acoustic");
         }
         const float peak = qMax(
             qMax(result.chords.peak, result.drums.peak),
