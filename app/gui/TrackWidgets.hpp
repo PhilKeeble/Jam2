@@ -22,6 +22,7 @@
 #include <QPolygon>
 #include <QProxyStyle>
 #include <QRect>
+#include <QRegion>
 #include <QSizePolicy>
 #include <QString>
 #include <QStyleOption>
@@ -117,14 +118,18 @@ public:
 
     void setDurationMs(qint64 durationMs)
     {
-        durationMs_ = qMax<qint64>(0, durationMs);
+        const qint64 boundedDuration = qMax<qint64>(0, durationMs);
+        if (durationMs_ == boundedDuration) return;
+        durationMs_ = boundedDuration;
         playheadMs_ = qBound<qint64>(0, playheadMs_, durationMs_);
         update();
     }
 
     void setBpm(double bpm)
     {
-        bpm_ = qBound(1.0, bpm, 400.0);
+        const double boundedBpm = qBound(1.0, bpm, 400.0);
+        if (qAbs(bpm_ - boundedBpm) < 0.0001) return;
+        bpm_ = boundedBpm;
         update();
     }
 
@@ -134,23 +139,48 @@ public:
         int beatsPerBar,
         int tempoPulseUnits)
     {
-        gridPositionMs_ = qMax<qint64>(0, positionMs);
+        const qint64 boundedPosition = qMax<qint64>(0, positionMs);
+        const int boundedBeatsPerBar = qMax(1, beatsPerBar);
+        const int boundedPulseUnits = tempoPulseUnits == 3 ? 3 : 1;
+        const bool layoutChanged =
+            beatsPerBar_ != boundedBeatsPerBar ||
+            tempoPulseUnits_ != boundedPulseUnits;
+        const int oldX = gridMarkerX(gridPositionMs_);
+        const bool markerChanged =
+            gridPositionMs_ != boundedPosition || gridRunning_ != running;
+
+        gridPositionMs_ = boundedPosition;
         gridRunning_ = running;
-        beatsPerBar_ = qMax(1, beatsPerBar);
-        tempoPulseUnits_ = tempoPulseUnits == 3 ? 3 : 1;
-        update();
+        beatsPerBar_ = boundedBeatsPerBar;
+        tempoPulseUnits_ = boundedPulseUnits;
+        if (layoutChanged) {
+            update();
+        } else if (markerChanged) {
+            QRegion damage(markerDamageAtX(oldX));
+            damage += markerDamageAtX(gridMarkerX(gridPositionMs_));
+            update(damage);
+        }
     }
 
     void setPlayheadMs(qint64 positionMs)
     {
-        playheadMs_ = qBound<qint64>(0, positionMs, qMax<qint64>(durationMs_, 0));
-        update();
+        const qint64 boundedPosition =
+            qBound<qint64>(0, positionMs, qMax<qint64>(durationMs_, 0));
+        if (playheadMs_ == boundedPosition) return;
+        const int oldX = xForMs(playheadMs_);
+        playheadMs_ = boundedPosition;
+        QRegion damage(markerDamageAtX(oldX));
+        damage += markerDamageAtX(xForMs(playheadMs_));
+        update(damage);
     }
 
     void setLoop(qint64 startMs, qint64 endMs)
     {
-        loopStartMs_ = startMs >= 0 ? startMs : -1;
-        loopEndMs_ = endMs >= 0 ? endMs : -1;
+        const qint64 boundedStart = startMs >= 0 ? startMs : -1;
+        const qint64 boundedEnd = endMs >= 0 ? endMs : -1;
+        if (loopStartMs_ == boundedStart && loopEndMs_ == boundedEnd) return;
+        loopStartMs_ = boundedStart;
+        loopEndMs_ = boundedEnd;
         update();
     }
 
@@ -243,6 +273,17 @@ protected:
     }
 
 private:
+    QRect markerDamageAtX(int x) const
+    {
+        return QRect(x - 7, 0, 15, height());
+    }
+
+    int gridMarkerX(qint64 positionMs) const
+    {
+        const qint64 wrapped = durationMs_ > 0 ? positionMs % durationMs_ : 0;
+        return xForMs(wrapped);
+    }
+
     int xForMs(qint64 ms) const
     {
         if (durationMs_ <= 0 || width() <= 1) {
@@ -380,12 +421,30 @@ public:
         int beatsPerBar,
         int tempoPulseUnits)
     {
-        gridPositionMs_ = qMax<qint64>(0, positionMs);
+        const qint64 boundedPosition = qMax<qint64>(0, positionMs);
+        const double boundedBpm = qBound(1.0, bpm, 400.0);
+        const int boundedBeatsPerBar = qMax(1, beatsPerBar);
+        const int boundedPulseUnits = tempoPulseUnits == 3 ? 3 : 1;
+        const bool layoutChanged =
+            qAbs(bpm_ - boundedBpm) >= 0.0001 ||
+            beatsPerBar_ != boundedBeatsPerBar ||
+            tempoPulseUnits_ != boundedPulseUnits;
+        const int oldX = gridMarkerX(gridPositionMs_);
+        const bool markerChanged =
+            gridPositionMs_ != boundedPosition || gridRunning_ != running;
+
+        gridPositionMs_ = boundedPosition;
         gridRunning_ = running;
-        bpm_ = qBound(1.0, bpm, 400.0);
-        beatsPerBar_ = qMax(1, beatsPerBar);
-        tempoPulseUnits_ = tempoPulseUnits == 3 ? 3 : 1;
-        update();
+        bpm_ = boundedBpm;
+        beatsPerBar_ = boundedBeatsPerBar;
+        tempoPulseUnits_ = boundedPulseUnits;
+        if (layoutChanged) {
+            update();
+        } else if (markerChanged) {
+            QRegion damage(markerDamageAtX(oldX));
+            damage += markerDamageAtX(gridMarkerX(gridPositionMs_));
+            update(damage);
+        }
     }
 
     void setRemoteRecordingStates(
@@ -405,10 +464,24 @@ public:
 
     void setPlaybackMarkers(qint64 positionMs, qint64 loopStartMs, qint64 loopEndMs)
     {
-        playheadMs_ = positionMs >= 0 ? positionMs : -1;
-        loopStartMs_ = loopStartMs >= 0 ? loopStartMs : -1;
-        loopEndMs_ = loopEndMs >= 0 ? loopEndMs : -1;
-        update();
+        const qint64 boundedPlayhead = positionMs >= 0 ? positionMs : -1;
+        const qint64 boundedLoopStart = loopStartMs >= 0 ? loopStartMs : -1;
+        const qint64 boundedLoopEnd = loopEndMs >= 0 ? loopEndMs : -1;
+        const bool loopChanged =
+            loopStartMs_ != boundedLoopStart || loopEndMs_ != boundedLoopEnd;
+        const int oldX = playbackMarkerX(playheadMs_);
+        const bool playheadChanged = playheadMs_ != boundedPlayhead;
+
+        playheadMs_ = boundedPlayhead;
+        loopStartMs_ = boundedLoopStart;
+        loopEndMs_ = boundedLoopEnd;
+        if (loopChanged) {
+            update();
+        } else if (playheadChanged) {
+            QRegion damage(markerDamageAtX(oldX));
+            damage += markerDamageAtX(playbackMarkerX(playheadMs_));
+            update(damage);
+        }
     }
 
     void setLiveRecordingEndFrame(qint64 frame)
@@ -682,6 +755,28 @@ private:
     static constexpr int kLaneHeight = 140;
     static constexpr int kHeaderWidth = 286;
     static constexpr int kPlusHeight = 44;
+
+    QRect markerDamageAtX(int x) const
+    {
+        if (x < 0) return {};
+        const int bottom = kToolbarHeight + visualLaneCount() * kLaneHeight;
+        return QRect(x - 7, kToolbarHeight - 14, 15, qMax(0, bottom - kToolbarHeight + 14));
+    }
+
+    int gridMarkerX(qint64 positionMs) const
+    {
+        const qint64 frames = viewFrames();
+        if (frames <= 0) return -1;
+        const qint64 markerFrame =
+            (positionMs * static_cast<qint64>(markerSampleRate()) / 1000) % frames;
+        return xForFrame(markerFrame);
+    }
+
+    int playbackMarkerX(qint64 positionMs) const
+    {
+        if (positionMs < 0) return -1;
+        return xForFrame(positionMs * static_cast<qint64>(markerSampleRate()) / 1000);
+    }
 
     int visualLaneCount() const
     {

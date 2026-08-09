@@ -1243,9 +1243,11 @@ MainWindow::MainWindow(QWidget* parent)
         }
     });
     playbackGridTimer_.setInterval(16);
+    playbackGridTimer_.setTimerType(Qt::PreciseTimer);
     QObject::connect(&playbackGridTimer_, &QTimer::timeout, this, [this] { updatePlaybackGrid(); });
     playbackGridTimer_.start();
-    trackTimelineTimer_.setInterval(33);
+    trackTimelineTimer_.setInterval(16);
+    trackTimelineTimer_.setTimerType(Qt::PreciseTimer);
     QObject::connect(&trackTimelineTimer_, &QTimer::timeout, this, [this] { updateTrackTimeline(); });
     trackTimelineTimer_.start();
 }
@@ -1931,17 +1933,25 @@ void MainWindow::updateJamSessionHeaderStatus(
             .arg(activeRemotePeers + 1)
             .arg(activeRemotePeers),
     };
+    if (!sessionHeaderRtt_.isEmpty()) {
+        lines << QStringLiteral("Peer RTT %1").arg(sessionHeaderRtt_);
+    }
     if (snapshot.contract.sampleRate > 0) {
         lines << QStringLiteral("%1  ·  %2 Hz")
             .arg(quality)
             .arg(snapshot.contract.sampleRate);
     }
-    setSessionHeaderStatus(
-        creator && activeRemotePeers == 0
-            ? QStringLiteral("JAM · WAITING")
-            : QStringLiteral("JAM · %1").arg(activeRemotePeers + 1),
-        role,
-        lines);
+    QString pill = QStringLiteral("JAM · WAITING");
+    if (!creator || activeRemotePeers > 0) {
+        const int totalPeers = activeRemotePeers + 1;
+        pill = QStringLiteral("JAM · %1 %2")
+            .arg(totalPeers)
+            .arg(totalPeers == 1 ? QStringLiteral("PEER") : QStringLiteral("PEERS"));
+        if (!sessionHeaderRtt_.isEmpty()) {
+            pill += QStringLiteral(" · %1").arg(sessionHeaderRtt_);
+        }
+    }
+    setSessionHeaderStatus(pill, role, lines);
 }
 
 void MainWindow::showLocalPerformSetup()
@@ -3795,28 +3805,19 @@ void MainWindow::updateStatsDisplay(const ConnectionDiagnosticsSnapshot* stats)
     if (lossLabel_) lossLabel_->setText(labels.loss);
     if (underrunLabel_) underrunLabel_->setText(labels.underrun);
     diagnosisLabel_->setText(labels.diagnosis);
-    if (performanceHome_) {
-        QString rtt = QStringLiteral("-");
-        if (stats != nullptr) {
-            const auto measured = std::find_if(
-                stats->peers.cbegin(),
-                stats->peers.cend(),
-                [](const Jam2PeerDiagnostics& peer) { return peer.has_rtt; });
-            if (measured != stats->peers.cend()) {
-                rtt = QStringLiteral("%1 ms").arg(measured->rtt_ms, 0, 'f', 1);
-            }
+    QString measuredRtt;
+    if (stats != nullptr) {
+        const auto measured = std::find_if(
+            stats->peers.cbegin(),
+            stats->peers.cend(),
+            [](const Jam2PeerDiagnostics& peer) { return peer.has_rtt; });
+        if (measured != stats->peers.cend()) {
+            measuredRtt = QStringLiteral("%1 ms").arg(measured->rtt_ms, 0, 'f', 1);
         }
-        performanceHome_->setTechnicalSummary(
-            rtt,
-            stats != nullptr
-                ? QStringLiteral("%1 ms").arg(stats->jitter_average_ms, 0, 'f', 1)
-                : QStringLiteral("-"),
-            stats != nullptr
-                ? QStringLiteral("%1%").arg(stats->packet_loss_percent, 0, 'f', 2)
-                : QStringLiteral("-"),
-            stats != nullptr
-                ? QString::number(stats->callback_gap_over_2x)
-                : QStringLiteral("-"));
+    }
+    if (sessionHeaderRtt_ != measuredRtt) {
+        sessionHeaderRtt_ = measuredRtt;
+        updateJamSessionHeaderStatus(sessionController_.snapshot());
     }
     if (diagnosticPacketsValue_) {
         diagnosticPacketsValue_->setText(

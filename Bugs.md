@@ -24,6 +24,8 @@ keyboard controls need sorting - maybe add the keybind list into the settings pa
 
 jam sync and tick boxes in the settings menu show black background box
 
+import wav sample cahnges 
+
 ### Sound references
 
 https://www.youtube.com/watch?v=miTyMfxxWCo - 1:30 - heavy synth sounds 

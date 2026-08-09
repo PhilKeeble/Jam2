@@ -13,6 +13,7 @@
 #include <QFileDialog>
 #include <QGuiApplication>
 #include <QLabel>
+#include <QLayout>
 #include <QLineEdit>
 #include <QPainter>
 #include <QPainterPath>
@@ -88,59 +89,89 @@ protected:
     {
         auto* dialog = qobject_cast<QDialog*>(watched);
         if (dialog == nullptr ||
-            (event->type() != QEvent::Show && event->type() != QEvent::WindowStateChange)) {
+            (event->type() != QEvent::Polish && event->type() != QEvent::Show)) {
             return QObject::eventFilter(watched, event);
         }
 
-        QPointer<QDialog> guarded(dialog);
-        QTimer::singleShot(0, dialog, [guarded] {
-            if (guarded == nullptr) {
-                return;
-            }
+        if (event->type() == QEvent::Polish) {
+            prepareDialog(*dialog);
+            placeDialog(*dialog);
+            return QObject::eventFilter(watched, event);
+        }
 
-            QDialog& current = *guarded;
-            QScreen* screen = current.screen();
-            if (screen == nullptr) {
-                screen = QGuiApplication::primaryScreen();
-            }
-            if (screen == nullptr) {
-                return;
-            }
-
-            const QRect available = screen->availableGeometry();
-            const QSize maximum(
-                std::min(900, std::max(320, available.width() - 96)),
-                std::min(720, std::max(240, available.height() - 96)));
-            const bool wasExpanded = current.isMaximized() || current.isFullScreen() ||
-                current.width() > maximum.width() || current.height() > maximum.height();
-
-            if (current.isMaximized() || current.isFullScreen()) {
-                current.setWindowState(current.windowState() &
-                    ~(Qt::WindowMaximized | Qt::WindowFullScreen));
-            }
-            current.setMaximumSize(maximum);
-
-            QSize target = current.size().boundedTo(maximum);
-            if (wasExpanded) {
-                target = qobject_cast<QFileDialog*>(&current) != nullptr
-                    ? QSize(800, 560).boundedTo(maximum)
-                    : QSize(780, 600).boundedTo(maximum);
-            }
-            target = target.expandedTo(current.minimumSizeHint().boundedTo(maximum));
-            current.resize(target);
-
-            const QPoint centre = current.parentWidget() != nullptr
-                ? current.parentWidget()->window()->frameGeometry().center()
-                : available.center();
-            QRect frame(QPoint(0, 0), current.frameGeometry().size());
-            frame.moveCenter(centre);
-            if (!available.contains(frame)) {
-                frame.moveLeft(std::clamp(frame.left(), available.left(), available.right() - frame.width() + 1));
-                frame.moveTop(std::clamp(frame.top(), available.top(), available.bottom() - frame.height() + 1));
-            }
-            current.move(frame.topLeft());
-        });
+        placeDialog(*dialog);
+        if (qobject_cast<QFileDialog*>(dialog) == nullptr) {
+            const qreal intendedOpacity = dialog->windowOpacity();
+            dialog->setWindowOpacity(0.0);
+            const QPointer<QDialog> guarded(dialog);
+            QTimer::singleShot(75, dialog, [guarded, intendedOpacity] {
+                if (guarded == nullptr) return;
+                placeDialog(*guarded);
+                guarded->setWindowOpacity(intendedOpacity);
+            });
+        }
         return QObject::eventFilter(watched, event);
+    }
+
+private:
+    static constexpr auto kPreparedSizeProperty = "jam2PreparedDialogSize";
+
+    static void prepareDialog(QDialog& dialog)
+    {
+        if (dialog.layout() != nullptr) dialog.layout()->activate();
+        QSize prepared = dialog.testAttribute(Qt::WA_Resized)
+            ? dialog.size()
+            : dialog.sizeHint();
+        if (!prepared.isValid()) prepared = QSize(480, 320);
+        dialog.setProperty(kPreparedSizeProperty, prepared);
+    }
+
+    static void placeDialog(QDialog& dialog)
+    {
+        QWidget* owner = dialog.parentWidget() != nullptr
+            ? dialog.parentWidget()->window()
+            : QApplication::activeWindow();
+        if (owner == &dialog) owner = nullptr;
+        QScreen* screen = owner != nullptr ? owner->screen() : dialog.screen();
+        if (screen == nullptr) screen = QGuiApplication::primaryScreen();
+        if (screen == nullptr) return;
+
+        const QRect available = screen->availableGeometry();
+        const QSize maximum(
+            std::min(900, std::max(320, available.width() - 96)),
+            std::min(720, std::max(240, available.height() - 96)));
+        if (dialog.isMaximized() || dialog.isFullScreen()) {
+            dialog.setWindowState(dialog.windowState() &
+                ~(Qt::WindowMaximized | Qt::WindowFullScreen));
+        }
+        dialog.setMaximumSize(maximum);
+
+        QSize target = dialog.property(kPreparedSizeProperty).toSize();
+        if (!target.isValid()) {
+            if (dialog.layout() != nullptr) dialog.layout()->activate();
+            target = dialog.sizeHint();
+        }
+        if (qobject_cast<QFileDialog*>(&dialog) != nullptr && !target.isValid()) {
+            target = QSize(800, 560);
+        }
+        if (!target.isValid()) target = QSize(480, 320);
+        target = target.expandedTo(dialog.minimumSizeHint()).boundedTo(maximum);
+        dialog.resize(target);
+
+        const QPoint centre = owner != nullptr
+            ? owner->frameGeometry().center()
+            : available.center();
+        QRect frame(QPoint(0, 0), dialog.frameGeometry().size());
+        frame.moveCenter(centre);
+        frame.moveLeft(std::clamp(
+            frame.left(),
+            available.left(),
+            std::max(available.left(), available.right() - frame.width() + 1)));
+        frame.moveTop(std::clamp(
+            frame.top(),
+            available.top(),
+            std::max(available.top(), available.bottom() - frame.height() + 1)));
+        dialog.move(frame.topLeft());
     }
 };
 

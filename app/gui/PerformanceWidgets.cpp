@@ -9,14 +9,18 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPointer>
 #include <QRadialGradient>
 #include <QRandomGenerator>
+#include <QRegion>
 #include <QResizeEvent>
+#include <QThreadPool>
 #include <QWheelEvent>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <memory>
 
 namespace {
 
@@ -24,6 +28,212 @@ namespace theme = jam2::gui::theme;
 
 constexpr int kPeerVisibleCount = 10;
 constexpr int kPeerChipWidth = 104;
+constexpr int kBackgroundLayerWidth = 960;
+constexpr int kBackgroundLayerHeight = 540;
+constexpr qint64 kBackgroundCompositeIntervalMs = 125;
+constexpr double kBackgroundMorphSeconds = 24.0;
+constexpr double kBackgroundMaximumParallaxPixels = 56.0;
+constexpr qint64 kNovaLifetimeMs = 5200;
+
+double clampUnit(double value)
+{
+    return std::clamp(value, 0.0, 1.0);
+}
+
+double smoothStep(double lower, double upper, double value)
+{
+    if (upper <= lower) return value >= upper ? 1.0 : 0.0;
+    const double normalized = clampUnit((value - lower) / (upper - lower));
+    return normalized * normalized * (3.0 - 2.0 * normalized);
+}
+
+quint32 noiseHash(int x, int y, quint32 seed)
+{
+    quint32 value = static_cast<quint32>(x) * 0x8da6b343U;
+    value ^= static_cast<quint32>(y) * 0xd8163841U;
+    value ^= seed * 0xcb1ab31fU;
+    value ^= value >> 13U;
+    value *= 0x85ebca6bU;
+    value ^= value >> 16U;
+    return value;
+}
+
+double latticeNoise(double x, double y, quint32 seed)
+{
+    const int x0 = static_cast<int>(std::floor(x));
+    const int y0 = static_cast<int>(std::floor(y));
+    const double fx = x - static_cast<double>(x0);
+    const double fy = y - static_cast<double>(y0);
+    const double sx = fx * fx * (3.0 - 2.0 * fx);
+    const double sy = fy * fy * (3.0 - 2.0 * fy);
+    const auto sample = [seed](int px, int py) {
+        return static_cast<double>(noiseHash(px, py, seed) & 0xffffU) / 65535.0;
+    };
+    const double top = std::lerp(sample(x0, y0), sample(x0 + 1, y0), sx);
+    const double bottom = std::lerp(sample(x0, y0 + 1), sample(x0 + 1, y0 + 1), sx);
+    return std::lerp(top, bottom, sy);
+}
+
+double fractalNoise(double x, double y, quint32 seed, int octaves)
+{
+    double value = 0.0;
+    double amplitude = 0.58;
+    double total = 0.0;
+    for (int octave = 0; octave < octaves; ++octave) {
+        value += latticeNoise(x, y, seed + static_cast<quint32>(octave) * 0x9e3779b9U) * amplitude;
+        total += amplitude;
+        x = x * 2.03 + 7.1;
+        y = y * 2.01 - 5.7;
+        amplitude *= 0.48;
+    }
+    return total > 0.0 ? value / total : 0.0;
+}
+
+QRgb premultipliedPixel(int red, int green, int blue, int alpha)
+{
+    return qPremultiply(qRgba(
+        qBound(0, red, 255),
+        qBound(0, green, 255),
+        qBound(0, blue, 255),
+        qBound(0, alpha, 255)));
+}
+
+QRectF scaledAroundCenter(const QRectF& bounds, double scale)
+{
+    const QSizeF size(bounds.width() * scale, bounds.height() * scale);
+    return QRectF(bounds.center() - QPointF(size.width() * 0.5, size.height() * 0.5), size);
+}
+
+struct PerformanceBackgroundLayerBuild {
+    QImage nebula;
+    QImage nebulaMorph;
+    QImage filament;
+    QImage dust;
+    qint64 buildNanoseconds = 0;
+};
+
+std::shared_ptr<PerformanceBackgroundLayerBuild> buildPerformanceBackgroundLayers()
+{
+    QElapsedTimer buildClock;
+    buildClock.start();
+    const QSize layerSize(kBackgroundLayerWidth, kBackgroundLayerHeight);
+    auto result = std::make_shared<PerformanceBackgroundLayerBuild>();
+    result->nebula = QImage(layerSize, QImage::Format_ARGB32_Premultiplied);
+    result->nebulaMorph = QImage(layerSize, QImage::Format_ARGB32_Premultiplied);
+    result->filament = QImage(layerSize, QImage::Format_ARGB32_Premultiplied);
+    result->dust = QImage(layerSize, QImage::Format_ARGB32_Premultiplied);
+    result->nebula.fill(Qt::transparent);
+    result->nebulaMorph.fill(Qt::transparent);
+    result->filament.fill(Qt::transparent);
+    result->dust.fill(Qt::transparent);
+
+    for (int y = 0; y < layerSize.height(); ++y) {
+        QRgb* nebulaLine = reinterpret_cast<QRgb*>(result->nebula.scanLine(y));
+        QRgb* morphLine = reinterpret_cast<QRgb*>(result->nebulaMorph.scanLine(y));
+        QRgb* dustLine = reinterpret_cast<QRgb*>(result->dust.scanLine(y));
+        const double v = (static_cast<double>(y) + 0.5) / layerSize.height();
+        for (int x = 0; x < layerSize.width(); ++x) {
+            const double u = (static_cast<double>(x) + 0.5) / layerSize.width();
+            const auto nebulaPixel = [u, v](double phase, quint32 seed) {
+                const double shiftedU = u + phase * 0.018;
+                const double shiftedV = v - phase * 0.014;
+                const double broad = fractalNoise(
+                    shiftedU * 3.15 + phase * 0.2,
+                    shiftedV * 2.75 - phase * 0.15,
+                    seed,
+                    4);
+                const double detail = fractalNoise(
+                    shiftedU * 8.2 - phase * 0.3,
+                    shiftedV * 7.1 + phase * 0.25,
+                    seed ^ 0x65adf219U,
+                    3);
+                const double density = smoothStep(
+                    0.20,
+                    0.60,
+                    broad * 0.72 + detail * 0.28);
+                const double leftCurve = 0.43 + 0.20 * u +
+                    0.035 * std::sin(u * 8.0 + phase * 0.8);
+                const double leftBand = std::exp(-std::pow((v - leftCurve) / 0.27, 2.0)) *
+                    (1.0 - smoothStep(0.18, 0.93, u));
+                const double cyanCurve = 0.62 + (v - 0.46) * 0.24 +
+                    0.025 * std::sin(v * 10.0 - phase);
+                const double cyanBand = std::exp(-std::pow((u - cyanCurve) / 0.18, 2.0)) *
+                    smoothStep(0.02, 0.26, v) *
+                    (1.0 - smoothStep(0.78, 1.0, v));
+                const double coralDistance =
+                    std::pow((u - 0.68) / 0.25, 2.0) +
+                    std::pow((v - 0.78) / 0.24, 2.0);
+                const double coralBand = std::exp(-coralDistance * 1.25);
+                const double ambientDistance =
+                    std::pow((u - 0.47) / 0.48, 2.0) +
+                    std::pow((v - 0.50) / 0.40, 2.0);
+                const double ambientBand = std::exp(-ambientDistance * 1.15);
+                const double magenta = density * leftBand;
+                const double cyan = density * cyanBand * 0.82;
+                const double coral = density * coralBand * 0.92;
+                const double ambient = density * ambientBand * 0.34;
+                const double total = magenta + cyan + coral + ambient;
+                if (total < 0.002) return static_cast<QRgb>(0);
+                const int red = static_cast<int>((126.0 * magenta + 49.0 * cyan +
+                    202.0 * coral + 103.0 * ambient) / total);
+                const int green = static_cast<int>((66.0 * magenta + 143.0 * cyan +
+                    76.0 * coral + 72.0 * ambient) / total);
+                const int blue = static_cast<int>((168.0 * magenta + 174.0 * cyan +
+                    113.0 * coral + 157.0 * ambient) / total);
+                const int alpha = static_cast<int>(
+                    255.0 * clampUnit(total * 1.18) * (0.76 + detail * 0.24));
+                return premultipliedPixel(red, green, blue, alpha);
+            };
+            nebulaLine[x] = nebulaPixel(-0.55, 0x4a324e31U);
+            morphLine[x] = nebulaPixel(0.55, 0x9756a3c1U);
+
+            const double dustNoise = fractalNoise(
+                u * 5.4 + 2.1,
+                v * 4.7 - 1.7,
+                0x4a324455U,
+                3);
+            const double dustCurve = 0.22 + 0.34 * v + 0.028 * std::sin(v * 11.0);
+            const double leftDust = std::exp(-std::pow((u - dustCurve) / 0.17, 2.0)) *
+                smoothStep(0.10, 0.92, v);
+            const double lowerDust = std::exp(-(
+                std::pow((u - 0.72) / 0.31, 2.0) +
+                std::pow((v - 0.89) / 0.19, 2.0)));
+            const double dustShape = std::max(leftDust, lowerDust * 0.48);
+            const double dustAlpha = dustShape *
+                smoothStep(0.38, 0.69, dustNoise + dustShape * 0.13);
+            dustLine[x] = premultipliedPixel(
+                3,
+                4,
+                10,
+                static_cast<int>(225.0 * clampUnit(dustAlpha * 1.12)));
+        }
+    }
+
+    const auto addFilaments = [layerSize](QImage& image, double phase, QColor color) {
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::Antialiasing);
+        QPainterPath path;
+        path.moveTo(layerSize.width() * (0.18 + phase * 0.012), layerSize.height() * 0.61);
+        path.cubicTo(
+            layerSize.width() * 0.32, layerSize.height() * (0.48 - phase * 0.01),
+            layerSize.width() * 0.45, layerSize.height() * (0.69 + phase * 0.015),
+            layerSize.width() * 0.66, layerSize.height() * 0.50);
+        path.cubicTo(
+            layerSize.width() * 0.76, layerSize.height() * 0.40,
+            layerSize.width() * 0.72, layerSize.height() * 0.28,
+            layerSize.width() * 0.86, layerSize.height() * 0.18);
+        for (const auto [width, alpha] :
+             std::array<QPair<double, int>, 3>{{{17.0, 7}, {7.0, 29}, {1.6, 76}}}) {
+            color.setAlpha(alpha);
+            painter.setPen(QPen(color, width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            painter.drawPath(path);
+        }
+    };
+    addFilaments(result->filament, -1.0, QColor(105, 198, 202));
+    addFilaments(result->filament, 1.0, QColor(223, 102, 151));
+    result->buildNanoseconds = buildClock.nsecsElapsed();
+    return result;
+}
 
 QColor nebulaRed()
 {
@@ -584,13 +794,9 @@ PerformanceHomeWidget::PerformanceHomeWidget(QWidget* parent)
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
     history_.fill(0.0, 72);
-    stars_.reserve(150);
-    QRandomGenerator random(0x4a414d32U);
-    for (int index = 0; index < 150; ++index) {
-        stars_.push_back(QPointF(random.generateDouble(), random.generateDouble()));
-    }
     animationClock_.start();
     renderWindow_.start();
+    rebuildBackground();
     animationTimer_.setInterval(33);
     QObject::connect(&animationTimer_, &QTimer::timeout, this, [this] {
         advanceAnimation();
@@ -611,12 +817,25 @@ void PerformanceHomeWidget::setTiming(
     double beatPhase,
     bool running)
 {
+    const int boundedSubdivision = qMax(0, subdivision);
+    const int boundedBeatsPerBar = qMax(1, beatsPerBar);
+    const double boundedBeatPhase = qBound(0.0, beatPhase, 0.999999);
+    const int previousActiveBeat = beatsPerBar_ > 0
+        ? static_cast<int>(absoluteBeat_ % static_cast<quint64>(beatsPerBar_))
+        : 0;
+    const int nextActiveBeat = static_cast<int>(
+        absoluteBeat % static_cast<quint64>(boundedBeatsPerBar));
+    const bool beatStateChanged = previousActiveBeat != nextActiveBeat ||
+        beatsPerBar_ != boundedBeatsPerBar || running_ != running;
+
     absoluteBeat_ = absoluteBeat;
-    subdivision_ = qMax(0, subdivision);
-    beatsPerBar_ = qMax(1, beatsPerBar);
-    beatPhase_ = qBound(0.0, beatPhase, 0.999999);
+    subdivision_ = boundedSubdivision;
+    beatsPerBar_ = boundedBeatsPerBar;
+    beatPhase_ = boundedBeatPhase;
     running_ = running;
-    update();
+    if (beatStateChanged && !currentBeatHitRect_.isEmpty()) {
+        update(currentBeatHitRect_.adjusted(0, 0, 0, -currentBeatHitRect_.height() + 32));
+    }
 }
 
 void PerformanceHomeWidget::setAudioPeaks(const jam2::EngineGuiPeakSnapshot& peaks)
@@ -642,7 +861,6 @@ void PerformanceHomeWidget::setTunerSnapshot(const jam2::EnginePitchSnapshot& sn
     if (!tuner_.enabled) {
         tunerExpanded_ = false;
     }
-    update();
 }
 
 void PerformanceHomeWidget::setPeers(QVector<PerformancePeerPresentation> peers)
@@ -651,6 +869,49 @@ void PerformanceHomeWidget::setPeers(QVector<PerformancePeerPresentation> peers)
     const int maximumOffset = qMax(0, peers_.size() - peerVisibleCapacity());
     peerScrollOffset_ = qBound(0, peerScrollOffset_, maximumOffset);
     update();
+}
+
+void PerformanceHomeWidget::updateAnimatedForeground()
+{
+    if (width() <= 0 || height() <= 0) return;
+
+    constexpr int headerHeight = 116;
+    constexpr int sideLeftWidth = 150;
+    constexpr int sideRightWidth = 250;
+    const int previewHeight = width() >= 900
+        ? qBound(160, height() / 3, 260)
+        : qBound(150, height() / 3, 320);
+    const int previewTop = qMax(
+        headerHeight,
+        height() - 24 - previewHeight);
+    const int middleHeight = qMax(0, previewTop - headerHeight + 12);
+
+    QRegion animated(QRect(0, 0, width(), headerHeight));
+    animated += QRect(
+        qMax(0, width() / 2 - 280),
+        headerHeight - 8,
+        qMin(560, width()),
+        middleHeight);
+    animated += QRect(0, qMax(0, previewTop - 12), width(), height() - previewTop + 12);
+    animated += QRect(0, headerHeight, qMin(sideLeftWidth, width()), middleHeight);
+    animated += QRect(
+        qMax(0, width() - sideRightWidth),
+        headerHeight,
+        qMin(sideRightWidth, width()),
+        middleHeight);
+
+    if (novaStartMs_ >= 0) {
+        constexpr int novaExtent = 116;
+        const QPoint center(
+            qRound(novaPosition_.x() * width()),
+            qRound(novaPosition_.y() * height()));
+        animated += QRect(
+            center.x() - novaExtent,
+            center.y() - novaExtent,
+            novaExtent * 2,
+            novaExtent * 2);
+    }
+    update(animated.intersected(rect()));
 }
 
 void PerformanceHomeWidget::setSelectedPeer(std::uint64_t peerId)
@@ -733,33 +994,37 @@ void PerformanceHomeWidget::setBankState(
     bool localOnly,
     const QString& status)
 {
-    liveBank_ = qBound(0, liveBank, 3);
-    pendingBank_ = pendingBank >= 0 && pendingBank < 4 ? pendingBank : -1;
-    pendingBankBeatsRemaining_ = pendingBank_ >= 0 ? beatsUntilSwitch : 0;
-    pendingBankBeatsPerBar_ = qMax(1, pendingBeatsPerBar);
+    const int boundedLiveBank = qBound(0, liveBank, 3);
+    const int boundedPendingBank = pendingBank >= 0 && pendingBank < 4
+        ? pendingBank
+        : -1;
+    const quint64 boundedBeatsUntilSwitch = boundedPendingBank >= 0
+        ? beatsUntilSwitch
+        : 0;
+    const int boundedPendingBeatsPerBar = qMax(1, pendingBeatsPerBar);
+    if (liveBank_ == boundedLiveBank &&
+        pendingBank_ == boundedPendingBank &&
+        pendingBankBeatsRemaining_ == boundedBeatsUntilSwitch &&
+        pendingBankBeatsPerBar_ == boundedPendingBeatsPerBar &&
+        bankLocalOnly_ == localOnly &&
+        bankTransitionStatus_ == status) {
+        return;
+    }
+    liveBank_ = boundedLiveBank;
+    pendingBank_ = boundedPendingBank;
+    pendingBankBeatsRemaining_ = boundedBeatsUntilSwitch;
+    pendingBankBeatsPerBar_ = boundedPendingBeatsPerBar;
     bankLocalOnly_ = localOnly;
     bankTransitionStatus_ = status;
-    update();
+    updateAnimatedForeground();
 }
 
 void PerformanceHomeWidget::setArrangementState(bool running, bool armed)
 {
+    if (arrangementRunning_ == running && arrangementArmed_ == armed) return;
     arrangementRunning_ = running;
     arrangementArmed_ = armed;
-    update();
-}
-
-void PerformanceHomeWidget::setTechnicalSummary(
-    const QString& rtt,
-    const QString& jitter,
-    const QString& loss,
-    const QString& xruns)
-{
-    rtt_ = rtt;
-    jitter_ = jitter;
-    loss_ = loss;
-    xruns_ = xruns;
-    update();
+    updateAnimatedForeground();
 }
 
 QString PerformanceHomeWidget::rendererStatsText() const
@@ -934,40 +1199,58 @@ int PerformanceHomeWidget::peerVisibleCapacity() const
 
 void PerformanceHomeWidget::rebuildBackground()
 {
-    if (width() <= 0 || height() <= 0) {
-        nebulaCache_ = {};
-        return;
+    if (spaceCache_.isNull()) {
+        authoredNebulaSource_.load(
+            QStringLiteral(":/jam2/assets/performance-nebula-v1.png"));
+        if (authoredNebulaSource_.isNull()) {
+            authoredNebulaSource_ = QImage(
+                QSize(1600, 900),
+                QImage::Format_ARGB32_Premultiplied);
+            authoredNebulaSource_.fill(QColor(3, 6, 12));
+        }
+        spaceCache_ = std::move(authoredNebulaSource_);
+        backgroundFrameCache_ = QImage(
+            QSize(kBackgroundLayerWidth, kBackgroundLayerHeight),
+            QImage::Format_ARGB32_Premultiplied);
+        backgroundFrameCache_.fill(Qt::transparent);
+        backgroundCacheBytes_ =
+            spaceCache_.sizeInBytes() + backgroundFrameCache_.sizeInBytes();
+        lastBackgroundCompositeMs_ = -1;
     }
-    const QSize cacheSize(
-        qMax(1, static_cast<int>(std::lround(width() * 0.65))),
-        qMax(1, static_cast<int>(std::lround(height() * 0.65))));
-    nebulaCache_ = QImage(cacheSize, QImage::Format_ARGB32_Premultiplied);
-    nebulaCache_.fill(QColor(4, 5, 13));
-    QPainter painter(&nebulaCache_);
-    painter.setRenderHint(QPainter::Antialiasing);
-    const auto cloud = [&painter, cacheSize](
-                           QPointF center,
-                           double radius,
-                           QColor color,
-                           int alpha) {
-        const QPointF point(center.x() * cacheSize.width(), center.y() * cacheSize.height());
-        const double pixels = radius * std::max(cacheSize.width(), cacheSize.height());
-        color.setAlpha(alpha);
-        QRadialGradient gradient(point, pixels);
-        gradient.setColorAt(0.0, color);
-        QColor transparent = color;
-        transparent.setAlpha(0);
-        gradient.setColorAt(0.72, QColor(color.red(), color.green(), color.blue(), alpha / 3));
-        gradient.setColorAt(1.0, transparent);
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(gradient);
-        painter.drawEllipse(point, pixels, pixels * 0.72);
-    };
-    cloud(QPointF(0.43, 0.42), 0.38, nebulaPurple(), 178);
-    cloud(QPointF(0.58, 0.48), 0.34, nebulaRed(), 166);
-    cloud(QPointF(0.50, 0.36), 0.24, nebulaCyan(), 105);
-    cloud(QPointF(0.34, 0.56), 0.20, QColor(231, 116, 97), 90);
+
+    if (backgroundLayersReady_ || backgroundLayerBuildPending_) return;
+    backgroundLayerBuildPending_ = true;
+    const QPointer<PerformanceHomeWidget> widget(this);
+    QThreadPool::globalInstance()->start([widget] {
+        const auto layers = buildPerformanceBackgroundLayers();
+        if (!widget) return;
+        QMetaObject::invokeMethod(
+            widget.data(),
+            [widget, layers] {
+                if (!widget) return;
+                widget->nebulaCache_ = std::move(layers->nebula);
+                widget->nebulaMorphCache_ = std::move(layers->nebulaMorph);
+                widget->filamentCache_ = std::move(layers->filament);
+                widget->dustCache_ = std::move(layers->dust);
+                widget->backgroundBuildNanoseconds_ = layers->buildNanoseconds;
+                widget->backgroundCacheBytes_ =
+                    widget->spaceCache_.sizeInBytes() +
+                    widget->nebulaCache_.sizeInBytes() +
+                    widget->nebulaMorphCache_.sizeInBytes() +
+                    widget->filamentCache_.sizeInBytes() +
+                    widget->dustCache_.sizeInBytes() +
+                    widget->backgroundFrameCache_.sizeInBytes();
+                widget->backgroundLayerBuildPending_ = false;
+                widget->backgroundLayersReady_ = true;
+                widget->backgroundLayersReadyMs_ =
+                    widget->animationClock_.elapsed();
+                widget->lastBackgroundCompositeMs_ = -1;
+                widget->update();
+            },
+            Qt::QueuedConnection);
+    });
 }
+
 
 void PerformanceHomeWidget::advanceAnimation()
 {
@@ -992,18 +1275,28 @@ void PerformanceHomeWidget::advanceAnimation()
     }
     history_.removeFirst();
     history_.push_back(envelope_);
-    if (running_ && now >= nextNovaMs_ && novaStartMs_ < 0) {
-        novaStartMs_ = now;
-        novaPosition_ = QPointF(
-            0.12 + QRandomGenerator::global()->generateDouble() * 0.76,
-            0.10 + QRandomGenerator::global()->generateDouble() * 0.48);
-        nextNovaMs_ = now + 45000 +
-            static_cast<qint64>(QRandomGenerator::global()->bounded(75001));
-    }
-    if (novaStartMs_ >= 0 && now - novaStartMs_ > 1800) {
+    if (novaStartMs_ >= 0 && now - novaStartMs_ > kNovaLifetimeMs) {
         novaStartMs_ = -1;
+        novaEligibleMs_ = now + 15000;
     }
-    update();
+    if (novaStartMs_ < 0 && now >= novaEligibleMs_) {
+        constexpr double kMeanNovaWaitSeconds = 45.0;
+        const double eventProbability =
+            1.0 - std::exp(-delta / kMeanNovaWaitSeconds);
+        if (QRandomGenerator::global()->generateDouble() < eventProbability) {
+            novaStartMs_ = now;
+            novaPosition_ = QPointF(
+                0.12 + QRandomGenerator::global()->generateDouble() * 0.76,
+                0.10 + QRandomGenerator::global()->generateDouble() * 0.48);
+        }
+    }
+    if (lastBackgroundRepaintMs_ < 0 ||
+        now - lastBackgroundRepaintMs_ >= kBackgroundCompositeIntervalMs) {
+        lastBackgroundRepaintMs_ = now;
+        update();
+    } else {
+        updateAnimatedForeground();
+    }
 }
 
 void PerformanceHomeWidget::paintNebulaFields(
@@ -1012,37 +1305,86 @@ void PerformanceHomeWidget::paintNebulaFields(
     double participantComplexity)
 {
     const QRectF viewport(rect());
-    const double overscanX = width() * 0.18;
-    const double overscanY = height() * 0.18;
-    const QRectF field = viewport.adjusted(
-        -overscanX, -overscanY, overscanX, overscanY);
-    const double motion = 0.30 + envelope_ * 0.70;
+    const double complexityMotion = 1.0 + participantComplexity * 0.12;
     const QPointF primaryOffset(
-        std::sin(seconds * (0.19 + participantComplexity * 0.15)) *
-            width() * 0.035 * motion,
-        std::cos(seconds * (0.15 + participantComplexity * 0.12)) *
-            height() * 0.028 * motion);
+        std::sin(seconds * 0.082) * 42.0 * complexityMotion,
+        std::cos(seconds * 0.064) * 26.0 * complexityMotion);
     const QPointF counterOffset(
-        std::cos(seconds * (0.13 + participantComplexity * 0.11)) *
-            width() * 0.045 * motion,
-        std::sin(seconds * (0.17 + participantComplexity * 0.13)) *
-            height() * 0.035 * motion);
+        std::cos(seconds * 0.057) * 50.0 * complexityMotion,
+        std::sin(seconds * 0.076) * 30.0 * complexityMotion);
+    const QPointF dustOffset(
+        std::sin(seconds * 0.049 + 1.3) * kBackgroundMaximumParallaxPixels,
+        std::cos(seconds * 0.041 + 0.4) * 34.0);
+    const QPointF filamentOffset(
+        std::sin(seconds * 0.108 + 0.7) * 32.0,
+        std::cos(seconds * 0.087 + 1.1) * 20.0);
+    const double morph = 0.5 - 0.5 * std::cos(
+        seconds * (2.0 * 3.14159265358979323846 / kBackgroundMorphSeconds));
+    const double breathing = 1.0 + std::sin(seconds * 0.095) * 0.012;
+    const qint64 nowMs = static_cast<qint64>(std::lround(seconds * 1000.0));
+    const double layerReveal = backgroundLayersReadyMs_ < 0
+        ? 0.0
+        : smoothStep(
+            0.0,
+            1.0,
+            static_cast<double>(nowMs - backgroundLayersReadyMs_) / 5000.0);
+    if (lastBackgroundCompositeMs_ < 0 ||
+        nowMs - lastBackgroundCompositeMs_ >= kBackgroundCompositeIntervalMs) {
+        lastBackgroundCompositeMs_ = nowMs;
+        QPainter backgroundPainter(&backgroundFrameCache_);
+        backgroundPainter.setRenderHint(QPainter::SmoothPixmapTransform);
+        const QRectF cacheViewport(backgroundFrameCache_.rect());
+        backgroundPainter.setCompositionMode(QPainter::CompositionMode_Source);
+        backgroundPainter.setOpacity(1.0);
+        backgroundPainter.fillRect(cacheViewport, Qt::transparent);
+
+        const double overscanX = cacheViewport.width() * 0.065;
+        const double overscanY = cacheViewport.height() * 0.065;
+        const QRectF field = cacheViewport.adjusted(
+            -overscanX, -overscanY, overscanX, overscanY);
+        const double xScale = backgroundFrameCache_.width() /
+            static_cast<double>(qMax(1, width()));
+        const double yScale = backgroundFrameCache_.height() /
+            static_cast<double>(qMax(1, height()));
+        const auto scaledOffset = [xScale, yScale](const QPointF& offset) {
+            return QPointF(offset.x() * xScale, offset.y() * yScale);
+        };
+        const QRectF breathingField = scaledAroundCenter(field, breathing);
+
+        backgroundPainter.setCompositionMode(QPainter::CompositionMode_Screen);
+        backgroundPainter.setOpacity(0.50 * layerReveal * (1.0 - morph));
+        backgroundPainter.drawImage(
+            breathingField.translated(scaledOffset(primaryOffset)),
+            nebulaCache_);
+        backgroundPainter.setOpacity(0.50 * layerReveal * morph);
+        backgroundPainter.drawImage(
+            breathingField.translated(scaledOffset(counterOffset)),
+            nebulaMorphCache_);
+
+        backgroundPainter.setOpacity(0.82 * layerReveal);
+        backgroundPainter.drawImage(
+            scaledAroundCenter(
+                field,
+                1.0 + std::sin(seconds * 0.123) * 0.010)
+                .translated(scaledOffset(filamentOffset)),
+            filamentCache_);
+
+        backgroundPainter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+        backgroundPainter.setOpacity(0.62 * layerReveal);
+        backgroundPainter.drawImage(
+            field.translated(scaledOffset(dustOffset)),
+            dustCache_);
+    }
 
     painter.save();
-    painter.setClipRect(viewport);
-    painter.setOpacity(0.62 + envelope_ * 0.16);
-    painter.drawImage(field.translated(primaryOffset), nebulaCache_);
-
-    if (envelope_ > 0.015) {
-        painter.setOpacity(qMin(
-            0.22,
-            envelope_ * (0.10 + participantComplexity * 0.12)));
-        painter.drawImage(
-            field.adjusted(-overscanX * 0.22, -overscanY * 0.18,
-                           overscanX * 0.22, overscanY * 0.18)
-                .translated(counterOffset),
-            nebulaCache_);
-    }
+    painter.setRenderHint(QPainter::SmoothPixmapTransform);
+    painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    painter.setOpacity(1.0);
+    painter.drawImage(viewport, spaceCache_, QRectF(spaceCache_.rect()));
+    painter.drawImage(
+        viewport,
+        backgroundFrameCache_,
+        QRectF(backgroundFrameCache_.rect()));
     painter.restore();
 }
 
@@ -1050,21 +1392,13 @@ void PerformanceHomeWidget::paintHtmlStage()
 {
     QElapsedTimer paintClock;
     paintClock.start();
-    if (nebulaCache_.isNull()) {
+    if (spaceCache_.isNull()) {
         rebuildBackground();
     }
 
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.fillRect(rect(), QColor(3, 5, 6));
-    painter.setPen(Qt::NoPen);
-    for (int index = 0; index < stars_.size(); ++index) {
-        const QPointF point(stars_[index].x() * width(), stars_[index].y() * height());
-        const int alpha = 48 + (index % 5) * 20;
-        painter.setBrush(QColor(220, 226, 225, alpha));
-        const double radius = index % 13 == 0 ? 1.5 : 0.75;
-        painter.drawEllipse(point, radius, radius);
-    }
 
     const double seconds = static_cast<double>(animationClock_.elapsed()) / 1000.0;
     const double participantComplexity =
@@ -1072,16 +1406,25 @@ void PerformanceHomeWidget::paintHtmlStage()
     paintNebulaFields(painter, seconds, participantComplexity);
 
     if (novaStartMs_ >= 0) {
-        const double age =
-            static_cast<double>(animationClock_.elapsed() - novaStartMs_) / 1800.0;
-        const double alpha = std::sin(qBound(0.0, age, 1.0) * 3.14159265358979323846);
+        const double age = qBound(
+            0.0,
+            static_cast<double>(animationClock_.elapsed() - novaStartMs_) /
+                static_cast<double>(kNovaLifetimeMs),
+            1.0);
+        const double alpha = smoothStep(0.0, 0.24, age) *
+            (1.0 - smoothStep(0.58, 1.0, age));
         const QPointF center(novaPosition_.x() * width(), novaPosition_.y() * height());
-        QRadialGradient nova(center, 42.0 + 24.0 * age);
-        nova.setColorAt(0.0, QColor(255, 245, 221, static_cast<int>(150 * alpha)));
-        nova.setColorAt(0.2, QColor(230, 117, 107, static_cast<int>(80 * alpha)));
+        const double radius = 50.0 + 55.0 * age;
+        QRadialGradient nova(center, radius);
+        nova.setColorAt(0.0, QColor(255, 245, 221, static_cast<int>(125 * alpha)));
+        nova.setColorAt(0.16, QColor(230, 117, 107, static_cast<int>(62 * alpha)));
+        nova.setColorAt(0.52, QColor(164, 111, 218, static_cast<int>(18 * alpha)));
         nova.setColorAt(1.0, QColor(230, 117, 107, 0));
+        painter.save();
+        painter.setPen(Qt::NoPen);
         painter.setBrush(nova);
-        painter.drawEllipse(center, 70, 70);
+        painter.drawEllipse(center, radius, radius);
+        painter.restore();
     }
 
     const int margin = 24;
@@ -1141,39 +1484,7 @@ void PerformanceHomeWidget::paintHtmlStage()
                 lyrics.second, Qt::ElideRight, lyricsHitRect_.width() - 28));
     }
 
-    const QStringList technical{rtt_, jitter_, loss_, xruns_};
-    const QStringList labels{
-        QStringLiteral("PEER RTT"),
-        QStringLiteral("JITTER"),
-        QStringLiteral("LOSS"),
-        QStringLiteral("XRUNS")};
-    const int statWidth = 90;
-    for (int index = 0; index < technical.size(); ++index) {
-        const QRect cell(
-            width() - margin - statWidth * (technical.size() - index),
-            17,
-            statWidth - 6,
-            45);
-        painter.setPen(QPen(QColor(96, 116, 121, 120), 1));
-        painter.setBrush(QColor(7, 11, 12, 190));
-        painter.drawRoundedRect(cell, 3, 3);
-        QFont valueFont(QStringLiteral("Bahnschrift"));
-        valueFont.setPointSizeF(10.0);
-        painter.setFont(valueFont);
-        painter.setPen(QColor(225, 229, 224));
-        painter.drawText(cell.adjusted(8, 5, -5, -19), Qt::AlignLeft, technical.at(index));
-        QFont labelFont(QStringLiteral("Bahnschrift"));
-        labelFont.setPointSizeF(8.0);
-        labelFont.setLetterSpacing(QFont::AbsoluteSpacing, 0.7);
-        painter.setFont(labelFont);
-        painter.setPen(QColor(156, 169, 171));
-        painter.drawText(
-            cell.adjusted(8, 23, -5, -4),
-            Qt::AlignLeft | Qt::AlignVCenter,
-            labels.at(index));
-    }
-    paintGenerationActions(painter, 72, width() - margin);
-
+    paintGenerationActions(painter, 17, width() - margin);
     const int previewGap = 8;
     const int previewHeight = qBound(160, height() / 3, 260);
     const int previewTop = height() - margin - previewHeight;
@@ -1572,11 +1883,22 @@ void PerformanceHomeWidget::paintHtmlStage()
             static_cast<double>(qMax(1, renderedFrames_)) / 1000000.0;
         const double maximumMs =
             static_cast<double>(renderMaximumNanoseconds_) / 1000000.0;
+        const double cacheMiB = static_cast<double>(backgroundCacheBytes_) /
+            (1024.0 * 1024.0);
+        const double buildMs = static_cast<double>(backgroundBuildNanoseconds_) /
+            1000000.0;
         rendererStats_ = QStringLiteral(
-            "Visualizer: %1 fps target 30 | paint avg %2 ms | max %3 ms | cached 65% nebula")
+            "Visualizer: %1 paint events/s | paint avg %2 ms | max %3 ms | "
+            "background authored 3840x2160 + live 960x540 + composite %4 MiB build %5 ms | "
+            "startup layers async + reveal 5 s | current beat label snaps | regional foreground 30 fps | "
+            "full background 8 fps | resize regen off | "
+            "morph 24 s | parallax 56 px | "
+            "background audio/beat response off | nova stochastic 5.2 s soft")
             .arg(fps, 0, 'f', 1)
             .arg(averageMs, 0, 'f', 2)
-            .arg(maximumMs, 0, 'f', 2);
+            .arg(maximumMs, 0, 'f', 2)
+            .arg(cacheMiB, 0, 'f', 1)
+            .arg(buildMs, 0, 'f', 1);
         renderWindow_.restart();
         renderedFrames_ = 0;
         renderTotalNanoseconds_ = 0;
@@ -1592,20 +1914,12 @@ void PerformanceHomeWidget::paintEvent(QPaintEvent*)
     }
     QElapsedTimer paintClock;
     paintClock.start();
-    if (nebulaCache_.isNull()) {
+    if (spaceCache_.isNull()) {
         rebuildBackground();
     }
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.fillRect(rect(), QColor(4, 5, 13));
-    painter.setPen(Qt::NoPen);
-    for (int index = 0; index < stars_.size(); ++index) {
-        const QPointF point(stars_[index].x() * width(), stars_[index].y() * height());
-        const int alpha = 55 + (index % 5) * 22;
-        painter.setBrush(QColor(220, 226, 242, alpha));
-        const double radius = index % 13 == 0 ? 1.5 : 0.8;
-        painter.drawEllipse(point, radius, radius);
-    }
 
     const double seconds = static_cast<double>(animationClock_.elapsed()) / 1000.0;
     const double participantComplexity =
@@ -1613,16 +1927,25 @@ void PerformanceHomeWidget::paintEvent(QPaintEvent*)
     paintNebulaFields(painter, seconds, participantComplexity);
 
     if (novaStartMs_ >= 0) {
-        const double age =
-            static_cast<double>(animationClock_.elapsed() - novaStartMs_) / 1800.0;
-        const double alpha = std::sin(qBound(0.0, age, 1.0) * 3.14159265358979323846);
+        const double age = qBound(
+            0.0,
+            static_cast<double>(animationClock_.elapsed() - novaStartMs_) /
+                static_cast<double>(kNovaLifetimeMs),
+            1.0);
+        const double alpha = smoothStep(0.0, 0.24, age) *
+            (1.0 - smoothStep(0.58, 1.0, age));
         const QPointF center(novaPosition_.x() * width(), novaPosition_.y() * height());
-        QRadialGradient nova(center, 42.0 + 24.0 * age);
-        nova.setColorAt(0.0, QColor(255, 245, 221, static_cast<int>(150 * alpha)));
-        nova.setColorAt(0.2, QColor(230, 117, 107, static_cast<int>(80 * alpha)));
+        const double radius = 50.0 + 55.0 * age;
+        QRadialGradient nova(center, radius);
+        nova.setColorAt(0.0, QColor(255, 245, 221, static_cast<int>(125 * alpha)));
+        nova.setColorAt(0.16, QColor(230, 117, 107, static_cast<int>(62 * alpha)));
+        nova.setColorAt(0.52, QColor(164, 111, 218, static_cast<int>(18 * alpha)));
         nova.setColorAt(1.0, QColor(230, 117, 107, 0));
+        painter.save();
+        painter.setPen(Qt::NoPen);
         painter.setBrush(nova);
-        painter.drawEllipse(center, 70, 70);
+        painter.drawEllipse(center, radius, radius);
+        painter.restore();
     }
 
     const int margin = 24;
@@ -1665,23 +1988,7 @@ void PerformanceHomeWidget::paintEvent(QPaintEvent*)
             lyrics.second);
     }
 
-    const int technicalWidth = 104;
-    const QStringList technical{rtt_, jitter_, loss_, xruns_};
-    for (int index = 0; index < technical.size(); ++index) {
-        const QRect cell(
-            width() - margin - technicalWidth * (technical.size() - index),
-            18,
-            technicalWidth - 8,
-            30);
-        painter.setPen(QPen(QColor(120, 105, 137, 135), 1));
-        painter.setBrush(QColor(12, 12, 25, 150));
-        painter.drawRoundedRect(cell, 6, 6);
-        painter.setPen(QColor(221, 214, 226));
-        painter.setFont(microFont);
-        painter.drawText(cell, Qt::AlignCenter, technical.at(index));
-    }
-    paintGenerationActions(painter, 57, width() - margin);
-
+    paintGenerationActions(painter, 18, width() - margin);
     const int previewGap = 14;
     const int previewHeight = qBound(150, height() / 3, 320);
     const int previewTop = height() - margin - previewHeight;
@@ -1849,11 +2156,22 @@ void PerformanceHomeWidget::paintEvent(QPaintEvent*)
             static_cast<double>(qMax(1, renderedFrames_)) / 1000000.0;
         const double maximumMs =
             static_cast<double>(renderMaximumNanoseconds_) / 1000000.0;
+        const double cacheMiB = static_cast<double>(backgroundCacheBytes_) /
+            (1024.0 * 1024.0);
+        const double buildMs = static_cast<double>(backgroundBuildNanoseconds_) /
+            1000000.0;
         rendererStats_ = QStringLiteral(
-            "Visualizer: %1 fps target 30 | paint avg %2 ms | max %3 ms | cached 65% nebula")
+            "Visualizer: %1 paint events/s | paint avg %2 ms | max %3 ms | "
+            "background authored 3840x2160 + live 960x540 + composite %4 MiB build %5 ms | "
+            "startup layers async + reveal 5 s | current beat label snaps | regional foreground 30 fps | "
+            "full background 8 fps | resize regen off | "
+            "morph 24 s | parallax 56 px | "
+            "background audio/beat response off | nova stochastic 5.2 s soft")
             .arg(fps, 0, 'f', 1)
             .arg(averageMs, 0, 'f', 2)
-            .arg(maximumMs, 0, 'f', 2);
+            .arg(maximumMs, 0, 'f', 2)
+            .arg(cacheMiB, 0, 'f', 1)
+            .arg(buildMs, 0, 'f', 1);
         renderWindow_.restart();
         renderedFrames_ = 0;
         renderTotalNanoseconds_ = 0;
@@ -1972,15 +2290,36 @@ void PerformanceHomeWidget::paintBeatPreview(
             pattern = &model_->section(beatPosition.section)
                 .beatPatterns[beatPosition.sectionBeat];
         }
-        painter.setPen(QColor(151, 136, 165));
+        const bool activeBeat = current && running_ &&
+            beat == static_cast<int>(
+                absoluteBeat_ % static_cast<quint64>(previewBeatsPerBar));
+        const QRect beatNumberRect(left, bounds.top() + 6, right - left, 24);
+        QFont beatNumberFont = laneFont;
+        beatNumberFont.setWeight(activeBeat ? QFont::DemiBold : QFont::Normal);
+        painter.setFont(beatNumberFont);
+        if (activeBeat) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(226, 172, 83, 28));
+            painter.drawRoundedRect(beatNumberRect.adjusted(5, 1, -5, -1), 4, 4);
+        }
+        painter.setPen(activeBeat ? QColor(255, 214, 142) : QColor(151, 136, 165));
         painter.drawText(
-            QRect(left, bounds.top() + 7, right - left, 22),
+            beatNumberRect,
             Qt::AlignCenter,
             QStringLiteral("%1.%2")
                 .arg((barStart + static_cast<quint64>(beat)) /
                         static_cast<quint64>(previewBeatsPerBar) +
                     1)
                 .arg(beat + 1));
+        if (activeBeat) {
+            const int underlineWidth = qMin(34, qMax(12, beatNumberRect.width() - 18));
+            painter.setPen(QPen(gold(), 2, Qt::SolidLine, Qt::RoundCap));
+            painter.drawLine(
+                beatNumberRect.center().x() - underlineWidth / 2,
+                beatNumberRect.bottom(),
+                beatNumberRect.center().x() + underlineWidth / 2,
+                beatNumberRect.bottom());
+        }
         painter.setPen(QColor(91, 76, 108, 150));
         painter.drawLine(left, grid.top(), left, grid.bottom());
         if (pattern == nullptr) {
@@ -2017,16 +2356,6 @@ void PerformanceHomeWidget::paintBeatPreview(
                 }
             }
         }
-    }
-    if (current && running_) {
-        const double beatInBar =
-            static_cast<double>(absoluteBeat_ % static_cast<quint64>(beatsPerBar_)) +
-            beatPhase_;
-        const int x = grid.left() +
-            static_cast<int>(beatInBar / beatsPerBar_ * grid.width());
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(gold());
-        painter.drawEllipse(QPoint(x, bounds.top() + 14), 5, 5);
     }
 }
 
@@ -2624,7 +2953,7 @@ void PerformanceHomeWidget::resizeEvent(QResizeEvent* event)
         0,
         peerScrollOffset_,
         qMax(0, peers_.size() - peerVisibleCapacity()));
-    rebuildBackground();
+    update();
 }
 
 void PerformanceHomeWidget::mousePressEvent(QMouseEvent* event)

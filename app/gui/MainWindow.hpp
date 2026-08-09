@@ -491,6 +491,7 @@ private:
     QPushButton* stopButton_ = nullptr;
     QPushButton* leaveJamButton_ = nullptr;
     QPushButton* refreshControlButton_ = nullptr;
+    QString sessionHeaderRtt_;
     QLabel* connectionLabel_ = nullptr;
     QLabel* jitterLabel_ = nullptr;
     QLabel* lossLabel_ = nullptr;

@@ -334,7 +334,7 @@ void MainWindowPages::build(MainWindow& w)
     w.updateJamSyncPresentation();
     w.connectionLabel_->setFixedHeight(32);
     w.connectionLabel_->setMinimumWidth(96);
-    w.connectionLabel_->setMaximumWidth(150);
+    w.connectionLabel_->setMaximumWidth(240);
     w.connectionLabel_->setAlignment(Qt::AlignCenter);
     auto* settingsButton = new QToolButton(&w);
     settingsButton->setObjectName(QStringLiteral("SettingsButton"));

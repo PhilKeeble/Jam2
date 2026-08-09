@@ -121,11 +121,6 @@ public:
         bool localOnly,
         const QString& status);
     void setArrangementState(bool running, bool armed);
-    void setTechnicalSummary(
-        const QString& rtt,
-        const QString& jitter,
-        const QString& loss,
-        const QString& xruns);
     QString rendererStatsText() const;
 
     std::function<void(const QString&)> onOpenDetail;
@@ -166,6 +161,7 @@ private:
     int peerVisibleCapacity() const;
     void rebuildBackground();
     void advanceAnimation();
+    void updateAnimatedForeground();
     void paintNebulaFields(
         QPainter& painter,
         double seconds,
@@ -205,7 +201,6 @@ private:
     double targetEnergy_ = 0.0;
     double envelope_ = 0.0;
     QVector<double> history_;
-    QVector<QPointF> stars_;
     QVector<PerformancePeerPresentation> peers_;
     std::uint64_t selectedPeerId_ = 0;
     double trackGainDb_ = 0.0;
@@ -223,12 +218,20 @@ private:
     bool jamRecordingEnabled_ = false;
     bool jamRecordingActive_ = false;
     QString jamRecordingTake_;
-    QString rtt_ = QStringLiteral("-");
-    QString jitter_ = QStringLiteral("-");
-    QString loss_ = QStringLiteral("-");
-    QString xruns_ = QStringLiteral("-");
     QString rendererStats_ = QStringLiteral("Visualizer: waiting for first frame");
+    QImage authoredNebulaSource_;
+    QImage spaceCache_;
     QImage nebulaCache_;
+    QImage nebulaMorphCache_;
+    QImage filamentCache_;
+    QImage dustCache_;
+    QImage backgroundFrameCache_;
+    qint64 backgroundBuildNanoseconds_ = 0;
+    qsizetype backgroundCacheBytes_ = 0;
+    qint64 lastBackgroundCompositeMs_ = -1;
+    qint64 backgroundLayersReadyMs_ = -1;
+    bool backgroundLayerBuildPending_ = false;
+    bool backgroundLayersReady_ = false;
     QTimer animationTimer_;
     QElapsedTimer animationClock_;
     QElapsedTimer renderWindow_;
@@ -236,7 +239,8 @@ private:
     qint64 renderTotalNanoseconds_ = 0;
     qint64 renderMaximumNanoseconds_ = 0;
     qint64 lastAnimationMs_ = 0;
-    qint64 nextNovaMs_ = 60000;
+    qint64 lastBackgroundRepaintMs_ = -1;
+    qint64 novaEligibleMs_ = 15000;
     qint64 novaStartMs_ = -1;
     QPointF novaPosition_{0.78, 0.24};
     int peerScrollOffset_ = 0;
