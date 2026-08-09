@@ -13,6 +13,7 @@ struct LooperLane {
     QString name;
     int sampleRate = 0;
     bool sampleRateCompatible = true;
+    qint64 sourceFrames = 0;
     qint64 startFrame = 0;
     qint64 stopFrame = -1;
     qint64 loopStartFrame = -1;
@@ -26,6 +27,7 @@ struct LooperLane {
     double referenceBpm = 0.0;
     bool referenceStale = false;
     bool localOnly = false;
+    QString originKind;
 };
 
 struct LooperBankTiming {

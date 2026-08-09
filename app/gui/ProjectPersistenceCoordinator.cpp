@@ -4,6 +4,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
+#include <QRegularExpression>
 #include <QRunnable>
 #include <QSaveFile>
 #include <QThreadPool>
@@ -19,6 +20,16 @@ constexpr qint64 kMaxSongFileBytes = 4LL * 1024LL * 1024LL;
 void ProjectPersistenceCoordinator::initializeWorkspace(const QString& workspaceFolder)
 {
     workspaceFolder_ = QDir(workspaceFolder).absolutePath();
+    QDir received(QDir(workspaceFolder_).absoluteFilePath(QStringLiteral("received")));
+    static const QRegularExpression partialName(QStringLiteral(
+        "^[0-9a-f]{64}\\.wav\\.partial\\.[0-9a-f]{8}-[0-9a-f]{4}-"
+        "[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"));
+    for (const QFileInfo& file : received.entryInfoList(
+             QDir::Files | QDir::NoDotAndDotDot)) {
+        if (partialName.match(file.fileName()).hasMatch()) {
+            (void)QFile::remove(file.absoluteFilePath());
+        }
+    }
 }
 
 void ProjectPersistenceCoordinator::relocateWorkspace(const QString& workspaceFolder)

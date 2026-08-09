@@ -406,18 +406,43 @@
       width: 640px;
       height: 520px;
       transform: translate(-50%, -50%);
+      isolation: isolate;
     }
-    .scope-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+    .performance-orbit::after {
+      content: "";
+      position: absolute;
+      z-index: 0;
+      top: 27px;
+      left: 92px;
+      width: 456px;
+      height: 376px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(102,212,207,.065), rgba(176,139,228,.026) 48%, transparent 72%);
+      filter: blur(18px);
+      pointer-events: none;
+    }
+    .performance-fx-canvas,
+    .scope-svg {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      overflow: visible;
+      pointer-events: none;
+    }
+    .performance-fx-canvas { z-index: 1; }
+    .scope-svg { z-index: 2; }
     .scope-ring { fill: none; stroke: #263438; }
     .scope-ring.major { stroke: #506064; stroke-width: 1; }
-    .scope-ring.glow { stroke: rgba(102,212,207,.18); stroke-width: 18; filter: blur(8px); }
-    .activity-spoke { stroke-linecap: round; transition: stroke .14s, opacity .14s; }
+    .scope-ring.glow { stroke: rgba(102,212,207,.11); stroke-width: 18; filter: blur(8px); }
+    .activity-spoke { stroke-linecap: round; transition: stroke .14s, opacity .14s; mix-blend-mode: screen; }
     .source-node { cursor: pointer; transition: r .12s, opacity .12s; }
     .source-node.selected { stroke: #fff; stroke-width: 1.5; }
     .orbit-tick { stroke: #39474a; stroke-width: 1; }
 
     .chord-lens {
       position: absolute;
+      z-index: 4;
       top: 116px;
       left: 221px;
       display: grid;
@@ -427,12 +452,17 @@
       border: 1px solid #5b6b6e;
       border-radius: 50%;
       background:
-        radial-gradient(circle at 48% 42%, rgba(102,212,207,.16), transparent 36%),
-        radial-gradient(circle, #152023 0 45%, #080c0d 72%);
+        radial-gradient(circle at 43% 36%, rgba(112,234,215,.16), transparent 30%),
+        radial-gradient(circle at 63% 67%, rgba(176,139,228,.13), transparent 39%),
+        radial-gradient(circle, rgba(16,29,31,.93) 0 42%, rgba(7,11,12,.95) 73%);
       box-shadow:
         inset 0 0 0 8px rgba(47,59,62,.46),
-        inset 0 0 48px rgba(102,212,207,.08),
-        0 0 55px rgba(0,0,0,.62);
+        inset 0 0 48px rgba(102,212,207,.1),
+        0 0 42px rgba(102,212,207,.055),
+        0 0 62px rgba(0,0,0,.62);
+      backdrop-filter: blur(2px);
+      transform: scale(var(--lens-scale, 1));
+      transition: transform 90ms linear, box-shadow 140ms linear;
     }
     .chord-lens::before {
       content: "";
@@ -445,6 +475,25 @@
       -webkit-mask: radial-gradient(transparent 66%, #000 67% 71%, transparent 72%);
       filter: drop-shadow(0 0 5px rgba(232,164,74,.45));
     }
+    .chord-lens::after {
+      content: "";
+      position: absolute;
+      z-index: 1;
+      inset: 12px;
+      border-radius: 50%;
+      opacity: var(--lens-texture-opacity, .32);
+      background:
+        repeating-radial-gradient(ellipse at 48% 52%, transparent 0 9px, rgba(112,234,215,.045) 10px, transparent 12px 20px),
+        repeating-linear-gradient(118deg, transparent 0 17px, rgba(176,139,228,.055) 18px, transparent 20px 34px);
+      mask: radial-gradient(circle, #000 0 68%, transparent 86%);
+      -webkit-mask: radial-gradient(circle, #000 0 68%, transparent 86%);
+      animation: performance-lens-drift 24s ease-in-out infinite alternate;
+      pointer-events: none;
+    }
+    @keyframes performance-lens-drift {
+      from { transform: rotate(-1.5deg) scale(.99); background-position: 0 0, 0 0; }
+      to { transform: rotate(2deg) scale(1.012); background-position: 9px -5px, -7px 4px; }
+    }
     .lens-copy {
       position: relative;
       z-index: 2;
@@ -452,7 +501,7 @@
       justify-items: center;
       text-align: center;
     }
-    .section-label { color: var(--cyan); font: 7px "Bahnschrift", sans-serif; letter-spacing: .17em; text-transform: uppercase; }
+    .section-label { color: var(--cyan); font: 10px "Bahnschrift", sans-serif; letter-spacing: .15em; text-transform: uppercase; }
     .current-chord {
       display: block;
       margin: 1px 0 -2px;
@@ -464,7 +513,7 @@
       -webkit-background-clip: text;
       filter: drop-shadow(0 0 12px rgba(176,139,228,.22));
     }
-    .bar-position { display: block; color: #aeb8b7; font: 8px "Bahnschrift", monospace; letter-spacing: .08em; }
+    .bar-position { display: block; color: #aeb8b7; font: 11px "Bahnschrift", monospace; letter-spacing: .07em; }
     .bar-position span { color: var(--amber-hi); }
     .beat-dots { display: flex; justify-content: center; gap: 5px; margin-top: 10px; }
     .beat-dots i {
@@ -497,7 +546,7 @@
       backdrop-filter: blur(7px);
     }
     .chord-cell.current { border-color: #8c667f; background: linear-gradient(135deg, rgba(201,47,88,.14), rgba(112,234,215,.055), rgba(9,13,14,.9)); }
-    .chord-cell small { display: block; color: #667376; font: 7px "Bahnschrift", sans-serif; letter-spacing: .13em; text-transform: uppercase; }
+    .chord-cell small { display: block; color: #7d898b; font: 10px "Bahnschrift", sans-serif; letter-spacing: .1em; text-transform: uppercase; }
     .chord-cell strong { display: block; margin-top: 2px; font: 400 22px Georgia, serif; }
     .chord-cell.current strong {
       color: transparent;
@@ -505,17 +554,18 @@
       background-clip: text;
       -webkit-background-clip: text;
     }
-    .chord-cell .arrival { position: absolute; top: 10px; right: 9px; color: #6c787a; font: 7px "Bahnschrift", monospace; }
+    .chord-cell .arrival { position: absolute; top: 9px; right: 9px; color: #758184; font: 10px "Bahnschrift", monospace; }
 
     .source-readout {
       position: absolute;
+      z-index: 5;
       top: 405px;
       left: 157px;
       width: 326px;
-      color: #6a7779;
+      color: #7c898b;
       text-align: center;
-      font: 7px "Bahnschrift", sans-serif;
-      letter-spacing: .13em;
+      font: 10px "Bahnschrift", sans-serif;
+      letter-spacing: .08em;
       text-transform: uppercase;
     }
     .source-readout strong { color: #aeb9b8; font-weight: 400; }
@@ -686,6 +736,12 @@
       background: #111719;
     }
     .detail-head .micro { margin-right: auto; }
+    .detail-context {
+      margin-right: auto;
+      color: #e9e6dc;
+      font: 20px Georgia, serif;
+      white-space: nowrap;
+    }
     .detail-tab, .detail-close {
       height: 27px;
       padding: 0 11px;
@@ -702,7 +758,8 @@
     .detail-body { position: relative; min-height: 0; overflow: hidden; }
     .detail-layer { display: none; width: 100%; height: 100%; overflow: hidden; scrollbar-color: #4a585b #101617; }
     .detail-layer.active { display: grid; grid-template-rows: 56px minmax(0, 1fr); }
-    .detail-layer[data-layer="metronome"].active { grid-template-rows: minmax(0, 1fr); }
+    .detail-layer[data-layer="metronome"].active,
+    .detail-layer[data-layer="looper"].active { grid-template-rows: minmax(0, 1fr); }
     .chord-detail {
       display: grid;
       grid-template-columns: repeat(12, 112px);
@@ -1612,53 +1669,278 @@
     .metro-field-row output { color: var(--amber-hi); font: 10px "Bahnschrift", monospace; }
     .metro-mode-data { display: grid; grid-template-columns: 1fr auto; gap: 7px 12px; margin-top: 8px; padding: 10px; border: 1px solid #283438; background: #0a1011; color: #738184; font: 8px "Bahnschrift", monospace; }
     .metro-mode-data strong { color: #aab6b5; font-weight: 500; text-align: right; }
-    .looper-workspace {
+    .track-view {
+      --track-head: 280px;
       display: grid;
-      gap: 9px;
+      gap: 12px;
       min-width: 1080px;
-      padding: 20px 28px 30px;
+      padding: 18px 22px 28px;
+      color: #f1eee5;
+      font-family: "Bahnschrift", "Segoe UI", sans-serif;
+      font-size: 13px;
     }
-    .looper-ruler { position: relative; height: 42px; overflow: visible; color: #647174; font: 9px "Bahnschrift", monospace; }
-    .looper-ruler strong { position: absolute; top: 6px; left: 0; width: 220px; }
-    .looper-ruler-scale {
-      position: absolute;
-      inset: 0 0 0 220px;
+    .track-card {
+      border: 1px solid #354247;
+      border-radius: 4px;
+      background: #0b1011;
+      box-shadow: 0 10px 26px rgba(0,0,0,.18);
+    }
+    .track-section-card {
       display: grid;
-      grid-template-columns: repeat(32, minmax(0, 1fr));
+      grid-template-columns: auto auto 1fr auto auto;
+      align-items: center;
+      gap: 12px;
+      min-height: 58px;
+      padding: 10px 14px;
     }
-    .looper-ruler-scale span {
-      padding: 6px 3px;
-      border-left: 1px solid rgba(45,57,60,.45);
-      color: var(--secondary);
-      font: 9px "Bahnschrift", monospace;
+    .track-kicker {
+      color: #9ca9ab;
+      font: 12px "Bahnschrift", "Segoe UI", sans-serif;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+    }
+    .track-section-tabs { display: flex; align-items: center; gap: 5px; }
+    .track-button,
+    .track-section-button,
+    .lane-button {
+      min-height: 34px;
+      border: 1px solid #526368;
+      border-radius: 3px;
+      background: #121b1d;
+      color: #f5f2e9;
+      font: 13px "Bahnschrift", "Segoe UI", sans-serif;
+      padding: 7px 11px;
+      cursor: pointer;
+    }
+    .track-button:hover,
+    .track-section-button:hover,
+    .lane-button:hover { background: #1c282b; border-color: #66d4cf; }
+    .track-button:active,
+    .track-section-button:active,
+    .lane-button:active { background: #241c20; border-color: #e8a44a; }
+    .track-button.active,
+    .track-section-button.active,
+    .lane-button.active {
+      color: #160e07;
+      background: #e8a44a;
+      border-color: #ffd68e;
+    }
+    .track-button.primary { color: #160e07; background: #e8a44a; border-color: #ffd68e; }
+    .track-button.danger { color: #ffb2b5; border-color: #81424b; }
+    .track-section-button {
+      width: 38px;
+      min-height: 34px;
+      padding: 4px;
+      font-weight: 600;
+    }
+    .track-section-button.active {
+      color: #fff8ea;
+      background: #502d5d;
+      border-color: #e8a44a;
+    }
+    .track-section-button.playing:not(.active) {
+      color: #f2fff9;
+      background: #214b43;
+      border-color: #68d6bc;
+    }
+    .track-tool-strip {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px 18px;
+      padding: 10px 14px;
+    }
+    .track-tool-group { display: flex; align-items: center; gap: 6px; }
+    .track-tool-group .track-kicker { margin-right: 4px; }
+    .track-tool-spacer { flex: 1 1 20px; }
+    .track-check {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 34px;
+      color: #d7dedb;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .track-check input { width: 16px; height: 16px; accent-color: #e8a44a; }
+    .recording-context {
+      display: grid;
+      grid-template-columns: auto minmax(250px, 1fr) auto;
+      align-items: center;
+      gap: 10px 12px;
+      min-height: 76px;
+      padding: 10px 12px 12px;
+      border-color: #986d36;
+      background: linear-gradient(90deg, rgba(232,164,74,.12), rgba(11,16,17,.96) 44%);
+    }
+    .recording-context[hidden] { display: none; }
+    .recording-light {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #c92f58;
+      box-shadow: 0 0 12px rgba(201,47,88,.52);
+    }
+    .recording-context.recording .recording-light { animation: recordPulse 1.2s ease-in-out infinite; }
+    @keyframes recordPulse { 50% { transform: scale(1.35); box-shadow: 0 0 18px rgba(255,125,134,.72); } }
+    .recording-copy { display: grid; gap: 2px; }
+    .recording-copy strong { color: #fff8ea; font-size: 14px; }
+    .recording-copy span { color: #b9c3c1; font-size: 12px; }
+    .recording-source-action { justify-self: end; }
+    .recording-peer-row { grid-column: 1 / -1; display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding-top: 8px; border-top: 1px solid rgba(152,109,54,.4); }
+    .recording-peer-label { margin-right: 2px; color: #9ca9ab; font-size: 11px; letter-spacing: .09em; text-transform: uppercase; }
+    .recording-peer-chip { display: inline-grid; grid-template-columns: auto auto; gap: 1px 8px; min-width: 190px; padding: 6px 9px; border: 1px solid #526368; border-radius: 3px; background: #101719; }
+    .recording-peer-chip strong { color: #e9e6dc; font-size: 12px; font-weight: 500; }
+    .recording-peer-chip span { color: #9ca9ab; font-size: 11px; }
+    .recording-peer-chip em { grid-row: 1 / 3; grid-column: 2; align-self: center; color: #ffd68e; font: normal 11px "Bahnschrift", sans-serif; text-transform: uppercase; }
+    .recording-peer-chip.recording { border-color: #c92f58; background: rgba(201,47,88,.1); }
+    .recording-peer-chip.recording em { color: #ffb2b5; }
+    .recording-restart-note { margin-left: auto; color: #d8c6a8; font-size: 12px; }
+    .recording-phase-strip { grid-column: 1 / -1; display: grid; grid-template-columns: auto auto auto 1fr auto; align-items: center; gap: 9px; min-height: 42px; padding: 7px 10px; border: 1px solid #526368; border-radius: 3px; background: rgba(7,11,12,.72); }
+    .recording-phase-strip[hidden] { display: none; }
+    .recording-phase { display: inline-flex; align-items: center; gap: 6px; color: #748084; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+    .recording-phase i { width: 7px; height: 7px; border-radius: 50%; border: 1px solid #667478; background: #11191b; }
+    .recording-phase.complete { color: #aeb9b7; }
+    .recording-phase.complete i { border-color: #73c9ae; background: #4f9f87; }
+    .recording-phase.active { color: #fff0d3; }
+    .recording-phase.active i { border-color: #ffd68e; background: #e8a44a; box-shadow: 0 0 10px rgba(232,164,74,.7); animation: phasePulse .8s ease-in-out infinite; }
+    .recording-phase[data-phase="recording"].active i { border-color: #ff9da5; background: #c92f58; box-shadow: 0 0 10px rgba(201,47,88,.7); }
+    .recording-phase-arrow { color: #526065; font-size: 14px; }
+    .recording-phase-status { grid-column: 1 / 5; color: #e9e6dc; font-size: 12px; font-weight: 500; }
+    .recording-count-beats { grid-column: 5; justify-self: end; display: flex; align-items: center; gap: 5px; min-width: 55px; }
+    .recording-count-beats[hidden] { display: none; }
+    .recording-count-beats i { width: 8px; height: 8px; border-radius: 50%; background: #354247; }
+    .recording-count-beats i.passed { background: #986d36; }
+    .recording-count-beats i.active { transform: scale(1.25); background: #e8a44a; box-shadow: 0 0 9px rgba(232,164,74,.7); }
+    @keyframes phasePulse { 50% { transform: scale(1.25); opacity: .72; } }
+    .recording-global-controls { grid-column: 1 / -1; display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; padding-top: 2px; }
+    .recording-global-controls[hidden] { display: none; }
+    .recording-global-controls label { display: inline-flex; align-items: center; gap: 7px; color: #d7dedb; font-size: 12px; }
+    .recording-global-controls select,
+    .recording-global-controls input[type="number"] { min-height: 31px; border: 1px solid #526368; border-radius: 3px; background: #070b0c; color: #f1eee5; font: 12px "Bahnschrift", sans-serif; padding: 4px 7px; }
+    .recording-global-controls input[type="number"] { width: 62px; }
+    .recording-global-controls input[type="checkbox"] { width: 16px; height: 16px; accent-color: #e8a44a; }
+    .recording-global-spacer { flex: 1 1 18px; }
+    .recording-protection { display: inline-flex; align-items: center; gap: 7px; color: #ffced0; font-size: 12px; }
+    .recording-protection::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #c92f58; box-shadow: 0 0 9px rgba(201,47,88,.65); }
+    .loop-lane.remote-armed { box-shadow: inset 3px 0 #e8a44a; }
+    .loop-lane.remote-recording { box-shadow: inset 3px 0 #c92f58; }
+    .lane-button.remote-arm { color: #ffd68e; border-color: #986d36; }
+    .lane-button.remote-arm.recording { color: #ffb2b5; border-color: #c92f58; background: rgba(201,47,88,.1); }
+    .transport.recording-protected::before {
+      content: attr(data-protection-copy);
+      position: absolute;
+      left: 50%;
+      top: -25px;
+      transform: translateX(-50%);
+      padding: 5px 12px;
+      border: 1px solid #c92f58;
+      border-bottom: 0;
+      border-radius: 4px 4px 0 0;
+      background: #251015;
+      color: #ffced0;
+      font-size: 11px;
+      letter-spacing: .07em;
       white-space: nowrap;
     }
-    .looper-ruler-scale span:nth-child(4n + 1) { border-left-color: #566367; }
-    .looper-ruler .track-position-marker { top: 27px; }
+    button.recording-locked,
+    input.recording-locked { opacity: .35; cursor: not-allowed !important; }
+
+    .record-setup-overlay {
+      position: fixed;
+      z-index: 80;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 30px;
+      background: rgba(3,5,6,.76);
+      backdrop-filter: blur(5px);
+    }
+    .record-setup-overlay[hidden] { display: none; }
+    .record-setup-dialog { width: min(660px, calc(100vw - 60px)); border: 1px solid #526368; border-radius: 4px; background: #0b1011; box-shadow: 0 28px 80px #000; }
+    .record-setup-head { display: flex; align-items: center; gap: 12px; padding: 13px 16px; border-bottom: 1px solid #354247; background: #101719; }
+    .record-setup-head div { display: grid; gap: 2px; }
+    .record-setup-head strong { color: #e9e6dc; font: 18px Georgia, serif; font-weight: 500; }
+    .record-setup-head span { color: #9ca9ab; font-size: 12px; }
+    .record-setup-form { display: grid; grid-template-columns: 126px 1fr; align-items: center; gap: 11px 14px; padding: 16px; }
+    .record-setup-form > label { color: #b9c3c1; font-size: 13px; }
+    .record-setup-form select,
+    .record-setup-form input[type="text"] { width: 100%; min-height: 36px; border: 1px solid #526368; border-radius: 3px; background: #070b0c; color: #f1eee5; font: 13px "Bahnschrift", sans-serif; padding: 6px 8px; }
+    .record-setup-output { display: grid; grid-template-columns: 1fr auto; gap: 7px; }
+    .record-source-panel { grid-column: 1 / -1; display: grid; grid-template-columns: 126px 1fr; align-items: center; gap: 10px 14px; }
+    .record-source-panel[hidden] { display: none; }
+    .record-source-panel > label { color: #b9c3c1; font-size: 13px; }
+    .record-input-status { padding: 9px 10px; border: 1px solid #354247; border-radius: 3px; background: #080d0e; color: #d7dedb; font-size: 13px; }
+    .record-source-panel .track-check { min-height: 28px; }
+    .record-advanced { grid-column: 1 / -1; border-top: 1px solid #354247; padding-top: 9px; }
+    .record-advanced summary { color: #d7dedb; font-size: 13px; cursor: pointer; }
+    .record-advanced-content { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; margin-top: 10px; color: #9ca9ab; font-size: 12px; }
+    .record-setup-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 11px 16px; border-top: 1px solid #354247; }
+    .track-timeline-card { overflow-x: auto; overflow-y: hidden; scrollbar-color: #526368 #0b1112; scrollbar-width: thin; }
+    .track-timeline-card::-webkit-scrollbar { height: 10px; }
+    .track-timeline-card::-webkit-scrollbar-track { background: #0b1112; }
+    .track-timeline-card::-webkit-scrollbar-thumb { border: 2px solid #0b1112; border-radius: 6px; background: #526368; }
+    .looper-workspace {
+      display: grid;
+      gap: 0;
+      min-width: 1040px;
+      padding: 0;
+    }
+    .looper-ruler { position: relative; height: 44px; overflow: visible; color: #9ca9ab; font: 12px "Bahnschrift", "Segoe UI", sans-serif; background: #101719; }
+    .looper-ruler strong { position: absolute; top: 13px; left: 14px; width: calc(var(--track-head) - 28px); color: #d7dedb; font-size: 13px; font-weight: 500; }
+    .looper-ruler-scale {
+      position: absolute;
+      inset: 0 0 0 var(--track-head);
+      display: grid;
+      grid-template-columns: repeat(var(--timeline-bars, 8), minmax(0, 1fr));
+    }
+    .looper-ruler-scale span {
+      padding: 13px 4px 0;
+      border-left: 1px solid #566367;
+      background: repeating-linear-gradient(90deg, transparent 0 calc(25% - 1px), rgba(80,96,100,.23) calc(25% - 1px) 25%);
+      color: #9ca9ab;
+      font: 12px "Bahnschrift", "Segoe UI", sans-serif;
+      white-space: nowrap;
+    }
+    .looper-ruler .track-position-marker { top: 29px; }
+    .track-loop-marker { position: absolute; z-index: 3; top: 0; bottom: 0; width: 2px; background: #68c98f; box-shadow: 0 0 7px rgba(104,201,143,.4); }
+    .track-loop-marker.start { left: calc(var(--track-head) + (100% - var(--track-head)) * .2); }
+    .track-loop-marker.end { left: calc(var(--track-head) + (100% - var(--track-head)) * .72); }
     .loop-lane {
       display: grid;
-      grid-template-columns: 220px 1fr;
-      min-height: 100px;
-      border: 1px solid #303c3f;
+      grid-template-columns: var(--track-head) 1fr;
+      min-height: 126px;
+      border-top: 1px solid #303c3f;
       background: #0d1314;
+      transition: border-color .15s, background .15s;
     }
-    .loop-lane.selected { border-color: #896780; box-shadow: inset 0 1px rgba(112,234,215,.2); }
-    .loop-lane-head { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 13px; border-right: 1px solid #303c3f; }
-    .loop-lane-head strong { font: 12px Georgia, serif; }
+    .loop-lane.selected { background: #15131a; box-shadow: inset 3px 0 #e8a44a; }
+    .loop-lane.muted .lane-wave { opacity: .42; }
+    .loop-lane.solo { box-shadow: inset 3px 0 #66d4cf; }
+    .loop-lane.armed { box-shadow: inset 3px 0 #c92f58; }
+    .loop-lane-head { position: relative; display: grid; grid-template-columns: 1fr auto; align-content: center; gap: 7px 10px; padding: 11px 14px; border-right: 1px solid #303c3f; }
+    .loop-lane-head strong { overflow: hidden; color: #e9e6dc; font: 16px Georgia, serif; font-weight: 500; white-space: nowrap; text-overflow: ellipsis; cursor: pointer; }
+    .lane-title-actions { display: flex; align-items: center; gap: 4px; }
+    .lane-title-actions .lane-button { min-height: 26px; padding: 3px 6px; color: #b9c3c1; font-size: 11px; }
+    .lane-title-actions .lane-button.remove { color: #ffb2b5; border-color: #81424b; }
+    .lane-origin { grid-column: 1 / -1; color: #9ca9ab; font-size: 12px; }
     .lane-buttons {
       grid-column: 1 / -1;
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 4px;
+      display: flex;
+      align-items: center;
+      gap: 5px;
     }
-    .lane-buttons button { padding: 3px 6px; border: 1px solid #364246; background: #111719; color: #7f8b8d; font: 7px "Bahnschrift", sans-serif; cursor: pointer; }
-    .lane-buttons button.active { border-color: #745b36; color: var(--amber-hi); background: rgba(232,164,74,.1); }
-    .lane-gain { width: 46px; accent-color: var(--cyan); }
+    .lane-button { min-height: 29px; padding: 4px 8px; color: #d7dedb; font-size: 12px; }
+    .lane-button.arm.active { color: #fff8f2; background: #c92f58; border-color: #ff7d86; }
+    .lane-gain-row { grid-column: 1 / -1; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 7px; color: #9ca9ab; font-size: 12px; }
+    .lane-gain { width: 100%; min-width: 60px; accent-color: #e8a44a; }
+    .lane-gain-value { min-width: 48px; color: #d7dedb; text-align: right; }
     .lane-wave {
       position: relative;
       overflow: hidden;
       background:
-        repeating-linear-gradient(90deg, transparent 0 calc(12.5% - 1px), rgba(80,96,100,.23) calc(12.5% - 1px) 12.5%),
+        repeating-linear-gradient(90deg, transparent 0 calc(var(--bar-size) - 1px), rgba(99,115,119,.38) calc(var(--bar-size) - 1px) var(--bar-size)),
+        repeating-linear-gradient(90deg, transparent 0 calc(var(--beat-size) - 1px), rgba(80,96,100,.18) calc(var(--beat-size) - 1px) var(--beat-size)),
         #081012;
     }
     .lane-clip {
@@ -1676,6 +1958,43 @@
       clip-path: polygon(0 44%, 4% 18%, 8% 70%, 12% 27%, 16% 78%, 20% 36%, 24% 62%, 28% 13%, 32% 72%, 36% 32%, 40% 67%, 44% 20%, 48% 77%, 52% 35%, 56% 64%, 60% 16%, 64% 73%, 68% 26%, 72% 69%, 76% 18%, 80% 74%, 84% 29%, 88% 66%, 92% 23%, 96% 70%, 100% 44%, 100% 56%, 0 56%);
     }
     .lane-playhead { position: absolute; top: 0; bottom: 0; left: var(--playhead); width: 2px; background: var(--amber-hi); box-shadow: 0 0 8px var(--amber); }
+    .lane-loop-marker { position: absolute; z-index: 3; top: 0; bottom: 0; width: 2px; background: #68c98f; }
+    .lane-loop-marker.start { left: 20%; }
+    .lane-loop-marker.end { left: 72%; }
+    .add-track-strip { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid #354247; background: #101719; }
+    .add-track-strip .track-kicker { margin-right: 6px; }
+    .listening-tools { overflow: hidden; }
+    .listening-tools summary {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-height: 48px;
+      padding: 0 14px;
+      color: #f1eee5;
+      cursor: pointer;
+      list-style: none;
+    }
+    .listening-tools summary::-webkit-details-marker { display: none; }
+    .listening-tools summary::before { content: "▸"; color: #e8a44a; font-size: 16px; }
+    .listening-tools[open] summary::before { content: "▾"; }
+    .listening-summary { color: #9ca9ab; font-size: 13px; }
+    .listening-grid { display: grid; grid-template-columns: repeat(3, minmax(250px, 1fr)); gap: 10px; padding: 0 12px 12px; border-top: 1px solid #283438; }
+    .listening-card { display: grid; gap: 10px; padding: 13px; border: 1px solid #354247; border-radius: 4px; background: #080d0e; }
+    .listening-card h3 { display: flex; align-items: center; justify-content: space-between; margin: 0; color: #e9e6dc; font-size: 14px; font-weight: 500; }
+    .listening-card output { color: #ffd68e; font-size: 14px; }
+    .listening-card input[type="range"] { width: 100%; accent-color: #e8a44a; }
+    .listening-card select,
+    .listening-card input[type="number"] { min-height: 34px; border: 1px solid #526368; border-radius: 3px; background: #070b0c; color: #f1eee5; font: 13px "Bahnschrift", sans-serif; padding: 5px 7px; }
+    .listening-focus-row { display: grid; grid-template-columns: auto 1fr 96px; align-items: center; gap: 8px; }
+    .sharing-card { display: flex; align-items: center; gap: 9px; min-width: 0; margin: 0; padding: 8px 14px 12px; }
+    .sharing-card legend { margin-left: 8px; padding: 0 6px; color: #ccd4d2; font: 13px "Bahnschrift", "Segoe UI", sans-serif; }
+    .sharing-status { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 3px 9px; min-width: 320px; margin-right: auto; }
+    .sharing-status-light { grid-row: 1 / 3; width: 10px; height: 10px; border-radius: 50%; background: #68c98f; box-shadow: 0 0 10px rgba(104,201,143,.44); }
+    .sharing-status.manual .sharing-status-light { background: #e8a44a; box-shadow: 0 0 10px rgba(232,164,74,.4); }
+    .sharing-status.off .sharing-status-light { background: #657275; box-shadow: none; }
+    .sharing-status strong { color: #e9e6dc; font-size: 14px; font-weight: 500; }
+    .sharing-status span { color: #9ca9ab; font-size: 12px; }
+    .sharing-separator { align-self: stretch; width: 1px; margin: 0 4px; background: #354247; }
 
     .local-strip, .remote-strip {
       display: grid;
@@ -1760,8 +2079,8 @@
     .stat strong,
     .song-cell.notes { font-size: 12px; }
     .position-copy strong { font-size: 14px; }
-    .loop-lane-head strong { font-size: 14px; }
-    .lane-buttons button { min-height: 24px; font-size: 9px; }
+    .loop-lane-head strong { font-size: 16px; }
+    .lane-buttons button { min-height: 29px; font-size: 12px; }
 
     /* Cool silver-grey secondary text with enough contrast over the dark shell. */
     .micro,
@@ -2078,6 +2397,7 @@
       </div>
 
       <section class="performance-orbit" aria-label="Combined audio activity and song position">
+        <canvas class="performance-fx-canvas" id="performanceFxCanvas" width="640" height="520" aria-hidden="true"></canvas>
         <svg class="scope-svg" viewBox="0 0 640 520" role="img" aria-label="Live combined audio activity history">
           <circle class="scope-ring glow" cx="320" cy="215" r="164"></circle>
           <circle class="scope-ring major" cx="320" cy="215" r="167"></circle>
@@ -2127,7 +2447,7 @@
 
       <section class="detail" id="detailPanel" aria-label="Expanded song information">
         <header class="detail-head">
-          <span class="micro">Song position / bar 17 of 32</span>
+          <span class="detail-context" id="detailContextLabel">Section A</span>
           <button class="detail-tab active" data-detail="chords">Chords</button>
           <button class="detail-tab" data-detail="beats">Beats</button>
           <button class="detail-tab" data-detail="lyrics">Lyrics</button>
@@ -2256,25 +2576,190 @@
             </div>
           </div>
           <div class="detail-layer" data-layer="looper">
-            <div class="editor-tools">
-              <span class="micro">Track / backing tracks</span>
-              <button class="editor-button" data-looper-action="play">Play</button>
-              <button class="editor-button" data-looper-action="stop">Stop</button>
-              <button class="editor-button" data-looper-action="loop-start">Loop start</button>
-              <button class="editor-button" data-looper-action="loop-end">Loop end</button>
-              <button class="editor-button" data-looper-action="clear-loop">Clear loop</button>
-              <button class="editor-button" data-looper-action="record">Record</button>
-              <button class="editor-button" data-looper-action="add-track">Add track</button>
-              <button class="editor-button" data-looper-action="add-wav">Add WAV</button>
-              <button class="editor-button" data-looper-action="share">Share tracks</button>
-              <span class="tool-spacer"></span>
-              <span class="micro">SECTION</span><button class="editor-button active" data-bank="A">A</button><button class="editor-button" data-bank="B">B</button><button class="editor-button" data-bank="C">C</button><button class="editor-button" data-bank="D">D</button>
+            <div class="editor-scroll">
+              <div class="track-view">
+                <section class="track-card track-section-card">
+                  <span class="track-kicker">Select Section</span>
+                  <div class="track-section-tabs" aria-label="Track section">
+                    <button class="track-section-button active playing" data-bank="A">A</button>
+                    <button class="track-section-button" data-bank="B">B</button>
+                    <button class="track-section-button" data-bank="C">C</button>
+                    <button class="track-section-button" data-bank="D">D</button>
+                  </div>
+                  <span></span>
+                  <button class="track-button" id="trackLaunchSection">Queue Section</button>
+                  <button class="track-button" data-looper-action="arrangement">Arrangement…</button>
+                </section>
+
+                <section class="track-card track-tool-strip">
+                  <div class="track-tool-group">
+                    <span class="track-kicker">Loop</span>
+                    <button class="track-button" data-looper-action="loop-start">Set Start</button>
+                    <button class="track-button" data-looper-action="loop-end">Set End</button>
+                    <button class="track-button" data-looper-action="clear-loop">Clear</button>
+                  </div>
+                  <label class="track-check"><input type="checkbox" id="trackWholeLoop">Loop whole track</label>
+                  <span class="track-tool-spacer"></span>
+                  <label class="track-check"><input type="checkbox" id="trackGridLock" checked>Lock to grid</label>
+                  <label class="track-check"><input type="checkbox" id="trackSyncControls" checked>Sync track controls</label>
+                </section>
+
+                <section class="track-card recording-context" id="recordingContext" hidden>
+                  <i class="recording-light"></i>
+                  <div class="recording-copy">
+                    <strong id="recordingTitle">Alex M. has armed Ambient layer</strong>
+                    <span id="recordingDetail">Section A · waiting to start a synced recording</span>
+                  </div>
+                  <button class="track-button recording-source-action" id="changeRecordingSource" hidden>Change Source…</button>
+                  <div class="recording-peer-row" id="recordingPeerRow"></div>
+                  <div class="recording-phase-strip" id="recordingPhaseStrip" hidden>
+                    <span class="recording-phase" data-phase="waiting"><i></i>Waiting for bar</span>
+                    <span class="recording-phase-arrow">›</span>
+                    <span class="recording-phase" data-phase="countin"><i></i>Count-in</span>
+                    <span class="recording-phase-arrow">›</span>
+                    <span class="recording-phase" data-phase="recording"><i></i>Recording</span>
+                    <span class="recording-phase-status" id="recordingPhaseStatus">Waiting for the current bar to finish</span>
+                    <span class="recording-count-beats" id="recordingCountBeats" hidden><i></i><i></i><i></i><i></i></span>
+                  </div>
+                  <div class="recording-global-controls" id="recordingGlobalControls" hidden>
+                    <label>Length
+                      <select id="recordLength">
+                        <option>Until stopped</option>
+                        <option>1 bar</option>
+                        <option>2 bars</option>
+                        <option>4 bars</option>
+                        <option>8 bars</option>
+                      </select>
+                    </label>
+                    <label class="track-check"><input type="checkbox" id="recordCountIn" checked>Count-in</label>
+                    <label><input type="number" id="recordCountBars" min="1" max="8" value="1"> bars</label>
+                    <label class="track-check"><input type="checkbox" id="recordMetronome" checked>Click during count-in</label>
+                    <label class="track-check"><input type="checkbox" id="recordKeepMetronome">Keep click during take</label>
+                    <span class="recording-global-spacer"></span>
+                    <span class="recording-protection" id="recordingProtection" hidden>Shared playback controls are temporarily protected</span>
+                    <button class="track-button primary" id="trackRecordAction">Start 2 Recordings</button>
+                  </div>
+                </section>
+
+                <section class="track-card track-timeline-card">
+                  <div class="looper-workspace" id="looperWorkspace"></div>
+                  <div class="add-track-strip">
+                    <span class="track-kicker">New Track</span>
+                    <button class="track-button" data-add-track="empty">Empty Track</button>
+                    <button class="track-button" data-add-track="wav">Import Audio</button>
+                  </div>
+                </section>
+
+                <details class="track-card listening-tools" id="listeningTools">
+                  <summary>
+                    <span class="track-kicker">Listening Tools</span>
+                    <span class="listening-summary" id="listeningSummary">Speed 1.00× · Pitch 0 st · Focus off</span>
+                  </summary>
+                  <div class="listening-grid">
+                    <section class="listening-card">
+                      <h3>Speed <output id="trackSpeedValue">1.00×</output></h3>
+                      <input type="range" id="trackSpeed" min="10" max="200" value="100" aria-label="Track speed">
+                      <button class="track-button" data-listening-reset="speed">Reset Speed</button>
+                    </section>
+                    <section class="listening-card">
+                      <h3>Pitch <output id="trackPitchValue">0 st</output></h3>
+                      <input type="range" id="trackPitch" min="-12" max="12" value="0" aria-label="Track pitch">
+                      <button class="track-button" data-listening-reset="pitch">Reset Pitch</button>
+                    </section>
+                    <section class="listening-card">
+                      <h3>Focus <output id="trackFocusValue">Off</output></h3>
+                      <div class="listening-focus-row">
+                        <label class="track-check"><input type="checkbox" id="trackFocusEnabled">On</label>
+                        <select id="trackFocusPreset" aria-label="Focus preset"><option value="bass">Bass</option><option value="guitar" selected>Guitar</option><option value="vocals">Vocals</option><option value="drums">Drums</option><option value="custom">Custom</option></select>
+                        <input type="number" id="trackFocusFrequency" min="40" max="8000" value="850" aria-label="Focus frequency">
+                      </div>
+                      <button class="track-button" data-listening-reset="focus">Reset Focus</button>
+                    </section>
+                  </div>
+                </details>
+
+                <fieldset class="track-card sharing-card">
+                  <legend>Sharing</legend>
+                  <div class="sharing-status" id="trackSharingStatus">
+                    <i class="sharing-status-light"></i>
+                    <strong id="trackOutputStatus">Automatic sharing is on</strong>
+                    <span id="trackOutputDetail">Track changes are shared because Sync track controls is enabled.</span>
+                  </div>
+                  <button class="track-button" data-looper-action="share">Share with Jam Now</button>
+                  <span class="sharing-separator"></span>
+                  <button class="track-button" data-looper-action="export">Export Audio…</button>
+                </fieldset>
+              </div>
             </div>
-            <div class="editor-scroll"><div class="looper-workspace" id="looperWorkspace"></div></div>
           </div>
         </div>
       </section>
     </main>
+
+    <div class="record-setup-overlay" id="recordSetupOverlay" hidden>
+      <section class="record-setup-dialog" role="dialog" aria-modal="true" aria-labelledby="recordSetupTitle">
+        <header class="record-setup-head">
+          <i class="recording-light"></i>
+          <div>
+            <strong id="recordSetupTitle">Arm Track</strong>
+            <span id="recordSetupTarget">Section A · selected track</span>
+          </div>
+        </header>
+        <div class="record-setup-form">
+          <label for="recordSource">Source</label>
+          <select id="recordSource">
+            <option value="input">Input</option>
+            <option value="jam">Current Jam</option>
+            <option value="loopback">Loopback</option>
+          </select>
+
+          <label for="recordWavLocation">Take WAV</label>
+          <div class="record-setup-output">
+            <input type="text" id="recordWavLocation" value="Recordings\take.wav">
+            <button class="track-button" type="button">Browse…</button>
+          </div>
+
+          <div class="record-source-panel" id="recordInputPanel">
+            <label>Input</label>
+            <div class="record-input-status">Jam2 Input · channels 1–2 · ready</div>
+            <details class="record-advanced">
+              <summary>Input alignment</summary>
+              <div class="record-advanced-content"><span>Recording alignment adjustment</span><span>0 ms</span></div>
+            </details>
+          </div>
+
+          <div class="record-source-panel" id="recordJamPanel" hidden>
+            <label>Capture</label>
+            <div>
+              <label class="track-check"><input type="checkbox" checked>Include backing tracks</label>
+              <label class="track-check"><input type="checkbox">Include metronome in WAV</label>
+            </div>
+            <label></label>
+            <div class="record-input-status">The jam leader controls the synchronized start.</div>
+          </div>
+
+          <div class="record-source-panel" id="recordLoopbackPanel" hidden>
+            <label for="recordLoopbackSource">Loopback source</label>
+            <div class="record-setup-output">
+              <select id="recordLoopbackSource"><option>Default system output</option><option>Speakers (Jam2 Audio)</option></select>
+              <button class="track-button" type="button">Refresh</button>
+            </div>
+            <details class="record-advanced">
+              <summary>Silence detection and trimming</summary>
+              <div class="record-advanced-content">
+                <span>Silence threshold</span><span>-54 dB</span>
+                <span>Tail silence</span><span>800 ms</span>
+                <span>Trim leading / trailing silence</span><span>On</span>
+              </div>
+            </details>
+          </div>
+        </div>
+        <footer class="record-setup-actions">
+          <button class="track-button" id="cancelRecordSetup" type="button">Cancel</button>
+          <button class="track-button primary" id="confirmRecordSetup" type="button">Arm Track</button>
+        </footer>
+      </section>
+    </div>
 
     <footer class="transport">
       <div class="local-strip">
@@ -2427,10 +2912,33 @@
     let beatBarClipboard = [];
     let lastFollowedLyricBar = -1;
     const looperLanes = [
-      { name: "Backing guitar", start: "0%", width: "68%", gain: -8 },
-      { name: "Ambient layer", start: "25%", width: "54%", gain: -14 },
-      { name: "Vocal idea", start: "49%", width: "34%", gain: -10 }
+      { name: "Backing guitar", origin: "Local recording", start: "0%", width: "68%", gain: -8, muted: false, solo: false },
+      { name: "Ambient layer", origin: "Shared idea · Section A", start: "25%", width: "54%", gain: -14, muted: false, solo: false },
+      { name: "Vocal idea", origin: "Local recording", start: "49%", width: "34%", gain: -10, muted: false, solo: false }
     ];
+    let activeTrackSection = "A";
+    let playingTrackSection = "A";
+    let queuedTrackSection = "";
+    let selectedLooperLane = 0;
+    let armedLooperLane = -1;
+    let recordingLooperLane = -1;
+    let pendingArmLane = -1;
+    let recordingPhase = "idle";
+    let countInBeat = 0;
+    let countInTotalBeats = 4;
+    let recordingWaitTimer = 0;
+    let recordingCountTimer = 0;
+    const looperCaptureSources = {};
+    const remoteRecording = {
+      peer: "Alex M.",
+      section: "A",
+      laneIndex: 1,
+      lane: "Ambient layer",
+      state: "armed"
+    };
+    let trackLoopStartSet = false;
+    let trackLoopEndSet = false;
+    let timelineBars = 8;
 
     let peerCount = 2;
     let activityMode = "balanced";
@@ -2452,11 +2960,18 @@
       level: .18 + .16 * Math.abs(Math.sin(index * .27)),
       color: sources[index % 2].color
     }));
+    let performanceBeatStartedAt = performance.now();
+    let performanceBeatStrength = 1;
+    let performanceChord = "";
+    let performanceChordChangedAt = performance.now();
 
     const starCanvas = document.getElementById("starCanvas");
     const starContext = starCanvas.getContext("2d");
     const nebulaCanvas = document.getElementById("nebulaCanvas");
     const nebulaContext = nebulaCanvas.getContext("2d");
+    const performanceFxCanvas = document.getElementById("performanceFxCanvas");
+    const performanceFxContext = performanceFxCanvas.getContext("2d");
+    let performanceFxDpr = 1;
     const nebulaRenderScale = .65;
     const nebulaFrameInterval = 1000 / 30;
     let nebulaWidth = 1;
@@ -2598,6 +3113,90 @@
       drawCachedStarField();
     }
 
+    function resizePerformanceFx() {
+      performanceFxDpr = Math.min(window.devicePixelRatio || 1, 1.5);
+      performanceFxCanvas.width = Math.round(640 * performanceFxDpr);
+      performanceFxCanvas.height = Math.round(520 * performanceFxDpr);
+      performanceFxContext.setTransform(
+        performanceFxDpr, 0, 0, performanceFxDpr, 0, 0);
+    }
+
+    function rgba(colour, alpha) {
+      return `rgba(${colour[0]},${colour[1]},${colour[2]},${alpha})`;
+    }
+
+    function performanceBeatEnvelope(now) {
+      if (!playing) return { progress: 1, life: 0 };
+      const progress = Math.max(0, Math.min(1, (now - performanceBeatStartedAt) / 620));
+      return {
+        progress,
+        life: Math.sin(progress * Math.PI) * (1 - progress * .3)
+      };
+    }
+
+    function drawPerformanceFx(now) {
+      const context = performanceFxContext;
+      context.setTransform(performanceFxDpr, 0, 0, performanceFxDpr, 0, 0);
+      context.clearRect(0, 0, 640, 520);
+      const beat = performanceBeatEnvelope(now);
+      const harmonyLife = Math.exp(-(now - performanceChordChangedAt) / 1250);
+      context.save();
+      context.globalCompositeOperation = "screen";
+      const atmosphere = context.createRadialGradient(320, 210, 20, 320, 215, 205);
+      atmosphere.addColorStop(0, rgba([102, 212, 207], .018 + visualEnergy * .018));
+      atmosphere.addColorStop(.5, rgba([176, 139, 228], .012 + visualEnergy * .012));
+      atmosphere.addColorStop(.78, rgba([255, 125, 134], .006));
+      atmosphere.addColorStop(1, rgba([255, 125, 134], 0));
+      context.fillStyle = atmosphere;
+      context.fillRect(95, -10, 450, 440);
+
+      for (let contour = 0; contour < 2; ++contour) {
+        const colour = contour === 0 ? [102, 212, 207] : [176, 139, 228];
+        const baseRadius = contour === 0 ? 137 : 161;
+        context.beginPath();
+        for (let segment = 0; segment <= 64; ++segment) {
+          const angle = -Math.PI / 2 + segment / 64 * Math.PI * 2;
+          const drift = now * (contour === 0 ? .000018 : -.000014);
+          const texture = Math.sin(angle * (contour === 0 ? 3 : 2) + drift) *
+            (1.4 + visualEnergy * 2.2);
+          const radius = baseRadius + texture;
+          const x = 320 + Math.cos(angle) * radius;
+          const y = 215 + Math.sin(angle) * radius * .96;
+          if (segment === 0) context.moveTo(x, y);
+          else context.lineTo(x, y);
+        }
+        context.closePath();
+        context.strokeStyle = rgba(colour, .018 + visualEnergy * .018);
+        context.lineWidth = 4;
+        context.stroke();
+        context.strokeStyle = rgba(colour, .08 + visualEnergy * .07);
+        context.lineWidth = .6;
+        context.stroke();
+      }
+
+      if (beat.life > .005) {
+        const radius = 105 + beat.progress * 48;
+        const pulseColour = performanceBeatStrength > .8
+          ? [232, 164, 74] : [102, 212, 207];
+        context.beginPath();
+        context.arc(320, 215, radius, 0, Math.PI * 2);
+        context.strokeStyle = rgba(
+          pulseColour,
+          beat.life * performanceBeatStrength * .055);
+        context.lineWidth = .7 + beat.life * .8;
+        context.stroke();
+      }
+      context.restore();
+
+      const lens = document.getElementById("chordLens");
+      lens.style.setProperty(
+        "--lens-scale",
+        (1 + visualEnergy * .004 + beat.life * performanceBeatStrength * .007).toFixed(4));
+      lens.style.setProperty(
+        "--lens-texture-opacity",
+        (.27 + visualEnergy * .07 + beat.life * .025 + harmonyLife * .035).toFixed(3));
+    }
+
     function spawnCosmicEvent(type = Math.random() < .78 ? "star" : "nova", preview = false) {
       let x = .06 + Math.random() * .88;
       let y = .06 + Math.random() * .76;
@@ -2708,6 +3307,7 @@
         nebulaContext.restore();
       });
 
+      drawPerformanceFx(now);
       cosmicEvents.forEach(event => drawCosmicEvent(event, now));
       cosmicEvents = cosmicEvents.filter(event => now - event.born < event.duration);
       if (playing && nebulaPlayTime >= nextCosmicEvent) {
@@ -2828,14 +3428,14 @@
         const cos = Number(line.dataset.cos);
         const sin = Number(line.dataset.sin);
         const inner = 178;
-        const outer = inner + 4 + sample.level * 34;
+        const outer = inner + 3 + sample.level * 17;
         line.setAttribute("x1", 320 + cos * inner);
         line.setAttribute("y1", 215 + sin * inner);
         line.setAttribute("x2", 320 + cos * outer);
         line.setAttribute("y2", 215 + sin * outer);
         line.setAttribute("stroke", sample.color);
-        line.setAttribute("stroke-width", 1.1 + sample.level * 2.2);
-        line.setAttribute("opacity", .18 + sample.level * .76);
+        line.setAttribute("stroke-width", .8 + sample.level * 1.1);
+        line.setAttribute("opacity", .1 + sample.level * .38);
       });
       sourceNodes.forEach((node, index) => {
         const level = sourceLevels[index];
@@ -2920,8 +3520,7 @@
           marker.setAttribute("aria-label", `Bar ${songBar}, beat ${beat}`);
         }
       });
-      const positionLabel = document.querySelector(".detail-head .micro");
-      if (positionLabel) positionLabel.textContent = `Song position / bar ${songBar} · beat ${beat}`;
+      updateDetailContextLabel();
     }
 
     function buildChordEditor() {
@@ -3614,8 +4213,7 @@
         document.querySelector(`[data-lyric-bar="${songBar - 1}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
         lastFollowedLyricBar = songBar;
       }
-      const positionLabel = document.querySelector(".detail-head .micro");
-      if (positionLabel) positionLabel.textContent = `Song position / bar ${songBar} · beat ${beat}`;
+      updateDetailContextLabel();
     }
 
     function metronomeConfig() {
@@ -3757,32 +4355,397 @@
     function buildLooperWorkspace() {
       const target = document.getElementById("looperWorkspace");
       target.innerHTML = "";
+      const trackHeadWidth = 280;
+      const barWidth = 76;
+      target.style.minWidth = `${Math.max(1040, trackHeadWidth + timelineBars * barWidth)}px`;
+      target.style.setProperty("--timeline-bars", timelineBars);
+      target.style.setProperty("--bar-size", `${100 / timelineBars}%`);
+      target.style.setProperty("--beat-size", `${100 / (timelineBars * 4)}%`);
       const ruler = document.createElement("div");
       ruler.className = "looper-ruler";
-      ruler.innerHTML = "<strong>Section A / grid locked</strong>";
+      const gridLocked = document.getElementById("trackGridLock")?.checked !== false;
+      ruler.innerHTML = `<strong>Section ${activeTrackSection} · ${gridLocked ? "grid locked" : "free timing"}</strong>`;
       const rulerScale = document.createElement("div");
       rulerScale.className = "looper-ruler-scale";
-      rulerScale.innerHTML = Array.from({ length: 32 }, (_, index) =>
-        `<span>${Math.floor(index / 4) + 1}.${index % 4 + 1}</span>`
+      rulerScale.innerHTML = Array.from({ length: timelineBars }, (_, index) =>
+        `<span title="Bar ${index + 1}">${index + 1}</span>`
       ).join("");
       ruler.appendChild(rulerScale);
+      if (trackLoopStartSet || document.getElementById("trackWholeLoop")?.checked) {
+        const marker = document.createElement("i");
+        marker.className = "track-loop-marker start";
+        ruler.appendChild(marker);
+      }
+      if (trackLoopEndSet || document.getElementById("trackWholeLoop")?.checked) {
+        const marker = document.createElement("i");
+        marker.className = "track-loop-marker end";
+        ruler.appendChild(marker);
+      }
       const trackMarker = document.createElement("i");
       trackMarker.className = "track-position-marker";
       trackMarker.id = "trackPositionMarker";
       ruler.appendChild(trackMarker);
       target.appendChild(ruler);
       looperLanes.forEach((lane, index) => {
+        const isRemoteLane = index === remoteRecording.laneIndex;
+        const remoteIsRecording = isRemoteLane && remoteRecording.state === "recording";
+        const transportProtected = recordingPhase !== "idle" || recordingLooperLane >= 0 || remoteRecording.state === "recording";
         const row = document.createElement("div");
-        row.className = `loop-lane${index === 0 ? " selected" : ""}`;
+        row.className = [
+          "loop-lane",
+          index === selectedLooperLane ? "selected" : "",
+          lane.muted ? "muted" : "",
+          lane.solo ? "solo" : "",
+          index === armedLooperLane || index === recordingLooperLane ? "armed" : "",
+          isRemoteLane && !remoteIsRecording ? "remote-armed" : "",
+          remoteIsRecording ? "remote-recording" : ""
+        ].filter(Boolean).join(" ");
+        row.dataset.laneIndex = index;
+        const preRollLabel = recordingPhase === "waiting" ? "Waiting" : recordingPhase === "countin" ? "Count-in" : "";
+        const armButton = isRemoteLane
+          ? `<button class="lane-button remote-arm${remoteIsRecording ? " recording" : ""}" disabled>${remoteIsRecording ? "Alex Recording" : preRollLabel ? `Alex ${preRollLabel}` : "Alex Armed"}</button>`
+          : `<button class="lane-button arm${index === armedLooperLane || index === recordingLooperLane ? " active" : ""}${transportProtected && index !== recordingLooperLane ? " recording-locked" : ""}" data-lane-action="arm" ${transportProtected && index !== recordingLooperLane ? 'disabled title="Another synced recording is active"' : ""}>${index === recordingLooperLane ? "Recording" : index === armedLooperLane && preRollLabel ? preRollLabel : index === armedLooperLane ? "Armed" : "Arm"}</button>`;
         row.innerHTML = `
           <div class="loop-lane-head">
-            <strong>${lane.name}</strong><input class="lane-gain" type="range" min="-60" max="12" value="${lane.gain}" title="Lane gain">
-            <div class="lane-buttons"><button>Mute</button><button>Solo</button><button>Record</button><button>Rename</button><button>Remove</button></div>
+            <strong title="Double-click to rename">${lane.name}</strong>
+            <div class="lane-title-actions">
+              <button class="lane-button" data-lane-action="rename">Rename</button>
+              <button class="lane-button remove${transportProtected || isRemoteLane ? " recording-locked" : ""}" data-lane-action="remove" ${transportProtected || isRemoteLane ? 'disabled title="' + (isRemoteLane ? "This track is armed by Alex M." : "Unavailable while a synced recording is active") + '"' : ""}>Remove</button>
+            </div>
+            <span class="lane-origin">${isRemoteLane ? "Alex M. · " + lane.origin : lane.origin}</span>
+            <div class="lane-buttons">
+              <button class="lane-button${lane.muted ? " active" : ""}" data-lane-action="mute">Mute</button>
+              <button class="lane-button${lane.solo ? " active" : ""}" data-lane-action="solo">Solo</button>
+              ${armButton}
+            </div>
+            <label class="lane-gain-row">Volume <input class="lane-gain" type="range" min="-60" max="12" value="${lane.gain}" title="Lane gain"><span class="lane-gain-value">${lane.gain.toFixed(1)} dB</span></label>
           </div>
-          <div class="lane-wave"><i class="lane-clip" style="--start:${lane.start};--width:${lane.width}"></i><i class="lane-playhead" style="--playhead:38%"></i></div>`;
-        row.querySelectorAll(".lane-buttons button").forEach(button => button.addEventListener("click", () => button.classList.toggle("active")));
+          <div class="lane-wave">
+            <i class="lane-clip" style="--start:${lane.start};--width:${lane.width}"></i>
+            ${trackLoopStartSet || document.getElementById("trackWholeLoop")?.checked ? '<i class="lane-loop-marker start"></i>' : ""}
+            ${trackLoopEndSet || document.getElementById("trackWholeLoop")?.checked ? '<i class="lane-loop-marker end"></i>' : ""}
+            <i class="lane-playhead" style="--playhead:38%"></i>
+          </div>`;
+
+        row.addEventListener("click", () => {
+          selectedLooperLane = index;
+          buildLooperWorkspace();
+        });
+        row.querySelector(".loop-lane-head strong").addEventListener("dblclick", event => {
+          event.stopPropagation();
+          renameLooperLane(index);
+        });
+        row.querySelector(".lane-gain").addEventListener("input", event => {
+          event.stopPropagation();
+          lane.gain = Number(event.currentTarget.value);
+          row.querySelector(".lane-gain-value").textContent = `${lane.gain.toFixed(1)} dB`;
+        });
+        row.querySelectorAll("[data-lane-action]").forEach(button => button.addEventListener("click", event => {
+          event.stopPropagation();
+          const action = button.dataset.laneAction;
+          if (action === "mute") lane.muted = !lane.muted;
+          if (action === "solo") lane.solo = !lane.solo;
+          if (action === "arm") {
+            selectedLooperLane = index;
+            if (armedLooperLane === index) {
+              armedLooperLane = -1;
+              recordingLooperLane = -1;
+              updateRecordingContext();
+            } else {
+              openRecordingSetup(index);
+            }
+          }
+          if (action === "rename") renameLooperLane(index);
+          if (action === "remove" && confirm(`Remove ${lane.name}?`)) {
+            looperLanes.splice(index, 1);
+            selectedLooperLane = Math.max(0, Math.min(selectedLooperLane, looperLanes.length - 1));
+            if (armedLooperLane === index) armedLooperLane = -1;
+            if (recordingLooperLane === index) recordingLooperLane = -1;
+            updateRecordingContext();
+          }
+          buildLooperWorkspace();
+          updateTrackSectionMeta();
+        }));
         target.appendChild(row);
       });
+      updateTrackSectionMeta();
+    }
+
+    function renameLooperLane(index) {
+      const lane = looperLanes[index];
+      if (!lane) return;
+      const nextName = prompt("Track name", lane.name);
+      if (nextName?.trim()) lane.name = nextName.trim();
+      buildLooperWorkspace();
+    }
+
+    function updateTrackSectionMeta() {
+      document.querySelectorAll("[data-bank]").forEach(button => {
+        const section = button.dataset.bank;
+        const isViewed = section === activeTrackSection;
+        const isPlaying = section === playingTrackSection;
+        const isQueued = section === queuedTrackSection;
+        button.classList.toggle("active", isViewed);
+        button.classList.toggle("playing", isPlaying);
+        button.textContent = section;
+        const state = [isPlaying ? "LIVE" : "", isViewed ? "VIEWED" : "", isQueued ? "NEXT" : ""]
+          .filter(Boolean).join(", ");
+        button.title = `Section ${section}${state ? ` · ${state}` : ""}`;
+        button.setAttribute("aria-label", `Section ${section}${state ? `, ${state}` : ""}`);
+      });
+      updateDetailContextLabel();
+    }
+
+    function updateDetailContextLabel() {
+      const label = document.getElementById("detailContextLabel");
+      if (!label) return;
+      label.textContent = `Section ${activeTrackSection}`;
+    }
+
+    function updateRecordSourcePanels() {
+      const source = document.getElementById("recordSource").value;
+      document.getElementById("recordInputPanel").hidden = source !== "input";
+      document.getElementById("recordJamPanel").hidden = source !== "jam";
+      document.getElementById("recordLoopbackPanel").hidden = source !== "loopback";
+    }
+
+    function openRecordingSetup(index) {
+      if (!looperLanes[index] || recordingLooperLane >= 0 || remoteRecording.state === "recording") return;
+      pendingArmLane = index;
+      const lane = looperLanes[index];
+      const priorSource = looperCaptureSources[index] || "input";
+      document.getElementById("recordSetupTitle").textContent = armedLooperLane === index ? "Change Recording Source" : "Arm Track";
+      document.getElementById("recordSetupTarget").textContent = `Section ${activeTrackSection} · ${lane.name}`;
+      document.getElementById("recordSource").value = priorSource;
+      document.getElementById("recordWavLocation").value = `Recordings\\${lane.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-take.wav`;
+      updateRecordSourcePanels();
+      document.getElementById("recordSetupOverlay").hidden = false;
+    }
+
+    function closeRecordingSetup() {
+      pendingArmLane = -1;
+      document.getElementById("recordSetupOverlay").hidden = true;
+    }
+
+    function clearRecordingSequenceTimers() {
+      window.clearTimeout(recordingWaitTimer);
+      window.clearInterval(recordingCountTimer);
+      recordingWaitTimer = 0;
+      recordingCountTimer = 0;
+    }
+
+    function beginRecordingCapture() {
+      clearRecordingSequenceTimers();
+      recordingPhase = "recording";
+      recordingLooperLane = armedLooperLane;
+      remoteRecording.state = "recording";
+      updateRecordingContext();
+      buildLooperWorkspace();
+    }
+
+    function beginRecordingCountIn() {
+      if (!document.getElementById("recordCountIn").checked) {
+        beginRecordingCapture();
+        return;
+      }
+      recordingPhase = "countin";
+      const bars = Math.max(1, Number(document.getElementById("recordCountBars").value) || 1);
+      countInTotalBeats = bars * 4;
+      countInBeat = 1;
+      updateRecordingContext();
+      buildLooperWorkspace();
+      const bpm = Math.max(30, Number(document.getElementById("tempoReadout").textContent) || 118);
+      recordingCountTimer = window.setInterval(() => {
+        countInBeat += 1;
+        if (countInBeat > countInTotalBeats) {
+          beginRecordingCapture();
+          return;
+        }
+        updateRecordingContext();
+      }, 60000 / bpm);
+    }
+
+    function scheduleRecordingStart() {
+      if (armedLooperLane < 0 || recordingPhase !== "idle") return;
+      clearRecordingSequenceTimers();
+      recordingPhase = "waiting";
+      playing = true;
+      document.getElementById("playButton").textContent = "Ⅱ";
+      document.getElementById("playButton").setAttribute("aria-label", "Pause");
+      updateRecordingContext();
+      buildLooperWorkspace();
+      recordingWaitTimer = window.setTimeout(beginRecordingCountIn, 1500);
+    }
+
+    function cancelOrStopRecording() {
+      clearRecordingSequenceTimers();
+      recordingLooperLane = -1;
+      remoteRecording.state = "armed";
+      recordingPhase = "idle";
+      countInBeat = 0;
+      updateRecordingContext();
+      buildLooperWorkspace();
+    }
+
+    function setRecordingProtection(active, copy = "TRANSPORT PROTECTED · synchronized recording in progress") {
+      const transport = document.querySelector(".transport");
+      transport?.classList.toggle("recording-protected", active);
+      if (transport) transport.dataset.protectionCopy = copy;
+      const protectedControls = [
+        document.getElementById("playButton"),
+        document.getElementById("stopButton"),
+        document.getElementById("trackLaunchSection"),
+        document.querySelector('[data-looper-action="arrangement"]'),
+        document.querySelector('[data-looper-action="loop-start"]'),
+        document.querySelector('[data-looper-action="loop-end"]'),
+        document.querySelector('[data-looper-action="clear-loop"]'),
+        document.getElementById("trackWholeLoop"),
+        document.getElementById("trackGridLock"),
+        document.getElementById("trackSyncControls")
+      ].filter(Boolean);
+      protectedControls.forEach(control => {
+        control.disabled = active;
+        control.classList.toggle("recording-locked", active);
+        if (active) control.title = "Unavailable because stopping or restarting playback would interrupt the synchronized recording";
+        else control.removeAttribute("title");
+      });
+    }
+
+    function updateRecordingContext() {
+      const context = document.getElementById("recordingContext");
+      if (!context) return;
+      const hasLocal = (recordingLooperLane >= 0 && looperLanes[recordingLooperLane]) || (armedLooperLane >= 0 && looperLanes[armedLooperLane]);
+      const hasRemote = remoteRecording.state === "armed" || remoteRecording.state === "recording";
+      const isRecording = recordingPhase === "recording" || recordingLooperLane >= 0 || remoteRecording.state === "recording";
+      const isPreRoll = recordingPhase === "waiting" || recordingPhase === "countin";
+      const sequenceActive = isPreRoll || isRecording;
+      const localIndex = recordingLooperLane >= 0 ? recordingLooperLane : armedLooperLane;
+      const localLane = hasLocal ? looperLanes[localIndex] : null;
+      context.hidden = !hasLocal && !hasRemote;
+      if (context.hidden) {
+        setRecordingProtection(false);
+        return;
+      }
+      context.classList.toggle("recording", isRecording);
+      const title = document.getElementById("recordingTitle");
+      const detail = document.getElementById("recordingDetail");
+      if (recordingPhase === "waiting") {
+        title.textContent = "Waiting for the current bar to finish";
+        detail.textContent = "The synchronized start is scheduled · count-in will begin on the next bar";
+      } else if (recordingPhase === "countin") {
+        const currentBar = Math.floor((countInBeat - 1) / 4) + 1;
+        const totalBars = Math.max(1, Math.ceil(countInTotalBeats / 4));
+        title.textContent = `Count-in · bar ${currentBar} of ${totalBars} · beat ${((countInBeat - 1) % 4) + 1} of 4`;
+        detail.textContent = "Both tracks are ready · recording begins immediately after the count-in";
+      } else if (isRecording && hasLocal && hasRemote) {
+        title.textContent = "2 synchronized recordings active";
+        detail.textContent = "Both takes share the same transport position · disruptive controls are protected";
+      } else if (isRecording && hasRemote) {
+        title.textContent = `${remoteRecording.peer} is recording ${remoteRecording.lane}`;
+        detail.textContent = `Section ${remoteRecording.section} · shared playback is protected until the take ends`;
+      } else if (hasLocal && hasRemote) {
+        title.textContent = "2 tracks armed for synchronized recording";
+        detail.textContent = "One start will capture both tracks locally from the same transport frame";
+      } else if (hasLocal) {
+        title.textContent = `${localLane.name} armed`;
+        detail.textContent = `Section ${activeTrackSection} · ready on the next bar`;
+      } else {
+        title.textContent = `${remoteRecording.peer} has armed ${remoteRecording.lane}`;
+        detail.textContent = `Section ${remoteRecording.section} · waiting to start a synced recording`;
+      }
+
+      const peerPhaseLabel = isRecording ? "Recording" : recordingPhase === "countin" ? "Count-in" : recordingPhase === "waiting" ? "Waiting" : "Ready";
+      const localChip = hasLocal
+        ? `<span class="recording-peer-chip${isRecording ? " recording" : ""}"><strong>Phil · ${localLane.name}</strong><span>Section ${activeTrackSection} · ${looperCaptureSources[localIndex] || "input"}</span><em>${peerPhaseLabel}</em></span>`
+        : "";
+      const remoteChip = hasRemote
+        ? `<span class="recording-peer-chip${isRecording ? " recording" : ""}"><strong>${remoteRecording.peer} · ${remoteRecording.lane}</strong><span>Section ${remoteRecording.section} · remote input</span><em>${peerPhaseLabel}</em></span>`
+        : "";
+      document.getElementById("recordingPeerRow").innerHTML = `
+        <span class="recording-peer-label">Recording readiness</span>
+        ${localChip}${remoteChip}
+        <span class="recording-restart-note">${sequenceActive ? "Playback changes are locked so nobody interrupts the scheduled take." : "Starting a synced recording restarts playback for everyone."}</span>`;
+
+      const phaseStrip = document.getElementById("recordingPhaseStrip");
+      phaseStrip.hidden = !sequenceActive;
+      const phaseOrder = ["waiting", "countin", "recording"];
+      const phaseIndex = phaseOrder.indexOf(recordingPhase);
+      phaseStrip.querySelectorAll("[data-phase]").forEach(item => {
+        const itemIndex = phaseOrder.indexOf(item.dataset.phase);
+        item.classList.toggle("active", itemIndex === phaseIndex);
+        item.classList.toggle("complete", itemIndex < phaseIndex);
+      });
+      const phaseStatus = document.getElementById("recordingPhaseStatus");
+      if (recordingPhase === "waiting") phaseStatus.textContent = "Waiting for the next bar boundary";
+      if (recordingPhase === "countin") phaseStatus.textContent = `Count-in beat ${countInBeat} of ${countInTotalBeats}`;
+      if (recordingPhase === "recording") phaseStatus.textContent = "Capturing both takes from the shared transport";
+      const beatDots = document.getElementById("recordingCountBeats");
+      beatDots.hidden = recordingPhase !== "countin";
+      const beatInBar = ((countInBeat - 1) % 4) + 1;
+      beatDots.querySelectorAll("i").forEach((dot, index) => {
+        dot.classList.toggle("active", index + 1 === beatInBar);
+        dot.classList.toggle("passed", index + 1 < beatInBar);
+      });
+
+      const sourceButton = document.getElementById("changeRecordingSource");
+      sourceButton.hidden = !hasLocal || sequenceActive;
+      const controls = document.getElementById("recordingGlobalControls");
+      controls.hidden = !hasLocal;
+      controls.querySelectorAll("select, input").forEach(control => control.disabled = sequenceActive);
+      document.getElementById("recordingProtection").hidden = !sequenceActive;
+      document.getElementById("trackRecordAction").textContent = isRecording
+        ? "Stop Recording" : isPreRoll ? "Cancel Start" : hasRemote ? "Start 2 Recordings" : "Start Recording";
+      const protectionCopy = isRecording
+        ? "TRANSPORT PROTECTED · Alex M. and Phil are recording"
+        : recordingPhase === "countin"
+          ? "TRANSPORT PROTECTED · synchronized count-in active"
+          : "TRANSPORT PROTECTED · recording start scheduled";
+      setRecordingProtection(sequenceActive, protectionCopy);
+    }
+
+    function addMockTrack(kind) {
+      const number = looperLanes.length + 1;
+      const lane = kind === "wav"
+        ? { name: "Imported full song", origin: "Imported audio · 4:00", start: "0%", width: "96%", gain: -12, muted: false, solo: false }
+        : { name: `Empty track ${number}`, origin: "Empty track", start: "0%", width: "42%", gain: -12, muted: false, solo: false };
+      looperLanes.push(lane);
+      if (kind === "wav") timelineBars = Math.max(timelineBars, 118);
+      selectedLooperLane = looperLanes.length - 1;
+      buildLooperWorkspace();
+    }
+
+    function updateListeningTools() {
+      const speed = Number(document.getElementById("trackSpeed").value) / 100;
+      const pitch = Number(document.getElementById("trackPitch").value);
+      const focusEnabled = document.getElementById("trackFocusEnabled").checked;
+      const preset = document.getElementById("trackFocusPreset");
+      document.getElementById("trackSpeedValue").textContent = `${speed.toFixed(2)}×`;
+      document.getElementById("trackPitchValue").textContent = `${pitch > 0 ? "+" : ""}${pitch} st`;
+      document.getElementById("trackFocusValue").textContent = focusEnabled ? preset.options[preset.selectedIndex].text : "Off";
+      document.getElementById("listeningSummary").textContent =
+        `Speed ${speed.toFixed(2)}× · Pitch ${pitch > 0 ? "+" : ""}${pitch} st · Focus ${focusEnabled ? preset.options[preset.selectedIndex].text : "off"}`;
+      document.getElementById("trackFocusFrequency").disabled = !focusEnabled || preset.value !== "custom";
+    }
+
+    function updateTrackSharingStatus(manualShare = false) {
+      const syncEnabled = document.getElementById("trackSyncControls").checked;
+      const status = document.getElementById("trackSharingStatus");
+      status.classList.toggle("manual", manualShare);
+      status.classList.toggle("off", !syncEnabled && !manualShare);
+      if (manualShare) {
+        document.getElementById("trackOutputStatus").textContent = "Manual share sent to the jam";
+        document.getElementById("trackOutputDetail").textContent = syncEnabled
+          ? "Automatic sharing remains on; the current tracks were shared again now."
+          : "Sync track controls is off, so this was a one-time manual share.";
+      } else if (syncEnabled) {
+        document.getElementById("trackOutputStatus").textContent = "Automatic sharing is on";
+        document.getElementById("trackOutputDetail").textContent =
+          "Track changes are shared because Sync track controls is enabled.";
+      } else {
+        document.getElementById("trackOutputStatus").textContent = "Automatic sharing is off";
+        document.getElementById("trackOutputDetail").textContent =
+          "Tracks stay local unless you use Share with Jam Now as a manual override.";
+      }
     }
 
     function buildDetailViews() {
@@ -3796,6 +4759,10 @@
     function updateSongPosition() {
       const beat = Math.floor(step / 4) + 1;
       const currentChord = resolvedChordAt(songBar - 1, beat - 1);
+      if (currentChord !== performanceChord) {
+        performanceChord = currentChord;
+        performanceChordChangedAt = performance.now();
+      }
       const sequence = [currentChord];
       for (let offset = 1; offset < 4; ++offset) sequence.push(resolvedChordAt((songBar - 1 + offset) % bankLength(), 0));
       document.getElementById("currentChord").textContent = sequence[0];
@@ -3823,7 +4790,7 @@
       const looperProgress = (songBar - 1 + step / 16) / bankLength();
       const trackMarker = document.getElementById("trackPositionMarker");
       if (trackMarker) {
-        trackMarker.style.setProperty("--marker", `calc(220px + ${looperProgress * 100}% - ${looperProgress * 220}px)`);
+        trackMarker.style.setProperty("--marker", `calc(280px + ${looperProgress * 100}% - ${looperProgress * 280}px)`);
         trackMarker.setAttribute("aria-label", `Bar ${songBar}, beat ${beat}`);
       }
       document.querySelectorAll(".lane-playhead").forEach(marker => marker.style.setProperty("--playhead", `${looperProgress * 100}%`));
@@ -3837,6 +4804,7 @@
       }
       document.querySelectorAll(".detail-tab").forEach(button => button.classList.toggle("active", button.dataset.detail === layer));
       document.querySelectorAll(".detail-layer").forEach(view => view.classList.toggle("active", view.dataset.layer === layer));
+      updateDetailContextLabel();
     }
 
     document.querySelectorAll("[data-peers]").forEach(button => {
@@ -4019,12 +4987,15 @@
     document.querySelectorAll("[data-mock-bank]").forEach(button => {
       button.addEventListener("click", () => {
         activeMockBank = Number(button.dataset.mockBank);
+        activeTrackSection = String.fromCharCode(65 + activeMockBank);
         songBar = Math.min(songBar, bankLength());
         selectEditorBar(selectedEditorBar);
         document.querySelectorAll("[data-mock-bank]").forEach(candidate => candidate.classList.toggle("active", Number(candidate.dataset.mockBank) === activeMockBank));
+        document.querySelectorAll("[data-bank]").forEach(candidate => candidate.classList.toggle("active", candidate.dataset.bank === activeTrackSection));
         rebuildAuthoringViews();
         buildBeatPreview();
         updateSongPosition();
+        updateTrackSectionMeta();
       });
     });
     document.getElementById("showMusicalLines").addEventListener("change", event => {
@@ -4107,21 +5078,101 @@
     document.getElementById("metroMode").addEventListener("change", updateMetronomeReadouts);
     document.querySelectorAll("[data-bank]").forEach(button => {
       button.addEventListener("click", () => {
-        document.querySelectorAll("[data-bank]").forEach(candidate => candidate.classList.toggle("active", candidate === button));
+        activeTrackSection = button.dataset.bank;
+        activeMockBank = Math.max(0, activeTrackSection.charCodeAt(0) - 65);
+        document.querySelectorAll("[data-mock-bank]").forEach(candidate => candidate.classList.toggle("active", Number(candidate.dataset.mockBank) === activeMockBank));
+        updateTrackSectionMeta();
+        buildLooperWorkspace();
         document.querySelector(".looper-launch .preview-title").textContent = `Backing tracks / Section ${button.dataset.bank}`;
       });
     });
     document.querySelectorAll("[data-looper-action]").forEach(button => {
       button.addEventListener("click", () => {
-        if (button.dataset.looperAction === "add-track" || button.dataset.looperAction === "add-wav") {
-          looperLanes.push({ name: button.dataset.looperAction === "add-wav" ? "Imported WAV" : `Empty track ${looperLanes.length + 1}`, start: "0%", width: "42%", gain: -12 });
+        const action = button.dataset.looperAction;
+        if (action === "loop-start") trackLoopStartSet = !trackLoopStartSet;
+        if (action === "loop-end") trackLoopEndSet = !trackLoopEndSet;
+        if (action === "clear-loop") {
+          trackLoopStartSet = false;
+          trackLoopEndSet = false;
+          document.getElementById("trackWholeLoop").checked = false;
+          document.querySelectorAll('[data-looper-action="loop-start"], [data-looper-action="loop-end"]').forEach(candidate => candidate.classList.remove("active"));
+        }
+        if (["loop-start", "loop-end", "clear-loop"].includes(action)) {
           buildLooperWorkspace();
         }
-        button.classList.toggle("active");
+        if (action === "share") {
+          updateTrackSharingStatus(true);
+          button.textContent = "Shared Now";
+          window.setTimeout(() => {
+            button.textContent = "Share with Jam Now";
+            updateTrackSharingStatus(false);
+          }, 1600);
+        }
+        if (action === "export") {
+          document.getElementById("trackOutputStatus").textContent = "Export dialogue opened for the current arrangement";
+        }
+        if (!["clear-loop", "export", "share", "arrangement"].includes(action)) button.classList.toggle("active");
       });
     });
+    document.getElementById("trackLaunchSection").addEventListener("click", () => {
+      queuedTrackSection = activeTrackSection;
+      updateTrackSectionMeta();
+      window.setTimeout(() => {
+        playingTrackSection = queuedTrackSection || activeTrackSection;
+        queuedTrackSection = "";
+        updateTrackSectionMeta();
+        document.querySelector(".looper-launch .preview-title").textContent = `Backing tracks / Section ${playingTrackSection}`;
+      }, 700);
+    });
+    document.querySelectorAll("[data-add-track]").forEach(button => {
+      button.addEventListener("click", () => addMockTrack(button.dataset.addTrack));
+    });
+    document.getElementById("recordSource").addEventListener("change", updateRecordSourcePanels);
+    document.getElementById("cancelRecordSetup").addEventListener("click", closeRecordingSetup);
+    document.getElementById("recordSetupOverlay").addEventListener("click", event => {
+      if (event.target === event.currentTarget) closeRecordingSetup();
+    });
+    document.getElementById("confirmRecordSetup").addEventListener("click", () => {
+      if (pendingArmLane < 0 || !looperLanes[pendingArmLane]) return;
+      looperCaptureSources[pendingArmLane] = document.getElementById("recordSource").value;
+      armedLooperLane = pendingArmLane;
+      recordingLooperLane = -1;
+      selectedLooperLane = pendingArmLane;
+      closeRecordingSetup();
+      updateRecordingContext();
+      buildLooperWorkspace();
+    });
+    document.getElementById("changeRecordingSource").addEventListener("click", () => {
+      if (armedLooperLane >= 0) openRecordingSetup(armedLooperLane);
+    });
+    document.getElementById("trackRecordAction").addEventListener("click", () => {
+      if (recordingPhase === "idle") scheduleRecordingStart();
+      else cancelOrStopRecording();
+    });
+    document.getElementById("trackWholeLoop").addEventListener("change", buildLooperWorkspace);
+    document.getElementById("trackGridLock").addEventListener("change", buildLooperWorkspace);
+    document.getElementById("trackSyncControls").addEventListener("change", () => updateTrackSharingStatus(false));
+    ["trackSpeed", "trackPitch", "trackFocusEnabled", "trackFocusPreset", "trackFocusFrequency"].forEach(id => {
+      document.getElementById(id).addEventListener("input", updateListeningTools);
+      document.getElementById(id).addEventListener("change", updateListeningTools);
+    });
+    document.querySelectorAll("[data-listening-reset]").forEach(button => {
+      button.addEventListener("click", () => {
+        if (button.dataset.listeningReset === "speed") document.getElementById("trackSpeed").value = 100;
+        if (button.dataset.listeningReset === "pitch") document.getElementById("trackPitch").value = 0;
+        if (button.dataset.listeningReset === "focus") document.getElementById("trackFocusEnabled").checked = false;
+        updateListeningTools();
+      });
+    });
+    updateListeningTools();
+    updateTrackSharingStatus();
+    updateRecordingContext();
     document.getElementById("playButton").addEventListener("click", event => {
       playing = !playing;
+      if (playing) {
+        performanceBeatStartedAt = performance.now();
+        performanceBeatStrength = step === 0 ? 1 : .66;
+      }
       event.currentTarget.textContent = playing ? "Ⅱ" : "▶";
       event.currentTarget.setAttribute("aria-label", playing ? "Pause" : "Play");
       updateMetronomeCursor();
@@ -4148,12 +5199,20 @@
     scheduleMetronomeTick();
     renderActivity();
     resizeNebula();
-    window.addEventListener("resize", resizeNebula);
+    resizePerformanceFx();
+    window.addEventListener("resize", () => {
+      resizeNebula();
+      resizePerformanceFx();
+    });
     requestAnimationFrame(renderNebula);
     setInterval(renderActivity, 100);
     setInterval(() => {
       if (!playing) return;
       step = (step + 1) % 16;
+      if (step % 4 === 0) {
+        performanceBeatStartedAt = performance.now();
+        performanceBeatStrength = step === 0 ? 1 : .66;
+      }
       if (step === 0) {
         songBar = songBar >= bankLength() ? 1 : songBar + 1;
         buildBeatPreview();
@@ -4211,7 +5270,41 @@
       buildMetronomePattern();
       scheduleMetronomeTick();
     }
+    if (params.has("timelineBars")) {
+      timelineBars = Math.max(1, Math.min(256, Number(params.get("timelineBars")) || 8));
+    }
+    if (/^[A-D]$/.test(params.get("viewSection") || "")) {
+      activeTrackSection = params.get("viewSection");
+      activeMockBank = activeTrackSection.charCodeAt(0) - 65;
+    }
+    if (/^[A-D]$/.test(params.get("playingSection") || "")) {
+      playingTrackSection = params.get("playingSection");
+    }
+    if (params.has("viewSection") || params.has("playingSection") || params.has("timelineBars")) {
+      updateTrackSectionMeta();
+      buildLooperWorkspace();
+    }
     if (["chords", "beats", "lyrics", "metronome", "looper"].includes(params.get("panel"))) openDetail(params.get("panel"));
+    const previewRecordPhase = ["waiting", "countin", "recording"].includes(params.get("recordPhase"))
+      ? params.get("recordPhase") : params.get("recording") === "1" ? "recording" : "idle";
+    if (params.get("armLocal") === "1" || previewRecordPhase !== "idle") {
+      armedLooperLane = 0;
+      looperCaptureSources[0] = "input";
+      recordingPhase = previewRecordPhase;
+      if (previewRecordPhase === "countin") {
+        countInBeat = Math.max(1, Math.min(4, Number(params.get("countBeat")) || 2));
+        countInTotalBeats = 4;
+      }
+      if (previewRecordPhase === "recording") {
+        recordingLooperLane = 0;
+        remoteRecording.state = "recording";
+        playing = true;
+        document.getElementById("playButton").textContent = "Ⅱ";
+      }
+      updateRecordingContext();
+      buildLooperWorkspace();
+    }
+    if (params.get("recordSetup") === "1") openRecordingSetup(0);
     if (params.get("data") === "1") setDataDrawer(true);
     if (params.get("event") === "nova" || params.get("event") === "star") spawnCosmicEvent(params.get("event"), true);
   </script>

@@ -1665,14 +1665,17 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     std::memory_order_relaxed);
 
                 commands.state.transport_pending.store(true, std::memory_order_relaxed);
-                commands.state.transport_network_revision.store(
-                    runtime_host.nextTransportEventId(),
-                    std::memory_order_relaxed);
-                commands.state.transport_network_target_raw_frame.store(command.transport_target_frame, std::memory_order_relaxed);
-                commands.state.transport_network_action.store(
-
-                    commands.state.transport_action.load(std::memory_order_relaxed),
-                    std::memory_order_relaxed);
+                if (!command.transport_local_only) {
+                    commands.state.transport_network_revision.store(
+                        runtime_host.nextTransportEventId(),
+                        std::memory_order_relaxed);
+                    commands.state.transport_network_target_raw_frame.store(
+                        command.transport_target_frame,
+                        std::memory_order_relaxed);
+                    commands.state.transport_network_action.store(
+                        commands.state.transport_action.load(std::memory_order_relaxed),
+                        std::memory_order_relaxed);
+                }
                 break;
             }
             default:
@@ -3034,9 +3037,19 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         }
         const bool sending_track_transport = jam2::is_track_sync_transport_action(
             static_cast<jam2::EngineTransportAction>(transport_action));
-        const bool may_send_transport = sending_track_transport
-            ? runtime_host.track_sync_enabled.load(std::memory_order_acquire)
-            : authority.localIsArrangementAuthority();
+        const bool recording_isolated =
+            runtime_host.lane_recording_isolation_enabled.load(
+                std::memory_order_acquire);
+        const bool isolation_allows_transport = !recording_isolated ||
+            static_cast<jam2::EngineTransportAction>(transport_action) ==
+                jam2::EngineTransportAction::RecordStart;
+        const bool may_send_transport = isolation_allows_transport &&
+            (sending_track_transport
+            ? jam2::transport_sync_enabled(
+                static_cast<jam2::EngineTransportAction>(transport_action),
+                runtime_host.track_sync_enabled.load(std::memory_order_acquire),
+                runtime_host.recording_sync_enabled.load(std::memory_order_acquire))
+            : authority.localIsArrangementAuthority());
         if (may_send_transport &&
             authority.grid().revision <= (std::numeric_limits<std::uint32_t>::max)() &&
             sending_transport_revision != 0 &&
@@ -3193,6 +3206,12 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     const MetronomePayload metronome = decode_metronome_payload(payload);
                     const int remote_abs_bpm = std::abs(metronome.bpm);
                     if (remote_abs_bpm <= 0 || remote_abs_bpm > 400) {
+                        ++peer.ignored_packets;
+                        continue;
+                    }
+                    if (runtime_host.lane_recording_isolation_enabled.load(
+                            std::memory_order_acquire) &&
+                        metronome.kind != GridMessageKind::PeerPhase) {
                         ++peer.ignored_packets;
                         continue;
                     }
@@ -3359,8 +3378,14 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                     const TransportPayload transport = decode_transport_payload(payload);
                     const bool track_transport =
                         jam2::is_track_sync_transport_action(transport.action);
-                    const bool accept_track_transport =
-                        runtime_host.track_sync_enabled.load(std::memory_order_acquire);
+                    const bool accept_track_transport = jam2::transport_sync_enabled(
+                        transport.action,
+                        runtime_host.track_sync_enabled.load(std::memory_order_acquire),
+                        runtime_host.recording_sync_enabled.load(std::memory_order_acquire));
+                    const bool recording_isolated =
+                        runtime_host.lane_recording_isolation_enabled.load(
+                            std::memory_order_acquire);
+                    const bool accept_during_recording = !recording_isolated;
                     const bool track_transport_ready =
                         !track_transport || !accept_track_transport ||
                         (peer.recv_pongs > 0 &&
@@ -3387,10 +3412,12 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         mesh_transport_source_frame = header.timing_value;
                         mesh_transport_requested_target_frame = transport.target_sender_frame;
                     }
-                    if (track_transport && accepted_transport && !accept_track_transport) {
+                    if (track_transport && accepted_transport &&
+                        (!accept_track_transport || !accept_during_recording)) {
                         ++peer.ignored_packets;
                     }
                     if (track_transport && accept_track_transport &&
+                        accept_during_recording &&
                         accepted_transport &&
                         peer.recv_pongs > 0 &&
                         peer_stream.stats().rtt_min_us > 0 &&

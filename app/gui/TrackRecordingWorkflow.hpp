@@ -84,15 +84,20 @@ public:
         bool enabled,
         std::uint64_t startFrame = 0,
         std::uint64_t endFrame = 0) noexcept;
-    bool restartPrepared(const PlaybackGrid::Position& position) noexcept;
-    bool restartGlobalTransport(const PlaybackGrid::Position& position) noexcept;
+    bool restartPrepared(
+        const PlaybackGrid::Position& position,
+        bool localOnly = false) noexcept;
+    bool restartGlobalTransport(
+        const PlaybackGrid::Position& position,
+        bool localOnly = false) noexcept;
     bool scheduleBankRestart(
         std::uint64_t targetFrame,
         std::uint64_t musicalFrame,
         bool preparedAvailable) noexcept;
     bool stopPrepared(
         std::uint64_t targetFrame,
-        std::uint64_t musicalFrame) noexcept;
+        std::uint64_t musicalFrame,
+        bool localOnly = false) noexcept;
     void noteManualPreparedSeek(qint64 sourceFrame, qint64 engineFrame) noexcept;
     void notePreparedAttachScheduled(std::uint64_t targetFrame) noexcept;
     void cancelPreparedAttach() noexcept;
@@ -119,7 +124,24 @@ public:
         int beatsPerBar,
         bool includePrepared,
         bool includeMetronome,
+        bool transportLocalOnly,
         QString& error);
+    bool startInputTakeAtSchedule(
+        const QString& outputPath,
+        bool transientOutput,
+        int expectedSampleRate,
+        std::uint64_t countdownStartFrame,
+        std::uint64_t targetFrame,
+        std::uint64_t targetMusicalFrame,
+        std::uint64_t durationFrames,
+        bool includePrepared,
+        bool includeMetronome,
+        QString& error);
+    bool scheduleRecordingTransport(
+        std::uint64_t countdownStartFrame,
+        std::uint64_t targetFrame,
+        std::uint64_t targetMusicalFrame,
+        bool localOnly = false) noexcept;
     bool stopInputTake(std::uint64_t targetFrame) noexcept;
     TrackTakeCompletion consumeTrackTakeEvent(const jam2::EngineEvent& event);
 
@@ -175,6 +197,11 @@ public:
     std::uint64_t globalTransportStartFrame() const noexcept {
         return global_transport_start_frame_;
     }
+    std::uint64_t globalTransportTimelineStartFrame() const noexcept {
+        return pending_global_transport_start_frame_ > 0
+            ? pending_global_transport_start_frame_
+            : global_transport_start_frame_;
+    }
     std::uint64_t preparedActualStartFrame() const noexcept {
         return prepared_actual_start_frame_;
     }
@@ -193,7 +220,8 @@ public:
 private:
     bool scheduleGlobalTransportStart(
         std::uint64_t targetFrame,
-        std::uint64_t musicalFrame) noexcept;
+        std::uint64_t musicalFrame,
+        bool localOnly = false) noexcept;
     void clearGlobalTransport() noexcept;
     bool submit(jam2::EngineCommand command) noexcept;
     bool armTrackTake(
@@ -209,6 +237,7 @@ private:
         std::uint64_t durationFrames,
         const PlaybackGrid::Position& position,
         int beatsPerBar,
+        bool transportLocalOnly,
         QString& error) noexcept;
 
     ApplicationRuntime& runtime_;

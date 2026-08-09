@@ -85,7 +85,9 @@ void GuiControlMessageRouter::dispatch(
     } else if (type == QStringLiteral("looper.track.batch.offer")) {
         if (handlers.trackBatchOffer) handlers.trackBatchOffer(message, sourcePeerToken);
     } else if (type == QStringLiteral("looper.track.batch.complete")) {
-        if (handlers.trackBatchComplete) handlers.trackBatchComplete(message);
+        if (handlers.trackBatchComplete) handlers.trackBatchComplete(message, sourcePeerToken);
+    } else if (type == QStringLiteral("looper.recording.state")) {
+        if (handlers.recordingState) handlers.recordingState(message, sourcePeerToken);
     } else if (type == QStringLiteral("looper.asset.request")) {
         if (handlers.assetTransfer) handlers.assetTransfer->handleRequest(message, sourcePeerToken);
     } else if (type == QStringLiteral("looper.asset.start")) {

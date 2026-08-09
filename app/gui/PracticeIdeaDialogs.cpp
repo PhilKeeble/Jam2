@@ -265,13 +265,8 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(
     auto* layout = new QVBoxLayout(&dialog);
     auto* description = new QLabel(
         QStringLiteral(
-            "Creates a full arrangement or replaces only its pitched or drum parts. Generation starts "
-            "with a random compatible meter. The target section's current meter is marked in the list when you want to keep it explicitly. "
-            "Partial generation starts with the target section's current tempo as an exact override; untick Use exact BPM to choose from the style's tempo range. "
-            "Untouched sections inherit Section A's timing. Partial generation also starts with the current section length. "
-            "Choose a meter while leaving Style random to generate from any style that supports it. "
-            "Form, scale, production, and other relationships are chosen automatically from the compatible profile. "
-            "Complexity unlocks musical tools without forcing every tool into the result."),
+            "Create a complete arrangement, or replace only the pitched or drum parts in the selected Section. "
+            "Choose the musical direction below, or leave options on Random for Jam2 to select compatible settings automatically."),
         &dialog);
     description->setWordWrap(true);
     layout->addWidget(description);
@@ -364,21 +359,21 @@ std::optional<ReferenceRenderSettings> askForReferenceRender(
 {
     QDialog dialog(parent);
     dialog.setWindowTitle(QStringLiteral("Generate Reference WAVs"));
-    auto* chords = new QCheckBox(QStringLiteral("Chord reference"), &dialog);
-    chords->setChecked(defaults.renderChords && chordBeats > 0);
-    chords->setEnabled(chordBeats > 0);
     auto* drums = new QCheckBox(QStringLiteral("Drum reference"), &dialog);
     drums->setChecked(defaults.renderDrums && beatBeats > 0);
     drums->setEnabled(beatBeats > 0);
-    auto* melody = new QCheckBox(QStringLiteral("Melody reference"), &dialog);
-    melody->setChecked(defaults.renderMelody && melodyBeats > 0);
-    melody->setEnabled(melodyBeats > 0);
+    auto* chords = new QCheckBox(QStringLiteral("Chord reference"), &dialog);
+    chords->setChecked(defaults.renderChords && chordBeats > 0);
+    chords->setEnabled(chordBeats > 0);
     auto* bass = new QCheckBox(QStringLiteral("Bass reference"), &dialog);
     bass->setChecked(defaults.renderBass && bassBeats > 0);
     bass->setEnabled(bassBeats > 0);
-    auto* support = new QCheckBox(QStringLiteral("Supporting-line reference"), &dialog);
+    auto* support = new QCheckBox(QStringLiteral("Supporting line reference"), &dialog);
     support->setChecked(defaults.renderSupport && supportBeats > 0);
     support->setEnabled(supportBeats > 0);
+    auto* melody = new QCheckBox(QStringLiteral("Melody reference"), &dialog);
+    melody->setChecked(defaults.renderMelody && melodyBeats > 0);
+    melody->setEnabled(melodyBeats > 0);
     auto* voicing = new QComboBox(&dialog);
     voicing->addItem(QStringLiteral("Style default"), static_cast<int>(ChordVoicing::StyleDefault));
     voicing->addItem(QStringLiteral("Close"), static_cast<int>(ChordVoicing::Close));
@@ -419,11 +414,11 @@ std::optional<ReferenceRenderSettings> askForReferenceRender(
                 .arg(seconds, 0, 'f', 2).arg(frames),
         &dialog);
     auto* form = new QFormLayout();
-    form->addRow(QStringLiteral("Layers"), chords);
-    form->addRow(QString(), drums);
-    form->addRow(QString(), melody);
+    form->addRow(QStringLiteral("Layers"), drums);
+    form->addRow(QString(), chords);
     form->addRow(QString(), bass);
     form->addRow(QString(), support);
+    form->addRow(QString(), melody);
     form->addRow(QStringLiteral("Voicing"), voicing);
     form->addRow(QStringLiteral("Drum Kit"), drumKit);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);

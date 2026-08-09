@@ -374,6 +374,55 @@ void BeatGridModel::resizeSection(int sectionIndex, int beats)
     ++revision_;
 }
 
+int BeatGridModel::occupiedBeatCount(int sectionIndex) const
+{
+    if (sectionIndex < 0 || sectionIndex >= sections_.size()) {
+        return 0;
+    }
+    const SongSection& section = sections_.at(sectionIndex);
+    const auto textOccupied = [](const QString& value) {
+        const QString trimmed = value.trimmed();
+        return !trimmed.isEmpty() && trimmed != QStringLiteral("-") &&
+            trimmed != QStringLiteral("~");
+    };
+    const auto drumPatternOccupied = [](const BeatPattern& pattern) {
+        for (const QString& lane : pattern.lanes) {
+            for (const QChar state : lane) {
+                if (!state.isSpace() && state != QLatin1Char('.') &&
+                    state != QLatin1Char('-')) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    const auto musicalPatternOccupied = [](const MusicalBeatPattern& pattern) {
+        const auto laneOccupied = [](const QVector<MusicalStep>& lane) {
+            return std::any_of(
+                lane.cbegin(), lane.cend(), [](const MusicalStep& step) {
+                    return step.state == MusicalStepState::Onset ||
+                        !step.value.trimmed().isEmpty();
+                });
+        };
+        return laneOccupied(pattern.chords) || laneOccupied(pattern.melody) ||
+            laneOccupied(pattern.bass) || laneOccupied(pattern.support);
+    };
+
+    for (int beat = section.beats - 1; beat >= 0; --beat) {
+        if (textOccupied(section.chords.value(beat)) ||
+            textOccupied(section.targets.value(beat)) ||
+            textOccupied(section.beatNotes.value(beat)) ||
+            textOccupied(section.lyrics.value(beat)) ||
+            (beat < section.beatPatterns.size() &&
+             drumPatternOccupied(section.beatPatterns.at(beat))) ||
+            (beat < section.musicalPatterns.size() &&
+             musicalPatternOccupied(section.musicalPatterns.at(beat)))) {
+            return beat + 1;
+        }
+    }
+    return 0;
+}
+
 void BeatGridModel::resizeAllSections(int beats)
 {
     const int clampedBeats = qBound(kMinBeatsPerSection, beats, kMaxBeatsPerSection);

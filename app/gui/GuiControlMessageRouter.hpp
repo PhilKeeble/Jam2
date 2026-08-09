@@ -20,7 +20,8 @@ public:
         std::function<void(const QJsonObject&, const QString&)> songSet;
         std::function<void(const QJsonObject&)> shareLocalTracks;
         std::function<void(const QJsonObject&, const QString&)> trackBatchOffer;
-        std::function<void(const QJsonObject&)> trackBatchComplete;
+        std::function<void(const QJsonObject&, const QString&)> trackBatchComplete;
+        std::function<void(const QJsonObject&, const QString&)> recordingState;
         AssetTransferService* assetTransfer = nullptr;
     };
 

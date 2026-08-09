@@ -61,6 +61,17 @@ inline constexpr bool is_track_sync_transport_action(
         action == EngineTransportAction::RecordStart;
 }
 
+inline constexpr bool transport_sync_enabled(
+    EngineTransportAction action,
+    bool track_sync_enabled,
+    bool recording_sync_enabled) noexcept
+{
+    if (action == EngineTransportAction::RecordStart) {
+        return recording_sync_enabled;
+    }
+    return !is_track_sync_transport_action(action) || track_sync_enabled;
+}
+
 // Validated once by Engine::start and then retained unchanged for the lifetime
 // of the running local engine. Session/network configuration intentionally does
 // not belong here.
@@ -144,6 +155,9 @@ struct EngineCommand {
     std::int64_t signed_value = 0;
     std::int32_t value = 0;
     bool enabled = false;
+    // Local transport adoption/reconciliation must update the engine and GUI
+    // without originating a second mesh event.
+    bool transport_local_only = false;
     EngineTransportAction transport_action = EngineTransportAction::None;
     std::uint64_t transport_target_frame = 0;
     std::uint64_t transport_musical_frame = 0;

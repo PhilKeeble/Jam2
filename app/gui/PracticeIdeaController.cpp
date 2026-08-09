@@ -115,6 +115,7 @@ void upsert(
     lane.assetHash = wav.sha256;
     lane.sampleRate = settings.sampleRate;
     lane.sampleRateCompatible = true;
+    lane.sourceFrames = wav.frames;
     lane.startFrame = 0;
     lane.stopFrame = wav.frames;
     lane.loopStartFrame = 0;
@@ -125,6 +126,7 @@ void upsert(
     lane.referenceBpm = settings.bpm;
     lane.referenceStale = false;
     lane.localOnly = true;
+    lane.originKind = QStringLiteral("generated");
     if (index >= 0) lanes[index] = std::move(lane);
     else lanes.push_back(std::move(lane));
 }

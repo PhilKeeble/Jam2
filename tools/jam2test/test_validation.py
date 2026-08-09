@@ -9,6 +9,7 @@ from jam2test.validation import (
     _csv_full_mesh_contract,
     _listener_compensation_contract,
     _mesh_edge_summaries,
+    _section_timeline_boundary_contract,
     _startup_events,
 )
 
@@ -102,6 +103,42 @@ class ValidationReportingTests(unittest.TestCase):
         result = _listener_compensation_contract(csv_summary, audio, 3)
         self.assertFalse(result["ok"])
         self.assertFalse(result["checks"]["all_remote_peers_averaged"])
+
+    def test_section_timeline_contract_requires_extension_trim_pagination_and_loop_cases(self):
+        names = {
+            "section-timeline.long-recording-and-moved-wav-round-to-bars",
+            "section-timeline.rendered-frame-rounding-does-not-add-empty-bar",
+            "section-overview.pagination-is-contained-to-thirty-two-bars",
+            "section-shrink.one-bar-override-crops-wavs-and-musical-content",
+            "section-trim.custom-chords-and-beats-set-safe-content-end",
+            "section-timeline.resize-preserves-custom-chord-and-beat-bars",
+            "prepared-mix.long-empty-recording-extends-loop-without-repeating-generated-wav",
+            "prepared-mix.bad-lane-does-not-silence-valid-lanes",
+            "track-share.duration-and-placement-metadata-is-bounded",
+            "track-sync.authoritative-removal-converges-and-keeps-local-mix",
+            "track-sync.concurrent-metadata-three-way-merge-preserves-nonconflicts",
+            "project.startup-removes-stale-asset-partials-only",
+        }
+        passing = {"cases": [{"name": name, "ok": True} for name in names]}
+        self.assertTrue(_section_timeline_boundary_contract(passing)["ok"])
+        self.assertTrue(
+            _section_timeline_boundary_contract({"result": passing})["ok"])
+
+        missing = {"cases": [{"name": name, "ok": True} for name in names if "pagination" not in name]}
+        result = _section_timeline_boundary_contract(missing)
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["missing"],
+            ["section-overview.pagination-is-contained-to-thirty-two-bars"],
+        )
+
+        failing = {"cases": [{"name": name, "ok": "trim" not in name} for name in names]}
+        result = _section_timeline_boundary_contract(failing)
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["failed"],
+            ["section-trim.custom-chords-and-beats-set-safe-content-end"],
+        )
 
 
 if __name__ == "__main__":

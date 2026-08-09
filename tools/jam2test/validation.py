@@ -28,6 +28,7 @@ from .audio_analysis import (
 from .manifest import InvocationManifest
 from .metrics import summarize_csv
 from .native import NativeCapabilities, ReactiveProcess, native_manifest, run_logged, write_scenario
+from .jam_sync import GeneratedIdeaSync, JamSyncPolicy
 from .results import (
     METRONOME_WAV_TOLERANCE_FRAMES,
     analyze_listener_compensated_pulse_side,
@@ -55,6 +56,36 @@ ACTION_CASES = {
     "snapshot": "runtime-controls",
     "shutdown": "clean-control",
 }
+
+SECTION_TIMELINE_BOUNDARY_CASES = {
+    "section-timeline.long-recording-and-moved-wav-round-to-bars",
+    "section-timeline.rendered-frame-rounding-does-not-add-empty-bar",
+    "section-overview.pagination-is-contained-to-thirty-two-bars",
+    "section-shrink.one-bar-override-crops-wavs-and-musical-content",
+    "section-trim.custom-chords-and-beats-set-safe-content-end",
+    "section-timeline.resize-preserves-custom-chord-and-beat-bars",
+    "prepared-mix.long-empty-recording-extends-loop-without-repeating-generated-wav",
+    "prepared-mix.bad-lane-does-not-silence-valid-lanes",
+    "track-share.duration-and-placement-metadata-is-bounded",
+    "track-sync.authoritative-removal-converges-and-keeps-local-mix",
+    "track-sync.concurrent-metadata-three-way-merge-preserves-nonconflicts",
+    "project.startup-removes-stale-asset-partials-only",
+}
+
+
+def _section_timeline_boundary_contract(native: dict[str, Any]) -> dict[str, Any]:
+    boundary_result = native.get("result", native)
+    cases = {
+        item.get("name"): bool(item.get("ok"))
+        for item in boundary_result.get("cases", [])
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    missing = sorted(SECTION_TIMELINE_BOUNDARY_CASES - set(cases))
+    failed = sorted(
+        name for name in SECTION_TIMELINE_BOUNDARY_CASES
+        if name in cases and not cases[name]
+    )
+    return {"ok": not missing and not failed, "missing": missing, "failed": failed}
 
 
 class ValidationReporter:
@@ -284,13 +315,18 @@ def _run_focused(jam2: Path, invocation: InvocationArtifacts, manifest: Invocati
             }
         scenario_path = root / "scenario.json"
         write_scenario(scenario_path, scenario)
+        timeout = 120 if operation == "validate.boundaries" else 60
         result = run_logged(
             [str(jam2), "debug", "run", str(scenario_path)],
-            root / "stdout.log", root / "stderr.log", timeout=60,
+            root / "stdout.log", root / "stderr.log", timeout=timeout,
         )
         try:
             native = native_manifest(root)
             passed = result["return_code"] == 0 and native.get("ok") is True
+            if operation == "validate.boundaries":
+                timeline_contract = _section_timeline_boundary_contract(native)
+                native["section_timeline_contract"] = timeline_contract
+                passed &= timeline_contract["ok"]
         except Exception as error:
             native = {"error": str(error)}
             passed = False
@@ -444,9 +480,11 @@ def _keyed_value(key: bytes, domain: bytes, transcript: bytes) -> bytes:
     return hmac.new(key, _protocol_field(domain) + transcript, hashlib.sha256).digest()
 
 
-def _authenticated_body(message: dict[str, Any], key: bytes, sequence: int) -> bytes:
+def _authenticated_body(
+    message: dict[str, Any], key: bytes, sequence: int, protocol_version: int
+) -> bytes:
     payload = json.dumps(message, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    body = b"\x02\x01\x00\x00" + struct.pack(">Q", sequence) + (b"\x00" * 16) + payload
+    body = bytes((protocol_version, 1, 0, 0)) + struct.pack(">Q", sequence) + (b"\x00" * 16) + payload
     tag = hmac.new(key, body, hashlib.sha256).digest()[:16]
     return body[:12] + tag + body[28:]
 
@@ -457,24 +495,28 @@ def _authenticate_fragmented(
     key_hex: str,
     peer_token: str,
     udp_endpoint: str,
-) -> bytes:
+) -> tuple[bytes, int]:
     challenge = json.loads(_recv_control_frame(connection).decode("utf-8"))
     server_nonce = bytes.fromhex(challenge["server_nonce"])
+    protocol_version = int(challenge["version"])
     client_nonce = bytes.fromhex("10" * 16)
+    channel = b"control"
     transcript = (
         b"jam2-control-v2" +
         _protocol_field(session_hex.encode("ascii")) +
         _protocol_field(server_nonce) +
         _protocol_field(client_nonce) +
         _protocol_field(peer_token.encode("utf-8")) +
-        _protocol_field(udp_endpoint.encode("utf-8"))
+        _protocol_field(udp_endpoint.encode("utf-8")) +
+        _protocol_field(channel)
     )
     master_key = bytes.fromhex(key_hex)
     proof = _keyed_value(master_key, b"jam2-control-client-proof", transcript)[:16]
     hello = {
-        "type": "hello.proof", "version": 2, "session": session_hex,
+        "type": "hello.proof", "version": protocol_version, "session": session_hex,
         "client_nonce": client_nonce.hex(), "peer_token": peer_token,
-        "udp_endpoint": udp_endpoint, "proof": proof.hex(),
+        "udp_endpoint": udp_endpoint, "channel": channel.decode("ascii"),
+        "proof": proof.hex(),
     }
     _send_fragmented(
         connection,
@@ -485,7 +527,7 @@ def _authenticate_fragmented(
         master_key, b"jam2-control-server-proof", transcript)[:16].hex()
     if response.get("type") != "hello.ok" or response.get("proof") != expected_server_proof:
         raise RuntimeError("fragmented control authentication did not produce a valid server proof")
-    return _keyed_value(master_key, b"jam2-control-c2s", transcript)
+    return _keyed_value(master_key, b"jam2-control-c2s", transcript), protocol_version
 
 
 def _run_real_process_control_hardening(
@@ -530,7 +572,20 @@ def _run_real_process_control_hardening(
         "gain_db": 0.0, "muted": False, "solo": False,
         "loop_enabled": True,
     })
+    jam_sync_policy = JamSyncPolicy(
+        auto_share_wavs=False,
+        generated_ideas=GeneratedIdeaSync.CHORDS,
+        metronome_state=True,
+    )
     corpus = [
+        jam_sync_policy.control_message("jam.sync.request"),
+        jam_sync_policy.control_message("jam.sync.set", revision=1),
+        {
+            **jam_sync_policy.control_message("jam.sync.request"),
+            "generated_ideas": "melody",
+        },
+        {"type": "jam.metronome.state.request", "enabled": True},
+        {"type": "jam.metronome.state.set", "enabled": True},
         {
             "type": "session.membership", "revision": 1,
             "page_index": 0, "page_count": 1,
@@ -590,17 +645,19 @@ def _run_real_process_control_hardening(
         if connection is None:
             raise RuntimeError("native coordinator did not open its TCP control listener")
         connection.settimeout(2)
-        c2s_key = _authenticate_fragmented(
+        c2s_key, protocol_version = _authenticate_fragmented(
             connection, session_hex, key_hex, peer_token, "127.0.0.1:41002")
         sequence = 1
         for message in corpus:
-            _send_fragmented(connection, _authenticated_body(message, c2s_key, sequence))
+            _send_fragmented(connection, _authenticated_body(
+                message, c2s_key, sequence, protocol_version))
             sequence += 1
         for index in range(48):
             _send_fragmented(
                 connection,
                 _authenticated_body(
-                    {"type": "unsupported.flood", "index": index}, c2s_key, sequence),
+                    {"type": "unsupported.flood", "index": index},
+                    c2s_key, sequence, protocol_version),
             )
             sequence += 1
         for _ in range(12):
@@ -612,7 +669,8 @@ def _run_real_process_control_hardening(
                 pass
         time.sleep(0.25)
         invalid_tag = bytearray(_authenticated_body(
-            {"type": "session.heartbeat.ack", "sequence": 1}, c2s_key, sequence))
+            {"type": "session.heartbeat.ack", "sequence": 1},
+            c2s_key, sequence, protocol_version))
         invalid_tag[12] ^= 0x01
         _send_fragmented(connection, bytes(invalid_tag))
         time.sleep(0.1)

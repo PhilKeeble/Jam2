@@ -206,7 +206,8 @@ bool TrackRecordingWorkflow::setPreparedLoop(
 }
 
 bool TrackRecordingWorkflow::restartPrepared(
-    const PlaybackGrid::Position& position) noexcept
+    const PlaybackGrid::Position& position,
+    bool localOnly) noexcept
 {
     const std::uint64_t target = jam2::gui::next_safe_grid_beat_raw_frame(position);
     if (target == 0) {
@@ -227,11 +228,13 @@ bool TrackRecordingWorkflow::restartPrepared(
     cancelPreparedAttach();
     return scheduleGlobalTransportStart(
         target,
-        musicalFrameFromRawFrame(target, position.renderOffsetFrames));
+        musicalFrameFromRawFrame(target, position.renderOffsetFrames),
+        localOnly);
 }
 
 bool TrackRecordingWorkflow::restartGlobalTransport(
-    const PlaybackGrid::Position& position) noexcept
+    const PlaybackGrid::Position& position,
+    bool localOnly) noexcept
 {
     const std::uint64_t target = jam2::gui::next_safe_grid_beat_raw_frame(position);
     if (target == 0) {
@@ -239,7 +242,8 @@ bool TrackRecordingWorkflow::restartGlobalTransport(
     }
     return scheduleGlobalTransportStart(
         target,
-        musicalFrameFromRawFrame(target, position.renderOffsetFrames));
+        musicalFrameFromRawFrame(target, position.renderOffsetFrames),
+        localOnly);
 }
 
 bool TrackRecordingWorkflow::scheduleBankRestart(
@@ -267,10 +271,12 @@ bool TrackRecordingWorkflow::scheduleBankRestart(
 
 bool TrackRecordingWorkflow::scheduleGlobalTransportStart(
     std::uint64_t targetFrame,
-    std::uint64_t musicalFrame) noexcept
+    std::uint64_t musicalFrame,
+    bool localOnly) noexcept
 {
     jam2::EngineCommand transport;
     transport.type = jam2::EngineCommandType::ScheduleTransport;
+    transport.transport_local_only = localOnly;
     transport.transport_action = jam2::EngineTransportAction::TrackRestart;
     transport.transport_target_frame = targetFrame;
     transport.transport_musical_frame = musicalFrame;
@@ -286,7 +292,8 @@ bool TrackRecordingWorkflow::scheduleGlobalTransportStart(
 
 bool TrackRecordingWorkflow::stopPrepared(
     std::uint64_t targetFrame,
-    std::uint64_t musicalFrame) noexcept
+    std::uint64_t musicalFrame,
+    bool localOnly) noexcept
 {
     // A bank change may already have queued a later seek/play. Invalidate that
     // generation first so a user Stop cannot be followed by the stale bank
@@ -305,6 +312,7 @@ bool TrackRecordingWorkflow::stopPrepared(
     cancelPreparedAttach();
     jam2::EngineCommand transport;
     transport.type = jam2::EngineCommandType::ScheduleTransport;
+    transport.transport_local_only = localOnly;
     transport.transport_action = jam2::EngineTransportAction::TrackStop;
     transport.transport_target_frame = targetFrame;
     transport.transport_musical_frame = musicalFrame;
@@ -508,6 +516,7 @@ bool TrackRecordingWorkflow::startTrackTakeQuantized(
     std::uint64_t durationFrames,
     const PlaybackGrid::Position& position,
     int beatsPerBar,
+    bool transportLocalOnly,
     QString& error) noexcept
 {
     if (!position.engineAnchored || !position.running || position.sampleRate <= 0) {
@@ -515,7 +524,13 @@ bool TrackRecordingWorkflow::startTrackTakeQuantized(
         return false;
     }
     const auto beats = static_cast<std::uint64_t>(qMax(1, beatsPerBar));
-    std::uint64_t nextBeat = position.absoluteBeat + 1ULL;
+    const std::uint64_t currentBar = position.absoluteBeat / beats;
+    if (currentBar == (std::numeric_limits<std::uint64_t>::max)() ||
+        currentBar + 1ULL > (std::numeric_limits<std::uint64_t>::max)() / beats) {
+        error = QStringLiteral("recording count-in target exceeds the engine clock range");
+        return false;
+    }
+    std::uint64_t nextBeat = (currentBar + 1ULL) * beats;
     const std::uint64_t beatFrames = static_cast<std::uint64_t>(std::llround(
         position.secondsPerBeat * static_cast<double>(position.sampleRate)));
     if (beatFrames == 0 || nextBeat >
@@ -524,19 +539,23 @@ bool TrackRecordingWorkflow::startTrackTakeQuantized(
         return false;
     }
     std::uint64_t countdownMusicalFrame = position.epochFrame + nextBeat * beatFrames;
-    const std::uint64_t safeNextBeat = jam2::gui::recording_count_in_start_beat(
-        position.absoluteBeat,
-        position.rawCurrentFrame,
-        rawFrameFromMusicalFrame(countdownMusicalFrame, position.renderOffsetFrames),
-        position.sampleRate);
-    if (safeNextBeat != nextBeat) {
-        if (safeNextBeat == (std::numeric_limits<std::uint64_t>::max)() ||
-            safeNextBeat >
+    const std::uint64_t minimumLeadFrames = static_cast<std::uint64_t>(
+        qMax(1, position.sampleRate) / 5);
+    const std::uint64_t minimumCountdownRawFrame =
+        position.rawCurrentFrame >
+            (std::numeric_limits<std::uint64_t>::max)() - minimumLeadFrames
+        ? (std::numeric_limits<std::uint64_t>::max)()
+        : position.rawCurrentFrame + minimumLeadFrames;
+    const std::uint64_t countdownRawFrame = rawFrameFromMusicalFrame(
+        countdownMusicalFrame, position.renderOffsetFrames);
+    if (countdownRawFrame < minimumCountdownRawFrame) {
+        if (nextBeat > (std::numeric_limits<std::uint64_t>::max)() - beats ||
+            nextBeat + beats >
                 ((std::numeric_limits<std::uint64_t>::max)() - position.epochFrame) / beatFrames) {
             error = QStringLiteral("recording count-in target exceeds the engine clock range");
             return false;
         }
-        nextBeat = safeNextBeat;
+        nextBeat += beats;
         countdownMusicalFrame = position.epochFrame + nextBeat * beatFrames;
     }
     const std::uint64_t countInBeats = static_cast<std::uint64_t>(qMax(0, countInBars)) * beats;
@@ -570,6 +589,7 @@ bool TrackRecordingWorkflow::startTrackTakeQuantized(
     }
     jam2::EngineCommand transport;
     transport.type = jam2::EngineCommandType::ScheduleTransport;
+    transport.transport_local_only = transportLocalOnly;
     transport.transport_action = jam2::EngineTransportAction::RecordStart;
     transport.transport_target_frame = target;
     transport.transport_musical_frame = targetMusicalFrame;
@@ -594,6 +614,7 @@ bool TrackRecordingWorkflow::startInputTake(
     int beatsPerBar,
     bool includePrepared,
     bool includeMetronome,
+    bool transportLocalOnly,
     QString& error)
 {
     if (input_take_active_) {
@@ -619,7 +640,13 @@ bool TrackRecordingWorkflow::startInputTake(
         return false;
     }
     const bool started = countInBars
-        ? startTrackTakeQuantized(*countInBars, durationFrames, position, beatsPerBar, error)
+        ? startTrackTakeQuantized(
+            *countInBars,
+            durationFrames,
+            position,
+            beatsPerBar,
+            transportLocalOnly,
+            error)
         : startTrackTake(targetFrame, durationFrames);
     if (!started) {
         if (error.isEmpty()) {
@@ -637,6 +664,114 @@ bool TrackRecordingWorkflow::startInputTake(
         recording_start_frame_ = targetFrame;
     }
     return true;
+}
+
+bool TrackRecordingWorkflow::startInputTakeAtSchedule(
+    const QString& outputPath,
+    bool transientOutput,
+    int expectedSampleRate,
+    std::uint64_t countdownStartFrame,
+    std::uint64_t targetFrame,
+    std::uint64_t targetMusicalFrame,
+    std::uint64_t durationFrames,
+    bool includePrepared,
+    bool includeMetronome,
+    QString& error)
+{
+    if (input_take_active_) {
+        error = QStringLiteral("an input take is already active");
+        return false;
+    }
+    const jam2::EngineSnapshot engine = runtime_.engineSnapshot();
+    if (!jam2::gui::sample_rate_matches_engine(
+            expectedSampleRate, engine.sample_rate)) {
+        error = QStringLiteral(
+            "recording target is %1 Hz but the active engine is %2 Hz")
+            .arg(expectedSampleRate)
+            .arg(engine.sample_rate, 0, 'f', 0);
+        return false;
+    }
+    if (targetFrame == 0 || countdownStartFrame > targetFrame) {
+        error = QStringLiteral("shared recording schedule is invalid");
+        return false;
+    }
+    const QString takeId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    if (!armTrackTake(
+            takeId,
+            QDir::toNativeSeparators(outputPath),
+            includePrepared,
+            includeMetronome)) {
+        error = QStringLiteral(
+            "track take id/output is too long or the engine command queue is unavailable");
+        return false;
+    }
+    jam2::EngineCommand seek;
+    seek.type = jam2::EngineCommandType::PreparedSeek;
+    seek.frame = targetFrame;
+    if (!submit(seek)) {
+        error = QStringLiteral(
+            "engine command queue unavailable while scheduling shared track reset");
+        return false;
+    }
+    jam2::EngineCommand play;
+    play.type = jam2::EngineCommandType::PreparedPlay;
+    play.frame = targetFrame;
+    if (!submit(play)) {
+        error = QStringLiteral(
+            "engine command queue unavailable while scheduling shared track playback");
+        return false;
+    }
+    if (!startTrackTake(targetFrame, durationFrames)) {
+        error = QStringLiteral(
+            "engine command queue unavailable while scheduling the shared recording take");
+        return false;
+    }
+    jam2::EngineCommand localTransport;
+    localTransport.type = jam2::EngineCommandType::ScheduleTransport;
+    localTransport.transport_local_only = true;
+    localTransport.transport_action = jam2::EngineTransportAction::RecordStart;
+    localTransport.transport_target_frame = targetFrame;
+    localTransport.transport_musical_frame = targetMusicalFrame;
+    localTransport.transport_countdown_start_frame = countdownStartFrame;
+    if (!submit(localTransport)) {
+        error = QStringLiteral(
+            "engine command queue unavailable while adopting the shared recording schedule");
+        return false;
+    }
+    active_take_id_ = takeId;
+    active_take_sample_rate_ = expectedSampleRate;
+    last_capture_sample_rate_ = expectedSampleRate;
+    input_take_active_ = true;
+    last_capture_path_ = outputPath;
+    pending_transient_capture_path_ = transientOutput ? outputPath : QString{};
+    recording_countdown_start_frame_ = countdownStartFrame;
+    recording_start_frame_ = targetFrame;
+    return true;
+}
+
+bool TrackRecordingWorkflow::scheduleRecordingTransport(
+    std::uint64_t countdownStartFrame,
+    std::uint64_t targetFrame,
+    std::uint64_t targetMusicalFrame,
+    bool localOnly) noexcept
+{
+    if (targetFrame == 0 || countdownStartFrame > targetFrame) return false;
+    jam2::EngineCommand seek;
+    seek.type = jam2::EngineCommandType::PreparedSeek;
+    seek.frame = targetFrame;
+    if (!submit(seek)) return false;
+    jam2::EngineCommand play;
+    play.type = jam2::EngineCommandType::PreparedPlay;
+    play.frame = targetFrame;
+    if (!submit(play)) return false;
+    jam2::EngineCommand transport;
+    transport.type = jam2::EngineCommandType::ScheduleTransport;
+    transport.transport_local_only = localOnly;
+    transport.transport_action = jam2::EngineTransportAction::RecordStart;
+    transport.transport_target_frame = targetFrame;
+    transport.transport_musical_frame = targetMusicalFrame;
+    transport.transport_countdown_start_frame = countdownStartFrame;
+    return submit(transport);
 }
 
 bool TrackRecordingWorkflow::stopInputTake(std::uint64_t targetFrame) noexcept

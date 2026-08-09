@@ -11,6 +11,7 @@ struct WavMetadata {
     int channels = 0;
     int bitsPerSample = 0;
     qint64 dataBytes = 0;
+    qint64 frames = 0;
     int durationMs = 0;
     QString sha256;
 };
@@ -37,3 +38,9 @@ int mergeQuarantinedLocalLanes(
     QJsonObject& song,
     const LooperProject& localProject,
     int expectedSampleRate);
+QJsonObject mergeConcurrentLooperMetadata(
+    const QJsonObject& baseSong,
+    const QJsonObject& currentSong,
+    const QJsonObject& proposedSong,
+    int* mergedChanges = nullptr,
+    int* conflicts = nullptr);

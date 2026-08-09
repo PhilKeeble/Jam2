@@ -77,6 +77,55 @@ QIcon settingsIcon()
     return QIcon(pixmap);
 }
 
+enum class IdeaHeaderAction {
+    Generate,
+    Continue,
+    Wav,
+    Details,
+};
+
+void styleIdeaHeaderAction(QPushButton* button, IdeaHeaderAction action)
+{
+    if (!button) return;
+    QString outline;
+    QString fill;
+    QString hover;
+    int width = 116;
+    switch (action) {
+    case IdeaHeaderAction::Generate:
+        outline = QStringLiteral("#e2ac53");
+        fill = QStringLiteral("rgba(35,27,20,232)");
+        hover = QStringLiteral("#302317");
+        width = 154;
+        break;
+    case IdeaHeaderAction::Continue:
+        outline = QStringLiteral("#66d4cf");
+        fill = QStringLiteral("rgba(13,42,43,232)");
+        hover = QStringLiteral("#123638");
+        width = 124;
+        break;
+    case IdeaHeaderAction::Wav:
+        outline = QStringLiteral("#b08be4");
+        fill = QStringLiteral("rgba(27,20,37,232)");
+        hover = QStringLiteral("#261b34");
+        width = 116;
+        break;
+    case IdeaHeaderAction::Details:
+        outline = QStringLiteral("#56a4f4");
+        fill = QStringLiteral("rgba(17,31,50,232)");
+        hover = QStringLiteral("#172c46");
+        width = 112;
+        break;
+    }
+    button->setFixedSize(width, 31);
+    button->setStyleSheet(QStringLiteral(
+        "QPushButton { color:#f3e6cf;background:%1;border:1px solid %2;border-radius:4px;"
+        "padding:0 9px;font-family:Bahnschrift;font-size:9pt;font-weight:600;letter-spacing:0.45px; }"
+        "QPushButton:hover { background:%3;border-color:%2; }"
+        "QPushButton:pressed { background:#241c20;border-color:#ffd68e; }")
+        .arg(fill, outline, hover));
+}
+
 class AnimatedBrandIcon final : public QWidget {
 public:
     explicit AnimatedBrandIcon(QWidget* parent)
@@ -242,13 +291,17 @@ void MainWindowPages::build(MainWindow& w)
     w.setMinimumSize(1280, 720);
 
     auto* brandMark = new AnimatedBrandIcon(&w);
-    w.connectionLabel_ = new QLabel(QStringLiteral("Idle"), &w);
+    w.connectionLabel_ = new QLabel(QStringLiteral("AUDIO OFF"), &w);
     w.connectionLabel_->setObjectName(QStringLiteral("StatusPill"));
 
     auto* header = new QHBoxLayout();
     header->setSpacing(10);
     header->addWidget(brandMark);
-    w.songTitleEdit_ = new QLineEdit(w.chordModel_.title(), &w);
+    auto* jamTitleEdit = new DetailSectionEdit(&w);
+    jamTitleEdit->setText(w.chordModel_.title());
+    jamTitleEdit->setProperty("sectionEditable", true);
+    jamTitleEdit->setToolTip(QStringLiteral("Double-click to rename this jam"));
+    w.songTitleEdit_ = jamTitleEdit;
     w.songTitleEdit_->setObjectName(QStringLiteral("SongTitle"));
     w.songTitleEdit_->setMinimumWidth(240);
     w.songTitleEdit_->setMaximumWidth(520);
@@ -262,23 +315,27 @@ void MainWindowPages::build(MainWindow& w)
         button->setFixedHeight(32);
         header->addWidget(button);
     }
-    w.engineModeLabel_ = new QLabel(QStringLiteral("Local"), &w);
-    w.engineModeLabel_->setObjectName(QStringLiteral("StatusPill"));
-    w.engineModeLabel_->setAlignment(Qt::AlignCenter);
-    w.engineModeLabel_->setFixedSize(72, 32);
-    w.sessionTopologyLabel_ = new QLabel(QStringLiteral("Remote Peers 0"), &w);
-    w.sessionTopologyLabel_->setObjectName(QStringLiteral("StatusPill"));
-    w.sessionTopologyLabel_->setFixedSize(116, 32);
-    w.connectionLabel_->setFixedHeight(32);
-    w.connectionLabel_->setMinimumWidth(76);
-    w.connectionLabel_->setMaximumWidth(130);
-    w.localEngineButton_ = new QPushButton(QStringLiteral("Audio setup"), &w);
-    w.localEngineButton_->setFixedHeight(32);
-    w.localEngineButton_->setMaximumWidth(108);
-    QObject::connect(w.localEngineButton_, &QPushButton::clicked, &w, [&w] {
-        w.showLocalPerformSetup();
+    w.jamSyncButton_ = new QToolButton(&w);
+    w.jamSyncButton_->setObjectName(QStringLiteral("JamSyncButton"));
+    w.jamSyncButton_->setText(QStringLiteral("\u25cf  JAM SYNC"));
+    w.jamSyncButton_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    w.jamSyncButton_->setFixedHeight(32);
+    w.jamSyncButton_->setMinimumWidth(116);
+    w.jamSyncButton_->setToolTip(QStringLiteral(
+        "Choose which session changes are shared with every peer"));
+    w.jamSyncButton_->setStyleSheet(QStringLiteral(
+        "QToolButton { border:1px solid #5e5268;border-radius:5px;background:rgba(28,23,34,224);"
+        "color:#e2ac53;font:600 9pt Bahnschrift;padding:4px 10px; }"
+        "QToolButton:hover,QToolButton:pressed { border-color:#e2ac53;background:#302638; }"));
+    header->addWidget(w.jamSyncButton_);
+    QObject::connect(w.jamSyncButton_, &QToolButton::clicked, &w, [&w] {
+        w.showJamSyncDialog();
     });
-    header->addWidget(w.localEngineButton_);
+    w.updateJamSyncPresentation();
+    w.connectionLabel_->setFixedHeight(32);
+    w.connectionLabel_->setMinimumWidth(96);
+    w.connectionLabel_->setMaximumWidth(150);
+    w.connectionLabel_->setAlignment(Qt::AlignCenter);
     auto* settingsButton = new QToolButton(&w);
     settingsButton->setObjectName(QStringLiteral("SettingsButton"));
     settingsButton->setIcon(settingsIcon());
@@ -290,13 +347,12 @@ void MainWindowPages::build(MainWindow& w)
         w.showSettingsDialog();
     });
     header->addWidget(settingsButton);
-    header->addWidget(w.engineModeLabel_);
     header->addWidget(w.connectionLabel_);
-    header->addWidget(w.sessionTopologyLabel_);
+    w.showAudioOffSessionHeaderStatus();
 
-    QObject::connect(w.songTitleEdit_, &QLineEdit::editingFinished, &w, [&w] {
-        (void)w.renameCurrentJam(w.songTitleEdit_->text());
-    });
+    jamTitleEdit->onCommitted = [&w](const QString& name) {
+        (void)w.renameCurrentJam(name);
+    };
     QObject::connect(newSongButton, &QPushButton::clicked, &w, [&w] { w.newSong(); });
     QObject::connect(openSongButton, &QPushButton::clicked, &w, [&w] { w.openSong(); });
     QObject::connect(saveSongButton, &QPushButton::clicked, &w, [&w] { w.saveSong(); });
@@ -368,8 +424,17 @@ void MainWindowPages::build(MainWindow& w)
             {QStringLiteral("lane"), QStringLiteral("beat")},
             {QStringLiteral("beats"), beats},
         });
+        if (w.chordGrid_) w.chordGrid_->refresh();
+        if (w.lyricGrid_) w.lyricGrid_->refresh();
+        w.refreshLooperLanes();
+        w.regeneratePreparedMix(section);
+        w.syncLooperArrangement();
     };
     w.lyricGrid_->onGridResized = w.beatGrid_->onGridResized;
+    w.beatGrid_->onShrinkRequested = [&w](int section) {
+        w.shrinkSectionOneBar(section);
+    };
+    w.lyricGrid_->onShrinkRequested = w.beatGrid_->onShrinkRequested;
 
     w.diagnosisLabel_ = new QLabel(QStringLiteral("Diagnosis -"), &w);
     w.diagnosisLabel_->setObjectName(QStringLiteral("StatusPill"));
@@ -436,6 +501,7 @@ void MainWindowPages::build(MainWindow& w)
     detailLayout->setSpacing(8);
     auto* detailHeader = new QHBoxLayout();
     w.detailIdentityPanel_ = new QWidget(detailPanel);
+    w.detailIdentityPanel_->setObjectName(QStringLiteral("DetailIdentityPanel"));
     auto* detailIdentity = new QVBoxLayout(w.detailIdentityPanel_);
     detailIdentity->setContentsMargins(0, 0, 0, 0);
     detailIdentity->setSpacing(0);
@@ -492,22 +558,23 @@ void MainWindowPages::build(MainWindow& w)
     sessionActions->setSpacing(6);
     auto* startJamButton = new QPushButton(QStringLiteral("Start Jam"), &w);
     auto* joinJamButton = new QPushButton(QStringLiteral("Join"), &w);
-    auto* leaveJamButton = new QPushButton(QStringLiteral("Leave"), &w);
+    w.leaveJamButton_ = new QPushButton(QStringLiteral("Leave"), &w);
     startJamButton->setObjectName(QStringLiteral("SessionAction"));
     joinJamButton->setObjectName(QStringLiteral("SessionAction"));
-    leaveJamButton->setObjectName(QStringLiteral("SessionAction"));
+    w.leaveJamButton_->setObjectName(QStringLiteral("SessionAction"));
+    w.leaveJamButton_->setEnabled(false);
     QObject::connect(startJamButton, &QPushButton::clicked, &w, [&w] {
         w.showStartJamDialog();
     });
     QObject::connect(joinJamButton, &QPushButton::clicked, &w, [&w] {
         w.showJoinJamDialog();
     });
-    QObject::connect(leaveJamButton, &QPushButton::clicked, &w, [&w] {
+    QObject::connect(w.leaveJamButton_, &QPushButton::clicked, &w, [&w] {
         w.stopJam(true);
     });
     sessionActions->addWidget(startJamButton);
     sessionActions->addWidget(joinJamButton);
-    sessionActions->addWidget(leaveJamButton);
+    sessionActions->addWidget(w.leaveJamButton_);
     auto* dataButton = new QPushButton(QStringLiteral("Data"), &w);
     dataButton->setObjectName(QStringLiteral("DataButton"));
     QObject::connect(dataButton, &QPushButton::clicked, &w, [&w] {
@@ -1069,17 +1136,23 @@ QWidget* MainWindowPages::buildSongPage(MainWindow& w)
     auto* page = new QWidget(&w);
     w.chordGrid_ = new BeatGridWidget(&w.chordModel_, QStringLiteral("chord"), page);
 
-    auto* generate = new QPushButton(QStringLiteral("Generate…"), page);
-    auto* continueIdea = new QPushButton(QStringLiteral("Continue Idea…"), page);
-    auto* reference = new QPushButton(QStringLiteral("Generate Reference WAVs…"), page);
-    auto* details = new QPushButton(QStringLiteral("Idea Details…"), page);
+    auto* generate = new QPushButton(QStringLiteral("GENERATE NEW IDEA"), page);
+    auto* continueIdea = new QPushButton(QStringLiteral("CONTINUE IDEA"), page);
+    auto* reference = new QPushButton(QStringLiteral("GENERATE WAV"), page);
+    auto* details = new QPushButton(QStringLiteral("IDEA DETAILS"), page);
+    styleIdeaHeaderAction(generate, IdeaHeaderAction::Generate);
+    styleIdeaHeaderAction(continueIdea, IdeaHeaderAction::Continue);
+    styleIdeaHeaderAction(reference, IdeaHeaderAction::Wav);
+    styleIdeaHeaderAction(details, IdeaHeaderAction::Details);
     auto* top = new QHBoxLayout();
+    addBankControls(w, page, top, false);
+    top->addSpacing(12);
     top->addWidget(generate);
     top->addWidget(continueIdea);
     top->addWidget(reference);
     top->addWidget(details);
-    addBankControls(w, page, top, false);
     top->addStretch(1);
+    top->addWidget(w.chordGrid_->createOverviewPagination(page));
     QObject::connect(generate, &QPushButton::clicked, &w, [&w] { w.generatePracticeIdea(); });
     QObject::connect(continueIdea, &QPushButton::clicked, &w, [&w] { w.continuePracticeIdea(); });
     QObject::connect(reference, &QPushButton::clicked, &w, [&w] { w.generatePracticeReferenceWavs(); });
@@ -1131,6 +1204,14 @@ QWidget* MainWindowPages::buildSongPage(MainWindow& w)
             {QStringLiteral("lane"), QStringLiteral("chord")},
             {QStringLiteral("beats"), beats},
         });
+        if (w.beatGrid_) w.beatGrid_->refresh();
+        if (w.lyricGrid_) w.lyricGrid_->refresh();
+        w.refreshLooperLanes();
+        w.regeneratePreparedMix(section);
+        w.syncLooperArrangement();
+    };
+    w.chordGrid_->onShrinkRequested = [&w](int section) {
+        w.shrinkSectionOneBar(section);
     };
     w.chordGrid_->onStructureChanged = [&w] {
         if (w.beatGrid_) w.beatGrid_->refresh();
@@ -1146,17 +1227,23 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
 {
     auto* page = new QWidget(&w);
     w.beatGrid_ = new BeatGridWidget(&w.beatModel_, QStringLiteral("beat"), page);
-    auto* generate = new QPushButton(QStringLiteral("Generate…"), page);
-    auto* continueIdea = new QPushButton(QStringLiteral("Continue Idea…"), page);
-    auto* reference = new QPushButton(QStringLiteral("Generate Reference WAVs…"), page);
-    auto* details = new QPushButton(QStringLiteral("Idea Details…"), page);
+    auto* generate = new QPushButton(QStringLiteral("GENERATE NEW IDEA"), page);
+    auto* continueIdea = new QPushButton(QStringLiteral("CONTINUE IDEA"), page);
+    auto* reference = new QPushButton(QStringLiteral("GENERATE WAV"), page);
+    auto* details = new QPushButton(QStringLiteral("IDEA DETAILS"), page);
+    styleIdeaHeaderAction(generate, IdeaHeaderAction::Generate);
+    styleIdeaHeaderAction(continueIdea, IdeaHeaderAction::Continue);
+    styleIdeaHeaderAction(reference, IdeaHeaderAction::Wav);
+    styleIdeaHeaderAction(details, IdeaHeaderAction::Details);
     auto* top = new QHBoxLayout();
+    addBankControls(w, page, top, false);
+    top->addSpacing(12);
     top->addWidget(generate);
     top->addWidget(continueIdea);
     top->addWidget(reference);
     top->addWidget(details);
-    addBankControls(w, page, top, false);
     top->addStretch(1);
+    top->addWidget(w.beatGrid_->createOverviewPagination(page));
     auto* layout = new QVBoxLayout(page);
     layout->addLayout(top);
     layout->addWidget(w.beatGrid_, 1);
@@ -1170,12 +1257,53 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
 QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
 {
     auto* page = new QWidget(&w);
-    w.recordingCountdownLabel_ = new QLabel(page);
-    w.recordingCountdownLabel_->setAlignment(Qt::AlignCenter);
-    w.recordingCountdownLabel_->setMinimumHeight(72);
-    w.recordingCountdownLabel_->setStyleSheet(QStringLiteral(
-        "QLabel { background: #161727; border: 1px solid #e6ae52; color: #ffffff; font-size: 34px; font-weight: 700; }"));
-    w.recordingCountdownLabel_->hide();
+    w.recordingContextFrame_ = new QFrame(page);
+    w.recordingContextFrame_->setObjectName(QStringLiteral("RecordingContext"));
+    w.recordingContextFrame_->setStyleSheet(QStringLiteral(
+        "QFrame#RecordingContext { background: #15130f; border: 1px solid #986d36; border-radius: 3px; }"
+        "QLabel#RecordingContextTitle { color: #fff1d5; font-size: 15px; font-weight: 600; }"
+        "QLabel#RecordingContextDetail { color: #bdc5c3; font-size: 12px; }"
+        "QLabel#RecordingPeerStates { color: #f0dfbe; font-size: 12px; padding-top: 5px; border-top: 1px solid #5f482b; }"
+        "QLabel#RecordingPhase { color: #e8a44a; font-size: 12px; font-weight: 600; letter-spacing: 1px; }"));
+    auto* recordingContextLayout = new QVBoxLayout(w.recordingContextFrame_);
+    recordingContextLayout->setContentsMargins(12, 9, 12, 9);
+    recordingContextLayout->setSpacing(6);
+    auto* recordingTop = new QHBoxLayout();
+    auto* recordingLamp = new QLabel(QStringLiteral("●"), w.recordingContextFrame_);
+    recordingLamp->setStyleSheet(QStringLiteral("color: #c92f58; font-size: 18px;"));
+    recordingTop->addWidget(recordingLamp);
+    auto* recordingCopy = new QVBoxLayout();
+    recordingCopy->setSpacing(1);
+    w.recordingContextTitle_ = new QLabel(QStringLiteral("Track armed"), w.recordingContextFrame_);
+    w.recordingContextTitle_->setObjectName(QStringLiteral("RecordingContextTitle"));
+    w.recordingContextDetail_ = new QLabel(w.recordingContextFrame_);
+    w.recordingContextDetail_->setObjectName(QStringLiteral("RecordingContextDetail"));
+    recordingCopy->addWidget(w.recordingContextTitle_);
+    recordingCopy->addWidget(w.recordingContextDetail_);
+    recordingTop->addLayout(recordingCopy, 1);
+    w.recoverRecordingGroupButton_ = new QPushButton(
+        QStringLiteral("Continue Locally"), w.recordingContextFrame_);
+    w.recoverRecordingGroupButton_->setToolTip(QStringLiteral(
+        "Release a stalled shared take while allowing active recordings to continue locally"));
+    w.recoverRecordingGroupButton_->setStyleSheet(QStringLiteral(
+        "QPushButton { background:#2a2520;color:#d9c7ab;border:1px solid #6a563c;"
+        "padding:6px 10px;border-radius:3px;font-size:12px; }"
+        "QPushButton:hover { background:#3a3025;color:#fff1d5;border-color:#a77a42; }"));
+    w.recoverRecordingGroupButton_->hide();
+    QObject::connect(w.recoverRecordingGroupButton_, &QPushButton::clicked,
+        &w, [&w] { w.requestRecordingGroupRecovery(); });
+    recordingTop->addWidget(w.recoverRecordingGroupButton_, 0, Qt::AlignTop);
+    recordingContextLayout->addLayout(recordingTop);
+    w.recordingPeerStatesLabel_ = new QLabel(w.recordingContextFrame_);
+    w.recordingPeerStatesLabel_->setObjectName(QStringLiteral("RecordingPeerStates"));
+    w.recordingPeerStatesLabel_->setWordWrap(true);
+    recordingContextLayout->addWidget(w.recordingPeerStatesLabel_);
+    w.recordingCountdownLabel_ = new QLabel(
+        QStringLiteral("ARMED  ›  WAITING FOR BAR  ›  COUNT-IN  ›  RECORDING"),
+        w.recordingContextFrame_);
+    w.recordingCountdownLabel_->setObjectName(QStringLiteral("RecordingPhase"));
+    recordingContextLayout->addWidget(w.recordingCountdownLabel_);
+    w.recordingContextFrame_->hide();
 
     w.trackWaveform_ = nullptr;
     w.looperStack_ = new LooperLaneStackWidget(page);
@@ -1216,8 +1344,6 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     w.focusFrequencySpin_->setSuffix(QStringLiteral(" Hz"));
     w.focusFrequencySpin_->setFixedWidth(108);
     applyMutedEditorStyle(w.focusFrequencySpin_);
-    w.trackSyncCheck_ = new QCheckBox(QStringLiteral("Sync track controls"), page);
-    w.trackSyncCheck_->setChecked(w.looperProject_.trackSyncEnabled());
     auto* gridLockBox = new QCheckBox(QStringLiteral("Lock to grid"), page);
     gridLockBox->setChecked(w.looperProject_.gridLockEnabled());
     w.captureOutputEdit_ = new QLineEdit(page);
@@ -1274,23 +1400,22 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     w.tailSilenceSpin_->setSuffix(QStringLiteral(" ms"));
     w.tailSilenceSpin_->setMinimumWidth(120);
     applyMutedEditorStyle(w.tailSilenceSpin_);
-    w.playTrackButton_ = new QPushButton(QStringLiteral("Play Track"), page);
-    w.stopTrackButton_ = new QPushButton(QStringLiteral("Stop Track"), page);
     w.loopStartButton_ = new QPushButton(QStringLiteral("Loop Start"), page);
     w.loopEndButton_ = new QPushButton(QStringLiteral("Loop End"), page);
     w.clearLoopButton_ = new QPushButton(QStringLiteral("Clear Loop"), page);
     w.loopEnabledCheck_ = new QCheckBox(QStringLiteral("Loop whole track"), page);
     w.loopEnabledCheck_->setChecked(w.trackController_.model().loopEnabled);
-    w.stopCaptureButton_ = new QPushButton(QStringLiteral("Stop Recording"), page);
-    w.stopCaptureButton_->setEnabled(false);
-    w.loadWavButton_ = new QPushButton(QStringLiteral("Load WAV"), page);
-    w.shareTracksButton_ = new QPushButton(QStringLiteral("Share Tracks"), page);
+    w.loadWavButton_ = nullptr;
+    w.shareTracksButton_ = new QPushButton(QStringLiteral("Share with Jam Now"), page);
+    w.shareTracksButton_->setEnabled(!w.automaticWavSharingEnabled());
+    w.shareTracksButton_->setToolTip(w.automaticWavSharingEnabled()
+        ? QStringLiteral("WAVs are already shared automatically with the jam")
+        : QStringLiteral("Manually share the current tracks with the jam"));
     w.startArmedLaneRecordingButton_ = new QPushButton(QStringLiteral("Start Recording"), page);
 
     w.captureOutputEdit_->setText(appReleaseFilePath(QStringLiteral("captures"), QStringLiteral("take.wav")));
     const QList<QWidget*> captureDialogWidgets{
-        w.captureOutputEdit_, w.loopbackSourceBox_, w.captureDurationSpin_,
-        w.captureManualStopCheck_, w.captureCountInCheck_, w.captureCountInMetronomeCheck_, w.captureKeepMetronomeCheck_, w.captureCountInBarsSpin_,
+        w.captureOutputEdit_, w.loopbackSourceBox_,
         w.recordingLatencyLabel_, w.recordingLatencyAdjustmentSpin_,
         w.trimLeadingCheck_, w.trimTrailingCheck_, w.silenceThresholdSpin_, w.tailSilenceSpin_,
     };
@@ -1328,73 +1453,189 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     focusLayout->addWidget(w.focusFrequencySlider_, 1);
     focusLayout->addWidget(w.focusFrequencySpin_);
     auto* loopOptionsControl = new QWidget(page);
-    auto* loopOptionsLayout = new QGridLayout(loopOptionsControl);
+    auto* loopOptionsLayout = new QHBoxLayout(loopOptionsControl);
     loopOptionsLayout->setContentsMargins(0, 0, 0, 0);
-    loopOptionsLayout->setHorizontalSpacing(24);
-    loopOptionsLayout->addWidget(gridLockBox, 0, 0);
-    loopOptionsLayout->addWidget(w.trackSyncCheck_, 0, 1);
-    loopOptionsLayout->addWidget(w.loopEnabledCheck_, 1, 0);
-    loopOptionsLayout->setColumnStretch(0, 1);
-    loopOptionsLayout->setColumnStretch(1, 1);
+    loopOptionsLayout->setSpacing(10);
+    auto* fitTimelineButton = new QPushButton(QStringLiteral("Fit"), loopOptionsControl);
+    auto* zoomOutButton = new QPushButton(QStringLiteral("\u2212"), loopOptionsControl);
+    auto* zoomInButton = new QPushButton(QStringLiteral("+"), loopOptionsControl);
+    fitTimelineButton->setFixedSize(42, 28);
+    zoomOutButton->setFixedSize(30, 28);
+    zoomInButton->setFixedSize(30, 28);
+    fitTimelineButton->setToolTip(QStringLiteral("Fit the complete track timeline in the view"));
+    zoomOutButton->setToolTip(QStringLiteral("Zoom out on the track timeline"));
+    zoomInButton->setToolTip(QStringLiteral("Zoom in on the track timeline"));
+    fitTimelineButton->setEnabled(false);
+    zoomOutButton->setEnabled(false);
+    loopOptionsLayout->addWidget(gridLockBox);
+    loopOptionsLayout->addSpacing(4);
+    loopOptionsLayout->addWidget(fitTimelineButton);
+    loopOptionsLayout->addWidget(zoomOutButton);
+    loopOptionsLayout->addWidget(zoomInButton);
 
     auto* form = new QFormLayout();
     form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     form->addRow(QStringLiteral("Speed"), speedControl);
     form->addRow(QStringLiteral("Pitch"), pitchControl);
     form->addRow(QStringLiteral("Focus frequency"), focusControl);
-    form->addRow(loopOptionsControl);
 
-    auto* buttons = new QHBoxLayout();
-    buttons->addWidget(w.playTrackButton_);
-    buttons->addWidget(w.stopTrackButton_);
-    buttons->addWidget(w.loopStartButton_);
-    buttons->addWidget(w.loopEndButton_);
-    buttons->addWidget(w.clearLoopButton_);
-    buttons->addWidget(w.startArmedLaneRecordingButton_);
-    buttons->addWidget(w.stopCaptureButton_);
-    buttons->addWidget(w.loadWavButton_);
-    buttons->addWidget(w.shareTracksButton_);
-    buttons->addWidget(new QLabel(QStringLiteral("SECTION"), page));
+    recordingTop->addWidget(w.startArmedLaneRecordingButton_);
+    w.recordingGlobalControls_ = new QWidget(w.recordingContextFrame_);
+    auto* recordingControlsLayout = new QHBoxLayout(w.recordingGlobalControls_);
+    recordingControlsLayout->setContentsMargins(0, 2, 0, 0);
+    recordingControlsLayout->setSpacing(10);
+    recordingControlsLayout->addWidget(w.captureManualStopCheck_);
+    recordingControlsLayout->addWidget(w.captureDurationSpin_);
+    recordingControlsLayout->addWidget(w.captureCountInCheck_);
+    recordingControlsLayout->addWidget(w.captureCountInBarsSpin_);
+    recordingControlsLayout->addWidget(w.captureCountInMetronomeCheck_);
+    recordingControlsLayout->addWidget(w.captureKeepMetronomeCheck_);
+    recordingControlsLayout->addStretch(1);
+    recordingContextLayout->addWidget(w.recordingGlobalControls_);
+
+    auto* sectionRow = new QHBoxLayout();
+    auto* sectionLabel = new QLabel(QStringLiteral("SECTION"), page);
+    sectionLabel->setObjectName(QStringLiteral("BankStripLabel"));
+    sectionRow->addWidget(sectionLabel);
     for (int i = 0; i < 4; ++i) {
         auto* bankButton = new QPushButton(QString(QChar(QLatin1Char(static_cast<char>('A' + i)))), page);
         bankButton->setFixedWidth(34);
         bankButton->setCheckable(true);
         w.looperBankButtons_[i] = bankButton;
-        buttons->addWidget(bankButton);
+        sectionRow->addWidget(bankButton);
         QObject::connect(bankButton, &QPushButton::clicked, &w, [&w, i] {
             w.selectViewedBank(i);
         });
     }
-    w.launchBankButton_ = new QPushButton(QStringLiteral("Launch Section"), page);
+    auto* trimSectionButton = new QPushButton(QStringLiteral("TRIM SECTION"), page);
+    trimSectionButton->setObjectName(QStringLiteral("TrimSectionButton"));
+    trimSectionButton->setStyleSheet(QStringLiteral(
+        "QPushButton { color:#d7c3a4; border:1px solid #5e4c37; background:#17140f; padding:5px 9px; }"
+        "QPushButton:hover { color:#ffd68a; border-color:#986d36; background:#211a12; }"
+        "QPushButton:disabled { color:#586164; border-color:#303638; background:#111516; }"));
+    w.sectionTrimButtons_.push_back(trimSectionButton);
+    sectionRow->addWidget(trimSectionButton);
+    QObject::connect(trimSectionButton, &QPushButton::clicked, &w, [&w] {
+        w.trimViewedSection();
+    });
+    sectionRow->addSpacing(12);
+    auto* generateIdeaButton = new QPushButton(
+        QStringLiteral("GENERATE NEW IDEA"), page);
+    auto* continueIdeaButton = new QPushButton(
+        QStringLiteral("CONTINUE IDEA"), page);
+    auto* generateWavButton = new QPushButton(
+        QStringLiteral("GENERATE WAV"), page);
+    styleIdeaHeaderAction(generateIdeaButton, IdeaHeaderAction::Generate);
+    styleIdeaHeaderAction(continueIdeaButton, IdeaHeaderAction::Continue);
+    styleIdeaHeaderAction(generateWavButton, IdeaHeaderAction::Wav);
+    sectionRow->addWidget(generateIdeaButton);
+    sectionRow->addWidget(continueIdeaButton);
+    sectionRow->addWidget(generateWavButton);
+    QObject::connect(generateIdeaButton, &QPushButton::clicked, &w, [&w] {
+        w.generatePracticeIdea();
+    });
+    QObject::connect(continueIdeaButton, &QPushButton::clicked, &w, [&w] {
+        w.continuePracticeIdea();
+    });
+    QObject::connect(generateWavButton, &QPushButton::clicked, &w, [&w] {
+        w.generatePracticeReferenceWavs();
+    });
+    sectionRow->addStretch(1);
+    w.launchBankButton_ = new QPushButton(QStringLiteral("Queue Section"), page);
     QObject::connect(w.launchBankButton_, &QPushButton::clicked, &w, [&w] {
         w.requestBankLaunch(w.viewedBankIndex_);
     });
-    buttons->addWidget(w.launchBankButton_);
+    sectionRow->addWidget(w.launchBankButton_);
     w.arrangementButton_ = new QPushButton(QStringLiteral("Arrangement..."), page);
     QObject::connect(w.arrangementButton_, &QPushButton::clicked, &w, [&w] {
         w.showArrangementDialog();
     });
-    buttons->addWidget(w.arrangementButton_);
+    sectionRow->addWidget(w.arrangementButton_);
+
+    auto* loopRow = new QHBoxLayout();
+    auto* loopLabel = new QLabel(QStringLiteral("LOOP"), page);
+    loopLabel->setObjectName(QStringLiteral("BankStripLabel"));
+    loopRow->addWidget(loopLabel);
+    loopRow->addWidget(w.loopStartButton_);
+    loopRow->addWidget(w.loopEndButton_);
+    loopRow->addWidget(w.clearLoopButton_);
+    loopRow->addWidget(w.loopEnabledCheck_);
+    loopRow->addStretch(1);
+    loopRow->addWidget(loopOptionsControl);
+
+    auto* listeningGroup = new QWidget(page);
+    auto* listeningContent = new QWidget(listeningGroup);
+    listeningContent->setLayout(form);
+    listeningContent->hide();
+    auto* listeningLayout = new QVBoxLayout(listeningGroup);
+    listeningLayout->setContentsMargins(0, 0, 0, 0);
+    listeningLayout->setSpacing(0);
+    auto* listeningToggle = new QPushButton(listeningGroup);
+    const auto setListeningToggleText = [listeningToggle](bool open) {
+        listeningToggle->setText(QStringLiteral(
+            "%1  LISTENING TOOLS     Speed 1.00× · Pitch 0 st · Focus off")
+            .arg(open ? QStringLiteral("▾") : QStringLiteral("▸")));
+    };
+    setListeningToggleText(false);
+    listeningToggle->setStyleSheet(QStringLiteral(
+        "QPushButton { border:0;border-top:1px solid #2f3a3d;background:transparent;color:#ddd7e8;"
+        "font:12px Bahnschrift;padding:9px 2px 4px;text-align:left; }"
+        "QPushButton:hover { color:#ffd68a; }"));
+    listeningLayout->addWidget(listeningToggle);
+    listeningLayout->addWidget(listeningContent);
+    QObject::connect(listeningToggle, &QPushButton::clicked, listeningGroup,
+        [listeningContent, setListeningToggleText] {
+            const bool open = !listeningContent->isVisible();
+            listeningContent->setVisible(open);
+            setListeningToggleText(open);
+        });
+
+    auto* sharingGroup = new QGroupBox(QStringLiteral("Sharing"), page);
+    sharingGroup->setObjectName(QStringLiteral("TrackSharingCard"));
+    auto* sharingLayout = new QHBoxLayout(sharingGroup);
+    w.trackSharingStatusLabel_ = new QLabel(
+        QStringLiteral("LANES: SYNCED  ·  WAVS: AUTOMATIC"), sharingGroup);
+    w.trackSharingStatusLabel_->setObjectName(QStringLiteral("TrackSharingStatus"));
+    sharingLayout->addWidget(w.trackSharingStatusLabel_, 1);
+    sharingLayout->addWidget(w.shareTracksButton_);
     auto* exportButton = new QPushButton(QStringLiteral("Export..."), page);
     QObject::connect(exportButton, &QPushButton::clicked, &w, [&w] {
         w.exportLooperAudio();
     });
-    buttons->addWidget(exportButton);
-    buttons->addStretch(1);
+    sharingLayout->addWidget(exportButton);
 
     auto* laneScroll = new QScrollArea(page);
     laneScroll->setWidgetResizable(true);
     laneScroll->setFrameShape(QFrame::NoFrame);
-    laneScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    laneScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     laneScroll->setMinimumHeight(280);
     laneScroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     laneScroll->setWidget(w.looperStack_);
 
+    const auto applyTimelineZoom = [laneScroll, fitTimelineButton, zoomOutButton, zoomInButton, &w](int level) {
+        w.looperStack_->setTimelineZoomLevel(level, laneScroll->viewport()->width());
+        fitTimelineButton->setEnabled(level > 0);
+        zoomOutButton->setEnabled(level > 0);
+        zoomInButton->setEnabled(level < 6);
+    };
+    QObject::connect(fitTimelineButton, &QPushButton::clicked, laneScroll,
+        [applyTimelineZoom] { applyTimelineZoom(0); });
+    QObject::connect(zoomOutButton, &QPushButton::clicked, laneScroll,
+        [applyTimelineZoom, &w] {
+            applyTimelineZoom(qMax(0, w.looperStack_->timelineZoomLevel() - 1));
+        });
+    QObject::connect(zoomInButton, &QPushButton::clicked, laneScroll,
+        [applyTimelineZoom, &w] {
+            applyTimelineZoom(qMin(6, w.looperStack_->timelineZoomLevel() + 1));
+        });
+
     auto* layout = new QVBoxLayout(page);
-    layout->addLayout(buttons);
-    layout->addWidget(w.recordingCountdownLabel_);
+    layout->addLayout(sectionRow);
+    layout->addLayout(loopRow);
+    layout->addWidget(w.recordingContextFrame_);
     layout->addWidget(laneScroll, 1);
-    layout->addLayout(form);
+    layout->addWidget(listeningGroup);
+    layout->addWidget(sharingGroup);
 
     QObject::connect(w.trackSpeedSlider_, &QSlider::valueChanged, &w, [&w](int value) {
         const double speed = static_cast<double>(value) / 100.0;
@@ -1446,12 +1687,6 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
             });
         };
     }
-    QObject::connect(w.playTrackButton_, &QPushButton::clicked, &w, [&w] {
-        w.playTrack();
-    });
-    QObject::connect(w.stopTrackButton_, &QPushButton::clicked, &w, [&w] {
-        w.runGridLockedEngineAction(QStringLiteral("track.stop"), [&w](std::uint64_t targetFrame) { w.stopTrack(targetFrame); });
-    });
     QObject::connect(w.loopStartButton_, &QPushButton::clicked, &w, [&w] {
         w.setLoopStartAtCurrentPosition();
     });
@@ -1527,49 +1762,6 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         }
         w.regeneratePreparedMix();
     });
-    QObject::connect(w.trackSyncCheck_, &QCheckBox::toggled, &w, [&w](bool checked) {
-        if (!checked) {
-            w.cancelSharedBankLaunch(
-                true, QStringLiteral("Track Sync was disabled locally"));
-        }
-        w.looperProject_.setTrackSyncEnabled(checked);
-        w.trackController_.model().syncControls = checked;
-        w.jam2_.setTrackSyncEnabled(checked);
-        if (!checked) {
-            ++w.songAssetCheckRevision_;
-            w.deferredSongSetMessage_ = {};
-            w.songAssetCheckRetryTimer_.stop();
-            w.pendingSongSet_ = {};
-            w.pendingSongRevision_ = 0;
-            w.trackWorkspace_.pendingSongBaseRevision = 0;
-            w.pendingSongTrackRestart_ = false;
-            w.pendingSongSourcePeerToken_.clear();
-            w.pendingSongNeedsAuthoritativePublish_ = false;
-            w.pendingLooperAssetHashes_.clear();
-            w.deferredSongSetSourcePeerToken_.clear();
-            w.deferredReferenceRenderRequests_.clear();
-            w.assetTransfer_.cancel();
-            w.pendingTrackContributions_.clear();
-            w.pendingTrackAssetSources_.clear();
-            w.trackWorkspace_.outgoingTrackShareBatchId.clear();
-            w.trackWorkspace_.heldTrackShareSongSet = {};
-            w.trackWorkspace_.heldTrackShareSongSourcePeerToken.clear();
-            if (w.performanceHome_) {
-                w.performanceHome_->setTrackTransferStatus(QString{});
-                if (!w.referenceWavGenerationRunning_) {
-                    w.performanceHome_->setWavGenerationActive(false);
-                }
-            }
-            w.trackController_.requestPlayback(
-                w.trackRecordingWorkflow_.globalTransportRequestedPlaying());
-            w.trackController_.observeEnginePlaying(
-                w.trackRecordingWorkflow_.globalTransportPlaying());
-        } else if (w.jam2_.isNetworkRunning()) {
-            w.shareLocalTracks();
-        }
-        w.updateTrackControls();
-        w.updateTrackPlaybackPresentation();
-    });
     QObject::connect(gridLockBox, &QCheckBox::toggled, &w, [&w](bool checked) {
         w.looperProject_.setGridLockEnabled(checked);
         w.refreshLooperLanes();
@@ -1588,49 +1780,50 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         updateCaptureDurationControl(w.captureManualStopCheck_, w.captureDurationSpin_);
     });
 
-    QObject::connect(w.stopCaptureButton_, &QPushButton::clicked, &w, [&w] {
-        if (w.loopbackRecorder_.isRunning()) {
-            w.loopbackRecorder_.stop();
-        } else {
-            w.runGridLockedEngineAction(
-                QStringLiteral("record.stop"),
-                [&w](std::uint64_t targetFrame) { w.stopInputCapture(targetFrame); },
-                true);
-        }
-    });
-    QObject::connect(w.loadWavButton_, &QPushButton::clicked, &w, [&w] { w.loadWavIntoLooperLane(); });
     QObject::connect(w.shareTracksButton_, &QPushButton::clicked, &w, [&w] { w.shareLocalTracks(true); });
-    QObject::connect(w.startArmedLaneRecordingButton_, &QPushButton::clicked, &w, [&w] { w.startArmedLooperLaneRecording(); });
+    QObject::connect(w.startArmedLaneRecordingButton_, &QPushButton::clicked, &w, [&w] {
+        if (w.trackRecordingWorkflow_.inputTakeActive() || w.loopbackRecorder_.isRunning()) {
+            if (w.loopbackRecorder_.isRunning()) {
+                w.loopbackRecorder_.stop();
+            } else {
+                w.runGridLockedEngineAction(
+                    QStringLiteral("record.stop"),
+                    [&w](std::uint64_t targetFrame) { w.stopInputCapture(targetFrame); },
+                    true);
+            }
+            return;
+        }
+        w.startArmedLooperLaneRecording();
+    });
     w.looperStack_->onSelected = [&w](int lane) { w.selectedLooperLane_ = lane; };
-    w.looperStack_->onAddLane = [&w] { w.addEmptyLooperLane(); };
-    w.looperStack_->onAddWav = [&w] { w.addLooperWavs(); };
-    w.looperStack_->onMute = [&w](int lane) { w.selectedLooperLane_ = lane; w.toggleSelectedLooperLaneMute(); };
-    w.looperStack_->onSolo = [&w](int lane) { w.selectedLooperLane_ = lane; w.toggleSelectedLooperLaneSolo(); };
+    w.looperStack_->onAddLane = [&w] { if (!w.sharedRecordingProtected()) w.addEmptyLooperLane(); };
+    w.looperStack_->onAddWav = [&w] { if (!w.sharedRecordingProtected()) w.addLooperWavs(); };
+    w.looperStack_->onWavDropped = [&w](int lane, const QString& path) {
+        w.importWavIntoLooperLane(lane, path);
+    };
+    w.looperStack_->onMute = [&w](int lane) { if (!w.sharedRecordingProtected()) { w.selectedLooperLane_ = lane; w.toggleSelectedLooperLaneMute(); } };
+    w.looperStack_->onSolo = [&w](int lane) { if (!w.sharedRecordingProtected()) { w.selectedLooperLane_ = lane; w.toggleSelectedLooperLaneSolo(); } };
     w.looperStack_->onArm = [&w](int lane) {
+        if (w.sharedRecordingProtected()) return;
         w.selectedLooperLane_ = lane;
         if (w.trackRecordingWorkflow_.laneArmedAt(w.viewedBankIndex_, lane)) {
             w.trackRecordingWorkflow_.disarmLane();
+            w.publishLocalTrackRecordingState(QStringLiteral("idle"));
             w.refreshLooperLanes();
             w.appendLog(QStringLiteral("disarmed lane recording"));
             return;
         }
         (void)w.armSelectedLooperLaneRecording();
     };
-    w.looperStack_->onRename = [&w](int lane) { w.selectedLooperLane_ = lane; w.renameSelectedLooperLane(); };
-    w.looperStack_->onRemove = [&w](int lane) { w.selectedLooperLane_ = lane; w.removeSelectedLooperLane(); };
-    w.looperStack_->onGainChanged = [&w](int lane, double gainDb) { w.applyLooperLaneGain(lane, gainDb); };
+    w.looperStack_->onRename = [&w](int lane) { if (!w.sharedRecordingProtected()) { w.selectedLooperLane_ = lane; w.renameSelectedLooperLane(); } };
+    w.looperStack_->onRemove = [&w](int lane) { if (!w.sharedRecordingProtected()) { w.selectedLooperLane_ = lane; w.removeSelectedLooperLane(); } };
+    w.looperStack_->onRevealWav = [&w](int lane) { w.revealLooperLaneWav(lane); };
+    w.looperStack_->onRemoveWav = [&w](int lane) { if (!w.sharedRecordingProtected()) w.removeLooperLaneWav(lane); };
+    w.looperStack_->onGainChanged = [&w](int lane, double gainDb) { if (!w.sharedRecordingProtected()) w.applyLooperLaneGain(lane, gainDb); };
     w.looperStack_->onRegionCommitted = [&w](int lane, qint64 startFrame, qint64 sourceStartFrame, qint64 sourceEndFrame) {
+        if (w.sharedRecordingProtected()) return;
         w.selectedLooperLane_ = lane;
         w.applySelectedLooperLaneRegion(startFrame, sourceStartFrame, sourceEndFrame);
-    };
-    w.looperStack_->onSeekFrame = [&w](qint64 frame) {
-        w.runGridLockedEngineAction(QStringLiteral("track.seek"), [&w, frame](std::uint64_t targetFrame) {
-            w.seekPreparedTrack(static_cast<std::uint64_t>(qMax<qint64>(0, frame)), targetFrame);
-            w.trackRecordingWorkflow_.noteManualPreparedSeek(
-                frame,
-                static_cast<qint64>(w.metronomeTransport_.grid().position().rawCurrentFrame));
-            w.updateTrackTimeline();
-        });
     };
     w.looperStack_->onBankSelected = [&w](int index) {
         w.selectViewedBank(index);
@@ -1649,7 +1842,6 @@ void MainWindowPages::addBankControls(
     bool looper)
 {
     if (!owner || !layout) return;
-    layout->addSpacing(12);
     auto* label = new QLabel(QStringLiteral("SECTION"), owner);
     label->setObjectName(QStringLiteral("BankStripLabel"));
     layout->addWidget(label);
@@ -1666,6 +1858,17 @@ void MainWindowPages::addBankControls(
             w.selectViewedBank(bank);
         });
     }
+    auto* trimSectionButton = new QPushButton(QStringLiteral("TRIM SECTION"), owner);
+    trimSectionButton->setObjectName(QStringLiteral("TrimSectionButton"));
+    trimSectionButton->setStyleSheet(QStringLiteral(
+        "QPushButton { color:#d7c3a4; border:1px solid #5e4c37; background:#17140f; padding:5px 9px; }"
+        "QPushButton:hover { color:#ffd68a; border-color:#986d36; background:#211a12; }"
+        "QPushButton:disabled { color:#586164; border-color:#303638; background:#111516; }"));
+    w.sectionTrimButtons_.push_back(trimSectionButton);
+    layout->addWidget(trimSectionButton);
+    QObject::connect(trimSectionButton, &QPushButton::clicked, &w, [&w] {
+        w.trimViewedSection();
+    });
 }
 
 QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
@@ -1964,6 +2167,7 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     });
     QObject::connect(w.metronomeModeBox_, &QComboBox::currentTextChanged, &w, [&w] {
         w.updateMetronomeCompensationVisibility();
+        w.updateJamSyncPresentation();
         w.sendMetronomeModeToJam();
     });
     QObject::connect(w.metronomeSoundBox_, qOverload<int>(&QComboBox::currentIndexChanged), &w, [&w] {

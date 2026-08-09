@@ -7,6 +7,7 @@
 #include "RuntimeContracts.hpp"
 
 #include "BeatGridModel.hpp"
+#include "BeatGridWidget.hpp"
 #include "LooperProject.hpp"
 #include "ProjectPersistenceCoordinator.hpp"
 #include "SharedTrackController.hpp"
@@ -28,6 +29,7 @@
 #include "GuiPresentation.hpp"
 #include "JamStorage.hpp"
 #include "RecordingTiming.hpp"
+#include "SectionTimeline.hpp"
 
 #include "common.hpp"
 #include "audio_device.hpp"
@@ -93,12 +95,20 @@ public:
         ++abandoned;
         active = false;
     }
-    void acceptIncomingAsset(const QString& hash, const QString& path) override
+    void acceptIncomingAsset(
+        const QString& hash,
+        const QString& path,
+        qint64 sourceFrames) override
     {
         ++accepted;
         acceptedHash = hash;
         acceptedPath = path;
+        acceptedFrames = sourceFrames;
         active = false;
+    }
+    void noteAssetProgress(const QString&, const QString&, bool) override
+    {
+        ++progressEvents;
     }
     void appendAssetLog(const QString&) override {}
     bool startAssetFileTask(
@@ -133,6 +143,8 @@ public:
     QString lastAcknowledgementToken;
     QString acceptedHash;
     QString acceptedPath;
+    qint64 acceptedFrames = 0;
+    int progressEvents = 0;
 
 private:
     QString folder_;
@@ -556,6 +568,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         record(QStringLiteral("asset-transfer.success-clears-without-abandon"),
             folderReady && context.accepted == 1 && context.abandoned == 0 &&
             context.acceptedHash == context.expectedHash && acceptedFileReady &&
+            context.acceptedFrames > 0 && context.progressEvents >= 2 &&
             context.acknowledgements == 1 && context.lastAcknowledgedChunks == 1 &&
             context.lastAcknowledgementToken == context.expectedSource);
         (void)QDir(folder).removeRecursively();
@@ -6385,6 +6398,102 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
     }
     {
         const QString workspace = QDir::current().absoluteFilePath(
+            QStringLiteral("build/prepared-mix-bad-lane-test-") +
+            QUuid::createUuid().toString(QUuid::WithoutBraces));
+        const QString validPath = QDir(workspace).absoluteFilePath(QStringLiteral("valid.wav"));
+        const QString outputPath = QDir(workspace).absoluteFilePath(QStringLiteral("mix.wav"));
+        const bool folderReady = QDir().mkpath(workspace);
+        QFile validFile(validPath);
+        const QByteArray validWav = pcm16Wav(16);
+        const bool validReady = folderReady && validFile.open(QIODevice::WriteOnly) &&
+            validFile.write(validWav) == validWav.size();
+        validFile.close();
+        LooperProject project;
+        LooperLane missing;
+        missing.name = QStringLiteral("Missing peer WAV");
+        missing.assetPath = QDir(workspace).absoluteFilePath(QStringLiteral("missing.wav"));
+        missing.stopFrame = 16;
+        LooperLane valid;
+        valid.name = QStringLiteral("Valid local WAV");
+        valid.assetPath = validPath;
+        valid.stopFrame = 16;
+        const bool lanesReady = project.appendLane(0, missing) && project.appendLane(0, valid);
+        const PreparedMixResult rendered = PreparedMixRenderer::render(
+            project, workspace, 48000, outputPath, SharedTrackModel{}, 0, 16);
+        record(QStringLiteral("prepared-mix.bad-lane-does-not-silence-valid-lanes"),
+            validReady && lanesReady && rendered.error.isEmpty() &&
+            !rendered.warnings.isEmpty() && QFileInfo::exists(outputPath));
+        (void)QDir(workspace).removeRecursively();
+    }
+    {
+        const QString workspace = QDir::current().absoluteFilePath(
+            QStringLiteral("build/prepared-mix-long-recording-test-") +
+            QUuid::createUuid().toString(QUuid::WithoutBraces));
+        const QString generatedPath = QDir(workspace).absoluteFilePath(
+            QStringLiteral("generated.wav"));
+        const QString recordingPath = QDir(workspace).absoluteFilePath(
+            QStringLiteral("silent-recording.wav"));
+        const QString outputPath = QDir(workspace).absoluteFilePath(
+            QStringLiteral("extended-loop.wav"));
+        const bool folderReady = QDir().mkpath(workspace);
+        QFile generatedFile(generatedPath);
+        const QByteArray generatedWav = pcm16Wav(8);
+        const bool generatedReady = folderReady &&
+            generatedFile.open(QIODevice::WriteOnly) &&
+            generatedFile.write(generatedWav) == generatedWav.size();
+        generatedFile.close();
+        QByteArray silentWav = pcm16Wav(16);
+        silentWav.replace(44, 32, QByteArray(32, '\0'));
+        QFile recordingFile(recordingPath);
+        const bool recordingReady = recordingFile.open(QIODevice::WriteOnly) &&
+            recordingFile.write(silentWav) == silentWav.size();
+        recordingFile.close();
+
+        LooperProject project;
+        LooperLane generated;
+        generated.name = QStringLiteral("Generated drums");
+        generated.assetPath = generatedPath;
+        generated.stopFrame = 8;
+        generated.loopStartFrame = 0;
+        generated.loopEndFrame = 8;
+        generated.loopEnabled = true;
+        generated.referenceKind = QStringLiteral("drum");
+        generated.sampleRateCompatible = true;
+        LooperLane recording;
+        recording.name = QStringLiteral("Empty 2x recording");
+        recording.assetPath = recordingPath;
+        recording.stopFrame = 16;
+        recording.sampleRateCompatible = true;
+        const bool lanesReady = project.appendLane(0, generated) &&
+            project.appendLane(0, recording);
+        SharedTrackModel track;
+        track.loopEnabled = true;
+        const PreparedMixResult rendered = PreparedMixRenderer::render(
+            project,
+            workspace,
+            48000,
+            outputPath,
+            track,
+            0,
+            16);
+        QFile outputFile(outputPath);
+        const bool outputReady = outputFile.open(QIODevice::ReadOnly);
+        const QByteArray outputBytes = outputReady ? outputFile.readAll() : QByteArray{};
+        const QByteArray generatedHalf = outputBytes.mid(44, 16);
+        const QByteArray silentHalf = outputBytes.mid(60, 16);
+        const bool generatedHalfHasAudio = std::any_of(
+            generatedHalf.cbegin(), generatedHalf.cend(),
+            [](char value) { return value != 0; });
+        record(QStringLiteral(
+            "prepared-mix.long-empty-recording-extends-loop-without-repeating-generated-wav"),
+            generatedReady && recordingReady && lanesReady &&
+            rendered.error.isEmpty() && rendered.frames == 16 &&
+            generatedHalfHasAudio && silentHalf == QByteArray(16, '\0'));
+        outputFile.close();
+        (void)QDir(workspace).removeRecursively();
+    }
+    {
+        const QString workspace = QDir::current().absoluteFilePath(
             QStringLiteral("build/empty-transient-workspace-") +
             QUuid::createUuid().toString(QUuid::WithoutBraces));
         const QString transientPath =
@@ -6445,6 +6554,30 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             !QFileInfo::exists(obsoletePath) &&
             !QFileInfo::exists(transientPath) && QFileInfo::exists(savedPath));
         (void)QDir(root).removeRecursively();
+    }
+    {
+        const QString workspace = QDir::current().absoluteFilePath(
+            QStringLiteral("build/partial-transfer-cleanup-") +
+            QUuid::createUuid().toString(QUuid::WithoutBraces));
+        const QString received = QDir(workspace).absoluteFilePath(
+            QStringLiteral("received"));
+        const QString partial = QDir(received).absoluteFilePath(
+            QString(64, QLatin1Char('a')) + QStringLiteral(".wav.partial.") +
+            QStringLiteral("12345678-1234-1234-1234-123456789abc"));
+        const QString unrelated = QDir(received).absoluteFilePath(
+            QStringLiteral("keep.txt"));
+        const bool folderReady = QDir().mkpath(received);
+        auto writeFixture = [](const QString& path) {
+            QFile file(path);
+            return file.open(QIODevice::WriteOnly) && file.write("x", 1) == 1;
+        };
+        const bool filesReady = folderReady &&
+            writeFixture(partial) && writeFixture(unrelated);
+        ProjectPersistenceCoordinator persistence;
+        persistence.initializeWorkspace(workspace);
+        record(QStringLiteral("project.startup-removes-stale-asset-partials-only"),
+            filesReady && !QFileInfo::exists(partial) && QFileInfo::exists(unrelated));
+        (void)QDir(workspace).removeRecursively();
     }
     {
         LooperProject local;
@@ -6610,12 +6743,65 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
     modelError.clear();
     record(QStringLiteral("reference-render.reject-non-boolean-part"),
         !jam2::application::validateControlMessage(invalidReferenceRender, modelError), modelError);
+    {
+        const QJsonObject syncSet{
+            {QStringLiteral("type"), QStringLiteral("jam.sync.set")},
+            {QStringLiteral("revision"), 4},
+            {QStringLiteral("track_lanes"), true},
+            {QStringLiteral("auto_share_wavs"), false},
+            {QStringLiteral("global_playback"), true},
+            {QStringLiteral("generated_ideas"), QStringLiteral("chords")},
+            {QStringLiteral("metronome_state"), false},
+            {QStringLiteral("recordings"), true},
+        };
+        QJsonObject syncRequest = syncSet;
+        syncRequest[QStringLiteral("type")] = QStringLiteral("jam.sync.request");
+        syncRequest.remove(QStringLiteral("revision"));
+        QJsonObject invalidSync = syncSet;
+        invalidSync[QStringLiteral("generated_ideas")] = QStringLiteral("melody");
+        modelError.clear();
+        record(QStringLiteral("jam-sync.validates-policy-and-enum"),
+            jam2::application::validateControlMessage(syncSet, modelError) &&
+            jam2::application::validateControlMessage(syncRequest, modelError) &&
+            !jam2::application::validateControlMessage(invalidSync, modelError));
+        record(QStringLiteral("jam-sync.authority-separates-set-and-request"),
+            jam2::application::evaluateControlMessage(
+                syncSet, jam2::application::ControlMessageSource::Coordinator).accepted &&
+            !jam2::application::evaluateControlMessage(
+                syncSet, jam2::application::ControlMessageSource::AuthenticatedPeer).accepted &&
+            jam2::application::evaluateControlMessage(
+                syncRequest, jam2::application::ControlMessageSource::AuthenticatedPeer).accepted &&
+            !jam2::application::evaluateControlMessage(
+                syncRequest, jam2::application::ControlMessageSource::Coordinator).accepted);
+
+        const QJsonObject metronomeSet{
+            {QStringLiteral("type"), QStringLiteral("jam.metronome.state.set")},
+            {QStringLiteral("enabled"), true},
+        };
+        QJsonObject metronomeRequest = metronomeSet;
+        metronomeRequest[QStringLiteral("type")] =
+            QStringLiteral("jam.metronome.state.request");
+        record(QStringLiteral("jam-sync.metronome-state-is-authoritative"),
+            jam2::application::evaluateControlMessage(
+                metronomeSet, jam2::application::ControlMessageSource::Coordinator).accepted &&
+            !jam2::application::evaluateControlMessage(
+                metronomeSet, jam2::application::ControlMessageSource::AuthenticatedPeer).accepted &&
+            jam2::application::evaluateControlMessage(
+                metronomeRequest, jam2::application::ControlMessageSource::AuthenticatedPeer).accepted);
+    }
     record(QStringLiteral("track-sync.classifies-all-control-payloads"),
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("song.set")) &&
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("practice.references.render")) &&
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.track.share.request")) &&
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.track.batch.offer")) &&
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.track.batch.complete")) &&
+        jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.recording.state")) &&
+        jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.recording.group.start")) &&
+        jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.recording.group.finish")) &&
+        jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.recording.group.recover.request")) &&
+        jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.recording.group.recover")) &&
+        jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.recording.resync.request")) &&
+        jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.recording.resync.state")) &&
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.asset.request")) &&
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.asset.start")) &&
         jam2::application::isTrackSyncControlMessageType(QStringLiteral("looper.asset.done")) &&
@@ -6634,6 +6820,92 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             QStringLiteral("looper.asset.request")) &&
         !jam2::application::isManualTrackShareControlMessageType(
             QStringLiteral("song.set")));
+    {
+        const QJsonObject recordingState{
+            {QStringLiteral("type"), QStringLiteral("looper.recording.state")},
+            {QStringLiteral("state_revision"), 3},
+            {QStringLiteral("phase"), QStringLiteral("count-in")},
+            {QStringLiteral("bank"), 1},
+            {QStringLiteral("lane_id"), QStringLiteral("12345678-1234-1234-1234-123456789abc")},
+            {QStringLiteral("lane_name"), QStringLiteral("Guitar take")},
+            {QStringLiteral("count_in_remaining"), 4},
+            {QStringLiteral("count_in_bars"), 1},
+            {QStringLiteral("group_id"), QStringLiteral("abcdef01-1234-1234-1234-123456789abc")},
+            {QStringLiteral("source_peer_token"), QString(32, QLatin1Char('1'))},
+        };
+        QJsonObject invalidRecordingState = recordingState;
+        invalidRecordingState[QStringLiteral("phase")] = QStringLiteral("starting-soon");
+        modelError.clear();
+        record(QStringLiteral("track-recording-state.accepts-bounded-phase-and-rejects-unknown"),
+            jam2::application::validateControlMessage(recordingState, modelError) &&
+            !jam2::application::validateControlMessage(invalidRecordingState, modelError));
+
+        const QJsonObject groupStart{
+            {QStringLiteral("type"), QStringLiteral("looper.recording.group.start")},
+            {QStringLiteral("group_id"), QStringLiteral("abcdef01-1234-1234-1234-123456789abc")},
+            {QStringLiteral("participants"), QJsonArray{
+                QString(32, QLatin1Char('1')),
+                QString(32, QLatin1Char('2'))}},
+            {QStringLiteral("count_in_bars"), 1},
+            {QStringLiteral("countdown_abs_beat"), QStringLiteral("16")},
+            {QStringLiteral("target_abs_beat"), QStringLiteral("20")},
+        };
+        QJsonObject duplicateParticipant = groupStart;
+        duplicateParticipant[QStringLiteral("participants")] = QJsonArray{
+            QString(32, QLatin1Char('1')),
+            QString(32, QLatin1Char('1'))};
+        const QJsonObject groupFinish{
+            {QStringLiteral("type"), QStringLiteral("looper.recording.group.finish")},
+            {QStringLiteral("group_id"), QStringLiteral("abcdef01-1234-1234-1234-123456789abc")},
+        };
+        const QJsonObject groupRecoverRequest{
+            {QStringLiteral("type"),
+                QStringLiteral("looper.recording.group.recover.request")},
+            {QStringLiteral("group_id"),
+                QStringLiteral("abcdef01-1234-1234-1234-123456789abc")},
+        };
+        const QJsonObject groupRecover{
+            {QStringLiteral("type"),
+                QStringLiteral("looper.recording.group.recover")},
+            {QStringLiteral("group_id"),
+                QStringLiteral("abcdef01-1234-1234-1234-123456789abc")},
+        };
+        const QJsonObject resyncRequest{
+            {QStringLiteral("type"), QStringLiteral("looper.recording.resync.request")},
+        };
+        const QJsonObject resyncState{
+            {QStringLiteral("type"), QStringLiteral("looper.recording.resync.state")},
+            {QStringLiteral("track_playing"), true},
+            {QStringLiteral("active_bank"), 2},
+        };
+        modelError.clear();
+        record(QStringLiteral("track-recording-group.validates-membership-and-boundary"),
+            jam2::application::validateControlMessage(groupStart, modelError) &&
+            !jam2::application::validateControlMessage(duplicateParticipant, modelError));
+        record(QStringLiteral("track-recording-group.authority-separates-coordination"),
+            jam2::application::evaluateControlMessage(
+                groupStart, jam2::application::ControlMessageSource::Coordinator).accepted &&
+            !jam2::application::evaluateControlMessage(
+                groupStart, jam2::application::ControlMessageSource::AuthenticatedPeer).accepted &&
+            jam2::application::evaluateControlMessage(
+                groupFinish, jam2::application::ControlMessageSource::Coordinator).accepted &&
+            jam2::application::evaluateControlMessage(
+                groupRecoverRequest,
+                jam2::application::ControlMessageSource::AuthenticatedPeer).accepted &&
+            !jam2::application::evaluateControlMessage(
+                groupRecoverRequest,
+                jam2::application::ControlMessageSource::Coordinator).accepted &&
+            jam2::application::evaluateControlMessage(
+                groupRecover,
+                jam2::application::ControlMessageSource::Coordinator).accepted &&
+            !jam2::application::evaluateControlMessage(
+                groupRecover,
+                jam2::application::ControlMessageSource::AuthenticatedPeer).accepted &&
+            jam2::application::evaluateControlMessage(
+                resyncRequest, jam2::application::ControlMessageSource::AuthenticatedPeer).accepted &&
+            jam2::application::evaluateControlMessage(
+                resyncState, jam2::application::ControlMessageSource::Coordinator).accepted);
+    }
     {
         const QString switchId = QStringLiteral("abcdef01-1234-1234-1234-123456789abc");
         const QJsonObject prepare{
@@ -6679,6 +6951,12 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         {QStringLiteral("sha256"), QString(64, QLatin1Char('a'))},
         {QStringLiteral("name"), QStringLiteral("Peer WAV")},
         {QStringLiteral("sample_rate"), 48000},
+        {QStringLiteral("source_frames"), QStringLiteral("96000")},
+        {QStringLiteral("start_frame"), QStringLiteral("48000")},
+        {QStringLiteral("stop_frame"), QStringLiteral("144000")},
+        {QStringLiteral("loop_start_frame"), QStringLiteral("0")},
+        {QStringLiteral("loop_end_frame"), QStringLiteral("96000")},
+        {QStringLiteral("loop_enabled"), false},
     };
     const QJsonObject validTrackOffer{
         {QStringLiteral("type"), QStringLiteral("looper.track.batch.offer")},
@@ -6697,6 +6975,22 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             validTrackOffer,
             jam2::application::ControlMessageSource::AuthenticatedPeer).accepted);
     {
+        QJsonObject invalidDurationTrack = validTrack;
+        invalidDurationTrack[QStringLiteral("source_frames")] = QStringLiteral("-1");
+        QJsonObject invalidDurationOffer = validTrackOffer;
+        invalidDurationOffer[QStringLiteral("tracks")] = QJsonArray{invalidDurationTrack};
+        QJsonObject excessiveDurationTrack = validTrack;
+        excessiveDurationTrack[QStringLiteral("source_frames")] = QString::number(
+            jam2::application::limits::kMaximumAssetFrames + 1);
+        QJsonObject excessiveDurationOffer = validTrackOffer;
+        excessiveDurationOffer[QStringLiteral("tracks")] =
+            QJsonArray{excessiveDurationTrack};
+        modelError.clear();
+        record(QStringLiteral("track-share.duration-and-placement-metadata-is-bounded"),
+            !jam2::application::validateControlMessage(invalidDurationOffer, modelError) &&
+            !jam2::application::validateControlMessage(excessiveDurationOffer, modelError));
+    }
+    {
         LooperProject additive;
         LooperLane creatorLane;
         creatorLane.id = QStringLiteral("creator-lane");
@@ -6710,6 +7004,95 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             creatorAdded && peerAdded && additive.banks().at(0).lanes.size() == 2 &&
             additive.banks().at(0).lanes.at(0).assetHash !=
                 additive.banks().at(0).lanes.at(1).assetHash);
+    }
+    {
+        LooperProject local;
+        LooperLane retained;
+        retained.id = QStringLiteral("retained-lane");
+        retained.assetHash = QString(64, QLatin1Char('a'));
+        retained.assetPath = QStringLiteral("received/retained.wav");
+        retained.name = QStringLiteral("Old name");
+        retained.sourceFrames = 96000;
+        retained.gainDb = -7.5;
+        retained.muted = true;
+        LooperLane removed;
+        removed.id = QStringLiteral("removed-lane");
+        removed.assetHash = QString(64, QLatin1Char('b'));
+        removed.assetPath = QStringLiteral("received/removed.wav");
+        const bool localReady = local.appendLane(0, retained) && local.appendLane(0, removed);
+
+        LooperProject authoritative;
+        LooperLane remote = retained;
+        remote.assetPath.clear();
+        remote.name = QStringLiteral("Remote name");
+        remote.gainDb = 0.0;
+        remote.muted = false;
+        const bool remoteReady = authoritative.appendLane(0, remote);
+        QJsonObject song{{QStringLiteral("looper"), authoritative.toJson(true)}};
+        (void)mergeSynchronizedLooperLanes(song, local);
+        LooperProject merged;
+        const bool mergedReady = merged.loadJson(song.value(QStringLiteral("looper")).toObject());
+        record(QStringLiteral("track-sync.authoritative-removal-converges-and-keeps-local-mix"),
+            localReady && remoteReady && mergedReady &&
+            merged.banks().at(0).lanes.size() == 1 &&
+            merged.banks().at(0).lanes.at(0).name == QStringLiteral("Remote name") &&
+            merged.banks().at(0).lanes.at(0).sourceFrames == 96000 &&
+            std::abs(merged.banks().at(0).lanes.at(0).gainDb + 7.5) < 0.000001 &&
+            merged.banks().at(0).lanes.at(0).muted);
+    }
+    {
+        LooperProject base;
+        LooperLane edited;
+        edited.id = QStringLiteral("edited-lane");
+        edited.name = QStringLiteral("Base name");
+        edited.assetHash = QString(64, QLatin1Char('a'));
+        edited.sampleRate = 48000;
+        edited.sourceFrames = 96000;
+        LooperLane changedBeforeDelete;
+        changedBeforeDelete.id = QStringLiteral("changed-before-delete");
+        changedBeforeDelete.name = QStringLiteral("Original");
+        LooperLane unchangedDelete;
+        unchangedDelete.id = QStringLiteral("unchanged-delete");
+        unchangedDelete.name = QStringLiteral("Delete me");
+        const bool baseReady = base.appendLane(0, edited) &&
+            base.appendLane(0, changedBeforeDelete) &&
+            base.appendLane(0, unchangedDelete);
+        LooperProject current = base;
+        current.banks()[0].lanes[0].name = QStringLiteral("Host rename");
+        current.banks()[0].lanes[1].name = QStringLiteral("Host changed");
+        LooperProject proposed = base;
+        proposed.banks()[0].lanes[0].startFrame = 48000;
+        proposed.banks()[0].lanes.removeAt(2);
+        proposed.banks()[0].lanes.removeAt(1);
+        const QJsonObject baseSong{{QStringLiteral("looper"), base.toJson(true)}};
+        const QJsonObject currentSong{{QStringLiteral("looper"), current.toJson(true)}};
+        const QJsonObject proposedSong{{QStringLiteral("looper"), proposed.toJson(true)}};
+        int changes = 0;
+        int conflicts = 0;
+        const QJsonObject mergedSong = mergeConcurrentLooperMetadata(
+            baseSong, currentSong, proposedSong, &changes, &conflicts);
+        LooperProject merged;
+        const bool loaded = merged.loadJson(
+            mergedSong.value(QStringLiteral("looper")).toObject());
+        bool editedMerged = false;
+        bool changedPreserved = false;
+        bool unchangedRemoved = true;
+        if (loaded) {
+            for (const LooperLane& lane : merged.banks().at(0).lanes) {
+                if (lane.id == edited.id) {
+                    editedMerged = lane.name == QStringLiteral("Host rename") &&
+                        lane.startFrame == 48000;
+                } else if (lane.id == changedBeforeDelete.id) {
+                    changedPreserved = lane.name == QStringLiteral("Host changed");
+                } else if (lane.id == unchangedDelete.id) {
+                    unchangedRemoved = false;
+                }
+            }
+        }
+        record(QStringLiteral(
+            "track-sync.concurrent-metadata-three-way-merge-preserves-nonconflicts"),
+            baseReady && loaded && editedMerged && changedPreserved &&
+            unchangedRemoved && changes >= 2 && conflicts >= 1);
     }
     {
         LooperProject project;
@@ -6731,6 +7114,109 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         jam2::gui::trackTimelineBarNumber(3, 4) == 0 &&
         jam2::gui::trackTimelineBarNumber(4, 4) == 2 &&
         jam2::gui::trackTimelineBarNumber(8, 4) == 3);
+    record(QStringLiteral("section-timeline.long-recording-and-moved-wav-round-to-bars"),
+        jam2::gui::sectionBeatCountForTimelineEnd(
+            2304000, 48000, 120.0, 1, 4) == 96 &&
+        jam2::gui::sectionBeatCountForTimelineEnd(
+            2016000, 48000, 120.0, 1, 4) == 84 &&
+        jam2::gui::sectionExtensionPreviewFrames(1152000, 2304000) == 2304000 &&
+        jam2::gui::sectionExtensionPreviewFrames(2304000, 1152000) == 2304000);
+    {
+        constexpr int sampleRate = 48000;
+        constexpr double bpm = 110.0;
+        constexpr int beats = 16;
+        const double exactFrames =
+            beats * static_cast<double>(sampleRate) * 60.0 / bpm;
+        const qint64 renderedFrames = static_cast<qint64>(std::ceil(exactFrames));
+        record(QStringLiteral(
+            "section-timeline.rendered-frame-rounding-does-not-add-empty-bar"),
+            renderedFrames == 418910 &&
+            jam2::gui::sectionBeatCountForTimelineEnd(
+                renderedFrames, sampleRate, bpm, 1, 4) == beats &&
+            jam2::gui::sectionBeatCountForTimelineEnd(
+                renderedFrames + 1, sampleRate, bpm, 1, 4) == beats + 4);
+    }
+    record(QStringLiteral("section-overview.pagination-is-contained-to-thirty-two-bars"),
+        jam2::gui::sectionOverviewPageCount(32) == 1 &&
+        jam2::gui::sectionOverviewPageCount(33) == 2 &&
+        jam2::gui::sectionOverviewPageCount(96) == 3 &&
+        jam2::gui::sectionOverviewPageForBar(0, 96) == 0 &&
+        jam2::gui::sectionOverviewPageForBar(32, 96) == 1 &&
+        jam2::gui::sectionOverviewPageForBar(95, 96) == 2);
+    {
+        const auto cropped = jam2::gui::sectionTimelineCropForEnd(
+            12000, 4000, 48000, 48000, 36000);
+        const auto converted = jam2::gui::sectionTimelineCropForEnd(
+            12000, 4000, 44100, 48000, 36000);
+        const auto removed = jam2::gui::sectionTimelineCropForEnd(
+            36000, 0, 48000, 48000, 36000);
+        BeatGridModel forced;
+        forced.resizeSection(0, 12);
+        forced.setCell(0, QStringLiteral("chord"), 11, QStringLiteral("G7alt"));
+        forced.resizeSection(0, 8);
+        record(QStringLiteral(
+            "section-shrink.one-bar-override-crops-wavs-and-musical-content"),
+            !cropped.removePlacement && cropped.stopFrame == 36000 &&
+            cropped.sourceStartFrame == 4000 && cropped.sourceEndFrame == 28000 &&
+            !converted.removePlacement && converted.sourceEndFrame == 26050 &&
+            removed.removePlacement && forced.section(0).beats == 8 &&
+            forced.section(0).chords.size() == 8 &&
+            !forced.section(0).chords.contains(QStringLiteral("G7alt")));
+    }
+    {
+        BeatGridModel model;
+        model.resizeSection(0, 128);
+        model.setCell(0, QStringLiteral("chord"), 75, QStringLiteral("F#m11"));
+        model.setBeatHit(0, 95, 0, QStringLiteral("x..."));
+        record(QStringLiteral("section-trim.custom-chords-and-beats-set-safe-content-end"),
+            model.occupiedBeatCount(0) == 96);
+    }
+    {
+        BeatGridModel model;
+        model.resizeSection(0, 48);
+        model.setCell(0, QStringLiteral("chord"), 43, QStringLiteral("Bbmaj9"));
+        model.setBeatHit(0, 47, 1, QStringLiteral("..a."));
+        model.resizeSection(0, 96);
+        const bool preservedAfterExtension =
+            model.section(0).chords.value(43) == QStringLiteral("Bbmaj9") &&
+            model.section(0).beatPatterns.value(47).lanes.value(1) ==
+                QStringLiteral("..a.") &&
+            model.occupiedBeatCount(0) == 48;
+        model.resizeSection(0, model.occupiedBeatCount(0));
+        record(QStringLiteral(
+            "section-timeline.resize-preserves-custom-chord-and-beat-bars"),
+            preservedAfterExtension && model.section(0).beats == 48 &&
+            model.section(0).chords.value(43) == QStringLiteral("Bbmaj9") &&
+            model.section(0).beatPatterns.value(47).lanes.value(1) ==
+                QStringLiteral("..a."));
+    }
+    record(QStringLiteral("track-gain.control-prioritizes-practical-and-positive-range"),
+        std::abs(jam2::gui::trackGainPosition(-60.0) - 0.0) < 0.000001 &&
+        std::abs(jam2::gui::trackGainPosition(-30.0) - 0.125) < 0.000001 &&
+        std::abs(jam2::gui::trackGainPosition(0.0) - 0.625) < 0.000001 &&
+        std::abs(jam2::gui::trackGainPosition(12.0) - 1.0) < 0.000001 &&
+        std::abs(jam2::gui::trackGainDb(jam2::gui::trackGainPosition(-15.0)) + 15.0) < 0.000001 &&
+        std::abs(jam2::gui::trackGainDb(jam2::gui::trackGainPosition(6.0)) - 6.0) < 0.000001);
+    {
+        const auto roomy = jam2::gui::chordDetailGroupForWidths(
+            QVector<int>{200, 200, 200, 200}, 2, 840);
+        const auto compound = jam2::gui::chordDetailGroupForWidths(
+            QVector<int>{440, 440, 440, 440}, 2, 900);
+        const auto dense = jam2::gui::chordDetailGroupForWidths(
+            QVector<int>{700, 700, 700, 700}, 2, 500);
+        const auto extended = jam2::gui::chordDetailGroupForWidths(
+            QVector<int>{260, 520, 260}, 1, 800);
+        record(QStringLiteral("chord-detail.responsive-groups-preserve-readable-bars"),
+            roomy.start == 0 && roomy.count == 4 &&
+            compound.start == 2 && compound.count == 2 &&
+            dense.start == 2 && dense.count == 1 &&
+            extended.start == 0 && extended.count == 2);
+    }
+    record(QStringLiteral("beat-overview.meter-and-division-aware-hit-phase"),
+        std::abs(jam2::gui::beatOverviewHitPhase(4, 0, 4, 5) - 0.8) < 0.000001 &&
+        std::abs(jam2::gui::beatOverviewHitPhase(11, 0, 1, 12) - (11.0 / 12.0)) < 0.000001 &&
+        std::abs(jam2::gui::beatOverviewHitPhase(1, 2, 3, 4) - (5.0 / 12.0)) < 0.000001 &&
+        std::abs(jam2::gui::beatOverviewHitPhase(3, 7, 8, 4) - 0.96875) < 0.000001);
 
     {
         PlaybackGrid grid;
@@ -6762,6 +7248,15 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                 jam2::EngineTransportAction::TrackRestart) &&
             !jam2::is_track_sync_transport_action(
                 jam2::EngineTransportAction::RecordStop));
+        record(QStringLiteral("record-start.has-independent-recording-sync-gate"),
+            jam2::transport_sync_enabled(
+                jam2::EngineTransportAction::TrackRestart, true, false) &&
+            !jam2::transport_sync_enabled(
+                jam2::EngineTransportAction::RecordStart, true, false) &&
+            jam2::transport_sync_enabled(
+                jam2::EngineTransportAction::RecordStart, false, true) &&
+            !jam2::transport_sync_enabled(
+                jam2::EngineTransportAction::TrackRestart, false, true));
     }
     {
         TapTempoTracker tap;
@@ -6984,7 +7479,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             snapshot, MetronomeTransportController::SnapshotUpdate{});
         const bool remoteStartArmedBeforeCommit =
             workflow.globalTransportRequestedPlaying() &&
-            !workflow.globalTransportPlaying();
+            !workflow.globalTransportPlaying() &&
+            workflow.globalTransportTimelineStartFrame() == 72000;
         snapshot.engine_frame = 72000;
         snapshot.transport_pending = false;
         snapshot.transport_commit_count = 1;
@@ -6994,6 +7490,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         advanced.rawCurrentFrame = 96000;
         const bool runningWithoutWav = workflow.globalTransportPlaying() &&
             workflow.globalTransportStartFrame() == 72000 &&
+            workflow.globalTransportTimelineStartFrame() == 72000 &&
             workflow.currentTransportPositionMs(advanced, 0) == 500;
         snapshot.transport_revision = 2;
         snapshot.transport_pending = true;

@@ -52,6 +52,13 @@ bool validAssetHash(const QString& hash)
     return hash.isEmpty() || expression.match(hash).hasMatch();
 }
 
+bool validOriginKind(const QString& kind)
+{
+    return kind.isEmpty() || kind == QStringLiteral("imported") ||
+        kind == QStringLiteral("recorded") || kind == QStringLiteral("generated") ||
+        kind == QStringLiteral("peer");
+}
+
 bool validJsonFrameValue(const QJsonValue& value)
 {
     if (value.isUndefined()) {
@@ -161,6 +168,7 @@ bool LooperProject::appendLane(int bankIndex, LooperLane lane)
         lane.id.size() > kMaxIdCharacters || lane.name.size() > kMaxNameCharacters ||
         lane.assetPath.size() > kMaxPathCharacters || !validAssetHash(lane.assetHash) ||
         lane.referenceKind.size() > 16 || !validAssetHash(lane.referenceSourceSignature) ||
+        !validOriginKind(lane.originKind) ||
         !std::isfinite(lane.referenceBpm) || lane.referenceBpm < 0.0 || lane.referenceBpm > 400.0) {
         return false;
     }
@@ -229,11 +237,14 @@ QJsonObject LooperProject::toJson(bool syncCompatibleOnly) const
     for (const LooperBank& bank : banks_) {
         QJsonArray lanes;
         for (const LooperLane& lane : bank.lanes) {
-            if (syncCompatibleOnly && !lane.sampleRateCompatible) {
+            if (syncCompatibleOnly &&
+                (!lane.sampleRateCompatible ||
+                 (lane.localOnly && lane.originKind == QStringLiteral("recorded")))) {
                 continue;
             }
             QJsonObject laneObject{{"id", lane.id}, {"asset_path", lane.assetPath}, {"asset_hash", lane.assetHash},
                 {"name", lane.name}, {"sample_rate", lane.sampleRate},
+                {"source_frames", QString::number(lane.sourceFrames)},
                 {"start_frame", QString::number(lane.startFrame)}, {"stop_frame", QString::number(lane.stopFrame)},
                 {"loop_start_frame", QString::number(lane.loopStartFrame)}, {"loop_end_frame", QString::number(lane.loopEndFrame)},
                 {"loop_enabled", lane.loopEnabled},
@@ -245,6 +256,7 @@ QJsonObject LooperProject::toJson(bool syncCompatibleOnly) const
                 laneObject.insert(QStringLiteral("muted"), lane.muted);
                 laneObject.insert(QStringLiteral("solo"), lane.solo);
                 laneObject.insert(QStringLiteral("local_only"), lane.localOnly);
+                laneObject.insert(QStringLiteral("origin_kind"), lane.originKind);
             }
             lanes.append(std::move(laneObject));
         }
@@ -330,14 +342,15 @@ bool LooperProject::loadJson(const QJsonObject& object)
             for (const QString& key : {
                     QStringLiteral("id"), QStringLiteral("asset_path"),
                     QStringLiteral("asset_hash"), QStringLiteral("name"),
-                    QStringLiteral("reference_kind"), QStringLiteral("reference_source_signature")}) {
+                    QStringLiteral("reference_kind"), QStringLiteral("reference_source_signature"),
+                    QStringLiteral("origin_kind")}) {
                 const QJsonValue text = laneObject.value(key);
                 if (!text.isUndefined() && !text.isString()) {
                     return false;
                 }
             }
             for (const QString& key : {
-                    QStringLiteral("start_frame"), QStringLiteral("stop_frame"),
+                    QStringLiteral("source_frames"), QStringLiteral("start_frame"), QStringLiteral("stop_frame"),
                     QStringLiteral("loop_start_frame"), QStringLiteral("loop_end_frame")}) {
                 if (!validJsonFrameValue(laneObject.value(key))) {
                     return false;
@@ -374,6 +387,7 @@ bool LooperProject::loadJson(const QJsonObject& object)
             lane.assetHash = laneObject.value(QStringLiteral("asset_hash")).toString();
             lane.name = laneObject.value(QStringLiteral("name")).toString();
             lane.sampleRate = laneObject.value(QStringLiteral("sample_rate")).toInt();
+            lane.sourceFrames = jsonFrame(laneObject, "source_frames", 0);
             lane.startFrame = jsonFrame(laneObject, "start_frame", 0);
             lane.stopFrame = jsonFrame(laneObject, "stop_frame", -1);
             lane.loopStartFrame = jsonFrame(laneObject, "loop_start_frame", -1);
@@ -387,14 +401,24 @@ bool LooperProject::loadJson(const QJsonObject& object)
             lane.referenceBpm = laneObject.value(QStringLiteral("reference_bpm")).toDouble();
             lane.referenceStale = laneObject.value(QStringLiteral("reference_stale")).toBool();
             lane.localOnly = laneObject.value(QStringLiteral("local_only")).toBool();
+            lane.originKind = laneObject.value(QStringLiteral("origin_kind")).toString();
             if (lane.id.size() > kMaxIdCharacters || lane.name.size() > kMaxNameCharacters ||
                 lane.assetPath.size() > kMaxPathCharacters || !validAssetHash(lane.assetHash) ||
                 lane.referenceKind.size() > 16 || !validAssetHash(lane.referenceSourceSignature) ||
+                !validOriginKind(lane.originKind) ||
                 !std::isfinite(lane.gainDb) || lane.gainDb < -120.0 || lane.gainDb > 24.0 ||
                 !std::isfinite(lane.referenceBpm) || lane.referenceBpm < 0.0 || lane.referenceBpm > 400.0 ||
+                lane.sourceFrames < 0 ||
+                lane.sourceFrames > jam2::application::limits::kMaximumAssetFrames ||
                 lane.startFrame < 0 ||
+                lane.startFrame > jam2::application::limits::kMaximumLooperTimelineFrames ||
                 (lane.stopFrame >= 0 && lane.stopFrame < lane.startFrame) ||
-                (lane.loopStartFrame >= 0 && lane.loopEndFrame >= 0 && lane.loopEndFrame <= lane.loopStartFrame)) {
+                lane.stopFrame > jam2::application::limits::kMaximumLooperTimelineFrames ||
+                lane.loopStartFrame > jam2::application::limits::kMaximumAssetFrames ||
+                lane.loopEndFrame > jam2::application::limits::kMaximumAssetFrames ||
+                (lane.loopStartFrame >= 0 && lane.loopEndFrame >= 0 && lane.loopEndFrame <= lane.loopStartFrame) ||
+                (lane.sourceFrames > 0 && lane.loopStartFrame >= lane.sourceFrames) ||
+                (lane.sourceFrames > 0 && lane.loopEndFrame > lane.sourceFrames)) {
                 return false;
             }
             bank.lanes.append(std::move(lane));

@@ -6,7 +6,10 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QMap>
 #include <QSaveFile>
+#include <QSet>
 
 #include <algorithm>
 #include <filesystem>
@@ -43,6 +46,62 @@ bool isManagedPracticeReference(const LooperLane& lane)
         lane.name == QStringLiteral("Practice Support");
 }
 
+QString laneMergeKey(const QJsonObject& lane, int index)
+{
+    const QString id = lane.value(QStringLiteral("id")).toString();
+    if (!id.isEmpty()) return QStringLiteral("id:") + id;
+    const QString hash = lane.value(QStringLiteral("asset_hash")).toString();
+    if (!hash.isEmpty()) return QStringLiteral("hash:") + hash;
+    return QStringLiteral("index:%1").arg(index);
+}
+
+QMap<QString, QJsonObject> lanesByKey(const QJsonArray& lanes)
+{
+    QMap<QString, QJsonObject> mapped;
+    for (int index = 0; index < lanes.size(); ++index) {
+        mapped.insert(laneMergeKey(lanes.at(index).toObject(), index),
+            lanes.at(index).toObject());
+    }
+    return mapped;
+}
+
+QStringList laneOrder(const QJsonArray& lanes)
+{
+    QStringList order;
+    for (int index = 0; index < lanes.size(); ++index) {
+        order.append(laneMergeKey(lanes.at(index).toObject(), index));
+    }
+    return order;
+}
+
+QJsonObject mergeLaneObject(
+    const QJsonObject& base,
+    const QJsonObject& current,
+    const QJsonObject& proposed,
+    int& mergedChanges,
+    int& conflicts)
+{
+    QJsonObject merged = current;
+    QSet<QString> keys;
+    for (auto it = base.begin(); it != base.end(); ++it) keys.insert(it.key());
+    for (auto it = current.begin(); it != current.end(); ++it) keys.insert(it.key());
+    for (auto it = proposed.begin(); it != proposed.end(); ++it) keys.insert(it.key());
+    for (const QString& key : std::as_const(keys)) {
+        const QJsonValue baseValue = base.value(key);
+        const QJsonValue currentValue = current.value(key);
+        const QJsonValue proposedValue = proposed.value(key);
+        if (proposedValue == baseValue || proposedValue == currentValue) continue;
+        if (currentValue == baseValue) {
+            if (proposedValue.isUndefined()) merged.remove(key);
+            else merged.insert(key, proposedValue);
+            ++mergedChanges;
+        } else {
+            ++conflicts;
+        }
+    }
+    return merged;
+}
+
 } // namespace
 
 WavMetadata readWavMetadata(const QString& path)
@@ -55,6 +114,7 @@ WavMetadata readWavMetadata(const QString& path)
     meta.channels = static_cast<int>(inspected.info.channels);
     meta.bitsPerSample = 16;
     meta.dataBytes = static_cast<qint64>(inspected.info.data_bytes);
+    meta.frames = static_cast<qint64>(inspected.info.frames);
     const std::uint64_t durationMs = inspected.info.frames * 1000ULL / inspected.info.sample_rate;
     meta.durationMs = static_cast<int>(std::min<std::uint64_t>(
         durationMs,
@@ -145,13 +205,11 @@ int mergeSynchronizedLooperLanes(
     for (int bankIndex = 0;
          bankIndex < localProject.banks().size() && bankIndex < received.banks().size();
          ++bankIndex) {
-        const QVector<LooperLane> remoteLanes = received.banks().at(bankIndex).lanes;
-        auto& mergedLanes = received.banks()[bankIndex].lanes;
-        mergedLanes = localProject.banks().at(bankIndex).lanes;
-
-        for (LooperLane remote : remoteLanes) {
+        auto& remoteLanes = received.banks()[bankIndex].lanes;
+        const QVector<LooperLane>& localLanes = localProject.banks().at(bankIndex).lanes;
+        for (LooperLane& remote : remoteLanes) {
             auto match = std::find_if(
-                mergedLanes.begin(), mergedLanes.end(),
+                localLanes.cbegin(), localLanes.cend(),
                 [&remote](const LooperLane& local) {
                     if (!remote.assetHash.isEmpty() &&
                         local.assetHash == remote.assetHash) {
@@ -161,41 +219,48 @@ int mergeSynchronizedLooperLanes(
                     return local.assetHash == remote.assetHash ||
                         (local.assetHash.isEmpty() && local.assetPath.trimmed().isEmpty());
                 });
-            if (match != mergedLanes.end()) {
+            if (match != localLanes.cend()) {
                 const double gainDb = match->gainDb;
                 const bool muted = match->muted;
                 const bool solo = match->solo;
                 const bool localOnly = match->localOnly;
                 const QString localPath = match->assetPath;
-                *match = std::move(remote);
-                match->gainDb = gainDb;
-                match->muted = muted;
-                match->solo = solo;
-                match->localOnly = localOnly;
-                if (!localPath.trimmed().isEmpty() && !match->assetHash.isEmpty()) {
-                    match->assetPath = localPath;
+                remote.gainDb = gainDb;
+                remote.muted = muted;
+                remote.solo = solo;
+                remote.localOnly = localOnly;
+                if (!localPath.trimmed().isEmpty() && !remote.assetHash.isEmpty()) {
+                    remote.assetPath = localPath;
                 }
+            }
+        }
+
+        for (const LooperLane& local : localLanes) {
+            const bool alreadyPresent = std::any_of(
+                remoteLanes.cbegin(), remoteLanes.cend(),
+                [&local](const LooperLane& remote) {
+                    if (!local.assetHash.isEmpty() &&
+                        remote.assetHash == local.assetHash) {
+                        return true;
+                    }
+                    if (local.id.isEmpty() || remote.id != local.id) return false;
+                    return remote.assetHash == local.assetHash ||
+                        (local.assetHash.isEmpty() && local.assetPath.trimmed().isEmpty());
+                });
+            if (alreadyPresent) continue;
+
+            const bool conflictingSameLaneId = std::any_of(
+                remoteLanes.cbegin(), remoteLanes.cend(),
+                [&local](const LooperLane& remote) {
+                    return !local.id.isEmpty() && remote.id == local.id;
+                });
+            if (!isManagedPracticeReference(local) && !conflictingSameLaneId) {
                 continue;
             }
 
-            const bool idCollision = std::any_of(
-                mergedLanes.cbegin(), mergedLanes.cend(),
-                [&remote](const LooperLane& local) {
-                    return !remote.id.isEmpty() && local.id == remote.id;
-                });
-            if (idCollision) remote.id.clear();
-            (void)received.appendLane(bankIndex, std::move(remote));
-        }
-
-        for (const LooperLane& local : localProject.banks().at(bankIndex).lanes) {
-            const bool representedRemotely = std::any_of(
-                remoteLanes.cbegin(), remoteLanes.cend(),
-                [&local](const LooperLane& remote) {
-                    return (!local.assetHash.isEmpty() && remote.assetHash == local.assetHash) ||
-                        (!local.id.isEmpty() && remote.id == local.id &&
-                         remote.assetHash == local.assetHash);
-                });
-            if (!representedRemotely) ++preserved;
+            LooperLane preservedLane = local;
+            if (conflictingSameLaneId) preservedLane.id.clear();
+            if (received.appendLane(bankIndex, std::move(preservedLane))) ++preserved;
         }
     }
     song.insert(QStringLiteral("looper"), received.toJson());
@@ -243,4 +308,121 @@ int mergeQuarantinedLocalLanes(
     }
     if (preserved > 0) song.insert(QStringLiteral("looper"), received.toJson());
     return preserved;
+}
+
+QJsonObject mergeConcurrentLooperMetadata(
+    const QJsonObject& baseSong,
+    const QJsonObject& currentSong,
+    const QJsonObject& proposedSong,
+    int* mergedChanges,
+    int* conflicts)
+{
+    int changes = 0;
+    int collisions = 0;
+    QJsonObject result = currentSong;
+    const QJsonObject baseLooper = baseSong.value(QStringLiteral("looper")).toObject();
+    QJsonObject currentLooper = currentSong.value(QStringLiteral("looper")).toObject();
+    const QJsonObject proposedLooper = proposedSong.value(QStringLiteral("looper")).toObject();
+    QJsonArray baseBanks = baseLooper.value(QStringLiteral("banks")).toArray();
+    QJsonArray currentBanks = currentLooper.value(QStringLiteral("banks")).toArray();
+    const QJsonArray proposedBanks = proposedLooper.value(QStringLiteral("banks")).toArray();
+    const int bankCount = qMin(currentBanks.size(), proposedBanks.size());
+    for (int bankIndex = 0; bankIndex < bankCount; ++bankIndex) {
+        const QJsonObject baseBank = bankIndex < baseBanks.size()
+            ? baseBanks.at(bankIndex).toObject() : QJsonObject{};
+        QJsonObject currentBank = currentBanks.at(bankIndex).toObject();
+        const QJsonObject proposedBank = proposedBanks.at(bankIndex).toObject();
+        const QJsonArray baseLanes = baseBank.value(QStringLiteral("lanes")).toArray();
+        const QJsonArray currentLanes = currentBank.value(QStringLiteral("lanes")).toArray();
+        const QJsonArray proposedLanes = proposedBank.value(QStringLiteral("lanes")).toArray();
+        const auto baseMap = lanesByKey(baseLanes);
+        const auto currentMap = lanesByKey(currentLanes);
+        const auto proposedMap = lanesByKey(proposedLanes);
+        QMap<QString, QJsonObject> mergedMap;
+        QSet<QString> laneKeys;
+        for (auto it = baseMap.cbegin(); it != baseMap.cend(); ++it) laneKeys.insert(it.key());
+        for (auto it = currentMap.cbegin(); it != currentMap.cend(); ++it) laneKeys.insert(it.key());
+        for (auto it = proposedMap.cbegin(); it != proposedMap.cend(); ++it) laneKeys.insert(it.key());
+        for (const QString& key : std::as_const(laneKeys)) {
+            const bool inBase = baseMap.contains(key);
+            const bool inCurrent = currentMap.contains(key);
+            const bool inProposed = proposedMap.contains(key);
+            if (!inBase) {
+                if (inCurrent) mergedMap.insert(key, currentMap.value(key));
+                if (inProposed && !inCurrent) {
+                    mergedMap.insert(key, proposedMap.value(key));
+                    ++changes;
+                } else if (inProposed && inCurrent &&
+                           proposedMap.value(key) != currentMap.value(key)) {
+                    ++collisions;
+                }
+                continue;
+            }
+            if (!inCurrent && !inProposed) continue;
+            if (!inCurrent) {
+                if (proposedMap.value(key) != baseMap.value(key)) {
+                    mergedMap.insert(key, proposedMap.value(key));
+                    ++changes;
+                    ++collisions;
+                } else {
+                    ++changes;
+                }
+                continue;
+            }
+            if (!inProposed) {
+                if (currentMap.value(key) != baseMap.value(key)) {
+                    mergedMap.insert(key, currentMap.value(key));
+                    ++collisions;
+                } else {
+                    ++changes;
+                }
+                continue;
+            }
+            mergedMap.insert(key, mergeLaneObject(
+                baseMap.value(key), currentMap.value(key), proposedMap.value(key),
+                changes, collisions));
+        }
+        QStringList order = laneOrder(currentLanes) == laneOrder(baseLanes)
+            ? laneOrder(proposedLanes) : laneOrder(currentLanes);
+        for (auto it = mergedMap.cbegin(); it != mergedMap.cend(); ++it) {
+            if (!order.contains(it.key())) order.append(it.key());
+        }
+        QJsonArray mergedLanes;
+        for (const QString& key : std::as_const(order)) {
+            if (mergedMap.contains(key)) mergedLanes.append(mergedMap.value(key));
+        }
+        currentBank.insert(QStringLiteral("lanes"), mergedLanes);
+        for (const QString& key : {QStringLiteral("id"), QStringLiteral("timing")}) {
+            const QJsonValue baseValue = baseBank.value(key);
+            const QJsonValue currentValue = currentBank.value(key);
+            const QJsonValue proposedValue = proposedBank.value(key);
+            if (proposedValue != baseValue && proposedValue != currentValue) {
+                if (currentValue == baseValue) {
+                    currentBank.insert(key, proposedValue);
+                    ++changes;
+                } else {
+                    ++collisions;
+                }
+            }
+        }
+        currentBanks.replace(bankIndex, currentBank);
+    }
+    currentLooper.insert(QStringLiteral("banks"), currentBanks);
+    for (const QString& key : {QStringLiteral("arrangement"), QStringLiteral("active_bank")}) {
+        const QJsonValue baseValue = baseLooper.value(key);
+        const QJsonValue currentValue = currentLooper.value(key);
+        const QJsonValue proposedValue = proposedLooper.value(key);
+        if (proposedValue != baseValue && proposedValue != currentValue) {
+            if (currentValue == baseValue) {
+                currentLooper.insert(key, proposedValue);
+                ++changes;
+            } else {
+                ++collisions;
+            }
+        }
+    }
+    result.insert(QStringLiteral("looper"), currentLooper);
+    if (mergedChanges) *mergedChanges = changes;
+    if (conflicts) *conflicts = collisions;
+    return result;
 }

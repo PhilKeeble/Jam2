@@ -72,6 +72,7 @@ public:
     void setMusicalDivision(int section, int beat, int division);
     void setMusicalStep(int section, int beat, int step, const QString& lane, const QString& text);
     void resizeSection(int section, int beats);
+    int occupiedBeatCount(int section) const;
     void resizeAllSections(int beats);
     void addSection(int beats = -1);
     void duplicateSection(int index);

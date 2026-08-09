@@ -46,16 +46,39 @@ bool isBoundedString(const QJsonValue& value, qsizetype maximum)
     return value.isString() && value.toString().size() <= maximum;
 }
 
+bool readJsonFrame(const QJsonValue& value, qint64 fallback, qint64& result);
+
 bool isValidTrackOffer(const QJsonObject& track)
 {
     const QString targetLaneId = track.value(QStringLiteral("target_lane_id")).toString();
     const QString hash = track.value(QStringLiteral("sha256")).toString().toLower();
+    qint64 sourceFrames = 0;
+    qint64 startFrame = 0;
+    qint64 stopFrame = -1;
+    qint64 loopStartFrame = -1;
+    qint64 loopEndFrame = -1;
     return isUuid(track.value(QStringLiteral("recording_id")).toString()) &&
         isBoundedInteger(track.value(QStringLiteral("bank")), 0, 3) &&
         !targetLaneId.isEmpty() && targetLaneId.size() <= 80 &&
         isSha256Hex(hash) && isBoundedString(track.value(QStringLiteral("name")), 512) &&
         isBoundedInteger(track.value(QStringLiteral("sample_rate")),
-            limits::kMinimumSampleRate, limits::kMaximumSampleRate);
+            limits::kMinimumSampleRate, limits::kMaximumSampleRate) &&
+        readJsonFrame(track.value(QStringLiteral("source_frames")), 0, sourceFrames) &&
+        readJsonFrame(track.value(QStringLiteral("start_frame")), 0, startFrame) &&
+        readJsonFrame(track.value(QStringLiteral("stop_frame")), -1, stopFrame) &&
+        readJsonFrame(track.value(QStringLiteral("loop_start_frame")), -1, loopStartFrame) &&
+        readJsonFrame(track.value(QStringLiteral("loop_end_frame")), -1, loopEndFrame) &&
+        sourceFrames >= 0 && sourceFrames <= limits::kMaximumAssetFrames &&
+        startFrame >= 0 && startFrame <= limits::kMaximumLooperTimelineFrames &&
+        (stopFrame < 0 || stopFrame >= startFrame) &&
+        (stopFrame < 0 || stopFrame <= limits::kMaximumLooperTimelineFrames) &&
+        (loopStartFrame < 0 || loopStartFrame <= limits::kMaximumAssetFrames) &&
+        (loopEndFrame < 0 || loopEndFrame <= limits::kMaximumAssetFrames) &&
+        (loopStartFrame < 0 || loopEndFrame < 0 || loopEndFrame > loopStartFrame) &&
+        (sourceFrames <= 0 || loopStartFrame < 0 || loopStartFrame < sourceFrames) &&
+        (sourceFrames <= 0 || loopEndFrame < 0 || loopEndFrame <= sourceFrames) &&
+        (track.value(QStringLiteral("loop_enabled")).isUndefined() ||
+         track.value(QStringLiteral("loop_enabled")).isBool());
 }
 
 bool isOptionalBoundedString(const QJsonObject& object, const QString& key, qsizetype maximum)
@@ -306,6 +329,7 @@ bool validateRemoteLooper(const QJsonObject& looper, QString& reason)
             const QJsonValue gain = lane.value(QStringLiteral("gain_db"));
             const QJsonValue referenceBpm = lane.value(QStringLiteral("reference_bpm"));
             qint64 startFrame = 0;
+            qint64 sourceFrames = 0;
             qint64 stopFrame = -1;
             qint64 loopStartFrame = -1;
             qint64 loopEndFrame = -1;
@@ -321,12 +345,20 @@ bool validateRemoteLooper(const QJsonObject& looper, QString& reason)
                 (!referenceBpm.isUndefined() &&
                  (!referenceBpm.isDouble() || !std::isfinite(referenceBpm.toDouble()) ||
                   referenceBpm.toDouble() < 0.0 || referenceBpm.toDouble() > 400.0)) ||
+                !readJsonFrame(lane.value(QStringLiteral("source_frames")), 0, sourceFrames) ||
                 !readJsonFrame(lane.value(QStringLiteral("start_frame")), 0, startFrame) ||
                 !readJsonFrame(lane.value(QStringLiteral("stop_frame")), -1, stopFrame) ||
                 !readJsonFrame(lane.value(QStringLiteral("loop_start_frame")), -1, loopStartFrame) ||
                 !readJsonFrame(lane.value(QStringLiteral("loop_end_frame")), -1, loopEndFrame) ||
-                startFrame < 0 || (stopFrame >= 0 && stopFrame < startFrame) ||
-                (loopStartFrame >= 0 && loopEndFrame >= 0 && loopEndFrame <= loopStartFrame)) {
+                sourceFrames < 0 || sourceFrames > limits::kMaximumAssetFrames ||
+                startFrame < 0 || startFrame > limits::kMaximumLooperTimelineFrames ||
+                (stopFrame >= 0 && stopFrame < startFrame) ||
+                stopFrame > limits::kMaximumLooperTimelineFrames ||
+                loopStartFrame > limits::kMaximumAssetFrames ||
+                loopEndFrame > limits::kMaximumAssetFrames ||
+                (loopStartFrame >= 0 && loopEndFrame >= 0 && loopEndFrame <= loopStartFrame) ||
+                (sourceFrames > 0 && loopStartFrame >= sourceFrames) ||
+                (sourceFrames > 0 && loopEndFrame > sourceFrames)) {
                 reason = QStringLiteral("song looper lane values are invalid");
                 return false;
             }
@@ -384,6 +416,13 @@ bool jam2::application::isTrackSyncControlMessageType(const QString& type) noexc
         type == QStringLiteral("looper.track.share.request") ||
         type == QStringLiteral("looper.track.batch.offer") ||
         type == QStringLiteral("looper.track.batch.complete") ||
+        type == QStringLiteral("looper.recording.state") ||
+        type == QStringLiteral("looper.recording.group.start") ||
+        type == QStringLiteral("looper.recording.group.finish") ||
+        type == QStringLiteral("looper.recording.group.recover.request") ||
+        type == QStringLiteral("looper.recording.group.recover") ||
+        type == QStringLiteral("looper.recording.resync.request") ||
+        type == QStringLiteral("looper.recording.resync.state") ||
         type == QStringLiteral("looper.asset.request") ||
         type == QStringLiteral("looper.asset.start") ||
         type == QStringLiteral("looper.asset.done") ||
@@ -499,6 +538,23 @@ bool jam2::application::validateControlMessage(
         return isBoundedString(message.value(QStringLiteral("message")), 4096)
             ? true : (reason = QStringLiteral("session error text is invalid"), false);
     }
+    if (type == QStringLiteral("jam.sync.set") ||
+        type == QStringLiteral("jam.sync.request")) {
+        const QString ideas = message.value(QStringLiteral("generated_ideas")).toString();
+        return message.value(QStringLiteral("track_lanes")).isBool() &&
+            message.value(QStringLiteral("auto_share_wavs")).isBool() &&
+            message.value(QStringLiteral("global_playback")).isBool() &&
+            (ideas == QStringLiteral("full") || ideas == QStringLiteral("chords") ||
+             ideas == QStringLiteral("beats") || ideas == QStringLiteral("off")) &&
+            message.value(QStringLiteral("metronome_state")).isBool() &&
+            message.value(QStringLiteral("recordings")).isBool()
+            ? true : (reason = QStringLiteral("jam sync policy is invalid"), false);
+    }
+    if (type == QStringLiteral("jam.metronome.state.set") ||
+        type == QStringLiteral("jam.metronome.state.request")) {
+        return message.value(QStringLiteral("enabled")).isBool()
+            ? true : (reason = QStringLiteral("shared metronome state is invalid"), false);
+    }
     if (type == QStringLiteral("beat.set")) {
         const QString lane = message.value(QStringLiteral("lane")).toString();
         return isBoundedInteger(message.value(QStringLiteral("section")), 0, 3) &&
@@ -552,7 +608,15 @@ bool jam2::application::validateControlMessage(
     }
     if (type == QStringLiteral("song.set")) {
         const QJsonValue songValue = message.value(QStringLiteral("song"));
+        const QJsonValue syncScopeValue = message.value(QStringLiteral("sync_scope"));
+        const QString syncScope = syncScopeValue.toString();
         if (!songValue.isObject() ||
+            (!syncScopeValue.isUndefined() &&
+             (syncScopeValue.isString() == false ||
+              (syncScope != QStringLiteral("tracks") &&
+               syncScope != QStringLiteral("idea.full") &&
+               syncScope != QStringLiteral("idea.chords") &&
+               syncScope != QStringLiteral("idea.beats")))) ||
             !isBoundedInteger(
                 message.value(QStringLiteral("arrangement_revision")),
                 0,
@@ -645,6 +709,83 @@ bool jam2::application::validateControlMessage(
                 limits::kLooperBankCount * limits::kMaximumLooperLanesPerBank)
             ? true : (reason = QStringLiteral("track batch completion is invalid"), false);
     }
+    if (type == QStringLiteral("looper.recording.state")) {
+        const QString phase = message.value(QStringLiteral("phase")).toString();
+        const QString sourceToken = message.value(
+            QStringLiteral("source_peer_token")).toString();
+        const bool validPhase = phase == QStringLiteral("idle") ||
+            phase == QStringLiteral("armed") ||
+            phase == QStringLiteral("ready") ||
+            phase == QStringLiteral("waiting") ||
+            phase == QStringLiteral("count-in") ||
+            phase == QStringLiteral("recording") ||
+            phase == QStringLiteral("complete") ||
+            phase == QStringLiteral("finalizing");
+        const bool laneRequired = phase != QStringLiteral("idle");
+        const QString laneId = message.value(QStringLiteral("lane_id")).toString();
+        return validPhase &&
+            isBoundedInteger(message.value(QStringLiteral("state_revision")),
+                0, (std::numeric_limits<int>::max)()) &&
+            isBoundedInteger(message.value(QStringLiteral("bank")), 0, 3) &&
+            isBoundedString(message.value(QStringLiteral("lane_id")),
+                limits::kMaximumLooperIdCharacters) &&
+            (!laneRequired || !laneId.isEmpty()) &&
+            isBoundedString(message.value(QStringLiteral("lane_name")),
+                limits::kMaximumLooperNameCharacters) &&
+            isBoundedInteger(message.value(QStringLiteral("count_in_remaining")),
+                0, limits::kMaximumBeatsPerSection * 8) &&
+            isBoundedInteger(message.value(QStringLiteral("count_in_bars")), 0, 8) &&
+            (message.value(QStringLiteral("group_id")).toString().isEmpty() ||
+             isUuid(message.value(QStringLiteral("group_id")).toString())) &&
+            (sourceToken.isEmpty() ||
+             jam2::control_protocol::peerIdFromToken(sourceToken).has_value())
+            ? true : (reason = QStringLiteral("track recording state is invalid"), false);
+    }
+    if (type == QStringLiteral("looper.recording.group.start")) {
+        const QJsonValue participantsValue = message.value(QStringLiteral("participants"));
+        const QJsonArray participants = participantsValue.toArray();
+        bool countdownOk = false;
+        bool targetOk = false;
+        const quint64 countdownBeat = message.value(
+            QStringLiteral("countdown_abs_beat")).toString().toULongLong(&countdownOk);
+        const quint64 targetBeat = message.value(
+            QStringLiteral("target_abs_beat")).toString().toULongLong(&targetOk);
+        QSet<QString> uniqueParticipants;
+        for (const QJsonValue& value : participants) {
+            const QString token = value.toString();
+            if (!value.isString() ||
+                !jam2::control_protocol::peerIdFromToken(token).has_value() ||
+                uniqueParticipants.contains(token)) {
+                reason = QStringLiteral("recording group participant is invalid");
+                return false;
+            }
+            uniqueParticipants.insert(token);
+        }
+        return isUuid(message.value(QStringLiteral("group_id")).toString()) &&
+            participantsValue.isArray() && !participants.isEmpty() &&
+            participants.size() <= 64 &&
+            isBoundedInteger(message.value(QStringLiteral("count_in_bars")), 0, 8) &&
+            countdownOk && targetOk && targetBeat >= countdownBeat &&
+            targetBeat <= (std::numeric_limits<qint64>::max)()
+            ? true : (reason = QStringLiteral("recording group start is invalid"), false);
+    }
+    if (type == QStringLiteral("looper.recording.group.finish")) {
+        return isUuid(message.value(QStringLiteral("group_id")).toString())
+            ? true : (reason = QStringLiteral("recording group finish is invalid"), false);
+    }
+    if (type == QStringLiteral("looper.recording.group.recover.request") ||
+        type == QStringLiteral("looper.recording.group.recover")) {
+        return isUuid(message.value(QStringLiteral("group_id")).toString())
+            ? true : (reason = QStringLiteral("recording group recovery is invalid"), false);
+    }
+    if (type == QStringLiteral("looper.recording.resync.request")) {
+        return true;
+    }
+    if (type == QStringLiteral("looper.recording.resync.state")) {
+        return message.value(QStringLiteral("track_playing")).isBool() &&
+            isBoundedInteger(message.value(QStringLiteral("active_bank")), 0, 3)
+            ? true : (reason = QStringLiteral("recording resync state is invalid"), false);
+    }
     if (type == QStringLiteral("looper.asset.request")) {
         const QJsonValue arrangementRevision =
             message.value(QStringLiteral("arrangement_revision"));
@@ -701,13 +842,24 @@ jam2::application::ControlMessageDecision jam2::application::evaluateControlMess
         type == QStringLiteral("session.membership") ||
         type == QStringLiteral("session.heartbeat") ||
         type == QStringLiteral("session.end") ||
+        type == QStringLiteral("jam.sync.set") ||
+        type == QStringLiteral("jam.metronome.state.set") ||
         type == QStringLiteral("bank.prepare") ||
         type == QStringLiteral("bank.cancel") ||
-        type == QStringLiteral("bank.switch");
+        type == QStringLiteral("bank.switch") ||
+        type == QStringLiteral("looper.recording.group.start") ||
+        type == QStringLiteral("looper.recording.group.finish") ||
+        type == QStringLiteral("looper.recording.group.recover") ||
+        type == QStringLiteral("looper.recording.resync.state");
+
     const bool peerOnly = type == QStringLiteral("session.heartbeat.ack") ||
         type == QStringLiteral("session.endpoint.update") ||
+        type == QStringLiteral("jam.sync.request") ||
+        type == QStringLiteral("jam.metronome.state.request") ||
         type == QStringLiteral("bank.ready") ||
-        type == QStringLiteral("bank.request");
+        type == QStringLiteral("bank.request") ||
+        type == QStringLiteral("looper.recording.group.recover.request") ||
+        type == QStringLiteral("looper.recording.resync.request");
     const bool internalOnly = type == QStringLiteral("debug.lifecycle.disconnect");
 
     const bool authorized = internalOnly

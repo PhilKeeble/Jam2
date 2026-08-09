@@ -30,6 +30,8 @@ public:
     bool updatePeers(const std::vector<Jam2RuntimePeer>& peers);
     bool setPeerGainDb(std::uint64_t peerId, double gainDb) noexcept;
     void setTrackSyncEnabled(bool enabled) noexcept;
+    void setRecordingSyncEnabled(bool enabled) noexcept;
+    void setLaneRecordingIsolationEnabled(bool enabled) noexcept;
 
     jam2::EngineSnapshot engineSnapshot() const noexcept;
     jam2::EngineGuiPeakSnapshot consumeGuiPeaks() noexcept;
@@ -58,6 +60,8 @@ private:
     std::thread network_worker_;
     std::atomic<bool> network_running_{false};
     std::atomic<bool> track_sync_enabled_{true};
+    std::atomic<bool> recording_sync_enabled_{true};
+    std::atomic<bool> lane_recording_isolation_enabled_{false};
     mutable std::mutex network_snapshot_mutex_;
     std::optional<Jam2NetworkOperationalSnapshot> network_snapshot_;
     QTimer poll_timer_;

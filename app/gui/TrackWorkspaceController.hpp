@@ -32,6 +32,8 @@ public:
         std::function<bool(const QString&, const QJsonObject&)> sendControl;
         std::function<bool(const QString&, const QByteArray&)> sendBinary;
         std::function<void()> incomingAssetAccepted;
+        std::function<void(const QString&)> incomingAssetAbandoned;
+        std::function<void(const QString&, const QString&, bool)> assetProgress;
     };
 
     struct LooperWaveformPreview {
@@ -50,6 +52,12 @@ public:
         QString assetHash;
         QString name;
         int sampleRate = 0;
+        qint64 sourceFrames = 0;
+        qint64 startFrame = 0;
+        qint64 stopFrame = -1;
+        qint64 loopStartFrame = -1;
+        qint64 loopEndFrame = -1;
+        bool loopEnabled = false;
     };
 
     enum class IncomingAssetWorkflow {
@@ -77,7 +85,14 @@ public:
         const QString& hash,
         const QString& sourcePeerToken) const override;
     void abandonIncomingAsset(const QString& hash) override;
-    void acceptIncomingAsset(const QString& hash, const QString& path) override;
+    void acceptIncomingAsset(
+        const QString& hash,
+        const QString& path,
+        qint64 sourceFrames) override;
+    void noteAssetProgress(
+        const QString& hash,
+        const QString& peerToken,
+        bool receiving) override;
     void appendAssetLog(const QString& message) override;
     bool startAssetFileTask(
         std::function<void()> work,
@@ -118,11 +133,15 @@ public:
     QSet<QString> appliedTrackContributionIds;
     QMap<QString, QJsonObject> localTrackOffers;
     QMap<QString, QString> trackOfferAssetPaths;
-    QString outgoingTrackShareBatchId;
+    QMap<QString, QSet<QString>> outgoingTrackSharePendingPeers;
+    QMap<QString, QSet<QString>> outgoingTrackShareBatchHashes;
+    QMap<QString, qint64> outgoingTrackShareLastProgressMs;
+    QMap<QString, qint64> incomingTrackShareLastProgressMs;
     QJsonObject heldTrackShareSongSet;
     QString heldTrackShareSongSourcePeerToken;
     QMap<QString, QString> pendingTrackAssetSources;
     QSet<QString> validatedTrackAssetHashes;
+    QMap<QString, int> incomingAssetRetryAttempts;
     IncomingAssetWorkflow incomingAssetWorkflow = IncomingAssetWorkflow::None;
     QString incomingAssetHash;
     QString incomingAssetSourcePeerToken;
@@ -138,6 +157,7 @@ public:
     QString deferredSongSetSourcePeerToken;
     int looperArrangementRevision = 0;
     int lastAppliedHostArrangementRevision = 0;
+    QMap<quint64, QJsonObject> authoritativeTrackHistory;
 
 private:
     Callbacks callbacks_;

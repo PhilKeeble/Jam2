@@ -2,6 +2,7 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QJsonArray>
 #include <QMetaObject>
 #include <QPointer>
 #include <QRunnable>
@@ -165,15 +166,81 @@ void TrackWorkspaceController::abandonIncomingAsset(const QString& hash)
         incomingAssetHash.clear();
         incomingAssetSourcePeerToken.clear();
     }
+    if (callbacks_.incomingAssetAbandoned) {
+        callbacks_.incomingAssetAbandoned(hash);
+    }
 }
 
-void TrackWorkspaceController::acceptIncomingAsset(const QString& hash, const QString& path)
+void TrackWorkspaceController::acceptIncomingAsset(
+    const QString& hash,
+    const QString& path,
+    qint64 sourceFrames)
 {
     persistence.registerTransientWav(path);
     looperWaveformCache.remove(path);
     pendingLooperAssetHashes.removeAll(hash);
     pendingTrackAssetSources.remove(hash);
     validatedTrackAssetHashes.insert(hash);
+    incomingAssetRetryAttempts.remove(hash);
+    const auto reconcileRegion = [sourceFrames](
+        qint64& loopStart, qint64& loopEnd, bool& loopEnabled) {
+        if (sourceFrames <= 0 || loopStart < 0 || loopEnd < 0) {
+            loopStart = -1;
+            loopEnd = -1;
+            loopEnabled = false;
+            return;
+        }
+        loopStart = qBound<qint64>(0, loopStart, sourceFrames - 1);
+        loopEnd = qBound<qint64>(loopStart + 1, loopEnd, sourceFrames);
+    };
+    for (auto it = pendingTrackContributions.begin();
+         it != pendingTrackContributions.end(); ++it) {
+        if (it->assetHash == hash) {
+            it->sourceFrames = sourceFrames;
+            reconcileRegion(it->loopStartFrame, it->loopEndFrame, it->loopEnabled);
+        }
+    }
+    for (LooperBank& bank : looperProject.banks()) {
+        for (LooperLane& lane : bank.lanes) {
+            if (lane.assetHash == hash) {
+                lane.sourceFrames = sourceFrames;
+                reconcileRegion(
+                    lane.loopStartFrame, lane.loopEndFrame, lane.loopEnabled);
+            }
+        }
+    }
+    if (!pendingSongSet.isEmpty()) {
+        QJsonObject looper = pendingSongSet.value(QStringLiteral("looper")).toObject();
+        QJsonArray banks = looper.value(QStringLiteral("banks")).toArray();
+        for (int bankIndex = 0; bankIndex < banks.size(); ++bankIndex) {
+            QJsonObject bank = banks.at(bankIndex).toObject();
+            QJsonArray lanes = bank.value(QStringLiteral("lanes")).toArray();
+            for (int laneIndex = 0; laneIndex < lanes.size(); ++laneIndex) {
+                QJsonObject lane = lanes.at(laneIndex).toObject();
+                if (lane.value(QStringLiteral("asset_hash")).toString() == hash) {
+                    lane.insert(QStringLiteral("source_frames"),
+                        QString::number(sourceFrames));
+                    qint64 loopStart = lane.value(
+                        QStringLiteral("loop_start_frame")).toString().toLongLong();
+                    qint64 loopEnd = lane.value(
+                        QStringLiteral("loop_end_frame")).toString().toLongLong();
+                    bool loopEnabled = lane.value(
+                        QStringLiteral("loop_enabled")).toBool();
+                    reconcileRegion(loopStart, loopEnd, loopEnabled);
+                    lane.insert(QStringLiteral("loop_start_frame"),
+                        QString::number(loopStart));
+                    lane.insert(QStringLiteral("loop_end_frame"),
+                        QString::number(loopEnd));
+                    lane.insert(QStringLiteral("loop_enabled"), loopEnabled);
+                    lanes.replace(laneIndex, lane);
+                }
+            }
+            bank.insert(QStringLiteral("lanes"), lanes);
+            banks.replace(bankIndex, bank);
+        }
+        looper.insert(QStringLiteral("banks"), banks);
+        pendingSongSet.insert(QStringLiteral("looper"), looper);
+    }
     const QString workflow = incomingAssetWorkflow == IncomingAssetWorkflow::TrackContribution
         ? QStringLiteral("track-share")
         : QStringLiteral("arrangement");
@@ -185,6 +252,16 @@ void TrackWorkspaceController::acceptIncomingAsset(const QString& hash, const QS
         .arg(workflow, hash, source, path));
     if (callbacks_.incomingAssetAccepted) {
         callbacks_.incomingAssetAccepted();
+    }
+}
+
+void TrackWorkspaceController::noteAssetProgress(
+    const QString& hash,
+    const QString& peerToken,
+    bool receiving)
+{
+    if (callbacks_.assetProgress) {
+        callbacks_.assetProgress(hash, peerToken, receiving);
     }
 }
 

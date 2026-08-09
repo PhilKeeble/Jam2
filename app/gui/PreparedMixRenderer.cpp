@@ -206,24 +206,27 @@ PreparedMixResult PreparedMixRenderer::render(
         const QString path = absoluteAsset(projectFolder, lane.assetPath);
         const jam2::wav::InspectResult inspected = jam2::wav::inspect_pcm16_file(nativeFilePath(path));
         if (!inspected) {
-            result.error = QStringLiteral("invalid lane WAV %1: %2")
-                .arg(lane.name, QString::fromStdString(inspected.error));
-            return result;
+            result.warnings.append(QStringLiteral("skipped invalid lane WAV %1: %2")
+                .arg(lane.name, QString::fromStdString(inspected.error)));
+            continue;
         }
         if (inspected.info.sample_rate != static_cast<std::uint32_t>(sampleRate)) {
-            result.error = QStringLiteral("WAV must be PCM16 at %1 Hz: %2").arg(sampleRate).arg(lane.name);
-            return result;
+            result.warnings.append(QStringLiteral("skipped lane with non-%1 Hz WAV: %2")
+                .arg(sampleRate).arg(lane.name));
+            continue;
         }
         if (inspected.info.frames == 0 ||
             inspected.info.frames > static_cast<std::uint64_t>(maxFrames) ||
             inspected.info.frames > static_cast<std::uint64_t>(std::numeric_limits<qint64>::max())) {
-            result.error = QStringLiteral("lane WAV exceeds the five-minute frame limit: %1").arg(lane.name);
-            return result;
+            result.warnings.append(QStringLiteral("skipped lane WAV outside the five-minute limit: %1")
+                .arg(lane.name));
+            continue;
         }
         const qint64 frames = static_cast<qint64>(inspected.info.frames);
         if (lane.startFrame < 0 || lane.startFrame > maxFrames) {
-            result.error = QStringLiteral("lane start frame is outside the prepared-mix limit: %1").arg(lane.name);
-            return result;
+            result.warnings.append(QStringLiteral("skipped lane with invalid start frame: %1")
+                .arg(lane.name));
+            continue;
         }
         const qint64 sourceStart = lane.loopStartFrame >= 0
             ? qBound<qint64>(0, lane.loopStartFrame, frames - 1)
@@ -235,22 +238,20 @@ PreparedMixResult PreparedMixRenderer::render(
         qint64 outputEnd = lane.stopFrame;
         if (outputEnd < 0) {
             if (visibleFrames > maxFrames - lane.startFrame) {
-                result.error = QStringLiteral("prepared mix exceeds five-minute limit: %1").arg(lane.name);
-                return result;
+                result.warnings.append(QStringLiteral("skipped lane extending beyond five minutes: %1")
+                    .arg(lane.name));
+                continue;
             }
             outputEnd = lane.startFrame + visibleFrames;
         }
-        // Managed generated references represent musical material, not a
-        // one-shot placement. If an older or externally supplied reference is
-        // shorter than the bank's exact musical duration, repeat it instead of
-        // leaving the remainder of the bank silent.
-        if (exactOutputFrames > 0 && lane.loopEnabled &&
-            !lane.referenceKind.isEmpty() && outputEnd < exactOutputFrames) {
-            outputEnd = exactOutputFrames;
-        }
+        // A Section can be extended by a longer recording or a moved clip.
+        // Generated references keep their recorded musical duration; the new
+        // trailing bars stay silent unless the user explicitly extends the
+        // lane's stop frame or generates a new reference for the longer idea.
         if (outputEnd < lane.startFrame || outputEnd > maxFrames) {
-            result.error = QStringLiteral("lane stop frame is outside the prepared-mix limit: %1").arg(lane.name);
-            return result;
+            result.warnings.append(QStringLiteral("skipped lane with invalid stop frame: %1")
+                .arg(lane.name));
+            continue;
         }
         length = qMax(length, outputEnd);
         sources.push_back(Source{
@@ -262,6 +263,12 @@ PreparedMixResult PreparedMixRenderer::render(
             lane.startFrame,
             outputEnd,
         });
+    }
+    if (sources.empty()) {
+        result.error = result.warnings.isEmpty()
+            ? QStringLiteral("prepared mix has no playable WAV-backed lanes")
+            : QStringLiteral("prepared mix has no valid WAV-backed lanes");
+        return result;
     }
     if (exactOutputFrames > 0) {
         length = qBound<qint64>(1, exactOutputFrames, maxFrames);
@@ -278,6 +285,7 @@ PreparedMixResult PreparedMixRenderer::render(
     std::vector<qint32> mix(static_cast<std::size_t>(length), 0);
 
     constexpr qint64 decodeBlockFrames = 4096;
+    int mixedSources = 0;
     for (const Source& source : sources) {
         QFile file(source.path);
         const qint64 visibleFrames = source.sourceEnd - source.sourceStart;
@@ -290,21 +298,23 @@ PreparedMixResult PreparedMixRenderer::render(
             sourceByteOffset > static_cast<std::uint64_t>(std::numeric_limits<qint64>::max()) ||
             !file.open(QIODevice::ReadOnly) ||
             !file.seek(static_cast<qint64>(sourceByteOffset))) {
-            result.error = QStringLiteral("cannot open lane WAV data: %1").arg(source.lane.name);
-            return result;
+            result.warnings.append(QStringLiteral("skipped unreadable lane WAV data: %1")
+                .arg(source.lane.name));
+            continue;
         }
         std::vector<qint16> mono(static_cast<std::size_t>(visibleFrames), 0);
         QByteArray bytes;
         bytes.resize(static_cast<qsizetype>(decodeBlockFrames * source.info.block_align));
         qint64 decodedFrames = 0;
+        bool truncated = false;
         while (decodedFrames < visibleFrames) {
             const qint64 framesThisBlock = qMin(
                 decodeBlockFrames,
                 visibleFrames - decodedFrames);
             const qint64 bytesThisBlock = framesThisBlock * source.info.block_align;
             if (file.read(bytes.data(), bytesThisBlock) != bytesThisBlock) {
-                result.error = QStringLiteral("truncated lane WAV data: %1").arg(source.lane.name);
-                return result;
+                truncated = true;
+                break;
             }
             const auto* raw = reinterpret_cast<const unsigned char*>(bytes.constData());
             for (qint64 frame = 0; frame < framesThisBlock; ++frame) {
@@ -324,6 +334,12 @@ PreparedMixResult PreparedMixRenderer::render(
             }
             decodedFrames += framesThisBlock;
         }
+        if (truncated) {
+            result.warnings.append(QStringLiteral("skipped truncated lane WAV data: %1")
+                .arg(source.lane.name));
+            continue;
+        }
+        ++mixedSources;
 
         const double gain = std::pow(10.0, qBound(-60.0, source.lane.gainDb, 12.0) / 20.0);
         // An exact musical duration deliberately crops lanes retained from a
@@ -348,6 +364,10 @@ PreparedMixResult PreparedMixRenderer::render(
                 std::numeric_limits<qint32>::min(),
                 std::numeric_limits<qint32>::max()));
         }
+    }
+    if (mixedSources == 0) {
+        result.error = QStringLiteral("prepared mix could not read any playable lane WAV data");
+        return result;
     }
 
     std::vector<float> processed(static_cast<std::size_t>(length), 0.0f);
@@ -523,6 +543,10 @@ PreparedMixResult PreparedMixRenderer::renderSequence(
             result.error = QStringLiteral("Section %1: %2")
                 .arg(QChar(QLatin1Char('A').unicode() + bank), bankResult.error);
             return result;
+        }
+        for (const QString& warning : bankResult.warnings) {
+            result.warnings.append(QStringLiteral("Section %1: %2")
+                .arg(QChar(QLatin1Char('A').unicode() + bank), warning));
         }
         renderedBanks[static_cast<std::size_t>(bank)] = true;
         renderedPaths[static_cast<std::size_t>(bank)] = bankPath;

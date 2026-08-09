@@ -207,6 +207,13 @@ struct Jam2RuntimeHost {
     // never consult it.  Headless runtimes accept shared track transport by
     // default.
     std::atomic<bool> track_sync_enabled{true};
+    // RecordStart uses the shared track transport packet shape, but may be
+    // kept local even while ordinary play/stop transport remains shared.
+    std::atomic<bool> recording_sync_enabled{true};
+    // A lane take owns a stable local transport/grid snapshot from readiness
+    // through finalisation. Network audio keeps flowing, but peer transport
+    // and grid mutations must not alter the captured timeline underneath it.
+    std::atomic<bool> lane_recording_isolation_enabled{false};
     std::function<void(const Jam2RuntimeStartup&)> startup;
     std::function<void(const Jam2NetworkOperationalSnapshot&)> network_snapshot;
     std::function<void(const ConnectionDiagnosticsSnapshot&)> connection_diagnostics;

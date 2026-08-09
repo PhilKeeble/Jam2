@@ -216,6 +216,15 @@ SharedSessionController::SharedSessionController(QObject* parent)
             return;
         }
         QJsonObject routed = message;
+        if (type == QStringLiteral("looper.recording.state") &&
+            role_ == Role::Creator) {
+            routed[QStringLiteral("source_peer_token")] = token;
+            server_.send(routed);
+            if (onMessage) {
+                onMessage(token, routed);
+            }
+            return;
+        }
         if (isEditorAction(type) && role_ == Role::Creator) {
             if (editorRevision_ == std::numeric_limits<quint64>::max()) {
                 server_.sendTo(token, QJsonObject{
@@ -611,7 +620,9 @@ bool SharedSessionController::send(const QJsonObject& message)
     if (role_ == Role::Creator) {
         QJsonObject routed = message;
         const QString type = routed.value(QStringLiteral("type")).toString();
-        if (isEditorAction(type)) {
+        if (type == QStringLiteral("looper.recording.state")) {
+            routed[QStringLiteral("source_peer_token")] = creator_.localToken;
+        } else if (isEditorAction(type)) {
             if (editorRevision_ == std::numeric_limits<quint64>::max()) {
                 return false;
             }

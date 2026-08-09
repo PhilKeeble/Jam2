@@ -41,12 +41,20 @@ void applyCustomTheme(QApplication& app)
             background: #050809; color: #e9e6dc;
             font-family: "Segoe UI Variable", "Segoe UI"; font-size: 10.5pt;
         }
+        QLabel {
+            background: transparent;
+        }
         QLineEdit#SongTitle, QSpinBox#MetronomeBpm {
             font-family: Georgia;
         }
         QLineEdit#SongTitle {
-            color: #e9e6dc; background: transparent; border: 0;
+            color: #e9e6dc; background: transparent; border: 1px solid transparent;
+            border-radius: 3px;
             font-size: 16pt; padding: 3px 8px;
+        }
+        QLineEdit#SongTitle[editing="true"] {
+            background: #11191a; border-color: #66d4cf;
+            selection-background-color: #315f60;
         }
         QLabel#StatusPill {
             color: #c6d0d0; background: #101719; border: 1px solid #354247;
@@ -88,6 +96,11 @@ void applyCustomTheme(QApplication& app)
         QPushButton#DataButton { color: #ffd68e; border-color: #986d36; }
         QFrame#DetailPanel {
             background: #0b1011; border: 1px solid #354247; border-radius: 4px;
+        }
+        QWidget#DetailIdentityPanel,
+        QWidget#ChordReferenceSection,
+        QWidget#ChordReferenceControls {
+            background: transparent;
         }
         QLabel#MicroHeading, QLabel#DrawerSection {
             color: #9ca9ab; font-family: Bahnschrift; font-size: 8.5pt;
@@ -189,6 +202,13 @@ void applyCustomTheme(QApplication& app)
         QLabel#StripTitle {
             color: #9ca9ab; font-family: Bahnschrift; font-size: 8.5pt;
             letter-spacing: 1px;
+        }
+        QLabel#BankStripLabel {
+            color: #9ca9ab; background: transparent; font-family: Bahnschrift;
+            font-size: 8.5pt; letter-spacing: 1px;
+        }
+        QGroupBox#TrackSharingCard QLabel#TrackSharingStatus {
+            background: transparent;
         }
         QWidget#DataOverlay { background: rgba(3, 5, 6, 150); }
         QFrame#DataDrawer {

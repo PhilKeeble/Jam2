@@ -36,6 +36,7 @@
 #include <QSet>
 #include <QSlider>
 #include <QSpinBox>
+#include <QStringList>
 #include <QTabWidget>
 #include <QTimer>
 #include <QThreadPool>
@@ -60,6 +61,7 @@ class QFrame;
 class QScrollArea;
 class QStackedWidget;
 class QTableWidget;
+class QToolButton;
 class QVBoxLayout;
 class WaveformWidget;
 class LooperLaneStackWidget;
@@ -77,6 +79,27 @@ public:
 
 private:
     friend class MainWindowPages;
+    enum class GeneratedIdeaSyncMode {
+        Off,
+        Full,
+        Chords,
+        Beats,
+    };
+    enum class SongSyncScope {
+        Tracks,
+        IdeaFull,
+        IdeaChords,
+        IdeaBeats,
+    };
+    struct JamSyncPolicy {
+        bool trackLanes = true;
+        bool autoShareWavs = true;
+        bool globalPlayback = true;
+        GeneratedIdeaSyncMode generatedIdeas = GeneratedIdeaSyncMode::Full;
+        bool metronomeState = false;
+        bool recordings = true;
+        int revision = 0;
+    };
     bool eventFilter(QObject* watched, QEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
 
@@ -86,6 +109,16 @@ private:
     void showStartJamDialog();
     void showJoinJamDialog();
     void showSettingsDialog();
+    void setSessionHeaderStatus(
+        const QString& text,
+        const QString& title,
+        const QStringList& lines = {},
+        bool issue = false,
+        bool actionable = false);
+    void showLocalSessionHeaderStatus();
+    void showAudioOffSessionHeaderStatus();
+    void updateJamSessionHeaderStatus(
+        const SharedSessionController::Snapshot& snapshot);
     void stopJam(bool returnToLocal = true);
     void showJamFailure(const QString& detail);
     void refreshDevices();
@@ -98,6 +131,19 @@ private:
     void applySelectedPeerGain(int db);
     void updateMixMeters(const MixerMeterLevels& levels);
     void sendControl(const QJsonObject& message);
+    void requestJamSyncPolicy(JamSyncPolicy policy);
+    void applyJamSyncPolicy(JamSyncPolicy policy, bool fromJam);
+    void handleJamSyncMessage(
+        const QJsonObject& message,
+        const QString& sourcePeerToken);
+    void sendJamSyncPolicy(const QString& targetPeerToken = {});
+    void showJamSyncDialog();
+    void updateJamSyncPresentation();
+    bool jamSyncAllowsControlMessage(const QJsonObject& message) const;
+    bool syncedRecordingsEnabled() const noexcept;
+    bool automaticWavSharingEnabled() const noexcept;
+    void setMetronomeEnabled(bool enabled, bool publishToJam);
+    void sendMetronomeStateToJam(bool enabled);
     void handleControlEvent(
         const jam2::control_protocol::TransportEvent& event,
         bool serverSide);
@@ -147,6 +193,15 @@ private:
     void updateTrackControls();
     void updateTrackPlaybackPresentation();
     void refreshLooperLanes();
+    qint64 looperLaneTimelineEndFrame(const LooperLane& lane, int sampleRate) const;
+    int requiredSectionBeatsForTracks(int bankIndex) const;
+    bool extendSectionToFitTracks(int bankIndex, bool showLimitWarning = false);
+    int safeTrimSectionBeats(int bankIndex) const;
+    bool sectionHasUnknownTrackDuration(int bankIndex) const;
+    void rebuildSectionMixAfterLengthChange(int bankIndex);
+    void shrinkSectionOneBar(int bankIndex);
+    void trimViewedSection();
+    void updateSectionTrimControls();
     void selectViewedBank(int bankIndex);
     void refreshBankPresentation();
     void requestBankLaunch(int bankIndex);
@@ -177,14 +232,42 @@ private:
     qint64 bankExactOutputFrames(int bankIndex, int sampleRate) const;
     void addLooperWavs();
     void loadWavIntoLooperLane();
+    void importWavIntoLooperLane(int laneIndex, const QString& sourcePath);
     void shareLocalTracks(bool includeLocalOnly = false);
     void addEmptyLooperLane();
     void removeSelectedLooperLane();
+    void revealLooperLaneWav(int laneIndex);
+    void removeLooperLaneWav(int laneIndex);
     void renameSelectedLooperLane();
     void moveSelectedLooperLane(int delta);
     bool armSelectedLooperLaneRecording();
     void startArmedLooperLaneRecording();
     void startArmedLooperLaneRecordingNow(std::uint64_t targetFrame);
+    void publishLocalTrackRecordingState(
+        const QString& phase,
+        int countInRemaining = 0,
+        bool force = false);
+    void handleTrackRecordingState(
+        const QJsonObject& message,
+        const QString& sourcePeerToken);
+    void maybeStartReadyRecordingGroup();
+    void handleRecordingGroupStart(const QJsonObject& message);
+    void handleRecordingGroupFinish(const QJsonObject& message);
+    void requestRecordingGroupRecovery();
+    void handleRecordingGroupRecovery(const QJsonObject& message);
+    void maybeFinishRecordingGroup();
+    void finalizePendingLaneTake();
+    void finishLaneTakeFinalization();
+    bool laneRecordingIsolationActive() const;
+    void updateLaneRecordingIsolation();
+    bool deferIncomingControlForLaneRecording(
+        const QJsonObject& message,
+        const QString& sourcePeerToken);
+    void releaseDeferredRecordingControls();
+    void applyPendingRecordingTransportResync();
+    void updateSharedRecordingPresentation();
+    bool sharedRecordingProtected() const;
+    QString recordingPeerLabel(const QString& token) const;
     void importLastCaptureToArmedLane();
     void toggleSelectedLooperLaneMute();
     void toggleSelectedLooperLaneSolo();
@@ -212,6 +295,11 @@ private:
     void chooseCaptureFolder();
     void refreshLoopbackSources();
     void startInputCapture(std::uint64_t targetFrame, int countInBars = -1);
+    void startInputCaptureAtGroupSchedule(
+        std::uint64_t countdownFrame,
+        std::uint64_t targetFrame,
+        std::uint64_t targetMusicalFrame,
+        int countInBars);
     void startLoopbackCapture();
     void stopInputCapture(std::uint64_t targetFrame);
     void loadTrackWaveform();
@@ -242,7 +330,18 @@ private:
     void updateMetronomeCompensationVisibility();
     void publishLocalTrackBatch(const QString& batchId);
     void handleTrackBatchOffer(const QJsonObject& message, const QString& sourcePeerToken);
-    void handleTrackBatchComplete(const QJsonObject& message);
+    void handleTrackBatchComplete(const QJsonObject& message, const QString& sourcePeerToken);
+    void expirePendingTrackBatch(const QString& sourcePeerToken, const QString& batchId);
+    void scheduleOutgoingTrackBatchExpiry(const QString& batchId);
+    void scheduleIncomingTrackBatchExpiry(
+        const QString& sourcePeerToken,
+        const QString& batchId);
+    void noteTrackAssetProgress(
+        const QString& hash,
+        const QString& peerToken,
+        bool receiving);
+    void retryOrFailIncomingAsset(const QString& hash);
+    void releaseHeldTrackSnapshotIfReady();
     void requestNextPendingAsset();
     void applyPendingTrackContributions();
     bool sendControlTo(const QString& targetPeerToken, const QJsonObject& message);
@@ -299,7 +398,9 @@ private:
         const QString& actionName,
         const std::function<void(std::uint64_t)>& action,
         bool quantizeToBar = false);
-    void sendSongSnapshot(std::optional<bool> trackPlayingOverride = std::nullopt);
+    void sendSongSnapshot(
+        std::optional<bool> trackPlayingOverride = std::nullopt,
+        SongSyncScope scope = SongSyncScope::Tracks);
 
     Jam2RuntimeOptions runtimeOptions() const;
     Jam2RuntimeOptions networkRuntimeOptions(
@@ -386,12 +487,11 @@ private:
     QSpinBox* adaptiveRatioRampSpin_ = nullptr;
     QPushButton* startButton_ = nullptr;
     QPushButton* joinButton_ = nullptr;
-    QPushButton* localEngineButton_ = nullptr;
+    QToolButton* jamSyncButton_ = nullptr;
     QPushButton* stopButton_ = nullptr;
+    QPushButton* leaveJamButton_ = nullptr;
     QPushButton* refreshControlButton_ = nullptr;
     QLabel* connectionLabel_ = nullptr;
-    QLabel* engineModeLabel_ = nullptr;
-    QLabel* sessionTopologyLabel_ = nullptr;
     QLabel* jitterLabel_ = nullptr;
     QLabel* lossLabel_ = nullptr;
     QLabel* underrunLabel_ = nullptr;
@@ -403,6 +503,13 @@ private:
     QLabel* gridPositionLabel_ = nullptr;
     QLabel* gridScheduleLabel_ = nullptr;
     QLabel* recordingCountdownLabel_ = nullptr;
+    QFrame* recordingContextFrame_ = nullptr;
+    QLabel* recordingContextTitle_ = nullptr;
+    QLabel* recordingContextDetail_ = nullptr;
+    QLabel* recordingPeerStatesLabel_ = nullptr;
+    QPushButton* recoverRecordingGroupButton_ = nullptr;
+    QLabel* trackSharingStatusLabel_ = nullptr;
+    QWidget* recordingGlobalControls_ = nullptr;
     LooperLaneStackWidget* looperStack_ = nullptr;
     WaveformWidget* trackWaveform_ = nullptr;
     QLineEdit* songTitleEdit_ = nullptr;
@@ -438,7 +545,6 @@ private:
     QPushButton* loopEndButton_ = nullptr;
     QPushButton* clearLoopButton_ = nullptr;
     QCheckBox* loopEnabledCheck_ = nullptr;
-    QCheckBox* trackSyncCheck_ = nullptr;
     QSlider* trackLevelSlider_ = nullptr;
     QLabel* trackLevelDbLabel_ = nullptr;
     QSlider* mixTrackLevelSlider_ = nullptr;
@@ -489,6 +595,7 @@ private:
     QPushButton* startArmedLaneRecordingButton_ = nullptr;
     std::array<QPushButton*, 4> looperBankButtons_{};
     QVector<QPushButton*> bankViewButtons_;
+    QVector<QPushButton*> sectionTrimButtons_;
     QPushButton* arrangementButton_ = nullptr;
     QPushButton* launchBankButton_ = nullptr;
     QCheckBox* captureCountInCheck_ = nullptr;
@@ -541,7 +648,50 @@ private:
     std::array<std::uint8_t, 16> sessionKey_{};
     TapTempoTracker tapTempoTracker_;
     QElapsedTimer tapTempoClock_;
+    QElapsedTimer loopbackRecordingPreviewClock_;
     int selectedLooperLane_ = -1;
+    struct PeerTrackRecordingState {
+        QString phase;
+        int bank = 0;
+        QString laneId;
+        QString laneName;
+        int countInRemaining = 0;
+        int countInBars = 0;
+        QString groupId;
+        int revision = 0;
+    };
+    QMap<QString, PeerTrackRecordingState> peerTrackRecordingStates_;
+    QMap<QString, int> peerTrackRecordingRevisions_;
+    QString localTrackRecordingPhase_ = QStringLiteral("idle");
+    int localTrackRecordingCountInRemaining_ = 0;
+    int localTrackRecordingCountInBars_ = 0;
+    int localTrackRecordingStateRevision_ = 0;
+    QString localRecordingTargetBankId_;
+    QString localRecordingTargetLaneId_;
+    QString activeRecordingGroupId_;
+    QStringList activeRecordingGroupParticipants_;
+    QSet<QString> recoveredRecordingGroupIds_;
+    QJsonObject activeRecordingGroupStartMessage_;
+    QJsonObject lastRecordingGroupFinishMessage_;
+    bool recordingGroupFinishSent_ = false;
+    bool localLaneTakeForcedLocal_ = false;
+    QString pendingRecordedLaneSyncId_;
+    QString pendingRecordedLaneSyncHash_;
+    int pendingRecordedLaneSyncAttempts_ = 0;
+    std::optional<TrackRecordingWorkflow::TrackTakeCompletion>
+        pendingGroupTakeCompletion_;
+    struct DeferredRecordingControl {
+        QString key;
+        QJsonObject message;
+        QString sourcePeerToken;
+    };
+    QVector<DeferredRecordingControl> deferredRecordingControls_;
+    bool deferredRecordingControlsOverflowed_ = false;
+    bool replayingDeferredRecordingControls_ = false;
+    std::optional<bool> pendingRecordingResyncPlaying_;
+    JamSyncPolicy jamSyncPolicy_;
+    bool applyingJamSyncPolicy_ = false;
+    bool applyingSharedMetronomeState_ = false;
     int viewedBankIndex_ = 0;
     int pendingBankIndex_ = -1;
     quint64 pendingBankAbsoluteBeat_ = 0;

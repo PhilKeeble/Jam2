@@ -109,6 +109,12 @@ bool ApplicationRuntime::startNetwork(const Jam2RuntimeOptions& options)
     host_.track_sync_enabled.store(
         track_sync_enabled_.load(std::memory_order_acquire),
         std::memory_order_release);
+    host_.recording_sync_enabled.store(
+        recording_sync_enabled_.load(std::memory_order_acquire),
+        std::memory_order_release);
+    host_.lane_recording_isolation_enabled.store(
+        lane_recording_isolation_enabled_.load(std::memory_order_acquire),
+        std::memory_order_release);
     network_running_.store(true, std::memory_order_release);
     network_worker_ = std::thread([this, options] {
         const int result = jam2_run_network_runtime(options, host_);
@@ -183,6 +189,18 @@ void ApplicationRuntime::setTrackSyncEnabled(bool enabled) noexcept
 {
     track_sync_enabled_.store(enabled, std::memory_order_release);
     host_.track_sync_enabled.store(enabled, std::memory_order_release);
+}
+
+void ApplicationRuntime::setRecordingSyncEnabled(bool enabled) noexcept
+{
+    recording_sync_enabled_.store(enabled, std::memory_order_release);
+    host_.recording_sync_enabled.store(enabled, std::memory_order_release);
+}
+
+void ApplicationRuntime::setLaneRecordingIsolationEnabled(bool enabled) noexcept
+{
+    lane_recording_isolation_enabled_.store(enabled, std::memory_order_release);
+    host_.lane_recording_isolation_enabled.store(enabled, std::memory_order_release);
 }
 
 jam2::EngineSnapshot ApplicationRuntime::engineSnapshot() const noexcept

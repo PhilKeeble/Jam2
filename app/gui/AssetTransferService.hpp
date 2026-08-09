@@ -26,7 +26,14 @@ public:
         const QString& hash,
         const QString& sourcePeerToken) const = 0;
     virtual void abandonIncomingAsset(const QString& hash) = 0;
-    virtual void acceptIncomingAsset(const QString& hash, const QString& path) = 0;
+    virtual void acceptIncomingAsset(
+        const QString& hash,
+        const QString& path,
+        qint64 sourceFrames) = 0;
+    virtual void noteAssetProgress(
+        const QString& hash,
+        const QString& peerToken,
+        bool receiving) = 0;
     virtual void appendAssetLog(const QString& message) = 0;
     virtual bool startAssetFileTask(
         std::function<void()> work,

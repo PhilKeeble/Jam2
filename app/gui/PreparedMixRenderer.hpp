@@ -4,6 +4,7 @@
 #include "SharedTrackModel.hpp"
 
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 #include <cstdint>
@@ -21,6 +22,7 @@ struct PreparedMixResult {
     float outputPeak = 0.0f;
     qint64 overUnitySamples = 0;
     QString sha256;
+    QStringList warnings;
     QString error;
 };
 

@@ -2,11 +2,20 @@
 
 #include "GuiTheme.hpp"
 #include "LooperProject.hpp"
+#include "SectionTimeline.hpp"
 
 #include <QColor>
+#include <QDragEnterEvent>
+#include <QDragLeaveEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
+#include <QFileInfo>
 #include <QFontMetrics>
+#include <QMap>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPaintEvent>
 #include <QPen>
 #include <QPoint>
@@ -16,9 +25,11 @@
 #include <QSizePolicy>
 #include <QString>
 #include <QStyleOption>
+#include <QUrl>
 #include <QVector>
 #include <QWidget>
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <utility>
@@ -46,6 +57,36 @@ inline qint64 looperTimelineViewFrames(
     if (loopStartMs >= 0) frames = qMax(frames, loopStartMs * rate / 1000);
     if (loopEndMs >= 0) frames = qMax(frames, loopEndMs * rate / 1000);
     return qMax<qint64>(1, qMax(frames, arrangementEndFrame));
+}
+
+inline double trackGainPosition(double gainDb) noexcept
+{
+    gainDb = qBound(-60.0, gainDb, 12.0);
+    constexpr double deepAttenuationEnd = 0.125;
+    constexpr double unityPosition = 0.625;
+    if (gainDb <= -30.0) {
+        return ((gainDb + 60.0) / 30.0) * deepAttenuationEnd;
+    }
+    if (gainDb <= 0.0) {
+        return deepAttenuationEnd + ((gainDb + 30.0) / 30.0) *
+            (unityPosition - deepAttenuationEnd);
+    }
+    return unityPosition + (gainDb / 12.0) * (1.0 - unityPosition);
+}
+
+inline double trackGainDb(double position) noexcept
+{
+    position = qBound(0.0, position, 1.0);
+    constexpr double deepAttenuationEnd = 0.125;
+    constexpr double unityPosition = 0.625;
+    if (position <= deepAttenuationEnd) {
+        return -60.0 + (position / deepAttenuationEnd) * 30.0;
+    }
+    if (position <= unityPosition) {
+        return -30.0 + ((position - deepAttenuationEnd) /
+            (unityPosition - deepAttenuationEnd)) * 30.0;
+    }
+    return ((position - unityPosition) / (1.0 - unityPosition)) * 12.0;
 }
 
 } // namespace jam2::gui
@@ -271,6 +312,7 @@ public:
     {
         setMinimumHeight(260);
         setMouseTracking(true);
+        setAcceptDrops(true);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
     }
 
@@ -282,10 +324,12 @@ public:
     std::function<void(int)> onArm;
     std::function<void(int)> onRename;
     std::function<void(int)> onRemove;
+    std::function<void(int)> onRevealWav;
+    std::function<void(int)> onRemoveWav;
     std::function<void(int, double)> onGainChanged;
     std::function<void(int, qint64, qint64, qint64)> onRegionCommitted;
     std::function<void(int)> onBankSelected;
-    std::function<void(qint64)> onSeekFrame;
+    std::function<void(int, const QString&)> onWavDropped;
 
     void setLanes(
         QVector<LaneView> lanes,
@@ -344,6 +388,21 @@ public:
         update();
     }
 
+    void setRemoteRecordingStates(
+        QMap<QString, QString> states,
+        bool interactionsProtected)
+    {
+        remoteRecordingStates_ = std::move(states);
+        interactionsProtected_ = interactionsProtected;
+        update();
+    }
+
+    void setInteractionsProtected(bool protectedState)
+    {
+        interactionsProtected_ = protectedState;
+        update();
+    }
+
     void setPlaybackMarkers(qint64 positionMs, qint64 loopStartMs, qint64 loopEndMs)
     {
         playheadMs_ = positionMs >= 0 ? positionMs : -1;
@@ -352,12 +411,40 @@ public:
         update();
     }
 
+    void setLiveRecordingEndFrame(qint64 frame)
+    {
+        const qint64 bounded = qMax<qint64>(0, frame);
+        if (liveRecordingEndFrame_ == bounded) return;
+        liveRecordingEndFrame_ = bounded;
+        update();
+    }
+
+    int timelineZoomLevel() const
+    {
+        return timelineZoomLevel_;
+    }
+
+    void setTimelineZoomLevel(int level, int viewportWidth)
+    {
+        timelineZoomLevel_ = qBound(0, level, 6);
+        if (timelineZoomLevel_ == 0) {
+            setMinimumWidth(0);
+        } else {
+            const int fittedTimelineWidth = qMax(320, viewportWidth - kHeaderWidth - 20);
+            const double scale = 1.0 + 0.5 * static_cast<double>(timelineZoomLevel_);
+            setMinimumWidth(kHeaderWidth + 20 +
+                static_cast<int>(std::llround(fittedTimelineWidth * scale)));
+        }
+        updateGeometry();
+        update();
+    }
+
 protected:
     void paintEvent(QPaintEvent*) override
     {
         QPainter painter(this);
         painter.fillRect(rect(), theme::editorBg);
-        painter.setRenderHint(QPainter::Antialiasing, false);
+        painter.setRenderHint(QPainter::Antialiasing, true);
 
         drawToolbar(painter);
 
@@ -366,16 +453,26 @@ protected:
             drawLane(painter, row);
         }
 
+        drawSectionExtensionPreview(painter);
+        drawTimelineGrid(painter);
         drawOverlays(painter);
+        drawLaneAssetChrome(painter);
 
         const QRect plus = plusRect();
+        const QRect emptyAction = emptyTrackActionRect();
+        const QRect importAction = importAudioActionRect();
         painter.save();
-        painter.fillRect(plus, theme::panelBg);
-        painter.setBrush(Qt::NoBrush);
-        painter.setPen(QPen(theme::playhead, 1));
-        painter.drawRect(plus.adjusted(0, 0, -1, -1));
-        painter.setPen(theme::playhead);
-        painter.drawText(plus.adjusted(0, 0, 0, 0), Qt::AlignCenter, QStringLiteral("+"));
+        painter.fillRect(plus, theme::editorBg);
+        painter.setBrush(theme::withAlpha(theme::nebulaBlue, 22));
+        painter.setPen(QPen(theme::withAlpha(theme::nebulaBlue, 165), 1, Qt::DashLine));
+        painter.drawRoundedRect(emptyAction, 5, 5);
+        painter.setPen(theme::nebulaBlue);
+        painter.drawText(emptyAction, Qt::AlignCenter, QStringLiteral("+  EMPTY TRACK"));
+        painter.setBrush(theme::withAlpha(theme::accent, 20));
+        painter.setPen(QPen(theme::withAlpha(theme::accent, 165), 1, Qt::DashLine));
+        painter.drawRoundedRect(importAction, 5, 5);
+        painter.setPen(theme::accent);
+        painter.drawText(importAction, Qt::AlignCenter, QStringLiteral("IMPORT AUDIO\u2026"));
         painter.restore();
     }
 
@@ -386,8 +483,13 @@ protected:
             return;
         }
         const QPoint pos = event->position().toPoint();
-        if (plusRect().contains(pos)) {
-            if (onAddLane) onAddLane();
+        if (emptyTrackActionRect().contains(pos)) {
+            if (!interactionsProtected_ && onAddLane) onAddLane();
+            event->accept();
+            return;
+        }
+        if (importAudioActionRect().contains(pos)) {
+            if (!interactionsProtected_ && onAddWav) onAddWav();
             event->accept();
             return;
         }
@@ -399,6 +501,10 @@ protected:
         }
         const QString control = controlAt(laneIndex, pos);
         selectLane(laneIndex);
+        if (interactionsProtected_) {
+            event->accept();
+            return;
+        }
         if (laneIndex >= lanes_.size()) {
             if (onAddLane) onAddLane();
             if (control == QStringLiteral("arm") && onArm) {
@@ -435,6 +541,16 @@ protected:
             event->accept();
             return;
         }
+        if (control == QStringLiteral("reveal_wav")) {
+            if (onRevealWav) onRevealWav(laneIndex);
+            event->accept();
+            return;
+        }
+        if (control == QStringLiteral("remove_wav")) {
+            if (onRemoveWav) onRemoveWav(laneIndex);
+            event->accept();
+            return;
+        }
         if (control == QStringLiteral("gain")) {
             beginGainDrag(laneIndex, pos.x());
             event->accept();
@@ -457,10 +573,59 @@ protected:
                 return;
             }
         }
-        if (laneTimelineRect(laneIndex).contains(pos) && onSeekFrame) {
-            onSeekFrame(frameForX(pos.x()));
-        }
         event->accept();
+    }
+
+    void dragEnterEvent(QDragEnterEvent* event) override
+    {
+        if (!interactionsProtected_ && event->mimeData()->hasUrls() &&
+            event->mimeData()->urls().size() == 1 &&
+            event->mimeData()->urls().front().isLocalFile()) {
+            event->acceptProposedAction();
+            return;
+        }
+        event->ignore();
+    }
+
+    void dragMoveEvent(QDragMoveEvent* event) override
+    {
+        const int nextLane = laneAt(event->position().toPoint());
+        if (!interactionsProtected_ && nextLane >= 0 &&
+            event->mimeData()->hasUrls() && event->mimeData()->urls().size() == 1) {
+            if (dropLane_ != nextLane) {
+                dropLane_ = nextLane;
+                update();
+            }
+            event->acceptProposedAction();
+            return;
+        }
+        if (dropLane_ != -1) {
+            dropLane_ = -1;
+            update();
+        }
+        event->ignore();
+    }
+
+    void dragLeaveEvent(QDragLeaveEvent* event) override
+    {
+        dropLane_ = -1;
+        update();
+        event->accept();
+    }
+
+    void dropEvent(QDropEvent* event) override
+    {
+        const int lane = laneAt(event->position().toPoint());
+        const QList<QUrl> urls = event->mimeData()->urls();
+        dropLane_ = -1;
+        update();
+        if (interactionsProtected_ || lane < 0 || urls.size() != 1 ||
+            !urls.front().isLocalFile() || !onWavDropped) {
+            event->ignore();
+            return;
+        }
+        onWavDropped(lane < lanes_.size() ? lane : -1, urls.front().toLocalFile());
+        event->acceptProposedAction();
     }
 
     void mouseMoveEvent(QMouseEvent* event) override
@@ -473,7 +638,7 @@ protected:
                 static_cast<double>(pos.x() - slider.left()) /
                     qMax(1, slider.width()),
                 1.0);
-            pendingGainDb_ = -60.0 + t * 72.0;
+            pendingGainDb_ = jam2::gui::trackGainDb(t);
             lanes_[dragLane_].lane.gainDb = pendingGainDb_;
             update();
             event->accept();
@@ -513,14 +678,14 @@ protected:
 private:
     enum class DragMode { None, Move, LeftEdge, RightEdge, Gain };
 
-    static constexpr int kToolbarHeight = 34;
-    static constexpr int kLaneHeight = 112;
-    static constexpr int kHeaderWidth = 248;
-    static constexpr int kPlusHeight = 34;
+    static constexpr int kToolbarHeight = 36;
+    static constexpr int kLaneHeight = 140;
+    static constexpr int kHeaderWidth = 286;
+    static constexpr int kPlusHeight = 44;
 
     int visualLaneCount() const
     {
-        return qMax(1, lanes_.size());
+        return lanes_.size();
     }
 
     void updateMinimumHeight()
@@ -530,7 +695,7 @@ private:
 
     QRect timelineRect() const
     {
-        return rect().adjusted(kHeaderWidth, kToolbarHeight, -1, -kPlusHeight - 8);
+        return rect().adjusted(kHeaderWidth + 10, kToolbarHeight, -10, -kPlusHeight - 8);
     }
 
     QRect laneRect(int row) const
@@ -540,12 +705,26 @@ private:
 
     QRect laneTimelineRect(int row) const
     {
-        return laneRect(row).adjusted(kHeaderWidth, 0, -1, 0);
+        return laneRect(row).adjusted(kHeaderWidth + 8, 7, -8, -7);
     }
 
     QRect plusRect() const
     {
         return QRect(0, kToolbarHeight + visualLaneCount() * kLaneHeight, width(), kPlusHeight);
+    }
+
+    QRect emptyTrackActionRect() const
+    {
+        const QRect area = plusRect().adjusted(8, 4, -8, -3);
+        return QRect(area.left(), area.top(), (area.width() - 6) / 2, area.height());
+    }
+
+    QRect importAudioActionRect() const
+    {
+        const QRect area = plusRect().adjusted(8, 4, -8, -3);
+        const int leftWidth = (area.width() - 6) / 2;
+        return QRect(area.left() + leftWidth + 6, area.top(),
+            area.width() - leftWidth - 6, area.height());
     }
 
     qint64 sourceStart(int laneIndex) const
@@ -585,6 +764,7 @@ private:
                 arrangementEndFrame,
                 lanes_[i].lane.startFrame + visibleFrames(i));
         }
+        arrangementEndFrame = qMax(arrangementEndFrame, liveRecordingEndFrame_);
         return jam2::gui::looperTimelineViewFrames(
             markerSampleRate(),
             minimumViewFrames_,
@@ -595,8 +775,13 @@ private:
 
     qint64 viewFrames() const
     {
-        return timelineDragActive() && dragViewFrames_ > 0
-            ? dragViewFrames_ : calculatedViewFrames();
+        if (timelineDragActive() && dragViewFrames_ > 0) {
+            const qint64 dragEnd = dragLane_ >= 0 && dragLane_ < lanes_.size()
+                ? lanes_[dragLane_].lane.startFrame + visibleFrames(dragLane_) : 0;
+            return jam2::gui::sectionExtensionPreviewFrames(
+                dragViewFrames_, dragEnd);
+        }
+        return calculatedViewFrames();
     }
 
     QRect effectiveTimelineRect() const
@@ -619,7 +804,10 @@ private:
     qint64 frameDeltaForX(double dx) const
     {
         const QRect area = effectiveTimelineRect();
-        return area.width() > 1 ? static_cast<qint64>(std::llround((dx / area.width()) * viewFrames())) : 0;
+        const qint64 transformFrames = timelineDragActive() && dragViewFrames_ > 0
+            ? dragViewFrames_ : viewFrames();
+        return area.width() > 1 ? static_cast<qint64>(std::llround(
+            (dx / area.width()) * transformFrames)) : 0;
     }
 
     qint64 snapTimelineFrame(qint64 frame) const
@@ -639,16 +827,6 @@ private:
         return qMax<qint64>(0, static_cast<qint64>(std::llround(static_cast<double>(beat) * beatFrames)));
     }
 
-    qint64 frameForX(double x) const
-    {
-        const QRect area = effectiveTimelineRect();
-        if (area.width() <= 1) {
-            return 0;
-        }
-        const double clamped = qBound(static_cast<double>(area.left()), x, static_cast<double>(area.right()));
-        return qBound<qint64>(0, static_cast<qint64>(std::llround(((clamped - area.left()) / area.width()) * viewFrames())), viewFrames());
-    }
-
     QRect clipRect(int laneIndex) const
     {
         const QRect area = laneTimelineRect(laneIndex).adjusted(0, 12, 0, -12);
@@ -662,8 +840,18 @@ private:
         painter.fillRect(QRect(0, 0, width(), kToolbarHeight), theme::panelRaised);
         painter.setPen(theme::border);
         painter.drawLine(0, kToolbarHeight - 1, width(), kToolbarHeight - 1);
+        QFont labelFont(QStringLiteral("Bahnschrift"));
+        labelFont.setPixelSize(11);
+        labelFont.setLetterSpacing(QFont::AbsoluteSpacing, 1.2);
+        painter.setFont(labelFont);
+        painter.setPen(theme::textMuted);
+        painter.drawText(
+            QRect(18, 0, kHeaderWidth - 36, kToolbarHeight),
+            Qt::AlignLeft | Qt::AlignVCenter,
+            QStringLiteral("TRACKS"));
         if (bpm_ > 0.0) {
-            const QRect area = QRect(kHeaderWidth, 0, width() - kHeaderWidth, kToolbarHeight);
+            const QRect area = QRect(
+                timelineRect().left(), 0, timelineRect().width(), kToolbarHeight);
             const double beatFrames =
                 static_cast<double>(markerSampleRate()) * 60.0 / bpm_ /
                 tempoPulseUnits_;
@@ -671,19 +859,88 @@ private:
                 1,
                 static_cast<int>(std::ceil(static_cast<double>(viewFrames()) / beatFrames)),
                 2048);
+            int lastLabelRight = area.left() - 20;
             for (int beat = 0; beat < beatCount; ++beat) {
                 const int x = xForFrame(static_cast<qint64>(std::llround(beat * beatFrames)));
                 if (x >= area.right()) break;
                 const int barNumber = jam2::gui::trackTimelineBarNumber(beat, beatsPerBar_);
-                painter.setPen(barNumber > 0 ? theme::gridBar : theme::gridBeat);
-                const int gridBottom = kToolbarHeight + visualLaneCount() * kLaneHeight - 1;
-                painter.drawLine(x, 0, x, gridBottom);
-                if (barNumber > 0) {
+                if (barNumber > 0 && x >= lastLabelRight + 12) {
+                    painter.setPen(theme::withAlpha(theme::gridBar, 150));
+                    painter.drawLine(x, kToolbarHeight - 8, x, kToolbarHeight - 1);
                     painter.setPen(theme::text);
-                    painter.drawText(x + 4, 20, QString::number(barNumber));
+                    const QString text = QString::number(barNumber);
+                    painter.drawText(x + 5, 0, 44, kToolbarHeight - 5,
+                        Qt::AlignLeft | Qt::AlignVCenter, text);
+                    lastLabelRight = x + painter.fontMetrics().horizontalAdvance(text) + 5;
                 }
             }
         }
+    }
+
+    void drawTimelineGrid(QPainter& painter)
+    {
+        if (bpm_ <= 0.0 || lanes_.isEmpty()) return;
+        const QRect area = timelineRect();
+        const int bottom = kToolbarHeight + visualLaneCount() * kLaneHeight - 8;
+        const double beatFrames =
+            static_cast<double>(markerSampleRate()) * 60.0 / bpm_ /
+            tempoPulseUnits_;
+        const int beatCount = qBound(
+            1,
+            static_cast<int>(std::ceil(static_cast<double>(viewFrames()) / beatFrames)),
+            4096);
+        int previousX = area.left() - 10;
+        for (int beat = 0; beat <= beatCount; ++beat) {
+            const int x = xForFrame(static_cast<qint64>(std::llround(beat * beatFrames)));
+            if (x > area.right()) break;
+            const bool bar = jam2::gui::trackTimelineBarNumber(beat, beatsPerBar_) > 0;
+            if (!bar && x - previousX < 5) continue;
+            painter.setPen(QPen(
+                bar ? theme::withAlpha(theme::gridBar, 76)
+                    : theme::withAlpha(theme::gridBeat, 76),
+                bar ? 1.2 : 1.0));
+            painter.drawLine(x, kToolbarHeight + 8, x, bottom);
+            previousX = x;
+        }
+    }
+
+    void drawSectionExtensionPreview(QPainter& painter)
+    {
+        qint64 previewEnd = liveRecordingEndFrame_;
+        if (timelineDragActive() && dragLane_ >= 0 && dragLane_ < lanes_.size()) {
+            previewEnd = qMax(
+                previewEnd,
+                lanes_[dragLane_].lane.startFrame + visibleFrames(dragLane_));
+        }
+        if (previewEnd <= minimumViewFrames_ || lanes_.isEmpty()) return;
+        const QRect area = timelineRect();
+        const int left = xForFrame(minimumViewFrames_);
+        const int right = qMax(left + 1, xForFrame(previewEnd));
+        const QRect extension(
+            left,
+            kToolbarHeight,
+            qMax(1, right - left),
+            visualLaneCount() * kLaneHeight);
+        painter.save();
+        painter.fillRect(extension, theme::withAlpha(theme::accent, 18));
+        painter.setPen(QPen(theme::withAlpha(theme::accent, 145), 1, Qt::DashLine));
+        painter.drawLine(left, extension.top(), left, extension.bottom());
+        const int beats = jam2::gui::sectionBeatCountForTimelineEnd(
+            previewEnd,
+            markerSampleRate(),
+            bpm_,
+            tempoPulseUnits_,
+            beatsPerBar_);
+        const int bars = qMax(1, (beats + beatsPerBar_ - 1) / beatsPerBar_);
+        QFont font(QStringLiteral("Bahnschrift"));
+        font.setPixelSize(11);
+        painter.setFont(font);
+        painter.setPen(theme::accent);
+        painter.drawText(
+            area.adjusted(8, 4, -8, 0),
+            Qt::AlignRight | Qt::AlignTop,
+            QStringLiteral("SECTION EXTENDS TO BAR %1").arg(bars));
+        painter.restore();
     }
 
     void drawOverlays(QPainter& painter)
@@ -714,11 +971,11 @@ private:
                 ? (gridPositionMs_ * static_cast<qint64>(rate) / 1000) % frames
                 : 0;
             const int x = xForFrame(currentBeatFrame);
-            painter.setPen(QPen(theme::withAlpha(theme::playhead, 170), 1));
+            painter.setPen(QPen(theme::withAlpha(theme::playhead, 210), 2));
             painter.drawLine(x, top, x, bottom);
             painter.setPen(Qt::NoPen);
             painter.setBrush(theme::playhead);
-            painter.drawEllipse(QPoint(x, kToolbarHeight - 8), 4, 4);
+            painter.drawEllipse(QPoint(x, kToolbarHeight - 8), 5, 5);
         }
         drawMarker(playheadMs_, theme::playhead, 2);
     }
@@ -730,43 +987,78 @@ private:
         const QRect rowRect = laneRect(row);
         const bool selected = row == selectedLane_;
         const bool armed = row == armedLane_;
-        painter.fillRect(
-            rowRect.adjusted(0, 0, 0, -1),
-            selected ? QColor(45, 26, 52) : theme::panelBg);
-        painter.fillRect(rowRect.adjusted(kHeaderWidth, 0, 0, -1), theme::editorBg);
+        const QRect headerCard = rowRect.adjusted(8, 7, -(width() - kHeaderWidth + 8), -7);
+        const QRect timelineCard = laneTimelineRect(row);
+        painter.setPen(QPen(
+            selected ? theme::withAlpha(theme::nebulaPurple, 145) : theme::border,
+            selected ? 1.4 : 1.0));
+        painter.setBrush(selected ? QColor(27, 21, 31) : theme::panelBg);
+        painter.drawRoundedRect(headerCard, 7, 7);
+        painter.setPen(QPen(selected ? theme::withAlpha(theme::nebulaPurple, 105) : theme::border));
+        painter.setBrush(selected ? QColor(11, 13, 17) : theme::editorBg);
+        painter.drawRoundedRect(timelineCard, 7, 7);
         if (selected) {
-            painter.fillRect(
-                QRect(rowRect.left(), rowRect.top(), 3, rowRect.height() - 1),
-                theme::playhead);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(theme::playhead);
+            painter.drawRoundedRect(
+                QRect(headerCard.left(), headerCard.top() + 8, 3, headerCard.height() - 16),
+                2, 2);
         }
-        painter.setPen(theme::border);
-        painter.drawLine(0, rowRect.bottom(), width(), rowRect.bottom());
-        painter.drawLine(kHeaderWidth, rowRect.top(), kHeaderWidth, rowRect.bottom());
 
         drawLaneHeader(painter, row, lane, realLane);
         drawLaneWaveform(painter, row, realLane);
+        if (row == dropLane_) {
+            painter.setBrush(theme::withAlpha(theme::accent, 28));
+            painter.setPen(QPen(theme::accent, 2, Qt::DashLine));
+            painter.drawRoundedRect(timelineCard.adjusted(2, 2, -2, -2), 6, 6);
+            painter.setPen(theme::textStrong);
+            painter.drawText(
+                timelineCard.adjusted(14, 0, -14, 0),
+                Qt::AlignCenter,
+                realLane
+                    ? QStringLiteral("DROP WAV TO REPLACE THIS TRACK")
+                    : QStringLiteral("DROP WAV TO CREATE THIS TRACK"));
+        }
         if (armed) {
             painter.setBrush(Qt::NoBrush);
             painter.setPen(QPen(theme::playhead, 2));
-            painter.drawRect(rowRect.adjusted(1, 1, -2, -2));
+            painter.drawRoundedRect(headerCard.adjusted(1, 1, -1, -1), 7, 7);
         }
     }
 
     QRect controlRect(int row, const QString& control) const
     {
         const QRect lane = laneRect(row);
-        if (control == QStringLiteral("mute")) return QRect(28, lane.top() + 49, 34, 30);
-        if (control == QStringLiteral("solo")) return QRect(70, lane.top() + 49, 34, 30);
-        if (control == QStringLiteral("arm")) return QRect(116, lane.top() + 49, 34, 30);
-        if (control == QStringLiteral("rename")) return QRect(28, lane.top() + 7, kHeaderWidth - 68, 34);
-        if (control == QStringLiteral("remove")) return QRect(kHeaderWidth - 34, lane.top() + 9, 22, 22);
+        if (control == QStringLiteral("mute")) return QRect(18, lane.top() + 64, 48, 26);
+        if (control == QStringLiteral("solo")) return QRect(73, lane.top() + 64, 48, 26);
+        if (control == QStringLiteral("arm")) return QRect(128, lane.top() + 64, 76, 26);
+        if (control == QStringLiteral("rename")) return QRect(151, lane.top() + 35, 58, 22);
+        if (control == QStringLiteral("remove")) return QRect(215, lane.top() + 35, 52, 22);
         return {};
     }
 
     QRect gainRect(int row) const
     {
         const QRect lane = laneRect(row);
-        return QRect(84, lane.top() + 89, kHeaderWidth - 102, 12);
+        return QRect(58, lane.top() + 102, 158, 12);
+    }
+
+    bool hasWav(int row) const
+    {
+        return row >= 0 && row < lanes_.size() &&
+            !lanes_[row].lane.assetPath.trimmed().isEmpty();
+    }
+
+    QRect revealWavRect(int row) const
+    {
+        const QRect card = laneTimelineRect(row);
+        return QRect(card.right() - 174, card.top() + 9, 72, 24);
+    }
+
+    QRect removeWavRect(int row) const
+    {
+        const QRect card = laneTimelineRect(row);
+        return QRect(card.right() - 96, card.top() + 9, 88, 24);
     }
 
     QString controlAt(int row, const QPoint& pos) const
@@ -774,16 +1066,75 @@ private:
         for (const QString& control : {QStringLiteral("mute"), QStringLiteral("solo"), QStringLiteral("arm"), QStringLiteral("rename"), QStringLiteral("remove")}) {
             if (controlRect(row, control).contains(pos)) return control;
         }
+        if (row == selectedLane_ && hasWav(row)) {
+            if (revealWavRect(row).contains(pos)) return QStringLiteral("reveal_wav");
+            if (removeWavRect(row).contains(pos)) return QStringLiteral("remove_wav");
+        }
         if (gainRect(row).adjusted(-4, -8, 4, 8).contains(pos)) return QStringLiteral("gain");
         return {};
     }
 
+    bool laneIsAudible(int row) const
+    {
+        if (row < 0 || row >= lanes_.size()) return false;
+        const bool anySolo = std::any_of(
+            lanes_.cbegin(), lanes_.cend(), [](const LaneView& view) {
+                return view.lane.sampleRateCompatible && view.lane.solo &&
+                    !view.lane.muted;
+            });
+        const LooperLane& lane = lanes_[row].lane;
+        return lane.sampleRateCompatible && !lane.muted &&
+            (!anySolo || lane.solo);
+    }
+
+    QColor laneWaveformColor(int row) const
+    {
+        const QColor source = laneOriginColor(lanes_[row].lane);
+        if (laneIsAudible(row)) return source;
+        QColor dimmed = source.toHsl();
+        dimmed.setHslF(
+            dimmed.hslHueF(),
+            qMax(0.0, dimmed.hslSaturationF()) * 0.22,
+            qBound(0.0, dimmed.lightnessF() * 0.62, 1.0));
+        return dimmed;
+    }
+
+    QString laneOriginText(const LooperLane& lane) const
+    {
+        if (lane.assetPath.trimmed().isEmpty() && !lane.assetHash.isEmpty()) {
+            return QStringLiteral("Remote WAV not shared");
+        }
+        if (lane.assetPath.trimmed().isEmpty()) return QStringLiteral("Empty track");
+        if (!lane.referenceKind.isEmpty() || lane.originKind == QStringLiteral("generated")) {
+            const QString kind = lane.referenceKind.isEmpty()
+                ? QStringLiteral("reference") : lane.referenceKind;
+            return QStringLiteral("Generated %1").arg(kind);
+        }
+        if (lane.originKind == QStringLiteral("peer")) return QStringLiteral("Track from peer");
+        if (lane.originKind == QStringLiteral("recorded")) return QStringLiteral("Recorded in Jam2");
+        if (lane.originKind == QStringLiteral("imported")) return QStringLiteral("Imported audio");
+        if (lane.localOnly) return QStringLiteral("Local track");
+        return QStringLiteral("Track audio");
+    }
+
+    QColor laneOriginColor(const LooperLane& lane) const
+    {
+        if (!lane.referenceKind.isEmpty() || lane.originKind == QStringLiteral("generated")) {
+            return theme::warning;
+        }
+        if (lane.originKind == QStringLiteral("peer")) return theme::nebulaPurple;
+        if (lane.originKind == QStringLiteral("recorded")) return theme::record;
+        if (lane.originKind == QStringLiteral("imported")) return theme::accent;
+        return theme::textMuted;
+    }
+
     void drawLaneHeader(QPainter& painter, int row, const LooperLane& lane, bool realLane)
     {
-        const QRect name = controlRect(row, QStringLiteral("rename"));
-        QFont laneNameFont = painter.font();
-        laneNameFont.setPointSizeF(qMax(10.5, laneNameFont.pointSizeF()));
-        laneNameFont.setWeight(QFont::DemiBold);
+        const QRect laneArea = laneRect(row);
+        const QRect name(18, laneArea.top() + 8, kHeaderWidth - 36, 27);
+        QFont laneNameFont(QStringLiteral("Georgia"));
+        laneNameFont.setPointSizeF(14.0);
+        laneNameFont.setWeight(QFont::Normal);
         painter.setFont(laneNameFont);
         painter.setPen(theme::textStrong);
         painter.drawText(
@@ -793,6 +1144,36 @@ private:
                 lane.name.isEmpty() ? QStringLiteral("Empty Track %1").arg(row + 1) : lane.name,
                 Qt::ElideRight,
                 name.width()));
+
+        QFont detailFont(QStringLiteral("Bahnschrift"));
+        detailFont.setPixelSize(11);
+        painter.setFont(detailFont);
+        const QColor sourceColor = laneOriginColor(lane);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(sourceColor);
+        painter.drawEllipse(QPoint(21, laneArea.top() + 46), 3, 3);
+        painter.setPen(theme::textMuted);
+        const QRect origin(29, laneArea.top() + 34, 116, 24);
+        painter.drawText(
+            origin,
+            Qt::AlignLeft | Qt::AlignVCenter,
+            QFontMetrics(detailFont).elidedText(
+                laneOriginText(lane), Qt::ElideRight, origin.width()));
+
+        drawActionButton(
+            painter,
+            controlRect(row, QStringLiteral("rename")),
+            QStringLiteral("Rename"),
+            theme::accent,
+            theme::accentSoft,
+            true);
+        drawActionButton(
+            painter,
+            controlRect(row, QStringLiteral("remove")),
+            QStringLiteral("Remove"),
+            theme::danger,
+            theme::withAlpha(theme::nebulaRed, 42),
+            realLane);
 
         drawButton(
             painter,
@@ -806,46 +1187,92 @@ private:
             realLane && lane.solo ? theme::success : theme::buttonBg);
 
         const QRect arm = controlRect(row, QStringLiteral("arm"));
-        painter.setBrush(theme::buttonBg);
-        painter.setPen(QPen(row == armedLane_ ? theme::playhead : theme::borderStrong, row == armedLane_ ? 2 : 1));
-        painter.drawRect(arm.adjusted(0, 0, -1, -1));
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(theme::record);
-        painter.drawEllipse(arm.center(), 7, 7);
-
-        const QRect remove = controlRect(row, QStringLiteral("remove"));
-        painter.setPen(QPen(theme::danger, 2));
-        painter.drawLine(remove.left() + 5, remove.top() + 5, remove.right() - 5, remove.bottom() - 5);
-        painter.drawLine(remove.right() - 5, remove.top() + 5, remove.left() + 5, remove.bottom() - 5);
+        const QString remoteState = remoteRecordingStates_.value(lane.id);
+        const bool localArmed = row == armedLane_;
+        const bool remoteRecording = remoteState.contains(
+            QStringLiteral("RECORDING"), Qt::CaseInsensitive);
+        painter.setBrush(
+            remoteRecording ? QColor(68, 18, 31) :
+                !remoteState.isEmpty() ? QColor(62, 46, 25) : theme::buttonBg);
+        painter.setPen(QPen(
+            remoteRecording ? theme::record :
+                (localArmed || !remoteState.isEmpty()) ? theme::playhead : theme::borderStrong,
+            localArmed || !remoteState.isEmpty() ? 2 : 1));
+        painter.drawRoundedRect(arm.adjusted(0, 0, -1, -1), 4, 4);
+        painter.setPen(remoteRecording ? QColor(255, 190, 196) : theme::textStrong);
+        const QString armText = remoteRecording
+            ? QStringLiteral("RECORDING")
+            : !remoteState.isEmpty() || localArmed
+                ? QStringLiteral("ARMED") : QStringLiteral("ARM");
+        painter.drawText(
+            arm.adjusted(4, 0, -4, 0),
+            Qt::AlignCenter,
+            QFontMetrics(painter.font()).elidedText(
+                armText, Qt::ElideRight, arm.width() - 8));
 
         const QRect slider = gainRect(row);
         painter.save();
-        painter.fillRect(slider, theme::meterBg);
-        painter.setBrush(Qt::NoBrush);
-        painter.setPen(QPen(theme::playhead, 1));
-        painter.drawRect(slider.adjusted(0, 0, -1, -1));
-        const double t = qBound(0.0, (lane.gainDb + 60.0) / 72.0, 1.0);
+        const QRect groove(slider.left(), slider.center().y() - 3, slider.width(), 6);
+        painter.setPen(QPen(theme::borderStrong, 1));
+        painter.setBrush(QColor(23, 32, 35));
+        painter.drawRoundedRect(groove, 3, 3);
+        const double t = jam2::gui::trackGainPosition(lane.gainDb);
         const int x = slider.left() +
             static_cast<int>(std::llround(t * qMax(1, slider.width() - 1)));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(theme::withAlpha(theme::accent, 190));
+        painter.drawRoundedRect(
+            QRect(groove.left() + 1, groove.top() + 1,
+                qMax(2, x - groove.left()), groove.height() - 2),
+            2, 2);
+        const int unityX = slider.left() + static_cast<int>(std::llround(
+            jam2::gui::trackGainPosition(0.0) * slider.width()));
+        painter.setPen(theme::withAlpha(theme::textMuted, 140));
+        painter.drawLine(unityX, slider.top(), unityX, slider.bottom());
+        painter.setPen(theme::borderStrong);
+        painter.drawLine(slider.left(), slider.top() - 1, slider.left(), slider.bottom() + 1);
+        painter.drawLine(slider.right(), slider.top() - 1, slider.right(), slider.bottom() + 1);
         painter.setBrush(theme::playhead);
-        painter.setPen(QPen(QColor(255, 214, 142), 1));
-        painter.drawEllipse(QPoint(x, slider.center().y()), 5, 5);
+        painter.setPen(QPen(QColor(255, 226, 170), 1));
+        painter.drawEllipse(QPoint(x, slider.center().y()), 6, 6);
         painter.setPen(theme::textMuted);
         painter.drawText(
-            QRect(28, laneRect(row).top() + 82, 50, 24),
+            QRect(18, laneArea.top() + 96, 42, 24),
             Qt::AlignLeft | Qt::AlignVCenter,
-            QStringLiteral("Volume"));
+            QStringLiteral("VOL"));
+        painter.setPen(theme::text);
+        painter.drawText(
+            QRect(198, laneArea.top() + 96, 69, 24),
+            Qt::AlignRight | Qt::AlignVCenter,
+            QStringLiteral("%1 dB").arg(lane.gainDb, 0, 'f', 1));
         painter.restore();
     }
 
     void drawButton(QPainter& painter, const QRect& rect, const QString& text, const QColor& fill)
     {
         painter.save();
-        painter.fillRect(rect, fill);
-        painter.setBrush(Qt::NoBrush);
+        painter.setBrush(fill);
         painter.setPen(theme::borderStrong);
-        painter.drawRect(rect.adjusted(0, 0, -1, -1));
+        painter.drawRoundedRect(rect.adjusted(0, 0, -1, -1), 4, 4);
         painter.setPen(theme::textStrong);
+        painter.drawText(rect, Qt::AlignCenter, text);
+        painter.restore();
+    }
+
+    void drawActionButton(
+        QPainter& painter,
+        const QRect& rect,
+        const QString& text,
+        const QColor& color,
+        const QColor& fill,
+        bool enabled)
+    {
+        painter.save();
+        const QColor resolvedColor = enabled ? color : theme::textMuted;
+        painter.setBrush(enabled ? fill : theme::panelRaised);
+        painter.setPen(QPen(theme::withAlpha(resolvedColor, enabled ? 185 : 80), 1));
+        painter.drawRoundedRect(rect.adjusted(0, 0, -1, -1), 4, 4);
+        painter.setPen(resolvedColor);
         painter.drawText(rect, Qt::AlignCenter, text);
         painter.restore();
     }
@@ -867,22 +1294,71 @@ private:
 
     void drawLaneWaveform(QPainter& painter, int row, bool realLane)
     {
-        const QRect area = laneTimelineRect(row).adjusted(0, 12, -1, -12);
-        painter.setPen(theme::gridBeat);
+        const QRect area = laneTimelineRect(row).adjusted(10, 11, -10, -11);
+        painter.setPen(theme::withAlpha(theme::gridBeat, 115));
         painter.drawLine(area.left(), area.center().y(), area.right(), area.center().y());
-        if (!realLane || row >= lanes_.size() || lanes_[row].sourceFrames <= 0 || lanes_[row].peaks.empty()) {
-            painter.setPen(theme::border);
-            painter.drawLine(area.left(), area.center().y(), area.right(), area.center().y());
+        if (!realLane || row >= lanes_.size() || lanes_[row].sourceFrames <= 0) {
+            painter.setPen(theme::withAlpha(theme::textMuted, 130));
+            painter.drawText(
+                area.adjusted(12, 0, -12, 0),
+                Qt::AlignCenter,
+                realLane && !laneOriginText(lanes_[row].lane).startsWith(QStringLiteral("Empty"))
+                    ? QStringLiteral("Loading waveform\u2026")
+                    : QStringLiteral("Import audio or arm this track to record"));
             return;
         }
-        const QRect clip = clipRect(row);
-        painter.fillRect(clip, QColor(35, 21, 45));
-        const QVector<QColor> waveformColors{
-            theme::accent,
-            theme::nebulaPurple,
-            theme::nebulaCoral,
-            theme::nebulaRed};
-        painter.setPen(waveformColors.at(row % waveformColors.size()));
+        const QRect clip = clipRect(row).intersected(area.adjusted(-1, -1, 1, 1));
+        if (!clip.isValid()) return;
+        const bool audible = laneIsAudible(row);
+        const QColor waveformColor = laneWaveformColor(row);
+        if (lanes_[row].peaks.empty()) {
+            const bool remoteMissing = lanes_[row].lane.assetPath.trimmed().isEmpty() &&
+                !lanes_[row].lane.assetHash.isEmpty();
+            if (!remoteMissing) {
+                painter.setPen(theme::withAlpha(theme::textMuted, 130));
+                painter.drawText(area.adjusted(12, 0, -12, 0), Qt::AlignCenter,
+                    QStringLiteral("Loading waveform\u2026"));
+                return;
+            }
+            painter.save();
+            const QColor pendingColor = theme::nebulaPurple;
+            painter.setBrush(theme::withAlpha(pendingColor, 24));
+            painter.setPen(QPen(theme::withAlpha(pendingColor, 150), 1, Qt::DashLine));
+            painter.drawRoundedRect(clip, 6, 6);
+            painter.setClipRect(clip.adjusted(1, 1, -1, -1));
+            painter.setPen(QPen(theme::withAlpha(pendingColor, 38), 1));
+            for (int x = clip.left() - clip.height(); x < clip.right(); x += 18) {
+                painter.drawLine(x, clip.bottom(), x + clip.height(), clip.top());
+            }
+            painter.setClipping(false);
+            QFont pendingFont(QStringLiteral("Bahnschrift"));
+            pendingFont.setPixelSize(11);
+            pendingFont.setWeight(QFont::DemiBold);
+            painter.setFont(pendingFont);
+            painter.setPen(theme::withAlpha(theme::textStrong, 205));
+            const int rate = qMax(1, lanes_[row].lane.sampleRate);
+            const qint64 seconds = (lanes_[row].sourceFrames + rate / 2) / rate;
+            const QString duration = QStringLiteral("%1:%2")
+                .arg(seconds / 60)
+                .arg(seconds % 60, 2, 10, QLatin1Char('0'));
+            painter.drawText(
+                clip.adjusted(10, 0, -10, 0),
+                Qt::AlignCenter,
+                QFontMetrics(pendingFont).elidedText(
+                    QStringLiteral("REMOTE WAV  \u00b7  AUDIO NOT SHARED  \u00b7  %1").arg(duration),
+                    Qt::ElideRight,
+                    qMax(1, clip.width() - 20)));
+            painter.restore();
+            return;
+        }
+        painter.setBrush(audible ? QColor(31, 22, 37) : QColor(20, 21, 24));
+        painter.setPen(QPen(theme::withAlpha(waveformColor, audible ? 150 : 82), 1));
+        painter.drawRoundedRect(clip, 6, 6);
+        painter.save();
+        QPainterPath clipPath;
+        clipPath.addRoundedRect(clip.adjusted(1, 1, -1, -1), 5, 5);
+        painter.setClipPath(clipPath);
+        painter.setPen(theme::withAlpha(waveformColor, audible ? 225 : 105));
         const auto& peaks = lanes_[row].peaks;
         const qint64 firstSourceFrame = sourceStart(row);
         const qint64 croppedFrames = visibleFrames(row);
@@ -898,14 +1374,54 @@ private:
             const int half = qMax(2, static_cast<int>(peaks[index] * (clip.height() / 2 - 4)));
             painter.drawLine(x, clip.center().y() - half, x, clip.center().y() + half);
         }
-        painter.fillRect(
-            QRect(clip.left(), clip.top(), 6, clip.height()),
-            theme::withAlpha(theme::accent, 190));
-        painter.fillRect(
-            QRect(clip.right() - 5, clip.top(), 6, clip.height()),
-            theme::withAlpha(theme::nebulaCoral, 190));
-        painter.setPen(theme::textStrong);
-        painter.drawText(clip.adjusted(6, 2, -6, -2), Qt::AlignLeft | Qt::AlignTop, lanes_[row].lane.name);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(theme::withAlpha(audible ? theme::accent : waveformColor, audible ? 185 : 90));
+        painter.drawRoundedRect(QRect(clip.left(), clip.top(), 5, clip.height()), 3, 3);
+        painter.setBrush(theme::withAlpha(audible ? theme::nebulaCoral : waveformColor, audible ? 185 : 90));
+        painter.drawRoundedRect(QRect(clip.right() - 4, clip.top(), 5, clip.height()), 3, 3);
+        painter.restore();
+    }
+
+    void drawLaneAssetChrome(QPainter& painter)
+    {
+        QFont assetFont(QStringLiteral("Bahnschrift"));
+        assetFont.setPixelSize(11);
+        painter.setFont(assetFont);
+        for (int row = 0; row < lanes_.size(); ++row) {
+            if (!hasWav(row)) continue;
+            const QRect card = laneTimelineRect(row);
+            const bool selected = row == selectedLane_;
+            const int labelRight = selected ? revealWavRect(row).left() - 10 : card.right() - 10;
+            const QRect label(
+                card.left() + 12,
+                card.top() + 9,
+                qMax(1, labelRight - card.left() - 12),
+                24);
+            const QString fileName = QFileInfo(lanes_[row].assetPath).fileName();
+            painter.setPen(laneIsAudible(row) ? theme::text : theme::textMuted);
+            painter.drawText(
+                label,
+                Qt::AlignLeft | Qt::AlignVCenter,
+                QFontMetrics(assetFont).elidedText(
+                    QStringLiteral("WAV  %1").arg(fileName),
+                    Qt::ElideMiddle,
+                    label.width()));
+            if (!selected) continue;
+            drawActionButton(
+                painter,
+                revealWavRect(row),
+                QStringLiteral("SHOW FILE"),
+                theme::accent,
+                theme::withAlpha(theme::accent, 24),
+                !interactionsProtected_);
+            drawActionButton(
+                painter,
+                removeWavRect(row),
+                QStringLiteral("REMOVE WAV"),
+                theme::danger,
+                theme::withAlpha(theme::nebulaRed, 34),
+                !interactionsProtected_);
+        }
     }
 
     int laneAt(const QPoint& pos) const
@@ -930,7 +1446,7 @@ private:
             0.0,
             static_cast<double>(x - slider.left()) / qMax(1, slider.width()),
             1.0);
-        pendingGainDb_ = -60.0 + t * 72.0;
+        pendingGainDb_ = jam2::gui::trackGainDb(t);
         if (lane >= 0 && lane < lanes_.size()) {
             lanes_[lane].lane.gainDb = pendingGainDb_;
         }
@@ -984,6 +1500,8 @@ private:
     }
 
     QVector<LaneView> lanes_;
+    QMap<QString, QString> remoteRecordingStates_;
+    bool interactionsProtected_ = false;
     int selectedLane_ = -1;
     int activeBank_ = 0;
     int armedLane_ = -1;
@@ -998,6 +1516,7 @@ private:
     qint64 loopEndMs_ = -1;
     int markerSampleRate_ = 48000;
     qint64 minimumViewFrames_ = 1;
+    qint64 liveRecordingEndFrame_ = 0;
     DragMode dragMode_ = DragMode::None;
     int dragLane_ = -1;
     double dragStartX_ = 0.0;
@@ -1011,6 +1530,8 @@ private:
     int dragTempoPulseUnits_ = 1;
     bool dragGridLockEnabled_ = true;
     double pendingGainDb_ = 0.0;
+    int timelineZoomLevel_ = 0;
+    int dropLane_ = -1;
 };
 
 class LevelMeterWidget : public QWidget {

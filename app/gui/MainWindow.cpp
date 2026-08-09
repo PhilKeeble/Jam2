@@ -7,6 +7,7 @@
 #include "MusicTheory.hpp"
 #include "PracticeIdeaDialogs.hpp"
 #include "RecordingTiming.hpp"
+#include "SectionTimeline.hpp"
 #include "PracticeIdeaController.hpp"
 #include "PracticeReferenceRenderer.hpp"
 #include "StyleProfileCatalog.hpp"
@@ -28,12 +29,14 @@
 
 #include <QAbstractSlider>
 #include <QAbstractSpinBox>
+#include <QAbstractScrollArea>
 #include <QApplication>
 #include <QAbstractItemView>
 #include <QCloseEvent>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QDesktopServices>
 #include <QDir>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -61,6 +64,7 @@
 #include <QIODevice>
 #include <QProgressDialog>
 #include <QPointer>
+#include <QProcess>
 #include <QRunnable>
 #include <QRegularExpression>
 #include <QSaveFile>
@@ -78,6 +82,7 @@
 #include <QTableWidgetItem>
 #include <QTemporaryFile>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <QUuid>
@@ -104,8 +109,18 @@ namespace {
 constexpr qint64 kMaxLooperAssetBytes = jam2::application::limits::kMaximumAssetBytes;
 constexpr int kMaxLooperAssetRequests = jam2::application::limits::kMaximumAssetRequests;
 constexpr int kMaxLooperTrackContributions = 512;
+constexpr qint64 kTrackBatchIdleTimeoutMs = 30000;
 constexpr int kFirewallGuidanceDisconnectThreshold = 3;
 constexpr int kFirewallGuidanceWindowMs = 10000;
+
+void addInitialEmptyLooperLanes(LooperProject& project)
+{
+    for (int bankIndex = 0; bankIndex < project.banks().size(); ++bankIndex) {
+        if (project.banks().at(bankIndex).lanes.isEmpty()) {
+            (void)project.appendLane(bankIndex, LooperLane{});
+        }
+    }
+}
 
 QString practiceMeterIdForPattern(const jam2::metronome::PatternSnapshot& pattern)
 {
@@ -725,32 +740,44 @@ bool isComboBoxPopupObject(QObject* object)
     return false;
 }
 
-QScrollArea* parentScrollArea(QObject* object)
+QAbstractScrollArea* parentScrollArea(
+    QObject* object,
+    Qt::Orientation orientation)
 {
     auto* widget = qobject_cast<QWidget*>(object);
     while (widget != nullptr) {
-        if (auto* scrollArea = qobject_cast<QScrollArea*>(widget)) {
-            return scrollArea;
+        if (auto* scrollArea = qobject_cast<QAbstractScrollArea*>(widget)) {
+            QScrollBar* bar = orientation == Qt::Horizontal
+                ? scrollArea->horizontalScrollBar()
+                : scrollArea->verticalScrollBar();
+            if (bar && bar->maximum() > bar->minimum()) return scrollArea;
         }
         widget = widget->parentWidget();
     }
     return nullptr;
 }
 
-void scrollAreaByWheel(QScrollArea& scrollArea, QWheelEvent& wheel)
+bool scrollAreaByWheel(
+    QAbstractScrollArea& scrollArea,
+    QWheelEvent& wheel,
+    Qt::Orientation orientation,
+    bool useVerticalAxis = false)
 {
-    QScrollBar* bar = scrollArea.verticalScrollBar();
-    if (bar == nullptr) {
-        return;
-    }
-    int delta = wheel.pixelDelta().y();
+    QScrollBar* bar = orientation == Qt::Horizontal
+        ? scrollArea.horizontalScrollBar()
+        : scrollArea.verticalScrollBar();
+    if (!bar || bar->maximum() <= bar->minimum()) return false;
+    const QPoint pixelDelta = wheel.pixelDelta();
+    const QPoint angleDelta = wheel.angleDelta();
+    int delta = orientation == Qt::Horizontal && !useVerticalAxis
+        ? pixelDelta.x() : pixelDelta.y();
     if (delta == 0) {
-        delta = wheel.angleDelta().y() / 8;
+        delta = (orientation == Qt::Horizontal && !useVerticalAxis
+            ? angleDelta.x() : angleDelta.y()) / 8;
     }
-    if (delta == 0) {
-        return;
-    }
+    if (delta == 0) return false;
     bar->setValue(bar->value() - delta);
+    return true;
 }
 
 } // namespace
@@ -836,12 +863,17 @@ MainWindow::MainWindow(QWidget* parent)
             applyPendingSongIfAssetsReady();
             requestNextPendingAsset();
         },
+        [this](const QString& hash) { retryOrFailIncomingAsset(hash); },
+        [this](const QString& hash, const QString& peerToken, bool receiving) {
+            noteTrackAssetProgress(hash, peerToken, receiving);
+        },
     });
     installJam2Style();
     generateSession();
     (void)JamStorage::pruneEmptyUnsavedWorkspaces();
     const QString initialJamName = JamStorage::randomDisplayName();
     chordModel_.setTitle(initialJamName);
+    addInitialEmptyLooperLanes(looperProject_);
     jamStorage_.startNew(initialJamName);
     projectPersistence_.initializeWorkspace(jamStorage_.rootFolder());
     MainWindowPages::build(*this);
@@ -924,7 +956,8 @@ MainWindow::MainWindow(QWidget* parent)
             // collaborative from either peer.
             sendMetronomeModeToJam();
             sendMetronomePatternToJam();
-            if (looperProject_.trackSyncEnabled()) {
+            sendJamSyncPolicy();
+            if (jamSyncPolicy_.trackLanes) {
                 sendSongSnapshot();
             }
         }
@@ -949,8 +982,83 @@ MainWindow::MainWindow(QWidget* parent)
     };
     sessionController_.onMessage = [this](const QString& sourcePeerToken, const QJsonObject& message) {
         const QString type = message.value(QStringLiteral("type")).toString();
+        if (type == QStringLiteral("looper.recording.group.start")) {
+            if (!syncedRecordingsEnabled()) return;
+            handleRecordingGroupStart(message);
+            return;
+        }
+        if (type == QStringLiteral("looper.recording.group.finish")) {
+            if (!syncedRecordingsEnabled()) return;
+            handleRecordingGroupFinish(message);
+            return;
+        }
+        if (type == QStringLiteral("looper.recording.group.recover.request")) {
+            if (!sessionController_.isServer() || !syncedRecordingsEnabled()) return;
+            const QString groupId = message.value(QStringLiteral("group_id")).toString();
+            if (groupId != activeRecordingGroupId_) return;
+            const QJsonObject recovery{
+                {QStringLiteral("type"),
+                    QStringLiteral("looper.recording.group.recover")},
+                {QStringLiteral("group_id"), groupId},
+            };
+            sendControl(recovery);
+            handleRecordingGroupRecovery(recovery);
+            return;
+        }
+        if (type == QStringLiteral("looper.recording.group.recover")) {
+            if (!syncedRecordingsEnabled()) return;
+            handleRecordingGroupRecovery(message);
+            return;
+        }
+        if (type == QStringLiteral("looper.recording.resync.request")) {
+            if (!jamSyncPolicy_.globalPlayback) return;
+            if (sessionController_.isServer()) {
+                sendJamSyncPolicy(sourcePeerToken);
+                sendSongSnapshot();
+                (void)sendControlTo(sourcePeerToken, QJsonObject{
+                    {QStringLiteral("type"),
+                        QStringLiteral("looper.recording.resync.state")},
+                    {QStringLiteral("track_playing"),
+                        trackRecordingWorkflow_.globalTransportRequestedPlaying()},
+                    {QStringLiteral("active_bank"),
+                        looperProject_.activeBankIndex()},
+                });
+            }
+            return;
+        }
+        if (type == QStringLiteral("looper.recording.resync.state")) {
+            if (!jamSyncPolicy_.globalPlayback) return;
+            pendingRecordingResyncPlaying_ = message.value(
+                QStringLiteral("track_playing")).toBool();
+            applyPendingRecordingTransportResync();
+            return;
+        }
+        if (deferIncomingControlForLaneRecording(message, sourcePeerToken)) {
+            return;
+        }
+        if (type == QStringLiteral("jam.sync.set") ||
+            type == QStringLiteral("jam.sync.request")) {
+            handleJamSyncMessage(message, sourcePeerToken);
+            return;
+        }
+        if (type == QStringLiteral("jam.metronome.state.set") ||
+            type == QStringLiteral("jam.metronome.state.request")) {
+            const bool enabled = message.value(QStringLiteral("enabled")).toBool();
+            if (type == QStringLiteral("jam.metronome.state.request")) {
+                if (sessionController_.isServer() && jamSyncPolicy_.metronomeState) {
+                    setMetronomeEnabled(enabled, false);
+                    sendControl(QJsonObject{
+                        {QStringLiteral("type"), QStringLiteral("jam.metronome.state.set")},
+                        {QStringLiteral("enabled"), enabled},
+                    });
+                }
+            } else if (!sessionController_.isServer() && jamSyncPolicy_.metronomeState) {
+                setMetronomeEnabled(enabled, false);
+            }
+            return;
+        }
         if (type == QStringLiteral("bank.request")) {
-            if (sessionController_.isServer() && looperProject_.trackSyncEnabled()) {
+            if (sessionController_.isServer() && jamSyncPolicy_.globalPlayback) {
                 std::optional<quint64> targetBeat;
                 bool targetOk = false;
                 const quint64 requestedTarget = message.value(
@@ -965,7 +1073,7 @@ MainWindow::MainWindow(QWidget* parent)
             if (!sessionController_.isServer()) {
                 const int bank = message.value(QStringLiteral("bank")).toInt();
                 const QString switchId = message.value(QStringLiteral("switch_id")).toString();
-                if (looperProject_.trackSyncEnabled()) {
+                if (jamSyncPolicy_.globalPlayback) {
                     prepareSharedBankLaunch(bank, switchId);
                 } else {
                     // An opted-out peer is not part of shared playback, but it
@@ -980,7 +1088,7 @@ MainWindow::MainWindow(QWidget* parent)
             return;
         }
         if (type == QStringLiteral("bank.ready")) {
-            if (sessionController_.isServer() && looperProject_.trackSyncEnabled()) {
+            if (sessionController_.isServer() && jamSyncPolicy_.globalPlayback) {
                 handleSharedBankReady(
                     message.value(QStringLiteral("bank")).toInt(),
                     message.value(QStringLiteral("switch_id")).toString(),
@@ -996,7 +1104,7 @@ MainWindow::MainWindow(QWidget* parent)
             return;
         }
         if (type == QStringLiteral("bank.switch")) {
-            if (!sessionController_.isServer() && looperProject_.trackSyncEnabled()) {
+            if (!sessionController_.isServer() && jamSyncPolicy_.globalPlayback) {
                 bool targetOk = false;
                 const quint64 targetBeat = message.value(QStringLiteral("target_abs_beat"))
                     .toString().toULongLong(&targetOk);
@@ -1017,7 +1125,7 @@ MainWindow::MainWindow(QWidget* parent)
             return;
         }
         GuiControlMessageRouter::dispatch({
-            [this] { return looperProject_.trackSyncEnabled(); },
+            [] { return true; },
             [this](const QString& text) { appendLog(text); },
             [this](const QString& text) {
                 QMessageBox::warning(this, QStringLiteral("Jam2"), text);
@@ -1036,7 +1144,12 @@ MainWindow::MainWindow(QWidget* parent)
             [this](const QJsonObject& value, const QString& source) {
                 handleTrackBatchOffer(value, source);
             },
-            [this](const QJsonObject& value) { handleTrackBatchComplete(value); },
+            [this](const QJsonObject& value, const QString& source) {
+                handleTrackBatchComplete(value, source);
+            },
+            [this](const QJsonObject& value, const QString& source) {
+                handleTrackRecordingState(value, source);
+            },
             &assetTransfer_,
         }, message, sourcePeerToken);
     };
@@ -1067,6 +1180,19 @@ MainWindow::MainWindow(QWidget* parent)
     };
     sessionController_.onPeerDisconnected = [this](const QString& token) {
         assetTransfer_.peerDisconnected(token);
+        for (auto it = trackWorkspace_.outgoingTrackSharePendingPeers.begin();
+             it != trackWorkspace_.outgoingTrackSharePendingPeers.end();) {
+            it->remove(token);
+            if (it->isEmpty()) {
+                const QString batchId = it.key();
+                it = trackWorkspace_.outgoingTrackSharePendingPeers.erase(it);
+                trackWorkspace_.outgoingTrackShareBatchHashes.remove(batchId);
+                trackWorkspace_.outgoingTrackShareLastProgressMs.remove(batchId);
+            } else {
+                ++it;
+            }
+        }
+        releaseHeldTrackSnapshotIfReady();
         localMeshPeerTokens_.remove(token);
         updateMixRemotePeers();
         if (sessionController_.isServer() && !sharedBankSwitchId_.isEmpty()) {
@@ -1192,16 +1318,46 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
             refreshControlConnection();
             return true;
         }
-    }
-    if (event->type() == QEvent::Wheel && isWheelValueEditor(watched)) {
-        if (isComboBoxPopupObject(watched)) {
-            return false;
-        }
-        if (auto* scrollArea = parentScrollArea(watched)) {
-            scrollAreaByWheel(*scrollArea, *static_cast<QWheelEvent*>(event));
+        const SharedSessionController::Role role = sessionController_.snapshot().role;
+        const bool audioAction = connectionLabel_->text() == QStringLiteral("AUDIO OFF") ||
+            connectionLabel_->text() == QStringLiteral("AUDIO ISSUE");
+        if (mouse->button() == Qt::LeftButton &&
+            (audioAction || !jam2_.isRunning()) &&
+            !jamStartupPending_ &&
+            role != SharedSessionController::Role::Creator &&
+            role != SharedSessionController::Role::Joiner) {
+            showSettingsDialog();
             return true;
         }
-        return false;
+    }
+    if (event->type() == QEvent::Wheel) {
+        auto* wheel = static_cast<QWheelEvent*>(event);
+        if (!isComboBoxPopupObject(watched)) {
+            const bool directHorizontal =
+                wheel->pixelDelta().x() != 0 || wheel->angleDelta().x() != 0;
+            const bool shiftedHorizontal =
+                wheel->modifiers().testFlag(Qt::ShiftModifier) &&
+                (wheel->pixelDelta().y() != 0 || wheel->angleDelta().y() != 0);
+            if (directHorizontal || shiftedHorizontal) {
+                if (auto* scrollArea = parentScrollArea(watched, Qt::Horizontal)) {
+                    if (scrollAreaByWheel(
+                            *scrollArea,
+                            *wheel,
+                            Qt::Horizontal,
+                            shiftedHorizontal && !directHorizontal)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        if (isWheelValueEditor(watched)) {
+            if (isComboBoxPopupObject(watched)) return false;
+            if (auto* scrollArea = parentScrollArea(watched, Qt::Vertical)) {
+                if (scrollAreaByWheel(
+                        *scrollArea, *wheel, Qt::Vertical)) return true;
+            }
+            return false;
+        }
     }
     return QWidget::eventFilter(watched, event);
 }
@@ -1591,6 +1747,8 @@ void MainWindow::showJamRecordingImportDialog(const QString& folder)
                 lane.name = result.laneName;
                 lane.sampleRate = result.asset.metadata.sampleRate;
                 lane.sampleRateCompatible = true;
+                lane.sourceFrames = result.asset.metadata.frames;
+                lane.originKind = QStringLiteral("recorded");
                 if (!looperProject_.appendLane(bankIndex, std::move(lane))) {
             failures.append(QStringLiteral("%1: no track slot was available")
                         .arg(result.laneName));
@@ -1606,7 +1764,8 @@ void MainWindow::showJamRecordingImportDialog(const QString& folder)
             refreshLooperLanes();
             if (imported > 0) {
                 regeneratePreparedMix(bankIndex);
-                if (looperProject_.trackSyncEnabled() && jam2_.isNetworkRunning()) {
+                syncLooperArrangement();
+                if (automaticWavSharingEnabled() && jam2_.isNetworkRunning()) {
                     shareLocalTracks();
                 }
             }
@@ -1673,6 +1832,116 @@ void MainWindow::updateConnectionControlState()
     if (stunRetriesSpin_) {
         stunRetriesSpin_->setEnabled(!manualEndpoint);
     }
+}
+
+void MainWindow::setSessionHeaderStatus(
+    const QString& text,
+    const QString& title,
+    const QStringList& lines,
+    bool issue,
+    bool actionable)
+{
+    if (!connectionLabel_) return;
+    connectionLabel_->setText(text);
+    connectionLabel_->setProperty("issue", issue);
+    connectionLabel_->setCursor(
+        issue || actionable ? Qt::PointingHandCursor : Qt::ArrowCursor);
+    QString tooltip = QStringLiteral("<b>%1</b>").arg(title.toHtmlEscaped());
+    for (const QString& line : lines) {
+        if (!line.trimmed().isEmpty()) {
+            tooltip += QStringLiteral("<br>%1").arg(line.toHtmlEscaped());
+        }
+    }
+    connectionLabel_->setToolTip(tooltip);
+    connectionLabel_->style()->unpolish(connectionLabel_);
+    connectionLabel_->style()->polish(connectionLabel_);
+}
+
+void MainWindow::showLocalSessionHeaderStatus()
+{
+    if (leaveJamButton_) leaveJamButton_->setEnabled(false);
+    QString deviceName = preferences_.localAudio.name.trimmed();
+    bool deviceOk = false;
+    const int selectedId = selectedDeviceId().toInt(&deviceOk);
+    if (deviceOk) {
+        const auto device = std::find_if(
+            availableDevices_.cbegin(), availableDevices_.cend(),
+            [selectedId](const auto& item) { return item.id == selectedId; });
+        if (device != availableDevices_.cend()) {
+            deviceName = QString::fromStdString(device->name);
+        }
+    }
+    if (deviceName.size() > 56) deviceName = deviceName.left(53) + QStringLiteral("...");
+    const int sampleRate = jam2_.engineSnapshot().sample_rate > 0.0
+        ? qRound(jam2_.engineSnapshot().sample_rate)
+        : sampleRateSpin_ ? sampleRateSpin_->value() : preferences_.localAudio.sampleRate;
+    const int buffer = bufferSizeSpin_
+        ? bufferSizeSpin_->value() : preferences_.localAudio.bufferSize;
+    QStringList lines;
+    if (!deviceName.isEmpty()) lines << deviceName;
+    lines << QStringLiteral("%1 Hz  ·  %2-frame buffer").arg(sampleRate).arg(buffer);
+    setSessionHeaderStatus(
+        QStringLiteral("LOCAL"), QStringLiteral("Local performance"), lines);
+}
+
+void MainWindow::showAudioOffSessionHeaderStatus()
+{
+    if (leaveJamButton_) leaveJamButton_->setEnabled(false);
+    setSessionHeaderStatus(
+        QStringLiteral("AUDIO OFF"),
+        QStringLiteral("Audio engine is off"),
+        {QStringLiteral("Click to open Local Audio settings.")},
+        false,
+        true);
+}
+
+void MainWindow::updateJamSessionHeaderStatus(
+    const SharedSessionController::Snapshot& snapshot)
+{
+    const bool activeJam = snapshot.role == SharedSessionController::Role::Creator ||
+        snapshot.role == SharedSessionController::Role::Joiner;
+    if (leaveJamButton_) leaveJamButton_->setEnabled(activeJam);
+    if (!activeJam) {
+        if (jam2_.isRunning()) showLocalSessionHeaderStatus();
+        else showAudioOffSessionHeaderStatus();
+        return;
+    }
+    int activeRemotePeers = 0;
+    for (const SharedSessionController::PeerSnapshot& peer : snapshot.peers) {
+        if (peer.token != snapshot.localToken &&
+            peer.edgeState == SharedSessionController::EdgeState::Active) {
+            ++activeRemotePeers;
+        }
+    }
+    const bool creator = snapshot.role == SharedSessionController::Role::Creator;
+    const QString role = creator
+        ? QStringLiteral("Jam creator") : QStringLiteral("Jam participant");
+    if (!creator && activeRemotePeers == 0) {
+        setSessionHeaderStatus(
+            QStringLiteral("JOINING"), role,
+            {QStringLiteral("Waiting for an active peer connection.")});
+        return;
+    }
+    const QString quality = snapshot.contract.audioFormat == QStringLiteral("pcm16-mono")
+        ? QStringLiteral("16-bit PCM")
+        : snapshot.contract.audioFormat == QStringLiteral("pcm24-mono")
+            ? QStringLiteral("24-bit PCM") : QStringLiteral("PCM audio");
+    QStringList lines{
+        QStringLiteral("%1 people  ·  %2 active remote")
+            .arg(activeRemotePeers + 1)
+            .arg(activeRemotePeers),
+    };
+    if (snapshot.contract.sampleRate > 0) {
+        lines << QStringLiteral("%1  ·  %2 Hz")
+            .arg(quality)
+            .arg(snapshot.contract.sampleRate);
+    }
+    setSessionHeaderStatus(
+        creator && activeRemotePeers == 0
+            ? QStringLiteral("JAM · WAITING")
+            : QStringLiteral("JAM · %1").arg(activeRemotePeers + 1),
+        role,
+        lines);
 }
 
 void MainWindow::showLocalPerformSetup()
@@ -1792,9 +2061,10 @@ void MainWindow::startLocalPerform()
         QMessageBox::warning(this, QStringLiteral("Jam2 Microphone Access"), permissionError);
         return;
     }
-    if (engineModeLabel_) {
-        engineModeLabel_->setText(QStringLiteral("Local"));
-    }
+    setSessionHeaderStatus(
+        QStringLiteral("STARTING"),
+        QStringLiteral("Starting local audio"),
+        {QStringLiteral("Preparing the selected device and channels.")});
     pendingJamRuntimeError_.clear();
     try {
         launchLocalRuntime(runtimeOptions());
@@ -1804,6 +2074,7 @@ void MainWindow::startLocalPerform()
             : pendingJamRuntimeError_;
         pendingJamRuntimeError_.clear();
         QMessageBox::warning(this, QStringLiteral("Local engine failed"), detail);
+        showAudioOffSessionHeaderStatus();
         QTimer::singleShot(0, this, [this] {
             if (!shuttingDown_ && !jam2_.isRunning()) {
                 showLocalPerformSetup();
@@ -1825,11 +2096,19 @@ void MainWindow::startJam(bool createSession)
         appendLog(permissionError);
         return;
     }
-    if (engineModeLabel_) {
-        engineModeLabel_->setText(QStringLiteral("Network"));
-    }
+    setSessionHeaderStatus(
+        createSession ? QStringLiteral("STARTING JAM") : QStringLiteral("JOINING"),
+        createSession ? QStringLiteral("Starting a jam") : QStringLiteral("Joining a jam"),
+        {QStringLiteral("Preparing authenticated control and direct audio connections.")});
     jamStartupPending_ = true;
     jamStartupCreating_ = createSession;
+    if (createSession) {
+        jamSyncPolicy_.revision = qMax(1, jamSyncPolicy_.revision);
+    } else {
+        // The creator's first authenticated policy snapshot must supersede any
+        // local choices made before joining this jam.
+        jamSyncPolicy_.revision = -1;
+    }
     pendingJamRuntimeError_.clear();
     lastJamFailureDialog_.clear();
     queuedJamFailureDetail_.clear();
@@ -1838,7 +2117,8 @@ void MainWindow::startJam(bool createSession)
     preAuthenticationDisconnectCount_ = 0;
     firewallGuidanceShown_ = false;
     cancelSharedBankLaunch(false, QStringLiteral("starting a new network session"));
-    jam2_.setTrackSyncEnabled(looperProject_.trackSyncEnabled());
+    jam2_.setTrackSyncEnabled(jamSyncPolicy_.globalPlayback);
+    jam2_.setRecordingSyncEnabled(syncedRecordingsEnabled());
     activePublicEndpoint_.clear();
     lastLoggedSessionSummary_.clear();
     localMeshPeerTokens_.clear();
@@ -1847,11 +2127,23 @@ void MainWindow::startJam(bool createSession)
     appliedTrackContributionIds_.clear();
     localTrackOffers_.clear();
     trackOfferAssetPaths_.clear();
-    trackWorkspace_.outgoingTrackShareBatchId.clear();
+    trackWorkspace_.outgoingTrackSharePendingPeers.clear();
+    trackWorkspace_.outgoingTrackShareBatchHashes.clear();
+    trackWorkspace_.outgoingTrackShareLastProgressMs.clear();
+    trackWorkspace_.incomingTrackShareLastProgressMs.clear();
+    trackWorkspace_.authoritativeTrackHistory.clear();
     trackWorkspace_.heldTrackShareSongSet = {};
     trackWorkspace_.heldTrackShareSongSourcePeerToken.clear();
     pendingTrackAssetSources_.clear();
     validatedTrackAssetHashes_.clear();
+    trackWorkspace_.incomingAssetRetryAttempts.clear();
+    activeRecordingGroupId_.clear();
+    activeRecordingGroupParticipants_.clear();
+    recoveredRecordingGroupIds_.clear();
+    activeRecordingGroupStartMessage_ = {};
+    lastRecordingGroupFinishMessage_ = {};
+    deferredRecordingControls_.clear();
+    deferredRecordingControlsOverflowed_ = false;
     incomingAssetWorkflow_ = IncomingAssetWorkflow::None;
     incomingAssetHash_.clear();
     incomingAssetSourcePeerToken_.clear();
@@ -1949,9 +2241,12 @@ void MainWindow::showJamFailure(const QString& detail)
         const QString action = jamStartupCreating_
             ? QStringLiteral("Start Jam failed")
             : QStringLiteral("Join Jam failed");
-        if (connectionLabel_) {
-            connectionLabel_->setText(action);
-        }
+        setSessionHeaderStatus(
+            QStringLiteral("CONNECTION ISSUE"),
+            action,
+            {lastJamFailureDialog_.left(160)},
+            true,
+            true);
         QMessageBox::critical(this, action, lastJamFailureDialog_);
     });
 }
@@ -1959,10 +2254,6 @@ void MainWindow::showJamFailure(const QString& detail)
 void MainWindow::launchLocalRuntime(Jam2RuntimeOptions options)
 {
     controlRefreshAvailable_ = false;
-    if (sessionTopologyLabel_) {
-        sessionTopologyLabel_->setText(QStringLiteral("Remote Peers 0"));
-        sessionTopologyLabel_->setToolTip(QString{});
-    }
     if (!sessionController_.startLocal(options)) {
         throw std::runtime_error("local engine failed to start");
     }
@@ -1976,7 +2267,7 @@ void MainWindow::launchLocalRuntime(Jam2RuntimeOptions options)
     if (refreshControlButton_) {
         refreshControlButton_->setEnabled(false);
     }
-    connectionLabel_->setText(QStringLiteral("Starting Perform"));
+    showLocalSessionHeaderStatus();
     QTimer::singleShot(250, this, [this] {
         updateRuntimeControls();
         sendMetronomeModeToJam();
@@ -2007,10 +2298,10 @@ void MainWindow::prepareNetworkRuntimePresentation(bool createSession)
     trackRecordingWorkflow_.clearJamRecordingState();
     updateJamRecordingControls();
     updateMixControls();
-    connectionLabel_->setText(
-        sessionController_.isConnected()
-            ? QStringLiteral("TCP peer authenticated")
-            : QStringLiteral("Starting"));
+    setSessionHeaderStatus(
+        createSession ? QStringLiteral("STARTING JAM") : QStringLiteral("JOINING"),
+        createSession ? QStringLiteral("Starting a jam") : QStringLiteral("Joining a jam"),
+        {QStringLiteral("Preparing authenticated control and direct audio connections.")});
 }
 
 
@@ -2212,10 +2503,17 @@ void MainWindow::handleEngineEvent(const jam2::EngineEvent& event)
         trackRecordingWorkflow_.consumeTrackTakeEvent(event);
     if (completion.handled) {
         if (stopCaptureButton_) stopCaptureButton_->setEnabled(false);
-        if (recordingCountdownLabel_) recordingCountdownLabel_->hide();
-        if (completion.ok && !completion.wavPath.isEmpty()) {
+        if (!activeRecordingGroupId_.isEmpty()) {
+            pendingGroupTakeCompletion_ = completion;
+            publishLocalTrackRecordingState(QStringLiteral("complete"));
+        } else if (completion.ok && !completion.wavPath.isEmpty()) {
+            publishLocalTrackRecordingState(QStringLiteral("finalizing"));
             registerTransientTrackWav(completion.wavPath);
             importLastCaptureToArmedLane();
+        } else {
+            appendLog(QStringLiteral("track take could not be finalised: %1")
+                .arg(completion.error));
+            finishLaneTakeFinalization();
         }
         if (loadWavButton_) loadWavButton_->setEnabled(true);
         appendLog(completion.ok
@@ -2261,6 +2559,7 @@ void MainWindow::handleNetworkSnapshot(const Jam2NetworkOperationalSnapshot& sna
             peer.receiving_audio ? QStringLiteral("receiving") : QStringLiteral("waiting"));
     }
     updatePerformancePeers();
+    updateJamSessionHeaderStatus(sessionController_.snapshot());
 }
 
 void MainWindow::handleConnectionDiagnostics(const ConnectionDiagnosticsSnapshot& snapshot)
@@ -2433,7 +2732,6 @@ void MainWindow::showStartJamDialog()
     if (result == QDialog::Accepted) {
         sampleRateSpin_->setValue(sampleRate->currentData().toInt());
         bufferSizeSpin_->setValue(bufferSize->currentData().toInt());
-        connectionLabel_->setText(QStringLiteral("Starting listener"));
         startJam(true);
     } else if (sampleRateSpin_) {
         sampleRateSpin_->setValue(sampleRateBeforeDialog);
@@ -2590,7 +2888,6 @@ void MainWindow::showJoinJamDialog()
     if (result == QDialog::Accepted) {
         joinProfileName_ = joinProfile->currentData().toString();
         bufferSizeSpin_->setValue(bufferSize->currentData().toInt());
-        connectionLabel_->setText(QStringLiteral("Joining"));
         startJam(false);
     }
 }
@@ -2667,13 +2964,20 @@ void MainWindow::showSettingsDialog()
     auto* localInput = new QLineEdit(localInitial.inputChannels, &dialog);
     auto* localOutput = new QLineEdit(localInitial.outputChannels, &dialog);
     auto* localTest = new QPushButton(QStringLiteral("Test Device"), &dialog);
+    auto* localApply = new QPushButton(QStringLiteral("Apply Audio"), &dialog);
+    auto* localActions = new QWidget(&dialog);
+    auto* localActionsLayout = new QHBoxLayout(localActions);
+    localActionsLayout->setContentsMargins(0, 0, 0, 0);
+    localActionsLayout->setSpacing(8);
+    localActionsLayout->addWidget(localTest, 1);
+    localActionsLayout->addWidget(localApply, 1);
     auto* localForm = new QFormLayout();
     localForm->addRow(QStringLiteral("Device"), localDevice);
     localForm->addRow(QStringLiteral("Sample rate"), localSampleRate);
     localForm->addRow(QStringLiteral("Buffer size"), localBufferSize);
     localForm->addRow(QStringLiteral("Input channels"), localInput);
     localForm->addRow(QStringLiteral("Output channels"), localOutput);
-    localForm->addRow(QString(), localTest);
+    localForm->addRow(QString(), localActions);
     auto* localBox = new QGroupBox(QStringLiteral("Local Audio"), &dialog);
     localBox->setLayout(localForm);
 
@@ -2972,7 +3276,7 @@ void MainWindow::showSettingsDialog()
             &dialog,
             QStringLiteral("Log Folder"),
             logFolder->text(),
-            QFileDialog::ShowDirsOnly | QFileDialog::DontUseNativeDialog);
+            QFileDialog::ShowDirsOnly);
         if (!folder.isEmpty()) logFolder->setText(QDir::toNativeSeparators(folder));
     });
 
@@ -2995,7 +3299,7 @@ void MainWindow::showSettingsDialog()
                 &dialog,
                 QStringLiteral("Recording Folder"),
                 edit->text(),
-                QFileDialog::ShowDirsOnly | QFileDialog::DontUseNativeDialog);
+                QFileDialog::ShowDirsOnly);
             if (!folder.isEmpty()) edit->setText(QDir::toNativeSeparators(folder));
         });
         return std::pair<QLineEdit*, QWidget*>{edit, row};
@@ -3066,7 +3370,9 @@ void MainWindow::showSettingsDialog()
     auto* notice = new QLabel(
         networkActive
             ? QStringLiteral("Leave the active jam before changing audio hardware settings.")
-            : QStringLiteral("Saved in %1").arg(QDir::toNativeSeparators(UserPreferencesStore::filePath())),
+            : QStringLiteral(
+                "Test Device checks the selection without changing playback. "
+                "Apply Audio starts or restarts local audio and saves that selection."),
         &dialog);
     notice->setWordWrap(true);
 
@@ -3084,6 +3390,87 @@ void MainWindow::showSettingsDialog()
     QObject::connect(localTest, &QPushButton::clicked, this, [this, localDevice, localTest, &dialog] {
         testDeviceSelection(localDevice, localTest, &dialog);
     });
+    QObject::connect(localApply, &QPushButton::clicked, this,
+        [this, &dialog, &localInitial, localDevice, localSampleRate,
+         localBufferSize, localInput, localOutput, localApply, networkActive] {
+            if (networkActive) return;
+            if (localDevice->currentData().toString().isEmpty()) {
+                QMessageBox::warning(
+                    &dialog,
+                    QStringLiteral("Local Audio"),
+                    QStringLiteral("Select a local audio device first."));
+                return;
+            }
+
+            AudioDevicePreference desired = preferences_.localAudio;
+            desired.sampleRate = localSampleRate->currentData().toInt();
+            desired.bufferSize = localBufferSize->currentData().toInt();
+            desired.inputChannels = localInput->text().trimmed();
+            desired.outputChannels = localOutput->text().trimmed();
+            storeSelectedDevice(desired, localDevice, availableDevices_);
+
+            const bool wasLocalActive = jam2_.isRunning() && !jam2_.isNetworkRunning();
+            QString permissionError;
+            if (!wasLocalActive && !jam2EnsureMicrophonePermission(&permissionError)) {
+                QMessageBox::warning(
+                    &dialog, QStringLiteral("Jam2 Microphone Access"), permissionError);
+                return;
+            }
+
+            const QString previousDevice = selectedDeviceId();
+            const QString previousInput = inputChannelsEdit_->text();
+            const QString previousOutput = outputChannelsEdit_->text();
+            const int previousRate = sampleRateSpin_->value();
+            const int previousBuffer = bufferSizeSpin_->value();
+            std::optional<Jam2RuntimeOptions> previousOptions;
+            try {
+                if (wasLocalActive) previousOptions = runtimeOptions();
+                const int deviceIndex = deviceBox_->findData(localDevice->currentData());
+                if (deviceIndex < 0) {
+                    throw std::runtime_error("the selected local audio device is unavailable");
+                }
+                deviceBox_->setCurrentIndex(deviceIndex);
+                inputChannelsEdit_->setText(desired.inputChannels);
+                outputChannelsEdit_->setText(desired.outputChannels);
+                sampleRateSpin_->setValue(desired.sampleRate);
+                bufferSizeSpin_->setValue(desired.bufferSize);
+                if (wasLocalActive) {
+                    if (!sessionController_.startLocal(runtimeOptions())) {
+                        throw std::runtime_error("the new local audio configuration did not start");
+                    }
+                    showLocalSessionHeaderStatus();
+                } else {
+                    launchLocalRuntime(runtimeOptions());
+                }
+            } catch (const std::exception& error) {
+                deviceBox_->setCurrentIndex(qMax(0, deviceBox_->findData(previousDevice)));
+                inputChannelsEdit_->setText(previousInput);
+                outputChannelsEdit_->setText(previousOutput);
+                sampleRateSpin_->setValue(previousRate);
+                bufferSizeSpin_->setValue(previousBuffer);
+                const bool restored = !wasLocalActive ||
+                    (previousOptions && sessionController_.startLocal(*previousOptions));
+                if (restored && wasLocalActive) showLocalSessionHeaderStatus();
+                else if (!wasLocalActive) showAudioOffSessionHeaderStatus();
+                QMessageBox::warning(
+                    &dialog,
+                    QStringLiteral("Local Audio Not Applied"),
+                    QStringLiteral("%1\n\nPrevious local audio settings %2.")
+                        .arg(QString::fromUtf8(error.what()),
+                             restored ? QStringLiteral("were restored")
+                                      : QStringLiteral("could not be restored")));
+                return;
+            }
+
+            preferences_.localAudio = desired;
+            localInitial = desired;
+            UserPreferencesStore::save(preferences_);
+            localApply->setText(QStringLiteral("Applied"));
+            QTimer::singleShot(1400, localApply, [localApply] {
+                localApply->setText(QStringLiteral("Apply Audio"));
+            });
+            appendLog(QStringLiteral("local audio settings applied"));
+        });
     auto connectDeviceTest = [this, &dialog](const NetworkAudioEditors& editors) {
         QObject::connect(editors.test, &QPushButton::clicked, this, [this, editors, &dialog] {
             testDeviceSelection(editors.device, editors.test, &dialog);
@@ -3190,7 +3577,7 @@ void MainWindow::showSettingsDialog()
         localInitial.bufferSize != updated.localAudio.bufferSize ||
         localInitial.inputChannels != updated.localAudio.inputChannels ||
         localInitial.outputChannels != updated.localAudio.outputChannels);
-    if (localActive && localChanged) {
+    if (jam2_.isRunning() && !jam2_.isNetworkRunning() && localChanged) {
         std::optional<Jam2RuntimeOptions> previousOptions;
         const QString previousDevice = selectedDeviceId();
         const QString previousInput = inputChannelsEdit_->text();
@@ -3209,6 +3596,7 @@ void MainWindow::showSettingsDialog()
             if (!sessionController_.startLocal(runtimeOptions())) {
                 throw std::runtime_error("the new local audio configuration did not start");
             }
+            showLocalSessionHeaderStatus();
         } catch (const std::exception& error) {
             deviceBox_->setCurrentIndex(qMax(0, deviceBox_->findData(previousDevice)));
             inputChannelsEdit_->setText(previousInput);
@@ -3236,13 +3624,6 @@ void MainWindow::stopJam(bool returnToLocal)
     const bool shouldReturnToLocal = returnToLocal && !shuttingDown_;
     jamStartupPending_ = false;
     controlRefreshAvailable_ = false;
-    if (connectionLabel_) {
-        connectionLabel_->setProperty("issue", false);
-        connectionLabel_->setCursor(Qt::ArrowCursor);
-        connectionLabel_->setToolTip(QString{});
-        connectionLabel_->style()->unpolish(connectionLabel_);
-        connectionLabel_->style()->polish(connectionLabel_);
-    }
     lastDiagnostics_.reset();
     updateStatsDisplay(nullptr);
     assetTransfer_.cancel();
@@ -3258,18 +3639,17 @@ void MainWindow::stopJam(bool returnToLocal)
             false,
             QStringLiteral("leave metronome enabled"));
     }
-    if (sessionTopologyLabel_) {
-        sessionTopologyLabel_->setText(QStringLiteral("Remote Peers 0"));
-        sessionTopologyLabel_->setToolTip(QString{});
-    }
     localMeshPeerTokens_.clear();
     operationalPeers_.clear();
+    peerTrackRecordingStates_.clear();
+    peerTrackRecordingRevisions_.clear();
     peerOrdinals_.clear();
     desiredPeerGainDb_.clear();
     selectedPeerId_ = 0;
     nextPeerOrdinal_ = 1;
     peerMembershipSignature_.clear();
     updatePerformancePeers();
+    updateSharedRecordingPresentation();
 
     meshPeerEndpoints_.clear();
     lastLoggedSessionSummary_.clear();
@@ -3320,13 +3700,21 @@ void MainWindow::stopJam(bool returnToLocal)
             }
         } catch (const std::exception& error) {
             appendLog(QStringLiteral("local resume failed: ") + QString::fromUtf8(error.what()));
+            setSessionHeaderStatus(
+                QStringLiteral("AUDIO ISSUE"),
+                QStringLiteral("Local audio could not resume"),
+                {QString::fromUtf8(error.what()).left(160),
+                 QStringLiteral("Click to open Local Audio settings.")},
+                true,
+                true);
             return;
         }
-        if (engineModeLabel_) engineModeLabel_->setText(QStringLiteral("Local"));
-        connectionLabel_->setText(QStringLiteral("Local"));
+        showLocalSessionHeaderStatus();
         updateRuntimeControls();
         sendMetronomeModeToJam();
         sendMetronomePatternToJam();
+    } else if (!shuttingDown_) {
+        showAudioOffSessionHeaderStatus();
     }
 }
 
@@ -3597,7 +3985,8 @@ void MainWindow::openWorkspace(const QString& page)
     if (found != workspacePages_.cend()) {
         const bool looperOpen = page == QStringLiteral("looper");
         const bool sectionEditorOpen = page == QStringLiteral("chords") ||
-            page == QStringLiteral("beats") || page == QStringLiteral("lyrics");
+            page == QStringLiteral("beats") || page == QStringLiteral("lyrics") ||
+            looperOpen;
         if (detailIdentityPanel_) {
             detailIdentityPanel_->setVisible(looperOpen || sectionEditorOpen);
         }
@@ -3620,8 +4009,6 @@ void MainWindow::openWorkspace(const QString& page)
                     : name);
                 detailPositionLabel_->setCursorPosition(0);
                 detailPositionLabel_->deselect();
-            } else if (looperOpen) {
-                refreshBankPresentation();
             }
         }
         if (page == QStringLiteral("chords") && chordGrid_) {
@@ -3894,26 +4281,35 @@ void MainWindow::applySessionSnapshot(const SharedSessionController::Snapshot& s
             }
         }
     }
-    if (sessionTopologyLabel_) {
-        int validRemotePeers = 0;
-        for (const SharedSessionController::PeerSnapshot& peer : snapshot.peers) {
-            if (peer.token != snapshot.localToken &&
-                peer.edgeState == SharedSessionController::EdgeState::Active) {
-                ++validRemotePeers;
-            }
+    updateJamSessionHeaderStatus(snapshot);
+    QSet<QString> memberTokens;
+    for (const SharedSessionController::PeerSnapshot& peer : snapshot.peers) {
+        memberTokens.insert(peer.token);
+    }
+    for (auto it = peerTrackRecordingStates_.begin();
+         it != peerTrackRecordingStates_.end();) {
+        if (!memberTokens.contains(it.key())) {
+            it = peerTrackRecordingStates_.erase(it);
+        } else {
+            ++it;
         }
-        const QString quality = snapshot.contract.audioFormat == QStringLiteral("pcm16-mono")
-            ? QStringLiteral("16-bit PCM")
-            : snapshot.contract.audioFormat == QStringLiteral("pcm24-mono")
-                ? QStringLiteral("24-bit PCM") : QStringLiteral("unknown PCM");
-        sessionTopologyLabel_->setText(
-            QStringLiteral("Remote Peers %1").arg(validRemotePeers));
-        sessionTopologyLabel_->setToolTip(
-            QStringLiteral("%1 · authenticated TCP peers with an active UDP connection")
-                .arg(quality));
+    }
+    for (auto it = peerTrackRecordingRevisions_.begin();
+         it != peerTrackRecordingRevisions_.end();) {
+        if (!memberTokens.contains(it.key())) {
+            it = peerTrackRecordingRevisions_.erase(it);
+        } else {
+            ++it;
+        }
     }
     updateMixRemotePeers();
     updateTrackControls();
+    updateSharedRecordingPresentation();
+    maybeFinishRecordingGroup();
+    if (incomingAssetWorkflow_ == IncomingAssetWorkflow::None &&
+        (!pendingTrackContributions_.isEmpty() || !pendingLooperAssetHashes_.isEmpty())) {
+        QTimer::singleShot(0, this, [this] { requestNextPendingAsset(); });
+    }
 }
 
 void MainWindow::handleControlEvent(
@@ -4010,16 +4406,43 @@ void MainWindow::handleControlEvent(
         }
         break;
     }
-    connectionLabel_->setText(displayState);
-    connectionLabel_->setProperty("issue", controlRefreshAvailable_);
-    connectionLabel_->setCursor(
-        controlRefreshAvailable_ ? Qt::PointingHandCursor : Qt::ArrowCursor);
-    connectionLabel_->setToolTip(controlRefreshAvailable_
-        ? QStringLiteral("%1\n\nClick to refresh the TCP control connection.")
-            .arg(event.detail)
-        : event.detail);
-    connectionLabel_->style()->unpolish(connectionLabel_);
-    connectionLabel_->style()->polish(connectionLabel_);
+    if (event.type == TransportEventType::Listening ||
+        event.type == TransportEventType::Authenticated ||
+        event.type == TransportEventType::AlreadyConnected) {
+        updateJamSessionHeaderStatus(sessionController_.snapshot());
+    } else if (event.type == TransportEventType::SessionEnded) {
+        if (jam2_.isRunning()) showLocalSessionHeaderStatus();
+        else showAudioOffSessionHeaderStatus();
+    } else {
+        const SharedSessionController::Role role = sessionController_.snapshot().role;
+        const bool joining = role == SharedSessionController::Role::Joiner;
+        QString pill = displayState.toUpper();
+        if (event.type == TransportEventType::Connecting ||
+            event.type == TransportEventType::Connected ||
+            event.type == TransportEventType::ChallengeSent ||
+            event.type == TransportEventType::ProofSent) {
+            pill = joining ? QStringLiteral("JOINING") : QStringLiteral("STARTING JAM");
+        } else if (event.type == TransportEventType::Disconnected ||
+                   event.type == TransportEventType::ReconnectScheduled ||
+                   event.type == TransportEventType::ReconnectAttempt) {
+            pill = joining ? QStringLiteral("RECONNECTING") : QStringLiteral("JAM · WAITING");
+        } else if (event.type == TransportEventType::Failure) {
+            pill = QStringLiteral("CONNECTION ISSUE");
+        }
+        QStringList detailLines;
+        if (!event.detail.trimmed().isEmpty() && event.detail != displayState) {
+            detailLines << event.detail.left(160);
+        }
+        if (controlRefreshAvailable_) {
+            detailLines << QStringLiteral("Click to retry the control connection.");
+        }
+        setSessionHeaderStatus(
+            pill,
+            displayState,
+            detailLines,
+            controlRefreshAvailable_,
+            controlRefreshAvailable_);
+    }
     appendLog(QStringLiteral("control: ") + event.detail);
     if (event.type == TransportEventType::Disconnected ||
         event.type == TransportEventType::Failure) {
@@ -4102,7 +4525,7 @@ void MainWindow::handleControlEvent(
         QTimer::singleShot(0, this, [this] { stopJam(true); });
     } else if (event.type == TransportEventType::Authenticated) {
         setMixRemotePeerVisible(true);
-        if (looperProject_.trackSyncEnabled()) {
+        if (automaticWavSharingEnabled()) {
             if (serverSide) {
                 QTimer::singleShot(0, this, [this] { shareLocalTracks(); });
             } else {
@@ -4170,30 +4593,20 @@ void MainWindow::refreshControlConnection()
     if (sessionController_.isServer() && sessionController_.hasPeer()) {
         appendLog(QStringLiteral("TCP control already connected"));
         controlRefreshAvailable_ = false;
-        connectionLabel_->setText(QStringLiteral("TCP peer authenticated"));
-        connectionLabel_->setProperty("issue", false);
-        connectionLabel_->setCursor(Qt::ArrowCursor);
-        connectionLabel_->style()->unpolish(connectionLabel_);
-        connectionLabel_->style()->polish(connectionLabel_);
+        updateJamSessionHeaderStatus(sessionController_.snapshot());
         return;
     }
     if (!sessionController_.isServer() && sessionController_.isConnected()) {
         appendLog(QStringLiteral("TCP control already connected"));
         controlRefreshAvailable_ = false;
-        connectionLabel_->setText(QStringLiteral("TCP peer authenticated"));
-        connectionLabel_->setProperty("issue", false);
-        connectionLabel_->setCursor(Qt::ArrowCursor);
-        connectionLabel_->style()->unpolish(connectionLabel_);
-        connectionLabel_->style()->polish(connectionLabel_);
+        updateJamSessionHeaderStatus(sessionController_.snapshot());
         return;
     }
     controlRefreshAvailable_ = false;
-    connectionLabel_->setText(QStringLiteral("Refreshing"));
-    connectionLabel_->setProperty("issue", false);
-    connectionLabel_->setCursor(Qt::ArrowCursor);
-    connectionLabel_->setToolTip(QStringLiteral("Refreshing the TCP control connection"));
-    connectionLabel_->style()->unpolish(connectionLabel_);
-    connectionLabel_->style()->polish(connectionLabel_);
+    setSessionHeaderStatus(
+        QStringLiteral("REFRESHING"),
+        QStringLiteral("Refreshing connection"),
+        {QStringLiteral("Re-establishing the authenticated control connection.")});
     appendLog(QStringLiteral("refreshing TCP control"));
     sessionController_.setReconnectEnabled(true);
     sessionController_.refresh();
@@ -4610,21 +5023,618 @@ void MainWindow::handleMeshPeerAuthenticated(const QString& token, const QJsonOb
     }
     appendLog(QStringLiteral("mesh peer TCP source token=%1 host=%2 same_machine=%3")
         .arg(token.left(8), tcpPeerHost, localMachinePeer ? QStringLiteral("yes") : QStringLiteral("no")));
-    if (looperProject_.trackSyncEnabled() && jam2_.isRunning()) {
+    sendJamSyncPolicy(token);
+    if (jamSyncPolicy_.metronomeState) {
+        (void)sessionController_.sendTo(token, QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("jam.metronome.state.set")},
+            {QStringLiteral("enabled"), metronomeTransport_.localRunning()},
+        });
+    }
+    if (jamSyncPolicy_.trackLanes && jam2_.isRunning()) {
         // Publish the current arrangement to the newly authenticated peer. Its
         // prepared audio may attach later without holding global transport.
         sendSongSnapshot();
     }
+    if (jam2_.isRunning() &&
+        jamSyncPolicy_.generatedIdeas != GeneratedIdeaSyncMode::Off) {
+        const SongSyncScope scope = jamSyncPolicy_.generatedIdeas == GeneratedIdeaSyncMode::Chords
+            ? SongSyncScope::IdeaChords
+            : jamSyncPolicy_.generatedIdeas == GeneratedIdeaSyncMode::Beats
+                ? SongSyncScope::IdeaBeats : SongSyncScope::IdeaFull;
+        sendSongSnapshot(std::nullopt, scope);
+    }
+    if (syncedRecordingsEnabled() && trackRecordingWorkflow_.laneArmed()) {
+        publishLocalTrackRecordingState(
+            localTrackRecordingPhase_,
+            localTrackRecordingCountInRemaining_,
+            true);
+    }
+    if (syncedRecordingsEnabled()) {
+        if (!activeRecordingGroupStartMessage_.isEmpty()) {
+            (void)sendControlTo(token, activeRecordingGroupStartMessage_);
+        } else if (!lastRecordingGroupFinishMessage_.isEmpty()) {
+            (void)sendControlTo(token, lastRecordingGroupFinishMessage_);
+        }
+    }
+}
+
+bool MainWindow::syncedRecordingsEnabled() const noexcept
+{
+    return jamSyncPolicy_.recordings && jamSyncPolicy_.trackLanes &&
+        jamSyncPolicy_.globalPlayback;
+}
+
+bool MainWindow::laneRecordingIsolationActive() const
+{
+    const auto isolates = [](const QString& phase) {
+        return phase == QStringLiteral("ready") ||
+            phase == QStringLiteral("waiting") ||
+            phase == QStringLiteral("count-in") ||
+            phase == QStringLiteral("recording") ||
+            phase == QStringLiteral("complete") ||
+            phase == QStringLiteral("finalizing");
+    };
+    return !activeRecordingGroupId_.isEmpty() ||
+        isolates(localTrackRecordingPhase_) ||
+        trackRecordingWorkflow_.inputTakeActive() ||
+        loopbackRecorder_.isRunning() || pendingGroupTakeCompletion_.has_value();
+}
+
+void MainWindow::updateLaneRecordingIsolation()
+{
+    jam2_.setLaneRecordingIsolationEnabled(laneRecordingIsolationActive());
+}
+
+bool MainWindow::deferIncomingControlForLaneRecording(
+    const QJsonObject& message,
+    const QString& sourcePeerToken)
+{
+    if (replayingDeferredRecordingControls_ || !laneRecordingIsolationActive()) {
+        return false;
+    }
+    const QString type = message.value(QStringLiteral("type")).toString();
+    if (type == QStringLiteral("looper.recording.state") ||
+        type.startsWith(QStringLiteral("looper.recording.group.")) ||
+        type.startsWith(QStringLiteral("looper.recording.resync.")) ||
+        type.startsWith(QStringLiteral("session.")) ||
+        type.startsWith(QStringLiteral("looper.asset."))) {
+        return false;
+    }
+    const bool mutableControl =
+        type == QStringLiteral("jam.sync.set") ||
+        type == QStringLiteral("jam.sync.request") ||
+        type.startsWith(QStringLiteral("jam.metronome.state.")) ||
+        type.startsWith(QStringLiteral("bank.")) ||
+        type == QStringLiteral("song.set") ||
+        type == QStringLiteral("practice.references.render") ||
+        type == QStringLiteral("looper.track.share.request") ||
+        type == QStringLiteral("looper.track.batch.offer") ||
+        type == QStringLiteral("looper.track.batch.complete") ||
+        jam2::application::isEditorControlMessageType(type);
+    if (!mutableControl) return false;
+
+    QString key = sourcePeerToken + QLatin1Char(':') + type;
+    if (type == QStringLiteral("song.set")) {
+        key += QLatin1Char(':') + message.value(
+            QStringLiteral("sync_scope")).toString(QStringLiteral("tracks"));
+    } else if (jam2::application::isEditorControlMessageType(type)) {
+        key += QStringLiteral(":%1:%2:%3:%4")
+            .arg(message.value(QStringLiteral("section")).toInt())
+            .arg(message.value(QStringLiteral("beat")).toInt())
+            .arg(message.value(QStringLiteral("lane")).toString())
+            .arg(message.value(QStringLiteral("step")).toInt(-1));
+    } else if (type.contains(QStringLiteral("batch"))) {
+        key += QLatin1Char(':') + message.value(QStringLiteral("batch_id")).toString();
+    }
+    for (qsizetype index = deferredRecordingControls_.size(); index-- > 0;) {
+        if (deferredRecordingControls_.at(index).key == key) {
+            deferredRecordingControls_.removeAt(index);
+            break;
+        }
+    }
+    constexpr qsizetype maximumDeferredControls = 4096;
+    if (deferredRecordingControls_.size() >= maximumDeferredControls) {
+        deferredRecordingControls_.removeFirst();
+        if (!deferredRecordingControlsOverflowed_) {
+            deferredRecordingControlsOverflowed_ = true;
+            appendLog(QStringLiteral(
+                "recording control hold reached 4096 entries; oldest changes will be replaced and an authoritative resync will follow"));
+        }
+    }
+    deferredRecordingControls_.append(
+        DeferredRecordingControl{key, message, sourcePeerToken});
+    appendLog(QStringLiteral("held %1 until the local lane take is finalised")
+        .arg(type));
+    return true;
+}
+
+void MainWindow::releaseDeferredRecordingControls()
+{
+    updateLaneRecordingIsolation();
+    if (laneRecordingIsolationActive()) return;
+
+    auto deferred = std::move(deferredRecordingControls_);
+    deferredRecordingControls_.clear();
+    const bool overflowed = deferredRecordingControlsOverflowed_;
+    deferredRecordingControlsOverflowed_ = false;
+    QTimer::singleShot(0, this,
+        [this, deferred = std::move(deferred), overflowed] {
+        replayingDeferredRecordingControls_ = true;
+        for (const DeferredRecordingControl& control : deferred) {
+            if (sessionController_.onMessage) {
+                sessionController_.onMessage(
+                    control.sourcePeerToken, control.message);
+            }
+        }
+        replayingDeferredRecordingControls_ = false;
+        if (overflowed) {
+            appendLog(QStringLiteral(
+                "recording control hold overflow recovered through authoritative state reconciliation"));
+        }
+        applyPendingTrackContributions();
+        applyPendingSongIfAssetsReady();
+        if (sessionController_.isServer()) {
+            sendJamSyncPolicy();
+            sendSongSnapshot();
+        } else if (jam2_.isNetworkRunning()) {
+            sendControl(QJsonObject{
+                {QStringLiteral("type"),
+                    QStringLiteral("looper.recording.resync.request")},
+            });
+        }
+    });
+}
+
+void MainWindow::applyPendingRecordingTransportResync()
+{
+    if (!pendingRecordingResyncPlaying_.has_value() ||
+        laneRecordingIsolationActive()) {
+        return;
+    }
+    if (preparedMixWorkerRunning_ || !pendingSongSet_.isEmpty() ||
+        fileWorkerTasksActive_ > 0) {
+        QTimer::singleShot(100, this,
+            [this] { applyPendingRecordingTransportResync(); });
+        return;
+    }
+    const bool shouldPlay = *pendingRecordingResyncPlaying_;
+    pendingRecordingResyncPlaying_.reset();
+    const PlaybackGrid::Position position = metronomeTransport_.grid().position();
+    if (!position.engineAnchored || position.sampleRate <= 0) return;
+    if (shouldPlay) {
+        trackController_.requestPlayback(true);
+        const bool hasPrepared = !preparedMix_.path.isEmpty() &&
+            preparedMix_.error.isEmpty();
+        const bool scheduled = hasPrepared
+            ? trackRecordingWorkflow_.restartPrepared(position, true)
+            : trackRecordingWorkflow_.restartGlobalTransport(position, true);
+        if (!scheduled) {
+            appendLog(QStringLiteral(
+                "could not rejoin global playback after the local lane take"));
+        }
+    } else {
+        (void)trackRecordingWorkflow_.stopPrepared(
+            position.rawCurrentFrame, position.currentFrame, true);
+        trackController_.requestPlayback(false);
+    }
+    updateTrackPlaybackPresentation();
+}
+
+bool MainWindow::automaticWavSharingEnabled() const noexcept
+{
+    return jamSyncPolicy_.autoShareWavs && jamSyncPolicy_.trackLanes;
+}
+
+void MainWindow::showJamSyncDialog()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Jam Sync"));
+    dialog.setMinimumWidth(500);
+
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(18, 18, 18, 18);
+    layout->setSpacing(14);
+
+    auto* introduction = new QLabel(QStringLiteral(
+        "Choose which changes Jam2 shares. Nothing changes until you apply the complete set to the jam."),
+        &dialog);
+    introduction->setWordWrap(true);
+    introduction->setStyleSheet(QStringLiteral("color:#9ca9ab;"));
+    layout->addWidget(introduction);
+
+    auto* contentGroup = new QGroupBox(QStringLiteral("Content Sharing"), &dialog);
+    auto* contentLayout = new QFormLayout(contentGroup);
+    contentLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    contentLayout->setHorizontalSpacing(18);
+    contentLayout->setVerticalSpacing(10);
+
+    auto* trackLanes = new QCheckBox(QStringLiteral("Sync Track Lanes"), contentGroup);
+    trackLanes->setChecked(jamSyncPolicy_.trackLanes);
+    trackLanes->setToolTip(QStringLiteral(
+        "Share lane creation, removal, names, positions and track metadata"));
+    contentLayout->addRow(trackLanes);
+
+    auto* autoShareWavs = new QCheckBox(QStringLiteral("Sync WAVs Automatically"), contentGroup);
+    autoShareWavs->setChecked(jamSyncPolicy_.autoShareWavs);
+    autoShareWavs->setToolTip(QStringLiteral(
+        "Automatically transfer audio files belonging to shared lanes"));
+    contentLayout->addRow(autoShareWavs);
+
+    auto* generatedIdeas = new QComboBox(contentGroup);
+    generatedIdeas->addItem(QStringLiteral("Whole Idea"),
+        static_cast<int>(GeneratedIdeaSyncMode::Full));
+    generatedIdeas->addItem(QStringLiteral("Chords Only"),
+        static_cast<int>(GeneratedIdeaSyncMode::Chords));
+    generatedIdeas->addItem(QStringLiteral("Beats Only"),
+        static_cast<int>(GeneratedIdeaSyncMode::Beats));
+    generatedIdeas->addItem(QStringLiteral("Disabled"),
+        static_cast<int>(GeneratedIdeaSyncMode::Off));
+    generatedIdeas->setCurrentIndex(qMax(0, generatedIdeas->findData(
+        static_cast<int>(jamSyncPolicy_.generatedIdeas))));
+    generatedIdeas->setToolTip(QStringLiteral(
+        "Choose which parts of newly generated and continued ideas are shared"));
+    contentLayout->addRow(QStringLiteral("Sync Generated Ideas"), generatedIdeas);
+    layout->addWidget(contentGroup);
+
+    auto* performanceGroup = new QGroupBox(QStringLiteral("Performance Sync"), &dialog);
+    auto* performanceLayout = new QFormLayout(performanceGroup);
+    performanceLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    performanceLayout->setHorizontalSpacing(18);
+    performanceLayout->setVerticalSpacing(10);
+
+    auto* globalPlayback = new QCheckBox(
+        QStringLiteral("Sync Global Playback"), performanceGroup);
+    globalPlayback->setChecked(jamSyncPolicy_.globalPlayback);
+    globalPlayback->setToolTip(QStringLiteral(
+        "Share play, stop, restart and queued Section changes"));
+    performanceLayout->addRow(globalPlayback);
+
+    auto* metronomeState = new QCheckBox(
+        QStringLiteral("Sync Metronome State"), performanceGroup);
+    metronomeState->setChecked(jamSyncPolicy_.metronomeState);
+    metronomeState->setToolTip(QStringLiteral(
+        "Share whether the metronome is turned on or off"));
+    performanceLayout->addRow(metronomeState);
+
+    auto* recordings = new QCheckBox(
+        QStringLiteral("Sync Recordings"), performanceGroup);
+    recordings->setChecked(syncedRecordingsEnabled());
+    performanceLayout->addRow(recordings);
+
+    auto* dependencyNote = new QLabel(performanceGroup);
+    dependencyNote->setWordWrap(true);
+    dependencyNote->setStyleSheet(QStringLiteral("color:#9ca9ab;"));
+    performanceLayout->addRow(dependencyNote);
+    layout->addWidget(performanceGroup);
+
+    const bool policyLocked = sharedRecordingProtected();
+    const bool leaderAudio = metronomeModeBox_ &&
+        metronomeModeBox_->currentText() == QStringLiteral("leader-audio");
+    const auto updateDependencies = [=] {
+        const bool lanesEnabled = trackLanes->isChecked();
+        const bool recordingDependencies = lanesEnabled && globalPlayback->isChecked();
+        autoShareWavs->setEnabled(lanesEnabled && !policyLocked);
+        recordings->setEnabled(recordingDependencies && !policyLocked);
+        if (!recordingDependencies) recordings->setChecked(false);
+        metronomeState->setEnabled(!leaderAudio && !policyLocked);
+        autoShareWavs->setToolTip(lanesEnabled
+            ? QStringLiteral("Automatically transfer audio files belonging to shared lanes")
+            : QStringLiteral("Requires Sync Track Lanes"));
+        recordings->setToolTip(recordingDependencies
+            ? QStringLiteral("Coordinate arm, count-in, recording and playback protection")
+            : QStringLiteral("Requires Sync Track Lanes and Sync Global Playback"));
+        dependencyNote->setText(policyLocked
+            ? QStringLiteral("Jam Sync cannot be changed while a shared recording is active.")
+            : leaderAudio
+                ? QStringLiteral("Recording sync requires Track Lanes and Global Playback. "
+                    "Metronome state is supplied by the leader in Leader Audio mode.")
+                : QStringLiteral("Recording sync requires Track Lanes and Global Playback."));
+    };
+    QObject::connect(trackLanes, &QCheckBox::toggled, &dialog, updateDependencies);
+    QObject::connect(globalPlayback, &QCheckBox::toggled, &dialog, updateDependencies);
+
+    const std::array<QWidget*, 6> policyControls{
+        trackLanes, autoShareWavs, generatedIdeas,
+        globalPlayback, metronomeState, recordings,
+    };
+    for (QWidget* control : policyControls) {
+        if (policyLocked) control->setEnabled(false);
+    }
+    updateDependencies();
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, &dialog);
+    auto* apply = buttons->addButton(
+        QStringLiteral("Apply to Jam"), QDialogButtonBox::AcceptRole);
+    apply->setEnabled(!policyLocked);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    JamSyncPolicy policy = jamSyncPolicy_;
+    policy.trackLanes = trackLanes->isChecked();
+    policy.autoShareWavs = autoShareWavs->isChecked();
+    policy.globalPlayback = globalPlayback->isChecked();
+    policy.generatedIdeas = static_cast<GeneratedIdeaSyncMode>(
+        generatedIdeas->currentData().toInt());
+    policy.metronomeState = metronomeState->isChecked();
+    policy.recordings = recordings->isChecked();
+    requestJamSyncPolicy(policy);
+}
+
+void MainWindow::updateJamSyncPresentation()
+{
+    if (jamSyncButton_) {
+        const bool anyShared = jamSyncPolicy_.trackLanes || jamSyncPolicy_.autoShareWavs ||
+            jamSyncPolicy_.globalPlayback ||
+            jamSyncPolicy_.generatedIdeas != GeneratedIdeaSyncMode::Off ||
+            jamSyncPolicy_.metronomeState || syncedRecordingsEnabled();
+        jamSyncButton_->setText(anyShared
+            ? QStringLiteral("\u25cf  JAM SYNC")
+            : QStringLiteral("\u25cb  JAM SYNC"));
+    }
+    if (trackSharingStatusLabel_) {
+        const QString laneState = jamSyncPolicy_.trackLanes
+            ? QStringLiteral("SYNCED") : QStringLiteral("LOCAL");
+        const QString wavState = automaticWavSharingEnabled()
+            ? QStringLiteral("AUTOMATIC")
+            : jamSyncPolicy_.autoShareWavs
+                ? QStringLiteral("PAUSED") : QStringLiteral("MANUAL");
+        trackSharingStatusLabel_->setText(
+            QStringLiteral("LANES: %1  \u00b7  WAVS: %2").arg(laneState, wavState));
+    }
+    if (shareTracksButton_) {
+        const bool protectedState = sharedRecordingProtected();
+        shareTracksButton_->setEnabled(!protectedState && !automaticWavSharingEnabled());
+        shareTracksButton_->setToolTip(automaticWavSharingEnabled()
+            ? QStringLiteral("WAVs are already shared automatically with the jam")
+            : QStringLiteral("Manually share the current tracks with the jam"));
+    }
+    updateSectionTrimControls();
+}
+
+void MainWindow::applyJamSyncPolicy(JamSyncPolicy policy, bool fromJam)
+{
+    policy.recordings = policy.recordings && policy.trackLanes && policy.globalPlayback;
+    const JamSyncPolicy previous = jamSyncPolicy_;
+    const bool recordingSyncWasEnabled = syncedRecordingsEnabled();
+    if (recordingSyncWasEnabled &&
+        !(policy.recordings && policy.trackLanes && policy.globalPlayback)) {
+        publishLocalTrackRecordingState(QStringLiteral("idle"), 0, true);
+    }
+
+    applyingJamSyncPolicy_ = true;
+    jamSyncPolicy_ = policy;
+    looperProject_.setTrackSyncEnabled(policy.trackLanes);
+    trackController_.model().syncControls = policy.globalPlayback;
+    jam2_.setTrackSyncEnabled(policy.globalPlayback);
+    jam2_.setRecordingSyncEnabled(
+        policy.recordings && policy.trackLanes && policy.globalPlayback);
+
+    if (previous.trackLanes && !policy.trackLanes) {
+        ++songAssetCheckRevision_;
+        deferredSongSetMessage_ = {};
+        deferredSongSetSourcePeerToken_.clear();
+        songAssetCheckRetryTimer_.stop();
+        pendingSongSet_ = {};
+        pendingSongRevision_ = 0;
+        trackWorkspace_.pendingSongBaseRevision = 0;
+        pendingSongTrackRestart_ = false;
+        pendingSongSourcePeerToken_.clear();
+        pendingSongNeedsAuthoritativePublish_ = false;
+        pendingLooperAssetHashes_.clear();
+        if (incomingAssetWorkflow_ == IncomingAssetWorkflow::Arrangement) {
+            assetTransfer_.cancel();
+            incomingAssetWorkflow_ = IncomingAssetWorkflow::None;
+            incomingAssetHash_.clear();
+            incomingAssetSourcePeerToken_.clear();
+        }
+    }
+    if (previous.globalPlayback && !policy.globalPlayback) {
+        cancelSharedBankLaunch(sessionController_.isServer(),
+            QStringLiteral("global playback sync was disabled"));
+        trackController_.requestPlayback(
+            trackRecordingWorkflow_.globalTransportRequestedPlaying());
+        trackController_.observeEnginePlaying(
+            trackRecordingWorkflow_.globalTransportPlaying());
+    }
+    if (recordingSyncWasEnabled && !syncedRecordingsEnabled()) {
+        peerTrackRecordingStates_.clear();
+        peerTrackRecordingRevisions_.clear();
+        localTrackRecordingPhase_ = trackRecordingWorkflow_.laneArmed()
+            ? QStringLiteral("armed") : QStringLiteral("idle");
+    }
+    applyingJamSyncPolicy_ = false;
+
+    updateJamSyncPresentation();
+    updateTrackControls();
+    updateTrackPlaybackPresentation();
+    updateSharedRecordingPresentation();
+
+    const bool publishLanes = jam2_.isNetworkRunning() &&
+        policy.trackLanes && !previous.trackLanes;
+    const bool publishWavs = jam2_.isNetworkRunning() &&
+        automaticWavSharingEnabled() &&
+        (!previous.autoShareWavs || !previous.trackLanes);
+    if (publishLanes || publishWavs) {
+        // Let the authoritative jam.sync.set frame enter the control stream
+        // before any newly-enabled content path starts publishing.
+        QTimer::singleShot(0, this, [this, publishLanes, publishWavs] {
+            if (publishLanes && jamSyncPolicy_.trackLanes) sendSongSnapshot();
+            if (publishWavs && automaticWavSharingEnabled()) shareLocalTracks();
+        });
+    }
+    appendLog(QStringLiteral("jam sync policy %1: lanes=%2 wavs=%3 playback=%4 ideas=%5 metronome=%6 recordings=%7")
+        .arg(fromJam ? QStringLiteral("applied") : QStringLiteral("changed"))
+        .arg(policy.trackLanes ? QStringLiteral("on") : QStringLiteral("off"))
+        .arg(policy.autoShareWavs ? QStringLiteral("auto") : QStringLiteral("manual"))
+        .arg(policy.globalPlayback ? QStringLiteral("on") : QStringLiteral("off"))
+        .arg(policy.generatedIdeas == GeneratedIdeaSyncMode::Full ? QStringLiteral("full") :
+            policy.generatedIdeas == GeneratedIdeaSyncMode::Chords ? QStringLiteral("chords") :
+            policy.generatedIdeas == GeneratedIdeaSyncMode::Beats ? QStringLiteral("beats") :
+            QStringLiteral("off"))
+        .arg(policy.metronomeState ? QStringLiteral("on") : QStringLiteral("off"))
+        .arg(policy.recordings ? QStringLiteral("on") : QStringLiteral("off")));
+}
+
+void MainWindow::requestJamSyncPolicy(JamSyncPolicy policy)
+{
+    if (sharedRecordingProtected()) {
+        appendLog(QStringLiteral("jam sync policy change ignored while a shared recording is active"));
+        updateJamSyncPresentation();
+        return;
+    }
+    policy.recordings = policy.recordings && policy.trackLanes && policy.globalPlayback;
+    const SharedSessionController::Snapshot session = sessionController_.snapshot();
+    if (session.role == SharedSessionController::Role::Joiner) {
+        const auto ideas = policy.generatedIdeas == GeneratedIdeaSyncMode::Full
+            ? QStringLiteral("full") : policy.generatedIdeas == GeneratedIdeaSyncMode::Chords
+                ? QStringLiteral("chords") : policy.generatedIdeas == GeneratedIdeaSyncMode::Beats
+                    ? QStringLiteral("beats") : QStringLiteral("off");
+        sendControl(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("jam.sync.request")},
+            {QStringLiteral("track_lanes"), policy.trackLanes},
+            {QStringLiteral("auto_share_wavs"), policy.autoShareWavs},
+            {QStringLiteral("global_playback"), policy.globalPlayback},
+            {QStringLiteral("generated_ideas"), ideas},
+            {QStringLiteral("metronome_state"), policy.metronomeState},
+            {QStringLiteral("recordings"), policy.recordings},
+        });
+        updateJamSyncPresentation();
+        return;
+    }
+    policy.revision = jamSyncPolicy_.revision >= (std::numeric_limits<int>::max)()
+        ? 1 : jamSyncPolicy_.revision + 1;
+    const bool beginMetronomeSync = policy.metronomeState &&
+        !jamSyncPolicy_.metronomeState;
+    applyJamSyncPolicy(policy, false);
+    if (session.role == SharedSessionController::Role::Creator) {
+        sendJamSyncPolicy();
+        if (beginMetronomeSync) {
+            sendMetronomeStateToJam(metronomeTransport_.localRunning());
+        }
+    }
+}
+
+void MainWindow::sendJamSyncPolicy(const QString& targetPeerToken)
+{
+    if (!sessionController_.isServer()) return;
+    const QString ideas = jamSyncPolicy_.generatedIdeas == GeneratedIdeaSyncMode::Full
+        ? QStringLiteral("full") : jamSyncPolicy_.generatedIdeas == GeneratedIdeaSyncMode::Chords
+            ? QStringLiteral("chords") : jamSyncPolicy_.generatedIdeas == GeneratedIdeaSyncMode::Beats
+                ? QStringLiteral("beats") : QStringLiteral("off");
+    const QJsonObject message{
+        {QStringLiteral("type"), QStringLiteral("jam.sync.set")},
+        {QStringLiteral("revision"), jamSyncPolicy_.revision},
+        {QStringLiteral("track_lanes"), jamSyncPolicy_.trackLanes},
+        {QStringLiteral("auto_share_wavs"), jamSyncPolicy_.autoShareWavs},
+        {QStringLiteral("global_playback"), jamSyncPolicy_.globalPlayback},
+        {QStringLiteral("generated_ideas"), ideas},
+        {QStringLiteral("metronome_state"), jamSyncPolicy_.metronomeState},
+        {QStringLiteral("recordings"), syncedRecordingsEnabled()},
+    };
+    if (targetPeerToken.isEmpty()) {
+        (void)sessionController_.send(message);
+    } else {
+        (void)sessionController_.sendTo(targetPeerToken, message);
+    }
+}
+
+void MainWindow::handleJamSyncMessage(
+    const QJsonObject& message,
+    const QString& sourcePeerToken)
+{
+    const QString type = message.value(QStringLiteral("type")).toString();
+    if (type == QStringLiteral("jam.sync.request") && !sessionController_.isServer()) return;
+    if (type == QStringLiteral("jam.sync.set") && sessionController_.isServer()) return;
+    JamSyncPolicy policy;
+    policy.trackLanes = message.value(QStringLiteral("track_lanes")).toBool();
+    policy.autoShareWavs = message.value(QStringLiteral("auto_share_wavs")).toBool();
+    policy.globalPlayback = message.value(QStringLiteral("global_playback")).toBool();
+    const QString ideas = message.value(QStringLiteral("generated_ideas")).toString();
+    policy.generatedIdeas = ideas == QStringLiteral("chords")
+        ? GeneratedIdeaSyncMode::Chords : ideas == QStringLiteral("beats")
+            ? GeneratedIdeaSyncMode::Beats : ideas == QStringLiteral("off")
+                ? GeneratedIdeaSyncMode::Off : GeneratedIdeaSyncMode::Full;
+    policy.metronomeState = message.value(QStringLiteral("metronome_state")).toBool();
+    policy.recordings = message.value(QStringLiteral("recordings")).toBool();
+    if (type == QStringLiteral("jam.sync.request")) {
+        if (sharedRecordingProtected()) {
+            sendJamSyncPolicy(sourcePeerToken);
+            return;
+        }
+        const bool beginMetronomeSync = policy.metronomeState &&
+            !jamSyncPolicy_.metronomeState;
+        policy.revision = jamSyncPolicy_.revision >= (std::numeric_limits<int>::max)()
+            ? 1 : jamSyncPolicy_.revision + 1;
+        applyJamSyncPolicy(policy, true);
+        sendJamSyncPolicy();
+        if (beginMetronomeSync) {
+            sendMetronomeStateToJam(metronomeTransport_.localRunning());
+        }
+        return;
+    }
+    policy.revision = message.value(QStringLiteral("revision")).toInt();
+    if (policy.revision <= jamSyncPolicy_.revision) return;
+    applyJamSyncPolicy(policy, true);
+}
+
+bool MainWindow::jamSyncAllowsControlMessage(const QJsonObject& message) const
+{
+    const QString type = message.value(QStringLiteral("type")).toString();
+    if (type == QStringLiteral("song.set")) {
+        const QString scope = message.value(QStringLiteral("sync_scope")).toString(
+            QStringLiteral("tracks"));
+        if (scope == QStringLiteral("tracks")) return jamSyncPolicy_.trackLanes;
+        if (scope == QStringLiteral("idea.full")) {
+            return jamSyncPolicy_.generatedIdeas == GeneratedIdeaSyncMode::Full;
+        }
+        if (scope == QStringLiteral("idea.chords")) {
+            return jamSyncPolicy_.generatedIdeas == GeneratedIdeaSyncMode::Full ||
+                jamSyncPolicy_.generatedIdeas == GeneratedIdeaSyncMode::Chords;
+        }
+        if (scope == QStringLiteral("idea.beats")) {
+            return jamSyncPolicy_.generatedIdeas == GeneratedIdeaSyncMode::Full ||
+                jamSyncPolicy_.generatedIdeas == GeneratedIdeaSyncMode::Beats;
+        }
+        return false;
+    }
+    if (type == QStringLiteral("practice.references.render")) {
+        return automaticWavSharingEnabled();
+    }
+    if (type == QStringLiteral("looper.recording.state")) {
+        return syncedRecordingsEnabled();
+    }
+    if (type == QStringLiteral("looper.recording.group.start") ||
+        type == QStringLiteral("looper.recording.group.finish") ||
+        type == QStringLiteral("looper.recording.group.recover.request") ||
+        type == QStringLiteral("looper.recording.group.recover")) {
+        return syncedRecordingsEnabled();
+    }
+    if (type == QStringLiteral("looper.recording.resync.request") ||
+        type == QStringLiteral("looper.recording.resync.state")) {
+        return jamSyncPolicy_.globalPlayback;
+    }
+    if (type == QStringLiteral("jam.metronome.state.request") ||
+        type == QStringLiteral("jam.metronome.state.set")) {
+        return jamSyncPolicy_.metronomeState;
+    }
+    if (type == QStringLiteral("bank.request") ||
+        type == QStringLiteral("bank.prepare") ||
+        type == QStringLiteral("bank.ready") ||
+        type == QStringLiteral("bank.cancel") ||
+        type == QStringLiteral("bank.switch")) {
+        return jamSyncPolicy_.globalPlayback;
+    }
+    return true;
 }
 
 void MainWindow::sendControl(const QJsonObject& message)
 {
-    const QString type = message.value(QStringLiteral("type")).toString();
-    if (type != QStringLiteral("bank.ready") &&
-        jam2::application::isTrackSyncControlMessageType(type) &&
-        !jam2::application::isManualTrackShareControlMessageType(type) &&
-        !looperProject_.trackSyncEnabled()) {
-        appendLog(QStringLiteral("suppressed local track sync while sync is disabled"));
+    if (!jamSyncAllowsControlMessage(message)) {
+        appendLog(QStringLiteral("suppressed control message by the jam sync policy: %1")
+            .arg(message.value(QStringLiteral("type")).toString()));
         return;
     }
     sessionController_.send(message);
@@ -4641,9 +5651,6 @@ void MainWindow::updateRuntimeControls()
         jam2::EngineCommandType::SetMetronomeTransportGated,
         true,
         QStringLiteral("metronome global transport gate"));
-    if (localEngineButton_) {
-        localEngineButton_->setEnabled(!jam2_.isRunning() && !jam2_.isNetworkRunning());
-    }
     if (!jam2_.isRunning()) {
         return;
     }
@@ -4687,6 +5694,7 @@ void MainWindow::auditWavCompatibilityForSession(int expectedSampleRate, bool sh
     struct Result {
         Input input;
         int sampleRate = 0;
+        qint64 sourceFrames = 0;
         QString error;
     };
     auto inputs = std::make_shared<QVector<Input>>();
@@ -4736,6 +5744,7 @@ void MainWindow::auditWavCompatibilityForSession(int expectedSampleRate, bool sh
                     result.error = QString::fromStdString(inspected.error);
                 } else {
                     result.sampleRate = static_cast<int>(inspected.info.sample_rate);
+                    result.sourceFrames = static_cast<qint64>(inspected.info.frames);
                 }
                 results->append(std::move(result));
             }
@@ -4770,6 +5779,7 @@ void MainWindow::auditWavCompatibilityForSession(int expectedSampleRate, bool sh
                             looperAssetAbsolutePath(lane) == result.input.path) {
                             stillPresent = true;
                             lane.sampleRate = result.sampleRate;
+                            lane.sourceFrames = result.sourceFrames;
                             lane.sampleRateCompatible = result.error.isEmpty() &&
                                 result.sampleRate == expectedSampleRate;
                             break;
@@ -4816,7 +5826,7 @@ void MainWindow::auditWavCompatibilityForSession(int expectedSampleRate, bool sh
                 const int pending = pendingWavCompatibilityAuditRate_;
                 pendingWavCompatibilityAuditRate_ = 0;
                 auditWavCompatibilityForSession(pending, showModal);
-            } else if (looperProject_.trackSyncEnabled() && jam2_.isNetworkRunning()) {
+            } else if (automaticWavSharingEnabled() && jam2_.isNetworkRunning()) {
                 shareLocalTracks();
             }
         },
@@ -4858,6 +5868,29 @@ void MainWindow::refreshBankPresentation()
                 ? QStringLiteral("QPushButton { background:#214b43;color:#f2fff9;border:1px solid #68d6bc;padding:4px; }")
                 : QStringLiteral("QPushButton { background:#12141f;color:#c4bacb;border:1px solid #55465f;padding:4px; }"));
     }
+    for (int bank = 0; bank < static_cast<int>(looperBankButtons_.size()); ++bank) {
+        QPushButton* button = looperBankButtons_[bank];
+        if (!button) continue;
+        button->setChecked(bank == viewedBankIndex_);
+        QString suffix;
+        if (bank == live) suffix = QStringLiteral("  LIVE");
+        if (bank == pendingBankIndex_) suffix = QStringLiteral("  NEXT");
+        button->setToolTip(QStringLiteral("Section %1%2")
+            .arg(QChar(QLatin1Char('A').unicode() + bank), suffix));
+        button->setStyleSheet(bank == viewedBankIndex_
+            ? QStringLiteral("QPushButton { background:#502d5d;color:#fff8ea;border:1px solid #e8a44a;padding:4px; }")
+            : bank == live
+                ? QStringLiteral("QPushButton { background:#214b43;color:#f2fff9;border:1px solid #68d6bc;padding:4px; }")
+                : QStringLiteral("QPushButton { background:#12141f;color:#c4bacb;border:1px solid #55465f;padding:4px; }"));
+    }
+    if (launchBankButton_) {
+        const bool viewingLiveSection = viewedBankIndex_ == live;
+        launchBankButton_->setEnabled(
+            !sharedRecordingProtected() && !viewingLiveSection);
+        launchBankButton_->setToolTip(viewingLiveSection
+            ? QStringLiteral("This Section is already playing")
+            : QStringLiteral("Queue the viewed Section for the next boundary"));
+    }
     if (detailPositionLabel_) {
         const int currentWorkspace = workspaceStack_ ? workspaceStack_->currentIndex() : -1;
         const bool sectionNamedWorkspace = currentWorkspace == workspacePages_.value(QStringLiteral("chords"), -2) ||
@@ -4882,10 +5915,15 @@ void MainWindow::refreshBankPresentation()
             : arrangementArmed_ ? QStringLiteral("Arrangement Armed...")
                                 : QStringLiteral("Arrangement..."));
     }
+    updateSectionTrimControls();
 }
 
 void MainWindow::requestBankLaunch(int bankIndex)
 {
+    if (sharedRecordingProtected()) {
+        appendLog(QStringLiteral("section queue ignored while a synced recording is active"));
+        return;
+    }
     launchBank(qBound(0, bankIndex, 3), true);
 }
 
@@ -4904,7 +5942,7 @@ void MainWindow::launchBank(
             .arg(QChar(QLatin1Char('A').unicode() + pendingBankIndex_)));
         return;
     }
-    if (!looperProject_.trackSyncEnabled() || !jam2_.isNetworkRunning()) {
+    if (!jamSyncPolicy_.globalPlayback || !jam2_.isNetworkRunning()) {
         schedulePreparedBankLaunch(bankIndex, targetAbsoluteBeat);
         return;
     }
@@ -4927,7 +5965,7 @@ void MainWindow::beginSharedBankLaunch(
     int bankIndex,
     std::optional<quint64> targetAbsoluteBeat)
 {
-    if (!sessionController_.isServer() || !looperProject_.trackSyncEnabled()) return;
+    if (!sessionController_.isServer() || !jamSyncPolicy_.globalPlayback) return;
     if (pendingBankIndex_ >= 0 && pendingBankAbsoluteBeat_ > 0) return;
     cancelSharedBankLaunch(true, QStringLiteral("superseded by a newer bank request"));
     sharedBankSwitchId_ = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -5403,7 +6441,7 @@ void MainWindow::exportLooperAudio()
             suggested,
             QStringLiteral("WAV files (*.wav)"),
             nullptr,
-            QFileDialog::DontUseNativeDialog);
+            QFileDialog::Options{});
         if (path.isEmpty()) return;
         if (!path.endsWith(QStringLiteral(".wav"), Qt::CaseInsensitive)) {
             path += QStringLiteral(".wav");
@@ -5414,7 +6452,7 @@ void MainWindow::exportLooperAudio()
             this,
             QStringLiteral("Export All Sections"),
             defaultFolder,
-            QFileDialog::ShowDirsOnly | QFileDialog::DontUseNativeDialog);
+            QFileDialog::ShowDirsOnly);
         if (folder.isEmpty()) return;
         for (int bank = 0; bank < looperProject_.banks().size(); ++bank) {
             outputPaths.append(QDir(folder).absoluteFilePath(
@@ -5443,7 +6481,7 @@ void MainWindow::exportLooperAudio()
             suggested,
             QStringLiteral("WAV files (*.wav)"),
             nullptr,
-            QFileDialog::DontUseNativeDialog);
+            QFileDialog::Options{});
         if (path.isEmpty()) return;
         if (!path.endsWith(QStringLiteral(".wav"), Qt::CaseInsensitive)) {
             path += QStringLiteral(".wav");
@@ -5594,50 +6632,60 @@ void MainWindow::exportLooperAudio()
 
 void MainWindow::showArrangementDialog()
 {
+    if (sharedRecordingProtected()) {
+        appendLog(QStringLiteral("arrangement edit ignored while a synced recording is active"));
+        return;
+    }
     const bool arrangementWasActive = arrangementRunning_ || arrangementArmed_;
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Arrangement"));
     auto* table = new QTableWidget(&dialog);
     table->setColumnCount(2);
+    table->setShowGrid(false);
     table->setHorizontalHeaderLabels({QStringLiteral("Section"), QStringLiteral("Repeats")});
     table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    constexpr int kArrangementRowHeight = 42;
-    constexpr int kArrangementEditorHeight = 32;
-    table->verticalHeader()->setMinimumSectionSize(kArrangementRowHeight);
-    table->verticalHeader()->setDefaultSectionSize(kArrangementRowHeight);
-    const auto wrapEditor = [table](QWidget* editor) {
-        auto* cell = new QWidget(table);
-        auto* inset = new QHBoxLayout(cell);
-        inset->setContentsMargins(3, 2, 3, 4);
-        inset->setSpacing(0);
-        editor->setFixedHeight(kArrangementEditorHeight);
-        inset->addWidget(editor);
-        return cell;
-    };
+    constexpr int kArrangementMinimumRowHeight = 46;
+    table->verticalHeader()->setMinimumSectionSize(kArrangementMinimumRowHeight);
+    table->verticalHeader()->setDefaultSectionSize(kArrangementMinimumRowHeight);
     const auto bankAt = [table](int row) {
         QWidget* cell = table->cellWidget(row, 0);
+        if (auto* bank = qobject_cast<QComboBox*>(cell)) return bank;
         return cell ? cell->findChild<QComboBox*>() : nullptr;
     };
     const auto repeatsAt = [table](int row) {
         QWidget* cell = table->cellWidget(row, 1);
+        if (auto* repeats = qobject_cast<QSpinBox*>(cell)) return repeats;
         return cell ? cell->findChild<QSpinBox*>() : nullptr;
     };
-    const auto appendRow = [table, wrapEditor](ArrangementStep step) {
+    const auto appendRow = [table](ArrangementStep step) {
         if (table->rowCount() >= 64) return;
         const int row = table->rowCount();
         table->insertRow(row);
-        table->setRowHeight(row, kArrangementRowHeight);
         auto* bank = new QComboBox(table);
         for (int index = 0; index < 4; ++index) {
             bank->addItem(QStringLiteral("Section %1")
                 .arg(QChar(QLatin1Char('A').unicode() + index)), index);
         }
         bank->setCurrentIndex(qBound(0, step.bankIndex, 3));
+        applyMutedEditorStyle(bank);
         auto* repeats = new QSpinBox(table);
         repeats->setRange(1, 64);
         repeats->setValue(qBound(1, step.repeats, 64));
-        table->setCellWidget(row, 0, wrapEditor(bank));
-        table->setCellWidget(row, 1, wrapEditor(repeats));
+        applyMutedEditorStyle(repeats);
+        bank->ensurePolished();
+        repeats->ensurePolished();
+        const int editorHeight = std::max({
+            bank->sizeHint().height(),
+            repeats->sizeHint().height(),
+            bank->fontMetrics().height() + 20,
+            repeats->fontMetrics().height() + 20});
+        bank->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        repeats->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        table->setRowHeight(
+            row,
+            qMax(kArrangementMinimumRowHeight, editorHeight));
+        table->setCellWidget(row, 0, bank);
+        table->setCellWidget(row, 1, repeats);
     };
     for (const ArrangementStep& step : looperProject_.arrangement().steps) appendRow(step);
     if (table->rowCount() == 0) appendRow(ArrangementStep{});
@@ -5683,7 +6731,7 @@ void MainWindow::showArrangementDialog()
     bool stopAfterSave = false;
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
     auto* start = buttons->addButton(
-        arrangementWasActive ? QStringLiteral("Stop") : QStringLiteral("Start"),
+        arrangementWasActive ? QStringLiteral("Stop") : QStringLiteral("Save + Start"),
         QDialogButtonBox::ActionRole);
     QObject::connect(start, &QPushButton::clicked, &dialog,
         [&dialog, &startAfterSave, &stopAfterSave, arrangementWasActive] {
@@ -5735,6 +6783,16 @@ void MainWindow::showArrangementDialog()
 
 void MainWindow::refreshLooperLanes()
 {
+    const int activeBankIndex = looperProject_.activeBankIndex();
+    if (trackRecordingWorkflow_.laneArmed() &&
+        trackRecordingWorkflow_.armedBank() != activeBankIndex &&
+        !trackRecordingWorkflow_.inputTakeActive() &&
+        !loopbackRecorder_.isRunning()) {
+        trackRecordingWorkflow_.disarmLane();
+        publishLocalTrackRecordingState(QStringLiteral("idle"));
+        appendLog(QStringLiteral(
+            "lane recording disarmed because the active Section changed"));
+    }
     const auto viewedPattern = bankMetronomePattern(viewedBankIndex_);
     const double currentBpm = viewedPattern.bpm;
     double mismatchedBackingBpm = 0.0;
@@ -5751,14 +6809,6 @@ void MainWindow::refreshLooperLanes()
             mismatchedBackingBpm > 0.0,
             mismatchedBackingBpm,
             currentBpm);
-    }
-    for (int i = 0; i < static_cast<int>(looperBankButtons_.size()); ++i) {
-        if (looperBankButtons_[i]) {
-            looperBankButtons_[i]->setChecked(i == viewedBankIndex_);
-            looperBankButtons_[i]->setStyleSheet(i == viewedBankIndex_
-                ? QStringLiteral("QPushButton { background: #502d5d; color: #fff8ea; border: 1px solid #e8a44a; padding: 4px; }")
-                : QStringLiteral("QPushButton { background: #12141f; color: #c4bacb; border: 1px solid #55465f; padding: 4px; }"));
-        }
     }
     refreshBankPresentation();
     if (looperStack_ == nullptr) {
@@ -5786,6 +6836,7 @@ void MainWindow::refreshLooperLanes()
     for (const LooperLane& lane : bank.lanes) {
         LooperLaneStackWidget::LaneView view;
         view.lane = lane;
+        view.sourceFrames = lane.sourceFrames;
         if (lane.referenceStale ||
             (!lane.referenceKind.isEmpty() && lane.referenceBpm > 0.0 &&
              std::abs(lane.referenceBpm - currentBpm) > 0.01) ||
@@ -5842,6 +6893,20 @@ void MainWindow::refreshLooperLanes()
         viewedPattern.bpm,
         tempoPulseUnits,
         looperProject_.gridLockEnabled());
+    QMap<QString, QStringList> remoteLabelsByLane;
+    for (auto it = peerTrackRecordingStates_.cbegin();
+         it != peerTrackRecordingStates_.cend(); ++it) {
+        const PeerTrackRecordingState& state = it.value();
+        if (state.bank != viewedBankIndex_ || state.laneId.isEmpty()) continue;
+        remoteLabelsByLane[state.laneId].append(QStringLiteral("%1 %2")
+            .arg(recordingPeerLabel(it.key()), state.phase.toUpper()));
+    }
+    QMap<QString, QString> remoteLabels;
+    for (auto it = remoteLabelsByLane.cbegin(); it != remoteLabelsByLane.cend(); ++it) {
+        remoteLabels[it.key()] = it.value().join(QStringLiteral(" · "));
+    }
+    looperStack_->setRemoteRecordingStates(
+        std::move(remoteLabels), sharedRecordingProtected());
 
     if (missingWaveforms.isEmpty() || looperWaveformWorkerRunning_) {
         return;
@@ -5876,6 +6941,16 @@ void MainWindow::refreshLooperLanes()
                     looperWaveformCache_.erase(looperWaveformCache_.begin());
 
                 }
+                if (preview.sourceFrames > 0) {
+                    for (LooperBank& bank : looperProject_.banks()) {
+                        for (LooperLane& lane : bank.lanes) {
+                            if (QDir::cleanPath(looperAssetAbsolutePath(lane)) ==
+                                QDir::cleanPath(path)) {
+                                lane.sourceFrames = preview.sourceFrames;
+                            }
+                        }
+                    }
+                }
                 looperWaveformCache_.insert(path, std::move(preview));
             }
             refreshLooperLanes();
@@ -5888,6 +6963,378 @@ void MainWindow::refreshLooperLanes()
     if (!started) {
         looperWaveformWorkerRunning_ = false;
         QTimer::singleShot(100, this, [this] { refreshLooperLanes(); });
+    }
+}
+
+qint64 MainWindow::looperLaneTimelineEndFrame(
+    const LooperLane& lane,
+    int sampleRate) const
+{
+    sampleRate = qMax(1, sampleRate);
+    if (lane.stopFrame > lane.startFrame) {
+        return lane.stopFrame;
+    }
+
+    qint64 sourceFrames = lane.sourceFrames;
+    if (sourceFrames <= 0 && lane.assetPath.trimmed().isEmpty()) {
+        return qMax<qint64>(0, lane.startFrame);
+    }
+    const QString path = looperAssetAbsolutePath(lane);
+    const auto cached = looperWaveformCache_.constFind(path);
+    if (sourceFrames <= 0 && cached != looperWaveformCache_.cend()) {
+        sourceFrames = cached.value().sourceFrames;
+    }
+    if (sourceFrames <= 0) {
+        const WavMetadata metadata = readWavMetadata(path);
+        const qint64 bytesPerFrame = static_cast<qint64>(metadata.channels) *
+            qMax(1, metadata.bitsPerSample / 8);
+        if (bytesPerFrame > 0) sourceFrames = metadata.dataBytes / bytesPerFrame;
+    }
+    if (sourceFrames <= 0) return qMax<qint64>(0, lane.startFrame);
+
+    const qint64 sourceStart = lane.loopStartFrame >= 0
+        ? qBound<qint64>(0, lane.loopStartFrame, sourceFrames - 1) : 0;
+    const qint64 sourceEnd = lane.loopEndFrame > sourceStart
+        ? qBound<qint64>(sourceStart + 1, lane.loopEndFrame, sourceFrames)
+        : sourceFrames;
+    qint64 visibleFrames = sourceEnd - sourceStart;
+    if (lane.sampleRate > 0 && lane.sampleRate != sampleRate) {
+        visibleFrames = static_cast<qint64>(std::llround(
+            static_cast<double>(visibleFrames) * sampleRate / lane.sampleRate));
+    }
+    return qMax<qint64>(0, lane.startFrame) + qMax<qint64>(1, visibleFrames);
+}
+
+int MainWindow::requiredSectionBeatsForTracks(int bankIndex) const
+{
+    if (bankIndex < 0 || bankIndex >= looperProject_.banks().size()) return 0;
+    const int sampleRate = qMax(1, activeTrackSampleRate());
+    qint64 endFrame = 0;
+    for (const LooperLane& lane : looperProject_.banks().at(bankIndex).lanes) {
+        endFrame = qMax(endFrame, looperLaneTimelineEndFrame(lane, sampleRate));
+    }
+    const auto timing = bankMetronomePattern(bankIndex);
+    return jam2::gui::sectionBeatCountForTimelineEnd(
+        endFrame,
+        sampleRate,
+        timing.bpm,
+        timing.tempo_pulse_units,
+        timing.beats_per_bar);
+}
+
+bool MainWindow::extendSectionToFitTracks(int bankIndex, bool showLimitWarning)
+{
+    if (bankIndex < 0 || bankIndex >= chordModel_.sections().size()) return false;
+    const int currentBeats = chordModel_.section(bankIndex).beats;
+    const int requiredBeats = requiredSectionBeatsForTracks(bankIndex);
+    if (requiredBeats <= currentBeats) return false;
+
+    chordModel_.resizeSection(bankIndex, requiredBeats);
+    const int appliedBeats = chordModel_.section(bankIndex).beats;
+    if (appliedBeats < requiredBeats) {
+        const QString detail = QStringLiteral(
+            "Section %1 reached the %2-beat limit; audio beyond that point cannot be included in the prepared Section.")
+            .arg(QChar(QLatin1Char('A').unicode() + bankIndex))
+            .arg(appliedBeats);
+        appendLog(detail);
+        if (showLimitWarning) {
+            QMessageBox::warning(this, QStringLiteral("Section length limit"), detail);
+        }
+    } else {
+        appendLog(QStringLiteral("extended Section %1 from %2 to %3 beats for track audio")
+            .arg(QChar(QLatin1Char('A').unicode() + bankIndex))
+            .arg(currentBeats)
+            .arg(appliedBeats));
+    }
+    if (chordGrid_) chordGrid_->refresh();
+    if (beatGrid_) beatGrid_->refresh();
+    if (lyricGrid_) lyricGrid_->refresh();
+    updateSectionTrimControls();
+    return appliedBeats != currentBeats;
+}
+
+int MainWindow::safeTrimSectionBeats(int bankIndex) const
+{
+    if (bankIndex < 0 || bankIndex >= chordModel_.sections().size()) return 0;
+    const int beatsPerBar = qMax(1, sectionBeatsPerBar(bankIndex));
+    const int musicalBeats = chordModel_.occupiedBeatCount(bankIndex);
+    const int roundedMusicalBeats = qMax(
+        beatsPerBar,
+        ((musicalBeats + beatsPerBar - 1) / beatsPerBar) * beatsPerBar);
+    return qMax(roundedMusicalBeats, requiredSectionBeatsForTracks(bankIndex));
+}
+
+bool MainWindow::sectionHasUnknownTrackDuration(int bankIndex) const
+{
+    if (bankIndex < 0 || bankIndex >= looperProject_.banks().size()) return false;
+    for (const LooperLane& lane : looperProject_.banks().at(bankIndex).lanes) {
+        if (!lane.assetHash.isEmpty() && lane.assetPath.trimmed().isEmpty() &&
+            lane.sourceFrames <= 0 && lane.stopFrame <= lane.startFrame) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void MainWindow::rebuildSectionMixAfterLengthChange(int bankIndex)
+{
+    const bool activeSection = bankIndex == looperProject_.activeBankIndex();
+    const bool restartPlayback = activeSection &&
+        (trackRecordingWorkflow_.globalTransportRequestedPlaying() ||
+         trackRecordingWorkflow_.globalTransportPlaying());
+
+    // The prepared mix is a cache of both the lane audio and the Section
+    // length.  Do not let its old source position continue under a shortened
+    // musical timeline: unload it, establish a fresh transport origin, and
+    // attach the rebuilt mix against that origin when rendering completes.
+    if (activeSection) {
+        discardPreparedMix(restartPlayback);
+    }
+    regeneratePreparedMix(bankIndex);
+
+    if (!restartPlayback) return;
+    trackController_.requestPlayback(true);
+    playPreparedMixWhenReady_ = PreparedMixRenderer::hasRenderableSources(
+        looperProject_, bankIndex);
+    if (!trackRecordingWorkflow_.restartGlobalTransport(
+            metronomeTransport_.grid().position())) {
+        appendLog(QStringLiteral(
+            "engine command queue unavailable: restart playback after Section length change"));
+    } else {
+        appendLog(QStringLiteral(
+            "restarted global playback after shortening active Section %1")
+            .arg(QChar(QLatin1Char('A').unicode() + bankIndex)));
+    }
+    updateTrackPlaybackPresentation();
+}
+
+void MainWindow::shrinkSectionOneBar(int bankIndex)
+{
+    if (bankIndex < 0 || bankIndex >= chordModel_.sections().size() ||
+        bankIndex >= looperProject_.banks().size()) {
+        return;
+    }
+    if (trackRecordingWorkflow_.inputTakeActive() || loopbackRecorder_.isRunning() ||
+        trackRecordingWorkflow_.laneArmed()) {
+        QMessageBox::information(
+            this,
+            QStringLiteral("Remove One Bar"),
+            QStringLiteral("Finish or disarm the current recording before changing the Section length."));
+        return;
+    }
+    const int beatsPerBar = qMax(1, sectionBeatsPerBar(bankIndex));
+    const int currentBeats = chordModel_.section(bankIndex).beats;
+    const int targetBeats = qMax(beatsPerBar, currentBeats - beatsPerBar);
+    if (targetBeats >= currentBeats) return;
+
+    const int sampleRate = qMax(1, activeTrackSampleRate());
+    const auto timing = bankMetronomePattern(bankIndex);
+    const qint64 targetFrames = qMax<qint64>(1, static_cast<qint64>(std::llround(
+        static_cast<double>(targetBeats) * 60.0 * sampleRate /
+        (qMax(1, timing.bpm) * qMax(1, timing.tempo_pulse_units)))));
+    const bool musicalConflict = chordModel_.occupiedBeatCount(bankIndex) > targetBeats;
+    bool wavConflict = false;
+    for (const LooperLane& lane : looperProject_.banks().at(bankIndex).lanes) {
+        if (looperLaneTimelineEndFrame(lane, sampleRate) > targetFrames) {
+            wavConflict = true;
+            break;
+        }
+    }
+    const SharedSessionController::Snapshot session = sessionController_.snapshot();
+    const bool peerConflict = session.remotePeerCount > 0 &&
+        jamSyncPolicy_.generatedIdeas != GeneratedIdeaSyncMode::Full;
+    const bool unknownWavDuration = sectionHasUnknownTrackDuration(bankIndex);
+    const bool hasConflict = musicalConflict || wavConflict || peerConflict || unknownWavDuration;
+    if (hasConflict) {
+        QStringList conflicts;
+        if (musicalConflict) {
+            conflicts.append(QStringLiteral(
+                "Chord, beat, lyric, or generated-line content exists in the final bar."));
+        }
+        if (wavConflict) {
+            conflicts.append(QStringLiteral(
+                "One or more WAV placements extend into the final bar and will be cropped or removed from their track."));
+        }
+        if (unknownWavDuration) {
+            conflicts.append(QStringLiteral(
+                "A remote WAV has not supplied enough duration information to prove that the final bar is empty."));
+        }
+        if (peerConflict) {
+            conflicts.append(QStringLiteral(
+                "Peers may have custom idea content there because Whole idea sync is not enabled."));
+        }
+        QMessageBox dialog(
+            QMessageBox::Warning,
+            QStringLiteral("Remove One Bar"),
+            QStringLiteral("Removing bar %1 from Section %2 will delete content.")
+                .arg((currentBeats + beatsPerBar - 1) / beatsPerBar)
+                .arg(QChar(QLatin1Char('A').unicode() + bankIndex)),
+            QMessageBox::Cancel,
+            this);
+        dialog.setInformativeText(
+            conflicts.join(QStringLiteral("\n\n")) +
+            QStringLiteral(
+                "\n\nOriginal imported files remain on disk, but this Section edit cannot be restored automatically."));
+        QPushButton* deleteButton = dialog.addButton(
+            QStringLiteral("Delete Anyway"), QMessageBox::DestructiveRole);
+        dialog.setDefaultButton(QMessageBox::Cancel);
+        dialog.exec();
+        if (dialog.clickedButton() != deleteButton) return;
+    }
+
+    QSet<QString> removedAssets;
+    if (wavConflict) {
+        for (LooperLane& lane : looperProject_.banks()[bankIndex].lanes) {
+            if (looperLaneTimelineEndFrame(lane, sampleRate) <= targetFrames) continue;
+            const jam2::gui::SectionTimelineCrop crop =
+                jam2::gui::sectionTimelineCropForEnd(
+                    lane.startFrame,
+                    lane.loopStartFrame,
+                    lane.sampleRate,
+                    sampleRate,
+                    targetFrames);
+            if (crop.removePlacement) {
+                removedAssets.insert(looperAssetAbsolutePath(lane));
+                lane.assetPath.clear();
+                lane.assetHash.clear();
+                lane.sampleRate = 0;
+                lane.sampleRateCompatible = true;
+                lane.sourceFrames = 0;
+                lane.startFrame = 0;
+                lane.stopFrame = -1;
+                lane.loopStartFrame = -1;
+                lane.loopEndFrame = -1;
+                lane.loopEnabled = false;
+                lane.referenceKind.clear();
+                lane.referenceSourceSignature.clear();
+                lane.referenceBpm = 0.0;
+                lane.referenceStale = false;
+                lane.localOnly = false;
+                lane.originKind.clear();
+                continue;
+            }
+            lane.stopFrame = crop.stopFrame;
+            lane.loopStartFrame = crop.sourceStartFrame;
+            lane.loopEndFrame = crop.sourceEndFrame;
+        }
+    }
+    chordModel_.resizeSection(bankIndex, targetBeats);
+    if (!removedAssets.isEmpty()) discardObsoleteReferenceWavs(removedAssets);
+    if (chordGrid_) chordGrid_->refresh();
+    if (beatGrid_) beatGrid_->refresh();
+    if (lyricGrid_) lyricGrid_->refresh();
+    refreshLooperLanes();
+    rebuildSectionMixAfterLengthChange(bankIndex);
+    sendControl(QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("grid.resize")},
+        {QStringLiteral("revision"), chordModel_.revision()},
+        {QStringLiteral("section"), bankIndex},
+        {QStringLiteral("lane"), QStringLiteral("chord")},
+        {QStringLiteral("beats"), targetBeats},
+    });
+    syncLooperArrangement();
+    appendLog(QStringLiteral("removed one bar from Section %1%2")
+        .arg(QChar(QLatin1Char('A').unicode() + bankIndex))
+        .arg(hasConflict ? QStringLiteral(" with confirmed content deletion") : QString{}));
+}
+
+void MainWindow::trimViewedSection()
+{
+    const int bankIndex = viewedBankIndex_;
+    if (bankIndex < 0 || bankIndex >= chordModel_.sections().size()) return;
+    if (trackRecordingWorkflow_.inputTakeActive() || loopbackRecorder_.isRunning() ||
+        trackRecordingWorkflow_.laneArmed()) {
+        QMessageBox::information(
+            this,
+            QStringLiteral("Trim Section"),
+            QStringLiteral("Finish or disarm the current recording before trimming this Section."));
+        return;
+    }
+    const SharedSessionController::Snapshot session = sessionController_.snapshot();
+    if (session.remotePeerCount > 0 &&
+        jamSyncPolicy_.generatedIdeas != GeneratedIdeaSyncMode::Full) {
+        QMessageBox::information(
+            this,
+            QStringLiteral("Trim Section"),
+            QStringLiteral(
+                "Whole idea sync must be enabled before trimming with peers connected, so custom chord and beat content on every peer is protected."));
+        return;
+    }
+    if (sectionHasUnknownTrackDuration(bankIndex)) {
+        QMessageBox::information(
+            this,
+            QStringLiteral("Trim Section"),
+            QStringLiteral(
+                "This Section contains a remote WAV whose duration is not known yet. Share or download that WAV before using safe Trim."));
+        return;
+    }
+    const int currentBeats = chordModel_.section(bankIndex).beats;
+    const int targetBeats = safeTrimSectionBeats(bankIndex);
+    if (targetBeats <= 0 || targetBeats >= currentBeats) {
+        QMessageBox::information(
+            this,
+            QStringLiteral("Trim Section"),
+            QStringLiteral("There are no complete trailing empty bars to remove."));
+        return;
+    }
+    const int beatsPerBar = qMax(1, sectionBeatsPerBar(bankIndex));
+    const int currentBars = (currentBeats + beatsPerBar - 1) / beatsPerBar;
+    const int targetBars = (targetBeats + beatsPerBar - 1) / beatsPerBar;
+    if (QMessageBox::question(
+            this,
+            QStringLiteral("Trim Section"),
+            QStringLiteral(
+                "Trim Section %1 from %2 to %3 bars?\n\n%4 trailing empty bars will be removed. Musical content and placed WAVs are protected.")
+                .arg(QChar(QLatin1Char('A').unicode() + bankIndex))
+                .arg(currentBars)
+                .arg(targetBars)
+                .arg(currentBars - targetBars),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No) != QMessageBox::Yes) {
+        return;
+    }
+    chordModel_.resizeSection(bankIndex, targetBeats);
+    if (chordGrid_) chordGrid_->refresh();
+    if (beatGrid_) beatGrid_->refresh();
+    if (lyricGrid_) lyricGrid_->refresh();
+    refreshLooperLanes();
+    rebuildSectionMixAfterLengthChange(bankIndex);
+    syncLooperArrangement();
+    updateSectionTrimControls();
+}
+
+void MainWindow::updateSectionTrimControls()
+{
+    const bool sectionValid = viewedBankIndex_ >= 0 &&
+        viewedBankIndex_ < chordModel_.sections().size();
+    const bool recordingBusy = trackRecordingWorkflow_.inputTakeActive() ||
+        loopbackRecorder_.isRunning() || trackRecordingWorkflow_.laneArmed();
+    const SharedSessionController::Snapshot session = sessionController_.snapshot();
+    const bool peerIdeaConflict = session.remotePeerCount > 0 &&
+        jamSyncPolicy_.generatedIdeas != GeneratedIdeaSyncMode::Full;
+    const bool unknownWavDuration = sectionValid &&
+        sectionHasUnknownTrackDuration(viewedBankIndex_);
+    const bool canTrim = sectionValid && !recordingBusy && !peerIdeaConflict &&
+        !unknownWavDuration &&
+        safeTrimSectionBeats(viewedBankIndex_) <
+            chordModel_.section(viewedBankIndex_).beats;
+    QString tooltip = QStringLiteral(
+        "Remove complete trailing bars that contain no chords, beats, lyrics, or placed WAV audio");
+    if (recordingBusy) {
+        tooltip = QStringLiteral("Finish or disarm recording before trimming the Section");
+    } else if (peerIdeaConflict) {
+        tooltip = QStringLiteral(
+            "Enable Whole idea sync before trimming with peers connected");
+    } else if (unknownWavDuration) {
+        tooltip = QStringLiteral(
+            "Download the pending remote WAV before using safe Trim");
+    } else if (!canTrim) {
+        tooltip = QStringLiteral("No complete trailing empty bars can be removed");
+    }
+    for (QPushButton* button : std::as_const(sectionTrimButtons_)) {
+        if (!button) continue;
+        button->setEnabled(canTrim);
+        button->setToolTip(tooltip);
     }
 }
 
@@ -5947,13 +7394,17 @@ void MainWindow::applyLooperLaneGain(int laneIndex, double gainDb)
 
 void MainWindow::addLooperWavs()
 {
+    if (sharedRecordingProtected()) {
+        appendLog(QStringLiteral("track import ignored while a synced recording is active"));
+        return;
+    }
     QStringList paths = QFileDialog::getOpenFileNames(
         this,
         QStringLiteral("Add WAV lanes"),
         QString(),
         QStringLiteral("WAV files (*.wav *.WAV)"),
         nullptr,
-        QFileDialog::DontUseNativeDialog);
+        QFileDialog::Options{});
     if (paths.isEmpty()) {
         return;
     }
@@ -6004,6 +7455,8 @@ void MainWindow::addLooperWavs()
                 lane.name = asset.displayName;
                 lane.sampleRate = asset.metadata.sampleRate;
                 lane.sampleRateCompatible = true;
+                lane.sourceFrames = asset.metadata.frames;
+                lane.originKind = QStringLiteral("imported");
                 if (!looperProject_.appendLane(bankIndex, std::move(lane))) {
                     appendLog(QStringLiteral("could not add WAV lane: ") + asset.sourcePath);
                     continue;
@@ -6025,7 +7478,8 @@ void MainWindow::addLooperWavs()
             }
             refreshLooperLanes();
             regeneratePreparedMix();
-            if (imported > 0 && looperProject_.trackSyncEnabled() && jam2_.isNetworkRunning()) {
+            if (imported > 0) syncLooperArrangement();
+            if (imported > 0 && automaticWavSharingEnabled() && jam2_.isNetworkRunning()) {
                 shareLocalTracks();
             }
         });
@@ -6069,7 +7523,7 @@ void MainWindow::loadWavIntoLooperLane()
             QString(),
             QStringLiteral("WAV files (*.wav *.WAV)"),
             nullptr,
-            QFileDialog::DontUseNativeDialog);
+            QFileDialog::Options{});
         if (!path.isEmpty()) {
             pathEdit->setText(QDir::toNativeSeparators(path));
             buttons->button(QDialogButtonBox::Ok)->setEnabled(true);
@@ -6083,13 +7537,43 @@ void MainWindow::loadWavIntoLooperLane()
 
     const QString sourcePath = QDir::fromNativeSeparators(pathEdit->text());
     const int selectedLaneIndex = laneBox->currentData().toInt();
-    const QString targetLaneId = selectedLaneIndex >= 0 && selectedLaneIndex < bank.lanes.size()
-        ? bank.lanes.at(selectedLaneIndex).id
+    importWavIntoLooperLane(selectedLaneIndex, sourcePath);
+}
+
+void MainWindow::importWavIntoLooperLane(int laneIndex, const QString& sourcePath)
+{
+    if (sharedRecordingProtected()) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Import WAV"),
+            QStringLiteral("Audio cannot be imported while a synced recording is active."));
+        return;
+    }
+    const QFileInfo sourceInfo(sourcePath);
+    if (!sourceInfo.exists() || !sourceInfo.isFile()) {
+        QMessageBox::warning(
+            this, QStringLiteral("Import WAV"), QStringLiteral("The dropped file could not be found."));
+        return;
+    }
+    if (sourceInfo.suffix().compare(QStringLiteral("wav"), Qt::CaseInsensitive) != 0) {
+        QMessageBox::warning(
+            this, QStringLiteral("Import WAV"), QStringLiteral("Only WAV audio files can be imported into a track."));
+        return;
+    }
+    const int bankIndex = viewedBankIndex_;
+    if (bankIndex < 0 || bankIndex >= looperProject_.banks().size() ||
+        laneIndex < -1 || laneIndex >= looperProject_.banks().at(bankIndex).lanes.size()) {
+        QMessageBox::warning(
+            this, QStringLiteral("Import WAV"), QStringLiteral("The selected track lane is no longer available."));
+        return;
+    }
+    const QString targetLaneId = laneIndex >= 0
+        ? looperProject_.banks().at(bankIndex).lanes.at(laneIndex).id
         : QString{};
     const QString stagingFolder = projectPersistence_.workspaceFolder();
     const int expectedSampleRate = activeTrackSampleRate();
     auto result = std::make_shared<StagedPcm16Asset>();
-    (void)startFileWorkerTask(
+    const bool started = startFileWorkerTask(
         [sourcePath, stagingFolder, expectedSampleRate, result] {
             *result = stagePcm16Asset(sourcePath, stagingFolder, expectedSampleRate);
         },
@@ -6128,6 +7612,13 @@ void MainWindow::loadWavIntoLooperLane()
             lane.assetHash = result->sha256;
             lane.sampleRate = result->metadata.sampleRate;
             lane.sampleRateCompatible = true;
+            lane.sourceFrames = result->metadata.frames;
+            lane.originKind = QStringLiteral("imported");
+            lane.referenceKind.clear();
+            lane.referenceSourceSignature.clear();
+            lane.referenceBpm = 0.0;
+            lane.referenceStale = false;
+            lane.localOnly = false;
             if (isDefaultEmptyTrackName(lane.name) || lane.name.trimmed().isEmpty()) {
                 lane.name = result->displayName;
             }
@@ -6139,14 +7630,25 @@ void MainWindow::loadWavIntoLooperLane()
             selectedLooperLane_ = laneIndex;
             refreshLooperLanes();
             regeneratePreparedMix();
-            if (looperProject_.trackSyncEnabled() && jam2_.isNetworkRunning()) {
+            syncLooperArrangement();
+            if (automaticWavSharingEnabled() && jam2_.isNetworkRunning()) {
                 shareLocalTracks();
             }
         });
+    if (!started) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Import WAV"),
+            QStringLiteral("The audio worker is busy. Please try importing the WAV again."));
+    }
 }
 
 void MainWindow::addEmptyLooperLane()
 {
+    if (sharedRecordingProtected()) {
+        appendLog(QStringLiteral("new track ignored while a synced recording is active"));
+        return;
+    }
     LooperLane lane;
     if (!looperProject_.appendLane(viewedBankIndex_, std::move(lane))) {
         appendLog(QStringLiteral("could not add empty lane"));
@@ -6161,6 +7663,13 @@ void MainWindow::addEmptyLooperLane()
 
 bool MainWindow::armSelectedLooperLaneRecording()
 {
+    if (viewedBankIndex_ != looperProject_.activeBankIndex()) {
+        QMessageBox::information(
+            this,
+            QStringLiteral("Arm Lane Recording"),
+            QStringLiteral("Recording can only be armed in the currently active Section."));
+        return false;
+    }
     if (selectedLooperLane_ < 0) {
         if (looperProject_.banks().at(viewedBankIndex_).lanes.isEmpty()) {
             addEmptyLooperLane();
@@ -6181,9 +7690,8 @@ bool MainWindow::armSelectedLooperLaneRecording()
 
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Arm Lane Recording"));
-    dialog.resize(760, 560);
+    dialog.resize(720, 430);
     auto* content = new QWidget(&dialog);
-    content->setMinimumWidth(700);
     content->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
     auto* form = new QFormLayout(content);
     form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
@@ -6200,8 +7708,7 @@ bool MainWindow::armSelectedLooperLaneRecording()
     applyMutedEditorStyle(modeBox);
 
     const QList<QWidget*> widgets{
-        captureOutputEdit_, loopbackSourceBox_, captureManualStopCheck_, captureDurationSpin_,
-        captureCountInCheck_, captureCountInMetronomeCheck_, captureKeepMetronomeCheck_, captureCountInBarsSpin_,
+        captureOutputEdit_, loopbackSourceBox_,
         silenceThresholdSpin_, tailSilenceSpin_, trimLeadingCheck_,
         trimTrailingCheck_, recordingLatencyLabel_, recordingLatencyAdjustmentSpin_,
     };
@@ -6246,20 +7753,13 @@ bool MainWindow::armSelectedLooperLaneRecording()
     sourceLayout->addWidget(loopbackSourceBox_, 1);
     auto* refreshSources = new QPushButton(QStringLiteral("Refresh Sources"), content);
     sourceLayout->addWidget(refreshSources);
-
-    auto* countInRow = new QWidget(content);
-    auto* countInLayout = new QHBoxLayout(countInRow);
-    countInLayout->setContentsMargins(0, 0, 0, 0);
-    countInLayout->addWidget(captureCountInCheck_);
-    countInLayout->addWidget(captureCountInBarsSpin_);
-    countInLayout->addStretch(1);
-
-    auto* metronomeRow = new QWidget(content);
-    auto* metronomeLayout = new QHBoxLayout(metronomeRow);
-    metronomeLayout->setContentsMargins(0, 0, 0, 0);
-    metronomeLayout->addWidget(captureCountInMetronomeCheck_);
-    metronomeLayout->addWidget(captureKeepMetronomeCheck_);
-    metronomeLayout->addStretch(1);
+    loopbackSourceBox_->ensurePolished();
+    const int loopbackSourceHeight = qMax(
+        loopbackSourceBox_->sizeHint().height(),
+        loopbackSourceBox_->fontMetrics().height() + 20);
+    loopbackSourceBox_->setMinimumHeight(loopbackSourceHeight);
+    refreshSources->setMinimumHeight(loopbackSourceHeight);
+    sourceRow->setMinimumHeight(loopbackSourceHeight);
 
     auto* latencyRow = new QWidget(content);
     latencyRow->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
@@ -6279,38 +7779,49 @@ bool MainWindow::armSelectedLooperLaneRecording()
     auto* engineStatus = new QLabel(content);
     engineStatus->setWordWrap(true);
     engineStatus->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
-    engineStatus->setMinimumHeight(qMax(36, detailLineHeight * 2));
-    engineStatus->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    engineStatus->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     engineStatus->setText(jam2_.isRunning()
         ? QStringLiteral("Records the input of the currently loaded engine.")
         : QStringLiteral("Start Perform or a jam before recording engine input."));
+    auto* inputLabel = new QLabel(QStringLiteral("Input"), content);
+    inputLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+
+    auto* advancedToggle = new QPushButton(content);
+    advancedToggle->setText(QStringLiteral("▸  ADVANCED"));
+    advancedToggle->setCheckable(true);
+    advancedToggle->setStyleSheet(QStringLiteral(
+        "QPushButton { border:0;border-top:1px solid #2f3a3d;background:transparent;color:#ddd7e8;"
+        "font:12px Bahnschrift;padding:9px 2px 4px;text-align:left; }"
+        "QPushButton:hover { color:#ffd68a; }"));
+    auto* advancedContent = new QWidget(content);
+    auto* advancedForm = new QFormLayout(advancedContent);
+    advancedForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    advancedForm->setRowWrapPolicy(QFormLayout::DontWrapRows);
+    advancedForm->setContentsMargins(14, 0, 0, 0);
+    advancedForm->setLabelAlignment(Qt::AlignLeft | Qt::AlignTop);
+    advancedForm->addRow(QStringLiteral("Recording alignment"), latencyRow);
+    advancedForm->addRow(QStringLiteral("Silence threshold"), silenceThresholdSpin_);
+    advancedForm->addRow(QStringLiteral("Tail silence"), tailSilenceSpin_);
+    advancedForm->addRow(trimLeadingCheck_);
+    advancedForm->addRow(trimTrailingCheck_);
+    advancedContent->hide();
 
     form->addRow(QStringLiteral("Lane"), new QLabel(laneName, content));
     form->addRow(QStringLiteral("Source"), modeBox);
     form->addRow(QStringLiteral("Take WAV"), outputRow);
-    form->addRow(QStringLiteral("Input"), engineStatus);
+    form->addRow(inputLabel, engineStatus);
     form->addRow(QStringLiteral("Loopback source"), sourceRow);
-    form->addRow(QStringLiteral("Recording alignment"), latencyRow);
-    form->addRow(captureManualStopCheck_);
-    auto* durationLabel = new QLabel(QStringLiteral("Duration limit"), content);
-    form->addRow(durationLabel, captureDurationSpin_);
-    form->addRow(QStringLiteral("Count-in"), countInRow);
-    form->addRow(QStringLiteral("Metronome"), metronomeRow);
     form->addRow(QStringLiteral("Current Jam mix"), includeBackingCheck);
     form->addRow(QString{}, includeMetronomeCheck);
     form->addRow(QString{}, leaderAudioWarning);
-    form->addRow(QStringLiteral("Silence threshold"), silenceThresholdSpin_);
-    form->addRow(QStringLiteral("Tail silence"), tailSilenceSpin_);
-    form->addRow(trimLeadingCheck_);
-    form->addRow(trimTrailingCheck_);
+    form->addRow(advancedToggle);
+    form->addRow(advancedContent);
 
     QObject::connect(browse, &QPushButton::clicked, this, [this] { chooseCaptureFolder(); });
-    QObject::connect(captureManualStopCheck_, &QCheckBox::toggled, &dialog, [this, durationLabel] {
-        updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_, durationLabel);
-    });
 
     auto* scroll = new QScrollArea(&dialog);
     scroll->setWidgetResizable(true);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setWidget(content);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, &dialog);
     auto* arm = buttons->addButton(QStringLiteral("Arm"), QDialogButtonBox::AcceptRole);
@@ -6377,44 +7888,62 @@ bool MainWindow::armSelectedLooperLaneRecording()
             trimLeadingCheck_->setChecked(loopbackDraft.trimLeading);
             trimTrailingCheck_->setChecked(loopbackDraft.trimTrailing);
         }
-        updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_, durationLabel);
+        updateCaptureDurationControl(captureManualStopCheck_, captureDurationSpin_);
     };
     auto setRowVisible = [form](QWidget* field, bool visible) {
         field->setVisible(visible);
         if (QWidget* label = form->labelForField(field)) label->setVisible(visible);
+    };
+    auto setAdvancedRowVisible = [advancedForm](QWidget* field, bool visible) {
+        field->setVisible(visible);
+        if (QWidget* label = advancedForm->labelForField(field)) {
+            label->setVisible(visible);
+        }
     };
     QString activeMode = modeBox->currentData().toString();
     auto refreshMode = [&] {
         const bool inputMode = activeMode == QStringLiteral("input");
         const bool currentJamMode = activeMode == QStringLiteral("current-jam");
         const bool engineMode = inputMode || currentJamMode;
+        const bool loopbackMode = !engineMode;
+        const bool advancedAvailable = inputMode || loopbackMode;
         engineStatus->setText(currentJamMode
             ? QStringLiteral("Records your input plus received peers at this endpoint.")
             : jam2_.isRunning()
                 ? QStringLiteral("Records the input of the currently loaded engine.")
                 : QStringLiteral("Start Perform or a jam before recording engine input."));
         setRowVisible(engineStatus, engineMode);
-        setRowVisible(latencyRow, inputMode);
-        setRowVisible(countInRow, engineMode);
-        setRowVisible(metronomeRow, engineMode);
         setRowVisible(sourceRow, !engineMode);
-        setRowVisible(silenceThresholdSpin_, !engineMode);
-        setRowVisible(tailSilenceSpin_, !engineMode);
-        setRowVisible(trimLeadingCheck_, !engineMode);
-        setRowVisible(trimTrailingCheck_, !engineMode);
         setRowVisible(includeBackingCheck, currentJamMode);
         setRowVisible(includeMetronomeCheck, currentJamMode);
         setRowVisible(leaderAudioWarning, currentJamMode &&
             metronomeModeBox_ &&
             metronomeModeBox_->currentText() == QStringLiteral("leader-audio"));
+        setAdvancedRowVisible(latencyRow, inputMode);
+        setAdvancedRowVisible(silenceThresholdSpin_, loopbackMode);
+        setAdvancedRowVisible(tailSilenceSpin_, loopbackMode);
+        setAdvancedRowVisible(trimLeadingCheck_, loopbackMode);
+        setAdvancedRowVisible(trimTrailingCheck_, loopbackMode);
+        setRowVisible(advancedToggle, advancedAvailable);
+        setRowVisible(
+            advancedContent,
+            advancedAvailable && advancedToggle->isChecked());
         arm->setEnabled(!engineMode || jam2_.isRunning());
     };
+    QObject::connect(advancedToggle, &QPushButton::toggled, &dialog,
+        [&](bool open) {
+            advancedToggle->setText(open
+                ? QStringLiteral("▾  ADVANCED")
+                : QStringLiteral("▸  ADVANCED"));
+            refreshMode();
+        });
     loadDraft(activeMode);
     refreshMode();
     QObject::connect(modeBox, qOverload<int>(&QComboBox::currentIndexChanged), &dialog, [&](int) {
         storeDraft(activeMode);
         activeMode = modeBox->currentData().toString();
         loadDraft(activeMode);
+        advancedToggle->setChecked(false);
         refreshMode();
     });
     QObject::connect(refreshSources, &QPushButton::clicked, this, [&] {
@@ -6441,7 +7970,8 @@ bool MainWindow::armSelectedLooperLaneRecording()
     const LooperLaneLocation resolved = findLooperLaneLocation(
         looperProject_, bankId, laneId);
     if (!resolved.valid() ||
-        viewedBankIndex_ != resolved.bank) {
+        viewedBankIndex_ != resolved.bank ||
+        looperProject_.activeBankIndex() != resolved.bank) {
         refreshLooperLanes();
         appendLog(QStringLiteral(
             "lane recording was not armed because the shared arrangement changed while the dialog was open"));
@@ -6459,6 +7989,11 @@ bool MainWindow::armSelectedLooperLaneRecording()
         captureMode,
         includeBackingCheck->isChecked(),
         includeMetronomeCheck->isChecked());
+    localRecordingTargetBankId_ = looperProject_.banks().at(resolved.bank).id;
+    localRecordingTargetLaneId_ = looperProject_.banks().at(resolved.bank)
+        .lanes.at(resolved.lane).id;
+    localTrackRecordingCountInBars_ = 0;
+    publishLocalTrackRecordingState(QStringLiteral("armed"));
     refreshLooperLanes();
     appendLog(QStringLiteral("armed lane recording: bank=%1 lane=%2 mode=%3")
         .arg(looperProject_.banks().at(resolved.bank).id)
@@ -6472,7 +8007,22 @@ bool MainWindow::armSelectedLooperLaneRecording()
 
 void MainWindow::startArmedLooperLaneRecording()
 {
-    if (trackRecordingWorkflow_.inputTakeActive() || loopbackRecorder_.isRunning()) {
+    const bool localCaptureActive = trackRecordingWorkflow_.inputTakeActive() ||
+        loopbackRecorder_.isRunning();
+    if (localCaptureActive) {
+        runGridLockedEngineAction(
+            QStringLiteral("track.record-stop"),
+            [this](std::uint64_t targetFrame) { stopInputCapture(targetFrame); },
+            true);
+        return;
+    }
+    if (sharedRecordingProtected() && activeRecordingGroupId_.isEmpty()) {
+        appendLog(QStringLiteral("recording start ignored while another synced take is active"));
+        return;
+    }
+    if (!activeRecordingGroupId_.isEmpty()) {
+        appendLog(QStringLiteral(
+            "recording start ignored because the current synced group has already started"));
         return;
     }
     if (!trackRecordingWorkflow_.laneArmed()) {
@@ -6482,6 +8032,24 @@ void MainWindow::startArmedLooperLaneRecording()
     }
     const bool engineCapture =
         trackRecordingWorkflow_.captureMode() != TrackRecordingWorkflow::CaptureMode::Loopback;
+    localLaneTakeForcedLocal_ = !engineCapture;
+    if (syncedRecordingsEnabled() && jam2_.isNetworkRunning() && engineCapture) {
+        if (localTrackRecordingPhase_ == QStringLiteral("ready")) {
+            localTrackRecordingCountInBars_ = 0;
+            publishLocalTrackRecordingState(QStringLiteral("armed"));
+            appendLog(QStringLiteral("cancelled readiness for the synced recording group"));
+            return;
+        }
+        localTrackRecordingCountInBars_ = captureCountInCheck_ &&
+                captureCountInCheck_->isChecked()
+            ? qMax(1, captureCountInBarsSpin_ ? captureCountInBarsSpin_->value() : 1)
+            : 0;
+        publishLocalTrackRecordingState(QStringLiteral("ready"));
+        appendLog(QStringLiteral(
+            "ready for synced recording; waiting for every armed participant"));
+        maybeStartReadyRecordingGroup();
+        return;
+    }
     if (engineCapture && captureCountInCheck_ && captureCountInCheck_->isChecked()) {
         const bool countInMetronome = captureCountInMetronomeCheck_ && captureCountInMetronomeCheck_->isChecked();
         const bool keepMetronome = captureKeepMetronomeCheck_ && captureKeepMetronomeCheck_->isChecked();
@@ -6524,30 +8092,686 @@ void MainWindow::startArmedLooperLaneRecordingNow(std::uint64_t targetFrame)
     }
 }
 
-void MainWindow::importLastCaptureToArmedLane()
+void MainWindow::publishLocalTrackRecordingState(
+    const QString& phase,
+    int countInRemaining,
+    bool force)
 {
-    if (!trackRecordingWorkflow_.laneArmed() ||
-        trackRecordingWorkflow_.armedBank() >= looperProject_.banks().size() ||
-        trackRecordingWorkflow_.armedLane() >=
-            looperProject_.banks().at(trackRecordingWorkflow_.armedBank()).lanes.size()) {
+    static const QSet<QString> validPhases{
+        QStringLiteral("idle"),
+        QStringLiteral("armed"),
+        QStringLiteral("ready"),
+        QStringLiteral("waiting"),
+        QStringLiteral("count-in"),
+        QStringLiteral("recording"),
+        QStringLiteral("complete"),
+        QStringLiteral("finalizing"),
+    };
+    if (!validPhases.contains(phase)) {
         return;
     }
-    const int bankIndex = trackRecordingWorkflow_.armedBank();
-    const QString laneId = looperProject_.banks().at(bankIndex)
-        .lanes.at(trackRecordingWorkflow_.armedLane()).id;
+    if (!force && localTrackRecordingPhase_ == phase &&
+        localTrackRecordingCountInRemaining_ == countInRemaining) {
+        updateSharedRecordingPresentation();
+        return;
+    }
+    localTrackRecordingPhase_ = phase;
+    localTrackRecordingCountInRemaining_ = countInRemaining;
+    localTrackRecordingStateRevision_ =
+        localTrackRecordingStateRevision_ >= (std::numeric_limits<int>::max)()
+        ? 1 : localTrackRecordingStateRevision_ + 1;
+
+    int bank = qBound(0, trackRecordingWorkflow_.armedBank(), 3);
+    QString laneId;
+    QString laneName;
+    if (trackRecordingWorkflow_.laneArmed() &&
+        bank < looperProject_.banks().size() &&
+        trackRecordingWorkflow_.armedLane() >= 0 &&
+        trackRecordingWorkflow_.armedLane() < looperProject_.banks().at(bank).lanes.size()) {
+        const LooperLane& lane = looperProject_.banks().at(bank).lanes.at(
+            trackRecordingWorkflow_.armedLane());
+        laneId = lane.id;
+        laneName = lane.name;
+    }
+    updateSharedRecordingPresentation();
+    updateLaneRecordingIsolation();
+    if (localLaneTakeForcedLocal_ || !syncedRecordingsEnabled() ||
+        !jam2_.isNetworkRunning()) {
+        return;
+    }
+    sendControl(QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("looper.recording.state")},
+        {QStringLiteral("state_revision"), localTrackRecordingStateRevision_},
+        {QStringLiteral("phase"), phase},
+        {QStringLiteral("bank"), bank},
+        {QStringLiteral("lane_id"), laneId},
+        {QStringLiteral("lane_name"), laneName},
+        {QStringLiteral("count_in_remaining"), qBound(0, countInRemaining, 4096)},
+        {QStringLiteral("count_in_bars"), qBound(0, localTrackRecordingCountInBars_, 8)},
+        {QStringLiteral("group_id"), activeRecordingGroupId_},
+    });
+    maybeStartReadyRecordingGroup();
+    maybeFinishRecordingGroup();
+}
+
+void MainWindow::handleTrackRecordingState(
+    const QJsonObject& message,
+    const QString& sourcePeerToken)
+{
+    if (!syncedRecordingsEnabled()) return;
+    const QString routedSource = message.value(
+        QStringLiteral("source_peer_token")).toString();
+    const QString source = routedSource.isEmpty() ? sourcePeerToken : routedSource;
+    const QString localToken = sessionController_.snapshot().localToken;
+    if (source.isEmpty() || source == localToken) {
+        return;
+    }
+    const int revision = message.value(QStringLiteral("state_revision")).toInt();
+    if (revision <= peerTrackRecordingRevisions_.value(source, -1)) {
+        return;
+    }
+    peerTrackRecordingRevisions_[source] = revision;
+    const QString phase = message.value(QStringLiteral("phase")).toString();
+    const QString messageGroupId = message.value(QStringLiteral("group_id")).toString();
+    if (phase != QStringLiteral("idle") &&
+        recoveredRecordingGroupIds_.contains(messageGroupId)) {
+        return;
+    }
+    if (phase == QStringLiteral("idle")) {
+        peerTrackRecordingStates_.remove(source);
+    } else {
+        PeerTrackRecordingState state;
+        state.phase = phase;
+        state.bank = message.value(QStringLiteral("bank")).toInt();
+        state.laneId = message.value(QStringLiteral("lane_id")).toString();
+        state.laneName = message.value(QStringLiteral("lane_name")).toString();
+        state.countInRemaining = message.value(
+            QStringLiteral("count_in_remaining")).toInt();
+        state.countInBars = message.value(QStringLiteral("count_in_bars")).toInt();
+        state.groupId = messageGroupId;
+        state.revision = revision;
+        peerTrackRecordingStates_[source] = std::move(state);
+    }
+    updateSharedRecordingPresentation();
+    refreshLooperLanes();
+    maybeStartReadyRecordingGroup();
+    maybeFinishRecordingGroup();
+}
+
+void MainWindow::maybeStartReadyRecordingGroup()
+{
+    if (!sessionController_.isServer() || !syncedRecordingsEnabled() ||
+        !jam2_.isNetworkRunning() || !activeRecordingGroupId_.isEmpty()) {
+        return;
+    }
+    const SharedSessionController::Snapshot session = sessionController_.snapshot();
+    QStringList participants;
+    int countInBars = 0;
+    bool hasArmedParticipant = false;
+    bool everyoneReady = true;
+    if (trackRecordingWorkflow_.laneArmed() &&
+        (localTrackRecordingPhase_ == QStringLiteral("armed") ||
+         localTrackRecordingPhase_ == QStringLiteral("ready"))) {
+        hasArmedParticipant = true;
+        if (localTrackRecordingPhase_ == QStringLiteral("ready")) {
+            participants.append(session.localToken);
+            countInBars = qMax(countInBars, localTrackRecordingCountInBars_);
+        } else {
+            everyoneReady = false;
+        }
+    }
+    for (auto it = peerTrackRecordingStates_.cbegin();
+         it != peerTrackRecordingStates_.cend(); ++it) {
+        if (it->phase != QStringLiteral("armed") &&
+            it->phase != QStringLiteral("ready")) {
+            continue;
+        }
+        hasArmedParticipant = true;
+        if (it->phase == QStringLiteral("ready")) {
+            participants.append(it.key());
+            countInBars = qMax(countInBars, it->countInBars);
+        } else {
+            everyoneReady = false;
+        }
+    }
+    if (!hasArmedParticipant || !everyoneReady || participants.isEmpty()) return;
+
+    const PlaybackGrid::Position position = metronomeTransport_.grid().position();
+    const int beatsPerBar = qMax(1, currentMetronomePattern().beats_per_bar);
+    if (!position.engineAnchored || !position.running ||
+        position.sampleRate <= 0 || position.secondsPerBeat <= 0.0) {
+        appendLog(QStringLiteral(
+            "synced recording group is ready but the shared grid is not available"));
+        return;
+    }
+    const quint64 currentBar = position.absoluteBeat /
+        static_cast<quint64>(beatsPerBar);
+    const quint64 countdownBeat = (currentBar + 3ULL) *
+        static_cast<quint64>(beatsPerBar);
+    const quint64 targetBeat = countdownBeat +
+        static_cast<quint64>(countInBars) *
+            static_cast<quint64>(beatsPerBar);
+    const QString groupId = QUuid::createUuid()
+        .toString(QUuid::WithoutBraces).toLower();
+    QJsonArray participantArray;
+    for (const QString& token : participants) participantArray.append(token);
+    const QJsonObject start{
+        {QStringLiteral("type"),
+            QStringLiteral("looper.recording.group.start")},
+        {QStringLiteral("group_id"), groupId},
+        {QStringLiteral("participants"), participantArray},
+        {QStringLiteral("count_in_bars"), countInBars},
+        {QStringLiteral("countdown_abs_beat"), QString::number(countdownBeat)},
+        {QStringLiteral("target_abs_beat"), QString::number(targetBeat)},
+    };
+    activeRecordingGroupId_ = groupId;
+    activeRecordingGroupParticipants_ = participants;
+    activeRecordingGroupStartMessage_ = start;
+    lastRecordingGroupFinishMessage_ = {};
+    recordingGroupFinishSent_ = false;
+    localLaneTakeForcedLocal_ = false;
+    sendControl(start);
+    handleRecordingGroupStart(start);
+}
+
+void MainWindow::handleRecordingGroupStart(const QJsonObject& message)
+{
+    const QString groupId = message.value(QStringLiteral("group_id")).toString();
+    if (groupId.isEmpty()) return;
+    if (recoveredRecordingGroupIds_.contains(groupId)) return;
+    if (!activeRecordingGroupId_.isEmpty() && activeRecordingGroupId_ != groupId) {
+        appendLog(QStringLiteral(
+            "ignored overlapping synced recording group %1")
+            .arg(groupId.left(8)));
+        return;
+    }
+    QStringList participantsForGroup;
+    const QJsonArray participants = message.value(
+        QStringLiteral("participants")).toArray();
+    for (const QJsonValue& value : participants) {
+        participantsForGroup.append(value.toString());
+    }
+    const QString localToken = sessionController_.snapshot().localToken;
+    if (activeRecordingGroupId_ == groupId &&
+        (localTrackRecordingPhase_ == QStringLiteral("recording") ||
+         localTrackRecordingPhase_ == QStringLiteral("complete") ||
+         localTrackRecordingPhase_ == QStringLiteral("finalizing"))) {
+        activeRecordingGroupParticipants_ = participantsForGroup;
+        activeRecordingGroupStartMessage_ = message;
+        return;
+    }
+    recordingGroupFinishSent_ = false;
+    bool countdownOk = false;
+    bool targetOk = false;
+    const quint64 countdownBeat = message.value(
+        QStringLiteral("countdown_abs_beat")).toString().toULongLong(&countdownOk);
+    const quint64 targetBeat = message.value(
+        QStringLiteral("target_abs_beat")).toString().toULongLong(&targetOk);
+    const PlaybackGrid::Position position = metronomeTransport_.grid().position();
+    const std::uint64_t beatFrames = position.sampleRate > 0 &&
+            position.secondsPerBeat > 0.0
+        ? static_cast<std::uint64_t>(std::llround(
+            position.secondsPerBeat * static_cast<double>(position.sampleRate)))
+        : 0;
+    if (!countdownOk || !targetOk || beatFrames == 0 ||
+        countdownBeat > ((std::numeric_limits<std::uint64_t>::max)() -
+            position.epochFrame) / beatFrames ||
+        targetBeat > ((std::numeric_limits<std::uint64_t>::max)() -
+            position.epochFrame) / beatFrames) {
+        appendLog(QStringLiteral("could not map the synced recording group to the local grid"));
+        activeRecordingGroupId_ = groupId;
+        activeRecordingGroupParticipants_ = participantsForGroup;
+        activeRecordingGroupStartMessage_ = message;
+        updateLaneRecordingIsolation();
+        if (participantsForGroup.contains(localToken) &&
+            localTrackRecordingPhase_ == QStringLiteral("ready")) {
+            publishLocalTrackRecordingState(QStringLiteral("complete"));
+        } else if (!sessionController_.isServer()) {
+            activeRecordingGroupId_.clear();
+            activeRecordingGroupParticipants_.clear();
+            activeRecordingGroupStartMessage_ = {};
+            updateLaneRecordingIsolation();
+        }
+        return;
+    }
+    const std::uint64_t countdownMusical = position.epochFrame +
+        countdownBeat * beatFrames;
+    const std::uint64_t targetMusical = position.epochFrame + targetBeat * beatFrames;
+    const std::uint64_t countdownFrame = rawFrameFromMusicalFrame(
+        countdownMusical, position.renderOffsetFrames);
+    const std::uint64_t targetFrame = rawFrameFromMusicalFrame(
+        targetMusical, position.renderOffsetFrames);
+
+    activeRecordingGroupId_ = groupId;
+    activeRecordingGroupParticipants_ = participantsForGroup;
+    activeRecordingGroupStartMessage_ = message;
+    recordingGroupFinishSent_ = false;
+    updateLaneRecordingIsolation();
+
+    if (activeRecordingGroupParticipants_.contains(localToken) &&
+        localTrackRecordingPhase_ == QStringLiteral("ready")) {
+        startInputCaptureAtGroupSchedule(
+            countdownFrame,
+            targetFrame,
+            targetMusical,
+            message.value(QStringLiteral("count_in_bars")).toInt());
+    } else if (!sessionController_.isServer()) {
+        if (!trackRecordingWorkflow_.scheduleRecordingTransport(
+                countdownFrame, targetFrame, targetMusical, true)) {
+            appendLog(QStringLiteral(
+                "could not adopt the synced recording group transport"));
+        }
+    }
+    if (sessionController_.isServer()) {
+        if (!trackRecordingWorkflow_.scheduleRecordingTransport(
+                countdownFrame, targetFrame, targetMusical)) {
+            appendLog(QStringLiteral(
+                "could not publish the synced recording group transport"));
+        }
+    }
+    updateSharedRecordingPresentation();
+}
+
+void MainWindow::maybeFinishRecordingGroup()
+{
+    if (!sessionController_.isServer() || activeRecordingGroupId_.isEmpty() ||
+        recordingGroupFinishSent_ || activeRecordingGroupParticipants_.isEmpty()) {
+        return;
+    }
+    const SharedSessionController::Snapshot session = sessionController_.snapshot();
+    QSet<QString> connected;
+    for (const SharedSessionController::PeerSnapshot& peer : session.peers) {
+        connected.insert(peer.token);
+    }
+    for (const QString& token : std::as_const(activeRecordingGroupParticipants_)) {
+        if (token == session.localToken) {
+            if (localTrackRecordingPhase_ != QStringLiteral("complete")) return;
+            continue;
+        }
+        if (!connected.contains(token)) continue;
+        const auto state = peerTrackRecordingStates_.constFind(token);
+        if (state == peerTrackRecordingStates_.cend() ||
+            state->groupId != activeRecordingGroupId_ ||
+            state->phase != QStringLiteral("complete")) {
+            return;
+        }
+    }
+    recordingGroupFinishSent_ = true;
+    const QJsonObject finish{
+        {QStringLiteral("type"),
+            QStringLiteral("looper.recording.group.finish")},
+        {QStringLiteral("group_id"), activeRecordingGroupId_},
+    };
+    lastRecordingGroupFinishMessage_ = finish;
+    sendControl(finish);
+    handleRecordingGroupFinish(finish);
+}
+
+void MainWindow::handleRecordingGroupFinish(const QJsonObject& message)
+{
+    const QString groupId = message.value(QStringLiteral("group_id")).toString();
+    if (groupId.isEmpty() || groupId != activeRecordingGroupId_) return;
+    const bool participant = activeRecordingGroupParticipants_.contains(
+        sessionController_.snapshot().localToken);
+    if (participant && pendingGroupTakeCompletion_.has_value()) {
+        publishLocalTrackRecordingState(QStringLiteral("finalizing"));
+        finalizePendingLaneTake();
+        return;
+    }
+    if (participant) {
+        finishLaneTakeFinalization();
+        return;
+    }
+    activeRecordingGroupId_.clear();
+    activeRecordingGroupParticipants_.clear();
+    activeRecordingGroupStartMessage_ = {};
+    recordingGroupFinishSent_ = false;
+    updateLaneRecordingIsolation();
+    updateSharedRecordingPresentation();
+    releaseDeferredRecordingControls();
+}
+
+void MainWindow::requestRecordingGroupRecovery()
+{
+    if (activeRecordingGroupId_.isEmpty() || !syncedRecordingsEnabled()) return;
+    const QMessageBox::StandardButton answer = QMessageBox::question(
+        this,
+        QStringLiteral("Continue Take Locally"),
+        QStringLiteral(
+            "Release the shared recording lock for everyone? Any recording that is still running will continue locally and will not be shared automatically."),
+        QMessageBox::Cancel | QMessageBox::Yes,
+        QMessageBox::Cancel);
+    if (answer != QMessageBox::Yes) return;
+    const QJsonObject recovery{
+        {QStringLiteral("type"), sessionController_.isServer()
+            ? QStringLiteral("looper.recording.group.recover")
+            : QStringLiteral("looper.recording.group.recover.request")},
+        {QStringLiteral("group_id"), activeRecordingGroupId_},
+    };
+    sendControl(recovery);
+    if (sessionController_.isServer()) handleRecordingGroupRecovery(recovery);
+}
+
+void MainWindow::handleRecordingGroupRecovery(const QJsonObject& message)
+{
+    const QString groupId = message.value(QStringLiteral("group_id")).toString();
+    if (groupId.isEmpty() || groupId != activeRecordingGroupId_) return;
+    const bool localParticipant = activeRecordingGroupParticipants_.contains(
+        sessionController_.snapshot().localToken);
+    if (localParticipant &&
+        (trackRecordingWorkflow_.laneArmed() ||
+         trackRecordingWorkflow_.inputTakeActive() ||
+         pendingGroupTakeCompletion_.has_value())) {
+        localLaneTakeForcedLocal_ = true;
+    } else if (!localParticipant && jam2_.isRunning()) {
+        jam2::EngineCommand cancelTransport;
+        cancelTransport.type = jam2::EngineCommandType::CancelTransport;
+        (void)submitEngineCommand(
+            cancelTransport,
+            QStringLiteral("cancel stalled shared recording schedule"));
+    }
+    activeRecordingGroupId_.clear();
+    activeRecordingGroupParticipants_.clear();
+    activeRecordingGroupStartMessage_ = {};
+    lastRecordingGroupFinishMessage_ = message;
+    recoveredRecordingGroupIds_.insert(groupId);
+    while (recoveredRecordingGroupIds_.size() > 16) {
+        recoveredRecordingGroupIds_.erase(recoveredRecordingGroupIds_.begin());
+    }
+    recordingGroupFinishSent_ = false;
+    peerTrackRecordingStates_.clear();
+    peerTrackRecordingRevisions_.clear();
+    appendLog(QStringLiteral(
+        "released stalled synced recording group %1; active local takes continue locally")
+        .arg(groupId.left(8)));
+    if (localParticipant && pendingGroupTakeCompletion_.has_value()) {
+        publishLocalTrackRecordingState(QStringLiteral("finalizing"));
+        finalizePendingLaneTake();
+        return;
+    }
+    updateLaneRecordingIsolation();
+    updateSharedRecordingPresentation();
+    releaseDeferredRecordingControls();
+}
+
+void MainWindow::finalizePendingLaneTake()
+{
+    if (!pendingGroupTakeCompletion_.has_value()) return;
+    const TrackRecordingWorkflow::TrackTakeCompletion completion =
+        *pendingGroupTakeCompletion_;
+    pendingGroupTakeCompletion_.reset();
+    if (!completion.ok || completion.wavPath.isEmpty()) {
+        appendLog(QStringLiteral("synced lane take could not be finalised: %1")
+            .arg(completion.error));
+        finishLaneTakeFinalization();
+        return;
+    }
+    registerTransientTrackWav(completion.wavPath);
+    importLastCaptureToArmedLane();
+}
+
+void MainWindow::finishLaneTakeFinalization()
+{
+    trackRecordingWorkflow_.disarmLane();
+    pendingGroupTakeCompletion_.reset();
+    activeRecordingGroupId_.clear();
+    activeRecordingGroupParticipants_.clear();
+    activeRecordingGroupStartMessage_ = {};
+    recordingGroupFinishSent_ = false;
+    localLaneTakeForcedLocal_ = false;
+    localTrackRecordingCountInBars_ = 0;
+    localRecordingTargetBankId_.clear();
+    localRecordingTargetLaneId_.clear();
+    publishLocalTrackRecordingState(QStringLiteral("idle"));
+    refreshLooperLanes();
+    releaseDeferredRecordingControls();
+}
+
+QString MainWindow::recordingPeerLabel(const QString& token) const
+{
+    const SharedSessionController::Snapshot snapshot = sessionController_.snapshot();
+    for (const SharedSessionController::PeerSnapshot& peer : snapshot.peers) {
+        if (peer.token != token) continue;
+        const int ordinal = peerOrdinals_.value(peer.peerId, 0);
+        return ordinal > 0
+            ? QStringLiteral("Peer %1").arg(ordinal)
+            : QStringLiteral("Peer %1").arg(peer.peerId);
+    }
+    return QStringLiteral("Peer %1").arg(token.left(8));
+}
+
+bool MainWindow::sharedRecordingProtected() const
+{
+    const auto protects = [](const QString& phase) {
+        return phase == QStringLiteral("waiting") ||
+            phase == QStringLiteral("count-in") ||
+            phase == QStringLiteral("recording") ||
+            phase == QStringLiteral("complete") ||
+            phase == QStringLiteral("finalizing");
+    };
+    if (!activeRecordingGroupId_.isEmpty()) return true;
+    if (protects(localTrackRecordingPhase_)) {
+        return true;
+    }
+    for (const PeerTrackRecordingState& state : peerTrackRecordingStates_) {
+        if (protects(state.phase)) return true;
+    }
+    return false;
+}
+
+void MainWindow::updateSharedRecordingPresentation()
+{
+    const bool sharedWorkflow = syncedRecordingsEnabled() &&
+        !localLaneTakeForcedLocal_;
+    const bool localVisible = localTrackRecordingPhase_ != QStringLiteral("idle") &&
+        trackRecordingWorkflow_.laneArmed();
+    const bool visible = localVisible || !peerTrackRecordingStates_.isEmpty();
+    const bool protectedState = sharedRecordingProtected();
+    const bool localActive = trackRecordingWorkflow_.inputTakeActive() ||
+        loopbackRecorder_.isRunning();
+
+    if (recordingContextFrame_) recordingContextFrame_->setVisible(visible);
+    if (recordingCountdownLabel_) recordingCountdownLabel_->setVisible(visible);
+    if (recoverRecordingGroupButton_) {
+        recoverRecordingGroupButton_->setVisible(
+            visible && !activeRecordingGroupId_.isEmpty() && syncedRecordingsEnabled());
+    }
+    QStringList entries;
+    QString strongestPhase = localVisible ? localTrackRecordingPhase_ : QStringLiteral("idle");
+    int strongestCount = localVisible ? localTrackRecordingCountInRemaining_ : 0;
+    auto phaseRank = [](const QString& phase) {
+        if (phase == QStringLiteral("finalizing")) return 6;
+        if (phase == QStringLiteral("complete")) return 5;
+        if (phase == QStringLiteral("recording")) return 4;
+        if (phase == QStringLiteral("count-in")) return 3;
+        if (phase == QStringLiteral("waiting")) return 2;
+        if (phase == QStringLiteral("ready")) return 1;
+        if (phase == QStringLiteral("armed")) return 1;
+        return 0;
+    };
+    if (localVisible) {
+        const int bank = trackRecordingWorkflow_.armedBank();
+        const int lane = trackRecordingWorkflow_.armedLane();
+        const QString laneName = bank >= 0 && bank < looperProject_.banks().size() &&
+                lane >= 0 && lane < looperProject_.banks().at(bank).lanes.size()
+            ? looperProject_.banks().at(bank).lanes.at(lane).name
+            : QStringLiteral("Track");
+        entries.append(QStringLiteral("You · %1Section %2 · %3 · %4")
+            .arg(sharedWorkflow ? QString{} : QStringLiteral("LOCAL · "))
+            .arg(QChar(QLatin1Char('A').unicode() + qBound(0, bank, 3)))
+            .arg(laneName.toHtmlEscaped(), localTrackRecordingPhase_.toUpper()));
+    }
+    for (auto it = peerTrackRecordingStates_.cbegin();
+         it != peerTrackRecordingStates_.cend(); ++it) {
+        const PeerTrackRecordingState& state = it.value();
+        entries.append(QStringLiteral("%1 · Section %2 · %3 · %4")
+            .arg(recordingPeerLabel(it.key()).toHtmlEscaped())
+            .arg(QChar(QLatin1Char('A').unicode() + qBound(0, state.bank, 3)))
+            .arg(state.laneName.toHtmlEscaped(), state.phase.toUpper()));
+        if (phaseRank(state.phase) > phaseRank(strongestPhase)) {
+            strongestPhase = state.phase;
+            strongestCount = state.countInRemaining;
+        }
+    }
+    if (recordingPeerStatesLabel_) {
+        recordingPeerStatesLabel_->setText(entries.join(QStringLiteral("   |   ")));
+    }
+    if (recordingContextTitle_) {
+        if (!sharedWorkflow && localVisible && strongestPhase == QStringLiteral("recording")) {
+            recordingContextTitle_->setText(QStringLiteral("Local recording active"));
+        } else if (!sharedWorkflow && localVisible) {
+            recordingContextTitle_->setText(QStringLiteral("Local track armed"));
+        } else if (strongestPhase == QStringLiteral("recording")) {
+            recordingContextTitle_->setText(QStringLiteral("Recording active"));
+        } else if (strongestPhase == QStringLiteral("count-in")) {
+            recordingContextTitle_->setText(strongestCount > 0
+                ? QStringLiteral("Count-in · %1 beat%2 remaining")
+                    .arg(strongestCount)
+                    .arg(strongestCount == 1 ? QString{} : QStringLiteral("s"))
+                : QStringLiteral("Count-in active"));
+        } else if (strongestPhase == QStringLiteral("waiting")) {
+            recordingContextTitle_->setText(QStringLiteral("Waiting for the recording boundary"));
+        } else if (strongestPhase == QStringLiteral("ready")) {
+            recordingContextTitle_->setText(QStringLiteral(
+                "Ready · waiting for every armed participant"));
+        } else if (strongestPhase == QStringLiteral("complete")) {
+            recordingContextTitle_->setText(QStringLiteral(
+                "Take complete · waiting for the recording group"));
+        } else if (strongestPhase == QStringLiteral("finalizing")) {
+            recordingContextTitle_->setText(QStringLiteral("Finalizing recorded takes"));
+        } else {
+            recordingContextTitle_->setText(entries.size() > 1
+                ? QStringLiteral("%1 tracks armed").arg(entries.size())
+                : QStringLiteral("Track armed"));
+        }
+    }
+    if (recordingContextDetail_) {
+        recordingContextDetail_->setText(!sharedWorkflow && localVisible
+            ? QStringLiteral("Local only · other peers can continue playback or record independently.")
+            : protectedState
+            ? QStringLiteral("Shared playback and Track edits are protected until the take stops.")
+            : QStringLiteral("Starting recording restarts playback for participating peers."));
+    }
+    if (recordingCountdownLabel_ && visible) {
+        if (strongestPhase == QStringLiteral("recording")) {
+            recordingCountdownLabel_->setText(
+                QStringLiteral("ARMED  ✓  WAITING FOR BAR  ✓  COUNT-IN  ✓  RECORDING  ●"));
+        } else if (strongestPhase == QStringLiteral("count-in")) {
+            recordingCountdownLabel_->setText(QStringLiteral(
+                "ARMED  ✓  WAITING FOR BAR  ✓  COUNT-IN  %1  ●  RECORDING")
+                .arg(qMax(1, strongestCount)));
+        } else if (strongestPhase == QStringLiteral("waiting")) {
+            recordingCountdownLabel_->setText(
+                QStringLiteral("ARMED  ✓  WAITING FOR BAR  ●  COUNT-IN  ›  RECORDING"));
+        } else {
+            recordingCountdownLabel_->setText(
+                QStringLiteral("ARMED  ●  WAITING FOR BAR  ›  COUNT-IN  ›  RECORDING"));
+        }
+    }
+    if (recordingGlobalControls_) {
+        recordingGlobalControls_->setVisible(localVisible);
+        recordingGlobalControls_->setEnabled(
+            !protectedState && localTrackRecordingPhase_ != QStringLiteral("ready"));
+    }
+    if (startArmedLaneRecordingButton_) {
+        startArmedLaneRecordingButton_->setVisible(localVisible);
+        const bool ready = localTrackRecordingPhase_ == QStringLiteral("ready");
+        const bool completed = localTrackRecordingPhase_ == QStringLiteral("complete") ||
+            localTrackRecordingPhase_ == QStringLiteral("finalizing");
+        startArmedLaneRecordingButton_->setText(localActive
+            ? QStringLiteral("Stop My Recording")
+            : ready ? QStringLiteral("Ready ✓ · Cancel")
+            : completed ? QStringLiteral("Take Complete")
+            : protectedState ? QStringLiteral("Recording Locked")
+            : syncedRecordingsEnabled()
+                ? QStringLiteral("Ready to Record")
+                : QStringLiteral("Start Recording"));
+        startArmedLaneRecordingButton_->setEnabled(
+            localActive || ready || (!protectedState && !completed));
+    }
+    if (stopCaptureButton_) stopCaptureButton_->setVisible(false);
+
+    const QList<QWidget*> protectedWidgets{
+        playTrackButton_, stopTrackButton_, loopStartButton_, loopEndButton_,
+        clearLoopButton_, loopEnabledCheck_, trackSpeedSlider_,
+        trackSpeedSpin_, trackPitchSlider_, trackPitchSpin_, focusFrequencyCheck_,
+        focusPresetBox_, loadWavButton_, arrangementButton_, songTitleEdit_,
+        metronomeBpmSpin_, metronomeBeatsSpin_, metronomeBeatUnitBox_,
+        metronomeTempoPulseBox_, metronomeDivisionBox_,
+        metronomePatternWidget_, tapTrackMetronomeButton_,
+    };
+    for (QWidget* widget : protectedWidgets) {
+        if (widget) widget->setEnabled(!protectedState);
+    }
+    if (chordGrid_) chordGrid_->setEditingProtected(protectedState);
+    if (beatGrid_) beatGrid_->setEditingProtected(protectedState);
+    if (lyricGrid_) lyricGrid_->setEditingProtected(protectedState);
+    for (QPushButton* button : looperBankButtons_) {
+        if (button) button->setEnabled(!protectedState);
+    }
+    if (launchBankButton_) {
+        launchBankButton_->setEnabled(
+            !protectedState &&
+            viewedBankIndex_ != looperProject_.activeBankIndex());
+    }
+    if (shareTracksButton_) {
+        const bool automaticSharing = automaticWavSharingEnabled();
+        shareTracksButton_->setEnabled(!protectedState && !automaticSharing);
+        shareTracksButton_->setToolTip(automaticSharing
+            ? QStringLiteral("WAVs are already shared automatically with the jam")
+            : QStringLiteral("Manually share the current tracks with the jam"));
+    }
+    const bool customFocus = isCustomFocusPreset(trackController_.model().focusPreset);
+    if (focusFrequencySlider_) {
+        focusFrequencySlider_->setEnabled(!protectedState && customFocus);
+    }
+    if (focusFrequencySpin_) {
+        focusFrequencySpin_->setEnabled(!protectedState && customFocus);
+    }
+    if (looperStack_) looperStack_->setInteractionsProtected(protectedState);
+    if (performanceTrackToggle_) {
+        performanceTrackToggle_->setEnabled(!protectedState &&
+            trackController_.model().sampleRateCompatible && jam2_.isRunning());
+        performanceTrackToggle_->setToolTip(protectedState
+            ? QStringLiteral("Playback is protected because a synced track recording is active")
+            : QString{});
+    }
+    updateJamSyncPresentation();
+}
+
+void MainWindow::importLastCaptureToArmedLane()
+{
+    if (!trackRecordingWorkflow_.laneArmed()) {
+        finishLaneTakeFinalization();
+        return;
+    }
+    int bankIndex = -1;
+    for (int index = 0; index < looperProject_.banks().size(); ++index) {
+        if (looperProject_.banks().at(index).id == localRecordingTargetBankId_) {
+            bankIndex = index;
+            break;
+        }
+    }
+    if (bankIndex < 0) {
+        bankIndex = qBound(0, trackRecordingWorkflow_.armedBank(),
+            looperProject_.banks().size() - 1);
+    }
+    const QString laneId = localRecordingTargetLaneId_;
     const QString sourcePath = trackRecordingWorkflow_.lastCapturePath();
     const QString stagingFolder = projectPersistence_.workspaceFolder();
     const int expectedSampleRate = activeTrackSampleRate();
     const int recordedSampleRate = trackRecordingWorkflow_.lastCaptureSampleRate();
+    const bool keepTakeLocal = localLaneTakeForcedLocal_;
     if (recordedSampleRate > 0 && recordedSampleRate != expectedSampleRate) {
         appendLog(QStringLiteral(
             "recorded lane WAV not importable: recording used %1 Hz but the active engine/session uses %2 Hz")
             .arg(recordedSampleRate)
             .arg(expectedSampleRate));
+        finishLaneTakeFinalization();
         return;
     }
     auto result = std::make_shared<StagedPcm16Asset>();
-    (void)startFileWorkerTask(
+    const bool started = startFileWorkerTask(
         [sourcePath, stagingFolder, expectedSampleRate, result] {
             *result = stagePcm16Asset(
                 sourcePath,
@@ -6555,12 +8779,14 @@ void MainWindow::importLastCaptureToArmedLane()
                 expectedSampleRate,
                 QStringLiteral("recorded"));
         },
-        [this, bankIndex, laneId, result] {
+        [this, bankIndex, laneId, result, keepTakeLocal] {
             if (!result->error.isEmpty()) {
                 appendLog(QStringLiteral("recorded lane WAV not importable: ") + result->error);
+                finishLaneTakeFinalization();
                 return;
             }
             if (bankIndex < 0 || bankIndex >= looperProject_.banks().size()) {
+                finishLaneTakeFinalization();
                 return;
             }
             int laneIndex = -1;
@@ -6572,8 +8798,20 @@ void MainWindow::importLastCaptureToArmedLane()
                 }
             }
             if (laneIndex < 0) {
-                appendLog(QStringLiteral("recorded lane target was removed before import completed"));
-                return;
+                LooperLane recovery;
+                recovery.id = QUuid::createUuid()
+                    .toString(QUuid::WithoutBraces).toLower();
+                recovery.name = QStringLiteral("Recovered recorded take");
+                recovery.originKind = QStringLiteral("recorded");
+                if (!looperProject_.appendLane(bankIndex, std::move(recovery))) {
+                    appendLog(QStringLiteral(
+                        "recorded lane target was removed and a recovery lane could not be created"));
+                    finishLaneTakeFinalization();
+                    return;
+                }
+                laneIndex = looperProject_.banks().at(bankIndex).lanes.size() - 1;
+                appendLog(QStringLiteral(
+                    "recorded lane target changed; preserved the WAV in a recovery lane"));
             }
             registerTransientTrackWav(result->stagedPath);
             looperWaveformCache_.remove(result->stagedPath);
@@ -6582,6 +8820,9 @@ void MainWindow::importLastCaptureToArmedLane()
             lane.assetHash = result->sha256;
             lane.sampleRate = result->metadata.sampleRate;
             lane.sampleRateCompatible = true;
+            lane.sourceFrames = result->metadata.frames;
+            lane.originKind = QStringLiteral("recorded");
+            lane.localOnly = keepTakeLocal;
             if (isDefaultEmptyTrackName(lane.name) || lane.name.trimmed().isEmpty()) {
                 lane.name = result->displayName;
             }
@@ -6590,18 +8831,39 @@ void MainWindow::importLastCaptureToArmedLane()
             lane.loopStartFrame = -1;
             lane.loopEndFrame = -1;
             lane.loopEnabled = false;
+            if (!keepTakeLocal && jamSyncPolicy_.trackLanes && jam2_.isNetworkRunning()) {
+                pendingRecordedLaneSyncId_ = lane.id;
+                pendingRecordedLaneSyncHash_ = lane.assetHash;
+                pendingRecordedLaneSyncAttempts_ = 0;
+            }
             appendLog(QStringLiteral("recorded lane imported: %1").arg(lane.name));
-            trackRecordingWorkflow_.disarmLane();
             refreshLooperLanes();
             regeneratePreparedMix();
-            if (looperProject_.trackSyncEnabled() && jam2_.isNetworkRunning()) {
+            if (!keepTakeLocal) syncLooperArrangement();
+            if (!keepTakeLocal && sessionController_.isServer()) {
+                pendingRecordedLaneSyncId_.clear();
+                pendingRecordedLaneSyncHash_.clear();
+                pendingRecordedLaneSyncAttempts_ = 0;
+            }
+            if (!keepTakeLocal && automaticWavSharingEnabled() && jam2_.isNetworkRunning()) {
                 shareLocalTracks();
             }
+            finishLaneTakeFinalization();
+        },
+        [this](const QString& error) {
+            appendLog(QStringLiteral("recorded lane import failed: ") + error);
+            finishLaneTakeFinalization();
         });
+    if (!started) {
+        appendLog(QStringLiteral(
+            "recorded lane import was deferred because the file worker is busy"));
+        finishLaneTakeFinalization();
+    }
 }
 
 void MainWindow::renameSelectedLooperLane()
 {
+    if (sharedRecordingProtected()) return;
     if (selectedLooperLane_ < 0) {
         return;
     }
@@ -6619,6 +8881,7 @@ void MainWindow::renameSelectedLooperLane()
 
 void MainWindow::removeSelectedLooperLane()
 {
+    if (sharedRecordingProtected()) return;
     if (selectedLooperLane_ < 0) {
         return;
     }
@@ -6664,10 +8927,142 @@ void MainWindow::removeSelectedLooperLane()
             QMessageBox::warning(this, QStringLiteral("Remove lane"), QStringLiteral("Could not delete the WAV file."));
             return;
         }
+        validatedTrackAssetHashes_.remove(lane.assetHash);
         projectPersistence_.pruneEmptyWorkspaceDirectories();
     }
+    const bool armedInBank = trackRecordingWorkflow_.laneArmed() &&
+        trackRecordingWorkflow_.armedBank() == bankIndex;
+    const int armedLaneIndex = trackRecordingWorkflow_.armedLane();
+    const QString armedLaneId = armedInBank &&
+            armedLaneIndex >= 0 &&
+            armedLaneIndex < looperProject_.banks().at(bankIndex).lanes.size()
+        ? looperProject_.banks().at(bankIndex).lanes.at(armedLaneIndex).id
+        : QString{};
+    const TrackRecordingWorkflow::CaptureMode armedCaptureMode =
+        trackRecordingWorkflow_.captureMode();
+    const bool armedIncludePrepared =
+        trackRecordingWorkflow_.includePreparedInTake();
+    const bool armedIncludeMetronome =
+        trackRecordingWorkflow_.includeMetronomeInTake();
     looperProject_.removeLane(bankIndex, row);
+    if (armedInBank && row == armedLaneIndex) {
+        trackRecordingWorkflow_.disarmLane();
+        publishLocalTrackRecordingState(QStringLiteral("idle"));
+        appendLog(QStringLiteral("lane recording disarmed because its track was removed"));
+    } else if (armedInBank && row < armedLaneIndex) {
+        int relocatedLaneIndex = -1;
+        const QVector<LooperLane>& remaining =
+            looperProject_.banks().at(bankIndex).lanes;
+        for (int index = 0; index < remaining.size(); ++index) {
+            if (remaining.at(index).id == armedLaneId) {
+                relocatedLaneIndex = index;
+                break;
+            }
+        }
+        if (relocatedLaneIndex >= 0) {
+            trackRecordingWorkflow_.armLane(
+                bankIndex,
+                relocatedLaneIndex,
+                armedCaptureMode,
+                armedIncludePrepared,
+                armedIncludeMetronome);
+        } else {
+            trackRecordingWorkflow_.disarmLane();
+            publishLocalTrackRecordingState(QStringLiteral("idle"));
+            appendLog(QStringLiteral(
+                "lane recording disarmed because its target could not be resolved"));
+        }
+    }
     selectedLooperLane_ = qMin(row, looperProject_.banks().at(bankIndex).lanes.size() - 1);
+    refreshLooperLanes();
+    regeneratePreparedMix();
+    syncLooperArrangement();
+}
+
+void MainWindow::revealLooperLaneWav(int laneIndex)
+{
+    if (viewedBankIndex_ < 0 || viewedBankIndex_ >= looperProject_.banks().size()) return;
+    const LooperBank& bank = looperProject_.banks().at(viewedBankIndex_);
+    if (laneIndex < 0 || laneIndex >= bank.lanes.size()) return;
+    const QString path = QFileInfo(looperAssetAbsolutePath(bank.lanes.at(laneIndex))).absoluteFilePath();
+    const QFileInfo info(path);
+    if (!info.exists() || !info.isFile()) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Show WAV"),
+            QStringLiteral("The WAV file could not be found:\n%1")
+                .arg(QDir::toNativeSeparators(path)));
+        return;
+    }
+
+    bool opened = false;
+#if defined(_WIN32)
+    opened = QProcess::startDetached(
+        QStringLiteral("explorer.exe"),
+        {QStringLiteral("/select,%1").arg(QDir::toNativeSeparators(path))});
+#elif defined(Q_OS_MACOS)
+    opened = QProcess::startDetached(
+        QStringLiteral("open"),
+        {QStringLiteral("-R"), path});
+#else
+    opened = QDesktopServices::openUrl(
+        QUrl::fromLocalFile(info.absolutePath()));
+#endif
+    if (!opened) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Show WAV"),
+            QStringLiteral("Could not open the WAV location:\n%1")
+                .arg(QDir::toNativeSeparators(path)));
+    }
+}
+
+void MainWindow::removeLooperLaneWav(int laneIndex)
+{
+    if (sharedRecordingProtected()) return;
+    if (viewedBankIndex_ < 0 || viewedBankIndex_ >= looperProject_.banks().size()) return;
+    LooperBank& bank = looperProject_.banks()[viewedBankIndex_];
+    if (laneIndex < 0 || laneIndex >= bank.lanes.size()) return;
+    LooperLane& lane = bank.lanes[laneIndex];
+    if (lane.assetPath.trimmed().isEmpty()) return;
+
+    const QString assetPath = looperAssetAbsolutePath(lane);
+    const QString removedHash = lane.assetHash;
+    const QString fileName = QFileInfo(assetPath).fileName();
+    QMessageBox dialog(
+        QMessageBox::Question,
+        QStringLiteral("Remove WAV"),
+        QStringLiteral("Remove '%1' from '%2'?")
+            .arg(fileName.isEmpty() ? QStringLiteral("this WAV") : fileName,
+                 lane.name),
+        QMessageBox::Cancel,
+        this);
+    dialog.setInformativeText(QStringLiteral(
+        "The track, its name and mixer settings will remain. An original imported file is not deleted."));
+    QPushButton* removeButton = dialog.addButton(
+        QStringLiteral("Remove WAV"), QMessageBox::DestructiveRole);
+    dialog.exec();
+    if (dialog.clickedButton() != removeButton) return;
+
+    lane.assetPath.clear();
+    lane.assetHash.clear();
+    lane.sampleRate = 0;
+    lane.sourceFrames = 0;
+    lane.sampleRateCompatible = true;
+    lane.stopFrame = -1;
+    lane.loopStartFrame = -1;
+    lane.loopEndFrame = -1;
+    lane.loopEnabled = false;
+    lane.referenceKind.clear();
+    lane.referenceSourceSignature.clear();
+    lane.referenceBpm = 0.0;
+    lane.referenceStale = false;
+    lane.localOnly = false;
+    lane.originKind.clear();
+    validatedTrackAssetHashes_.remove(removedHash);
+
+    selectedLooperLane_ = laneIndex;
+    discardObsoleteReferenceWavs(QSet<QString>{assetPath});
     refreshLooperLanes();
     regeneratePreparedMix();
     syncLooperArrangement();
@@ -6675,6 +9070,7 @@ void MainWindow::removeSelectedLooperLane()
 
 void MainWindow::moveSelectedLooperLane(int delta)
 {
+    if (sharedRecordingProtected()) return;
     if (selectedLooperLane_ < 0) {
         return;
     }
@@ -6690,6 +9086,7 @@ void MainWindow::moveSelectedLooperLane(int delta)
 
 void MainWindow::toggleSelectedLooperLaneMute()
 {
+    if (sharedRecordingProtected()) return;
     if (selectedLooperLane_ < 0) return;
     LooperLane& lane = looperProject_.banks()[viewedBankIndex_].lanes[selectedLooperLane_];
     lane.muted = !lane.muted;
@@ -6699,6 +9096,7 @@ void MainWindow::toggleSelectedLooperLaneMute()
 
 void MainWindow::toggleSelectedLooperLaneSolo()
 {
+    if (sharedRecordingProtected()) return;
     if (selectedLooperLane_ < 0) return;
     LooperLane& lane = looperProject_.banks()[viewedBankIndex_].lanes[selectedLooperLane_];
 
@@ -6709,6 +9107,7 @@ void MainWindow::toggleSelectedLooperLaneSolo()
 
 void MainWindow::setSelectedLooperLaneGain()
 {
+    if (sharedRecordingProtected()) return;
     if (selectedLooperLane_ < 0) return;
     LooperLane& lane = looperProject_.banks()[viewedBankIndex_].lanes[selectedLooperLane_];
     bool accepted = false;
@@ -6782,7 +9181,7 @@ void MainWindow::editSelectedLooperLaneRegion()
 void MainWindow::syncLooperArrangement()
 {
     const SharedSessionController::Role role = sessionController_.snapshot().role;
-    if (looperProject_.trackSyncEnabled() && jam2_.isRunning() &&
+    if (jamSyncPolicy_.trackLanes && jam2_.isRunning() &&
         (role == SharedSessionController::Role::Creator ||
          role == SharedSessionController::Role::Joiner)) {
         sendSongSnapshot();
@@ -6919,6 +9318,7 @@ void MainWindow::regeneratePreparedMix(int bankIndex)
 {
     const int requestedBank = bankIndex < 0 ? viewedBankIndex_ : bankIndex;
     const int targetBank = qBound(0, requestedBank, looperProject_.banks().size() - 1);
+    (void)extendSectionToFitTracks(targetBank);
     ++preparedMixRequests_;
     const std::uint64_t generation = ++preparedMixRevision_;
     if (preparedMixWorkerRunning_) {
@@ -7023,6 +9423,9 @@ bool MainWindow::startFileWorkerTask(
 void MainWindow::applyPreparedMixResult(PreparedMixResult result)
 
 {
+    for (const QString& warning : std::as_const(result.warnings)) {
+        appendLog(QStringLiteral("prepared mix warning: ") + warning);
+    }
     if (!result.error.isEmpty()) {
         ++preparedMixFailures_;
         appendLog(QStringLiteral("prepared mix failed: %1 worker_requests=%2 worker_coalesced=%3 worker_failures=%4")
@@ -7084,7 +9487,7 @@ void MainWindow::applyPreparedMixResult(PreparedMixResult result)
             const PlaybackGrid::Position position = metronomeTransport_.grid().position();
             attachTargetFrame = jam2::gui::next_safe_grid_beat_raw_frame(position);
             const std::uint64_t songStart =
-                trackRecordingWorkflow_.globalTransportStartFrame();
+                trackRecordingWorkflow_.globalTransportTimelineStartFrame();
             if (attachTargetFrame == 0 || preparedMix_.frames <= 0) {
                 attachToRunningTransport = false;
             } else {
@@ -7215,14 +9618,20 @@ void MainWindow::loadPreparedMixIntoEngine(
     }
     const auto& model = trackController_.model();
     if (model.loopEnabled) {
-        const qint64 loopStartFrame = model.loopStartSeconds >= 0.0
+        const qint64 requestedLoopStartFrame = model.loopStartSeconds >= 0.0
             ? qMax<qint64>(0, static_cast<qint64>(std::llround(
                 model.loopStartSeconds * trackRecordingWorkflow_.preparedSampleRate())))
             : 0;
-        const qint64 loopEndFrame = model.loopEndSeconds > model.loopStartSeconds
+        const qint64 loopStartFrame = qBound<qint64>(
+            0, requestedLoopStartFrame, qMax<qint64>(0, preparedMix_.frames - 1));
+        const qint64 requestedLoopEndFrame = model.loopEndSeconds > model.loopStartSeconds
             ? qMax<qint64>(loopStartFrame + 1, static_cast<qint64>(std::llround(
                 model.loopEndSeconds * trackRecordingWorkflow_.preparedSampleRate())))
-            : qMax<qint64>(loopStartFrame + 1, preparedMix_.frames);
+            : preparedMix_.frames;
+        const qint64 loopEndFrame = qBound<qint64>(
+            loopStartFrame + 1,
+            requestedLoopEndFrame,
+            qMax<qint64>(loopStartFrame + 1, preparedMix_.frames));
         setPreparedTrackLoop(
             true,
             static_cast<std::uint64_t>(loopStartFrame),
@@ -7318,10 +9727,6 @@ void MainWindow::updateTrackControls()
             loopEnabledCheck_->setText(QStringLiteral("Loop whole track"));
         }
     }
-    if (trackSyncCheck_) {
-        const QSignalBlocker blocker(trackSyncCheck_);
-        trackSyncCheck_->setChecked(looperProject_.trackSyncEnabled());
-    }
     const bool trackCompatible = trackController_.model().sampleRateCompatible;
     if (playTrackButton_) {
         playTrackButton_->setEnabled(trackCompatible);
@@ -7332,6 +9737,7 @@ void MainWindow::updateTrackControls()
         stopTrackButton_->setEnabled(trackCompatible);
         stopTrackButton_->setToolTip(playTrackButton_ ? playTrackButton_->toolTip() : QString{});
     }
+    updateSharedRecordingPresentation();
 }
 
 void MainWindow::updateTrackPlaybackPresentation()
@@ -7340,7 +9746,7 @@ void MainWindow::updateTrackPlaybackPresentation()
         trackNameLabel_->setText(QStringLiteral("Track: %1 | %2")
             .arg(
                 trackController_.model().fileName,
-                trackController_.playbackStatusText(looperProject_.trackSyncEnabled())));
+                trackController_.playbackStatusText(jamSyncPolicy_.globalPlayback)));
     }
     if (performanceTrackToggle_) {
         const bool playing =
@@ -7350,8 +9756,12 @@ void MainWindow::updateTrackPlaybackPresentation()
         performanceTrackToggle_->setProperty("active", playing);
         performanceTrackToggle_->style()->unpolish(performanceTrackToggle_);
         performanceTrackToggle_->style()->polish(performanceTrackToggle_);
+        const bool protectedState = sharedRecordingProtected();
         performanceTrackToggle_->setEnabled(
-            trackController_.model().sampleRateCompatible && jam2_.isRunning());
+            !protectedState && trackController_.model().sampleRateCompatible && jam2_.isRunning());
+        performanceTrackToggle_->setToolTip(protectedState
+            ? QStringLiteral("Playback is protected because a synced track recording is active")
+            : QString{});
     }
 }
 
@@ -7363,7 +9773,7 @@ void MainWindow::loadTrackMetadata()
         jamAssetFolder(JamStorage::AssetKind::Imported),
         QStringLiteral("WAV files (*.wav);;All files (*)"),
         nullptr,
-        QFileDialog::DontUseNativeDialog);
+        QFileDialog::Options{});
     if (path.isEmpty()) {
         return;
     }
@@ -7431,7 +9841,7 @@ void MainWindow::chooseCaptureFolder()
             : current,
         QStringLiteral("WAV files (*.wav);;All files (*)"),
         nullptr,
-        QFileDialog::DontUseNativeDialog);
+        QFileDialog::Options{});
     if (!path.isEmpty()) {
         captureOutputEdit_->setText(path);
     }
@@ -7508,6 +9918,10 @@ void MainWindow::startInputCapture(std::uint64_t targetFrame, int countInBars)
         pattern.bpm,
         recordingSampleRate,
         pattern.tempo_pulse_units);
+    // Close the small scheduling window before the visible recording phase is
+    // published so a remote transport edge cannot land between arming the
+    // engine take and enabling local isolation.
+    jam2_.setLaneRecordingIsolationEnabled(true);
     if (!trackRecordingWorkflow_.startInputTake(
             output,
             !QFileInfo::exists(output),
@@ -7519,13 +9933,15 @@ void MainWindow::startInputCapture(std::uint64_t targetFrame, int countInBars)
             pattern.beats_per_bar,
             trackRecordingWorkflow_.includePreparedInTake(),
             trackRecordingWorkflow_.includeMetronomeInTake(),
+            true,
             workflowError)) {
         appendLog(QStringLiteral("could not start input take: ") + workflowError);
+        updateLaneRecordingIsolation();
         return;
     }
     if (countInBars >= 0 && recordingCountdownLabel_) {
-        recordingCountdownLabel_->setText(QStringLiteral("WAITING FOR NEXT BEAT..."));
-        recordingCountdownLabel_->show();
+        recordingCountdownLabel_->setText(
+            QStringLiteral("ARMED  ✓  WAITING FOR BAR  ●  COUNT-IN  ›  RECORDING"));
     }
     const QString limitText = durationBars > 0
         ? QStringLiteral(" duration_bars=%1 duration_frames=%2").arg(durationBars).arg(durationFrames)
@@ -7547,6 +9963,89 @@ void MainWindow::startInputCapture(std::uint64_t targetFrame, int countInBars)
     appendLog(startText);
     if (stopCaptureButton_) stopCaptureButton_->setEnabled(true);
     if (loadWavButton_) loadWavButton_->setEnabled(false);
+    publishLocalTrackRecordingState(
+        countInBars >= 0 ? QStringLiteral("waiting") : QStringLiteral("recording"));
+}
+
+void MainWindow::startInputCaptureAtGroupSchedule(
+    std::uint64_t countdownFrame,
+    std::uint64_t targetFrame,
+    std::uint64_t targetMusicalFrame,
+    int countInBars)
+{
+    if (trackRecordingWorkflow_.inputTakeActive()) return;
+    QString permissionError;
+    if (!jam2EnsureMicrophonePermission(&permissionError)) {
+        QMessageBox::warning(
+            this, QStringLiteral("Jam2 Track Recording Microphone Access"),
+            permissionError);
+        appendLog(permissionError);
+        publishLocalTrackRecordingState(QStringLiteral("complete"));
+        return;
+    }
+    int recordingSampleRate = 0;
+    QString rateError;
+    if (!jam2_.isRunning() ||
+        !recordingTargetSampleRate(recordingSampleRate, rateError)) {
+        appendLog(QStringLiteral("could not start synced input take: ") + rateError);
+        publishLocalTrackRecordingState(QStringLiteral("complete"));
+        return;
+    }
+    QString output = captureOutputEdit_->text().trimmed();
+    if (isAutoCapturePath(output)) {
+        output = timestampedCapturePath(
+            QStringLiteral("track-input"),
+            jamAssetFolder(JamStorage::AssetKind::Recorded));
+        captureOutputEdit_->setText(output);
+    }
+    const int durationBars = (!captureManualStopCheck_ ||
+            !captureManualStopCheck_->isChecked())
+        ? captureDurationSpin_->value() : 0;
+    const auto pattern = currentMetronomePattern();
+    const std::uint64_t durationFrames = jam2::gui::recording_frames_for_bars(
+        durationBars,
+        pattern.beats_per_bar,
+        pattern.bpm,
+        recordingSampleRate,
+        pattern.tempo_pulse_units);
+    const bool countInMetronome = countInBars > 0 &&
+        captureCountInMetronomeCheck_ &&
+        captureCountInMetronomeCheck_->isChecked();
+    const bool keepMetronome = captureKeepMetronomeCheck_ &&
+        captureKeepMetronomeCheck_->isChecked();
+    const bool startedCountInClick = countInMetronome &&
+        !metronomeTransport_.localRunning();
+    if (startedCountInClick) startTrackMetronome();
+    trackRecordingWorkflow_.waitForCountIn(
+        0, startedCountInClick && !keepMetronome);
+
+    QString workflowError;
+    if (!trackRecordingWorkflow_.startInputTakeAtSchedule(
+            output,
+            !QFileInfo::exists(output),
+            recordingSampleRate,
+            countdownFrame,
+            targetFrame,
+            targetMusicalFrame,
+            durationFrames,
+            trackRecordingWorkflow_.includePreparedInTake(),
+            trackRecordingWorkflow_.includeMetronomeInTake(),
+            workflowError)) {
+        appendLog(QStringLiteral("could not start synced input take: ") +
+            workflowError);
+        publishLocalTrackRecordingState(QStringLiteral("complete"));
+        return;
+    }
+    if (stopCaptureButton_) stopCaptureButton_->setEnabled(true);
+    if (loadWavButton_) loadWavButton_->setEnabled(false);
+    localTrackRecordingCountInBars_ = qBound(0, countInBars, 8);
+    publishLocalTrackRecordingState(QStringLiteral("waiting"));
+    appendLog(QStringLiteral(
+        "synced recording scheduled: group=%1 countdown_frame=%2 start_frame=%3 count_in_bars=%4")
+        .arg(activeRecordingGroupId_.left(8))
+        .arg(countdownFrame)
+        .arg(targetFrame)
+        .arg(countInBars));
 }
 
 void MainWindow::startLoopbackCapture()
@@ -7607,12 +10106,14 @@ void MainWindow::startLoopbackCapture()
         .arg(options.trimLeadingSilence ? QStringLiteral("yes") : QStringLiteral("no"))
         .arg(options.trimTrailingSilence ? QStringLiteral("yes") : QStringLiteral("no"))
         .arg(output));
+    jam2_.setLaneRecordingIsolationEnabled(true);
     if (!loopbackRecorder_.start(options, [this](
             bool ok,
             const QString& outputPath,
             const QString& errorText,
             const QString& diagnostics) {
             QMetaObject::invokeMethod(this, [this, ok, outputPath, errorText, diagnostics] {
+                loopbackRecordingPreviewClock_.invalidate();
                 if (stopCaptureButton_) stopCaptureButton_->setEnabled(false);
                 const QString transientPath = trackRecordingWorkflow_.finishLoopbackCapture(outputPath);
                 if (!diagnostics.isEmpty()) {
@@ -7624,6 +10125,7 @@ void MainWindow::startLoopbackCapture()
                     }
                     if (loadWavButton_) loadWavButton_->setEnabled(true);
                     appendLog(QStringLiteral("loopback recording failed: ") + errorText);
+                    finishLaneTakeFinalization();
                     return;
                 }
                 if (!transientPath.isEmpty()) {
@@ -7633,7 +10135,10 @@ void MainWindow::startLoopbackCapture()
                     loadWavButton_->setEnabled(true);
                 }
                 if (trackRecordingWorkflow_.laneArmed()) {
+                    publishLocalTrackRecordingState(QStringLiteral("finalizing"));
                     importLastCaptureToArmedLane();
+                } else {
+                    finishLaneTakeFinalization();
                 }
             }, Qt::QueuedConnection);
         }, &error)) {
@@ -7643,11 +10148,15 @@ void MainWindow::startLoopbackCapture()
         }
         if (loadWavButton_) loadWavButton_->setEnabled(true);
         appendLog(QStringLiteral("loopback recording failed to start: ") + error);
+        finishLaneTakeFinalization();
+        loopbackRecordingPreviewClock_.invalidate();
         return;
 
     }
+    loopbackRecordingPreviewClock_.start();
     if (stopCaptureButton_) stopCaptureButton_->setEnabled(true);
     if (loadWavButton_) loadWavButton_->setEnabled(false);
+    publishLocalTrackRecordingState(QStringLiteral("recording"));
 }
 
 void MainWindow::stopInputCapture(std::uint64_t targetFrame)
@@ -7737,6 +10246,10 @@ void MainWindow::loadTrackWaveform()
 
 void MainWindow::playTrack()
 {
+    if (sharedRecordingProtected()) {
+        appendLog(QStringLiteral("global playback change ignored while a synced recording is active"));
+        return;
+    }
     if (!jam2_.isRunning()) {
         QMessageBox::warning(this, QStringLiteral("Jam2 Track"), QStringLiteral("Start the local engine before playing the prepared mix."));
         return;
@@ -7794,6 +10307,10 @@ void MainWindow::playTrack()
 
 void MainWindow::stopTrack(std::uint64_t targetFrame)
 {
+    if (sharedRecordingProtected()) {
+        appendLog(QStringLiteral("global playback stop ignored while a synced recording is active"));
+        return;
+    }
     if (!jam2_.isRunning()) {
         QMessageBox::warning(this, QStringLiteral("Jam2 Track"), QStringLiteral("Start the local engine before stopping the prepared mix."));
         return;
@@ -7806,7 +10323,7 @@ void MainWindow::stopTrack(std::uint64_t targetFrame)
     }
     trackController_.requestPlayback(false);
     updateTrackPlaybackPresentation();
-    if (looperProject_.trackSyncEnabled() && sessionController_.isServer()) {
+    if (jamSyncPolicy_.globalPlayback && sessionController_.isServer()) {
         publishStoppedTrackStateWhenApplied_ = true;
     }
     updateTrackTimeline();
@@ -7814,6 +10331,7 @@ void MainWindow::stopTrack(std::uint64_t targetFrame)
 
 void MainWindow::setLoopStartAtCurrentPosition()
 {
+    if (sharedRecordingProtected()) return;
     const qint64 duration = trackController_.model().durationMs;
     const qint64 position = qBound<qint64>(0, currentAudibleTrackPositionMs(), duration);
     auto& model = trackController_.model();
@@ -7826,6 +10344,7 @@ void MainWindow::setLoopStartAtCurrentPosition()
 
 void MainWindow::setLoopEndAtCurrentPosition()
 {
+    if (sharedRecordingProtected()) return;
     const qint64 duration = trackController_.model().durationMs;
     const qint64 position = qBound<qint64>(0, currentAudibleTrackPositionMs(), duration);
     auto& model = trackController_.model();
@@ -7839,6 +10358,7 @@ void MainWindow::setLoopEndAtCurrentPosition()
 
 void MainWindow::clearTrackLoop()
 {
+    if (sharedRecordingProtected()) return;
     auto& model = trackController_.model();
     model.loopEnabled = false;
     model.loopStartSeconds = -1.0;
@@ -7880,6 +10400,41 @@ void MainWindow::updateTrackTimeline()
     }
 }
 
+void MainWindow::sendMetronomeStateToJam(bool enabled)
+{
+    if (!jamSyncPolicy_.metronomeState || !jam2_.isNetworkRunning()) return;
+    sendControl(QJsonObject{
+        {QStringLiteral("type"), sessionController_.isServer()
+            ? QStringLiteral("jam.metronome.state.set")
+            : QStringLiteral("jam.metronome.state.request")},
+        {QStringLiteral("enabled"), enabled},
+    });
+}
+
+void MainWindow::setMetronomeEnabled(bool enabled, bool publishToJam)
+{
+    const bool followerUsingLeaderAudio = jam2_.isNetworkRunning() &&
+        !sessionController_.isServer() && metronomeModeBox_ &&
+        metronomeModeBox_->currentText() == QStringLiteral("leader-audio");
+    const bool localEnabled = enabled && !followerUsingLeaderAudio;
+    const bool changed = metronomeTransport_.localRunning() != localEnabled;
+    metronomeTransport_.setLocalState(localEnabled);
+    if (jam2_.isRunning() && changed) {
+        submitEngineToggle(
+            jam2::EngineCommandType::SetMetronomeEnabled,
+            localEnabled,
+            QStringLiteral("metronome enabled"));
+    }
+    if (startTrackMetronomeButton_) {
+        startTrackMetronomeButton_->setEnabled(!localEnabled);
+    }
+    if (stopTrackMetronomeButton_) {
+        stopTrackMetronomeButton_->setEnabled(localEnabled);
+    }
+    if (publishToJam) sendMetronomeStateToJam(enabled);
+    updateTrackControls();
+}
+
 void MainWindow::startTrackMetronome()
 {
     if (jam2_.isRunning()) {
@@ -7894,18 +10449,8 @@ void MainWindow::startTrackMetronome()
             }
             return;
         }
-        metronomeTransport_.setLocalState(true);
         updateRuntimeControls();
-        submitEngineToggle(
-            jam2::EngineCommandType::SetMetronomeEnabled,
-            true,
-            QStringLiteral("metronome enabled"));
-        if (startTrackMetronomeButton_) {
-            startTrackMetronomeButton_->setEnabled(false);
-        }
-        if (stopTrackMetronomeButton_) {
-            stopTrackMetronomeButton_->setEnabled(true);
-        }
+        setMetronomeEnabled(true, true);
         return;
     }
 
@@ -7914,21 +10459,7 @@ void MainWindow::startTrackMetronome()
 
 void MainWindow::stopTrackMetronome()
 {
-    const bool jamMetronomeWasRunning = jam2_.isRunning() &&
-        metronomeTransport_.localRunning();
-    metronomeTransport_.setLocalState(false);
-    if (jamMetronomeWasRunning) {
-        submitEngineToggle(
-            jam2::EngineCommandType::SetMetronomeEnabled,
-            false,
-            QStringLiteral("metronome enabled"));
-    }
-    if (startTrackMetronomeButton_) {
-        startTrackMetronomeButton_->setEnabled(true);
-    }
-    if (stopTrackMetronomeButton_) {
-        stopTrackMetronomeButton_->setEnabled(false);
-    }
+    setMetronomeEnabled(false, true);
 }
 
 void MainWindow::tapTrackMetronomeTempo()
@@ -8262,6 +10793,11 @@ void MainWindow::updateMetronomeCompensationVisibility()
 void MainWindow::sendMetronomePatternToJam()
 {
     if (applyingBankTiming_) return;
+    if (sharedRecordingProtected()) {
+        appendLog(QStringLiteral(
+            "held metronome timing unchanged while a track take is active"));
+        return;
+    }
     const int activeBank = looperProject_.activeBankIndex();
     const jam2::metronome::PatternSnapshot previous =
         bankMetronomePattern(activeBank);
@@ -8391,6 +10927,7 @@ void MainWindow::publishLocalTrackBatch(const QString& requestedBatchId)
         ? QUuid::createUuid().toString(QUuid::WithoutBraces).toLower()
         : requestedBatchId.toLower();
     QJsonArray tracks;
+    QSet<QString> batchHashes;
     for (int bankIndex = 0; bankIndex < looperProject_.banks().size(); ++bankIndex) {
         const LooperBank& bank = looperProject_.banks().at(bankIndex);
         for (const LooperLane& lane : bank.lanes) {
@@ -8418,8 +10955,15 @@ void MainWindow::publishLocalTrackBatch(const QString& requestedBatchId)
                 {QStringLiteral("sha256"), lane.assetHash},
                 {QStringLiteral("name"), lane.name.left(512)},
                 {QStringLiteral("sample_rate"), lane.sampleRate},
+                {QStringLiteral("source_frames"), QString::number(lane.sourceFrames)},
+                {QStringLiteral("start_frame"), QString::number(lane.startFrame)},
+                {QStringLiteral("stop_frame"), QString::number(lane.stopFrame)},
+                {QStringLiteral("loop_start_frame"), QString::number(lane.loopStartFrame)},
+                {QStringLiteral("loop_end_frame"), QString::number(lane.loopEndFrame)},
+                {QStringLiteral("loop_enabled"), lane.loopEnabled},
             };
             tracks.append(track);
+            batchHashes.insert(lane.assetHash);
             trackOfferAssetPaths_.insert(lane.assetHash, lane.assetPath);
             localTrackOffers_.insert(contributionId, track);
         }
@@ -8435,22 +10979,21 @@ void MainWindow::publishLocalTrackBatch(const QString& requestedBatchId)
         if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
         return;
     }
-    trackWorkspace_.outgoingTrackShareBatchId = batchId;
-    QTimer::singleShot(30000, this, [this, batchId] {
-        if (trackWorkspace_.outgoingTrackShareBatchId != batchId) {
-            return;
+    QSet<QString> recipients;
+    if (session.role == SharedSessionController::Role::Creator) {
+        for (const SharedSessionController::PeerSnapshot& peer : session.peers) {
+            if (!peer.token.isEmpty() && peer.token != session.localToken) {
+                recipients.insert(peer.token);
+            }
         }
-        trackWorkspace_.outgoingTrackShareBatchId.clear();
-        if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
-        appendLog(QStringLiteral(
-            "Track Sync batch %1 timed out; released held arrangement updates")
-            .arg(batchId.left(8)));
-        const QJsonObject held = trackWorkspace_.heldTrackShareSongSet;
-        const QString source = trackWorkspace_.heldTrackShareSongSourcePeerToken;
-        trackWorkspace_.heldTrackShareSongSet = {};
-        trackWorkspace_.heldTrackShareSongSourcePeerToken.clear();
-        if (!held.isEmpty()) handleSongSet(held, source);
-    });
+    } else {
+        recipients.insert(QString{});
+    }
+    trackWorkspace_.outgoingTrackSharePendingPeers.insert(batchId, recipients);
+    trackWorkspace_.outgoingTrackShareBatchHashes.insert(batchId, batchHashes);
+    trackWorkspace_.outgoingTrackShareLastProgressMs.insert(
+        batchId, QDateTime::currentMSecsSinceEpoch());
+    scheduleOutgoingTrackBatchExpiry(batchId);
     if (performanceHome_) {
         performanceHome_->setTrackTransferStatus(
             QStringLiteral("SHARING TRACKS\u2026  0 / %1").arg(tracks.size()));
@@ -8461,6 +11004,9 @@ void MainWindow::publishLocalTrackBatch(const QString& requestedBatchId)
 
 void MainWindow::shareLocalTracks(bool includeLocalOnly)
 {
+    if (!includeLocalOnly && !automaticWavSharingEnabled()) {
+        return;
+    }
     if (!jam2_.isRunning()) {
         appendLog(QStringLiteral("Share Tracks requires an active jam"));
         return;
@@ -8530,6 +11076,17 @@ void MainWindow::handleTrackBatchOffer(
         appendLog(QStringLiteral("track contribution queue is full"));
         return;
     }
+    const auto offerFrame = [](const QJsonObject& object, const QString& key, qint64 fallback) {
+        const QJsonValue value = object.value(key);
+        if (value.isUndefined()) return fallback;
+        if (value.isString()) {
+            bool ok = false;
+            const qint64 parsed = value.toString().toLongLong(&ok);
+            return ok ? parsed : fallback;
+        }
+        return value.toInteger(fallback);
+    };
+    bool insertedAny = false;
     for (const QJsonValue& trackValue : tracks) {
         const QJsonObject track = trackValue.toObject();
         const QString contributionId =
@@ -8540,6 +11097,20 @@ void MainWindow::handleTrackBatchOffer(
             continue;
         }
         const QString hash = track.value(QStringLiteral("sha256")).toString().toLower();
+        if (validatedTrackAssetHashes_.contains(hash)) {
+            bool stillAvailable = QFileInfo::exists(looperAssetPathForHash(hash));
+            for (const LooperBank& bank : looperProject_.banks()) {
+                for (const LooperLane& lane : bank.lanes) {
+                    if (lane.assetHash == hash &&
+                        QFileInfo::exists(looperAssetAbsolutePath(lane))) {
+                        stillAvailable = true;
+                        break;
+                    }
+                }
+                if (stillAvailable) break;
+            }
+            if (!stillAvailable) validatedTrackAssetHashes_.remove(hash);
+        }
         pendingTrackContributions_.insert(contributionKey, PendingTrackContribution{
             sourcePeerToken,
             batchId,
@@ -8550,7 +11121,14 @@ void MainWindow::handleTrackBatchOffer(
             hash,
             track.value(QStringLiteral("name")).toString(),
             track.value(QStringLiteral("sample_rate")).toInt(),
+            offerFrame(track, QStringLiteral("source_frames"), 0),
+            offerFrame(track, QStringLiteral("start_frame"), 0),
+            offerFrame(track, QStringLiteral("stop_frame"), -1),
+            offerFrame(track, QStringLiteral("loop_start_frame"), -1),
+            offerFrame(track, QStringLiteral("loop_end_frame"), -1),
+            track.value(QStringLiteral("loop_enabled")).toBool(),
         });
+        insertedAny = true;
         if (!validatedTrackAssetHashes_.contains(hash)) {
             for (const LooperBank& bank : looperProject_.banks()) {
                 for (const LooperLane& lane : bank.lanes) {
@@ -8565,6 +11143,12 @@ void MainWindow::handleTrackBatchOffer(
             }
         }
     }
+    if (insertedAny) {
+        const QString activityKey = sourcePeerToken + QLatin1Char(':') + batchId;
+        trackWorkspace_.incomingTrackShareLastProgressMs.insert(
+            activityKey, QDateTime::currentMSecsSinceEpoch());
+        scheduleIncomingTrackBatchExpiry(sourcePeerToken, batchId);
+    }
     if (performanceHome_) {
         performanceHome_->setTrackTransferStatus(
             QStringLiteral("RECEIVING TRACKS\u2026  0 / %1").arg(tracks.size()));
@@ -8573,27 +11157,108 @@ void MainWindow::handleTrackBatchOffer(
     requestNextPendingAsset();
 }
 
-void MainWindow::handleTrackBatchComplete(const QJsonObject& message)
+void MainWindow::handleTrackBatchComplete(
+    const QJsonObject& message,
+    const QString& sourcePeerToken)
 {
     const QString batchId = message.value(QStringLiteral("batch_id")).toString().toLower();
-    if (!trackWorkspace_.outgoingTrackShareBatchId.isEmpty() &&
-        trackWorkspace_.outgoingTrackShareBatchId != batchId) {
+    auto pending = trackWorkspace_.outgoingTrackSharePendingPeers.find(batchId);
+    if (pending == trackWorkspace_.outgoingTrackSharePendingPeers.end()) {
         appendLog(QStringLiteral("ignored stale Track Sync batch completion %1")
             .arg(batchId.left(8)));
         return;
     }
-    trackWorkspace_.outgoingTrackShareBatchId.clear();
+    pending->remove(sourcePeerToken);
+    if (!pending->isEmpty()) {
+        appendLog(QStringLiteral("Track Sync batch %1 is still pending for %2 peer(s)")
+            .arg(batchId.left(8)).arg(pending->size()));
+        return;
+    }
+    trackWorkspace_.outgoingTrackSharePendingPeers.erase(pending);
+    trackWorkspace_.outgoingTrackShareBatchHashes.remove(batchId);
+    trackWorkspace_.outgoingTrackShareLastProgressMs.remove(batchId);
     if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
     appendLog(QStringLiteral("Track Sync batch %1 completed with %2 track(s)")
         .arg(message.value(QStringLiteral("batch_id")).toString().left(8))
         .arg(message.value(QStringLiteral("tracks")).toInt()));
+    releaseHeldTrackSnapshotIfReady();
+}
+
+void MainWindow::scheduleOutgoingTrackBatchExpiry(const QString& batchId)
+{
+    QTimer::singleShot(static_cast<int>(kTrackBatchIdleTimeoutMs), this,
+        [this, batchId] {
+            if (!trackWorkspace_.outgoingTrackSharePendingPeers.contains(batchId)) return;
+            const qint64 elapsed = QDateTime::currentMSecsSinceEpoch() -
+                trackWorkspace_.outgoingTrackShareLastProgressMs.value(batchId);
+            if (elapsed < kTrackBatchIdleTimeoutMs) {
+                scheduleOutgoingTrackBatchExpiry(batchId);
+                return;
+            }
+            trackWorkspace_.outgoingTrackSharePendingPeers.remove(batchId);
+            trackWorkspace_.outgoingTrackShareBatchHashes.remove(batchId);
+            trackWorkspace_.outgoingTrackShareLastProgressMs.remove(batchId);
+            if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
+            appendLog(QStringLiteral(
+                "Track Sync batch %1 was idle for 30 seconds; released held arrangement updates")
+                .arg(batchId.left(8)));
+            releaseHeldTrackSnapshotIfReady();
+        });
+}
+
+void MainWindow::scheduleIncomingTrackBatchExpiry(
+    const QString& sourcePeerToken,
+    const QString& batchId)
+{
+    const QString activityKey = sourcePeerToken + QLatin1Char(':') + batchId;
+    QTimer::singleShot(static_cast<int>(kTrackBatchIdleTimeoutMs), this,
+        [this, sourcePeerToken, batchId, activityKey] {
+            if (!trackWorkspace_.incomingTrackShareLastProgressMs.contains(activityKey)) return;
+            const qint64 elapsed = QDateTime::currentMSecsSinceEpoch() -
+                trackWorkspace_.incomingTrackShareLastProgressMs.value(activityKey);
+            if (elapsed < kTrackBatchIdleTimeoutMs) {
+                scheduleIncomingTrackBatchExpiry(sourcePeerToken, batchId);
+                return;
+            }
+            expirePendingTrackBatch(sourcePeerToken, batchId);
+        });
+}
+
+void MainWindow::noteTrackAssetProgress(
+    const QString& hash,
+    const QString& peerToken,
+    bool receiving)
+{
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (receiving) {
+        for (const PendingTrackContribution& contribution : pendingTrackContributions_) {
+            if (contribution.assetHash == hash &&
+                contribution.sourcePeerToken == peerToken) {
+                trackWorkspace_.incomingTrackShareLastProgressMs[
+                    contribution.sourcePeerToken + QLatin1Char(':') +
+                    contribution.batchId] = now;
+            }
+        }
+        return;
+    }
+    for (auto it = trackWorkspace_.outgoingTrackSharePendingPeers.cbegin();
+         it != trackWorkspace_.outgoingTrackSharePendingPeers.cend(); ++it) {
+        if (!it.value().contains(peerToken) ||
+            !trackWorkspace_.outgoingTrackShareBatchHashes.value(it.key()).contains(hash)) {
+            continue;
+        }
+        trackWorkspace_.outgoingTrackShareLastProgressMs[it.key()] = now;
+    }
+}
+
+void MainWindow::releaseHeldTrackSnapshotIfReady()
+{
+    if (!trackWorkspace_.outgoingTrackSharePendingPeers.isEmpty()) return;
     const QJsonObject held = trackWorkspace_.heldTrackShareSongSet;
     const QString source = trackWorkspace_.heldTrackShareSongSourcePeerToken;
     trackWorkspace_.heldTrackShareSongSet = {};
     trackWorkspace_.heldTrackShareSongSourcePeerToken.clear();
-    if (!held.isEmpty()) {
-        handleSongSet(held, source);
-    }
+    if (!held.isEmpty()) handleSongSet(held, source);
 }
 
 void MainWindow::requestNextPendingAsset()
@@ -8635,10 +11300,9 @@ void MainWindow::requestNextPendingAsset()
         {QStringLiteral("arrangement_revision"), pendingSongRevision_},
         {QStringLiteral("hashes"), hashes},
     };
-    const bool sent = source.isEmpty() || sendControlTo(source, request);
-    if (source.isEmpty()) {
-        sendControl(request);
-    }
+    const bool sent = source.isEmpty()
+        ? (jamSyncAllowsControlMessage(request) && sessionController_.send(request))
+        : sendControlTo(source, request);
     if (!sent) {
         pendingTrackAssetSources_.remove(hash);
         incomingAssetWorkflow_ = IncomingAssetWorkflow::None;
@@ -8651,6 +11315,7 @@ void MainWindow::requestNextPendingAsset()
                     : QStringLiteral("arrangement"),
                 hash,
                 source.left(8)));
+        retryOrFailIncomingAsset(hash);
         return;
     }
     appendLog(QStringLiteral(
@@ -8663,35 +11328,145 @@ void MainWindow::requestNextPendingAsset()
         .arg(pendingSongRevision_));
 }
 
+void MainWindow::retryOrFailIncomingAsset(const QString& hash)
+{
+    if (!isSha256Hex(hash)) return;
+    bool stillExpected = pendingLooperAssetHashes_.contains(hash);
+    if (!stillExpected) {
+        for (const PendingTrackContribution& contribution : pendingTrackContributions_) {
+            if (contribution.assetHash == hash) {
+                stillExpected = true;
+                break;
+            }
+        }
+    }
+    if (!stillExpected) return;
+    const int attempt = trackWorkspace_.incomingAssetRetryAttempts.value(hash) + 1;
+    trackWorkspace_.incomingAssetRetryAttempts[hash] = attempt;
+    if (attempt <= 3) {
+        const int delayMs = 250 * attempt;
+        appendLog(QStringLiteral("retrying looper asset %1 after interruption: attempt=%2")
+            .arg(hash.left(8)).arg(attempt));
+        QTimer::singleShot(delayMs, this, [this, hash] {
+            if (validatedTrackAssetHashes_.contains(hash) ||
+                incomingAssetWorkflow_ != IncomingAssetWorkflow::None) return;
+            requestNextPendingAsset();
+        });
+        return;
+    }
+
+    trackWorkspace_.incomingAssetRetryAttempts.remove(hash);
+    QString failedSource;
+    QString failedBatch;
+    for (const PendingTrackContribution& contribution : pendingTrackContributions_) {
+        if (contribution.assetHash == hash) {
+            failedSource = contribution.sourcePeerToken;
+            failedBatch = contribution.batchId;
+            break;
+        }
+    }
+    if (!failedBatch.isEmpty()) {
+        appendLog(QStringLiteral("abandoned Track Sync batch %1 after repeated asset failures")
+            .arg(failedBatch.left(8)));
+        expirePendingTrackBatch(failedSource, failedBatch);
+        return;
+    }
+    if (pendingLooperAssetHashes_.contains(hash)) {
+        const bool publishCurrent = pendingSongNeedsAuthoritativePublish_ &&
+            sessionController_.isServer();
+        pendingSongSet_ = {};
+        pendingSongRevision_ = 0;
+        trackWorkspace_.pendingSongBaseRevision = 0;
+        pendingSongTrackRestart_ = false;
+        pendingSongSourcePeerToken_.clear();
+        pendingSongNeedsAuthoritativePublish_ = false;
+        pendingLooperAssetHashes_.clear();
+        if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
+        appendLog(QStringLiteral("abandoned pending arrangement after repeated WAV transfer failures"));
+        if (publishCurrent) sendSongSnapshot();
+    }
+    requestNextPendingAsset();
+}
+
+void MainWindow::expirePendingTrackBatch(
+    const QString& sourcePeerToken,
+    const QString& batchId)
+{
+    trackWorkspace_.incomingTrackShareLastProgressMs.remove(
+        sourcePeerToken + QLatin1Char(':') + batchId);
+    QStringList removedKeys;
+    QSet<QString> removedHashes;
+    for (auto it = pendingTrackContributions_.cbegin();
+         it != pendingTrackContributions_.cend(); ++it) {
+        if (it->sourcePeerToken == sourcePeerToken && it->batchId == batchId) {
+            removedKeys.append(it.key());
+            removedHashes.insert(it->assetHash);
+        }
+    }
+    if (removedKeys.isEmpty()) return;
+    const bool resetActive = incomingAssetWorkflow_ == IncomingAssetWorkflow::TrackContribution &&
+        removedHashes.contains(incomingAssetHash_);
+    for (const QString& key : removedKeys) pendingTrackContributions_.remove(key);
+    for (const QString& hash : removedHashes) {
+        pendingTrackAssetSources_.remove(hash);
+        trackWorkspace_.incomingAssetRetryAttempts.remove(hash);
+    }
+    if (resetActive) assetTransfer_.resetIncoming();
+    if (performanceHome_) performanceHome_->setTrackTransferStatus(QString{});
+    appendLog(QStringLiteral("expired incomplete Track Sync batch %1 from peer %2")
+        .arg(batchId.left(8), sourcePeerToken.left(8)));
+    applyPendingTrackContributions();
+    requestNextPendingAsset();
+}
+
 void MainWindow::applyPendingTrackContributions()
 {
+    if (laneRecordingIsolationActive()) return;
     if (pendingTrackContributions_.isEmpty()) {
         return;
     }
-    const PendingTrackContribution first = pendingTrackContributions_.constBegin().value();
-    const QString batchId = first.batchId;
-    const QString sourcePeerToken = first.sourcePeerToken;
-    const int expected = first.batchSize;
-    int received = 0;
-    int ready = 0;
+    struct BatchProgress {
+        QString source;
+        QString batch;
+        int expected = 0;
+        int received = 0;
+        int ready = 0;
+    };
+    QMap<QString, BatchProgress> batches;
     for (const PendingTrackContribution& contribution : pendingTrackContributions_) {
-        if (contribution.batchId != batchId ||
-            contribution.sourcePeerToken != sourcePeerToken) {
-            continue;
-        }
-        ++received;
+        const QString key = contribution.sourcePeerToken + QLatin1Char(':') + contribution.batchId;
+        BatchProgress& batch = batches[key];
+        batch.source = contribution.sourcePeerToken;
+        batch.batch = contribution.batchId;
+        batch.expected = contribution.batchSize;
+        ++batch.received;
         if (validatedTrackAssetHashes_.contains(contribution.assetHash)) {
-            ++ready;
+            ++batch.ready;
         }
     }
+    BatchProgress selected;
+    bool haveReadyBatch = false;
+    for (const BatchProgress& batch : std::as_const(batches)) {
+        if (batch.expected > 0 && batch.received == batch.expected &&
+            batch.ready == batch.expected) {
+            selected = batch;
+            haveReadyBatch = true;
+            break;
+        }
+    }
+    const BatchProgress display = haveReadyBatch ? selected : batches.constBegin().value();
     if (performanceHome_) {
         performanceHome_->setTrackTransferStatus(
-            QStringLiteral("RECEIVING TRACKS\u2026  %1 / %2").arg(ready).arg(expected));
+            QStringLiteral("RECEIVING TRACKS\u2026  %1 / %2")
+                .arg(display.ready).arg(display.expected));
     }
-    if (expected <= 0 || received != expected || ready != expected) {
+    if (!haveReadyBatch) {
         requestNextPendingAsset();
         return;
     }
+    const QString batchId = selected.batch;
+    const QString sourcePeerToken = selected.source;
+    const int expected = selected.expected;
     LooperProject stagedProject = looperProject_;
     QStringList completedIds;
     bool arrangementChanged = false;
@@ -8742,8 +11517,18 @@ void MainWindow::applyPendingTrackContributions()
             }
         }
         if (matchingHashIndex >= 0) {
-            if (lanes[matchingHashIndex].localOnly) {
-                lanes[matchingHashIndex].localOnly = false;
+            LooperLane& lane = lanes[matchingHashIndex];
+            if (lane.assetPath.trimmed().isEmpty() ||
+                !QFileInfo::exists(looperAssetAbsolutePath(lane))) {
+                lane.assetPath = assetPath;
+                lane.sampleRate = contribution.sampleRate;
+                lane.sampleRateCompatible = true;
+                lane.sourceFrames = contribution.sourceFrames;
+                lane.originKind = QStringLiteral("peer");
+                arrangementChanged = true;
+            }
+            if (lane.localOnly) {
+                lane.localOnly = false;
                 arrangementChanged = true;
             }
             appendLog(QStringLiteral(
@@ -8762,16 +11547,18 @@ void MainWindow::applyPendingTrackContributions()
             lane.assetHash = contribution.assetHash;
             lane.sampleRate = contribution.sampleRate;
             lane.sampleRateCompatible = true;
+            lane.sourceFrames = contribution.sourceFrames;
             lane.localOnly = false;
+            lane.originKind = QStringLiteral("peer");
             if (!contribution.name.trimmed().isEmpty() &&
                 (lane.name.trimmed().isEmpty() || isDefaultEmptyTrackName(lane.name))) {
                 lane.name = contribution.name;
             }
-            lane.startFrame = 0;
-            lane.stopFrame = -1;
-            lane.loopStartFrame = -1;
-            lane.loopEndFrame = -1;
-            lane.loopEnabled = false;
+            lane.startFrame = contribution.startFrame;
+            lane.stopFrame = contribution.stopFrame;
+            lane.loopStartFrame = contribution.loopStartFrame;
+            lane.loopEndFrame = contribution.loopEndFrame;
+            lane.loopEnabled = contribution.loopEnabled;
             arrangementChanged = true;
             applied = true;
         } else {
@@ -8784,7 +11571,14 @@ void MainWindow::applyPendingTrackContributions()
                 ? QStringLiteral("Peer track") : contribution.name;
             lane.sampleRate = contribution.sampleRate;
             lane.sampleRateCompatible = true;
+            lane.sourceFrames = contribution.sourceFrames;
             lane.localOnly = false;
+            lane.originKind = QStringLiteral("peer");
+            lane.startFrame = contribution.startFrame;
+            lane.stopFrame = contribution.stopFrame;
+            lane.loopStartFrame = contribution.loopStartFrame;
+            lane.loopEndFrame = contribution.loopEndFrame;
+            lane.loopEnabled = contribution.loopEnabled;
             if (stagedProject.appendLane(contribution.bankIndex, std::move(lane))) {
                 arrangementChanged = true;
                 applied = true;
@@ -8813,12 +11607,20 @@ void MainWindow::applyPendingTrackContributions()
         pendingTrackContributions_.remove(contributionId);
         appliedTrackContributionIds_.insert(contributionId);
     }
+    trackWorkspace_.incomingTrackShareLastProgressMs.remove(
+        sourcePeerToken + QLatin1Char(':') + batchId);
     while (appliedTrackContributionIds_.size() > kMaxLooperTrackContributions * 2) {
         appliedTrackContributionIds_.erase(appliedTrackContributionIds_.begin());
     }
     if (arrangementChanged) {
         refreshLooperLanes();
         regeneratePreparedMix();
+        if (sessionController_.isServer()) {
+            sendSongSnapshot();
+            if (!automaticWavSharingEnabled()) {
+                QTimer::singleShot(0, this, [this] { publishLocalTrackBatch({}); });
+            }
+        }
     }
     sendControlTo(sourcePeerToken, QJsonObject{
         {QStringLiteral("type"), QStringLiteral("looper.track.batch.complete")},
@@ -8852,12 +11654,9 @@ bool MainWindow::sendAssetBinaryTo(
 
 bool MainWindow::sendControlTo(const QString& targetPeerToken, const QJsonObject& message)
 {
-    if (jam2::application::isTrackSyncControlMessageType(
-            message.value(QStringLiteral("type")).toString()) &&
-        !jam2::application::isManualTrackShareControlMessageType(
-            message.value(QStringLiteral("type")).toString()) &&
-        !looperProject_.trackSyncEnabled()) {
-        appendLog(QStringLiteral("suppressed local track sync while sync is disabled"));
+    if (!jamSyncAllowsControlMessage(message)) {
+        appendLog(QStringLiteral("suppressed targeted control message by the jam sync policy: %1")
+            .arg(message.value(QStringLiteral("type")).toString()));
         return false;
     }
     return sessionController_.sendTo(targetPeerToken, message);
@@ -8867,6 +11666,21 @@ void MainWindow::handleSongSet(
     const QJsonObject& message,
     const QString& sourcePeerToken)
 {
+    const QString syncScope = message.value(QStringLiteral("sync_scope")).toString(
+        QStringLiteral("tracks"));
+    QJsonObject policyProbe{
+        {QStringLiteral("type"), QStringLiteral("song.set")},
+        {QStringLiteral("sync_scope"), syncScope},
+    };
+    if (!jamSyncAllowsControlMessage(policyProbe)) {
+        appendLog(QStringLiteral("ignored %1 snapshot because it is disabled by the jam sync policy")
+            .arg(syncScope));
+        return;
+    }
+    const SongSyncScope songScope = syncScope == QStringLiteral("idea.full")
+        ? SongSyncScope::IdeaFull : syncScope == QStringLiteral("idea.chords")
+            ? SongSyncScope::IdeaChords : syncScope == QStringLiteral("idea.beats")
+                ? SongSyncScope::IdeaBeats : SongSyncScope::Tracks;
     const bool hostAuthoritative =
         message.value(QStringLiteral("host_authoritative")).toBool(false);
     const bool fromPeerProposal = sessionController_.isServer() &&
@@ -8884,8 +11698,8 @@ void MainWindow::handleSongSet(
         appendLog(QStringLiteral("rejected arrangement outside the collaborative proposal or creator snapshot path"));
         return;
     }
-    if (hostAuthoritative &&
-        !trackWorkspace_.outgoingTrackShareBatchId.isEmpty()) {
+    if (songScope == SongSyncScope::Tracks && hostAuthoritative &&
+        !trackWorkspace_.outgoingTrackSharePendingPeers.isEmpty()) {
         const int incomingRevision = message.value(
             QStringLiteral("arrangement_revision")).toInt();
         const int heldRevision = trackWorkspace_.heldTrackShareSongSet.value(
@@ -8895,28 +11709,49 @@ void MainWindow::handleSongSet(
             trackWorkspace_.heldTrackShareSongSourcePeerToken = sourcePeerToken;
         }
         appendLog(QStringLiteral(
-            "held arrangement revision %1 until outgoing Track Sync batch %2 completes")
+            "held arrangement revision %1 until %2 outgoing Track Sync batch(es) complete")
             .arg(incomingRevision)
-            .arg(trackWorkspace_.outgoingTrackShareBatchId.left(8)));
+            .arg(trackWorkspace_.outgoingTrackSharePendingPeers.size()));
         return;
     }
     if (fromPeerProposal) {
         const quint64 currentRevision = sessionController_.snapshot().arrangementRevision;
         if (proposalBaseRevision != currentRevision) {
+            if (songScope == SongSyncScope::Tracks &&
+                trackWorkspace_.authoritativeTrackHistory.contains(proposalBaseRevision)) {
+                int mergedChanges = 0;
+                int mergeConflicts = 0;
+                QJsonObject rebased = message;
+                rebased.insert(QStringLiteral("song"), mergeConcurrentLooperMetadata(
+                    trackWorkspace_.authoritativeTrackHistory.value(proposalBaseRevision),
+                    songToJson(true),
+                    message.value(QStringLiteral("song")).toObject(),
+                    &mergedChanges,
+                    &mergeConflicts));
+                rebased.insert(QStringLiteral("base_arrangement_revision"),
+                    static_cast<qint64>(currentRevision));
+                appendLog(QStringLiteral(
+                    "rebased stale track metadata from peer %1: base=%2 current=%3 "
+                    "merged_changes=%4 conflicts_kept_local=%5")
+                    .arg(sourcePeerToken.left(8))
+                    .arg(proposalBaseRevision)
+                    .arg(currentRevision)
+                    .arg(mergedChanges)
+                    .arg(mergeConflicts));
+                QTimer::singleShot(0, this,
+                    [this, rebased, sourcePeerToken] {
+                        handleSongSet(rebased, sourcePeerToken);
+                    });
+                return;
+            }
             appendLog(QStringLiteral(
                 "rejected stale collaborative arrangement from peer %1: base=%2 current=%3")
                 .arg(sourcePeerToken.left(8))
                 .arg(proposalBaseRevision)
                 .arg(currentRevision));
-            sendSongSnapshot();
+            sendSongSnapshot(std::nullopt, songScope);
             return;
         }
-    }
-    if (!looperProject_.trackSyncEnabled()) {
-        appendLog(fromPeerProposal
-            ? QStringLiteral("ignored collaborative arrangement proposal while Track Sync is disabled")
-            : QStringLiteral("ignored creator arrangement while Track Sync is disabled"));
-        return;
     }
     if (sessionController_.isServer() && hostAuthoritative) {
         appendLog(QStringLiteral("ignored host-authoritative song snapshot while hosting"));
@@ -8924,9 +11759,9 @@ void MainWindow::handleSongSet(
     }
     const int revision = message.value(QStringLiteral("arrangement_revision")).toInt(
         message.value(QStringLiteral("revision")).toInt(0));
-    const bool restartTrack = fromPeerProposal
+    const bool restartTrack = jamSyncPolicy_.globalPlayback && (fromPeerProposal
         ? trackRecordingWorkflow_.globalTransportRequestedPlaying()
-        : message.value(QStringLiteral("track_playing")).toBool(false);
+        : message.value(QStringLiteral("track_playing")).toBool(false));
     if (hostAuthoritative &&
         revision <= lastAppliedHostArrangementRevision_) {
         appendLog(QStringLiteral("ignored stale host arrangement revision %1").arg(revision));
@@ -8943,8 +11778,132 @@ void MainWindow::handleSongSet(
             }
         }
     }
-    const QJsonObject normalizedSong =
+    const QJsonObject normalizedIncomingSong =
         normalizeLooperAssetPaths(message.value(QStringLiteral("song")).toObject());
+    const QString pendingRecordingId = pendingRecordedLaneSyncId_;
+    const QString pendingRecordingHash = pendingRecordedLaneSyncHash_;
+    bool authoritativeContainsPendingRecording = false;
+    if (hostAuthoritative && !pendingRecordingId.isEmpty()) {
+        const QJsonArray pendingBanks = normalizedIncomingSong
+            .value(QStringLiteral("looper")).toObject()
+            .value(QStringLiteral("banks")).toArray();
+        for (const QJsonValue& bankValue : pendingBanks) {
+            for (const QJsonValue& laneValue : bankValue.toObject()
+                     .value(QStringLiteral("lanes")).toArray()) {
+                const QJsonObject lane = laneValue.toObject();
+                const bool matches = !pendingRecordingHash.isEmpty()
+                    ? lane.value(QStringLiteral("asset_hash")).toString() ==
+                        pendingRecordingHash
+                    : lane.value(QStringLiteral("id")).toString() ==
+                        pendingRecordingId;
+                if (matches) {
+                    authoritativeContainsPendingRecording = true;
+                    break;
+                }
+            }
+            if (authoritativeContainsPendingRecording) break;
+        }
+    }
+    QJsonObject normalizedSong = songToJson(true);
+    if (songScope == SongSyncScope::Tracks) {
+        normalizedSong.insert(
+            QStringLiteral("looper"),
+            normalizedIncomingSong.value(QStringLiteral("looper")));
+        if (normalizedIncomingSong.contains(QStringLiteral("title"))) {
+            normalizedSong.insert(
+                QStringLiteral("title"),
+                normalizedIncomingSong.value(QStringLiteral("title")));
+        }
+        QJsonArray localSections = normalizedSong.value(QStringLiteral("sections")).toArray();
+        const QJsonArray incomingSections = normalizedIncomingSong
+            .value(QStringLiteral("sections")).toArray();
+        for (int section = 0; section < qMin(localSections.size(), incomingSections.size()); ++section) {
+            QJsonObject localSection = localSections.at(section).toObject();
+            const QJsonObject incomingSection = incomingSections.at(section).toObject();
+            for (const QString& field : {
+                     QStringLiteral("label"), QStringLiteral("name"), QStringLiteral("id"),
+                     QStringLiteral("beats")}) {
+                if (incomingSection.contains(field)) {
+                    localSection.insert(field, incomingSection.value(field));
+                }
+            }
+            const int structuralBeats = localSection.value(
+                QStringLiteral("beats")).toInt(8);
+            for (const QString& field : {
+                     QStringLiteral("chords"), QStringLiteral("targets"),
+                     QStringLiteral("beat_notes"), QStringLiteral("lyrics"),
+                     QStringLiteral("beat_patterns"), QStringLiteral("musical_patterns")}) {
+                QJsonArray values = localSection.value(field).toArray();
+                while (values.size() > structuralBeats) values.removeLast();
+                if (localSection.contains(field)) localSection.insert(field, values);
+            }
+            localSections.replace(section, localSection);
+        }
+        normalizedSong.insert(QStringLiteral("sections"), localSections);
+    } else {
+        if (songScope == SongSyncScope::IdeaFull) {
+            const QJsonValue localLooper = normalizedSong.value(QStringLiteral("looper"));
+            normalizedSong = normalizedIncomingSong;
+            normalizedSong.insert(QStringLiteral("looper"), localLooper);
+        } else {
+            QJsonArray localSections = normalizedSong.value(QStringLiteral("sections")).toArray();
+            const QJsonArray incomingSections = normalizedIncomingSong
+                .value(QStringLiteral("sections")).toArray();
+            const int sectionCount = qMin(localSections.size(), incomingSections.size());
+            const QStringList sharedFields = songScope == SongSyncScope::IdeaChords
+                ? QStringList{
+                    QStringLiteral("label"), QStringLiteral("name"), QStringLiteral("id"),
+                    QStringLiteral("beats"), QStringLiteral("chords"),
+                    QStringLiteral("targets"), QStringLiteral("musical_patterns"),
+                    QStringLiteral("generated_kind"), QStringLiteral("generated_recipe")}
+                : QStringList{
+                    QStringLiteral("label"), QStringLiteral("name"), QStringLiteral("id"),
+                    QStringLiteral("beats"), QStringLiteral("beat_notes"),
+                    QStringLiteral("beat_patterns"), QStringLiteral("drum_kit"),
+                    QStringLiteral("generated_kind"), QStringLiteral("generated_recipe")};
+            for (int section = 0; section < sectionCount; ++section) {
+                QJsonObject localSection = localSections.at(section).toObject();
+                const QJsonObject incomingSection = incomingSections.at(section).toObject();
+                for (const QString& field : sharedFields) {
+                    if (incomingSection.contains(field)) {
+                        localSection.insert(field, incomingSection.value(field));
+                    } else {
+                        localSection.remove(field);
+                    }
+                }
+                const int beats = localSection.value(QStringLiteral("beats")).toInt(8);
+                for (const QString& field : {
+                         QStringLiteral("chords"), QStringLiteral("targets"),
+                         QStringLiteral("beat_notes"), QStringLiteral("lyrics"),
+                         QStringLiteral("beat_patterns"), QStringLiteral("musical_patterns")}) {
+                    QJsonArray values = localSection.value(field).toArray();
+                    while (values.size() > beats) values.removeLast();
+                    if (localSection.contains(field)) localSection.insert(field, values);
+                }
+                localSections.replace(section, localSection);
+            }
+            normalizedSong.insert(QStringLiteral("sections"), localSections);
+            if (songScope == SongSyncScope::IdeaChords &&
+                normalizedIncomingSong.contains(QStringLiteral("title"))) {
+                normalizedSong.insert(
+                    QStringLiteral("title"),
+                    normalizedIncomingSong.value(QStringLiteral("title")));
+            }
+        }
+        QJsonObject localLooper = normalizedSong.value(QStringLiteral("looper")).toObject();
+        QJsonArray localBanks = localLooper.value(QStringLiteral("banks")).toArray();
+        const QJsonArray incomingBanks = normalizedIncomingSong.value(QStringLiteral("looper"))
+            .toObject().value(QStringLiteral("banks")).toArray();
+        for (int bank = 0; bank < qMin(localBanks.size(), incomingBanks.size()); ++bank) {
+            QJsonObject localBank = localBanks.at(bank).toObject();
+            localBank.insert(
+                QStringLiteral("timing"),
+                incomingBanks.at(bank).toObject().value(QStringLiteral("timing")));
+            localBanks.replace(bank, localBank);
+        }
+        localLooper.insert(QStringLiteral("banks"), localBanks);
+        normalizedSong.insert(QStringLiteral("looper"), localLooper);
+    }
     QStringList referencedHashes;
     const QJsonArray banks = normalizedSong.value(QStringLiteral("looper"))
         .toObject().value(QStringLiteral("banks")).toArray();
@@ -9009,10 +11968,15 @@ void MainWindow::handleSongSet(
                 }
             }
         },
-        [this, song, revision, restartTrack, hostAuthoritative, fromPeerProposal,
-         proposalBaseRevision,
-         sourcePeerToken, checkRevision, missing, resolvedPaths, assetFailure] {
+        [this, message, song, revision, restartTrack, hostAuthoritative, fromPeerProposal,
+         proposalBaseRevision, songScope,
+         sourcePeerToken, checkRevision, missing, resolvedPaths, assetFailure,
+         pendingRecordingId, authoritativeContainsPendingRecording] {
             if (checkRevision != songAssetCheckRevision_) {
+                return;
+            }
+            if (deferIncomingControlForLaneRecording(
+                    message, sourcePeerToken)) {
                 return;
             }
             if (!assetFailure->isEmpty()) {
@@ -9025,7 +11989,7 @@ void MainWindow::handleSongSet(
                     "discarded collaborative arrangement superseded during asset validation: base=%1 current=%2")
                     .arg(proposalBaseRevision)
                     .arg(sessionController_.snapshot().arrangementRevision));
-                sendSongSnapshot();
+                sendSongSnapshot(std::nullopt, songScope);
                 return;
             }
             QJsonObject resolvedSong = song;
@@ -9040,8 +12004,10 @@ void MainWindow::handleSongSet(
                         lane.value(QStringLiteral("asset_hash")).toString().toLower();
                     if (resolvedPaths->contains(hash)) {
                         lane.insert(QStringLiteral("asset_path"), resolvedPaths->value(hash));
-                        lanes.replace(laneIndex, lane);
+                    } else if (missing->contains(hash) && !automaticWavSharingEnabled()) {
+                        lane.insert(QStringLiteral("asset_path"), QString{});
                     }
+                    lanes.replace(laneIndex, lane);
                 }
                 bank.insert(QStringLiteral("lanes"), lanes);
                 resolvedBanks.replace(bankIndex, bank);
@@ -9061,7 +12027,7 @@ void MainWindow::handleSongSet(
                  !missing->contains(incomingAssetHash_))) {
                 assetTransfer_.resetIncoming();
             }
-            if (!missing->isEmpty()) {
+            if (!missing->isEmpty() && automaticWavSharingEnabled()) {
                 pendingSongSet_ = resolvedSong;
                 pendingSongRevision_ = revision;
                 trackWorkspace_.pendingSongBaseRevision = proposalBaseRevision;
@@ -9078,6 +12044,11 @@ void MainWindow::handleSongSet(
                 requestNextPendingAsset();
                 return;
             }
+            if (!missing->isEmpty()) {
+                appendLog(QStringLiteral(
+                    "applied shared lane metadata with %1 WAV asset(s) left local; automatic WAV sharing is off")
+                    .arg(missing->size()));
+            }
             projectPersistence_.useWorkspaceAsProjectFolderIfUnset();
             pendingSongSet_ = QJsonObject{};
             pendingSongRevision_ = 0;
@@ -9089,6 +12060,22 @@ void MainWindow::handleSongSet(
             if (loadSongJson(resolvedSong)) {
                 if (hostAuthoritative) {
                     lastAppliedHostArrangementRevision_ = revision;
+                    if (!pendingRecordingId.isEmpty() &&
+                        pendingRecordedLaneSyncId_ == pendingRecordingId) {
+                        if (authoritativeContainsPendingRecording) {
+                            pendingRecordedLaneSyncId_.clear();
+                            pendingRecordedLaneSyncHash_.clear();
+                            pendingRecordedLaneSyncAttempts_ = 0;
+                        } else if (pendingRecordedLaneSyncAttempts_ < 4) {
+                            const int retry = ++pendingRecordedLaneSyncAttempts_;
+                            QTimer::singleShot(100 * retry, this, [this] {
+                                if (!pendingRecordedLaneSyncId_.isEmpty() &&
+                                    !laneRecordingIsolationActive()) {
+                                    syncLooperArrangement();
+                                }
+                            });
+                        }
+                    }
                 }
                 refreshSongViews();
                 refreshLooperLanes();
@@ -9100,7 +12087,7 @@ void MainWindow::handleSongSet(
                 if (fromPeerProposal) {
                     appendLog(QStringLiteral("accepted collaborative arrangement edit from peer %1")
                         .arg(sourcePeerToken.left(8)));
-                    sendSongSnapshot(restartTrack);
+                    sendSongSnapshot(restartTrack, songScope);
                 }
             }
         },
@@ -9123,6 +12110,7 @@ void MainWindow::handleSongSet(
 
 void MainWindow::applyPendingSongIfAssetsReady()
 {
+    if (laneRecordingIsolationActive()) return;
     if (pendingSongSet_.isEmpty()) {
         return;
     }
@@ -9475,7 +12463,7 @@ void MainWindow::loadTrackJson(const QJsonObject& object)
     model.loopEnabled = object.value(QStringLiteral("loop_enabled")).toBool(model.loopEnabled);
     model.loopStartSeconds = object.value(QStringLiteral("loop_start_seconds")).toDouble(model.loopStartSeconds);
     model.loopEndSeconds = object.value(QStringLiteral("loop_end_seconds")).toDouble(model.loopEndSeconds);
-    model.syncControls = looperProject_.trackSyncEnabled();
+    model.syncControls = jamSyncPolicy_.globalPlayback;
     model.focusEnabled = object.value(QStringLiteral("focus_enabled")).toBool(model.focusEnabled);
     model.focusPreset = object.value(QStringLiteral("focus_preset")).toString(model.focusPreset);
     model.focusFrequencyHz = object.value(QStringLiteral("focus_frequency_hz")).toDouble(model.focusFrequencyHz);
@@ -9849,7 +12837,7 @@ void MainWindow::updatePlaybackGrid()
             performanceUpcomingBeats,
             performanceUpcomingBank >= 0
                 ? bankMetronomePattern(performanceUpcomingBank).beats_per_bar : beatsPerBar,
-            !looperProject_.trackSyncEnabled(),
+            !jamSyncPolicy_.globalPlayback,
             bankStatus);
         performanceHome_->setArrangementState(arrangementRunning_, arrangementArmed_);
         performanceHome_->setTiming(
@@ -9924,13 +12912,27 @@ void MainWindow::updatePlaybackGrid()
             currentMetronomePattern().tempo_pulse_units);
     }
     if (looperStack_) {
-        const bool trackPlaying =
-            trackRecordingWorkflow_.globalTransportPlaying();
         const qint64 gridPositionMs = qMax<qint64>(0, transportPositionMs);
         const auto viewedPattern = bankMetronomePattern(viewedBankIndex_);
+        qint64 recordingPreviewFrames = 0;
+        if (trackRecordingWorkflow_.inputTakeActive() &&
+            trackRecordingWorkflow_.armedBank() == viewedBankIndex_) {
+            const double recordedBeats = static_cast<double>(visualAbsoluteBeat) +
+                qBound(0.0, beatPhase, 0.999999);
+            recordingPreviewFrames = static_cast<qint64>(std::llround(
+                recordedBeats * qMax(1, activeTrackSampleRate()) * 60.0 /
+                (qMax(1, viewedPattern.bpm) *
+                 qMax(1, viewedPattern.tempo_pulse_units))));
+        } else if (loopbackRecorder_.isRunning() &&
+                   trackRecordingWorkflow_.armedBank() == viewedBankIndex_ &&
+                   loopbackRecordingPreviewClock_.isValid()) {
+            recordingPreviewFrames = loopbackRecordingPreviewClock_.elapsed() *
+                static_cast<qint64>(qMax(1, activeTrackSampleRate())) / 1000;
+        }
+        looperStack_->setLiveRecordingEndFrame(recordingPreviewFrames);
         looperStack_->setGridPosition(
             gridPositionMs,
-            trackPlaying && viewedBankIndex_ == liveBank,
+            editorMarkerRunning && viewedBankIndex_ == liveBank,
             viewedPattern.bpm,
             viewedPattern.beats_per_bar,
             viewedPattern.tempo_pulse_units);
@@ -9945,21 +12947,27 @@ void MainWindow::updateRecordingCountdown(const PlaybackGrid::Position& position
     const TrackRecordingWorkflow::CountdownPresentation countdown =
         trackRecordingWorkflow_.countdown(position);
     if (countdown.phase == TrackRecordingWorkflow::CountdownPhase::Hidden) {
-        recordingCountdownLabel_->hide();
+        recordingCountdownLabel_->setText(
+            QStringLiteral("ARMED  ›  WAITING FOR BAR  ›  COUNT-IN  ›  RECORDING"));
         return;
     }
     if (countdown.phase == TrackRecordingWorkflow::CountdownPhase::WaitingForBeat) {
-        recordingCountdownLabel_->setText(QStringLiteral("WAITING FOR NEXT BEAT..."));
-        recordingCountdownLabel_->show();
+        recordingCountdownLabel_->setText(
+            QStringLiteral("ARMED  ✓  WAITING FOR BAR  ●  COUNT-IN  ›  RECORDING"));
+        publishLocalTrackRecordingState(QStringLiteral("waiting"));
         return;
     }
     if (countdown.phase == TrackRecordingWorkflow::CountdownPhase::Counting) {
-        recordingCountdownLabel_->setText(QString::number(countdown.remainingBeats));
-        recordingCountdownLabel_->show();
+        recordingCountdownLabel_->setText(QStringLiteral(
+            "ARMED  ✓  WAITING FOR BAR  ✓  COUNT-IN  %1  ●  RECORDING")
+            .arg(countdown.remainingBeats));
+        publishLocalTrackRecordingState(
+            QStringLiteral("count-in"), countdown.remainingBeats);
         return;
     }
-    recordingCountdownLabel_->setText(QStringLiteral("RECORDING"));
-    recordingCountdownLabel_->show();
+    recordingCountdownLabel_->setText(
+        QStringLiteral("ARMED  ✓  WAITING FOR BAR  ✓  COUNT-IN  ✓  RECORDING  ●"));
+    publishLocalTrackRecordingState(QStringLiteral("recording"));
     if (countdown.stopMetronome) {
         stopTrackMetronome();
     }
@@ -10075,6 +13083,7 @@ void MainWindow::newSong()
     stopTrackMetronome();
     trackController_ = SharedTrackController{};
     looperProject_ = LooperProject{};
+    addInitialEmptyLooperLanes(looperProject_);
     applyMetronomePatternForBank(0, false);
     trackRecordingWorkflow_.clearProjectCapture();
     if (trackWaveform_) {
@@ -10095,7 +13104,7 @@ void MainWindow::openSong()
         appReleaseFolderPath(QStringLiteral("songs")),
         QStringLiteral("JamJar (*.jamjar);;JSON files (*.json);;All files (*)"),
         nullptr,
-        QFileDialog::DontUseNativeDialog);
+        QFileDialog::Options{});
     if (path.isEmpty()) {
         return;
     }
@@ -10429,16 +13438,33 @@ void MainWindow::cleanupTransientTrackWavs()
 }
 
 
-void MainWindow::sendSongSnapshot(std::optional<bool> trackPlayingOverride)
+void MainWindow::sendSongSnapshot(
+    std::optional<bool> trackPlayingOverride,
+    SongSyncScope scope)
 {
-    if (!looperProject_.trackSyncEnabled()) {
-        appendLog(QStringLiteral("suppressed local track sync while sync is disabled"));
+    const QString scopeName = scope == SongSyncScope::IdeaFull
+        ? QStringLiteral("idea.full") : scope == SongSyncScope::IdeaChords
+            ? QStringLiteral("idea.chords") : scope == SongSyncScope::IdeaBeats
+                ? QStringLiteral("idea.beats") : QStringLiteral("tracks");
+    QJsonObject policyProbe{
+        {QStringLiteral("type"), QStringLiteral("song.set")},
+        {QStringLiteral("sync_scope"), scopeName},
+    };
+    if (!jamSyncAllowsControlMessage(policyProbe)) {
+        appendLog(QStringLiteral("suppressed %1 snapshot by the jam sync policy")
+            .arg(scopeName));
         return;
     }
     const SharedSessionController::Snapshot before = sessionController_.snapshot();
     if (before.role != SharedSessionController::Role::Creator &&
         before.role != SharedSessionController::Role::Joiner) {
         return;
+    }
+    const QJsonObject snapshotSong = songToJson(true);
+    if (sessionController_.isServer() &&
+        !trackWorkspace_.authoritativeTrackHistory.contains(before.arrangementRevision)) {
+        trackWorkspace_.authoritativeTrackHistory.insert(
+            before.arrangementRevision, snapshotSong);
     }
     const int revision = looperArrangementRevision_ + 1;
     if (!sessionController_.isServer()) {
@@ -10449,9 +13475,10 @@ void MainWindow::sendSongSnapshot(std::optional<bool> trackPlayingOverride)
             {QStringLiteral("base_arrangement_revision"),
                 static_cast<qint64>(before.arrangementRevision)},
             {QStringLiteral("host_authoritative"), false},
+            {QStringLiteral("sync_scope"), scopeName},
             {QStringLiteral("track_playing"), trackPlayingOverride.value_or(
                 trackRecordingWorkflow_.globalTransportRequestedPlaying())},
-            {QStringLiteral("song"), songToJson(true)},
+            {QStringLiteral("song"), snapshotSong},
         };
         const qsizetype bytes = QJsonDocument(proposal).toJson(QJsonDocument::Compact).size();
         if (bytes > jam2::control_protocol::kMaxLargeJsonBytes) {
@@ -10486,8 +13513,9 @@ void MainWindow::sendSongSnapshot(std::optional<bool> trackPlayingOverride)
         {QStringLiteral("revision"), revision},
         {QStringLiteral("arrangement_revision"), revision},
         {QStringLiteral("host_authoritative"), true},
+        {QStringLiteral("sync_scope"), scopeName},
         {QStringLiteral("track_playing"), trackPlaying},
-        {QStringLiteral("song"), songToJson(true)},
+        {QStringLiteral("song"), snapshotSong},
     };
     const qsizetype bytes = QJsonDocument(authoritative)
         .toJson(QJsonDocument::Compact).size();
@@ -10501,6 +13529,12 @@ void MainWindow::sendSongSnapshot(std::optional<bool> trackPlayingOverride)
     (void)sessionController_.send(authoritative);
     const SharedSessionController::Snapshot after = sessionController_.snapshot();
     looperArrangementRevision_ = revision;
+    trackWorkspace_.authoritativeTrackHistory.insert(
+        static_cast<quint64>(revision), snapshotSong);
+    while (trackWorkspace_.authoritativeTrackHistory.size() > 16) {
+        trackWorkspace_.authoritativeTrackHistory.erase(
+            trackWorkspace_.authoritativeTrackHistory.begin());
+    }
     trackController_.requestPlayback(trackPlaying, after.arrangementRevision);
     updateTrackPlaybackPresentation();
 }
@@ -10530,6 +13564,11 @@ void MainWindow::refreshSongView(const QString& lane)
 
 void MainWindow::generatePracticeIdea()
 {
+    if (sharedRecordingProtected()) {
+        appendLog(QStringLiteral(
+            "idea generation is unavailable while a track take is active"));
+        return;
+    }
     jam2::practice::PracticeIdeaDialogDefaults defaults;
     defaults.targetSectionIndex = chordGrid_
         ? chordGrid_->selectedSectionIndex()
@@ -10572,6 +13611,11 @@ void MainWindow::generatePracticeIdea()
 
 void MainWindow::continuePracticeIdea()
 {
+    if (sharedRecordingProtected()) {
+        appendLog(QStringLiteral(
+            "idea continuation is unavailable while a track take is active"));
+        return;
+    }
     jam2::practice::ContinueIdeaDialogDefaults defaults;
     defaults.sourceSectionIndex = qBound(0, viewedBankIndex_, 3);
     for (int bank = 0; bank < 4; ++bank) {
@@ -10622,7 +13666,15 @@ void MainWindow::continuePracticeIdea()
     selectViewedBank(targetBank);
     refreshSongViews();
     refreshLooperLanes();
-    sendSongSnapshot(affectsLiveBank ? std::optional<bool>(false) : std::nullopt);
+    if (jamSyncPolicy_.generatedIdeas != GeneratedIdeaSyncMode::Off) {
+        const SongSyncScope scope = jamSyncPolicy_.generatedIdeas == GeneratedIdeaSyncMode::Chords
+            ? SongSyncScope::IdeaChords
+            : jamSyncPolicy_.generatedIdeas == GeneratedIdeaSyncMode::Beats
+                ? SongSyncScope::IdeaBeats : SongSyncScope::IdeaFull;
+        sendSongSnapshot(
+            affectsLiveBank ? std::optional<bool>(false) : std::nullopt,
+            scope);
+    }
     const auto& analysis = continuation->analysis;
     appendLog(QStringLiteral(
         "continued Section %1 into Section %2 as %3 using %4/%5; key confidence=%6%, profile=%7 (%8%); chord-root overlap=%9%, chord-symbol overlap=%10%, order contrast=%11%, first-four-position similarity=%12%, drums=%13%, melody rhythm=%14%, melody contour=%15%, bass contour=%16%, boundary=%17%, harmonic density=%18% (%19->%20 changes)")
@@ -10650,6 +13702,11 @@ void MainWindow::continuePracticeIdea()
 
 void MainWindow::clearPracticeIdea()
 {
+    if (sharedRecordingProtected()) {
+        appendLog(QStringLiteral(
+            "idea clearing is unavailable while a track take is active"));
+        return;
+    }
     const int viewedBank = qBound(0, viewedBankIndex_, 3);
     QMessageBox prompt(this);
     prompt.setIcon(QMessageBox::Question);
@@ -10702,7 +13759,14 @@ void MainWindow::clearPracticeIdea()
     if (performanceHome_) {
         performanceHome_->update();
     }
-    sendSongSnapshot();
+    if (jamSyncPolicy_.generatedIdeas != GeneratedIdeaSyncMode::Off) {
+        const SongSyncScope syncScope =
+            jamSyncPolicy_.generatedIdeas == GeneratedIdeaSyncMode::Chords
+            ? SongSyncScope::IdeaChords
+            : jamSyncPolicy_.generatedIdeas == GeneratedIdeaSyncMode::Beats
+                ? SongSyncScope::IdeaBeats : SongSyncScope::IdeaFull;
+        sendSongSnapshot(std::nullopt, syncScope);
+    }
     const QString scope = clearAllBanks
         ? QStringLiteral("all sections")
         : QStringLiteral("Section %1").arg(
@@ -10714,6 +13778,7 @@ void MainWindow::clearPracticeIdea()
 
 bool MainWindow::applyPracticeIdea(const jam2::practice::ChordIdeaRequest& request)
 {
+    if (sharedRecordingProtected()) return false;
     const auto previousPattern = currentMetronomePattern();
     const auto idea = jam2::practice::PracticeIdeaController::generateCoupled(
         chordModel_, beatModel_, request);
@@ -10759,8 +13824,17 @@ bool MainWindow::applyPracticeIdea(const jam2::practice::ChordIdeaRequest& reque
     }
     selectViewedBank(targetBank);
     refreshLooperLanes();
-    sendSongSnapshot(affectsLiveBank || timingChanged
-        ? std::optional<bool>(false) : std::nullopt);
+    if (jamSyncPolicy_.generatedIdeas != GeneratedIdeaSyncMode::Off) {
+        const SongSyncScope syncScope =
+            jamSyncPolicy_.generatedIdeas == GeneratedIdeaSyncMode::Chords
+            ? SongSyncScope::IdeaChords
+            : jamSyncPolicy_.generatedIdeas == GeneratedIdeaSyncMode::Beats
+                ? SongSyncScope::IdeaBeats : SongSyncScope::IdeaFull;
+        sendSongSnapshot(
+            affectsLiveBank || timingChanged
+                ? std::optional<bool>(false) : std::nullopt,
+            syncScope);
+    }
     return true;
 }
 
@@ -10786,6 +13860,11 @@ void MainWindow::stopTrackForPracticeIdeaGeneration()
 
 void MainWindow::generatePracticeReferenceWavs()
 {
+    if (sharedRecordingProtected()) {
+        appendLog(QStringLiteral(
+            "reference WAV generation is unavailable while a track take is active"));
+        return;
+    }
     if (referenceWavGenerationRunning_) {
         appendLog(QStringLiteral("reference WAV generation is already running"));
         return;
@@ -10834,7 +13913,7 @@ void MainWindow::generatePracticeReferenceWavs()
     jam2::practice::ReferenceRenderSettings defaults;
     defaults.renderChords = anyChords;
     defaults.renderDrums = anyDrums;
-    defaults.renderMelody = anyMelody;
+    defaults.renderMelody = false;
     defaults.renderBass = anyBass;
     defaults.renderSupport = anySupport;
     defaults.bpm = pattern.bpm;
@@ -10876,7 +13955,7 @@ void MainWindow::generatePracticeReferenceWavs()
         {QStringLiteral("drum_kit"), static_cast<int>(settings->drumKit)},
     };
     const SharedSessionController::Snapshot session = sessionController_.snapshot();
-    if (looperProject_.trackSyncEnabled() && session.remotePeerCount > 0) {
+    if (automaticWavSharingEnabled() && session.remotePeerCount > 0) {
         sendControl(request);
     }
     handlePracticeReferenceRenderRequest(request, QString{}, true);
@@ -10906,9 +13985,9 @@ void MainWindow::handlePracticeReferenceRenderRequest(
     const QString& sourcePeerToken,
     bool localRequest)
 {
-    if (!localRequest && !looperProject_.trackSyncEnabled()) {
+    if (!localRequest && !automaticWavSharingEnabled()) {
         appendLog(QStringLiteral(
-            "ignored shared reference WAV render while Track Sync is disabled"));
+            "ignored shared reference WAV render while automatic WAV sharing is disabled"));
         return;
     }
     const QString requestId = message.value(QStringLiteral("request_id")).toString();
