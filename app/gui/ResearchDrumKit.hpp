@@ -131,6 +131,15 @@ struct ResearchDrumRenderEvent {
 struct ResearchDrumRenderResult {
     QVector<float> dry;
     QVector<float> roomSend;
+    qint64 setupUs = -1;
+    qint64 voicesUs = -1;
+    qint64 detailBanksUs = -1;
+    quint64 processedVoiceSamples = 0;
+    quint64 modalDetailSamples = 0;
+    quint64 noiseDetailSamples = 0;
+    int maximumActiveVoices = 0;
+    QHash<QString, quint64> processedVoiceSamplesBySource;
+    QHash<QString, int> voicesBySource;
 };
 
 const ResearchDrumKit* researchDrumKitForProfile(
@@ -161,7 +170,8 @@ ResearchDrumRenderResult renderResearchDrumVoices(
     const ResearchDrumKit& kit,
     const QVector<ResearchDrumRenderEvent>& events,
     qint64 totalFrames,
-    int sampleRate);
+    int sampleRate,
+    bool collectPerformanceTimings = false);
 void applyResearchDrumBus(
     QVector<float>& audio,
     const QVector<float>& roomSend,

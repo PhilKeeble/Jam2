@@ -1558,7 +1558,13 @@ ReferenceWav renderDrums(
         });
     }
     const ResearchDrumRenderResult research = renderResearchDrumVoices(
-        tunedKit, researchEvents, totalFrames, settings.sampleRate);
+        tunedKit,
+        researchEvents,
+        totalFrames,
+        settings.sampleRate,
+        settings.collectPerformanceTimings);
+    QElapsedTimer phaseTimer;
+    if (settings.collectPerformanceTimings) phaseTimer.start();
     const double generatedGain = generatedPerformance
         ? std::pow(10.0, section.generatedRecipe.drumMixGainDb / 20.0)
         : 1.0;
@@ -1572,14 +1578,23 @@ ReferenceWav renderDrums(
                 researchScale * research.roomSend.at(frame));
         }
     }
+    const qint64 scaleUs = settings.collectPerformanceTimings
+        ? phaseTimer.nsecsElapsed() / 1000 : -1;
+    if (settings.collectPerformanceTimings) phaseTimer.restart();
     applyResearchDrumBus(
         rendered,
         researchRoomSend,
         tunedKit.bus,
         settings.sampleRate);
+    const qint64 busUs = settings.collectPerformanceTimings
+        ? phaseTimer.nsecsElapsed() / 1000 : -1;
+    if (settings.collectPerformanceTimings) phaseTimer.restart();
     const bool generated = generatedPerformance;
     const DrumMakeupMetrics makeup =
         applyGeneratedDrumMakeup(rendered, generated);
+    const qint64 makeupUs = settings.collectPerformanceTimings
+        ? phaseTimer.nsecsElapsed() / 1000 : -1;
+    if (settings.collectPerformanceTimings) phaseTimer.restart();
 
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) {
@@ -1615,9 +1630,15 @@ ReferenceWav renderDrums(
         error = QStringLiteral("Cannot finalize drum reference WAV.");
         return {};
     }
-    return {
+    const qint64 wavUs = settings.collectPerformanceTimings
+        ? phaseTimer.nsecsElapsed() / 1000 : -1;
+    if (settings.collectPerformanceTimings) phaseTimer.restart();
+    const QString sha256 = fileHash(path);
+    const qint64 hashUs = settings.collectPerformanceTimings
+        ? phaseTimer.nsecsElapsed() / 1000 : -1;
+    ReferenceWav output{
         path,
-        fileHash(path),
+        sha256,
         totalFrames,
         renderedPeak,
         static_cast<int>(events.size()),
@@ -1627,6 +1648,38 @@ ReferenceWav renderDrums(
         generated ? kGeneratedDrumStemMakeupDb : 0.0,
         makeup.limitedSamples,
     };
+    if (settings.collectPerformanceTimings) {
+        QStringList voiceSources;
+        QStringList sourceIds =
+            research.processedVoiceSamplesBySource.keys();
+        std::sort(sourceIds.begin(), sourceIds.end());
+        for (const QString& sourceId : std::as_const(sourceIds)) {
+            voiceSources.append(QStringLiteral("%1:%2/%3")
+                .arg(sourceId)
+                .arg(research.processedVoiceSamplesBySource.value(sourceId))
+                .arg(research.voicesBySource.value(sourceId)));
+        }
+        output.debugDiagnostics = QStringLiteral(
+            "drum_setup_us=%1 drum_voices_us=%2 drum_detail_banks_us=%3 "
+            "drum_scale_us=%4 drum_bus_us=%5 drum_makeup_us=%6 "
+            "drum_wav_us=%7 drum_hash_us=%8 drum_voice_samples=%9 "
+            "drum_modal_detail_samples=%10 drum_noise_detail_samples=%11 "
+            "drum_max_active_voices=%12 drum_voice_sources=%13")
+            .arg(research.setupUs)
+            .arg(research.voicesUs)
+            .arg(research.detailBanksUs)
+            .arg(scaleUs)
+            .arg(busUs)
+            .arg(makeupUs)
+            .arg(wavUs)
+            .arg(hashUs)
+            .arg(research.processedVoiceSamples)
+            .arg(research.modalDetailSamples)
+            .arg(research.noiseDetailSamples)
+            .arg(research.maximumActiveVoices)
+            .arg(voiceSources.join(QLatin1Char(',')));
+    }
+    return output;
 }
 
 QJsonObject sectionSignature(const SongSection* section)
@@ -2036,6 +2089,10 @@ ReferenceRenderResult renderPracticeReferences(
             .arg(result.drums.preMakeupPeak, 0, 'f', 4)
             .arg(result.drums.makeupGainDb, 0, 'f', 1)
             .arg(result.drums.limitedSamples);
+        if (!result.drums.debugDiagnostics.isEmpty()) {
+            result.diagnostics += QLatin1Char(' ') +
+                result.drums.debugDiagnostics;
+        }
     }
     return result;
 }

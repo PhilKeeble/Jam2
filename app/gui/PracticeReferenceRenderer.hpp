@@ -19,6 +19,7 @@ struct ReferenceWav {
     float preMakeupPeak = 0.0f;
     double makeupGainDb = 0.0;
     qint64 limitedSamples = 0;
+    QString debugDiagnostics;
 };
 
 struct ReferenceRenderResult {

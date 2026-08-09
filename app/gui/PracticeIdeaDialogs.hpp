@@ -41,6 +41,7 @@ struct ReferenceRenderSettings {
     double supportLevel = 0.24;
     double attackMs = 8.0;
     double releaseMs = 100.0;
+    bool collectPerformanceTimings = false;
 };
 
 struct PracticeIdeaDialogDefaults {

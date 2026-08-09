@@ -6033,6 +6033,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         jam2::practice::ReferenceRenderSettings settings;
         settings.sampleRate = 8000;
         settings.bpm = idea.bpm;
+        settings.collectPerformanceTimings = true;
         settings.renderMelody = true;
         settings.renderBass = true;
         settings.renderSupport = true;
@@ -6085,7 +6086,10 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                 QStringLiteral("reported_threads=%1").arg(reportedThreads)) &&
             rendered.diagnostics.contains(QStringLiteral("chord_ms=")) &&
             rendered.diagnostics.contains(QStringLiteral("drum_ms=")) &&
-            rendered.diagnostics.contains(QStringLiteral("elapsed_ms=")),
+            rendered.diagnostics.contains(QStringLiteral("elapsed_ms=")) &&
+            rendered.diagnostics.contains(QStringLiteral("drum_voices_us=")) &&
+            rendered.diagnostics.contains(QStringLiteral("drum_detail_banks_us=")) &&
+            rendered.diagnostics.contains(QStringLiteral("drum_voice_samples=")),
             renderDetail);
         (void)QDir(workspace).removeRecursively();
     }

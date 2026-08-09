@@ -371,6 +371,7 @@ CorpusAudioRender renderFullMix(
     settings.meterNumerator = idea.meterNumerator;
     settings.meterDenominator = idea.meterDenominator;
     settings.tempoPulseUnits = idea.tempoPulseUnits;
+    settings.collectPerformanceTimings = true;
     const auto rendered = jam2::practice::renderPracticeReferences(
         &idea.chordSection, &idea.beatSection, settings,
         artifacts.absolutePath());

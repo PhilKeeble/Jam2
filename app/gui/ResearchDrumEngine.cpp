@@ -9,6 +9,8 @@
 #include "Filters/svf.h"
 #include "Synthesis/oscillator.h"
 
+#include <QElapsedTimer>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -199,6 +201,10 @@ struct Voice {
     std::unique_ptr<daisysp::Svf> identityFilterC;
     std::array<float, 12> identityPhase{};
     std::array<float, 12> identityFrequency{};
+    std::array<double, 12> identityOscillatorSin{};
+    std::array<double, 12> identityOscillatorCos{};
+    std::array<double, 12> identityOscillatorStepSin{};
+    std::array<double, 12> identityOscillatorStepCos{};
     std::array<float, 12> identityGain{};
     std::array<float, 12> identityEnvelope{};
     std::array<float, 12> identityDecay{};
@@ -242,13 +248,44 @@ struct Voice {
     float reconstructed = 0.0f;
     float dynamicFilterAmount = 0.0f;
     float roomSend = 0.0f;
+    QString sourceId;
     QString chokeGroup;
     float chokeGain = 1.0f;
     float chokeDecay = 1.0f;
     float sampleRate = 48000.0f;
     bool trigger = true;
 
-    float processIdentityModes(float pitchScale = 1.0f)
+    float processIdentityModes()
+    {
+        float value = 0.0f;
+        for (int index = 0; index < identityModeCount; ++index) {
+            double sine = identityOscillatorSin[index];
+            double cosine = identityOscillatorCos[index];
+            if ((age & 4095) == 0) {
+                const double magnitude = std::sqrt(
+                    sine * sine + cosine * cosine);
+                if (magnitude > 0.0) {
+                    sine /= magnitude;
+                    cosine /= magnitude;
+                }
+            }
+            const double nextSine =
+                sine * identityOscillatorStepCos[index] +
+                cosine * identityOscillatorStepSin[index];
+            const double nextCosine =
+                cosine * identityOscillatorStepCos[index] -
+                sine * identityOscillatorStepSin[index];
+            identityOscillatorSin[index] = nextSine;
+            identityOscillatorCos[index] = nextCosine;
+            value += static_cast<float>(nextSine) *
+                identityGain[index] *
+                identityEnvelope[index];
+            identityEnvelope[index] *= identityDecay[index];
+        }
+        return value;
+    }
+
+    float processSweptIdentityModes(float pitchScale)
     {
         float value = 0.0f;
         for (int index = 0; index < identityModeCount; ++index) {
@@ -307,7 +344,7 @@ struct Voice {
                 1.0f + identityPitchSweep * identityPitchEnvelope;
             identityFilterA->Process(noise);
             base =
-                processIdentityModes(pitchScale) +
+                processSweptIdentityModes(pitchScale) +
                 0.22f *
                     (0.72f * identityFilterA->Low() +
                      0.58f * identityFilterA->Band()) *
@@ -620,6 +657,15 @@ void setMode(
         20.0f,
         19000.0f);
     voice.identityPhase[index] = 0.012f + 0.16f * unit;
+    const double initialAngle =
+        2.0 * kPi * voice.identityPhase[index];
+    const double phaseStep =
+        2.0 * kPi * voice.identityFrequency[index] /
+        voice.sampleRate;
+    voice.identityOscillatorSin[index] = std::sin(initialAngle);
+    voice.identityOscillatorCos[index] = std::cos(initialAngle);
+    voice.identityOscillatorStepSin[index] = std::sin(phaseStep);
+    voice.identityOscillatorStepCos[index] = std::cos(phaseStep);
     voice.identityGain[index] =
         gain * (0.97f + 0.06f * unit);
     voice.identityEnvelope[index] =
@@ -790,6 +836,7 @@ Voice makeVoice(
         return voice;
     }
     voice.model = *selected;
+    voice.sourceId = source;
     switch (voice.model) {
     case Model::AnalogKick:
         voice.analogKick =
@@ -1319,7 +1366,8 @@ void renderDetailBanks(
     QVector<float>& dry,
     QVector<float>& room,
     const std::vector<DetailHit>& hits,
-    int sampleRate)
+    int sampleRate,
+    ResearchDrumRenderResult* diagnostics)
 {
     constexpr double minusSixtyDb = 6.907755278982137;
     for (const DetailHit& item : hits) {
@@ -1338,6 +1386,10 @@ void renderDetailBanks(
                 std::max<qint64>(1, static_cast<qint64>(
                     std::ceil(seconds * sampleRate))));
             if (count <= 0 || band.level <= 0.0f) continue;
+            if (diagnostics) {
+                diagnostics->modalDetailSamples +=
+                    static_cast<quint64>(count);
+            }
             const double frequency = std::clamp(
                 static_cast<double>(band.frequencyHz) *
                     std::pow(2.0, band.detuneCents / 1200.0),
@@ -1358,18 +1410,27 @@ void renderDetailBanks(
             const double highpassPole = band.highpassHz > 0.0f
                 ? std::exp(-2.0 * kPi * band.highpassHz / sampleRate)
                 : 0.0;
+            const double decayMultiplier =
+                std::exp(-decayCoefficient / sampleRate);
+            const double attackDecayMultiplier =
+                std::exp(
+                    -(attackCoefficient + decayCoefficient) /
+                    sampleRate);
+            double decayEnvelope = 1.0;
+            double attackDecayEnvelope = 1.0;
+            double oscillatorSine = std::sin(initialPhase);
+            double oscillatorCosine = std::cos(initialPhase);
+            const double oscillatorStepSine = std::sin(phaseStep);
+            const double oscillatorStepCosine = std::cos(phaseStep);
             double previousInputA = 0.0;
             double previousOutputA = 0.0;
             double previousInputB = 0.0;
             double previousOutputB = 0.0;
             for (qint64 age = 0; age < count; ++age) {
-                const double time = static_cast<double>(age) / sampleRate;
-                const double attack =
-                    1.0 - std::exp(-attackCoefficient * time);
                 const double envelope =
-                    attack * std::exp(-decayCoefficient * time);
+                    decayEnvelope - attackDecayEnvelope;
                 double sampleValue = gain * envelope *
-                    std::sin(initialPhase + phaseStep * age);
+                    oscillatorSine;
                 if (band.highpassHz > 0.0f) {
                     const double first = sampleValue - previousInputA +
                         highpassPole * previousOutputA;
@@ -1386,6 +1447,15 @@ void renderDetailBanks(
                 dry[frame] += sample;
                 room[frame] += sample * piece.roomSend *
                     band.response.roomSend;
+                decayEnvelope *= decayMultiplier;
+                attackDecayEnvelope *= attackDecayMultiplier;
+                const double nextSine =
+                    oscillatorSine * oscillatorStepCosine +
+                    oscillatorCosine * oscillatorStepSine;
+                oscillatorCosine =
+                    oscillatorCosine * oscillatorStepCosine -
+                    oscillatorSine * oscillatorStepSine;
+                oscillatorSine = nextSine;
             }
         }
         for (qsizetype index = 0; index < piece.noiseBands.size(); ++index) {
@@ -1400,6 +1470,10 @@ void renderDetailBanks(
                 std::max<qint64>(1, static_cast<qint64>(
                     std::ceil(seconds * sampleRate))));
             if (count <= 0 || band.level <= 0.0f) continue;
+            if (diagnostics) {
+                diagnostics->noiseDetailSamples +=
+                    static_cast<quint64>(count);
+            }
             const double frequency = std::clamp(
                 static_cast<double>(band.frequencyHz),
                 40.0,
@@ -1428,6 +1502,14 @@ void renderDetailBanks(
             const double highpassPole = band.highpassHz > 0.0f
                 ? std::exp(-2.0 * kPi * band.highpassHz / sampleRate)
                 : 0.0;
+            const double decayMultiplier =
+                std::exp(-decayCoefficient / sampleRate);
+            const double attackDecayMultiplier =
+                std::exp(
+                    -(attackCoefficient + decayCoefficient) /
+                    sampleRate);
+            double decayEnvelope = 1.0;
+            double attackDecayEnvelope = 1.0;
             double previousInputA = 0.0;
             double previousOutputA = 0.0;
             double previousInputB = 0.0;
@@ -1445,11 +1527,8 @@ void renderDetailBanks(
                 input1 = input;
                 output2 = output1;
                 output1 = filtered;
-                const double time = static_cast<double>(age) / sampleRate;
-                const double attack =
-                    1.0 - std::exp(-attackCoefficient * time);
                 const double envelope =
-                    attack * std::exp(-decayCoefficient * time);
+                    decayEnvelope - attackDecayEnvelope;
                 double sampleValue = gain * envelope * filtered;
                 if (band.highpassHz > 0.0f) {
                     const double first = sampleValue - previousInputA +
@@ -1467,6 +1546,8 @@ void renderDetailBanks(
                 dry[frame] += sample;
                 room[frame] += sample * piece.roomSend *
                     band.response.roomSend;
+                decayEnvelope *= decayMultiplier;
+                attackDecayEnvelope *= attackDecayMultiplier;
             }
         }
     }
@@ -1478,10 +1559,13 @@ ResearchDrumRenderResult renderResearchDrumVoices(
     const ResearchDrumKit& kit,
     const QVector<ResearchDrumRenderEvent>& events,
     qint64 totalFrames,
-    int sampleRate)
+    int sampleRate,
+    bool collectPerformanceTimings)
 {
     ResearchDrumRenderResult result;
     if (totalFrames <= 0 || sampleRate <= 0) return result;
+    QElapsedTimer phaseTimer;
+    if (collectPerformanceTimings) phaseTimer.start();
     // DaisySP's accepted analogue and metallic drum models use rand() for
     // their excitation noise. Reset it at this offline render boundary so a
     // generation recipe remains byte-for-byte reproducible.
@@ -1532,10 +1616,25 @@ ResearchDrumRenderResult renderResearchDrumVoices(
             item.piece,
         });
     }
+    if (collectPerformanceTimings) {
+        result.setupUs = phaseTimer.nsecsElapsed() / 1000;
+        phaseTimer.restart();
+    }
 
     std::vector<Voice> active;
     std::array<SubVoice, 32> synthVoices;
     std::size_t next = 0;
+    const auto recordVoiceWork = [
+        &result,
+        collectPerformanceTimings
+    ](const QString& source, const Voice& voice, qint64 startFrame) {
+        if (!collectPerformanceTimings) return;
+        const quint64 sampleCount = static_cast<quint64>(
+            voice.endFrame - startFrame + 1);
+        result.processedVoiceSamples += sampleCount;
+        result.processedVoiceSamplesBySource[source] += sampleCount;
+        ++result.voicesBySource[source];
+    };
     for (qint64 frame = 0; frame < totalFrames; ++frame) {
         while (next < pending.size() &&
                pending[next].event.frame <= frame) {
@@ -1549,10 +1648,40 @@ ResearchDrumRenderResult renderResearchDrumVoices(
                     std::max(
                         1.0f,
                         item.piece->chokeSeconds * sampleRate));
+                constexpr double kInaudibleChokeGain = 1.0e-6;
+                const qint64 chokeRetirementFrames =
+                    std::max<qint64>(
+                        1,
+                        static_cast<qint64>(std::ceil(
+                            -std::log(kInaudibleChokeGain) *
+                            std::max(
+                                0.001f,
+                                item.piece->chokeSeconds) *
+                            sampleRate)));
                 for (Voice& voice : active) {
                     if (voice.chokeGroup ==
                         item.piece->chokeGroup) {
                         voice.chokeDecay = chokeDecay;
+                        const qint64 shortenedEndFrame = std::min(
+                            voice.endFrame,
+                            frame + chokeRetirementFrames);
+                        if (collectPerformanceTimings &&
+                            shortenedEndFrame < voice.endFrame) {
+                            const quint64 removedSamples =
+                                static_cast<quint64>(
+                                    voice.endFrame - shortenedEndFrame);
+                            result.processedVoiceSamples -=
+                                std::min(
+                                    result.processedVoiceSamples,
+                                    removedSamples);
+                            quint64& sourceSamples =
+                                result.processedVoiceSamplesBySource[
+                                    voice.sourceId];
+                            sourceSamples -= std::min(
+                                sourceSamples,
+                                removedSamples);
+                        }
+                        voice.endFrame = shortenedEndFrame;
                     }
                 }
             }
@@ -1576,6 +1705,10 @@ ResearchDrumRenderResult renderResearchDrumVoices(
                 totalFrames,
                 sampleRate);
             if (voice.endFrame > frame) {
+                recordVoiceWork(
+                    item.piece->source,
+                    voice,
+                    frame);
                 active.push_back(std::move(voice));
             }
             if (hasSecond) {
@@ -1587,6 +1720,10 @@ ResearchDrumRenderResult renderResearchDrumVoices(
                     totalFrames,
                     sampleRate);
                 if (voice.endFrame > frame) {
+                    recordVoiceWork(
+                        item.piece->secondSource,
+                        voice,
+                        frame);
                     active.push_back(std::move(voice));
                 }
             }
@@ -1611,16 +1748,30 @@ ResearchDrumRenderResult renderResearchDrumVoices(
                 }
                 synth->begin(hit, *item.piece, sampleRate);
             }
+            if (collectPerformanceTimings) {
+                result.maximumActiveVoices = std::max(
+                    result.maximumActiveVoices,
+                    static_cast<int>(active.size()));
+            }
             ++next;
         }
 
         float dry = 0.0f;
         float send = 0.0f;
-        for (Voice& voice : active) {
+        std::size_t retainedVoiceCount = 0;
+        for (std::size_t index = 0; index < active.size(); ++index) {
+            Voice& voice = active[index];
             const float sample = voice.gain * voice.process();
             dry += sample;
             send += voice.roomSend * sample;
+            if (frame < voice.endFrame) {
+                if (retainedVoiceCount != index) {
+                    active[retainedVoiceCount] = std::move(voice);
+                }
+                ++retainedVoiceCount;
+            }
         }
+        active.resize(retainedVoiceCount);
         float synth = 0.0f;
         int synthCount = 0;
         float synthSend = 0.0f;
@@ -1641,20 +1792,20 @@ ResearchDrumRenderResult renderResearchDrumVoices(
         }
         result.dry[static_cast<qsizetype>(frame)] = dry;
         result.roomSend[static_cast<qsizetype>(frame)] = send;
-        active.erase(
-            std::remove_if(
-                active.begin(),
-                active.end(),
-                [frame](const Voice& voice) {
-                    return frame >= voice.endFrame;
-                }),
-            active.end());
+    }
+    if (collectPerformanceTimings) {
+        result.voicesUs = phaseTimer.nsecsElapsed() / 1000;
+        phaseTimer.restart();
     }
     renderDetailBanks(
         result.dry,
         result.roomSend,
         detailHits,
-        sampleRate);
+        sampleRate,
+        collectPerformanceTimings ? &result : nullptr);
+    if (collectPerformanceTimings) {
+        result.detailBanksUs = phaseTimer.nsecsElapsed() / 1000;
+    }
     return result;
 }
 
