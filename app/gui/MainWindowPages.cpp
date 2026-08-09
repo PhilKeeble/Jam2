@@ -314,14 +314,24 @@ void MainWindowPages::build(MainWindow& w)
     w.songTitleEdit_->setMaximumWidth(520);
     header->addSpacing(20);
     header->addWidget(w.songTitleEdit_, 1);
-    auto* newSongButton = new QPushButton(QStringLiteral("New Song"), &w);
-    auto* openSongButton = new QPushButton(QStringLiteral("Open"), &w);
-    auto* saveSongButton = new QPushButton(QStringLiteral("Save"), &w);
-    for (QPushButton* button : {newSongButton, openSongButton, saveSongButton}) {
+    auto* startJamButton = new QPushButton(QStringLiteral("Start Jam"), &w);
+    auto* joinJamButton = new QPushButton(QStringLiteral("Join Jam"), &w);
+    w.leaveJamButton_ = new QPushButton(QStringLiteral("Leave Jam"), &w);
+    for (QPushButton* button : {startJamButton, joinJamButton, w.leaveJamButton_}) {
         button->setObjectName(QStringLiteral("DetailTool"));
         button->setFixedHeight(32);
         header->addWidget(button);
     }
+    w.leaveJamButton_->setEnabled(false);
+    QObject::connect(startJamButton, &QPushButton::clicked, &w, [&w] {
+        w.showStartJamDialog();
+    });
+    QObject::connect(joinJamButton, &QPushButton::clicked, &w, [&w] {
+        w.showJoinJamDialog();
+    });
+    QObject::connect(w.leaveJamButton_, &QPushButton::clicked, &w, [&w] {
+        w.stopJam(true);
+    });
     w.jamSyncButton_ = new QToolButton(&w);
     w.jamSyncButton_->setObjectName(QStringLiteral("JamSyncButton"));
     w.jamSyncButton_->setText(QStringLiteral("\u25cf  JAM SYNC"));
@@ -360,10 +370,6 @@ void MainWindowPages::build(MainWindow& w)
     jamTitleEdit->onCommitted = [&w](const QString& name) {
         (void)w.renameCurrentJam(name);
     };
-    QObject::connect(newSongButton, &QPushButton::clicked, &w, [&w] { w.newSong(); });
-    QObject::connect(openSongButton, &QPushButton::clicked, &w, [&w] { w.openSong(); });
-    QObject::connect(saveSongButton, &QPushButton::clicked, &w, [&w] { w.saveSong(); });
-
     QWidget* sessionPage = buildSessionPage(w);
     QWidget* chordPage = buildSongPage(w);
     QWidget* beatPage = buildBeatPage(w);
@@ -566,25 +572,16 @@ void MainWindowPages::build(MainWindow& w)
 
     auto* sessionActions = new QHBoxLayout();
     sessionActions->setSpacing(6);
-    auto* startJamButton = new QPushButton(QStringLiteral("Start Jam"), &w);
-    auto* joinJamButton = new QPushButton(QStringLiteral("Join"), &w);
-    w.leaveJamButton_ = new QPushButton(QStringLiteral("Leave"), &w);
-    startJamButton->setObjectName(QStringLiteral("SessionAction"));
-    joinJamButton->setObjectName(QStringLiteral("SessionAction"));
-    w.leaveJamButton_->setObjectName(QStringLiteral("SessionAction"));
-    w.leaveJamButton_->setEnabled(false);
-    QObject::connect(startJamButton, &QPushButton::clicked, &w, [&w] {
-        w.showStartJamDialog();
-    });
-    QObject::connect(joinJamButton, &QPushButton::clicked, &w, [&w] {
-        w.showJoinJamDialog();
-    });
-    QObject::connect(w.leaveJamButton_, &QPushButton::clicked, &w, [&w] {
-        w.stopJam(true);
-    });
-    sessionActions->addWidget(startJamButton);
-    sessionActions->addWidget(joinJamButton);
-    sessionActions->addWidget(w.leaveJamButton_);
+    auto* saveSongButton = new QPushButton(QStringLiteral("Save"), &w);
+    auto* openSongButton = new QPushButton(QStringLiteral("Open"), &w);
+    auto* newSongButton = new QPushButton(QStringLiteral("New"), &w);
+    for (QPushButton* button : {saveSongButton, openSongButton, newSongButton}) {
+        button->setObjectName(QStringLiteral("SessionAction"));
+        sessionActions->addWidget(button);
+    }
+    QObject::connect(saveSongButton, &QPushButton::clicked, &w, [&w] { w.saveSong(); });
+    QObject::connect(openSongButton, &QPushButton::clicked, &w, [&w] { w.openSong(); });
+    QObject::connect(newSongButton, &QPushButton::clicked, &w, [&w] { w.newSong(); });
     auto* dataButton = new QPushButton(QStringLiteral("Data"), &w);
     dataButton->setObjectName(QStringLiteral("DataButton"));
     QObject::connect(dataButton, &QPushButton::clicked, &w, [&w] {
