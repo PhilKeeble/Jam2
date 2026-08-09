@@ -7659,7 +7659,7 @@ void MainWindow::showArrangementDialog()
         if (auto* repeats = qobject_cast<QSpinBox*>(cell)) return repeats;
         return cell ? cell->findChild<QSpinBox*>() : nullptr;
     };
-    const auto appendRow = [table](ArrangementStep step) {
+    const auto appendRow = [table, kArrangementMinimumRowHeight](ArrangementStep step) {
         if (table->rowCount() >= 64) return;
         const int row = table->rowCount();
         table->insertRow(row);
