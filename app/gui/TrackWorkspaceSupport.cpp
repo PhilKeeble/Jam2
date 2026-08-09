@@ -1,5 +1,7 @@
 #include "TrackWorkspaceSupport.hpp"
 
+#include "GuiLoopbackRecorder.hpp"
+
 #include "pcm16_wav.hpp"
 
 #include <QCryptographicHash>
@@ -10,11 +12,14 @@
 #include <QMap>
 #include <QSaveFile>
 #include <QSet>
+#include <QtEndian>
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 namespace {
 
@@ -34,6 +39,92 @@ QString sha256FileHex(const QString& path)
     QCryptographicHash hash(QCryptographicHash::Sha256);
     while (!file.atEnd()) hash.addData(file.read(1024 * 1024));
     return QString::fromLatin1(hash.result().toHex());
+}
+
+void appendLe16(QByteArray& bytes, std::uint16_t value)
+{
+    bytes.append(static_cast<char>(value & 0xffU));
+    bytes.append(static_cast<char>((value >> 8U) & 0xffU));
+}
+
+void appendLe32(QByteArray& bytes, std::uint32_t value)
+{
+    bytes.append(static_cast<char>(value & 0xffU));
+    bytes.append(static_cast<char>((value >> 8U) & 0xffU));
+    bytes.append(static_cast<char>((value >> 16U) & 0xffU));
+    bytes.append(static_cast<char>((value >> 24U) & 0xffU));
+}
+
+QByteArray pcm16WavHeader(
+    std::uint16_t channels,
+    std::uint32_t sampleRate,
+    std::uint32_t dataBytes)
+{
+    QByteArray header;
+    header.reserve(44);
+    header.append("RIFF", 4);
+    appendLe32(header, 36U + dataBytes);
+    header.append("WAVEfmt ", 8);
+    appendLe32(header, 16U);
+    appendLe16(header, 1U);
+    appendLe16(header, channels);
+    appendLe32(header, sampleRate);
+    const std::uint16_t blockAlign = static_cast<std::uint16_t>(channels * 2U);
+    appendLe32(header, sampleRate * static_cast<std::uint32_t>(blockAlign));
+    appendLe16(header, blockAlign);
+    appendLe16(header, 16U);
+    header.append("data", 4);
+    appendLe32(header, dataBytes);
+    return header;
+}
+
+std::vector<std::int16_t> readPcm16Samples(
+    const QString& path,
+    const jam2::wav::Pcm16Info& info)
+{
+    if (info.data_bytes > static_cast<std::uint64_t>(
+            (std::numeric_limits<std::size_t>::max)())) {
+        throw std::length_error("WAV audio data is too large to import");
+    }
+    std::vector<std::int16_t> samples(
+        static_cast<std::size_t>(info.data_bytes / sizeof(std::int16_t)));
+    QFile source(path);
+    if (!source.open(QIODevice::ReadOnly) ||
+        !source.seek(static_cast<qint64>(info.data_offset))) {
+        throw std::runtime_error("could not open WAV audio data for resampling");
+    }
+    char* destination = reinterpret_cast<char*>(samples.data());
+    qint64 remaining = static_cast<qint64>(info.data_bytes);
+    while (remaining > 0) {
+        const qint64 read = source.read(destination, remaining);
+        if (read <= 0) {
+            throw std::runtime_error("failed while reading WAV audio data for resampling");
+        }
+        destination += read;
+        remaining -= read;
+    }
+#if Q_BYTE_ORDER == Q_BIG_ENDIAN
+    for (std::int16_t& sample : samples) {
+        sample = qFromLittleEndian(sample);
+    }
+#endif
+    return samples;
+}
+
+QByteArray pcm16Bytes(const std::vector<std::int16_t>& samples)
+{
+    const auto byteCount = static_cast<qsizetype>(
+        samples.size() * sizeof(std::int16_t));
+#if Q_BYTE_ORDER == Q_LITTLE_ENDIAN
+    return QByteArray::fromRawData(
+        reinterpret_cast<const char*>(samples.data()), byteCount);
+#else
+    QByteArray bytes(byteCount, Qt::Uninitialized);
+    for (std::size_t index = 0; index < samples.size(); ++index) {
+        qToLittleEndian(samples[index], bytes.data() + index * sizeof(std::int16_t));
+    }
+    return bytes;
+#endif
 }
 
 bool isManagedPracticeReference(const LooperLane& lane)
@@ -144,13 +235,98 @@ StagedPcm16Asset stagePcm16Asset(
         result.error = QStringLiteral("WAV contains no audio frames");
         return result;
     }
+    result.sourceSampleRate = result.metadata.sampleRate;
+    result.sourceFrames = result.metadata.frames;
     if (expectedSampleRate > 0 && result.metadata.sampleRate != expectedSampleRate) {
-        result.error = QStringLiteral(
-            "Sample-rate mismatch: this jam uses %1 Hz but the WAV is %2 Hz. "
-            "The WAV was not loaded; convert it or use a %1 Hz source.")
-            .arg(expectedSampleRate)
-            .arg(result.metadata.sampleRate);
-        return result;
+        try {
+            const jam2::wav::InspectResult inspected =
+                jam2::wav::inspect_pcm16_file(nativeFilePath(result.sourcePath));
+            if (!inspected) throw std::runtime_error(inspected.error);
+            const std::uint64_t bytesPerFrame =
+                static_cast<std::uint64_t>(inspected.info.channels) * sizeof(std::int16_t);
+            const std::uint64_t maximumDataBytes = std::min<std::uint64_t>(
+                std::numeric_limits<std::uint32_t>::max() - 36ULL,
+                jam2::wav::kDefaultMaxFileBytes - 44ULL);
+            const std::uint64_t maximumOutputFrames = maximumDataBytes / bytesPerFrame;
+            const long double exactOutputFrames =
+                static_cast<long double>(inspected.info.frames) *
+                static_cast<long double>(expectedSampleRate) /
+                static_cast<long double>(inspected.info.sample_rate);
+            if (!std::isfinite(exactOutputFrames) ||
+                exactOutputFrames > static_cast<long double>(maximumOutputFrames) + 0.499L) {
+                throw std::length_error("resampled WAV exceeds the managed file-size limit");
+            }
+            const std::uint64_t expectedOutputFrames = std::max<std::uint64_t>(
+                1ULL,
+                static_cast<std::uint64_t>(std::llround(exactOutputFrames)));
+            std::vector<std::int16_t> sourceSamples =
+                readPcm16Samples(result.sourcePath, inspected.info);
+            std::vector<std::int16_t> converted =
+                jam2::gui::resample_pcm16_interleaved(
+                    sourceSamples,
+                    static_cast<int>(inspected.info.channels),
+                    static_cast<int>(inspected.info.sample_rate),
+                    expectedSampleRate);
+            if (converted.size() != expectedOutputFrames * inspected.info.channels) {
+                throw std::runtime_error("resampler produced an unexpected frame count");
+            }
+
+            const std::uint64_t dataBytes64 =
+                static_cast<std::uint64_t>(converted.size()) * sizeof(std::int16_t);
+            if (dataBytes64 > std::numeric_limits<std::uint32_t>::max() - 36ULL ||
+                dataBytes64 + 44ULL > jam2::wav::kDefaultMaxFileBytes) {
+                throw std::length_error("resampled WAV exceeds the managed file-size limit");
+            }
+            const std::uint32_t dataBytes = static_cast<std::uint32_t>(dataBytes64);
+            const QByteArray header = pcm16WavHeader(
+                inspected.info.channels,
+                static_cast<std::uint32_t>(expectedSampleRate),
+                dataBytes);
+            const QByteArray audioBytes = pcm16Bytes(converted);
+            QCryptographicHash hash(QCryptographicHash::Sha256);
+            hash.addData(header);
+            hash.addData(audioBytes);
+            result.sha256 = QString::fromLatin1(hash.result().toHex());
+            result.stagedPath = QDir(stagingFolder).absoluteFilePath(
+                assetFolder + QLatin1Char('/') + result.sha256 + QStringLiteral(".wav"));
+            if (!QDir().mkpath(QFileInfo(result.stagedPath).absolutePath())) {
+                throw std::runtime_error("could not create the WAV staging folder");
+            }
+            if (!QFileInfo::exists(result.stagedPath) ||
+                sha256FileHex(result.stagedPath) != result.sha256) {
+                QSaveFile destination(result.stagedPath);
+                if (!destination.open(QIODevice::WriteOnly) ||
+                    destination.write(header) != header.size() ||
+                    destination.write(audioBytes) != audioBytes.size() ||
+                    !destination.commit()) {
+                    throw std::runtime_error("could not atomically write the resampled WAV");
+                }
+            }
+
+            result.metadata.audioFormat = 1;
+            result.metadata.sampleRate = expectedSampleRate;
+            result.metadata.channels = static_cast<int>(inspected.info.channels);
+            result.metadata.bitsPerSample = 16;
+            result.metadata.dataBytes = static_cast<qint64>(dataBytes);
+            result.metadata.frames = static_cast<qint64>(
+                converted.size() / inspected.info.channels);
+            result.metadata.durationMs = static_cast<int>(
+                std::min<std::uint64_t>(
+                    static_cast<std::uint64_t>(result.metadata.frames) * 1000ULL /
+                        static_cast<std::uint64_t>(expectedSampleRate),
+                    std::numeric_limits<int>::max()));
+            result.metadata.sha256 = result.sha256;
+            result.resampled = true;
+            return result;
+        } catch (const std::exception& error) {
+            result.stagedPath.clear();
+            result.sha256.clear();
+            result.error = QStringLiteral("could not resample WAV from %1 Hz to %2 Hz: %3")
+                .arg(result.sourceSampleRate)
+                .arg(expectedSampleRate)
+                .arg(QString::fromUtf8(error.what()));
+            return result;
+        }
     }
     result.sha256 = result.metadata.sha256;
     const QString managedFolder = QDir(stagingFolder).absoluteFilePath(assetFolder);

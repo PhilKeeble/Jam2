@@ -97,14 +97,107 @@ struct LoopbackRecordingPreference {
     bool trimTrailing = true;
 };
 
+struct JamRecordingPreference {
+    bool promptForName = true;
+    QString completionAction = QStringLiteral("ask");
+    bool importMix = true;
+    bool importMyInput = false;
+    bool importTheirInput = false;
+    bool importInputsMix = false;
+    bool importMetronome = false;
+};
+
+struct JamMixTrackRecordingPreference {
+    bool includeBackingTrack = false;
+    bool includeMetronome = false;
+};
+
 struct RecordingPreference {
     QString preferredMode = QStringLiteral("input");
     InputRecordingPreference input;
     LoopbackRecordingPreference loopback;
+    JamRecordingPreference jam;
+    JamMixTrackRecordingPreference jamMixTrack;
+};
+
+struct GeneralPreference {
+    QString startupView = QStringLiteral("performance");
+    int bpm = 80;
+    int meterNumerator = 4;
+    int meterDenominator = 4;
+    int tempoPulseUnits = 1;
+    int clickDivision = 1;
+    bool generateIdeaOnStartup = false;
+};
+
+struct IdeaPreference {
+    int parts = 0;
+    int key = -1;
+    QString styleId;
+    QString profileId;
+    QString meterId;
+    int bars = 0;
+    bool exactBpm = false;
+    int bpm = 80;
+    int complexity = 2;
+    bool renderWavsOnStartup = false;
+    bool renderChords = true;
+    bool renderDrums = true;
+    bool renderMelody = false;
+    bool renderBass = true;
+    bool renderSupport = true;
+    int chordVoicing = 0;
+    int drumKit = 0;
+    bool grooveUseIdeaTiming = true;
+    int grooveBars = 0;
+};
+
+struct LevelPreference {
+    int sendDb = 0;
+    bool monitorInput = false;
+    int monitorDb = 0;
+    int metronomeDb = -10;
+    int masterDb = 0;
+    int remotePeerDb = 0;
+    int backingTrackDb = -3;
+};
+
+struct MetronomePreference {
+    int sound = 0;
+    QString mode = QStringLiteral("shared-grid");
+    double compensationMaxMs = 250.0;
+    double compensationSmoothingMs = 750.0;
+    double compensationDeadbandMs = 1.0;
+    double compensationSlewMsPerSecond = 40.0;
+};
+
+struct ViewPreference {
+    bool performanceChordPreview = true;
+    bool performanceBeatPreview = true;
+    bool chordFocusCurrentBar = false;
+    bool drumFocusCurrentBar = false;
+    int guitarStrings = 6;
+    bool guitarDropTuning = false;
+    bool trackGridLock = true;
+    bool trackLoop = true;
+    double trackSpeed = 1.0;
+    int trackPitch = 0;
+    bool focusFrequencyEnabled = false;
+    QString focusPreset = QStringLiteral("custom");
+    int focusFrequencyHz = 120;
+};
+
+struct SyncPreference {
+    bool trackLanes = true;
+    bool autoShareWavs = true;
+    bool globalPlayback = true;
+    int generatedIdeas = 1;
+    bool metronomeState = false;
+    bool recordings = true;
 };
 
 struct UserPreferences {
-    static constexpr int kSchemaVersion = 3;
+    static constexpr int kSchemaVersion = 5;
     AudioDevicePreference localAudio;
     AudioDevicePreference networkAudio;
     bool splitNetworkAudioByRole = false;
@@ -114,7 +207,12 @@ struct UserPreferences {
     JoinPreference join;
     LoggingPreference logging;
     RecordingPreference recording;
-    int metronomeSound = 0;
+    GeneralPreference general;
+    IdeaPreference ideas;
+    LevelPreference levels;
+    MetronomePreference metronome;
+    ViewPreference views;
+    SyncPreference sync;
 
     const AudioDevicePreference& createAudio() const noexcept
     {

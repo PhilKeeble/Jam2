@@ -15300,6 +15300,13 @@ GeneratedPracticeIdea generateCoupledPracticeIdea(const ChordIdeaRequest& reques
     return coupledIdea(request, device());
 }
 
+GeneratedPracticeIdea generateCoupledPracticeIdeaSeeded(
+    const ChordIdeaRequest& request,
+    std::uint32_t seed)
+{
+    return coupledIdea(request, seed);
+}
+
 GeneratedContinuationIdea generateContinuationPracticeIdea(
     const SongSection& source,
     const ContinueIdeaRequest& request)
@@ -15331,7 +15338,7 @@ SongSection generateBeatIdeaForTest(const BeatIdeaRequest& request, std::uint32_
 
 GeneratedPracticeIdea generateCoupledPracticeIdeaForTest(const ChordIdeaRequest& request, std::uint32_t seed)
 {
-    return coupledIdea(request, seed);
+    return generateCoupledPracticeIdeaSeeded(request, seed);
 }
 
 GeneratedContinuationIdea generateContinuationPracticeIdeaForTest(

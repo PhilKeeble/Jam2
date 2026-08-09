@@ -80,7 +80,17 @@ void replaceDrumParts(SongSection& destination, const SongSection& generated)
     destination.beats = generated.beats;
     destination.beatNotes = generated.beatNotes;
     destination.beatPatterns = generated.beatPatterns;
+    destination.drumKitId = generated.drumKitId;
     destination.generatedRecipe = generated.generatedRecipe;
+}
+
+SongSection fittedSection(SongSection section, int beats)
+{
+    if (section.beats == beats) return section;
+    BeatGridModel model;
+    if (!model.replaceSection(0, std::move(section))) return {};
+    model.resizeSection(0, beats);
+    return model.section(0);
 }
 
 void upsert(
@@ -139,15 +149,38 @@ std::optional<GeneratedPracticeIdea> PracticeIdeaController::generateCoupled(
     const ChordIdeaRequest& request)
 {
     GeneratedPracticeIdea idea = generateCoupledPracticeIdea(request);
-    if (request.parts != PracticeIdeaParts::FullArrangement) {
-        const bool pitched = request.parts == PracticeIdeaParts::PitchedPartsOnly;
+    return applyCoupled(
+        chordModel,
+        beatModel,
+        std::move(idea),
+        request.parts,
+        request.targetSectionIndex,
+        true);
+}
+
+std::optional<GeneratedPracticeIdea> PracticeIdeaController::applyCoupled(
+    BeatGridModel& chordModel,
+    BeatGridModel& beatModel,
+    GeneratedPracticeIdea idea,
+    PracticeIdeaParts parts,
+    int targetSectionIndex,
+    bool matchIdeaLength)
+{
+    if (parts != PracticeIdeaParts::FullArrangement) {
+        const bool pitched = parts == PracticeIdeaParts::PitchedPartsOnly;
         if (&chordModel == &beatModel) {
             BeatGridModel next = chordModel;
-            const int target = partialTargetIndex(next, request.targetSectionIndex);
+            const int target = partialTargetIndex(next, targetSectionIndex);
             if (target < 0) return std::nullopt;
+            const int targetBeats = matchIdeaLength
+                ? (pitched ? idea.chordSection.beats : idea.beatSection.beats)
+                : next.section(target).beats;
+            SongSection imported = fittedSection(
+                pitched ? idea.chordSection : idea.beatSection,
+                targetBeats);
             SongSection merged = next.section(target);
-            if (pitched) replacePitchedParts(merged, idea.chordSection);
-            else replaceDrumParts(merged, idea.beatSection);
+            if (pitched) replacePitchedParts(merged, imported);
+            else replaceDrumParts(merged, imported);
             merged.generatedKind = QStringLiteral("practice");
             if (!next.replaceSection(target, std::move(merged))) return std::nullopt;
             chordModel = std::move(next);
@@ -156,11 +189,17 @@ std::optional<GeneratedPracticeIdea> PracticeIdeaController::generateCoupled(
 
         BeatGridModel& destinationModel = pitched ? chordModel : beatModel;
         BeatGridModel next = destinationModel;
-        const int target = partialTargetIndex(next, request.targetSectionIndex);
+        const int target = partialTargetIndex(next, targetSectionIndex);
         if (target < 0) return std::nullopt;
+        const int targetBeats = matchIdeaLength
+            ? (pitched ? idea.chordSection.beats : idea.beatSection.beats)
+            : next.section(target).beats;
+        SongSection imported = fittedSection(
+            pitched ? idea.chordSection : idea.beatSection,
+            targetBeats);
         SongSection merged = next.section(target);
-        if (pitched) replacePitchedParts(merged, idea.chordSection);
-        else replaceDrumParts(merged, idea.beatSection);
+        if (pitched) replacePitchedParts(merged, imported);
+        else replaceDrumParts(merged, imported);
         merged.generatedKind = pitched
             ? QStringLiteral("chord")
             : QStringLiteral("beat");
@@ -169,13 +208,18 @@ std::optional<GeneratedPracticeIdea> PracticeIdeaController::generateCoupled(
         return idea;
     }
     if (&chordModel == &beatModel) {
-        SongSection combined = idea.chordSection;
-        combined.beats = std::max(idea.chordSection.beats, idea.beatSection.beats);
-        combined.beatNotes = idea.beatSection.beatNotes;
-        combined.beatPatterns = idea.beatSection.beatPatterns;
-        combined.generatedKind = QStringLiteral("practice");
         BeatGridModel next = chordModel;
-        const int target = partialTargetIndex(next, request.targetSectionIndex);
+        const int target = partialTargetIndex(next, targetSectionIndex);
+        if (target < 0) return std::nullopt;
+        const int targetBeats = matchIdeaLength
+            ? std::max(idea.chordSection.beats, idea.beatSection.beats)
+            : next.section(target).beats;
+        SongSection combined = fittedSection(idea.chordSection, targetBeats);
+        const SongSection drums = fittedSection(idea.beatSection, targetBeats);
+        combined.beatNotes = drums.beatNotes;
+        combined.beatPatterns = drums.beatPatterns;
+        combined.drumKitId = drums.drumKitId;
+        combined.generatedKind = QStringLiteral("practice");
         if (target < 0 || !next.replaceSection(target, std::move(combined))) {
             return std::nullopt;
         }
@@ -184,18 +228,42 @@ std::optional<GeneratedPracticeIdea> PracticeIdeaController::generateCoupled(
     }
     BeatGridModel nextChord = chordModel;
     BeatGridModel nextBeat = beatModel;
-    const int chordTarget = partialTargetIndex(nextChord, request.targetSectionIndex);
-    const int beatTarget = partialTargetIndex(nextBeat, request.targetSectionIndex);
+    const int chordTarget = partialTargetIndex(nextChord, targetSectionIndex);
+    const int beatTarget = partialTargetIndex(nextBeat, targetSectionIndex);
+    if (chordTarget < 0 || beatTarget < 0) return std::nullopt;
+    const int chordBeats = matchIdeaLength
+        ? idea.chordSection.beats : nextChord.section(chordTarget).beats;
+    const int beatBeats = matchIdeaLength
+        ? idea.beatSection.beats : nextBeat.section(beatTarget).beats;
+    idea.chordSection = fittedSection(std::move(idea.chordSection), chordBeats);
+    idea.beatSection = fittedSection(std::move(idea.beatSection), beatBeats);
     idea.chordSection.generatedKind = QStringLiteral("chord");
     idea.beatSection.generatedKind = QStringLiteral("beat");
-    if (chordTarget < 0 || beatTarget < 0 ||
-        !nextChord.replaceSection(chordTarget, idea.chordSection) ||
+    if (!nextChord.replaceSection(chordTarget, idea.chordSection) ||
         !nextBeat.replaceSection(beatTarget, idea.beatSection)) {
         return std::nullopt;
     }
     chordModel = std::move(nextChord);
     beatModel = std::move(nextBeat);
     return idea;
+}
+
+SongSection PracticeIdeaController::fitRepeatingDrums(
+    SongSection source,
+    int targetBeats)
+{
+    targetBeats = std::max(1, targetBeats);
+    const int sourceBeats = std::max(1, source.beats);
+    const QVector<QString> notes = source.beatNotes;
+    const QVector<BeatPattern> patterns = source.beatPatterns;
+    source.beats = targetBeats;
+    source.beatNotes.resize(targetBeats);
+    source.beatPatterns.resize(targetBeats);
+    for (int beat = 0; beat < targetBeats; ++beat) {
+        source.beatNotes[beat] = notes.value(beat % sourceBeats);
+        source.beatPatterns[beat] = patterns.value(beat % sourceBeats);
+    }
+    return source;
 }
 
 std::optional<GeneratedContinuationIdea> PracticeIdeaController::generateContinuation(

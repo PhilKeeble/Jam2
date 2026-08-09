@@ -7,4 +7,7 @@
     <qresource prefix="/jam2/drums">
         <file alias="researched-kits.json">gui/researched-drum-kits.json</file>
     </qresource>
+    <qresource prefix="/jam2/ideas">
+        <file alias="catalog.json">gui/curated-ideas.json</file>
+    </qresource>
 </RCC>

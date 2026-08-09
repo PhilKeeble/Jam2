@@ -5,6 +5,7 @@
 #include <QAction>
 #include <QColor>
 #include <QClipboard>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QFrame>
 #include <QFontMetrics>
@@ -936,14 +937,28 @@ QWidget* BeatGridWidget::createOverviewPagination(QWidget* parent)
     auto* layout = new QHBoxLayout(overviewPagination_);
     layout->setContentsMargins(6, 0, 0, 0);
     layout->setSpacing(3);
-    overviewPageLabel_ = new QLabel(overviewPagination_);
+    focusCurrentBarCheck_ = new QCheckBox(
+        QStringLiteral("Focus current bar"), overviewPagination_);
+    focusCurrentBarCheck_->setChecked(false);
+    focusCurrentBarCheck_->setToolTip(QStringLiteral(
+        "Select the playing bar and follow it through the section while playback is running"));
+    focusCurrentBarCheck_->setStyleSheet(QStringLiteral(
+        "QCheckBox { color:#cbd3d1; font:11px Bahnschrift; spacing:7px; padding:4px 8px 4px 0; }"
+        "QCheckBox:hover { color:#f1eee5; }"));
+    layout->addWidget(focusCurrentBarCheck_);
+
+    overviewPageControls_ = new QWidget(overviewPagination_);
+    auto* pageLayout = new QHBoxLayout(overviewPageControls_);
+    pageLayout->setContentsMargins(0, 0, 0, 0);
+    pageLayout->setSpacing(3);
+    overviewPageLabel_ = new QLabel(overviewPageControls_);
     overviewPageLabel_->setObjectName(QStringLiteral("SectionPageLabel"));
     overviewPageLabel_->setStyleSheet(QStringLiteral(
         "QLabel { background:transparent; color:#899497; font:11px Bahnschrift; padding:0 6px; }"));
-    layout->addWidget(overviewPageLabel_);
+    pageLayout->addWidget(overviewPageLabel_);
 
-    const auto makeButton = [this, layout](const QIcon& icon, const QString& tooltip) {
-        auto* button = new QToolButton(overviewPagination_);
+    const auto makeButton = [this, pageLayout](const QIcon& icon, const QString& tooltip) {
+        auto* button = new QToolButton(overviewPageControls_);
         button->setIcon(icon);
         button->setIconSize(QSize(24, 24));
         button->setFixedSize(32, 32);
@@ -953,7 +968,7 @@ QWidget* BeatGridWidget::createOverviewPagination(QWidget* parent)
             "QToolButton { border:1px solid transparent; border-radius:3px; background:transparent; color:#ddd7e8; }"
             "QToolButton:hover { border-color:#58686c; background:#121a1c; }"
             "QToolButton:disabled { color:#4d5759; }"));
-        layout->addWidget(button);
+        pageLayout->addWidget(button);
         return button;
     };
     overviewFirstButton_ = makeButton(
@@ -965,30 +980,51 @@ QWidget* BeatGridWidget::createOverviewPagination(QWidget* parent)
     overviewLastButton_ = makeButton(
         sectionPaginationIcon(true, true), QStringLiteral("Last bars"));
     QObject::connect(overviewFirstButton_, &QToolButton::clicked, this,
-        [this] { setOverviewPage(0, true); });
+        [this] { setOverviewPage(0); });
     QObject::connect(overviewPreviousButton_, &QToolButton::clicked, this,
-        [this] { setOverviewPage(overviewPage_ - 1, true); });
+        [this] { setOverviewPage(overviewPage_ - 1); });
     QObject::connect(overviewNextButton_, &QToolButton::clicked, this,
-        [this] { setOverviewPage(overviewPage_ + 1, true); });
+        [this] { setOverviewPage(overviewPage_ + 1); });
     QObject::connect(overviewLastButton_, &QToolButton::clicked, this, [this] {
         if (model_->sections().isEmpty()) return;
         const SongSection& section = model_->section(
             qBound(0, selectedSection_, model_->sections().size() - 1));
         const int bars = qMax(1, (section.beats + beatsPerBar_ - 1) / beatsPerBar_);
-        setOverviewPage(jam2::gui::sectionOverviewPageCount(bars) - 1, true);
+        setOverviewPage(jam2::gui::sectionOverviewPageCount(bars) - 1);
     });
+    QObject::connect(focusCurrentBarCheck_, &QCheckBox::toggled, this, [this](bool enabled) {
+        focusCurrentBar_ = enabled;
+        if (!enabled || !gridRunning_ || model_->sections().isEmpty()) return;
+        const int sectionIndex = selectedSectionIndex();
+        if (sectionIndex < 0 || sectionIndex >= model_->sections().size()) return;
+        const int beats = qMax(1, model_->section(sectionIndex).beats);
+        const int liveBeat = static_cast<int>(gridBeat_ % static_cast<quint64>(beats));
+        focusLivePosition(liveBeat / beatsPerBar_, liveBeat, beats);
+    });
+    layout->addWidget(overviewPageControls_);
     updateOverviewPagination();
     return overviewPagination_;
 }
 
-void BeatGridWidget::setOverviewPage(int page, bool pinToPage)
+void BeatGridWidget::toggleFocusCurrentBar()
+{
+    if (focusCurrentBarCheck_) {
+        focusCurrentBarCheck_->setChecked(!focusCurrentBarCheck_->isChecked());
+    }
+}
+
+void BeatGridWidget::setFocusCurrentBar(bool enabled)
+{
+    if (focusCurrentBarCheck_) focusCurrentBarCheck_->setChecked(enabled);
+}
+
+void BeatGridWidget::setOverviewPage(int page)
 {
     if (model_->sections().isEmpty()) return;
     const SongSection& section = model_->section(
         qBound(0, selectedSection_, model_->sections().size() - 1));
     const int bars = qMax(1, (section.beats + beatsPerBar_ - 1) / beatsPerBar_);
     const int bounded = qBound(0, page, jam2::gui::sectionOverviewPageCount(bars) - 1);
-    overviewPagePinned_ = pinToPage;
     if (overviewPage_ == bounded) {
         updateOverviewPagination();
         return;
@@ -1007,13 +1043,14 @@ void BeatGridWidget::updateOverviewPagination()
         overviewPagination_->hide();
         return;
     }
+    overviewPagination_->show();
     const SongSection& section = model_->section(
         qBound(0, selectedSection_, model_->sections().size() - 1));
     const int bars = qMax(1, (section.beats + beatsPerBar_ - 1) / beatsPerBar_);
     const int pages = jam2::gui::sectionOverviewPageCount(bars);
     overviewPage_ = qBound(0, overviewPage_, pages - 1);
     const bool paginated = bars > jam2::gui::kSectionOverviewBarsPerPage;
-    overviewPagination_->setVisible(paginated);
+    overviewPageControls_->setVisible(paginated);
     if (!paginated) return;
     const int first = overviewPage_ * jam2::gui::kSectionOverviewBarsPerPage + 1;
     const int last = qMin(
@@ -1051,7 +1088,6 @@ void BeatGridWidget::setSelectedSectionIndex(int section)
     if (selectedSection_ == bounded) return;
     selectedSection_ = bounded;
     overviewPage_ = 0;
-    overviewPagePinned_ = false;
     selectedBar_ = 0;
     refresh();
     if (onSelectedSectionChanged) onSelectedSectionChanged(selectedSection_);
@@ -1316,12 +1352,10 @@ void BeatGridWidget::scheduleResponsiveChordRebuild()
 
 void BeatGridWidget::setGridPosition(quint64 absoluteBeat, int subdivision, bool running, double beatPhase)
 {
-    const bool wasRunning = gridRunning_;
     gridBeat_ = absoluteBeat;
     gridSubdivision_ = subdivision;
     gridBeatPhase_ = qBound(0.0, beatPhase, 0.999999);
     gridRunning_ = running;
-    if (running && !wasRunning) overviewPagePinned_ = false;
     const int sectionIndex = selectedSectionIndex();
     if (sectionIndex < 0 || sectionIndex >= model_->sections().size()) return;
 
@@ -1329,15 +1363,11 @@ void BeatGridWidget::setGridPosition(quint64 absoluteBeat, int subdivision, bool
     const int sectionBeat = static_cast<int>(absoluteBeat % static_cast<quint64>(beats));
     const int nextLiveBar = running ? sectionBeat / beatsPerBar_ : -1;
     const int nextLiveBeat = running ? sectionBeat : -1;
-    if (running && !overviewPagePinned_ && mode() != Mode::Lyrics) {
-        const int barCount = qMax(1, (beats + beatsPerBar_ - 1) / beatsPerBar_);
-        const int livePage = jam2::gui::sectionOverviewPageForBar(nextLiveBar, barCount);
-        if (livePage != overviewPage_) {
-            overviewPage_ = livePage;
-            rebuildAuthoringView();
-        }
-    }
     if (nextLiveBar == authoringLiveBar_ && nextLiveBeat == authoringLiveBeat_) return;
+
+    if (running && focusCurrentBar_) {
+        focusLivePosition(nextLiveBar, nextLiveBeat, beats);
+    }
 
     authoringLiveBar_ = nextLiveBar;
     authoringLiveBeat_ = nextLiveBeat;
@@ -1362,6 +1392,23 @@ void BeatGridWidget::setGridPosition(quint64 absoluteBeat, int subdivision, bool
             widget->style()->polish(widget);
             widget->update();
         }
+    }
+}
+
+void BeatGridWidget::focusLivePosition(int liveBar, int liveBeat, int beats)
+{
+    if (!focusCurrentBar_ || liveBar < 0 || mode() == Mode::Lyrics) return;
+    const int barCount = qMax(1, (qMax(1, beats) + beatsPerBar_ - 1) / beatsPerBar_);
+    const int boundedBar = qBound(0, liveBar, barCount - 1);
+    const int livePage = jam2::gui::sectionOverviewPageForBar(boundedBar, barCount);
+    if (selectedBar_ != boundedBar || overviewPage_ != livePage) {
+        selectedBar_ = boundedBar;
+        overviewPage_ = livePage;
+        selectedChordBeat_ = qBound(0, liveBeat, qMax(0, beats - 1));
+        rebuildAuthoringView();
+    }
+    if (mode() == Mode::Chord) {
+        selectFocusedChordBar(boundedBar, qBound(0, liveBeat, qMax(0, beats - 1)));
     }
 }
 void BeatGridWidget::applyRemoteCell(int section, const QString& lane, int beat, const QString& text)

@@ -23,8 +23,6 @@
 #include <vector>
 
 namespace {
-constexpr double kPreparedMixMasterPreGain = 0.72;
-
 void put16(QByteArray& b, quint16 v) { b.append(char(v)); b.append(char(v >> 8)); }
 void put32(QByteArray& b, quint32 v) { b.append(char(v)); b.append(char(v >> 8)); b.append(char(v >> 16)); b.append(char(v >> 24)); }
 QString absoluteAsset(const QString& folder, const QString& path) { return QFileInfo(path).isAbsolute() ? path : QDir(folder).absoluteFilePath(path); }

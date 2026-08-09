@@ -97,6 +97,8 @@ public:
     explicit PerformanceHomeWidget(QWidget* parent = nullptr);
 
     void setSongModel(const BeatGridModel* model);
+    void setChordPreviewVisible(bool visible);
+    void setBeatPreviewVisible(bool visible);
     void setTiming(
         quint64 absoluteBeat,
         int subdivision,
@@ -127,6 +129,7 @@ public:
     std::function<void(std::uint64_t)> onPeerSelected;
     std::function<void(double)> onTrackGainChanged;
     std::function<void()> onGenerateIdea;
+    std::function<void()> onBrowseIdeas;
     std::function<void()> onContinueIdea;
     std::function<void()> onClearIdea;
     std::function<void()> onGenerateWav;
@@ -198,12 +201,14 @@ private:
     int beatsPerBar_ = 4;
     double beatPhase_ = 0.0;
     bool running_ = false;
+    bool chordPreviewVisible_ = true;
+    bool beatPreviewVisible_ = true;
     double targetEnergy_ = 0.0;
     double envelope_ = 0.0;
     QVector<double> history_;
     QVector<PerformancePeerPresentation> peers_;
     std::uint64_t selectedPeerId_ = 0;
-    double trackGainDb_ = 0.0;
+    double trackGainDb_ = -3.0;
     jam2::EnginePitchSnapshot tuner_;
     double displayedTunerCents_ = 0.0;
     double tunerOrbOpacity_ = 0.0;
@@ -249,6 +254,7 @@ private:
     QRect chordRunwayRect_;
     QRect lyricsHitRect_;
     QRect generateIdeaHitRect_;
+    QRect browseIdeasHitRect_;
     QRect continueIdeaHitRect_;
     QRect clearIdeaHitRect_;
     QRect generateWavHitRect_;

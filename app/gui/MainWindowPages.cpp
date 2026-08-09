@@ -79,6 +79,7 @@ QIcon settingsIcon()
 
 enum class IdeaHeaderAction {
     Generate,
+    Browse,
     Continue,
     Wav,
     Details,
@@ -97,6 +98,12 @@ void styleIdeaHeaderAction(QPushButton* button, IdeaHeaderAction action)
         fill = QStringLiteral("rgba(35,27,20,232)");
         hover = QStringLiteral("#302317");
         width = 154;
+        break;
+    case IdeaHeaderAction::Browse:
+        outline = QStringLiteral("#9fb56f");
+        fill = QStringLiteral("rgba(28,36,21,232)");
+        hover = QStringLiteral("#26331c");
+        width = 132;
         break;
     case IdeaHeaderAction::Continue:
         outline = QStringLiteral("#66d4cf");
@@ -459,6 +466,9 @@ void MainWindowPages::build(MainWindow& w)
     };
     w.performanceHome_->onGenerateIdea = [&w] {
         w.generatePracticeIdea();
+    };
+    w.performanceHome_->onBrowseIdeas = [&w] {
+        w.browseCuratedIdeas();
     };
     w.performanceHome_->onContinueIdea = [&w] {
         w.continuePracticeIdea();
@@ -1137,10 +1147,12 @@ QWidget* MainWindowPages::buildSongPage(MainWindow& w)
     w.chordGrid_ = new BeatGridWidget(&w.chordModel_, QStringLiteral("chord"), page);
 
     auto* generate = new QPushButton(QStringLiteral("GENERATE NEW IDEA"), page);
+    auto* browse = new QPushButton(QStringLiteral("GROOVE LIBRARY"), page);
     auto* continueIdea = new QPushButton(QStringLiteral("CONTINUE IDEA"), page);
     auto* reference = new QPushButton(QStringLiteral("GENERATE WAV"), page);
     auto* details = new QPushButton(QStringLiteral("IDEA DETAILS"), page);
     styleIdeaHeaderAction(generate, IdeaHeaderAction::Generate);
+    styleIdeaHeaderAction(browse, IdeaHeaderAction::Browse);
     styleIdeaHeaderAction(continueIdea, IdeaHeaderAction::Continue);
     styleIdeaHeaderAction(reference, IdeaHeaderAction::Wav);
     styleIdeaHeaderAction(details, IdeaHeaderAction::Details);
@@ -1148,12 +1160,14 @@ QWidget* MainWindowPages::buildSongPage(MainWindow& w)
     addBankControls(w, page, top, false);
     top->addSpacing(12);
     top->addWidget(generate);
+    top->addWidget(browse);
     top->addWidget(continueIdea);
     top->addWidget(reference);
     top->addWidget(details);
     top->addStretch(1);
     top->addWidget(w.chordGrid_->createOverviewPagination(page));
     QObject::connect(generate, &QPushButton::clicked, &w, [&w] { w.generatePracticeIdea(); });
+    QObject::connect(browse, &QPushButton::clicked, &w, [&w] { w.browseCuratedIdeas(); });
     QObject::connect(continueIdea, &QPushButton::clicked, &w, [&w] { w.continuePracticeIdea(); });
     QObject::connect(reference, &QPushButton::clicked, &w, [&w] { w.generatePracticeReferenceWavs(); });
     QObject::connect(details, &QPushButton::clicked, &w, [&w] { w.showPracticeIdeaDetails(); });
@@ -1228,10 +1242,12 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
     auto* page = new QWidget(&w);
     w.beatGrid_ = new BeatGridWidget(&w.beatModel_, QStringLiteral("beat"), page);
     auto* generate = new QPushButton(QStringLiteral("GENERATE NEW IDEA"), page);
+    auto* browse = new QPushButton(QStringLiteral("GROOVE LIBRARY"), page);
     auto* continueIdea = new QPushButton(QStringLiteral("CONTINUE IDEA"), page);
     auto* reference = new QPushButton(QStringLiteral("GENERATE WAV"), page);
     auto* details = new QPushButton(QStringLiteral("IDEA DETAILS"), page);
     styleIdeaHeaderAction(generate, IdeaHeaderAction::Generate);
+    styleIdeaHeaderAction(browse, IdeaHeaderAction::Browse);
     styleIdeaHeaderAction(continueIdea, IdeaHeaderAction::Continue);
     styleIdeaHeaderAction(reference, IdeaHeaderAction::Wav);
     styleIdeaHeaderAction(details, IdeaHeaderAction::Details);
@@ -1239,6 +1255,7 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
     addBankControls(w, page, top, false);
     top->addSpacing(12);
     top->addWidget(generate);
+    top->addWidget(browse);
     top->addWidget(continueIdea);
     top->addWidget(reference);
     top->addWidget(details);
@@ -1248,6 +1265,7 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
     layout->addLayout(top);
     layout->addWidget(w.beatGrid_, 1);
     QObject::connect(generate, &QPushButton::clicked, &w, [&w] { w.generatePracticeIdea(); });
+    QObject::connect(browse, &QPushButton::clicked, &w, [&w] { w.browseCuratedIdeas(); });
     QObject::connect(continueIdea, &QPushButton::clicked, &w, [&w] { w.continuePracticeIdea(); });
     QObject::connect(reference, &QPushButton::clicked, &w, [&w] { w.generatePracticeReferenceWavs(); });
     QObject::connect(details, &QPushButton::clicked, &w, [&w] { w.showPracticeIdeaDetails(); });
@@ -1344,8 +1362,8 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     w.focusFrequencySpin_->setSuffix(QStringLiteral(" Hz"));
     w.focusFrequencySpin_->setFixedWidth(108);
     applyMutedEditorStyle(w.focusFrequencySpin_);
-    auto* gridLockBox = new QCheckBox(QStringLiteral("Lock to grid"), page);
-    gridLockBox->setChecked(w.looperProject_.gridLockEnabled());
+    w.trackGridLockCheck_ = new QCheckBox(QStringLiteral("Lock to grid"), page);
+    w.trackGridLockCheck_->setChecked(w.looperProject_.gridLockEnabled());
     w.captureOutputEdit_ = new QLineEdit(page);
     w.captureOutputEdit_->setMinimumWidth(420);
     applyMutedEditorStyle(w.captureOutputEdit_);
@@ -1467,7 +1485,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     zoomInButton->setToolTip(QStringLiteral("Zoom in on the track timeline"));
     fitTimelineButton->setEnabled(false);
     zoomOutButton->setEnabled(false);
-    loopOptionsLayout->addWidget(gridLockBox);
+    loopOptionsLayout->addWidget(w.trackGridLockCheck_);
     loopOptionsLayout->addSpacing(4);
     loopOptionsLayout->addWidget(fitTimelineButton);
     loopOptionsLayout->addWidget(zoomOutButton);
@@ -1521,18 +1539,25 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     sectionRow->addSpacing(12);
     auto* generateIdeaButton = new QPushButton(
         QStringLiteral("GENERATE NEW IDEA"), page);
+    auto* browseIdeasButton = new QPushButton(
+        QStringLiteral("GROOVE LIBRARY"), page);
     auto* continueIdeaButton = new QPushButton(
         QStringLiteral("CONTINUE IDEA"), page);
     auto* generateWavButton = new QPushButton(
         QStringLiteral("GENERATE WAV"), page);
     styleIdeaHeaderAction(generateIdeaButton, IdeaHeaderAction::Generate);
+    styleIdeaHeaderAction(browseIdeasButton, IdeaHeaderAction::Browse);
     styleIdeaHeaderAction(continueIdeaButton, IdeaHeaderAction::Continue);
     styleIdeaHeaderAction(generateWavButton, IdeaHeaderAction::Wav);
     sectionRow->addWidget(generateIdeaButton);
+    sectionRow->addWidget(browseIdeasButton);
     sectionRow->addWidget(continueIdeaButton);
     sectionRow->addWidget(generateWavButton);
     QObject::connect(generateIdeaButton, &QPushButton::clicked, &w, [&w] {
         w.generatePracticeIdea();
+    });
+    QObject::connect(browseIdeasButton, &QPushButton::clicked, &w, [&w] {
+        w.browseCuratedIdeas();
     });
     QObject::connect(continueIdeaButton, &QPushButton::clicked, &w, [&w] {
         w.continuePracticeIdea();
@@ -1762,7 +1787,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         }
         w.regeneratePreparedMix();
     });
-    QObject::connect(gridLockBox, &QCheckBox::toggled, &w, [&w](bool checked) {
+    QObject::connect(w.trackGridLockCheck_, &QCheckBox::toggled, &w, [&w](bool checked) {
         w.looperProject_.setGridLockEnabled(checked);
         w.refreshLooperLanes();
     });
@@ -2171,7 +2196,7 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
         w.sendMetronomeModeToJam();
     });
     QObject::connect(w.metronomeSoundBox_, qOverload<int>(&QComboBox::currentIndexChanged), &w, [&w] {
-        w.preferences_.metronomeSound = w.metronomeSoundBox_->currentData().toInt();
+        w.preferences_.metronome.sound = w.metronomeSoundBox_->currentData().toInt();
         UserPreferencesStore::save(w.preferences_);
         w.sendMetronomeSoundToJam();
     });

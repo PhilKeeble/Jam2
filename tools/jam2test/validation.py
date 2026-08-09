@@ -231,7 +231,7 @@ def _wav_boundary_fixtures(root: Path) -> list[str]:
         f"invalid:{truncated}",
         f"invalid:{excessive}",
         f"import-match-48000:{matching}",
-        f"import-mismatch-48000:{mismatch}",
+        f"import-resample-48000:{mismatch}",
     ]
 
 

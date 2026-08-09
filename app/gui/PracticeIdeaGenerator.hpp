@@ -128,6 +128,9 @@ QString generatedChordFingerprint(const SongSection& section);
 QString generatedBeatFingerprint(const SongSection& section);
 
 GeneratedPracticeIdea generateCoupledPracticeIdea(const ChordIdeaRequest& request);
+GeneratedPracticeIdea generateCoupledPracticeIdeaSeeded(
+    const ChordIdeaRequest& request,
+    std::uint32_t seed);
 GeneratedContinuationIdea generateContinuationPracticeIdea(
     const SongSection& source,
     const ContinueIdeaRequest& request);

@@ -172,10 +172,19 @@ UserPreferences UserPreferencesStore::load()
         return out;
     }
     settings.beginGroup(QStringLiteral("metronome"));
-    out.metronomeSound = qBound(
-        0,
-        settings.value(QStringLiteral("sound"), out.metronomeSound).toInt(),
-        3);
+    out.metronome.sound = qBound(
+        0, settings.value(QStringLiteral("sound"), out.metronome.sound).toInt(), 3);
+    out.metronome.mode = settings.value(
+        QStringLiteral("mode"), out.metronome.mode).toString();
+    out.metronome.compensationMaxMs = settings.value(
+        QStringLiteral("compensation_max_ms"), out.metronome.compensationMaxMs).toDouble();
+    out.metronome.compensationSmoothingMs = settings.value(
+        QStringLiteral("compensation_smoothing_ms"), out.metronome.compensationSmoothingMs).toDouble();
+    out.metronome.compensationDeadbandMs = settings.value(
+        QStringLiteral("compensation_deadband_ms"), out.metronome.compensationDeadbandMs).toDouble();
+    out.metronome.compensationSlewMsPerSecond = settings.value(
+        QStringLiteral("compensation_slew_ms_per_second"),
+        out.metronome.compensationSlewMsPerSecond).toDouble();
     settings.endGroup();
     settings.beginGroup(QStringLiteral("local_audio")); loadAudio(settings, out.localAudio); settings.endGroup();
     settings.beginGroup(QStringLiteral("network_audio"));
@@ -230,6 +239,162 @@ UserPreferences UserPreferencesStore::load()
         settings.beginGroup(QStringLiteral("loopback"));
         loadLoopbackRecording(settings, out.recording.loopback);
         settings.endGroup();
+        settings.beginGroup(QStringLiteral("jam"));
+        out.recording.jam.promptForName = settings.value(
+            QStringLiteral("prompt_for_name"), out.recording.jam.promptForName).toBool();
+        out.recording.jam.completionAction = settings.value(
+            QStringLiteral("completion_action"),
+            out.recording.jam.completionAction).toString();
+        if (out.recording.jam.completionAction != QStringLiteral("ask") &&
+            out.recording.jam.completionAction != QStringLiteral("import") &&
+            out.recording.jam.completionAction != QStringLiteral("notify")) {
+            out.recording.jam.completionAction = QStringLiteral("ask");
+        }
+        out.recording.jam.importMix = settings.value(
+            QStringLiteral("import_mix"), out.recording.jam.importMix).toBool();
+        out.recording.jam.importMyInput = settings.value(
+            QStringLiteral("import_my_input"), out.recording.jam.importMyInput).toBool();
+        out.recording.jam.importTheirInput = settings.value(
+            QStringLiteral("import_their_input"), out.recording.jam.importTheirInput).toBool();
+        out.recording.jam.importInputsMix = settings.value(
+            QStringLiteral("import_inputs_mix"), out.recording.jam.importInputsMix).toBool();
+        out.recording.jam.importMetronome = settings.value(
+            QStringLiteral("import_metronome"), out.recording.jam.importMetronome).toBool();
+        settings.endGroup();
+        settings.beginGroup(QStringLiteral("track_jam_mix"));
+        out.recording.jamMixTrack.includeBackingTrack = settings.value(
+            QStringLiteral("include_backing_track"),
+            out.recording.jamMixTrack.includeBackingTrack).toBool();
+        out.recording.jamMixTrack.includeMetronome = settings.value(
+            QStringLiteral("include_metronome"),
+            out.recording.jamMixTrack.includeMetronome).toBool();
+        settings.endGroup();
+        settings.endGroup();
+    }
+    if (schemaVersion >= 4) {
+        settings.beginGroup(QStringLiteral("general"));
+        out.general.startupView = settings.value(
+            QStringLiteral("startup_view"), out.general.startupView).toString();
+        out.general.bpm = qBound(20,
+            settings.value(QStringLiteral("bpm"), out.general.bpm).toInt(), 400);
+        out.general.meterNumerator = qBound(1, settings.value(
+            QStringLiteral("meter_numerator"), out.general.meterNumerator).toInt(), 16);
+        out.general.meterDenominator = settings.value(
+            QStringLiteral("meter_denominator"), out.general.meterDenominator).toInt();
+        out.general.tempoPulseUnits = qBound(1, settings.value(
+            QStringLiteral("tempo_pulse_units"), out.general.tempoPulseUnits).toInt(), 3);
+        out.general.clickDivision = qBound(1, settings.value(
+            QStringLiteral("click_division"), out.general.clickDivision).toInt(), 8);
+        out.general.generateIdeaOnStartup = settings.value(
+            QStringLiteral("generate_idea_on_startup"),
+            out.general.generateIdeaOnStartup).toBool();
+        settings.endGroup();
+
+        settings.beginGroup(QStringLiteral("ideas"));
+        out.ideas.parts = qBound(0, settings.value(
+            QStringLiteral("parts"), out.ideas.parts).toInt(), 2);
+        out.ideas.key = qBound(-1, settings.value(
+            QStringLiteral("key"), out.ideas.key).toInt(), 11);
+        out.ideas.styleId = settings.value(
+            QStringLiteral("style_id"), out.ideas.styleId).toString();
+        out.ideas.profileId = settings.value(
+            QStringLiteral("profile_id"), out.ideas.profileId).toString();
+        out.ideas.meterId = settings.value(
+            QStringLiteral("meter_id"), out.ideas.meterId).toString();
+        out.ideas.bars = qMax(0, settings.value(
+            QStringLiteral("bars"), out.ideas.bars).toInt());
+        out.ideas.exactBpm = settings.value(
+            QStringLiteral("exact_bpm"), out.ideas.exactBpm).toBool();
+        out.ideas.bpm = qBound(20, settings.value(
+            QStringLiteral("bpm"), out.ideas.bpm).toInt(), 400);
+        out.ideas.complexity = qBound(1, settings.value(
+            QStringLiteral("complexity"), out.ideas.complexity).toInt(), 8);
+        out.ideas.renderWavsOnStartup = settings.value(
+            QStringLiteral("render_wavs_on_startup"),
+            out.ideas.renderWavsOnStartup).toBool();
+        out.ideas.renderChords = settings.value(
+            QStringLiteral("render_chords"), out.ideas.renderChords).toBool();
+        out.ideas.renderDrums = settings.value(
+            QStringLiteral("render_drums"), out.ideas.renderDrums).toBool();
+        out.ideas.renderMelody = settings.value(
+            QStringLiteral("render_melody"), out.ideas.renderMelody).toBool();
+        out.ideas.renderBass = settings.value(
+            QStringLiteral("render_bass"), out.ideas.renderBass).toBool();
+        out.ideas.renderSupport = settings.value(
+            QStringLiteral("render_support"), out.ideas.renderSupport).toBool();
+        out.ideas.chordVoicing = qBound(0, settings.value(
+            QStringLiteral("chord_voicing"), out.ideas.chordVoicing).toInt(), 3);
+        out.ideas.drumKit = qBound(0, settings.value(
+            QStringLiteral("drum_kit"), out.ideas.drumKit).toInt(), 2);
+        out.ideas.grooveUseIdeaTiming = settings.value(
+            QStringLiteral("groove_use_idea_timing"),
+            out.ideas.grooveUseIdeaTiming).toBool();
+        out.ideas.grooveBars = qMax(0, settings.value(
+            QStringLiteral("groove_bars"), out.ideas.grooveBars).toInt());
+        settings.endGroup();
+
+        settings.beginGroup(QStringLiteral("levels"));
+        out.levels.sendDb = qBound(-60, settings.value(
+            QStringLiteral("send_db"), out.levels.sendDb).toInt(), 12);
+        out.levels.monitorInput = settings.value(
+            QStringLiteral("monitor_input"), out.levels.monitorInput).toBool();
+        out.levels.monitorDb = qBound(-60, settings.value(
+            QStringLiteral("monitor_db"), out.levels.monitorDb).toInt(), 12);
+        out.levels.metronomeDb = qBound(-60, settings.value(
+            QStringLiteral("metronome_db"), out.levels.metronomeDb).toInt(), 12);
+        out.levels.masterDb = qBound(-60, settings.value(
+            QStringLiteral("master_db"), out.levels.masterDb).toInt(), 12);
+        out.levels.remotePeerDb = qBound(-60, settings.value(
+            QStringLiteral("remote_peer_db"), out.levels.remotePeerDb).toInt(), 12);
+        out.levels.backingTrackDb = qBound(-60, settings.value(
+            QStringLiteral("backing_track_db"), out.levels.backingTrackDb).toInt(), 12);
+        settings.endGroup();
+
+        settings.beginGroup(QStringLiteral("views"));
+        out.views.performanceChordPreview = settings.value(
+            QStringLiteral("performance_chord_preview"),
+            out.views.performanceChordPreview).toBool();
+        out.views.performanceBeatPreview = settings.value(
+            QStringLiteral("performance_beat_preview"),
+            out.views.performanceBeatPreview).toBool();
+        out.views.chordFocusCurrentBar = settings.value(
+            QStringLiteral("chord_focus_current_bar"), out.views.chordFocusCurrentBar).toBool();
+        out.views.drumFocusCurrentBar = settings.value(
+            QStringLiteral("drum_focus_current_bar"), out.views.drumFocusCurrentBar).toBool();
+        out.views.guitarStrings = qBound(6, settings.value(
+            QStringLiteral("guitar_strings"), out.views.guitarStrings).toInt(), 8);
+        out.views.guitarDropTuning = settings.value(
+            QStringLiteral("guitar_drop_tuning"), out.views.guitarDropTuning).toBool();
+        out.views.trackGridLock = settings.value(
+            QStringLiteral("track_grid_lock"), out.views.trackGridLock).toBool();
+        out.views.trackLoop = settings.value(
+            QStringLiteral("track_loop"), out.views.trackLoop).toBool();
+        out.views.trackSpeed = qBound(0.1, settings.value(
+            QStringLiteral("track_speed"), out.views.trackSpeed).toDouble(), 2.0);
+        out.views.trackPitch = qBound(-12, settings.value(
+            QStringLiteral("track_pitch"), out.views.trackPitch).toInt(), 12);
+        out.views.focusFrequencyEnabled = settings.value(
+            QStringLiteral("focus_frequency_enabled"),
+            out.views.focusFrequencyEnabled).toBool();
+        out.views.focusPreset = settings.value(
+            QStringLiteral("focus_preset"), out.views.focusPreset).toString();
+        out.views.focusFrequencyHz = qBound(40, settings.value(
+            QStringLiteral("focus_frequency_hz"), out.views.focusFrequencyHz).toInt(), 8000);
+        settings.endGroup();
+
+        settings.beginGroup(QStringLiteral("sync"));
+        out.sync.trackLanes = settings.value(
+            QStringLiteral("track_lanes"), out.sync.trackLanes).toBool();
+        out.sync.autoShareWavs = settings.value(
+            QStringLiteral("auto_share_wavs"), out.sync.autoShareWavs).toBool();
+        out.sync.globalPlayback = settings.value(
+            QStringLiteral("global_playback"), out.sync.globalPlayback).toBool();
+        out.sync.generatedIdeas = qBound(0, settings.value(
+            QStringLiteral("generated_ideas"), out.sync.generatedIdeas).toInt(), 3);
+        out.sync.metronomeState = settings.value(
+            QStringLiteral("metronome_state"), out.sync.metronomeState).toBool();
+        out.sync.recordings = settings.value(
+            QStringLiteral("recordings"), out.sync.recordings).toBool();
         settings.endGroup();
     }
     if (out.logging.folder.isEmpty()) {
@@ -247,7 +412,13 @@ void UserPreferencesStore::save(const UserPreferences& p)
     settings.clear();
     settings.setValue(QStringLiteral("schema_version"), UserPreferences::kSchemaVersion);
     settings.beginGroup(QStringLiteral("metronome"));
-    settings.setValue(QStringLiteral("sound"), qBound(0, p.metronomeSound, 3));
+    settings.setValue(QStringLiteral("sound"), qBound(0, p.metronome.sound, 3));
+    settings.setValue(QStringLiteral("mode"), p.metronome.mode);
+    settings.setValue(QStringLiteral("compensation_max_ms"), p.metronome.compensationMaxMs);
+    settings.setValue(QStringLiteral("compensation_smoothing_ms"), p.metronome.compensationSmoothingMs);
+    settings.setValue(QStringLiteral("compensation_deadband_ms"), p.metronome.compensationDeadbandMs);
+    settings.setValue(QStringLiteral("compensation_slew_ms_per_second"),
+        p.metronome.compensationSlewMsPerSecond);
     settings.endGroup();
     settings.beginGroup(QStringLiteral("local_audio")); saveAudio(settings, p.localAudio); settings.endGroup();
     settings.beginGroup(QStringLiteral("network_audio"));
@@ -289,6 +460,90 @@ void UserPreferencesStore::save(const UserPreferences& p)
     settings.beginGroup(QStringLiteral("loopback"));
     saveLoopbackRecording(settings, p.recording.loopback);
     settings.endGroup();
+    settings.beginGroup(QStringLiteral("jam"));
+    settings.setValue(QStringLiteral("prompt_for_name"), p.recording.jam.promptForName);
+    settings.setValue(QStringLiteral("completion_action"), p.recording.jam.completionAction);
+    settings.setValue(QStringLiteral("import_mix"), p.recording.jam.importMix);
+    settings.setValue(QStringLiteral("import_my_input"), p.recording.jam.importMyInput);
+    settings.setValue(QStringLiteral("import_their_input"), p.recording.jam.importTheirInput);
+    settings.setValue(QStringLiteral("import_inputs_mix"), p.recording.jam.importInputsMix);
+    settings.setValue(QStringLiteral("import_metronome"), p.recording.jam.importMetronome);
+    settings.endGroup();
+    settings.beginGroup(QStringLiteral("track_jam_mix"));
+    settings.setValue(QStringLiteral("include_backing_track"),
+        p.recording.jamMixTrack.includeBackingTrack);
+    settings.setValue(QStringLiteral("include_metronome"),
+        p.recording.jamMixTrack.includeMetronome);
+    settings.endGroup();
+    settings.endGroup();
+
+    settings.beginGroup(QStringLiteral("general"));
+    settings.setValue(QStringLiteral("startup_view"), p.general.startupView);
+    settings.setValue(QStringLiteral("bpm"), p.general.bpm);
+    settings.setValue(QStringLiteral("meter_numerator"), p.general.meterNumerator);
+    settings.setValue(QStringLiteral("meter_denominator"), p.general.meterDenominator);
+    settings.setValue(QStringLiteral("tempo_pulse_units"), p.general.tempoPulseUnits);
+    settings.setValue(QStringLiteral("click_division"), p.general.clickDivision);
+    settings.setValue(QStringLiteral("generate_idea_on_startup"), p.general.generateIdeaOnStartup);
+    settings.endGroup();
+
+    settings.beginGroup(QStringLiteral("ideas"));
+    settings.setValue(QStringLiteral("parts"), p.ideas.parts);
+    settings.setValue(QStringLiteral("key"), p.ideas.key);
+    settings.setValue(QStringLiteral("style_id"), p.ideas.styleId);
+    settings.setValue(QStringLiteral("profile_id"), p.ideas.profileId);
+    settings.setValue(QStringLiteral("meter_id"), p.ideas.meterId);
+    settings.setValue(QStringLiteral("bars"), p.ideas.bars);
+    settings.setValue(QStringLiteral("exact_bpm"), p.ideas.exactBpm);
+    settings.setValue(QStringLiteral("bpm"), p.ideas.bpm);
+    settings.setValue(QStringLiteral("complexity"), p.ideas.complexity);
+    settings.setValue(QStringLiteral("render_wavs_on_startup"), p.ideas.renderWavsOnStartup);
+    settings.setValue(QStringLiteral("render_chords"), p.ideas.renderChords);
+    settings.setValue(QStringLiteral("render_drums"), p.ideas.renderDrums);
+    settings.setValue(QStringLiteral("render_melody"), p.ideas.renderMelody);
+    settings.setValue(QStringLiteral("render_bass"), p.ideas.renderBass);
+    settings.setValue(QStringLiteral("render_support"), p.ideas.renderSupport);
+    settings.setValue(QStringLiteral("chord_voicing"), p.ideas.chordVoicing);
+    settings.setValue(QStringLiteral("drum_kit"), p.ideas.drumKit);
+    settings.setValue(QStringLiteral("groove_use_idea_timing"), p.ideas.grooveUseIdeaTiming);
+    settings.setValue(QStringLiteral("groove_bars"), p.ideas.grooveBars);
+    settings.endGroup();
+
+    settings.beginGroup(QStringLiteral("levels"));
+    settings.setValue(QStringLiteral("send_db"), p.levels.sendDb);
+    settings.setValue(QStringLiteral("monitor_input"), p.levels.monitorInput);
+    settings.setValue(QStringLiteral("monitor_db"), p.levels.monitorDb);
+    settings.setValue(QStringLiteral("metronome_db"), p.levels.metronomeDb);
+    settings.setValue(QStringLiteral("master_db"), p.levels.masterDb);
+    settings.setValue(QStringLiteral("remote_peer_db"), p.levels.remotePeerDb);
+    settings.setValue(QStringLiteral("backing_track_db"), p.levels.backingTrackDb);
+    settings.endGroup();
+
+    settings.beginGroup(QStringLiteral("views"));
+    settings.setValue(QStringLiteral("performance_chord_preview"),
+        p.views.performanceChordPreview);
+    settings.setValue(QStringLiteral("performance_beat_preview"),
+        p.views.performanceBeatPreview);
+    settings.setValue(QStringLiteral("chord_focus_current_bar"), p.views.chordFocusCurrentBar);
+    settings.setValue(QStringLiteral("drum_focus_current_bar"), p.views.drumFocusCurrentBar);
+    settings.setValue(QStringLiteral("guitar_strings"), p.views.guitarStrings);
+    settings.setValue(QStringLiteral("guitar_drop_tuning"), p.views.guitarDropTuning);
+    settings.setValue(QStringLiteral("track_grid_lock"), p.views.trackGridLock);
+    settings.setValue(QStringLiteral("track_loop"), p.views.trackLoop);
+    settings.setValue(QStringLiteral("track_speed"), p.views.trackSpeed);
+    settings.setValue(QStringLiteral("track_pitch"), p.views.trackPitch);
+    settings.setValue(QStringLiteral("focus_frequency_enabled"), p.views.focusFrequencyEnabled);
+    settings.setValue(QStringLiteral("focus_preset"), p.views.focusPreset);
+    settings.setValue(QStringLiteral("focus_frequency_hz"), p.views.focusFrequencyHz);
+    settings.endGroup();
+
+    settings.beginGroup(QStringLiteral("sync"));
+    settings.setValue(QStringLiteral("track_lanes"), p.sync.trackLanes);
+    settings.setValue(QStringLiteral("auto_share_wavs"), p.sync.autoShareWavs);
+    settings.setValue(QStringLiteral("global_playback"), p.sync.globalPlayback);
+    settings.setValue(QStringLiteral("generated_ideas"), p.sync.generatedIdeas);
+    settings.setValue(QStringLiteral("metronome_state"), p.sync.metronomeState);
+    settings.setValue(QStringLiteral("recordings"), p.sync.recordings);
     settings.endGroup();
     settings.sync();
 }

@@ -85,7 +85,9 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(
     parts->addItem(
         QStringLiteral("Drums Only"),
         static_cast<int>(PracticeIdeaParts::DrumsOnly));
+    parts->setCurrentIndex(qMax(0, parts->findData(static_cast<int>(defaults.parts))));
     QComboBox* key = randomCombo(keyNames(), &dialog);
+    key->setCurrentIndex(qMax(0, key->findData(defaults.key)));
     QComboBox* style = new QComboBox(&dialog);
     style->addItem(QStringLiteral("Random"), QString());
     const QStringList publicStyleNames = chordStyleNames();
@@ -97,6 +99,7 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(
     style->addItem(
         QStringLiteral("Experimental - Modern Progressive Metalcore"),
         QStringLiteral("metal-experimental"));
+    style->setCurrentIndex(qMax(0, style->findData(defaults.styleId)));
     QComboBox* profile = new QComboBox(&dialog);
     QComboBox* meter = new QComboBox(&dialog);
     QComboBox* length = new QComboBox(&dialog);
@@ -104,8 +107,8 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(
     auto* bpm = new QSpinBox(&dialog);
     bpm->setRange(20, 400);
     bpm->setValue(qBound(20, defaults.bpm, 400));
-    exactBpm->setChecked(false);
-    bpm->setEnabled(false);
+    exactBpm->setChecked(defaults.exactBpm);
+    bpm->setEnabled(defaults.exactBpm);
     bpm->setSuffix(QStringLiteral(" BPM"));
     bpm->setToolTip(QStringLiteral(
         "Overrides the selected style's normal tempo range."));
@@ -117,6 +120,7 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(
     bpmLayout->addStretch();
     QObject::connect(exactBpm, &QCheckBox::toggled, bpm, &QSpinBox::setEnabled);
     QComboBox* complexity = complexityCombo(&dialog);
+    complexity->setCurrentIndex(qMax(0, complexity->findData(defaults.complexity)));
     const auto partialGeneration = [parts] {
         return static_cast<PracticeIdeaParts>(parts->currentData().toInt()) !=
             PracticeIdeaParts::FullArrangement;
@@ -165,10 +169,12 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(
                     QStringLiteral("%1 bars (current section)").arg(selectedDefaults.bars));
             }
         }
-        const int preferredBars = previousBars > 0
+        const int configuredBars = previousBars > 0
             ? previousBars
-            : partialGeneration() ? selectedDefaults.bars : 0;
-        const int preferredIndex = length->findData(preferredBars);
+            : selectedDefaults.preferredBars > 0
+                ? selectedDefaults.preferredBars
+                : partialGeneration() ? selectedDefaults.bars : 0;
+        const int preferredIndex = length->findData(configuredBars);
         length->setCurrentIndex(preferredIndex >= 0 ? preferredIndex : 0);
     };
     const auto refreshProfileOptions = [
@@ -207,7 +213,9 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(
         // Random remains the default. The target bank's current meter is
         // labelled above so it remains a one-click explicit choice without
         // silently constraining every new idea.
-        const QString preferredMeter = previousMeter;
+        const QString preferredMeter = previousMeter.isEmpty()
+            ? selectedDefaults.preferredMeterId
+            : previousMeter;
         const int preferredIndex = meter->findData(preferredMeter);
         meter->setCurrentIndex(preferredIndex >= 0 ? preferredIndex : 0);
         refreshLength();
@@ -248,6 +256,7 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(
             refreshProfileOptions();
         });
     refreshProfile();
+    profile->setCurrentIndex(qMax(0, profile->findData(defaults.profileId)));
     refreshProfileOptions();
     form->addRow(QStringLiteral("Section"), targetBank);
     form->addRow(QStringLiteral("Parts"), parts);

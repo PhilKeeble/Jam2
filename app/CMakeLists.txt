@@ -125,6 +125,10 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/BeatGridModel.hpp
     gui/BeatGridWidget.cpp
     gui/BeatGridWidget.hpp
+    gui/CuratedIdeaCatalog.cpp
+    gui/CuratedIdeaCatalog.hpp
+    gui/CuratedIdeaDialog.cpp
+    gui/CuratedIdeaDialog.hpp
     gui/GuiLoopbackRecorder.cpp
     gui/GuiLoopbackRecorder.hpp
     gui/GuiControlMessageRouter.cpp
@@ -182,6 +186,16 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/UserPreferences.hpp
     main.cpp
 )
+
+file(GLOB JAM2_IDEA_PREVIEW_FILES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/gui/idea-previews/*.wav")
+if(JAM2_IDEA_PREVIEW_FILES)
+    qt_add_resources(jam2 "jam2_idea_previews"
+        PREFIX "/jam2/ideas/previews"
+        BASE "${CMAKE_CURRENT_SOURCE_DIR}/gui/idea-previews"
+        FILES ${JAM2_IDEA_PREVIEW_FILES}
+    )
+endif()
 
 if(WIN32)
     set_target_properties(jam2 PROPERTIES WIN32_EXECUTABLE FALSE)

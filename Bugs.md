@@ -12,19 +12,11 @@ test benchmark, validate, stress and get logs for localhost and mac
 
 Look into what makes the generation of the wavs take a while and see if we can make that more efficient 
 
-Settings needs to include preference for views with all tickboxes and options etc configured if they want to customise and things like auto generate jam on start, locking in BPM / meter for startup etc
+make tooltips more conssitent across the app
 
 ## Bugs
 
-Import midi files for songs? 
 
-maybe preset bank of drum grooves seletable on the beat view so its not random? 
-
-keyboard controls need sorting - maybe add the keybind list into the settings panel for reference 
-
-jam sync and tick boxes in the settings menu show black background box
-
-import wav sample cahnges 
 
 ### Sound references
 

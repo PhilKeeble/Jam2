@@ -26,6 +26,14 @@ public:
         BeatGridModel& chordModel,
         BeatGridModel& beatModel,
         const ChordIdeaRequest& request);
+    static std::optional<GeneratedPracticeIdea> applyCoupled(
+        BeatGridModel& chordModel,
+        BeatGridModel& beatModel,
+        GeneratedPracticeIdea idea,
+        PracticeIdeaParts parts,
+        int targetSectionIndex,
+        bool matchIdeaLength);
+    static SongSection fitRepeatingDrums(SongSection source, int targetBeats);
     static std::optional<GeneratedContinuationIdea> generateContinuation(
         BeatGridModel& model,
         const ContinueIdeaRequest& request);

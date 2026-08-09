@@ -69,7 +69,10 @@ class LevelMeterWidget;
 
 namespace jam2::practice {
 struct ChordIdeaRequest;
+struct CuratedIdeaEntry;
+struct GeneratedPracticeIdea;
 struct ReferenceRenderSettings;
+enum class PracticeIdeaParts;
 }
 
 class MainWindow : public QWidget {
@@ -159,6 +162,8 @@ private:
     void testDeviceSelection(QComboBox* device, QPushButton* button, QWidget* dialogParent);
     void applyJoinProfileName(const QString& name);
     void applyPreferencesToControls();
+    void applyNewJamDefaults();
+    void initializeStartupWorkflow();
     void applyCreateDefaultsToControls();
     void applyJoinDefaultsToControls();
     void saveCreateDefaults();
@@ -376,9 +381,20 @@ private:
     void refreshSongViews();
     void refreshSongView(const QString& lane);
     void generatePracticeIdea();
+    void browseCuratedIdeas();
     void continuePracticeIdea();
     void clearPracticeIdea();
     bool applyPracticeIdea(const jam2::practice::ChordIdeaRequest& request);
+    bool applyPracticeIdea(
+        jam2::practice::GeneratedPracticeIdea idea,
+        jam2::practice::PracticeIdeaParts parts,
+        int targetSectionIndex,
+        bool useIdeaTiming,
+        bool matchIdeaLength);
+    bool playCuratedIdeaPreview(
+        const jam2::practice::CuratedIdeaEntry& idea,
+        QString& error);
+    void stopCuratedIdeaPreview();
     void stopTrackForPracticeIdeaGeneration();
     void generatePracticeReferenceWavs();
     void startPracticeReferenceWavGeneration(
@@ -414,6 +430,7 @@ private:
 
     ApplicationRuntime jam2_;
     UserPreferences preferences_;
+    bool preferencesInitialized_ = false;
     std::vector<jam2::audio::DeviceInfo> availableDevices_;
     QMap<QString, jam2::audio::DeviceTestResult> deviceCapabilitiesCache_;
     QString joinProfileName_ = QStringLiteral("fast");
@@ -546,6 +563,7 @@ private:
     QPushButton* loopEndButton_ = nullptr;
     QPushButton* clearLoopButton_ = nullptr;
     QCheckBox* loopEnabledCheck_ = nullptr;
+    QCheckBox* trackGridLockCheck_ = nullptr;
     QSlider* trackLevelSlider_ = nullptr;
     QLabel* trackLevelDbLabel_ = nullptr;
     QSlider* mixTrackLevelSlider_ = nullptr;
@@ -795,6 +813,7 @@ private:
     std::uint64_t tunerCommandCookie_ = 0;
     bool tunerRequestedEnabled_ = true;
     std::uint64_t practiceIdeaRevision_ = 0;
+    bool curatedIdeaPreviewActive_ = false;
     QVector<bool> metronomeEnabledSteps_;
     QVector<bool> metronomeAccents_;
     bool applyingBankTiming_ = false;

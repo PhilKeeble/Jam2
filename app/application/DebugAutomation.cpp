@@ -656,12 +656,18 @@ ParsedScenario parseScenario(const QString& path, const QJsonObject& source, con
         const bool valid =
             (it.key() == QStringLiteral("render_audio") &&
              it.value().isBool()) ||
+            (it.key() == QStringLiteral("drum_only_audio") &&
+             it.value().isBool()) ||
             (it.key() == QStringLiteral("matched_complexity_seeds") &&
              it.value().isBool()) ||
             (it.key() == QStringLiteral("samples_per_cell") &&
              it.value().isDouble() &&
              it.value().toInt() >= 2 &&
              it.value().toInt() <= 16) ||
+            (it.key() == QStringLiteral("fixed_bars") &&
+             it.value().isDouble() &&
+             it.value().toInt() >= 4 &&
+             it.value().toInt() <= 64) ||
             ((it.key() == QStringLiteral("style_id") ||
               it.key() == QStringLiteral("profile_id")) &&
              it.value().isString() &&
@@ -1165,11 +1171,15 @@ int runFocusedOperation(const ParsedScenario& scenario, QJsonObject& result)
         Jam2MusicCorpusOptions options;
         options.includeAudio =
             corpus.value(QStringLiteral("render_audio")).toBool(true);
+        options.drumOnlyAudio =
+            corpus.value(QStringLiteral("drum_only_audio")).toBool(false);
         options.matchedComplexitySeeds =
             corpus.value(QStringLiteral("matched_complexity_seeds"))
                 .toBool(false);
         options.samplesPerCell =
             corpus.value(QStringLiteral("samples_per_cell")).toInt(4);
+        options.fixedBars =
+            corpus.value(QStringLiteral("fixed_bars")).toInt(0);
         options.styleId =
             corpus.value(QStringLiteral("style_id")).toString();
         options.profileId =

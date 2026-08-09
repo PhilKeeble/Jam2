@@ -163,6 +163,24 @@ Generated recipes use the research-based version-7 schema exclusively. Earlier
 generated recipe versions are rejected; there is no Mood/Character migration or
 fallback generation path. Manual songs without generated metadata remain valid.
 
+The Chord, Beat, Track, and Performance views also expose **Groove Library**.
+The embedded version-7 Groove Library contains two deterministic 32-bar drum
+performances for every generation profile. Each has a compact four-bar,
+drum-only audition preview; preview audio is local and is never sent to peers.
+Preview assets are authored at representative default backing-track loudness,
+play at unity internally, and follow only the normal master output level.
+New backing tracks start at -3 dB; the metronome retains its quieter -10 dB
+default because its transient sound can otherwise be harsh during a jam.
+Import replaces only the editable drums and kit, preserving chords, melody,
+bass, and support already in the target section. The user can import 8, 12, 16,
+24, or 32 bars, or fit the groove to the current section. Fitting truncates a
+shorter section and repeats the complete groove from bar 1 when the target is
+longer than 32 bars; it does not pad with silence. The dialog separately
+chooses whether to adopt the groove BPM/meter or retain the target section's
+timing. Retained timing keeps events at the same beat/subdivision positions
+without stretching. Changing timing affects the entire target bank, including
+material that was not imported.
+
 Reference WAVs can render five separate layers: chords, drums, melody, bass,
 and supporting line. Rendering uses the recipe's deterministic synthesis,
 articulation, per-lane timing, automation, meter denominator, and style kit.
@@ -199,7 +217,7 @@ The Track tab can:
 - Sync collaborative arrangement snapshots and missing managed WAV assets by content hash when Track Sync is enabled.
 - Use **Share Tracks** to explicitly reconcile all asset-backed local lanes with the jam.
 
-Perform prepared-cache playback uses the engine's ASIO/CoreAudio output path. Prepared caches must match the active engine sample rate; offline resampling is deferred.
+Perform prepared-cache playback uses the engine's ASIO/CoreAudio output path. Imported PCM16 WAVs are resampled offline to the active project rate before Jam2 stores and prepares its managed copy.
 
 The Performance bank strip launches a bank. While Global Play is running, a
 shared launch first prepares the target on every participating peer, then the

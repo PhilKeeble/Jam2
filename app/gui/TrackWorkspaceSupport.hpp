@@ -22,6 +22,9 @@ struct StagedPcm16Asset {
     QString displayName;
     QString sha256;
     WavMetadata metadata;
+    int sourceSampleRate = 0;
+    qint64 sourceFrames = 0;
+    bool resampled = false;
     QString error;
 };
 

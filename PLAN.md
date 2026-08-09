@@ -28,6 +28,8 @@ Looks like maybe not worth the effort?
 
 ## Guitar Pro Import
 
+Import midi files for songs? 
+
 Guitar pro has complex writings that could be exportd to midi, and then that midi could feed jam2?
 
 ## Linux Audio Backend (never implement this without explicit approval)

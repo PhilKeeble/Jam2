@@ -36,7 +36,7 @@ void detachConsoleForGui() noexcept
 
 void applyCustomTheme(QApplication& app)
 {
-    app.setStyleSheet(R"(
+    app.setStyleSheet(QString::fromLatin1(R"(
         QWidget {
             background: #050809; color: #e9e6dc;
             font-family: "Segoe UI Variable", "Segoe UI"; font-size: 10.5pt;
@@ -75,6 +75,24 @@ void applyCustomTheme(QApplication& app)
         QLineEdit, QAbstractSpinBox, QComboBox, QTextEdit, QPlainTextEdit, QTableWidget {
             background: #070b0c; border: 1px solid #526368; border-radius: 3px;
             color: #f1eee5; selection-background-color: #74435e; padding: 6px;
+        }
+        QAbstractSpinBox[jam2MutedEditor="true"] {
+            border: 1px solid #89959c; background: #000000; color: #ffffff;
+            padding: 2px 28px 2px 6px;
+        }
+        QComboBox[jam2MutedEditor="true"], QLineEdit[jam2MutedEditor="true"] {
+            border: 1px solid #89959c; background: #000000; color: #ffffff;
+            padding: 2px 6px;
+        }
+        QAbstractSpinBox[jam2MutedEditor="true"]:focus,
+        QComboBox[jam2MutedEditor="true"]:focus,
+        QLineEdit[jam2MutedEditor="true"]:focus {
+            border-color: #e8a44a;
+        }
+        QAbstractSpinBox[jam2MutedEditor="true"]:disabled,
+        QComboBox[jam2MutedEditor="true"]:disabled,
+        QLineEdit[jam2MutedEditor="true"]:disabled {
+            border-color: #535270; background: #161727; color: #aaa5ba;
         }
         QComboBox::drop-down { border: 0; width: 22px; }
         QPushButton, QToolButton {
@@ -273,7 +291,157 @@ void applyCustomTheme(QApplication& app)
             background: #526368; min-height: 28px; border-radius: 5px;
         }
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-    )");
+
+    )") + QString::fromLatin1(R"(
+        /* One popup language throughout Jam2. These rules intentionally sit
+           after the workspace theme so every QDialog, including message and
+           file dialogs, inherits the Groove Library's warmer, softer visual
+           hierarchy without changing the controls each workflow uses. */
+        QDialog {
+            background: #101516; color: #eee4d1;
+        }
+        QDialog QLabel, QDialog QCheckBox, QDialog QRadioButton {
+            color: #eee4d1;
+        }
+        QDialog QLineEdit, QDialog QAbstractSpinBox, QDialog QComboBox,
+        QDialog QTextEdit, QDialog QPlainTextEdit, QDialog QTableWidget {
+            background: #182022; color: #f4ead8;
+            border: 1px solid #3b4a4c; border-radius: 3px;
+            selection-background-color: #315153; selection-color: #ffffff;
+        }
+        QDialog QLineEdit, QDialog QAbstractSpinBox, QDialog QComboBox {
+            padding: 6px 8px;
+        }
+        QDialog QLineEdit:focus, QDialog QAbstractSpinBox:focus,
+        QDialog QComboBox:focus, QDialog QTextEdit:focus,
+        QDialog QPlainTextEdit:focus, QDialog QTableWidget:focus,
+        QDialog QListWidget:focus, QDialog QTreeWidget:focus,
+        QDialog QTableView:focus {
+            background: #202a2c; color: #fff4df;
+            border: 2px solid #d8bf91;
+        }
+        QDialog QPushButton:focus, QDialog QToolButton:focus {
+            background: #383426; color: #fff4df;
+            border: 2px solid #ffd68e;
+        }
+        QDialog QCheckBox:focus, QDialog QRadioButton:focus {
+            background: #202a2c; color: #fff4df;
+            border: 1px solid #d8bf91; border-radius: 3px;
+            padding: 3px 5px;
+        }
+        QDialog QSlider:focus {
+            border: 1px solid #d8bf91; border-radius: 3px;
+        }
+        QDialog QAbstractSpinBox[jam2MutedEditor="true"],
+        QDialog QComboBox[jam2MutedEditor="true"],
+        QDialog QLineEdit[jam2MutedEditor="true"] {
+            background: #182022; color: #f4ead8;
+            border: 1px solid #3b4a4c; padding: 6px 8px;
+        }
+        QDialog QAbstractSpinBox[jam2MutedEditor="true"]:focus,
+        QDialog QComboBox[jam2MutedEditor="true"]:focus,
+        QDialog QLineEdit[jam2MutedEditor="true"]:focus {
+            border-color: #b99b67;
+        }
+        QDialog QComboBox QAbstractItemView {
+            background: #182022; color: #f4ead8;
+            border: 1px solid #465658;
+            selection-background-color: #315153; selection-color: #ffffff;
+            outline: 0;
+        }
+        QDialog QListWidget, QDialog QTreeWidget, QDialog QTableView {
+            background: #12191a; color: #e7ddca;
+            border: 1px solid #344244; border-radius: 4px; outline: 0;
+            selection-background-color: #29484b; selection-color: #ffffff;
+        }
+        QDialog QListWidget::item, QDialog QTreeWidget::item {
+            border-bottom: 1px solid #253133; padding: 7px 9px;
+        }
+        QDialog QListWidget::item:hover, QDialog QTreeWidget::item:hover {
+            background: #1b292b;
+        }
+        QDialog QListWidget::item:selected, QDialog QTreeWidget::item:selected {
+            background: #29484b; color: #ffffff;
+            border-left: 3px solid #b99b67;
+        }
+        QDialog QGroupBox {
+            background: #0b1011; border: 1px solid #344244;
+            border-radius: 4px; margin-top: 16px; padding: 10px;
+        }
+        QDialog QGroupBox::title {
+            subcontrol-origin: margin; left: 10px; padding: 0 5px;
+            color: #d8bf91; font-family: Bahnschrift; font-size: 9pt;
+            font-weight: 600;
+        }
+        QDialog QPushButton, QDialog QToolButton {
+            background: #202b2d; color: #eee4d1;
+            border: 1px solid #465658; border-radius: 3px;
+            padding: 7px 12px;
+        }
+        QDialog QPushButton:hover, QDialog QToolButton:hover {
+            background: #2a3a3c; border-color: #71878a;
+        }
+        QDialog QPushButton:pressed, QDialog QToolButton:pressed {
+            background: #30251c; border-color: #b99b67;
+        }
+        QDialog QPushButton:default {
+            color: #ffe3ad; background: #29281f; border-color: #b99b67;
+        }
+        QDialog QPushButton:default:hover {
+            background: #383426; border-color: #d8bf91;
+        }
+        QDialog QPushButton:disabled, QDialog QToolButton:disabled,
+        QDialog QLineEdit:disabled, QDialog QAbstractSpinBox:disabled,
+        QDialog QComboBox:disabled {
+            color: #718082; border-color: #303b3d; background: #171e1f;
+        }
+        QDialog QDialogButtonBox {
+            border-top: 1px solid #253133; padding-top: 10px;
+        }
+        QDialog QTabWidget::pane {
+            background: #0b1011; border: 1px solid #344244;
+            border-radius: 4px;
+        }
+        QDialog QTabBar::tab {
+            background: #182022; color: #c8d1cf;
+            border: 1px solid #344244; border-bottom: 0;
+            border-top-left-radius: 3px; border-top-right-radius: 3px;
+            padding: 8px 13px; margin-right: 2px;
+        }
+        QDialog QTabBar::tab:selected {
+            background: #29484b; color: #ffffff; border-color: #b99b67;
+        }
+        QDialog QHeaderView::section {
+            background: #182022; color: #d8bf91;
+            border: 0; border-right: 1px solid #344244;
+            border-bottom: 1px solid #344244; padding: 7px;
+        }
+        QDialog QTableWidget::item:selected, QDialog QTableView::item:selected {
+            background: #29484b; color: #ffffff;
+        }
+        QDialog QScrollBar:vertical { background: #101516; }
+        QDialog QScrollBar::handle:vertical { background: #465658; }
+
+        QMenu {
+            background: #12191a; color: #e7ddca;
+            border: 1px solid #344244; border-radius: 4px; padding: 4px;
+        }
+        QMenu::item {
+            border-radius: 3px; padding: 7px 24px 7px 10px;
+        }
+        QMenu::item:selected {
+            background: #29484b; color: #ffffff;
+            border-left: 3px solid #b99b67;
+        }
+        QMenu::item:disabled { color: #718082; }
+        QMenu::separator {
+            height: 1px; background: #344244; margin: 5px 7px;
+        }
+        QToolTip {
+            background: #202b2d; color: #f4ead8;
+            border: 1px solid #b99b67; border-radius: 3px; padding: 5px 7px;
+        }
+    )"));
 }
 
 void setApplicationIdentity()

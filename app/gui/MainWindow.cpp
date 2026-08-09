@@ -4,6 +4,8 @@
 #include "TrackWorkspaceSupport.hpp"
 #include "GuiPresentation.hpp"
 #include "GuiControlMessageRouter.hpp"
+#include "CuratedIdeaCatalog.hpp"
+#include "CuratedIdeaDialog.hpp"
 #include "MusicTheory.hpp"
 #include "PracticeIdeaDialogs.hpp"
 #include "RecordingTiming.hpp"
@@ -30,8 +32,10 @@
 #include <QAbstractSlider>
 #include <QAbstractSpinBox>
 #include <QAbstractScrollArea>
+#include <QAbstractButton>
 #include <QApplication>
 #include <QAbstractItemView>
+#include <QButtonGroup>
 #include <QCloseEvent>
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -56,7 +60,9 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonValue>
+#include <QKeyEvent>
 #include <QList>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QMouseEvent>
@@ -68,7 +74,9 @@
 #include <QRunnable>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QStandardPaths>
 #include <QScrollBar>
+#include <QScreen>
 #include <QUrl>
 #include <QSlider>
 #include <QSignalBlocker>
@@ -80,7 +88,9 @@
 #include <QStyle>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTabBar>
 #include <QTemporaryFile>
+#include <QTextEdit>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -112,6 +122,34 @@ constexpr int kMaxLooperTrackContributions = 512;
 constexpr qint64 kTrackBatchIdleTimeoutMs = 30000;
 constexpr int kFirewallGuidanceDisconnectThreshold = 3;
 constexpr int kFirewallGuidanceWindowMs = 10000;
+
+bool explicitValueEditorHasFocus(QWidget* focus)
+{
+    for (QWidget* widget = focus; widget != nullptr; widget = widget->parentWidget()) {
+        if (qobject_cast<QLineEdit*>(widget) ||
+            qobject_cast<QPlainTextEdit*>(widget) ||
+            qobject_cast<QTextEdit*>(widget) ||
+            qobject_cast<QAbstractSpinBox*>(widget) ||
+            qobject_cast<QComboBox*>(widget)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool blocksIncidentalNavigationKey(QWidget* focus)
+{
+    for (QWidget* widget = focus; widget != nullptr; widget = widget->parentWidget()) {
+        if (qobject_cast<QAbstractSlider*>(widget) ||
+            qobject_cast<QAbstractButton*>(widget) ||
+            qobject_cast<QAbstractItemView*>(widget) ||
+            qobject_cast<QAbstractScrollArea*>(widget) ||
+            qobject_cast<QTabBar*>(widget)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 void addInitialEmptyLooperLanes(LooperProject& project)
 {
@@ -878,6 +916,7 @@ MainWindow::MainWindow(QWidget* parent)
     projectPersistence_.initializeWorkspace(jamStorage_.rootFolder());
     MainWindowPages::build(*this);
     applyPreferencesToControls();
+    applyNewJamDefaults();
     projectPersistence_.acceptNewProject(currentProjectSnapshot());
     QApplication::instance()->installEventFilter(this);
 
@@ -1250,6 +1289,7 @@ MainWindow::MainWindow(QWidget* parent)
     trackTimelineTimer_.setTimerType(Qt::PreciseTimer);
     QObject::connect(&trackTimelineTimer_, &QTimer::timeout, this, [this] { updateTrackTimeline(); });
     trackTimelineTimer_.start();
+    QTimer::singleShot(0, this, [this] { initializeStartupWorkflow(); });
 }
 
 MainWindow::~MainWindow()
@@ -1313,6 +1353,145 @@ void MainWindow::closeEvent(QCloseEvent* event)
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event)
 {
+    if (event->type() == QEvent::KeyPress) {
+        auto* target = qobject_cast<QWidget*>(watched);
+        const bool belongsToMainWindow = target &&
+            (target == this || isAncestorOf(target));
+        QWidget* focus = QApplication::focusWidget();
+        const bool modalOpen = QApplication::activeModalWidget() != nullptr;
+        const bool dialogTarget = target &&
+            qobject_cast<QDialog*>(target->window()) != nullptr;
+        const bool valueEditorFocused = explicitValueEditorHasFocus(focus);
+        auto* keyEvent = static_cast<QKeyEvent*>(event);
+        const Qt::KeyboardModifiers eventModifiers =
+            keyEvent->modifiers() & ~Qt::KeypadModifier;
+
+        if (belongsToMainWindow && !dialogTarget &&
+            keyEvent->key() == Qt::Key_Tab &&
+            eventModifiers == Qt::NoModifier) {
+            return true;
+        }
+
+        if (belongsToMainWindow && !valueEditorFocused) {
+            const int key = keyEvent->key();
+            const bool navigationKey = key == Qt::Key_Left || key == Qt::Key_Right ||
+                key == Qt::Key_Up || key == Qt::Key_Down ||
+                key == Qt::Key_PageUp || key == Qt::Key_PageDown ||
+                key == Qt::Key_End;
+            if (navigationKey && blocksIncidentalNavigationKey(focus)) {
+                return true;
+            }
+        }
+
+        if (belongsToMainWindow && !modalOpen && !dialogTarget &&
+            !valueEditorFocused) {
+            const Qt::KeyboardModifiers modifiers = eventModifiers;
+            const bool noModifiers = modifiers == Qt::NoModifier;
+            const bool shiftOnly = modifiers == Qt::ShiftModifier;
+            const bool controlOnly = modifiers == Qt::ControlModifier;
+            const bool repeated = keyEvent->isAutoRepeat();
+            const int key = keyEvent->key();
+
+            const auto currentView = [this]() -> QString {
+                if (!performanceStageStack_ || performanceStageStack_->currentIndex() == 0) {
+                    return QStringLiteral("performance");
+                }
+                if (!workspaceStack_) return QStringLiteral("performance");
+                for (auto it = workspacePages_.cbegin(); it != workspacePages_.cend(); ++it) {
+                    if (it.value() == workspaceStack_->currentIndex()) return it.key();
+                }
+                return QStringLiteral("performance");
+            };
+            const auto triggerView = [this, repeated](const QString& view) {
+                if (!repeated) openWorkspace(view);
+            };
+
+            if (noModifiers && key >= Qt::Key_1 && key <= Qt::Key_6) {
+                static const QStringList views{
+                    QStringLiteral("performance"),
+                    QStringLiteral("chords"),
+                    QStringLiteral("beats"),
+                    QStringLiteral("lyrics"),
+                    QStringLiteral("metronome"),
+                    QStringLiteral("looper"),
+                };
+                triggerView(views.at(key - Qt::Key_1));
+                return true;
+            }
+            if (noModifiers && key == Qt::Key_Home) {
+                triggerView(QStringLiteral("performance"));
+                return true;
+            }
+            if ((key == Qt::Key_Backtab && (shiftOnly || noModifiers)) ||
+                (key == Qt::Key_Tab && shiftOnly)) {
+                static const QStringList views{
+                    QStringLiteral("performance"),
+                    QStringLiteral("chords"),
+                    QStringLiteral("beats"),
+                    QStringLiteral("lyrics"),
+                    QStringLiteral("metronome"),
+                    QStringLiteral("looper"),
+                };
+                const int current = qMax(0, views.indexOf(currentView()));
+                triggerView(views.at((current + 1) % views.size()));
+                return true;
+            }
+            if (noModifiers && key == Qt::Key_Space) {
+                if (!repeated && performanceTrackToggle_ &&
+                    performanceTrackToggle_->isEnabled()) {
+                    performanceTrackToggle_->click();
+                }
+                return true;
+            }
+            if (shiftOnly && key == Qt::Key_Space) {
+                if (!repeated && trackRecordingWorkflow_.globalTransportPlaying()) {
+                    const int next = (qBound(0, looperProject_.activeBankIndex(), 3) + 1) % 4;
+                    requestBankLaunch(next);
+                }
+                return true;
+            }
+            if (noModifiers && key == Qt::Key_M) {
+                if (!repeated && performanceMetronomeToggle_ &&
+                    performanceMetronomeToggle_->isEnabled()) {
+                    performanceMetronomeToggle_->click();
+                }
+                return true;
+            }
+            if (noModifiers && key == Qt::Key_F) {
+                if (!repeated) {
+                    const QString view = currentView();
+                    if (view == QStringLiteral("chords") && chordGrid_) {
+                        chordGrid_->toggleFocusCurrentBar();
+                    } else if (view == QStringLiteral("beats") && beatGrid_) {
+                        beatGrid_->toggleFocusCurrentBar();
+                    }
+                }
+                return true;
+            }
+            if (controlOnly && key == Qt::Key_A) {
+                if (!repeated && currentView() == QStringLiteral("looper") &&
+                    selectedLooperLane_ >= 0 && !sharedRecordingProtected() &&
+                    !trackRecordingWorkflow_.laneArmedAt(
+                        viewedBankIndex_, selectedLooperLane_)) {
+                    (void)armSelectedLooperLaneRecording();
+                }
+                return true;
+            }
+            if (controlOnly && key == Qt::Key_R) {
+                if (!repeated && currentView() == QStringLiteral("looper") &&
+                    selectedLooperLane_ >= 0 && startArmedLaneRecordingButton_ &&
+                    startArmedLaneRecordingButton_->isEnabled()) {
+                    startArmedLaneRecordingButton_->click();
+                }
+                return true;
+            }
+
+            if ((key == Qt::Key_Return || key == Qt::Key_Enter ||
+                 key == Qt::Key_Space) && qobject_cast<QAbstractButton*>(focus)) {
+                return true;
+            }
+        }
+    }
     if (watched == connectionLabel_ &&
         event->type() == QEvent::MouseButtonRelease) {
         auto* mouse = static_cast<QMouseEvent*>(event);
@@ -1495,15 +1674,18 @@ void MainWindow::startJamRecording()
         return;
     }
     const QString defaultTake = jamStorage_.nextTakeName();
-    bool accepted = false;
-    const QString requested = QInputDialog::getText(
-        this,
-        QStringLiteral("Record Jam"),
-        QStringLiteral("Recording name"),
-        QLineEdit::Normal,
-        defaultTake,
-        &accepted).trimmed();
-    if (!accepted) return;
+    QString requested = defaultTake;
+    if (preferences_.recording.jam.promptForName) {
+        bool accepted = false;
+        requested = QInputDialog::getText(
+            this,
+            QStringLiteral("Record Jam"),
+            QStringLiteral("Recording name"),
+            QLineEdit::Normal,
+            defaultTake,
+            &accepted).trimmed();
+        if (!accepted) return;
+    }
     const QString folder = jamStorage_.uniqueTakeFolder(
         requested.isEmpty() ? defaultTake : requested);
     if (!QDir().mkpath(folder)) {
@@ -1548,6 +1730,10 @@ void MainWindow::updateJamRecordingControls()
 void MainWindow::showJamRecordingFinished(const QString& folder)
 {
     const QString absoluteFolder = QDir(folder).absolutePath();
+    if (preferences_.recording.jam.completionAction == QStringLiteral("import")) {
+        showJamRecordingImportDialog(absoluteFolder);
+        return;
+    }
     QMessageBox message(this);
     message.setIcon(QMessageBox::Information);
     message.setWindowTitle(QStringLiteral("Jam Recording Saved"));
@@ -1556,12 +1742,15 @@ void MainWindow::showJamRecordingFinished(const QString& folder)
         .arg(QDir::toNativeSeparators(absoluteFolder)));
     message.setTextInteractionFlags(
         Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
-    QPushButton* importButton = message.addButton(
-        QStringLiteral("Import to Section"), QMessageBox::ActionRole);
+    QPushButton* importButton = nullptr;
+    if (preferences_.recording.jam.completionAction != QStringLiteral("notify")) {
+        importButton = message.addButton(
+            QStringLiteral("Import to Section"), QMessageBox::ActionRole);
+    }
     QPushButton* closeButton = message.addButton(QMessageBox::Close);
     message.setDefaultButton(closeButton);
     message.exec();
-    if (message.clickedButton() == importButton) {
+    if (importButton && message.clickedButton() == importButton) {
         showJamRecordingImportDialog(absoluteFolder);
     }
 }
@@ -1579,19 +1768,19 @@ void MainWindow::showJamRecordingImportDialog(const QString& folder)
     QVector<StemChoice> choices{
         {QStringLiteral("mix.wav"),
             QStringLiteral("Mix (what you heard)"),
-            QStringLiteral("Mix"), true},
+            QStringLiteral("Mix"), preferences_.recording.jam.importMix},
         {QStringLiteral("my-input.wav"),
             QStringLiteral("My Input"),
-            QStringLiteral("My Input")},
+            QStringLiteral("My Input"), preferences_.recording.jam.importMyInput},
         {QStringLiteral("their-input.wav"),
             QStringLiteral("Their Input"),
-            QStringLiteral("Their Input")},
+            QStringLiteral("Their Input"), preferences_.recording.jam.importTheirInput},
         {QStringLiteral("inputs-mix.wav"),
             QStringLiteral("Inputs Mix"),
-            QStringLiteral("Inputs Mix")},
+            QStringLiteral("Inputs Mix"), preferences_.recording.jam.importInputsMix},
         {QStringLiteral("metronome.wav"),
             QStringLiteral("Metronome"),
-            QStringLiteral("Metronome")},
+            QStringLiteral("Metronome"), preferences_.recording.jam.importMetronome},
     };
     for (auto it = choices.begin(); it != choices.end();) {
         if (!QFileInfo::exists(QDir(folder).absoluteFilePath(it->fileName))) {
@@ -2546,7 +2735,10 @@ void MainWindow::handleNetworkSnapshot(const Jam2NetworkOperationalSnapshot& sna
             peerOrdinals_.insert(peer.peer_id, nextPeerOrdinal_++);
         }
         if (!desiredPeerGainDb_.contains(peer.peer_id)) {
-            desiredPeerGainDb_.insert(peer.peer_id, peer.gain_db);
+            desiredPeerGainDb_.insert(peer.peer_id, preferences_.levels.remotePeerDb);
+            if (std::abs(peer.gain_db - preferences_.levels.remotePeerDb) > 0.05) {
+                (void)jam2_.setPeerGainDb(peer.peer_id, preferences_.levels.remotePeerDb);
+            }
         } else if (std::abs(desiredPeerGainDb_.value(peer.peer_id) - peer.gain_db) > 0.05) {
             (void)jam2_.setPeerGainDb(peer.peer_id, desiredPeerGainDb_.value(peer.peer_id));
         }
@@ -2913,7 +3105,11 @@ void MainWindow::showSettingsDialog()
 
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Settings"));
-    dialog.resize(800, 640);
+    const QRect availableSettingsGeometry = dialog.screen()->availableGeometry();
+    const int settingsWidth = qMax(820, qMin(1180, availableSettingsGeometry.width() - 80));
+    const int settingsHeight = qMax(620, qMin(820, availableSettingsGeometry.height() - 80));
+    dialog.setMinimumSize(qMin(1000, settingsWidth), qMin(680, settingsHeight));
+    dialog.resize(settingsWidth, settingsHeight);
 
     auto makeSpin = [&dialog](int value, int minimum, int maximum) {
         auto* spin = new QSpinBox(&dialog);
@@ -2943,6 +3139,7 @@ void MainWindow::showSettingsDialog()
     auto makeScrollTab = [&dialog](QWidget* content) {
         auto* scroll = new QScrollArea(&dialog);
         scroll->setWidgetResizable(true);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         scroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         content->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
         scroll->setWidget(content);
@@ -3292,12 +3489,114 @@ void MainWindow::showSettingsDialog()
 
     auto* recordingContent = new QWidget(&dialog);
     auto* recordingLayout = new QVBoxLayout(recordingContent);
+    recordingLayout->setSpacing(12);
+    auto* recordingTiles = new QWidget(recordingContent);
+    auto* recordingTilesLayout = new QHBoxLayout(recordingTiles);
+    recordingTilesLayout->setContentsMargins(0, 0, 0, 0);
+    recordingTilesLayout->setSpacing(10);
+    auto* jamRecordingTile = new QPushButton(QStringLiteral("JAM RECORDING\nGlobal multi-stem capture"), recordingTiles);
+    auto* trackRecordingTile = new QPushButton(QStringLiteral("TRACK RECORDING\nInput, Jam Mix, or loopback"), recordingTiles);
+    for (QPushButton* tile : {jamRecordingTile, trackRecordingTile}) {
+        tile->setCheckable(true);
+        tile->setMinimumHeight(62);
+        tile->setStyleSheet(QStringLiteral(
+            "QPushButton { text-align:left; color:#bdc8c6; background:#11191b; "
+            "border:1px solid #344245; border-radius:5px; padding:9px 14px; }"
+            "QPushButton:hover { color:#eef2ef; background:#182224; border-color:#506164; }"
+            "QPushButton:checked { color:#f2c66d; background:#211b12; "
+            "border-color:#8a6835; font-weight:600; }"));
+        recordingTilesLayout->addWidget(tile, 1);
+    }
+    auto* recordingTileGroup = new QButtonGroup(recordingTiles);
+    recordingTileGroup->setExclusive(true);
+    recordingTileGroup->addButton(jamRecordingTile, 0);
+    recordingTileGroup->addButton(trackRecordingTile, 1);
+    auto* recordingPages = new QStackedWidget(recordingContent);
+    auto* jamRecordingPage = new QWidget(recordingPages);
+    auto* jamRecordingPageLayout = new QVBoxLayout(jamRecordingPage);
+    jamRecordingPageLayout->setContentsMargins(0, 0, 0, 0);
+    auto* trackRecordingPage = new QWidget(recordingPages);
+    auto* trackRecordingPageLayout = new QVBoxLayout(trackRecordingPage);
+    trackRecordingPageLayout->setContentsMargins(0, 0, 0, 0);
+    recordingPages->addWidget(jamRecordingPage);
+    recordingPages->addWidget(trackRecordingPage);
+    QObject::connect(recordingTileGroup, &QButtonGroup::idClicked,
+        recordingPages, &QStackedWidget::setCurrentIndex);
+    jamRecordingTile->setChecked(true);
+    recordingPages->setCurrentIndex(0);
+    recordingLayout->addWidget(recordingTiles);
+    recordingLayout->addWidget(recordingPages, 1);
+
     auto* preferredMode = new QComboBox(&dialog);
-    preferredMode->addItem(QStringLiteral("Input"), QStringLiteral("input"));
-    preferredMode->addItem(QStringLiteral("Loopback"), QStringLiteral("loopback"));
+    preferredMode->addItem(QStringLiteral("Local Input (instrument)"), QStringLiteral("input"));
+    preferredMode->addItem(QStringLiteral("Jam Mix (Jam2 input + peers)"), QStringLiteral("current-jam"));
+    preferredMode->addItem(QStringLiteral("System Loopback (desktop audio)"), QStringLiteral("loopback"));
     preferredMode->setCurrentIndex(qMax(0, preferredMode->findData(preferences_.recording.preferredMode)));
     auto* preferredForm = new QFormLayout(); preferredForm->addRow(QStringLiteral("Preferred recording mode"), preferredMode);
-    recordingLayout->addLayout(preferredForm);
+    trackRecordingPageLayout->addLayout(preferredForm);
+
+    auto* jamMixIncludeBacking = new QCheckBox(
+        QStringLiteral("Include the Section backing track"), &dialog);
+    auto* jamMixIncludeMetronome = new QCheckBox(
+        QStringLiteral("Include the metronome in the WAV"), &dialog);
+    jamMixIncludeBacking->setChecked(
+        preferences_.recording.jamMixTrack.includeBackingTrack);
+    jamMixIncludeMetronome->setChecked(
+        preferences_.recording.jamMixTrack.includeMetronome);
+    auto* jamMixNote = new QLabel(QStringLiteral(
+        "Jam Mix records your local input together with audio received from Jam2 peers. It is internal Jam2 audio, not the operating-system loopback source."),
+        &dialog);
+    jamMixNote->setWordWrap(true);
+    jamMixNote->setStyleSheet(QStringLiteral("color:#9eaaa9;"));
+    auto* jamMixForm = new QFormLayout();
+    jamMixForm->addRow(QString(), jamMixIncludeBacking);
+    jamMixForm->addRow(QString(), jamMixIncludeMetronome);
+    jamMixForm->addRow(QString(), jamMixNote);
+    auto* jamMixBox = new QGroupBox(QStringLiteral("Jam Mix source"), &dialog);
+    jamMixBox->setLayout(jamMixForm);
+    trackRecordingPageLayout->addWidget(jamMixBox);
+
+    auto* jamPromptName = new QCheckBox(
+        QStringLiteral("Ask for a recording name when starting"), &dialog);
+    jamPromptName->setChecked(preferences_.recording.jam.promptForName);
+    auto* jamCompletion = new QComboBox(&dialog);
+    jamCompletion->addItem(QStringLiteral("Ask whether to import"), QStringLiteral("ask"));
+    jamCompletion->addItem(QStringLiteral("Open the import dialog"), QStringLiteral("import"));
+    jamCompletion->addItem(QStringLiteral("Only show where files were saved"), QStringLiteral("notify"));
+    jamCompletion->setCurrentIndex(qMax(0,
+        jamCompletion->findData(preferences_.recording.jam.completionAction)));
+    auto* jamImportMix = new QCheckBox(QStringLiteral("Mix (what you heard)"), &dialog);
+    auto* jamImportMyInput = new QCheckBox(QStringLiteral("My Input"), &dialog);
+    auto* jamImportTheirInput = new QCheckBox(QStringLiteral("Their Input"), &dialog);
+    auto* jamImportInputsMix = new QCheckBox(QStringLiteral("Inputs Mix"), &dialog);
+    auto* jamImportMetronome = new QCheckBox(QStringLiteral("Metronome"), &dialog);
+    jamImportMix->setChecked(preferences_.recording.jam.importMix);
+    jamImportMyInput->setChecked(preferences_.recording.jam.importMyInput);
+    jamImportTheirInput->setChecked(preferences_.recording.jam.importTheirInput);
+    jamImportInputsMix->setChecked(preferences_.recording.jam.importInputsMix);
+    jamImportMetronome->setChecked(preferences_.recording.jam.importMetronome);
+    auto* jamImportParts = new QWidget(&dialog);
+    auto* jamImportPartsLayout = new QVBoxLayout(jamImportParts);
+    jamImportPartsLayout->setContentsMargins(0, 0, 0, 0);
+    jamImportPartsLayout->setSpacing(4);
+    for (QCheckBox* check : {jamImportMix, jamImportMyInput, jamImportTheirInput,
+             jamImportInputsMix, jamImportMetronome}) {
+        jamImportPartsLayout->addWidget(check);
+    }
+    auto* jamRecordingNote = new QLabel(QStringLiteral(
+        "Jam recordings are stored inside the current JamJar. The engine always captures the complete stem set; these choices control which stems are preselected when importing them into a Section."),
+        &dialog);
+    jamRecordingNote->setWordWrap(true);
+    jamRecordingNote->setStyleSheet(QStringLiteral("color:#9eaaa9;"));
+    auto* jamRecordingForm = new QFormLayout();
+    jamRecordingForm->addRow(QString(), jamPromptName);
+    jamRecordingForm->addRow(QStringLiteral("When recording finishes"), jamCompletion);
+    jamRecordingForm->addRow(QStringLiteral("Default import tracks"), jamImportParts);
+    jamRecordingForm->addRow(QString(), jamRecordingNote);
+    auto* jamRecordingBox = new QGroupBox(QStringLiteral("Jam Recording"), &dialog);
+    jamRecordingBox->setLayout(jamRecordingForm);
+    jamRecordingPageLayout->addWidget(jamRecordingBox);
+    jamRecordingPageLayout->addStretch(1);
 
     auto makeFolderRow = [&](const QString& value) {
         auto* edit = new QLineEdit(value, &dialog);
@@ -3329,8 +3628,8 @@ void MainWindow::showSettingsDialog()
     inputForm->addRow(QString(), inputCountIn); inputForm->addRow(QStringLiteral("Count-in bars"), inputCountBars);
     inputForm->addRow(QString(), inputCountMetro); inputForm->addRow(QString(), inputKeepMetro);
     inputForm->addRow(QStringLiteral("Manual latency adjustment frames"), inputLatency);
-    auto* inputBox = new QGroupBox(QStringLiteral("Input Recording"), &dialog); inputBox->setLayout(inputForm);
-    recordingLayout->addWidget(inputBox);
+    auto* inputBox = new QGroupBox(QStringLiteral("Local Input Recording"), &dialog); inputBox->setLayout(inputForm);
+    trackRecordingPageLayout->addWidget(inputBox);
     inputDuration->setEnabled(!inputUntilStopped->isChecked());
     QObject::connect(inputUntilStopped, &QCheckBox::toggled, inputDuration, [=](bool checked) { inputDuration->setEnabled(!checked); });
 
@@ -3364,10 +3663,452 @@ void MainWindow::showSettingsDialog()
     loopForm->addRow(QString(), loopUntilStopped); loopForm->addRow(QStringLiteral("Duration bars"), loopDuration);
     loopForm->addRow(QStringLiteral("Silence threshold dB"), loopSilenceThreshold); loopForm->addRow(QStringLiteral("Tail silence ms"), loopTailSilence);
     loopForm->addRow(QString(), loopTrimLeading); loopForm->addRow(QString(), loopTrimTrailing);
-    auto* loopBox = new QGroupBox(QStringLiteral("Loopback Recording"), &dialog); loopBox->setLayout(loopForm);
-    recordingLayout->addWidget(loopBox); recordingLayout->addStretch(1);
+    auto* loopBox = new QGroupBox(QStringLiteral("System Loopback Recording"), &dialog); loopBox->setLayout(loopForm);
+    trackRecordingPageLayout->addWidget(loopBox); trackRecordingPageLayout->addStretch(1);
     loopDuration->setEnabled(!loopUntilStopped->isChecked());
     QObject::connect(loopUntilStopped, &QCheckBox::toggled, loopDuration, [=](bool checked) { loopDuration->setEnabled(!checked); });
+
+    auto* generalContent = new QWidget(&dialog);
+    auto* generalLayout = new QVBoxLayout(generalContent);
+    auto* startupBox = new QGroupBox(QStringLiteral("When Jam2 opens"), generalContent);
+    auto* startupForm = new QFormLayout(startupBox);
+    auto* startupView = new QComboBox(startupBox);
+    for (const auto& view : QList<QPair<QString, QString>>{
+             {QStringLiteral("Performance"), QStringLiteral("performance")},
+             {QStringLiteral("Chords"), QStringLiteral("chords")},
+             {QStringLiteral("Drums"), QStringLiteral("drums")},
+             {QStringLiteral("Lyrics"), QStringLiteral("lyrics")},
+             {QStringLiteral("Metronome"), QStringLiteral("metronome")},
+             {QStringLiteral("Track"), QStringLiteral("track")}}) {
+        startupView->addItem(view.first, view.second);
+    }
+    startupView->setCurrentIndex(qMax(0, startupView->findData(preferences_.general.startupView)));
+    auto* defaultBpm = makeSpin(preferences_.general.bpm, 20, 400);
+    defaultBpm->setSuffix(QStringLiteral(" BPM"));
+    auto* defaultMeter = new QComboBox(startupBox);
+    for (const auto& meter : jam2::practice::meterCatalog()) {
+        defaultMeter->addItem(meter.name, meter.id);
+    }
+    QString currentDefaultMeter;
+    for (const auto& meter : jam2::practice::meterCatalog()) {
+        if (meter.numerator == preferences_.general.meterNumerator &&
+            meter.denominator == preferences_.general.meterDenominator &&
+            meter.tempoPulseUnits == preferences_.general.tempoPulseUnits) {
+            currentDefaultMeter = meter.id;
+            break;
+        }
+    }
+    defaultMeter->setCurrentIndex(qMax(0, defaultMeter->findData(currentDefaultMeter)));
+    auto* defaultDivision = new QComboBox(startupBox);
+    for (const auto& division : QList<QPair<QString, int>>{
+             {QStringLiteral("Quarter"), 1}, {QStringLiteral("Eighth"), 2},
+             {QStringLiteral("Triplet"), 3}, {QStringLiteral("16th"), 4},
+             {QStringLiteral("6th"), 6}, {QStringLiteral("32nd"), 8}}) {
+        defaultDivision->addItem(division.first, division.second);
+    }
+    defaultDivision->setCurrentIndex(qMax(0,
+        defaultDivision->findData(preferences_.general.clickDivision)));
+    auto* generateOnStartup = new QCheckBox(
+        QStringLiteral("Generate an idea automatically"), startupBox);
+    generateOnStartup->setChecked(preferences_.general.generateIdeaOnStartup);
+    startupForm->addRow(QStringLiteral("Opening view"), startupView);
+    startupForm->addRow(QStringLiteral("Default tempo"), defaultBpm);
+    startupForm->addRow(QStringLiteral("Default meter"), defaultMeter);
+    startupForm->addRow(QStringLiteral("Click division"), defaultDivision);
+    startupForm->addRow(QString(), generateOnStartup);
+    generalLayout->addWidget(startupBox);
+    auto* generalNote = new QLabel(QStringLiteral(
+        "These defaults initialise a new empty jam. Saved JamJars retain their own song timing and content."),
+        generalContent);
+    generalNote->setWordWrap(true);
+    generalNote->setStyleSheet(QStringLiteral("color:#9eaaa9;"));
+    generalLayout->addWidget(generalNote);
+    generalLayout->addStretch(1);
+
+    auto* ideaContent = new QWidget(&dialog);
+    auto* ideaLayout = new QVBoxLayout(ideaContent);
+    auto* generationBox = new QGroupBox(QStringLiteral("Generate Idea defaults"), ideaContent);
+    auto* generationForm = new QFormLayout(generationBox);
+    auto* ideaParts = new QComboBox(generationBox);
+    ideaParts->addItem(QStringLiteral("Full arrangement"), 0);
+    ideaParts->addItem(QStringLiteral("Chords, Bass & Melody Only"), 1);
+    ideaParts->addItem(QStringLiteral("Drums Only"), 2);
+    ideaParts->setCurrentIndex(qMax(0, ideaParts->findData(preferences_.ideas.parts)));
+    auto* ideaKey = new QComboBox(generationBox);
+    ideaKey->addItem(QStringLiteral("Random"), -1);
+    const QStringList ideaKeyNames = jam2::practice::keyNames();
+    for (int index = 0; index < ideaKeyNames.size(); ++index) {
+        ideaKey->addItem(ideaKeyNames.at(index), index);
+    }
+    ideaKey->setCurrentIndex(qMax(0, ideaKey->findData(preferences_.ideas.key)));
+    auto* ideaStyle = new QComboBox(generationBox);
+    ideaStyle->addItem(QStringLiteral("Random"), QString());
+    const QStringList ideaStyleNames = jam2::practice::chordStyleNames();
+    const QStringList ideaStyleIds = jam2::practice::styleIds();
+    for (int index = 0; index < ideaStyleNames.size(); ++index) {
+        ideaStyle->addItem(ideaStyleNames.at(index), ideaStyleIds.value(index));
+    }
+    ideaStyle->addItem(QStringLiteral("Experimental - Modern Progressive Metalcore"),
+        QStringLiteral("metal-experimental"));
+    ideaStyle->setCurrentIndex(qMax(0, ideaStyle->findData(preferences_.ideas.styleId)));
+    auto* ideaProfile = new QComboBox(generationBox);
+    const auto refreshIdeaProfiles = [ideaStyle, ideaProfile](const QString& preferred = QString()) {
+        ideaProfile->clear();
+        ideaProfile->addItem(QStringLiteral("Random profile"), QString());
+        const QString styleId = ideaStyle->currentData().toString();
+        if (styleId == QStringLiteral("metal-experimental")) {
+            ideaProfile->addItem(QStringLiteral("Modern Progressive Metalcore (sound test)"),
+                QStringLiteral("metal_modern_progressive"));
+        } else {
+            const QStringList ids = jam2::practice::profileIds(styleId);
+            const QStringList names = jam2::practice::profileNames(styleId);
+            for (int index = 0; index < names.size(); ++index) {
+                ideaProfile->addItem(names.at(index), ids.value(index));
+            }
+        }
+        ideaProfile->setCurrentIndex(qMax(0, ideaProfile->findData(preferred)));
+    };
+    refreshIdeaProfiles(preferences_.ideas.profileId);
+    QObject::connect(ideaStyle, &QComboBox::currentIndexChanged, &dialog,
+        [refreshIdeaProfiles](int) { refreshIdeaProfiles(); });
+    auto* ideaMeter = new QComboBox(generationBox);
+    ideaMeter->addItem(QStringLiteral("Random compatible / use jam meter at startup"), QString());
+    for (const auto& meter : jam2::practice::meterCatalog()) {
+        ideaMeter->addItem(meter.name, meter.id);
+    }
+    ideaMeter->setCurrentIndex(qMax(0, ideaMeter->findData(preferences_.ideas.meterId)));
+    auto* ideaLength = new QComboBox(generationBox);
+    ideaLength->addItem(QStringLiteral("Current section / compatible default"), 0);
+    for (int bars : {4, 8, 12, 16, 24, 32}) {
+        ideaLength->addItem(QStringLiteral("%1 bars").arg(bars), bars);
+    }
+    ideaLength->setCurrentIndex(qMax(0, ideaLength->findData(preferences_.ideas.bars)));
+    auto* ideaExactBpm = new QCheckBox(QStringLiteral("Use exact BPM"), generationBox);
+    ideaExactBpm->setChecked(preferences_.ideas.exactBpm);
+    auto* ideaBpm = makeSpin(preferences_.ideas.bpm, 20, 400);
+    ideaBpm->setSuffix(QStringLiteral(" BPM"));
+    ideaBpm->setEnabled(ideaExactBpm->isChecked());
+    QObject::connect(ideaExactBpm, &QCheckBox::toggled, ideaBpm, &QSpinBox::setEnabled);
+    auto* ideaTempoRow = new QWidget(generationBox);
+    auto* ideaTempoLayout = new QHBoxLayout(ideaTempoRow);
+    ideaTempoLayout->setContentsMargins(0, 0, 0, 0);
+    ideaTempoLayout->addWidget(ideaExactBpm);
+    ideaTempoLayout->addWidget(ideaBpm, 1);
+    auto* ideaComplexity = makeSpin(preferences_.ideas.complexity, 1, 8);
+    generationForm->addRow(QStringLiteral("Parts"), ideaParts);
+    generationForm->addRow(QStringLiteral("Key"), ideaKey);
+    generationForm->addRow(QStringLiteral("Style"), ideaStyle);
+    generationForm->addRow(QStringLiteral("Profile"), ideaProfile);
+    generationForm->addRow(QStringLiteral("Meter"), ideaMeter);
+    generationForm->addRow(QStringLiteral("Length"), ideaLength);
+    generationForm->addRow(QStringLiteral("Tempo"), ideaTempoRow);
+    generationForm->addRow(QStringLiteral("Complexity"), ideaComplexity);
+    ideaLayout->addWidget(generationBox);
+
+    auto* wavBox = new QGroupBox(QStringLiteral("Reference WAV defaults"), ideaContent);
+    auto* wavForm = new QFormLayout(wavBox);
+    auto* startupWavs = new QCheckBox(
+        QStringLiteral("Render reference WAVs for the startup idea"), wavBox);
+    startupWavs->setChecked(preferences_.ideas.renderWavsOnStartup);
+    startupWavs->setEnabled(generateOnStartup->isChecked());
+    startupWavs->setToolTip(QStringLiteral(
+        "Requires Generate an idea automatically in General"));
+    QObject::connect(generateOnStartup, &QCheckBox::toggled,
+        startupWavs, &QCheckBox::setEnabled);
+    auto* renderChords = new QCheckBox(QStringLiteral("Chords"), wavBox);
+    auto* renderDrums = new QCheckBox(QStringLiteral("Drums"), wavBox);
+    auto* renderMelody = new QCheckBox(QStringLiteral("Melody"), wavBox);
+    auto* renderBass = new QCheckBox(QStringLiteral("Bass"), wavBox);
+    auto* renderSupport = new QCheckBox(QStringLiteral("Supporting line"), wavBox);
+    renderChords->setChecked(preferences_.ideas.renderChords);
+    renderDrums->setChecked(preferences_.ideas.renderDrums);
+    renderMelody->setChecked(preferences_.ideas.renderMelody);
+    renderBass->setChecked(preferences_.ideas.renderBass);
+    renderSupport->setChecked(preferences_.ideas.renderSupport);
+    auto* renderPartsRow = new QWidget(wavBox);
+    auto* renderPartsLayout = new QHBoxLayout(renderPartsRow);
+    renderPartsLayout->setContentsMargins(0, 0, 0, 0);
+    for (QCheckBox* check : {renderChords, renderDrums, renderMelody, renderBass, renderSupport}) {
+        renderPartsLayout->addWidget(check);
+    }
+    auto* chordVoicing = new QComboBox(wavBox);
+    chordVoicing->addItems({QStringLiteral("Style default"), QStringLiteral("Close"),
+        QStringLiteral("Spread"), QStringLiteral("Voice-led")});
+    chordVoicing->setCurrentIndex(qBound(0, preferences_.ideas.chordVoicing, 3));
+    auto* drumKit = new QComboBox(wavBox);
+    drumKit->addItems({QStringLiteral("Style default"), QStringLiteral("Acoustic"),
+        QStringLiteral("Electronic")});
+    drumKit->setCurrentIndex(qBound(0, preferences_.ideas.drumKit, 2));
+    wavForm->addRow(QString(), startupWavs);
+    wavForm->addRow(QStringLiteral("Render parts"), renderPartsRow);
+    wavForm->addRow(QStringLiteral("Chord voicing"), chordVoicing);
+    wavForm->addRow(QStringLiteral("Drum kit"), drumKit);
+    ideaLayout->addWidget(wavBox);
+
+    auto* grooveBox = new QGroupBox(QStringLiteral("Groove Library defaults"), ideaContent);
+    auto* grooveForm = new QFormLayout(grooveBox);
+    auto* grooveTiming = new QComboBox(grooveBox);
+    grooveTiming->addItem(QStringLiteral("Use groove timing"), true);
+    grooveTiming->addItem(QStringLiteral("Keep section timing"), false);
+    grooveTiming->setCurrentIndex(qMax(0,
+        grooveTiming->findData(preferences_.ideas.grooveUseIdeaTiming)));
+    auto* grooveLength = new QComboBox(grooveBox);
+    grooveLength->addItem(QStringLiteral("Current section length"), 0);
+    for (int bars : {8, 12, 16, 24, 32}) {
+        grooveLength->addItem(QStringLiteral("%1 bars").arg(bars), bars);
+    }
+    grooveLength->setCurrentIndex(qMax(0,
+        grooveLength->findData(preferences_.ideas.grooveBars)));
+    grooveForm->addRow(QStringLiteral("Timing"), grooveTiming);
+    grooveForm->addRow(QStringLiteral("Groove length"), grooveLength);
+    ideaLayout->addWidget(grooveBox);
+    ideaLayout->addStretch(1);
+
+    auto* levelsContent = new QWidget(&dialog);
+    auto* levelsForm = new QFormLayout(levelsContent);
+    auto makeDbSpin = [&makeSpin](int value) {
+        QSpinBox* spin = makeSpin(value, -60, 12);
+        spin->setSuffix(QStringLiteral(" dB"));
+        return spin;
+    };
+    auto* defaultSend = makeDbSpin(preferences_.levels.sendDb);
+    auto* defaultMonitorEnabled = new QCheckBox(QStringLiteral("Monitor input by default"), levelsContent);
+    defaultMonitorEnabled->setChecked(preferences_.levels.monitorInput);
+    auto* defaultMonitor = makeDbSpin(preferences_.levels.monitorDb);
+    auto* defaultMetronomeLevel = makeDbSpin(preferences_.levels.metronomeDb);
+    auto* defaultMaster = makeDbSpin(preferences_.levels.masterDb);
+    auto* defaultRemote = makeDbSpin(preferences_.levels.remotePeerDb);
+    auto* defaultBacking = makeDbSpin(preferences_.levels.backingTrackDb);
+    levelsForm->addRow(QStringLiteral("Local send"), defaultSend);
+    levelsForm->addRow(QString(), defaultMonitorEnabled);
+    levelsForm->addRow(QStringLiteral("Input monitor"), defaultMonitor);
+    levelsForm->addRow(QStringLiteral("Metronome"), defaultMetronomeLevel);
+    levelsForm->addRow(QStringLiteral("Master output"), defaultMaster);
+    levelsForm->addRow(QStringLiteral("New remote peers"), defaultRemote);
+    levelsForm->addRow(QStringLiteral("New backing tracks"), defaultBacking);
+
+    auto* metronomeContent = new QWidget(&dialog);
+    auto* metronomeLayout = new QVBoxLayout(metronomeContent);
+    auto* metronomeGeneralBox = new QGroupBox(
+        QStringLiteral("General metronome"), metronomeContent);
+    auto* metronomeGeneralForm = new QFormLayout(metronomeGeneralBox);
+    auto* defaultClickSound = new QComboBox(metronomeGeneralBox);
+    defaultClickSound->addItems({QStringLiteral("Classic"), QStringLiteral("Woodblock"),
+        QStringLiteral("Rim Click"), QStringLiteral("Digital Tick")});
+    defaultClickSound->setCurrentIndex(qBound(0, preferences_.metronome.sound, 3));
+    auto* defaultMetronomeMode = new QComboBox(metronomeGeneralBox);
+    defaultMetronomeMode->addItem(
+        QStringLiteral("Shared Grid"), QStringLiteral("shared-grid"));
+    defaultMetronomeMode->addItem(
+        QStringLiteral("Leader Audio"), QStringLiteral("leader-audio"));
+    defaultMetronomeMode->addItem(
+        QStringLiteral("Listener Compensated"), QStringLiteral("listener-compensated"));
+    defaultMetronomeMode->setCurrentIndex(qMax(0,
+        defaultMetronomeMode->findData(preferences_.metronome.mode)));
+    metronomeGeneralForm->addRow(QStringLiteral("Click sound"), defaultClickSound);
+    metronomeGeneralForm->addRow(QStringLiteral("Sync mode"), defaultMetronomeMode);
+    metronomeLayout->addWidget(metronomeGeneralBox);
+
+    auto* listenerTimingBox = new QGroupBox(
+        QStringLiteral("Listener-compensated timing"), metronomeContent);
+    auto* listenerTimingForm = new QFormLayout(listenerTimingBox);
+    auto* compensationMax = makeDoubleSpin(preferences_.metronome.compensationMaxMs, 0, 1000, 1);
+    auto* compensationSmoothing = makeDoubleSpin(preferences_.metronome.compensationSmoothingMs, 0, 10000, 1);
+    auto* compensationDeadband = makeDoubleSpin(preferences_.metronome.compensationDeadbandMs, 0, 1000, 1);
+    auto* compensationSlew = makeDoubleSpin(preferences_.metronome.compensationSlewMsPerSecond, 0, 10000, 1);
+    compensationMax->setSuffix(QStringLiteral(" ms"));
+    compensationSmoothing->setSuffix(QStringLiteral(" ms"));
+    compensationDeadband->setSuffix(QStringLiteral(" ms"));
+    compensationSlew->setSuffix(QStringLiteral(" ms/s"));
+    auto* listenerTimingNote = new QLabel(
+        QStringLiteral(
+            "These saved defaults are used only when the sync mode is Listener Compensated."),
+        listenerTimingBox);
+    listenerTimingNote->setWordWrap(true);
+    listenerTimingNote->setStyleSheet(QStringLiteral("color:#9eaaa8;"));
+    listenerTimingForm->addRow(QString(), listenerTimingNote);
+    listenerTimingForm->addRow(QStringLiteral("Maximum compensation"), compensationMax);
+    listenerTimingForm->addRow(QStringLiteral("Compensation smoothing"), compensationSmoothing);
+    listenerTimingForm->addRow(QStringLiteral("Compensation deadband"), compensationDeadband);
+    listenerTimingForm->addRow(QStringLiteral("Compensation slew"), compensationSlew);
+    metronomeLayout->addWidget(listenerTimingBox);
+    metronomeLayout->addStretch(1);
+
+    auto* viewsContent = new QWidget(&dialog);
+    auto* viewsLayout = new QVBoxLayout(viewsContent);
+    auto* performanceDefaultsBox = new QGroupBox(
+        QStringLiteral("Performance view"), viewsContent);
+    auto* performanceDefaultsForm = new QFormLayout(performanceDefaultsBox);
+    auto* performanceChordPreview = new QCheckBox(
+        QStringLiteral("Show chord preview"), performanceDefaultsBox);
+    auto* performanceBeatPreview = new QCheckBox(
+        QStringLiteral("Show beat preview"), performanceDefaultsBox);
+    performanceChordPreview->setChecked(preferences_.views.performanceChordPreview);
+    performanceBeatPreview->setChecked(preferences_.views.performanceBeatPreview);
+    auto* performancePreviewNote = new QLabel(
+        QStringLiteral(
+            "Hide either preview to leave more open visual space when you only need the jam audio."),
+        performanceDefaultsBox);
+    performancePreviewNote->setWordWrap(true);
+    performancePreviewNote->setStyleSheet(QStringLiteral("color:#9eaaa8;"));
+    performanceDefaultsForm->addRow(QString(), performanceChordPreview);
+    performanceDefaultsForm->addRow(QString(), performanceBeatPreview);
+    performanceDefaultsForm->addRow(QString(), performancePreviewNote);
+    viewsLayout->addWidget(performanceDefaultsBox);
+    auto* gridDefaultsBox = new QGroupBox(QStringLiteral("Chord and Drum views"), viewsContent);
+    auto* gridDefaultsForm = new QFormLayout(gridDefaultsBox);
+    auto* chordFollow = new QCheckBox(QStringLiteral("Focus current bar in Chords"), gridDefaultsBox);
+    auto* drumFollow = new QCheckBox(QStringLiteral("Focus current bar in Drums"), gridDefaultsBox);
+    chordFollow->setChecked(preferences_.views.chordFocusCurrentBar);
+    drumFollow->setChecked(preferences_.views.drumFocusCurrentBar);
+    auto* guitarStrings = new QComboBox(gridDefaultsBox);
+    for (int strings : {6, 7, 8}) guitarStrings->addItem(QString::number(strings), strings);
+    guitarStrings->setCurrentIndex(qMax(0, guitarStrings->findData(preferences_.views.guitarStrings)));
+    auto* guitarTuning = new QComboBox(gridDefaultsBox);
+    guitarTuning->addItem(QStringLiteral("Standard"), false);
+    guitarTuning->addItem(QStringLiteral("Dropped"), true);
+    guitarTuning->setCurrentIndex(qMax(0,
+        guitarTuning->findData(preferences_.views.guitarDropTuning)));
+    gridDefaultsForm->addRow(QString(), chordFollow);
+    gridDefaultsForm->addRow(QString(), drumFollow);
+    gridDefaultsForm->addRow(QStringLiteral("Guitar strings"), guitarStrings);
+    gridDefaultsForm->addRow(QStringLiteral("Guitar tuning"), guitarTuning);
+    viewsLayout->addWidget(gridDefaultsBox);
+    auto* trackDefaultsBox = new QGroupBox(QStringLiteral("Track view"), viewsContent);
+    auto* trackDefaultsForm = new QFormLayout(trackDefaultsBox);
+    auto* defaultGridLock = new QCheckBox(QStringLiteral("Lock transport actions to the grid"), trackDefaultsBox);
+    auto* defaultTrackLoop = new QCheckBox(QStringLiteral("Loop whole track"), trackDefaultsBox);
+    defaultGridLock->setChecked(preferences_.views.trackGridLock);
+    defaultTrackLoop->setChecked(preferences_.views.trackLoop);
+    auto* defaultTrackSpeed = makeDoubleSpin(preferences_.views.trackSpeed, 0.1, 2.0, 2);
+    auto* defaultTrackPitch = makeSpin(preferences_.views.trackPitch, -12, 12);
+    auto* defaultFocusEnabled = new QCheckBox(QStringLiteral("Enable focus frequency"), trackDefaultsBox);
+    defaultFocusEnabled->setChecked(preferences_.views.focusFrequencyEnabled);
+    auto* defaultFocusPreset = new QComboBox(trackDefaultsBox);
+    for (const QString& preset : {QStringLiteral("custom"), QStringLiteral("bass"),
+             QStringLiteral("guitar"), QStringLiteral("vocals"), QStringLiteral("drums")}) {
+        defaultFocusPreset->addItem(preset.front().toUpper() + preset.mid(1), preset);
+    }
+    defaultFocusPreset->setCurrentIndex(qMax(0,
+        defaultFocusPreset->findData(preferences_.views.focusPreset)));
+    auto* defaultFocusFrequency = makeSpin(preferences_.views.focusFrequencyHz, 40, 8000);
+    defaultFocusFrequency->setSuffix(QStringLiteral(" Hz"));
+    trackDefaultsForm->addRow(QString(), defaultGridLock);
+    trackDefaultsForm->addRow(QString(), defaultTrackLoop);
+    trackDefaultsForm->addRow(QStringLiteral("Playback speed"), defaultTrackSpeed);
+    trackDefaultsForm->addRow(QStringLiteral("Pitch semitones"), defaultTrackPitch);
+    trackDefaultsForm->addRow(QString(), defaultFocusEnabled);
+    trackDefaultsForm->addRow(QStringLiteral("Focus preset"), defaultFocusPreset);
+    trackDefaultsForm->addRow(QStringLiteral("Focus frequency"), defaultFocusFrequency);
+    viewsLayout->addWidget(trackDefaultsBox);
+    viewsLayout->addStretch(1);
+
+    auto* syncContent = new QWidget(&dialog);
+    auto* syncForm = new QFormLayout(syncContent);
+    auto* syncTrackLanes = new QCheckBox(QStringLiteral("Sync Track Lanes"), syncContent);
+    auto* syncWavs = new QCheckBox(QStringLiteral("Sync WAVs Automatically"), syncContent);
+    auto* syncPlayback = new QCheckBox(QStringLiteral("Sync Global Playback"), syncContent);
+    auto* syncMetronome = new QCheckBox(QStringLiteral("Sync Metronome State"), syncContent);
+    auto* syncRecordings = new QCheckBox(QStringLiteral("Sync Recordings"), syncContent);
+    syncTrackLanes->setChecked(preferences_.sync.trackLanes);
+    syncWavs->setChecked(preferences_.sync.autoShareWavs);
+    syncPlayback->setChecked(preferences_.sync.globalPlayback);
+    syncMetronome->setChecked(preferences_.sync.metronomeState);
+    syncRecordings->setChecked(preferences_.sync.recordings);
+    auto* syncIdeas = new QComboBox(syncContent);
+    syncIdeas->addItem(QStringLiteral("Disabled"), 0);
+    syncIdeas->addItem(QStringLiteral("Whole Idea"), 1);
+    syncIdeas->addItem(QStringLiteral("Chords Only"), 2);
+    syncIdeas->addItem(QStringLiteral("Beats Only"), 3);
+    syncIdeas->setCurrentIndex(qMax(0, syncIdeas->findData(preferences_.sync.generatedIdeas)));
+    const auto updateSyncDefaults = [=] {
+        syncWavs->setEnabled(syncTrackLanes->isChecked());
+        const bool recordingDependencies = syncTrackLanes->isChecked() &&
+            syncPlayback->isChecked();
+        syncRecordings->setEnabled(recordingDependencies);
+        if (!recordingDependencies) syncRecordings->setChecked(false);
+    };
+    QObject::connect(syncTrackLanes, &QCheckBox::toggled, &dialog,
+        [updateSyncDefaults](bool) { updateSyncDefaults(); });
+    QObject::connect(syncPlayback, &QCheckBox::toggled, &dialog,
+        [updateSyncDefaults](bool) { updateSyncDefaults(); });
+    updateSyncDefaults();
+    syncForm->addRow(syncTrackLanes);
+    syncForm->addRow(syncWavs);
+    syncForm->addRow(QStringLiteral("Generated ideas"), syncIdeas);
+    syncForm->addRow(syncPlayback);
+    syncForm->addRow(syncMetronome);
+    syncForm->addRow(syncRecordings);
+    auto* syncNote = new QLabel(QStringLiteral(
+        "These defaults initialise new local, created, and joined workflows. The jam creator can still apply a different policy to an active jam."),
+        syncContent);
+    syncNote->setWordWrap(true);
+    syncNote->setStyleSheet(QStringLiteral("color:#9eaaa9;"));
+    syncForm->addRow(syncNote);
+
+    auto* keybindContent = new QWidget(&dialog);
+    auto* keybindLayout = new QVBoxLayout(keybindContent);
+    keybindLayout->setSpacing(12);
+    auto* keybindNote = new QLabel(
+        QStringLiteral(
+            "Jam2 shortcuts are fixed and work from the main workflow views. "
+            "They pause while you are typing, editing a numeric value, choosing from a list, "
+            "or using a popup dialog."),
+        keybindContent);
+    keybindNote->setWordWrap(true);
+    keybindNote->setStyleSheet(QStringLiteral("color:#9eaaa9; padding:2px 0 6px 0;"));
+    keybindLayout->addWidget(keybindNote);
+
+    const auto addKeybindGroup = [keybindContent, keybindLayout](
+        const QString& title,
+        const QList<QPair<QString, QString>>& bindings) {
+        auto* group = new QGroupBox(title, keybindContent);
+        auto* form = new QFormLayout(group);
+        form->setHorizontalSpacing(18);
+        form->setVerticalSpacing(9);
+        for (const auto& binding : bindings) {
+            auto* shortcut = new QLabel(binding.first, group);
+            shortcut->setMinimumWidth(112);
+            shortcut->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            shortcut->setStyleSheet(QStringLiteral(
+                "color:#d9ad58; font-weight:600; padding:2px 8px; "
+                "background:#11191b; border:1px solid #344245; border-radius:4px;"));
+            auto* action = new QLabel(binding.second, group);
+            action->setWordWrap(true);
+            action->setStyleSheet(QStringLiteral("color:#d8dfdd;"));
+            form->addRow(shortcut, action);
+        }
+        keybindLayout->addWidget(group);
+    };
+
+    addKeybindGroup(QStringLiteral("Views"), {
+        {QStringLiteral("1"), QStringLiteral("Performance")},
+        {QStringLiteral("2"), QStringLiteral("Chords")},
+        {QStringLiteral("3"), QStringLiteral("Drums")},
+        {QStringLiteral("4"), QStringLiteral("Lyrics")},
+        {QStringLiteral("5"), QStringLiteral("Metronome")},
+        {QStringLiteral("6"), QStringLiteral("Track")},
+        {QStringLiteral("Tab"), QStringLiteral("No action in the main views")},
+        {QStringLiteral("Shift+Tab"), QStringLiteral("Cycle to the next view in the order above")},
+        {QStringLiteral("Home"), QStringLiteral("Return to Performance")},
+    });
+    addKeybindGroup(QStringLiteral("Playback and sections"), {
+        {QStringLiteral("Space"), QStringLiteral("Start or stop global playback")},
+        {QStringLiteral("Shift+Space"), QStringLiteral("Queue the next section while playback is running")},
+        {QStringLiteral("M"), QStringLiteral("Toggle the metronome")},
+        {QStringLiteral("F"), QStringLiteral("Toggle Focus current bar in Chords or Drums")},
+    });
+    addKeybindGroup(QStringLiteral("Track recording"), {
+        {QStringLiteral("Ctrl+A"), QStringLiteral("Arm the selected lane in Track view")},
+        {QStringLiteral("Ctrl+R"), QStringLiteral("Start or stop recording the selected lane in Track view")},
+    });
+    addKeybindGroup(QStringLiteral("Dialogs and editing"), {
+        {QStringLiteral("Enter"), QStringLiteral("Confirm the active dialog; in Lyrics, move to the next bar")},
+        {QStringLiteral("Shift+Enter"), QStringLiteral("Insert a new line in Lyrics")},
+        {QStringLiteral("Ctrl+V"), QStringLiteral("Paste multiple lyric lines into consecutive bars")},
+        {QStringLiteral("Escape"), QStringLiteral("Cancel or close the active dialog, rename, or expanded tuner")},
+    });
+    keybindLayout->addStretch(1);
 
     if (networkActive) {
         localBox->setEnabled(false);
@@ -3387,13 +4128,46 @@ void MainWindow::showSettingsDialog()
     notice->setWordWrap(true);
 
     audioLayout->addWidget(notice);
-    auto* tabs = new QTabWidget(&dialog);
-    tabs->addTab(makeScrollTab(audioContent), QStringLiteral("Audio"));
-    tabs->addTab(makeScrollTab(connectionContent), QStringLiteral("Create Connection"));
-    tabs->addTab(makeScrollTab(createContent), QStringLiteral("Create Defaults"));
-    tabs->addTab(makeScrollTab(joinContent), QStringLiteral("Join Defaults"));
-    tabs->addTab(makeScrollTab(logContent), QStringLiteral("Logs"));
-    tabs->addTab(makeScrollTab(recordingContent), QStringLiteral("Recording"));
+    auto* tabs = new QWidget(&dialog);
+    auto* tabLayout = new QHBoxLayout(tabs);
+    tabLayout->setContentsMargins(0, 0, 0, 0);
+    tabLayout->setSpacing(12);
+    auto* settingsNavigation = new QListWidget(tabs);
+    settingsNavigation->setObjectName(QStringLiteral("SettingsNavigation"));
+    settingsNavigation->setFixedWidth(172);
+    settingsNavigation->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    settingsNavigation->setSpacing(2);
+    settingsNavigation->setStyleSheet(QStringLiteral(
+        "QListWidget#SettingsNavigation { background:#101718; border:1px solid #344245; "
+        "border-radius:5px; padding:6px; outline:none; }"
+        "QListWidget#SettingsNavigation::item { color:#bdc8c6; min-height:22px; "
+        "padding:7px 10px; border:1px solid transparent; border-radius:4px; }"
+        "QListWidget#SettingsNavigation::item:hover { color:#eef2ef; background:#182224; }"
+        "QListWidget#SettingsNavigation::item:selected { color:#f2c66d; background:#211b12; "
+        "border-color:#8a6835; font-weight:600; }"));
+    auto* settingsPages = new QStackedWidget(tabs);
+    const auto addSettingsPage = [=](const QString& title, QWidget* page) {
+        settingsNavigation->addItem(title);
+        settingsPages->addWidget(page);
+    };
+    addSettingsPage(QStringLiteral("Audio"), makeScrollTab(audioContent));
+    addSettingsPage(QStringLiteral("Create Connection"), makeScrollTab(connectionContent));
+    addSettingsPage(QStringLiteral("Create Defaults"), makeScrollTab(createContent));
+    addSettingsPage(QStringLiteral("Join Defaults"), makeScrollTab(joinContent));
+    addSettingsPage(QStringLiteral("Jam Sync"), makeScrollTab(syncContent));
+    addSettingsPage(QStringLiteral("Ideas & WAVs"), makeScrollTab(ideaContent));
+    addSettingsPage(QStringLiteral("Levels"), makeScrollTab(levelsContent));
+    addSettingsPage(QStringLiteral("Metronome"), makeScrollTab(metronomeContent));
+    addSettingsPage(QStringLiteral("Startup"), makeScrollTab(generalContent));
+    addSettingsPage(QStringLiteral("Views & Tracks"), makeScrollTab(viewsContent));
+    addSettingsPage(QStringLiteral("Logs"), makeScrollTab(logContent));
+    addSettingsPage(QStringLiteral("Recording"), makeScrollTab(recordingContent));
+    addSettingsPage(QStringLiteral("Keybinds"), makeScrollTab(keybindContent));
+    QObject::connect(settingsNavigation, &QListWidget::currentRowChanged,
+        settingsPages, &QStackedWidget::setCurrentIndex);
+    settingsNavigation->setCurrentRow(0);
+    tabLayout->addWidget(settingsNavigation);
+    tabLayout->addWidget(settingsPages, 1);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
@@ -3558,6 +4332,17 @@ void MainWindow::showSettingsDialog()
     updated.create.runtime.logStatsFolder = updated.logging.folder;
     updated.join.runtime.logStatsFolder = updated.logging.folder;
     updated.recording.preferredMode = preferredMode->currentData().toString();
+    updated.recording.jam.promptForName = jamPromptName->isChecked();
+    updated.recording.jam.completionAction = jamCompletion->currentData().toString();
+    updated.recording.jam.importMix = jamImportMix->isChecked();
+    updated.recording.jam.importMyInput = jamImportMyInput->isChecked();
+    updated.recording.jam.importTheirInput = jamImportTheirInput->isChecked();
+    updated.recording.jam.importInputsMix = jamImportInputsMix->isChecked();
+    updated.recording.jam.importMetronome = jamImportMetronome->isChecked();
+    updated.recording.jamMixTrack.includeBackingTrack =
+        jamMixIncludeBacking->isChecked();
+    updated.recording.jamMixTrack.includeMetronome =
+        jamMixIncludeMetronome->isChecked();
     updated.recording.input.outputFolder = inputFolderRow.first->text().trimmed();
     if (updated.recording.input.outputFolder.isEmpty()) {
         updated.recording.input.outputFolder = appReleaseFolderPath(QStringLiteral("captures"));
@@ -3579,6 +4364,73 @@ void MainWindow::showSettingsDialog()
     updated.recording.loopback.silenceThresholdDb = loopSilenceThreshold->value();
     updated.recording.loopback.tailSilenceMs = loopTailSilence->value(); updated.recording.loopback.trimLeading = loopTrimLeading->isChecked();
     updated.recording.loopback.trimTrailing = loopTrimTrailing->isChecked();
+
+    updated.general.startupView = startupView->currentData().toString();
+    updated.general.bpm = defaultBpm->value();
+    if (const auto* meter = jam2::practice::findMeter(
+            defaultMeter->currentData().toString())) {
+        updated.general.meterNumerator = meter->numerator;
+        updated.general.meterDenominator = meter->denominator;
+        updated.general.tempoPulseUnits = meter->tempoPulseUnits;
+    }
+    updated.general.clickDivision = defaultDivision->currentData().toInt();
+    updated.general.generateIdeaOnStartup = generateOnStartup->isChecked();
+
+    updated.ideas.parts = ideaParts->currentData().toInt();
+    updated.ideas.key = ideaKey->currentData().toInt();
+    updated.ideas.styleId = ideaStyle->currentData().toString();
+    updated.ideas.profileId = ideaProfile->currentData().toString();
+    updated.ideas.meterId = ideaMeter->currentData().toString();
+    updated.ideas.bars = ideaLength->currentData().toInt();
+    updated.ideas.exactBpm = ideaExactBpm->isChecked();
+    updated.ideas.bpm = ideaBpm->value();
+    updated.ideas.complexity = ideaComplexity->value();
+    updated.ideas.renderWavsOnStartup = startupWavs->isChecked();
+    updated.ideas.renderChords = renderChords->isChecked();
+    updated.ideas.renderDrums = renderDrums->isChecked();
+    updated.ideas.renderMelody = renderMelody->isChecked();
+    updated.ideas.renderBass = renderBass->isChecked();
+    updated.ideas.renderSupport = renderSupport->isChecked();
+    updated.ideas.chordVoicing = chordVoicing->currentIndex();
+    updated.ideas.drumKit = drumKit->currentIndex();
+    updated.ideas.grooveUseIdeaTiming = grooveTiming->currentData().toBool();
+    updated.ideas.grooveBars = grooveLength->currentData().toInt();
+
+    updated.levels.sendDb = defaultSend->value();
+    updated.levels.monitorInput = defaultMonitorEnabled->isChecked();
+    updated.levels.monitorDb = defaultMonitor->value();
+    updated.levels.metronomeDb = defaultMetronomeLevel->value();
+    updated.levels.masterDb = defaultMaster->value();
+    updated.levels.remotePeerDb = defaultRemote->value();
+    updated.levels.backingTrackDb = defaultBacking->value();
+
+    updated.metronome.sound = defaultClickSound->currentIndex();
+    updated.metronome.mode = defaultMetronomeMode->currentData().toString();
+    updated.metronome.compensationMaxMs = compensationMax->value();
+    updated.metronome.compensationSmoothingMs = compensationSmoothing->value();
+    updated.metronome.compensationDeadbandMs = compensationDeadband->value();
+    updated.metronome.compensationSlewMsPerSecond = compensationSlew->value();
+
+    updated.views.performanceChordPreview = performanceChordPreview->isChecked();
+    updated.views.performanceBeatPreview = performanceBeatPreview->isChecked();
+    updated.views.chordFocusCurrentBar = chordFollow->isChecked();
+    updated.views.drumFocusCurrentBar = drumFollow->isChecked();
+    updated.views.guitarStrings = guitarStrings->currentData().toInt();
+    updated.views.guitarDropTuning = guitarTuning->currentData().toBool();
+    updated.views.trackGridLock = defaultGridLock->isChecked();
+    updated.views.trackLoop = defaultTrackLoop->isChecked();
+    updated.views.trackSpeed = defaultTrackSpeed->value();
+    updated.views.trackPitch = defaultTrackPitch->value();
+    updated.views.focusFrequencyEnabled = defaultFocusEnabled->isChecked();
+    updated.views.focusPreset = defaultFocusPreset->currentData().toString();
+    updated.views.focusFrequencyHz = defaultFocusFrequency->value();
+
+    updated.sync.trackLanes = syncTrackLanes->isChecked();
+    updated.sync.autoShareWavs = syncWavs->isChecked();
+    updated.sync.globalPlayback = syncPlayback->isChecked();
+    updated.sync.generatedIdeas = syncIdeas->currentData().toInt();
+    updated.sync.metronomeState = syncMetronome->isChecked();
+    updated.sync.recordings = syncRecordings->isChecked();
 
     const bool localChanged = !networkActive && (
         localInitial.backend != updated.localAudio.backend ||
@@ -3626,6 +4478,7 @@ void MainWindow::showSettingsDialog()
     preferences_ = std::move(updated);
     joinProfileName_ = preferences_.join.tuning.profile;
     UserPreferencesStore::save(preferences_);
+    applyPreferencesToControls();
     appendLog(QStringLiteral("preferences saved"));
 }
 
@@ -4787,10 +5640,156 @@ void MainWindow::applyPreferencesToControls()
     applyCreateDefaultsToControls();
     if (metronomeSoundBox_) {
         const QSignalBlocker blocker(metronomeSoundBox_);
-        const int index = metronomeSoundBox_->findData(preferences_.metronomeSound);
+        const int index = metronomeSoundBox_->findData(preferences_.metronome.sound);
         metronomeSoundBox_->setCurrentIndex(index >= 0 ? index : 0);
     }
+    if (metronomeModeBox_) {
+        const int index = metronomeModeBox_->findText(preferences_.metronome.mode);
+        metronomeModeBox_->setCurrentIndex(index >= 0 ? index : 0);
+    }
+    if (metronomeCompensationMaxSpin_)
+        metronomeCompensationMaxSpin_->setValue(preferences_.metronome.compensationMaxMs);
+    if (metronomeCompensationSmoothingSpin_)
+        metronomeCompensationSmoothingSpin_->setValue(preferences_.metronome.compensationSmoothingMs);
+    if (metronomeCompensationDeadbandSpin_)
+        metronomeCompensationDeadbandSpin_->setValue(preferences_.metronome.compensationDeadbandMs);
+    if (metronomeCompensationSlewSpin_)
+        metronomeCompensationSlewSpin_->setValue(preferences_.metronome.compensationSlewMsPerSecond);
+
+    if (mixSendLevelSlider_) mixSendLevelSlider_->setValue(preferences_.levels.sendDb);
+    if (mixMonitorCheck_) mixMonitorCheck_->setChecked(preferences_.levels.monitorInput);
+    if (mixMonitorLevelSlider_) mixMonitorLevelSlider_->setValue(preferences_.levels.monitorDb);
+    if (metronomeLevelSlider_) metronomeLevelSlider_->setValue(preferences_.levels.metronomeDb);
+    if (masterOutputLevelSlider_) masterOutputLevelSlider_->setValue(preferences_.levels.masterDb);
+    if (remoteLevelSlider_) remoteLevelSlider_->setValue(preferences_.levels.remotePeerDb);
+    if (mixRemotePeerSlider_ && selectedPeerId_ == 0)
+        mixRemotePeerSlider_->setValue(preferences_.levels.remotePeerDb);
+
+    if (performanceHome_) {
+        performanceHome_->setChordPreviewVisible(
+            preferences_.views.performanceChordPreview);
+        performanceHome_->setBeatPreviewVisible(
+            preferences_.views.performanceBeatPreview);
+    }
+    if (chordGrid_) chordGrid_->setFocusCurrentBar(preferences_.views.chordFocusCurrentBar);
+    if (beatGrid_) beatGrid_->setFocusCurrentBar(preferences_.views.drumFocusCurrentBar);
+    (void)chordModel_.setGuitarReference(
+        preferences_.views.guitarStrings, preferences_.views.guitarDropTuning);
+    looperProject_.setGridLockEnabled(preferences_.views.trackGridLock);
+    if (trackGridLockCheck_) trackGridLockCheck_->setChecked(preferences_.views.trackGridLock);
+    SharedTrackModel& track = trackController_.model();
+    track.loopEnabled = preferences_.views.trackLoop;
+    track.speed = preferences_.views.trackSpeed;
+    track.pitchCents = preferences_.views.trackPitch * 100;
+    track.trackGainDb = preferences_.levels.backingTrackDb;
+    track.focusEnabled = preferences_.views.focusFrequencyEnabled;
+    track.focusPreset = preferences_.views.focusPreset;
+    track.focusFrequencyHz = preferences_.views.focusFrequencyHz;
+    updateTrackControls();
+
+    if (!preferencesInitialized_) {
+        JamSyncPolicy policy;
+        policy.trackLanes = preferences_.sync.trackLanes;
+        policy.autoShareWavs = preferences_.sync.autoShareWavs;
+        policy.globalPlayback = preferences_.sync.globalPlayback;
+        policy.generatedIdeas = static_cast<GeneratedIdeaSyncMode>(
+            qBound(0, preferences_.sync.generatedIdeas, 3));
+        policy.metronomeState = preferences_.sync.metronomeState;
+        policy.recordings = preferences_.sync.recordings;
+        applyJamSyncPolicy(policy, false);
+        preferencesInitialized_ = true;
+    }
     joinProfileName_ = preferences_.join.tuning.profile;
+}
+
+void MainWindow::applyNewJamDefaults()
+{
+    const int numerator = preferences_.general.meterNumerator;
+    const int denominator = preferences_.general.meterDenominator;
+    const int pulseUnits = preferences_.general.tempoPulseUnits;
+    const int division = preferences_.general.clickDivision;
+    for (int bank = 0; bank < looperProject_.banks().size(); ++bank) {
+        LooperBankTiming timing;
+        timing.bpm = preferences_.general.bpm;
+        timing.beatsPerBar = numerator;
+        timing.beatUnit = denominator;
+        timing.tempoPulseUnits = pulseUnits;
+        timing.division = division;
+        timing.playMaskLow = 0;
+        timing.playMaskHigh = 0;
+        timing.accentMaskLow = 0;
+        timing.accentMaskHigh = 0;
+        const int steps = jam2::metronome::pattern_step_count(numerator, division);
+        for (int step = 0; step < steps; ++step) {
+            jam2::metronome::set_mask_enabled(
+                timing.playMaskLow, timing.playMaskHigh, step, true);
+        }
+        jam2::metronome::set_mask_enabled(
+            timing.accentMaskLow, timing.accentMaskHigh, 0, true);
+        timing.inheritsBankA = bank > 0;
+        (void)looperProject_.setTiming(bank, std::move(timing));
+    }
+    looperProject_.setGridLockEnabled(preferences_.views.trackGridLock);
+    SharedTrackModel& track = trackController_.model();
+    track.acceptedBpm = preferences_.general.bpm;
+    track.loopEnabled = preferences_.views.trackLoop;
+    track.speed = preferences_.views.trackSpeed;
+    track.pitchCents = preferences_.views.trackPitch * 100;
+    track.trackGainDb = preferences_.levels.backingTrackDb;
+    track.focusEnabled = preferences_.views.focusFrequencyEnabled;
+    track.focusPreset = preferences_.views.focusPreset;
+    track.focusFrequencyHz = preferences_.views.focusFrequencyHz;
+    if (metronomeBpmSpin_) {
+        applyMetronomePatternForBank(looperProject_.activeBankIndex(), false);
+    }
+    updateTrackControls();
+}
+
+void MainWindow::initializeStartupWorkflow()
+{
+    QString startupPage = preferences_.general.startupView;
+    if (startupPage == QStringLiteral("drums")) startupPage = QStringLiteral("beats");
+    if (startupPage == QStringLiteral("track")) startupPage = QStringLiteral("looper");
+    openWorkspace(startupPage);
+    if (!preferences_.general.generateIdeaOnStartup || sharedRecordingProtected()) return;
+
+    jam2::practice::ChordIdeaRequest request;
+    request.key = preferences_.ideas.key;
+    request.styleId = preferences_.ideas.styleId;
+    request.profileId = preferences_.ideas.profileId;
+    request.parts = static_cast<jam2::practice::PracticeIdeaParts>(
+        qBound(0, preferences_.ideas.parts, 2));
+    request.targetSectionIndex = 0;
+    request.meterId = preferences_.ideas.meterId;
+    if (request.meterId.isEmpty()) {
+        request.meterId = practiceMeterIdForPattern(bankMetronomePattern(0));
+    }
+    request.allowMeterOverride = !request.meterId.isEmpty() &&
+        !jam2::practice::compatibleMeterIds(request.styleId, request.profileId)
+            .contains(request.meterId);
+    request.bpm = preferences_.ideas.exactBpm ? preferences_.ideas.bpm : 0;
+    request.bars = preferences_.ideas.bars > 0 ? preferences_.ideas.bars : 8;
+    request.harmonicComplexity = preferences_.ideas.complexity;
+    request.rhythmicComplexity = preferences_.ideas.complexity;
+    if (!applyPracticeIdea(request)) {
+        appendLog(QStringLiteral("startup idea generation failed"));
+        return;
+    }
+    if (!preferences_.ideas.renderWavsOnStartup) return;
+    const QJsonObject renderRequest{
+        {QStringLiteral("type"), QStringLiteral("practice.references.render")},
+        {QStringLiteral("request_id"), QUuid::createUuid().toString(QUuid::WithoutBraces)},
+        {QStringLiteral("render_signature"),
+            QString::fromLatin1(practiceReferenceRenderSignature())},
+        {QStringLiteral("render_chords"), preferences_.ideas.renderChords},
+        {QStringLiteral("render_drums"), preferences_.ideas.renderDrums},
+        {QStringLiteral("render_melody"), preferences_.ideas.renderMelody},
+        {QStringLiteral("render_bass"), preferences_.ideas.renderBass},
+        {QStringLiteral("render_support"), preferences_.ideas.renderSupport},
+        {QStringLiteral("chord_voicing"), preferences_.ideas.chordVoicing},
+        {QStringLiteral("drum_kit"), preferences_.ideas.drumKit},
+    };
+    handlePracticeReferenceRenderRequest(renderRequest, QString{}, true);
 }
 
 void MainWindow::saveCreateDefaults()
@@ -6645,6 +7644,8 @@ void MainWindow::showArrangementDialog()
     table->setShowGrid(false);
     table->setHorizontalHeaderLabels({QStringLiteral("Section"), QStringLiteral("Repeats")});
     table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    table->horizontalHeader()->setHighlightSections(false);
+    table->verticalHeader()->setHighlightSections(false);
     constexpr int kArrangementMinimumRowHeight = 46;
     table->verticalHeader()->setMinimumSectionSize(kArrangementMinimumRowHeight);
     table->verticalHeader()->setDefaultSectionSize(kArrangementMinimumRowHeight);
@@ -6668,11 +7669,9 @@ void MainWindow::showArrangementDialog()
                 .arg(QChar(QLatin1Char('A').unicode() + index)), index);
         }
         bank->setCurrentIndex(qBound(0, step.bankIndex, 3));
-        applyMutedEditorStyle(bank);
         auto* repeats = new QSpinBox(table);
         repeats->setRange(1, 64);
         repeats->setValue(qBound(1, step.repeats, 64));
-        applyMutedEditorStyle(repeats);
         bank->ensurePolished();
         repeats->ensurePolished();
         const int editorHeight = std::max({
@@ -7448,6 +8447,15 @@ void MainWindow::addLooperWavs()
                     }
                     continue;
                 }
+                if (asset.resampled) {
+                    appendLog(QStringLiteral(
+                        "WAV import resampled %1: source_rate=%2 target_rate=%3 source_frames=%4 output_frames=%5")
+                        .arg(QFileInfo(asset.sourcePath).fileName())
+                        .arg(asset.sourceSampleRate)
+                        .arg(asset.metadata.sampleRate)
+                        .arg(asset.sourceFrames)
+                        .arg(asset.metadata.frames));
+                }
                 registerTransientTrackWav(asset.stagedPath);
                 looperWaveformCache_.remove(asset.stagedPath);
                 LooperLane lane;
@@ -7586,6 +8594,15 @@ void MainWindow::importWavIntoLooperLane(int laneIndex, const QString& sourcePat
             if (bankIndex < 0 || bankIndex >= looperProject_.banks().size()) {
                 return;
             }
+            if (result->resampled) {
+                appendLog(QStringLiteral(
+                    "WAV import resampled %1: source_rate=%2 target_rate=%3 source_frames=%4 output_frames=%5")
+                    .arg(QFileInfo(result->sourcePath).fileName())
+                    .arg(result->sourceSampleRate)
+                    .arg(result->metadata.sampleRate)
+                    .arg(result->sourceFrames)
+                    .arg(result->metadata.frames));
+            }
             int laneIndex = -1;
             if (!targetLaneId.isEmpty()) {
                 const auto& currentLanes = looperProject_.banks().at(bankIndex).lanes;
@@ -7702,9 +8719,12 @@ bool MainWindow::armSelectedLooperLaneRecording()
     form->setVerticalSpacing(10);
 
     auto* modeBox = new QComboBox(content);
-    modeBox->addItem(QStringLiteral("Input"), QStringLiteral("input"));
-    modeBox->addItem(QStringLiteral("Current Jam"), QStringLiteral("current-jam"));
-    modeBox->addItem(QStringLiteral("Loopback"), QStringLiteral("loopback"));
+    modeBox->addItem(
+        QStringLiteral("Local Input (instrument)"), QStringLiteral("input"));
+    modeBox->addItem(
+        QStringLiteral("Jam Mix (Jam2 input + peers)"), QStringLiteral("current-jam"));
+    modeBox->addItem(
+        QStringLiteral("System Loopback (desktop audio)"), QStringLiteral("loopback"));
     modeBox->setCurrentIndex(qMax(0, modeBox->findData(preferences_.recording.preferredMode)));
     applyMutedEditorStyle(modeBox);
 
@@ -7731,10 +8751,14 @@ bool MainWindow::armSelectedLooperLaneRecording()
             loopbackDraft.outputFolder,
             jamAssetFolder(JamStorage::AssetKind::Recorded)));
     QString currentJamOutput = timestampedCapturePath(
-        laneFileName + QStringLiteral("-current-jam"),
+        laneFileName + QStringLiteral("-jam-mix"),
         jamAssetFolder(JamStorage::AssetKind::Recorded));
     auto* includeBackingCheck = new QCheckBox(QStringLiteral("Include backing track"), content);
     auto* includeMetronomeCheck = new QCheckBox(QStringLiteral("Include metronome in WAV"), content);
+    includeBackingCheck->setChecked(
+        preferences_.recording.jamMixTrack.includeBackingTrack);
+    includeMetronomeCheck->setChecked(
+        preferences_.recording.jamMixTrack.includeMetronome);
     auto* leaderAudioWarning = new QLabel(
         QStringLiteral(
             "Leader-audio note: a click embedded in received peer audio cannot be removed from this recording."),
@@ -7812,7 +8836,7 @@ bool MainWindow::armSelectedLooperLaneRecording()
     form->addRow(QStringLiteral("Take WAV"), outputRow);
     form->addRow(inputLabel, engineStatus);
     form->addRow(QStringLiteral("Loopback source"), sourceRow);
-    form->addRow(QStringLiteral("Current Jam mix"), includeBackingCheck);
+    form->addRow(QStringLiteral("Jam Mix options"), includeBackingCheck);
     form->addRow(QString{}, includeMetronomeCheck);
     form->addRow(QString{}, leaderAudioWarning);
     form->addRow(advancedToggle);
@@ -7909,9 +8933,11 @@ bool MainWindow::armSelectedLooperLaneRecording()
         const bool loopbackMode = !engineMode;
         const bool advancedAvailable = inputMode || loopbackMode;
         engineStatus->setText(currentJamMode
-            ? QStringLiteral("Records your input plus received peers at this endpoint.")
+            ? QStringLiteral(
+                "Jam Mix records your local input plus received Jam2 peers. "
+                "It does not capture other desktop applications.")
             : jam2_.isRunning()
-                ? QStringLiteral("Records the input of the currently loaded engine.")
+                ? QStringLiteral("Records only your local Jam2 input.")
                 : QStringLiteral("Start Perform or a jam before recording engine input."));
         setRowVisible(engineStatus, engineMode);
         setRowVisible(sourceRow, !engineMode);
@@ -8761,16 +9787,7 @@ void MainWindow::importLastCaptureToArmedLane()
     const QString sourcePath = trackRecordingWorkflow_.lastCapturePath();
     const QString stagingFolder = projectPersistence_.workspaceFolder();
     const int expectedSampleRate = activeTrackSampleRate();
-    const int recordedSampleRate = trackRecordingWorkflow_.lastCaptureSampleRate();
     const bool keepTakeLocal = localLaneTakeForcedLocal_;
-    if (recordedSampleRate > 0 && recordedSampleRate != expectedSampleRate) {
-        appendLog(QStringLiteral(
-            "recorded lane WAV not importable: recording used %1 Hz but the active engine/session uses %2 Hz")
-            .arg(recordedSampleRate)
-            .arg(expectedSampleRate));
-        finishLaneTakeFinalization();
-        return;
-    }
     auto result = std::make_shared<StagedPcm16Asset>();
     const bool started = startFileWorkerTask(
         [sourcePath, stagingFolder, expectedSampleRate, result] {
@@ -8789,6 +9806,14 @@ void MainWindow::importLastCaptureToArmedLane()
             if (bankIndex < 0 || bankIndex >= looperProject_.banks().size()) {
                 finishLaneTakeFinalization();
                 return;
+            }
+            if (result->resampled) {
+                appendLog(QStringLiteral(
+                    "recorded lane WAV resampled: source_rate=%1 target_rate=%2 source_frames=%3 output_frames=%4")
+                    .arg(result->sourceSampleRate)
+                    .arg(result->metadata.sampleRate)
+                    .arg(result->sourceFrames)
+                    .arg(result->metadata.frames));
             }
             int laneIndex = -1;
             const auto& lanes = looperProject_.banks().at(bankIndex).lanes;
@@ -13085,6 +14110,7 @@ void MainWindow::newSong()
     trackController_ = SharedTrackController{};
     looperProject_ = LooperProject{};
     addInitialEmptyLooperLanes(looperProject_);
+    applyNewJamDefaults();
     applyMetronomePatternForBank(0, false);
     trackRecordingWorkflow_.clearProjectCapture();
     if (trackWaveform_) {
@@ -13571,6 +14597,15 @@ void MainWindow::generatePracticeIdea()
         return;
     }
     jam2::practice::PracticeIdeaDialogDefaults defaults;
+    defaults.parts = static_cast<jam2::practice::PracticeIdeaParts>(
+        qBound(0, preferences_.ideas.parts, 2));
+    defaults.key = preferences_.ideas.key;
+    defaults.styleId = preferences_.ideas.styleId;
+    defaults.profileId = preferences_.ideas.profileId;
+    defaults.preferredMeterId = preferences_.ideas.meterId;
+    defaults.preferredBars = preferences_.ideas.bars;
+    defaults.exactBpm = preferences_.ideas.exactBpm;
+    defaults.complexity = preferences_.ideas.complexity;
     defaults.targetSectionIndex = chordGrid_
         ? chordGrid_->selectedSectionIndex()
         : 0;
@@ -13600,6 +14635,7 @@ void MainWindow::generatePracticeIdea()
             (beats + qMax(1, pattern.beats_per_bar) - 1) /
                 qMax(1, pattern.beats_per_bar));
     }
+    if (preferences_.ideas.exactBpm) defaults.bpm = preferences_.ideas.bpm;
     const auto request = jam2::practice::askForPracticeIdea(this, defaults);
     if (!request) {
         return;
@@ -13607,6 +14643,212 @@ void MainWindow::generatePracticeIdea()
     if (!applyPracticeIdea(*request)) {
         QMessageBox::warning(this, QStringLiteral("Generate Practice Idea"),
             QStringLiteral("The song has reached its section limit."));
+    }
+}
+
+void MainWindow::browseCuratedIdeas()
+{
+    if (sharedRecordingProtected()) {
+        appendLog(QStringLiteral(
+            "groove library importing is unavailable while a track take is active"));
+        return;
+    }
+    QString catalogError;
+    if (jam2::practice::loadCuratedIdeaCatalog(catalogError).isEmpty()) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Groove Library"),
+            catalogError.isEmpty()
+                ? QStringLiteral("The embedded groove library is empty.")
+                : catalogError);
+        return;
+    }
+
+    jam2::practice::CuratedIdeaDialogDefaults defaults;
+    defaults.targetSectionIndex = qBound(0, viewedBankIndex_, 3);
+    defaults.timing = preferences_.ideas.grooveUseIdeaTiming
+        ? jam2::practice::CuratedIdeaTimingPolicy::UseIdeaTiming
+        : jam2::practice::CuratedIdeaTimingPolicy::KeepSectionTiming;
+    defaults.importBars = preferences_.ideas.grooveBars;
+    for (int bank = 0; bank < 4; ++bank) {
+        const auto pattern = bankMetronomePattern(bank);
+        defaults.bankBpms.push_back(pattern.bpm);
+        defaults.bankMeterNumerators.push_back(pattern.beats_per_bar);
+        defaults.bankMeterDenominators.push_back(pattern.beat_unit);
+        defaults.bankBeats.push_back(
+            bank < chordModel_.sections().size()
+                ? chordModel_.section(bank).beats
+                : pattern.beats_per_bar);
+    }
+
+    const jam2::EngineSnapshot engine = jam2_.engineSnapshot();
+    jam2::practice::CuratedIdeaPreviewCallbacks preview;
+    preview.available = jam2_.isRunning() &&
+        !engine.prepared_source_playing &&
+        !sharedRecordingProtected();
+    preview.unavailableReason = !jam2_.isRunning()
+        ? QStringLiteral("Start audio to hear previews. Grooves can still be imported.")
+        : engine.prepared_source_playing
+            ? QStringLiteral("Stop backing-track playback to hear previews. Grooves can still be imported.")
+            : QStringLiteral("Preview is unavailable while recording.");
+    preview.play = [this](const jam2::practice::CuratedIdeaEntry& entry, QString& error) {
+        return playCuratedIdeaPreview(entry, error);
+    };
+    preview.stop = [this] { stopCuratedIdeaPreview(); };
+
+    const auto selection = jam2::practice::askForCuratedIdea(this, defaults, preview);
+    if (!selection) return;
+
+    jam2::practice::GeneratedPracticeIdea idea =
+        jam2::practice::generateCoupledPracticeIdeaSeeded(
+            selection->idea.generationRequest(selection->targetSectionIndex),
+            selection->idea.seed);
+    if (!idea.recipe.isValid() ||
+        idea.recipe.generatorVersion != selection->idea.generatorVersion ||
+        jam2::practice::generatedChordFingerprint(idea.chordSection) !=
+            selection->idea.chordFingerprint ||
+        jam2::practice::generatedBeatFingerprint(idea.beatSection) !=
+            selection->idea.beatFingerprint) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Groove Library"),
+            QStringLiteral(
+                "This groove no longer matches its embedded preview. Regenerate the curated library before importing it."));
+        appendLog(QStringLiteral("curated groove rejected: id=%1 generator=%2")
+            .arg(selection->idea.id)
+            .arg(idea.recipe.generatorVersion));
+        return;
+    }
+
+    const int sourceBeats = idea.beatSection.beats;
+    const int targetBeats = selection->importBars > 0
+        ? selection->importBars * idea.meterNumerator
+        : defaults.bankBeats.value(selection->targetSectionIndex, sourceBeats);
+    idea.beatSection = jam2::practice::PracticeIdeaController::fitRepeatingDrums(
+        std::move(idea.beatSection), targetBeats);
+
+    const bool applied = applyPracticeIdea(
+        std::move(idea),
+        jam2::practice::PracticeIdeaParts::DrumsOnly,
+        selection->targetSectionIndex,
+        selection->timing == jam2::practice::CuratedIdeaTimingPolicy::UseIdeaTiming,
+        true);
+    if (!applied) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("Groove Library"),
+            QStringLiteral("The selected groove could not be imported into that section."));
+        return;
+    }
+    appendLog(QStringLiteral(
+        "curated groove imported: id=%1 section=%2 material=drums timing=%3 source_beats=%4 imported_beats=%5 requested_bars=%6")
+        .arg(selection->idea.id)
+        .arg(QChar(QLatin1Char('A').unicode() + selection->targetSectionIndex))
+        .arg(selection->timing == jam2::practice::CuratedIdeaTimingPolicy::UseIdeaTiming
+            ? QStringLiteral("idea") : QStringLiteral("kept"))
+        .arg(sourceBeats)
+        .arg(targetBeats)
+        .arg(selection->importBars > 0
+            ? QString::number(selection->importBars) : QStringLiteral("current")));
+}
+
+bool MainWindow::playCuratedIdeaPreview(
+    const jam2::practice::CuratedIdeaEntry& idea,
+    QString& error)
+{
+    error.clear();
+    if (!jam2_.isRunning()) {
+        error = QStringLiteral("Start audio to hear previews.");
+        return false;
+    }
+    const jam2::EngineSnapshot engine = jam2_.engineSnapshot();
+    if (!curatedIdeaPreviewActive_ && engine.prepared_source_playing) {
+        error = QStringLiteral("Stop backing-track playback before previewing an idea.");
+        return false;
+    }
+    stopCuratedIdeaPreview();
+
+    QFile resource(idea.previewResource);
+    if (!resource.open(QIODevice::ReadOnly)) {
+        error = QStringLiteral("The embedded preview could not be opened.");
+        return false;
+    }
+    const QByteArray data = resource.readAll();
+    const QString actualHash = QString::fromLatin1(
+        QCryptographicHash::hash(data, QCryptographicHash::Sha256).toHex());
+    if (actualHash.compare(idea.previewSha256, Qt::CaseInsensitive) != 0) {
+        error = QStringLiteral("The embedded preview failed its SHA-256 check.");
+        return false;
+    }
+
+    const QString cacheRoot = QDir(
+        QStandardPaths::writableLocation(QStandardPaths::CacheLocation))
+        .absoluteFilePath(QStringLiteral("idea-previews"));
+    if (!QDir().mkpath(cacheRoot)) {
+        error = QStringLiteral("The preview cache folder could not be created.");
+        return false;
+    }
+    const QString embeddedPath = QDir(cacheRoot).absoluteFilePath(
+        idea.id + QStringLiteral("-") + idea.previewSha256.left(12) + QStringLiteral(".wav"));
+    if (!QFile::exists(embeddedPath)) {
+        QSaveFile output(embeddedPath);
+        if (!output.open(QIODevice::WriteOnly) || output.write(data) != data.size() ||
+            !output.commit()) {
+            error = QStringLiteral("The embedded preview could not be extracted.");
+            return false;
+        }
+    }
+    const StagedPcm16Asset staged = stagePcm16Asset(
+        embeddedPath,
+        cacheRoot,
+        activeTrackSampleRate(),
+        QStringLiteral("active-rate"));
+    if (!staged.error.isEmpty()) {
+        error = staged.error;
+        return false;
+    }
+
+    jam2::EngineCommand load;
+    load.type = jam2::EngineCommandType::LoadPreparedTrack;
+    load.enabled = true;
+    if (!jam2::engine_command_set_text(
+            load,
+            QDir::toNativeSeparators(staged.stagedPath).toStdString()) ||
+        !submitEngineCommand(load, QStringLiteral("load curated idea preview"))) {
+        error = QStringLiteral("The audio engine could not queue the preview.");
+        return false;
+    }
+    curatedIdeaPreviewActive_ = true;
+    setPreparedTrackLoop(
+        true,
+        0,
+        static_cast<std::uint64_t>(staged.metadata.frames));
+    submitEngineGain(
+        jam2::EngineCommandType::PreparedSetLevel,
+        1.0,
+        QStringLiteral("curated idea preview level"));
+    appendLog(QStringLiteral(
+        "curated preview loaded: id=%1 frames=%2 sample_rate=%3 resampled=%4 preview_level=1.0000 level_control=master-output-only")
+        .arg(idea.id)
+        .arg(staged.metadata.frames)
+        .arg(staged.metadata.sampleRate)
+        .arg(staged.resampled ? QStringLiteral("yes") : QStringLiteral("no")));
+    return true;
+}
+
+void MainWindow::stopCuratedIdeaPreview()
+{
+    if (!curatedIdeaPreviewActive_) return;
+    jam2::EngineCommand stop;
+    stop.type = jam2::EngineCommandType::PreparedStop;
+    (void)submitEngineCommand(stop, QStringLiteral("stop curated idea preview"));
+    curatedIdeaPreviewActive_ = false;
+    if (!preparedMix_.path.isEmpty() && preparedMix_.error.isEmpty()) {
+        loadPreparedMixIntoEngine();
+    } else {
+        jam2::EngineCommand unload;
+        unload.type = jam2::EngineCommandType::UnloadPreparedTrack;
+        (void)submitEngineCommand(unload, QStringLiteral("unload curated idea preview"));
     }
 }
 
@@ -13779,51 +15021,77 @@ void MainWindow::clearPracticeIdea()
 
 bool MainWindow::applyPracticeIdea(const jam2::practice::ChordIdeaRequest& request)
 {
+    jam2::practice::GeneratedPracticeIdea idea =
+        jam2::practice::generateCoupledPracticeIdea(request);
+    return applyPracticeIdea(
+        std::move(idea),
+        request.parts,
+        request.targetSectionIndex,
+        true,
+        true);
+}
+
+bool MainWindow::applyPracticeIdea(
+    jam2::practice::GeneratedPracticeIdea idea,
+    jam2::practice::PracticeIdeaParts parts,
+    int targetSectionIndex,
+    bool useIdeaTiming,
+    bool matchIdeaLength)
+{
     if (sharedRecordingProtected()) return false;
     const auto previousPattern = currentMetronomePattern();
-    const auto idea = jam2::practice::PracticeIdeaController::generateCoupled(
-        chordModel_, beatModel_, request);
-    if (!idea) {
+    const auto appliedIdea = jam2::practice::PracticeIdeaController::applyCoupled(
+        chordModel_,
+        beatModel_,
+        std::move(idea),
+        parts,
+        targetSectionIndex,
+        matchIdeaLength);
+    if (!appliedIdea) {
         return false;
     }
     ++practiceIdeaRevision_;
-    const int targetBank = qBound(0, request.targetSectionIndex, 3);
+    const int targetBank = qBound(0, targetSectionIndex, 3);
     const bool affectsLiveBank = targetBank == looperProject_.activeBankIndex();
-    const bool timingChanged = affectsLiveBank && (idea->bpm != previousPattern.bpm ||
-        idea->meterNumerator != previousPattern.beats_per_bar ||
-        idea->meterDenominator != previousPattern.beat_unit ||
-        idea->tempoPulseUnits != previousPattern.tempo_pulse_units);
+    const bool timingChanged = useIdeaTiming && affectsLiveBank &&
+        (appliedIdea->bpm != previousPattern.bpm ||
+         appliedIdea->meterNumerator != previousPattern.beats_per_bar ||
+         appliedIdea->meterDenominator != previousPattern.beat_unit ||
+         appliedIdea->tempoPulseUnits != previousPattern.tempo_pulse_units);
     if (affectsLiveBank || timingChanged) stopTrackForPracticeIdeaGeneration();
     clearPracticeReferenceWavs(false, targetBank);
-    LooperBankTiming generatedTiming;
-    generatedTiming.bpm = idea->bpm;
-    generatedTiming.beatsPerBar = idea->meterNumerator;
-    generatedTiming.beatUnit = idea->meterDenominator;
-    generatedTiming.tempoPulseUnits = idea->tempoPulseUnits;
-    generatedTiming.division = idea->clickDivision;
-    generatedTiming.playMaskLow = 0;
-    generatedTiming.playMaskHigh = 0;
-    generatedTiming.accentMaskLow = 0;
-    generatedTiming.accentMaskHigh = 0;
-    for (int step = 0; step < idea->clickEnabled.size(); ++step) {
-        jam2::metronome::set_mask_enabled(
-            generatedTiming.playMaskLow,
-            generatedTiming.playMaskHigh,
-            step,
-            idea->clickEnabled.at(step));
-        jam2::metronome::set_mask_enabled(
-            generatedTiming.accentMaskLow,
-            generatedTiming.accentMaskHigh,
-            step,
-            step < idea->clickAccents.size() && idea->clickAccents.at(step));
+    if (useIdeaTiming) {
+        LooperBankTiming generatedTiming;
+        generatedTiming.bpm = appliedIdea->bpm;
+        generatedTiming.beatsPerBar = appliedIdea->meterNumerator;
+        generatedTiming.beatUnit = appliedIdea->meterDenominator;
+        generatedTiming.tempoPulseUnits = appliedIdea->tempoPulseUnits;
+        generatedTiming.division = appliedIdea->clickDivision;
+        generatedTiming.playMaskLow = 0;
+        generatedTiming.playMaskHigh = 0;
+        generatedTiming.accentMaskLow = 0;
+        generatedTiming.accentMaskHigh = 0;
+        for (int step = 0; step < appliedIdea->clickEnabled.size(); ++step) {
+            jam2::metronome::set_mask_enabled(
+                generatedTiming.playMaskLow,
+                generatedTiming.playMaskHigh,
+                step,
+                appliedIdea->clickEnabled.at(step));
+            jam2::metronome::set_mask_enabled(
+                generatedTiming.accentMaskLow,
+                generatedTiming.accentMaskHigh,
+                step,
+                step < appliedIdea->clickAccents.size() && appliedIdea->clickAccents.at(step));
+        }
+        generatedTiming.inheritsBankA = false;
+        (void)looperProject_.setTiming(targetBank, std::move(generatedTiming));
     }
-    generatedTiming.inheritsBankA = false;
-    (void)looperProject_.setTiming(targetBank, std::move(generatedTiming));
-    if (affectsLiveBank) {
+    if (useIdeaTiming && affectsLiveBank) {
         applyMetronomePatternForBank(targetBank);
         updateTrackMetronomeInterval();
     }
     selectViewedBank(targetBank);
+    refreshSongViews();
     refreshLooperLanes();
     if (jamSyncPolicy_.generatedIdeas != GeneratedIdeaSyncMode::Off) {
         const SongSyncScope syncScope =
@@ -13912,11 +15180,15 @@ void MainWindow::generatePracticeReferenceWavs()
 
     const auto pattern = currentMetronomePattern();
     jam2::practice::ReferenceRenderSettings defaults;
-    defaults.renderChords = anyChords;
-    defaults.renderDrums = anyDrums;
-    defaults.renderMelody = false;
-    defaults.renderBass = anyBass;
-    defaults.renderSupport = anySupport;
+    defaults.renderChords = anyChords && preferences_.ideas.renderChords;
+    defaults.renderDrums = anyDrums && preferences_.ideas.renderDrums;
+    defaults.renderMelody = anyMelody && preferences_.ideas.renderMelody;
+    defaults.renderBass = anyBass && preferences_.ideas.renderBass;
+    defaults.renderSupport = anySupport && preferences_.ideas.renderSupport;
+    defaults.voicing = static_cast<jam2::practice::ChordVoicing>(
+        qBound(0, preferences_.ideas.chordVoicing, 3));
+    defaults.drumKit = static_cast<jam2::practice::ReferenceDrumKit>(
+        qBound(0, preferences_.ideas.drumKit, 2));
     defaults.bpm = pattern.bpm;
     defaults.sampleRate = activeTrackSampleRate();
     defaults.tempoPulseUnits = pattern.tempo_pulse_units;

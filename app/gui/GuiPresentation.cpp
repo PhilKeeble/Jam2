@@ -17,14 +17,12 @@
 #include <QLineEdit>
 #include <QPainter>
 #include <QPainterPath>
-#include <QPointer>
 #include <QProxyStyle>
 #include <QPushButton>
 #include <QScreen>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStyleOption>
-#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -99,17 +97,11 @@ protected:
             return QObject::eventFilter(watched, event);
         }
 
+        // Polish already prepared the final size before the window became
+        // visible. Re-centre synchronously on Show, but do not hide and resize
+        // the live window again: that left stale child-widget pixels in the
+        // backing store on Windows, visibly duplicating dialog controls.
         placeDialog(*dialog);
-        if (qobject_cast<QFileDialog*>(dialog) == nullptr) {
-            const qreal intendedOpacity = dialog->windowOpacity();
-            dialog->setWindowOpacity(0.0);
-            const QPointer<QDialog> guarded(dialog);
-            QTimer::singleShot(75, dialog, [guarded, intendedOpacity] {
-                if (guarded == nullptr) return;
-                placeDialog(*guarded);
-                guarded->setWindowOpacity(intendedOpacity);
-            });
-        }
         return QObject::eventFilter(watched, event);
     }
 
@@ -292,25 +284,16 @@ bool isCustomFocusPreset(const QString& key)
     return key.isEmpty() || key == QStringLiteral("custom");
 }
 
-QString trackValueEditorStyle()
-{
-    return QStringLiteral(
-        "QAbstractSpinBox { border: 1px solid #89959c; background: #000000; color: #ffffff; padding: 2px 28px 2px 6px; }"
-        "QComboBox, QLineEdit { border: 1px solid #89959c; background: #000000; color: #ffffff; padding: 2px 6px; }"
-        "QAbstractSpinBox:focus, QComboBox:focus, QLineEdit:focus { border: 1px solid #e8a44a; }"
-        "QAbstractSpinBox:disabled, QComboBox:disabled, QLineEdit:disabled { border: 1px solid #535270; background: #161727; color: #aaa5ba; }");
-}
-
 void applyMutedEditorStyle(QWidget* widget)
 {
     if (widget == nullptr) {
         return;
     }
     widget->setAttribute(Qt::WA_MacShowFocusRect, false);
-    widget->setStyleSheet(trackValueEditorStyle());
+    widget->setProperty("jam2MutedEditor", true);
     if (auto* combo = qobject_cast<QComboBox*>(widget); combo != nullptr && combo->lineEdit() != nullptr) {
         combo->lineEdit()->setAttribute(Qt::WA_MacShowFocusRect, false);
-        combo->lineEdit()->setStyleSheet(trackValueEditorStyle());
+        combo->lineEdit()->setProperty("jam2MutedEditor", true);
     }
 }
 

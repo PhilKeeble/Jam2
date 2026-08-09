@@ -1,0 +1,16 @@
+{
+  "schema": "jam2-debug-scenario",
+  "run_id": "groove-library-32-bar-v1",
+  "operation": "validate.music-full-form-corpus",
+  "profile": "fast",
+  "artifacts": {
+    "root": "../../artifacts/music-research/curated-idea-source"
+  },
+  "corpus": {
+    "render_audio": true,
+    "drum_only_audio": true,
+    "matched_complexity_seeds": false,
+    "samples_per_cell": 2,
+    "fixed_bars": 32
+  }
+}

@@ -47,6 +47,14 @@ struct PracticeIdeaDialogDefaults {
     int bpm = 80;
     QString meterId;
     int bars = 8;
+    PracticeIdeaParts parts = PracticeIdeaParts::FullArrangement;
+    int key = -1;
+    QString styleId;
+    QString profileId;
+    QString preferredMeterId;
+    int preferredBars = 0;
+    bool exactBpm = false;
+    int complexity = 2;
     int targetSectionIndex = 0;
     QVector<int> bankBpms;
     QStringList bankMeterIds;

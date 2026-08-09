@@ -171,8 +171,10 @@
       "additionalProperties": false,
       "properties": {
         "render_audio": {"type": "boolean"},
+        "drum_only_audio": {"type": "boolean"},
         "matched_complexity_seeds": {"type": "boolean"},
         "samples_per_cell": {"type": "integer", "minimum": 2, "maximum": 16},
+        "fixed_bars": {"type": "integer", "minimum": 4, "maximum": 64},
         "style_id": {"type": "string", "maxLength": 128},
         "profile_id": {"type": "string", "maxLength": 128}
       }

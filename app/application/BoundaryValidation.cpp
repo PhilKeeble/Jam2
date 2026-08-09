@@ -8,6 +8,7 @@
 
 #include "BeatGridModel.hpp"
 #include "BeatGridWidget.hpp"
+#include "CuratedIdeaCatalog.hpp"
 #include "LooperProject.hpp"
 #include "ProjectPersistenceCoordinator.hpp"
 #include "SharedTrackController.hpp"
@@ -49,6 +50,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMap>
 #include <QObject>
 #include <QSet>
 #include <QTemporaryFile>
@@ -1018,8 +1020,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
     }
     {
         const SharedTrackModel defaults;
-        record(QStringLiteral("track.defaults-to-minus-ten-db"),
-            defaults.trackGainDb == -10.0);
+        record(QStringLiteral("track.defaults-to-minus-three-db"),
+            defaults.trackGainDb == -3.0);
     }
     {
         const QStringList advancedSymbols{
@@ -1235,6 +1237,95 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                     generatedDrums &&
                 model.section(0).generatedKind == QStringLiteral("practice") &&
                 model.section(0).beats == 32);
+        }
+        {
+            QString catalogError;
+            const auto catalog = jam2::practice::loadCuratedIdeaCatalog(catalogError);
+            QMap<QString, int> perProfile;
+            bool previewsValid = true;
+            bool fingerprintsValid = true;
+            for (const auto& entry : catalog) {
+                ++perProfile[entry.profileId];
+                QFile preview(entry.previewResource);
+                if (!preview.open(QIODevice::ReadOnly) ||
+                    QString::fromLatin1(QCryptographicHash::hash(
+                        preview.readAll(), QCryptographicHash::Sha256).toHex()) !=
+                        entry.previewSha256) {
+                    previewsValid = false;
+                }
+                const auto idea = jam2::practice::generateCoupledPracticeIdeaSeeded(
+                    entry.generationRequest(), entry.seed);
+                fingerprintsValid = fingerprintsValid && idea.recipe.isValid() &&
+                    entry.bars == 32 && entry.previewBars == 4 &&
+                    idea.beatSection.beats == 32 * idea.meterNumerator &&
+                    idea.recipe.generatorVersion == entry.generatorVersion &&
+                    jam2::practice::generatedChordFingerprint(idea.chordSection) ==
+                        entry.chordFingerprint &&
+                    jam2::practice::generatedBeatFingerprint(idea.beatSection) ==
+                        entry.beatFingerprint;
+            }
+            const bool exactlyTwoPerProfile = perProfile.size() == 27 &&
+                std::all_of(perProfile.cbegin(), perProfile.cend(),
+                    [](int count) { return count == 2; });
+            record(QStringLiteral("practice.curated-library-is-complete-and-reproducible"),
+                catalogError.isEmpty() && catalog.size() == 54 &&
+                exactlyTwoPerProfile && previewsValid && fingerprintsValid,
+                QStringLiteral("ideas=%1 profiles=%2 error=%3")
+                    .arg(catalog.size()).arg(perProfile.size()).arg(catalogError));
+
+            if (!catalog.isEmpty()) {
+                const auto source = jam2::practice::generateCoupledPracticeIdeaSeeded(
+                    catalog.front().generationRequest(), catalog.front().seed);
+                BeatGridModel model;
+                model.resizeSection(0, 24);
+                model.setCell(0, QStringLiteral("chord"), 0, QStringLiteral("Cmaj7"));
+                const QString originalPitched =
+                    jam2::practice::generatedChordFingerprint(model.section(0));
+                const auto drums = jam2::practice::PracticeIdeaController::applyCoupled(
+                    model,
+                    model,
+                    source,
+                    jam2::practice::PracticeIdeaParts::DrumsOnly,
+                    0,
+                    false);
+                const QString importedDrums =
+                    jam2::practice::generatedBeatFingerprint(model.section(0));
+                const bool drumsKeptLengthAndPitched = drums.has_value() &&
+                    model.section(0).beats == 24 &&
+                    jam2::practice::generatedChordFingerprint(model.section(0)) ==
+                        originalPitched;
+                const auto pitched = jam2::practice::PracticeIdeaController::applyCoupled(
+                    model,
+                    model,
+                    source,
+                    jam2::practice::PracticeIdeaParts::PitchedPartsOnly,
+                    0,
+                    false);
+                record(QStringLiteral("practice.curated-partial-import-keeps-length-and-other-side"),
+                    drumsKeptLengthAndPitched && pitched.has_value() &&
+                    model.section(0).beats == 24 &&
+                    jam2::practice::generatedBeatFingerprint(model.section(0)) ==
+                        importedDrums &&
+                    jam2::practice::generatedChordFingerprint(model.section(0)) !=
+                        originalPitched);
+            }
+            SongSection loopSource;
+            loopSource.beats = 2;
+            loopSource.beatNotes = {QStringLiteral("A"), QStringLiteral("B")};
+            loopSource.beatPatterns.resize(2);
+            loopSource.beatPatterns[0].division = 1;
+            loopSource.beatPatterns[1].division = 2;
+            const SongSection looped =
+                jam2::practice::PracticeIdeaController::fitRepeatingDrums(
+                    loopSource, 5);
+            record(QStringLiteral("practice.curated-groove-fit-repeats-instead-of-padding"),
+                looped.beats == 5 &&
+                looped.beatNotes == QVector<QString>{
+                    QStringLiteral("A"), QStringLiteral("B"),
+                    QStringLiteral("A"), QStringLiteral("B"),
+                    QStringLiteral("A")} &&
+                looped.beatPatterns.size() == 5 &&
+                looped.beatPatterns.at(4).division == 1);
         }
         {
             const auto combinedIdeaSection = [](const jam2::practice::GeneratedPracticeIdea& idea) {
@@ -7514,6 +7605,32 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             !workflow.globalTransportPlaying());
     }
     {
+        ApplicationRuntime runtime;
+        TrackRecordingWorkflow workflow(runtime);
+        jam2::EngineSnapshot snapshot;
+        snapshot.transport_revision = 1;
+        snapshot.transport_pending = true;
+        snapshot.transport_action = jam2::EngineTransportAction::TrackRestart;
+        snapshot.transport_target_frame = 72000;
+        snapshot.engine_frame = 71000;
+        snapshot.sample_rate = 48000.0;
+        workflow.consumeSnapshot(
+            snapshot, MetronomeTransportController::SnapshotUpdate{});
+        const bool armed = workflow.globalTransportRequestedPlaying() &&
+            !workflow.globalTransportPlaying();
+
+        // A grid revision can invalidate the queued boundary without committing
+        // it. The GUI must return to stopped instead of becoming a stuck Stop
+        // button for audio that never started.
+        snapshot.transport_pending = false;
+        snapshot.engine_frame = 72000;
+        workflow.consumeSnapshot(
+            snapshot, MetronomeTransportController::SnapshotUpdate{});
+        record(QStringLiteral("global-play.canceled-start-can-be-retried"),
+            armed && !workflow.globalTransportRequestedPlaying() &&
+            !workflow.globalTransportPlaying());
+    }
+    {
         Jam2RuntimeHost requestIds;
         const std::uint64_t gridBeforeReset = requestIds.nextGridRequestId();
         const std::uint64_t transportBeforeReset = requestIds.nextTransportEventId();
@@ -8144,24 +8261,26 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             const QString expectation = separator > 0 ? spec.left(separator) : QString();
             const QString path = separator > 0 ? spec.mid(separator + 1) : QString();
             const bool importMatch = expectation == QStringLiteral("import-match-48000");
-            const bool importMismatch = expectation == QStringLiteral("import-mismatch-48000");
+            const bool importResample = expectation == QStringLiteral("import-resample-48000");
             if ((expectation != QStringLiteral("valid") && expectation != QStringLiteral("invalid") &&
-                 !importMatch && !importMismatch) ||
+                 !importMatch && !importResample) ||
                 path.isEmpty() || path.toUtf8().size() > 4096) {
                 record(QStringLiteral("wav.fixture-spec-bound"), false, QStringLiteral("invalid fixture spec"));
                 continue;
             }
-            if (importMatch || importMismatch) {
+            if (importMatch || importResample) {
                 const StagedPcm16Asset staged = stagePcm16Asset(
                     path,
                     QDir(QFileInfo(path).absolutePath()).filePath(QStringLiteral("staged")),
                     48000);
                 const bool ok = importMatch
                     ? staged.error.isEmpty() && staged.metadata.sampleRate == 48000 &&
+                        staged.sourceSampleRate == 48000 && !staged.resampled &&
                         QFileInfo::exists(staged.stagedPath)
-                    : !staged.error.isEmpty() && staged.stagedPath.isEmpty() &&
-                        staged.error.contains(QStringLiteral("48000")) &&
-                        staged.error.contains(QStringLiteral("44100"));
+                    : staged.error.isEmpty() && staged.metadata.sampleRate == 48000 &&
+                        staged.sourceSampleRate == 44100 && staged.sourceFrames == 128 &&
+                        staged.metadata.frames == 139 && staged.resampled &&
+                        QFileInfo::exists(staged.stagedPath);
                 record(
                     QStringLiteral("wav.%1.%2").arg(expectation, QFileInfo(path).fileName()),
                     ok,

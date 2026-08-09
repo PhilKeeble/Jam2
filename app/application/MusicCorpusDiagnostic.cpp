@@ -5,6 +5,7 @@
 #include "MusicTheory.hpp"
 #include "PracticeIdeaController.hpp"
 #include "PracticeIdeaGenerator.hpp"
+#include "PracticeIdeaController.hpp"
 #include "PracticeReferenceRenderer.hpp"
 #include "StyleProfileCatalog.hpp"
 #include "pcm16_wav.hpp"
@@ -332,7 +333,8 @@ struct CorpusAudioRender {
 CorpusAudioRender renderFullMix(
     const jam2::practice::GeneratedPracticeIdea& idea,
     const QString& sampleId,
-    const QDir& artifacts)
+    const QDir& artifacts,
+    bool drumOnly)
 {
     const auto hasLaneOnset = [](const SongSection& section,
                                  const QString& laneId) {
@@ -352,16 +354,16 @@ CorpusAudioRender renderFullMix(
         return false;
     };
     jam2::practice::ReferenceRenderSettings settings;
-    settings.renderChords = true;
+    settings.renderChords = !drumOnly;
     settings.renderDrums = true;
     // Optional recipe roles may legitimately have no visible performance
     // events in a particular generated form. Ask the renderer for the lanes
     // that actually contain onsets, which is the source it renders.
-    settings.renderMelody = hasLaneOnset(
+    settings.renderMelody = !drumOnly && hasLaneOnset(
         idea.chordSection, QStringLiteral("melody"));
-    settings.renderBass = hasLaneOnset(
+    settings.renderBass = !drumOnly && hasLaneOnset(
         idea.chordSection, QStringLiteral("bass"));
-    settings.renderSupport = hasLaneOnset(
+    settings.renderSupport = !drumOnly && hasLaneOnset(
         idea.chordSection, QStringLiteral("support"));
     settings.voicing = jam2::practice::ChordVoicing::StyleDefault;
     settings.sampleRate = kSampleRate;
@@ -378,7 +380,7 @@ CorpusAudioRender renderFullMix(
                 .arg(rendered.error).toStdString());
     }
     const std::array<std::vector<float>, 5> stems{
-        readMonoPcm16(rendered.chords.path),
+        drumOnly ? std::vector<float>{} : readMonoPcm16(rendered.chords.path),
         settings.renderMelody
             ? readMonoPcm16(rendered.melody.path) : std::vector<float>{},
         settings.renderBass
@@ -409,12 +411,14 @@ CorpusAudioRender renderFullMix(
              rendered.support.path}) {
         if (!path.isEmpty()) QFile::remove(path);
     }
-    const QString relative =
-        QStringLiteral("audio/full-form-corpus/") + sampleId +
-        QStringLiteral(".wav");
-    if (!writeMonoPcm16(
-            artifacts.absoluteFilePath(relative), auditionMix(stems))) {
-        throw std::runtime_error("Cannot write a full-form corpus mix.");
+    QString relative;
+    if (!drumOnly) {
+        relative = QStringLiteral("audio/full-form-corpus/") + sampleId +
+            QStringLiteral(".wav");
+        if (!writeMonoPcm16(
+                artifacts.absoluteFilePath(relative), auditionMix(stems))) {
+            throw std::runtime_error("Cannot write a full-form corpus mix.");
+        }
     }
     const auto stemJson = [](const jam2::practice::ReferenceWav& stem) {
         return QJsonObject{
@@ -463,7 +467,9 @@ QJsonObject corpusSample(
     const QString& seedNamespace,
     const QDir& artifacts,
     bool renderAudio,
-    bool matchedComplexitySeeds)
+    bool matchedComplexitySeeds,
+    bool forceFormBars,
+    bool drumOnlyAudio)
 {
     const QString sampleId = QStringLiteral("%1__%2__c%3__s%4")
         .arg(profile.id, form.id)
@@ -479,7 +485,12 @@ QJsonObject corpusSample(
     jam2::practice::ChordIdeaRequest request;
     request.styleId = profile.styleId;
     request.profileId = profile.id;
-    request.formId = form.id;
+    if (forceFormBars) {
+        request.bars = form.bars;
+        request.meterId = form.meterId;
+    } else {
+        request.formId = form.id;
+    }
     request.harmonicComplexity = complexity;
     request.rhythmicComplexity = complexity;
     const auto idea =
@@ -501,8 +512,17 @@ QJsonObject corpusSample(
     if (!voicingError.isEmpty()) {
         throw std::runtime_error(voicingError.toStdString());
     }
+    auto renderIdea = idea;
+    if (renderAudio && drumOnlyAudio) {
+        const int previewBeats = 4 * renderIdea.meterNumerator;
+        renderIdea.beatSection =
+            jam2::practice::PracticeIdeaController::fitRepeatingDrums(
+                std::move(renderIdea.beatSection), previewBeats);
+        renderIdea.beatSection.generatedRecipe.beatFingerprint =
+            jam2::practice::generatedBeatFingerprint(renderIdea.beatSection);
+    }
     const CorpusAudioRender audio = renderAudio
-        ? renderFullMix(idea, sampleId, artifacts)
+        ? renderFullMix(renderIdea, sampleId, artifacts, drumOnlyAudio)
         : CorpusAudioRender{};
     return {
         {QStringLiteral("id"), sampleId},
@@ -589,10 +609,17 @@ QJsonObject jam2WriteFullFormMusicCorpus(
          options.matchedComplexitySeeds},
         {QStringLiteral("style_filter"), options.styleId},
         {QStringLiteral("profile_filter"), options.profileId},
+        {QStringLiteral("fixed_bars"), options.fixedBars},
+        {QStringLiteral("drum_only_audio"), options.drumOnlyAudio},
+        {QStringLiteral("drum_audio_preview_bars"),
+         options.drumOnlyAudio ? 4 : 0},
         {QStringLiteral("full_audio_policy"),
           options.includeAudio
-            ? QStringLiteral(
-                  "One complete complexity-4 Jam2 audition mix and drum stem per native form")
+            ? options.fixedBars > 0
+                ? QStringLiteral(
+                      "One complete complexity-4 Jam2 audition mix and drum stem per requested sample")
+                : QStringLiteral(
+                      "One complete complexity-4 Jam2 audition mix and drum stem per native form")
             : QStringLiteral(
                   "Structure-only corpus; no reference audio rendered")},
     };
@@ -625,7 +652,21 @@ QJsonObject jam2WriteFullFormMusicCorpus(
         console << "Generating full forms for "
                 << profile.name << "...\n";
         console.flush();
-        for (const auto& form : profile.forms) {
+        auto forms = profile.forms;
+        if (options.fixedBars > 0) {
+            forms.clear();
+            jam2::practice::NativeFormDefinition custom;
+            custom.id = QStringLiteral("custom-%1").arg(options.fixedBars);
+            custom.name = QStringLiteral("%1-bar groove performance")
+                .arg(options.fixedBars);
+            custom.bars = options.fixedBars;
+            custom.meterId = profile.meterIds.value(0, QStringLiteral("4-4"));
+            custom.phraseBars = options.fixedBars % 8 == 0 ? 8 : 4;
+            custom.description = QStringLiteral(
+                "A fixed-length groove-library performance with profile-native variation and fills.");
+            forms.push_back(std::move(custom));
+        }
+        for (const auto& form : forms) {
             for (int complexity : complexities) {
                 for (int sampleIndex = 0;
                      sampleIndex < samplesPerCell;
@@ -633,11 +674,13 @@ QJsonObject jam2WriteFullFormMusicCorpus(
                     const bool renderAudio =
                         options.includeAudio &&
                         complexity == 4 &&
-                        sampleIndex == 0;
+                        (options.fixedBars > 0 || sampleIndex == 0);
                     const QJsonObject sample = corpusSample(
                         profile, form, complexity, sampleIndex,
                         seedNamespace, artifacts, renderAudio,
-                        options.matchedComplexitySeeds);
+                        options.matchedComplexitySeeds,
+                        options.fixedBars > 0,
+                        options.drumOnlyAudio);
                     QByteArray encoded =
                         QJsonDocument(sample).toJson(QJsonDocument::Compact);
                     if (!firstSample && !writeChunk(QByteArrayLiteral(","))) {

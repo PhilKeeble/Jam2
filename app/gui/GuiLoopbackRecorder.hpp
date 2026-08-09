@@ -12,6 +12,12 @@
 
 namespace jam2::gui {
 
+std::vector<std::int16_t> resample_pcm16_interleaved(
+    std::span<const std::int16_t> input,
+    int channels,
+    int sourceSampleRate,
+    int targetSampleRate);
+
 std::vector<std::int16_t> resample_pcm16_mono(
     std::span<const std::int16_t> input,
     int sourceSampleRate,

@@ -434,10 +434,12 @@ void TrackRecordingWorkflow::consumeSnapshot(
         }
     }
     if (pending_global_transport_start_frame_ > 0 &&
-        snapshot.engine_frame >= pending_global_transport_start_frame_) {
-        global_transport_playing_ = true;
-        global_transport_start_frame_ = pending_global_transport_start_frame_;
-        pending_global_transport_start_frame_ = 0;
+        snapshot.engine_frame >= pending_global_transport_start_frame_ &&
+        !snapshot.transport_pending) {
+        // A committed start is handled above by transport_commit_count. If the
+        // target passed without a commit, a grid revision canceled the request.
+        // Clear the requested-playing state so Global Play can be tried again.
+        clearGlobalTransport();
     }
     if (pending_global_transport_stop_frame_ > 0 &&
         snapshot.engine_frame >= pending_global_transport_stop_frame_) {

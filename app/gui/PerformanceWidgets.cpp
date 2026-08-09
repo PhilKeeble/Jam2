@@ -810,6 +810,24 @@ void PerformanceHomeWidget::setSongModel(const BeatGridModel* model)
     update();
 }
 
+void PerformanceHomeWidget::setChordPreviewVisible(bool visible)
+{
+    if (chordPreviewVisible_ == visible) return;
+    chordPreviewVisible_ = visible;
+    chordHitRect_ = {};
+    chordRunwayRect_ = {};
+    update();
+}
+
+void PerformanceHomeWidget::setBeatPreviewVisible(bool visible)
+{
+    if (beatPreviewVisible_ == visible) return;
+    beatPreviewVisible_ = visible;
+    currentBeatHitRect_ = {};
+    nextBeatHitRect_ = {};
+    update();
+}
+
 void PerformanceHomeWidget::setTiming(
     quint64 absoluteBeat,
     int subdivision,
@@ -1486,7 +1504,9 @@ void PerformanceHomeWidget::paintHtmlStage()
 
     paintGenerationActions(painter, 17, width() - margin);
     const int previewGap = 8;
-    const int previewHeight = qBound(160, height() / 3, 260);
+    const int previewHeight = beatPreviewVisible_
+        ? qBound(160, height() / 3, 260)
+        : 0;
     const int previewTop = height() - margin - previewHeight;
     const int peerWidth = 112;
     const int looperWidth = width() >= 1100 ? 220 : 184;
@@ -1496,6 +1516,9 @@ void PerformanceHomeWidget::paintHtmlStage()
         180,
         (previewRight - previewLeft - previewGap) / 2);
 
+    chordHitRect_ = {};
+    chordRunwayRect_ = {};
+    if (chordPreviewVisible_) {
     const double orbitCenterY = qBound(
         150.0,
         static_cast<double>(previewTop - 210),
@@ -1750,6 +1773,8 @@ void PerformanceHomeWidget::paintHtmlStage()
             chordCells.at(index).first);
     }
 
+    }
+
     const int visiblePeople = qMin(10, peers_.size()) + 1;
     const int railHeight = visiblePeople * 29;
     peerRailRect_ = QRect(
@@ -1765,17 +1790,21 @@ void PerformanceHomeWidget::paintHtmlStage()
     paintJamRecordingButton(painter, jamRecordingHitRect_);
     paintVerticalPeerRail(painter, peerRailRect_);
 
-    currentBeatHitRect_ = QRect(previewLeft, previewTop, previewWidth, previewHeight);
-    nextBeatHitRect_ = QRect(
-        previewLeft + previewWidth + previewGap,
-        previewTop,
-        previewWidth,
-        previewHeight);
+    currentBeatHitRect_ = beatPreviewVisible_
+        ? QRect(previewLeft, previewTop, previewWidth, previewHeight)
+        : QRect{};
+    nextBeatHitRect_ = beatPreviewVisible_
+        ? QRect(
+            previewLeft + previewWidth + previewGap,
+            previewTop,
+            previewWidth,
+            previewHeight)
+        : QRect{};
     looperHitRect_ = QRect(
         width() - margin - looperWidth,
-        height() - margin - qMin(118, previewHeight),
+        height() - margin - 118,
         looperWidth,
-        qMin(118, previewHeight));
+        118);
     if (tuner_.enabled) {
         tunerHitRect_ = QRect(
             looperHitRect_.left(),
@@ -1804,18 +1833,20 @@ void PerformanceHomeWidget::paintHtmlStage()
     const bool nextBarUsesPendingBank = pendingBank_ >= 0 &&
         pendingBankBeatsRemaining_ > 0 &&
         pendingBankBeatsRemaining_ <= beatsToNextBar;
-    paintBeatPreview(
-        painter, currentBeatHitRect_, liveBank_, beatsPerBar_, currentBarStart, true);
-    paintBeatPreview(
-        painter,
-        nextBeatHitRect_,
-        nextBarUsesPendingBank ? pendingBank_ : liveBank_,
-        nextBarUsesPendingBank ? pendingBankBeatsPerBar_ : beatsPerBar_,
-        nextBarUsesPendingBank ? 0 : position.totalBeats > 0
-            ? (currentBarStart + static_cast<quint64>(beatsPerBar_)) %
-                position.totalBeats
-            : 0,
-        false);
+    if (beatPreviewVisible_) {
+        paintBeatPreview(
+            painter, currentBeatHitRect_, liveBank_, beatsPerBar_, currentBarStart, true);
+        paintBeatPreview(
+            painter,
+            nextBeatHitRect_,
+            nextBarUsesPendingBank ? pendingBank_ : liveBank_,
+            nextBarUsesPendingBank ? pendingBankBeatsPerBar_ : beatsPerBar_,
+            nextBarUsesPendingBank ? 0 : position.totalBeats > 0
+                ? (currentBarStart + static_cast<quint64>(beatsPerBar_)) %
+                    position.totalBeats
+                : 0,
+            false);
+    }
     paintLooperLaunch(painter, looperHitRect_);
     if (tuner_.enabled) {
         paintTuner(painter, tunerHitRect_, false);
@@ -1990,9 +2021,14 @@ void PerformanceHomeWidget::paintEvent(QPaintEvent*)
 
     paintGenerationActions(painter, 18, width() - margin);
     const int previewGap = 14;
-    const int previewHeight = qBound(150, height() / 3, 320);
+    const int previewHeight = beatPreviewVisible_
+        ? qBound(150, height() / 3, 320)
+        : 0;
     const int previewTop = height() - margin - previewHeight;
     const int previewWidth = (width() - margin * 2 - previewGap) / 2;
+    chordHitRect_ = {};
+    chordRunwayRect_ = {};
+    if (chordPreviewVisible_) {
     const QPointF orbitCenter(
         width() * 0.50,
         (170.0 + static_cast<double>(previewTop)) / 2.0);
@@ -2066,18 +2102,18 @@ void PerformanceHomeWidget::paintEvent(QPaintEvent*)
 
     const QVector<QPair<QString, QString>> upcoming = upcomingChords(position);
     const int runwayWidth = qMin(430, width() / 3);
-    const QRect runway(
+    chordRunwayRect_ = QRect(
         static_cast<int>(orbitCenter.x() + orbitRadius * 0.86),
         static_cast<int>(orbitCenter.y() - 46),
         runwayWidth,
         92);
-    const int chordCellWidth = runway.width() / 3;
+    const int chordCellWidth = chordRunwayRect_.width() / 3;
     for (int index = 0; index < 3; ++index) {
         const QRect cell(
-            runway.left() + index * chordCellWidth,
-            runway.top(),
+            chordRunwayRect_.left() + index * chordCellWidth,
+            chordRunwayRect_.top(),
             chordCellWidth - 8,
-            runway.height());
+            chordRunwayRect_.height());
         painter.setPen(QPen(QColor(129, 99, 151, 150), 1));
         painter.setBrush(QColor(13, 12, 28, 190));
         painter.drawRoundedRect(cell, 8, 8);
@@ -2104,6 +2140,8 @@ void PerformanceHomeWidget::paintEvent(QPaintEvent*)
             index < upcoming.size() ? upcoming.at(index).second : QString{});
     }
 
+    }
+
     jamRecordingHitRect_ = QRect(margin, 118, 132, 48);
     paintJamRecordingButton(painter, jamRecordingHitRect_);
     peerRailRect_ = QRect(
@@ -2113,12 +2151,16 @@ void PerformanceHomeWidget::paintEvent(QPaintEvent*)
         48);
     paintPeerRail(painter, peerRailRect_);
 
-    currentBeatHitRect_ = QRect(margin, previewTop, previewWidth, previewHeight);
-    nextBeatHitRect_ = QRect(
-        margin + previewWidth + previewGap,
-        previewTop,
-        previewWidth,
-        previewHeight);
+    currentBeatHitRect_ = beatPreviewVisible_
+        ? QRect(margin, previewTop, previewWidth, previewHeight)
+        : QRect{};
+    nextBeatHitRect_ = beatPreviewVisible_
+        ? QRect(
+            margin + previewWidth + previewGap,
+            previewTop,
+            previewWidth,
+            previewHeight)
+        : QRect{};
     const quint64 currentBarStart =
         position.totalBeats > 0
         ? position.songBeat -
@@ -2131,18 +2173,20 @@ void PerformanceHomeWidget::paintEvent(QPaintEvent*)
     const bool nextBarUsesPendingBank = pendingBank_ >= 0 &&
         pendingBankBeatsRemaining_ > 0 &&
         pendingBankBeatsRemaining_ <= beatsToNextBar;
-    paintBeatPreview(
-        painter, currentBeatHitRect_, liveBank_, beatsPerBar_, currentBarStart, true);
-    paintBeatPreview(
-        painter,
-        nextBeatHitRect_,
-        nextBarUsesPendingBank ? pendingBank_ : liveBank_,
-        nextBarUsesPendingBank ? pendingBankBeatsPerBar_ : beatsPerBar_,
-        nextBarUsesPendingBank ? 0 : position.totalBeats > 0
-            ? (currentBarStart + static_cast<quint64>(beatsPerBar_)) %
-                position.totalBeats
-            : 0,
-        false);
+    if (beatPreviewVisible_) {
+        paintBeatPreview(
+            painter, currentBeatHitRect_, liveBank_, beatsPerBar_, currentBarStart, true);
+        paintBeatPreview(
+            painter,
+            nextBeatHitRect_,
+            nextBarUsesPendingBank ? pendingBank_ : liveBank_,
+            nextBarUsesPendingBank ? pendingBankBeatsPerBar_ : beatsPerBar_,
+            nextBarUsesPendingBank ? 0 : position.totalBeats > 0
+                ? (currentBarStart + static_cast<quint64>(beatsPerBar_)) %
+                    position.totalBeats
+                : 0,
+            false);
+    }
 
     const qint64 elapsed = paintClock.nsecsElapsed();
     ++renderedFrames_;
@@ -2369,6 +2413,7 @@ void PerformanceHomeWidget::paintGenerationActions(
     constexpr int wavWidth = 116;
     constexpr int clearWidth = 96;
     constexpr int continueWidth = 124;
+    constexpr int browseWidth = 132;
     constexpr int ideaWidth = 154;
     generateWavHitRect_ = QRect(right - wavWidth, top, wavWidth, height);
     clearIdeaHitRect_ = QRect(
@@ -2381,8 +2426,13 @@ void PerformanceHomeWidget::paintGenerationActions(
         top,
         continueWidth,
         height);
+    browseIdeasHitRect_ = QRect(
+        continueIdeaHitRect_.left() - gap - browseWidth,
+        top,
+        browseWidth,
+        height);
     generateIdeaHitRect_ = QRect(
-        continueIdeaHitRect_.left() - gap - ideaWidth,
+        browseIdeasHitRect_.left() - gap - ideaWidth,
         top,
         ideaWidth,
         height);
@@ -2412,6 +2462,11 @@ void PerformanceHomeWidget::paintGenerationActions(
         QStringLiteral("GENERATE NEW IDEA"),
         gold(),
         QColor(35, 27, 20, 232));
+    drawAction(
+        browseIdeasHitRect_,
+        QStringLiteral("GROOVE LIBRARY"),
+        QColor(159, 181, 111),
+        QColor(28, 36, 21, 232));
     drawAction(
         continueIdeaHitRect_,
         QStringLiteral("CONTINUE IDEA"),
@@ -2992,6 +3047,10 @@ void PerformanceHomeWidget::mousePressEvent(QMouseEvent* event)
     }
     if (generateIdeaHitRect_.contains(point)) {
         if (onGenerateIdea) onGenerateIdea();
+        return;
+    }
+    if (browseIdeasHitRect_.contains(point)) {
+        if (onBrowseIdeas) onBrowseIdeas();
         return;
     }
     if (continueIdeaHitRect_.contains(point)) {

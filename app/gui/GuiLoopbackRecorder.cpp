@@ -312,13 +312,17 @@ std::vector<std::int16_t> jam2::gui::trim_loopback_silence_pcm16(
     return input;
 }
 
-std::vector<std::int16_t> jam2::gui::resample_pcm16_mono(
+std::vector<std::int16_t> jam2::gui::resample_pcm16_interleaved(
     std::span<const std::int16_t> input,
+    int channels,
     int sourceSampleRate,
     int targetSampleRate)
 {
-    if (sourceSampleRate <= 0 || targetSampleRate <= 0) {
-        throw std::invalid_argument("sample rates must be positive");
+    if (channels <= 0 || sourceSampleRate <= 0 || targetSampleRate <= 0) {
+        throw std::invalid_argument("channel count and sample rates must be positive");
+    }
+    if (input.size() % static_cast<std::size_t>(channels) != 0) {
+        throw std::invalid_argument("interleaved PCM16 input is not frame aligned");
     }
     if (input.empty()) {
         return {};
@@ -327,12 +331,14 @@ std::vector<std::int16_t> jam2::gui::resample_pcm16_mono(
         return {input.begin(), input.end()};
     }
 
+    const std::size_t inputFrames = input.size() / static_cast<std::size_t>(channels);
     const long double exactOutputFrames =
-        static_cast<long double>(input.size()) *
+        static_cast<long double>(inputFrames) *
         static_cast<long double>(targetSampleRate) /
         static_cast<long double>(sourceSampleRate);
     const long double maximumOutputFrames = std::min(
-        static_cast<long double>((std::numeric_limits<std::size_t>::max)()),
+        static_cast<long double>((std::numeric_limits<std::size_t>::max)() /
+            static_cast<std::size_t>(channels)),
         static_cast<long double>((std::numeric_limits<long long>::max)()));
     if (!std::isfinite(exactOutputFrames) ||
         exactOutputFrames > maximumOutputFrames) {
@@ -341,7 +347,8 @@ std::vector<std::int16_t> jam2::gui::resample_pcm16_mono(
     const std::size_t outputFrames = std::max<std::size_t>(
         1,
         static_cast<std::size_t>(std::llround(exactOutputFrames)));
-    std::vector<std::int16_t> output(outputFrames);
+    std::vector<std::int16_t> output(
+        outputFrames * static_cast<std::size_t>(channels));
 
     constexpr int kHalfTaps = 16;
     constexpr int kTapCount = kHalfTaps * 2;
@@ -398,30 +405,46 @@ std::vector<std::int16_t> jam2::gui::resample_pcm16_mono(
             phase = 0;
             ++centre;
         }
-        double weightedSample = 0.0;
-        double weightSum = 0.0;
-        for (int tapIndex = 0; tapIndex < kTapCount; ++tapIndex) {
-            const int tap = tapIndex - kHalfTaps + 1;
-            const std::int64_t sourceIndex = centre + tap;
-            if (sourceIndex < 0 ||
-                sourceIndex >= static_cast<std::int64_t>(input.size())) {
-                continue;
+        for (int channel = 0; channel < channels; ++channel) {
+            double weightedSample = 0.0;
+            double weightSum = 0.0;
+            for (int tapIndex = 0; tapIndex < kTapCount; ++tapIndex) {
+                const int tap = tapIndex - kHalfTaps + 1;
+                const std::int64_t sourceIndex = centre + tap;
+                if (sourceIndex < 0 ||
+                    sourceIndex >= static_cast<std::int64_t>(inputFrames)) {
+                    continue;
+                }
+                const double weight = kernels[
+                    static_cast<std::size_t>(phase) * kTapCount +
+                    static_cast<std::size_t>(tapIndex)];
+                const std::size_t sampleIndex =
+                    static_cast<std::size_t>(sourceIndex) *
+                    static_cast<std::size_t>(channels) +
+                    static_cast<std::size_t>(channel);
+                weightedSample += static_cast<double>(input[sampleIndex]) * weight;
+                weightSum += weight;
             }
-            const double weight = kernels[
-                static_cast<std::size_t>(phase) * kTapCount +
-                static_cast<std::size_t>(tapIndex)];
-            weightedSample +=
-                static_cast<double>(input[static_cast<std::size_t>(sourceIndex)]) *
-                weight;
-            weightSum += weight;
+            const double sample = std::abs(weightSum) > 1.0e-12
+                ? weightedSample / weightSum
+                : 0.0;
+            output[
+                outputIndex * static_cast<std::size_t>(channels) +
+                static_cast<std::size_t>(channel)] =
+                static_cast<std::int16_t>(std::lrint(
+                    std::clamp(sample, -32768.0, 32767.0)));
         }
-        const double sample = std::abs(weightSum) > 1.0e-12
-            ? weightedSample / weightSum
-            : 0.0;
-        output[outputIndex] = static_cast<std::int16_t>(std::lrint(
-            std::clamp(sample, -32768.0, 32767.0)));
     }
     return output;
+}
+
+std::vector<std::int16_t> jam2::gui::resample_pcm16_mono(
+    std::span<const std::int16_t> input,
+    int sourceSampleRate,
+    int targetSampleRate)
+{
+    return resample_pcm16_interleaved(
+        input, 1, sourceSampleRate, targetSampleRate);
 }
 
 GuiLoopbackRecorder::GuiLoopbackRecorder() = default;

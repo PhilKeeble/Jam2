@@ -8,6 +8,7 @@
 #include <functional>
 
 class QResizeEvent;
+class QCheckBox;
 class QPushButton;
 class QLabel;
 class QComboBox;
@@ -85,6 +86,8 @@ public:
         bool arrangementActive,
         bool arrangementArmed);
     void setEditingProtected(bool protectedState);
+    void setFocusCurrentBar(bool enabled);
+    void toggleFocusCurrentBar();
     void applyRemoteCell(int section, const QString& lane, int beat, const QString& text);
 
     std::function<void(int, const QString&, int, const QString&, int)> onCellEdited;
@@ -122,8 +125,9 @@ private:
     jam2::gui::ChordDetailGroup currentChordDetailGroup(
         const SongSection& section) const;
     void scheduleResponsiveChordRebuild();
-    void setOverviewPage(int page, bool pinToPage);
+    void setOverviewPage(int page);
     void updateOverviewPagination();
+    void focusLivePosition(int liveBar, int liveBeat, int beats);
 
     BeatGridModel ownedModel_;
     BeatGridModel* model_ = nullptr;
@@ -140,6 +144,8 @@ private:
     QPushButton* expandButton_ = nullptr;
     QPushButton* shrinkButton_ = nullptr;
     QWidget* overviewPagination_ = nullptr;
+    QWidget* overviewPageControls_ = nullptr;
+    QCheckBox* focusCurrentBarCheck_ = nullptr;
     QLabel* overviewPageLabel_ = nullptr;
     QToolButton* overviewFirstButton_ = nullptr;
     QToolButton* overviewPreviousButton_ = nullptr;
@@ -168,7 +174,7 @@ private:
     int visibleChordGroupStart_ = 0;
     int visibleChordGroupCount_ = 1;
     int overviewPage_ = 0;
-    bool overviewPagePinned_ = false;
+    bool focusCurrentBar_ = false;
     bool responsiveChordRebuildPending_ = false;
     QWidget* editingBlocker_ = nullptr;
 };

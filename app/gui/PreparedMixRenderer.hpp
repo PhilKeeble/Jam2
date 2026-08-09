@@ -9,6 +9,11 @@
 
 #include <cstdint>
 
+// Applied to every prepared backing-track mix before its final soft limiting.
+// Preview paths that audition a rendered lane directly use the same gain so
+// their level remains representative of normal prepared-track playback.
+inline constexpr double kPreparedMixMasterPreGain = 0.72;
+
 struct PreparedMixResult {
     int bankIndex = 0;
     QString path;
@@ -17,7 +22,7 @@ struct PreparedMixResult {
     qint64 fileBytes = 0;
     int sampleRate = 0;
     int durationMs = 0;
-    double masterPreGain = 0.72;
+    double masterPreGain = kPreparedMixMasterPreGain;
     float preMasterPeak = 0.0f;
     float outputPeak = 0.0f;
     qint64 overUnitySamples = 0;

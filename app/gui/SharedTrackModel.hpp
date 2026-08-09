@@ -16,7 +16,7 @@ struct SharedTrackModel {
     QString key = QStringLiteral("Unknown");
     double speed = 1.0;
     int pitchCents = 0;
-    double trackGainDb = -10.0;
+    double trackGainDb = -3.0;
     bool loopEnabled = true;
     double loopStartSeconds = -1.0;
     double loopEndSeconds = -1.0;
