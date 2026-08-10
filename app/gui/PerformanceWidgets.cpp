@@ -1012,8 +1012,9 @@ void PerformanceHomeWidget::setBankState(
     bool localOnly,
     const QString& status)
 {
-    const int boundedLiveBank = qBound(0, liveBank, 3);
-    const int boundedPendingBank = pendingBank >= 0 && pendingBank < 4
+    const int bankCount = model_ ? qMax(1, model_->sections().size()) : 4;
+    const int boundedLiveBank = qBound(0, liveBank, bankCount - 1);
+    const int boundedPendingBank = pendingBank >= 0 && pendingBank < bankCount
         ? pendingBank
         : -1;
     const quint64 boundedBeatsUntilSwitch = boundedPendingBank >= 0
@@ -2657,9 +2658,11 @@ void PerformanceHomeWidget::paintBankStrip(QPainter& painter, int left, int top)
     painter.setPen(QColor(156, 169, 171));
     painter.drawText(QRect(left, top, 56, 24), Qt::AlignVCenter, QStringLiteral("SECTION"));
     int x = left + 60;
-    for (int bank = 0; bank < 4; ++bank) {
+    const int bankCount = model_ ? model_->sections().size() : 4;
+    bankHitRects_.fill(QRect{}, bankCount);
+    for (int bank = 0; bank < bankCount; ++bank) {
         const QRect cell(x, top, 28, 24);
-        bankHitRects_[static_cast<std::size_t>(bank)] = cell;
+        bankHitRects_[bank] = cell;
         const bool live = bank == liveBank_;
         const bool next = bank == pendingBank_;
         painter.setPen(QPen(next ? QColor(232, 164, 74)
@@ -2672,6 +2675,18 @@ void PerformanceHomeWidget::paintBankStrip(QPainter& painter, int left, int top)
             QString(QChar(QLatin1Char('A').unicode() + bank)));
         x += 32;
     }
+    removeSectionHitRect_ = QRect(x + 2, top, 24, 24);
+    addSectionHitRect_ = QRect(removeSectionHitRect_.right() + 4, top, 24, 24);
+    for (const auto& control : {
+            qMakePair(removeSectionHitRect_, QStringLiteral("\u2212")),
+            qMakePair(addSectionHitRect_, QStringLiteral("+"))}) {
+        painter.setPen(QPen(QColor(78, 94, 98), 1));
+        painter.setBrush(QColor(7, 11, 12, 220));
+        painter.drawRoundedRect(control.first, 3, 3);
+        painter.setPen(QColor(196, 202, 194));
+        painter.drawText(control.first, Qt::AlignCenter, control.second);
+    }
+    x = addSectionHitRect_.right() + 4;
     arrangementHitRect_ = QRect(x + 4, top, 82, 24);
     const bool arrangementActive = arrangementRunning_ || arrangementArmed_;
     painter.setPen(QPen(arrangementActive
@@ -3069,12 +3084,20 @@ void PerformanceHomeWidget::mousePressEvent(QMouseEvent* event)
         if (onManageArrangement) onManageArrangement();
         return;
     }
+    if (removeSectionHitRect_.contains(point)) {
+        if (onRemoveSection) onRemoveSection();
+        return;
+    }
+    if (addSectionHitRect_.contains(point)) {
+        if (onAddSection) onAddSection();
+        return;
+    }
     if (jamRecordingHitRect_.contains(point)) {
         if (jamRecordingEnabled_ && onJamRecordingToggle) onJamRecordingToggle();
         return;
     }
-    for (int bank = 0; bank < static_cast<int>(bankHitRects_.size()); ++bank) {
-        if (bankHitRects_[static_cast<std::size_t>(bank)].contains(point)) {
+    for (int bank = 0; bank < bankHitRects_.size(); ++bank) {
+        if (bankHitRects_[bank].contains(point)) {
             if (onBankLaunch) onBankLaunch(bank);
             return;
         }

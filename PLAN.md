@@ -26,6 +26,8 @@ back on the menu, test in lab to see how accurate it is ?
 
 Looks like maybe not worth the effort? 
 
+Add sections so taht it can split it into the relevant sections??
+
 ## Guitar Pro Import
 
 Import midi files for songs? 

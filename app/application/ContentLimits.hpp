@@ -9,14 +9,16 @@ namespace jam2::application::limits {
 inline constexpr int kMinimumSampleRate = jam2::limits::kMinimumSampleRate;
 inline constexpr int kMaximumSampleRate = jam2::limits::kMaximumSampleRate;
 
-inline constexpr int kMaximumSongSections = 4;
+inline constexpr int kMinimumSongSections = 4;
+inline constexpr int kMaximumSongSections = 12;
 inline constexpr int kMinimumBeatsPerSection = 4;
 inline constexpr int kMaximumBeatsPerSection = 512;
 inline constexpr int kMaximumBeatLanes = 10;
 inline constexpr int kMaximumCellCharacters = 4096;
 inline constexpr int kMaximumTitleCharacters = 512;
 
-inline constexpr int kLooperBankCount = 4;
+inline constexpr int kMinimumLooperBankCount = kMinimumSongSections;
+inline constexpr int kMaximumLooperBankCount = kMaximumSongSections;
 inline constexpr int kMaximumLooperLanesPerBank = 128;
 inline constexpr int kMaximumLooperIdCharacters = 80;
 inline constexpr int kMaximumLooperNameCharacters = 512;

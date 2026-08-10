@@ -136,6 +136,46 @@ std::uint64_t jam2::gui::next_safe_grid_beat_raw_frame(
     return target;
 }
 
+std::uint64_t jam2::gui::synced_recording_countdown_beat(
+    const PlaybackGrid::Position& position,
+    int beatsPerBar) noexcept
+{
+    if (!position.engineAnchored || !position.running ||
+        position.sampleRate <= 0 || position.secondsPerBeat <= 0.0) {
+        return 0;
+    }
+    const std::uint64_t beats = static_cast<std::uint64_t>(qMax(1, beatsPerBar));
+    const std::uint64_t currentBar = position.absoluteBeat / beats;
+    if (currentBar == (std::numeric_limits<std::uint64_t>::max)() ||
+        currentBar + 1ULL > (std::numeric_limits<std::uint64_t>::max)() / beats) {
+        return 0;
+    }
+    std::uint64_t countdownBeat = (currentBar + 1ULL) * beats;
+    const std::uint64_t beatFrames = static_cast<std::uint64_t>(std::llround(
+        position.secondsPerBeat * static_cast<double>(position.sampleRate)));
+    if (beatFrames == 0 || countdownBeat >
+        ((std::numeric_limits<std::uint64_t>::max)() - position.epochFrame) / beatFrames) {
+        return 0;
+    }
+    const std::uint64_t countdownRawFrame = rawFrameFromMusicalFrame(
+        position.epochFrame + countdownBeat * beatFrames,
+        position.renderOffsetFrames);
+    const std::uint64_t minimumLeadFrames = static_cast<std::uint64_t>(
+        qMax(1, position.sampleRate) / 5);
+    const std::uint64_t minimumCountdownRawFrame =
+        position.rawCurrentFrame >
+            (std::numeric_limits<std::uint64_t>::max)() - minimumLeadFrames
+        ? (std::numeric_limits<std::uint64_t>::max)()
+        : position.rawCurrentFrame + minimumLeadFrames;
+    if (countdownRawFrame < minimumCountdownRawFrame) {
+        if (countdownBeat > (std::numeric_limits<std::uint64_t>::max)() - beats) {
+            return 0;
+        }
+        countdownBeat += beats;
+    }
+    return countdownBeat;
+}
+
 bool jam2::gui::prepared_attach_has_applied(
     std::uint64_t pendingTargetFrame,
     std::uint64_t engineFrame,
@@ -792,6 +832,9 @@ TrackRecordingWorkflow::TrackTakeCompletion TrackRecordingWorkflow::consumeTrack
 {
     TrackTakeCompletion completion;
     if (event.type != jam2::EngineEventType::TrackTakeCompleted) {
+        return completion;
+    }
+    if (!input_take_active_ || active_take_id_.isEmpty()) {
         return completion;
     }
     completion.handled = true;

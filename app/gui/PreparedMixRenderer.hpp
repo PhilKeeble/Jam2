@@ -45,7 +45,8 @@ public:
     static QString outputPath(
         const QString& workspaceFolder,
         int bankIndex,
-        std::uint64_t generation);
+        std::uint64_t generation,
+        qint64 processId);
 
     // PCM16 WAV only. Rendering is caller-thread/offline work and never runs
     // in an audio callback.

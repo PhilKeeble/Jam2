@@ -245,11 +245,15 @@ bool TrackTakeRecorder::stop_at(std::uint64_t frame, std::string& error)
 
 void TrackTakeRecorder::cancel() noexcept
 {
-    armed_.store(false, std::memory_order_release);
-    recording_.store(false, std::memory_order_release);
+    const bool was_armed = armed_.exchange(false, std::memory_order_acq_rel);
+    const bool was_recording = recording_.exchange(false, std::memory_order_acq_rel);
+    const bool had_active_take = was_armed || was_recording ||
+        start_requested_.load(std::memory_order_acquire) || writer_thread_.joinable();
     canceled_.store(true, std::memory_order_release);
     finalized_.store(true, std::memory_order_release);
-    completion_pending_.store(true, std::memory_order_release);
+    if (had_active_take) {
+        completion_pending_.store(true, std::memory_order_release);
+    }
     writer_stop_.store(true, std::memory_order_release);
 }
 

@@ -15,6 +15,7 @@ constexpr int kDefaultBeatDivision = 4;
 constexpr int kCurrentBeatLaneSchema = 3;
 constexpr int kMinBeatsPerSection = jam2::application::limits::kMinimumBeatsPerSection;
 constexpr int kMaxBeatsPerSection = jam2::application::limits::kMaximumBeatsPerSection;
+constexpr int kMinSections = jam2::application::limits::kMinimumSongSections;
 constexpr int kMaxSections = jam2::application::limits::kMaximumSongSections;
 constexpr int kMaxCellCharacters = jam2::application::limits::kMaximumCellCharacters;
 constexpr int kMaxTitleCharacters = jam2::application::limits::kMaximumTitleCharacters;
@@ -22,7 +23,7 @@ constexpr int kMaxTitleCharacters = jam2::application::limits::kMaximumTitleChar
 SongSection defaultSection(int index, int beats = 32)
 {
     SongSection section;
-    section.label = QString(QChar(QLatin1Char('A').unicode() + qBound(0, index, 3)));
+    section.label = QString(QChar(QLatin1Char('A').unicode() + qBound(0, index, kMaxSections - 1)));
     section.name = QStringLiteral("Section %1").arg(section.label);
     section.beats = beats;
     return section;
@@ -240,7 +241,7 @@ const SongSection& BeatGridModel::section(int index) const
 
 bool BeatGridModel::hasOnlyPristineSection() const
 {
-    if (sections_.size() != kMaxSections) {
+    if (sections_.size() != kMinSections) {
         return false;
     }
     const auto allEmpty = [](const QVector<QString>& values) {
@@ -440,7 +441,7 @@ void BeatGridModel::addSection(int beats)
     }
     SongSection section;
     section.label = QString(QChar(static_cast<ushort>('A' + (sections_.size() % 26))));
-    section.name = QStringLiteral("Section");
+    section.name = QStringLiteral("Section %1").arg(section.label);
     section.beats = beats > 0 ? beats : (sections_.isEmpty() ? 32 : sections_.back().beats);
     normalize(section);
     sections_.push_back(section);
@@ -463,7 +464,7 @@ void BeatGridModel::duplicateSection(int index)
 
 void BeatGridModel::deleteSection(int index)
 {
-    if (sections_.size() <= 1 || index < 0 || index >= sections_.size()) {
+    if (sections_.size() <= kMinSections || index < 0 || index >= sections_.size()) {
         return;
     }
     sections_.removeAt(index);
@@ -574,7 +575,7 @@ int BeatGridModel::replaceGeneratedSection(const QString& kind, SongSection sect
 void BeatGridModel::clearContent()
 {
     sections_.clear();
-    for (int index = 0; index < kMaxSections; ++index) {
+    for (int index = 0; index < kMinSections; ++index) {
         SongSection section = defaultSection(index);
         normalize(section);
         sections_.push_back(std::move(section));
@@ -588,7 +589,7 @@ void BeatGridModel::reset()
     guitarStringCount_ = 6;
     guitarDropTuning_ = false;
     sections_.clear();
-    for (int index = 0; index < kMaxSections; ++index) {
+    for (int index = 0; index < kMinSections; ++index) {
         SongSection section = defaultSection(index);
         normalize(section);
         sections_.push_back(std::move(section));
@@ -828,7 +829,7 @@ bool BeatGridModel::loadJson(const QJsonObject& object)
         loaded.push_back(section);
     }
     if (loaded.isEmpty()) return false;
-    while (loaded.size() < kMaxSections) {
+    while (loaded.size() < kMinSections) {
         SongSection section = defaultSection(loaded.size(), loaded.front().beats);
         normalize(section);
         loaded.push_back(std::move(section));

@@ -57,6 +57,7 @@ struct ArrangementStep {
 struct ArrangementDefinition {
     QVector<ArrangementStep> steps;
     bool loop = true;
+    bool enabled = false;
 };
 
 class LooperProject {
@@ -65,6 +66,8 @@ public:
 
     const QVector<LooperBank>& banks() const;
     QVector<LooperBank>& banks();
+    bool addBank();
+    bool removeLastBank();
     int activeBankIndex() const;
     void setActiveBankIndex(int index);
     bool gridLockEnabled() const;
@@ -76,6 +79,7 @@ public:
     bool hasSerializedTiming() const;
     const ArrangementDefinition& arrangement() const;
     bool setArrangement(ArrangementDefinition arrangement);
+    void setArrangementEnabled(bool enabled);
 
     // These are the only mutations the track UI and sync layer need.  Keeping
     // them here preserves the four-bank invariant and the lane order that is

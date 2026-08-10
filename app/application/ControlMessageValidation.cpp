@@ -58,7 +58,8 @@ bool isValidTrackOffer(const QJsonObject& track)
     qint64 loopStartFrame = -1;
     qint64 loopEndFrame = -1;
     return isUuid(track.value(QStringLiteral("recording_id")).toString()) &&
-        isBoundedInteger(track.value(QStringLiteral("bank")), 0, 3) &&
+        isBoundedInteger(track.value(QStringLiteral("bank")), 0,
+            limits::kMaximumLooperBankCount - 1) &&
         !targetLaneId.isEmpty() && targetLaneId.size() <= 80 &&
         isSha256Hex(hash) && isBoundedString(track.value(QStringLiteral("name")), 512) &&
         isBoundedInteger(track.value(QStringLiteral("sample_rate")),
@@ -274,14 +275,16 @@ bool validateRemoteLooper(const QJsonObject& looper, QString& reason)
 {
     const QJsonValue activeBank = looper.value(QStringLiteral("active_bank"));
     if ((!activeBank.isUndefined() &&
-         !isBoundedInteger(activeBank, 0, limits::kLooperBankCount - 1)) ||
+         !isBoundedInteger(activeBank, 0, limits::kMaximumLooperBankCount - 1)) ||
         !isOptionalBoolean(looper, QStringLiteral("grid_lock")) ||
         !looper.value(QStringLiteral("banks")).isArray()) {
         reason = QStringLiteral("song looper header is invalid");
         return false;
     }
     const QJsonArray banks = looper.value(QStringLiteral("banks")).toArray();
-    if (banks.size() != limits::kLooperBankCount) {
+    if (banks.size() < limits::kMinimumLooperBankCount ||
+        banks.size() > limits::kMaximumLooperBankCount ||
+        (!activeBank.isUndefined() && activeBank.toInt() >= banks.size())) {
         reason = QStringLiteral("song looper bank count is invalid");
         return false;
     }
@@ -381,7 +384,8 @@ bool validateRemoteLooper(const QJsonObject& looper, QString& reason)
         for (const QJsonValue& value : steps) {
             const QJsonObject step = value.toObject();
             if (!value.isObject() ||
-                !isBoundedInteger(step.value(QStringLiteral("bank")), 0, 3) ||
+                !isBoundedInteger(
+                    step.value(QStringLiteral("bank")), 0, banks.size() - 1) ||
                 !isBoundedInteger(step.value(QStringLiteral("repeats")), 1, 64)) {
                 reason = QStringLiteral("song arrangement step is invalid");
                 return false;
@@ -404,7 +408,14 @@ bool validateRemoteSong(const QJsonObject& song, QString& reason)
         reason = QStringLiteral("song looper field is not an object");
         return false;
     }
-    return looperValue.toObject().isEmpty() || validateRemoteLooper(looperValue.toObject(), reason);
+    if (looperValue.toObject().isEmpty()) return true;
+    if (!validateRemoteLooper(looperValue.toObject(), reason)) return false;
+    if (looperValue.toObject().value(QStringLiteral("banks")).toArray().size() !=
+        song.value(QStringLiteral("sections")).toArray().size()) {
+        reason = QStringLiteral("song section and looper bank counts differ");
+        return false;
+    }
+    return true;
 }
 
 }
@@ -557,7 +568,8 @@ bool jam2::application::validateControlMessage(
     }
     if (type == QStringLiteral("beat.set")) {
         const QString lane = message.value(QStringLiteral("lane")).toString();
-        return isBoundedInteger(message.value(QStringLiteral("section")), 0, 3) &&
+        return isBoundedInteger(message.value(QStringLiteral("section")), 0,
+            limits::kMaximumSongSections - 1) &&
             isBoundedInteger(message.value(QStringLiteral("beat")), 0, 511) &&
             (lane == QStringLiteral("chord") || lane == QStringLiteral("target") ||
              lane == QStringLiteral("beat") ||
@@ -568,12 +580,14 @@ bool jam2::application::validateControlMessage(
     if (type == QStringLiteral("grid.resize")) {
         const QString lane = message.value(QStringLiteral("lane")).toString();
         return (lane == QStringLiteral("chord") || lane == QStringLiteral("beat")) &&
-            isBoundedInteger(message.value(QStringLiteral("section")), 0, 3) &&
+            isBoundedInteger(message.value(QStringLiteral("section")), 0,
+                limits::kMaximumSongSections - 1) &&
             isBoundedInteger(message.value(QStringLiteral("beats")), 4, 512)
             ? true : (reason = QStringLiteral("grid resize is invalid"), false);
     }
     if (type == QStringLiteral("beat.hit")) {
-        return isBoundedInteger(message.value(QStringLiteral("section")), 0, 3) &&
+        return isBoundedInteger(message.value(QStringLiteral("section")), 0,
+            limits::kMaximumSongSections - 1) &&
             isBoundedInteger(message.value(QStringLiteral("beat")), 0, 511) &&
             isBoundedInteger(
                 message.value(QStringLiteral("lane")),
@@ -584,21 +598,24 @@ bool jam2::application::validateControlMessage(
     }
     if (type == QStringLiteral("beat.division")) {
         const int division = message.value(QStringLiteral("division")).toInt(-1);
-        return isBoundedInteger(message.value(QStringLiteral("section")), 0, 3) &&
+        return isBoundedInteger(message.value(QStringLiteral("section")), 0,
+            limits::kMaximumSongSections - 1) &&
             isBoundedInteger(message.value(QStringLiteral("beat")), 0, 511) &&
             QList<int>{1, 2, 3, 4, 6, 8}.contains(division)
             ? true : (reason = QStringLiteral("beat division is invalid"), false);
     }
     if (type == QStringLiteral("music.division")) {
         const int division = message.value(QStringLiteral("division")).toInt(-1);
-        return isBoundedInteger(message.value(QStringLiteral("section")), 0, 3) &&
+        return isBoundedInteger(message.value(QStringLiteral("section")), 0,
+            limits::kMaximumSongSections - 1) &&
             isBoundedInteger(message.value(QStringLiteral("beat")), 0, 511) &&
             QList<int>{1, 2, 4, 3}.contains(division)
             ? true : (reason = QStringLiteral("musical division is invalid"), false);
     }
     if (type == QStringLiteral("music.step")) {
         const QString lane = message.value(QStringLiteral("lane")).toString();
-        return isBoundedInteger(message.value(QStringLiteral("section")), 0, 3) &&
+        return isBoundedInteger(message.value(QStringLiteral("section")), 0,
+            limits::kMaximumSongSections - 1) &&
             isBoundedInteger(message.value(QStringLiteral("beat")), 0, 511) &&
             isBoundedInteger(message.value(QStringLiteral("step")), 0, 3) &&
             (lane == QStringLiteral("chord") || lane == QStringLiteral("melody") ||
@@ -657,13 +674,15 @@ bool jam2::application::validateControlMessage(
             ? true : (reason = QStringLiteral("reference render request is invalid"), false);
     }
     if (type == QStringLiteral("bank.request")) {
-        return isBoundedInteger(message.value(QStringLiteral("bank")), 0, 3)
+        return isBoundedInteger(message.value(QStringLiteral("bank")), 0,
+            limits::kMaximumLooperBankCount - 1)
             ? true : (reason = QStringLiteral("bank transition is invalid"), false);
     }
     if (type == QStringLiteral("bank.prepare") ||
         type == QStringLiteral("bank.ready") ||
         type == QStringLiteral("bank.cancel")) {
-        return isBoundedInteger(message.value(QStringLiteral("bank")), 0, 3) &&
+        return isBoundedInteger(message.value(QStringLiteral("bank")), 0,
+            limits::kMaximumLooperBankCount - 1) &&
             isUuid(message.value(QStringLiteral("switch_id")).toString())
             ? true : (reason = QStringLiteral("bank preparation is invalid"), false);
     }
@@ -671,7 +690,8 @@ bool jam2::application::validateControlMessage(
         bool targetOk = false;
         const quint64 targetBeat = message.value(QStringLiteral("target_abs_beat"))
             .toString().toULongLong(&targetOk);
-        return isBoundedInteger(message.value(QStringLiteral("bank")), 0, 3) &&
+        return isBoundedInteger(message.value(QStringLiteral("bank")), 0,
+            limits::kMaximumLooperBankCount - 1) &&
             isUuid(message.value(QStringLiteral("switch_id")).toString()) &&
             targetOk && targetBeat <= (std::numeric_limits<qint64>::max)()
             ? true : (reason = QStringLiteral("bank transition is invalid"), false);
@@ -685,7 +705,7 @@ bool jam2::application::validateControlMessage(
         const QJsonArray tracks = tracksValue.toArray();
         if (!isUuid(message.value(QStringLiteral("batch_id")).toString()) ||
             !tracksValue.isArray() ||
-            tracks.size() > limits::kLooperBankCount * limits::kMaximumLooperLanesPerBank) {
+            tracks.size() > limits::kMaximumLooperBankCount * limits::kMaximumLooperLanesPerBank) {
             reason = QStringLiteral("track batch manifest is invalid");
             return false;
         }
@@ -706,7 +726,7 @@ bool jam2::application::validateControlMessage(
     if (type == QStringLiteral("looper.track.batch.complete")) {
         return isUuid(message.value(QStringLiteral("batch_id")).toString()) &&
             isBoundedInteger(message.value(QStringLiteral("tracks")), 0,
-                limits::kLooperBankCount * limits::kMaximumLooperLanesPerBank)
+                limits::kMaximumLooperBankCount * limits::kMaximumLooperLanesPerBank)
             ? true : (reason = QStringLiteral("track batch completion is invalid"), false);
     }
     if (type == QStringLiteral("looper.recording.state")) {
@@ -726,7 +746,8 @@ bool jam2::application::validateControlMessage(
         return validPhase &&
             isBoundedInteger(message.value(QStringLiteral("state_revision")),
                 0, (std::numeric_limits<int>::max)()) &&
-            isBoundedInteger(message.value(QStringLiteral("bank")), 0, 3) &&
+            isBoundedInteger(message.value(QStringLiteral("bank")), 0,
+                limits::kMaximumLooperBankCount - 1) &&
             isBoundedString(message.value(QStringLiteral("lane_id")),
                 limits::kMaximumLooperIdCharacters) &&
             (!laneRequired || !laneId.isEmpty()) &&
@@ -783,7 +804,8 @@ bool jam2::application::validateControlMessage(
     }
     if (type == QStringLiteral("looper.recording.resync.state")) {
         return message.value(QStringLiteral("track_playing")).isBool() &&
-            isBoundedInteger(message.value(QStringLiteral("active_bank")), 0, 3)
+            isBoundedInteger(message.value(QStringLiteral("active_bank")), 0,
+                limits::kMaximumLooperBankCount - 1)
             ? true : (reason = QStringLiteral("recording resync state is invalid"), false);
     }
     if (type == QStringLiteral("looper.asset.request")) {

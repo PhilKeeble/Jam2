@@ -145,11 +145,13 @@ bool PreparedMixRenderer::hasRenderableSources(const LooperProject& project, int
 QString PreparedMixRenderer::outputPath(
     const QString& workspaceFolder,
     int bankIndex,
-    std::uint64_t generation)
+    std::uint64_t generation,
+    qint64 processId)
 {
     return QDir(workspaceFolder).absoluteFilePath(
-        QStringLiteral("prepared/active-bank-%1-generation-%2.wav")
+        QStringLiteral("prepared/active-bank-%1-process-%2-generation-%3.wav")
             .arg(qMax(0, bankIndex))
+            .arg(qMax<qint64>(0, processId))
             .arg(generation));
 }
 
@@ -517,11 +519,11 @@ PreparedMixResult PreparedMixRenderer::renderSequence(
     } temporary;
     const QString temporaryToken =
         QUuid::createUuid().toString(QUuid::WithoutBraces);
-    std::array<QString, 4> renderedPaths;
-    std::array<bool, 4> renderedBanks{};
+    QVector<QString> renderedPaths(project.banks().size());
+    QVector<bool> renderedBanks(project.banks().size(), false);
     for (const PreparedMixSequenceSegment& segment : segments) {
         const int bank = segment.bankIndex;
-        if (renderedBanks[static_cast<std::size_t>(bank)] ||
+        if (renderedBanks[bank] ||
             !hasRenderableSources(project, bank)) {
             continue;
         }
@@ -546,8 +548,8 @@ PreparedMixResult PreparedMixRenderer::renderSequence(
             result.warnings.append(QStringLiteral("Section %1: %2")
                 .arg(QChar(QLatin1Char('A').unicode() + bank), warning));
         }
-        renderedBanks[static_cast<std::size_t>(bank)] = true;
-        renderedPaths[static_cast<std::size_t>(bank)] = bankPath;
+        renderedBanks[bank] = true;
+        renderedPaths[bank] = bankPath;
         result.preMasterPeak = qMax(result.preMasterPeak, bankResult.preMasterPeak);
         result.outputPeak = qMax(result.outputPeak, bankResult.outputPeak);
         result.overUnitySamples += bankResult.overUnitySamples;

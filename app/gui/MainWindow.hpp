@@ -207,6 +207,8 @@ private:
     void shrinkSectionOneBar(int bankIndex);
     void trimViewedSection();
     void updateSectionTrimControls();
+    void addSongSection();
+    void removeLastSongSection();
     void selectViewedBank(int bankIndex);
     void refreshBankPresentation();
     void requestBankLaunch(int bankIndex);
@@ -306,6 +308,9 @@ private:
         std::uint64_t targetMusicalFrame,
         int countInBars);
     void startLoopbackCapture();
+    bool scheduleLoopbackCountIn(int bars, bool stopMetronomeAtStart);
+    bool updateLoopbackCountIn(const PlaybackGrid::Position& position);
+    void cancelLoopbackCountIn();
     void stopInputCapture(std::uint64_t targetFrame);
     void loadTrackWaveform();
     void playTrack();
@@ -612,8 +617,10 @@ private:
     QPushButton* loadWavButton_ = nullptr;
     QPushButton* shareTracksButton_ = nullptr;
     QPushButton* startArmedLaneRecordingButton_ = nullptr;
-    std::array<QPushButton*, 4> looperBankButtons_{};
+    std::array<QPushButton*, 12> looperBankButtons_{};
     QVector<QPushButton*> bankViewButtons_;
+    QVector<QPushButton*> sectionAddButtons_;
+    QVector<QPushButton*> sectionRemoveButtons_;
     QVector<QPushButton*> sectionTrimButtons_;
     QPushButton* arrangementButton_ = nullptr;
     QPushButton* launchBankButton_ = nullptr;
@@ -668,6 +675,9 @@ private:
     TapTempoTracker tapTempoTracker_;
     QElapsedTimer tapTempoClock_;
     QElapsedTimer loopbackRecordingPreviewClock_;
+    std::uint64_t loopbackCountdownStartFrame_ = 0;
+    std::uint64_t loopbackRecordingStartFrame_ = 0;
+    bool stopMetronomeAtLoopbackStart_ = false;
     int selectedLooperLane_ = -1;
     struct PeerTrackRecordingState {
         QString phase;
@@ -726,7 +736,7 @@ private:
     int arrangementStepIndex_ = 0;
     int arrangementStepRepeat_ = 0;
     quint64 arrangementSectionStartBeat_ = 0;
-    std::array<PreparedMixResult, 4> preparedMixByBank_{};
+    std::array<PreparedMixResult, 12> preparedMixByBank_{};
     bool referenceWavGenerationRunning_ = false;
     QSet<QString> handledReferenceRenderRequests_;
     QMap<QString, QPair<QJsonObject, QString>> deferredReferenceRenderRequests_;

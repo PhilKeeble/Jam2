@@ -30,6 +30,10 @@ std::uint64_t global_transport_elapsed_frames(
 std::uint64_t next_safe_grid_beat_raw_frame(
     const PlaybackGrid::Position& position) noexcept;
 
+std::uint64_t synced_recording_countdown_beat(
+    const PlaybackGrid::Position& position,
+    int beatsPerBar) noexcept;
+
 bool prepared_attach_has_applied(
     std::uint64_t pendingTargetFrame,
     std::uint64_t engineFrame,

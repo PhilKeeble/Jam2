@@ -11,7 +11,8 @@
 #include <limits>
 
 namespace {
-constexpr int kBankCount = jam2::application::limits::kLooperBankCount;
+constexpr int kMinBankCount = jam2::application::limits::kMinimumLooperBankCount;
+constexpr int kMaxBankCount = jam2::application::limits::kMaximumLooperBankCount;
 constexpr int kMaxLanesPerBank = jam2::application::limits::kMaximumLooperLanesPerBank;
 constexpr int kMaxIdCharacters = jam2::application::limits::kMaximumLooperIdCharacters;
 constexpr int kMaxNameCharacters = jam2::application::limits::kMaximumLooperNameCharacters;
@@ -116,17 +117,37 @@ LooperBankTiming sanitizedTiming(LooperBankTiming timing, bool allowInheritance)
 
 LooperProject::LooperProject()
 {
-    int index = 0;
-    for (const QChar bank : {QLatin1Char('A'), QLatin1Char('B'), QLatin1Char('C'), QLatin1Char('D')}) {
+    for (int index = 0; index < kMinBankCount; ++index) {
         LooperBankTiming timing;
         timing.inheritsBankA = index > 0;
-        banks_.append(LooperBank{QString(bank), {}, timing});
-        ++index;
+        banks_.append(LooperBank{
+            QString(QChar(QLatin1Char('A').unicode() + index)), {}, timing});
     }
 }
 
 const QVector<LooperBank>& LooperProject::banks() const { return banks_; }
 QVector<LooperBank>& LooperProject::banks() { return banks_; }
+bool LooperProject::addBank()
+{
+    if (banks_.size() >= kMaxBankCount) return false;
+    const int index = banks_.size();
+    LooperBankTiming timing;
+    timing.inheritsBankA = index > 0;
+    banks_.append(LooperBank{
+        QString(QChar(QLatin1Char('A').unicode() + index)), {}, timing});
+    return true;
+}
+bool LooperProject::removeLastBank()
+{
+    if (banks_.size() <= kMinBankCount) return false;
+    const int removed = banks_.size() - 1;
+    for (const ArrangementStep& step : arrangement_.steps) {
+        if (step.bankIndex == removed) return false;
+    }
+    banks_.removeLast();
+    setActiveBankIndex(activeBankIndex_);
+    return true;
+}
 int LooperProject::activeBankIndex() const { return activeBankIndex_; }
 void LooperProject::setActiveBankIndex(int index) { activeBankIndex_ = qBound(0, index, banks_.size() - 1); }
 bool LooperProject::gridLockEnabled() const { return gridLockEnabled_; }
@@ -156,11 +177,15 @@ bool LooperProject::setArrangement(ArrangementDefinition arrangement)
 {
     if (arrangement.steps.size() > 64) return false;
     for (const ArrangementStep& step : arrangement.steps) {
-        if (step.bankIndex < 0 || step.bankIndex >= kBankCount ||
+        if (step.bankIndex < 0 || step.bankIndex >= banks_.size() ||
             step.repeats < 1 || step.repeats > 64) return false;
     }
     arrangement_ = std::move(arrangement);
     return true;
+}
+void LooperProject::setArrangementEnabled(bool enabled)
+{
+    arrangement_.enabled = enabled;
 }
 bool LooperProject::appendLane(int bankIndex, LooperLane lane)
 {
@@ -286,19 +311,22 @@ QJsonObject LooperProject::toJson(bool syncCompatibleOnly) const
             {QStringLiteral("repeats"), step.repeats},
         });
     }
+    QJsonObject arrangementObject{
+        {QStringLiteral("version"), 1},
+        {QStringLiteral("loop"), arrangement_.loop},
+        {QStringLiteral("steps"), arrangementSteps},
+    };
+    if (!syncCompatibleOnly) {
+        arrangementObject.insert(QStringLiteral("enabled"), arrangement_.enabled);
+    }
     return QJsonObject{{"active_bank", activeBankIndex_}, {"grid_lock", gridLockEnabled_},
-        {"banks", banks},
-        {"arrangement", QJsonObject{
-            {QStringLiteral("version"), 1},
-            {QStringLiteral("loop"), arrangement_.loop},
-            {QStringLiteral("steps"), arrangementSteps},
-        }}};
+        {"banks", banks}, {"arrangement", arrangementObject}};
 }
 
 bool LooperProject::loadJson(const QJsonObject& object)
 {
     const QJsonArray savedBanks = object.value(QStringLiteral("banks")).toArray();
-    if (savedBanks.size() != kBankCount) return false;
+    if (savedBanks.size() < kMinBankCount || savedBanks.size() > kMaxBankCount) return false;
     QVector<LooperBank> loaded;
     bool loadedTiming = true;
     for (int i = 0; i < savedBanks.size(); ++i) {
@@ -431,10 +459,13 @@ bool LooperProject::loadJson(const QJsonObject& object)
         if (!arrangementValue.isObject()) return false;
         const QJsonObject savedArrangement = arrangementValue.toObject();
         const QJsonValue version = savedArrangement.value(QStringLiteral("version"));
+        const QJsonValue enabled = savedArrangement.value(QStringLiteral("enabled"));
         const QJsonValue loop = savedArrangement.value(QStringLiteral("loop"));
         const QJsonValue steps = savedArrangement.value(QStringLiteral("steps"));
         if (!version.isDouble() || version.toInt() != 1 ||
+            (!enabled.isUndefined() && !enabled.isBool()) ||
             !loop.isBool() || !steps.isArray() || steps.toArray().size() > 64) return false;
+        arrangement.enabled = enabled.toBool(false);
         arrangement.loop = loop.toBool(true);
         for (const QJsonValue& stepValue : steps.toArray()) {
             if (!stepValue.isObject()) return false;
@@ -444,7 +475,7 @@ bool LooperProject::loadJson(const QJsonObject& object)
             if (!bank.isDouble() || !repeats.isDouble() ||
                 bank.toDouble() != std::floor(bank.toDouble()) ||
                 repeats.toDouble() != std::floor(repeats.toDouble()) ||
-                bank.toInt() < 0 || bank.toInt() >= kBankCount ||
+                bank.toInt() < 0 || bank.toInt() >= loaded.size() ||
                 repeats.toInt() < 1 || repeats.toInt() > 64) return false;
             arrangement.steps.push_back(ArrangementStep{bank.toInt(), repeats.toInt()});
         }

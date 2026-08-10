@@ -58,12 +58,13 @@ std::optional<CuratedIdeaSelection> askForCuratedIdea(
     profile->addItem(QStringLiteral("All profiles"), QString());
 
     auto* target = new QComboBox(&dialog);
-    for (int bank = 0; bank < 4; ++bank) {
+    const int bankCount = qMax(1, defaults.bankBpms.size());
+    for (int bank = 0; bank < bankCount; ++bank) {
         target->addItem(
             QStringLiteral("Section %1").arg(QChar(QLatin1Char('A').unicode() + bank)),
             bank);
     }
-    target->setCurrentIndex(qBound(0, defaults.targetSectionIndex, 3));
+    target->setCurrentIndex(qBound(0, defaults.targetSectionIndex, bankCount - 1));
 
     auto* useGrooveTiming = new QRadioButton(&dialog);
     auto* keepTiming = new QRadioButton(&dialog);

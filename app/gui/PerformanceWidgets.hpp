@@ -136,6 +136,8 @@ public:
     std::function<void(bool)> onTunerEnabledChanged;
     std::function<void()> onJamRecordingToggle;
     std::function<void(int)> onBankLaunch;
+    std::function<void()> onAddSection;
+    std::function<void()> onRemoveSection;
     std::function<void()> onManageArrangement;
 
 protected:
@@ -263,6 +265,8 @@ private:
     QRect peerRailRect_;
     QRect jamRecordingHitRect_;
     QRect arrangementHitRect_;
+    QRect addSectionHitRect_;
+    QRect removeSectionHitRect_;
     QRect looperHitRect_;
     QRect tunerHitRect_;
     QRect tunerEnableHitRect_;
@@ -272,5 +276,5 @@ private:
     QRect tunerOverlayOffHitRect_;
     QRect trackSliderRect_;
     QVector<QPair<QRect, std::uint64_t>> peerHitRects_;
-    std::array<QRect, 4> bankHitRects_{};
+    QVector<QRect> bankHitRects_;
 };

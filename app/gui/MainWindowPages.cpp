@@ -495,6 +495,12 @@ void MainWindowPages::build(MainWindow& w)
     w.performanceHome_->onBankLaunch = [&w](int bank) {
         w.requestBankLaunch(bank);
     };
+    w.performanceHome_->onAddSection = [&w] {
+        w.addSongSection();
+    };
+    w.performanceHome_->onRemoveSection = [&w] {
+        w.removeLastSongSection();
+    };
     w.performanceHome_->onManageArrangement = [&w] {
         w.showArrangementDialog();
     };
@@ -1512,7 +1518,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     auto* sectionLabel = new QLabel(QStringLiteral("SECTION"), page);
     sectionLabel->setObjectName(QStringLiteral("BankStripLabel"));
     sectionRow->addWidget(sectionLabel);
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < jam2::application::limits::kMaximumSongSections; ++i) {
         auto* bankButton = new QPushButton(QString(QChar(QLatin1Char(static_cast<char>('A' + i)))), page);
         bankButton->setFixedWidth(34);
         bankButton->setCheckable(true);
@@ -1522,6 +1528,20 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
             w.selectViewedBank(i);
         });
     }
+    auto* removeSectionButton = new QPushButton(QStringLiteral("\u2212"), page);
+    auto* addSectionButton = new QPushButton(QStringLiteral("+"), page);
+    for (QPushButton* button : {removeSectionButton, addSectionButton}) {
+        button->setFixedWidth(30);
+        sectionRow->addWidget(button);
+    }
+    w.sectionRemoveButtons_.push_back(removeSectionButton);
+    w.sectionAddButtons_.push_back(addSectionButton);
+    QObject::connect(removeSectionButton, &QPushButton::clicked, &w, [&w] {
+        w.removeLastSongSection();
+    });
+    QObject::connect(addSectionButton, &QPushButton::clicked, &w, [&w] {
+        w.addSongSection();
+    });
     auto* trimSectionButton = new QPushButton(QStringLiteral("TRIM SECTION"), page);
     trimSectionButton->setObjectName(QStringLiteral("TrimSectionButton"));
     trimSectionButton->setStyleSheet(QStringLiteral(
@@ -1867,7 +1887,7 @@ void MainWindowPages::addBankControls(
     auto* label = new QLabel(QStringLiteral("SECTION"), owner);
     label->setObjectName(QStringLiteral("BankStripLabel"));
     layout->addWidget(label);
-    for (int bank = 0; bank < 4; ++bank) {
+    for (int bank = 0; bank < jam2::application::limits::kMaximumSongSections; ++bank) {
         auto* button = new QPushButton(
             QString(QChar(QLatin1Char('A').unicode() + bank)), owner);
         button->setCheckable(true);
@@ -1880,6 +1900,20 @@ void MainWindowPages::addBankControls(
             w.selectViewedBank(bank);
         });
     }
+    auto* removeSectionButton = new QPushButton(QStringLiteral("\u2212"), owner);
+    auto* addSectionButton = new QPushButton(QStringLiteral("+"), owner);
+    for (QPushButton* button : {removeSectionButton, addSectionButton}) {
+        button->setFixedWidth(30);
+        layout->addWidget(button);
+    }
+    w.sectionRemoveButtons_.push_back(removeSectionButton);
+    w.sectionAddButtons_.push_back(addSectionButton);
+    QObject::connect(removeSectionButton, &QPushButton::clicked, &w, [&w] {
+        w.removeLastSongSection();
+    });
+    QObject::connect(addSectionButton, &QPushButton::clicked, &w, [&w] {
+        w.addSongSection();
+    });
     auto* trimSectionButton = new QPushButton(QStringLiteral("TRIM SECTION"), owner);
     trimSectionButton->setObjectName(QStringLiteral("TrimSectionButton"));
     trimSectionButton->setStyleSheet(QStringLiteral(

@@ -69,12 +69,14 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(
     dialog.setWindowTitle(QStringLiteral("Generate Practice Idea"));
     auto* form = new QFormLayout();
     auto* targetBank = new QComboBox(&dialog);
-    for (int bank = 0; bank < 4; ++bank) {
+    const int bankCount = qMax(1, defaults.bankBpms.size());
+    for (int bank = 0; bank < bankCount; ++bank) {
         targetBank->addItem(
             QStringLiteral("Section %1").arg(QChar(QLatin1Char('A').unicode() + bank)),
             bank);
     }
-    targetBank->setCurrentIndex(qBound(0, defaults.targetSectionIndex, 3));
+    targetBank->setCurrentIndex(qBound(
+        0, defaults.targetSectionIndex, bankCount - 1));
     auto* parts = new QComboBox(&dialog);
     parts->addItem(
         QStringLiteral("Full arrangement"),
@@ -307,7 +309,8 @@ std::optional<ContinueIdeaRequest> askForIdeaContinuation(
     dialog.setWindowTitle(QStringLiteral("Continue Idea"));
     auto* source = new QComboBox(&dialog);
     auto* target = new QComboBox(&dialog);
-    for (int bank = 0; bank < 4; ++bank) {
+    const int bankCount = qMax(1, defaults.bankNames.size());
+    for (int bank = 0; bank < bankCount; ++bank) {
         const QString bankName = defaults.bankNames.value(bank).trimmed();
         const QString state = defaults.bankHasContent.value(bank)
             ? bankName.isEmpty() ? QStringLiteral("has material") : bankName
@@ -317,8 +320,10 @@ std::optional<ContinueIdeaRequest> askForIdeaContinuation(
         source->addItem(label, bank);
         target->addItem(label, bank);
     }
-    source->setCurrentIndex(qBound(0, defaults.sourceSectionIndex, 3));
-    target->setCurrentIndex(qBound(0, defaults.targetSectionIndex, 3));
+    source->setCurrentIndex(qBound(
+        0, defaults.sourceSectionIndex, bankCount - 1));
+    target->setCurrentIndex(qBound(
+        0, defaults.targetSectionIndex, bankCount - 1));
 
     auto* buttons = new QDialogButtonBox(
         QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);

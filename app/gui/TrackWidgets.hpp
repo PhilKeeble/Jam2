@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -58,6 +59,24 @@ inline qint64 looperTimelineViewFrames(
     if (loopStartMs >= 0) frames = qMax(frames, loopStartMs * rate / 1000);
     if (loopEndMs >= 0) frames = qMax(frames, loopEndMs * rate / 1000);
     return qMax<qint64>(1, qMax(frames, arrangementEndFrame));
+}
+
+inline qint64 stableLiveTimelineExtentFrames(
+    qint64 currentExtentFrames,
+    qint64 minimumExtentFrames,
+    qint64 liveEndFrame) noexcept
+{
+    if (liveEndFrame <= 0) return 0;
+    qint64 extent = qMax<qint64>(1,
+        qMax(currentExtentFrames, minimumExtentFrames));
+    constexpr qint64 maximum = (std::numeric_limits<qint64>::max)();
+    while (extent < liveEndFrame) {
+        if (extent > maximum / 2) {
+            return maximum;
+        }
+        extent *= 2;
+    }
+    return extent;
 }
 
 inline double trackGainPosition(double gainDb) noexcept
@@ -397,7 +416,7 @@ public:
             lanes_[dragLane_] = std::move(activeDragPreview);
         }
         selectedLane_ = selected;
-        activeBank_ = qBound(0, activeBank, 3);
+        activeBank_ = qMax(0, activeBank);
         armedLane_ = armedLane;
         markerSampleRate_ = sampleRate > 0 ? sampleRate : 48000;
         minimumViewFrames_ = qMax<qint64>(1, minimumViewFrames);
@@ -487,8 +506,12 @@ public:
     void setLiveRecordingEndFrame(qint64 frame)
     {
         const qint64 bounded = qMax<qint64>(0, frame);
-        if (liveRecordingEndFrame_ == bounded) return;
+        const qint64 nextExtent = jam2::gui::stableLiveTimelineExtentFrames(
+            liveRecordingViewExtentFrames_, minimumViewFrames_, bounded);
+        if (liveRecordingEndFrame_ == bounded &&
+            liveRecordingViewExtentFrames_ == nextExtent) return;
         liveRecordingEndFrame_ = bounded;
+        liveRecordingViewExtentFrames_ = nextExtent;
         update();
     }
 
@@ -859,7 +882,8 @@ private:
                 arrangementEndFrame,
                 lanes_[i].lane.startFrame + visibleFrames(i));
         }
-        arrangementEndFrame = qMax(arrangementEndFrame, liveRecordingEndFrame_);
+        arrangementEndFrame = qMax(
+            arrangementEndFrame, liveRecordingViewExtentFrames_);
         return jam2::gui::looperTimelineViewFrames(
             markerSampleRate(),
             minimumViewFrames_,
@@ -1612,6 +1636,7 @@ private:
     int markerSampleRate_ = 48000;
     qint64 minimumViewFrames_ = 1;
     qint64 liveRecordingEndFrame_ = 0;
+    qint64 liveRecordingViewExtentFrames_ = 0;
     DragMode dragMode_ = DragMode::None;
     int dragLane_ = -1;
     double dragStartX_ = 0.0;

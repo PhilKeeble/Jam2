@@ -1445,7 +1445,9 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
             }
             if (shiftOnly && key == Qt::Key_Space) {
                 if (!repeated && trackRecordingWorkflow_.globalTransportPlaying()) {
-                    const int next = (qBound(0, looperProject_.activeBankIndex(), 3) + 1) % 4;
+                    const int bankCount = qMax(1, looperProject_.banks().size());
+                    const int next =
+                        (qBound(0, looperProject_.activeBankIndex(), bankCount - 1) + 1) % bankCount;
                     requestBankLaunch(next);
                 }
                 return true;
@@ -6203,6 +6205,12 @@ void MainWindow::applyPendingRecordingTransportResync()
     if (!position.engineAnchored || position.sampleRate <= 0) return;
     if (shouldPlay) {
         trackController_.requestPlayback(true);
+        if (trackRecordingWorkflow_.globalTransportPlaying()) {
+            appendLog(QStringLiteral(
+                "recording resync kept the existing global playback phase"));
+            updateTrackPlaybackPresentation();
+            return;
+        }
         const bool hasPrepared = !preparedMix_.path.isEmpty() &&
             preparedMix_.error.isEmpty();
         const bool scheduled = hasPrepared
@@ -6842,7 +6850,7 @@ void MainWindow::auditWavCompatibilityForSession(int expectedSampleRate, bool sh
 
 void MainWindow::selectViewedBank(int bankIndex)
 {
-    viewedBankIndex_ = qBound(0, bankIndex, 3);
+    viewedBankIndex_ = qBound(0, bankIndex, looperProject_.banks().size() - 1);
     selectedLooperLane_ = -1;
     if (chordGrid_) chordGrid_->setSelectedSectionIndex(viewedBankIndex_);
     if (beatGrid_) beatGrid_->setSelectedSectionIndex(viewedBankIndex_);
@@ -6850,12 +6858,104 @@ void MainWindow::selectViewedBank(int bankIndex)
     refreshLooperLanes();
 }
 
+void MainWindow::addSongSection()
+{
+    if (sharedRecordingProtected() ||
+        chordModel_.sections().size() >=
+            jam2::application::limits::kMaximumSongSections) {
+        return;
+    }
+    const int previousCount = chordModel_.sections().size();
+    chordModel_.addSection();
+    if (chordModel_.sections().size() != previousCount + 1 ||
+        !looperProject_.addBank()) {
+        if (chordModel_.sections().size() > previousCount) {
+            chordModel_.deleteSection(chordModel_.sections().size() - 1);
+        }
+        return;
+    }
+    const int added = chordModel_.sections().size() - 1;
+    preparedMixByBank_[static_cast<std::size_t>(added)] = {};
+    selectViewedBank(added);
+    refreshBankPresentation();
+    syncLooperArrangement();
+    appendLog(QStringLiteral("added Section %1; section_count=%2")
+        .arg(QChar(QLatin1Char('A').unicode() + added))
+        .arg(chordModel_.sections().size()));
+}
+
+void MainWindow::removeLastSongSection()
+{
+    const int count = chordModel_.sections().size();
+    if (sharedRecordingProtected() ||
+        count <= jam2::application::limits::kMinimumSongSections ||
+        looperProject_.banks().size() != count) {
+        return;
+    }
+    const int removed = count - 1;
+    const SongSection& section = chordModel_.section(removed);
+    const QString expectedLabel(
+        QChar(QLatin1Char('A').unicode() + removed));
+    const bool pristineMetadata = section.generatedKind.isEmpty() &&
+        section.label == expectedLabel &&
+        section.name == QStringLiteral("Section %1").arg(expectedLabel);
+    const bool arrangementReferencesSection = std::any_of(
+        looperProject_.arrangement().steps.cbegin(),
+        looperProject_.arrangement().steps.cend(),
+        [removed](const ArrangementStep& step) {
+            return step.bankIndex == removed;
+        });
+    const bool empty = pristineMetadata &&
+        chordModel_.occupiedBeatCount(removed) == 0 &&
+        looperProject_.banks().at(removed).lanes.isEmpty() &&
+        !arrangementReferencesSection;
+    if (!empty && QMessageBox::warning(
+            this,
+            QStringLiteral("Remove Section %1").arg(expectedLabel),
+            QStringLiteral(
+                "Section %1 contains notes, generated metadata, or tracks. "
+                "Remove it and all of that section's content?").arg(expectedLabel),
+            QMessageBox::Yes | QMessageBox::Cancel,
+            QMessageBox::Cancel) != QMessageBox::Yes) {
+        return;
+    }
+
+    stopArrangement();
+    ArrangementDefinition arrangement = looperProject_.arrangement();
+    arrangement.steps.erase(
+        std::remove_if(
+            arrangement.steps.begin(), arrangement.steps.end(),
+            [removed](const ArrangementStep& step) {
+                return step.bankIndex == removed;
+            }),
+        arrangement.steps.end());
+    if (!looperProject_.setArrangement(std::move(arrangement)) ||
+        !looperProject_.removeLastBank()) {
+        return;
+    }
+    chordModel_.deleteSection(removed);
+    preparedMixByBank_[static_cast<std::size_t>(removed)] = {};
+    if (viewedBankIndex_ >= removed) {
+        selectViewedBank(removed - 1);
+    } else {
+        refreshLooperLanes();
+    }
+    refreshBankPresentation();
+    syncLooperArrangement();
+    appendLog(QStringLiteral("removed Section %1; section_count=%2")
+        .arg(expectedLabel)
+        .arg(chordModel_.sections().size()));
+}
+
 void MainWindow::refreshBankPresentation()
 {
     const int live = looperProject_.activeBankIndex();
+    const int bankCount = looperProject_.banks().size();
     for (QPushButton* button : std::as_const(bankViewButtons_)) {
         if (!button) continue;
         const int bank = button->property("bankIndex").toInt();
+        button->setVisible(bank < bankCount);
+        if (bank >= bankCount) continue;
         button->setChecked(bank == viewedBankIndex_);
         QString suffix;
         if (bank == live) suffix = QStringLiteral("  LIVE");
@@ -6871,6 +6971,8 @@ void MainWindow::refreshBankPresentation()
     for (int bank = 0; bank < static_cast<int>(looperBankButtons_.size()); ++bank) {
         QPushButton* button = looperBankButtons_[bank];
         if (!button) continue;
+        button->setVisible(bank < bankCount);
+        if (bank >= bankCount) continue;
         button->setChecked(bank == viewedBankIndex_);
         QString suffix;
         if (bank == live) suffix = QStringLiteral("  LIVE");
@@ -6882,6 +6984,16 @@ void MainWindow::refreshBankPresentation()
             : bank == live
                 ? QStringLiteral("QPushButton { background:#214b43;color:#f2fff9;border:1px solid #68d6bc;padding:4px; }")
                 : QStringLiteral("QPushButton { background:#12141f;color:#c4bacb;border:1px solid #55465f;padding:4px; }"));
+    }
+    for (QPushButton* button : std::as_const(sectionAddButtons_)) {
+        if (button) button->setEnabled(
+            !sharedRecordingProtected() &&
+            bankCount < jam2::application::limits::kMaximumSongSections);
+    }
+    for (QPushButton* button : std::as_const(sectionRemoveButtons_)) {
+        if (button) button->setEnabled(
+            !sharedRecordingProtected() &&
+            bankCount > jam2::application::limits::kMinimumSongSections);
     }
     if (launchBankButton_) {
         const bool viewingLiveSection = viewedBankIndex_ == live;
@@ -6924,7 +7036,7 @@ void MainWindow::requestBankLaunch(int bankIndex)
         appendLog(QStringLiteral("section queue ignored while a synced recording is active"));
         return;
     }
-    launchBank(qBound(0, bankIndex, 3), true);
+    launchBank(qBound(0, bankIndex, looperProject_.banks().size() - 1), true);
 }
 
 void MainWindow::launchBank(
@@ -6932,7 +7044,7 @@ void MainWindow::launchBank(
     bool manualLaunch,
     std::optional<quint64> targetAbsoluteBeat)
 {
-    bankIndex = qBound(0, bankIndex, 3);
+    bankIndex = qBound(0, bankIndex, looperProject_.banks().size() - 1);
     if (manualLaunch) {
         stopArrangement();
         selectViewedBank(bankIndex);
@@ -6969,7 +7081,7 @@ void MainWindow::beginSharedBankLaunch(
     if (pendingBankIndex_ >= 0 && pendingBankAbsoluteBeat_ > 0) return;
     cancelSharedBankLaunch(true, QStringLiteral("superseded by a newer bank request"));
     sharedBankSwitchId_ = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    sharedBankSwitchIndex_ = qBound(0, bankIndex, 3);
+    sharedBankSwitchIndex_ = qBound(0, bankIndex, looperProject_.banks().size() - 1);
     sharedBankTargetAbsoluteBeat_ = targetAbsoluteBeat.value_or(0);
     sharedBankHostReady_ = false;
     sharedBankReadyTokens_.clear();
@@ -6996,7 +7108,7 @@ void MainWindow::beginSharedBankLaunch(
 
 void MainWindow::prepareSharedBankLaunch(int bankIndex, const QString& switchId)
 {
-    bankIndex = qBound(0, bankIndex, 3);
+    bankIndex = qBound(0, bankIndex, looperProject_.banks().size() - 1);
     if (switchId.isEmpty()) return;
     if (sharedBankSwitchId_ != switchId) {
         sharedBankReadyTokens_.clear();
@@ -7133,7 +7245,7 @@ void MainWindow::schedulePreparedBankLaunch(
     int bankIndex,
     std::optional<quint64> targetAbsoluteBeat)
 {
-    bankIndex = qBound(0, bankIndex, 3);
+    bankIndex = qBound(0, bankIndex, looperProject_.banks().size() - 1);
     const bool hasSources = PreparedMixRenderer::hasRenderableSources(looperProject_, bankIndex);
     const PreparedMixResult& cached = preparedMixByBank_[static_cast<std::size_t>(bankIndex)];
     if (hasSources && (cached.path.isEmpty() || !QFileInfo::exists(cached.path))) {
@@ -7228,13 +7340,18 @@ void MainWindow::applyScheduledBankLaunch()
     arrangementSectionStartBeat_ = pendingBankAbsoluteBeat_;
     pendingBankAbsoluteBeat_ = 0;
     pendingBankRequestedTargetBeat_.reset();
-    refreshLooperLanes();
+    if (arrangementRunning_ || arrangementArmed_) {
+        selectViewedBank(bank);
+    } else {
+        refreshLooperLanes();
+    }
     appendLog(QStringLiteral("bank launch committed: bank=%1 source=1.1 epoch_unchanged=yes")
         .arg(QChar(QLatin1Char('A').unicode() + bank)));
 }
 
 void MainWindow::stopArrangement()
 {
+    looperProject_.setArrangementEnabled(false);
     arrangementRunning_ = false;
     arrangementArmed_ = false;
     arrangementResetBankAfterStop_ = false;
@@ -7317,6 +7434,13 @@ void MainWindow::updateArrangementPlayback(const PlaybackGrid::Position& positio
         if (hasNextSection && position.absoluteBeat >= queueBeat) {
             arrangementStepIndex_ = nextStepIndex;
             arrangementStepRepeat_ = nextRepeat;
+            appendLog(QStringLiteral(
+                "arrangement transition queued: row=%1 repeat=%2 bank=%3 target_abs_beat=%4")
+                .arg(arrangementStepIndex_ + 1)
+                .arg(arrangementStepRepeat_ + 1)
+                .arg(QChar(QLatin1Char('A').unicode() +
+                    arrangement.steps[arrangementStepIndex_].bankIndex))
+                .arg(sectionEndBeat));
             launchBank(
                 arrangement.steps[arrangementStepIndex_].bankIndex,
                 false,
@@ -7336,6 +7460,7 @@ void MainWindow::startArrangement()
             QStringLiteral("Add at least one arrangement step first."));
         return;
     }
+    looperProject_.setArrangementEnabled(true);
     arrangementStepIndex_ = 0;
     arrangementStepRepeat_ = 0;
     arrangementResetBankAfterStop_ = false;
@@ -7659,16 +7784,17 @@ void MainWindow::showArrangementDialog()
         if (auto* repeats = qobject_cast<QSpinBox*>(cell)) return repeats;
         return cell ? cell->findChild<QSpinBox*>() : nullptr;
     };
-    const auto appendRow = [table, kArrangementMinimumRowHeight](ArrangementStep step) {
+    const int arrangementBankCount = looperProject_.banks().size();
+    const auto appendRow = [table, kArrangementMinimumRowHeight, arrangementBankCount](ArrangementStep step) {
         if (table->rowCount() >= 64) return;
         const int row = table->rowCount();
         table->insertRow(row);
         auto* bank = new QComboBox(table);
-        for (int index = 0; index < 4; ++index) {
+        for (int index = 0; index < arrangementBankCount; ++index) {
             bank->addItem(QStringLiteral("Section %1")
                 .arg(QChar(QLatin1Char('A').unicode() + index)), index);
         }
-        bank->setCurrentIndex(qBound(0, step.bankIndex, 3));
+        bank->setCurrentIndex(qBound(0, step.bankIndex, arrangementBankCount - 1));
         auto* repeats = new QSpinBox(table);
         repeats->setRange(1, 64);
         repeats->setValue(qBound(1, step.repeats, 64));
@@ -7751,6 +7877,7 @@ void MainWindow::showArrangementDialog()
     if (dialog.exec() != QDialog::Accepted) return;
     ArrangementDefinition definition;
     definition.loop = loop->isChecked();
+    definition.enabled = arrangementWasActive;
     for (int row = 0; row < table->rowCount(); ++row) {
         auto* bank = bankAt(row);
         auto* repeats = repeatsAt(row);
@@ -9034,6 +9161,10 @@ bool MainWindow::armSelectedLooperLaneRecording()
 
 void MainWindow::startArmedLooperLaneRecording()
 {
+    if (loopbackRecordingStartFrame_ > 0) {
+        cancelLoopbackCountIn();
+        return;
+    }
     const bool localCaptureActive = trackRecordingWorkflow_.inputTakeActive() ||
         loopbackRecorder_.isRunning();
     if (localCaptureActive) {
@@ -9077,7 +9208,7 @@ void MainWindow::startArmedLooperLaneRecording()
         maybeStartReadyRecordingGroup();
         return;
     }
-    if (engineCapture && captureCountInCheck_ && captureCountInCheck_->isChecked()) {
+    if (captureCountInCheck_ && captureCountInCheck_->isChecked()) {
         const bool countInMetronome = captureCountInMetronomeCheck_ && captureCountInMetronomeCheck_->isChecked();
         const bool keepMetronome = captureKeepMetronomeCheck_ && captureKeepMetronomeCheck_->isChecked();
         const bool startedCountInClick = countInMetronome &&
@@ -9099,7 +9230,11 @@ void MainWindow::startArmedLooperLaneRecording()
                 startedCountInClick && !keepMetronome);
             startInputCapture(0, bars);
         } else {
-            startLoopbackCapture();
+            if (!scheduleLoopbackCountIn(
+                    bars, startedCountInClick && !keepMetronome) &&
+                startedCountInClick) {
+                stopTrackMetronome();
+            }
         }
     } else {
         if (engineCapture) {
@@ -9148,7 +9283,8 @@ void MainWindow::publishLocalTrackRecordingState(
         localTrackRecordingStateRevision_ >= (std::numeric_limits<int>::max)()
         ? 1 : localTrackRecordingStateRevision_ + 1;
 
-    int bank = qBound(0, trackRecordingWorkflow_.armedBank(), 3);
+    int bank = qBound(
+        0, trackRecordingWorkflow_.armedBank(), looperProject_.banks().size() - 1);
     QString laneId;
     QString laneName;
     if (trackRecordingWorkflow_.laneArmed() &&
@@ -9271,13 +9407,21 @@ void MainWindow::maybeStartReadyRecordingGroup()
             "synced recording group is ready but the shared grid is not available"));
         return;
     }
-    const quint64 currentBar = position.absoluteBeat /
+    const quint64 countdownBeat = jam2::gui::synced_recording_countdown_beat(
+        position, beatsPerBar);
+    if (countdownBeat == 0) {
+        appendLog(QStringLiteral(
+            "synced recording group count-in target exceeds the engine clock range"));
+        return;
+    }
+    const quint64 countInBeats = static_cast<quint64>(qMax(0, countInBars)) *
         static_cast<quint64>(beatsPerBar);
-    const quint64 countdownBeat = (currentBar + 3ULL) *
-        static_cast<quint64>(beatsPerBar);
-    const quint64 targetBeat = countdownBeat +
-        static_cast<quint64>(countInBars) *
-            static_cast<quint64>(beatsPerBar);
+    if (countdownBeat > (std::numeric_limits<quint64>::max)() - countInBeats) {
+        appendLog(QStringLiteral(
+            "synced recording group target exceeds the engine clock range"));
+        return;
+    }
+    const quint64 targetBeat = countdownBeat + countInBeats;
     const QString groupId = QUuid::createUuid()
         .toString(QUuid::WithoutBraces).toLower();
     QJsonArray participantArray;
@@ -9539,6 +9683,9 @@ void MainWindow::finalizePendingLaneTake()
 
 void MainWindow::finishLaneTakeFinalization()
 {
+    loopbackCountdownStartFrame_ = 0;
+    loopbackRecordingStartFrame_ = 0;
+    stopMetronomeAtLoopbackStart_ = false;
     trackRecordingWorkflow_.disarmLane();
     pendingGroupTakeCompletion_.reset();
     activeRecordingGroupId_.clear();
@@ -9595,7 +9742,7 @@ void MainWindow::updateSharedRecordingPresentation()
     const bool visible = localVisible || !peerTrackRecordingStates_.isEmpty();
     const bool protectedState = sharedRecordingProtected();
     const bool localActive = trackRecordingWorkflow_.inputTakeActive() ||
-        loopbackRecorder_.isRunning();
+        loopbackRecorder_.isRunning() || loopbackRecordingStartFrame_ > 0;
 
     if (recordingContextFrame_) recordingContextFrame_->setVisible(visible);
     if (recordingCountdownLabel_) recordingCountdownLabel_->setVisible(visible);
@@ -9625,7 +9772,8 @@ void MainWindow::updateSharedRecordingPresentation()
             : QStringLiteral("Track");
         entries.append(QStringLiteral("You · %1Section %2 · %3 · %4")
             .arg(sharedWorkflow ? QString{} : QStringLiteral("LOCAL · "))
-            .arg(QChar(QLatin1Char('A').unicode() + qBound(0, bank, 3)))
+            .arg(QChar(QLatin1Char('A').unicode() + qBound(
+                0, bank, static_cast<int>(looperProject_.banks().size()) - 1)))
             .arg(laneName.toHtmlEscaped(), localTrackRecordingPhase_.toUpper()));
     }
     for (auto it = peerTrackRecordingStates_.cbegin();
@@ -9633,7 +9781,8 @@ void MainWindow::updateSharedRecordingPresentation()
         const PeerTrackRecordingState& state = it.value();
         entries.append(QStringLiteral("%1 · Section %2 · %3 · %4")
             .arg(recordingPeerLabel(it.key()).toHtmlEscaped())
-            .arg(QChar(QLatin1Char('A').unicode() + qBound(0, state.bank, 3)))
+            .arg(QChar(QLatin1Char('A').unicode() + qBound(
+                0, state.bank, static_cast<int>(looperProject_.banks().size()) - 1)))
             .arg(state.laneName.toHtmlEscaped(), state.phase.toUpper()));
         if (phaseRank(state.phase) > phaseRank(strongestPhase)) {
             strongestPhase = state.phase;
@@ -10368,7 +10517,8 @@ void MainWindow::regeneratePreparedMix(int bankIndex)
     const QString cachePath = PreparedMixRenderer::outputPath(
         projectPersistence_.workspaceFolder(),
         targetBank,
-        generation);
+        generation,
+        QCoreApplication::applicationPid());
     const LooperProject project = looperProject_;
     const QString projectFolder = projectPersistence_.projectFolder();
     const SharedTrackModel track = trackController_.model();
@@ -10462,22 +10612,31 @@ void MainWindow::applyPreparedMixResult(PreparedMixResult result)
         playPreparedMixWhenReady_ = false;
         return;
     }
-    const int resultBank = qBound(0, result.bankIndex, 3);
+    const int resultBank = qBound(
+        0, result.bankIndex, looperProject_.banks().size() - 1);
     preparedMixByBank_[static_cast<std::size_t>(resultBank)] = result;
     registerTransientTrackWav(result.path);
     const bool preparedForSharedBank =
         !sharedBankSwitchId_.isEmpty() && sharedBankSwitchIndex_ == resultBank;
+    // A freshly loaded arrangement can request its already-active first bank
+    // before that bank has a prepared cache.  Once the render completes it is
+    // still a real pending launch: route it through the normal launch path so
+    // pendingBankIndex_ is cleared.  Leaving it as "NEXT A" prevents the armed
+    // arrangement state machine from ever entering its transition branch on
+    // the first Play; Stop happened to clear it, which is why the second Play
+    // worked.
+    if (!preparedForSharedBank && pendingBankIndex_ == resultBank) {
+        const std::optional<quint64> targetBeat = pendingBankRequestedTargetBeat_;
+        pendingBankRequestedTargetBeat_.reset();
+        schedulePreparedBankLaunch(resultBank, targetBeat);
+        return;
+    }
     if (resultBank != looperProject_.activeBankIndex()) {
         appendLog(QStringLiteral("prepared inactive bank %1: %2 frames in %3 ms")
             .arg(QChar(QLatin1Char('A').unicode() + resultBank))
             .arg(result.frames)
             .arg(result.renderMs));
         if (preparedForSharedBank) noteSharedBankReady(resultBank);
-        else if (pendingBankIndex_ == resultBank) {
-            const std::optional<quint64> targetBeat = pendingBankRequestedTargetBeat_;
-            pendingBankRequestedTargetBeat_.reset();
-            schedulePreparedBankLaunch(resultBank, targetBeat);
-        }
         return;
     }
     if (!preparedMix_.path.isEmpty() && preparedMix_.path != result.path) {
@@ -10578,7 +10737,7 @@ void MainWindow::applyPreparedMixResult(PreparedMixResult result)
 
 void MainWindow::adoptPreparedBankCache(int bankIndex)
 {
-    bankIndex = qBound(0, bankIndex, 3);
+    bankIndex = qBound(0, bankIndex, looperProject_.banks().size() - 1);
     const PreparedMixResult& cached =
         preparedMixByBank_[static_cast<std::size_t>(bankIndex)];
     if (cached.path.isEmpty() || !cached.error.isEmpty() ||
@@ -11083,6 +11242,7 @@ void MainWindow::startLoopbackCapture()
     QString rateError;
     if (!recordingTargetSampleRate(recordingSampleRate, rateError)) {
         appendLog(QStringLiteral("loopback recording failed to start: ") + rateError);
+        publishLocalTrackRecordingState(QStringLiteral("armed"));
         QMessageBox::warning(
             this, QStringLiteral("Jam2 Loopback Recording"), rateError);
         return;
@@ -11185,8 +11345,125 @@ void MainWindow::startLoopbackCapture()
     publishLocalTrackRecordingState(QStringLiteral("recording"));
 }
 
+bool MainWindow::scheduleLoopbackCountIn(
+    int bars,
+    bool stopMetronomeAtStart)
+{
+    const PlaybackGrid::Position position = metronomeTransport_.grid().position();
+    const int beatsPerBar = qMax(1, currentMetronomePattern().beats_per_bar);
+    const std::uint64_t countdownBeat =
+        jam2::gui::synced_recording_countdown_beat(position, beatsPerBar);
+    const std::uint64_t beatFrames = position.sampleRate > 0 &&
+            position.secondsPerBeat > 0.0
+        ? static_cast<std::uint64_t>(std::llround(
+            position.secondsPerBeat * static_cast<double>(position.sampleRate)))
+        : 0;
+    const std::uint64_t countInBeats =
+        static_cast<std::uint64_t>(qMax(1, bars)) *
+        static_cast<std::uint64_t>(beatsPerBar);
+    if (countdownBeat == 0 || beatFrames == 0 ||
+        countdownBeat > (std::numeric_limits<std::uint64_t>::max)() - countInBeats ||
+        countdownBeat + countInBeats >
+            ((std::numeric_limits<std::uint64_t>::max)() - position.epochFrame) /
+                beatFrames) {
+        appendLog(QStringLiteral(
+            "loopback count-in is waiting for a valid engine grid"));
+        publishLocalTrackRecordingState(QStringLiteral("armed"));
+        return false;
+    }
+    const std::uint64_t targetBeat = countdownBeat + countInBeats;
+    loopbackCountdownStartFrame_ = rawFrameFromMusicalFrame(
+        position.epochFrame + countdownBeat * beatFrames,
+        position.renderOffsetFrames);
+    loopbackRecordingStartFrame_ = rawFrameFromMusicalFrame(
+        position.epochFrame + targetBeat * beatFrames,
+        position.renderOffsetFrames);
+    stopMetronomeAtLoopbackStart_ = stopMetronomeAtStart;
+    localTrackRecordingCountInBars_ = qBound(1, bars, 8);
+    if (stopCaptureButton_) stopCaptureButton_->setEnabled(true);
+    if (loadWavButton_) loadWavButton_->setEnabled(false);
+    publishLocalTrackRecordingState(QStringLiteral("waiting"));
+    appendLog(QStringLiteral(
+        "loopback recording scheduled: countdown_frame=%1 start_frame=%2 count_in_bars=%3")
+        .arg(loopbackCountdownStartFrame_)
+        .arg(loopbackRecordingStartFrame_)
+        .arg(localTrackRecordingCountInBars_));
+    return true;
+}
+
+bool MainWindow::updateLoopbackCountIn(
+    const PlaybackGrid::Position& position)
+{
+    if (loopbackRecordingStartFrame_ == 0) return false;
+    if (position.rawCurrentFrame < loopbackCountdownStartFrame_) {
+        if (recordingCountdownLabel_) {
+            recordingCountdownLabel_->setText(QStringLiteral(
+                "ARMED - WAITING FOR BAR - COUNT-IN - RECORDING"));
+        }
+        publishLocalTrackRecordingState(QStringLiteral("waiting"));
+        return true;
+    }
+    if (position.rawCurrentFrame < loopbackRecordingStartFrame_) {
+        const std::uint64_t beatFrames = position.sampleRate > 0 &&
+                position.secondsPerBeat > 0.0
+            ? qMax<std::uint64_t>(1, static_cast<std::uint64_t>(std::llround(
+                position.secondsPerBeat * static_cast<double>(position.sampleRate))))
+            : qMax<std::uint64_t>(
+                1, static_cast<std::uint64_t>(qMax(1, position.sampleRate)) / 2ULL);
+        const std::uint64_t remainingFrames =
+            loopbackRecordingStartFrame_ - position.rawCurrentFrame;
+        const int remaining = static_cast<int>(qMin<std::uint64_t>(
+            4096, (remainingFrames + beatFrames - 1ULL) / beatFrames));
+        if (recordingCountdownLabel_) {
+            recordingCountdownLabel_->setText(QStringLiteral(
+                "ARMED - WAITING FOR BAR - COUNT-IN %1 - RECORDING")
+                .arg(remaining));
+        }
+        publishLocalTrackRecordingState(QStringLiteral("count-in"), remaining);
+        return true;
+    }
+
+    const std::uint64_t targetFrame = loopbackRecordingStartFrame_;
+    const std::uint64_t lateFrames = position.rawCurrentFrame - targetFrame;
+    const double lateMs = position.sampleRate > 0
+        ? static_cast<double>(lateFrames) * 1000.0 /
+            static_cast<double>(position.sampleRate)
+        : 0.0;
+    const bool stopMetronome = stopMetronomeAtLoopbackStart_;
+    loopbackCountdownStartFrame_ = 0;
+    loopbackRecordingStartFrame_ = 0;
+    stopMetronomeAtLoopbackStart_ = false;
+    if (stopMetronome) stopTrackMetronome();
+    appendLog(QStringLiteral(
+        "loopback count-in completed: target_frame=%1 actual_frame=%2 late_frames=%3 late_ms=%4")
+        .arg(targetFrame)
+        .arg(position.rawCurrentFrame)
+        .arg(lateFrames)
+        .arg(lateMs, 0, 'f', 3));
+    startLoopbackCapture();
+    return true;
+}
+
+void MainWindow::cancelLoopbackCountIn()
+{
+    const bool stopMetronome = stopMetronomeAtLoopbackStart_;
+    loopbackCountdownStartFrame_ = 0;
+    loopbackRecordingStartFrame_ = 0;
+    stopMetronomeAtLoopbackStart_ = false;
+    localTrackRecordingCountInBars_ = 0;
+    if (stopMetronome) stopTrackMetronome();
+    if (stopCaptureButton_) stopCaptureButton_->setEnabled(false);
+    if (loadWavButton_) loadWavButton_->setEnabled(true);
+    publishLocalTrackRecordingState(QStringLiteral("armed"));
+    appendLog(QStringLiteral("cancelled loopback recording count-in"));
+}
+
 void MainWindow::stopInputCapture(std::uint64_t targetFrame)
 {
+    if (loopbackRecordingStartFrame_ > 0) {
+        cancelLoopbackCountIn();
+        return;
+    }
     if (trackRecordingWorkflow_.inputTakeActive()) {
         if (!trackRecordingWorkflow_.stopInputTake(targetFrame)) {
             appendLog(QStringLiteral("engine command queue unavailable: stop track take"));
@@ -13565,6 +13842,10 @@ bool MainWindow::loadSongJson(const QJsonObject& object)
     if (!looperObject.isEmpty() && !loadedLooper.loadJson(looperObject)) {
         return false;
     }
+    if (!looperObject.isEmpty() &&
+        loadedSong.sections().size() != loadedLooper.banks().size()) {
+        return false;
+    }
     // A prepared mix is a derived cache of the old arrangement. Invalidate
     // and unload it before adopting any replacement song so a later remote
     // TrackRestart cannot revive stale PCM that is no longer represented in
@@ -13595,6 +13876,14 @@ bool MainWindow::loadSongJson(const QJsonObject& object)
         }
     }
     looperProject_ = std::move(loadedLooper);
+    arrangementRunning_ = false;
+    arrangementArmed_ = false;
+    arrangementResetBankAfterStop_ = false;
+    arrangementStepIndex_ = 0;
+    arrangementStepRepeat_ = 0;
+    pendingBankIndex_ = -1;
+    pendingBankAbsoluteBeat_ = 0;
+    pendingBankRequestedTargetBeat_.reset();
     preparedMixByBank_ = {};
     viewedBankIndex_ = looperProject_.activeBankIndex();
     if (looperProject_.hasSerializedTiming()) {
@@ -13604,6 +13893,10 @@ bool MainWindow::loadSongJson(const QJsonObject& object)
     if (beatGrid_) beatGrid_->setSelectedSectionIndex(viewedBankIndex_);
     if (lyricGrid_) lyricGrid_->setSelectedSectionIndex(viewedBankIndex_);
     refreshLooperLanes();
+    if (looperProject_.arrangement().enabled &&
+        !looperProject_.arrangement().steps.isEmpty()) {
+        startArrangement();
+    }
     startDeferredPracticeReferenceRenders();
     if (needsCompatibilityAudit) {
         QTimer::singleShot(0, this, [this, expectedSampleRate] {
@@ -13660,6 +13953,17 @@ void MainWindow::updatePlaybackGrid()
         const double trackBeat = static_cast<double>(
             position.rawCurrentFrame - recordingStart) /
             (position.secondsPerBeat * static_cast<double>(position.sampleRate));
+        visualAbsoluteBeat = static_cast<quint64>(std::floor(trackBeat));
+        visualSubdivision =
+            static_cast<int>(std::floor(trackBeat * visualDivision)) % visualDivision;
+        beatPhase = trackBeat - std::floor(trackBeat);
+        visualRunning = true;
+    } else if (loopbackRecorder_.isRunning() &&
+               loopbackRecordingPreviewClock_.isValid()) {
+        const double trackBeat =
+            static_cast<double>(loopbackRecordingPreviewClock_.elapsed()) *
+            qMax(1.0, static_cast<double>(livePattern.bpm)) *
+            qMax(1, tempoPulseUnits) / 60000.0;
         visualAbsoluteBeat = static_cast<quint64>(std::floor(trackBeat));
         visualSubdivision =
             static_cast<int>(std::floor(trackBeat * visualDivision)) % visualDivision;
@@ -13938,7 +14242,11 @@ void MainWindow::updatePlaybackGrid()
             currentMetronomePattern().tempo_pulse_units);
     }
     if (looperStack_) {
-        const qint64 gridPositionMs = qMax<qint64>(0, transportPositionMs);
+        qint64 gridPositionMs = qMax<qint64>(0, transportPositionMs);
+        if (loopbackRecorder_.isRunning() &&
+            loopbackRecordingPreviewClock_.isValid()) {
+            gridPositionMs = loopbackRecordingPreviewClock_.elapsed();
+        }
         const auto viewedPattern = bankMetronomePattern(viewedBankIndex_);
         qint64 recordingPreviewFrames = 0;
         if (trackRecordingWorkflow_.inputTakeActive() &&
@@ -13968,6 +14276,9 @@ void MainWindow::updatePlaybackGrid()
 void MainWindow::updateRecordingCountdown(const PlaybackGrid::Position& position)
 {
     if (!recordingCountdownLabel_) {
+        return;
+    }
+    if (updateLoopbackCountIn(position)) {
         return;
     }
     const TrackRecordingWorkflow::CountdownPresentation countdown =
@@ -14428,7 +14739,8 @@ bool MainWindow::clearPracticeReferenceWavs(bool rebuildRemainingTracks, int ban
     }
     if (bankIndex >= 0) {
         jam2::practice::PracticeIdeaController::clearReferences(looperProject_, bankIndex);
-        preparedMixByBank_[static_cast<std::size_t>(qBound(0, bankIndex, 3))] = {};
+        preparedMixByBank_[static_cast<std::size_t>(qBound(
+            0, bankIndex, looperProject_.banks().size() - 1))] = {};
     } else {
         jam2::practice::PracticeIdeaController::clearReferences(looperProject_);
         preparedMixByBank_ = {};
@@ -14615,7 +14927,7 @@ void MainWindow::generatePracticeIdea()
     }
     const auto pattern = bankMetronomePattern(defaults.targetSectionIndex);
     defaults.bpm = pattern.bpm;
-    for (int bank = 0; bank < 4; ++bank) {
+    for (int bank = 0; bank < looperProject_.banks().size(); ++bank) {
         const auto bankPattern = bankMetronomePattern(bank);
         defaults.bankBpms.push_back(bankPattern.bpm);
         defaults.bankMeterIds.push_back(practiceMeterIdForPattern(bankPattern));
@@ -14665,12 +14977,13 @@ void MainWindow::browseCuratedIdeas()
     }
 
     jam2::practice::CuratedIdeaDialogDefaults defaults;
-    defaults.targetSectionIndex = qBound(0, viewedBankIndex_, 3);
+    defaults.targetSectionIndex = qBound(
+        0, viewedBankIndex_, looperProject_.banks().size() - 1);
     defaults.timing = preferences_.ideas.grooveUseIdeaTiming
         ? jam2::practice::CuratedIdeaTimingPolicy::UseIdeaTiming
         : jam2::practice::CuratedIdeaTimingPolicy::KeepSectionTiming;
     defaults.importBars = preferences_.ideas.grooveBars;
-    for (int bank = 0; bank < 4; ++bank) {
+    for (int bank = 0; bank < looperProject_.banks().size(); ++bank) {
         const auto pattern = bankMetronomePattern(bank);
         defaults.bankBpms.push_back(pattern.bpm);
         defaults.bankMeterNumerators.push_back(pattern.beats_per_bar);
@@ -14860,16 +15173,17 @@ void MainWindow::continuePracticeIdea()
         return;
     }
     jam2::practice::ContinueIdeaDialogDefaults defaults;
-    defaults.sourceSectionIndex = qBound(0, viewedBankIndex_, 3);
-    for (int bank = 0; bank < 4; ++bank) {
+    const int bankCount = looperProject_.banks().size();
+    defaults.sourceSectionIndex = qBound(0, viewedBankIndex_, bankCount - 1);
+    for (int bank = 0; bank < bankCount; ++bank) {
         const SongSection& section = chordModel_.section(bank);
         defaults.bankHasContent.push_back(
             jam2::practice::PracticeIdeaController::referenceLayers(section).any());
         defaults.bankNames.push_back(section.name);
     }
-    defaults.targetSectionIndex = (defaults.sourceSectionIndex + 1) % 4;
-    for (int offset = 1; offset < 4; ++offset) {
-        const int candidate = (defaults.sourceSectionIndex + offset) % 4;
+    defaults.targetSectionIndex = (defaults.sourceSectionIndex + 1) % bankCount;
+    for (int offset = 1; offset < bankCount; ++offset) {
+        const int candidate = (defaults.sourceSectionIndex + offset) % bankCount;
         if (!defaults.bankHasContent.value(candidate)) {
             defaults.targetSectionIndex = candidate;
             break;
@@ -14894,7 +15208,8 @@ void MainWindow::continuePracticeIdea()
     }
 
     ++practiceIdeaRevision_;
-    const int targetBank = qBound(0, request->targetSectionIndex, 3);
+    const int targetBank = qBound(
+        0, request->targetSectionIndex, looperProject_.banks().size() - 1);
     const bool affectsLiveBank = targetBank == looperProject_.activeBankIndex();
     if (affectsLiveBank) stopTrackForPracticeIdeaGeneration();
     clearPracticeReferenceWavs(false, targetBank);
@@ -14950,7 +15265,8 @@ void MainWindow::clearPracticeIdea()
             "idea clearing is unavailable while a track take is active"));
         return;
     }
-    const int viewedBank = qBound(0, viewedBankIndex_, 3);
+    const int viewedBank = qBound(
+        0, viewedBankIndex_, looperProject_.banks().size() - 1);
     QMessageBox prompt(this);
     prompt.setIcon(QMessageBox::Question);
     prompt.setWindowTitle(QStringLiteral("Clear Idea"));
@@ -15051,7 +15367,8 @@ bool MainWindow::applyPracticeIdea(
         return false;
     }
     ++practiceIdeaRevision_;
-    const int targetBank = qBound(0, targetSectionIndex, 3);
+    const int targetBank = qBound(
+        0, targetSectionIndex, looperProject_.banks().size() - 1);
     const bool affectsLiveBank = targetBank == looperProject_.activeBankIndex();
     const bool timingChanged = useIdeaTiming && affectsLiveBank &&
         (appliedIdea->bpm != previousPattern.bpm ||

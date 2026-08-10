@@ -29,6 +29,7 @@ Testing/
 /tools/*logs/
 /incoming_uploads/
 /artifacts/
+/datasets/
 __pycache__/
 *.pyc
 

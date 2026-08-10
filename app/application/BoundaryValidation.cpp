@@ -40,6 +40,7 @@
 #include "prepared_track_source.hpp"
 #include "protocol.hpp"
 #include "session_authority.hpp"
+#include "track_take_recorder.hpp"
 #include "tuning_profile.hpp"
 
 #include <QByteArray>
@@ -5926,24 +5927,56 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         record(QStringLiteral("practice.v7-out-of-range-groove-feel-is-rejected"),
             !rejectedFeel.loadJson(invalidFeel));
 
-        QJsonObject excessiveSections = BeatGridModel{}.toJson();
-        QJsonArray fiveSections = excessiveSections.value(QStringLiteral("sections")).toArray();
-        fiveSections.append(fiveSections.first());
-        excessiveSections[QStringLiteral("sections")] = fiveSections;
-        BeatGridModel rejectedFiveSections;
-        record(QStringLiteral("practice.fixed-banks-reject-more-than-four-sections"),
-            !rejectedFiveSections.loadJson(excessiveSections));
+        BeatGridModel twelveSectionModel;
+        for (int index = twelveSectionModel.sections().size(); index < 12; ++index) {
+            twelveSectionModel.addSection();
+        }
+        BeatGridModel twelveSectionRoundTrip;
+        QJsonObject excessiveSections = twelveSectionModel.toJson();
+        QJsonArray thirteenSections =
+            excessiveSections.value(QStringLiteral("sections")).toArray();
+        thirteenSections.append(thirteenSections.first());
+        excessiveSections[QStringLiteral("sections")] = thirteenSections;
+        BeatGridModel rejectedThirteenSections;
+        record(QStringLiteral("practice.dynamic-sections-allow-twelve-and-reject-thirteen"),
+            twelveSectionModel.sections().size() == 12 &&
+            twelveSectionRoundTrip.loadJson(twelveSectionModel.toJson()) &&
+            twelveSectionRoundTrip.sections().size() == 12 &&
+            !rejectedThirteenSections.loadJson(excessiveSections));
 
         LooperProject arrangementProject;
         const bool acceptedArrangement = arrangementProject.setArrangement(
-            ArrangementDefinition{{ArrangementStep{0, 2}, ArrangementStep{1, 3}}, false});
+            ArrangementDefinition{{ArrangementStep{0, 2}, ArrangementStep{1, 3}}, false, true});
         LooperProject arrangementRoundTrip;
+        const QJsonObject syncArrangement = arrangementProject.toJson(true)
+            .value(QStringLiteral("arrangement")).toObject();
         record(QStringLiteral("looper.arrangement-roundtrip-is-bounded"),
             acceptedArrangement && arrangementRoundTrip.loadJson(arrangementProject.toJson()) &&
             arrangementRoundTrip.arrangement().steps.size() == 2 &&
             arrangementRoundTrip.arrangement().steps.at(1).bankIndex == 1 &&
             arrangementRoundTrip.arrangement().steps.at(1).repeats == 3 &&
-            !arrangementRoundTrip.arrangement().loop);
+            !arrangementRoundTrip.arrangement().loop &&
+            arrangementRoundTrip.arrangement().enabled &&
+            !syncArrangement.contains(QStringLiteral("enabled")));
+
+        LooperProject dynamicLooper;
+        bool addedDynamicBanks = true;
+        while (dynamicLooper.banks().size() < 12) {
+            addedDynamicBanks = dynamicLooper.addBank() && addedDynamicBanks;
+        }
+        const bool acceptedLastBankArrangement = dynamicLooper.setArrangement(
+            ArrangementDefinition{{ArrangementStep{11, 1}}, true, true});
+        const bool protectedReferencedBank = !dynamicLooper.removeLastBank();
+        (void)dynamicLooper.setArrangement(ArrangementDefinition{});
+        const bool removedUnreferencedBank = dynamicLooper.removeLastBank();
+        LooperProject dynamicLooperRoundTrip;
+        record(QStringLiteral("looper.dynamic-banks-allow-a-through-l-and-protect-arrangement-references"),
+            addedDynamicBanks && acceptedLastBankArrangement &&
+            protectedReferencedBank && removedUnreferencedBank &&
+            dynamicLooper.banks().size() == 11 &&
+            dynamicLooperRoundTrip.loadJson(dynamicLooper.toJson()) &&
+            dynamicLooperRoundTrip.banks().size() == 11 &&
+            dynamicLooperRoundTrip.banks().back().id == QStringLiteral("K"));
 
         LooperProject timingProject;
         const LooperBankTiming newProjectA = timingProject.resolvedTiming(0);
@@ -6393,6 +6426,11 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             emptyBankRejected && emptyLaneRejected && wavLaneAccepted &&
             mutedLaneRejected);
     }
+    record(QStringLiteral("prepared-mix.cache-path-is-process-scoped"),
+        PreparedMixRenderer::outputPath(
+            QStringLiteral("workspace"), 1, 7, 1001) !=
+        PreparedMixRenderer::outputPath(
+            QStringLiteral("workspace"), 1, 7, 1002));
     {
         const QString workspace = QDir::current().absoluteFilePath(
             QStringLiteral("build/prepared-mix-short-bank-test-") +
@@ -7203,6 +7241,12 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         jam2::gui::looperTimelineViewFrames(48000, 384000, 96000, -1, -1) == 384000 &&
         jam2::gui::looperTimelineViewFrames(48000, 384000, 480000, -1, -1) == 480000 &&
         jam2::gui::looperTimelineViewFrames(48000, 384000, 96000, -1, 12000) == 576000);
+    record(QStringLiteral("track-timeline.live-recording-expands-in-stable-steps"),
+        jam2::gui::stableLiveTimelineExtentFrames(0, 384000, 1) == 384000 &&
+        jam2::gui::stableLiveTimelineExtentFrames(384000, 384000, 383999) == 384000 &&
+        jam2::gui::stableLiveTimelineExtentFrames(384000, 384000, 384001) == 768000 &&
+        jam2::gui::stableLiveTimelineExtentFrames(768000, 384000, 500000) == 768000 &&
+        jam2::gui::stableLiveTimelineExtentFrames(768000, 384000, 0) == 0);
     record(QStringLiteral("track-timeline.labels-bars-only"),
         jam2::gui::trackTimelineBarNumber(0, 4) == 1 &&
         jam2::gui::trackTimelineBarNumber(1, 4) == 0 &&
@@ -7452,6 +7496,30 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
     record(QStringLiteral("record-count-in.starts-at-safe-next-beat"),
         jam2::gui::recording_count_in_start_beat(3, 10000, 10100, 48000) == 5 &&
         jam2::gui::recording_count_in_start_beat(3, 10000, 20000, 48000) == 4);
+    record(QStringLiteral("record-count-in.synced-group-uses-next-safe-bar"),
+        [] {
+            PlaybackGrid::Position position;
+            position.running = true;
+            position.engineAnchored = true;
+            position.epochFrame = 0;
+            position.secondsPerBeat = 0.5;
+            position.sampleRate = 48000;
+            position.absoluteBeat = 5;
+            position.rawCurrentFrame = 125000;
+            const bool normal = jam2::gui::synced_recording_countdown_beat(
+                position, 4) == 8;
+            position.absoluteBeat = 7;
+            position.rawCurrentFrame = 191500;
+            const bool nearBoundary = jam2::gui::synced_recording_countdown_beat(
+                position, 4) == 12;
+            return normal && nearBoundary;
+        }());
+    record(QStringLiteral("track-take.cancel-idle-does-not-publish-completion"),
+        [] {
+            jam2::audio::TrackTakeRecorder recorder(256);
+            recorder.cancel();
+            return !recorder.consume_completion().available;
+        }());
     record(QStringLiteral("record-count-in-depends-on-grid-not-local-click"),
         jam2::gui::recording_grid_ready_for_count_in(true) &&
         !jam2::gui::recording_grid_ready_for_count_in(false));
