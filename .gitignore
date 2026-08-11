@@ -30,15 +30,10 @@ Testing/
 /incoming_uploads/
 /artifacts/
 /datasets/
-/app/jamtaster/worker/.venv/
-/app/jamtaster/worker/cache/
-/app/jamtaster/worker/models/
-/app/jamtaster/.cpu-*
-/experiments/jamtaster-native/.deps/
-/experiments/jamtaster-native/build/
-/experiments/jamtaster-native/models/adtof.onnx
-/experiments/jamtaster-native/models/adtof.onnx.json
-/experiments/jamtaster-native/outputs/
+!/libs/third_party/onnxruntime/windows-x64/lib/onnxruntime.dll
+!/libs/third_party/onnxruntime/windows-x64/lib/onnxruntime.lib
+!/libs/third_party/onnxruntime/macos-arm64/lib/*.dylib
+!/libs/third_party/onnxruntime/macos-x64/lib/*.dylib
 __pycache__/
 *.pyc
 

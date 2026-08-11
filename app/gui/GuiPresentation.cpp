@@ -102,6 +102,7 @@ protected:
 
 private:
     static constexpr auto kPreparedSizeProperty = "jam2PreparedDialogSize";
+    static constexpr auto kMaximumHeightProperty = "jam2MaximumDialogHeight";
 
     static void prepareDialog(QDialog& dialog)
     {
@@ -124,9 +125,11 @@ private:
         if (screen == nullptr) return;
 
         const QRect available = screen->availableGeometry();
+        const int requestedHeightLimit = dialog.property(kMaximumHeightProperty).toInt();
+        const int heightLimit = requestedHeightLimit > 0 ? requestedHeightLimit : 720;
         const QSize maximum(
             std::min(900, std::max(320, available.width() - 96)),
-            std::min(720, std::max(240, available.height() - 96)));
+            std::min(heightLimit, std::max(240, available.height() - 96)));
         if (dialog.isMaximized() || dialog.isFullScreen()) {
             dialog.setWindowState(dialog.windowState() &
                 ~(Qt::WindowMaximized | Qt::WindowFullScreen));

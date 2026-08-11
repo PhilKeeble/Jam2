@@ -284,22 +284,19 @@ analysis with it.
 
 Saved results can be applied independently: set the project tempo/grid, add the
 four stems to normal `imported/` lanes, apply selected musical data and
-arrangement to the current jam, or create a separate JamJar song. The component
-runs in a separate process from Jam2. Its private runtime and model installation
-can be installed, health-checked, repaired, or removed from the **JamTaster**
-Settings page; end users do not manage Python environments.
-On Windows, Jam2 detects a compatible NVIDIA GPU/driver and chooses the CUDA
-component; otherwise it chooses the CPU-only component. macOS receives a native
-package without CUDA. The selected processing runtime is shown in Settings, and
-an automatically selected accelerator failure retries the request once on CPU.
-Installation and analysis are owned by the main Jam2 window, so closing the
-JamTaster dialog does not stop the task or discard a queued analysis. Live
+arrangement to the current jam, or create a separate JamJar song. JamTaster's
+native worker, CPU inference runtime, and model weights are bundled with Jam2;
+there is no separate install, health check, repair, download, Python environment
+or CUDA package to manage. Analysis runs outside the Jam2 process and uses the
+available processor cores.
+
+Analysis is owned by the main Jam2 window, so closing the JamTaster dialog does
+not stop the task or discard a queued analysis. Live
 JamTaster progress temporarily replaces the top session-status pill and is also
 shown on the Performance-view JamTaster action. Click either place to reopen the
 dialog. **Cancel Task** is enabled only while work is active, asks for
-confirmation, and can stop installation, health checks, or analysis. Cancelled
-installs are cleaned up automatically; a stale partial installation can also be
-removed explicitly from the dialog without removing per-song analysis.
+confirmation, and stops the active analysis worker without removing completed
+per-song results.
 
 ## Track Recording From The GUI
 

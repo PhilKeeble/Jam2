@@ -23,8 +23,17 @@ maybe arrange the buttons a bit differently so they are grouped nicer
 add a copy and paste bar option in the beat and chord views for quicker work 
 
 allow export to midi option 
+consider allowing midi / mpe input on tracks and allowing plugins for a more daw like experience if people want to build loops to jam on
 
 make sure that when python is removed we also remove the qt compoennts and other parts we dont need, whcih should remove moc for mac 
+
+look into why daisy drums has its own cmake, think its leftover stuff
+
+Make a jamjar collection repo to store full songs and jams 
+
+look into CC BY-NC-SA 4.0 terms 
+
+CPU of jamtaster worker sitting very high during analysis, much higher than during testing 
 
 ## Bugs
 

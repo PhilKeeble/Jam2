@@ -38,18 +38,20 @@ JamTasterDialog::JamTasterDialog(
     , callbacks_(std::move(callbacks))
 {
     setWindowTitle(QStringLiteral("JamTaster"));
-    resize(820, 720);
+    setProperty("jam2MaximumDialogHeight", 760);
+    resize(820, 760);
 
     auto* content = new QWidget(this);
     auto* layout = new QVBoxLayout(content);
     layout->setContentsMargins(18, 18, 18, 18);
     layout->setSpacing(14);
+    layout->setAlignment(Qt::AlignTop);
 
     auto* introduction = new QLabel(
         QStringLiteral(
             "Analyse a Jam2 recording or imported WAV once, then choose exactly "
             "which timing, stems, notes and sections to bring into the jam. "
-            "Installation and analysis continue in the background if this window is closed."),
+            "Analysis continues in the background if this window is closed."),
         content);
     introduction->setWordWrap(true);
     layout->addWidget(introduction);
@@ -75,36 +77,6 @@ JamTasterDialog::JamTasterDialog(
     connect(choose, &QPushButton::clicked, this, &JamTasterDialog::chooseSource);
     layout->addWidget(sourceBox);
 
-    auto* componentBox = new QGroupBox(QStringLiteral("Analysis component"), content);
-    auto* componentLayout = new QVBoxLayout(componentBox);
-    auto* componentRow = new QHBoxLayout();
-    componentLabel_ = new QLabel(componentBox);
-    componentLabel_->setWordWrap(true);
-    storageLabel_ = new QLabel(service_.storageSummary(), componentBox);
-    storageLabel_->setWordWrap(true);
-    storageLabel_->setProperty("muted", true);
-    componentInstallButton_ = new QPushButton(QStringLiteral("Install"), componentBox);
-    componentHealthButton_ = new QPushButton(QStringLiteral("Check health"), componentBox);
-    componentRemoveButton_ = new QPushButton(QStringLiteral("Remove"), componentBox);
-    componentRow->addWidget(componentLabel_, 1);
-    componentRow->addWidget(componentInstallButton_);
-    componentRow->addWidget(componentHealthButton_);
-    componentRow->addWidget(componentRemoveButton_);
-    componentLayout->addLayout(componentRow);
-    componentLayout->addWidget(storageLabel_);
-    connect(componentInstallButton_, &QPushButton::clicked, this, [this] {
-        if (QFileInfo::exists(service_.componentRoot())) {
-            service_.repair();
-        } else {
-            service_.install();
-        }
-    });
-    connect(componentHealthButton_, &QPushButton::clicked,
-            &service_, &JamTasterService::checkHealth);
-    connect(componentRemoveButton_, &QPushButton::clicked,
-            this, &JamTasterDialog::removePartialComponent);
-    layout->addWidget(componentBox);
-
     auto* actions = new QGroupBox(QStringLiteral("Quick analysis"), content);
     auto* actionLayout = new QHBoxLayout(actions);
     analyzeButton_ = new QPushButton(QStringLiteral("Analyse Everything"), actions);
@@ -121,14 +93,21 @@ JamTasterDialog::JamTasterDialog(
             [this] { startAction(QStringLiteral("split_stems")); });
     layout->addWidget(actions);
 
-    progressLabel_ = new QLabel(QStringLiteral("Ready"), content);
+    auto* progressPanel = new QWidget(content);
+    progressPanel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    auto* progressLayout = new QVBoxLayout(progressPanel);
+    progressLayout->setContentsMargins(0, 0, 0, 0);
+    progressLayout->setSpacing(6);
+    progressLabel_ = new QLabel(QStringLiteral("Ready"), progressPanel);
     progressLabel_->setWordWrap(true);
-    progressBar_ = new QProgressBar(content);
+    progressLabel_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    progressBar_ = new QProgressBar(progressPanel);
     progressBar_->setObjectName(QStringLiteral("JamTasterProgress"));
     progressBar_->setRange(0, 100);
     progressBar_->setValue(0);
-    layout->addWidget(progressLabel_);
-    layout->addWidget(progressBar_);
+    progressLayout->addWidget(progressLabel_);
+    progressLayout->addWidget(progressBar_);
+    layout->addWidget(progressPanel);
 
     auto* results = new QGroupBox(QStringLiteral("Saved results for this WAV"), content);
     auto* resultLayout = new QFormLayout(results);
@@ -217,39 +196,13 @@ JamTasterDialog::JamTasterDialog(
     outer->addWidget(scroll, 1);
     outer->addWidget(buttons);
 
-    connect(&service_, &JamTasterService::componentChanged,
-            this, [this] {
-                refreshComponent();
-                startPendingAction();
-            });
-    connect(&service_, &JamTasterService::storageUsageChanged,
-            this, [this](const QString& summary) {
-                storageLabel_->setText(summary);
-            });
-    connect(&service_, &JamTasterService::componentProgress,
-            this, [this](const QString& message, int percent) {
-                progressLabel_->setText(message);
-                if (percent >= 0) progressBar_->setValue(percent);
-                refreshComponent();
-                refreshResultsUi();
-            });
-    connect(&service_, &JamTasterService::componentFailed,
-            this, [this](const QString& message) {
-                pendingAction_.clear();
-                createSongAfterAnalysis_ = false;
-                progressLabel_->setText(message);
-                if (isVisible()) {
-                    QMessageBox::warning(this, QStringLiteral("JamTaster"), message);
-                }
-            });
-    connect(&service_, &JamTasterService::jobStarted,
-            this, [this](const QString&) {
+    JamTasterService::Observer observer;
+    observer.jobStarted = [this](const QString&) {
                 progressBar_->setValue(0);
                 progressLabel_->setText(QStringLiteral("Starting isolated JamTaster worker…"));
                 refreshResultsUi();
-            });
-    connect(&service_, &JamTasterService::jobProgress,
-            this, [this](const QJsonObject& event) {
+            };
+    observer.jobProgress = [this](const QJsonObject& event) {
                 if (event.value(QStringLiteral("type")).toString() !=
                     QStringLiteral("progress")) return;
                 const QString message = event.value(QStringLiteral("message")).toString();
@@ -257,27 +210,22 @@ JamTasterDialog::JamTasterDialog(
                 if (event.contains(QStringLiteral("percent"))) {
                     progressBar_->setValue(event.value(QStringLiteral("percent")).toInt());
                 }
-            });
-    connect(&service_, &JamTasterService::taskStatusChanged,
-            this, [this](const QString&, int, bool) {
+            };
+    observer.taskStatusChanged = [this](const QString&, int, bool) {
                 syncTaskState();
-                refreshComponent();
                 refreshResultsUi();
-            });
-    connect(&service_, &JamTasterService::taskCancelled,
-            this, [this] {
+            };
+    observer.taskCancelled = [this] {
                 pendingAction_.clear();
                 createSongAfterAnalysis_ = false;
                 syncTaskState();
-            });
-    connect(&service_, &JamTasterService::jobFinished,
-            this, [this](const QJsonObject& result) {
+            };
+    observer.jobFinished = [this](const QJsonObject& result) {
                 progressBar_->setValue(100);
                 progressLabel_->setText(QStringLiteral("Analysis complete"));
                 acceptJobResult(result);
-            });
-    connect(&service_, &JamTasterService::jobFailed,
-            this, [this](const QString& error) {
+            };
+    observer.jobFailed = [this](const QString& error) {
                 createSongAfterAnalysis_ = false;
                 progressLabel_->setText(error);
                 refreshResultsUi();
@@ -285,15 +233,20 @@ JamTasterDialog::JamTasterDialog(
                     QMessageBox::warning(
                         this, QStringLiteral("JamTaster analysis failed"), error);
                 }
-            });
+            };
+    serviceObserverId_ = service_.addObserver(std::move(observer));
 
-    refreshComponent();
     refreshSavedResults();
     if (!service_.lastJobResult().isEmpty()) {
         acceptJobResult(service_.lastJobResult());
     }
     syncTaskState();
     refreshResultsUi();
+}
+
+JamTasterDialog::~JamTasterDialog()
+{
+    service_.removeObserver(serviceObserverId_);
 }
 
 void JamTasterDialog::setSourceContext(
@@ -345,24 +298,8 @@ void JamTasterDialog::startAction(const QString& action)
         chooseSource();
         if (!QFileInfo(sourcePath_).isFile()) return;
     }
-    if (!service_.isInstalled()) {
-        const auto answer = QMessageBox::question(
-            this,
-            QStringLiteral("Install JamTaster"),
-            QStringLiteral(
-                "This analysis requires the optional private JamTaster runtime and models. "
-                "Jam2 will detect compatible graphics hardware and install the correct "
-                "CPU, NVIDIA, or native macOS component inside Jam2's application-data "
-                "folder. Your system Python installation will not be changed. Install it now?"),
-            QMessageBox::Yes | QMessageBox::Cancel,
-            QMessageBox::Yes);
-        if (answer != QMessageBox::Yes) return;
-        pendingAction_ = action;
-        if (QFileInfo::exists(service_.componentRoot())) {
-            service_.repair();
-        } else {
-            service_.install();
-        }
+    if (!service_.isAvailable()) {
+        QMessageBox::warning(this, QStringLiteral("JamTaster"), service_.bundleStatus());
         return;
     }
     pendingAction_ = action;
@@ -371,7 +308,7 @@ void JamTasterDialog::startAction(const QString& action)
 
 void JamTasterDialog::startPendingAction()
 {
-    if (pendingAction_.isEmpty() || !service_.isInstalled() || service_.isBusy()) return;
+    if (pendingAction_.isEmpty() || !service_.isAvailable() || service_.isBusy()) return;
     QJsonObject request{
         {QStringLiteral("action"), pendingAction_},
         {QStringLiteral("input_path"), sourcePath_},
@@ -388,31 +325,6 @@ void JamTasterDialog::startPendingAction()
     refreshResultsUi();
 }
 
-void JamTasterDialog::refreshComponent()
-{
-    const QString version = service_.componentVersion();
-    const bool filesExist = QFileInfo::exists(service_.componentRoot());
-    componentLabel_->setText(version.isEmpty()
-        ? service_.componentStatus()
-        : QStringLiteral("%1 | version %2")
-            .arg(service_.componentStatus(), version));
-    storageLabel_->setText(service_.storageSummary());
-    if (!service_.taskActive()) service_.refreshStorageUsage();
-    componentInstallButton_->setText(filesExist
-        ? QStringLiteral("Repair") : QStringLiteral("Install"));
-    componentInstallButton_->setEnabled(!service_.taskActive());
-    componentHealthButton_->setEnabled(service_.isInstalled() && !service_.taskActive());
-    componentRemoveButton_->setText(
-        filesExist && !service_.isInstalled()
-            ? QStringLiteral("Remove Partial Installation")
-            : QStringLiteral("Remove"));
-    componentRemoveButton_->setEnabled(filesExist && !service_.taskActive());
-    componentLabel_->setToolTip(QStringLiteral(
-        "JamTaster's Python runtime and packages are isolated under this application "
-        "component folder. They do not modify the system Python installation.\n\n%1")
-        .arg(service_.componentRoot()));
-}
-
 void JamTasterDialog::syncTaskState()
 {
     cancelTaskButton_->setEnabled(service_.taskActive());
@@ -421,10 +333,6 @@ void JamTasterDialog::syncTaskState()
         progressLabel_->setText(service_.taskStatusText());
         progressBar_->setRange(0, 100);
         progressBar_->setValue(service_.taskProgress());
-    } else if (QFileInfo::exists(service_.componentRoot()) && !service_.isInstalled()) {
-        progressLabel_->setText(QStringLiteral(
-            "A partial JamTaster installation can be repaired or removed."));
-        progressBar_->setValue(0);
     }
 }
 
@@ -435,37 +343,10 @@ void JamTasterDialog::confirmCancelTask()
         this,
         QStringLiteral("Cancel JamTaster task"),
         QStringLiteral(
-            "Cancel the active JamTaster task? An interrupted installation will be "
-            "cleaned up, and completed song analysis results will be left intact."),
+            "Cancel the active JamTaster task? Completed song analysis results will be left intact."),
         QMessageBox::Yes | QMessageBox::No,
         QMessageBox::No);
     if (answer == QMessageBox::Yes) service_.cancelTask();
-}
-
-void JamTasterDialog::removePartialComponent()
-{
-    if (service_.taskActive() || !QFileInfo::exists(service_.componentRoot())) return;
-    const bool partial = !service_.isInstalled();
-    const auto answer = QMessageBox::warning(
-        this,
-        partial ? QStringLiteral("Remove partial JamTaster installation")
-                : QStringLiteral("Remove JamTaster"),
-        partial
-            ? QStringLiteral(
-                "Remove the incomplete private JamTaster runtime? This does not remove "
-                "analysis saved inside song folders.")
-            : QStringLiteral(
-                "Remove the private JamTaster runtime and models? Analysis saved inside "
-                "song folders will remain available."),
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::No);
-    if (answer != QMessageBox::Yes) return;
-    QString error;
-    if (!service_.remove(error)) {
-        QMessageBox::warning(this, QStringLiteral("JamTaster"), error);
-    }
-    refreshComponent();
-    syncTaskState();
 }
 
 QString JamTasterDialog::analysisSourceRoot() const

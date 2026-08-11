@@ -1035,71 +1035,70 @@ MainWindow::MainWindow(QWidget* parent)
         },
     });
     jamTaster_ = std::make_unique<JamTasterService>(this);
-    connect(jamTaster_.get(), &JamTasterService::componentProgress,
-            this, [this](const QString& message, int percent) {
-                appendLog(percent >= 0
-                    ? QStringLiteral("JamTaster component: %1 (%2%)").arg(message).arg(percent)
-                    : QStringLiteral("JamTaster component: ") + message);
-            });
-    connect(jamTaster_.get(), &JamTasterService::componentLog,
-            this, [this](const QString& message) {
-                appendLog(QStringLiteral("JamTaster install: ") + message);
-            });
-    connect(jamTaster_.get(), &JamTasterService::jobProgress,
-            this, [this](const QJsonObject& event) {
-                const QString message = event.value(QStringLiteral("message")).toString();
-                if (!message.isEmpty()) appendLog(QStringLiteral("JamTaster: ") + message);
-            });
-    connect(jamTaster_.get(), &JamTasterService::jobStarted,
-            this, [this](const QString& action) {
-                appendLog(QStringLiteral("JamTaster job started in isolated process: ") + action);
-            });
-    connect(jamTaster_.get(), &JamTasterService::jobFailed,
-            this, [this](const QString& error) {
-                appendLog(QStringLiteral("JamTaster worker failed: ") + error);
-            });
-    connect(jamTaster_.get(), &JamTasterService::taskStatusChanged,
-            this, [this](const QString&, int percent, bool active) {
+    JamTasterService::Observer jamTasterObserver;
+    jamTasterObserver.log = [this](const QString& message) {
+        appendLog(QStringLiteral("JamTaster worker: ") + message);
+    };
+    jamTasterObserver.jobProgress = [this](const QJsonObject& event) {
+        const QString message = event.value(QStringLiteral("message")).toString();
+        if (!message.isEmpty()) appendLog(QStringLiteral("JamTaster: ") + message);
+    };
+    jamTasterObserver.jobStarted = [this](const QString& action) {
+        appendLog(QStringLiteral("JamTaster job started in isolated process: ") + action);
+    };
+    const auto showJamTasterOutcome = [this](
+        const QString& pill,
+        const QString& status,
+        const QString& state,
+        bool issue) {
+        ++jamTasterStatusRevision_;
+        setSessionHeaderStatus(
+            pill,
+            status,
+            {QStringLiteral("Click to reopen JamTaster.")},
+            issue,
+            true);
+        connectionLabel_->setProperty("jamtaster", state);
+        connectionLabel_->style()->unpolish(connectionLabel_);
+        connectionLabel_->style()->polish(connectionLabel_);
+        const quint64 revision = jamTasterStatusRevision_;
+        QTimer::singleShot(8000, this, [this, revision] {
+            if (revision == jamTasterStatusRevision_ &&
+                !jamTaster_->taskActive()) {
+                restoreSessionHeaderStatus();
+            }
+        });
+    };
+    jamTasterObserver.jobFinished = [showJamTasterOutcome](const QJsonObject&) {
+        showJamTasterOutcome(
+            QStringLiteral("JAMTASTER DONE"),
+            QStringLiteral("JamTaster analysis complete"),
+            QStringLiteral("complete"),
+            false);
+    };
+    jamTasterObserver.jobFailed = [this, showJamTasterOutcome](const QString& error) {
+        appendLog(QStringLiteral("JamTaster worker failed: ") + error);
+        showJamTasterOutcome(
+            QStringLiteral("JAMTASTER ERROR"), error,
+            QStringLiteral("error"), true);
+    };
+    jamTasterObserver.taskCancelled = [showJamTasterOutcome] {
+        showJamTasterOutcome(
+            QStringLiteral("JAMTASTER STOPPED"),
+            QStringLiteral("JamTaster analysis cancelled"),
+            QStringLiteral("cancelled"),
+            false);
+    };
+    jamTasterObserver.taskStatusChanged = [this](const QString&, int percent, bool active) {
                 ++jamTasterStatusRevision_;
                 if (performanceHome_) {
                     performanceHome_->setJamTasterTaskStatus(active, percent);
                 }
                 if (active) {
                     showJamTasterSessionHeaderStatus();
-                    return;
                 }
-                const QString status = jamTaster_->taskStatusText();
-                const QString lower = status.toLower();
-                const bool issue = lower.contains(QStringLiteral("fail")) ||
-                    lower.contains(QStringLiteral("error")) ||
-                    lower.contains(QStringLiteral("repair"));
-                const QString pill = issue
-                    ? QStringLiteral("JAMTASTER ERROR")
-                    : lower.contains(QStringLiteral("cancel"))
-                        ? QStringLiteral("JAMTASTER STOPPED")
-                        : QStringLiteral("JAMTASTER DONE");
-                setSessionHeaderStatus(
-                    pill,
-                    status,
-                    {QStringLiteral("Click to reopen JamTaster.")},
-                    issue,
-                    true);
-                connectionLabel_->setProperty(
-                    "jamtaster",
-                    issue ? QStringLiteral("error")
-                          : lower.contains(QStringLiteral("cancel"))
-                              ? QStringLiteral("cancelled")
-                              : QStringLiteral("complete"));
-                connectionLabel_->style()->unpolish(connectionLabel_);
-                connectionLabel_->style()->polish(connectionLabel_);
-                const quint64 revision = jamTasterStatusRevision_;
-                QTimer::singleShot(8000, this, [this, revision] {
-                    if (revision == jamTasterStatusRevision_ &&
-                        !jamTaster_->taskActive()) {
-                        restoreSessionHeaderStatus();
-                    }
-                });
-            });
+            };
+    (void)jamTaster_->addObserver(std::move(jamTasterObserver));
     installJam2Style();
     generateSession();
     (void)JamStorage::pruneEmptyUnsavedWorkspaces();
@@ -2305,7 +2304,7 @@ void MainWindow::showJamTasterSessionHeaderStatus()
         : QStringLiteral("JAMTASTER");
     setSessionHeaderStatus(
         pill,
-        QStringLiteral("JamTaster background task"),
+        QStringLiteral("JamTaster analysis"),
         {jamTaster_->taskStatusText(), QStringLiteral("Click to view or cancel the task.")},
         false,
         true);
@@ -4353,88 +4352,33 @@ void MainWindow::showSettingsDialog()
     jamTasterLayout->setSpacing(14);
     auto* jamTasterDescription = new QLabel(
         QStringLiteral(
-            "JamTaster is an optional, self-contained audio analysis component. "
-            "It runs outside Jam2 and stores each WAV's results in that song's analysis folder."),
+            "JamTaster is bundled with Jam2 as a native analysis worker. It runs outside "
+            "the Jam2 process and stores each WAV's reusable results in that song's "
+            "analysis folder."),
         jamTasterContent);
     jamTasterDescription->setWordWrap(true);
     jamTasterLayout->addWidget(jamTasterDescription);
-    auto* jamTasterBox = new QGroupBox(QStringLiteral("Installation"), jamTasterContent);
+    auto* jamTasterBox = new QGroupBox(QStringLiteral("Bundled runtime"), jamTasterContent);
     auto* jamTasterForm = new QFormLayout(jamTasterBox);
     auto* jamTasterStatus = new QLabel(jamTasterBox);
     jamTasterStatus->setWordWrap(true);
     jamTasterStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    auto* jamTasterPath = new QLabel(jamTaster_->componentRoot(), jamTasterBox);
+    jamTasterStatus->setText(jamTaster_->bundleStatus());
+    auto* jamTasterPath = new QLabel(jamTaster_->bundleRoot(), jamTasterBox);
     jamTasterPath->setWordWrap(true);
     jamTasterPath->setTextInteractionFlags(Qt::TextSelectableByMouse);
     auto* jamTasterAccelerator = new QLabel(
-        jamTaster_->acceleratorRecommendation(), jamTasterBox);
+        QStringLiteral("CPU ONNX Runtime · automatically uses available processor cores"),
+        jamTasterBox);
     jamTasterAccelerator->setWordWrap(true);
-    jamTasterAccelerator->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    auto* jamTasterActions = new QWidget(jamTasterBox);
-    auto* jamTasterActionsLayout = new QHBoxLayout(jamTasterActions);
-    jamTasterActionsLayout->setContentsMargins(0, 0, 0, 0);
-    auto* jamTasterInstall = new QPushButton(QStringLiteral("Install"), jamTasterActions);
-    auto* jamTasterHealth = new QPushButton(QStringLiteral("Check Health"), jamTasterActions);
-    auto* jamTasterRepair = new QPushButton(QStringLiteral("Repair"), jamTasterActions);
-    auto* jamTasterRemove = new QPushButton(QStringLiteral("Remove"), jamTasterActions);
-    jamTasterActionsLayout->addWidget(jamTasterInstall);
-    jamTasterActionsLayout->addWidget(jamTasterHealth);
-    jamTasterActionsLayout->addWidget(jamTasterRepair);
-    jamTasterActionsLayout->addWidget(jamTasterRemove);
+    auto* jamTasterStorage = new QLabel(jamTaster_->storageSummary(), jamTasterBox);
+    jamTasterStorage->setWordWrap(true);
     jamTasterForm->addRow(QStringLiteral("Status"), jamTasterStatus);
     jamTasterForm->addRow(QStringLiteral("Location"), jamTasterPath);
     jamTasterForm->addRow(QStringLiteral("Processing"), jamTasterAccelerator);
-    jamTasterForm->addRow(jamTasterActions);
+    jamTasterForm->addRow(QStringLiteral("Space used"), jamTasterStorage);
     jamTasterLayout->addWidget(jamTasterBox);
-    auto* jamTasterProgress = new QLabel(QStringLiteral("No component operation is running."), jamTasterContent);
-    jamTasterProgress->setWordWrap(true);
-    jamTasterLayout->addWidget(jamTasterProgress);
     jamTasterLayout->addStretch(1);
-    const auto refreshJamTasterSettings = [=, this] {
-        const QString version = jamTaster_->componentVersion();
-        jamTasterStatus->setText(version.isEmpty()
-            ? jamTaster_->componentStatus()
-            : QStringLiteral("%1 · version %2")
-                .arg(jamTaster_->componentStatus(), version));
-        const bool busy = jamTaster_->isBusy();
-        const bool installed = jamTaster_->isInstalled();
-        const bool componentFiles = QFileInfo::exists(jamTaster_->componentRoot());
-        jamTasterInstall->setEnabled(!busy && !installed && !componentFiles);
-        jamTasterHealth->setEnabled(!busy && installed);
-        jamTasterRepair->setEnabled(!busy && componentFiles);
-        jamTasterRemove->setEnabled(!busy && componentFiles);
-    };
-    refreshJamTasterSettings();
-    QObject::connect(jamTaster_.get(), &JamTasterService::componentChanged,
-                     &dialog, refreshJamTasterSettings);
-    QObject::connect(jamTaster_.get(), &JamTasterService::componentProgress,
-                     &dialog, [=](const QString& message, int percent) {
-        jamTasterProgress->setText(percent >= 0
-            ? QStringLiteral("%1 · %2%").arg(message).arg(percent) : message);
-        refreshJamTasterSettings();
-    });
-    QObject::connect(jamTasterInstall, &QPushButton::clicked,
-                     &dialog, [this] { jamTaster_->install(); });
-    QObject::connect(jamTasterHealth, &QPushButton::clicked,
-                     &dialog, [this] { jamTaster_->checkHealth(); });
-    QObject::connect(jamTasterRepair, &QPushButton::clicked,
-                     &dialog, [this] { jamTaster_->repair(); });
-    QObject::connect(jamTasterRemove, &QPushButton::clicked,
-                     &dialog, [this, &dialog] {
-        if (QMessageBox::question(
-                &dialog,
-                QStringLiteral("Remove JamTaster"),
-                QStringLiteral(
-                    "Remove the shared JamTaster runtime and models? "
-                    "Song analysis folders and applied project content will remain."),
-                QMessageBox::Yes | QMessageBox::Cancel,
-                QMessageBox::Cancel) != QMessageBox::Yes) return;
-        QString error;
-        if (!jamTaster_->remove(error)) {
-            QMessageBox::warning(&dialog, QStringLiteral("JamTaster"), error);
-        }
-    });
-
     if (networkActive) {
         localBox->setEnabled(false);
         splitNetworkAudio->setEnabled(false);

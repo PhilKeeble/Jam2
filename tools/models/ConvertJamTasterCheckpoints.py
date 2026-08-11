@@ -14,9 +14,7 @@ import time
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-ROOT = REPO_ROOT / "experiments" / "jamtaster-native"
-MODELS_ROOT = ROOT / "models"
-OUTPUTS_ROOT = ROOT / "outputs"
+MODELS_ROOT = REPO_ROOT / "app" / "jamtaster" / "models"
 CONVERSION_DEMUCS_ROOT = (
     Path(__file__).resolve().parent / "third_party" / "jamtaster_demucs_onnx"
 )
@@ -69,9 +67,6 @@ def _sha256(path: Path) -> str:
 
 
 def _prepare_ml_imports(component_root: Path) -> None:
-    worker_path = str(REPO_ROOT / "app" / "jamtaster" / "worker")
-    if worker_path not in sys.path:
-        sys.path.insert(0, worker_path)
     os.environ["JAMTASTER_COMPONENT_ROOT"] = str(component_root)
     os.environ["TORCH_HOME"] = str(component_root / "cache" / "torch")
 
@@ -304,7 +299,7 @@ def _export_demucs_ft(component_root: Path) -> list[Path]:
             },
             {
                 "status": "validated-native-audio-parity",
-                "reference": "experiments/jamtaster-native/RESULTS.md",
+                "reference": "app/jamtaster/README.md",
             },
         )
         destinations.append(destination)
@@ -449,23 +444,6 @@ def reference(args: argparse.Namespace) -> None:
             "provider": "CPU",
             "midi_range": [args.min_midi, args.max_midi],
             "notes": notes,
-            "timings": {"complete_analysis": duration},
-        }
-    elif args.stage == "chords":
-        from jamtaster.models import analyze_chords
-
-        started = time.perf_counter()
-        segments, _ = analyze_chords(Path(args.input), output_root, "cpu")
-        duration = time.perf_counter() - started
-        report = {
-            "format": "jamtaster-python-chords-v1",
-            "input": str(Path(args.input).resolve()),
-            "model": "ChordMini BTC",
-            "provider": "CPU",
-            "chords": [
-                {"start": item.start, "end": item.end, "label": item.label}
-                for item in segments
-            ],
             "timings": {"complete_analysis": duration},
         }
     elif args.stage == "drums":
@@ -701,7 +679,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     reference_parser = commands.add_parser("reference", help="write Python reference tensors and events")
     reference_parser.add_argument(
-        "--stage", choices=("beat", "basic-pitch", "chords", "drums", "demucs"),
+        "--stage", choices=("beat", "basic-pitch", "drums", "demucs"),
         default="beat",
     )
     reference_parser.add_argument("--input", required=True)
@@ -728,7 +706,7 @@ def main() -> int:
         component_root = Path(args.component_root).resolve()
         python = _component_python(component_root)
         environment = dict(os.environ)
-        python_path = [str(REPO_ROOT / "app" / "jamtaster" / "worker")]
+        python_path = []
         if sys.platform == "win32":
             site_packages = component_root / "runtime" / "Lib" / "site-packages"
         else:

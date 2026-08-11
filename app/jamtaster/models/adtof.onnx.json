@@ -1,0 +1,16 @@
+{
+  "format": "jamtaster-native-export-v1",
+  "model": "adtof.onnx",
+  "bytes": 1822342,
+  "sha256": "bc275b20dfe9ddee80e6d6ff5f8f6ec0100f5b75d1d64d844f85ceb34376e7ea",
+  "source": {
+    "checkpoint": "adtof_frame_rnn_pytorch_weights.pth",
+    "sha256": "1bc986e596ec47ba0b44916f87cd4a39f0b2bec23596df3fb5d0e87749217320",
+    "redistribution": "unresolved"
+  },
+  "parity": {
+    "maximum_absolute_error": 8.866190910339355e-07,
+    "mean_absolute_error": 3.8042959005224475e-08
+  },
+  "created_at": 1786471947.723206
+}

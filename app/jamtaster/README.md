@@ -1,19 +1,30 @@
-# JamTaster component
+# JamTaster
 
-JamTaster is Jam2's optional, isolated WAV-analysis component. Production code lives here because it is an application feature rather than a development experiment.
+JamTaster is Jam2's bundled native WAV-analysis engine. The public application
+remains `jam2`; analysis is executed by the private `jamtaster-worker` helper so
+a model/runtime failure cannot bring down a live Jam2 process.
+
+The release contains the worker, ONNX Runtime and the model weights. It does not
+use Python, pip, PyTorch, CUDA, an installer, a downloader, or a mutable runtime.
+Inference is CPU-only and uses the machine's available hardware threads.
 
 ## Runtime boundary
 
-Jam2 starts one private worker process per analysis request and communicates with JSON lines. Python, Torch, native model libraries and model weights never load into `jam2.exe`. A failed worker cannot corrupt the live Jam2 process.
+Jam2 writes a protocol-1 JSON request and starts one worker process. The worker
+emits newline-delimited progress, result and error objects. Supported actions
+are `detect_bpm`, `split_stems`, `analyze_all` and `convert_song`.
 
-Shared runtime material is versioned outside the repository:
+The internal command is:
 
 ```text
-Windows: %LOCALAPPDATA%/Jam2/components/jamtaster/1.0.0/
-macOS:   ~/Library/Application Support/Jam2/components/jamtaster/1.0.0/
+jamtaster-worker worker --request <request.json> --models <model-directory>
 ```
 
-Per-WAV results belong to the owning song:
+This command is an implementation boundary, not a second public Jam2 CLI.
+
+## Song-local results
+
+Results are keyed by the source WAV's SHA-256 and live with the owning song:
 
 ```text
 <song>/analysis/index.json
@@ -23,62 +34,46 @@ Per-WAV results belong to the owning song:
 <song>/analysis/sources/<sha256>/converted/<song>/
 ```
 
-Deleting an unsaved song therefore deletes its analysis. Applied WAVs are materialized under the normal `imported/` folder.
+Deleting an unsaved song therefore deletes its analysis. Analysing is local and
+does not send a peer command. Only applying results changes normal Jam2 project
+state; existing Jam Sync and WAV-sharing settings then replicate those ordinary
+tempo, section, note and imported-lane changes.
 
-Installation, health checks, worker progress, and the `analysis/` cache are
-strictly local. They never create peer commands. Only an explicit Apply action
-changes the ordinary Jam2 song/track models, after which the existing Jam Sync
-and track-sharing preferences distribute those normal project changes.
+## Native pipeline
 
-## Development installation
+The worker runs the four-model HTDemucs FT ensemble, Beat This, ChordMini,
+Basic Pitch and ADTOF through ONNX Runtime. Native post-processing aligns the
+grid, restores drum patterns and dynamics, uses bass/chord/groove context, finds
+meaningful bar-aligned section changes, and exports up to twelve sections with
+an enabled arrangement. Exported section WAVs use Signalsmith Stretch and live
+under the JamJar's normal `imported/` directory.
 
-The Settings page invokes this automatically from a source checkout. The equivalent command is:
+Section inference does not assume that the input is a complete song and does
+not use a separate song-form model. Sections use neutral names such as
+`Section A` and are grouped from sustained tonal, groove and energy changes.
 
-```powershell
-py -3.10 app\jamtaster\worker\JamTaster.py install
-```
+## Source layout
 
-This source-only installer creates the private runtime and downloads pinned models into the same application-data location used by a release. Jam2 automatically selects a CPU-only or CUDA package on Windows from the detected NVIDIA GPU and driver. macOS uses the native PyTorch package and never installs CUDA; Health reports whether Apple's MPS backend is present while analysis keeps the conservative CPU path. End users receive or download a prebuilt component and never need Python, pip, a virtual environment, or an accelerator choice.
+- `*.cpp` / `*.hpp`: native inference, DSP, post-processing and worker protocol.
+- `third_party/demucs_onnx`: locally adapted MIT-licensed Demucs ONNX C++ code.
+- `models`: production ONNX artifacts and provenance sidecars.
+- `tests`: deterministic native DSP, export and post-processing tests.
+- `tools/models`: one-off Python conversion tools; these are never shipped or
+  invoked by Jam2.
 
-All development-installer pip commands are executed by the Python executable
-inside the versioned component runtime. Package upgrade/uninstall messages
-therefore refer only to that private runtime and never to the user's system
-Python installation. The native UI consumes structured installation milestones
-for its progress bar while retaining raw pip/model output only in Jam2's logs.
+Model and source licensing details are in `MODEL_NOTICES.md`. The ADTOF weight
+redistribution terms still require resolution before publishing a release; its
+local artifact remains ignored until that decision is made.
 
-## Worker requests
+## Validation
 
-The stable interface remains the single `JamTaster.py` argparse entry point:
-
-```powershell
-python JamTaster.py worker --request request.json
-```
-
-Protocol 1 supports `detect_bpm`, `split_stems`, `analyze_all` and `convert_song`. Requests name an existing WAV and its owning project root. Progress, results and errors are emitted as JSON lines.
-
-Song sections are inferred locally from sustained, bar-aligned changes in the
-detected chord cadence, drum groove, bass pattern, and stem energy. The result
-uses neutral `Section A`, `Section B`, and subsequent names; there is no separate
-song-form model or runtime dependency.
-
-## Release package
-
-After installing and checking a complete component on its target operating system:
+The normal Jam2 build compiles the worker and stages it with the application.
+On Windows, follow the repository build rule and then run:
 
 ```powershell
-python app\jamtaster\packaging\build_component.py `
-  --component-root <component-root> `
-  --output artifacts\jamtaster
+ctest --test-dir build --output-on-failure
 ```
 
-The builder creates a platform-specific `tar.gz` and a small release manifest containing its exact byte size and SHA-256. Windows artifacts have separate `-cpu` and `-cuda` suffixes; macOS artifacts use the native platform package and contain no CUDA libraries. Jam2 detects the appropriate package, verifies the archive and publishes the component atomically. If an automatically selected accelerator fails at job runtime, that request is retried once on CPU. Builds must be produced separately for Windows x86-64 CPU/CUDA, macOS arm64 and macOS x86-64 where supported, then signed/notarized as part of the normal release pipeline.
-
-Model redistribution licences must be audited before publishing a complete component archive.
-
-## Fast tests
-
-The unit tests do not download or execute the ML models:
-
-```powershell
-<component-python> -m unittest discover -s app\jamtaster\worker\tests -v
-```
+Release validation should also submit a protocol-1 request to the staged worker
+and verify that every `asset_path` in the generated JamJar names an existing,
+valid WAV.

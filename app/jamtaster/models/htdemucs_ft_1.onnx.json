@@ -1,0 +1,18 @@
+{
+  "format": "jamtaster-native-export-v1",
+  "model": "htdemucs_ft_1.onnx",
+  "bytes": 174263466,
+  "sha256": "375b1920ae65201a73b697dff8cad791330497ac4b811b5d196c619024781f17",
+  "source": {
+    "checkpoint": "d12395a8-e57c48e6.th",
+    "sha256": "e57c48e6b0e38af4f7118d7bd08c49f0a0c0edf7d09143bdd902ea0d237303e6",
+    "signature": "d12395a8",
+    "ensemble_role": "bass",
+    "demucs_onnx_revision": "81fa192e6fcc88e35e887f6e6ccce91227f4e6f5"
+  },
+  "parity": {
+    "status": "validated-native-audio-parity",
+    "reference": "app/jamtaster/README.md"
+  },
+  "created_at": 1786473653.3549025
+}

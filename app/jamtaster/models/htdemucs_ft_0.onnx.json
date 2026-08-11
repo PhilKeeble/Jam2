@@ -1,0 +1,18 @@
+{
+  "format": "jamtaster-native-export-v1",
+  "model": "htdemucs_ft_0.onnx",
+  "bytes": 174263466,
+  "sha256": "7d1a12d364d72ed18b01c0ee5747548fa2d94bc77fff3cc0931c1397b6dd4479",
+  "source": {
+    "checkpoint": "f7e0c4bc-ba3fe64a.th",
+    "sha256": "ba3fe64ae8ef66ac9a4857222ce48efbdc5eb3ad375cb79dd13debee5aaa4066",
+    "signature": "f7e0c4bc",
+    "ensemble_role": "drums",
+    "demucs_onnx_revision": "81fa192e6fcc88e35e887f6e6ccce91227f4e6f5"
+  },
+  "parity": {
+    "status": "validated-native-audio-parity",
+    "reference": "app/jamtaster/README.md"
+  },
+  "created_at": 1786473650.2456737
+}

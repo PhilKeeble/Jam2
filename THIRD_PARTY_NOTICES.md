@@ -45,3 +45,17 @@ change the model or its parameter behaviour; it prevents the first transient
 sample from reading indeterminate state. The pinned vendored source remains
 unmodified, and configuration fails if the reviewed upstream source anchor no
 longer matches.
+
+## JamTaster native analysis
+
+JamTaster uses ONNX Runtime 1.23.2 (MIT) for CPU inference and Eigen 3.4.0
+(MPL-2.0) for tensor/matrix support in its adapted Demucs implementation. Full
+licence texts are stored at `libs/third_party/onnxruntime/LICENSE` and
+`libs/third_party/eigen/COPYING.MPL2`.
+
+The adapted `app/jamtaster/third_party/demucs_onnx` source derives from
+sevagh/demucs.onnx revision `81fa192e6fcc88e35e887f6e6ccce91227f4e6f5` and is
+licensed under MIT; its licence remains beside the source. JamTaster also uses
+model artifacts derived from Demucs, Beat This, Spotify Basic Pitch,
+ChordMini, and ADTOF. Exact provenance and model-weight licensing status are
+listed in `app/jamtaster/MODEL_NOTICES.md`.

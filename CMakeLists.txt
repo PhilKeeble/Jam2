@@ -6,6 +6,8 @@ project(Jam2
     LANGUAGES C CXX
 )
 
+enable_testing()
+
 if(CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_CONFIGURATION_TYPES Release CACHE STRING "Jam2 only supports Release builds" FORCE)
 else()

@@ -4,6 +4,7 @@
 #include <QJsonObject>
 #include <QString>
 
+#include <cstdint>
 #include <functional>
 
 class QCheckBox;
@@ -14,8 +15,6 @@ class QPushButton;
 class JamTasterService;
 
 class JamTasterDialog final : public QDialog {
-    Q_OBJECT
-
 public:
     struct Callbacks {
         std::function<void(
@@ -33,6 +32,7 @@ public:
         QString displayName,
         Callbacks callbacks,
         QWidget* parent = nullptr);
+    ~JamTasterDialog() override;
 
     void setSourceContext(
         QString projectRoot,
@@ -44,10 +44,8 @@ private:
     void chooseSource();
     void startAction(const QString& action);
     void startPendingAction();
-    void refreshComponent();
     void syncTaskState();
     void confirmCancelTask();
-    void removePartialComponent();
     void refreshSavedResults();
     void acceptJobResult(const QJsonObject& result);
     void loadFullAnalysis(const QString& convertedSong);
@@ -67,10 +65,9 @@ private:
     QJsonObject stemsResult_;
     QJsonObject analysisResult_;
     Callbacks callbacks_;
+    std::uint64_t serviceObserverId_ = 0;
 
     QLineEdit* sourceEdit_ = nullptr;
-    QLabel* componentLabel_ = nullptr;
-    QLabel* storageLabel_ = nullptr;
     QLabel* progressLabel_ = nullptr;
     QProgressBar* progressBar_ = nullptr;
     QLabel* tempoValue_ = nullptr;
@@ -84,9 +81,6 @@ private:
     QPushButton* stemsButton_ = nullptr;
     QPushButton* applySelectedButton_ = nullptr;
     QPushButton* createSongButton_ = nullptr;
-    QPushButton* componentInstallButton_ = nullptr;
-    QPushButton* componentHealthButton_ = nullptr;
-    QPushButton* componentRemoveButton_ = nullptr;
     QPushButton* cancelTaskButton_ = nullptr;
     QCheckBox* applyTempoCheck_ = nullptr;
     QCheckBox* applyStemsCheck_ = nullptr;
