@@ -307,6 +307,7 @@ std::optional<ContinueIdeaRequest> askForIdeaContinuation(
 {
     QDialog dialog(parent);
     dialog.setWindowTitle(QStringLiteral("Continue Idea"));
+    dialog.setMinimumWidth(520);
     auto* source = new QComboBox(&dialog);
     auto* target = new QComboBox(&dialog);
     const int bankCount = qMax(1, defaults.bankNames.size());

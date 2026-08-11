@@ -110,7 +110,7 @@ def crop_and_stretch_pcm16_mono(
             import python_stretch as ps
         except ImportError as exc:
             raise WavError(
-                "python-stretch is missing; run JamTaster.py setup"
+                "Signalsmith support is missing; use Repair in Jam2 Settings"
             ) from exc
         values = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
         stretcher = ps.Signalsmith.Stretch()
@@ -162,7 +162,7 @@ def crop_and_stretch_pcm16_mono_bar_anchored(
         import numpy as np
         import python_stretch as ps
     except ImportError as exc:
-        raise WavError("python-stretch is missing; run JamTaster.py setup") from exc
+        raise WavError("Signalsmith support is missing; use Repair in Jam2 Settings") from exc
     with wave.open(str(source_path), "rb") as source:
         if source.getnchannels() != 1 or source.getsampwidth() != 2:
             raise WavError(f"intermediate stem is not mono PCM16: {source_path}")

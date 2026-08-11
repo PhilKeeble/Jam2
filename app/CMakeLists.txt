@@ -137,6 +137,10 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/GuiPresentation.hpp
     gui/JamStorage.cpp
     gui/JamStorage.hpp
+    gui/JamTasterDialog.cpp
+    gui/JamTasterDialog.hpp
+    jamtaster/JamTasterService.cpp
+    jamtaster/JamTasterService.hpp
     gui/GenerationRecipe.cpp
     gui/GenerationRecipe.hpp
     gui/LooperProject.cpp
@@ -236,6 +240,7 @@ target_include_directories(jam2 PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/application"
     "${CMAKE_CURRENT_SOURCE_DIR}/cli"
     "${CMAKE_CURRENT_SOURCE_DIR}/gui"
+    "${CMAKE_CURRENT_SOURCE_DIR}/jamtaster"
     "${CMAKE_CURRENT_SOURCE_DIR}/platform"
     "${CMAKE_CURRENT_SOURCE_DIR}/../libs/third_party"
 )

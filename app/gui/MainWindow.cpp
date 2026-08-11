@@ -3,6 +3,8 @@
 #include "TrackWidgets.hpp"
 #include "TrackWorkspaceSupport.hpp"
 #include "GuiPresentation.hpp"
+#include "JamTasterDialog.hpp"
+#include "../jamtaster/JamTasterService.hpp"
 #include "GuiControlMessageRouter.hpp"
 #include "CuratedIdeaCatalog.hpp"
 #include "CuratedIdeaDialog.hpp"
@@ -77,6 +79,7 @@
 #include <QStandardPaths>
 #include <QScrollBar>
 #include <QScreen>
+#include <QSet>
 #include <QUrl>
 #include <QSlider>
 #include <QSignalBlocker>
@@ -122,6 +125,131 @@ constexpr int kMaxLooperTrackContributions = 512;
 constexpr qint64 kTrackBatchIdleTimeoutMs = 30000;
 constexpr int kFirewallGuidanceDisconnectThreshold = 3;
 constexpr int kFirewallGuidanceWindowMs = 10000;
+
+QString promptJamTasterSourceDisposition(QWidget* parent)
+{
+    QMessageBox box(QMessageBox::Question,
+                    QStringLiteral("Original source WAV"),
+                    QStringLiteral(
+                        "This action creates a new section arrangement. What should Jam2 "
+                        "do with the original source WAV?"),
+                    QMessageBox::NoButton,
+                    parent);
+    QPushButton* keep = box.addButton(
+        QStringLiteral("Keep in final muted section"), QMessageBox::AcceptRole);
+    QPushButton* remove = box.addButton(
+        QStringLiteral("Move source file to Recycle Bin"), QMessageBox::DestructiveRole);
+    box.addButton(QMessageBox::Cancel);
+    box.setDefaultButton(keep);
+    box.exec();
+    if (box.clickedButton() == keep) return QStringLiteral("keep");
+    if (box.clickedButton() == remove) return QStringLiteral("delete");
+    return {};
+}
+
+bool appendJamTasterReferenceSection(
+    QJsonObject& song,
+    QJsonObject lane,
+    QString& error)
+{
+    QJsonArray sections = song.value(QStringLiteral("sections")).toArray();
+    QJsonObject looper = song.value(QStringLiteral("looper")).toObject();
+    QJsonArray banks = looper.value(QStringLiteral("banks")).toArray();
+    if (sections.isEmpty() || banks.isEmpty() ||
+        sections.size() >= jam2::application::limits::kMaximumSongSections) {
+        error = QStringLiteral(
+            "There is no free section for the original reference WAV. Remove a section "
+            "or choose to delete the source instead.");
+        return false;
+    }
+    const QJsonObject firstBank = banks.first().toObject();
+    QJsonObject timing = firstBank.value(QStringLiteral("timing")).toObject();
+    const int bpm = qBound(20, timing.value(QStringLiteral("bpm")).toInt(120), 400);
+    const int meter = qBound(
+        2, timing.value(QStringLiteral("beats_per_bar")).toInt(4), 12);
+    const qint64 frames = lane.value(QStringLiteral("source_frames"))
+        .toVariant().toLongLong();
+    const int sampleRate = lane.value(QStringLiteral("sample_rate")).toInt(48000);
+    const double duration = sampleRate > 0 ? frames / static_cast<double>(sampleRate) : 0.0;
+    const int rawBeats = qMax(
+        jam2::application::limits::kMinimumBeatsPerSection,
+        static_cast<int>(std::ceil(duration * bpm / 60.0)));
+    const int beats = ((rawBeats + meter - 1) / meter) * meter;
+    if (beats > 512) {
+        error = QStringLiteral(
+            "The original recording is longer than Jam2's 512-beat section limit.");
+        return false;
+    }
+
+    QJsonArray strings;
+    QJsonArray beatPatterns;
+    QJsonArray musicalPatterns;
+    QJsonArray emptyDrumLanes;
+    for (int drumLane = 0; drumLane < 10; ++drumLane) emptyDrumLanes.append(QString());
+    const auto restSteps = [] {
+        QJsonArray result;
+        for (int index = 0; index < 4; ++index) {
+            result.append(QJsonObject{
+                {QStringLiteral("state"), QStringLiteral("rest")},
+                {QStringLiteral("value"), QString()},
+                {QStringLiteral("velocity"), 96},
+            });
+        }
+        return result;
+    };
+    for (int beat = 0; beat < beats; ++beat) {
+        strings.append(QString());
+        beatPatterns.append(QJsonObject{
+            {QStringLiteral("division"), 4},
+            {QStringLiteral("lanes"), emptyDrumLanes},
+        });
+        musicalPatterns.append(QJsonObject{
+            {QStringLiteral("division"), 4},
+            {QStringLiteral("chords"), restSteps()},
+            {QStringLiteral("bass"), restSteps()},
+            {QStringLiteral("melody"), restSteps()},
+            {QStringLiteral("support"), restSteps()},
+        });
+    }
+    const int index = sections.size();
+    const QString label(QChar(QLatin1Char('A').unicode() + index));
+    QJsonObject section{
+        {QStringLiteral("id"), QUuid::createUuid().toString(QUuid::WithoutBraces)},
+        {QStringLiteral("label"), label},
+        {QStringLiteral("name"), QStringLiteral("Original Reference")},
+        {QStringLiteral("beats"), beats},
+        {QStringLiteral("targets"), strings},
+        {QStringLiteral("beat_notes"), strings},
+        {QStringLiteral("lyrics"), strings},
+        {QStringLiteral("chords"), strings},
+        {QStringLiteral("beat_patterns"), beatPatterns},
+        {QStringLiteral("musical_patterns"), musicalPatterns},
+        {QStringLiteral("drum_kit"), QStringLiteral("acoustic")},
+        {QStringLiteral("generated_kind"), QString()},
+    };
+    sections.append(section);
+
+    lane.insert(QStringLiteral("id"), QUuid::createUuid().toString(QUuid::WithoutBraces));
+    lane.insert(QStringLiteral("name"), QStringLiteral("Original Source (muted)"));
+    lane.insert(QStringLiteral("muted"), true);
+    lane.insert(QStringLiteral("solo"), false);
+    lane.insert(QStringLiteral("loop_enabled"), false);
+    lane.insert(QStringLiteral("local_only"), false);
+    lane.insert(QStringLiteral("origin_kind"), QStringLiteral("imported"));
+    timing.insert(QStringLiteral("bpm"), bpm);
+    timing.insert(QStringLiteral("beats_per_bar"), meter);
+    timing.insert(QStringLiteral("inherits_bank_a"), true);
+    QJsonObject bank{
+        {QStringLiteral("id"), label},
+        {QStringLiteral("lanes"), QJsonArray{lane}},
+        {QStringLiteral("timing"), timing},
+    };
+    banks.append(bank);
+    looper.insert(QStringLiteral("banks"), banks);
+    song.insert(QStringLiteral("sections"), sections);
+    song.insert(QStringLiteral("looper"), looper);
+    return true;
+}
 
 bool explicitValueEditorHasFocus(QWidget* focus)
 {
@@ -906,6 +1034,72 @@ MainWindow::MainWindow(QWidget* parent)
             noteTrackAssetProgress(hash, peerToken, receiving);
         },
     });
+    jamTaster_ = std::make_unique<JamTasterService>(this);
+    connect(jamTaster_.get(), &JamTasterService::componentProgress,
+            this, [this](const QString& message, int percent) {
+                appendLog(percent >= 0
+                    ? QStringLiteral("JamTaster component: %1 (%2%)").arg(message).arg(percent)
+                    : QStringLiteral("JamTaster component: ") + message);
+            });
+    connect(jamTaster_.get(), &JamTasterService::componentLog,
+            this, [this](const QString& message) {
+                appendLog(QStringLiteral("JamTaster install: ") + message);
+            });
+    connect(jamTaster_.get(), &JamTasterService::jobProgress,
+            this, [this](const QJsonObject& event) {
+                const QString message = event.value(QStringLiteral("message")).toString();
+                if (!message.isEmpty()) appendLog(QStringLiteral("JamTaster: ") + message);
+            });
+    connect(jamTaster_.get(), &JamTasterService::jobStarted,
+            this, [this](const QString& action) {
+                appendLog(QStringLiteral("JamTaster job started in isolated process: ") + action);
+            });
+    connect(jamTaster_.get(), &JamTasterService::jobFailed,
+            this, [this](const QString& error) {
+                appendLog(QStringLiteral("JamTaster worker failed: ") + error);
+            });
+    connect(jamTaster_.get(), &JamTasterService::taskStatusChanged,
+            this, [this](const QString&, int percent, bool active) {
+                ++jamTasterStatusRevision_;
+                if (performanceHome_) {
+                    performanceHome_->setJamTasterTaskStatus(active, percent);
+                }
+                if (active) {
+                    showJamTasterSessionHeaderStatus();
+                    return;
+                }
+                const QString status = jamTaster_->taskStatusText();
+                const QString lower = status.toLower();
+                const bool issue = lower.contains(QStringLiteral("fail")) ||
+                    lower.contains(QStringLiteral("error")) ||
+                    lower.contains(QStringLiteral("repair"));
+                const QString pill = issue
+                    ? QStringLiteral("JAMTASTER ERROR")
+                    : lower.contains(QStringLiteral("cancel"))
+                        ? QStringLiteral("JAMTASTER STOPPED")
+                        : QStringLiteral("JAMTASTER DONE");
+                setSessionHeaderStatus(
+                    pill,
+                    status,
+                    {QStringLiteral("Click to reopen JamTaster.")},
+                    issue,
+                    true);
+                connectionLabel_->setProperty(
+                    "jamtaster",
+                    issue ? QStringLiteral("error")
+                          : lower.contains(QStringLiteral("cancel"))
+                              ? QStringLiteral("cancelled")
+                              : QStringLiteral("complete"));
+                connectionLabel_->style()->unpolish(connectionLabel_);
+                connectionLabel_->style()->polish(connectionLabel_);
+                const quint64 revision = jamTasterStatusRevision_;
+                QTimer::singleShot(8000, this, [this, revision] {
+                    if (revision == jamTasterStatusRevision_ &&
+                        !jamTaster_->taskActive()) {
+                        restoreSessionHeaderStatus();
+                    }
+                });
+            });
     installJam2Style();
     generateSession();
     (void)JamStorage::pruneEmptyUnsavedWorkspaces();
@@ -1338,13 +1532,13 @@ void MainWindow::closeEvent(QCloseEvent* event)
     }
     if (discardUnsavedWorkspace && !jamStorage_.isSaved()) {
         fileWorkerPool_.waitForDone();
-        projectPersistence_.clearTransientTracking();
         QString discardError;
         if (!jamStorage_.discardUnsaved(discardError)) {
             QMessageBox::warning(this, QStringLiteral("Discard Jam"), discardError);
             event->ignore();
             return;
         }
+        projectPersistence_.clearTransientTracking();
     } else {
         cleanupTransientTrackWavs();
     }
@@ -1497,6 +1691,11 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
     if (watched == connectionLabel_ &&
         event->type() == QEvent::MouseButtonRelease) {
         auto* mouse = static_cast<QMouseEvent*>(event);
+        if (mouse->button() == Qt::LeftButton &&
+            connectionLabel_->text().startsWith(QStringLiteral("JAMTASTER"))) {
+            showJamTasterDialog();
+            return true;
+        }
         if (mouse->button() == Qt::LeftButton && controlRefreshAvailable_) {
             refreshControlConnection();
             return true;
@@ -2037,6 +2236,7 @@ void MainWindow::setSessionHeaderStatus(
     if (!connectionLabel_) return;
     connectionLabel_->setText(text);
     connectionLabel_->setProperty("issue", issue);
+    connectionLabel_->setProperty("jamtaster", QString());
     connectionLabel_->setCursor(
         issue || actionable ? Qt::PointingHandCursor : Qt::ArrowCursor);
     QString tooltip = QStringLiteral("<b>%1</b>").arg(title.toHtmlEscaped());
@@ -2052,6 +2252,10 @@ void MainWindow::setSessionHeaderStatus(
 
 void MainWindow::showLocalSessionHeaderStatus()
 {
+    if (jamTaster_ && jamTaster_->taskActive()) {
+        showJamTasterSessionHeaderStatus();
+        return;
+    }
     if (leaveJamButton_) leaveJamButton_->setEnabled(false);
     QString deviceName = preferences_.localAudio.name.trimmed();
     bool deviceOk = false;
@@ -2079,6 +2283,10 @@ void MainWindow::showLocalSessionHeaderStatus()
 
 void MainWindow::showAudioOffSessionHeaderStatus()
 {
+    if (jamTaster_ && jamTaster_->taskActive()) {
+        showJamTasterSessionHeaderStatus();
+        return;
+    }
     if (leaveJamButton_) leaveJamButton_->setEnabled(false);
     setSessionHeaderStatus(
         QStringLiteral("AUDIO OFF"),
@@ -2088,9 +2296,36 @@ void MainWindow::showAudioOffSessionHeaderStatus()
         true);
 }
 
+void MainWindow::showJamTasterSessionHeaderStatus()
+{
+    if (!jamTaster_ || !jamTaster_->taskActive()) return;
+    const int percent = jamTaster_->taskProgress();
+    const QString pill = percent > 0
+        ? QStringLiteral("JAMTASTER %1%").arg(percent)
+        : QStringLiteral("JAMTASTER");
+    setSessionHeaderStatus(
+        pill,
+        QStringLiteral("JamTaster background task"),
+        {jamTaster_->taskStatusText(), QStringLiteral("Click to view or cancel the task.")},
+        false,
+        true);
+    connectionLabel_->setProperty("jamtaster", QStringLiteral("running"));
+    connectionLabel_->style()->unpolish(connectionLabel_);
+    connectionLabel_->style()->polish(connectionLabel_);
+}
+
+void MainWindow::restoreSessionHeaderStatus()
+{
+    updateJamSessionHeaderStatus(sessionController_.snapshot());
+}
+
 void MainWindow::updateJamSessionHeaderStatus(
     const SharedSessionController::Snapshot& snapshot)
 {
+    if (jamTaster_ && jamTaster_->taskActive()) {
+        showJamTasterSessionHeaderStatus();
+        return;
+    }
     const bool activeJam = snapshot.role == SharedSessionController::Role::Creator ||
         snapshot.role == SharedSessionController::Role::Joiner;
     if (leaveJamButton_) leaveJamButton_->setEnabled(activeJam);
@@ -4112,6 +4347,94 @@ void MainWindow::showSettingsDialog()
     });
     keybindLayout->addStretch(1);
 
+    auto* jamTasterContent = new QWidget(&dialog);
+    auto* jamTasterLayout = new QVBoxLayout(jamTasterContent);
+    jamTasterLayout->setContentsMargins(18, 18, 18, 18);
+    jamTasterLayout->setSpacing(14);
+    auto* jamTasterDescription = new QLabel(
+        QStringLiteral(
+            "JamTaster is an optional, self-contained audio analysis component. "
+            "It runs outside Jam2 and stores each WAV's results in that song's analysis folder."),
+        jamTasterContent);
+    jamTasterDescription->setWordWrap(true);
+    jamTasterLayout->addWidget(jamTasterDescription);
+    auto* jamTasterBox = new QGroupBox(QStringLiteral("Installation"), jamTasterContent);
+    auto* jamTasterForm = new QFormLayout(jamTasterBox);
+    auto* jamTasterStatus = new QLabel(jamTasterBox);
+    jamTasterStatus->setWordWrap(true);
+    jamTasterStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    auto* jamTasterPath = new QLabel(jamTaster_->componentRoot(), jamTasterBox);
+    jamTasterPath->setWordWrap(true);
+    jamTasterPath->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    auto* jamTasterAccelerator = new QLabel(
+        jamTaster_->acceleratorRecommendation(), jamTasterBox);
+    jamTasterAccelerator->setWordWrap(true);
+    jamTasterAccelerator->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    auto* jamTasterActions = new QWidget(jamTasterBox);
+    auto* jamTasterActionsLayout = new QHBoxLayout(jamTasterActions);
+    jamTasterActionsLayout->setContentsMargins(0, 0, 0, 0);
+    auto* jamTasterInstall = new QPushButton(QStringLiteral("Install"), jamTasterActions);
+    auto* jamTasterHealth = new QPushButton(QStringLiteral("Check Health"), jamTasterActions);
+    auto* jamTasterRepair = new QPushButton(QStringLiteral("Repair"), jamTasterActions);
+    auto* jamTasterRemove = new QPushButton(QStringLiteral("Remove"), jamTasterActions);
+    jamTasterActionsLayout->addWidget(jamTasterInstall);
+    jamTasterActionsLayout->addWidget(jamTasterHealth);
+    jamTasterActionsLayout->addWidget(jamTasterRepair);
+    jamTasterActionsLayout->addWidget(jamTasterRemove);
+    jamTasterForm->addRow(QStringLiteral("Status"), jamTasterStatus);
+    jamTasterForm->addRow(QStringLiteral("Location"), jamTasterPath);
+    jamTasterForm->addRow(QStringLiteral("Processing"), jamTasterAccelerator);
+    jamTasterForm->addRow(jamTasterActions);
+    jamTasterLayout->addWidget(jamTasterBox);
+    auto* jamTasterProgress = new QLabel(QStringLiteral("No component operation is running."), jamTasterContent);
+    jamTasterProgress->setWordWrap(true);
+    jamTasterLayout->addWidget(jamTasterProgress);
+    jamTasterLayout->addStretch(1);
+    const auto refreshJamTasterSettings = [=, this] {
+        const QString version = jamTaster_->componentVersion();
+        jamTasterStatus->setText(version.isEmpty()
+            ? jamTaster_->componentStatus()
+            : QStringLiteral("%1 · version %2")
+                .arg(jamTaster_->componentStatus(), version));
+        const bool busy = jamTaster_->isBusy();
+        const bool installed = jamTaster_->isInstalled();
+        const bool componentFiles = QFileInfo::exists(jamTaster_->componentRoot());
+        jamTasterInstall->setEnabled(!busy && !installed && !componentFiles);
+        jamTasterHealth->setEnabled(!busy && installed);
+        jamTasterRepair->setEnabled(!busy && componentFiles);
+        jamTasterRemove->setEnabled(!busy && componentFiles);
+    };
+    refreshJamTasterSettings();
+    QObject::connect(jamTaster_.get(), &JamTasterService::componentChanged,
+                     &dialog, refreshJamTasterSettings);
+    QObject::connect(jamTaster_.get(), &JamTasterService::componentProgress,
+                     &dialog, [=](const QString& message, int percent) {
+        jamTasterProgress->setText(percent >= 0
+            ? QStringLiteral("%1 · %2%").arg(message).arg(percent) : message);
+        refreshJamTasterSettings();
+    });
+    QObject::connect(jamTasterInstall, &QPushButton::clicked,
+                     &dialog, [this] { jamTaster_->install(); });
+    QObject::connect(jamTasterHealth, &QPushButton::clicked,
+                     &dialog, [this] { jamTaster_->checkHealth(); });
+    QObject::connect(jamTasterRepair, &QPushButton::clicked,
+                     &dialog, [this] { jamTaster_->repair(); });
+    QObject::connect(jamTasterRemove, &QPushButton::clicked,
+                     &dialog, [this, &dialog] {
+        if (QMessageBox::question(
+                &dialog,
+                QStringLiteral("Remove JamTaster"),
+                QStringLiteral(
+                    "Remove the shared JamTaster runtime and models? "
+                    "Song analysis folders and applied project content will remain."),
+                QMessageBox::Yes | QMessageBox::Cancel,
+                QMessageBox::Cancel) != QMessageBox::Yes) return;
+        QString error;
+        if (!jamTaster_->remove(error)) {
+            QMessageBox::warning(&dialog, QStringLiteral("JamTaster"), error);
+        }
+    });
+
     if (networkActive) {
         localBox->setEnabled(false);
         splitNetworkAudio->setEnabled(false);
@@ -4158,6 +4481,7 @@ void MainWindow::showSettingsDialog()
     addSettingsPage(QStringLiteral("Join Defaults"), makeScrollTab(joinContent));
     addSettingsPage(QStringLiteral("Jam Sync"), makeScrollTab(syncContent));
     addSettingsPage(QStringLiteral("Ideas & WAVs"), makeScrollTab(ideaContent));
+    addSettingsPage(QStringLiteral("JamTaster"), makeScrollTab(jamTasterContent));
     addSettingsPage(QStringLiteral("Levels"), makeScrollTab(levelsContent));
     addSettingsPage(QStringLiteral("Metronome"), makeScrollTab(metronomeContent));
     addSettingsPage(QStringLiteral("Startup"), makeScrollTab(generalContent));
@@ -8517,6 +8841,725 @@ void MainWindow::applyLooperLaneGain(int laneIndex, double gainDb)
     bank.lanes[laneIndex].gainDb = qBound(-60.0, gainDb, 12.0);
     refreshLooperLanes();
     regeneratePreparedMix();
+}
+
+void MainWindow::showJamTasterDialog(int laneIndex)
+{
+    if (!QDir().mkpath(jamStorage_.rootFolder())) {
+        QMessageBox::warning(
+            this, QStringLiteral("JamTaster"),
+            QStringLiteral("Could not create this jam's working folder."));
+        return;
+    }
+    QString sourcePath;
+    QString sourceHash;
+    QString displayName = chordModel_.title();
+    const int selected = laneIndex >= 0 ? laneIndex : selectedLooperLane_;
+    if (viewedBankIndex_ >= 0 && viewedBankIndex_ < looperProject_.banks().size()) {
+        const QVector<LooperLane>& lanes = looperProject_.banks().at(viewedBankIndex_).lanes;
+        if (selected >= 0 && selected < lanes.size() &&
+            !lanes.at(selected).assetPath.trimmed().isEmpty()) {
+            sourcePath = looperAssetAbsolutePath(lanes.at(selected));
+            sourceHash = lanes.at(selected).assetHash;
+            if (!lanes.at(selected).name.trimmed().isEmpty()) {
+                displayName = lanes.at(selected).name;
+            }
+        }
+    }
+    if ((jamTaster_->taskActive() || sourcePath.isEmpty()) &&
+        !jamTaster_->taskInputPath().isEmpty() &&
+        QDir(jamTaster_->taskProjectRoot()).absolutePath() ==
+            QDir(jamStorage_.rootFolder()).absolutePath()) {
+        sourcePath = jamTaster_->taskInputPath();
+        displayName = jamTaster_->taskDisplayName();
+    }
+    if (!jamTasterDialog_) {
+        jamTasterDialog_ = std::make_unique<JamTasterDialog>(
+            *jamTaster_,
+            jamStorage_.rootFolder(),
+            sourcePath,
+            sourceHash,
+            displayName,
+            JamTasterDialog::Callbacks{
+                [this](const QJsonObject& tempo, const QJsonObject& stems,
+                       const QJsonObject& options, const QString& sourceHash) {
+                    applyJamTasterQuick(tempo, stems, options, sourceHash);
+                },
+                [this](const QString& song, const QJsonObject& options) {
+                    applyJamTasterConverted(song, options);
+                },
+                [this](const QString& song, const QString& sourcePath,
+                       const QString& sourceHash) {
+                    createJamTasterSong(song, sourcePath, sourceHash);
+                },
+            },
+            this);
+    } else if (!jamTaster_->taskActive()) {
+        jamTasterDialog_->setSourceContext(
+            jamStorage_.rootFolder(), sourcePath, sourceHash, displayName);
+    }
+    jamTasterDialog_->exec();
+}
+
+void MainWindow::applyJamTasterTempo(const QJsonObject& result)
+{
+    const int bpm = qBound(
+        20,
+        result.value(QStringLiteral("project_bpm")).toInt(
+            qRound(result.value(QStringLiteral("bpm")).toDouble())),
+        400);
+    const int meter = qBound(
+        2, result.value(QStringLiteral("beats_per_bar")).toInt(4), 12);
+    if (bpm < 20) return;
+    for (int bank = 0; bank < looperProject_.banks().size(); ++bank) {
+        LooperBankTiming timing = looperProject_.resolvedTiming(bank);
+        timing.bpm = bpm;
+        timing.beatsPerBar = meter;
+        timing.inheritsBankA = bank > 0;
+        (void)looperProject_.setTiming(bank, timing);
+    }
+    auto& track = trackController_.model();
+    track.guessedBpm = result.value(QStringLiteral("bpm")).toDouble(bpm);
+    track.acceptedBpm = bpm;
+    applyMetronomePatternForBank(looperProject_.activeBankIndex(), true);
+    updateTrackControls();
+    regeneratePreparedMix();
+    syncLooperArrangement();
+    jamStorage_.markArtifactCreated();
+    appendLog(QStringLiteral("JamTaster tempo applied: detected=%1 project=%2 meter=%3/4")
+        .arg(track.guessedBpm, 0, 'f', 3)
+        .arg(bpm)
+        .arg(meter));
+}
+
+void MainWindow::applyJamTasterQuick(
+    const QJsonObject& tempo,
+    const QJsonObject& stemsResult,
+    const QJsonObject& options,
+    const QString& sourceHash)
+{
+    if (options.value(QStringLiteral("tempo")).toBool() && !tempo.isEmpty()) {
+        applyJamTasterTempo(tempo);
+    }
+    if (!options.value(QStringLiteral("stems")).toBool() || stemsResult.isEmpty()) {
+        return;
+    }
+    const QJsonObject stems = stemsResult.value(QStringLiteral("stems")).toObject();
+    const QStringList order{
+        QStringLiteral("drums"), QStringLiteral("bass"),
+        QStringLiteral("other"), QStringLiteral("vocals")};
+    const QMap<QString, QString> names{
+        {QStringLiteral("drums"), QStringLiteral("Drums")},
+        {QStringLiteral("bass"), QStringLiteral("Bass")},
+        {QStringLiteral("other"), QStringLiteral("Chords / Other")},
+        {QStringLiteral("vocals"), QStringLiteral("Vocals")},
+    };
+    QStringList paths;
+    QStringList displayNames;
+    for (const QString& stem : order) {
+        const QString path = stems.value(stem).toString();
+        if (QFileInfo(path).isFile()) {
+            paths.append(path);
+            displayNames.append(names.value(stem));
+        }
+    }
+    const int bankIndex = viewedBankIndex_;
+    if (paths.isEmpty()) {
+        QMessageBox::warning(
+            this, QStringLiteral("JamTaster"),
+            QStringLiteral("The analysis has no saved stems to apply."));
+        return;
+    }
+    const QString stagingFolder = projectPersistence_.workspaceFolder();
+    const int expectedSampleRate = activeTrackSampleRate();
+    auto assets = std::make_shared<std::vector<StagedPcm16Asset>>();
+    auto error = std::make_shared<QString>();
+    const bool started = startFileWorkerTask(
+        [paths, stagingFolder, expectedSampleRate, assets, error] {
+            for (const QString& path : paths) {
+                StagedPcm16Asset asset = stagePcm16Asset(
+                    path, stagingFolder, expectedSampleRate,
+                    QStringLiteral("imported"));
+                if (!asset.error.isEmpty()) {
+                    *error = asset.error;
+                    return;
+                }
+                assets->push_back(std::move(asset));
+            }
+        },
+        [this, bankIndex, sourceHash, displayNames, assets, error] {
+            if (!error->isEmpty()) {
+                QMessageBox::warning(this, QStringLiteral("JamTaster"), *error);
+                return;
+            }
+            if (bankIndex < 0 || bankIndex >= looperProject_.banks().size()) return;
+            bool changed = false;
+            int reused = 0;
+            int skippedForCapacity = 0;
+            for (LooperLane& lane : looperProject_.banks()[bankIndex].lanes) {
+                if (!sourceHash.isEmpty() && lane.assetHash == sourceHash) {
+                    if (!lane.muted) {
+                        lane.muted = true;
+                        changed = true;
+                    }
+                }
+            }
+            for (std::size_t index = 0; index < assets->size(); ++index) {
+                const StagedPcm16Asset& asset = assets->at(index);
+                const QString expectedName = displayNames.value(
+                    static_cast<int>(index), asset.displayName);
+                const auto& existingLanes = looperProject_.banks()[bankIndex].lanes;
+                const auto existing = std::find_if(
+                    existingLanes.cbegin(), existingLanes.cend(),
+                    [&asset](const LooperLane& lane) {
+                        return !asset.sha256.isEmpty() &&
+                            lane.assetHash.compare(asset.sha256, Qt::CaseInsensitive) == 0;
+                    });
+                if (existing != existingLanes.cend()) {
+                    ++reused;
+                    appendLog(QStringLiteral(
+                        "JamTaster kept existing lane %1; WAV hash already matches %2")
+                        .arg(existing->name.isEmpty() ? expectedName : existing->name,
+                             asset.sha256));
+                    continue;
+                }
+                if (existingLanes.size() >=
+                    jam2::application::limits::kMaximumLooperLanesPerBank) {
+                    ++skippedForCapacity;
+                    continue;
+                }
+                LooperLane lane;
+                lane.assetPath = asset.stagedPath;
+                lane.assetHash = asset.sha256;
+                lane.name = expectedName;
+                lane.sampleRate = asset.metadata.sampleRate;
+                lane.sampleRateCompatible = true;
+                lane.sourceFrames = asset.metadata.frames;
+                lane.originKind = QStringLiteral("imported");
+                if (looperProject_.appendLane(bankIndex, std::move(lane))) {
+                    registerTransientTrackWav(asset.stagedPath);
+                    looperWaveformCache_.remove(asset.stagedPath);
+                    changed = true;
+                }
+            }
+            if (changed) {
+                jamStorage_.markArtifactCreated();
+                refreshLooperLanes();
+                regeneratePreparedMix();
+                syncLooperArrangement();
+            }
+            appendLog(reused > 0
+                ? QStringLiteral(
+                    "JamTaster stem apply reused %1 existing WAV lane(s); no duplicates added")
+                    .arg(reused)
+                : skippedForCapacity > 0 && !changed
+                    ? QStringLiteral(
+                        "JamTaster stems already fill the current section; no WAV lanes added")
+                    : QStringLiteral(
+                        "JamTaster stems added to the current section; source WAV muted"));
+        });
+    if (!started) {
+        QMessageBox::warning(this, QStringLiteral("JamTaster"),
+                             QStringLiteral("The bounded file worker is busy."));
+    }
+}
+
+void MainWindow::createJamTasterSong(
+    const QString& convertedSong,
+    const QString& sourcePath,
+    const QString& sourceHash)
+{
+    Q_UNUSED(sourceHash)
+    const QFileInfo source(convertedSong);
+    if (!source.isDir()) {
+        QMessageBox::warning(this, QStringLiteral("JamTaster"),
+                             QStringLiteral("The converted song folder is missing."));
+        return;
+    }
+    QString suggestedName = source.fileName();
+    suggestedName.replace(QLatin1Char('_'), QLatin1Char(' '));
+    bool accepted = false;
+    const QString displayName = QInputDialog::getText(
+        this,
+        QStringLiteral("Create New JamJar"),
+        QStringLiteral("Song name"),
+        QLineEdit::Normal,
+        suggestedName,
+        &accepted).trimmed();
+    if (!accepted || displayName.isEmpty()) return;
+    const QString sourceDisposition = promptJamTasterSourceDisposition(this);
+    if (sourceDisposition.isEmpty()) return;
+    const QString slug = JamStorage::portableSlug(displayName);
+    const QString destination = QDir(appReleaseFolderPath(QStringLiteral("songs")))
+        .absoluteFilePath(slug);
+    if (QFileInfo::exists(destination)) {
+        QMessageBox::warning(
+            this, QStringLiteral("JamTaster"),
+            QStringLiteral("A song named %1 already exists.").arg(displayName));
+        return;
+    }
+    const QString partialDestination = QDir(QFileInfo(destination).absolutePath())
+        .absoluteFilePath(QStringLiteral(".jamtaster-%1.partial")
+            .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
+    auto error = std::make_shared<QString>();
+    const int expectedSampleRate = activeTrackSampleRate();
+    const bool started = startFileWorkerTask(
+        [sourcePath = source.absoluteFilePath(), destination, partialDestination,
+         displayName, slug, error, sourceDisposition, originalSource = sourcePath,
+         expectedSampleRate] {
+            try {
+                std::filesystem::copy(
+                    nativeFilePath(sourcePath), nativeFilePath(partialDestination),
+                    std::filesystem::copy_options::recursive);
+                QDir staged(partialDestination);
+                const QStringList jamjars = staged.entryList(
+                    {QStringLiteral("*.jamjar")}, QDir::Files, QDir::Name);
+                if (jamjars.size() != 1) {
+                    throw std::runtime_error("copied JamTaster song has no unique JamJar");
+                }
+                QFile input(staged.absoluteFilePath(jamjars.front()));
+                if (!input.open(QIODevice::ReadOnly)) {
+                    throw std::runtime_error("could not read the copied JamJar");
+                }
+                QJsonDocument document = QJsonDocument::fromJson(input.readAll());
+                if (!document.isObject()) {
+                    throw std::runtime_error("the copied JamJar is invalid");
+                }
+                QJsonObject object = document.object();
+                object.insert(QStringLiteral("title"), displayName);
+                if (sourceDisposition == QStringLiteral("keep")) {
+                    const StagedPcm16Asset asset = stagePcm16Asset(
+                        originalSource, partialDestination, expectedSampleRate,
+                        QStringLiteral("imported"));
+                    if (!asset.error.isEmpty()) {
+                        throw std::runtime_error(asset.error.toStdString());
+                    }
+                    QJsonObject lane{
+                        {QStringLiteral("asset_path"),
+                         QStringLiteral("imported/%1.wav").arg(asset.sha256)},
+                        {QStringLiteral("asset_hash"), asset.sha256},
+                        {QStringLiteral("sample_rate"), asset.metadata.sampleRate},
+                        {QStringLiteral("source_frames"), QString::number(asset.metadata.frames)},
+                        {QStringLiteral("gain_db"), 0.0},
+                        {QStringLiteral("start_frame"), QStringLiteral("0")},
+                        {QStringLiteral("stop_frame"), QStringLiteral("-1")},
+                        {QStringLiteral("loop_start_frame"), QStringLiteral("-1")},
+                        {QStringLiteral("loop_end_frame"), QStringLiteral("-1")},
+                    };
+                    QString referenceError;
+                    if (!appendJamTasterReferenceSection(object, lane, referenceError)) {
+                        throw std::runtime_error(referenceError.toStdString());
+                    }
+                }
+                const QString renamedJamjar = staged.absoluteFilePath(
+                    slug + QStringLiteral(".jamjar"));
+                QSaveFile output(renamedJamjar);
+                const QByteArray encoded = QJsonDocument(object).toJson(QJsonDocument::Indented);
+                if (!output.open(QIODevice::WriteOnly) ||
+                    output.write(encoded) != encoded.size() || !output.commit()) {
+                    throw std::runtime_error("could not name the copied JamJar");
+                }
+                const QString originalJamjar = staged.absoluteFilePath(jamjars.front());
+                if (QFileInfo(originalJamjar).absoluteFilePath() !=
+                    QFileInfo(renamedJamjar).absoluteFilePath()) {
+                    (void)QFile::remove(originalJamjar);
+                }
+                std::filesystem::rename(
+                    nativeFilePath(partialDestination), nativeFilePath(destination));
+            } catch (const std::exception& exception) {
+                *error = QString::fromUtf8(exception.what());
+                std::error_code ignored;
+                std::filesystem::remove_all(nativeFilePath(partialDestination), ignored);
+            }
+        },
+        [this, destination, error, sourceDisposition, sourcePath] {
+            if (!error->isEmpty()) {
+                QMessageBox::warning(this, QStringLiteral("JamTaster"), *error);
+                return;
+            }
+            appendLog(QStringLiteral("JamTaster song created: ") + destination);
+            if (sourceDisposition == QStringLiteral("delete") &&
+                QFileInfo(sourcePath).isFile() && !QFile::moveToTrash(sourcePath)) {
+                QMessageBox::warning(
+                    this, QStringLiteral("JamTaster"),
+                    QStringLiteral(
+                        "The new song was created, but the original source WAV could not "
+                        "be moved to the Recycle Bin."));
+            }
+            QMessageBox::information(
+                this, QStringLiteral("JamTaster"),
+                QStringLiteral("Created %1. It can now be opened from Jam2.")
+                    .arg(QFileInfo(destination).fileName()));
+        });
+    if (!started) {
+        QMessageBox::warning(this, QStringLiteral("JamTaster"),
+                             QStringLiteral("The bounded file worker is busy."));
+    }
+}
+
+void MainWindow::applyJamTasterConverted(
+    const QString& convertedSong,
+    const QJsonObject& options)
+{
+    const QDir converted(convertedSong);
+    const QStringList jamjars = converted.entryList(
+        {QStringLiteral("*.jamjar")}, QDir::Files, QDir::Name);
+    if (jamjars.size() != 1) {
+        QMessageBox::warning(this, QStringLiteral("JamTaster"),
+                             QStringLiteral("The converted JamJar result is incomplete."));
+        return;
+    }
+    const bool applyStems = options.value(QStringLiteral("stems")).toBool();
+    const bool applySections = options.value(QStringLiteral("sections")).toBool();
+    const QString sourcePath = options.value(QStringLiteral("source_path")).toString();
+    const QString sourceHash = options.value(QStringLiteral("source_hash")).toString();
+    const QString sourceDisposition = applySections
+        ? promptJamTasterSourceDisposition(this) : QString();
+    if (applySections && sourceDisposition.isEmpty()) return;
+    const QString jamjarPath = converted.absoluteFilePath(jamjars.front());
+    const QString stagingFolder = projectPersistence_.workspaceFolder();
+    const int expectedSampleRate = activeTrackSampleRate();
+    const QJsonObject currentSnapshot = songToJson();
+    auto generated = std::make_shared<QJsonObject>();
+    auto error = std::make_shared<QString>();
+    auto stagedPaths = std::make_shared<QStringList>();
+    auto referenceLane = std::make_shared<QJsonObject>();
+    const bool started = startFileWorkerTask(
+        [jamjarPath, convertedSong, stagingFolder, expectedSampleRate,
+         applyStems, applySections, currentSnapshot, generated, stagedPaths, error,
+         sourceDisposition, sourcePath, sourceHash, referenceLane] {
+            if (!ProjectPersistenceCoordinator::readSongJson(
+                    jamjarPath, *generated, *error)) return;
+            const auto sourceLaneMatches = [&sourceHash](const QJsonObject& lane) {
+                return !sourceHash.isEmpty() &&
+                    lane.value(QStringLiteral("asset_hash")).toString() == sourceHash;
+            };
+            if (sourceDisposition == QStringLiteral("keep")) {
+                const QJsonArray existingBanks = currentSnapshot.value(QStringLiteral("looper"))
+                    .toObject().value(QStringLiteral("banks")).toArray();
+                for (const QJsonValue& bankValue : existingBanks) {
+                    for (const QJsonValue& laneValue : bankValue.toObject()
+                             .value(QStringLiteral("lanes")).toArray()) {
+                        const QJsonObject lane = laneValue.toObject();
+                        if (sourceLaneMatches(lane)) {
+                            *referenceLane = lane;
+                            break;
+                        }
+                    }
+                    if (!referenceLane->isEmpty()) break;
+                }
+                if (referenceLane->isEmpty()) {
+                    const StagedPcm16Asset asset = stagePcm16Asset(
+                        sourcePath, stagingFolder, expectedSampleRate,
+                        QStringLiteral("imported"));
+                    if (!asset.error.isEmpty()) {
+                        *error = asset.error;
+                        return;
+                    }
+                    *referenceLane = QJsonObject{
+                        {QStringLiteral("asset_path"), asset.stagedPath},
+                        {QStringLiteral("asset_hash"), asset.sha256},
+                        {QStringLiteral("sample_rate"), asset.metadata.sampleRate},
+                        {QStringLiteral("source_frames"), QString::number(asset.metadata.frames)},
+                        {QStringLiteral("gain_db"), 0.0},
+                        {QStringLiteral("start_frame"), QStringLiteral("0")},
+                        {QStringLiteral("stop_frame"), QStringLiteral("-1")},
+                        {QStringLiteral("loop_start_frame"), QStringLiteral("-1")},
+                        {QStringLiteral("loop_end_frame"), QStringLiteral("-1")},
+                    };
+                    stagedPaths->append(asset.stagedPath);
+                }
+            }
+            if (!applyStems) return;
+            QJsonObject looper = generated->value(QStringLiteral("looper")).toObject();
+            QJsonArray banks = looper.value(QStringLiteral("banks")).toArray();
+            const QJsonArray currentBanks = currentSnapshot.value(QStringLiteral("looper"))
+                .toObject().value(QStringLiteral("banks")).toArray();
+            constexpr int maxLanes =
+                jam2::application::limits::kMaximumLooperLanesPerBank;
+            for (int bankIndex = 0; bankIndex < banks.size(); ++bankIndex) {
+                QJsonObject bank = banks.at(bankIndex).toObject();
+                const QJsonArray candidates = bank.value(QStringLiteral("lanes")).toArray();
+                QSet<QString> existingHashes;
+                int currentLaneCount = 0;
+                if (bankIndex < currentBanks.size()) {
+                    for (const QJsonValue& lane : currentBanks.at(bankIndex).toObject()
+                             .value(QStringLiteral("lanes")).toArray()) {
+                        const QJsonObject currentLane = lane.toObject();
+                        if (applySections && sourceLaneMatches(currentLane)) continue;
+                        ++currentLaneCount;
+                        const QString hash = currentLane.value(
+                            QStringLiteral("asset_hash")).toString().toLower();
+                        if (!hash.isEmpty()) existingHashes.insert(hash);
+                    }
+                }
+                const int allowed = !applySections && bankIndex >= currentBanks.size()
+                    ? 0 : qMax(0, maxLanes - currentLaneCount);
+                QJsonArray lanes;
+                for (const QJsonValue& candidate : candidates) {
+                    if (lanes.size() >= allowed) break;
+                    QJsonObject lane = candidate.toObject();
+                    const QString relative = lane.value(QStringLiteral("asset_path")).toString();
+                    const QString source = QDir(convertedSong).absoluteFilePath(relative);
+                    const StagedPcm16Asset asset = stagePcm16Asset(
+                        source, stagingFolder, expectedSampleRate,
+                        QStringLiteral("imported"));
+                    if (!asset.error.isEmpty()) {
+                        *error = asset.error;
+                        return;
+                    }
+                    const QString normalizedHash = asset.sha256.toLower();
+                    if (!normalizedHash.isEmpty() && existingHashes.contains(normalizedHash)) {
+                        continue;
+                    }
+                    lane.insert(QStringLiteral("asset_path"), asset.stagedPath);
+                    lane.insert(QStringLiteral("asset_hash"), asset.sha256);
+                    lane.insert(QStringLiteral("sample_rate"), asset.metadata.sampleRate);
+                    lane.insert(QStringLiteral("source_frames"),
+                                QString::number(asset.metadata.frames));
+                    stagedPaths->append(asset.stagedPath);
+                    lanes.append(lane);
+                    if (!normalizedHash.isEmpty()) existingHashes.insert(normalizedHash);
+                }
+                bank.insert(QStringLiteral("lanes"), lanes);
+                banks.replace(bankIndex, bank);
+            }
+            looper.insert(QStringLiteral("banks"), banks);
+            generated->insert(QStringLiteral("looper"), looper);
+        },
+        [this, convertedSong, options, applySections, currentSnapshot,
+         generated, stagedPaths, error, referenceLane, sourceDisposition,
+         sourcePath, sourceHash] {
+            if (!error->isEmpty()) {
+                for (const QString& path : std::as_const(*stagedPaths)) {
+                    (void)QFile::remove(path);
+                }
+                QMessageBox::warning(this, QStringLiteral("JamTaster"), *error);
+                return;
+            }
+            QJsonObject next = currentSnapshot;
+            const QJsonArray currentSections = next.value(QStringLiteral("sections")).toArray();
+            const QJsonArray generatedSections = generated->value(QStringLiteral("sections")).toArray();
+            const bool applyChords = options.value(QStringLiteral("chords")).toBool();
+            const bool applyDrums = options.value(QStringLiteral("drums")).toBool();
+            const bool applyBass = options.value(QStringLiteral("bass")).toBool();
+            const bool applyStems = options.value(QStringLiteral("stems")).toBool();
+            const bool muteSourceInPlace = !applySections &&
+                (applyStems || applyChords || applyDrums || applyBass);
+            const auto boundedArray = [](const QJsonValue& value, int maximum) {
+                QJsonArray bounded;
+                const QJsonArray source = value.toArray();
+                for (int index = 0; index < qMin(source.size(), maximum); ++index) {
+                    bounded.append(source.at(index));
+                }
+                return bounded;
+            };
+            const auto restSteps = [](int division) {
+                QJsonArray steps;
+                for (int step = 0; step < division; ++step) {
+                    steps.append(QJsonObject{
+                        {QStringLiteral("state"), QStringLiteral("rest")},
+                        {QStringLiteral("value"), QString()},
+                        {QStringLiteral("velocity"), 96},
+                    });
+                }
+                return steps;
+            };
+            const auto compatibleSteps = [&restSteps](
+                const QJsonObject& pattern, const QString& key, int division) {
+                const QJsonArray steps = pattern.value(key).toArray();
+                return steps.size() == division ? steps : restSteps(division);
+            };
+
+            QJsonArray mergedSections = applySections ? generatedSections : currentSections;
+            const int count = qMin(mergedSections.size(), generatedSections.size());
+            for (int index = 0; index < count; ++index) {
+                QJsonObject target = mergedSections.at(index).toObject();
+                const QJsonObject source = generatedSections.at(index).toObject();
+                const QJsonObject previous = index < currentSections.size()
+                    ? currentSections.at(index).toObject() : QJsonObject{};
+                const int beats = target.value(QStringLiteral("beats")).toInt(8);
+                if (applySections && !previous.isEmpty()) {
+                    for (const QString& key : {
+                             QStringLiteral("targets"), QStringLiteral("beat_notes"),
+                             QStringLiteral("lyrics")}) {
+                        target.insert(key, boundedArray(previous.value(key), beats));
+                    }
+                }
+                if (applyChords) {
+                    target.insert(QStringLiteral("chords"),
+                                  boundedArray(source.value(QStringLiteral("chords")), beats));
+                } else if (applySections) {
+                    target.insert(QStringLiteral("chords"), boundedArray(
+                        previous.value(QStringLiteral("chords")), beats));
+                }
+                if (applyDrums) {
+                    target.insert(QStringLiteral("beat_patterns"),
+                                  boundedArray(source.value(QStringLiteral("beat_patterns")), beats));
+                    target.insert(QStringLiteral("drum_kit"),
+                                  source.value(QStringLiteral("drum_kit")));
+                } else if (applySections) {
+                    target.insert(QStringLiteral("beat_patterns"), boundedArray(
+                        previous.value(QStringLiteral("beat_patterns")), beats));
+                    if (!previous.isEmpty()) {
+                        target.insert(QStringLiteral("drum_kit"),
+                                      previous.value(QStringLiteral("drum_kit")));
+                    }
+                }
+                if (applyChords || applyBass) {
+                    const QJsonArray basePatterns = !previous.isEmpty()
+                        ? previous.value(QStringLiteral("musical_patterns")).toArray()
+                        : (applySections ? QJsonArray{} : target.value(
+                            QStringLiteral("musical_patterns")).toArray());
+                    const QJsonArray sourcePatterns = source.value(
+                        QStringLiteral("musical_patterns")).toArray();
+                    QJsonArray targetPatterns = applySections
+                        ? QJsonArray{} : boundedArray(basePatterns, beats);
+                    for (int beat = 0; beat < qMin(sourcePatterns.size(), beats); ++beat) {
+                        const QJsonObject sourcePattern = sourcePatterns.at(beat).toObject();
+                        const QJsonObject basePattern = beat < basePatterns.size()
+                            ? basePatterns.at(beat).toObject() : QJsonObject{};
+                        const int division = sourcePattern.value(
+                            QStringLiteral("division")).toInt(4);
+                        QJsonObject targetPattern{
+                            {QStringLiteral("division"), division},
+                            {QStringLiteral("chords"), applyChords
+                                ? sourcePattern.value(QStringLiteral("chords"))
+                                : compatibleSteps(basePattern, QStringLiteral("chords"), division)},
+                            {QStringLiteral("bass"), applyBass
+                                ? sourcePattern.value(QStringLiteral("bass"))
+                                : compatibleSteps(basePattern, QStringLiteral("bass"), division)},
+                            {QStringLiteral("melody"), compatibleSteps(
+                                basePattern, QStringLiteral("melody"), division)},
+                            {QStringLiteral("support"), compatibleSteps(
+                                basePattern, QStringLiteral("support"), division)},
+                        };
+                        if (beat < targetPatterns.size()) {
+                            targetPatterns.replace(beat, targetPattern);
+                        } else {
+                            targetPatterns.append(targetPattern);
+                        }
+                    }
+                    target.insert(QStringLiteral("musical_patterns"), targetPatterns);
+                } else if (applySections) {
+                    target.insert(QStringLiteral("musical_patterns"),
+                                  boundedArray(previous.value(
+                                      QStringLiteral("musical_patterns")), beats));
+                }
+                mergedSections.replace(index, target);
+            }
+            next.insert(QStringLiteral("sections"), mergedSections);
+
+            QJsonObject currentLooper = next.value(QStringLiteral("looper")).toObject();
+            const QJsonObject generatedLooper = generated->value(QStringLiteral("looper")).toObject();
+            QJsonArray currentBanks = currentLooper.value(QStringLiteral("banks")).toArray();
+            if (!sourceHash.isEmpty()) {
+                for (int bank = 0; bank < currentBanks.size(); ++bank) {
+                    QJsonObject currentBank = currentBanks.at(bank).toObject();
+                    QJsonArray kept;
+                    for (const QJsonValue& laneValue : currentBank.value(
+                             QStringLiteral("lanes")).toArray()) {
+                        QJsonObject lane = laneValue.toObject();
+                        if (lane.value(QStringLiteral("asset_hash")).toString() == sourceHash) {
+                            if (!applySections) {
+                                if (muteSourceInPlace) {
+                                    lane.insert(QStringLiteral("muted"), true);
+                                }
+                                kept.append(lane);
+                            }
+                        } else {
+                            kept.append(laneValue);
+                        }
+                    }
+                    currentBank.insert(QStringLiteral("lanes"), kept);
+                    currentBanks.replace(bank, currentBank);
+                }
+            }
+            const QJsonArray generatedBanks = generatedLooper.value(QStringLiteral("banks")).toArray();
+            QJsonArray mergedBanks = applySections ? generatedBanks : currentBanks;
+            for (int bank = 0; bank < mergedBanks.size(); ++bank) {
+                QJsonObject mergedBank = mergedBanks.at(bank).toObject();
+                const QJsonObject currentBank = bank < currentBanks.size()
+                    ? currentBanks.at(bank).toObject() : QJsonObject{};
+                const QJsonObject generatedBank = bank < generatedBanks.size()
+                    ? generatedBanks.at(bank).toObject() : QJsonObject{};
+                QJsonArray lanes = currentBank.value(QStringLiteral("lanes")).toArray();
+                if (applyStems) {
+                    for (const QJsonValue& lane : generatedBank.value(
+                             QStringLiteral("lanes")).toArray()) {
+                        lanes.append(lane);
+                    }
+                }
+                mergedBank.insert(QStringLiteral("lanes"), lanes);
+                if (!options.value(QStringLiteral("tempo")).toBool() &&
+                    !currentBank.isEmpty()) {
+                    mergedBank.insert(QStringLiteral("timing"),
+                                      currentBank.value(QStringLiteral("timing")));
+                }
+                mergedBanks.replace(bank, mergedBank);
+            }
+            currentLooper.insert(QStringLiteral("banks"), mergedBanks);
+            if (applySections) {
+                currentLooper.insert(QStringLiteral("arrangement"),
+                                     generatedLooper.value(QStringLiteral("arrangement")));
+            }
+            next.insert(QStringLiteral("looper"), currentLooper);
+            next.insert(QStringLiteral("title"), chordModel_.title());
+            if (sourceDisposition == QStringLiteral("keep") &&
+                !appendJamTasterReferenceSection(next, *referenceLane, *error)) {
+                for (const QString& path : std::as_const(*stagedPaths)) {
+                    (void)QFile::remove(path);
+                }
+                QMessageBox::warning(this, QStringLiteral("JamTaster"), *error);
+                return;
+            }
+            if (!loadSongJson(next)) {
+                for (const QString& path : std::as_const(*stagedPaths)) {
+                    (void)QFile::remove(path);
+                }
+                QMessageBox::warning(
+                    this, QStringLiteral("JamTaster"),
+                    QStringLiteral("The selected JamTaster results could not be merged into this jam."));
+                return;
+            }
+            if (applyStems || sourceDisposition == QStringLiteral("keep")) {
+                for (const QString& path : std::as_const(*stagedPaths)) {
+                    registerTransientTrackWav(path);
+                }
+            }
+            if (options.value(QStringLiteral("tempo")).toBool()) {
+                QDir source(QFileInfo(convertedSong).absolutePath());
+                if (source.cdUp()) {
+                    QFile tempoFile(source.absoluteFilePath(QStringLiteral("tempo.json")));
+                    if (tempoFile.open(QIODevice::ReadOnly)) {
+                        const QJsonDocument tempo = QJsonDocument::fromJson(tempoFile.readAll());
+                        if (tempo.isObject()) applyJamTasterTempo(tempo.object());
+                    }
+                }
+            }
+            jamStorage_.markArtifactCreated();
+            refreshSongViews();
+            regeneratePreparedMix();
+            syncLooperArrangement();
+            if (sourceDisposition == QStringLiteral("delete") &&
+                QFileInfo(sourcePath).isFile() && !QFile::moveToTrash(sourcePath)) {
+                QMessageBox::warning(
+                    this, QStringLiteral("JamTaster"),
+                    QStringLiteral(
+                        "The results were applied, but the original source WAV could not "
+                        "be moved to the Recycle Bin."));
+            } else if (sourceDisposition == QStringLiteral("keep")) {
+                QMessageBox::information(
+                    this, QStringLiteral("JamTaster"),
+                    QStringLiteral(
+                        "The original source WAV is muted in the final Original Reference section."));
+            }
+            appendLog(QStringLiteral("selected JamTaster results applied to current jam"));
+        });
+    if (!started) {
+        QMessageBox::warning(this, QStringLiteral("JamTaster"),
+                             QStringLiteral("The bounded file worker is busy."));
+    }
 }
 
 void MainWindow::addLooperWavs()
@@ -14435,6 +15478,26 @@ void MainWindow::newSong()
 
 void MainWindow::openSong()
 {
+    bool discardCurrent = false;
+    const bool hasTransientWavs = projectPersistence_.hasExistingTransientWavs() ||
+        !trackRecordingWorkflow_.pendingTransientCapturePath().isEmpty();
+    if (hasUnsavedProjectChanges() || hasTransientWavs) {
+        QMessageBox dialog(
+            QMessageBox::Question,
+            QStringLiteral("Open JamJar"),
+            QStringLiteral("Save this project before opening another JamJar?"),
+            QMessageBox::NoButton,
+            this);
+        QPushButton* save = dialog.addButton(
+            QStringLiteral("Save Project"), QMessageBox::AcceptRole);
+        QPushButton* discard = dialog.addButton(
+            QStringLiteral("Discard"), QMessageBox::DestructiveRole);
+        QPushButton* cancel = dialog.addButton(QMessageBox::Cancel);
+        dialog.exec();
+        if (dialog.clickedButton() == cancel || dialog.clickedButton() == nullptr) return;
+        if (dialog.clickedButton() == save && !saveSong()) return;
+        discardCurrent = dialog.clickedButton() == discard;
+    }
     const QString path = QFileDialog::getOpenFileName(
         this,
         QStringLiteral("Open JamJar"),
@@ -14448,21 +15511,53 @@ void MainWindow::openSong()
     }
     auto root = std::make_shared<QJsonObject>();
     auto error = std::make_shared<QString>();
+    const bool previousWasUnsaved = !jamStorage_.isSaved();
     (void)startFileWorkerTask(
         [path, root, error] {
             (void)ProjectPersistenceCoordinator::readSongJson(path, *root, *error);
         },
-        [this, path, root, error] {
-            if (!error->isEmpty() || !loadSongJson(*root)) {
+        [this, path, root, error, discardCurrent, previousWasUnsaved] {
+            BeatGridModel validatedSong;
+            LooperProject validatedLooper = looperProject_;
+            const QJsonObject looper = root->value(QStringLiteral("looper")).toObject();
+            const bool valid = error->isEmpty() && validatedSong.loadJson(*root) &&
+                (looper.isEmpty() || validatedLooper.loadJson(looper)) &&
+                (looper.isEmpty() ||
+                 validatedSong.sections().size() == validatedLooper.banks().size());
+            if (!valid) {
                 QMessageBox::warning(
                     this,
                     QStringLiteral("Jam2"),
                     error->isEmpty() ? QStringLiteral("Invalid JamJar file.") : *error);
                 return;
             }
+
+            // Finish the old storage lifecycle before changing roots. Otherwise
+            // prepared/reference renders from the old unsaved project become
+            // unreachable non-empty folders under release/tracks.
+            discardPreparedMix(false);
+            fileWorkerPool_.waitForDone();
+            if (discardCurrent && previousWasUnsaved &&
+                QFileInfo::exists(jamStorage_.rootFolder())) {
+                QString discardError;
+                if (!jamStorage_.discardUnsaved(discardError)) {
+                    QMessageBox::warning(this, QStringLiteral("Discard Jam"), discardError);
+                    return;
+                }
+                projectPersistence_.clearTransientTracking();
+            } else {
+                cleanupTransientTrackWavs();
+                fileWorkerPool_.waitForDone();
+            }
+
+            jamStorage_.openSaved(path, validatedSong.title());
             projectPersistence_.setProjectLocation(path);
-            jamStorage_.openSaved(path, chordModel_.title());
             projectPersistence_.initializeWorkspace(jamStorage_.rootFolder());
+            if (!loadSongJson(*root)) {
+                QMessageBox::warning(
+                    this, QStringLiteral("Jam2"), QStringLiteral("Invalid JamJar file."));
+                return;
+            }
             loadTrackJson(root->value(QStringLiteral("track")).toObject());
             refreshSongViews();
             projectPersistence_.acceptOpenedProject(path, currentProjectSnapshot());

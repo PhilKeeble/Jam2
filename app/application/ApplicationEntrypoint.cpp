@@ -64,6 +64,18 @@ void applyCustomTheme(QApplication& app)
         QLabel#StatusPill[issue="true"] {
             color: #ffd68e; background: #211714; border-color: #e8a44a;
         }
+        QLabel#StatusPill[jamtaster="running"] {
+            color: #ffe3aa; background: #2a2112; border-color: #e8a44a;
+        }
+        QLabel#StatusPill[jamtaster="complete"] {
+            color: #b9f2df; background: #10241f; border-color: #58b99b;
+        }
+        QLabel#StatusPill[jamtaster="cancelled"] {
+            color: #c6d0d0; background: #171d1e; border-color: #526368;
+        }
+        QLabel#StatusPill[jamtaster="error"] {
+            color: #ffd68e; background: #211714; border-color: #e8a44a;
+        }
         QGroupBox {
             border: 1px solid #354247; border-radius: 4px; margin-top: 16px;
             padding: 10px; background: #0b1011;
@@ -300,6 +312,16 @@ void applyCustomTheme(QApplication& app)
         QDialog {
             background: #101516; color: #eee4d1;
         }
+        /* Layout-only QWidget containers otherwise inherit the application's
+           near-black workspace background and appear as bars behind dialog
+           checkboxes and labels. Concrete dialog controls below restore their
+           own surfaces where they need one. */
+        QDialog QWidget {
+            background: transparent;
+        }
+        QDialog QGroupBox {
+            background: #0b1011;
+        }
         QDialog QLabel, QDialog QCheckBox, QDialog QRadioButton {
             color: #eee4d1;
         }
@@ -324,10 +346,28 @@ void applyCustomTheme(QApplication& app)
             background: #383426; color: #fff4df;
             border: 2px solid #ffd68e;
         }
-        QDialog QCheckBox:focus, QDialog QRadioButton:focus {
-            background: #202a2c; color: #fff4df;
-            border: 1px solid #d8bf91; border-radius: 3px;
-            padding: 3px 5px;
+        QDialog QCheckBox:focus {
+            background: transparent; color: #fff4df;
+            border: 1px dotted #d8bf91;
+        }
+        QDialog QRadioButton:focus {
+            background: transparent; color: #fff4df; border: 0;
+        }
+        QDialog QCheckBox {
+            background: transparent; border: 1px dotted transparent;
+            padding: 1px 3px; spacing: 7px; min-height: 24px;
+        }
+        QDialog QRadioButton {
+            background: transparent; border: 0; padding: 2px 0; spacing: 7px;
+            min-height: 24px;
+        }
+        QProgressBar#JamTasterProgress {
+            background: #182022; color: #f4ead8;
+            border: 1px solid #465658; border-radius: 4px;
+            text-align: center; min-height: 18px;
+        }
+        QProgressBar#JamTasterProgress::chunk {
+            background: #e8a44a; border-radius: 3px;
         }
         QDialog QSlider:focus {
             border: 1px solid #d8bf91; border-radius: 3px;

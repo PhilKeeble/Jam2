@@ -30,6 +30,10 @@ Testing/
 /incoming_uploads/
 /artifacts/
 /datasets/
+/app/jamtaster/worker/.venv/
+/app/jamtaster/worker/cache/
+/app/jamtaster/worker/models/
+/app/jamtaster/.cpu-*
 __pycache__/
 *.pyc
 

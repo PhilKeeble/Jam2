@@ -51,19 +51,14 @@ public:
         const QRect box = option->rect.adjusted(1, 1, -1, -1);
         const bool enabled = (option->state & State_Enabled) != 0;
         const bool checked = (option->state & State_On) != 0;
-        const bool hovered = (option->state & State_MouseOver) != 0;
-        const bool focused = (option->state & State_HasFocus) != 0;
-        const QColor border = enabled
-            ? (hovered || focused ? theme::playhead : theme::textMuted)
-            : theme::border;
         const QColor fill = checked
-            ? theme::withAlpha(theme::playhead, 95)
+            ? theme::withAlpha(theme::playhead, 70)
             : theme::editorBg;
         const QColor tick = enabled ? theme::textStrong : theme::textMuted;
 
         painter->save();
         painter->setRenderHint(QPainter::Antialiasing, true);
-        painter->setPen(QPen(border, 1.25));
+        painter->setPen(QPen(enabled ? theme::playhead : theme::border, 1.0));
         painter->setBrush(fill);
         painter->drawRect(box);
         if (checked) {

@@ -12,27 +12,9 @@ Work on the chord generation to make it more rhythmically interesting, like the 
 Link DLLs on windows so its one bin
 Make docker compose that will build on windows / mac / linux, ship back into folder like Jam2gether-Windows etc and then have just the clean binary in there with the docker compose handling getting those base into jam2 in dist/ or something
 
-## Wav analysis
+maybe binary doesnt have validate etc in it and thats only debug builds? on release i spawn container for windows and mac and then build debug, run all validation checks, then pass on to build release and package them up into dist/ for easy release ?
 
-back on the menu, test in lab to see how accurate it is ?
-
-  A realistic implementation sequence would be:
-
-  1. WAV import → Demucs stems → BPM/key/chord analysis → review → JamJar.
-  2. Add bass and melody transcription.
-  3. Add classified drum-lane transcription.
-  4. Add loopback capture as another input source.
-  5. Add optional lyric transcription.
-
-Looks like maybe not worth the effort? 
-
-Add sections so taht it can split it into the relevant sections??
-
-## Guitar Pro Import
-
-Import midi files for songs? 
-
-Guitar pro has complex writings that could be exportd to midi, and then that midi could feed jam2?
+website and youtube videos 
 
 ## Linux Audio Backend (never implement this without explicit approval)
 

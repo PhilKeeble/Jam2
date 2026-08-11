@@ -272,6 +272,35 @@ becomes available while Global Play is running, it joins on a later beat at the
 corresponding song position without resetting `1.1` or the metronome accent.
 The scheduling grid continues silently underneath while Global Play is stopped.
 
+## JamTaster WAV Analysis
+
+JamTaster is an optional WAV-analysis component. Use the **JamTaster** button on
+the Chord, Beat, Track, or Performance view, or select a WAV lane and choose
+**Analyse with JamTaster**. The dialog can detect tempo, split four stems, or run
+the complete chord, drum, bass, and song-structure conversion. Results are
+saved by source-file hash under the current song's `analysis/` folder, so
+reopening the same WAV reuses completed work and deleting the song removes its
+analysis with it.
+
+Saved results can be applied independently: set the project tempo/grid, add the
+four stems to normal `imported/` lanes, apply selected musical data and
+arrangement to the current jam, or create a separate JamJar song. The component
+runs in a separate process from Jam2. Its private runtime and model installation
+can be installed, health-checked, repaired, or removed from the **JamTaster**
+Settings page; end users do not manage Python environments.
+On Windows, Jam2 detects a compatible NVIDIA GPU/driver and chooses the CUDA
+component; otherwise it chooses the CPU-only component. macOS receives a native
+package without CUDA. The selected processing runtime is shown in Settings, and
+an automatically selected accelerator failure retries the request once on CPU.
+Installation and analysis are owned by the main Jam2 window, so closing the
+JamTaster dialog does not stop the task or discard a queued analysis. Live
+JamTaster progress temporarily replaces the top session-status pill and is also
+shown on the Performance-view JamTaster action. Click either place to reopen the
+dialog. **Cancel Task** is enabled only while work is active, asks for
+confirmation, and can stop installation, health checks, or analysis. Cancelled
+installs are cleaned up automatically; a stale partial installation can also be
+removed explicitly from the dialog without removing per-song analysis.
+
 ## Track Recording From The GUI
 
 The GUI records Perform Input takes through the already-loaded local or network

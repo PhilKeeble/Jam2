@@ -102,11 +102,15 @@ QIcon sectionPaginationIcon(bool forward, bool edge)
     return icon;
 }
 
-QString withHitState(const QString& text, int division, int index, bool checked)
+QString withNextHitState(const QString& text, int division, int index)
 {
     QString out = normalizedHitText(text, division);
     if (index >= 0 && index < out.size()) {
-        out[index] = checked ? QChar('x') : QChar('.');
+        const QChar current = out[index].toLower();
+        out[index] = current == QLatin1Char('.') ? QChar('x')
+            : current == QLatin1Char('x') ? QChar('a')
+            : current == QLatin1Char('a') ? QChar('g')
+            : QChar('.');
     }
     return out;
 }
@@ -1854,7 +1858,8 @@ void BeatGridWidget::rebuildChordCards()
     }
     focusLayout->addWidget(bars);
     auto* tip = new QLabel(QStringLiteral(
-        "Type directly and press Tab to advance. ~ holds and - rests. Right-click any chord for the picker."), focus);
+        "Right click on a beat to select a chord, or left click and type chord directly. "
+        "~ for hold, - for rest."), focus);
     tip->setStyleSheet(QStringLiteral("border:0;color:#ddd7e8;font:12px Bahnschrift;"));
     focusLayout->addWidget(tip);
     const int referenceInsertIndex = focusLayout->count();
@@ -2121,7 +2126,8 @@ void BeatGridWidget::rebuildBeatSequencer()
                     [this, sectionIndex, beat, lane, step, cell, applyState] {
                         const BeatPattern& currentPattern = model_->section(sectionIndex).beatPatterns[beat];
                         const QString current = normalizedHitText(currentPattern.lanes[lane], currentPattern.division);
-                        const QString updated = withHitState(current, currentPattern.division, step, current[step] == QLatin1Char('.'));
+                        const QString updated = withNextHitState(
+                            current, currentPattern.division, step);
                         model_->setBeatHit(sectionIndex, beat, lane, updated);
                         applyState(updated[step]);
                         if (onBeatHitEdited) onBeatHitEdited(sectionIndex, beat, lane, updated, model_->revision());
@@ -2130,15 +2136,22 @@ void BeatGridWidget::rebuildBeatSequencer()
                 QObject::connect(cell, &QPushButton::customContextMenuRequested, this,
                     [this, sectionIndex, beat, lane, step, cell, applyState](const QPoint& point) {
                         QMenu menu(this);
+                        const BeatPattern& currentPattern =
+                            model_->section(sectionIndex).beatPatterns[beat];
+                        const QString current = normalizedHitText(
+                            currentPattern.lanes[lane], currentPattern.division);
                         for (const auto& choice : QList<QPair<QString, QChar>>{
-                                {QStringLiteral("Empty"), QLatin1Char('.')}, {QStringLiteral("Normal"), QLatin1Char('x')},
-                                {QStringLiteral("Accent"), QLatin1Char('a')}, {QStringLiteral("Ghost"), QLatin1Char('g')}}) {
+                                {QStringLiteral("Hit"), QLatin1Char('x')},
+                                {QStringLiteral("Accent"), QLatin1Char('a')},
+                                {QStringLiteral("Ghost"), QLatin1Char('g')},
+                                {QStringLiteral("Empty"), QLatin1Char('.')}}) {
                             QAction* action = menu.addAction(choice.first);
                             action->setData(QString(choice.second));
+                            action->setCheckable(true);
+                            action->setChecked(current[step] == choice.second);
                         }
                         QAction* chosen = menu.exec(cell->mapToGlobal(point));
                         if (!chosen) return;
-                        const BeatPattern& currentPattern = model_->section(sectionIndex).beatPatterns[beat];
                         QString updated = normalizedHitText(currentPattern.lanes[lane], currentPattern.division);
                         updated[step] = chosen->data().toString()[0];
                         model_->setBeatHit(sectionIndex, beat, lane, updated);

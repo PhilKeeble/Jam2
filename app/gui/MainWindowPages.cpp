@@ -485,6 +485,9 @@ void MainWindowPages::build(MainWindow& w)
     w.performanceHome_->onGenerateWav = [&w] {
         w.generatePracticeReferenceWavs();
     };
+    w.performanceHome_->onJamTaster = [&w] {
+        w.showJamTasterDialog();
+    };
     w.performanceHome_->onTunerEnabledChanged = [&w](bool enabled) {
         w.setTunerEnabled(enabled);
     };
@@ -1153,11 +1156,13 @@ QWidget* MainWindowPages::buildSongPage(MainWindow& w)
     auto* browse = new QPushButton(QStringLiteral("GROOVE LIBRARY"), page);
     auto* continueIdea = new QPushButton(QStringLiteral("CONTINUE IDEA"), page);
     auto* reference = new QPushButton(QStringLiteral("GENERATE WAV"), page);
+    auto* jamTaster = new QPushButton(QStringLiteral("JAMTASTER"), page);
     auto* details = new QPushButton(QStringLiteral("IDEA DETAILS"), page);
     styleIdeaHeaderAction(generate, IdeaHeaderAction::Generate);
     styleIdeaHeaderAction(browse, IdeaHeaderAction::Browse);
     styleIdeaHeaderAction(continueIdea, IdeaHeaderAction::Continue);
     styleIdeaHeaderAction(reference, IdeaHeaderAction::Wav);
+    styleIdeaHeaderAction(jamTaster, IdeaHeaderAction::Browse);
     styleIdeaHeaderAction(details, IdeaHeaderAction::Details);
     auto* top = new QHBoxLayout();
     addBankControls(w, page, top, false);
@@ -1166,6 +1171,7 @@ QWidget* MainWindowPages::buildSongPage(MainWindow& w)
     top->addWidget(browse);
     top->addWidget(continueIdea);
     top->addWidget(reference);
+    top->addWidget(jamTaster);
     top->addWidget(details);
     top->addStretch(1);
     top->addWidget(w.chordGrid_->createOverviewPagination(page));
@@ -1173,6 +1179,7 @@ QWidget* MainWindowPages::buildSongPage(MainWindow& w)
     QObject::connect(browse, &QPushButton::clicked, &w, [&w] { w.browseCuratedIdeas(); });
     QObject::connect(continueIdea, &QPushButton::clicked, &w, [&w] { w.continuePracticeIdea(); });
     QObject::connect(reference, &QPushButton::clicked, &w, [&w] { w.generatePracticeReferenceWavs(); });
+    QObject::connect(jamTaster, &QPushButton::clicked, &w, [&w] { w.showJamTasterDialog(); });
     QObject::connect(details, &QPushButton::clicked, &w, [&w] { w.showPracticeIdeaDetails(); });
 
     auto* layout = new QVBoxLayout(page);
@@ -1248,11 +1255,13 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
     auto* browse = new QPushButton(QStringLiteral("GROOVE LIBRARY"), page);
     auto* continueIdea = new QPushButton(QStringLiteral("CONTINUE IDEA"), page);
     auto* reference = new QPushButton(QStringLiteral("GENERATE WAV"), page);
+    auto* jamTaster = new QPushButton(QStringLiteral("JAMTASTER"), page);
     auto* details = new QPushButton(QStringLiteral("IDEA DETAILS"), page);
     styleIdeaHeaderAction(generate, IdeaHeaderAction::Generate);
     styleIdeaHeaderAction(browse, IdeaHeaderAction::Browse);
     styleIdeaHeaderAction(continueIdea, IdeaHeaderAction::Continue);
     styleIdeaHeaderAction(reference, IdeaHeaderAction::Wav);
+    styleIdeaHeaderAction(jamTaster, IdeaHeaderAction::Browse);
     styleIdeaHeaderAction(details, IdeaHeaderAction::Details);
     auto* top = new QHBoxLayout();
     addBankControls(w, page, top, false);
@@ -1261,6 +1270,7 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
     top->addWidget(browse);
     top->addWidget(continueIdea);
     top->addWidget(reference);
+    top->addWidget(jamTaster);
     top->addWidget(details);
     top->addStretch(1);
     top->addWidget(w.beatGrid_->createOverviewPagination(page));
@@ -1271,6 +1281,7 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
     QObject::connect(browse, &QPushButton::clicked, &w, [&w] { w.browseCuratedIdeas(); });
     QObject::connect(continueIdea, &QPushButton::clicked, &w, [&w] { w.continuePracticeIdea(); });
     QObject::connect(reference, &QPushButton::clicked, &w, [&w] { w.generatePracticeReferenceWavs(); });
+    QObject::connect(jamTaster, &QPushButton::clicked, &w, [&w] { w.showJamTasterDialog(); });
     QObject::connect(details, &QPushButton::clicked, &w, [&w] { w.showPracticeIdeaDetails(); });
     return page;
 }
@@ -1562,14 +1573,18 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         QStringLiteral("CONTINUE IDEA"), page);
     auto* generateWavButton = new QPushButton(
         QStringLiteral("GENERATE WAV"), page);
+    auto* jamTasterButton = new QPushButton(
+        QStringLiteral("JAMTASTER"), page);
     styleIdeaHeaderAction(generateIdeaButton, IdeaHeaderAction::Generate);
     styleIdeaHeaderAction(browseIdeasButton, IdeaHeaderAction::Browse);
     styleIdeaHeaderAction(continueIdeaButton, IdeaHeaderAction::Continue);
     styleIdeaHeaderAction(generateWavButton, IdeaHeaderAction::Wav);
+    styleIdeaHeaderAction(jamTasterButton, IdeaHeaderAction::Browse);
     sectionRow->addWidget(generateIdeaButton);
     sectionRow->addWidget(browseIdeasButton);
     sectionRow->addWidget(continueIdeaButton);
     sectionRow->addWidget(generateWavButton);
+    sectionRow->addWidget(jamTasterButton);
     QObject::connect(generateIdeaButton, &QPushButton::clicked, &w, [&w] {
         w.generatePracticeIdea();
     });
@@ -1581,6 +1596,9 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     });
     QObject::connect(generateWavButton, &QPushButton::clicked, &w, [&w] {
         w.generatePracticeReferenceWavs();
+    });
+    QObject::connect(jamTasterButton, &QPushButton::clicked, &w, [&w] {
+        w.showJamTasterDialog();
     });
     sectionRow->addStretch(1);
     w.launchBankButton_ = new QPushButton(QStringLiteral("Queue Section"), page);
@@ -1861,6 +1879,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     w.looperStack_->onRemove = [&w](int lane) { if (!w.sharedRecordingProtected()) { w.selectedLooperLane_ = lane; w.removeSelectedLooperLane(); } };
     w.looperStack_->onRevealWav = [&w](int lane) { w.revealLooperLaneWav(lane); };
     w.looperStack_->onRemoveWav = [&w](int lane) { if (!w.sharedRecordingProtected()) w.removeLooperLaneWav(lane); };
+    w.looperStack_->onAnalyzeWav = [&w](int lane) { w.showJamTasterDialog(lane); };
     w.looperStack_->onGainChanged = [&w](int lane, double gainDb) { if (!w.sharedRecordingProtected()) w.applyLooperLaneGain(lane, gainDb); };
     w.looperStack_->onRegionCommitted = [&w](int lane, qint64 startFrame, qint64 sourceStartFrame, qint64 sourceEndFrame) {
         if (w.sharedRecordingProtected()) return;
@@ -2143,10 +2162,10 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     patternLayout->addWidget(patternScroll);
     auto* legend = new QLabel(patternCard);
     legend->setText(QStringLiteral(
-        "<span style='color:#e8a44a'>◆</span> <span style='color:#f5f2e9'>Accent</span>"
-        "&nbsp;&nbsp;&nbsp;&nbsp; <span style='color:#66d4cf'>●</span> <span style='color:#f5f2e9'>Click</span>"
-        "&nbsp;&nbsp;&nbsp;&nbsp; <span style='color:#68777a'>○</span> <span style='color:#f5f2e9'>Muted</span>"
-        "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span style='color:#f5f2e9'>Click a beat to cycle its state</span>"));
+        "<span style='color:#68777a'>○</span> <span style='color:#f5f2e9'>Muted</span>"
+        "&nbsp;&nbsp;&nbsp;&nbsp; <span style='color:#66d4cf'>●</span> <span style='color:#f5f2e9'>Hit</span>"
+        "&nbsp;&nbsp;&nbsp;&nbsp; <span style='color:#e8a44a'>◆</span> <span style='color:#f5f2e9'>Accent</span>"
+        "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span style='color:#f5f2e9'>Left-click cycles · right-click chooses</span>"));
     legend->setTextFormat(Qt::RichText);
     legend->setObjectName(QStringLiteral("MetronomeLegend"));
     legend->setContentsMargins(14, 5, 14, 3);

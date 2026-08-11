@@ -17,19 +17,6 @@ ROLE_NAMES = {
 }
 
 
-def structure_role(label: str) -> str | None:
-    cleaned = label.lower().strip().replace("_", "-")
-    if cleaned in {"intro", "outro"}:
-        return "bookend"
-    if cleaned in {"verse", "pre-chorus", "prechorus"}:
-        return "verse"
-    if cleaned == "chorus":
-        return "chorus"
-    if cleaned in {"bridge", "inst", "instrumental", "break", "solo"}:
-        return "bridge"
-    return None
-
-
 def estimate_bpm(beats: list[float]) -> float:
     intervals = [b - a for a, b in zip(beats, beats[1:]) if 0.2 <= b - a <= 2.0]
     if not intervals:
@@ -45,40 +32,6 @@ def infer_meter(beats: list[float], downbeats: list[float], fallback: int = 4) -
     if not spacings:
         return fallback
     return Counter(spacings).most_common(1)[0][0]
-
-
-def merge_consecutive_structures(
-    structures: list[TimedLabel],
-) -> tuple[list[TimedLabel], list[dict[str, object]]]:
-    """Merge consecutive model spans carrying the same normalized label."""
-    merged: list[TimedLabel] = []
-    diagnostics: list[dict[str, object]] = []
-
-    def key(label: str) -> str:
-        return " ".join(label.strip().lower().replace("_", " ").split())
-
-    for structure in sorted(structures, key=lambda item: (item.start, item.end)):
-        if merged and key(merged[-1].label) == key(structure.label):
-            previous = merged[-1]
-            confidences = [
-                value for value in (previous.confidence, structure.confidence)
-                if value is not None
-            ]
-            merged[-1] = TimedLabel(
-                previous.start,
-                max(previous.end, structure.end),
-                previous.label,
-                min(confidences) if confidences else None,
-            )
-            diagnostics.append({
-                "label": previous.label,
-                "first_start": previous.start,
-                "join": structure.start,
-                "merged_end": max(previous.end, structure.end),
-            })
-        else:
-            merged.append(structure)
-    return merged, diagnostics
 
 
 def beat_index_at(beats: list[float], time: float) -> int:

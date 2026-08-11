@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import io
 from pathlib import Path
+from contextlib import redirect_stdout
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import wave
 
 
@@ -13,11 +16,20 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from jamtaster.jamjar import export_song
+from jamtaster.cli import (
+    _PIP_RAW_PROGRESS,
+    _install_progress,
+    _pip_bootstrap_command,
+    _torch_install_command,
+    repair_component,
+)
+from jamtaster.jobs import run_request
 from jamtaster.paths import portable_slug
 from jamtaster.postprocess import (
     classify_cymbals,
     contextualize_bass,
     contextualize_chords,
+    infer_song_sections,
     section_timing_diagnostics,
 )
 from jamtaster.timing import (
@@ -25,14 +37,12 @@ from jamtaster.timing import (
     choose_sections,
     drum_state,
     fuse_chords_with_bass,
-    merge_consecutive_structures,
     normalize_chord,
     quantize_drums,
     quantize_musical,
     repair_drum_hits,
     shape_drum_dynamics,
     stabilize_chords,
-    structure_role,
 )
 from jamtaster.types import Analysis, DrumHit, NoteEvent, SectionChoice, TimedLabel, jsonable
 from jamtaster.wav import (
@@ -64,6 +74,137 @@ class PortableSlugTests(unittest.TestCase):
                 return 7
 
         self.assertEqual(jsonable({"value": ModelScalar()}), {"value": 7})
+
+
+class RuntimeInstallTests(unittest.TestCase):
+    def test_removed_song_form_dependencies_are_not_packaged(self) -> None:
+        component_root = ROOT.parent
+        requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").lower()
+        self.assertNotIn("matplotlib", requirements)
+        self.assertNotIn("seaborn", requirements)
+        combined = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (
+                ROOT / "requirements.txt",
+                ROOT / "jamtaster" / "models.py",
+                component_root / "packaging" / "build_component.py",
+            )
+        ).lower()
+        for removed in (
+            "songformer", "transformers", "huggingface", "msaf",
+            "x_transformers", "muq", "nnaudio", "julius",
+        ):
+            self.assertNotIn(removed, combined)
+
+    def test_install_progress_uses_the_native_ui_contract(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            _install_progress("Private runtime", 40)
+        self.assertEqual(json.loads(output.getvalue()), {
+            "format": "jamtaster-install-progress-v1",
+            "message": "Private runtime",
+            "percent": 40,
+        })
+
+    def test_windows_selects_distinct_cpu_and_cuda_wheels(self) -> None:
+        cpu = _torch_install_command("python", True, os_name="nt", platform_name="win32")
+        cuda = _torch_install_command("python", False, os_name="nt", platform_name="win32")
+        self.assertIn("https://download.pytorch.org/whl/cpu", cpu)
+        self.assertIn("https://download.pytorch.org/whl/cu126", cuda)
+        self.assertIn("raw", cpu)
+
+    def test_fresh_runtime_bootstrap_uses_old_pip_compatible_progress(self) -> None:
+        command = _pip_bootstrap_command("python")
+        progress_index = command.index("--progress-bar")
+        self.assertEqual(command[progress_index + 1], "off")
+        self.assertNotIn("raw", command)
+
+    def test_repair_does_no_install_work_when_health_is_ok(self) -> None:
+        healthy = {
+            "healthy": True,
+            "dependencies": {},
+            "models": {},
+            "runtime_compatible": True,
+        }
+        output = io.StringIO()
+        with (
+            patch("jamtaster.cli.venv_python") as python,
+            patch("jamtaster.cli.component_health", return_value=healthy),
+            patch("jamtaster.cli._run") as run,
+            redirect_stdout(output),
+        ):
+            python.return_value.is_file.return_value = True
+            repair_component(True)
+        run.assert_not_called()
+        self.assertIn("no repair was needed", output.getvalue())
+
+    def test_pip_raw_byte_progress_can_drive_native_speed_updates(self) -> None:
+        match = _PIP_RAW_PROGRESS.match("Progress 1048576 of 8388608")
+        self.assertIsNotNone(match)
+        self.assertEqual(match.groups(), ("1048576", "8388608"))
+
+    def test_macos_never_adds_a_cuda_or_cpu_index(self) -> None:
+        command = _torch_install_command(
+            "python", False, os_name="posix", platform_name="darwin"
+        )
+        self.assertNotIn("--index-url", command)
+        self.assertEqual(command[-2:], ["torch==2.9.1", "torchaudio==2.9.1"])
+
+
+class JobRequestTests(unittest.TestCase):
+    def test_rejects_empty_paths_before_dispatch(self) -> None:
+        with self.assertRaisesRegex(ValueError, "input_path is required"):
+            run_request(
+                {"protocol": 1, "action": "detect_bpm", "project_root": "project"},
+                lambda _event: None,
+            )
+        with self.assertRaisesRegex(ValueError, "project_root is required"):
+            run_request(
+                {"protocol": 1, "action": "detect_bpm", "input_path": "audio.wav"},
+                lambda _event: None,
+            )
+
+    def test_rejects_incompatible_protocol(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported JamTaster protocol"):
+            run_request({}, lambda _event: None)
+
+    def test_auto_device_retries_accelerator_failure_on_cpu(self) -> None:
+        events = []
+        with patch(
+            "jamtaster.jobs._dispatch_request",
+            side_effect=[RuntimeError("CUDA kernel failed"), {"device": "cpu"}],
+        ) as dispatch:
+            result = run_request(
+                {
+                    "protocol": 1,
+                    "action": "split_stems",
+                    "input_path": "audio.wav",
+                    "project_root": "project",
+                },
+                events.append,
+            )
+        self.assertEqual(result, {"device": "cpu"})
+        self.assertEqual(dispatch.call_count, 2)
+        self.assertEqual(dispatch.call_args_list[1].args[3]["device"], "cpu")
+        self.assertEqual(events[0]["stage"], "accelerator_fallback")
+
+    def test_explicit_cpu_does_not_retry(self) -> None:
+        with patch(
+            "jamtaster.jobs._dispatch_request",
+            side_effect=RuntimeError("CUDA text from a dependency"),
+        ) as dispatch:
+            with self.assertRaises(RuntimeError):
+                run_request(
+                    {
+                        "protocol": 1,
+                        "action": "split_stems",
+                        "input_path": "audio.wav",
+                        "project_root": "project",
+                        "device": "cpu",
+                    },
+                    lambda _event: None,
+                )
+        self.assertEqual(dispatch.call_count, 1)
 
 
 class WavTests(unittest.TestCase):
@@ -122,17 +263,65 @@ class WavTests(unittest.TestCase):
 
 
 class TimingTests(unittest.TestCase):
-    def test_consecutive_equal_structure_labels_merge_but_later_verse_does_not(self) -> None:
-        structures = [
-            TimedLabel(0, 4, "verse"), TimedLabel(4, 8, "Verse"),
-            TimedLabel(8, 12, "chorus"), TimedLabel(12, 16, "verse"),
+    def test_local_structure_inference_finds_sustained_multimodal_change(self) -> None:
+        beats = [index * 0.5 for index in range(65)]
+        downbeats = [beats[index] for index in range(0, 65, 4)]
+        chords = [
+            TimedLabel(0.0, 16.0, "Am"),
+            TimedLabel(16.0, 32.0, "F"),
         ]
-        merged, diagnostics = merge_consecutive_structures(structures)
-        self.assertEqual(
-            [(item.start, item.end, item.label) for item in merged],
-            [(0, 8, "verse"), (8, 12, "chorus"), (12, 16, "verse")],
+        drums = []
+        bass = []
+        for bar in range(16):
+            start = bar * 2.0
+            if bar < 8:
+                drums.extend([
+                    DrumHit(start, "Kick", 100),
+                    DrumHit(start + 1.0, "Snare", 105),
+                ])
+                bass.append(NoteEvent(start, start + 0.4, 45))
+            else:
+                drums.extend([
+                    DrumHit(start, "Crash", 112),
+                    DrumHit(start + 0.5, "Kick", 104),
+                    DrumHit(start + 1.5, "Snare", 110),
+                ])
+                bass.append(NoteEvent(start + 0.5, start + 0.9, 41))
+
+        sections, diagnostics = infer_song_sections(
+            beats, downbeats, 4, chords, drums, bass, 32.0
         )
-        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual([item.label for item in sections], ["Section A", "Section B"])
+        self.assertAlmostEqual(sections[0].end, 16.0)
+        self.assertEqual(diagnostics["selected_boundary_bars"], [8])
+
+    def test_local_structure_inference_ignores_one_bar_variation(self) -> None:
+        beats = [index * 0.5 for index in range(65)]
+        downbeats = [beats[index] for index in range(0, 65, 4)]
+        chords = [TimedLabel(0.0, 32.0, "Am")]
+        drums = []
+        bass = []
+        for bar in range(16):
+            start = bar * 2.0
+            drums.extend([
+                DrumHit(start, "Kick", 100),
+                DrumHit(start + 1.0, "Snare", 105),
+            ])
+            bass.append(NoteEvent(start, start + 0.4, 45))
+        # A fill and passing chord in one bar should remain part of the phrase.
+        drums.extend(DrumHit(10.0 + offset * 0.125, "Mid Tom", 96)
+                     for offset in range(8))
+        chords = [
+            TimedLabel(0.0, 10.0, "Am"),
+            TimedLabel(10.0, 12.0, "G"),
+            TimedLabel(12.0, 32.0, "Am"),
+        ]
+
+        sections, diagnostics = infer_song_sections(
+            beats, downbeats, 4, chords, drums, bass, 32.0
+        )
+        self.assertEqual(len(sections), 1)
+        self.assertEqual(diagnostics["selected_boundary_bars"], [])
 
     def test_context_chords_remove_isolated_lead_note_excursion(self) -> None:
         primary = [
@@ -196,7 +385,7 @@ class TimingTests(unittest.TestCase):
         self.assertEqual(stable[2].end, 4.1)
         self.assertEqual(stable[-1].end, 7.0)
 
-    def test_role_mapping_and_arrangement_preserves_each_selected_section(self) -> None:
+    def test_arrangement_preserves_each_selected_section(self) -> None:
         structures = [
             TimedLabel(0, 4, "intro"), TimedLabel(4, 12, "verse"),
             TimedLabel(12, 20, "pre-chorus"), TimedLabel(20, 28, "chorus"),
@@ -207,7 +396,6 @@ class TimingTests(unittest.TestCase):
             SectionChoice("verse", "verse", 4, 12, 8, 16),
             SectionChoice("chorus", "chorus", 20, 28, 40, 16),
         ]
-        self.assertEqual(structure_role("pre-chorus"), "verse")
         self.assertEqual(arrangement_steps(structures, choices), [
             {"bank": 0, "repeats": 1},
             {"bank": 1, "repeats": 1},

@@ -6,6 +6,7 @@
 #include <QFontMetricsF>
 #include <QKeyEvent>
 #include <QLinearGradient>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -771,16 +772,43 @@ int MetronomePatternWidget::stepAt(const QPoint& point) const
 
 void MetronomePatternWidget::mousePressEvent(QMouseEvent* event)
 {
-    if (event->button() != Qt::LeftButton) {
+    if (event->button() != Qt::LeftButton && event->button() != Qt::RightButton) {
         QWidget::mousePressEvent(event);
         return;
     }
     const int step = stepAt(event->position().toPoint());
     if (step < 0 || step >= enabled_.size() || step >= accents_.size()) return;
-    const bool enabled = enabled_.at(step);
-    const bool accent = enabled && accents_.at(step);
-    const bool nextEnabled = !enabled || !accent;
-    const bool nextAccent = enabled && !accent;
+    const int currentState = enabled_.at(step)
+        ? accents_.at(step) ? 2 : 1
+        : 0;
+    if (event->button() == Qt::LeftButton) {
+        setStepState(step, (currentState + 1) % 3);
+        event->accept();
+        return;
+    }
+
+    QMenu menu(this);
+    for (const auto& choice : QList<QPair<QString, int>>{
+             {QStringLiteral("Muted"), 0},
+             {QStringLiteral("Hit"), 1},
+             {QStringLiteral("Accent"), 2}}) {
+        QAction* action = menu.addAction(choice.first);
+        action->setData(choice.second);
+        action->setCheckable(true);
+        action->setChecked(currentState == choice.second);
+    }
+    QAction* chosen = menu.exec(event->globalPosition().toPoint());
+    if (chosen) setStepState(step, chosen->data().toInt());
+    event->accept();
+}
+
+void MetronomePatternWidget::setStepState(int step, int state)
+{
+    if (step < 0 || step >= enabled_.size() || step >= accents_.size()) return;
+    state = qBound(0, state, 2);
+    const bool nextEnabled = state != 0;
+    const bool nextAccent = state == 2;
+    if (enabled_.at(step) == nextEnabled && accents_.at(step) == nextAccent) return;
     enabled_[step] = nextEnabled;
     accents_[step] = nextAccent;
     update();
@@ -988,6 +1016,14 @@ void PerformanceHomeWidget::setWavGenerationActive(bool active)
         return;
     }
     wavGenerationActive_ = active;
+    update();
+}
+
+void PerformanceHomeWidget::setJamTasterTaskStatus(bool active, int percent)
+{
+    if (jamTasterTaskActive_ == active && jamTasterTaskProgress_ == percent) return;
+    jamTasterTaskActive_ = active;
+    jamTasterTaskProgress_ = qBound(0, percent, 100);
     update();
 }
 
@@ -2412,6 +2448,7 @@ void PerformanceHomeWidget::paintGenerationActions(
     constexpr int height = 31;
     constexpr int gap = 8;
     constexpr int wavWidth = 116;
+    constexpr int jamTasterWidth = 126;
     constexpr int clearWidth = 96;
     constexpr int continueWidth = 124;
     constexpr int browseWidth = 132;
@@ -2436,6 +2473,11 @@ void PerformanceHomeWidget::paintGenerationActions(
         browseIdeasHitRect_.left() - gap - ideaWidth,
         top,
         ideaWidth,
+        height);
+    jamTasterHitRect_ = QRect(
+        generateIdeaHitRect_.left() - gap - jamTasterWidth,
+        top,
+        jamTasterWidth,
         height);
 
     QFont actionFont(QStringLiteral("Bahnschrift"));
@@ -2483,6 +2525,11 @@ void PerformanceHomeWidget::paintGenerationActions(
         QStringLiteral("GENERATE WAV"),
         QColor(176, 139, 228),
         QColor(27, 20, 37, 232));
+    drawAction(
+        jamTasterHitRect_,
+        QStringLiteral("JAMTASTER"),
+        QColor(102, 175, 229),
+        QColor(15, 31, 44, 232));
 
     if (wavGenerationActive_) {
         constexpr int statusWidth = 164;
@@ -3078,6 +3125,10 @@ void PerformanceHomeWidget::mousePressEvent(QMouseEvent* event)
     }
     if (generateWavHitRect_.contains(point)) {
         if (onGenerateWav) onGenerateWav();
+        return;
+    }
+    if (jamTasterHitRect_.contains(point)) {
+        if (onJamTaster) onJamTaster();
         return;
     }
     if (arrangementHitRect_.contains(point)) {

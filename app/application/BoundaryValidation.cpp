@@ -6409,6 +6409,35 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                 songsBefore);
     }
     {
+        const QString name = QStringLiteral("Boundary Discard %1").arg(
+            QUuid::createUuid().toString(QUuid::WithoutBraces));
+        JamStorage storage;
+        storage.startNew(name);
+        const QString workspace = storage.rootFolder();
+        const QString generated = QDir(workspace).absoluteFilePath(
+            QStringLiteral("generated/session.wav"));
+        const QString received = QDir(workspace).absoluteFilePath(
+            QStringLiteral("received/session.wav"));
+        const bool foldersReady =
+            QDir().mkpath(QFileInfo(generated).absolutePath()) &&
+            QDir().mkpath(QFileInfo(received).absolutePath());
+        auto writeFixture = [](const QString& path) {
+            QFile file(path);
+            return file.open(QIODevice::WriteOnly) && file.write("wav", 3) == 3;
+        };
+        const bool filesReady = foldersReady &&
+            writeFixture(generated) && writeFixture(received);
+        storage.markArtifactCreated();
+        QString error;
+        const bool discarded = storage.discardUnsaved(error);
+        record(QStringLiteral("jam-storage.discard-removes-entire-nonempty-track-workspace"),
+            filesReady && discarded && error.isEmpty() &&
+            !QFileInfo::exists(workspace));
+        if (QFileInfo::exists(workspace)) {
+            (void)QDir(workspace).removeRecursively();
+        }
+    }
+    {
         LooperProject project;
         const bool emptyBankRejected =
             !PreparedMixRenderer::hasRenderableSources(project);

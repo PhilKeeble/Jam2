@@ -66,6 +66,8 @@ class QVBoxLayout;
 class WaveformWidget;
 class LooperLaneStackWidget;
 class LevelMeterWidget;
+class JamTasterService;
+class JamTasterDialog;
 
 namespace jam2::practice {
 struct ChordIdeaRequest;
@@ -112,6 +114,20 @@ private:
     void showStartJamDialog();
     void showJoinJamDialog();
     void showSettingsDialog();
+    void showJamTasterDialog(int laneIndex = -1);
+    void applyJamTasterTempo(const QJsonObject& result);
+    void applyJamTasterQuick(
+        const QJsonObject& tempo,
+        const QJsonObject& stems,
+        const QJsonObject& options,
+        const QString& sourceHash);
+    void applyJamTasterConverted(
+        const QString& convertedSong,
+        const QJsonObject& options);
+    void createJamTasterSong(
+        const QString& convertedSong,
+        const QString& sourcePath,
+        const QString& sourceHash);
     void setSessionHeaderStatus(
         const QString& text,
         const QString& title,
@@ -120,6 +136,8 @@ private:
         bool actionable = false);
     void showLocalSessionHeaderStatus();
     void showAudioOffSessionHeaderStatus();
+    void showJamTasterSessionHeaderStatus();
+    void restoreSessionHeaderStatus();
     void updateJamSessionHeaderStatus(
         const SharedSessionController::Snapshot& snapshot);
     void stopJam(bool returnToLocal = true);
@@ -827,5 +845,8 @@ private:
     QVector<bool> metronomeEnabledSteps_;
     QVector<bool> metronomeAccents_;
     bool applyingBankTiming_ = false;
+    std::unique_ptr<JamTasterService> jamTaster_;
+    std::unique_ptr<JamTasterDialog> jamTasterDialog_;
+    quint64 jamTasterStatusRevision_ = 0;
     JamStorage jamStorage_;
 };

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from array import array
+import argparse
 import gc
+import importlib.util
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
+import time
+import types
 import urllib.request
 import wave
 import zipfile
@@ -15,7 +18,6 @@ from .paths import CACHE_ROOT, MODELS_ROOT
 from .types import DrumHit, NoteEvent, TimedLabel, WavInfo
 
 
-SONGFORMER_REVISION = "a75880ed1b7375ac71860ec6c4fc9c899cf99515"
 CHORDMINI_REVISION = "aa6e3a8d7b017f082fd2aaff9329d5c26af49c03"
 ADTOF_REVISION = "85c192e78f716ea0b111cc8a5ee4a8f6a3a4f8a9"
 
@@ -24,10 +26,16 @@ class ModelError(RuntimeError):
     pass
 
 
+def _model_progress(message: str, percent: int) -> None:
+    print(json.dumps({
+        "format": "jamtaster-install-progress-v1",
+        "message": message,
+        "percent": percent,
+    }, separators=(",", ":")), flush=True)
+
+
 def configure_local_caches() -> None:
     locations = {
-        "HF_HOME": CACHE_ROOT / "huggingface",
-        "HUGGINGFACE_HUB_CACHE": CACHE_ROOT / "huggingface" / "hub",
         "TORCH_HOME": CACHE_ROOT / "torch",
         "XDG_CACHE_HOME": CACHE_ROOT,
         "NUMBA_CACHE_DIR": CACHE_ROOT / "numba",
@@ -45,7 +53,7 @@ def resolve_device(requested: str) -> str:
             try:
                 import torch
             except ImportError as exc:
-                raise ModelError("PyTorch is not installed; run JamTaster.py setup") from exc
+                raise ModelError("the JamTaster runtime is incomplete; use Repair in Jam2 Settings") from exc
             if not torch.cuda.is_available():
                 raise ModelError(f"requested {requested}, but CUDA is unavailable")
         return requested
@@ -100,18 +108,7 @@ def _fetch_github_snapshot(owner: str, repo: str, revision: str, destination: Pa
 def fetch_models(device: str) -> None:
     configure_local_caches()
     MODELS_ROOT.mkdir(parents=True, exist_ok=True)
-    try:
-        from huggingface_hub import snapshot_download
-    except ImportError as exc:
-        raise ModelError("huggingface-hub is missing; run JamTaster.py setup") from exc
-
-    songformer = MODELS_ROOT / "songformer"
-    print(f"Downloading SongFormer {SONGFORMER_REVISION[:12]}...")
-    snapshot_download(
-        repo_id="ASLP-lab/SongFormer",
-        revision=SONGFORMER_REVISION,
-        local_dir=str(songformer),
-    )
+    _model_progress("Downloading pinned chord model", 63)
     _fetch_github_snapshot(
         "ptnghia-j", "ChordMini", CHORDMINI_REVISION, MODELS_ROOT / "chordmini"
     )
@@ -119,14 +116,14 @@ def fetch_models(device: str) -> None:
     if not chord_checkpoint.is_file() or chord_checkpoint.stat().st_size <= 1024 * 1024:
         raise ModelError("the pinned ChordMini archive did not contain its full BTC checkpoint")
 
-    print("Downloading Beat This final0 weights...")
+    _model_progress("Downloading pinned chord and beat models", 76)
     try:
         from beat_this.inference import File2Beats
         File2Beats(checkpoint_path="final0", device=device, dbn=False)
     except Exception as exc:
         raise ModelError(f"could not fetch Beat This weights: {exc}") from exc
 
-    print("Downloading Demucs htdemucs_ft weights...")
+    _model_progress("Downloading pinned Demucs stem model", 84)
     try:
         from demucs_infer.api import Separator
         separator = Separator(model="htdemucs_ft", device=device)
@@ -134,11 +131,8 @@ def fetch_models(device: str) -> None:
     except Exception as exc:
         raise ModelError(f"could not fetch Demucs weights: {exc}") from exc
 
-    print("Loading SongFormer once to fetch its dependent local weights...")
-    songformer_model = _load_songformer(device)
-    del songformer_model
-    gc.collect()
-    print("All model sources and weights are available locally.")
+    _model_progress("Validating local model weights", 92)
+    _model_progress("Pinned model installation complete", 96)
 
 
 def _write_tensor_wav(tensor: object, sample_rate: int, path: Path) -> None:
@@ -165,7 +159,7 @@ def separate_stems(input_path: Path, info: WavInfo, workspace: Path, device: str
         import soundfile as sf
         from demucs_infer.api import Separator
     except ImportError as exc:
-        raise ModelError("Demucs dependencies are missing; run JamTaster.py setup") from exc
+        raise ModelError("Demucs is missing; use Repair in Jam2 Settings") from exc
     print(f"Separating drums, bass, other and vocals with {model} on {device}...")
     try:
         separator = Separator(model=model, device=device, progress=True)
@@ -202,7 +196,7 @@ def track_beats(input_path: Path, device: str, checkpoint: str) -> tuple[list[fl
     try:
         from beat_this.inference import File2Beats
     except ImportError as exc:
-        raise ModelError("Beat This is missing; run JamTaster.py setup") from exc
+        raise ModelError("Beat This is missing; use Repair in Jam2 Settings") from exc
     print(f"Tracking beats and downbeats with Beat This {checkpoint}...")
     try:
         tracker = File2Beats(checkpoint_path=checkpoint, device=device, dbn=False)
@@ -210,50 +204,6 @@ def track_beats(input_path: Path, device: str, checkpoint: str) -> tuple[list[fl
         return [float(value) for value in beats], [float(value) for value in downbeats]
     except Exception as exc:
         raise ModelError(f"Beat This analysis failed: {exc}") from exc
-
-
-def _load_songformer(device: str):
-    directory = MODELS_ROOT / "songformer"
-    if not (directory / "config.json").is_file():
-        raise ModelError("SongFormer has not been fetched; run JamTaster.py models fetch")
-    try:
-        from transformers import AutoModel
-    except ImportError as exc:
-        raise ModelError("Transformers is missing; run JamTaster.py setup") from exc
-    sys.path.insert(0, str(directory))
-    os.environ["SONGFORMER_LOCAL_DIR"] = str(directory)
-    try:
-        model = AutoModel.from_pretrained(
-            str(directory), trust_remote_code=True, low_cpu_mem_usage=False, local_files_only=True
-        )
-        return model.to(device).eval()
-    except Exception as exc:
-        raise ModelError(f"could not load local SongFormer: {exc}") from exc
-
-
-def analyze_structure(input_path: Path, device: str) -> tuple[list[TimedLabel], object]:
-    print("Detecting song structure with local SongFormer weights...")
-    model = _load_songformer(device)
-    try:
-        result = model(str(input_path))
-    except Exception as exc:
-        raise ModelError(f"SongFormer analysis failed: {exc}") from exc
-    if isinstance(result, str):
-        result = json.loads(result)
-    if isinstance(result, dict):
-        result = result.get("segments", result.get("result", []))
-    segments: list[TimedLabel] = []
-    for item in result:
-        if isinstance(item, dict):
-            segments.append(TimedLabel(
-                float(item["start"]), float(item["end"]), str(item["label"]),
-                float(item["confidence"]) if item.get("confidence") is not None else None,
-            ))
-        elif len(item) >= 3:
-            segments.append(TimedLabel(float(item[0]), float(item[1]), str(item[2])))
-    del model
-    gc.collect()
-    return segments, result
 
 
 def mix_pcm16(left: Path, right: Path, destination: Path) -> None:
@@ -294,7 +244,7 @@ def prepare_analysis_only_chord_audio(
         import soundfile as sf
         from scipy.signal import butter, sosfiltfilt
     except ImportError as exc:
-        raise ModelError("harmonic preprocessing dependencies are missing; run JamTaster.py setup") from exc
+        raise ModelError("harmonic preprocessing support is missing; use Repair in Jam2 Settings") from exc
     other, sample_rate = sf.read(str(source_path), dtype="float32", always_2d=False)
     if other.ndim != 1:
         other = other.mean(axis=1)
@@ -319,38 +269,135 @@ def analyze_chords(audio_path: Path, workspace: Path, device: str) -> tuple[list
     config = root / "config" / "ChordMini.yaml"
     if not script.is_file() or not checkpoint.is_file():
         raise ModelError("ChordMini source/checkpoint is missing; run JamTaster.py models fetch")
-    output = workspace / "chordmini-output"
-    output.mkdir()
-    command = [
-        sys.executable, str(script), "--model_type", "BTC", "--checkpoint", str(checkpoint),
-        "--config", str(config), "--audio_dir", str(audio_path), "--save_dir", str(output),
-        "--smooth_logits", "--use_overlap", "--use_gaussian", "--kernel_size", "9",
-        "--vote_aggregation", "logit", "--min_segment_duration", "0.25", "--smooth_predictions",
-    ]
-    environment = dict(os.environ)
-    if device == "cpu":
-        environment["CUDA_VISIBLE_DEVICES"] = ""
-    print("Recognising chords with ChordMini BTC...")
-    completed = subprocess.run(
-        command, cwd=root, env=environment, text=True, stdout=None,
-        stderr=subprocess.PIPE, check=False
-    )
-    if completed.returncode:
-        detail = (completed.stderr or "no error detail").strip()[-3000:]
-        raise ModelError(f"ChordMini analysis failed (exit {completed.returncode}): {detail}")
-    labs = list(output.rglob("*.lab"))
-    if len(labs) != 1:
-        raise ModelError(f"ChordMini produced {len(labs)} .lab files; expected one")
-    segments: list[TimedLabel] = []
-    raw: list[dict[str, object]] = []
-    for line in labs[0].read_text(encoding="utf-8").splitlines():
-        fields = line.split(maxsplit=2)
-        if len(fields) != 3:
-            continue
-        start, end, label = float(fields[0]), float(fields[1]), fields[2]
-        segments.append(TimedLabel(start, end, label))
-        raw.append({"start": start, "end": end, "label": label})
-    return segments, raw
+    print("Recognising chords with ChordMini BTC in the JamTaster worker...", flush=True)
+    stage_started = time.perf_counter()
+    # ChordMini is fetched as pinned source, not installed as an importable
+    # distribution. Load its inference module locally so a frozen JamTaster
+    # worker never tries to spawn sys.executable as a second Python process.
+    root_text = str(root)
+    source_text = str(root / "src")
+    if root_text not in sys.path:
+        sys.path.insert(0, root_text)
+    if source_text not in sys.path:
+        sys.path.insert(0, source_text)
+    # Importing a submodule normally executes ChordMini's
+    # src.evaluation.utils.__init__, which eagerly imports optional plotting
+    # and offline quality-report modules (Matplotlib and Seaborn). Inference
+    # only needs common.py and inference.py, so register the package path
+    # without executing that plotting-only initializer.
+    utility_package = "src.evaluation.utils"
+    if utility_package not in sys.modules:
+        utility_stub = types.ModuleType(utility_package)
+        utility_stub.__package__ = utility_package
+        utility_stub.__path__ = [str(root / "src" / "evaluation" / "utils")]
+        sys.modules[utility_package] = utility_stub
+    try:
+        spec = importlib.util.spec_from_file_location("jamtaster_chordmini_inference", script)
+        if spec is None or spec.loader is None:
+            raise ModelError("could not load ChordMini inference module")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        print(
+            f"ChordMini source loaded in {time.perf_counter() - stage_started:.3f}s",
+            flush=True,
+        )
+        import numpy as np
+        import torch
+
+        requested_device = torch.device(device)
+        arguments = argparse.Namespace(
+            model_type="BTC",
+            checkpoint=str(checkpoint),
+            model_file=None,
+            seed=42,
+            verbose=False,
+            smooth_predictions=True,
+            smooth_logits=True,
+            kernel_size=9,
+            use_gaussian=True,
+            use_overlap=True,
+            overlap_ratio=None,
+            vote_aggregation="logit",
+            min_segment_duration=0.25,
+        )
+        module.set_random_seed(arguments.seed, include_python_random=True)
+        chord_config = module.HParams.load(str(config))
+        stage_started = time.perf_counter()
+        model, _, _ = module.load_model(
+            str(checkpoint), arguments.model_type, chord_config,
+            requested_device, arguments,
+        )
+        print(
+            f"ChordMini model loaded in {time.perf_counter() - stage_started:.3f}s",
+            flush=True,
+        )
+        mean, std = module._extract_norm_stats(str(checkpoint))
+        index_to_chord = module.idx2voca_chord()
+        model.idx_to_chord = index_to_chord
+        model.eval()
+        sequence_length = module._resolve_seq_len(
+            chord_config, model, str(checkpoint)
+        )
+        stage_started = time.perf_counter()
+        features, frame_duration, song_duration = (
+            module._extract_song_features_root_compatible(
+                str(audio_path), chord_config
+            )
+        )
+        print(
+            f"ChordMini CQT prepared in {time.perf_counter() - stage_started:.3f}s "
+            f"({len(features)} frames)",
+            flush=True,
+        )
+        stage_started = time.perf_counter()
+        predictions = module.predict_sliding_windows(
+            model=model,
+            feature_matrix=features,
+            mean=mean,
+            std=std,
+            seq_len=sequence_length,
+            batch_size=16,
+            model_type="BTC",
+            n_classes=170,
+            vote_aggregation="logit",
+            use_overlap=True,
+            overlap_ratio=None,
+            smooth_logits=True,
+            smooth_predictions=True,
+            kernel_size=9,
+            use_gaussian=True,
+        )
+        print(
+            f"ChordMini inference completed in {time.perf_counter() - stage_started:.3f}s",
+            flush=True,
+        )
+        maximum_frames = (
+            int(np.floor(song_duration / frame_duration))
+            if frame_duration > 0 else len(predictions)
+        )
+        if maximum_frames > 0:
+            predictions = predictions[:maximum_frames]
+        lines = module._prediction_segments(
+            predictions, frame_duration, index_to_chord, 0.25
+        )
+        segments: list[TimedLabel] = []
+        raw: list[dict[str, object]] = []
+        for line in lines:
+            fields = line.split(maxsplit=2)
+            if len(fields) != 3:
+                continue
+            start, end, label = float(fields[0]), float(fields[1]), fields[2]
+            segments.append(TimedLabel(start, end, label))
+            raw.append({"start": start, "end": end, "label": label})
+        del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return segments, raw
+    except ModelError:
+        raise
+    except Exception as exc:
+        raise ModelError(f"ChordMini analysis failed: {exc}") from exc
 
 
 def analyze_chroma_chords(
@@ -500,7 +547,7 @@ def analyze_drums(
         from adtof_pytorch import transcribe_to_midi
         from adtof_pytorch.post_processing import LABELS_5, PeakPicker
     except ImportError as exc:
-        raise ModelError("ADTOF-pytorch is missing; run JamTaster.py setup") from exc
+        raise ModelError("ADTOF is missing; use Repair in Jam2 Settings") from exc
     print("Transcribing core drum hits with ADTOF-pytorch...")
     try:
         threshold_values = [float(value.strip()) for value in thresholds.split(",")]
@@ -655,7 +702,7 @@ def analyze_bass(audio_path: Path, min_midi: int, max_midi: int) -> list[NoteEve
         from basic_pitch import ICASSP_2022_MODEL_PATH
         from basic_pitch.inference import Model, predict
     except ImportError as exc:
-        raise ModelError("Basic Pitch is missing; run JamTaster.py setup") from exc
+        raise ModelError("Basic Pitch is missing; use Repair in Jam2 Settings") from exc
     print("Transcribing bass notes with Basic Pitch...")
     try:
         model = Model(ICASSP_2022_MODEL_PATH)

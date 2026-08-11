@@ -21,6 +21,7 @@ For LAN testing, use **No STUN** and a reachable LAN host/IP. For internet testi
 | --- | --- |
 | [Building](docs/Building.md) | Host-native CMake build instructions for Windows and macOS. |
 | [GUI](docs/Gui.md) | How to use the unified `jam2` application to start, join, tune, share songs, and share tracks. |
+| [JamTaster](app/jamtaster/README.md) | Optional isolated WAV analysis, component installation, result storage, and packaging. |
 | [Engine](docs/Engine.md) | `jam2` CLI commands, runtime commands, audio/network tuning flags, and stats logging. |
 | [Mesh](docs/Mesh.md) | Experimental direct full-mesh audio usage, GUI launch flow, peer-list behavior, and scaling considerations. |
 | [Metronome](docs/Metronome.md) | Metronome modes, timing behavior, levels, and when to compare modes. |

@@ -74,6 +74,7 @@ protected:
 
 private:
     int stepAt(const QPoint& point) const;
+    void setStepState(int step, int state);
 
     int beats_ = 4;
     int division_ = 1;
@@ -114,6 +115,7 @@ public:
     void setTrackBpmMismatch(bool mismatched, double backingBpm, double sessionBpm);
     void setTrackTransferStatus(const QString& status);
     void setWavGenerationActive(bool active);
+    void setJamTasterTaskStatus(bool active, int percent);
     void setJamRecordingState(bool enabled, bool active, const QString& takeName);
     void setBankState(
         int liveBank,
@@ -133,6 +135,7 @@ public:
     std::function<void()> onContinueIdea;
     std::function<void()> onClearIdea;
     std::function<void()> onGenerateWav;
+    std::function<void()> onJamTaster;
     std::function<void(bool)> onTunerEnabledChanged;
     std::function<void()> onJamRecordingToggle;
     std::function<void(int)> onBankLaunch;
@@ -222,6 +225,8 @@ private:
     double sessionBpm_ = 0.0;
     QString trackTransferStatus_;
     bool wavGenerationActive_ = false;
+    bool jamTasterTaskActive_ = false;
+    int jamTasterTaskProgress_ = 0;
     bool jamRecordingEnabled_ = false;
     bool jamRecordingActive_ = false;
     QString jamRecordingTake_;
@@ -260,6 +265,7 @@ private:
     QRect continueIdeaHitRect_;
     QRect clearIdeaHitRect_;
     QRect generateWavHitRect_;
+    QRect jamTasterHitRect_;
     QRect currentBeatHitRect_;
     QRect nextBeatHitRect_;
     QRect peerRailRect_;

@@ -386,6 +386,7 @@ public:
     std::function<void(int)> onRemove;
     std::function<void(int)> onRevealWav;
     std::function<void(int)> onRemoveWav;
+    std::function<void(int)> onAnalyzeWav;
     std::function<void(int, double)> onGainChanged;
     std::function<void(int, qint64, qint64, qint64)> onRegionCommitted;
     std::function<void(int)> onBankSelected;
@@ -644,6 +645,11 @@ protected:
         }
         if (control == QStringLiteral("remove_wav")) {
             if (onRemoveWav) onRemoveWav(laneIndex);
+            event->accept();
+            return;
+        }
+        if (control == QStringLiteral("analyze_wav")) {
+            if (onAnalyzeWav) onAnalyzeWav(laneIndex);
             event->accept();
             return;
         }
@@ -1174,6 +1180,12 @@ private:
         return QRect(card.right() - 174, card.top() + 9, 72, 24);
     }
 
+    QRect analyzeWavRect(int row) const
+    {
+        const QRect card = laneTimelineRect(row);
+        return QRect(card.right() - 316, card.top() + 9, 132, 24);
+    }
+
     QRect removeWavRect(int row) const
     {
         const QRect card = laneTimelineRect(row);
@@ -1186,6 +1198,7 @@ private:
             if (controlRect(row, control).contains(pos)) return control;
         }
         if (row == selectedLane_ && hasWav(row)) {
+            if (analyzeWavRect(row).contains(pos)) return QStringLiteral("analyze_wav");
             if (revealWavRect(row).contains(pos)) return QStringLiteral("reveal_wav");
             if (removeWavRect(row).contains(pos)) return QStringLiteral("remove_wav");
         }
@@ -1510,7 +1523,7 @@ private:
             if (!hasWav(row)) continue;
             const QRect card = laneTimelineRect(row);
             const bool selected = row == selectedLane_;
-            const int labelRight = selected ? revealWavRect(row).left() - 10 : card.right() - 10;
+            const int labelRight = selected ? analyzeWavRect(row).left() - 10 : card.right() - 10;
             const QRect label(
                 card.left() + 12,
                 card.top() + 9,
@@ -1526,6 +1539,13 @@ private:
                     Qt::ElideMiddle,
                     label.width()));
             if (!selected) continue;
+            drawActionButton(
+                painter,
+                analyzeWavRect(row),
+                QStringLiteral("ANALYSE · JAMTASTER"),
+                theme::warning,
+                theme::withAlpha(theme::warning, 24),
+                !interactionsProtected_);
             drawActionButton(
                 painter,
                 revealWavRect(row),

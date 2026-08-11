@@ -199,7 +199,8 @@ void ProjectPersistenceCoordinator::pruneEmptyWorkspace(const QString& workspace
              QStringLiteral("received"),
              QStringLiteral("imported"),
              QStringLiteral("recorded"),
-             QStringLiteral("prepared")}) {
+             QStringLiteral("prepared"),
+             QStringLiteral("analysis")}) {
         (void)workspace.rmdir(folder);
     }
     QDir parent = workspace;

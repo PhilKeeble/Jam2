@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from array import array
 from dataclasses import replace
 import math
+from pathlib import Path
 import statistics
 from typing import Iterable
+import wave
 
 from .timing import normalize_chord
 from .types import DrumHit, NoteEvent, SectionChoice, TimedLabel
@@ -15,6 +18,228 @@ ROOT_TO_PC = {name: index for index, name in enumerate(PITCH_CLASSES)}
 ROOT_TO_PC.update({"Db": 1, "Eb": 3, "Gb": 6, "Ab": 8, "Bb": 10})
 MAJOR_PROFILE = (6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88)
 MINOR_PROFILE = (6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17)
+
+
+def _feature_distance(left: Counter[str], right: Counter[str]) -> float:
+    keys = set(left) | set(right)
+    if not keys:
+        return 0.0
+    numerator = sum(float(left[key]) * float(right[key]) for key in keys)
+    left_norm = math.sqrt(sum(float(value) ** 2 for value in left.values()))
+    right_norm = math.sqrt(sum(float(value) ** 2 for value in right.values()))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0 if left_norm == right_norm else 1.0
+    return max(0.0, min(1.0, 1.0 - numerator / (left_norm * right_norm)))
+
+
+def _mean_features(rows: list[Counter[str]]) -> Counter[str]:
+    combined: Counter[str] = Counter()
+    if not rows:
+        return combined
+    for row in rows:
+        combined.update(row)
+    scale = 1.0 / len(rows)
+    return Counter({key: value * scale for key, value in combined.items()})
+
+
+def _bar_rms(path: Path, bounds: list[tuple[float, float]]) -> list[float]:
+    if not path.is_file():
+        return [0.0] * len(bounds)
+    try:
+        with wave.open(str(path), "rb") as source:
+            if source.getsampwidth() != 2:
+                return [0.0] * len(bounds)
+            rate = source.getframerate()
+            channels = source.getnchannels()
+            result = []
+            for start, end in bounds:
+                first = max(0, min(source.getnframes(), round(start * rate)))
+                count = max(0, min(source.getnframes() - first, round((end - start) * rate)))
+                source.setpos(first)
+                samples = array("h")
+                samples.frombytes(source.readframes(count))
+                if channels > 1:
+                    values = samples[::channels]
+                else:
+                    values = samples
+                if not values:
+                    result.append(0.0)
+                    continue
+                mean_square = sum(float(value) * float(value) for value in values) / len(values)
+                result.append(20.0 * math.log10(max(1.0, math.sqrt(mean_square)) / 32768.0))
+            return result
+    except (OSError, EOFError, wave.Error):
+        return [0.0] * len(bounds)
+
+
+def infer_song_sections(
+    beats: list[float],
+    downbeats: list[float],
+    beats_per_bar: int,
+    chords: list[TimedLabel],
+    drums: list[DrumHit],
+    bass: list[NoteEvent],
+    duration: float,
+    energy_paths: dict[str, Path] | None = None,
+    minimum_bars: int = 4,
+    maximum_sections: int = 11,
+) -> tuple[list[TimedLabel], dict[str, object]]:
+    """Infer conservative anonymous sections from sustained musical change.
+
+    Boundaries are restricted to tracked downbeats. Two-bar context on either
+    side and a four-bar minimum prevent fills, pickup notes and AAB-style bar
+    variations from becoming tiny sections.
+    """
+    if len(beats) < beats_per_bar * 2:
+        return [TimedLabel(0.0, duration, "Section A")], {
+            "enabled": False, "reason": "insufficient tracked beats",
+        }
+
+    def nearest_beat(value: float) -> int:
+        return min(range(len(beats)), key=lambda index: abs(beats[index] - value))
+
+    indices = sorted({nearest_beat(value) for value in downbeats})
+    indices = [value for value in indices if 0 <= value < len(beats)]
+    if len(indices) < 3:
+        indices = list(range(0, len(beats), beats_per_bar))
+    clean = [indices[0]] if indices else [0]
+    for value in indices[1:]:
+        if value - clean[-1] >= max(2, beats_per_bar - 1):
+            clean.append(value)
+    bounds = [
+        (beats[first], min(duration, beats[last]))
+        for first, last in zip(clean, clean[1:])
+        if beats[last] > beats[first]
+    ]
+    bar_count = len(bounds)
+    if bar_count < minimum_bars * 2:
+        return [TimedLabel(bounds[0][0] if bounds else 0.0,
+                           bounds[-1][1] if bounds else duration,
+                           "Section A")], {
+            "enabled": False, "reason": "fewer than eight complete bars",
+            "bars": bar_count,
+        }
+
+    chord_rows: list[Counter[str]] = []
+    drum_rows: list[Counter[str]] = []
+    bass_rows: list[Counter[str]] = []
+    for start, end in bounds:
+        chord_features: Counter[str] = Counter()
+        labels: list[str] = []
+        for offset in range(beats_per_bar):
+            timestamp = start + (end - start) * (offset + 0.5) / beats_per_bar
+            event = _label_at(chords, timestamp)
+            label = normalize_chord(event.label)[0] if event else "-"
+            labels.append(label)
+            chord_features[f"position:{offset}:{label}"] += 1.4
+            chord_features[f"chord:{label}"] += 0.5
+        for previous, current in zip(labels, labels[1:]):
+            chord_features[f"cadence:{previous}>{current}"] += 0.8
+        chord_rows.append(chord_features)
+
+        drum_features: Counter[str] = Counter()
+        for hit in drums:
+            if not start <= hit.time < end:
+                continue
+            slot = min(15, max(0, round((hit.time - start) / (end - start) * 16)))
+            drum_features[f"{hit.lane}:{slot}"] += 0.6 + hit.velocity / 127.0
+            drum_features[f"lane:{hit.lane}"] += 0.20
+        drum_rows.append(drum_features)
+
+        bass_features: Counter[str] = Counter()
+        for note in bass:
+            if not start <= note.start < end:
+                continue
+            slot = min(7, max(0, round((note.start - start) / (end - start) * 8)))
+            bass_features[f"pitch:{note.midi % 12}"] += 0.6
+            bass_features[f"position:{slot}:{note.midi % 12}"] += 0.8
+        bass_rows.append(bass_features)
+
+    energy = {
+        name: _bar_rms(Path(path), bounds)
+        for name, path in (energy_paths or {}).items()
+    }
+    candidates: list[dict[str, object]] = []
+    context_bars = 2
+    for index in range(minimum_bars, bar_count - minimum_bars + 1):
+        before = slice(max(0, index - context_bars), index)
+        after = slice(index, min(bar_count, index + context_bars))
+        chord_change = _feature_distance(
+            _mean_features(chord_rows[before]), _mean_features(chord_rows[after]))
+        drum_change = _feature_distance(
+            _mean_features(drum_rows[before]), _mean_features(drum_rows[after]))
+        bass_change = _feature_distance(
+            _mean_features(bass_rows[before]), _mean_features(bass_rows[after]))
+        energy_changes = []
+        for values in energy.values():
+            left = statistics.mean(values[before])
+            right = statistics.mean(values[after])
+            energy_changes.append(min(1.0, abs(right - left) / 12.0))
+        energy_change = statistics.mean(energy_changes) if energy_changes else 0.0
+        phrase_bonus = 0.06 if index % 4 == 0 else 0.02 if index % 2 == 0 else 0.0
+        score = (
+            0.43 * chord_change + 0.36 * drum_change +
+            0.13 * bass_change + 0.08 * energy_change + phrase_bonus
+        )
+        modalities = sum(value >= 0.24 for value in (
+            chord_change, drum_change, bass_change, energy_change
+        ))
+        clear = (score >= 0.36 and modalities >= 2) or score >= 0.58
+        candidates.append({
+            "bar": index,
+            "time": bounds[index][0],
+            "score": round(score, 6),
+            "chord_change": round(chord_change, 6),
+            "drum_change": round(drum_change, 6),
+            "bass_change": round(bass_change, 6),
+            "energy_change": round(energy_change, 6),
+            "clear": clear,
+        })
+
+    selected: list[int] = []
+    for candidate in sorted(
+        (value for value in candidates if bool(value["clear"])),
+        key=lambda value: float(value["score"]),
+        reverse=True,
+    ):
+        bar = int(candidate["bar"])
+        if all(abs(bar - existing) >= minimum_bars for existing in selected):
+            selected.append(bar)
+        if len(selected) >= maximum_sections - 1:
+            break
+    selected.sort()
+
+    # Jam2 sections cannot exceed 512 beats. Add only the minimum technical
+    # boundaries needed for unusually long, otherwise-uniform recordings.
+    maximum_bars = max(1, 512 // beats_per_bar)
+    complete = [0, *selected, bar_count]
+    for first, last in list(zip(complete, complete[1:])):
+        cursor = first + maximum_bars
+        while cursor < last and len(selected) < maximum_sections - 1:
+            selected.append(cursor - cursor % 4)
+            cursor += maximum_bars
+    selected = sorted(set(value for value in selected if 0 < value < bar_count))
+
+    section_bars = [0, *selected, bar_count]
+    structures = [
+        TimedLabel(
+            bounds[first][0],
+            bounds[last - 1][1],
+            f"Section {chr(ord('A') + index)}",
+            next((float(item["score"]) for item in candidates
+                  if int(item["bar"]) == last), None),
+        )
+        for index, (first, last) in enumerate(zip(section_bars, section_bars[1:]))
+    ]
+    return structures, {
+        "enabled": True,
+        "method": "bar_aligned_multimodal_change_points",
+        "bars": bar_count,
+        "minimum_section_bars": minimum_bars,
+        "candidates": candidates,
+        "selected_boundary_bars": selected,
+        "sections": structures,
+    }
 
 
 def _root_pc(label: str) -> int | None:

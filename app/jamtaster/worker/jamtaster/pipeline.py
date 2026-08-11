@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import statistics
 from pathlib import Path
+import shutil
 import tempfile
 import time
 
@@ -10,26 +12,24 @@ from .jamjar import export_song
 from .models import (
     ADTOF_REVISION,
     CHORDMINI_REVISION,
-    SONGFORMER_REVISION,
     analyze_bass,
     analyze_chords,
     analyze_chroma_chords,
     analyze_drums,
-    analyze_structure,
     configure_local_caches,
     prepare_chord_sources,
     resolve_device,
     separate_stems,
     track_beats,
 )
-from .paths import CACHE_ROOT, REPORTS_ROOT, SONGS_ROOT, portable_slug
+from .paths import project_analysis_root, portable_slug
 from .postprocess import (
     classify_cymbals, contextualize_bass, contextualize_chords,
-    section_timing_diagnostics,
+    infer_song_sections, section_timing_diagnostics,
 )
 from .timing import (
     arrangement_steps, choose_sections, estimate_bpm, fuse_chords_with_bass,
-    infer_meter, merge_consecutive_structures, repair_drum_hits,
+    infer_meter, repair_drum_hits,
     shape_drum_dynamics, stabilize_chords,
 )
 from .types import Analysis, TimedLabel, jsonable
@@ -39,6 +39,7 @@ from .wav import inspect_loopback_wav, sha256_file
 def taste(args: object) -> Path:
     pipeline_started = time.perf_counter()
     configure_local_caches()
+    emit = getattr(args, "event_sink", lambda _event: None)
     timings: dict[str, float] = {}
     started = time.perf_counter()
     input_path = Path(args.input)
@@ -49,15 +50,31 @@ def taste(args: object) -> Path:
     if len(display_name) > 512:
         raise ValueError("--name exceeds Jam2's 512-character title limit")
     slug = portable_slug(display_name)
-    target = SONGS_ROOT / slug
-    if target.exists():
-        raise FileExistsError(f"song already exists; refusing to overwrite: {target}")
+    project_root = Path(args.project_root).expanduser().resolve()
+    project_root.mkdir(parents=True, exist_ok=True)
     device = resolve_device(args.device)
     source_hash = sha256_file(info.path)
+    analysis_root = project_analysis_root(project_root)
+    source_root = analysis_root / "sources" / source_hash
+    report_root = source_root
+    target = source_root / "converted" / slug
+    cached_analysis = report_root / "analysis.json"
+    cached_manifest = report_root / "manifest.json"
+    cached_jamjar = target / f"{slug}.jamjar"
+    if (
+        not bool(getattr(args, "force", False))
+        and cached_analysis.is_file()
+        and cached_manifest.is_file()
+        and cached_jamjar.is_file()
+    ):
+        emit({
+            "type": "progress", "stage": "complete", "percent": 100,
+            "message": "Using saved JamTaster analysis", "cached": True,
+        })
+        return target
     timings["input_validation_seconds"] = time.perf_counter() - started
     raw: dict[str, object] = {}
     warnings: list[str] = []
-    report_root = REPORTS_ROOT / slug
     report_root.mkdir(parents=True, exist_ok=True)
 
     def checkpoint(completed_stage: str) -> None:
@@ -74,53 +91,113 @@ def taste(args: object) -> Path:
         (report_root / "progress.json").write_text(
             json.dumps(jsonable(progress), indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
+        stage_order = {
+            "input_validation": 2, "separation": 18, "beat_tracking": 27,
+            "chord_source_preparation": 36, "chords": 51,
+            "drums": 66, "drum_repair": 70, "drum_dynamics": 73,
+            "bass": 82, "structure": 87, "context_postprocessing": 90,
+            "section_selection": 92,
+            "jamjar_export": 97, "publish": 99,
+        }
+        emit({
+            "type": "progress",
+            "stage": completed_stage,
+            "percent": stage_order.get(completed_stage, 0),
+            "message": completed_stage.replace("_", " ").capitalize(),
+            "elapsed_seconds": progress["elapsed_seconds"],
+            "timings": timings,
+        })
 
     checkpoint("input_validation")
-    work_parent = CACHE_ROOT / "work"
+    work_parent = analysis_root / ".working"
     work_parent.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="taste-", dir=work_parent) as temporary:
         workspace = Path(temporary)
 
         started = time.perf_counter()
-        stems = separate_stems(info.path, info, workspace, device, args.demucs_model)
+        stems_root = source_root / "stems"
+        saved_stems = {
+            name: stems_root / f"{name}.wav"
+            for name in ("drums", "bass", "other", "vocals")
+        }
+        if all(path.is_file() for path in saved_stems.values()) and not bool(getattr(args, "force", False)):
+            stems = saved_stems
+            raw["stem_cache"] = {"used": True}
+        else:
+            generated_stems = separate_stems(
+                info.path, info, workspace, device, args.demucs_model
+            )
+            stems_root.mkdir(parents=True, exist_ok=True)
+            for name, destination in saved_stems.items():
+                partial = destination.with_suffix(".wav.partial")
+                shutil.copy2(generated_stems[name], partial)
+                os.replace(partial, destination)
+            stems = saved_stems
+            raw["stem_cache"] = {"used": False}
+        stems_result_path = source_root / "stems.json"
+        stems_result = {
+            "format": "jamtaster-stems-v1",
+            "action": "split_stems",
+            "input_path": str(info.path),
+            "source_sha256": source_hash,
+            "device": device,
+            "stems": {name: str(path) for name, path in stems.items()},
+        }
+        temporary_stems_result = stems_result_path.with_suffix(".json.partial")
+        temporary_stems_result.write_text(
+            json.dumps(stems_result, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary_stems_result, stems_result_path)
         timings["separation_seconds"] = time.perf_counter() - started
         checkpoint("separation")
 
         started = time.perf_counter()
-        beats, downbeats = track_beats(info.path, device, args.beat_model)
+        tempo_path = source_root / "tempo.json"
+        if tempo_path.is_file() and not bool(getattr(args, "force", False)):
+            tempo_result = json.loads(tempo_path.read_text(encoding="utf-8"))
+            beats = [float(value) for value in tempo_result["beats"]]
+            downbeats = [float(value) for value in tempo_result["downbeats"]]
+            detected_bpm = float(tempo_result["bpm"])
+            detected_meter = int(tempo_result["beats_per_bar"])
+            raw["tempo_cache"] = {"used": True}
+        else:
+            beats, downbeats = track_beats(info.path, device, args.beat_model)
+            detected_bpm = estimate_bpm(beats)
+            detected_meter = infer_meter(beats, downbeats)
+            tempo_result = {
+                "format": "jamtaster-tempo-v1",
+                "input_path": str(info.path),
+                "source_sha256": source_hash,
+                "bpm": detected_bpm,
+                "project_bpm": round(detected_bpm),
+                "beats_per_bar": detected_meter,
+                "beats": beats,
+                "downbeats": downbeats,
+            }
+            temporary_tempo = tempo_path.with_suffix(".json.partial")
+            temporary_tempo.write_text(
+                json.dumps(tempo_result, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary_tempo, tempo_path)
+            raw["tempo_cache"] = {"used": False}
         timings["beat_tracking_seconds"] = time.perf_counter() - started
         checkpoint("beat_tracking")
-        detected_bpm = estimate_bpm(beats)
         requested_bpm = float(args.bpm) if args.bpm is not None else detected_bpm
         # Jam2's native timing schema stores whole BPM. Use that exact value for
         # quantisation and drift reporting instead of silently rounding only at export.
         bpm = float(round(requested_bpm))
         if not 20 <= bpm <= 400:
             raise ValueError("BPM must be between 20 and 400")
-        meter = int(args.meter) if args.meter != "auto" else infer_meter(beats, downbeats)
+        meter = int(args.meter) if args.meter != "auto" else detected_meter
         if meter < 2 or meter > 12:
             raise ValueError("meter must contain 2 to 12 beats per bar")
 
-        started = time.perf_counter()
-        if args.sections == "single":
-            structures = [TimedLabel(0.0, info.duration, "verse")]
-            raw_structure = {
-                "skipped": True,
-                "reason": "--sections single does not require song-form analysis",
-            }
-        else:
-            structures, raw_structure = analyze_structure(info.path, device)
-            original_structures = list(structures)
-            structures, structure_merges = merge_consecutive_structures(structures)
-            raw["structure_postprocessing"] = {
-                "original": original_structures,
-                "merged": structures,
-                "merges": structure_merges,
-            }
-        timings["structure_seconds"] = time.perf_counter() - started
-        raw["songformer"] = raw_structure
-        checkpoint("structure")
+        # Start with one neutral span so chord cleanup is conservative before
+        # the locally-derived section boundaries are available.
+        structures = [TimedLabel(0.0, info.duration, "Section A")]
 
         started = time.perf_counter()
         chord_sources = prepare_chord_sources(stems["other"], stems["bass"], workspace)
@@ -272,16 +349,53 @@ def taste(args: object) -> Path:
         chords, chord_fusion = fuse_chords_with_bass(chords, bass)
         chords = stabilize_chords(chords, info.duration)
         raw_context_chords = list(chords)
+        chords, preliminary_chord_context = contextualize_chords(
+            chords, [raw_chroma], bass, beats, structures, info.duration
+        )
+        preliminary_context_seconds = time.perf_counter() - started
+
+        structure_started = time.perf_counter()
+        if args.sections == "single":
+            raw_structure = {
+                "skipped": True,
+                "reason": "--sections single requested one section",
+                "section_count": 1,
+            }
+        else:
+            structures, raw_structure = infer_song_sections(
+                beats=beats,
+                downbeats=downbeats,
+                beats_per_bar=meter,
+                chords=chords,
+                drums=drums,
+                bass=bass,
+                duration=info.duration,
+                energy_paths={
+                    "drums": stems["drums"],
+                    "bass": stems["bass"],
+                    "other": stems["other"],
+                },
+            )
+        timings["structure_seconds"] = time.perf_counter() - structure_started
+        raw["structure_inference"] = raw_structure
+        checkpoint("structure")
+
+        # A second pass can reject brief chord interruptions using the final
+        # bar-aligned section context without changing the source stems.
+        final_context_started = time.perf_counter()
         chords, chord_context = contextualize_chords(
             chords, [raw_chroma], bass, beats, structures, info.duration
         )
         drums, cymbal_context = classify_cymbals(
             drums, beats, downbeats, structures
         )
-        timings["context_postprocessing_seconds"] = time.perf_counter() - started
+        timings["context_postprocessing_seconds"] = (
+            preliminary_context_seconds + time.perf_counter() - final_context_started
+        )
         raw["chord_bass_fusion"] = chord_fusion
         raw["context_postprocessing"] = {
             "chords": chord_context,
+            "preliminary_chords": preliminary_chord_context,
             "bass": bass_context,
             "cymbals": cymbal_context,
             "raw_chords": raw_context_chords,
@@ -348,7 +462,10 @@ def taste(args: object) -> Path:
                     f"bank {bank['role']} exported audio/grid drift is {bank['drift_ms']} ms"
                 )
 
-        SONGS_ROOT.mkdir(parents=True, exist_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            # This target is constrained beneath the hash-owned analysis root.
+            shutil.rmtree(target)
         # A same-volume rename publishes the complete native folder at once.
         started = time.perf_counter()
         song_root.replace(target)
@@ -410,11 +527,10 @@ def taste(args: object) -> Path:
         "display_name": display_name,
         "source_sha256": source_hash,
         "song_folder": str(target),
-        "report_folder": str(report_root),
+        "analysis_folder": str(report_root),
         "models": {
             "demucs": args.demucs_model,
             "beat_this": args.beat_model,
-            "songformer_revision": SONGFORMER_REVISION,
             "chordmini_revision": CHORDMINI_REVISION,
             "adtof_revision": ADTOF_REVISION,
             "basic_pitch": "0.4.0",
@@ -444,4 +560,19 @@ def taste(args: object) -> Path:
     (report_root / "analysis.json").write_text(
         json.dumps(analysis_report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
+    from .jobs import _update_index
+    _update_index(
+        project_root,
+        source_hash,
+        info.path,
+        {
+            "analysis": str(report_root / "analysis.json"),
+            "manifest": str(report_root / "manifest.json"),
+            "converted_song": str(target),
+        },
+    )
+    emit({
+        "type": "progress", "stage": "complete", "percent": 100,
+        "message": "JamTaster analysis complete", "elapsed_seconds": timings["total_seconds"],
+    })
     return target
