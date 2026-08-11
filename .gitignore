@@ -34,6 +34,11 @@ Testing/
 /app/jamtaster/worker/cache/
 /app/jamtaster/worker/models/
 /app/jamtaster/.cpu-*
+/experiments/jamtaster-native/.deps/
+/experiments/jamtaster-native/build/
+/experiments/jamtaster-native/models/adtof.onnx
+/experiments/jamtaster-native/models/adtof.onnx.json
+/experiments/jamtaster-native/outputs/
 __pycache__/
 *.pyc
 

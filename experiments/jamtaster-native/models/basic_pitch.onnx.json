@@ -1,0 +1,15 @@
+{
+  "format": "jamtaster-native-export-v1",
+  "model": "basic_pitch.onnx",
+  "bytes": 230444,
+  "sha256": "2c3c1d144bfa61ad236e92e169c13535c880469a12a047d4e73451f2c059a0ec",
+  "source": {
+    "source": "basic_pitch/saved_models/icassp_2022/nmp.onnx",
+    "license": "Apache-2.0"
+  },
+  "parity": {
+    "maximum_absolute_error": 0.0,
+    "mean_absolute_error": 0.0
+  },
+  "created_at": 1786473640.8504417
+}

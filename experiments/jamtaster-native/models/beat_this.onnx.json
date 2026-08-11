@@ -1,0 +1,16 @@
+{
+  "format": "jamtaster-native-export-v1",
+  "model": "beat_this.onnx",
+  "bytes": 83035786,
+  "sha256": "6d30d4fbb75a789562ed3526bd002b7fb3aec3850d5420186ecf56f71ca99ff1",
+  "source": {
+    "checkpoint": "beat_this-final0.ckpt",
+    "sha256": "8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331",
+    "revision": "final0"
+  },
+  "parity": {
+    "maximum_absolute_error": 1.049041748046875e-05,
+    "mean_absolute_error": 3.8005512124072993e-06
+  },
+  "created_at": 1786473640.3412466
+}

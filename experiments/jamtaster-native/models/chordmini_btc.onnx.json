@@ -1,0 +1,15 @@
+{
+  "format": "jamtaster-native-export-v1",
+  "model": "chordmini_btc.onnx",
+  "bytes": 13073924,
+  "sha256": "088ed776c240c9e77d33d87dfe1e79851fda794b3895a6db73ea7d1527446b8f",
+  "source": {
+    "checkpoint": "chordmini/checkpoints/btc_model_best.pth",
+    "sha256": "e0a12ca6d881f81e01dfb459b4836ec7dac8d8f87b0170a412b5807256b3a1fc"
+  },
+  "parity": {
+    "maximum_absolute_error": 5.7220458984375e-06,
+    "mean_absolute_error": 6.247645387702505e-07
+  },
+  "created_at": 1786473644.0165925
+}

@@ -1,0 +1,10 @@
+# One-time developer dependencies for ConvertJamTasterCheckpoints.py.
+# Install these in a development environment, never in an end-user runtime.
+onnx==1.17.0
+cloudpickle==3.1.2
+diffq==0.2.4
+dora-search==0.1.12
+omegaconf==2.3.0
+openunmix==1.3.0
+retrying==1.4.2
+

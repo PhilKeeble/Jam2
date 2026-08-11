@@ -1,0 +1,18 @@
+{
+  "format": "jamtaster-native-export-v1",
+  "model": "htdemucs_ft_3.onnx",
+  "bytes": 174263466,
+  "sha256": "92a9d5ff511da19054754dd9ff1330e72ab4ede1afcacd0482ef5ba2dbb79bc9",
+  "source": {
+    "checkpoint": "04573f0d-f3cf25b2.th",
+    "sha256": "f3cf25b222c4eed7cd49dd8b2c9597d50c18bd154090f7b919cfa5f93cf22c49",
+    "signature": "04573f0d",
+    "ensemble_role": "vocals",
+    "demucs_onnx_revision": "81fa192e6fcc88e35e887f6e6ccce91227f4e6f5"
+  },
+  "parity": {
+    "status": "validated-native-audio-parity",
+    "reference": "experiments/jamtaster-native/RESULTS.md"
+  },
+  "created_at": 1786473659.6095064
+}
