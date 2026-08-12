@@ -103,6 +103,8 @@ struct EngineConfig {
     EngineTestInput test_input = EngineTestInput::Off;
     int test_input_level_ppm = 125000;
     std::size_t prepared_track_max_frames = 0;
+    // Non-owning application source graph. It must outlive a running Engine.
+    audio::InputSourceRouter* input_source_router = nullptr;
 };
 
 enum class EngineCommandType : std::uint8_t {

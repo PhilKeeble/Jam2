@@ -578,6 +578,8 @@ struct CoreAudioDuplexContext {
     OutputRecorder* recorder = nullptr;
     TrackTakeRecorder* track_take_recorder = nullptr;
     std::vector<std::int32_t> capture_scratch;
+    std::vector<std::int32_t> physical_input_scratch;
+    std::vector<const std::int32_t*> input_source_pointers;
     std::vector<double> input_peak_scratch;
     SmoothedMonoDownmix input_downmix;
     std::vector<std::int32_t> playback_scratch;
@@ -1064,6 +1066,27 @@ OSStatus duplex_io_proc(
             std::copy(generated.begin(), generated.end(), context->recorder_my_input_scratch.begin());
         }
     } else if (input_frames > 0) {
+        auto* source_router = context->control != nullptr ?
+            context->control->input_source_router : nullptr;
+        if (source_router != nullptr) {
+            for (std::size_t selected = 0; selected < context->channels.input.size(); ++selected) {
+                auto* destination = context->physical_input_scratch.data() + selected * context->capture_scratch.size();
+                context->input_source_pointers[selected] = destination;
+                const int channel = context->channels.input[selected];
+                for (std::size_t frame = 0; frame < input_frames; ++frame) {
+                    destination[frame] = float_to_i32(read_float_channel(
+                        input, frame, static_cast<UInt32>(channel)));
+                }
+            }
+            const bool routed = source_router->process(
+                std::span<const std::int32_t* const>(context->input_source_pointers.data(),
+                    context->input_source_pointers.size()),
+                input_frames,
+                context->engine_frame_counter,
+                context->sample_rate,
+                std::span<std::int32_t>(context->capture_scratch.data(), input_frames));
+            if (!routed) std::fill_n(context->capture_scratch.begin(), input_frames, 0);
+        } else {
         std::fill(
             context->input_peak_scratch.begin(),
             context->input_peak_scratch.end(),
@@ -1107,6 +1130,7 @@ OSStatus duplex_io_proc(
             context->capture_scratch[frame] = float_to_i32(
                 static_cast<float>(std::clamp(mixed, -1.0, 1.0)));
         }
+        }
         if (network_capture_enabled) {
             context->capture->push(std::span<const std::int32_t>(context->capture_scratch.data(), input_frames));
         }
@@ -1125,10 +1149,15 @@ OSStatus duplex_io_proc(
                 std::span<const std::int32_t>(context->capture_scratch.data(), input_frames));
         }
         if (context->recorder_my_input_scratch.size() >= input_frames) {
-            std::copy(
-                context->capture_scratch.begin(),
-                context->capture_scratch.begin() + input_frames,
-                context->recorder_my_input_scratch.begin());
+            const bool selected = source_router != nullptr && source_router->copy_recording_source(
+                input_frames,
+                std::span<std::int32_t>(context->recorder_my_input_scratch.data(), input_frames));
+            if (!selected) {
+                std::copy(
+                    context->capture_scratch.begin(),
+                    context->capture_scratch.begin() + input_frames,
+                    context->recorder_my_input_scratch.begin());
+            }
         }
     }
 
@@ -1310,6 +1339,9 @@ public:
         context_.recorder = recorder;
         context_.track_take_recorder = track_take_recorder;
         context_.capture_scratch.resize(static_cast<std::size_t>(buffer_size));
+        context_.physical_input_scratch.resize(
+            channels.input.size() * static_cast<std::size_t>(buffer_size));
+        context_.input_source_pointers.resize(channels.input.size());
         context_.input_peak_scratch.resize(channels.input.size());
         context_.input_downmix.configure(
             channels.input.size(), sample_rate, static_cast<std::size_t>(buffer_size));

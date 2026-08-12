@@ -16,6 +16,12 @@ maybe binary doesnt have validate etc in it and thats only debug builds? on rele
 
 website and youtube videos 
 
+## refinement pass
+
+look for redundant code and dependencies 
+look for old schema and backwards compatability
+look for places we can refactor to make code splits cleaner 
+
 ## Linux Audio Backend (never implement this without explicit approval)
 
 Consider Linux support after the Windows ASIO and macOS CoreAudio paths are stable. Linux should be treated as another host-native low-latency backend, not as a Docker or container target.

@@ -1372,6 +1372,7 @@ void Engine::start(const EngineConfig& requested)
         impl_->playback_ring->set_depth_bucket_thresholds(static_cast<double>(impl_->config.sample_rate));
 
         auto& control = *impl_->control;
+        control.input_source_router = impl_->config.input_source_router;
         const auto pattern = impl_->config.metronome_pattern;
         control.prepared_source = impl_->prepared_source.get();
         control.metronome_enabled.store(impl_->config.metronome_enabled, std::memory_order_relaxed);

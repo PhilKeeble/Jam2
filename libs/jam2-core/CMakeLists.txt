@@ -41,7 +41,9 @@ endif()
 add_library(jam2_core STATIC
     src/audio_ring.cpp
     src/common.cpp
+    src/input_source.cpp
     src/metronome.cpp
+    src/midi.cpp
     src/engine.cpp
     src/network_capture.cpp
     src/network_session.cpp
@@ -104,17 +106,32 @@ if(WIN32)
     else()
         message(WARNING "ASIO SDK not found at ${ASIO_SDK_DIR}; device enumeration can still read registry entries, but ASIO opening will need the SDK.")
     endif()
-    target_sources(jam2_core PRIVATE src/audio_device_windows.cpp)
+    target_sources(jam2_core PRIVATE
+        src/audio_device_windows.cpp
+        src/midi_device_windows.cpp)
     target_compile_definitions(jam2_core PUBLIC JAM2_PLATFORM_WINDOWS=1)
-    target_link_libraries(jam2_core PUBLIC ws2_32 advapi32 ole32 bcrypt)
+    target_link_libraries(jam2_core PUBLIC ws2_32 advapi32 ole32 bcrypt winmm)
 elseif(APPLE)
-    target_sources(jam2_core PRIVATE src/audio_device_macos.cpp)
+    target_sources(jam2_core PRIVATE
+        src/audio_device_macos.cpp
+        src/midi_device_macos.mm)
     target_compile_definitions(jam2_core PUBLIC JAM2_PLATFORM_MACOS=1)
     target_link_libraries(jam2_core PUBLIC
         "-framework CoreAudio"
+        "-framework CoreMIDI"
         "-framework CoreFoundation"
         "-framework AudioToolbox"
     )
 else()
     message(FATAL_ERROR "Jam2 supports only Windows and macOS host-native builds.")
 endif()
+
+add_executable(jam2_core_input_tests tests/CoreInputTests.cpp)
+target_compile_features(jam2_core_input_tests PRIVATE cxx_std_20)
+target_link_libraries(jam2_core_input_tests PRIVATE jam2_core)
+if(MSVC)
+    target_compile_options(jam2_core_input_tests PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(jam2_core_input_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME jam2_core_input_units COMMAND jam2_core_input_tests)

@@ -17,8 +17,10 @@
 #include "TrackRecordingWorkflow.hpp"
 #include "TrackWorkspaceController.hpp"
 #include "UserPreferences.hpp"
+#include "PluginHostService.hpp"
 
 #include "metronome.hpp"
+#include "midi.hpp"
 
 #include <QCheckBox>
 #include <QByteArray>
@@ -450,6 +452,49 @@ private:
     QString sessionHex() const;
     QString keyHex() const;
     void generateSession();
+    void showAudioInputSources();
+    void showMidiInputSources();
+    void refreshInputSourceRouting();
+    void updateInputSourceButtons();
+    using PluginStartCallback = std::function<void(
+        std::unique_ptr<jam2::pluginhost::PluginHostService>, const QString&)>;
+    bool selectAndStartPluginAsync(
+        std::size_t slot,
+        jam2::audio::InputSourceKind kind,
+        jam2::midi::EventQueue* midiQueue,
+        PluginStartCallback completion);
+    void removeAudioPlugin(std::size_t slot);
+    void retirePluginHost(std::unique_ptr<jam2::pluginhost::PluginHostService> host);
+
+    struct AudioPluginSource {
+        std::unique_ptr<jam2::pluginhost::PluginHostService> host;
+        QString name;
+        bool bypassed = false;
+        std::size_t firstChannel = jam2::audio::kNoInputChannel;
+        std::size_t secondChannel = jam2::audio::kNoInputChannel;
+        int levelPpm = 1000000;
+        bool included = true;
+        bool consumedByStereoGroup = false;
+    };
+    struct MidiPluginSource {
+        jam2::midi::DeviceInfo deviceInfo;
+        jam2::midi::InputMode mode = jam2::midi::InputMode::Standard;
+        jam2::midi::EventQueue events;
+        std::unique_ptr<jam2::midi::InputDevice> device;
+        std::unique_ptr<jam2::pluginhost::PluginHostService> host;
+        QString pluginName;
+        std::size_t routerSlot = 0;
+        bool muted = false;
+        int levelPpm = 1000000;
+        bool included = true;
+    };
+
+    std::array<AudioPluginSource, jam2::audio::kMaximumInputSources> audioPluginSources_{};
+    std::vector<std::shared_ptr<MidiPluginSource>> midiPluginSources_;
+    std::vector<std::unique_ptr<jam2::pluginhost::PluginHostService>> retiredPluginHosts_;
+    std::vector<std::shared_ptr<MidiPluginSource>> retiredMidiSources_;
+    jam2::audio::InputSourceRouter* attachedInputRouter_ = nullptr;
+    std::optional<std::size_t> recordingInputSourceSlot_;
 
     ApplicationRuntime jam2_;
     UserPreferences preferences_;
@@ -672,6 +717,9 @@ private:
     QLabel* performanceLeftTitle_ = nullptr;
     QLabel* performanceRightTitle_ = nullptr;
     QWidget* performanceLocalControls_ = nullptr;
+    QPushButton* performanceAudioInputsButton_ = nullptr;
+    QPushButton* performanceMidiInputsButton_ = nullptr;
+    QPushButton* performancePluginBypassButton_ = nullptr;
     QWidget* performancePeerControls_ = nullptr;
     QWidget* performanceMasterOutputControls_ = nullptr;
     QWidget* detailIdentityPanel_ = nullptr;

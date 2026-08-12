@@ -3,6 +3,13 @@
 Jam2 is distributed under GPL-3.0-or-later. Its source tree and binary
 distribution include the following third-party components.
 
+## Steinberg VST 3 SDK
+
+Jam2's private plugin-host helper includes portions of the Steinberg VST 3 SDK,
+maintained in `libs/third_party/vst3sdk`. The SDK is licensed under the MIT
+License. See `libs/third_party/vst3sdk/LICENSE.txt` and
+`libs/third_party/vst3sdk/JAM2_VENDOR.md`.
+
 ## aubio 0.4.9 pitch subset
 
 Copyright (C) Paul Brossier and aubio contributors.
@@ -38,13 +45,10 @@ variable filter, and oscillator sources from pinned DaisySP commit
 components are licensed under the MIT License. See
 `libs/third_party/DaisySP/LICENSE`.
 
-Jam2 generates a build-local copy of DaisySP's `synthbassdrum.cpp` with two
-missing transient-envelope state initializers added to
-`SyntheticBassDrum::Init`. This narrow deterministic-state correction does not
-change the model or its parameter behaviour; it prevents the first transient
-sample from reading indeterminate state. The pinned vendored source remains
-unmodified, and configuration fails if the reviewed upstream source anchor no
-longer matches.
+Jam2 directly maintains a narrow correction in DaisySP's vendored
+`synthbassdrum.cpp`: `SyntheticBassDrum::Init` initializes its two transient
+envelope state fields. This prevents the first transient sample from reading
+indeterminate state without changing the model or its parameter behaviour.
 
 ## JamTaster native analysis
 

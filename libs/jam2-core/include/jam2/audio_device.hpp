@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "audio_ring.hpp"
+#include "input_source.hpp"
 #include "metronome.hpp"
 #include "output_recorder.hpp"
 #include "prepared_track_source.hpp"
@@ -413,6 +414,9 @@ struct StreamControl {
         std::atomic<int>{251},
         std::atomic<int>{251},
     };
+    // Published before stream startup and retained for the stream lifetime.
+    // Source configuration itself uses the router's lock-free atomics.
+    InputSourceRouter* input_source_router = nullptr;
     PreparedTrackSource* prepared_source = nullptr;
     std::atomic<std::uint64_t> prepared_source_frame{0};
     std::atomic<std::uint64_t> prepared_source_scheduled_start_frame{0};

@@ -92,7 +92,6 @@
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTabBar>
-#include <QTemporaryFile>
 #include <QTextEdit>
 #include <QTimer>
 #include <QToolButton>
@@ -1477,7 +1476,10 @@ MainWindow::MainWindow(QWidget* parent)
     });
     playbackGridTimer_.setInterval(16);
     playbackGridTimer_.setTimerType(Qt::PreciseTimer);
-    QObject::connect(&playbackGridTimer_, &QTimer::timeout, this, [this] { updatePlaybackGrid(); });
+    QObject::connect(&playbackGridTimer_, &QTimer::timeout, this, [this] {
+        refreshInputSourceRouting();
+        updatePlaybackGrid();
+    });
     playbackGridTimer_.start();
     trackTimelineTimer_.setInterval(16);
     trackTimelineTimer_.setTimerType(Qt::PreciseTimer);
@@ -9908,6 +9910,42 @@ bool MainWindow::armSelectedLooperLaneRecording()
         QStringLiteral("System Loopback (desktop audio)"), QStringLiteral("loopback"));
     modeBox->setCurrentIndex(qMax(0, modeBox->findData(preferences_.recording.preferredMode)));
     applyMutedEditorStyle(modeBox);
+    auto* inputSourceBox = new QComboBox(content);
+    inputSourceBox->addItem(QStringLiteral("Combined My Send mix"), -1);
+    const auto sourceOptions = runtimeOptions();
+    if (auto* sourceRouter = jam2_.inputSourceRouter()) {
+        for (std::size_t slot = 0; slot < sourceRouter->physical_channels() &&
+             slot < audioPluginSources_.size(); ++slot) {
+            const auto& source = audioPluginSources_[slot];
+            if (source.firstChannel == jam2::audio::kNoInputChannel) continue;
+            const int firstNumber = source.firstChannel < sourceOptions.channel_selection.input.size()
+                ? sourceOptions.channel_selection.input[source.firstChannel] + 1
+                : static_cast<int>(source.firstChannel + 1);
+            QString name = QStringLiteral("Input %1").arg(firstNumber);
+            if (source.secondChannel != jam2::audio::kNoInputChannel) {
+                const int secondNumber = source.secondChannel < sourceOptions.channel_selection.input.size()
+                    ? sourceOptions.channel_selection.input[source.secondChannel] + 1
+                    : static_cast<int>(source.secondChannel + 1);
+                name = QStringLiteral("Inputs %1 + %2 (plugin output -> mono)")
+                    .arg(firstNumber).arg(secondNumber);
+            }
+            if (!source.name.isEmpty()) name += QStringLiteral(" - %1").arg(source.name);
+            inputSourceBox->addItem(name, static_cast<qulonglong>(slot));
+        }
+    }
+    for (const auto& source : midiPluginSources_) {
+        if (!source) continue;
+        inputSourceBox->addItem(
+            QStringLiteral("%1 - %2")
+                .arg(QString::fromStdString(source->deviceInfo.name), source->pluginName),
+            static_cast<qulonglong>(source->routerSlot));
+    }
+    if (recordingInputSourceSlot_) {
+        const int current = inputSourceBox->findData(
+            static_cast<qulonglong>(*recordingInputSourceSlot_));
+        if (current >= 0) inputSourceBox->setCurrentIndex(current);
+    }
+    applyMutedEditorStyle(inputSourceBox);
 
     const QList<QWidget*> widgets{
         captureOutputEdit_, loopbackSourceBox_,
@@ -10014,6 +10052,7 @@ bool MainWindow::armSelectedLooperLaneRecording()
 
     form->addRow(QStringLiteral("Lane"), new QLabel(laneName, content));
     form->addRow(QStringLiteral("Source"), modeBox);
+    form->addRow(QStringLiteral("Input source"), inputSourceBox);
     form->addRow(QStringLiteral("Take WAV"), outputRow);
     form->addRow(inputLabel, engineStatus);
     form->addRow(QStringLiteral("Loopback source"), sourceRow);
@@ -10121,6 +10160,7 @@ bool MainWindow::armSelectedLooperLaneRecording()
                 ? QStringLiteral("Records only your local Jam2 input.")
                 : QStringLiteral("Start Perform or a jam before recording engine input."));
         setRowVisible(engineStatus, engineMode);
+        setRowVisible(inputSourceBox, inputMode);
         setRowVisible(sourceRow, !engineMode);
         setRowVisible(includeBackingCheck, currentJamMode);
         setRowVisible(includeMetronomeCheck, currentJamMode);
@@ -10168,6 +10208,16 @@ bool MainWindow::armSelectedLooperLaneRecording()
     }
     if (result != QDialog::Accepted) {
         return false;
+    }
+    if (activeMode == QStringLiteral("input")) {
+        const qlonglong selectedSource = inputSourceBox->currentData().toLongLong();
+        recordingInputSourceSlot_ = selectedSource >= 0
+            ? std::optional<std::size_t>(static_cast<std::size_t>(selectedSource))
+            : std::nullopt;
+        if (auto* sourceRouter = jam2_.inputSourceRouter()) {
+            sourceRouter->set_recording_source(recordingInputSourceSlot_.value_or(
+                jam2::audio::kCombinedInputSources));
+        }
     }
     const TrackRecordingWorkflow::CaptureMode captureMode =
         activeMode == QStringLiteral("loopback")
@@ -14611,6 +14661,745 @@ bool MainWindow::recordingTargetSampleRate(
         return false;
     }
     return true;
+}
+
+void MainWindow::retirePluginHost(
+    std::unique_ptr<jam2::pluginhost::PluginHostService> host)
+{
+    if (!host) return;
+    // Never wait for a third-party process from the GUI thread. The shared
+    // shutdown flag is enough for the worker to leave its loop; retained
+    // ownership also keeps any bridge observed by the audio callback valid.
+    host->requestRetire();
+    retiredPluginHosts_.push_back(std::move(host));
+}
+
+void MainWindow::removeAudioPlugin(std::size_t slot)
+{
+    if (slot >= audioPluginSources_.size()) return;
+    auto& source = audioPluginSources_[slot];
+    if (auto* router = jam2_.inputSourceRouter()) {
+        jam2::audio::InputSourceConfiguration configuration;
+        configuration.kind = jam2::audio::InputSourceKind::Audio;
+        configuration.first_channel = source.firstChannel;
+        configuration.second_channel = source.secondChannel;
+        configuration.level_ppm = source.levelPpm;
+        configuration.enabled = source.included &&
+            source.firstChannel != jam2::audio::kNoInputChannel;
+        (void)router->configure(slot, configuration);
+    }
+    retirePluginHost(std::move(source.host));
+    source.name.clear();
+    source.bypassed = false;
+    updateInputSourceButtons();
+}
+
+bool MainWindow::selectAndStartPluginAsync(
+    std::size_t slot,
+    jam2::audio::InputSourceKind kind,
+    jam2::midi::EventQueue* midiQueue,
+    PluginStartCallback completion)
+{
+    if (!jam2_.isRunning()) {
+        QMessageBox::information(this, QStringLiteral("Input plugin"),
+            QStringLiteral("Start the local audio engine before loading an input plugin."));
+        return false;
+    }
+#ifdef Q_OS_MACOS
+    const QString pluginPath = QFileDialog::getExistingDirectory(
+        this, QStringLiteral("Select VST3 plugin"),
+        QDir::homePath() + QStringLiteral("/Library/Audio/Plug-Ins/VST3"));
+#else
+    const QString pluginPath = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Select VST3 plugin"),
+        QStringLiteral("C:/Program Files/Common Files/VST3"),
+        QStringLiteral("VST3 plugins (*.vst3)"));
+#endif
+    if (pluginPath.isEmpty()) return false;
+    Jam2RuntimeOptions options;
+    try {
+        options = runtimeOptions();
+    } catch (const std::exception& error) {
+        QMessageBox::warning(this, QStringLiteral("Input plugin"),
+            QStringLiteral("The current audio configuration is invalid: %1")
+                .arg(QString::fromUtf8(error.what())));
+        return false;
+    }
+    const std::size_t blockFrames = static_cast<std::size_t>(
+        options.audio_buffer_size > 0 ? options.audio_buffer_size : 256);
+    const std::size_t sourceChannels = kind == jam2::audio::InputSourceKind::MidiInstrument
+        ? 0U
+        : (slot < audioPluginSources_.size() &&
+           audioPluginSources_[slot].secondChannel != jam2::audio::kNoInputChannel ? 2U : 1U);
+    const QString workerPath = jam2::pluginhost::PluginHostService::workerExecutablePath();
+    const QString resultPath = QDir::temp().absoluteFilePath(
+        QStringLiteral("jam2-vst3-probe-%1.txt")
+            .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
+
+    auto* progress = new QProgressDialog(
+        QStringLiteral("Scanning VST3 in an isolated process..."),
+        QStringLiteral("Cancel"), 0, 0, this);
+    progress->setWindowTitle(QStringLiteral("Input plugin"));
+    progress->setWindowModality(Qt::WindowModal);
+    progress->setMinimumDuration(0);
+    progress->setAttribute(Qt::WA_DeleteOnClose);
+    QObject::connect(progress, &QProgressDialog::canceled, progress, &QObject::deleteLater);
+    progress->show();
+
+    struct ScanOutcome {
+        QList<QStringList> classes;
+        QString error;
+    };
+    const auto scan = std::make_shared<ScanOutcome>();
+    QPointer<MainWindow> self(this);
+    QPointer<QProgressDialog> progressGuard(progress);
+    QThread* const guiThread = thread();
+    fileWorkerPool_.start(QRunnable::create([
+        self, progressGuard, pluginPath, resultPath, workerPath, scan,
+        kind, midiQueue, blockFrames, sourceChannels, options, completion,
+        guiThread
+    ]() mutable {
+        try {
+            constexpr int maximumProbeAttempts = 12;
+            for (int attempt = 0; attempt < maximumProbeAttempts &&
+                 scan->classes.isEmpty(); ++attempt) {
+                (void)QFile::remove(resultPath);
+                QProcess probe;
+                probe.setProcessChannelMode(QProcess::ForwardedChannels);
+                probe.setInputChannelMode(QProcess::ForwardedInputChannel);
+                probe.start(workerPath,
+                    {QStringLiteral("--probe-file"), pluginPath, resultPath});
+                if (!probe.waitForStarted(5000) || !probe.waitForFinished(30000) ||
+                    probe.exitStatus() != QProcess::NormalExit || probe.exitCode() != 0) {
+                    if (attempt + 1 == maximumProbeAttempts) {
+                        scan->error = QStringLiteral(
+                            "The isolated scanner could not load this VST3 plugin after "
+                            "12 bounded attempts. Jam2 was not exposed to the plugin.");
+                    }
+                    continue;
+                }
+                QFile result(resultPath);
+                if (!result.open(QIODevice::ReadOnly)) {
+                    scan->error = QStringLiteral("Could not read the private plugin scan result.");
+                    break;
+                }
+                const QList<QByteArray> lines = result.readAll().split('\n');
+                for (const QByteArray& line : lines) {
+                    const QList<QByteArray> fields = line.trimmed().split('\t');
+                    if (fields.size() < 2) continue;
+                    QStringList values;
+                    for (const auto& field : fields)
+                        values.push_back(QString::fromUtf8(field));
+                    scan->classes.push_back(values);
+                }
+            }
+            if (scan->classes.isEmpty() && scan->error.isEmpty())
+                scan->error = QStringLiteral(
+                    "No VST3 audio or instrument class was found after 12 isolated attempts.");
+        } catch (const std::exception& error) {
+            scan->error = QString::fromUtf8(error.what());
+        } catch (...) {
+            scan->error = QStringLiteral("Unknown isolated VST3 scan failure.");
+        }
+        (void)QFile::remove(resultPath);
+        if (self.isNull()) return;
+        QMetaObject::invokeMethod(self, [
+            self, progressGuard, pluginPath, scan, kind, midiQueue,
+            blockFrames, sourceChannels, options, completion, guiThread
+        ]() mutable {
+            if (self.isNull() || progressGuard.isNull()) return;
+            if (!scan->error.isEmpty()) {
+                progressGuard->close();
+                QMessageBox::warning(self, QStringLiteral("Input plugin"), scan->error);
+                return;
+            }
+            QStringList classNames;
+            for (const auto& pluginClass : scan->classes)
+                classNames.push_back(pluginClass[1]);
+            int selected = 0;
+            if (scan->classes.size() > 1) {
+                progressGuard->hide();
+                bool accepted = false;
+                const QString choice = QInputDialog::getItem(self,
+                    QStringLiteral("Plugin class"), QStringLiteral("Class"),
+                    classNames, 0, false, &accepted);
+                if (!accepted) {
+                    progressGuard->close();
+                    return;
+                }
+                selected = classNames.indexOf(choice);
+                progressGuard->show();
+            }
+            progressGuard->setLabelText(
+                QStringLiteral("Starting isolated plugin worker..."));
+
+            struct StartOutcome {
+                std::unique_ptr<jam2::pluginhost::PluginHostService> host;
+                QString error;
+            };
+            const auto started = std::make_shared<StartOutcome>();
+            const QStringList selectedClass = scan->classes[selected];
+            self->fileWorkerPool_.start(QRunnable::create([
+                self, progressGuard, pluginPath, selectedClass, kind, midiQueue,
+                blockFrames, sourceChannels, options, completion, started,
+                guiThread
+            ]() mutable {
+                try {
+                    started->host = std::make_unique<jam2::pluginhost::PluginHostService>();
+                    started->host->start(pluginPath.toStdString(),
+                        selectedClass[0].toStdString(),
+                        static_cast<double>(options.sample_rate), blockFrames,
+                        kind, sourceChannels);
+                    if (midiQueue && started->host->bridge())
+                        started->host->bridge()->set_midi_queue(midiQueue);
+                    started->host->moveProcessToThread(guiThread);
+                } catch (const std::exception& error) {
+                    started->error = QString::fromUtf8(error.what());
+                } catch (...) {
+                    started->error = QStringLiteral("Unknown isolated plugin worker failure.");
+                }
+                if (self.isNull()) return;
+                QMetaObject::invokeMethod(self, [
+                    self, progressGuard, selectedClass, completion, started
+                ]() mutable {
+                    if (self.isNull()) return;
+                    if (progressGuard.isNull()) {
+                        if (started->host) started->host->requestRetire();
+                        return;
+                    }
+                    progressGuard->close();
+                    if (!started->error.isEmpty()) {
+                        QMessageBox::warning(self, QStringLiteral("Input plugin"),
+                            QStringLiteral("The isolated plugin worker rejected the plugin:\n%1")
+                                .arg(started->error));
+                        return;
+                    }
+                    completion(std::move(started->host), selectedClass[1]);
+                }, Qt::QueuedConnection);
+            }));
+        }, Qt::QueuedConnection);
+    }));
+    return true;
+}
+
+void MainWindow::refreshInputSourceRouting()
+{
+    auto* router = jam2_.inputSourceRouter();
+    if (!router || router == attachedInputRouter_) return;
+    attachedInputRouter_ = router;
+    for (std::size_t slot = 0; slot < audioPluginSources_.size(); ++slot) {
+        auto& source = audioPluginSources_[slot];
+        if (slot < router->physical_channels() &&
+            source.firstChannel == jam2::audio::kNoInputChannel &&
+            !source.consumedByStereoGroup) {
+            source.firstChannel = slot;
+        }
+        if (source.firstChannel == jam2::audio::kNoInputChannel) {
+            router->clear(slot);
+            continue;
+        }
+        jam2::audio::InputSourceConfiguration configuration;
+        configuration.kind = jam2::audio::InputSourceKind::Audio;
+        configuration.first_channel = source.firstChannel;
+        configuration.second_channel = source.secondChannel;
+        configuration.renderer = source.host ? source.host->bridge() : nullptr;
+        configuration.level_ppm = source.levelPpm;
+        configuration.enabled = source.included;
+        (void)router->configure(slot, configuration);
+    }
+    for (auto& source : midiPluginSources_) {
+        if (!source || source->routerSlot >= jam2::audio::kMaximumInputSources) continue;
+        jam2::audio::InputSourceConfiguration configuration;
+        configuration.kind = jam2::audio::InputSourceKind::MidiInstrument;
+        configuration.renderer = source->host ? source->host->bridge() : nullptr;
+        configuration.level_ppm = source->levelPpm;
+        configuration.enabled = source->included;
+        if (source->host && source->host->bridge())
+            source->host->bridge()->set_muted(source->muted);
+        (void)router->configure(source->routerSlot, configuration);
+    }
+    router->set_recording_source(recordingInputSourceSlot_.value_or(
+        jam2::audio::kCombinedInputSources));
+    updateInputSourceButtons();
+}
+
+void MainWindow::updateInputSourceButtons()
+{
+    int effects = 0;
+    bool allBypassed = true;
+    for (const auto& source : audioPluginSources_) {
+        if (!source.host) continue;
+        ++effects;
+        allBypassed = allBypassed && source.bypassed;
+    }
+    if (performanceAudioInputsButton_) {
+        const auto* router = jam2_.inputSourceRouter();
+        performanceAudioInputsButton_->setText(QStringLiteral("Audio - %1")
+            .arg(router ? static_cast<int>(router->physical_channels()) : 0));
+    }
+    if (performanceMidiInputsButton_)
+        performanceMidiInputsButton_->setText(QStringLiteral("MIDI - %1").arg(midiPluginSources_.size()));
+    if (performancePluginBypassButton_) {
+        QSignalBlocker blocker(performancePluginBypassButton_);
+        performancePluginBypassButton_->setEnabled(effects > 0);
+        performancePluginBypassButton_->setChecked(effects > 0 && allBypassed);
+        performancePluginBypassButton_->setText(effects > 0
+            ? QStringLiteral("Bypass effects (%1)").arg(effects)
+            : QStringLiteral("No effects"));
+    }
+}
+
+void MainWindow::showAudioInputSources()
+{
+    refreshInputSourceRouting();
+    auto* router = jam2_.inputSourceRouter();
+    if (!router) {
+        QMessageBox::information(this, QStringLiteral("Audio inputs"),
+            QStringLiteral("Start the local audio engine to assign its selected input channels."));
+        return;
+    }
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Audio inputs"));
+    auto* layout = new QVBoxLayout(&dialog);
+    const bool topologyLocked = trackRecordingWorkflow_.inputTakeActive() ||
+        loopbackRecorder_.isRunning() || trackRecordingWorkflow_.laneArmed();
+    auto* intro = new QLabel(QStringLiteral(
+        "Each selected engine input is a numbered mono source. Two inputs can be grouped for one stereo plugin; Jam2 then sends and records the result as mono."), &dialog);
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+    const auto options = runtimeOptions();
+    for (std::size_t slot = 0; slot < router->physical_channels() &&
+         slot < audioPluginSources_.size(); ++slot) {
+        auto& source = audioPluginSources_[slot];
+        if (source.firstChannel == jam2::audio::kNoInputChannel) continue;
+        auto* row = new QFrame(&dialog);
+        auto* rowLayout = new QHBoxLayout(row);
+        const int firstNumber = source.firstChannel < options.channel_selection.input.size()
+            ? options.channel_selection.input[source.firstChannel] + 1
+            : static_cast<int>(source.firstChannel + 1);
+        QString label = QStringLiteral("Input %1").arg(firstNumber);
+        if (source.secondChannel != jam2::audio::kNoInputChannel) {
+            const int secondNumber = source.secondChannel < options.channel_selection.input.size()
+                ? options.channel_selection.input[source.secondChannel] + 1
+                : static_cast<int>(source.secondChannel + 1);
+            label = QStringLiteral("Inputs %1 + %2 (stereo -> mono)").arg(firstNumber).arg(secondNumber);
+        }
+        rowLayout->addWidget(new QLabel(label, row), 1);
+        QString effectText = source.name.isEmpty() ? QStringLiteral("No effect") : source.name;
+        if (source.host && source.host->bridge()) {
+            const auto stats = source.host->bridge()->stats();
+            effectText += source.host->healthy()
+                ? QStringLiteral("  |  I/O %1 -> %2 -> mono, latency %3 + %4 transport frames, process %5/%6 us avg/max, misses %7")
+                    .arg(stats.negotiated_input_channels)
+                    .arg(stats.negotiated_output_channels)
+                    .arg(stats.worker_latency_frames)
+                    .arg(stats.isolation_latency_frames)
+                    .arg(stats.worker_process_average_us)
+                    .arg(stats.worker_process_max_us)
+                    .arg(stats.deadline_misses)
+                : QStringLiteral("  |  worker stopped - latency-aligned dry fallback");
+        }
+        rowLayout->addWidget(new QLabel(effectText, row), 1);
+        auto* include = new QCheckBox(QStringLiteral("Send"), row);
+        include->setChecked(source.included);
+        rowLayout->addWidget(include);
+        QObject::connect(include, &QCheckBox::toggled, &dialog, [this, slot](bool value) {
+            audioPluginSources_[slot].included = value;
+            if (auto* current = jam2_.inputSourceRouter())
+                (void)current->set_enabled(slot, value);
+        });
+        auto* level = new QSpinBox(row);
+        level->setRange(0, 200);
+        level->setSuffix(QStringLiteral("%"));
+        level->setValue(source.levelPpm / 10000);
+        level->setToolTip(QStringLiteral("Source level before the mono My Send mix"));
+        rowLayout->addWidget(level);
+        QObject::connect(level, qOverload<int>(&QSpinBox::valueChanged), &dialog,
+            [this, slot](int percent) {
+                audioPluginSources_[slot].levelPpm = percent * 10000;
+                if (auto* current = jam2_.inputSourceRouter())
+                    (void)current->set_level(slot, percent * 10000);
+            });
+        auto* load = new QPushButton(source.host ? QStringLiteral("Replace") : QStringLiteral("Add effect"), row);
+        load->setEnabled(!topologyLocked);
+        rowLayout->addWidget(load);
+        QObject::connect(load, &QPushButton::clicked, &dialog, [this, &dialog, slot] {
+            QPointer<QDialog> dialogGuard(&dialog);
+            (void)selectAndStartPluginAsync(slot,
+                jam2::audio::InputSourceKind::Audio, nullptr,
+                [this, dialogGuard, slot](
+                    std::unique_ptr<jam2::pluginhost::PluginHostService> host,
+                    const QString& name) mutable {
+                auto& current = audioPluginSources_[slot];
+                if (trackRecordingWorkflow_.inputTakeActive() ||
+                    loopbackRecorder_.isRunning() || trackRecordingWorkflow_.laneArmed()) {
+                    host->requestRetire();
+                    QMessageBox::information(this, QStringLiteral("Input plugin"),
+                        QStringLiteral("The plugin finished loading after recording began, so it was not attached."));
+                    return;
+                }
+                retirePluginHost(std::move(current.host));
+                current.host = std::move(host);
+                current.name = name;
+                current.bypassed = false;
+                attachedInputRouter_ = nullptr;
+                refreshInputSourceRouting();
+                if (!dialogGuard.isNull()) dialogGuard->accept();
+            });
+        });
+        auto* open = new QPushButton(QStringLiteral("Open"), row);
+        open->setEnabled(source.host != nullptr);
+        rowLayout->addWidget(open);
+        QObject::connect(open, &QPushButton::clicked, &dialog, [this, slot] {
+            auto& current = audioPluginSources_[slot];
+            if (current.host) current.host->openEditor();
+        });
+        auto* bypass = new QPushButton(QStringLiteral("Bypass"), row);
+        bypass->setCheckable(true);
+        bypass->setChecked(source.bypassed);
+        bypass->setEnabled(source.host != nullptr);
+        rowLayout->addWidget(bypass);
+        QObject::connect(bypass, &QPushButton::toggled, &dialog, [this, slot](bool value) {
+            auto& current = audioPluginSources_[slot];
+            current.bypassed = value;
+            if (current.host && current.host->bridge()) current.host->bridge()->set_bypassed(value);
+            updateInputSourceButtons();
+        });
+        auto* remove = new QPushButton(QStringLiteral("Remove"), row);
+        remove->setEnabled(source.host != nullptr && !topologyLocked);
+        rowLayout->addWidget(remove);
+        QObject::connect(remove, &QPushButton::clicked, &dialog, [this, &dialog, slot] {
+            removeAudioPlugin(slot);
+            dialog.accept();
+        });
+        if (source.secondChannel != jam2::audio::kNoInputChannel) {
+            auto* ungroup = new QPushButton(QStringLiteral("Ungroup"), row);
+            ungroup->setEnabled(!topologyLocked);
+            rowLayout->addWidget(ungroup);
+            QObject::connect(ungroup, &QPushButton::clicked, &dialog, [this, &dialog, slot] {
+                auto& grouped = audioPluginSources_[slot];
+                const std::size_t restored = grouped.secondChannel;
+                grouped.secondChannel = jam2::audio::kNoInputChannel;
+                if (restored < audioPluginSources_.size())
+                    audioPluginSources_[restored].firstChannel = restored;
+                if (restored < audioPluginSources_.size())
+                    audioPluginSources_[restored].consumedByStereoGroup = false;
+                attachedInputRouter_ = nullptr;
+                refreshInputSourceRouting();
+                dialog.accept();
+            });
+        }
+        layout->addWidget(row);
+    }
+    auto* group = new QPushButton(QStringLiteral("Group two inputs as stereo..."), &dialog);
+    group->setEnabled(router->physical_channels() >= 2 && !topologyLocked);
+    layout->addWidget(group);
+    QObject::connect(group, &QPushButton::clicked, &dialog, [this, &dialog, router] {
+        QStringList choices;
+        std::vector<std::size_t> availableIndices;
+        const auto options = runtimeOptions();
+        for (std::size_t index = 0; index < router->physical_channels(); ++index) {
+            const auto& candidate = audioPluginSources_[index];
+            if (candidate.firstChannel != index ||
+                candidate.secondChannel != jam2::audio::kNoInputChannel) continue;
+            const int number = index < options.channel_selection.input.size()
+                ? options.channel_selection.input[index] + 1 : static_cast<int>(index + 1);
+            choices.push_back(QStringLiteral("Input %1").arg(number));
+            availableIndices.push_back(index);
+        }
+        if (choices.size() < 2) {
+            QMessageBox::information(&dialog, QStringLiteral("Stereo input"),
+                QStringLiteral("Ungroup an existing pair before creating another stereo input."));
+            return;
+        }
+        bool accepted = false;
+        const QString left = QInputDialog::getItem(&dialog, QStringLiteral("Stereo input"),
+            QStringLiteral("Left channel"), choices, 0, false, &accepted);
+        if (!accepted) return;
+        const QString right = QInputDialog::getItem(&dialog, QStringLiteral("Stereo input"),
+            QStringLiteral("Right channel"), choices, choices.size() > 1 ? 1 : 0, false, &accepted);
+        if (!accepted) return;
+        const std::size_t first = availableIndices[static_cast<std::size_t>(choices.indexOf(left))];
+        const std::size_t second = availableIndices[static_cast<std::size_t>(choices.indexOf(right))];
+        if (first == second) {
+            QMessageBox::warning(&dialog, QStringLiteral("Stereo input"),
+                QStringLiteral("Left and right must be different input channels."));
+            return;
+        }
+        removeAudioPlugin(first);
+        removeAudioPlugin(second);
+        audioPluginSources_[first].firstChannel = first;
+        audioPluginSources_[first].secondChannel = second;
+        audioPluginSources_[second].firstChannel = jam2::audio::kNoInputChannel;
+        audioPluginSources_[second].consumedByStereoGroup = true;
+        attachedInputRouter_ = nullptr;
+        refreshInputSourceRouting();
+        dialog.accept();
+    });
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+    dialog.exec();
+    updateInputSourceButtons();
+}
+
+void MainWindow::showMidiInputSources()
+{
+    refreshInputSourceRouting();
+    auto* router = jam2_.inputSourceRouter();
+    if (!router) {
+        QMessageBox::information(this, QStringLiteral("MIDI inputs"),
+            QStringLiteral("Start the local audio engine before assigning a MIDI instrument."));
+        return;
+    }
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("MIDI inputs"));
+    auto* layout = new QVBoxLayout(&dialog);
+    const bool topologyLocked = trackRecordingWorkflow_.inputTakeActive() ||
+        loopbackRecorder_.isRunning() || trackRecordingWorkflow_.laneArmed();
+    auto* intro = new QLabel(QStringLiteral(
+        "MIDI and MPE stay local and drive one isolated instrument plugin. Jam2 sends and records only its mono audio output."), &dialog);
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+    for (std::size_t index = 0; index < midiPluginSources_.size(); ++index) {
+        auto& source = *midiPluginSources_[index];
+        auto* row = new QFrame(&dialog);
+        auto* rowLayout = new QHBoxLayout(row);
+        rowLayout->addWidget(new QLabel(QString::fromStdString(source.deviceInfo.name), row), 1);
+        rowLayout->addWidget(new QLabel(source.mode == jam2::midi::InputMode::Mpe
+            ? QStringLiteral("MPE") : QStringLiteral("Standard MIDI"), row));
+        QString pluginText = source.pluginName;
+        if (source.host && source.host->bridge()) {
+            const auto stats = source.host->bridge()->stats();
+            pluginText += source.host->healthy()
+                ? QStringLiteral("  |  I/O MIDI -> %1 -> mono, latency %2 + %3 transport frames, process %4/%5 us avg/max, misses %6, MIDI %7/%8 (high %9), drops %10")
+                    .arg(stats.negotiated_output_channels)
+                    .arg(stats.worker_latency_frames).arg(stats.isolation_latency_frames)
+                    .arg(stats.worker_process_average_us)
+                    .arg(stats.worker_process_max_us).arg(stats.deadline_misses)
+                    .arg(stats.midi_queue_depth).arg(jam2::midi::kEventQueueCapacity)
+                    .arg(stats.midi_queue_high_water).arg(stats.midi_dropped)
+                : QStringLiteral("  |  worker stopped - instrument silent");
+        }
+        rowLayout->addWidget(new QLabel(pluginText, row), 1);
+        auto* include = new QCheckBox(QStringLiteral("Send"), row);
+        include->setChecked(source.included);
+        rowLayout->addWidget(include);
+        QObject::connect(include, &QCheckBox::toggled, &dialog, [this, index](bool value) {
+            auto& currentSource = *midiPluginSources_[index];
+            currentSource.included = value;
+            if (auto* current = jam2_.inputSourceRouter())
+                (void)current->set_enabled(currentSource.routerSlot, value);
+        });
+        auto* level = new QSpinBox(row);
+        level->setRange(0, 200);
+        level->setSuffix(QStringLiteral("%"));
+        level->setValue(source.levelPpm / 10000);
+        rowLayout->addWidget(level);
+        QObject::connect(level, qOverload<int>(&QSpinBox::valueChanged), &dialog,
+            [this, index](int percent) {
+                auto& currentSource = *midiPluginSources_[index];
+                currentSource.levelPpm = percent * 10000;
+                if (auto* current = jam2_.inputSourceRouter())
+                    (void)current->set_level(currentSource.routerSlot, percent * 10000);
+            });
+        auto* open = new QPushButton(QStringLiteral("Open"), row);
+        rowLayout->addWidget(open);
+        QObject::connect(open, &QPushButton::clicked, &dialog, [this, index] {
+            if (midiPluginSources_[index]->host)
+                midiPluginSources_[index]->host->openEditor();
+        });
+        auto* mute = new QPushButton(QStringLiteral("Mute"), row);
+        mute->setCheckable(true);
+        mute->setChecked(source.muted);
+        rowLayout->addWidget(mute);
+        QObject::connect(mute, &QPushButton::toggled, &dialog, [this, index](bool value) {
+            midiPluginSources_[index]->muted = value;
+            if (auto* host = midiPluginSources_[index]->host.get(); host && host->bridge()) {
+                if (value) host->bridge()->request_midi_reset();
+                host->bridge()->set_muted(value);
+            }
+        });
+        auto* remove = new QPushButton(QStringLiteral("Remove"), row);
+        remove->setEnabled(!topologyLocked);
+        rowLayout->addWidget(remove);
+        QObject::connect(remove, &QPushButton::clicked, &dialog, [this, &dialog, index] {
+            auto source = std::move(midiPluginSources_[index]);
+            if (auto* current = jam2_.inputSourceRouter()) current->clear(source->routerSlot);
+            if (source->host && source->host->bridge()) {
+                source->host->bridge()->request_midi_reset();
+                source->host->bridge()->set_midi_queue(nullptr);
+            }
+            if (source->host) source->host->requestRetire();
+            retiredMidiSources_.push_back(std::move(source));
+            midiPluginSources_.erase(midiPluginSources_.begin() + static_cast<std::ptrdiff_t>(index));
+            attachedInputRouter_ = nullptr;
+            refreshInputSourceRouting();
+            dialog.accept();
+        });
+        layout->addWidget(row);
+    }
+    auto* add = new QPushButton(QStringLiteral("Add MIDI input..."), &dialog);
+    add->setEnabled(!topologyLocked);
+    layout->addWidget(add);
+    QObject::connect(add, &QPushButton::clicked, &dialog, [this, &dialog] {
+        auto* discovery = new QProgressDialog(
+            QStringLiteral("Finding MIDI input devices..."),
+            QStringLiteral("Cancel"), 0, 0, this);
+        discovery->setWindowTitle(QStringLiteral("MIDI input"));
+        discovery->setWindowModality(Qt::WindowModal);
+        discovery->setMinimumDuration(0);
+        discovery->setAttribute(Qt::WA_DeleteOnClose);
+        QObject::connect(discovery, &QProgressDialog::canceled,
+            discovery, &QObject::deleteLater);
+        discovery->show();
+
+        struct MidiDiscoveryOutcome {
+            std::vector<jam2::midi::DeviceInfo> devices;
+            QString error;
+        };
+        const auto outcome = std::make_shared<MidiDiscoveryOutcome>();
+        QPointer<MainWindow> self(this);
+        QPointer<QDialog> dialogGuard(&dialog);
+        QPointer<QProgressDialog> discoveryGuard(discovery);
+        fileWorkerPool_.start(QRunnable::create([
+            self, dialogGuard, discoveryGuard, outcome
+        ] {
+            try {
+                outcome->devices = jam2::midi::enumerate_input_devices();
+            } catch (const std::exception& error) {
+                outcome->error = QString::fromUtf8(error.what());
+            } catch (...) {
+                outcome->error = QStringLiteral("Unknown MIDI device discovery failure.");
+            }
+            if (self.isNull()) return;
+            QMetaObject::invokeMethod(self, [
+                self, dialogGuard, discoveryGuard, outcome
+            ]() mutable {
+                if (self.isNull() || discoveryGuard.isNull()) return;
+                discoveryGuard->close();
+                QWidget* parent = dialogGuard.isNull()
+                    ? static_cast<QWidget*>(self.data())
+                    : static_cast<QWidget*>(dialogGuard.data());
+                if (!outcome->error.isEmpty()) {
+                    QMessageBox::warning(parent, QStringLiteral("MIDI input"),
+                        QStringLiteral("Could not enumerate MIDI inputs: %1")
+                            .arg(outcome->error));
+                    return;
+                }
+                if (outcome->devices.empty()) {
+                    QMessageBox::information(parent, QStringLiteral("MIDI inputs"),
+                        QStringLiteral("No MIDI input devices are currently available."));
+                    return;
+                }
+                QStringList names;
+                for (const auto& device : outcome->devices)
+                    names.push_back(QString::fromStdString(device.name));
+                bool accepted = false;
+                const QString choice = QInputDialog::getItem(parent,
+                    QStringLiteral("MIDI input"), QStringLiteral("Device"),
+                    names, 0, false, &accepted);
+                if (!accepted) return;
+                const int deviceIndex = names.indexOf(choice);
+                const QString mode = QInputDialog::getItem(parent,
+                    QStringLiteral("MIDI input"), QStringLiteral("Mode"),
+                    {QStringLiteral("Standard MIDI"), QStringLiteral("MPE")},
+                    0, false, &accepted);
+                if (!accepted) return;
+
+                auto* currentRouter = self->jam2_.inputSourceRouter();
+                if (!currentRouter) {
+                    QMessageBox::information(parent, QStringLiteral("MIDI input"),
+                        QStringLiteral("The audio engine stopped while MIDI inputs were being found."));
+                    return;
+                }
+                std::array<bool, jam2::audio::kMaximumInputSources> used{};
+                for (std::size_t audio = 0;
+                     audio < currentRouter->physical_channels() && audio < used.size(); ++audio)
+                    used[audio] = true;
+                for (const auto& existing : self->midiPluginSources_)
+                    if (existing && existing->routerSlot < used.size())
+                        used[existing->routerSlot] = true;
+                std::size_t slot = currentRouter->physical_channels();
+                while (slot < used.size() && used[slot]) ++slot;
+                if (slot >= jam2::audio::kMaximumInputSources) {
+                    QMessageBox::warning(parent, QStringLiteral("MIDI inputs"),
+                        QStringLiteral("Jam2's 16 local input-source limit has been reached."));
+                    return;
+                }
+
+                auto source = std::make_shared<MidiPluginSource>();
+                source->deviceInfo = outcome->devices[static_cast<std::size_t>(deviceIndex)];
+                source->mode = mode == QStringLiteral("MPE")
+                    ? jam2::midi::InputMode::Mpe : jam2::midi::InputMode::Standard;
+                source->routerSlot = slot;
+                auto* opening = new QProgressDialog(
+                    QStringLiteral("Opening MIDI input device..."),
+                    QStringLiteral("Cancel"), 0, 0, self);
+                opening->setWindowTitle(QStringLiteral("MIDI input"));
+                opening->setWindowModality(Qt::WindowModal);
+                opening->setMinimumDuration(0);
+                opening->setAttribute(Qt::WA_DeleteOnClose);
+                QObject::connect(opening, &QProgressDialog::canceled,
+                    opening, &QObject::deleteLater);
+                opening->show();
+                QPointer<QProgressDialog> openingGuard(opening);
+                const auto nativeError = std::make_shared<std::string>();
+                self->fileWorkerPool_.start(QRunnable::create([
+                    self, dialogGuard, openingGuard, source, nativeError
+                ] {
+                    source->device = jam2::midi::open_input_device(
+                        source->deviceInfo.id, source->events, *nativeError);
+                    if (self.isNull()) return;
+                    QMetaObject::invokeMethod(self, [
+                        self, dialogGuard, openingGuard, source, nativeError
+                    ]() mutable {
+                        if (self.isNull() || openingGuard.isNull()) return;
+                        openingGuard->close();
+                        QWidget* parent = dialogGuard.isNull()
+                            ? static_cast<QWidget*>(self.data())
+                            : static_cast<QWidget*>(dialogGuard.data());
+                        if (!source->device) {
+                            QMessageBox::warning(parent, QStringLiteral("MIDI input"),
+                                QStringLiteral("Could not open the MIDI device: %1")
+                                    .arg(QString::fromStdString(*nativeError)));
+                            return;
+                        }
+                        (void)self->selectAndStartPluginAsync(source->routerSlot,
+                            jam2::audio::InputSourceKind::MidiInstrument,
+                            &source->events,
+                            [self, dialogGuard, source](
+                                std::unique_ptr<jam2::pluginhost::PluginHostService> host,
+                                const QString& name) mutable {
+                                if (self.isNull()) {
+                                    if (host) host->requestRetire();
+                                    return;
+                                }
+                                if (self->trackRecordingWorkflow_.inputTakeActive() ||
+                                    self->loopbackRecorder_.isRunning() ||
+                                    self->trackRecordingWorkflow_.laneArmed()) {
+                                    host->requestRetire();
+                                    QMessageBox::information(self, QStringLiteral("MIDI input"),
+                                        QStringLiteral("The instrument finished loading after recording began, so it was not attached."));
+                                    return;
+                                }
+                                source->host = std::move(host);
+                                source->pluginName = name;
+                                self->midiPluginSources_.push_back(source);
+                                self->attachedInputRouter_ = nullptr;
+                                self->refreshInputSourceRouting();
+                                if (!dialogGuard.isNull()) dialogGuard->accept();
+                            });
+                    }, Qt::QueuedConnection);
+                }));
+            }, Qt::QueuedConnection);
+        }));
+    });
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+    dialog.exec();
+    updateInputSourceButtons();
 }
 
 Jam2RuntimeOptions MainWindow::runtimeOptions() const

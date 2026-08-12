@@ -6,6 +6,10 @@ project(Jam2
     LANGUAGES C CXX
 )
 
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
+
 enable_testing()
 
 if(CMAKE_CONFIGURATION_TYPES)
@@ -47,6 +51,9 @@ function(jam2_create_release_dirs target)
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${CMAKE_SOURCE_DIR}/libs/third_party/DaisySP/LICENSE"
             "${JAM2_RELEASE_DIR}/licenses/DaisySP-LICENSE.txt"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/libs/third_party/vst3sdk/LICENSE.txt"
+            "${JAM2_RELEASE_DIR}/licenses/VST3-SDK-LICENSE.txt"
         VERBATIM
     )
 endfunction()

@@ -801,6 +801,35 @@ void MainWindowPages::build(MainWindow& w)
     auto* selfControlsLayout = new QVBoxLayout(w.performanceLocalControls_);
     selfControlsLayout->setContentsMargins(0, 0, 0, 0);
     selfControlsLayout->setSpacing(4);
+    auto* inputSourcesRow = new QWidget(w.performanceLocalControls_);
+    auto* inputSourcesLayout = new QHBoxLayout(inputSourcesRow);
+    inputSourcesLayout->setContentsMargins(0, 0, 0, 0);
+    inputSourcesLayout->setSpacing(5);
+    w.performanceAudioInputsButton_ = new QPushButton(
+        QStringLiteral("Audio inputs"), inputSourcesRow);
+    w.performanceMidiInputsButton_ = new QPushButton(
+        QStringLiteral("MIDI inputs"), inputSourcesRow);
+    w.performancePluginBypassButton_ = new QPushButton(
+        QStringLiteral("Bypass effects"), inputSourcesRow);
+    w.performancePluginBypassButton_->setCheckable(true);
+    inputSourcesLayout->addWidget(w.performanceAudioInputsButton_);
+    inputSourcesLayout->addWidget(w.performanceMidiInputsButton_);
+    inputSourcesLayout->addWidget(w.performancePluginBypassButton_);
+    QObject::connect(w.performanceAudioInputsButton_, &QPushButton::clicked,
+        &w, [&w] { w.showAudioInputSources(); });
+    QObject::connect(w.performanceMidiInputsButton_, &QPushButton::clicked,
+        &w, [&w] { w.showMidiInputSources(); });
+    QObject::connect(w.performancePluginBypassButton_, &QPushButton::toggled,
+        &w, [&w](bool bypassed) {
+            for (auto& source : w.audioPluginSources_) {
+                if (source.host && source.host->bridge()) {
+                    source.bypassed = bypassed;
+                    source.host->bridge()->set_bypassed(bypassed);
+                }
+            }
+            w.updateInputSourceButtons();
+        });
+    selfControlsLayout->addWidget(inputSourcesRow);
     selfControlsLayout->addWidget(w.mixInputMeterRow_);
     selfControlsLayout->addWidget(w.mixSendRow_);
     auto* monitorRow = new QHBoxLayout();

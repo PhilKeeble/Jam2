@@ -17,6 +17,127 @@ if(NOT Qt6_FOUND)
     )
 endif()
 
+# Build the maintained VST3 SDK checkout directly into Jam2's private plugin
+# helper. The public jam2 process never links this target or loads plugins.
+set(JAM2_VST3SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../libs/third_party/vst3sdk")
+if(NOT EXISTS "${JAM2_VST3SDK_ROOT}/LICENSE.txt")
+    message(FATAL_ERROR "The maintained VST3 SDK sources are missing")
+endif()
+set(JAM2_VST3SDK_SOURCES
+    "${JAM2_VST3SDK_ROOT}/base/source/baseiids.cpp"
+    "${JAM2_VST3SDK_ROOT}/base/source/fbuffer.cpp"
+    "${JAM2_VST3SDK_ROOT}/base/source/fdebug.cpp"
+    "${JAM2_VST3SDK_ROOT}/base/source/fdynlib.cpp"
+    "${JAM2_VST3SDK_ROOT}/base/source/fobject.cpp"
+    "${JAM2_VST3SDK_ROOT}/base/source/fstreamer.cpp"
+    "${JAM2_VST3SDK_ROOT}/base/source/fstring.cpp"
+    "${JAM2_VST3SDK_ROOT}/base/source/timer.cpp"
+    "${JAM2_VST3SDK_ROOT}/base/source/updatehandler.cpp"
+    "${JAM2_VST3SDK_ROOT}/pluginterfaces/base/conststringtable.cpp"
+    "${JAM2_VST3SDK_ROOT}/pluginterfaces/base/coreiids.cpp"
+    "${JAM2_VST3SDK_ROOT}/pluginterfaces/base/funknown.cpp"
+    "${JAM2_VST3SDK_ROOT}/pluginterfaces/base/ustring.cpp"
+    "${JAM2_VST3SDK_ROOT}/public.sdk/source/vst/vstinitiids.cpp"
+    "${JAM2_VST3SDK_ROOT}/public.sdk/source/common/commoniids.cpp"
+    "${JAM2_VST3SDK_ROOT}/public.sdk/source/common/commonstringconvert.cpp"
+    "${JAM2_VST3SDK_ROOT}/public.sdk/source/vst/hosting/connectionproxy.cpp"
+    "${JAM2_VST3SDK_ROOT}/public.sdk/source/vst/hosting/eventlist.cpp"
+    "${JAM2_VST3SDK_ROOT}/public.sdk/source/vst/hosting/hostclasses.cpp"
+    "${JAM2_VST3SDK_ROOT}/public.sdk/source/vst/hosting/module.cpp"
+    "${JAM2_VST3SDK_ROOT}/public.sdk/source/vst/hosting/parameterchanges.cpp"
+    "${JAM2_VST3SDK_ROOT}/public.sdk/source/vst/hosting/pluginterfacesupport.cpp"
+    "${JAM2_VST3SDK_ROOT}/public.sdk/source/vst/hosting/plugprovider.cpp"
+    "${JAM2_VST3SDK_ROOT}/public.sdk/source/vst/hosting/processdata.cpp"
+    "${JAM2_VST3SDK_ROOT}/public.sdk/source/vst/utility/stringconvert.cpp")
+if(WIN32)
+    list(APPEND JAM2_VST3SDK_SOURCES
+        "${JAM2_VST3SDK_ROOT}/public.sdk/source/common/threadchecker_win32.cpp"
+        "${JAM2_VST3SDK_ROOT}/public.sdk/source/vst/hosting/module_win32.cpp")
+elseif(APPLE)
+    enable_language(OBJCXX)
+    list(APPEND JAM2_VST3SDK_SOURCES
+        "${JAM2_VST3SDK_ROOT}/public.sdk/source/common/threadchecker_mac.mm"
+        "${JAM2_VST3SDK_ROOT}/public.sdk/source/vst/hosting/module_mac.mm")
+endif()
+add_library(jam2_vst3sdk STATIC ${JAM2_VST3SDK_SOURCES})
+target_compile_features(jam2_vst3sdk PUBLIC cxx_std_20)
+target_include_directories(jam2_vst3sdk SYSTEM PUBLIC "${JAM2_VST3SDK_ROOT}")
+target_compile_definitions(jam2_vst3sdk PUBLIC SMTG_CPP20=1)
+if(MSVC)
+    target_compile_options(jam2_vst3sdk PRIVATE /W0 /permissive- /EHsc)
+endif()
+if(WIN32)
+    target_link_libraries(jam2_vst3sdk PUBLIC ole32 shell32)
+elseif(APPLE)
+    target_link_libraries(jam2_vst3sdk PUBLIC
+        "-framework Cocoa" "-framework CoreFoundation")
+endif()
+
+add_library(jam2_vst3host STATIC pluginhost/Vst3Host.cpp pluginhost/Vst3Host.hpp)
+if(APPLE)
+    set_source_files_properties(pluginhost/Vst3Host.cpp PROPERTIES LANGUAGE OBJCXX)
+endif()
+target_compile_features(jam2_vst3host PUBLIC cxx_std_20)
+target_include_directories(jam2_vst3host PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/pluginhost")
+target_link_libraries(jam2_vst3host PRIVATE jam2_vst3sdk)
+add_library(jam2_plugin_transport STATIC
+    pluginhost/PluginProtocol.hpp
+    pluginhost/PluginSharedMemory.hpp)
+if(WIN32)
+    target_sources(jam2_plugin_transport PRIVATE pluginhost/PluginSharedMemoryWindows.cpp)
+elseif(APPLE)
+    target_sources(jam2_plugin_transport PRIVATE pluginhost/PluginSharedMemoryMac.cpp)
+endif()
+target_compile_features(jam2_plugin_transport PUBLIC cxx_std_20)
+target_include_directories(jam2_plugin_transport PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/pluginhost")
+
+add_library(jam2_plugin_client STATIC
+    pluginhost/PluginAudioBridge.cpp
+    pluginhost/PluginAudioBridge.hpp
+    pluginhost/PluginHostService.cpp
+    pluginhost/PluginHostService.hpp)
+target_compile_features(jam2_plugin_client PUBLIC cxx_std_20)
+target_include_directories(jam2_plugin_client PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/pluginhost")
+target_link_libraries(jam2_plugin_client PUBLIC jam2_core Qt6::Core PRIVATE jam2_plugin_transport)
+
+add_executable(jam2_plugin_worker pluginhost/PluginWorkerMain.cpp)
+set_target_properties(jam2_plugin_worker PROPERTIES OUTPUT_NAME "jam2-plugin-worker")
+target_compile_features(jam2_plugin_worker PRIVATE cxx_std_20)
+target_link_libraries(jam2_plugin_worker PRIVATE jam2_vst3host jam2_vst3sdk jam2_plugin_transport)
+add_executable(jam2_plugin_worker_tests pluginhost/tests/PluginWorkerTests.cpp)
+target_compile_features(jam2_plugin_worker_tests PRIVATE cxx_std_20)
+target_link_libraries(jam2_plugin_worker_tests PRIVATE jam2_plugin_client Qt6::Core)
+add_dependencies(jam2_plugin_worker_tests jam2_plugin_worker)
+add_executable(jam2_plugin_device_tests pluginhost/tests/PluginDeviceTests.cpp)
+target_compile_features(jam2_plugin_device_tests PRIVATE cxx_std_20)
+target_link_libraries(jam2_plugin_device_tests PRIVATE jam2_plugin_client Qt6::Core)
+add_dependencies(jam2_plugin_device_tests jam2_plugin_worker)
+add_executable(jam2_plugin_bridge_tests pluginhost/tests/PluginBridgeTests.cpp)
+target_compile_features(jam2_plugin_bridge_tests PRIVATE cxx_std_20)
+target_link_libraries(jam2_plugin_bridge_tests PRIVATE jam2_plugin_client Qt6::Core)
+add_test(NAME jam2_plugin_bridge_units COMMAND jam2_plugin_bridge_tests)
+if(WIN32)
+    set_tests_properties(jam2_plugin_bridge_units PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${JAM2_RELEASE_DIR}")
+endif()
+if(MSVC)
+    target_compile_options(jam2_vst3host PRIVATE /W4 /permissive- /EHsc)
+    target_compile_options(jam2_plugin_transport PRIVATE /W4 /permissive- /EHsc)
+    target_compile_options(jam2_plugin_client PRIVATE /W4 /permissive- /EHsc)
+    target_compile_options(jam2_plugin_worker PRIVATE /W4 /permissive- /EHsc)
+    target_compile_options(jam2_plugin_worker_tests PRIVATE /W4 /permissive- /EHsc)
+    target_compile_options(jam2_plugin_device_tests PRIVATE /W4 /permissive- /EHsc)
+    target_compile_options(jam2_plugin_bridge_tests PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(jam2_vst3host PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(jam2_plugin_transport PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(jam2_plugin_client PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(jam2_plugin_worker PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(jam2_plugin_worker_tests PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(jam2_plugin_device_tests PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(jam2_plugin_bridge_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 set(JAM2_DAISYSP_ROOT
     "${CMAKE_CURRENT_SOURCE_DIR}/../libs/third_party/DaisySP")
 if(NOT EXISTS "${JAM2_DAISYSP_ROOT}/Source/Drums/synthbassdrum.cpp")
@@ -364,6 +485,7 @@ target_include_directories(jam2 PRIVATE
 target_link_libraries(jam2 PRIVATE
     jam2_core
     jam2_daisysp_drums
+    jam2_plugin_client
     Qt6::Network
     Qt6::Widgets
 )
@@ -430,7 +552,7 @@ if(WIN32)
     )
 endif()
 
-add_dependencies(jam2 jamtaster_worker)
+add_dependencies(jam2 jamtaster_worker jam2_plugin_worker)
 if(WIN32)
     set(JAMTASTER_RELEASE_ROOT "${JAM2_RELEASE_DIR}/components/jamtaster")
     add_custom_command(TARGET jamtaster_worker POST_BUILD
@@ -460,6 +582,17 @@ if(WIN32)
             ${JAMTASTER_MODEL_FILES}
             "${JAMTASTER_RELEASE_ROOT}/models"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/jamtaster/models"
+        VERBATIM)
+    set(JAM2_PLUGINHOST_RELEASE_ROOT "${JAM2_RELEASE_DIR}/components/pluginhost")
+    add_custom_command(TARGET jam2_plugin_worker POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E make_directory
+            "${JAM2_PLUGINHOST_RELEASE_ROOT}/licenses"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:jam2_plugin_worker>"
+            "${JAM2_PLUGINHOST_RELEASE_ROOT}"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${JAM2_VST3SDK_ROOT}/LICENSE.txt"
+            "${JAM2_PLUGINHOST_RELEASE_ROOT}/licenses/VST3-SDK-LICENSE.txt"
         VERBATIM)
 elseif(APPLE)
     add_custom_command(TARGET jam2 POST_BUILD
@@ -493,6 +626,17 @@ elseif(APPLE)
             ${JAMTASTER_MODEL_FILES}
             "$<TARGET_BUNDLE_DIR:jam2>/Contents/Resources/jamtaster/models"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/jamtaster/models"
+        VERBATIM)
+    add_custom_command(TARGET jam2 POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E make_directory
+            "$<TARGET_BUNDLE_DIR:jam2>/Contents/Helpers"
+            "$<TARGET_BUNDLE_DIR:jam2>/Contents/Resources/pluginhost/licenses"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "$<TARGET_FILE:jam2_plugin_worker>"
+            "$<TARGET_BUNDLE_DIR:jam2>/Contents/Helpers/jam2-plugin-worker"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${JAM2_VST3SDK_ROOT}/LICENSE.txt"
+            "$<TARGET_BUNDLE_DIR:jam2>/Contents/Resources/pluginhost/licenses/VST3-SDK-LICENSE.txt"
         VERBATIM)
 endif()
 

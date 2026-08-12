@@ -39,6 +39,8 @@ public:
     std::uint64_t engineStarts() const noexcept { return engine_starts_; }
     std::uint64_t engineRestarts() const noexcept { return engine_restarts_; }
     std::uint64_t engineReuses() const noexcept { return engine_reuses_; }
+    jam2::audio::InputSourceRouter* inputSourceRouter() noexcept
+    { return input_source_router_.get(); }
 
     std::function<void(const jam2::EngineSnapshot&)> onEngineSnapshot;
     std::function<void(const jam2::EngineEvent&)> onEngineEvent;
@@ -56,6 +58,7 @@ private:
     void publishConnectionDiagnostics(ConnectionDiagnosticsSnapshot snapshot);
 
     std::unique_ptr<jam2::Engine> engine_;
+    std::unique_ptr<jam2::audio::InputSourceRouter> input_source_router_;
     Jam2RuntimeHost host_;
     std::thread network_worker_;
     std::atomic<bool> network_running_{false};

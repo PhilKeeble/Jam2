@@ -52,7 +52,7 @@ bool ApplicationRuntime::ensureEngine(
         host_.engine = nullptr;
         return true;
     }
-    const jam2::EngineConfig requested = jam2_make_engine_config(options, leaderAudioLocalClick);
+    jam2::EngineConfig requested = jam2_make_engine_config(options, leaderAudioLocalClick);
     if (engine_ != nullptr) {
         const jam2::EngineConfig* active = engine_->config();
         if (active != nullptr && !jam2_engine_restart_required(*active, requested)) {
@@ -79,6 +79,19 @@ bool ApplicationRuntime::ensureEngine(
         ++engine_restarts_;
     }
     try {
+        input_source_router_ = std::make_unique<jam2::audio::InputSourceRouter>(
+            8192U, requested.channels.input.size());
+        for (std::size_t index = 0; index < requested.channels.input.size() &&
+             index < jam2::audio::kMaximumInputSources; ++index) {
+            jam2::audio::InputSourceConfiguration source;
+            source.kind = jam2::audio::InputSourceKind::Audio;
+            source.first_channel = index;
+            source.enabled = true;
+            if (!input_source_router_->configure(index, source)) {
+                throw std::runtime_error("Could not configure local audio input source");
+            }
+        }
+        requested.input_source_router = input_source_router_.get();
         engine_ = std::make_unique<jam2::Engine>();
         engine_->start(requested);
         host_.engine = engine_.get();
@@ -87,6 +100,7 @@ bool ApplicationRuntime::ensureEngine(
     } catch (const std::exception& exception) {
         host_.engine = nullptr;
         engine_.reset();
+        input_source_router_.reset();
         if (onError) onError(QString::fromUtf8(exception.what()));
         return false;
     }
@@ -147,6 +161,7 @@ void ApplicationRuntime::shutdown()
         engine_->join();
         engine_.reset();
     }
+    input_source_router_.reset();
     host_.engine = nullptr;
 }
 
