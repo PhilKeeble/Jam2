@@ -379,7 +379,7 @@ private:
     void handleSongSet(const QJsonObject& message, const QString& sourcePeerToken);
     void applyPendingSongIfAssetsReady();
     QJsonObject normalizeLooperAssetPaths(QJsonObject song) const;
-    QJsonObject preserveQuarantinedLocalLanes(QJsonObject song);
+    QJsonObject preserveLocalOnlyLanes(QJsonObject song);
     QString looperAssetPathForHash(const QString& hash) const;
     QJsonObject trackToJson() const;
     void loadTrackJson(const QJsonObject& object);

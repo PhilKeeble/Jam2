@@ -14786,9 +14786,13 @@ GeneratedContinuationIdea continuationIdea(
     const bool usePowerChords = sourceSignature.chordEventCount > 0 &&
         sourceSignature.powerChordCount * 2 >= sourceSignature.chordEventCount;
     double bestScore = -std::numeric_limits<double>::infinity();
+    double fallbackScore = -std::numeric_limits<double>::infinity();
     GeneratedPracticeIdea best;
+    GeneratedPracticeIdea fallback;
     ContinuationAnalysis bestAnalysis;
+    ContinuationAnalysis fallbackAnalysis;
     ContinuationStylePlan bestStylePlan;
+    ContinuationStylePlan fallbackStylePlan;
     for (int index = 0; index < kCandidateCount; ++index) {
         const std::uint32_t candidateSeed = performanceHash(
             seed, index, source.beats, 0x9e3779b9U);
@@ -14917,11 +14921,10 @@ GeneratedContinuationIdea continuationIdea(
         const bool bluesOpeningContrast = nativeBluesCollection &&
             openingPositionSimilarity <= 0.75 &&
             (orderContrast > 0.0 || chordQualitySimilarity <= 0.75);
-        if (!newGrooveIdentity || !newHarmonicIdentity ||
-            (!newOpeningPhrase && !bluesOpeningContrast) ||
-            (!hasContrast && !bluesOpeningContrast)) {
-            continue;
-        }
+        const bool meetsContrastTargets =
+            newGrooveIdentity && newHarmonicIdentity &&
+            (newOpeningPhrase || bluesOpeningContrast) &&
+            (hasContrast || bluesOpeningContrast);
         const bool keepsSourceKit = source.generatedRecipe.isValid() &&
             !source.generatedRecipe.drumPatchId.isEmpty() &&
             candidate.recipe.drumPatchId == source.generatedRecipe.drumPatchId;
@@ -14944,39 +14947,59 @@ GeneratedContinuationIdea continuationIdea(
             (newGrooveIdentity ? 1.2 : -5.0) +
             (keepsSourceKit ? 0.6 : 0.0) +
             (candidate.recipe.mode == inferred.modeName ? 0.8 : 0.0);
-        if (score <= bestScore) continue;
-        bestScore = score;
-        best = std::move(candidate);
-        bestStylePlan = stylePlan;
-        bestAnalysis.inferredTonic = inferred.tonicName;
-        bestAnalysis.inferredMode = inferred.modeName;
-        bestAnalysis.inferredTonalConfidence = inferred.tonalConfidence;
-        bestAnalysis.inferredProfileId = inferred.profileId;
-        bestAnalysis.inferredProfileConfidence = inferred.profileConfidence;
-        bestAnalysis.alternativeProfileIds = inferred.alternativeProfiles;
-        bestAnalysis.continuationRoleId = role.id;
-        bestAnalysis.continuationRoleName = role.name;
-        bestAnalysis.relationshipId = stylePlan.relationshipId.isEmpty()
-            ? continuationRelationship(best.recipe.profileId, best.recipe.styleId)
+        ContinuationAnalysis analysis;
+        analysis.inferredTonic = inferred.tonicName;
+        analysis.inferredMode = inferred.modeName;
+        analysis.inferredTonalConfidence = inferred.tonalConfidence;
+        analysis.inferredProfileId = inferred.profileId;
+        analysis.inferredProfileConfidence = inferred.profileConfidence;
+        analysis.alternativeProfileIds = inferred.alternativeProfiles;
+        analysis.continuationRoleId = role.id;
+        analysis.continuationRoleName = role.name;
+        analysis.relationshipId = stylePlan.relationshipId.isEmpty()
+            ? continuationRelationship(candidate.recipe.profileId, candidate.recipe.styleId)
             : stylePlan.relationshipId;
-        bestAnalysis.chordVocabularySimilarity = chordSimilarity;
-        bestAnalysis.chordQualityVocabularySimilarity =
+        analysis.chordVocabularySimilarity = chordSimilarity;
+        analysis.chordQualityVocabularySimilarity =
             chordQualitySimilarity;
-        bestAnalysis.chordOrderContrast = orderContrast;
-        bestAnalysis.openingChordPositionSimilarity =
+        analysis.chordOrderContrast = orderContrast;
+        analysis.openingChordPositionSimilarity =
             openingPositionSimilarity;
-        bestAnalysis.drumSimilarity = drumSimilarity;
-        bestAnalysis.melodyRhythmSimilarity = melodySimilarity;
-        bestAnalysis.melodyContourSimilarity = contourSimilarity;
-        bestAnalysis.bassContourSimilarity = bassContourSimilarity;
-        bestAnalysis.boundaryVoiceLeading = boundaryVoiceLeading;
-        bestAnalysis.harmonicDensityRetention = harmonicDensityRetention;
-        bestAnalysis.sourceChordEvents = sourceSignature.chordEventCount;
-        bestAnalysis.continuationChordEvents = signature.chordEventCount;
-        bestAnalysis.harmonicPacingId = stylePlan.pacingId.isEmpty()
+        analysis.drumSimilarity = drumSimilarity;
+        analysis.melodyRhythmSimilarity = melodySimilarity;
+        analysis.melodyContourSimilarity = contourSimilarity;
+        analysis.bassContourSimilarity = bassContourSimilarity;
+        analysis.boundaryVoiceLeading = boundaryVoiceLeading;
+        analysis.harmonicDensityRetention = harmonicDensityRetention;
+        analysis.sourceChordEvents = sourceSignature.chordEventCount;
+        analysis.continuationChordEvents = signature.chordEventCount;
+        analysis.harmonicPacingId = stylePlan.pacingId.isEmpty()
             ? QStringLiteral("native-profile-form")
             : stylePlan.pacingId;
-        bestAnalysis.candidateCount = kCandidateCount;
+        analysis.candidateCount = kCandidateCount;
+
+        if (meetsContrastTargets) {
+            if (score <= bestScore) continue;
+            bestScore = score;
+            best = std::move(candidate);
+            bestAnalysis = std::move(analysis);
+            bestStylePlan = stylePlan;
+        } else {
+            if (score <= fallbackScore) continue;
+            fallbackScore = score;
+            fallback = std::move(candidate);
+            fallbackAnalysis = std::move(analysis);
+            fallbackStylePlan = stylePlan;
+        }
+    }
+
+    // Sparse/manual chord sections can make every candidate miss one of the
+    // aspirational contrast thresholds. Return the best valid continuation in
+    // that case instead of annotating and installing a default, empty section.
+    if (!best.recipe.isValid() && fallback.recipe.isValid()) {
+        best = std::move(fallback);
+        bestAnalysis = std::move(fallbackAnalysis);
+        bestStylePlan = std::move(fallbackStylePlan);
     }
 
     bestAnalysis.evidence = {

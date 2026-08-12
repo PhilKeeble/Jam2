@@ -51,6 +51,8 @@ void SyntheticBassDrum::Init(float sample_rate)
     fm_lp_                = 0.0f;
     body_env_lp_          = 0.0f;
     body_env_             = 0.0f;
+    transient_env_        = 0.0f;
+    transient_env_lp_     = 0.0f;
     body_env_pulse_width_ = 0;
     fm_pulse_width_       = 0;
     tone_lp_              = 0.0f;

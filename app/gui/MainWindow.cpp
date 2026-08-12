@@ -1459,7 +1459,8 @@ MainWindow::MainWindow(QWidget* parent)
             if (snapshot.role == SharedSessionController::Role::Joiner &&
                 !selectedDeviceSupportsSampleRate(snapshot.contract.sampleRate)) {
                 throw std::runtime_error(
-                    QStringLiteral("Selected audio device does not support session sample rate %1")
+                    QStringLiteral("Selected audio device '%1' does not support session sample rate %2 Hz")
+                        .arg(deviceBox_ ? deviceBox_->currentText() : QStringLiteral("unknown"))
                         .arg(snapshot.contract.sampleRate).toStdString());
             }
             return networkRuntimeOptions(snapshot);
@@ -5896,6 +5897,7 @@ void MainWindow::applyJoinDefaultsToControls()
 
 void MainWindow::applyPreferencesToControls()
 {
+    const bool firstApplication = !preferencesInitialized_;
     if (preferences_.logging.folder.trimmed().isEmpty()) {
         preferences_.logging.folder = appReleaseFolderPath(QStringLiteral("logs"));
     }
@@ -5926,14 +5928,18 @@ void MainWindow::applyPreferencesToControls()
     if (metronomeCompensationSlewSpin_)
         metronomeCompensationSlewSpin_->setValue(preferences_.metronome.compensationSlewMsPerSecond);
 
-    if (mixSendLevelSlider_) mixSendLevelSlider_->setValue(preferences_.levels.sendDb);
-    if (mixMonitorCheck_) mixMonitorCheck_->setChecked(preferences_.levels.monitorInput);
-    if (mixMonitorLevelSlider_) mixMonitorLevelSlider_->setValue(preferences_.levels.monitorDb);
-    if (metronomeLevelSlider_) metronomeLevelSlider_->setValue(preferences_.levels.metronomeDb);
-    if (masterOutputLevelSlider_) masterOutputLevelSlider_->setValue(preferences_.levels.masterDb);
-    if (remoteLevelSlider_) remoteLevelSlider_->setValue(preferences_.levels.remotePeerDb);
-    if (mixRemotePeerSlider_ && selectedPeerId_ == 0)
-        mixRemotePeerSlider_->setValue(preferences_.levels.remotePeerDb);
+    // These preferences are startup defaults. Reapplying them after an unrelated
+    // settings change must not overwrite the live mixer state.
+    if (firstApplication) {
+        if (mixSendLevelSlider_) mixSendLevelSlider_->setValue(preferences_.levels.sendDb);
+        if (mixMonitorCheck_) mixMonitorCheck_->setChecked(preferences_.levels.monitorInput);
+        if (mixMonitorLevelSlider_) mixMonitorLevelSlider_->setValue(preferences_.levels.monitorDb);
+        if (metronomeLevelSlider_) metronomeLevelSlider_->setValue(preferences_.levels.metronomeDb);
+        if (masterOutputLevelSlider_) masterOutputLevelSlider_->setValue(preferences_.levels.masterDb);
+        if (remoteLevelSlider_) remoteLevelSlider_->setValue(preferences_.levels.remotePeerDb);
+        if (mixRemotePeerSlider_ && selectedPeerId_ == 0)
+            mixRemotePeerSlider_->setValue(preferences_.levels.remotePeerDb);
+    }
 
     if (performanceHome_) {
         performanceHome_->setChordPreviewVisible(
@@ -6172,8 +6178,11 @@ bool MainWindow::selectedDeviceSupportsSampleRate(int sampleRate)
                 std::distance(jam2::audio::kTestSampleRates.begin(), rate))]) {
             return true;
         }
-        appendLog(QStringLiteral("device sample-rate preflight failed: device %1 does not support %2 Hz")
-            .arg(selectedDeviceId()).arg(sampleRate));
+        appendLog(QStringLiteral(
+            "device sample-rate preflight failed: device '%1' (id=%2) does not support %3 Hz")
+            .arg(deviceBox_ ? deviceBox_->currentText() : QStringLiteral("unknown"))
+            .arg(selectedDeviceId())
+            .arg(sampleRate));
         return false;
     } catch (const std::exception& error) {
         appendLog(QStringLiteral("device sample-rate preflight failed: ") + QString::fromUtf8(error.what()));
@@ -6971,6 +6980,8 @@ void MainWindow::auditWavCompatibilityForSession(int expectedSampleRate, bool sh
         Input input;
         int sampleRate = 0;
         qint64 sourceFrames = 0;
+        bool conversionAttempted = false;
+        StagedPcm16Asset converted;
         QString error;
     };
     auto inputs = std::make_shared<QVector<Input>>();
@@ -7007,10 +7018,11 @@ void MainWindow::auditWavCompatibilityForSession(int expectedSampleRate, bool sh
 
     auto results = std::make_shared<QVector<Result>>();
     results->reserve(inputs->size());
+    const QString stagingFolder = projectPersistence_.workspaceFolder();
     wavCompatibilityAuditRunning_ = true;
     const std::uint64_t generation = ++wavCompatibilityAuditGeneration_;
     const bool started = startFileWorkerTask(
-        [inputs, results] {
+        [inputs, results, stagingFolder, expectedSampleRate] {
             for (const Input& input : *inputs) {
                 Result result;
                 result.input = input;
@@ -7021,6 +7033,17 @@ void MainWindow::auditWavCompatibilityForSession(int expectedSampleRate, bool sh
                 } else {
                     result.sampleRate = static_cast<int>(inspected.info.sample_rate);
                     result.sourceFrames = static_cast<qint64>(inspected.info.frames);
+                    if (result.sampleRate != expectedSampleRate) {
+                        result.conversionAttempted = true;
+                        result.converted = stagePcm16Asset(
+                            input.path, stagingFolder, expectedSampleRate);
+                        if (!result.converted.error.isEmpty()) {
+                            result.error = result.converted.error;
+                        } else {
+                            result.sampleRate = result.converted.metadata.sampleRate;
+                            result.sourceFrames = result.converted.metadata.frames;
+                        }
+                    }
                 }
                 results->append(std::move(result));
             }
@@ -7037,16 +7060,31 @@ void MainWindow::auditWavCompatibilityForSession(int expectedSampleRate, bool sh
                 auditWavCompatibilityForSession(pending, showModal);
                 return;
             }
-            QStringList newlyQuarantined;
+            QStringList resamplingFailures;
+            QStringList temporarilyUnavailable;
+            bool arrangementConverted = false;
             for (const Result& result : *results) {
                 bool stillPresent = false;
                 if (result.input.track) {
                     SharedTrackModel& current = trackController_.model();
                     stillPresent = current.filePath == result.input.path;
-                    if (stillPresent) {
+                    if (stillPresent && result.error.isEmpty()) {
+                        if (result.converted.resampled) {
+                            registerTransientTrackWav(result.converted.stagedPath);
+                            current.filePath = result.converted.stagedPath;
+                            current.fileBytes = QFileInfo(result.converted.stagedPath).size();
+                            current.durationMs = result.converted.metadata.durationMs;
+                            current.sha256 = result.converted.sha256;
+                            appendLog(QStringLiteral(
+                                "session WAV resampled %1: source_rate=%2 target_rate=%3")
+                                .arg(result.input.name)
+                                .arg(result.converted.sourceSampleRate)
+                                .arg(result.converted.metadata.sampleRate));
+                        }
                         current.sampleRate = result.sampleRate;
-                        current.sampleRateCompatible = result.error.isEmpty() &&
-                            result.sampleRate == expectedSampleRate;
+                        current.sampleRateCompatible = true;
+                    } else if (stillPresent && result.conversionAttempted) {
+                        current.sampleRateCompatible = false;
                     }
                 } else if (result.input.bank >= 0 &&
                            result.input.bank < looperProject_.banks().size()) {
@@ -7054,49 +7092,78 @@ void MainWindow::auditWavCompatibilityForSession(int expectedSampleRate, bool sh
                         if (lane.id == result.input.laneId &&
                             looperAssetAbsolutePath(lane) == result.input.path) {
                             stillPresent = true;
-                            lane.sampleRate = result.sampleRate;
-                            lane.sourceFrames = result.sourceFrames;
-                            lane.sampleRateCompatible = result.error.isEmpty() &&
-                                result.sampleRate == expectedSampleRate;
+                            if (result.error.isEmpty()) {
+                                if (result.converted.resampled) {
+                                    const QString oldHash = lane.assetHash;
+                                    registerTransientTrackWav(result.converted.stagedPath);
+                                    looperWaveformCache_.remove(result.input.path);
+                                    lane.assetPath = result.converted.stagedPath;
+                                    lane.assetHash = result.converted.sha256;
+                                    validatedTrackAssetHashes_.remove(oldHash);
+                                    validatedTrackAssetHashes_.insert(lane.assetHash);
+                                    arrangementConverted = true;
+                                    appendLog(QStringLiteral(
+                                        "session lane resampled %1: source_rate=%2 target_rate=%3")
+                                        .arg(result.input.name)
+                                        .arg(result.converted.sourceSampleRate)
+                                        .arg(result.converted.metadata.sampleRate));
+                                }
+                                lane.sampleRate = result.sampleRate;
+                                lane.sourceFrames = result.sourceFrames;
+                                lane.sampleRateCompatible = true;
+                            } else if (result.conversionAttempted) {
+                                lane.sampleRateCompatible = false;
+                            }
                             break;
                         }
                     }
                 }
-                if (!stillPresent ||
-                    (result.error.isEmpty() && result.sampleRate == expectedSampleRate)) {
+                if (!stillPresent) {
                     continue;
                 }
-                const QString identity = result.input.path + QLatin1Char('|') +
-                    QString::number(expectedSampleRate) + QLatin1Char('|') +
-                    QString::number(result.sampleRate);
-                if (!reportedIncompatibleWavs_.contains(identity) && newlyQuarantined.size() < 8) {
-                    reportedIncompatibleWavs_.insert(identity);
-                    newlyQuarantined.append(result.error.isEmpty()
-                        ? QStringLiteral("%1 - expected %2 Hz, actual %3 Hz")
-                            .arg(result.input.name)
-                            .arg(expectedSampleRate)
-                            .arg(result.sampleRate)
-                        : QStringLiteral("%1 - expected %2 Hz, WAV could not be inspected: %3")
-                            .arg(result.input.name)
-                            .arg(expectedSampleRate)
-                            .arg(result.error));
+                if (!result.error.isEmpty()) {
+                    if (result.conversionAttempted) {
+                        const QString identity = result.input.path + QLatin1Char('|') +
+                            QString::number(expectedSampleRate) + QLatin1Char('|') +
+                            result.error;
+                        if (!reportedIncompatibleWavs_.contains(identity) &&
+                            resamplingFailures.size() < 8) {
+                            reportedIncompatibleWavs_.insert(identity);
+                            resamplingFailures.append(QStringLiteral("%1: %2")
+                                .arg(result.input.name, result.error));
+                        }
+                    } else if (temporarilyUnavailable.size() < 8) {
+                        temporarilyUnavailable.append(
+                            QStringLiteral("%1: %2")
+                                .arg(result.input.name, result.error));
+                    }
+                    continue;
                 }
             }
             while (reportedIncompatibleWavs_.size() > 256) {
                 reportedIncompatibleWavs_.erase(reportedIncompatibleWavs_.begin());
             }
-            lastWavCompatibilityAuditSignature_ = auditSignature;
+            if (temporarilyUnavailable.isEmpty()) {
+                lastWavCompatibilityAuditSignature_ = auditSignature;
+            } else {
+                appendLog(QStringLiteral(
+                    "WAV compatibility audit left transient inspection failures unchanged: %1")
+                    .arg(temporarilyUnavailable.join(QStringLiteral("; "))));
+            }
             refreshLooperLanes();
             updateTrackControls();
             regeneratePreparedMix();
-            if (showModal && !newlyQuarantined.isEmpty()) {
+            if (arrangementConverted && jam2_.isNetworkRunning()) {
+                syncLooperArrangement();
+            }
+            if (showModal && !resamplingFailures.isEmpty()) {
                 QMessageBox::warning(
                     this,
-                    QStringLiteral("WAV Sample-Rate Mismatch"),
+                    QStringLiteral("WAV Resampling Failed"),
                     QStringLiteral(
-                        "These WAVs are quarantined from playback and Track Sync. "
-                        "Unload or replace them with files matching the jam:\n\n") +
-                        newlyQuarantined.join(QStringLiteral("\n")));
+                        "These WAVs could not be converted to the jam sample rate "
+                        "and will remain unavailable until replaced:\n\n") +
+                        resamplingFailures.join(QStringLiteral("\n")));
             }
             if (pendingWavCompatibilityAuditRate_ > 0) {
                 const int pending = pendingWavCompatibilityAuditRate_;
@@ -8242,7 +8309,7 @@ void MainWindow::refreshLooperLanes()
             view.lane.name += QStringLiteral(" [stale]");
         }
         if (!lane.sampleRateCompatible) {
-            view.lane.name += QStringLiteral(" [quarantined: sample-rate mismatch]");
+            view.lane.name += QStringLiteral(" [unavailable: WAV conversion failed]");
         }
         view.assetPath = looperAssetAbsolutePath(lane);
         if (!lane.assetPath.trimmed().isEmpty()) {
@@ -11107,6 +11174,7 @@ void MainWindow::removeSelectedLooperLane()
     const bool armedIncludeMetronome =
         trackRecordingWorkflow_.includeMetronomeInTake();
     looperProject_.removeLane(bankIndex, row);
+    looperWaveformCache_.remove(assetPath);
     if (armedInBank && row == armedLaneIndex) {
         trackRecordingWorkflow_.disarmLane();
         publishLocalTrackRecordingState(QStringLiteral("idle"));
@@ -11903,7 +11971,7 @@ void MainWindow::updateTrackControls()
     if (playTrackButton_) {
         playTrackButton_->setEnabled(trackCompatible);
         playTrackButton_->setToolTip(trackCompatible ? QString{} : QStringLiteral(
-            "This track is quarantined because its sample rate does not match the jam"));
+            "This track is unavailable because WAV conversion failed"));
     }
     if (stopTrackButton_) {
         stopTrackButton_->setEnabled(trackCompatible);
@@ -13222,6 +13290,8 @@ void MainWindow::publishLocalTrackBatch(const QString& requestedBatchId)
         const LooperBank& bank = looperProject_.banks().at(bankIndex);
         for (const LooperLane& lane : bank.lanes) {
             if (lane.localOnly || !lane.sampleRateCompatible || lane.sampleRate <= 0 ||
+                (session.contract.sampleRate > 0 &&
+                 lane.sampleRate != session.contract.sampleRate) ||
                 !isSha256Hex(lane.assetHash) || lane.assetPath.isEmpty() ||
                 tracks.size() >= kMaxLooperTrackContributions) {
                 continue;
@@ -14211,7 +14281,7 @@ void MainWindow::handleSongSet(
             .arg(kMaxLooperAssetRequests));
         return;
     }
-    const QJsonObject song = preserveQuarantinedLocalLanes(normalizedSong);
+    const QJsonObject song = preserveLocalOnlyLanes(normalizedSong);
     const QString assetFolder = QDir(projectPersistence_.workspaceFolder()).absoluteFilePath(QStringLiteral("wavs"));
     const std::uint64_t checkRevision = ++songAssetCheckRevision_;
     auto missing = std::make_shared<QStringList>();
@@ -14477,16 +14547,14 @@ QJsonObject MainWindow::normalizeLooperAssetPaths(QJsonObject song) const
     return song;
 }
 
-QJsonObject MainWindow::preserveQuarantinedLocalLanes(QJsonObject song)
+QJsonObject MainWindow::preserveLocalOnlyLanes(QJsonObject song)
 {
-    const int expectedSampleRate = sessionController_.snapshot().contract.sampleRate;
     const int merged = mergeSynchronizedLooperLanes(song, looperProject_);
-    const int quarantined = mergeQuarantinedLocalLanes(
-        song, looperProject_, expectedSampleRate);
-    const int preserved = merged + quarantined;
+    const int localOnly = mergeLocalOnlyLooperLanes(song, looperProject_);
+    const int preserved = merged + localOnly;
     if (preserved > 0) {
         appendLog(QStringLiteral(
-            "preserved %1 local WAV lane(s) during non-destructive arrangement merge")
+            "preserved %1 local-only WAV lane(s) during arrangement merge")
             .arg(preserved));
     }
     return song;

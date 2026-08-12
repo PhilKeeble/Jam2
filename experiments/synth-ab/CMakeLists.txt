@@ -18,17 +18,12 @@ endif()
 
 find_package(Qt6 REQUIRED COMPONENTS Core)
 
-include("${JAM2_ROOT}/cmake/PrepareDaisySPDrums.cmake")
-jam2_prepare_daisysp_synthbassdrum(
-    "${DAISYSP_ROOT}"
-    JAM2_DAISYSP_SYNTHBASSDRUM_SOURCE)
-
 add_library(daisysp_experiment STATIC
     "${DAISYSP_ROOT}/Source/Control/adsr.cpp"
     "${DAISYSP_ROOT}/Source/Drums/analogbassdrum.cpp"
     "${DAISYSP_ROOT}/Source/Drums/analogsnaredrum.cpp"
     "${DAISYSP_ROOT}/Source/Drums/hihat.cpp"
-    "${JAM2_DAISYSP_SYNTHBASSDRUM_SOURCE}"
+    "${DAISYSP_ROOT}/Source/Drums/synthbassdrum.cpp"
     "${DAISYSP_ROOT}/Source/Drums/synthsnaredrum.cpp"
     "${DAISYSP_ROOT}/Source/Dynamics/crossfade.cpp"
     "${DAISYSP_ROOT}/Source/Effects/chorus.cpp"

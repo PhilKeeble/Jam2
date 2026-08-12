@@ -2543,6 +2543,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                 controllerResult.has_value() &&
                 controllerSourceChord == jam2::practice::generatedChordFingerprint(
                     controllerModel.section(0)) &&
+                jam2::practice::PracticeIdeaController::referenceLayers(
+                    controllerModel.section(1)).chords &&
                 controllerModel.section(1).generatedKind == QStringLiteral("practice") &&
                 controllerModel.section(1).name == QStringLiteral("Continuation of Section A") &&
                 controllerModel.section(1).generatedRecipe.isValid());
@@ -6743,17 +6745,18 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
     }
     {
         LooperProject local;
-        LooperLane incompatible;
-        incompatible.id = QStringLiteral("local-wrong-rate");
-        incompatible.assetPath = QStringLiteral("C:/fixtures/wrong-rate.wav");
-        incompatible.assetHash = QString(64, QLatin1Char('c'));
-        incompatible.name = QStringLiteral("Local 44.1 kHz lane");
-        incompatible.sampleRate = 44100;
-        incompatible.sampleRateCompatible = false;
-        const bool appended = local.appendLane(0, std::move(incompatible));
+        LooperLane localOnly;
+        localOnly.id = QStringLiteral("local-recording");
+        localOnly.assetPath = QStringLiteral("C:/fixtures/local.wav");
+        localOnly.assetHash = QString(64, QLatin1Char('c'));
+        localOnly.name = QStringLiteral("Local recording");
+        localOnly.sampleRate = 48000;
+        localOnly.localOnly = true;
+        localOnly.originKind = QStringLiteral("recorded");
+        const bool appended = local.appendLane(0, std::move(localOnly));
         QJsonObject incoming = BeatGridModel{}.toJson();
         incoming.insert(QStringLiteral("looper"), LooperProject{}.toJson());
-        const int preserved = mergeQuarantinedLocalLanes(incoming, local, 48000);
+        const int preserved = mergeLocalOnlyLooperLanes(incoming, local);
         LooperProject merged;
         const bool loaded = merged.loadJson(incoming.value(QStringLiteral("looper")).toObject());
         if (loaded && !merged.banks().at(0).lanes.isEmpty()) {
@@ -6762,10 +6765,10 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         }
         const QJsonArray syncBanks = merged.toJson(true)
             .value(QStringLiteral("banks")).toArray();
-        record(QStringLiteral("wav.quarantine-preserved-and-excluded-from-sync"),
+        record(QStringLiteral("wav.local-only-preserved-and-excluded-from-sync"),
             appended && preserved == 1 && loaded &&
             merged.banks().at(0).lanes.size() == 1 &&
-            merged.banks().at(0).lanes.at(0).sampleRate == 44100 &&
+            merged.banks().at(0).lanes.at(0).localOnly &&
             syncBanks.at(0).toObject().value(QStringLiteral("lanes")).toArray().isEmpty());
     }
     {
@@ -6795,7 +6798,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             .at(0).toObject().value(QStringLiteral("lanes")).toArray();
         const QJsonObject syncedLane = syncedLanes.isEmpty()
             ? QJsonObject{} : syncedLanes.at(0).toObject();
-        record(QStringLiteral("practice-reference.metadata-syncs-without-local-mix-state"),
+        record(QStringLiteral("practice-reference.authoritative-removal-converges"),
             appended && roundTripped && savedLanes.size() == 1 &&
             savedLanes.at(0).toObject().value(QStringLiteral("local_only")).toBool() &&
             loaded.banks().at(0).lanes.size() == 1 &&
@@ -6804,8 +6807,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             !syncedLane.contains(QStringLiteral("gain_db")) &&
             !syncedLane.contains(QStringLiteral("muted")) &&
             !syncedLane.contains(QStringLiteral("solo")) &&
-            preserved == 1 && mergedLoaded &&
-            merged.banks().at(0).lanes.size() == 1);
+            preserved == 0 && mergedLoaded &&
+            merged.banks().at(0).lanes.isEmpty());
     }
     {
         LooperProject local;

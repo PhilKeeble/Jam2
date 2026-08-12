@@ -282,6 +282,10 @@ std::optional<GeneratedContinuationIdea> PracticeIdeaController::generateContinu
 
     GeneratedContinuationIdea continuation =
         generateContinuationPracticeIdea(source, request);
+    if (!continuation.idea.recipe.isValid() ||
+        !referenceLayers(continuation.idea.chordSection).chords) {
+        return std::nullopt;
+    }
     SongSection combined = continuation.idea.chordSection;
     combined.beats = std::max(
         continuation.idea.chordSection.beats,

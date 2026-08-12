@@ -26,17 +26,12 @@ if(NOT EXISTS "${JAM2_DAISYSP_ROOT}/Source/Drums/synthbassdrum.cpp")
         "configure again.")
 endif()
 
-include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/PrepareDaisySPDrums.cmake")
-jam2_prepare_daisysp_synthbassdrum(
-    "${JAM2_DAISYSP_ROOT}"
-    JAM2_DAISYSP_SYNTHBASSDRUM_SOURCE)
-
 add_library(jam2_daisysp_drums STATIC
     "${JAM2_DAISYSP_ROOT}/Source/Control/adsr.cpp"
     "${JAM2_DAISYSP_ROOT}/Source/Drums/analogbassdrum.cpp"
     "${JAM2_DAISYSP_ROOT}/Source/Drums/analogsnaredrum.cpp"
     "${JAM2_DAISYSP_ROOT}/Source/Drums/hihat.cpp"
-    "${JAM2_DAISYSP_SYNTHBASSDRUM_SOURCE}"
+    "${JAM2_DAISYSP_ROOT}/Source/Drums/synthbassdrum.cpp"
     "${JAM2_DAISYSP_ROOT}/Source/Drums/synthsnaredrum.cpp"
     "${JAM2_DAISYSP_ROOT}/Source/Filters/svf.cpp"
     "${JAM2_DAISYSP_ROOT}/Source/Synthesis/oscillator.cpp"

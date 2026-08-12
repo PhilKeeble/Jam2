@@ -23,6 +23,7 @@
 #include <QMessageBox>
 #include <QPainter>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPushButton>
 #include <QPixmap>
 #include <QPolygonF>
@@ -1624,6 +1625,7 @@ void BeatGridWidget::selectFocusedChordBar(int bar, int chordBeat)
 
 void BeatGridWidget::rebuildChordCards()
 {
+    if (!model_ || model_->sections().isEmpty()) return;
     const int sectionIndex = qBound(0, selectedSection_, model_->sections().size() - 1);
     const SongSection& section = model_->section(sectionIndex);
     const int barCount = qMax(1, (section.beats + beatsPerBar_ - 1) / beatsPerBar_);
@@ -1733,13 +1735,24 @@ void BeatGridWidget::rebuildChordCards()
                     beatLayout->setStretchFactor(beatBox, weight);
                     edit->setToolTip(text.trimmed());
                 });
-            const auto commitChord = [this, sectionIndex, beat, edit] {
-                const QString value = edit->text().trimmed();
-                if (model_->section(sectionIndex).chords.value(beat).trimmed() == value) return;
+            const QPointer<QLineEdit> guardedEdit(edit);
+            const auto commitChord = [this, sectionIndex, beat, guardedEdit] {
+                if (!model_ || guardedEdit.isNull() || sectionIndex < 0 ||
+                    sectionIndex >= model_->sections().size()) {
+                    return;
+                }
+                const SongSection& currentSection = model_->section(sectionIndex);
+                if (beat < 0 || beat >= currentSection.beats) return;
+                const QString value = guardedEdit->text().trimmed();
+                if (currentSection.chords.value(beat).trimmed() == value) return;
                 model_->setCell(sectionIndex, QStringLiteral("chord"), beat, value);
                 selectedChordBeat_ = beat;
                 if (onCellEdited) onCellEdited(
                     sectionIndex, QStringLiteral("chord"), beat, value, model_->revision());
+                if (sectionIndex >= model_->sections().size() ||
+                    beat >= model_->section(sectionIndex).beats) {
+                    return;
+                }
                 const int bar = beat / beatsPerBar_;
                 const SongSection& updatedSection = model_->section(sectionIndex);
                 for (QPushButton* button : authoringContent_->findChildren<QPushButton*>()) {

@@ -430,7 +430,10 @@ int mergeSynchronizedLooperLanes(
                 [&local](const LooperLane& remote) {
                     return !local.id.isEmpty() && remote.id == local.id;
                 });
-            if (!isManagedPracticeReference(local) && !conflictingSameLaneId) {
+            // An incoming authoritative arrangement may deliberately omit a
+            // managed reference. Re-adding every omitted reference here makes
+            // deletions bounce back from another peer indefinitely.
+            if (!conflictingSameLaneId) {
                 continue;
             }
 
@@ -443,10 +446,9 @@ int mergeSynchronizedLooperLanes(
     return preserved;
 }
 
-int mergeQuarantinedLocalLanes(
+int mergeLocalOnlyLooperLanes(
     QJsonObject& song,
-    const LooperProject& localProject,
-    int expectedSampleRate)
+    const LooperProject& localProject)
 {
     LooperProject received;
     const QJsonObject receivedLooper = song.value(QStringLiteral("looper")).toObject();
@@ -456,11 +458,9 @@ int mergeQuarantinedLocalLanes(
          bankIndex < localProject.banks().size() && bankIndex < received.banks().size();
         ++bankIndex) {
         for (const LooperLane& local : localProject.banks().at(bankIndex).lanes) {
-            const bool incompatible =
-                expectedSampleRate > 0 && local.sampleRate != expectedSampleRate;
             if (local.assetPath.trimmed().isEmpty() ||
                 isManagedPracticeReference(local) ||
-                (!local.localOnly && !incompatible)) {
+                !local.localOnly) {
                 continue;
             }
             const bool alreadyPresent = std::any_of(
@@ -470,16 +470,15 @@ int mergeQuarantinedLocalLanes(
                     return !local.assetHash.isEmpty() && candidate.assetHash == local.assetHash;
                 });
             if (alreadyPresent) continue;
-            LooperLane quarantined = local;
+            LooperLane preservedLane = local;
             const bool idCollision = std::any_of(
                 received.banks().at(bankIndex).lanes.cbegin(),
                 received.banks().at(bankIndex).lanes.cend(),
-                [&quarantined](const LooperLane& candidate) {
-                    return !quarantined.id.isEmpty() && candidate.id == quarantined.id;
+                [&preservedLane](const LooperLane& candidate) {
+                    return !preservedLane.id.isEmpty() && candidate.id == preservedLane.id;
                 });
-            if (idCollision) quarantined.id.clear();
-            if (incompatible) quarantined.sampleRateCompatible = false;
-            if (received.appendLane(bankIndex, std::move(quarantined))) ++preserved;
+            if (idCollision) preservedLane.id.clear();
+            if (received.appendLane(bankIndex, std::move(preservedLane))) ++preserved;
         }
     }
     if (preserved > 0) song.insert(QStringLiteral("looper"), received.toJson());

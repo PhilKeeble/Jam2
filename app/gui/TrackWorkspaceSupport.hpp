@@ -37,10 +37,9 @@ StagedPcm16Asset stagePcm16Asset(
 int mergeSynchronizedLooperLanes(
     QJsonObject& song,
     const LooperProject& localProject);
-int mergeQuarantinedLocalLanes(
+int mergeLocalOnlyLooperLanes(
     QJsonObject& song,
-    const LooperProject& localProject,
-    int expectedSampleRate);
+    const LooperProject& localProject);
 QJsonObject mergeConcurrentLooperMetadata(
     const QJsonObject& baseSong,
     const QJsonObject& currentSong,
