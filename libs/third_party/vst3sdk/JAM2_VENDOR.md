@@ -15,9 +15,9 @@ Pinned revisions:
 
 Jam2 integration changes:
 
-- The aggregate repository's nested Git metadata and VSTGUI checkout are
-  intentionally omitted. Upstream sample/reference sources remain in the
-  vendor tree for review, but Jam2 does not configure, compile, or ship them.
+- The aggregate repository's nested Git metadata, VSTGUI checkout, sample
+  applications, and usage-guide PDF are intentionally omitted. Remaining
+  upstream reference/test sources are not configured, compiled, or shipped.
 - Jam2 lists the required SDK translation units explicitly in its own CMake
   target. It does not execute or patch around an upstream build system.
 - Jam2-specific hosting, process isolation, IPC, MIDI/MPE translation, editor
@@ -30,6 +30,10 @@ Jam2 integration changes:
   tolerates delayed factory class registration for up to 500 ms at the
   non-real-time scan/load boundary, and avoids undefined `back()` access when
   a malformed factory advertises a class but rejects every metadata query.
+- Jam2 compiles `public.sdk/source/vst/hosting/module_mac.mm` with Objective-C
+  ARC, as required by the maintained upstream source. The flag is scoped to
+  that translation unit rather than changing ownership semantics for Jam2's
+  own Objective-C++ sources.
 - Unused plug-in examples and wrapper sources remain outside Jam2 build
   targets and are not shipped with the application.
 

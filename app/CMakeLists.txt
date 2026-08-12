@@ -55,9 +55,17 @@ if(WIN32)
         "${JAM2_VST3SDK_ROOT}/public.sdk/source/vst/hosting/module_win32.cpp")
 elseif(APPLE)
     enable_language(OBJCXX)
+    set(JAM2_VST3SDK_MAC_MODULE
+        "${JAM2_VST3SDK_ROOT}/public.sdk/source/vst/hosting/module_mac.mm")
     list(APPEND JAM2_VST3SDK_SOURCES
         "${JAM2_VST3SDK_ROOT}/public.sdk/source/common/threadchecker_mac.mm"
-        "${JAM2_VST3SDK_ROOT}/public.sdk/source/vst/hosting/module_mac.mm")
+        "${JAM2_VST3SDK_MAC_MODULE}")
+    # Steinberg's macOS module loader uses ARC by contract and deliberately
+    # rejects non-ARC compilation. Keep ARC scoped to that maintained SDK
+    # translation unit; Jam2's editor host retains its explicit RAII/manual
+    # ownership model.
+    set_source_files_properties("${JAM2_VST3SDK_MAC_MODULE}" PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc")
 endif()
 add_library(jam2_vst3sdk STATIC ${JAM2_VST3SDK_SOURCES})
 target_compile_features(jam2_vst3sdk PUBLIC cxx_std_20)
