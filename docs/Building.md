@@ -2,6 +2,25 @@
 
 Jam2 uses host-native CMake builds. Docker is not part of the normal development workflow because the audio paths must be validated against the host ASIO or CoreAudio driver stack.
 
+## Updating the Source Checkout
+
+Jam2 tracks its model and ONNX Runtime binaries with Git LFS. Before building
+an existing checkout, update the current branch and download its LFS objects
+with the platform script:
+
+```powershell
+.\update.ps1
+```
+
+```bash
+bash ./update.sh
+```
+
+The scripts install or configure Git LFS when needed, use a fast-forward-only
+Git pull, download and verify the current LFS objects, and preserve existing
+local changes. They stop with an error instead of automatically merging a
+diverged branch or discarding local work.
+
 ## Windows
 
 Required tools:

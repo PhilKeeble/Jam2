@@ -10,8 +10,6 @@ gui/mainwindow keeps getting bloated as default choice, refactor again later to 
 
 test benchmark, validate, stress and get logs for localhost and mac 
 
-Look into what makes the generation of the wavs take a while and see if we can make that more efficient 
-
 make tooltips more conssitent across the app
 
 clear idea renamed to be more representative that its clearing the views across all sections but not track view? 
@@ -23,11 +21,7 @@ add a copy and paste bar option in the beat and chord views for quicker work
 allow export to midi option 
 consider allowing midi / mpe input on tracks and allowing plugins for a more daw like experience if people want to build loops to jam on
 
-look into why daisy drums has its own cmake, think its leftover stuff
-
 Make a jamjar collection repo to store full songs and jams 
-
-CPU of jamtaster worker sitting very high during analysis, much higher than during testing 
 
 ## Bugs
 
