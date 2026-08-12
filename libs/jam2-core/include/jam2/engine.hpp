@@ -264,6 +264,7 @@ struct EngineSnapshot {
     long input_latency_frames = 0;
     long output_latency_frames = 0;
     std::int64_t recording_latency_adjustment_frames = 0;
+    std::uint64_t recording_source_latency_frames = 0;
     std::uint64_t recording_latency_compensation_frames = 0;
     bool playback_prefilled = false;
     std::size_t capture_ring_capacity_frames = 0;

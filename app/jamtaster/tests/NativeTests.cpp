@@ -188,42 +188,54 @@ void testNativeStretchLength()
         "bar-anchored stretch must retain audio across its join");
 }
 
-void testPartialRecordingLateSectionChange()
+void testSectionSplittingRequiresLongRecording()
 {
     using namespace jamtaster::native;
-    Analysis analysis;
-    analysis.beatsPerBar = 4;
-    constexpr int barCount = 12;
     constexpr double beatSeconds = 0.5;
     constexpr double barSeconds = beatSeconds * 4.0;
 
-    // Include the final downbeat so twelve complete bars are available.
-    for (int beat = 0; beat <= barCount * analysis.beatsPerBar; ++beat)
-        analysis.beats.push_back(beat * beatSeconds);
-    for (int bar = 0; bar <= barCount; ++bar)
-        analysis.downbeats.push_back(bar * barSeconds);
-
-    // This is an excerpt with a real transition at bar nine and only three bars
-    // after it. Chord, groove and bass evidence all change at the same downbeat.
-    for (int bar = 0; bar < barCount; ++bar) {
-        const double start = bar * barSeconds;
-        const bool secondPattern = bar >= 9;
-        analysis.chords.push_back({start, start + barSeconds,
-            secondPattern ? "C" : "Am", 1.0});
-        analysis.bass.push_back({start, start + 0.4,
-            secondPattern ? 48 : 45, 100, 1.0});
-        for (int beat = 0; beat < analysis.beatsPerBar; ++beat) {
-            analysis.drums.push_back({start + beat * beatSeconds,
-                secondPattern ? "Ride" : "HiHat", 100, 1.0, 1.0, "test"});
+    const auto analysisWithChange = [&](int barCount, int transitionBar) {
+        Analysis analysis;
+        analysis.beatsPerBar = 4;
+        for (int beat = 0; beat <= barCount * analysis.beatsPerBar; ++beat)
+            analysis.beats.push_back(beat * beatSeconds);
+        for (int bar = 0; bar <= barCount; ++bar)
+            analysis.downbeats.push_back(bar * barSeconds);
+        for (int bar = 0; bar < barCount; ++bar) {
+            const double start = bar * barSeconds;
+            const bool secondPattern = bar >= transitionBar;
+            analysis.chords.push_back({start, start + barSeconds,
+                secondPattern ? "C" : "Am", 1.0});
+            analysis.bass.push_back({start, start + 0.4,
+                secondPattern ? 48 : 45, 100, 1.0});
+            for (int beat = 0; beat < analysis.beatsPerBar; ++beat) {
+                analysis.drums.push_back({start + beat * beatSeconds,
+                    secondPattern ? "Ride" : "HiHat", 100, 1.0, 1.0, "test"});
+            }
         }
-    }
+        return analysis;
+    };
 
-    const auto sections = inferSongSections(analysis, barCount * barSeconds, {});
-    require(sections.size() == 2, "partial recording should have one late section change");
-    require(std::abs(sections.front().end - 9.0 * barSeconds) < 1.0e-9,
-        "late section change must follow evidence rather than an assumed outro length");
-    require(std::abs(sections.back().start - 9.0 * barSeconds) < 1.0e-9,
-        "late section must start on its detected downbeat");
+    const auto shortSections = inferSongSections(
+        analysisWithChange(6, 3), 6 * barSeconds, {});
+    require(shortSections.size() == 1 && shortSections.front().start == 0.0 &&
+        std::abs(shortSections.front().end - 6 * barSeconds) < 1.0e-9,
+        "six-bar Jam2 performance must remain one full section");
+
+    const auto thresholdSections = inferSongSections(
+        analysisWithChange(32, 16), 32 * barSeconds, {});
+    require(thresholdSections.size() == 1,
+        "thirty-two-bar recording must remain one section");
+
+    constexpr int longBars = 33;
+    constexpr int transitionBar = 20;
+    const auto longSections = inferSongSections(
+        analysisWithChange(longBars, transitionBar), longBars * barSeconds, {});
+    require(longSections.size() == 2,
+        "recording above thirty-two bars remains eligible for section splitting");
+    require(std::abs(longSections.front().end - transitionBar * barSeconds) < 1.0e-9 &&
+        std::abs(longSections.back().start - transitionBar * barSeconds) < 1.0e-9,
+        "long recording section split must follow measured musical change");
 }
 
 #if JAMTASTER_NATIVE_HAS_DEMUCS
@@ -290,7 +302,7 @@ int main()
         testWavRoundTrip();
         testPipelineUtilities();
         testNativeStretchLength();
-        testPartialRecordingLateSectionChange();
+        testSectionSplittingRequiresLongRecording();
 #if JAMTASTER_NATIVE_HAS_DEMUCS
         testDemucsStftRoundTrip();
 #endif

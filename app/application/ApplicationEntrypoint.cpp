@@ -222,6 +222,14 @@ void applyCustomTheme(QApplication& app)
         QPushButton#TempoButton {
             color: #f0ede4; font-family: Georgia; font-size: 12pt; padding: 2px 8px;
         }
+        QCheckBox#PlaybackCountIn {
+            color: #c7cfcd; background: transparent; border: 0;
+            font-family: Bahnschrift; font-size: 7.5pt; padding: 0; spacing: 5px;
+            min-height: 13px; max-height: 15px;
+        }
+        QCheckBox#PlaybackCountIn::indicator {
+            width: 15px; height: 15px;
+        }
         QLabel#PerformancePosition {
             color: #e8a44a; font-family: Bahnschrift; font-size: 12pt;
             font-weight: 600; padding: 0 8px;
@@ -232,6 +240,42 @@ void applyCustomTheme(QApplication& app)
         QLabel#StripTitle {
             color: #9ca9ab; font-family: Bahnschrift; font-size: 8.5pt;
             letter-spacing: 1px;
+        }
+        QPushButton#LocalAudioTag, QPushButton#LocalMidiTag,
+        QPushButton#LocalPluginsTag, QPushButton#LocalBypassTag {
+            background: transparent; border-radius: 3px; font-family: Bahnschrift;
+            font-size: 7.5pt; font-weight: 600; padding: 2px 7px;
+            min-height: 16px; max-height: 20px;
+        }
+        QPushButton#LocalAudioTag {
+            color: #ffd68e; border: 1px solid #b98036;
+        }
+        QPushButton#LocalAudioTag:hover {
+            color: #fff4df; background: #302317; border-color: #e8a44a;
+        }
+        QPushButton#LocalMidiTag {
+            color: #8ce7e1; border: 1px solid #438c89;
+        }
+        QPushButton#LocalMidiTag:hover {
+            color: #e9fffc; background: #193031; border-color: #66d4cf;
+        }
+        QPushButton#LocalPluginsTag {
+            color: #d5b4f1; border: 1px solid #76539a;
+        }
+        QPushButton#LocalPluginsTag:hover {
+            color: #f5eaff; background: #2c2137; border-color: #a46fda;
+        }
+        QPushButton#LocalBypassTag {
+            color: #c8d1cf; border: 1px solid #526368;
+        }
+        QPushButton#LocalBypassTag:hover {
+            color: #ffffff; background: #252e30; border-color: #86999d;
+        }
+        QPushButton#LocalBypassTag:checked {
+            color: #ffd8df; background: #441827; border-color: #e14975;
+        }
+        QPushButton#LocalBypassTag:disabled {
+            color: #596568; background: transparent; border-color: #2f3a3c;
         }
         QLabel#BankStripLabel {
             color: #9ca9ab; background: transparent; font-family: Bahnschrift;
@@ -361,6 +405,23 @@ void applyCustomTheme(QApplication& app)
             background: transparent; border: 0; padding: 2px 0; spacing: 7px;
             min-height: 24px;
         }
+        QDialog QRadioButton::indicator {
+            width: 16px; height: 16px; border-radius: 8px;
+            background: #182022; border: 2px solid #71878a;
+        }
+        QDialog QRadioButton::indicator:hover {
+            background: #202a2c; border-color: #d8bf91;
+        }
+        QDialog QRadioButton::indicator:checked {
+            width: 6px; height: 6px; border-radius: 8px;
+            background: #e8a44a; border: 5px solid #182022;
+        }
+        QDialog QRadioButton::indicator:checked:hover {
+            background: #ffd68e; border-color: #202a2c;
+        }
+        QDialog QRadioButton::indicator:disabled {
+            background: #171e1f; border-color: #3b4749;
+        }
         QProgressBar#JamTasterProgress {
             background: #182022; color: #f4ead8;
             border: 1px solid #465658; border-radius: 4px;
@@ -434,6 +495,23 @@ void applyCustomTheme(QApplication& app)
         QDialog QLineEdit:disabled, QDialog QAbstractSpinBox:disabled,
         QDialog QComboBox:disabled {
             color: #718082; border-color: #303b3d; background: #171e1f;
+        }
+        QDialog QPushButton#PluginBypassAction:checked {
+            color: #fff4df; background: #7a4d11;
+            border: 2px solid #e8a44a;
+        }
+        QDialog QPushButton#PluginBypassAction:focus:!checked {
+            color: #eee4d1; background: #202b2d;
+            border: 2px solid #ffd68e;
+        }
+        QDialog QPushButton#PluginRemoveAction {
+            color: #ffd8df; background: #35141f; border-color: #9f294b;
+        }
+        QDialog QPushButton#PluginRemoveAction:hover {
+            color: #ffffff; background: #571b30; border-color: #e14975;
+        }
+        QDialog QPushButton#PluginRemoveAction:disabled {
+            color: #775d65; background: #24171b; border-color: #483039;
         }
         QDialog QDialogButtonBox {
             border-top: 1px solid #253133; padding-top: 10px;

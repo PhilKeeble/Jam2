@@ -240,7 +240,8 @@ void mix_metronome_output(
     const bool transport_gated =
         control.metronome_transport_gated.load(std::memory_order_relaxed);
     const bool output_allowed = audio::metronome_output_allowed(
-        control.metronome_enabled.load(std::memory_order_relaxed),
+        control.metronome_enabled.load(std::memory_order_relaxed) ||
+            control.playback_count_in_active.load(std::memory_order_relaxed),
         local_click_suppressed,
         transport_gated,
         control.transport_playback_active.load(std::memory_order_relaxed),
@@ -285,6 +286,9 @@ void mix_metronome_output(
     for (std::size_t index = 0; index < output.size(); ++index) {
         const std::uint64_t raw_frame =
             callback_frame + static_cast<std::uint64_t>(index);
+        if (count_in_active && raw_frame < count_in_start) {
+            continue;
+        }
         std::uint64_t frame = raw_frame;
         if (render_offset < 0) {
             const std::uint64_t magnitude = static_cast<std::uint64_t>(-(render_offset + 1)) + 1ULL;
@@ -537,9 +541,13 @@ private:
                 }
                 track_take_recorder_->record(callback_frame, inputs_mix_scratch_);
             } else {
-                const std::uint64_t compensation =
+                std::uint64_t compensation =
                     control_.recording_latency_compensation_frames.load(
                         std::memory_order_relaxed);
+                if (control_.input_source_router != nullptr) {
+                    compensation += static_cast<std::uint64_t>(
+                        control_.input_source_router->recording_latency_frames());
+                }
                 track_take_recorder_->record(
                     callback_frame > compensation ? callback_frame - compensation : 0ULL,
                     capture_scratch_);
@@ -990,6 +998,7 @@ struct Engine::Impl {
                 return false;
             }
             control->recording_count_in_active.store(false, std::memory_order_release);
+            control->playback_count_in_active.store(false, std::memory_order_release);
             control->recording_count_in_start_frame.store(
                 command.transport_countdown_start_frame,
                 std::memory_order_relaxed);
@@ -997,7 +1006,12 @@ struct Engine::Impl {
                 command.transport_target_frame,
                 std::memory_order_relaxed);
             control->recording_count_in_active.store(
-                command.transport_action == EngineTransportAction::RecordStart &&
+                (command.transport_action == EngineTransportAction::RecordStart ||
+                 command.transport_action == EngineTransportAction::TrackRestart) &&
+                    command.transport_countdown_start_frame < command.transport_target_frame,
+                std::memory_order_release);
+            control->playback_count_in_active.store(
+                command.transport_action == EngineTransportAction::TrackRestart &&
                     command.transport_countdown_start_frame < command.transport_target_frame,
                 std::memory_order_release);
             transport_target_frame.store(command.transport_target_frame, std::memory_order_relaxed);
@@ -1023,6 +1037,7 @@ struct Engine::Impl {
             control->metronome_pattern_scheduled_origin_raw_frame.store(
                 0, std::memory_order_release);
             control->recording_count_in_active.store(false, std::memory_order_release);
+            control->playback_count_in_active.store(false, std::memory_order_release);
             transport_pending.store(false, std::memory_order_release);
             transport_action.store(EngineTransportAction::None, std::memory_order_relaxed);
             transport_cookie.store(0, std::memory_order_relaxed);
@@ -1201,6 +1216,7 @@ struct Engine::Impl {
         }
         transport_pending.store(false, std::memory_order_release);
         control->recording_count_in_active.store(false, std::memory_order_release);
+        control->playback_count_in_active.store(false, std::memory_order_release);
         const EngineTransportAction action =
             transport_action.load(std::memory_order_relaxed);
         if (action == EngineTransportAction::TrackRestart ||
@@ -1690,8 +1706,13 @@ EngineSnapshot Engine::snapshot() const noexcept
         result.output_latency_frames = impl_->stream_info.output_latency_frames;
         result.recording_latency_adjustment_frames =
             control.recording_latency_adjustment_frames.load(std::memory_order_relaxed);
+        result.recording_source_latency_frames = impl_->config.input_source_router != nullptr
+            ? static_cast<std::uint64_t>(
+                impl_->config.input_source_router->recording_latency_frames())
+            : 0ULL;
         result.recording_latency_compensation_frames =
-            control.recording_latency_compensation_frames.load(std::memory_order_relaxed);
+            control.recording_latency_compensation_frames.load(std::memory_order_relaxed) +
+            result.recording_source_latency_frames;
         result.callbacks = impl_->stream->callbacks();
         result.playback_prefilled = impl_->stream->playback_prefilled();
         result.callback_timing = impl_->stream->callback_timing_stats();

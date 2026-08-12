@@ -112,6 +112,8 @@ bool InputSourceRouter::process(
     std::fill(mix_scratch_.begin(), mix_scratch_.begin() + frames, 0);
     recording_source_ready_.store(false, std::memory_order_relaxed);
     const std::size_t recording_slot = recording_slot_.load(std::memory_order_acquire);
+    std::size_t selected_recording_latency = 0;
+    std::size_t combined_recording_latency = 0;
     std::size_t rendered_sources = 0;
     for (std::size_t slot_index = 0; slot_index < slots_.size(); ++slot_index) {
         Slot& source = slots_[slot_index];
@@ -139,6 +141,9 @@ bool InputSourceRouter::process(
 
         bool rendered = false;
         InputSourceRenderer* renderer = source.renderer.load(std::memory_order_acquire);
+        const std::size_t source_latency = renderer != nullptr
+            ? renderer->latency_frames(frames)
+            : 0;
         if (renderer != nullptr) {
             std::fill(source_scratch_.begin(), source_scratch_.begin() + frames, 0);
             rendered = renderer->render_mono(
@@ -177,8 +182,18 @@ bool InputSourceRouter::process(
         }
         if (slot_index == recording_slot)
             recording_source_ready_.store(true, std::memory_order_release);
-        if (included) ++rendered_sources;
+        if (slot_index == recording_slot) selected_recording_latency = source_latency;
+        if (included) {
+            combined_recording_latency = std::max(combined_recording_latency, source_latency);
+            ++rendered_sources;
+        }
     }
+
+    recording_latency_frames_.store(
+        recording_slot == kCombinedInputSources
+            ? combined_recording_latency
+            : selected_recording_latency,
+        std::memory_order_relaxed);
 
     std::uint64_t absolute_peak = 0;
     const std::int64_t divisor = static_cast<std::int64_t>(std::max<std::size_t>(1, rendered_sources));

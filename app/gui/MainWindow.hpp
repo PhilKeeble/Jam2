@@ -454,15 +454,18 @@ private:
     void generateSession();
     void showAudioInputSources();
     void showMidiInputSources();
+    void showInputPlugins();
     void refreshInputSourceRouting();
     void updateInputSourceButtons();
     using PluginStartCallback = std::function<void(
         std::unique_ptr<jam2::pluginhost::PluginHostService>, const QString&)>;
+    using PluginLoadProgressCallback = std::function<void(int, const QString&)>;
     bool selectAndStartPluginAsync(
         std::size_t slot,
         jam2::audio::InputSourceKind kind,
         jam2::midi::EventQueue* midiQueue,
-        PluginStartCallback completion);
+        PluginStartCallback completion,
+        PluginLoadProgressCallback progress);
     void removeAudioPlugin(std::size_t slot);
     void retirePluginHost(std::unique_ptr<jam2::pluginhost::PluginHostService> host);
 
@@ -709,6 +712,7 @@ private:
     QPushButton* performanceTrackToggle_ = nullptr;
     QPushButton* performanceMetronomeToggle_ = nullptr;
     QPushButton* performanceTempoButton_ = nullptr;
+    QCheckBox* performanceCountInCheck_ = nullptr;
     QLabel* performancePositionLabel_ = nullptr;
     QLineEdit* detailPositionLabel_ = nullptr;
     QSlider* selectedPeerGainSlider_ = nullptr;
@@ -719,6 +723,7 @@ private:
     QWidget* performanceLocalControls_ = nullptr;
     QPushButton* performanceAudioInputsButton_ = nullptr;
     QPushButton* performanceMidiInputsButton_ = nullptr;
+    QPushButton* performancePluginsButton_ = nullptr;
     QPushButton* performancePluginBypassButton_ = nullptr;
     QWidget* performancePeerControls_ = nullptr;
     QWidget* performanceMasterOutputControls_ = nullptr;

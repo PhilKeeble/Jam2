@@ -367,7 +367,9 @@ void mix_metronome_click(DuplexContext& context, std::span<std::int32_t> output,
     if (metronome_stem.size() == output.size()) {
         std::fill(metronome_stem.begin(), metronome_stem.end(), 0);
     }
-    const bool enabled = context.control->metronome_enabled.load(std::memory_order_relaxed);
+    const bool enabled =
+        context.control->metronome_enabled.load(std::memory_order_relaxed) ||
+        context.control->playback_count_in_active.load(std::memory_order_relaxed);
     const bool transport_gated =
         context.control->metronome_transport_gated.load(std::memory_order_relaxed);
     const bool local_click_suppressed =
@@ -416,6 +418,9 @@ void mix_metronome_click(DuplexContext& context, std::span<std::int32_t> output,
     for (std::size_t i = 0; i < output.size(); ++i) {
         const std::uint64_t raw_sample_counter =
             context.engine_frame_counter + static_cast<std::uint64_t>(i);
+        if (count_in_active && raw_sample_counter < count_in_start) {
+            continue;
+        }
         std::uint64_t render_sample_counter = raw_sample_counter;
         if (render_offset_frames < 0) {
             const std::uint64_t offset = static_cast<std::uint64_t>(-render_offset_frames);
@@ -960,9 +965,14 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
                     std::span<const std::int32_t>(
                         context->recorder_inputs_mix_scratch.data(), playback.size()));
             } else {
-                const std::uint64_t compensation = context->control != nullptr
+                std::uint64_t compensation = context->control != nullptr
                     ? context->control->recording_latency_compensation_frames.load(std::memory_order_relaxed)
                     : 0ULL;
+                if (context->control != nullptr &&
+                    context->control->input_source_router != nullptr) {
+                    compensation += static_cast<std::uint64_t>(
+                        context->control->input_source_router->recording_latency_frames());
+                }
                 const std::uint64_t capture_frame_start = audio_frame_start > compensation
                     ? audio_frame_start - compensation
                     : 0ULL;

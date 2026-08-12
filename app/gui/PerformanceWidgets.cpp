@@ -1155,7 +1155,7 @@ QString PerformanceHomeWidget::chordAt(const SongPosition& position) const
     for (quint64 distance = 0; distance < position.totalBeats; ++distance) {
         const quint64 candidateBeat =
             (position.songBeat + position.totalBeats - distance) % position.totalBeats;
-        const SongPosition candidate = songPositionFromSongBeat(candidateBeat);
+        const SongPosition candidate = songPositionForBankBeat(position.section, candidateBeat);
         const QString value =
             model_->section(candidate.section).chords.value(candidate.sectionBeat).trimmed();
         if (value == QStringLiteral("-")) {
@@ -1175,12 +1175,18 @@ QVector<QPair<QString, QString>> PerformanceHomeWidget::upcomingChords(
     if (model_ == nullptr || position.totalBeats == 0) {
         return result;
     }
-    QString previous = chordAt(position);
-    const quint64 pendingBeats = model_ != nullptr && pendingBank_ >= 0
+    const quint64 liveBeatsPerBar = static_cast<quint64>(qMax(1, beatsPerBar_));
+    const quint64 pendingBeats = pendingBank_ >= 0
         ? static_cast<quint64>(qMax(0, model_->section(
             qBound(0, pendingBank_, model_->sections().size() - 1)).beats))
         : 0;
-    const quint64 searchBeats = position.totalBeats + pendingBeats;
+    const quint64 largestBeatsPerBar = qMax(
+        liveBeatsPerBar,
+        static_cast<quint64>(qMax(1, pendingBankBeatsPerBar_)));
+    const quint64 searchBeats =
+        position.totalBeats + pendingBeats + 3 * largestBeatsPerBar;
+    QString previous = chordAt(position);
+    bool wasAfterSwitch = false;
     for (quint64 distance = 1;
          distance <= searchBeats && result.size() < 3;
          ++distance) {
@@ -1191,24 +1197,35 @@ QVector<QPair<QString, QString>> PerformanceHomeWidget::upcomingChords(
                 pendingBank_, distance - pendingBankBeatsRemaining_)
             : songPositionFromSongBeat(
                 (position.songBeat + distance) % position.totalBeats);
-        QString value =
+        const int locationBeatsPerBar = qMax(
+            1, afterSwitch ? pendingBankBeatsPerBar_ : beatsPerBar_);
+        const QString authoredChord =
             model_->section(candidate.section).chords.value(candidate.sectionBeat).trimmed();
-        if (value.isEmpty()) {
-            continue;
+        QString value = previous;
+        if (afterSwitch && !wasAfterSwitch) {
+            value = chordAt(candidate);
         }
-        if (value == QStringLiteral("-")) {
+        if (authoredChord == QStringLiteral("-")) {
             value = QStringLiteral("—");
+        } else if (!authoredChord.isEmpty()) {
+            value = authoredChord;
         }
-        if (value == previous) {
+        const bool chordChanged = value != previous;
+        const bool startsBar =
+            candidate.songBeat % static_cast<quint64>(locationBeatsPerBar) == 0;
+        const bool entersDifferentBankChord = afterSwitch && !wasAfterSwitch && chordChanged;
+        if (!startsBar && !entersDifferentBankChord &&
+            (authoredChord.isEmpty() || !chordChanged)) {
+            previous = value;
+            wasAfterSwitch = afterSwitch;
             continue;
         }
-        const int locationBeatsPerBar = afterSwitch
-            ? pendingBankBeatsPerBar_ : beatsPerBar_;
         const QString location = QStringLiteral("%1.%2")
             .arg(candidate.songBeat / static_cast<quint64>(locationBeatsPerBar) + 1)
             .arg(candidate.songBeat % static_cast<quint64>(locationBeatsPerBar) + 1);
         result.push_back({value, location});
         previous = value;
+        wasAfterSwitch = afterSwitch;
     }
     return result;
 }

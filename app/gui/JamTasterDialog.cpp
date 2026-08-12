@@ -179,7 +179,10 @@ JamTasterDialog::JamTasterDialog(
         }
     });
 
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
+    auto* footer = new QWidget(this);
+    auto* footerLayout = new QHBoxLayout(footer);
+    footerLayout->setContentsMargins(18, 8, 18, 14);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, footer);
     cancelTaskButton_ = buttons->addButton(
         QStringLiteral("Cancel Task"), QDialogButtonBox::ActionRole);
     connect(cancelTaskButton_, &QPushButton::clicked,
@@ -194,7 +197,8 @@ JamTasterDialog::JamTasterDialog(
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
     outer->addWidget(scroll, 1);
-    outer->addWidget(buttons);
+    footerLayout->addWidget(buttons);
+    outer->addWidget(footer);
 
     JamTasterService::Observer observer;
     observer.jobStarted = [this](const QString&) {

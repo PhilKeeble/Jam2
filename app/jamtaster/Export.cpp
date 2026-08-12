@@ -287,7 +287,7 @@ Json analysisJson(const Analysis& analysis,const std::vector<SectionChoice>& sec
     const std::string& sourceHash,int sampleRate,std::size_t frames,int channels,
     const Json& quantization)
 {
-    Json root=Json::object(); root["format"]="jamtaster-analysis-v1"; root["engine"]="native";
+    Json root=Json::object(); root["format"]=std::string(kAnalysisFormat); root["engine"]="native";
     Json inputValue=Json::object();inputValue["path"]=input.generic_string();inputValue["sha256"]=sourceHash;
     inputValue["sample_rate"]=sampleRate;inputValue["frames"]=frames;inputValue["channels"]=channels;
     inputValue["duration_seconds"]=sampleRate>0?static_cast<double>(frames)/sampleRate:0.0;

@@ -15,6 +15,8 @@ Make docker compose that will build on windows / mac / linux, ship back into fol
 maybe binary doesnt have validate etc in it and thats only debug builds? on release i spawn container for windows and mac and then build debug, run all validation checks, then pass on to build release and package them up into dist/ for easy release ?
 
 website and youtube videos 
+discord server for community feedback / testing / logs etc?
+Make a jamjar collection repo to store full songs and jams 
 
 ## refinement pass
 

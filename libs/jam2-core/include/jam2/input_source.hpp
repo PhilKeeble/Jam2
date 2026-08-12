@@ -35,6 +35,11 @@ public:
     virtual bool render_mono(
         const InputSourceRenderRequest& request,
         std::span<std::int32_t> output) noexcept = 0;
+    virtual std::size_t latency_frames(std::size_t block_frames) const noexcept
+    {
+        (void)block_frames;
+        return 0;
+    }
 };
 
 struct InputSourceConfiguration {
@@ -67,6 +72,10 @@ public:
     // false when recording should use the combined canonical output.
     bool copy_recording_source(
         std::size_t frames, std::span<std::int32_t> output) const noexcept;
+    std::size_t recording_latency_frames() const noexcept
+    {
+        return recording_latency_frames_.load(std::memory_order_relaxed);
+    }
 
     // physical_inputs contains one planar Int32LSB pointer for every selected
     // engine channel. Missing pointers are treated as silence. The result is
@@ -103,6 +112,7 @@ private:
     std::vector<std::int32_t> recording_scratch_;
     std::atomic<std::size_t> recording_slot_{kCombinedInputSources};
     std::atomic<bool> recording_source_ready_{false};
+    std::atomic<std::size_t> recording_latency_frames_{0};
     std::atomic<std::uint64_t> rendered_blocks_{0};
     std::atomic<std::uint64_t> renderer_failures_{0};
     std::atomic<std::uint64_t> invalid_configurations_{0};

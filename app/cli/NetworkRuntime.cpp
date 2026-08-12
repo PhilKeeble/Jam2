@@ -640,24 +640,28 @@ struct TransportPayload {
     std::uint32_t event_counter = 0;
     std::uint32_t grid_revision = 0;
     std::uint64_t target_sender_frame = 0;
+    std::uint64_t countdown_start_sender_frame = 0;
 };
 
-std::array<std::uint8_t, 20> encode_transport_payload(const TransportPayload& value)
+std::array<std::uint8_t, 28> encode_transport_payload(const TransportPayload& value)
 {
-    std::array<std::uint8_t, 20> payload{};
-    payload[0] = 1;
+    std::array<std::uint8_t, 28> payload{};
+    payload[0] = 2;
     payload[1] = static_cast<std::uint8_t>(value.action);
     const std::uint64_t identity =
         (static_cast<std::uint64_t>(value.grid_revision) << 32U) |
         static_cast<std::uint64_t>(value.event_counter);
     write_u64_le(std::span<std::uint8_t>(payload), 4, identity);
     write_u64_le(std::span<std::uint8_t>(payload), 12, value.target_sender_frame);
+    write_u64_le(
+        std::span<std::uint8_t>(payload), 20, value.countdown_start_sender_frame);
     return payload;
 }
 
 TransportPayload decode_transport_payload(std::span<const std::uint8_t> payload)
 {
-    if (payload.size() != 20 || payload[0] != 1) {
+    const bool legacy = payload.size() == 20 && payload[0] == 1;
+    if (!legacy && (payload.size() != 28 || payload[0] != 2)) {
         throw std::runtime_error("transport payload size or version mismatch");
     }
     const std::uint64_t identity = read_u64_le(payload, 4);
@@ -674,6 +678,7 @@ TransportPayload decode_transport_payload(std::span<const std::uint8_t> payload)
         static_cast<std::uint32_t>(identity & 0xffffffffULL),
         static_cast<std::uint32_t>(identity >> 32U),
         read_u64_le(payload, 12),
+        legacy ? read_u64_le(payload, 12) : read_u64_le(payload, 20),
     };
 }
 
@@ -3023,11 +3028,15 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
 
         std::uint64_t network_transport_revision = 0;
         std::uint64_t transport_target = 0;
+        std::uint64_t transport_countdown_start = 0;
         int transport_action = 0;
         {
             std::lock_guard<std::mutex> lock(commands.state.transport_mutex);
             network_transport_revision = commands.state.transport_network_revision.load(std::memory_order_relaxed);
             transport_target = commands.state.transport_network_target_raw_frame.load(std::memory_order_relaxed);
+            transport_countdown_start =
+                commands.state.transport_countdown_start_frame.load(
+                    std::memory_order_relaxed);
             transport_action = commands.state.transport_network_action.load(std::memory_order_relaxed);
         }
         if (network_transport_revision != sending_transport_revision) {
@@ -3064,6 +3073,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 static_cast<std::uint32_t>(sending_transport_revision),
                 static_cast<std::uint32_t>(authority.grid().revision),
                 transport_target,
+                transport_countdown_start,
             });
             network_session.sendToActive(
                 jam2::protocol::PacketType::TransportState,
@@ -3422,22 +3432,36 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         peer.recv_pongs > 0 &&
                         peer_stream.stats().rtt_min_us > 0 &&
                         audio.engine != nullptr) {
-                        const std::uint64_t sender_lead_frames =
-                            transport.target_sender_frame > header.timing_value
-                            ? transport.target_sender_frame - header.timing_value
-                            : 0ULL;
                         const std::uint64_t one_way_frames = peer_stream.stats().rtt_min_us *
                             static_cast<std::uint64_t>(options.sample_rate) / 2000000ULL;
-                        const std::uint64_t frames_until_target = sender_lead_frames > one_way_frames
-                            ? sender_lead_frames - one_way_frames
-                            : 0ULL;
+                        const std::uint64_t receiver_now =
+                            current_engine_frame(audio.engine.get());
+                        const auto translated_sender_frame =
+                            [&](std::uint64_t sender_frame) noexcept {
+                                const std::uint64_t sender_lead =
+                                    sender_frame > header.timing_value
+                                    ? sender_frame - header.timing_value
+                                    : 0ULL;
+                                const std::uint64_t remaining =
+                                    sender_lead > one_way_frames
+                                    ? sender_lead - one_way_frames
+                                    : 0ULL;
+                                return receiver_now >
+                                    (std::numeric_limits<std::uint64_t>::max)() - remaining
+                                    ? (std::numeric_limits<std::uint64_t>::max)()
+                                    : receiver_now + remaining;
+                            };
                         const std::uint64_t target_raw_frame =
-                            current_engine_frame(audio.engine.get()) + frames_until_target;
+                            translated_sender_frame(transport.target_sender_frame);
+                        const std::uint64_t countdown_start_raw_frame = std::min(
+                            target_raw_frame,
+                            translated_sender_frame(
+                                transport.countdown_start_sender_frame));
                         mesh_transport_applied_target_frame = target_raw_frame;
                         const std::int64_t offset =
                             commands.state.metronome_render_offset_frames.load(std::memory_order_relaxed);
                         const QuantizedSchedule schedule{
-                            target_raw_frame,
+                            countdown_start_raw_frame,
                             target_raw_frame,
                             musical_frame_from_raw(target_raw_frame, offset),
                         };

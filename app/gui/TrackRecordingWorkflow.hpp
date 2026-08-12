@@ -90,10 +90,14 @@ public:
         std::uint64_t endFrame = 0) noexcept;
     bool restartPrepared(
         const PlaybackGrid::Position& position,
-        bool localOnly = false) noexcept;
+        bool localOnly = false,
+        int countInBars = 0,
+        int beatsPerBar = 4) noexcept;
     bool restartGlobalTransport(
         const PlaybackGrid::Position& position,
-        bool localOnly = false) noexcept;
+        bool localOnly = false,
+        int countInBars = 0,
+        int beatsPerBar = 4) noexcept;
     bool scheduleBankRestart(
         std::uint64_t targetFrame,
         std::uint64_t musicalFrame,
@@ -206,6 +210,9 @@ public:
             ? pending_global_transport_start_frame_
             : global_transport_start_frame_;
     }
+    std::uint64_t globalTransportCountdownStartFrame() const noexcept {
+        return pending_global_transport_countdown_start_frame_;
+    }
     std::uint64_t preparedActualStartFrame() const noexcept {
         return prepared_actual_start_frame_;
     }
@@ -217,12 +224,14 @@ public:
     std::uint64_t appliedLatencyFrames() const noexcept { return applied_latency_frames_; }
     std::uint32_t inputLatencyFrames() const noexcept { return input_latency_frames_; }
     std::uint32_t outputLatencyFrames() const noexcept { return output_latency_frames_; }
+    std::uint64_t sourceLatencyFrames() const noexcept { return source_latency_frames_; }
     int latencySampleRate() const noexcept { return latency_sample_rate_; }
     bool jamRecordingActive() const noexcept { return jam_recording_active_; }
     const QString& jamRecordingFolder() const noexcept { return jam_recording_folder_; }
 
 private:
     bool scheduleGlobalTransportStart(
+        std::uint64_t countdownStartFrame,
         std::uint64_t targetFrame,
         std::uint64_t musicalFrame,
         bool localOnly = false) noexcept;
@@ -269,6 +278,7 @@ private:
     std::uint64_t observed_transport_revision_ = 0;
     std::uint64_t observed_transport_commit_count_ = 0;
     std::uint64_t global_transport_start_frame_ = 0;
+    std::uint64_t pending_global_transport_countdown_start_frame_ = 0;
     std::uint64_t pending_global_transport_start_frame_ = 0;
     std::uint64_t pending_global_transport_stop_frame_ = 0;
     bool global_transport_requested_playing_ = false;
@@ -281,6 +291,7 @@ private:
 
     std::uint32_t input_latency_frames_ = 0;
     std::uint32_t output_latency_frames_ = 0;
+    std::uint64_t source_latency_frames_ = 0;
     std::uint64_t applied_latency_frames_ = 0;
     int latency_sample_rate_ = 48000;
 

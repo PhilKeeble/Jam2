@@ -7,8 +7,11 @@
 #include <filesystem>
 #include <map>
 #include <string>
+#include <string_view>
 
 namespace jamtaster::native {
+
+inline constexpr std::string_view kAnalysisFormat = "jamtaster-analysis-v2";
 
 struct JamJarExport {
     std::filesystem::path path;

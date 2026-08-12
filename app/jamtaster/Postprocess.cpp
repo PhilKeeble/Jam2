@@ -431,8 +431,15 @@ std::vector<TimedLabel> inferSongSections(const Analysis& analysis, double durat
     int maximumSections)
 {
     constexpr int contextBars = 2;
+    constexpr std::size_t maximumUnsplitBars = 32;
     const auto& beats = analysis.beats;
-    const int meter = analysis.beatsPerBar;
+    const int meter = std::max(1, analysis.beatsPerBar);
+    const std::size_t beatIntervals = beats.empty() ? 0 : beats.size() - 1U;
+    const std::size_t detectedBars =
+        (beatIntervals + static_cast<std::size_t>(meter) - 1U) /
+        static_cast<std::size_t>(meter);
+    if (detectedBars <= maximumUnsplitBars)
+        return {{0.0, duration, "Section A", 0.0}};
     if (beats.size() < static_cast<std::size_t>(meter * 2)) return {{0,duration,"Section A",0}};
     std::vector<int> downbeatIndices;
     for (const auto value : analysis.downbeats) downbeatIndices.push_back(nearestBeat(beats, value));

@@ -360,6 +360,9 @@ struct StreamControl {
     std::atomic<std::uint64_t> metronome_pattern_scheduled_origin_raw_frame{0};
     std::atomic<std::uint64_t> metronome_pattern_source_start_seen{0};
     std::atomic<bool> recording_count_in_active{false};
+    // Playback count-ins use the recording count-in voice even when the
+    // normal metronome is off, then become silent at the play boundary.
+    std::atomic<bool> playback_count_in_active{false};
     std::atomic<std::uint64_t> recording_count_in_start_frame{0};
     std::atomic<std::uint64_t> recording_count_in_target_frame{0};
     std::atomic<std::uint64_t> engine_frame_counter{0};

@@ -17,6 +17,7 @@ struct PluginBridgeStats {
     std::uint64_t submitted_blocks = 0;
     std::uint64_t completed_blocks = 0;
     std::uint64_t deadline_misses = 0;
+    std::uint64_t deadline_concealments = 0;
     std::uint64_t failed_blocks = 0;
     std::uint64_t stale_responses = 0;
     std::uint64_t midi_late = 0;
@@ -40,6 +41,7 @@ public:
 
     bool render_mono(const jam2::audio::InputSourceRenderRequest& request,
         std::span<std::int32_t> output) noexcept override;
+    std::size_t latency_frames(std::size_t block_frames) const noexcept override;
 
     void set_bypassed(bool bypassed) noexcept;
     bool bypassed() const noexcept;
@@ -71,10 +73,12 @@ private:
     std::int32_t previous_output_sample_ = 0;
     bool previous_output_wet_ = false;
     bool have_previous_output_ = false;
+    bool concealed_previous_miss_ = false;
     std::uint64_t last_midi_dropped_ = 0;
     std::atomic<std::uint64_t> submitted_blocks_{0};
     std::atomic<std::uint64_t> completed_blocks_{0};
     std::atomic<std::uint64_t> deadline_misses_{0};
+    std::atomic<std::uint64_t> deadline_concealments_{0};
     std::atomic<std::uint64_t> failed_blocks_{0};
     std::atomic<std::uint64_t> stale_responses_{0};
     std::atomic<std::uint64_t> midi_late_{0};

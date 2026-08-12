@@ -43,6 +43,14 @@ bool PluginAudioBridge::bypassed() const noexcept
     return bypassed_.load(std::memory_order_acquire);
 }
 
+std::size_t PluginAudioBridge::latency_frames(std::size_t block_frames) const noexcept
+{
+    const std::size_t plugin_latency = (std::min<std::size_t>)(
+        shared_.plugin_latency_frames.load(std::memory_order_relaxed),
+        kMaximumPluginLatencyFrames);
+    return kIsolationPipelineBlocks * block_frames + plugin_latency;
+}
+
 void PluginAudioBridge::set_midi_queue(jam2::midi::EventQueue* queue) noexcept
 {
     midi_queue_.store(queue, std::memory_order_release);
@@ -161,10 +169,7 @@ void PluginAudioBridge::render_delayed_dry(
 
 void PluginAudioBridge::capture_dry(const jam2::audio::InputSourceRenderRequest& request) noexcept
 {
-    const std::size_t plugin_latency = (std::min<std::size_t>)(
-        shared_.plugin_latency_frames.load(std::memory_order_relaxed),
-        kMaximumPluginLatencyFrames);
-    const std::size_t delay = kIsolationPipelineBlocks * request.frames + plugin_latency;
+    const std::size_t delay = latency_frames(request.frames);
     for (std::size_t frame = 0; frame < request.frames; ++frame) {
         std::int32_t dry = 0;
         if (request.input_channels == 1 && request.inputs[0]) dry = request.inputs[0][frame];
@@ -192,19 +197,25 @@ bool PluginAudioBridge::render_mono(
     const std::uint64_t expected = sequence_ >= kIsolationPipelineBlocks
         ? sequence_ - (kIsolationPipelineBlocks - 1U) : 0U;
     const bool got_plugin = consume(expected, request.frames, output.first(request.frames));
-    if (bypassed() || !got_plugin) {
+    const bool bypass = bypassed();
+    const bool muted = kind_ == jam2::audio::InputSourceKind::MidiInstrument &&
+        muted_.load(std::memory_order_acquire);
+    const bool conceal_miss = !got_plugin && expected != 0U && !bypass && !muted &&
+        previous_output_wet_ && !concealed_previous_miss_;
+    if (conceal_miss) {
+        std::fill_n(output.begin(), request.frames, previous_output_sample_);
+        deadline_concealments_.fetch_add(1, std::memory_order_relaxed);
+    } else if (bypass || !got_plugin) {
         render_delayed_dry(request.frames, output.first(request.frames));
-        if (!got_plugin && expected != 0U)
-            deadline_misses_.fetch_add(1, std::memory_order_relaxed);
     }
-    if (kind_ == jam2::audio::InputSourceKind::MidiInstrument &&
-        muted_.load(std::memory_order_acquire)) {
+    if (!got_plugin && expected != 0U)
+        deadline_misses_.fetch_add(1, std::memory_order_relaxed);
+    if (muted) {
         std::fill_n(output.begin(), request.frames, 0);
     }
-    const bool wet = got_plugin && !bypassed() &&
-        !(kind_ == jam2::audio::InputSourceKind::MidiInstrument &&
-          muted_.load(std::memory_order_relaxed));
-    if (have_previous_output_ && wet != previous_output_wet_) {
+    const bool wet = got_plugin && !bypass && !muted;
+    const bool continuous_wet = wet || conceal_miss;
+    if (have_previous_output_ && continuous_wet != previous_output_wet_) {
         const std::size_t fade_frames = (std::min<std::size_t>)(32U, request.frames);
         for (std::size_t frame = 0; frame < fade_frames; ++frame) {
             const std::int64_t old_weight = static_cast<std::int64_t>(fade_frames - frame);
@@ -216,8 +227,10 @@ bool PluginAudioBridge::render_mono(
         }
     }
     previous_output_sample_ = output[request.frames - 1U];
-    previous_output_wet_ = wet;
+    previous_output_wet_ = continuous_wet;
     have_previous_output_ = true;
+    if (got_plugin || bypass || muted) concealed_previous_miss_ = false;
+    else if (conceal_miss) concealed_previous_miss_ = true;
     publish(request);
     return true;
 }
@@ -230,6 +243,7 @@ PluginBridgeStats PluginAudioBridge::stats() const noexcept
         submitted_blocks_.load(std::memory_order_relaxed),
         completed_blocks_.load(std::memory_order_relaxed),
         deadline_misses_.load(std::memory_order_relaxed),
+        deadline_concealments_.load(std::memory_order_relaxed),
         failed_blocks_.load(std::memory_order_relaxed),
         stale_responses_.load(std::memory_order_relaxed),
         midi_late_.load(std::memory_order_relaxed),

@@ -794,31 +794,38 @@ void MainWindowPages::build(MainWindow& w)
     auto* localStrip = new QWidget(transport);
     auto* localLayout = new QVBoxLayout(localStrip);
     localLayout->setContentsMargins(0, 0, 0, 0);
-    w.performanceLeftTitle_ = new QLabel(QStringLiteral("YOU / LOCAL INPUT"), localStrip);
+    localLayout->setSpacing(4);
+    auto* localHeader = new QWidget(localStrip);
+    auto* localHeaderLayout = new QHBoxLayout(localHeader);
+    localHeaderLayout->setContentsMargins(0, 0, 0, 0);
+    localHeaderLayout->setSpacing(5);
+    w.performanceLeftTitle_ = new QLabel(QStringLiteral("YOU / LOCAL INPUT"), localHeader);
     w.performanceLeftTitle_->setObjectName(QStringLiteral("StripTitle"));
-    localLayout->addWidget(w.performanceLeftTitle_);
-    w.performanceLocalControls_ = new QWidget(localStrip);
-    auto* selfControlsLayout = new QVBoxLayout(w.performanceLocalControls_);
-    selfControlsLayout->setContentsMargins(0, 0, 0, 0);
-    selfControlsLayout->setSpacing(4);
-    auto* inputSourcesRow = new QWidget(w.performanceLocalControls_);
-    auto* inputSourcesLayout = new QHBoxLayout(inputSourcesRow);
-    inputSourcesLayout->setContentsMargins(0, 0, 0, 0);
-    inputSourcesLayout->setSpacing(5);
+    localHeaderLayout->addWidget(w.performanceLeftTitle_);
+    localHeaderLayout->addStretch(1);
     w.performanceAudioInputsButton_ = new QPushButton(
-        QStringLiteral("Audio inputs"), inputSourcesRow);
+        QStringLiteral("AUDIO"), localHeader);
+    w.performanceAudioInputsButton_->setObjectName(QStringLiteral("LocalAudioTag"));
     w.performanceMidiInputsButton_ = new QPushButton(
-        QStringLiteral("MIDI inputs"), inputSourcesRow);
+        QStringLiteral("MIDI"), localHeader);
+    w.performanceMidiInputsButton_->setObjectName(QStringLiteral("LocalMidiTag"));
+    w.performancePluginsButton_ = new QPushButton(
+        QStringLiteral("PLUGINS"), localHeader);
+    w.performancePluginsButton_->setObjectName(QStringLiteral("LocalPluginsTag"));
     w.performancePluginBypassButton_ = new QPushButton(
-        QStringLiteral("Bypass effects"), inputSourcesRow);
+        QStringLiteral("BYPASS"), localHeader);
+    w.performancePluginBypassButton_->setObjectName(QStringLiteral("LocalBypassTag"));
     w.performancePluginBypassButton_->setCheckable(true);
-    inputSourcesLayout->addWidget(w.performanceAudioInputsButton_);
-    inputSourcesLayout->addWidget(w.performanceMidiInputsButton_);
-    inputSourcesLayout->addWidget(w.performancePluginBypassButton_);
+    localHeaderLayout->addWidget(w.performanceAudioInputsButton_);
+    localHeaderLayout->addWidget(w.performanceMidiInputsButton_);
+    localHeaderLayout->addWidget(w.performancePluginsButton_);
+    localHeaderLayout->addWidget(w.performancePluginBypassButton_);
     QObject::connect(w.performanceAudioInputsButton_, &QPushButton::clicked,
         &w, [&w] { w.showAudioInputSources(); });
     QObject::connect(w.performanceMidiInputsButton_, &QPushButton::clicked,
         &w, [&w] { w.showMidiInputSources(); });
+    QObject::connect(w.performancePluginsButton_, &QPushButton::clicked,
+        &w, [&w] { w.showInputPlugins(); });
     QObject::connect(w.performancePluginBypassButton_, &QPushButton::toggled,
         &w, [&w](bool bypassed) {
             for (auto& source : w.audioPluginSources_) {
@@ -827,9 +834,19 @@ void MainWindowPages::build(MainWindow& w)
                     source.host->bridge()->set_bypassed(bypassed);
                 }
             }
+            for (auto& source : w.midiPluginSources_) {
+                if (!source || !source->host || !source->host->bridge()) continue;
+                source->muted = bypassed;
+                if (bypassed) source->host->bridge()->request_midi_reset();
+                source->host->bridge()->set_muted(bypassed);
+            }
             w.updateInputSourceButtons();
         });
-    selfControlsLayout->addWidget(inputSourcesRow);
+    localLayout->addWidget(localHeader);
+    w.performanceLocalControls_ = new QWidget(localStrip);
+    auto* selfControlsLayout = new QVBoxLayout(w.performanceLocalControls_);
+    selfControlsLayout->setContentsMargins(0, 0, 0, 0);
+    selfControlsLayout->setSpacing(4);
     selfControlsLayout->addWidget(w.mixInputMeterRow_);
     selfControlsLayout->addWidget(w.mixSendRow_);
     auto* monitorRow = new QHBoxLayout();
@@ -874,6 +891,13 @@ void MainWindowPages::build(MainWindow& w)
     w.performanceTrackToggle_->setObjectName(QStringLiteral("MainTransportButton"));
     w.performanceTrackToggle_->setFixedSize(64, 64);
     QObject::connect(w.performanceTrackToggle_, &QPushButton::clicked, &w, [&w] {
+        w.appendLog(QStringLiteral(
+            "global transport button clicked: requested=%1 playing=%2 engine_running=%3 count_in=%4")
+            .arg(w.trackRecordingWorkflow_.globalTransportRequestedPlaying())
+            .arg(w.trackRecordingWorkflow_.globalTransportPlaying())
+            .arg(w.jam2_.isRunning())
+            .arg(w.performanceCountInCheck_ &&
+                w.performanceCountInCheck_->isChecked()));
         if (w.trackRecordingWorkflow_.globalTransportRequestedPlaying()) {
             w.runGridLockedEngineAction(
                 QStringLiteral("track.stop"),
@@ -917,11 +941,23 @@ void MainWindowPages::build(MainWindow& w)
     clickLevel->setSpacing(6);
     auto* clickLevelLabel = new QLabel(QStringLiteral("CLICK"), tempoCard);
     clickLevelLabel->setObjectName(QStringLiteral("StripTitle"));
+    clickLevelLabel->setFixedWidth(38);
     clickLevel->addWidget(clickLevelLabel);
     w.metronomeLevelSlider_->setMinimumWidth(120);
     clickLevel->addWidget(w.metronomeLevelSlider_, 1);
     clickLevel->addWidget(w.mixMetronomeLevelLabel_);
     tempoLayout->addLayout(clickLevel);
+    auto* countInRow = new QHBoxLayout();
+    countInRow->setContentsMargins(4, 0, 4, 0);
+    countInRow->setSpacing(6);
+    countInRow->addSpacing(44);
+    w.performanceCountInCheck_ = new QCheckBox(QStringLiteral("Count-In"), tempoCard);
+    w.performanceCountInCheck_->setObjectName(QStringLiteral("PlaybackCountIn"));
+    w.performanceCountInCheck_->setToolTip(QStringLiteral(
+        "Play one bar of the recording count-in click before global playback starts"));
+    countInRow->addWidget(w.performanceCountInCheck_);
+    countInRow->addStretch(1);
+    tempoLayout->addLayout(countInRow);
     playbackLayout->addWidget(tempoCard);
     w.performancePositionLabel_ = new QLabel(
         QStringLiteral("1.01\nBAR / BEAT"), playback);

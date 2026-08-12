@@ -1,11 +1,15 @@
+#include "common.hpp"
 #include "input_source.hpp"
+#include "engine.hpp"
 #include "midi.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <chrono>
 #include <iostream>
 #include <span>
+#include <thread>
 
 namespace {
 
@@ -32,6 +36,11 @@ public:
                  static_cast<std::int64_t>(request.inputs[1][frame])) / 2);
         }
         return true;
+    }
+
+    std::size_t latency_frames(std::size_t) const noexcept override
+    {
+        return 23;
     }
 };
 
@@ -110,6 +119,15 @@ void test_source_router()
         "source router produces canonical mono");
     expect(output == std::array<std::int32_t, 4>{200, 300, 400, 500},
         "stereo input is deterministically downmixed");
+    expect(router.recording_latency_frames() == 23,
+        "combined recording exposes active renderer latency");
+    expect(router.configure(0, {
+        jam2::audio::InputSourceKind::Audio, 0, 1, 1000000, true, nullptr}),
+        "dry source replaces renderer");
+    expect(router.process(inputs, 4, 4, 48000.0, output),
+        "dry replacement continues routing");
+    expect(router.recording_latency_frames() == 0,
+        "removing renderer clears recording processing latency dynamically");
 }
 
 void test_instrument_failure_is_silence()
@@ -176,6 +194,65 @@ void test_excluded_midi_source_keeps_draining()
         "excluded MIDI instrument does not leak audio");
 }
 
+void test_playback_count_in_commits_without_control_toggle()
+{
+    jam2::Engine engine;
+    jam2::EngineConfig config;
+    config.backend = jam2::EngineAudioBackend::Headless;
+    config.sample_rate = 48000;
+    config.audio_buffer_frames = 64;
+    config.metronome_enabled = false;
+    config.metronome_pattern.bpm = 400;
+    engine.start(config);
+
+    const std::uint64_t readyDeadline = jam2::monotonic_us() + 500000ULL;
+    while (engine.snapshot().engine_frame < 1024 &&
+           jam2::monotonic_us() < readyDeadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const std::uint64_t now = engine.snapshot().engine_frame;
+    jam2::EngineCommand transport;
+    transport.type = jam2::EngineCommandType::ScheduleTransport;
+    transport.transport_action = jam2::EngineTransportAction::TrackRestart;
+    transport.transport_countdown_start_frame = now + 128ULL;
+    transport.transport_target_frame = transport.transport_countdown_start_frame + 512ULL;
+    transport.transport_musical_frame = transport.transport_target_frame;
+    const bool submitted = engine.submit(transport);
+
+    bool countInAudible = false;
+    bool committed = false;
+    jam2::EngineSnapshot finalSnapshot;
+    const std::uint64_t commitDeadline = jam2::monotonic_us() + 1500000ULL;
+    while (jam2::monotonic_us() < commitDeadline) {
+        const jam2::EngineSnapshot snapshot = engine.snapshot();
+        finalSnapshot = snapshot;
+        countInAudible = countInAudible || snapshot.metronome_peak_ppm > 0;
+        if (snapshot.transport_commit_count > 0 &&
+            snapshot.transport_playback_active &&
+            !snapshot.transport_pending) {
+            committed = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    engine.requestStop();
+    engine.join();
+    if (!committed) {
+        std::cerr << "count-in transport diagnostic: frame=" << finalSnapshot.engine_frame
+                  << " target=" << finalSnapshot.transport_target_frame
+                  << " pending=" << finalSnapshot.transport_pending
+                  << " commits=" << finalSnapshot.transport_commit_count
+                  << " active=" << finalSnapshot.transport_playback_active
+                  << " action=" << static_cast<int>(finalSnapshot.transport_action)
+                  << '\n';
+    }
+    expect(submitted, "playback count-in schedule is accepted");
+    expect(countInAudible,
+        "playback count-in is audible while the normal metronome is off");
+    expect(committed,
+        "playback count-in commits without another control command");
+}
+
 } // namespace
 
 int main()
@@ -187,6 +264,7 @@ int main()
     test_instrument_failure_is_silence();
     test_selected_recording_source_is_independent_of_send_mix();
     test_excluded_midi_source_keeps_draining();
+    test_playback_count_in_commits_without_control_toggle();
     if (failures == 0) std::cout << "Jam2 core input tests passed\n";
     return failures == 0 ? 0 : 1;
 }

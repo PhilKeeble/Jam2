@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cmath>
 #include <fstream>
+#include <iterator>
 #include <numeric>
 #include <stdexcept>
 
@@ -32,6 +33,19 @@ void writeText(const std::filesystem::path& path,const std::string& text)
     const auto partial=path.string()+".partial";
     {std::ofstream output(filesystemIoPath(partial),std::ios::binary|std::ios::trunc);output<<text<<'\n';if(!output)throw std::runtime_error("could not write "+path.string());}
     std::error_code ignored;std::filesystem::remove(filesystemIoPath(path),ignored);std::filesystem::rename(filesystemIoPath(partial),filesystemIoPath(path));
+}
+
+bool currentAnalysisCache(const std::filesystem::path& path)
+{
+    try {
+        std::ifstream input(filesystemIoPath(path),std::ios::binary);
+        if(!input)return false;
+        const std::string text{
+            std::istreambuf_iterator<char>{input},std::istreambuf_iterator<char>{}};
+        return Json::parse(text).get("format").stringValue()==kAnalysisFormat;
+    } catch(...) {
+        return false;
+    }
 }
 
 std::vector<std::filesystem::path> demucsModels(const std::filesystem::path& root)
@@ -114,7 +128,8 @@ PipelineResult runPipeline(const PipelineOptions& options,PipelineProgress progr
     const auto sourceRoot=options.projectRoot/"analysis"/"sources"/sourceHash;const std::string slug=portableSlug(options.name);
     const auto converted=sourceRoot/"converted"/slug;const auto finalJamjar=converted/(slug+".jamjar");
     PipelineResult result;result.analysisRoot=sourceRoot;result.analysisReport=sourceRoot/"analysis.json";result.songRoot=converted;result.jamjar=finalJamjar;
-    if(!options.force&&std::filesystem::is_regular_file(result.analysisReport)&&std::filesystem::is_regular_file(finalJamjar)) {
+    if(!options.force&&std::filesystem::is_regular_file(result.analysisReport)&&
+        std::filesystem::is_regular_file(finalJamjar)&&currentAnalysisCache(result.analysisReport)) {
         result.cached=true;if(progress)progress(100,"cached");return result;
     }
     std::filesystem::create_directories(sourceRoot);std::map<std::string,double>& timings=result.timings;

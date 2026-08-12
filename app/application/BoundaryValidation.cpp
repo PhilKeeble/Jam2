@@ -7528,7 +7528,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
     record(QStringLiteral("record-count-in.starts-at-safe-next-beat"),
         jam2::gui::recording_count_in_start_beat(3, 10000, 10100, 48000) == 5 &&
         jam2::gui::recording_count_in_start_beat(3, 10000, 20000, 48000) == 4);
-    record(QStringLiteral("record-count-in.synced-group-uses-next-safe-bar"),
+    record(QStringLiteral("record-count-in.synced-group-uses-next-safe-beat"),
         [] {
             PlaybackGrid::Position position;
             position.running = true;
@@ -7539,11 +7539,11 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             position.absoluteBeat = 5;
             position.rawCurrentFrame = 125000;
             const bool normal = jam2::gui::synced_recording_countdown_beat(
-                position, 4) == 8;
+                position, 4) == 6;
             position.absoluteBeat = 7;
             position.rawCurrentFrame = 191500;
             const bool nearBoundary = jam2::gui::synced_recording_countdown_beat(
-                position, 4) == 12;
+                position, 4) == 9;
             return normal && nearBoundary;
         }());
     record(QStringLiteral("track-take.cancel-idle-does-not-publish-completion"),
@@ -7707,6 +7707,32 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             runningWithoutWav && remoteStopArmedBeforeCommit &&
             !workflow.globalTransportRequestedPlaying() &&
             !workflow.globalTransportPlaying());
+
+        snapshot = {};
+        snapshot.sample_rate = 48000.0;
+        workflow.consumeSnapshot(
+            snapshot, MetronomeTransportController::SnapshotUpdate{});
+        snapshot.transport_revision = 1;
+        snapshot.transport_pending = true;
+        snapshot.transport_action = jam2::EngineTransportAction::TrackRestart;
+        snapshot.transport_countdown_start_frame = 144000;
+        snapshot.transport_target_frame = 288000;
+        snapshot.engine_frame = 200000;
+        workflow.consumeSnapshot(
+            snapshot, MetronomeTransportController::SnapshotUpdate{});
+        const bool restartCountInArmed =
+            workflow.globalTransportRequestedPlaying() &&
+            !workflow.globalTransportPlaying();
+        snapshot.transport_pending = false;
+        snapshot.transport_commit_count = 1;
+        snapshot.engine_frame = 288000;
+        workflow.consumeSnapshot(
+            snapshot, MetronomeTransportController::SnapshotUpdate{});
+        record(QStringLiteral("global-play.engine-restart-accepts-first-count-in-commit"),
+            restartCountInArmed &&
+            workflow.globalTransportRequestedPlaying() &&
+            workflow.globalTransportPlaying() &&
+            workflow.globalTransportStartFrame() == 288000);
     }
     {
         ApplicationRuntime runtime;
