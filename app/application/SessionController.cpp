@@ -462,6 +462,39 @@ private:
     void handleAutomationCommand(const QJsonObject& frame)
     {
         const QString type = frame.value(QStringLiteral("type")).toString();
+        if (type == QStringLiteral("debug.session-error")) {
+            static const std::set<QString> fields{
+                QStringLiteral("format"), QStringLiteral("type"),
+                QStringLiteral("id"), QStringLiteral("target_peer_token")};
+            const QString id = frame.value(QStringLiteral("id")).toString();
+            const QString target = frame.value(
+                QStringLiteral("target_peer_token")).toString().toLower();
+            bool valid = creator_ && !id.isEmpty() && id.toUtf8().size() <= 128 &&
+                jam2::control_protocol::peerIdFromToken(target).has_value();
+            for (auto it = frame.begin(); valid && it != frame.end(); ++it) {
+                valid = fields.contains(it.key());
+            }
+            if (valid) {
+                valid = sessionController_.sendTo(target, QJsonObject{
+                    {QStringLiteral("type"), QStringLiteral("session.error")},
+                    {QStringLiteral("message"),
+                        QStringLiteral("Injected controller rejection")},
+                });
+            }
+            if (valid) {
+                emitAutomation(QStringLiteral("command_applied"), {
+                    {QStringLiteral("id"), id},
+                });
+                return;
+            }
+            automationCommandRejects_++;
+            emitAutomation(QStringLiteral("command_rejected"), {
+                {QStringLiteral("id"), id},
+                {QStringLiteral("reason"), QStringLiteral(
+                    "debug session error requires a creator and active target peer")},
+            });
+            return;
+        }
         if (type == QStringLiteral("action")) {
             const QJsonObject action = frame.value(QStringLiteral("action")).toObject();
             static const std::set<QString> frameFields{
@@ -1379,7 +1412,9 @@ private:
         hasFinalControlSnapshot_ = true;
         sessionController_.close();
         if (runtime_.isNetworkRunning()) {
+            runtime_.onNetworkFinished = {};
             runtime_.stopNetwork();
+            handleRuntimeFinished(code);
         } else {
             publishAutomationResult(code);
             QCoreApplication::exit(code);

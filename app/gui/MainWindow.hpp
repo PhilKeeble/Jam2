@@ -221,7 +221,6 @@ private:
     void applySessionSnapshot(const SharedSessionController::Snapshot& snapshot);
     void refreshControlConnection();
     void handleMeshPeerAuthenticated(const QString& token, const QJsonObject& message);
-    QStringList meshPeerEndpointsExcludingSelf() const;
     QString meshBindEndpoint() const;
     QString localMeshEndpoint(bool createSession) const;
     QString meshPeerToken();
@@ -239,13 +238,12 @@ private:
     void applyJoinDefaultsToControls();
     void saveCreateDefaults();
     void saveJoinDefaults();
+    QString promptJamTasterSourceDisposition();
     void prepareNetworkRuntimePresentation(bool createSession);
     void launchLocalRuntime(Jam2RuntimeOptions options);
     bool submitEngineCommand(jam2::EngineCommand command, const QString& context);
     void submitEngineGain(jam2::EngineCommandType type, double gain, const QString& context);
     void submitEngineToggle(jam2::EngineCommandType type, bool enabled, const QString& context);
-    void submitEngineFrame(jam2::EngineCommandType type, std::uint64_t frame, const QString& context);
-    void submitEngineText(jam2::EngineCommandType type, const QString& text, const QString& context);
     void seekPreparedTrack(std::uint64_t sourceFrame, std::uint64_t targetFrame);
     void setPreparedTrackLoop(bool enabled, std::uint64_t startFrame = 0, std::uint64_t endFrame = 0);
     void restartPreparedTrackQuantized();

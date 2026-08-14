@@ -457,7 +457,12 @@ before making changes.
 ## Iteration 23 staged JamTaster model parity
 
 - Build and run `jam2_jamtaster_model_units` against the staged bundle model
-  directory. Require actual Beat This, Basic Pitch, ADTOF, and ChordMini CPU
+  directory. CTest must pass
+  `release/Jam2.app/Contents/Resources/jamtaster/models` on macOS, while the
+  same target must continue using `release/components/jamtaster/models` on
+  Windows. Keep this platform selection centralized in `tests/CMakeLists.txt`;
+  do not repair the Mac endpoint by changing the Windows package contract.
+  Require actual Beat This, Basic Pitch, ADTOF, and ChordMini CPU
   inference with the same tensor counts, finite outputs, nonempty musical
   events, bounds, sorting, and invalid-range/shape rejection as Windows.
 - Confirm the test executable resolves the imported ONNX Runtime 1.23 dylib via
@@ -489,6 +494,11 @@ before making changes.
 ## Iteration 25 worker protocol and service lifecycle parity
 
 - Run `jam2_jamtaster_worker_protocol_units` against the staged bundle helper.
+  CTest must resolve the macOS helper at
+  `release/Jam2.app/Contents/Helpers/jamtaster-worker`; Windows must retain
+  `release/components/jamtaster/jamtaster-worker.exe`. The worker must then
+  discover the adjacent app-bundle Resources model directory through its
+  existing cross-platform lookup.
   Preserve real tempo/full stem-reusing analysis, cached tempo/convert/split,
   every progress stage, repaired index, and request/protocol/action/missing-
   model/invalid-ONNX/malformed-JSON exit classifications.
@@ -951,6 +961,33 @@ before making changes.
 - Re-run the production controller binary/rejection case and staged public
   network create/join help checks. No protocol acceptance or emitted bytes may
   be changed to obtain macOS parity.
+
+## Iteration 43 staged ONNX and final coverage-tail parity
+
+- Configure the four JamTaster CTests from the staged bundle, not from the
+  Windows component tree. Model, Demucs, and pipeline tests must receive
+  `release/Jam2.app/Contents/Resources/jamtaster/models`; the worker protocol
+  test must receive `release/Jam2.app/Contents/Helpers/jamtaster-worker`.
+- Keep the platform switch centralized in `tests/CMakeLists.txt`. Do not edit
+  the Windows branch while fixing Apple deployment: Windows must continue to
+  pass `release/components/jamtaster/models` and
+  `release/components/jamtaster/jamtaster-worker.exe`.
+- Run `jam2_jamtaster_model_units`, `jam2_jamtaster_demucs_units`,
+  `jam2_jamtaster_pipeline_units`, and
+  `jam2_jamtaster_worker_protocol_units` against those exact staged paths.
+  Confirm ADTOF is found at
+  `Jam2.app/Contents/Resources/jamtaster/models/adtof.onnx` and that sibling
+  Beat This, Basic Pitch, ChordMini, and Demucs assets resolve without a test
+  copy or alternate bundle.
+- Run the fake-loopback unit and exactly-four-peer modal integration. The test
+  backend must remain independent of CoreAudio while the MainWindow workflow
+  still writes and finalizes a real PCM16 WAV under `build/test-artifacts`.
+- Run the exactly-four-peer session-command integration and require the same
+  existing `session.error` rejection/exit-4 evidence plus three normal exits.
+  Do not change the control protocol or its acceptance rules for parity.
+- macOS runs tests only. Do not invoke PowerShell coverage scripts, add an
+  Apple coverage substitute, or compare Apple source coverage to the Windows
+  manifest.
 
 ## macOS acceptance
 

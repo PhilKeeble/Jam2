@@ -432,6 +432,8 @@ add_executable(jam2 MACOSX_BUNDLE
     cli/NetworkRuntime.cpp
     gui/ArrangementEditorDialog.cpp
     gui/ArrangementEditorDialog.hpp
+    gui/AudioDeviceUiSupport.cpp
+    gui/AudioDeviceUiSupport.hpp
     gui/BeatGridModel.cpp
     gui/BeatGridModel.hpp
     gui/BeatGridWidget.cpp
@@ -440,12 +442,16 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/CuratedIdeaCatalog.hpp
     gui/CuratedIdeaDialog.cpp
     gui/CuratedIdeaDialog.hpp
+    gui/ConnectionGuidance.cpp
+    gui/ConnectionGuidance.hpp
     gui/GuiLoopbackRecorder.cpp
     gui/GuiLoopbackRecorder.hpp
     gui/GuiControlMessageRouter.cpp
     gui/GuiControlMessageRouter.hpp
     gui/GuiControlContract.cpp
     gui/GuiControlContract.hpp
+    gui/GuiInteractionPolicy.cpp
+    gui/GuiInteractionPolicy.hpp
     gui/GuiPresentation.cpp
     gui/GuiPresentation.hpp
     gui/InputSourceDialogs.cpp
@@ -495,6 +501,8 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/PracticeIdeaController.hpp
     gui/PracticeIdeaGenerator.cpp
     gui/PracticeIdeaGenerator.hpp
+    gui/JamTasterProjectSupport.cpp
+    gui/JamTasterProjectSupport.hpp
     gui/PracticeReferenceRenderer.cpp
     gui/PracticeReferenceRenderer.hpp
     gui/ResearchDrumKit.cpp

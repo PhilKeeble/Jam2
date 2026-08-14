@@ -1,11 +1,14 @@
 #include "MainWindow.hpp"
 #include "MainWindowPages.hpp"
 #include "ArrangementEditorDialog.hpp"
+#include "AudioDeviceUiSupport.hpp"
 #include "TrackWidgets.hpp"
 #include "TrackAssetOwnership.hpp"
 #include "TrackWorkspaceSupport.hpp"
+#include "JamTasterProjectSupport.hpp"
 #include "GuiPresentation.hpp"
 #include "GuiControlContract.hpp"
+#include "GuiInteractionPolicy.hpp"
 #include "InputSourceDialogs.hpp"
 #include "JamSyncDialog.hpp"
 #include "JamTasterDialog.hpp"
@@ -20,6 +23,7 @@
 #include "GuiControlMessageRouter.hpp"
 #include "CuratedIdeaCatalog.hpp"
 #include "CuratedIdeaDialog.hpp"
+#include "ConnectionGuidance.hpp"
 #include "MusicTheory.hpp"
 #include "PracticeIdeaDialogs.hpp"
 #include "RecordingTiming.hpp"
@@ -141,7 +145,7 @@ constexpr int kLooperAssetRequestStartTimeoutMs = 10000;
 constexpr int kFirewallGuidanceDisconnectThreshold = 3;
 constexpr int kFirewallGuidanceWindowMs = 10000;
 
-QString promptJamTasterSourceDisposition(QWidget* parent)
+QString promptJamTasterSourceDispositionDialog(QWidget* parent)
 {
     QMessageBox box(QMessageBox::Question,
                     QStringLiteral("Original source WAV"),
@@ -160,138 +164,6 @@ QString promptJamTasterSourceDisposition(QWidget* parent)
     if (box.clickedButton() == keep) return QStringLiteral("keep");
     if (box.clickedButton() == remove) return QStringLiteral("delete");
     return {};
-}
-
-bool appendJamTasterReferenceSection(
-    QJsonObject& song,
-    QJsonObject lane,
-    QString& error)
-{
-    QJsonArray sections = song.value(QStringLiteral("sections")).toArray();
-    QJsonObject looper = song.value(QStringLiteral("looper")).toObject();
-    QJsonArray banks = looper.value(QStringLiteral("banks")).toArray();
-    if (sections.isEmpty() || banks.isEmpty() ||
-        sections.size() >= jam2::application::limits::kMaximumSongSections) {
-        error = QStringLiteral(
-            "There is no free section for the original reference WAV. Remove a section "
-            "or choose to delete the source instead.");
-        return false;
-    }
-    const QJsonObject firstBank = banks.first().toObject();
-    QJsonObject timing = firstBank.value(QStringLiteral("timing")).toObject();
-    const int bpm = qBound(20, timing.value(QStringLiteral("bpm")).toInt(120), 400);
-    const int meter = qBound(
-        2, timing.value(QStringLiteral("beats_per_bar")).toInt(4), 12);
-    const qint64 frames = lane.value(QStringLiteral("source_frames"))
-        .toVariant().toLongLong();
-    const int sampleRate = lane.value(QStringLiteral("sample_rate")).toInt(48000);
-    const double duration = sampleRate > 0 ? frames / static_cast<double>(sampleRate) : 0.0;
-    const int rawBeats = qMax(
-        jam2::application::limits::kMinimumBeatsPerSection,
-        static_cast<int>(std::ceil(duration * bpm / 60.0)));
-    const int beats = ((rawBeats + meter - 1) / meter) * meter;
-    if (beats > 512) {
-        error = QStringLiteral(
-            "The original recording is longer than Jam2's 512-beat section limit.");
-        return false;
-    }
-
-    QJsonArray strings;
-    QJsonArray beatPatterns;
-    QJsonArray musicalPatterns;
-    QJsonArray emptyDrumLanes;
-    for (int drumLane = 0; drumLane < 10; ++drumLane) emptyDrumLanes.append(QString());
-    const auto restSteps = [] {
-        QJsonArray result;
-        for (int index = 0; index < 4; ++index) {
-            result.append(QJsonObject{
-                {QStringLiteral("state"), QStringLiteral("rest")},
-                {QStringLiteral("value"), QString()},
-                {QStringLiteral("velocity"), 96},
-            });
-        }
-        return result;
-    };
-    for (int beat = 0; beat < beats; ++beat) {
-        strings.append(QString());
-        beatPatterns.append(QJsonObject{
-            {QStringLiteral("division"), 4},
-            {QStringLiteral("lanes"), emptyDrumLanes},
-        });
-        musicalPatterns.append(QJsonObject{
-            {QStringLiteral("division"), 4},
-            {QStringLiteral("chords"), restSteps()},
-            {QStringLiteral("bass"), restSteps()},
-            {QStringLiteral("melody"), restSteps()},
-            {QStringLiteral("support"), restSteps()},
-        });
-    }
-    const int index = sections.size();
-    const QString label(QChar(QLatin1Char('A').unicode() + index));
-    QJsonObject section{
-        {QStringLiteral("id"), QUuid::createUuid().toString(QUuid::WithoutBraces)},
-        {QStringLiteral("label"), label},
-        {QStringLiteral("name"), QStringLiteral("Original Reference")},
-        {QStringLiteral("beats"), beats},
-        {QStringLiteral("targets"), strings},
-        {QStringLiteral("beat_notes"), strings},
-        {QStringLiteral("lyrics"), strings},
-        {QStringLiteral("chords"), strings},
-        {QStringLiteral("beat_patterns"), beatPatterns},
-        {QStringLiteral("musical_patterns"), musicalPatterns},
-        {QStringLiteral("drum_kit"), QStringLiteral("acoustic")},
-        {QStringLiteral("generated_kind"), QString()},
-    };
-    sections.append(section);
-
-    lane.insert(QStringLiteral("id"), QUuid::createUuid().toString(QUuid::WithoutBraces));
-    lane.insert(QStringLiteral("name"), QStringLiteral("Original Source (muted)"));
-    lane.insert(QStringLiteral("muted"), true);
-    lane.insert(QStringLiteral("solo"), false);
-    lane.insert(QStringLiteral("loop_enabled"), false);
-    lane.insert(QStringLiteral("local_only"), false);
-    lane.insert(QStringLiteral("origin_kind"), QStringLiteral("imported"));
-    timing.insert(QStringLiteral("bpm"), bpm);
-    timing.insert(QStringLiteral("beats_per_bar"), meter);
-    timing.insert(QStringLiteral("inherits_bank_a"), true);
-    QJsonObject bank{
-        {QStringLiteral("id"), label},
-        {QStringLiteral("lanes"), QJsonArray{lane}},
-        {QStringLiteral("timing"), timing},
-    };
-    banks.append(bank);
-    looper.insert(QStringLiteral("banks"), banks);
-    song.insert(QStringLiteral("sections"), sections);
-    song.insert(QStringLiteral("looper"), looper);
-    return true;
-}
-
-bool explicitValueEditorHasFocus(QWidget* focus)
-{
-    for (QWidget* widget = focus; widget != nullptr; widget = widget->parentWidget()) {
-        if (qobject_cast<QLineEdit*>(widget) ||
-            qobject_cast<QPlainTextEdit*>(widget) ||
-            qobject_cast<QTextEdit*>(widget) ||
-            qobject_cast<QAbstractSpinBox*>(widget) ||
-            qobject_cast<QComboBox*>(widget)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool blocksIncidentalNavigationKey(QWidget* focus)
-{
-    for (QWidget* widget = focus; widget != nullptr; widget = widget->parentWidget()) {
-        if (qobject_cast<QAbstractSlider*>(widget) ||
-            qobject_cast<QAbstractButton*>(widget) ||
-            qobject_cast<QAbstractItemView*>(widget) ||
-            qobject_cast<QAbstractScrollArea*>(widget) ||
-            qobject_cast<QTabBar*>(widget)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 QString practiceMeterIdForPattern(const jam2::metronome::PatternSnapshot& pattern)
@@ -317,124 +189,6 @@ bool isManagedPracticeReference(const LooperLane& lane)
         lane.name == QStringLiteral("Practice Melody") ||
         lane.name == QStringLiteral("Practice Bass") ||
         lane.name == QStringLiteral("Practice Support");
-}
-
-QString devicePreferenceKey(const jam2::audio::DeviceInfo& device)
-{
-    return QString::fromStdString(device.backend) + QLatin1Char('|') +
-        QString::fromStdString(device.clsid.empty() ? device.name : device.clsid);
-}
-
-void storeSelectedDevice(
-    AudioDevicePreference& preference,
-    const QComboBox* combo,
-    const std::vector<jam2::audio::DeviceInfo>& devices)
-{
-    if (combo == nullptr) return;
-    bool ok = false;
-    const int id = combo->currentData().toInt(&ok);
-    if (!ok) return;
-    const auto selected = std::find_if(devices.begin(), devices.end(),
-        [id](const auto& item) { return item.id == id; });
-    if (selected == devices.end()) return;
-    preference.backend = QString::fromStdString(selected->backend);
-    preference.stableId = QString::fromStdString(
-        selected->clsid.empty() ? selected->name : selected->clsid);
-    preference.name = QString::fromStdString(selected->name);
-}
-
-void storeSelectedDevice(
-    AudioDevicePreference& preference,
-    const QString& selectedDeviceId,
-    const std::vector<jam2::audio::DeviceInfo>& devices)
-{
-    bool ok = false;
-    const int id = selectedDeviceId.toInt(&ok);
-    if (!ok) return;
-    const auto selected = std::find_if(
-        devices.cbegin(), devices.cend(),
-        [id](const auto& item) { return item.id == id; });
-    if (selected == devices.cend()) return;
-    preference.backend = QString::fromStdString(selected->backend);
-    preference.stableId = QString::fromStdString(
-        selected->clsid.empty() ? selected->name : selected->clsid);
-    preference.name = QString::fromStdString(selected->name);
-}
-
-QString deviceCapabilitiesText(const jam2::audio::DeviceTestResult& capabilities)
-{
-    QStringList lines{
-        QStringLiteral("Device: %1 %2")
-            .arg(QString::fromStdString(capabilities.device.backend),
-                 QString::fromStdString(capabilities.device.name)),
-        QStringLiteral("Current device sample rate: %1 Hz")
-            .arg(capabilities.current_sample_rate, 0, 'f', 0),
-        QStringLiteral(""),
-        QStringLiteral("Sample rates:"),
-    };
-    for (std::size_t index = 0; index < jam2::audio::kTestSampleRates.size(); ++index) {
-        lines.append(QStringLiteral("  %1 Hz: %2")
-            .arg(jam2::audio::kTestSampleRates[index])
-            .arg(capabilities.sample_rate_supported[index]
-                ? QStringLiteral("supported") : QStringLiteral("not supported")));
-    }
-    lines.append(QStringLiteral(""));
-    lines.append(QStringLiteral("Buffer sizes:"));
-    for (std::size_t index = 0; index < jam2::audio::kTestBufferSizes.size(); ++index) {
-        lines.append(QStringLiteral("  %1 frames: %2")
-            .arg(jam2::audio::kTestBufferSizes[index])
-            .arg(capabilities.buffer_size_supported[index]
-                ? QStringLiteral("supported") : QStringLiteral("not supported")));
-    }
-    return lines.join(QLatin1Char('\n'));
-}
-
-void showQuietDeviceMessage(QWidget* parent, const QString& text)
-{
-    QDialog dialog(parent);
-    dialog.setWindowTitle(QStringLiteral("Test Device"));
-    dialog.setModal(true);
-    auto* message = new QLabel(text, &dialog);
-    message->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
-    message->setWordWrap(true);
-    message->setMinimumWidth(430);
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok, &dialog);
-    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    auto* layout = new QVBoxLayout(&dialog);
-    layout->addWidget(message);
-    layout->addWidget(buttons);
-    dialog.exec();
-}
-
-QString creatorFirewallGuidance()
-{
-#if defined(__APPLE__)
-    return QStringLiteral(
-        "Jam2 accepted incoming TCP connections, but they closed before authentication began. "
-        "macOS Firewall may be blocking Jam2.\n\n"
-        "Open System Settings > Network > Firewall > Options and set Jam2 to Allow incoming "
-        "connections, then ask the peer to retry.");
-#elif defined(_WIN32)
-    return QStringLiteral(
-        "Jam2 accepted incoming TCP connections, but they closed before authentication began. "
-        "Windows Firewall or other network security software on either computer may be blocking "
-        "the connection.\n\n"
-        "Open Windows Security > Firewall & network protection > Allow an app through firewall, "
-        "allow Jam2 on the active network, then ask the peer to retry.");
-#else
-    return QStringLiteral(
-        "Jam2 accepted incoming TCP connections, but they closed before authentication began. "
-        "Check firewall and network security settings on both computers, then ask the peer to retry.");
-#endif
-}
-
-QString joinerFirewallGuidance()
-{
-    return QStringLiteral(
-        "\n\nNo authenticated TCP control connection was established. Confirm that the creator is "
-        "still hosting and that the invite address is correct. Also check that Jam2 is allowed "
-        "through macOS Firewall or Windows Firewall on the creator's computer and through any "
-        "third-party network security software on both computers.");
 }
 
 QString normalizedNetworkHost(QString host)
@@ -773,18 +527,6 @@ QString deviceId(const QString& text)
 
 
 
-QJsonObject readSidecarJson(const QString& wavPath)
-{
-    QFile file(wavPath + QStringLiteral(".json"));
-    constexpr qint64 kMaxSidecarBytes = 1024 * 1024;
-    if (!file.open(QIODevice::ReadOnly) || file.size() < 0 || file.size() > kMaxSidecarBytes) {
-        return {};
-    }
-    const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
-    return document.isObject() ? document.object() : QJsonObject{};
-
-}
-
 QString onOff(bool value)
 {
     return value ? QStringLiteral("on") : QStringLiteral("off");
@@ -817,72 +559,6 @@ std::vector<int> parseUiChannels(const QString& text, const char* label)
 }
 
 
-
-bool isWheelValueEditor(QObject* object)
-{
-    for (QObject* current = object; current != nullptr; current = current->parent()) {
-        const QString className = QString::fromLatin1(current->metaObject()->className());
-        if (qobject_cast<QAbstractSpinBox*>(current) ||
-            qobject_cast<QAbstractSlider*>(current) ||
-            qobject_cast<QComboBox*>(current) ||
-            className.contains(QStringLiteral("QComboBox"))) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool isComboBoxPopupObject(QObject* object)
-{
-    for (QObject* current = object; current != nullptr; current = current->parent()) {
-        const QString className = QString::fromLatin1(current->metaObject()->className());
-        if (className.contains(QStringLiteral("QComboBoxListView")) ||
-            className.contains(QStringLiteral("QComboBoxPrivateContainer"))) {
-            return true;
-        }
-    }
-    return false;
-}
-
-QAbstractScrollArea* parentScrollArea(
-    QObject* object,
-    Qt::Orientation orientation)
-{
-    auto* widget = qobject_cast<QWidget*>(object);
-    while (widget != nullptr) {
-        if (auto* scrollArea = qobject_cast<QAbstractScrollArea*>(widget)) {
-            QScrollBar* bar = orientation == Qt::Horizontal
-                ? scrollArea->horizontalScrollBar()
-                : scrollArea->verticalScrollBar();
-            if (bar && bar->maximum() > bar->minimum()) return scrollArea;
-        }
-        widget = widget->parentWidget();
-    }
-    return nullptr;
-}
-
-bool scrollAreaByWheel(
-    QAbstractScrollArea& scrollArea,
-    QWheelEvent& wheel,
-    Qt::Orientation orientation,
-    bool useVerticalAxis = false)
-{
-    QScrollBar* bar = orientation == Qt::Horizontal
-        ? scrollArea.horizontalScrollBar()
-        : scrollArea.verticalScrollBar();
-    if (!bar || bar->maximum() <= bar->minimum()) return false;
-    const QPoint pixelDelta = wheel.pixelDelta();
-    const QPoint angleDelta = wheel.angleDelta();
-    int delta = orientation == Qt::Horizontal && !useVerticalAxis
-        ? pixelDelta.x() : pixelDelta.y();
-    if (delta == 0) {
-        delta = (orientation == Qt::Horizontal && !useVerticalAxis
-            ? angleDelta.x() : angleDelta.y()) / 8;
-    }
-    if (delta == 0) return false;
-    bar->setValue(bar->value() - delta);
-    return true;
-}
 
 } // namespace
 
@@ -1566,7 +1242,8 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
         const bool modalOpen = QApplication::activeModalWidget() != nullptr;
         const bool dialogTarget = target &&
             qobject_cast<QDialog*>(target->window()) != nullptr;
-        const bool valueEditorFocused = explicitValueEditorHasFocus(focus);
+        const bool valueEditorFocused =
+            jam2::gui::explicitValueEditorHasFocus(focus);
         auto* keyEvent = static_cast<QKeyEvent*>(event);
         const Qt::KeyboardModifiers eventModifiers =
             keyEvent->modifiers() & ~Qt::KeypadModifier;
@@ -1583,7 +1260,8 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
                 key == Qt::Key_Up || key == Qt::Key_Down ||
                 key == Qt::Key_PageUp || key == Qt::Key_PageDown ||
                 key == Qt::Key_End;
-            if (navigationKey && blocksIncidentalNavigationKey(focus)) {
+            if (navigationKey &&
+                jam2::gui::blocksIncidentalNavigationKey(focus)) {
                 return true;
             }
         }
@@ -1725,15 +1403,16 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
     }
     if (event->type() == QEvent::Wheel) {
         auto* wheel = static_cast<QWheelEvent*>(event);
-        if (!isComboBoxPopupObject(watched)) {
+        if (!jam2::gui::isComboBoxPopupObject(watched)) {
             const bool directHorizontal =
                 wheel->pixelDelta().x() != 0 || wheel->angleDelta().x() != 0;
             const bool shiftedHorizontal =
                 wheel->modifiers().testFlag(Qt::ShiftModifier) &&
                 (wheel->pixelDelta().y() != 0 || wheel->angleDelta().y() != 0);
             if (directHorizontal || shiftedHorizontal) {
-                if (auto* scrollArea = parentScrollArea(watched, Qt::Horizontal)) {
-                    if (scrollAreaByWheel(
+                if (auto* scrollArea = jam2::gui::parentScrollArea(
+                        watched, Qt::Horizontal)) {
+                    if (jam2::gui::scrollAreaByWheel(
                             *scrollArea,
                             *wheel,
                             Qt::Horizontal,
@@ -1743,10 +1422,11 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
                 }
             }
         }
-        if (isWheelValueEditor(watched)) {
-            if (isComboBoxPopupObject(watched)) return false;
-            if (auto* scrollArea = parentScrollArea(watched, Qt::Vertical)) {
-                if (scrollAreaByWheel(
+        if (jam2::gui::isWheelValueEditor(watched)) {
+            if (jam2::gui::isComboBoxPopupObject(watched)) return false;
+            if (auto* scrollArea = jam2::gui::parentScrollArea(
+                    watched, Qt::Vertical)) {
+                if (jam2::gui::scrollAreaByWheel(
                         *scrollArea, *wheel, Qt::Vertical)) return true;
             }
             return false;
@@ -2455,7 +2135,7 @@ void MainWindow::showLocalPerformSetup()
         preferences_.localAudio = sessionRuntimeDraft_.audio;
         preferences_.localAudio.sampleRate = state.sampleRate;
         preferences_.localAudio.bufferSize = state.bufferSize;
-        storeSelectedDevice(
+        jam2::gui::storeSelectedDevicePreference(
             preferences_.localAudio,
             sessionRuntimeDraft_.selectedDeviceId,
             availableDevices_);
@@ -2714,6 +2394,30 @@ bool MainWindow::prepareAutomationDialogJam(
     automationHeadlessAudio_ = true;
     automationTestInput_ = testInput;
     automationSuppressDialogs_ = true;
+    QString loopbackError;
+    if (!loopbackRecorder_.setCaptureBackendForTesting(
+            [](const GuiLoopbackOptions& options,
+               const std::atomic<bool>& stopRequested) {
+                if (stopRequested.load(std::memory_order_acquire)) {
+                    return GuiLoopbackCaptureResult{
+                        false,
+                        QStringLiteral("automation loopback capture stopped"),
+                        QStringLiteral("fake loopback stop requested before capture")};
+                }
+                std::array<std::int16_t, 64> samples{};
+                for (std::size_t index = 0; index < samples.size(); ++index) {
+                    samples[index] = (index % 16U) < 8U ? 4096 : -4096;
+                }
+                jam2::gui::write_loopback_wav_pcm16(
+                    options.outputPath, options.targetSampleRate, samples);
+                return GuiLoopbackCaptureResult{
+                    true, {}, QStringLiteral("fake loopback frames=64")};
+            },
+            &loopbackError)) {
+        error = loopbackError;
+        return false;
+    }
+    refreshDevices();
     error.clear();
     return true;
 }
@@ -3029,6 +2733,13 @@ QJsonObject MainWindow::automationContentSnapshot() const
             recordedLaneImportTargetId_},
         {QStringLiteral("lane_recording_import_last_hash"),
             recordedLaneImportLastHash_},
+        {QStringLiteral("loopback_recording_running"),
+            loopbackRecorder_.isRunning()},
+        {QStringLiteral("loopback_capture_path"),
+            laneRecordingState_.outputPath},
+        {QStringLiteral("loopback_capture_available"),
+            !laneRecordingState_.outputPath.isEmpty() &&
+                QFileInfo::exists(laneRecordingState_.outputPath)},
         {QStringLiteral("file_tasks_active"), fileWorkerTasksActive_},
         {QStringLiteral("transfer"), automationTransferSnapshot()},
     };
@@ -3765,31 +3476,6 @@ void MainWindow::submitEngineToggle(
     (void)submitEngineCommand(command, context);
 }
 
-void MainWindow::submitEngineFrame(
-    jam2::EngineCommandType type,
-    std::uint64_t frame,
-    const QString& context)
-{
-    jam2::EngineCommand command;
-    command.type = type;
-    command.frame = frame;
-    (void)submitEngineCommand(command, context);
-}
-
-void MainWindow::submitEngineText(
-    jam2::EngineCommandType type,
-    const QString& text,
-    const QString& context)
-{
-    jam2::EngineCommand command;
-    command.type = type;
-    if (!jam2::engine_command_set_text(command, text.toStdString())) {
-        appendLog(QStringLiteral("engine command text is too long: ") + context);
-        return;
-    }
-    (void)submitEngineCommand(command, context);
-}
-
 void MainWindow::seekPreparedTrack(std::uint64_t sourceFrame, std::uint64_t targetFrame)
 {
     if (!trackRecordingWorkflow_.seekPrepared(sourceFrame, targetFrame)) {
@@ -4234,7 +3920,7 @@ void MainWindow::showSettingsDialog()
         localInitial.sampleRate = sessionRuntimeDraft_.configuration.sampleRate;
         localInitial.bufferSize =
             sessionRuntimeDraft_.configuration.tuning.bufferSize;
-        storeSelectedDevice(
+        jam2::gui::storeSelectedDevicePreference(
             localInitial,
             sessionRuntimeDraft_.selectedDeviceId,
             availableDevices_);
@@ -4421,11 +4107,29 @@ void MainWindow::refreshDevices()
 {
     const QString previous = sessionRuntimeDraft_.selectedDeviceId;
     availableDevices_.clear();
-    try {
-        availableDevices_ = jam2::audio::list_devices();
-    } catch (const std::exception& error) {
-        appendLog(QStringLiteral("device refresh failed: ") +
-            QString::fromUtf8(error.what()));
+    if (automationHeadlessAudio_) {
+        jam2::audio::DeviceInfo device{
+            0,
+            "automation",
+            "Headless fake audio device",
+            "jam2-automation-headless",
+            {},
+        };
+        availableDevices_.push_back(device);
+        jam2::audio::DeviceTestResult capabilities;
+        capabilities.device = std::move(device);
+        capabilities.current_sample_rate = 48000.0;
+        capabilities.sample_rate_supported.fill(true);
+        capabilities.buffer_size_supported.fill(true);
+        deviceCapabilitiesCache_.insert(
+            jam2::gui::audioDevicePreferenceKey(capabilities.device), capabilities);
+    } else {
+        try {
+            availableDevices_ = jam2::audio::list_devices();
+        } catch (const std::exception& error) {
+            appendLog(QStringLiteral("device refresh failed: ") +
+                QString::fromUtf8(error.what()));
+        }
     }
     if (availableDevices_.empty()) {
         sessionRuntimeDraft_.selectedDeviceId.clear();
@@ -5251,7 +4955,7 @@ void MainWindow::handleControlEvent(
             ? event.detail : pendingJamRuntimeError_;
         if (event.failure == jam2::control_protocol::TransportFailure::ReconnectExhausted &&
             !detail.contains(QStringLiteral("firewall"), Qt::CaseInsensitive)) {
-            detail += joinerFirewallGuidance();
+            detail += jam2::gui::joinerFirewallGuidance();
         }
         showJamFailure(detail);
         QTimer::singleShot(0, this, [this] { stopJam(true); });
@@ -5284,7 +4988,7 @@ void MainWindow::notePreAuthenticationDisconnect()
             QMessageBox::warning(
                 this,
                 QStringLiteral("Incoming connection may be blocked"),
-                creatorFirewallGuidance());
+                jam2::gui::creatorFirewallGuidance());
         }
     });
 }
@@ -5510,11 +5214,16 @@ void MainWindow::saveCreateDefaults()
     preferences_.create = sessionRuntimeDraft_.configuration;
     AudioDevicePreference& audio = preferences_.createAudio();
     audio = sessionRuntimeDraft_.audio;
-    storeSelectedDevice(
+    jam2::gui::storeSelectedDevicePreference(
         audio, sessionRuntimeDraft_.selectedDeviceId, availableDevices_);
     preferences_.logging.folder = preferences_.create.runtime.logStatsFolder;
     preferences_.join.runtime.logStatsFolder = preferences_.logging.folder;
     UserPreferencesStore::save(preferences_);
+}
+
+QString MainWindow::promptJamTasterSourceDisposition()
+{
+    return promptJamTasterSourceDispositionDialog(this);
 }
 
 void MainWindow::saveJoinDefaults()
@@ -5528,7 +5237,7 @@ void MainWindow::saveJoinDefaults()
     preference.runtime = configuration.runtime;
     AudioDevicePreference& audio = preferences_.joinAudio();
     audio = sessionRuntimeDraft_.audio;
-    storeSelectedDevice(
+    jam2::gui::storeSelectedDevicePreference(
         audio, sessionRuntimeDraft_.selectedDeviceId, availableDevices_);
     preferences_.logging.folder = preference.runtime.logStatsFolder;
     preferences_.create.runtime.logStatsFolder = preferences_.logging.folder;
@@ -5546,7 +5255,7 @@ bool MainWindow::selectedDeviceSupportsSampleRate(int sampleRate)
         const auto device = std::find_if(availableDevices_.begin(), availableDevices_.end(),
             [deviceId](const auto& item) { return item.id == deviceId; });
         const QString key = device != availableDevices_.end()
-            ? devicePreferenceKey(*device)
+            ? jam2::gui::audioDevicePreferenceKey(*device)
             : QString::number(deviceId);
         jam2::audio::DeviceTestResult capabilities;
         if ((jam2_.isRunning() || jam2_.isNetworkRunning()) &&
@@ -5583,23 +5292,28 @@ void MainWindow::testDeviceSelection(
     QWidget* dialogParent)
 {
     if (device == nullptr || device->currentData().toString().isEmpty()) {
-        showQuietDeviceMessage(dialogParent, QStringLiteral("Select a low-latency audio device first."));
+        jam2::gui::showAudioDeviceTestMessage(
+            dialogParent, QStringLiteral("Select a low-latency audio device first."));
         return;
     }
     bool ok = false;
     const int deviceId = device->currentData().toInt(&ok);
     if (!ok) {
-        showQuietDeviceMessage(dialogParent, QStringLiteral("The selected device id is invalid."));
+        jam2::gui::showAudioDeviceTestMessage(
+            dialogParent, QStringLiteral("The selected device id is invalid."));
         return;
     }
     const auto info = std::find_if(availableDevices_.begin(), availableDevices_.end(),
         [deviceId](const auto& item) { return item.id == deviceId; });
     const QString key = info != availableDevices_.end()
-        ? devicePreferenceKey(*info)
+        ? jam2::gui::audioDevicePreferenceKey(*info)
         : QString::number(deviceId);
     if ((jam2_.isRunning() || jam2_.isNetworkRunning()) &&
         deviceCapabilitiesCache_.contains(key)) {
-        showQuietDeviceMessage(dialogParent, deviceCapabilitiesText(deviceCapabilitiesCache_.value(key)));
+        jam2::gui::showAudioDeviceTestMessage(
+            dialogParent,
+            jam2::gui::audioDeviceCapabilitiesText(
+                deviceCapabilitiesCache_.value(key)));
         return;
     }
     if (button != nullptr) button->setEnabled(false);
@@ -5613,18 +5327,20 @@ void MainWindow::testDeviceSelection(
             if (!*result) return;
             deviceCapabilitiesCache_.insert(key, **result);
             if (parentGuard) {
-                showQuietDeviceMessage(parentGuard, deviceCapabilitiesText(**result));
+                jam2::gui::showAudioDeviceTestMessage(
+                    parentGuard,
+                    jam2::gui::audioDeviceCapabilitiesText(**result));
             }
         },
         [parentGuard, buttonGuard](const QString& error) {
             if (buttonGuard) buttonGuard->setEnabled(true);
             if (parentGuard) {
-                showQuietDeviceMessage(parentGuard, error);
+                jam2::gui::showAudioDeviceTestMessage(parentGuard, error);
             }
         });
     if (!started) {
         if (buttonGuard) buttonGuard->setEnabled(true);
-        showQuietDeviceMessage(dialogParent,
+        jam2::gui::showAudioDeviceTestMessage(dialogParent,
             QStringLiteral("Device testing is temporarily busy; try again."));
     }
 }
@@ -5659,21 +5375,6 @@ QString MainWindow::meshBindEndpoint() const
         ? configuration.bindHost.trimmed()
         : QStringLiteral("0.0.0.0");
     return QStringLiteral("%1:%2").arg(host).arg(configuration.port);
-}
-
-QStringList MainWindow::meshPeerEndpointsExcludingSelf() const
-{
-    QStringList peers;
-    const QString self = meshPeerToken_;
-    for (auto it = meshPeerEndpoints_.cbegin(); it != meshPeerEndpoints_.cend(); ++it) {
-        if (it.key() == self || it.value().isEmpty()) {
-            continue;
-        }
-        if (!peers.contains(it.value())) {
-            peers << it.value();
-        }
-    }
-    return peers;
 }
 
 void MainWindow::handleMeshPeerAuthenticated(const QString& token, const QJsonObject& message)
@@ -8299,7 +8000,7 @@ void MainWindow::createJamTasterSong(
         suggestedName,
         &accepted).trimmed();
     if (!accepted || displayName.isEmpty()) return;
-    const QString sourceDisposition = promptJamTasterSourceDisposition(this);
+    const QString sourceDisposition = promptJamTasterSourceDisposition();
     if (sourceDisposition.isEmpty()) return;
     const QString slug = JamStorage::portableSlug(displayName);
     const QString destination = QDir(appReleaseFolderPath(QStringLiteral("songs")))
@@ -8359,7 +8060,8 @@ void MainWindow::createJamTasterSong(
                         {QStringLiteral("loop_end_frame"), QStringLiteral("-1")},
                     };
                     QString referenceError;
-                    if (!appendJamTasterReferenceSection(object, lane, referenceError)) {
+                    if (!jam2::gui::appendJamTasterReferenceSection(
+                            object, lane, referenceError)) {
                         throw std::runtime_error(referenceError.toStdString());
                     }
                 }
@@ -8426,7 +8128,7 @@ void MainWindow::applyJamTasterConverted(
     const QString sourcePath = options.value(QStringLiteral("source_path")).toString();
     const QString sourceHash = options.value(QStringLiteral("source_hash")).toString();
     const QString sourceDisposition = applySections
-        ? promptJamTasterSourceDisposition(this) : QString();
+        ? promptJamTasterSourceDisposition() : QString();
     if (applySections && sourceDisposition.isEmpty()) return;
     const QString jamjarPath = converted.absoluteFilePath(jamjars.front());
     const QString stagingFolder = projectPersistence_.workspaceFolder();
@@ -8718,7 +8420,8 @@ void MainWindow::applyJamTasterConverted(
             next.insert(QStringLiteral("looper"), currentLooper);
             next.insert(QStringLiteral("title"), chordModel_.title());
             if (sourceDisposition == QStringLiteral("keep") &&
-                !appendJamTasterReferenceSection(next, *referenceLane, *error)) {
+                !jam2::gui::appendJamTasterReferenceSection(
+                    next, *referenceLane, *error)) {
                 for (const QString& path : std::as_const(*stagedPaths)) {
                     (void)QFile::remove(path);
                 }
@@ -11257,7 +10960,7 @@ void MainWindow::loadTrackMetadata()
         [path, metadata, sidecar, error] {
             try {
                 *metadata = readWavMetadata(path);
-                *sidecar = readSidecarJson(path);
+                *sidecar = readTrackSidecarJson(path);
             } catch (const std::exception& exception) {
                 *error = QString::fromUtf8(exception.what());
             }

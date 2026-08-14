@@ -844,6 +844,19 @@ exemptions; no live source directory is broadly exempted. The only planned work
 left is the replacement two-pass gate and a narrowly scoped repair iteration if
 its fresh report identifies a genuinely unreviewed function.
 
+Iteration 43 owns the 60-function tail reported by the replacement gate. Real
+four-peer GUI actions now cover the remaining MainWindow coordination paths,
+including deterministic fake-device startup/restart and a real build-local WAV
+through an injected loopback backend. Named helpers own device UI, connection
+guidance, interaction policy, sidecar parsing, and JamTaster section creation.
+The four-peer native session test covers both requested runtime completion and
+the existing coordinator `session.error` path. Exact residual exemptions are
+limited to reviewed dormant UI, private catalogue invariants, and unavailable
+physical/driver callbacks. Focused tests pass. One fresh Windows instrumented
+catalogue plus the checker is now the only coverage task; its report must show
+zero unreviewed missing, wholly uncovered, and collector-skipped functions
+before the final full distribution command can be expected to succeed.
+
 ## Intended command surface
 
 ```text

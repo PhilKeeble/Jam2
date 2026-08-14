@@ -1,23 +1,39 @@
 #include "BeatGridWidget.hpp"
+#include "AudioDeviceUiSupport.hpp"
+#include "ConnectionGuidance.hpp"
 #include "GuiControlContract.hpp"
+#include "GuiInteractionPolicy.hpp"
 #include "PerformanceWidgets.hpp"
 #include "SectionTimeline.hpp"
+#include "SessionStartupDialogs.hpp"
 #include "TrackWidgets.hpp"
 
 #include <QAbstractButton>
 #include <QApplication>
 #include <QClipboard>
+#include <QCheckBox>
 #include <QComboBox>
+#include <QListWidget>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
 #include <QDragMoveEvent>
 #include <QDropEvent>
+#include <QDialog>
 #include <QKeyEvent>
 #include <QLineEdit>
+#include <QLabel>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
+#include <QPushButton>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QSlider>
+#include <QSpinBox>
+#include <QTabBar>
+#include <QTextEdit>
 #include <QThreadPool>
+#include <QTimer>
 #include <QUrl>
 #include <QVariantMap>
 #include <QVBoxLayout>
@@ -182,6 +198,257 @@ void testTimelineHelpers()
             jam2::gui::trackGainDb(jam2::gui::trackGainPosition(gain)), gain),
             "track gain position round trips boundary gain");
     }
+}
+
+void testGuiInteractionPolicy()
+{
+    QWidget plain;
+    QWidget plainChild(&plain);
+    QLineEdit lineEdit;
+    QWidget lineEditChild(&lineEdit);
+    QPlainTextEdit plainText;
+    QTextEdit richText;
+    QSpinBox spin;
+    QComboBox combo;
+    combo.addItems({QStringLiteral("one"), QStringLiteral("two")});
+    expect(!jam2::gui::explicitValueEditorHasFocus(nullptr) &&
+            !jam2::gui::explicitValueEditorHasFocus(&plainChild) &&
+            jam2::gui::explicitValueEditorHasFocus(&lineEditChild) &&
+            jam2::gui::explicitValueEditorHasFocus(&plainText) &&
+            jam2::gui::explicitValueEditorHasFocus(&richText) &&
+            jam2::gui::explicitValueEditorHasFocus(&spin) &&
+            jam2::gui::explicitValueEditorHasFocus(&combo),
+        "explicit value-editor focus follows editor ownership");
+
+    QSlider slider;
+    QWidget sliderChild(&slider);
+    QPushButton button;
+    QListWidget list;
+    QScrollArea scrollArea;
+    QTabBar tabs;
+    expect(!jam2::gui::blocksIncidentalNavigationKey(nullptr) &&
+            !jam2::gui::blocksIncidentalNavigationKey(&plainChild) &&
+            jam2::gui::blocksIncidentalNavigationKey(&sliderChild) &&
+            jam2::gui::blocksIncidentalNavigationKey(&button) &&
+            jam2::gui::blocksIncidentalNavigationKey(&list) &&
+            jam2::gui::blocksIncidentalNavigationKey(&scrollArea) &&
+            jam2::gui::blocksIncidentalNavigationKey(&tabs),
+        "navigation-key policy protects interactive control families");
+
+    QObject spinChild(&spin);
+    expect(!jam2::gui::isWheelValueEditor(&plain) &&
+            jam2::gui::isWheelValueEditor(&spinChild) &&
+            jam2::gui::isWheelValueEditor(&slider) &&
+            jam2::gui::isWheelValueEditor(&combo),
+        "wheel value-editor policy follows composite ownership");
+    expect(!jam2::gui::isComboBoxPopupObject(&plain) &&
+            jam2::gui::isComboBoxPopupObject(combo.view()),
+        "combo popup policy recognizes Qt's owned list view");
+
+    scrollArea.horizontalScrollBar()->setRange(0, 100);
+    scrollArea.verticalScrollBar()->setRange(0, 100);
+    scrollArea.horizontalScrollBar()->setValue(50);
+    scrollArea.verticalScrollBar()->setValue(50);
+    QWidget viewportChild(scrollArea.viewport());
+    expect(jam2::gui::parentScrollArea(&viewportChild, Qt::Horizontal) ==
+                &scrollArea &&
+            jam2::gui::parentScrollArea(&viewportChild, Qt::Vertical) ==
+                &scrollArea &&
+            jam2::gui::parentScrollArea(&plainChild, Qt::Vertical) == nullptr,
+        "parent scroll-area lookup requires an actually scrollable axis");
+
+    const auto wheel = [](QPoint pixel, QPoint angle) {
+        return QWheelEvent(
+            QPointF(1, 1), QPointF(1, 1), pixel, angle,
+            Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+    };
+    QWheelEvent horizontalPixel = wheel(QPoint(5, 0), QPoint());
+    expect(jam2::gui::scrollAreaByWheel(
+               scrollArea, horizontalPixel, Qt::Horizontal) &&
+            scrollArea.horizontalScrollBar()->value() == 45,
+        "horizontal pixel wheel moves the owning scroll area");
+    QWheelEvent shiftedVerticalPixel = wheel(QPoint(0, 7), QPoint());
+    expect(jam2::gui::scrollAreaByWheel(
+               scrollArea, shiftedVerticalPixel, Qt::Horizontal, true) &&
+            scrollArea.horizontalScrollBar()->value() == 38,
+        "shifted vertical pixel wheel drives horizontal scrolling");
+    QWheelEvent verticalAngle = wheel(QPoint(), QPoint(0, 120));
+    expect(jam2::gui::scrollAreaByWheel(
+               scrollArea, verticalAngle, Qt::Vertical) &&
+            scrollArea.verticalScrollBar()->value() == 35,
+        "angle-wheel fallback drives vertical scrolling");
+    QWheelEvent zero = wheel(QPoint(), QPoint());
+    expect(!jam2::gui::scrollAreaByWheel(
+               scrollArea, zero, Qt::Vertical),
+        "zero-delta wheel is not consumed");
+    scrollArea.verticalScrollBar()->setRange(0, 0);
+    expect(!jam2::gui::scrollAreaByWheel(
+               scrollArea, verticalAngle, Qt::Vertical),
+        "non-scrollable axes do not consume wheel input");
+}
+
+void testLocalEngineDialogState()
+{
+    jam2::gui::SessionAudioDeviceList devices;
+    devices.devices = {
+        {QStringLiteral("[17] ASIO First"), QStringLiteral("17")},
+        {QStringLiteral("[19] ASIO Second"), QStringLiteral("19")},
+    };
+    devices.selectedId = QStringLiteral("19");
+    int deviceTestCalls = 0;
+    jam2::gui::LocalEngineDialog dialog(
+        {
+            QStringLiteral("19"),
+            44100,
+            128,
+            QStringLiteral("1,2"),
+            QStringLiteral("3,4"),
+            false,
+        },
+        devices,
+        {[&deviceTestCalls](QComboBox* device, QPushButton*, QWidget*) {
+            if (device != nullptr &&
+                device->currentData().toString() == QStringLiteral("17")) {
+                ++deviceTestCalls;
+            }
+        }});
+
+    const jam2::gui::LocalEngineDialogState initial = dialog.state();
+    expect(initial.selectedDeviceId == QStringLiteral("19") &&
+            initial.sampleRate == 44100 && initial.bufferSize == 128 &&
+            initial.inputChannels == QStringLiteral("1,2") &&
+            initial.outputChannels == QStringLiteral("3,4") &&
+            !initial.saveDefaults,
+        "local engine dialog exposes its complete typed initial state");
+
+    auto* device = qobject_cast<QComboBox*>(
+        findControl(dialog, QStringLiteral("application.local-engine.device")));
+    auto* sampleRate = qobject_cast<QComboBox*>(findControl(
+        dialog, QStringLiteral("application.local-engine.sample-rate")));
+    auto* bufferSize = qobject_cast<QComboBox*>(findControl(
+        dialog, QStringLiteral("application.local-engine.buffer-size")));
+    auto* inputs = qobject_cast<QLineEdit*>(findControl(
+        dialog, QStringLiteral("application.local-engine.input-channels")));
+    auto* outputs = qobject_cast<QLineEdit*>(findControl(
+        dialog, QStringLiteral("application.local-engine.output-channels")));
+    auto* saveDefaults = qobject_cast<QCheckBox*>(findControl(
+        dialog, QStringLiteral("application.local-engine.save-defaults")));
+    expect(device != nullptr && sampleRate != nullptr && bufferSize != nullptr &&
+            inputs != nullptr && outputs != nullptr && saveDefaults != nullptr,
+        "local engine dialog registers every typed editor");
+    if (device == nullptr || sampleRate == nullptr || bufferSize == nullptr ||
+        inputs == nullptr || outputs == nullptr || saveDefaults == nullptr) {
+        return;
+    }
+
+    device->setCurrentIndex(device->findData(QStringLiteral("17")));
+    sampleRate->setCurrentIndex(sampleRate->findData(48000));
+    bufferSize->setCurrentIndex(bufferSize->findData(32));
+    inputs->setText(QStringLiteral(" 5,6 "));
+    outputs->setText(QStringLiteral(" 7,8 "));
+    saveDefaults->setChecked(true);
+    expect(clickControl(
+               dialog, QStringLiteral("application.local-engine.test-device")) &&
+            deviceTestCalls == 1,
+        "local engine Test Device action receives the selected typed device");
+
+    const jam2::gui::LocalEngineDialogState edited = dialog.state();
+    expect(edited.selectedDeviceId == QStringLiteral("17"),
+        "local engine dialog returns the edited device id");
+    expect(edited.sampleRate == 48000,
+        "local engine dialog returns the edited sample rate");
+    expect(edited.bufferSize == 32,
+        "local engine dialog returns the edited buffer size");
+    expect(edited.inputChannels == QStringLiteral("5,6") &&
+            edited.outputChannels == QStringLiteral("7,8"),
+        "local engine dialog trims both edited channel lists");
+    expect(edited.saveDefaults,
+        "local engine dialog returns the edited persistence choice");
+}
+
+void testAudioDeviceUiSupport()
+{
+    const std::vector<jam2::audio::DeviceInfo> devices{
+        {17, "ASIO", "First Device", "{FIRST}", "first.dll"},
+        {19, "ASIO", "Second Device", "", "second.dll"},
+    };
+    expect(jam2::gui::audioDevicePreferenceKey(devices[0]) ==
+                QStringLiteral("ASIO|{FIRST}") &&
+            jam2::gui::audioDevicePreferenceKey(devices[1]) ==
+                QStringLiteral("ASIO|Second Device"),
+        "audio device preference keys favor stable driver ids and fall back to names");
+
+    AudioDevicePreference preference;
+    expect(!jam2::gui::storeSelectedDevicePreference(
+               preference, QStringLiteral("invalid"), devices) &&
+            preference.backend.isEmpty() &&
+            !jam2::gui::storeSelectedDevicePreference(
+               preference, QStringLiteral("999"), devices),
+        "audio device preference mapping rejects malformed and unknown ids");
+    expect(jam2::gui::storeSelectedDevicePreference(
+               preference, QStringLiteral("17"), devices) &&
+            preference.backend == QStringLiteral("ASIO") &&
+            preference.stableId == QStringLiteral("{FIRST}") &&
+            preference.name == QStringLiteral("First Device"),
+        "audio device preference mapping stores a stable selected identity");
+
+    QComboBox combo;
+    combo.addItem(QStringLiteral("First"), QStringLiteral("17"));
+    combo.addItem(QStringLiteral("Second"), QStringLiteral("19"));
+    combo.setCurrentIndex(1);
+    expect(jam2::gui::storeSelectedDevicePreference(
+               preference, &combo, devices) &&
+            preference.stableId == QStringLiteral("Second Device") &&
+            !jam2::gui::storeSelectedDevicePreference(
+               preference, static_cast<const QComboBox*>(nullptr), devices),
+        "combo-owned device preference mapping handles selection and null ownership");
+
+    jam2::audio::DeviceTestResult capabilities;
+    capabilities.device = devices[0];
+    capabilities.current_sample_rate = 48000.0;
+    capabilities.sample_rate_supported = {true, false};
+    capabilities.buffer_size_supported = {true, true, false, false};
+    const QString text = jam2::gui::audioDeviceCapabilitiesText(capabilities);
+    expect(text.contains(QStringLiteral("Device: ASIO First Device")) &&
+            text.contains(QStringLiteral("44100 Hz: supported")) &&
+            text.contains(QStringLiteral("48000 Hz: not supported")) &&
+            text.contains(QStringLiteral("32 frames: supported")) &&
+            text.contains(QStringLiteral("256 frames: not supported")),
+        "audio device capability text reports every exact probed result");
+
+    bool inspected = false;
+    QTimer::singleShot(0, [&inspected, &text] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        if (dialog == nullptr || dialog->windowTitle() != QStringLiteral("Test Device")) {
+            return;
+        }
+        auto* message = dialog->findChild<QLabel*>(
+            QStringLiteral("AudioDeviceTestMessage"));
+        inspected = message != nullptr && message->text() == text &&
+            clickControl(
+                *dialog, QStringLiteral("application.device-test-dialog.ok"));
+    });
+    jam2::gui::showAudioDeviceTestMessage(nullptr, text);
+    expect(inspected,
+        "audio device result dialog exposes exact text and its registered close action");
+}
+
+void testConnectionGuidance()
+{
+    const QString creator = jam2::gui::creatorFirewallGuidance();
+    const QString joiner = jam2::gui::joinerFirewallGuidance();
+#if defined(_WIN32)
+    expect(creator.contains(QStringLiteral("Windows Firewall")) &&
+            creator.contains(QStringLiteral("before authentication")),
+        "creator diagnostics provide exact Windows firewall recovery guidance");
+#else
+    expect(!creator.trimmed().isEmpty(),
+        "creator diagnostics provide platform firewall recovery guidance");
+#endif
+    expect(joiner.contains(QStringLiteral("No authenticated TCP")) &&
+            joiner.contains(QStringLiteral("invite address")) &&
+            joiner.contains(QStringLiteral("both computers")),
+        "joiner diagnostics distinguish coordinator and local firewall checks");
 }
 
 void testWaveformAndMeterWidgets()
@@ -998,6 +1265,10 @@ int main(int argc, char** argv)
 {
     QApplication app(argc, argv);
     testTimelineHelpers();
+    testGuiInteractionPolicy();
+    testLocalEngineDialogState();
+    testAudioDeviceUiSupport();
+    testConnectionGuidance();
     testWaveformAndMeterWidgets();
     testLooperLaneWidget();
     testMetronomeWidgets();

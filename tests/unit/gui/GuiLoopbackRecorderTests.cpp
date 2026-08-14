@@ -314,6 +314,10 @@ void testRecorderLifecycleWithInjectedAudio()
     CompletionState completion;
     QString error;
 
+    require(!recorder.setCaptureBackendForTesting({}, &error) &&
+            error == QStringLiteral("loopback capture backend is required"),
+        "recorder must reject an empty replacement backend");
+
     GuiLoopbackOptions invalid = valid;
     invalid.outputPath.clear();
     require(!recorder.start(invalid, completionCallback(completion), &error) &&
@@ -340,6 +344,12 @@ void testRecorderLifecycleWithInjectedAudio()
                 return backendCalls.load(std::memory_order_acquire) == 1;
             }) && recorder.isRunning(),
         "injected recorder must enter running state and invoke its backend once");
+    require(!recorder.setCaptureBackendForTesting(
+                [](const GuiLoopbackOptions&, const std::atomic<bool>&) {
+                    return GuiLoopbackCaptureResult{};
+                },
+                &error) && error.contains(QStringLiteral("while recording")),
+        "recorder must reject backend replacement during an active capture");
     require(!recorder.start(valid, completionCallback(completion), &error) &&
             error == QStringLiteral("loopback recorder is already running"),
         "a concurrent start must be rejected without launching another backend");
@@ -367,6 +377,22 @@ void testRecorderLifecycleWithInjectedAudio()
                 completion.diagnostics == QStringLiteral("fake failure"),
             "backend failure must preserve its diagnostic channels");
     }
+
+    require(recorder.setCaptureBackendForTesting(
+                [](const GuiLoopbackOptions& options, const std::atomic<bool>&) {
+                    const std::array<std::int16_t, 1> samples{321};
+                    jam2::gui::write_loopback_wav_pcm16(
+                        options.outputPath, options.targetSampleRate, samples);
+                    return GuiLoopbackCaptureResult{
+                        true, {}, QStringLiteral("replacement backend")};
+                },
+                &error) && error.isEmpty(),
+        "completed recorder must accept a replacement test backend");
+    CompletionState replaced;
+    require(recorder.start(valid, completionCallback(replaced), &error) &&
+            waitForCompletions(replaced, 1) && replaced.ok &&
+            replaced.diagnostics == QStringLiteral("replacement backend"),
+        "replacement test backend must own the next capture");
 
     CompletionState thrown;
     GuiLoopbackRecorder throwing([](const GuiLoopbackOptions&,

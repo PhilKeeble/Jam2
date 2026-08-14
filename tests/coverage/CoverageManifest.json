@@ -115,6 +115,11 @@
       "reason": "These six wrappers have no caller in the current owned UI; maintained painted-lane, import, metadata, region, gain, movement, and transport workflows are covered while removal is pending REVIEW-002."
     },
     {
+      "path": "app/gui/MainWindow.cpp",
+      "functionPattern": "promptFrame\\(",
+      "reason": "This dialog helper is reachable only through the dormant editSelectedLooperLaneRegion wrapper retained pending REVIEW-002; active lane region editing is covered through its owned painted-lane control."
+    },
+    {
       "path": "app/gui/SharedTrackController.cpp",
       "functionPattern": "^SharedTrackController::(processingMessage|applyProcessingMessage)$",
       "reason": "The unreferenced track.processing compatibility helpers are retained without fabricating a protocol contract pending the removal decision in REVIEW-005."
@@ -160,6 +165,21 @@
       "reason": "This unsolicited ASIO driver notification cannot be forced safely in automation; normal real callbacks, invalid-channel diagnostics, cleanup, and reopen are covered by the explicit hardware profile, with manual change validation tracked in REVIEW-011."
     },
     {
+      "path": "libs/jam2-core/src/audio_device_windows.cpp",
+      "functionPattern": "hresult_text\\(HRESULT\\)$",
+      "reason": "This formatter requires an unexpected Windows COM failure carrying system text; deliberate invalid device/channel paths and the real ASIO callback lifecycle are covered, while unsolicited driver/OS failures are tracked in REVIEW-011."
+    },
+    {
+      "path": "libs/jam2-core/src/audio_device_windows.cpp",
+      "functionPattern": "duplex_buffer_switch_time_info\\(struct ASIOTime \\*, long, long\\)$",
+      "reason": "The installed ASIO driver invokes the ordinary buffer-switch callback rather than this optional time-info callback; the same shared processing body is exercised at 32 frames by the explicit hardware profile and the alternative driver callback is tracked in REVIEW-011."
+    },
+    {
+      "path": "libs/jam2-core/src/midi_device_windows.cpp",
+      "functionPattern": "winmm_error\\(unsigned int\\)$",
+      "reason": "Formatting a nonzero WinMM driver error requires physical MIDI hardware or a driver failure not present in the explicit Windows profile; invalid opens and synthetic MIDI behavior are covered and the physical path is tracked in REVIEW-011."
+    },
+    {
       "path": "app/application/InputPluginBackend.cpp",
       "function": "operator==",
       "reason": "Compiler-emitted comparison helper with no independent product branch; production plugin selection and host lifecycle are exercised by the explicit real-plugin hardware profile."
@@ -183,6 +203,11 @@
       "path": "app/gui/PracticeIdeaGenerator.cpp",
       "functionPattern": "^static bool operator==\\(class QList<jam2::practice::",
       "reason": "Compiler-emitted QList iterator comparison helper with no independent product branch; planned-event generation is covered across maintained styles, meters, and complexity levels."
+    },
+    {
+      "path": "app/gui/PracticeIdeaGenerator.cpp",
+      "functionPattern": "choose<jam2::practice::.*(ProgressionDef|StyleDef)>",
+      "reason": "These template specializations select from nonempty internal style/progression catalogues; exhaustive deterministic generator tests validate every maintained catalogue family, while manufacturing an empty private catalogue would violate the invariant recorded in REVIEW-012."
     },
     {
       "path": "app/gui/PracticeReferenceRenderer.cpp",

@@ -58,7 +58,10 @@ bool receive(AutomationProcess& process, const QString& expected, QJsonObject& e
     return true;
 }
 
-bool receiveApplied(AutomationProcess& process, const QString& id)
+bool receiveApplied(
+    AutomationProcess& process,
+    const QString& id,
+    QJsonObject* applied = nullptr)
 {
     QJsonObject event;
     QString error;
@@ -74,7 +77,10 @@ bool receiveApplied(AutomationProcess& process, const QString& id)
                  QString::fromUtf8(QJsonDocument(event).toJson(QJsonDocument::Compact))));
         return false;
     }
-    if (event.value(QStringLiteral("id")).toString() == id) return true;
+    if (event.value(QStringLiteral("id")).toString() == id) {
+        if (applied != nullptr) *applied = event;
+        return true;
+    }
     fail(QStringLiteral("expected applied id %1, received %2")
         .arg(id, event.value(QStringLiteral("id")).toString()));
     return false;
@@ -756,6 +762,181 @@ bool exerciseActiveCreatorWorkflows(
     });
     closeModal(creator, QStringLiteral("coverage-window-close-cancel"),
         QStringLiteral("application.close-dialog.cancel"));
+    return failures == 0;
+}
+
+bool exerciseLocalFakeAudioWorkflow(AutomationProcess& peer)
+{
+    const QString prefix = QStringLiteral("local-fake-audio-");
+    const QString prepareId = prefix + QStringLiteral("prepare");
+    if (!send(peer, {
+            {QStringLiteral("type"), QStringLiteral("jam.dialog-runtime.prepare")},
+            {QStringLiteral("id"), prepareId},
+            {QStringLiteral("test_input"), QStringLiteral("tone-440")},
+        }) || !receiveApplied(peer, prepareId)) {
+        return false;
+    }
+    const QString openId = prefix + QStringLiteral("open");
+    if (!send(peer, {
+            {QStringLiteral("type"), QStringLiteral("application.local-dialog.open")},
+            {QStringLiteral("id"), openId},
+        }) || !receiveApplied(peer, openId)) {
+        return false;
+    }
+    const Snapshot start = waitForControl(peer, prefix + QStringLiteral("dialog"),
+        QStringLiteral("application.local-engine.start"));
+    const Snapshot device = snapshotControl(peer, prefix + QStringLiteral("device"),
+        QStringLiteral("application.local-engine.device"));
+    if (!start.controls.contains(QStringLiteral("application.local-engine.start")) ||
+        controlState(device, QStringLiteral("application.local-engine.device"))
+            .value(QStringLiteral("count")).toInt() != 1 ||
+        !controlState(device, QStringLiteral("application.local-engine.device"))
+            .value(QStringLiteral("text")).toString()
+            .contains(QStringLiteral("Headless fake audio device"))) {
+        fail(QStringLiteral(
+            "automation local runtime did not expose its deterministic fake device"));
+        return false;
+    }
+    closeModal(peer, prefix + QStringLiteral("start"),
+        QStringLiteral("application.local-engine.start"));
+    const Snapshot running = waitForControlState(
+        peer, prefix + QStringLiteral("running"),
+        QStringLiteral("workspace.open.looper"),
+        [](const QJsonObject&, const QJsonObject& performance) {
+            return performance.value(QStringLiteral("headless_audio")).toBool() &&
+                performance.value(QStringLiteral("callbacks")).toInteger() > 0;
+        });
+    if (!running.performance.value(QStringLiteral("headless_audio")).toBool() ||
+        running.performance.value(QStringLiteral("callbacks")).toInteger() <= 0) {
+        return false;
+    }
+
+    for (const auto& [rate, expected] :
+         std::array<std::pair<int, bool>, 2>{{{48000, true}, {96000, false}}}) {
+        const QString id = prefix + QStringLiteral("preflight-%1").arg(rate);
+        QJsonObject applied;
+        if (!send(peer, {
+                {QStringLiteral("type"), QStringLiteral("audio.device-preflight")},
+                {QStringLiteral("id"), id},
+                {QStringLiteral("sample_rate"), rate},
+            }) || !receiveApplied(peer, id, &applied)) {
+            return false;
+        }
+        if (applied.value(QStringLiteral("supported")).toBool() != expected ||
+            !applied.value(QStringLiteral("device")).toString()
+                .contains(QStringLiteral("Headless fake audio device"))) {
+            fail(QStringLiteral(
+                "fake-device preflight result did not preserve exact rate support"));
+        }
+    }
+
+    openModal(peer, prefix + QStringLiteral("settings-open"),
+        QStringLiteral("application.settings"));
+    (void)waitForControl(peer, prefix + QStringLiteral("settings-ready"),
+        QStringLiteral("application.settings-dialog.audio.local.apply"));
+    const Snapshot settings = snapshotAll(peer, prefix + QStringLiteral("settings-state"));
+    const QString rateControl = QStringLiteral(
+        "application.settings-dialog.audio.local.sample-rate");
+    const QJsonObject rateState = controlState(settings, rateControl);
+    const int rateIndex = rateState.value(QStringLiteral("index")).toInt(-1);
+    const int rateCount = rateState.value(QStringLiteral("count")).toInt();
+    if (rateIndex < 0 || rateCount < 2) {
+        fail(QStringLiteral("local Settings sample rates are not testable"));
+    } else {
+        (void)invokeAndReceive(peer, prefix + QStringLiteral("settings-rate"),
+            rateControl, QStringLiteral("set-index"), (rateIndex + 1) % rateCount);
+        (void)invokeAndReceive(peer, prefix + QStringLiteral("settings-apply"),
+            QStringLiteral("application.settings-dialog.audio.local.apply"),
+            QStringLiteral("click"));
+    }
+
+    openModal(peer, prefix + QStringLiteral("device-test-open"),
+        QStringLiteral("application.settings-dialog.audio.local.test-device"));
+    const Snapshot result = waitForControl(peer, prefix + QStringLiteral("device-test"),
+        QStringLiteral("application.device-test-dialog.ok"));
+    if (!result.controls.contains(QStringLiteral("application.device-test-dialog.ok"))) {
+        return false;
+    }
+    closeModal(peer, prefix + QStringLiteral("device-test-close"),
+        QStringLiteral("application.device-test-dialog.ok"));
+    closeModal(peer, prefix + QStringLiteral("settings-close"),
+        QStringLiteral("application.settings-dialog.cancel"));
+
+    for (const QString& action : {
+             QStringLiteral("session-maintenance"),
+             QStringLiteral("track-reload"),
+             QStringLiteral("file-dialog-cancels"),
+             QStringLiteral("jamtaster-dialog-cancel"),
+             QStringLiteral("jamtaster-source-disposition"),
+             QStringLiteral("jamtaster-apply"),
+             QStringLiteral("save-session-defaults"),
+             QStringLiteral("recording-loopback"),
+             QStringLiteral("jamtaster-error-boundaries"),
+             QStringLiteral("recording-schedule"),
+             QStringLiteral("failure-presentation"),
+         }) {
+        const QString id = prefix + action;
+        QJsonObject applied;
+        if (!send(peer, {
+                {QStringLiteral("type"), QStringLiteral("application.boundary")},
+                {QStringLiteral("id"), id},
+                {QStringLiteral("action"), action},
+            }) || !receiveApplied(peer, id, &applied)) {
+            return false;
+        }
+        if (applied.value(QStringLiteral("action")).toString() != action ||
+            !applied.value(QStringLiteral("jam")).isObject() ||
+            !applied.value(QStringLiteral("content")).isObject() ||
+            !applied.value(QStringLiteral("performance")).isObject()) {
+            fail(QStringLiteral("boundary action omitted typed result state: ") + action);
+        }
+        if (action == QStringLiteral("jamtaster-apply") &&
+            applied.value(QStringLiteral("performance")).toObject()
+                .value(QStringLiteral("metronome_bpm")).toInt() != 137) {
+            fail(QStringLiteral("JamTaster tempo boundary did not reach the live metronome"));
+        }
+    }
+
+    const auto loopbackDeadline = std::chrono::steady_clock::now() +
+        jam2::test::scaledTimeout(5s);
+    bool loopbackCompleted = false;
+    int loopbackAttempt = 0;
+    while (std::chrono::steady_clock::now() < loopbackDeadline) {
+        const auto state = runtimeSnapshot(
+            peer, prefix + QStringLiteral("loopback-%1").arg(loopbackAttempt++));
+        if (!state) return false;
+        const QJsonObject content = state->value(QStringLiteral("content")).toObject();
+        if (!content.value(QStringLiteral("loopback_recording_running")).toBool() &&
+            content.value(QStringLiteral("loopback_capture_available")).toBool()) {
+            loopbackCompleted = true;
+            break;
+        }
+        QThread::msleep(20);
+    }
+    if (!loopbackCompleted) {
+        fail(QStringLiteral(
+            "MainWindow fake loopback capture did not finish with a WAV artifact"));
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() +
+        jam2::test::scaledTimeout(5s);
+    bool failureVisible = false;
+    int attempt = 0;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto state = runtimeSnapshot(
+            peer, prefix + QStringLiteral("failure-%1").arg(attempt++));
+        if (!state) return false;
+        if (state->value(QStringLiteral("jam")).toObject()
+                .value(QStringLiteral("last_startup_failure")).toString() ==
+            QStringLiteral("automation failure presentation boundary")) {
+            failureVisible = true;
+            break;
+        }
+        QThread::msleep(20);
+    }
+    if (!failureVisible) {
+        fail(QStringLiteral("asynchronous jam failure presentation was not observable"));
+    }
     return failures == 0;
 }
 
@@ -2245,6 +2426,11 @@ int main(int argc, char* argv[])
             peerPrefix + QStringLiteral("remove-recording-lane-only"),
             QStringLiteral("looper.lane-remove-dialog.remove-only"));
     }
+    }
+
+    if (!startupOnly &&
+        !exerciseLocalFakeAudioWorkflow(coordinator.peer(0))) {
+        return 1;
     }
 
     if (startupOnly) {

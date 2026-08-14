@@ -438,13 +438,17 @@ endif()
 
 add_executable(jam2_gui_widget_boundary_tests EXCLUDE_FROM_ALL
     unit/gui/GuiWidgetBoundaryTests.cpp
+    "${CMAKE_SOURCE_DIR}/app/gui/AudioDeviceUiSupport.cpp"
     "${CMAKE_SOURCE_DIR}/app/gui/BeatGridModel.cpp"
     "${CMAKE_SOURCE_DIR}/app/gui/BeatGridWidget.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/ConnectionGuidance.cpp"
     "${CMAKE_SOURCE_DIR}/app/gui/GenerationRecipe.cpp"
     "${CMAKE_SOURCE_DIR}/app/gui/GuiControlContract.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/GuiInteractionPolicy.cpp"
     "${CMAKE_SOURCE_DIR}/app/gui/GuiPresentation.cpp"
     "${CMAKE_SOURCE_DIR}/app/gui/MusicTheory.cpp"
-    "${CMAKE_SOURCE_DIR}/app/gui/PerformanceWidgets.cpp")
+    "${CMAKE_SOURCE_DIR}/app/gui/PerformanceWidgets.cpp"
+    "${CMAKE_SOURCE_DIR}/app/gui/SessionStartupDialogs.cpp")
 jam2_configure_test_target(jam2_gui_widget_boundary_tests)
 target_include_directories(jam2_gui_widget_boundary_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/app/application"
@@ -583,6 +587,17 @@ get_filename_component(
     "${JAM2_TEST_ONNXRUNTIME_LIBRARY}"
     DIRECTORY)
 if(APPLE)
+    set(JAM2_TEST_JAMTASTER_MODELS_DIR
+        "${JAM2_RELEASE_DIR}/Jam2.app/Contents/Resources/jamtaster/models")
+    set(JAM2_TEST_JAMTASTER_WORKER
+        "${JAM2_RELEASE_DIR}/Jam2.app/Contents/Helpers/jamtaster-worker")
+else()
+    set(JAM2_TEST_JAMTASTER_MODELS_DIR
+        "${JAM2_RELEASE_DIR}/components/jamtaster/models")
+    set(JAM2_TEST_JAMTASTER_WORKER
+        "${JAM2_RELEASE_DIR}/components/jamtaster/jamtaster-worker${CMAKE_EXECUTABLE_SUFFIX}")
+endif()
+if(APPLE)
     set_target_properties(jamtaster_tests PROPERTIES
         BUILD_RPATH "${JAM2_TEST_ONNXRUNTIME_DIR}")
 endif()
@@ -615,7 +630,7 @@ if(WIN32)
 endif()
 add_test(NAME jam2_jamtaster_model_units
     COMMAND $<TARGET_FILE:jam2_jamtaster_model_tests>
-        "${JAM2_RELEASE_DIR}/components/jamtaster/models")
+        "${JAM2_TEST_JAMTASTER_MODELS_DIR}")
 set_tests_properties(jam2_jamtaster_model_units PROPERTIES
     LABELS "unit;jamtaster;model"
     TIMEOUT 120)
@@ -640,7 +655,7 @@ if(WIN32)
 endif()
 add_test(NAME jam2_jamtaster_demucs_units
     COMMAND $<TARGET_FILE:jam2_jamtaster_demucs_tests>
-        "${JAM2_RELEASE_DIR}/components/jamtaster/models")
+        "${JAM2_TEST_JAMTASTER_MODELS_DIR}")
 set_tests_properties(jam2_jamtaster_demucs_units PROPERTIES
     LABELS "unit;jamtaster;model;separation"
     TIMEOUT 300)
@@ -665,7 +680,7 @@ if(WIN32)
 endif()
 add_test(NAME jam2_jamtaster_pipeline_units
     COMMAND $<TARGET_FILE:jam2_jamtaster_pipeline_tests>
-        "${JAM2_RELEASE_DIR}/components/jamtaster/models")
+        "${JAM2_TEST_JAMTASTER_MODELS_DIR}")
 set_tests_properties(jam2_jamtaster_pipeline_units PROPERTIES
     LABELS "unit;jamtaster;model;pipeline"
     TIMEOUT 180)
@@ -687,7 +702,7 @@ target_include_directories(jam2_jamtaster_worker_protocol_tests SYSTEM PRIVATE
 add_dependencies(jam2_jamtaster_worker_protocol_tests jamtaster_worker)
 add_test(NAME jam2_jamtaster_worker_protocol_units
     COMMAND $<TARGET_FILE:jam2_jamtaster_worker_protocol_tests>
-        "${JAM2_RELEASE_DIR}/components/jamtaster/jamtaster-worker${CMAKE_EXECUTABLE_SUFFIX}")
+        "${JAM2_TEST_JAMTASTER_WORKER}")
 set_tests_properties(jam2_jamtaster_worker_protocol_units PROPERTIES
     LABELS "unit;jamtaster;worker;model;pipeline"
     TIMEOUT 120)
@@ -745,6 +760,26 @@ if(WIN32)
     set_tests_properties(jam2_jamtaster_dialog_units PROPERTIES
         ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Widgets>")
+endif()
+
+add_executable(jam2_jamtaster_project_support_tests EXCLUDE_FROM_ALL
+    unit/gui/JamTasterProjectSupportTests.cpp
+    "${CMAKE_SOURCE_DIR}/app/gui/JamTasterProjectSupport.cpp")
+jam2_configure_test_target(jam2_jamtaster_project_support_tests)
+target_include_directories(jam2_jamtaster_project_support_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/app/application"
+    "${CMAKE_SOURCE_DIR}/app/gui")
+target_link_libraries(jam2_jamtaster_project_support_tests PRIVATE
+    jam2_core Qt6::Core)
+add_test(NAME jam2_jamtaster_project_support_units
+    COMMAND $<TARGET_FILE:jam2_jamtaster_project_support_tests>)
+set_tests_properties(jam2_jamtaster_project_support_units PROPERTIES
+    LABELS "unit;gui;jamtaster;model;project"
+    TIMEOUT 30)
+if(WIN32)
+    set_tests_properties(jam2_jamtaster_project_support_units PROPERTIES
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()
 
 add_executable(jam2_plugin_worker_tests EXCLUDE_FROM_ALL
@@ -1160,7 +1195,8 @@ add_custom_target(jam2_tests_unit
         jam2_jamtaster_pipeline_tests
         jam2_jamtaster_worker_protocol_tests
         jam2_jamtaster_service_tests
-        jam2_jamtaster_dialog_tests)
+        jam2_jamtaster_dialog_tests
+        jam2_jamtaster_project_support_tests)
 
 add_custom_target(jam2_tests_plugin
     DEPENDS
@@ -1196,6 +1232,7 @@ add_custom_target(jam2_tests_gui
         jam2_user_preferences_tests
         jam2_detail_section_edit_tests
         jam2_jamtaster_dialog_tests
+        jam2_jamtaster_project_support_tests
         jam2_four_gui_agent_smoke
         jam2_four_gui_modal_integration
         jam2_four_jam_sync_integration

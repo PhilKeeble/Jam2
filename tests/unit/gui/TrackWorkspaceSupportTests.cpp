@@ -158,6 +158,36 @@ void testMetadataAndRejection(const QString& root)
         "empty PCM data must never become a staged asset");
 }
 
+void testTrackSidecarJson(const QString& root)
+{
+    const QString wavPath = QDir(root).absoluteFilePath(
+        QStringLiteral("sidecars/take.wav"));
+    const QString sidecarPath = wavPath + QStringLiteral(".json");
+
+    require(readTrackSidecarJson(wavPath).isEmpty(),
+        "a missing track sidecar must be treated as absent");
+
+    writeBytes(sidecarPath, QByteArrayLiteral("not-json"));
+    require(readTrackSidecarJson(wavPath).isEmpty(),
+        "a malformed track sidecar must be rejected");
+
+    writeBytes(sidecarPath, QByteArrayLiteral("[1,2,3]"));
+    require(readTrackSidecarJson(wavPath).isEmpty(),
+        "a non-object track sidecar must be rejected");
+
+    writeBytes(sidecarPath, QByteArrayLiteral(
+        "{\"title\":\"Shared take\",\"duration_ms\":1250}"));
+    const QJsonObject valid = readTrackSidecarJson(wavPath);
+    require(valid.value(QStringLiteral("title")).toString() ==
+                QStringLiteral("Shared take") &&
+            valid.value(QStringLiteral("duration_ms")).toInt() == 1250,
+        "a bounded object sidecar must preserve its typed fields");
+
+    writeBytes(sidecarPath, QByteArray(1024 * 1024 + 1, 'x'));
+    require(readTrackSidecarJson(wavPath).isEmpty(),
+        "a sidecar above the one-MiB input bound must be rejected");
+}
+
 void testExactStagingAndRepair(const QString& root)
 {
     const QByteArray sourceBytes = pcm16Wav(44100, 2, 441);
@@ -637,6 +667,7 @@ int main(int argc, char** argv)
     try {
         QTemporaryDir root = makeRoot();
         testMetadataAndRejection(root.path());
+        testTrackSidecarJson(root.path());
         testExactStagingAndRepair(root.path());
         testResampledStagingAndRepair(root.path());
         testStagingBoundaryValidation(root.path());

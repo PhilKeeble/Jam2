@@ -22,6 +22,7 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QDir>
+#include <QFileDialog>
 #include <QHeaderView>
 #include <QJsonArray>
 #include <QLineEdit>
@@ -724,6 +725,141 @@ void GuiTestAgent::handle(const QJsonObject& command)
         });
         return;
     }
+    if (type == QStringLiteral("application.local-dialog.open")) {
+        if (!onlyFields(command, {"format", "type", "id"})) {
+            reject(command, QStringLiteral(
+                "unsupported field for local dialog open"));
+            return;
+        }
+        QPointer<MainWindow> window(&window_);
+        QTimer::singleShot(0, &window_, [window] {
+            if (window) window->showLocalPerformSetup();
+        });
+        emitEvent(QStringLiteral("command_applied"), {
+            {QStringLiteral("id"), command.value(QStringLiteral("id"))},
+        });
+        return;
+    }
+    if (type == QStringLiteral("audio.device-preflight")) {
+        int sampleRate = 0;
+        if (!onlyFields(command, {"format", "type", "id", "sample_rate"}) ||
+            !exactInteger(command.value(QStringLiteral("sample_rate")),
+                8000, 384000, sampleRate)) {
+            reject(command, QStringLiteral("sample_rate is invalid"));
+            return;
+        }
+        const bool supported = window_.selectedDeviceSupportsSampleRate(sampleRate);
+        emitEvent(QStringLiteral("command_applied"), {
+            {QStringLiteral("id"), command.value(QStringLiteral("id"))},
+            {QStringLiteral("sample_rate"), sampleRate},
+            {QStringLiteral("supported"), supported},
+            {QStringLiteral("device"), window_.selectedDeviceDescription()},
+        });
+        return;
+    }
+    if (type == QStringLiteral("application.boundary")) {
+        const QString action = command.value(QStringLiteral("action")).toString();
+        if (!onlyFields(command, {"format", "type", "id", "action"}) ||
+            action.isEmpty() || action.toUtf8().size() > 128) {
+            reject(command, QStringLiteral("boundary action is invalid"));
+            return;
+        }
+        const auto closeNextModal = [] {
+            QTimer::singleShot(0, QCoreApplication::instance(), [] {
+                if (QWidget* modal = QApplication::activeModalWidget()) {
+                    modal->close();
+                }
+            });
+        };
+        if (action == QStringLiteral("session-maintenance")) {
+            const ConnectionDiagnosticsSnapshot diagnostics =
+                window_.lastDiagnostics_.value_or(ConnectionDiagnosticsSnapshot{});
+            window_.handleConnectionDiagnostics(diagnostics);
+            window_.notePreAuthenticationDisconnect();
+            window_.refreshControlConnection();
+            window_.restoreSessionHeaderStatus();
+            window_.cleanupTransientTrackWavs();
+            window_.requestRecordingGroupRecovery();
+            window_.handleRecordingGroupRecovery({});
+            window_.revealLooperLaneWav(-1);
+        } else if (action == QStringLiteral("track-reload")) {
+            window_.loadTrackJson(
+                window_.trackToJson(), window_.trackController_.model());
+        } else if (action == QStringLiteral("file-dialog-cancels")) {
+            closeNextModal();
+            window_.addLooperWavs();
+            closeNextModal();
+            window_.openSong();
+        } else if (action == QStringLiteral("jamtaster-dialog-cancel")) {
+            closeNextModal();
+            window_.showJamTasterDialog();
+        } else if (action == QStringLiteral("jamtaster-source-disposition")) {
+            closeNextModal();
+            if (!window_.promptJamTasterSourceDisposition().isEmpty()) {
+                reject(command, QStringLiteral(
+                    "JamTaster source-disposition cancel was not preserved"));
+                return;
+            }
+        } else if (action == QStringLiteral("jamtaster-apply")) {
+            const QJsonObject tempo{
+                {QStringLiteral("bpm"), 136.75},
+                {QStringLiteral("project_bpm"), 137},
+                {QStringLiteral("beats_per_bar"), 7},
+            };
+            window_.applyJamTasterTempo(tempo);
+            window_.applyJamTasterQuick(
+                tempo,
+                {},
+                QJsonObject{
+                    {QStringLiteral("tempo"), true},
+                    {QStringLiteral("stems"), false},
+                },
+                {});
+            window_.showJamTasterSessionHeaderStatus();
+        } else if (action == QStringLiteral("save-session-defaults")) {
+            window_.saveCreateDefaults();
+            window_.saveJoinDefaults();
+        } else if (action == QStringLiteral("recording-loopback")) {
+            window_.laneRecordingState_.outputPath = QDir(
+                window_.jamAssetFolder(JamStorage::AssetKind::Recorded))
+                .absoluteFilePath(QStringLiteral("automation-loopback.wav"));
+            if (window_.captureManualStopCheck_) {
+                window_.captureManualStopCheck_->setChecked(true);
+            }
+            window_.startLoopbackCapture();
+        } else if (action == QStringLiteral("jamtaster-error-boundaries")) {
+            const QString missing = QDir(window_.jamStorage_.rootFolder())
+                .absoluteFilePath(QStringLiteral("missing-jamtaster-result"));
+            closeNextModal();
+            window_.applyJamTasterConverted(missing, {});
+            closeNextModal();
+            window_.createJamTasterSong(missing, {}, {});
+            closeNextModal();
+            window_.showJamRecordingImportDialog(missing);
+        } else if (action == QStringLiteral("recording-schedule")) {
+            (void)window_.scheduleLoopbackCountIn(1, false);
+            window_.cancelLoopbackCountIn();
+            closeNextModal();
+            window_.startArmedLooperLaneRecordingNow(0);
+            closeNextModal();
+            window_.startInputCapture(0, 0);
+            window_.stopInputCapture(0);
+        } else if (action == QStringLiteral("failure-presentation")) {
+            window_.showJamFailure(QStringLiteral(
+                "automation failure presentation boundary"));
+        } else {
+            reject(command, QStringLiteral("unsupported boundary action"));
+            return;
+        }
+        emitEvent(QStringLiteral("command_applied"), {
+            {QStringLiteral("id"), command.value(QStringLiteral("id"))},
+            {QStringLiteral("action"), action},
+            {QStringLiteral("jam"), window_.automationJamSnapshot()},
+            {QStringLiteral("content"), window_.automationContentSnapshot()},
+            {QStringLiteral("performance"), window_.automationPerformanceSnapshot()},
+        });
+        return;
+    }
     if (type == QStringLiteral("jam.leave")) {
         if (!onlyFields(command, {"format", "type", "id"})) {
             reject(command, QStringLiteral("unsupported field for automation jam leave"));
@@ -1151,7 +1287,9 @@ bool GuiTestAgent::invokeControl(const QJsonObject& command, QString& error)
             return true;
         }
         if (operation == QStringLiteral("click-async") &&
-            jam2::gui::guiControlAvailability(*button) == QStringLiteral("modal")) {
+            (jam2::gui::guiControlAvailability(*button) == QStringLiteral("modal") ||
+             jam2::gui::guiControlAvailability(*button) ==
+                 QStringLiteral("hardware-profile"))) {
             const QPointer<QAbstractButton> target(button);
             QTimer::singleShot(0, button, [target] {
                 if (target && target->isEnabled()) target->click();

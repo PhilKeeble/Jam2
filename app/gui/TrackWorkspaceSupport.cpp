@@ -10,6 +10,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QSaveFile>
 #include <QtEndian>
 
@@ -192,6 +193,18 @@ WavMetadata readWavMetadata(const QString& path)
     meta.sha256 = sha256FileHex(path);
     if (meta.sha256.isEmpty()) throw std::runtime_error("failed to hash WAV");
     return meta;
+}
+
+QJsonObject readTrackSidecarJson(const QString& wavPath)
+{
+    QFile file(wavPath + QStringLiteral(".json"));
+    constexpr qint64 kMaxSidecarBytes = 1024 * 1024;
+    if (!file.open(QIODevice::ReadOnly) ||
+        file.size() < 0 || file.size() > kMaxSidecarBytes) {
+        return {};
+    }
+    const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
+    return document.isObject() ? document.object() : QJsonObject{};
 }
 
 StagedPcm16Asset stagePcm16Asset(

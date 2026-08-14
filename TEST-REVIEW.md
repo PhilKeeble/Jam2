@@ -17,6 +17,7 @@ Items are never actioned merely because they appear here.
 | REVIEW-008 | Section/render duration | The maintained Section model can describe substantially more audio than `PreparedMixRenderer` will render. | Choose streaming/full-duration rendering, a visibly smaller Section limit, or an explicit product error. | Open |
 | REVIEW-010 | Legacy session defaults | Three `SessionController` default helpers and their sibling-path resolver have no caller in the unified executable. | Approve removal as obsolete bootstrap API, or identify the intended owner. | Open |
 | REVIEW-011 | Physical MIDI and driver callbacks | The Windows profile contains a real ASIO device and VST3 but no physical WinMM MIDI input; unsolicited driver-change/error callbacks cannot be forced safely. | Run the listed manual hardware checks when suitable MIDI/driver hardware is available. | Open |
+| REVIEW-012 | Practice catalogue selection invariant | The private style/progression selector requires a nonempty maintained catalogue; valid generation cannot construct its empty-input failure shape. | Keep the invariant and its exact coverage exemptions, or request a fallible selector API if catalogues become runtime data. | Open |
 # Jam2 Test Review
 
 ## REVIEW-001 - should Join Jam Cancel preserve the typed invite draft?
@@ -230,9 +231,29 @@ Items are never actioned merely because they appear here.
 - An unsolicited ASIO sample-rate-change or post-start kernel accept/select
   failure is likewise not manufactured against the user's driver or OS. Normal
   callbacks, channel errors, bind failures, transport failures, and cleanup are
-  automated.
+  automated. The explicit ASIO device uses the ordinary buffer-switch callback,
+  so the driver's optional time-info callback and unexpected COM error text
+  formatter remain exact reviewed exemptions. WinMM system error-string
+  formatting likewise needs a real nonzero driver result.
 - Manual check requested when suitable hardware is available: open a physical
   MIDI input, send supported short messages and at least one unsupported/SysEx
   message, verify routed events and exact counters, close/reopen it, then change
   the ASIO driver's sample rate while idle and confirm the visible diagnostic
   and safe restart behavior.
+
+## REVIEW-012 - should private practice catalogues remain a hard invariant?
+
+- `PracticeIdeaGenerator` owns compile-time style and progression catalogues.
+  Its `choose<T>` helper is only called after those internal catalogues or
+  explicitly constructed nonempty candidate lists have been selected.
+- Deterministic practice tests exercise the public generator across maintained
+  styles, meters, complexity levels, seeds, continuations, and rendered parts.
+  The two wholly uncovered template specializations are the compiler's separate
+  catalogue-type bodies, not independent user flows.
+- Coverage decision: exempt only the exact `StyleDef` and `ProgressionDef`
+  specializations. A fabricated empty private catalogue would turn an internal
+  invariant violation into a supported product input and would not add useful
+  behavioral confidence.
+- Manual decision requested only if these catalogues later become editable or
+  loaded from disk; in that case the selector should become fallible and gain
+  explicit empty-catalogue tests.

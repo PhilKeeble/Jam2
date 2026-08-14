@@ -121,6 +121,7 @@ public:
     GuiLoopbackRecorder& operator=(const GuiLoopbackRecorder&) = delete;
 
     bool isRunning() const;
+    bool setCaptureBackendForTesting(CaptureBackend captureBackend, QString* error = nullptr);
     bool start(const GuiLoopbackOptions& options, FinishedCallback finished, QString* error);
     void stop();
 

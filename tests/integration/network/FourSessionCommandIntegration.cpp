@@ -543,7 +543,27 @@ int main(int argc, char* argv[])
         }
     }
 
-    for (std::size_t index = 0; index < kPeerCount; ++index) {
+    const std::size_t rejectedPeer = kPeerCount - 1;
+    if (!send(*peers[0], {
+            {QStringLiteral("type"), QStringLiteral("debug.session-error")},
+            {QStringLiteral("id"), QStringLiteral("session-error")},
+            {QStringLiteral("target_peer_token"),
+                deterministicHex(31 + static_cast<int>(rejectedPeer), 16)},
+        }, error)) {
+        return fail(error);
+    }
+    QJsonObject injected;
+    if (!waitForNamedEvent(
+            *peers[0],
+            QStringLiteral("command_applied"),
+            QStringLiteral("session-error"),
+            2s,
+            injected,
+            error)) {
+        return fail(QStringLiteral("injecting coordinator session error: ") + error);
+    }
+
+    for (std::size_t index = 0; index < rejectedPeer; ++index) {
         if (!send(*peers[index], {
                 {QStringLiteral("type"), QStringLiteral("shutdown")},
                 {QStringLiteral("id"),
@@ -553,19 +573,23 @@ int main(int argc, char* argv[])
         }
     }
     for (std::size_t index = 0; index < kPeerCount; ++index) {
-        QJsonObject shutdown;
-        if (!waitForNamedEvent(
-                *peers[index],
-                QStringLiteral("shutdown"),
-                QString(),
-                10s,
-                shutdown,
-                error)) {
-            return fail(QStringLiteral("peer %1 shutdown event: %2")
-                .arg(index + 1).arg(error));
+        if (index != rejectedPeer) {
+            QJsonObject shutdown;
+            if (!waitForNamedEvent(
+                    *peers[index],
+                    QStringLiteral("shutdown"),
+                    QString(),
+                    10s,
+                    shutdown,
+                    error)) {
+                return fail(QStringLiteral("peer %1 shutdown event: %2")
+                    .arg(index + 1).arg(error));
+            }
         }
         int exitCode = -1;
-        if (!peers[index]->waitForExit(10s, exitCode, error) || exitCode != 0) {
+        const int expectedExitCode = index == rejectedPeer ? 4 : 0;
+        if (!peers[index]->waitForExit(10s, exitCode, error) ||
+            exitCode != expectedExitCode) {
             return fail(QStringLiteral("peer %1 exit: %2 code=%3")
                 .arg(index + 1).arg(error).arg(exitCode));
         }
@@ -576,7 +600,10 @@ int main(int argc, char* argv[])
         const QJsonObject result = manifest.value(QStringLiteral("result")).toObject();
         const int rejectedCommands = result
             .value(QStringLiteral("commands_rejected")).toInt(-1);
-        if (!manifest.value(QStringLiteral("ok")).toBool() ||
+        if (manifest.value(QStringLiteral("ok")).toBool() !=
+                (index != rejectedPeer) ||
+            result.value(QStringLiteral("return_code")).toInt(-1) !=
+                expectedExitCode ||
             result.value(QStringLiteral("remote_peer_count")).toInt(-1) != 3 ||
             result.value(QStringLiteral("control_max_active_remote_peers")).toInt(-1) != 3 ||
             result.value(QStringLiteral("automation_command_queue_high_water")).toInt() < 1 ||

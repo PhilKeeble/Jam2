@@ -31,6 +31,7 @@ look into what python is left, cpp might still be calling some like the fuzzer
 
 ## Bugs
 
+when ctests GUI is hidden i can till see popups
 
 
 ## jamtaster

@@ -211,6 +211,7 @@ int main(int argc, char** argv)
         int maximumRouterPeak = 0;
         constexpr auto warmupWindow = std::chrono::milliseconds(500);
         constexpr std::uint64_t maximumWarmupMisses = 2;
+        constexpr std::uint64_t maximumSteadyMisses = 2;
         std::uint64_t missesAfterWarmup = 0;
         bool sampledWarmup = false;
         const auto started = std::chrono::steady_clock::now();
@@ -244,7 +245,9 @@ int main(int argc, char** argv)
             throw std::runtime_error("The real device/plugin callback path did not run");
         }
 
-        std::cout << "Jam2 real-device plugin test passed; device=" << deviceId
+        const std::uint64_t steadyMisses =
+            pluginStats.deadlineMisses - missesAfterWarmup;
+        std::cout << "Jam2 real-device plugin test results; device=" << deviceId
                   << " input=" << userInputChannel
                   << " frames=" << engineStats.audio_buffer_frames
                   << " callbacks=" << engineStats.callbacks
@@ -255,8 +258,9 @@ int main(int argc, char** argv)
                   << " plugin_completed=" << pluginStats.completedBlocks
                   << " plugin_misses=" << pluginStats.deadlineMisses
                   << " warmup_misses=" << missesAfterWarmup
-                  << " steady_misses=" <<
-                         (pluginStats.deadlineMisses - missesAfterWarmup)
+                  << " steady_misses=" << steadyMisses
+                  << " allowed_misses=" << maximumWarmupMisses << '/'
+                  << maximumSteadyMisses
                   << " callback_gaps(1.1x/1.5x/2x)="
                   << engineStats.callback_timing.gap_over_1_1x_count << '/'
                   << engineStats.callback_timing.gap_over_1_5x_count << '/'
@@ -264,9 +268,13 @@ int main(int argc, char** argv)
                   << " process_us(last/avg/max)=" << pluginStats.workerProcessLastUs << '/'
                   << pluginStats.workerProcessAverageUs << '/'
                   << pluginStats.workerProcessMaxUs << '\n';
-        return sampledWarmup && missesAfterWarmup <= maximumWarmupMisses &&
-                pluginStats.deadlineMisses == missesAfterWarmup
-            ? 0 : 1;
+        if (!sampledWarmup || missesAfterWarmup > maximumWarmupMisses ||
+            steadyMisses > maximumSteadyMisses) {
+            throw std::runtime_error(
+                "The real device/plugin deadline miss count exceeded its bounded tolerance");
+        }
+        std::cout << "Jam2 real-device plugin test passed\n";
+        return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

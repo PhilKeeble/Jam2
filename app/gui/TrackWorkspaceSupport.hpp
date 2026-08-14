@@ -34,6 +34,7 @@ struct StagedPcm16Asset {
 };
 
 WavMetadata readWavMetadata(const QString& path);
+QJsonObject readTrackSidecarJson(const QString& wavPath);
 StagedPcm16Asset stagePcm16Asset(
     const QString& sourcePath,
     const QString& stagingFolder,

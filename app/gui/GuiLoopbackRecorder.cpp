@@ -510,6 +510,27 @@ bool GuiLoopbackRecorder::isRunning() const
     return running_.load(std::memory_order_acquire);
 }
 
+bool GuiLoopbackRecorder::setCaptureBackendForTesting(
+    CaptureBackend captureBackend,
+    QString* error)
+{
+    if (isRunning()) {
+        if (error) *error = QStringLiteral(
+            "cannot replace the loopback capture backend while recording");
+        return false;
+    }
+    if (!captureBackend) {
+        if (error) *error = QStringLiteral("loopback capture backend is required");
+        return false;
+    }
+    if (thread_.joinable()) {
+        thread_.join();
+    }
+    captureBackend_ = std::move(captureBackend);
+    if (error) error->clear();
+    return true;
+}
+
 bool GuiLoopbackRecorder::start(const GuiLoopbackOptions& options, FinishedCallback finished, QString* error)
 {
     if (isRunning()) {

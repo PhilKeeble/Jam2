@@ -1,5 +1,7 @@
 #include "SettingsDialog.hpp"
 
+#include "AudioDeviceUiSupport.hpp"
+
 #include "GuiControlContract.hpp"
 #include "GuiPresentation.hpp"
 #include "MusicTheory.hpp"
@@ -87,25 +89,6 @@ void selectPreferredDevice(
 {
     const int index = preferredDeviceIndex(combo, devices, preference);
     if (index >= 0) combo->setCurrentIndex(index);
-}
-
-void storeSelectedDevice(
-    AudioDevicePreference& preference,
-    const QComboBox* combo,
-    const std::vector<jam2::audio::DeviceInfo>& devices)
-{
-    if (combo == nullptr) return;
-    bool ok = false;
-    const int id = combo->currentData().toInt(&ok);
-    if (!ok) return;
-    const auto selected = std::find_if(
-        devices.cbegin(), devices.cend(),
-        [id](const auto& item) { return item.id == id; });
-    if (selected == devices.cend()) return;
-    preference.backend = QString::fromStdString(selected->backend);
-    preference.stableId = QString::fromStdString(
-        selected->clsid.empty() ? selected->name : selected->clsid);
-    preference.name = QString::fromStdString(selected->name);
 }
 
 } // namespace
@@ -251,7 +234,8 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
         AudioDevicePreference value = original;
         value.inputChannels = editors.input->text().trimmed();
         value.outputChannels = editors.output->text().trimmed();
-        storeSelectedDevice(value, editors.device, availableDevices_);
+        jam2::gui::storeSelectedDevicePreference(
+            value, editors.device, availableDevices_);
         return value;
     };
     auto applyAudioToEditors = [&availableDevices_](
@@ -1423,7 +1407,8 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
             desired.bufferSize = localBufferSize->currentData().toInt();
             desired.inputChannels = localInput->text().trimmed();
             desired.outputChannels = localOutput->text().trimmed();
-            storeSelectedDevice(desired, localDevice, availableDevices_);
+            jam2::gui::storeSelectedDevicePreference(
+                desired, localDevice, availableDevices_);
             if (!callbacks.applyLocalAudio(
                     desired, localDevice->currentData().toString(), &dialog)) {
                 return;
@@ -1470,7 +1455,8 @@ std::optional<SettingsDialogResult> SettingsDialog::run(
     updated.localAudio.bufferSize = localBufferSize->currentData().toInt();
     updated.localAudio.inputChannels = localInput->text().trimmed();
     updated.localAudio.outputChannels = localOutput->text().trimmed();
-    storeSelectedDevice(updated.localAudio, localDevice, availableDevices_);
+    jam2::gui::storeSelectedDevicePreference(
+        updated.localAudio, localDevice, availableDevices_);
     updated.splitNetworkAudioByRole = splitNetworkAudio->isChecked();
     updated.networkAudio = audioFromEditors(updated.networkAudio, networkAudio);
     if (updated.splitNetworkAudioByRole) {
