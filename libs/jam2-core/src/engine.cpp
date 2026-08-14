@@ -1,4 +1,5 @@
 #include "engine.hpp"
+#include "audio_device_processing.hpp"
 #include "runtime_limits.hpp"
 
 #include <algorithm>
@@ -22,7 +23,7 @@ namespace jam2 {
 
 namespace {
 
-constexpr double kPi = 3.141592653589793238462643383279502884;
+namespace processing = audio::device_processing;
 
 template <typename T, std::size_t Capacity>
 class FixedQueue {
@@ -111,215 +112,6 @@ int clamp_ratio(int value) noexcept
     return std::clamp(value, 500000, 2000000);
 }
 
-std::int32_t clamp_i32(double sample) noexcept
-{
-    return static_cast<std::int32_t>(std::clamp(
-        sample,
-        static_cast<double>((std::numeric_limits<std::int32_t>::min)()),
-        static_cast<double>((std::numeric_limits<std::int32_t>::max)())));
-}
-
-std::int32_t mix_i32(std::int32_t left, std::int32_t right) noexcept
-{
-    const std::int64_t mixed = static_cast<std::int64_t>(left) + static_cast<std::int64_t>(right);
-    return static_cast<std::int32_t>(std::clamp<std::int64_t>(
-        mixed,
-        (std::numeric_limits<std::int32_t>::min)(),
-        (std::numeric_limits<std::int32_t>::max)()));
-}
-
-int peak_ppm(std::span<const std::int32_t> samples) noexcept
-{
-    std::int64_t peak = 0;
-    for (const std::int32_t sample : samples) {
-        const std::int64_t magnitude = sample < 0
-            ? -static_cast<std::int64_t>(sample)
-            : static_cast<std::int64_t>(sample);
-        peak = std::max(peak, magnitude);
-    }
-    const double normalized = static_cast<double>(peak) /
-        static_cast<double>((std::numeric_limits<std::int32_t>::max)());
-    return static_cast<int>(std::clamp(normalized, 0.0, 1.0) * 1000000.0);
-}
-
-void update_peak(std::atomic<int>& target, int value) noexcept
-{
-    int current = target.load(std::memory_order_relaxed);
-    while (value > current &&
-           !target.compare_exchange_weak(
-               current,
-               value,
-               std::memory_order_relaxed,
-               std::memory_order_relaxed)) {
-    }
-}
-
-std::int32_t render_test_input(
-    int mode,
-    std::uint64_t frame,
-    double sample_rate,
-    double level) noexcept
-{
-    if (mode == static_cast<int>(EngineTestInput::Silence) || sample_rate <= 0.0) {
-        return 0;
-    }
-    if (mode == static_cast<int>(EngineTestInput::Tone440)) {
-        const double phase = std::fmod(static_cast<double>(frame) * 440.0 / sample_rate, 1.0);
-        return clamp_i32(std::sin(phase * 2.0 * kPi) * level * 2147483647.0);
-    }
-    if (mode == static_cast<int>(EngineTestInput::ToneBassB0)) {
-        const double phase = std::fmod(static_cast<double>(frame) * 30.867706 / sample_rate, 1.0);
-        return clamp_i32(std::sin(phase * 2.0 * kPi) * level * 2147483647.0);
-    }
-    if (mode == static_cast<int>(EngineTestInput::Pulse1s)) {
-        const std::uint64_t period = static_cast<std::uint64_t>(std::max(1.0, sample_rate));
-        const std::uint64_t width = std::max<std::uint64_t>(1, period / 100U);
-        return frame % period < width ? clamp_i32(level * 2147483647.0) : 0;
-    }
-    return 0;
-}
-
-std::int32_t render_metronome_test_input(
-    const audio::StreamControl& control,
-    std::uint64_t frame,
-    double sample_rate,
-    double level) noexcept
-{
-    if (sample_rate <= 0.0 ||
-        !control.metronome_enabled.load(std::memory_order_relaxed) ||
-        !control.metronome_epoch_valid.load(std::memory_order_relaxed)) {
-        return 0;
-    }
-    const std::uint64_t epoch = control.metronome_epoch_sample_time.load(std::memory_order_relaxed);
-    if (frame < epoch) {
-        return 0;
-    }
-    const auto pattern = metronome::sanitize({
-        control.metronome_bpm.load(std::memory_order_relaxed),
-        control.metronome_beats_per_bar.load(std::memory_order_relaxed),
-        control.metronome_division.load(std::memory_order_relaxed),
-        control.metronome_step_count.load(std::memory_order_relaxed),
-        control.metronome_play_mask_low.load(std::memory_order_relaxed),
-        control.metronome_play_mask_high.load(std::memory_order_relaxed),
-        control.metronome_accent_mask_low.load(std::memory_order_relaxed),
-        control.metronome_accent_mask_high.load(std::memory_order_relaxed),
-        control.metronome_beat_unit.load(std::memory_order_relaxed),
-        control.metronome_tempo_pulse_units.load(std::memory_order_relaxed),
-    });
-    const std::uint64_t interval = metronome::step_interval_samples(
-        sample_rate,
-        pattern.bpm,
-        pattern.division,
-        pattern.tempo_pulse_units);
-    return metronome::mix_i32(
-        0,
-        metronome::render_sample(
-            pattern,
-            frame - epoch,
-            interval,
-            sample_rate,
-            level,
-            metronome::ClickVoice::Normal,
-            metronome::sanitize_click_sound(
-                control.metronome_sound.load(std::memory_order_relaxed))));
-}
-
-void mix_metronome_output(
-    audio::StreamControl& control,
-    std::uint64_t callback_frame,
-    double sample_rate,
-    std::span<std::int32_t> output,
-    std::span<std::int32_t> stem) noexcept
-{
-    if (stem.size() == output.size()) {
-        std::fill(stem.begin(), stem.end(), 0);
-    }
-    const bool local_click_suppressed =
-        control.metronome_mode.load(std::memory_order_relaxed) == 1 &&
-        !control.leader_audio_local_click.load(std::memory_order_relaxed);
-    const bool transport_gated =
-        control.metronome_transport_gated.load(std::memory_order_relaxed);
-    const bool output_allowed = audio::metronome_output_allowed(
-        control.metronome_enabled.load(std::memory_order_relaxed) ||
-            control.playback_count_in_active.load(std::memory_order_relaxed),
-        local_click_suppressed,
-        transport_gated,
-        control.transport_playback_active.load(std::memory_order_relaxed),
-        control.recording_count_in_active.load(std::memory_order_relaxed));
-    if (sample_rate <= 0.0 || !output_allowed) {
-        return;
-    }
-
-    const double level = static_cast<double>(
-        std::clamp(control.metronome_level_ppm.load(std::memory_order_relaxed), 0, 4000000)) /
-        1000000.0;
-    const bool epoch_valid = control.metronome_epoch_valid.load(std::memory_order_relaxed);
-    const std::uint64_t epoch = control.metronome_epoch_sample_time.load(std::memory_order_relaxed);
-    const std::int64_t render_offset =
-        control.metronome_render_offset_frames.load(std::memory_order_relaxed);
-    const auto pattern = metronome::sanitize({
-        control.metronome_bpm.load(std::memory_order_relaxed),
-        control.metronome_beats_per_bar.load(std::memory_order_relaxed),
-        control.metronome_division.load(std::memory_order_relaxed),
-        control.metronome_step_count.load(std::memory_order_relaxed),
-        control.metronome_play_mask_low.load(std::memory_order_relaxed),
-        control.metronome_play_mask_high.load(std::memory_order_relaxed),
-        control.metronome_accent_mask_low.load(std::memory_order_relaxed),
-        control.metronome_accent_mask_high.load(std::memory_order_relaxed),
-        control.metronome_beat_unit.load(std::memory_order_relaxed),
-        control.metronome_tempo_pulse_units.load(std::memory_order_relaxed),
-    });
-    const std::uint64_t interval = metronome::step_interval_samples(
-        sample_rate,
-        pattern.bpm,
-        pattern.division,
-        pattern.tempo_pulse_units);
-    const bool count_in_active =
-        control.recording_count_in_active.load(std::memory_order_acquire);
-    const auto click_sound = metronome::sanitize_click_sound(
-        control.metronome_sound.load(std::memory_order_relaxed));
-    const std::uint64_t count_in_start =
-        control.recording_count_in_start_frame.load(std::memory_order_relaxed);
-    const std::uint64_t count_in_target =
-        control.recording_count_in_target_frame.load(std::memory_order_relaxed);
-
-    for (std::size_t index = 0; index < output.size(); ++index) {
-        const std::uint64_t raw_frame =
-            callback_frame + static_cast<std::uint64_t>(index);
-        if (count_in_active && raw_frame < count_in_start) {
-            continue;
-        }
-        std::uint64_t frame = raw_frame;
-        if (render_offset < 0) {
-            const std::uint64_t magnitude = static_cast<std::uint64_t>(-(render_offset + 1)) + 1ULL;
-            frame = frame > magnitude ? frame - magnitude : 0ULL;
-        } else {
-            frame += static_cast<std::uint64_t>(render_offset);
-        }
-        std::uint64_t position = 0;
-        if (!audio::metronome_pattern_position(
-                control, raw_frame, frame, epoch_valid, epoch, position)) {
-            continue;
-        }
-        const double rendered = metronome::render_sample(
-            pattern,
-            position,
-            interval,
-            sample_rate,
-            level,
-            count_in_active &&
-                    raw_frame >= count_in_start &&
-                    raw_frame < count_in_target
-                ? metronome::ClickVoice::CountIn
-                : metronome::ClickVoice::Normal,
-            click_sound);
-        if (stem.size() == output.size()) {
-            stem[index] = metronome::mix_i32(0, rendered);
-        }
-        output[index] = metronome::mix_i32(output[index], rendered);
-    }
-}
-
 class HeadlessDeviceStream final : public audio::DeviceStream {
 public:
     HeadlessDeviceStream(
@@ -361,6 +153,9 @@ public:
         inputs_mix_scratch_.resize(frames, 0);
         metronome_scratch_.resize(frames, 0);
         prepared_scratch_.resize(frames, 0);
+        physical_input_scratch_.resize(
+            frames * info_.channels.input.size(), 0);
+        input_source_pointers_.resize(info_.channels.input.size(), nullptr);
         thread_ = std::thread([this] { run(); });
     }
 
@@ -379,69 +174,46 @@ public:
     audio::CallbackTimingStats callback_timing_stats() const override
     {
         return {
-            interval_min_us_.load(std::memory_order_relaxed),
-            interval_sum_us_.load(std::memory_order_relaxed),
-            interval_max_us_.load(std::memory_order_relaxed),
-            interval_samples_.load(std::memory_order_relaxed),
-            gap_over_1_1x_count_.load(std::memory_order_relaxed),
-            gap_over_1_5x_count_.load(std::memory_order_relaxed),
-            gap_over_2x_count_.load(std::memory_order_relaxed),
+            callback_intervals_.minimumUs.load(std::memory_order_relaxed),
+            callback_intervals_.sumUs.load(std::memory_order_relaxed),
+            callback_intervals_.maximumUs.load(std::memory_order_relaxed),
+            callback_intervals_.samples.load(std::memory_order_relaxed),
+            callback_intervals_.gapsOver1_1x.load(std::memory_order_relaxed),
+            callback_intervals_.gapsOver1_5x.load(std::memory_order_relaxed),
+            callback_intervals_.gapsOver2x.load(std::memory_order_relaxed),
         };
     }
 
 private:
-    void observe_callback_interval(std::uint64_t now_us) noexcept
-    {
-        if (last_callback_us_ == 0) {
-            last_callback_us_ = now_us;
-            return;
-        }
-        const std::uint64_t interval = now_us >= last_callback_us_ ? now_us - last_callback_us_ : 0;
-        last_callback_us_ = now_us;
-        const std::uint64_t expected = static_cast<std::uint64_t>(
-            static_cast<double>(buffer_size_) * 1000000.0 / clock_rate_);
-        std::uint64_t minimum = interval_min_us_.load(std::memory_order_relaxed);
-        while ((minimum == 0 || interval < minimum) &&
-               !interval_min_us_.compare_exchange_weak(minimum, interval, std::memory_order_relaxed)) {
-        }
-        interval_sum_us_.fetch_add(interval, std::memory_order_relaxed);
-        std::uint64_t maximum = interval_max_us_.load(std::memory_order_relaxed);
-        while (interval > maximum &&
-               !interval_max_us_.compare_exchange_weak(maximum, interval, std::memory_order_relaxed)) {
-        }
-        interval_samples_.fetch_add(1, std::memory_order_relaxed);
-        if (expected > 0) {
-            if (interval > expected * 11U / 10U) {
-                gap_over_1_1x_count_.fetch_add(1, std::memory_order_relaxed);
-            }
-            if (interval > expected * 3U / 2U) {
-                gap_over_1_5x_count_.fetch_add(1, std::memory_order_relaxed);
-            }
-            if (interval > expected * 2U) {
-                gap_over_2x_count_.fetch_add(1, std::memory_order_relaxed);
-            }
-        }
-    }
-
     void fill_capture(std::uint64_t callback_frame) noexcept
     {
-        const int mode = control_.test_input_mode.load(std::memory_order_relaxed);
-        const double level = static_cast<double>(
-            std::clamp(control_.test_input_level_ppm.load(std::memory_order_relaxed), 0, 1000000)) /
-            1000000.0;
-        for (std::int32_t& sample : capture_scratch_) {
-            sample = mode == static_cast<int>(EngineTestInput::MetronomePulse)
-                ? render_metronome_test_input(control_, test_input_frame_, sample_rate_, level)
-                : render_test_input(mode, test_input_frame_, sample_rate_, level);
-            ++test_input_frame_;
+        processing::fill_test_input(
+            &control_, sample_rate_, test_input_frame_, capture_scratch_);
+        if (control_.input_source_router != nullptr) {
+            for (std::size_t channel = 0;
+                 channel < input_source_pointers_.size(); ++channel) {
+                auto* destination = physical_input_scratch_.data() +
+                    channel * capture_scratch_.size();
+                std::copy(
+                    capture_scratch_.cbegin(), capture_scratch_.cend(), destination);
+                input_source_pointers_[channel] = destination;
+            }
+            const bool routed = control_.input_source_router->process(
+                std::span<const std::int32_t* const>(
+                    input_source_pointers_.data(), input_source_pointers_.size()),
+                capture_scratch_.size(),
+                callback_frame,
+                sample_rate_,
+                capture_scratch_);
+            if (!routed) {
+                std::fill(capture_scratch_.begin(), capture_scratch_.end(), 0);
+            }
         }
         if (audio::prepare_network_capture_callback(control_, capture_ring_, callback_frame)) {
             capture_ring_.push(capture_scratch_);
         }
         audio::push_pitch_analysis_callback(control_, pitch_ring_, capture_scratch_);
-        const int peak = peak_ppm(capture_scratch_);
-        update_peak(control_.input_peak_ppm, peak);
-        update_peak(control_.gui_input_peak_ppm, peak);
+        processing::observe_input_peaks(&control_, capture_scratch_);
     }
 
     void render_output(std::uint64_t callback_frame) noexcept
@@ -450,10 +222,7 @@ private:
         if (!network_playback) {
             playback_prefilled_.store(false, std::memory_order_relaxed);
             playback_ring_.pop(std::span<std::int32_t>{}, false);
-            resample_has_current_ = false;
-            resample_has_next_ = false;
-            resample_phase_ = 0.0;
-            ratio_smoother_.reset();
+            playback_resampler_.reset();
             control_.playback_ratio_applied_ppm.store(1000000, std::memory_order_relaxed);
             control_.playback_ratio_ramping.store(false, std::memory_order_relaxed);
             std::fill(playback_scratch_.begin(), playback_scratch_.end(), 0);
@@ -465,77 +234,53 @@ private:
             }
         }
         if (network_playback && playback_prefilled_.load(std::memory_order_relaxed)) {
-            pop_resampled_playback();
+            processing::pop_resampled_playback(
+                &playback_ring_,
+                &control_,
+                playback_resampler_,
+                playback_scratch_);
+            processing::apply_remote_level(&control_, playback_scratch_);
         }
         control_.network_playback_enabled_applied.store(network_playback, std::memory_order_release);
-        const int remote_peak = peak_ppm(playback_scratch_);
-        update_peak(control_.remote_peak_ppm, remote_peak);
-        update_peak(control_.gui_remote_peak_ppm, remote_peak);
+        processing::observe_peak(control_.remote_peak_ppm, playback_scratch_);
+        processing::observe_peak(control_.gui_remote_peak_ppm, playback_scratch_);
 
-        const double remote_level = static_cast<double>(
-            clamp_gain(control_.remote_level_ppm.load(std::memory_order_relaxed))) / 1000000.0;
-        const bool monitor = control_.local_monitor_enabled.load(std::memory_order_relaxed);
-        const double monitor_level = static_cast<double>(
-            clamp_gain(control_.local_monitor_level_ppm.load(std::memory_order_relaxed))) / 1000000.0;
-        for (std::size_t index = 0; index < output_scratch_.size(); ++index) {
-            std::int32_t sample = clamp_i32(static_cast<double>(playback_scratch_[index]) * remote_level);
-            if (monitor) {
-                sample = mix_i32(
-                    sample,
-                    clamp_i32(static_cast<double>(capture_scratch_[index]) * monitor_level));
-            }
-            output_scratch_[index] = sample;
-        }
-        int prepared_track_peak = 0;
-        if (control_.prepared_source != nullptr && !output_scratch_.empty()) {
-            prepared_track_peak = control_.prepared_source->mix(
-                output_scratch_.data(),
-                output_scratch_.size(),
-                callback_frame,
-                prepared_scratch_);
-            control_.prepared_source_frame.store(control_.prepared_source->sourceFrame(), std::memory_order_relaxed);
-            control_.prepared_source_scheduled_start_frame.store(
-                control_.prepared_source->scheduledStartFrame(),
-                std::memory_order_relaxed);
-            control_.prepared_source_actual_start_frame.store(
-                control_.prepared_source->actualStartFrame(),
-                std::memory_order_relaxed);
-            control_.prepared_source_underruns.store(control_.prepared_source->underruns(), std::memory_order_relaxed);
-        }
-        update_peak(control_.prepared_track_peak_ppm, prepared_track_peak);
-        update_peak(control_.gui_prepared_track_peak_ppm, prepared_track_peak);
-        mix_metronome_output(
-            control_,
+        std::copy(
+            playback_scratch_.cbegin(),
+            playback_scratch_.cend(),
+            output_scratch_.begin());
+        processing::mix_local_monitor(
+            &control_, output_scratch_, capture_scratch_);
+        processing::mix_prepared_source(
+            &control_,
+            output_scratch_,
             callback_frame,
+            prepared_scratch_);
+        processing::mix_metronome_click(
+            &control_,
             sample_rate_,
+            callback_frame,
+            metronome_beat_index_,
             output_scratch_,
             metronome_scratch_);
-        const int metronome_peak = peak_ppm(metronome_scratch_);
-        update_peak(control_.metronome_peak_ppm, metronome_peak);
-        update_peak(control_.gui_metronome_peak_ppm, metronome_peak);
-        const double output_level = static_cast<double>(
-            clamp_gain(control_.output_level_ppm.load(std::memory_order_relaxed))) /
-            1000000.0;
-        for (std::int32_t& sample : output_scratch_) {
-            sample = clamp_i32(static_cast<double>(sample) * output_level);
-            if (sample == (std::numeric_limits<std::int32_t>::min)() ||
-                sample == (std::numeric_limits<std::int32_t>::max)()) {
-                control_.output_clipped_samples.fetch_add(1, std::memory_order_relaxed);
-            }
-        }
+        processing::observe_peak(control_.metronome_peak_ppm, metronome_scratch_);
+        processing::observe_peak(control_.gui_metronome_peak_ppm, metronome_scratch_);
+        processing::apply_output_level(&control_, output_scratch_);
         if (track_take_recorder_ != nullptr) {
             const std::int32_t options =
                 control_.track_take_options.load(std::memory_order_relaxed);
             const auto source = static_cast<audio::TrackTakeSource>(options & 0xff);
             if (source == audio::TrackTakeSource::CurrentJam) {
                 for (std::size_t index = 0; index < inputs_mix_scratch_.size(); ++index) {
-                    std::int32_t sample = mix_i32(
+                    std::int32_t sample = processing::mix_i32_samples(
                         capture_scratch_[index], playback_scratch_[index]);
                     if ((options & audio::kTrackTakeIncludePrepared) != 0) {
-                        sample = mix_i32(sample, prepared_scratch_[index]);
+                        sample = processing::mix_i32_samples(
+                            sample, prepared_scratch_[index]);
                     }
                     if ((options & audio::kTrackTakeIncludeMetronome) != 0) {
-                        sample = mix_i32(sample, metronome_scratch_[index]);
+                        sample = processing::mix_i32_samples(
+                            sample, metronome_scratch_[index]);
                     }
                     inputs_mix_scratch_[index] = sample;
                 }
@@ -553,12 +298,11 @@ private:
                     capture_scratch_);
             }
         }
-        const int output_peak = peak_ppm(output_scratch_);
-        update_peak(control_.output_peak_ppm, output_peak);
-        update_peak(control_.gui_output_peak_ppm, output_peak);
+        processing::observe_output_peak(&control_, output_scratch_);
         if (recorder_ != nullptr) {
             for (std::size_t index = 0; index < inputs_mix_scratch_.size(); ++index) {
-                inputs_mix_scratch_[index] = mix_i32(capture_scratch_[index], playback_scratch_[index]);
+                inputs_mix_scratch_[index] = processing::mix_i32_samples(
+                    capture_scratch_[index], playback_scratch_[index]);
             }
             recorder_->record({
                 callback_frame,
@@ -571,52 +315,6 @@ private:
         }
     }
 
-    std::int32_t pop_playback_frame() noexcept
-    {
-        std::array<std::int32_t, 1> frame{};
-        (void)playback_ring_.pop(frame, false);
-        return frame[0];
-    }
-
-    void pop_resampled_playback() noexcept
-    {
-        const int target_ppm = control_.playback_ratio_ppm.load(std::memory_order_relaxed);
-        ratio_smoother_.setTargetPpm(
-            target_ppm,
-            control_.playback_ratio_ramp_frames.load(std::memory_order_relaxed));
-        if (ratio_smoother_.steadyUnity() && !resample_has_current_ && !resample_has_next_) {
-            playback_ring_.pop(playback_scratch_);
-            control_.playback_ratio_applied_ppm.store(1000000, std::memory_order_relaxed);
-            control_.playback_ratio_ramping.store(false, std::memory_order_relaxed);
-            return;
-        }
-        if (!resample_has_current_) {
-            resample_current_ = pop_playback_frame();
-            resample_has_current_ = true;
-        }
-        if (!resample_has_next_) {
-            resample_next_ = pop_playback_frame();
-            resample_has_next_ = true;
-        }
-        for (std::int32_t& sample : playback_scratch_) {
-            const double ratio = ratio_smoother_.nextRatio();
-            const double mixed =
-                static_cast<double>(resample_current_) +
-                static_cast<double>(resample_next_ - resample_current_) * resample_phase_;
-            sample = clamp_i32(mixed);
-            resample_phase_ += ratio;
-            while (resample_phase_ >= 1.0) {
-                resample_phase_ -= 1.0;
-                resample_current_ = resample_next_;
-                resample_next_ = pop_playback_frame();
-            }
-        }
-        control_.playback_ratio_applied_ppm.store(
-            ratio_smoother_.appliedPpm(), std::memory_order_relaxed);
-        control_.playback_ratio_ramping.store(
-            ratio_smoother_.ramping(), std::memory_order_relaxed);
-    }
-
     void run() noexcept
     {
         using clock = std::chrono::steady_clock;
@@ -625,7 +323,11 @@ private:
             std::chrono::duration<double>(static_cast<double>(buffer_size_) / clock_rate_));
         while (!stop_.load(std::memory_order_acquire)) {
             const std::uint64_t callback_frame = engine_frame_;
-            observe_callback_interval(monotonic_us());
+            processing::observe_callback_interval(
+                callback_intervals_,
+                monotonic_us(),
+                static_cast<std::size_t>(buffer_size_),
+                clock_rate_);
             fill_capture(callback_frame);
             render_output(callback_frame);
             engine_frame_ += static_cast<std::uint64_t>(buffer_size_);
@@ -656,26 +358,17 @@ private:
     std::vector<std::int32_t> inputs_mix_scratch_;
     std::vector<std::int32_t> metronome_scratch_;
     std::vector<std::int32_t> prepared_scratch_;
+    std::vector<std::int32_t> physical_input_scratch_;
+    std::vector<const std::int32_t*> input_source_pointers_;
     std::thread thread_;
     std::atomic<bool> stop_{false};
     std::atomic<long> callbacks_{0};
     std::atomic<bool> playback_prefilled_{false};
-    std::atomic<std::uint64_t> interval_min_us_{0};
-    std::atomic<std::uint64_t> interval_sum_us_{0};
-    std::atomic<std::uint64_t> interval_max_us_{0};
-    std::atomic<std::uint64_t> interval_samples_{0};
-    std::atomic<std::uint64_t> gap_over_1_1x_count_{0};
-    std::atomic<std::uint64_t> gap_over_1_5x_count_{0};
-    std::atomic<std::uint64_t> gap_over_2x_count_{0};
-    std::uint64_t last_callback_us_ = 0;
+    processing::CallbackIntervalState callback_intervals_;
     std::uint64_t test_input_frame_ = 0;
     std::uint64_t engine_frame_ = 0;
-    std::int32_t resample_current_ = 0;
-    std::int32_t resample_next_ = 0;
-    double resample_phase_ = 0.0;
-    bool resample_has_current_ = false;
-    bool resample_has_next_ = false;
-    audio::PlaybackRatioSmoother ratio_smoother_;
+    std::uint64_t metronome_beat_index_ = 0;
+    processing::PlaybackResamplerState playback_resampler_;
 };
 
 struct PreparedLoadResult {
@@ -844,7 +537,8 @@ struct Engine::Impl {
         std::uint64_t applied_frame,
         std::uint64_t value,
         std::string_view message = {},
-        int sample_rate = 0) noexcept
+        int sample_rate = 0,
+        std::string_view id = {}) noexcept
     {
         EngineEvent event;
         event.type = type;
@@ -858,6 +552,7 @@ struct Engine::Impl {
         if (!set_bounded_text(event.text, message)) {
             (void)set_bounded_text(event.text, "engine event text exceeded fixed capacity");
         }
+        (void)set_bounded_text(event.id, id);
         (void)events.push(event);
     }
 
@@ -1280,7 +975,8 @@ struct Engine::Impl {
                             frame,
                             completion.frames_written,
                             completion.ok ? std::string_view{} : std::string_view(completion.error),
-                            completion.sample_rate);
+                            completion.sample_rate,
+                            completion.take_id);
                     }
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1642,6 +1338,14 @@ EngineSnapshot Engine::snapshot() const noexcept
     result.transport_countdown_start_frame =
         impl_->transport_countdown_start_frame.load(std::memory_order_relaxed);
     result.transport_commit_count = impl_->transport_commit_count.load(std::memory_order_relaxed);
+    result.recording_count_in_active =
+        control.recording_count_in_active.load(std::memory_order_acquire);
+    result.playback_count_in_active =
+        control.playback_count_in_active.load(std::memory_order_acquire);
+    result.count_in_start_frame =
+        control.recording_count_in_start_frame.load(std::memory_order_relaxed);
+    result.count_in_target_frame =
+        control.recording_count_in_target_frame.load(std::memory_order_relaxed);
     result.input_peak_ppm = control.input_peak_ppm.load(std::memory_order_relaxed);
     result.send_peak_ppm = control.send_peak_ppm.load(std::memory_order_relaxed);
     result.monitor_peak_ppm = control.monitor_peak_ppm.load(std::memory_order_relaxed);
@@ -1916,6 +1620,11 @@ bool engine_command_set_id(EngineCommand& command, std::string_view id) noexcept
 std::string_view engine_event_text(const EngineEvent& event) noexcept
 {
     return bounded_text(event.text);
+}
+
+std::string_view engine_event_id(const EngineEvent& event) noexcept
+{
+    return bounded_text(event.id);
 }
 
 } // namespace jam2

@@ -17,6 +17,94 @@ if(NOT Qt6_FOUND)
     )
 endif()
 
+add_library(jam2_automation_contract STATIC
+    application/AutomationActionRegistry.cpp
+    application/AutomationActionRegistry.hpp
+    application/DebugActionValidation.cpp
+    application/DebugActionValidation.hpp)
+target_compile_features(jam2_automation_contract PUBLIC cxx_std_20)
+target_include_directories(jam2_automation_contract PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/application")
+target_link_libraries(jam2_automation_contract PUBLIC Qt6::Core)
+if(MSVC)
+    target_compile_options(jam2_automation_contract PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(jam2_automation_contract PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_library(jam2_jam_sync STATIC
+    application/JamSyncPolicy.cpp
+    application/JamSyncPolicy.hpp)
+target_compile_features(jam2_jam_sync PUBLIC cxx_std_20)
+target_include_directories(jam2_jam_sync PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/application")
+target_link_libraries(jam2_jam_sync PUBLIC Qt6::Core)
+if(MSVC)
+    target_compile_options(jam2_jam_sync PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(jam2_jam_sync PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_library(jam2_midi_input_backend STATIC
+    application/MidiInputBackend.cpp
+    application/MidiInputBackend.hpp)
+target_compile_features(jam2_midi_input_backend PUBLIC cxx_std_20)
+target_include_directories(jam2_midi_input_backend PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/application")
+target_link_libraries(jam2_midi_input_backend PUBLIC jam2_core)
+if(MSVC)
+    target_compile_options(jam2_midi_input_backend PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(jam2_midi_input_backend PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_library(jam2_looper_model STATIC
+    gui/ConcurrentLooperMerge.cpp
+    gui/ConcurrentLooperMerge.hpp
+    gui/LooperProject.cpp
+    gui/LooperProject.hpp)
+target_compile_features(jam2_looper_model PUBLIC cxx_std_20)
+target_include_directories(jam2_looper_model PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/application"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gui")
+target_link_libraries(jam2_looper_model PUBLIC jam2_core Qt6::Core)
+if(MSVC)
+    target_compile_options(jam2_looper_model PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(jam2_looper_model PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_library(jam2_prepared_mix_lifecycle STATIC
+    gui/PreparedMixLifecycle.cpp
+    gui/PreparedMixLifecycle.hpp)
+target_compile_features(jam2_prepared_mix_lifecycle PUBLIC cxx_std_20)
+target_include_directories(jam2_prepared_mix_lifecycle PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/gui")
+target_link_libraries(jam2_prepared_mix_lifecycle PUBLIC Qt6::Core)
+if(MSVC)
+    target_compile_options(jam2_prepared_mix_lifecycle PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(jam2_prepared_mix_lifecycle PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_library(jam2_asset_transfer STATIC
+    application/AssetChunkProtocol.cpp
+    application/AssetChunkProtocol.hpp
+    gui/TrackAssetOwnership.cpp
+    gui/TrackAssetOwnership.hpp
+    gui/AssetTransferService.cpp
+    gui/AssetTransferService.hpp)
+target_compile_features(jam2_asset_transfer PUBLIC cxx_std_20)
+target_include_directories(jam2_asset_transfer PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/application"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gui")
+target_link_libraries(jam2_asset_transfer PUBLIC jam2_core Qt6::Core)
+if(MSVC)
+    target_compile_options(jam2_asset_transfer PRIVATE /W4 /permissive- /EHsc)
+else()
+    target_compile_options(jam2_asset_transfer PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 # Build the maintained VST3 SDK checkout directly into Jam2's private plugin
 # helper. The public jam2 process never links this target or loads plugins.
 set(JAM2_VST3SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../libs/third_party/vst3sdk")
@@ -108,42 +196,31 @@ target_compile_features(jam2_plugin_client PUBLIC cxx_std_20)
 target_include_directories(jam2_plugin_client PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/pluginhost")
 target_link_libraries(jam2_plugin_client PUBLIC jam2_core Qt6::Core PRIVATE jam2_plugin_transport)
 
+add_library(jam2_input_plugin_backend STATIC
+    application/InputPluginBackend.cpp
+    application/InputPluginBackend.hpp)
+target_compile_features(jam2_input_plugin_backend PUBLIC cxx_std_20)
+target_include_directories(jam2_input_plugin_backend PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/application")
+target_link_libraries(jam2_input_plugin_backend PUBLIC
+    jam2_core jam2_plugin_client Qt6::Widgets)
+
 add_executable(jam2_plugin_worker pluginhost/PluginWorkerMain.cpp)
 set_target_properties(jam2_plugin_worker PROPERTIES OUTPUT_NAME "jam2-plugin-worker")
 target_compile_features(jam2_plugin_worker PRIVATE cxx_std_20)
 target_link_libraries(jam2_plugin_worker PRIVATE jam2_vst3host jam2_vst3sdk jam2_plugin_transport)
-add_executable(jam2_plugin_worker_tests pluginhost/tests/PluginWorkerTests.cpp)
-target_compile_features(jam2_plugin_worker_tests PRIVATE cxx_std_20)
-target_link_libraries(jam2_plugin_worker_tests PRIVATE jam2_plugin_client Qt6::Core)
-add_dependencies(jam2_plugin_worker_tests jam2_plugin_worker)
-add_executable(jam2_plugin_device_tests pluginhost/tests/PluginDeviceTests.cpp)
-target_compile_features(jam2_plugin_device_tests PRIVATE cxx_std_20)
-target_link_libraries(jam2_plugin_device_tests PRIVATE jam2_plugin_client Qt6::Core)
-add_dependencies(jam2_plugin_device_tests jam2_plugin_worker)
-add_executable(jam2_plugin_bridge_tests pluginhost/tests/PluginBridgeTests.cpp)
-target_compile_features(jam2_plugin_bridge_tests PRIVATE cxx_std_20)
-target_link_libraries(jam2_plugin_bridge_tests PRIVATE jam2_plugin_client Qt6::Core)
-add_test(NAME jam2_plugin_bridge_units COMMAND jam2_plugin_bridge_tests)
-if(WIN32)
-    set_tests_properties(jam2_plugin_bridge_units PROPERTIES
-        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${JAM2_RELEASE_DIR}")
-endif()
 if(MSVC)
     target_compile_options(jam2_vst3host PRIVATE /W4 /permissive- /EHsc)
     target_compile_options(jam2_plugin_transport PRIVATE /W4 /permissive- /EHsc)
     target_compile_options(jam2_plugin_client PRIVATE /W4 /permissive- /EHsc)
+    target_compile_options(jam2_input_plugin_backend PRIVATE /W4 /permissive- /EHsc)
     target_compile_options(jam2_plugin_worker PRIVATE /W4 /permissive- /EHsc)
-    target_compile_options(jam2_plugin_worker_tests PRIVATE /W4 /permissive- /EHsc)
-    target_compile_options(jam2_plugin_device_tests PRIVATE /W4 /permissive- /EHsc)
-    target_compile_options(jam2_plugin_bridge_tests PRIVATE /W4 /permissive- /EHsc)
 else()
     target_compile_options(jam2_vst3host PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(jam2_plugin_transport PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(jam2_plugin_client PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(jam2_input_plugin_backend PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(jam2_plugin_worker PRIVATE -Wall -Wextra -Wpedantic)
-    target_compile_options(jam2_plugin_worker_tests PRIVATE -Wall -Wextra -Wpedantic)
-    target_compile_options(jam2_plugin_device_tests PRIVATE -Wall -Wextra -Wpedantic)
-    target_compile_options(jam2_plugin_bridge_tests PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 set(JAM2_DAISYSP_ROOT
@@ -251,29 +328,17 @@ set_target_properties(jamtaster_worker PROPERTIES OUTPUT_NAME "jamtaster-worker"
 target_compile_features(jamtaster_worker PRIVATE cxx_std_20)
 target_link_libraries(jamtaster_worker PRIVATE jamtaster_core)
 
-add_executable(jamtaster_tests jamtaster/tests/NativeTests.cpp)
-target_compile_features(jamtaster_tests PRIVATE cxx_std_20)
-target_link_libraries(jamtaster_tests PRIVATE jamtaster_core)
-target_include_directories(jamtaster_tests SYSTEM PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../libs/third_party/eigen")
-enable_testing()
-add_test(NAME jamtaster_native_units COMMAND jamtaster_tests)
-
 if(MSVC)
     target_compile_options(jamtaster_core PRIVATE /W4 /permissive- /EHsc)
     target_compile_options(jamtaster_worker PRIVATE /W4 /permissive- /EHsc)
-    target_compile_options(jamtaster_tests PRIVATE /W4 /permissive- /EHsc)
 else()
     target_compile_options(jamtaster_core PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(jamtaster_worker PRIVATE -Wall -Wextra -Wpedantic)
-    target_compile_options(jamtaster_tests PRIVATE -Wall -Wextra -Wpedantic)
     if(APPLE)
         set_target_properties(jamtaster_worker PROPERTIES
             BUILD_RPATH "${JAMTASTER_ONNXRUNTIME_ROOT}/lib;@executable_path/../Frameworks")
-        set_target_properties(jamtaster_tests PROPERTIES
-            BUILD_RPATH "${JAMTASTER_ONNXRUNTIME_ROOT}/lib")
     else()
-        set_target_properties(jamtaster_worker jamtaster_tests PROPERTIES
+        set_target_properties(jamtaster_worker PROPERTIES
             BUILD_RPATH "${JAMTASTER_ONNXRUNTIME_ROOT}/lib")
     endif()
 endif()
@@ -321,8 +386,6 @@ endif()
 # command-line invocations. The no-argument GUI path detaches immediately.
 add_executable(jam2 MACOSX_BUNDLE
     Jam2Resources.qrc
-    gui/AssetTransferService.cpp
-    gui/AssetTransferService.hpp
     application/ApplicationEntrypoint.cpp
     application/ApplicationEntrypoint.hpp
     application/ApplicationRuntime.cpp
@@ -331,8 +394,6 @@ add_executable(jam2 MACOSX_BUNDLE
     application/BoundaryValidation.hpp
     application/AutomationChannel.cpp
     application/AutomationChannel.hpp
-    application/AssetChunkProtocol.cpp
-    application/AssetChunkProtocol.hpp
     application/ControlClient.cpp
     application/ControlClient.hpp
     application/ContentLimits.hpp
@@ -340,10 +401,10 @@ add_executable(jam2 MACOSX_BUNDLE
     application/ControlMessageValidation.hpp
     application/ControllerLifecycleValidation.cpp
     application/ControllerLifecycleValidation.hpp
-    application/DebugActionValidation.cpp
-    application/DebugActionValidation.hpp
     application/DebugAutomation.cpp
     application/DebugAutomation.hpp
+    application/GuiTestAgent.cpp
+    application/GuiTestAgent.hpp
     application/MusicCorpusDiagnostic.cpp
     application/MusicCorpusDiagnostic.hpp
     application/NativeTcpTransport.cpp
@@ -362,12 +423,15 @@ add_executable(jam2 MACOSX_BUNDLE
     cli/CliOptions.hpp
     cli/CliRecordingSupervisor.cpp
     cli/CliRecordingSupervisor.hpp
+    cli/CliRuntimeSupport.hpp
     cli/CliDispatch.cpp
     cli/CliRuntime.hpp
     cli/CliStats.cpp
     cli/CliStats.hpp
     cli/CliEntrypoint.hpp
     cli/NetworkRuntime.cpp
+    gui/ArrangementEditorDialog.cpp
+    gui/ArrangementEditorDialog.hpp
     gui/BeatGridModel.cpp
     gui/BeatGridModel.hpp
     gui/BeatGridWidget.cpp
@@ -380,22 +444,38 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/GuiLoopbackRecorder.hpp
     gui/GuiControlMessageRouter.cpp
     gui/GuiControlMessageRouter.hpp
+    gui/GuiControlContract.cpp
+    gui/GuiControlContract.hpp
     gui/GuiPresentation.cpp
     gui/GuiPresentation.hpp
+    gui/InputSourceDialogs.cpp
+    gui/InputSourceDialogs.hpp
     gui/JamStorage.cpp
     gui/JamStorage.hpp
+    gui/JamSyncDialog.cpp
+    gui/JamSyncDialog.hpp
     gui/JamTasterDialog.cpp
     gui/JamTasterDialog.hpp
+    gui/LaneRecordingDialog.cpp
+    gui/LaneRecordingDialog.hpp
+    gui/ListenerCompensationDialog.cpp
+    gui/ListenerCompensationDialog.hpp
+    gui/LooperAssetMaterializer.cpp
+    gui/LooperAssetMaterializer.hpp
     jamtaster/JamTasterService.cpp
     jamtaster/JamTasterService.hpp
     gui/GenerationRecipe.cpp
     gui/GenerationRecipe.hpp
-    gui/LooperProject.cpp
-    gui/LooperProject.hpp
+    gui/DetailSectionEdit.cpp
+    gui/DetailSectionEdit.hpp
     gui/MainWindow.cpp
     gui/MainWindow.hpp
     gui/MainWindowPages.cpp
     gui/MainWindowPages.hpp
+    gui/SessionStartupDialogs.cpp
+    gui/SessionStartupDialogs.hpp
+    gui/SettingsDialog.cpp
+    gui/SettingsDialog.hpp
     gui/MetronomeTransportController.cpp
     gui/MetronomeTransportController.hpp
     gui/MixerStatsViewModel.cpp
@@ -408,6 +488,7 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/PlaybackGrid.hpp
     gui/PreparedMixRenderer.cpp
     gui/PreparedMixRenderer.hpp
+    gui/PreparedMixLifecycle.hpp
     gui/PracticeIdeaDialogs.cpp
     gui/PracticeIdeaDialogs.hpp
     gui/PracticeIdeaController.cpp
@@ -419,6 +500,8 @@ add_executable(jam2 MACOSX_BUNDLE
     gui/ResearchDrumKit.cpp
     gui/ResearchDrumKit.hpp
     gui/ResearchDrumEngine.cpp
+    gui/SharedBankLaunchCoordinator.cpp
+    gui/SharedBankLaunchCoordinator.hpp
     gui/ProjectPersistenceCoordinator.cpp
     gui/ProjectPersistenceCoordinator.hpp
     gui/SharedTrackController.cpp
@@ -491,6 +574,13 @@ target_include_directories(jam2 PRIVATE
 )
 
 target_link_libraries(jam2 PRIVATE
+    jam2_asset_transfer
+    jam2_automation_contract
+    jam2_input_plugin_backend
+    jam2_jam_sync
+    jam2_midi_input_backend
+    jam2_looper_model
+    jam2_prepared_mix_lifecycle
     jam2_core
     jam2_daisysp_drums
     jam2_plugin_client

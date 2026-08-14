@@ -1,7 +1,11 @@
 #include "MetronomeTransportController.hpp"
 
+#include "runtime_limits.hpp"
+#include "transport_timing.hpp"
+
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 std::optional<int> TapTempoTracker::tap(std::int64_t elapsedMs) noexcept
 {
@@ -11,14 +15,23 @@ std::optional<int> TapTempoTracker::tap(std::int64_t elapsedMs) noexcept
         return std::nullopt;
     }
 
-    const std::int64_t interval = elapsedMs - last_tap_ms_;
+    const std::int64_t previousTapMs = last_tap_ms_;
     last_tap_ms_ = elapsedMs;
     constexpr std::int64_t kFastestIntervalMs = 150;
     constexpr std::int64_t kSequenceResetIntervalMs = 2000;
-    if (interval < kFastestIntervalMs || interval > kSequenceResetIntervalMs) {
+    if (elapsedMs <= previousTapMs) {
         interval_count_ = 0;
         return std::nullopt;
     }
+    const std::uint64_t unsignedInterval =
+        static_cast<std::uint64_t>(elapsedMs) -
+        static_cast<std::uint64_t>(previousTapMs);
+    if (unsignedInterval < static_cast<std::uint64_t>(kFastestIntervalMs) ||
+        unsignedInterval > static_cast<std::uint64_t>(kSequenceResetIntervalMs)) {
+        interval_count_ = 0;
+        return std::nullopt;
+    }
+    const std::int64_t interval = static_cast<std::int64_t>(unsignedInterval);
 
     if (interval_count_ < kIntervalCapacity) {
         intervals_ms_[interval_count_++] = interval;
@@ -48,8 +61,8 @@ void TapTempoTracker::reset() noexcept
 }
 
 MetronomeTransportController::MetronomeTransportController(
-    ApplicationRuntime& runtime) noexcept
-    : runtime_(runtime)
+    CommandSubmitter submitter)
+    : submitter_(std::move(submitter))
 {
 }
 
@@ -58,11 +71,17 @@ MetronomeTransportController::SnapshotUpdate MetronomeTransportController::consu
 {
     const auto pattern = snapshot.metronome_pattern;
     const std::int64_t offset = snapshot.metronome_render_offset_frames;
-    const std::uint64_t musical = offset >= 0
-        ? snapshot.engine_frame + static_cast<std::uint64_t>(offset)
-        : snapshot.engine_frame > static_cast<std::uint64_t>(-offset)
-            ? snapshot.engine_frame - static_cast<std::uint64_t>(-offset)
-            : 0ULL;
+    const std::uint64_t musical = jam2::transport_musical_frame_from_raw(
+        snapshot.engine_frame, offset);
+    int sampleRate = 0;
+    if (std::isfinite(snapshot.sample_rate) &&
+        snapshot.sample_rate >= jam2::limits::kMinimumSampleRate - 0.5 &&
+        snapshot.sample_rate < jam2::limits::kMaximumSampleRate + 0.5) {
+        const int rounded = static_cast<int>(std::lround(snapshot.sample_rate));
+        if (jam2::limits::valid_sample_rate(rounded)) {
+            sampleRate = rounded;
+        }
+    }
     grid_.setPattern(
         pattern.bpm,
         pattern.beats_per_bar,
@@ -73,8 +92,8 @@ MetronomeTransportController::SnapshotUpdate MetronomeTransportController::consu
         musical,
         snapshot.metronome_epoch_frame,
         offset,
-        static_cast<int>(std::lround(snapshot.sample_rate)),
-        snapshot.metronome_epoch_valid);
+        sampleRate,
+        snapshot.metronome_epoch_valid && sampleRate > 0);
 
     SnapshotUpdate update;
     const std::uint64_t revision = snapshot.transport_revision;
@@ -90,7 +109,14 @@ MetronomeTransportController::SnapshotUpdate MetronomeTransportController::consu
 
 bool MetronomeTransportController::submit(const jam2::EngineCommand& command) noexcept
 {
-    return runtime_.submit(command);
+    if (!submitter_) {
+        return false;
+    }
+    try {
+        return submitter_(command);
+    } catch (...) {
+        return false;
+    }
 }
 
 void MetronomeTransportController::clearEngine() noexcept

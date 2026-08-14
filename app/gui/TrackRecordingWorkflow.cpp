@@ -1,5 +1,7 @@
 #include "TrackRecordingWorkflow.hpp"
 
+#include "transport_timing.hpp"
+
 #include <QDir>
 #include <QUuid>
 #include <QtGlobal>
@@ -7,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace {
 
@@ -14,28 +17,16 @@ std::uint64_t rawFrameFromMusicalFrame(
     std::uint64_t musicalFrame,
     std::int64_t renderOffsetFrames) noexcept
 {
-    if (renderOffsetFrames >= 0) {
-        const auto offset = static_cast<std::uint64_t>(renderOffsetFrames);
-        return musicalFrame > offset ? musicalFrame - offset : 0ULL;
-    }
-    const auto offset = static_cast<std::uint64_t>(-renderOffsetFrames);
-    return musicalFrame > (std::numeric_limits<std::uint64_t>::max)() - offset
-        ? (std::numeric_limits<std::uint64_t>::max)()
-        : musicalFrame + offset;
+    return jam2::transport_raw_frame_from_musical(
+        musicalFrame, renderOffsetFrames);
 }
 
 std::uint64_t musicalFrameFromRawFrame(
     std::uint64_t rawFrame,
     std::int64_t renderOffsetFrames) noexcept
 {
-    if (renderOffsetFrames >= 0) {
-        const auto offset = static_cast<std::uint64_t>(renderOffsetFrames);
-        return rawFrame > (std::numeric_limits<std::uint64_t>::max)() - offset
-            ? (std::numeric_limits<std::uint64_t>::max)()
-            : rawFrame + offset;
-    }
-    const auto offset = static_cast<std::uint64_t>(-renderOffsetFrames);
-    return rawFrame > offset ? rawFrame - offset : 0ULL;
+    return jam2::transport_musical_frame_from_raw(
+        rawFrame, renderOffsetFrames);
 }
 
 int remainingCountInBeats(
@@ -48,9 +39,28 @@ int remainingCountInBeats(
     }
     const std::uint64_t remaining = startFrame - currentFrame;
     return static_cast<int>(std::clamp<std::uint64_t>(
-        (remaining + beatFrames - 1ULL) / beatFrames,
+        1ULL + (remaining - 1ULL) / beatFrames,
         1ULL,
         static_cast<std::uint64_t>((std::numeric_limits<int>::max)())));
+}
+
+bool positiveBeatFrames(
+    double secondsPerBeat,
+    int sampleRate,
+    std::uint64_t& frames) noexcept
+{
+    if (!std::isfinite(secondsPerBeat) || secondsPerBeat <= 0.0 ||
+        sampleRate <= 0) {
+        return false;
+    }
+    const long double scaled = static_cast<long double>(secondsPerBeat) *
+        static_cast<long double>(sampleRate);
+    if (!std::isfinite(scaled) || scaled < 0.5L || scaled >
+        static_cast<long double>((std::numeric_limits<long long>::max)())) {
+        return false;
+    }
+    frames = static_cast<std::uint64_t>(std::llround(scaled));
+    return frames > 0;
 }
 
 }
@@ -108,9 +118,13 @@ std::uint64_t jam2::gui::next_safe_grid_beat_raw_frame(
         (std::numeric_limits<std::uint64_t>::max)() - leadFrames
         ? (std::numeric_limits<std::uint64_t>::max)()
         : position.rawCurrentFrame + leadFrames;
-    if (!position.running || position.secondsPerBeat <= 0.0 ||
-        position.absoluteBeat == (std::numeric_limits<std::uint64_t>::max)()) {
+    if (!position.running) {
         return minimumLead;
+    }
+    if (!std::isfinite(position.secondsPerBeat) ||
+        position.secondsPerBeat <= 0.0 ||
+        position.absoluteBeat == (std::numeric_limits<std::uint64_t>::max)()) {
+        return 0;
     }
     const auto targetForBeat = [&position](std::uint64_t beat) {
         const long double offset = static_cast<long double>(beat) *
@@ -141,12 +155,14 @@ std::uint64_t jam2::gui::synced_recording_countdown_beat(
     int beatsPerBar) noexcept
 {
     (void)beatsPerBar;
-    if (!position.engineAnchored || !position.running ||
-        position.sampleRate <= 0 || position.secondsPerBeat <= 0.0) {
+    if (!position.engineAnchored || !position.running) {
         return 0;
     }
-    const std::uint64_t beatFrames = static_cast<std::uint64_t>(std::llround(
-        position.secondsPerBeat * static_cast<double>(position.sampleRate)));
+    std::uint64_t beatFrames = 0;
+    if (!positiveBeatFrames(
+            position.secondsPerBeat, position.sampleRate, beatFrames)) {
+        return 0;
+    }
     const std::uint64_t countdownRawFrame =
         jam2::gui::next_safe_grid_beat_raw_frame(position);
     if (beatFrames == 0 || countdownRawFrame == 0) {
@@ -187,12 +203,14 @@ bool globalTransportStartSchedule(
             targetFrame, position.renderOffsetFrames);
         return targetFrame != 0;
     }
-    if (!position.engineAnchored || !position.running ||
-        position.sampleRate <= 0 || position.secondsPerBeat <= 0.0) {
+    if (!position.engineAnchored || !position.running) {
         return false;
     }
-    const std::uint64_t beatFrames = static_cast<std::uint64_t>(std::llround(
-        position.secondsPerBeat * static_cast<double>(position.sampleRate)));
+    std::uint64_t beatFrames = 0;
+    if (!positiveBeatFrames(
+            position.secondsPerBeat, position.sampleRate, beatFrames)) {
+        return false;
+    }
     const std::uint64_t beats = static_cast<std::uint64_t>(qMax(1, beatsPerBar));
     const std::uint64_t bars = static_cast<std::uint64_t>(countInBars);
     countdownStartFrame = jam2::gui::next_safe_grid_beat_raw_frame(position);
@@ -213,6 +231,60 @@ bool globalTransportStartSchedule(
     targetFrame = rawFrameFromMusicalFrame(
         targetMusicalFrame, position.renderOffsetFrames);
     return countdownStartFrame < targetFrame;
+}
+
+bool quantizedRecordingSchedule(
+    int countInBars,
+    const PlaybackGrid::Position& position,
+    int beatsPerBar,
+    std::uint64_t& countdownStartFrame,
+    std::uint64_t& targetFrame,
+    std::uint64_t& targetMusicalFrame,
+    QString& error) noexcept
+{
+    if (!position.engineAnchored || !position.running) {
+        error = QStringLiteral(
+            "recording count-in is waiting for a running engine grid");
+        return false;
+    }
+    std::uint64_t beatFrames = 0;
+    if (!positiveBeatFrames(
+            position.secondsPerBeat, position.sampleRate, beatFrames)) {
+        error = QStringLiteral("recording count-in has an invalid beat interval");
+        return false;
+    }
+    const std::uint64_t beats =
+        static_cast<std::uint64_t>(qMax(1, beatsPerBar));
+    const std::uint64_t countdownBeat =
+        jam2::gui::synced_recording_countdown_beat(position, beatsPerBar);
+    if (countdownBeat == 0 || countdownBeat >
+        ((std::numeric_limits<std::uint64_t>::max)() - position.epochFrame) /
+            beatFrames) {
+        error = QStringLiteral(
+            "recording count-in target exceeds the engine clock range");
+        return false;
+    }
+    const std::uint64_t countdownMusicalFrame =
+        position.epochFrame + countdownBeat * beatFrames;
+    const std::uint64_t countInBeats =
+        static_cast<std::uint64_t>(qMax(0, countInBars)) * beats;
+    if (countInBeats >
+        ((std::numeric_limits<std::uint64_t>::max)() - countdownMusicalFrame) /
+            beatFrames) {
+        error = QStringLiteral(
+            "recording start target exceeds the engine clock range");
+        return false;
+    }
+    targetMusicalFrame = countdownMusicalFrame + countInBeats * beatFrames;
+    countdownStartFrame = rawFrameFromMusicalFrame(
+        countdownMusicalFrame, position.renderOffsetFrames);
+    targetFrame = rawFrameFromMusicalFrame(
+        targetMusicalFrame, position.renderOffsetFrames);
+    if (targetFrame == 0 || countdownStartFrame > targetFrame) {
+        error = QStringLiteral("recording count-in produced an invalid schedule");
+        return false;
+    }
+    return true;
 }
 
 }
@@ -241,15 +313,66 @@ bool jam2::gui::sample_rate_matches_engine(
         std::abs(engineSampleRate - static_cast<double>(expectedSampleRate)) <= 1.0;
 }
 
-TrackRecordingWorkflow::TrackRecordingWorkflow(ApplicationRuntime& runtime) noexcept
-    : runtime_(runtime)
-{
-}
+TrackRecordingWorkflow::TrackRecordingWorkflow(
+    CommandSubmitter submitter,
+    SnapshotProvider snapshotProvider)
+    : command_submitter_(std::move(submitter)),
+      snapshot_provider_(std::move(snapshotProvider))
+{}
 
-bool TrackRecordingWorkflow::submit(jam2::EngineCommand command) noexcept
+bool TrackRecordingWorkflow::submit(
+    jam2::EngineCommand command,
+    std::uint64_t* submittedCookie) noexcept
 {
     command.cookie = ++command_cookie_;
-    return runtime_.submit(command);
+    try {
+        if (!command_submitter_ || !command_submitter_(command)) {
+            return false;
+        }
+        if (submittedCookie != nullptr) {
+            *submittedCookie = command.cookie;
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool TrackRecordingWorkflow::submitTakeCommand(jam2::EngineCommand command) noexcept
+{
+    if (active_take_command_cookie_count_ >= active_take_command_cookies_.size()) {
+        return false;
+    }
+    std::uint64_t cookie = 0;
+    if (!submit(command, &cookie)) {
+        return false;
+    }
+    active_take_command_cookies_[active_take_command_cookie_count_++] = cookie;
+    return true;
+}
+
+bool TrackRecordingWorkflow::ownsTakeCommandCookie(std::uint64_t cookie) const noexcept
+{
+    return cookie != 0 && std::find(
+        active_take_command_cookies_.cbegin(),
+        active_take_command_cookies_.cbegin() + active_take_command_cookie_count_,
+        cookie) != active_take_command_cookies_.cbegin() +
+            active_take_command_cookie_count_;
+}
+
+void TrackRecordingWorkflow::clearTakeCommandCookies() noexcept
+{
+    active_take_command_cookies_.fill(0);
+    active_take_command_cookie_count_ = 0;
+}
+
+void TrackRecordingWorkflow::clearActiveTakeState() noexcept
+{
+    input_take_active_ = false;
+    active_take_id_.clear();
+    active_take_sample_rate_ = 0;
+    clearTakeCommandCookies();
+    clearRecordingSchedule();
 }
 
 bool TrackRecordingWorkflow::seekPrepared(
@@ -600,76 +723,57 @@ bool TrackRecordingWorkflow::armTrackTake(
         : static_cast<std::int32_t>(jam2::audio::TrackTakeSource::Input);
     if (includePrepared) command.value |= jam2::audio::kTrackTakeIncludePrepared;
     if (includeMetronome) command.value |= jam2::audio::kTrackTakeIncludeMetronome;
-    return submit(command);
+    return submitTakeCommand(command);
 }
 
 bool TrackRecordingWorkflow::startTrackTake(
     std::uint64_t targetFrame,
     std::uint64_t durationFrames) noexcept
 {
+    if (durationFrames > 0 &&
+        targetFrame > (std::numeric_limits<std::uint64_t>::max)() - durationFrames) {
+        return false;
+    }
     jam2::EngineCommand command;
     command.type = jam2::EngineCommandType::StartTrackTake;
     command.frame = targetFrame;
-    if (!submit(command)) {
+    if (!submitTakeCommand(command)) {
         return false;
     }
     if (durationFrames == 0) {
         return true;
     }
-    if (targetFrame > (std::numeric_limits<std::uint64_t>::max)() - durationFrames) {
-        return false;
-    }
     command.type = jam2::EngineCommandType::StopTrackTake;
     command.frame = targetFrame + durationFrames;
-    return submit(command);
+    return submitTakeCommand(command);
 }
 
-bool TrackRecordingWorkflow::startTrackTakeQuantized(
-    int countInBars,
+void TrackRecordingWorkflow::cancelTrackTake() noexcept
+{
+    jam2::EngineCommand cancel;
+    cancel.type = jam2::EngineCommandType::CancelTrackTake;
+    (void)submit(cancel);
+}
+
+bool TrackRecordingWorkflow::startTrackTakeAtSchedule(
+    std::uint64_t countdownStart,
+    std::uint64_t target,
+    std::uint64_t targetMusicalFrame,
     std::uint64_t durationFrames,
-    const PlaybackGrid::Position& position,
-    int beatsPerBar,
     bool transportLocalOnly,
     QString& error) noexcept
 {
-    if (!position.engineAnchored || !position.running || position.sampleRate <= 0) {
-        error = QStringLiteral("recording count-in is waiting for a running engine grid");
-        return false;
-    }
-    const auto beats = static_cast<std::uint64_t>(qMax(1, beatsPerBar));
-    const std::uint64_t countdownBeat =
-        jam2::gui::synced_recording_countdown_beat(position, beatsPerBar);
-    const std::uint64_t beatFrames = static_cast<std::uint64_t>(std::llround(
-        position.secondsPerBeat * static_cast<double>(position.sampleRate)));
-    if (countdownBeat == 0 || beatFrames == 0 || countdownBeat >
-        ((std::numeric_limits<std::uint64_t>::max)() - position.epochFrame) / beatFrames) {
-        error = QStringLiteral("recording count-in target exceeds the engine clock range");
-        return false;
-    }
-    const std::uint64_t countdownMusicalFrame =
-        position.epochFrame + countdownBeat * beatFrames;
-    const std::uint64_t countInBeats = static_cast<std::uint64_t>(qMax(0, countInBars)) * beats;
-    if (countInBeats >
-        ((std::numeric_limits<std::uint64_t>::max)() - countdownMusicalFrame) / beatFrames) {
-        error = QStringLiteral("recording start target exceeds the engine clock range");
-        return false;
-    }
-    const std::uint64_t targetMusicalFrame = countdownMusicalFrame + countInBeats * beatFrames;
-    const std::uint64_t countdownStart = rawFrameFromMusicalFrame(
-        countdownMusicalFrame, position.renderOffsetFrames);
-    const std::uint64_t target = rawFrameFromMusicalFrame(
-        targetMusicalFrame, position.renderOffsetFrames);
     jam2::EngineCommand seek;
     seek.type = jam2::EngineCommandType::PreparedSeek;
     seek.frame = target;
-    if (!submit(seek)) {
+    if (!submitTakeCommand(seek)) {
         error = QStringLiteral("engine command queue unavailable while scheduling track reset for recording");
         return false;
     }
     jam2::EngineCommand play;
     play.type = jam2::EngineCommandType::PreparedPlay;
     play.frame = target;
-    if (!submit(play)) {
+    if (!submitTakeCommand(play)) {
         error = QStringLiteral("engine command queue unavailable while scheduling track playback for recording");
         return false;
     }
@@ -684,7 +788,7 @@ bool TrackRecordingWorkflow::startTrackTakeQuantized(
     transport.transport_target_frame = target;
     transport.transport_musical_frame = targetMusicalFrame;
     transport.transport_countdown_start_frame = countdownStart;
-    if (!submit(transport)) {
+    if (!submitTakeCommand(transport)) {
         error = QStringLiteral("engine command queue unavailable while publishing the recording schedule");
         return false;
     }
@@ -711,7 +815,35 @@ bool TrackRecordingWorkflow::startInputTake(
         error = QStringLiteral("an input take is already active");
         return false;
     }
-    const jam2::EngineSnapshot engine = runtime_.engineSnapshot();
+    if (outputPath.trimmed().isEmpty()) {
+        error = QStringLiteral("track take output WAV is required");
+        return false;
+    }
+    if (!countInBars && durationFrames > 0 &&
+        targetFrame > (std::numeric_limits<std::uint64_t>::max)() - durationFrames) {
+        error = QStringLiteral("recording duration exceeds the engine clock range");
+        return false;
+    }
+    std::uint64_t countdownStartFrame = targetFrame;
+    std::uint64_t scheduledTargetFrame = targetFrame;
+    std::uint64_t targetMusicalFrame = targetFrame;
+    if (countInBars && !quantizedRecordingSchedule(
+            *countInBars,
+            position,
+            beatsPerBar,
+            countdownStartFrame,
+            scheduledTargetFrame,
+            targetMusicalFrame,
+            error)) {
+        return false;
+    }
+    if (durationFrames > 0 && scheduledTargetFrame >
+        (std::numeric_limits<std::uint64_t>::max)() - durationFrames) {
+        error = QStringLiteral("recording duration exceeds the engine clock range");
+        return false;
+    }
+    const jam2::EngineSnapshot engine = snapshot_provider_
+        ? snapshot_provider_() : jam2::EngineSnapshot{};
     if (!jam2::gui::sample_rate_matches_engine(
             expectedSampleRate, engine.sample_rate)) {
         error = QStringLiteral(
@@ -721,24 +853,29 @@ bool TrackRecordingWorkflow::startInputTake(
         return false;
     }
     const QString takeId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    clearTakeCommandCookies();
     if (!armTrackTake(
             takeId,
             QDir::toNativeSeparators(outputPath),
             includePrepared,
             includeMetronome)) {
+        clearTakeCommandCookies();
         error = QStringLiteral("track take id/output is too long or the engine command queue is unavailable");
         return false;
     }
+    pending_transient_capture_path_ = transientOutput ? outputPath : QString{};
     const bool started = countInBars
-        ? startTrackTakeQuantized(
-            *countInBars,
+        ? startTrackTakeAtSchedule(
+            countdownStartFrame,
+            scheduledTargetFrame,
+            targetMusicalFrame,
             durationFrames,
-            position,
-            beatsPerBar,
             transportLocalOnly,
             error)
         : startTrackTake(targetFrame, durationFrames);
     if (!started) {
+        cancelTrackTake();
+        clearTakeCommandCookies();
         if (error.isEmpty()) {
             error = QStringLiteral("engine command queue unavailable while starting the recording take");
         }
@@ -749,7 +886,6 @@ bool TrackRecordingWorkflow::startInputTake(
     last_capture_sample_rate_ = expectedSampleRate;
     input_take_active_ = true;
     last_capture_path_ = outputPath;
-    pending_transient_capture_path_ = transientOutput ? outputPath : QString{};
     if (!countInBars) {
         recording_start_frame_ = targetFrame;
     }
@@ -772,7 +908,12 @@ bool TrackRecordingWorkflow::startInputTakeAtSchedule(
         error = QStringLiteral("an input take is already active");
         return false;
     }
-    const jam2::EngineSnapshot engine = runtime_.engineSnapshot();
+    if (outputPath.trimmed().isEmpty()) {
+        error = QStringLiteral("track take output WAV is required");
+        return false;
+    }
+    const jam2::EngineSnapshot engine = snapshot_provider_
+        ? snapshot_provider_() : jam2::EngineSnapshot{};
     if (!jam2::gui::sample_rate_matches_engine(
             expectedSampleRate, engine.sample_rate)) {
         error = QStringLiteral(
@@ -785,47 +926,33 @@ bool TrackRecordingWorkflow::startInputTakeAtSchedule(
         error = QStringLiteral("shared recording schedule is invalid");
         return false;
     }
+    if (durationFrames > 0 &&
+        targetFrame > (std::numeric_limits<std::uint64_t>::max)() - durationFrames) {
+        error = QStringLiteral("shared recording duration exceeds the engine clock range");
+        return false;
+    }
     const QString takeId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    clearTakeCommandCookies();
     if (!armTrackTake(
             takeId,
             QDir::toNativeSeparators(outputPath),
             includePrepared,
             includeMetronome)) {
+        clearTakeCommandCookies();
         error = QStringLiteral(
             "track take id/output is too long or the engine command queue is unavailable");
         return false;
     }
-    jam2::EngineCommand seek;
-    seek.type = jam2::EngineCommandType::PreparedSeek;
-    seek.frame = targetFrame;
-    if (!submit(seek)) {
-        error = QStringLiteral(
-            "engine command queue unavailable while scheduling shared track reset");
-        return false;
-    }
-    jam2::EngineCommand play;
-    play.type = jam2::EngineCommandType::PreparedPlay;
-    play.frame = targetFrame;
-    if (!submit(play)) {
-        error = QStringLiteral(
-            "engine command queue unavailable while scheduling shared track playback");
-        return false;
-    }
-    if (!startTrackTake(targetFrame, durationFrames)) {
-        error = QStringLiteral(
-            "engine command queue unavailable while scheduling the shared recording take");
-        return false;
-    }
-    jam2::EngineCommand localTransport;
-    localTransport.type = jam2::EngineCommandType::ScheduleTransport;
-    localTransport.transport_local_only = true;
-    localTransport.transport_action = jam2::EngineTransportAction::RecordStart;
-    localTransport.transport_target_frame = targetFrame;
-    localTransport.transport_musical_frame = targetMusicalFrame;
-    localTransport.transport_countdown_start_frame = countdownStartFrame;
-    if (!submit(localTransport)) {
-        error = QStringLiteral(
-            "engine command queue unavailable while adopting the shared recording schedule");
+    pending_transient_capture_path_ = transientOutput ? outputPath : QString{};
+    if (!startTrackTakeAtSchedule(
+            countdownStartFrame,
+            targetFrame,
+            targetMusicalFrame,
+            durationFrames,
+            true,
+            error)) {
+        cancelTrackTake();
+        clearTakeCommandCookies();
         return false;
     }
     active_take_id_ = takeId;
@@ -833,7 +960,6 @@ bool TrackRecordingWorkflow::startInputTakeAtSchedule(
     last_capture_sample_rate_ = expectedSampleRate;
     input_take_active_ = true;
     last_capture_path_ = outputPath;
-    pending_transient_capture_path_ = transientOutput ? outputPath : QString{};
     recording_countdown_start_frame_ = countdownStartFrame;
     recording_start_frame_ = targetFrame;
     return true;
@@ -872,23 +998,44 @@ bool TrackRecordingWorkflow::stopInputTake(std::uint64_t targetFrame) noexcept
     jam2::EngineCommand command;
     command.type = jam2::EngineCommandType::StopTrackTake;
     command.frame = targetFrame;
-    return submit(command);
+    return submitTakeCommand(command);
 }
 
 TrackRecordingWorkflow::TrackTakeCompletion TrackRecordingWorkflow::consumeTrackTakeEvent(
     const jam2::EngineEvent& event)
 {
     TrackTakeCompletion completion;
-    if (event.type != jam2::EngineEventType::TrackTakeCompleted) {
+    if (event.type == jam2::EngineEventType::CommandRejected &&
+        input_take_active_ && !active_take_id_.isEmpty() &&
+        ownsTakeCommandCookie(event.cookie)) {
+        completion.handled = true;
+        completion.takeId = active_take_id_;
+        completion.wavPath = pending_transient_capture_path_;
+        completion.sampleRate = active_take_sample_rate_;
+        const std::string_view text = jam2::engine_event_text(event);
+        completion.error = QString::fromUtf8(
+            text.data(), static_cast<qsizetype>(text.size()));
+        if (completion.error.isEmpty()) {
+            completion.error = QStringLiteral("engine rejected a track-take command");
+        }
+        pending_transient_capture_path_.clear();
+        cancelTrackTake();
+        clearActiveTakeState();
         return completion;
     }
-    if (!input_take_active_ || active_take_id_.isEmpty()) {
+    if (event.type != jam2::EngineEventType::TrackTakeCompleted ||
+        !input_take_active_ || active_take_id_.isEmpty()) {
+        return completion;
+    }
+    const std::string_view eventId = jam2::engine_event_id(event);
+    if (eventId.empty() || eventId != active_take_id_.toStdString()) {
         return completion;
     }
     completion.handled = true;
     completion.ok = event.ok;
     completion.takeId = active_take_id_;
     completion.wavPath = pending_transient_capture_path_;
+    pending_transient_capture_path_.clear();
     completion.frames = event.value;
     completion.sampleRate = event.sample_rate > 0
         ? event.sample_rate
@@ -898,13 +1045,9 @@ TrackRecordingWorkflow::TrackTakeCompletion TrackRecordingWorkflow::consumeTrack
     }
     const std::string_view text = jam2::engine_event_text(event);
     completion.error = QString::fromUtf8(text.data(), static_cast<qsizetype>(text.size()));
-    input_take_active_ = false;
-    active_take_id_.clear();
-    active_take_sample_rate_ = 0;
-    clearRecordingSchedule();
+    clearActiveTakeState();
     if (event.ok && !completion.wavPath.isEmpty()) {
         last_capture_path_ = QDir::fromNativeSeparators(completion.wavPath);
-        pending_transient_capture_path_.clear();
     }
     return completion;
 }
@@ -1009,24 +1152,37 @@ bool TrackRecordingWorkflow::laneArmedAt(int bankIndex, int laneIndex) const noe
 
 bool TrackRecordingWorkflow::startJamRecording(const QString& folder)
 {
+    if (jam_recording_active_ || jam_recording_start_cookie_ != 0 ||
+        jam_recording_stop_cookie_ != 0 || folder.trimmed().isEmpty()) {
+        return false;
+    }
     jam2::EngineCommand command;
     command.type = jam2::EngineCommandType::StartJamRecording;
-    if (!jam2::engine_command_set_text(command, folder.toStdString()) || !submit(command)) {
+    std::uint64_t cookie = 0;
+    if (!jam2::engine_command_set_text(command, folder.toStdString()) ||
+        !submit(command, &cookie)) {
         return false;
     }
     jam_recording_folder_ = folder;
     jam_recording_active_ = true;
+    jam_recording_start_cookie_ = cookie;
     return true;
 }
 
 bool TrackRecordingWorkflow::stopJamRecording() noexcept
 {
+    if (!jam_recording_active_ || jam_recording_start_cookie_ != 0 ||
+        jam_recording_stop_cookie_ != 0) {
+        return false;
+    }
     jam2::EngineCommand command;
     command.type = jam2::EngineCommandType::StopJamRecording;
-    if (!submit(command)) {
+    std::uint64_t cookie = 0;
+    if (!submit(command, &cookie)) {
         return false;
     }
     jam_recording_active_ = false;
+    jam_recording_stop_cookie_ = cookie;
     return true;
 }
 
@@ -1034,11 +1190,35 @@ bool TrackRecordingWorkflow::consumeJamRecordingEvent(const jam2::EngineEvent& e
 {
     if (event.type == jam2::EngineEventType::JamRecordingStarted) {
         jam_recording_active_ = true;
+        jam_recording_confirmed_active_ = true;
+        if (event.cookie == jam_recording_start_cookie_) {
+            jam_recording_start_cookie_ = 0;
+        }
         return true;
     }
     if (event.type == jam2::EngineEventType::JamRecordingStopped) {
         jam_recording_active_ = false;
+        jam_recording_confirmed_active_ = false;
+        if (event.cookie == jam_recording_stop_cookie_) {
+            jam_recording_stop_cookie_ = 0;
+        }
         return true;
+    }
+    if (event.type == jam2::EngineEventType::CommandRejected &&
+        event.cookie != 0) {
+        if (event.cookie == jam_recording_start_cookie_) {
+            jam_recording_start_cookie_ = 0;
+            jam_recording_active_ = jam_recording_confirmed_active_;
+            if (!jam_recording_confirmed_active_) {
+                jam_recording_folder_.clear();
+            }
+            return true;
+        }
+        if (event.cookie == jam_recording_stop_cookie_) {
+            jam_recording_stop_cookie_ = 0;
+            jam_recording_active_ = jam_recording_confirmed_active_;
+            return true;
+        }
     }
     return false;
 }
@@ -1046,6 +1226,9 @@ bool TrackRecordingWorkflow::consumeJamRecordingEvent(const jam2::EngineEvent& e
 void TrackRecordingWorkflow::clearJamRecordingState() noexcept
 {
     jam_recording_active_ = false;
+    jam_recording_confirmed_active_ = false;
+    jam_recording_start_cookie_ = 0;
+    jam_recording_stop_cookie_ = 0;
 }
 
 void TrackRecordingWorkflow::clearProjectCapture() noexcept

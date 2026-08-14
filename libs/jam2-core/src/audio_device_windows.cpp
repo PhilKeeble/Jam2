@@ -1,4 +1,5 @@
 #include "audio_device.hpp"
+#include "audio_device_processing.hpp"
 #include "audio_ring.hpp"
 
 #include <array>
@@ -24,19 +25,7 @@
 namespace jam2::audio {
 namespace {
 
-constexpr double kPi = 3.14159265358979323846;
-
-void update_interval_peak(std::atomic<int>& target, int value) noexcept
-{
-    int current = target.load(std::memory_order_relaxed);
-    while (value > current &&
-           !target.compare_exchange_weak(
-               current,
-               value,
-               std::memory_order_relaxed,
-               std::memory_order_relaxed)) {
-    }
-}
+namespace processing = device_processing;
 
 class RegistryKey {
 public:
@@ -245,106 +234,13 @@ struct DuplexContext {
     std::uint64_t test_input_sample_counter = 0;
     std::uint64_t engine_frame_counter = 0;
     std::uint64_t metronome_beat_index = 0;
-    int click_remaining = 0;
-    int click_total = 0;
-    double click_phase = 0.0;
-    double click_phase_step = 0.0;
-    std::int32_t resample_current = 0;
-    std::int32_t resample_next = 0;
-    bool resample_has_current = false;
-    bool resample_has_next = false;
-    double resample_phase = 0.0;
-    PlaybackRatioSmoother ratio_smoother;
+    processing::PlaybackResamplerState playback_resampler;
     std::atomic<long> callbacks{0};
     std::atomic<bool> playback_prefilled{false};
-    std::atomic<std::uint64_t> last_callback_us{0};
-    std::atomic<std::uint64_t> callback_interval_min_us{0};
-    std::atomic<std::uint64_t> callback_interval_sum_us{0};
-    std::atomic<std::uint64_t> callback_interval_max_us{0};
-    std::atomic<std::uint64_t> callback_interval_samples{0};
-    std::atomic<std::uint64_t> callback_gap_over_1_1x_count{0};
-    std::atomic<std::uint64_t> callback_gap_over_1_5x_count{0};
-    std::atomic<std::uint64_t> callback_gap_over_2x_count{0};
+    processing::CallbackIntervalState callback_intervals;
 };
 
 DuplexContext* g_duplex_context = nullptr;
-
-std::uint64_t callback_now_us()
-{
-    const auto now = std::chrono::steady_clock::now().time_since_epoch();
-    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
-}
-
-void atomic_update_max(std::atomic<std::uint64_t>& target, std::uint64_t value)
-{
-    std::uint64_t current = target.load(std::memory_order_relaxed);
-    while (value > current && !target.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
-    }
-}
-
-void atomic_update_min(std::atomic<std::uint64_t>& target, std::uint64_t value)
-{
-    std::uint64_t current = target.load(std::memory_order_relaxed);
-    while ((current == 0 || value < current) &&
-           !target.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
-    }
-}
-
-void observe_callback_interval(DuplexContext& context)
-{
-    const std::uint64_t now = callback_now_us();
-    const std::uint64_t previous = context.last_callback_us.exchange(now, std::memory_order_relaxed);
-    if (previous == 0 || now <= previous || context.sample_rate <= 0.0 || context.buffer_size <= 0) {
-        return;
-    }
-    const std::uint64_t interval = now - previous;
-    atomic_update_min(context.callback_interval_min_us, interval);
-    context.callback_interval_sum_us.fetch_add(interval, std::memory_order_relaxed);
-    atomic_update_max(context.callback_interval_max_us, interval);
-    context.callback_interval_samples.fetch_add(1, std::memory_order_relaxed);
-    const double expected = static_cast<double>(context.buffer_size) * 1000000.0 / context.sample_rate;
-    if (interval > static_cast<std::uint64_t>(expected * 1.1)) {
-        context.callback_gap_over_1_1x_count.fetch_add(1, std::memory_order_relaxed);
-    }
-    if (interval > static_cast<std::uint64_t>(expected * 1.5)) {
-        context.callback_gap_over_1_5x_count.fetch_add(1, std::memory_order_relaxed);
-    }
-    if (interval > static_cast<std::uint64_t>(expected * 2.0)) {
-        context.callback_gap_over_2x_count.fetch_add(1, std::memory_order_relaxed);
-    }
-}
-
-void update_peak(std::atomic<int>& peak, int candidate)
-{
-    int current = peak.load(std::memory_order_relaxed);
-    while (candidate > current &&
-           !peak.compare_exchange_weak(current, candidate, std::memory_order_relaxed, std::memory_order_relaxed)) {
-    }
-}
-
-int i32_peak_ppm(std::span<const std::int32_t> samples)
-{
-    std::uint32_t peak = 0;
-    for (std::int32_t sample : samples) {
-        const std::uint32_t abs_sample = sample == (std::numeric_limits<std::int32_t>::min)() ?
-            static_cast<std::uint32_t>((std::numeric_limits<std::int32_t>::max)()) :
-            static_cast<std::uint32_t>(std::abs(sample));
-        peak = (std::max)(peak, abs_sample);
-    }
-    const double normalized = static_cast<double>(peak) / 2147483647.0;
-    return static_cast<int>(std::clamp(normalized, 0.0, 1.0) * 1000000.0);
-}
-
-std::int32_t scale_i32_sample(std::int32_t sample, double level)
-{
-    const double scaled = static_cast<double>(sample) * level;
-    return static_cast<std::int32_t>(std::clamp(scaled, -2147483648.0, 2147483647.0));
-}
-
-void observe_peak(std::atomic<int>& peak, std::span<const std::int32_t> samples)
-{
-    update_peak(peak, i32_peak_ppm(samples));
-}
 
 void asio_sample_rate_changed(ASIOSampleRate)
 {
@@ -358,375 +254,17 @@ long asio_message(long selector, long, void*, double*)
     return 0;
 }
 
-void mix_metronome_click(DuplexContext& context, std::span<std::int32_t> output, std::span<std::int32_t> metronome_stem)
-{
-    if (context.control == nullptr ||
-        context.sample_rate <= 0.0) {
-        return;
-    }
-    if (metronome_stem.size() == output.size()) {
-        std::fill(metronome_stem.begin(), metronome_stem.end(), 0);
-    }
-    const bool enabled =
-        context.control->metronome_enabled.load(std::memory_order_relaxed) ||
-        context.control->playback_count_in_active.load(std::memory_order_relaxed);
-    const bool transport_gated =
-        context.control->metronome_transport_gated.load(std::memory_order_relaxed);
-    const bool local_click_suppressed =
-        context.control->metronome_mode.load(std::memory_order_relaxed) == 1 &&
-        !context.control->leader_audio_local_click.load(std::memory_order_relaxed);
-    if (!metronome_output_allowed(
-            enabled,
-            local_click_suppressed,
-            transport_gated,
-            context.control->transport_playback_active.load(std::memory_order_relaxed),
-            context.control->recording_count_in_active.load(std::memory_order_relaxed))) {
-        return;
-    }
-
-    const int level_ppm = context.control->metronome_level_ppm.load(std::memory_order_relaxed);
-    const double level = static_cast<double>(std::clamp(level_ppm, 0, 4000000)) / 1000000.0;
-    const bool epoch_valid = context.control->metronome_epoch_valid.load(std::memory_order_relaxed);
-    const std::uint64_t epoch = context.control->metronome_epoch_sample_time.load(std::memory_order_relaxed);
-    const std::int64_t render_offset_frames =
-        context.control->metronome_render_offset_frames.load(std::memory_order_relaxed);
-    const jam2::metronome::PatternSnapshot pattern = jam2::metronome::sanitize({
-        context.control->metronome_bpm.load(std::memory_order_relaxed),
-        context.control->metronome_beats_per_bar.load(std::memory_order_relaxed),
-        context.control->metronome_division.load(std::memory_order_relaxed),
-        context.control->metronome_step_count.load(std::memory_order_relaxed),
-        context.control->metronome_play_mask_low.load(std::memory_order_relaxed),
-        context.control->metronome_play_mask_high.load(std::memory_order_relaxed),
-        context.control->metronome_accent_mask_low.load(std::memory_order_relaxed),
-        context.control->metronome_accent_mask_high.load(std::memory_order_relaxed),
-        context.control->metronome_beat_unit.load(std::memory_order_relaxed),
-        context.control->metronome_tempo_pulse_units.load(std::memory_order_relaxed),
-    });
-    const std::uint64_t step_interval =
-        jam2::metronome::step_interval_samples(
-            context.sample_rate, pattern.bpm, pattern.division,
-            pattern.tempo_pulse_units);
-    const bool count_in_active =
-        context.control->recording_count_in_active.load(std::memory_order_acquire);
-    const auto click_sound = jam2::metronome::sanitize_click_sound(
-        context.control->metronome_sound.load(std::memory_order_relaxed));
-    const std::uint64_t count_in_start =
-        context.control->recording_count_in_start_frame.load(std::memory_order_relaxed);
-    const std::uint64_t count_in_target =
-        context.control->recording_count_in_target_frame.load(std::memory_order_relaxed);
-
-    for (std::size_t i = 0; i < output.size(); ++i) {
-        const std::uint64_t raw_sample_counter =
-            context.engine_frame_counter + static_cast<std::uint64_t>(i);
-        if (count_in_active && raw_sample_counter < count_in_start) {
-            continue;
-        }
-        std::uint64_t render_sample_counter = raw_sample_counter;
-        if (render_offset_frames < 0) {
-            const std::uint64_t offset = static_cast<std::uint64_t>(-render_offset_frames);
-            render_sample_counter = render_sample_counter > offset ? render_sample_counter - offset : 0ULL;
-        } else {
-            render_sample_counter += static_cast<std::uint64_t>(render_offset_frames);
-        }
-        std::uint64_t position = 0;
-        if (jam2::audio::metronome_pattern_position(
-                *context.control,
-                raw_sample_counter,
-                render_sample_counter,
-                epoch_valid,
-                epoch,
-                position)) {
-            const double rendered = jam2::metronome::render_sample(
-                pattern,
-                position,
-                step_interval,
-                context.sample_rate,
-                level,
-                count_in_active &&
-                        raw_sample_counter >= count_in_start &&
-                        raw_sample_counter < count_in_target
-                    ? jam2::metronome::ClickVoice::CountIn
-                    : jam2::metronome::ClickVoice::Normal,
-                click_sound);
-            if (metronome_stem.size() == output.size()) {
-                metronome_stem[i] = jam2::metronome::mix_i32(0, rendered);
-            }
-            output[i] = jam2::metronome::mix_i32(output[i], rendered);
-            if (step_interval > 0) {
-                context.metronome_beat_index = (position / step_interval) + 1;
-            }
-        }
-    }
-}
-
-std::int32_t pop_one_frame(MonoRingBuffer& ring)
-{
-    std::array<std::int32_t, 1> frame{};
-    (void)ring.pop(frame, false);
-    return frame[0];
-}
-
-void pop_resampled_playback(DuplexContext& context, std::span<std::int32_t> output)
-{
-    if (context.playback == nullptr || context.control == nullptr) {
-        std::fill(output.begin(), output.end(), 0);
-        return;
-    }
-
-    context.ratio_smoother.setTargetPpm(
-        context.control->playback_ratio_ppm.load(std::memory_order_relaxed),
-        context.control->playback_ratio_ramp_frames.load(std::memory_order_relaxed));
-
-    if (context.ratio_smoother.steadyUnity() &&
-        !context.resample_has_current && !context.resample_has_next) {
-        context.playback->pop(output);
-        context.control->playback_ratio_applied_ppm.store(1000000, std::memory_order_relaxed);
-        context.control->playback_ratio_ramping.store(false, std::memory_order_relaxed);
-        return;
-    }
-
-    if (!context.resample_has_current) {
-        context.resample_current = pop_one_frame(*context.playback);
-        context.resample_has_current = true;
-    }
-    if (!context.resample_has_next) {
-        context.resample_next = pop_one_frame(*context.playback);
-        context.resample_has_next = true;
-    }
-
-    for (std::int32_t& sample : output) {
-        const double ratio = context.ratio_smoother.nextRatio();
-        const double mixed =
-            static_cast<double>(context.resample_current) +
-            (static_cast<double>(context.resample_next - context.resample_current) * context.resample_phase);
-        sample = static_cast<std::int32_t>(std::clamp(mixed, -2147483648.0, 2147483647.0));
-
-        context.resample_phase += ratio;
-        while (context.resample_phase >= 1.0) {
-            context.resample_phase -= 1.0;
-            context.resample_current = context.resample_next;
-            context.resample_next = pop_one_frame(*context.playback);
-        }
-    }
-    context.control->playback_ratio_applied_ppm.store(
-        context.ratio_smoother.appliedPpm(), std::memory_order_relaxed);
-    context.control->playback_ratio_ramping.store(
-        context.ratio_smoother.ramping(), std::memory_order_relaxed);
-}
-
-void apply_remote_level(DuplexContext& context, std::span<std::int32_t> output)
-{
-    if (context.control == nullptr) {
-        return;
-    }
-    const int level_ppm = context.control->remote_level_ppm.load(std::memory_order_relaxed);
-    if (level_ppm == 1000000) {
-        return;
-    }
-    const double level = static_cast<double>(std::clamp(level_ppm, 0, 4000000)) / 1000000.0;
-    for (std::int32_t& sample : output) {
-        sample = scale_i32_sample(sample, level);
-    }
-}
-
-void apply_output_level(DuplexContext& context, std::span<std::int32_t> output)
-{
-    if (context.control == nullptr) {
-        return;
-    }
-    const int level_ppm =
-        context.control->output_level_ppm.load(std::memory_order_relaxed);
-    if (level_ppm == 1000000) {
-        return;
-    }
-    const double level =
-        static_cast<double>(std::clamp(level_ppm, 0, 4000000)) / 1000000.0;
-    for (std::int32_t& sample : output) {
-        sample = scale_i32_sample(sample, level);
-    }
-}
-
-std::int32_t mix_i32_samples(std::int32_t a, std::int32_t b);
-
-void mix_local_monitor(DuplexContext& context, std::span<std::int32_t> output, std::span<const std::int32_t> input)
-{
-    if (context.control == nullptr ||
-        !context.control->local_monitor_enabled.load(std::memory_order_relaxed) ||
-        input.empty()) {
-        if (context.control != nullptr) {
-            context.control->monitor_peak_ppm.store(0, std::memory_order_relaxed);
-            context.control->gui_monitor_peak_ppm.store(0, std::memory_order_relaxed);
-        }
-        return;
-    }
-    const int level_ppm = context.control->local_monitor_level_ppm.load(std::memory_order_relaxed);
-    if (level_ppm <= 0) {
-        context.control->monitor_peak_ppm.store(0, std::memory_order_relaxed);
-        context.control->gui_monitor_peak_ppm.store(0, std::memory_order_relaxed);
-        return;
-    }
-    const double level = static_cast<double>(std::clamp(level_ppm, 0, 4000000)) / 1000000.0;
-    std::uint32_t monitor_peak = 0;
-    const std::size_t frames = (std::min)(output.size(), input.size());
-    for (std::size_t i = 0; i < frames; ++i) {
-        const std::int32_t monitored = scale_i32_sample(input[i], level);
-        const std::uint32_t abs_sample = monitored == (std::numeric_limits<std::int32_t>::min)() ?
-            static_cast<std::uint32_t>((std::numeric_limits<std::int32_t>::max)()) :
-            static_cast<std::uint32_t>(std::abs(monitored));
-        monitor_peak = (std::max)(monitor_peak, abs_sample);
-        output[i] = mix_i32_samples(output[i], monitored);
-    }
-    const double normalized = static_cast<double>(monitor_peak) / 2147483647.0;
-    const int peak_ppm = static_cast<int>(std::clamp(normalized, 0.0, 1.0) * 1000000.0);
-    context.control->monitor_peak_ppm.store(peak_ppm, std::memory_order_relaxed);
-    update_interval_peak(context.control->gui_monitor_peak_ppm, peak_ppm);
-}
-
-void mix_prepared_source(
-    DuplexContext& context,
-    std::span<std::int32_t> output,
-    std::uint64_t frame,
-    std::span<std::int32_t> stem)
-{
-    if (context.control == nullptr || context.control->prepared_source == nullptr || output.empty()) {
-        if (context.control != nullptr) {
-            context.control->prepared_track_peak_ppm.store(0, std::memory_order_relaxed);
-        }
-        return;
-    }
-    const int peak = context.control->prepared_source->mix(
-        output.data(), output.size(), frame, stem);
-    context.control->prepared_track_peak_ppm.store(peak, std::memory_order_relaxed);
-    update_interval_peak(context.control->gui_prepared_track_peak_ppm, peak);
-    context.control->prepared_source_frame.store(
-        context.control->prepared_source->sourceFrame(),
-        std::memory_order_relaxed);
-    context.control->prepared_source_scheduled_start_frame.store(
-        context.control->prepared_source->scheduledStartFrame(),
-        std::memory_order_relaxed);
-    context.control->prepared_source_actual_start_frame.store(
-        context.control->prepared_source->actualStartFrame(),
-        std::memory_order_relaxed);
-    context.control->prepared_source_underruns.store(
-        context.control->prepared_source->underruns(),
-        std::memory_order_relaxed);
-}
-
-void observe_output_peak(DuplexContext& context, std::span<const std::int32_t> output)
-{
-    if (context.control == nullptr) {
-        return;
-    }
-    observe_peak(context.control->output_peak_ppm, output);
-    observe_peak(context.control->gui_output_peak_ppm, output);
-    for (std::int32_t sample : output) {
-        if (sample == (std::numeric_limits<std::int32_t>::min)() ||
-            sample == (std::numeric_limits<std::int32_t>::max)()) {
-            context.control->output_clipped_samples.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
-}
-
-std::int32_t mix_i32_samples(std::int32_t a, std::int32_t b)
-{
-    const std::int64_t mixed = static_cast<std::int64_t>(a) + static_cast<std::int64_t>(b);
-    return static_cast<std::int32_t>(std::clamp<std::int64_t>(mixed, -2147483648LL, 2147483647LL));
-}
-
-std::int32_t render_test_input_sample(int mode, std::uint64_t sample_time, double sample_rate, double level)
-{
-    if (mode == 1 || sample_rate <= 0.0) {
-        return 0;
-    }
-    if (mode == 2) {
-        const double phase = std::fmod(static_cast<double>(sample_time) * 440.0 / sample_rate, 1.0);
-        return static_cast<std::int32_t>(std::sin(phase * 2.0 * kPi) * level * 2147483647.0);
-    }
-    if (mode == 5) {
-        const double phase = std::fmod(static_cast<double>(sample_time) * 30.867706 / sample_rate, 1.0);
-        return static_cast<std::int32_t>(std::sin(phase * 2.0 * kPi) * level * 2147483647.0);
-    }
-    if (mode == 3) {
-        const std::uint64_t period = static_cast<std::uint64_t>(sample_rate > 1.0 ? sample_rate : 1.0);
-        const std::uint64_t width = std::max<std::uint64_t>(1, period / 100);
-        return (sample_time % period) < width ?
-            static_cast<std::int32_t>(level * 2147483647.0) :
-            0;
-    }
-    return 0;
-}
-
-std::int32_t render_metronome_test_input_sample(
-    const StreamControl& control,
-    std::uint64_t sample_time,
-    double sample_rate,
-    double level)
-{
-    if (sample_rate <= 0.0 ||
-        !control.metronome_enabled.load(std::memory_order_relaxed) ||
-        !control.metronome_epoch_valid.load(std::memory_order_relaxed)) {
-        return 0;
-    }
-    const std::uint64_t epoch = control.metronome_epoch_sample_time.load(std::memory_order_relaxed);
-    if (sample_time < epoch) {
-        return 0;
-    }
-    const jam2::metronome::PatternSnapshot pattern = jam2::metronome::sanitize({
-        control.metronome_bpm.load(std::memory_order_relaxed),
-        control.metronome_beats_per_bar.load(std::memory_order_relaxed),
-        control.metronome_division.load(std::memory_order_relaxed),
-        control.metronome_step_count.load(std::memory_order_relaxed),
-        control.metronome_play_mask_low.load(std::memory_order_relaxed),
-        control.metronome_play_mask_high.load(std::memory_order_relaxed),
-        control.metronome_accent_mask_low.load(std::memory_order_relaxed),
-        control.metronome_accent_mask_high.load(std::memory_order_relaxed),
-        control.metronome_beat_unit.load(std::memory_order_relaxed),
-        control.metronome_tempo_pulse_units.load(std::memory_order_relaxed),
-    });
-    const std::uint64_t step_interval =
-        jam2::metronome::step_interval_samples(
-            sample_rate, pattern.bpm, pattern.division,
-            pattern.tempo_pulse_units);
-    const double rendered = jam2::metronome::render_sample(
-        pattern,
-        sample_time - epoch,
-        step_interval,
-        sample_rate,
-        level,
-        jam2::metronome::ClickVoice::Normal,
-        jam2::metronome::sanitize_click_sound(
-            control.metronome_sound.load(std::memory_order_relaxed)));
-    return jam2::metronome::mix_i32(0, rendered);
-}
-
-void fill_test_input(DuplexContext& context, std::span<std::int32_t> output)
-{
-    if (context.control == nullptr) {
-        std::fill(output.begin(), output.end(), 0);
-        return;
-    }
-    const int mode = context.control->test_input_mode.load(std::memory_order_relaxed);
-    const double level = static_cast<double>(
-        std::clamp(context.control->test_input_level_ppm.load(std::memory_order_relaxed), 0, 1000000)) / 1000000.0;
-    for (std::int32_t& sample : output) {
-        sample = mode == 4 ?
-            render_metronome_test_input_sample(
-                *context.control,
-                context.test_input_sample_counter,
-                context.sample_rate,
-                level) :
-            render_test_input_sample(mode, context.test_input_sample_counter, context.sample_rate, level);
-        ++context.test_input_sample_counter;
-    }
-}
-
 void duplex_buffer_switch(long double_buffer_index, ASIOBool)
 {
     DuplexContext* context = g_duplex_context;
     if (context == nullptr || context->capture == nullptr || context->playback == nullptr) {
         return;
     }
-    observe_callback_interval(*context);
+    processing::observe_callback_interval(
+        context->callback_intervals,
+        processing::callback_now_us(),
+        static_cast<std::size_t>(context->buffer_size),
+        context->sample_rate);
     const bool network_capture_enabled = context->control != nullptr &&
         prepare_network_capture_callback(
             *context->control,
@@ -745,10 +283,30 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
     if (test_input_mode != 0 &&
         context->capture_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
         auto generated = std::span<std::int32_t>(context->capture_scratch.data(), static_cast<std::size_t>(context->buffer_size));
-        fill_test_input(*context, generated);
+        processing::fill_test_input(
+            context->control,
+            context->sample_rate,
+            context->test_input_sample_counter,
+            generated);
+        auto* source_router = context->control != nullptr ?
+            context->control->input_source_router : nullptr;
+        if (source_router != nullptr) {
+            std::fill(
+                context->input_source_pointers.begin(),
+                context->input_source_pointers.end(),
+                generated.data());
+            const bool routed = source_router->process(
+                std::span<const std::int32_t* const>(
+                    context->input_source_pointers.data(),
+                    context->input_source_pointers.size()),
+                generated.size(),
+                context->engine_frame_counter,
+                context->sample_rate,
+                generated);
+            if (!routed) std::fill(generated.begin(), generated.end(), 0);
+        }
         if (context->control != nullptr) {
-            observe_peak(context->control->input_peak_ppm, generated);
-            observe_peak(context->control->gui_input_peak_ppm, generated);
+            processing::observe_input_peaks(context->control, generated);
         }
         if (network_capture_enabled) {
             context->capture->push(std::span<const std::int32_t>(generated.data(), generated.size()));
@@ -851,8 +409,7 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
             push_pitch_analysis_callback(*context->control, *context->pitch, captured_input);
         }
         if (context->control != nullptr) {
-            observe_peak(context->control->input_peak_ppm, captured_input);
-            observe_peak(context->control->gui_input_peak_ppm, captured_input);
+            processing::observe_input_peaks(context->control, captured_input);
         }
         if (context->recorder_my_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
             const bool selected = source_router != nullptr && source_router->copy_recording_source(
@@ -874,10 +431,7 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
         if (!network_playback_enabled) {
             context->playback_prefilled.store(false, std::memory_order_relaxed);
             context->playback->pop(std::span<std::int32_t>{}, false);
-            context->resample_has_current = false;
-            context->resample_has_next = false;
-            context->resample_phase = 0.0;
-            context->ratio_smoother.reset();
+            context->playback_resampler.reset();
             context->control->playback_ratio_applied_ppm.store(1000000, std::memory_order_relaxed);
             context->control->playback_ratio_ramping.store(false, std::memory_order_relaxed);
             std::fill(mono, mono + context->buffer_size, 0);
@@ -890,52 +444,59 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
         }
         auto playback = std::span<std::int32_t>(mono, static_cast<std::size_t>(context->buffer_size));
         if (network_playback_enabled && context->playback_prefilled.load(std::memory_order_relaxed)) {
-            pop_resampled_playback(*context, playback);
-            apply_remote_level(*context, playback);
+            processing::pop_resampled_playback(
+                context->playback,
+                context->control,
+                context->playback_resampler,
+                playback);
+            processing::apply_remote_level(context->control, playback);
         }
         if (context->control != nullptr) {
             context->control->network_playback_enabled_applied.store(
                 network_playback_enabled,
                 std::memory_order_release);
-            observe_peak(context->control->remote_peak_ppm, playback);
-            observe_peak(context->control->gui_remote_peak_ppm, playback);
+            processing::observe_peak(context->control->remote_peak_ppm, playback);
+            processing::observe_peak(context->control->gui_remote_peak_ppm, playback);
         }
         if (context->recorder_their_input_scratch.size() >= static_cast<std::size_t>(context->buffer_size)) {
             std::copy(playback.begin(), playback.end(), context->recorder_their_input_scratch.begin());
         }
-        mix_local_monitor(
-            *context,
+        processing::mix_local_monitor(
+            context->control,
             playback,
             std::span<const std::int32_t>(
                 context->capture_scratch.data(),
                 std::min<std::size_t>(context->capture_scratch.size(), playback.size())));
         const std::uint64_t audio_frame_start = context->engine_frame_counter;
-        mix_prepared_source(
-            *context,
+        processing::mix_prepared_source(
+            context->control,
             playback,
             audio_frame_start,
             std::span<std::int32_t>(
                 context->recorder_prepared_scratch.data(),
                 std::min<std::size_t>(context->recorder_prepared_scratch.size(), playback.size())));
-        mix_metronome_click(
-            *context,
+        processing::mix_metronome_click(
+            context->control,
+            context->sample_rate,
+            context->engine_frame_counter,
+            context->metronome_beat_index,
             playback,
             std::span<std::int32_t>(
                 context->recorder_metronome_scratch.data(),
                 std::min<std::size_t>(context->recorder_metronome_scratch.size(), playback.size())));
-        apply_output_level(*context, playback);
+        processing::apply_output_level(context->control, playback);
         if (context->control != nullptr) {
-            observe_peak(
+            processing::observe_peak(
                 context->control->metronome_peak_ppm,
                 std::span<const std::int32_t>(
                     context->recorder_metronome_scratch.data(),
                     std::min<std::size_t>(context->recorder_metronome_scratch.size(), playback.size())));
-            observe_peak(
+            processing::observe_peak(
                 context->control->gui_metronome_peak_ppm,
                 std::span<const std::int32_t>(
                     context->recorder_metronome_scratch.data(),
                     std::min<std::size_t>(context->recorder_metronome_scratch.size(), playback.size())));
-            observe_output_peak(*context, playback);
+            processing::observe_output_peak(context->control, playback);
         }
         if (context->track_take_recorder != nullptr &&
             context->recorder_my_input_scratch.size() >= playback.size() &&
@@ -947,16 +508,18 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
             const auto source = static_cast<TrackTakeSource>(options & 0xff);
             if (source == TrackTakeSource::CurrentJam) {
                 for (std::size_t index = 0; index < playback.size(); ++index) {
-                    std::int32_t sample = mix_i32_samples(
+                    std::int32_t sample = processing::mix_i32_samples(
                         context->recorder_my_input_scratch[index],
                         context->recorder_their_input_scratch[index]);
                     if ((options & kTrackTakeIncludePrepared) != 0 &&
                         context->recorder_prepared_scratch.size() >= playback.size()) {
-                        sample = mix_i32_samples(sample, context->recorder_prepared_scratch[index]);
+                        sample = processing::mix_i32_samples(
+                            sample, context->recorder_prepared_scratch[index]);
                     }
                     if ((options & kTrackTakeIncludeMetronome) != 0 &&
                         context->recorder_metronome_scratch.size() >= playback.size()) {
-                        sample = mix_i32_samples(sample, context->recorder_metronome_scratch[index]);
+                        sample = processing::mix_i32_samples(
+                            sample, context->recorder_metronome_scratch[index]);
                     }
                     context->recorder_inputs_mix_scratch[index] = sample;
                 }
@@ -988,7 +551,7 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
             context->recorder_their_input_scratch.size() >= playback.size() &&
             context->recorder_metronome_scratch.size() >= playback.size()) {
             for (std::size_t i = 0; i < playback.size(); ++i) {
-                context->recorder_inputs_mix_scratch[i] = mix_i32_samples(
+                context->recorder_inputs_mix_scratch[i] = processing::mix_i32_samples(
                     context->recorder_my_input_scratch[i],
                     context->recorder_their_input_scratch[i]);
             }
@@ -1161,13 +724,13 @@ public:
     CallbackTimingStats callback_timing_stats() const override
     {
         return CallbackTimingStats{
-            context_.callback_interval_min_us.load(std::memory_order_relaxed),
-            context_.callback_interval_sum_us.load(std::memory_order_relaxed),
-            context_.callback_interval_max_us.load(std::memory_order_relaxed),
-            context_.callback_interval_samples.load(std::memory_order_relaxed),
-            context_.callback_gap_over_1_1x_count.load(std::memory_order_relaxed),
-            context_.callback_gap_over_1_5x_count.load(std::memory_order_relaxed),
-            context_.callback_gap_over_2x_count.load(std::memory_order_relaxed),
+            context_.callback_intervals.minimumUs.load(std::memory_order_relaxed),
+            context_.callback_intervals.sumUs.load(std::memory_order_relaxed),
+            context_.callback_intervals.maximumUs.load(std::memory_order_relaxed),
+            context_.callback_intervals.samples.load(std::memory_order_relaxed),
+            context_.callback_intervals.gapsOver1_1x.load(std::memory_order_relaxed),
+            context_.callback_intervals.gapsOver1_5x.load(std::memory_order_relaxed),
+            context_.callback_intervals.gapsOver2x.load(std::memory_order_relaxed),
         };
     }
 

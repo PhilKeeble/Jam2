@@ -3,5 +3,5 @@
   "run_id": "controller-lifecycle-validation",
   "operation": "validate.controller-lifecycle",
   "profile": "fast",
-  "artifacts": {"root": "../validate_logs/manual/controller-lifecycle-validation"}
+  "artifacts": {"root": "../diagnostic_logs/manual/controller-lifecycle-validation"}
 }

@@ -2,7 +2,9 @@
 
 #include "MainWindow.hpp"
 
+#include "DetailSectionEdit.hpp"
 #include "GuiPresentation.hpp"
+#include "GuiControlContract.hpp"
 #include "GuiTheme.hpp"
 #include "SessionController.hpp"
 #include "TrackWidgets.hpp"
@@ -23,10 +25,7 @@
 #include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
-#include <QFocusEvent>
 #include <QFont>
-#include <QKeyEvent>
-#include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
@@ -212,83 +211,6 @@ protected:
     }
 };
 
-class DetailSectionEdit final : public QLineEdit {
-public:
-    explicit DetailSectionEdit(QWidget* parent)
-        : QLineEdit(parent)
-    {
-        setReadOnly(true);
-        setFocusPolicy(Qt::NoFocus);
-        setFrame(false);
-        setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-        setMinimumWidth(460);
-        setMaximumWidth(760);
-        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-        setToolTip(QStringLiteral("Double-click to rename this section"));
-    }
-
-    std::function<void(const QString&)> onCommitted;
-
-protected:
-    void mouseDoubleClickEvent(QMouseEvent* event) override
-    {
-        if (property("sectionEditable").toBool()) {
-            original_ = text();
-            setFocusPolicy(Qt::StrongFocus);
-            setReadOnly(false);
-            setFocus(Qt::MouseFocusReason);
-            setProperty("editing", true);
-            style()->unpolish(this);
-            style()->polish(this);
-            selectAll();
-            event->accept();
-            return;
-        }
-        QLineEdit::mouseDoubleClickEvent(event);
-    }
-
-    void keyPressEvent(QKeyEvent* event) override
-    {
-        if (!isReadOnly() && event->key() == Qt::Key_Escape) {
-            setText(original_);
-            finishEditing(false);
-            event->accept();
-            return;
-        }
-        if (!isReadOnly() && (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)) {
-            finishEditing(true);
-            event->accept();
-            return;
-        }
-        QLineEdit::keyPressEvent(event);
-    }
-
-    void focusOutEvent(QFocusEvent* event) override
-    {
-        if (!isReadOnly()) finishEditing(true);
-        QLineEdit::focusOutEvent(event);
-    }
-
-private:
-    void finishEditing(bool commit)
-    {
-        QString value = text().trimmed();
-        if (value.isEmpty()) value = original_;
-        setText(value);
-        setCursorPosition(0);
-        setReadOnly(true);
-        deselect();
-        setFocusPolicy(Qt::NoFocus);
-        clearFocus();
-        setProperty("editing", false);
-        style()->unpolish(this);
-        style()->polish(this);
-        if (commit && value != original_ && onCommitted) onCommitted(value);
-    }
-
-    QString original_;
-};
-
 } // namespace
 
 void MainWindowPages::build(MainWindow& w)
@@ -304,12 +226,15 @@ void MainWindowPages::build(MainWindow& w)
     auto* header = new QHBoxLayout();
     header->setSpacing(10);
     header->addWidget(brandMark);
-    auto* jamTitleEdit = new DetailSectionEdit(&w);
+    auto* jamTitleEdit = new jam2::gui::DetailSectionEdit(&w);
     jamTitleEdit->setText(w.chordModel_.title());
     jamTitleEdit->setProperty("sectionEditable", true);
     jamTitleEdit->setToolTip(QStringLiteral("Double-click to rename this jam"));
     w.songTitleEdit_ = jamTitleEdit;
     w.songTitleEdit_->setObjectName(QStringLiteral("SongTitle"));
+    jam2::gui::registerGuiControl(
+        *w.songTitleEdit_, QStringLiteral("session.song-title"),
+        QStringLiteral("session.rename"));
     w.songTitleEdit_->setMinimumWidth(240);
     w.songTitleEdit_->setMaximumWidth(520);
     header->addSpacing(20);
@@ -317,6 +242,18 @@ void MainWindowPages::build(MainWindow& w)
     auto* startJamButton = new QPushButton(QStringLiteral("Start Jam"), &w);
     auto* joinJamButton = new QPushButton(QStringLiteral("Join Jam"), &w);
     w.leaveJamButton_ = new QPushButton(QStringLiteral("Leave Jam"), &w);
+    jam2::gui::registerGuiControl(
+        *startJamButton, QStringLiteral("session.start"),
+        QStringLiteral("session.create-dialog"),
+        jam2::gui::GuiControlAvailability::Modal);
+    jam2::gui::registerGuiControl(
+        *joinJamButton, QStringLiteral("session.join"),
+        QStringLiteral("session.join-dialog"),
+        jam2::gui::GuiControlAvailability::Modal);
+    jam2::gui::registerGuiControl(
+        *w.leaveJamButton_, QStringLiteral("session.leave"),
+        QStringLiteral("session.lifecycle"),
+        jam2::gui::GuiControlAvailability::StateGated);
     for (QPushButton* button : {startJamButton, joinJamButton, w.leaveJamButton_}) {
         button->setObjectName(QStringLiteral("DetailTool"));
         button->setFixedHeight(32);
@@ -334,6 +271,10 @@ void MainWindowPages::build(MainWindow& w)
     });
     w.jamSyncButton_ = new QToolButton(&w);
     w.jamSyncButton_->setObjectName(QStringLiteral("JamSyncButton"));
+    jam2::gui::registerGuiControl(
+        *w.jamSyncButton_, QStringLiteral("session.jam-sync"),
+        QStringLiteral("session.sync-policy-dialog"),
+        jam2::gui::GuiControlAvailability::Modal);
     w.jamSyncButton_->setText(QStringLiteral("\u25cf  JAM SYNC"));
     w.jamSyncButton_->setToolButtonStyle(Qt::ToolButtonTextOnly);
     w.jamSyncButton_->setFixedHeight(32);
@@ -355,6 +296,10 @@ void MainWindowPages::build(MainWindow& w)
     w.connectionLabel_->setAlignment(Qt::AlignCenter);
     auto* settingsButton = new QToolButton(&w);
     settingsButton->setObjectName(QStringLiteral("SettingsButton"));
+    jam2::gui::registerGuiControl(
+        *settingsButton, QStringLiteral("application.settings"),
+        QStringLiteral("application.settings-dialog"),
+        jam2::gui::GuiControlAvailability::Modal);
     settingsButton->setIcon(settingsIcon());
     settingsButton->setIconSize(QSize(18, 18));
     settingsButton->setFixedSize(34, 34);
@@ -376,7 +321,7 @@ void MainWindowPages::build(MainWindow& w)
     auto* lyricPage = new QWidget(&w);
     w.lyricGrid_ = new BeatGridWidget(&w.lyricModel_, QStringLiteral("lyric"), lyricPage);
     auto* lyricTop = new QHBoxLayout();
-    addBankControls(w, lyricPage, lyricTop, false);
+    addBankControls(w, lyricPage, lyricTop, false, "lyrics");
     lyricTop->addStretch(1);
     auto* lyricLayout = new QVBoxLayout(lyricPage);
     lyricLayout->addLayout(lyricTop);
@@ -530,11 +475,15 @@ void MainWindowPages::build(MainWindow& w)
     auto* detailIdentity = new QVBoxLayout(w.detailIdentityPanel_);
     detailIdentity->setContentsMargins(0, 0, 0, 0);
     detailIdentity->setSpacing(0);
-    auto* detailSectionEdit = new DetailSectionEdit(w.detailIdentityPanel_);
+    auto* detailSectionEdit = new jam2::gui::DetailSectionEdit(w.detailIdentityPanel_);
     w.detailPositionLabel_ = detailSectionEdit;
     w.detailPositionLabel_->setText(QStringLiteral("Section A"));
     w.detailPositionLabel_->setCursorPosition(0);
     w.detailPositionLabel_->setObjectName(QStringLiteral("DetailPosition"));
+    jam2::gui::registerGuiControl(
+        *w.detailPositionLabel_, QStringLiteral("song.section-name"),
+        QStringLiteral("song.section-rename"),
+        jam2::gui::GuiControlAvailability::StateGated);
     detailSectionEdit->onCommitted = [&w](const QString& name) {
         const int bank = w.viewedBankIndex_;
         if (bank < 0 || bank >= w.chordModel_.sections().size()) return;
@@ -560,6 +509,11 @@ void MainWindowPages::build(MainWindow& w)
         auto* button = new QPushButton(destination.first, detailPanel);
         button->setObjectName(QStringLiteral("DetailTab"));
         button->setProperty("workspaceKey", destination.second);
+        jam2::gui::registerGuiControl(
+            *button, QStringLiteral("workspace.open.%1").arg(destination.second),
+            QStringLiteral("workspace.navigation"),
+            jam2::gui::GuiControlAvailability::StateGated,
+            QStringLiteral("workspace.open"));
         QObject::connect(button, &QPushButton::clicked, &w, [&w, key = destination.second] {
             w.openWorkspace(key);
         });
@@ -567,6 +521,10 @@ void MainWindowPages::build(MainWindow& w)
     }
     auto* closeDetailButton = new QPushButton(QStringLiteral("Close"), detailPanel);
     closeDetailButton->setObjectName(QStringLiteral("CloseDetailButton"));
+    jam2::gui::registerGuiControl(
+        *closeDetailButton, QStringLiteral("workspace.close"),
+        QStringLiteral("workspace.navigation"),
+        jam2::gui::GuiControlAvailability::StateGated);
     QObject::connect(closeDetailButton, &QPushButton::clicked, &w, [&w] {
         w.openWorkspace(QStringLiteral("performance"));
     });
@@ -584,6 +542,18 @@ void MainWindowPages::build(MainWindow& w)
     auto* saveSongButton = new QPushButton(QStringLiteral("Save"), &w);
     auto* openSongButton = new QPushButton(QStringLiteral("Open"), &w);
     auto* newSongButton = new QPushButton(QStringLiteral("New"), &w);
+    jam2::gui::registerGuiControl(
+        *saveSongButton, QStringLiteral("session.save"),
+        QStringLiteral("session.persistence"),
+        jam2::gui::GuiControlAvailability::FileDialog);
+    jam2::gui::registerGuiControl(
+        *openSongButton, QStringLiteral("session.open"),
+        QStringLiteral("session.persistence"),
+        jam2::gui::GuiControlAvailability::FileDialog);
+    jam2::gui::registerGuiControl(
+        *newSongButton, QStringLiteral("session.new"),
+        QStringLiteral("session.persistence"),
+        jam2::gui::GuiControlAvailability::Modal);
     for (QPushButton* button : {saveSongButton, openSongButton, newSongButton}) {
         button->setObjectName(QStringLiteral("SessionAction"));
         sessionActions->addWidget(button);
@@ -593,6 +563,9 @@ void MainWindowPages::build(MainWindow& w)
     QObject::connect(newSongButton, &QPushButton::clicked, &w, [&w] { w.newSong(); });
     auto* dataButton = new QPushButton(QStringLiteral("Data"), &w);
     dataButton->setObjectName(QStringLiteral("DataButton"));
+    jam2::gui::registerGuiControl(
+        *dataButton, QStringLiteral("application.data"),
+        QStringLiteral("application.data-drawer"));
     QObject::connect(dataButton, &QPushButton::clicked, &w, [&w] {
         w.toggleDataDrawer();
     });
@@ -624,6 +597,10 @@ void MainWindowPages::build(MainWindow& w)
     dataHeader->addStretch(1);
     auto* closeData = new QPushButton(QStringLiteral("Close"), dataContent);
     closeData->setObjectName(QStringLiteral("CloseDetailButton"));
+    jam2::gui::registerGuiControl(
+        *closeData, QStringLiteral("application.data.close"),
+        QStringLiteral("application.data-drawer"),
+        jam2::gui::GuiControlAvailability::StateGated);
     QObject::connect(closeData, &QPushButton::clicked, &w, [&w] {
         w.toggleDataDrawer();
     });
@@ -691,14 +668,17 @@ void MainWindowPages::build(MainWindow& w)
     w.diagnosticPeerTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     w.diagnosticPeerTable_->setMinimumHeight(140);
     w.diagnosticPeerTable_->setMaximumHeight(280);
+    jam2::gui::excludeFromGuiControlInventory(
+        *w.diagnosticPeerTable_,
+        QStringLiteral("read-only diagnostic view with selection and editing disabled"));
     dataLayout->addWidget(w.diagnosticPeerTable_);
 
     auto* guideTitle = new QLabel(QStringLiteral("IF YOU HEAR THIS ARTIFACT"), dataContent);
     guideTitle->setObjectName(QStringLiteral("DrawerSection"));
     dataLayout->addWidget(guideTitle);
-    const auto addGuide = [dataContent, dataLayout](
+    auto addGuide = [dataContent, dataLayout, guideIndex = 0](
                               const QString& title,
-                              const QString& body) {
+                              const QString& body) mutable {
         auto* container = new QFrame(dataContent);
         container->setObjectName(QStringLiteral("GuideSection"));
         auto* sectionLayout = new QVBoxLayout(container);
@@ -710,6 +690,11 @@ void MainWindowPages::build(MainWindow& w)
         toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
         toggle->setArrowType(Qt::RightArrow);
         toggle->setCheckable(true);
+        jam2::gui::registerGuiControl(
+            *toggle, QStringLiteral("application.data.guide.%1").arg(guideIndex++),
+            QStringLiteral("application.data-guide"),
+            jam2::gui::GuiControlAvailability::StateGated,
+            QStringLiteral("application.data.guide"));
         auto* copy = new QLabel(body, container);
         copy->setObjectName(QStringLiteral("ArtifactGuide"));
         copy->setWordWrap(true);
@@ -757,6 +742,10 @@ void MainWindowPages::build(MainWindow& w)
     logTitle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     logTitle->setArrowType(Qt::RightArrow);
     logTitle->setCheckable(true);
+    jam2::gui::registerGuiControl(
+        *logTitle, QStringLiteral("application.data.log"),
+        QStringLiteral("application.technical-log"),
+        jam2::gui::GuiControlAvailability::StateGated);
     dataLayout->addWidget(logTitle);
     w.logEdit_ = new QPlainTextEdit(dataContent);
     w.logEdit_->setReadOnly(true);
@@ -806,15 +795,31 @@ void MainWindowPages::build(MainWindow& w)
     w.performanceAudioInputsButton_ = new QPushButton(
         QStringLiteral("AUDIO"), localHeader);
     w.performanceAudioInputsButton_->setObjectName(QStringLiteral("LocalAudioTag"));
+    jam2::gui::registerGuiControl(
+        *w.performanceAudioInputsButton_, QStringLiteral("performance.audio-inputs"),
+        QStringLiteral("performance.audio-input-dialog"),
+        jam2::gui::GuiControlAvailability::Modal);
     w.performanceMidiInputsButton_ = new QPushButton(
         QStringLiteral("MIDI"), localHeader);
     w.performanceMidiInputsButton_->setObjectName(QStringLiteral("LocalMidiTag"));
+    jam2::gui::registerGuiControl(
+        *w.performanceMidiInputsButton_, QStringLiteral("performance.midi-inputs"),
+        QStringLiteral("performance.midi-input-dialog"),
+        jam2::gui::GuiControlAvailability::Modal);
     w.performancePluginsButton_ = new QPushButton(
         QStringLiteral("PLUGINS"), localHeader);
     w.performancePluginsButton_->setObjectName(QStringLiteral("LocalPluginsTag"));
+    jam2::gui::registerGuiControl(
+        *w.performancePluginsButton_, QStringLiteral("performance.plugins"),
+        QStringLiteral("performance.plugin-dialog"),
+        jam2::gui::GuiControlAvailability::Modal);
     w.performancePluginBypassButton_ = new QPushButton(
         QStringLiteral("BYPASS"), localHeader);
     w.performancePluginBypassButton_->setObjectName(QStringLiteral("LocalBypassTag"));
+    jam2::gui::registerGuiControl(
+        *w.performancePluginBypassButton_, QStringLiteral("performance.plugin-bypass"),
+        QStringLiteral("performance.plugin-bypass"),
+        jam2::gui::GuiControlAvailability::StateGated);
     w.performancePluginBypassButton_->setCheckable(true);
     localHeaderLayout->addWidget(w.performanceAudioInputsButton_);
     localHeaderLayout->addWidget(w.performanceMidiInputsButton_);
@@ -829,16 +834,16 @@ void MainWindowPages::build(MainWindow& w)
     QObject::connect(w.performancePluginBypassButton_, &QPushButton::toggled,
         &w, [&w](bool bypassed) {
             for (auto& source : w.audioPluginSources_) {
-                if (source.host && source.host->bridge()) {
+                if (source.host) {
                     source.bypassed = bypassed;
-                    source.host->bridge()->set_bypassed(bypassed);
+                    source.host->setAudioBypassed(bypassed);
                 }
             }
             for (auto& source : w.midiPluginSources_) {
-                if (!source || !source->host || !source->host->bridge()) continue;
+                if (!source || !source->host) continue;
                 source->muted = bypassed;
-                if (bypassed) source->host->bridge()->request_midi_reset();
-                source->host->bridge()->set_muted(bypassed);
+                if (bypassed) source->host->requestMidiReset();
+                source->host->setMidiMuted(bypassed);
             }
             w.updateInputSourceButtons();
         });
@@ -872,6 +877,10 @@ void MainWindowPages::build(MainWindow& w)
     w.selectedPeerGainSlider_->setEnabled(false);
     w.selectedPeerGainSlider_->setMinimumWidth(240);
     applyJamSliderStyle(w.selectedPeerGainSlider_);
+    jam2::gui::registerGuiControl(
+        *w.selectedPeerGainSlider_, QStringLiteral("performance.peer-gain"),
+        QStringLiteral("performance.peer-mix"),
+        jam2::gui::GuiControlAvailability::StateGated);
     w.selectedPeerGainLabel_ = new QLabel(QStringLiteral("+0.0 dB"), w.performancePeerControls_);
     QObject::connect(w.selectedPeerGainSlider_, &QSlider::valueChanged, &w, [&w](int value) {
         w.applySelectedPeerGain(value);
@@ -889,6 +898,10 @@ void MainWindowPages::build(MainWindow& w)
     playbackLayout->setSpacing(8);
     w.performanceTrackToggle_ = new QPushButton(QStringLiteral("▶"), playback);
     w.performanceTrackToggle_->setObjectName(QStringLiteral("MainTransportButton"));
+    jam2::gui::registerGuiControl(
+        *w.performanceTrackToggle_, QStringLiteral("performance.track-toggle"),
+        QStringLiteral("performance.global-transport"),
+        jam2::gui::GuiControlAvailability::StateGated);
     w.performanceTrackToggle_->setFixedSize(64, 64);
     QObject::connect(w.performanceTrackToggle_, &QPushButton::clicked, &w, [&w] {
         w.appendLog(QStringLiteral(
@@ -919,6 +932,10 @@ void MainWindowPages::build(MainWindow& w)
     w.performanceMetronomeToggle_ = new QPushButton(QStringLiteral("METRONOME ON"), tempoCard);
     w.performanceMetronomeToggle_->setProperty("active", true);
     w.performanceMetronomeToggle_->setObjectName(QStringLiteral("MetronomeToggle"));
+    jam2::gui::registerGuiControl(
+        *w.performanceMetronomeToggle_, QStringLiteral("performance.metronome-toggle"),
+        QStringLiteral("performance.metronome-audibility"),
+        jam2::gui::GuiControlAvailability::StateGated);
     w.performanceMetronomeToggle_->setToolTip(QStringLiteral(
         "Choose whether the click is heard while global playback is running"));
     QObject::connect(w.performanceMetronomeToggle_, &QPushButton::clicked, &w, [&w] {
@@ -931,6 +948,9 @@ void MainWindowPages::build(MainWindow& w)
     tempoTop->addWidget(w.performanceMetronomeToggle_);
     w.performanceTempoButton_ = new QPushButton(QStringLiteral("120 BPM"), tempoCard);
     w.performanceTempoButton_->setObjectName(QStringLiteral("TempoButton"));
+    jam2::gui::registerGuiControl(
+        *w.performanceTempoButton_, QStringLiteral("performance.tempo"),
+        QStringLiteral("workspace.navigation"));
     QObject::connect(w.performanceTempoButton_, &QPushButton::clicked, &w, [&w] {
         w.openWorkspace(QStringLiteral("metronome"));
     });
@@ -953,6 +973,9 @@ void MainWindowPages::build(MainWindow& w)
     countInRow->addSpacing(44);
     w.performanceCountInCheck_ = new QCheckBox(QStringLiteral("Count-In"), tempoCard);
     w.performanceCountInCheck_->setObjectName(QStringLiteral("PlaybackCountIn"));
+    jam2::gui::registerGuiControl(
+        *w.performanceCountInCheck_, QStringLiteral("performance.count-in"),
+        QStringLiteral("performance.count-in"));
     w.performanceCountInCheck_->setToolTip(QStringLiteral(
         "Play one bar of the recording count-in click before global playback starts"));
     countInRow->addWidget(w.performanceCountInCheck_);
@@ -1011,172 +1034,27 @@ void MainWindowPages::build(MainWindow& w)
 QWidget* MainWindowPages::buildSessionPage(MainWindow& w)
 {
     auto* page = new QWidget(&w);
-    w.bindHostEdit_ = new QLineEdit(SessionController::defaultBindHost(), page);
-    w.portSpin_ = new QSpinBox(page);
-    w.portSpin_->setRange(1, 65535);
-    w.portSpin_->setValue(49000);
-    w.publicHostEdit_ = new QLineEdit(SessionController::defaultPublicHost(), page);
-    w.connectUrlEdit_ = new QLineEdit(page);
-    w.stunServerEdit_ = new QLineEdit(QStringLiteral("stun.l.google.com:19302"), page);
-    w.stunTimeoutSpin_ = new QSpinBox(page);
-    w.stunTimeoutSpin_->setRange(1, 60000);
-    w.stunTimeoutSpin_->setValue(1000);
-    w.stunRetriesSpin_ = new QSpinBox(page);
-    w.stunRetriesSpin_->setRange(1, 100);
-    w.stunRetriesSpin_->setValue(3);
-    w.waitMsSpin_ = new QSpinBox(page);
-    w.waitMsSpin_->setRange(0, 24 * 60 * 60 * 1000);
-    w.waitMsSpin_->setValue(0);
-    w.streamMsSpin_ = new QSpinBox(page);
-    w.streamMsSpin_->setRange(0, 24 * 60 * 60 * 1000);
-
-    w.streamMsSpin_->setValue(0);
-    w.streamLingerMsSpin_ = new QSpinBox(page);
-    w.streamLingerMsSpin_->setRange(0, 60000);
-    w.streamLingerMsSpin_->setValue(100);
-    w.statsCheck_ = new QCheckBox(QStringLiteral("Connection diagnostics"), page);
-    w.statsCheck_->setChecked(true);
-    QObject::connect(w.statsCheck_, &QCheckBox::toggled, &w, [&w](bool enabled) {
-        if (!enabled) w.updateStatsDisplay(nullptr);
-    });
-    w.meshMaxPeersSpin_ = new QSpinBox(page);
-    w.meshMaxPeersSpin_->setRange(0, 1000000);
-    w.meshMaxPeersSpin_->setValue(0);
-    w.statsWarmupMsSpin_ = new QSpinBox(page);
-    w.statsWarmupMsSpin_->setRange(0, 600000);
-    w.statsWarmupMsSpin_->setValue(3000);
-    w.logStatsEdit_ = new QLineEdit(page);
-    w.logStatsEdit_->setText(appReleaseFolderPath(QStringLiteral("logs")));
-    w.socketSendBufferSpin_ = new QSpinBox(page);
-    w.socketSendBufferSpin_->setRange(0, std::numeric_limits<int>::max());
-    w.socketSendBufferSpin_->setValue(0);
-    w.socketRecvBufferSpin_ = new QSpinBox(page);
-    w.socketRecvBufferSpin_->setRange(0, std::numeric_limits<int>::max());
-    w.socketRecvBufferSpin_->setValue(0);
-
-    w.profileBox_ = new QComboBox(page);
-    for (const jam2::CreateProfile& profile : jam2::create_profiles()) {
-        w.profileBox_->addItem(QString::fromUtf8(profile.label.data(), static_cast<qsizetype>(profile.label.size())),
-                             QString::fromUtf8(profile.name.data(), static_cast<qsizetype>(profile.name.size())));
-    }
-    w.osPriorityBox_ = new QComboBox(page);
-    w.osPriorityBox_->addItem(QStringLiteral("Realtime"), QStringLiteral("realtime"));
-    w.osPriorityBox_->addItem(QStringLiteral("High"), QStringLiteral("high"));
-    w.osPriorityBox_->addItem(QStringLiteral("Off"), QStringLiteral("off"));
-    w.deviceBox_ = new QComboBox(page);
-    w.deviceBox_->setEditable(true);
-    w.inputChannelsEdit_ = new QLineEdit(QStringLiteral("1"), page);
-    w.outputChannelsEdit_ = new QLineEdit(QStringLiteral("1,2"), page);
-    w.sampleRateSpin_ = new QSpinBox(page);
-    w.sampleRateSpin_->setRange(
-        jam2::application::limits::kMinimumSampleRate,
-        jam2::application::limits::kMaximumSampleRate);
-    w.sampleRateSpin_->setValue(44100);
-    w.bufferSizeSpin_ = new QSpinBox(page);
-    w.bufferSizeSpin_->setRange(16, 4096);
-    w.bufferSizeSpin_->setValue(128);
-    w.frameSizeSpin_ = new QSpinBox(page);
-    w.frameSizeSpin_->setRange(32, 256);
-    w.frameSizeSpin_->setValue(128);
-    w.networkAudioFormatBox_ = new QComboBox(page);
-    w.networkAudioFormatBox_->addItem(QStringLiteral("16-bit PCM"), QStringLiteral("pcm16-mono"));
-    w.networkAudioFormatBox_->addItem(QStringLiteral("24-bit PCM"), QStringLiteral("pcm24-mono"));
-    w.prefillSpin_ = new QSpinBox(page);
-    w.prefillSpin_->setRange(0, 65536);
-    w.prefillSpin_->setValue(1536);
-    w.playbackMaxSpin_ = new QSpinBox(page);
-    w.playbackMaxSpin_->setRange(0, 65536);
-    w.playbackMaxSpin_->setValue(0);
-    w.captureRingSpin_ = new QSpinBox(page);
-    w.captureRingSpin_->setRange(1, 1048576);
-    w.captureRingSpin_->setValue(4096);
-    w.playbackRingSpin_ = new QSpinBox(page);
-    w.playbackRingSpin_->setRange(1, 1048576);
-    w.playbackRingSpin_->setValue(4096);
-    w.driftCorrectionCheck_ = new QCheckBox(QStringLiteral("Drift correction"), page);
-    w.driftCorrectionCheck_->setChecked(true);
-    w.driftSmoothingSpin_ = new QDoubleSpinBox(page);
-    w.driftSmoothingSpin_->setRange(0.0, 1.0);
-    w.driftSmoothingSpin_->setDecimals(3);
-    w.driftSmoothingSpin_->setSingleStep(0.005);
-    w.driftSmoothingSpin_->setValue(0.02);
-    w.driftDeadbandSpin_ = new QSpinBox(page);
-    w.driftDeadbandSpin_->setRange(0, 50000);
-    w.driftDeadbandSpin_->setValue(25);
-    w.driftMaxCorrectionSpin_ = new QSpinBox(page);
-    w.driftMaxCorrectionSpin_->setRange(0, 50000);
-    w.driftMaxCorrectionSpin_->setValue(500);
-    w.noStunCheck_ = new QCheckBox(QStringLiteral("No STUN"), page);
     w.bpmSpin_ = new QSpinBox(page);
     w.bpmSpin_->setRange(1, 400);
     w.bpmSpin_->setValue(120);
     w.bpmSpin_->hide();
-    w.sampleTimePlayoutCheck_ = new QCheckBox(QStringLiteral("Sample-time playout"), page);
-
-    w.sampleTimePlayoutCheck_->setChecked(true);
-    w.playoutDelaySpin_ = new QSpinBox(page);
-    w.playoutDelaySpin_->setRange(0, 1048576);
-    w.playoutDelaySpin_->setValue(0);
-    w.jitterBufferSpin_ = new QSpinBox(page);
-    w.jitterBufferSpin_->setRange(0, 1048576);
-    w.jitterBufferSpin_->setValue(0);
-    w.jitterBufferMaxSpin_ = new QSpinBox(page);
-    w.jitterBufferMaxSpin_->setRange(0, 1048576);
-    w.jitterBufferMaxSpin_->setValue(0);
-    w.adaptiveCushionCheck_ = new QCheckBox(QStringLiteral("Adaptive cushion"), page);
-    w.adaptiveTargetSpin_ = new QSpinBox(page);
-    w.adaptiveTargetSpin_->setRange(0, 1048576);
-    w.adaptiveMinSpin_ = new QSpinBox(page);
-    w.adaptiveMinSpin_->setRange(0, 1048576);
-    w.adaptiveMaxSpin_ = new QSpinBox(page);
-    w.adaptiveMaxSpin_->setRange(0, 1048576);
-    w.adaptiveReleaseSpin_ = new QSpinBox(page);
-    w.adaptiveReleaseSpin_->setRange(0, 1000000);
-    w.adaptiveReleaseSpin_->setValue(5000);
-    w.adaptiveRatioRampSpin_ = new QSpinBox(page);
-    w.adaptiveRatioRampSpin_->setRange(0, 60000);
-    w.adaptiveRatioRampSpin_->setValue(250);
+    jam2::gui::excludeFromGuiControlInventory(
+        *w.bpmSpin_, QStringLiteral("hidden mirror of the visible metronome BPM control"));
     w.startButton_ = new QPushButton(QStringLiteral("Start Jam"), page);
     w.joinButton_ = new QPushButton(QStringLiteral("Join Jam"), page);
     w.stopButton_ = new QPushButton(QStringLiteral("End Jam"), page);
     w.refreshControlButton_ = new QPushButton(QStringLiteral("Refresh Control"), page);
+    jam2::gui::excludeFromGuiControlInventory(
+        *w.startButton_, QStringLiteral("hidden duplicate of the public Start Jam control"));
+    jam2::gui::excludeFromGuiControlInventory(
+        *w.joinButton_, QStringLiteral("hidden duplicate of the public Join Jam control"));
+    jam2::gui::excludeFromGuiControlInventory(
+        *w.stopButton_, QStringLiteral("hidden state mirror for the public Leave Jam control"));
+    jam2::gui::excludeFromGuiControlInventory(
+        *w.refreshControlButton_,
+        QStringLiteral("hidden state control; refresh is exposed in active session dialogs"));
     w.stopButton_->setEnabled(false);
     w.refreshControlButton_->setEnabled(false);
-
-    w.connectUrlEdit_->setMinimumWidth(420);
-    w.deviceBox_->setEditable(false);
-    w.deviceBox_->setMinimumWidth(280);
-    const QList<QWidget*> sessionEditors{
-        w.bindHostEdit_, w.portSpin_, w.publicHostEdit_, w.connectUrlEdit_,
-        w.stunServerEdit_, w.stunTimeoutSpin_, w.stunRetriesSpin_, w.waitMsSpin_,
-        w.streamMsSpin_, w.streamLingerMsSpin_, w.statsWarmupMsSpin_, w.logStatsEdit_,
-        w.meshMaxPeersSpin_,
-        w.socketSendBufferSpin_, w.socketRecvBufferSpin_, w.profileBox_, w.osPriorityBox_, w.deviceBox_, w.inputChannelsEdit_,
-        w.outputChannelsEdit_, w.sampleRateSpin_, w.bufferSizeSpin_, w.frameSizeSpin_, w.networkAudioFormatBox_, w.prefillSpin_,
-        w.playbackMaxSpin_, w.captureRingSpin_, w.playbackRingSpin_, w.driftSmoothingSpin_,
-        w.driftDeadbandSpin_, w.driftMaxCorrectionSpin_, w.playoutDelaySpin_, w.jitterBufferSpin_,
-        w.jitterBufferMaxSpin_, w.adaptiveTargetSpin_, w.adaptiveMinSpin_, w.adaptiveMaxSpin_,
-        w.adaptiveReleaseSpin_, w.adaptiveRatioRampSpin_,
-    };
-    for (QWidget* widget : sessionEditors) {
-        applyMutedEditorStyle(widget);
-    }
-    const QList<QWidget*> sessionDialogWidgets{
-        w.bindHostEdit_, w.portSpin_, w.publicHostEdit_, w.connectUrlEdit_,
-        w.stunServerEdit_, w.stunTimeoutSpin_, w.stunRetriesSpin_, w.waitMsSpin_,
-        w.streamMsSpin_, w.streamLingerMsSpin_, w.statsCheck_, w.statsWarmupMsSpin_, w.logStatsEdit_,
-        w.meshMaxPeersSpin_,
-        w.socketSendBufferSpin_, w.socketRecvBufferSpin_, w.profileBox_, w.osPriorityBox_, w.deviceBox_, w.inputChannelsEdit_,
-        w.outputChannelsEdit_, w.sampleRateSpin_, w.bufferSizeSpin_, w.frameSizeSpin_, w.networkAudioFormatBox_, w.prefillSpin_,
-        w.playbackMaxSpin_, w.captureRingSpin_, w.playbackRingSpin_, w.driftCorrectionCheck_,
-        w.driftSmoothingSpin_, w.driftDeadbandSpin_, w.driftMaxCorrectionSpin_, w.noStunCheck_,
-        w.sampleTimePlayoutCheck_, w.playoutDelaySpin_, w.jitterBufferSpin_, w.jitterBufferMaxSpin_,
-        w.adaptiveCushionCheck_, w.adaptiveTargetSpin_, w.adaptiveMinSpin_, w.adaptiveMaxSpin_,
-        w.adaptiveReleaseSpin_, w.adaptiveRatioRampSpin_,
-    };
-    for (QWidget* widget : sessionDialogWidgets) {
-        widget->hide();
-    }
 
     auto* buttons = new QHBoxLayout();
     buttons->addWidget(w.startButton_);
@@ -1200,15 +1078,6 @@ QWidget* MainWindowPages::buildSessionPage(MainWindow& w)
         }
     });
     QObject::connect(w.refreshControlButton_, &QPushButton::clicked, &w, [&w] { w.refreshControlConnection(); });
-    QObject::connect(w.profileBox_, qOverload<int>(&QComboBox::currentIndexChanged), &w, [&w] {
-        w.applyTuningProfileName(w.profileBox_->currentData().toString());
-    });
-    w.applyTuningProfileName(QStringLiteral("fast"));
-    QObject::connect(w.noStunCheck_, &QCheckBox::toggled, &w, [&w] {
-        w.updateConnectionControlState();
-    });
-    w.updateConnectionControlState();
-
     return page;
 }
 
@@ -1223,6 +1092,20 @@ QWidget* MainWindowPages::buildSongPage(MainWindow& w)
     auto* reference = new QPushButton(QStringLiteral("GENERATE WAV"), page);
     auto* jamTaster = new QPushButton(QStringLiteral("JAMTASTER"), page);
     auto* details = new QPushButton(QStringLiteral("IDEA DETAILS"), page);
+    const auto registerChordAction = [](QObject& control, const char* id, const char* contract) {
+        jam2::gui::registerGuiControl(
+            control,
+            QStringLiteral("chords.idea.") + QString::fromLatin1(id),
+            QString::fromLatin1(contract),
+            jam2::gui::GuiControlAvailability::Modal,
+            QStringLiteral("idea.header-action"));
+    };
+    registerChordAction(*generate, "generate", "idea.generate");
+    registerChordAction(*browse, "browse", "idea.catalog");
+    registerChordAction(*continueIdea, "continue", "idea.continue");
+    registerChordAction(*reference, "generate-wav", "idea.reference-wav");
+    registerChordAction(*jamTaster, "jam-taster", "idea.jam-taster");
+    registerChordAction(*details, "details", "idea.details");
     styleIdeaHeaderAction(generate, IdeaHeaderAction::Generate);
     styleIdeaHeaderAction(browse, IdeaHeaderAction::Browse);
     styleIdeaHeaderAction(continueIdea, IdeaHeaderAction::Continue);
@@ -1230,7 +1113,7 @@ QWidget* MainWindowPages::buildSongPage(MainWindow& w)
     styleIdeaHeaderAction(jamTaster, IdeaHeaderAction::Browse);
     styleIdeaHeaderAction(details, IdeaHeaderAction::Details);
     auto* top = new QHBoxLayout();
-    addBankControls(w, page, top, false);
+    addBankControls(w, page, top, false, "chords");
     top->addSpacing(12);
     top->addWidget(generate);
     top->addWidget(browse);
@@ -1322,6 +1205,20 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
     auto* reference = new QPushButton(QStringLiteral("GENERATE WAV"), page);
     auto* jamTaster = new QPushButton(QStringLiteral("JAMTASTER"), page);
     auto* details = new QPushButton(QStringLiteral("IDEA DETAILS"), page);
+    const auto registerBeatAction = [](QObject& control, const char* id, const char* contract) {
+        jam2::gui::registerGuiControl(
+            control,
+            QStringLiteral("beats.idea.") + QString::fromLatin1(id),
+            QString::fromLatin1(contract),
+            jam2::gui::GuiControlAvailability::Modal,
+            QStringLiteral("idea.header-action"));
+    };
+    registerBeatAction(*generate, "generate", "idea.generate");
+    registerBeatAction(*browse, "browse", "idea.catalog");
+    registerBeatAction(*continueIdea, "continue", "idea.continue");
+    registerBeatAction(*reference, "generate-wav", "idea.reference-wav");
+    registerBeatAction(*jamTaster, "jam-taster", "idea.jam-taster");
+    registerBeatAction(*details, "details", "idea.details");
     styleIdeaHeaderAction(generate, IdeaHeaderAction::Generate);
     styleIdeaHeaderAction(browse, IdeaHeaderAction::Browse);
     styleIdeaHeaderAction(continueIdea, IdeaHeaderAction::Continue);
@@ -1329,7 +1226,7 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
     styleIdeaHeaderAction(jamTaster, IdeaHeaderAction::Browse);
     styleIdeaHeaderAction(details, IdeaHeaderAction::Details);
     auto* top = new QHBoxLayout();
-    addBankControls(w, page, top, false);
+    addBankControls(w, page, top, false, "beats");
     top->addSpacing(12);
     top->addWidget(generate);
     top->addWidget(browse);
@@ -1354,6 +1251,20 @@ QWidget* MainWindowPages::buildBeatPage(MainWindow& w)
 QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
 {
     auto* page = new QWidget(&w);
+    const auto registerTrack = [](
+                                   QObject& control,
+                                   const char* id,
+                                   const char* contract,
+                                   jam2::gui::GuiControlAvailability availability =
+                                       jam2::gui::GuiControlAvailability::StateGated,
+                                   const char* family = nullptr) {
+        jam2::gui::registerGuiControl(
+            control,
+            QStringLiteral("looper.") + QString::fromLatin1(id),
+            QString::fromLatin1(contract),
+            availability,
+            family ? QString::fromLatin1(family) : QString{});
+    };
     w.recordingContextFrame_ = new QFrame(page);
     w.recordingContextFrame_->setObjectName(QStringLiteral("RecordingContext"));
     w.recordingContextFrame_->setStyleSheet(QStringLiteral(
@@ -1382,6 +1293,9 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         QStringLiteral("Continue Locally"), w.recordingContextFrame_);
     w.recoverRecordingGroupButton_->setToolTip(QStringLiteral(
         "Release a stalled shared take while allowing active recordings to continue locally"));
+    registerTrack(
+        *w.recoverRecordingGroupButton_, "recording.recover-group",
+        "looper.shared-recording-recovery");
     w.recoverRecordingGroupButton_->setStyleSheet(QStringLiteral(
         "QPushButton { background:#2a2520;color:#d9c7ab;border:1px solid #6a563c;"
         "padding:6px 10px;border-radius:3px;font-size:12px; }"
@@ -1417,6 +1331,10 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     w.trackSpeedSpin_->setValue(1.0);
     w.trackSpeedSpin_->setFixedWidth(92);
     applyMutedEditorStyle(w.trackSpeedSpin_);
+    registerTrack(*w.trackSpeedSlider_, "speed.slider", "looper.playback-transform",
+        jam2::gui::GuiControlAvailability::StateGated, "looper.speed");
+    registerTrack(*w.trackSpeedSpin_, "speed.value", "looper.playback-transform",
+        jam2::gui::GuiControlAvailability::StateGated, "looper.speed");
     w.trackPitchSlider_ = new QSlider(Qt::Horizontal, page);
     w.trackPitchSlider_->setRange(-12, 12);
     w.trackPitchSlider_->setValue(0);
@@ -1429,6 +1347,10 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     w.trackPitchSpin_->setSuffix(QStringLiteral(" semitones"));
     w.trackPitchSpin_->setFixedWidth(128);
     applyMutedEditorStyle(w.trackPitchSpin_);
+    registerTrack(*w.trackPitchSlider_, "pitch.slider", "looper.playback-transform",
+        jam2::gui::GuiControlAvailability::StateGated, "looper.pitch");
+    registerTrack(*w.trackPitchSpin_, "pitch.value", "looper.playback-transform",
+        jam2::gui::GuiControlAvailability::StateGated, "looper.pitch");
     w.focusFrequencySlider_ = new QSlider(Qt::Horizontal, page);
     w.focusFrequencySlider_->setRange(40, 8000);
     w.focusFrequencySlider_->setValue(120);
@@ -1441,16 +1363,13 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     w.focusFrequencySpin_->setSuffix(QStringLiteral(" Hz"));
     w.focusFrequencySpin_->setFixedWidth(108);
     applyMutedEditorStyle(w.focusFrequencySpin_);
+    registerTrack(*w.focusFrequencySlider_, "focus.slider", "looper.focus-filter",
+        jam2::gui::GuiControlAvailability::StateGated, "looper.focus-frequency");
+    registerTrack(*w.focusFrequencySpin_, "focus.value", "looper.focus-filter",
+        jam2::gui::GuiControlAvailability::StateGated, "looper.focus-frequency");
     w.trackGridLockCheck_ = new QCheckBox(QStringLiteral("Lock to grid"), page);
     w.trackGridLockCheck_->setChecked(w.looperProject_.gridLockEnabled());
-    w.captureOutputEdit_ = new QLineEdit(page);
-    w.captureOutputEdit_->setMinimumWidth(420);
-    applyMutedEditorStyle(w.captureOutputEdit_);
-    w.loopbackSourceBox_ = new QComboBox(page);
-    w.loopbackSourceBox_->setEditable(true);
-    w.loopbackSourceBox_->addItem(QStringLiteral("[default] System mix"), QStringLiteral("default"));
-    w.loopbackSourceBox_->setMinimumWidth(360);
-    applyMutedEditorStyle(w.loopbackSourceBox_);
+    registerTrack(*w.trackGridLockCheck_, "grid-lock", "looper.grid-lock");
     w.captureManualStopCheck_ = new QCheckBox(QStringLiteral("Record until stopped"), page);
     w.captureManualStopCheck_->setChecked(true);
     w.captureCountInCheck_ = new QCheckBox(QStringLiteral("Count-in"), page);
@@ -1459,20 +1378,22 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     w.captureCountInMetronomeCheck_->setChecked(true);
     w.captureKeepMetronomeCheck_ = new QCheckBox(QStringLiteral("Keep metronome on while recording"), page);
     w.captureKeepMetronomeCheck_->setChecked(false);
+    registerTrack(*w.captureManualStopCheck_, "recording.manual-stop", "looper.recording-settings");
+    registerTrack(*w.captureCountInCheck_, "recording.count-in", "looper.recording-settings");
+    registerTrack(
+        *w.captureCountInMetronomeCheck_, "recording.count-in-metronome",
+        "looper.recording-settings");
+    registerTrack(
+        *w.captureKeepMetronomeCheck_, "recording.keep-metronome",
+        "looper.recording-settings");
     w.captureCountInBarsSpin_ = new QSpinBox(page);
     w.captureCountInBarsSpin_->setRange(1, 8);
     w.captureCountInBarsSpin_->setValue(1);
     w.captureCountInBarsSpin_->setSuffix(QStringLiteral(" bars"));
     w.captureCountInBarsSpin_->setMinimumWidth(120);
     applyMutedEditorStyle(w.captureCountInBarsSpin_);
-    w.recordingLatencyLabel_ = new QLabel(QStringLiteral("Waiting for engine latency data"), page);
-    w.recordingLatencyLabel_->setWordWrap(true);
-    w.recordingLatencyAdjustmentSpin_ = new QSpinBox(page);
-    w.recordingLatencyAdjustmentSpin_->setRange(-8192, 8192);
-    w.recordingLatencyAdjustmentSpin_->setValue(0);
-    w.recordingLatencyAdjustmentSpin_->setSuffix(QStringLiteral(" frames"));
-    w.recordingLatencyAdjustmentSpin_->setMinimumWidth(132);
-    applyMutedEditorStyle(w.recordingLatencyAdjustmentSpin_);
+    registerTrack(
+        *w.captureCountInBarsSpin_, "recording.count-in-bars", "looper.recording-settings");
     w.captureDurationSpin_ = new QSpinBox(page);
     w.captureDurationSpin_->setRange(1, 128);
     w.captureDurationSpin_->setValue(8);
@@ -1480,45 +1401,33 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     w.captureDurationSpin_->setEnabled(false);
     w.captureDurationSpin_->setMinimumWidth(120);
     applyMutedEditorStyle(w.captureDurationSpin_);
-    w.trimLeadingCheck_ = new QCheckBox(QStringLiteral("Trim leading silence"), page);
-    w.trimTrailingCheck_ = new QCheckBox(QStringLiteral("Trim trailing silence"), page);
-    w.trimLeadingCheck_->setChecked(true);
-    w.trimTrailingCheck_->setChecked(true);
-    w.silenceThresholdSpin_ = new QDoubleSpinBox(page);
-    w.silenceThresholdSpin_->setRange(-120.0, 0.0);
-    w.silenceThresholdSpin_->setDecimals(1);
-    w.silenceThresholdSpin_->setValue(-50.0);
-    w.silenceThresholdSpin_->setSuffix(QStringLiteral(" dB"));
-    w.silenceThresholdSpin_->setMinimumWidth(120);
-    applyMutedEditorStyle(w.silenceThresholdSpin_);
-    w.tailSilenceSpin_ = new QSpinBox(page);
-    w.tailSilenceSpin_->setRange(0, 30000);
-    w.tailSilenceSpin_->setValue(1000);
-    w.tailSilenceSpin_->setSuffix(QStringLiteral(" ms"));
-    w.tailSilenceSpin_->setMinimumWidth(120);
-    applyMutedEditorStyle(w.tailSilenceSpin_);
+    registerTrack(
+        *w.captureDurationSpin_, "recording.duration", "looper.recording-settings");
     w.loopStartButton_ = new QPushButton(QStringLiteral("Loop Start"), page);
     w.loopEndButton_ = new QPushButton(QStringLiteral("Loop End"), page);
     w.clearLoopButton_ = new QPushButton(QStringLiteral("Clear Loop"), page);
     w.loopEnabledCheck_ = new QCheckBox(QStringLiteral("Loop whole track"), page);
     w.loopEnabledCheck_->setChecked(w.trackController_.model().loopEnabled);
+    registerTrack(*w.loopStartButton_, "loop.start", "looper.loop-region",
+        jam2::gui::GuiControlAvailability::StateGated, "looper.loop-region");
+    registerTrack(*w.loopEndButton_, "loop.end", "looper.loop-region",
+        jam2::gui::GuiControlAvailability::StateGated, "looper.loop-region");
+    registerTrack(*w.clearLoopButton_, "loop.clear", "looper.loop-region",
+        jam2::gui::GuiControlAvailability::StateGated, "looper.loop-region");
+    registerTrack(*w.loopEnabledCheck_, "loop.enabled", "looper.loop-region");
     w.loadWavButton_ = nullptr;
     w.shareTracksButton_ = new QPushButton(QStringLiteral("Share with Jam Now"), page);
+    registerTrack(*w.shareTracksButton_, "share-now", "looper.wav-sharing");
     w.shareTracksButton_->setEnabled(!w.automaticWavSharingEnabled());
     w.shareTracksButton_->setToolTip(w.automaticWavSharingEnabled()
         ? QStringLiteral("WAVs are already shared automatically with the jam")
         : QStringLiteral("Manually share the current tracks with the jam"));
     w.startArmedLaneRecordingButton_ = new QPushButton(QStringLiteral("Start Recording"), page);
+    registerTrack(
+        *w.startArmedLaneRecordingButton_, "recording.start-stop", "looper.recording-lifecycle");
 
-    w.captureOutputEdit_->setText(appReleaseFilePath(QStringLiteral("captures"), QStringLiteral("take.wav")));
-    const QList<QWidget*> captureDialogWidgets{
-        w.captureOutputEdit_, w.loopbackSourceBox_,
-        w.recordingLatencyLabel_, w.recordingLatencyAdjustmentSpin_,
-        w.trimLeadingCheck_, w.trimTrailingCheck_, w.silenceThresholdSpin_, w.tailSilenceSpin_,
-    };
-    for (QWidget* widget : captureDialogWidgets) {
-        widget->hide();
-    }
+    w.laneRecordingState_.outputPath =
+        appReleaseFilePath(QStringLiteral("captures"), QStringLiteral("take.wav"));
     auto* speedControl = new QWidget(page);
     speedControl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     auto* speedLayout = new QHBoxLayout(speedControl);
@@ -1537,6 +1446,8 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     focusLayout->setContentsMargins(0, 0, 0, 0);
     w.focusFrequencyCheck_ = new QCheckBox(page);
     w.focusPresetBox_ = new QComboBox(page);
+    registerTrack(*w.focusFrequencyCheck_, "focus.enabled", "looper.focus-filter");
+    registerTrack(*w.focusPresetBox_, "focus.preset", "looper.focus-filter");
 
     w.focusPresetBox_->addItem(QStringLiteral("Custom"), QStringLiteral("custom"));
     w.focusPresetBox_->addItem(QStringLiteral("Bass"), QStringLiteral("bass"));
@@ -1556,6 +1467,12 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     auto* fitTimelineButton = new QPushButton(QStringLiteral("Fit"), loopOptionsControl);
     auto* zoomOutButton = new QPushButton(QStringLiteral("\u2212"), loopOptionsControl);
     auto* zoomInButton = new QPushButton(QStringLiteral("+"), loopOptionsControl);
+    registerTrack(*fitTimelineButton, "timeline.fit", "looper.timeline-zoom",
+        jam2::gui::GuiControlAvailability::StateGated, "looper.timeline-zoom");
+    registerTrack(*zoomOutButton, "timeline.zoom-out", "looper.timeline-zoom",
+        jam2::gui::GuiControlAvailability::StateGated, "looper.timeline-zoom");
+    registerTrack(*zoomInButton, "timeline.zoom-in", "looper.timeline-zoom",
+        jam2::gui::GuiControlAvailability::StateGated, "looper.timeline-zoom");
     fitTimelineButton->setFixedSize(42, 28);
     zoomOutButton->setFixedSize(30, 28);
     zoomInButton->setFixedSize(30, 28);
@@ -1598,6 +1515,11 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         auto* bankButton = new QPushButton(QString(QChar(QLatin1Char(static_cast<char>('A' + i)))), page);
         bankButton->setFixedWidth(34);
         bankButton->setCheckable(true);
+        jam2::gui::registerGuiControl(
+            *bankButton, QStringLiteral("looper.section.select.%1").arg(i),
+            QStringLiteral("song.section-selection"),
+            jam2::gui::GuiControlAvailability::StateGated,
+            QStringLiteral("looper.section-select"));
         w.looperBankButtons_[i] = bankButton;
         sectionRow->addWidget(bankButton);
         QObject::connect(bankButton, &QPushButton::clicked, &w, [&w, i] {
@@ -1606,6 +1528,10 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     }
     auto* removeSectionButton = new QPushButton(QStringLiteral("\u2212"), page);
     auto* addSectionButton = new QPushButton(QStringLiteral("+"), page);
+    registerTrack(*removeSectionButton, "section.remove", "song.section-structure",
+        jam2::gui::GuiControlAvailability::StateGated, "looper.section-structure");
+    registerTrack(*addSectionButton, "section.add", "song.section-structure",
+        jam2::gui::GuiControlAvailability::StateGated, "looper.section-structure");
     for (QPushButton* button : {removeSectionButton, addSectionButton}) {
         button->setFixedWidth(30);
         sectionRow->addWidget(button);
@@ -1619,6 +1545,8 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         w.addSongSection();
     });
     auto* trimSectionButton = new QPushButton(QStringLiteral("TRIM SECTION"), page);
+    registerTrack(*trimSectionButton, "section.trim", "song.section-structure",
+        jam2::gui::GuiControlAvailability::Modal, "looper.section-structure");
     trimSectionButton->setObjectName(QStringLiteral("TrimSectionButton"));
     trimSectionButton->setStyleSheet(QStringLiteral(
         "QPushButton { color:#d7c3a4; border:1px solid #5e4c37; background:#17140f; padding:5px 9px; }"
@@ -1640,6 +1568,16 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         QStringLiteral("GENERATE WAV"), page);
     auto* jamTasterButton = new QPushButton(
         QStringLiteral("JAMTASTER"), page);
+    registerTrack(*generateIdeaButton, "idea.generate", "idea.generate",
+        jam2::gui::GuiControlAvailability::Modal, "idea.header-action");
+    registerTrack(*browseIdeasButton, "idea.browse", "idea.catalog",
+        jam2::gui::GuiControlAvailability::StateGated, "idea.header-action");
+    registerTrack(*continueIdeaButton, "idea.continue", "idea.continue",
+        jam2::gui::GuiControlAvailability::Modal, "idea.header-action");
+    registerTrack(*generateWavButton, "idea.generate-wav", "idea.reference-wav",
+        jam2::gui::GuiControlAvailability::Modal, "idea.header-action");
+    registerTrack(*jamTasterButton, "idea.jam-taster", "idea.jam-taster",
+        jam2::gui::GuiControlAvailability::StateGated, "idea.header-action");
     styleIdeaHeaderAction(generateIdeaButton, IdeaHeaderAction::Generate);
     styleIdeaHeaderAction(browseIdeasButton, IdeaHeaderAction::Browse);
     styleIdeaHeaderAction(continueIdeaButton, IdeaHeaderAction::Continue);
@@ -1667,11 +1605,15 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     });
     sectionRow->addStretch(1);
     w.launchBankButton_ = new QPushButton(QStringLiteral("Queue Section"), page);
+    registerTrack(*w.launchBankButton_, "section.queue", "looper.arrangement-playback");
     QObject::connect(w.launchBankButton_, &QPushButton::clicked, &w, [&w] {
         w.requestBankLaunch(w.viewedBankIndex_);
     });
     sectionRow->addWidget(w.launchBankButton_);
     w.arrangementButton_ = new QPushButton(QStringLiteral("Arrangement..."), page);
+    registerTrack(
+        *w.arrangementButton_, "arrangement", "looper.arrangement-dialog",
+        jam2::gui::GuiControlAvailability::Modal);
     QObject::connect(w.arrangementButton_, &QPushButton::clicked, &w, [&w] {
         w.showArrangementDialog();
     });
@@ -1696,6 +1638,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     listeningLayout->setContentsMargins(0, 0, 0, 0);
     listeningLayout->setSpacing(0);
     auto* listeningToggle = new QPushButton(listeningGroup);
+    registerTrack(*listeningToggle, "listening-tools", "looper.listening-tools");
     const auto setListeningToggleText = [listeningToggle](bool open) {
         listeningToggle->setText(QStringLiteral(
             "%1  LISTENING TOOLS     Speed 1.00× · Pitch 0 st · Focus off")
@@ -1724,6 +1667,10 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     sharingLayout->addWidget(w.trackSharingStatusLabel_, 1);
     sharingLayout->addWidget(w.shareTracksButton_);
     auto* exportButton = new QPushButton(QStringLiteral("Export..."), page);
+    registerTrack(
+        *exportButton, "export", "looper.export",
+        jam2::gui::GuiControlAvailability::Modal,
+        "looper.export-dialog");
     QObject::connect(exportButton, &QPushButton::clicked, &w, [&w] {
         w.exportLooperAudio();
     });
@@ -1820,7 +1767,7 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
     });
     QObject::connect(w.clearLoopButton_, &QPushButton::clicked, &w, [&w] { w.clearTrackLoop(); });
     QObject::connect(w.loopEnabledCheck_, &QCheckBox::toggled, &w, [&w](bool checked) {
-        w.trackController_.model().loopEnabled = checked;
+        w.trackController_.setLoopEnabled(checked);
         w.updateTrackControls();
         w.loadPreparedMixIntoEngine();
     });
@@ -1891,15 +1838,6 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         w.looperProject_.setGridLockEnabled(checked);
         w.refreshLooperLanes();
     });
-    QObject::connect(w.recordingLatencyAdjustmentSpin_, qOverload<int>(&QSpinBox::valueChanged), &w, [&w](int frames) {
-        w.updateRecordingLatencyDisplay();
-        if (w.jam2_.isRunning()) {
-            jam2::EngineCommand command;
-            command.type = jam2::EngineCommandType::SetRecordingLatencyAdjustment;
-            command.signed_value = frames;
-            (void)w.submitEngineCommand(command, QStringLiteral("recording latency adjustment"));
-        }
-    });
     QObject::connect(w.captureManualStopCheck_, &QCheckBox::toggled, &w, [&w](bool checked) {
         (void)checked;
         updateCaptureDurationControl(w.captureManualStopCheck_, w.captureDurationSpin_);
@@ -1965,9 +1903,11 @@ void MainWindowPages::addBankControls(
     MainWindow& w,
     QWidget* owner,
     QHBoxLayout* layout,
-    bool looper)
+    bool looper,
+    const char* view)
 {
     if (!owner || !layout) return;
+    const QString viewName = QString::fromLatin1(view);
     auto* label = new QLabel(QStringLiteral("SECTION"), owner);
     label->setObjectName(QStringLiteral("BankStripLabel"));
     layout->addWidget(label);
@@ -1978,6 +1918,12 @@ void MainWindowPages::addBankControls(
         button->setFixedWidth(34);
         button->setProperty("bankIndex", bank);
         button->setProperty("looperStrip", looper);
+        jam2::gui::registerGuiControl(
+            *button,
+            QStringLiteral("grid.%1.section.select.%2").arg(viewName).arg(bank),
+            QStringLiteral("song.section-selection"),
+            jam2::gui::GuiControlAvailability::StateGated,
+            QStringLiteral("grid.section-select"));
         w.bankViewButtons_.push_back(button);
         layout->addWidget(button);
         QObject::connect(button, &QPushButton::clicked, &w, [&w, bank] {
@@ -1986,6 +1932,16 @@ void MainWindowPages::addBankControls(
     }
     auto* removeSectionButton = new QPushButton(QStringLiteral("\u2212"), owner);
     auto* addSectionButton = new QPushButton(QStringLiteral("+"), owner);
+    jam2::gui::registerGuiControl(
+        *removeSectionButton, QStringLiteral("grid.%1.section.remove").arg(viewName),
+        QStringLiteral("song.section-structure"),
+        jam2::gui::GuiControlAvailability::StateGated,
+        QStringLiteral("grid.section-structure"));
+    jam2::gui::registerGuiControl(
+        *addSectionButton, QStringLiteral("grid.%1.section.add").arg(viewName),
+        QStringLiteral("song.section-structure"),
+        jam2::gui::GuiControlAvailability::StateGated,
+        QStringLiteral("grid.section-structure"));
     for (QPushButton* button : {removeSectionButton, addSectionButton}) {
         button->setFixedWidth(30);
         layout->addWidget(button);
@@ -1999,6 +1955,11 @@ void MainWindowPages::addBankControls(
         w.addSongSection();
     });
     auto* trimSectionButton = new QPushButton(QStringLiteral("TRIM SECTION"), owner);
+    jam2::gui::registerGuiControl(
+        *trimSectionButton, QStringLiteral("grid.%1.section.trim").arg(viewName),
+        QStringLiteral("song.section-structure"),
+        jam2::gui::GuiControlAvailability::Modal,
+        QStringLiteral("grid.section-structure"));
     trimSectionButton->setObjectName(QStringLiteral("TrimSectionButton"));
     trimSectionButton->setStyleSheet(QStringLiteral(
         "QPushButton { color:#d7c3a4; border:1px solid #5e4c37; background:#17140f; padding:5px 9px; }"
@@ -2087,8 +2048,27 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     w.metronomeModeBox_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
     applyMutedEditorStyle(w.metronomeModeBox_);
 
+    const auto registerMetronomeControl = [](QObject& control, const char* id, const char* contract) {
+        jam2::gui::registerGuiControl(
+            control,
+            QStringLiteral("metronome.") + QString::fromLatin1(id),
+            QString::fromLatin1(contract),
+            jam2::gui::GuiControlAvailability::StateGated);
+    };
+    registerMetronomeControl(*w.metronomeBeatsSpin_, "beats-per-bar", "metronome.pattern");
+    registerMetronomeControl(*w.metronomeBeatUnitBox_, "beat-unit", "metronome.pattern");
+    registerMetronomeControl(*w.metronomeTempoPulseBox_, "tempo-pulse", "metronome.pattern");
+    registerMetronomeControl(*w.metronomeDivisionBox_, "division", "metronome.pattern");
+    registerMetronomeControl(*w.metronomeSoundBox_, "sound", "metronome.sound");
+    registerMetronomeControl(*w.metronomeModeBox_, "mode", "metronome.mode-and-epoch");
+
     w.metronomeCompensationButton_ = new QPushButton(QStringLiteral("Advanced"), page);
     w.metronomeCompensationButton_->setVisible(false);
+    jam2::gui::registerGuiControl(
+        *w.metronomeCompensationButton_,
+        QStringLiteral("metronome.compensation"),
+        QStringLiteral("metronome.compensation-dialog"),
+        jam2::gui::GuiControlAvailability::Modal);
 
     w.metronomeCompensationMaxSpin_ = new QDoubleSpinBox(page);
     w.metronomeCompensationMaxSpin_->setRange(0.0, 1000.0);
@@ -2110,6 +2090,18 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     w.metronomeCompensationSlewSpin_->setDecimals(1);
     w.metronomeCompensationSlewSpin_->setSuffix(QStringLiteral(" ms/s"));
     w.metronomeCompensationSlewSpin_->setValue(40.0);
+    const auto registerCompensation = [](QObject& control, const char* id) {
+        jam2::gui::registerGuiControl(
+            control,
+            QStringLiteral("metronome.compensation.") + QString::fromLatin1(id),
+            QStringLiteral("metronome.listener-compensation"),
+            jam2::gui::GuiControlAvailability::Modal,
+            QStringLiteral("metronome.compensation-field"));
+    };
+    registerCompensation(*w.metronomeCompensationMaxSpin_, "maximum");
+    registerCompensation(*w.metronomeCompensationSmoothingSpin_, "smoothing");
+    registerCompensation(*w.metronomeCompensationDeadbandSpin_, "deadband");
+    registerCompensation(*w.metronomeCompensationSlewSpin_, "slew");
     applyMutedEditorStyle(w.metronomeCompensationMaxSpin_);
     applyMutedEditorStyle(w.metronomeCompensationSmoothingSpin_);
     applyMutedEditorStyle(w.metronomeCompensationDeadbandSpin_);
@@ -2123,12 +2115,20 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     w.tapTrackMetronomeButton_->setToolTip(
         QStringLiteral("Tap at least twice; pause for two seconds to begin a new tempo"));
     w.metronomeBpmSpin_->setObjectName(QStringLiteral("MetronomeBpm"));
+    jam2::gui::registerGuiControl(
+        *w.metronomeBpmSpin_, QStringLiteral("metronome.bpm"),
+        QStringLiteral("metronome.tempo"),
+        jam2::gui::GuiControlAvailability::StateGated);
     QFont bpmFont = w.songTitleEdit_ ? w.songTitleEdit_->font() : page->font();
     bpmFont.setPointSizeF(30.0);
     bpmFont.setFeature(QFont::Tag("lnum"), 1);
     bpmFont.setFeature(QFont::Tag("tnum"), 1);
     w.metronomeBpmSpin_->setFont(bpmFont);
     w.tapTrackMetronomeButton_->setObjectName(QStringLiteral("MetronomeTap"));
+    jam2::gui::registerGuiControl(
+        *w.tapTrackMetronomeButton_, QStringLiteral("metronome.tap"),
+        QStringLiteral("metronome.tap-tempo"),
+        jam2::gui::GuiControlAvailability::StateGated);
 
     auto* content = new QWidget(page);
     auto* contentLayout = new QVBoxLayout(content);
@@ -2164,6 +2164,16 @@ QWidget* MainWindowPages::buildMetronomePage(MainWindow& w)
     bpmControl->setSpacing(8);
     auto* decreaseBpm = new QPushButton(QStringLiteral("−"), bpmPanel);
     auto* increaseBpm = new QPushButton(QStringLiteral("+"), bpmPanel);
+    jam2::gui::registerGuiControl(
+        *decreaseBpm, QStringLiteral("metronome.bpm.decrease"),
+        QStringLiteral("metronome.tempo"),
+        jam2::gui::GuiControlAvailability::StateGated,
+        QStringLiteral("metronome.bpm-adjust"));
+    jam2::gui::registerGuiControl(
+        *increaseBpm, QStringLiteral("metronome.bpm.increase"),
+        QStringLiteral("metronome.tempo"),
+        jam2::gui::GuiControlAvailability::StateGated,
+        QStringLiteral("metronome.bpm-adjust"));
     for (QPushButton* button : {decreaseBpm, increaseBpm}) {
         button->setObjectName(QStringLiteral("MetronomeBpmAdjust"));
         button->setFixedSize(40, 40);
@@ -2403,16 +2413,26 @@ void MainWindowPages::buildAudioControls(MainWindow& w)
     applyJamSliderStyle(w.mixSendLevelSlider_);
     w.mixSendLevelSlider_->setMinimumWidth(220);
     w.mixSendLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    jam2::gui::registerGuiControl(
+        *w.mixSendLevelSlider_, QStringLiteral("performance.send-level"),
+        QStringLiteral("performance.local-mix"));
     w.mixSendLevelLabel_ = makeValueLabel(QStringLiteral("+0.0 dB"));
 
     w.mixMonitorCheck_ = new QCheckBox(QStringLiteral("Monitor input"), page);
     w.mixMonitorCheck_->setChecked(false);
+    jam2::gui::registerGuiControl(
+        *w.mixMonitorCheck_, QStringLiteral("performance.monitor-enabled"),
+        QStringLiteral("performance.local-monitor"));
     w.mixMonitorLevelSlider_ = new QSlider(Qt::Horizontal, page);
     w.mixMonitorLevelSlider_->setRange(-60, 12);
     w.mixMonitorLevelSlider_->setValue(0);
     applyJamSliderStyle(w.mixMonitorLevelSlider_);
     w.mixMonitorLevelSlider_->setMinimumWidth(220);
     w.mixMonitorLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    jam2::gui::registerGuiControl(
+        *w.mixMonitorLevelSlider_, QStringLiteral("performance.monitor-level"),
+        QStringLiteral("performance.local-monitor"),
+        jam2::gui::GuiControlAvailability::StateGated);
 
     w.mixMonitorLevelLabel_ = makeValueLabel(QStringLiteral("+0.0 dB"));
 
@@ -2422,6 +2442,9 @@ void MainWindowPages::buildAudioControls(MainWindow& w)
     applyJamSliderStyle(w.metronomeLevelSlider_);
     w.metronomeLevelSlider_->setMinimumWidth(220);
     w.metronomeLevelSlider_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    jam2::gui::registerGuiControl(
+        *w.metronomeLevelSlider_, QStringLiteral("performance.metronome-level"),
+        QStringLiteral("performance.metronome-level"));
     w.localMetronomeLevelSlider_ = w.metronomeLevelSlider_;
     w.mixMetronomeLevelSlider_ = w.metronomeLevelSlider_;
     w.mixMetronomeLevelLabel_ = makeValueLabel(QStringLiteral("-10.0 dB"));
@@ -2433,6 +2456,9 @@ void MainWindowPages::buildAudioControls(MainWindow& w)
     w.masterOutputLevelSlider_->setMinimumWidth(240);
     w.masterOutputLevelSlider_->setSizePolicy(
         QSizePolicy::Expanding, QSizePolicy::Fixed);
+    jam2::gui::registerGuiControl(
+        *w.masterOutputLevelSlider_, QStringLiteral("performance.master-output-level"),
+        QStringLiteral("performance.master-output"));
     w.masterOutputLevelLabel_ = makeValueLabel(QStringLiteral("+0.0 dB"));
 
     w.mixLocalInputSection_ = makeSectionLabel(QStringLiteral("Local input"));

@@ -1,4 +1,5 @@
 #include "PracticeIdeaDialogs.hpp"
+#include "GuiControlContract.hpp"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -18,6 +19,19 @@
 
 namespace jam2::practice {
 namespace {
+
+void registerIdeaControl(
+    QObject& control,
+    const char* id,
+    const char* contract = "idea.dialog")
+{
+    jam2::gui::registerGuiControl(
+        control,
+        QStringLiteral("idea.") + QString::fromLatin1(id),
+        QString::fromLatin1(contract),
+        jam2::gui::GuiControlAvailability::Modal,
+        QStringLiteral("idea.dialog-field"));
+}
 
 QComboBox* randomCombo(const QStringList& values, QWidget* parent)
 {
@@ -123,6 +137,16 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(
     QObject::connect(exactBpm, &QCheckBox::toggled, bpm, &QSpinBox::setEnabled);
     QComboBox* complexity = complexityCombo(&dialog);
     complexity->setCurrentIndex(qMax(0, complexity->findData(defaults.complexity)));
+    registerIdeaControl(*targetBank, "generate-dialog.target-section");
+    registerIdeaControl(*parts, "generate-dialog.parts");
+    registerIdeaControl(*key, "generate-dialog.key");
+    registerIdeaControl(*style, "generate-dialog.style");
+    registerIdeaControl(*profile, "generate-dialog.profile");
+    registerIdeaControl(*meter, "generate-dialog.meter");
+    registerIdeaControl(*length, "generate-dialog.length");
+    registerIdeaControl(*exactBpm, "generate-dialog.exact-bpm");
+    registerIdeaControl(*bpm, "generate-dialog.bpm");
+    registerIdeaControl(*complexity, "generate-dialog.complexity");
     const auto partialGeneration = [parts] {
         return static_cast<PracticeIdeaParts>(parts->currentData().toInt()) !=
             PracticeIdeaParts::FullArrangement;
@@ -271,6 +295,10 @@ std::optional<ChordIdeaRequest> askForPracticeIdea(
     form->addRow(QStringLiteral("Complexity"), complexity);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
     buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Generate"));
+    registerIdeaControl(*buttons->button(QDialogButtonBox::Ok),
+        "generate-dialog.accept", "idea.generate");
+    registerIdeaControl(*buttons->button(QDialogButtonBox::Cancel),
+        "generate-dialog.cancel", "idea.generate");
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     auto* layout = new QVBoxLayout(&dialog);
@@ -325,10 +353,16 @@ std::optional<ContinueIdeaRequest> askForIdeaContinuation(
         0, defaults.sourceSectionIndex, bankCount - 1));
     target->setCurrentIndex(qBound(
         0, defaults.targetSectionIndex, bankCount - 1));
+    registerIdeaControl(*source, "continue-dialog.source", "idea.continue");
+    registerIdeaControl(*target, "continue-dialog.target", "idea.continue");
 
     auto* buttons = new QDialogButtonBox(
         QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
     buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Continue"));
+    registerIdeaControl(*buttons->button(QDialogButtonBox::Ok),
+        "continue-dialog.accept", "idea.continue");
+    registerIdeaControl(*buttons->button(QDialogButtonBox::Cancel),
+        "continue-dialog.cancel", "idea.continue");
     const auto updateState = [source, target, buttons, &defaults] {
         const int sourceBank = source->currentData().toInt();
         const int targetBank = target->currentData().toInt();
@@ -407,6 +441,13 @@ std::optional<ReferenceRenderSettings> askForReferenceRender(
         static_cast<int>(ReferenceDrumKit::Electronic));
     drumKit->setCurrentIndex(
         drumKit->findData(static_cast<int>(defaults.drumKit)));
+    registerIdeaControl(*drums, "reference-dialog.drums", "idea.reference-wav");
+    registerIdeaControl(*chords, "reference-dialog.chords", "idea.reference-wav");
+    registerIdeaControl(*bass, "reference-dialog.bass", "idea.reference-wav");
+    registerIdeaControl(*support, "reference-dialog.support", "idea.reference-wav");
+    registerIdeaControl(*melody, "reference-dialog.melody", "idea.reference-wav");
+    registerIdeaControl(*voicing, "reference-dialog.voicing", "idea.reference-wav");
+    registerIdeaControl(*drumKit, "reference-dialog.drum-kit", "idea.reference-wav");
     int commonBeats = 0;
     for (int beats : {chordBeats, beatBeats, melodyBeats, bassBeats, supportBeats}) {
         if (beats <= 0) continue;
@@ -438,6 +479,10 @@ std::optional<ReferenceRenderSettings> askForReferenceRender(
     form->addRow(QStringLiteral("Drum Kit"), drumKit);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
     buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Render"));
+    registerIdeaControl(*buttons->button(QDialogButtonBox::Ok),
+        "reference-dialog.accept", "idea.reference-wav");
+    registerIdeaControl(*buttons->button(QDialogButtonBox::Cancel),
+        "reference-dialog.cancel", "idea.reference-wav");
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     auto* layout = new QVBoxLayout(&dialog);
@@ -475,6 +520,11 @@ void showIdeaDetails(QWidget* parent, const GenerationRecipe& recipe, bool conte
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
     QPushButton* details = buttons->addButton(
         QStringLiteral("Detailed Analysis"), QDialogButtonBox::ActionRole);
+    registerIdeaControl(*teaching, "details-dialog.teaching", "idea.details");
+    registerIdeaControl(*technical, "details-dialog.technical", "idea.details");
+    registerIdeaControl(*details, "details-dialog.toggle", "idea.details");
+    registerIdeaControl(*buttons->button(QDialogButtonBox::Close),
+        "details-dialog.close", "idea.details");
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     auto* layout = new QVBoxLayout(&dialog);

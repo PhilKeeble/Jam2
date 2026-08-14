@@ -43,6 +43,8 @@ struct Header {
 
 constexpr std::size_t kHeaderSize = 36;
 constexpr std::size_t kMaxAudioFramesPerPacket = 256;
+constexpr std::size_t kMetronomeStatePayloadSize = 56;
+constexpr std::size_t kTransportStatePayloadSize = 28;
 constexpr std::size_t kMaxDatagramSize = kHeaderSize + kMaxAudioFramesPerPacket * 3;
 
 enum class ParseError : std::uint8_t {

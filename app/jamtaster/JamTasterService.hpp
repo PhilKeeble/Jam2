@@ -24,6 +24,10 @@ public:
     };
 
     explicit JamTasterService(QObject* parent = nullptr);
+    JamTasterService(
+        QString bundleRootOverride,
+        QString workerPathOverride,
+        QObject* parent = nullptr);
     ~JamTasterService() override;
 
     std::uint64_t addObserver(Observer observer);
@@ -80,4 +84,6 @@ private:
     bool cancelRequested_ = false;
     std::uint64_t nextObserverId_ = 1;
     std::map<std::uint64_t, Observer> observers_;
+    QString bundleRootOverride_;
+    QString workerPathOverride_;
 };

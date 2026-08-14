@@ -190,10 +190,10 @@ public:
     {
     }
 
-    void setTimeline(int beatsPerBar, ChordOverviewData data)
+    void setTimeline(int beatsPerBar, ChordOverviewData timeline)
     {
         beatsPerBar_ = qMax(1, beatsPerBar);
-        spans_ = std::move(data.spans);
+        spans_ = std::move(timeline.spans);
         update();
     }
 
@@ -838,6 +838,7 @@ BeatGridWidget::BeatGridWidget(BeatGridModel* model, const QString& lane, QWidge
     , model_(model ? model : &ownedModel_)
     , fixedLane_(lane)
 {
+    setObjectName(QStringLiteral("BeatGrid-%1").arg(fixedLane_));
     authoringContent_ = new QWidget(this);
     authoringContent_->setFocusPolicy(Qt::StrongFocus);
     authoringContent_->setStyleSheet(QStringLiteral(
@@ -863,6 +864,22 @@ BeatGridWidget::BeatGridWidget(BeatGridModel* model, const QString& lane, QWidge
     deleteButton_ = new QPushButton(QStringLiteral("Clear Section"), this);
     expandButton_ = new QPushButton(QStringLiteral("+1 Bar"), this);
     shrinkButton_ = new QPushButton(QStringLiteral("−1 Bar"), this);
+
+    registerControl(
+        *duplicateButton_, QStringLiteral("section.copy"),
+        QStringLiteral("song.section-copy"),
+        jam2::gui::GuiControlAvailability::Modal);
+    registerControl(
+        *deleteButton_, QStringLiteral("section.clear"),
+        QStringLiteral("song.section-clear"),
+        jam2::gui::GuiControlAvailability::Modal);
+    registerControl(
+        *expandButton_, QStringLiteral("section.expand"),
+        QStringLiteral("song.section-resize"));
+    registerControl(
+        *shrinkButton_, QStringLiteral("section.shrink"),
+        QStringLiteral("song.section-resize"),
+        jam2::gui::GuiControlAvailability::Modal);
 
     auto* top = new QHBoxLayout();
     top->addWidget(duplicateButton_, 1);
@@ -927,6 +944,21 @@ BeatGridModel& BeatGridWidget::model()
     return *model_;
 }
 
+void BeatGridWidget::registerControl(
+    QObject& control,
+    const QString& suffix,
+    const QString& contract,
+    jam2::gui::GuiControlAvailability availability,
+    const QString& family) const
+{
+    jam2::gui::registerGuiControl(
+        control,
+        QStringLiteral("grid.%1.%2").arg(fixedLane_, suffix),
+        contract,
+        availability,
+        family);
+}
+
 void BeatGridWidget::setEditingProtected(bool protectedState)
 {
     if (!editingBlocker_) return;
@@ -945,6 +977,9 @@ QWidget* BeatGridWidget::createOverviewPagination(QWidget* parent)
     focusCurrentBarCheck_ = new QCheckBox(
         QStringLiteral("Focus current bar"), overviewPagination_);
     focusCurrentBarCheck_->setChecked(false);
+    registerControl(
+        *focusCurrentBarCheck_, QStringLiteral("overview.focus-current"),
+        QStringLiteral("song.playhead-follow"));
     focusCurrentBarCheck_->setToolTip(QStringLiteral(
         "Select the playing bar and follow it through the section while playback is running"));
     focusCurrentBarCheck_->setStyleSheet(QStringLiteral(
@@ -984,6 +1019,26 @@ QWidget* BeatGridWidget::createOverviewPagination(QWidget* parent)
         sectionPaginationIcon(true, false), QStringLiteral("Next 32 bars"));
     overviewLastButton_ = makeButton(
         sectionPaginationIcon(true, true), QStringLiteral("Last bars"));
+    registerControl(
+        *overviewFirstButton_, QStringLiteral("overview.page.first"),
+        QStringLiteral("song.overview-pagination"),
+        jam2::gui::GuiControlAvailability::StateGated,
+        QStringLiteral("grid.overview-pagination"));
+    registerControl(
+        *overviewPreviousButton_, QStringLiteral("overview.page.previous"),
+        QStringLiteral("song.overview-pagination"),
+        jam2::gui::GuiControlAvailability::StateGated,
+        QStringLiteral("grid.overview-pagination"));
+    registerControl(
+        *overviewNextButton_, QStringLiteral("overview.page.next"),
+        QStringLiteral("song.overview-pagination"),
+        jam2::gui::GuiControlAvailability::StateGated,
+        QStringLiteral("grid.overview-pagination"));
+    registerControl(
+        *overviewLastButton_, QStringLiteral("overview.page.last"),
+        QStringLiteral("song.overview-pagination"),
+        jam2::gui::GuiControlAvailability::StateGated,
+        QStringLiteral("grid.overview-pagination"));
     QObject::connect(overviewFirstButton_, &QToolButton::clicked, this,
         [this] { setOverviewPage(0); });
     QObject::connect(overviewPreviousButton_, &QToolButton::clicked, this,
@@ -1457,6 +1512,18 @@ void BeatGridWidget::rebuildAuthoringView()
     while (QLayoutItem* item = authoringLayout_->takeAt(0)) {
         if (QWidget* widget = item->widget()) {
             widget->hide();
+            // Deferred deletion leaves the old controls discoverable through
+            // the window hierarchy until the event loop processes them. Retire
+            // their automation identities immediately while preserving Qt
+            // ownership until it is safe to destroy the signal sender tree.
+            jam2::gui::excludeFromGuiControlInventory(
+                *widget, QStringLiteral("authoring view pending deferred deletion"));
+            const auto descendants = widget->findChildren<QObject*>();
+            for (QObject* descendant : descendants) {
+                jam2::gui::excludeFromGuiControlInventory(
+                    *descendant,
+                    QStringLiteral("authoring view pending deferred deletion"));
+            }
             widget->deleteLater();
         }
         delete item;
@@ -1499,6 +1566,12 @@ QWidget* BeatGridWidget::buildAuthoringOverview(bool chords)
             : new QPushButton(overview);
         button->setObjectName(QStringLiteral("AuthoringBarButton"));
         button->setProperty("authoringBar", bar);
+        registerControl(
+            *button,
+            QStringLiteral("section.%1.overview.bar.%2").arg(sectionIndex).arg(bar),
+            QStringLiteral("song.bar-selection"),
+            jam2::gui::GuiControlAvailability::StateGated,
+            QStringLiteral("grid.overview-bar"));
         button->setProperty(
             "focusedGroup",
             chords && bar >= visibleChordGroupStart_ &&
@@ -1686,6 +1759,12 @@ void BeatGridWidget::rebuildChordCards()
             QStringLiteral("BAR %1%2").arg(bar + 1).arg(bar == selectedBar_ ? QStringLiteral("     SELECTED") : QString()), card);
         barLabel->setProperty("chordBarHeader", true);
         barLabel->setProperty("authoringBar", bar);
+        registerControl(
+            *barLabel,
+            QStringLiteral("section.%1.bar.%2.select").arg(sectionIndex).arg(bar),
+            QStringLiteral("song.bar-selection"),
+            jam2::gui::GuiControlAvailability::StateGated,
+            QStringLiteral("grid.chord-bar"));
         barLabel->setStyleSheet(QStringLiteral(
             "QPushButton { border:0;border-bottom:1px solid #303c3f;background:transparent;color:#ddd7e8;"
             "font:11px Bahnschrift;padding:7px;text-align:left; }"
@@ -1712,6 +1791,12 @@ void BeatGridWidget::rebuildChordCards()
             auto* beatNumber = new QLabel(QString::number(localBeat + 1), beatBox);
             beatNumber->setStyleSheet(QStringLiteral("border:0;color:#ddd7e8;font:10px Bahnschrift;padding:4px 6px 0;"));
             auto* edit = new QLineEdit(section.chords.value(beat), beatBox);
+            registerControl(
+                *edit,
+                QStringLiteral("section.%1.beat.%2.chord").arg(sectionIndex).arg(beat),
+                QStringLiteral("song.chord-edit"),
+                jam2::gui::GuiControlAvailability::StateGated,
+                QStringLiteral("grid.chord-cell"));
             edit->setAlignment(Qt::AlignCenter);
             edit->setFrame(false);
             edit->setFixedHeight(54);
@@ -1839,6 +1924,13 @@ void BeatGridWidget::rebuildChordCards()
                 });
             auto* division = new QPushButton(
                 QStringLiteral("%1 step%2").arg(pattern.division).arg(pattern.division == 1 ? QString() : QStringLiteral("s")), beatBox);
+            registerControl(
+                *division,
+                QStringLiteral("section.%1.beat.%2.musical-division")
+                    .arg(sectionIndex).arg(beat),
+                QStringLiteral("song.musical-division"),
+                jam2::gui::GuiControlAvailability::StateGated,
+                QStringLiteral("grid.musical-division"));
             division->setMinimumWidth(0);
             division->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
             division->setStyleSheet(QStringLiteral(
@@ -1878,6 +1970,10 @@ void BeatGridWidget::rebuildChordCards()
     const int referenceInsertIndex = focusLayout->count();
 
     auto* lineHeading = new QPushButton(focus);
+    registerControl(
+        *lineHeading,
+        QStringLiteral("section.%1.musical-lines.toggle").arg(sectionIndex),
+        QStringLiteral("song.musical-lines-visibility"));
     lineHeading->setText(QStringLiteral("%1  GENERATED MUSICAL LINES     onset note · ~ hold · - rest")
         .arg(musicalLinesVisible_ ? QStringLiteral("▾") : QStringLiteral("▸")));
     lineHeading->setStyleSheet(QStringLiteral(
@@ -1926,6 +2022,13 @@ void BeatGridWidget::rebuildChordCards()
                 stepLayout->setSpacing(1);
                 for (int step = 0; step < steps.size(); ++step) {
                     auto* edit = new QLineEdit(musicalStepText(steps[step]), stepHost);
+                    registerControl(
+                        *edit,
+                        QStringLiteral("section.%1.beat.%2.%3.step.%4")
+                            .arg(sectionIndex).arg(beat).arg(lane.second).arg(step),
+                        QStringLiteral("song.musical-step-edit"),
+                        jam2::gui::GuiControlAvailability::StateGated,
+                        QStringLiteral("grid.musical-step"));
                     edit->setAlignment(Qt::AlignCenter);
                     edit->setFrame(false);
                     edit->setMinimumHeight(32);
@@ -1974,6 +2077,10 @@ void BeatGridWidget::rebuildChordCards()
     referenceSectionLayout->setContentsMargins(0, 0, 0, 0);
     referenceSectionLayout->setSpacing(5);
     auto* referenceToggle = new QPushButton(referenceSection);
+    registerControl(
+        *referenceToggle,
+        QStringLiteral("section.%1.chord-reference.toggle").arg(sectionIndex),
+        QStringLiteral("song.chord-reference"));
     referenceToggle->setText(QStringLiteral("%1  CHORD REFERENCE")
         .arg(chordReferenceVisible_ ? QStringLiteral("▾") : QStringLiteral("▸")));
     referenceToggle->setStyleSheet(QStringLiteral(
@@ -2003,6 +2110,10 @@ void BeatGridWidget::rebuildChordCards()
     stringsLabel->setStyleSheet(QStringLiteral("border:0;color:#ddd7e8;font:11px Bahnschrift;"));
     controlsLayout->addWidget(stringsLabel);
     guitarStringCountBox_ = new QComboBox(controls);
+    registerControl(
+        *guitarStringCountBox_,
+        QStringLiteral("section.%1.chord-reference.strings").arg(sectionIndex),
+        QStringLiteral("song.chord-reference"));
     for (const int strings : {6, 7, 8})
         guitarStringCountBox_->addItem(QString::number(strings), strings);
     guitarStringCountBox_->setCurrentIndex(guitarStringCountBox_->findData(guitarStringCount_));
@@ -2012,6 +2123,10 @@ void BeatGridWidget::rebuildChordCards()
     tuningLabel->setStyleSheet(QStringLiteral("border:0;color:#ddd7e8;font:11px Bahnschrift;"));
     controlsLayout->addWidget(tuningLabel);
     guitarTuningBox_ = new QComboBox(controls);
+    registerControl(
+        *guitarTuningBox_,
+        QStringLiteral("section.%1.chord-reference.tuning").arg(sectionIndex),
+        QStringLiteral("song.chord-reference"));
     guitarTuningBox_->addItem(QStringLiteral("Standard"), false);
     guitarTuningBox_->addItem(QStringLiteral("Dropped"), true);
     guitarTuningBox_->setCurrentIndex(guitarTuningBox_->findData(guitarDropTuning_));
@@ -2074,6 +2189,12 @@ void BeatGridWidget::rebuildBeatSequencer()
         if (beat >= section.beats) break;
         auto* button = new QPushButton(
             QStringLiteral("Beat %1 · %2").arg(localBeat + 1).arg(BeatGridModel::beatDivisionLabel(section.beatPatterns[beat].division)), divisionRow);
+        registerControl(
+            *button,
+            QStringLiteral("section.%1.beat.%2.division").arg(sectionIndex).arg(beat),
+            QStringLiteral("song.beat-division"),
+            jam2::gui::GuiControlAvailability::StateGated,
+            QStringLiteral("grid.beat-division"));
         button->setStyleSheet(QStringLiteral(
             "QPushButton { border:1px solid #334044;border-left:2px solid #e8a44a;"
             "background:#101617;color:#ddd7e8;font:11px Bahnschrift;min-height:31px; }"
@@ -2116,6 +2237,13 @@ void BeatGridWidget::rebuildBeatSequencer()
             beatLayout->setSpacing(1);
             for (int step = 0; step < pattern.division; ++step) {
                 auto* cell = new QPushButton(beatGroup);
+                registerControl(
+                    *cell,
+                    QStringLiteral("section.%1.beat.%2.lane.%3.step.%4")
+                        .arg(sectionIndex).arg(beat).arg(lane).arg(step),
+                    QStringLiteral("song.beat-hit-edit"),
+                    jam2::gui::GuiControlAvailability::StateGated,
+                    QStringLiteral("grid.beat-step"));
                 cell->setProperty("authoringBeat", beat);
                 cell->setProperty("authoringStep", step);
                 cell->setProperty("playhead", gridRunning_ && section.beats > 0 &&
@@ -2208,6 +2336,12 @@ void BeatGridWidget::rebuildLyricRows()
         number->setAlignment(Qt::AlignCenter);
         number->setStyleSheet(QStringLiteral("border:0;color:#ddd7e8;font:11px Bahnschrift;"));
         auto* edit = new LyricBarEdit(row);
+        registerControl(
+            *edit,
+            QStringLiteral("section.%1.bar.%2.lyric").arg(sectionIndex).arg(bar),
+            QStringLiteral("song.lyric-edit"),
+            jam2::gui::GuiControlAvailability::StateGated,
+            QStringLiteral("grid.lyric-bar"));
         edit->setProperty("lyricBar", bar);
         edit->setInitialText(section.lyrics.value(beat));
         edit->setPlaceholderText(QStringLiteral("Write a lyric cue for this bar…"));
@@ -2243,6 +2377,12 @@ void BeatGridWidget::rebuildLyricRows()
             }
         };
         auto* clear = new QPushButton(QStringLiteral("×"), row);
+        registerControl(
+            *clear,
+            QStringLiteral("section.%1.bar.%2.lyric.clear").arg(sectionIndex).arg(bar),
+            QStringLiteral("song.lyric-edit"),
+            jam2::gui::GuiControlAvailability::StateGated,
+            QStringLiteral("grid.lyric-bar"));
         clear->setFixedSize(28, 28);
         clear->setToolTip(QStringLiteral("Clear bar %1 lyric").arg(bar + 1));
         QObject::connect(clear, &QPushButton::clicked, this, [this, sectionIndex, beat, edit] {

@@ -21,6 +21,8 @@
 #include <QScrollArea>
 #include <QVBoxLayout>
 
+#include <utility>
+
 JamTasterDialog::JamTasterDialog(
     JamTasterService& service,
     QString projectRoot,
@@ -227,6 +229,10 @@ JamTasterDialog::JamTasterDialog(
     observer.jobFinished = [this](const QJsonObject& result) {
                 progressBar_->setValue(100);
                 progressLabel_->setText(QStringLiteral("Analysis complete"));
+                if (!serviceTaskMatchesSource()) {
+                    refreshResultsUi();
+                    return;
+                }
                 acceptJobResult(result);
             };
     observer.jobFailed = [this](const QString& error) {
@@ -241,7 +247,7 @@ JamTasterDialog::JamTasterDialog(
     serviceObserverId_ = service_.addObserver(std::move(observer));
 
     refreshSavedResults();
-    if (!service_.lastJobResult().isEmpty()) {
+    if (!service_.lastJobResult().isEmpty() && serviceTaskMatchesSource()) {
         acceptJobResult(service_.lastJobResult());
     }
     syncTaskState();
@@ -270,9 +276,7 @@ void JamTasterDialog::setSourceContext(
     analysisResult_ = {};
     convertedSong_.clear();
     refreshSavedResults();
-    if (!service_.lastJobResult().isEmpty() &&
-        QFileInfo(service_.taskInputPath()).absoluteFilePath() ==
-            QFileInfo(sourcePath_).absoluteFilePath()) {
+    if (!service_.lastJobResult().isEmpty() && serviceTaskMatchesSource()) {
         acceptJobResult(service_.lastJobResult());
     }
     syncTaskState();
@@ -360,10 +364,26 @@ QString JamTasterDialog::analysisSourceRoot() const
         QStringLiteral("analysis/sources/%1").arg(sourceHash_));
 }
 
+bool JamTasterDialog::serviceTaskMatchesSource() const
+{
+    if (service_.taskInputPath().isEmpty() || sourcePath_.isEmpty()) return false;
+    return QFileInfo(service_.taskInputPath()).absoluteFilePath() ==
+        QFileInfo(sourcePath_).absoluteFilePath();
+}
+
+bool JamTasterDialog::isCompleteConvertedSong(const QString& convertedSong)
+{
+    if (convertedSong.isEmpty()) return false;
+    const QDir converted(convertedSong);
+    return converted.exists() && converted.entryList(
+        {QStringLiteral("*.jamjar")}, QDir::Files, QDir::Name).size() == 1;
+}
+
 void JamTasterDialog::refreshSavedResults()
 {
     const QString root = analysisSourceRoot();
     if (root.isEmpty()) return;
+    convertedSong_.clear();
     tempoResult_ = readJson(QDir(root).absoluteFilePath(QStringLiteral("tempo.json")));
     stemsResult_ = readJson(QDir(root).absoluteFilePath(QStringLiteral("stems.json")));
     analysisResult_ = readJson(QDir(root).absoluteFilePath(QStringLiteral("analysis.json")));
@@ -372,8 +392,9 @@ void JamTasterDialog::refreshSavedResults()
         const QJsonObject manifest = readJson(
             QDir(root).absoluteFilePath(QStringLiteral("manifest.json")));
         const QString songSlug = manifest.value(QStringLiteral("song_slug")).toString(slug);
-        convertedSong_ = QDir(root).absoluteFilePath(
+        const QString candidate = QDir(root).absoluteFilePath(
             QStringLiteral("converted/%1").arg(songSlug));
+        if (isCompleteConvertedSong(candidate)) convertedSong_ = candidate;
     }
 }
 
@@ -387,8 +408,8 @@ void JamTasterDialog::acceptJobResult(const QJsonObject& result)
         stemsResult_ = result;
         sourceHash_ = result.value(QStringLiteral("source_sha256")).toString();
     } else {
-        convertedSong_ = result.value(QStringLiteral("converted_song")).toString();
-        loadFullAnalysis(convertedSong_);
+        const QString converted = result.value(QStringLiteral("converted_song")).toString();
+        convertedSong_ = loadFullAnalysis(converted) ? converted : QString{};
     }
     refreshSavedResults();
     refreshResultsUi();
@@ -407,24 +428,28 @@ void JamTasterDialog::acceptJobResult(const QJsonObject& result)
         }
     }
     refreshResultsUi();
-    if (createSongAfterAnalysis_ && !convertedSong_.isEmpty()) {
+    if (createSongAfterAnalysis_) {
         createSongAfterAnalysis_ = false;
-        if (callbacks_.createSong) {
+        if (!convertedSong_.isEmpty() && callbacks_.createSong) {
             callbacks_.createSong(convertedSong_, sourcePath_, sourceHash_);
         }
     }
 }
 
-void JamTasterDialog::loadFullAnalysis(const QString& convertedSong)
+bool JamTasterDialog::loadFullAnalysis(const QString& convertedSong)
 {
-    if (convertedSong.isEmpty()) return;
+    if (!isCompleteConvertedSong(convertedSong)) return false;
     QDir source(QFileInfo(convertedSong).absolutePath());
-    if (!source.cdUp()) return;
-    analysisResult_ = readJson(source.absoluteFilePath(QStringLiteral("analysis.json")));
+    if (!source.cdUp()) return false;
+    const QJsonObject analysis = readJson(
+        source.absoluteFilePath(QStringLiteral("analysis.json")));
+    if (analysis.isEmpty()) return false;
+    analysisResult_ = analysis;
     tempoResult_ = readJson(source.absoluteFilePath(QStringLiteral("tempo.json")));
     stemsResult_ = readJson(source.absoluteFilePath(QStringLiteral("stems.json")));
     sourceHash_ = analysisResult_.value(QStringLiteral("input")).toObject()
         .value(QStringLiteral("sha256")).toString(sourceHash_);
+    return true;
 }
 
 void JamTasterDialog::refreshResultsUi()
@@ -455,10 +480,11 @@ void JamTasterDialog::refreshResultsUi()
 
     applyTempoCheck_->setEnabled(hasTempo);
     applyStemsCheck_->setEnabled(hasStems);
-    applyChordsCheck_->setEnabled(chordCount > 0);
-    applyDrumsCheck_->setEnabled(drumCount > 0);
-    applyBassCheck_->setEnabled(bassCount > 0);
-    applySectionsCheck_->setEnabled(sectionCount > 0);
+    const bool hasConvertedSong = !convertedSong_.isEmpty();
+    applyChordsCheck_->setEnabled(hasConvertedSong && chordCount > 0);
+    applyDrumsCheck_->setEnabled(hasConvertedSong && drumCount > 0);
+    applyBassCheck_->setEnabled(hasConvertedSong && bassCount > 0);
+    applySectionsCheck_->setEnabled(hasConvertedSong && sectionCount > 0);
     for (QCheckBox* check : {applyTempoCheck_, applyStemsCheck_, applyChordsCheck_,
                              applyDrumsCheck_, applyBassCheck_, applySectionsCheck_}) {
         if (!check->isEnabled()) check->setChecked(false);

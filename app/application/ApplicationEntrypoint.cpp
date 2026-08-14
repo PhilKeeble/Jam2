@@ -1,5 +1,6 @@
 #include "DebugAutomation.hpp"
 #include "GuiPresentation.hpp"
+#include "GuiTestAgent.hpp"
 #include "MainWindow.hpp"
 #include "SessionController.hpp"
 #include "CliEntrypoint.hpp"
@@ -577,11 +578,21 @@ int jam2ApplicationMain(int argc, char* argv[])
         qEnvironmentVariableIsSet("JAM2_AUTOMATION_EVENT_HANDLE");
     const bool debugRun = argc > 2 && std::string_view(argv[1]) == "debug" &&
         std::string_view(argv[2]) == "run";
-    if (hasAutomationHandle && !debugRun) {
-        std::cerr << "automation handles are accepted only by an explicitly reactive debug run\n";
+    const bool debugGuiAgent = argc > 2 && std::string_view(argv[1]) == "debug" &&
+        std::string_view(argv[2]) == "gui-agent";
+    if (hasAutomationHandle && !debugRun && !debugGuiAgent) {
+        std::cerr << "automation handles are accepted only by an explicitly reactive debug command\n";
         return 2;
     }
     if (argc > 1) {
+        if (debugGuiAgent) {
+            QApplication app(argc, argv);
+            setApplicationIdentity();
+            app.setWindowIcon(QIcon(QStringLiteral(":/jam2/assets/logo-nebula.png")));
+            applyCustomTheme(app);
+            installCompactDialogPolicy(app);
+            return jam2RunGuiTestAgent(app, argc, argv);
+        }
         if (std::string_view(argv[1]) == "debug") {
             QCoreApplication app(argc, argv);
             setApplicationIdentity();

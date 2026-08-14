@@ -31,6 +31,13 @@ struct MidiWireEvent {
     std::uint8_t reserved[3]{};
 };
 
+#if defined(_MSC_VER)
+#pragma warning(push)
+// The transport and shared state intentionally occupy whole cache-line-aligned
+// regions. MSVC C4324 reports the padding required by that explicit contract.
+#pragma warning(disable: 4324)
+#endif
+
 struct alignas(64) TransportSlot {
     // A generation is odd while its owner writes and sequence*2 when complete.
     // Readers copy only when equal even values bracket the copy.
@@ -74,8 +81,14 @@ struct alignas(64) SharedState {
     std::array<TransportSlot, kTransportSlots> transport_blocks{};
 };
 
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
 static_assert(std::is_standard_layout_v<SharedState>);
+static_assert(offsetof(TransportSlot, response_generation) == 20544);
+static_assert(sizeof(TransportSlot) == 36992);
 
 } // namespace jam2::pluginhost

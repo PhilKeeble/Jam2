@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from jam2test.impairment import DirectionImpairment, UdpStressProxy
+from jam2test.impairment import DirectionImpairment, UdpImpairmentProxy
 
 
 class FakeSocket:
@@ -20,7 +20,7 @@ class FakeSocket:
 
 class ProxySchedulingTests(unittest.TestCase):
     def make_proxy(self):
-        return UdpStressProxy(("127.0.0.1", 9), seed=1)
+        return UdpImpairmentProxy(("127.0.0.1", 9), seed=1)
 
     def test_clean_packet_is_forwarded_without_timed_heap(self):
         proxy = self.make_proxy()

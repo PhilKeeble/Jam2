@@ -147,9 +147,9 @@ bool valid_payload_size(PacketType type, std::size_t size, NetworkAudioFormat au
     case PacketType::Bye:
         return size == 0;
     case PacketType::MetronomeState:
-        return size == 56;
+        return size == kMetronomeStatePayloadSize;
     case PacketType::TransportState:
-        return size == 20;
+        return size == kTransportStatePayloadSize;
     }
     return false;
 }

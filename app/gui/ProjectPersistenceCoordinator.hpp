@@ -13,10 +13,8 @@ public:
     void relocateWorkspace(const QString& workspaceFolder);
     void clearTransientTracking() noexcept;
 
-    const QString& projectFilePath() const noexcept;
     const QString& projectFolder() const noexcept;
     const QString& workspaceFolder() const noexcept;
-    QString workingProjectFolder() const;
     void useWorkspaceAsProjectFolderIfUnset();
     void setProjectFolder(const QString& folder);
     void setProjectLocation(const QString& path);
@@ -44,7 +42,6 @@ private:
     static void pruneEmptyWorkspace(const QString& workspacePath);
 
     QString projectFolder_;
-    QString projectFilePath_;
     QString workspaceFolder_;
     QByteArray savedSnapshot_;
     QSet<QString> transientWavs_;

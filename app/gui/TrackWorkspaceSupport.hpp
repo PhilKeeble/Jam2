@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ConcurrentLooperMerge.hpp"
 #include "LooperProject.hpp"
 
 #include <QJsonObject>
@@ -25,6 +26,10 @@ struct StagedPcm16Asset {
     int sourceSampleRate = 0;
     qint64 sourceFrames = 0;
     bool resampled = false;
+    // True only when this call committed new bytes at stagedPath. Reusing an
+    // already-valid content-addressed file or its owned recording source is
+    // false, allowing abandoned async work to clean up without deleting reuse.
+    bool stagedFileCreated = false;
     QString error;
 };
 
@@ -40,9 +45,3 @@ int mergeSynchronizedLooperLanes(
 int mergeLocalOnlyLooperLanes(
     QJsonObject& song,
     const LooperProject& localProject);
-QJsonObject mergeConcurrentLooperMetadata(
-    const QJsonObject& baseSong,
-    const QJsonObject& currentSong,
-    const QJsonObject& proposedSong,
-    int* mergedChanges = nullptr,
-    int* conflicts = nullptr);

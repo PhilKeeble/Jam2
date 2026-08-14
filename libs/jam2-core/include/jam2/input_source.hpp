@@ -59,6 +59,16 @@ struct InputSourceRouterStats {
     int peak_ppm = 0;
 };
 
+struct InputSourceSlotSnapshot {
+    InputSourceKind kind = InputSourceKind::Audio;
+    std::size_t first_channel = kNoInputChannel;
+    std::size_t second_channel = kNoInputChannel;
+    int level_ppm = 1000000;
+    bool configured = false;
+    bool enabled = false;
+    bool renderer_attached = false;
+};
+
 class InputSourceRouter final {
 public:
     InputSourceRouter(std::size_t maximum_frames, std::size_t physical_channels);
@@ -88,11 +98,16 @@ public:
         std::span<std::int32_t> mono_output) noexcept;
 
     InputSourceRouterStats stats() const noexcept;
+    InputSourceSlotSnapshot slot_snapshot(std::size_t slot) const noexcept;
     std::size_t maximum_frames() const noexcept { return maximum_frames_; }
     std::size_t physical_channels() const noexcept { return physical_channels_; }
 
 private:
     struct Slot {
+        // Even revisions are stable. The single non-real-time topology writer
+        // advances through an odd revision while replacing the fixed fields;
+        // callback readers skip a slot if the revision changes mid-snapshot.
+        std::atomic<std::uint64_t> topology_revision{0};
         std::atomic<InputSourceKind> kind{InputSourceKind::Audio};
         std::atomic<std::size_t> first_channel{kNoInputChannel};
         std::atomic<std::size_t> second_channel{kNoInputChannel};

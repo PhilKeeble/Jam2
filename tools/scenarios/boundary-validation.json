@@ -3,6 +3,6 @@
   "run_id": "boundary-validation",
   "operation": "validate.boundaries",
   "profile": "fast",
-  "artifacts": {"root": "../validate_logs/manual/boundary-validation"},
+  "artifacts": {"root": "../diagnostic_logs/manual/boundary-validation"},
   "fixtures": []
 }

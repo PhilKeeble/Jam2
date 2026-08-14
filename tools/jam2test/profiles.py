@@ -1,7 +1,7 @@
-"""Native-backed profile names plus sparse experimental overrides.
+"""Native-backed profile names plus sparse benchmark overrides.
 
 Native `debug describe` data is the only source for base-profile values. The
-benchmark/stress matrices own only their deliberate differences.
+benchmark catalogue owns only its deliberate experimental differences.
 """
 from __future__ import annotations
 

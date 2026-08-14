@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -280,7 +281,13 @@ struct NetworkSession::Impl {
             contract.audio_format,
             transmit_packet);
         if (packet_size == 0) {
-            throw std::runtime_error("failed to encode bounded current UDP packet");
+            std::ostringstream message;
+            message << "failed to encode bounded current UDP packet: type="
+                    << static_cast<int>(type)
+                    << " payload_bytes=" << payload.size()
+                    << " output_bytes=" << transmit_packet.size()
+                    << " audio_format=" << static_cast<int>(contract.audio_format);
+            throw std::runtime_error(message.str());
         }
         return std::span<const std::uint8_t>(transmit_packet.data(), packet_size);
     }

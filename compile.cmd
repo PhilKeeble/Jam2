@@ -1,12 +1,130 @@
 @echo off
 setlocal EnableExtensions
 
-if /I "%~1"=="--in-dev-shell" goto build
+if /I "%~1"=="--in-dev-shell" (
+    shift /1
+    goto build
+)
 
-start "Jam2 MSVC Build" "%ComSpec%" /k call "%~f0" --in-dev-shell
+start "Jam2 MSVC Build" "%ComSpec%" /k call "%~f0" --in-dev-shell %*
 exit /b 0
 
 :build
+set "JAM2_BUILD_TESTING=OFF"
+set "JAM2_TEST_SUITE="
+set "JAM2_TEST_TARGET="
+set "JAM2_TEST_LABEL="
+set "JAM2_TEST_SHOW_GUI=0"
+set "JAM2_TEST_NAME="
+set "JAM2_TEST_FULL_GATE=0"
+set "JAM2_COVERAGE_RESULT=0"
+set "JAM2_CTEST_LOG_ARGS="
+set "JAM2_HARDWARE_PROFILE="
+
+:parse_arguments
+if "%~1"=="" goto arguments_ready
+if /I "%~1"=="--tests-full" (
+    set "JAM2_BUILD_TESTING=ON"
+    set "JAM2_TEST_SUITE=full"
+    set "JAM2_TEST_FULL_GATE=1"
+    shift /1
+    goto parse_arguments
+)
+if /I "%~1"=="--tests" (
+    if "%~2"=="" (
+        echo ERROR: --tests requires a suite name.
+        exit /b 2
+    )
+    set "JAM2_BUILD_TESTING=ON"
+    set "JAM2_TEST_SUITE=%~2"
+    shift /1
+    shift /1
+    goto parse_arguments
+)
+if /I "%~1"=="--show-gui" (
+    set "JAM2_TEST_SHOW_GUI=1"
+    shift /1
+    goto parse_arguments
+)
+if /I "%~1"=="--test-name" (
+    if "%~2"=="" (
+        echo ERROR: --test-name requires one exact CTest name.
+        exit /b 2
+    )
+    set "JAM2_TEST_NAME=%~2"
+    shift /1
+    shift /1
+    goto parse_arguments
+)
+if /I "%~1"=="--hardware-profile" (
+    if "%~2"=="" (
+        echo ERROR: --hardware-profile requires a JSON profile path.
+        exit /b 2
+    )
+    set "JAM2_HARDWARE_PROFILE=%~f2"
+    shift /1
+    shift /1
+    goto parse_arguments
+)
+echo ERROR: Unknown compile option: %~1
+echo Supported options: --tests unit, --tests plugin, --tests hardware, --tests gui, --tests jam-sync, --tests shared-content, --tests performance, --tests network, --tests full, --tests-full, --test-name NAME, --show-gui, --hardware-profile PATH
+exit /b 2
+
+:arguments_ready
+if /I "%JAM2_TEST_SUITE%"=="unit" (
+    set "JAM2_TEST_TARGET=jam2_tests_unit"
+    set "JAM2_TEST_LABEL=unit"
+) else if /I "%JAM2_TEST_SUITE%"=="plugin" (
+    set "JAM2_TEST_TARGET=jam2_tests_plugin"
+    set "JAM2_TEST_LABEL=plugin"
+) else if /I "%JAM2_TEST_SUITE%"=="hardware" (
+    set "JAM2_TEST_TARGET=jam2_tests_hardware"
+    set "JAM2_TEST_LABEL=hardware"
+) else if /I "%JAM2_TEST_SUITE%"=="gui" (
+    set "JAM2_TEST_TARGET=jam2_tests_gui"
+    set "JAM2_TEST_LABEL=gui"
+) else if /I "%JAM2_TEST_SUITE%"=="jam-sync" (
+    set "JAM2_TEST_TARGET=jam2_tests_jam_sync"
+    set "JAM2_TEST_LABEL=jam-sync"
+) else if /I "%JAM2_TEST_SUITE%"=="shared-content" (
+    set "JAM2_TEST_TARGET=jam2_tests_shared_content"
+    set "JAM2_TEST_LABEL=shared-content"
+) else if /I "%JAM2_TEST_SUITE%"=="performance" (
+    set "JAM2_TEST_TARGET=jam2_tests_performance"
+    set "JAM2_TEST_LABEL=performance"
+) else if /I "%JAM2_TEST_SUITE%"=="network" (
+    set "JAM2_TEST_TARGET=jam2_tests_network"
+    set "JAM2_TEST_LABEL=^^network$"
+) else if /I "%JAM2_TEST_SUITE%"=="full" (
+    set "JAM2_TEST_TARGET=jam2_tests_all"
+) else if not "%JAM2_TEST_SUITE%"=="" (
+    echo ERROR: Test suite "%JAM2_TEST_SUITE%" is not implemented yet.
+    echo Available suites: unit, plugin, hardware, gui, jam-sync, shared-content, performance, network, full
+    exit /b 2
+)
+if "%JAM2_TEST_SHOW_GUI%"=="1" (
+    if /I not "%JAM2_TEST_SUITE%"=="gui" if /I not "%JAM2_TEST_SUITE%"=="full" (
+        echo ERROR: --show-gui requires the gui or full test suite.
+        exit /b 2
+    )
+)
+if defined JAM2_TEST_NAME if not defined JAM2_TEST_TARGET (
+    echo ERROR: --test-name requires --tests SUITE or --tests-full.
+    exit /b 2
+)
+if /I "%JAM2_TEST_SUITE%"=="hardware" if not defined JAM2_HARDWARE_PROFILE (
+    echo ERROR: --tests hardware requires --hardware-profile PATH.
+    exit /b 2
+)
+if defined JAM2_HARDWARE_PROFILE if /I not "%JAM2_TEST_SUITE%"=="hardware" if /I not "%JAM2_TEST_SUITE%"=="full" (
+    echo ERROR: --hardware-profile requires --tests hardware or --tests-full.
+    exit /b 2
+)
+if defined JAM2_HARDWARE_PROFILE if not exist "%JAM2_HARDWARE_PROFILE%" (
+    echo ERROR: Hardware profile was not found: "%JAM2_HARDWARE_PROFILE%"
+    exit /b 2
+)
+
 title Jam2 MSVC Build
 set "REPO_DIR=%~dp0"
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -89,26 +207,164 @@ if errorlevel 1 (
     exit /b 1
 )
 
+if defined JAM2_TEST_TARGET (
+    set "JAM2_TEST_ARTIFACT_ROOT=%REPO_DIR%build\test-artifacts"
+    if exist "%REPO_DIR%build\test-artifacts" cmake -E remove_directory "%REPO_DIR%build\test-artifacts"
+    if errorlevel 1 (
+        echo.
+        echo ERROR: Could not clear the previous test artifact workspace:
+        echo        "%REPO_DIR%build\test-artifacts"
+        exit /b 1
+    )
+    cmake -E make_directory "%REPO_DIR%build\test-artifacts"
+    if errorlevel 1 (
+        echo.
+        echo ERROR: Could not create the test artifact workspace:
+        echo        "%REPO_DIR%build\test-artifacts"
+        exit /b 1
+    )
+)
+
+if "%JAM2_TEST_FULL_GATE%"=="1" (
+    if not exist "%REPO_DIR%build\coverage" mkdir "%REPO_DIR%build\coverage"
+    if errorlevel 1 (
+        echo.
+        echo ERROR: Could not create the full-gate report directory.
+        exit /b 1
+    )
+    if defined JAM2_TEST_NAME (
+        set "JAM2_CTEST_LOG_ARGS=--output-log "%REPO_DIR%build\coverage\windows-focused-release-ctest.log""
+    ) else (
+        set "JAM2_CTEST_LOG_ARGS=--output-log "%REPO_DIR%build\coverage\windows-release-ctest.log""
+    )
+)
+
+if not "%JAM2_TEST_FULL_GATE%"=="1" goto normal_build
+call :run_windows_coverage
+set "JAM2_COVERAGE_RESULT=%errorlevel%"
+
+:normal_build
+
 echo.
-echo Configuring Jam2...
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="%QT_DIR%" -DASIO_SDK_DIR="%ASIO_SDK_DIR%"
+echo Configuring normal Jam2 Release build...
+cmake -U CMAKE_C_FLAGS_RELEASE -U CMAKE_CXX_FLAGS_RELEASE -U CMAKE_EXE_LINKER_FLAGS_RELEASE -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="%QT_DIR%" -DASIO_SDK_DIR="%ASIO_SDK_DIR%" -DBUILD_TESTING=%JAM2_BUILD_TESTING% -DJAM2_ENABLE_COVERAGE=OFF -DJAM2_HARDWARE_PROFILE:FILEPATH="%JAM2_HARDWARE_PROFILE%"
 if errorlevel 1 (
     echo.
     echo CONFIGURE FAILED.
     exit /b 1
 )
 
+findstr /B /C:"CMAKE_CXX_FLAGS_RELEASE:STRING=" build\CMakeCache.txt | findstr /C:"/O2" >nul
+if errorlevel 1 (
+    echo.
+    echo ERROR: The normal Release build is not configured with MSVC /O2 optimization.
+    exit /b 1
+)
+findstr /B /C:"CMAKE_CXX_FLAGS_RELEASE:STRING=" build\CMakeCache.txt | findstr /C:"/Od" >nul
+if not errorlevel 1 (
+    echo.
+    echo ERROR: Coverage /Od flags leaked into the normal Release build.
+    exit /b 1
+)
+findstr /B /C:"CMAKE_EXE_LINKER_FLAGS_RELEASE:STRING=" build\CMakeCache.txt | findstr /C:"/PROFILE" >nul
+if not errorlevel 1 (
+    echo.
+    echo ERROR: Coverage /PROFILE flags leaked into the normal Release build.
+    exit /b 1
+)
+
 echo.
 echo Building Jam2...
-cmake --build build
+if defined JAM2_TEST_TARGET (
+    cmake --build build --target %JAM2_TEST_TARGET%
+) else (
+    cmake --build build
+)
 if errorlevel 1 (
     echo.
     echo BUILD FAILED.
     exit /b 1
 )
 
+if defined JAM2_TEST_TARGET (
+    echo.
+    echo Running Jam2 %JAM2_TEST_SUITE% tests...
+    if defined JAM2_TEST_NAME (
+        ctest --test-dir build --output-on-failure %JAM2_CTEST_LOG_ARGS% --no-tests=error -R "^%JAM2_TEST_NAME%$"
+    ) else if defined JAM2_TEST_LABEL (
+        ctest --test-dir build --output-on-failure %JAM2_CTEST_LOG_ARGS% -L "%JAM2_TEST_LABEL%"
+    ) else (
+        ctest --test-dir build --output-on-failure %JAM2_CTEST_LOG_ARGS%
+    )
+    if errorlevel 1 (
+        echo.
+        echo TESTS FAILED.
+        exit /b 1
+    )
+)
+
 echo.
-echo BUILD SUCCEEDED.
+if not "%JAM2_COVERAGE_RESULT%"=="0" (
+    echo COVERAGE GATE FAILED. The normal Release binary and tests were restored successfully.
+    echo Inspect "%REPO_DIR%build\coverage" for the native coverage reports.
+    exit /b 1
+)
+if defined JAM2_TEST_TARGET (
+    cmake -E remove_directory "%JAM2_TEST_ARTIFACT_ROOT%"
+    if errorlevel 1 (
+        echo ERROR: Tests passed, but their artifact workspace could not be removed:
+        echo        "%JAM2_TEST_ARTIFACT_ROOT%"
+        exit /b 1
+    )
+)
+if defined JAM2_TEST_TARGET (
+    echo BUILD AND TESTS SUCCEEDED.
+) else (
+    echo BUILD SUCCEEDED.
+)
+exit /b 0
+
+:run_windows_coverage
+where dotnet.exe >nul 2>nul
+if errorlevel 1 (
+    echo.
+    echo ERROR: dotnet.exe is required only for --tests-full coverage-tool restore.
+    exit /b 1
+)
+
+echo.
+echo Configuring instrumented Jam2 MSVC coverage build...
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="%QT_DIR%" -DASIO_SDK_DIR="%ASIO_SDK_DIR%" -DBUILD_TESTING=ON -DJAM2_ENABLE_COVERAGE=ON -DJAM2_HARDWARE_PROFILE:FILEPATH="%JAM2_HARDWARE_PROFILE%"
+if errorlevel 1 (
+    echo.
+    echo COVERAGE CONFIGURE FAILED. Restoring the normal Release build next.
+    exit /b 1
+)
+
+echo.
+echo Building instrumented Jam2 test catalogue...
+cmake --build build --target jam2_tests_all
+if errorlevel 1 (
+    echo.
+    echo COVERAGE BUILD FAILED. Restoring the normal Release build next.
+    exit /b 1
+)
+
+for %%I in ("%CMAKE_PATH%") do set "JAM2_CTEST_PATH=%%~dpIctest.exe"
+set "JAM2_REPO_ROOT=%REPO_DIR:~0,-1%"
+echo.
+if defined JAM2_TEST_NAME (
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%REPO_DIR%tests\coverage\RunWindowsCoverage.ps1" -RepoRoot "%JAM2_REPO_ROOT%" -BuildDirectory "%REPO_DIR%build" -CTestPath "%JAM2_CTEST_PATH%" -TestName "%JAM2_TEST_NAME%"
+) else (
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%REPO_DIR%tests\coverage\RunWindowsCoverage.ps1" -RepoRoot "%JAM2_REPO_ROOT%" -BuildDirectory "%REPO_DIR%build" -CTestPath "%JAM2_CTEST_PATH%"
+)
+if errorlevel 1 (
+    echo.
+    echo INSTRUMENTED COVERAGE GATE FAILED. Restoring the normal Release build next.
+    exit /b 1
+)
+
+echo INSTRUMENTED COVERAGE GATE SUCCEEDED.
 exit /b 0
 
 :check_msvc

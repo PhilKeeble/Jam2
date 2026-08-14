@@ -11,5 +11,5 @@
     "stats": true,
     "stats_interval_ms": 250
   },
-  "artifacts": {"root": "../validate_logs/manual/local-headless-smoke"}
+  "artifacts": {"root": "../diagnostic_logs/manual/local-headless-smoke"}
 }

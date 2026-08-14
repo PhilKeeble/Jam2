@@ -3,11 +3,27 @@
 #include "GuiPresentation.hpp"
 
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QRandomGenerator>
 #include <QRegularExpression>
 
 namespace {
+
+Qt::CaseSensitivity pathCaseSensitivity() noexcept
+{
+#ifdef Q_OS_WIN
+    return Qt::CaseInsensitive;
+#else
+    return Qt::CaseSensitive;
+#endif
+}
+
+bool samePath(const QString& first, const QString& second) noexcept
+{
+    return QDir::cleanPath(first).compare(
+               QDir::cleanPath(second), pathCaseSensitivity()) == 0;
+}
 
 const QStringList& adjectives()
 {
@@ -136,6 +152,7 @@ void JamStorage::startNew(const QString& displayName)
     slug_ = portableSlug(displayName_);
     saved_ = false;
     rootFolder_ = rootFor(false, slug_);
+    projectFilePath_.clear();
     hasArtifacts_ = false;
 }
 
@@ -143,9 +160,10 @@ void JamStorage::openSaved(const QString& projectFilePath, const QString& displa
 {
     const QFileInfo info(projectFilePath);
     displayName_ = displayName.trimmed();
-    slug_ = portableSlug(displayName_);
+    slug_ = portableSlug(info.completeBaseName());
     saved_ = true;
     rootFolder_ = info.absolutePath();
+    projectFilePath_ = info.absoluteFilePath();
     hasArtifacts_ = false;
 }
 
@@ -157,7 +175,7 @@ QString JamStorage::assetFolder(AssetKind kind) const
 QString JamStorage::projectFilePath() const
 {
     if (!saved_) return {};
-    return QDir(rootFolder_).absoluteFilePath(slug_ + QStringLiteral(".jamjar"));
+    return projectFilePath_;
 }
 
 QString JamStorage::nextTakeName() const
@@ -191,13 +209,43 @@ bool JamStorage::rename(const QString& displayName, QString& error)
         return false;
     }
     const QString nextSlug = portableSlug(nextDisplay);
+    const bool managedSavedRoot = saved_ &&
+        samePath(rootFolder_, rootFor(true, slug_));
+    if (saved_ && !managedSavedRoot) {
+        // A JamJar may be opened from any user-selected folder. Its parent is
+        // not a Jam2-owned project directory and must never be moved merely
+        // because the title stored inside the project changes.
+        displayName_ = nextDisplay;
+        return true;
+    }
     const QString destination = rootFor(saved_, nextSlug);
-    if (QDir::cleanPath(destination) != QDir::cleanPath(rootFolder_) &&
+    if (!samePath(destination, rootFolder_) &&
         QFileInfo::exists(destination)) {
         error = QStringLiteral("A jam named %1 already exists.").arg(nextDisplay);
         return false;
     }
+    const QString oldRoot = rootFolder_;
+    const QString oldProjectPath = projectFilePath_;
     if (!moveRoot(destination, error)) return false;
+    if (saved_) {
+        const QString relocatedProjectPath = oldProjectPath.isEmpty()
+            ? QString{}
+            : QDir(rootFolder_).absoluteFilePath(
+                  QDir(oldRoot).relativeFilePath(oldProjectPath));
+        const QString renamedProjectPath = QDir(rootFolder_).absoluteFilePath(
+            nextSlug + QStringLiteral(".jamjar"));
+        if (!relocatedProjectPath.isEmpty() &&
+            !samePath(relocatedProjectPath, renamedProjectPath) &&
+            QFileInfo::exists(relocatedProjectPath) &&
+            !QFile::rename(relocatedProjectPath, renamedProjectPath)) {
+            QString rollbackError;
+            (void)moveRoot(oldRoot, rollbackError);
+            projectFilePath_ = oldProjectPath;
+            error = QStringLiteral("Could not rename the JamJar project file.");
+            return false;
+        }
+        projectFilePath_ = renamedProjectPath;
+    }
     displayName_ = nextDisplay;
     slug_ = nextSlug;
     return true;
@@ -213,6 +261,8 @@ bool JamStorage::moveToSongs(QString& error)
     }
     if (!moveRoot(destination, error)) return false;
     saved_ = true;
+    projectFilePath_ = QDir(rootFolder_).absoluteFilePath(
+        slug_ + QStringLiteral(".jamjar"));
     hasArtifacts_ = false;
     return true;
 }

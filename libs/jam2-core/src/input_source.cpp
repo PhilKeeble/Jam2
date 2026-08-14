@@ -54,7 +54,9 @@ bool InputSourceRouter::configure(
         return false;
     }
     Slot& destination = slots_[slot];
+    destination.topology_revision.fetch_add(1, std::memory_order_acq_rel);
     destination.enabled.store(false, std::memory_order_release);
+    destination.configured.store(false, std::memory_order_release);
     destination.kind.store(source.kind, std::memory_order_relaxed);
     destination.first_channel.store(source.first_channel, std::memory_order_relaxed);
     destination.second_channel.store(source.second_channel, std::memory_order_relaxed);
@@ -62,6 +64,7 @@ bool InputSourceRouter::configure(
     destination.renderer.store(source.renderer, std::memory_order_release);
     destination.configured.store(true, std::memory_order_release);
     destination.enabled.store(source.enabled, std::memory_order_release);
+    destination.topology_revision.fetch_add(1, std::memory_order_release);
     return true;
 }
 
@@ -89,11 +92,13 @@ void InputSourceRouter::clear(std::size_t slot) noexcept
 {
     if (slot >= slots_.size()) return;
     Slot& source = slots_[slot];
+    source.topology_revision.fetch_add(1, std::memory_order_acq_rel);
     source.enabled.store(false, std::memory_order_release);
-    source.configured.store(false, std::memory_order_release);
     source.renderer.store(nullptr, std::memory_order_release);
     source.first_channel.store(kNoInputChannel, std::memory_order_relaxed);
     source.second_channel.store(kNoInputChannel, std::memory_order_relaxed);
+    source.configured.store(false, std::memory_order_release);
+    source.topology_revision.fetch_add(1, std::memory_order_release);
 }
 
 bool InputSourceRouter::process(
@@ -117,18 +122,24 @@ bool InputSourceRouter::process(
     std::size_t rendered_sources = 0;
     for (std::size_t slot_index = 0; slot_index < slots_.size(); ++slot_index) {
         Slot& source = slots_[slot_index];
-        if (!source.configured.load(std::memory_order_acquire)) {
-            continue;
-        }
+        const std::uint64_t revision =
+            source.topology_revision.load(std::memory_order_acquire);
+        if ((revision & 1U) != 0U) continue;
+        const bool configured = source.configured.load(std::memory_order_acquire);
         const InputSourceKind kind = source.kind.load(std::memory_order_relaxed);
         const bool included = source.enabled.load(std::memory_order_acquire);
+        const std::size_t first = source.first_channel.load(std::memory_order_relaxed);
+        const std::size_t second = source.second_channel.load(std::memory_order_relaxed);
+        InputSourceRenderer* renderer = source.renderer.load(std::memory_order_acquire);
+        const std::int64_t level = std::clamp(
+            source.level_ppm.load(std::memory_order_relaxed), 0, 4000000);
+        if (source.topology_revision.load(std::memory_order_acquire) != revision ||
+            !configured) continue;
         // MIDI renderers must continue draining timestamped controller events
         // while excluded from My Send, otherwise mute/send-off fills the queue
         // and replays stale notes when the source is enabled again.
         if (!included && slot_index != recording_slot &&
             kind != InputSourceKind::MidiInstrument) continue;
-        const std::size_t first = source.first_channel.load(std::memory_order_relaxed);
-        const std::size_t second = source.second_channel.load(std::memory_order_relaxed);
         std::array<const std::int32_t*, kMaximumSourceInputChannels> inputs{};
         std::size_t input_channels = 0;
         if (kind == InputSourceKind::Audio) {
@@ -140,7 +151,6 @@ bool InputSourceRouter::process(
         }
 
         bool rendered = false;
-        InputSourceRenderer* renderer = source.renderer.load(std::memory_order_acquire);
         const std::size_t source_latency = renderer != nullptr
             ? renderer->latency_frames(frames)
             : 0;
@@ -168,8 +178,6 @@ bool InputSourceRouter::process(
                 std::fill(source_scratch_.begin(), source_scratch_.begin() + frames, 0);
             }
         }
-        const std::int64_t level = std::clamp(
-            source.level_ppm.load(std::memory_order_relaxed), 0, 4000000);
         for (std::size_t frame = 0; frame < frames; ++frame) {
             const std::int64_t levelled =
                 static_cast<std::int64_t>(source_scratch_[frame]) * level / 1000000LL;
@@ -226,6 +234,30 @@ InputSourceRouterStats InputSourceRouter::stats() const noexcept
     result.invalid_configurations = invalid_configurations_.load(std::memory_order_relaxed);
     result.peak_ppm = peak_ppm_.load(std::memory_order_relaxed);
     return result;
+}
+
+InputSourceSlotSnapshot InputSourceRouter::slot_snapshot(
+    std::size_t slot) const noexcept
+{
+    if (slot >= slots_.size()) return {};
+    const Slot& source = slots_[slot];
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const std::uint64_t revision =
+            source.topology_revision.load(std::memory_order_acquire);
+        if ((revision & 1U) != 0U) continue;
+        const InputSourceSlotSnapshot result{
+            source.kind.load(std::memory_order_relaxed),
+            source.first_channel.load(std::memory_order_relaxed),
+            source.second_channel.load(std::memory_order_relaxed),
+            source.level_ppm.load(std::memory_order_relaxed),
+            source.configured.load(std::memory_order_acquire),
+            source.enabled.load(std::memory_order_acquire),
+            source.renderer.load(std::memory_order_acquire) != nullptr,
+        };
+        if (source.topology_revision.load(std::memory_order_acquire) == revision)
+            return result;
+    }
+    return {};
 }
 
 } // namespace jam2::audio

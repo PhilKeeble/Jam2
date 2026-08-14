@@ -39,6 +39,7 @@ if(MSVC)
 endif()
 
 add_library(jam2_core STATIC
+    src/audio_device_processing.cpp
     src/audio_ring.cpp
     src/common.cpp
     src/input_source.cpp
@@ -57,6 +58,7 @@ add_library(jam2_core STATIC
     src/session_authority.cpp
     src/track_take_recorder.cpp
     src/stun.cpp
+    src/transport_timing.cpp
     src/tuning_profile.cpp
     src/udp_socket.cpp
 )
@@ -125,13 +127,3 @@ elseif(APPLE)
 else()
     message(FATAL_ERROR "Jam2 supports only Windows and macOS host-native builds.")
 endif()
-
-add_executable(jam2_core_input_tests tests/CoreInputTests.cpp)
-target_compile_features(jam2_core_input_tests PRIVATE cxx_std_20)
-target_link_libraries(jam2_core_input_tests PRIVATE jam2_core)
-if(MSVC)
-    target_compile_options(jam2_core_input_tests PRIVATE /W4 /permissive- /EHsc)
-else()
-    target_compile_options(jam2_core_input_tests PRIVATE -Wall -Wextra -Wpedantic)
-endif()
-add_test(NAME jam2_core_input_units COMMAND jam2_core_input_tests)

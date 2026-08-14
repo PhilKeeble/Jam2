@@ -11,5 +11,5 @@
     "stats_interval_ms": 250,
     "os_priority": "realtime"
   },
-  "artifacts": {"root": "../validate_logs/manual/lifecycle-headless-smoke"}
+  "artifacts": {"root": "../diagnostic_logs/manual/lifecycle-headless-smoke"}
 }

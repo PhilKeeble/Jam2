@@ -5,6 +5,7 @@
 #include "BeatGridModel.hpp"
 #include "LooperProject.hpp"
 #include "PreparedMixRenderer.hpp"
+#include "PreparedMixLifecycle.hpp"
 #include "ProjectPersistenceCoordinator.hpp"
 #include "SharedTrackController.hpp"
 #include "TrackRecordingWorkflow.hpp"
@@ -32,7 +33,7 @@ public:
         std::function<bool(const QString&, const QJsonObject&)> sendControl;
         std::function<bool(const QString&, const QByteArray&)> sendBinary;
         std::function<void()> incomingAssetAccepted;
-        std::function<void(const QString&)> incomingAssetAbandoned;
+        std::function<void(const QString&, const QString&)> incomingAssetAbandoned;
         std::function<void(const QString&, const QString&, bool)> assetProgress;
     };
 
@@ -75,8 +76,6 @@ public:
         std::function<void()> work,
         std::function<void()> complete,
         std::function<void(const QString&)> failed = {});
-    void waitForWorkers();
-
     QObject* dispatchContext() noexcept override;
     int sessionSampleRate() const noexcept override;
     QString assetPathForSend(const QString& hash) const override;
@@ -107,17 +106,11 @@ public:
     TrackRecordingWorkflow recordingWorkflow;
     BeatGridModel songModel;
     ProjectPersistenceCoordinator persistence;
-    PreparedMixResult preparedMix;
+    jam2::gui::PreparedMixLifecycle preparedMixLifecycle;
     QThreadPool fileWorkers;
     AssetTransferService assetTransfer;
 
-    bool preparedMixWorkerRunning = false;
-    bool preparedMixRerunPending = false;
-    bool playPreparedMixWhenReady = false;
     bool publishStoppedTrackStateWhenApplied = false;
-    std::uint64_t preparedMixRequests = 0;
-    std::uint64_t preparedMixCoalesced = 0;
-    std::uint64_t preparedMixFailures = 0;
     int fileWorkerTasksActive = 0;
     int fileWorkerTasksHighWater = 0;
     std::uint64_t fileWorkerTasksCompleted = 0;
@@ -142,6 +135,9 @@ public:
     QMap<QString, QString> pendingTrackAssetSources;
     QSet<QString> validatedTrackAssetHashes;
     QMap<QString, int> incomingAssetRetryAttempts;
+    QMap<QString, QString> incomingAssetRetrySources;
+    std::uint64_t assetRequestStartTimeouts = 0;
+    std::uint64_t incomingAssetRequestGeneration = 0;
     IncomingAssetWorkflow incomingAssetWorkflow = IncomingAssetWorkflow::None;
     QString incomingAssetHash;
     QString incomingAssetSourcePeerToken;

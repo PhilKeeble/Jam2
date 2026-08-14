@@ -8,10 +8,130 @@ CMAKE_VERSION=""
 NINJA_BIN=""
 NINJA_VERSION=""
 QT_DIR="${QT_DIR:-}"
+BUILD_TESTING="OFF"
+TEST_SUITE=""
+TEST_TARGET=""
+TEST_LABEL=""
+TEST_SHOW_GUI="0"
+TEST_NAME=""
+TEST_ARTIFACT_ROOT=""
+HARDWARE_PROFILE=""
 
 print_error() {
     printf '\nERROR: %s\n' "$1" >&2
 }
+
+while (( $# > 0 )); do
+    case "$1" in
+        --tests-full)
+            BUILD_TESTING="ON"
+            TEST_SUITE="full"
+            shift
+            ;;
+        --tests)
+            if (( $# < 2 )); then
+                print_error "--tests requires a suite name."
+                exit 2
+            fi
+            BUILD_TESTING="ON"
+            TEST_SUITE="$2"
+            shift 2
+            ;;
+        --show-gui)
+            TEST_SHOW_GUI="1"
+            shift
+            ;;
+        --test-name)
+            if (( $# < 2 )); then
+                print_error "--test-name requires one exact CTest name."
+                exit 2
+            fi
+            TEST_NAME="$2"
+            shift 2
+            ;;
+        --hardware-profile)
+            if (( $# < 2 )); then
+                print_error "--hardware-profile requires a JSON profile path."
+                exit 2
+            fi
+            HARDWARE_PROFILE="$2"
+            shift 2
+            ;;
+        *)
+            print_error "Unknown compile option: $1"
+            printf 'Supported options: --tests unit, --tests plugin, --tests hardware, --tests gui, --tests jam-sync, --tests shared-content, --tests performance, --tests network, --tests full, --tests-full, --test-name NAME, --show-gui, --hardware-profile PATH\n' >&2
+            exit 2
+            ;;
+    esac
+done
+
+case "$TEST_SUITE" in
+    "") ;;
+    unit)
+        TEST_TARGET="jam2_tests_unit"
+        TEST_LABEL="unit"
+        ;;
+    plugin)
+        TEST_TARGET="jam2_tests_plugin"
+        TEST_LABEL="plugin"
+        ;;
+    hardware)
+        TEST_TARGET="jam2_tests_hardware"
+        TEST_LABEL="hardware"
+        ;;
+    gui)
+        TEST_TARGET="jam2_tests_gui"
+        TEST_LABEL="gui"
+        ;;
+    jam-sync)
+        TEST_TARGET="jam2_tests_jam_sync"
+        TEST_LABEL="jam-sync"
+        ;;
+    shared-content)
+        TEST_TARGET="jam2_tests_shared_content"
+        TEST_LABEL="shared-content"
+        ;;
+    performance)
+        TEST_TARGET="jam2_tests_performance"
+        TEST_LABEL="performance"
+        ;;
+    network)
+        TEST_TARGET="jam2_tests_network"
+        TEST_LABEL="^network$"
+        ;;
+    full)
+        TEST_TARGET="jam2_tests_all"
+        ;;
+    *)
+        print_error "Test suite '$TEST_SUITE' is not implemented yet."
+        printf 'Available suites: unit, plugin, hardware, gui, jam-sync, shared-content, performance, network, full\n' >&2
+        exit 2
+        ;;
+esac
+
+if [[ "$TEST_SHOW_GUI" == "1" && "$TEST_SUITE" != "gui" && "$TEST_SUITE" != "full" ]]; then
+    print_error "--show-gui requires the gui or full test suite."
+    exit 2
+fi
+if [[ -n "$TEST_NAME" && -z "$TEST_TARGET" ]]; then
+    print_error "--test-name requires --tests SUITE or --tests-full."
+    exit 2
+fi
+if [[ "$TEST_SUITE" == "hardware" && -z "$HARDWARE_PROFILE" ]]; then
+    print_error "--tests hardware requires --hardware-profile PATH."
+    exit 2
+fi
+if [[ -n "$HARDWARE_PROFILE" && "$TEST_SUITE" != "hardware" && "$TEST_SUITE" != "full" ]]; then
+    print_error "--hardware-profile requires --tests hardware or --tests-full."
+    exit 2
+fi
+if [[ -n "$HARDWARE_PROFILE" ]]; then
+    if [[ ! -f "$HARDWARE_PROFILE" ]]; then
+        print_error "Hardware profile was not found: $HARDWARE_PROFILE"
+        exit 2
+    fi
+    HARDWARE_PROFILE="$(cd "$(dirname "$HARDWARE_PROFILE")" && pwd -P)/$(basename "$HARDWARE_PROFILE")"
+fi
 
 cmake_version_supported() {
     local version="$1"
@@ -170,21 +290,63 @@ printf '  CMake %s:       %s\n' "$CMAKE_VERSION" "$CMAKE_BIN"
 printf '  Ninja %s:             %s\n' "$NINJA_VERSION" "$NINJA_BIN"
 printf '  Qt 6:                 %s\n' "$QT_DIR"
 
+if [[ -n "$TEST_TARGET" ]]; then
+    TEST_ARTIFACT_ROOT="$REPO_DIR/build/test-artifacts"
+    if ! "$CMAKE_BIN" -E remove_directory "$TEST_ARTIFACT_ROOT" ||
+        ! "$CMAKE_BIN" -E make_directory "$TEST_ARTIFACT_ROOT"; then
+        print_error "Could not initialize the test artifact workspace: $TEST_ARTIFACT_ROOT"
+        exit 1
+    fi
+fi
+
 printf '\nConfiguring Jam2...\n'
 if ! "$CMAKE_BIN" \
     -S "$REPO_DIR" \
     -B "$REPO_DIR/build" \
     -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_PREFIX_PATH="$QT_DIR"; then
+    -DCMAKE_PREFIX_PATH="$QT_DIR" \
+    -DBUILD_TESTING="$BUILD_TESTING" \
+    -DJAM2_HARDWARE_PROFILE:FILEPATH="$HARDWARE_PROFILE"; then
     printf '\nCONFIGURE FAILED.\n' >&2
     exit 1
 fi
 
 printf '\nBuilding Jam2...\n'
-if ! "$CMAKE_BIN" --build "$REPO_DIR/build"; then
+if [[ -n "$TEST_TARGET" ]]; then
+    BUILD_COMMAND=("$CMAKE_BIN" --build "$REPO_DIR/build" --target "$TEST_TARGET")
+else
+    BUILD_COMMAND=("$CMAKE_BIN" --build "$REPO_DIR/build")
+fi
+if ! "${BUILD_COMMAND[@]}"; then
     printf '\nBUILD FAILED.\n' >&2
     exit 1
 fi
 
-printf '\nBUILD SUCCEEDED.\n'
+if [[ -n "$TEST_TARGET" ]]; then
+    printf '\nRunning Jam2 %s tests...\n' "$TEST_SUITE"
+    export JAM2_TEST_SHOW_GUI="$TEST_SHOW_GUI"
+    CTEST_BIN="$(dirname "$CMAKE_BIN")/ctest"
+    if [[ ! -x "$CTEST_BIN" ]]; then
+        print_error "CTest was not found next to CMake: $CTEST_BIN"
+        exit 1
+    fi
+    if [[ -n "$TEST_NAME" ]]; then
+        TEST_COMMAND=("$CTEST_BIN" --test-dir "$REPO_DIR/build" --output-on-failure --no-tests=error -R "^${TEST_NAME}$")
+    elif [[ -n "$TEST_LABEL" ]]; then
+        TEST_COMMAND=("$CTEST_BIN" --test-dir "$REPO_DIR/build" --output-on-failure -L "$TEST_LABEL")
+    else
+        TEST_COMMAND=("$CTEST_BIN" --test-dir "$REPO_DIR/build" --output-on-failure)
+    fi
+    if ! "${TEST_COMMAND[@]}"; then
+        printf '\nTESTS FAILED.\n' >&2
+        exit 1
+    fi
+    if ! "$CMAKE_BIN" -E remove_directory "$TEST_ARTIFACT_ROOT"; then
+        print_error "Tests passed, but their artifact workspace could not be removed: $TEST_ARTIFACT_ROOT"
+        exit 1
+    fi
+    printf '\nBUILD AND TESTS SUCCEEDED.\n'
+else
+    printf '\nBUILD SUCCEEDED.\n'
+fi

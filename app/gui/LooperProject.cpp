@@ -1,5 +1,6 @@
 #include "LooperProject.hpp"
 #include "ContentLimits.hpp"
+#include "SectionTimeline.hpp"
 #include "metronome.hpp"
 
 #include <QJsonArray>
@@ -17,6 +18,49 @@ constexpr int kMaxLanesPerBank = jam2::application::limits::kMaximumLooperLanesP
 constexpr int kMaxIdCharacters = jam2::application::limits::kMaximumLooperIdCharacters;
 constexpr int kMaxNameCharacters = jam2::application::limits::kMaximumLooperNameCharacters;
 constexpr int kMaxPathCharacters = jam2::application::limits::kMaximumLooperPathCharacters;
+
+bool validAssetHash(const QString& hash);
+bool validOriginKind(const QString& kind);
+
+bool validLaneState(const LooperLane& lane)
+{
+    const bool cropUnset = lane.loopStartFrame == -1 && lane.loopEndFrame == -1;
+    const bool cropSet = lane.loopStartFrame >= 0 && lane.loopEndFrame > lane.loopStartFrame;
+    return lane.id.size() <= kMaxIdCharacters &&
+        lane.name.size() <= kMaxNameCharacters &&
+        lane.assetPath.size() <= kMaxPathCharacters &&
+        validAssetHash(lane.assetHash) &&
+        lane.referenceKind.size() <= 16 &&
+        validAssetHash(lane.referenceSourceSignature) &&
+        validOriginKind(lane.originKind) &&
+        (lane.sampleRate == 0 ||
+         (lane.sampleRate >= jam2::application::limits::kMinimumSampleRate &&
+          lane.sampleRate <= jam2::application::limits::kMaximumSampleRate)) &&
+        std::isfinite(lane.gainDb) && lane.gainDb >= -120.0 && lane.gainDb <= 24.0 &&
+        std::isfinite(lane.referenceBpm) && lane.referenceBpm >= 0.0 && lane.referenceBpm <= 400.0 &&
+        lane.sourceFrames >= 0 &&
+        lane.sourceFrames <= jam2::application::limits::kMaximumAssetFrames &&
+        lane.startFrame >= 0 &&
+        lane.startFrame <= jam2::application::limits::kMaximumLooperTimelineFrames &&
+        (lane.stopFrame == -1 ||
+         (lane.stopFrame > lane.startFrame &&
+          lane.stopFrame <= jam2::application::limits::kMaximumLooperTimelineFrames)) &&
+        (cropUnset || cropSet) &&
+        lane.loopStartFrame <= jam2::application::limits::kMaximumAssetFrames &&
+        lane.loopEndFrame <= jam2::application::limits::kMaximumAssetFrames &&
+        (lane.sourceFrames <= 0 || cropUnset ||
+         (lane.loopStartFrame < lane.sourceFrames &&
+          lane.loopEndFrame <= lane.sourceFrames));
+}
+
+LooperLane* mutableLane(QVector<LooperBank>& banks, int bankIndex, int laneIndex)
+{
+    if (bankIndex < 0 || bankIndex >= banks.size() ||
+        laneIndex < 0 || laneIndex >= banks.at(bankIndex).lanes.size()) {
+        return nullptr;
+    }
+    return &banks[bankIndex].lanes[laneIndex];
+}
 
 QString laneId(const QString& value)
 {
@@ -115,6 +159,43 @@ LooperBankTiming sanitizedTiming(LooperBankTiming timing, bool allowInheritance)
 }
 }
 
+qint64 jam2::gui::looperLaneTimelineEnd(
+    const LooperLane& lane,
+    qint64 resolvedSourceFrames,
+    int timelineSampleRate) noexcept
+{
+    constexpr qint64 maximum =
+        jam2::application::limits::kMaximumLooperTimelineFrames;
+    const qint64 start = qBound<qint64>(0, lane.startFrame, maximum);
+    if (lane.stopFrame > start) {
+        return qBound<qint64>(start, lane.stopFrame, maximum);
+    }
+    if (resolvedSourceFrames <= 0 || timelineSampleRate <= 0) {
+        return start;
+    }
+    resolvedSourceFrames = qMin(
+        resolvedSourceFrames,
+        jam2::application::limits::kMaximumAssetFrames);
+    const qint64 sourceStart = lane.loopStartFrame >= 0
+        ? qBound<qint64>(0, lane.loopStartFrame, resolvedSourceFrames - 1)
+        : 0;
+    const qint64 sourceEnd = lane.loopEndFrame > sourceStart
+        ? qBound<qint64>(sourceStart + 1, lane.loopEndFrame, resolvedSourceFrames)
+        : resolvedSourceFrames;
+    long double visibleFrames = static_cast<long double>(sourceEnd - sourceStart);
+    if (lane.sampleRate > 0 && lane.sampleRate != timelineSampleRate) {
+        visibleFrames = visibleFrames * static_cast<long double>(timelineSampleRate) /
+            static_cast<long double>(lane.sampleRate);
+    }
+    const long double rounded = std::round(visibleFrames);
+    const qint64 available = maximum - start;
+    const qint64 boundedVisible = !std::isfinite(rounded) ||
+            rounded >= static_cast<long double>(available)
+        ? available
+        : qMax<qint64>(1, static_cast<qint64>(rounded));
+    return start + boundedVisible;
+}
+
 LooperProject::LooperProject()
 {
     for (int index = 0; index < kMinBankCount; ++index) {
@@ -187,15 +268,27 @@ void LooperProject::setArrangementEnabled(bool enabled)
 {
     arrangement_.enabled = enabled;
 }
+void LooperProject::ensureInitialEmptyLanes()
+{
+    for (int bankIndex = 0; bankIndex < banks_.size(); ++bankIndex) {
+        if (!banks_.at(bankIndex).lanes.isEmpty()) continue;
+        LooperLane placeholder;
+        // This is one stable visible slot, not independently-created content.
+        placeholder.id = QStringLiteral("initial-empty-%1").arg(bankIndex);
+        (void)appendLane(bankIndex, std::move(placeholder));
+    }
+}
 bool LooperProject::appendLane(int bankIndex, LooperLane lane)
 {
-    if (bankIndex < 0 || bankIndex >= banks_.size() || banks_[bankIndex].lanes.size() >= kMaxLanesPerBank ||
-        lane.id.size() > kMaxIdCharacters || lane.name.size() > kMaxNameCharacters ||
-        lane.assetPath.size() > kMaxPathCharacters || !validAssetHash(lane.assetHash) ||
-        lane.referenceKind.size() > 16 || !validAssetHash(lane.referenceSourceSignature) ||
-        !validOriginKind(lane.originKind) ||
-        !std::isfinite(lane.referenceBpm) || lane.referenceBpm < 0.0 || lane.referenceBpm > 400.0) {
+    if (bankIndex < 0 || bankIndex >= banks_.size() ||
+        banks_[bankIndex].lanes.size() >= kMaxLanesPerBank ||
+        !validLaneState(lane)) {
         return false;
+    }
+    if (!lane.id.isEmpty()) {
+        for (const LooperLane& existing : banks_.at(bankIndex).lanes) {
+            if (existing.id == lane.id) return false;
+        }
     }
     lane.id = laneId(lane.id);
     if (lane.name.trimmed().isEmpty()) {
@@ -217,10 +310,27 @@ bool LooperProject::appendLane(int bankIndex, LooperLane lane)
                 ++number;
             }
         } else {
-            lane.name = lane.assetPath.section(QLatin1Char('/'), -1).section(QLatin1Char('\\'), -1);
+            lane.name = lane.assetPath.section(QLatin1Char('/'), -1)
+                .section(QLatin1Char('\\'), -1).trimmed();
+            if (lane.name.isEmpty()) lane.name = QStringLiteral("Track");
+            lane.name = lane.name.left(kMaxNameCharacters);
         }
     }
+    if (!validLaneState(lane)) return false;
     banks_[bankIndex].lanes.append(std::move(lane));
+    return true;
+}
+
+bool LooperProject::replaceLane(
+    int bankIndex,
+    int laneIndex,
+    LooperLane lane)
+{
+    LooperLane* current = mutableLane(banks_, bankIndex, laneIndex);
+    if (!current) return false;
+    lane.id = current->id;
+    if (!validLaneState(lane)) return false;
+    *current = std::move(lane);
     return true;
 }
 
@@ -249,11 +359,159 @@ bool LooperProject::renameLane(int bankIndex, int laneIndex, const QString& name
         return false;
     }
     const QString trimmed = name.trimmed();
-    if (trimmed.isEmpty()) {
+    if (trimmed.isEmpty() || trimmed.size() > kMaxNameCharacters) {
         return false;
     }
     banks_[bankIndex].lanes[laneIndex].name = trimmed;
     return true;
+}
+
+bool LooperProject::setLaneGainDb(int bankIndex, int laneIndex, double gainDb)
+{
+    LooperLane* lane = mutableLane(banks_, bankIndex, laneIndex);
+    if (!lane || !std::isfinite(gainDb)) return false;
+    lane->gainDb = qBound(-60.0, gainDb, 12.0);
+    return true;
+}
+
+bool LooperProject::setLaneMuted(int bankIndex, int laneIndex, bool muted)
+{
+    LooperLane* lane = mutableLane(banks_, bankIndex, laneIndex);
+    if (!lane) return false;
+    lane->muted = muted;
+    return true;
+}
+
+bool LooperProject::setLaneSolo(int bankIndex, int laneIndex, bool solo)
+{
+    LooperLane* lane = mutableLane(banks_, bankIndex, laneIndex);
+    if (!lane) return false;
+    lane->solo = solo;
+    return true;
+}
+
+bool LooperProject::setLaneRegion(
+    int bankIndex,
+    int laneIndex,
+    const LooperLaneRegion& region)
+{
+    LooperLane* lane = mutableLane(banks_, bankIndex, laneIndex);
+    if (!lane || region.startFrame < 0 ||
+        region.startFrame > jam2::application::limits::kMaximumLooperTimelineFrames ||
+        (region.stopFrame != -1 &&
+         (region.stopFrame <= region.startFrame ||
+          region.stopFrame > jam2::application::limits::kMaximumLooperTimelineFrames))) {
+        return false;
+    }
+    const bool cropUnset =
+        region.sourceStartFrame == -1 && region.sourceEndFrame == -1;
+    const bool cropSet = region.sourceStartFrame >= 0 &&
+        region.sourceEndFrame > region.sourceStartFrame &&
+        region.sourceEndFrame <= jam2::application::limits::kMaximumAssetFrames;
+    if (!cropUnset && !cropSet) return false;
+    if (cropSet && lane->sourceFrames > 0 &&
+        (region.sourceStartFrame >= lane->sourceFrames ||
+         region.sourceEndFrame > lane->sourceFrames)) {
+        return false;
+    }
+
+    LooperLane updated = *lane;
+    updated.startFrame = region.startFrame;
+    updated.stopFrame = region.stopFrame;
+    updated.loopStartFrame = region.sourceStartFrame;
+    updated.loopEndFrame = region.sourceEndFrame;
+    updated.loopEnabled = region.loopEnabled;
+    if (!validLaneState(updated)) return false;
+    *lane = std::move(updated);
+    return true;
+}
+
+bool LooperProject::clearLaneAsset(
+    int bankIndex,
+    int laneIndex,
+    bool resetTimelineStart)
+{
+    LooperLane* lane = mutableLane(banks_, bankIndex, laneIndex);
+    if (!lane) return false;
+    lane->assetPath.clear();
+    lane->assetHash.clear();
+    lane->sampleRate = 0;
+    lane->sourceFrames = 0;
+    lane->sampleRateCompatible = true;
+    if (resetTimelineStart) lane->startFrame = 0;
+    lane->stopFrame = -1;
+    lane->loopStartFrame = -1;
+    lane->loopEndFrame = -1;
+    lane->loopEnabled = false;
+    lane->referenceKind.clear();
+    lane->referenceSourceSignature.clear();
+    lane->referenceBpm = 0.0;
+    lane->referenceStale = false;
+    lane->localOnly = false;
+    lane->originKind.clear();
+    return true;
+}
+
+LooperLaneTimelineCropResult LooperProject::cropLaneToTimelineEnd(
+    int bankIndex,
+    int laneIndex,
+    qint64 resolvedSourceFrames,
+    int timelineSampleRate,
+    qint64 timelineEndFrame)
+{
+    const LooperLane* lane = mutableLane(banks_, bankIndex, laneIndex);
+    if (!lane || resolvedSourceFrames < 0 ||
+        resolvedSourceFrames > jam2::application::limits::kMaximumAssetFrames ||
+        timelineSampleRate < jam2::application::limits::kMinimumSampleRate ||
+        timelineSampleRate > jam2::application::limits::kMaximumSampleRate ||
+        timelineEndFrame <= 0 ||
+        timelineEndFrame > jam2::application::limits::kMaximumLooperTimelineFrames) {
+        return {};
+    }
+    if (jam2::gui::looperLaneTimelineEnd(
+            *lane, resolvedSourceFrames, timelineSampleRate) <= timelineEndFrame) {
+        return {LooperLaneTimelineCropStatus::Unchanged, {}, {}};
+    }
+
+    const jam2::gui::SectionTimelineCrop crop =
+        jam2::gui::sectionTimelineCropForEnd(
+            lane->startFrame,
+            lane->loopStartFrame,
+            lane->sampleRate,
+            timelineSampleRate,
+            timelineEndFrame);
+    if (crop.removePlacement) {
+        const QString removedPath = lane->assetPath;
+        const QString removedHash = lane->assetHash;
+        if (!clearLaneAsset(bankIndex, laneIndex, true)) return {};
+        return {
+            LooperLaneTimelineCropStatus::Cleared,
+            removedPath,
+            removedHash};
+    }
+
+    qint64 sourceStart = crop.sourceStartFrame;
+    qint64 sourceEnd = crop.sourceEndFrame;
+    if (lane->loopEnabled) {
+        sourceStart = lane->loopStartFrame;
+        sourceEnd = lane->loopEndFrame;
+    } else if (resolvedSourceFrames > 0) {
+        sourceStart = qBound<qint64>(0, sourceStart, resolvedSourceFrames - 1);
+        sourceEnd = qBound<qint64>(
+            sourceStart + 1, sourceEnd, resolvedSourceFrames);
+    }
+    if (!setLaneRegion(
+            bankIndex,
+            laneIndex,
+            LooperLaneRegion{
+                lane->startFrame,
+                crop.stopFrame,
+                sourceStart,
+                sourceEnd,
+                lane->loopEnabled})) {
+        return {};
+    }
+    return {LooperLaneTimelineCropStatus::Cropped, {}, {}};
 }
 
 QJsonObject LooperProject::toJson(bool syncCompatibleOnly) const
@@ -267,7 +525,7 @@ QJsonObject LooperProject::toJson(bool syncCompatibleOnly) const
                  (lane.localOnly && lane.originKind == QStringLiteral("recorded")))) {
                 continue;
             }
-            QJsonObject laneObject{{"id", lane.id}, {"asset_path", lane.assetPath}, {"asset_hash", lane.assetHash},
+            QJsonObject laneObject{{"id", lane.id}, {"asset_hash", lane.assetHash},
                 {"name", lane.name}, {"sample_rate", lane.sampleRate},
                 {"source_frames", QString::number(lane.sourceFrames)},
                 {"start_frame", QString::number(lane.startFrame)}, {"stop_frame", QString::number(lane.stopFrame)},
@@ -277,6 +535,7 @@ QJsonObject LooperProject::toJson(bool syncCompatibleOnly) const
                 {"reference_bpm", lane.referenceBpm},
                 {"reference_stale", lane.referenceStale}};
             if (!syncCompatibleOnly) {
+                laneObject.insert(QStringLiteral("asset_path"), lane.assetPath);
                 laneObject.insert(QStringLiteral("gain_db"), lane.gainDb);
                 laneObject.insert(QStringLiteral("muted"), lane.muted);
                 laneObject.insert(QStringLiteral("solo"), lane.solo);

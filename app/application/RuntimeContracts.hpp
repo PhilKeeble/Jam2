@@ -123,6 +123,27 @@ struct Jam2RuntimeOptions {
     Jam2OsPriorityMode os_priority = Jam2OsPriorityMode::High;
 };
 
+// Local listener-compensation tuning. These values are consumed only by the
+// non-real-time network supervisor and are never serialized onto the wire.
+struct Jam2MetronomeCompensationSettings {
+    double maximum_ms = 250.0;
+    double smoothing_ms = 750.0;
+    double deadband_ms = 1.0;
+    double slew_ms_per_second = 40.0;
+
+    bool operator==(const Jam2MetronomeCompensationSettings&) const noexcept = default;
+};
+
+bool jam2_valid_metronome_compensation(
+    const Jam2MetronomeCompensationSettings& settings) noexcept;
+std::int64_t jam2_next_metronome_compensation_offset(
+    std::int64_t current_offset_frames,
+    std::int64_t base_offset_frames,
+    std::int64_t requested_target_frames,
+    double elapsed_ms,
+    double sample_rate,
+    const Jam2MetronomeCompensationSettings& settings) noexcept;
+
 struct Jam2RuntimeStartup {
     jam2::Endpoint local_endpoint;
     std::optional<jam2::Endpoint> public_candidate;
@@ -143,6 +164,7 @@ struct Jam2NetworkOperationalSnapshot {
     jam2::SessionBootstrapRole bootstrap_role = jam2::SessionBootstrapRole::Joiner;
     jam2::SessionBootstrapState bootstrap_state = jam2::SessionBootstrapState::Configured;
     std::uint64_t local_peer_id = 0;
+    Jam2MetronomeCompensationSettings metronome_compensation;
     std::vector<Jam2OperationalPeer> peers;
 };
 
@@ -223,8 +245,11 @@ struct Jam2RuntimeHost {
     bool submitCommand(const jam2::EngineCommand& command) noexcept;
     bool submitPeerUpdate(const std::vector<Jam2RuntimePeer>& peers);
     bool submitPeerGain(std::uint64_t peer_id, int gain_ppm) noexcept;
+    bool submitMetronomeCompensation(
+        const Jam2MetronomeCompensationSettings& settings) noexcept;
     std::optional<std::vector<Jam2RuntimePeer>> takePeerUpdate();
     std::vector<Jam2PeerGainUpdate> takePeerGains();
+    std::optional<Jam2MetronomeCompensationSettings> takeMetronomeCompensation();
     std::optional<jam2::EngineCommand> takeCommand(std::uint64_t current_frame);
     std::uint64_t nextGridRequestId() noexcept;
     std::uint64_t nextTransportEventId() noexcept;
@@ -237,6 +262,8 @@ private:
     std::deque<jam2::EngineCommand> commands_;
     std::mutex peer_gain_mutex_;
     std::unordered_map<std::uint64_t, int> peer_gains_;
+    std::mutex metronome_compensation_mutex_;
+    std::optional<Jam2MetronomeCompensationSettings> metronome_compensation_;
     // The same authenticated peer identity survives Leave/Join while the
     // application stays open. Keep proposal identities monotonic across those
     // network-worker lifetimes so a coordinator cannot mistake a new request

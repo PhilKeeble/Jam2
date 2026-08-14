@@ -200,6 +200,12 @@ bool ApplicationRuntime::setPeerGainDb(std::uint64_t peerId, double gainDb) noex
     return host_.submitPeerGain(peerId, gainPpm);
 }
 
+bool ApplicationRuntime::setMetronomeCompensation(
+    const Jam2MetronomeCompensationSettings& settings) noexcept
+{
+    return isNetworkRunning() && host_.submitMetronomeCompensation(settings);
+}
+
 void ApplicationRuntime::setTrackSyncEnabled(bool enabled) noexcept
 {
     track_sync_enabled_.store(enabled, std::memory_order_release);

@@ -2,3 +2,7 @@
 /libs/third_party/onnxruntime/**/*.dll filter=lfs diff=lfs merge=lfs -text
 /libs/third_party/onnxruntime/**/*.lib filter=lfs diff=lfs merge=lfs -text
 /libs/third_party/onnxruntime/**/*.dylib filter=lfs diff=lfs merge=lfs -text
+
+# Keep platform entry-point scripts directly executable by their native shells.
+*.cmd text eol=crlf
+*.sh text eol=lf

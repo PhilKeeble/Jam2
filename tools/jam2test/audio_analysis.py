@@ -1,4 +1,4 @@
-"""Offline WAV analysis for retained stress and benchmark artifacts."""
+"""Offline WAV analysis for benchmark and manually captured artifacts."""
 
 import json
 import math

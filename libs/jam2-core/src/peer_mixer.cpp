@@ -102,18 +102,24 @@ struct PeerMixer::Impl {
             timeline_recovery_pending = true;
         }
 
-        void recoverTimeline(std::size_t retain_frames) noexcept
+        void retainLiveTail(std::size_t retain_frames) noexcept
         {
-            if (!timeline_recovery_pending || late_frames_to_discard > 0 || queued == 0) {
-                return;
-            }
             const std::size_t dropped = queued > retain_frames ? queued - retain_frames : 0;
             read_index = (read_index + dropped) % queue.size();
             queued -= dropped;
             stats.late_after_release_frames += dropped;
             owner->stats.late_after_release_frames += dropped;
             stats.queue_depth_frames = queued;
+        }
+
+        bool recoverTimeline(std::size_t retain_frames) noexcept
+        {
+            if (!timeline_recovery_pending || late_frames_to_discard > 0 || queued == 0) {
+                return false;
+            }
+            retainLiveTail(retain_frames);
             timeline_recovery_pending = false;
+            return true;
         }
 
         std::int32_t pop() noexcept
@@ -523,8 +529,28 @@ struct PeerMixer::Impl {
             return;
         }
         const std::size_t recovery_tail = static_cast<std::size_t>(config.frames_per_block) * 2U;
+        bool timeline_recovered = false;
         for (auto& peer : peers) {
-            peer->recoverTimeline(recovery_tail);
+            timeline_recovered = peer->recoverTimeline(recovery_tail) || timeline_recovered;
+        }
+        if (timeline_recovered) {
+            // A deadline release advances the one shared output timeline.  If
+            // only the peer that missed that deadline discards its late tail,
+            // healthy peers can remain seconds behind and eventually fill
+            // their queues.  Rebase every active contributor to the same live
+            // tail whenever any source completes timeline recovery.
+            for (auto& peer : peers) {
+                if (peer->stats.active && peer->stats.contributing) {
+                    peer->retainLiveTail(recovery_tail);
+                }
+            }
+            // Recovery can leave one source with a partial block. Reusing an
+            // already-due deadline would immediately release that fragment,
+            // recreate the same missing-frame debt, and keep the source in a
+            // permanent discard/release loop. Give the aligned live tails one
+            // normal bounded prefill window before another incomplete release.
+            next_deadline_us = now_us + deadlineDelay();
+            consecutive_deadline_slots = 0;
         }
         updateOccupancy();
         if (stats.contributing_peers == 0) {

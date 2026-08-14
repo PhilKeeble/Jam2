@@ -1712,19 +1712,19 @@ ResearchDrumRenderResult renderResearchDrumVoices(
                 active.push_back(std::move(voice));
             }
             if (hasSecond) {
-                Voice voice = makeVoice(
+                Voice secondaryVoice = makeVoice(
                     *item.piece,
                     hit,
                     item.piece->secondSource,
                     secondGain,
                     totalFrames,
                     sampleRate);
-                if (voice.endFrame > frame) {
+                if (secondaryVoice.endFrame > frame) {
                     recordVoiceWork(
                         item.piece->secondSource,
-                        voice,
+                        secondaryVoice,
                         frame);
-                    active.push_back(std::move(voice));
+                    active.push_back(std::move(secondaryVoice));
                 }
             }
             if (item.piece->synthSource ==

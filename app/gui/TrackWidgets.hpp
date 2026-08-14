@@ -1,6 +1,7 @@
 #pragma once
 
 #include "GuiTheme.hpp"
+#include "GuiControlContract.hpp"
 #include "LooperProject.hpp"
 #include "SectionTimeline.hpp"
 
@@ -358,7 +359,7 @@ private:
     bool gridRunning_ = false;
 };
 
-class LooperLaneStackWidget : public QWidget {
+class LooperLaneStackWidget : public QWidget, public jam2::gui::GuiVirtualControlProvider {
 public:
     struct LaneView {
         LooperLane lane;
@@ -534,6 +535,221 @@ public:
         }
         updateGeometry();
         update();
+    }
+
+    QVector<jam2::gui::GuiVirtualControl> guiVirtualControls() const override
+    {
+        using jam2::gui::GuiControlAvailability;
+        using jam2::gui::makeGuiVirtualControl;
+        QVector<jam2::gui::GuiVirtualControl> controls;
+        controls.reserve(2 + lanes_.size() * 12);
+        controls.push_back(makeGuiVirtualControl(
+            QStringLiteral("looper.lane.add-empty"),
+            QStringLiteral("looper.lane-lifecycle"),
+            GuiControlAvailability::StateGated,
+            {QStringLiteral("click")},
+            QStringLiteral("looper.lane-toolbar"),
+            {{QStringLiteral("enabled"), !interactionsProtected_}}));
+        controls.push_back(makeGuiVirtualControl(
+            QStringLiteral("looper.wav.import"),
+            QStringLiteral("looper.wav-import"),
+            GuiControlAvailability::FileDialog,
+            {QStringLiteral("click")},
+            QStringLiteral("looper.lane-toolbar"),
+            {{QStringLiteral("enabled"), !interactionsProtected_}}));
+        for (int lane = 0; lane < lanes_.size(); ++lane) {
+            const LaneView& view = lanes_.at(lane);
+            const QString prefix = QStringLiteral("looper.lane.%1.").arg(lane);
+            const QVariantMap state{
+                {QStringLiteral("lane"), lane},
+                {QStringLiteral("selected"), lane == selectedLane_},
+                {QStringLiteral("armed"), lane == armedLane_},
+                {QStringLiteral("muted"), view.lane.muted},
+                {QStringLiteral("solo"), view.lane.solo},
+                {QStringLiteral("gain_db"), view.lane.gainDb},
+                {QStringLiteral("has_wav"), !view.assetPath.isEmpty()},
+                {QStringLiteral("enabled"), !interactionsProtected_},
+            };
+            const auto addClick = [&](const QString& suffix, const QString& contract) {
+                controls.push_back(makeGuiVirtualControl(
+                    prefix + suffix,
+                    contract,
+                    GuiControlAvailability::StateGated,
+                    {QStringLiteral("click")},
+                    QStringLiteral("looper.lane-action"),
+                    state));
+            };
+            addClick(QStringLiteral("select"), QStringLiteral("looper.lane-selection"));
+            addClick(QStringLiteral("mute"), QStringLiteral("looper.lane-mix"));
+            addClick(QStringLiteral("solo"), QStringLiteral("looper.lane-mix"));
+            controls.push_back(makeGuiVirtualControl(
+                prefix + QStringLiteral("arm"),
+                QStringLiteral("looper.lane-recording"),
+                GuiControlAvailability::Modal,
+                {QStringLiteral("click")},
+                QStringLiteral("looper.lane-action"),
+                state));
+            controls.push_back(makeGuiVirtualControl(
+                prefix + QStringLiteral("rename"),
+                QStringLiteral("looper.lane-rename"),
+                GuiControlAvailability::Modal,
+                {QStringLiteral("click")},
+                QStringLiteral("looper.lane-action"),
+                state));
+            controls.push_back(makeGuiVirtualControl(
+                prefix + QStringLiteral("remove"),
+                QStringLiteral("looper.lane-lifecycle"),
+                GuiControlAvailability::Modal,
+                {QStringLiteral("click")},
+                QStringLiteral("looper.lane-action"),
+                state));
+            controls.push_back(makeGuiVirtualControl(
+                prefix + QStringLiteral("gain"),
+                QStringLiteral("looper.lane-mix"),
+                GuiControlAvailability::StateGated,
+                {QStringLiteral("set-value")},
+                QStringLiteral("looper.lane-action"),
+                state));
+            controls.push_back(makeGuiVirtualControl(
+                prefix + QStringLiteral("wav.drop"),
+                QStringLiteral("looper.wav-import"),
+                GuiControlAvailability::FileDialog,
+                {QStringLiteral("drop-file")},
+                QStringLiteral("looper.wav-action"),
+                state));
+            if (view.sourceFrames > 0) {
+                controls.push_back(makeGuiVirtualControl(
+                    prefix + QStringLiteral("region"),
+                    QStringLiteral("looper.wav-region"),
+                    GuiControlAvailability::StateGated,
+                    {QStringLiteral("set-region")},
+                    QStringLiteral("looper.wav-action"),
+                    state));
+            }
+            if (!view.assetPath.isEmpty()) {
+                controls.push_back(makeGuiVirtualControl(
+                    prefix + QStringLiteral("wav.analyze"),
+                    QStringLiteral("looper.wav-analysis"),
+                    GuiControlAvailability::Modal,
+                    {QStringLiteral("click")},
+                    QStringLiteral("looper.wav-action"),
+                    state));
+                addClick(QStringLiteral("wav.reveal"), QStringLiteral("looper.wav-reveal"));
+                controls.push_back(makeGuiVirtualControl(
+                    prefix + QStringLiteral("wav.remove"),
+                    QStringLiteral("looper.wav-remove"),
+                    GuiControlAvailability::Modal,
+                    {QStringLiteral("click")},
+                    QStringLiteral("looper.wav-action"),
+                    state));
+            }
+        }
+        return controls;
+    }
+
+    bool invokeGuiVirtualControl(
+        const QString& id,
+        const QString& operation,
+        const QVariant& value,
+        QString& error) override
+    {
+        if (id == QStringLiteral("looper.lane.add-empty") ||
+            id == QStringLiteral("looper.wav.import")) {
+            if (operation != QStringLiteral("click")) {
+                error = QStringLiteral("looper toolbar target requires click");
+                return false;
+            }
+            if (interactionsProtected_) {
+                error = QStringLiteral("looper interactions are protected by shared recording");
+                return false;
+            }
+            if (id == QStringLiteral("looper.lane.add-empty")) {
+                if (onAddLane) onAddLane();
+            } else if (onAddWav) {
+                onAddWav();
+            }
+            return true;
+        }
+
+        const QStringList parts = id.split(QLatin1Char('.'));
+        bool laneOk = false;
+        const int lane = parts.size() >= 4 ? parts.at(2).toInt(&laneOk) : -1;
+        if (parts.size() < 4 || parts.at(0) != QStringLiteral("looper") ||
+            parts.at(1) != QStringLiteral("lane") || !laneOk || lane < 0 ||
+            lane >= lanes_.size()) {
+            error = QStringLiteral("looper virtual target is invalid or stale");
+            return false;
+        }
+        const QString action = parts.mid(3).join(QLatin1Char('.'));
+        if (action == QStringLiteral("select")) {
+            if (operation != QStringLiteral("click")) {
+                error = QStringLiteral("lane selection requires click");
+                return false;
+            }
+            selectLane(lane);
+            return true;
+        }
+        if (interactionsProtected_) {
+            error = QStringLiteral("looper interactions are protected by shared recording");
+            return false;
+        }
+        if (operation == QStringLiteral("click")) {
+            if (action == QStringLiteral("mute") && onMute) onMute(lane);
+            else if (action == QStringLiteral("solo") && onSolo) onSolo(lane);
+            else if (action == QStringLiteral("arm") && onArm) onArm(lane);
+            else if (action == QStringLiteral("rename") && onRename) onRename(lane);
+            else if (action == QStringLiteral("remove") && onRemove) onRemove(lane);
+            else if (action == QStringLiteral("wav.reveal") && onRevealWav) onRevealWav(lane);
+            else if (action == QStringLiteral("wav.remove") && onRemoveWav) onRemoveWav(lane);
+            else if (action == QStringLiteral("wav.analyze") && onAnalyzeWav) onAnalyzeWav(lane);
+            else {
+                error = QStringLiteral("looper click target is unavailable");
+                return false;
+            }
+            return true;
+        }
+        if (action == QStringLiteral("gain") && operation == QStringLiteral("set-value")) {
+            bool ok = false;
+            const double gain = value.toDouble(&ok);
+            if (!ok || !std::isfinite(gain) || gain < -60.0 || gain > 12.0) {
+                error = QStringLiteral("lane gain must be between -60 and 12 dB");
+                return false;
+            }
+            lanes_[lane].lane.gainDb = gain;
+            if (onGainChanged) onGainChanged(lane, gain);
+            update();
+            return true;
+        }
+        if (action == QStringLiteral("wav.drop") && operation == QStringLiteral("drop-file")) {
+            const QString path = value.toString();
+            if (path.isEmpty() || !onWavDropped) {
+                error = QStringLiteral("WAV drop requires a non-empty local path");
+                return false;
+            }
+            onWavDropped(lane, path);
+            return true;
+        }
+        if (action == QStringLiteral("region") && operation == QStringLiteral("set-region")) {
+            const QVariantMap region = value.toMap();
+            bool startOk = false;
+            bool sourceStartOk = false;
+            bool sourceEndOk = false;
+            const qint64 start = region.value(QStringLiteral("start_frame")).toLongLong(&startOk);
+            const qint64 sourceStartFrame =
+                region.value(QStringLiteral("source_start_frame")).toLongLong(&sourceStartOk);
+            const qint64 sourceEndFrame =
+                region.value(QStringLiteral("source_end_frame")).toLongLong(&sourceEndOk);
+            if (!startOk || !sourceStartOk || !sourceEndOk || start < 0 ||
+                sourceStartFrame < 0 || sourceEndFrame <= sourceStartFrame ||
+                sourceEndFrame > lanes_[lane].sourceFrames || !onRegionCommitted) {
+                error = QStringLiteral("WAV region bounds are invalid");
+                return false;
+            }
+            onRegionCommitted(lane, start, sourceStartFrame, sourceEndFrame);
+            return true;
+        }
+        error = QStringLiteral("operation is invalid for the looper virtual target");
+        return false;
     }
 
 protected:

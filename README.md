@@ -28,7 +28,7 @@ For LAN testing, use **No STUN** and a reachable LAN host/IP. For internet testi
 | [Profiles](docs/Profiles.md) | Current tested tuning profiles and what each numeric field does. |
 | [Diagnosing](docs/Diagnosing.md) | How to read Jam2 stats and troubleshoot network/audio issues. |
 | [Connection Test](docs/ConnectionTest.md) | Pre-flight UDP connectivity checks before running Jam2. |
-| [Validation](docs/Validation.md) | Deterministic framework and native post-build checks. |
-| [Stress Tests](docs/StressTests.md) | Targeted impairment, recovery, timing, and full-mesh regression runs. |
+| [Validation](docs/Validation.md) | Native C++/CTest suites and the full distribution gate. |
+| [Stress Tests](docs/StressTests.md) | Native impairment, recovery, timing, and four-peer regression runs. |
 | [Benchmark](docs/Benchmark.md) | Two-machine coordinator/agent measurements, artifacts, and analysis. |
 | [Licensing](docs/Licensing.md) | Third-party notices and current licensing notes. |

@@ -11,6 +11,7 @@
 #include <QDir>
 #include <QEvent>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QLabel>
 #include <QLayout>
@@ -232,8 +233,17 @@ FocusPreset focusPresetForKey(const QString& key)
     return {120.0, 12.0, 6.0};
 }
 
+QString& appReleaseRootOverride()
+{
+    static QString path;
+    return path;
+}
+
 QDir appReleaseDir()
 {
+    if (!appReleaseRootOverride().isEmpty()) {
+        return QDir(appReleaseRootOverride());
+    }
     QDir appDir(QCoreApplication::applicationDirPath());
 
     QDir bundleDir(appDir);
@@ -261,6 +271,23 @@ QDir appReleaseDir()
     }
 
     return appDir;
+}
+
+bool setAppReleaseRootForTesting(const QString& path, QString& error)
+{
+    error.clear();
+    const QFileInfo info(path);
+    if (!info.isAbsolute()) {
+        error = QStringLiteral("test storage root must be absolute");
+        return false;
+    }
+    const QString clean = QDir::cleanPath(info.absoluteFilePath());
+    if (clean.isEmpty() || !QDir().mkpath(clean)) {
+        error = QStringLiteral("test storage root could not be created");
+        return false;
+    }
+    appReleaseRootOverride() = clean;
+    return true;
 }
 
 QString appReleaseFilePath(const QString& folder, const QString& fileName)

@@ -5,6 +5,7 @@
 #include "ControllerLifecycleValidation.hpp"
 
 #include "AssetChunkProtocol.hpp"
+#include "ControlServer.hpp"
 #include "ControlProtocol.hpp"
 #include "SharedSessionController.hpp"
 
@@ -19,8 +20,10 @@
 
 #include <algorithm>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <thread>
+#include <vector>
 
 using jam2::control_protocol::TransportEvent;
 using jam2::control_protocol::TransportEventType;
@@ -91,6 +94,72 @@ bool pumpUntil(const std::function<bool()>& predicate, int timeoutMs)
     }
     QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
     return predicate();
+}
+
+bool readHandshakeFrame(
+    QTcpSocket& socket,
+    QJsonObject& message,
+    int timeoutMs = 1000)
+{
+    QByteArray buffer;
+    return pumpUntil([&] {
+        buffer += socket.readAll();
+        QByteArray probe = buffer;
+        QByteArray body;
+        QString error;
+        return jam2::control_protocol::takeFrame(probe, body, error) ==
+                jam2::control_protocol::TakeFrameResult::Ready &&
+            jam2::control_protocol::decodeHandshake(body, message, error);
+    }, timeoutMs);
+}
+
+bool connectRawAuthenticated(
+    QTcpSocket& socket,
+    quint16 port,
+    const QString& token,
+    QByteArray& clientToServerKey)
+{
+    socket.connectToHost(QHostAddress::LocalHost, port);
+    QJsonObject challenge;
+    if (!readHandshakeFrame(socket, challenge) ||
+        challenge.value(QStringLiteral("type")).toString() !=
+            QStringLiteral("hello.challenge")) {
+        return false;
+    }
+    const QString session = QStringLiteral("0102030405060708");
+    const QString endpoint = QStringLiteral("127.0.0.1:43001");
+    const QByteArray clientNonce = jam2::control_protocol::randomNonce();
+    const QByteArray masterKey = jam2::control_protocol::decodeHex(
+        QStringLiteral("000102030405060708090a0b0c0d0e0f"), 16);
+    const QByteArray transcript = jam2::control_protocol::makeTranscript(
+        session,
+        jam2::control_protocol::decodeHex(
+            challenge.value(QStringLiteral("server_nonce")).toString(), 16),
+        clientNonce,
+        token,
+        endpoint);
+    const QByteArray proof = jam2::control_protocol::keyedValue(
+        masterKey, QByteArrayLiteral("jam2-control-client-proof"), transcript).left(16);
+    const QByteArray proofFrame = jam2::control_protocol::encodeHandshake(QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("hello.proof")},
+        {QStringLiteral("version"), jam2::control_protocol::kControlProtocolVersion},
+        {QStringLiteral("session"), session},
+        {QStringLiteral("client_nonce"),
+            jam2::control_protocol::encodeHex(clientNonce)},
+        {QStringLiteral("proof"), jam2::control_protocol::encodeHex(proof)},
+        {QStringLiteral("peer_token"), token},
+        {QStringLiteral("udp_endpoint"), endpoint},
+        {QStringLiteral("channel"), QStringLiteral("control")},
+    });
+    if (proofFrame.isEmpty() || socket.write(proofFrame) != proofFrame.size()) return false;
+    QJsonObject response;
+    if (!readHandshakeFrame(socket, response) ||
+        response.value(QStringLiteral("type")).toString() != QStringLiteral("hello.ok")) {
+        return false;
+    }
+    clientToServerKey = jam2::control_protocol::keyedValue(
+        masterKey, QByteArrayLiteral("jam2-control-c2s"), transcript);
+    return clientToServerKey.size() == 32;
 }
 
 SharedSessionController::SessionContract contract()
@@ -226,10 +295,208 @@ QJsonObject jam2RunControllerLifecycleValidation(
             invalidContractCreator.snapshot().lifecycle == SharedSessionController::Lifecycle::Failed);
     invalidContractCreator.close();
 
+    const auto securityPort = unusedLoopbackPort();
+    ControlServer securityServer;
+    const bool securityListening = securityPort && securityServer.listen(
+        *securityPort,
+        QStringLiteral("0102030405060708"),
+        QStringLiteral("000102030405060708090a0b0c0d0e0f"));
+    check(QStringLiteral("controller.security-test-listener"), securityListening,
+        securityServer.errorString());
+
+    std::vector<std::unique_ptr<QTcpSocket>> pendingSockets;
+    if (securityListening) {
+        pendingSockets.reserve(
+            static_cast<std::size_t>(jam2::control_protocol::kMaxPendingPeers + 4));
+        for (int index = 0; index < jam2::control_protocol::kMaxPendingPeers + 4; ++index) {
+            auto socket = std::make_unique<QTcpSocket>();
+            socket->connectToHost(QHostAddress::LocalHost, *securityPort);
+            pendingSockets.push_back(std::move(socket));
+        }
+    }
+    const bool pendingCapObserved = securityListening && pumpUntil([&] {
+        const auto stats = securityServer.stats();
+        return stats.activeConnectionHighWater ==
+                static_cast<quint64>(jam2::control_protocol::kMaxPendingPeers) &&
+            stats.pendingCapRejects > 0 &&
+            stats.activeConnections <=
+                static_cast<quint64>(jam2::control_protocol::kMaxPendingPeers);
+    }, 1500);
+    const auto pendingCapStats = securityServer.stats();
+    check(QStringLiteral("controller.pending-authentication-work-is-bounded"),
+        pendingCapObserved &&
+            pendingCapStats.activeConnectionHighWater ==
+                static_cast<quint64>(jam2::control_protocol::kMaxPendingPeers),
+        QStringLiteral("active=%1 high_water=%2 cap_rejects=%3 accepted=%4")
+            .arg(pendingCapStats.activeConnections)
+            .arg(pendingCapStats.activeConnectionHighWater)
+            .arg(pendingCapStats.pendingCapRejects)
+            .arg(pendingCapStats.acceptedConnections));
+    for (const auto& socket : pendingSockets) socket->abort();
+    pendingSockets.clear();
+    const bool pendingDrained = securityListening && pumpUntil([&] {
+        return securityServer.stats().activeConnections == 0;
+    }, 1000);
+    check(QStringLiteral("controller.pending-authentication-cleanup-drains"), pendingDrained);
+
+    const quint64 authTimeoutsBefore = securityServer.stats().authenticationTimeouts;
+    QTcpSocket silentSocket;
+    QJsonObject silentChallenge;
+    if (securityListening) {
+        silentSocket.connectToHost(QHostAddress::LocalHost, *securityPort);
+        (void)readHandshakeFrame(silentSocket, silentChallenge);
+    }
+    const bool authenticationTimedOut = securityListening && pumpUntil([&] {
+        return securityServer.stats().authenticationTimeouts > authTimeoutsBefore &&
+            securityServer.stats().activeConnections == 0;
+    }, jam2::control_protocol::kAuthenticationDeadlineMs + 1000);
+    check(QStringLiteral("controller.silent-authentication-has-bounded-deadline"),
+        authenticationTimedOut);
+
+    const QString rawToken = QStringLiteral("00000000000000050000000000000005");
+    const quint64 frameTimeoutsBefore = securityServer.stats().frameTimeouts;
+    QTcpSocket incompleteSocket;
+    QByteArray incompleteKey;
+    const bool incompleteAuthenticated = securityListening && connectRawAuthenticated(
+        incompleteSocket, *securityPort, rawToken, incompleteKey);
+    if (incompleteAuthenticated) incompleteSocket.write(QByteArray(2, '\0'));
+    const bool incompleteTimedOut = incompleteAuthenticated && pumpUntil([&] {
+        return securityServer.stats().frameTimeouts > frameTimeoutsBefore &&
+            securityServer.stats().activeConnections == 0;
+    }, jam2::control_protocol::kIncompleteFrameDeadlineMs + 1000);
+    check(QStringLiteral("controller.incomplete-authenticated-frame-has-bounded-deadline"),
+        incompleteTimedOut);
+
+    const QString rejectedToken =
+        QStringLiteral("00000000000000060000000000000006");
+    QTcpSocket rejectedSocket;
+    QByteArray rejectedKey;
+    const bool rejectionPeerAuthenticated = securityListening &&
+        connectRawAuthenticated(
+            rejectedSocket, *securityPort, rejectedToken, rejectedKey);
+    const bool rejectionQueued = rejectionPeerAuthenticated &&
+        securityServer.rejectAuthenticatedPeer(
+            rejectedToken, QStringLiteral("Validation peer limit"));
+    const bool rejectedPeerClosed = rejectionQueued && pumpUntil([&] {
+        return securityServer.stats().activeConnections == 0;
+    }, 1000);
+    check(QStringLiteral("controller.authenticated-peer-rejection-is-delivered-and-closed"),
+        rejectionPeerAuthenticated && rejectionQueued && rejectedPeerClosed &&
+            securityServer.stats().authenticatedCapRejects == 1);
+
+    int deliveredRawMessages = 0;
+    securityServer.onMessage = [&](const QString&, const QJsonObject&) {
+        ++deliveredRawMessages;
+    };
+    const quint64 replayRejectsBefore = securityServer.stats().sequenceOrTagRejects;
+    QTcpSocket replaySocket;
+    QByteArray replayKey;
+    const bool replayAuthenticated = securityListening && connectRawAuthenticated(
+        replaySocket, *securityPort, rawToken, replayKey);
+    const QByteArray replayFrame = jam2::control_protocol::encodeAuthenticated(
+        QJsonObject{{QStringLiteral("type"), QStringLiteral("test.probe")}},
+        replayKey,
+        1);
+    if (replayAuthenticated && !replayFrame.isEmpty()) {
+        replaySocket.write(replayFrame + replayFrame);
+    }
+    const bool replayRejected = replayAuthenticated && pumpUntil([&] {
+        return deliveredRawMessages == 1 &&
+            securityServer.stats().sequenceOrTagRejects > replayRejectsBefore &&
+            securityServer.stats().activeConnections == 0;
+    }, 1000);
+    check(QStringLiteral("controller.authenticated-frame-replay-is-rejected-once"),
+        replayRejected);
+
+    const quint64 tagRejectsBefore = securityServer.stats().sequenceOrTagRejects;
+    QTcpSocket tagSocket;
+    QByteArray tagKey;
+    const bool tagAuthenticated = securityListening && connectRawAuthenticated(
+        tagSocket, *securityPort, rawToken, tagKey);
+    QByteArray invalidTagFrame = jam2::control_protocol::encodeAuthenticated(
+        QJsonObject{{QStringLiteral("type"), QStringLiteral("test.probe")}},
+        tagKey,
+        1);
+    if (!invalidTagFrame.isEmpty()) invalidTagFrame[invalidTagFrame.size() - 1] ^= 0x01;
+    if (tagAuthenticated && !invalidTagFrame.isEmpty()) tagSocket.write(invalidTagFrame);
+    const bool invalidTagRejected = tagAuthenticated && pumpUntil([&] {
+        return securityServer.stats().sequenceOrTagRejects > tagRejectsBefore &&
+            securityServer.stats().activeConnections == 0;
+    }, 1000);
+    check(QStringLiteral("controller.authenticated-frame-tag-corruption-is-rejected"),
+        invalidTagRejected && deliveredRawMessages == 1);
+
+    const quint64 frameRejectsBefore = securityServer.stats().frameRejects;
+    QTcpSocket oversizedSocket;
+    QJsonObject oversizedChallenge;
+    if (securityListening) {
+        oversizedSocket.connectToHost(QHostAddress::LocalHost, *securityPort);
+        if (readHandshakeFrame(oversizedSocket, oversizedChallenge)) {
+            QByteArray invalidLength(4, '\0');
+            invalidLength[0] = static_cast<char>(0x7f);
+            oversizedSocket.write(invalidLength);
+        }
+    }
+    const bool oversizedRejected = securityListening && pumpUntil([&] {
+        return securityServer.stats().frameRejects > frameRejectsBefore &&
+            securityServer.stats().activeConnections == 0;
+    }, 1000);
+    check(QStringLiteral("controller.oversized-frame-prefix-fails-closed"), oversizedRejected);
+
+    const quint64 authenticationRejectsBefore = securityServer.stats().authenticationRejects;
+    for (int attempt = 0;
+         securityListening &&
+             attempt < jam2::control_protocol::kMaxAuthenticationFailuresPerWindow;
+         ++attempt) {
+        QTcpSocket socket;
+        QJsonObject challenge;
+        socket.connectToHost(QHostAddress::LocalHost, *securityPort);
+        if (!readHandshakeFrame(socket, challenge)) break;
+        const QByteArray invalidProof = jam2::control_protocol::encodeHandshake(
+            QJsonObject{{QStringLiteral("type"), QStringLiteral("hello.proof")}});
+        socket.write(invalidProof);
+        const quint64 target = authenticationRejectsBefore +
+            static_cast<quint64>(attempt + 1);
+        if (!pumpUntil([&] {
+                return securityServer.stats().authenticationRejects >= target &&
+                    securityServer.stats().activeConnections == 0;
+            }, 500)) {
+            break;
+        }
+    }
+    QTcpSocket rateLimitedSocket;
+    if (securityListening) {
+        rateLimitedSocket.connectToHost(QHostAddress::LocalHost, *securityPort);
+    }
+    const bool authenticationRateLimited = securityListening && pumpUntil([&] {
+        return securityServer.stats().authenticationRateLimitRejects > 0 &&
+            securityServer.stats().activeConnections == 0;
+    }, 1000);
+    const auto finalSecurityStats = securityServer.stats();
+    check(QStringLiteral("controller.failed-key-work-is-rate-limited-and-bounded"),
+        authenticationRateLimited &&
+            finalSecurityStats.authenticationRejects - authenticationRejectsBefore ==
+                static_cast<quint64>(
+                    jam2::control_protocol::kMaxAuthenticationFailuresPerWindow) &&
+            finalSecurityStats.activeConnectionHighWater <=
+                static_cast<quint64>(jam2::control_protocol::kMaxPendingPeers) &&
+            finalSecurityStats.maxBufferedInputBytes <=
+                static_cast<quint64>(jam2::control_protocol::kMaxJsonBytes +
+                    jam2::control_protocol::kAuthenticatedHeaderBytes + 4));
+    securityServer.close();
+
     SharedSessionController creator;
     EventCapture creatorCapture;
+    int creatorPeerDisconnectCallbacks = 0;
+    int creatorAssetDisconnectCallbacks = 0;
     creator.onTransportEvent = [&](const TransportEvent& event, bool) {
         creatorCapture.event(event);
+    };
+    creator.onPeerDisconnected = [&](const QString&) {
+        ++creatorPeerDisconnectCallbacks;
+    };
+    creator.onAssetDisconnected = [&](const QString&) {
+        ++creatorAssetDisconnectCallbacks;
     };
     auto primaryCreatorConfig = sessionPort
         ? creatorConfig(*sessionPort) : SharedSessionController::CreatorConfig{};
@@ -395,6 +662,39 @@ QJsonObject jam2RunControllerLifecycleValidation(
     }, 1000);
     check(QStringLiteral("controller.heartbeat-authenticated-and-acknowledged"),
         heartbeatObserved && joiner.snapshot().lastHeartbeatAgeMs >= 0);
+
+    const QByteArray controlBinary("control-binary", 14);
+    QByteArray creatorControlBinary;
+    QByteArray joinerControlBinary;
+    QString controlBinarySource;
+    creator.onBinaryMessage =
+        [&](const QString& source, const QByteArray& payload) {
+            controlBinarySource = source;
+            creatorControlBinary = payload;
+        };
+    joiner.onBinaryMessage =
+        [&](const QString&, const QByteArray& payload) {
+            joinerControlBinary = payload;
+        };
+    const bool controlQueuesReady = joined && creator.isConnected() &&
+        joiner.isConnected() &&
+        creator.canQueueTo(joiner.snapshot().localToken, controlBinary.size()) &&
+        joiner.canQueueTo(QString{}, controlBinary.size());
+    const bool joinerControlSent = controlQueuesReady &&
+        joiner.sendBinaryTo(QString{}, controlBinary);
+    const bool creatorControlReceived = joinerControlSent && pumpUntil([&] {
+        return creatorControlBinary == controlBinary &&
+            controlBinarySource == joiner.snapshot().localToken;
+    }, 1000);
+    const bool creatorControlSent = creatorControlReceived &&
+        creator.sendBinaryTo(joiner.snapshot().localToken, controlBinary);
+    const bool joinerControlReceived = creatorControlSent && pumpUntil([&] {
+        return joinerControlBinary == controlBinary;
+    }, 1000);
+    const auto assetClientDiagnostics = joiner.assetClientStats();
+    check(QStringLiteral("controller.authenticated-control-binary-roundtrip"),
+        controlQueuesReady && creatorControlReceived && joinerControlReceived &&
+            assetClientDiagnostics.framesSent > 0);
 
     const QByteArray binaryAsset = jam2::application::asset_chunk::encode({
         QString(64, QLatin1Char('a')), 0, 0, QByteArray("binary-asset", 12)});
@@ -578,6 +878,9 @@ QJsonObject jam2RunControllerLifecycleValidation(
 
     const QString joinerToken = joiner.snapshot().localToken;
     const quint64 revisionBeforeAutoReconnect = joiner.snapshot().membershipRevision;
+    const auto statsBeforeAutoReconnect = creator.serverStats();
+    const int peerDisconnectsBeforeAutoReconnect = creatorPeerDisconnectCallbacks;
+    const int assetDisconnectsBeforeAutoReconnect = creatorAssetDisconnectCallbacks;
     bool autoReconnected = false;
     if (joined && creator.sendTo(joinerToken, QJsonObject{
             {QStringLiteral("type"), QStringLiteral("debug.lifecycle.disconnect")}}, true)) {
@@ -593,6 +896,39 @@ QJsonObject jam2RunControllerLifecycleValidation(
             joinerCapture.maxReconnectAttempts >= 1 && joiner.snapshot().reconnectAttempts == 0 &&
             joiner.clientStats().completedConnections >= 2 &&
             joiner.clientStats().disconnectedConnections >= 1);
+
+    creatorBinary.clear();
+    joinerBinary.clear();
+    binarySource.clear();
+    const bool sameTokenAssetReauthenticated = autoReconnected && pumpUntil([&] {
+        return creator.serverStats().assetActiveConnections == 1 &&
+            creator.serverStats().assetAcceptedConnections >
+                statsBeforeAutoReconnect.assetAcceptedConnections &&
+            joiner.canQueueAssetTo(QString{}, 1024);
+    }, 1500);
+    const bool postReconnectUploadQueued = sameTokenAssetReauthenticated &&
+        joiner.sendAssetBinaryTo(QString{}, binaryAsset);
+    const bool postReconnectUploadReceived = postReconnectUploadQueued && pumpUntil([&] {
+        return creatorBinary == binaryAsset && binarySource == joinerToken;
+    }, 1000);
+    const bool postReconnectDownloadQueued = postReconnectUploadReceived &&
+        creator.sendAssetBinaryTo(joinerToken, binaryAsset);
+    const bool postReconnectDownloadReceived = postReconnectDownloadQueued && pumpUntil([&] {
+        return joinerBinary == binaryAsset;
+    }, 1000);
+    const auto statsAfterAutoReconnect = creator.serverStats();
+    check(QStringLiteral(
+        "controller.same-token-control-disconnect-removes-and-reauthenticates-asset"),
+        postReconnectDownloadReceived &&
+            creatorPeerDisconnectCallbacks == peerDisconnectsBeforeAutoReconnect + 1 &&
+            creatorAssetDisconnectCallbacks == assetDisconnectsBeforeAutoReconnect + 1 &&
+            statsAfterAutoReconnect.assetDisconnectedConnections ==
+                statsBeforeAutoReconnect.assetDisconnectedConnections + 1 &&
+            statsAfterAutoReconnect.assetActiveConnections == 1 &&
+            statsAfterAutoReconnect.authenticationRejects ==
+                statsBeforeAutoReconnect.authenticationRejects &&
+            statsAfterAutoReconnect.authenticationRateLimitRejects ==
+                statsBeforeAutoReconnect.authenticationRateLimitRejects);
 
     const quint64 revisionBeforeRefresh = joiner.snapshot().membershipRevision;
     bool manualRefreshReconnected = false;

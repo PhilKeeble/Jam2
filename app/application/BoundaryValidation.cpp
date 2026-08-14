@@ -64,9 +64,11 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <functional>
 #include <limits>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -541,6 +543,15 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             QStringLiteral("jam2-asset-validation-") +
             QUuid::createUuid().toString(QUuid::WithoutBraces));
         const bool folderReady = QDir().mkpath(folder);
+        AssetTransferValidationContext adapterProbe(folder);
+        const bool adapterSurfaceReady =
+            adapterProbe.dispatchContext() == &adapterProbe &&
+            adapterProbe.assetPathForSend(QStringLiteral("unused")).isEmpty() &&
+            adapterProbe.canQueueAssetControl(QStringLiteral("peer-a"), 1) &&
+            adapterProbe.sendAssetBinary(QStringLiteral("peer-a"), QByteArray("x"));
+        adapterProbe.abandonIncomingAsset(QStringLiteral("unused"));
+        record(QStringLiteral("asset-transfer.validation-adapter-surface"),
+            adapterSurfaceReady && adapterProbe.abandoned == 1 && !adapterProbe.active);
         AssetTransferValidationContext context(folder);
         const QByteArray wav = minimalPcm16Wav();
         context.expectedHash = QString::fromLatin1(
@@ -7206,6 +7217,42 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             merged.banks().at(0).lanes.at(0).muted);
     }
     {
+        LooperProject local;
+        LooperLane withWav;
+        withWav.id = QStringLiteral("remove-wav-keep-lane");
+        withWav.assetHash = QString(64, QLatin1Char('c'));
+        withWav.assetPath = QStringLiteral("received/remove-me.wav");
+        withWav.name = QStringLiteral("Keep this track");
+        withWav.sampleRate = 48000;
+        withWav.sourceFrames = 96000;
+        withWav.gainDb = -9.0;
+        withWav.solo = true;
+        const bool localReady = local.appendLane(0, withWav);
+
+        LooperProject authoritative;
+        LooperLane withoutWav = withWav;
+        withoutWav.assetHash.clear();
+        withoutWav.assetPath.clear();
+        withoutWav.sampleRate = 0;
+        withoutWav.sourceFrames = 0;
+        withoutWav.gainDb = 0.0;
+        withoutWav.solo = false;
+        const bool remoteReady = authoritative.appendLane(0, withoutWav);
+        QJsonObject song{{QStringLiteral("looper"), authoritative.toJson(true)}};
+        const int preserved = mergeSynchronizedLooperLanes(song, local);
+        LooperProject merged;
+        const bool mergedReady = merged.loadJson(song.value(QStringLiteral("looper")).toObject());
+        const LooperLane mergedLane = mergedReady && !merged.banks().at(0).lanes.isEmpty()
+            ? merged.banks().at(0).lanes.at(0) : LooperLane{};
+        record(QStringLiteral("track-sync.wav-removal-keeps-lane-without-cloning-old-asset"),
+            localReady && remoteReady && preserved == 0 && mergedReady &&
+            merged.banks().at(0).lanes.size() == 1 &&
+            mergedLane.id == withWav.id && mergedLane.name == withWav.name &&
+            mergedLane.assetHash.isEmpty() && mergedLane.assetPath.isEmpty() &&
+            mergedLane.sampleRate == 0 && mergedLane.sourceFrames == 0 &&
+            std::abs(mergedLane.gainDb + 9.0) < 0.000001 && mergedLane.solo);
+    }
+    {
         LooperProject base;
         LooperLane edited;
         edited.id = QStringLiteral("edited-lane");
@@ -7392,21 +7439,29 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
     {
         PlaybackGrid grid;
         grid.setPattern(60.0, 4, 1, 1);
-        grid.updateEngine(200, 200, 100, 0, 100, true);
-        grid.updateEngine(400, 400, 100, 0, 100, true);
+        grid.updateEngine(96000, 96000, 48000, 0, 48000, true);
+        grid.updateEngine(192000, 192000, 48000, 0, 48000, true);
         const PlaybackGrid::Position advanced = grid.position();
         record(QStringLiteral("transport-actions-do-not-replace-continuous-grid-epoch"),
-            advanced.running && advanced.epochFrame == 100 &&
+            advanced.running && advanced.epochFrame == 48000 &&
             advanced.absoluteBeat >= 3);
     }
     {
         PlaybackGrid grid;
         grid.setPattern(60.0, 6, 1, 3);
-        grid.updateEngine(100, 100, 0, 0, 100, true);
+        grid.updateEngine(48000, 48000, 0, 0, 48000, true);
         const PlaybackGrid::Position position = grid.position();
         record(QStringLiteral("playback-grid.tempo-pulse-controls-written-unit-duration"),
             position.absoluteBeat == 3 &&
             std::abs(position.secondsPerBeat - (1.0 / 3.0)) < 0.000001);
+    }
+    {
+        PlaybackGrid grid;
+        grid.updateEngine(400, 400, 100, 0, 100, true);
+        const PlaybackGrid::Position rejected = grid.position();
+        record(QStringLiteral("playback-grid.rejects-unsupported-audio-sample-rate"),
+            !rejected.engineAnchored && !rejected.running &&
+            rejected.sampleRate == 0);
     }
     {
         record(QStringLiteral("metronome.remote-settings-are-presentation-only"),
@@ -7634,7 +7689,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
     {
         ApplicationRuntime runtime;
         TrackWorkspaceController workspace(runtime);
-        workspace.playPreparedMixWhenReady = true;
+        workspace.preparedMixLifecycle.setPlayWhenReady(true);
         workspace.publishStoppedTrackStateWhenApplied = true;
         workspace.pendingSongTrackRestart = true;
         workspace.trackController.requestPlayback(true, 12);
@@ -7642,7 +7697,7 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         workspace.cancelPendingTrackPlayback();
 
         record(QStringLiteral("practice.generate-cancels-track-playback-and-restarts"),
-            !workspace.playPreparedMixWhenReady &&
+            !workspace.preparedMixLifecycle.playWhenReady() &&
             !workspace.publishStoppedTrackStateWhenApplied &&
             !workspace.pendingSongTrackRestart &&
             !workspace.trackController.playback().requestedPlaying);
@@ -7794,6 +7849,78 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             peer11 != updates.cend() && peer11->gain_ppm == 750000 &&
             peer22 != updates.cend() && peer22->gain_ppm == 1250000 &&
             peerGains.takePeerGains().empty());
+    }
+    {
+        Jam2RuntimeHost compensation;
+        const Jam2MetronomeCompensationSettings first{100.0, 200.0, 3.0, 50.0};
+        const Jam2MetronomeCompensationSettings latest{125.0, 275.0, 4.5, 65.0};
+        Jam2MetronomeCompensationSettings invalid = first;
+        invalid.deadband_ms = std::numeric_limits<double>::quiet_NaN();
+        const bool accepted =
+            !compensation.submitMetronomeCompensation(invalid) &&
+            compensation.submitMetronomeCompensation(first) &&
+            compensation.submitMetronomeCompensation(latest);
+        const auto update = compensation.takeMetronomeCompensation();
+        record(QStringLiteral("metronome-compensation.latest-update-is-atomic"),
+            accepted && update && *update == latest &&
+            !compensation.takeMetronomeCompensation());
+        (void)compensation.submitMetronomeCompensation(first);
+        compensation.reset();
+        record(QStringLiteral("metronome-compensation.reset-discards-update"),
+            !compensation.takeMetronomeCompensation());
+    }
+    {
+        const Jam2MetronomeCompensationSettings immediate{1000.0, 0.0, 1.0, 0.0};
+        const bool deadbandHolds =
+            jam2_next_metronome_compensation_offset(
+                1000, 0, 1047, 10.0, 48000.0, immediate) == 1000;
+        const bool outsideDeadbandMoves =
+            jam2_next_metronome_compensation_offset(
+                1000, 0, 1049, 10.0, 48000.0, immediate) == 1049;
+        record(QStringLiteral("metronome-compensation.deadband-holds-small-errors"),
+            deadbandHolds && outsideDeadbandMoves);
+
+        const Jam2MetronomeCompensationSettings smoothed{1000.0, 100.0, 0.0, 0.0};
+        record(QStringLiteral("metronome-compensation.smoothing-controls-step"),
+            jam2_next_metronome_compensation_offset(
+                0, 0, 4800, 10.0, 48000.0, smoothed) == 480);
+
+        const Jam2MetronomeCompensationSettings slewLimited{1000.0, 0.0, 0.0, 40.0};
+        record(QStringLiteral("metronome-compensation.slew-bounds-both-directions"),
+            jam2_next_metronome_compensation_offset(
+                0, 0, 4800, 10.0, 48000.0, slewLimited) == 19 &&
+            jam2_next_metronome_compensation_offset(
+                0, 0, -4800, 10.0, 48000.0, slewLimited) == -19);
+
+        const Jam2MetronomeCompensationSettings maximumLimited{10.0, 0.0, 0.0, 0.0};
+        record(QStringLiteral("metronome-compensation.maximum-bounds-target"),
+            jam2_next_metronome_compensation_offset(
+                100, 100, 100000, 10.0, 48000.0, maximumLimited) == 580 &&
+            jam2_next_metronome_compensation_offset(
+                100, 100, -100000, 10.0, 48000.0, maximumLimited) == -380);
+    }
+    {
+        const std::array<const char*, 4> fields{{
+            "--metronome-compensation-max-ms",
+            "--metronome-compensation-smoothing-ms",
+            "--metronome-compensation-deadband-ms",
+            "--metronome-compensation-slew-ms-per-sec",
+        }};
+        bool rejectedAll = true;
+        for (const char* field : fields) {
+            std::vector<std::string> storage{"jam2", field, "nan"};
+            std::vector<char*> arguments;
+            arguments.reserve(storage.size());
+            for (std::string& value : storage) arguments.push_back(value.data());
+            try {
+                (void)jam2_parse_runtime_options(
+                    static_cast<int>(arguments.size()), arguments.data(), 1);
+                rejectedAll = false;
+            } catch (const std::exception&) {
+            }
+        }
+        record(QStringLiteral("metronome-compensation.cli-rejects-non-finite-values"),
+            rejectedAll);
     }
     {
         jam2::audio::PreparedTrackSource source(4);
@@ -8319,6 +8446,9 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             config.audio_buffer_frames = 64;
             config.metronome_enabled = true;
             config.metronome_level_ppm = 1000000;
+            config.test_input = jam2::EngineTestInput::Tone440;
+            config.local_monitor_enabled = true;
+            config.local_monitor_level_ppm = 1000000;
             config.output_level_ppm = 0;
             engine.start(config);
             engineStarted = true;

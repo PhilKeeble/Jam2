@@ -10,8 +10,6 @@ from pathlib import Path
 
 
 FAMILY_DIRS = {
-    "validate": "validate_logs",
-    "stress": "stress_logs",
     "benchmark": "benchmark_logs",
     "connectivity": "connectivity_logs",
     "fuzz": "fuzz_logs",

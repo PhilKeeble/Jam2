@@ -1,4 +1,5 @@
 #include "CuratedIdeaDialog.hpp"
+#include "GuiControlContract.hpp"
 
 #include <QAbstractItemView>
 #include <QButtonGroup>
@@ -129,6 +130,24 @@ std::optional<CuratedIdeaSelection> askForCuratedIdea(
         QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
     buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Use Groove"));
     buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+    const auto registerCatalogControl = [](QObject& control, const char* id) {
+        jam2::gui::registerGuiControl(
+            control,
+            QStringLiteral("idea.catalog-dialog.") + QString::fromLatin1(id),
+            QStringLiteral("idea.catalog"),
+            jam2::gui::GuiControlAvailability::Modal,
+            QStringLiteral("idea.catalog-dialog"));
+    };
+    registerCatalogControl(*style, "style");
+    registerCatalogControl(*profile, "profile");
+    registerCatalogControl(*list, "catalog");
+    registerCatalogControl(*target, "target-section");
+    registerCatalogControl(*useGrooveTiming, "use-groove-timing");
+    registerCatalogControl(*keepTiming, "keep-section-timing");
+    registerCatalogControl(*length, "length");
+    registerCatalogControl(*previewButton, "preview");
+    registerCatalogControl(*buttons->button(QDialogButtonBox::Ok), "accept");
+    registerCatalogControl(*buttons->button(QDialogButtonBox::Cancel), "cancel");
 
     bool previewPlaying = false;
     int selectedCatalogIndex = -1;

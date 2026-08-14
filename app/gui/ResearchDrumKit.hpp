@@ -159,7 +159,6 @@ double researchDrumTailSeconds(
     const QString& articulation);
 double researchDrumSample(
     const ResearchDrumPiece& piece,
-    const QString& laneId,
     const QString& articulation,
     int velocity,
     std::uint32_t seed,

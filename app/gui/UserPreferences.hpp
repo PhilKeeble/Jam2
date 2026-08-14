@@ -240,4 +240,5 @@ public:
     static UserPreferences load();
     static void save(const UserPreferences& preferences);
     static QString filePath();
+    static bool setFilePathForTesting(const QString& path, QString& error);
 };

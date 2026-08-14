@@ -48,9 +48,11 @@ private:
     void confirmCancelTask();
     void refreshSavedResults();
     void acceptJobResult(const QJsonObject& result);
-    void loadFullAnalysis(const QString& convertedSong);
+    bool loadFullAnalysis(const QString& convertedSong);
     void refreshResultsUi();
     QString analysisSourceRoot() const;
+    bool serviceTaskMatchesSource() const;
+    static bool isCompleteConvertedSong(const QString& convertedSong);
     static QJsonObject readJson(const QString& path);
 
     JamTasterService& service_;

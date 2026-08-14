@@ -8,6 +8,7 @@
 #include "SharedSessionController.hpp"
 
 #include "common.hpp"
+#include "transport_timing.hpp"
 #include "tuning_profile.hpp"
 #include "udp_socket.hpp"
 
@@ -478,14 +479,15 @@ private:
         }
         if (type == QStringLiteral("snapshot")) {
             static const std::set<QString> fields{
-                QStringLiteral("format"), QStringLiteral("type"), QStringLiteral("id")};
+                QStringLiteral("format"), QStringLiteral("type"), QStringLiteral("id"),
+                QStringLiteral("delay_frames"), QStringLiteral("apply_frame")};
             QJsonObject action = frame;
             action.remove(QStringLiteral("format"));
             QString validationError;
             bool valid = jam2ValidateDebugAction(action, validationError);
             for (auto it = frame.begin(); it != frame.end(); ++it) valid &= fields.contains(it.key());
             if (valid) {
-                emitAutomationSnapshot(frame.value(QStringLiteral("id")).toString());
+                scheduleControllerAction(frame, false, true);
                 return;
             }
         }
@@ -516,8 +518,12 @@ private:
             return static_cast<std::uint64_t>(action.value(QStringLiteral("apply_frame")).toDouble());
         }
         if (action.contains(QStringLiteral("delay_frames"))) {
-            return runtime_.engineSnapshot().engine_frame +
-                static_cast<std::uint64_t>(action.value(QStringLiteral("delay_frames")).toDouble());
+            const std::uint64_t current = runtime_.engineSnapshot().engine_frame;
+            const std::uint64_t delay = static_cast<std::uint64_t>(
+                action.value(QStringLiteral("delay_frames")).toDouble());
+            return current > (std::numeric_limits<std::uint64_t>::max)() - delay
+                ? (std::numeric_limits<std::uint64_t>::max)()
+                : current + delay;
         }
         return 0;
     }
@@ -629,26 +635,64 @@ private:
             const int countIn = action.value(QStringLiteral("count_in_bars"))
                 .toInt(type == QStringLiteral("track.record-start") ? 1 : 0);
             valid = countIn >= 0 && countIn <= 8;
-            const std::uint64_t transportFrame = target == 0
-                ? nextBarTarget(snapshot, countIn)
-                : target;
+            const auto schedule = target == 0
+                ? jam2::next_bar_transport_schedule(
+                    snapshot.sample_rate,
+                    snapshot.metronome_pattern,
+                    snapshot.engine_frame,
+                    snapshot.metronome_render_offset_frames,
+                    snapshot.metronome_epoch_valid,
+                    snapshot.metronome_epoch_frame,
+                    countIn)
+                : std::optional<jam2::QuantizedTransportSchedule>{
+                    jam2::QuantizedTransportSchedule{
+                        target,
+                        target,
+                        jam2::transport_musical_frame_from_raw(
+                            target,
+                            snapshot.metronome_render_offset_frames)}};
+            valid = valid && schedule.has_value();
+            if (!valid) {
+                automationCommandRejects_++;
+                emitAutomation(QStringLiteral("command_rejected"), {
+                    {QStringLiteral("id"), id},
+                    {QStringLiteral("reason"),
+                        QStringLiteral("invalid transport grid schedule")},
+                });
+                return;
+            }
+            const std::uint64_t transportFrame = schedule->target_raw_frame;
+            // A generated grid schedule is already a future intent. Submit it
+            // immediately so the engine can expose the count-in and the mesh
+            // can advertise it before the first countdown beat. An explicit
+            // automation frame retains its established deferred semantics.
+            const std::uint64_t scheduleApplyFrame = target == 0
+                ? 0ULL
+                : schedule->countdown_start_raw_frame;
             jam2::EngineCommand seek;
             seek.type = jam2::EngineCommandType::PreparedSeek;
             seek.frame = transportFrame;
             jam2::EngineCommand play;
             play.type = jam2::EngineCommandType::PreparedPlay;
             play.frame = transportFrame;
-            if (valid && !submitAutomationCommand(seek, id + QStringLiteral("/seek"), transportFrame)) return;
-            if (valid && !submitAutomationCommand(play, id + QStringLiteral("/play"), transportFrame)) return;
+            if (!submitAutomationCommand(
+                    seek,
+                    id + QStringLiteral("/seek"),
+                    scheduleApplyFrame)) return;
+            if (!submitAutomationCommand(
+                    play,
+                    id + QStringLiteral("/play"),
+                    scheduleApplyFrame)) return;
             command.type = jam2::EngineCommandType::ScheduleTransport;
             command.transport_action = type == QStringLiteral("track.record-start")
                 ? jam2::EngineTransportAction::RecordStart
                 : jam2::EngineTransportAction::TrackRestart;
             command.transport_target_frame = transportFrame;
-            command.transport_musical_frame = transportFrame;
-            command.transport_countdown_start_frame = transportFrame;
-            if (valid && trackSyncEnabled_) {
-                (void)submitAutomationCommand(command, id, transportFrame);
+            command.transport_musical_frame = schedule->target_musical_frame;
+            command.transport_countdown_start_frame =
+                schedule->countdown_start_raw_frame;
+            if (trackSyncEnabled_) {
+                (void)submitAutomationCommand(command, id, scheduleApplyFrame);
             }
             return;
         } else if (type == QStringLiteral("recording.start")) {
@@ -767,6 +811,29 @@ private:
             {QStringLiteral("bpm"), snapshot.metronome_pattern.bpm},
             {QStringLiteral("remote_level_ppm"), snapshot.remote_level_ppm},
             {QStringLiteral("output_level_ppm"), snapshot.output_level_ppm},
+            {QStringLiteral("metronome_epoch_valid"),
+                snapshot.metronome_epoch_valid},
+            {QStringLiteral("metronome_epoch_frame"),
+                static_cast<qint64>(snapshot.metronome_epoch_frame)},
+            {QStringLiteral("metronome_render_offset_frames"),
+                static_cast<qint64>(snapshot.metronome_render_offset_frames)},
+            {QStringLiteral("transport_action"),
+                static_cast<int>(snapshot.transport_action)},
+            {QStringLiteral("transport_pending"), snapshot.transport_pending},
+            {QStringLiteral("transport_target_frame"),
+                static_cast<qint64>(snapshot.transport_target_frame)},
+            {QStringLiteral("transport_musical_frame"),
+                static_cast<qint64>(snapshot.transport_musical_frame)},
+            {QStringLiteral("transport_countdown_start_frame"),
+                static_cast<qint64>(snapshot.transport_countdown_start_frame)},
+            {QStringLiteral("recording_count_in_active"),
+                snapshot.recording_count_in_active},
+            {QStringLiteral("playback_count_in_active"),
+                snapshot.playback_count_in_active},
+            {QStringLiteral("count_in_start_frame"),
+                static_cast<qint64>(snapshot.count_in_start_frame)},
+            {QStringLiteral("count_in_target_frame"),
+                static_cast<qint64>(snapshot.count_in_target_frame)},
             {QStringLiteral("track_sync"), trackSyncEnabled_},
             {QStringLiteral("network_running"), runtime_.isNetworkRunning()},
             {QStringLiteral("remote_peer_count"), network.remotePeerCount},
@@ -791,51 +858,6 @@ private:
             {QStringLiteral("applied_frame"), static_cast<qint64>(event.applied_frame)},
             {QStringLiteral("difference_frames"), difference},
         });
-    }
-
-    std::uint64_t nextBarTarget(
-        const jam2::EngineSnapshot& snapshot,
-        int extraBars = 0) const
-    {
-        const auto pattern = jam2::metronome::sanitize(snapshot.metronome_pattern);
-        const int sampleRate = std::max(1, static_cast<int>(std::llround(snapshot.sample_rate)));
-        const std::uint64_t stepFrames = jam2::metronome::step_interval_samples(
-            static_cast<double>(sampleRate),
-            pattern.bpm,
-            pattern.division,
-            pattern.tempo_pulse_units);
-        const std::uint64_t barFrames = std::max<std::uint64_t>(
-            1,
-            stepFrames * static_cast<std::uint64_t>(pattern.division) *
-                static_cast<std::uint64_t>(pattern.beats_per_bar));
-        const auto musicalFromRaw = [](std::uint64_t raw, std::int64_t offset) {
-            if (offset < 0) {
-                const auto magnitude = static_cast<std::uint64_t>(-offset);
-                return raw > magnitude ? raw - magnitude : 0ULL;
-            }
-            return raw + static_cast<std::uint64_t>(offset);
-        };
-        const auto rawFromMusical = [](std::uint64_t musical, std::int64_t offset) {
-            if (offset >= 0) {
-                const auto magnitude = static_cast<std::uint64_t>(offset);
-                return musical > magnitude ? musical - magnitude : 0ULL;
-            }
-            return musical + static_cast<std::uint64_t>(-offset);
-        };
-        const std::uint64_t musicalNow = musicalFromRaw(
-            snapshot.engine_frame, snapshot.metronome_render_offset_frames);
-        const std::uint64_t epoch = snapshot.metronome_epoch_valid
-            ? snapshot.metronome_epoch_frame
-            : 0ULL;
-        const std::uint64_t elapsed = musicalNow >= epoch ? musicalNow - epoch : 0ULL;
-        std::uint64_t nextMusical = epoch + (elapsed / barFrames + 1ULL) * barFrames;
-        const std::uint64_t minimumLead = static_cast<std::uint64_t>(sampleRate) / 5ULL;
-        if (rawFromMusical(nextMusical, snapshot.metronome_render_offset_frames) <=
-            snapshot.engine_frame + minimumLead) {
-            nextMusical += barFrames;
-        }
-        nextMusical += static_cast<std::uint64_t>(std::max(0, extraBars)) * barFrames;
-        return rawFromMusical(nextMusical, snapshot.metronome_render_offset_frames);
     }
 
     void writeRecordingSidecar()

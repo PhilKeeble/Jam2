@@ -53,19 +53,44 @@ public:
     void queueSend(const QString& hash, const QString& targetPeerToken);
     void continueSend();
     void cancel();
+    void discardOutgoingHash(const QString& hash);
     void peerDisconnected(const QString& peerToken);
+    void discardIncoming();
     void resetIncoming();
     void receiveStart(const QJsonObject& message, const QString& sourcePeerToken);
     void receiveAck(const QJsonObject& message, const QString& sourcePeerToken);
     void receiveChunk(const QByteArray& payload, const QString& sourcePeerToken);
     void receiveDone(const QJsonObject& message, const QString& sourcePeerToken);
 
+    // Private GUI-agent controls used only by native real-process tests. They
+    // delay a local lifecycle boundary or suppress a bounded number of outgoing
+    // starts before they are emitted; neither changes a wire frame or decoder.
+    bool armAutomationPause(
+        const QString& point,
+        int milliseconds,
+        QString& error);
+    bool armAutomationDropOutgoingStarts(int count, QString& error);
+    void clearAutomationPause();
+    QJsonObject automationSnapshot() const;
+    bool incomingTransferActive() const noexcept;
+
 private:
+    enum class AutomationPausePoint {
+        None,
+        OutgoingValidation,
+        IncomingChunk,
+        IncomingFinalize,
+    };
+
     struct IncomingWorkerState;
     void scheduleIncomingWrite();
     void finalizeIncoming();
     void clearIncoming(bool abandonExpected);
     void resetOutgoing();
+    bool pauseForAutomation(
+        AutomationPausePoint point,
+        std::function<void()> resume);
+    static QString automationPausePointName(AutomationPausePoint point);
 
     AssetTransferContext& context_;
 
@@ -97,4 +122,10 @@ private:
     QElapsedTimer outgoingLooperAssetProgress_;
     QTimer outgoingLooperAssetTimer_;
     quint64 outgoingLooperAssetGeneration_ = 0;
+
+    AutomationPausePoint automationPauseArmed_ = AutomationPausePoint::None;
+    AutomationPausePoint automationPauseActive_ = AutomationPausePoint::None;
+    int automationPauseMilliseconds_ = 0;
+    int automationDropOutgoingStartsRemaining_ = 0;
+    quint64 automationDroppedOutgoingStarts_ = 0;
 };

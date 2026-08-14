@@ -57,7 +57,7 @@ public:
     bool canQueueAssetTo(const QString& token, qint64 additionalBytes) const;
     bool hasPeer() const;
     QString errorString() const;
-    Stats stats() const { return stats_; }
+    Stats stats() const;
 
     std::function<void(const QString&, const QJsonObject&)> onMessage;
     std::function<void(const QString&, const QByteArray&)> onBinaryMessage;

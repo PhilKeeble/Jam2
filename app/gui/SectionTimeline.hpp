@@ -3,6 +3,7 @@
 #include <QtGlobal>
 
 #include <cmath>
+#include <limits>
 
 namespace jam2::gui {
 
@@ -10,8 +11,8 @@ inline constexpr int kSectionOverviewBarsPerPage = 32;
 
 inline int sectionOverviewPageCount(int barCount) noexcept
 {
-    return qMax(1, (qMax(1, barCount) + kSectionOverviewBarsPerPage - 1) /
-        kSectionOverviewBarsPerPage);
+    const int bounded = qMax(1, barCount);
+    return 1 + (bounded - 1) / kSectionOverviewBarsPerPage;
 }
 
 inline int sectionOverviewPageForBar(int bar, int barCount) noexcept
@@ -30,23 +31,32 @@ inline int sectionBeatCountForTimelineEnd(
     int tempoPulseUnits,
     int beatsPerBar) noexcept
 {
-    if (endFrame <= 0 || sampleRate <= 0 || bpm <= 0.0) {
+    if (endFrame <= 0 || sampleRate <= 0 ||
+        !std::isfinite(bpm) || bpm <= 0.0) {
         return qMax(1, beatsPerBar);
     }
     tempoPulseUnits = qMax(1, tempoPulseUnits);
     beatsPerBar = qMax(1, beatsPerBar);
-    const double framesPerBeat =
-        static_cast<double>(sampleRate) * 60.0 /
-        (bpm * static_cast<double>(tempoPulseUnits));
+    const long double framesPerBeat =
+        static_cast<long double>(sampleRate) * 60.0L /
+        (static_cast<long double>(bpm) *
+         static_cast<long double>(tempoPulseUnits));
+    if (!std::isfinite(framesPerBeat) || framesPerBeat <= 0.0L) {
+        return beatsPerBar;
+    }
     // A rendered musical endpoint is rounded up to a whole audio frame. Allow
     // that complete frame of padding so it cannot be mistaken for another beat
     // and then rounded up to an otherwise empty bar.
-    const double frameToleranceInBeats = 1.000001 / framesPerBeat;
-    const int occupiedBeats = qMax(
-        1,
-        static_cast<int>(std::ceil(
-            static_cast<double>(endFrame) / framesPerBeat -
-            frameToleranceInBeats)));
+    const long double frameToleranceInBeats = 1.000001L / framesPerBeat;
+    const long double occupied = std::ceil(
+        static_cast<long double>(endFrame) / framesPerBeat -
+        frameToleranceInBeats);
+    const int maximum = (std::numeric_limits<int>::max)();
+    if (!std::isfinite(occupied) || occupied >= static_cast<long double>(maximum)) {
+        return maximum;
+    }
+    const int occupiedBeats = qMax(1, static_cast<int>(occupied));
+    if (occupiedBeats > maximum - (beatsPerBar - 1)) return maximum;
     return ((occupiedBeats + beatsPerBar - 1) / beatsPerBar) * beatsPerBar;
 }
 
@@ -76,19 +86,32 @@ inline SectionTimelineCrop sectionTimelineCropForEnd(
     if (laneStartFrame >= timelineEndFrame) {
         return {true, timelineEndFrame, -1, -1};
     }
-    sourceStartFrame = qMax<qint64>(0, sourceStartFrame);
+    sourceStartFrame = qBound<qint64>(
+        0,
+        sourceStartFrame,
+        (std::numeric_limits<qint64>::max)() - 1);
     qint64 retainedSourceFrames = timelineEndFrame - laneStartFrame;
     if (laneSampleRate > 0 && timelineSampleRate > 0 &&
         laneSampleRate != timelineSampleRate) {
-        retainedSourceFrames = static_cast<qint64>(std::llround(
-            static_cast<double>(retainedSourceFrames) *
-            laneSampleRate / timelineSampleRate));
+        const long double converted = std::round(
+            static_cast<long double>(retainedSourceFrames) *
+            static_cast<long double>(laneSampleRate) /
+            static_cast<long double>(timelineSampleRate));
+        const qint64 available =
+            (std::numeric_limits<qint64>::max)() - sourceStartFrame;
+        retainedSourceFrames = !std::isfinite(converted) ||
+                converted >= static_cast<long double>(available)
+            ? available
+            : qMax<qint64>(1, static_cast<qint64>(converted));
     }
+    const qint64 available =
+        (std::numeric_limits<qint64>::max)() - sourceStartFrame;
+    retainedSourceFrames = qBound<qint64>(1, retainedSourceFrames, available);
     return {
         false,
         timelineEndFrame,
         sourceStartFrame,
-        sourceStartFrame + qMax<qint64>(1, retainedSourceFrames),
+        sourceStartFrame + retainedSourceFrames,
     };
 }
 

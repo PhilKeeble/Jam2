@@ -20,6 +20,7 @@ void installCompactDialogPolicy(QApplication& app);
 void showJamReadyInviteDialog(QWidget* parent, const QString& inviteUrl);
 QString appReleaseFilePath(const QString& folder, const QString& fileName);
 QString appReleaseFolderPath(const QString& folder);
+bool setAppReleaseRootForTesting(const QString& path, QString& error);
 FocusPreset focusPresetForKey(const QString& key);
 void applyJamSliderStyle(QSlider* slider);
 bool isCustomFocusPreset(const QString& key);

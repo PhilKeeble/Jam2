@@ -65,11 +65,6 @@ void ProjectPersistenceCoordinator::clearTransientTracking() noexcept
     deferredCleanupWavs_.clear();
 }
 
-const QString& ProjectPersistenceCoordinator::projectFilePath() const noexcept
-{
-    return projectFilePath_;
-}
-
 const QString& ProjectPersistenceCoordinator::projectFolder() const noexcept
 {
     return projectFolder_;
@@ -78,11 +73,6 @@ const QString& ProjectPersistenceCoordinator::projectFolder() const noexcept
 const QString& ProjectPersistenceCoordinator::workspaceFolder() const noexcept
 {
     return workspaceFolder_;
-}
-
-QString ProjectPersistenceCoordinator::workingProjectFolder() const
-{
-    return projectFolder_.isEmpty() ? workspaceFolder_ : projectFolder_;
 }
 
 void ProjectPersistenceCoordinator::useWorkspaceAsProjectFolderIfUnset()
@@ -100,13 +90,11 @@ void ProjectPersistenceCoordinator::setProjectFolder(const QString& folder)
 void ProjectPersistenceCoordinator::setProjectLocation(const QString& path)
 {
     const QFileInfo info(path);
-    projectFilePath_ = info.absoluteFilePath();
     projectFolder_ = info.absolutePath();
 }
 
 void ProjectPersistenceCoordinator::acceptNewProject(const QByteArray& snapshot)
 {
-    projectFilePath_.clear();
     projectFolder_.clear();
     savedSnapshot_ = snapshot;
 }
@@ -125,7 +113,6 @@ void ProjectPersistenceCoordinator::acceptSavedProject(
     const QSet<QString>& persistentAssetPaths)
 {
     const QFileInfo info(path);
-    projectFilePath_ = info.absoluteFilePath();
     projectFolder_ = info.absolutePath();
     for (const QString& assetPath : persistentAssetPaths) {
         transientWavs_.remove(canonicalFilePath(assetPath));
@@ -252,6 +239,10 @@ bool ProjectPersistenceCoordinator::writeSongJson(
     const QByteArray& json,
     QString& error)
 {
+    if (json.size() > kMaxSongFileBytes) {
+        error = QStringLiteral("Could not write song file beyond the 4 MiB limit.");
+        return false;
+    }
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly) || file.write(json) != json.size() || !file.commit()) {
         error = QStringLiteral("Could not atomically write the song file.");

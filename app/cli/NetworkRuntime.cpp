@@ -64,11 +64,13 @@
 #include "protocol.hpp"
 #include "session_authority.hpp"
 #include "stun.hpp"
+#include "transport_timing.hpp"
 #include "tuning_profile.hpp"
 #include "udp_socket.hpp"
 #include "CliRuntime.hpp"
 #include "CliOptions.hpp"
 #include "CliRecordingSupervisor.hpp"
+#include "CliRuntimeSupport.hpp"
 #include "CliStats.hpp"
 #include "RuntimeContracts.hpp"
 
@@ -411,68 +413,7 @@ void hold_shared_grid_at_start(
     }
 }
 
-struct QuantizedSchedule {
-    std::uint64_t countdown_start_raw_frame = 0;
-    std::uint64_t target_raw_frame = 0;
-    std::uint64_t target_musical_frame = 0;
-};
-
-std::uint64_t musical_frame_from_raw(std::uint64_t raw_frame, std::int64_t offset)
-{
-    if (offset < 0) {
-        const std::uint64_t magnitude = static_cast<std::uint64_t>(-offset);
-        return raw_frame > magnitude ? raw_frame - magnitude : 0ULL;
-    }
-    return raw_frame + static_cast<std::uint64_t>(offset);
-}
-
-std::uint64_t raw_frame_from_musical(std::uint64_t musical_frame, std::int64_t offset)
-{
-    if (offset >= 0) {
-        const std::uint64_t magnitude = static_cast<std::uint64_t>(offset);
-        return musical_frame > magnitude ? musical_frame - magnitude : 0ULL;
-
-    }
-    return musical_frame + static_cast<std::uint64_t>(-offset);
-
-}
-
-QuantizedSchedule next_bar_schedule(
-    const RuntimeState& state,
-    const jam2::Engine* engine,
-    int sample_rate,
-    int count_in_bars)
-{
-    const auto pattern = metronome_pattern_from_runtime(state);
-    const std::uint64_t step_frames = jam2::metronome::step_interval_samples(
-        static_cast<double>(std::max(1, sample_rate)),
-        pattern.bpm,
-        pattern.division,
-        pattern.tempo_pulse_units);
-    const std::uint64_t bar_frames = std::max<std::uint64_t>(
-        1,
-        step_frames * static_cast<std::uint64_t>(pattern.division) *
-            static_cast<std::uint64_t>(pattern.beats_per_bar));
-    const std::uint64_t raw_now = current_engine_frame(engine);
-    const std::int64_t offset = state.metronome_render_offset_frames.load(std::memory_order_relaxed);
-    const std::uint64_t musical_now = musical_frame_from_raw(raw_now, offset);
-    const std::uint64_t epoch = state.metronome_epoch_valid.load(std::memory_order_relaxed)
-        ? state.metronome_epoch_sample_time.load(std::memory_order_relaxed)
-        : 0ULL;
-    const std::uint64_t elapsed = musical_now >= epoch ? musical_now - epoch : 0ULL;
-    std::uint64_t next_bar_musical = epoch + (elapsed / bar_frames + 1ULL) * bar_frames;
-    const std::uint64_t minimum_lead_frames = static_cast<std::uint64_t>(std::max(1, sample_rate)) / 5ULL;
-    if (raw_frame_from_musical(next_bar_musical, offset) <= raw_now + minimum_lead_frames) {
-        next_bar_musical += bar_frames;
-    }
-    const std::uint64_t target_musical = next_bar_musical +
-        static_cast<std::uint64_t>(std::max(0, count_in_bars)) * bar_frames;
-    return {
-        raw_frame_from_musical(next_bar_musical, offset),
-        raw_frame_from_musical(target_musical, offset),
-        target_musical,
-    };
-}
+using QuantizedSchedule = jam2::QuantizedTransportSchedule;
 
 std::uint64_t publish_transport_schedule(
     RuntimeState& state,
@@ -543,7 +484,7 @@ enum class GridMessageKind : std::uint8_t {
 
 constexpr std::uint8_t kGridMessageMarker = 0x80;
 
-std::array<std::uint8_t, 56> encode_metronome_payload(
+std::array<std::uint8_t, jam2::protocol::kMetronomeStatePayloadSize> encode_metronome_payload(
     int bpm,
     std::uint64_t revision_or_request,
     std::uint64_t epoch_sample_time,
@@ -554,7 +495,7 @@ std::array<std::uint8_t, 56> encode_metronome_payload(
     bool reset_epoch = false)
 {
     pattern = jam2::metronome::sanitize(pattern);
-    std::array<std::uint8_t, 56> payload{};
+    std::array<std::uint8_t, jam2::protocol::kMetronomeStatePayloadSize> payload{};
     payload[0] = static_cast<std::uint8_t>(bpm & 0xff);
     payload[1] = static_cast<std::uint8_t>((bpm >> 8) & 0xff);
     payload[2] = static_cast<std::uint8_t>((bpm >> 16) & 0xff);
@@ -593,7 +534,7 @@ struct MetronomePayload {
 
 MetronomePayload decode_metronome_payload(std::span<const std::uint8_t> payload)
 {
-    if (payload.size() != 56) {
+    if (payload.size() != jam2::protocol::kMetronomeStatePayloadSize) {
         throw std::runtime_error("metronome payload size mismatch");
     }
     const int bpm = static_cast<int>(payload[0]) |
@@ -643,9 +584,10 @@ struct TransportPayload {
     std::uint64_t countdown_start_sender_frame = 0;
 };
 
-std::array<std::uint8_t, 28> encode_transport_payload(const TransportPayload& value)
+std::array<std::uint8_t, jam2::protocol::kTransportStatePayloadSize> encode_transport_payload(
+    const TransportPayload& value)
 {
-    std::array<std::uint8_t, 28> payload{};
+    std::array<std::uint8_t, jam2::protocol::kTransportStatePayloadSize> payload{};
     payload[0] = 2;
     payload[1] = static_cast<std::uint8_t>(value.action);
     const std::uint64_t identity =
@@ -660,8 +602,8 @@ std::array<std::uint8_t, 28> encode_transport_payload(const TransportPayload& va
 
 TransportPayload decode_transport_payload(std::span<const std::uint8_t> payload)
 {
-    const bool legacy = payload.size() == 20 && payload[0] == 1;
-    if (!legacy && (payload.size() != 28 || payload[0] != 2)) {
+    if (payload.size() != jam2::protocol::kTransportStatePayloadSize ||
+        payload[0] != 2) {
         throw std::runtime_error("transport payload size or version mismatch");
     }
     const std::uint64_t identity = read_u64_le(payload, 4);
@@ -678,7 +620,7 @@ TransportPayload decode_transport_payload(std::span<const std::uint8_t> payload)
         static_cast<std::uint32_t>(identity & 0xffffffffULL),
         static_cast<std::uint32_t>(identity >> 32U),
         read_u64_le(payload, 12),
-        legacy ? read_u64_le(payload, 12) : read_u64_le(payload, 20),
+        read_u64_le(payload, 20),
     };
 }
 
@@ -705,14 +647,6 @@ std::int64_t ms_to_signed_frames(double ms, double sample_rate)
 }
 
 
-
-std::string os_error_text(unsigned long code)
-{
-    if (code == 0) {
-        return {};
-    }
-    return "error " + std::to_string(code);
-}
 
 #if defined(_WIN32)
 std::string win_priority_class_text(DWORD value)
@@ -980,34 +914,6 @@ void mix_leader_click_into_packet(
                 sound));
     }
 }
-
-class CliPeerStreamPlayback final : public jam2::PeerStreamPlayback {
-public:
-    explicit CliPeerStreamPlayback(jam2::Engine* engine) noexcept : engine_(engine) {}
-    bool acceptsFrames() const noexcept override { return engine_ != nullptr; }
-    std::size_t depthFrames() const noexcept override
-    {
-        return engine_ != nullptr
-            ? engine_->networkPlaybackDepth()
-            : (std::numeric_limits<std::size_t>::max)() / 2U;
-    }
-    std::size_t pushFrames(std::span<const std::int32_t> frames) noexcept override
-    {
-        return engine_ != nullptr ? engine_->pushNetworkPlayback(frames) : 0;
-    }
-    void requestDropFrames(std::size_t frames) noexcept override
-    {
-        if (engine_ != nullptr) engine_->requestNetworkPlaybackDrop(frames);
-    }
-    void setResamplerRatio(double ratio) noexcept override
-    {
-        if (engine_ != nullptr) engine_->setNetworkPlaybackRatio(ratio);
-    }
-    void detach() noexcept { engine_ = nullptr; }
-
-private:
-    jam2::Engine* engine_ = nullptr;
-};
 
 jam2::PeerStreamConfig make_peer_stream_config(const Options& options, bool collect_diagnostics)
 {
@@ -1554,6 +1460,19 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     hold_shared_grid_at_start(commands.state, audio.engine.get());
     jam2::NetworkSession* network_session_control = nullptr;
     auto apply_runtime_host_commands = [&] {
+        if (const auto update = runtime_host.takeMetronomeCompensation()) {
+            options.metronome_compensation_max_ms = update->maximum_ms;
+            options.metronome_compensation_smoothing_ms = update->smoothing_ms;
+            options.metronome_compensation_deadband_ms = update->deadband_ms;
+            options.metronome_compensation_slew_ms_per_sec =
+                update->slew_ms_per_second;
+            std::cout << "Listener compensation updated: max_ms="
+                      << update->maximum_ms
+                      << " smoothing_ms=" << update->smoothing_ms
+                      << " deadband_ms=" << update->deadband_ms
+                      << " slew_ms_per_sec=" << update->slew_ms_per_second
+                      << "\n";
+        }
         if (network_session_control != nullptr) {
             for (const Jam2PeerGainUpdate& update : runtime_host.takePeerGains()) {
                 (void)network_session_control->setPeerGain(
@@ -2208,7 +2127,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             commands.state.metronome_epoch_sample_time.load(std::memory_order_relaxed);
         stats.metronome_epoch_sample_time = mapped_epoch;
         if (epoch_valid && beat_frames > 0 && grid.run_state == jam2::GridRunState::Running) {
-            const std::uint64_t local_frame = musical_frame_from_raw(
+            const std::uint64_t local_frame = jam2::transport_musical_frame_from_raw(
                 current_engine_frame(audio.engine.get()),
                 commands.state.metronome_render_offset_frames.load(std::memory_order_relaxed));
             stats.local_metronome_beat = local_frame >= mapped_epoch
@@ -2341,6 +2260,12 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         snapshot.bootstrap_role = network_session.bootstrapRole();
         snapshot.bootstrap_state = network_session.bootstrapState();
         snapshot.local_peer_id = network_session.localPeerId().value;
+        snapshot.metronome_compensation = {
+            options.metronome_compensation_max_ms,
+            options.metronome_compensation_smoothing_ms,
+            options.metronome_compensation_deadband_ms,
+            options.metronome_compensation_slew_ms_per_sec,
+        };
         snapshot.peers.reserve(peers.size());
         for (const auto& entry : peers) {
             const auto& peer = entry.second;
@@ -2676,7 +2601,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                 if (interval > 0) {
                     const std::int64_t current_offset =
                         commands.state.metronome_render_offset_frames.load(std::memory_order_relaxed);
-                    const std::uint64_t local_frame = musical_frame_from_raw(
+                    const std::uint64_t local_frame =
+                        jam2::transport_musical_frame_from_raw(
                         current_engine_frame(audio.engine.get()), current_offset);
                     const std::uint64_t local_epoch =
                         commands.state.metronome_epoch_sample_time.load(std::memory_order_relaxed);
@@ -2757,30 +2683,25 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
               grid_mode == metronome_mode_id(MetronomeMode::SharedGrid)));
         if (correction_enabled &&
             (mesh_grid_last_update_us == 0 || now - mesh_grid_last_update_us >= 10000ULL)) {
-            const std::int64_t current =
-                commands.state.metronome_render_offset_frames.load(std::memory_order_relaxed);
-            const std::int64_t max_frames = std::abs(ms_to_signed_frames(
-                options.metronome_compensation_max_ms, options.sample_rate));
-            const std::int64_t target = mesh_grid_base_offset_frames + std::clamp(
-                mesh_grid_target_offset_frames - mesh_grid_base_offset_frames,
-                -max_frames,
-                max_frames);
+            const std::int64_t current = commands.state
+                .metronome_render_offset_frames.load(std::memory_order_relaxed);
             const double elapsed_ms = mesh_grid_last_update_us == 0
                 ? 10.0
                 : static_cast<double>(now - mesh_grid_last_update_us) / 1000.0;
-            const double alpha = options.metronome_compensation_smoothing_ms > 0.0
-                ? std::clamp(elapsed_ms / options.metronome_compensation_smoothing_ms, 0.0, 1.0)
-                : 1.0;
-            std::int64_t step = static_cast<std::int64_t>(
-                std::llround(static_cast<double>(target - current) * alpha));
-            const std::int64_t max_step = std::abs(ms_to_signed_frames(
-                options.metronome_compensation_slew_ms_per_sec * elapsed_ms / 1000.0,
-                options.sample_rate));
-            if (max_step > 0) {
-                step = std::clamp(step, -max_step, max_step);
-            }
+            const Jam2MetronomeCompensationSettings settings{
+                options.metronome_compensation_max_ms,
+                options.metronome_compensation_smoothing_ms,
+                options.metronome_compensation_deadband_ms,
+                options.metronome_compensation_slew_ms_per_sec,
+            };
             commands.state.metronome_render_offset_frames.store(
-                current + step,
+                jam2_next_metronome_compensation_offset(
+                    current,
+                    mesh_grid_base_offset_frames,
+                    mesh_grid_target_offset_frames,
+                    elapsed_ms,
+                    options.sample_rate,
+                    settings),
                 std::memory_order_relaxed);
             mesh_grid_last_update_us = now;
         }
@@ -3349,7 +3270,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                                     const std::uint64_t projected = header.timing_value +
                                         peer_stream.stats().rtt_min_us *
                                             static_cast<std::uint64_t>(options.sample_rate) / 2000000ULL;
-                                    const std::uint64_t local_frame = musical_frame_from_raw(
+                                    const std::uint64_t local_frame =
+                                        jam2::transport_musical_frame_from_raw(
                                         current_engine_frame(audio.engine.get()),
                                         commands.state.metronome_render_offset_frames.load(
                                             std::memory_order_relaxed));
@@ -3463,7 +3385,8 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         const QuantizedSchedule schedule{
                             countdown_start_raw_frame,
                             target_raw_frame,
-                            musical_frame_from_raw(target_raw_frame, offset),
+                            jam2::transport_musical_frame_from_raw(
+                                target_raw_frame, offset),
                         };
                         bool scheduled = false;
                         if (transport.action == jam2::EngineTransportAction::TrackRestart ||

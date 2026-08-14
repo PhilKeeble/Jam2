@@ -30,6 +30,40 @@ struct LooperLane {
     QString originKind;
 };
 
+struct LooperLaneRegion {
+    qint64 startFrame = 0;
+    qint64 stopFrame = -1;
+    qint64 sourceStartFrame = -1;
+    qint64 sourceEndFrame = -1;
+    bool loopEnabled = false;
+};
+
+enum class LooperLaneTimelineCropStatus {
+    Unchanged,
+    Cropped,
+    Cleared,
+    Rejected,
+};
+
+struct LooperLaneTimelineCropResult {
+    LooperLaneTimelineCropStatus status = LooperLaneTimelineCropStatus::Rejected;
+    QString removedAssetPath;
+    QString removedAssetHash;
+};
+
+namespace jam2::gui {
+
+// Resolves the lane's audible end on the prepared-mix timeline without file
+// I/O. The caller supplies a known source length from the model, waveform
+// cache, or strict WAV inspection. The result is always within the maintained
+// looper timeline domain.
+qint64 looperLaneTimelineEnd(
+    const LooperLane& lane,
+    qint64 resolvedSourceFrames,
+    int timelineSampleRate) noexcept;
+
+} // namespace jam2::gui
+
 struct LooperBankTiming {
     int bpm = 80;
     int beatsPerBar = 4;
@@ -80,14 +114,36 @@ public:
     const ArrangementDefinition& arrangement() const;
     bool setArrangement(ArrangementDefinition arrangement);
     void setArrangementEnabled(bool enabled);
+    void ensureInitialEmptyLanes();
 
     // These are the only mutations the track UI and sync layer need.  Keeping
     // them here preserves the four-bank invariant and the lane order that is
     // used when rendering a prepared mix.
     bool appendLane(int bankIndex, LooperLane lane);
+    // Atomically replaces one lane's checked state while retaining its stable
+    // identity. This is used when an asynchronous WAV import completes after
+    // the UI has resolved the original lane by ID.
+    bool replaceLane(int bankIndex, int laneIndex, LooperLane lane);
     bool removeLane(int bankIndex, int laneIndex);
     bool moveLane(int bankIndex, int from, int to);
     bool renameLane(int bankIndex, int laneIndex, const QString& name);
+    bool setLaneGainDb(int bankIndex, int laneIndex, double gainDb);
+    bool setLaneMuted(int bankIndex, int laneIndex, bool muted);
+    bool setLaneSolo(int bankIndex, int laneIndex, bool solo);
+    bool setLaneRegion(
+        int bankIndex,
+        int laneIndex,
+        const LooperLaneRegion& region);
+    bool clearLaneAsset(
+        int bankIndex,
+        int laneIndex,
+        bool resetTimelineStart = false);
+    LooperLaneTimelineCropResult cropLaneToTimelineEnd(
+        int bankIndex,
+        int laneIndex,
+        qint64 resolvedSourceFrames,
+        int timelineSampleRate,
+        qint64 timelineEndFrame);
 
     QJsonObject toJson(bool syncCompatibleOnly = false) const;
     bool loadJson(const QJsonObject& object);

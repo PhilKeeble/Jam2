@@ -674,6 +674,7 @@ public:
         onError = std::move(errorHandler);
         maxPending = std::max(1, maximumPendingDeliveries);
         pendingDeliveries = std::make_shared<std::atomic<int>>(0);
+        pendingDeliveryRejects.store(0);
 
         const OsSocket socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (socket == kInvalidSocket) {
@@ -799,6 +800,7 @@ public:
             const int priorPending = pendingDeliveries->fetch_add(1);
             if (priorPending >= maxPending) {
                 pendingDeliveries->fetch_sub(1);
+                pendingDeliveryRejects.fetch_add(1);
                 continue;
             }
             NativeTcpConnection::Pointer connection;
@@ -858,6 +860,7 @@ public:
     ErrorHandler onError;
     int maxPending = 1;
     std::shared_ptr<std::atomic<int>> pendingDeliveries;
+    std::atomic<std::uint64_t> pendingDeliveryRejects{0};
     mutable std::mutex errorMutex;
     QString lastError;
     std::thread thread;
@@ -880,6 +883,10 @@ bool NativeTcpListener::listen(
 void NativeTcpListener::close() { impl_->close(); }
 bool NativeTcpListener::isListening() const { return impl_->listening.load(); }
 quint16 NativeTcpListener::localPort() const { return impl_->port.load(); }
+std::uint64_t NativeTcpListener::pendingDeliveryRejects() const
+{
+    return impl_->pendingDeliveryRejects.load();
+}
 QString NativeTcpListener::errorString() const { return impl_->error(); }
 
 class NativeTcpConnector::Impl {

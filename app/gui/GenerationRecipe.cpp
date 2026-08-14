@@ -913,17 +913,17 @@ bool generationRecipeFromJson(const QJsonObject& object, GenerationRecipe& recip
     if (!stringsFromJson(groove.value(QStringLiteral("decisions")), next.grooveDecisions,
             kMaximumGrooveDecisions, kMaximumExplanation)) return false;
     {
-        const QJsonValue phrasesValue =
+        const QJsonValue drumPhrasesValue =
             groove.value(QStringLiteral("phrase_plan"));
-        if (!phrasesValue.isUndefined() &&
-            !phrasesValue.isNull()) {
-            if (!phrasesValue.isArray() ||
-                phrasesValue.toArray().size() >
+        if (!drumPhrasesValue.isUndefined() &&
+            !drumPhrasesValue.isNull()) {
+            if (!drumPhrasesValue.isArray() ||
+                drumPhrasesValue.toArray().size() >
                     kMaximumDrumPhrases) {
                 return false;
             }
             for (const QJsonValue& raw :
-                 phrasesValue.toArray()) {
+                 drumPhrasesValue.toArray()) {
                 if (!raw.isObject()) return false;
                 const QJsonObject item = raw.toObject();
                 if (!exactInteger(

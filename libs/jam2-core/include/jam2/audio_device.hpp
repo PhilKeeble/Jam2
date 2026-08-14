@@ -18,6 +18,7 @@
 #include "output_recorder.hpp"
 #include "prepared_track_source.hpp"
 #include "track_take_recorder.hpp"
+#include "transport_timing.hpp"
 
 namespace jam2::audio {
 
@@ -432,15 +433,8 @@ inline std::uint64_t metronome_musical_frame_from_raw(
     std::uint64_t rawFrame,
     std::int64_t renderOffsetFrames) noexcept
 {
-    if (renderOffsetFrames < 0) {
-        const std::uint64_t magnitude =
-            static_cast<std::uint64_t>(-(renderOffsetFrames + 1)) + 1ULL;
-        return rawFrame > magnitude ? rawFrame - magnitude : 0ULL;
-    }
-    const std::uint64_t magnitude = static_cast<std::uint64_t>(renderOffsetFrames);
-    return rawFrame > (std::numeric_limits<std::uint64_t>::max)() - magnitude
-        ? (std::numeric_limits<std::uint64_t>::max)()
-        : rawFrame + magnitude;
+    return jam2::transport_musical_frame_from_raw(
+        rawFrame, renderOffsetFrames);
 }
 
 inline bool metronome_pattern_position(

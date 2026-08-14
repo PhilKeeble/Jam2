@@ -34,7 +34,7 @@ void TrackWorkspaceController::setCallbacks(Callbacks callbacks)
 
 void TrackWorkspaceController::cancelPendingTrackPlayback() noexcept
 {
-    playPreparedMixWhenReady = false;
+    preparedMixLifecycle.setPlayWhenReady(false);
     publishStoppedTrackStateWhenApplied = false;
     pendingSongTrackRestart = false;
     trackController.requestPlayback(false);
@@ -105,11 +105,6 @@ bool TrackWorkspaceController::startFileTask(
     return true;
 }
 
-void TrackWorkspaceController::waitForWorkers()
-{
-    fileWorkers.waitForDone();
-}
-
 QObject* TrackWorkspaceController::dispatchContext() noexcept { return this; }
 int TrackWorkspaceController::sessionSampleRate() const noexcept
 {
@@ -154,6 +149,7 @@ bool TrackWorkspaceController::incomingAssetExpected(
 
 void TrackWorkspaceController::abandonIncomingAsset(const QString& hash)
 {
+    const QString failedSource = incomingAssetSourcePeerToken;
     pendingTrackAssetSources.remove(hash);
     if (incomingAssetHash == hash) {
         appendAssetLog(QStringLiteral("cancelled incoming looper asset: workflow=%1 hash=%2 source=%3")
@@ -167,7 +163,7 @@ void TrackWorkspaceController::abandonIncomingAsset(const QString& hash)
         incomingAssetSourcePeerToken.clear();
     }
     if (callbacks_.incomingAssetAbandoned) {
-        callbacks_.incomingAssetAbandoned(hash);
+        callbacks_.incomingAssetAbandoned(hash, failedSource);
     }
 }
 
@@ -182,6 +178,7 @@ void TrackWorkspaceController::acceptIncomingAsset(
     pendingTrackAssetSources.remove(hash);
     validatedTrackAssetHashes.insert(hash);
     incomingAssetRetryAttempts.remove(hash);
+    incomingAssetRetrySources.remove(hash);
     const auto reconcileRegion = [sourceFrames](
         qint64& loopStart, qint64& loopEnd, bool& loopEnabled) {
         if (sourceFrames <= 0 || loopStart < 0 || loopEnd < 0) {

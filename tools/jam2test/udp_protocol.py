@@ -1,11 +1,9 @@
-"""Fixed-shape Jam2 UDP helpers for retained validation injections."""
-
-"""Independent Jam2 UDP v2 fixtures for black-box validation tools.
+"""Independent fixed-shape Jam2 UDP v2 fixtures for bounded fuzz tooling.
 
 This module intentionally does not share code with the C++ codec.  It is used
-only by Python validators that observe or inject packets through real Jam2 UDP
-sockets.  Keeping the implementation small and literal makes it useful for
-checking the fixed wire layout while the production codec is refactored.
+by the retained Python fuzz front end without importing product code. Keeping
+the implementation small and literal makes it useful for checking the fixed
+wire layout while the production codec is refactored.
 """
 
 from dataclasses import dataclass, replace

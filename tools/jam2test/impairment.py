@@ -1,4 +1,4 @@
-"""Deterministic external UDP impairment used by retained stress cases."""
+"""Reusable deterministic external UDP impairment for tooling and benchmarks."""
 
 import heapq
 import random
@@ -32,7 +32,7 @@ class ProxyImpairment:
         return ProxyImpairment(client_to_server=direction, server_to_client=direction)
 
 
-class UdpStressProxy:
+class UdpImpairmentProxy:
     def __init__(
             self,
             server_endpoint,

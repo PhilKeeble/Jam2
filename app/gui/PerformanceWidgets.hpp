@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BeatGridModel.hpp"
+#include "GuiControlContract.hpp"
 #include "RuntimeContracts.hpp"
 #include "engine.hpp"
 
@@ -53,7 +54,7 @@ private:
     bool active_ = false;
 };
 
-class MetronomePatternWidget final : public QWidget {
+class MetronomePatternWidget final : public QWidget, public jam2::gui::GuiVirtualControlProvider {
 public:
     explicit MetronomePatternWidget(QWidget* parent = nullptr);
 
@@ -64,6 +65,12 @@ public:
         const QVector<bool>& enabled,
         const QVector<bool>& accents);
     void setCurrentStep(int step, bool active);
+    QVector<jam2::gui::GuiVirtualControl> guiVirtualControls() const override;
+    bool invokeGuiVirtualControl(
+        const QString& id,
+        const QString& operation,
+        const QVariant& value,
+        QString& error) override;
 
     std::function<void(int step, bool enabled, bool accent)> onStepChanged;
 
@@ -93,7 +100,7 @@ struct PerformancePeerPresentation {
     bool selected = false;
 };
 
-class PerformanceHomeWidget final : public QWidget {
+class PerformanceHomeWidget final : public QWidget, public jam2::gui::GuiVirtualControlProvider {
 public:
     explicit PerformanceHomeWidget(QWidget* parent = nullptr);
 
@@ -117,6 +124,9 @@ public:
     void setWavGenerationActive(bool active);
     void setJamTasterTaskStatus(bool active, int percent);
     void setJamRecordingState(bool enabled, bool active, const QString& takeName);
+    bool jamRecordingEnabled() const noexcept { return jamRecordingEnabled_; }
+    bool jamRecordingActive() const noexcept { return jamRecordingActive_; }
+    const QString& jamRecordingTake() const noexcept { return jamRecordingTake_; }
     void setBankState(
         int liveBank,
         int pendingBank,
@@ -126,6 +136,12 @@ public:
         const QString& status);
     void setArrangementState(bool running, bool armed);
     QString rendererStatsText() const;
+    QVector<jam2::gui::GuiVirtualControl> guiVirtualControls() const override;
+    bool invokeGuiVirtualControl(
+        const QString& id,
+        const QString& operation,
+        const QVariant& value,
+        QString& error) override;
 
     std::function<void(const QString&)> onOpenDetail;
     std::function<void(std::uint64_t)> onPeerSelected;

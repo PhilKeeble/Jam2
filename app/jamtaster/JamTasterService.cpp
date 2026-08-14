@@ -11,6 +11,7 @@
 #include <QUuid>
 
 #include <array>
+#include <utility>
 
 namespace {
 
@@ -33,7 +34,17 @@ QString workerFilename()
 } // namespace
 
 JamTasterService::JamTasterService(QObject* parent)
-    : QObject(parent)
+    : JamTasterService({}, {}, parent)
+{
+}
+
+JamTasterService::JamTasterService(
+    QString bundleRootOverride,
+    QString workerPathOverride,
+    QObject* parent)
+    : QObject(parent),
+      bundleRootOverride_(std::move(bundleRootOverride)),
+      workerPathOverride_(std::move(workerPathOverride))
 {
     jobProcess_.setProcessChannelMode(QProcess::SeparateChannels);
     connect(&jobProcess_, &QProcess::readyReadStandardOutput,
@@ -87,6 +98,7 @@ void JamTasterService::removeObserver(std::uint64_t id)
 
 QString JamTasterService::bundleRoot() const
 {
+    if (!bundleRootOverride_.isEmpty()) return bundleRootOverride_;
     const QDir executable(QCoreApplication::applicationDirPath());
 #ifdef Q_OS_MACOS
     return QDir::cleanPath(executable.absoluteFilePath(
@@ -98,8 +110,9 @@ QString JamTasterService::bundleRoot() const
 
 QString JamTasterService::workerPath() const
 {
-    const QDir executable(QCoreApplication::applicationDirPath());
+    if (!workerPathOverride_.isEmpty()) return workerPathOverride_;
 #ifdef Q_OS_MACOS
+    const QDir executable(QCoreApplication::applicationDirPath());
     return QDir::cleanPath(executable.absoluteFilePath(
         QStringLiteral("../Helpers/") + workerFilename()));
 #else
@@ -364,10 +377,15 @@ void JamTasterService::stopProcessTree()
 #ifdef Q_OS_WIN
     const QString taskkill = QStandardPaths::findExecutable(QStringLiteral("taskkill"));
     if (!taskkill.isEmpty() && jobProcess_.processId() > 0) {
-        (void)QProcess::startDetached(taskkill, {
+        QProcess killer;
+        killer.setProgram(taskkill);
+        killer.setArguments({
             QStringLiteral("/PID"), QString::number(jobProcess_.processId()),
             QStringLiteral("/T"), QStringLiteral("/F"),
         });
+        killer.setStandardOutputFile(QProcess::nullDevice());
+        killer.setStandardErrorFile(QProcess::nullDevice());
+        (void)killer.startDetached();
     }
 #endif
     jobProcess_.terminate();

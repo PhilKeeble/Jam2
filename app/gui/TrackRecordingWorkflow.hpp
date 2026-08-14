@@ -8,7 +8,9 @@
 
 #include <QString>
 
+#include <array>
 #include <cstdint>
+#include <functional>
 #include <optional>
 
 namespace jam2::gui {
@@ -81,7 +83,19 @@ public:
         int sampleRate = 0;
     };
 
-    explicit TrackRecordingWorkflow(ApplicationRuntime& runtime) noexcept;
+    using CommandSubmitter = std::function<bool(const jam2::EngineCommand&)>;
+    using SnapshotProvider = std::function<jam2::EngineSnapshot()>;
+
+    explicit TrackRecordingWorkflow(ApplicationRuntime& runtime)
+        : TrackRecordingWorkflow(
+            [&runtime](const jam2::EngineCommand& command) {
+                return runtime.submit(command);
+            },
+            [&runtime] { return runtime.engineSnapshot(); })
+    {}
+    TrackRecordingWorkflow(
+        CommandSubmitter submitter,
+        SnapshotProvider snapshotProvider);
 
     bool seekPrepared(std::uint64_t sourceFrame, std::uint64_t targetFrame) noexcept;
     bool setPreparedLoop(
@@ -236,7 +250,13 @@ private:
         std::uint64_t musicalFrame,
         bool localOnly = false) noexcept;
     void clearGlobalTransport() noexcept;
-    bool submit(jam2::EngineCommand command) noexcept;
+    bool submit(
+        jam2::EngineCommand command,
+        std::uint64_t* submittedCookie = nullptr) noexcept;
+    bool submitTakeCommand(jam2::EngineCommand command) noexcept;
+    bool ownsTakeCommandCookie(std::uint64_t cookie) const noexcept;
+    void clearTakeCommandCookies() noexcept;
+    void clearActiveTakeState() noexcept;
     bool armTrackTake(
         const QString& id,
         const QString& output,
@@ -245,15 +265,17 @@ private:
     bool startTrackTake(
         std::uint64_t targetFrame,
         std::uint64_t durationFrames) noexcept;
-    bool startTrackTakeQuantized(
-        int countInBars,
+    void cancelTrackTake() noexcept;
+    bool startTrackTakeAtSchedule(
+        std::uint64_t countdownStartFrame,
+        std::uint64_t targetFrame,
+        std::uint64_t targetMusicalFrame,
         std::uint64_t durationFrames,
-        const PlaybackGrid::Position& position,
-        int beatsPerBar,
         bool transportLocalOnly,
         QString& error) noexcept;
 
-    ApplicationRuntime& runtime_;
+    CommandSubmitter command_submitter_;
+    SnapshotProvider snapshot_provider_;
     std::uint64_t command_cookie_ = 0;
 
     QString last_capture_path_;
@@ -262,6 +284,8 @@ private:
     int active_take_sample_rate_ = 0;
     int last_capture_sample_rate_ = 0;
     bool input_take_active_ = false;
+    std::array<std::uint64_t, 16> active_take_command_cookies_{};
+    std::size_t active_take_command_cookie_count_ = 0;
 
     int armed_bank_ = -1;
     int armed_lane_ = -1;
@@ -297,4 +321,7 @@ private:
 
     QString jam_recording_folder_;
     bool jam_recording_active_ = false;
+    bool jam_recording_confirmed_active_ = false;
+    std::uint64_t jam_recording_start_cookie_ = 0;
+    std::uint64_t jam_recording_stop_cookie_ = 0;
 };

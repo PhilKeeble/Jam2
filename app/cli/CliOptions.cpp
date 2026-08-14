@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <filesystem>
 #include <iostream>
 #include <optional>
@@ -628,22 +629,26 @@ Options parse_options(
             options.metronome_mode = parse_metronome_mode(require_value(argc, argv, i, arg));
         } else if (arg == "--metronome-compensation-max-ms") {
             options.metronome_compensation_max_ms = std::stod(std::string(require_value(argc, argv, i, arg)));
-            if (options.metronome_compensation_max_ms < 0.0 || options.metronome_compensation_max_ms > 1000.0) {
+            if (!std::isfinite(options.metronome_compensation_max_ms) ||
+                options.metronome_compensation_max_ms < 0.0 || options.metronome_compensation_max_ms > 1000.0) {
                 throw std::runtime_error("--metronome-compensation-max-ms must be 0..1000");
             }
         } else if (arg == "--metronome-compensation-smoothing-ms") {
             options.metronome_compensation_smoothing_ms = std::stod(std::string(require_value(argc, argv, i, arg)));
-            if (options.metronome_compensation_smoothing_ms < 0.0 || options.metronome_compensation_smoothing_ms > 10000.0) {
+            if (!std::isfinite(options.metronome_compensation_smoothing_ms) ||
+                options.metronome_compensation_smoothing_ms < 0.0 || options.metronome_compensation_smoothing_ms > 10000.0) {
                 throw std::runtime_error("--metronome-compensation-smoothing-ms must be 0..10000");
             }
         } else if (arg == "--metronome-compensation-deadband-ms") {
             options.metronome_compensation_deadband_ms = std::stod(std::string(require_value(argc, argv, i, arg)));
-            if (options.metronome_compensation_deadband_ms < 0.0 || options.metronome_compensation_deadband_ms > 1000.0) {
+            if (!std::isfinite(options.metronome_compensation_deadband_ms) ||
+                options.metronome_compensation_deadband_ms < 0.0 || options.metronome_compensation_deadband_ms > 1000.0) {
                 throw std::runtime_error("--metronome-compensation-deadband-ms must be 0..1000");
             }
         } else if (arg == "--metronome-compensation-slew-ms-per-sec") {
             options.metronome_compensation_slew_ms_per_sec = std::stod(std::string(require_value(argc, argv, i, arg)));
-            if (options.metronome_compensation_slew_ms_per_sec < 0.0 || options.metronome_compensation_slew_ms_per_sec > 10000.0) {
+            if (!std::isfinite(options.metronome_compensation_slew_ms_per_sec) ||
+                options.metronome_compensation_slew_ms_per_sec < 0.0 || options.metronome_compensation_slew_ms_per_sec > 10000.0) {
                 throw std::runtime_error("--metronome-compensation-slew-ms-per-sec must be 0..10000");
             }
         } else if (arg == "--remote-level") {

@@ -1,0 +1,193 @@
+{
+  "schemaVersion": 1,
+  "sourceRoots": [
+    "app",
+    "libs/jam2-core"
+  ],
+  "sourceExtensions": [
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".m",
+    ".mm"
+  ],
+  "pathExclusions": [
+    {
+      "pathPattern": "^(app|libs/jam2-core)/(?:.*/)?third_party/",
+      "reason": "Third-party implementation is excluded from Jam2-owned source coverage; maintained integration call sites remain included."
+    }
+  ],
+  "fileExemptions": [
+    {
+      "path": "app/pluginhost/PluginSharedMemoryMac.cpp",
+      "reason": "Apple-only implementation; Windows parity is provided by PluginSharedMemoryWindows.cpp and macOS completion is tracked in TEST-MACOS.md."
+    },
+    {
+      "path": "app/platform/Jam2MacPermissions.mm",
+      "reason": "Apple-only permission integration; its executable behavior must be completed on macOS under TEST-MACOS.md."
+    },
+    {
+      "path": "app/pluginhost/Vst3Host.cpp",
+      "reason": "Real VST3 discovery, loading, editors, and processing require an explicit plugin fixture or hardware profile; deterministic backend and worker entrypoint contracts remain in the default gate."
+    },
+    {
+      "path": "libs/jam2-core/src/audio_device_macos.cpp",
+      "reason": "CoreAudio-only implementation; Windows parity is provided by audio_device_windows.cpp and macOS completion is tracked in TEST-MACOS.md."
+    },
+    {
+      "path": "libs/jam2-core/src/midi_device_macos.mm",
+      "reason": "CoreMIDI-only implementation; Windows MIDI behavior is validated natively and macOS completion is tracked in TEST-MACOS.md."
+    }
+  ],
+  "functionExemptions": [
+    {
+      "function": "asio_sample_type_name(long)",
+      "reason": "MSVC native coverage reports instrumentation_failure for this helper in every owning module; ASIO format handling is exercised by audio processing units and the explicit real-device profile."
+    },
+    {
+      "function": "BeatGridModel::beatDivisionLabel",
+      "reason": "MSVC native coverage reports instrumentation_failure; model and real widget tests exercise every maintained beat-division label through the owning UI."
+    },
+    {
+      "function": "compingStateName(jam2::practice::`anonymous-namespace'::CompingState)",
+      "reason": "MSVC native coverage reports instrumentation_failure; practice generation tests exercise the comping-state planning and rendered results."
+    },
+    {
+      "function": "Engine::Impl::apply_command",
+      "reason": "MSVC native coverage reports instrumentation_failure in every owning module; engine command behavior is exercised directly and through four-peer playback, transport, and recording workflows."
+    },
+    {
+      "function": "JamStorage::kindFolderName",
+      "reason": "MSVC native coverage reports instrumentation_failure; JamStorage units and four-peer save/reopen workflows exercise every maintained storage kind."
+    },
+    {
+      "function": "Json::Parser::stringValue",
+      "reason": "The pinned collector marks this JamTaster parser helper has_external_branch; native pipeline and worker tests exercise valid, malformed, and bounded JSON inputs."
+    },
+    {
+      "function": "Json::Parser::value",
+      "reason": "The pinned collector marks this JamTaster parser helper has_external_branch; native pipeline and worker tests exercise valid, malformed, and bounded JSON inputs."
+    },
+    {
+      "function": "Json::string",
+      "reason": "The pinned collector marks this JamTaster serializer helper has_external_branch; native pipeline and worker tests verify exact serialized protocol results."
+    },
+    {
+      "function": "MainWindow::handleControlEvent",
+      "reason": "MSVC native coverage reports instrumentation_failure; exact four-peer GUI workflows exercise authenticated control routing, shared ideas, WAVs, tracks, recording, and Section changes."
+    },
+    {
+      "function": "makeVoice(const struct jam2::practice::ResearchDrumPiece & const, const struct jam2::practice::`anonymous-namespace'::RealisedHit & const, const class QString & const, float, __int64, int)",
+      "reason": "MSVC native coverage reports instrumentation_failure; deterministic research-drum and reference-render tests exercise voice construction across the maintained kits."
+    },
+    {
+      "function": "NetworkSession::Impl::sendPacket",
+      "reason": "MSVC native coverage reports instrumentation_failure; the four-peer network, security, WAV, and complete impairment matrices exercise authenticated packet transmission."
+    },
+    {
+      "function": "pathCaseSensitivity()",
+      "reason": "The collector skips this compile-time platform helper as too_small; path ownership units exercise the resulting Windows case-insensitive comparisons."
+    },
+    {
+      "path": "app/application/ApplicationEntrypoint.cpp",
+      "function": "static void `anonymous namespace'::detachConsoleForGui()",
+      "reason": "Windows GUI console detachment is an OS launch-boundary side effect; automated GUI agents deliberately retain inherited diagnostic handles and normal no-argument launch remains a manual distribution check."
+    },
+    {
+      "path": "app/application/NativeTcpTransport.cpp",
+      "function": "NativeTcpListener::Impl::postError",
+      "reason": "This callback requires an unexpected kernel accept/select failure after a listener has started; deterministic tests cover bind failures, normal accept/close, delivery bounds, and transport errors without manufacturing an unsafe OS fault."
+    },
+    {
+      "path": "app/application/SessionController.cpp",
+      "functionPattern": "^SessionController::default(Jam2Path|BindHost|PublicHost)$",
+      "reason": "These unreferenced legacy default helpers are retained pending the removal decision recorded in REVIEW-010; current startup dialogs and command parsing own their defaults directly."
+    },
+    {
+      "path": "app/application/SessionController.cpp",
+      "function": "static class QString `anonymous namespace'::siblingToolPath(const char *)",
+      "reason": "This helper is reachable only from the unreferenced defaultJam2Path legacy API retained pending REVIEW-010."
+    },
+    {
+      "path": "app/gui/MainWindow.cpp",
+      "functionPattern": "^MainWindow::(moveSelectedLooperLane|setSelectedLooperLaneGain|editSelectedLooperLaneRegion|loadWavIntoLooperLane|loadTrackMetadata|seekPreparedTrack)$",
+      "reason": "These six wrappers have no caller in the current owned UI; maintained painted-lane, import, metadata, region, gain, movement, and transport workflows are covered while removal is pending REVIEW-002."
+    },
+    {
+      "path": "app/gui/SharedTrackController.cpp",
+      "functionPattern": "^SharedTrackController::(processingMessage|applyProcessingMessage)$",
+      "reason": "The unreferenced track.processing compatibility helpers are retained without fabricating a protocol contract pending the removal decision in REVIEW-005."
+    },
+    {
+      "path": "libs/jam2-core/src/midi_device_windows.cpp",
+      "function": "WinMidiInput::~WinMidiInput()",
+      "reason": "A physical WinMM MIDI input is not present in the explicit Windows hardware profile; backend enumeration and invalid-open behavior are automated, while physical callback lifecycle is tracked for manual hardware validation in REVIEW-011."
+    },
+    {
+      "path": "libs/jam2-core/src/midi_device_windows.cpp",
+      "function": "WinMidiInput::callback(struct HMIDIIN__ *, unsigned int, unsigned __int64, unsigned __int64, unsigned __int64)",
+      "reason": "A physical WinMM MIDI input is not present in the explicit Windows hardware profile; short/unsupported message callback validation is tracked in REVIEW-011."
+    },
+    {
+      "path": "libs/jam2-core/src/midi_device_windows.cpp",
+      "function": "WinMidiInput::info()",
+      "reason": "Construction of a live WinMM MIDI input requires physical MIDI hardware not present in the explicit profile; tracked in REVIEW-011."
+    },
+    {
+      "path": "libs/jam2-core/src/midi_device_windows.cpp",
+      "function": "WinMidiInput::short_messages()",
+      "reason": "Reading live WinMM short-message counters requires physical MIDI hardware not present in the explicit profile; tracked in REVIEW-011."
+    },
+    {
+      "path": "libs/jam2-core/src/midi_device_windows.cpp",
+      "function": "WinMidiInput::unsupported_messages()",
+      "reason": "Reading live WinMM unsupported-message counters requires physical MIDI hardware not present in the explicit profile; tracked in REVIEW-011."
+    },
+    {
+      "path": "libs/jam2-core/src/midi_device_windows.cpp",
+      "function": "WinMidiInput::valid()",
+      "reason": "A valid live WinMM MIDI handle requires physical MIDI hardware not present in the explicit profile; tracked in REVIEW-011."
+    },
+    {
+      "path": "libs/jam2-core/src/midi_device_windows.cpp",
+      "functionPattern": "^WinMidiInput::WinMidiInput\\(",
+      "reason": "Opening a live WinMM MIDI input requires physical MIDI hardware not present in the explicit profile; invalid production opens are automated and the real-device case is tracked in REVIEW-011."
+    },
+    {
+      "path": "libs/jam2-core/src/audio_device_windows.cpp",
+      "function": "static void jam2::audio::`anonymous namespace'::asio_sample_rate_changed(double)",
+      "reason": "This unsolicited ASIO driver notification cannot be forced safely in automation; normal real callbacks, invalid-channel diagnostics, cleanup, and reopen are covered by the explicit hardware profile, with manual change validation tracked in REVIEW-011."
+    },
+    {
+      "path": "app/application/InputPluginBackend.cpp",
+      "function": "operator==",
+      "reason": "Compiler-emitted comparison helper with no independent product branch; production plugin selection and host lifecycle are exercised by the explicit real-plugin hardware profile."
+    },
+    {
+      "path": "app/gui/MainWindow.cpp",
+      "function": "operator<=>",
+      "reason": "Compiler-emitted comparison helper with no independent product branch; its owning MainWindow collection algorithms are exercised through real GUI workflows."
+    },
+    {
+      "path": "app/gui/MainWindow.cpp",
+      "functionPattern": "^static bool operator==\\(class QList<`MainWindow::",
+      "reason": "Compiler-emitted QList iterator comparison helpers have no independent behavior; the owning recording-import and reference-render loops are validated at their maintained workflow boundaries."
+    },
+    {
+      "path": "app/gui/PracticeIdeaController.cpp",
+      "function": "operator==",
+      "reason": "Compiler-emitted comparison helper with no independent product branch; practice-controller state and generation ownership are covered directly."
+    },
+    {
+      "path": "app/gui/PracticeIdeaGenerator.cpp",
+      "functionPattern": "^static bool operator==\\(class QList<jam2::practice::",
+      "reason": "Compiler-emitted QList iterator comparison helper with no independent product branch; planned-event generation is covered across maintained styles, meters, and complexity levels."
+    },
+    {
+      "path": "app/gui/PracticeReferenceRenderer.cpp",
+      "function": "operator<=>",
+      "reason": "Compiler-emitted comparison helper with no independent product branch; deterministic renderer signatures, kits, and exact output identities are covered directly."
+    }
+  ]
+}

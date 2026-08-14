@@ -24,6 +24,8 @@ daw functionality on the track view for splitting tracks and doing multiple take
 
 python test cases and benchmarks are getting a bit lost, not being kept up to date, codex is preffering ctests instead. Maybe we have some other way to run validation of builds when a build happens so that a docker compose release file could eventually build all in docker containers and test validation and mesh and all other test cases and run the build through an automated rig pipeline to then deploy if they pass? maybe doing that in ctests rather than python so it could be done for other platforms as well like ipad / android in future as product support grows 
 
+look into what python is left, cpp might still be calling some like the fuzzer
+
 
 
 

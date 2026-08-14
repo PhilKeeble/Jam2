@@ -29,6 +29,8 @@ public:
     bool submit(const jam2::EngineCommand& command) noexcept;
     bool updatePeers(const std::vector<Jam2RuntimePeer>& peers);
     bool setPeerGainDb(std::uint64_t peerId, double gainDb) noexcept;
+    bool setMetronomeCompensation(
+        const Jam2MetronomeCompensationSettings& settings) noexcept;
     void setTrackSyncEnabled(bool enabled) noexcept;
     void setRecordingSyncEnabled(bool enabled) noexcept;
     void setLaneRecordingIsolationEnabled(bool enabled) noexcept;
@@ -40,6 +42,8 @@ public:
     std::uint64_t engineRestarts() const noexcept { return engine_restarts_; }
     std::uint64_t engineReuses() const noexcept { return engine_reuses_; }
     jam2::audio::InputSourceRouter* inputSourceRouter() noexcept
+    { return input_source_router_.get(); }
+    const jam2::audio::InputSourceRouter* inputSourceRouter() const noexcept
     { return input_source_router_.get(); }
 
     std::function<void(const jam2::EngineSnapshot&)> onEngineSnapshot;

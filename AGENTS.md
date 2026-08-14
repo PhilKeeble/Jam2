@@ -38,6 +38,17 @@ These rules apply to all implementation work in this repository.
 
 - Do not create a visible child widget for a dialog or page and then conditionally omit it from every layout. An unlaid-out child is still shown by Qt at its default position, commonly leaving an orphaned control in the top-left corner. Create optional controls only in the branch that lays them out, or place them in an owned container and explicitly manage that container's visibility.
 
+## Feature Ownership and Native Test Rules
+
+- Every new Jam2 feature, behavior change, and bug fix must add or update the relevant native C++/CTest coverage in the same change. A successful build alone is not sufficient validation, and Python product-validation cases are not a substitute for the native tests.
+- Put production behavior in the file and component that owns the responsibility: model, controller, service, engine, transport, widget, page, or dialog. Keep `MainWindow` responsible for genuine window-level composition, routing, and lifecycle coordination; do not place a feature there merely because it is reachable from the main window. Do not split cohesive code solely because a file is large.
+- Model internal state, commands, results, configuration, and component boundaries with explicit C++ types. Avoid stringly typed or generic map/variant state except at necessary serialization, Qt-property, automation, or protocol boundaries, and convert to typed structures at those boundaries.
+- Place tests under the matching owned area in `tests/unit/<area>`, `tests/integration/<area>`, or another existing purpose-specific test directory, and register them with the narrowest relevant CTest suite and labels. Do not put product test logic into production source files.
+- Test behavior at the lowest useful ownership boundary and add integration coverage wherever components interact. Cover successful behavior, meaningful invalid/error paths, cancellation or rollback, ownership and cleanup, and observable state transitions. GUI work must cover the real control/action, its typed state, modal or asynchronous boundary, and relevant view state rather than only calling an underlying helper.
+- Network, synchronization, shared-content/WAV, peer-interaction, and metronome/epoch changes must retain or extend the exactly-four-peer CTest workflows. Exercise relevant ordering and network-impairment cases with deterministic fake audio or injection; use explicitly profiled hardware tests only for behavior that genuinely requires a real device.
+- Prefer deterministic production seams and fake backends over test-only reimplementations of product behavior. Tests must exercise the same owned production code used by `release/jam2.exe`.
+- Before treating feature work as complete, run its focused CTest cases. Before distribution, run the Windows `--tests-full` coverage and optimized-Release gate; macOS `--tests-full` runs the normal Release tests without source coverage.
+
 ## Efficiency Rules
 
 - Prefer simple choices and fewer external libraries.

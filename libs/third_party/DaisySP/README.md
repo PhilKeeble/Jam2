@@ -11,6 +11,11 @@ Jam2 directly patches `Source/Drums/synthbassdrum.cpp` to initialize
 pinned upstream source leaves those members indeterminate, which makes the
 first triggered sample depend on previous memory contents.
 
+Jam2 also patches `Source/Drums/hihat.h` to use explicit `float` constants in
+`HiHat::SetDecay()`. This preserves the class's float arithmetic and prevents
+MSVC truncation warnings from every translation unit that instantiates the
+template.
+
 Only the transitive source and header closure required by those two targets is
 vendored. Upstream Git metadata, examples, tests, build files, hardware support,
 and unused DSP modules are intentionally omitted.

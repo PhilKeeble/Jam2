@@ -76,6 +76,7 @@ public:
     void close();
     bool isListening() const;
     quint16 localPort() const;
+    std::uint64_t pendingDeliveryRejects() const;
     QString errorString() const;
 
 private:

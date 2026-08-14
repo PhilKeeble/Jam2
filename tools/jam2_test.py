@@ -12,42 +12,9 @@ def parser() -> argparse.ArgumentParser:
     root = Path(__file__).resolve().parents[1]
     artifact_output_help = (
         "artifact root; the timestamped invocation is created directly beneath it")
-    result = argparse.ArgumentParser(description="Jam2 validation, stress, benchmark, connectivity, and fuzz tooling")
+    result = argparse.ArgumentParser(
+        description="Jam2 benchmark, connectivity, fuzz, and offline analysis tooling")
     families = result.add_subparsers(dest="family", required=True)
-
-    validate = families.add_parser("validate", help="run framework and deterministic product validation")
-    validate.add_argument("selection", choices=("all", "framework", "product"), nargs="?", default="all")
-    validate.add_argument("--jam2", type=Path, default=default_jam2(root))
-    validate.add_argument(
-        "--output", type=Path, help=artifact_output_help)
-    validate.add_argument("--clean", action="store_true")
-    validate.add_argument("--real-device", help="optional device identifier extension; headless baseline still runs")
-
-    stress = families.add_parser("stress", help="run retained targeted stress and impairment cases")
-    stress.add_argument("--jam2", type=Path, default=default_jam2(root))
-    stress.add_argument("--output", type=Path, help=artifact_output_help)
-    stress.add_argument("--clean", action="store_true")
-    stress.add_argument("--scenario", action="append", default=[])
-    stress.add_argument("--profile", choices=("fast", "moderate", "safe", "all"), default="fast")
-    stress.add_argument("--sample-rate", type=int, default=48000)
-    stress.add_argument("--stream-ms", type=int, default=8000)
-    stress.add_argument("--network-audio-format", choices=("pcm16", "pcm24", "both"), default="pcm24",
-                        help="wire quality matrix; 'both' runs matched PCM16 and PCM24 cases")
-    stress.add_argument("--headless-audio", action="store_true",
-                        help="explicitly use deterministic synthetic audio (the default when devices are omitted)")
-    stress.add_argument("--server-audio-device", type=int,
-                        help="physical device for peer 1; omit the other peer device for a mixed real/headless run")
-    stress.add_argument("--client-audio-device", type=int,
-                        help="physical device for peer 2; omit the other peer device for a mixed real/headless run")
-    stress.add_argument("--headless-audio-buffer-frames", type=int, default=256)
-    stress.add_argument("--startup-timeout-s", type=float, default=10.0)
-    stress.add_argument("--scenario-cooldown-s", type=float, default=0.0)
-    stress.add_argument("--include-audio-probes", action="store_true")
-    stress.add_argument("--os-priority", action="append",
-                        choices=("off", "high", "realtime", "all"))
-    stress.add_argument("--seed", type=int, default=1)
-    stress.add_argument("--mesh-peers", type=int, action="append")
-    stress.add_argument("--mesh-base-port", type=int, default=0)
 
     benchmark = families.add_parser("benchmark", help="two-host coordinator/agent workflow and analysis")
     benchmark_modes = benchmark.add_subparsers(dest="benchmark_mode", required=True)

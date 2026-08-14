@@ -44,6 +44,7 @@ private:
     QString displayName_;
     QString slug_;
     QString rootFolder_;
+    QString projectFilePath_;
     bool saved_ = false;
     bool hasArtifacts_ = false;
 };

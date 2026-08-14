@@ -1042,7 +1042,6 @@ std::optional<QString> modeDerivedExtensionSuffix(
 std::optional<QString> countryExtensionSuffix(
     const ParsedChord& chord,
     int key,
-    const ModeDef& mode,
     const QString& profileId)
 {
     if (!chord.valid || chord.rest || chord.bass >= 0 ||
@@ -4090,7 +4089,6 @@ void addTheory(
                         ? countryExtensionSuffix(
                               parsed,
                               key,
-                              mode,
                               profile.id)
                         : modeDerivedExtensionSuffix(
                               parsed,
@@ -4316,7 +4314,6 @@ void addTheory(
                 ? countryExtensionSuffix(
                       parsed,
                       key,
-                      mode,
                       profile.id)
                 : modeDerivedExtensionSuffix(
                       parsed,
@@ -6732,7 +6729,6 @@ bool writeFillSequence(
 
 bool applyPlannedFill(
     SongSection& section,
-    const GenerationRecipe& recipe,
     const DrumPhraseRecipe& phrase,
     const DrummerProfileSpec& spec,
     int maximumHits,
@@ -7819,7 +7815,6 @@ void generateGroove(
         ++fillBoundaries;
         applyPlannedFill(
             section,
-            recipe,
             phrase,
             drummer,
             maximumHits,
@@ -8010,19 +8005,6 @@ struct MelodyCandidate {
     double score = -std::numeric_limits<double>::infinity();
 };
 
-QString formForBars(int bars, int variant)
-{
-    if (bars <= 4) return QStringLiteral("A");
-    if (bars <= 8) return variant % 2 ? QStringLiteral("A-B") : QStringLiteral("A-A'");
-    if (bars <= 12) return variant % 2 ? QStringLiteral("A-B-A'") : QStringLiteral("A-A'-B");
-    switch (variant % 4) {
-    case 1: return QStringLiteral("A-B-A'-A''");
-    case 2: return QStringLiteral("A-A'-B-B'");
-    case 3: return QStringLiteral("A-B-C-A'");
-    default: return QStringLiteral("A-A'-B-A''");
-    }
-}
-
 QVector<int> homePitchClasses(int key, const ModeDef& mode)
 {
     QVector<int> result;
@@ -8122,9 +8104,7 @@ MelodyCandidate planMelodyCandidate(
     for (const FormSectionRecipe& section : recipe.formSections) {
         formLabels << section.label;
     }
-    result.form = formLabels.isEmpty()
-        ? formForBars(recipe.bars, candidateIndex)
-        : formLabels.join(QLatin1Char('-'));
+    result.form = formLabels.join(QLatin1Char('-'));
     result.transformations << QStringLiteral(
         "The unique contour is reharmonised against each chord rather than copied as fixed pitches.")
         << QStringLiteral(
@@ -13489,7 +13469,6 @@ struct ContinuationStylePlan {
 
 ContinuationStylePlan continuationStylePlan(
     const QString& profileId,
-    const QString& styleId,
     const ModeDef& mode,
     bool useSevenths,
     bool usePowerChords,
@@ -14698,24 +14677,6 @@ SongSection combinedContinuationSection(const GeneratedPracticeIdea& idea)
     return result;
 }
 
-QString continuationRelationship(const QString& profileId, const QString& styleId)
-{
-    if (profileId.startsWith(QStringLiteral("modal_")) ||
-        styleId == QStringLiteral("electronic") ||
-        styleId == QStringLiteral("hiphop-trap") ||
-        styleId == QStringLiteral("reggae")) {
-        return QStringLiteral("continue_textural_lift");
-    }
-    if (styleId == QStringLiteral("rock") || styleId == QStringLiteral("funk") ||
-        styleId == QStringLiteral("metal") || profileId.contains(QStringLiteral("fusion"))) {
-        return QStringLiteral("continue_riff_answer");
-    }
-    if (styleId == QStringLiteral("blues")) {
-        return QStringLiteral("continue_native_form_slot");
-    }
-    return QStringLiteral("continue_harmonic_lift");
-}
-
 GeneratedContinuationIdea continuationIdea(
     const SongSection& source,
     ContinueIdeaRequest request,
@@ -14798,7 +14759,6 @@ GeneratedContinuationIdea continuationIdea(
             seed, index, source.beats, 0x9e3779b9U);
         ContinuationStylePlan stylePlan = continuationStylePlan(
             inferred.profileId,
-            candidateRequest.styleId,
             planningMode,
             useSevenths,
             usePowerChords,
@@ -14956,9 +14916,7 @@ GeneratedContinuationIdea continuationIdea(
         analysis.alternativeProfileIds = inferred.alternativeProfiles;
         analysis.continuationRoleId = role.id;
         analysis.continuationRoleName = role.name;
-        analysis.relationshipId = stylePlan.relationshipId.isEmpty()
-            ? continuationRelationship(candidate.recipe.profileId, candidate.recipe.styleId)
-            : stylePlan.relationshipId;
+        analysis.relationshipId = stylePlan.relationshipId;
         analysis.chordVocabularySimilarity = chordSimilarity;
         analysis.chordQualityVocabularySimilarity =
             chordQualitySimilarity;

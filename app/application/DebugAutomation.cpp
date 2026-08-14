@@ -7,6 +7,7 @@
 #include "runtime_limits.hpp"
 
 #include "ApplicationRuntime.hpp"
+#include "AutomationActionRegistry.hpp"
 #include "AutomationChannel.hpp"
 #include "AssetChunkProtocol.hpp"
 #include "ControlProtocol.hpp"
@@ -70,6 +71,36 @@ constexpr auto kScenarioFormat = "jam2-debug-scenario";
 constexpr auto kDescriptionFormat = "jam2-debug-description";
 constexpr auto kAutomationFormat = "jam2-automation";
 constexpr auto kScenarioProperty = "jam2.debug.scenario";
+constexpr auto kTestStartBarrierVariable = "JAM2_TEST_START_BARRIER";
+constexpr auto kTestReadyFileVariable = "JAM2_TEST_READY_FILE";
+
+void awaitTestStartBarrier()
+{
+    const QString barrierPath = qEnvironmentVariable(kTestStartBarrierVariable);
+    const QString readyPath = qEnvironmentVariable(kTestReadyFileVariable);
+    if (barrierPath.isEmpty() && readyPath.isEmpty()) return;
+    if (barrierPath.isEmpty() || readyPath.isEmpty() ||
+        barrierPath.toUtf8().size() > kMaxStringBytes ||
+        readyPath.toUtf8().size() > kMaxStringBytes ||
+        !QFileInfo(barrierPath).isAbsolute() || !QFileInfo(readyPath).isAbsolute()) {
+        throw std::runtime_error(
+            "test start barrier requires two bounded absolute paths");
+    }
+
+    QSaveFile readyFile(readyPath);
+    if (!readyFile.open(QIODevice::WriteOnly) ||
+        readyFile.write("ready\n") != 6 || !readyFile.commit()) {
+        throw std::runtime_error("test start barrier could not publish readiness");
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(2);
+    while (!QFileInfo::exists(barrierPath)) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            throw std::runtime_error("test start barrier timed out");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
 
 std::optional<std::uint64_t> processCpuTimeNanoseconds() noexcept
 {
@@ -243,7 +274,8 @@ void printFuzzHelp()
   jam2 debug fuzz <control|udp-pcm16|udp-pcm24|asset|wav> <input-file>
 
 Runs one bounded local parser input and emits a JSON accepted/rejected result.
-This opt-in operation opens no listener and is intended for jam2_test.py fuzz.
+This opt-in operation opens no listener and is intended for native automated
+fuzz/replay validation.
 )";
 }
 
@@ -439,15 +471,7 @@ QJsonObject descriptionJson()
             QStringLiteral("validate.music-full-form-corpus"),
             QStringLiteral("network.create"),
             QStringLiteral("network.join")}},
-        {QStringLiteral("actions"), QJsonArray{
-            QStringLiteral("metronome.enabled"), QStringLiteral("metronome.bpm"),
-            QStringLiteral("metronome.mode"), QStringLiteral("metronome.level"),
-            QStringLiteral("remote.level"), QStringLiteral("track.sync"),
-            QStringLiteral("track.load"), QStringLiteral("track.play"),
-            QStringLiteral("track.stop"), QStringLiteral("track.restart"),
-            QStringLiteral("track.record-start"), QStringLiteral("recording.start"),
-            QStringLiteral("recording.stop"), QStringLiteral("snapshot"),
-            QStringLiteral("shutdown")}},
+        {QStringLiteral("actions"), jam2AutomationActionNamesJson()},
         {QStringLiteral("runtime_fields"), fields},
         {QStringLiteral("profiles"), profiles},
         {QStringLiteral("default_profile"), QString::fromUtf8(jam2::default_create_profile().name.data(), static_cast<qsizetype>(jam2::default_create_profile().name.size()))},
@@ -1351,6 +1375,7 @@ int jam2RunDebugCommand(int argc, char* argv[])
             (scenario->reactive && (!hasCommandHandle || !hasEventHandle))) {
             throw std::runtime_error("automation handles do not match the scenario reactive contract");
         }
+        awaitTestStartBarrier();
         QJsonObject result;
         const auto wallStarted = std::chrono::steady_clock::now();
         const auto cpuStarted = processCpuTimeNanoseconds();

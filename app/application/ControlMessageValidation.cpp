@@ -2,6 +2,7 @@
 #include "ContentLimits.hpp"
 #include "ControlProtocol.hpp"
 #include "GenerationRecipe.hpp"
+#include "JamSyncPolicy.hpp"
 #include "protocol.hpp"
 
 #include <QJsonArray>
@@ -551,15 +552,8 @@ bool jam2::application::validateControlMessage(
     }
     if (type == QStringLiteral("jam.sync.set") ||
         type == QStringLiteral("jam.sync.request")) {
-        const QString ideas = message.value(QStringLiteral("generated_ideas")).toString();
-        return message.value(QStringLiteral("track_lanes")).isBool() &&
-            message.value(QStringLiteral("auto_share_wavs")).isBool() &&
-            message.value(QStringLiteral("global_playback")).isBool() &&
-            (ideas == QStringLiteral("full") || ideas == QStringLiteral("chords") ||
-             ideas == QStringLiteral("beats") || ideas == QStringLiteral("off")) &&
-            message.value(QStringLiteral("metronome_state")).isBool() &&
-            message.value(QStringLiteral("recordings")).isBool()
-            ? true : (reason = QStringLiteral("jam sync policy is invalid"), false);
+        JamSyncPolicy policy;
+        return jam2ParseJamSyncPolicyMessage(message, policy, reason);
     }
     if (type == QStringLiteral("jam.metronome.state.set") ||
         type == QStringLiteral("jam.metronome.state.request")) {

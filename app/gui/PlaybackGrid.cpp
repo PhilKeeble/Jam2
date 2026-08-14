@@ -1,8 +1,47 @@
 #include "PlaybackGrid.hpp"
 
+#include "metronome.hpp"
+#include "runtime_limits.hpp"
+
 #include <QtGlobal>
 
 #include <cmath>
+#include <limits>
+
+namespace {
+
+constexpr std::uint64_t kMaximumFrame =
+    (std::numeric_limits<std::uint64_t>::max)();
+
+std::uint64_t saturatingAdd(
+    std::uint64_t left,
+    std::uint64_t right) noexcept
+{
+    return left > kMaximumFrame - right ? kMaximumFrame : left + right;
+}
+
+std::uint64_t elapsedFrames(
+    qint64 elapsedMilliseconds,
+    int sampleRate) noexcept
+{
+    if (elapsedMilliseconds <= 0 ||
+        !jam2::limits::valid_sample_rate(sampleRate)) {
+        return 0;
+    }
+    const std::uint64_t milliseconds =
+        static_cast<std::uint64_t>(elapsedMilliseconds);
+    const std::uint64_t seconds = milliseconds / 1000ULL;
+    const std::uint64_t remainder = milliseconds % 1000ULL;
+    const std::uint64_t rate = static_cast<std::uint64_t>(sampleRate);
+    if (seconds > kMaximumFrame / rate) {
+        return kMaximumFrame;
+    }
+    return saturatingAdd(
+        seconds * rate,
+        remainder * rate / 1000ULL);
+}
+
+} // namespace
 
 void PlaybackGrid::setPattern(
     double bpm,
@@ -10,10 +49,10 @@ void PlaybackGrid::setPattern(
     int division,
     int tempoPulseUnits)
 {
-    bpm_ = qBound(1.0, bpm, 400.0);
-    beatsPerBar_ = qBound(1, beatsPerBar, 16);
-    division_ = qMax(1, division);
-    tempoPulseUnits_ = tempoPulseUnits == 3 ? 3 : 1;
+    bpm_ = std::isfinite(bpm) ? qBound(1.0, bpm, 400.0) : 120.0;
+    beatsPerBar_ = jam2::metronome::clamp_beats_per_bar(beatsPerBar);
+    division_ = jam2::metronome::clamp_division(division);
+    tempoPulseUnits_ = jam2::metronome::clamp_tempo_pulse_units(tempoPulseUnits);
 }
 
 void PlaybackGrid::updateEngine(
@@ -28,7 +67,9 @@ void PlaybackGrid::updateEngine(
     engineMusicalFrame_ = musicalFrame;
     engineEpochFrame_ = epochFrame;
     engineRenderOffsetFrames_ = renderOffsetFrames;
-    engineSampleRate_ = qMax(0, sampleRate);
+    engineSampleRate_ = jam2::limits::valid_sample_rate(sampleRate)
+        ? sampleRate
+        : 0;
     engineRunning_ = running;
     engineValid_ = engineSampleRate_ > 0;
     engineReportTime_.start();
@@ -48,10 +89,10 @@ PlaybackGrid::Position PlaybackGrid::position() const
         std::uint64_t rawFrame = engineFrame_;
         std::uint64_t musicalFrame = engineMusicalFrame_;
         if (engineRunning_ && engineReportTime_.isValid()) {
-            const std::uint64_t elapsedFrames = static_cast<std::uint64_t>(engineReportTime_.elapsed()) *
-                static_cast<std::uint64_t>(engineSampleRate_) / 1000ULL;
-            rawFrame += elapsedFrames;
-            musicalFrame += elapsedFrames;
+            const std::uint64_t advanced = elapsedFrames(
+                engineReportTime_.elapsed(), engineSampleRate_);
+            rawFrame = saturatingAdd(rawFrame, advanced);
+            musicalFrame = saturatingAdd(musicalFrame, advanced);
         }
         const std::uint64_t epochFrame = engineEpochFrame_;
         result.engineAnchored = true;

@@ -76,6 +76,14 @@ int PreparedTrackSource::mix(
             }
             const Command command = queue_[read];
             if (command.generation != generation_.load(std::memory_order_acquire)) {
+                // A cancelled Swap owns a Ready slot that no later command can
+                // activate. Release it while consuming the stale command;
+                // otherwise repeated scheduled loads permanently exhaust the
+                // fixed source slots. This is an atomic state transition only
+                // and remains safe for the real-time callback.
+                if (command.type == CommandType::Swap && command.slot < kSlots) {
+                    abandonReadySlot(static_cast<int>(command.slot));
+                }
                 read_.store(
                     (read + 1U) % static_cast<std::uint32_t>(kCommandCapacity),
                     std::memory_order_release);

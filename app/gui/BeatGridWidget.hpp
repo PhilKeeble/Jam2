@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BeatGridModel.hpp"
+#include "GuiControlContract.hpp"
 
 #include <QWidget>
 #include <QVector>
@@ -128,6 +129,13 @@ private:
     void setOverviewPage(int page);
     void updateOverviewPagination();
     void focusLivePosition(int liveBar, int liveBeat, int beats);
+    void registerControl(
+        QObject& control,
+        const QString& suffix,
+        const QString& contract,
+        jam2::gui::GuiControlAvailability availability =
+            jam2::gui::GuiControlAvailability::StateGated,
+        const QString& family = {}) const;
 
     BeatGridModel ownedModel_;
     BeatGridModel* model_ = nullptr;

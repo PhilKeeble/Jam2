@@ -1,7 +1,10 @@
 #include "DebugActionValidation.hpp"
 
+#include "AutomationActionRegistry.hpp"
+
 #include <QJsonValue>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <set>
@@ -84,18 +87,19 @@ bool jam2ValidateDebugAction(const QJsonObject& action, QString& error)
         return false;
     }
 
-    const QString type = action.value(QStringLiteral("type")).toString();
-    static const std::set<QString> supportedTypes{
-        QStringLiteral("metronome.enabled"), QStringLiteral("metronome.bpm"),
-        QStringLiteral("metronome.mode"), QStringLiteral("metronome.level"),
-        QStringLiteral("remote.level"), QStringLiteral("track.sync"),
-        QStringLiteral("track.load"), QStringLiteral("track.play"),
-        QStringLiteral("track.stop"), QStringLiteral("track.restart"),
-        QStringLiteral("track.record-start"), QStringLiteral("recording.start"),
-        QStringLiteral("recording.stop"), QStringLiteral("snapshot"),
-        QStringLiteral("shutdown")};
-    if (!supportedTypes.contains(type)) {
+    const QString typeName = action.value(QStringLiteral("type")).toString();
+    const auto type = jam2AutomationActionType(typeName);
+    if (!type.has_value()) {
         error = QStringLiteral("unsupported action type");
+        return false;
+    }
+
+    const auto descriptors = jam2AutomationActionDescriptors();
+    const auto descriptor = std::find_if(
+        descriptors.begin(), descriptors.end(),
+        [type](const Jam2AutomationActionDescriptor& item) { return item.type == *type; });
+    if (descriptor == descriptors.end()) {
+        error = QStringLiteral("automation action registry is inconsistent");
         return false;
     }
 
@@ -103,20 +107,16 @@ bool jam2ValidateDebugAction(const QJsonObject& action, QString& error)
         QStringLiteral("id"), QStringLiteral("type"),
         QStringLiteral("after_event"), QStringLiteral("delay_frames"),
         QStringLiteral("apply_frame")};
-    if (type == QStringLiteral("metronome.enabled") ||
-        type == QStringLiteral("track.sync")) {
+    if (descriptor->payload == Jam2AutomationPayload::Enabled) {
         allowed.insert(QStringLiteral("enabled"));
-    } else if (type == QStringLiteral("metronome.bpm") ||
-               type == QStringLiteral("metronome.level") ||
-               type == QStringLiteral("remote.level")) {
+    } else if (descriptor->payload == Jam2AutomationPayload::Bpm ||
+               descriptor->payload == Jam2AutomationPayload::Gain) {
         allowed.insert(QStringLiteral("value"));
-    } else if (type == QStringLiteral("metronome.mode")) {
+    } else if (descriptor->payload == Jam2AutomationPayload::MetronomeMode) {
         allowed.insert(QStringLiteral("mode"));
-    } else if (type == QStringLiteral("track.load") ||
-               type == QStringLiteral("recording.start")) {
+    } else if (descriptor->payload == Jam2AutomationPayload::Path) {
         allowed.insert(QStringLiteral("path"));
-    } else if (type == QStringLiteral("track.restart") ||
-               type == QStringLiteral("track.record-start")) {
+    } else if (descriptor->payload == Jam2AutomationPayload::OptionalCountInBars) {
         allowed.insert(QStringLiteral("count_in_bars"));
     }
     for (auto it = action.begin(); it != action.end(); ++it) {
@@ -148,18 +148,16 @@ bool jam2ValidateDebugAction(const QJsonObject& action, QString& error)
         }
     }
 
-    if (type == QStringLiteral("metronome.enabled") ||
-        type == QStringLiteral("track.sync")) {
+    if (descriptor->payload == Jam2AutomationPayload::Enabled) {
         if (!action.value(QStringLiteral("enabled")).isBool()) {
             error = QStringLiteral("enabled must be a boolean");
             return false;
         }
-    } else if (type == QStringLiteral("metronome.bpm")) {
+    } else if (descriptor->payload == Jam2AutomationPayload::Bpm) {
         return boundedInteger(action, QStringLiteral("value"), 1, 400, true, error);
-    } else if (type == QStringLiteral("metronome.level") ||
-               type == QStringLiteral("remote.level")) {
+    } else if (descriptor->payload == Jam2AutomationPayload::Gain) {
         return boundedGain(action, error);
-    } else if (type == QStringLiteral("metronome.mode")) {
+    } else if (descriptor->payload == Jam2AutomationPayload::MetronomeMode) {
         const QJsonValue value = action.value(QStringLiteral("mode"));
         static const std::set<QString> modes{
             QStringLiteral("shared-grid"), QStringLiteral("leader-audio"),
@@ -168,15 +166,13 @@ bool jam2ValidateDebugAction(const QJsonObject& action, QString& error)
             error = QStringLiteral("mode is not supported");
             return false;
         }
-    } else if (type == QStringLiteral("track.load") ||
-               type == QStringLiteral("recording.start")) {
+    } else if (descriptor->payload == Jam2AutomationPayload::Path) {
         if (!boundedOptionalText(action, QStringLiteral("path"), kMaxActionPathBytes, error) ||
             !action.contains(QStringLiteral("path"))) {
             if (error.isEmpty()) error = QStringLiteral("path is required");
             return false;
         }
-    } else if ((type == QStringLiteral("track.restart") ||
-                type == QStringLiteral("track.record-start")) &&
+    } else if (descriptor->payload == Jam2AutomationPayload::OptionalCountInBars &&
                !boundedInteger(action, QStringLiteral("count_in_bars"), 0, 8, false, error)) {
         return false;
     }

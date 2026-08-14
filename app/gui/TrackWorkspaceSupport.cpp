@@ -3,15 +3,14 @@
 #include "GuiLoopbackRecorder.hpp"
 
 #include "pcm16_wav.hpp"
+#include "runtime_limits.hpp"
 
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
-#include <QMap>
 #include <QSaveFile>
-#include <QSet>
 #include <QtEndian>
 
 #include <algorithm>
@@ -37,8 +36,44 @@ QString sha256FileHex(const QString& path)
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) return {};
     QCryptographicHash hash(QCryptographicHash::Sha256);
-    while (!file.atEnd()) hash.addData(file.read(1024 * 1024));
+    while (!file.atEnd()) {
+        const QByteArray block = file.read(1024 * 1024);
+        if (block.isEmpty() && file.error() != QFileDevice::NoError) return {};
+        hash.addData(block);
+    }
     return QString::fromLatin1(hash.result().toHex());
+}
+
+Qt::CaseSensitivity pathCaseSensitivity()
+{
+#if defined(_WIN32)
+    return Qt::CaseInsensitive;
+#else
+    return Qt::CaseSensitive;
+#endif
+}
+
+QString normalizedPath(const QString& path)
+{
+    return QDir::cleanPath(QDir::fromNativeSeparators(path.trimmed()));
+}
+
+bool samePath(const QString& first, const QString& second)
+{
+    return normalizedPath(first).compare(
+        normalizedPath(second), pathCaseSensitivity()) == 0;
+}
+
+bool isSafeAssetFolder(const QString& folder)
+{
+    if (folder.isEmpty() || folder == QStringLiteral(".") ||
+        folder == QStringLiteral("..")) {
+        return false;
+    }
+    return std::all_of(folder.cbegin(), folder.cend(), [](QChar character) {
+        return character.isLetterOrNumber() || character == QLatin1Char('-') ||
+            character == QLatin1Char('_');
+    });
 }
 
 void appendLe16(QByteArray& bytes, std::uint16_t value)
@@ -137,62 +172,6 @@ bool isManagedPracticeReference(const LooperLane& lane)
         lane.name == QStringLiteral("Practice Support");
 }
 
-QString laneMergeKey(const QJsonObject& lane, int index)
-{
-    const QString id = lane.value(QStringLiteral("id")).toString();
-    if (!id.isEmpty()) return QStringLiteral("id:") + id;
-    const QString hash = lane.value(QStringLiteral("asset_hash")).toString();
-    if (!hash.isEmpty()) return QStringLiteral("hash:") + hash;
-    return QStringLiteral("index:%1").arg(index);
-}
-
-QMap<QString, QJsonObject> lanesByKey(const QJsonArray& lanes)
-{
-    QMap<QString, QJsonObject> mapped;
-    for (int index = 0; index < lanes.size(); ++index) {
-        mapped.insert(laneMergeKey(lanes.at(index).toObject(), index),
-            lanes.at(index).toObject());
-    }
-    return mapped;
-}
-
-QStringList laneOrder(const QJsonArray& lanes)
-{
-    QStringList order;
-    for (int index = 0; index < lanes.size(); ++index) {
-        order.append(laneMergeKey(lanes.at(index).toObject(), index));
-    }
-    return order;
-}
-
-QJsonObject mergeLaneObject(
-    const QJsonObject& base,
-    const QJsonObject& current,
-    const QJsonObject& proposed,
-    int& mergedChanges,
-    int& conflicts)
-{
-    QJsonObject merged = current;
-    QSet<QString> keys;
-    for (auto it = base.begin(); it != base.end(); ++it) keys.insert(it.key());
-    for (auto it = current.begin(); it != current.end(); ++it) keys.insert(it.key());
-    for (auto it = proposed.begin(); it != proposed.end(); ++it) keys.insert(it.key());
-    for (const QString& key : std::as_const(keys)) {
-        const QJsonValue baseValue = base.value(key);
-        const QJsonValue currentValue = current.value(key);
-        const QJsonValue proposedValue = proposed.value(key);
-        if (proposedValue == baseValue || proposedValue == currentValue) continue;
-        if (currentValue == baseValue) {
-            if (proposedValue.isUndefined()) merged.remove(key);
-            else merged.insert(key, proposedValue);
-            ++mergedChanges;
-        } else {
-            ++conflicts;
-        }
-    }
-    return merged;
-}
-
 } // namespace
 
 WavMetadata readWavMetadata(const QString& path)
@@ -225,6 +204,22 @@ StagedPcm16Asset stagePcm16Asset(
     const QFileInfo sourceInfo(sourcePath);
     result.sourcePath = sourceInfo.absoluteFilePath();
     result.displayName = sourceInfo.completeBaseName();
+    const QString trimmedStagingFolder = stagingFolder.trimmed();
+    if (trimmedStagingFolder.isEmpty() ||
+        !QFileInfo(trimmedStagingFolder).isAbsolute()) {
+        result.error = QStringLiteral("WAV staging folder must be an absolute path");
+        return result;
+    }
+    if (!isSafeAssetFolder(assetFolder)) {
+        result.error = QStringLiteral(
+            "WAV asset folder must be one safe directory name");
+        return result;
+    }
+    if (expectedSampleRate != 0 &&
+        !jam2::limits::valid_sample_rate(expectedSampleRate)) {
+        result.error = QStringLiteral("requested WAV sample rate is outside the supported range");
+        return result;
+    }
     try {
         result.metadata = readWavMetadata(result.sourcePath);
     } catch (const std::exception& error) {
@@ -287,7 +282,7 @@ StagedPcm16Asset stagePcm16Asset(
             hash.addData(header);
             hash.addData(audioBytes);
             result.sha256 = QString::fromLatin1(hash.result().toHex());
-            result.stagedPath = QDir(stagingFolder).absoluteFilePath(
+            result.stagedPath = QDir(trimmedStagingFolder).absoluteFilePath(
                 assetFolder + QLatin1Char('/') + result.sha256 + QStringLiteral(".wav"));
             if (!QDir().mkpath(QFileInfo(result.stagedPath).absolutePath())) {
                 throw std::runtime_error("could not create the WAV staging folder");
@@ -301,6 +296,7 @@ StagedPcm16Asset stagePcm16Asset(
                     !destination.commit()) {
                     throw std::runtime_error("could not atomically write the resampled WAV");
                 }
+                result.stagedFileCreated = true;
             }
 
             result.metadata.audioFormat = 1;
@@ -329,13 +325,13 @@ StagedPcm16Asset stagePcm16Asset(
         }
     }
     result.sha256 = result.metadata.sha256;
-    const QString managedFolder = QDir(stagingFolder).absoluteFilePath(assetFolder);
+    const QString managedFolder = QDir(trimmedStagingFolder).absoluteFilePath(assetFolder);
     if (assetFolder == QStringLiteral("recorded") &&
-        QDir::cleanPath(sourceInfo.absolutePath()) == QDir::cleanPath(managedFolder)) {
+        samePath(sourceInfo.absolutePath(), managedFolder)) {
         result.stagedPath = result.sourcePath;
         return result;
     }
-    result.stagedPath = QDir(stagingFolder).absoluteFilePath(
+    result.stagedPath = QDir(trimmedStagingFolder).absoluteFilePath(
         assetFolder + QLatin1Char('/') + result.sha256 + QStringLiteral(".wav"));
     if (!QDir().mkpath(QFileInfo(result.stagedPath).absolutePath())) {
         result.error = QStringLiteral("could not create the WAV staging folder");
@@ -365,6 +361,12 @@ StagedPcm16Asset stagePcm16Asset(
     }
     if (!destination.commit()) {
         result.error = QStringLiteral("could not atomically commit the staged WAV");
+        return result;
+    }
+    result.stagedFileCreated = true;
+    if (sha256FileHex(result.stagedPath) != result.sha256) {
+        result.error = QStringLiteral(
+            "source WAV changed while it was being staged");
     }
     return result;
 }
@@ -392,6 +394,10 @@ int mergeSynchronizedLooperLanes(
                         return true;
                     }
                     if (remote.id.isEmpty() || local.id != remote.id) return false;
+                    if (!local.localOnly && remote.assetHash.isEmpty() &&
+                        remote.assetPath.trimmed().isEmpty()) {
+                        return true;
+                    }
                     return local.assetHash == remote.assetHash ||
                         (local.assetHash.isEmpty() && local.assetPath.trimmed().isEmpty());
                 });
@@ -420,6 +426,10 @@ int mergeSynchronizedLooperLanes(
                         return true;
                     }
                     if (local.id.isEmpty() || remote.id != local.id) return false;
+                    if (!local.localOnly && remote.assetHash.isEmpty() &&
+                        remote.assetPath.trimmed().isEmpty()) {
+                        return true;
+                    }
                     return remote.assetHash == local.assetHash ||
                         (local.assetHash.isEmpty() && local.assetPath.trimmed().isEmpty());
                 });
@@ -467,7 +477,12 @@ int mergeLocalOnlyLooperLanes(
                 received.banks().at(bankIndex).lanes.cbegin(),
                 received.banks().at(bankIndex).lanes.cend(),
                 [&local](const LooperLane& candidate) {
-                    return !local.assetHash.isEmpty() && candidate.assetHash == local.assetHash;
+                    if (!local.assetHash.isEmpty()) {
+                        return candidate.assetHash == local.assetHash;
+                    }
+                    return candidate.assetHash.isEmpty() &&
+                        !candidate.assetPath.trimmed().isEmpty() &&
+                        samePath(candidate.assetPath, local.assetPath);
                 });
             if (alreadyPresent) continue;
             LooperLane preservedLane = local;
@@ -483,121 +498,4 @@ int mergeLocalOnlyLooperLanes(
     }
     if (preserved > 0) song.insert(QStringLiteral("looper"), received.toJson());
     return preserved;
-}
-
-QJsonObject mergeConcurrentLooperMetadata(
-    const QJsonObject& baseSong,
-    const QJsonObject& currentSong,
-    const QJsonObject& proposedSong,
-    int* mergedChanges,
-    int* conflicts)
-{
-    int changes = 0;
-    int collisions = 0;
-    QJsonObject result = currentSong;
-    const QJsonObject baseLooper = baseSong.value(QStringLiteral("looper")).toObject();
-    QJsonObject currentLooper = currentSong.value(QStringLiteral("looper")).toObject();
-    const QJsonObject proposedLooper = proposedSong.value(QStringLiteral("looper")).toObject();
-    QJsonArray baseBanks = baseLooper.value(QStringLiteral("banks")).toArray();
-    QJsonArray currentBanks = currentLooper.value(QStringLiteral("banks")).toArray();
-    const QJsonArray proposedBanks = proposedLooper.value(QStringLiteral("banks")).toArray();
-    const int bankCount = qMin(currentBanks.size(), proposedBanks.size());
-    for (int bankIndex = 0; bankIndex < bankCount; ++bankIndex) {
-        const QJsonObject baseBank = bankIndex < baseBanks.size()
-            ? baseBanks.at(bankIndex).toObject() : QJsonObject{};
-        QJsonObject currentBank = currentBanks.at(bankIndex).toObject();
-        const QJsonObject proposedBank = proposedBanks.at(bankIndex).toObject();
-        const QJsonArray baseLanes = baseBank.value(QStringLiteral("lanes")).toArray();
-        const QJsonArray currentLanes = currentBank.value(QStringLiteral("lanes")).toArray();
-        const QJsonArray proposedLanes = proposedBank.value(QStringLiteral("lanes")).toArray();
-        const auto baseMap = lanesByKey(baseLanes);
-        const auto currentMap = lanesByKey(currentLanes);
-        const auto proposedMap = lanesByKey(proposedLanes);
-        QMap<QString, QJsonObject> mergedMap;
-        QSet<QString> laneKeys;
-        for (auto it = baseMap.cbegin(); it != baseMap.cend(); ++it) laneKeys.insert(it.key());
-        for (auto it = currentMap.cbegin(); it != currentMap.cend(); ++it) laneKeys.insert(it.key());
-        for (auto it = proposedMap.cbegin(); it != proposedMap.cend(); ++it) laneKeys.insert(it.key());
-        for (const QString& key : std::as_const(laneKeys)) {
-            const bool inBase = baseMap.contains(key);
-            const bool inCurrent = currentMap.contains(key);
-            const bool inProposed = proposedMap.contains(key);
-            if (!inBase) {
-                if (inCurrent) mergedMap.insert(key, currentMap.value(key));
-                if (inProposed && !inCurrent) {
-                    mergedMap.insert(key, proposedMap.value(key));
-                    ++changes;
-                } else if (inProposed && inCurrent &&
-                           proposedMap.value(key) != currentMap.value(key)) {
-                    ++collisions;
-                }
-                continue;
-            }
-            if (!inCurrent && !inProposed) continue;
-            if (!inCurrent) {
-                if (proposedMap.value(key) != baseMap.value(key)) {
-                    mergedMap.insert(key, proposedMap.value(key));
-                    ++changes;
-                    ++collisions;
-                } else {
-                    ++changes;
-                }
-                continue;
-            }
-            if (!inProposed) {
-                if (currentMap.value(key) != baseMap.value(key)) {
-                    mergedMap.insert(key, currentMap.value(key));
-                    ++collisions;
-                } else {
-                    ++changes;
-                }
-                continue;
-            }
-            mergedMap.insert(key, mergeLaneObject(
-                baseMap.value(key), currentMap.value(key), proposedMap.value(key),
-                changes, collisions));
-        }
-        QStringList order = laneOrder(currentLanes) == laneOrder(baseLanes)
-            ? laneOrder(proposedLanes) : laneOrder(currentLanes);
-        for (auto it = mergedMap.cbegin(); it != mergedMap.cend(); ++it) {
-            if (!order.contains(it.key())) order.append(it.key());
-        }
-        QJsonArray mergedLanes;
-        for (const QString& key : std::as_const(order)) {
-            if (mergedMap.contains(key)) mergedLanes.append(mergedMap.value(key));
-        }
-        currentBank.insert(QStringLiteral("lanes"), mergedLanes);
-        for (const QString& key : {QStringLiteral("id"), QStringLiteral("timing")}) {
-            const QJsonValue baseValue = baseBank.value(key);
-            const QJsonValue currentValue = currentBank.value(key);
-            const QJsonValue proposedValue = proposedBank.value(key);
-            if (proposedValue != baseValue && proposedValue != currentValue) {
-                if (currentValue == baseValue) {
-                    currentBank.insert(key, proposedValue);
-                    ++changes;
-                } else {
-                    ++collisions;
-                }
-            }
-        }
-        currentBanks.replace(bankIndex, currentBank);
-    }
-    currentLooper.insert(QStringLiteral("banks"), currentBanks);
-    for (const QString& key : {QStringLiteral("arrangement"), QStringLiteral("active_bank")}) {
-        const QJsonValue baseValue = baseLooper.value(key);
-        const QJsonValue currentValue = currentLooper.value(key);
-        const QJsonValue proposedValue = proposedLooper.value(key);
-        if (proposedValue != baseValue && proposedValue != currentValue) {
-            if (currentValue == baseValue) {
-                currentLooper.insert(key, proposedValue);
-                ++changes;
-            } else {
-                ++collisions;
-            }
-        }
-    }
-    result.insert(QStringLiteral("looper"), currentLooper);
-    if (mergedChanges) *mergedChanges = changes;
-    if (conflicts) *conflicts = collisions;
-    return result;
 }

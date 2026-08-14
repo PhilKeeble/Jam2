@@ -46,6 +46,13 @@ ControlServer::~ControlServer()
     close();
 }
 
+ControlServer::Stats ControlServer::stats() const
+{
+    Stats snapshot = stats_;
+    snapshot.pendingCapRejects += server_.pendingDeliveryRejects();
+    return snapshot;
+}
+
 bool ControlServer::listen(quint16 port, const QString& sessionHex, const QString& keyHex)
 {
     close();
@@ -518,6 +525,10 @@ void ControlServer::disconnectPeer(const PeerHandle& peer, const QString& detail
             const PeerHandle assetPeer = findAuthenticatedPeer(token, true);
             if (assetPeer && assetPeer->connection) {
                 assetPeer->connection->close();
+                // Closing a native connection suppresses its later read callback,
+                // so remove the paired asset entry now. Otherwise a reconnect
+                // with the same peer token is rejected forever as a duplicate.
+                disconnectPeer(assetPeer);
             }
         }
         return;

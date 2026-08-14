@@ -7,6 +7,12 @@
 
 namespace {
 
+QString& preferencesFilePathOverride()
+{
+    static QString path;
+    return path;
+}
+
 void loadAudio(QSettings& settings, AudioDevicePreference& value)
 {
     value.backend = settings.value(QStringLiteral("backend"), value.backend).toString();
@@ -159,8 +165,29 @@ void saveLoopbackRecording(QSettings& s, const LoopbackRecordingPreference& v)
 
 QString UserPreferencesStore::filePath()
 {
+    if (!preferencesFilePathOverride().isEmpty()) {
+        return preferencesFilePathOverride();
+    }
     const QString root = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
     return QDir(root).filePath(QStringLiteral("preferences.ini"));
+}
+
+bool UserPreferencesStore::setFilePathForTesting(const QString& path, QString& error)
+{
+    error.clear();
+    const QFileInfo info(path);
+    if (!info.isAbsolute()) {
+        error = QStringLiteral("test preferences path must be absolute");
+        return false;
+    }
+    const QString clean = QDir::cleanPath(info.absoluteFilePath());
+    const QString parent = QFileInfo(clean).absolutePath();
+    if (clean.isEmpty() || parent.isEmpty() || !QDir().mkpath(parent)) {
+        error = QStringLiteral("test preferences folder could not be created");
+        return false;
+    }
+    preferencesFilePathOverride() = clean;
+    return true;
 }
 
 UserPreferences UserPreferencesStore::load()

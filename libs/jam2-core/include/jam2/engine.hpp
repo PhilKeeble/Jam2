@@ -182,6 +182,7 @@ enum class EngineEventType : std::uint8_t {
 };
 
 inline constexpr std::size_t kEngineEventTextBytes = 512;
+inline constexpr std::size_t kEngineEventIdBytes = kEngineCommandIdBytes;
 
 struct EngineEvent {
     EngineEventType type = EngineEventType::Lifecycle;
@@ -193,6 +194,9 @@ struct EngineEvent {
     int sample_rate = 0;
     bool ok = true;
     std::array<char, kEngineEventTextBytes> text{};
+    // Local engine/GUI correlation only. This is never serialized onto the
+    // Jam2 network protocol.
+    std::array<char, kEngineEventIdBytes> id{};
 };
 
 struct EngineRecordingSnapshot {
@@ -312,6 +316,10 @@ struct EngineSnapshot {
     std::uint64_t transport_countdown_start_frame = 0;
     bool transport_pending = false;
     std::uint64_t transport_commit_count = 0;
+    bool recording_count_in_active = false;
+    bool playback_count_in_active = false;
+    std::uint64_t count_in_start_frame = 0;
+    std::uint64_t count_in_target_frame = 0;
     int input_peak_ppm = 0;
     int send_peak_ppm = 0;
     int monitor_peak_ppm = 0;
@@ -420,5 +428,6 @@ private:
 bool engine_command_set_text(EngineCommand& command, std::string_view text) noexcept;
 bool engine_command_set_id(EngineCommand& command, std::string_view id) noexcept;
 std::string_view engine_event_text(const EngineEvent& event) noexcept;
+std::string_view engine_event_id(const EngineEvent& event) noexcept;
 
 } // namespace jam2

@@ -19,5 +19,6 @@ private:
         MainWindow& window,
         QWidget* owner,
         QHBoxLayout* layout,
-        bool looper);
+        bool looper,
+        const char* view);
 };

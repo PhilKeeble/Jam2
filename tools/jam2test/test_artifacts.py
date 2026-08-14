@@ -14,12 +14,13 @@ class ArtifactTests(unittest.TestCase):
             parent = Path(directory)
             tools = parent / "repo" / "tools"
             tools.mkdir(parents=True)
-            first = allocate_invocation("validate", tools)
-            second = allocate_invocation("validate", tools)
-            stress = allocate_invocation("stress", tools)
+            first = allocate_invocation("fuzz", tools)
+            second = allocate_invocation("fuzz", tools)
+            connectivity = allocate_invocation("connectivity", tools)
             self.assertNotEqual(first.root, second.root)
-            self.assertEqual(first.family_root.parent, stress.family_root.parent)
-            self.assertNotEqual(first.family_root, stress.family_root)
+            self.assertEqual(
+                first.family_root.parent, connectivity.family_root.parent)
+            self.assertNotEqual(first.family_root, connectivity.family_root)
             self.assertRegex(first.invocation_id, r"^\d{8}T\d{4}Z(?:_\d+)?$")
 
     def test_custom_output_is_the_exact_timestamp_parent(self):
@@ -39,39 +40,36 @@ class ArtifactTests(unittest.TestCase):
             parent = Path(directory)
             tools = parent / "repo" / "tools"
             tools.mkdir(parents=True)
-            validation_output = parent / "validation"
-            stress_output = parent / "stress"
-            validation = allocate_invocation(
-                "validate", tools, validation_output, "keep")
-            stress = allocate_invocation("stress", tools, stress_output, "old")
-            marker = validation.root / "marker"
+            benchmark_output = parent / "benchmark"
+            fuzz_output = parent / "fuzz"
+            benchmark = allocate_invocation(
+                "benchmark", tools, benchmark_output, "keep")
+            fuzz = allocate_invocation("fuzz", tools, fuzz_output, "old")
+            marker = benchmark.root / "marker"
             marker.write_text("keep")
             replacement = allocate_invocation(
-                "stress", tools, stress_output, "new", clean=True)
+                "fuzz", tools, fuzz_output, "new", clean=True)
             self.assertTrue(marker.exists())
-            self.assertEqual(stress.root, replacement.root)
+            self.assertEqual(fuzz.root, replacement.root)
             self.assertTrue(replacement.root.exists())
 
-    def test_validate_clean_removes_selected_validate_root_only(self):
+    def test_default_clean_removes_selected_fuzz_root_only(self):
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory)
             tools = parent / "repo" / "tools"
             tools.mkdir(parents=True)
-            validation_output = parent / "validation"
-            stress_output = parent / "stress"
-            validation = allocate_invocation(
-                "validate", tools, validation_output, "old")
-            stress = allocate_invocation(
-                "stress", tools, stress_output, "keep")
-            validation_marker = validation.root / "old-evidence"
-            stress_marker = stress.root / "retained-evidence"
-            validation_marker.write_text("old")
-            stress_marker.write_text("keep")
+            fuzz = allocate_invocation("fuzz", tools, run_id="old")
+            connectivity = allocate_invocation(
+                "connectivity", tools, run_id="keep")
+            fuzz_marker = fuzz.root / "old-evidence"
+            connectivity_marker = connectivity.root / "retained-evidence"
+            fuzz_marker.write_text("old")
+            connectivity_marker.write_text("keep")
             replacement = allocate_invocation(
-                "validate", tools, validation_output, "new", clean=True)
-            self.assertFalse(validation_marker.exists())
-            self.assertEqual(validation.root, replacement.root)
-            self.assertTrue(stress_marker.exists())
+                "fuzz", tools, run_id="new", clean=True)
+            self.assertFalse(fuzz_marker.exists())
+            self.assertEqual(fuzz.family_root, replacement.family_root)
+            self.assertTrue(connectivity_marker.exists())
             self.assertTrue(replacement.root.exists())
 
     def test_benchmark_attempt_uses_normalized_nested_tree(self):
@@ -106,7 +104,7 @@ class ArtifactTests(unittest.TestCase):
             tools = Path(directory) / "repo" / "tools"
             tools.mkdir(parents=True)
             with self.assertRaisesRegex(ValueError, "2048-character bound"):
-                allocate_invocation("validate", tools, Path("C:/") / ("x" * 2049))
+                allocate_invocation("benchmark", tools, Path("C:/") / ("x" * 2049))
 
 
 if __name__ == "__main__":

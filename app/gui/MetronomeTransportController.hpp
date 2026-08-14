@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <optional>
 
 class TapTempoTracker {
@@ -24,13 +25,21 @@ private:
 
 class MetronomeTransportController {
 public:
+    using CommandSubmitter = std::function<bool(const jam2::EngineCommand&)>;
+
     struct SnapshotUpdate {
         bool recordingScheduleAdvanced = false;
         std::uint64_t recordingCountdownStartFrame = 0;
         std::uint64_t recordingStartFrame = 0;
     };
 
-    explicit MetronomeTransportController(ApplicationRuntime& runtime) noexcept;
+    explicit MetronomeTransportController(ApplicationRuntime& runtime)
+        : submitter_([&runtime](const jam2::EngineCommand& command) {
+              return runtime.submit(command);
+          })
+    {
+    }
+    explicit MetronomeTransportController(CommandSubmitter submitter);
 
     PlaybackGrid& grid() noexcept { return grid_; }
     const PlaybackGrid& grid() const noexcept { return grid_; }
@@ -50,7 +59,7 @@ public:
     }
 
 private:
-    ApplicationRuntime& runtime_;
+    CommandSubmitter submitter_;
     PlaybackGrid grid_;
     std::uint64_t recording_schedule_revision_ = 0;
     bool local_running_ = true;

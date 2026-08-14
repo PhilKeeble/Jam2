@@ -364,7 +364,6 @@ double inharmonic(
 
 double sourceSample(
     const QString& source,
-    const QString& laneId,
     const QString& articulation,
     const ResearchDrumPiece& piece,
     double excitation,
@@ -761,7 +760,6 @@ double researchDrumTailSeconds(
 
 double researchDrumSample(
     const ResearchDrumPiece& piece,
-    const QString& laneId,
     const QString& articulation,
     int velocity,
     std::uint32_t seed,
@@ -791,7 +789,6 @@ double researchDrumSample(
                      piece.driveAmount));
     const double first = sourceSample(
         piece.source,
-        laneId,
         articulation,
         piece,
         excitation,
@@ -806,7 +803,6 @@ double researchDrumSample(
         piece.blend > 0.0f) {
         const double second = sourceSample(
             piece.secondSource,
-            laneId,
             articulation,
             piece,
             excitation,

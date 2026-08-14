@@ -22,6 +22,7 @@
 #include <array>
 #include <cmath>
 #include <memory>
+#include <set>
 
 namespace {
 
@@ -813,6 +814,60 @@ void MetronomePatternWidget::setStepState(int step, int state)
     accents_[step] = nextAccent;
     update();
     if (onStepChanged) onStepChanged(step, nextEnabled, nextAccent);
+}
+
+QVector<jam2::gui::GuiVirtualControl> MetronomePatternWidget::guiVirtualControls() const
+{
+    QVector<jam2::gui::GuiVirtualControl> controls;
+    const int steps = qMin(enabled_.size(), accents_.size());
+    controls.reserve(steps);
+    for (int step = 0; step < steps; ++step) {
+        controls.push_back(jam2::gui::makeGuiVirtualControl(
+            QStringLiteral("metronome.pattern.step.%1").arg(step),
+            QStringLiteral("metronome.pattern-step"),
+            jam2::gui::GuiControlAvailability::StateGated,
+            {QStringLiteral("cycle"), QStringLiteral("set-state")},
+            QStringLiteral("metronome.pattern-step"),
+            {
+                {QStringLiteral("step"), step},
+                {QStringLiteral("hit"), enabled_.at(step)},
+                {QStringLiteral("accent"), accents_.at(step)},
+                {QStringLiteral("current"), active_ && currentStep_ == step},
+            }));
+    }
+    return controls;
+}
+
+bool MetronomePatternWidget::invokeGuiVirtualControl(
+    const QString& id,
+    const QString& operation,
+    const QVariant& value,
+    QString& error)
+{
+    const QString prefix = QStringLiteral("metronome.pattern.step.");
+    if (!id.startsWith(prefix)) {
+        error = QStringLiteral("metronome pattern target is invalid");
+        return false;
+    }
+    bool stepOk = false;
+    const int step = id.mid(prefix.size()).toInt(&stepOk);
+    if (!stepOk || step < 0 || step >= enabled_.size() || step >= accents_.size()) {
+        error = QStringLiteral("metronome pattern step is stale or out of range");
+        return false;
+    }
+    const int currentState = enabled_.at(step) ? accents_.at(step) ? 2 : 1 : 0;
+    if (operation == QStringLiteral("cycle")) {
+        setStepState(step, (currentState + 1) % 3);
+        return true;
+    }
+    bool stateOk = false;
+    const int state = value.toInt(&stateOk);
+    if (operation != QStringLiteral("set-state") || !stateOk || state < 0 || state > 2) {
+        error = QStringLiteral("metronome pattern state must be 0, 1, or 2");
+        return false;
+    }
+    setStepState(step, state);
+    return true;
 }
 
 PerformanceHomeWidget::PerformanceHomeWidget(QWidget* parent)
@@ -3088,6 +3143,268 @@ void PerformanceHomeWidget::resizeEvent(QResizeEvent* event)
         peerScrollOffset_,
         qMax(0, peers_.size() - peerVisibleCapacity()));
     update();
+}
+
+QVector<jam2::gui::GuiVirtualControl> PerformanceHomeWidget::guiVirtualControls() const
+{
+    using jam2::gui::GuiControlAvailability;
+    using jam2::gui::makeGuiVirtualControl;
+    QVector<jam2::gui::GuiVirtualControl> controls;
+    const auto addClick = [&controls](
+                              const QString& id,
+                              const QString& contract,
+                              GuiControlAvailability availability,
+                              const QString& family,
+                              QVariantMap state = {}) {
+        controls.push_back(makeGuiVirtualControl(
+            id, contract, availability, {QStringLiteral("click")}, family, std::move(state)));
+    };
+    const QVariantMap commonState{
+        {QStringLiteral("live_bank"), liveBank_},
+        {QStringLiteral("running"), running_},
+    };
+    addClick(
+        QStringLiteral("performance.home.idea.generate"), QStringLiteral("idea.generate"),
+        GuiControlAvailability::Modal, QStringLiteral("performance.home.idea"), commonState);
+    addClick(
+        QStringLiteral("performance.home.idea.browse"), QStringLiteral("idea.catalog"),
+        GuiControlAvailability::Modal, QStringLiteral("performance.home.idea"), commonState);
+    addClick(
+        QStringLiteral("performance.home.idea.continue"), QStringLiteral("idea.continue"),
+        GuiControlAvailability::Modal, QStringLiteral("performance.home.idea"), commonState);
+    addClick(
+        QStringLiteral("performance.home.idea.clear"), QStringLiteral("idea.clear"),
+        GuiControlAvailability::Modal, QStringLiteral("performance.home.idea"), commonState);
+    addClick(
+        QStringLiteral("performance.home.idea.generate-wav"), QStringLiteral("idea.reference-wav"),
+        GuiControlAvailability::Modal, QStringLiteral("performance.home.idea"), commonState);
+    addClick(
+        QStringLiteral("performance.home.idea.jam-taster"), QStringLiteral("idea.jam-taster"),
+        GuiControlAvailability::Modal, QStringLiteral("performance.home.idea"), commonState);
+    addClick(
+        QStringLiteral("performance.home.arrangement"), QStringLiteral("looper.arrangement-dialog"),
+        GuiControlAvailability::Modal, QStringLiteral("performance.home.session"), commonState);
+    addClick(
+        QStringLiteral("performance.home.section.add"), QStringLiteral("song.section-structure"),
+        GuiControlAvailability::StateGated, QStringLiteral("performance.home.section"), commonState);
+    addClick(
+        QStringLiteral("performance.home.section.remove"), QStringLiteral("song.section-structure"),
+        GuiControlAvailability::StateGated, QStringLiteral("performance.home.section"), commonState);
+    addClick(
+        QStringLiteral("performance.home.recording"), QStringLiteral("performance.jam-recording"),
+        GuiControlAvailability::StateGated, QStringLiteral("performance.home.session"),
+        {
+            {QStringLiteral("enabled"), jamRecordingEnabled_},
+            {QStringLiteral("active"), jamRecordingActive_},
+            {QStringLiteral("take"), jamRecordingTake_},
+        });
+    for (const auto& target : QList<QPair<QString, QString>>{
+             {QStringLiteral("performance.home.open.chords.current"), QStringLiteral("chords")},
+             {QStringLiteral("performance.home.open.chords.runway"), QStringLiteral("chords")},
+             {QStringLiteral("performance.home.open.lyrics"), QStringLiteral("lyrics")},
+             {QStringLiteral("performance.home.open.beats.current"), QStringLiteral("beats")},
+             {QStringLiteral("performance.home.open.beats.next"), QStringLiteral("beats")},
+             {QStringLiteral("performance.home.open.looper"), QStringLiteral("looper")},
+         }) {
+        addClick(
+            target.first,
+            QStringLiteral("workspace.navigation"),
+            GuiControlAvailability::StateGated,
+            QStringLiteral("performance.home.navigation"),
+            {{QStringLiteral("workspace"), target.second}});
+    }
+    controls.push_back(makeGuiVirtualControl(
+        QStringLiteral("performance.home.track-gain"),
+        QStringLiteral("looper.track-mix"),
+        GuiControlAvailability::StateGated,
+        {QStringLiteral("set-value")},
+        QStringLiteral("performance.home.mix"),
+        {{QStringLiteral("gain_db"), trackGainDb_}}));
+
+    const int bankCount = model_ ? model_->sections().size() : bankHitRects_.size();
+    for (int bank = 0; bank < bankCount; ++bank) {
+        addClick(
+            QStringLiteral("performance.home.section.queue.%1").arg(bank),
+            QStringLiteral("looper.arrangement-playback"),
+            GuiControlAvailability::StateGated,
+            QStringLiteral("performance.home.section-queue"),
+            {
+                {QStringLiteral("bank"), bank},
+                {QStringLiteral("live"), bank == liveBank_},
+                {QStringLiteral("pending"), bank == pendingBank_},
+            });
+    }
+    std::set<std::uint64_t> peerIds{0};
+    for (const PerformancePeerPresentation& peer : peers_) peerIds.insert(peer.peerId);
+    for (const std::uint64_t peerId : peerIds) {
+        addClick(
+            QStringLiteral("performance.home.peer.%1").arg(peerId),
+            QStringLiteral("performance.peer-selection"),
+            GuiControlAvailability::StateGated,
+            QStringLiteral("performance.home.peer"),
+            {
+                {QStringLiteral("peer_id"), static_cast<qulonglong>(peerId)},
+                {QStringLiteral("selected"), peerId == selectedPeerId_},
+            });
+    }
+    if (!tunerEnableHitRect_.isEmpty()) {
+        addClick(
+            QStringLiteral("performance.home.tuner.enable"),
+            QStringLiteral("performance.tuner"),
+            GuiControlAvailability::StateGated,
+            QStringLiteral("performance.home.tuner"));
+    }
+    if (!tunerHitRect_.isEmpty()) {
+        addClick(
+            QStringLiteral("performance.home.tuner.open"),
+            QStringLiteral("performance.tuner"),
+            GuiControlAvailability::StateGated,
+            QStringLiteral("performance.home.tuner"));
+        addClick(
+            QStringLiteral("performance.home.tuner.disable"),
+            QStringLiteral("performance.tuner"),
+            GuiControlAvailability::StateGated,
+            QStringLiteral("performance.home.tuner"));
+    }
+    if (tunerExpanded_) {
+        addClick(
+            QStringLiteral("performance.home.tuner.close"),
+            QStringLiteral("performance.tuner"),
+            GuiControlAvailability::StateGated,
+            QStringLiteral("performance.home.tuner"));
+        addClick(
+            QStringLiteral("performance.home.tuner.overlay-disable"),
+            QStringLiteral("performance.tuner"),
+            GuiControlAvailability::StateGated,
+            QStringLiteral("performance.home.tuner"));
+    }
+    return controls;
+}
+
+bool PerformanceHomeWidget::invokeGuiVirtualControl(
+    const QString& id,
+    const QString& operation,
+    const QVariant& value,
+    QString& error)
+{
+    if (id == QStringLiteral("performance.home.track-gain")) {
+        bool ok = false;
+        const double gain = value.toDouble(&ok);
+        if (operation != QStringLiteral("set-value") || !ok || !std::isfinite(gain) ||
+            gain < -60.0 || gain > 12.0) {
+            error = QStringLiteral("performance track gain must be between -60 and 12 dB");
+            return false;
+        }
+        setTrackGainDb(gain);
+        if (onTrackGainChanged) onTrackGainChanged(gain);
+        return true;
+    }
+    if (operation != QStringLiteral("click")) {
+        error = QStringLiteral("performance target requires click");
+        return false;
+    }
+    const auto call = [&error](const std::function<void()>& callback, const QString& name) {
+        if (!callback) {
+            error = name + QStringLiteral(" callback is unavailable");
+            return false;
+        }
+        callback();
+        return true;
+    };
+    if (id == QStringLiteral("performance.home.idea.generate"))
+        return call(onGenerateIdea, QStringLiteral("generate idea"));
+    if (id == QStringLiteral("performance.home.idea.browse"))
+        return call(onBrowseIdeas, QStringLiteral("browse ideas"));
+    if (id == QStringLiteral("performance.home.idea.continue"))
+        return call(onContinueIdea, QStringLiteral("continue idea"));
+    if (id == QStringLiteral("performance.home.idea.clear"))
+        return call(onClearIdea, QStringLiteral("clear idea"));
+    if (id == QStringLiteral("performance.home.idea.generate-wav"))
+        return call(onGenerateWav, QStringLiteral("generate WAV"));
+    if (id == QStringLiteral("performance.home.idea.jam-taster"))
+        return call(onJamTaster, QStringLiteral("JamTaster"));
+    if (id == QStringLiteral("performance.home.arrangement"))
+        return call(onManageArrangement, QStringLiteral("arrangement"));
+    if (id == QStringLiteral("performance.home.section.add"))
+        return call(onAddSection, QStringLiteral("add section"));
+    if (id == QStringLiteral("performance.home.section.remove"))
+        return call(onRemoveSection, QStringLiteral("remove section"));
+    if (id == QStringLiteral("performance.home.recording")) {
+        if (!jamRecordingEnabled_) {
+            error = QStringLiteral("jam recording is disabled");
+            return false;
+        }
+        return call(onJamRecordingToggle, QStringLiteral("jam recording"));
+    }
+    if (id == QStringLiteral("performance.home.tuner.enable")) {
+        if (!onTunerEnabledChanged) {
+            error = QStringLiteral("tuner callback is unavailable");
+            return false;
+        }
+        onTunerEnabledChanged(true);
+        return true;
+    }
+    if (id == QStringLiteral("performance.home.tuner.disable") ||
+        id == QStringLiteral("performance.home.tuner.overlay-disable")) {
+        if (!onTunerEnabledChanged) {
+            error = QStringLiteral("tuner callback is unavailable");
+            return false;
+        }
+        tunerExpanded_ = false;
+        onTunerEnabledChanged(false);
+        update();
+        return true;
+    }
+    if (id == QStringLiteral("performance.home.tuner.open")) {
+        tunerExpanded_ = true;
+        update();
+        return true;
+    }
+    if (id == QStringLiteral("performance.home.tuner.close")) {
+        tunerExpanded_ = false;
+        update();
+        return true;
+    }
+    if (id.startsWith(QStringLiteral("performance.home.open."))) {
+        QString workspace;
+        if (id.contains(QStringLiteral("chords"))) workspace = QStringLiteral("chords");
+        else if (id.contains(QStringLiteral("lyrics"))) workspace = QStringLiteral("lyrics");
+        else if (id.contains(QStringLiteral("beats"))) workspace = QStringLiteral("beats");
+        else if (id.endsWith(QStringLiteral("looper"))) workspace = QStringLiteral("looper");
+        if (workspace.isEmpty() || !onOpenDetail) {
+            error = QStringLiteral("performance workspace target is invalid");
+            return false;
+        }
+        onOpenDetail(workspace);
+        return true;
+    }
+    const QString bankPrefix = QStringLiteral("performance.home.section.queue.");
+    if (id.startsWith(bankPrefix)) {
+        bool ok = false;
+        const int bank = id.mid(bankPrefix.size()).toInt(&ok);
+        const int count = model_ ? model_->sections().size() : bankHitRects_.size();
+        if (!ok || bank < 0 || bank >= count || !onBankLaunch) {
+            error = QStringLiteral("performance bank target is stale or invalid");
+            return false;
+        }
+        onBankLaunch(bank);
+        return true;
+    }
+    const QString peerPrefix = QStringLiteral("performance.home.peer.");
+    if (id.startsWith(peerPrefix)) {
+        bool ok = false;
+        const qulonglong peer = id.mid(peerPrefix.size()).toULongLong(&ok);
+        const bool known = peer == 0 || std::any_of(
+            peers_.cbegin(), peers_.cend(), [peer](const auto& item) { return item.peerId == peer; });
+        if (!ok || !known || !onPeerSelected) {
+            error = QStringLiteral("performance peer target is stale or invalid");
+            return false;
+        }
+        onPeerSelected(peer);
+        return true;
+    }
+    error = QStringLiteral("performance virtual target is invalid or stale");
+    return false;
 }
 
 void PerformanceHomeWidget::mousePressEvent(QMouseEvent* event)
