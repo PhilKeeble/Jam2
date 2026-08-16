@@ -56,6 +56,18 @@ enum class LoopbackSampleEncoding {
     Float32,
 };
 
+enum class LoopbackCaptureContent {
+    Audio,
+    NoFrames,
+    SilenceOnly,
+};
+
+LoopbackCaptureContent classify_loopback_capture_content(
+    std::uint64_t rawFrames,
+    std::uint64_t retainedFrames) noexcept;
+
+QString loopback_capture_content_error(LoopbackCaptureContent content);
+
 double decode_loopback_sample(
     std::span<const std::uint8_t> frame,
     LoopbackSampleEncoding encoding,

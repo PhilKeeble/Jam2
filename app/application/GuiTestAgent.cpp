@@ -22,11 +22,13 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QDir>
+#include <QEvent>
 #include <QFileDialog>
 #include <QHeaderView>
 #include <QJsonArray>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMessageBox>
 #include <QMetaObject>
 #include <QPlainTextEdit>
 #include <QPointer>
@@ -54,6 +56,29 @@ constexpr auto kProtocol = "jam2-gui-test-agent";
 constexpr int kPageSize = 32;
 constexpr qsizetype kMaximumTextBytes = 1024;
 constexpr qsizetype kMaximumCommandTextBytes = 4096;
+
+class HiddenGuiWindowFilter final : public QObject {
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (event != nullptr && event->type() == QEvent::Show) {
+            if (auto* messageBox = qobject_cast<QMessageBox*>(watched)) {
+                // QMessageBox asks the platform to play an alert based on its
+                // icon during showEvent(). Hidden GUI-agent runs should not
+                // produce desktop UI or its associated system sound.
+                messageBox->setIcon(QMessageBox::NoIcon);
+            }
+        }
+        if (event != nullptr &&
+            (event->type() == QEvent::Polish || event->type() == QEvent::Show)) {
+            if (auto* widget = qobject_cast<QWidget*>(watched);
+                widget != nullptr && widget->isWindow()) {
+                widget->setAttribute(Qt::WA_DontShowOnScreen, true);
+            }
+        }
+        return QObject::eventFilter(watched, event);
+    }
+};
 
 QString boundedText(QString text)
 {
@@ -1414,6 +1439,12 @@ int jam2RunGuiTestAgent(QApplication& application, int argc, char* argv[])
                          "[--instance-id <id>] [--storage-root <absolute-path>]\n";
             return 2;
         }
+    }
+
+    HiddenGuiWindowFilter hiddenWindowFilter;
+    if (!show) {
+        QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs, true);
+        application.installEventFilter(&hiddenWindowFilter);
     }
 
     if (!storageRoot.isEmpty()) {

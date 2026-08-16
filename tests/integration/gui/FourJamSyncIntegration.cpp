@@ -197,9 +197,11 @@ int main(int argc, char* argv[])
 
     const QString executable = QString::fromLocal8Bit(argv[1]);
     std::array<QStringList, FourPeerCoordinator::kPeerCount> arguments;
+    const bool show = qEnvironmentVariableIntValue("JAM2_TEST_SHOW_GUI") == 1;
     for (std::size_t index = 0; index < arguments.size(); ++index) {
         arguments[index] << QStringLiteral("debug") << QStringLiteral("gui-agent")
             << QStringLiteral("--instance-id") << QStringLiteral("jam-peer-%1").arg(index + 1);
+        if (show) arguments[index] << QStringLiteral("--show-gui");
     }
     FourPeerCoordinator coordinator;
     QString launchError;

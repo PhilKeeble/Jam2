@@ -244,7 +244,6 @@ private:
     bool submitEngineCommand(jam2::EngineCommand command, const QString& context);
     void submitEngineGain(jam2::EngineCommandType type, double gain, const QString& context);
     void submitEngineToggle(jam2::EngineCommandType type, bool enabled, const QString& context);
-    void seekPreparedTrack(std::uint64_t sourceFrame, std::uint64_t targetFrame);
     void setPreparedTrackLoop(bool enabled, std::uint64_t startFrame = 0, std::uint64_t endFrame = 0);
     void restartPreparedTrackQuantized();
     void handleEngineSnapshot(const jam2::EngineSnapshot& snapshot);
@@ -309,7 +308,6 @@ private:
     void exportLooperAudio();
     qint64 bankExactOutputFrames(int bankIndex, int sampleRate) const;
     void addLooperWavs();
-    void loadWavIntoLooperLane();
     bool importWavIntoLooperLane(int laneIndex, const QString& sourcePath);
     void shareLocalTracks(bool includeLocalOnly = false);
     void addEmptyLooperLane();
@@ -318,7 +316,6 @@ private:
     void removeLooperLaneWav(int laneIndex);
     void cancelUnreferencedLooperAssetTransfer(const QString& hash);
     void renameSelectedLooperLane();
-    void moveSelectedLooperLane(int delta);
     bool armSelectedLooperLaneRecording();
     bool showLaneRecordingDialog(
         const QString& bankId,
@@ -354,8 +351,6 @@ private:
     void importLastCaptureToArmedLane();
     void toggleSelectedLooperLaneMute();
     void toggleSelectedLooperLaneSolo();
-    void setSelectedLooperLaneGain();
-    void editSelectedLooperLaneRegion();
     void applySelectedLooperLaneRegion(qint64 startFrame, qint64 sourceStartFrame, qint64 sourceEndFrame);
     void applyLooperLaneGain(int laneIndex, double gainDb);
     void regeneratePreparedMix(int bankIndex = -1);
@@ -373,7 +368,6 @@ private:
     void syncLooperArrangement();
     QString looperAssetAbsolutePath(const LooperLane& lane) const;
     bool materializeLooperAssets(const QString& projectFolder);
-    void loadTrackMetadata();
     QString selectedDeviceId() const;
     QString selectedDeviceDescription() const;
     void refreshLoopbackSources();

@@ -160,6 +160,24 @@ void testSampleDecodingAndConversion()
 
 void testResamplingTrimmingAndAccumulator()
 {
+    using jam2::gui::LoopbackCaptureContent;
+    require(jam2::gui::classify_loopback_capture_content(0, 0) ==
+                LoopbackCaptureContent::NoFrames &&
+            jam2::gui::classify_loopback_capture_content(48000, 0) ==
+                LoopbackCaptureContent::SilenceOnly &&
+            jam2::gui::classify_loopback_capture_content(48000, 1) ==
+                LoopbackCaptureContent::Audio,
+        "loopback capture classification must distinguish missing frames, trimmed silence, and audio");
+    require(jam2::gui::loopback_capture_content_error(
+                LoopbackCaptureContent::NoFrames).contains(
+                    QStringLiteral("No audio was captured")) &&
+            jam2::gui::loopback_capture_content_error(
+                LoopbackCaptureContent::SilenceOnly).contains(
+                    QStringLiteral("Only silence was detected")) &&
+            jam2::gui::loopback_capture_content_error(
+                LoopbackCaptureContent::Audio).isEmpty(),
+        "capture classification must provide exact user-facing failures only for unusable takes");
+
     const std::array<std::int16_t, 8> stereo{
         1000, -1000, 2000, -2000, 3000, -3000, 4000, -4000};
     require(jam2::gui::resample_pcm16_interleaved(stereo, 2, 48000, 48000) ==

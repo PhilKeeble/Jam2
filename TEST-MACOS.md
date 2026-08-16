@@ -1,8 +1,7 @@
 # Jam2 macOS Test Completion Handoff
 
 Windows completion of the native test initiative does not complete macOS. When
-Codex is next run on a macOS endpoint, it must read `AGENTS.md`,
-`AGENT-TESTING.md`, `TEST-PLAN.md`, `TEST-LOG.md`, and `TEST-REVIEW.md` completely
+Codex is next run on a macOS endpoint, it must read `AGENTS.md`, `TEST-PLAN.md`, `TEST-LOG.md`, and `TEST-REVIEW.md` completely
 before making changes.
 
 ## Required macOS completion work
@@ -115,7 +114,8 @@ before making changes.
    duplicates. Mutate Start bind, port, sample rate, create profile, and the
    profile-driven buffer; Cancel and require exact baseline restoration. Mutate
    Join invite, bind, port, join profile, and buffer; Cancel and require only
-   the invite retained per REVIEW-001. Then reserve four distinct TCP/UDP
+   the invite retained, matching the approved Windows behavior. Then reserve
+   four distinct TCP/UDP
    loopback pairs, start one creator through the real Start button and three
    fake-audio joiners through the real Join button, require three active remotes
    and non-zero callbacks on every process, and leave through the public action.
@@ -434,9 +434,9 @@ before making changes.
   commits identical frame bounds under Apple Clang. Keep the explicit reset of
   the simulated live-recording extent before deterministic crop-coordinate
   checks.
-- Inspect `REVIEW-002` on macOS as source ownership only. Do not remove the
-  dormant bank callback or placeholder-lane branch as a parity workaround
-  without the user's behavior decision.
+- Confirm the approved dormant bank callback, impossible placeholder-lane
+  branch, and obsolete MainWindow wrappers remain removed on macOS. Do not
+  restore them as parity work; the painted controls own the maintained flows.
 - Require all temporary state beneath `build/test-artifacts`; this test opens
   no CoreAudio device and launches no peer process.
 
@@ -614,9 +614,10 @@ before making changes.
   abstraction as a parity workaround. If native system-output capture is later
   requested as a macOS feature, add it behind the same narrow capture backend
   and retain all processing/lifecycle contracts.
-- Revisit `REVIEW-003` only after the user chooses whether a valid zero-frame or
-  fully trimmed silent WAV should remain a successful capture. The parity test
-  must preserve current behavior until that decision is made.
+- Preserve the resolved empty-capture behavior: zero captured frames and a take
+  fully removed by silence trimming are failures, create/import no new WAV,
+  retain technical diagnostics, and show the owned user-facing warning outside
+  automation.
 
 ## Iteration 31 track-recording workflow and local-event parity
 
@@ -699,11 +700,9 @@ before making changes.
   top-level scheduled snapshot, immediate publication of generated future
   transport, correlated rejection diagnostics, and stable stored musical-phase
   assertions while render compensation moves.
-- Revisit `REVIEW-004` only after the user decides whether adopted raw
-  transport targets should remain fixed or follow later render-offset slew.
-  Preserve current fixed-target behavior for parity until that decision is
-  made. Continue to use the existing 21 clean/impaired all-mode matrix as the
-  independent live metronome/epoch proof.
+- Preserve the approved fixed adopted raw transport target while render offset
+  continues to slew. Continue to use the existing 21 clean/impaired all-mode
+  matrix as the independent live metronome/epoch proof.
 - No network field, header, payload, parser, version, authentication rule, or
   compatibility path changed on Windows. Do not change any during parity work
   without prior user approval.
@@ -728,10 +727,9 @@ before making changes.
   intentionally case-sensitive outside Windows. Include a Unicode JamJar
   filename and confirm a read-only rename reports an error without moving
   unrelated files.
-- Confirm removal of the unused `waitForWorkers` wrapper compiles cleanly.
-  Leave the unreferenced `track.processing` helpers unchanged until the user
-  resolves `REVIEW-005`; do not remove or revive a message/schema path during
-  parity work without approval.
+- Confirm removal of the unused `waitForWorkers` wrapper and approved obsolete
+  `track.processing` helpers compiles cleanly. Do not revive that unowned
+  message/schema path during parity work.
 - Windows changed no JamJar JSON shape, network message, field, payload,
   parser, protocol version, authentication rule, metronome/epoch behavior, or
   shared-WAV transfer contract. Preserve that scope on macOS.
@@ -813,10 +811,11 @@ before making changes.
   ready/switch ordering. The new barrier diagnostics must be present in
   automation snapshots and all artifacts must remain under, then cleanly
   remove, `build/test-artifacts`.
-- Preserve `REVIEW-006` and `REVIEW-007` without changing validation or adding
-  a commit acknowledgement until the user makes those protocol decisions.
-  Windows changed no `bank.*` name, field, JSON shape, validator, parser,
-  version, authentication rule, or encoding; macOS parity must not either.
+- Preserve the tightened Windows acceptance: optional `bank.request`
+  `target_abs_beat` is empty/absent or a signed-64-bounded decimal string, and
+  `bank.switch` must match both prepared switch ID and bank. No message name,
+  field, JSON shape, emitted value, parser version, authentication rule, or
+  encoding changed. Keep the existing no-second-acknowledgement commit design.
 
 ## Iteration 38 LooperProject editing and Section-shortening parity
 
@@ -842,9 +841,9 @@ before making changes.
   is cancelled. Repeat with two lanes sharing a hash to prove the transfer is
   retained until the final reference is removed.
 - Keep artifacts beneath `build/test-artifacts` and require successful cleanup.
-  Preserve `REVIEW-002` and `REVIEW-008`; do not delete dormant wrappers or
-  change the Section/renderer limits before the user decides their intended
-  behavior.
+  Confirm the approved dormant wrappers remain deleted. Preserve `REVIEW-008`;
+  do not change the Section/renderer limits before their combined duration and
+  allocation ownership is decided.
 - Windows changed no persistence parser/schema, network message, field,
   payload, encoding, validator, version, authentication rule, shared-WAV wire
   behavior, metronome model, or epoch rule. Preserve that scope during parity.
@@ -957,7 +956,7 @@ before making changes.
 - Do not carry Windows WinMM exemptions over to CoreMIDI. With a physical MIDI
   device, validate open, supported short-message routing, unsupported/SysEx
   counters, close, and reopen. If no device is available, record the exact
-  hardware limitation under `REVIEW-011` rather than manufacturing a pass.
+  hardware limitation in `TEST-LOG.md` rather than manufacturing a pass.
 - Re-run the production controller binary/rejection case and staged public
   network create/join help checks. No protocol acceptance or emitted bytes may
   be changed to obtain macOS parity.
@@ -990,6 +989,12 @@ before making changes.
   manifest.
 
 ## macOS acceptance
+
+- Manually run one GUI modal case without `--show-gui` and confirm neither the
+  four main windows nor any Qt/native dialog appears. Repeat with `--show-gui`
+  and confirm the same real windows and dialogs are visible. Hidden GUI-agent
+  mode uses a process-wide Qt top-level filter and disables native choosers;
+  ordinary Jam2 launch must remain unaffected.
 
 - Quick builds omit all test targets.
 - Selected suites build only their required targets.

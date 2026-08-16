@@ -7102,12 +7102,32 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
         };
         QJsonObject invalidLaunch = launch;
         invalidLaunch.remove(QStringLiteral("target_abs_beat"));
+        const QJsonObject requestWithoutTarget{
+            {QStringLiteral("type"), QStringLiteral("bank.request")},
+            {QStringLiteral("bank"), 2},
+        };
+        QJsonObject requestWithEmptyTarget = requestWithoutTarget;
+        requestWithEmptyTarget[QStringLiteral("target_abs_beat")] = QString{};
+        QJsonObject requestAtMaximum = requestWithoutTarget;
+        requestAtMaximum[QStringLiteral("target_abs_beat")] =
+            QString::number((std::numeric_limits<qint64>::max)());
+        QJsonObject requestAboveMaximum = requestWithoutTarget;
+        requestAboveMaximum[QStringLiteral("target_abs_beat")] =
+            QStringLiteral("9223372036854775808");
+        QJsonObject requestWithNumericTarget = requestWithoutTarget;
+        requestWithNumericTarget[QStringLiteral("target_abs_beat")] = 128;
         modelError.clear();
         record(QStringLiteral("bank-switch.prepare-ready-and-exact-target-validate"),
             jam2::application::validateControlMessage(prepare, modelError) &&
             jam2::application::validateControlMessage(ready, modelError) &&
             jam2::application::validateControlMessage(launch, modelError) &&
             !jam2::application::validateControlMessage(invalidLaunch, modelError));
+        record(QStringLiteral("bank-request.optional-target-is-exact-and-signed-64-bounded"),
+            jam2::application::validateControlMessage(requestWithoutTarget, modelError) &&
+            jam2::application::validateControlMessage(requestWithEmptyTarget, modelError) &&
+            jam2::application::validateControlMessage(requestAtMaximum, modelError) &&
+            !jam2::application::validateControlMessage(requestAboveMaximum, modelError) &&
+            !jam2::application::validateControlMessage(requestWithNumericTarget, modelError));
         const auto prepareFromCoordinator = jam2::application::evaluateControlMessage(
             prepare, jam2::application::ControlMessageSource::Coordinator);
         const auto prepareFromPeer = jam2::application::evaluateControlMessage(

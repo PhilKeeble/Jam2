@@ -610,6 +610,35 @@ qint64 TrackRecordingWorkflow::currentTransportPositionMs(
     return static_cast<qint64>(elapsedMs);
 }
 
+TrackRecordingWorkflow::PreparedAttachPlan
+TrackRecordingWorkflow::preparedAttachPlan(
+    const PlaybackGrid::Position& enginePosition,
+    qint64 preparedFrames) const noexcept
+{
+    if (!global_transport_requested_playing_ || preparedFrames <= 0) {
+        return {};
+    }
+
+    const std::uint64_t songStart = globalTransportTimelineStartFrame();
+    std::uint64_t targetFrame = global_transport_playing_
+        ? jam2::gui::next_safe_grid_beat_raw_frame(enginePosition)
+        : songStart;
+    if (targetFrame <= enginePosition.rawCurrentFrame) {
+        targetFrame = jam2::gui::next_safe_grid_beat_raw_frame(enginePosition);
+    }
+    if (targetFrame == 0) {
+        return {};
+    }
+
+    const std::uint64_t elapsed = targetFrame >= songStart
+        ? targetFrame - songStart
+        : 0ULL;
+    return {
+        true,
+        targetFrame,
+        elapsed % static_cast<std::uint64_t>(preparedFrames)};
+}
+
 void TrackRecordingWorkflow::consumeSnapshot(
     const jam2::EngineSnapshot& snapshot,
     const MetronomeTransportController::SnapshotUpdate& transportUpdate) noexcept
@@ -1107,6 +1136,13 @@ void TrackRecordingWorkflow::beginLoopbackCapture(
 QString TrackRecordingWorkflow::finishLoopbackCapture(const QString& outputPath)
 {
     last_capture_path_ = outputPath;
+    return abandonPendingCapture();
+}
+
+QString TrackRecordingWorkflow::failLoopbackCapture()
+{
+    last_capture_path_.clear();
+    last_capture_sample_rate_ = 0;
     return abandonPendingCapture();
 }
 

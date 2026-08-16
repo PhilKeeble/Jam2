@@ -26,6 +26,13 @@ namespace {
 using namespace std::chrono_literals;
 constexpr std::size_t kPeerCount = 4;
 constexpr int kSampleRate = 48000;
+constexpr int kFrameSize = 64;
+constexpr std::uint64_t kOneBarFrames = 96000ULL;
+// A received transport is translated onto the listener's callback clock while
+// its metronome render offset can still slew. The audio-level impairment test
+// uses the same two-callback bound for shared-grid click phase.
+constexpr std::uint64_t kTransportGridToleranceFrames =
+    2ULL * static_cast<std::uint64_t>(kFrameSize);
 
 QString deterministicHex(int seed, int bytes)
 {
@@ -202,8 +209,8 @@ QJsonObject scenario(
         {QStringLiteral("runtime"), QJsonObject{
             {QStringLiteral("headless_audio"), true},
             {QStringLiteral("sample_rate"), kSampleRate},
-            {QStringLiteral("audio_buffer_size"), 64},
-            {QStringLiteral("frame_size"), 64},
+            {QStringLiteral("audio_buffer_size"), kFrameSize},
+            {QStringLiteral("frame_size"), kFrameSize},
             {QStringLiteral("network_audio_format"), QStringLiteral("pcm16")},
             {QStringLiteral("stats"), true},
             {QStringLiteral("stats_interval_ms"), 100},
@@ -245,9 +252,9 @@ bool countInSnapshotValid(
     const std::uint64_t targetPhase = musicalTarget >= epoch
         ? musicalTarget - epoch
         : 0ULL;
-    const std::uint64_t barRemainder = targetPhase % 96000ULL;
+    const std::uint64_t barRemainder = targetPhase % kOneBarFrames;
     const std::uint64_t barBoundaryDifference = std::min(
-        barRemainder, 96000ULL - barRemainder);
+        barRemainder, kOneBarFrames - barRemainder);
     return snapshot.value(QStringLiteral("metronome_epoch_valid")).toBool() &&
         snapshot.value(QStringLiteral("transport_pending")).toBool() &&
         snapshot.value(QStringLiteral("recording_count_in_active")).toBool() &&
@@ -255,8 +262,9 @@ bool countInSnapshotValid(
         snapshot.value(QStringLiteral("transport_action")).toInt() ==
             static_cast<int>(jam2::EngineTransportAction::RecordStart) &&
         countdown > 0 && target > countdown && target > frame &&
-        target - countdown == 96000ULL &&
-        musicalTarget >= epoch && barBoundaryDifference <= 64ULL &&
+        target - countdown == kOneBarFrames &&
+        musicalTarget >= epoch &&
+        barBoundaryDifference <= kTransportGridToleranceFrames &&
         countInStart == countdown && countInTarget == target &&
         (!requireCountdownStarted || frame >= countdown);
 }

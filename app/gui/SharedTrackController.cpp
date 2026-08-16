@@ -437,33 +437,3 @@ QString SharedTrackController::playbackStatusText(bool syncEnabled) const
     }
     return scope;
 }
-
-QJsonObject SharedTrackController::processingMessage() const
-{
-    return QJsonObject{
-        {QStringLiteral("type"), QStringLiteral("track.processing")},
-        {QStringLiteral("file_name"), model_.fileName},
-        {QStringLiteral("file_path"), model_.filePath},
-        {QStringLiteral("file_bytes"), model_.fileBytes},
-        {QStringLiteral("sample_rate"), model_.sampleRate},
-        {QStringLiteral("duration_ms"), model_.durationMs},
-        {QStringLiteral("sha256"), model_.sha256},
-        {QStringLiteral("loop_enabled"), model_.loopEnabled},
-        {QStringLiteral("loop_start_seconds"), model_.loopStartSeconds},
-        {QStringLiteral("loop_end_seconds"), model_.loopEndSeconds},
-    };
-}
-
-void SharedTrackController::applyProcessingMessage(const QJsonObject& message)
-{
-    model_.fileName = message.value(QStringLiteral("file_name")).toString(model_.fileName);
-    model_.filePath = message.value(QStringLiteral("file_path")).toString(model_.filePath);
-    model_.userProvidedSource = false;
-    model_.fileBytes = static_cast<qint64>(message.value(QStringLiteral("file_bytes")).toDouble(model_.fileBytes));
-    model_.sampleRate = message.value(QStringLiteral("sample_rate")).toInt(model_.sampleRate);
-    model_.durationMs = message.value(QStringLiteral("duration_ms")).toInt(model_.durationMs);
-    model_.sha256 = message.value(QStringLiteral("sha256")).toString(model_.sha256);
-    model_.loopEnabled = message.value(QStringLiteral("loop_enabled")).toBool(model_.loopEnabled);
-    model_.loopStartSeconds = message.value(QStringLiteral("loop_start_seconds")).toDouble(model_.loopStartSeconds);
-    model_.loopEndSeconds = message.value(QStringLiteral("loop_end_seconds")).toDouble(model_.loopEndSeconds);
-}

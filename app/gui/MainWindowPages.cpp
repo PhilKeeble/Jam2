@@ -1746,19 +1746,6 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         }
         w.regeneratePreparedMix();
     });
-    if (w.trackWaveform_) {
-        w.trackWaveform_->onSeekMs = [&w](qint64 positionMs) {
-            const qint64 frame = positionMs *
-                qMax(1, w.trackRecordingWorkflow_.preparedSampleRate()) / 1000;
-            w.runGridLockedEngineAction(QStringLiteral("track.seek"), [&w, frame](std::uint64_t targetFrame) {
-                w.seekPreparedTrack(static_cast<std::uint64_t>(qMax<qint64>(0, frame)), targetFrame);
-                w.trackRecordingWorkflow_.noteManualPreparedSeek(
-                    frame,
-                    static_cast<qint64>(w.metronomeTransport_.grid().position().rawCurrentFrame));
-                w.updateTrackTimeline();
-            });
-        };
-    }
     QObject::connect(w.loopStartButton_, &QPushButton::clicked, &w, [&w] {
         w.setLoopStartAtCurrentPosition();
     });
@@ -1888,9 +1875,6 @@ QWidget* MainWindowPages::buildTrackPage(MainWindow& w)
         if (w.sharedRecordingProtected()) return;
         w.selectedLooperLane_ = lane;
         w.applySelectedLooperLaneRegion(startFrame, sourceStartFrame, sourceEndFrame);
-    };
-    w.looperStack_->onBankSelected = [&w](int index) {
-        w.selectViewedBank(index);
     };
     w.refreshLooperLanes();
     w.regeneratePreparedMix();

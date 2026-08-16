@@ -626,10 +626,12 @@ int main(int argc, char* argv[])
     }
 
     std::array<QStringList, FourPeerCoordinator::kPeerCount> arguments;
+    const bool show = qEnvironmentVariableIntValue("JAM2_TEST_SHOW_GUI") == 1;
     for (std::size_t peer = 0; peer < arguments.size(); ++peer) {
         arguments[peer] << QStringLiteral("debug") << QStringLiteral("gui-agent")
             << QStringLiteral("--instance-id")
             << QStringLiteral("wav-interrupt-peer-%1").arg(peer + 1);
+        if (show) arguments[peer] << QStringLiteral("--show-gui");
     }
     FourPeerCoordinator coordinator;
     if (!coordinator.launch(QString::fromLocal8Bit(argv[1]), arguments, error)) {

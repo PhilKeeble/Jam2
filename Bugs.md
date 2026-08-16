@@ -33,6 +33,13 @@ look into what python is left, cpp might still be calling some like the fuzzer
 
 when ctests GUI is hidden i can till see popups
 
+when ctests happen there is a vulkan dir missing on both windows and mac so probs not needed
+
+when ctests happen it runs on build and then on release? is build a proper debug build? 
+
+need to make it fit better on smaller screens like the macbook neo
+
+
 
 ## jamtaster
 

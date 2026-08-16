@@ -668,8 +668,16 @@ bool jam2::application::validateControlMessage(
             ? true : (reason = QStringLiteral("reference render request is invalid"), false);
     }
     if (type == QStringLiteral("bank.request")) {
+        const QJsonValue targetValue = message.value(QStringLiteral("target_abs_beat"));
+        const QString targetText = targetValue.toString();
+        bool targetOk = false;
+        const quint64 targetBeat = targetText.toULongLong(&targetOk);
+        const bool targetValid = targetValue.isUndefined() ||
+            (targetValue.isString() &&
+                (targetText.isEmpty() ||
+                    (targetOk && targetBeat <= (std::numeric_limits<qint64>::max)())));
         return isBoundedInteger(message.value(QStringLiteral("bank")), 0,
-            limits::kMaximumLooperBankCount - 1)
+            limits::kMaximumLooperBankCount - 1) && targetValid
             ? true : (reason = QStringLiteral("bank transition is invalid"), false);
     }
     if (type == QStringLiteral("bank.prepare") ||

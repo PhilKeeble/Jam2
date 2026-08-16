@@ -857,6 +857,46 @@ catalogue plus the checker is now the only coverage task; its report must show
 zero unreviewed missing, wholly uncovered, and collector-skipped functions
 before the final full distribution command can be expected to succeed.
 
+The fresh instrumented catalogue passed all 76 behavioral cases in 2,019.95
+seconds and reduced the maintained inventory to one reported uncovered
+function with no missing or collector-skipped source. That final row is the
+MSVC-emitted out-of-line copy of the implicit-inline
+`NetworkCommandController::handleRuntimeFinished(int)` callback. The same body
+is measured at its requested-shutdown call site and is proved observably by
+the exactly-four-peer test's three clean manifests and one propagated exit-code
+4 manifest, so it has one exact compiler-shape exemption rather than a source,
+network, or controller exemption. Rechecking the existing XML passed with zero
+unreviewed missing, wholly uncovered, or collector-skipped functions.
+
+Iteration 44 follows up the distribution run's four-performance failure. The
+retained peer logs proved a late prepared-mix replacement race rather than a
+slow timeout: two peers committed global Play while their replacement WAV was
+loaded unscheduled, leaving transport playing with the prepared source stopped.
+Prepared-attach planning now belongs to `TrackRecordingWorkflow` and keys from
+the typed pending/running global-transport state, not the one-shot render UI
+intent. Focused pending/running ordering tests and the exact four-peer
+performance integration pass; the existing timeout remains strict.
+
+Iteration 45 closes two later metronome-matrix failures without changing the
+metronome or epoch models. Impaired-network mixer recovery is now judged by an
+exact, bounded output-equivalent rate rather than requiring a designed recovery
+counter to stay at zero; clean networking remains zero-drop. Windows loopback
+reservations now select a UDP-valid ephemeral port before proving the same
+number for TCP, avoiding protocol-specific excluded ranges. The dual-protocol
+support unit and both exact failed four-peer cases pass.
+
+Iteration 46 makes hidden GUI-agent mode process-wide. Every Qt top-level
+window is marked `WA_DontShowOnScreen` at polish/show time and native file
+dialogs are disabled, while all GUI integration launchers now propagate the
+existing `--show-gui` opt-in consistently. No automated desktop-visibility
+assertion was added at the user's request; the existing real four-peer modal
+workflow passes and final on-screen/off-screen behavior is manually verified.
+
+Iteration 47 extends that same hidden-presentation boundary to platform alert
+audio. Hidden GUI-agent message boxes retain their text, controls, modality,
+and response behavior but clear the alert icon before Qt requests its system
+sound. Explicit `--show-gui` runs retain normal production icons and sounds.
+
 ## Intended command surface
 
 ```text
@@ -901,3 +941,16 @@ Windows completion does not claim macOS completion. The exact later macOS work
 is maintained in `TEST-MACOS.md`. Source coverage is a Windows-only
 distribution gate: macOS `compile.sh --tests-full` runs the normal Release test
 catalogue without PowerShell, instrumentation, or an Apple coverage substitute.
+
+## Iteration 48 overview
+
+All previously answered review items are now either implemented or retained as
+directed, and `TEST-REVIEW.md` contains only `REVIEW-008`. Approved dead looper,
+track-processing, and session-default paths were removed. Empty/silence-only
+loopback capture now fails visibly without creating/importing an asset or
+leaving a completed-capture path. The
+approved bank request bound and exact prepared-bank commit match are enforced
+without changing emitted protocol shape. Focused units, the exactly-four-peer
+performance transition, and the MSVC Release build pass. The remaining design
+work is the unified Section/recording/render duration and memory-allocation
+contract; no limit was changed in this iteration.

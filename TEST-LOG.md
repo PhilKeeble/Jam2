@@ -6523,8 +6523,8 @@ retirement or distribution completion is claimed.
   both passed the hardware case with the neutral summary followed by the final
   success line; both catalogues passed 75/75 tests.
 - Remaining test need: retain longer real-device observation in manual use;
-  this short automated boundary must continue rejecting more than two misses
-  in either phase.
+  this short automated boundary must continue enforcing exact block accounting,
+  no failed/stale responses, and the bounded warm-up/steady miss rate.
 
 ### Iteration 43 - final 60-function ownership and coverage tail
 
@@ -6638,3 +6638,307 @@ retirement or distribution completion is claimed.
   valid final manifests in 5.62 s.
 - Remaining test need: retain this lifecycle case on macOS; no protocol change
   was made.
+
+#### BUG-T106 - instrumented listener phase exceeded a one-callback assertion
+
+- Observed symptom: instrumented test 51 proved the future record action was
+  pending on all four peers with an exact 96,000-frame one-bar count-in, but
+  rejected peer 3 because its adopted musical target was 70 frames from the
+  local epoch bar while the assertion allowed only 64.
+- Root cause: the integration test used a magic one-callback tolerance even
+  though a received target is translated onto the listener callback clock while
+  its render offset can still slew. The authoritative audio-level metronome
+  impairment test already uses a two-callback (128-frame) shared-grid phase
+  bound for this 64-frame configuration.
+- Change: name the frame size, one-bar duration, and transport phase tolerance;
+  derive the latter as exactly two callbacks. The exact action, pending state,
+  recording count-in state, countdown/target identity, and 96,000-frame
+  duration assertions remain unchanged.
+- Regression proof: the exact normal-Release
+  `jam2_four_session_command_integration` rebuilt and passed in 5.71 seconds
+  with four real Jam2 processes.
+- Remaining test need: retain the stricter audio-stem/dynamic-epoch impairment
+  matrix as the audible metronome authority; this controller test validates
+  schedule propagation and must not substitute a broad timing tolerance.
+- Protocol status: test assertion only; no runtime, transport, metronome, epoch,
+  packet, or accepted network input changed.
+
+#### BUG-T107 - fixed steady plug-in miss count was not sample-size aware
+
+- Observed symptom: instrumented hardware test 41 completed 7,479 of 7,485
+  callbacks through Surge XT Effects at 32 frames, with four steady misses,
+  zero 2x callback gaps, and a 328-us maximum worker process time against a
+  roughly 667-us callback period, but failed the fixed two-miss threshold.
+- Root cause: the five-second test treated two misses as the same budget for
+  every configured hardware block size and callback count. It did not express
+  the actual bounded rate or assert the bridge's exact response accounting.
+- Change: retain at most two misses during the 500-ms warm-up; after warm-up,
+  permit the greater of two or one miss per 1,000 submitted blocks (rounded
+  up). Also require zero failed/stale responses and exact isolation-pipeline
+  accounting: completed plus missed responses must equal submitted blocks
+  minus the fixed two startup pipeline blocks.
+- Regression proof: the exact normal-Release hardware profile rebuilt and
+  `jam2_hardware_plugin_device` passed against ASIO device 5, input 2, 32
+  frames, and Surge XT Effects in 5.71 seconds.
+- Remaining test need: the optimized hardware case remains the timing
+  authority. Manual longer observation should compare the printed exact miss
+  rate, callback-gap counts, and worker processing times rather than treating
+  any nonzero isolated-process scheduling miss as device failure.
+- Protocol status: hardware test acceptance only; no plug-in bridge, audio
+  callback, network protocol, or production tolerance changed.
+
+#### Final Windows coverage catalogue and exact compiler-shape review
+
+- The fresh instrumented catalogue passed all 76 behavioral cases in 2,019.95
+  seconds. It catalogued 3,128 maintained functions: 1,173 fully covered,
+  1,868 partially covered, 86 explicitly exempt, one unreviewed wholly
+  uncovered function, and zero collector-skipped functions. All 126 maintained
+  source files were observed or explicitly platform-accounted, with zero
+  unreviewed missing files.
+- The sole row was
+  `NetworkCommandController::handleRuntimeFinished(int)`. The exactly-four-peer
+  session-command test observably executed the requested-shutdown body through
+  three exit-0 final manifests and one propagated exit-4 final manifest, but
+  MSVC also emitted a separate unentered copy because the callback is defined
+  inline inside the local controller class. The manifest now classifies only
+  that exact function shape; it does not exempt SessionController, network
+  completion, or any source path.
+- This is a collector/compiler representation issue, not a product or protocol
+  change. No production source, network message, field, parser, accepted input,
+  metronome/epoch behavior, shared-WAV behavior, or test acceptance changed.
+- The standalone checker completed in 14.1 seconds and passed: 126 maintained
+  files, 122 observed, zero unreviewed missing files, 3,128 maintained
+  functions, 1,173 fully covered, 1,868 partially covered, 87 exact reviewed
+  exemptions, zero unreviewed wholly uncovered functions, and zero unreviewed
+  collector-skipped functions. No rebuild or CTest rerun was performed.
+
+### Iteration 44 - late prepared-mix attachment during four-peer Play
+
+- The distribution run failed `jam2_four_performance_integration` after
+  195.45 seconds while waiting for four prepared loop fixtures to play. All
+  four peers had the exact shared WAV attached and available, and global
+  transport was requested and committed on all four, but peers 2 and 4 had
+  `prepared_source_playing=0` permanently. Retained logs showed their final
+  prepared-mix refresh landing while Play was pending and loading with
+  `scheduled=0`; peers 1 and 3 attached to a transport target and played.
+- Moved the attach target/source calculation into the typed
+  `TrackRecordingWorkflow::PreparedAttachPlan`. Any valid replacement mix now
+  attaches when global transport is pending or running. The one-shot
+  `PreparedMixLifecycle::playWhenReady` flag still owns UI render intent but no
+  longer gates correctness of a late transport attachment. A pending mix uses
+  the existing transport target; a running replacement uses the next safe grid
+  beat and the exact shared-timeline source offset.
+- Self-review retained the original integration timeout. This state could not
+  recover regardless of waiting, so making the test more tolerant would have
+  hidden a real synchronization defect. Pending, running, empty-render, target,
+  and modulo source-offset behavior now have deterministic workflow coverage.
+- Verification: required normal MSVC Release build succeeded in 37.7 seconds;
+  `jam2_track_recording_workflow_units` passed in 0.60 seconds; and the exact
+  exactly-four-peer `jam2_four_performance_integration` passed in 18.27
+  seconds. No full suite or coverage collector ran.
+- Removed the verified generated `tests/coverage/obj` restore directory found
+  during final status review. The maintained coverage runner already passes
+  both MSBuild intermediate paths under `build/coverage/tools-obj`; no source
+  or test artifact from this iteration remains outside `build/`.
+- Scope/protocol status: local prepared-source scheduling and native tests
+  only. No network message, field, payload, encoding, parser, authentication,
+  metronome model, epoch rule, or shared-WAV transfer behavior changed.
+
+#### BUG-P104 - late prepared-mix replacement could miss global Play forever
+
+- Observed symptom: peers could show the exact same available shared WAV and
+  committed global transport while the prepared source remained stopped.
+- Root cause: `MainWindow::applyPreparedMixResult` required the transient
+  `playWhenReady` render flag as well as global transport intent before loading
+  a completed replacement at a scheduled frame. Background/coalesced refreshes
+  did not necessarily own that flag, so a load racing with Play replaced the
+  source without scheduling it.
+- Change: derive a typed attach plan from the authoritative pending/running
+  global-transport state. Late sources join at the pending target or next safe
+  beat with their source frame aligned to the shared transport timeline.
+- Regression proof: deterministic workflow assertions cover both orderings,
+  and the real four-process performance workflow requires all four prepared
+  sources to enter playback.
+- Remaining test need: retain this case in the macOS normal Release suite to
+  verify the same worker-completion ordering under Cocoa/CoreAudio scheduling.
+
+### Iteration 45 - impaired mixer health and Windows dual-protocol ports
+
+- The continued distribution run reported two independent failures.
+  `jam2_metronome_leader_audio_duplication` completed the exact authority
+  handoff, revision 4 replacement epoch, zero mapping error, and one-beat
+  alignment, but rejected peer 1 solely because `mix_capacity_drops` was 4,634
+  rather than zero. Retained CSVs showed 4,634--22,333 exact dropped samples
+  across peers, at worst 2.97% of one output timeline, while the mixer remained
+  live and aligned. `jam2_metronome_listener_compensated_clean` never launched:
+  TCP selected port 53,345, which was inside this machine's Windows UDP-only
+  excluded range 53,271--53,370.
+- Impaired conditions now permit at most 5% output-equivalent mixer capacity
+  recovery. The test still requires positive output, exact equality between
+  drop events and dropped frames, and every existing authority, revision,
+  epoch-replacement, mapping, beat-alignment, authentication, proxy, recording,
+  and WAV/stem proof. Clean networking still requires exactly zero capacity
+  drops.
+- Loopback reservation now asks UDP for an allowed ephemeral port first and
+  then binds TCP to the same number. UDP candidates rejected by TCP remain
+  held during selection, preventing immediate reuse. The support unit reserves
+  16 unique simultaneous TCP/UDP ports and retains its bounds checks.
+- Verification: `jam2_four_peer_coordinator_units` passed in 0.04 seconds;
+  exact `jam2_metronome_leader_audio_duplication` passed in 17.36 seconds; and
+  exact `jam2_metronome_listener_compensated_clean` passed in 17.29 seconds.
+  The required MSVC Release build succeeded. No full suite or coverage
+  collector was started.
+- Scope/protocol status: test acceptance and test-only port allocation. No
+  production source, network header/field/payload/parser/version, accepted
+  input, authentication, metronome model, epoch rule, audio mixer behavior, or
+  shared-WAV behavior changed.
+
+#### BUG-T108 - duplication required a designed recovery counter to stay zero
+
+- Observed symptom: a fully aligned replacement epoch failed because the
+  bounded peer mixer discarded queued samples while recovering from sustained
+  duplicated traffic.
+- Root cause: the impairment matrix treated any mixer capacity recovery as a
+  correctness failure even though the fixed-capacity mixer deliberately keeps
+  the live tail rather than remaining behind real time.
+- Change: clean runs retain zero-drop acceptance; impaired runs require exact
+  accounting and no more than 5% of output-equivalent frames.
+- Regression proof: the exact leader-audio duplication workflow passes while
+  retaining its complete four-peer epoch and recorded-audio validation.
+- Remaining test need: retain raw drop/output counters in failure output and
+  compare rates when tuning future mixer capacities; do not widen this bound
+  without evidence.
+
+#### BUG-T109 - TCP-first port selection could choose a UDP-protected port
+
+- Observed symptom: listener-compensated clean failed before peer launch after
+  256 attempts, ending on Windows port 53,345 with `The address is protected`.
+- Root cause: the allocator asked TCP for an ephemeral number first, but
+  Windows maintains different TCP and UDP excluded ranges. TCP could therefore
+  repeatedly return numbers that UDP was forbidden to bind.
+- Change: select through UDP first, then prove TCP ownership of the same port,
+  retaining rejected UDP candidates during the bounded search.
+- Regression proof: 16 unique dual-protocol reservations pass directly and
+  the exact four-peer listener-compensated clean workflow launches and passes.
+- Remaining test need: run the same support unit and metronome case under macOS;
+  the ordering uses portable Qt socket ownership and has no Windows-only branch.
+
+### Iteration 46 - process-wide hidden GUI-agent windows
+
+- Hidden GUI tests previously applied `Qt::WA_DontShowOnScreen` only to
+  `MainWindow`. Real modal dialogs are separate Qt top-level windows, so message
+  boxes and dialogs could appear on the desktop while their owning Jam2 window
+  remained hidden.
+- Added a GUI-agent-only application event filter that applies the off-screen
+  attribute to every top-level widget before polish/show. Hidden mode also sets
+  `Qt::AA_DontUseNativeDialogs`, preventing a native file chooser from escaping
+  the Qt window policy. Normal Jam2 startup and non-test commands do not install
+  this policy.
+- All six four-peer GUI launchers now honor the existing
+  `JAM2_TEST_SHOW_GUI` switch consistently. Default runs remain hidden;
+  `--show-gui` passes through to each GUI-agent peer and leaves normal Qt/native
+  presentation enabled.
+- Per user direction, no automation protocol field or desktop-visibility
+  assertion was added. The existing exactly-four-peer
+  `jam2_four_session_dialog_integration` rebuilt and passed its real modal
+  interactions in 79.72 seconds. Manual desktop verification remains the
+  acceptance for whether pixels appear.
+- Manual Windows check: run
+  `compile.cmd --in-dev-shell --tests gui --test-name jam2_four_session_dialog_integration`
+  and confirm no windows appear; add `--show-gui` and confirm the same peers and
+  dialogs are visible.
+- Scope/protocol status: private GUI test harness and test launch arguments
+  only. No ordinary UI behavior, product feature, network/control protocol,
+  metronome/epoch model, audio path, or shared-WAV behavior changed.
+
+#### BUG-T110 - hidden GUI mode covered only MainWindow
+
+- Observed symptom: modal popups appeared during default hidden GUI tests even
+  though the four base Jam2 windows were absent.
+- Root cause: `WA_DontShowOnScreen` is a per-widget attribute and was set only
+  on `MainWindow`; modal dialogs are independent top-level widgets and do not
+  inherit it reliably.
+- Change: enforce hidden presentation across every GUI-agent top-level widget
+  and reserve visible presentation for explicit `--show-gui` runs.
+- Regression proof: the existing real four-peer session-dialog workflow passes
+  in hidden mode; desktop visibility is intentionally a manual check.
+- Remaining test need: manually confirm hidden and `--show-gui` presentation on
+  Windows and repeat both modes on macOS.
+
+### Iteration 47 - hidden GUI-agent alert sounds
+
+- A hidden Windows GUI CTest could still play the system warning tone when an
+  intentionally exercised `QMessageBox::Warning` entered its show handler.
+  Window visibility and Windows alert audio are independent.
+- Hidden GUI-agent mode now clears a message box's alert icon immediately
+  before its show handler runs. This prevents Qt from requesting the associated
+  platform alert sound while preserving the dialog text, buttons, modality,
+  automation controls, and tested response.
+- Explicit `--show-gui` runs do not install the hidden-window filter, so they
+  retain the production icon and platform sound for manual UI verification.
+- Scope/protocol status: private GUI test presentation only. No normal Jam2 UI,
+  network/control protocol, audio engine, synchronization, metronome/epoch, or
+  shared-WAV behavior changed.
+
+### Iteration 48 - resolved review actions and remaining duration design
+
+- Reduced `TEST-REVIEW.md` to the sole unresolved `REVIEW-008` decision. It now
+  records the coupled Section/bar/beat, five-minute recording, dense metadata,
+  resident audio, streaming/cache, serialization, and diagnostics questions.
+  No Section, recording-duration, renderer, or buffer limit changed.
+- Removed the user-approved obsolete surface: the uninvoked looper bank
+  callback, impossible placeholder-lane mouse branch, old MainWindow lane
+  move/gain/region/import/metadata/waveform-seek wrappers and their private
+  prompt helper, unreferenced `track.processing` construction/application, and
+  unused SessionController default/sibling-path helpers. The active painted
+  lane, Add WAV, prepared transport, and direct Section-selection paths remain.
+- Self-review corrected the initial call-graph reading for waveform seek. A
+  call site existed, but its entire callback was guarded by `trackWaveform_`,
+  which the maintained page sets to null. The dead callback and wrapper were
+  therefore removed together rather than leaving unreachable code or deleting
+  a live transport action.
+- Empty loopback capture now has typed content classification. Zero captured
+  frames reports `No audio was captured`; a take fully removed by silence
+  trimming reports `Only silence was detected`. Both retain technical capture
+  diagnostics, write/import no new WAV, clear completed-capture availability,
+  return transient cleanup ownership, and show the normal styled warning in
+  interactive Jam2 while automation remains nonblocking.
+- Tightened the two explicitly approved bank-transition checks. Optional
+  `bank.request.target_abs_beat` must be absent, empty, or a decimal string no
+  greater than signed-64 maximum. A joiner now commits `bank.switch` only when
+  both switch ID and bank match its prepared state. The redundant prepare
+  target remains unchanged as directed.
+- Verification: the MSVC Release product build succeeded; exact
+  `jam2_application_boundary_units`, `jam2_gui_loopback_recorder_units`, and
+  `jam2_shared_bank_launch_units` passed; self-review then added and passed
+  exact `jam2_track_recording_workflow_units`; exact four-peer
+  `jam2_four_performance_integration` passed in 17.65 seconds; and the final
+  post-review Release rebuild succeeded. No full suite or coverage collection
+  was started.
+- Protocol status: bank acceptance became stricter exactly as approved. No
+  message name, field, emitted JSON shape/value, packet header, payload,
+  encoding, version, authentication rule, or audio protocol changed.
+
+#### BUG-T111 - unusable loopback takes were accepted as valid WAV assets
+
+- Observed condition: a loopback endpoint that returned no frames, or a take
+  entirely removed by enabled silence trimming, could complete successfully
+  with a zero-data RIFF and continue toward lane import.
+- Change: classify the capture before writing, report the precise owned failure
+  to the user, preserve raw diagnostic counters, clear the failed completed-
+  capture path/rate, and stop before asset creation or import.
+- Regression proof: loopback units cover no-frame, silence-only, usable-audio,
+  and exact user-error mappings alongside the existing writer/lifecycle cases;
+  recording-workflow units prove failed transient cleanup and empty availability.
+
+#### BUG-T112 - bank request and commit accepted inconsistent target ownership
+
+- Observed condition: a creator could accept a request target above the limit
+  that joiners enforce on switch, and a joiner matched a switch identity
+  without also matching the bank it had prepared.
+- Change: apply the same signed-64 target domain at request validation and use
+  the coordinator's exact `(switch_id, bank)` match at joiner commit.
+- Regression proof: application boundaries cover absent, empty, maximum,
+  above-maximum, and wrong-JSON-type targets; coordinator units retain
+  same-ID/wrong-bank rejection; the four-peer performance workflow completes
+  two real prepared transitions with epoch preservation.

@@ -1,4 +1,5 @@
 #include "FourPeerCoordinator.hpp"
+#include "LoopbackPortReservations.hpp"
 #include "TestTiming.hpp"
 
 #include <QDir>
@@ -7,6 +8,8 @@
 
 #include <filesystem>
 #include <iostream>
+#include <set>
+#include <stdexcept>
 
 namespace {
 
@@ -73,6 +76,26 @@ int main()
         "could not create a build-local temporary placement probe");
     check(isWithin(placementProbe.path(), artifactRoot),
         "QTemporaryDir escaped the build-local artifact root");
+
+    LoopbackPortReservations loopbackPorts;
+    QString reservationError;
+    check(loopbackPorts.reserve(16, reservationError),
+        "could not reserve 16 ports valid for both loopback TCP and UDP");
+    std::set<std::uint16_t> uniquePorts;
+    for (std::size_t index = 0; index < 16; ++index) {
+        uniquePorts.insert(loopbackPorts.port(index));
+    }
+    check(uniquePorts.size() == 16,
+        "TCP/UDP loopback reservations were not unique");
+    bool rejectedOutOfRange = false;
+    try {
+        (void)loopbackPorts.port(16);
+    } catch (const std::out_of_range&) {
+        rejectedOutOfRange = true;
+    }
+    check(rejectedOutOfRange,
+        "loopback reservation accepted an out-of-range index");
+    loopbackPorts.release();
 
     const QByteArray previousScale = qgetenv("JAM2_TEST_TIMEOUT_SCALE");
     const bool hadPreviousScale = qEnvironmentVariableIsSet("JAM2_TEST_TIMEOUT_SCALE");

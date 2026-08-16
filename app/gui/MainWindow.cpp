@@ -455,35 +455,6 @@ std::uint64_t nextGridBoundaryBeat(
         absoluteBeat, beatsPerBar, quantizeToBar);
 }
 
-bool promptFrame(QWidget* parent, const QString& title, const QString& label, qint64 current, qint64& out)
-{
-    bool accepted = false;
-    const QString text = QInputDialog::getText(
-        parent,
-        title,
-        label,
-        QLineEdit::Normal,
-        current >= 0 ? QString::number(current) : QString(),
-        &accepted);
-    if (!accepted) {
-        return false;
-    }
-    const QString trimmed = text.trimmed();
-    if (trimmed.isEmpty()) {
-
-        out = -1;
-        return true;
-    }
-    bool ok = false;
-    const qint64 parsed = trimmed.toLongLong(&ok);
-    if (!ok || parsed < 0) {
-        QMessageBox::warning(parent, title, QStringLiteral("Frame values must be empty or non-negative integers."));
-        return false;
-    }
-    out = parsed;
-    return true;
-}
-
 }
 
 namespace {
@@ -981,10 +952,10 @@ MainWindow::MainWindow(
                 const quint64 targetBeat = message.value(QStringLiteral("target_abs_beat"))
                     .toString().toULongLong(&targetOk);
                 const QString switchId = message.value(QStringLiteral("switch_id")).toString();
-                if (targetOk && switchId == sharedBankLaunch_.snapshot().switchId) {
+                const int bankIndex = message.value(QStringLiteral("bank")).toInt();
+                if (targetOk && sharedBankLaunch_.matches(switchId, bankIndex)) {
                     sharedBankLaunch_.clear();
-                    schedulePreparedBankLaunch(
-                        message.value(QStringLiteral("bank")).toInt(), targetBeat);
+                    schedulePreparedBankLaunch(bankIndex, targetBeat);
                 }
             }
             return;
@@ -3474,13 +3445,6 @@ void MainWindow::submitEngineToggle(
 
     command.enabled = enabled;
     (void)submitEngineCommand(command, context);
-}
-
-void MainWindow::seekPreparedTrack(std::uint64_t sourceFrame, std::uint64_t targetFrame)
-{
-    if (!trackRecordingWorkflow_.seekPrepared(sourceFrame, targetFrame)) {
-        appendLog(QStringLiteral("engine command queue unavailable: prepared track seek"));
-    }
 }
 
 void MainWindow::setPreparedTrackLoop(bool enabled, std::uint64_t startFrame, std::uint64_t endFrame)
@@ -8579,61 +8543,6 @@ void MainWindow::addLooperWavs()
         });
 }
 
-void MainWindow::loadWavIntoLooperLane()
-{
-    const int bankIndex = viewedBankIndex_;
-    const LooperBank& bank = looperProject_.banks().at(bankIndex);
-
-    QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("Load WAV"));
-    auto* form = new QFormLayout(&dialog);
-    auto* laneBox = new QComboBox(&dialog);
-    for (int laneIndex = 0; laneIndex < bank.lanes.size(); ++laneIndex) {
-        laneBox->addItem(bank.lanes.at(laneIndex).name, laneIndex);
-    }
-    if (bank.lanes.isEmpty()) {
-        laneBox->addItem(QStringLiteral("Empty Track 1"), -1);
-    } else if (selectedLooperLane_ >= 0 && selectedLooperLane_ < laneBox->count()) {
-        laneBox->setCurrentIndex(selectedLooperLane_);
-    }
-
-    auto* pathEdit = new QLineEdit(&dialog);
-    pathEdit->setReadOnly(true);
-    auto* browse = new QPushButton(QStringLiteral("Browse"), &dialog);
-    auto* pathRow = new QHBoxLayout();
-    pathRow->addWidget(pathEdit, 1);
-    pathRow->addWidget(browse);
-    form->addRow(QStringLiteral("Track lane"), laneBox);
-    form->addRow(QStringLiteral("WAV"), pathRow);
-
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
-    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Load WAV"));
-    buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
-    form->addRow(buttons);
-    QObject::connect(browse, &QPushButton::clicked, &dialog, [this, pathEdit, buttons] {
-        const QString path = QFileDialog::getOpenFileName(
-            this,
-            QStringLiteral("Load WAV"),
-            QString(),
-            QStringLiteral("WAV files (*.wav *.WAV)"),
-            nullptr,
-            QFileDialog::Options{});
-        if (!path.isEmpty()) {
-            pathEdit->setText(QDir::toNativeSeparators(path));
-            buttons->button(QDialogButtonBox::Ok)->setEnabled(true);
-        }
-    });
-    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    if (dialog.exec() != QDialog::Accepted) {
-        return;
-    }
-
-    const QString sourcePath = QDir::fromNativeSeparators(pathEdit->text());
-    const int selectedLaneIndex = laneBox->currentData().toInt();
-    importWavIntoLooperLane(selectedLaneIndex, sourcePath);
-}
-
 bool MainWindow::importWavIntoLooperLane(int laneIndex, const QString& sourcePath)
 {
     if (sharedRecordingProtected()) {
@@ -10239,22 +10148,6 @@ void MainWindow::cancelUnreferencedLooperAssetTransfer(const QString& hash)
     validatedTrackAssetHashes_.remove(hash);
 }
 
-void MainWindow::moveSelectedLooperLane(int delta)
-{
-    if (sharedRecordingProtected()) return;
-    if (selectedLooperLane_ < 0) {
-        return;
-    }
-    const int from = selectedLooperLane_;
-    const int to = from + delta;
-    if (looperProject_.moveLane(viewedBankIndex_, from, to)) {
-        selectedLooperLane_ = to;
-        refreshLooperLanes();
-        regeneratePreparedMix();
-        syncLooperArrangement();
-    }
-}
-
 void MainWindow::toggleSelectedLooperLaneMute()
 {
     if (sharedRecordingProtected()) return;
@@ -10279,96 +10172,6 @@ void MainWindow::toggleSelectedLooperLaneSolo()
     if (!looperProject_.setLaneSolo(viewedBankIndex_, selectedLooperLane_, !solo)) return;
     refreshLooperLanes();
     regeneratePreparedMix();
-}
-
-void MainWindow::setSelectedLooperLaneGain()
-{
-    if (sharedRecordingProtected()) return;
-    if (selectedLooperLane_ < 0) return;
-    if (viewedBankIndex_ < 0 || viewedBankIndex_ >= looperProject_.banks().size() ||
-        selectedLooperLane_ >= looperProject_.banks().at(viewedBankIndex_).lanes.size()) return;
-    const LooperLane& lane =
-        looperProject_.banks().at(viewedBankIndex_).lanes.at(selectedLooperLane_);
-    bool accepted = false;
-    const double gain = QInputDialog::getDouble(this, QStringLiteral("Lane gain"), QStringLiteral("Gain (dB)"), lane.gainDb, -60.0, 12.0, 1, &accepted);
-    if (!accepted) return;
-    if (!looperProject_.setLaneGainDb(viewedBankIndex_, selectedLooperLane_, gain)) return;
-    refreshLooperLanes();
-    regeneratePreparedMix();
-}
-
-void MainWindow::editSelectedLooperLaneRegion()
-{
-    if (selectedLooperLane_ < 0) {
-        return;
-    }
-    if (viewedBankIndex_ < 0 || viewedBankIndex_ >= looperProject_.banks().size() ||
-        selectedLooperLane_ >= looperProject_.banks().at(viewedBankIndex_).lanes.size()) return;
-    const LooperLane lane =
-        looperProject_.banks().at(viewedBankIndex_).lanes.at(selectedLooperLane_);
-    qint64 startFrame = lane.startFrame;
-    qint64 stopFrame = lane.stopFrame;
-    qint64 loopStartFrame = lane.loopStartFrame;
-    qint64 loopEndFrame = lane.loopEndFrame;
-
-    if (!promptFrame(this, QStringLiteral("Lane region"), QStringLiteral("Timeline start frame"), startFrame, startFrame)) {
-        return;
-    }
-    if (startFrame < 0) {
-        QMessageBox::warning(this, QStringLiteral("Lane region"), QStringLiteral("Timeline start frame is required."));
-        return;
-    }
-    if (!promptFrame(this, QStringLiteral("Lane region"), QStringLiteral("Timeline stop frame (empty for source end)"), stopFrame, stopFrame)) {
-        return;
-    }
-    if (stopFrame >= 0 && stopFrame < startFrame) {
-        QMessageBox::warning(this, QStringLiteral("Lane region"), QStringLiteral("Timeline stop frame must be after start frame."));
-        return;
-    }
-    if (!promptFrame(this, QStringLiteral("Lane region"), QStringLiteral("Source crop start frame (empty for source start)"), loopStartFrame, loopStartFrame)) {
-        return;
-    }
-    if (!promptFrame(this, QStringLiteral("Lane region"), QStringLiteral("Source crop end frame (empty for source end)"), loopEndFrame, loopEndFrame)) {
-        return;
-    }
-    if ((loopStartFrame < 0) != (loopEndFrame < 0)) {
-        QMessageBox::warning(this, QStringLiteral("Lane region"), QStringLiteral("Source crop start and end must both be set, or both left empty."));
-        return;
-    }
-    if (loopStartFrame >= 0 && loopEndFrame <= loopStartFrame) {
-        QMessageBox::warning(this, QStringLiteral("Lane region"), QStringLiteral("Source crop end frame must be after the source crop start frame."));
-        return;
-    }
-    const bool loopEnabled = QMessageBox::question(
-        this,
-        QStringLiteral("Lane region"),
-        QStringLiteral("Loop the source crop range for this lane?"),
-        QMessageBox::Yes | QMessageBox::No,
-        lane.loopEnabled ? QMessageBox::Yes : QMessageBox::No) == QMessageBox::Yes;
-    if (loopStartFrame < 0) {
-        loopStartFrame = -1;
-        loopEndFrame = -1;
-    }
-
-    if (!looperProject_.setLaneRegion(
-            viewedBankIndex_,
-            selectedLooperLane_,
-            LooperLaneRegion{
-                startFrame,
-                stopFrame,
-                loopStartFrame,
-                loopEndFrame,
-                loopEnabled})) {
-        QMessageBox::warning(
-            this,
-            QStringLiteral("Lane region"),
-            QStringLiteral(
-                "The lane region exceeds the available WAV or Section timeline limits."));
-        return;
-    }
-    refreshLooperLanes();
-    regeneratePreparedMix();
-    syncLooperArrangement();
 }
 
 void MainWindow::syncLooperArrangement()
@@ -10653,35 +10456,14 @@ void MainWindow::applyPreparedMixResult(PreparedMixResult result)
         track.acceptedBpm = bankMetronomePattern(resultBank).bpm;
         updateTrackControls();
         loadTrackWaveform();
-        bool attachToRunningTransport =
-            preparedMixLifecycle_.playWhenReady() &&
-            trackRecordingWorkflow_.globalTransportRequestedPlaying();
-        std::uint64_t attachTargetFrame = 0;
-        std::uint64_t attachSourceFrame = 0;
-        if (attachToRunningTransport) {
-            const PlaybackGrid::Position position = metronomeTransport_.grid().position();
-            const std::uint64_t songStart =
-                trackRecordingWorkflow_.globalTransportTimelineStartFrame();
-            attachTargetFrame = trackRecordingWorkflow_.globalTransportPlaying()
-                ? jam2::gui::next_safe_grid_beat_raw_frame(position)
-                : songStart;
-            if (attachTargetFrame <= position.rawCurrentFrame) {
-                attachTargetFrame = jam2::gui::next_safe_grid_beat_raw_frame(position);
-            }
-            if (attachTargetFrame == 0 || preparedMixLifecycle_.active().frames <= 0) {
-                attachToRunningTransport = false;
-            } else {
-                const std::uint64_t elapsed = attachTargetFrame >= songStart
-                    ? attachTargetFrame - songStart
-                    : 0ULL;
-                attachSourceFrame = elapsed %
-                    static_cast<std::uint64_t>(preparedMixLifecycle_.active().frames);
-            }
-        }
+        const TrackRecordingWorkflow::PreparedAttachPlan attachPlan =
+            trackRecordingWorkflow_.preparedAttachPlan(
+                metronomeTransport_.grid().position(),
+                preparedMixLifecycle_.active().frames);
         loadPreparedMixIntoEngine(
-            attachTargetFrame,
-            attachSourceFrame,
-            attachToRunningTransport);
+            attachPlan.targetFrame,
+            attachPlan.sourceFrame,
+            attachPlan.alignToTransport);
         discardObsoletePreparedMixPaths();
         appendLog(QStringLiteral("prepared mix: %1 frames in %2 ms pre_master_peak=%3 output_peak=%4 master_pre_gain=%5 over_unity_samples=%6 worker_requests=%7 worker_coalesced=%8 worker_failures=%9")
             .arg(preparedMixLifecycle_.active().frames)
@@ -10701,7 +10483,7 @@ void MainWindow::applyPreparedMixResult(PreparedMixResult result)
             updateTrackPlaybackPresentation();
         }
         if (preparedMixLifecycle_.takePlayWhenReady()) {
-            if (attachToRunningTransport) {
+            if (attachPlan.alignToTransport) {
                 if (gridScheduleLabel_) {
                     gridScheduleLabel_->setText(
                         trackRecordingWorkflow_.globalTransportPlaying()
@@ -10938,67 +10720,6 @@ void MainWindow::updateTrackPlaybackPresentation()
             ? QStringLiteral("Playback is protected because a synced track recording is active")
             : QString{});
     }
-}
-
-void MainWindow::loadTrackMetadata()
-{
-    const QString path = QFileDialog::getOpenFileName(
-        this,
-        QStringLiteral("Load WAV"),
-        jamAssetFolder(JamStorage::AssetKind::Imported),
-        QStringLiteral("WAV files (*.wav);;All files (*)"),
-        nullptr,
-        QFileDialog::Options{});
-    if (path.isEmpty()) {
-        return;
-    }
-    const QFileInfo info(path);
-    auto metadata = std::make_shared<WavMetadata>();
-    auto sidecar = std::make_shared<QJsonObject>();
-    auto error = std::make_shared<QString>();
-    (void)startFileWorkerTask(
-        [path, metadata, sidecar, error] {
-            try {
-                *metadata = readWavMetadata(path);
-                *sidecar = readTrackSidecarJson(path);
-            } catch (const std::exception& exception) {
-                *error = QString::fromUtf8(exception.what());
-            }
-        },
-        [this, info, metadata, sidecar, error] {
-            if (!error->isEmpty()) {
-                QMessageBox::warning(this, QStringLiteral("Jam2 Track"), *error);
-                return;
-            }
-            const int expectedSampleRate = activeTrackSampleRate();
-            if (metadata->sampleRate != expectedSampleRate) {
-                QMessageBox::warning(
-                    this,
-                    QStringLiteral("Jam2 Track"),
-                    QStringLiteral(
-                        "Sample-rate mismatch: this jam uses %1 Hz but the WAV is %2 Hz. "
-                        "The track was not loaded; convert it or use a %1 Hz source.")
-                        .arg(expectedSampleRate)
-                        .arg(metadata->sampleRate));
-                return;
-            }
-            trackController_.model().fileName = info.fileName();
-            trackController_.model().filePath = info.absoluteFilePath();
-            trackController_.model().fileBytes = info.size();
-            trackController_.model().sampleRate = metadata->sampleRate;
-            trackController_.model().sampleRateCompatible = true;
-            trackController_.model().userProvidedSource = true;
-            trackController_.model().durationMs = sidecar->value(QStringLiteral("duration_ms")).toInt(metadata->durationMs);
-            trackController_.model().sha256 = metadata->sha256;
-            trackController_.model().guessedBpm = 0.0;
-            trackController_.model().acceptedBpm = sidecar->value(
-                QStringLiteral("accepted_bpm")).toDouble(
-                    trackController_.model().acceptedBpm);
-            trackController_.model().key = QStringLiteral("Unknown");
-            trackController_.setWholeTrackLoop();
-            updateTrackControls();
-            loadTrackWaveform();
-        });
 }
 
 void MainWindow::refreshLoopbackSources()
@@ -11313,7 +11034,9 @@ void MainWindow::startLoopbackCapture()
             QMetaObject::invokeMethod(this, [this, ok, outputPath, errorText, diagnostics] {
                 loopbackRecordingPreviewClock_.invalidate();
                 if (stopCaptureButton_) stopCaptureButton_->setEnabled(false);
-                const QString transientPath = trackRecordingWorkflow_.finishLoopbackCapture(outputPath);
+                const QString transientPath = ok
+                    ? trackRecordingWorkflow_.finishLoopbackCapture(outputPath)
+                    : trackRecordingWorkflow_.failLoopbackCapture();
                 if (!diagnostics.isEmpty()) {
                     appendLog(diagnostics);
                 }
@@ -11323,6 +11046,14 @@ void MainWindow::startLoopbackCapture()
                     }
                     if (loadWavButton_) loadWavButton_->setEnabled(true);
                     appendLog(QStringLiteral("loopback recording failed: ") + errorText);
+                    if (!automationSuppressDialogs_) {
+                        QMessageBox::warning(
+                            this,
+                            QStringLiteral("Loopback Recording"),
+                            errorText.isEmpty()
+                                ? QStringLiteral("The loopback recording did not complete.")
+                                : errorText);
+                    }
                     finishLaneTakeFinalization();
                     return;
                 }
@@ -11340,7 +11071,7 @@ void MainWindow::startLoopbackCapture()
                 }
             }, Qt::QueuedConnection);
         }, &error)) {
-        const QString transientPath = trackRecordingWorkflow_.abandonPendingCapture();
+        const QString transientPath = trackRecordingWorkflow_.failLoopbackCapture();
         if (!transientPath.isEmpty() && QFileInfo::exists(transientPath)) {
             registerTransientTrackWav(transientPath);
         }

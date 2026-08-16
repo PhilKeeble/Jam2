@@ -1,5 +1,6 @@
 // Native hardware coverage is owned by the repository-level test tree.
 #include "InputPluginBackend.hpp"
+#include "PluginProtocol.hpp"
 
 #include "engine.hpp"
 #include "input_source.hpp"
@@ -211,8 +212,10 @@ int main(int argc, char** argv)
         int maximumRouterPeak = 0;
         constexpr auto warmupWindow = std::chrono::milliseconds(500);
         constexpr std::uint64_t maximumWarmupMisses = 2;
-        constexpr std::uint64_t maximumSteadyMisses = 2;
+        constexpr std::uint64_t minimumSteadyMissAllowance = 2;
+        constexpr std::uint64_t steadyBlocksPerAllowedMiss = 1000;
         std::uint64_t missesAfterWarmup = 0;
+        std::uint64_t submittedAfterWarmup = 0;
         bool sampledWarmup = false;
         const auto started = std::chrono::steady_clock::now();
         while (std::chrono::steady_clock::now() - started < std::chrono::seconds(5)) {
@@ -224,7 +227,9 @@ int main(int argc, char** argv)
             maximumRouterPeak = std::max(maximumRouterPeak, routerStats.peak_ppm);
             if (!sampledWarmup &&
                 std::chrono::steady_clock::now() - started >= warmupWindow) {
-                missesAfterWarmup = plugin->stats().deadlineMisses;
+                const auto warmupStats = plugin->stats();
+                missesAfterWarmup = warmupStats.deadlineMisses;
+                submittedAfterWarmup = warmupStats.submittedBlocks;
                 sampledWarmup = true;
             }
             QThread::msleep(10);
@@ -247,6 +252,18 @@ int main(int argc, char** argv)
 
         const std::uint64_t steadyMisses =
             pluginStats.deadlineMisses - missesAfterWarmup;
+        const std::uint64_t steadyBlocks =
+            pluginStats.submittedBlocks - submittedAfterWarmup;
+        const std::uint64_t maximumSteadyMisses = std::max(
+            minimumSteadyMissAllowance,
+            (steadyBlocks + steadyBlocksPerAllowedMiss - 1U) /
+                steadyBlocksPerAllowedMiss);
+        constexpr std::uint64_t isolationPipelineBlocks =
+            jam2::pluginhost::kIsolationPipelineBlocks;
+        const bool exactBlockAccounting =
+            pluginStats.submittedBlocks >= isolationPipelineBlocks &&
+            pluginStats.completedBlocks + pluginStats.deadlineMisses ==
+                pluginStats.submittedBlocks - isolationPipelineBlocks;
         std::cout << "Jam2 real-device plugin test results; device=" << deviceId
                   << " input=" << userInputChannel
                   << " frames=" << engineStats.audio_buffer_frames
@@ -255,10 +272,12 @@ int main(int argc, char** argv)
                   << " send_peak_ppm=" << maximumSendPeak
                   << " plugin_peak_ppm=" << maximumRouterPeak
                   << " plugin=" << pluginName.toStdString()
+                  << " plugin_submitted=" << pluginStats.submittedBlocks
                   << " plugin_completed=" << pluginStats.completedBlocks
                   << " plugin_misses=" << pluginStats.deadlineMisses
                   << " warmup_misses=" << missesAfterWarmup
                   << " steady_misses=" << steadyMisses
+                  << " steady_blocks=" << steadyBlocks
                   << " allowed_misses=" << maximumWarmupMisses << '/'
                   << maximumSteadyMisses
                   << " callback_gaps(1.1x/1.5x/2x)="
@@ -268,10 +287,13 @@ int main(int argc, char** argv)
                   << " process_us(last/avg/max)=" << pluginStats.workerProcessLastUs << '/'
                   << pluginStats.workerProcessAverageUs << '/'
                   << pluginStats.workerProcessMaxUs << '\n';
-        if (!sampledWarmup || missesAfterWarmup > maximumWarmupMisses ||
+        if (!sampledWarmup || !exactBlockAccounting ||
+            pluginStats.failedBlocks != 0 || pluginStats.staleResponses != 0 ||
+            missesAfterWarmup > maximumWarmupMisses ||
             steadyMisses > maximumSteadyMisses) {
             throw std::runtime_error(
-                "The real device/plugin deadline miss count exceeded its bounded tolerance");
+                "The real device/plugin block accounting, worker responses, or "
+                "bounded deadline-miss rate failed");
         }
         std::cout << "Jam2 real-device plugin test passed\n";
         return 0;

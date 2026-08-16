@@ -390,7 +390,6 @@ public:
     std::function<void(int)> onAnalyzeWav;
     std::function<void(int, double)> onGainChanged;
     std::function<void(int, qint64, qint64, qint64)> onRegionCommitted;
-    std::function<void(int)> onBankSelected;
     std::function<void(int, const QString&)> onWavDropped;
 
     void setLanes(
@@ -818,17 +817,6 @@ protected:
             event->accept();
             return;
         }
-        if (laneIndex >= lanes_.size()) {
-            if (onAddLane) onAddLane();
-            if (control == QStringLiteral("arm") && onArm) {
-                onArm(laneIndex);
-            } else if (control == QStringLiteral("rename") && onRename) {
-                onRename(laneIndex);
-            }
-            event->accept();
-            return;
-        }
-
         if (control == QStringLiteral("mute")) {
             if (onMute) onMute(laneIndex);
             event->accept();

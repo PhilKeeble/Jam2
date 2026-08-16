@@ -255,6 +255,30 @@ std::int16_t jam2::gui::normalized_to_pcm16(double value) noexcept
         std::lrint(std::clamp(value, -1.0, 1.0) * 32767.0));
 }
 
+jam2::gui::LoopbackCaptureContent jam2::gui::classify_loopback_capture_content(
+    std::uint64_t rawFrames,
+    std::uint64_t retainedFrames) noexcept
+{
+    if (rawFrames == 0) return LoopbackCaptureContent::NoFrames;
+    if (retainedFrames == 0) return LoopbackCaptureContent::SilenceOnly;
+    return LoopbackCaptureContent::Audio;
+}
+
+QString jam2::gui::loopback_capture_content_error(LoopbackCaptureContent content)
+{
+    switch (content) {
+    case LoopbackCaptureContent::NoFrames:
+        return QStringLiteral(
+            "No audio was captured. Check the selected loopback source and try again.");
+    case LoopbackCaptureContent::SilenceOnly:
+        return QStringLiteral(
+            "Only silence was detected. Check that audio is playing through the selected loopback source and try again.");
+    case LoopbackCaptureContent::Audio:
+        return {};
+    }
+    return {};
+}
+
 void jam2::gui::write_loopback_wav_pcm16(
     const QString& outputPath,
     int sampleRate,
@@ -766,6 +790,9 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
                 sourceSamples,
                 sampleRate,
                 options.targetSampleRate);
+        const jam2::gui::LoopbackCaptureContent captureContent =
+            jam2::gui::classify_loopback_capture_content(
+                capture.rawFrames(), sourceSamples.size());
         diagnostics = QStringLiteral(
             "loopback capture endpoint=\"%1\" channels=%2 channel_mask=0x%3 "
             "source_sample_rate=%4 target_sample_rate=%5 resampled=%6 "
@@ -804,11 +831,14 @@ void GuiLoopbackRecorder::run(GuiLoopbackOptions options, FinishedCallback finis
             .arg(options.trimLeadingSilence ? QStringLiteral("yes") : QStringLiteral("no"))
             .arg(options.trimTrailingSilence ? QStringLiteral("yes") : QStringLiteral("no"))
             .arg(capture.peakDbfs(), 0, 'f', 2);
-        writeWav(
-            options.outputPath,
-            options.targetSampleRate,
-            outputSamples);
-        ok = true;
+        error = jam2::gui::loopback_capture_content_error(captureContent);
+        if (error.isEmpty()) {
+            writeWav(
+                options.outputPath,
+                options.targetSampleRate,
+                outputSamples);
+            ok = true;
+        }
 #else
         throw std::runtime_error("internal loopback recording is currently implemented on Windows only");
 #endif

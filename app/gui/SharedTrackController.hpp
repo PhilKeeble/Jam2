@@ -59,9 +59,6 @@ public:
     void preparedForTransport(quint64 arrangementRevision) noexcept;
     bool observeEnginePlaying(bool playing) noexcept;
     QString playbackStatusText(bool syncEnabled) const;
-    QJsonObject processingMessage() const;
-    void applyProcessingMessage(const QJsonObject& message);
-
 private:
     SharedTrackModel model_;
     PlaybackState playback_;

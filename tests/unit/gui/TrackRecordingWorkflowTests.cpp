@@ -318,6 +318,17 @@ void testSnapshotsAndCountdown()
             workflow.globalTransportTimelineStartFrame() == 200 &&
             workflow.recordingStartFrame() == 400,
         "snapshot must atomically update latency, prepared, transport, attach, and recording state");
+
+    PlaybackGrid::Position pendingPosition = runningPosition();
+    pendingPosition.rawCurrentFrame = 150;
+    const TrackRecordingWorkflow::PreparedAttachPlan pendingAttach =
+        workflow.preparedAttachPlan(pendingPosition, 75);
+    require(pendingAttach.alignToTransport &&
+            pendingAttach.targetFrame == 200 &&
+            pendingAttach.sourceFrame == 0,
+        "a late prepared mix must attach to a pending global play even without a lifecycle play-when-ready flag");
+    require(!workflow.preparedAttachPlan(pendingPosition, 0).alignToTransport,
+        "a prepared attach plan must reject an empty render");
     PlaybackGrid::Position position;
     position.engineAnchored = true;
     position.rawCurrentFrame = 170;
@@ -336,6 +347,14 @@ void testSnapshotsAndCountdown()
             workflow.globalTransportStartFrame() == 200 &&
             workflow.currentTransportPositionMs(position, 1) == 550,
         "committed transport must expose unclamped elapsed timeline milliseconds");
+    PlaybackGrid::Position playingPosition = runningPosition();
+    playingPosition.rawCurrentFrame = 241000;
+    const TrackRecordingWorkflow::PreparedAttachPlan runningAttach =
+        workflow.preparedAttachPlan(playingPosition, 100000);
+    require(runningAttach.alignToTransport &&
+            runningAttach.targetFrame == 264000 &&
+            runningAttach.sourceFrame == 63800,
+        "a replacement prepared mix must join running transport on a safe beat at the shared timeline offset");
 
     snapshot.transport_revision = 2;
     snapshot.transport_pending = true;
@@ -643,6 +662,12 @@ void testCaptureLaneAndJamState()
             workflow.pendingTransientCapturePath().isEmpty() &&
             workflow.abandonPendingCapture().isEmpty(),
         "loopback finish must return and consume the original transient path once");
+    workflow.beginLoopbackCapture(QStringLiteral("failed.wav"), true, 48000);
+    require(workflow.failLoopbackCapture() == QStringLiteral("failed.wav") &&
+            workflow.lastCapturePath().isEmpty() &&
+            workflow.lastCaptureSampleRate() == 0 &&
+            workflow.pendingTransientCapturePath().isEmpty(),
+        "loopback failure must return transient cleanup ownership and expose no completed capture");
     workflow.beginLoopbackCapture(QStringLiteral("persistent.wav"), false, 48000);
     require(workflow.abandonPendingCapture().isEmpty(),
         "nontransient loopback capture must have no cleanup ownership");

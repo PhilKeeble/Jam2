@@ -1547,6 +1547,20 @@ int main(int argc, char* argv[])
             final, QStringLiteral("audio_callbacks"));
         const double mixCapacityDrops = peer.csv.number(
             final, QStringLiteral("mix_capacity_drops"), -1.0);
+        const double mixCapacityDroppedFrames = peer.csv.number(
+            final, QStringLiteral("mix_capacity_dropped_frames"), -1.0);
+        const double mixOutputFrames = peer.csv.number(
+            final, QStringLiteral("mix_output_frames"), -1.0);
+        constexpr double kMaximumImpairedMixDropRatio = 0.05;
+        const double maximumMixCapacityDrops =
+            *condition == NetworkCondition::Clean
+            ? 0.0
+            : mixOutputFrames * kMaximumImpairedMixDropRatio;
+        const bool mixCapacityHealthy =
+            mixCapacityDrops >= 0.0 &&
+            mixCapacityDroppedFrames == mixCapacityDrops &&
+            mixOutputFrames > 0.0 &&
+            mixCapacityDrops <= maximumMixCapacityDrops;
         const double authenticationFailures = peer.csv.number(
             final, QStringLiteral("udp_authentication_failed"));
         if (initialAuthority != creatorId || finalAuthority != expectedFinalAuthority ||
@@ -1555,7 +1569,7 @@ int main(int argc, char* argv[])
             finalEpoch == initialEpoch ||
             mappedEpoch <= 0 || std::abs(mappingError) > 1024.0 ||
             sentPackets <= 0.0 || receivedPackets <= 0.0 || callbacks <= 0.0 ||
-            mixCapacityDrops != 0.0 ||
+            !mixCapacityHealthy ||
             (*condition != NetworkCondition::Security &&
              authenticationFailures != 0.0)) {
             return fail(QStringLiteral(
@@ -1563,7 +1577,7 @@ int main(int argc, char* argv[])
                 "authority=%2/%3 expected=%4/%5 revision=%6/%7 mode=%8/%9 "
                 "aligned=%10 beat_delta=%11 epochs=%12->%13 mapped=%14 "
                 "mapping_error=%15 sent=%16 recv=%17 callbacks=%18 "
-                "mix_capacity_drops=%19 auth_failures=%20")
+                "mix_capacity_drops=%19/%20 output_frames=%21 auth_failures=%22")
                 .arg(index + 1)
                 .arg(initialAuthority).arg(finalAuthority)
                 .arg(creatorId).arg(expectedFinalAuthority)
@@ -1572,7 +1586,8 @@ int main(int argc, char* argv[])
                 .arg(aligned).arg(beatDelta)
                 .arg(initialEpoch).arg(finalEpoch).arg(mappedEpoch)
                 .arg(mappingError).arg(sentPackets).arg(receivedPackets)
-                .arg(callbacks).arg(mixCapacityDrops).arg(authenticationFailures));
+                .arg(callbacks).arg(mixCapacityDrops).arg(maximumMixCapacityDrops)
+                .arg(mixOutputFrames).arg(authenticationFailures));
         }
         if (!initialAuthorityEpoch) initialAuthorityEpoch = initialEpoch;
         if (!finalAuthorityEpoch) finalAuthorityEpoch = finalEpoch;

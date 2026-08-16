@@ -83,6 +83,12 @@ public:
         int sampleRate = 0;
     };
 
+    struct PreparedAttachPlan {
+        bool alignToTransport = false;
+        std::uint64_t targetFrame = 0;
+        std::uint64_t sourceFrame = 0;
+    };
+
     using CommandSubmitter = std::function<bool(const jam2::EngineCommand&)>;
     using SnapshotProvider = std::function<jam2::EngineSnapshot()>;
 
@@ -129,6 +135,9 @@ public:
     qint64 currentTransportPositionMs(
         const PlaybackGrid::Position& enginePosition,
         qint64 durationMs) const noexcept;
+    PreparedAttachPlan preparedAttachPlan(
+        const PlaybackGrid::Position& enginePosition,
+        qint64 preparedFrames) const noexcept;
 
     void consumeSnapshot(
         const jam2::EngineSnapshot& snapshot,
@@ -178,6 +187,7 @@ public:
         bool transientOutput,
         int sampleRate);
     QString finishLoopbackCapture(const QString& outputPath);
+    QString failLoopbackCapture();
     QString abandonPendingCapture();
 
     void armLane(
