@@ -21,6 +21,9 @@ namespace {
 
 using namespace std::chrono_literals;
 
+constexpr qint64 kJamRecordingSignalProofFrames =
+    ((48000LL * 60LL + 173LL - 1LL) / 173LL) + 1024LL;
+
 int failures = 0;
 
 void fail(const QString& message)
@@ -1214,8 +1217,8 @@ int main(int argc, char* argv[])
                 !folder.isEmpty() &&
                 performance.value(QStringLiteral("jam_recording_view_take")).toString() ==
                     QFileInfo(folder).fileName() &&
-                performance.value(QStringLiteral("jam_recording_frames_written")).toInteger() >
-                    4800 &&
+                performance.value(QStringLiteral("jam_recording_frames_written")).toInteger() >=
+                    kJamRecordingSignalProofFrames &&
                 performance.value(QStringLiteral("jam_recording_dropped_frames")).toInteger() == 0 &&
                 performance.value(QStringLiteral("jam_recording_writer_errors")).toInteger() == 0;
         }, states)) return 1;

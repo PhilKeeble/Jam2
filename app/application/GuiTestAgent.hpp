@@ -10,6 +10,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 class AutomationChannel;
 class QApplication;
@@ -32,7 +33,7 @@ private:
     void drain();
     void handle(const QJsonObject& command);
     void emitEvent(QString event, QJsonObject fields = {});
-    QJsonObject controlInventoryPage(int cursor, bool includeState) const;
+    QJsonObject controlInventoryPage(int cursor, bool includeState);
     bool invokeControl(const QJsonObject& command, QString& error);
     void reject(const QJsonObject& command, const QString& reason);
 
@@ -42,6 +43,8 @@ private:
     std::unique_ptr<AutomationChannel> channel_;
     std::mutex commandMutex_;
     std::deque<QJsonObject> commands_;
+    std::vector<QJsonObject> pagedControls_;
+    bool pagedControlsIncludeState_ = false;
     bool drainScheduled_ = false;
     bool stopping_ = false;
     std::atomic<std::uint64_t> rejectedCommands_{0};

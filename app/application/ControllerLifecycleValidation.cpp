@@ -31,6 +31,10 @@ using jam2::control_protocol::TransportFailure;
 
 namespace {
 
+constexpr int kFailedKeyHandshakeTimeoutMs = 1000;
+constexpr int kFailedKeyCleanupTimeoutMs = 500;
+constexpr int kFailedKeyRateLimitTimeoutMs = 1000;
+
 struct EventCapture {
     int connectionRefused = 0;
     int authenticationRejected = 0;
@@ -443,47 +447,81 @@ QJsonObject jam2RunControllerLifecycleValidation(
     }, 1000);
     check(QStringLiteral("controller.oversized-frame-prefix-fails-closed"), oversizedRejected);
 
-    const quint64 authenticationRejectsBefore = securityServer.stats().authenticationRejects;
+    // Own a fresh failure window for the exact 64-plus-one limiter proof. The
+    // preceding deadline/replay/oversize cases deliberately keep one listener
+    // alive for several seconds and must not consume this case's window age.
+    securityServer.close();
+    const auto rateLimitPort = unusedLoopbackPort();
+    ControlServer rateLimitServer;
+    const bool rateLimitListening = rateLimitPort && rateLimitServer.listen(
+        *rateLimitPort,
+        QStringLiteral("0102030405060708"),
+        QStringLiteral("000102030405060708090a0b0c0d0e0f"));
+    const quint64 authenticationRejectsBefore =
+        rateLimitServer.stats().authenticationRejects;
+    int completedFailedKeyAttempts = 0;
+    bool failedKeyChallengeRead = true;
+    bool failedKeyCleanupObserved = true;
     for (int attempt = 0;
-         securityListening &&
+         rateLimitListening &&
              attempt < jam2::control_protocol::kMaxAuthenticationFailuresPerWindow;
          ++attempt) {
         QTcpSocket socket;
         QJsonObject challenge;
-        socket.connectToHost(QHostAddress::LocalHost, *securityPort);
-        if (!readHandshakeFrame(socket, challenge)) break;
+        socket.connectToHost(QHostAddress::LocalHost, *rateLimitPort);
+        if (!readHandshakeFrame(socket, challenge, kFailedKeyHandshakeTimeoutMs)) {
+            failedKeyChallengeRead = false;
+            break;
+        }
         const QByteArray invalidProof = jam2::control_protocol::encodeHandshake(
             QJsonObject{{QStringLiteral("type"), QStringLiteral("hello.proof")}});
         socket.write(invalidProof);
         const quint64 target = authenticationRejectsBefore +
             static_cast<quint64>(attempt + 1);
         if (!pumpUntil([&] {
-                return securityServer.stats().authenticationRejects >= target &&
-                    securityServer.stats().activeConnections == 0;
-            }, 500)) {
+                return rateLimitServer.stats().authenticationRejects >= target &&
+                    rateLimitServer.stats().activeConnections == 0;
+            }, kFailedKeyCleanupTimeoutMs)) {
+            failedKeyCleanupObserved = false;
             break;
         }
+        ++completedFailedKeyAttempts;
     }
     QTcpSocket rateLimitedSocket;
-    if (securityListening) {
-        rateLimitedSocket.connectToHost(QHostAddress::LocalHost, *securityPort);
+    if (rateLimitListening) {
+        rateLimitedSocket.connectToHost(QHostAddress::LocalHost, *rateLimitPort);
     }
-    const bool authenticationRateLimited = securityListening && pumpUntil([&] {
-        return securityServer.stats().authenticationRateLimitRejects > 0 &&
-            securityServer.stats().activeConnections == 0;
-    }, 1000);
-    const auto finalSecurityStats = securityServer.stats();
+    const bool authenticationRateLimited = rateLimitListening && pumpUntil([&] {
+        return rateLimitServer.stats().authenticationRateLimitRejects > 0 &&
+            rateLimitServer.stats().activeConnections == 0;
+    }, kFailedKeyRateLimitTimeoutMs);
+    const auto finalSecurityStats = rateLimitServer.stats();
+    const quint64 authenticationRejectDelta =
+        finalSecurityStats.authenticationRejects - authenticationRejectsBefore;
     check(QStringLiteral("controller.failed-key-work-is-rate-limited-and-bounded"),
         authenticationRateLimited &&
-            finalSecurityStats.authenticationRejects - authenticationRejectsBefore ==
+            authenticationRejectDelta ==
                 static_cast<quint64>(
                     jam2::control_protocol::kMaxAuthenticationFailuresPerWindow) &&
             finalSecurityStats.activeConnectionHighWater <=
                 static_cast<quint64>(jam2::control_protocol::kMaxPendingPeers) &&
             finalSecurityStats.maxBufferedInputBytes <=
                 static_cast<quint64>(jam2::control_protocol::kMaxJsonBytes +
-                    jam2::control_protocol::kAuthenticatedHeaderBytes + 4));
-    securityServer.close();
+                    jam2::control_protocol::kAuthenticatedHeaderBytes + 4),
+        QStringLiteral(
+            "rate_limited=%1 rate_limit_rejects=%2 authentication_reject_delta=%3 "
+            "attempts=%4 challenge_read=%5 cleanup_observed=%6 active=%7 "
+            "active_high_water=%8 max_buffered_input_bytes=%9")
+            .arg(authenticationRateLimited)
+            .arg(finalSecurityStats.authenticationRateLimitRejects)
+            .arg(authenticationRejectDelta)
+            .arg(completedFailedKeyAttempts)
+            .arg(failedKeyChallengeRead)
+            .arg(failedKeyCleanupObserved)
+            .arg(finalSecurityStats.activeConnections)
+            .arg(finalSecurityStats.activeConnectionHighWater)
+            .arg(finalSecurityStats.maxBufferedInputBytes));
+    rateLimitServer.close();
 
     SharedSessionController creator;
     EventCapture creatorCapture;

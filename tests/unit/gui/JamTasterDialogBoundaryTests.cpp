@@ -95,18 +95,21 @@ void answerNextMessage(
     QMessageBox::StandardButton response,
     MessageCapture& capture)
 {
-    QTimer::singleShot(0, [&capture, response] {
+    auto* timer = new QTimer(QApplication::instance());
+    timer->setInterval(1);
+    QObject::connect(timer, &QTimer::timeout, timer, [timer, &capture, response] {
         auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
         if (box == nullptr) return;
+        QAbstractButton* button = box->button(response);
+        if (button == nullptr) return;
+        timer->stop();
+        timer->deleteLater();
         capture.seen = true;
         capture.title = box->windowTitle();
         capture.text = box->text();
-        if (QAbstractButton* button = box->button(response)) {
-            button->click();
-        } else {
-            box->done(static_cast<int>(response));
-        }
+        button->click();
     });
+    timer->start();
 }
 
 void answerNextFileDialog(const QString& selection, bool& seen)
@@ -447,9 +450,25 @@ void testChooserAndWorkerActions(const BundleFixture& fixture)
     MessageCapture prompt;
     answerNextMessage(QMessageBox::Cancel, prompt);
     create->click();
-    require(prompt.seen && prompt.title == QStringLiteral("Complete JamJar analysis") &&
+    bool promptIdentityMatches =
+        prompt.title == QStringLiteral("Complete JamJar analysis");
+#ifdef Q_OS_MACOS
+    // Native macOS alerts intentionally omit their window title. Identify the
+    // same prompt by its owned message text while retaining the strict title
+    // contract on platforms that present one.
+    promptIdentityMatches = promptIdentityMatches || prompt.title.isEmpty();
+#endif
+    require(prompt.seen && promptIdentityMatches &&
+            prompt.text.contains(QStringLiteral("A new JamJar needs the full timing")) &&
             state.createCalls == 0 && !service.taskActive(),
-        "cancelling full-analysis confirmation starts no work");
+        QStringLiteral(
+            "cancelling full-analysis confirmation starts no work "
+            "(seen=%1 title='%2' creates=%3 active=%4)")
+            .arg(prompt.seen)
+            .arg(prompt.title)
+            .arg(state.createCalls)
+            .arg(service.taskActive())
+            .toStdString());
     prompt = {};
     answerNextMessage(QMessageBox::Yes, prompt);
     create->click();
@@ -530,7 +549,11 @@ void testMissingSourceAndUnavailableBundle(const BundleFixture& fixture)
     MessageCapture warning;
     answerNextMessage(QMessageBox::Ok, warning);
     findTextWidget<QPushButton>(unavailableDialog, QStringLiteral("Find BPM"))->click();
-    require(warning.seen && warning.title == QStringLiteral("JamTaster") &&
+    bool warningTitleMatches = warning.title == QStringLiteral("JamTaster");
+#ifdef Q_OS_MACOS
+    warningTitleMatches = warningTitleMatches || warning.title.isEmpty();
+#endif
+    require(warning.seen && warningTitleMatches &&
             warning.text.contains(QStringLiteral("worker is missing")),
         "unavailable bundle reports its precise validation error without starting");
 

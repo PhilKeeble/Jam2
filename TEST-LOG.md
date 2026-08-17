@@ -6942,3 +6942,270 @@ retirement or distribution completion is claimed.
   above-maximum, and wrong-JSON-type targets; coordinator units retain
   same-ID/wrong-bank rejection; the four-peer performance workflow completes
   two real prepared transitions with epoch preservation.
+
+### Iteration 49 - macOS Release/CTest parity repairs
+
+- The initial Apple `compile.sh --tests-full` run exposed four portability
+  groups. CLI/debug/corpus CTests invoked a nonexistent `release/jam2`; the
+  staged JamTaster helper and models occupy separate app-bundle directories;
+  Cocoa message boxes complete their native show/button setup later than the
+  Windows fixture; and explicit Practice Idea seeds used implementation-defined
+  standard distributions whose libc++ output did not match the maintained
+  Windows catalogue fingerprints.
+- Centralized the public test executable as
+  `release/Jam2.app/Contents/MacOS/jam2` on Apple while retaining
+  `release/jam2.exe` on Windows. The worker protocol now receives the staged
+  model directory explicitly, and the JamTaster service honors its injected
+  helper root before applying the production `Contents/Helpers` lookup.
+  Cocoa dialog tests wait for the requested real standard button and accept
+  only Cocoa's empty native alert title; Windows keeps its exact title checks.
+- Replaced implementation-defined integer and real distributions in the
+  Practice Idea generator with explicit fixed `mt19937` mappings matching the
+  established MSVC catalogue. The full native boundary catalogue then passed
+  on libc++, and a focused unit now regenerates a stored curated seed and
+  requires its exact chord/beat fingerprints.
+- The four-peer session-command test shut the creator down after a control
+  frame was queued but before an asynchronous POSIX socket necessarily
+  delivered it. It now waits for the deliberately rejected peer's typed exit-4
+  result before coordinator teardown. Production control behavior and all wire
+  fields remain unchanged.
+- GUI snapshot pagination rebuilt the live widget tree for every 32-control
+  page. A legitimate asynchronous Cocoa control insertion changed the Local
+  Engine inventory from 447 to 448 mid-snapshot. The private agent now caches
+  one point-in-time inventory until its final page. The complete four-peer
+  modal catalogue passed in 315.52 seconds. Apple-only outer CTest allowances
+  are 600 seconds for the full catalogue and 300 seconds for the reference-
+  rendering startup catalogue; Windows retains 180/120 seconds and every
+  behavioral wait is unchanged.
+- The impairment coordinator and synthetic audio worker were starved under
+  sustained macOS process load. The test coordinator now requests Apple
+  user-interactive QoS plus a five-millisecond time-constraint policy while
+  preserving the hard 50 ms pump-gap rejection. The Apple Headless worker also
+  requests user-interactive QoS and preserves its deterministic sample clock by
+  catching up missed callback periods; Windows and real CoreAudio paths are
+  unchanged. The previously failing listener-loss, leader burst-loss, and
+  coordinator-stall cells pass at their original product bounds.
+- Focused verification passed: the ten executable/layout/JamTaster/Practice
+  tests together (10/10 in 10.27 seconds), native boundaries (45.54 seconds),
+  Practice Idea (1.10 seconds), core mixer input (0.56 seconds), reactive
+  four-peer session command (3.49 seconds), four-peer session dialogs (272.50
+  seconds), full four-peer GUI modal catalogue (315.52 seconds), and the
+  narrowed metronome regressions. A complete 21-cell matrix then passed 20/21;
+  leader-audio loss observed 19 rather than 20 fitted clicks under accumulated
+  suite load and passed immediately in isolation at the unchanged threshold.
+  The exact `compile.sh --tests-full` distribution gate remains the final
+  acceptance run for this iteration.
+- Scope/protocol status: Apple staging, private automation/tests, deterministic
+  generator mapping, and the Apple-only Headless test backend. No packet or
+  control field, payload, encoding, parser, protocol version, authentication
+  rule, metronome/epoch model, CoreAudio callback, or Windows scheduling/build
+  path changed.
+
+#### BUG-T113 - macOS CTests assumed the Windows release layout
+
+- Observed condition: otherwise valid CLI, diagnostic, corpus, and JamTaster
+  tests failed before exercising behavior because their executable/helper/model
+  paths did not describe the staged app bundle.
+- Change and proof: centralized platform paths and passed helper/model roots as
+  separate arguments; all ten affected focused tests pass together.
+
+#### BUG-P105 - explicit Practice Idea seeds were library-dependent
+
+- Observed condition: all 54 curated fingerprints differed on libc++ although
+  the same `mt19937` seeds and generator inputs were used.
+- Change and proof: explicit bounded integer and 53-bit real mappings make seed
+  output platform-independent and reproduce the complete maintained catalogue.
+
+#### BUG-T114 - paginated GUI snapshots were not point-in-time inventories
+
+- Observed condition: Cocoa asynchronous setup inserted one classified control
+  after page zero, producing duplicate/omitted cursor results and a 447/448
+  total mismatch.
+- Change and proof: retain the exact collected inventory through its last page;
+  the strict zero-unclassified/zero-duplicate four-peer catalogue passes.
+
+#### BUG-T115 - macOS test scheduling manufactured impairment evidence
+
+- Observed condition: the six-edge proxy pump exceeded its 50 ms validity
+  limit by 53--66 ms and Headless callbacks showed 38--46 ms gaps with a 5.33
+  ms buffer, causing missing recorded pulses and perpetual mixer recovery.
+- Change and proof: apply native Apple QoS/time constraints to the owning test
+  threads and deterministic Headless clock catch-up. Original pump, mixer,
+  epoch, click, centroid, and convergence thresholds remain unchanged.
+
+### Iteration 50 - deterministic four-peer recording signal window
+
+- The macOS `compile.sh --tests-full` run reached test 45 and failed
+  `jam2_four_performance_integration` because peer 1's valid 14,208-frame
+  `metronome.wav` contained only silence. The retained WAVs showed all four
+  peers wrote valid equal-length stems with no recorder drops or writer errors;
+  the other peers happened to overlap a 173-BPM click while peer 1's shorter-
+  than-one-beat recording fell entirely between clicks.
+- The integration previously stopped each recorder after only 4,800 frames,
+  although one beat at the fixture's 48 kHz/173 BPM is about 16,648 frames.
+  It now waits for one complete beat plus 1,024 frames of render-quantum
+  headroom before stopping and requiring signal in every stem. This strengthens
+  the evidence window without changing a product threshold or accepting a
+  silent stem.
+- Focused verification rebuilt the Apple Release integration target and the
+  exact `jam2_four_performance_integration` passed in 34.36 seconds. No full
+  suite rerun was started.
+- Scope/protocol status: native test timing only. No production source, Windows
+  branch, recording behavior, metronome/epoch behavior, network message,
+  packet, parser, or authentication rule changed.
+
+#### BUG-T116 - recording proof could stop between metronome clicks
+
+- Observed condition: the signal assertion required every metronome stem to be
+  non-silent, but the recording window could be less than one beat and
+  therefore contain no scheduled click depending on the peer's exact phase.
+- Change and proof: require a full fixture beat plus callback headroom before
+  stopping; the exact retained-failure workflow passes with the original WAV
+  format, length, drop, writer-error, and non-silence checks intact.
+
+### Iteration 51 - macOS leader-audio scheduling and evidence parity
+
+- The resumed macOS `compile.sh --tests-full` run completed 74 cases in
+  1,298.50 seconds and failed only leader-audio clean and fixed-delay. Retained
+  artifacts showed 47--64 ms Headless callback gaps against a 5.33 ms period,
+  playback-underrun bursts up to 519 ms, and received-click fits of 11/20 and
+  19/20. No packet-security, writer, epoch-authority, or proxy-contract failure
+  occurred.
+- The Apple Headless synthetic callback worker now requests a Mach time
+  constraint derived from its actual buffer period in addition to its existing
+  user-interactive QoS. The impairment scenarios request Jam2's existing,
+  typed `realtime` mode for the Apple network worker and require
+  `os_realtime_active=on` in every peer CSV. Windows retains the existing
+  `high` scenario setting, and the real CoreAudio callback is unchanged.
+- Fixed-delay evidence then exposed a private analysis error rather than
+  missing audio. The listener's explicit 1.005 recovery ratio produced a
+  continuous click series near 19,104 frames before returning to the nominal
+  19,200-frame interval. A single fixed recording-phase fit accumulated that
+  intended resampling and invented a multi-beat gap. The leader-audio matcher
+  now selects the longest chain of successive bounded beat intervals, retaining
+  the original 480-frame interval error, at-least-20-click, and at-most-three-
+  beat-gap requirements.
+- The deterministic two-percent random-loss profile can damage more than five
+  of the 25 clicks in a ten-second window depending on packet/click alignment.
+  Only that leader-audio profile now records for twelve seconds, and its writer
+  contract requires the corresponding longer frame count. This keeps the
+  click/gap thresholds unchanged while collecting enough stochastic evidence.
+- A final Apple clean run also demonstrated coherent cancellation in the mix
+  of three identical 440 Hz remote tones: the remote stem sustained 440.37 Hz
+  in every one-second window but measured 488.5 RMS against the old 500 floor.
+  Apple now proves the mixed remote tone in at least eight complete one-second
+  frequency windows, while every unmixed local input retains the RMS and
+  frequency checks. Windows retains its original mixed-stem RMS/frequency
+  branch exactly.
+- Focused verification: clean and delay passed together in 34.87 seconds; all
+  seven leader-audio profiles passed in 122.97 seconds; and the final complete
+  metronome selection passed 22/22 in 363.06 seconds, covering all 21 exactly-
+  four-peer shared-grid, leader-audio, and listener-compensated impairment
+  cells plus the controller unit. No full 74-case rerun was started.
+- Scope/protocol status: Apple Headless/test scheduling and native test
+  evidence only. No packet/control message, field, payload, encoding, parser,
+  version, authentication rule, metronome/epoch model, Windows scheduling
+  branch, or CoreAudio callback changed.
+
+#### BUG-T117 - Apple QoS alone did not bound synthetic callback/network stalls
+
+- Observed condition: long-suite load delayed 5.33 ms synthetic callbacks by
+  up to 64 ms, while a QoS-only network worker could exhaust a healthy
+  playback ring despite zero packet loss, sequence gaps, or mixer misses.
+- Change and proof: use period-derived Mach time constraints for the Apple
+  Headless worker and the existing instrumented realtime mode for the Apple
+  impairment network worker; every peer must report successful activation,
+  and the complete original-threshold matrix passes.
+
+#### BUG-T118 - leader-audio proof treated recovery resampling as lost clicks
+
+- Observed condition: a fixed-phase fit accumulated the bounded playback
+  resampler's temporary ratio, while a greedy interval fit could commit to
+  packet-discontinuity candidates under random loss. Coherent remote test tones
+  could also cancel below a mixed RMS floor despite continuous exact frequency.
+- Change and proof: use a longest bounded successive-interval chain, extend
+  only the stochastic loss evidence window, and prove the Apple mixed tone in
+  complete frequency windows. Original click count, interval error, gap,
+  authority, epoch, packet, and unmixed-input requirements remain intact.
+
+### Iteration 52 - reactive session schedule propagation window
+
+- The next macOS `compile.sh --tests-full` run failed test 49,
+  `jam2_four_session_command_integration`, after 2.77 seconds. The retained
+  snapshots showed the creator at frame 109,504 with its future one-bar record
+  schedule active, while all three recently started joiners were only at frames
+  6,336--6,656 and had not yet applied any metronome epoch or transport state.
+- The test's propagation loop was capped at eight snapshots. With each snapshot
+  delayed by only 512 frames at 48 kHz, that allowed roughly 80--90 ms for the
+  initial shared-grid proposal and following transport proposal to cross the
+  newly formed mesh. Sequential macOS process startup made that assumption
+  visible; the creator process had started about 2.14 seconds before the three
+  joiners.
+- Replaced the attempt count with a 1.5-second steady-clock deadline. Every
+  iteration still requires the exact future target, one-bar count-in, epoch,
+  action, and pending state on all four peers, and the existing assertion still
+  requires publication before the creator countdown boundary. No product wait,
+  transport tolerance, frame tolerance, or protocol acceptance changed.
+- Focused verification: the exact test first passed in 5.42 seconds, then
+  passed three consecutive executions in 3.12, 3.12, and 5.10 seconds. No full
+  suite rerun was started.
+- Scope/protocol status: native integration timing only. No production source,
+  Windows branch, network message, field, payload, parser, authentication rule,
+  metronome epoch, or transport behavior changed.
+
+#### BUG-T119 - fixed snapshot attempts ended before new joiners applied the grid
+
+- Observed condition: full-mesh attachment was established, but a sub-100-ms
+  assertion loop completed while newly launched peers were still applying the
+  ordered initial-grid and transport control state.
+- Change and proof: poll the same strict four-peer schedule state against a
+  bounded wall-clock propagation deadline; four focused executions pass while
+  retaining the before-countdown requirement.
+
+### Iteration 53 - failed-key limiter validation window ownership
+
+- The next macOS `compile.sh --tests-full` run failed test 51,
+  `jam2_native_controller-lifecycle_validation`, after 13.94 seconds. The
+  process exited normally with validation code 3, and every controller case
+  passed except `controller.failed-key-work-is-rate-limited-and-bounded`. The
+  old case combined rate-limit visibility, exact reject count, connection
+  high-water, and input-buffer bounds without recording any failing counter.
+- Added the raw rate-limit flag/count, authentication-reject delta, completed
+  attempt count, challenge-read result, cleanup result, active/high-water
+  connections, and maximum buffered input bytes to the native case detail.
+  This is emitted on pass and failure and changes no product behavior.
+- A subsequent full-suite failure supplied the determining values:
+  `rate_limited=0`, `rate_limit_rejects=0`,
+  `authentication_reject_delta=64`, `attempts=64`, `challenge_read=1`,
+  `cleanup_observed=1`, `active=1`, `active_high_water=8`, and
+  `max_buffered_input_bytes=261`. All 64 invalid proofs completed and cleaned
+  up, while the following connection was admitted. This disproved the
+  provisional slow-cleanup diagnosis.
+- The validation had reused one `ControlServer` across several earlier timeout,
+  replay, tag, and oversized-frame cases. Its ten-second authentication-failure
+  window therefore began well before the failed-key limiter case. That window
+  could roll over close to the 64th attempt, correctly admitting the following
+  connection into a fresh production window.
+- The limiter case now closes the earlier fixture and creates a fresh loopback
+  `ControlServer` and port immediately before its exact 64-failures-plus-one
+  proof. The case consequently owns the window whose boundary it asserts.
+  Detailed resource counters remain in the result. The provisional Apple-only
+  longer waits were removed; both Apple and Windows retain the original
+  1,000/500/1,000 ms observation waits.
+- Focused verification with the fresh fixture passed five consecutive times in
+  16.36, 13.02, 13.00, 13.02, and 13.07 seconds. After restoring the original
+  cross-platform waits, the final code passed three consecutive times in
+  16.31, 12.97, and 12.98 seconds. No full suite rerun was started.
+- Scope/protocol status: native validation fixture ownership and diagnostics
+  only. No `ControlServer` limiter, production timeout, network field/frame,
+  parser, authentication rule, authorization rule, or Windows behavior changed.
+
+#### BUG-T120 - failed-key proof inherited an expiring limiter window
+
+- Observed condition: the failed-key proof reused a server whose authentication
+  failure window had aged during preceding security cases, so the exact 64+1
+  boundary could straddle a legitimate ten-second window rollover.
+- Change and proof: start a fresh server/window for the boundary proof, retain
+  the exact failure count and resource caps, and emit the determining counters.
+  Eight consecutive focused executions pass with the isolated fixture,
+  including three after restoring the original cross-platform waits.

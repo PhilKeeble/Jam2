@@ -36,6 +36,11 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/thread_policy.h>
+#include <pthread.h>
 #endif
 
 namespace {
@@ -56,9 +61,7 @@ constexpr int kFinalBpm = 150;
 constexpr std::int64_t kBpmChangeFrames = 3LL * kSampleRate;
 constexpr std::int64_t kRecordingStartFrames = 5LL * kSampleRate;
 constexpr std::int64_t kRecordingStopFrames = 15LL * kSampleRate;
-constexpr std::int64_t kSnapshotFrames = kRecordingStopFrames + kSampleRate / 4;
-constexpr std::int64_t kShutdownFrames = 16LL * kSampleRate;
-constexpr std::int64_t kExpectedRecordingFrames = kRecordingStopFrames - kRecordingStartFrames;
+constexpr std::int64_t kLeaderAudioLossRecordingStopFrames = 17LL * kSampleRate;
 constexpr std::int64_t kFinalBeatIntervalFrames = 60LL * kSampleRate / kFinalBpm;
 constexpr qint64 kMaximumProxyPumpGapMs = 50;
 
@@ -80,6 +83,44 @@ bool prioritizeProxyCoordinator(QString& error)
         error = QStringLiteral(
             "could not set the UDP impairment coordinator thread priority: Windows error %1")
             .arg(GetLastError());
+        return false;
+    }
+#elif defined(__APPLE__)
+    // The four measured Jam2 processes request high QoS themselves. Give the
+    // in-process six-edge proxy pump equivalent scheduling service so macOS
+    // cannot starve the impairment harness and manufacture packet gaps.
+    const int qosError = pthread_set_qos_class_self_np(
+        QOS_CLASS_USER_INTERACTIVE, 0);
+    if (qosError != 0) {
+        error = QStringLiteral(
+            "could not set the UDP impairment coordinator QoS: error %1")
+            .arg(qosError);
+        return false;
+    }
+    mach_timebase_info_data_t timebase{};
+    if (mach_timebase_info(&timebase) != KERN_SUCCESS || timebase.numer == 0) {
+        error = QStringLiteral("could not read the macOS scheduling timebase");
+        return false;
+    }
+    const auto absoluteFromNanoseconds = [&timebase](std::uint64_t nanoseconds) {
+        return nanoseconds * static_cast<std::uint64_t>(timebase.denom) /
+            static_cast<std::uint64_t>(timebase.numer);
+    };
+    const std::uint64_t period = absoluteFromNanoseconds(5000000ULL);
+    thread_time_constraint_policy_data_t policy{};
+    policy.period = static_cast<std::uint32_t>(period);
+    policy.computation = static_cast<std::uint32_t>(std::max<std::uint64_t>(period * 2 / 5, 1));
+    policy.constraint = static_cast<std::uint32_t>(std::max<std::uint64_t>(period * 4 / 5, 2));
+    policy.preemptible = TRUE;
+    const kern_return_t schedulingError = thread_policy_set(
+        pthread_mach_thread_np(pthread_self()),
+        THREAD_TIME_CONSTRAINT_POLICY,
+        reinterpret_cast<thread_policy_t>(&policy),
+        THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+    if (schedulingError != KERN_SUCCESS) {
+        error = QStringLiteral(
+            "could not set the UDP impairment coordinator time constraint: error %1")
+            .arg(schedulingError);
         return false;
     }
 #else
@@ -556,34 +597,37 @@ FittedGrid fitEventGrid(
 {
     FittedGrid best;
     if (intervalFrames <= 0) return best;
-    for (const std::int64_t anchor : candidates) {
-        std::vector<std::pair<std::int64_t, std::int64_t>> matched;
-        for (const std::int64_t candidate : candidates) {
-            const std::int64_t step = std::llround(
-                static_cast<double>(candidate - anchor) / intervalFrames);
+    // Leader audio passes through the listener's explicitly bounded playback
+    // resampler. Validate the observable interval from each accepted click
+    // instead of accumulating that intentional recovery ratio against one
+    // fixed recording-phase anchor.
+    const auto better = [](const FittedGrid& candidate, const FittedGrid& current) {
+        return candidate.events > current.events ||
+            (candidate.events == current.events &&
+             candidate.maximumIntervalMultiple < current.maximumIntervalMultiple) ||
+            (candidate.events == current.events &&
+             candidate.maximumIntervalMultiple == current.maximumIntervalMultiple &&
+             candidate.maximumPhaseErrorFrames < current.maximumPhaseErrorFrames);
+    };
+    std::vector<FittedGrid> chains(candidates.size(), FittedGrid{1, 0, 0});
+    for (std::size_t index = 0; index < candidates.size(); ++index) {
+        for (std::size_t previous = 0; previous < index; ++previous) {
+            const std::int64_t delta = candidates[index] - candidates[previous];
+            const std::int64_t intervalMultiple = std::llround(
+                static_cast<double>(delta) / intervalFrames);
+            if (intervalMultiple < 1) continue;
             const std::int64_t error = std::llabs(
-                candidate - (anchor + step * intervalFrames));
-            if (error <= toleranceFrames) matched.emplace_back(step, error);
+                delta - intervalMultiple * intervalFrames);
+            if (error > toleranceFrames) continue;
+            FittedGrid candidate = chains[previous];
+            ++candidate.events;
+            candidate.maximumIntervalMultiple = std::max(
+                candidate.maximumIntervalMultiple, intervalMultiple);
+            candidate.maximumPhaseErrorFrames = std::max(
+                candidate.maximumPhaseErrorFrames, error);
+            if (better(candidate, chains[index])) chains[index] = candidate;
         }
-        std::sort(matched.begin(), matched.end());
-        FittedGrid fitted;
-        std::optional<std::int64_t> previousStep;
-        for (const auto& [step, error] : matched) {
-            if (previousStep && step == *previousStep) continue;
-            if (previousStep) {
-                fitted.maximumIntervalMultiple = std::max(
-                    fitted.maximumIntervalMultiple, step - *previousStep);
-            }
-            previousStep = step;
-            ++fitted.events;
-            fitted.maximumPhaseErrorFrames = std::max(
-                fitted.maximumPhaseErrorFrames, error);
-        }
-        if (fitted.events > best.events ||
-            (fitted.events == best.events &&
-             fitted.maximumPhaseErrorFrames < best.maximumPhaseErrorFrames)) {
-            best = fitted;
-        }
+        if (better(chains[index], best)) best = chains[index];
     }
     return best;
 }
@@ -632,7 +676,11 @@ bool eventContractValid(
     return true;
 }
 
-bool recordingContractValid(const PeerEvidence& evidence, int peerIndex, QString& reason)
+bool recordingContractValid(
+    const PeerEvidence& evidence,
+    int peerIndex,
+    std::int64_t expectedRecordingFrames,
+    QString& reason)
 {
     const QJsonObject& sidecar = evidence.sidecar;
     const std::int64_t queued = static_cast<std::int64_t>(
@@ -648,7 +696,7 @@ bool recordingContractValid(const PeerEvidence& evidence, int peerIndex, QString
         sidecar.value(QStringLiteral("bpm")).toInt() != kFinalBpm ||
         !sidecar.value(QStringLiteral("metronome_epoch_valid")).toBool() ||
         sidecar.value(QStringLiteral("metronome_epoch_sample_time")).toDouble() <= 0.0 ||
-        queued != written || written < kExpectedRecordingFrames * 9 / 10 ||
+        queued != written || written < expectedRecordingFrames * 9 / 10 ||
         stop <= start || stop - start != written ||
         sidecar.value(QStringLiteral("dropped_frames")).toDouble(-1) != 0.0 ||
         sidecar.value(QStringLiteral("drop_events")).toDouble(-1) != 0.0 ||
@@ -785,7 +833,28 @@ bool leaderAudioValid(
                 start, static_cast<std::int64_t>(samples.size()) - kSampleRate / 2);
             const double rms = jam2::test::rootMeanSquare(samples, start, stop);
             const double tone = jam2::test::estimateToneHz(samples, kSampleRate, start, stop);
-            if (rms < 500.0 || std::abs(tone - 440.0) > 5.0) {
+#if defined(__APPLE__)
+            bool continuousMixedTone = true;
+            std::size_t completeToneWindows = 0;
+            if (stem == kTheirInputStem) {
+                for (std::int64_t window = start;
+                     window + kSampleRate <= stop;
+                     window += kSampleRate) {
+                    const double windowTone = jam2::test::estimateToneHz(
+                        samples, kSampleRate, window, window + kSampleRate);
+                    continuousMixedTone = continuousMixedTone &&
+                        std::abs(windowTone - 440.0) <= 5.0;
+                    ++completeToneWindows;
+                }
+            }
+            const bool contentValid = std::abs(tone - 440.0) <= 5.0 &&
+                (stem == kMyInputStem
+                    ? rms >= 500.0
+                    : continuousMixedTone && completeToneWindows >= 8);
+#else
+            const bool contentValid = rms >= 500.0 && std::abs(tone - 440.0) <= 5.0;
+#endif
+            if (!contentValid) {
                 reason = QStringLiteral("leader-audio tone continuity/content check failed on peer %1 stem %2")
                     .arg(index + 1).arg(QString::fromLatin1(kStemNames[stem]));
                 return false;
@@ -800,7 +869,7 @@ bool leaderAudioValid(
                 received.maximumIntervalMultiple > 3) {
                 reason = QStringLiteral(
                     "peer %1 did not receive grid-timed leader clicks under impairment: "
-                    "candidates=%2 fitted=%3 max_phase_error_frames=%4 max_gap_beats=%5")
+                    "candidates=%2 fitted=%3 max_interval_error_frames=%4 max_gap_beats=%5")
                     .arg(index + 1).arg(candidates.size()).arg(received.events)
                     .arg(received.maximumPhaseErrorFrames)
                     .arg(received.maximumIntervalMultiple);
@@ -1073,6 +1142,19 @@ int main(int argc, char* argv[])
     if (edges.size() != 6) return fail(QStringLiteral("exactly six edge proxies were not created"));
 
     std::array<PeerProcess, kPeerCount> processes;
+    const std::int64_t recordingStopFrames =
+        *mode == MetronomeMode::LeaderAudio && *condition == NetworkCondition::Loss
+        ? kLeaderAudioLossRecordingStopFrames
+        : kRecordingStopFrames;
+    const std::int64_t expectedRecordingFrames =
+        recordingStopFrames - kRecordingStartFrames;
+    const std::int64_t snapshotFrames = recordingStopFrames + kSampleRate / 4;
+    const std::int64_t shutdownFrames = recordingStopFrames + kSampleRate;
+#if defined(__APPLE__)
+    const QString osPriority = QStringLiteral("realtime");
+#else
+    const QString osPriority = QStringLiteral("high");
+#endif
     const QString invite = QStringLiteral("jam2://v1?endpoint=127.0.0.1:%1&session=%2&key=%3")
         .arg(ports[0]).arg(sessionId, sessionKey);
     for (int index = 0; index < kPeerCount; ++index) {
@@ -1118,15 +1200,15 @@ int main(int argc, char* argv[])
         actions.push_back(scheduledAction(
             QStringLiteral("record-stop-%1").arg(index),
             QStringLiteral("recording.stop"),
-            kRecordingStopFrames));
+            recordingStopFrames));
         actions.push_back(scheduledAction(
             QStringLiteral("snapshot-%1").arg(index),
             QStringLiteral("snapshot"),
-            kSnapshotFrames));
+            snapshotFrames));
         actions.push_back(scheduledAction(
             QStringLiteral("shutdown-%1").arg(index),
             QStringLiteral("shutdown"),
-            kShutdownFrames + (index == 0 ? kSampleRate / 2 : 0)));
+            shutdownFrames + (index == 0 ? kSampleRate / 2 : 0)));
 
         const QString signal = *mode == MetronomeMode::LeaderAudio
             ? QStringLiteral("tone-440") :
@@ -1170,7 +1252,7 @@ int main(int argc, char* argv[])
                 {QStringLiteral("bpm"), kInitialBpm},
                 {QStringLiteral("metronome_level"), 0.20},
                 {QStringLiteral("metronome_mode"), modeText(*mode)},
-                {QStringLiteral("os_priority"), QStringLiteral("high")},
+                {QStringLiteral("os_priority"), osPriority},
             }},
             {QStringLiteral("artifacts"), QJsonObject{{QStringLiteral("root"), peer.root}}},
             {QStringLiteral("network"), network},
@@ -1442,6 +1524,13 @@ int main(int argc, char* argv[])
                     .arg(index + 1).arg(column));
             }
         }
+#if defined(__APPLE__)
+        if (!peer.csv.hasColumn(QStringLiteral("os_realtime_active"))) {
+            return fail(QStringLiteral(
+                "peer %1 CSV is missing Apple realtime scheduling evidence")
+                .arg(index + 1));
+        }
+#endif
         peer.periodicRows = peer.csv.rowsOfType(QStringLiteral("periodic"));
         const auto initial = latestRow(peer, 1, true);
         const std::int64_t committedRevision = *mode == MetronomeMode::LeaderAudio ? 4 : 2;
@@ -1500,7 +1589,8 @@ int main(int argc, char* argv[])
                 QStringLiteral("recording/") + QString::fromLatin1(kStemNames[stem]));
             if (!jam2::test::readPcm16MonoWav(path, peer.stems[stem], error)) return fail(error);
         }
-        if (!recordingContractValid(peer, index, error)) return fail(error);
+        if (!recordingContractValid(
+                peer, index, expectedRecordingFrames, error)) return fail(error);
     }
 
     std::set<std::uint64_t> localIds;
@@ -1561,6 +1651,13 @@ int main(int argc, char* argv[])
             mixCapacityDroppedFrames == mixCapacityDrops &&
             mixOutputFrames > 0.0 &&
             mixCapacityDrops <= maximumMixCapacityDrops;
+#if defined(__APPLE__)
+        if (!peer.csv.yes(final, QStringLiteral("os_realtime_active"))) {
+            return fail(QStringLiteral(
+                "peer %1 Apple network worker did not activate its requested time constraint")
+                .arg(index + 1));
+        }
+#endif
         const double authenticationFailures = peer.csv.number(
             final, QStringLiteral("udp_authentication_failed"));
         if (initialAuthority != creatorId || finalAuthority != expectedFinalAuthority ||

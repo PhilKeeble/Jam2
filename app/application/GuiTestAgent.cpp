@@ -1226,26 +1226,35 @@ void GuiTestAgent::emitEvent(QString event, QJsonObject fields)
     }
 }
 
-QJsonObject GuiTestAgent::controlInventoryPage(int cursor, bool includeState) const
+QJsonObject GuiTestAgent::controlInventoryPage(int cursor, bool includeState)
 {
-    auto controls = controlInventoryItems(window_, includeState);
+    // A cursor walks one point-in-time inventory. Rebuilding the widget tree on
+    // every page lets asynchronous device/UI updates insert a control between
+    // pages, shifting indices and producing duplicates or omissions.
+    if (cursor == 0 || pagedControls_.empty() ||
+        pagedControlsIncludeState_ != includeState) {
+        pagedControls_ = controlInventoryItems(window_, includeState);
+        pagedControlsIncludeState_ = includeState;
+    }
     const int count = static_cast<int>(std::min<std::size_t>(
-        controls.size(), static_cast<std::size_t>(std::numeric_limits<int>::max())));
+        pagedControls_.size(), static_cast<std::size_t>(std::numeric_limits<int>::max())));
     const int start = std::min(cursor, count);
     const int end = std::min(count, start + kPageSize);
     QJsonArray items;
     for (int index = start; index < end; ++index) {
-        QJsonObject item = std::move(controls[static_cast<std::size_t>(index)]);
+        QJsonObject item = pagedControls_[static_cast<std::size_t>(index)];
         item.insert(QStringLiteral("index"), index);
         items.push_back(std::move(item));
     }
-    return {
+    QJsonObject page{
         {QStringLiteral("protocol"), QString::fromLatin1(kProtocol)},
         {QStringLiteral("cursor"), start},
         {QStringLiteral("next_cursor"), end < count ? end : -1},
         {QStringLiteral("total_controls"), count},
         {QStringLiteral("controls"), items},
     };
+    if (end >= count) pagedControls_.clear();
+    return page;
 }
 
 bool GuiTestAgent::invokeControl(const QJsonObject& command, QString& error)

@@ -4,6 +4,14 @@ set(JAM2_TEST_BIN_DIR "${CMAKE_BINARY_DIR}/tests")
 # are a sibling of app/, so resolve the Qt components they link directly.
 find_package(Qt6 REQUIRED COMPONENTS Core Network Widgets)
 
+if(WIN32)
+    set(JAM2_TEST_PUBLIC_EXECUTABLE
+        "${JAM2_RELEASE_DIR}/jam2${CMAKE_EXECUTABLE_SUFFIX}")
+elseif(APPLE)
+    set(JAM2_TEST_PUBLIC_EXECUTABLE
+        "${JAM2_RELEASE_DIR}/Jam2.app/Contents/MacOS/jam2")
+endif()
+
 function(jam2_configure_test_target target)
     target_compile_features(${target} PRIVATE cxx_std_20)
     set_target_properties(${target} PROPERTIES
@@ -72,7 +80,7 @@ target_link_libraries(jam2_cli_boundary_tests PRIVATE jam2_core Qt6::Core)
 add_dependencies(jam2_cli_boundary_tests jam2)
 add_test(NAME jam2_cli_boundary_units
     COMMAND $<TARGET_FILE:jam2_cli_boundary_tests>
-        "${JAM2_RELEASE_DIR}/jam2${CMAKE_EXECUTABLE_SUFFIX}")
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}")
 set_tests_properties(jam2_cli_boundary_units PROPERTIES
     LABELS "unit;application;cli"
     TIMEOUT 45)
@@ -116,31 +124,31 @@ target_link_libraries(jam2_debug_diagnostic_tests PRIVATE jam2_core Qt6::Core)
 add_dependencies(jam2_debug_diagnostic_tests jam2)
 add_test(NAME jam2_debug_help_units
     COMMAND $<TARGET_FILE:jam2_debug_diagnostic_tests>
-        "${JAM2_RELEASE_DIR}/jam2${CMAKE_EXECUTABLE_SUFFIX}" help)
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" help)
 set_tests_properties(jam2_debug_help_units PROPERTIES
     LABELS "unit;application;debug;network"
     TIMEOUT 40)
 add_test(NAME jam2_debug_fuzz_rejected_units
     COMMAND $<TARGET_FILE:jam2_debug_diagnostic_tests>
-        "${JAM2_RELEASE_DIR}/jam2${CMAKE_EXECUTABLE_SUFFIX}" fuzz-rejected)
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" fuzz-rejected)
 set_tests_properties(jam2_debug_fuzz_rejected_units PROPERTIES
     LABELS "unit;application;debug;fuzz;network"
     TIMEOUT 70)
 add_test(NAME jam2_debug_fuzz_accepted_units
     COMMAND $<TARGET_FILE:jam2_debug_diagnostic_tests>
-        "${JAM2_RELEASE_DIR}/jam2${CMAKE_EXECUTABLE_SUFFIX}" fuzz-accepted)
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" fuzz-accepted)
 set_tests_properties(jam2_debug_fuzz_accepted_units PROPERTIES
     LABELS "unit;application;debug;fuzz;network"
     TIMEOUT 60)
 add_test(NAME jam2_debug_lifecycle_units
     COMMAND $<TARGET_FILE:jam2_debug_diagnostic_tests>
-        "${JAM2_RELEASE_DIR}/jam2${CMAKE_EXECUTABLE_SUFFIX}" lifecycle)
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" lifecycle)
 set_tests_properties(jam2_debug_lifecycle_units PROPERTIES
     LABELS "unit;application;debug;network;lifecycle"
     TIMEOUT 20)
 add_test(NAME jam2_music_corpus_units
     COMMAND $<TARGET_FILE:jam2_debug_diagnostic_tests>
-        "${JAM2_RELEASE_DIR}/jam2${CMAKE_EXECUTABLE_SUFFIX}" corpus)
+        "${JAM2_TEST_PUBLIC_EXECUTABLE}" corpus)
 set_tests_properties(jam2_music_corpus_units PROPERTIES
     LABELS "unit;application;debug;jamtaster;gui"
     TIMEOUT 120)
@@ -702,7 +710,8 @@ target_include_directories(jam2_jamtaster_worker_protocol_tests SYSTEM PRIVATE
 add_dependencies(jam2_jamtaster_worker_protocol_tests jamtaster_worker)
 add_test(NAME jam2_jamtaster_worker_protocol_units
     COMMAND $<TARGET_FILE:jam2_jamtaster_worker_protocol_tests>
-        "${JAM2_TEST_JAMTASTER_WORKER}")
+        "${JAM2_TEST_JAMTASTER_WORKER}"
+        "${JAM2_TEST_JAMTASTER_MODELS_DIR}")
 set_tests_properties(jam2_jamtaster_worker_protocol_units PROPERTIES
     LABELS "unit;jamtaster;worker;model;pipeline"
     TIMEOUT 120)
@@ -953,13 +962,6 @@ add_executable(jam2_four_gui_modal_integration EXCLUDE_FROM_ALL
 jam2_configure_test_target(jam2_four_gui_modal_integration)
 target_link_libraries(jam2_four_gui_modal_integration PRIVATE
     jam2_test_process_support Qt6::Core)
-if(WIN32)
-    set(JAM2_TEST_PUBLIC_EXECUTABLE "${JAM2_RELEASE_DIR}/jam2.exe")
-elseif(APPLE)
-    set(JAM2_TEST_PUBLIC_EXECUTABLE
-        "${JAM2_RELEASE_DIR}/Jam2.app/Contents/MacOS/jam2")
-endif()
-
 add_executable(jam2_four_jam_sync_integration EXCLUDE_FROM_ALL
     integration/gui/FourJamSyncIntegration.cpp)
 jam2_configure_test_target(jam2_four_jam_sync_integration)
@@ -1044,6 +1046,12 @@ add_test(NAME jam2_four_gui_modal_integration
 set_tests_properties(jam2_four_gui_modal_integration PROPERTIES
     LABELS "integration;gui;four-peer;automation;modal"
     TIMEOUT 180)
+if(APPLE)
+    # Four Cocoa processes repeatedly snapshot the full real widget tree. The
+    # per-operation waits remain bounded; allow the complete catalogue longer.
+    set_tests_properties(jam2_four_gui_modal_integration PROPERTIES
+        TIMEOUT 600)
+endif()
 if(WIN32)
     set_tests_properties(jam2_four_gui_modal_integration PROPERTIES
         ENVIRONMENT_MODIFICATION
@@ -1055,6 +1063,13 @@ add_test(NAME jam2_four_session_dialog_integration
 set_tests_properties(jam2_four_session_dialog_integration PROPERTIES
     LABELS "integration;gui;four-peer;automation;modal;session-startup"
     TIMEOUT 120)
+if(APPLE)
+    # This workflow renders real reference material while driving four Cocoa
+    # processes. Its behavioral waits remain individually bounded; only the
+    # outer catalogue allowance differs from the faster Windows run.
+    set_tests_properties(jam2_four_session_dialog_integration PROPERTIES
+        TIMEOUT 300)
+endif()
 if(WIN32)
     set_tests_properties(jam2_four_session_dialog_integration PROPERTIES
         ENVIRONMENT_MODIFICATION

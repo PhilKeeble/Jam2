@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <random>
 
@@ -20,6 +21,35 @@ namespace jam2::practice {
 namespace {
 
 using Rng = std::mt19937;
+
+// Standard random distributions do not promise identical sequences across
+// library implementations. Jam2 persists seeded idea fingerprints, so map the
+// fixed mt19937 stream explicitly. This is the 32-bit multiply/reject mapping
+// used by the MSVC build that produced the maintained curated catalog.
+int randomInt(Rng& rng, int minimum, int maximum)
+{
+    const std::uint32_t span = static_cast<std::uint32_t>(
+        static_cast<std::int64_t>(maximum) - minimum + 1);
+    std::uint64_t product = static_cast<std::uint64_t>(rng()) * span;
+    std::uint32_t remainder = static_cast<std::uint32_t>(product);
+    if (remainder < span) {
+        const std::uint32_t threshold = static_cast<std::uint32_t>(-span) % span;
+        while (remainder < threshold) {
+            product = static_cast<std::uint64_t>(rng()) * span;
+            remainder = static_cast<std::uint32_t>(product);
+        }
+    }
+    return minimum + static_cast<int>(product >> 32);
+}
+
+double randomReal(Rng& rng, double minimum, double maximum)
+{
+    constexpr double scale = 1.0 / 9007199254740992.0;
+    const std::uint64_t sample =
+        (static_cast<std::uint64_t>(rng()) >> 11) |
+        (static_cast<std::uint64_t>(rng()) << 21);
+    return minimum + (maximum - minimum) * (static_cast<double>(sample) * scale);
+}
 
 struct ProgressionDef {
     QString id;
@@ -68,7 +98,7 @@ struct PlannedEvent {
 template <typename T>
 const T& choose(const QVector<T>& values, Rng& rng)
 {
-    return values.at(std::uniform_int_distribution<int>(0, values.size() - 1)(rng));
+    return values.at(randomInt(rng, 0, static_cast<int>(values.size()) - 1));
 }
 
 ProgressionDef progression(const char* id, const char* name, std::initializer_list<const char*> romans)
@@ -332,7 +362,7 @@ const ProfileDefinition& resolvedProfile(const ChordIdeaRequest& request, Rng& r
         const auto& normal = profileCatalog();
         for (const ProfileDefinition& profile : normal) candidates.push_back(&profile);
     }
-    return *candidates.at(std::uniform_int_distribution<int>(0, candidates.size() - 1)(rng));
+    return *candidates.at(randomInt(rng, 0, static_cast<int>(candidates.size()) - 1));
 }
 
 const StyleDef& grammarForProfile(const ProfileDefinition& profile, Rng& rng)
@@ -378,11 +408,11 @@ NativeFormDefinition resolvedForm(
         }
     }
     if (!compatible.isEmpty()) {
-        return *compatible.at(
-            std::uniform_int_distribution<int>(0, compatible.size() - 1)(rng));
+        return *compatible.at(randomInt(
+            rng, 0, static_cast<int>(compatible.size()) - 1));
     }
-    NativeFormDefinition result = profile.forms.at(
-        std::uniform_int_distribution<int>(0, profile.forms.size() - 1)(rng));
+    NativeFormDefinition result = profile.forms.at(randomInt(
+        rng, 0, static_cast<int>(profile.forms.size()) - 1));
     if (!request.meterId.isEmpty() &&
         (request.allowMeterOverride || profile.meterIds.contains(request.meterId))) {
         result.meterId = request.meterId;
@@ -410,7 +440,7 @@ const MeterDefinition& resolvedMeter(
 VariationPlan profileVariation(const ProfileDefinition& profile, Rng& rng)
 {
     const auto drawAxis = [&rng] {
-        return std::uniform_int_distribution<int>(-1, 1)(rng);
+        return randomInt(rng, -1, 1);
     };
     VariationPlan plan;
     plan.density = drawAxis();
@@ -649,7 +679,7 @@ const ProgressionDef& chooseProgression(
         }
     }
     if (candidates.isEmpty()) return choose(style.progressions, rng);
-    return *candidates.at(std::uniform_int_distribution<int>(0, candidates.size() - 1)(rng));
+    return *candidates.at(randomInt(rng, 0, static_cast<int>(candidates.size()) - 1));
 }
 
 bool preferFlats(int key, const ModeDef& mode)
@@ -3469,7 +3499,7 @@ void addTheory(
     QSet<int> protectedJpopBeats;
     if (profile.id == QStringLiteral("jpop_anisong_rock") &&
         recipe.complexity >= 7 &&
-        std::uniform_int_distribution<int>(0, 1)(rng) == 0) {
+        randomInt(rng, 0, 1) == 0) {
         const auto region = std::find_if(
             recipe.formSections.cbegin(),
             recipe.formSections.cend(),
@@ -3488,7 +3518,7 @@ void addTheory(
                 (region->startBar - 1 + region->bars) *
                 recipe.beatsPerBar;
             const int shift =
-                std::uniform_int_distribution<int>(0, 1)(rng)
+                randomInt(rng, 0, 1)
                 ? 3
                 : -3;
             const int localTonic = key + shift;
@@ -3699,14 +3729,12 @@ void addTheory(
     }
     static constexpr std::array<int, 8> perEight{0, 1, 1, 1, 2, 2, 3, 4};
     int budget = perEight.at(recipe.complexity - 1) * ((recipe.bars + 7) / 8);
-    if (budget > 0 && std::uniform_int_distribution<int>(0, 3)(rng) == 0) --budget;
+    if (budget > 0 && randomInt(rng, 0, 3) == 0) --budget;
     if (profile.id.startsWith(QStringLiteral("blues_"))) {
         // Blues complexity enriches a composed turnaround; it must not
         // spray generic chromatic operations across each four-bar line.
         const int advancedLimit =
-            recipe.complexity >= 7 &&
-                    std::uniform_int_distribution<int>(
-                        0, 3)(rng) == 0
+            recipe.complexity >= 7 && randomInt(rng, 0, 3) == 0
             ? 1
             : 2;
         budget = qMin(
@@ -3725,12 +3753,10 @@ void addTheory(
             recipe.complexity >= 7
                 ? (profile.id == QStringLiteral("jpop_anisong_rock") ? 4 : 3)
                 : 2);
-        if (budget > 1 &&
-            std::uniform_int_distribution<int>(0, 3)(rng) == 0) {
+        if (budget > 1 && randomInt(rng, 0, 3) == 0) {
             --budget;
         }
-        if (recipe.complexity >= 7 && budget > 2 &&
-            std::uniform_int_distribution<int>(0, 5)(rng) == 0) {
+        if (recipe.complexity >= 7 && budget > 2 && randomInt(rng, 0, 5) == 0) {
             --budget;
         }
         budget = qMax(
@@ -3748,8 +3774,7 @@ void addTheory(
                    : 4)
             : 2;
         budget = qMin(budget, profileLimit);
-        if (budget > 1 &&
-            std::uniform_int_distribution<int>(0, 4)(rng) == 0) {
+        if (budget > 1 && randomInt(rng, 0, 4) == 0) {
             --budget;
         }
     }
@@ -4199,11 +4224,8 @@ void addTheory(
         const QVector<int> targetCandidates =
             candidatesFor(technique);
         if (targetCandidates.isEmpty()) continue;
-        const int targetIndex =
-            targetCandidates.at(
-                std::uniform_int_distribution<int>(
-                    0, targetCandidates.size() - 1)(
-                    operationRng));
+        const int targetIndex = targetCandidates.at(randomInt(
+            operationRng, 0, static_cast<int>(targetCandidates.size()) - 1));
         auto target = events.begin() + targetIndex;
         const int targetBeat = target->beat;
         usedTargetBeats.insert(targetBeat);
@@ -4543,7 +4565,7 @@ int musicalDivisionForBeat(
     if (style.id == QStringLiteral("edm") ||
         style.id == QStringLiteral("anime-jpop")) {
         return beat % beatsPerBar == beatsPerBar - 1 ||
-            std::uniform_int_distribution<int>(0, 4)(rng) == 0 ? 4 : 2;
+            randomInt(rng, 0, 4) == 0 ? 4 : 2;
     }
     if (style.id == QStringLiteral("rock") || style.id == QStringLiteral("country") ||
         style.id == QStringLiteral("rnb-soul") || style.id == QStringLiteral("reggae")) return 2;
@@ -5765,7 +5787,7 @@ const GrooveDef& chooseGroove(
             totalWeight += familyWeight(family, variation);
         }
     }
-    int draw = std::uniform_int_distribution<int>(1, qMax(1, totalWeight))(rng);
+    int draw = randomInt(rng, 1, qMax(1, totalWeight));
     for (const GrooveDef* family : matching) {
         draw -= familyWeight(*family, variation);
         if (draw <= 0) return *family;
@@ -8038,7 +8060,8 @@ int definingInterval(const TheoryDecision* decision, const ParsedChord& chord, R
     for (int interval : preferred) {
         if (includesPitchClass(chord.intervals, interval)) return interval;
     }
-    return chord.intervals.at(std::uniform_int_distribution<int>(0, chord.intervals.size() - 1)(rng));
+    return chord.intervals.at(randomInt(
+        rng, 0, static_cast<int>(chord.intervals.size()) - 1));
 }
 
 int chooseMelodyMidi(
@@ -8060,7 +8083,7 @@ int chooseMelodyMidi(
     double bestScore = -1.0e9;
     for (int midi : choices) {
         double score = -1.2 * std::abs(midi - desired) - 0.08 * std::abs(midi - 66) +
-            std::uniform_real_distribution<double>(-1.2, 1.2)(rng);
+            randomReal(rng, -1.2, 1.2);
         if (midi >= 57 && midi <= 76) score += 2.0;
         if (previous >= 0 && std::abs(midi - previous) <= 2) score += 1.1;
         if (score > bestScore) { bestScore = score; best = midi; }
@@ -8090,11 +8113,11 @@ MelodyCandidate planMelodyCandidate(
         ? pitchClass(
               key + characteristicInterval)
         : -1;
-    const int cellLength = std::uniform_int_distribution<int>(3, 5)(rng);
+    const int cellLength = randomInt(rng, 3, 5);
     QVector<int> contour;
     QStringList contourText;
     for (int index = 0; index < cellLength; ++index) {
-        int movement = index == 0 ? 0 : std::uniform_int_distribution<int>(-2, 2)(rng);
+        int movement = index == 0 ? 0 : randomInt(rng, -2, 2);
         if (index > 0 && movement == 0 && contour.back() == 0) movement = index % 2 ? 1 : -1;
         contour.push_back(movement);
         contourText << (movement > 0 ? QStringLiteral("+%1").arg(movement) : QString::number(movement));
@@ -8202,7 +8225,7 @@ MelodyCandidate planMelodyCandidate(
     }
 
     int previous = 64 + recipe.variationRegister * 4 +
-        std::uniform_int_distribution<int>(-2, 2)(rng);
+        randomInt(rng, -2, 2);
     int repeatCount = 0;
     int onsetOrdinal = 0;
     int motifCursor = 0;
@@ -8703,8 +8726,7 @@ MelodyCandidate planMelodyCandidate(
                 ((electronicProfile || hiphopProfile ||
                   reggaeProfile) &&
                  tick == 0);
-            bool onset = structuralOnset ||
-                std::uniform_real_distribution<double>(0.0, 1.0)(rng) < chance;
+            bool onset = structuralOnset || randomReal(rng, 0.0, 1.0) < chance;
             if (electronicTechno &&
                 tick < electronicCycleTicks) {
                 // The authored Techno identity is a three-beat process cell:
@@ -8747,8 +8769,7 @@ MelodyCandidate planMelodyCandidate(
                 onset =
                     structuralOnset ||
                     recalledBluesSlot ||
-                    std::uniform_real_distribution<double>(
-                        0.0, 1.0)(rng) <
+                    randomReal(rng, 0.0, 1.0) <
                     chance * 0.08;
             }
             const bool inJpopHookWindow =
@@ -8785,8 +8806,7 @@ MelodyCandidate planMelodyCandidate(
                 onset =
                     structuralOnset ||
                     recalledJpopSlot ||
-                    std::uniform_real_distribution<double>(
-                        0.0, 1.0)(rng) <
+                    randomReal(rng, 0.0, 1.0) <
                         chance * 0.08;
             }
             const bool inCountryCallWindow =
@@ -8830,8 +8850,7 @@ MelodyCandidate planMelodyCandidate(
                 onset =
                     structuralOnset ||
                     recalledCountrySlot ||
-                    std::uniform_real_distribution<double>(
-                        0.0, 1.0)(rng) <
+                    randomReal(rng, 0.0, 1.0) <
                         chance * 0.08;
             }
             const bool inRnbCallWindow =
@@ -8866,8 +8885,7 @@ MelodyCandidate planMelodyCandidate(
                 onset =
                     structuralOnset ||
                     recalledRnbSlot ||
-                    std::uniform_real_distribution<double>(
-                        0.0, 1.0)(rng) <
+                    randomReal(rng, 0.0, 1.0) <
                         chance * 0.06;
             }
             bool recalledElectronicSlot = false;
@@ -9222,7 +9240,7 @@ MelodyCandidate planMelodyCandidate(
                 continue;
             }
 
-            int tier = std::uniform_int_distribution<int>(1, recipe.complexity)(rng);
+            int tier = randomInt(rng, 1, recipe.complexity);
             QVector<int> allowed = chordTones;
             QString melodicRole = harmonicChange
                 ? QStringLiteral("Chord-change target")
@@ -9330,14 +9348,12 @@ MelodyCandidate planMelodyCandidate(
                 allowed = activeHome;
                 for (int value : chordTones) if (!allowed.contains(value)) allowed.push_back(value);
                 melodicRole = QStringLiteral("Modal or borrowed chord colour");
-            } else if (!strong && tier >= 4 &&
-                       std::uniform_int_distribution<int>(0, 3)(rng) == 0) {
+            } else if (!strong && tier >= 4 && randomInt(rng, 0, 3) == 0) {
                 const QVector<int> nextTones = chordPitchClasses(parseChord(
                     activeChordAtBeat(chordSection, qMin(chordSection.beats - 1, beat + 1))));
                 if (!nextTones.isEmpty()) {
                     const int target = choose(nextTones, rng);
-                    allowed = {pitchClass(target +
-                        (std::uniform_int_distribution<int>(0, 1)(rng) ? 1 : -1))};
+                    allowed = {pitchClass(target + (randomInt(rng, 0, 1) ? 1 : -1))};
                     approach = true;
                     melodicRole = tier >= 7 ? QStringLiteral("Outside semitone approach")
                         : tier >= 5 ? QStringLiteral("Chromatic enclosure / passing approach")
@@ -9692,7 +9708,7 @@ MelodyCandidate planMelodyCandidate(
             high = qMax(high, midi);
             const int velocity = qBound(58,
                 76 + (strong ? 12 : 0) + (onGroove ? 7 : 0) +
-                    std::uniform_int_distribution<int>(-5, 5)(rng), 112);
+                    randomInt(rng, -5, 5), 112);
             output = {MusicalStepState::Onset,
                 noteName(midi % 12, flats) + QString::number(midi / 12 - 1), velocity};
             const int stepTicks = 12 / source.division;
@@ -10394,8 +10410,7 @@ void generateBassAndSupport(
                     const int aboveDistance =
                         std::abs(above - previousBass);
                     bassMidi = belowDistance == aboveDistance
-                        ? (std::uniform_int_distribution<int>(
-                               0, 1)(rng)
+                        ? (randomInt(rng, 0, 1)
                                ? below
                                : above)
                         : belowDistance < aboveDistance
@@ -12864,7 +12879,8 @@ GeneratedPracticeIdea coupledIdea(
         ? *progressionOverride
         : chooseProgression(
             style, profile, form, complexity, request.modeId, rng);
-    const int key = request.key >= 0 && request.key < 12 ? request.key : std::uniform_int_distribution<int>(0, 11)(rng);
+    const int key = request.key >= 0 && request.key < 12
+        ? request.key : randomInt(rng, 0, 11);
     const int bars = form.bars;
     const int beatsPerBar = meter.numerator;
     const ModeDef mode = resolvedMode(
@@ -13026,10 +13042,8 @@ GeneratedPracticeIdea coupledIdea(
         // decisions so raising complexity develops the same pulse rather than
         // silently rerolling it.
         Rng tempoRng(performanceHash(seed, 0, 0, 0xcbbb9d5dU));
-        const int drawA =
-            std::uniform_int_distribution<int>(low, high)(tempoRng);
-        const int drawB =
-            std::uniform_int_distribution<int>(low, high)(tempoRng);
+        const int drawA = randomInt(tempoRng, low, high);
+        const int drawB = randomInt(tempoRng, low, high);
         const int weighted = (drawA + drawB) / 2;
         recipe.bpm = qBound(low, ((weighted + 1) / 2) * 2, high);
         recipe.variationDecisions << QStringLiteral(

@@ -155,8 +155,12 @@ Snapshot snapshotAll(AutomationProcess& process, const QString& prefix)
             const QJsonObject control = value.toObject();
             const QString controlId = control.value(QStringLiteral("test_id")).toString();
             if (controlId.isEmpty() || !control.value(QStringLiteral("classified")).toBool()) {
-                fail(QStringLiteral("%1 exposed an unclassified control at %2")
-                    .arg(prefix, control.value(QStringLiteral("diagnostic_path")).toString()));
+                fail(QStringLiteral("%1 exposed an unclassified control at %2 state=%3")
+                    .arg(prefix,
+                        control.value(QStringLiteral("diagnostic_path")).toString(),
+                        QString::fromUtf8(QJsonDocument(
+                            control.value(QStringLiteral("state")).toObject())
+                            .toJson(QJsonDocument::Compact))));
                 continue;
             }
             if (result.controls.contains(controlId)) {

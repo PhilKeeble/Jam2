@@ -15,6 +15,13 @@
 #include <thread>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/thread_policy.h>
+#include <pthread.h>
+#endif
+
 #include "common.hpp"
 #include "pcm16_wav.hpp"
 #include "pitch_analyzer.hpp"
@@ -24,6 +31,37 @@ namespace jam2 {
 namespace {
 
 namespace processing = audio::device_processing;
+
+#if defined(__APPLE__)
+void prioritize_headless_audio_thread(double sample_rate, long buffer_size) noexcept
+{
+    (void)pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    if (sample_rate <= 0.0 || buffer_size <= 0) return;
+
+    mach_timebase_info_data_t timebase{};
+    if (mach_timebase_info(&timebase) != KERN_SUCCESS || timebase.numer == 0) return;
+    const auto absolute_from_nanoseconds = [&timebase](std::uint64_t nanoseconds) {
+        return nanoseconds * static_cast<std::uint64_t>(timebase.denom) /
+            static_cast<std::uint64_t>(timebase.numer);
+    };
+    const auto period_nanoseconds = static_cast<std::uint64_t>(
+        static_cast<double>(buffer_size) * 1000000000.0 / sample_rate);
+    const std::uint64_t period = std::max<std::uint64_t>(
+        absolute_from_nanoseconds(period_nanoseconds), 1);
+    thread_time_constraint_policy_data_t policy{};
+    policy.period = static_cast<std::uint32_t>(period);
+    policy.computation = static_cast<std::uint32_t>(
+        std::max<std::uint64_t>(period / 4, 1));
+    policy.constraint = static_cast<std::uint32_t>(
+        std::max<std::uint64_t>(period / 2, policy.computation + 1ULL));
+    policy.preemptible = TRUE;
+    (void)thread_policy_set(
+        pthread_mach_thread_np(pthread_self()),
+        THREAD_TIME_CONSTRAINT_POLICY,
+        reinterpret_cast<thread_policy_t>(&policy),
+        THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+}
+#endif
 
 template <typename T, std::size_t Capacity>
 class FixedQueue {
@@ -317,6 +355,12 @@ private:
 
     void run() noexcept
     {
+#if defined(__APPLE__)
+        // The headless backend stands in for a real CoreAudio callback during
+        // deterministic network tests. Give its worker an audio-period time
+        // constraint so four test processes do not manufacture callback gaps.
+        prioritize_headless_audio_thread(sample_rate_, buffer_size_);
+#endif
         using clock = std::chrono::steady_clock;
         auto next = clock::now();
         const auto period = std::chrono::duration_cast<clock::duration>(
@@ -335,9 +379,14 @@ private:
             callbacks_.fetch_add(1, std::memory_order_relaxed);
             next += period;
             std::this_thread::sleep_until(next);
+#if !defined(__APPLE__)
             if (next + period < clock::now()) {
                 next = clock::now();
             }
+#else
+            // Preserve the deterministic sample clock after a scheduler stall.
+            // A past deadline makes the next bounded callback run immediately.
+#endif
         }
     }
 

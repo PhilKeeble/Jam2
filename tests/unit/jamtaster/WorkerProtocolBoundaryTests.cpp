@@ -131,15 +131,14 @@ int main(int argc, char** argv)
 {
     try {
         QCoreApplication application(argc, argv);
-        if (argc != 2) {
+        if (argc != 3) {
             throw std::runtime_error(
-                "usage: jam2_jamtaster_worker_protocol_tests <jamtaster-worker>");
+                "usage: jam2_jamtaster_worker_protocol_tests <jamtaster-worker> <models>");
         }
         const QString worker = QFileInfo(QString::fromLocal8Bit(argv[1])).absoluteFilePath();
-        const QString models = QDir(QFileInfo(worker).absolutePath())
-            .absoluteFilePath(QStringLiteral("models"));
+        const QString models = QFileInfo(QString::fromLocal8Bit(argv[2])).absoluteFilePath();
         require(QFileInfo(worker).isFile() && QDir(models).exists(),
-            "staged worker and colocated model directory must exist");
+            "staged worker and model directory must exist");
 
         const QString root = QDir::temp().absoluteFilePath(
             QStringLiteral("jam2-jamtaster-worker-protocol-boundary"));

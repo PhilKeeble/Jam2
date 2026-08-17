@@ -1256,6 +1256,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             QMap<QString, int> perProfile;
             bool previewsValid = true;
             bool fingerprintsValid = true;
+            int invalidPreviews = 0;
+            int invalidFingerprints = 0;
             for (const auto& entry : catalog) {
                 ++perProfile[entry.profileId];
                 QFile preview(entry.previewResource);
@@ -1264,10 +1266,11 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                         preview.readAll(), QCryptographicHash::Sha256).toHex()) !=
                         entry.previewSha256) {
                     previewsValid = false;
+                    ++invalidPreviews;
                 }
                 const auto idea = jam2::practice::generateCoupledPracticeIdeaSeeded(
                     entry.generationRequest(), entry.seed);
-                fingerprintsValid = fingerprintsValid && idea.recipe.isValid() &&
+                const bool fingerprintValid = idea.recipe.isValid() &&
                     entry.bars == 32 && entry.previewBars == 4 &&
                     idea.beatSection.beats == 32 * idea.meterNumerator &&
                     idea.recipe.generatorVersion == entry.generatorVersion &&
@@ -1275,6 +1278,8 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
                         entry.chordFingerprint &&
                     jam2::practice::generatedBeatFingerprint(idea.beatSection) ==
                         entry.beatFingerprint;
+                fingerprintsValid = fingerprintsValid && fingerprintValid;
+                if (!fingerprintValid) ++invalidFingerprints;
             }
             const bool exactlyTwoPerProfile = perProfile.size() == 27 &&
                 std::all_of(perProfile.cbegin(), perProfile.cend(),
@@ -1282,8 +1287,14 @@ QJsonObject jam2RunBoundaryValidation(const QStringList& fixtureSpecs)
             record(QStringLiteral("practice.curated-library-is-complete-and-reproducible"),
                 catalogError.isEmpty() && catalog.size() == 54 &&
                 exactlyTwoPerProfile && previewsValid && fingerprintsValid,
-                QStringLiteral("ideas=%1 profiles=%2 error=%3")
-                    .arg(catalog.size()).arg(perProfile.size()).arg(catalogError));
+                QStringLiteral(
+                    "ideas=%1 profiles=%2 invalid_previews=%3 "
+                    "invalid_fingerprints=%4 error=%5")
+                    .arg(catalog.size())
+                    .arg(perProfile.size())
+                    .arg(invalidPreviews)
+                    .arg(invalidFingerprints)
+                    .arg(catalogError));
 
             if (!catalog.isEmpty()) {
                 const auto source = jam2::practice::generateCoupledPracticeIdeaSeeded(

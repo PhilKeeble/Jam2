@@ -457,7 +457,11 @@ int main(int argc, char* argv[])
 
     std::array<QJsonObject, kPeerCount> countInSnapshots{};
     bool allScheduled = false;
-    for (int attempt = 0; attempt < 8 && !allScheduled; ++attempt) {
+    int attempt = 0;
+    const auto schedulePropagationDeadline =
+        std::chrono::steady_clock::now() + 1500ms;
+    while (!allScheduled &&
+           std::chrono::steady_clock::now() < schedulePropagationDeadline) {
         allScheduled = true;
         std::array<QString, kPeerCount> ids{};
         for (std::size_t index = 0; index < kPeerCount; ++index) {
@@ -485,6 +489,7 @@ int main(int argc, char* argv[])
             allScheduled = allScheduled &&
                 countInSnapshotValid(countInSnapshots[index], false);
         }
+        ++attempt;
     }
     if (!allScheduled) {
         QString evidence;
@@ -569,6 +574,17 @@ int main(int argc, char* argv[])
             injected,
             error)) {
         return fail(QStringLiteral("injecting coordinator session error: ") + error);
+    }
+
+    // command_applied confirms that the coordinator queued the control frame;
+    // keep the coordinator alive until the rejected peer has consumed it. On
+    // asynchronous socket backends, closing the creator immediately can discard
+    // a frame that has not reached the kernel yet.
+    int rejectedExitCode = -1;
+    if (!peers[rejectedPeer]->waitForExit(10s, rejectedExitCode, error) ||
+        rejectedExitCode != 4) {
+        return fail(QStringLiteral("peer %1 injected session-error exit: %2 code=%3")
+            .arg(rejectedPeer + 1).arg(error).arg(rejectedExitCode));
     }
 
     for (std::size_t index = 0; index < rejectedPeer; ++index) {

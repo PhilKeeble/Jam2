@@ -112,6 +112,9 @@ QString JamTasterService::workerPath() const
 {
     if (!workerPathOverride_.isEmpty()) return workerPathOverride_;
 #ifdef Q_OS_MACOS
+    if (!bundleRootOverride_.isEmpty()) {
+        return QDir(bundleRootOverride_).absoluteFilePath(workerFilename());
+    }
     const QDir executable(QCoreApplication::applicationDirPath());
     return QDir::cleanPath(executable.absoluteFilePath(
         QStringLiteral("../Helpers/") + workerFilename()));

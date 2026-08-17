@@ -862,6 +862,21 @@ void testCuratedIdeaDialog()
         "curated dialog returns exact selection and balances preview lifecycle");
 }
 
+void testCuratedIdeaSeedReproducibility()
+{
+    QString error;
+    const QVector<CuratedIdeaEntry> catalog = loadCuratedIdeaCatalog(error);
+    require(error.isEmpty() && !catalog.isEmpty() &&
+            catalog.front().id == QStringLiteral("pop_loop__groove-1"),
+        "curated seed regression resolves the maintained first catalog entry");
+    const CuratedIdeaEntry& entry = catalog.front();
+    const GeneratedPracticeIdea idea = generateCoupledPracticeIdeaSeeded(
+        entry.generationRequest(), entry.seed);
+    require(generatedChordFingerprint(idea.chordSection) == entry.chordFingerprint &&
+            generatedBeatFingerprint(idea.beatSection) == entry.beatFingerprint,
+        "curated seeded generation reproduces its cross-platform stored fingerprints");
+}
+
 void testReferenceSignaturesAndKeyAwareKit()
 {
     const GeneratedPracticeIdea idea = generateCoupledPracticeIdeaForTest(
@@ -955,6 +970,7 @@ int main(int argc, char** argv)
         testContinuationDialog();
         testReferenceDialog();
         testCuratedIdeaDialog();
+        testCuratedIdeaSeedReproducibility();
         testReferenceSignaturesAndKeyAwareKit();
         testIdeaDetailsAndGeneratedSection();
         std::cout << "Practice idea and research drum boundary tests passed\n";

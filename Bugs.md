@@ -32,6 +32,16 @@ need to make it fit better on smaller screens like the macbook neo
 ## Bugs
 
 
+## Bugs - MacOS
+listening tools gets cut off by the tracks so you cant see it when its expanded 
+
+need to make it more efficient for small screen
+- track view sharing tile can be smaller or collapsable 
+- the coloured buttons need to be able to shrink to accomodate for longer sections
+- performance view needs to re arrange buttons to allow a more compressed view
+
+Generate wav is saying 12 sections - Sections A-D, confusing 
+
 
 
 
