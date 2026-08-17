@@ -869,12 +869,17 @@ void testCuratedIdeaSeedReproducibility()
     require(error.isEmpty() && !catalog.isEmpty() &&
             catalog.front().id == QStringLiteral("pop_loop__groove-1"),
         "curated seed regression resolves the maintained first catalog entry");
-    const CuratedIdeaEntry& entry = catalog.front();
-    const GeneratedPracticeIdea idea = generateCoupledPracticeIdeaSeeded(
-        entry.generationRequest(), entry.seed);
-    require(generatedChordFingerprint(idea.chordSection) == entry.chordFingerprint &&
-            generatedBeatFingerprint(idea.beatSection) == entry.beatFingerprint,
-        "curated seeded generation reproduces its cross-platform stored fingerprints");
+    for (const CuratedIdeaEntry& entry : catalog) {
+        const GeneratedPracticeIdea idea = generateCoupledPracticeIdeaSeeded(
+            entry.generationRequest(), entry.seed);
+        require(generatedChordFingerprint(idea.chordSection) == entry.chordFingerprint &&
+                generatedBeatFingerprint(idea.beatSection) == entry.beatFingerprint,
+            QStringLiteral(
+                "curated seeded generation reproduces the cross-platform stored "
+                "fingerprints for %1")
+                .arg(entry.id)
+                .toStdString());
+    }
 }
 
 void testReferenceSignaturesAndKeyAwareKit()

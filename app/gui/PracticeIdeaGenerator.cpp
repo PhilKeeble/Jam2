@@ -33,7 +33,7 @@ int randomInt(Rng& rng, int minimum, int maximum)
     std::uint64_t product = static_cast<std::uint64_t>(rng()) * span;
     std::uint32_t remainder = static_cast<std::uint32_t>(product);
     if (remainder < span) {
-        const std::uint32_t threshold = static_cast<std::uint32_t>(-span) % span;
+        const std::uint32_t threshold = (std::uint32_t{0} - span) % span;
         while (remainder < threshold) {
             product = static_cast<std::uint64_t>(rng()) * span;
             remainder = static_cast<std::uint32_t>(product);
@@ -44,11 +44,15 @@ int randomInt(Rng& rng, int minimum, int maximum)
 
 double randomReal(Rng& rng, double minimum, double maximum)
 {
-    constexpr double scale = 1.0 / 9007199254740992.0;
-    const std::uint64_t sample =
-        (static_cast<std::uint64_t>(rng()) >> 11) |
-        (static_cast<std::uint64_t>(rng()) << 21);
-    return minimum + (maximum - minimum) * (static_cast<double>(sample) * scale);
+    // Match MSVC's generate_canonical<double, 53> ordering exactly. Keeping
+    // the two draws in separate statements is important: operand evaluation
+    // order is otherwise unspecified and MSVC evaluates the old bitwise
+    // expression in the opposite order to Apple Clang.
+    constexpr double base = 4294967296.0;
+    const double low = static_cast<double>(rng());
+    const double high = static_cast<double>(rng());
+    const double unit = (low + high * base) / (base * base);
+    return minimum + (maximum - minimum) * unit;
 }
 
 struct ProgressionDef {

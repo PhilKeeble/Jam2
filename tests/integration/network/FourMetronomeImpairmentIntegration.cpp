@@ -63,6 +63,7 @@ constexpr std::int64_t kRecordingStartFrames = 5LL * kSampleRate;
 constexpr std::int64_t kRecordingStopFrames = 15LL * kSampleRate;
 constexpr std::int64_t kLeaderAudioLossRecordingStopFrames = 17LL * kSampleRate;
 constexpr std::int64_t kFinalBeatIntervalFrames = 60LL * kSampleRate / kFinalBpm;
+constexpr std::int64_t kMaximumLeaderAudioGapBeats = 3;
 constexpr qint64 kMaximumProxyPumpGapMs = 50;
 
 bool prioritizeProxyCoordinator(QString& error)
@@ -615,7 +616,13 @@ FittedGrid fitEventGrid(
             const std::int64_t delta = candidates[index] - candidates[previous];
             const std::int64_t intervalMultiple = std::llround(
                 static_cast<double>(delta) / intervalFrames);
-            if (intervalMultiple < 1) continue;
+            // The contract asks whether a sufficiently long bounded-gap chain
+            // exists. Do not let a longer chain with an invalid gap eclipse a
+            // valid chain at the same candidate endpoint.
+            if (intervalMultiple < 1 ||
+                intervalMultiple > kMaximumLeaderAudioGapBeats) {
+                continue;
+            }
             const std::int64_t error = std::llabs(
                 delta - intervalMultiple * intervalFrames);
             if (error > toleranceFrames) continue;
@@ -866,7 +873,7 @@ bool leaderAudioValid(
             const auto received = fitEventGrid(
                 candidates, kFinalBeatIntervalFrames, 480);
             if (received.events < 20 ||
-                received.maximumIntervalMultiple > 3) {
+                received.maximumIntervalMultiple > kMaximumLeaderAudioGapBeats) {
                 reason = QStringLiteral(
                     "peer %1 did not receive grid-timed leader clicks under impairment: "
                     "candidates=%2 fitted=%3 max_interval_error_frames=%4 max_gap_beats=%5")
@@ -1150,6 +1157,8 @@ int main(int argc, char* argv[])
         recordingStopFrames - kRecordingStartFrames;
     const std::int64_t snapshotFrames = recordingStopFrames + kSampleRate / 4;
     const std::int64_t shutdownFrames = recordingStopFrames + kSampleRate;
+    const qint64 evidenceCaptureMs =
+        recordingStopFrames * 1000 / kSampleRate + 500;
 #if defined(__APPLE__)
     const QString osPriority = QStringLiteral("realtime");
 #else
@@ -1358,9 +1367,17 @@ int main(int argc, char* argv[])
     std::optional<std::vector<UdpProxyStats>> activeProxyStats;
     QElapsedTimer proxyPumpGap;
     proxyPumpGap.start();
-    qint64 maximumProxyPumpGapMs = 0;
+    qint64 maximumEvidenceProxyPumpGapMs = 0;
+    qint64 maximumTeardownProxyPumpGapMs = 0;
     while (deadline.elapsed() < 30000) {
-        maximumProxyPumpGapMs = std::max(maximumProxyPumpGapMs, proxyPumpGap.restart());
+        const qint64 proxyPumpGapMs = proxyPumpGap.restart();
+        if (activeProxyStats) {
+            maximumTeardownProxyPumpGapMs = std::max(
+                maximumTeardownProxyPumpGapMs, proxyPumpGapMs);
+        } else {
+            maximumEvidenceProxyPumpGapMs = std::max(
+                maximumEvidenceProxyPumpGapMs, proxyPumpGapMs);
+        }
         pumpProxies(edges);
         if (*condition == NetworkCondition::Security &&
             !malformedAndReplayInjected && deadline.elapsed() >= 2500) {
@@ -1384,7 +1401,7 @@ int main(int argc, char* argv[])
         // Capture the impairment verdict after every scheduled recording and
         // hard-reset assertion window, but before orderly peer shutdown can
         // produce loopback ICMP/WSAECONNRESET noise on Windows UDP sockets.
-        if (!activeProxyStats && deadline.elapsed() >= 15500) {
+        if (!activeProxyStats && deadline.elapsed() >= evidenceCaptureMs) {
             activeProxyStats.emplace();
             activeProxyStats->reserve(edges.size());
             for (const auto& edge : edges) activeProxyStats->push_back(edge.proxy->stats());
@@ -1401,11 +1418,11 @@ int main(int argc, char* argv[])
         stopProcesses(processes);
         return fail(QStringLiteral("four-peer metronome case exceeded 30 seconds"));
     }
-    if (maximumProxyPumpGapMs > kMaximumProxyPumpGapMs) {
+    if (maximumEvidenceProxyPumpGapMs > kMaximumProxyPumpGapMs) {
         return fail(QStringLiteral(
             "UDP impairment coordinator scheduling stalled for %1 ms (limit %2 ms); "
             "product metronome evidence is invalid for this run")
-            .arg(maximumProxyPumpGapMs).arg(kMaximumProxyPumpGapMs));
+            .arg(maximumEvidenceProxyPumpGapMs).arg(kMaximumProxyPumpGapMs));
     }
     if (*condition == NetworkCondition::Security &&
         (!malformedAndReplayInjected || !shortFloodInjected ||
@@ -1832,6 +1849,9 @@ int main(int argc, char* argv[])
               << " initial_epoch=" << *initialAuthorityEpoch
               << " replacement_epoch=" << *finalAuthorityEpoch
               << " authority=" << expectedFinalAuthority
-              << " maximum_proxy_pump_gap_ms=" << maximumProxyPumpGapMs << '\n';
+              << " maximum_evidence_proxy_pump_gap_ms="
+              << maximumEvidenceProxyPumpGapMs
+              << " maximum_teardown_proxy_pump_gap_ms="
+              << maximumTeardownProxyPumpGapMs << '\n';
     return 0;
 }
