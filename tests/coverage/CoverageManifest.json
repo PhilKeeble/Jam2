@@ -29,7 +29,13 @@
     },
     {
       "path": "app/pluginhost/Vst3Host.cpp",
-      "reason": "Real VST3 discovery, loading, editors, and processing require an explicit plugin fixture or hardware profile; deterministic backend and worker entrypoint contracts remain in the default gate."
+      "condition": "without-hardware-profile",
+      "reason": "Real VST3 discovery, loading, editors, and processing require an explicit plugin fixture or hardware profile; when one is configured this file is audited normally."
+    },
+    {
+      "path": "libs/jam2-core/src/audio_device_windows.cpp",
+      "condition": "without-hardware-profile",
+      "reason": "The Windows ASIO implementation requires an explicit real-device profile. The ordinary no-hardware full pass covers typed device configuration, invalid opens, engine audio seams, and fake-audio workflows; configuring hardware makes this file mandatory coverage."
     },
     {
       "path": "libs/jam2-core/src/audio_device_macos.cpp",
@@ -41,6 +47,40 @@
     }
   ],
   "functionExemptions": [
+    {
+      "path": "app/application/InputPluginBackend.cpp",
+      "functionPattern": "^(SystemInputPluginBackend|SystemInputPluginHost)::",
+      "condition": "without-hardware-profile",
+      "reason": "These adapters own the real isolated plugin process and system audio device lifecycle. Deterministic backend validation remains in the baseline, and configuring the hardware/plugin profile makes these functions mandatory coverage."
+    },
+    {
+      "path": "app/application/InputPluginBackend.cpp",
+      "functionPattern": "copyStats\\(",
+      "condition": "without-hardware-profile",
+      "reason": "Copying live worker diagnostics requires a running real plugin worker. Synthetic bridge diagnostics are covered in the baseline, and configuring the hardware/plugin profile makes this adapter mandatory coverage."
+    },
+    {
+      "path": "app/pluginhost/PluginWorkerMain.cpp",
+      "functionPattern": "(probe|probe_all|probe_file|run_worker|self_test|set_status)\\(",
+      "condition": "without-hardware-profile",
+      "reason": "These are real VST3 discovery, loading, worker-loop, and self-test entry points. Protocol and transport boundaries remain covered without hardware, and configuring the plugin profile makes these functions mandatory coverage."
+    },
+    {
+      "path": "app/pluginhost/Vst3Host.cpp",
+      "function": "Vst3Instance::editor_error",
+      "reason": "The real-plugin profile proves a healthy editor open, pump, close, and process lifecycle; a nonempty editor error requires an unsolicited plugin or native-window failure and remains a manual failure boundary."
+    },
+    {
+      "path": "app/pluginhost/Vst3Host.cpp",
+      "function": "Vst3Instance::Impl::set_instrument_arrangement",
+      "condition": "without-midi-instrument-profile",
+      "reason": "This path requires the explicit schema-v2 MIDI instrument fixture; it becomes mandatory coverage whenever that profile is configured."
+    },
+    {
+      "path": "app/gui/TrackWorkspaceController.cpp",
+      "function": "TrackWorkspaceController::dispatchContext",
+      "reason": "Pure QObject identity adapter used only to target delayed AssetTransferService retries; deterministic service tests exercise scheduling through the same interface and four-peer shared-content tests exercise the owning production controller, while forcing the production QThreadPool enqueue failure would be nondeterministic."
+    },
     {
       "function": "asio_sample_type_name(long)",
       "reason": "MSVC native coverage reports instrumentation_failure for this helper in every owning module; ASIO format handling is exercised by audio processing units and the explicit real-device profile."
@@ -105,38 +145,50 @@
       "reason": "MSVC retains an unentered out-of-line copy of this implicit-inline callback while requested shutdown measures its call-site copy; the exactly-four-peer session-command test proves this completion body through three clean exits, one propagated exit code 4, and all four final automation manifests."
     },
     {
+      "path": "app/application/SessionController.cpp",
+      "functionPattern": "^NetworkCommandController::(actionGain|drainAutomationCommands|enqueueAutomationCommand|handleAutomationCommand|handleCoordinatorMessage)\\(",
+      "reason": "These handlers are exercised by the required exactly-four-peer reactive session-command test in the optimized Release gate. Microsoft.CodeCoverage child injection cannot preserve that test's explicit Windows inherited-handle allowlist, so the coverage-only catalogue excludes the incompatible coordinator while the behavioral test remains mandatory."
+    },
+    {
       "path": "libs/jam2-core/src/midi_device_windows.cpp",
       "function": "WinMidiInput::~WinMidiInput()",
+      "condition": "without-midi-instrument-profile",
       "reason": "A physical WinMM MIDI input is not present in the explicit Windows hardware profile; backend enumeration and invalid-open behavior are automated, while physical callback lifecycle remains a documented manual hardware check."
     },
     {
       "path": "libs/jam2-core/src/midi_device_windows.cpp",
       "function": "WinMidiInput::callback(struct HMIDIIN__ *, unsigned int, unsigned __int64, unsigned __int64, unsigned __int64)",
+      "condition": "without-midi-instrument-profile",
       "reason": "A physical WinMM MIDI input is not present in the explicit Windows hardware profile; short/unsupported message callback validation remains a documented manual hardware check."
     },
     {
       "path": "libs/jam2-core/src/midi_device_windows.cpp",
       "function": "WinMidiInput::info()",
+      "condition": "without-midi-instrument-profile",
       "reason": "Construction of a live WinMM MIDI input requires physical MIDI hardware not present in the explicit profile and remains a documented manual hardware check."
     },
     {
       "path": "libs/jam2-core/src/midi_device_windows.cpp",
       "function": "WinMidiInput::short_messages()",
+      "condition": "without-midi-instrument-profile",
       "reason": "Reading live WinMM short-message counters requires physical MIDI hardware not present in the explicit profile and remains a documented manual hardware check."
     },
     {
       "path": "libs/jam2-core/src/midi_device_windows.cpp",
       "function": "WinMidiInput::unsupported_messages()",
+      "condition": "without-midi-instrument-profile",
       "reason": "Reading live WinMM unsupported-message counters requires physical MIDI hardware not present in the explicit profile and remains a documented manual hardware check."
     },
     {
       "path": "libs/jam2-core/src/midi_device_windows.cpp",
       "function": "WinMidiInput::valid()",
+      "condition": "without-midi-instrument-profile",
       "reason": "A valid live WinMM MIDI handle requires physical MIDI hardware not present in the explicit profile and remains a documented manual hardware check."
     },
     {
       "path": "libs/jam2-core/src/midi_device_windows.cpp",
       "functionPattern": "^WinMidiInput::WinMidiInput\\(",
+      "condition": "without-midi-instrument-profile",
       "reason": "Opening a live WinMM MIDI input requires physical MIDI hardware not present in the explicit profile; invalid production opens are automated and the real-device case remains a documented manual hardware check."
     },
     {

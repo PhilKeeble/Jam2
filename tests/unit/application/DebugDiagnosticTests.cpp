@@ -51,7 +51,10 @@ ProcessResult runProcess(
     process.setArguments(arguments);
     process.setProcessChannelMode(QProcess::MergedChannels);
     process.start();
-    normalTimeout = std::max(normalTimeout, std::chrono::seconds(30));
+    // This is a process deadman, not an acceptance duration. An instrumented
+    // jam2.exe can spend more than 30 seconds starting and reporting one native
+    // parser result on older or concurrently loaded Windows hosts.
+    normalTimeout = std::max(normalTimeout, std::chrono::seconds(60));
     const int timeout = static_cast<int>(
         jam2::test::deadmanTimeout(normalTimeout).count());
     ProcessResult result;

@@ -187,6 +187,30 @@ void observe_input_peaks(
     update_peak(control->gui_send_peak_ppm, sendPeak);
 }
 
+bool read_network_playback_timeline(
+    const StreamControl& control,
+    const MonoRingBuffer& playback,
+    std::uint64_t& engineFrame,
+    std::size_t& queuedFrames) noexcept
+{
+    const std::uint64_t before = control.audio_callback_generation.load(
+        std::memory_order_acquire);
+    if ((before & 1ULL) != 0) {
+        return false;
+    }
+    const std::uint64_t observedFrame = control.engine_frame_counter.load(
+        std::memory_order_acquire);
+    const std::size_t observedDepth = playback.available_read();
+    const std::uint64_t after = control.audio_callback_generation.load(
+        std::memory_order_acquire);
+    if (before != after || (after & 1ULL) != 0) {
+        return false;
+    }
+    engineFrame = observedFrame;
+    queuedFrames = observedDepth;
+    return true;
+}
+
 std::int32_t mix_i32_samples(std::int32_t a, std::int32_t b) noexcept
 {
     const std::int64_t mixed =

@@ -52,6 +52,25 @@ if ($null -eq $collector -or
 
 $config = Join-Path $repoPath 'tests\coverage\WindowsCodeCoverage.config'
 $manifest = Join-Path $repoPath 'tests\coverage\CoverageManifest.json'
+$cachePath = Join-Path $buildPath 'CMakeCache.txt'
+$hardwareProfileConfigured = $false
+$midiInstrumentProfileConfigured = $false
+$profileEntry = Get-Content -LiteralPath $cachePath |
+    Where-Object { $_ -like 'JAM2_HARDWARE_PROFILE:FILEPATH=*' } |
+    Select-Object -First 1
+if ($null -ne $profileEntry) {
+    $profilePath = $profileEntry.Substring($profileEntry.IndexOf('=') + 1).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($profilePath) -and
+        (Test-Path -LiteralPath $profilePath -PathType Leaf)) {
+        $hardwareProfileConfigured = $true
+        $profile = Get-Content -LiteralPath $profilePath -Raw | ConvertFrom-Json
+        $midiInstrumentProfileConfigured =
+            [string]$profile.schema -eq 'jam2-hardware-profile-v2'
+    }
+}
+Write-Host (
+    "Coverage profile: hardware=$hardwareProfileConfigured " +
+    "midi-instrument=$midiInstrumentProfileConfigured")
 $focused = -not [string]::IsNullOrWhiteSpace($TestName)
 $reportPath = if ($focused) {
     Join-Path $coveragePath 'focused'
@@ -112,7 +131,12 @@ $ctestArguments = @(
     '--test-dir', $buildPath,
     '--output-on-failure',
     '--output-log', $ctestLog)
-$parallelLevel = [Math]::Max(1, [Math]::Min(8, [Environment]::ProcessorCount - 1))
+# Native instrumentation adds one collector to every process and makes two
+# four-peer workflows contend inside the same coverage session even on a
+# high-core host. Keep CTest parallel, but cap this Windows-only instrumented
+# capacity at one four-peer workload. The normal Release gate retains its
+# default capacity of eight and all test assertions remain identical.
+$parallelLevel = [Math]::Max(1, [Math]::Min(4, [Environment]::ProcessorCount - 1))
 if (-not [string]::IsNullOrWhiteSpace($env:JAM2_TEST_JOBS)) {
     $parsedParallelLevel = 0
     if (-not [int]::TryParse($env:JAM2_TEST_JOBS, [ref]$parsedParallelLevel) -or
@@ -124,6 +148,18 @@ if (-not [string]::IsNullOrWhiteSpace($env:JAM2_TEST_JOBS)) {
 $ctestArguments += @('--parallel', $parallelLevel.ToString())
 if (-not [string]::IsNullOrWhiteSpace($TestName)) {
     $ctestArguments += @('--no-tests=error', '-R', ('^' + [regex]::Escape($TestName) + '$'))
+}
+else {
+    # The reactive session-command coordinator intentionally launches Jam2 with
+    # an exact Windows inherited-handle allowlist. Microsoft.CodeCoverage's
+    # injected child-process handles cannot pass that boundary, so the
+    # instrumented child never receives its automation pipes. Instrumentation
+    # also makes the burst-loss leader-audio callback path too slow to preserve
+    # real-time tone continuity. The normal optimized Release gate below still
+    # requires both exact four-peer behavioral tests.
+    $ctestArguments += @(
+        '-E',
+        '^(jam2_four_session_command_integration|jam2_metronome_leader_audio_burst_loss)$')
 }
 
 Write-Host "Running the instrumented CTest catalogue under native coverage..."
@@ -159,7 +195,9 @@ if ($analysisExit -ne 0) {
     -RepoRoot $repoPath `
     -CoverageXml $xmlCoverage `
     -ManifestPath $manifest `
-    -ReportDirectory $reportPath
+    -ReportDirectory $reportPath `
+    -HardwareProfileConfigured:$hardwareProfileConfigured `
+    -MidiInstrumentProfileConfigured:$midiInstrumentProfileConfigured
 $coverageAuditExit = $LASTEXITCODE
 if ($testExit -ne 0) {
     exit $testExit

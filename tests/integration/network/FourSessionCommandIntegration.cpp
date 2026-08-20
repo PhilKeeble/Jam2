@@ -36,6 +36,10 @@ constexpr std::uint64_t kOneBarFrames = 96000ULL;
 // uses the same two-callback bound for shared-grid click phase.
 constexpr std::uint64_t kTransportGridToleranceFrames =
     2ULL * static_cast<std::uint64_t>(kFrameSize);
+// Bounds waits for observable state or process completion only. The musical
+// assertions use engine frames, so allowing instrumented and older hosts more
+// wall time does not weaken the behavior under test.
+constexpr auto kStateWaitTimeout = 60s;
 jam2::test::UdpImpairmentProxy* activeUdpProxy = nullptr;
 
 QString deterministicHex(int seed, int bytes)
@@ -181,7 +185,7 @@ bool waitForTransportGridReady(
     QString& error)
 {
     const auto deadline = std::chrono::steady_clock::now() +
-        jam2::test::deadmanTimeout(30s);
+        jam2::test::deadmanTimeout(kStateWaitTimeout);
     int attempt = 0;
     while (std::chrono::steady_clock::now() < deadline) {
         const QString id = QStringLiteral("grid-ready-%1-%2")
@@ -198,7 +202,7 @@ bool waitForTransportGridReady(
                 process,
                 QStringLiteral("snapshot"),
                 id,
-                30s,
+                kStateWaitTimeout,
                 snapshot,
                 error)) {
             return false;
@@ -437,7 +441,7 @@ int main(int argc, char* argv[])
         QJsonObject connected;
         if (!waitForEvent(
                 *peers[index],
-                20s,
+                kStateWaitTimeout,
                 [](const QJsonObject& event) {
                     return event.value(QStringLiteral("event")).toString() ==
                             QStringLiteral("network.connected") &&
@@ -455,7 +459,7 @@ int main(int argc, char* argv[])
         QJsonObject active;
         if (!waitForEvent(
                 *peers[index],
-                20s,
+                kStateWaitTimeout,
                 [](const QJsonObject& event) {
                     return event.value(QStringLiteral("event")).toString() ==
                             QStringLiteral("peer_snapshot") &&
@@ -485,7 +489,7 @@ int main(int argc, char* argv[])
     QJsonObject staleEdge;
     if (!waitForEvent(
             *peers[1],
-            20s,
+            kStateWaitTimeout,
             [](const QJsonObject& event) {
                 return event.value(QStringLiteral("event")).toString() ==
                         QStringLiteral("peer_snapshot") &&
@@ -498,7 +502,7 @@ int main(int argc, char* argv[])
     QJsonObject recoveredEdge;
     if (!waitForEvent(
             *peers[1],
-            20s,
+            kStateWaitTimeout,
             [](const QJsonObject& event) {
                 return event.value(QStringLiteral("event")).toString() ==
                         QStringLiteral("peer_snapshot") &&
@@ -535,7 +539,7 @@ int main(int argc, char* argv[])
             *peers[0],
             QStringLiteral("command_rejected"),
             QStringLiteral("invalid-frame"),
-            30s,
+            kStateWaitTimeout,
             rejected,
             error)) {
         return fail(QStringLiteral("invalid reactive command rejection: ") + error);
@@ -561,7 +565,7 @@ int main(int argc, char* argv[])
                 *peers[index],
                 QStringLiteral("command_applied"),
                 QStringLiteral("gain-%1").arg(index + 1),
-                30s,
+                kStateWaitTimeout,
                 applied,
                 error)) {
             return fail(QStringLiteral("peer %1 gain application: %2")
@@ -585,7 +589,7 @@ int main(int argc, char* argv[])
             *peers[0],
             QStringLiteral("snapshot"),
             QStringLiteral("delayed-snapshot"),
-            30s,
+            kStateWaitTimeout,
             delayedSnapshot,
             error) ||
         delayedSnapshot.value(QStringLiteral("remote_level_ppm")).toInt() != 250000 ||
@@ -610,7 +614,7 @@ int main(int argc, char* argv[])
             *peers[0],
             QStringLiteral("command_applied"),
             QStringLiteral("count-in"),
-            30s,
+            kStateWaitTimeout,
             countInApplied,
             error)) {
         return fail(QStringLiteral("count-in transport application: ") + error);
@@ -622,7 +626,7 @@ int main(int argc, char* argv[])
         QJsonObject scheduled;
         if (!waitForEvent(
                 *peers[index],
-                30s,
+                kStateWaitTimeout,
                 [](const QJsonObject& event) {
                     return event.value(QStringLiteral("event")).toString() ==
                             QStringLiteral("transport_scheduled") &&
@@ -654,7 +658,7 @@ int main(int argc, char* argv[])
                 *peers[index],
                 QStringLiteral("snapshot"),
                 ids[index],
-                30s,
+                kStateWaitTimeout,
                 countInSnapshots[index],
                 error) ||
             !countInSnapshotValid(countInSnapshots[index], false)) {
@@ -685,7 +689,7 @@ int main(int argc, char* argv[])
             *peers[0],
             QStringLiteral("snapshot"),
             QStringLiteral("countdown-boundary"),
-            30s,
+            kStateWaitTimeout,
             boundarySnapshot,
             error) ||
         !countInSnapshotValid(boundarySnapshot, true)) {
@@ -706,7 +710,7 @@ int main(int argc, char* argv[])
                 *peers[index],
                 QStringLiteral("snapshot"),
                 id,
-                30s,
+                kStateWaitTimeout,
                 activeSnapshot,
                 error) ||
             !countInSnapshotValid(activeSnapshot, true)) {
@@ -732,7 +736,7 @@ int main(int argc, char* argv[])
             *peers[0],
             QStringLiteral("command_applied"),
             QStringLiteral("session-error"),
-            30s,
+            kStateWaitTimeout,
             injected,
             error)) {
         return fail(QStringLiteral("injecting coordinator session error: ") + error);
@@ -743,7 +747,7 @@ int main(int argc, char* argv[])
     // asynchronous socket backends, closing the creator immediately can discard
     // a frame that has not reached the kernel yet.
     int rejectedExitCode = -1;
-    if (!peers[rejectedPeer]->waitForExit(30s, rejectedExitCode, error) ||
+    if (!peers[rejectedPeer]->waitForExit(kStateWaitTimeout, rejectedExitCode, error) ||
         rejectedExitCode != 4) {
         return fail(QStringLiteral("peer %1 injected session-error exit: %2 code=%3")
             .arg(rejectedPeer + 1).arg(error).arg(rejectedExitCode));
@@ -765,7 +769,7 @@ int main(int argc, char* argv[])
                     *peers[index],
                     QStringLiteral("shutdown"),
                     QString(),
-                    30s,
+                    kStateWaitTimeout,
                     shutdown,
                     error)) {
                 return fail(QStringLiteral("peer %1 shutdown event: %2")
@@ -774,7 +778,7 @@ int main(int argc, char* argv[])
         }
         int exitCode = -1;
         const int expectedExitCode = index == rejectedPeer ? 4 : 0;
-        if (!peers[index]->waitForExit(30s, exitCode, error) ||
+        if (!peers[index]->waitForExit(kStateWaitTimeout, exitCode, error) ||
             exitCode != expectedExitCode) {
             return fail(QStringLiteral("peer %1 exit: %2 code=%3")
                 .arg(index + 1).arg(error).arg(exitCode));

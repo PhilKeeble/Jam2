@@ -194,6 +194,9 @@ bool OutputRecorder::start(const std::filesystem::path& folder, int sample_rate,
     dropped_frames_.store(0, std::memory_order_relaxed);
     drop_events_.store(0, std::memory_order_relaxed);
     writer_errors_.store(0, std::memory_order_relaxed);
+    for (auto& frames : stem_signal_frames_) {
+        frames.store(0, std::memory_order_relaxed);
+    }
 
     try {
         for (std::size_t i = 0; i < writers_.size(); ++i) {
@@ -265,6 +268,11 @@ void OutputRecorder::record(const RecordBlock& block) noexcept
     }
     for (std::size_t i = 0; i < stems.size(); ++i) {
         pushed = std::min(pushed, queues_[i]->push(stems[i]));
+        const std::uint64_t signalFrames = static_cast<std::uint64_t>(
+            std::count_if(stems[i].begin(), stems[i].end(), [](std::int32_t sample) {
+                return to_i16(sample) != 0;
+            }));
+        stem_signal_frames_[i].fetch_add(signalFrames, std::memory_order_relaxed);
     }
     if (pushed < block.mix.size()) {
         dropped_frames_.fetch_add(block.mix.size() - pushed, std::memory_order_relaxed);
@@ -285,6 +293,10 @@ OutputRecorderSnapshot OutputRecorder::snapshot() const noexcept
     out.dropped_frames = dropped_frames_.load(std::memory_order_relaxed);
     out.drop_events = drop_events_.load(std::memory_order_relaxed);
     out.writer_errors = writer_errors_.load(std::memory_order_relaxed);
+    for (std::size_t i = 0; i < out.stem_signal_frames.size(); ++i) {
+        out.stem_signal_frames[i] =
+            stem_signal_frames_[i].load(std::memory_order_relaxed);
+    }
     out.queue_depth_frames = queues_[0] ? queues_[0]->depth() : 0;
     return out;
 }
@@ -302,6 +314,7 @@ OutputRecorderStats OutputRecorder::stats() const
     out.dropped_frames = fixed.dropped_frames;
     out.drop_events = fixed.drop_events;
     out.writer_errors = fixed.writer_errors;
+    out.stem_signal_frames = fixed.stem_signal_frames;
     out.queue_depth_frames = fixed.queue_depth_frames;
     {
         std::lock_guard<std::mutex> lock(error_mutex_);

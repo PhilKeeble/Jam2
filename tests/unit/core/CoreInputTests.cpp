@@ -74,6 +74,7 @@ class MixerSink final : public jam2::PeerStreamPlayback {
 public:
     bool acceptsFrames() const noexcept override { return true; }
     std::size_t depthFrames() const noexcept override { return depth; }
+    std::uint64_t underrunFrames() const noexcept override { return underruns; }
     std::size_t pushFrames(std::span<const std::int32_t> frames) noexcept override
     {
         depth += frames.size();
@@ -86,6 +87,7 @@ public:
     void setResamplerRatio(double) noexcept override {}
 
     std::size_t depth = 0;
+    std::uint64_t underruns = 0;
 };
 
 void test_midi_queue()
@@ -431,6 +433,8 @@ void test_current_transport_packet_contract()
 void test_peer_mixer_recovery_rebases_every_source()
 {
     MixerSink sink;
+    expect(sink.jam2::PeerStreamPlayback::underrunFrames() == 0,
+        "playback sinks without device underrun telemetry report zero");
     jam2::PeerMixerConfig config;
     config.sample_rate = 48000;
     config.frames_per_block = 64;
@@ -507,6 +511,34 @@ void test_peer_mixer_recovery_rebases_every_source()
         "all sources resume complete mixed blocks after partial-block recovery");
 }
 
+void test_peer_mixer_adapts_to_device_ring_underrun()
+{
+    MixerSink sink;
+    jam2::PeerMixerConfig config;
+    config.sample_rate = 48000;
+    config.frames_per_block = 64;
+    config.deadline_frames = 64;
+    config.max_blocks_per_advance = 8;
+    config.adaptive_playback_cushion = true;
+    config.adaptive_target_frames = 256;
+    config.adaptive_min_frames = 256;
+    config.adaptive_max_frames = 512;
+    jam2::PeerMixer mixer(config, &sink);
+    auto* peer = mixer.addPeer(91, 512);
+    expect(peer != nullptr && mixer.setPeerActive(91, true),
+        "adaptive mixer creates its active source");
+    const std::array<std::int32_t, 64> block{};
+    peer->pushFrames(block);
+    mixer.advance(0);
+
+    sink.underruns += 64;
+    peer->pushFrames(block);
+    mixer.advance(1400);
+    expect(mixer.stats().adaptive_target_frames == 320 &&
+            mixer.stats().adaptive_raise_events == 1,
+        "device-facing ring underrun raises the bounded adaptive cushion");
+}
+
 } // namespace
 
 int main()
@@ -523,6 +555,7 @@ int main()
     test_headless_injected_audio_uses_input_router();
     test_current_transport_packet_contract();
     test_peer_mixer_recovery_rebases_every_source();
+    test_peer_mixer_adapts_to_device_ring_underrun();
     if (failures == 0) std::cout << "Jam2 core input tests passed\n";
     return failures == 0 ? 0 : 1;
 }

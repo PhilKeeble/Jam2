@@ -94,6 +94,29 @@ void testCallbackTiming()
         "callback clock publishes a monotonic-clock timestamp");
 }
 
+void testNetworkPlaybackTimelineCoherence()
+{
+    jam2::audio::StreamControl control;
+    jam2::audio::MonoRingBuffer playback(32);
+    const std::array<std::int32_t, 7> frames{};
+    (void)playback.push(frames);
+    control.engine_frame_counter.store(4096, std::memory_order_relaxed);
+    std::uint64_t engineFrame = 0;
+    std::size_t queuedFrames = 0;
+    expect(processing::read_network_playback_timeline(
+               control, playback, engineFrame, queuedFrames) &&
+            engineFrame == 4096 && queuedFrames == frames.size(),
+        "playback timeline returns one coherent frame/depth pair");
+
+    control.audio_callback_generation.store(1, std::memory_order_release);
+    engineFrame = 99;
+    queuedFrames = 99;
+    expect(!processing::read_network_playback_timeline(
+               control, playback, engineFrame, queuedFrames) &&
+            engineFrame == 99 && queuedFrames == 99,
+        "playback timeline rejects values while an audio callback is active");
+}
+
 void testPeakGainAndMixing()
 {
     constexpr auto minimum = (std::numeric_limits<std::int32_t>::min)();
@@ -598,6 +621,7 @@ void testHeadlessUsesSharedPipeline()
 int main()
 {
     testCallbackTiming();
+    testNetworkPlaybackTimelineCoherence();
     testPeakGainAndMixing();
     testPlaybackResampler();
     testPreparedSourceMixing();

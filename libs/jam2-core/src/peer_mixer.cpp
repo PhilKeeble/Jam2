@@ -210,6 +210,7 @@ struct PeerMixer::Impl {
     double adaptive_release_accumulator_frames = 0.0;
     bool adaptive_release_active = false;
     std::uint64_t consecutive_deadline_slots = 0;
+    std::uint64_t observed_output_underrun_frames = 0;
 
     Impl(const PeerMixerConfig& requested, PeerStreamPlayback* sink)
         : config(requested),
@@ -564,10 +565,19 @@ struct PeerMixer::Impl {
             started = true;
             next_deadline_us = now_us + deadlineDelay();
             adaptive_last_update_us = now_us;
+            if (output != nullptr) {
+                observed_output_underrun_frames = output->underrunFrames();
+            }
             // Initial prefill establishes the configured latency before the
             // first real block. Later padding must never outrank queued audio.
             ensureAdaptiveCushion();
         }
+        const std::uint64_t output_underrun_frames = output != nullptr
+            ? output->underrunFrames()
+            : observed_output_underrun_frames;
+        bool output_underrun_observed =
+            output_underrun_frames > observed_output_underrun_frames;
+        observed_output_underrun_frames = output_underrun_frames;
         std::size_t work = 0;
         while (work < config.max_blocks_per_advance) {
             if (outputAtLimit()) {
@@ -583,7 +593,10 @@ struct PeerMixer::Impl {
             } else {
                 ++consecutive_deadline_slots;
             }
-            updateAdaptiveTarget(now_us, consecutive_deadline_slots >= 3);
+            updateAdaptiveTarget(
+                now_us,
+                consecutive_deadline_slots >= 3 || output_underrun_observed);
+            output_underrun_observed = false;
             ++work;
             if (complete) {
                 if (!allContributorsReady()) {

@@ -141,16 +141,22 @@ void testReceivedGridAlignment()
             anchored->target_musical_frame == 242000,
         "received grid alignment respects a mapped epoch and negative offset");
 
+    const auto late = jam2::align_received_transport_to_grid(
+        48000.0,
+        normalPattern(),
+        95000,
+        1000,
+        true,
+        0,
+        191304,
+        96000);
+    expect(late.has_value() &&
+            late->countdown_start_raw_frame == 191000 &&
+            late->target_raw_frame == 287000 &&
+            late->target_musical_frame == 288000,
+        "a late received transport intent advances to the next exact shared bar");
+
     expect(!jam2::align_received_transport_to_grid(
-                48000.0,
-                normalPattern(),
-                95000,
-                1000,
-                true,
-                0,
-                191304,
-                96000) &&
-            !jam2::align_received_transport_to_grid(
                 48000.0,
                 normalPattern(),
                 1000,
@@ -159,7 +165,7 @@ void testReceivedGridAlignment()
                 0,
                 191304,
                 96000),
-        "received grid alignment rejects a missed countdown and an invalid epoch");
+        "received grid alignment rejects an invalid epoch");
 }
 
 void testInvalidAndExhaustedSchedules()

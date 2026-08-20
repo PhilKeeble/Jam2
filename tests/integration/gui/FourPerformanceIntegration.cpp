@@ -143,6 +143,10 @@ void printState(std::size_t peer, const QJsonObject& state)
     std::cerr << "  peer-" << peer + 1
               << " remotes=" << jam.value(QStringLiteral("remote_peer_count")).toInt()
               << " active=" << jam.value(QStringLiteral("active_remote_peer_count")).toInt()
+              << " grid_ready=" << jam.value(
+                    QStringLiteral("transport_grid_ready")).toBool()
+              << " grid_error=" << jam.value(
+                    QStringLiteral("grid_mapping_error_frames")).toInteger()
               << " frame=" << performance.value(QStringLiteral("engine_frame")).toInteger()
               << " callbacks=" << performance.value(QStringLiteral("callbacks")).toInteger()
               << " input_peak=" << performance.value(QStringLiteral("input_peak_ppm")).toInt()
@@ -727,6 +731,12 @@ int main(int argc, char* argv[])
                 performance.value(QStringLiteral("metronome_transport_gated")).toBool();
         }, states)) return 1;
 
+    if (!waitForAll(coordinator, QStringLiteral("four usable mapped transport grids"),
+        [](std::size_t, const QJsonObject& state) {
+            return state.value(QStringLiteral("jam")).toObject()
+                .value(QStringLiteral("transport_grid_ready")).toBool();
+        }, states)) return 1;
+
     std::array<qint64, FourPeerCoordinator::kPeerCount> playRevisions{};
     std::array<qint64, FourPeerCoordinator::kPeerCount> playCommits{};
     for (std::size_t peer = 0; peer < states.size(); ++peer) {
@@ -1216,6 +1226,12 @@ int main(int argc, char* argv[])
             const QJsonObject performance = state.value(QStringLiteral("performance")).toObject();
             const QString folder = performance.value(
                 QStringLiteral("jam_recording_folder")).toString();
+            const QJsonArray signalFrames = performance.value(
+                QStringLiteral("jam_recording_stem_signal_frames")).toArray();
+            bool everyStemHasSignal = signalFrames.size() == 5;
+            for (const QJsonValue& frames : signalFrames) {
+                everyStemHasSignal = frames.toInteger() > 0 && everyStemHasSignal;
+            }
             return performance.value(QStringLiteral("jam_recording_active")).toBool() &&
                 performance.value(QStringLiteral("jam_recording_workflow_active")).toBool() &&
                 performance.value(QStringLiteral("jam_recording_view_enabled")).toBool() &&
@@ -1225,6 +1241,7 @@ int main(int argc, char* argv[])
                     QFileInfo(folder).fileName() &&
                 performance.value(QStringLiteral("jam_recording_frames_written")).toInteger() >=
                     kJamRecordingSignalProofFrames &&
+                everyStemHasSignal &&
                 performance.value(QStringLiteral("jam_recording_dropped_frames")).toInteger() == 0 &&
                 performance.value(QStringLiteral("jam_recording_writer_errors")).toInteger() == 0;
         }, states)) return 1;

@@ -208,6 +208,8 @@ struct EngineRecordingSnapshot {
     std::uint64_t dropped_frames = 0;
     std::uint64_t drop_events = 0;
     std::uint64_t writer_errors = 0;
+    // Mix, local input, remote input, combined inputs, and metronome.
+    std::array<std::uint64_t, 5> stem_signal_frames{};
     std::size_t queue_depth_frames = 0;
     std::size_t queue_capacity_frames = 0;
 };
@@ -381,6 +383,12 @@ struct CapturedAudioBlock {
     std::size_t frames = 0;
 };
 
+struct NetworkPlaybackTimelineSnapshot {
+    std::uint64_t engine_frame = 0;
+    std::size_t queued_frames = 0;
+    bool coherent = false;
+};
+
 class Engine {
 public:
     static constexpr std::size_t kCommandCapacity = 128;
@@ -413,7 +421,9 @@ public:
     CapturedAudioBlock popNetworkCapture(
         NetworkCaptureAttachment attachment,
         std::span<std::int32_t> output) noexcept;
+    NetworkPlaybackTimelineSnapshot networkPlaybackTimelineSnapshot() const noexcept;
     std::size_t networkPlaybackDepth() const noexcept;
+    std::uint64_t networkPlaybackUnderrunFrames() const noexcept;
     std::size_t pushNetworkPlayback(std::span<const std::int32_t> input) noexcept;
     void requestNetworkPlaybackDrop(std::size_t frames) noexcept;
     void setNetworkPlaybackRatio(double ratio) noexcept;

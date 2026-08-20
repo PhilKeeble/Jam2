@@ -88,7 +88,7 @@ int main(int argc, char** argv)
         }
         const std::filesystem::path models = argv[1];
         const auto root = std::filesystem::temp_directory_path() /
-            "jam2-jamtaster-pipeline-boundary";
+            "pipeline";
         std::error_code ignored;
         std::filesystem::remove_all(root, ignored);
         std::filesystem::create_directories(root);

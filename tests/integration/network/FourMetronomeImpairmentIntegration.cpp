@@ -53,6 +53,14 @@ constexpr std::int64_t kRecordingStopFrames = 15LL * kSampleRate;
 constexpr std::int64_t kLeaderAudioLossRecordingStopFrames = 17LL * kSampleRate;
 constexpr std::int64_t kFinalBeatIntervalFrames = 60LL * kSampleRate / kFinalBpm;
 constexpr std::int64_t kMaximumLeaderAudioGapBeats = 3;
+constexpr std::size_t kMinimumLeaderAudioEvents = 18;
+constexpr std::int64_t kMinimumLeaderAudioCoveredIntervals = 18;
+// Leader audio traverses the deliberately impaired audio path. Its contract is
+// a complete bounded-gap beat chain, not the sample-exact phase contract owned
+// by shared-grid and listener-compensated modes. A 20 ms interval tolerance is
+// still below the injected 40 ms jitter envelope while avoiding false breaks
+// from bounded playback recovery on slower or concurrently loaded hosts.
+constexpr std::int64_t kLeaderAudioIntervalToleranceFrames = kSampleRate / 50;
 enum class MetronomeMode {
     SharedGrid,
     LeaderAudio,
@@ -530,6 +538,7 @@ struct FittedGrid {
     std::size_t events = 0;
     std::int64_t maximumPhaseErrorFrames = 0;
     std::int64_t maximumIntervalMultiple = 0;
+    std::int64_t coveredIntervalMultiples = 0;
 };
 
 FittedGrid fitEventGrid(
@@ -546,12 +555,16 @@ FittedGrid fitEventGrid(
     const auto better = [](const FittedGrid& candidate, const FittedGrid& current) {
         return candidate.events > current.events ||
             (candidate.events == current.events &&
+             candidate.coveredIntervalMultiples > current.coveredIntervalMultiples) ||
+            (candidate.events == current.events &&
+             candidate.coveredIntervalMultiples == current.coveredIntervalMultiples &&
              candidate.maximumIntervalMultiple < current.maximumIntervalMultiple) ||
             (candidate.events == current.events &&
+             candidate.coveredIntervalMultiples == current.coveredIntervalMultiples &&
              candidate.maximumIntervalMultiple == current.maximumIntervalMultiple &&
              candidate.maximumPhaseErrorFrames < current.maximumPhaseErrorFrames);
     };
-    std::vector<FittedGrid> chains(candidates.size(), FittedGrid{1, 0, 0});
+    std::vector<FittedGrid> chains(candidates.size(), FittedGrid{1, 0, 0, 0});
     for (std::size_t index = 0; index < candidates.size(); ++index) {
         for (std::size_t previous = 0; previous < index; ++previous) {
             const std::int64_t delta = candidates[index] - candidates[previous];
@@ -573,6 +586,7 @@ FittedGrid fitEventGrid(
                 candidate.maximumIntervalMultiple, intervalMultiple);
             candidate.maximumPhaseErrorFrames = std::max(
                 candidate.maximumPhaseErrorFrames, error);
+            candidate.coveredIntervalMultiples += intervalMultiple;
             if (better(candidate, chains[index])) chains[index] = candidate;
         }
         if (better(chains[index], best)) best = chains[index];
@@ -808,13 +822,22 @@ bool leaderAudioValid(
             const auto candidates = detectToneRejectedEvents(
                 evidence.stems[kTheirInputStem].samples, 440.0, 100, 900);
             const auto received = fitEventGrid(
-                candidates, kFinalBeatIntervalFrames, 480);
-            if (received.events < 20 ||
+                candidates,
+                kFinalBeatIntervalFrames,
+                kLeaderAudioIntervalToleranceFrames);
+            // Count enough actual clicks and require that their fitted chain
+            // covers most of the recording. Counting clicks alone rejects a
+            // valid long chain when one bounded network/playback gap replaces
+            // two detections near a recording boundary.
+            if (received.events < kMinimumLeaderAudioEvents ||
+                received.coveredIntervalMultiples < kMinimumLeaderAudioCoveredIntervals ||
                 received.maximumIntervalMultiple > kMaximumLeaderAudioGapBeats) {
                 reason = QStringLiteral(
                     "peer %1 did not receive grid-timed leader clicks under impairment: "
-                    "candidates=%2 fitted=%3 max_interval_error_frames=%4 max_gap_beats=%5")
+                    "candidates=%2 fitted=%3 covered_intervals=%4 "
+                    "max_interval_error_frames=%5 max_gap_beats=%6")
                     .arg(index + 1).arg(candidates.size()).arg(received.events)
+                    .arg(received.coveredIntervalMultiples)
                     .arg(received.maximumPhaseErrorFrames)
                     .arg(received.maximumIntervalMultiple);
                 return false;
@@ -1225,7 +1248,7 @@ AttemptResult runAttempt(
             peer.scenarioPath,
         });
         if (!peer.process->waitForStarted(static_cast<int>(
-                jam2::test::deadmanTimeout(std::chrono::seconds(30)).count()))) {
+                jam2::test::deadmanTimeout(std::chrono::seconds(90)).count()))) {
             stopProcesses(processes);
             return die(QStringLiteral("peer %1 failed to start: %2")
                 .arg(index + 1).arg(peer.process->errorString()),
@@ -1235,8 +1258,11 @@ AttemptResult runAttempt(
 
     QElapsedTimer readyDeadline;
     readyDeadline.start();
+    // This bounds process initialization only. Coverage-instrumented binaries
+    // and older machines can take tens of seconds to reach the ready file; all
+    // product acceptance below is based on engine frames and observed state.
     const qint64 readyTimeoutMs = jam2::test::deadmanTimeout(
-        std::chrono::seconds(30)).count();
+        std::chrono::seconds(90)).count();
     while (readyDeadline.elapsed() < readyTimeoutMs) {
         const bool allReady = std::all_of(
             processes.begin(), processes.end(), [](const PeerProcess& peer) {

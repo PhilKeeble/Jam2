@@ -260,6 +260,10 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
     if (context == nullptr || context->capture == nullptr || context->playback == nullptr) {
         return;
     }
+    if (context->control != nullptr) {
+        context->control->audio_callback_generation.fetch_add(
+            1, std::memory_order_acq_rel);
+    }
     processing::observe_callback_interval(
         context->callback_intervals,
         processing::callback_now_us(),
@@ -578,6 +582,8 @@ void duplex_buffer_switch(long double_buffer_index, ASIOBool)
     context->engine_frame_counter += static_cast<std::uint64_t>(context->buffer_size);
     if (context->control != nullptr) {
         context->control->engine_frame_counter.store(context->engine_frame_counter, std::memory_order_release);
+        context->control->audio_callback_generation.fetch_add(
+            1, std::memory_order_release);
     }
     context->callbacks.fetch_add(1, std::memory_order_relaxed);
 }

@@ -1774,6 +1774,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     std::uint64_t next_peer_phase_send_us = 0;
     std::uint64_t sending_transport_revision = 0;
     std::uint64_t next_transport_send = 0;
+    std::uint64_t transport_send_until_us = 0;
     bool sent_current_transport = false;
     const std::uint64_t start_time = packet_schedule.startTimeUs();
     std::uint64_t next_stats = options.stats_enabled && csv_log && options.stats_interval_ms > 0
@@ -1840,6 +1841,7 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
     std::int64_t mesh_grid_target_offset_frames = 0;
     bool mesh_grid_target_valid = false;
     std::uint64_t mesh_grid_last_update_us = 0;
+    jam2::NetworkPlaybackTimelineSnapshot mesh_playback_timeline;
 
     auto grid_mapping_error_frames = [&]() noexcept {
         return mesh_grid_target_valid
@@ -2707,10 +2709,17 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         const bool listener_compensated =
             grid_mode == metronome_mode_id(MetronomeMode::ListenerCompensated);
         if (listener_compensated) {
+            const auto observed_timeline = audio.engine != nullptr
+                ? audio.engine->networkPlaybackTimelineSnapshot()
+                : jam2::NetworkPlaybackTimelineSnapshot{};
+            if (observed_timeline.coherent) {
+                mesh_playback_timeline = observed_timeline;
+            }
             long double total_phase_error_frames = 0.0L;
             std::uint64_t contributing_peers = 0;
             std::int64_t phase_error_reference = 0;
-            if (commands.state.metronome_epoch_valid.load(std::memory_order_relaxed)) {
+            if (commands.state.metronome_epoch_valid.load(std::memory_order_relaxed) &&
+                mesh_playback_timeline.coherent) {
                 const auto pattern = metronome_pattern_from_runtime(commands.state);
                 const std::int64_t interval = static_cast<std::int64_t>(
                     jam2::metronome::step_interval_samples(
@@ -2723,12 +2732,11 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
                         commands.state.metronome_render_offset_frames.load(std::memory_order_relaxed);
                     const std::uint64_t local_frame =
                         jam2::transport_musical_frame_from_raw(
-                        current_engine_frame(audio.engine.get()), current_offset);
+                        mesh_playback_timeline.engine_frame, current_offset);
                     const std::uint64_t local_epoch =
                         commands.state.metronome_epoch_sample_time.load(std::memory_order_relaxed);
-                    const std::uint64_t output_queue_depth = audio.engine != nullptr
-                        ? static_cast<std::uint64_t>(audio.engine->networkPlaybackDepth())
-                        : 0ULL;
+                    const std::uint64_t output_queue_depth =
+                        static_cast<std::uint64_t>(mesh_playback_timeline.queued_frames);
                     auto phase = [interval](std::uint64_t frame, std::uint64_t epoch) {
                         const std::int64_t position = frame >= epoch
                             ? static_cast<std::int64_t>((frame - epoch) % static_cast<std::uint64_t>(interval))
@@ -3090,6 +3098,11 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
         if (network_transport_revision != sending_transport_revision) {
             sending_transport_revision = network_transport_revision;
             next_transport_send = 0;
+            // A command can cross from the GUI thread after its quantized
+            // target under scheduler load. Keep its tiny authenticated UDP
+            // intent alive long enough for packet loss or a late receiver to
+            // recover at the next exact grid boundary.
+            transport_send_until_us = now + 1000000ULL;
             sent_current_transport = false;
         }
         const bool sending_track_transport = jam2::is_track_sync_transport_action(
@@ -3112,7 +3125,9 @@ int run_network_session(Options options, Jam2RuntimeHost& runtime_host)
             sending_transport_revision != 0 &&
             sending_transport_revision <= (std::numeric_limits<std::uint32_t>::max)() &&
             now >= next_transport_send &&
-            (!sent_current_transport || current_engine_frame(audio.engine.get()) <= transport_target) &&
+            (!sent_current_transport ||
+             current_engine_frame(audio.engine.get()) <= transport_target ||
+             now <= transport_send_until_us) &&
             now < send_deadline) {
             const std::uint64_t engine_now = current_engine_frame(audio.engine.get());
             const auto payload = encode_transport_payload({

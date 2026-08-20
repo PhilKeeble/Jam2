@@ -366,6 +366,10 @@ struct StreamControl {
     std::atomic<bool> playback_count_in_active{false};
     std::atomic<std::uint64_t> recording_count_in_start_frame{0};
     std::atomic<std::uint64_t> recording_count_in_target_frame{0};
+    // Odd while the real-time callback may be changing both the engine frame
+    // and playback-ring depth, even at an OS scheduling boundary. Readers use
+    // this generation as a seqlock and never combine values from two callbacks.
+    std::atomic<std::uint64_t> audio_callback_generation{0};
     std::atomic<std::uint64_t> engine_frame_counter{0};
     // The callback is the capture-ring producer and the only side allowed to
     // reset it. A network attachment publishes a generation; the callback

@@ -9,7 +9,11 @@ param(
     [string]$ManifestPath,
 
     [Parameter(Mandatory = $true)]
-    [string]$ReportDirectory
+    [string]$ReportDirectory,
+
+    [switch]$HardwareProfileConfigured,
+
+    [switch]$MidiInstrumentProfileConfigured
 )
 
 $ErrorActionPreference = "Stop"
@@ -72,9 +76,22 @@ function Test-Rule([string]$source, $rule) {
     return $true
 }
 
+function Test-RuleEnabled($rule) {
+    if (-not ($rule.PSObject.Properties.Name -contains 'condition')) {
+        return $true
+    }
+    switch ([string]$rule.condition) {
+        'without-hardware-profile' { return -not $HardwareProfileConfigured }
+        'without-midi-instrument-profile' {
+            return -not $MidiInstrumentProfileConfigured
+        }
+        default { throw "Unknown coverage rule condition: $($rule.condition)" }
+    }
+}
+
 function Get-FileExemption([string]$source, $rules) {
     foreach ($rule in @($rules)) {
-        if (Test-Rule $source $rule) {
+        if ((Test-RuleEnabled $rule) -and (Test-Rule $source $rule)) {
             return $rule
         }
     }
@@ -83,6 +100,9 @@ function Get-FileExemption([string]$source, $rules) {
 
 function Get-FunctionExemption([string]$source, [string]$functionName, $rules) {
     foreach ($rule in @($rules)) {
+        if (-not (Test-RuleEnabled $rule)) {
+            continue
+        }
         $sourceMatches = $true
         if ($rule.PSObject.Properties.Name -contains 'path') {
             $sourceMatches = $source.Equals(
@@ -134,6 +154,14 @@ foreach ($rule in $allRules) {
     if (-not ($rule.PSObject.Properties.Name -contains 'reason') -or
         [string]::IsNullOrWhiteSpace([string]$rule.reason)) {
         throw "Every coverage exclusion or exemption requires a reason."
+    }
+    if ($rule.PSObject.Properties.Name -contains 'condition') {
+        $condition = [string]$rule.condition
+        if ($condition -notin @(
+                'without-hardware-profile',
+                'without-midi-instrument-profile')) {
+            throw "Unknown coverage rule condition: $condition"
+        }
     }
 }
 
@@ -357,6 +385,8 @@ $coveredCount = @($functionRows | Where-Object Status -eq 'covered').Count
 $partialCount = $partialFunctions.Count
 $exemptCount = @($functionRows | Where-Object Status -eq 'exempt').Count
 $summary = @(
+    "Hardware profile configured: $([bool]$HardwareProfileConfigured)",
+    "MIDI instrument profile configured: $([bool]$MidiInstrumentProfileConfigured)",
     "Maintained source files: $($maintainedFiles.Count)",
     "Observed maintained source files: $($observedFiles.Count)",
     "Unreviewed missing source files: $($missingFiles.Count)",

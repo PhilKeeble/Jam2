@@ -35,6 +35,11 @@ public:
             : (std::numeric_limits<std::size_t>::max)() / 2U;
     }
 
+    std::uint64_t underrunFrames() const noexcept override
+    {
+        return engine_ != nullptr ? engine_->networkPlaybackUnderrunFrames() : 0;
+    }
+
     std::size_t pushFrames(std::span<const std::int32_t> frames) noexcept override
     {
         return engine_ != nullptr ? engine_->pushNetworkPlayback(frames) : 0;

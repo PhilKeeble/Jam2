@@ -322,6 +322,7 @@ private:
         const auto period = std::chrono::duration_cast<clock::duration>(
             std::chrono::duration<double>(static_cast<double>(buffer_size_) / clock_rate_));
         while (!stop_.load(std::memory_order_acquire)) {
+            control_.audio_callback_generation.fetch_add(1, std::memory_order_acq_rel);
             const std::uint64_t callback_frame = engine_frame_;
             processing::observe_callback_interval(
                 callback_intervals_,
@@ -332,6 +333,7 @@ private:
             render_output(callback_frame);
             engine_frame_ += static_cast<std::uint64_t>(buffer_size_);
             control_.engine_frame_counter.store(engine_frame_, std::memory_order_release);
+            control_.audio_callback_generation.fetch_add(1, std::memory_order_release);
             callbacks_.fetch_add(1, std::memory_order_relaxed);
             next += period;
             std::this_thread::sleep_until(next);
@@ -1436,6 +1438,7 @@ EngineSnapshot Engine::snapshot() const noexcept
         result.jam_recording.dropped_frames = recording.dropped_frames;
         result.jam_recording.drop_events = recording.drop_events;
         result.jam_recording.writer_errors = recording.writer_errors;
+        result.jam_recording.stem_signal_frames = recording.stem_signal_frames;
         result.jam_recording.queue_depth_frames = recording.queue_depth_frames;
         result.jam_recording.queue_capacity_frames = recording.queue_capacity_frames;
     }
@@ -1579,6 +1582,27 @@ std::size_t Engine::networkPlaybackDepth() const noexcept
     return impl_ != nullptr && impl_->playback_ring != nullptr
         ? impl_->playback_ring->available_read()
         : 0;
+}
+
+std::uint64_t Engine::networkPlaybackUnderrunFrames() const noexcept
+{
+    return impl_ != nullptr && impl_->playback_ring != nullptr
+        ? impl_->playback_ring->underrun_frames()
+        : 0;
+}
+
+NetworkPlaybackTimelineSnapshot Engine::networkPlaybackTimelineSnapshot() const noexcept
+{
+    NetworkPlaybackTimelineSnapshot result;
+    if (impl_ == nullptr || impl_->playback_ring == nullptr || impl_->control == nullptr) {
+        return result;
+    }
+    result.coherent = audio::device_processing::read_network_playback_timeline(
+        *impl_->control,
+        *impl_->playback_ring,
+        result.engine_frame,
+        result.queued_frames);
+    return result;
 }
 
 std::size_t Engine::pushNetworkPlayback(std::span<const std::int32_t> input) noexcept

@@ -11,6 +11,23 @@
 namespace jam2::wav {
 namespace {
 
+std::filesystem::path filesystem_io_path(const std::filesystem::path& path)
+{
+#ifdef _WIN32
+    const std::filesystem::path absolute = std::filesystem::absolute(path);
+    const std::wstring value = absolute.wstring();
+    if (value.rfind(L"\\\\?\\", 0) == 0 || value.size() < 240U) {
+        return absolute;
+    }
+    if (value.rfind(L"\\\\", 0) == 0) {
+        return std::filesystem::path(L"\\\\?\\UNC\\" + value.substr(2));
+    }
+    return std::filesystem::path(L"\\\\?\\" + value);
+#else
+    return path;
+#endif
+}
+
 std::uint16_t read_le16(const std::uint8_t* data) noexcept
 {
     return static_cast<std::uint16_t>(data[0]) |
@@ -51,8 +68,9 @@ InspectResult failure(std::string message)
 InspectResult inspect_pcm16_file(const std::filesystem::path& path, std::uint64_t max_file_bytes) noexcept
 {
     try {
+        const std::filesystem::path io_path = filesystem_io_path(path);
         std::error_code size_error;
-        const std::uint64_t file_size = std::filesystem::file_size(path, size_error);
+        const std::uint64_t file_size = std::filesystem::file_size(io_path, size_error);
         if (size_error) {
             return failure("cannot determine WAV file size");
         }
@@ -63,7 +81,7 @@ InspectResult inspect_pcm16_file(const std::filesystem::path& path, std::uint64_
             return failure("WAV exceeds the configured file-size limit");
         }
 
-        std::ifstream file(path, std::ios::binary);
+        std::ifstream file(io_path, std::ios::binary);
         if (!file) {
             return failure("cannot open WAV file");
         }

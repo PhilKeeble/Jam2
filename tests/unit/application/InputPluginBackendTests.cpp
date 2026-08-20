@@ -68,6 +68,18 @@ int main(int argc, char** argv)
         QWidget parent;
         QThreadPool workers;
         workers.setMaxThreadCount(2);
+        auto systemBackend = jam2::application::makeSystemInputPluginBackend();
+        QString systemGateError;
+        require(!systemBackend->armAutomationCompletionGate(systemGateError) &&
+                !systemGateError.isEmpty(),
+            "system plugin backend accepted an automation completion gate");
+        systemGateError.clear();
+        require(!systemBackend->releaseAutomationCompletionGate(systemGateError) &&
+                !systemGateError.isEmpty() &&
+                systemBackend->automationCompletionGateState() ==
+                    jam2::application::AutomationCompletionGateState::Unsupported,
+            "system plugin backend omitted its unsupported completion-gate contract");
+
         auto backend = jam2::application::makeSyntheticInputPluginBackend();
 
         jam2::application::InputPluginLoadRequest audioRequest;

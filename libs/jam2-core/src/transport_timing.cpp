@@ -257,9 +257,19 @@ std::optional<QuantizedTransportSchedule> align_received_transport_to_grid(
         targetRawFrame < countInFrames) {
         return std::nullopt;
     }
-    const std::uint64_t countdownRawFrame = targetRawFrame - countInFrames;
-    if (countdownRawFrame <= rawCurrentFrame ||
-        targetRawFrame < countdownRawFrame) {
+    std::uint64_t countdownRawFrame = targetRawFrame - countInFrames;
+    if (countdownRawFrame <= rawCurrentFrame) {
+        const std::uint64_t missedBy = rawCurrentFrame - countdownRawFrame;
+        const std::uint64_t barsToAdvance = missedBy / barFrames + 1ULL;
+        std::uint64_t advanceFrames = 0;
+        if (!checked_multiply(barsToAdvance, barFrames, advanceFrames) ||
+            !checked_add(targetMusicalFrame, advanceFrames, targetMusicalFrame) ||
+            !checked_add(targetRawFrame, advanceFrames, targetRawFrame) ||
+            !checked_add(countdownRawFrame, advanceFrames, countdownRawFrame)) {
+            return std::nullopt;
+        }
+    }
+    if (targetRawFrame < countdownRawFrame) {
         return std::nullopt;
     }
     return QuantizedTransportSchedule{

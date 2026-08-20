@@ -45,6 +45,16 @@ set_tests_properties(jam2_core_boundary_units PROPERTIES
     LABELS "unit;core;network"
     TIMEOUT 30)
 
+add_executable(jam2_pcm16_wav_tests EXCLUDE_FROM_ALL
+    unit/core/Pcm16WavTests.cpp)
+jam2_configure_test_target(jam2_pcm16_wav_tests)
+target_link_libraries(jam2_pcm16_wav_tests PRIVATE jam2_core)
+add_test(NAME jam2_pcm16_wav_units
+    COMMAND $<TARGET_FILE:jam2_pcm16_wav_tests>)
+set_tests_properties(jam2_pcm16_wav_units PROPERTIES
+    LABELS "unit;core;shared-content"
+    TIMEOUT 30)
+
 add_executable(jam2_audio_device_processing_tests EXCLUDE_FROM_ALL
     unit/core/AudioDeviceProcessingTests.cpp)
 jam2_configure_test_target(jam2_audio_device_processing_tests)
@@ -86,6 +96,21 @@ set_tests_properties(jam2_cli_boundary_units PROPERTIES
     TIMEOUT 45)
 if(WIN32)
     set_tests_properties(jam2_cli_boundary_units PROPERTIES
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
+
+add_executable(jam2_output_recorder_tests EXCLUDE_FROM_ALL
+    unit/core/OutputRecorderTests.cpp)
+jam2_configure_test_target(jam2_output_recorder_tests)
+target_link_libraries(jam2_output_recorder_tests PRIVATE jam2_core Qt6::Core)
+add_test(NAME jam2_output_recorder_units
+    COMMAND $<TARGET_FILE:jam2_output_recorder_tests>)
+set_tests_properties(jam2_output_recorder_units PROPERTIES
+    LABELS "unit;core;audio;recording;wav"
+    TIMEOUT 30)
+if(WIN32)
+    set_tests_properties(jam2_output_recorder_units PROPERTIES
         ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()
@@ -579,6 +604,11 @@ add_test(NAME jam2_plugin_bridge_units
 set_tests_properties(jam2_plugin_bridge_units PROPERTIES
     LABELS "unit;plugin"
     TIMEOUT 30)
+if(WIN32)
+    set_tests_properties(jam2_plugin_bridge_units PROPERTIES
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
 
 add_executable(jamtaster_tests EXCLUDE_FROM_ALL
     unit/jamtaster/NativeTests.cpp)
@@ -1258,6 +1288,8 @@ add_custom_target(jam2_tests_unit
         jam2_asset_transfer_tests
         jam2_core_input_tests
         jam2_core_boundary_tests
+        jam2_pcm16_wav_tests
+        jam2_output_recorder_tests
         jam2_audio_device_processing_tests
         jam2_transport_timing_tests
         jam2_cli_boundary_tests
@@ -1388,9 +1420,20 @@ file(MAKE_DIRECTORY "${JAM2_TEST_ARTIFACT_ROOT}")
 get_property(JAM2_ALL_TESTS DIRECTORY PROPERTY TESTS)
 set(JAM2_RESET_TEST_ARTIFACT_SCRIPT
     "file(REMOVE_RECURSE [==[${JAM2_TEST_ARTIFACT_ROOT}]==])\n")
+set(JAM2_TEST_ARTIFACT_INDEX
+    "# CTest name to private artifact directory\n")
 foreach(test_name IN LISTS JAM2_ALL_TESTS)
-    set(test_artifact_root "${JAM2_TEST_ARTIFACT_ROOT}/${test_name}")
+    # Keep the private namespace short. JamTaster's maintained output layout
+    # includes a source hash and converted-song assets; repeating a descriptive
+    # CTest name here can exceed Win32's legacy path limit even though the test
+    # and product paths are otherwise valid. The index retains the readable
+    # mapping needed to inspect a failed parallel run.
+    string(MD5 test_artifact_hash "${test_name}")
+    string(SUBSTRING "${test_artifact_hash}" 0 8 test_artifact_key)
+    set(test_artifact_root "${JAM2_TEST_ARTIFACT_ROOT}/t-${test_artifact_key}")
     file(MAKE_DIRECTORY "${test_artifact_root}")
+    string(APPEND JAM2_TEST_ARTIFACT_INDEX
+        "${test_name}=t-${test_artifact_key}\n")
     string(APPEND JAM2_RESET_TEST_ARTIFACT_SCRIPT
         "file(MAKE_DIRECTORY [==[${test_artifact_root}]==])\n")
     set_property(TEST "${test_name}" APPEND PROPERTY
@@ -1400,6 +1443,9 @@ foreach(test_name IN LISTS JAM2_ALL_TESTS)
             "TMP=set:${test_artifact_root}"
             "TMPDIR=set:${test_artifact_root}")
 endforeach()
+file(GENERATE
+    OUTPUT "${JAM2_TEST_ARTIFACT_ROOT}/index.txt"
+    CONTENT "${JAM2_TEST_ARTIFACT_INDEX}")
 set(JAM2_RESET_TEST_ARTIFACT_SCRIPT_PATH
     "${CMAKE_BINARY_DIR}/ResetTestArtifactWorkspace.cmake")
 file(GENERATE

@@ -2415,6 +2415,7 @@ bool MainWindow::prepareAutomationDialogJam(
 QJsonObject MainWindow::automationJamSnapshot() const
 {
     const SharedSessionController::Snapshot session = sessionController_.snapshot();
+    const std::optional<Jam2NetworkOperationalSnapshot> network = jam2_.networkSnapshot();
     QString role = QStringLiteral("inactive");
     if (session.role == SharedSessionController::Role::Creator) role = QStringLiteral("creator");
     else if (session.role == SharedSessionController::Role::Joiner) role = QStringLiteral("joiner");
@@ -2434,6 +2435,11 @@ QJsonObject MainWindow::automationJamSnapshot() const
         {QStringLiteral("active_remote_peer_count"), activeRemotePeers},
         {QStringLiteral("network_attachment_ready"), session.networkAttachmentReady},
         {QStringLiteral("network_running"), jam2_.isNetworkRunning()},
+        {QStringLiteral("transport_grid_ready"),
+            network.has_value() && network->transport_grid_ready},
+        {QStringLiteral("grid_mapping_error_frames"), network.has_value()
+            ? static_cast<qint64>(network->grid_mapping_error_frames)
+            : 0LL},
         {QStringLiteral("local_token"), session.localToken},
         {QStringLiteral("coordinator_token"), session.coordinatorToken},
         {QStringLiteral("failure"), session.failureDetail},
@@ -2907,6 +2913,10 @@ QJsonObject MainWindow::automationPerformanceSnapshot() const
             {QStringLiteral("stats"), pluginStatsJson(source->host)},
         });
     }
+    QJsonArray jamRecordingStemSignalFrames;
+    for (const std::uint64_t frames : engine.jam_recording.stem_signal_frames) {
+        jamRecordingStemSignalFrames.append(static_cast<qint64>(frames));
+    }
     return {
         {QStringLiteral("engine_running"), jam2_.isRunning()},
         {QStringLiteral("network_running"), jam2_.isNetworkRunning()},
@@ -2999,6 +3009,8 @@ QJsonObject MainWindow::automationPerformanceSnapshot() const
             engine.jam_recording.drop_events)},
         {QStringLiteral("jam_recording_writer_errors"), static_cast<qint64>(
             engine.jam_recording.writer_errors)},
+        {QStringLiteral("jam_recording_stem_signal_frames"),
+            jamRecordingStemSignalFrames},
         {QStringLiteral("track_take_armed"), engine.track_take.armed},
         {QStringLiteral("track_take_recording"), engine.track_take.recording},
         {QStringLiteral("track_take_finalized"), engine.track_take.finalized},

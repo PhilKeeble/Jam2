@@ -105,6 +105,12 @@ int main()
         require(systemBackend->automationCompletionGateState() ==
                 jam2::application::AutomationCompletionGateState::Unsupported,
             "system MIDI backend unexpectedly exposed a private completion gate");
+        error.clear();
+        require(!systemBackend->armAutomationCompletionGate(error) && !error.empty(),
+            "system MIDI backend accepted an automation completion gate");
+        error.clear();
+        require(!systemBackend->releaseAutomationCompletionGate(error) && !error.empty(),
+            "system MIDI backend accepted completion-gate release");
         (void)systemBackend->enumerate();
         error.clear();
         auto invalidSystemDevice = systemBackend->open(

@@ -141,7 +141,7 @@ int main(int argc, char** argv)
             "staged worker and model directory must exist");
 
         const QString root = QDir::temp().absoluteFilePath(
-            QStringLiteral("jam2-jamtaster-worker-protocol-boundary"));
+            QStringLiteral("worker-protocol"));
         QDir(root).removeRecursively();
         require(QDir().mkpath(root), "worker test root must be creatable");
         const QString project = QDir(root).absoluteFilePath(QStringLiteral("project"));

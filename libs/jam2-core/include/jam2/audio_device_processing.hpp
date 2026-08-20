@@ -51,6 +51,12 @@ void observe_input_peaks(
     StreamControl* control,
     std::span<const std::int32_t> samples) noexcept;
 
+bool read_network_playback_timeline(
+    const StreamControl& control,
+    const MonoRingBuffer& playback,
+    std::uint64_t& engineFrame,
+    std::size_t& queuedFrames) noexcept;
+
 std::int32_t mix_i32_samples(std::int32_t a, std::int32_t b) noexcept;
 void apply_remote_level(
     StreamControl* control,

@@ -40,6 +40,9 @@ public:
     std::size_t capacity() const { return capacity_; }
     std::size_t available_read() const;
     std::size_t available_write() const;
+    std::uint64_t underrun_frames() const noexcept {
+        return underruns_.load(std::memory_order_relaxed);
+    }
 
     std::size_t push(std::span<const std::int32_t> frames);
     std::size_t pop(std::span<std::int32_t> frames, bool observe_depth = true);

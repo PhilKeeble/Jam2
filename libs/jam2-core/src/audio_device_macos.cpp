@@ -570,6 +570,10 @@ OSStatus duplex_io_proc(
         clear_output(output);
         return noErr;
     }
+    if (context->control != nullptr) {
+        context->control->audio_callback_generation.fetch_add(
+            1, std::memory_order_acq_rel);
+    }
     processing::observe_callback_interval(
         context->callback_intervals,
         processing::callback_now_us(),
@@ -874,6 +878,8 @@ OSStatus duplex_io_proc(
     context->engine_frame_counter += static_cast<std::uint64_t>(callback_frames);
     if (context->control != nullptr) {
         context->control->engine_frame_counter.store(context->engine_frame_counter, std::memory_order_release);
+        context->control->audio_callback_generation.fetch_add(
+            1, std::memory_order_release);
     }
     context->callbacks.fetch_add(1, std::memory_order_relaxed);
     return noErr;

@@ -1,24 +1,34 @@
 // Native unit coverage is owned by the repository-level test tree.
 #include "PluginAudioBridge.hpp"
+#include "PluginHostService.hpp"
 #include "PluginSharedMemory.hpp"
 #include "common.hpp"
+
+#include <QCoreApplication>
+#include <QThread>
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <iostream>
+#include <stdexcept>
 #include <string>
+#include <utility>
 
-int main()
+int main(int argc, char** argv)
 {
+    QCoreApplication application(argc, argv);
+
     {
         const std::string token =
             "nativeplugintransport" + std::to_string(jam2::monotonic_us());
         auto owner = jam2::pluginhost::PluginSharedMemory::create(token);
         auto peer = jam2::pluginhost::PluginSharedMemory::open(token);
         owner.get()->heartbeat.store(73U, std::memory_order_release);
-        if (peer.get() == nullptr ||
-            peer.get()->heartbeat.load(std::memory_order_acquire) != 73U) {
+        jam2::pluginhost::PluginSharedMemory moved;
+        moved = std::move(peer);
+        if (!owner || !moved || peer ||
+            moved.get()->heartbeat.load(std::memory_order_acquire) != 73U) {
             std::cerr << "plugin shared-memory create/open did not share state\n";
             return 1;
         }
@@ -28,6 +38,12 @@ int main()
         jam2::pluginhost::SharedState shared;
         jam2::pluginhost::PluginAudioBridge bridge(
             shared, 16, jam2::audio::InputSourceKind::Audio);
+        bridge.set_bypassed(true);
+        if (!bridge.bypassed()) {
+            std::cerr << "VST3 bypass state was not observable\n";
+            return 1;
+        }
+        bridge.set_bypassed(false);
         shared.plugin_latency_frames.store(7, std::memory_order_relaxed);
         shared.worker_input_peak_ppm.store(321U, std::memory_order_relaxed);
         shared.midi_events_consumed.store(4U, std::memory_order_relaxed);
@@ -112,6 +128,8 @@ int main()
             shared, 16, jam2::audio::InputSourceKind::MidiInstrument);
         jam2::midi::EventQueue queue;
         bridge.set_midi_queue(&queue);
+        bridge.set_muted(true);
+        bridge.set_muted(false);
         bridge.request_midi_reset();
         (void)queue.push({jam2::monotonic_us(), 0, 0x92, 64, 100, 3});
         std::array<std::int32_t, 16> rendered{};
@@ -124,6 +142,35 @@ int main()
             published.midi[32].status != 0x92 ||
             published.midi[32].data1 != 64) {
             std::cerr << "MIDI reset reservation corrupted the following live event\n";
+            return 1;
+        }
+    }
+
+    {
+        // The no-hardware baseline still owns the complete idle and validation
+        // lifecycle. Loading a real plugin worker is reserved for the explicit
+        // hardware/plugin profile.
+        jam2::pluginhost::PluginHostService service;
+        service.moveProcessToThread(QThread::currentThread());
+        service.openEditor();
+        service.closeEditor();
+        service.requestRetire();
+        if (service.bridge() != nullptr || service.healthy() || service.editorOpen() ||
+            !service.statusText().isEmpty() || !service.errorText().isEmpty() ||
+            jam2::pluginhost::PluginHostService::workerExecutablePath().isEmpty()) {
+            std::cerr << "idle plugin-host service exposed invalid state\n";
+            return 1;
+        }
+        bool rejected = false;
+        try {
+            service.start({}, {}, 48000.0, 0,
+                jam2::audio::InputSourceKind::Audio, 0);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        service.stop();
+        if (!rejected) {
+            std::cerr << "plugin-host service accepted an invalid block size\n";
             return 1;
         }
     }

@@ -43,6 +43,8 @@ struct OutputRecorderStats {
     std::uint64_t dropped_frames = 0;
     std::uint64_t drop_events = 0;
     std::uint64_t writer_errors = 0;
+    std::array<std::uint64_t, static_cast<std::size_t>(RecordStem::Count)>
+        stem_signal_frames{};
     std::size_t queue_depth_frames = 0;
     std::string last_error;
 };
@@ -57,6 +59,8 @@ struct OutputRecorderSnapshot {
     std::uint64_t dropped_frames = 0;
     std::uint64_t drop_events = 0;
     std::uint64_t writer_errors = 0;
+    std::array<std::uint64_t, static_cast<std::size_t>(RecordStem::Count)>
+        stem_signal_frames{};
     std::size_t queue_depth_frames = 0;
 };
 
@@ -104,6 +108,9 @@ private:
     std::atomic<std::uint64_t> dropped_frames_{0};
     std::atomic<std::uint64_t> drop_events_{0};
     std::atomic<std::uint64_t> writer_errors_{0};
+    std::array<
+        std::atomic<std::uint64_t>,
+        static_cast<std::size_t>(RecordStem::Count)> stem_signal_frames_{};
     std::filesystem::path folder_;
     int sample_rate_ = 0;
     std::string last_error_;
