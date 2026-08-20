@@ -86,6 +86,16 @@ public:
     }
     void setResamplerRatio(double) noexcept override {}
 
+    void consume(std::size_t frames) noexcept
+    {
+        if (frames > depth) {
+            underruns += frames - depth;
+            depth = 0;
+            return;
+        }
+        depth -= frames;
+    }
+
     std::size_t depth = 0;
     std::uint64_t underruns = 0;
 };
@@ -511,6 +521,52 @@ void test_peer_mixer_recovery_rebases_every_source()
         "all sources resume complete mixed blocks after partial-block recovery");
 }
 
+void test_peer_mixer_global_gap_preserves_lossless_timeline()
+{
+    MixerSink sink;
+    jam2::PeerMixerConfig config;
+    config.sample_rate = 48000;
+    config.frames_per_block = 64;
+    config.deadline_frames = 1024;
+    config.output_max_frames = 1536;
+    config.max_blocks_per_advance = 64;
+    config.adaptive_playback_cushion = true;
+    config.adaptive_target_frames = 256;
+    config.adaptive_min_frames = 256;
+    config.adaptive_max_frames = 1536;
+    jam2::PeerMixer mixer(config, &sink);
+    auto* peer = mixer.addPeer(81, 16384);
+    expect(peer != nullptr && mixer.setPeerActive(81, true),
+        "lossless-gap mixer creates its active source");
+
+    const std::array<std::int32_t, 64> block{};
+    peer->pushFrames(block);
+    mixer.advance(0);
+
+    // Reproduce a receive-thread stall substantially longer than the Fast
+    // profile's mixer deadline. The device continues consuming its local
+    // cushion, but no peer has audio ready. Advancing an all-empty source
+    // timeline here turns a lossless delay into silence followed by discarded
+    // late audio.
+    for (std::uint64_t now = 1000; now <= 225000; now += 1000) {
+        sink.consume(48);
+        mixer.advance(now);
+    }
+    expect(mixer.stats().deadline_slots == 0 &&
+            mixer.stats().missing_peer_frames == 0,
+        "global source gap does not manufacture deadline silence");
+
+    for (std::uint64_t packet = 0; packet < 170; ++packet) {
+        peer->pushFrames(block);
+        sink.consume(64);
+        mixer.advance(226000 + packet * 1333);
+    }
+    expect(mixer.stats().late_after_release_frames == 0,
+        "lossless audio delayed by a global gap is not discarded as late");
+    expect(mixer.stats().complete_slots >= 171,
+        "lossless source resumes complete blocks after a global gap");
+}
+
 void test_peer_mixer_adapts_to_device_ring_underrun()
 {
     MixerSink sink;
@@ -555,6 +611,7 @@ int main()
     test_headless_injected_audio_uses_input_router();
     test_current_transport_packet_contract();
     test_peer_mixer_recovery_rebases_every_source();
+    test_peer_mixer_global_gap_preserves_lossless_timeline();
     test_peer_mixer_adapts_to_device_ring_underrun();
     if (failures == 0) std::cout << "Jam2 core input tests passed\n";
     return failures == 0 ? 0 : 1;

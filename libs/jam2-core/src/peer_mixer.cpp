@@ -210,6 +210,7 @@ struct PeerMixer::Impl {
     double adaptive_release_accumulator_frames = 0.0;
     bool adaptive_release_active = false;
     std::uint64_t consecutive_deadline_slots = 0;
+    bool waiting_for_any_contributor = false;
     std::uint64_t observed_output_underrun_frames = 0;
 
     Impl(const PeerMixerConfig& requested, PeerStreamPlayback* sink)
@@ -552,6 +553,7 @@ struct PeerMixer::Impl {
             // normal bounded prefill window before another incomplete release.
             next_deadline_us = now_us + deadlineDelay();
             consecutive_deadline_slots = 0;
+            waiting_for_any_contributor = false;
         }
         updateOccupancy();
         if (stats.contributing_peers == 0) {
@@ -559,6 +561,7 @@ struct PeerMixer::Impl {
                 output->setResamplerRatio(1.0);
             }
             adaptive_release_active = false;
+            waiting_for_any_contributor = false;
             return;
         }
         if (!started) {
@@ -584,8 +587,33 @@ struct PeerMixer::Impl {
                 break;
             }
             const bool complete = allContributorsReady();
-            if (!complete && now_us < next_deadline_us) {
-                break;
+            if (!complete) {
+                const bool any_ready = anyContributorReady();
+                if (!any_ready) {
+                    if (now_us >= next_deadline_us) {
+                        // A deadline only arbitrates between peers. Advancing
+                        // the shared timeline while every source is empty
+                        // manufactures silence and makes delayed lossless audio
+                        // obsolete. The device-facing cushion owns this common
+                        // gap until at least one contributor returns.
+                        waiting_for_any_contributor = true;
+                        consecutive_deadline_slots = 0;
+                    }
+                    break;
+                }
+                if (waiting_for_any_contributor) {
+                    // Give the remaining peers one normal bounded window after
+                    // the first source returns instead of reusing an already
+                    // expired deadline from the all-empty interval.
+                    waiting_for_any_contributor = false;
+                    next_deadline_us = now_us + deadlineDelay();
+                    break;
+                }
+                if (now_us < next_deadline_us) {
+                    break;
+                }
+            } else {
+                waiting_for_any_contributor = false;
             }
             releaseSlot(complete);
             if (complete) {
